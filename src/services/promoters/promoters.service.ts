@@ -4,12 +4,13 @@
  * for the PlayTelecom/White-Label dashboard.
  */
 import prisma from '../../utils/prismaClient'
-import { CashDepositStatus } from '@prisma/client'
+import { CashDepositStatus, OrderStatus } from '@prisma/client'
 import { logAction } from '../dashboard/activity-log.service'
 import { getVenueTimezone } from '../dashboard/commission/commission-utils'
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 import { zonaValida } from '../../utils/datetime'
 import { addCivilDays, venueDayKey } from '../../utils/venueDateKeys'
+import { dondeHoraRealEntre } from '../shared/horaRealDelAparato'
 
 /**
  * D19: the venue's calendar day `offset` days from `now`'s day (0 = today), as `YYYY-MM-DD`, and its midnight. Calendar
@@ -155,12 +156,7 @@ class PromotersService {
 
     // Get today's sales by staff
     const todayOrders = await prisma.order.findMany({
-      where: {
-        venueId,
-        status: 'COMPLETED',
-        createdAt: { gte: todayStart },
-        createdById: { not: null },
-      },
+      where: dondeHoraRealEntre({ venueId, status: OrderStatus.COMPLETED, createdById: { not: null } }, todayStart, null),
       include: {
         items: true,
       },

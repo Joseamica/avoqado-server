@@ -17,7 +17,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { NotFoundError } from '../../errors/AppError'
 import { CAMPOS_EDITABLES_DE_ORGANIZACION } from '../../schemas/organization.schema'
 import { Prisma, VenueStatus, TransactionStatus } from '@prisma/client'
-import { utcTs } from '../../utils/sqlDates'
+import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraRealSql } from '../shared/horaRealDelAparato'
 
 // Types for organization overview
 export interface VenueMetrics {
@@ -323,24 +323,21 @@ export async function getOrganizationOverview(orgId: string, filter?: DateRangeF
   })
 
   const venueIds = venues.map(v => v.id)
+  const orderScope = { venueId: { in: venueIds } }
+  const ordersInPeriod = dondeHoraRealEntre(orderScope, from, to)
+  const paymentScope = { ...orderScope, status: TransactionStatus.COMPLETED }
+  const paymentsInPeriod = dondeHoraRealEntre(paymentScope, from, to)
 
   // Aggregate payments for all venues
   const paymentsAgg = await prisma.payment.aggregate({
-    where: {
-      venueId: { in: venueIds },
-      status: TransactionStatus.COMPLETED,
-      createdAt: { gte: from, lte: to },
-    },
+    where: paymentsInPeriod,
     _sum: { amount: true },
     _count: true,
   })
 
   // Aggregate orders for all venues
   const ordersAgg = await prisma.order.aggregate({
-    where: {
-      venueId: { in: venueIds },
-      createdAt: { gte: from, lte: to },
-    },
+    where: ordersInPeriod,
     _count: true,
   })
 
@@ -353,20 +350,13 @@ export async function getOrganizationOverview(orgId: string, filter?: DateRangeF
   const [paymentsByVenue, ordersByVenue, staffByVenue] = await Promise.all([
     prisma.payment.groupBy({
       by: ['venueId'],
-      where: {
-        venueId: { in: venueIds },
-        status: TransactionStatus.COMPLETED,
-        createdAt: { gte: from, lte: to },
-      },
+      where: paymentsInPeriod,
       _sum: { amount: true },
       _count: true,
     }),
     prisma.order.groupBy({
       by: ['venueId'],
-      where: {
-        venueId: { in: venueIds },
-        createdAt: { gte: from, lte: to },
-      },
+      where: ordersInPeriod,
       _count: true,
     }),
     prisma.staffVenue.groupBy({
@@ -444,23 +434,21 @@ export async function getEnhancedOrganizationOverview(orgId: string, filter?: Da
   })
 
   const venueIds = venues.map(v => v.id)
+  const orderScope = { venueId: { in: venueIds } }
+  const ordersInPeriod = dondeHoraRealEntre(orderScope, from, to)
+  const paymentScope = { ...orderScope, status: TransactionStatus.COMPLETED }
+  const paymentsInPeriod = dondeHoraRealEntre(paymentScope, from, to)
+  const previousPaymentsInPeriod = dondeHoraRealEntre(paymentScope, previousPeriodDates.from, previousPeriodDates.to)
 
   // Current period aggregations
   const [currentPayments, currentOrders, staffCount] = await Promise.all([
     prisma.payment.aggregate({
-      where: {
-        venueId: { in: venueIds },
-        status: TransactionStatus.COMPLETED,
-        createdAt: { gte: from, lte: to },
-      },
+      where: paymentsInPeriod,
       _sum: { amount: true },
       _count: true,
     }),
     prisma.order.aggregate({
-      where: {
-        venueId: { in: venueIds },
-        createdAt: { gte: from, lte: to },
-      },
+      where: ordersInPeriod,
       _count: true,
     }),
     prisma.staff.count({
@@ -471,19 +459,12 @@ export async function getEnhancedOrganizationOverview(orgId: string, filter?: Da
   // Previous period aggregations
   const [previousPayments, previousOrders] = await Promise.all([
     prisma.payment.aggregate({
-      where: {
-        venueId: { in: venueIds },
-        status: TransactionStatus.COMPLETED,
-        createdAt: { gte: previousPeriodDates.from, lte: previousPeriodDates.to },
-      },
+      where: previousPaymentsInPeriod,
       _sum: { amount: true },
       _count: true,
     }),
     prisma.order.aggregate({
-      where: {
-        venueId: { in: venueIds },
-        createdAt: { gte: previousPeriodDates.from, lte: previousPeriodDates.to },
-      },
+      where: dondeHoraRealEntre(orderScope, previousPeriodDates.from, previousPeriodDates.to),
       _count: true,
     }),
   ])
@@ -505,31 +486,20 @@ export async function getEnhancedOrganizationOverview(orgId: string, filter?: Da
     // Current period payments grouped by venue
     prisma.payment.groupBy({
       by: ['venueId'],
-      where: {
-        venueId: { in: venueIds },
-        status: TransactionStatus.COMPLETED,
-        createdAt: { gte: from, lte: to },
-      },
+      where: paymentsInPeriod,
       _sum: { amount: true },
       _count: true,
     }),
     // Current period orders grouped by venue
     prisma.order.groupBy({
       by: ['venueId'],
-      where: {
-        venueId: { in: venueIds },
-        createdAt: { gte: from, lte: to },
-      },
+      where: ordersInPeriod,
       _count: true,
     }),
     // Previous period payments grouped by venue
     prisma.payment.groupBy({
       by: ['venueId'],
-      where: {
-        venueId: { in: venueIds },
-        status: TransactionStatus.COMPLETED,
-        createdAt: { gte: previousPeriodDates.from, lte: previousPeriodDates.to },
-      },
+      where: previousPaymentsInPeriod,
       _sum: { amount: true },
     }),
     // Staff count grouped by venue
@@ -673,40 +643,40 @@ export async function getRevenueTrends(orgId: string, filter?: DateRangeFilter):
     }
   }
 
-  // Aggregate by date at database level (avoids loading all rows into memory)
+  // Keep UTC day buckets for the organization-wide trend.
   const [currentRevenueByDate, currentOrdersByDate, previousRevenueByDate, previousOrdersByDate] = await Promise.all([
     prisma.$queryRaw<Array<{ date: string; revenue: number }>>`
-      SELECT TO_CHAR(p."createdAt", 'YYYY-MM-DD') as date,
+      SELECT TO_CHAR(${Prisma.raw(sqlHoraReal('p'))}, 'YYYY-MM-DD') as date,
              COALESCE(SUM(p.amount), 0) as revenue
       FROM "Payment" p
       WHERE p."venueId" = ANY(${venueIds})
         AND p.status = 'COMPLETED'
-        AND p."createdAt" >= ${utcTs(from)} AND p."createdAt" <= ${utcTs(to)}
-      GROUP BY TO_CHAR(p."createdAt", 'YYYY-MM-DD')
+        AND ${sqlRangoHoraRealSql('p', from, to)}
+      GROUP BY 1
       ORDER BY date`,
     prisma.$queryRaw<Array<{ date: string; count: bigint }>>`
-      SELECT TO_CHAR("createdAt", 'YYYY-MM-DD') as date,
+      SELECT TO_CHAR(${Prisma.raw(sqlHoraReal('o'))}, 'YYYY-MM-DD') as date,
              COUNT(*) as count
-      FROM "Order"
-      WHERE "venueId" = ANY(${venueIds})
-        AND "createdAt" >= ${utcTs(from)} AND "createdAt" <= ${utcTs(to)}
-      GROUP BY TO_CHAR("createdAt", 'YYYY-MM-DD')`,
+      FROM "Order" o
+      WHERE o."venueId" = ANY(${venueIds})
+        AND ${sqlRangoHoraRealSql('o', from, to)}
+      GROUP BY 1`,
     prisma.$queryRaw<Array<{ date: string; revenue: number }>>`
-      SELECT TO_CHAR(p."createdAt", 'YYYY-MM-DD') as date,
+      SELECT TO_CHAR(${Prisma.raw(sqlHoraReal('p'))}, 'YYYY-MM-DD') as date,
              COALESCE(SUM(p.amount), 0) as revenue
       FROM "Payment" p
       WHERE p."venueId" = ANY(${venueIds})
         AND p.status = 'COMPLETED'
-        AND p."createdAt" >= ${utcTs(previousPeriodDates.from)} AND p."createdAt" <= ${utcTs(previousPeriodDates.to)}
-      GROUP BY TO_CHAR(p."createdAt", 'YYYY-MM-DD')
+        AND ${sqlRangoHoraRealSql('p', previousPeriodDates.from, previousPeriodDates.to)}
+      GROUP BY 1
       ORDER BY date`,
     prisma.$queryRaw<Array<{ date: string; count: bigint }>>`
-      SELECT TO_CHAR("createdAt", 'YYYY-MM-DD') as date,
+      SELECT TO_CHAR(${Prisma.raw(sqlHoraReal('o'))}, 'YYYY-MM-DD') as date,
              COUNT(*) as count
-      FROM "Order"
-      WHERE "venueId" = ANY(${venueIds})
-        AND "createdAt" >= ${utcTs(previousPeriodDates.from)} AND "createdAt" <= ${utcTs(previousPeriodDates.to)}
-      GROUP BY TO_CHAR("createdAt", 'YYYY-MM-DD')`,
+      FROM "Order" o
+      WHERE o."venueId" = ANY(${venueIds})
+        AND ${sqlRangoHoraRealSql('o', previousPeriodDates.from, previousPeriodDates.to)}
+      GROUP BY 1`,
   ])
 
   // Merge revenue and order counts by date
@@ -804,15 +774,14 @@ export async function getTopItems(orgId: string, filter?: DateRangeFilter, limit
     select: { id: true },
   })
   const venueIds = venues.map(v => v.id)
+  const orderScope = { venueId: { in: venueIds } }
+  const ordersInPeriod = dondeHoraRealEntre(orderScope, from, to)
 
   // Get order items with product info grouped by product
   const orderItems = await prisma.orderItem.groupBy({
     by: ['productId'],
     where: {
-      order: {
-        venueId: { in: venueIds },
-        createdAt: { gte: from, lte: to },
-      },
+      order: ordersInPeriod,
     },
     _sum: {
       quantity: true,
@@ -840,7 +809,7 @@ export async function getTopItems(orgId: string, filter?: DateRangeFilter, limit
           where: {
             OR: [...(productIds.length ? [{ productId: { in: productIds } }] : []), ...(conLibres ? [{ productId: null }] : [])],
             isCortesia: false,
-            order: { venueId: { in: venueIds }, createdAt: { gte: from, lte: to } },
+            order: ordersInPeriod,
           },
           _sum: { total: true },
         })
@@ -911,20 +880,13 @@ export async function getVenueBenchmarks(orgId: string, filter?: DateRangeFilter
   const [paymentsByVenue, ordersByVenue] = await Promise.all([
     prisma.payment.groupBy({
       by: ['venueId'],
-      where: {
-        venueId: { in: venueIds },
-        status: TransactionStatus.COMPLETED,
-        createdAt: { gte: from, lte: to },
-      },
+      where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: TransactionStatus.COMPLETED }, from, to),
       _sum: { amount: true },
       _count: true,
     }),
     prisma.order.groupBy({
       by: ['venueId'],
-      where: {
-        venueId: { in: venueIds },
-        createdAt: { gte: from, lte: to },
-      },
+      where: dondeHoraRealEntre({ venueId: { in: venueIds } }, from, to),
       _count: true,
     }),
   ])
@@ -1032,29 +994,18 @@ export async function getOrganizationVenues(orgId: string, filter?: DateRangeFil
   const [currentPaymentsByVenue, currentOrdersByVenue, previousPaymentsByVenue, staffByVenue] = await Promise.all([
     prisma.payment.groupBy({
       by: ['venueId'],
-      where: {
-        venueId: { in: venueIds },
-        status: TransactionStatus.COMPLETED,
-        createdAt: { gte: from, lte: to },
-      },
+      where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: TransactionStatus.COMPLETED }, from, to),
       _sum: { amount: true },
       _count: true,
     }),
     prisma.order.groupBy({
       by: ['venueId'],
-      where: {
-        venueId: { in: venueIds },
-        createdAt: { gte: from, lte: to },
-      },
+      where: dondeHoraRealEntre({ venueId: { in: venueIds } }, from, to),
       _count: true,
     }),
     prisma.payment.groupBy({
       by: ['venueId'],
-      where: {
-        venueId: { in: venueIds },
-        status: TransactionStatus.COMPLETED,
-        createdAt: { gte: previousFrom, lte: previousTo },
-      },
+      where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: TransactionStatus.COMPLETED }, previousFrom, previousTo),
       _sum: { amount: true },
     }),
     prisma.staffVenue.groupBy({
