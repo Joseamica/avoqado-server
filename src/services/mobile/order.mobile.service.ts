@@ -148,6 +148,7 @@ import { avisarEfectivoConTarjetaEnDuda } from '../shared/avisoDeEfectivoConTarj
 import { avisarSobrepago } from '../shared/avisoDeSobrepago'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiLaCuentaTieneVales, rechazarSiQuitaUnDescuentoDeVale } from '../shared/cuentaConVales'
+import { rechazarSiAlgunoTieneTope } from '../shared/descuentoConTopeEnVales'
 import { esRenglonDeVale } from '../shared/renglonDeVale'
 import { desactivarSobresPendientesDeCuentaEnTx, esCuentaDeTarjetasEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import {
@@ -1130,6 +1131,8 @@ export async function buildOrderItemsData(
   precioMostrado?: { horaDeLaVenta: Date; llegada?: Date; rechazarSiNoSeReconoce: boolean },
   db?: Prisma.TransactionClient,
   compAuthority?: Pick<CreateOrderInput, 'canCompItems' | 'performedBy' | 'aprobacionDelDescuento' | 'isOfflineReplay'>,
+  /** D11: en una venta con vales no entra un descuento con tope de usos (`descuentoConTopeEnVales.ts`); `VALE` = área, `CAJA` = suelto. */
+  opciones?: { sinDescuentosConTope?: 'VALE' | 'CAJA' },
 ): Promise<{
   itemsData: any[]
   subtotal: number
@@ -1229,6 +1232,8 @@ export async function buildOrderItemsData(
     throw new BadRequestError(`Descuento no encontrado o no pertenece a este local: ${missingIds.join(', ')}`)
   }
 
+  // 🔴 D11: con la MISMA lectura que calcula la rebaja y antes de `validateDiscountActive` (un descuento ya agotado recibe este texto).
+  if (opciones?.sinDescuentosConTope) rechazarSiAlgunoTieneTope(discounts, opciones.sinDescuentosConTope)
   // De la cola (`llegada` sólo viene de ahí), el vencimiento se mide a la hora de la venta (S6); en línea, como siempre.
   const horaDeVigencia = precioMostrado?.llegada ? precioMostrado.horaDeLaVenta : undefined
   discounts.forEach(discount => validateDiscountActive(discount, { horaDeLaVenta: horaDeVigencia }))

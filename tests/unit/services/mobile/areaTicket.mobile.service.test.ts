@@ -297,7 +297,11 @@ describe('vales por área — claim de la caja (§5.4)', () => {
   it('🔴 D11: agregar al vale viejo un renglón con un descuento con tope ⇒ 400 y no escribe nada', async () => {
     mockAreaTerminal()
     prismaMock.order.findUnique.mockResolvedValue(ticketRow())
-    prismaMock.discount.findMany.mockResolvedValue([{ name: 'Primeros 100', maxTotalUses: 100, maxUsesPerCustomer: null }])
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'p-jamon', name: 'Jamón', price: new Decimal(100), sku: null, category: { name: 'Cremería' }, categoryId: 'c-2' },
+    ])
+    prismaMock.modifier.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([{ id: 'd-tope', name: 'Primeros 100', active: true, maxTotalUses: 100, maxUsesPerCustomer: null }])
 
     await expect(
       addAreaTicketItems(VENUE, CODE, { deviceUid: DEVICE, items: [{ productId: 'p-jamon', quantity: 1, discountId: 'd-tope' }] }),
@@ -310,7 +314,11 @@ describe('vales por área — claim de la caja (§5.4)', () => {
     mockAreaTerminal()
     prismaMock.order.findUnique.mockResolvedValue(null)
     prismaMock.order.findFirst.mockResolvedValue(null)
-    prismaMock.discount.findMany.mockResolvedValue([{ name: 'Primeros 100', maxTotalUses: 100, maxUsesPerCustomer: null }])
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'p-jamon', name: 'Jamón', price: new Decimal(100), sku: null, category: { name: 'Cremería' }, categoryId: 'c-2' },
+    ])
+    prismaMock.modifier.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([{ id: 'd-tope', name: 'Primeros 100', active: true, maxTotalUses: 100, maxUsesPerCustomer: null }])
 
     await expect(
       openAreaTicket(VENUE, { code: CODE, deviceUid: DEVICE, items: [{ productId: 'p-jamon', quantity: 1, discountId: 'd-tope' }] } as any),

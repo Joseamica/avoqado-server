@@ -136,8 +136,38 @@ describe('Vales V7 — D11: los descuentos con tope de usos no entran a una vent
     }
   })
 
-  it('la ruta EXTERNAL queda como hoy: su propio rechazo de rebajas, no el de D11', async () => {
-    await expect(emitir('externa', topeTotalId, externalDeviceUid)).rejects.not.toMatchObject({ code: 'AREA_TICKET_DISCOUNT_HAS_LIMIT' })
+  it('la ruta EXTERNAL queda como hoy: su propio 409 por la rebaja, no el de D11 (Codex r4 #3)', async () => {
+    await expect(emitir('externa', topeTotalId, externalDeviceUid)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'EXTERNAL_DISCOUNT_NOT_SUPPORTED',
+    })
+  })
+
+  it('un 400 no deja nada guardado: si el dueño quita el tope, la misma llave crea el vale (Codex r3 #2)', async () => {
+    await expect(emitir('quitan-tope', topeTotalId)).rejects.toMatchObject({ code: 'AREA_TICKET_DISCOUNT_HAS_LIMIT' })
+    await prisma.discount.update({ where: { id: topeTotalId }, data: { maxTotalUses: null } })
+    try {
+      const vale = await emitir('quitan-tope', topeTotalId)
+      expect(vale.discountAmount).toBe('10.00')
+    } finally {
+      await prisma.discount.update({ where: { id: topeTotalId }, data: { maxTotalUses: 100 } })
+    }
+  })
+
+  it('🔴 Codex r4 #2: la misma llave en plena carrera devuelve el vale que ya ganó, no el 400', async () => {
+    // El primer POST terminó (vale guardado sin tope) y, mientras el reenvío revisaba, el dueño puso el tope. El reenvío no vio el vale
+    // en su primera búsqueda (se simula) y su construcción ve el tope: debe devolver el vale ganador.
+    const ganador = await emitir('carrera', sinTopeId)
+    await prisma.discount.update({ where: { id: sinTopeId }, data: { maxTotalUses: 50 } })
+    const espia = jest.spyOn(prisma.areaTicket, 'findUnique').mockImplementationOnce((() => Promise.resolve(null)) as any)
+    try {
+      const reenvio = await emitir('carrera', sinTopeId)
+      expect(reenvio.code).toBe(ganador.code)
+      expect(espia).toHaveBeenCalledTimes(2) // la búsqueda inicial (simulada vacía) y la del ganador tras el 400
+    } finally {
+      espia.mockRestore()
+      await prisma.discount.update({ where: { id: sinTopeId }, data: { maxTotalUses: null } })
+    }
   })
 
   it('🔴 armar la venta con un suelto con tope ⇒ 400 con el texto de la caja, sin orden; sin ese descuento se arma', async () => {
@@ -155,6 +185,7 @@ describe('Vales V7 — D11: los descuentos con tope de usos no entran a una vent
       })
 
     const antes = await usos()
+    const folioAntes = await prisma.$queryRaw<Array<{ last_value: bigint; is_called: boolean }>>`SELECT last_value, is_called FROM order_number_seq`
     await expect(armar('armar-tope', topePorClientaId)).rejects.toMatchObject({
       statusCode: 400,
       code: 'AREA_TICKET_DISCOUNT_HAS_LIMIT',
@@ -164,8 +195,27 @@ describe('Vales V7 — D11: los descuentos con tope de usos no entran a una vent
     const sesion = await prisma.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: caja.id }, select: { status: true, orderId: true } })
     expect(sesion).toEqual({ status: 'OPEN', orderId: null })
     expect(await usos()).toEqual(antes)
+    // Sin folio gastado: el 400 sale antes de crear la orden (Codex r4 #3).
+    const folioDespues = await prisma.$queryRaw<Array<{ last_value: bigint; is_called: boolean }>>`SELECT last_value, is_called FROM order_number_seq`
+    expect(folioDespues).toEqual(folioAntes)
 
     const armada = await armar('armar-sin-tope', sinTopeId)
     expect(armada.order?.id).toBeTruthy()
+
+    // 🔴 Codex r4 #2: el reenvío con la MISMA llave en plena carrera (leyó la sesión abierta antes de que el primero la armara, y el
+    // dueño puso un tope en el suelto) devuelve la venta ya armada, no el 400.
+    await prisma.discount.update({ where: { id: sinTopeId }, data: { maxUsesPerCustomer: 1 } })
+    const leerSesion = prisma.areaTicketCheckoutSession.findFirst.bind(prisma.areaTicketCheckoutSession)
+    const espia = jest.spyOn(prisma.areaTicketCheckoutSession, 'findFirst').mockImplementationOnce((async (args: any) => {
+      const real: any = await leerSesion(args)
+      return real ? { ...real, status: 'OPEN', orderId: null, materializeIdempotencyKey: null } : real
+    }) as any)
+    try {
+      const reenvio = await armar('armar-sin-tope', sinTopeId)
+      expect(reenvio.order?.id).toBe(armada.order?.id)
+    } finally {
+      espia.mockRestore()
+      await prisma.discount.update({ where: { id: sinTopeId }, data: { maxUsesPerCustomer: null } })
+    }
   })
 })
