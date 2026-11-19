@@ -890,6 +890,19 @@ function normalizeExternalId(externalId?: string | null): string | null {
 }
 
 /**
+ * hz:bdd815fd:D2 (Codex r5 #1): ¿el cobro de la cola llegó EN VIVO? La TPV manda el efectivo de Mesas por la cola y lo reproduce
+ * enseguida: con red llega en segundos. Se mide la hora del aparato al cobrar (`horaDelAparato`, sin recortar) contra la llegada de
+ * la petición; un reloj del aparato desfasado más de 2 min cuenta como «sin red» y avisa como antes. Sin alguna de las dos, no.
+ */
+const EN_VIVO_MS = 2 * 60 * 1000
+function llegoEnVivo(input: { horaDelAparato?: number | string | null; llegada?: Date }): boolean {
+  if (input.horaDelAparato === undefined || input.horaDelAparato === null || !input.llegada) return false
+  const crudo = input.horaDelAparato
+  const hora = typeof crudo === 'number' || /^\d+$/.test(crudo) ? Number(crudo) : Date.parse(crudo)
+  return Number.isFinite(hora) && Math.abs(input.llegada.getTime() - hora) <= EN_VIVO_MS
+}
+
+/**
  * S7 («Cobrar sin red»): la venta de la cola de una terminal SÍ se registró, pero con problema ⇒ aviso al gerente, después del
  * commit y sin esperarlo (nunca toca la respuesta; `avisarVentaSinRed` no lanza). Sólo con `isOfflineReplay` y el serial del
  * token: la cola de Android no avisa.
@@ -4721,8 +4734,11 @@ export interface AbonoEnTx {
   ventaCerrada: boolean
   /** Pedidos en línea 1c (S1): la cuenta estaba CANCELADA y este dinero capturado la reabrió ⇒ quien llama no arma la comanda. */
   reabiertaDeCancelada: boolean
-  /** hz:bdd815fd:D2: la cuenta estaba VIVA (ni anulada ni borrada) al leerla bajo el candado de este cobro. */
-  cuentaVivaAlCobrar: boolean
+  /**
+   * hz:bdd815fd:D2: al leerla bajo el candado de este cobro, la cuenta estaba VIVA (ni anulada ni borrada) y era una cuenta propia de
+   * Avoqado (no de SoftRestaurant, de una plataforma de reparto ni de Rappi): la única que puede callar el aviso de abono esperado.
+   */
+  cuentaPropiaVivaAlCobrar: boolean
   areaTicketOrder: boolean
   areaTicketSessionId?: string
   tableId?: string | null
@@ -5427,7 +5443,7 @@ export async function registrarAbonoEnTx(
     isFullyPaid: efectosDeSaldar,
     ventaCerrada: cobro.cerrada,
     reabiertaDeCancelada,
-    cuentaVivaAlCobrar: claseDeEstado(fresh.status) === 'VIVA',
+    cuentaPropiaVivaAlCobrar: claseDeEstado(fresh.status) === 'VIVA' && fresh.originSystem === 'AVOQADO' && fresh.source !== 'RAPPI',
     aplicadoCents,
     cambioCents,
     saldoAntesCents: pesosToCents(saldoAntes.remainingBalance.toNumber()),
@@ -5546,26 +5562,28 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
 
   /**
    * hz:bdd815fd:D2 (encargo 8cfa9e): en Mesas la TPV manda TODO el efectivo por la cola, también con red, así que un abono parcial a
-   * propósito ($20 de una cuenta de $50) avisaba «una venta sin conexión no cuadra». Si la terminal dijo cuánto creía que debía la
-   * cuenta ANTES de cobrar (`saldoEsperadoSinRed`) y el servidor debía eso mismo (±1 centavo), el saldo que queda es el que la terminal
-   * sabía: no se avisa. Si el servidor tenía otro saldo, el aviso sigue (y además `COBRO_SIN_RED_CON_DIFERENCIA`). Una TPV que no manda
-   * el saldo esperado avisa como antes. Rappi 2b (efectivo con dinero de terceros) avisa como antes: su saldo no es el de la venta
-   * (Codex r1 #3). Sólo decide el cobro NUEVO: el reintento no conoce el saldo de antes y el de ahora pudo moverlo otro abono, un
-   * cupón o un pago confirmado tarde (Codex r1 #1, r2 #1-#3), así que avisa como antes, aunque sea de más en ese caso raro.
+   * propósito ($20 de una cuenta de $50) avisaba «una venta sin conexión no cuadra». Sólo el cobro NUEVO puede callar ese aviso, y
+   * sólo si se cumple TODO (si falta algo, avisa como antes):
+   *  - la terminal dijo cuánto creía que debía la cuenta ANTES de cobrar (`saldoEsperadoSinRed`) y el servidor, bajo el candado,
+   *    debía eso mismo (±1 centavo): el saldo que queda es el que la terminal sabía;
+   *  - el cobro llegó EN VIVO (`llegoEnVivo`): con la red caída, otra caja pudo separar productos y agregar una ronda que deje el
+   *    mismo saldo por casualidad (Codex r5 #1); el cobro que de verdad viajó sin red avisa como antes;
+   *  - la cuenta era propia de Avoqado y estaba viva (`cuentaPropiaVivaAlCobrar`): anulada, borrada (r3, r4), de SoftRestaurant, de
+   *    una plataforma o de Rappi (r1 #3, r5 #2) avisa como antes; y no se reabrió ni trae aviso de Rappi.
+   * El reintento no conoce el saldo de antes y el de ahora pudo moverlo otro abono, un cupón o un pago confirmado tarde (r1 #1, r2):
+   * avisa como antes, aunque sea de más en ese caso raro. El sobrepago avisa siempre.
    */
   const abonoEsperadoAlCobrar = (cobro: {
     saldoAntesCents: number
-    cuentaVivaAlCobrar: boolean
+    cuentaPropiaVivaAlCobrar: boolean
     reabiertaDeCancelada: boolean
     avisoRappi: string | null
   }): boolean =>
     order.thirdPartyCashDue == null &&
-    // Codex r3 y r4 (una sola regla para la familia): si otra caja anuló o borró la cuenta mientras la terminal estaba sin red
-    // (Avoqado la reabre con el dinero; SoftRestaurant la deja borrada), su saldo puede ser el que la terminal vio, pero el dueño
-    // debe saberlo: sólo una cuenta VIVA al cobrar puede callar. Lo mismo un pedido de Rappi que llega con dinero.
-    cobro.cuentaVivaAlCobrar &&
+    cobro.cuentaPropiaVivaAlCobrar &&
     !cobro.reabiertaDeCancelada &&
     cobro.avisoRappi == null &&
+    llegoEnVivo(input) &&
     input.saldoEsperadoSinRed !== undefined &&
     Math.abs(input.saldoEsperadoSinRed.antesCents - cobro.saldoAntesCents) <= 1
 
