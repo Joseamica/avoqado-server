@@ -882,6 +882,7 @@ async function ackDelCobroYaRegistrado(p: {
       select: { id: true, orderId: true, status: true, type: true },
     })
     if (!guardado || guardado.id !== paymentId || !esCobroCompletadoDeLaOrden(guardado, orderId)) return null
+    const antesCents = saldoEsperadoDelPayload(payload)
     const cobro = await orderMobileService.payCashOrder(venueId, orderId, {
       amount: amountCents,
       tip: tipCents,
@@ -889,6 +890,8 @@ async function ackDelCobroYaRegistrado(p: {
       idempotencyKey: intent.id,
       isOfflineReplay: true,
       ...(p.terminalSerialNumber ? { terminalSerialNumber: p.terminalSerialNumber } : {}),
+      // hz:bdd815fd:D2: el aviso que repite este reintento decide con el saldo que la terminal esperaba, como al registrarlo.
+      ...(antesCents !== undefined ? { saldoEsperadoSinRed: { antesCents, deviceId: p.deviceId } } : {}),
       soloDevolverElCobroDeLaLlave: true,
     })
     const deQuienCobro = existing.staffId === p.staffId
@@ -1776,6 +1779,21 @@ async function desciendePorRondaTardia(venueId: string, cuenta: string, origen: 
 const MANUAL_PAY_METHODS = ['CASH', 'CREDIT_CARD', 'DEBIT_CARD', 'BANK_TRANSFER', 'OTHER'] as const
 type PayCashMethod = (typeof MANUAL_PAY_METHODS)[number]
 
+/**
+ * `expectedBalanceBeforeCents` del `PAY_CASH` ya validado: centavos enteros entre 0 y el tope del teclado; otra cosa es `undefined`.
+ * Lo leen el registro (`applyPayCash`) y el reintento de D20 (`ackDelCobroYaRegistrado`), para que los avisos salgan igual las dos
+ * veces (hz:bdd815fd:D2: el abono parcial de Mesas que la terminal esperaba no avisa «venta sin red no cuadra»).
+ */
+function saldoEsperadoDelPayload(payload: Record<string, unknown> | null | undefined): number | undefined {
+  const saldoEsperado = payload?.expectedBalanceBeforeCents
+  return typeof saldoEsperado === 'number' &&
+    Number.isInteger(saldoEsperado) &&
+    saldoEsperado >= 0 &&
+    saldoEsperado <= MAX_TERMINAL_PAYMENT_CENTS
+    ? saldoEsperado
+    : undefined
+}
+
 async function applyPayCash(
   venueId: string,
   staffId: string,
@@ -1867,14 +1885,8 @@ async function applyPayCash(
   // D5 · bloque P (11-nov-2026): el saldo que la tablet creía que debía la cuenta ANTES de este cobro (mesa cobrada sin red). Es
   // sólo un rastro (`COBRO_SIN_RED_CON_DIFERENCIA`): nunca cambia ni rechaza el cobro. Centavos enteros entre 0 y el tope del
   // teclado; otra cosa se ignora, porque el efectivo ya está en el cajón y un dato de diagnóstico no puede dejarlo sin registrar.
+  const antesCents = saldoEsperadoDelPayload(intent.payload)
   const saldoEsperado = intent.payload.expectedBalanceBeforeCents
-  const antesCents =
-    typeof saldoEsperado === 'number' &&
-    Number.isInteger(saldoEsperado) &&
-    saldoEsperado >= 0 &&
-    saldoEsperado <= MAX_TERMINAL_PAYMENT_CENTS
-      ? saldoEsperado
-      : undefined
   if (saldoEsperado !== undefined && saldoEsperado !== null && antesCents === undefined) {
     logger.warn('[POS SYNC] PAY_CASH: expectedBalanceBeforeCents inválido; se ignora y el cobro sigue', { venueId, intentId: intent.id })
   }

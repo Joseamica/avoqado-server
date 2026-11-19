@@ -2807,6 +2807,25 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
       expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
     })
 
+    // hz:bdd815fd:D2 (encargo 8cfa9e): el reintento repite los avisos idempotentes, y el de «venta sin red no cuadra» decide con el
+    // saldo que la terminal esperaba. Si aquí no viajara, el abono parcial de Mesas que la primera vez NO avisó avisaría ahora.
+    it('el saldo que la terminal esperaba viaja igual que al registrarlo (y uno inválido no viaja)', async () => {
+      const conSaldo = (expectedBalanceBeforeCents: unknown) =>
+        baseParams([
+          { id: 'i-pay', seq: 9, type: 'PAY_CASH', payload: { orderId: 'order-9', amountCents: 5000, expectedBalanceBeforeCents } },
+        ])
+      ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
+        reserva('PAY_CASH', 'i-pay', 90_000, conHuella, { staffId: 'staff-ana' }),
+      )
+
+      await processIntents(conSaldo(9000))
+      await processIntents(conSaldo(-5))
+
+      const [primero, segundo] = (orderMobileService.payCashOrder as jest.Mock).mock.calls.map(c => c[2])
+      expect(primero.saldoEsperadoSinRed).toEqual({ antesCents: 9000, deviceId: DEVICE })
+      expect(segundo.saldoEsperadoSinRed).toBeUndefined()
+    })
+
     it('Codex r4 #1: el importe se lee igual que al registrarlo (`[5000]` y texto numérico valen 5000)', async () => {
       ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
         reserva('PAY_CASH', 'i-pay', 90_000, conHuella, { staffId: 'staff-ana' }),
