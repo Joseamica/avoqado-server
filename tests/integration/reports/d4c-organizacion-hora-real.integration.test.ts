@@ -629,6 +629,52 @@ describe('D4c · visión global, tiendas y vendedores', () => {
     }
   })
 
+  it('R24 · asistencia: donde la medianoche no existe (Santiago, 6-sep) los días no se enciman, y una fecha vacía es «hoy» (Codex a1988b r1 #3 y #5)', async () => {
+    const venueS = (
+      await prisma.venue.create({
+        data: {
+          organizationId: n.organizationId,
+          name: 'Sucursal Santiago asistencia',
+          slug: `d4c-sa-${n.venueId}`,
+          status: 'ACTIVE',
+          timezone: 'America/Santiago',
+        },
+        select: { id: true },
+      })
+    ).id
+    const staffS = (
+      await prisma.staff.create({
+        data: { firstName: 'Caja', lastName: 'Santiago', email: `d4c-caja-s-${n.venueId}@example.test` },
+        select: { id: true },
+      })
+    ).id
+    try {
+      await prisma.staffVenue.create({ data: { staffId: staffS, venueId: venueS, role: 'CASHIER' } })
+      // 23:30 del 5-sep en Santiago (UTC−4) = 03:30Z del 6. El 6 empieza a la 01:00 (UTC−3) = 04:00Z: el cobro es SÓLO del 5.
+      await sale(venueS, staffS, 9, 1, '2026-09-06T03:30:00Z')
+      const fila = (r: Awaited<ReturnType<typeof dashboard.getStaffAttendance>>) =>
+        r.staff.find(s => s.id === staffS && s.venueId === venueS)
+      expect(fila(await dashboard.getStaffAttendance(n.organizationId, '2026-09-05'))).toMatchObject({ sales: 9, cashSales: 9 })
+      expect(fila(await dashboard.getStaffAttendance(n.organizationId, '2026-09-06'))).toBeUndefined()
+      expect(
+        fila(await dashboard.getStaffAttendance(n.organizationId, undefined, undefined, undefined, '2026-09-05', '2026-09-06')),
+      ).toMatchObject({ sales: 9, cashSales: 9 })
+
+      // Una fecha vacía (`?date=`) es «hoy», como antes, y no tumba la consulta.
+      const vacia = await dashboard.getStaffAttendance(n.organizationId, '')
+      const hoy = await dashboard.getStaffAttendance(n.organizationId)
+      expect(vacia.staff.map(s => `${s.id}:${s.venueId}:${s.sales}`).sort()).toEqual(
+        hoy.staff.map(s => `${s.id}:${s.venueId}:${s.sales}`).sort(),
+      )
+      expect(hoy.staff).toEqual(expect.arrayContaining([expect.objectContaining({ id: staffB, venueId: venueB, sales: 40 })]))
+    } finally {
+      await prisma.order.deleteMany({ where: { venueId: venueS } })
+      await prisma.staffVenue.deleteMany({ where: { venueId: venueS } })
+      await prisma.venue.delete({ where: { id: venueS } })
+      await prisma.staff.deleteMany({ where: { id: staffS } })
+    }
+  })
+
   it('R24 · el mapa de calor usa el día real del cobro en el filtro y en el grupo por tienda', async () => {
     const get = (from: string, to: string) => dashboard.getSalesHeatmap(n.organizationId, from, to, 'OWNER', n.staffId)
     const both = await get(DIA_11, DIA_12)

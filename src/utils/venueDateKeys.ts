@@ -28,6 +28,8 @@
  *   etiqueta de semana → to_char(..., '"W"IW')
  */
 
+import { fromZonedTime } from 'date-fns-tz'
+
 const MS_PER_DAY = 86_400_000
 const MS_PER_WEEK = 604_800_000
 
@@ -123,4 +125,24 @@ export function venueIsoWeekKey(date: Date, timezone: string): string {
 export function addCivilDays(dayKey: string, days: number): string {
   const [year, month, day] = dayKey.split('-').map(Number)
   return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10)
+}
+
+/**
+ * The first instant (epoch ms) whose civil date in `tz` is `dayKey` (yyyy-mm-dd). `fromZonedTime` of a midnight that does
+ * not exist lands on the day before, and of a repeated hour it picks either occurrence, so its answer is only a starting
+ * point: if it is not the first instant of the day, binary-search the jump within ±12 h of it.
+ * Movida aquí desde `nightly-sales-summary.job.ts` (encargo a1988b): la usa también la Auditoría de Promotores.
+ */
+export function firstInstantOfDay(dayKey: string, tz: string): number {
+  const guess = fromZonedTime(`${dayKey}T00:00:00.000`, tz).getTime()
+  const civil = (t: number) => venueDayKey(new Date(t), tz)
+  if (civil(guess) === dayKey && civil(guess - 1) < dayKey) return guess
+  let before = guess - 12 * 3_600_000 // civil(before) < dayKey
+  let from = guess + 12 * 3_600_000 // civil(from) >= dayKey
+  while (from - before > 1) {
+    const mid = Math.floor((before + from) / 2)
+    if (civil(mid) < dayKey) before = mid
+    else from = mid
+  }
+  return from
 }

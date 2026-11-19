@@ -30,7 +30,7 @@ import {
   venueStartOfMonth,
   zonaValida,
 } from '../../utils/datetime'
-import { addCivilDays, venueDayKey } from '../../utils/venueDateKeys'
+import { addCivilDays, firstInstantOfDay, venueDayKey } from '../../utils/venueDateKeys'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
@@ -2195,11 +2195,15 @@ class OrganizationDashboardService {
     // Codex 4c r6 #1 (encargo a1988b): «el día» es el de CADA sucursal, con SU zona (`Venue.timezone`), no la medianoche de CDMX para
     // todas. En Cancún (UTC−5) o Tijuana lo cobrado o checado entre las 00:00 y la 01:00 locales caía en el día anterior. Las sucursales se
     // agrupan por zona y cada grupo consulta con su propio [inicio, fin] (en PlayTelecom casi siempre es una sola zona: una vuelta).
-    // Un día sin fecha («hoy») también es el de cada zona. Las fechas son cadenas civiles: nunca pasan por la zona del host.
+    // Un día sin fecha («hoy») también es el de cada zona, con UN solo reloj por petición (Codex r1 #4); una fecha vacía es «hoy», como
+    // antes (Codex r1 #5). El día va de su primer instante al primer instante del siguiente, menos 1 ms: en una zona cuya medianoche no
+    // existe o se repite (Santiago) los días no se enciman ni dejan hueco (Codex r1 #3, el mismo cálculo que el correo nocturno).
+    // Las fechas son cadenas civiles: nunca pasan por la zona del host.
+    const ahora = new Date()
     const rangoDelDia = (tz: string): { dayStart: Date; dayEnd: Date } => {
-      const desde = startDateStr && endDateStr ? startDateStr : (dateStr ?? formatInTimeZone(new Date(), tz, 'yyyy-MM-dd'))
+      const desde = startDateStr && endDateStr ? startDateStr : dateStr || venueDayKey(ahora, tz)
       const hasta = startDateStr && endDateStr ? endDateStr : desde
-      return { dayStart: fromZonedTime(`${desde}T00:00:00.000`, tz), dayEnd: fromZonedTime(`${hasta}T23:59:59.999`, tz) }
+      return { dayStart: new Date(firstInstantOfDay(desde, tz)), dayEnd: new Date(firstInstantOfDay(addCivilDays(hasta, 1), tz) - 1) }
     }
 
     // Get all venues in organization
