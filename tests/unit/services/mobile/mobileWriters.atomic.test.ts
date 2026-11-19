@@ -389,12 +389,17 @@ describe('locked mobile writers', () => {
       // D3 (21-oct): quitar un descuento que vino de un premio de sellos bloquea DESPUÉS la fila de ese premio (la misma que
       // toma la reversa del sello). No es un candado de la cuenta: va aparte y siempre después del candado de la cuenta.
       const esDelPremio = (call: any[]) => (Array.isArray(call[0]) ? call[0].join('?') : '').includes('FROM "StampReward"')
-      const deLaCuenta = raw.filter((call: any[]) => !esDelPremio(call))
+      // D19 (encargo 01765a): aplicar suma el uso del descuento bajo SU candado (el del cupón) y su fila `Discount`, siempre DESPUÉS del
+      // candado de la cuenta. Tampoco es un candado de la cuenta.
+      const sqlDe = (call: any[]) => (Array.isArray(call[0]) ? call[0].join('?') : (call[0]?.sql ?? ''))
+      const esDelContador = (call: any[]) => sqlDe(call).includes('pg_advisory_xact_lock') || sqlDe(call).includes('FROM "Discount"')
+      const deLaCuenta = raw.filter((call: any[]) => !esDelPremio(call) && !esDelContador(call))
       expect(
         deLaCuenta.map((call: any[]) => (Array.isArray(call[0]) ? Prisma.sql(call[0], ...call.slice(1)).values : call[0].values)),
       ).toEqual([['order', 'venue']])
       expect(tx.$queryRaw.mock.invocationCallOrder[deLaCuenta.length - 1]).toBeLessThan(Math.min(...txCallOrders()))
-      if (raw.length > deLaCuenta.length) expect(name).toBe('removeDiscount')
+      if (raw.some(esDelPremio)) expect(name).toBe('removeDiscount')
+      if (raw.some(esDelContador)) expect(name).toBe('applyDiscount')
     }
     expect(tx.order.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1143,12 +1148,23 @@ describe('createOrderWithItems writes the sale money inside its creation transac
 })
 
 describe('Task4 captured transaction results', () => {
-  it('apply helper returns original created row and totals without another transaction/audit or catalog usage write', async () => {
+  it('apply helper returns original created row and totals without another transaction/audit; its usage write rides the caller TX', async () => {
+    // D19: la fila `Discount` que el contador toma bajo su candado.
+    const deAntes = tx.$queryRaw.getMockImplementation()
+    tx.$queryRaw.mockImplementation(async (q: any, ...v: any[]) => {
+      const sql = Array.isArray(q) ? q.join('?') : (q?.sql ?? '')
+      if (sql.includes('FROM "Discount"')) return [{ id: 'disc', name: 'Diez', currentUses: 0, maxTotalUses: null }]
+      if (sql.includes('pg_advisory_xact_lock')) return [{}]
+      return deAntes(q, ...v)
+    })
     const result = await applyOrderDiscountInTransaction(tx, 'venue', 'order', 'disc', 'staff')
     expect(result.row).toEqual({ id: 'od-new', name: 'Diez', amount: 15 })
     expect(result.totals).toMatchObject({ subtotal: 150, discountAmount: 0, total: 150, version: 2 })
-    expect(tx.discount.update).not.toHaveBeenCalled()
+    // D19 (encargo 01765a): antes esta prueba fijaba que el POS NO sumaba el uso (el defecto). Ahora suma UNA vez, en la tx de quien llama.
     expect(tx.discount.updateMany).not.toHaveBeenCalled()
+    expect(tx.discount.update).toHaveBeenCalledTimes(1)
+    expect(tx.discount.update).toHaveBeenCalledWith({ where: { id: 'disc' }, data: { currentUses: { increment: 1 } } })
+    expect(prismaMock.discount.update).not.toHaveBeenCalled()
     expect(prismaMock.$transaction).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
   })

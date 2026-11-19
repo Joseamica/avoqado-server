@@ -9906,6 +9906,9 @@ model OrderDiscount {
   isComp      Boolean @default(false) // Was this a comp?
   isAutomatic Boolean @default(false) // Applied automatically?
   isManual    Boolean @default(false) // Applied manually at checkout?
+  // D19 (hz:e82938e1:D19): esta fila SUMÓ un uso a `Discount.currentUses` al aplicarse (descuento de cuenta del POS, Mesas). Quitarla
+  // lo devuelve. false = filas de antes del arreglo o de caminos que cuentan aparte (motor de la TPV, Mostrador): no se resta aquí.
+  usoContado  Boolean @default(false)
 
   // Comp-specific
   compReason String? @db.Text

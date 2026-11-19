@@ -98,6 +98,18 @@ function baseEnMemoria() {
     return conRenglones(o)
   })
   prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...valores: any[]) => {
+    // D19: el candado del descuento y la pasada de filas `Discount` de `usoDelDescuento` (leídas como las da `discount.findFirst`).
+    const sqlD19 = Array.isArray(strings) ? strings.join('?') : (strings as any).sql
+    if (sqlD19.includes('pg_advisory_xact_lock')) return [{}]
+    if (sqlD19.includes('FROM "Discount"')) {
+      const [venueIdD19, idsD19] = valores
+      const filasD19 = await Promise.all(
+        (idsD19 as string[]).map((id: string) => prismaMock.discount.findFirst({ where: { id, venueId: venueIdD19 } } as any)),
+      )
+      return filasD19
+        .filter(Boolean)
+        .map((d: any) => ({ id: d.id, name: d.name, currentUses: d.currentUses ?? 0, maxTotalUses: d.maxTotalUses ?? null }))
+    }
     if (!strings.join('?').includes('FOR UPDATE')) throw new Error('doble en memoria: $queryRaw no soportado')
     const [orderId, venueId] = valores
     const o = ordenes.get(orderId)
@@ -123,6 +135,7 @@ function baseEnMemoria() {
     where.venueId === VENUE ? { id: `sv-${where.staffId}`, staffId: where.staffId, venueId: VENUE, active: true, staff: {} } : null,
   )
   prismaMock.shift.findFirst.mockResolvedValue(null)
+  // D19 (encargo 01765a): el descuento de cuenta de la mesa suma su uso (el tope lo prueba topeDeUsos.descuentoDeCuenta.test.ts).
   prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) => {
     const d = catalogo[where.id]
     return d && d.venueId === where.venueId ? { ...d, value: new Prisma.Decimal(d.value) } : null

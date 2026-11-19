@@ -2067,6 +2067,8 @@ async function applyOrderMutation(
         authorizeIntent?.(intent, 'tpv-orders:discount') === true ? {} : undefined,
         // Encargo f998c8: el motivo viaja en el payload (opcional; uno viejo no lo trae y entra «Sin motivo», nunca REJECTED).
         motivoDelDescuento(p.reason, p.reasonComment),
+        // D19 (encargo 01765a): la mesa ya dio el descuento sin red; si el tope se llenó mientras tanto, no se rechaza (el uso cuenta).
+        { enLaCola: true },
       )
       break
     }

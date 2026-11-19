@@ -78,6 +78,7 @@ import {
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
+import { apartarUsoDeMesaEnTx, devolverUsoDelDescuentoEnTx, sumarUsosDeVentaEnTx } from '../shared/usoDelDescuento'
 import { apartarCupon, cuponDeLaVenta, ligarCupon, montoDelCupon, textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
 import { aCentavos, comoJson, esFilaDeValeV7, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
 import { descuentoComoLoCobroLaTpvVieja } from '../shared/descuentoDeTpvVieja'
@@ -1231,7 +1232,10 @@ export async function buildOrderItemsData(
 
   // De la cola (`llegada` sólo viene de ahí), el vencimiento se mide a la hora de la venta (S6); en línea, como siempre.
   const horaDeVigencia = precioMostrado?.llegada ? precioMostrado.horaDeLaVenta : undefined
-  discounts.forEach(discount => validateDiscountActive(discount, { horaDeLaVenta: horaDeVigencia }))
+  // D19 (encargo 01765a): la venta de la cola ya se cobró; el tope de usos no la rechaza (su uso cuenta igual, abajo).
+  discounts.forEach(discount =>
+    validateDiscountActive(discount, { horaDeLaVenta: horaDeVigencia, enLaCola: precioMostrado?.llegada != null }),
+  )
   // Estos son los descuentos que se van a calcular, no la foto previa del middleware. También protege a los cuatro callers de vales.
   if (discounts.some(discount => discount.type === 'COMP') && (compAuthority?.canCompItems !== true || !compAuthority.performedBy)) {
     throw new ForbiddenError('No tienes permiso para dar cortesías')
@@ -1645,6 +1649,11 @@ export type VentaDeMostradorEnTx =
       descuentoDelCliente?: { montoPesos: number; fueraDeTarifa: boolean }
       /** D652: el cupón sin identificar ya quedó en la bitácora de la transacción; esto es su aviso, después del commit. */
       cuponSinIdentificar?: Omit<DatosDelAviso, 'terminalSerial'>
+      /**
+       * D19 (encargo 5b78aa): los descuentos de catálogo cuyo uso gasta esta venta y quién la subió. Se suman DESPUÉS del commit, en su
+       * propia transacción corta (`terminarVentaDeMostrador`): la venta nunca toma la fila `Discount` (Codex r3 #3–#5, r4 #4–#6).
+       */
+      usosPorSumar: { ids: string[]; quien: string | null }
     }
 /** La venta recién creada (no la de una llave que ya existía). */
 export type VentaDeMostradorCreada = Exclude<VentaDeMostradorEnTx, { existente: OrdenCreada }>
@@ -1955,7 +1964,9 @@ export async function crearVentaDeMostradorEnTx(
     throw new BadRequestError(`Descuento no encontrado o no pertenece a este local: ${input.orderDiscountId}`)
   }
   // El cupón ya se validó con sus fechas, que mandan sobre las del descuento.
-  if (orderDiscount && !cupon) validateDiscountActive(orderDiscount, { horaDeLaVenta: enLaCola ? precioMostrado.horaDeLaVenta : undefined })
+  // D19 (encargo 01765a): en la cola el tope de usos no rechaza una venta ya cobrada (el efectivo ya está en el cajón); el uso cuenta.
+  if (orderDiscount && !cupon)
+    validateDiscountActive(orderDiscount, { horaDeLaVenta: enLaCola ? precioMostrado.horaDeLaVenta : undefined, enLaCola })
   if (orderDiscount?.type === 'COMP' && (input.canCompItems !== true || !input.performedBy)) {
     throw new ForbiddenError('No tienes permiso para dar cortesías')
   }
@@ -1966,7 +1977,7 @@ export async function crearVentaDeMostradorEnTx(
   const idDeLaEtiqueta = input.descuentoDeCatalogoId ?? input.descuentoDelCliente?.discountId
   const etiquetaDeCuenta =
     !orderDiscount && idDeLaEtiqueta && (input.discount ?? 0) > 0
-      ? await tx.discount.findFirst({ where: { id: idDeLaEtiqueta, venueId }, select: { requiresApproval: true, type: true } })
+      ? await tx.discount.findFirst({ where: { id: idDeLaEtiqueta, venueId }, select: { requiresApproval: true, type: true, scope: true } })
       : null
   const cuentaPideAprobacion = pideAprobacionDeGerente(orderDiscount) || pideAprobacionDeGerente(etiquetaDeCuenta)
   // D4 r5 (Codex, apps viejas): la venta de la cola ya se cobró; sin la acreditación entra igual (como antes de #423), sin aprobador.
@@ -2063,6 +2074,32 @@ export async function crearVentaDeMostradorEnTx(
     discounts: orderDiscount && !cupon ? [...discounts, orderDiscount] : discounts,
     cambiosDePrecio,
   }
+  // 🔴 D19 (hz:e82938e1:D19, encargos 01765a y 5b78aa; Codex r3 #1): el uso de cada descuento de catálogo de la venta — por renglón, el
+  // de la cuenta, el del cliente y la ETIQUETA del importe libre que manda ANDROID (`descuentoDeCatalogoId`), que antes nunca contaba —
+  // se devuelve en `usosPorSumar` y se suma DESPUÉS del commit (`terminarVentaDeMostrador`). Decisión «A» del founder: aquí no se
+  // rechaza por tope (la validación de arriba sigue como siempre); el choque del mismo segundo queda un uso arriba, con aviso.
+  // El del cliente cuenta con la misma condición de siempre; la etiqueta, sólo si su importe libre quedó registrado como descuento de la
+  // cuenta (sin catálogo, cupón ni descuento del cliente que manden sobre él: una rebaja = un uso, Codex r4 #2). Un id ajeno al negocio
+  // no cuenta nada (la suma filtra por `venueId`).
+  const usosDeLaVenta = (conDelCliente: boolean, importeLibreRegistrado: boolean): VentaDeMostradorCreada['usosPorSumar'] => ({
+    ids: [
+      ...venta.discounts.map(d => d.id),
+      ...(conDelCliente && prep.descuentoDelCliente ? [prep.descuentoDelCliente.discountId] : []),
+      // Codex r5 #2: en línea, sólo una etiqueta de CUENTA del negocio (la que se leyó arriba); una de renglón no puede gastar su cupo
+      // con una rebaja de cuenta. Codex r6 #1: de la cola, cualquier etiqueta del negocio: la venta ya se cobró con ella y el dueño pudo
+      // cambiar el alcance antes de que sincronizara.
+      ...(importeLibreRegistrado &&
+      !orderDiscount &&
+      !cupon &&
+      !prep.descuentoDelCliente &&
+      input.descuentoDeCatalogoId &&
+      etiquetaDeCuenta != null &&
+      (enLaCola || etiquetaDeCuenta.scope === 'ORDER')
+        ? [input.descuentoDeCatalogoId]
+        : []),
+    ],
+    quien: input.performedBy ?? validatedStaffId ?? null,
+  })
 
   if (input.tableId) await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [input.tableId] })
   // 🔴 La venta se toma en el mostrador: la orden nace en el turno de caja abierto AHORA
@@ -2274,6 +2311,7 @@ export async function crearVentaDeMostradorEnTx(
             },
           }
         : {}
+    const usosPorSumar = usosDeLaVenta(orderLevelDiscountDecimal > 0, orderLevelDiscountDecimal > 0)
     if (regaloSinPromociones === 'SIN_PERMISO') {
       await anotarRegaloSinPermisoEnTx(tx, venueId, input, createdOrder.id, validatedStaffId || null, orderLevelDiscountDecimal)
       return {
@@ -2283,12 +2321,14 @@ export async function crearVentaDeMostradorEnTx(
         regaloSinPermisoPesos: orderLevelDiscountDecimal,
         ...registradoDelCliente,
         ...(sinAprobacion.length > 0 ? { sinAprobacion } : {}),
+        usosPorSumar,
       }
     }
     return {
       order: createdOrder,
       promotionTotals: null,
       venta,
+      usosPorSumar,
       ...registradoDelCliente,
       ...(sinAprobacion.length > 0 ? { sinAprobacion } : {}),
     }
@@ -2401,6 +2441,7 @@ export async function crearVentaDeMostradorEnTx(
     order: reafirmada,
     promotionTotals: { subtotal: subtotalConPromociones, discount: descuentoFinal, total: totalFinal },
     venta,
+    usosPorSumar: usosDeLaVenta(!cupon && descuentoDeOrdenFinal > 0, descuentoDeOrdenFinal > 0),
     ...(regaloConPromociones === 'SIN_PERMISO' ? { regaloSinPermisoPesos: descuentoDeOrdenFinal } : {}),
     ...(sinAprobacion.length > 0 ? { sinAprobacion } : {}),
     ...(prep.descuentoDelCliente && !cupon && descuentoDeOrdenFinal > 0
@@ -2416,11 +2457,11 @@ export async function crearVentaDeMostradorEnTx(
 
 /**
  * Lo de DESPUÉS del commit de una venta de mostrador nueva (sin el premio ni el aviso, que van después): la bitácora del alta, el
- * contador de usos de los descuentos (mejor esfuerzo) y la bitácora de las promociones.
+ * contador de usos de sus descuentos y la bitácora de las promociones.
  */
 export async function terminarVentaDeMostrador(venueId: string, creada: VentaDeMostradorCreada, prep: PreparacionDeVenta): Promise<void> {
   const { order, promotionTotals } = creada
-  const { subtotal, discountDecimal, total, discounts } = creada.venta
+  const { subtotal, discountDecimal, total } = creada.venta
   const { tipDecimal, promocionesUnicas } = prep
 
   logger.info(
@@ -2449,30 +2490,31 @@ export async function terminarVentaDeMostrador(venueId: string, creada: VentaDeM
     })
   }
 
-  // Bump usage counters for any Discount rows applied via item.discountId (mirrors
-  // order.tpv.service.ts). Best-effort: the order already committed above, so a
-  // failure here must not fail the request — it would only leave a discount's
-  // maxTotalUses counter stale, not corrupt the order/payment.
-  // Descuento del cliente (revisión r1): su uso cuenta igual que el del `orderDiscountId` (y que la TPV de la fase 1), sólo si se
-  // registró y el descuento existe en el negocio.
-  const usados = [
-    ...discounts.map(discount => discount.id),
-    ...(delCliente?.discountId && creada.descuentoDelCliente ? [delCliente.discountId] : []),
-  ]
-  if (usados.length > 0) {
+  // 🔴 D19 (hz:e82938e1:D19, encargos 01765a y 5b78aa): el uso de cada descuento de catálogo de la venta, en su PROPIA transacción corta
+  // después del commit. Decisión «A» del founder: lo ya cobrado nunca se rechaza por el tope, así que aquí no hay nada que decidir antes
+  // de guardar la venta; si el contador queda arriba, `DESCUENTO_SOBRE_TOPE` va en la MISMA transacción que la suma. Fuera de la venta a
+  // propósito: tomar la fila `Discount` dentro de ella la cruzaba con el turno, el premio de sellos, la tarjeta de regalo y otras filas
+  // `Discount` (Codex r3 #3–#5, r4 #4–#6). Residuo aceptado (como antes): si el proceso muere entre el commit y esta suma, ese uso no se
+  // cuenta y el reintento con la misma llave tampoco lo suma.
+  // Codex r5 #3 y #4: UN descuento por transacción. Nunca tiene dos filas `Discount` a la vez (no se cruza con la TPV, que toma las suyas
+  // en otro orden) y, si falla el aviso de uno, los demás conservan su uso.
+  for (const discountId of [...new Set(creada.usosPorSumar.ids)].sort()) {
     try {
       await withDeadlockRetry(
         tx =>
-          tx.discount.updateMany({
-            where: { id: { in: usados } },
-            data: { currentUses: { increment: 1 } },
+          sumarUsosDeVentaEnTx(tx, {
+            venueId,
+            orderId: order.id,
+            discountIds: [discountId],
+            enLaCola: prep.enLaCola,
+            quien: creada.usosPorSumar.quien,
           }),
         { etiqueta: 'terminarVentaDeMostrador' },
       )
     } catch (error) {
-      logger.error('❌ [ORDER.MOBILE] Failed to increment discount currentUses', {
+      logger.error('❌ [ORDER.MOBILE] No se pudo sumar el uso de un descuento de la venta', {
         orderId: order.id,
-        discountIds: usados,
+        discountId,
         error: (error as Error).message,
       })
     }
@@ -3052,7 +3094,8 @@ export async function updateOrderDetails(
  * re-derive consistently).
  */
 export async function applyOrderDiscountInTransaction(
-  tx: Prisma.TransactionClient,
+  // D19: escribe el contador de `Discount` ⇒ corre con reintento por traba (S5b): `withDeadlockRetry` o `executeHttpOperation`.
+  tx: TxConReintento,
   venueId: string,
   orderId: string,
   discountId: string,
@@ -3064,6 +3107,8 @@ export async function applyOrderDiscountInTransaction(
   aprobacion?: { porPin?: string },
   /** Encargo f998c8: el motivo y comentario que eligió la caja (ya recortados con `motivoDelDescuento`). Sin él, «Sin motivo». */
   motivo: MotivoDeDescuento = {},
+  /** D19 (encargo 01765a): `enLaCola` = lo reproduce la cola sin red (APPLY_DISCOUNT): la mesa ya lo dio, el tope no lo rechaza. */
+  opciones: { enLaCola?: boolean } = {},
 ) {
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
 
@@ -3087,7 +3132,7 @@ export async function applyOrderDiscountInTransaction(
 
   const discount = await tx.discount.findFirst({ where: { id: discountId, venueId } })
   if (!discount) throw new NotFoundError('Descuento no encontrado')
-  validateDiscountActive(discount)
+  validateDiscountActive(discount, { enLaCola: opciones.enLaCola })
   // D1 (hz:f34960c5:D1): el tipo se lee bajo el candado; regalar la cuenta pide el permiso de cortesía, como `/comp` y D14.
   if (discount.type === 'COMP' && !puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
   // D4 (hz:f34960c5:D4): también bajo el candado; el de la ruta ya pidió el PIN si hacía falta.
@@ -3143,12 +3188,19 @@ export async function applyOrderDiscountInTransaction(
     : null
   const aprobo = pideAprobacion && aprobacion ? (aprobacion.porPin ?? aplico) : null
 
+  // 🔴 D19 (hz:e82938e1:D19, encargos 01765a y 5b78aa): el uso se GASTA aquí, en la misma transacción y antes de crear la fila. Antes el
+  // POS revisaba el tope y nunca sumaba: un «primeros 100» aplicado en Mesas no se acababa. La cuenta ya está tomada; la fila `Discount`
+  // es lo último (sin el candado consultivo del cupón, Codex r3 #4). En línea sin usos se rechaza (todavía no se cobra); de la cola no.
+  await apartarUsoDeMesaEnTx(tx, { venueId, orderId, discountId, enLaCola: opciones.enLaCola, quien: staffId ?? null })
+
   // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
   await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
   const row = await tx.orderDiscount.create({
     data: {
       orderId,
       discountId,
+      // D19: esta fila sumó un uso; quitarla lo devuelve (`removeOrderDiscountInTransaction`). Las viejas no lo sumaron.
+      usoContado: true,
       type: discount.type,
       name: discount.name,
       value: discount.value,
@@ -3174,10 +3226,11 @@ export async function applyOrderDiscount(
   puedeRegalar = false,
   aprobacion?: { porPin?: string },
   motivo: MotivoDeDescuento = {},
+  opciones: { enLaCola?: boolean } = {},
 ) {
-  const { row, totals } = await prisma.$transaction(
-    tx => applyOrderDiscountInTransaction(tx, venueId, orderId, discountId, staffId, puedeRegalar, aprobacion, motivo),
-    ORDER_LOCK_WAIT_BUDGET,
+  const { row, totals } = await withDeadlockRetry(
+    tx => applyOrderDiscountInTransaction(tx, venueId, orderId, discountId, staffId, puedeRegalar, aprobacion, motivo, opciones),
+    { etiqueta: 'applyOrderDiscount', ...ORDER_LOCK_WAIT_BUDGET },
   )
 
   void (await import('../dashboard/activity-log.service')).logAction({
@@ -3250,6 +3303,10 @@ export async function removeOrderDiscountInTransaction(
   if (!row) throw new NotFoundError('Descuento no aplicado a esta orden')
   // Tarjeta na24531d: la fila que nació al cobrar vales V7 (marcada) no se quita desde la caja (la anulación sólo regresa canjes).
   if (!opciones.porAnulacion) rechazarSiQuitaUnDescuentoDeVale(row)
+  // D19 (encargo 01765a): devuelve el uso SÓLO si esta fila lo sumó (`usoContado`); una fila vieja o de otro camino no resta lo que no
+  // sumó aquí. Va ANTES de escribir cualquier fila de la cuenta (Codex r1 #6): con el gerente borrando ese descuento del catálogo
+  // (Discount → poner en NULL las filas que lo usan), tomar Discount primero evita el ciclo con la fila que esta caja borra después.
+  if (row.usoContado && row.discountId) await devolverUsoDelDescuentoEnTx(tx, venueId, row.discountId)
   // R7-1 (ruling de B2 «al retirar un descuento, antes de borrarlo»): el recálculo de abajo es Σ filas, así que un resto de
   // cabecera sin fila se perdería con ésta; se congela antes de devolver, revertir y borrar.
   await conservarDescuentoHistorico(tx, orderId, order.discountAmount)

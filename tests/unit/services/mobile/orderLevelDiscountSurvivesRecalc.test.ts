@@ -108,6 +108,18 @@ function baseEnMemoria() {
   })
   // El candado de la orden (`lockExistingOrderForPayment`) es un SELECT … FOR UPDATE crudo.
   prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...valores: any[]) => {
+    // D19: el candado del descuento y la pasada de filas `Discount` de `usoDelDescuento` (leídas como las da `discount.findFirst`).
+    const sqlD19 = Array.isArray(strings) ? strings.join('?') : (strings as any).sql
+    if (sqlD19.includes('pg_advisory_xact_lock')) return [{}]
+    if (sqlD19.includes('FROM "Discount"')) {
+      const [venueIdD19, idsD19] = valores
+      const filasD19 = await Promise.all(
+        (idsD19 as string[]).map((id: string) => prismaMock.discount.findFirst({ where: { id, venueId: venueIdD19 } } as any)),
+      )
+      return filasD19
+        .filter(Boolean)
+        .map((d: any) => ({ id: d.id, name: d.name, currentUses: d.currentUses ?? 0, maxTotalUses: d.maxTotalUses ?? null }))
+    }
     // D652: el candado de la llave de la venta (`candadoDeLaLlave`, un `Prisma.Sql`); en memoria no hay concurrencia que serializar.
     if (!Array.isArray(strings) && String((strings as any)?.sql).includes('pg_advisory_xact_lock')) return [{ pg_advisory_xact_lock: '' }]
     if (!strings.join('?').includes('FOR UPDATE')) throw new Error('doble en memoria: $queryRaw no soportado')
@@ -148,6 +160,7 @@ function baseEnMemoria() {
   prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: VENUE, active: true, staff: {} })
   prismaMock.shift.findFirst.mockResolvedValue(null)
   prismaMock.customer.findUnique.mockResolvedValue({ id: CLIENTE, venueId: VENUE, firstName: 'Ana', lastName: 'López', phone: null })
+  // D19 (encargo 01765a): el descuento de cuenta de la mesa suma su uso (el tope lo prueba topeDeUsos.descuentoDeCuenta.test.ts).
   prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) =>
     where.id === DESCUENTO_10 && where.venueId === VENUE
       ? { id: DESCUENTO_10, venueId: VENUE, name: '10% cliente frecuente', type: 'PERCENTAGE', value: 10, scope: 'ORDER', active: true }

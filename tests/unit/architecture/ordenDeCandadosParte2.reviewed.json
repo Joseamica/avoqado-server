@@ -320,10 +320,6 @@
       "clase": "EN_TX",
       "etiqueta": "crearVentaDeMostradorEnTx"
     },
-    "src/services/mobile/order.mobile.service.ts#terminarVentaDeMostrador": {
-      "clase": "SENTENCIA",
-      "etiqueta": "terminarVentaDeMostrador"
-    },
     "src/services/onboarding/demoCleanup.service.ts#cleanDemoData": {
       "clase": "EN_TX",
       "etiqueta": "cleanDemoData"
@@ -410,6 +406,26 @@
     "src/services/shared/puntosAlReembolsar.ts#reversaEnTx": {
       "clase": "EN_TX",
       "etiqueta": "reversaEnTx"
+    },
+    "src/services/shared/usoDelDescuento.ts#apartarUsoDeMesaEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "apartarUsoDeMesaEnTx"
+    },
+    "src/services/shared/usoDelDescuento.ts#devolverUsoDelDescuentoEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "devolverUsoDelDescuentoEnTx"
+    },
+    "src/services/shared/usoDelDescuento.ts#devolverUsosDeCuentaQueSeBorraEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "devolverUsosDeCuentaQueSeBorraEnTx"
+    },
+    "src/services/shared/usoDelDescuento.ts#sumarUsosDeVentaEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "sumarUsosDeVentaEnTx"
+    },
+    "src/services/shared/usoDelDescuento.ts#tomarFilas": {
+      "clase": "EN_TX",
+      "etiqueta": "tomarFilas"
     },
     "src/services/superadmin/staffDeletion.service.ts#deleteOrRetainStaffWithH1ProvenanceTx": {
       "clase": "EN_TX",
@@ -891,6 +907,10 @@
       "etiqueta": "redeemPointsToOrder",
       "cantidad": 1
     },
+    "src/services/mobile/order.mobile.service.ts#applyOrderDiscount": {
+      "etiqueta": "applyOrderDiscount",
+      "cantidad": 1
+    },
     "src/services/mobile/order.mobile.service.ts#cancelOrder": {
       "etiqueta": "cancelOrder",
       "cantidad": 1
@@ -938,7 +958,7 @@
     "src/services/mobile/order.mobile.service.ts#terminarVentaDeMostrador": {
       "etiqueta": "terminarVentaDeMostrador",
       "cantidad": 1,
-      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+      "nota": "D19 (encargo 5b78aa): la suma del uso de los descuentos de la venta, después del commit; su transacción sólo toma filas Discount ascendentes."
     },
     "src/services/onboarding/demoCleanup.service.ts#cleanDemoData": {
       "etiqueta": "cleanDemoData",

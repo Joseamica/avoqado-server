@@ -18,6 +18,7 @@ import { createOrder } from '@/controllers/mobile/order.mobile.controller'
 import * as orderMobileService from '@/services/mobile/order.mobile.service'
 import { buildOrderItemsData, createOrderWithItems, type CreateOrderInput } from '@/services/mobile/order.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
+import { contestarFilasDeDescuentos, usosSumados } from '../../../__helpers__/usoDelDescuento'
 
 const PRODUCTOS = [
   { id: 'cafe', name: 'Café', price: new Decimal(50), sku: 'CAFE', categoryId: 'c1', category: { name: 'Bebidas' } },
@@ -93,6 +94,7 @@ beforeEach(() => {
   ordenGuardada = null
   prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
   prismaMock.$queryRaw.mockResolvedValue([])
+  contestarFilasDeDescuentos() // D19: el candado y las filas del contador de usos
   prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
   prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
   prismaMock.product.findMany.mockImplementation(async ({ where }: any) => PRODUCTOS.filter(p => where.id.in.includes(p.id)))
@@ -248,11 +250,8 @@ describe('cortesías y descuento de cuenta en la orden de mobile — servicio', 
       where: { id: deCuenta.id },
       data: { reparto: { ...deCuenta.reparto, renglones: { 'oi-1': 300, 'oi-2': 200 } } },
     })
-    // currentUses++ del descuento de catálogo.
-    expect(prismaMock.discount.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['orden10'] } },
-      data: { currentUses: { increment: 1 } },
-    })
+    // currentUses++ del descuento de catálogo (D19: dentro de la transacción de la venta, bajo el candado del descuento).
+    expect(usosSumados()).toEqual(['orden10'])
   })
 
   it('orderDiscountId de otro negocio o inexistente ⇒ 400, sin crear la orden', async () => {
@@ -312,7 +311,7 @@ describe('cortesías y descuento de cuenta en la orden de mobile — servicio', 
     expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
     expect(prismaMock.orderDiscount.create).toHaveBeenCalledTimes(1)
     expect(acciones).toHaveLength(1)
-    expect(prismaMock.discount.updateMany).not.toHaveBeenCalled()
+    expect(usosSumados()).toEqual([]) // D19: sin descuentos de catálogo, nada que contar (ni en el reintento)
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
     expect(prismaMock.inventoryPosting.create).not.toHaveBeenCalled()
   })
