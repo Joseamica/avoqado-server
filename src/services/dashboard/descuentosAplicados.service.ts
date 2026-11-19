@@ -6,6 +6,7 @@
 // Capacidad (bounded-queries): el periodo se filtra por la fecha de la VENTA (índice `Order(venueId, createdAt)`), el agrupado es un
 // `groupBy` en la base (exacto, no la suma de la página), la lista lleva tope del servidor y orden estable (`createdAt`, `id`), y el
 // total de filas viaja siempre. Sólo cuentas vivas: una cancelada o borrada no dio el descuento (igual que `getDiscountStats`).
+import { dondeHoraRealEntre } from '@/services/shared/horaRealDelAparato'
 import type { OrderStatus, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { parseDbDateRange } from '../../utils/datetime'
@@ -71,12 +72,9 @@ export async function listarDescuentosAplicados(
   const pageSize = Math.min(PAGINA_MAXIMA, Math.max(1, Math.trunc(filtros.pageSize ?? PAGINA_POR_DEFECTO) || PAGINA_POR_DEFECTO))
   const page = Math.max(1, Math.trunc(filtros.page ?? 1) || 1)
 
+  // D4: el periodo es el de la VENTA (la hora real de la orden, la del aparato si se vendió sin internet), como el Resumen.
   const delPeriodo = {
-    order: {
-      venueId,
-      status: { notIn: ['CANCELLED', 'DELETED'] as OrderStatus[] },
-      createdAt: { gte: from, lte: to },
-    },
+    order: dondeHoraRealEntre({ venueId, status: { notIn: ['CANCELLED', 'DELETED'] as OrderStatus[] } }, from, to),
   } satisfies Prisma.OrderDiscountWhereInput
   const filtroDeMotivo: Prisma.OrderDiscountWhereInput =
     filtros.reason === undefined || filtros.reason === '' ? {} : { reason: filtros.reason === SIN_MOTIVO ? null : filtros.reason }
@@ -95,7 +93,8 @@ export async function listarDescuentosAplicados(
     prisma.orderDiscount.count({ where: dondeLista }),
     prisma.orderDiscount.findMany({
       where: dondeLista,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      // La lista va por la llegada de la cuenta (como las listas); sin red, a lo más lo que tardó en subir.
+      orderBy: [{ order: { createdAt: 'desc' } }, { createdAt: 'desc' }, { id: 'desc' }],
       skip: (page - 1) * pageSize,
       take: pageSize,
       select: {
@@ -107,7 +106,7 @@ export async function listarDescuentosAplicados(
         amount: true,
         reason: true,
         reasonComment: true,
-        order: { select: { orderNumber: true } },
+        order: { select: { orderNumber: true, createdAt: true, clientCreatedAt: true } },
         appliedBy: { select: { staff: { select: { firstName: true, lastName: true } } } },
         authorizedBy: { select: { staff: { select: { firstName: true, lastName: true } } } },
       },
@@ -126,7 +125,8 @@ export async function listarDescuentosAplicados(
     motivosRecortados: grupos.length > MOTIVOS_MAXIMOS,
     rows: filas.map(f => ({
       id: f.id,
-      createdAt: f.createdAt,
+      // D4: la fecha de la VENTA, la misma que filtra el periodo (sin red, la del aparato).
+      createdAt: f.order ? (f.order.clientCreatedAt ?? f.order.createdAt) : f.createdAt,
       orderId: f.orderId,
       orderNumber: f.order?.orderNumber ?? null,
       name: f.name,

@@ -1,3 +1,4 @@
+import { dondeHoraRealEntre } from '@/services/shared/horaRealDelAparato'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { TransactionStatus } from '@prisma/client'
@@ -81,13 +82,15 @@ export function registerTrendTools(server: McpServer, scope: McpScope) {
       const [cur, prev, venues] = await Promise.all([
         prisma.payment.groupBy({
           by: ['venueId'],
-          where: { ...base, ...completed, createdAt: { gte: curStart, lte: now } },
+          // D4: por la hora real del cobro, como el Resumen.
+          where: dondeHoraRealEntre({ ...base, ...completed }, curStart, now),
           _sum: { amount: true },
           _count: { _all: true },
         }),
         prisma.payment.groupBy({
           by: ['venueId'],
-          where: { ...base, ...completed, createdAt: { gte: prevStart, lt: curStart } },
+          // `< curStart`: el borde se queda en el periodo actual (el ayudante es de dos extremos inclusivos).
+          where: dondeHoraRealEntre({ ...base, ...completed }, prevStart, new Date(curStart.getTime() - 1)),
           _sum: { amount: true },
           _count: { _all: true },
         }),
@@ -161,7 +164,11 @@ export function registerTrendTools(server: McpServer, scope: McpScope) {
       const [groups, venues] = await Promise.all([
         prisma.payment.groupBy({
           by: ['venueId'],
-          where: { ...base, status: TransactionStatus.COMPLETED, order: WHERE_ORDEN_SIN_TARJETAS, createdAt: { gte: start } },
+          where: dondeHoraRealEntre(
+            { ...base, status: TransactionStatus.COMPLETED, order: WHERE_ORDEN_SIN_TARJETAS },
+            start,
+            null, // como antes: sólo «desde»
+          ),
           _sum: { amount: true },
           _count: { _all: true },
         }),

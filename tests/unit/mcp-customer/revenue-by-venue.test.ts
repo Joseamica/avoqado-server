@@ -63,7 +63,7 @@ describe('revenue_by_venue', () => {
       { venueId: 'v3', venue: 'Sur', currency: 'UNKNOWN', gross: 0, transactions: 0 },
     ])
     // only COMPLETED payments across the caller's whole scope
-    expect((mockGroupBy.mock.calls[0][0] as { where: Record<string, unknown> }).where).toMatchObject({
+    expect((mockGroupBy.mock.calls[0][0] as { where: { AND: Record<string, unknown>[] } }).where.AND[0]).toMatchObject({
       venueId: { in: ['v1', 'v2', 'v3'] },
       status: 'COMPLETED',
     })

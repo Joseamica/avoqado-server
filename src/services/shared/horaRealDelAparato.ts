@@ -81,19 +81,21 @@ export function conHoraRealDelAparato(
 /**
  * Filtro Prisma «la hora real cae en [desde, hasta]», ENVOLVIENDO el `where` que ya tenías en un `AND` (nunca se mezcla con sus
  * propias llaves `OR`/`AND`, como las del filtro por tipo de tarjeta). El `createdAt` ensanchado deja que Postgres use el índice
- * `(venueId, createdAt)`; la condición exacta es la del `OR`.
+ * `(venueId, createdAt)`; la condición exacta es la del `OR`. Sin `desde` o sin `hasta` (`null`), ese lado queda abierto, como un
+ * `createdAt: { gte }` a secas (D4).
  */
-export function dondeHoraRealEntre<W extends object>(where: W, desde: Date, hasta: Date): { AND: [W, Prisma.PaymentWhereInput] } {
-  return {
-    AND: [
-      where,
-      {
-        createdAt: { gte: new Date(desde.getTime() - MARGEN_DE_LECTURA_ANTES_MS), lte: new Date(hasta.getTime() + MARGEN_DE_LECTURA_MS) },
-        OR: [{ clientCreatedAt: { gte: desde, lte: hasta } }, { clientCreatedAt: null, createdAt: { gte: desde, lte: hasta } }],
-      },
-    ],
+export function dondeHoraRealEntre<W extends object>(where: W, desde: Date | null, hasta: Date | null): { AND: [W, RangoDeHoraReal] } {
+  const rango: Rango = { ...(desde && { gte: desde }), ...(hasta && { lte: hasta }) }
+  const ensanchado: Rango = {
+    ...(desde && { gte: new Date(desde.getTime() - MARGEN_DE_LECTURA_ANTES_MS) }),
+    ...(hasta && { lte: new Date(hasta.getTime() + MARGEN_DE_LECTURA_MS) }),
   }
+  return { AND: [where, { createdAt: ensanchado, OR: [{ clientCreatedAt: rango }, { clientCreatedAt: null, createdAt: rango }] }] }
 }
+
+type Rango = { gte?: Date; lte?: Date }
+/** La forma del filtro de `dondeHoraRealEntre`: sólo `createdAt` y `clientCreatedAt`, que tienen `Order` y `Payment` (D4: también órdenes). */
+type RangoDeHoraReal = { createdAt: Rango; OR: [{ clientCreatedAt: Rango }, { clientCreatedAt: null; createdAt: Rango }] }
 
 /** Texto SQL de la hora real de la fila (`alias` vacío = columnas sin calificar). */
 export function sqlHoraReal(alias = ''): string {

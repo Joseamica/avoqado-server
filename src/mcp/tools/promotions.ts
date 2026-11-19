@@ -1,3 +1,4 @@
+import { dondeHoraRealEntre } from '@/services/shared/horaRealDelAparato'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
@@ -88,8 +89,9 @@ export function registerPromotionTools(server: McpServer, scope: McpScope) {
           by: ['promotionId'],
           where: {
             promotionId: { in: active.map(p => p.id) },
-            order: { venueId, status: { not: 'CANCELLED' } },
-            createdAt: { gte: venueStartOfDay(tz), lte: venueEndOfDay(tz) },
+            // D4: el día de la CUENTA (su hora real), como el reporte de Promociones, PMIX y Ventas por artículo. Antes contaba la hora
+            // de su renglón, que nace con la llegada: lo vendido sin internet caía en el día en que se subió.
+            order: dondeHoraRealEntre({ venueId, status: { not: 'CANCELLED' as const } }, venueStartOfDay(tz), venueEndOfDay(tz)),
           },
           _count: { _all: true },
         })
