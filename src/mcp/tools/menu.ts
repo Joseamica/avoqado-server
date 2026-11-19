@@ -5,7 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { updateProduct, createProduct, getProduct } from '@/services/dashboard/product.dashboard.service'
-import { createMenuCategory, createModifierGroup, updateModifier } from '@/services/dashboard/menu.dashboard.service'
+import { createMenuCategory, createModifierGroup, updateModifier, updateModifierGroup } from '@/services/dashboard/menu.dashboard.service'
 import { MODIFIER_SKU_FORMAT_MESSAGE, MODIFIER_SKU_MAX, SKU_REGEX } from '@/schemas/dashboard/menu.schema'
 import { auditMcpWrite } from '../audit'
 import { planGateMessage } from '../planGate'
@@ -852,6 +852,169 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           data: { modifier: modifier.name, from: modifier.linkedProductId, to: product?.id ?? null },
         })
         return text({ ok: true, extra: modifier.name, deductsMenuItem: product?.name ?? null })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'configure_modifier_repeat',
+    'See or change whether an option group lets the customer pick THE SAME option more than once (e.g. "Flautas (elige 3)": 2 of Cochinita + 1 of Papa), like Square "multiple quantities of a modifier" and Fudo\'s per-option "max". Each pick counts toward the group\'s min/max and is charged at the option\'s price each time. Optionally cap how many times ONE option can be picked (maxTimes; null = up to the group max). Without allowRepeat/optionLimits it only READS the current setting. Changing it changes what the cashier can sell, so by DEFAULT it only PREVIEWS (current → new); call again with confirm:true. Applies on the Android and Windows POS updated with this change; the iPad POS still offers each option once. All plans. This WRITES — requires menu:update. Ambiguous names return the candidates.',
+    {
+      venueId: z.string().describe('Venue that owns the group (must be in your scope)'),
+      groupName: z.string().min(1).describe('Name of the option group, or part of it, e.g. "Flautas"'),
+      allowRepeat: z.boolean().optional().describe('true = the same option can be picked several times; false = each option once'),
+      optionLimits: z
+        .array(
+          z.object({
+            optionName: z.string().min(1).describe('Name of the option, or part of it, e.g. "Cochinita"'),
+            maxTimes: z
+              .number()
+              .int()
+              .min(1)
+              .max(99)
+              .nullable()
+              .describe('Most times this option can be picked; null = up to the group max'),
+          }),
+        )
+        .max(50)
+        .optional()
+        .describe('Per-option caps, e.g. [{optionName:"Queso", maxTimes:1}]'),
+      resolvedGroupId: z.string().optional().describe('Exact id returned by the preview'),
+      expectedSourceFingerprint: z.string().optional().describe('Exact fingerprint returned by the preview'),
+      confirm: z.boolean().optional().describe('Must be true to apply; without it you get a preview'),
+    },
+    async ({ venueId, groupName, allowRepeat, optionLimits, resolvedGroupId, expectedSourceFingerprint, confirm }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const quiereCambiar = allowRepeat !== undefined || (optionLimits?.length ?? 0) > 0
+      if (quiereCambiar)
+        guard.requirePermission('menu:update', venueId) // write gate (per-venue role)
+      else guard.requirePermission('menu:read', venueId)
+
+      const groups = await prisma.modifierGroup.findMany({
+        where: {
+          venueId,
+          active: true,
+          ...(confirm && resolvedGroupId ? { id: resolvedGroupId } : { name: { contains: groupName, mode: 'insensitive' as const } }),
+        },
+        select: {
+          id: true,
+          name: true,
+          allowMultiple: true,
+          allowRepeat: true,
+          minSelections: true,
+          maxSelections: true,
+          modifiers: {
+            where: { active: true },
+            select: { id: true, name: true, maxQuantity: true },
+            orderBy: [{ name: 'asc' }, { id: 'asc' }],
+            take: 200,
+          },
+        },
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        take: 10,
+      })
+      if (groups.length === 0)
+        return text({ ok: false, error: `No hay un grupo de opciones activo que se llame "${groupName}" en ese negocio.` })
+      if (groups.length > 1)
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${groupName}" coincide con varios grupos: dime el nombre exacto.`,
+          matches: groups.map(g => g.name),
+        })
+      const group = groups[0]
+      const estado = {
+        group: group.name,
+        allowsSeveral: group.allowMultiple,
+        allowRepeat: group.allowRepeat,
+        min: group.minSelections,
+        max: group.maxSelections,
+        options: group.modifiers.map(m => ({ name: m.name, maxTimes: m.maxQuantity })),
+      }
+      if (!quiereCambiar) return text({ ok: true, ...estado })
+
+      // Cada tope por opción se resuelve a UNA opción del grupo: ambiguo o inexistente ⇒ se pregunta, nunca se adivina.
+      const topes: { id: string; name: string; from: number | null; to: number | null }[] = []
+      for (const limite of optionLimits ?? []) {
+        const exactas = group.modifiers.filter(m => m.name.toLowerCase() === limite.optionName.toLowerCase())
+        const candidatas = exactas.length
+          ? exactas
+          : group.modifiers.filter(m => m.name.toLowerCase().includes(limite.optionName.toLowerCase()))
+        if (candidatas.length === 0)
+          return text({ ok: false, error: `«${group.name}» no tiene una opción que se llame "${limite.optionName}".` })
+        if (candidatas.length > 1)
+          return text({
+            ok: false,
+            ambiguous: true,
+            error: `"${limite.optionName}" coincide con varias opciones de «${group.name}»: dime el nombre exacto.`,
+            matches: candidatas.map(m => m.name),
+          })
+        topes.push({ id: candidatas[0].id, name: candidatas[0].name, from: candidatas[0].maxQuantity, to: limite.maxTimes })
+      }
+      const repetirFinal = allowRepeat ?? group.allowRepeat
+      if (repetirFinal && !group.allowMultiple)
+        return text({
+          ok: false,
+          needsInput: true,
+          question: `«${group.name}» deja elegir una sola opción. Para repetir, primero súbele el máximo a más de 1 (por ejemplo, «elige 3»).`,
+        })
+
+      const fingerprint = operationHash({
+        groupId: group.id,
+        allowRepeat: group.allowRepeat,
+        allowMultiple: group.allowMultiple,
+        options: group.modifiers.map(m => [m.id, m.maxQuantity]),
+        target: { allowRepeat: repetirFinal, topes: topes.map(t => [t.id, t.to]) },
+      })
+      if (confirm && (resolvedGroupId !== group.id || expectedSourceFingerprint !== fingerprint)) {
+        return text({
+          ok: false,
+          needsInput: true,
+          question: 'El grupo cambió o falta la vista previa. Vuelve a consultar y confirma el cambio actualizado.',
+        })
+      }
+      const veces = (n: number | null) => (n == null ? 'hasta el máximo del grupo' : `hasta ${n} ${n === 1 ? 'vez' : 'veces'}`)
+      const changes = [
+        ...(allowRepeat !== undefined && allowRepeat !== group.allowRepeat
+          ? [
+              {
+                item: group.name,
+                label: 'Repetir la misma opción',
+                from: group.allowRepeat ? 'sí' : 'no',
+                to: allowRepeat ? 'sí' : 'no',
+              },
+            ]
+          : []),
+        ...topes
+          .filter(t => t.from !== t.to)
+          .map(t => ({ item: `${group.name} › ${t.name}`, label: 'Veces que se puede elegir', from: veces(t.from), to: veces(t.to) })),
+      ]
+      if (changes.length === 0) return text({ ok: true, unchanged: true, ...estado })
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          resolvedGroupId: group.id,
+          expectedSourceFingerprint: fingerprint,
+          changes,
+          message: repetirFinal
+            ? `En «${group.name}» la caja podrá elegir la misma opción varias veces; cada vez cuenta para el mínimo y el máximo del grupo y se cobra a su precio. Confirma con el operador y vuelve a llamar con confirm:true.`
+            : `En «${group.name}» cada opción se podrá elegir una sola vez. Confirma con el operador y vuelve a llamar con confirm:true.`,
+        })
+      }
+      try {
+        if (allowRepeat !== undefined && allowRepeat !== group.allowRepeat) await updateModifierGroup(venueId, group.id, { allowRepeat })
+        for (const t of topes.filter(x => x.from !== x.to)) await updateModifier(venueId, group.id, t.id, { maxQuantity: t.to })
+        await auditMcpWrite(scope, {
+          action: 'MODIFIER_GROUP_REPEAT_SET',
+          entity: 'ModifierGroup',
+          entityId: group.id,
+          venueId,
+          data: { group: group.name, changes },
+        })
+        return text({ ok: true, group: group.name, allowRepeat: repetirFinal, changes })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

@@ -627,6 +627,7 @@ router.use('/impersonation', impersonationRoutes)
  *         name: { type: string }
  *         price: { type: number, format: float }
  *         active: { type: boolean }
+ *         maxQuantity: { type: integer, minimum: 1, nullable: true, description: 'Veces que se puede elegir en un grupo que deja repetir' }
  *     ModifierGroup:
  *       type: object
  *       properties:
@@ -636,6 +637,7 @@ router.use('/impersonation', impersonationRoutes)
  *         description: { type: string, nullable: true }
  *         required: { type: boolean }
  *         allowMultiple: { type: boolean }
+ *         allowRepeat: { type: boolean, description: 'La misma opción se puede elegir varias veces' }
  *         minSelections: { type: integer, minimum: 0 }
  *         maxSelections: { type: integer, minimum: 1, nullable: true }
  *         displayOrder: { type: integer, minimum: 0 }
