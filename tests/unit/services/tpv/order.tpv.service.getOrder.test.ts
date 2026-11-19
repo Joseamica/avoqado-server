@@ -101,11 +101,31 @@ describe('order.tpv.service.getOrder — itemized check breakdown', () => {
     expect(findUniqueMock).toHaveBeenCalledWith(
       expect.objectContaining({
         include: expect.objectContaining({
-          orderDiscounts: { select: SELECT_DESCUENTO_DE_LA_CUENTA },
+          // D15: también el reparto, para decir qué fila quedó fija al cobrar vales (no viaja en la respuesta).
+          orderDiscounts: { select: { ...SELECT_DESCUENTO_DE_LA_CUENTA, reparto: true } },
           serviceCharges: true,
         }),
       }),
     )
+  })
+
+  // D15 (pizarrón hz:e82938e1:D15, 18-nov): Mesas de la TPV pinta en gris el «Quitar» de la rebaja que quedó fija al cobrar vales.
+  it('🔴 D15: cada descuento dice congeladoPorVales (true sólo en la fila marcada) y no manda su reparto', async () => {
+    findUniqueMock.mockResolvedValue(
+      buildOrderFixture({
+        orderDiscounts: [
+          { id: 'od-vale', name: '10 % producto', amount: new Decimal('10.00'), reparto: { v: 1, espejo: true, deValeV7: true } },
+          { id: 'od-cortesia', name: 'Cortesía', amount: new Decimal('5.00'), reparto: { v: 1, espejo: true } },
+        ],
+      }),
+    )
+
+    const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
+
+    expect(result.orderDiscounts).toEqual([
+      { id: 'od-vale', name: '10 % producto', amount: expect.anything(), congeladoPorVales: true },
+      { id: 'od-cortesia', name: 'Cortesía', amount: expect.anything(), congeladoPorVales: false },
+    ])
   })
 
   // QA del descuento del cliente en la PAX (11-nov): el mapper de la TPV (`OrderDiscountDto`) exige `type`; con la línea
@@ -130,7 +150,7 @@ describe('order.tpv.service.getOrder — itemized check breakdown', () => {
 
     const result: any = await orderTpvService.getOrder(VENUE_ID, ORDER_ID)
 
-    expect(result.orderDiscounts).toEqual([{ id: 'od-1', name: '10% cumpleaños', amount: expect.anything() }])
+    expect(result.orderDiscounts).toEqual([{ id: 'od-1', name: '10% cumpleaños', amount: expect.anything(), congeladoPorVales: false }])
     // Decimal('10.00') — pesos 1:1, never *100
     expect(Number(result.orderDiscounts[0].amount)).toBe(10)
   })

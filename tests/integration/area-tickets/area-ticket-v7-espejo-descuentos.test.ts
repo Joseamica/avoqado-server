@@ -12,6 +12,8 @@ import {
   issueAreaTicket,
   materializeAreaTicketCheckout,
 } from '@/services/mobile/areaTicketV7.mobile.service'
+import { getOrder as getOrderDelPos } from '@/services/mobile/order.mobile.service'
+import { getOrder as getOrderDeLaTpv } from '@/services/tpv/order.tpv.service'
 import prisma from '@/utils/prismaClient'
 import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
@@ -421,5 +423,43 @@ describe('Vales V7 — los descuentos del cobro salen en «Descuentos» (fila es
     expect(filas[0]).toMatchObject({ discountId: dGerenteId, authorizedById: null, appliedById: staffVenueId })
     expect(filas[0].amount.toFixed(2)).toBe('20.00')
     await prisma.staff.delete({ where: { id: otra.id } })
+  })
+
+  // D15 (pizarrón hz:e82938e1:D15, 18-nov): Mesas de la TPV y de ANDROID/WINDOWS pintan en gris el «Quitar» de la rebaja fija. El
+  // detalle de la cuenta de las dos cajas dice cuál es (`congeladoPorVales`), con la misma marca del candado; una rebaja que la caja da
+  // después no la lleva. El `reparto` no viaja.
+  it('D15: el detalle de la cuenta del POS y de la TPV marca congeladoPorVales sólo en las rebajas fijas del cobro de vales', async () => {
+    const vale = await issueAreaTicket(venueId, {
+      idempotencyKey: `d15-vale-${suffix}`,
+      deviceUid: issueDeviceUid,
+      staffId,
+      performedBy: staffId,
+      lines: [{ clientLineId: `d15-jamon-${suffix}`, productId: jamonId, quantity: '1', discountId: d10Id }],
+    })
+    const caja = await createAreaTicketCheckout(venueId, { idempotencyKey: `d15-caja-${suffix}`, deviceUid: checkoutDeviceUid, staffId })
+    await addTicketToCheckout(venueId, caja.id, vale.code, { idempotencyKey: `d15-claim-${suffix}`, deviceUid: checkoutDeviceUid, staffId })
+    const materializada = await materializeAreaTicketCheckout(venueId, caja.id, {
+      idempotencyKey: `d15-materializar-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+      performedBy: staffId,
+      source: 'AVOQADO_ANDROID' as const,
+      normalItems: [{ productId: papasId, quantity: 1, discountId: d10Id }],
+    })
+    const orderId = materializada.order!.id
+    // Una rebaja de cuenta que la caja da después (sin la marca): la del catálogo, sin reparto de vales.
+    const deCuenta = await prisma.orderDiscount.create({
+      data: { orderId, discountId: null, type: 'FIXED_AMOUNT', name: 'Cliente frecuente', value: 1, amount: 1, isManual: true },
+    })
+
+    const delPos = await getOrderDelPos(venueId, orderId)
+    const marcasPos = Object.fromEntries(delPos.discounts.map(d => [d.id, d.congeladoPorVales]))
+    expect(Object.values(marcasPos).filter(Boolean)).toHaveLength(2) // la del vale y la del suelto
+    expect(marcasPos[deCuenta.id]).toBe(false)
+
+    const deLaTpv: any = await getOrderDeLaTpv(venueId, orderId)
+    const marcasTpv = Object.fromEntries(deLaTpv.orderDiscounts.map((d: any) => [d.id, d.congeladoPorVales]))
+    expect(marcasTpv).toEqual(marcasPos)
+    expect(deLaTpv.orderDiscounts.every((d: any) => !('reparto' in d))).toBe(true)
   })
 })
