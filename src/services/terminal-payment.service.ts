@@ -97,6 +97,13 @@ export interface TerminalPaymentRequest {
    * (3-5 días por la firma PAX) para un arreglo que es sólo del server.
    */
   customerId?: string | null
+  /**
+   * 🔴 hz:e9ce0be7:D53 · lo que debía la cuenta (centavos, sin propina) cuando la caja armó ESTE cobro: el `remainingBalance` que le
+   * devolvió el servidor al armar la venta de vales. Opcional: sólo lo manda ANDROID nuevo en el cobro de vales; las apps
+   * publicadas no lo mandan y la admisión queda igual. Si el saldo guardado de la orden ya no es ése (alguien abonó en el panel
+   * mientras se cobraba), no se cobra: 412 `ORDER_BALANCE_CHANGED`, con lápida y antes de tocar la terminal.
+   */
+  expectedBalanceBeforeCents?: number
 }
 
 export interface TerminalPaymentResult {
@@ -1051,7 +1058,10 @@ export function proyectarEstado(row: FilaProyectable): TerminalPaymentStatus {
     ...(desenlace.reconciliationRequired ? { reconciliationRequired: true } : {}),
     // hz:ce654971:D7 (Codex r1 #2): el «falta $X» también sale aquí: si se perdió la respuesta del POST, la caja lo recupera con esta
     // consulta y sin él decía «El cobro fue rechazado» (suena al banco) y reintentaba con el importe viejo.
-    ...(row.failureCode === 'BANK_DECLINED' || row.failureCode === 'REJECTED_ORDER_AMOUNT_OVER_BALANCE'
+    // D53: lo mismo para «la cuenta cambió mientras se cobraba».
+    ...(row.failureCode === 'BANK_DECLINED' ||
+    row.failureCode === 'REJECTED_ORDER_AMOUNT_OVER_BALANCE' ||
+    row.failureCode === 'REJECTED_ORDER_BALANCE_CHANGED'
       ? { errorMessage: mensajeDelServidor(row.resultJson) }
       : {}),
     createdAt: row.createdAt.toISOString(),
@@ -1308,6 +1318,8 @@ type MotivoDeRechazo =
   | 'REJECTED_EXCHANGE_DIFFERENCE_ALREADY_CHARGED'
   /** hz:ce654971:D7: la cuenta ya tiene un abono y el cobro (sin propina) pasa de lo que falta. */
   | 'REJECTED_ORDER_AMOUNT_OVER_BALANCE'
+  /** hz:e9ce0be7:D53: el saldo de la cuenta ya no es el que vio la caja al armar este cobro (`expectedBalanceBeforeCents`). */
+  | 'REJECTED_ORDER_BALANCE_CHANGED'
 
 /**
  * hz:ce654971:D7 · margen para los redondeos de la caja al repartir una cuenta (dividir «por producto» reparte su total local y
@@ -1317,6 +1329,8 @@ const MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS = 100
 /** 412 y no 400/409: las apps vivas (ANDROID ≥ 2.22, iOS ≥ 1.13) muestran tal cual el texto de cualquier 4xx fuera de esos. */
 const HTTP_COBRO_MAYOR_QUE_EL_SALDO = 412
 const COBRO_MAYOR_QUE_EL_SALDO = 'AMOUNT_EXCEEDS_REMAINING_BALANCE'
+/** hz:e9ce0be7:D53: mismo 412 que el «falta $X» (las apps vivas muestran el texto tal cual). */
+const LA_CUENTA_CAMBIO = 'ORDER_BALANCE_CHANGED'
 /**
  * hz:5bda0b30:D1 · pedido que no se cobra en la terminal (Rappi en efectivo, pagado con tarjeta en línea). Las otras puertas los
  * rechazan con 409; aquí va 412 por la misma razón que el «falta $X»: con 409 las apps vivas consultan el estado y sólo dicen
@@ -1397,6 +1411,14 @@ function errorDeLapida(row: { failureCode?: string | null; resultJson: Prisma.Js
         HTTP_COBRO_MAYOR_QUE_EL_SALDO,
         true,
         COBRO_MAYOR_QUE_EL_SALDO,
+        details,
+      )
+    case 'REJECTED_ORDER_BALANCE_CHANGED':
+      return new AppError(
+        mensaje('La cuenta cambió mientras se cobraba. No se cobró la tarjeta. Sal del cobro y cobra el saldo pendiente.'),
+        HTTP_COBRO_MAYOR_QUE_EL_SALDO,
+        true,
+        LA_CUENTA_CAMBIO,
         details,
       )
     case 'REJECTED_TERMINAL_NOT_CONNECTED':
@@ -1949,6 +1971,8 @@ class TerminalPaymentService {
             serviceChargeAmount: true,
             contratoDePrecio: true,
             taxAmount: true,
+            // D53: el saldo GUARDADO, la misma columna que la caja leyó al armar la venta de vales.
+            remainingBalance: true,
           },
         })
         if (!order) {
@@ -2048,6 +2072,30 @@ class TerminalPaymentService {
           const cobrado = await cobradoQueCubreEnTx(tx, { venueId, orderId: request.orderId })
           const saldo = computeOrderBalance(order, [{ amount: cobrado.amount, tipAmount: cobrado.tipAmount }])
           const faltaCents = saldo.remainingBalance.mul(100).toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+          // 🔴 hz:e9ce0be7:D53 · la caja armó este cobro (su importe) cuando la cuenta debía `expectedBalanceBeforeCents`. Si un abono
+          // del panel entró en medio, el importe ya no es el saldo: $0.50 de más cabe en el margen de D7, y en partes iguales quedaban
+          // pesos sin pedir. Se compara la MISMA columna que la caja leyó (servidor contra servidor, sin la aritmética del carrito),
+          // bajo el candado que también toma el pago manual. Sin el dato (apps publicadas) no cambia nada.
+          const esperado = request.expectedBalanceBeforeCents
+          if (esperado !== undefined) {
+            const guardadoCents = new Prisma.Decimal(order.remainingBalance ?? 0)
+              .mul(100)
+              .toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP)
+              .toNumber()
+            if (guardadoCents !== esperado) {
+              return rechazar(
+                'REJECTED_ORDER_BALANCE_CHANGED',
+                new AppError(
+                  `La cuenta ${order.orderNumber ?? request.orderId} cambió mientras se cobraba: ahora falta $${(faltaCents / 100).toFixed(2)}. ` +
+                    'No se cobró la tarjeta. Sal del cobro y cobra el saldo pendiente.',
+                  HTTP_COBRO_MAYOR_QUE_EL_SALDO,
+                  true,
+                  LA_CUENTA_CAMBIO,
+                  { ...detalles, remainingCents: faltaCents, expectedBalanceBeforeCents: esperado },
+                ),
+              )
+            }
+          }
           if (saldo.paidAmount.greaterThan(0) && request.amountCents > faltaCents + MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS) {
             const falta = (faltaCents / 100).toFixed(2)
             return rechazar(
