@@ -15,6 +15,7 @@
  */
 
 import { createHash, randomInt } from 'node:crypto'
+import { esRechazoPorTopeEnVales } from '../shared/descuentoConTopeEnVales'
 import {
   AreaSettlementRoute,
   AreaTicketCheckoutStatus,
@@ -994,14 +995,28 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
   const isExternal = fulfillmentArea.settlementRoute === AreaSettlementRoute.EXTERNAL
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
   const normalizedItems = normalizeIssueLines(input.lines)
-  const { itemsData, subtotal, itemDiscountTotal, modifierSkus, modifierInventory, discounts } = await buildOrderItemsData(
-    venueId,
-    normalizedItems,
-    fulfillmentAreaId,
-    undefined,
-    undefined,
-    input,
-  )
+  // 🔴 D11: un descuento con tope de usos no entra a un vale (`descuentoConTopeEnVales.ts`): lo revisa `buildOrderItemsData` con la
+  // misma lectura que calcula la rebaja, antes de validar el descuento y de escribir nada. La ruta EXTERNAL sigue con su propio rechazo.
+  // Si con esta llave ya hay un vale (el primer POST terminó mientras éste revisaba), se devuelve ése: la misma llave no da éxito y 400.
+  let construido: Awaited<ReturnType<typeof buildOrderItemsData>>
+  try {
+    construido = await buildOrderItemsData(
+      venueId,
+      normalizedItems,
+      fulfillmentAreaId,
+      undefined,
+      undefined,
+      input,
+      isExternal ? undefined : { sinDescuentosConTope: 'VALE' },
+    )
+  } catch (error) {
+    if (!esRechazoPorTopeEnVales(error)) throw error
+    const ganador = await prisma.areaTicket.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey } }, include: ticketInclude })
+    if (!ganador) throw error
+    assertIssueIdempotencyMatch(ganador, input.lines)
+    return mapTicket(ganador)
+  }
+  const { itemsData, subtotal, itemDiscountTotal, modifierSkus, modifierInventory, discounts } = construido
   const snapshots = buildSnapshotLines(input.lines, itemsData, modifierSkus, modifierInventory)
   // D4 (18-nov): el motivo del descuento se congela en el renglón (sólo si lleva descuento, como `buildOrderItemsData`).
   const motivos = snapshots.map((snapshot, index) =>
@@ -2016,9 +2031,24 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
   if (normalItems.length > 0 && settings?.allowMixedCart === false) {
     throw domainError(409, 'MIXED_CART_DISABLED', 'Este local no permite mezclar vales con productos de caja.')
   }
+  // 🔴 D11: un descuento con tope de usos no entra a un suelto de la venta de vales; lo revisa `buildOrderItemsData` con la misma lectura
+  // que calcula la rebaja, antes de crear la orden (sin folio gastado). La venta no se arma y los vales siguen en la caja. Si con esta
+  // llave la venta ya quedó armada (el primer POST terminó mientras éste revisaba), se devuelve ésa (Codex D11 r4 #2).
+  const sueltos = async () => {
+    try {
+      return await buildOrderItemsData(venueId, normalItems, null, undefined, undefined, input, { sinDescuentosConTope: 'CAJA' })
+    } catch (error) {
+      if (!esRechazoPorTopeEnVales(error)) throw error
+      const ganador = await loadCheckout(venueId, sessionId)
+      if (ganador.orderId && ganador.materializeIdempotencyKey === idempotencyKey) return ganador
+      throw error
+    }
+  }
+  const construidoSueltos = normalItems.length > 0 ? await sueltos() : null
+  if (construidoSueltos && 'orderId' in construidoSueltos) return mapCheckout(construidoSueltos)
   const normalBuild =
-    normalItems.length > 0
-      ? await buildOrderItemsData(venueId, normalItems, null, undefined, undefined, input)
+    construidoSueltos
+      ? construidoSueltos
       : {
           itemsData: [] as any[],
           subtotal: 0,

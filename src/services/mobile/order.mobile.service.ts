@@ -149,6 +149,7 @@ import { avisarEfectivoConTarjetaEnDuda } from '../shared/avisoDeEfectivoConTarj
 import { avisarSobrepago } from '../shared/avisoDeSobrepago'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiLaCuentaTieneVales, rechazarSiQuitaUnDescuentoDeVale } from '../shared/cuentaConVales'
+import { rechazarSiAlgunoTieneTope } from '../shared/descuentoConTopeEnVales'
 import { esRenglonDeVale } from '../shared/renglonDeVale'
 import { desactivarSobresPendientesDeCuentaEnTx, esCuentaDeTarjetasEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import {
@@ -1131,6 +1132,8 @@ export async function buildOrderItemsData(
   precioMostrado?: { horaDeLaVenta: Date; llegada?: Date; rechazarSiNoSeReconoce: boolean },
   db?: Prisma.TransactionClient,
   compAuthority?: Pick<CreateOrderInput, 'canCompItems' | 'performedBy' | 'aprobacionDelDescuento' | 'isOfflineReplay'>,
+  /** D11: en una venta con vales no entra un descuento con tope de usos (`descuentoConTopeEnVales.ts`); `VALE` = área, `CAJA` = suelto. */
+  opciones?: { sinDescuentosConTope?: 'VALE' | 'CAJA' },
 ): Promise<{
   itemsData: any[]
   subtotal: number
@@ -1230,6 +1233,10 @@ export async function buildOrderItemsData(
     throw new BadRequestError(`Descuento no encontrado o no pertenece a este local: ${missingIds.join(', ')}`)
   }
 
+  // 🔴 D11: con la MISMA lectura que calcula la rebaja y antes de `validateDiscountActive`, la aprobación y la cortesía (un descuento ya
+  // agotado recibe este texto). Promesa v3.2: NO se adelanta la lectura (Codex r6 #1: cambiaba qué descuento aceptaban Mostrador y la caja
+  // externa si el dueño lo editaba en ese instante); un producto, un extra o un descuento que ya no está frena antes, sin guardar nada.
+  if (opciones?.sinDescuentosConTope) rechazarSiAlgunoTieneTope(discounts, opciones.sinDescuentosConTope)
   // De la cola (`llegada` sólo viene de ahí), el vencimiento se mide a la hora de la venta (S6); en línea, como siempre.
   const horaDeVigencia = precioMostrado?.llegada ? precioMostrado.horaDeLaVenta : undefined
   // D19 (encargo 01765a): la venta de la cola ya se cobró; el tope de usos no la rechaza (su uso cuenta igual, abajo).

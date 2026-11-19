@@ -1,4 +1,5 @@
 import { bloquearCuentaParaEditar } from '../shared/cuentaCancelada'
+import { esRechazoPorTopeEnVales } from '../shared/descuentoConTopeEnVales'
 /**
  * Vales por área (AREA_TICKETS) — cuenta compartida entre áreas emisoras.
  *
@@ -555,16 +556,29 @@ export async function openAreaTicket(venueId: string, input: OpenAreaTicketInput
   }
 
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
-
   // 🔴 El área la pone el SERVER desde el binding de la terminal, jamás el payload.
-  const { itemsData, subtotal, itemDiscountTotal, discounts, motivosPorRenglon } = await buildOrderItemsData(
-    venueId,
-    input.items,
-    terminal.fulfillmentAreaId,
-    undefined,
-    undefined,
-    input,
-  )
+  // 🔴 D11: un descuento con tope de usos no entra a un vale, tampoco al viejo (una app vieja podría llamarlo): lo revisa
+  // `buildOrderItemsData` con la misma lectura que calcula la rebaja, antes de escribir. Si el mismo código ya se abrió (el primer
+  // intento terminó mientras éste revisaba), se devuelve esa cuenta, como el reintento de siempre (Codex D11 r4 #2).
+  let construido: Awaited<ReturnType<typeof buildOrderItemsData>>
+  try {
+    construido = await buildOrderItemsData(
+      venueId,
+      input.items,
+      terminal.fulfillmentAreaId,
+      undefined,
+      undefined,
+      input,
+      { sinDescuentosConTope: 'VALE' },
+    )
+  } catch (error) {
+    if (!esRechazoPorTopeEnVales(error)) throw error
+    const yaAbierta = await findTicketByCode(venueId, parsed.code)
+    if (!yaAbierta) throw error
+    return toAreaTicketView(yaAbierta)
+  }
+  const { itemsData, subtotal, itemDiscountTotal, discounts, motivosPorRenglon } = construido
+
   const total = subtotal - itemDiscountTotal
 
   try {
@@ -702,8 +716,8 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
   assertTicketAcceptsItems(order, terminal.id)
 
   await validateStaffVenue(input.staffId ?? undefined, venueId)
-
-  // Misma aritmética que abrir la cuenta y que el mostrador: una sola función.
+  // Misma aritmética que abrir la cuenta y que el mostrador: una sola función. D11: un descuento con tope de usos no entra a un vale,
+  // tampoco al viejo; lo revisa con la misma lectura que calcula la rebaja, antes de escribir.
   const { itemsData, discounts, motivosPorRenglon } = await buildOrderItemsData(
     venueId,
     input.items,
@@ -711,6 +725,7 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
     undefined,
     undefined,
     input,
+    { sinDescuentosConTope: 'VALE' },
   )
 
   const updated = await prisma.$transaction(async tx => {

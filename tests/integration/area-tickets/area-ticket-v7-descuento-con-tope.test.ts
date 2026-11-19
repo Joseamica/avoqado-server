@@ -1,0 +1,336 @@
+import {
+  AreaSettlementRoute,
+  AreaTicketInventoryReservationMode,
+  DiscountScope,
+  DiscountType,
+  FulfillmentMode,
+  InventoryMethod,
+  Prisma,
+  StaffRole,
+  TerminalStatus,
+  TerminalType,
+} from '@prisma/client'
+
+import {
+  addTicketToCheckout,
+  createAreaTicketCheckout,
+  issueAreaTicket,
+  materializeAreaTicketCheckout,
+} from '@/services/mobile/areaTicketV7.mobile.service'
+import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
+
+/**
+ * D11 (pizarrón hz:e82938e1:D11, 18-nov; founder: «no puede haber un hueco»), contra Postgres: en una venta con vales no se usa un
+ * descuento con tope de usos (total `maxTotalUses` o por clienta `maxUsesPerCustomer`). Se rechaza con 400 AREA_TICKET_DISCOUNT_HAS_LIMIT
+ * al imprimir el vale y al armar la venta (un suelto), antes de escribir nada: ni vale, ni orden, ni contador. Sin tope, como siempre; la
+ * ruta EXTERNAL, como siempre; la misma llave de un vale ya impreso lo devuelve.
+ */
+describe('Vales V7 — D11: los descuentos con tope de usos no entran a una venta con vales', () => {
+  const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  let organizationId: string
+  let venueId: string
+  let staffId: string
+  let jamonId: string
+  let papasId: string
+  let sinTopeId: string
+  let topeTotalId: string
+  let topePorClientaId: string
+  let agotadoId: string
+  const issueDeviceUid = `tope-issue-${suffix}`
+  const externalDeviceUid = `tope-externa-${suffix}`
+  const checkoutDeviceUid = `tope-caja-${suffix}`
+
+  beforeAll(async () => {
+    organizationId = (
+      await prisma.organization.create({
+        data: { name: `Vales tope ${suffix}`, email: `vales-tope-${suffix}@example.com`, phone: '5555555555' },
+      })
+    ).id
+    venueId = (
+      await prisma.venue.create({
+        data: { organizationId, name: `Vales tope ${suffix}`, slug: `vales-tope-${suffix}`, seatCapExempt: true },
+      })
+    ).id
+    await encenderIvaPorProducto(venueId)
+    staffId = (
+      await prisma.staff.create({ data: { email: `vales-tope-staff-${suffix}@example.com`, firstName: 'Área', lastName: 'Cremería' } })
+    ).id
+    await prisma.staffVenue.create({ data: { staffId, venueId, role: StaffRole.MANAGER } })
+
+    const area = await prisma.fulfillmentArea.create({ data: { venueId, name: `Cremería ${suffix}`, fulfillmentMode: 'HOLD_UNTIL_PAID' } })
+    const externa = await prisma.fulfillmentArea.create({
+      data: {
+        venueId,
+        name: `Externa ${suffix}`,
+        fulfillmentMode: FulfillmentMode.HOLD_UNTIL_PAID,
+        settlementRoute: AreaSettlementRoute.EXTERNAL,
+      },
+    })
+    await prisma.terminal.createMany({
+      data: [
+        {
+          venueId,
+          name: 'Cremería',
+          type: TerminalType.POS_ANDROID,
+          status: TerminalStatus.ACTIVE,
+          deviceUid: issueDeviceUid,
+          fulfillmentAreaId: area.id,
+          canIssueAreaTickets: true,
+        },
+        {
+          venueId,
+          name: 'Externa',
+          type: TerminalType.POS_ANDROID,
+          status: TerminalStatus.ACTIVE,
+          deviceUid: externalDeviceUid,
+          fulfillmentAreaId: externa.id,
+          canIssueAreaTickets: true,
+        },
+        {
+          venueId,
+          name: 'Caja',
+          type: TerminalType.POS_ANDROID,
+          status: TerminalStatus.ACTIVE,
+          deviceUid: checkoutDeviceUid,
+          canCheckoutAreaTickets: true,
+        },
+      ],
+    })
+    await prisma.venueAreaTicketSettings.create({ data: { venueId, enabled: true } })
+
+    const category = await prisma.menuCategory.create({
+      data: { venueId, name: 'Abarrotes', slug: `abarrotes-${suffix}`, availableDays: [] },
+    })
+    const producto = (name: string, price: string) =>
+      prisma.product.create({
+        data: {
+          venueId,
+          categoryId: category.id,
+          sku: `${name.toUpperCase()}-${suffix}`,
+          name,
+          price: new Prisma.Decimal(price),
+          taxRate: new Prisma.Decimal(0),
+          tags: [],
+          allergens: [],
+        },
+      })
+    jamonId = (await producto('Jamon', '100.00')).id
+    papasId = (await producto('Papas', '50.00')).id
+
+    const descuento = (name: string, extra: Partial<Prisma.DiscountUncheckedCreateInput> = {}) =>
+      prisma.discount.create({
+        data: { venueId, name, type: DiscountType.PERCENTAGE, value: new Prisma.Decimal(10), scope: DiscountScope.ITEM, ...extra },
+      })
+    sinTopeId = (await descuento('10 % sin tope')).id
+    topeTotalId = (await descuento('Primeros 100', { maxTotalUses: 100 })).id
+    topePorClientaId = (await descuento('1 por clienta', { maxUsesPerCustomer: 1 })).id
+    agotadoId = (await descuento('Agotado', { maxTotalUses: 1, currentUses: 1 })).id
+  })
+
+  afterAll(async () => {
+    if (!venueId) return
+    await prisma.areaTicketInventoryReservation.deleteMany({ where: { venueId } })
+    await prisma.inventoryMovement.deleteMany({ where: { inventory: { venueId } } })
+    await prisma.inventory.deleteMany({ where: { venueId } })
+    await prisma.areaTicketPaymentAttempt.deleteMany({ where: { checkoutSession: { venueId } } })
+    await prisma.areaTicketExternalSettlement.deleteMany({ where: { venueId } })
+    await prisma.orderDiscount.deleteMany({ where: { order: { venueId } } })
+    await prisma.orderItemModifier.deleteMany({ where: { orderItem: { order: { venueId } } } })
+    await prisma.orderItem.deleteMany({ where: { order: { venueId } } })
+    await prisma.areaTicket.deleteMany({ where: { venueId } })
+    await prisma.areaTicketCheckoutSession.deleteMany({ where: { venueId } })
+    await prisma.order.deleteMany({ where: { venueId } })
+    await prisma.discount.deleteMany({ where: { venueId } })
+    await prisma.product.deleteMany({ where: { venueId } })
+    await prisma.menuCategory.deleteMany({ where: { venueId } })
+    await prisma.terminal.deleteMany({ where: { venueId } })
+    await prisma.fulfillmentArea.deleteMany({ where: { venueId } })
+    await prisma.venueAreaTicketSettings.deleteMany({ where: { venueId } })
+    await prisma.staffVenue.deleteMany({ where: { venueId } })
+    await prisma.venue.delete({ where: { id: venueId } })
+    if (staffId) await prisma.staff.delete({ where: { id: staffId } })
+    if (organizationId) await prisma.organization.delete({ where: { id: organizationId } })
+    await prisma.$disconnect()
+  })
+
+  const emitir = (llave: string, discountId?: string, deviceUid = issueDeviceUid) =>
+    issueAreaTicket(venueId, {
+      idempotencyKey: `${llave}-${suffix}`,
+      deviceUid,
+      staffId,
+      performedBy: staffId,
+      lines: [{ clientLineId: `${llave}-l1-${suffix}`, productId: jamonId, quantity: '1', ...(discountId ? { discountId } : {}) }],
+    })
+  const usos = async () =>
+    await prisma.discount.findMany({ where: { venueId }, select: { name: true, currentUses: true }, orderBy: { name: 'asc' }, take: 10 })
+
+  it('🔴 imprimir un vale con un descuento con tope (total, por clienta o ya agotado) ⇒ 400 con el texto del área, sin vale ni contador', async () => {
+    const antes = await usos()
+    for (const [llave, id, nombre] of [
+      ['total', topeTotalId, 'Primeros 100'],
+      ['clienta', topePorClientaId, '1 por clienta'],
+      ['agotado', agotadoId, 'Agotado'],
+    ] as const) {
+      await expect(emitir(llave, id)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'AREA_TICKET_DISCOUNT_HAS_LIMIT',
+        message: `El descuento «${nombre}» tiene tope de usos y no se puede poner en un vale: emite el vale sin ese descuento.`,
+      })
+    }
+    expect(await prisma.areaTicket.count({ where: { venueId } })).toBe(0)
+    expect(await usos()).toEqual(antes)
+  })
+
+  it('sin tope se imprime como siempre; la misma llave de un vale ya impreso lo devuelve aunque después le pongan tope', async () => {
+    const vale = await emitir('sin-tope', sinTopeId)
+    expect(vale.discountAmount).toBe('10.00')
+    await prisma.discount.update({ where: { id: sinTopeId }, data: { maxTotalUses: 50 } })
+    try {
+      const otraVez = await emitir('sin-tope', sinTopeId)
+      expect(otraVez.code).toBe(vale.code)
+    } finally {
+      await prisma.discount.update({ where: { id: sinTopeId }, data: { maxTotalUses: null } })
+    }
+  })
+
+  it('la ruta EXTERNAL queda como hoy: su propio 409 por la rebaja, no el de D11 (Codex r4 #3)', async () => {
+    await expect(emitir('externa', topeTotalId, externalDeviceUid)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'EXTERNAL_DISCOUNT_NOT_SUPPORTED',
+    })
+  })
+
+  it('un 400 no deja nada guardado: si el dueño quita el tope, la misma llave crea el vale (Codex r3 #2)', async () => {
+    await expect(emitir('quitan-tope', topeTotalId)).rejects.toMatchObject({ code: 'AREA_TICKET_DISCOUNT_HAS_LIMIT' })
+    await prisma.discount.update({ where: { id: topeTotalId }, data: { maxTotalUses: null } })
+    try {
+      const vale = await emitir('quitan-tope', topeTotalId)
+      expect(vale.discountAmount).toBe('10.00')
+    } finally {
+      await prisma.discount.update({ where: { id: topeTotalId }, data: { maxTotalUses: 100 } })
+    }
+  })
+
+  it('🔴 Codex r4 #2: la misma llave en plena carrera devuelve el vale que ya ganó, no el 400', async () => {
+    // El primer POST terminó (vale guardado sin tope) y, mientras el reenvío revisaba, el dueño puso el tope. El reenvío no vio el vale
+    // en su primera búsqueda (se simula) y su construcción ve el tope: debe devolver el vale ganador.
+    const ganador = await emitir('carrera', sinTopeId)
+    await prisma.discount.update({ where: { id: sinTopeId }, data: { maxTotalUses: 50 } })
+    const espia = jest.spyOn(prisma.areaTicket, 'findUnique').mockImplementationOnce((() => Promise.resolve(null)) as any)
+    try {
+      const reenvio = await emitir('carrera', sinTopeId)
+      expect(reenvio.code).toBe(ganador.code)
+      expect(espia).toHaveBeenCalledTimes(2) // la búsqueda inicial (simulada vacía) y la del ganador tras el 400
+    } finally {
+      espia.mockRestore()
+      await prisma.discount.update({ where: { id: sinTopeId }, data: { maxTotalUses: null } })
+    }
+  })
+
+  it('🔴 armar la venta con un suelto con tope ⇒ 400 con el texto de la caja, sin orden; sin ese descuento se arma', async () => {
+    const vale = await emitir('para-armar')
+    const caja = await createAreaTicketCheckout(venueId, { idempotencyKey: `tope-caja-${suffix}`, deviceUid: checkoutDeviceUid, staffId })
+    await addTicketToCheckout(venueId, caja.id, vale.code, {
+      idempotencyKey: `tope-claim-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+    })
+    const armar = (llave: string, discountId?: string) =>
+      materializeAreaTicketCheckout(venueId, caja.id, {
+        idempotencyKey: `${llave}-${suffix}`,
+        deviceUid: checkoutDeviceUid,
+        staffId,
+        performedBy: staffId,
+        source: 'AVOQADO_ANDROID' as const,
+        normalItems: [{ productId: papasId, quantity: 1, ...(discountId ? { discountId } : {}) }],
+      })
+
+    const antes = await usos()
+    const folioAntes = await prisma.$queryRaw<
+      Array<{ last_value: bigint; is_called: boolean }>
+    >`SELECT last_value, is_called FROM order_number_seq`
+    await expect(armar('armar-tope', topePorClientaId)).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'AREA_TICKET_DISCOUNT_HAS_LIMIT',
+      message:
+        'El descuento «1 por clienta» tiene tope de usos y no se puede usar en una venta con vales: quítalo de ese producto para cobrar.',
+    })
+    expect(await prisma.order.count({ where: { venueId } })).toBe(0)
+    const sesion = await prisma.areaTicketCheckoutSession.findUniqueOrThrow({
+      where: { id: caja.id },
+      select: { status: true, orderId: true },
+    })
+    expect(sesion).toEqual({ status: 'OPEN', orderId: null })
+    expect(await usos()).toEqual(antes)
+    // Sin folio gastado: el 400 sale antes de crear la orden (Codex r4 #3).
+    const folioDespues = await prisma.$queryRaw<
+      Array<{ last_value: bigint; is_called: boolean }>
+    >`SELECT last_value, is_called FROM order_number_seq`
+    expect(folioDespues).toEqual(folioAntes)
+
+    const armada = await armar('armar-sin-tope', sinTopeId)
+    expect(armada.order?.id).toBeTruthy()
+
+    // 🔴 Codex r4 #2: el reenvío con la MISMA llave en plena carrera (leyó la sesión abierta antes de que el primero la armara, y el
+    // dueño puso un tope en el suelto) devuelve la venta ya armada, no el 400.
+    await prisma.discount.update({ where: { id: sinTopeId }, data: { maxUsesPerCustomer: 1 } })
+    const leerSesion = prisma.areaTicketCheckoutSession.findFirst.bind(prisma.areaTicketCheckoutSession)
+    const espia = jest.spyOn(prisma.areaTicketCheckoutSession, 'findFirst').mockImplementationOnce((async (args: any) => {
+      const real: any = await leerSesion(args)
+      return real ? { ...real, status: 'OPEN', orderId: null, materializeIdempotencyKey: null } : real
+    }) as any)
+    try {
+      const reenvio = await armar('armar-sin-tope', sinTopeId)
+      expect(reenvio.order?.id).toBe(armada.order?.id)
+    } finally {
+      espia.mockRestore()
+      await prisma.discount.update({ where: { id: sinTopeId }, data: { maxUsesPerCustomer: null } })
+    }
+  })
+
+  it('🔴 Codex r5 #2: apartando inventario al emitir y con una rebaja que redondea a $0 ⇒ el mismo 400, sin apartar nada', async () => {
+    // El jamón lleva inventario por piezas y el negocio aparta existencias al emitir. Un 0.0001 % de $100 redondea a $0.00: el tope
+    // manda aunque la rebaja no mueva dinero (la ruta EXTERNAL sólo mira rebajas positivas; ésta no).
+    await prisma.product.update({ where: { id: jamonId }, data: { trackInventory: true, inventoryMethod: InventoryMethod.QUANTITY } })
+    const inventario = await prisma.inventory.create({ data: { venueId, productId: jamonId, currentStock: new Prisma.Decimal('10.000') } })
+    await prisma.venueAreaTicketSettings.update({
+      where: { venueId },
+      data: { inventoryReservationMode: AreaTicketInventoryReservationMode.HOLD_AVAILABLE_STOCK },
+    })
+    const ceroId = (
+      await prisma.discount.create({
+        data: {
+          venueId,
+          name: 'Cero con tope',
+          type: DiscountType.PERCENTAGE,
+          value: new Prisma.Decimal('0.0001'),
+          scope: DiscountScope.ITEM,
+          maxTotalUses: 5,
+        },
+      })
+    ).id
+    try {
+      const valesAntes = await prisma.areaTicket.count({ where: { venueId } })
+      await expect(emitir('cero', ceroId)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'AREA_TICKET_DISCOUNT_HAS_LIMIT',
+        message: 'El descuento «Cero con tope» tiene tope de usos y no se puede poner en un vale: emite el vale sin ese descuento.',
+      })
+      expect(await prisma.areaTicket.count({ where: { venueId } })).toBe(valesAntes)
+      expect(await prisma.areaTicketInventoryReservation.count({ where: { venueId } })).toBe(0)
+      expect((await prisma.inventory.findUniqueOrThrow({ where: { id: inventario.id } })).currentStock.toFixed(3)).toBe('10.000')
+      expect((await prisma.discount.findUniqueOrThrow({ where: { id: ceroId } })).currentUses).toBe(0)
+
+      // Control: el apartado SÍ está prendido; el mismo vale sin ese descuento aparta su pieza.
+      await emitir('cero-sin-descuento')
+      expect(await prisma.areaTicketInventoryReservation.count({ where: { venueId } })).toBe(1)
+    } finally {
+      await prisma.venueAreaTicketSettings.update({
+        where: { venueId },
+        data: { inventoryReservationMode: AreaTicketInventoryReservationMode.NONE },
+      })
+      await prisma.product.update({ where: { id: jamonId }, data: { trackInventory: false } })
+    }
+  })
+})
