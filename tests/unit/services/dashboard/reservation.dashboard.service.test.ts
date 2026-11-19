@@ -3701,11 +3701,18 @@ describe('Reservation Dashboard Service', () => {
       expect(result).not.toHaveProperty('grouped')
     })
 
-    it('D112 · también trae terminadas, «no llegó» y canceladas: el panel decide qué enseña con sus filtros', async () => {
+    it('D112 · el panel que lo pide recibe también terminadas, «no llegó» y canceladas', async () => {
       prismaMock.reservation.findMany.mockResolvedValue([])
-      await getReservationsCalendar(VENUE_ID, new Date('2026-03-01'), new Date('2026-03-02'))
+      await getReservationsCalendar(VENUE_ID, new Date('2026-03-01'), new Date('2026-03-02'), undefined, { todosLosEstados: true })
       const where = (prismaMock.reservation.findMany.mock.calls[0][0] as any).where
       expect([...where.status.in].sort()).toEqual(['CANCELLED', 'CHECKED_IN', 'COMPLETED', 'CONFIRMED', 'NO_SHOW', 'PENDING'])
+    })
+
+    it('D112 · sin pedirlo (apps del POS ya instaladas) sigue con las activas de siempre', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([])
+      await getReservationsCalendar(VENUE_ID, new Date('2026-03-01'), new Date('2026-03-02'), 'staff')
+      const where = (prismaMock.reservation.findMany.mock.calls[0][0] as any).where
+      expect([...where.status.in].sort()).toEqual(['CHECKED_IN', 'CONFIRMED', 'PENDING'])
     })
 
     it('should group by table when specified', async () => {
