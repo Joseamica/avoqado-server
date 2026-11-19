@@ -752,8 +752,11 @@ describe('F1 · bloque 1 — «no presentó tarjeta» sobre una solicitud entreg
   it('la terminal dueña trae su certificado: se guarda en la MISMA transacción y el CAS lo vuelve a exigir', async () => {
     rearmar(v2)
     await resolveNoInstrument(identidad, { ...declaracion(), executionClearance: 'DECLARABLE' })
-    const [guardado, cas] = updates()
-    expect(guardado).toContain('\\"executionDeclarable\\" = true')
+    expect(prismaMock.terminalPaymentRequest.update).toHaveBeenCalledWith({
+      where: { id: fila.id },
+      data: { executionDeclarable: true },
+    })
+    const [cas] = updates()
     expect(cas).toContain('OPERATOR_RECONCILED_NO_CHARGE')
     expect(cas).toContain('\\"executionDeclarable\\" IS TRUE')
     expect(prismaMock.activityLog.create.mock.calls.map((c: any[]) => c[0].data.action)).toContain('TERMINAL_PAYMENT_DECLARATION_CLEARANCE')

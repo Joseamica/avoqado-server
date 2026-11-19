@@ -539,7 +539,7 @@ export async function resolveNoInstrument(
     if (exigeCertificado && row.executionDeclarable !== true) {
       if (declaration.executionClearance !== 'DECLARABLE')
         throw new NoInstrumentResolutionError(row.executionDeclarable === false ? TERMINAL_HAS_RESULT : TERMINAL_CONFIRMATION_PENDING)
-      await tx.$executeRaw`UPDATE "TerminalPaymentRequest" SET "executionDeclarable" = true WHERE "id" = ${row.id}`
+      await tx.terminalPaymentRequest.update({ where: { id: row.id }, data: { executionDeclarable: true } })
       await tx.activityLog.create({
         data: {
           action: 'TERMINAL_PAYMENT_DECLARATION_CLEARANCE',
