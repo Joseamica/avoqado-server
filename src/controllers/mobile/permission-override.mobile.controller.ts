@@ -10,7 +10,9 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import {
+  acusarLiberacionLan,
   createPermissionOverride,
+  LiberacionLanError,
   OverrideDisabledError,
   OverrideInsufficientError,
   OverrideInvalidPinError,
@@ -96,6 +98,28 @@ export const createOverride = async (req: Request, res: Response, next: NextFunc
 
       if (firmaDeGerente) return negativaDeFirma(res)
       return res.status(403).json({ success: false, code: 'OVERRIDE_INSUFFICIENT', message: error.message })
+    }
+    return next(error)
+  }
+}
+
+/**
+ * @route POST /api/v1/mobile/venues/:venueId/permission-overrides/applied
+ *
+ * F1 · cierre android bloque 6: el acuse de la caja dueña — «la liberación de esta cuenta de Mostrador se aplicó» — con la autorización
+ * ATADA (`liberacion-lan:<folio>:<caja>:<intento>`) que le dio el PIN del gerente. 200 `{ recorded }`: `true` = este acuse dejó el
+ * asiento; `false` = ya estaba (repetirlo es seguro). 404 `AUTHORIZATION_NOT_FOUND` / 409 `OPERATION_MISMATCH`: no se registró nada y
+ * reintentar no cambia la respuesta.
+ */
+export const acknowledgeOverrideApplied = async (req: Request, res: Response, next: NextFunction) => {
+  const { venueId } = req.params
+  const { token, operationKey } = req.body as { token: string; operationKey: string }
+  try {
+    const r = await acusarLiberacionLan({ venueId, token, operationKey, sessionStaffId: (req as any).authContext?.userId ?? null })
+    return res.status(200).json({ success: true, recorded: r.recorded })
+  } catch (error) {
+    if (error instanceof LiberacionLanError) {
+      return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message })
     }
     return next(error)
   }

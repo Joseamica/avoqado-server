@@ -203,6 +203,103 @@ export async function createPermissionOverride(params: {
 }
 
 /**
+ * F1 · cierre android bloque 6 (Codex android r2 #9): la liberación de una cuenta de Mostrador ENTRE CAJAS. La caja dueña de la cuenta
+ * pide el PIN del gerente ATADO a `liberacion-lan:<folio>:<caja dueña>:<intento LAN>` (la sucursal es la del propio registro); libera A en
+ * su disco y después manda el ACUSE con esa autorización. El intento va AL FINAL porque su llave puede traer `:` (nunca los otros dos).
+ */
+export const PREFIJO_LIBERACION_LAN = 'liberacion-lan:'
+/** La acción del asiento en la Bitácora: una por sucursal + folio + intento. */
+export const ACCION_LIBERACION_LAN = 'POS_LAN_RELEASE_SIGNED'
+const PERMISO_DE_LA_LIBERACION = 'payments:reconcile-uncharged'
+
+export class LiberacionLanError extends Error {
+  constructor(
+    readonly code: 'AUTHORIZATION_NOT_FOUND' | 'OPERATION_MISMATCH',
+    readonly statusCode: number,
+  ) {
+    super(
+      code === 'OPERATION_MISMATCH'
+        ? 'Esa autorización era para otro cobro de esta cuenta. No se registró nada.'
+        : 'No encontré esa autorización en este negocio. No se registró nada.',
+    )
+    this.name = 'LiberacionLanError'
+  }
+}
+
+/**
+ * El ACUSE de la caja: «la liberación se aplicó». Escribe UN `ActivityLog` con el gerente DE LA AUTORIZACIÓN (nunca del cuerpo), la
+ * sesión que lo manda, la sucursal, el folio, el intento, la caja y la hora del PIN. Deduplica por sucursal + folio + intento en la misma
+ * transacción (candado consultivo + búsqueda): repetirlo —respuesta perdida, app reiniciada, otro PIN para el mismo intento— contesta
+ * `recorded: false`. Funciona aunque la autorización ya haya VENCIDO: no autoriza nada nuevo, sólo deja constancia de lo que ya firmó el
+ * gerente para ESA operación. Una autorización ajena, sin atar o de otra operación: cero asientos.
+ */
+export async function acusarLiberacionLan(p: {
+  venueId: string
+  token: string
+  operationKey: string
+  sessionStaffId: string | null
+}): Promise<{ recorded: boolean; activityLogId: string }> {
+  const [orderId, caja, ...resto] = p.operationKey.slice(PREFIJO_LIBERACION_LAN.length).split(':')
+  const intento = resto.join(':')
+  if (!p.operationKey.startsWith(PREFIJO_LIBERACION_LAN) || !orderId || !caja || !intento)
+    throw new LiberacionLanError('OPERATION_MISMATCH', 409)
+
+  return prisma.$transaction(async tx => {
+    const autorizacion = await tx.permissionOverride.findFirst({
+      where: {
+        token: p.token,
+        venueId: p.venueId,
+        permission: PERMISO_DE_LA_LIBERACION,
+        operationKey: { startsWith: PREFIJO_LIBERACION_LAN },
+      },
+      select: { operationKey: true, authorizedById: true, createdAt: true },
+    })
+    if (!autorizacion) throw new LiberacionLanError('AUTHORIZATION_NOT_FOUND', 404)
+    if (autorizacion.operationKey !== p.operationKey) throw new LiberacionLanError('OPERATION_MISMATCH', 409)
+
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`liberacion-lan:${p.venueId}:${orderId}:${intento}`}, 0))::text`
+    const previo = await tx.activityLog.findFirst({
+      where: {
+        venueId: p.venueId,
+        action: ACCION_LIBERACION_LAN,
+        entity: 'Order',
+        entityId: orderId,
+        data: { path: ['intento'], equals: intento },
+      },
+      select: { id: true },
+    })
+    if (previo) return { recorded: false, activityLogId: previo.id }
+
+    const gerente = await tx.staffVenue.findFirst({
+      where: { id: autorizacion.authorizedById, venueId: p.venueId },
+      select: { staffId: true },
+    })
+    // El folio puede no existir todavía en el servidor (una cuenta abierta sin red): el asiento queda igual, sin número.
+    const orden = await tx.order.findFirst({ where: { id: orderId, venueId: p.venueId }, select: { orderNumber: true } })
+    const asiento = await tx.activityLog.create({
+      data: {
+        action: ACCION_LIBERACION_LAN,
+        entity: 'Order',
+        entityId: orderId,
+        venueId: p.venueId,
+        staffId: gerente?.staffId ?? null,
+        data: {
+          orderId,
+          orderNumber: orden?.orderNumber ?? null,
+          intento,
+          caja,
+          sessionStaffId: p.sessionStaffId,
+          authorizedByStaffVenueId: autorizacion.authorizedById,
+          authorizedAt: autorizacion.createdAt.toISOString(),
+        },
+      },
+      select: { id: true },
+    })
+    return { recorded: true, activityLogId: asiento.id }
+  })
+}
+
+/**
  * Consumo del token.
  *
  * SIN llave (todas las rutas de siempre): ATÓMICO y de UN uso. El `updateMany` con `consumedAt: null` en el WHERE

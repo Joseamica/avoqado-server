@@ -85,7 +85,7 @@ import * as areaTicketV7MobileController from '../controllers/mobile/areaTicketV
 import * as areaTicketExternalMobileController from '../controllers/mobile/areaTicketExternal.mobile.controller'
 import * as permissionOverrideMobileController from '../controllers/mobile/permission-override.mobile.controller'
 import * as switchUserMobileController from '../controllers/mobile/switch-user.mobile.controller'
-import { createPermissionOverrideSchema } from '../schemas/mobile/permissionOverride.mobile.schema'
+import { acusePermissionOverrideSchema, createPermissionOverrideSchema } from '../schemas/mobile/permissionOverride.mobile.schema'
 import { switchUserSchema } from '../schemas/mobile/switchUser.mobile.schema'
 import { attachCustomerToLatestPaymentSchema, attachCustomerToPaymentSchema } from '../schemas/mobile/paymentCustomer.mobile.schema'
 import { cashPaymentByKeyParamsSchema } from '../schemas/mobile/paymentByKey.mobile.schema'
@@ -1220,6 +1220,20 @@ router.post(
   pinOverrideRateLimiter,
   validateRequest(createPermissionOverrideSchema),
   permissionOverrideMobileController.createOverride,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/permission-overrides/applied
+ * F1 · cierre android bloque 6: la caja dueña acusa que aplicó la liberación de una cuenta de Mostrador firmada por un gerente
+ * (autorización atada a `liberacion-lan:<folio>:<caja>:<intento>`). Deja UN asiento por sucursal + folio + intento. Sin PIN ni permiso
+ * propio: la autoridad es la autorización, y el acuse no habilita nada (sólo deja constancia). Sin cubeta de PIN: el token es un UUID.
+ */
+router.post(
+  '/venues/:venueId/permission-overrides/applied',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  validateRequest(acusePermissionOverrideSchema),
+  permissionOverrideMobileController.acknowledgeOverrideApplied,
 )
 
 /**
