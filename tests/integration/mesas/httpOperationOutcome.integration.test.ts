@@ -3026,7 +3026,8 @@ test('Task4 apply discount exact created amount and totals survive catalog/order
   })
   const i = operationInput({ action: 'applyOrderDiscount', refs: { orderId: o.id, discountId: discount.id }, payload: {} })
   const r = await exactReplay(i, 'post', `/orders/${o.id}/discounts`, { discountId: discount.id }, async () => {
-    expect((await prisma.discount.findUniqueOrThrow({ where: { id: discount.id } })).currentUses).toBe(0)
+    // D19 (encargo 5b78aa): aplicar un descuento de cuenta en Mesas gasta su uso (antes nunca sumaba).
+    expect((await prisma.discount.findUniqueOrThrow({ where: { id: discount.id } })).currentUses).toBe(1)
     await prisma.discount.update({ where: { id: discount.id }, data: { currentUses: 5, name: 'Later', value: 20 } })
     await prisma.order.update({ where: { id: o.id }, data: { total: 777, version: { increment: 1 } } })
   })
@@ -3394,7 +3395,8 @@ describe('Task4 receipt coverage', () => {
     if (s.customer) expect(s.customer.loyaltyPoints).toBe(action === 'removeOrderDiscount' ? 10000 : 19000)
     if (s.reward)
       expect(s.reward).toMatchObject({ status: 'PENDING', redeemedAt: null, orderDiscountId: null, rewardLabel: 'Task4 original café' })
-    if (s.catalog) expect(s.catalog.currentUses).toBe(0)
+    // D19 (encargo 5b78aa): aplicar en Mesas gasta UN uso, una sola vez aunque la operación se repita.
+    if (s.catalog) expect(s.catalog.currentUses).toBe(1)
     return s
   }
   test.each(actions)('Task4 %s legacy DTO, no receipt, original audit attribution', async action => {
