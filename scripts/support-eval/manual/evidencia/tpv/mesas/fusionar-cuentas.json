@@ -1,0 +1,95 @@
+{
+  "pagina": "tpv/mesas/fusionar-cuentas",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 807,
+      "cita": "Icon(Icons.Default.MoreVert, contentDescription = \"Más acciones\")"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 841,
+      "cita": "text = { Text(\"Fusionar cuentas\") },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/MergeOrdersSheet.kt",
+      "linea": 75,
+      "cita": "text = \"Elige la mesa cuya cuenta se junta con esta. La cuenta elegida se cierra y su mesa queda libre.\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/MergeOrdersSheet.kt",
+      "linea": 110,
+      "cita": "MergeCandidateRow(table = table, enabled = !isMerging, onClick = { onSelect(table) })"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderViewModel.kt",
+      "linea": 731,
+      "cita": "\"Cuenta de Mesa ${source.number} fusionada\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "orders:merge",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 4310
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 603
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: «Ver cuenta» desde la mesa",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableSheet.kt",
+      "linea": 280
+    },
+    {
+      "ruta": "Fusionar cierra la otra cuenta (CANCELLED); su mesa queda libre sólo si no tiene otra cuenta abierta",
+      "archivo": "avoqado-server/src/services/mobile/order.mobile.service.ts",
+      "linea": 3284
+    },
+    {
+      "ruta": "La mesa de la otra cuenta: libre o con su cuenta hermana",
+      "archivo": "avoqado-server/src/services/tpv/table.tpv.service.ts",
+      "linea": 735
+    },
+    {
+      "ruta": "Problema: sin otras cuentas abiertas",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/MergeOrdersSheet.kt",
+      "linea": 97
+    },
+    {
+      "ruta": "Problema: la lista no cargó",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/MergeOrdersSheet.kt",
+      "linea": 90
+    },
+    {
+      "ruta": "Problema: Reintentar del selector (componente compartido)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/MoveTableSheet.kt",
+      "linea": 193
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 5,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

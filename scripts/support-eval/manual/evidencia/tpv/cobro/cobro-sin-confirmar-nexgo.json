@@ -1,0 +1,127 @@
+{
+  "pagina": "tpv/cobro/cobro-sin-confirmar-nexgo",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 984,
+      "cita": "text = \"Consultando al servidor… ${state.segundos} s\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 974,
+      "cita": "text = \"Consultando con AngelPay...\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 999,
+      "cita": "if (state.puedeDeclarar) {"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 1019,
+      "cita": "Text(if (state.declarando) \"Confirmando…\" else \"El cliente no presentó tarjeta\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 1004,
+      "cita": "label = \"Código de supervisor\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 1014,
+      "cita": "Text(if (state.declarando) \"Confirmando…\" else \"Confirmar con código\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 1025,
+      "cita": "Text(\"Consultar de nuevo\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 1033,
+      "cita": "Text(\"Salir\")"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/AvisoDeCobrosPendientes.kt",
+      "linea": 95,
+      "cita": "\"El cobro de ${pesos(totalCentavos)} (${antiguedad(ahoraMillis - desdeMillis)}) SÍ pasó: Avoqado ya lo registró, \""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 980,
+      "cita": "Text(\"Entendido\")"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:resolve-no-instrument",
+      "archivo": "avoqado-server/src/services/tpv/no-instrument-resolution.service.ts",
+      "linea": 41
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Cobro empezado en la terminal y sin respuesta de Avoqado: el mensaje «Sin conexión con Avoqado…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 3712
+    },
+    {
+      "afirmacion": "El texto completo del mensaje",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 3713
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: pantalla «Cobro sin confirmar»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 958
+    },
+    {
+      "ruta": "La declaración va al servidor: POST …/terminal-payment/attempts/{attemptId}/no-instrument-resolution",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/TerminalAttemptApiService.kt",
+      "linea": 60
+    },
+    {
+      "ruta": "El servidor pide código sólo con SUPERVISOR_AUTHORIZATION_REQUIRED",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 4071
+    },
+    {
+      "ruta": "Problema: «Ese código no tiene permiso para confirmarlo.»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 1323
+    },
+    {
+      "ruta": "Problema: sin «Reintentar» a propósito (Salir sí; volver a cobrar no)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 1030
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fecha": "2026-11-18",
+    "fotos": [],
+    "filasCreadas": [],
+    "nota": "No se provocó a propósito, por riesgo: hace falta que AngelPay cobre y que la TPV no sepa el resultado (por ejemplo, cortar la red o el SERVIDOR a media venta). Eso deja un cobro real del QA sin registrar y no se puede limpiar con seguridad. En la segunda vuelta con la tarjeta, el cobro, el rechazo y el reembolso se confirmaron al momento."
+  },
+  "codex": {
+    "lote": 1,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

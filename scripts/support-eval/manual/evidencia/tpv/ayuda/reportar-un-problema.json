@@ -1,0 +1,97 @@
+{
+  "pagina": "tpv/ayuda/reportar-un-problema",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 969,
+      "cita": "label = \"Soporte\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/support/presentation/SupportScreen.kt",
+      "linea": 288,
+      "cita": "SectionHeader(title = \"Acciones Rápidas\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/support/presentation/SupportScreen.kt",
+      "linea": 586,
+      "cita": "Text(\"Reportar Bug\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/support/presentation/SupportScreen.kt",
+      "linea": 599,
+      "cita": "Text(\"Sugerir Función\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/support/presentation/SupportScreen.kt",
+      "linea": 917,
+      "cita": "placeholder = { Text(\"Describe el problema o sugerencia...\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/support/presentation/SupportScreen.kt",
+      "linea": 966,
+      "cita": "errorMessage = \"El mensaje debe tener al menos 10 caracteres\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/support/presentation/SupportScreen.kt",
+      "linea": 996,
+      "cita": "Text(\"Enviar\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/support/presentation/SupportScreen.kt",
+      "linea": 412,
+      "cita": "message = \"✅ Reporte enviado correctamente\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/support/presentation/SupportScreen.kt",
+      "linea": 449,
+      "cita": "message = \"✅ Sugerencia enviada correctamente\","
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: *Soporte* sale con showSupport",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 965
+    },
+    {
+      "ruta": "Antes: showSupport viene encendido por default",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/model/TpvSettings.kt",
+      "linea": 127
+    },
+    {
+      "ruta": "Antes: sin conexión no se envía",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/support/presentation/SupportScreen.kt",
+      "linea": 184
+    },
+    {
+      "ruta": "Si aparece «No se pudo enviar el feedback…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/support/presentation/SupportScreen.kt",
+      "linea": 184
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 8,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

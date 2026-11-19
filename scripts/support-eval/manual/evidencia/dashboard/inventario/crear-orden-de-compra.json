@@ -1,0 +1,289 @@
+{
+  "pagina": "dashboard/inventario/crear-orden-de-compra",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 404,
+      "cita": "url: 'inventory/purchase-orders',"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1213,
+      "cita": "title: t('sidebar:routes.inventory'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Inventory/PurchaseOrders/PurchaseOrdersPage.tsx",
+      "linea": 694,
+      "cita": "<Button onClick={handleCreateClick} data-tour=\"po-new-btn\">"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Inventory/PurchaseOrders/PurchaseOrdersPage.tsx",
+      "linea": 696,
+      "cita": "{t('create')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/purchaseOrders.json",
+      "linea": 4,
+      "cita": "\"create\": \"Crear Orden de Compra\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 787,
+      "cita": "<div className=\"bg-muted/30 px-4 py-3 font-medium text-sm\">Nombre de proveedor</div>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 798,
+      "cita": "Seleccionar proveedor"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 837,
+      "cita": "{t('wizard.createSupplier', { name: supplierSearchValue || '...' })}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/purchaseOrders.json",
+      "linea": 72,
+      "cita": "\"createSupplier\": \"Crear \\\"{{name}}\\\"\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 772,
+      "cita": "{createSupplierMutation.isPending ? t('common:saving') : t('wizard.saveSupplier')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/purchaseOrders.json",
+      "linea": 98,
+      "cita": "\"saveSupplier\": \"Guardar Proveedor\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 380,
+      "cita": "form.setValue('supplierId', newSupplier.data.id)"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 985,
+      "cita": "<Label className=\"text-base font-semibold\">{t('wizard.addItems')}</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/purchaseOrders.json",
+      "linea": 99,
+      "cita": "\"addItems\": \"Artículos de la Orden\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 994,
+      "cita": "{t('wizard.addItem')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/purchaseOrders.json",
+      "linea": 100,
+      "cita": "\"addItem\": \"Agregar Artículo\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 1003,
+      "cita": "<TableHead>{t('wizard.columns.quantity')}</TableHead>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/purchaseOrders.json",
+      "linea": 106,
+      "cita": "\"quantity\": \"Cantidad\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 1004,
+      "cita": "<TableHead>{t('wizard.columns.unitPrice')}</TableHead>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/purchaseOrders.json",
+      "linea": 107,
+      "cita": "\"unitPrice\": \"Precio Unitario\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 636,
+      "cita": "{isEditMode ? t('actions.save') : t('wizard.submit')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/purchaseOrders.json",
+      "linea": 121,
+      "cita": "\"submit\": \"Crear Orden\""
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 625,
+      "cita": "{t('wizard.saveDraft')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/purchaseOrders.json",
+      "linea": 120,
+      "cita": "\"saveDraft\": \"Guardar como Borrador\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "inventory:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 990
+    },
+    {
+      "permiso": "inventory:create",
+      "archivo": "avoqado-server/src/routes/dashboard/inventory.routes.ts",
+      "linea": 851
+    },
+    {
+      "permiso": "inventory:update",
+      "archivo": "avoqado-server/src/routes/dashboard/inventory.routes.ts",
+      "linea": 865
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "INVENTORY_TRACKING",
+      "archivo": "src/pages/Inventory/PurchaseOrders/PurchaseOrdersPage.tsx",
+      "linea": 668
+    },
+    {
+      "featureCode": "INVENTORY_TRACKING",
+      "archivo": "avoqado-server/src/routes/dashboard/inventory.routes.ts",
+      "linea": 118
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: Crear Orden de Compra no tiene candado en la pantalla",
+      "archivo": "src/pages/Inventory/PurchaseOrders/PurchaseOrdersPage.tsx",
+      "linea": 396
+    },
+    {
+      "ruta": "Paso 4: Crear Orden crea y luego la pasa a CONFIRMED",
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 496
+    },
+    {
+      "ruta": "Paso 4: Guardar como Borrador sólo crea",
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 494
+    },
+    {
+      "ruta": "Problema: sin proveedor",
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 429
+    },
+    {
+      "ruta": "Problema: texto sin proveedor",
+      "archivo": "src/locales/es/purchaseOrders.json",
+      "linea": 124
+    },
+    {
+      "ruta": "Problema: renglones sin material, cantidad o precio no cuentan",
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 438
+    },
+    {
+      "ruta": "Problema: sin artículos",
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 442
+    },
+    {
+      "ruta": "Problema: texto sin artículos",
+      "archivo": "src/locales/es/purchaseOrders.json",
+      "linea": 126
+    },
+    {
+      "ruta": "Problema: el alta avisa éxito y cierra antes de confirmar",
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 352
+    },
+    {
+      "ruta": "Problema: texto de éxito",
+      "archivo": "src/locales/es/purchaseOrders.json",
+      "linea": 282
+    },
+    {
+      "ruta": "Problema: la confirmación es otra petición, después de crear",
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 495
+    },
+    {
+      "ruta": "Problema: cualquier falla de esa petición cae aquí, sin leer el estado (puede quedar confirmada)",
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 503
+    },
+    {
+      "ruta": "Problema: y sale este aviso",
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 507
+    },
+    {
+      "ruta": "Problema: texto del aviso",
+      "archivo": "src/locales/es/purchaseOrders.json",
+      "linea": 240
+    },
+    {
+      "ruta": "T11-12: el panel reintenta una vez cualquier petición tras un error de red, sin llave",
+      "archivo": "src/api.ts",
+      "linea": 98
+    },
+    {
+      "ruta": "T11-12: la orden se crea primero y después se confirma; si falla la confirmación, la orden ya existe",
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 489
+    },
+    {
+      "ruta": "T11-12: el aviso de la confirmación que falló",
+      "archivo": "src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx",
+      "linea": 507
+    },
+    {
+      "ruta": "T11-12: cada alta crea otra orden con folio nuevo",
+      "archivo": "avoqado-server/src/services/dashboard/purchaseOrder.service.ts",
+      "linea": 681
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 6,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

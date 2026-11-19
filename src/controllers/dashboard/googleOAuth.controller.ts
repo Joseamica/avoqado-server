@@ -103,6 +103,7 @@ export async function googleOAuthCallback(req: Request, res: Response, next: Nex
       code || token,
       !!code, // isCode = true if code is provided
       signup,
+      ...(req.body?.purpose === 'support-whatsapp' ? (['support-whatsapp'] as const) : ([] as const)),
     )
 
     // Cookie maxAge must match JWT expiration (24h default for OAuth login)

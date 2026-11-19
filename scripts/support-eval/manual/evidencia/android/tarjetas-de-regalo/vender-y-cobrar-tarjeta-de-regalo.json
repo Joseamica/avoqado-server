@@ -1,0 +1,308 @@
+{
+  "pagina": "android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
+      "linea": 259,
+      "cita": "if (onTarjetaDeRegalo != null) ShortcutItem("
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
+      "linea": 261,
+      "cita": "name = com.avoqado.pos.giftcards.domain.TextosDeTarjetas.MOSAICO,"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 7,
+      "cita": "const val MOSAICO = \"Tarjeta de regalo\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 8,
+      "cita": "const val VENDER = \"Vender tarjeta\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/HojaDeTarjetaDeRegalo.kt",
+      "linea": 75,
+      "cita": "AccionDeTarjeta(TextosDeTarjetas.VENDER, hoja.vender, onVender)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 97,
+      "cita": "placeholder = TextosDeTarjetas.OTRO_MONTO"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 104,
+      "cita": "Text(TextosDeTarjetas.COMO_LA_ENTREGAS)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 105,
+      "cita": "\"PRINTED\" to TextosDeTarjetas.IMPRIMIR, \"HANDED_TO_BUYER\" to TextosDeTarjetas.ENTREGAR_AL_COMPRADOR,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 106,
+      "cita": "\"WHATSAPP\" to TextosDeTarjetas.WHATSAPP, \"EMAIL\" to TextosDeTarjetas.CORREO)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 139,
+      "cita": "placeholder = TextosDeTarjetas.DE_PARTE_DE"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 86,
+      "cita": "const val OBLIGATORIO_CON_ENTREGA = \"Obligatorio con WhatsApp o correo\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 60,
+      "cita": "primaryActionText = if (viewModel.bloqueado) TextosDeTarjetas.REINTENTAR else TextosDeTarjetas.cobrar("
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 147,
+      "cita": "CobroDeCuentaScreen(orderId = id"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/HojaDeTarjetaDeRegalo.kt",
+      "linea": 78,
+      "cita": "AccionDeTarjeta(TextosDeTarjetas.CONSULTAR, hoja.consultar, onConsultar)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 9,
+      "cita": "const val CONSULTAR = \"Consultar saldo\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/IdentificarTarjetaSheet.kt",
+      "linea": 97,
+      "cita": "if (modo == TextosDeTarjetas.ESCANEAR) PrimaryButton(text = TextosDeTarjetas.ESCANEAR"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/IdentificarTarjetaSheet.kt",
+      "linea": 99,
+      "cita": "placeholder = TextosDeTarjetas.TECLEAR_CODIGO"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/IdentificarTarjetaSheet.kt",
+      "linea": 73,
+      "cita": "else TextosDeTarjetas.VERIFICAR,"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 354,
+      "cita": "Text(com.avoqado.pos.giftcards.domain.TextosDeTarjetas.FILA_COBRO"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 236,
+      "cita": "IdentificarTarjetaSheet(venue, viewModel.ajustesDelSaldo(),"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 239,
+      "cita": "} else MontoConSaldoSheet(tarjeta"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/MontoConSaldoSheet.kt",
+      "linea": 24,
+      "cita": "AvoqadoFullscreenHeader(title = TextosDeTarjetas.MONTO_CON_SALDO"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/MontoConSaldoSheet.kt",
+      "linea": 25,
+      "cita": "primaryActionText = TextosDeTarjetas.PAGAR_CON_SALDO,"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/MontoConSaldoSheet.kt",
+      "linea": 26,
+      "cita": "cents in 1..oferta.montoCents),"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "giftCards:sell",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1705
+    },
+    {
+      "permiso": "giftCards:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1712
+    },
+    {
+      "permiso": "giftCards:redeem",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1747
+    },
+    {
+      "permiso": "giftCards:sell",
+      "archivo": "avoqado-server/src/lib/permissions.ts",
+      "linea": 1001
+    },
+    {
+      "permiso": "giftCards:redeem",
+      "archivo": "avoqado-server/src/lib/permissions.ts",
+      "linea": 1146
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Si aparece «Sin conexión: las tarjetas de regalo necesitan internet»",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 31
+    },
+    {
+      "afirmacion": "Si aparece: sin red, Vender y Consultar quedan apagados",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/EntradaDeTarjetas.kt",
+      "linea": 31
+    },
+    {
+      "afirmacion": "Si aparece: sin red, Cobrar de la venta de tarjetas se apaga",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 190
+    },
+    {
+      "afirmacion": "Si aparece: sin red, Verificar y Escanear se apagan",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/IdentificarTarjetaSheet.kt",
+      "linea": 69
+    },
+    {
+      "afirmacion": "Si aparece: sin red, Pagar con saldo se apaga",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/MontoConSaldoSheet.kt",
+      "linea": 55
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: sin ajustes disponibles no sale el mosaico",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/EntradaDeTarjetas.kt",
+      "linea": 29
+    },
+    {
+      "ruta": "Si aparece «Las tarjetas de regalo están apagadas. Pídele…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 12
+    },
+    {
+      "ruta": "Si aparece «La tarjeta se vende en su propia cuenta…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/EntradaDeTarjetas.kt",
+      "linea": 46
+    },
+    {
+      "ruta": "Si aparece «Comprobando el cobro con saldo…» (desenlace incierto)",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/MontoConSaldoSheet.kt",
+      "linea": 40
+    },
+    {
+      "ruta": "Si aparece «Teléfono» (sólo con la capacidad porTelefono)",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/IdentificarTarjetaSheet.kt",
+      "linea": 84
+    },
+    {
+      "ruta": "Si aparece: el código llega por WhatsApp",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 65
+    },
+    {
+      "ruta": "Si aparece «Teléfono»: Pedir código con 10 dígitos y luego Verificar con 6",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/IdentificarTarjetaSheet.kt",
+      "linea": 74
+    },
+    {
+      "ruta": "Si aparece «Teléfono»: Verificar consulta con teléfono y código",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/IdentificarTarjetaSheet.kt",
+      "linea": 77
+    },
+    {
+      "ruta": "Si aparece «Teléfono»: campo del código de 6 dígitos",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/IdentificarTarjetaSheet.kt",
+      "linea": 94
+    },
+    {
+      "ruta": "Si aparece «Para pagar con tarjeta de regalo, la venta necesita artículos del catálogo.»: la fila sale en gris (T10) con ese texto cuando la venta no tiene cuenta creada ni productos del catálogo",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TablaDeLaCaja.kt",
+      "linea": 32
+    },
+    {
+      "ruta": "Si aparece «Para pagar con tarjeta de regalo, la venta necesita artículos del catálogo.»: el texto, letra por letra",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 110
+    },
+    {
+      "ruta": "Si aparece «Para pagar con tarjeta de regalo…»: «hay cuenta o artículos» = una cuenta ya creada o algún producto del catálogo (un monto tecleado no cuenta)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 1987
+    },
+    {
+      "ruta": "Si aparece «Para pagar con tarjeta de regalo…»: el motivo sale debajo de la fila «Tarjeta de regalo» apagada",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 356
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "Sunmi D3 del laboratorio del Alien (serial D40625BRJ0469)",
+    "version": "2.25.42-dev (70), copia de QA com.avoqado.pos.soportewa compilada en v2.25.42 (843c15ae), contra el segundo SERVIDOR de QA en http://localhost:3005 (copia soporte-whatsapp-20261116, Postgres propio y desechable avoqado_jornada_vuelta2 con el seed, DEMO_MODE, sin .env, llaves GIFT_CARD_* de prueba generadas con openssl)",
+    "apkSha256": "c109312a1a4e02448e2c7ab10a8a2c7a5b57920868f2190b3b969a6ed19e5d34",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo/1-atajos-tarjeta-de-regalo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo/10-teclear-codigo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo/11-saldo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo/12-pantalla-de-cobro-tarjeta-de-regalo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo/13-monto-a-pagar-con-saldo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo/14-pagado-con-saldo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo/2-vender-tarjeta.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo/3-monto-y-entrega.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo/4-cobrar-cuenta-de-la-tarjeta.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo/5-pantalla-de-cobro.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo/6-tarjeta-vendida.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo/7-entregar-tarjeta-codigo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo/8-mostrar-qr.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo/9-consultar-saldo.png"
+    ],
+    "filasCreadas": [
+      "(base desechable, ya apagada) venta ORD-1795044051893: tarjeta •••• 8ZEV de $100 cobrada en efectivo",
+      "(base desechable) venta ORD-1795044585741: tarjeta •••• 5R43 de $100 en efectivo (sin usar)",
+      "(base desechable) venta de $20 (Agua Mineral) pagada con saldo de 8ZEV"
+    ],
+    "nota": "Vuelta 2, contra el segundo servidor de QA (Avoqado Full del seed, admin@admin.com). *Atajos* → *Tarjeta de regalo* → *Vender tarjeta* → *Otro monto* 100 → «¿Cómo la entregas?» *Entregar al comprador* (también salen *Imprimir*, *WhatsApp*, *Correo*) → *Cobrar $100.00* → pantalla «Tarjetas de regalo» con *Cobrar $100.00* → cobro en efectivo → *Entregar tarjeta de regalo* (•••• 8ZEV, *Mostrar QR* con el código). *Consultar saldo* → *Teclear código* → *Verificar* → «Saldo disponible $100.00». Venta de $20 → en la pantalla del cobro *Tarjeta de regalo* → *Teclear código* → *Verificar* → *Monto a pagar con saldo* (20.00) → *Pagar con saldo* → «Saldo disponible: $80.00». No se probó *Teléfono* (manda WhatsApp) ni *Escanear*."
+  },
+  "codex": {
+    "lote": 9,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

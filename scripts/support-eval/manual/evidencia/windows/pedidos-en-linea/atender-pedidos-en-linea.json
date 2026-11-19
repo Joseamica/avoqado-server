@@ -1,0 +1,312 @@
+{
+  "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 608,
+      "cita": "label = com.avoqado.pos.onlineorders.presentation.TextosPedidosEnLinea.MENU,"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 7,
+      "cita": "const val SECCION_POR_ACEPTAR = \"Por aceptar\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 12,
+      "cita": "const val ACEPTAR = \"Aceptar\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 89,
+      "cita": "const val ACEPTAR_TITULO = \"¿En cuántos minutos estará listo?\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 59,
+      "cita": "val MINUTOS_ACEPTAR: List<Int> = listOf(10, 15, 20, 30)"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrdersScreen.kt",
+      "linea": 622,
+      "cita": "TextosPedidosEnLinea.MINUTOS_ACEPTAR.forEach { minutos ->"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 13,
+      "cita": "const val RECHAZAR = \"Rechazar\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 91,
+      "cita": "const val RECHAZAR_TITULO = \"¿Por qué lo rechazas?\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 42,
+      "cita": "const val MOTIVO_SIN_INGREDIENTES = \"Sin ingredientes\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 45,
+      "cita": "const val MOTIVO_OTRO = \"Otro\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrdersScreen.kt",
+      "linea": 637,
+      "cita": "TextosPedidosEnLinea.MOTIVOS.forEach { (texto, codigo) ->"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 8,
+      "cita": "const val SECCION_EN_PREPARACION = \"En preparación\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 14,
+      "cita": "const val LISTO = \"Listo\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrderCard.kt",
+      "linea": 168,
+      "cita": "if (seccion == SeccionDePedido.EN_PREPARACION) {"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 16,
+      "cita": "const val ENTREGADO = \"Entregado\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrderCard.kt",
+      "linea": 183,
+      "cita": "Text(TextosPedidosEnLinea.ENTREGADO)"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 70,
+      "cita": "const val REIMPRIMIR = \"Reimprimir\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrderCard.kt",
+      "linea": 179,
+      "cita": "OutlinedButton(onClick = onReimprimir, enabled = !ocupado"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 84,
+      "cita": "const val PAUSAR_TIENDA = \"Pausar pedidos\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 60,
+      "cita": "val MINUTOS_PAUSA: List<Int> = listOf(15, 30, 60)"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 61,
+      "cita": "const val REANUDAR = \"Reanudar\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrdersScreen.kt",
+      "linea": 323,
+      "cita": "OutlinedButton(onClick = { pausando = false; viewModel.pausar(null) }"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "orders:read",
+      "archivo": "avoqado-server/src/routes/mobile/onlineOrders.mobile.routes.ts",
+      "linea": 19
+    },
+    {
+      "permiso": "orders:update",
+      "archivo": "avoqado-server/src/routes/mobile/onlineOrders.mobile.routes.ts",
+      "linea": 33
+    },
+    {
+      "permiso": "orders:update",
+      "archivo": "avoqado-server/src/routes/mobile/onlineOrders.mobile.routes.ts",
+      "linea": 34
+    },
+    {
+      "permiso": "orders:update",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 183
+    },
+    {
+      "permiso": "online-orders:pause",
+      "archivo": "avoqado-server/src/routes/mobile/onlineOrders.mobile.routes.ts",
+      "linea": 31
+    },
+    {
+      "permiso": "orders:cancel-unpaid",
+      "archivo": "avoqado-server/src/routes/mobile/onlineOrders.mobile.routes.ts",
+      "linea": 54
+    },
+    {
+      "permiso": "orders:cancel-unpaid",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 191
+    },
+    {
+      "permiso": "online-orders:pause",
+      "archivo": "avoqado-server/src/lib/permissions.ts",
+      "linea": 1201
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Si aparece «Sin conexión: no llegan pedidos nuevos»",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 55
+    },
+    {
+      "afirmacion": "Si aparece: sin red Aceptar, Rechazar, Listo y Entregado se apagan",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrderCard.kt",
+      "linea": 156
+    },
+    {
+      "afirmacion": "Si aparece: sin red «Pausar pedidos» se apaga",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrdersScreen.kt",
+      "linea": 164
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: sin orders:update no hay botones de acción (también Reimprimir)",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrderCard.kt",
+      "linea": 152
+    },
+    {
+      "ruta": "Antes: banda «Nuevo pedido en línea #…» con «Ver»",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/BannerDePedidoEnLinea.kt",
+      "linea": 26
+    },
+    {
+      "ruta": "Antes: Ver abre la bandeja",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/BannerDePedidoEnLinea.kt",
+      "linea": 59
+    },
+    {
+      "ruta": "Si aparece «Con tarjeta: se cobra al aceptar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 23
+    },
+    {
+      "ruta": "Si aparece: un pedido con tarjeta en línea nunca muestra «Cobrar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrderCard.kt",
+      "linea": 46
+    },
+    {
+      "ruta": "Si aparece «Cobra el pedido antes de entregarlo.» (409 PAYMENT_REQUIRED)",
+      "archivo": "avoqado-server/src/controllers/mobile/onlineOrders.mobile.controller.ts",
+      "linea": 45
+    },
+    {
+      "ruta": "Si aparece «Ese pedido ya no está disponible»",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 57
+    },
+    {
+      "ruta": "Si aparece «No se pudo cobrar la tarjeta» (motivo PAYMENT_FAILED)",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 34
+    },
+    {
+      "ruta": "Si aparece: el servidor rechaza con PAYMENT_FAILED si no se pudo capturar",
+      "archivo": "avoqado-server/src/services/online-ordering/card/capture.service.ts",
+      "linea": 52
+    },
+    {
+      "ruta": "Si aparece «Tarjeta cobrada: devuélvela desde el panel» (cerrado sin completar con cargo CAPTURED)",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrderCard.kt",
+      "linea": 60
+    },
+    {
+      "ruta": "Problema: «Cancelar pedido» sólo con el permiso de cancelar y sin ningún pago",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrderCard.kt",
+      "linea": 185
+    },
+    {
+      "ruta": "Problema: sin pago = PENDING y nada abonado",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrderCard.kt",
+      "linea": 41
+    },
+    {
+      "ruta": "Problema: el diálogo confirma con «Cancelar pedido»",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrdersScreen.kt",
+      "linea": 654
+    },
+    {
+      "ruta": "Problema: texto del botón «Cancelar pedido»",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt",
+      "linea": 92
+    },
+    {
+      "ruta": "Problema: pausar sin el permiso: overridable sólo con el PIN de gerente prendido",
+      "archivo": "avoqado-server/src/middlewares/checkPermission.middleware.ts",
+      "linea": 539
+    },
+    {
+      "ruta": "Problema: la pausa deja pasar el 403 al interceptor del PIN",
+      "archivo": "app/src/main/java/com/avoqado/pos/onlineorders/data/OnlineOrdersRepository.kt",
+      "linea": 262
+    },
+    {
+      "ruta": "Si aparece «Incluido en el Plan …» (teaser)",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 617
+    },
+    {
+      "ruta": "Antes: el vigilante corre en WINDOWS (Arranque.iniciar, espejo de AvoqadoApp)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Arranque.kt",
+      "linea": 72
+    },
+    {
+      "ruta": "Antes: cerrar la ventana cierra el POS (y con él el vigilante)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Main.kt",
+      "linea": 108
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/pedidos-en-linea/atender-pedidos-en-linea/01-sw109-mas-full.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/pedidos-en-linea/atender-pedidos-en-linea/02-sw110-pedidos-en-linea.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/pedidos-en-linea/atender-pedidos-en-linea/03-sw111-pausar-opciones.png"
+    ],
+    "filasCreadas": [],
+    "nota": "No hubo pedido que atender: la tienda de Avoqado Full en el SERVIDOR local está apagada (GET /public/venues/avoqado-full/ordering/info → status DISABLED, reason NOT_ENABLED) y un pedido nuevo pide el teléfono comprobado por WhatsApp, que esta jornada no puede mandar. Sí se vio: Más › Pedidos en línea abre la bandeja «No hay pedidos por ahora» con Pausar pedidos arriba; Pausar pedidos abre «Pausar pedidos en línea» con 15 min, 30 min, 60 min, Reanudar y Cerrar (se cerró sin pausar). Aceptar, Rechazar, Listo, Entregado y Reimprimir quedan sin recorrer."
+  },
+  "codex": {
+    "lote": 9,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

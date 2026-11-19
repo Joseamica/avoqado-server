@@ -3,6 +3,14 @@
  * offsets together makes accidental pool stampedes visible in code review.
  */
 export const DATABASE_JOB_SCHEDULES = {
+  // Soporte por WhatsApp: el worker, cada 10 s. Segundos :05…:55 y no :07…:57 (porte del 16-nov): :57 es el segundo propio de
+  // paymentLinkHoldSweeper (su prueba lo exige). :15 y :25 están libres; comparte :35 con el watchdog de cierre, :45 con el cuadre
+  // diario de Shopify (06:14:45) y, cada 10 min, :05 y :55 con los reconciliadores de plan y de órdenes pagadas.
+  supportWhatsapp: '5,15,25,35,45,55 * * * * *',
+  // Soporte por WhatsApp (fase 1, Task 6): el correo del aviso al equipo, cada 30 s y en su propio job. Segundos :01/:31 y no
+  // :12/:42 (porte del 16-nov): :42 es el segundo propio de crmGmailReplies (su prueba lo exige). :01 está libre y :31 sólo lo
+  // usa la limpieza diaria de las 04:17:31. Su entrada es una lectura por índice.
+  supportNotices: '1,31 * * * * *',
   documentRequests: '19 */2 * * * *',
   displayModeRequestExpiry: '4 * * * * *',
   terminalPaymentWatchdog: '8,38 * * * * *',

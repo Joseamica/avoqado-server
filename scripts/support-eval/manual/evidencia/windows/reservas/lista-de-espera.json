@@ -1,0 +1,308 @@
+{
+  "pagina": "windows/reservas/lista-de-espera",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 57,
+      "cita": "label = \"Más\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 654,
+      "cita": "label = \"Lista de espera\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 655,
+      "cita": "onClick = onOpenWaitlist,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/WaitlistScreen.kt",
+      "linea": 72,
+      "cita": "primaryActionIcon = Icons.Filled.Add,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/AddWaitlistSheet.kt",
+      "linea": 90,
+      "cita": "title = \"Agregar a la lista de espera\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/AddWaitlistSheet.kt",
+      "linea": 80,
+      "cita": "var isGuest by remember { mutableStateOf(true) }"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/AddWaitlistSheet.kt",
+      "linea": 149,
+      "cita": "text = \"Invitado\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/AddWaitlistSheet.kt",
+      "linea": 154,
+      "cita": "if (isGuest) {"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/AddWaitlistSheet.kt",
+      "linea": 170,
+      "cita": "placeholder = \"Buscar cliente\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/AddWaitlistSheet.kt",
+      "linea": 158,
+      "cita": "placeholder = \"Nombre\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/AddWaitlistSheet.kt",
+      "linea": 221,
+      "cita": "text = \"Personas\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/AddWaitlistSheet.kt",
+      "linea": 242,
+      "cita": "text = \"Fecha y hora\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/AddWaitlistSheet.kt",
+      "linea": 109,
+      "cita": "text = \"Agregar\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/WaitlistScreen.kt",
+      "linea": 203,
+      "cita": "TextButton(onClick = onPromote) { Text(\"Promover\") }"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationViewModel.kt",
+      "linea": 186,
+      "cita": "val promoteId = handle.get<String>(\"promoteWaitlistId\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationViewModel.kt",
+      "linea": 201,
+      "cita": "partySize = prefillPartySize ?: d.partySize,"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationScreen.kt",
+      "linea": 170,
+      "cita": "placeholder = \"Seleccionar servicio\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/domain/CreateReservationDraft.kt",
+      "linea": 49,
+      "cita": "val hasProduct = productId != null"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationScreen.kt",
+      "linea": 176,
+      "cita": "sectionLabel = \"Fecha y hora\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationViewModel.kt",
+      "linea": 270,
+      "cita": "_requiresSlotReselection.value = usesStaffAwareAppointment()"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationScreen.kt",
+      "linea": 116,
+      "cita": "val actionLabel = if (isEditing) \"Guardar\" else \"Crear\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/WaitlistScreen.kt",
+      "linea": 209,
+      "cita": ") { Text(\"Quitar\") }"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "reservations:read",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 86
+    },
+    {
+      "permiso": "reservations:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/WaitlistApi.kt",
+      "linea": 38
+    },
+    {
+      "permiso": "reservations:create",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 101
+    },
+    {
+      "permiso": "reservations:create",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/WaitlistApi.kt",
+      "linea": 56
+    },
+    {
+      "permiso": "reservations:create",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 150
+    },
+    {
+      "permiso": "reservations:update",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 132
+    },
+    {
+      "permiso": "reservations:update",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/WaitlistApi.kt",
+      "linea": 65
+    },
+    {
+      "permiso": "reservations:cancel",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 117
+    },
+    {
+      "permiso": "reservations:cancel",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/WaitlistApi.kt",
+      "linea": 60
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuViewModel.kt",
+      "linea": 187
+    },
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4695
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Agregar es una llamada directa al servidor (sin cola)",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/WaitlistRepository.kt",
+      "linea": 33
+    },
+    {
+      "afirmacion": "Si falla, la ventana no se cierra",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/WaitlistScreen.kt",
+      "linea": 148
+    },
+    {
+      "afirmacion": "T11-6: un fallo no recarga la lista (sólo el éxito llama load()); con la respuesta perdida no hay cómo saber si quedó",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/WaitlistViewModel.kt",
+      "linea": 82
+    },
+    {
+      "afirmacion": "T11-6: cerrar la ventana sólo la esconde; no recarga la lista",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/WaitlistScreen.kt",
+      "linea": 145
+    },
+    {
+      "afirmacion": "Quitar también es directo (sin cola)",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/WaitlistRepository.kt",
+      "linea": 39
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: «Lista de espera» sólo con reservaciones prendidas y en el plan",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 650
+    },
+    {
+      "ruta": "Antes: el interruptor de reservas es de ESTA computadora (sus preferencias), no del negocio",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/onboarding/ActivateReservationsViewModel.kt",
+      "linea": 71
+    },
+    {
+      "ruta": "Antes: el interruptor se lee de las preferencias seguras del equipo",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/local/SecureStorage.kt",
+      "linea": 141
+    },
+    {
+      "ruta": "Antes WINDOWS: las preferencias seguras son un archivo de la carpeta de datos de esta computadora",
+      "archivo": "desktop/plataforma/src/main/java/androidx/security/crypto/EncryptedSharedPreferences.java",
+      "linea": 21
+    },
+    {
+      "ruta": "Antes WINDOWS: en la carpeta shared_prefs de esta computadora",
+      "archivo": "desktop/plataforma/src/main/kotlin/com/avoqado/escritorio/ContextoDeEscritorio.kt",
+      "linea": 37
+    },
+    {
+      "ruta": "Problema: «Agregar» apagado dice qué falta (invitado)",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/AddWaitlistSheet.kt",
+      "linea": 99
+    },
+    {
+      "ruta": "Problema: «Agregar» apagado dice qué falta (cliente)",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/AddWaitlistSheet.kt",
+      "linea": 101
+    },
+    {
+      "ruta": "Problema: «Promover» y «Quitar» sólo en «Esperando»",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/WaitlistScreen.kt",
+      "linea": 202
+    },
+    {
+      "ruta": "Promover abre «Crear cita» con sus datos",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 661
+    },
+    {
+      "ruta": "T11-6: agregar otra vez crea otra entrada en el SERVIDOR (no deduplica)",
+      "archivo": "avoqado-server/src/services/dashboard/reservationWaitlist.service.ts",
+      "linea": 40
+    },
+    {
+      "ruta": "Antes (rama): elegir a un cliente guardado lee la lista de clientes (customers:read en el SERVIDOR)",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/waitlist/WaitlistViewModel.kt",
+      "linea": 46
+    },
+    {
+      "ruta": "Antes (rama): la lista de clientes es la ruta con customers:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1588
+    },
+    {
+      "ruta": "Antes (rama): al promover, el servicio sale del catálogo (menu:read en el SERVIDOR)",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationViewModel.kt",
+      "linea": 148
+    },
+    {
+      "ruta": "Antes (rama): el catálogo es la ruta con menu:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 2086
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

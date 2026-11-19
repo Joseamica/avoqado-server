@@ -18,6 +18,9 @@ const LEGACY_MINDFORM_VENUE_ID = 'mindform_prado'
 // New venue ID in avoqado-server DB
 export const MINDFORM_NEW_VENUE_ID = 'cmisvi38o001fhr2828ygmxi2'
 
+/** La condición del puente en el resumen de ventas: la sucursal cuyas cifras suman cobros QR del sistema anterior. La usan el resumen y la B (C1). */
+export const sumsLegacyQrPayments = (venueId: string): boolean => venueId === MINDFORM_NEW_VENUE_ID
+
 interface LegacyPaymentRow {
   id: string
   amount: string // numeric comes as string from pg

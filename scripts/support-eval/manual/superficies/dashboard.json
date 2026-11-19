@@ -1,0 +1,1891 @@
+{
+  "app": "dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "superficies": [
+    {
+      "id": "ruta:/",
+      "archivo": "src/routes/router.tsx",
+      "linea": 925
+    },
+    {
+      "id": "ruta:/*",
+      "archivo": "src/routes/router.tsx",
+      "linea": 957
+    },
+    {
+      "id": "ruta:/admin",
+      "archivo": "src/routes/router.tsx",
+      "linea": 246
+    },
+    {
+      "id": "ruta:/admin/accept-invitation",
+      "archivo": "src/routes/router.tsx",
+      "linea": 202
+    },
+    {
+      "id": "ruta:/admin/general",
+      "archivo": "src/routes/router.tsx",
+      "linea": 254
+    },
+    {
+      "id": "ruta:/admin/global",
+      "archivo": "src/routes/router.tsx",
+      "linea": 291
+    },
+    {
+      "id": "ruta:/admin/settings",
+      "archivo": "src/routes/router.tsx",
+      "linea": 276
+    },
+    {
+      "id": "ruta:/admin/superadmins",
+      "archivo": "src/routes/router.tsx",
+      "linea": 301
+    },
+    {
+      "id": "ruta:/admin/system",
+      "archivo": "src/routes/router.tsx",
+      "linea": 281
+    },
+    {
+      "id": "ruta:/admin/users",
+      "archivo": "src/routes/router.tsx",
+      "linea": 258
+    },
+    {
+      "id": "ruta:/admin/venues",
+      "archivo": "src/routes/router.tsx",
+      "linea": 262
+    },
+    {
+      "id": "ruta:/admin/venues/:slug",
+      "archivo": "src/routes/router.tsx",
+      "linea": 270
+    },
+    {
+      "id": "ruta:/auth/confirm-email-change",
+      "archivo": "src/routes/router.tsx",
+      "linea": 164
+    },
+    {
+      "id": "ruta:/auth/entrar",
+      "archivo": "src/routes/router.tsx",
+      "linea": 169
+    },
+    {
+      "id": "ruta:/auth/forgot-password",
+      "archivo": "src/routes/router.tsx",
+      "linea": 155
+    },
+    {
+      "id": "ruta:/auth/google/callback",
+      "archivo": "src/routes/router.tsx",
+      "linea": 198
+    },
+    {
+      "id": "ruta:/auth/reset-password/:token",
+      "archivo": "src/routes/router.tsx",
+      "linea": 159
+    },
+    {
+      "id": "ruta:/auth/verify-email",
+      "archivo": "src/routes/router.tsx",
+      "linea": 173
+    },
+    {
+      "id": "ruta:/book/:venueSlug",
+      "archivo": "src/routes/router.tsx",
+      "linea": 947
+    },
+    {
+      "id": "ruta:/book/:venueSlug/manage/:cancelSecret",
+      "archivo": "src/routes/router.tsx",
+      "linea": 952
+    },
+    {
+      "id": "ruta:/documentos/:id",
+      "archivo": "src/routes/router.tsx",
+      "linea": 142
+    },
+    {
+      "id": "ruta:/go",
+      "archivo": "src/routes/router.tsx",
+      "linea": 222
+    },
+    {
+      "id": "ruta:/go/*",
+      "archivo": "src/routes/router.tsx",
+      "linea": 226
+    },
+    {
+      "id": "ruta:/google-calendar/picker",
+      "archivo": "src/routes/router.tsx",
+      "linea": 218
+    },
+    {
+      "id": "ruta:/invite/:token",
+      "archivo": "src/routes/router.tsx",
+      "linea": 206
+    },
+    {
+      "id": "ruta:/login",
+      "archivo": "src/routes/router.tsx",
+      "linea": 147
+    },
+    {
+      "id": "ruta:/onboarding",
+      "archivo": "src/routes/router.tsx",
+      "linea": 180
+    },
+    {
+      "id": "ruta:/organizations/:orgId",
+      "archivo": "src/routes/router.tsx",
+      "linea": 588
+    },
+    {
+      "id": "ruta:/organizations/:orgId/activity-log",
+      "archivo": "src/routes/router.tsx",
+      "linea": 601
+    },
+    {
+      "id": "ruta:/organizations/:orgId/analytics",
+      "archivo": "src/routes/router.tsx",
+      "linea": 602
+    },
+    {
+      "id": "ruta:/organizations/:orgId/celulares-de-promotores",
+      "archivo": "src/routes/router.tsx",
+      "linea": 613
+    },
+    {
+      "id": "ruta:/organizations/:orgId/comisiones",
+      "archivo": "src/routes/router.tsx",
+      "linea": 610
+    },
+    {
+      "id": "ruta:/organizations/:orgId/dashboard",
+      "archivo": "src/routes/router.tsx",
+      "linea": 595
+    },
+    {
+      "id": "ruta:/organizations/:orgId/master-catalog",
+      "archivo": "src/routes/router.tsx",
+      "linea": 564
+    },
+    {
+      "id": "ruta:/organizations/:orgId/master-catalog/audit",
+      "archivo": "src/routes/router.tsx",
+      "linea": 576
+    },
+    {
+      "id": "ruta:/organizations/:orgId/master-catalog/bindings",
+      "archivo": "src/routes/router.tsx",
+      "linea": 574
+    },
+    {
+      "id": "ruta:/organizations/:orgId/master-catalog/imports",
+      "archivo": "src/routes/router.tsx",
+      "linea": 573
+    },
+    {
+      "id": "ruta:/organizations/:orgId/master-catalog/items",
+      "archivo": "src/routes/router.tsx",
+      "linea": 571
+    },
+    {
+      "id": "ruta:/organizations/:orgId/master-catalog/items/:catalogItemId",
+      "archivo": "src/routes/router.tsx",
+      "linea": 572
+    },
+    {
+      "id": "ruta:/organizations/:orgId/master-catalog/items/new",
+      "archivo": "src/routes/router.tsx",
+      "linea": 581
+    },
+    {
+      "id": "ruta:/organizations/:orgId/master-catalog/publications",
+      "archivo": "src/routes/router.tsx",
+      "linea": 575
+    },
+    {
+      "id": "ruta:/organizations/:orgId/org-categories",
+      "archivo": "src/routes/router.tsx",
+      "linea": 606
+    },
+    {
+      "id": "ruta:/organizations/:orgId/org-config",
+      "archivo": "src/routes/router.tsx",
+      "linea": 604
+    },
+    {
+      "id": "ruta:/organizations/:orgId/org-goals",
+      "archivo": "src/routes/router.tsx",
+      "linea": 605
+    },
+    {
+      "id": "ruta:/organizations/:orgId/org-messages",
+      "archivo": "src/routes/router.tsx",
+      "linea": 607
+    },
+    {
+      "id": "ruta:/organizations/:orgId/sales",
+      "archivo": "src/routes/router.tsx",
+      "linea": 615
+    },
+    {
+      "id": "ruta:/organizations/:orgId/sales/detail",
+      "archivo": "src/routes/router.tsx",
+      "linea": 616
+    },
+    {
+      "id": "ruta:/organizations/:orgId/settings",
+      "archivo": "src/routes/router.tsx",
+      "linea": 598
+    },
+    {
+      "id": "ruta:/organizations/:orgId/settings/service-courses",
+      "archivo": "src/routes/router.tsx",
+      "linea": 599
+    },
+    {
+      "id": "ruta:/organizations/:orgId/stock-control",
+      "archivo": "src/routes/router.tsx",
+      "linea": 609
+    },
+    {
+      "id": "ruta:/organizations/:orgId/team",
+      "archivo": "src/routes/router.tsx",
+      "linea": 597
+    },
+    {
+      "id": "ruta:/organizations/:orgId/terminals",
+      "archivo": "src/routes/router.tsx",
+      "linea": 600
+    },
+    {
+      "id": "ruta:/organizations/:orgId/ubicacion-tpvs",
+      "archivo": "src/routes/router.tsx",
+      "linea": 612
+    },
+    {
+      "id": "ruta:/organizations/:orgId/users",
+      "archivo": "src/routes/router.tsx",
+      "linea": 608
+    },
+    {
+      "id": "ruta:/organizations/:orgId/ventas-externas",
+      "archivo": "src/routes/router.tsx",
+      "linea": 611
+    },
+    {
+      "id": "ruta:/organizations/:orgId/venues",
+      "archivo": "src/routes/router.tsx",
+      "linea": 596
+    },
+    {
+      "id": "ruta:/privacy",
+      "archivo": "src/routes/router.tsx",
+      "linea": 194
+    },
+    {
+      "id": "ruta:/receipts/public/:accessKey",
+      "archivo": "src/routes/router.tsx",
+      "linea": 930
+    },
+    {
+      "id": "ruta:/reports/settlement/:token",
+      "archivo": "src/routes/router.tsx",
+      "linea": 936
+    },
+    {
+      "id": "ruta:/setup",
+      "archivo": "src/routes/router.tsx",
+      "linea": 184
+    },
+    {
+      "id": "ruta:/signup",
+      "archivo": "src/routes/router.tsx",
+      "linea": 151
+    },
+    {
+      "id": "ruta:/superadmin",
+      "archivo": "src/routes/router.tsx",
+      "linea": 315
+    },
+    {
+      "id": "ruta:/superadmin-v2",
+      "archivo": "src/routes/router.tsx",
+      "linea": 510
+    },
+    {
+      "id": "ruta:/superadmin-v2/activity-log",
+      "archivo": "src/routes/router.tsx",
+      "linea": 553
+    },
+    {
+      "id": "ruta:/superadmin-v2/alerts",
+      "archivo": "src/routes/router.tsx",
+      "linea": 521
+    },
+    {
+      "id": "ruta:/superadmin-v2/analytics",
+      "archivo": "src/routes/router.tsx",
+      "linea": 520
+    },
+    {
+      "id": "ruta:/superadmin-v2/cost-structures",
+      "archivo": "src/routes/router.tsx",
+      "linea": 534
+    },
+    {
+      "id": "ruta:/superadmin-v2/credit-assessment",
+      "archivo": "src/routes/router.tsx",
+      "linea": 539
+    },
+    {
+      "id": "ruta:/superadmin-v2/customers",
+      "archivo": "src/routes/router.tsx",
+      "linea": 524
+    },
+    {
+      "id": "ruta:/superadmin-v2/features",
+      "archivo": "src/routes/router.tsx",
+      "linea": 519
+    },
+    {
+      "id": "ruta:/superadmin-v2/growth",
+      "archivo": "src/routes/router.tsx",
+      "linea": 525
+    },
+    {
+      "id": "ruta:/superadmin-v2/kyc/:venueId",
+      "archivo": "src/routes/router.tsx",
+      "linea": 518
+    },
+    {
+      "id": "ruta:/superadmin-v2/marketing",
+      "archivo": "src/routes/router.tsx",
+      "linea": 546
+    },
+    {
+      "id": "ruta:/superadmin-v2/marketing/:campaignId",
+      "archivo": "src/routes/router.tsx",
+      "linea": 548
+    },
+    {
+      "id": "ruta:/superadmin-v2/marketing/:campaignId/edit",
+      "archivo": "src/routes/router.tsx",
+      "linea": 549
+    },
+    {
+      "id": "ruta:/superadmin-v2/marketing/new",
+      "archivo": "src/routes/router.tsx",
+      "linea": 547
+    },
+    {
+      "id": "ruta:/superadmin-v2/marketing/templates",
+      "archivo": "src/routes/router.tsx",
+      "linea": 550
+    },
+    {
+      "id": "ruta:/superadmin-v2/master-totp",
+      "archivo": "src/routes/router.tsx",
+      "linea": 543
+    },
+    {
+      "id": "ruta:/superadmin-v2/merchant-accounts",
+      "archivo": "src/routes/router.tsx",
+      "linea": 531
+    },
+    {
+      "id": "ruta:/superadmin-v2/modules",
+      "archivo": "src/routes/router.tsx",
+      "linea": 540
+    },
+    {
+      "id": "ruta:/superadmin-v2/onboarding",
+      "archivo": "src/routes/router.tsx",
+      "linea": 551
+    },
+    {
+      "id": "ruta:/superadmin-v2/organizations",
+      "archivo": "src/routes/router.tsx",
+      "linea": 541
+    },
+    {
+      "id": "ruta:/superadmin-v2/payment-analytics",
+      "archivo": "src/routes/router.tsx",
+      "linea": 533
+    },
+    {
+      "id": "ruta:/superadmin-v2/payment-providers",
+      "archivo": "src/routes/router.tsx",
+      "linea": 530
+    },
+    {
+      "id": "ruta:/superadmin-v2/profit-analytics",
+      "archivo": "src/routes/router.tsx",
+      "linea": 523
+    },
+    {
+      "id": "ruta:/superadmin-v2/push-notifications",
+      "archivo": "src/routes/router.tsx",
+      "linea": 545
+    },
+    {
+      "id": "ruta:/superadmin-v2/reports",
+      "archivo": "src/routes/router.tsx",
+      "linea": 527
+    },
+    {
+      "id": "ruta:/superadmin-v2/revenue",
+      "archivo": "src/routes/router.tsx",
+      "linea": 522
+    },
+    {
+      "id": "ruta:/superadmin-v2/server-health",
+      "archivo": "src/routes/router.tsx",
+      "linea": 552
+    },
+    {
+      "id": "ruta:/superadmin-v2/settings",
+      "archivo": "src/routes/router.tsx",
+      "linea": 529
+    },
+    {
+      "id": "ruta:/superadmin-v2/settlement-terms",
+      "archivo": "src/routes/router.tsx",
+      "linea": 535
+    },
+    {
+      "id": "ruta:/superadmin-v2/staff",
+      "archivo": "src/routes/router.tsx",
+      "linea": 542
+    },
+    {
+      "id": "ruta:/superadmin-v2/support",
+      "archivo": "src/routes/router.tsx",
+      "linea": 528
+    },
+    {
+      "id": "ruta:/superadmin-v2/system",
+      "archivo": "src/routes/router.tsx",
+      "linea": 526
+    },
+    {
+      "id": "ruta:/superadmin-v2/terminals",
+      "archivo": "src/routes/router.tsx",
+      "linea": 532
+    },
+    {
+      "id": "ruta:/superadmin-v2/testing",
+      "archivo": "src/routes/router.tsx",
+      "linea": 537
+    },
+    {
+      "id": "ruta:/superadmin-v2/tpv-updates",
+      "archivo": "src/routes/router.tsx",
+      "linea": 544
+    },
+    {
+      "id": "ruta:/superadmin-v2/trainings",
+      "archivo": "src/routes/router.tsx",
+      "linea": 554
+    },
+    {
+      "id": "ruta:/superadmin-v2/trainings/:trainingId",
+      "archivo": "src/routes/router.tsx",
+      "linea": 555
+    },
+    {
+      "id": "ruta:/superadmin-v2/venue-pricing",
+      "archivo": "src/routes/router.tsx",
+      "linea": 536
+    },
+    {
+      "id": "ruta:/superadmin-v2/venues",
+      "archivo": "src/routes/router.tsx",
+      "linea": 517
+    },
+    {
+      "id": "ruta:/superadmin-v2/webhooks",
+      "archivo": "src/routes/router.tsx",
+      "linea": 538
+    },
+    {
+      "id": "ruta:/superadmin/activity-log",
+      "archivo": "src/routes/router.tsx",
+      "linea": 492
+    },
+    {
+      "id": "ruta:/superadmin/aggregators",
+      "archivo": "src/routes/router.tsx",
+      "linea": 396
+    },
+    {
+      "id": "ruta:/superadmin/alerts",
+      "archivo": "src/routes/router.tsx",
+      "linea": 345
+    },
+    {
+      "id": "ruta:/superadmin/analytics",
+      "archivo": "src/routes/router.tsx",
+      "linea": 341
+    },
+    {
+      "id": "ruta:/superadmin/bulk-onboarding",
+      "archivo": "src/routes/router.tsx",
+      "linea": 484
+    },
+    {
+      "id": "ruta:/superadmin/cost-structures",
+      "archivo": "src/routes/router.tsx",
+      "linea": 408
+    },
+    {
+      "id": "ruta:/superadmin/credit-assessment",
+      "archivo": "src/routes/router.tsx",
+      "linea": 432
+    },
+    {
+      "id": "ruta:/superadmin/customers",
+      "archivo": "src/routes/router.tsx",
+      "linea": 357
+    },
+    {
+      "id": "ruta:/superadmin/ecommerce-merchants",
+      "archivo": "src/routes/router.tsx",
+      "linea": 392
+    },
+    {
+      "id": "ruta:/superadmin/features",
+      "archivo": "src/routes/router.tsx",
+      "linea": 337
+    },
+    {
+      "id": "ruta:/superadmin/growth",
+      "archivo": "src/routes/router.tsx",
+      "linea": 361
+    },
+    {
+      "id": "ruta:/superadmin/kyc/:venueId",
+      "archivo": "src/routes/router.tsx",
+      "linea": 330
+    },
+    {
+      "id": "ruta:/superadmin/marketing",
+      "archivo": "src/routes/router.tsx",
+      "linea": 460
+    },
+    {
+      "id": "ruta:/superadmin/marketing/:campaignId",
+      "archivo": "src/routes/router.tsx",
+      "linea": 468
+    },
+    {
+      "id": "ruta:/superadmin/marketing/:campaignId/edit",
+      "archivo": "src/routes/router.tsx",
+      "linea": 472
+    },
+    {
+      "id": "ruta:/superadmin/marketing/new",
+      "archivo": "src/routes/router.tsx",
+      "linea": 464
+    },
+    {
+      "id": "ruta:/superadmin/marketing/templates",
+      "archivo": "src/routes/router.tsx",
+      "linea": 476
+    },
+    {
+      "id": "ruta:/superadmin/master-totp",
+      "archivo": "src/routes/router.tsx",
+      "linea": 448
+    },
+    {
+      "id": "ruta:/superadmin/merchant-accounts",
+      "archivo": "src/routes/router.tsx",
+      "linea": 385
+    },
+    {
+      "id": "ruta:/superadmin/modules",
+      "archivo": "src/routes/router.tsx",
+      "linea": 436
+    },
+    {
+      "id": "ruta:/superadmin/onboarding",
+      "archivo": "src/routes/router.tsx",
+      "linea": 480
+    },
+    {
+      "id": "ruta:/superadmin/organizations",
+      "archivo": "src/routes/router.tsx",
+      "linea": 440
+    },
+    {
+      "id": "ruta:/superadmin/partner-keys",
+      "archivo": "src/routes/router.tsx",
+      "linea": 424
+    },
+    {
+      "id": "ruta:/superadmin/payment-analytics",
+      "archivo": "src/routes/router.tsx",
+      "linea": 404
+    },
+    {
+      "id": "ruta:/superadmin/payment-providers",
+      "archivo": "src/routes/router.tsx",
+      "linea": 381
+    },
+    {
+      "id": "ruta:/superadmin/profit-analytics",
+      "archivo": "src/routes/router.tsx",
+      "linea": 353
+    },
+    {
+      "id": "ruta:/superadmin/push-notifications",
+      "archivo": "src/routes/router.tsx",
+      "linea": 456
+    },
+    {
+      "id": "ruta:/superadmin/reports",
+      "archivo": "src/routes/router.tsx",
+      "linea": 369
+    },
+    {
+      "id": "ruta:/superadmin/revenue",
+      "archivo": "src/routes/router.tsx",
+      "linea": 349
+    },
+    {
+      "id": "ruta:/superadmin/server-health",
+      "archivo": "src/routes/router.tsx",
+      "linea": 488
+    },
+    {
+      "id": "ruta:/superadmin/settings",
+      "archivo": "src/routes/router.tsx",
+      "linea": 377
+    },
+    {
+      "id": "ruta:/superadmin/settlement-terms",
+      "archivo": "src/routes/router.tsx",
+      "linea": 412
+    },
+    {
+      "id": "ruta:/superadmin/staff",
+      "archivo": "src/routes/router.tsx",
+      "linea": 444
+    },
+    {
+      "id": "ruta:/superadmin/support",
+      "archivo": "src/routes/router.tsx",
+      "linea": 373
+    },
+    {
+      "id": "ruta:/superadmin/system",
+      "archivo": "src/routes/router.tsx",
+      "linea": 365
+    },
+    {
+      "id": "ruta:/superadmin/terminals",
+      "archivo": "src/routes/router.tsx",
+      "linea": 400
+    },
+    {
+      "id": "ruta:/superadmin/testing",
+      "archivo": "src/routes/router.tsx",
+      "linea": 420
+    },
+    {
+      "id": "ruta:/superadmin/tpv-updates",
+      "archivo": "src/routes/router.tsx",
+      "linea": 452
+    },
+    {
+      "id": "ruta:/superadmin/trainings",
+      "archivo": "src/routes/router.tsx",
+      "linea": 496
+    },
+    {
+      "id": "ruta:/superadmin/trainings/:trainingId",
+      "archivo": "src/routes/router.tsx",
+      "linea": 500
+    },
+    {
+      "id": "ruta:/superadmin/venue-pricing",
+      "archivo": "src/routes/router.tsx",
+      "linea": 416
+    },
+    {
+      "id": "ruta:/superadmin/venues",
+      "archivo": "src/routes/router.tsx",
+      "linea": 326
+    },
+    {
+      "id": "ruta:/superadmin/webhooks",
+      "archivo": "src/routes/router.tsx",
+      "linea": 428
+    },
+    {
+      "id": "ruta:/terms",
+      "archivo": "src/routes/router.tsx",
+      "linea": 190
+    },
+    {
+      "id": "ruta:/venues",
+      "archivo": "src/routes/router.tsx",
+      "linea": 234
+    },
+    {
+      "id": "ruta:/venues/:slug",
+      "archivo": "src/routes/router.tsx",
+      "linea": 623
+    },
+    {
+      "id": "ruta:/venues/:slug/command-center",
+      "archivo": "src/routes/router.tsx",
+      "linea": 756
+    },
+    {
+      "id": "ruta:/venues/:slug/ecommerce-merchants",
+      "archivo": "src/routes/router.tsx",
+      "linea": 782
+    },
+    {
+      "id": "ruta:/venues/:slug/merchant-accounts",
+      "archivo": "src/routes/router.tsx",
+      "linea": 781
+    },
+    {
+      "id": "ruta:/venues/:slug/payment-config",
+      "archivo": "src/routes/router.tsx",
+      "linea": 780
+    },
+    {
+      "id": "ruta:/venues/:slug/playtelecom",
+      "archivo": "src/routes/router.tsx",
+      "linea": 641
+    },
+    {
+      "id": "ruta:/venues/:slug/playtelecom/celulares-de-promotores",
+      "archivo": "src/routes/router.tsx",
+      "linea": 740
+    },
+    {
+      "id": "ruta:/venues/:slug/playtelecom/comisiones",
+      "archivo": "src/routes/router.tsx",
+      "linea": 680
+    },
+    {
+      "id": "ruta:/venues/:slug/playtelecom/managers",
+      "archivo": "src/routes/router.tsx",
+      "linea": 690
+    },
+    {
+      "id": "ruta:/venues/:slug/playtelecom/promoters",
+      "archivo": "src/routes/router.tsx",
+      "linea": 670
+    },
+    {
+      "id": "ruta:/venues/:slug/playtelecom/reporte",
+      "archivo": "src/routes/router.tsx",
+      "linea": 730
+    },
+    {
+      "id": "ruta:/venues/:slug/playtelecom/sales",
+      "archivo": "src/routes/router.tsx",
+      "linea": 650
+    },
+    {
+      "id": "ruta:/venues/:slug/playtelecom/stock",
+      "archivo": "src/routes/router.tsx",
+      "linea": 648
+    },
+    {
+      "id": "ruta:/venues/:slug/playtelecom/stores",
+      "archivo": "src/routes/router.tsx",
+      "linea": 660
+    },
+    {
+      "id": "ruta:/venues/:slug/playtelecom/supervisor",
+      "archivo": "src/routes/router.tsx",
+      "linea": 720
+    },
+    {
+      "id": "ruta:/venues/:slug/playtelecom/tpv-config",
+      "archivo": "src/routes/router.tsx",
+      "linea": 710
+    },
+    {
+      "id": "ruta:/venues/:slug/playtelecom/users",
+      "archivo": "src/routes/router.tsx",
+      "linea": 700
+    },
+    {
+      "id": "ruta:/venues/:slug/promoters",
+      "archivo": "src/routes/router.tsx",
+      "linea": 766
+    },
+    {
+      "id": "ruta:/venues/:slug/receipts/:receiptId",
+      "archivo": "src/routes/router.tsx",
+      "linea": 633
+    },
+    {
+      "id": "ruta:/venues/:slug/serialized-sales-demo",
+      "archivo": "src/routes/router.tsx",
+      "linea": 636
+    },
+    {
+      "id": "ruta:/venues/:slug/stock",
+      "archivo": "src/routes/router.tsx",
+      "linea": 761
+    },
+    {
+      "id": "ruta:/venues/:slug/stores",
+      "archivo": "src/routes/router.tsx",
+      "linea": 771
+    },
+    {
+      "id": "ruta:/venues/:slug/superadmin",
+      "archivo": "src/routes/router.tsx",
+      "linea": 788
+    },
+    {
+      "id": "ruta:/wl/organizations/:orgSlug",
+      "archivo": "src/routes/router.tsx",
+      "linea": 806
+    },
+    {
+      "id": "ruta:/wl/organizations/:orgSlug/celulares-de-promotores",
+      "archivo": "src/routes/router.tsx",
+      "linea": 817
+    },
+    {
+      "id": "ruta:/wl/organizations/:orgSlug/live-location",
+      "archivo": "src/routes/router.tsx",
+      "linea": 816
+    },
+    {
+      "id": "ruta:/wl/organizations/:orgSlug/managers",
+      "archivo": "src/routes/router.tsx",
+      "linea": 815
+    },
+    {
+      "id": "ruta:/wl/organizations/:orgSlug/reports",
+      "archivo": "src/routes/router.tsx",
+      "linea": 820
+    },
+    {
+      "id": "ruta:/wl/organizations/:orgSlug/sales",
+      "archivo": "src/routes/router.tsx",
+      "linea": 818
+    },
+    {
+      "id": "ruta:/wl/organizations/:orgSlug/sales/detail",
+      "archivo": "src/routes/router.tsx",
+      "linea": 819
+    },
+    {
+      "id": "ruta:/wl/organizations/:orgSlug/settings/service-courses",
+      "archivo": "src/routes/router.tsx",
+      "linea": 821
+    },
+    {
+      "id": "ruta:/wl/organizations/:orgSlug/venues",
+      "archivo": "src/routes/router.tsx",
+      "linea": 814
+    },
+    {
+      "id": "ruta:/wl/venues/:slug",
+      "archivo": "src/routes/router.tsx",
+      "linea": 833
+    },
+    {
+      "id": "ruta:/wl/venues/:slug/celulares-de-promotores",
+      "archivo": "src/routes/router.tsx",
+      "linea": 908
+    },
+    {
+      "id": "ruta:/wl/venues/:slug/comisiones",
+      "archivo": "src/routes/router.tsx",
+      "linea": 897
+    },
+    {
+      "id": "ruta:/wl/venues/:slug/command-center",
+      "archivo": "src/routes/router.tsx",
+      "linea": 845
+    },
+    {
+      "id": "ruta:/wl/venues/:slug/managers",
+      "archivo": "src/routes/router.tsx",
+      "linea": 869
+    },
+    {
+      "id": "ruta:/wl/venues/:slug/promoters",
+      "archivo": "src/routes/router.tsx",
+      "linea": 859
+    },
+    {
+      "id": "ruta:/wl/venues/:slug/reporte",
+      "archivo": "src/routes/router.tsx",
+      "linea": 889
+    },
+    {
+      "id": "ruta:/wl/venues/:slug/sales",
+      "archivo": "src/routes/router.tsx",
+      "linea": 848
+    },
+    {
+      "id": "ruta:/wl/venues/:slug/stock",
+      "archivo": "src/routes/router.tsx",
+      "linea": 846
+    },
+    {
+      "id": "ruta:/wl/venues/:slug/stores",
+      "archivo": "src/routes/router.tsx",
+      "linea": 864
+    },
+    {
+      "id": "ruta:/wl/venues/:slug/supervisor",
+      "archivo": "src/routes/router.tsx",
+      "linea": 884
+    },
+    {
+      "id": "ruta:/wl/venues/:slug/tpv-config",
+      "archivo": "src/routes/router.tsx",
+      "linea": 879
+    },
+    {
+      "id": "ruta:/wl/venues/:slug/users",
+      "archivo": "src/routes/router.tsx",
+      "linea": 874
+    },
+    {
+      "id": "ruta:venue/account",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 202
+    },
+    {
+      "id": "ruta:venue/activar-cobros",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 540
+    },
+    {
+      "id": "ruta:venue/activity-log",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 744
+    },
+    {
+      "id": "ruta:venue/asistencia",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 570
+    },
+    {
+      "id": "ruta:venue/available-balance",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 483
+    },
+    {
+      "id": "ruta:venue/bancos",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 327
+    },
+    {
+      "id": "ruta:venue/bancos/beneficiarios",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 342
+    },
+    {
+      "id": "ruta:venue/bancos/dispersiones",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 360
+    },
+    {
+      "id": "ruta:venue/bancos/movimientos",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 332
+    },
+    {
+      "id": "ruta:venue/bancos/reportes",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 347
+    },
+    {
+      "id": "ruta:venue/bancos/spei",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 353
+    },
+    {
+      "id": "ruta:venue/bancos/transferencias",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 337
+    },
+    {
+      "id": "ruta:venue/campaigns",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 618
+    },
+    {
+      "id": "ruta:venue/cfdi",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 723
+    },
+    {
+      "id": "ruta:venue/cfdi/configuracion",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 728
+    },
+    {
+      "id": "ruta:venue/commissions",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 586
+    },
+    {
+      "id": "ruta:venue/commissions/config/:configId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 591
+    },
+    {
+      "id": "ruta:venue/contabilidad/activos-fijos",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 412
+    },
+    {
+      "id": "ruta:venue/contabilidad/balanza",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 447
+    },
+    {
+      "id": "ruta:venue/contabilidad/bancos",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 384
+    },
+    {
+      "id": "ruta:venue/contabilidad/buzon",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 391
+    },
+    {
+      "id": "ruta:venue/contabilidad/catalogo",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 426
+    },
+    {
+      "id": "ruta:venue/contabilidad/conciliacion",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 372
+    },
+    {
+      "id": "ruta:venue/contabilidad/configuracion",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 433
+    },
+    {
+      "id": "ruta:venue/contabilidad/cuentas-por-pagar",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 468
+    },
+    {
+      "id": "ruta:venue/contabilidad/impuestos",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 461
+    },
+    {
+      "id": "ruta:venue/contabilidad/ingresos",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 366
+    },
+    {
+      "id": "ruta:venue/contabilidad/isr",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 405
+    },
+    {
+      "id": "ruta:venue/contabilidad/libro-diario",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 440
+    },
+    {
+      "id": "ruta:venue/contabilidad/nomina",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 419
+    },
+    {
+      "id": "ruta:venue/contabilidad/preparacion",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 398
+    },
+    {
+      "id": "ruta:venue/contabilidad/reportes",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 454
+    },
+    {
+      "id": "ruta:venue/contabilidad/resumen",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 378
+    },
+    {
+      "id": "ruta:venue/customers",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 604
+    },
+    {
+      "id": "ruta:venue/customers/:customerId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 609
+    },
+    {
+      "id": "ruta:venue/customers/groups",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 608
+    },
+    {
+      "id": "ruta:venue/delivery",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 738
+    },
+    {
+      "id": "ruta:venue/devices",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 511
+    },
+    {
+      "id": "ruta:venue/devices/:tpvId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 515
+    },
+    {
+      "id": "ruta:venue/devices/orders/:id",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 514
+    },
+    {
+      "id": "ruta:venue/disputes",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 668
+    },
+    {
+      "id": "ruta:venue/ecommerce",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 661
+    },
+    {
+      "id": "ruta:venue/edit",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 490
+    },
+    {
+      "id": "ruta:venue/edit/basic-info",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 493
+    },
+    {
+      "id": "ruta:venue/edit/chat",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 497
+    },
+    {
+      "id": "ruta:venue/edit/contact-images",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 495
+    },
+    {
+      "id": "ruta:venue/edit/documents",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 496
+    },
+    {
+      "id": "ruta:venue/edit/general",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 494
+    },
+    {
+      "id": "ruta:venue/edit/integrations",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 498
+    },
+    {
+      "id": "ruta:venue/edit/integrations/google",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 499
+    },
+    {
+      "id": "ruta:venue/exports/:runId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 794
+    },
+    {
+      "id": "ruta:venue/gift-cards",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 711
+    },
+    {
+      "id": "ruta:venue/home",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 197
+    },
+    {
+      "id": "ruta:venue/inventory",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 989
+    },
+    {
+      "id": "ruta:venue/inventory/auto-reorder",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1030
+    },
+    {
+      "id": "ruta:venue/inventory/counts",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1006
+    },
+    {
+      "id": "ruta:venue/inventory/history",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1001
+    },
+    {
+      "id": "ruta:venue/inventory/ingredients",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1022
+    },
+    {
+      "id": "ruta:venue/inventory/inter-venue-transfers",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1013
+    },
+    {
+      "id": "ruta:venue/inventory/inter-venue-transfers/:transferId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1014
+    },
+    {
+      "id": "ruta:venue/inventory/modifier-analytics",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1028
+    },
+    {
+      "id": "ruta:venue/inventory/modifiers",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1027
+    },
+    {
+      "id": "ruta:venue/inventory/pricing",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1026
+    },
+    {
+      "id": "ruta:venue/inventory/product-stock",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1023
+    },
+    {
+      "id": "ruta:venue/inventory/profitability",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1025
+    },
+    {
+      "id": "ruta:venue/inventory/purchase-orders",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1017
+    },
+    {
+      "id": "ruta:venue/inventory/purchase-orders/:poId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1018
+    },
+    {
+      "id": "ruta:venue/inventory/raw-materials",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1000
+    },
+    {
+      "id": "ruta:venue/inventory/recipes",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1024
+    },
+    {
+      "id": "ruta:venue/inventory/restocks",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1021
+    },
+    {
+      "id": "ruta:venue/inventory/stock-counts",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1004
+    },
+    {
+      "id": "ruta:venue/inventory/stock-counts/:countId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1005
+    },
+    {
+      "id": "ruta:venue/inventory/stock-overview",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 999
+    },
+    {
+      "id": "ruta:venue/inventory/suppliers",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1020
+    },
+    {
+      "id": "ruta:venue/inventory/transfers",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1008
+    },
+    {
+      "id": "ruta:venue/inventory/transfers/:transferId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1009
+    },
+    {
+      "id": "ruta:venue/inventory/vendors",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1019
+    },
+    {
+      "id": "ruta:venue/inventory/waste",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1002
+    },
+    {
+      "id": "ruta:venue/kyc-required",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 190
+    },
+    {
+      "id": "ruta:venue/loyalty",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 692
+    },
+    {
+      "id": "ruta:venue/loyalty/card",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 696
+    },
+    {
+      "id": "ruta:venue/menumaker",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 206
+    },
+    {
+      "id": "ruta:venue/menumaker/bundles",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 786
+    },
+    {
+      "id": "ruta:venue/menumaker/categories",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 217
+    },
+    {
+      "id": "ruta:venue/menumaker/categories/:categoryId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 218
+    },
+    {
+      "id": "ruta:venue/menumaker/categories/create",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 219
+    },
+    {
+      "id": "ruta:venue/menumaker/credit-packs",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 227
+    },
+    {
+      "id": "ruta:venue/menumaker/menus",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 214
+    },
+    {
+      "id": "ruta:venue/menumaker/menus/:menuId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 215
+    },
+    {
+      "id": "ruta:venue/menumaker/menus/create",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 216
+    },
+    {
+      "id": "ruta:venue/menumaker/modifier-groups",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 224
+    },
+    {
+      "id": "ruta:venue/menumaker/modifier-groups/create",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 225
+    },
+    {
+      "id": "ruta:venue/menumaker/overview",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 213
+    },
+    {
+      "id": "ruta:venue/menumaker/product-options",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 226
+    },
+    {
+      "id": "ruta:venue/menumaker/products",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 220
+    },
+    {
+      "id": "ruta:venue/menumaker/products/:productId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 221
+    },
+    {
+      "id": "ruta:venue/menumaker/products/create",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 222
+    },
+    {
+      "id": "ruta:venue/menumaker/services",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 223
+    },
+    {
+      "id": "ruta:venue/notifications",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 793
+    },
+    {
+      "id": "ruta:venue/notifications/preferences",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 795
+    },
+    {
+      "id": "ruta:venue/notifications/preferences/1",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 796
+    },
+    {
+      "id": "ruta:venue/notifications/preferences/2",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 797
+    },
+    {
+      "id": "ruta:venue/notifications/preferences/3",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 798
+    },
+    {
+      "id": "ruta:venue/notifications/preferences/4",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 799
+    },
+    {
+      "id": "ruta:venue/notifications/preferences/5",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 800
+    },
+    {
+      "id": "ruta:venue/online-ordering",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 281
+    },
+    {
+      "id": "ruta:venue/orders",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 274
+    },
+    {
+      "id": "ruta:venue/orders/:orderId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 275
+    },
+    {
+      "id": "ruta:venue/payment-links",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 650
+    },
+    {
+      "id": "ruta:venue/payment-links/branding",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 655
+    },
+    {
+      "id": "ruta:venue/payment-links/settings",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 654
+    },
+    {
+      "id": "ruta:venue/payments",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 254
+    },
+    {
+      "id": "ruta:venue/payments/:paymentId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 256
+    },
+    {
+      "id": "ruta:venue/payments/exchanges",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 255
+    },
+    {
+      "id": "ruta:venue/payments/routing-rules",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 261
+    },
+    {
+      "id": "ruta:venue/promotions",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 749
+    },
+    {
+      "id": "ruta:venue/promotions/bundles",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 790
+    },
+    {
+      "id": "ruta:venue/promotions/coupons",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 772
+    },
+    {
+      "id": "ruta:venue/promotions/coupons/:couponId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 777
+    },
+    {
+      "id": "ruta:venue/promotions/coupons/create",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 776
+    },
+    {
+      "id": "ruta:venue/promotions/discounts",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 753
+    },
+    {
+      "id": "ruta:venue/promotions/discounts/:discountId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 758
+    },
+    {
+      "id": "ruta:venue/promotions/discounts/create",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 757
+    },
+    {
+      "id": "ruta:venue/promotions/upsell",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 765
+    },
+    {
+      "id": "ruta:venue/referrals",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 702
+    },
+    {
+      "id": "ruta:venue/reports/home-charts",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 473
+    },
+    {
+      "id": "ruta:venue/reports/pay-later-aging",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 294
+    },
+    {
+      "id": "ruta:venue/reports/payment-methods",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 311
+    },
+    {
+      "id": "ruta:venue/reports/promotions",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 321
+    },
+    {
+      "id": "ruta:venue/reports/refunds",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 315
+    },
+    {
+      "id": "ruta:venue/reports/sales-by-category",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 307
+    },
+    {
+      "id": "ruta:venue/reports/sales-by-item",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 303
+    },
+    {
+      "id": "ruta:venue/reports/sales-summary",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 299
+    },
+    {
+      "id": "ruta:venue/reservations",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 625
+    },
+    {
+      "id": "ruta:venue/reservations/:reservationId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 644
+    },
+    {
+      "id": "ruta:venue/reservations/branding",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 643
+    },
+    {
+      "id": "ruta:venue/reservations/calendar",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 629
+    },
+    {
+      "id": "ruta:venue/reservations/online-booking",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 639
+    },
+    {
+      "id": "ruta:venue/reservations/passes",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 632
+    },
+    {
+      "id": "ruta:venue/reservations/settings",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 634
+    },
+    {
+      "id": "ruta:venue/reservations/waitlist",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 630
+    },
+    {
+      "id": "ruta:venue/reviews",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 548
+    },
+    {
+      "id": "ruta:venue/rh",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 577
+    },
+    {
+      "id": "ruta:venue/rh/puestos",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 578
+    },
+    {
+      "id": "ruta:venue/servicio-pago",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 597
+    },
+    {
+      "id": "ruta:venue/settings",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 804
+    },
+    {
+      "id": "ruta:venue/settings/activity-log",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 922
+    },
+    {
+      "id": "ruta:venue/settings/area-tickets",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 967
+    },
+    {
+      "id": "ruta:venue/settings/area-tickets/external-settlements",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 975
+    },
+    {
+      "id": "ruta:venue/settings/billing",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 883
+    },
+    {
+      "id": "ruta:venue/settings/billing/history",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 899
+    },
+    {
+      "id": "ruta:venue/settings/billing/payment-methods",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 904
+    },
+    {
+      "id": "ruta:venue/settings/billing/subscriptions",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 894
+    },
+    {
+      "id": "ruta:venue/settings/billing/tokens",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 909
+    },
+    {
+      "id": "ruta:venue/settings/floor-plan",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 936
+    },
+    {
+      "id": "ruta:venue/settings/gift-cards",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 962
+    },
+    {
+      "id": "ruta:venue/settings/integrations",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 850
+    },
+    {
+      "id": "ruta:venue/settings/integrations/google",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 854
+    },
+    {
+      "id": "ruta:venue/settings/integrations/pases",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 860
+    },
+    {
+      "id": "ruta:venue/settings/integrations/shopify",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 869
+    },
+    {
+      "id": "ruta:venue/settings/local",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 817
+    },
+    {
+      "id": "ruta:venue/settings/local/basic-info",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 824
+    },
+    {
+      "id": "ruta:venue/settings/local/chat",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 844
+    },
+    {
+      "id": "ruta:venue/settings/local/contact-images",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 825
+    },
+    {
+      "id": "ruta:venue/settings/local/documents",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 826
+    },
+    {
+      "id": "ruta:venue/settings/local/fiscal",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 837
+    },
+    {
+      "id": "ruta:venue/settings/local/privacy",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 830
+    },
+    {
+      "id": "ruta:venue/settings/notifications",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 813
+    },
+    {
+      "id": "ruta:venue/settings/preferences",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 812
+    },
+    {
+      "id": "ruta:venue/settings/print-stations",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 929
+    },
+    {
+      "id": "ruta:venue/settings/profile",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 810
+    },
+    {
+      "id": "ruta:venue/settings/receipt-layout",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 948
+    },
+    {
+      "id": "ruta:venue/settings/role-permissions",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 876
+    },
+    {
+      "id": "ruta:venue/settings/security",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 811
+    },
+    {
+      "id": "ruta:venue/settings/service-courses",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 943
+    },
+    {
+      "id": "ruta:venue/settings/tender-types",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 955
+    },
+    {
+      "id": "ruta:venue/shifts",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 239
+    },
+    {
+      "id": "ruta:venue/shifts/:shiftId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 240
+    },
+    {
+      "id": "ruta:venue/subscriptions",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 675
+    },
+    {
+      "id": "ruta:venue/team",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 553
+    },
+    {
+      "id": "ruta:venue/team/:memberId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 557
+    },
+    {
+      "id": "ruta:venue/tpv",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 518
+    },
+    {
+      "id": "ruta:venue/tpv/:tpvId",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 526
+    },
+    {
+      "id": "ruta:venue/tpv/orders/:id",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 520
+    },
+    {
+      "id": "ruta:venue/virtual-terminal",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 682
+    }
+  ]
+}

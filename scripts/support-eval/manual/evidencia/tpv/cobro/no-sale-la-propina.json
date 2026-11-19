@@ -1,0 +1,136 @@
+{
+  "pagina": "tpv/cobro/no-sale-la-propina",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/SettingsBottomSheet.kt",
+      "linea": 149,
+      "cita": "label = \"Configuración\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/SettingsBottomSheet.kt",
+      "linea": 151,
+      "cita": "enabled = onSettings != null,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt",
+      "linea": 281,
+      "cita": "title = \"Configuración de Pago\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt",
+      "linea": 296,
+      "cita": "label = \"Pantalla de Propina\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsViewModel.kt",
+      "linea": 434,
+      "cita": "updateSetting { it.copy(showTipScreen = newValue) }"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 1967,
+      "cita": "if (settings.showTipScreen) features += PaymentFeature.TIP_COLLECTION"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 1487,
+      "cita": "val nextStep = PaymentFlowGate.nextAfterAmount(effectiveSettings)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 297,
+      "cita": "\"Propina\" to \"Paso $step de $prePaymentSteps · Total: $$total MXN\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 452,
+      "cita": "is AngelPayPaymentState.CollectingTip -> \"Propina\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "tpv-terminal:settings",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 644
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: *Configuración* apagado sin permiso",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 644
+    },
+    {
+      "ruta": "Problema: el punto de venta pide saltar la propina (PAX)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 636
+    },
+    {
+      "ruta": "Problema: en la PAX, con skipReview no se pide la propina",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 2954
+    },
+    {
+      "ruta": "Problema: en la Nexgo, skipReview apaga la propina",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 1483
+    },
+    {
+      "ruta": "Problema: en la PAX, la propina del punto de venta entra por las entradas externas",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 627
+    },
+    {
+      "ruta": "Problema: en la PAX, sin calificación del punto de venta cae al flujo de la terminal (también sin propina si está apagada)",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 2957
+    },
+    {
+      "ruta": "Problema: en la PAX, needsTip es la pantalla de propina",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 2951
+    },
+    {
+      "ruta": "Problema: en la PAX, con la pantalla apagada la propina del punto de venta queda en 0.00",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 2973
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "PAX A910S del laboratorio del Alien (serial 2841548417, terminal AVQD-2841548417 de Avoqado Full)",
+    "version": "2.16.0-sandbox (125), copia de QA com.jaac.avoqado_tpv.sandbox.soportewa compilada en v2.16.0 (031f14db), Blumon de pruebas, contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
+    "apkSha256": "001675e37809b69d6290341cf74f3601306fc9df2072f1dc0f271436710fc401",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/no-sale-la-propina/1-engrane-configuracion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/no-sale-la-propina/2-configuracion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/no-sale-la-propina/3-configuracion-de-pago-pantalla-de-propina-encendida.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/no-sale-la-propina/4-pantalla-de-propina-apagada.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/no-sale-la-propina/5a-sin-propina-calificacion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/no-sale-la-propina/5b-sin-pantalla-de-propina-metodo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/no-sale-la-propina/6-pantalla-de-propina-encendida-de-nuevo.png"
+    ],
+    "filasCreadas": [],
+    "nota": "Engrane → *Configuración* → *Configuración de Pago* → *Pantalla de Propina* encendida (foto 3); se apagó (foto 4) y un cobro nuevo de $5 pasó de Calificación «Paso 1 de 2» directo a Método de pago, sin *Propina* (fotos 5a-5b; se salió sin cobrar); se volvió a encender (foto 6). Con ella encendida, los cobros de esta jornada sí pidieron *Propina*. No se probó el envío de propina desde el punto de venta."
+  },
+  "codex": {
+    "lote": 8,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

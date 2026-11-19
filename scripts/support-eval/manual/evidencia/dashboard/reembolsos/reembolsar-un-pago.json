@@ -1,0 +1,388 @@
+{
+  "pagina": "dashboard/reembolsos/reembolsar-un-pago",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 46,
+      "cita": "\"title\": \"Ventas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 48,
+      "cita": "\"transactions\": \"Transacciones\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Payment/Payments.tsx",
+      "linea": 1163,
+      "cita": "to: row.id,"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 283,
+      "cita": "<MoreHorizontal className=\"h-4 w-4\" />"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 297,
+      "cita": "{t('detail.actions.issueRefund', { defaultValue: 'Emitir reembolso' })}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 799,
+      "cita": "\"items\": \"Reembolsar artículos\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 800,
+      "cita": "\"amount\": \"Reembolsos por importe\""
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 483,
+      "cita": "const rawQty = refundQty[i.id] ?? remainingQty"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 544,
+      "cita": "aria-label=\"-\""
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 556,
+      "cita": "aria-label=\"+\""
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 782,
+      "cita": "inputMode=\"decimal\""
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 406,
+      "cita": "{t('refund.tabs.items', { defaultValue: 'Reembolsar artículos' })}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 241,
+      "cita": "if (restockableItems.length > 0) {"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 243,
+      "cita": "setRestockItemIds(new Set(restockableItems.map(i => i.id)))"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 151,
+      "cita": "() => selectedItems.filter(i => !!i.trackInventory && !!i.productId),"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 792,
+      "cita": "\"confirm\": \"Reabastecer existencias\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 791,
+      "cita": "\"skip\": \"Omitir\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 825,
+      "cita": "\"reason\": \"Motivo del reembolso\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 815,
+      "cita": "\"includeTip\": \"Incluir propina en el reembolso\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 109,
+      "cita": "const [includeTip, setIncludeTip] = useState(true)"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 156,
+      "cita": "const itemsTipChecked = itemsTipManual ?? propinaMarcadaPorDefecto(itemsRefundAmount, remainingSaleAmount)"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 815,
+      "cita": "{paymentTipAmount > 0 && ("
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 708,
+      "cita": "{tipAmount > 0 && ("
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 803,
+      "cita": "\"confirm\": \"Reembolsar\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 775,
+      "cita": "\"success\": \"Reembolso emitido\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 190,
+      "cita": "toast({ title: t('refund.success', { defaultValue: 'Reembolso emitido' }) })"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:refund",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4055
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: el pago se abre con payments:read; el reembolso lo autoriza el SERVIDOR con payments:refund",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 3967
+    },
+    {
+      "ruta": "Antes: el reembolso del panel no pasa por la terminal ni por el procesador",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4029
+    },
+    {
+      "ruta": "Antes: la fila REFUND nace COMPLETED del procesador «dashboard», sin llamar a nadie",
+      "archivo": "avoqado-server/src/services/dashboard/refund.dashboard.service.ts",
+      "linea": 957
+    },
+    {
+      "ruta": "Antes: issueRefund del panel escribe con writeRefundInTx",
+      "archivo": "avoqado-server/src/services/dashboard/refund.dashboard.service.ts",
+      "linea": 1526
+    },
+    {
+      "ruta": "Problema: Emitir reembolso apagado sin saldo por reembolsar",
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 288
+    },
+    {
+      "ruta": "Problema: Reembolsar se prende con motivo e importe que cabe",
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 234
+    },
+    {
+      "ruta": "Problema: aviso de importe de más",
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 844
+    },
+    {
+      "ruta": "Problema: texto de importe de más",
+      "archivo": "src/locales/es/payment.json",
+      "linea": 833
+    },
+    {
+      "ruta": "Problema: tope «como máximo» junto al importe",
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 790
+    },
+    {
+      "ruta": "Problema: 403 sin permiso",
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 208
+    },
+    {
+      "ruta": "Problema: texto del 403",
+      "archivo": "src/locales/es/payment.json",
+      "linea": 780
+    },
+    {
+      "ruta": "Problema: sin respuesta o 5xx = sin confirmar",
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 198
+    },
+    {
+      "ruta": "Problema: título «Reembolso sin confirmar»",
+      "archivo": "src/locales/es/payment.json",
+      "linea": 776
+    },
+    {
+      "ruta": "Problema: texto de sin confirmar",
+      "archivo": "src/locales/es/payment.json",
+      "linea": 779
+    },
+    {
+      "ruta": "Problema: el panel no manda llave de idempotencia (repetir puede duplicar)",
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 165
+    },
+    {
+      "ruta": "Problema: pedido en línea con tarjeta, rechazo del SERVIDOR",
+      "archivo": "avoqado-server/src/services/online-ordering/card/guards.ts",
+      "linea": 76
+    },
+    {
+      "ruta": "Problema: el SERVIDOR revisa ese caso en el reembolso del panel",
+      "archivo": "avoqado-server/src/services/dashboard/refund.dashboard.service.ts",
+      "linea": 1208
+    },
+    {
+      "ruta": "Problema: el texto del SERVIDOR con código se muestra tal cual",
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 197
+    },
+    {
+      "ruta": "Problema: botón «Ver la cuenta» con ese código",
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 199
+    },
+    {
+      "ruta": "Problema: texto «Ver la cuenta»",
+      "archivo": "src/locales/es/payment.json",
+      "linea": 836
+    },
+    {
+      "ruta": "Problema: la liga lleva a la cuenta del pago",
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 540
+    },
+    {
+      "ruta": "Problema: sin leer los reembolsos, Emitir reembolso queda apagado",
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 90
+    },
+    {
+      "ruta": "Problema: el aviso de carga de los reembolsos",
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 335
+    },
+    {
+      "ruta": "Problema: texto del aviso sin datos",
+      "archivo": "src/locales/es/common.json",
+      "linea": 66
+    },
+    {
+      "ruta": "Problema: el 403 de permisos del SERVIDOR no trae code",
+      "archivo": "avoqado-server/src/middlewares/checkPermission.middleware.ts",
+      "linea": 543
+    },
+    {
+      "ruta": "Problema: sin code no se usa el texto del SERVIDOR",
+      "archivo": "src/pages/GiftCards/giftCardText.ts",
+      "linea": 87
+    },
+    {
+      "ruta": "Problema: el detalle sólo existe mientras está abierto",
+      "archivo": "src/pages/Payment/Payments.tsx",
+      "linea": 1643
+    },
+    {
+      "ruta": "Problema: al volver a abrirlo, las consultas se leen de nuevo (QueryClient por omisión)",
+      "archivo": "src/dashboard-main.tsx",
+      "linea": 35
+    },
+    {
+      "ruta": "Problema: cada reembolso sale como tarjeta arriba del pago",
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 337
+    },
+    {
+      "ruta": "T11-10: el panel reintenta una vez cualquier petición tras un error de red, sin llave",
+      "archivo": "src/api.ts",
+      "linea": 98
+    },
+    {
+      "ruta": "T11-10: el reintento",
+      "archivo": "src/api.ts",
+      "linea": 101
+    },
+    {
+      "ruta": "T11-10: cualquier error tras Reembolsar puede seguir a un primer intento que sí quedó; el panel no manda llave",
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 198
+    },
+    {
+      "ruta": "T11-10: al reabrir el pago se vuelven a leer sus reembolsos",
+      "archivo": "src/pages/Payment/Payments.tsx",
+      "linea": 1643
+    },
+    {
+      "ruta": "T11-12: el permiso se revisa en cada petición; el reintento puede recibir 403 aunque el primer intento sí quedó",
+      "archivo": "avoqado-server/src/middlewares/checkPermission.middleware.ts",
+      "linea": 433
+    },
+    {
+      "ruta": "T11-12: la tarjeta del reembolso muestra la hora sólo al minuto; dos reembolsos iguales no se distinguen",
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 591
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3000 (develop)",
+    "fecha": "2026-11-12",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/reembolsar-un-pago/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/reembolsar-un-pago/2.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/reembolsar-un-pago/3.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/reembolsar-un-pago/4.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/reembolsar-un-pago/5.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/reembolsar-un-pago/6.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/reembolsar-un-pago/7.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/reembolsar-un-pago/8.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/reembolsar-un-pago/9.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/reembolsar-un-pago/10.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/reembolsar-un-pago/11.png"
+    ],
+    "filasCreadas": [
+      "Payment cmwe4ce6t01b5wald4biqoe5a — REFUND −$273.00 en efectivo del pago cmuyd9sku003ac97ageie0n84 (1 Alitas Buffalo + 1 de 3 Aros de Cebolla, sin propina, sin reabastecer)",
+      "DigitalReceipt cmwe4cjwa01biwald7wza88o4",
+      "VenueTransaction cmwe4chci01b9waldl80ydkyf",
+      "PaymentEffect cmwe4ci4v01bawald7wtsh037",
+      "ActivityLog cmwe4cf7d01b7waldqyvl5vou — PAYMENT_WITHOUT_SHIFT",
+      "ActivityLog cmwe4cjfk01bfwald8m513hla — REFUND_CREATED"
+    ],
+    "nota": "Avoqado Full, OWNER del seed, pago en efectivo (el reembolso del panel no llama a ningún procesador). El detalle se abrió por su dirección /payments/:paymentId, la misma pantalla de Transacciones. Por importe sólo se comprobó el tope («El importe excede el máximo reembolsable», *Reembolsar* apagado), sin reembolsar. Un solo POST (201)."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -1,0 +1,213 @@
+{
+  "pagina": "windows/lealtad/ajustar-sellos",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 57,
+      "cita": "label = \"Más\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 636,
+      "cita": "label = \"Clientes\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 637,
+      "cita": "onClick = { showCustomers = true },"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersScreen.kt",
+      "linea": 356,
+      "cita": "onClick = { selectedCustomer = customer },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsSection.kt",
+      "linea": 128,
+      "cita": "\"Tarjeta de sellos\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsSection.kt",
+      "linea": 83,
+      "cita": "if (e.puedeAjustar) TextButton(onClick = viewModel::abrirAjuste) { Text(\"Ajustar sellos\") }"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsSection.kt",
+      "linea": 166,
+      "cita": "Text(\"¿Cuántos sellos tiene?\", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsSection.kt",
+      "linea": 148,
+      "cita": "val validoTotal = total != null && total in 0..tarjeta.stampsRequired && total != tarjeta.stampsEarned"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsSection.kt",
+      "linea": 190,
+      "cita": "Text(\"Motivo\", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsSection.kt",
+      "linea": 149,
+      "cita": "val validoMotivo = motivo.trim().length in 5..500"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsSection.kt",
+      "linea": 159,
+      "cita": "enabled = validoTotal && validoMotivo && !guardando,"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsSection.kt",
+      "linea": 122,
+      "cita": "AvoqadoSuccessToast(message = \"¡Sellos ajustados!\", onDismiss = { toast = false })"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "customers:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1588
+    },
+    {
+      "permiso": "customers:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/data/CustomersRepository.kt",
+      "linea": 72
+    },
+    {
+      "permiso": "loyalty:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3489
+    },
+    {
+      "permiso": "loyalty:adjust",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 109
+    },
+    {
+      "permiso": "loyalty:adjust",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3501
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "LOYALTY_PROGRAM",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3488
+    },
+    {
+      "featureCode": "LOYALTY_PROGRAM",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3500
+    },
+    {
+      "featureCode": "LOYALTY_PROGRAM",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/data/SellosRepository.kt",
+      "linea": 75
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Si aparece «Sin conexión: los sellos se ajustan con internet»: su texto",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsSection.kt",
+      "linea": 36
+    },
+    {
+      "afirmacion": "Si aparece en la ficha: la lectura de la tarjeta falló por red (sin botón de ajuste)",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsViewModel.kt",
+      "linea": 81
+    },
+    {
+      "afirmacion": "Si aparece en la ficha: la sección sólo pinta el aviso",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsSection.kt",
+      "linea": 61
+    },
+    {
+      "afirmacion": "Si aparece dentro de Ajustar sellos: el aviso del diálogo",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsSection.kt",
+      "linea": 193
+    },
+    {
+      "afirmacion": "Si aparece dentro de Ajustar sellos: no se pudo confirmar; cualquier IOException del POST es SinRed, también si el servidor ya guardó y sólo se perdió la respuesta (T11-6: sin autocomprobación)",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/data/SellosRepository.kt",
+      "linea": 115
+    },
+    {
+      "afirmacion": "Si aparece dentro de Ajustar sellos: SinRed no es terminal, no recarga la tarjeta",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsViewModel.kt",
+      "linea": 118
+    },
+    {
+      "afirmacion": "Si aparece dentro de Ajustar sellos: la sección no muestra los premios ganados, así que la ficha no distingue un ajuste completado de uno que no llegó",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsSection.kt",
+      "linea": 74
+    },
+    {
+      "afirmacion": "Si aparece en la ficha: volver a abrir al cliente lee la tarjeta otra vez",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsViewModel.kt",
+      "linea": 67
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: «Clientes» se puede esconder en «Personalizar menú» de esta computadora",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 633
+    },
+    {
+      "ruta": "Antes: la entrada «Personalizar menú» de Más",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1989
+    },
+    {
+      "ruta": "Antes: lo que se esconde en «Personalizar menú» se guarda en las preferencias del equipo",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/domain/PreferenciasDelMenu.kt",
+      "linea": 61
+    },
+    {
+      "ruta": "WINDOWS: las preferencias del equipo se guardan en la carpeta de datos de esta computadora (shared_prefs)",
+      "archivo": "desktop/plataforma/src/main/kotlin/com/avoqado/escritorio/ContextoDeEscritorio.kt",
+      "linea": 30
+    },
+    {
+      "ruta": "Antes: la tarjeta no sale si el negocio no tiene programa de sellos",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsViewModel.kt",
+      "linea": 80
+    },
+    {
+      "ruta": "Problema: llegar al máximo completa la tarjeta",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsSection.kt",
+      "linea": 183
+    },
+    {
+      "ruta": "Problema: los sellos cambiaron mientras tanto",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomerStampsSection.kt",
+      "linea": 93
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

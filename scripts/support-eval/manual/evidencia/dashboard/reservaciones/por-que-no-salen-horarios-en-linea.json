@@ -1,0 +1,361 @@
+{
+  "pagina": "dashboard/reservaciones/por-que-no-salen-horarios-en-linea",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1254,
+      "cita": "title: t('sidebar:routes.reservations'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 176,
+      "cita": "\"reservations\": \"Reservaciones\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 652,
+      "cita": "title: t('sidebar:reservationsMenu.settingsGroup', { defaultValue: 'Ajustes' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 255,
+      "cita": "\"settingsGroup\": \"Ajustes\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 656,
+      "cita": "title: t('sidebar:reservationsMenu.general', { defaultValue: 'General' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 256,
+      "cita": "\"general\": \"General\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Reservations/ReservationSettings.tsx",
+      "linea": 1129,
+      "cita": "label={t('settings.publicBooking.enabled')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 670,
+      "cita": "\"enabled\": \"Habilitar reservaciones online\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Reservations/ReservationSettings.tsx",
+      "linea": 807,
+      "cita": "{isPending ? tCommon('loading') : t('actions.saveChanges')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 79,
+      "cita": "\"saveChanges\": \"Guardar Cambios\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 609,
+      "cita": "{ title: t('sidebar:reservationsMenu.calendar'), url: 'reservations/calendar', permission: 'reservations:read' },"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 247,
+      "cita": "\"calendar\": \"Calendario\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/ReservationCalendar.tsx",
+      "linea": 1278,
+      "cita": "title={t('availability.title', { defaultValue: 'Editar disponibilidad' })}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/ReservationCalendar.tsx",
+      "linea": 1280,
+      "cita": "<Clock className=\"h-4 w-4\" />"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/components/EditAvailabilityDialog.tsx",
+      "linea": 188,
+      "cita": "return reservationService.updateSettings(venueId, { operatingHours: hours })"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/components/EditAvailabilityDialog.tsx",
+      "linea": 365,
+      "cita": "{t('availability.done', { defaultValue: 'Listo' })}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reservations/ReservationSettings.tsx",
+      "linea": 887,
+      "cita": "<SettingRow label={t('settings.scheduling.minNotice')} tooltip={t('settings.scheduling.minNoticeHelp')}>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 520,
+      "cita": "\"minNotice\": \"Aviso mínimo\","
+    },
+    {
+      "paso": 4,
+      "archivo": "avoqado-server/src/services/dashboard/reservationAvailability.service.ts",
+      "linea": 221,
+      "cita": "while (cursor.getTime() + defaultDuration * 60000 <= rangeEnd.getTime()) {"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Reservations/ReservationSettings.tsx",
+      "linea": 830,
+      "cita": "label={t('settings.scheduling.capacityMode')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 524,
+      "cita": "\"capacityMode\": \"Capacidad para citas\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 528,
+      "cita": "\"perStaff\": \"Personal disponible\""
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Reservations/ReservationSettings.tsx",
+      "linea": 1136,
+      "cita": "label={t('settings.publicBooking.showStaffPicker')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 672,
+      "cita": "\"showStaffPicker\": \"Permitir que el cliente elija profesionista\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Reservations/components/ReservationStaffConfiguration.tsx",
+      "linea": 109,
+      "cita": "<h3 className=\"text-sm font-semibold\">{t('settings.staffing.serviceMappingTitle')}</h3>"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 539,
+      "cita": "\"serviceMappingTitle\": \"Profesionistas por servicio\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Reservations/components/ReservationStaffConfiguration.tsx",
+      "linea": 288,
+      "cita": "<h3 className=\"text-sm font-semibold\">{t('settings.staffing.scheduleTitle')}</h3>"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 553,
+      "cita": "\"scheduleTitle\": \"Horario del profesionista\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Reservations/ReservationSettings.tsx",
+      "linea": 950,
+      "cita": "{venueId ? <ReservationStaffConfiguration venueId={venueId} venueHours={operatingHours} /> : null}"
+    },
+    {
+      "paso": 6,
+      "archivo": "avoqado-server/src/controllers/public/reservation.public.controller.ts",
+      "linea": 661,
+      "cita": "const classSlots = await availabilityService.getClassSessionSlots(venue.id, leadProductId, date!, onlinePercent, tz)"
+    },
+    {
+      "paso": 6,
+      "archivo": "src/pages/Reservations/ReservationCalendar.tsx",
+      "linea": 1305,
+      "cita": "{t('calendar.createClase', { defaultValue: 'Clase' })}"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "reservations:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 626
+    },
+    {
+      "permiso": "reservations:update",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 67
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1259
+    },
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4695
+    },
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "src/pages/Reservations/ReservationCalendar.tsx",
+      "linea": 1118
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: Ajustes › General sólo administrador o dueño",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 635
+    },
+    {
+      "ruta": "Paso 1: con la reserva en línea apagada el SERVIDOR no la ofrece",
+      "archivo": "avoqado-server/src/controllers/public/reservation.public.controller.ts",
+      "linea": 290
+    },
+    {
+      "ruta": "Paso 1: texto",
+      "archivo": "avoqado-server/src/controllers/public/reservation.public.controller.ts",
+      "linea": 291
+    },
+    {
+      "ruta": "Paso 2: día cerrado = sin horarios",
+      "archivo": "avoqado-server/src/services/dashboard/reservationAvailability.service.ts",
+      "linea": 204
+    },
+    {
+      "ruta": "Paso 2: el día se marca con una casilla",
+      "archivo": "src/pages/Reservations/components/EditAvailabilityDialog.tsx",
+      "linea": 209
+    },
+    {
+      "ruta": "Paso 3: aviso mínimo",
+      "archivo": "avoqado-server/src/services/dashboard/reservationAvailability.service.ts",
+      "linea": 212
+    },
+    {
+      "ruta": "Paso 3: horarios antes del aviso no entran (citas)",
+      "archivo": "avoqado-server/src/services/dashboard/reservationAvailability.service.ts",
+      "linea": 222
+    },
+    {
+      "ruta": "Paso 3 (T11-7): la consulta de clases por día y servicio no usa el aviso mínimo, por eso la frase dice «de cita»",
+      "archivo": "avoqado-server/src/controllers/public/reservation.public.controller.ts",
+      "linea": 661
+    },
+    {
+      "ruta": "Paso 5: cuándo se cuenta el personal",
+      "archivo": "src/pages/Reservations/create-reservation-staff.ts",
+      "linea": 21
+    },
+    {
+      "ruta": "Paso 5: sin personal libre el horario no sale",
+      "archivo": "avoqado-server/src/services/dashboard/reservationAvailability.service.ts",
+      "linea": 457
+    },
+    {
+      "ruta": "Paso 6: clases salen de las sesiones creadas",
+      "archivo": "avoqado-server/src/services/dashboard/reservationAvailability.service.ts",
+      "linea": 547
+    },
+    {
+      "ruta": "Problema: el personal y su horario están en Ajustes › General",
+      "archivo": "src/pages/Reservations/ReservationSettings.tsx",
+      "linea": 950
+    },
+    {
+      "ruta": "Problema: secciones",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 539
+    },
+    {
+      "ruta": "Problema: secciones",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 553
+    },
+    {
+      "ruta": "Problema: ver asignaciones pide equipo y menú",
+      "archivo": "src/pages/Reservations/components/ReservationStaffConfiguration.tsx",
+      "linea": 512
+    },
+    {
+      "ruta": "Problema: ver horarios pide equipo",
+      "archivo": "src/pages/Reservations/components/ReservationStaffConfiguration.tsx",
+      "linea": 521
+    },
+    {
+      "ruta": "Problema: textos",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 541
+    },
+    {
+      "ruta": "Problema: textos",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 555
+    },
+    {
+      "ruta": "Problema: Cambio único y Calendario recurrente editan el mismo horario",
+      "archivo": "src/pages/Reservations/components/EditAvailabilityDialog.tsx",
+      "linea": 305
+    },
+    {
+      "ruta": "Problema: pestaña recurrente",
+      "archivo": "src/pages/Reservations/components/EditAvailabilityDialog.tsx",
+      "linea": 311
+    },
+    {
+      "ruta": "Problema: los dos guardan operatingHours semanal",
+      "archivo": "src/pages/Reservations/components/EditAvailabilityDialog.tsx",
+      "linea": 92
+    },
+    {
+      "ruta": "Problema: Cambio único pinta filas por día de la semana",
+      "archivo": "src/pages/Reservations/components/EditAvailabilityDialog.tsx",
+      "linea": 332
+    },
+    {
+      "ruta": "Problema: y las edita con la misma función",
+      "archivo": "src/pages/Reservations/components/EditAvailabilityDialog.tsx",
+      "linea": 334
+    },
+    {
+      "ruta": "Problema: filas por día de la semana",
+      "archivo": "src/pages/Reservations/components/EditAvailabilityDialog.tsx",
+      "linea": 351
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 10,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

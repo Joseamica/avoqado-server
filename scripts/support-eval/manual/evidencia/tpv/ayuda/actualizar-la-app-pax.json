@@ -1,0 +1,161 @@
+{
+  "pagina": "tpv/ayuda/actualizar-la-app-pax",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/SettingsBottomSheet.kt",
+      "linea": 159,
+      "cita": "label = \"Buscar Actualizaciones\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 923,
+      "cita": "navController.navigate(NavRoute.SelfUpdate.route)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 60,
+      "cita": "title = \"Actualizaciones\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateViewModel.kt",
+      "linea": 87,
+      "cita": "checkForUpdateAvoqado()"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 204,
+      "cita": "text = \"Verificando...\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 268,
+      "cita": "text = \"¡Estás al día!\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 378,
+      "cita": "text = \"¡Nueva versión disponible!\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 614,
+      "cita": "Text(\"Actualizar\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 649,
+      "cita": "text = \"Descargando...\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 676,
+      "cita": "text = \"No cierres la aplicación\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 721,
+      "cita": "text = \"Listo para instalar\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 769,
+      "cita": "Text(\"Instalar Ahora\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 795,
+      "cita": "text = \"Instalando...\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 824,
+      "cita": "text = \"No apagues la terminal durante la instalación\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateViewModel.kt",
+      "linea": 421,
+      "cita": "val result = apkInstaller.install(apkPath)"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/receivers/AppUpdateReceiver.kt",
+      "linea": 63,
+      "cita": "Timber.i(\"🔄 [AppUpdate] Package replaced - relaunching app\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/receivers/AppUpdateReceiver.kt",
+      "linea": 73,
+      "cita": "context.startActivity(launchIntent)"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/receivers/AppUpdateReceiver.kt",
+      "linea": 58,
+      "cita": "if (isActivityResumed) {"
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Problema: *Error* con *Reintentar*",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 921
+    },
+    {
+      "ruta": "Problema: el título *Error*",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 879
+    },
+    {
+      "ruta": "Sólo PAX: en la Nexgo la pantalla no actualiza",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2624
+    },
+    {
+      "ruta": "Problema: *Cancelar* en la descarga o en *Listo para instalar* regresa a la pantalla con *Buscar actualizaciones*",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 115
+    },
+    {
+      "ruta": "Problema: cancel() vuelve a Idle",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateViewModel.kt",
+      "linea": 529
+    },
+    {
+      "ruta": "Problema: el botón *Buscar actualizaciones*",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/self_update/presentation/SelfUpdateScreen.kt",
+      "linea": 187
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 8,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

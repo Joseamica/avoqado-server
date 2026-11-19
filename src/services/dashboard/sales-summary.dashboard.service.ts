@@ -42,6 +42,7 @@ import {
 } from '@/services/dashboard/settlementCalendar.dashboard.service'
 import {
   MINDFORM_NEW_VENUE_ID,
+  sumsLegacyQrPayments,
   AVISO_PUENTE_QR_CAIDO,
   forEachLegacyPaymentPage,
   getLegacyPeriodMetrics,
@@ -264,6 +265,8 @@ export interface SalesSummaryFilters {
   cardType?: CardTypeFilter
   includeMerchantBreakdown?: boolean // additive opt-in; default off preserves existing payload
   includeSettlementProjection?: boolean // additive opt-in; adds settlementCalendar + per-merchant estimatedSettlement
+  /** La B (C1): no corre el agregado de CommissionCalculation y `staffCommissions` sale 0. Sin la opción, el panel no cambia. */
+  skipStaffCommissions?: boolean
 }
 
 /** Round money to cents — keeps API/MCP payloads free of float-accumulation noise. */
@@ -1167,17 +1170,19 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // 7. Staff Commissions (paid to employees) - From CommissionCalculation
   // CommissionCalculation has paymentId → Payment.merchantAccountId for filtering
   const hasPaymentFilter = !!merchantAccountId || isFiltered
-  const staffCommissionsResult = await prisma.commissionCalculation.aggregate({
-    where: {
-      venueId,
-      createdAt: dateFilter.createdAt,
-      status: { not: 'VOIDED' },
-      ...(hasPaymentFilter ? { payment: paymentLevelFilter } : {}),
-    },
-    _sum: {
-      netCommission: true,
-    },
-  })
+  const staffCommissionsResult = filters.skipStaffCommissions
+    ? null
+    : await prisma.commissionCalculation.aggregate({
+        where: {
+          venueId,
+          createdAt: dateFilter.createdAt,
+          status: { not: 'VOIDED' },
+          ...(hasPaymentFilter ? { payment: paymentLevelFilter } : {}),
+        },
+        _sum: {
+          netCommission: true,
+        },
+      })
 
   // 8. Transaction Count - Completed payments
   // Tarjetas de regalo (B5 r1, M-2): sin filtro de método, los cobros se cuentan como las ventas brutas, sin los de cuentas de
@@ -1224,7 +1229,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   const refunds = Math.abs(Number(refundsResult._sum.amount || 0) + Number(refundsResult._sum.tipAmount || 0))
   const tips = Number(tipsResult._sum.tipAmount || 0)
   const platformFees = Number(platformFeesRows[0]?.sum_fee || 0)
-  const staffCommissions = Number(staffCommissionsResult._sum.netCommission || 0)
+  const staffCommissions = Number(staffCommissionsResult?._sum.netCommission || 0)
 
   // Net Sales = Gross Sales - Discounts - Refunds (null when filtered)
   const netSales = grossSales !== null && discounts !== null ? grossSales - discounts - refunds : null
@@ -1274,14 +1279,14 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // ⚠️ MindForm legacy QR bridge. Mirrors the gate in
   // payment.dashboard.service.ts and mergedPayments.service.ts.
   // DELETE this block when the native QR module ships — search the repo for
-  // MINDFORM_NEW_VENUE_ID to find every gate.
+  // MINDFORM_NEW_VENUE_ID (and sumsLegacyQrPayments) to find every gate.
   let legacyAggregate: { amount: number; tips: number; count: number } | null = null
   // D15: true when ANY legacy read of this report could not answer (the page walk here, the period query below).
   let legacyUnavailable = false
   // A filter that admits NO legacy row (OTHER, CARD → DEBIT / AMEX / INTERNATIONAL) never asks the bridge: nothing of it can
   // be part of that total, so its outage cannot make the total incomplete either. Asking anyway copied the bridge failure
   // into a total it does not feed — a false "may be incomplete" (Codex r2 #2). Same gate as the period query below.
-  if (venueId === MINDFORM_NEW_VENUE_ID && legacyAdmission(paymentMethod, cardType).include) {
+  if (sumsLegacyQrPayments(venueId) && legacyAdmission(paymentMethod, cardType).include) {
     legacyAggregate = { amount: 0, tips: 0, count: 0 }
     const paginas = await forEachLegacyPaymentPage(
       { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
@@ -1368,7 +1373,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     // percentage against the new (larger) grand total so the slices still sum to
     // 100%. Depends on the Part D legacyAggregate block above having populated
     // `legacyAggregate` first.
-    if (venueId === MINDFORM_NEW_VENUE_ID && legacyAggregate && legacyAggregate.count > 0) {
+    if (sumsLegacyQrPayments(venueId) && legacyAggregate && legacyAggregate.count > 0) {
       const legacyTotal = legacyAggregate.amount + legacyAggregate.tips
       byPaymentMethod = withPercentages([
         ...(byPaymentMethod ?? []),
@@ -1531,10 +1536,10 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
 
     // MindForm legacy QR → its own QR_LEGACY bucket (no recorded platform fees).
     // legacyAggregate was populated by the Part D block above (declared with let
-    // before this block, so it's in scope here). The MINDFORM_NEW_VENUE_ID guard
+    // before this block, so it's in scope here). The bridge guard
     // is redundant (legacyAggregate is null otherwise) but kept so the
-    // "delete when native QR ships" repo-grep on MINDFORM_NEW_VENUE_ID finds it.
-    if (venueId === MINDFORM_NEW_VENUE_ID && legacyAggregate && legacyAggregate.count > 0) {
+    // "delete when native QR ships" repo-grep on sumsLegacyQrPayments finds it.
+    if (sumsLegacyQrPayments(venueId) && legacyAggregate && legacyAggregate.count > 0) {
       const acc = ensure(buckets, 'QR_LEGACY')
       acc.amount += legacyAggregate.amount + legacyAggregate.tips
       acc.tips += legacyAggregate.tips
@@ -1636,10 +1641,9 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     }
   }
 
+  // Sin importes (la B lo lee también, caso 23): sólo cuántos cobros y de qué reporte.
   logger.info('Sales summary calculated', {
     venueId,
-    grossSales,
-    netSales,
     transactionCount: transactionCountResult,
     reportType,
     periodsCount: byPeriod?.length,

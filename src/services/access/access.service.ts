@@ -11,7 +11,7 @@
  *
  * @see docs/PERMISSIONS_SYSTEM.md for architecture details
  */
-import { StaffRole, OrgRole } from '@prisma/client'
+import { StaffRole, OrgRole, type Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { resolveStaffVenuePermissions } from '@/lib/resolveEffectivePermissions'
 import logger from '@/config/logger'
@@ -257,6 +257,8 @@ export async function getUserAccess(
   venueId: string,
   cache?: AccessCache,
   impersonation?: ImpersonationAccessOverride,
+  /** A transaction reads every row through itself; the feature metadata (global reads) then stays empty. */
+  db: Prisma.TransactionClient = prisma,
 ): Promise<UserAccess> {
   // Don't share impersonation-scoped results with normal resolutions.
   const cacheKey = impersonation
@@ -281,7 +283,7 @@ export async function getUserAccess(
   // Without these, deactivating a superadmin leaves them with full access everywhere.
   const superAdminVenue = impersonation
     ? null
-    : await prisma.staffVenue.findFirst({
+    : await db.staffVenue.findFirst({
         where: {
           staffId: userId,
           role: StaffRole.SUPERADMIN,
@@ -296,7 +298,7 @@ export async function getUserAccess(
   // Parallel queries for performance
   const [staffVenueData, venueData, whiteLabelModule, rolePermissions, ownerOrgs] = await Promise.all([
     // 1. Get user's role in this venue (may be null for SUPERADMIN or org-level OWNER)
-    prisma.staffVenue.findUnique({
+    db.staffVenue.findUnique({
       where: {
         staffId_venueId: {
           staffId: userId,
@@ -317,14 +319,14 @@ export async function getUserAccess(
     }),
 
     // 2. Get venue's organizationId (needed for SUPERADMIN and org-level OWNER fallback)
-    prisma.venue.findUnique({
+    db.venue.findUnique({
       where: { id: venueId },
       select: { organizationId: true },
     }),
 
     // 3. Get white-label venue module (check existence regardless of enabled state,
     //    so we can distinguish "explicitly disabled" from "no override → inherit from org")
-    prisma.venueModule.findFirst({
+    db.venueModule.findFirst({
       where: {
         venueId: venueId,
         module: {
@@ -339,7 +341,7 @@ export async function getUserAccess(
 
     // 4. Get custom permissions for this venue+role combo
     // Note: We query by venueId first, then filter by role after we know it
-    prisma.venueRolePermission.findMany({
+    db.venueRolePermission.findMany({
       where: {
         venueId: venueId,
       },
@@ -351,7 +353,7 @@ export async function getUserAccess(
     }),
 
     // 5. Get organizations where user is OWNER (for org-level OWNER override)
-    prisma.staffOrganization.findMany({
+    db.staffOrganization.findMany({
       where: {
         staffId: userId,
         role: OrgRole.OWNER,
@@ -379,7 +381,7 @@ export async function getUserAccess(
   // impersonación (el actor es el superadmin), la PERSONA tiene que seguir activa: la fila de la
   // sucursal o la membresía de dueño activas no bastan si dieron de baja la cuenta.
   if (!isSuperAdmin && !impersonation) {
-    const persona = await prisma.staff.findUnique({ where: { id: userId }, select: { active: true } })
+    const persona = await db.staff.findUnique({ where: { id: userId }, select: { active: true } })
     if (!persona?.active) {
       throw new Error(`User ${userId} has no access to venue ${venueId}`)
     }
@@ -430,7 +432,7 @@ export async function getUserAccess(
     // If VenueModule.enabled = false, venue explicitly disabled → DON'T fall back to org
   } else if (resolvedOrgId) {
     // No VenueModule → check org-level inheritance
-    resolvedWhiteLabelModule = await prisma.organizationModule.findFirst({
+    resolvedWhiteLabelModule = await db.organizationModule.findFirst({
       where: {
         organizationId: resolvedOrgId,
         enabled: true,
@@ -512,7 +514,7 @@ export async function getUserAccess(
   }
 
   try {
-    access.featureMetadata = await getFeatureMetadataForVenue(venueId)
+    if (db === prisma) access.featureMetadata = await getFeatureMetadataForVenue(venueId)
   } catch (error) {
     logger.warn('accessService.getUserAccess: Failed to resolve feature metadata, returning empty metadata', {
       venueId,

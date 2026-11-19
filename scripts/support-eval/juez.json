@@ -1,0 +1,700 @@
+[
+  {
+    "id": "j01",
+    "question": "La terminal me sale como pendiente en el dashboard, ¿qué hago?",
+    "guideId": "dashboard/terminales/gestionar-terminales",
+    "intro": null,
+    "steps": [
+      {
+        "text": "Si en Terminales te aparece como pendiente, es que todavía falta completar la activación.",
+        "quote": "Si aparece pendiente, falta completar activación."
+      },
+      {
+        "text": "Sigue el flujo de activación que te indica o escríbele a soporte con el identificador del dispositivo.",
+        "quote": "Si se requiere activación, sigue el flujo indicado o contacta a soporte con el identificador del dispositivo."
+      }
+    ],
+    "supported": true,
+    "alteracion": "none",
+    "nota": "Paráfrasis fiel de dos frases de la guía de terminales."
+  },
+  {
+    "id": "j02",
+    "question": "La terminal me sale como pendiente en el dashboard, ¿qué hago?",
+    "guideId": "dashboard/terminales/gestionar-terminales",
+    "intro": null,
+    "steps": [
+      {
+        "text": "Si en Terminales te aparece como pendiente, falta completar la activación; normalmente se activa sola en 24 horas.",
+        "quote": "Si aparece pendiente, falta completar activación."
+      },
+      {
+        "text": "Sigue el flujo de activación que te indica o escríbele a soporte con el identificador del dispositivo.",
+        "quote": "Si se requiere activación, sigue el flujo indicado o contacta a soporte con el identificador del dispositivo."
+      }
+    ],
+    "supported": false,
+    "alteracion": "plazo",
+    "nota": "Igual que j01 más «se activa sola en 24 horas»: la guía no da plazo ni dice que se active sola."
+  },
+  {
+    "id": "j03",
+    "question": "¿Puedo comparar mi saldo disponible directo contra las ventas brutas del día?",
+    "guideId": "dashboard/reportes/ver-saldo-disponible",
+    "intro": null,
+    "steps": [
+      {
+        "text": "No directamente: antes hay que revisar comisiones, tiempos de liquidación, método de pago, devoluciones o ajustes.",
+        "quote": "No debe compararse directamente contra ventas brutas sin revisar comisiones, tiempos de liquidación, método de pago, devoluciones o ajustes."
+      },
+      {
+        "text": "Si no te coincide con lo vendido en el día, checa las liquidaciones pendientes.",
+        "quote": "Si el saldo no coincide con ventas del día, revisa liquidaciones pendientes."
+      }
+    ],
+    "supported": true,
+    "alteracion": "none",
+    "nota": "Responde «no» con la negación completa de la guía."
+  },
+  {
+    "id": "j04",
+    "question": "¿Puedo comparar mi saldo disponible directo contra las ventas brutas del día?",
+    "guideId": "dashboard/reportes/ver-saldo-disponible",
+    "intro": null,
+    "steps": [
+      {
+        "text": "Sí, el saldo disponible se compara directamente contra tus ventas brutas.",
+        "quote": "debe compararse directamente contra ventas brutas"
+      },
+      {
+        "text": "Si no te coincide con lo vendido en el día, checa las liquidaciones pendientes.",
+        "quote": "Si el saldo no coincide con ventas del día, revisa liquidaciones pendientes."
+      }
+    ],
+    "supported": false,
+    "alteracion": "cita-cortada",
+    "nota": "La cita es una subcadena real pero corta el «No» inicial de «No debe compararse directamente contra ventas brutas sin revisar…»; la respuesta dice lo contrario de la guía."
+  },
+  {
+    "id": "j05",
+    "question": "Ya compré el add-on de Reservaciones, ¿ya pueden reservar mis clientes?",
+    "guideId": "dashboard/configuracion/comprar-addons-suscripciones",
+    "intro": null,
+    "steps": [
+      {
+        "text": "Todavía no: no basta con comprar el add-on, también tienes que configurar reglas, horarios, capacidad, permisos y canales públicos.",
+        "quote": "no basta con comprar el add-on. También debes configurar reglas, horarios, capacidad, permisos y canales públicos"
+      },
+      {
+        "text": "Si ya lo compraste y el cliente no puede reservar, revisa Reservaciones > Ajustes y Reservas online.",
+        "quote": "Si compraste Reservaciones pero el cliente no puede reservar, revisa **Reservaciones > Ajustes** y **Reservas online**."
+      }
+    ],
+    "supported": true,
+    "alteracion": "none",
+    "nota": "Paráfrasis fiel, conserva el «no basta»."
+  },
+  {
+    "id": "j06",
+    "question": "Ya compré el add-on de Reservaciones, ¿ya pueden reservar mis clientes?",
+    "guideId": "dashboard/configuracion/comprar-addons-suscripciones",
+    "intro": null,
+    "steps": [
+      {
+        "text": "Ya pueden: basta con comprar el add-on, también tienes que configurar reglas, horarios, capacidad, permisos y canales públicos.",
+        "quote": "no basta con comprar el add-on. También debes configurar reglas, horarios, capacidad, permisos y canales públicos"
+      },
+      {
+        "text": "Si ya lo compraste y el cliente no puede reservar, revisa Reservaciones > Ajustes y Reservas online.",
+        "quote": "Si compraste Reservaciones pero el cliente no puede reservar, revisa **Reservaciones > Ajustes** y **Reservas online**."
+      }
+    ],
+    "supported": false,
+    "alteracion": "negacion",
+    "nota": "j05 sin el «no»: «basta con comprar el add-on» contradice la cita «no basta…»."
+  },
+  {
+    "id": "j07",
+    "question": "Ya di de alta un producto pero no me aparece para vender, ¿qué reviso?",
+    "guideId": "dashboard/menu/gestionar-productos",
+    "intro": null,
+    "steps": [
+      {
+        "text": "Revisa que esté activo, que pertenezca al menú correcto y que tenga una categoría asignada.",
+        "quote": "Si un producto no aparece para venta, revisa si está activo, si pertenece al menú correcto y si tiene categoría asignada."
+      },
+      {
+        "text": "Si no te deja editarlo, puede que tu rol no tenga permiso de menú.",
+        "quote": "Si no puedes editar, tu rol puede no tener permiso de menú."
+      }
+    ],
+    "supported": true,
+    "alteracion": "none",
+    "nota": "Paráfrasis fiel de «Problemas frecuentes» de productos."
+  },
+  {
+    "id": "j08",
+    "question": "Ya di de alta un producto pero no me aparece para vender, ¿qué reviso?",
+    "guideId": "dashboard/menu/gestionar-productos",
+    "intro": null,
+    "steps": [
+      {
+        "text": "Revisa que esté activo, que pertenezca al menú correcto y que tenga una categoría asignada, y luego pícale a «Publicar en caja».",
+        "quote": "Si un producto no aparece para venta, revisa si está activo, si pertenece al menú correcto y si tiene categoría asignada."
+      },
+      {
+        "text": "Si no te deja editarlo, puede que tu rol no tenga permiso de menú.",
+        "quote": "Si no puedes editar, tu rol puede no tener permiso de menú."
+      }
+    ],
+    "supported": false,
+    "alteracion": "boton",
+    "nota": "Agrega un botón «Publicar en caja» que no existe en la guía."
+  },
+  {
+    "id": "j09",
+    "question": "Le mandé a un cliente una liga de pago con el monto mal, ¿qué hago?",
+    "guideId": "dashboard/ventas/crear-liga-pago",
+    "intro": null,
+    "steps": [
+      {
+        "text": "Crea una liga nueva con el monto correcto y ya no uses la anterior.",
+        "quote": "Si una liga se compartió con monto incorrecto, crea una nueva liga con datos correctos y evita reutilizar la anterior."
+      },
+      {
+        "text": "Copia el enlace nuevo y mándaselo por el canal que acordaste con el cliente.",
+        "quote": "Copia el enlace y compártelo por el canal acordado con el cliente."
+      }
+    ],
+    "supported": true,
+    "alteracion": "none",
+    "nota": "La guía cubre exactamente el caso de monto incorrecto."
+  },
+  {
+    "id": "j10",
+    "question": "¿Puedo editarle el monto a la liga que ya le mandé al cliente?",
+    "guideId": "dashboard/ventas/crear-liga-pago",
+    "intro": null,
+    "steps": [
+      {
+        "text": "Sí, crea una liga nueva con el monto correcto y ya no uses la anterior.",
+        "quote": "Si una liga se compartió con monto incorrecto, crea una nueva liga con datos correctos y evita reutilizar la anterior."
+      },
+      {
+        "text": "Copia el enlace nuevo y mándaselo por el canal que acordaste con el cliente.",
+        "quote": "Copia el enlace y compártelo por el canal acordado con el cliente."
+      }
+    ],
+    "supported": false,
+    "alteracion": "si-no-eliptico",
+    "nota": "El «Sí» contesta que se puede editar una liga enviada; la guía nunca lo dice (sólo dice crear una nueva)."
+  },
+  {
+    "id": "j11",
+    "question": "Le cambié los permisos a mi cajera y todavía no le aparece la sección, ¿qué hago?",
+    "guideId": "dashboard/configuracion/asignar-permisos-roles",
+    "intro": {
+      "text": "Los cambios de permisos aplican a la sucursal activa, así que primero confirma que lo cambiaste en la correcta.",
+      "quote": "Los cambios afectan al local activo."
+    },
+    "steps": [
+      {
+        "text": "Pídele que cierre sesión y vuelva a entrar; si sigue igual, que borre filtros o recargue el Dashboard.",
+        "quote": "Si el cambio no aparece de inmediato, pide cerrar sesión, borrar filtros o recargar el Dashboard."
+      },
+      {
+        "text": "Confirma en RH > Personas que tenga el rol correcto.",
+        "quote": "Abre **RH > Personas** para confirmar que la persona tenga el rol correcto."
+      }
+    ],
+    "supported": true,
+    "alteracion": "none",
+    "nota": "Intro y pasos fieles a la guía de permisos."
+  },
+  {
+    "id": "j12",
+    "question": "Le cambié los permisos a mi cajera y todavía no le aparece la sección, ¿qué hago?",
+    "guideId": "dashboard/configuracion/asignar-permisos-roles",
+    "intro": {
+      "text": "Los cambios de permisos se aplican en todas tus sucursales a la vez.",
+      "quote": "Los cambios afectan al local activo."
+    },
+    "steps": [
+      {
+        "text": "Pídele que cierre sesión y vuelva a entrar; si sigue igual, que borre filtros o recargue el Dashboard.",
+        "quote": "Si el cambio no aparece de inmediato, pide cerrar sesión, borrar filtros o recargar el Dashboard."
+      },
+      {
+        "text": "Confirma en RH > Personas que tenga el rol correcto.",
+        "quote": "Abre **RH > Personas** para confirmar que la persona tenga el rol correcto."
+      }
+    ],
+    "supported": false,
+    "alteracion": "intro-falsa",
+    "nota": "La intro contradice su propia cita: la guía dice local activo (y rol distinto por sucursal), no todas las sucursales."
+  },
+  {
+    "id": "j13",
+    "question": "¿Hasta cuándo se puede facturar mi cliente su compra?",
+    "guideId": "general/facturacion-y-contabilidad",
+    "intro": {
+      "text": "Tu cliente se factura solo con la liga de su ticket.",
+      "quote": "La liga del ticket que recibe al pagar lo lleva directo a facturarse"
+    },
+    "steps": [
+      {
+        "text": "Lo puede hacer dentro del mismo mes fiscal de su compra, y sólo de su propia venta.",
+        "quote": "Solo puede facturar su propia venta y dentro del mismo mes fiscal."
+      }
+    ],
+    "supported": true,
+    "alteracion": "none",
+    "nota": "El límite que da la guía es el mismo mes fiscal."
+  },
+  {
+    "id": "j14",
+    "question": "¿Hasta cuándo se puede facturar mi cliente su compra?",
+    "guideId": "general/facturacion-y-contabilidad",
+    "intro": {
+      "text": "Tu cliente se factura solo con la liga de su ticket.",
+      "quote": "La liga del ticket que recibe al pagar lo lleva directo a facturarse"
+    },
+    "steps": [
+      {
+        "text": "Lo puede hacer hasta 72 horas después de su compra, y sólo de su propia venta.",
+        "quote": "Solo puede facturar su propia venta y dentro del mismo mes fiscal."
+      }
+    ],
+    "supported": false,
+    "alteracion": "plazo",
+    "nota": "Cambia «mismo mes fiscal» por un plazo inventado de 72 horas."
+  },
+  {
+    "id": "j15",
+    "question": "¿Cuánto cuesta el plan Pro?",
+    "guideId": "general/overview",
+    "intro": null,
+    "steps": [
+      { "text": "El plan Pro cuesta $999 al mes.", "quote": "**Pro**        | $999 / mes" },
+      {
+        "text": "Es precio de referencia en pesos y sin IVA; confirma el vigente en la página de precios de Avoqado.",
+        "quote": "Precios de referencia en pesos mexicanos, sin IVA. Confirma siempre el precio vigente en la página de precios de Avoqado."
+      }
+    ],
+    "supported": true,
+    "alteracion": "none",
+    "nota": "Precio y aclaración de IVA tal como vienen en la tabla de planes."
+  },
+  {
+    "id": "j16",
+    "question": "¿Cuánto cuesta el plan Pro?",
+    "guideId": "general/overview",
+    "intro": null,
+    "steps": [
+      { "text": "El plan Pro cuesta $899 al mes.", "quote": "**Pro**        | $999 / mes" },
+      {
+        "text": "Es precio de referencia en pesos y sin IVA; confirma el vigente en la página de precios de Avoqado.",
+        "quote": "Precios de referencia en pesos mexicanos, sin IVA. Confirma siempre el precio vigente en la página de precios de Avoqado."
+      }
+    ],
+    "supported": false,
+    "alteracion": "importe",
+    "nota": "Importe cambiado: $899 contra los $999 de la cita."
+  },
+  {
+    "id": "j17",
+    "question": "Si ya le hice factura a un cliente, ¿esa venta se vuelve a meter en la factura global?",
+    "guideId": "general/facturacion-y-contabilidad",
+    "intro": null,
+    "steps": [
+      {
+        "text": "No, no se duplica: en la factura global sólo entra lo que no se facturó aparte.",
+        "quote": "No duplica ingresos: solo entra lo que no se facturó aparte."
+      },
+      {
+        "text": "Las ventas que nadie facturó se juntan en una factura global a «Público en general».",
+        "quote": "Las ventas que nadie facturó individualmente se agrupan en una factura global a \"Público en general\""
+      }
+    ],
+    "supported": true,
+    "alteracion": "none",
+    "nota": "Responde «no» con la frase exacta de la factura global."
+  },
+  {
+    "id": "j18",
+    "question": "Si ya le hice factura a un cliente, ¿esa venta se vuelve a meter en la factura global?",
+    "guideId": "general/facturacion-y-contabilidad",
+    "intro": null,
+    "steps": [
+      {
+        "text": "Sí, se vuelve a meter: en la factura global también entra lo que ya se facturó aparte.",
+        "quote": "No duplica ingresos: solo entra lo que no se facturó aparte."
+      },
+      {
+        "text": "Las ventas que nadie facturó se juntan en una factura global a «Público en general».",
+        "quote": "Las ventas que nadie facturó individualmente se agrupan en una factura global a \"Público en general\""
+      }
+    ],
+    "supported": false,
+    "alteracion": "negacion",
+    "nota": "Invierte la negación de j17: la cita dice que NO entra lo ya facturado."
+  },
+  {
+    "id": "j19",
+    "question": "¿Cómo conecto Avoqado con Claude?",
+    "guideId": "dashboard/configuracion/conectar-avoqado-con-claude-o-chatgpt",
+    "intro": null,
+    "steps": [
+      {
+        "text": "En Claude ve a Customize > Connectors y busca Avoqado.",
+        "quote": "En Claude, abre **Customize > Connectors** y busca **Avoqado**."
+      },
+      {
+        "text": "Dale a Conectar e inicia sesión con tu correo y contraseña de Avoqado.",
+        "quote": "Pulsa **Conectar**. Se abre la página de Avoqado: inicia sesión con tu correo y contraseña de Avoqado."
+      },
+      {
+        "text": "Pícale a Autorizar acceso; al regresar a Claude la conexión ya aparece activa.",
+        "quote": "Pulsa **Autorizar acceso**. Al volver a Claude, la conexión aparece activa."
+      }
+    ],
+    "supported": true,
+    "alteracion": "none",
+    "nota": "Tres pasos fieles con los nombres de botón de la guía."
+  },
+  {
+    "id": "j20",
+    "question": "¿Cómo conecto Avoqado con Claude?",
+    "guideId": "dashboard/configuracion/conectar-avoqado-con-claude-o-chatgpt",
+    "intro": null,
+    "steps": [
+      {
+        "text": "En Claude ve a Customize > Connectors y busca Avoqado.",
+        "quote": "En Claude, abre **Customize > Connectors** y busca **Avoqado**."
+      },
+      {
+        "text": "Dale a Conectar e inicia sesión con tu correo y contraseña de Avoqado.",
+        "quote": "Pulsa **Conectar**. Se abre la página de Avoqado: inicia sesión con tu correo y contraseña de Avoqado."
+      },
+      {
+        "text": "Pícale a «Vincular cuenta»; al regresar a Claude la conexión ya aparece activa.",
+        "quote": "Pulsa **Autorizar acceso**. Al volver a Claude, la conexión aparece activa."
+      }
+    ],
+    "supported": false,
+    "alteracion": "boton",
+    "nota": "Renombra el botón «Autorizar acceso» como «Vincular cuenta», que no está en la guía."
+  },
+  {
+    "id": "j21",
+    "question": "¿Cuánto cuesta el plan Pro?",
+    "guideId": "general/overview",
+    "intro": null,
+    "steps": [{ "text": "El plan Pro cuesta $999 al mes + IVA.", "quote": "**Pro**        | $999 / mes" }],
+    "supported": true,
+    "alteracion": "none",
+    "nota": "Revisión final I1: copia el precio de la tabla y le agrega «+ IVA»; la guía da los precios «sin IVA»."
+  },
+  {
+    "id": "j22",
+    "question": "¿Cuánto cuesta el plan Pro?",
+    "guideId": "general/overview",
+    "intro": null,
+    "steps": [{ "text": "El plan Pro cuesta $999 al mes, IVA incluido.", "quote": "**Pro**        | $999 / mes" }],
+    "supported": false,
+    "alteracion": "importe",
+    "nota": "Revisión final I1: dice que $999 ya incluye el IVA; la guía da $999 sin IVA (el total sería otro)."
+  },
+  {
+    "id": "j23",
+    "question": "¿Cómo cancelo una reservación desde el panel?",
+    "guideId": "dashboard/reservaciones/confirmar-o-cancelar-reservacion",
+    "intro": null,
+    "steps": [
+      {
+        "text": "Para confirmar, hacer check-in, completar o marcar No Show necesitas permiso para editar reservaciones; para cancelar, permiso para cancelarlas.",
+        "quote": "Para confirmar, hacer check-in, completar o marcar No Show necesitas permiso para editar reservaciones; para cancelar, permiso para cancelarlas."
+      },
+      {
+        "text": "En *Reservaciones* › *Resumen*, toca la reservación para abrirla.",
+        "quote": "En *Reservaciones* › *Resumen*, toca la reservación para abrirla."
+      },
+      {
+        "text": "Para cancelarla, toca *Cancelar* y luego *Confirmar Cancelación*: sale «Reservación cancelada».",
+        "quote": "Para cancelarla, toca *Cancelar* y luego *Confirmar Cancelación*: sale «Reservación cancelada»."
+      },
+      {
+        "text": "Si la reservación tenía depósito o usó créditos de un paquete, al cancelarla se aplican las reglas de *Cancelación* de tu negocio.",
+        "quote": "Si la reservación tenía depósito o usó créditos de un paquete, al cancelarla se aplican las reglas de *Cancelación* de tu negocio."
+      },
+      {
+        "text": "No le prometas una devolución al cliente: si pregunta por ella, pide que lo revise una persona del equipo de Avoqado.",
+        "quote": "No le prometas una devolución al cliente: si pregunta por ella, pide que lo revise una persona del equipo de Avoqado."
+      }
+    ],
+    "supported": true,
+    "alteracion": "falta-advertencia",
+    "falta": "Si al cancelar sale un error, no lo repitas: la reservación pudo quedar cancelada, con su depósito o sus créditos en proceso.",
+    "nota": "T-F13: todo es cierto y los pasos son los de la guía, pero falta su advertencia de no repetir la cancelación si sale un error."
+  },
+  {
+    "id": "j24",
+    "question": "En la tablet cobré y se me olvidó ponerle el cliente a la venta, no le sumó el sello, ¿cómo se lo agrego?",
+    "guideId": "android/lealtad/sello-que-no-se-sumo",
+    "intro": null,
+    "steps": [
+      {
+        "text": "Lo de abajo se hace en la pantalla que sale al terminar el cobro, la que arriba dice *Venta nueva*: no la cierres antes.",
+        "quote": "Lo de abajo se hace en la pantalla que sale al terminar el cobro, la que arriba dice *Venta nueva*: no la cierres antes."
+      },
+      {
+        "text": "Agregar el cliente ahí pide el permiso de ver clientes y el de cobrar.",
+        "quote": "Agregar el cliente ahí pide el permiso de ver clientes y el de cobrar."
+      },
+      {
+        "text": "Si a la venta le faltó el cliente, toca *Agregar cliente*, arriba a la derecha de esa pantalla.",
+        "quote": "Si a la venta le faltó el cliente, toca *Agregar cliente*, arriba a la derecha de esa pantalla."
+      },
+      {
+        "text": "Búscalo y tócalo. Si queda ligado, sale «Cliente agregado: …» y su nombre queda en lugar de *Agregar cliente*.",
+        "quote": "Búscalo y tócalo. Si queda ligado, sale «Cliente agregado: …» y su nombre queda en lugar de *Agregar cliente*."
+      },
+      {
+        "text": "Luego toca *Venta nueva*.",
+        "quote": "Luego toca *Venta nueva*."
+      }
+    ],
+    "supported": true,
+    "alteracion": "falta-advertencia",
+    "falta": "Si aparece en esa venta, antes de terminar, «Cobro sin confirmar», «Cancelando el cobro…», «Cancelación pendiente», «¿Se cobró …?» o «La terminal sí cobró este pago…», o alguien declaró que no se cobró, no agregues el cliente desde esa pantalla ni lo intentes otra vez: una persona tiene que revisarlo.",
+    "nota": "T-F13: los pasos para agregar el cliente son los de la guía, pero falta su advertencia: con un cobro en duda no se agrega el cliente ni se intenta otra vez."
+  },
+  {
+    "id": "j25",
+    "question": "¿Cómo le facturo una venta a un cliente desde el panel?",
+    "guideId": "dashboard/facturas/facturar-una-venta",
+    "intro": null,
+    "steps": [
+      {
+        "text": "Necesitas permiso para facturar y para ver pedidos, y que tu plan incluya facturación.",
+        "quote": "Necesitas permiso para facturar y para ver pedidos, y que tu plan incluya facturación."
+      },
+      {
+        "text": "En *Facturación* › *Facturas*, toca *Nueva factura*.",
+        "quote": "En *Facturación* › *Facturas*, toca *Nueva factura*."
+      },
+      {
+        "text": "Busca la venta por folio, monto, o nombre o teléfono del cliente, y toca *Facturar* en su renglón.",
+        "quote": "Busca la venta por folio, monto, o nombre o teléfono del cliente, y toca *Facturar* en su renglón."
+      },
+      {
+        "text": "Llena *RFC*, *Código postal*, *Razón social* (como está ante el SAT, sin «S.A. de C.V.»), *Régimen fiscal* y *Uso del CFDI*.",
+        "quote": "Llena *RFC*, *Código postal*, *Razón social* (como está ante el SAT, sin «S.A. de C.V.»), *Régimen fiscal* y *Uso del CFDI*."
+      },
+      {
+        "text": "Si escribes un correo, se le intenta mandar la factura ahí.",
+        "quote": "Si escribes un correo, se le intenta mandar la factura ahí."
+      },
+      {
+        "text": "Toca *Emitir factura*. Si sale «Factura emitida correctamente.», ya quedó.",
+        "quote": "Toca *Emitir factura*. Si sale «Factura emitida correctamente.», ya quedó."
+      }
+    ],
+    "supported": true,
+    "alteracion": "falta-advertencia",
+    "falta": "Si no le llega, no la vuelvas a emitir: reenvíala o descárgala con el botón ⋯ de la factura en *Facturas*.",
+    "nota": "T-F13: la de c05 de b-tf6-r1. Todo es cierto, pero falta que «Factura emitida correctamente.» no confirma el correo y que no se vuelve a emitir."
+  },
+  {
+    "id": "j26",
+    "question": "¿Cómo doy de alta un producto nuevo en el panel?",
+    "guideId": "dashboard/menu/crear-producto",
+    "intro": null,
+    "steps": [
+      {
+        "text": "El panel guarda el producto nuevo sólo si tienes permiso para crear productos y para editar el inventario, y si tu negocio tiene incluida la función de inventario.",
+        "quote": "El panel guarda el producto nuevo sólo si tienes permiso para crear productos y para editar el inventario, y si tu negocio tiene incluida la función de inventario."
+      },
+      {
+        "text": "En la barra lateral, abre el menú de tu catálogo (su nombre cambia según tu giro, por ejemplo *Menú* o *Catálogo*), entra a *Productos* y toca *Nuevo producto*.",
+        "quote": "En la barra lateral, abre el menú de tu catálogo (su nombre cambia según tu giro, por ejemplo *Menú* o *Catálogo*), entra a *Productos* y toca *Nuevo producto*."
+      },
+      {
+        "text": "Elige el tipo de artículo y toca *Siguiente*.",
+        "quote": "Elige el tipo de artículo y toca *Siguiente*."
+      },
+      {
+        "text": "Escribe el *Nombre del Producto* y el *Precio* y, si aparece, elige la *Categoría*.",
+        "quote": "Escribe el *Nombre del Producto* y el *Precio* y, si aparece, elige la *Categoría*."
+      },
+      {
+        "text": "Toca *Finalizar*.",
+        "quote": "Toca *Finalizar*."
+      }
+    ],
+    "supported": true,
+    "alteracion": "falta-advertencia",
+    "falta": "Si al tocar *Finalizar* sale cualquier «Error», también esos dos, no lo vuelvas a crear ni le pidas a otra persona que lo cree: pudo quedar creado en un primer intento.",
+    "nota": "T-F13: la de c65 de b-tf6-r1. Los cuatro pasos de la guía, pero sin su advertencia de no volver a crear el producto si sale un error."
+  },
+  {
+    "id": "j27",
+    "question": "¿Cómo le reembolso un pago a un cliente por importe en el panel?",
+    "guideId": "dashboard/reembolsos/reembolsar-un-pago",
+    "intro": null,
+    "steps": [
+      {
+        "text": "Necesitas permiso para reembolsar.",
+        "quote": "Necesitas permiso para reembolsar."
+      },
+      {
+        "text": "Si el pago fue con tarjeta bancaria, el reembolso del panel no le regresa el dinero a la tarjeta.",
+        "quote": "Si el pago fue con tarjeta bancaria, el reembolso del panel no le regresa el dinero a la tarjeta."
+      },
+      {
+        "text": "En *Ventas* › *Transacciones*, abre el pago. Arriba del detalle, toca el botón ⋯ y luego *Emitir reembolso*.",
+        "quote": "En *Ventas* › *Transacciones*, abre el pago. Arriba del detalle, toca el botón ⋯ y luego *Emitir reembolso*."
+      },
+      {
+        "text": "Elige *Reembolsar artículos* y marca los artículos (con varias piezas se marcan todas las que quedan; ajústalas con − y +), o *Reembolsos por importe* y escribe el importe.",
+        "quote": "Elige *Reembolsar artículos* y marca los artículos (con varias piezas se marcan todas las que quedan; ajústalas con − y +), o *Reembolsos por importe* y escribe el importe."
+      },
+      {
+        "text": "Por importe, además, el importe no puede pasar del máximo que dice junto a él; si te pasas, sale «El importe excede el máximo reembolsable».",
+        "quote": "Por importe, además, el importe no puede pasar del máximo que dice junto a él; si te pasas, sale «El importe excede el máximo reembolsable»."
+      },
+      {
+        "text": "En *Motivo del reembolso*, elige el motivo.",
+        "quote": "En *Motivo del reembolso*, elige el motivo."
+      },
+      {
+        "text": "Si sale *Incluir propina en el reembolso*, revísala: marcada, el reembolso también toca la propina, y puede venir ya marcada.",
+        "quote": "Si sale *Incluir propina en el reembolso*, revísala: marcada, el reembolso también toca la propina, y puede venir ya marcada."
+      },
+      {
+        "text": "Toca *Reembolsar*. Si sale «Reembolso emitido», ya quedó.",
+        "quote": "Toca *Reembolsar*. Si sale «Reembolso emitido», ya quedó."
+      }
+    ],
+    "supported": true,
+    "alteracion": "falta-advertencia",
+    "falta": "Si después de tocar *Reembolsar* sale «Reembolso sin confirmar», «No tienes permiso para emitir reembolsos…» o cualquier otro error, no lo repitas ni le pidas a otra persona que lo haga: el reembolso pudo quedar en un primer intento.",
+    "nota": "T-F13 (dinero): los pasos y las condiciones de la guía, pero sin su advertencia de no repetir el reembolso si sale un error."
+  },
+  {
+    "id": "j28",
+    "question": "¿Cómo hago un conteo de inventario en la tablet?",
+    "guideId": "android/inventario/contar-existencia",
+    "intro": null,
+    "steps": [
+      {
+        "text": "*Inventario* sale para gerente, administrador y dueño.",
+        "quote": "*Inventario* sale para gerente, administrador y dueño."
+      },
+      {
+        "text": "Los conteos dependen del plan: sin él, *Conteos* sale con candado.",
+        "quote": "Los conteos dependen del plan: sin él, *Conteos* sale con candado."
+      },
+      {
+        "text": "En *Inventario*, abre *Conteos* y toca *Contar existencia*.",
+        "quote": "En *Inventario*, abre *Conteos* y toca *Contar existencia*."
+      },
+      {
+        "text": "En *Tipo de conteo*, elige *Conteo completo* o *Conteo cíclico*; en el cíclico, toca *Agregar artículos* y elige cuáles.",
+        "quote": "En *Tipo de conteo*, elige *Conteo completo* o *Conteo cíclico*; en el cíclico, toca *Agregar artículos* y elige cuáles."
+      },
+      {
+        "text": "Escribe cuánto hay de cada artículo y toca *Siguiente artículo*; en el último, toca *Revisar conteo*.",
+        "quote": "Escribe cuánto hay de cada artículo y toca *Siguiente artículo*; en el último, toca *Revisar conteo*."
+      },
+      {
+        "text": "Revisa *Esperado*, *Contado* y *Diferencia*; si quieres, toca *Agregar nota*.",
+        "quote": "Revisa *Esperado*, *Contado* y *Diferencia*; si quieres, toca *Agregar nota*."
+      },
+      {
+        "text": "Toca *Confirmar* para ajustar el inventario con lo contado.",
+        "quote": "Toca *Confirmar* para ajustar el inventario con lo contado."
+      }
+    ],
+    "supported": true,
+    "alteracion": "falta-advertencia",
+    "falta": "Si aparece «No se pudo comprobar si todo se aplicó…», no repitas el conteo: con conexión, abre ese conteo en *Conteos* y revisa si algún producto dice «No se aplicó».",
+    "nota": "T-F13: la de Codex en T-F6 (contar-existencia): los cinco pasos, pero sin «no repitas el conteo» si no se pudo comprobar que se aplicó."
+  },
+  {
+    "id": "j29",
+    "question": "¿Cómo registro en el panel un pago que me hicieron fuera de Avoqado?",
+    "guideId": "dashboard/pagos/registrar-pago-manual",
+    "intro": null,
+    "steps": [
+      {
+        "text": "*Nuevo pago manual* sale en *Ventas* › *Transacciones* si tienes permiso para registrar pagos manuales.",
+        "quote": "*Nuevo pago manual* sale en *Ventas* › *Transacciones* si tienes permiso para registrar pagos manuales."
+      },
+      {
+        "text": "El pago manual sólo queda anotado: no le cobra nada al cliente.",
+        "quote": "El pago manual sólo queda anotado: no le cobra nada al cliente."
+      },
+      {
+        "text": "En *Ventas* › *Transacciones*, toca *Nuevo pago manual*.",
+        "quote": "En *Ventas* › *Transacciones*, toca *Nuevo pago manual*."
+      },
+      {
+        "text": "Escribe el *Monto*. Si aplica, llena *Propina (opcional)*, *IVA (opcional)* y *Descuento (opcional)*.",
+        "quote": "Escribe el *Monto*. Si aplica, llena *Propina (opcional)*, *IVA (opcional)* y *Descuento (opcional)*."
+      },
+      {
+        "text": "Elige el *Método* (viene en *Efectivo*) y el *Origen*.",
+        "quote": "Elige el *Método* (viene en *Efectivo*) y el *Origen*."
+      },
+      {
+        "text": "Si quieres, elige el *Mesero (opcional)* y escribe la *Razón (opcional)*.",
+        "quote": "Si quieres, elige el *Mesero (opcional)* y escribe la *Razón (opcional)*."
+      },
+      {
+        "text": "Si debajo de un campo sale un aviso en rojo, corrígelo antes de guardar; por ejemplo, «El monto debe ser un número mayor a 0» o «El proveedor externo es requerido cuando el origen es OTHER».",
+        "quote": "Si debajo de un campo sale un aviso en rojo, corrígelo antes de guardar; por ejemplo, «El monto debe ser un número mayor a 0» o «El proveedor externo es requerido cuando el origen es OTHER»."
+      },
+      {
+        "text": "Toca *Registrar pago*. Si sale «Pago registrado», ya quedó.",
+        "quote": "Toca *Registrar pago*. Si sale «Pago registrado», ya quedó."
+      }
+    ],
+    "supported": true,
+    "alteracion": "falta-advertencia",
+    "falta": "Si después de tocar *Registrar pago* sale «Error», debajo dice por qué, pero no lo registres otra vez: el pago pudo quedar en un primer intento.",
+    "nota": "T-F13 (dinero): los pasos de la guía, pero sin su advertencia de no registrar el pago otra vez si sale «Error»."
+  },
+  {
+    "id": "j30",
+    "question": "¿Cómo cancelo mi plan de Avoqado?",
+    "guideId": "dashboard/plan/cancelar-o-reanudar-plan",
+    "intro": null,
+    "steps": [
+      {
+        "text": "*Plan y facturación* sale en *Configuración* para un administrador o el dueño con permiso de facturación; cancelar o reanudar pide además permiso para gestionar suscripciones.",
+        "quote": "*Plan y facturación* sale en *Configuración* para un administrador o el dueño con permiso de facturación; cancelar o reanudar pide además permiso para gestionar suscripciones."
+      },
+      {
+        "text": "Cancelar no corta el plan en ese momento.",
+        "quote": "Cancelar no corta el plan en ese momento."
+      },
+      {
+        "text": "En *Configuración* › *Plan y facturación* › *Plan*, junto a tu plan toca *Cancelar plan*. Si en su lugar dice *Cancelar renovación*, toca ese.",
+        "quote": "En *Configuración* › *Plan y facturación* › *Plan*, junto a tu plan toca *Cancelar plan*. Si en su lugar dice *Cancelar renovación*, toca ese."
+      },
+      {
+        "text": "En «Antes de irte, ¿por qué cancelas?» elige una razón y, si quieres, escribe más. Toca *Sí, cancelar mi plan*.",
+        "quote": "En «Antes de irte, ¿por qué cancelas?» elige una razón y, si quieres, escribe más. Toca *Sí, cancelar mi plan*."
+      },
+      {
+        "text": "Si al cancelar el plan sale *Elige quién se queda*, tienes más usuarios de los que caben en Gratis: marca a quién conservas y toca *Confirmar y cambiar a Gratis*.",
+        "quote": "Si al cancelar el plan sale *Elige quién se queda*, tienes más usuarios de los que caben en Gratis: marca a quién conservas y toca *Confirmar y cambiar a Gratis*."
+      }
+    ],
+    "supported": true,
+    "alteracion": "falta-advertencia",
+    "falta": "Si sale un aviso en rojo al cancelar o al reanudar, no lo repitas: el cambio pudo haber quedado aunque *Plan* no lo muestre.",
+    "nota": "T-F13: los pasos para cancelar, pero sin su advertencia de no repetir la cancelación si sale un aviso en rojo."
+  }
+]

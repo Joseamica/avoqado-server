@@ -1,0 +1,210 @@
+[
+  {
+    "id": "s01",
+    "app": "dashboard",
+    "turnos": [
+      {
+        "mensaje": "cuanto saldo me queda?",
+        "esperado": {
+          "accion": "aclarar",
+          "guias": ["dashboard/reportes/ver-saldo-disponible", "dashboard/configuracion/revisar-billing-detallado"]
+        }
+      },
+      {
+        "mensaje": "la segunda",
+        "esperado": {
+          "accion": "contestar",
+          "guias": ["dashboard/reportes/ver-saldo-disponible", "dashboard/configuracion/revisar-billing-detallado"],
+          "opcion": 2,
+          "debeDecir": [
+            {
+              "texto": "Debe contestar sólo la 2.ª opción que listó el asistente; con el orden del turno 1 (saldo disponible, luego saldo de tokens) es el saldo de tokens de IA, en Configuración > Plan y facturación > Tokens IA.",
+              "claves": ["Configuración", "Plan y facturación", "Tokens IA"],
+              "prohibidas": ["Saldo Disponible", "depósitos"]
+            },
+            {
+              "texto": "Debe decir que «Plan y facturación» sólo aparece para administrador o dueño.",
+              "claves": ["administrador", "dueño"],
+              "prohibidas": ["cualquier usuario"]
+            }
+          ]
+        }
+      }
+    ],
+    "nota": "(a) «saldo» = dinero por depositar (Saldo disponible) o saldo de tokens (Billing detallado). «la segunda» debe usar la guía que el asistente listó en 2.º lugar en el turno 1 (`opcion: 2`); por eso `guias` lleva las dos candidatas."
+  },
+  {
+    "id": "s02",
+    "app": "dashboard",
+    "turnos": [
+      {
+        "mensaje": "donde veo mis facturas",
+        "esperado": {
+          "accion": "aclarar",
+          "guias": [
+            "general/facturacion-y-contabilidad",
+            "dashboard/facturas/reenviar-descargar-o-cancelar-factura",
+            "dashboard/configuracion/revisar-billing-detallado"
+          ]
+        }
+      },
+      {
+        "mensaje": "las q le ago a mis clientes",
+        "esperado": {
+          "accion": "contestar",
+          "guias": ["dashboard/facturas/reenviar-descargar-o-cancelar-factura", "general/facturacion-y-contabilidad"],
+          "debeDecir": [
+            {
+              "texto": "Debe decir que las facturas que el negocio emite a sus clientes se ven en Facturación, en el menú del panel (Facturación › Facturas).",
+              "claves": ["Facturación", "Facturas"],
+              "prohibidas": ["Plan y facturación", "Tokens"]
+            }
+          ]
+        }
+      }
+    ],
+    "nota": "(b) Facturas CFDI que el negocio emite a sus clientes vs facturas que Avoqado le cobra al negocio. [T-F1, 17-nov] El turno 2 decía «la d facturasion y contavilidad», escrito para una opción con ese título; hoy el asistente puede mostrar la página nueva «Reenviar, descargar o cancelar una factura en el panel» («Desde Facturación › Facturas baja el XML o el PDF de una factura»), así que la persona elige por lo que busca, con errores de dedo. En los dos turnos valen esa página y la guía general («Facturación en el menú lateral (facturas emitidas, factura global, configuración fiscal y CSD)»). Salieron las debeDecir de «Contabilidad» y «¿Cuánto gané?» (la pregunta ya no es de contabilidad y «¿Cuánto gané?» no está en ninguna guía) y la de Premium y roles (la página específica no nombra un plan y «gerente» no sale en ninguna de las dos)."
+  },
+  {
+    "id": "s03",
+    "app": "dashboard",
+    "turnos": [
+      {
+        "mensaje": "tengo una duda con los reportes",
+        "esperado": {
+          "accion": "aclarar",
+          "guias": [
+            "dashboard/reportes/revisar-reportes-ventas",
+            "dashboard/reportes/revisar-reportes-avanzados",
+            "dashboard/reportes/ver-analitica"
+          ]
+        }
+      },
+      {
+        "mensaje": "ninguna, es otra cosa: como cambio de sucursal pa ver la otra tienda",
+        "esperado": {
+          "accion": "contestar",
+          "guias": ["dashboard/inicio/cambiar-sucursal"],
+          "debeDecir": [
+            {
+              "texto": "Debe decir que la persona misma cambia de sucursal en el selector de sucursal: clic en el local activo y elegir la sucursal que quiere ver.",
+              "claves": ["selector", "local activo"],
+              "prohibidas": ["ya te cambié", "lo cambio por ti"]
+            },
+            {
+              "texto": "Debe decir que el selector solo muestra los locales a los que su usuario tiene acceso.",
+              "claves": ["acceso"],
+              "prohibidas": ["cualquier sucursal"]
+            },
+            {
+              "texto": "Debe decir que al elegirla el Dashboard recarga y muestra los datos (pagos, pedidos, reportes…) de la sucursal elegida.",
+              "claves": ["recargue", "datos"],
+              "prohibidas": ["cerrar sesión", "otra cuenta"]
+            }
+          ]
+        }
+      }
+    ],
+    "nota": "(c) Rechaza las opciones y hace una pregunta nueva: debe tratarse como pregunta nueva (cambiar de sucursal), no forzarla a una guía de reportes. [T-F1, 17-nov] Turno 2: debeDecir reescritas con lo que dice cambiar-sucursal («ubica el selector de sucursal. Haz clic en el local activo. Elige la sucursal…», «Si no ves una sucursal, tu usuario no está asignado o el local no está disponible para tu cuenta», «Pagos, pedidos, inventario, reportes… se cargan para el local seleccionado», «Espera a que el Dashboard recargue datos»). «arriba del menú lateral», «Buscar sucursales...» y «misma sección» salían del inventario de pantallas. [T-F10b, 17-nov] Turno 2: la 2.ª debeDecir pide la condición como la dice el renglón 4 de cambiar-sucursal («El selector solo muestra locales a los que tu usuario tiene acceso»), como c63: el mismo texto pasó en b-tf7-r1 y falló en b-tf8-r1 y b-tf9-r1 con la condición en las palabras del renglón 12."
+  },
+  {
+    "id": "s04",
+    "app": "android",
+    "turnos": [
+      {
+        "mensaje": "como entro al panel desde la compu",
+        "esperado": {
+          "accion": "contestar",
+          "guias": ["dashboard/inicio/iniciar-sesion"],
+          "debeDecir": [
+            {
+              "texto": "Debe decir que abra la URL oficial del Dashboard Web.",
+              "claves": ["URL oficial", "Dashboard"],
+              "prohibidas": ["descarga la app del POS"]
+            },
+            {
+              "texto": "Debe decir que entra con su correo completo y su contraseña de usuario.",
+              "claves": ["correo", "contraseña"],
+              "prohibidas": ["con tu PIN"]
+            }
+          ]
+        }
+      },
+      {
+        "mensaje": "y si se me olvido?",
+        "esperado": {
+          "accion": "contestar",
+          "guias": ["dashboard/inicio/iniciar-sesion"],
+          "debeDecir": [
+            {
+              "texto": "Debe decir que use la recuperación de contraseña antes de pedir un usuario nuevo.",
+              "claves": ["recuperación de contraseña"],
+              "prohibidas": ["pide un usuario nuevo", "te mando tu contraseña"]
+            },
+            {
+              "texto": "Debe decir que si no le llega la recuperación de contraseña, pida soporte.",
+              "claves": ["soporte"],
+              "prohibidas": ["contraseña temporal", "te enviamos tu contraseña"]
+            }
+          ]
+        }
+      }
+    ],
+    "nota": "(d) «y si se me olvidó?» sólo se entiende con el turno anterior (la contraseña). La guía de inicio de sesión dice usar la recuperación de contraseña antes de pedir otro usuario. [T-F1, 17-nov] Sólo se reescribieron las debeDecir (el caso es REAL). Dicen lo que dice iniciar-sesion: «Abre la URL oficial del Dashboard», «confirma que estás entrando al Dashboard Web», «Escribe tu correo completo… Escribe tu contraseña», «Si la contraseña no funciona, usa recuperación de contraseña antes de pedir un nuevo usuario» y «Pide soporte si el usuario no recibe recuperación de contraseña». «dashboard.avoqado.io» (sólo en el resumen general), «Continuar con Google», «¿Olvidaste tu contraseña?», «Enviar Enlace», «1 hora» y «spam» no están en esa guía."
+  },
+  {
+    "id": "s05",
+    "app": "tpv",
+    "turnos": [
+      {
+        "mensaje": "como le cambio los porcentajes de propina q salen en la terminal",
+        "esperado": {
+          "accion": "no-se",
+          "guias": []
+        }
+      },
+      {
+        "mensaje": "entonces q hago?",
+        "esperado": {
+          "accion": "no-se",
+          "accionesValidas": ["no-se", "persona"],
+          "guias": []
+        }
+      }
+    ],
+    "nota": "(e) Ninguna guía explica configurar la propina sugerida. Al insistir no debe inventar pasos: vale repetir que no lo sabe u ofrecer pasarlo con una persona."
+  },
+  {
+    "id": "s06",
+    "app": "dashboard",
+    "turnos": [
+      {
+        "mensaje": "buenas noches",
+        "esperado": {
+          "accion": "saludo",
+          "guias": []
+        }
+      },
+      {
+        "mensaje": "oye como saco cuanto vendi de cada producto esta semana",
+        "esperado": {
+          "accion": "contestar",
+          "guias": ["dashboard/reportes/revisar-reportes-ventas"],
+          "debeDecir": [
+            {
+              "texto": "Debe decir que en Reportes abra Ventas por producto, donde se ven los artículos vendidos.",
+              "claves": ["Reportes", "Ventas por producto"],
+              "prohibidas": ["no se puede ver por producto"]
+            },
+            {
+              "texto": "Debe decir que seleccione el rango de fechas de esta semana.",
+              "claves": ["rango de fechas"],
+              "prohibidas": []
+            }
+          ]
+        }
+      }
+    ],
+    "nota": "(f) Saludo y luego pregunta real: el segundo turno se contesta con «Ventas por producto» de la guía de reportes de ventas. [T-F1, 17-nov] Turno 2: debeDecir reescritas con lo que dice revisar-reportes-ventas («Abre Reportes > Resumen de ventas. Selecciona el rango de fechas… Abre Ventas por producto para analizar artículos vendidos»). Salió la de plan Pro y roles: esa guía no nombra un plan ni roles para Ventas por producto (hueco del manual). «Ventas por artículo» y «abre en los últimos 7 días» salían del inventario de pantallas."
+  }
+]

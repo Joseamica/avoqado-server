@@ -1,0 +1,279 @@
+{
+  "pagina": "dashboard/reservaciones/agregar-a-lista-de-espera",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1254,
+      "cita": "title: t('sidebar:routes.reservations'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 176,
+      "cita": "\"reservations\": \"Reservaciones\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 611,
+      "cita": "title: t('sidebar:reservationsMenu.waitlist'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 248,
+      "cita": "\"waitlist\": \"Lista de espera\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Reservations/Waitlist.tsx",
+      "linea": 249,
+      "cita": "<Button onClick={() => setShowAddModal(true)}>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 325,
+      "cita": "\"add\": \"Agregar a Lista\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/Waitlist.tsx",
+      "linea": 323,
+      "cita": "<Label>{t('waitlist.addForm.fields.guestName')}</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 333,
+      "cita": "\"guestName\": \"Nombre\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/Waitlist.tsx",
+      "linea": 337,
+      "cita": "<Label>{t('waitlist.addForm.fields.desiredTime')}</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 336,
+      "cita": "\"desiredTime\": \"Hora deseada\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 334,
+      "cita": "\"guestPhone\": \"Teléfono\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 335,
+      "cita": "\"partySize\": \"Personas\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 337,
+      "cita": "\"notes\": \"Notas\""
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reservations/Waitlist.tsx",
+      "linea": 316,
+      "cita": "<Button onClick={handleSubmit(data => addMutation.mutate(data))} disabled={addMutation.isPending}>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 753,
+      "cita": "\"waitlistAddSuccess\": \"Agregado a la lista de espera\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reservations/Waitlist.tsx",
+      "linea": 230,
+      "cita": "<X className=\"h-3.5 w-3.5\" />"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reservations/Waitlist.tsx",
+      "linea": 360,
+      "cita": "onClick={() => removeEntry && removeMutation.mutate(removeEntry.id)}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 328,
+      "cita": "\"remove\": \"Remover\""
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 754,
+      "cita": "\"waitlistRemoveSuccess\": \"Removido de la lista de espera\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "reservations:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 626
+    },
+    {
+      "permiso": "reservations:create",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 101
+    },
+    {
+      "permiso": "reservations:cancel",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 117
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1259
+    },
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4695
+    },
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "src/pages/Reservations/Waitlist.tsx",
+      "linea": 241
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Problema: Nombre y Hora deseada obligatorios, con «Required»",
+      "archivo": "src/pages/Reservations/Waitlist.tsx",
+      "linea": 38
+    },
+    {
+      "ruta": "Problema: Hora deseada",
+      "archivo": "src/pages/Reservations/Waitlist.tsx",
+      "linea": 41
+    },
+    {
+      "ruta": "Problema: lista apagada",
+      "archivo": "avoqado-server/src/services/dashboard/reservationWaitlist.service.ts",
+      "linea": 23
+    },
+    {
+      "ruta": "Problema: dónde se prende",
+      "archivo": "src/pages/Reservations/ReservationSettings.tsx",
+      "linea": 1320
+    },
+    {
+      "ruta": "Problema: texto del interruptor",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 711
+    },
+    {
+      "ruta": "Problema: Ajustes › General sólo administrador o dueño",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 635
+    },
+    {
+      "ruta": "Problema: lista llena",
+      "archivo": "avoqado-server/src/services/dashboard/reservationWaitlist.service.ts",
+      "linea": 33
+    },
+    {
+      "ruta": "Problema: tope",
+      "archivo": "avoqado-server/src/services/dashboard/reservationWaitlist.service.ts",
+      "linea": 32
+    },
+    {
+      "ruta": "Problema: Tamaño máximo",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 713
+    },
+    {
+      "ruta": "Problema: Tamaño máximo en la pantalla de ajustes",
+      "archivo": "src/pages/Reservations/ReservationSettings.tsx",
+      "linea": 1327
+    },
+    {
+      "ruta": "Problema: se cuentan registros, no personas",
+      "archivo": "avoqado-server/src/services/dashboard/reservationWaitlist.service.ts",
+      "linea": 29
+    },
+    {
+      "ruta": "Problema: registros que esperan",
+      "archivo": "avoqado-server/src/services/dashboard/reservationWaitlist.service.ts",
+      "linea": 30
+    },
+    {
+      "ruta": "Problema: cada registro trae Personas (2 por omisión)",
+      "archivo": "src/pages/Reservations/Waitlist.tsx",
+      "linea": 94
+    },
+    {
+      "ruta": "Problema: Required sale antes de mandar (zodResolver + handleSubmit)",
+      "archivo": "src/pages/Reservations/Waitlist.tsx",
+      "linea": 316
+    },
+    {
+      "ruta": "T11-10: el panel reintenta solo ante error de red",
+      "archivo": "src/api.ts",
+      "linea": 98
+    },
+    {
+      "ruta": "T11-10: la lista llena se revisa antes de insertar",
+      "archivo": "avoqado-server/src/services/dashboard/reservationWaitlist.service.ts",
+      "linea": 32
+    },
+    {
+      "ruta": "Problema: error al agregar sólo muestra el aviso",
+      "archivo": "src/pages/Reservations/Waitlist.tsx",
+      "linea": 125
+    },
+    {
+      "ruta": "Problema: texto por omisión",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 756
+    },
+    {
+      "ruta": "Problema: la X sólo en Esperando o Notificado",
+      "archivo": "src/pages/Reservations/Waitlist.tsx",
+      "linea": 218
+    },
+    {
+      "ruta": "Problema: textos de estado",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 318
+    },
+    {
+      "ruta": "Problema: textos de estado",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 319
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 10,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

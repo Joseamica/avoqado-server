@@ -13,6 +13,7 @@
 
 import { PaymentMethod, SettlementDayType, TransactionCardType } from '@prisma/client'
 import { proyectarComisionYNeto } from '../payments/proyeccionMonetaria'
+import { aPesos, centavosDeUnCobro, nuevaSuma, sumar, type SumaDeDinero } from '../payments/sumaExactaDeDinero'
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 
 import { calculateSettlementDate } from '@/services/payments/settlementCalculation.service'
@@ -108,8 +109,6 @@ export function projectPaymentSettlement(
 }
 
 // ── Weekly settlement view (Task 2) ─────────────────────────────────────────
-
-const round2 = (n: number): number => Math.round(n * 100) / 100
 
 /**
  * Monday–Sunday week bounds (as UTC instants) for the venue-local week that
@@ -242,19 +241,13 @@ export async function getSettlementsLandingInWeek(
   const endKey = formatInTimeZone(weekEnd, venueTimezone, 'yyyy-MM-dd')
   const todayKey = formatInTimeZone(new Date(), venueTimezone, 'yyyy-MM-dd')
 
-  const newAgg = (): WeekAgg => ({ gross: 0, commission: 0, net: 0, count: 0 })
-  const bump = (a: WeekAgg, pr: ProjectedSettlement) => {
-    a.gross += pr.gross
-    a.commission += pr.commission
-    a.net += pr.net
-    a.count += 1
-  }
+  // P1: los acumuladores son centavos enteros (sumaExactaDeDinero); a pesos sólo al final. Sumar `number` derivaba a volumen.
   const dayMap = new Map<
     string,
     {
-      total: WeekAgg
-      byMerchant: Map<string, WeekAgg & { displayName: string; provider: string }>
-      byCardType: Map<TransactionCardType, WeekAgg>
+      total: SumaDeDinero
+      byMerchant: Map<string, SumaDeDinero & { displayName: string; provider: string }>
+      byCardType: Map<TransactionCardType, SumaDeDinero>
     }
   >()
 
@@ -306,21 +299,28 @@ export async function getSettlementsLandingInWeek(
       if (!projected) continue
       const key = projected.settlementDateKey
       if (key < startKey || key > endKey) continue // lands outside this week
+      // P1: el día sale de la proyección; el dinero, de los cuatro campos originales del cobro, en centavos.
+      const centavos = centavosDeUnCobro({
+        amount: p.amount,
+        tipAmount: p.tipAmount,
+        venueChargeAmount: p.transactionCost.venueChargeAmount,
+        venueFixedFee: p.transactionCost.venueFixedFee,
+      })
 
-      if (!dayMap.has(key)) dayMap.set(key, { total: newAgg(), byMerchant: new Map(), byCardType: new Map() })
+      if (!dayMap.has(key)) dayMap.set(key, { total: nuevaSuma(), byMerchant: new Map(), byCardType: new Map() })
       const day = dayMap.get(key)!
-      bump(day.total, projected)
+      sumar(day.total, centavos)
       if (!day.byMerchant.has(merchantId)) {
         day.byMerchant.set(merchantId, {
-          ...newAgg(),
+          ...nuevaSuma(),
           displayName: p.merchantAccount?.displayName || p.merchantAccount?.alias || 'Comercio',
           provider: p.merchantAccount?.provider?.name ?? '',
         })
       }
-      bump(day.byMerchant.get(merchantId)!, projected)
+      sumar(day.byMerchant.get(merchantId)!, centavos)
       const ct = p.transactionCost.transactionType
-      if (!day.byCardType.has(ct)) day.byCardType.set(ct, newAgg())
-      bump(day.byCardType.get(ct)!, projected)
+      if (!day.byCardType.has(ct)) day.byCardType.set(ct, nuevaSuma())
+      sumar(day.byCardType.get(ct)!, centavos)
     }
 
     // Una página corta es la última: no se pide otra (y un mock constante no cicla).
@@ -329,37 +329,24 @@ export async function getSettlementsLandingInWeek(
     await cederElEventLoop()
   }
 
-  const roundAgg = (a: WeekAgg): WeekAgg => ({
-    gross: round2(a.gross),
-    commission: round2(a.commission),
-    net: round2(a.net),
-    count: a.count,
-  })
   const days: SettlementWeekDay[] = Array.from(dayMap.entries())
     .map(([date, d]) => ({
       date,
       status: (date < todayKey ? 'settled' : date === todayKey ? 'today' : 'projected') as SettlementWeekDay['status'],
-      ...roundAgg(d.total),
+      ...aPesos(d.total),
       byMerchant: Array.from(d.byMerchant.entries())
-        .map(([merchantAccountId, m]) => ({ merchantAccountId, displayName: m.displayName, provider: m.provider, ...roundAgg(m) }))
+        .map(([merchantAccountId, m]) => ({ merchantAccountId, displayName: m.displayName, provider: m.provider, ...aPesos(m) }))
         .sort((a, b) => b.net - a.net),
       byCardType: Array.from(d.byCardType.entries())
-        .map(([cardType, c]) => ({ cardType, ...roundAgg(c) }))
+        .map(([cardType, c]) => ({ cardType, ...aPesos(c) }))
         .sort((a, b) => b.net - a.net),
     }))
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
 
-  const weekTotal = roundAgg(
-    days.reduce(
-      (acc, d) => ({
-        gross: acc.gross + d.gross,
-        commission: acc.commission + d.commission,
-        net: acc.net + d.net,
-        count: acc.count + d.count,
-      }),
-      newAgg(),
-    ),
-  )
+  // P1: la semana suma los centavos exactos de sus días (no los días ya redondeados) y pasa a pesos al final.
+  const semana = nuevaSuma()
+  for (const d of dayMap.values()) sumar(semana, d.total)
+  const weekTotal = aPesos(semana)
 
   return { weekStart: startKey, weekEnd: endKey, days, weekTotal }
 }

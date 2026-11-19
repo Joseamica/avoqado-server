@@ -17,6 +17,10 @@ const SALTOS = 3
 
 /** Jobs que pueden llegar a un mensaje pero nunca a partir de un negocio demo. La razón es obligatoria. */
 const NUNCA_TOCAN_UN_DEMO: Record<string, string> = {
+  'support-whatsapp.job.ts':
+    'cada mensaje corre con conNegocio en support/worker.service; delivery.integration prueba rechazo demo incluso tras esperar el transporte y batch.test comprueba contextos independientes',
+  'support-notices.job.ts':
+    'avisa al equipo de Avoqado (SUPPORT_HANDOFF_EMAIL_TO), y cada aviso corre con conNegocio(row.venueId) en support/notices.service (la prueba de abajo lo exige)',
   'giftCardDelivery.job.ts': 'cada entrega corre con conNegocio(e.venueId) en giftCardDelivery.service (la prueba de abajo lo exige)',
   'announcementEmail.job.ts':
     'cada correo de anuncio se manda con conNegocio(d.venueId) en announcementEmail.service y salta DEMO antes de reservar (la prueba de abajo lo exige)',
@@ -119,4 +123,9 @@ it('las tarjetas de regalo se entregan con el negocio de cada tarjeta en el cont
 it('los correos de anuncios se mandan con el negocio de cada fila en el contexto', () => {
   const servicio = sinComentarios(fs.readFileSync(path.join(JOBS, '../services/announcements/announcementEmail.service.ts'), 'utf8'))
   expect(servicio).toMatch(/conNegocio\(d\.venueId, \(\) =>\s*emailService\.sendEmailWithResult\(/)
+})
+
+it('los avisos de soporte salen con el negocio de origen de cada aviso en el contexto', () => {
+  const servicio = sinComentarios(fs.readFileSync(path.join(JOBS, '../services/support/notices.service.ts'), 'utf8'))
+  expect(servicio).toMatch(/conNegocio\(row\.venueId \?\? null, \(\) => sendOne\(row,/)
 })

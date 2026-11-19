@@ -1,0 +1,204 @@
+{
+  "pagina": "dashboard/cuentas-por-cobrar/liquidar-saldo-de-cliente",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 13,
+      "cita": "\"title\": \"Clientes\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 14,
+      "cita": "\"all\": \"Todos los Clientes\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Customers/Customers.tsx",
+      "linea": 525,
+      "cita": "{t('list.filters.pendingBalance', { defaultValue: 'Con Saldo Pendiente' })}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 13,
+      "cita": "\"pendingBalance\": \"Con Saldo Pendiente\""
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Customers/Customers.tsx",
+      "linea": 329,
+      "cita": "<MoreHorizontal className=\"h-4 w-4\" />"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Customers/Customers.tsx",
+      "linea": 347,
+      "cita": "{t('actions.settleBalance')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 268,
+      "cita": "\"settleBalance\": \"Liquidar Saldo\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 274,
+      "cita": "\"pendingOrders\": \"Órdenes pendientes\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 275,
+      "cita": "\"totalBalance\": \"Saldo total\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 276,
+      "cita": "\"notesLabel\": \"Notas (opcional)\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 279,
+      "cita": "\"confirm\": \"Liquidar Saldo\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 280,
+      "cita": "\"successTitle\": \"Saldo Liquidado\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 281,
+      "cita": "\"successDescription\": \"Se liquidaron {{count}} orden(es) por un total de {{amount}}\""
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Customers/Customers.tsx",
+      "linea": 152,
+      "cita": "count: data.settledOrderCount,"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "customers:settle-balance",
+      "archivo": "src/pages/Customers/Customers.tsx",
+      "linea": 341
+    },
+    {
+      "permiso": "customers:settle-balance",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 10564
+    },
+    {
+      "permiso": "customers:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 605
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: sólo sale con saldo pendiente",
+      "archivo": "src/pages/Customers/Customers.tsx",
+      "linea": 340
+    },
+    {
+      "ruta": "Antes: lo liquidado queda como EFECTIVO",
+      "archivo": "avoqado-server/src/services/dashboard/customer.dashboard.service.ts",
+      "linea": 1010
+    },
+    {
+      "ruta": "Antes: y entra como efectivo del cajón",
+      "archivo": "avoqado-server/src/services/dashboard/customer.dashboard.service.ts",
+      "linea": 1012
+    },
+    {
+      "ruta": "Paso 4: no todo lo pendiente entra (cobros con tarjeta fallidos, pedidos en línea con tarjeta)",
+      "archivo": "avoqado-server/src/services/dashboard/customer.dashboard.service.ts",
+      "linea": 857
+    },
+    {
+      "ruta": "Problema: error al liquidar",
+      "archivo": "src/pages/Customers/Customers.tsx",
+      "linea": 162
+    },
+    {
+      "ruta": "Problema: la razón del SERVIDOR",
+      "archivo": "src/pages/Customers/Customers.tsx",
+      "linea": 163
+    },
+    {
+      "ruta": "Problema: texto «Error»",
+      "archivo": "src/locales/es/common.json",
+      "linea": 17
+    },
+    {
+      "ruta": "Problema: el barrido salta un pedido de Rappi en efectivo",
+      "archivo": "avoqado-server/src/services/dashboard/customer.dashboard.service.ts",
+      "linea": 946
+    },
+    {
+      "ruta": "Problema: el Saldo Pendiente sí lo cuenta (sin esa exclusión)",
+      "archivo": "avoqado-server/src/services/shared/customerSearch.ts",
+      "linea": 160
+    },
+    {
+      "ruta": "Problema: tras liquidar, la lista se vuelve a leer",
+      "archivo": "src/pages/Customers/Customers.tsx",
+      "linea": 156
+    },
+    {
+      "ruta": "Problema: la columna Saldo Pendiente",
+      "archivo": "src/pages/Customers/Customers.tsx",
+      "linea": 308
+    },
+    {
+      "ruta": "Antes: Clientes pide customers:read; liquidar no lo concede",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 605
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3000 (develop)",
+    "fecha": "2026-11-12",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/liquidar-saldo-de-cliente/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/liquidar-saldo-de-cliente/2.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/liquidar-saldo-de-cliente/3.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/liquidar-saldo-de-cliente/4.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/liquidar-saldo-de-cliente/5.png"
+    ],
+    "filasCreadas": [
+      "Payment cmwe4hphw01c2waldx2z6nsyp — $30.00 CASH que liquida ORD-1793167166037 de Aniyah Keebler (la orden cmvrpfklv00iewashmghvyvjc pasó a PAID)",
+      "PaymentEffect cmwe4huds01c7wald27pdr2wh",
+      "CommissionCalculation cmwe4i5ac01cdwaldjk4uoc14",
+      "ActivityLog cmwe4hpzn01c4waldvnh2fgl8 — PAYMENT_WITHOUT_SHIFT",
+      "ActivityLog cmwe4hvm901cbwaldtqi3h6gv — CUSTOMER_BALANCE_SETTLED"
+    ],
+    "nota": "Avoqado Full, OWNER del seed. Un solo POST /settle-balance (200): «Se liquidaron 1 orden(es) por un total de $30.00»."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

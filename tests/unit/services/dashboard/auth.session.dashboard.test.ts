@@ -132,6 +132,36 @@ describe('Parte A — el dashboard web emite sesiones revocables', () => {
     ],
   })
 
+  describe('personal support after losing the last venue', () => {
+    beforeEach(() => {
+      mockPrisma.staff.findUnique = jest.fn().mockResolvedValue({ ...staffConVenue(), venues: [], organizations: [] })
+    })
+    it.each(['PASSWORD', 'GOOGLE'])(
+      'issues an accredited but venue-less VIEWER session only for explicit support intent through %s',
+      async method => {
+        if (method === 'PASSWORD')
+          await loginStaff({ email: 'duena@negocio.com', password: validPassword, purpose: 'support-whatsapp' } as any)
+        else await loginWithGoogle('id-token', false, undefined, 'support-whatsapp')
+        expect(createSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ staffId: 'staff-1', venueId: 'support-personal', strongAuthAt: expect.any(Date) }),
+        )
+        expect(mockJwt.generateAccessToken).toHaveBeenCalledWith(
+          'staff-1',
+          'support-personal',
+          'support-personal',
+          StaffRole.VIEWER,
+          undefined,
+          { sid: SESSION_ID },
+        )
+      },
+    )
+    it('keeps ordinary login without venue access rejected', async () => {
+      await expect(loginStaff({ email: 'duena@negocio.com', password: validPassword } as any)).rejects.toMatchObject({
+        code: 'NO_VENUE_ACCESS',
+      })
+      expect(createSessionMock).not.toHaveBeenCalled()
+    })
+  })
   describe('login con contraseña', () => {
     beforeEach(() => {
       mockPrisma.staff.findUnique = jest.fn().mockResolvedValue(staffConVenue())
@@ -144,6 +174,13 @@ describe('Parte A — el dashboard web emite sesiones revocables', () => {
       expect(createSessionMock).toHaveBeenCalledWith(
         expect.objectContaining({ staffId: 'staff-1', venueId: VENUE_ID, authMethod: AuthMethod.PASSWORD }),
       )
+    })
+
+    it('sólo después de comprobar la contraseña acredita el login personal', async () => {
+      await expect(loginStaff({ email: 'duena@negocio.com', password: 'incorrecta' } as any)).rejects.toThrow()
+      expect(createSessionMock).not.toHaveBeenCalled()
+      await loginStaff({ email: 'duena@negocio.com', password: validPassword } as any)
+      expect(createSessionMock).toHaveBeenCalledWith(expect.objectContaining({ strongAuthAt: expect.any(Date) }))
     })
 
     it('🔴 mete el sid como 6º argumento del access token — el 5º sigue siendo rememberMe', async () => {
@@ -212,6 +249,46 @@ describe('Parte A — el dashboard web emite sesiones revocables', () => {
       expect(args[3]).toBe('venue-2')
       expect(args[4]).toEqual(expect.objectContaining({ sid: SESSION_ID }))
     })
+
+    it('una sesión PIN/POS conserva su origen y no se convierte en un login personal', async () => {
+      mockPrisma.session = {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'source',
+          staffId: 'staff-1',
+          authMethod: 'PIN',
+          deviceId: 'device',
+          revokedAt: null,
+          strongAuthAt: null,
+        }),
+      }
+      await switchVenueForStaff('staff-1', ORG_ID, 'venue-2', { sid: 'source', origen: 'POS' })
+      expect(createSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ authMethod: 'PIN', deviceId: 'device', parentSessionId: 'source', strongAuthAt: null }),
+      )
+      expect(mockJwt.generateAccessToken.mock.calls[0][5]).toMatchObject({ pos: true })
+    })
+
+    it('hereda la fecha personal sin renovarla; una fuente ajena o revocada no emite sesión', async () => {
+      const strongAuthAt = new Date(Date.now() - 60_000)
+      mockPrisma.session = {
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({ id: 'source', staffId: 'staff-1', authMethod: 'PASSWORD', deviceId: null, revokedAt: null, strongAuthAt }),
+      }
+      await switchVenueForStaff('staff-1', ORG_ID, 'venue-2', { sid: 'source' })
+      expect(createSessionMock).toHaveBeenCalledWith(expect.objectContaining({ strongAuthAt, parentSessionId: 'source' }))
+      createSessionMock.mockClear()
+      mockPrisma.session.findUnique.mockResolvedValueOnce({ id: 'source', staffId: 'other', revokedAt: null })
+      await expect(switchVenueForStaff('staff-1', ORG_ID, 'venue-2', { sid: 'source' })).rejects.toThrow()
+      mockPrisma.session.findUnique.mockResolvedValueOnce({ id: 'source', staffId: 'staff-1', revokedAt: new Date() })
+      await expect(switchVenueForStaff('staff-1', ORG_ID, 'venue-2', { sid: 'source' })).rejects.toThrow()
+      expect(createSessionMock).not.toHaveBeenCalled()
+    })
+
+    it('una sesión histórica sin fuente no adquiere prueba de contraseña', async () => {
+      await switchVenueForStaff('staff-1', ORG_ID, 'venue-2')
+      expect(createSessionMock).toHaveBeenCalledWith(expect.objectContaining({ strongAuthAt: null }))
+    })
   })
 
   describe('login con Google', () => {
@@ -229,7 +306,7 @@ describe('Parte A — el dashboard web emite sesiones revocables', () => {
       await loginWithGoogle('codigo-de-google')
 
       expect(createSessionMock).toHaveBeenCalledWith(
-        expect.objectContaining({ staffId: 'staff-1', venueId: VENUE_ID, authMethod: AuthMethod.PASSWORD }),
+        expect.objectContaining({ staffId: 'staff-1', venueId: VENUE_ID, authMethod: AuthMethod.PASSWORD, strongAuthAt: expect.any(Date) }),
       )
       expect(mockJwt.generateAccessToken.mock.calls[0][5]).toEqual(expect.objectContaining({ sid: SESSION_ID }))
       expect(mockJwt.generateRefreshToken.mock.calls[0][4]).toEqual(expect.objectContaining({ sid: SESSION_ID }))

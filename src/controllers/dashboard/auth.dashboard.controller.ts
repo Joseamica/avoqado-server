@@ -1075,7 +1075,7 @@ export async function switchVenueController(req: Request, res: Response, next: N
     }
 
     // Llamar al servicio para realizar la lógica y obtener los nuevos tokens
-    const { accessToken, refreshToken } = await authService.switchVenueForStaff(staffId, orgId, targetVenueId)
+    const { accessToken, refreshToken } = await authService.switchVenueForStaff(staffId, orgId, targetVenueId, req.authContext)
 
     // Establecer las nuevas cookies, sobrescribiendo las anteriores
     ponerCookiesDeSesion(res, accessToken, refreshToken)

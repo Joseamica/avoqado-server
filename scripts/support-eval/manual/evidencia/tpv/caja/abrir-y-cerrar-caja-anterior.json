@@ -1,0 +1,277 @@
+{
+  "pagina": "tpv/caja/abrir-y-cerrar-caja-anterior",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "81cc9983b24beb0bcdb85c907a361d3806383999",
+  "version": "2.13.2",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 940,
+      "cita": "label = \"Turnos de caja\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 421,
+      "cita": "Text(\"Abrir caja\", style = MaterialTheme.typography.bodyLarge)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 139,
+      "cita": "label = { Text(\"Efectivo Inicial\") }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 165,
+      "cita": "text = \"Montos sugeridos:\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 225,
+      "cita": "text = \"Abrir caja\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 341,
+      "cita": "Text(\"Cerrar caja\", style = MaterialTheme.typography.bodyLarge)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 506,
+      "cita": "text = \"Arqueo de caja\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 526,
+      "cita": "label = { Text(\"Efectivo total contado\") }"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 552,
+      "cita": "text = \"Cerrar y conciliar\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 564,
+      "cita": "text = \"Cerrar sin conteo\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 497,
+      "cita": "Text(\"Sí, cerrar sin conteo\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 411,
+      "cita": "text = \"Cerrar caja\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 557,
+      "cita": "title = \"Turno cuadrado\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 546,
+      "cita": "title = \"Turno cerrado sin conteo\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 578,
+      "cita": "title = \"Turno de caja cerrado\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 701,
+      "cita": "Text(\"Listo\", style = MaterialTheme.typography.labelLarge)"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 501,
+      "cita": "text = \"Turno de caja cerrado\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "tpv-shifts:create",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 1354
+    },
+    {
+      "permiso": "tpv-shifts:close",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 1535
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Abrir va directo a la API, sin cola",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt",
+      "linea": 118
+    },
+    {
+      "afirmacion": "Cerrar va directo a la API, sin cola",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt",
+      "linea": 208
+    },
+    {
+      "afirmacion": "Abrir sin red: NetworkError (no se guarda en la terminal)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt",
+      "linea": 133
+    },
+    {
+      "afirmacion": "Cerrar sin red: NetworkError (no se guarda en la terminal)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt",
+      "linea": 239
+    },
+    {
+      "afirmacion": "El texto: «No se pudo conectar al servidor.» / «Verifica tu conexión a internet.»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftViewModel.kt",
+      "linea": 680
+    },
+    {
+      "afirmacion": "El error ofrece «Reintentar»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 743
+    },
+    {
+      "afirmacion": "«Reintentar» vuelve a leer la caja (no reenvía)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftViewModel.kt",
+      "linea": 595
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: «Turnos de caja» sólo si el negocio usa turnos",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 1013
+    },
+    {
+      "ruta": "Inicio → Turnos de caja → nav:Shifts",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1247
+    },
+    {
+      "ruta": "Antes: sin permiso «No tienes permiso para abrir la caja»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 427
+    },
+    {
+      "ruta": "Antes: sin permiso «No tienes permiso para cerrar la caja»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 346
+    },
+    {
+      "ruta": "Problema: contado sin conciliación aplicada → «Turno de caja cerrado» con este aviso",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 579
+    },
+    {
+      "ruta": "Problema: el cierre se detiene si hay devoluciones sin registrar o rechazadas sin reconocer",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftViewModel.kt",
+      "linea": 535
+    },
+    {
+      "ruta": "Problema: «No se puede cerrar la caja todavía»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/CloseBlockedByRefundsContent.kt",
+      "linea": 55
+    },
+    {
+      "ruta": "Problema: «devolución que SÍ se hizo»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/CloseBlockedByRefundsContent.kt",
+      "linea": 63
+    },
+    {
+      "ruta": "Problema: las pendientes se registran solas con conexión; no repetir",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/CloseBlockedByRefundsContent.kt",
+      "linea": 73
+    },
+    {
+      "ruta": "Problema: rechazada por el servidor, la concilia un gerente",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/CloseBlockedByRefundsContent.kt",
+      "linea": 123
+    },
+    {
+      "ruta": "Problema: «Ya lo vi — liberar el cierre» sólo en las rechazadas",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/CloseBlockedByRefundsContent.kt",
+      "linea": 133
+    },
+    {
+      "ruta": "Problema: al liberar todas vuelve a la caja abierta (hay que tocar Cerrar caja otra vez)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftViewModel.kt",
+      "linea": 636
+    },
+    {
+      "ruta": "Problema: el cierre avisa del cambio de turno y la pantalla se recarga",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt",
+      "linea": 217
+    },
+    {
+      "ruta": "Problema: al recargar se pierde el resultado y queda «Sin turno de caja»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftViewModel.kt",
+      "linea": 285
+    },
+    {
+      "ruta": "Problema: «Sin turno de caja»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 396
+    },
+    {
+      "ruta": "Problema: «HISTORIAL DE TURNOS DE CAJA»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 766
+    },
+    {
+      "ruta": "Problema: Turno cuadrado / Faltante / Sobrante en el historial",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 919
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "PAX A910S del laboratorio del Alien (serial 2841548417, terminal AVQD-2841548417 de Avoqado Full)",
+    "version": "2.13.2-sandbox (122), copia de QA com.jaac.avoqado_tpv.sandbox.soportewaant compilada en v2.13.2 (81cc9983), contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
+    "apkSha256": "3a6ba5be8d3e50c2551953ba4a40b9d9d1728452c57967c1d54b2e1bf167442f",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja-anterior/1-inicio-turnos-de-caja.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja-anterior/2-turno-cerrar-caja.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja-anterior/3-arqueo-de-caja.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja-anterior/4-efectivo-total-contado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja-anterior/5-resultado-del-conteo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja-anterior/6-abrir-caja-efectivo-inicial.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja-anterior/7-turno-abierto.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja-anterior/8-si-cerrar-sin-conteo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja-anterior/8b-cargando-turno-grabacion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja-anterior/9-tras-cerrar-sin-conteo.png"
+    ],
+    "filasCreadas": [
+      "Shift cmwmk2da800ukwayda8cibwsc — cerrado aquí con conteo $530 (Faltante $5.00)",
+      "Shift cmwmmjfw9014hwaydqfmd1i48 — abierto con $500 y cerrado sin conteo",
+      "Shift cmwmmn93m014wwaydjx3zxkbk — abierto con $500; se deja abierto para el negocio"
+    ],
+    "nota": "Avoqado Full, Admin Venue 1, conciliación prendida un rato. *Turnos de caja* → *Cerrar caja* → *Arqueo de caja* → *Efectivo total contado* $530 → *Cerrar y conciliar*: el SERVIDOR cerró el turno con conteo (530, diferencia −5) pero la pantalla volvió directo a «Sin turno de caja» y el resultado sólo se ve en *HISTORIAL DE TURNOS DE CAJA* («Faltante $5.00»), sin *Listo* (foto 5). *Abrir caja* → *Efectivo Inicial* $500 → *Abrir caja* (fotos 6-7). Otro cierre con *Cerrar sin conteo* → *Sí, cerrar sin conteo* → «Cargando turno de caja…» → «Sin turno de caja», también sin resultado ni *Listo* (fotos 8-9, grabación). Causa en el código: el cierre avisa que el turno cambió y la pantalla se recarga antes de mostrar el resultado. CORREGIDA: se agregó a *Problemas frecuentes* que, si vuelve directo a «Sin turno de caja», la caja sí se cerró y el resultado está en el historial. Se dejó un turno abierto con $500 (como estaba)."
+  },
+  "codex": {
+    "lote": 1,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

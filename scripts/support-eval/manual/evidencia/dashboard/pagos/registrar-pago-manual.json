@@ -1,0 +1,258 @@
+{
+  "pagina": "dashboard/pagos/registrar-pago-manual",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 46,
+      "cita": "\"title\": \"Ventas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 48,
+      "cita": "\"transactions\": \"Transacciones\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Payment/Payments.tsx",
+      "linea": 1134,
+      "cita": "{tCommon('newManualPayment')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/common.json",
+      "linea": 4,
+      "cita": "\"newManualPayment\": \"Nuevo pago manual\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 227,
+      "cita": "<FormLabel>Monto</FormLabel>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 240,
+      "cita": "<FormLabel>Propina (opcional)</FormLabel>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 257,
+      "cita": "<FormLabel>IVA (opcional)</FormLabel>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 270,
+      "cita": "<FormLabel>Descuento (opcional)</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 286,
+      "cita": "<FormLabel>Método</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 122,
+      "cita": "method: 'CASH',"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 78,
+      "cita": "CASH: 'Efectivo',"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 310,
+      "cita": "<FormLabel>Origen</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 126,
+      "cita": "source: 'OTHER',"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 96,
+      "cita": "OTHER: 'Otro (proveedor externo)',"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 331,
+      "cita": "{source === 'OTHER' && ("
+    },
+    {
+      "paso": 3,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 337,
+      "cita": "<FormLabel>Proveedor externo</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/components/ManualPaymentDialog/ExternalSourceCombobox.tsx",
+      "linea": 60,
+      "cita": "<CommandGroup heading=\"Ya usados en este venue\">"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/components/ManualPaymentDialog/ExternalSourceCombobox.tsx",
+      "linea": 73,
+      "cita": "Agregar \"{search.trim()}\""
+    },
+    {
+      "paso": 4,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 357,
+      "cita": "<FormLabel>Mesero (opcional)</FormLabel>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 386,
+      "cita": "<FormLabel>Razón (opcional)</FormLabel>"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 404,
+      "cita": "Registrar pago"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 178,
+      "cita": "title: 'Pago registrado',"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payment:create-manual",
+      "archivo": "src/pages/Payment/Payments.tsx",
+      "linea": 116
+    },
+    {
+      "permiso": "payment:create-manual",
+      "archivo": "avoqado-server/src/routes/dashboard/manualPayment.routes.ts",
+      "linea": 27
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: el botón sólo sale con el permiso",
+      "archivo": "src/pages/Payment/Payments.tsx",
+      "linea": 1131
+    },
+    {
+      "ruta": "Antes: es un pago hecho fuera del sistema",
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 215
+    },
+    {
+      "ruta": "Antes: el SERVIDOR crea el pago ya COMPLETED, sin procesador",
+      "archivo": "avoqado-server/src/services/dashboard/manualPayment.service.ts",
+      "linea": 468
+    },
+    {
+      "ruta": "Antes: sin comisiones de procesador",
+      "archivo": "avoqado-server/src/services/dashboard/manualPayment.service.ts",
+      "linea": 470
+    },
+    {
+      "ruta": "Problema: monto mayor a 0",
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 28
+    },
+    {
+      "ruta": "Problema: proveedor externo con Otro",
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 57
+    },
+    {
+      "ruta": "Problema: el aviso va debajo del campo",
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 231
+    },
+    {
+      "ruta": "Problema: aviso «Error» con la razón",
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 193
+    },
+    {
+      "ruta": "Problema: la razón del SERVIDOR o de la conexión",
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 188
+    },
+    {
+      "ruta": "Problema: el envío no lleva llave de idempotencia (repetir puede duplicar)",
+      "archivo": "src/services/manualPayment.service.ts",
+      "linea": 42
+    },
+    {
+      "ruta": "T11-10: el panel reintenta una vez cualquier petición tras un error de red, sin llave",
+      "archivo": "src/api.ts",
+      "linea": 98
+    },
+    {
+      "ruta": "T11-10: el reintento",
+      "archivo": "src/api.ts",
+      "linea": 101
+    },
+    {
+      "ruta": "T11-10: el error tras Registrar pago puede seguir a un primer intento que sí quedó",
+      "archivo": "src/components/ManualPaymentDialog/ManualPaymentDialog.tsx",
+      "linea": 188
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3000 (develop)",
+    "fecha": "2026-11-12",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/registrar-pago-manual/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/registrar-pago-manual/2.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/registrar-pago-manual/3.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/registrar-pago-manual/4.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/registrar-pago-manual/5.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/registrar-pago-manual/6.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/registrar-pago-manual/7.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/registrar-pago-manual/8.png"
+    ],
+    "filasCreadas": [
+      "Order cmwe4736h01aqwaldi12ftjxn — ORD-MANUAL-1794522220498-ZS40, la cuenta que crea el pago manual",
+      "Payment cmwe4747u01aswaldmjpc6kdd — pago manual $1.00 en efectivo, origen OTHER, proveedor «QA soporte manual»",
+      "PaymentAllocation cmwe476xb01aywald20id0g4o",
+      "VenueTransaction cmwe476o001awwaldq0srp0tn",
+      "PaymentEffect cmwe47aqz01azwaldv0p7v1cb",
+      "CommissionCalculation cmwe47vg301b3waldwdpgrgtw",
+      "ActivityLog cmwe475gi01auwaldpm3rxurf — PAYMENT_WITHOUT_SHIFT",
+      "ActivityLog cmwe47axf01b1waldqiocxoht — payment.manual.create"
+    ],
+    "nota": "Avoqado Full, OWNER del seed. Un solo POST (201). El paso 3 se corrigió: escribir en *Proveedor externo* sin tocar *Agregar \"…\"* deja el campo vacío (foto 6)."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

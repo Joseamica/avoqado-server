@@ -1,0 +1,199 @@
+{
+  "pagina": "windows/clientes/editar-cliente",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 57,
+      "cita": "label = \"Más\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 636,
+      "cita": "label = \"Clientes\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 637,
+      "cita": "onClick = { showCustomers = true },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersScreen.kt",
+      "linea": 261,
+      "cita": "placeholder = { Text(\"Buscar\") },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersScreen.kt",
+      "linea": 356,
+      "cita": "onClick = { selectedCustomer = customer },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersScreen.kt",
+      "linea": 763,
+      "cita": "Text(\"Editar\", style = MaterialTheme.typography.labelLarge)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersScreen.kt",
+      "linea": 378,
+      "cita": "onEditar = { viewModel.onEditarTocado(selectedCustomer!!) },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/EditCustomerView.kt",
+      "linea": 97,
+      "cita": "text = \"Editar cliente\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/EditCustomerView.kt",
+      "linea": 152,
+      "cita": "etiqueta = \"Nombre\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/EditCustomerView.kt",
+      "linea": 160,
+      "cita": "etiqueta = \"Apellido\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/EditCustomerView.kt",
+      "linea": 169,
+      "cita": "etiqueta = \"Teléfono\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/EditCustomerView.kt",
+      "linea": 177,
+      "cita": "etiqueta = \"Correo electrónico\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/EditCustomerView.kt",
+      "linea": 108,
+      "cita": "enabled = puedeGuardar,"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/EditCustomerView.kt",
+      "linea": 122,
+      "cita": "Text(text = \"Guardar\", style = MaterialTheme.typography.titleMedium)"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "customers:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1588
+    },
+    {
+      "permiso": "customers:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/data/CustomersRepository.kt",
+      "linea": 72
+    },
+    {
+      "permiso": "customers:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersViewModel.kt",
+      "linea": 128
+    },
+    {
+      "permiso": "customers:update",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/domain/EdicionDeCliente.kt",
+      "linea": 12
+    },
+    {
+      "permiso": "customers:update",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1650
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Si aparece «Sin conexión: para editar al cliente necesitas internet.»: «Guardar» no se encola",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersViewModel.kt",
+      "linea": 323
+    },
+    {
+      "afirmacion": "Si aparece el aviso: su texto",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/domain/EdicionDeCliente.kt",
+      "linea": 18
+    },
+    {
+      "afirmacion": "Si aparece el aviso: se pinta dentro del formulario, que sigue abierto",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/EditCustomerView.kt",
+      "linea": 138
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: «Clientes» se puede esconder en «Personalizar menú» de esta computadora",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 633
+    },
+    {
+      "ruta": "Antes: la entrada «Personalizar menú» de Más",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1989
+    },
+    {
+      "ruta": "Antes: lo que se esconde en «Personalizar menú» se guarda en las preferencias del equipo",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/domain/PreferenciasDelMenu.kt",
+      "linea": 61
+    },
+    {
+      "ruta": "WINDOWS: las preferencias del equipo se guardan en la carpeta de datos de esta computadora (shared_prefs)",
+      "archivo": "desktop/plataforma/src/main/kotlin/com/avoqado/escritorio/ContextoDeEscritorio.kt",
+      "linea": 30
+    },
+    {
+      "ruta": "Antes: con el permiso entra directo; sin él y con PIN de gerente, pide el PIN; sin PIN, explica",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/domain/EdicionDeCliente.kt",
+      "linea": 43
+    },
+    {
+      "ruta": "Antes: el PIN de gerente se pide al tocar Editar",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersViewModel.kt",
+      "linea": 238
+    },
+    {
+      "ruta": "Problema: «No puedes editar clientes»",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersScreen.kt",
+      "linea": 102
+    },
+    {
+      "ruta": "Problema: el texto del aviso sin permiso",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/domain/EdicionDeCliente.kt",
+      "linea": 15
+    },
+    {
+      "ruta": "Problema: un dato que ya tenía no se vacía",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/domain/EdicionDeCliente.kt",
+      "linea": 90
+    },
+    {
+      "ruta": "Problema: teléfono de 10 a 15 dígitos",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/domain/EdicionDeCliente.kt",
+      "linea": 93
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

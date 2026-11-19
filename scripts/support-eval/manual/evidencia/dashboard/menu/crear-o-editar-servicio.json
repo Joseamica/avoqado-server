@@ -1,0 +1,324 @@
+{
+  "pagina": "dashboard/menu/crear-o-editar-servicio",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1201,
+      "cita": "title: term('menu'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/config/sector-terminology.ts",
+      "linea": 48,
+      "cita": "menu: 'Menú',"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/config/sector-terminology.ts",
+      "linea": 90,
+      "cita": "menu: 'Catálogo',"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 359,
+      "cita": "{ title: t('menu:menumaker.nav.services'), url: 'menumaker/services', permission: 'menu:read' },"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 37,
+      "cita": "\"services\": \"Servicios\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Menu/Services/Services.tsx",
+      "linea": 95,
+      "cita": "<span>{t('services.new')}</span>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 764,
+      "cita": "\"new\": \"Crear servicio\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Menu/Services/ServiceTypeSelectorDialog.tsx",
+      "linea": 31,
+      "cita": "titleKey: 'services.typeSelector.serviceTitle',"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 781,
+      "cita": "\"serviceTitle\": \"Servicio con cita\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Menu/Services/ServiceTypeSelectorDialog.tsx",
+      "linea": 37,
+      "cita": "titleKey: 'services.typeSelector.classTitle',"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 783,
+      "cita": "\"classTitle\": \"Clase / Taller\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Menu/Services/ServiceTypeSelectorDialog.tsx",
+      "linea": 108,
+      "cita": "{tCommon('next')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 359,
+      "cita": "<Label htmlFor=\"name\">{t('services.form.nameLabel')} *</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 789,
+      "cita": "\"nameLabel\": \"Nombre\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 373,
+      "cita": "<Label htmlFor=\"price\">{t('services.form.priceLabel')} *</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 795,
+      "cita": "\"priceLabel\": \"Precio\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 683,
+      "cita": "<Label>{t('services.form.categoryLabel')} *</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 806,
+      "cita": "\"categoryLabel\": \"Categoría\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 711,
+      "cita": "createNewLabel={term => `${term} (${t('services.form.createCategory', { defaultValue: 'Crear categoría' })})`}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 817,
+      "cita": "\"createCategory\": \"Crear categoría\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 327,
+      "cita": "{isSaving ? t('services.form.saving') : mode === 'edit' ? tCommon('save') : tCommon('create')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/common.json",
+      "linea": 77,
+      "cita": "\"create\": \"Crear\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 227,
+      "cita": "title: t('services.toasts.created'),"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 827,
+      "cita": "\"created\": \"Servicio creado\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Menu/Services/Services.tsx",
+      "linea": 411,
+      "cita": "<MoreHorizontal className=\"h-4 w-4\" />"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Menu/Services/Services.tsx",
+      "linea": 427,
+      "cita": "{tCommon('edit')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/common.json",
+      "linea": 10,
+      "cita": "\"edit\": \"Editar\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/common.json",
+      "linea": 11,
+      "cita": "\"save\": \"Guardar\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 271,
+      "cita": "title: t('services.toasts.saved'),"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 833,
+      "cita": "\"saved\": \"Cambios guardados\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "menu:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 207
+    },
+    {
+      "permiso": "menu:create",
+      "archivo": "src/pages/Menu/Services/Services.tsx",
+      "linea": 92
+    },
+    {
+      "permiso": "menu:update",
+      "archivo": "src/pages/Menu/Services/Services.tsx",
+      "linea": 417
+    },
+    {
+      "permiso": "menu:update",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 7858
+    },
+    {
+      "permiso": "inventory:update",
+      "archivo": "avoqado-server/src/routes/dashboard/inventory.routes.ts",
+      "linea": 1389
+    },
+    {
+      "permiso": "menu:create",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 1317
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: crear llama a inventory/wizard/complete",
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 220
+    },
+    {
+      "ruta": "Antes: ese router pide INVENTORY_TRACKING (sólo al crear)",
+      "archivo": "avoqado-server/src/routes/dashboard/inventory.routes.ts",
+      "linea": 118
+    },
+    {
+      "ruta": "Antes: editar llama a PUT products (sin ese candado)",
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 265
+    },
+    {
+      "ruta": "Antes: «(Crear categoría)» sale también al editar (sin revisar el modo) y crea la categoría",
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 90
+    },
+    {
+      "ruta": "Antes: la opción sale cuando lo escrito no coincide con una categoría",
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 705
+    },
+    {
+      "ruta": "Problema: regla del nombre",
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 364
+    },
+    {
+      "ruta": "Problema: texto del nombre",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 138
+    },
+    {
+      "ruta": "Problema: regla del precio",
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 385
+    },
+    {
+      "ruta": "Problema: texto del precio",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 498
+    },
+    {
+      "ruta": "Problema: regla de la categoría",
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 687
+    },
+    {
+      "ruta": "Problema: texto de la categoría",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 527
+    },
+    {
+      "ruta": "Problema: el error de crear no trae la razón",
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 236
+    },
+    {
+      "ruta": "Problema: texto del error",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 834
+    },
+    {
+      "ruta": "T11-10: el panel reintenta una vez cualquier petición tras un error de red, sin llave",
+      "archivo": "src/api.ts",
+      "linea": 98
+    },
+    {
+      "ruta": "T11-10: el reintento",
+      "archivo": "src/api.ts",
+      "linea": 101
+    },
+    {
+      "ruta": "T11-10: el error al crear o guardar",
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 97
+    },
+    {
+      "ruta": "T11-12: crear un servicio es un POST sin llave; el servidor acepta dos iguales",
+      "archivo": "src/pages/Menu/Services/ServiceFormDialog.tsx",
+      "linea": 199
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 6,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -491,7 +491,7 @@ describe('Dashboard Auth Controller', () => {
 
       await authController.switchVenueController(req as Request, res as Response, next)
 
-      expect(authService.switchVenueForStaff).toHaveBeenCalledWith(mockStaffId, mockOrgId, mockTargetVenueId)
+      expect(authService.switchVenueForStaff).toHaveBeenCalledWith(mockStaffId, mockOrgId, mockTargetVenueId, (req as Request).authContext)
       expect(res.cookie).toHaveBeenCalledTimes(2)
       expect(res.cookie).toHaveBeenNthCalledWith(1, 'accessToken', mockNewAccessToken, {
         httpOnly: true,

@@ -1,0 +1,132 @@
+{
+  "pagina": "dashboard/pagos/enviar-recibo-por-correo",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 46,
+      "cita": "\"title\": \"Ventas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 48,
+      "cita": "\"transactions\": \"Transacciones\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Payment/Payments.tsx",
+      "linea": 1163,
+      "cita": "to: row.id,"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 378,
+      "cita": "\"sendReceipt\": \"Enviar Recibo Digital\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 251,
+      "cita": "{t('detail.actions.sendReceipt', { defaultValue: 'Enviar recibo' })}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 264,
+      "cita": "<Label htmlFor=\"email\">{t('detail.fields.email', { defaultValue: 'Correo electrónico' })}</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 274,
+      "cita": "{sendReceiptMutation.isPending ? tCommon('sending', { defaultValue: 'Enviando...' }) : tCommon('send', { defaultValue: 'Enviar' })}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 260,
+      "cita": "sendReceiptMutation.mutate({ recipientEmail: email })"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:refund",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4018
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: cualquier falla (también el 403) da el mismo aviso",
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 129
+    },
+    {
+      "ruta": "Problema: Enviar apagado sin correo",
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 273
+    },
+    {
+      "ruta": "Problema: aviso de éxito",
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 121
+    },
+    {
+      "ruta": "Problema: texto «Recibo enviado»",
+      "archivo": "src/locales/es/payment.json",
+      "linea": 617
+    },
+    {
+      "ruta": "Problema: el SERVIDOR crea el recibo y contesta antes de mandar el correo",
+      "archivo": "avoqado-server/src/controllers/dashboard/payment.dashboard.controller.ts",
+      "linea": 128
+    },
+    {
+      "ruta": "Problema: si el correo falla, sólo queda en el log",
+      "archivo": "avoqado-server/src/controllers/dashboard/payment.dashboard.controller.ts",
+      "linea": 133
+    },
+    {
+      "ruta": "Problema: la respuesta 201 sale sin esperar el correo",
+      "archivo": "avoqado-server/src/controllers/dashboard/payment.dashboard.controller.ts",
+      "linea": 137
+    },
+    {
+      "ruta": "T11-10: el panel reintenta una vez cualquier petición tras un error de red, sin llave",
+      "archivo": "src/api.ts",
+      "linea": 98
+    },
+    {
+      "ruta": "T11-10: el reintento",
+      "archivo": "src/api.ts",
+      "linea": 101
+    },
+    {
+      "ruta": "T11-10: el mismo aviso para cualquier falla, también tras un primer intento que sí quedó",
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 129
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

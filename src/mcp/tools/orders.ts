@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { OrderStatus, OrderType, PaymentStatus, TransactionStatus } from '@prisma/client'
+import { OrderStatus, OrderType, TransactionStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
@@ -12,6 +12,7 @@ import { hasPermission } from '@/services/access/access.service'
 // El carril del reembolso: la MISMA definición que usan los cuatro canales de
 // cobro, para que el MCP no pueda contradecir al saldo persistido.
 import { summarizeRefunds } from '@/services/shared/orderBalance'
+import { openOrdersWhere } from '@/services/dashboard/openOrders.service'
 import AppError from '@/errors/AppError'
 import { revisarCortesiaPendiente } from '@/services/mobile/cortesia-pendiente.mobile.service'
 import {
@@ -380,11 +381,7 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
       limit: z.number().int().min(1).max(50).default(25).describe('Max open orders to return (oldest first)'),
     },
     async ({ venueId, limit }) => {
-      const where = {
-        venueId: { in: orderReadableVenues(venueId) }, // scope + orders:read gate (see helper)
-        paymentStatus: { in: [PaymentStatus.PENDING, PaymentStatus.PARTIAL] },
-        status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] },
-      }
+      const where = openOrdersWhere(orderReadableVenues(venueId)) // scope + orders:read gate (see helper); la misma «cuenta abierta» que la B
       const [summary, orders] = await Promise.all([
         prisma.order.aggregate({ where, _count: { _all: true }, _sum: { remainingBalance: true, total: true, paidAmount: true } }),
         prisma.order.findMany({

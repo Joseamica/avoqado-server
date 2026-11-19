@@ -1,0 +1,85 @@
+{
+  "pagina": "windows/recibos/imprimir-y-reimprimir-recibo",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 383,
+      "cita": "title = if (isPrintingReceipt) \"Imprimiendo...\" else \"Imprimir recibo\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 43,
+      "cita": "label = \"Ventas\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionsScreen.kt",
+      "linea": 485,
+      "cita": "onClick = { viewModel.selectTransaction(transaction.id) },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 48,
+      "cita": "const val MAS_OPCIONES = \"Más opciones\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionDetailSheet.kt",
+      "linea": 390,
+      "cita": "Icon(Icons.Filled.MoreHoriz, contentDescription = TextosCambio.MAS_OPCIONES)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionDetailSheet.kt",
+      "linea": 393,
+      "cita": "DropdownMenuItem(text = { Text(TextosCambio.IMPRIMIR) }, enabled = !isPrintingReceipt,"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 46,
+      "cita": "const val IMPRIMIR = \"Imprimir\""
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Problema: sin impresora, «Imprimir recibo» dice «Sin impresora · Configurar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 384
+    },
+    {
+      "ruta": "Problema: el diálogo «Sin impresora de recibos»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 512
+    },
+    {
+      "ruta": "Problema: botón «Configurar impresora»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 541
+    },
+    {
+      "ruta": "Problema: sin papel (reimpresión desde Ventas)",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionsViewModel.kt",
+      "linea": 921
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 2,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

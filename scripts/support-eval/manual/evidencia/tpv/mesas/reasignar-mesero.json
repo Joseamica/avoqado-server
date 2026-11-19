@@ -1,0 +1,99 @@
+{
+  "pagina": "tpv/mesas/reasignar-mesero",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 807,
+      "cita": "Icon(Icons.Default.MoreVert, contentDescription = \"Más acciones\")"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 847,
+      "cita": "text = { Text(\"Reasignar mesero\") },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/AssignWaiterSheet.kt",
+      "linea": 122,
+      "cita": "StaffRow(member = member, enabled = !isAssigning, onClick = { onSelect(member) })"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderViewModel.kt",
+      "linea": 853,
+      "cita": "\"Cuenta reasignada a ${staff.name}\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "orders:update",
+      "archivo": "avoqado-server/src/services/mobile/sync.mobile.service.ts",
+      "linea": 268
+    },
+    {
+      "permiso": "orders:update",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 3993
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 603
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Reasignar viaja por la cola (ASSIGN_ORDER)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
+      "linea": 1262
+    },
+    {
+      "ruta": "Codex r1-3: el SERVIDOR sólo cambia quién atiende (servedById); la propina y la comisión no siempre lo siguen, por eso la página ya no lo promete",
+      "archivo": "avoqado-server/src/services/tpv/table.tpv.service.ts",
+      "linea": 794
+    },
+    {
+      "ruta": "Codex r1-3: comisión CREATOR/PROCESSOR no usa servedById",
+      "archivo": "avoqado-server/src/services/dashboard/commission/commission-utils.ts",
+      "linea": 287
+    },
+    {
+      "ruta": "Codex r1-3: las propinas por persona del reporte salen de quien cobró (processedById)",
+      "archivo": "avoqado-server/src/services/tpv/shift.tpv.service.ts",
+      "linea": 936
+    },
+    {
+      "ruta": "Problema: sin personal en turno",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/AssignWaiterSheet.kt",
+      "linea": 105
+    },
+    {
+      "ruta": "Problema: la lista no cargó",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/AssignWaiterSheet.kt",
+      "linea": 98
+    },
+    {
+      "ruta": "Problema: Reintentar del selector (componente compartido)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/MoveTableSheet.kt",
+      "linea": 193
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 5,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

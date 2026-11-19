@@ -1,0 +1,309 @@
+{
+  "pagina": "dashboard/inventario/por-que-una-receta-no-descuenta",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1213,
+      "cita": "title: t('sidebar:routes.inventory'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 155,
+      "cita": "\"inventory\": \"Inventario\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 427,
+      "cita": "title: t('sidebar:routes.recipes', { defaultValue: 'Recetas' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 173,
+      "cita": "\"recipes\": \"Recetas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 599,
+      "cita": "{t('recipes.add')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 272,
+      "cita": "\"add\": \"Agregar Receta\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 445,
+      "cita": "const hasRecipe = !!product.recipe"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 594,
+      "cita": "{tCommon('edit')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/common.json",
+      "linea": 10,
+      "cita": "\"edit\": \"Editar\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1201,
+      "cita": "title: term('menu'),"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/config/sector-terminology.ts",
+      "linea": 48,
+      "cita": "menu: 'Menú',"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/config/sector-terminology.ts",
+      "linea": 90,
+      "cita": "menu: 'Catálogo',"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 342,
+      "cita": "title: t('menu:menumaker.nav.products'),"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 36,
+      "cita": "\"products\": \"Productos\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 221,
+      "cita": "{ path: 'products/:productId', element: <ProductId /> },"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Menu/Products/productId.tsx",
+      "linea": 543,
+      "cita": "{t('products.tabs.inventory')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 425,
+      "cita": "\"inventory\": \"Inventario\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Products/productId.tsx",
+      "linea": 1067,
+      "cita": "<Label>{t('products.detail.inventory.trackingMethod')}</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 561,
+      "cita": "\"trackingMethod\": \"Seguimiento de Inventario\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Products/productId.tsx",
+      "linea": 1121,
+      "cita": "<p className=\"font-medium text-foreground\">{t('products.detail.inventory.trackByRecipe')}</p>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 566,
+      "cita": "\"trackByRecipe\": \"Rastrear por receta\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Products/productId.tsx",
+      "linea": 520,
+      "cita": "{saveProduct.isPending ? t('products.detail.saving') : t('modifiers.forms.save')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 231,
+      "cita": "\"save\": \"Guardar\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Products/productId.tsx",
+      "linea": 190,
+      "cita": "inventoryMethod: trackInventory ? inventoryMethod : null,"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "menu:read",
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 129
+    },
+    {
+      "permiso": "menu:read",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 7742
+    },
+    {
+      "permiso": "inventory:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 990
+    },
+    {
+      "permiso": "inventory:create",
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 575
+    },
+    {
+      "permiso": "inventory:update",
+      "archivo": "avoqado-server/src/routes/dashboard/inventory.routes.ts",
+      "linea": 1440
+    },
+    {
+      "permiso": "menu:read",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 7826
+    },
+    {
+      "permiso": "menu:update",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 7858
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "INVENTORY_TRACKING",
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 831
+    },
+    {
+      "featureCode": "INVENTORY_TRACKING",
+      "archivo": "avoqado-server/src/routes/dashboard/inventory.routes.ts",
+      "linea": 118
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Problema: sin seguimiento no hay método y no se descuenta",
+      "archivo": "avoqado-server/src/services/dashboard/productInventoryIntegration.service.ts",
+      "linea": 62
+    },
+    {
+      "ruta": "Problema: el método explícito manda",
+      "archivo": "avoqado-server/src/services/dashboard/productInventoryIntegration.service.ts",
+      "linea": 68
+    },
+    {
+      "ruta": "Problema: la venta sólo genera línea de descuento con método",
+      "archivo": "avoqado-server/src/services/inventory/inventoryPosting.service.ts",
+      "linea": 206
+    },
+    {
+      "ruta": "Problema: por cantidad descuenta las piezas del producto",
+      "archivo": "avoqado-server/src/services/dashboard/productInventoryIntegration.service.ts",
+      "linea": 186
+    },
+    {
+      "ruta": "Problema: por receta descuenta los ingredientes",
+      "archivo": "avoqado-server/src/services/dashboard/productInventoryIntegration.service.ts",
+      "linea": 196
+    },
+    {
+      "ruta": "Problema: textos de las opciones",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 562
+    },
+    {
+      "ruta": "Problema: textos de las opciones",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 564
+    },
+    {
+      "ruta": "Problema: producto por cantidad sin receta abre «¿Cambiar a Receta?»",
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 582
+    },
+    {
+      "ruta": "Problema: el diálogo",
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 1149
+    },
+    {
+      "ruta": "Problema: título",
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 784
+    },
+    {
+      "ruta": "Problema: aviso del diálogo",
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 785
+    },
+    {
+      "ruta": "Problema: botón",
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 786
+    },
+    {
+      "ruta": "Problema: el SERVIDOR borra el conteo por cantidad",
+      "archivo": "avoqado-server/src/services/dashboard/productWizard.service.ts",
+      "linea": 614
+    },
+    {
+      "ruta": "Problema: y luego se abre la receta",
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 368
+    },
+    {
+      "ruta": "Problema: Recetas filtra por tipo de producto",
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 154
+    },
+    {
+      "ruta": "Problema: por seguimiento o receta",
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 157
+    },
+    {
+      "ruta": "Problema: y por los filtros de categoría, receta y búsqueda",
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 160
+    },
+    {
+      "ruta": "Problema: por eso se revisa la pestaña Inventario del producto",
+      "archivo": "src/pages/Menu/Products/productId.tsx",
+      "linea": 543
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 10,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

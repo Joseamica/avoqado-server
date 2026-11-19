@@ -1,0 +1,282 @@
+{
+  "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1201,
+      "cita": "title: term('menu'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/config/sector-terminology.ts",
+      "linea": 48,
+      "cita": "menu: 'Menú',"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/config/sector-terminology.ts",
+      "linea": 90,
+      "cita": "menu: 'Catálogo',"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 373,
+      "cita": "permission: 'creditPacks:read',"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 43,
+      "cita": "\"creditPacks\": \"Paquetes de Créditos\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/CreditPacks/CreditPacks.tsx",
+      "linea": 311,
+      "cita": "{t('actions.create')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 88,
+      "cita": "\"create\": \"Crear Paquete\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 276,
+      "cita": "<FormLabel>{t('form.fields.name')}</FormLabel>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 31,
+      "cita": "\"name\": \"Nombre del Paquete\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 309,
+      "cita": "<FormLabel>{t('form.fields.price')}</FormLabel>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 33,
+      "cita": "\"price\": \"Precio\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 35,
+      "cita": "\"validityDays\": \"Días de Validez\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 36,
+      "cita": "\"maxPerCustomer\": \"Máximo por Cliente\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 409,
+      "cita": "<h3 className=\"font-medium text-sm\">{t('form.fields.items')}</h3>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 38,
+      "cita": "\"items\": \"Items del Paquete\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 438,
+      "cita": "<FormLabel>{t('form.fields.product')}</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 40,
+      "cita": "\"product\": \"Producto\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 461,
+      "cita": "<FormLabel>{t('form.fields.quantity')}</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 41,
+      "cita": "\"quantity\": \"Cantidad\""
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 415,
+      "cita": "onClick={() => append({ productId: '', quantity: 1 })}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 39,
+      "cita": "\"addItem\": \"Agregar Item\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 244,
+      "cita": "{mutation.isPending ? tCommon('saving') : t('actions.save')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 91,
+      "cita": "\"save\": \"Guardar Cambios\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 213,
+      "cita": "title: isEditing ? t('toasts.updateSuccess') : t('toasts.createSuccess'),"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 127,
+      "cita": "\"createSuccess\": \"Paquete de créditos creado exitosamente\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/CreditPacks/CreditPacks.tsx",
+      "linea": 268,
+      "cita": "<MoreHorizontal className=\"h-4 w-4\" />"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/CreditPacks/CreditPacks.tsx",
+      "linea": 273,
+      "cita": "<DropdownMenuItem onClick={() => openEdit(row.original.id)} className=\"cursor-pointer\">"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 89,
+      "cita": "\"edit\": \"Editar\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "menu:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 207
+    },
+    {
+      "permiso": "creditPacks:read",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 373
+    },
+    {
+      "permiso": "creditPacks:create",
+      "archivo": "src/pages/CreditPacks/CreditPacks.tsx",
+      "linea": 308
+    },
+    {
+      "permiso": "creditPacks:create",
+      "archivo": "avoqado-server/src/routes/dashboard/creditPack.routes.ts",
+      "linea": 64
+    },
+    {
+      "permiso": "creditPacks:update",
+      "archivo": "src/pages/CreditPacks/CreditPacks.tsx",
+      "linea": 272
+    },
+    {
+      "permiso": "creditPacks:update",
+      "archivo": "avoqado-server/src/routes/dashboard/creditPack.routes.ts",
+      "linea": 68
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: la ruta cuelga de menumaker (menu:read)",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 227
+    },
+    {
+      "ruta": "Problema: regla del nombre",
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 273
+    },
+    {
+      "ruta": "Problema: texto del nombre",
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 52
+    },
+    {
+      "ruta": "Problema: regla del precio",
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 304
+    },
+    {
+      "ruta": "Problema: texto del precio",
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 53
+    },
+    {
+      "ruta": "Problema: regla del producto",
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 435
+    },
+    {
+      "ruta": "Problema: texto del producto",
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 56
+    },
+    {
+      "ruta": "Problema: el error trae la razón del SERVIDOR",
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 221
+    },
+    {
+      "ruta": "Problema: texto por omisión",
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 133
+    },
+    {
+      "ruta": "Problema: título del error",
+      "archivo": "src/locales/es/common.json",
+      "linea": 513
+    },
+    {
+      "ruta": "T11-12: el panel reintenta una vez cualquier petición tras un error de red, sin llave",
+      "archivo": "src/api.ts",
+      "linea": 98
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 6,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

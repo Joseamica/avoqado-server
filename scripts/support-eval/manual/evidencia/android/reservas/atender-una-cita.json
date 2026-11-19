@@ -1,0 +1,171 @@
+{
+  "pagina": "android/reservas/atender-una-cita",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 64,
+      "cita": "label = \"Calendario\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/calendar/CalendarTabHost.kt",
+      "linea": 170,
+      "cita": "onReservationClick = { onOpenReservation(it.id) },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/ReservationDetailScreen.kt",
+      "linea": 210,
+      "cita": "ActionPill(\"Confirmar\", state.isAllowed(ReservationAction.CONFIRM)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/domain/ReservationStateMachine.kt",
+      "linea": 11,
+      "cita": "ReservationAction.CONFIRM to setOf(PENDING),"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/ReservationDetailScreen.kt",
+      "linea": 211,
+      "cita": "ActionPill(\"Check-in\", state.isAllowed(ReservationAction.CHECK_IN)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/domain/ReservationStateMachine.kt",
+      "linea": 12,
+      "cita": "ReservationAction.CHECK_IN to setOf(PENDING, CONFIRMED),"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/ReservationDetailScreen.kt",
+      "linea": 212,
+      "cita": "ActionPill(\"Completar\", state.isAllowed(ReservationAction.COMPLETE)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/domain/ReservationStateMachine.kt",
+      "linea": 13,
+      "cita": "ReservationAction.COMPLETE to setOf(CHECKED_IN),"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/ReservationDetailScreen.kt",
+      "linea": 213,
+      "cita": "ActionPill(\"No se presentó\", state.isAllowed(ReservationAction.NO_SHOW)"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/domain/ReservationStateMachine.kt",
+      "linea": 14,
+      "cita": "ReservationAction.NO_SHOW to setOf(PENDING, CONFIRMED),"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "reservations:read",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 50
+    },
+    {
+      "permiso": "reservations:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationApi.kt",
+      "linea": 110
+    },
+    {
+      "permiso": "reservations:update",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 196
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt",
+      "linea": 37
+    },
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4695
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red la acción se guarda en la cola del aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationRepository.kt",
+      "linea": 108
+    },
+    {
+      "afirmacion": "Si aparece «Sin conexión: … al volver el internet»: el aviso de la acción encolada",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/ReservationDetailScreen.kt",
+      "linea": 70
+    },
+    {
+      "afirmacion": "Si aparece el aviso: texto del check-in encolado",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationRepository.kt",
+      "linea": 274
+    },
+    {
+      "afirmacion": "Si aparece el aviso de encolado: se encola con isOnline() = red del aparato Y servidor alcanzable",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/util/ConnectivityMonitor.kt",
+      "linea": 71
+    },
+    {
+      "afirmacion": "Si aparece el aviso: el reintentador sólo escucha la red del aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationActionsRetrier.kt",
+      "linea": 52
+    },
+    {
+      "afirmacion": "Si aparece el aviso: isOnlineFlow es sólo la red del aparato, no el servidor",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/util/ConnectivityMonitor.kt",
+      "linea": 74
+    },
+    {
+      "afirmacion": "Si aparece el aviso: al arrancar la app el reintentador lee el estado actual y vacía si hay red",
+      "archivo": "app/src/main/java/com/avoqado/pos/AvoqadoApp.kt",
+      "linea": 65
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: el interruptor de reservas es de ESTE aparato (SharedPreferences), no del negocio",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/onboarding/ActivateReservationsViewModel.kt",
+      "linea": 71
+    },
+    {
+      "ruta": "Antes: sin activar, «Más» ofrece «Reservaciones»",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 677
+    },
+    {
+      "ruta": "Antes: el botón «Activar reservas»",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/onboarding/ActivateReservationsScreen.kt",
+      "linea": 98
+    },
+    {
+      "ruta": "Antes: interruptor local Y plan",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabHostViewModel.kt",
+      "linea": 48
+    },
+    {
+      "ruta": "Problema: sin reservations:update los botones salen apagados",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/detail/ReservationDetailUiState.kt",
+      "linea": 40
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

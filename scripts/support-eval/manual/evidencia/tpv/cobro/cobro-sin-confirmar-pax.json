@@ -1,0 +1,151 @@
+{
+  "pagina": "tpv/cobro/cobro-sin-confirmar-pax",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 75,
+      "cita": "Text(\"Esperando confirmación: $secondsRemaining s\")"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 53,
+      "cita": "BlumonAttemptResolver.State.RECORDED -> \"Cobro registrado\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 66,
+      "cita": "BlumonAttemptResolver.State.RECORDED -> \"Avoqado confirmó este pago. No vuelvas a cobrar esta venta.\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 97,
+      "cita": "Text(\"Consultar de nuevo\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 80,
+      "cita": "Text(\"Ya revisé la terminal: no se cobró\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 78,
+      "cita": "Text(\"Si ya revisaste que no se cobró"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 29,
+      "cita": "return if (result.serverAnswered || row?.serverAnsweredAt != null) SalidaDelCobro.REVISE_LA_TERMINAL"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 24,
+      "cita": "if (row?.terminalPaymentRequestId != null)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 86,
+      "cita": "Text(\"El cliente no presentó tarjeta\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 54,
+      "cita": "BlumonAttemptResolver.State.RELEASED -> \"Intento cerrado\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 68,
+      "cita": "Puedes volver a cobrar esta venta"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 99,
+      "cita": "Text(\"Regresar\")"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/AvisoDeCobrosPendientes.kt",
+      "linea": 95,
+      "cita": "\"El cobro de ${pesos(totalCentavos)} (${antiguedad(ahoraMillis - desdeMillis)}) SÍ pasó: Avoqado ya lo registró, \""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 980,
+      "cita": "Text(\"Entendido\")"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:reconcile-uncharged",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/BlumonAttemptResolver.kt",
+      "linea": 41
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin respuesta de Avoqado no se ofrece «Ya revisé…»: «Primero hay que consultar a Avoqado…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 94
+    },
+    {
+      "afirmacion": "La libreta exige que Avoqado haya contestado alguna vez (server_answered_at)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/BlumonAttemptResolver.kt",
+      "linea": 152
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "nav:Payment, estado Error con intento sin resolver → BlumonRecoveryContent",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 947
+    },
+    {
+      "ruta": "Antes: título «Estamos confirmando el cobro» y su aviso de no volver a pasar la tarjeta",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 56
+    },
+    {
+      "ruta": "Problema: «Hay evidencia de cobro»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 70
+    },
+    {
+      "ruta": "Problema: sin permiso del cajero",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 90
+    },
+    {
+      "ruta": "Problema: sin permiso de gerente",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 92
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fecha": "2026-11-18",
+    "fotos": [],
+    "filasCreadas": [],
+    "nota": "No se pudo provocar: hace falta un cobro con tarjeta cuya respuesta se pierda (*Estamos confirmando el cobro*). Con la tarjeta de laboratorio sobre el lector, la PAX cobró y confirmó al instante en los tres cobros de la jornada. Falta un recorrido con la respuesta de Blumon o del SERVIDOR cortada a propósito."
+  },
+  "codex": {
+    "lote": 1,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

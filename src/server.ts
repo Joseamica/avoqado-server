@@ -101,6 +101,8 @@ import { shopifyWorkerJob } from './jobs/shopify-worker.job'
 import { shopifyReconcileJob } from './jobs/shopify-reconcile.job'
 import { giftCardReconciliationJob } from './jobs/giftCardReconciliation.job'
 import { giftCardDeliveryJob } from './jobs/giftCardDelivery.job'
+import { supportWhatsappJob } from './jobs/support-whatsapp.job'
+import { supportNoticesJob } from './jobs/support-notices.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { planAccessReconciliationJob } from './jobs/plan-access-reconciliation.job'
 import { altasAMedioPagoJob } from './jobs/altas-a-medio-pago.job'
@@ -213,6 +215,8 @@ const gracefulShutdown = async (signal: string) => {
       shopifyReconcileJob.stop()
       giftCardReconciliationJob.stop()
       giftCardDeliveryJob.stop()
+      supportWhatsappJob.stop()
+      supportNoticesJob.stop()
       cashDrawerReconcilerJob.stop()
       planAccessReconciliationJob.stop()
       documentRequestsJob.stop()
@@ -596,6 +600,9 @@ const startApplication = async (retries = 3) => {
       giftCardReconciliationJob.start()
       // Tarjetas de regalo 1b: la entrega por WhatsApp y correo (reclamo en la fila, reintentos a +1, +5 y +30 min).
       giftCardDeliveryJob.start()
+      supportWhatsappJob.start()
+      // Soporte: el correo del aviso al equipo, en su propio job (el de WhatsApp nunca lo espera).
+      supportNoticesJob.start()
       cashDrawerReconcilerJob.start()
       planAccessReconciliationJob.start()
       documentRequestsJob.start()
