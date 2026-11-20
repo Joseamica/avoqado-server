@@ -426,6 +426,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   shopify_unmatched_list: 'read',
   sim_custody: 'read',
   sim_pending_approvals: 'read',
+  void_table_check_item: 'write',
   split_table_check: 'write',
   split_table_check_by_seat: 'write',
   staff_attendance: 'read',

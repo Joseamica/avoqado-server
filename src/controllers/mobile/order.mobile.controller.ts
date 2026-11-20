@@ -870,6 +870,23 @@ export const compOrderItem = async (req: Request, res: Response, next: NextFunct
 }
 
 /**
+ * «Anular producto» (Flautas, 20-nov): quita UN renglón de la cuenta de mesa, aunque ya esté en cocina. Firma la sesión.
+ * @route POST /api/v1/mobile/venues/:venueId/orders/:orderId/items/:itemId/void
+ */
+export const voidOrderItem = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId, itemId } = req.params
+    const actorId = (req as any).authContext?.userId as string | undefined
+    if (!actorId) throw new UnauthorizedError('Autenticación requerida')
+    const { voidOrderItem: anular } = await import('../../services/mobile/void-item.mobile.service')
+    const data = await anular({ venueId, orderId, itemId, reason: req.body.reason, actorId, expectedVersion: req.body.expectedVersion })
+    return res.json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * POST /mobile/venues/:venueId/orders/:orderId/comp
  * TABLE_SERVICE — "Cortesía en la cuenta": comps EVERY line of the open
  * order with one reason. Body: { reason: string }

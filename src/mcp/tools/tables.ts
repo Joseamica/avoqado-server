@@ -11,6 +11,8 @@ import AppError from '@/errors/AppError'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { moveOrderToTable, assignOrderWaiter, setTableStatusInTransaction } from '@/services/tpv/table.tpv.service'
 import { compWholeOrder } from '@/services/mobile/comp-item.mobile.service'
+import { voidOrderItem } from '@/services/mobile/void-item.mobile.service'
+import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { updateOrderDetails, splitOrderItems, splitOrderBySeat, mergeOrders } from '@/services/mobile/order.mobile.service'
 // Módulo LIGERO (sólo Prisma): el `.service` arrastra sockets y candados que el MCP no necesita para leer.
 import { getFloorPlan } from '@/services/dashboard/floorPlan/floorPlan.read'
@@ -391,6 +393,86 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
         return text({ ok: true, comped: { table: number, items: result.itemsComped, amount: result.compedAmount } })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'void_table_check_item',
+    'TABLE_SERVICE: «Anular producto» — quita UN producto de la cuenta abierta de una mesa, aunque ya se haya mandado a cocina (el cliente cambió de parecer, se capturó mal). El producto sale de la cuenta y el total se recalcula; no se cobra ni descuenta inventario. Pide el motivo, que queda en la bitácora. No se puede si la cuenta ya tiene pagos, ni con el único producto de la cuenta (eso es anular la cuenta completa, desde el POS). Para regalarlo en vez de quitarlo es una cortesía. Sin confirm:true sólo muestra qué se anularía. This WRITES money; requires orders:void. Pass venueId + table number + the product (its line id, or part of its name) + reason.',
+    {
+      venueId: z.string().describe('Venue that owns the table (must be in your scope)'),
+      number: z.string().min(1).describe('Table number whose check has the product, e.g. "8"'),
+      item: z.string().min(1).describe('Line id of the product on the check, or part of its name (e.g. "agua de pepino")'),
+      reason: z.string().trim().min(1).max(120).describe('Reason (e.g. "El cliente cambió de parecer", "Error de entrada")'),
+      confirm: z.boolean().optional().describe('true to void it for real, only after the user authorized it'),
+    },
+    async ({ venueId, number, item, reason, confirm }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('orders:void', venueId)
+      requireWriteScopeAlways(scope, 'orders:void', 'quita un producto de la cuenta de una mesa')
+      const table = await prisma.table.findFirst({
+        where: { ...where, number, active: true },
+        select: { id: true, currentOrderId: true },
+      })
+      if (!table) return text({ ok: false, error: `No encontré la mesa "${number}" activa en este local.` })
+      if (!table.currentOrderId) return text({ ok: false, error: `La mesa ${number} no tiene cuenta abierta.` })
+      const lineas = await prisma.orderItem.findMany({
+        where: { orderId: table.currentOrderId },
+        select: { id: true, productName: true, quantity: true, total: true, sentToKitchenAt: true, isCortesia: true },
+        orderBy: { createdAt: 'asc' },
+        take: 200, // una cuenta de mesa no llega ni cerca; es el techo del listado
+      })
+      const buscado = item.trim().toLowerCase()
+      const porId = lineas.filter(l => l.id === item.trim())
+      const candidatas = porId.length > 0 ? porId : lineas.filter(l => (l.productName ?? '').toLowerCase().includes(buscado))
+      const ver = (l: (typeof lineas)[number]) => ({
+        id: l.id,
+        producto: l.productName,
+        cantidad: l.quantity,
+        importe: Number(l.total),
+        enviadoACocina: l.sentToKitchenAt != null,
+        ...(l.isCortesia ? { cortesia: true } : {}),
+      })
+      if (candidatas.length === 0) {
+        return text({ ok: false, error: `No encontré "${item}" en la cuenta de la mesa ${number}.`, productos: lineas.map(ver) })
+      }
+      if (candidatas.length > 1) {
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: 'Hay varios productos así en la cuenta: elige uno por su id.',
+          productos: candidatas.map(ver),
+        })
+      }
+      const linea = candidatas[0]
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            mesa: number,
+            producto: ver(linea),
+            motivo: reason,
+            efecto:
+              'El producto sale de la cuenta y el total baja por su importe. Si la cuenta ya tiene pagos o es su único producto, no se anula y se dice por qué.',
+          },
+          mensaje: 'Vuelve a llamar con confirm:true para anularlo.',
+        })
+      }
+      try {
+        const result = await voidOrderItem({ venueId, orderId: table.currentOrderId, itemId: linea.id, reason, actorId: scope.staffId })
+        await auditMcpWrite(scope, {
+          action: 'TABLE_CHECK_ITEM_VOIDED',
+          entity: 'Order',
+          entityId: table.currentOrderId,
+          venueId,
+          data: { table: number, itemId: linea.id, product: linea.productName, amount: Number(linea.total), reason },
+        })
+        return text({ ok: true, anulado: { mesa: number, producto: linea.productName, nuevoTotal: result.total } })
+      } catch (err) {
+        if (err instanceof AppError) return text({ ok: false, error: err.message, ...(err.code ? { code: err.code } : {}) })
+        throw err
       }
     },
   )

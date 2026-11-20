@@ -932,3 +932,46 @@ describe('S9 (P2-5): anular TODOS los artículos de un folio es cancelarlo como 
     expect(tx.orderItem.deleteMany).toHaveBeenCalled()
   })
 })
+
+describe('«Anular producto» desde la mesa del POS (Flautas, 20-nov): las dos guardas de la ruta móvil, bajo el candado', () => {
+  const dos = () => ({ ...order(), items: [line, { ...line, id: 'line-2' }] })
+
+  it('soloSinCobros: una cuenta con abonos (PARTIAL) no deja anular, aunque sea un renglón, y no toca nada', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...dos(), paymentStatus: 'PARTIAL' })
+    await expect(
+      voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1, soloSinCobros: true }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_ITEM_VOID_HAS_PAYMENTS' })
+    expect(tx.orderItem.deleteMany).not.toHaveBeenCalled()
+    expect(tx.order.update).not.toHaveBeenCalled()
+  })
+
+  it('sin la bandera, una anulación parcial sobre PARTIAL sigue como hoy (la TPV no cambia)', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...dos(), paymentStatus: 'PARTIAL' })
+    await voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1 })
+    expect(tx.orderItem.deleteMany).toHaveBeenCalled()
+  })
+
+  it('sinCancelarLaCuenta: el último renglón no se anula (cancelaría la cuenta sin soltar la mesa); antes de devolver canjes o borrar', async () => {
+    await expect(
+      voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1, sinCancelarLaCuenta: true }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_ITEM_VOID_LAST_ITEM' })
+    expect(tx.orderItem.deleteMany).not.toHaveBeenCalled()
+    expect(tx.order.update).not.toHaveBeenCalled()
+    expect(tx.orderDiscount.delete).not.toHaveBeenCalled()
+    expect(tx.kdsOrder.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('sinCancelarLaCuenta: con otro renglón en la cuenta, anula como siempre', async () => {
+    tx.order.findUnique.mockResolvedValue(dos())
+    await voidItems('venue', 'order', {
+      itemIds: ['line'],
+      reason: 'error',
+      staffId: 'staff',
+      expectedVersion: 1,
+      sinCancelarLaCuenta: true,
+    })
+    expect(tx.orderItem.deleteMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: { in: ['line'] } }) }),
+    )
+  })
+})

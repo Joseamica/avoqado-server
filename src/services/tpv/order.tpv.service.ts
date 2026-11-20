@@ -3290,7 +3290,20 @@ interface VoidItemsInput {
    * vales soltados (D2) y los canjes que se devuelven. Sin él, como antes: el `staffId` del cuerpo (los vales soltados, sin autor).
    */
   actorId?: string
+  /**
+   * «Anular producto» desde la mesa del POS (Flautas, 20-nov): como la cortesía, nada con abonos (PARTIAL). La TPV no la pone y
+   * sigue anulando parcial sobre PARTIAL (con el tope de lo cobrado de abajo).
+   */
+  soloSinCobros?: boolean
+  /**
+   * «Anular producto» desde la mesa del POS: el último renglón no se anula. Anularlo cancela la cuenta, y este camino no suelta la
+   * mesa (sí `cancelOrder`): la mesa quedaría ocupada sin cuenta. Para eso está «Anular cuenta».
+   */
+  sinCancelarLaCuenta?: boolean
 }
+
+export const VOID_ITEM_HAS_PAYMENTS = 'ORDER_ITEM_VOID_HAS_PAYMENTS'
+export const VOID_ITEM_LAST_ITEM = 'ORDER_ITEM_VOID_LAST_ITEM'
 
 /**
  * Void (cancel) items from an order
@@ -3356,6 +3369,19 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       if (order.paymentStatus === 'PAID') {
         throw new BadRequestError(
           'Esta cuenta ya está pagada y ya no se pueden anular artículos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+        )
+      }
+      if (input.soloSinCobros && order.paymentStatus === 'PARTIAL') {
+        throw new BadRequestError(
+          'Esta cuenta ya tiene pagos registrados y ya no se pueden anular sus productos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+          VOID_ITEM_HAS_PAYMENTS,
+        )
+      }
+      // Antes de devolver canjes (abajo, al anular TODO): aquí no se cancela nada.
+      if (input.sinCancelarLaCuenta && order.items.every(item => input.itemIds.includes(item.id))) {
+        throw new BadRequestError(
+          'Es el único producto de la cuenta. Para quitarlo usa «Anular cuenta», o manda primero lo que lo reemplaza y luego anúlalo.',
+          VOID_ITEM_LAST_ITEM,
         )
       }
 
