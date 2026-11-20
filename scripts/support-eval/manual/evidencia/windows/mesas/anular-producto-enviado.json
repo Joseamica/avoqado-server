@@ -1,7 +1,7 @@
 {
   "pagina": "windows/mesas/anular-producto-enviado",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "1a298d6129b6b3b64bbefe718f1c4a2541dafb14",
+  "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b",
   "version": "2.25.52",
   "pasos": [
     {
@@ -103,7 +103,7 @@
     {
       "afirmacion": "Si no se pudo leer la cuenta, lo ya enviado no sale y se muestra en gris (showSinRed)",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 2457
+      "linea": 2462
     },
     {
       "afirmacion": "Si la ronda se confirma mientras sale otra hoja, dice «Esta ronda se acaba de confirmar: vuelve a tocar «Volver a imprimir»…»",
@@ -111,7 +111,7 @@
       "linea": 180
     },
     {
-      "afirmacion": "Con internet, una ronda que todavía llega al servidor no sale de lo guardado: dice «Una ronda todavía está llegando al servidor: vuelve a tocar «Volver a imprimir» en un momento para sacarla.»",
+      "afirmacion": "Con internet, una ronda de esta caja que el servidor aún no confirma no sale de lo guardado: dice «Una ronda de esta caja todavía no tiene confirmación del servidor: salió lo que la cuenta ya trae; lo demás sale al reimprimir cuando se confirme.»",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
       "linea": 184
     }

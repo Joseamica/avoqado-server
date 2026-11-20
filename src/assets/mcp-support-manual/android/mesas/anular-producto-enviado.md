@@ -9,7 +9,7 @@ featureCode: TABLE_SERVICE
 gateKind: FEATURE
 money: true
 sourceRepo: avoqado-android
-sourceRef: 1a298d6129b6b3b64bbefe718f1c4a2541dafb14
+sourceRef: df4cc2172fa35ef528c7cd65e90353e7c147db6b
 keywords:
   - cancelar un producto
   - quitar un producto que ya se mandó
@@ -49,4 +49,4 @@ Es para productos que ya están guardados en la cuenta de una mesa en *Mesas*: l
 
 - Sin internet el botón *Anular producto* no se ve en gris: al tocarlo aparece «Sin conexión — anular un producto enviado necesita internet; se habilita al volver la señal» y no se anuló: hazlo cuando vuelva la conexión. La cortesía de un producto enviado también necesita internet.
 - Si aparece «Sin conexión: no supimos si el producto se anuló…», la red se cortó a media anulación: cuando vuelva, revisa la cuenta antes de anularlo otra vez.
-- Sin internet, *Volver a imprimir pedido* no saca lo que ya se envió, porque otra caja pudo anular algo: aparece «Sin conexión: lo que ya se envió no se puede reimprimir porque otra caja pudo cambiarlo; se podrá al volver el internet.». Sí sale una ronda nueva que todavía no llega al servidor. Reimprime lo demás cuando vuelva la conexión; si la cocina lo necesita ya, díctaselo. Si aparece «Esta ronda se acaba de confirmar…» o «Una ronda todavía está llegando al servidor…», vuelve a tocar *Volver a imprimir pedido* en un momento.
+- Sin internet, *Volver a imprimir pedido* no saca lo que ya se envió, porque otra caja pudo anular algo: aparece «Sin conexión: lo que ya se envió no se puede reimprimir porque otra caja pudo cambiarlo; se podrá al volver el internet.». Sí sale una ronda que esta caja mandó y que el servidor todavía no le confirma. Reimprime lo demás cuando vuelva la conexión; si la cocina lo necesita ya, díctaselo. Si aparece «Esta ronda se acaba de confirmar…» o «Una ronda de esta caja todavía no tiene confirmación del servidor…», lo que faltó sale al volver a tocar *Volver a imprimir pedido* cuando se confirme.
