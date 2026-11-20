@@ -189,23 +189,47 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
     }
   }
 
-  // Reusar = PRENDERLA, como hoy (Codex r6-r8). Del alta sólo se toma la apariencia que trae con valor (descripción, color, ícono,
-  // foto): la clave SAT, el horario, la impresora y el padre se quedan como estaban y se cambian editándola, como hoy, con las
-  // revisiones de la edición (un horario a medias, una clave que cambia facturas). El nombre se queda tal cual.
+  // Reusar = prenderla y editarla con lo que el alta trae CON valor, en UNA transacción con sus menús y productos (Codex r6-r9): el
+  // formulario manda vacío lo que el dueño no tocó, y eso no borra la clave SAT, el horario ni la impresora que tenía; si algo
+  // falla (un menú que se borró en medio), no queda nada a medias. El horario sólo se aplica completo (de y hasta juntos), como
+  // lo exige la edición. El nombre se queda tal cual (sólo cambian mayúsculas o espacios: las promociones lo leen tal cual).
   const conValor = (v: unknown) => v !== undefined && v !== null && v !== ''
+  const dias = Array.isArray(createData.availableDays) ? (createData.availableDays as string[]) : []
+  const horarioCompleto = conValor(createData.availableFrom) && conValor(createData.availableUntil)
+  const menuAssignments = (data.avoqadoMenus ?? []).map(menu => ({ menuId: menu.value }))
+  const productIds = (data.avoqadoProducts ?? []).map(product => product.value)
+
   const category = reusar
-    ? await prisma.menuCategory
-        .update({
-          where: { id: reusar.id, venueId, deletedAt: { not: null } },
-          data: {
-            ...(conValor(createData.description) && { description: createData.description }),
-            ...(conValor(createData.imageUrl) && { imageUrl: createData.imageUrl }),
-            ...(conValor(createData.color) && { color: createData.color }),
-            ...(conValor(createData.icon) && { icon: createData.icon }),
-            active: createData.active ?? true,
-            deletedAt: null,
-            isDemo: false,
-          },
+    ? await prisma
+        .$transaction(async tx => {
+          const reusada = await tx.menuCategory.update({
+            where: { id: reusar.id, venueId, deletedAt: { not: null } },
+            data: {
+              ...(conValor(createData.description) && { description: createData.description }),
+              ...(conValor(createData.imageUrl) && { imageUrl: createData.imageUrl }),
+              ...(conValor(createData.color) && { color: createData.color }),
+              ...(conValor(createData.icon) && { icon: createData.icon }),
+              ...(conValor(createData.displayOrder) && { displayOrder: createData.displayOrder }),
+              active: createData.active ?? true,
+              deletedAt: null,
+              isDemo: false,
+              ...(horarioCompleto && { availableFrom: createData.availableFrom, availableUntil: createData.availableUntil }),
+              ...(dias.length > 0 && { availableDays: { set: dias } }),
+              ...(conValor(createData.defaultSatProductKey) && { defaultSatProductKey: createData.defaultSatProductKey }),
+              ...(conValor(createData.defaultSatUnitKey) && { defaultSatUnitKey: createData.defaultSatUnitKey }),
+              ...(createData.parent ? { parent: createData.parent } : {}),
+              ...(createData.printStation ? { printStation: createData.printStation } : {}),
+            },
+          })
+          if (menuAssignments.length > 0) {
+            await tx.menuCategoryAssignment.createMany({ data: menuAssignments.map(m => ({ ...m, categoryId: reusada.id })) })
+          }
+          if (productIds.length > 0) {
+            await tx.product
+              .updateMany({ where: { id: { in: productIds }, venueId }, data: { categoryId: reusada.id } })
+              .catch(rechazoDelEscritorUnico)
+          }
+          return reusada
         })
         .catch(e => {
           // Una importación o un producto que regresó la volvió a mostrar en medio: ya existe, como cualquier otra con ese nombre.
@@ -216,33 +240,28 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
         })
     : await prisma.menuCategory.create({ data: createData })
 
-  // Handle menu assignments
-  if (data.avoqadoMenus && data.avoqadoMenus.length > 0) {
-    const menuAssignments = data.avoqadoMenus.map(menu => ({
-      menuId: menu.value,
-      categoryId: category.id,
-    }))
-
-    await prisma.menuCategoryAssignment.createMany({
-      data: menuAssignments,
-    })
-  }
-
-  // Handle product assignments
-  if (data.avoqadoProducts && data.avoqadoProducts.length > 0) {
-    const productIds = data.avoqadoProducts.map(product => product.value)
-
-    await prisma.product
-      .updateMany({
-        where: {
-          id: { in: productIds },
-          venueId: venueId,
-        },
-        data: {
-          categoryId: category.id,
-        },
+  if (!reusar) {
+    // Handle menu assignments
+    if (menuAssignments.length > 0) {
+      await prisma.menuCategoryAssignment.createMany({
+        data: menuAssignments.map(m => ({ ...m, categoryId: category.id })),
       })
-      .catch(rechazoDelEscritorUnico)
+    }
+
+    // Handle product assignments
+    if (productIds.length > 0) {
+      await prisma.product
+        .updateMany({
+          where: {
+            id: { in: productIds },
+            venueId: venueId,
+          },
+          data: {
+            categoryId: category.id,
+          },
+        })
+        .catch(rechazoDelEscritorUnico)
+    }
   }
 
   // 🔌 REAL-TIME: Broadcast category creation via Socket.IO

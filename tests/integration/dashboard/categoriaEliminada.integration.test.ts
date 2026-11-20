@@ -102,7 +102,7 @@ describe('eliminar una categoría que sólo guarda archivados', () => {
     } as never)
 
     // Como prenderla hoy: misma fila, mismo nombre (sólo cambiaban mayúsculas), su clave SAT se queda y el color que mandó, sí.
-    // Un horario del alta no se aplica al reusar (se cambia editándola, con sus revisiones: Codex r8).
+    // Lo vacío no borra; lo que trae con valor sí se aplica (un horario, sólo completo).
     expect(nueva).toMatchObject({ id: categoryId, name: 'EVENTO', active: true, deletedAt: null, color: '#00ff00' })
     expect(nueva.defaultSatProductKey).toBe('90101501')
     expect(await nombresEnLaLista(x.venueId)).toEqual(['EVENTO'])
@@ -115,6 +115,26 @@ describe('eliminar una categoría que sólo guarda archivados', () => {
     await expect(createMenuCategory(x.venueId, { name: 'EVENTO' } as never)).rejects.toMatchObject({ statusCode: 400 })
     await expect(createMenuCategory(x.venueId, { name: 'evento ' } as never)).rejects.toMatchObject({ statusCode: 400 })
     expect(await prisma.menuCategory.count({ where: { venueId: x.venueId } })).toBe(1)
+  })
+
+  it('al reusarla, un horario completo del alta se aplica y uno a medias no (Codex r8-r9)', async () => {
+    const x = await negocio()
+    const { categoryId } = await eventoConArchivado(x)
+    await prisma.menuCategory.update({ where: { id: categoryId }, data: { availableFrom: '09:00', availableUntil: '14:00' } })
+    await deleteMenuCategory(x.venueId, categoryId)
+    await createMenuCategory(x.venueId, { name: 'EVENTO', availableFrom: '14:00', availableUntil: null } as never)
+    expect(await prisma.menuCategory.findUniqueOrThrow({ where: { id: categoryId } })).toMatchObject({
+      availableFrom: '09:00',
+      availableUntil: '14:00',
+    })
+
+    await deleteMenuCategory(x.venueId, categoryId)
+    await createMenuCategory(x.venueId, { name: 'EVENTO', availableFrom: '17:00', availableUntil: '22:00' } as never)
+    expect(await prisma.menuCategory.findUniqueOrThrow({ where: { id: categoryId } })).toMatchObject({
+      availableFrom: '17:00',
+      availableUntil: '22:00',
+      deletedAt: null,
+    })
   })
 
   it('REGRESIÓN: otro nombre con el mismo slug que una eliminada («21» y «2+1») se rechaza como hoy y no la toca', async () => {
