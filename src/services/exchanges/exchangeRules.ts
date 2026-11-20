@@ -3,7 +3,7 @@
  * §6.3): si el cambio está prendido, qué renglón y qué venta se pueden cambiar, por qué medios se devuelve lo de cada cobro y de
  * qué cobro sale cada peso cuando la venta tiene varios. Sin Prisma ni red: quien llama trae los datos y aplica el veredicto.
  */
-import type { VenueType } from '@prisma/client'
+import { OnlineOrderPaymentMode, type VenueType } from '@prisma/client'
 import { centavosYaDevueltos, centavosDevueltosPorComponente, type FilaDeReembolso } from '../shared/devueltoDeUnCobro'
 import { categoryOfVenueType } from '../../utils/venueTypeCategory'
 import { isGiftCardTenderKind } from '../giftCards/giftCardPredicados'
@@ -62,16 +62,21 @@ export function lineBlockReason(line: {
 }
 
 /**
- * Por qué la venta entera no se puede cambiar, o null (spec §5.1). Un pedido de plataforma se cambia en la plataforma. Sólo una
- * venta cobrada (PAID o REFUNDED: `esVentaCerrada`) y viva se cambia; si ya se devolvió todo, lo dicen sus renglones.
+ * Por qué la venta entera no se puede cambiar, o null (spec §5.1). Un pedido de plataforma se cambia en la plataforma. D661: la venta
+ * de un pedido «Nadie» (`requiresAcceptance = false`) pagado con tarjeta en línea tampoco: su dinero sólo regresa por la devolución
+ * del pedido, cobrado o no; «Mi equipo» y el folio pagado en caja siguen como hoy. Sólo una venta cobrada (PAID o REFUNDED:
+ * `esVentaCerrada`) y viva se cambia; si ya se devolvió todo, lo dicen sus renglones.
  */
 export function saleBlockReason(sale: {
   source: string
   status: string
   paymentStatus: string
   paymentSources: string[]
-}): 'DELIVERY_PLATFORM' | 'NOT_PAID' | null {
+  onlineOrder?: { requiresAcceptance: boolean; paymentMode: string } | null
+}): 'DELIVERY_PLATFORM' | 'ONLINE_CARD' | 'NOT_PAID' | null {
   if (DELIVERY_PLATFORM_ORDER_SOURCES.has(sale.source) || sale.paymentSources.includes('DELIVERY_PLATFORM')) return 'DELIVERY_PLATFORM'
+  if (sale.onlineOrder?.requiresAcceptance === false && sale.onlineOrder.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE)
+    return 'ONLINE_CARD'
   if (claseDeEstado(sale.status) === 'CANCELADA' || !esVentaCerrada(sale.paymentStatus)) return 'NOT_PAID'
   return null
 }

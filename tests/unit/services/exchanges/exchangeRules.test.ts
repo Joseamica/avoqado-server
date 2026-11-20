@@ -137,6 +137,19 @@ describe('saleBlockReason', () => {
     expect(saleBlockReason(sale())).toBeNull()
     expect(saleBlockReason(sale({ paymentStatus: 'REFUNDED' }))).toBeNull()
   })
+
+  // D661 tarea 7: el dinero de un pedido «Nadie» pagado con tarjeta en línea sólo regresa por la devolución del pedido.
+  it('D661: la venta de un pedido «Nadie» CARD_ONLINE → ONLINE_CARD, cobrada o no', () => {
+    const nadieConTarjeta = { requiresAcceptance: false, paymentMode: 'CARD_ONLINE' }
+    expect(saleBlockReason(sale({ source: 'WEB', onlineOrder: nadieConTarjeta }))).toBe('ONLINE_CARD')
+    expect(saleBlockReason(sale({ source: 'WEB', onlineOrder: nadieConTarjeta, paymentStatus: 'PENDING' }))).toBe('ONLINE_CARD')
+  })
+
+  it('D661: un pedido «Mi equipo» con tarjeta y un folio «Nadie» pagado en caja siguen como hoy', () => {
+    expect(saleBlockReason(sale({ source: 'WEB', onlineOrder: { requiresAcceptance: true, paymentMode: 'CARD_ONLINE' } }))).toBeNull()
+    expect(saleBlockReason(sale({ source: 'WEB', onlineOrder: { requiresAcceptance: false, paymentMode: 'PAY_AT_PICKUP' } }))).toBeNull()
+    expect(saleBlockReason(sale({ onlineOrder: null }))).toBeNull()
+  })
 })
 
 describe('payoutModesFor', () => {
