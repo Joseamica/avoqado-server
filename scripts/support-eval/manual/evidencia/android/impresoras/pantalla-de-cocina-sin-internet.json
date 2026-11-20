@@ -139,7 +139,7 @@
     {
       "featureCode": "KITCHEN_DISPLAY",
       "archivo": "avoqado-server/src/services/kds/kitchenDisplayStations.ts",
-      "linea": 97
+      "linea": 102
     }
   ],
   "sinInternet": [
@@ -263,12 +263,12 @@
     {
       "ruta": "Antes: sólo estaciones activas con pantalla de cocina",
       "archivo": "avoqado-server/src/services/kds/kitchenDisplayStations.ts",
-      "linea": 91
+      "linea": 96
     },
     {
       "ruta": "Antes: recién arrancado el servidor no da a ninguna por desconectada",
       "archivo": "avoqado-server/src/services/kds/kitchenDisplayStations.ts",
-      "linea": 106
+      "linea": 111
     },
     {
       "ruta": "Antes: la caja pregunta cada 20 s (con pantallas)",
