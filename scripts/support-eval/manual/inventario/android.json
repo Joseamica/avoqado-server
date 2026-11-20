@@ -662,7 +662,7 @@
       "nombre": "Mesa {número}",
       "origen": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt:1438",
       "quienLaVe": "Ruta en app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:573; el encabezado dice «Mesa N · área» (app/src/main/java/com/avoqado/pos/tables/data/TableSession.kt:61). Se registra con canAccessPOS (app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:558) y se abre al tocar «Abrir mesa y ordenar» o «Agregar productos» en Mesas (app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt:755, 855); plan con featureCode TABLE_SERVICE (sin él sale «Servicio de mesas · PRO», app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt:143-144); con «propiedad de mesas» activa, sólo el mesero de la mesa o quien tenga `tables:pay-any` (respaldo MANAGER+, RoleManager.canSettleAnyTable, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:261-262; app/src/main/java/com/avoqado/pos/tables/data/TableServiceRepository.kt:274).",
-      "paginas": ["android/mesas/abrir-mesa-y-ordenar"]
+      "paginas": ["android/mesas/abrir-mesa-y-ordenar", "android/mesas/anular-producto-enviado"]
     },
     {
       "id": "accion:nav:MainTab.TABLES.route/abrir-mesa",

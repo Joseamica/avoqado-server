@@ -1,0 +1,111 @@
+{
+  "pagina": "windows/mesas/anular-producto-enviado",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "0ce9a57a4addebc5772c6ec693df405c313d0444",
+  "version": "2.25.52",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 199,
+      "cita": "viewModel.startOrdering(t, onReady = onOpenTableOrder)"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 720,
+      "cita": "text = \"Ver cheque\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2042,
+      "cita": ".clickable(enabled = !item.isCortesia) { onSentItemTap(item) }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 574,
+      "cita": "onSentItemTap = { item -> if (!item.isCortesia && !blockIfReadOnly()) compTarget = item },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 1055,
+      "cita": "Text(\"Motivo\", fontWeight = FontWeight.SemiBold)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 999,
+      "cita": "\"El cliente cambió de parecer\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 1035,
+      "cita": "text = \"Anular producto\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1680,
+      "cita": "showMessage(\"Producto anulado — $reason\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 1050,
+      "cita": ") { Text(\"Dar de cortesía\") }"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/network/ForbiddenInterceptor.kt",
+      "linea": 183,
+      "cita": "if (parsed.overridable == true &&"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "orders:void",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3643
+    },
+    {
+      "permiso": "orders:comp",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3626
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3641
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red no se anula ni se encola: dice «Sin conexión — anular un producto enviado necesita internet…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1673
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "La cuenta de la mesa se abre al tocar la mesa ocupada en Mesas",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 199
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 11,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

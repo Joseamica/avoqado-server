@@ -240,7 +240,7 @@
       "nombre": "Cuenta {N} de {M}",
       "origen": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:573",
       "quienLaVe": "Quien ve Mesas (se registra junto a Cobrar con RoleManager.canAccessPOS, app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:558) al abrir una mesa (app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:569). La pantalla no tiene título fijo: muestra la mesa y «Cuenta N de M» (app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt:1463). Si el negocio activó la propiedad de mesa, la cuenta de otro mesero queda «solo lectura» salvo con tables:manage-all (app/src/main/java/com/avoqado/pos/tables/data/TableServiceRepository.kt:138; app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt:304).",
-      "paginas": ["windows/mesas/abrir-mesa-y-ordenar"]
+      "paginas": ["windows/mesas/abrir-mesa-y-ordenar", "windows/mesas/anular-producto-enviado"]
     },
     {
       "id": "accion:nav:\"table-order\"/enviar-a-cocina",
