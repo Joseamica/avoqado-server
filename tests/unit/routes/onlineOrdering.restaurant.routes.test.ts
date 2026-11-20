@@ -339,7 +339,13 @@ describe('panel: GET y PUT /settings (controlador real)', () => {
     const r = await request(panel).get('/venues/v1/settings')
 
     expect(r.status).toBe(200)
-    expect(r.body.data.store).toEqual({ status: 'PAUSED', reason: 'MANUAL_PAUSE', pausedUntil: hasta.toISOString(), manualPause: false })
+    expect(r.body.data.store).toEqual({
+      status: 'PAUSED',
+      reason: 'MANUAL_PAUSE',
+      pausedUntil: hasta.toISOString(),
+      manualPause: false,
+      autoPausedAt: null,
+    })
     expect(r.body.data.requirements).toEqual({ address: true, phone: true, privacyNotice: false })
     // Lo de antes sigue (campos aditivos).
     expect(r.body.data).toMatchObject({ enabled: true, minOrderAmount: 0, lastInboxPollAt: new Date(NOW - 10_000).toISOString() })
@@ -349,7 +355,7 @@ describe('panel: GET y PUT /settings (controlador real)', () => {
   it('GET de una tienda abierta: OPEN sin motivo, sin pausa', async () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(fila() as any)
     const r = await request(panel).get('/venues/v1/settings')
-    expect(r.body.data.store).toEqual({ status: 'OPEN', reason: null, pausedUntil: null, manualPause: false })
+    expect(r.body.data.store).toEqual({ status: 'OPEN', reason: null, pausedUntil: null, manualPause: false, autoPausedAt: null })
     expect(r.body.data.requirements).toEqual({ address: true, phone: true, privacyNotice: true })
   })
 
@@ -395,7 +401,7 @@ describe('panel: GET y PUT /settings (controlador real)', () => {
     const get = await request(panel).get('/venues/v1/settings')
 
     expect(put.status).toBe(200)
-    expect(put.body.data.store).toEqual({ status: 'OPEN', reason: null, pausedUntil: null, manualPause: false })
+    expect(put.body.data.store).toEqual({ status: 'OPEN', reason: null, pausedUntil: null, manualPause: false, autoPausedAt: null })
     expect(put.body.data.requirements).toEqual({ address: true, phone: true, privacyNotice: true })
     expect(put.body.data.lastInboxPollAt).toBe(new Date(NOW - 10_000).toISOString())
     expect(put.body.data.minOrderAmount).toBe(60)
@@ -407,7 +413,13 @@ describe('panel: GET y PUT /settings (controlador real)', () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(fila() as any)
     prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(fila({ manualPause: true }) as any)
     const r = await request(panel).put('/venues/v1/settings').send({ manualPause: true })
-    expect(r.body.data.store).toEqual({ status: 'PAUSED', reason: 'MANUAL_PAUSE', pausedUntil: null, manualPause: true })
+    expect(r.body.data.store).toEqual({
+      status: 'PAUSED',
+      reason: 'MANUAL_PAUSE',
+      pausedUntil: null,
+      manualPause: true,
+      autoPausedAt: null,
+    })
     // Una lectura bajo el candado de `updateSettings`; la vista usa lo que acaba de escribir.
     expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledTimes(1)
   })
