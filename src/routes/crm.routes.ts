@@ -16,9 +16,9 @@ import { CRM_KEYS } from '../lib/permissions'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { autenticacionOpcional } from '../middlewares/autenticacionOpcional.middleware'
 import { requireCrm } from '../middlewares/requireCrm.middleware'
+import { soloSuperadminReal } from '../middlewares/soloSuperadminReal.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { preserveContext } from '../observability/preserveContext'
-import { esSuperadminReal } from '../services/access/rolVigente'
 import { assertFormaNuevaDeLlaves } from '../services/crm/teamVenue.service'
 import {
   accountIdSchema,
@@ -188,20 +188,11 @@ router.get('/clients/:organizationId/live', ver, validateRequest(hideClientSchem
 router.get('/reports', ver, validateRequest(reportsSchema), crmController.getReports)
 router.get('/export.csv', exportar, validateRequest(exportAccountsSchema), crmController.exportAccountsCsv)
 
-// The sales WhatsApp, read only (phase 3, «leer chats»). Any key opens the door; the service lets only the real superadmin
-// through (founder, 20-nov: «Sólo yo»), so the screens and the MCP answer the same 403 to a seller.
-// `soloSuperadminReal` goes FIRST: a seller's first request would otherwise claim their key row (`getCrmAccess`) on the way to
-// the 403 (Codex r1 #8). For the superadmin `requireCrm` reads no row.
-const soloSuperadminReal = async (req: Request, res: Response, next: NextFunction) => {
-  const userId = req.authContext?.userId
-  try {
-    if (userId && !req.authContext?.isImpersonating && (await esSuperadminReal(userId))) return next()
-  } catch (error) {
-    return next(error)
-  }
-  res.status(403).json({ code: 'CRM_FORBIDDEN', message: 'Los chats del WhatsApp de ventas sólo los ve el superadmin.' })
-}
-const whatsapp = [soloSuperadminReal, requireCrm(CRM_KEYS)]
+// The sales WhatsApp, read only (phase 3, «leer chats»): only the real superadmin (founder, 20-nov: «Sólo yo»); the service
+// checks it again, so the screens and the MCP answer the same 403 to a seller.
+// `soloSuperadminReal` goes FIRST: a seller's first request would otherwise claim their key row on the way to the 403.
+// Then «Ver negocios», which the superadmin always holds: it fills `req.crmAccess` for the service, that checks again.
+const whatsapp = [soloSuperadminReal, ver]
 router.get('/whatsapp/chats', ...whatsapp, validateRequest(listWhatsappChatsSchema), crmController.listWhatsappChats)
 router.get('/whatsapp/messages', ...whatsapp, validateRequest(whatsappThreadSchema), crmController.getWhatsappThread)
 

@@ -13,6 +13,7 @@ jest.mock('@/middlewares/requireCrm.middleware', () => ({
 
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
 import { autenticacionOpcional } from '@/middlewares/autenticacionOpcional.middleware'
+import { soloSuperadminReal } from '@/middlewares/soloSuperadminReal.middleware'
 import router from '@/routes/crm.routes'
 
 type Layer = { route?: { path: string; methods: Record<string, boolean>; stack: Array<{ handle: { crmKey?: unknown } }> } }
@@ -134,6 +135,9 @@ describe('crm team routes', () => {
       { route: 'GET /clients/:organizationId/live', keys: ver },
       { route: 'GET /reports', keys: ver },
       { route: 'GET /export.csv', keys: ['crm:exportar'] },
+      // El WhatsApp de ventas: sólo el superadmin real (`soloSuperadminReal`, antes de las llaves), que siempre trae «Ver».
+      { route: 'GET /whatsapp/chats', keys: ver },
+      { route: 'GET /whatsapp/messages', keys: ver },
       { route: 'POST /activities/:id/done', keys: editar },
       // Ruling 55: «Reagendar», with the same key and scope as «Hecha».
       { route: 'POST /activities/:id/reschedule', keys: editar },
@@ -186,7 +190,8 @@ describe('crm team routes', () => {
     // handler is not `requireCrm` would validate, read or upload for any signed-in user of any business before saying no.
     const layers = router.stack as unknown as Array<Layer & { handle?: unknown }>
     const unguarded = layers
-      .filter(layer => layer.route && !layer.route.stack[0]?.handle.crmKey)
+      // `soloSuperadminReal` también es guardia y va antes que las llaves a propósito (WhatsApp de ventas, Codex r1 #8).
+      .filter(layer => layer.route && !layer.route.stack[0]?.handle.crmKey && layer.route.stack[0]?.handle !== soloSuperadminReal)
       .map(layer => `${Object.keys(layer.route!.methods).join(',').toUpperCase()} ${layer.route!.path}`)
     // The ONE exception (plan task 7): Google's return lands here from Google's screen, so a missing or foreign session must
     // become a redirect to «Mi Gmail» (`?error=otra-sesion`), not a bare 401. It reads the session WITHOUT demanding it, and
