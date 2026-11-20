@@ -207,8 +207,15 @@ describe('D661 · 3A y 3B: confirmar → apartado; abrir = cobrar; vencer y libe
     return body.data
   }
   /** Lo ya cobrado por entregar de pruebas anteriores se da por entregado: sólo cuenta lo de esta prueba. */
+  /**
+   * Lo de pruebas anteriores se da por entregado CON su comanda ya impresa: así no ocupa `comandasPorImprimir` (tope 50, del más viejo)
+   * y lo de cada prueba nunca se queda fuera de la lista por crecer el archivo.
+   */
   const sinNadaVivo = () =>
-    prisma.onlineOrder.updateMany({ where: { venueId: venueId!, status: { in: ['ACCEPTED', 'READY'] } }, data: { status: 'COMPLETED' } })
+    prisma.onlineOrder.updateMany({
+      where: { venueId: venueId!, OR: [{ status: { in: ['ACCEPTED', 'READY'] } }, { status: 'COMPLETED', printedAt: null }] },
+      data: { status: 'COMPLETED', printedAt: new Date() },
+    })
   /** Un apartado que una caja ya abrió (cobrado, «Por entregar», con la comanda pendiente). */
   const cobrado = async () => {
     const a = await apartado()
@@ -334,6 +341,8 @@ describe('D661 · 3A y 3B: confirmar → apartado; abrir = cobrar; vencer y libe
     await prisma.onlineOrderingSettings.update({
       where: { venueId: venueId! },
       data: {
+        // La tienda encendida: una prueba que la apagó y falló antes de prenderla no tumba en cascada a las siguientes.
+        enabled: true,
         requiresAcceptance: false,
         cardOnlineNadie: true,
         acceptsCardOnline: false,
@@ -985,6 +994,7 @@ describe('D661 · 3A y 3B: confirmar → apartado; abrir = cobrar; vencer y libe
   })
 
   it('Ruling 9: un reclamo concedido sobre uno anterior que venció sin confirmarse trae posibleRepetida:true; dos cajas a la vez: una sola gana', async () => {
+    await sinNadaVivo()
     const a = await cobrado()
     // Dos cajas reclaman la misma comanda a la vez: el CAS de Postgres deja pasar a una.
     const [x, y] = await Promise.all([

@@ -458,6 +458,54 @@ describe('online_order_respond', () => {
       expect(r.error).toMatch(/se abre desde la caja/)
       expect(r.error).toMatch(/se libera sin cobrar/)
       expect(r.error).toMatch(/No se aplicó nada/)
+      // Todavía no se cobra: nunca «ya está pagado» ni «devolución».
+      expect(r.error).not.toMatch(/pagado|devoluci/i)
+    }
+    expect(mockReject).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('D661 (3B, ronda 1): REJECT sobre un pedido con tarjeta de «No, entran solos» ya COBRADO (en preparación o listo) dice que ya está pagado y que se devuelve con la devolución del pedido; nunca «se libera sin cobrar»', async () => {
+    for (const status of ['ACCEPTED', 'READY']) {
+      mockGetInboxOrder.mockResolvedValue({
+        ...pending,
+        status,
+        requiresAcceptance: false,
+        paymentMode: 'CARD_ONLINE',
+        paymentStatus: 'PAID',
+        card: { status: 'CAPTURED', amount: 186 },
+      })
+      for (const confirm of [undefined, true]) {
+        const r = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'REJECT', reason: 'OTHER', confirm }))
+        expect(r).toMatchObject({ ok: false, status })
+        expect(r.error).toMatch(/ya está pagado/)
+        expect(r.error).toMatch(/devolución del pedido/)
+        expect(r.error).toMatch(/No se aplicó nada\.$/)
+        // La promesa falsa para un pedido ya cobrado.
+        expect(r.error).not.toMatch(/se libera sin cobrar|si nadie lo abre|se paga en caja/)
+      }
+    }
+    expect(mockReject).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('D661 (3B, ronda 1): REJECT sobre un pedido con tarjeta de «No, entran solos» ya CERRADO (vencido o entregado) contesta lo de siempre para un pedido que ya no está por aceptar; no promete nada', async () => {
+    for (const [status, paymentStatus] of [
+      ['EXPIRED', 'PENDING'], // nadie lo abrió: se liberó sin cobrar
+      ['COMPLETED', 'PAID'], // cobrado y entregado (o cerrado por el día)
+    ]) {
+      mockGetInboxOrder.mockResolvedValue({
+        ...pending,
+        status,
+        requiresAcceptance: false,
+        paymentMode: 'CARD_ONLINE',
+        paymentStatus,
+        card: { status: status === 'EXPIRED' ? 'RELEASED' : 'CAPTURED', amount: 186 },
+      })
+      const r = parse(
+        await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'REJECT', reason: 'OTHER', confirm: true }),
+      )
+      expect({ status, r }).toEqual({ status, r: { ok: false, status, error: 'Ese pedido ya no está por aceptar; no se aplicó nada.' } })
     }
     expect(mockReject).not.toHaveBeenCalled()
     expect(mockAudit).not.toHaveBeenCalled()

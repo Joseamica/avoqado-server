@@ -71,6 +71,9 @@ const FOLIO_SIN_PAGAR = 'Este pedido se cobra antes de prepararlo'
 /** D661 (3B): un apartado con tarjeta tampoco se rechaza, pero no «se paga en caja»: se abre desde ahí o se libera solo sin cobrar. */
 const TARJETA_NO_SE_RECHAZA =
   'Un pedido con tarjeta en línea no se rechaza: se abre desde la caja (TPV o POS actualizados) y, si nadie lo abre a tiempo, se libera sin cobrar. No se aplicó nada.'
+/** D661 (3B, ronda 1): uno ya abierto (en preparación o listo) ya está pagado: no se rechaza y el dinero se regresa con su devolución. */
+const TARJETA_YA_PAGADA =
+  'Este pedido ya está pagado y no se rechaza. Para regresarle el dinero a la clienta usa la devolución del pedido. No se aplicó nada.'
 /** R46: un folio no se rechaza; se quita con CANCELAR. Nunca promete «no se le cobró nada» (§5: un efectivo sin red puede subir después). */
 const FOLIO_NO_SE_RECHAZA =
   'Este pedido se paga en caja y no se rechaza; no se aplicó nada. Para quitarlo usa CANCELAR (pide el permiso de cancelar cuentas sin cobro).'
@@ -212,13 +215,16 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       // T13: un folio por pagar («Nadie» acepta) también se puede cancelar; uno de «Mi equipo» por aceptar se rechaza, no se cancela.
       const folio = order.requiresAcceptance === false
       // R46: el servicio también responde STALE (la API del POS y del panel), aquí se dice antes de la vista previa.
-      if (action === 'REJECT' && folio) {
-        return text({
-          ok: false,
-          status: order.status,
-          error: order.paymentMode === 'CARD_ONLINE' ? TARJETA_NO_SE_RECHAZA : FOLIO_NO_SE_RECHAZA,
-        })
-      }
+      // D661: el texto de un pedido con tarjeta, según su estado (siempre verdad): apartado, ya pagado o, si ya se cerró, lo de siempre.
+      const noSeRechaza =
+        order.paymentMode !== 'CARD_ONLINE'
+          ? FOLIO_NO_SE_RECHAZA
+          : order.status === 'PENDING_ACCEPTANCE'
+            ? TARJETA_NO_SE_RECHAZA
+            : order.status === 'ACCEPTED' || order.status === 'READY'
+              ? TARJETA_YA_PAGADA
+              : null
+      if (action === 'REJECT' && folio && noSeRechaza) return text({ ok: false, status: order.status, error: noSeRechaza })
       const vigente: string[] = pendingAction
         ? ['PENDING_ACCEPTANCE']
         : action === 'CANCEL' && folio

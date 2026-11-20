@@ -613,7 +613,10 @@ export async function listFolios(p: { venueId: string; section?: FolioSection; c
   // El mosaico sigue mientras haya folios vivos aunque se cambie a «Mi equipo» o se apague la tienda: se cobran o vencen. D661: y
   // mientras haya un apartado por abrir. Defensivo: una lista con folios siempre enciende el mosaico, aunque los conteos digan otra cosa.
   const showTile =
-    (enabled && !requiresAcceptance) || toPayCount + toDeliverCount > 0 || toPay.length + toDeliver.length > 0 || abrirRows.length > 0
+    (enabled && requiresAcceptance === false) ||
+    toPayCount + toDeliverCount > 0 ||
+    toPay.length + toDeliver.length > 0 ||
+    abrirRows.length > 0
   // D661 (r5 #3, Ruling 7): un borrador de «Nadie» sin resolver todavía puede volverse un apartado: la caja sigue en 30 s aunque la
   // tienda haya cambiado de modo o se haya apagado. Con la tienda encendida en «Nadie» ya es 30 s (y la tarjeta sólo se ofrece ahí):
   // la consulta sólo corre cuando haría falta.

@@ -35,10 +35,11 @@ export function onlineOrderNeedsPrint(
     status: OnlineOrderStatus
     printedAt: Date | null
     printClaimedAt: Date | null
-    paymentMode?: OnlineOrderPaymentMode
-    requiresAcceptance?: boolean
-    refundRequestedAt?: Date | null
-    refundedAt?: Date | null
+    // Obligatorios: quien llame sin ellos se apartaría en silencio de la regla de la lista y del reclamo (D661, Ruling 2).
+    paymentMode: OnlineOrderPaymentMode
+    requiresAcceptance: boolean
+    refundRequestedAt: Date | null
+    refundedAt: Date | null
   },
   now: Date = new Date(),
 ): boolean {
