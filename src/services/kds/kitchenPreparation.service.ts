@@ -7,7 +7,6 @@ import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { tomarCandadoDeComandas } from './kitchenTicketAuthoring.service'
 import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import {
-  horaDeTerminada,
   parsePreparation,
   recalculoDeComanda,
   regresarListoAPreparando,
@@ -339,13 +338,13 @@ export async function recallPreparationTicket(
     await tomarCandadoDeComandas(tx, orderId)
     const ticket = await tx.kdsOrder.findFirst({
       where: { id: kdsOrderId, venueId, orderId, preparationVersion: PREPARATION_VERSION },
-      select: { id: true, status: true, kitchenDoneAt: true, completedAt: true, updatedAt: true, archivedAt: true },
+      select: { id: true, status: true, kitchenDoneAt: true, archivedAt: true },
     })
     if (!ticket || ticket.archivedAt) throw new NotFoundError('No hay una comanda terminada con ese id para regresar')
     if (ticket.status !== 'READY' && ticket.status !== 'COMPLETED') {
       throw new ConflictError('Esta comanda sigue en la pantalla de cocina: no hay que regresarla.', 'KDS_RECALL_NOT_DONE')
     }
-    if (horaDeTerminada(ticket)?.getTime() !== visto.getTime()) {
+    if (ticket.kitchenDoneAt?.getTime() !== visto.getTime()) {
       throw new ConflictError('Esta comanda cambió desde que abriste «Recientes». Vuelve a abrirlo.', 'KDS_RECALL_STALE')
     }
     // Codex r5 #6: «Recientes» es la última hora; una hoja que se quedó abierta no regresa comida que ya salió de esa ventana.
