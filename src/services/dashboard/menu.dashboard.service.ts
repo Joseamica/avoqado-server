@@ -198,6 +198,15 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
   const horarioCompleto = conValor(createData.availableFrom) && conValor(createData.availableUntil)
   const menuAssignments = (data.avoqadoMenus ?? []).map(menu => ({ menuId: menu.value }))
   const productIds = (data.avoqadoProducts ?? []).map(product => product.value)
+  // Menús y productos de la categoría (alta nueva, o dentro de la transacción del reuso).
+  const asignar = async (db: Prisma.TransactionClient, categoryId: string) => {
+    if (menuAssignments.length > 0) {
+      await db.menuCategoryAssignment.createMany({ data: menuAssignments.map(m => ({ ...m, categoryId })) })
+    }
+    if (productIds.length > 0) {
+      await db.product.updateMany({ where: { id: { in: productIds }, venueId }, data: { categoryId } }).catch(rechazoDelEscritorUnico)
+    }
+  }
 
   // Cambiar la clave SAT de una categoría que ya existió es EDITARLA (permiso `menu:update`, y cambia lo que heredan sus ventas
   // por facturar): el alta no lo hace a escondidas (Codex r10). Si trae otra clave, se dice y no se toca nada.
@@ -233,14 +242,7 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
           })
           // Sus menús son los que eligió el alta, como al editarla (una asignación que se coló tras el «Eliminar» no estorba).
           await tx.menuCategoryAssignment.deleteMany({ where: { categoryId: reusada.id } })
-          if (menuAssignments.length > 0) {
-            await tx.menuCategoryAssignment.createMany({ data: menuAssignments.map(m => ({ ...m, categoryId: reusada.id })) })
-          }
-          if (productIds.length > 0) {
-            await tx.product
-              .updateMany({ where: { id: { in: productIds }, venueId }, data: { categoryId: reusada.id } })
-              .catch(rechazoDelEscritorUnico)
-          }
+          await asignar(tx, reusada.id)
           return reusada
         })
         .catch(e => {
@@ -252,29 +254,7 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
         })
     : await prisma.menuCategory.create({ data: createData })
 
-  if (!reusar) {
-    // Handle menu assignments
-    if (menuAssignments.length > 0) {
-      await prisma.menuCategoryAssignment.createMany({
-        data: menuAssignments.map(m => ({ ...m, categoryId: category.id })),
-      })
-    }
-
-    // Handle product assignments
-    if (productIds.length > 0) {
-      await prisma.product
-        .updateMany({
-          where: {
-            id: { in: productIds },
-            venueId: venueId,
-          },
-          data: {
-            categoryId: category.id,
-          },
-        })
-        .catch(rechazoDelEscritorUnico)
-    }
-  }
+  if (!reusar) await asignar(prisma, category.id)
 
   // 🔌 REAL-TIME: Broadcast category creation via Socket.IO
   const broadcastingService = socketManager.getBroadcastingService()
