@@ -1,4 +1,4 @@
-import { getAcceptingStatus, storeView } from './presence.service'
+import { getAcceptingStatus, proximaHoraLimite, storeView } from './presence.service'
 import prisma from '@/utils/prismaClient'
 import { cardMerchantStatus } from './card/merchant'
 import { getSettings, getSettingsWithSaved, storeRequirements } from './settings.service'
@@ -12,17 +12,22 @@ import { NO_ONE_VENUE_TYPES } from './constants'
  * `preloaded`: los ajustes que quien llama ya tiene (lo que acaba de escribir el PUT, o lo que ya leyó el MCP), para no leerlos
  * dos veces y para que el estado salga de ESOS ajustes.
  */
-export async function settingsView(venueId: string, preloaded?: Awaited<ReturnType<typeof getSettings>>) {
+export async function settingsView(
+  venueId: string,
+  preloaded?: Awaited<ReturnType<typeof getSettings>>,
+  opts: { pestanaVieja?: boolean } = {},
+) {
+  // D662 (Codex p2-r7 #2, p2-r8 #4, p2v4-r1 #11): la hora en que se leyó el estado de la tienda viaja con él y se toma ANTES de leer nada:
+  // toda respuesta con hora posterior a un cambio guardado ya lo trae (su lectura fue después). El panel se queda con la más nueva.
+  const leidoEn = new Date()
   // R66: con `preloaded` (lo que acaba de escribir el PUT) siempre hay fila; si no, la misma lectura dice si existe.
   const { settings, saved } = preloaded ? { settings: preloaded, saved: true } : await getSettingsWithSaved(venueId)
-  // D662 (Codex p2-r7 #2): la hora en que se leyó el estado de la tienda viaja con él: el panel, con dos lecturas en camino, se queda
-  // con la más NUEVA del SERVIDOR (no con la última que llegó).
-  const leidoEn = new Date()
-  const [state, requirements, merchantStatus, venue] = await Promise.all([
+  const [state, requirements, merchantStatus, venue, siguiente] = await Promise.all([
     getAcceptingStatus(venueId, leidoEn, settings),
     storeRequirements(venueId),
     cardMerchantStatus(prisma, venueId),
     prisma.venue.findUnique({ where: { id: venueId }, select: { type: true } }),
+    proximaHoraLimite(venueId, leidoEn).catch(() => null),
   ])
   // D662 parte 2: `autoPauseResumedAt` es interno de la pausa sola; lo que el panel ve es `store.autoPausedAt`.
   const { lastInboxPollAt, lastToPayPollAt, autoPauseResumedAt: _reanudada, ...config } = settings
@@ -34,9 +39,11 @@ export async function settingsView(venueId: string, preloaded?: Awaited<ReturnTy
     suggestedRequiresAcceptance: !(venue && NO_ONE_VENUE_TYPES.includes(venue.type)),
     // Campo nuevo y opcional: el panel preselecciona la sugerencia por giro sólo si el negocio nunca guardó.
     hasSavedSettings: saved,
-    store: storeView(state),
-    /** Campo nuevo y opcional (D662): cuándo se leyó `store`. */
+    store: storeView(state, opts),
+    /** Campo nuevo y opcional (D662): cuándo se leyó `store` (antes de leer nada). */
     storeReadAt: leidoEn.toISOString(),
+    /** Campo nuevo y opcional (D662 v4): la hora límite más cercana de un pedido por aceptar; el panel vuelve a leer justo después. */
+    storeNextDeadlineAt: siguiente ? siguiente.toISOString() : null,
     requirements,
     // Fase 2: el switch y el estado de la cuenta Stripe (el panel explica por qué no se puede prender).
     card: { enabled: !!settings.acceptsCardOnline, merchantStatus },

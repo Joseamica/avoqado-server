@@ -10,6 +10,8 @@
  */
 import { OnlineOrderStatus, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { __resetArranqueParaPruebas, CLAVE_PAUSA_SOLA, MARGEN_DEL_ARRANQUE_MS } from '@/services/online-ordering/arranquePausaSola'
+import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { ForbiddenError, ServiceUnavailableError } from '@/errors/AppError'
 import { assertOperationalVenue } from '@/middlewares/resolveOperationalVenueBySlug.middleware'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -971,7 +973,18 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     expect(bitacora(onlineOrderId, 'ONLINE_ORDER_COLLECTED')).toHaveLength(1)
   })
 
-  describe('D662 parte 2 (v3) · la pausa sola contra Postgres (la consulta real, sus nulos y el corte)', () => {
+  describe('D662 parte 2 (v4) · la pausa sola contra Postgres (la consulta real, sus nulos y el corte)', () => {
+    /** v4: el SERVIDOR nuevo «atiende» desde hace un día: la pausa sola ya cuenta (inicio = primer servicio + 120 s). */
+    const ponerArranque = async (primerServicioAt: Date) => {
+      await prisma.arranqueDeFuncion.upsert({
+        where: { clave: CLAVE_PAUSA_SOLA },
+        create: { clave: CLAVE_PAUSA_SOLA, primerServicioAt },
+        update: { primerServicioAt },
+      })
+      __resetArranqueParaPruebas()
+    }
+    beforeEach(() => ponerArranque(new Date(Date.now() - 24 * 60 * 60_000)))
+
     /** Mueve la hora límite de un pedido (lo que en la vida pasa a los 10 min). */
     const venceA = (onlineOrderId: string, at: Date) =>
       prisma.onlineOrder.update({ where: { id: onlineOrderId }, data: { acceptDeadlineAt: at } })
@@ -1040,21 +1053,75 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN' })
     })
 
-    it('Codex p2-r7 #1: un rechazo a tiempo que guardó el SERVIDOR anterior (sin staffAnsweredAt) también corta la racha', async () => {
+    it('v4: un pedido creado ANTES del primer servicio y contestado por el SERVIDOR anterior (sin marca) no es falla', async () => {
       await arrancar()
-      const a = await newOrder()
-      const b = await newOrder()
-      const c = await newOrder()
-      await venceA(a.onlineOrderId, hace(200))
-      // Sin `porPersona`: así escribía el servidor anterior (sólo `rejectedAt` con un motivo de persona).
-      await expect(rejectOnlineOrder({ venueId: venueId!, orderId: c.orderId, staffId: null, reason: 'TOO_BUSY' })).resolves.toMatchObject({
+      const viejo = await newOrder()
+      // Así contestaba el servidor anterior: rechazo de persona sin `staffAnsweredAt`.
+      await expect(
+        rejectOnlineOrder({ venueId: venueId!, orderId: viejo.orderId, staffId: null, reason: 'TOO_BUSY' }),
+      ).resolves.toMatchObject({
         outcome: 'OK',
       })
-      expect((await prisma.onlineOrder.findUniqueOrThrow({ where: { id: c.onlineOrderId } })).staffAnsweredAt).toBeNull()
+      expect((await prisma.onlineOrder.findUniqueOrThrow({ where: { id: viejo.onlineOrderId } })).staffAnsweredAt).toBeNull()
+      const b = await newOrder()
+      // El SERVIDOR nuevo empezó a atender DESPUÉS de crear `viejo` y antes de `b`, y su inicio (primer servicio + 120 s) ya pasó. Para no
+      // esperar 2 min, se ponen las horas de creación respecto a ese primer servicio (lo que importa es el orden).
+      const inicio = new Date(Date.now() - 1_000)
+      await prisma.arranqueDeFuncion.update({
+        where: { clave: CLAVE_PAUSA_SOLA },
+        data: { primerServicioAt: new Date(inicio.getTime() - MARGEN_DEL_ARRANQUE_MS) },
+      })
+      __resetArranqueParaPruebas()
+      await prisma.onlineOrder.update({
+        where: { id: viejo.onlineOrderId },
+        data: { createdAt: new Date(inicio.getTime() - MARGEN_DEL_ARRANQUE_MS - 1) },
+      })
+      await prisma.onlineOrder.update({
+        where: { id: b.onlineOrderId },
+        data: { createdAt: new Date(inicio.getTime() - MARGEN_DEL_ARRANQUE_MS + 1) },
+      })
+      await espera(5)
+      await venceA(viejo.onlineOrderId, new Date())
       await espera(5)
       await venceA(b.onlineOrderId, new Date())
       await espera(5)
+      // `viejo` lo contestó el anterior: no es falla. `b` (creado desde el primer servicio, sin marca) es una sola falla.
       await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
+      const c = await newOrder()
+      await venceA(c.onlineOrderId, new Date())
+      await espera(5)
+      await expect(estadoTienda()).resolves.toMatchObject({ status: 'PAUSED' })
+    })
+
+    it('v4 (hueco 3 y T2): una aceptación a tiempo que todavía se guarda NO hace parpadear «en pausa»: la lectura la espera', async () => {
+      await arrancar()
+      const a = await newOrder()
+      const b = await newOrder()
+      await venceA(a.onlineOrderId, hace(200))
+      const limiteB = new Date(Date.now() + 400)
+      await venceA(b.onlineOrderId, limiteB)
+      // La cajera acepta B a tiempo: toma el candado de la cuenta, su reloj, guarda la marca… y tarda en confirmar.
+      let soltar!: () => void
+      const tardanza = new Promise<void>(resolve => (soltar = resolve))
+      let tomado!: () => void
+      const yaTomado = new Promise<void>(resolve => (tomado = resolve))
+      const cajera = prisma.$transaction(
+        async tx => {
+          await lockExistingOrderForPayment(tx, { venueId: venueId!, orderId: b.orderId })
+          await tx.onlineOrder.updateMany({ where: { id: b.onlineOrderId, staffAnsweredAt: null }, data: { staffAnsweredAt: new Date() } })
+          tomado()
+          await tardanza
+        },
+        { timeout: 15_000 },
+      )
+      await yaTomado
+      // Pasa la hora límite de B mientras la aceptación sigue sin confirmarse.
+      while (Date.now() <= limiteB.getTime() + 50) await espera(20)
+      const lectura = estadoTienda()
+      await espera(300)
+      soltar()
+      await cajera
+      await expect(lectura).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
     })
 
     it('un rechazo TARDE no es respuesta: el pedido ya falló a su hora límite', async () => {

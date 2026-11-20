@@ -8,6 +8,7 @@ import { isValidOrderingHours } from './hours'
 import { findCardMerchant } from './card/merchant'
 import { FOLIO_DEVICE_WINDOW_MS } from './constants'
 import type { FloorPauseMinutes, OnlineOrderingConfig, OnlineOrderingSettingsPatch } from './types'
+import { emitStoreChanged } from './traySocket'
 
 export const DEFAULT_CONFIG: OnlineOrderingConfig = {
   enabled: false,
@@ -265,6 +266,7 @@ export async function updateSettings(
     })
   }
 
+  emitStoreChanged(venueId)
   return rowToConfig(row)
 }
 
@@ -303,5 +305,6 @@ export async function pauseOnlineOrdering(
     entityId: venueId,
     data: { minutes, pausedUntil: pausedUntil ? pausedUntil.toISOString() : null },
   })
+  emitStoreChanged(venueId)
   return { pausedUntil: pausedUntil ? pausedUntil.toISOString() : null, manualPause: current?.manualPause ?? false }
 }

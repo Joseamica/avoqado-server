@@ -92,6 +92,7 @@ jest.mock('@/services/online-ordering/presence.service', () => ({
   getAcceptingStatus: (...a: unknown[]) => mockAccepting(...(a as [])),
   // Ronda 1: el armado del estado es el REAL (el mismo del panel y la bandeja).
   storeView: jest.requireActual('@/services/online-ordering/presence.service').storeView,
+  proximaHoraLimite: jest.fn().mockResolvedValue(null),
 }))
 
 type Handler = (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>

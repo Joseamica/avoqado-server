@@ -13,7 +13,13 @@ import { ONLINE_ORDERS_TO_PAY_HEADER, ONLINE_ORDERS_TRAY_HEADER } from '@/servic
 import { listInbox, type InboxFilter } from '@/services/online-ordering/inbox.service'
 import { listFolios, type FolioSection } from '@/services/online-ordering/folios.service'
 import { listDeliveryCashPending } from '@/services/delivery-channels/core/deliveryCashPending.service'
-import { getAcceptingStatus, storeView, touchInboxPoll, touchToPayPoll } from '@/services/online-ordering/presence.service'
+import {
+  getAcceptingStatus,
+  proximaHoraLimite,
+  storeView,
+  touchInboxPoll,
+  touchToPayPoll,
+} from '@/services/online-ordering/presence.service'
 import { pauseOnlineOrdering } from '@/services/online-ordering/settings.service'
 import {
   acceptOnlineOrder,
@@ -93,9 +99,24 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
     const latido = req.header(ONLINE_ORDERS_TRAY_HEADER) === '1' && (await canAnswerOrders(req, venueId).catch(() => false))
     if (latido) await touchInboxPoll(venueId).catch(() => false)
     // R13: el restaurante ve si su tienda está abierta, pausada, fuera de horario o sin aparato; 1b: y hasta cuándo, o si la
-    // pausa es la del gerente (`manualPause`, que no se va sola).
-    const state = await getAcceptingStatus(venueId).catch(() => null)
-    return res.json({ success: true, data: { ...data, store: state ? storeView(state) : null } })
+    // pausa es la del gerente (`manualPause`, que no se va sola). D662 v4: el panel nuevo avisa `?pausaSola=1` (sin cabecera nueva: el
+    // CORS no la deja pasar); con él recibe cuándo se leyó el estado (antes de leer) y la próxima hora límite; sin él, la forma de la
+    // pestaña vieja (`storeView`).
+    const panelNuevo = req.query.pausaSola === '1'
+    const leidoEn = new Date()
+    const [state, siguiente] = await Promise.all([
+      getAcceptingStatus(venueId, leidoEn).catch(() => null),
+      panelNuevo ? proximaHoraLimite(venueId, leidoEn).catch(() => null) : Promise.resolve(null),
+    ])
+    const store = state ? storeView(state, { pestanaVieja: !panelNuevo }) : null
+    return res.json({
+      success: true,
+      data: {
+        ...data,
+        store,
+        ...(panelNuevo ? { storeReadAt: leidoEn.toISOString(), storeNextDeadlineAt: siguiente ? siguiente.toISOString() : null } : {}),
+      },
+    })
   } catch (e) {
     return next(e)
   }

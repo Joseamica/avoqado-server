@@ -21421,6 +21421,14 @@ enum OnlineOrderChargeStatus {
 }
 
 /// Ajustes de la tienda en línea de un negocio (1:1 con Venue). Sólo aceptación manual en la v1 (decisión F1).
+/// D662 parte 2 (v4, «cero huecos»): la primera vez que un código del SERVIDOR que trae una función ATENDIÓ una petición (no `/health`).
+/// Una fila por función, escrita una sola vez en la vida (`INSERT … ON CONFLICT DO NOTHING`). La pausa sola cuenta desde
+/// `primerServicioAt + 90 s` (`arranquePausaSola.ts`): antes, el SERVIDOR anterior puede seguir vivo y no conoce la marca de respuesta.
+model ArranqueDeFuncion {
+  clave            String   @id
+  primerServicioAt DateTime
+}
+
 model OnlineOrderingSettings {
   id      String @id @default(cuid())
   venueId String @unique
@@ -21447,10 +21455,9 @@ model OnlineOrderingSettings {
   requiresAcceptance Boolean   @default(true)
   /// Último sondeo de la lista «por cobrar» (pedidos sin aceptación que esperan pago en la barra): latido de presencia.
   lastToPayPollAt    DateTime?
-  /// D662 parte 2 (v3): el corte de la pausa sola. Sólo cuentan los pedidos cuya hora límite fue DESPUÉS de esta hora. Sólo SUBE: la
-  /// escriben «Reanudar» (`pauseOnlineOrdering(null)`, = ahora) y la propia lectura (`corteSeguro`, sin pausa). Encender, apagar,
-  /// cambiar de modo y pausar 15/30/60 no la tocan. Una fila nueva nace con ahora. Null = fila de antes del cambio (o creada por el
-  /// SERVIDOR anterior al desplegar): gracia del despliegue, la primera lectura la pone 20 min adelante.
+  /// D662 parte 2 (v4): el corte propio de la pausa sola. Sólo cuentan los pedidos cuya hora límite fue DESPUÉS de
+  /// max(esta hora, el inicio global de `ArranqueDeFuncion`). Sólo SUBE: la escriben «Reanudar» (`pauseOnlineOrdering(null)`, = ahora) y la
+  /// propia lectura (`corteSeguro`, sin pausa). Encender, apagar, cambiar de modo y pausar 15/30/60 no la tocan. Null = sin corte propio.
   autoPauseResumedAt DateTime?
 
   createdAt DateTime @default(now())
