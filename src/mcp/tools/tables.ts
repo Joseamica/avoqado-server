@@ -11,6 +11,10 @@ import AppError from '@/errors/AppError'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { moveOrderToTable, assignOrderWaiter, setTableStatusInTransaction } from '@/services/tpv/table.tpv.service'
 import { compWholeOrder } from '@/services/mobile/comp-item.mobile.service'
+import { PROMOCION_NO_SE_ANULA_SUELTA, VOID_ITEM_PROMOTION, voidOrderItem } from '@/services/mobile/void-item.mobile.service'
+import { isTableOwnershipEnforced, staffCanManageAllTables } from '@/middlewares/checkTableOwnership.middleware'
+import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
+import { planGateMessage } from '../planGate'
 import { updateOrderDetails, splitOrderItems, splitOrderBySeat, mergeOrders } from '@/services/mobile/order.mobile.service'
 // Módulo LIGERO (sólo Prisma): el `.service` arrastra sockets y candados que el MCP no necesita para leer.
 import { getFloorPlan } from '@/services/dashboard/floorPlan/floorPlan.read'
@@ -391,6 +395,135 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
         return text({ ok: true, comped: { table: number, items: result.itemsComped, amount: result.compedAmount } })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'void_table_check_item',
+    'TABLE_SERVICE: «Anular producto» — quita UN producto de la cuenta abierta de una mesa, aunque ya se haya mandado a cocina (el cliente cambió de parecer, se capturó mal). El producto sale de la cuenta y el total se recalcula; no se cobra ni descuenta inventario. Pide el motivo, que queda en la bitácora. No se puede si la cuenta ya tiene pagos, con el único producto de la cuenta (eso es anular la cuenta completa, desde el POS) ni con una pieza de una promoción. Con la regla de dueño de mesa, sólo su mesero o quien administra todas las mesas. Para regalarlo en vez de quitarlo es una cortesía. Sin confirm:true sólo muestra qué se anularía; la confirmación anula exactamente el renglón que mostró. This WRITES money; requires orders:void. Pass venueId + table number + the product (its line id, or part of its name) + reason.',
+    {
+      venueId: z.string().describe('Venue that owns the table (must be in your scope)'),
+      number: z.string().min(1).describe('Table number whose check has the product, e.g. "8"'),
+      item: z.string().min(1).describe('Line id of the product on the check, or part of its name (e.g. "agua de pepino")'),
+      reason: z.string().trim().min(1).max(120).describe('Reason (e.g. "El cliente cambió de parecer", "Error de entrada")'),
+      confirm: z.boolean().optional().describe('true to void it for real, only after the user authorized it'),
+      resolvedOrderItemId: z.string().optional().describe('The line the preview showed; the confirmation fills it, never invent it'),
+      expectedVersion: z.number().int().optional().describe('The check version the preview showed; the confirmation fills it'),
+    },
+    async ({ venueId, number, item, reason, confirm, resolvedOrderItemId, expectedVersion }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('orders:void', venueId)
+      requireWriteScopeAlways(scope, 'orders:void', 'quita un producto de la cuenta de una mesa')
+      // El mismo candado de plan que la ruta del POS (Codex r2 #5).
+      const gate = await planGateMessage(venueId, 'TABLE_SERVICE', 'El servicio de mesas')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      const table = await prisma.table.findFirst({
+        where: { ...where, number, active: true },
+        select: { id: true, currentOrderId: true },
+      })
+      if (!table) return text({ ok: false, error: `No encontré la mesa "${number}" activa en este local.` })
+      if (!table.currentOrderId) return text({ ok: false, error: `La mesa ${number} no tiene cuenta abierta.` })
+      const cuenta = await prisma.order.findFirst({
+        where: { id: table.currentOrderId, venueId },
+        select: { version: true, servedById: true, servedBy: { select: { firstName: true, lastName: true } } },
+      })
+      if (!cuenta) return text({ ok: false, error: `La mesa ${number} no tiene cuenta abierta.` })
+      // Dueño de la mesa, como la ruta del POS (`checkTableOwnership`; Codex r1 #3).
+      if (await isTableOwnershipEnforced(venueId)) {
+        if (cuenta.servedById && cuenta.servedById !== scope.staffId && !(await staffCanManageAllTables(scope.staffId, venueId))) {
+          const dueno = cuenta.servedBy ? `${cuenta.servedBy.firstName} ${cuenta.servedBy.lastName}`.trim() : 'otro mesero'
+          return text({
+            ok: false,
+            error: `La mesa ${number} es de ${dueno}: sólo su mesero o quien administra todas las mesas anula sus productos.`,
+          })
+        }
+      }
+      const lineas = await prisma.orderItem.findMany({
+        where: { orderId: table.currentOrderId },
+        select: {
+          id: true,
+          productName: true,
+          quantity: true,
+          total: true,
+          sentToKitchenAt: true,
+          isCortesia: true,
+          orderPromotionId: true,
+        },
+        orderBy: { createdAt: 'asc' },
+        take: 200, // una cuenta de mesa no llega ni cerca; es el techo del listado
+      })
+      // Al confirmar se anula EXACTAMENTE el renglón que mostró la vista previa (Codex r1 #5): nunca se vuelve a buscar por nombre,
+      // o una cuenta nueva en la misma mesa con otro «agua de pepino» se anularía con la aprobación dada sobre la anterior.
+      if (confirm) {
+        const vista = resolvedOrderItemId ? lineas.find(l => l.id === resolvedOrderItemId) : undefined
+        if (!vista) return text({ ok: false, error: 'La cuenta cambió desde la vista previa: vuelve a pedirla.' })
+      }
+      const buscado = item.trim().toLowerCase()
+      const porId = lineas.filter(l => l.id === (confirm ? resolvedOrderItemId : item.trim()))
+      const candidatas = porId.length > 0 || confirm ? porId : lineas.filter(l => (l.productName ?? '').toLowerCase().includes(buscado))
+      const ver = (l: (typeof lineas)[number]) => ({
+        id: l.id,
+        producto: l.productName,
+        cantidad: l.quantity,
+        importe: Number(l.total),
+        enviadoACocina: l.sentToKitchenAt != null,
+        ...(l.isCortesia ? { cortesia: true } : {}),
+      })
+      if (candidatas.length === 0) {
+        return text({ ok: false, error: `No encontré "${item}" en la cuenta de la mesa ${number}.`, productos: lineas.map(ver) })
+      }
+      if (candidatas.length > 1) {
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: 'Hay varios productos así en la cuenta: elige uno por su id.',
+          productos: candidatas.map(ver),
+        })
+      }
+      const linea = candidatas[0]
+      if (linea.orderPromotionId) return text({ ok: false, error: PROMOCION_NO_SE_ANULA_SUELTA, code: VOID_ITEM_PROMOTION })
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          resolvedOrderItemId: linea.id,
+          // La confirmación anula sobre la cuenta tal como se VIO (Codex r2 #4): si otra caja la cambió (p. ej. regaló ese mismo
+          // renglón), el SERVIDOR contesta que cambió y hay que pedir otra vista previa.
+          expectedVersion: cuenta.version,
+          preview: {
+            mesa: number,
+            producto: ver(linea),
+            motivo: reason,
+            efecto:
+              'El producto sale de la cuenta y el total se recalcula (con sus descuentos, IVA y cargos). Si la cuenta ya tiene pagos o es su único producto, no se anula y se dice por qué.',
+          },
+          mensaje: 'Vuelve a llamar con confirm:true para anularlo.',
+        })
+      }
+      try {
+        const result = await voidOrderItem({
+          venueId,
+          orderId: table.currentOrderId,
+          itemId: linea.id,
+          reason,
+          actorId: scope.staffId,
+          ...(expectedVersion != null ? { expectedVersion } : {}),
+        })
+        await auditMcpWrite(scope, {
+          action: 'TABLE_CHECK_ITEM_VOIDED',
+          entity: 'Order',
+          entityId: table.currentOrderId,
+          venueId,
+          data: { table: number, itemId: linea.id, product: linea.productName, amount: Number(linea.total), reason },
+        })
+        return text({ ok: true, anulado: { mesa: number, producto: linea.productName, nuevoTotal: result.total } })
+      } catch (err) {
+        if (err instanceof AppError && err.statusCode === 409) {
+          return text({ ok: false, error: 'La cuenta cambió desde la vista previa: vuelve a pedirla.', code: 'ORDER_CHANGED' })
+        }
+        if (err instanceof AppError) return text({ ok: false, error: err.message, ...(err.code ? { code: err.code } : {}) })
+        throw err
       }
     },
   )

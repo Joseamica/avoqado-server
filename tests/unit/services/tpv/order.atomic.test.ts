@@ -111,7 +111,10 @@ function db() {
     // B2c T4 (P5): la cortesía de la terminal crea su fila espejo con quien la otorga (StaffVenue) y el recorte puede retirar filas.
     staffVenue: { findFirst: jest.fn(async () => null) },
     orderServiceCharge: { findMany: jest.fn(async () => []), update: jest.fn() },
-    orderAction: { create: jest.fn(async () => ({})) },
+    // «Anular producto» (Codex r1 #1): la ronda lee las lápidas de lo anulado (`OrderAction` VOID con `externalIds`).
+    orderAction: { create: jest.fn(async () => ({})), findMany: jest.fn(async () => []) },
+    // Codex r2 #7: `ITEM_VOIDED` (bitácora del dueño) va dentro de la transacción de la anulación.
+    activityLog: { create: jest.fn(async () => ({})) },
     orderCustomer: { deleteMany: jest.fn(async () => ({ count: 0 })) },
     terminalPaymentRequest: { findFirst: jest.fn(async () => null) },
     payment: { aggregate: jest.fn(async () => ({ _sum: { amount: 0, tipAmount: 0 } })) },
@@ -930,5 +933,117 @@ describe('S9 (P2-5): anular TODOS los artículos de un folio es cancelarlo como 
   it('una cuenta que no es de folio: anular todos sigue como hoy', async () => {
     await voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1 })
     expect(tx.orderItem.deleteMany).toHaveBeenCalled()
+  })
+})
+
+describe('«Anular producto» desde la mesa del POS (Flautas, 20-nov): las dos guardas de la ruta móvil, bajo el candado', () => {
+  const dos = () => ({ ...order(), items: [line, { ...line, id: 'line-2' }] })
+
+  it('soloSinCobros: una cuenta con abonos (PARTIAL) no deja anular, aunque sea un renglón, y no toca nada', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...dos(), paymentStatus: 'PARTIAL' })
+    await expect(
+      voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1, soloSinCobros: true }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_ITEM_VOID_HAS_PAYMENTS' })
+    expect(tx.orderItem.deleteMany).not.toHaveBeenCalled()
+    expect(tx.order.update).not.toHaveBeenCalled()
+  })
+
+  it('sin la bandera, una anulación parcial sobre PARTIAL sigue como hoy (la TPV no cambia)', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...dos(), paymentStatus: 'PARTIAL' })
+    await voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1 })
+    expect(tx.orderItem.deleteMany).toHaveBeenCalled()
+  })
+
+  it('sinCancelarLaCuenta: el último renglón no se anula (cancelaría la cuenta sin soltar la mesa); antes de devolver canjes o borrar', async () => {
+    await expect(
+      voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1, sinCancelarLaCuenta: true }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_ITEM_VOID_LAST_ITEM' })
+    expect(tx.orderItem.deleteMany).not.toHaveBeenCalled()
+    expect(tx.order.update).not.toHaveBeenCalled()
+    expect(tx.orderDiscount.delete).not.toHaveBeenCalled()
+    expect(tx.kdsOrder.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('sinCancelarLaCuenta: con otro renglón en la cuenta, anula como siempre', async () => {
+    tx.order.findUnique.mockResolvedValue(dos())
+    await voidItems('venue', 'order', {
+      itemIds: ['line'],
+      reason: 'error',
+      staffId: 'staff',
+      expectedVersion: 1,
+      sinCancelarLaCuenta: true,
+    })
+    expect(tx.orderItem.deleteMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: { in: ['line'] } }) }),
+    )
+  })
+})
+
+describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la MISMA transacción; con cobros, nada', () => {
+  const dos = () => ({
+    ...order(),
+    items: [
+      { ...line, externalId: 'sync:r:0' },
+      { ...line, id: 'line-2', externalId: 'sync:r:1' },
+    ],
+  })
+
+  it('#10: voidItems escribe la OrderAction VOID dentro de la transacción, con las llaves que anuló', async () => {
+    tx.order.findUnique.mockResolvedValue(dos())
+    await voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1 })
+    expect(tx.orderAction.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        actionType: 'VOID',
+        metadata: expect.objectContaining({ itemIds: ['line'], externalIds: ['sync:r:0'] }),
+      }),
+    })
+    expect(globalDb.orderAction?.create).not.toHaveBeenCalled()
+  })
+
+  it('#1: el reenvío de la ronda NO vuelve a crear el renglón anulado (el resto, como réplica)', async () => {
+    tx.orderAction.findMany.mockResolvedValueOnce([{ metadata: { externalIds: ['sync:r:0'] } }])
+    tx.orderItem.findMany.mockResolvedValueOnce([{ externalId: 'sync:r:1' }])
+    tx.orderItem.findFirst.mockResolvedValueOnce({ ...line, id: 'line-2', externalId: 'sync:r:1' })
+    await addItemsToOrder(
+      'venue',
+      'order',
+      [
+        { productId: 'product', quantity: 1, externalId: 'sync:r:0' },
+        { productId: 'product', quantity: 1, externalId: 'sync:r:1' },
+      ],
+      1,
+      true,
+    )
+    expect(tx.orderAction.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { orderId: 'order', actionType: 'VOID' } }))
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+  })
+
+  it('#1: una llave NUEVA en esa misma ronda sí se crea; la anulada no', async () => {
+    tx.orderAction.findMany.mockResolvedValueOnce([{ metadata: { externalIds: ['sync:r:0'] } }])
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    await addItemsToOrder(
+      'venue',
+      'order',
+      [
+        { productId: 'product', quantity: 1, externalId: 'sync:r:0' },
+        { productId: 'product', quantity: 1, externalId: 'sync:r:2' },
+      ],
+      1,
+      true,
+    )
+    expect(tx.orderItem.create).toHaveBeenCalledTimes(1)
+    expect(tx.orderItem.create.mock.calls[0][0].data.externalId).toBe('sync:r:2')
+  })
+
+  it('#6: soloSinCobros también frena una cuenta PENDING con un cobro registrado (cabecera desfasada)', async () => {
+    tx.order.findUnique.mockResolvedValue(dos())
+    tx.payment.aggregate.mockImplementation(async ({ where }: any) =>
+      where?.type === 'REFUND' ? { _sum: {} } : { _sum: { amount: new Prisma.Decimal(20), tipAmount: new Prisma.Decimal(0) }, _count: 1 },
+    )
+    await expect(
+      voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1, soloSinCobros: true }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_ITEM_VOID_HAS_PAYMENTS' })
+    expect(tx.order.update).not.toHaveBeenCalled()
+    expect(tx.orderAction.create).not.toHaveBeenCalled()
   })
 })
