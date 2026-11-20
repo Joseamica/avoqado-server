@@ -167,6 +167,22 @@ describe('sales-by-item — «Dentro de paquete»', () => {
     }
   })
 
+  it('Codex r2 #4: con el SKU cambiado (mismo nombre y unidades) el renglón elegido tampoco depende del orden del SQL', async () => {
+    for (const skus of [
+      ['FL-B', 'FL-A'],
+      ['FL-A', 'FL-B'],
+    ]) {
+      ;(prismaMock.$queryRawUnsafe as jest.Mock).mockReset().mockResolvedValue([])
+      responder(
+        skus.map(sku => itemRow({ product_sku: sku, units_sold: 1, items_sold: 1, gross_sales: 30, discounts: 0 })),
+        [dentroRow()],
+      )
+      const r = (await getSalesByItem(VENUE, { ...RANGE })).items
+      expect(r.find(i => i.productSku === 'FL-A')!.unitsInsidePackages).toBe(15)
+      expect(r.find(i => i.productSku === 'FL-B')!.unitsInsidePackages).toBe(0)
+    }
+  })
+
   it('Codex r1 #5: con incluirDentroDePaquete:false (lo que pide /mobile) no se consulta ni se agrega nada', async () => {
     ;(prismaMock.$queryRawUnsafe as jest.Mock).mockResolvedValueOnce([itemRow()]).mockResolvedValueOnce([])
 

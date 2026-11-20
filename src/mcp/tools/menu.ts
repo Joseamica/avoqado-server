@@ -891,11 +891,26 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           venueId,
           data: { modifier: modifier.name, from: modifier.linkedProductId, to: product?.id ?? null },
         })
+        // Lo que de verdad quedó: se relee el platillo DESPUÉS de guardar (Codex r2 #7). Si en ese instante le prendieron o apagaron
+        // el inventario, la respuesta lo dice en vez de repetir la vista previa.
+        let deductsNow: boolean | null = null
+        if (product) {
+          const ahora = await prisma.product.findFirst({
+            where: { id: product.id, venueId },
+            select: { trackInventory: true, inventoryMethod: true, recipe: { select: { id: true } } },
+          })
+          deductsNow = !!ahora?.trackInventory && !!(ahora.inventoryMethod ?? ahora.recipe)
+        }
         return text({
           ok: true,
           extra: modifier.name,
           deductsMenuItem: product?.name ?? null,
-          ...(product ? { deductsInventory: product.deducts } : {}),
+          ...(product ? { deductsInventory: deductsNow } : {}),
+          ...(product && deductsNow !== product.deducts
+            ? {
+                warning: `Ojo: el inventario de «${product.name}» cambió mientras se confirmaba: ahora el extra ${deductsNow ? 'SÍ lo descuenta' : 'sólo cuenta (no descuenta)'}.`,
+              }
+            : {}),
         })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })

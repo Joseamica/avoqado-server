@@ -221,6 +221,27 @@ describe('link_modifier_to_menu_item', () => {
     expect(mockUpdateModifier).not.toHaveBeenCalled()
   })
 
+  it('Codex r2 #7: si el inventario cambia justo al guardar, la respuesta dice lo que de verdad quedó', async () => {
+    const sinInv = { trackInventory: false, inventoryMethod: null, recipe: null }
+    productFindFirst.mockResolvedValueOnce(sinInv) // vista previa
+    const preview = parse(await call({ venueId: 'v1', modifierName: 'Papas', menuItemName: 'Papas a la' }))
+    productFindFirst
+      .mockResolvedValueOnce(sinInv) // la confirmación vuelve a leer: misma huella
+      .mockResolvedValueOnce({ trackInventory: true, inventoryMethod: 'QUANTITY', recipe: null }) // ya guardado, alguien lo prendió
+    const out = parse(
+      await call({
+        venueId: 'v1',
+        modifierName: 'Papas',
+        menuItemName: 'Papas a la',
+        confirm: true,
+        resolvedModifierId: preview.resolvedModifierId,
+        resolvedProductId: preview.resolvedProductId,
+        expectedSourceFingerprint: preview.expectedSourceFingerprint,
+      }),
+    )
+    expect(out).toMatchObject({ ok: true, deductsInventory: true, warning: expect.stringMatching(/SÍ lo descuenta/) })
+  })
+
   it('Codex r1 #14: un platillo por kilo se rechaza en la vista previa, sin ofrecer confirmación', async () => {
     productFindFirst.mockResolvedValue({ trackInventory: true, inventoryMethod: 'QUANTITY', soldByWeight: true, recipe: null })
     const out = parse(await call({ venueId: 'v1', modifierName: 'Papas', menuItemName: 'Papas a la' }))

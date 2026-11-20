@@ -137,10 +137,18 @@ describe('package_component_sales', () => {
     expect(mockUnidades).not.toHaveBeenCalled()
   })
 
-  it('Codex r1 #10: el día no depende de la zona del proceso (mediodía UTC del día pedido)', async () => {
+  it('Codex r2 #6: un negocio en Auckland (UTC+13) recibe SU día pedido, no el siguiente', async () => {
+    mockVenueFind.mockResolvedValue({ timezone: 'Pacific/Auckland' })
+    await call({ venueId: 'v1', fromDate: '2026-11-20', toDate: '2026-11-20' })
+    const [, start, end] = mockUnidades.mock.calls[0]
+    // 00:00 y 23:59:59.999 del 20-nov en Auckland (horario de verano, UTC+13).
+    expect([(start as Date).toISOString(), (end as Date).toISOString()]).toEqual(['2026-11-19T11:00:00.000Z', '2026-11-20T10:59:59.999Z'])
+  })
+
+  it('Codex r1 #10: el día no depende de la zona del proceso', async () => {
     const tzAntes = process.env.TZ
     try {
-      for (const tz of ['UTC', 'Asia/Tokyo', 'America/Los_Angeles']) {
+      for (const tz of ['UTC', 'Asia/Tokyo', 'America/Los_Angeles', 'Pacific/Auckland']) {
         process.env.TZ = tz
         mockUnidades.mockClear()
         await call({ venueId: 'v1', fromDate: '2026-11-01', toDate: '2026-11-01' })

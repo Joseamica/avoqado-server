@@ -494,13 +494,20 @@ async function getPromotionAttribution(
 // Helper: «Dentro de paquete» (founder «B», 20-nov-2026)
 // ============================================================
 
-/** ¿`a` es mejor renglón que `b` para llevar lo de paquete de su platillo? Su nombre de hoy, luego más unidades, luego el nombre. */
+/**
+ * ¿`a` es mejor renglón que `b` para llevar lo de paquete de su platillo? Su nombre de hoy, luego más unidades, y al empate un orden
+ * fijo por nombre, SKU y categoría vendidos: lo que separa dos renglones del mismo platillo en la consulta principal (Codex r2 #4: un
+ * SKU cambiado deja dos renglones con el mismo nombre y las mismas unidades).
+ */
 function renglonPreferido(a: ItemSalesMetrics, b: ItemSalesMetrics, nombreDeHoy: string): boolean {
   const aHoy = a.productName === nombreDeHoy
   const bHoy = b.productName === nombreDeHoy
   if (aHoy !== bHoy) return aHoy
   if (a.unitsSold !== b.unitsSold) return a.unitsSold > b.unitsSold
-  return a.productName < b.productName
+  const llave = (r: ItemSalesMetrics) => [r.productName, r.productSku ?? '', r.categoryName ?? '']
+  const [la, lb] = [llave(a), llave(b)]
+  for (let i = 0; i < la.length; i++) if (la[i] !== lb[i]) return la[i] < lb[i]
+  return false
 }
 
 /**

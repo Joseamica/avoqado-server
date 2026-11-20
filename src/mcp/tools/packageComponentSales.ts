@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
+import { fromZonedTime } from 'date-fns-tz'
 import { venueEndOfDay, venueStartOfDay } from '@/utils/datetime'
 import { getUnitsInsidePackages } from '@/services/dashboard/sales-by-item.dashboard.service'
 import type { McpScope } from '../scope'
@@ -16,16 +17,18 @@ const sinAcentos = (s: string) =>
     .replace(/\p{Diacritic}/gu, '')
     .toLowerCase()
 
-/**
- * Un día AAAA-MM-DD que exista (el 30 de febrero no) → su mediodía UTC, que en las zonas de América cae en ese mismo día del negocio
- * sin importar la zona del proceso (Codex r1 #10: `new Date('…T12:00:00')` se leía en la zona del proceso y el 2026-02-30 se volvía
- * 2 de marzo). `null` si no es una fecha válida.
- */
-function mediodiaDe(dia: string): Date | null {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dia)) return null
+/** ¿Es un día AAAA-MM-DD que existe? (el 30 de febrero no; Codex r1 #10: `new Date` lo volvía 2 de marzo). */
+function diaExiste(dia: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dia)) return false
   const ref = new Date(`${dia}T12:00:00Z`)
-  return !isNaN(ref.getTime()) && ref.toISOString().slice(0, 10) === dia ? ref : null
+  return !isNaN(ref.getTime()) && ref.toISOString().slice(0, 10) === dia
 }
+
+/**
+ * El mediodía de ese día EN LA ZONA DEL NEGOCIO: ni la zona del proceso (Codex r1 #10) ni el mediodía UTC, que en Auckland ya es el
+ * día siguiente (Codex r2 #6).
+ */
+const mediodiaDelNegocio = (dia: string, tz: string): Date => fromZonedTime(`${dia}T12:00:00`, tz)
 
 /**
  * «Dentro de paquete» por MCP (founder «B», 20-nov-2026, Flautas). Herramienta NUEVA a propósito: `product_sales` está en la tanda
@@ -38,7 +41,7 @@ export function registerPackageComponentSalesTools(server: McpServer, scope: Mcp
 
   server.tool(
     'package_component_sales',
-    'Units of each menu item sold as an EXTRA linked to it — an option of a combo that IS that menu item, e.g. the potato flautas chosen inside a "3 flautas" combo — over a period (default last 30 days). It is the "Dentro de paquete" column of the sales-by-item report: same orders, time zone and cap. Units only, never money (the price is in the main product), and NOT loose sales of the item (those are in product_sales). It uses each extra\'s CURRENT link, so linking or unlinking today also changes past days. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD), name (part of the menu item name) and limit (max 100) / offset.',
+    'Units of each menu item sold as an EXTRA linked to it — an option of a combo that IS that menu item, e.g. the potato flautas chosen inside a "3 flautas" combo — over a period (default last 30 days). It is the "Dentro de paquete" column of the sales-by-item report: same orders and time zone. Units only, never money (the price is in the main product), and NOT loose sales of the item (those are in product_sales). It uses each extra\'s CURRENT link, so linking or unlinking today also changes past days. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD), name (part of the menu item name) and limit (max 100) / offset.',
     {
       venueId: z.string().describe('Venue to read (must be in your scope)'),
       fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 30 days ago)'),
@@ -53,15 +56,12 @@ export function registerPackageComponentSalesTools(server: McpServer, scope: Mcp
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO, like the report
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 
-      const desde = fromDate ? mediodiaDe(fromDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
-      const hasta = toDate ? mediodiaDe(toDate) : new Date()
-      if (!desde || !hasta) {
-        return text({ ok: false, error: `La fecha «${!desde ? fromDate : toDate}» no es válida: usa AAAA-MM-DD (un día que exista).` })
-      }
+      const malo = [fromDate, toDate].find(d => d !== undefined && !diaExiste(d))
+      if (malo !== undefined) return text({ ok: false, error: `La fecha «${malo}» no es válida: usa AAAA-MM-DD (un día que exista).` })
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
       const tz = venue?.timezone || 'America/Mexico_City'
-      const start = venueStartOfDay(tz, desde)
-      const end = venueEndOfDay(tz, hasta)
+      const start = venueStartOfDay(tz, fromDate ? mediodiaDelNegocio(fromDate, tz) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
+      const end = venueEndOfDay(tz, toDate ? mediodiaDelNegocio(toDate, tz) : undefined)
 
       // Un renglón por platillo ligado (acotado por el catálogo del negocio), ya ordenados de más a menos unidades.
       const porPlatillo = await getUnitsInsidePackages(venueId, start, end, '')
