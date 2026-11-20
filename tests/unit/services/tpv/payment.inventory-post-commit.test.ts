@@ -1116,6 +1116,74 @@ describe('🔴 D26 tras el cobro: la transacción del cobro de la terminal no bu
     }
   })
 
+  it('recálculo de totales (vales sin sesión): tampoco espera a Discount con la cuenta tomada; el uso se gasta después, una vez', async () => {
+    const order = makeOrder({
+      status: 'CANCELLED',
+      originSystem: 'AVOQADO',
+      contratoDePrecio: 'IVA_INCLUIDO',
+      taxAmount: new Decimal(0),
+      items: [
+        { ...makeOrder().items[0], id: 'item-suelto', areaTicketLineId: null },
+        { ...makeOrder().items[0], id: 'item-vale', productId: 'prod-vale', areaTicketLineId: 'line-1' },
+      ],
+    })
+    ;(prisma.order.findUnique as jest.Mock).mockImplementation(async (args: any) =>
+      args?.select?.paymentStatus ? { paymentStatus: 'PAID' } : order,
+    )
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+    const eventos: string[] = []
+    const txs = capturarTransacciones(eventos)
+    const despues = jest.spyOn(cuentaCancelada, 'volverAGastarUsosTrasElCobro').mockResolvedValue(1)
+    try {
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'd26-recalculo-1' }, 'user-1')
+      expect((prisma.order.update as jest.Mock).mock.calls.some(([a]) => a?.data?.status === 'PENDING')).toBe(true)
+      for (const tx of txs) {
+        expect(tx.orderDiscount.findMany).not.toHaveBeenCalled()
+        expect(tx.discount.update).not.toHaveBeenCalled()
+      }
+      expect(despues).toHaveBeenCalledTimes(1)
+      expect(despues).toHaveBeenCalledWith(
+        expect.objectContaining({ orderId: ORDER_ID, canal: 'recordOrderPayment', paymentId: 'payment-1' }),
+      )
+    } finally {
+      despues.mockRestore()
+    }
+  })
+
+  it('🔴 Codex r2 #2: la respuesta espera al paso del uso como mucho el tope (1.5 s): un paso que nunca termina no la detiene', async () => {
+    const order = makeOrder({ status: 'CANCELLED', originSystem: 'AVOQADO', contratoDePrecio: 'IVA_INCLUIDO', taxAmount: new Decimal(0) })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+    capturarTransacciones([])
+    expect((paymentService as any).TOPE_DEL_PASO_DEL_USO_MS).toBe(1_500)
+    let llamado = 0
+    const despues = jest.spyOn(cuentaCancelada, 'volverAGastarUsosTrasElCobro').mockImplementation(() => {
+      llamado = Date.now()
+      return new Promise<number>(() => undefined) // otra caja retiene la promoción para siempre
+    })
+    try {
+      const r: any = await (paymentService as any).recordOrderPayment(
+        VENUE_ID,
+        ORDER_ID,
+        { ...paymentData, idempotencyKey: 'd26-tope-1' },
+        'user-1',
+      )
+      const esperado = Date.now() - llamado
+      expect(r.id).toBe('payment-1')
+      expect(despues).toHaveBeenCalledTimes(1)
+      expect(esperado).toBeGreaterThanOrEqual(1_450)
+      expect(esperado).toBeLessThan(2_000)
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('[D26]'),
+        expect.objectContaining({ orderId: ORDER_ID, paymentId: 'payment-1', topeMs: 1_500 }),
+      )
+    } finally {
+      despues.mockRestore()
+    }
+  })
+
   it('control: un cobro sobre una cuenta viva no llama al paso del uso (ningún cobro normal paga una consulta más)', async () => {
     const order = makeOrder()
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
