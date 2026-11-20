@@ -6,6 +6,6 @@
 -- Reversión (no se ejecuta):
 --   ALTER TABLE "time_entries" DROP COLUMN "salidaOlvidada";
 --   ALTER TABLE "VenueSettings" DROP COLUMN "salidaOlvidadaEnabled";
-SET lock_timeout = '5s';
+SET LOCAL lock_timeout = '5s';
 ALTER TABLE "VenueSettings" ADD COLUMN "salidaOlvidadaEnabled" BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE "time_entries" ADD COLUMN "salidaOlvidada" BOOLEAN NOT NULL DEFAULT false;
