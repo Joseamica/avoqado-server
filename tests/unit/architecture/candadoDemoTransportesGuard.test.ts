@@ -7,7 +7,8 @@ import fs from 'fs'
 import path from 'path'
 
 const SRC = path.join(__dirname, '../../../src')
-const SALIDA = /new Resend\(|\.emails\.send\(|graph\.facebook\.com|\.sendInvoiceByEmail\(|google\.walletobjects\(|\bconnect\(host|\bsignPass\(/
+const SALIDA =
+  /new Resend\(|\.emails\.send\(|graph\.facebook\.com|\.sendInvoiceByEmail\(|google\.walletobjects\(|\bconnect\(host|\bsignPass\(/
 
 /** Transportes que nunca parten de un negocio demo. La razón es obligatoria. */
 const NUNCA_TOCAN_UN_DEMO: Record<string, string> = {
@@ -58,9 +59,24 @@ describe('candado demo: los transportes de mensajes', () => {
  */
 const EXTERIOR = /from '(?:stripe|googleapis|axios|openai|resend|firebase-admin[^']*|http2|@anthropic-ai\/sdk)'|\bfetch\(/
 const POR_QUE_NO_LO_ALCANZA: Array<[prefijo: string, razon: string]> = [
+  [
+    'services/support/answer.service.ts',
+    'IA de ayuda pública de Avoqado: sólo elige secciones; no opera un negocio ni envía WhatsApp. El envío posterior pasa por omitirPorDemo en whatsapp.service',
+  ],
+  [
+    'services/support/hybrid.service.ts',
+    'IA de ayuda pública de Avoqado (soporte híbrido): entiende, redacta y juzga con guías aprobadas; no opera un negocio ni envía WhatsApp. El envío posterior pasa por omitirPorDemo en whatsapp.service',
+  ],
+  [
+    'services/support/worker.service.ts',
+    'importa sólo el tipo OpenAI; la IA vive en answer.service y cada salida WhatsApp corre con conNegocio de su propia fila (batch.test y delivery.integration prueban los contextos y demos)',
+  ],
   ['config/firebase.ts', 'inicializa Firebase; no manda nada por sí solo'],
   ['services/customer-display/storageOrigins.ts', 'sólo arma URLs de Storage; no sube nada'],
-  ['controllers/google-calendar.controller.ts', 'Google Calendar: conectarlo está cerrado en un demo (google-calendar) y la semilla no conecta ninguno'],
+  [
+    'controllers/google-calendar.controller.ts',
+    'Google Calendar: conectarlo está cerrado en un demo (google-calendar) y la semilla no conecta ninguno',
+  ],
   ['jobs/gcal-', 'Google Calendar: sin conexión no hay a quién llamar (conectar está cerrado en un demo)'],
   ['services/google-calendar/', 'Google Calendar: sin conexión no hay a quién llamar (conectar está cerrado en un demo)'],
   ['services/googleBusinessProfile.service.ts', 'reseñas de Google: requiere conectar Google (integrations y reviews cerrados en un demo)'],
@@ -88,12 +104,10 @@ const POR_QUE_NO_LO_ALCANZA: Array<[prefijo: string, razon: string]> = [
     'services/dashboard/venueFeature.dashboard.service.ts',
     'services/dashboard/token-budget.service.ts',
     'services/dashboard/terminalOrder/',
-  ].map(
-    (p): [string, string] => [
-      p,
-      'plan, suscripción y compras de Avoqado en Stripe: cerradas en un demo (plan, features, hybrid-billing, tpv-orders, tokens; el usuario demo sólo escribe en su negocio) y LIVE_DEMO no tiene suscripción',
-    ],
-  ),
+  ].map((p): [string, string] => [
+    p,
+    'plan, suscripción y compras de Avoqado en Stripe: cerradas en un demo (plan, features, hybrid-billing, tpv-orders, tokens; el usuario demo sólo escribe en su negocio) y LIVE_DEMO no tiene suscripción',
+  ]),
   [
     'services/dashboard/creditPack.public.service.ts',
     'compra de paquetes: los cobros públicos de un demo dan 403 (negocioDeRutaPublica) y el kiosco pide Stripe Connect, que un demo no tiene',
@@ -111,18 +125,14 @@ const POR_QUE_NO_LO_ALCANZA: Array<[prefijo: string, razon: string]> = [
     'services/financial-connections/',
     // Liga por prenda: sin intento el barrido no llama a Stripe (el intento nace en el cobro público, 403 en un demo).
     'jobs/payment-link-hold-sweeper.job.ts',
-  ].map(
-    (p): [string, string] => [
-      p,
-      'cobro y dinero: un demo no cobra con tarjeta (cuentas de cobro, cripto, bancos y la TPV cerradas; los cobros públicos de un demo dan 403)',
-    ],
-  ),
-  ...['services/delivery-channels/', 'services/commerce-channels/', 'services/aggregators/'].map(
-    (p): [string, string] => [
-      p,
-      'Rappi, Uber, Deliverect, Shopify y TotalPass/Wellhub: conectarlos está cerrado en un demo y la semilla no conecta ninguno',
-    ],
-  ),
+  ].map((p): [string, string] => [
+    p,
+    'cobro y dinero: un demo no cobra con tarjeta (cuentas de cobro, cripto, bancos y la TPV cerradas; los cobros públicos de un demo dan 403)',
+  ]),
+  ...['services/delivery-channels/', 'services/commerce-channels/', 'services/aggregators/'].map((p): [string, string] => [
+    p,
+    'Rappi, Uber, Deliverect, Shopify y TotalPass/Wellhub: conectarlos está cerrado en un demo y la semilla no conecta ninguno',
+  ]),
   [
     'services/crm/email/gmail',
     'Gmail del vendedor de Avoqado (CRM interno, con crm:contactar): escribe a contactos del CRM, nunca desde un demo',
@@ -136,7 +146,10 @@ const POR_QUE_NO_LO_ALCANZA: Array<[prefijo: string, razon: string]> = [
     'services/dashboard/inventory/market-benchmark.service.ts',
     'services/upsell/upsellAi.service.ts',
   ].map((p): [string, string] => [p, 'IA de Avoqado: una función que el demo sí enseña; contesta en pantalla y no le escribe a nadie']),
-  ['services/consumer/auth.consumer.service.ts', 'inicio de sesión de la app del cliente final (verifica con Google); no parte de un negocio'],
+  [
+    'services/consumer/auth.consumer.service.ts',
+    'inicio de sesión de la app del cliente final (verifica con Google); no parte de un negocio',
+  ],
   ['mcp/oauth/loginPage.ts', 'la página de login del MCP llama a NUESTRA API'],
 ]
 

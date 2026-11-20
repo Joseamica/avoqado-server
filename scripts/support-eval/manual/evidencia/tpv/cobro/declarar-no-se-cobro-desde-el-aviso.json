@@ -1,0 +1,140 @@
+{
+  "pagina": "tpv/cobro/declarar-no-se-cobro-desde-el-aviso",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt",
+      "linea": 210,
+      "cita": "Text(\"No se cobró\")"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt",
+      "linea": 82,
+      "cita": "if (cobros.size == 1) elegir(cobros.single())"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt",
+      "linea": 267,
+      "cita": "Text(\"¿Cuál no se cobró?\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt",
+      "linea": 298,
+      "cita": "Text(\"¿No se cobró este cobro?\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt",
+      "linea": 308,
+      "cita": "AvoqadoButton(text = \"Sí, no se cobró\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt",
+      "linea": 334,
+      "cita": "Text(\"Pide a un gerente que ingrese su PIN\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt",
+      "linea": 340,
+      "cita": "label = \"PIN de gerente\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt",
+      "linea": 351,
+      "cita": "text = \"Confirmar\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:reconcile-uncharged",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/BlumonAttemptResolver.kt",
+      "linea": 41
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Cobro del POS sin red: «Sin conexión: esto necesita internet…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/DeclaracionDesdeElAviso.kt",
+      "linea": 48
+    },
+    {
+      "afirmacion": "Sólo la ruta del servidor (cobro del POS) contesta SinRed",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/DeclaracionDesdeElAviso.kt",
+      "linea": 142
+    },
+    {
+      "afirmacion": "Cobro de la terminal sin respuesta de Avoqado: «Primero hay que consultar a Avoqado…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/DeclaracionDesdeElAviso.kt",
+      "linea": 90
+    },
+    {
+      "afirmacion": "El texto de FaltaConsultar",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/DeclaracionDesdeElAviso.kt",
+      "linea": 50
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "El aviso sale en Inicio, Pago rápido y Cobrar",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/NavRoute.kt",
+      "linea": 420
+    },
+    {
+      "ruta": "Antes: «queda tu nombre y la hora»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt",
+      "linea": 303
+    },
+    {
+      "ruta": "Antes: «No se cobró» sólo con cobros declarables",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt",
+      "linea": 174
+    },
+    {
+      "ruta": "Problema: hay evidencia",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/DeclaracionDesdeElAviso.kt",
+      "linea": 49
+    },
+    {
+      "ruta": "Problema: sin permiso",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/DeclaracionDesdeElAviso.kt",
+      "linea": 51
+    },
+    {
+      "ruta": "Problema: servidor sin la ruta",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/DeclaracionDesdeElAviso.kt",
+      "linea": 52
+    },
+    {
+      "ruta": "Problema: PIN sin permiso",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt",
+      "linea": 341
+    },
+    {
+      "ruta": "Cobro del POS: POST …/terminal-payment/requests/{requestId}/uncharged-declaration (decide el servidor)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/TerminalAttemptApiService.kt",
+      "linea": 75
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fecha": "2026-11-18",
+    "fotos": [],
+    "filasCreadas": [],
+    "nota": "No se pudo provocar: el aviso de un cobro sin confirmar con *No se cobró* sólo sale cuando queda un cobro en duda, y en la jornada todos los cobros con tarjeta se confirmaron al instante. Falta el mismo recorrido que cobro-sin-confirmar-pax."
+  },
+  "codex": {
+    "lote": 1,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

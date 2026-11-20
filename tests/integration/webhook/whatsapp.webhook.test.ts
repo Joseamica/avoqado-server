@@ -4,6 +4,9 @@ import request from 'supertest'
 
 import app from '@/app'
 import prisma from '@/utils/prismaClient'
+import { hashActivationToken } from '@/utils/activationToken'
+
+jest.mock('@/services/venueChatEmail.service', () => ({ maybeSendVenueReplyEmail: jest.fn().mockResolvedValue(undefined) }))
 
 jest.mock('@/services/whatsapp.service', () => ({
   sendServiceMessage: jest.fn().mockResolvedValue({ messageId: 'wamid.TEST_REPLY' }),
@@ -15,6 +18,10 @@ jest.mock('@/services/whatsapp.service', () => ({
 const APP_SECRET = 'test-app-secret'
 const CENTRAL = '111000111'
 const VENTAS = '172120185993202'
+const TOKEN = 'SUPPORTTEST1'
+let orgId: string
+let venueId: string
+let sessionId: string
 // Meta stamps every `messages` delivery with the number that received it; only the central one is ever answered.
 const metadata = (phoneNumberId = CENTRAL) => ({ display_phone_number: '525640070001', phone_number_id: phoneNumberId })
 
@@ -49,14 +56,33 @@ const textMessagePayload = (wamid: string, fromPhone = '525511112222', body = 'h
 })
 
 describe('POST /api/v1/webhooks/whatsapp (dispatch — integration with real DB)', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.WHATSAPP_VERIFY_TOKEN = 'test-verify-token'
     process.env.WHATSAPP_APP_SECRET = APP_SECRET
     process.env.WHATSAPP_PHONE_NUMBER_ID = CENTRAL
     process.env.WHATSAPP_SALES_PHONE_NUMBER_ID = VENTAS
+    const org = await prisma.organization.create({
+      data: { name: 'Soporte baseline', email: 'support-baseline@test.local', phone: '0000000000' },
+    })
+    orgId = org.id
+    const venue = await prisma.venue.create({
+      data: { organizationId: orgId, name: 'Soporte baseline', slug: `support-baseline-${orgId}` },
+    })
+    venueId = venue.id
+    const session = await prisma.venueChatSession.create({
+      data: { venueId, shortCode: 'S001', customerName: 'Cliente de prueba', requestFingerprintHash: 'test', accessTokenHash: 'test' },
+    })
+    sessionId = session.id
+    await prisma.venueChatMessage.create({
+      data: { sessionId, direction: 'INBOUND_FROM_CUSTOMER', body: 'Consulta ficticia', whatsappMessageId: 'wamid.BASELINE_RELAY' },
+    })
   })
 
   beforeEach(async () => {
+    jest.clearAllMocks()
+    await prisma.venueChatMessage.deleteMany({ where: { sessionId, direction: 'INBOUND_FROM_VENUE' } })
+    await prisma.venueWhatsappActivation.deleteMany({ where: { venueId } })
+    await prisma.venue.update({ where: { id: venueId }, data: { whatsappContactMode: 'WA_ME_FALLBACK', whatsappOptInPhone: null } })
     await prisma.crmWhatsappMessage.deleteMany({ where: { wamid: { startsWith: 'wamid.TEST_' } } })
     await prisma.whatsappInboundEvent.deleteMany({
       where: { wamid: { startsWith: 'wamid.TEST_' } },
@@ -75,12 +101,67 @@ describe('POST /api/v1/webhooks/whatsapp (dispatch — integration with real DB)
     await prisma.whatsappContactWindow.deleteMany({
       where: { phone: { in: ['+525511112222', '+525500001111'] } },
     })
+    if (venueId) {
+      await prisma.venueChatMessage.deleteMany({ where: { session: { venueId } } })
+      await prisma.venueChatSession.deleteMany({ where: { venueId } })
+      await prisma.venueWhatsappActivation.deleteMany({ where: { venueId } })
+      await prisma.venue.delete({ where: { id: venueId } })
+    }
+    if (orgId) await prisma.organization.delete({ where: { id: orgId } })
     await prisma.$disconnect()
   })
 
   it('rejects POST without HMAC signature with 403', async () => {
     const res = await request(app).post('/api/v1/webhooks/whatsapp').set('Content-Type', 'application/json').send({})
     expect(res.status).toBe(403)
+  })
+
+  it('activation/deactivation and a relay quote keep their real DB behavior, including a whole-body retry', async () => {
+    await prisma.venueWhatsappActivation.create({
+      data: { venueId, tokenHash: hashActivationToken(TOKEN), tokenLast4: 'EST1', expiresAt: new Date(Date.now() + 600_000) },
+    })
+    const payload = textMessagePayload('wamid.TEST_ACTIVATE', '525511112222', `ACTIVAR ${TOKEN}`)
+    const change = payload.entry[0].changes[0]
+    change.value.messages.push({ ...change.value.messages[0], id: 'wamid.TEST_DEACTIVATE', text: { body: 'DESACTIVAR' } })
+    expect((await postWebhook(payload)).status).toBe(200)
+    expect((await postWebhook(payload)).status).toBe(200)
+    expect(await prisma.venue.findUnique({ where: { id: venueId } })).toMatchObject({
+      whatsappContactMode: 'RELAY',
+      whatsappOptInPhone: '+525511112222',
+    })
+    const quote = textMessagePayload('wamid.TEST_QUOTE', '525511112222', 'Respuesta ficticia')
+    Object.assign(quote.entry[0].changes[0].value.messages[0], { context: { id: 'wamid.BASELINE_RELAY' } })
+    expect((await postWebhook(quote)).status).toBe(200)
+    expect((await postWebhook(quote)).status).toBe(200)
+    const stored = await prisma.venueChatMessage.findMany({ where: { sessionId, direction: 'INBOUND_FROM_VENUE' }, take: 10 })
+    expect(stored).toHaveLength(1)
+    expect(stored[0]).toMatchObject({ sessionId, body: 'Respuesta ficticia', whatsappMessageId: 'wamid.TEST_QUOTE' })
+    const stranger = textMessagePayload('wamid.TEST_FOREIGN', '525500001111', 'No es el negocio')
+    Object.assign(stranger.entry[0].changes[0].value.messages[0], { context: { id: 'wamid.BASELINE_RELAY' } })
+    expect((await postWebhook(stranger)).status).toBe(200)
+    expect(await prisma.venueChatMessage.count({ where: { sessionId, direction: 'INBOUND_FROM_VENUE' } })).toBe(1)
+  })
+
+  it('a mixed delivery only archives SALES AYUDA; SALES wins a receiver collision; OTHER stays ignored', async () => {
+    const { sendServiceMessage } = jest.requireMock('@/services/whatsapp.service') as { sendServiceMessage: jest.Mock }
+    const sales = textMessagePayload('wamid.TEST_SALES_HELP', '525500001111', 'AYUDA')
+    sales.entry[0].changes[0].value.metadata = metadata(VENTAS)
+    Object.assign(sales.entry[0].changes[0].value.messages[0], { context: { id: 'wamid.BASELINE_RELAY' } })
+    const other = textMessagePayload('wamid.TEST_OTHER_HELP', '525500001111', 'AYUDA')
+    other.entry[0].changes[0].value.metadata = metadata('other')
+    sales.entry[0].changes.push(other.entry[0].changes[0])
+    process.env.WHATSAPP_PHONE_NUMBER_ID = VENTAS
+    try {
+      expect((await postWebhook(sales)).status).toBe(200)
+      expect((await postWebhook(sales)).status).toBe(200)
+      expect(await prisma.crmWhatsappMessage.count({ where: { wamid: 'wamid.TEST_SALES_HELP' } })).toBe(1)
+      expect(
+        await prisma.whatsappInboundEvent.count({ where: { wamid: { in: ['wamid.TEST_SALES_HELP', 'wamid.TEST_OTHER_HELP'] } } }),
+      ).toBe(0)
+      expect(sendServiceMessage).not.toHaveBeenCalled()
+    } finally {
+      process.env.WHATSAPP_PHONE_NUMBER_ID = CENTRAL
+    }
   })
 
   it('inserts WhatsappInboundEvent for a new wamid and returns 200', async () => {

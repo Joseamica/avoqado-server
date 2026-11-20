@@ -1,0 +1,200 @@
+{
+  "pagina": "tpv/mesas/abrir-mesa-y-enviar-ronda",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 880,
+      "cita": "label = \"Mesas\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableSheet.kt",
+      "linea": 158,
+      "cita": "text = \"Comensales\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableSheet.kt",
+      "linea": 216,
+      "cita": "Text(\"Abrir mesa y ordenar\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableSheet.kt",
+      "linea": 280,
+      "cita": "Text(\"Ver cuenta\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TablesScreen.kt",
+      "linea": 150,
+      "cita": "onNavigateToTableOrder()"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 913,
+      "cita": "Icon(Icons.Default.Add, contentDescription = \"Agregar productos\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableMenuScreen.kt",
+      "linea": 123,
+      "cita": "title = \"Agregar productos\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableMenuScreen.kt",
+      "linea": 169,
+      "cita": "viewModel.addSimple(product)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableMenuScreen.kt",
+      "linea": 167,
+      "cita": "modifierSheetProduct = product"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableMenuScreen.kt",
+      "linea": 574,
+      "cita": "Text(\"Agregar\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableMenuScreen.kt",
+      "linea": 132,
+      "cita": "text = if (cartCount > 0) \"Listo · $cartCount artículo"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 545,
+      "cita": "SectionHeader(\"Por enviar\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 917,
+      "cita": "text = if (pendingCount > 0) \"Enviar ronda · ${moneyDisplay(pendingTotal)}\" else \"Enviar ronda\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderViewModel.kt",
+      "linea": 325,
+      "cita": "_notice.value = \"Ronda enviada a cocina\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "tables:update",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 4451
+    },
+    {
+      "permiso": "orders:create",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 4571
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 603
+    },
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 4450
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin conexión el menú de la mesa no carga: «Sin conexión. Verifica tu red e intenta de nuevo.»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableMenuViewModel.kt",
+      "linea": 105
+    },
+    {
+      "afirmacion": "El catálogo de la mesa sólo se pide al servidor (sin copia guardada)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
+      "linea": 333
+    },
+    {
+      "afirmacion": "La ronda se escribe en la cola antes de intentar enviarla (ADD_ITEMS)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
+      "linea": 446
+    },
+    {
+      "afirmacion": "Sin red, la ronda sigue en la cola",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
+      "linea": 460
+    },
+    {
+      "afirmacion": "Mensaje de ronda guardada",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderViewModel.kt",
+      "linea": 311
+    },
+    {
+      "afirmacion": "Los productos encolados dicen «Por sincronizar»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 664
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: la tarjeta Mesas sólo con el modo restaurante",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/model/TpvSettings.kt",
+      "linea": 179
+    },
+    {
+      "ruta": "Antes: el interruptor «Modo Restaurante» de Configuración",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt",
+      "linea": 267
+    },
+    {
+      "ruta": "Antes: sin el plan, Mesas sale apagado con «Plan Pro»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 872
+    },
+    {
+      "ruta": "Problema: «Mesa de … — solo lectura» (otro mesero, candado del negocio)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 765
+    },
+    {
+      "ruta": "Problema: el candado es del negocio (enforced) y de otro dueño",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
+      "linea": 124
+    },
+    {
+      "ruta": "Problema: 409, la cuenta cambió en otro dispositivo",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderViewModel.kt",
+      "linea": 337
+    },
+    {
+      "ruta": "Problema: la cuenta no cargó",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 631
+    },
+    {
+      "ruta": "Problema: Reintentar de la cuenta",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 640
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 5,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

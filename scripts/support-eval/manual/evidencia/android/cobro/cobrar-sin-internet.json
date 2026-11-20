@@ -1,0 +1,194 @@
+{
+  "pagina": "android/cobro/cobrar-sin-internet",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 29,
+      "cita": "label = \"Cobrar\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 457,
+      "cita": "text = primaryActionLabel ?: \"Cobrar ${cartState.totalDisplay}\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 232,
+      "cita": "text = \"Efectivo\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 270,
+      "cita": "text = \"Personalizado\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 238,
+      "cita": "Triple(Icons.Filled.CloudOff, Warning, \"Se sincronizará cuando haya conexión\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 3659,
+      "cita": "val idEnCola = cashPaymentRepository.queueCashPayment("
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/PaymentSyncService.kt",
+      "linea": 431,
+      "cita": "Log.d(TAG, \"Network reconnected — triggering sync\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/PaymentSyncService.kt",
+      "linea": 594,
+      "cita": "!ventaSinRedConPedido(payment) &&"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 240,
+      "cita": "Triple(Icons.Filled.CheckCircle, com.avoqado.pos.designsystem.theme.Success, \"Venta sincronizada\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 429,
+      "cita": ".flatMapLatest { exito ->"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 971
+    },
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1918
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red, el efectivo entra a la cola de pagos del aparato (queueCashPayment)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 3659
+    },
+    {
+      "afirmacion": "El cobro encolado termina en Success con isQueued = true",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 3686
+    },
+    {
+      "afirmacion": "La cola de pagos es Room (PendingPaymentDao)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/CashPaymentRepository.kt",
+      "linea": 23
+    },
+    {
+      "afirmacion": "El recibo de un cobro encolado dice «Se sincronizará cuando haya conexión»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 238
+    },
+    {
+      "afirmacion": "Al volver la red, el sincronizador manda lo encolado (caja primero)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/PaymentSyncService.kt",
+      "linea": 431
+    },
+    {
+      "afirmacion": "La venta sin red con productos y sin orden no se retiene esperando la prueba de precio: la cola la crea y la cobra (Q16)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/PaymentSyncService.kt",
+      "linea": 594
+    },
+    {
+      "afirmacion": "Q16: si el servidor no tiene la orden, se suelta la fila para crearla y cobrarla en la misma vuelta",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/PaymentSyncService.kt",
+      "linea": 470
+    },
+    {
+      "afirmacion": "Si crear la orden con premio falla por red, no se encola: sale MENSAJE_PREMIO_SIN_RED (si la orden ya se creó, el efectivo sí se encola)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 3644
+    },
+    {
+      "afirmacion": "Texto «Sin conexión: el premio necesita internet…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/model/PaymentModels.kt",
+      "linea": 374
+    },
+    {
+      "afirmacion": "Si aparece «Sin conexión: el cupón necesita internet…» (existe desde 2.25.37): sin red, con cupón y sin orden, no se encola",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 3652
+    },
+    {
+      "afirmacion": "Si aparece el aviso del cupón: el estado es Error con MENSAJE_CUPON_SIN_RED",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 3655
+    },
+    {
+      "afirmacion": "Si aparece el aviso del cupón: sin orden, el cupón no se aparta",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 548
+    },
+    {
+      "afirmacion": "Si aparece el aviso del cupón: su texto",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/model/PaymentModels.kt",
+      "linea": 378
+    },
+    {
+      "afirmacion": "Banda sin red, sin pendientes",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/ConnectivityBanner.kt",
+      "linea": 90
+    },
+    {
+      "afirmacion": "Banda sin red, con pendientes",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/ConnectivityBanner.kt",
+      "linea": 88
+    },
+    {
+      "afirmacion": "Terminal sin red: TARJETA_SIN_RED",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 2577
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Problema: venta rechazada al sincronizar",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 245
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "Sunmi D3 del laboratorio del Alien (serial D40625BRJ0469)",
+    "version": "2.25.42-dev (70), copia de QA com.avoqado.pos.soportewa compilada en v2.25.42 (843c15ae), contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
+    "apkSha256": "c109312a1a4e02448e2c7ab10a8a2c7a5b57920868f2190b3b969a6ed19e5d34",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/cobrar-sin-internet/1-sin-conexion-banda.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/cobrar-sin-internet/2-cobro-sin-red-efectivo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/cobrar-sin-internet/3-seleccionar-terminal-sin-conexion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/cobrar-sin-internet/4-se-sincronizara.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/cobrar-sin-internet/5-venta-sincronizada.png"
+    ],
+    "filasCreadas": [
+      "Order cmwmobigk01bjwaydsqj2l2jf — ORD-1795039747411, hecha sin red",
+      "Payment cmwmobj4401bowaydtultkmor — $50.00 CASH subido por la cola"
+    ],
+    "nota": "Sin red de verdad (alien-adb sin-red, sin túnel): arriba «Sin conexión — las ventas se guardan en el dispositivo». Agua + Café $50 → *Cobrar* → *Omitir* → *Sin propina* → fila *Efectivo* $50 → «Se sincronizará cuando haya conexión». *Cobrar con terminal* sin red: «Sin conexión: el cobro con tarjeta necesita internet…» (foto 3). Con red otra vez, la misma pantalla cambió a «Venta sincronizada» (~20 s)."
+  },
+  "codex": {
+    "lote": 2,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

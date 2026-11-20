@@ -1,0 +1,220 @@
+[
+  {
+    "id": "p01",
+    "tipo": "directa",
+    "app": "dashboard",
+    "mensaje": "buenas! como le configuro las comisiones a mis chavas del salon? q se les calcule solito x cada servicio",
+    "esperado": {
+      "accion": "contestar",
+      "guias": ["dashboard/equipo/configurar-comisiones", "general/overview"],
+      "debeDecir": [
+        {
+          "texto": "RH > Comisiones"
+        }
+      ],
+      "noDebeDecir": ["Configuración > Comisiones", "las comisiones vienen en el plan Pro", "un porcentaje fijo por default"]
+    },
+    "nota": "La guía de comisiones da la ruta (RH > Comisiones) y que se definen periodo, miembros y condiciones. El overview acepta como fuente del plan: comisiones están en Premium, no en Pro. Decir Pro o inventar un porcentaje por default es error."
+  },
+  {
+    "id": "p02",
+    "tipo": "directa",
+    "app": "dashboard",
+    "mensaje": "oye en reportes no me sale lo de cuentas por cobrar y a mi gerente si le aparece, xq sera?",
+    "esperado": {
+      "accion": "contestar",
+      "guias": ["dashboard/reportes/revisar-reportes-avanzados", "dashboard/configuracion/asignar-permisos-roles"],
+      "debeDecir": [
+        {
+          "texto": "tpv-reports:pay-later-aging"
+        },
+        {
+          "texto": "Configuración > Permisos y roles"
+        }
+      ],
+      "noDebeDecir": ["necesitas el plan Premium", "tpv-reports:read", "reinstala"]
+    },
+    "nota": "La guía de reportes avanzados dice literalmente que si Cuentas por cobrar no aparece se revisa el permiso `tpv-reports:pay-later-aging`; como al gerente sí le sale (mismo local, mismo plan), es permiso del rol, que se ajusta en Configuración > Permisos y roles. Echarle la culpa al plan o inventar otro nombre de permiso es error."
+  },
+  {
+    "id": "p03",
+    "tipo": "directa",
+    "app": "android",
+    "mensaje": "hola soy la encargada, cobramos en la tablet. donde checo cuando nos van a depositar lo d las tarjetas??",
+    "esperado": {
+      "accion": "contestar",
+      "guias": ["dashboard/reportes/ver-saldo-disponible"],
+      "debeDecir": [
+        {
+          "texto": "Reportes > Saldo Disponible"
+        },
+        {
+          "texto": "calendario de depósitos"
+        }
+      ],
+      "noDebeDecir": ["24 horas", "48 horas", "al día siguiente hábil", "en la app de la tablet"]
+    },
+    "nota": "Pregunta desde ANDROID pero la respuesta vive en el Dashboard: Reportes > Saldo Disponible, con saldo pendiente y calendario de depósitos. La guía NO da plazos de depósito; cualquier número de horas/días es inventado. Tampoco dice que se vea en la app de la tablet. Las guías de android están vacías: contestar con la del Dashboard es lo correcto, no 'no sé'."
+  },
+  {
+    "id": "p04",
+    "tipo": "directa",
+    "app": "dashboard",
+    "mensaje": "ya conecte avoqado con claude 🙌 le puedo pedir q me timbre las facturas d mis clientes?",
+    "esperado": {
+      "accion": "contestar",
+      "guias": ["dashboard/configuracion/conectar-avoqado-con-claude-o-chatgpt", "general/facturacion-y-contabilidad"],
+      "debeDecir": [
+        {
+          "texto": "facturación (CFDI)"
+        },
+        {
+          "texto": "Premium"
+        }
+      ],
+      "noDebeDecir": ["sí, Claude puede timbrar", "el conector emite la factura", "la facturación viene en el plan Pro"]
+    },
+    "nota": "Respuesta: no. La guía del conector dice que **No incluye** ... facturación (CFDI). La facturación se hace en el módulo Facturación del Dashboard y requiere plan Premium (guía general de facturación). Decir que sí puede, o que facturar es Pro, es error."
+  },
+  {
+    "id": "p05",
+    "tipo": "directa",
+    "app": "windows",
+    "mensaje": "en la compu de la caja (windows) kiero q cuando pidan hamburguesa salga pa escoger el termino y los extras, eso donde se pone",
+    "esperado": {
+      "accion": "contestar",
+      "guias": ["dashboard/menu/configurar-menu-avanzado", "dashboard/menu/gestionar-productos"],
+      "debeDecir": [
+        {
+          "texto": "Menú > Grupos de modificadores"
+        },
+        {
+          "texto": "Asocia el grupo a los productos"
+        }
+      ],
+      "noDebeDecir": ["Configuración > Modificadores", "desde la app de Windows en Ajustes", "Inventario > Recetas"]
+    },
+    "nota": "Términos y extras son grupos de modificadores (la guía cita 'términos, extras, tamaños'). Se crean en el Dashboard en Menú > Grupos de modificadores y se asocian al producto. gestionar-productos es casi duplicado (menciona Menú > Modificadores). Pregunta desde WINDOWS; la configuración vive en el Dashboard."
+  },
+  {
+    "id": "p06",
+    "tipo": "directa",
+    "app": "tpv",
+    "mensaje": "me llego la terminal nueva y en el dashboard en terminales sale como pendiente y no cobra, q le falta?",
+    "esperado": {
+      "accion": "contestar",
+      "guias": ["dashboard/terminales/gestionar-terminales"],
+      "debeDecir": [
+        {
+          "texto": "falta completar activación"
+        },
+        {
+          "texto": "identificador del dispositivo"
+        }
+      ],
+      "noDebeDecir": ["código de activación de 6 dígitos", "restablece de fábrica", "Configuración > Terminales"]
+    },
+    "nota": "La guía de terminales dice: si aparece pendiente, falta completar activación; seguir el flujo o contactar a soporte con el identificador del dispositivo. Inventar códigos, reinicios de fábrica o rutas es error. Las guías tpv/ no están en la biblioteca: la respuesta sale de la del Dashboard."
+  },
+  {
+    "id": "p07",
+    "tipo": "seguimiento",
+    "app": "dashboard",
+    "historial": [
+      {
+        "role": "user",
+        "text": "como hago una liga de pago pa cobrarle a un cliente q esta en otra ciudad"
+      },
+      {
+        "role": "assistant",
+        "text": "En el Dashboard entra a Ventas > Ligas de Pago, crea una nueva liga, captura concepto, monto y descripción, guárdala y copia el enlace o compártelo por WhatsApp."
+      }
+    ],
+    "mensaje": "ya se la mande pero le puse 850 y eran 580 🤦‍♀️ la puedo editar?",
+    "esperado": {
+      "accion": "contestar",
+      "guias": ["dashboard/ventas/crear-liga-pago"],
+      "debeDecir": [
+        {
+          "texto": "crea una nueva liga con datos correctos"
+        },
+        {
+          "texto": "evita reutilizar la anterior"
+        }
+      ],
+      "noDebeDecir": ["edita el monto de la liga", "desactiva la liga", "cancela la liga desde"]
+    },
+    "nota": "'la' = la liga del historial. La guía dice: si una liga se compartió con monto incorrecto, crea una nueva liga con datos correctos y evita reutilizar la anterior. No dice que se pueda editar el monto ni desactivar/cancelar la liga: eso es inventado."
+  },
+  {
+    "id": "p08",
+    "tipo": "ambigua",
+    "app": "dashboard",
+    "mensaje": "oye como doy de alta a alguien nuevo?",
+    "esperado": {
+      "accion": "aclarar",
+      "guias": [
+        "dashboard/equipo/gestionar-miembros",
+        "dashboard/configuracion/asignar-permisos-roles",
+        "dashboard/clientes/gestionar-clientes",
+        "dashboard/reservaciones/gestionar-reservaciones"
+      ],
+      "debeDecir": [
+        {
+          "texto": "equipo"
+        },
+        {
+          "texto": "cliente"
+        }
+      ],
+      "noDebeDecir": ["Configuración > Usuarios", "Equipo > Nuevo empleado"]
+    },
+    "nota": "'Alguien nuevo' puede ser un empleado (RH > Personas, con su rol en Permisos y roles), un cliente (Clientes > Todos) o una persona en reservaciones/lista de espera. Debe preguntar cuál antes de dar pasos; debeDecir son las dos opciones mínimas que la pregunta de aclaración debe ofrecer."
+  },
+  {
+    "id": "p09",
+    "tipo": "ambigua",
+    "app": "dashboard",
+    "mensaje": "como la cancelo? ya no la ocupo",
+    "esperado": {
+      "accion": "aclarar",
+      "guias": [
+        "dashboard/reservaciones/gestionar-reservaciones",
+        "dashboard/reservaciones/configurar-reservaciones-avanzadas",
+        "dashboard/configuracion/comprar-addons-suscripciones",
+        "dashboard/configuracion/revisar-billing-detallado",
+        "general/facturacion-y-contabilidad",
+        "dashboard/clientes/configurar-promociones",
+        "dashboard/ventas/crear-liga-pago",
+        "dashboard/ventas/ver-pedidos"
+      ],
+      "debeDecir": [
+        {
+          "texto": "reservación"
+        },
+        {
+          "texto": "suscripción"
+        }
+      ],
+      "noDebeDecir": ["Configuración > Cancelar", "se cancela desde Mi perfil"]
+    },
+    "nota": "Sin historial, 'la' puede ser una reservación, una suscripción o add-on, una factura (motivo SAT), una promoción, una liga de pago o una orden. Debe preguntar qué quiere cancelar ofreciendo opciones; no debe adivinar una."
+  },
+  {
+    "id": "p10",
+    "tipo": "sin-respuesta",
+    "app": "android",
+    "mensaje": "como le hago pa q las comandas salgan en la impresora d la cocina y no en la d caja?",
+    "esperado": {
+      "accion": "no-se",
+      "guias": [],
+      "debeDecir": [],
+      "noDebeDecir": [
+        "Configuración > Impresoras",
+        "con las reglas de ruteo de terminales mandas la comanda a cocina",
+        "Menú > Productos > Impresora"
+      ]
+    },
+    "nota": "Verificado con grep: ninguna guía de la biblioteca explica configurar impresoras ni el ruteo de comandas; 'impresoras' sólo aparece en la lista de temas del conector de Claude/ChatGPT, y 'reglas de ruteo de terminales' (overview, Premium) es de terminales de cobro, no de impresoras. Debe decir que no tiene esa guía y escalar."
+  }
+]

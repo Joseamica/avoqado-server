@@ -13,9 +13,10 @@
  * zonas distintas (Tijuana, Cancún) el "hoy" de esa tienda queda corrido 1 h. Los heatmaps
  * sí agrupan por `v."timezone"` de cada tienda. Si algún día hace falta, el arreglo es
  * "hoy" por tienda en TODAS las funciones de org, no sólo en algunas.
+ * Excepción ya hecha: `getStaffAttendance` (Auditoría de Promotores) corta el día de cada sucursal con SU zona (Codex 4c r6 #1).
  */
 import { OrderStatus, Prisma, StaffRole } from '@prisma/client'
-import { endOfDay, endOfMonth, format, startOfDay, subDays } from 'date-fns'
+import { endOfMonth, format, subDays } from 'date-fns'
 import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz'
 import { localWallClock, utcTs } from '../../utils/sqlDates'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
@@ -27,8 +28,9 @@ import {
   venueStartOfDay,
   venueStartOfDayOffset,
   venueStartOfMonth,
+  zonaValida,
 } from '../../utils/datetime'
-import { addCivilDays, venueDayKey } from '../../utils/venueDateKeys'
+import { addCivilDays, firstInstantOfDay, venueDayKey } from '../../utils/venueDateKeys'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
@@ -317,6 +319,21 @@ async function cashSalesPerTimeEntry(venueIds: string[], from: Date, to: Date): 
     GROUP BY te."id"
   `
   return new Map(rows.map(r => [r.timeEntryId, Number(r.cash) || 0]))
+}
+
+/**
+ * ¿Es «AAAA-MM-DD» de un día que existe en el calendario, entre los años 2000 y 2099? Por partes y sin `Date.UTC`, que lee los
+ * años 0–99 como 1900–1999; el tope también deja seguro a `addCivilDays` (Codex a1988b r3 y r4). Un reporte de asistencia fuera de ese
+ * siglo no tiene datos que mostrar.
+ */
+function esFechaCivil(valor: unknown): valor is string {
+  if (typeof valor !== 'string') return false
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(valor)
+  if (!m) return false
+  const [anio, mes, dia] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  const bisiesto = (anio % 4 === 0 && anio % 100 !== 0) || anio % 400 === 0
+  const diasDelMes = [31, bisiesto ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mes - 1]
+  return anio >= 2000 && anio <= 2099 && diasDelMes !== undefined && dia >= 1 && dia <= diasDelMes
 }
 
 export const SELF_VALIDATION_FORBIDDEN = 'SELF_VALIDATION_FORBIDDEN'
@@ -2190,34 +2207,47 @@ class OrganizationDashboardService {
       attendancePercent: number
     }>
   }> {
-    // Parse date range — convert venue-local dates to UTC for Prisma queries.
-    // DB stores UTC (Prisma sends JS Date as UTC). Frontend sends YYYY-MM-DD venue-local dates.
-    // We convert venue midnight/end-of-day to real UTC boundaries using fromZonedTime.
-    let dayStart: Date
-    let dayEnd: Date
-    if (startDateStr && endDateStr) {
-      dayStart = fromZonedTime(new Date(`${startDateStr}T00:00:00`), DEFAULT_TIMEZONE)
-      dayEnd = fromZonedTime(new Date(`${endDateStr}T23:59:59.999`), DEFAULT_TIMEZONE)
-    } else if (dateStr) {
-      dayStart = fromZonedTime(new Date(`${dateStr}T00:00:00`), DEFAULT_TIMEZONE)
-      dayEnd = fromZonedTime(new Date(`${dateStr}T23:59:59.999`), DEFAULT_TIMEZONE)
-    } else {
-      // No date specified → today in venue timezone
-      const nowVenue = toZonedTime(new Date(), DEFAULT_TIMEZONE)
-      dayStart = fromZonedTime(startOfDay(nowVenue), DEFAULT_TIMEZONE)
-      dayEnd = fromZonedTime(endOfDay(nowVenue), DEFAULT_TIMEZONE)
+    // Codex 4c r6 #1 (encargo a1988b): «el día» es el de CADA sucursal, con SU zona (`Venue.timezone`), no la medianoche de CDMX para
+    // todas. En Cancún (UTC−5) o Tijuana lo cobrado o checado entre las 00:00 y la 01:00 locales caía en el día anterior. Las sucursales se
+    // agrupan por zona y cada grupo consulta con su propio [inicio, fin] (en PlayTelecom casi siempre es una sola zona: una vuelta).
+    // Un día sin fecha («hoy») también es el de cada zona, con UN solo reloj por petición (Codex r1 #4); una fecha vacía es «hoy», como
+    // antes (Codex r1 #5). El día va de su primer instante al primer instante del siguiente, menos 1 ms: en una zona cuya medianoche no
+    // existe o se repite (Santiago) los días no se enciman ni dejan hueco (Codex r1 #3, el mismo cálculo que el correo nocturno).
+    // Las fechas son cadenas civiles: nunca pasan por la zona del host.
+    // Una fecha que no existe en el calendario (2026-11-32, 2026-02-30) es un 400, nunca otro día por desbordamiento (Codex a1988b r2).
+    // Una lista (`?date=a&date=b`) también es un 400 (r3).
+    for (const fecha of [dateStr, startDateStr, endDateStr] as unknown[]) {
+      if (fecha !== undefined && fecha !== '' && !esFechaCivil(fecha)) {
+        // El mensaje no copia lo recibido: un objeto de la query no se puede convertir a texto (r4).
+        throw new BadRequestError('Una fecha no es válida: usa el formato AAAA-MM-DD con un día que exista (años 2000 a 2099).')
+      }
+    }
+    const ahora = new Date()
+    const rangoDelDia = (tz: string): { dayStart: Date; dayEnd: Date } => {
+      const desde = startDateStr && endDateStr ? startDateStr : dateStr || venueDayKey(ahora, tz)
+      const hasta = startDateStr && endDateStr ? endDateStr : desde
+      return { dayStart: new Date(firstInstantOfDay(desde, tz)), dayEnd: new Date(firstInstantOfDay(addCivilDays(hasta, 1), tz) - 1) }
     }
 
     // Get all venues in organization
     const venues = await prisma.venue.findMany({
       where: { organizationId: orgId },
-      select: { id: true, name: true },
+      select: { id: true, name: true, timezone: true },
     })
 
     // A caller-supplied venueId must belong to THIS org — using it verbatim would let a
     // caller read another tenant's attendance (staff PII, GPS, photos, sales) by id.
     const orgVenueIds = venues.map(v => v.id)
     const venueIds = venueId ? orgVenueIds.filter(id => id === venueId) : orgVenueIds
+
+    // Sucursales agrupadas por su zona (inválida o vacía → CDMX, igual que la tardanza de abajo).
+    const zonaDe = new Map(venues.map(v => [v.id, zonaValida(v.timezone)]))
+    const gruposPorZona = new Map<string, string[]>()
+    for (const id of venueIds) {
+      const tz = zonaDe.get(id) ?? DEFAULT_TIMEZONE
+      gruposPorZona.set(tz, [...(gruposPorZona.get(tz) ?? []), id])
+    }
+    const grupos = [...gruposPorZona.entries()].map(([tz, ids]) => ({ venueIds: ids, ...rangoDelDia(tz) }))
 
     // Get all staff in these venues
     const staffVenues = await prisma.staffVenue.findMany({
@@ -2264,76 +2294,85 @@ class OrganizationDashboardService {
       latenessThresholdMinutes: orgAttendanceConfig?.latenessThresholdMinutes ?? 30,
     }
 
-    // Get TimeEntry for the specified date
-    const timeEntries = await prisma.timeEntry.findMany({
-      where: {
-        venueId: { in: venueIds },
-        clockInTime: { gte: dayStart, lte: dayEnd },
-      },
-      select: {
-        id: true,
-        staffId: true,
-        venueId: true,
-        clockInTime: true,
-        clockOutTime: true,
-        clockInLatitude: true,
-        clockInLongitude: true,
-        clockOutLatitude: true,
-        clockOutLongitude: true,
-        checkInPhotoUrl: true,
-        facadePhotoUrl: true,
-        checkOutPhotoUrl: true,
-        depositPhotoUrl: true,
-        status: true,
-        validationStatus: true,
-      },
-    })
+    // Checadas, ventas y efectivo del día, por grupo de sucursales de la misma zona (cada uno con SU día). Una sucursal está en un solo
+    // grupo, así que juntar los resultados no repite ni pierde nada.
+    const porGrupo = await Promise.all(
+      grupos.map(async ({ venueIds: ids, dayStart, dayEnd }) => {
+        // Get TimeEntry for the specified date
+        const timeEntries = await prisma.timeEntry.findMany({
+          where: {
+            venueId: { in: ids },
+            clockInTime: { gte: dayStart, lte: dayEnd },
+          },
+          select: {
+            id: true,
+            staffId: true,
+            venueId: true,
+            clockInTime: true,
+            clockOutTime: true,
+            clockInLatitude: true,
+            clockInLongitude: true,
+            clockOutLatitude: true,
+            clockOutLongitude: true,
+            checkInPhotoUrl: true,
+            facadePhotoUrl: true,
+            checkOutPhotoUrl: true,
+            depositPhotoUrl: true,
+            status: true,
+            validationStatus: true,
+          },
+        })
 
-    // Ventas de cada persona por tienda, agregadas en Postgres. D2 (Codex r4 A3 de pedidos en línea): una devolución cuenta en las
-    // VENTAS de quien hizo la venta (`processedById` de su cobro original), no de quien la opera; la de un cobro sin vendedor (web, liga)
-    // no es de nadie. El EFECTIVO de abajo sigue siendo de quien lo entregó: es dinero que salió de sus manos.
-    // D4c (Codex 4c r2 #2 y r5 #2): QUIÉN sale en la lista no cambia con la hora real; sólo se SUMA quien vendió a la hora real en el
-    // día. Las mismas ventas a la hora de LLEGADA (como antes de D4c, `amountAtArrival`) deciden también quién aparece: así sigue la cajera
-    // sin checada cuya venta sin internet de ayer llegó hoy (con su efectivo de hoy), y no aparece nadie nuevo con red (un gerente que sólo
-    // devolvió efectivo de la venta de otro). Las dos sumas salen de UNA consulta: un cobro que se confirma a media petición cae en las dos
-    // o en ninguna. El rango de llegada [inicio, fin] cabe dentro del ensanchado de la hora real.
-    const horaReal = Prisma.raw(sqlHoraReal('p'))
-    const salesData =
-      venueIds.length === 0
-        ? []
-        : await prisma.$queryRaw<
-            Array<{ processedById: string; venueId: string; amount: Prisma.Decimal | null; amountAtArrival: Prisma.Decimal | null }>
-          >`
-            SELECT ${SQL_VENDEDOR_DEL_MOVIMIENTO} AS "processedById",
-                   p."venueId" AS "venueId",
-                   SUM(p."amount") FILTER (WHERE ${horaReal} >= ${utcTs(dayStart)} AND ${horaReal} <= ${utcTs(dayEnd)}) AS "amount",
-                   SUM(p."amount") FILTER (WHERE p."createdAt" >= ${utcTs(dayStart)} AND p."createdAt" <= ${utcTs(dayEnd)}) AS "amountAtArrival"
-            FROM "Payment" p
-            ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
-            WHERE p."venueId" IN (${Prisma.join(venueIds)})
-              AND p."createdAt" >= ${utcTs(dayStart)} - ${Prisma.raw(`INTERVAL '${MARGEN_DE_LECTURA_ANTES_MS / 3600000} hours'`)}
-              AND p."createdAt" <= ${utcTs(dayEnd)} + ${Prisma.raw(`INTERVAL '${MARGEN_DE_LECTURA_MS / 3600000} hours'`)}
-              AND p."status" = 'COMPLETED'
-              AND ${SQL_VENDEDOR_DEL_MOVIMIENTO} IS NOT NULL
-            GROUP BY 1, 2
-          `
+        // Ventas de cada persona por tienda, agregadas en Postgres. D2 (Codex r4 A3 de pedidos en línea): una devolución cuenta en las
+        // VENTAS de quien hizo la venta (`processedById` de su cobro original), no de quien la opera; la de un cobro sin vendedor (web,
+        // liga) no es de nadie. El EFECTIVO de abajo sigue siendo de quien lo entregó: es dinero que salió de sus manos.
+        // D4c (Codex 4c r2 #2 y r5 #2): QUIÉN sale en la lista no cambia con la hora real; sólo se SUMA quien vendió a la hora real en el
+        // día. Las mismas ventas a la hora de LLEGADA (como antes de D4c, `amountAtArrival`) deciden también quién aparece: así sigue la
+        // cajera sin checada cuya venta sin internet de ayer llegó hoy (con su efectivo de hoy), y no aparece nadie nuevo con red (un
+        // gerente que sólo devolvió efectivo de la venta de otro). Las dos sumas salen de UNA consulta: un cobro que se confirma a media
+        // petición cae en las dos o en ninguna. El rango de llegada [inicio, fin] cabe dentro del ensanchado de la hora real.
+        const horaReal = Prisma.raw(sqlHoraReal('p'))
+        const salesData = await prisma.$queryRaw<
+          Array<{ processedById: string; venueId: string; amount: Prisma.Decimal | null; amountAtArrival: Prisma.Decimal | null }>
+        >`
+          SELECT ${SQL_VENDEDOR_DEL_MOVIMIENTO} AS "processedById",
+                 p."venueId" AS "venueId",
+                 SUM(p."amount") FILTER (WHERE ${horaReal} >= ${utcTs(dayStart)} AND ${horaReal} <= ${utcTs(dayEnd)}) AS "amount",
+                 SUM(p."amount") FILTER (WHERE p."createdAt" >= ${utcTs(dayStart)} AND p."createdAt" <= ${utcTs(dayEnd)}) AS "amountAtArrival"
+          FROM "Payment" p
+          ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
+          WHERE p."venueId" IN (${Prisma.join(ids)})
+            AND p."createdAt" >= ${utcTs(dayStart)} - ${Prisma.raw(`INTERVAL '${MARGEN_DE_LECTURA_ANTES_MS / 3600000} hours'`)}
+            AND p."createdAt" <= ${utcTs(dayEnd)} + ${Prisma.raw(`INTERVAL '${MARGEN_DE_LECTURA_MS / 3600000} hours'`)}
+            AND p."status" = 'COMPLETED'
+            AND ${SQL_VENDEDOR_DEL_MOVIMIENTO} IS NOT NULL
+          GROUP BY 1, 2
+        `
+
+        // Get CASH-only sales per staff (for deposit verification): a su hora de LLEGADA, con el día de su sucursal.
+        const cashSalesData = await prisma.payment.groupBy({
+          by: ['processedById', 'venueId'],
+          where: {
+            venueId: { in: ids },
+            createdAt: { gte: dayStart, lte: dayEnd },
+            status: 'COMPLETED',
+            processedById: { not: null },
+            method: 'CASH',
+          },
+          _sum: { amount: true },
+        })
+
+        // Efectivo por checada (ventana [clockIn, clockOut] inclusiva), agregado en Postgres.
+        const cashByEntry = await cashSalesPerTimeEntry(ids, dayStart, dayEnd)
+
+        return { timeEntries, salesData, cashSalesData, cashByEntry }
+      }),
+    )
+    const timeEntries = porGrupo.flatMap(g => g.timeEntries)
+    const salesData = porGrupo.flatMap(g => g.salesData)
+    const cashSalesData = porGrupo.flatMap(g => g.cashSalesData)
+    const cashByEntry = new Map(porGrupo.flatMap(g => [...g.cashByEntry]))
     const ventasPorLlegada = new Map(salesData.map(s => [`${s.processedById}:${s.venueId}`, Number(s.amountAtArrival) || 0]))
-
-    // Get CASH-only sales per staff (for deposit verification)
-    const cashSalesData = await prisma.payment.groupBy({
-      by: ['processedById', 'venueId'],
-      where: {
-        venueId: { in: venueIds },
-        createdAt: { gte: dayStart, lte: dayEnd },
-        status: 'COMPLETED',
-        processedById: { not: null },
-        method: 'CASH',
-      },
-      _sum: { amount: true },
-    })
-
-    // Efectivo por checada (ventana [clockIn, clockOut] inclusiva), agregado en Postgres.
-    const cashByEntry = await cashSalesPerTimeEntry(venueIds, dayStart, dayEnd)
 
     // Key: staffId:venueId -> sales amount
     const salesByStaffVenue: Record<string, number> = {}
@@ -2391,7 +2430,7 @@ class OrganizationDashboardService {
       const fullName = `${sv.staff.firstName} ${sv.staff.lastName}`
 
       // Lateness calculation for this venue
-      const venueTz = sv.venue.timezone || DEFAULT_TIMEZONE
+      const venueTz = zonaValida(sv.venue.timezone)
       const aSetting = attendanceSettingsMap.get(sv.venueId) || defaultAttendanceSettings
       const [expH, expM] = aSetting.expectedCheckInTime.split(':').map(Number)
       const deadlineMin = expH * 60 + expM + aSetting.latenessThresholdMinutes

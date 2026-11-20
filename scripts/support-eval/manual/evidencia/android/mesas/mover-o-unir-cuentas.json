@@ -1,0 +1,196 @@
+{
+  "pagina": "android/mesas/mover-o-unir-cuentas",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 73,
+      "cita": "label = \"Mesas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 564,
+      "cita": "{ Text(\"Acciones\") }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 190,
+      "cita": "if (t.isOccupied) {"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 191,
+      "cita": "selectedIds = if (t.id in selectedIds) selectedIds - t.id else selectedIds + t.id"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 604,
+      "cita": "BulkAction(\"Mover\", Icons.AutoMirrored.Filled.DriveFileMove, selectedCount == 1, onMover)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 426,
+      "cita": "title = \"Mover cuenta — Mesa ${source.number}\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 423,
+      "cita": "val freeTables = tables.filter { it.isAvailable }"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 603,
+      "cita": "BulkAction(\"Unir\", Icons.AutoMirrored.Filled.CallMerge, selectedCount >= 2, onUnir)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 340,
+      "cita": "title = \"Unir ${selectedOccupied.size} cuentas\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 341,
+      "cita": "description = \"¿En qué mesa se queda la cuenta? Las otras mesas se liberan y TODOS sus artículos pasan a ella, en una sola cuenta.\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "tables:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 2855
+    },
+    {
+      "permiso": "tables:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/network/ApiService.kt",
+      "linea": 299
+    },
+    {
+      "permiso": "tables:update",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 2954
+    },
+    {
+      "permiso": "tables:update",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/network/ApiService.kt",
+      "linea": 354
+    },
+    {
+      "permiso": "orders:merge",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3364
+    },
+    {
+      "permiso": "orders:merge",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/network/ApiService.kt",
+      "linea": 416
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 143
+    },
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 2917
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red (IOException o 502-504) la acción se guarda en la cola del aparato y vuelve como éxito",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableServiceRepository.kt",
+      "linea": 70
+    },
+    {
+      "afirmacion": "Mover sin red: MOVE_ORDER",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableServiceRepository.kt",
+      "linea": 365
+    },
+    {
+      "afirmacion": "Unir sin red: MERGE_ORDERS",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableServiceRepository.kt",
+      "linea": 454
+    },
+    {
+      "afirmacion": "Mover encolado sale «Cuenta movida»",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesViewModel.kt",
+      "linea": 702
+    },
+    {
+      "afirmacion": "Unir encolado sale «Cuentas unidas en la mesa …»",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 352
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: Mesas sólo en el modo Mesas del aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt",
+      "linea": 38
+    },
+    {
+      "ruta": "Antes: el modo se llama «Mesas»",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/domain/PosMode.kt",
+      "linea": 14
+    },
+    {
+      "ruta": "Antes: sin el plan, la pantalla de Mesas pide el plan",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 144
+    },
+    {
+      "ruta": "Antes: la pestaña no depende del plan (sólo del rol)",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt",
+      "linea": 68
+    },
+    {
+      "ruta": "Antes: el texto del candado",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/PlanGate.kt",
+      "linea": 231
+    },
+    {
+      "ruta": "Problema: sin mesas libres al mover",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 447
+    },
+    {
+      "ruta": "Problema: salir de Acciones sin hacer nada",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 554
+    },
+    {
+      "ruta": "Mover llama al repositorio",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesViewModel.kt",
+      "linea": 698
+    },
+    {
+      "ruta": "Unir llama al repositorio por cada cuenta abierta",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesViewModel.kt",
+      "linea": 741
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

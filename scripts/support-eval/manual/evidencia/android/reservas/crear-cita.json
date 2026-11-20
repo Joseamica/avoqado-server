@@ -1,0 +1,248 @@
+{
+  "pagina": "android/reservas/crear-cita",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 64,
+      "cita": "label = \"Calendario\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/calendar/CalendarTabHost.kt",
+      "linea": 134,
+      "cita": "Icon(Icons.Filled.Add, \"Crear\")"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/calendar/CalendarTabHost.kt",
+      "linea": 172,
+      "cita": "onSlotTap = ::openSheetAtSlot,"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/calendar/CalendarTabHost.kt",
+      "linea": 252,
+      "cita": "label = \"Crear cita\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationScreen.kt",
+      "linea": 161,
+      "cita": "placeholder = \"Seleccionar cliente\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationScreen.kt",
+      "linea": 170,
+      "cita": "placeholder = \"Seleccionar servicio\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationScreen.kt",
+      "linea": 176,
+      "cita": "sectionLabel = \"Fecha y hora\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/sections/DateTimeSection.kt",
+      "linea": 164,
+      "cita": "text = \"No hay horarios disponibles este día — prueba otra fecha.\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationScreen.kt",
+      "linea": 186,
+      "cita": "sectionLabel = \"Detalles\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationScreen.kt",
+      "linea": 116,
+      "cita": "val actionLabel = if (isEditing) \"Guardar\" else \"Crear\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationScreen.kt",
+      "linea": 130,
+      "cita": "primaryActionEnabled = canSubmit && !isSubmitting,"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationScreen.kt",
+      "linea": 260,
+      "cita": "message = if (isEditing) \"¡Reserva actualizada!\" else \"¡Reserva creada!\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "reservations:read",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 57
+    },
+    {
+      "permiso": "reservations:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationApi.kt",
+      "linea": 78
+    },
+    {
+      "permiso": "reservations:create",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 150
+    },
+    {
+      "permiso": "customers:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1588
+    },
+    {
+      "permiso": "customers:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationViewModel.kt",
+      "linea": 350
+    },
+    {
+      "permiso": "menu:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 2086
+    },
+    {
+      "permiso": "menu:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationViewModel.kt",
+      "linea": 148
+    },
+    {
+      "permiso": "menu:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/data/ProductsRepository.kt",
+      "linea": 102
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt",
+      "linea": 37
+    },
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4695
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Si aparece «Guardado sin conexión»: sin red la cita se guarda en el aparato (PENDING_NEW) y se crea al volver",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationRepository.kt",
+      "linea": 190
+    },
+    {
+      "afirmacion": "Si aparece «Guardado sin conexión»: el diálogo",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationScreen.kt",
+      "linea": 214
+    },
+    {
+      "afirmacion": "Si aparece «Guardado sin conexión»: su texto",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationRepository.kt",
+      "linea": 279
+    },
+    {
+      "afirmacion": "Si aparece «Guardado sin conexión»: el reintentador vuelve a llamar al servidor (que revalida y puede rechazar)",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationActionsRetrier.kt",
+      "linea": 167
+    },
+    {
+      "afirmacion": "Si aparece «Guardado sin conexión»: tras los intentos máximos queda en cuarentena, no se crea",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationActionsRetrier.kt",
+      "linea": 70
+    },
+    {
+      "afirmacion": "Si aparece el aviso de encolado: se encola con isOnline() = red del aparato Y servidor alcanzable",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/util/ConnectivityMonitor.kt",
+      "linea": 71
+    },
+    {
+      "afirmacion": "Si aparece el aviso: el reintentador sólo escucha la red del aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/data/ReservationActionsRetrier.kt",
+      "linea": 52
+    },
+    {
+      "afirmacion": "Si aparece el aviso: isOnlineFlow es sólo la red del aparato, no el servidor",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/util/ConnectivityMonitor.kt",
+      "linea": 74
+    },
+    {
+      "afirmacion": "Si aparece el aviso: al arrancar la app el reintentador lee el estado actual y vacía si hay red",
+      "archivo": "app/src/main/java/com/avoqado/pos/AvoqadoApp.kt",
+      "linea": 65
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: Calendario sólo con reservaciones prendidas y en el plan",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt",
+      "linea": 37
+    },
+    {
+      "ruta": "Antes: el interruptor de reservas es de ESTE aparato (SharedPreferences), no del negocio",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/onboarding/ActivateReservationsViewModel.kt",
+      "linea": 71
+    },
+    {
+      "ruta": "Antes: sin activar, «Más» ofrece «Reservaciones»",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 677
+    },
+    {
+      "ruta": "Antes: el botón «Activar reservas»",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/onboarding/ActivateReservationsScreen.kt",
+      "linea": 98
+    },
+    {
+      "ruta": "Antes: interruptor local Y plan",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabHostViewModel.kt",
+      "linea": 48
+    },
+    {
+      "ruta": "Problema: «Crear» apagado dice qué falta",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationScreen.kt",
+      "linea": 147
+    },
+    {
+      "ruta": "Problema: el texto de lo que falta",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/domain/CreateReservationDraft.kt",
+      "linea": 51
+    },
+    {
+      "ruta": "Problema: «Horario lleno» con «Sobre-agendar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationScreen.kt",
+      "linea": 238
+    },
+    {
+      "ruta": "Problema: el botón Sobre-agendar",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationScreen.kt",
+      "linea": 243
+    },
+    {
+      "ruta": "Si aparece «Este servicio no tiene profesionistas configurados…»: servicio con profesionistas sin asignar",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/sections/DetailsSection.kt",
+      "linea": 182
+    },
+    {
+      "ruta": "Paso 4: con profesionistas, al elegir el servicio hay que volver a elegir horario",
+      "archivo": "app/src/main/java/com/avoqado/pos/reservations/presentation/create/CreateReservationViewModel.kt",
+      "linea": 270
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

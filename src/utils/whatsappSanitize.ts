@@ -1,16 +1,22 @@
 const URL_REGEX = /https?:\/\/\S+/g
+export const isWhatsappWamid = (value: unknown): value is string =>
+  typeof value === 'string' && /^wamid\.[A-Za-z0-9_+./=:-]{1,500}$/.test(value)
 // Strip ASCII control chars except whitespace we explicitly handle elsewhere.
 // The control characters in this class are exactly what we're sanitizing OUT
 // of WhatsApp payloads — flagging them as "unexpected" defeats the purpose.
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS_REGEX = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g
 
+export function stripWhatsappControls(input: string): string {
+  return (input || '').replace(CONTROL_CHARS_REGEX, '')
+}
+
 // Sanitize a string for use as a WhatsApp utility template variable.
 // Strips control chars, collapses whitespace, replaces URLs with [enlace],
 // caps at maxLen. Per spec §Sanitization of ALL template variables.
 export function sanitizeTemplateVar(input: string, maxLen: number): string {
   let s = input || ''
-  s = s.replace(CONTROL_CHARS_REGEX, '')
+  s = stripWhatsappControls(s)
   s = s.replace(/[\r\n]+/g, ' ')
   s = s.replace(/\s+/g, ' ').trim()
   s = s.replace(URL_REGEX, '[enlace]')

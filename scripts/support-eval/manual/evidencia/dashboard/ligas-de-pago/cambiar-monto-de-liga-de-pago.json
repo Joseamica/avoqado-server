@@ -1,0 +1,241 @@
+{
+  "pagina": "dashboard/ligas-de-pago/cambiar-monto-de-liga-de-pago",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 509,
+      "cita": "title: t('sidebar:salesMenu.paymentLinks', { defaultValue: 'Ligas de Pago' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 49,
+      "cita": "\"paymentLinks\": \"Ligas de Pago\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 516,
+      "cita": "{ title: t('sidebar:paymentLinksMenu.links'), url: 'payment-links', permission: 'payment-link:read' },"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 241,
+      "cita": "\"links\": \"Ligas de pago\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/PaymentLinks/PaymentLinks.tsx",
+      "linea": 455,
+      "cita": "<DropdownMenuItem onClick={() => openEdit(row.original.id)} className=\"cursor-pointer\">"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/PaymentLinks/PaymentLinks.tsx",
+      "linea": 457,
+      "cita": "{t('actions.edit')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 111,
+      "cita": "\"edit\": \"Editar\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/PaymentLinks/CreatePaymentLinkDialog.tsx",
+      "linea": 740,
+      "cita": "<h2 className=\"text-lg font-semibold\">{t('form.amount')}</h2>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 71,
+      "cita": "\"amount\": \"Monto\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/PaymentLinks/CreatePaymentLinkDialog.tsx",
+      "linea": 752,
+      "cita": "{t('form.fixed')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 73,
+      "cita": "\"fixed\": \"Fijo\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/PaymentLinks/CreatePaymentLinkDialog.tsx",
+      "linea": 769,
+      "cita": "<Label htmlFor=\"pl-amount\">{t('form.amountField')}</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 77,
+      "cita": "\"amountField\": \"Monto (MXN)\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/PaymentLinks/CreatePaymentLinkDialog.tsx",
+      "linea": 547,
+      "cita": "{t('form.save')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 61,
+      "cita": "\"save\": \"Guardar\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/PaymentLinks/CreatePaymentLinkDialog.tsx",
+      "linea": 405,
+      "cita": "await paymentLinkService.updatePaymentLink(venueId, editingLinkId!, updateData)"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/PaymentLinks/CreatePaymentLinkDialog.tsx",
+      "linea": 407,
+      "cita": "toast({ title: t('toasts.updated') })"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 119,
+      "cita": "\"updated\": \"Liga de pago actualizada\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payment-link:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 651
+    },
+    {
+      "permiso": "payment-link:create",
+      "archivo": "src/pages/PaymentLinks/PaymentLinks.tsx",
+      "linea": 454
+    },
+    {
+      "permiso": "payment-link:update",
+      "archivo": "avoqado-server/src/routes/dashboard/paymentLink.routes.ts",
+      "linea": 107
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: una archivada no se edita",
+      "archivo": "avoqado-server/src/services/dashboard/paymentLink.service.ts",
+      "linea": 1013
+    },
+    {
+      "ruta": "Paso 1: al editar abre directo en los detalles",
+      "archivo": "src/pages/PaymentLinks/CreatePaymentLinkDialog.tsx",
+      "linea": 95
+    },
+    {
+      "ruta": "Paso 2: Monto (MXN) sólo con Fijo",
+      "archivo": "src/pages/PaymentLinks/CreatePaymentLinkDialog.tsx",
+      "linea": 767
+    },
+    {
+      "ruta": "Paso 3: guardar se prende con título y monto",
+      "archivo": "src/pages/PaymentLinks/CreatePaymentLinkDialog.tsx",
+      "linea": 462
+    },
+    {
+      "ruta": "Paso 3: el servidor sólo cambia los campos de la liga (no el enlace)",
+      "archivo": "avoqado-server/src/services/dashboard/paymentLink.service.ts",
+      "linea": 1036
+    },
+    {
+      "ruta": "Problema: una liga de productos toma su total de los productos",
+      "archivo": "src/pages/PaymentLinks/CreatePaymentLinkDialog.tsx",
+      "linea": 349
+    },
+    {
+      "ruta": "Problema: con descuento pide discounts:apply",
+      "archivo": "avoqado-server/src/routes/dashboard/paymentLink.routes.ts",
+      "linea": 111
+    },
+    {
+      "ruta": "Problema: el candado de descuento",
+      "archivo": "avoqado-server/src/routes/dashboard/paymentLink.routes.ts",
+      "linea": 115
+    },
+    {
+      "ruta": "Problema: una sesión ya abierta cobra su propio monto",
+      "archivo": "avoqado-server/src/services/dashboard/paymentLink.service.ts",
+      "linea": 3961
+    },
+    {
+      "ruta": "Problema: otra sesión de una liga reutilizable lleva otra llave (podría cobrarse dos veces)",
+      "archivo": "avoqado-server/src/services/dashboard/paymentLink.service.ts",
+      "linea": 2750
+    },
+    {
+      "ruta": "Problema: columnas Pagos y Total cobrado",
+      "archivo": "src/pages/PaymentLinks/PaymentLinks.tsx",
+      "linea": 391
+    },
+    {
+      "ruta": "Problema: texto Pagos",
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 20
+    },
+    {
+      "ruta": "Problema: texto Total cobrado",
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 21
+    },
+    {
+      "ruta": "Problema: el error trae el texto del servidor",
+      "archivo": "src/pages/PaymentLinks/CreatePaymentLinkDialog.tsx",
+      "linea": 448
+    },
+    {
+      "ruta": "Problema: título Error",
+      "archivo": "src/locales/es/common.json",
+      "linea": 17
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3000 (develop)",
+    "fecha": "2026-11-12",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cambiar-monto-de-liga-de-pago/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cambiar-monto-de-liga-de-pago/2.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cambiar-monto-de-liga-de-pago/3.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cambiar-monto-de-liga-de-pago/4.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cambiar-monto-de-liga-de-pago/5.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/cambiar-monto-de-liga-de-pago/6.png"
+    ],
+    "filasCreadas": [
+      "PaymentLink cmwehmm9701jkwaldskxk2hf4 — liga de QA «QA soporte manual» creada desde el panel (*Crear liga* › *Aceptar un pago*, $580 fijo, shortCode pRTFDRFP); el panel la ligó al canal cmtwfpbf20092c9968yn0304r, que no cobra",
+      "ActivityLog cmwehmmhc01jmwalddfljlo7b — PAYMENT_LINK_CREATED · ActivityLog cmweho5vs01juwaldzzm2pod4 — PAYMENT_LINK_UPDATED ($580 → $850)"
+    ],
+    "nota": "Avoqado Full, OWNER del seed. La liga de QA se creó desde el panel (foto 2-3). Paso 1: ⋯ → *Editar* (fotos 4). Paso 2: *Monto* con *Fijo* y *Monto (MXN)* de 580 a 850 (foto 5). Paso 3: *Guardar* (PUT 200) dio «Liga de pago actualizada» y el renglón quedó en $850.00; el shortCode no cambió (mismo enlace)."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

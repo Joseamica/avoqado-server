@@ -4,10 +4,9 @@ description:
   Resumen general de la plataforma — módulos, para qué tipo de negocio sirve y qué trae cada plan (Free, Pro, Premium, Enterprise).
 category: general
 keywords:
-  - avoqado
+  - cuánto cuesta el plan
   - plataforma
   - negocio
-  - sirve
   - estetica
   - salon
   - barberia
@@ -79,14 +78,14 @@ Todo se administra desde el **Dashboard** (`dashboard.avoqado.io`) y se opera en
 
 ## Planes
 
-Precios de referencia en pesos mexicanos, sin IVA. Confirma siempre el precio vigente en `avoqado.io/pricing`.
+Precios de referencia en pesos mexicanos, sin IVA. Confirma siempre el precio vigente en la página de precios de Avoqado.
 
 | Plan           | Precio       | Qué agrega                                                                                                                                                                                                                                                                                                                                     |
 | -------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Free**       | $0           | POS, menú y órdenes, inventario básico, reportes diarios, asistente de IA (beta), 2 asientos.                                                                                                                                                                                                                                                  |
-| **Básico**     | $499 / mes   | Oferta de prueba (se ve sólo si aparece en el alta o en «Tu plan»). Todo Free + arqueo de caja, servicio de mesas y comandas, pantalla de cocina, reservaciones y citas, lealtad; usuarios sin tope; 1 sucursal. En el alta trae 30 días gratis con todo Pro que terminan solos, sin cobro; ese día se contrata el Básico con un clic. Sin clic, el negocio pasa a Free sin perder datos (los usuarios arriba del tope de Free se pausan hasta contratar) y puede contratarlo después. |
-| **Pro**        | $999 / mes   | Todo Free + reportes históricos y avanzados, bitácora de auditoría, IA y conexión MCP, lealtad y referidos, promociones, reservaciones y pedidos en línea, conciliación bancaria y saldo disponible, arqueo de caja, servicio de mesas, upsell, asientos ilimitados.                                                                           |
-| **Premium**    | $1,699 / mes | Todo Pro + **facturación CFDI 4.0**, contabilidad fiscal completa, inventario con costeo FIFO e inventario serializado, reorden automático, comisiones, control de asistencia, canales de delivery (Uber Eats, Rappi, DiDi), reglas de ruteo de terminales, hub LAN offline, upsell con IA, exportación de transacciones, soporte prioritario. |
+| **Básico**     | $499 / mes + IVA | Oferta de prueba (se ve sólo si aparece en el alta o en «Tu plan»). Todo Free + arqueo de caja, servicio de mesas y comandas, pantalla de cocina, reservaciones y citas, lealtad; usuarios sin tope; 1 sucursal. En el alta trae 30 días gratis con todo Pro que terminan solos, sin cobro; ese día se contrata el Básico con un clic. Sin clic, el negocio pasa a Free sin perder datos (los usuarios arriba del tope de Free se pausan hasta contratar) y puede contratarlo después. |
+| **Pro**        | $999 / mes + IVA | Todo Free + reportes históricos y avanzados, bitácora de auditoría, IA y conexión MCP, lealtad y referidos, promociones, reservaciones y pedidos en línea, conciliación bancaria y saldo disponible, arqueo de caja, servicio de mesas, upsell, asientos ilimitados.                                                                           |
+| **Premium**    | $1,699 / mes + IVA | Todo Pro + **facturación CFDI 4.0**, contabilidad fiscal completa, inventario con costeo FIFO e inventario serializado, reorden automático, comisiones, control de asistencia, canales de delivery (Uber Eats, Rappi, DiDi), reglas de ruteo de terminales, hub LAN offline, upsell con IA, exportación de transacciones, soporte prioritario. |
 | **Enterprise** | A la medida  | Todo Premium + marca blanca, integraciones por API y SLA de soporte.                                                                                                                                                                                                                                                                           |
 
 La vista gerencial de ingresos y el resumen del negocio están en todos los planes; la contabilidad **fiscal** (pólizas, balanza, estados

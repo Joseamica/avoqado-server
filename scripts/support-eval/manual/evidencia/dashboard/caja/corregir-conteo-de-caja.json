@@ -1,0 +1,230 @@
+{
+  "pagina": "dashboard/caja/corregir-conteo-de-caja",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 46,
+      "cita": "\"title\": \"Ventas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 158,
+      "cita": "\"shifts\": \"Turnos de caja\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 501,
+      "cita": "title: t('sidebar:routes.shifts'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 513,
+      "cita": "to: row.id,"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 128,
+      "cita": "\"title\": \"Arqueo de caja\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 170,
+      "cita": "\"button\": \"Corregir conteo\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Shift/components/CashReconciliationSummary.tsx",
+      "linea": 126,
+      "cita": "<Button variant=\"outline\" size=\"sm\" disabled={!countCorrection?.allowed} onClick={onCorrect}>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 172,
+      "cita": "\"amount\": \"Monto contado\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 173,
+      "cita": "\"reason\": \"Motivo\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Shift/components/CorrectCashCountDialog.tsx",
+      "linea": 58,
+      "cita": "const [amountText, setAmountText] = useState(String(countedCash))"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 175,
+      "cita": "\"preview\": \"El resultado pasa de {{before}} a {{after}}\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 180,
+      "cita": "\"save\": \"Guardar corrección\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 181,
+      "cita": "\"saved\": \"Conteo corregido\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Shift/components/CorrectCashCountDialog.tsx",
+      "linea": 91,
+      "cita": "toast({ title: t('detail.correctCount.saved') })"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "shifts:update",
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 576
+    },
+    {
+      "permiso": "shifts:update",
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 1066
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: Turnos de caja sólo sale con turnos prendidos",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 498
+    },
+    {
+      "ruta": "Antes: la ruta pide shifts:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 237
+    },
+    {
+      "ruta": "Antes: el arqueo sólo sale en un turno cerrado",
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 1060
+    },
+    {
+      "ruta": "Antes: el botón sólo sale con permiso y con conteo",
+      "archivo": "src/pages/Shift/components/CashReconciliationSummary.tsx",
+      "linea": 124
+    },
+    {
+      "ruta": "Problema: apagado, debajo la razón",
+      "archivo": "src/pages/Shift/components/CashReconciliationSummary.tsx",
+      "linea": 130
+    },
+    {
+      "ruta": "Problema: ejemplo de razón (con conteo, sin caja ligada)",
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 190
+    },
+    {
+      "ruta": "Problema: se prende con otro monto y motivo de 3 o más",
+      "archivo": "src/pages/Shift/components/CorrectCashCountDialog.tsx",
+      "linea": 112
+    },
+    {
+      "ruta": "Problema: mismo monto",
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 179
+    },
+    {
+      "ruta": "Problema: alguien lo cambió",
+      "archivo": "src/pages/Shift/components/CorrectCashCountDialog.tsx",
+      "linea": 102
+    },
+    {
+      "ruta": "Problema: texto de alguien lo cambió",
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 182
+    },
+    {
+      "ruta": "Problema: la lista de correcciones",
+      "archivo": "src/pages/Shift/components/CashReconciliationSummary.tsx",
+      "linea": 107
+    },
+    {
+      "ruta": "Problema: el monto de antes y el motivo",
+      "archivo": "src/pages/Shift/components/CashReconciliationSummary.tsx",
+      "linea": 110
+    },
+    {
+      "ruta": "Problema: texto «Corregido por»",
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 183
+    },
+    {
+      "ruta": "T11-10: el panel reintenta una vez cualquier petición tras un error de red, sin llave",
+      "archivo": "src/api.ts",
+      "linea": 98
+    },
+    {
+      "ruta": "T11-10: el reintento",
+      "archivo": "src/api.ts",
+      "linea": 101
+    },
+    {
+      "ruta": "T11-10: la corrección lleva el conteo y las correcciones que vio (el servidor no la aplica dos veces)",
+      "archivo": "src/pages/Shift/components/CorrectCashCountDialog.tsx",
+      "linea": 81
+    },
+    {
+      "ruta": "T11-10: con el mismo monto no se puede volver a guardar",
+      "archivo": "src/pages/Shift/components/CorrectCashCountDialog.tsx",
+      "linea": 66
+    },
+    {
+      "ruta": "T11-10: el historial de correcciones en Arqueo de caja",
+      "archivo": "src/pages/Shift/components/CashReconciliationSummary.tsx",
+      "linea": 127
+    },
+    {
+      "ruta": "T11-12: el historial muestra el monto de antes, no el que se puso; no prueba qué corrección quedó",
+      "archivo": "src/pages/Shift/components/CashReconciliationSummary.tsx",
+      "linea": 110
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3000 (develop 94cc3d0e8) por el panel de la copia en http://localhost:5900 (vite; mismos archivos que 1fe15c5 para esta página)",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/caja/corregir-conteo-de-caja/1-ventas-turnos-de-caja.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/caja/corregir-conteo-de-caja/2-arqueo-de-caja-corregir-conteo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/caja/corregir-conteo-de-caja/3-monto-contado-y-motivo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/caja/corregir-conteo-de-caja/4-resultado-pasa-de-a-guardar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/caja/corregir-conteo-de-caja/5-conteo-corregido.png"
+    ],
+    "filasCreadas": [
+      "Corrección de conteo cmwmmv8ak015bwaydmiy9uo8c sobre el Shift cmwmk2da800ukwayda8cibwsc — de $530.00 a $535.00, motivo «Jornada soporte: el conteo real era otro», source DASHBOARD"
+    ],
+    "nota": "Avoqado Full, OWNER del seed (Main Owner). El turno se cerró con conteo en la PAX (copia 2.13.2, $530, Faltante $5.00). *Ventas* › *Turnos de caja* (foto 1) → turno → *Arqueo de caja* → *Corregir conteo* (prendido, foto 2) → *Monto contado* viene con 530 (foto 3) → 535 y *Motivo* → «El resultado pasa de Faltante $5.00 a Cuadró» (foto 4) → *Guardar corrección*: un solo POST (200), «Conteo corregido» y en *Arqueo de caja* «Corregido por Main Owner · … antes $530.00 · «…»» (foto 5). La corrección de nota del 12-nov (servidor sin la ruta) ya no aplica: develop la trae."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -1,0 +1,151 @@
+{
+  "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 337,
+      "cita": "onClick = { if (!item.locked && !item.isPromotionLine) onItemTap(item) },"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 3070,
+      "cita": "text = \"Ver carrito\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2743,
+      "cita": "text = \"Cantidad\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2760,
+      "cita": "onUpdateQuantity(item.quantity - 1)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2781,
+      "cita": "onUpdateQuantity(item.quantity + 1)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2813,
+      "cita": "text = \"Nota del artículo\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
+      "linea": 807,
+      "cita": "text = \"Guardar nota\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2889,
+      "cita": "text = \"Eliminar artículo\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 690,
+      "cita": "if (value == SwipeToDismissBoxValue.EndToStart) {"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 620,
+      "cita": "contentDescription = \"Mas opciones\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 1114,
+      "cita": "title = \"Vaciar carrito\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2314,
+      "cita": "title = \"¿Vaciar carrito?\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2320,
+      "cita": "PrimaryButton(text = \"Vaciar\", onClick = {"
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "WINDOWS: la ventana abre maximizada",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Main.kt",
+      "linea": 98
+    },
+    {
+      "ruta": "WINDOWS: el tamaño de la ventana decide el diseño (WindowSizeClass del ancho real)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt",
+      "linea": 49
+    },
+    {
+      "ruta": "Diseño de tableta desde el ancho Medium (600 dp); más angosta, el de teléfono",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 159
+    },
+    {
+      "ruta": "WINDOWS: el renglón del carrito se arrastra (SwipeToDismissBox → anchoredDraggable, que en Compose 1.7.3 acepta también el mouse)",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 702
+    },
+    {
+      "ruta": "WINDOWS: la versión de Compose del escritorio",
+      "archivo": "desktop/pos/build.gradle.kts",
+      "linea": 13
+    },
+    {
+      "ruta": "Problema: una línea de promoción no se abre; se quita deslizando, con el aviso del combo",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1150
+    },
+    {
+      "ruta": "Problema: el aviso quita el combo completo",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1155
+    },
+    {
+      "ruta": "Problema: sin «Cantidad» en líneas por peso o de promoción",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2735
+    },
+    {
+      "ruta": "Si aparece «No se puede vaciar»: venta de vales con abono",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2302
+    },
+    {
+      "ruta": "Si aparece «No se puede vaciar»: su texto (VALES_CON_ABONO)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 141
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -391,8 +391,16 @@ async function findPlanProFeature(venueId: string) {
 /**
  * Assemble the full PlanState for a venue. Tolerant: a Stripe outage degrades to
  * nulls for the Stripe-derived fields but never throws (the card still renders).
+ *
+ * Las dos opciones son de la B (soporte por WhatsApp, C5); sin ellas, el panel no cambia.
+ * - `skipPauseOffer`: pauseOfferEligible = false SIN llamar a getVenueBaseTier ni a pauseBlocker (no lee ActivityLog).
+ * - `stripeTimeoutMs`: Stripe se consulta UNA vez, con ese tiempo máximo y sin reintentos. Si no contesta o falla, se degrada como
+ *   siempre (sin las fechas de Stripe) y el aviso del registro lleva sólo el nombre del error, nunca su mensaje.
  */
-export async function getPlanState(venueId: string): Promise<PlanState> {
+export async function getPlanState(
+  venueId: string,
+  options: { skipPauseOffer?: boolean; stripeTimeoutMs?: number } = {},
+): Promise<PlanState> {
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
     select: { id: true, stripeCustomerId: true, ...GRANDFATHER_SELECT },
@@ -437,12 +445,17 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
   let stripeSub: Awaited<ReturnType<typeof retrievePlanSubscription>> | null = null
   if (vf.stripeSubscriptionId) {
     try {
-      stripeSub = await retrievePlanSubscription(vf.stripeSubscriptionId)
+      stripeSub = options.stripeTimeoutMs
+        ? await retrievePlanSubscription(vf.stripeSubscriptionId, { timeoutMs: options.stripeTimeoutMs })
+        : await retrievePlanSubscription(vf.stripeSubscriptionId)
     } catch (error) {
       logger.warn('getPlanState: failed to retrieve Stripe subscription; degrading to nulls', {
         venueId,
         subscriptionId: vf.stripeSubscriptionId,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        // La B: el nombre y el tipo de Stripe (`StripeConnectionError`), nunca el mensaje
+        ...(options.stripeTimeoutMs
+          ? { error: (error as Error)?.name, type: (error as { type?: unknown })?.type }
+          : { error: error instanceof Error ? error.message : 'Unknown error' }),
       })
     }
   }
@@ -491,12 +504,14 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
       firstChargeAt: finDePruebaDiferible(vf, vf.feature.code, now.getTime(), MARGEN_OFERTA_MS)?.toISOString() ?? null,
     }
   }
-  const pauseOfferEligible = Boolean(
-    stripeSub &&
-      origin.kind === 'CLASSIC' &&
-      (await getVenueBaseTier(venueId)) !== null &&
-      (await pauseBlocker(venueId, stripeSub)) === null,
-  )
+  const pauseOfferEligible =
+    !options.skipPauseOffer &&
+    Boolean(
+      stripeSub &&
+        origin.kind === 'CLASSIC' &&
+        (await getVenueBaseTier(venueId)) !== null &&
+        (await pauseBlocker(venueId, stripeSub)) === null,
+    )
   const basicPlan = await basicPlanOf(venueId, now)
   const basicOffer = await basicOfferOf(basicPlan, grandfathered, origin, stripeSub, now)
 

@@ -1,0 +1,25 @@
+{
+  "huella": "6249d8116b98f8806d7ed83a1e7b18cad15ba1d154ac4d24687c758d4c6c9673",
+  "ajuste": {
+    "completo": true,
+    "faltan": 0,
+    "tecnicos": 0,
+    "total": 106,
+    "aciertos": 106,
+    "familiaTotal": 59,
+    "familiaAciertos": 59,
+    "aprobado": true
+  },
+  "ciego": {
+    "completo": true,
+    "faltan": 0,
+    "tecnicos": 0,
+    "total": 30,
+    "aciertos": 30,
+    "familiaTotal": 21,
+    "familiaAciertos": 21,
+    "aprobado": true,
+    "sha256": "2fe24d08d43ea1791e52f8b43e2afc6d05582d5f4230dc7f7d6e3f78bc655fdf"
+  },
+  "fecha": "2026-11-19T05:59:14.255Z"
+}

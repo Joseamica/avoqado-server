@@ -1,4 +1,4 @@
-import { OrgRole, StaffRole, VenueStatus } from '@prisma/client'
+import { OrgRole, StaffRole, VenueStatus, type Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { getUserAccess, createAccessCache } from '@/services/access/access.service'
 import type { UserAccess } from '@/services/access/access.service'
@@ -38,8 +38,8 @@ export interface McpScope {
  * disabled must LOSE the global bypass. Without them, a revoked superadmin still resolves to all-venues/all-orgs
  * access via the MCP. (Mirror of the getUserAccess fix.)
  */
-export async function isActiveSuperAdmin(staffId: string): Promise<boolean> {
-  const superAdminVenue = await prisma.staffVenue.findFirst({
+export async function isActiveSuperAdmin(staffId: string, db: Pick<Prisma.TransactionClient, 'staffVenue'> = prisma): Promise<boolean> {
+  const superAdminVenue = await db.staffVenue.findFirst({
     where: { staffId, role: StaffRole.SUPERADMIN, active: true, staff: { active: true } },
     select: { id: true },
   })

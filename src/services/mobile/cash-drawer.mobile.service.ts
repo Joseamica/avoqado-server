@@ -134,7 +134,7 @@ function parseOpenedAt(raw: unknown): Date | null {
  * dashboard («Caja física») decía "Abierta por Staff" (visto en /full-testing 27-ago). Si viene un
  * nombre real se respeta; si no, se resuelve del `Staff` y sólo en último caso queda 'Staff'.
  */
-async function resolveMobileStaffName(staffId: string | null | undefined, provided?: string | null): Promise<string> {
+export async function resolveMobileStaffName(staffId: string | null | undefined, provided?: string | null): Promise<string> {
   const given = (provided || '').trim()
   if (given && given !== 'Staff') return given
   if (!staffId) return given || 'Staff'

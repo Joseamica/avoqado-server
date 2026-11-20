@@ -1,0 +1,151 @@
+{
+  "app": "android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "superficies": [
+    {
+      "id": "nav:\"activate-reservations\"",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 649
+    },
+    {
+      "id": "nav:\"calendar/settings\"",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 635
+    },
+    {
+      "id": "nav:\"class-sessions/{sessionId}\"",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 754
+    },
+    {
+      "id": "nav:\"class-sessions/{sessionId}/edit\"",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 765
+    },
+    {
+      "id": "nav:\"my-class-now\"",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 644
+    },
+    {
+      "id": "nav:\"reservations/list\"",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 680
+    },
+    {
+      "id": "nav:\"reservations/{reservationId}\"",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 773
+    },
+    {
+      "id": "nav:\"reservations/{reservationId}/cancel\"",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 794
+    },
+    {
+      "id": "nav:\"reservations/{reservationId}/reschedule\"",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 802
+    },
+    {
+      "id": "nav:\"table-order\"",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 573
+    },
+    {
+      "id": "nav:\"waitlist\"",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 658
+    },
+    {
+      "id": "nav:EXCHANGE_ROUTE",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 591
+    },
+    {
+      "id": "nav:MainTab.CALENDAR.route",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 618
+    },
+    {
+      "id": "nav:MainTab.CHECKOUT.route",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 559
+    },
+    {
+      "id": "nav:MainTab.INVENTORY.route",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 585
+    },
+    {
+      "id": "nav:MainTab.MORE.route",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 608
+    },
+    {
+      "id": "nav:MainTab.NOTIFICATIONS.route",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 593
+    },
+    {
+      "id": "nav:MainTab.TABLES.route",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 564
+    },
+    {
+      "id": "nav:MainTab.TRANSACTIONS.route",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 588
+    },
+    {
+      "id": "nav:route = \"class-sessions/create?date={date}&time={time}\"",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 735
+    },
+    {
+      "id": "nav:route = \"reservations/create?date={date}&time={time}&walkin={walkin}&promoteWaitlistId={promoteWaitlistId}&prefillCustomerId={prefillCustomerId}&prefillGuestName={prefillGuestName}&prefillPartySize={prefillPartySize}&prefillStart={prefillStart}\"",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 686
+    },
+    {
+      "id": "nav:route = \"reservations/edit/{editingId}\"",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 786
+    },
+    {
+      "id": "tab:CALENDAR",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 62
+    },
+    {
+      "id": "tab:CHECKOUT",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 27
+    },
+    {
+      "id": "tab:INVENTORY",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 34
+    },
+    {
+      "id": "tab:MORE",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 55
+    },
+    {
+      "id": "tab:NOTIFICATIONS",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 48
+    },
+    {
+      "id": "tab:TABLES",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 71
+    },
+    {
+      "id": "tab:TRANSACTIONS",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 41
+    }
+  ]
+}

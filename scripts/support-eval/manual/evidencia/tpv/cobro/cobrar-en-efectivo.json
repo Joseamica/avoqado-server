@@ -1,0 +1,148 @@
+{
+  "pagina": "tpv/cobro/cobrar-en-efectivo",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 850,
+      "cita": "label = \"Pago rápido\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/AmountInputBottomSheet.kt",
+      "linea": 153,
+      "cita": "text = \"Cantidad personalizada\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/CustomKeyboard.kt",
+      "linea": 143,
+      "cita": "icon = Icons.Default.Check"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/ReviewScreen.kt",
+      "linea": 93,
+      "cita": "text = \"Saltar\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/TipScreen.kt",
+      "linea": 214,
+      "cita": "text = \"Sin propina\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 362,
+      "cita": "text = \"Método de pago\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 464,
+      "cita": "text = \"Efectivo\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 446,
+      "cita": "showCashConfirmationDialog = true"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 555,
+      "cita": "text = \"Confirmar pago en efectivo\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 581,
+      "cita": "Text(\"Confirmar\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1291,
+      "cita": "PaymentFlowOrigin.FAST -> SuccessRouting(text = \"Nuevo Pago\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPaySuccessContent.kt",
+      "linea": 106,
+      "cita": "newPaymentLabel: String = \"Nuevo Pago\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 3168
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "PAX: si registrar el efectivo falla, el cobro entra a la cola de la terminal y se ve el recibo",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 5968
+    },
+    {
+      "afirmacion": "PAX: con la fila en la cola, la pantalla pasa al recibo (Success)",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 1201
+    },
+    {
+      "afirmacion": "Nexgo: el efectivo sin red queda en la cola de la terminal",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 905
+    },
+    {
+      "afirmacion": "La cola vive en Room (PaymentQueueRepositoryImpl)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/repository/PaymentQueueRepositoryImpl.kt",
+      "linea": 43
+    },
+    {
+      "afirmacion": "La cola se envía sola al volver la conexión (restricción NetworkType.CONNECTED)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/data/workers/PaymentSyncWorker.kt",
+      "linea": 35
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Problema: «Cancelar» cierra la confirmación de efectivo",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 586
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "PAX A910S del laboratorio del Alien (serial 2841548417, terminal AVQD-2841548417 de Avoqado Full)",
+    "version": "2.16.0-sandbox (125), copia de QA com.jaac.avoqado_tpv.sandbox.soportewa compilada en v2.16.0 (031f14db), Blumon de pruebas, contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
+    "apkSha256": "001675e37809b69d6290341cf74f3601306fc9df2072f1dc0f271436710fc401",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-en-efectivo/1-inicio-pago-rapido.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-en-efectivo/2-cantidad-personalizada.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-en-efectivo/3-calificacion-saltar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-en-efectivo/4-propina-sin-propina.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-en-efectivo/5-metodo-de-pago-efectivo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-en-efectivo/6-confirmar-pago-en-efectivo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-en-efectivo/7-recibo-nuevo-pago.png"
+    ],
+    "filasCreadas": [
+      "Order cmwmk7uqg00uvwaydosr5cq86 — FAST-1795032859479, Pago rápido",
+      "Payment cmwmk7vej00uxwayddxwfvz9z — $25.00 + $3.00 de propina, CASH, turno cmwmk2da800ukwayda8cibwsc"
+    ],
+    "nota": "Avoqado Full, Admin Venue 1 (PIN del seed). Pago rápido → Cantidad personalizada $25 → palomita → Calificación *Saltar* → Propina (ahí se escribió $3 con *Monto personalizado*; el mismo cobro sirve a la guía de propina) → Método de pago *Efectivo* → *Confirmar pago en efectivo* → *Confirmar* → recibo con *Nuevo Pago*. Un solo pago registrado ($25 + $3 de propina). El paso 1 usa la foto del inicio de abrir-y-cerrar-caja (la misma pantalla)."
+  },
+  "codex": {
+    "lote": 1,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

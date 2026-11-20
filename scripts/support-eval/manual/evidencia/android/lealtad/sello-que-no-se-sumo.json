@@ -1,0 +1,256 @@
+{
+  "pagina": "android/lealtad/sello-que-no-se-sumo",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 192,
+      "cita": "text = \"Venta nueva\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 209,
+      "cita": "text = customerName ?: \"Agregar cliente\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 496,
+      "cita": "showCustomersSheet = true"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 746,
+      "cita": "onCustomerSelected = { customer ->"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 491,
+      "cita": "customerName = if (customerAttachSending) \"Agregando...\" else attachedCustomerName,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 1703,
+      "cita": "_customerAttachResult.value = \"Cliente agregado: $customerName\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 1634,
+      "cita": "ligarClienteAVentaEncolada(encolada.colaDelCobro, customerId, customerName)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 1672,
+      "cita": "is ColaDelCobro.Outbox -> syncOutbox.pagoDelServidor(cola.intentId)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 1571,
+      "cita": "_renglonDelSello.value = RenglonDelSello.desde(sello)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 365,
+      "cita": "text = renglonDelSello.texto,"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1937
+    },
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1945
+    },
+    {
+      "permiso": "customers:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1588
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "LOYALTY_PROGRAM",
+      "archivo": "avoqado-server/src/services/shared/loyaltyOnLateCustomer.ts",
+      "linea": 466
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Si aparece «Sin conexión: agrégalo cuando vuelva la red…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/domain/SelloDeLaVenta.kt",
+      "linea": 19
+    },
+    {
+      "afirmacion": "Si aparece: el mensaje sale cuando la liga falla por red",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 1718
+    },
+    {
+      "afirmacion": "Si aparece «Esta venta aún no se sincroniza…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/domain/SelloDeLaVenta.kt",
+      "linea": 23
+    },
+    {
+      "afirmacion": "Si aparece: «Venta sincronizada» en la misma pantalla",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 240
+    },
+    {
+      "afirmacion": "Si aparece «El sello se suma al sincronizar»: venta encolada que ya lleva al cliente",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 1560
+    },
+    {
+      "afirmacion": "Si aparece: texto «El sello se suma al sincronizar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/domain/SelloDeLaVenta.kt",
+      "linea": 17
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: tras pedir cancelar, si la terminal cobró, sale «La terminal sí cobró este pago…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 515
+    },
+    {
+      "ruta": "Antes: texto «La terminal sí cobró este pago: la venta queda pagada.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 233
+    },
+    {
+      "ruta": "Antes: ese camino aplica el cobro tras cancelar",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 5156
+    },
+    {
+      "ruta": "Antes: el éxito guarda el paymentId que traiga (puede ser null tras una reconsulta sin red)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 4222
+    },
+    {
+      "ruta": "Antes: sin paymentId la liga va al último pago del mismo importe",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 1650
+    },
+    {
+      "ruta": "Antes: el camino directo de tarjeta sólo da éxito con paymentId (si no, consulta)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/TerminalPaymentService.kt",
+      "linea": 765
+    },
+    {
+      "ruta": "Antes: el éxito sin paymentId sólo sale de una consulta sobre un cobro ya marcado (camino no directo)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/TerminalPaymentService.kt",
+      "linea": 1006
+    },
+    {
+      "ruta": "Antes: ese éxito sin paymentId",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/TerminalPaymentService.kt",
+      "linea": 1007
+    },
+    {
+      "ruta": "Antes: efectivo directo — el SERVIDOR siempre devuelve el id del pago (`CashPaymentResponse.paymentId: string`)",
+      "archivo": "avoqado-server/src/services/mobile/order.mobile.service.ts",
+      "linea": 3484
+    },
+    {
+      "ruta": "Antes: efectivo directo — la app lo lee de `payment`/`data`",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/OrderRepository.kt",
+      "linea": 298
+    },
+    {
+      "ruta": "Si aparece «Cobro sin confirmar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 938
+    },
+    {
+      "ruta": "Si aparece «Cancelando el cobro…» o «Cancelación pendiente»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 81
+    },
+    {
+      "ruta": "Si aparece «Cancelación pendiente»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 82
+    },
+    {
+      "ruta": "Si aparece «¿Se cobró …?»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 135
+    },
+    {
+      "ruta": "Si aparece «✓ +1 sello»",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/domain/SelloDeLaVenta.kt",
+      "linea": 12
+    },
+    {
+      "ruta": "Si aparece la tarjeta «+1 sello»",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/domain/SelloDeLaVenta.kt",
+      "linea": 29
+    },
+    {
+      "ruta": "Si aparece «Ya recibió su sello de hoy» (DAILY_LIMIT)",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/domain/SelloDeLaVenta.kt",
+      "linea": 124
+    },
+    {
+      "ruta": "Si aparece «Esta venta ya sumó su sello a otro cliente»",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/domain/SelloDeLaVenta.kt",
+      "linea": 123
+    },
+    {
+      "ruta": "Si aparece «Pasaron más de 24 h…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/domain/SelloDeLaVenta.kt",
+      "linea": 125
+    },
+    {
+      "ruta": "Si aparece «Esta venta no está pagada completa…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/domain/SelloDeLaVenta.kt",
+      "linea": 126
+    },
+    {
+      "ruta": "Servidor: tope de sellos por día",
+      "archivo": "avoqado-server/src/services/shared/loyaltyOnLateCustomer.ts",
+      "linea": 485
+    },
+    {
+      "ruta": "Servidor: NOT_PAID también con reembolso o reverso",
+      "archivo": "avoqado-server/src/services/shared/loyaltyOnLateCustomer.ts",
+      "linea": 125
+    },
+    {
+      "ruta": "Servidor: 24 h desde que se saldó",
+      "archivo": "avoqado-server/src/services/shared/loyaltyOnLateCustomer.ts",
+      "linea": 135
+    },
+    {
+      "ruta": "Servidor: plan, programa y sellos prendidos",
+      "archivo": "avoqado-server/src/services/shared/loyaltyOnLateCustomer.ts",
+      "linea": 468
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 9,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

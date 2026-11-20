@@ -1,0 +1,254 @@
+{
+  "pagina": "android/inventario/registrar-merma",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 14,
+      "cita": "const val TITULO = \"Registrar merma\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 736,
+      "cita": "label = TextosMerma.TITULO,"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 740,
+      "cita": "onClick = { showLogWaste = true },"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/presentation/InventoryScreen.kt",
+      "linea": 603,
+      "cita": "onRegistrarMerma = if (viewModel.canLogWaste) ({ viewModel.abrirMerma(null) }) else null,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 19,
+      "cita": "const val BUSCAR = \"Busca por nombre o SKU\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/presentation/LogWasteScreen.kt",
+      "linea": 147,
+      "cita": "placeholder = TextosMerma.BUSCAR,"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 22,
+      "cita": "const val CANTIDAD = \"Cantidad\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/presentation/LogWasteScreen.kt",
+      "linea": 159,
+      "cita": "Seccion(TextosMerma.CANTIDAD)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/presentation/LogWasteScreen.kt",
+      "linea": 175,
+      "cita": "Seccion(TextosMerma.MOTIVO)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/WasteReason.kt",
+      "linea": 20,
+      "cita": "EXPIRED(\"EXPIRED\", \"Caducó\"),"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/WasteReason.kt",
+      "linea": 26,
+      "cita": "OTHER(\"OTHER\", \"Otro\", exigeNota = true),"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 26,
+      "cita": "const val NOTA_OBLIGATORIA = \"Escribe qué pasó (obligatoria con «Otro»)\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 27,
+      "cita": "const val REGISTRAR = \"Registrar\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 50,
+      "cita": "const val CONFIRMAR_TITULO = \"¿Registrar merma?\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 52,
+      "cita": "const val CONFIRMAR = \"Confirmar\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 54,
+      "cita": "const val REGISTRADA = \"¡Merma registrada!\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/presentation/LogWasteViewModel.kt",
+      "linea": 383,
+      "cita": "SubidaDeMerma.SUBIO -> AvisoDeMerma(TextosMerma.REGISTRADA) to true"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 109,
+      "cita": "const val IMPRIMIR_COMPROBANTE = \"Imprimir comprobante\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/presentation/LogWasteScreen.kt",
+      "linea": 136,
+      "cita": "Text(TextosMerma.IMPRIMIR_COMPROBANTE)"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "inventory:log-waste",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 105
+    },
+    {
+      "permiso": "inventory:log-waste",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3096
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Si aparece «Sin conexión: la merma se guarda en este aparato y se sube sola.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 43
+    },
+    {
+      "afirmacion": "Si aparece: sin red el aviso es «Merma guardada · Se subirá al recuperar la conexión.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/presentation/LogWasteViewModel.kt",
+      "linea": 381
+    },
+    {
+      "afirmacion": "Si aparece: la fila queda en disco antes de subir",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/presentation/LogWasteViewModel.kt",
+      "linea": 420
+    },
+    {
+      "afirmacion": "Si aparece: sin catálogo guardado no hay qué buscar",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 42
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: sin permiso sale apagada con «Pídele acceso a tu gerente»",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 15
+    },
+    {
+      "ruta": "Si aparece: plan: se guarda y sube cuando se active",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 47
+    },
+    {
+      "ruta": "Si aparece: plan: «Merma guardada · Se subirá cuando tu negocio active el Plan Premium.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 57
+    },
+    {
+      "ruta": "Si aparece: productos que no aparecen",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 30
+    },
+    {
+      "ruta": "Si aparece: rechazo → «Mermas por subir»",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 69
+    },
+    {
+      "ruta": "Si aparece: «Mermas por subir» en Más cuando hay algo",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 748
+    },
+    {
+      "ruta": "Si aparece: Descartar desde «Mermas por subir»",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 82
+    },
+    {
+      "ruta": "Si aparece: «Se está subiendo»",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 68
+    },
+    {
+      "ruta": "Si aparece: «Merma guardada»",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 55
+    },
+    {
+      "ruta": "Si aparece: el aviso «Se está subiendo» sigue hasta el desenlace",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/presentation/LogWasteViewModel.kt",
+      "linea": 386
+    },
+    {
+      "ruta": "Si aparece: «Incluido en el Plan Premium»",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/domain/TextosMerma.kt",
+      "linea": 16
+    },
+    {
+      "ruta": "Si aparece: con el plan bloqueado se guarda y no sube",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/presentation/LogWasteViewModel.kt",
+      "linea": 380
+    },
+    {
+      "ruta": "Si aparece: debajo dice qué hacer con cada producto",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/presentation/LogWasteScreen.kt",
+      "linea": 345
+    },
+    {
+      "ruta": "Problema: la cola sólo toma las filas de la sesión actual (staffId)",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/data/PendingWasteDao.kt",
+      "linea": 96
+    },
+    {
+      "ruta": "Problema: con otra sesión la fila vuelve a esperar a su dueño",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/data/WasteSyncCoordinator.kt",
+      "linea": 325
+    },
+    {
+      "ruta": "Problema: el relevo intenta subir lo suyo antes, sin esperar",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuViewModel.kt",
+      "linea": 333
+    },
+    {
+      "ruta": "Problema: «Mermas por subir» marca las de otra persona",
+      "archivo": "app/src/main/java/com/avoqado/pos/inventory/waste/presentation/PendingWasteScreen.kt",
+      "linea": 129
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 7,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

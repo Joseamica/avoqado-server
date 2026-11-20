@@ -1,0 +1,303 @@
+{
+  "pagina": "windows/cobro/cobrar-con-el-teclado",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 29,
+      "cita": "label = \"Cobrar\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 674,
+      "cita": "Key.F12,"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 678,
+      "cita": "runPrimaryAction(closePhoneCart = true)"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 457,
+      "cita": "text = primaryActionLabel ?: \"Cobrar ${cartState.totalDisplay}\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/RatingScreen.kt",
+      "linea": 91,
+      "cita": "text = \"¿Cómo fue tu experiencia?\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/RatingScreen.kt",
+      "linea": 55,
+      "cita": "AtajoDeTeclado(Key.F12) { onSkip() }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/RatingScreen.kt",
+      "linea": 121,
+      "cita": "Text(\"Omitir\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 138,
+      "cita": "text = \"Propina\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 119,
+      "cita": "AvoqadoModalBottomSheet("
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/AvoqadoModalBottomSheet.kt",
+      "linea": 76,
+      "cita": "BarreraDeAtajos()"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 121,
+      "cita": "AtajoDeTeclado(Key.F5, activo = metodosHabilitados) {"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 124,
+      "cita": "efectivoConTotal = true"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 557,
+      "cita": "var inputCents by remember { mutableIntStateOf(if (conTotal) totalCents else 0) }"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 621,
+      "cita": "text = \"Monto recibido\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 599,
+      "cita": "if (enWindows && e.key == Key.F5 && !conModificador) {"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 601,
+      "cita": "totalSugerido -> onConfirm(totalCents)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 591,
+      "cita": "val alcanza = inputCents >= totalCents"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 602,
+      "cita": "alcanza -> onConfirm(inputCents)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 560,
+      "cita": "inputCents = montoConTecla(if (totalSugerido) 0 else inputCents, caracter, borrar) ?: return false"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 539,
+      "cita": "caracter != null && caracter in '0'..'9' -> if (cents < 10_000_000) cents * 10 + (caracter - '0') else cents"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 645,
+      "cita": "text = formatMoney(inputCents / 100.0),"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 665,
+      "cita": "text = \"F5 otra vez: exacto · o teclea lo que te dieron\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 130,
+      "cita": "AtajoDeTeclado(Key.F4, activo = metodosHabilitados && !terminalsUnavailable && !saldoSinActualizar) { if (metodosVigentes) onMethodSelected(PaymentMethod.CARD) }"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TerminalSelectionScreen.kt",
+      "linea": 96,
+      "cita": "text = \"Seleccionar terminal\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TerminalSelectionScreen.kt",
+      "linea": 74,
+      "cita": "val primera = terminals.firstOrNull()?.takeIf { sinLista == null }"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TerminalSelectionScreen.kt",
+      "linea": 75,
+      "cita": "AtajoDeTeclado(Key.F4, activo = enLinea && primera != null) { primera?.let { onTerminalSelected(it.terminalId) } }"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 174,
+      "cita": "AtajoDeTeclado(Key.Escape) { onDone() }"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 192,
+      "cita": "text = \"Venta nueva\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 131,
+      "cita": "AtajoDeTeclado(Key.Escape) { onCancel() }"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 158,
+      "cita": "TeclaDeAtajo(\"Esc\", Modifier.padding(end = AvoqadoTheme.spacing.sm))"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 164,
+      "cita": ".clickable(onClick = onCancel),"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 272,
+      "cita": "onCancel = cancelarElCobro,"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 174,
+      "cita": "if (viewModel.descartarApartadosDeEstaVenta()) salirSinCobrar()"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 971
+    },
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1918
+    },
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1978
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "WINDOWS: las teclas sólo se registran en escritorio (LocalEsEscritorio)",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/AtajosDeTeclado.kt",
+      "linea": 49
+    },
+    {
+      "ruta": "WINDOWS: desktop/ pone LocalEsEscritorio = true",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Main.kt",
+      "linea": 95
+    },
+    {
+      "ruta": "WINDOWS: la ventana pasa a los atajos lo que la pantalla no usó",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Main.kt",
+      "linea": 113
+    },
+    {
+      "ruta": "Problema: F12 sólo con productos y nada abierto encima (búsqueda, ¿Algo más?, vale emitiéndose)",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 676
+    },
+    {
+      "ruta": "Problema: con una hoja, un diálogo o un aviso encima (BarreraDeAtajos), las teclas de atajo de abajo no responden",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/AtajosDeTeclado.kt",
+      "linea": 67
+    },
+    {
+      "ruta": "Problema: en Monto recibido, Enter no cobra en Windows (sinTeclasDeClic se lo come)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 585
+    },
+    {
+      "ruta": "Problema: sinTeclasDeClic = Enter y Espacio no pican el control",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/AtajosDeTeclado.kt",
+      "linea": 83
+    },
+    {
+      "ruta": "Problema: F4 apagada sin terminales conectadas (la fila dice «No hay terminales conectadas · Reintentar»)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 321
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado; sin pantalla táctil ni segundo monitor)",
+    "version": "2.25.41-escritorio: paquete de prueba Avoqado.POS.Prueba armado del sourceRef c07a2bbe con :pos:empaquetarWindows (avq-verify en la nube), en %TEMP%\\avq-tactil-soporte-windows con datos propios, contra el segundo SERVIDOR de QA del 3005 (base desechable avoqado_jornada_vuelta2, llaves de tarjetas de regalo de prueba) por Tailscale; sesión owner@owner.com (Propietario) en Avoqado Full de esa base. Terminal: PAX con la copia de QA com.jaac.avoqado_tpv.sandbox.soportewin 2.22.0-sandbox (avoqado-tpv 8db3c1d3, sha256 dba5dd4d…ac8f), Blumon de pruebas",
+    "apkSha256": "2d24ce533eaf065e54305d0603837bf854bcc68f421c1459e5ff0d95d88ff4bc",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/01-sw28-carrito-15.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/02-sw29-f12-calificacion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/03-sw30-f12-omitir-propina.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/04-sw31-f5-en-propina.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/05-sw37-cobro-con-propina.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/06-sw38-f5-monto-recibido.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/07-sw39-enter-no-cobra.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/08-sw40-f5-cobrado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/09-sw27-esc-venta-nueva.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/10-sw42-f4-sin-terminales.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/11-sw43-esc-cierra-cobro.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/12-sw130-cobrar-con-terminal-f4.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/13-sw131-f4-seleccionar-terminal.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/14-sw132-esc-regresa.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/15-v2-12-seleccionar-terminal.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/16-v2-13-esperando.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-el-teclado/17-v2-14-pos-tras-cobro.png"
+    ],
+    "filasCreadas": [
+      "Vuelta 1: Order cmwmkqlg900yswaydkg943jt3 (av-db-25, Avoqado Empty) cobrada con F5 + F5",
+      "Vuelta 2: el cobro con tarjeta FAST-1795049207657 de cobrar-con-terminal, mandado con F4 + F4"
+    ],
+    "nota": "Vuelta 1 (servidor del 3000): F12 = Cobrar; en ¿Cómo fue tu experiencia? F12 = Omitir; en Propina F5 no hace nada; F5 abre Monto recibido con el total; Enter no cobra; F5 otra vez cobra; Esc = Venta nueva; en el cobro Esc = la X; con «No hay terminales conectadas» F4 no hace nada. Vuelta 2 (fotos 15-17): en el cobro F4 abre *Seleccionar terminal* y la primera trae la etiqueta F4; **F4 otra vez la manda a la primera terminal** («Esperando respuesta de la terminal»), y el cobro terminó en «$10.00 Tarjeta». Trampa del control remoto, no de la app: un SendKeys mientras el menú de iconos ocultos de Windows tenía el foco no llegó al POS."
+  },
+  "codex": {
+    "lote": 2,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

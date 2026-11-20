@@ -1,0 +1,380 @@
+{
+  "pagina": "dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1277,
+      "cita": "title: t('sidebar:customersMenu.title'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 13,
+      "cita": "\"title\": \"Clientes\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 772,
+      "cita": "title: t('sidebar:customersMenu.giftCards', { defaultValue: 'Tarjetas de regalo' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 20,
+      "cita": "\"giftCards\": \"Tarjetas de regalo\""
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/GiftCards/components/GiftCardsList.tsx",
+      "linea": 163,
+      "cita": "placeholder={t('list.searchPlaceholder')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 107,
+      "cita": "\"searchPlaceholder\": \"Buscar por últimos 4, nombre, teléfono o correo\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/GiftCards/components/GiftCardsList.tsx",
+      "linea": 269,
+      "cita": "onRowClick={abrir}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 673,
+      "cita": "<h3 className=\"text-sm font-semibold\">{t('actions.title')}</h3>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 172,
+      "cita": "\"title\": \"Acciones del gerente\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 695,
+      "cita": "{t('actions.adjust.button')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 189,
+      "cita": "\"button\": \"Ajustar saldo\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 264,
+      "cita": "{t(d === 'INCREMENT' ? 'actions.adjust.increment' : 'actions.adjust.decrement')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 193,
+      "cita": "\"increment\": \"Sumar saldo\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 194,
+      "cita": "\"decrement\": \"Quitar saldo\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 270,
+      "cita": "<Label htmlFor=\"gift-adjust-amount\">{t('actions.adjust.amount')}</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 195,
+      "cita": "\"amount\": \"Monto\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 159,
+      "cita": "<p className=\"text-sm font-medium\">{t('actions.reason')}</p>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 174,
+      "cita": "\"reason\": \"Motivo\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/GiftCards/giftCardText.ts",
+      "linea": 223,
+      "cita": "if (p.nota.trim().length < 5) return { key: 'actions.adjust.errors.note' }"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 242,
+      "cita": "{t(envio.enDuda ? 'actions.retry' : 'actions.adjust.confirm')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 196,
+      "cita": "\"confirm\": \"Ajustar\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 701,
+      "cita": "{t('actions.block.button')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 206,
+      "cita": "\"button\": \"Bloquear\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 208,
+      "cita": "\"description\": \"Nadie podrá pagar con ella hasta que la desbloquees. El saldo no cambia.\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 376,
+      "cita": "{t(envio.enDuda ? 'actions.retry' : `actions.${clave}.confirm`)}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 209,
+      "cita": "\"confirm\": \"Bloquear\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/GiftCards/giftCardText.ts",
+      "linea": 231,
+      "cita": "if (p.motivo === 'OTHER' && p.nota.trim().length < 5) return { key: 'actions.errors.noteForOther' }"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 59,
+      "cita": "\"OTHER\": \"Otro motivo\""
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 707,
+      "cita": "{t('actions.unblock.button')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 213,
+      "cita": "\"button\": \"Desbloquear\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 323,
+      "cita": "const error = validarMotivoYNota({ motivo, nota })"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 376,
+      "cita": "{t(envio.enDuda ? 'actions.retry' : `actions.${clave}.confirm`)}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 216,
+      "cita": "\"confirm\": \"Desbloquear\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 713,
+      "cita": "{t('actions.replace.button')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 220,
+      "cita": "\"button\": \"Reponer código\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 493,
+      "cita": "<Label htmlFor=\"gift-replace-folio\">{t('actions.replace.folio')}</Label>"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 223,
+      "cita": "\"folio\": \"Folio de la compra (número de cuenta)\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 468,
+      "cita": "{t(envio.enDuda ? 'actions.retry' : 'actions.replace.confirm')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 225,
+      "cita": "\"confirm\": \"Reponer código\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 476,
+      "cita": "<p className=\"text-sm text-muted-foreground\">{t('actions.replace.newCodeOnce')}</p>"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 231,
+      "cita": "\"newCodeOnce\": \"Anótalo o entrégalo ahora: por seguridad no lo volverás a ver aquí.\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "giftCards:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 712
+    },
+    {
+      "permiso": "giftCards:manage",
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 671
+    },
+    {
+      "permiso": "giftCards:manage",
+      "archivo": "avoqado-server/src/routes/dashboard/giftCards.routes.ts",
+      "linea": 49
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: ver y administrar no piden el plan (sólo vender y prender)",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 708
+    },
+    {
+      "ruta": "Antes: el ajuste queda en el historial con tu nombre",
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 191
+    },
+    {
+      "ruta": "Paso 2: sólo en una tarjeta activa o bloqueada sin cancelación",
+      "archivo": "src/pages/GiftCards/giftCardText.ts",
+      "linea": 259
+    },
+    {
+      "ruta": "Paso 3: bloquear sólo una activa",
+      "archivo": "src/pages/GiftCards/giftCardText.ts",
+      "linea": 260
+    },
+    {
+      "ruta": "Paso 4: desbloquear sólo una bloqueada sin cancelación",
+      "archivo": "src/pages/GiftCards/giftCardText.ts",
+      "linea": 261
+    },
+    {
+      "ruta": "Paso 3: el motivo es obligatorio, la nota sólo con Otro motivo",
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 358
+    },
+    {
+      "ruta": "Paso 5: el servidor sólo lo deja si no está guardada, nunca se usó y sigue viva",
+      "archivo": "avoqado-server/src/services/giftCards/giftCardReports.service.ts",
+      "linea": 514
+    },
+    {
+      "ruta": "Paso 5: reponer sólo si se puede reponer",
+      "archivo": "src/pages/GiftCards/giftCardText.ts",
+      "linea": 263
+    },
+    {
+      "ruta": "Paso 5: el folio es obligatorio",
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 227
+    },
+    {
+      "ruta": "Problema: en duda, Intentar otra vez",
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 180
+    },
+    {
+      "ruta": "Problema: texto Intentar otra vez",
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 179
+    },
+    {
+      "ruta": "Problema: no se quita más del saldo",
+      "archivo": "src/pages/GiftCards/giftCardText.ts",
+      "linea": 218
+    },
+    {
+      "ruta": "Problema: texto más del saldo",
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 200
+    },
+    {
+      "ruta": "Problema: el código anterior deja de servir; saldo y vigencia igual",
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 222
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "segundo SERVIDOR de QA en http://localhost:3005 (copia soporte-whatsapp-20261116, Postgres propio y desechable avoqado_jornada_vuelta2 con el seed, DEMO_MODE, sin .env, llaves GIFT_CARD_* de prueba generadas con openssl); panel de la copia en http://localhost:5900 con VITE_API_URL=http://localhost:3005",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo/v2-1-clientes-tarjetas-de-regalo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo/v2-10-tarjeta-sin-usar-reponer-codigo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo/v2-11-folio-de-la-compra.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo/v2-12-codigo-nuevo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo/v2-3-tarjeta-abierta.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo/v2-3-tarjeta-acciones-del-gerente.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo/v2-4-ajustar-saldo-sumar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo/v2-5-saldo-ajustado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo/v2-6-bloquear-motivo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo/v2-7-bloqueada.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo/v2-8-desbloquear-motivo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo/v2-9-desbloqueada.png"
+    ],
+    "filasCreadas": [
+      "(base desechable, ya apagada) GiftCard •••• 8ZEV: +$10.00 «Lo pidió el cliente», bloqueo «Actividad sospechosa» y desbloqueo «Lo pidió el cliente»",
+      "(base desechable) GiftCard •••• 5R43: código repuesto con el folio ORD-1795044585741"
+    ],
+    "nota": "Vuelta 2. Avoqado Full del seed (OWNER Main Owner) en el segundo servidor, con GIFT_CARDS encendida por superadmin y la venta prendida en el panel (interruptor → reglas → casilla → Prender). Clientes › Tarjetas de regalo → buscar 8ZEV → la tarjeta abre con *Acciones del gerente* (*Ajustar saldo*, *Bloquear*, *Cancelar la venta*) → *Ajustar saldo*: *Sumar saldo*, *Monto* 10.00, *Motivo* «Lo pidió el cliente», *Nota* → *Ajustar* (saldo $80 → $90) → *Bloquear* con *Motivo* → *Bloquear* (sale *Desbloquear*) → *Desbloquear* con *Motivo* → *Desbloquear*. Tarjeta sin usar 5R43: sale *Reponer código* → *Folio de la compra (número de cuenta)* → *Reponer código* → «Código nuevo · Anótalo o entrégalo ahora…» con *Listo* y *Copiar*. En la usada (8ZEV) no sale *Reponer código*, como dice la guía. No se provocó «No supimos si se guardó…»."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

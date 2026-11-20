@@ -1,0 +1,452 @@
+{
+  "pagina": "dashboard/facturas/facturar-una-venta",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1314,
+      "cita": "title: t('sidebar:facturacionMenu.title', { defaultValue: 'Facturación' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 39,
+      "cita": "\"title\": \"Facturación\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 961,
+      "cita": "title: t('sidebar:facturacionMenu.invoices'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 40,
+      "cita": "\"invoices\": \"Facturas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 470,
+      "cita": "{t('list.newInvoice')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 5,
+      "cita": "\"newInvoice\": \"Nueva factura\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Cfdi/components/PickOrderToInvoiceDialog.tsx",
+      "linea": 198,
+      "cita": "placeholder={t('pickOrder.searchPlaceholder')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 111,
+      "cita": "\"searchPlaceholder\": \"Folio, nombre, teléfono o monto\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Cfdi/components/PickOrderToInvoiceDialog.tsx",
+      "linea": 157,
+      "cita": "<Button size=\"sm\" onClick={() => onSelect(venta.id)} aria-label={t('pickOrder.selectAria', { folio: venta.orderNumber })}>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 123,
+      "cita": "\"select\": \"Facturar\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 592,
+      "cita": "setOrderToInvoice(orderId)"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Cfdi/components/receptor-fields.tsx",
+      "linea": 55,
+      "cita": "<FormLabel>{t('issueDialog.rfc')}</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 132,
+      "cita": "\"rfc\": \"RFC\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Cfdi/components/receptor-fields.tsx",
+      "linea": 76,
+      "cita": "<FormLabel>{t('issueDialog.codigoPostal')}</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 139,
+      "cita": "\"codigoPostal\": \"Código postal\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Cfdi/components/receptor-fields.tsx",
+      "linea": 99,
+      "cita": "<FormLabel>{t('issueDialog.razonSocial')}</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 134,
+      "cita": "\"razonSocial\": \"Razón social\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 136,
+      "cita": "\"razonSocialHint\": \"Tal como está registrada ante el SAT (sin régimen societario, p. ej. sin 'S.A. de C.V.').\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Cfdi/components/receptor-fields.tsx",
+      "linea": 120,
+      "cita": "<FormLabel>{t('issueDialog.regimenFiscal')}</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 137,
+      "cita": "\"regimenFiscal\": \"Régimen fiscal\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Cfdi/components/receptor-fields.tsx",
+      "linea": 155,
+      "cita": "<FormLabel>{t('issueDialog.usoCfdi')}</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 142,
+      "cita": "\"usoCfdi\": \"Uso del CFDI\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Cfdi/components/receptor-fields.tsx",
+      "linea": 184,
+      "cita": "<FormLabel>{emailRequired ? t('issueDialog.emailRequired') : t('issueDialog.email')}</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 147,
+      "cita": "\"emailHint\": \"Le enviaremos la factura a este correo.\","
+    },
+    {
+      "paso": 3,
+      "archivo": "avoqado-server/src/services/fiscal/cfdi.service.ts",
+      "linea": 1479,
+      "cita": "if (result === 'FINALIZADO') void sendNewCfdiByEmail({ cfdiId: reservation.id, venueId: reservation.venueId, provider })"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Cfdi/components/IssueCfdiDialog.tsx",
+      "linea": 298,
+      "cita": "{t('issueDialog.submit')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 149,
+      "cita": "\"submit\": \"Emitir factura\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/hooks/use-cfdi.ts",
+      "linea": 310,
+      "cita": "title: t('issueDialog.toast.success'),"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 151,
+      "cita": "\"success\": \"Factura emitida correctamente.\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "cfdi:view",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 724
+    },
+    {
+      "permiso": "cfdi:view",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 963
+    },
+    {
+      "permiso": "cfdi:issue",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 180
+    },
+    {
+      "permiso": "cfdi:issue",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 183
+    },
+    {
+      "permiso": "orders:read",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 183
+    },
+    {
+      "permiso": "cfdi:issue",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 3734
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "CFDI",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 460
+    },
+    {
+      "featureCode": "CFDI",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 165
+    },
+    {
+      "featureCode": "CFDI",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 3733
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: si falta configuración, lo dice al elegir la venta",
+      "archivo": "src/pages/Cfdi/components/IssueCfdiDialog.tsx",
+      "linea": 73
+    },
+    {
+      "ruta": "Antes: o al tocar Nueva factura",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 596
+    },
+    {
+      "ruta": "Paso 2: busca por folio, monto, nombre o teléfono",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 112
+    },
+    {
+      "ruta": "Paso 3: el correo es opcional para el personal",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 144
+    },
+    {
+      "ruta": "Paso 3: el panel manda los datos del receptor",
+      "archivo": "src/services/cfdi.service.ts",
+      "linea": 974
+    },
+    {
+      "ruta": "Problema: Ya facturada no se puede elegir",
+      "archivo": "src/pages/Cfdi/components/PickOrderToInvoiceDialog.tsx",
+      "linea": 152
+    },
+    {
+      "ruta": "Problema: texto Ya facturada",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 121
+    },
+    {
+      "ruta": "Problema: sólo ventas cerradas",
+      "archivo": "src/pages/Cfdi/components/PickOrderToInvoiceDialog.tsx",
+      "linea": 26
+    },
+    {
+      "ruta": "Problema: abierta se factura desde Pedidos (texto del panel)",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 112
+    },
+    {
+      "ruta": "Problema: lista de motivos",
+      "archivo": "src/pages/Cfdi/components/IssueCfdiDialog.tsx",
+      "linea": 313
+    },
+    {
+      "ruta": "Problema: texto No se pudo facturar",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 162
+    },
+    {
+      "ruta": "Problema: no se puede facturar todavía",
+      "archivo": "src/pages/Cfdi/components/IssueCfdiDialog.tsx",
+      "linea": 399
+    },
+    {
+      "ruta": "Problema: texto no se puede todavía",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 204
+    },
+    {
+      "ruta": "Problema: la razón",
+      "archivo": "src/pages/Cfdi/components/IssueCfdiDialog.tsx",
+      "linea": 401
+    },
+    {
+      "ruta": "Problema: Ir a Configuración con permiso",
+      "archivo": "src/pages/Cfdi/components/IssueCfdiDialog.tsx",
+      "linea": 403
+    },
+    {
+      "ruta": "Problema: texto Ir a Configuración",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 205
+    },
+    {
+      "ruta": "Problema: el correo se manda sin esperar y su falla no deshace la factura",
+      "archivo": "avoqado-server/src/services/fiscal/cfdiEmail.service.ts",
+      "linea": 113
+    },
+    {
+      "ruta": "Problema: reenviar desde el menú de la factura",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 397
+    },
+    {
+      "ruta": "Problema: descargar desde el menú de la factura",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 392
+    },
+    {
+      "ruta": "Problema: venta de antes del IVA por producto",
+      "archivo": "src/pages/Cfdi/components/IssueCfdiDialog.tsx",
+      "linea": 323
+    },
+    {
+      "ruta": "Problema: texto de la venta vieja",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 186
+    },
+    {
+      "ruta": "Problema: confirmar pide configurar la facturación",
+      "archivo": "src/pages/Cfdi/components/IssueCfdiDialog.tsx",
+      "linea": 88
+    },
+    {
+      "ruta": "Problema: botón Confirmar que el precio ya incluía IVA",
+      "archivo": "src/pages/Cfdi/components/IssueCfdiDialog.tsx",
+      "linea": 337
+    },
+    {
+      "ruta": "Problema: texto del botón",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 187
+    },
+    {
+      "ruta": "Problema: botón Sí, el precio incluía IVA",
+      "archivo": "src/pages/Cfdi/components/IssueCfdiDialog.tsx",
+      "linea": 374
+    },
+    {
+      "ruta": "Problema: texto Sí",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 194
+    },
+    {
+      "ruta": "Problema: al confirmar se vuelve a intentar",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 193
+    },
+    {
+      "ruta": "Problema: sin permiso, pedírselo al dueño",
+      "archivo": "src/pages/Cfdi/components/IssueCfdiDialog.tsx",
+      "linea": 382
+    },
+    {
+      "ruta": "Problema: texto pídeselo",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 197
+    },
+    {
+      "ruta": "Problema: el servidor pide cfdi:configure",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 3747
+    },
+    {
+      "ruta": "Problema: PAC sin respuesta clara",
+      "archivo": "src/pages/Cfdi/components/IssueCfdiDialog.tsx",
+      "linea": 184
+    },
+    {
+      "ruta": "Problema: texto PAC sin respuesta",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 164
+    },
+    {
+      "ruta": "Problema: no la vuelvas a emitir",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 165
+    },
+    {
+      "ruta": "Problema: la lista muestra el estado de cada factura",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 479
+    },
+    {
+      "ruta": "Problema: permiso o plan",
+      "archivo": "src/pages/Cfdi/components/IssueCfdiDialog.tsx",
+      "linea": 206
+    },
+    {
+      "ruta": "Problema: texto No puedes facturar",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 171
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3000 (develop)",
+    "fecha": "2026-11-12",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/facturar-una-venta/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/facturar-una-venta/2.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/facturar-una-venta/3.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/facturar-una-venta/4.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/facturar-una-venta/5.png"
+    ],
+    "filasCreadas": [
+      "FiscalEmisor cmwehbphx000050waek5ef55v — emisor de PRUEBA de Avoqado Full (STA241210PW8, SERVICIOS TECNOLOGICOS AVO, 601, CP 36540, csdStatus ACTIVE, sin llave propia): insertado a mano en av-db-25, autorizado",
+      "MerchantFiscalConfig cmwehd1b901h1waldr4evn611 — *Agregar comercio* en *Facturación* › *Configuración*: Cuenta Blumon A (Sandbox) con *Facturación activa*",
+      "ActivityLog cmwehd1ee01h3waldyxvbzxpu — MERCHANT_FISCAL_CONFIG_UPSERTED",
+      "Order cmwehebup01h5waldjnlblssm — ORD-1794544392432, venta de QA de 1 Agua Mineral 1L ($20.00, IVA incluido), creada con el endpoint de venta de mostrador del POS",
+      "OrderItem cmwehebur01h7wald7on8kpvc · KdsOrder cmwehfe8a01i5wald7o0pbkri",
+      "Payment cmweheveq01h9waldjvs5synx — $0.20 CASH (el endpoint de cobro del POS va en centavos: mandé 20) · Payment cmwehfazy01howaldkwv4bwq1 — $19.80 CASH (el resto)",
+      "PaymentAllocation cmwehewhi01hfwaldn8rcq8bb, cmwehfbjg01huwald0mlc9k6h · VenueTransaction cmwehewc901hdwaldah4ebvyc, cmwehfbf701hswaldtfkka0s6 · PaymentEffect cmweheylf01hgwald3riz2m7b, cmwehfcje01hywald7nmy3pba, cmwehfcj801hxwaldwqmj14wc",
+      "CommissionCalculation cmwehf12h01hmwaldu6xton5s, cmwehfoe901i8wald4h061lg6 · DigitalReceipt cmwehez9h01hjwalddgre1xff, cmwehfdcw01i3waldjsty6pli",
+      "InventoryPosting cmwehfc9001hvwaldfkzyqda3 · InventoryPostingLine cmwehfc9001hwwald8tj07hib · InventoryMovement cmwehfd1h01i0wald3q49i0pt (Agua Mineral 1L −1)",
+      "ActivityLog cmwehew3801hbwald7pm8z6si, cmwehfbae01hqwaldm8ya5iep — PAYMENT_WITHOUT_SHIFT",
+      "Cfdi cmwehilp901imwaldqx6wmn76 — QA-1, UUID AD56474C-71E4-469B-9E27-B02061BF21AA, timbre de PRUEBAS del SAT (NoCertificadoSAT 30001000000500003456), $20.00 a EKU9003173C9 · ActivityLog cmwehinxs01iowaldysibg1n5 CFDI_ISSUED",
+      "Almacenamiento dev/venues/avoqado-full/cfdi/AD56474C-71E4-469B-9E27-B02061BF21AA.xml y .pdf"
+    ],
+    "nota": "Avoqado Full (Premium), OWNER del seed, Facturapi EN MODO DE PRUEBA (el emisor no tiene llave propia: en local timbra con la llave de pruebas; el XML trae el certificado de pruebas del SAT 30001…). Paso 1: *Nueva factura* abrió «Elige la venta que quieres facturar» con las ventas cerradas, la más reciente primero. Paso 2: *Buscar* → folio 1794544392432 → *Facturar*. Paso 3: «Facturar cuenta» con *RFC* EKU9003173C9, *Código postal* 42501, *Razón social* ESCUELA KEMPER URGATE, *Régimen fiscal* 601, *Uso del CFDI* G03, sin correo. Paso 4: *Emitir factura* (POST 201) dio «Factura emitida correctamente.» y la factura QA-1 salió *Timbrada* en *Facturas*. Antes de dar de alta el emisor, *Nueva factura* mostraba «Antes de facturar» con *Ir a Configuración* (foto 2), como dice *Antes de empezar*."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

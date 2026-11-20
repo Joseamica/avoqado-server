@@ -1,0 +1,347 @@
+{
+  "pagina": "dashboard/turnos/editar-o-eliminar-turno",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 501,
+      "cita": "title: t('sidebar:routes.shifts'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 158,
+      "cita": "\"shifts\": \"Turnos de caja\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 444,
+      "cita": "onClick={e => handleEditClick(e, row.original)}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 446,
+      "cita": "<Pencil className=\"h-3.5 w-3.5\" />"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 454,
+      "cita": "onClick={e => handleDeleteClick(e, row.original)}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 456,
+      "cita": "<Trash2 className=\"h-3.5 w-3.5\" />"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 558,
+      "cita": "<Label htmlFor=\"edit-totalSales\">{t('columns.subtotal')}</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 12,
+      "cita": "\"subtotal\": \"Subtotal\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 571,
+      "cita": "<Label htmlFor=\"edit-totalTips\">{t('columns.totalTip')}</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 10,
+      "cita": "\"totalTip\": \"Propina Total\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 584,
+      "cita": "<span className=\"text-sm font-medium text-muted-foreground\">{t('columns.total')}</span>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 598,
+      "cita": "{updateShiftMutation.isPending ? tCommon('saving') : tCommon('save')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/common.json",
+      "linea": 11,
+      "cita": "\"save\": \"Guardar\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 158,
+      "cita": "title: tCommon('superadmin.edit.success'),"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/common.json",
+      "linea": 259,
+      "cita": "\"success\": \"Actualizado exitosamente\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 842,
+      "cita": "{tCommon('edit')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/common.json",
+      "linea": 10,
+      "cita": "\"edit\": \"Editar\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 1117,
+      "cita": "{t('detail.sidebar.financialSummary')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/shifts.json",
+      "linea": 152,
+      "cita": "\"financialSummary\": \"Resumen Financiero\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 1136,
+      "cita": "onChange={e => setEditedValues(prev => ({ ...prev, totalSales: parseFloat(e.target.value) || 0 }))}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 1152,
+      "cita": "onChange={e => setEditedValues(prev => ({ ...prev, totalTips: parseFloat(e.target.value) || 0 }))}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 852,
+      "cita": "onClick={saveChanges}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 524,
+      "cita": "<AlertDialogTitle>{tCommon('superadmin.delete.title')}</AlertDialogTitle>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/common.json",
+      "linea": 252,
+      "cita": "\"title\": \"Confirmar Eliminación\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 536,
+      "cita": "{deleteShiftMutation.isPending ? tCommon('deleting') : tCommon('delete')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/common.json",
+      "linea": 14,
+      "cita": "\"delete\": \"Eliminar\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 132,
+      "cita": "title: tCommon('superadmin.delete.success'),"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/common.json",
+      "linea": 254,
+      "cita": "\"success\": \"Eliminado exitosamente\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "shifts:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 237
+    },
+    {
+      "permiso": "shifts:update",
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 57
+    },
+    {
+      "permiso": "shifts:update",
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 576
+    },
+    {
+      "permiso": "shifts:update",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 8976
+    },
+    {
+      "permiso": "shifts:delete",
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 58
+    },
+    {
+      "permiso": "shifts:delete",
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 577
+    },
+    {
+      "permiso": "shifts:delete",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 8960
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: Turnos de caja sólo con turnos prendidos",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 498
+    },
+    {
+      "ruta": "Antes: borrar es de administrador o dueño por omisión",
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 55
+    },
+    {
+      "ruta": "Antes: la pantalla sólo manda subtotal y propina",
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 153
+    },
+    {
+      "ruta": "Antes: el servidor sólo escribe los campos que llegan",
+      "archivo": "avoqado-server/src/services/dashboard/shift.dashboard.service.ts",
+      "linea": 1342
+    },
+    {
+      "ruta": "Antes: la edición escribe sólo la fila del turno",
+      "archivo": "avoqado-server/src/services/dashboard/shift.dashboard.service.ts",
+      "linea": 1457
+    },
+    {
+      "ruta": "Antes: eliminar no se deshace",
+      "archivo": "src/locales/es/common.json",
+      "linea": 253
+    },
+    {
+      "ruta": "Paso 1: la columna de acciones sólo con permiso",
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 430
+    },
+    {
+      "ruta": "Paso 4: en el detalle, el mismo diálogo",
+      "archivo": "src/pages/Shift/ShiftId.tsx",
+      "linea": 880
+    },
+    {
+      "ruta": "Problema: error al eliminar (lista)",
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 142
+    },
+    {
+      "ruta": "Problema: texto Error al eliminar",
+      "archivo": "src/locales/es/common.json",
+      "linea": 255
+    },
+    {
+      "ruta": "Problema: no se borra uno que se está cerrando",
+      "archivo": "avoqado-server/src/services/dashboard/shift.dashboard.service.ts",
+      "linea": 871
+    },
+    {
+      "ruta": "Problema: no se borra uno abierto",
+      "archivo": "avoqado-server/src/services/dashboard/shift.dashboard.service.ts",
+      "linea": 880
+    },
+    {
+      "ruta": "Problema: no se borra con la caja abierta",
+      "archivo": "avoqado-server/src/services/dashboard/shift.dashboard.service.ts",
+      "linea": 891
+    },
+    {
+      "ruta": "Problema: ventas y pagos se quedan sin turno",
+      "archivo": "avoqado-server/src/services/dashboard/shift.dashboard.service.ts",
+      "linea": 897
+    },
+    {
+      "ruta": "Problema: Corregir conteo es otra acción",
+      "archivo": "src/pages/Shift/components/CashReconciliationSummary.tsx",
+      "linea": 127
+    },
+    {
+      "ruta": "T11-10: el panel reintenta una vez cualquier petición tras un error de red, sin llave",
+      "archivo": "src/api.ts",
+      "linea": 98
+    },
+    {
+      "ruta": "T11-10: el reintento",
+      "archivo": "src/api.ts",
+      "linea": 101
+    },
+    {
+      "ruta": "T11-10: borrar otra vez un turno ya borrado da 404 («Error al eliminar»)",
+      "archivo": "avoqado-server/src/controllers/dashboard/shift.dashboard.controller.ts",
+      "linea": 84
+    },
+    {
+      "ruta": "T11-10: la lista se vuelve a leer al recargar",
+      "archivo": "src/pages/Shift/Shifts.tsx",
+      "linea": 72
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3000 (develop)",
+    "fecha": "2026-11-12",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/editar-o-eliminar-turno/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/editar-o-eliminar-turno/2.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/editar-o-eliminar-turno/3.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/editar-o-eliminar-turno/4.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/editar-o-eliminar-turno/5.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/editar-o-eliminar-turno/6.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/editar-o-eliminar-turno/7.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/editar-o-eliminar-turno/8.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/editar-o-eliminar-turno/9.png"
+    ],
+    "filasCreadas": [
+      "ActivityLog cmwefjkza01ddwaldn4h0tcwf — SHIFT_UPDATED del turno cmtwg95tx006cc9pj7gc0ltt7: 0.00/0.00 → 1.00/0.50 (desde la lista)",
+      "ActivityLog cmwefjr5l01dfwald1h6qjzvg — SHIFT_UPDATED del mismo turno: de vuelta a 0.00/0.00 (desde el detalle)",
+      "Shift cmtwg95tx006cc9pj7gc0ltt7 — ELIMINADO desde el panel (cerrado, sin ventas, pagos ni comisiones; autorizado)",
+      "CashDrawerSession cmtwg95u1006ec9pjvy3v8srp (cerrada) — su shiftId quedó en null por el borrado (onDelete SetNull)",
+      "ActivityLog cmwegzxd301f7waldccqdwyy5 — SHIFT_DELETED"
+    ],
+    "nota": "Avoqado Full, OWNER del seed. Pasos 1-3 como en el recorrido 1 (editar desde la lista y desde el detalle; el turno volvió a 0/0). Paso 4: antes de borrar se comprobó que el turno seguía cerrado y vacío; el bote de su renglón abrió «Confirmar Eliminación» («¿…eliminar permanentemente 7gc0ltt7? Esta acción no se puede deshacer.»), *Eliminar* (DELETE 204) dio «Eliminado exitosamente» y la lista filtrada quedó en «Sin resultados». En el detalle, el mismo aviso dice «Turno #undefined»."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

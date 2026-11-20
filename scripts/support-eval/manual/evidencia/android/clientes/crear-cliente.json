@@ -1,0 +1,160 @@
+{
+  "pagina": "android/clientes/crear-cliente",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 57,
+      "cita": "label = \"Más\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 636,
+      "cita": "label = \"Clientes\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 637,
+      "cita": "onClick = { showCustomers = true },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersScreen.kt",
+      "linea": 219,
+      "cita": "contentDescription = \"Opciones\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersScreen.kt",
+      "linea": 227,
+      "cita": "if (viewModel.canManageCustomers) {"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersScreen.kt",
+      "linea": 229,
+      "cita": "text = { Text(\"Crear cliente\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CreateCustomerView.kt",
+      "linea": 188,
+      "cita": "text = \"Crear cliente\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CreateCustomerView.kt",
+      "linea": 282,
+      "cita": "label = { Text(\"Nombre\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CreateCustomerView.kt",
+      "linea": 290,
+      "cita": "label = { Text(\"Apellido\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CreateCustomerView.kt",
+      "linea": 302,
+      "cita": "\"Teléfono\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CreateCustomerView.kt",
+      "linea": 315,
+      "cita": "label = { Text(\"Correo electrónico\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CreateCustomerView.kt",
+      "linea": 270,
+      "cita": "text = \"Importar desde Contactos\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CreateCustomerView.kt",
+      "linea": 214,
+      "cita": "enabled = canSave && !isSaving,"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CreateCustomerView.kt",
+      "linea": 234,
+      "cita": "text = \"Guardar\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersViewModel.kt",
+      "linea": 192,
+      "cita": "val result = repository.createCustomer(request)"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "customers:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1626
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red el alta no se encola: el fallo de la petición vuelve como error",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/data/CustomersRepository.kt",
+      "linea": 171
+    },
+    {
+      "afirmacion": "El error del alta llega al diálogo del formulario",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersViewModel.kt",
+      "linea": 200
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: «Crear cliente» sólo con rol gerente, administrador, dueño o superadmin (canManageCustomers)",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 149
+    },
+    {
+      "ruta": "Antes: «Clientes» se puede esconder en «Personalizar menú» de este aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 633
+    },
+    {
+      "ruta": "Antes: la entrada «Personalizar menú» de Más",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1989
+    },
+    {
+      "ruta": "Problema: el servidor exige teléfono o correo",
+      "archivo": "avoqado-server/src/services/dashboard/customer.dashboard.service.ts",
+      "linea": 394
+    },
+    {
+      "ruta": "Problema: el formulario deja guardar con sólo un nombre (cualquiera de los 4 campos)",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CreateCustomerView.kt",
+      "linea": 63
+    },
+    {
+      "ruta": "Problema: un rechazo sale en el diálogo «No se pudo crear el cliente»",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CreateCustomerView.kt",
+      "linea": 327
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

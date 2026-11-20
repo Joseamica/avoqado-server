@@ -1,0 +1,294 @@
+{
+  "pagina": "tpv/mesas/cobrar-cuenta-de-mesa",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 937,
+      "cita": "text = \"Pagar · ${moneyDisplay(checkTotal ?: BigDecimal.ZERO)}\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 410,
+      "cita": "text = \"Cómo dividir el cobro\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
+      "linea": 39,
+      "cita": "FULLPAYMENT(\"FULLPAYMENT\", \"Cuenta completa\"),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
+      "linea": 40,
+      "cita": "CUSTOMAMOUNT(\"CUSTOMAMOUNT\", \"Monto personalizado\"),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
+      "linea": 41,
+      "cita": "EQUALPARTS(\"EQUALPARTS\", \"Partes iguales\"),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
+      "linea": 49,
+      "cita": "PERPRODUCT(\"PERPRODUCT\", \"Por artículo\"),"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 429,
+      "cita": "label = { Text(\"Monto a cobrar\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 668,
+      "cita": "Text(\"Dividir entre\", style = MaterialTheme.typography.bodyMedium)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 677,
+      "cita": "Text(\"Cobrando\", style = MaterialTheme.typography.bodyMedium)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 736,
+      "cita": "Checkbox(checked = selected, onCheckedChange = { onToggle() })"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 468,
+      "cita": "label = { Text(\"Propina (opcional)\") },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 467,
+      "cita": "onValueChange = { text -> onTipChanged(text.toBigDecimalOrNull() ?: BigDecimal.ZERO) },"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 818,
+      "cita": "label = if (!cashSupportsThisSplit) \"Efectivo no disponible\" else \"Efectivo\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 827,
+      "cita": "label = if (cardEnabled) \"Tarjeta\" else \"Tarjeta no disponible\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 945,
+      "cita": "title = { Text(if (receipt.queued) \"Cobro guardado\" else \"Cobro registrado\") },"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 998,
+      "cita": "TextButton(onClick = onDismiss) { Text(\"Cerrar\") }"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1623,
+      "cita": "navController.navigate(getPaymentRoute())"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 326,
+      "cita": "subtitle = \"Restante ${moneyDisplay(state.remaining)}\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 564,
+      "cita": "SummaryRow(label = \"Restante\", amount = remaining, emphasized = true)"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1793,
+      "cita": "text = \"Continuar pagando $${String.format(java.util.Locale.US, \"%.2f\", remainingBalance)}\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2133,
+      "cita": "navController.navigate(NavRoute.TableOrder.route) {"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/services/mobile/sync.mobile.service.ts",
+      "linea": 232
+    },
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 3041
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 603
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red la tarjeta se apaga: «Tarjeta no disponible» y la cuenta se queda abierta",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 767
+    },
+    {
+      "afirmacion": "La tarjeta necesita red",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
+      "linea": 149
+    },
+    {
+      "afirmacion": "El efectivo de la mesa se escribe en la cola antes de enviarse (PAY_CASH)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
+      "linea": 579
+    },
+    {
+      "afirmacion": "El efectivo encolado sale como «Cobro guardado»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 945
+    },
+    {
+      "afirmacion": "Aviso de la app al encolar (la página no lo repite: en 2.13.2 el envío en segundo plano no procesa la cola de Mesas)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
+      "linea": 420
+    },
+    {
+      "afirmacion": "Al volver la red: abrir Mesas desde el inicio crea la pantalla y la carga del plano vacía primero la cola de Mesas (igual en 2.13.2 y 031f14db)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TablesViewModel.kt",
+      "linea": 271
+    },
+    {
+      "afirmacion": "La carga se pide al abrir la pantalla",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TablesScreen.kt",
+      "linea": 104
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: «Pagar» sólo con algo ya en la cuenta (total > 0), sin sesión provisional ni candado de cobro",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 1037
+    },
+    {
+      "ruta": "Antes: «Pagar» se prende sin nada por enviar",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 939
+    },
+    {
+      "ruta": "La propina de la casilla sólo va con el efectivo (payCash la manda; el cargo con tarjeta no la lleva)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
+      "linea": 413
+    },
+    {
+      "ruta": "El cargo con tarjeta no lleva propina",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
+      "linea": 361
+    },
+    {
+      "ruta": "«Pagar» de la mesa de otro mesero sólo con permiso de cobrar cualquier mesa (tables:pay-any)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
+      "linea": 142
+    },
+    {
+      "ruta": "Por artículo no admite efectivo",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 800
+    },
+    {
+      "ruta": "«Por artículo» sólo sale con productos",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 638
+    },
+    {
+      "ruta": "Nexgo: tarjeta sólo con la cuenta completa",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 790
+    },
+    {
+      "ruta": "Problema Nexgo: el mensaje de la división",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 794
+    },
+    {
+      "ruta": "Tarjeta parcial: «Continuar pagando» regresa a la cuenta de la mesa",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2132
+    },
+    {
+      "ruta": "Desde 2.13.2 el recibo del efectivo se ve aunque el cobro salde la cuenta (antes la pantalla podía quedar en blanco: 95bedba7)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 207
+    },
+    {
+      "ruta": "En versiones anteriores a la 2.21 la casilla de propina se queda escrita tras un cobro en efectivo: el éxito de payCash no la vacía (v2.20.0 igual; desde v2.21.0, e292e9d3, sí: «D9: la propina ya se cobró con ESTE pago»). Visto en el aparato (H6)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
+      "linea": 417
+    },
+    {
+      "ruta": "En versiones anteriores a la 2.21 el siguiente cobro en efectivo la vuelve a sumar: payCash manda lo que tenga la casilla al cobrar",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
+      "linea": 403
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "PAX A910S del laboratorio del Alien (serial 2841548417, terminal AVQD-2841548417)",
+    "version": "2.16.0-sandbox (125), copia de QA com.jaac.avoqado_tpv.sandbox.soportewa compilada en v2.16.0 (031f14db); vuelta 1 contra el SERVIDOR local del 3000 (tarjeta) y vuelta 2 contra el segundo SERVIDOR de QA en http://localhost:3005 (copia soporte-whatsapp-20261116, Postgres propio y desechable avoqado_jornada_vuelta2 con el seed, DEMO_MODE, sin .env, llaves GIFT_CARD_* de prueba generadas con openssl) (efectivo)",
+    "apkSha256": "001675e37809b69d6290341cf74f3601306fc9df2072f1dc0f271436710fc401",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/0-por-enviar-sin-pagar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/1-cuenta-pagar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/2-como-dividir-el-cobro.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/2b-opciones-division.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/3a-partes-iguales.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/3b-por-articulo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/3c-dividir-entre-cobrando.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/4-propina-opcional.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/5-efectivo-tocado-sin-respuesta.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/6-cuenta-completa-tarjeta.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/7-tarjeta-resultado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/v2-1-cuenta-pagar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/v2-2-como-dividir-el-cobro.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/v2-3-partes-iguales-propina.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/v2-4-cobro-registrado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/v2-5-restante.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/v2-6-segundo-cobro-registrado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/mesas/cobrar-cuenta-de-mesa/v2-7-tras-cerrar.png"
+    ],
+    "filasCreadas": [
+      "Vuelta 1 (av-db-25): Order cmwmkq4dg00yowaydcp7c8bxv — Mesa M1; Payment cmwml1jj80113waydtkhpn2yc — $90.00 con tarjeta; 4 intents rechazados (STALE_DEVICE_SEQUENCE), sin pago",
+      "Vuelta 2 (base desechable, ya apagada): Order cmwms1qpx0068wawoy7qilry8 — Mesa M5, 2 Coca-Cola; Payments cmwms7njf006fwawoakwddkyk ($25 + $5 propina) y cmwms9v6v006ywawo2z1jwhaz ($25 + $5 propina), en efectivo"
+    ],
+    "nota": "Vuelta 1 (av-db-25): *Pagar*, *Cómo dividir el cobro* con *Cuenta completa*, *Monto personalizado*, *Partes iguales* (*Dividir entre*, *Cobrando*) y *Por artículo* (*Efectivo no disponible*), *Propina (opcional)*; con *Tarjeta* cobró $90 sin sumar la propina escrita. El efectivo lo rechazó H1 (STALE_DEVICE_SEQUENCE). Vuelta 2: copia nueva contra el segundo servidor de QA (base nueva, sin secuencia previa del serial; la terminal se activó con su código y se prendió *Modo Restaurante*): Mesa M5 con 2 Coca-Cola → *Enviar ronda* → *Pagar · $50.00* → *Partes iguales* (2) con *Propina (opcional)* $5 → *Efectivo $25.00* → «Cobro registrado» (Cobrado $25, Propina $5) → *Cerrar* → «Restante $25.00» → *Cuenta completa* → *Efectivo* → «Cobro registrado» → *Cerrar* y la mesa queda libre. OJO (hallazgo H6): *Propina (opcional)* se quedó escrita después del primer cobro y el segundo también sumó $5 de propina; el servidor guardó $10 de propina en la cuenta."
+  },
+  "codex": {
+    "lote": 5,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

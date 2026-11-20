@@ -1,0 +1,330 @@
+{
+  "pagina": "dashboard/facturas/reenviar-descargar-o-cancelar-factura",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1314,
+      "cita": "title: t('sidebar:facturacionMenu.title', { defaultValue: 'Facturación' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 39,
+      "cita": "\"title\": \"Facturación\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 961,
+      "cita": "title: t('sidebar:facturacionMenu.invoices'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 40,
+      "cita": "\"invoices\": \"Facturas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 375,
+      "cita": "<MoreHorizontal className=\"h-4 w-4\" />"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 385,
+      "cita": "{t('actions.downloadXml')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 69,
+      "cita": "\"downloadXml\": \"Descargar XML\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 392,
+      "cita": "{t('actions.downloadPdf')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 70,
+      "cita": "\"downloadPdf\": \"Descargar PDF\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 397,
+      "cita": "{t('actions.sendEmail')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 73,
+      "cita": "\"sendEmail\": \"Reenviar por correo\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Cfdi/components/SendCfdiEmailDialog.tsx",
+      "linea": 60,
+      "cita": "<Label htmlFor=\"cfdi-send-email\">{t('sendEmailDialog.emailLabel')}</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 722,
+      "cita": "\"emailLabel\": \"Otro correo (opcional)\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 721,
+      "cita": "\"description\": \"Se manda el PDF y el XML. Déjalo vacío para usar el correo que dio el cliente al facturar.\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Cfdi/components/SendCfdiEmailDialog.tsx",
+      "linea": 77,
+      "cita": "{t('sendEmailDialog.submit')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 724,
+      "cita": "\"submit\": \"Enviar\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 445,
+      "cita": "{t('actions.cancel')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 71,
+      "cita": "\"cancel\": \"Cancelar\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Cfdi/components/CancelCfdiDialog.tsx",
+      "linea": 71,
+      "cita": "<Label>{t('cancelDialog.motivoLabel')}</Label>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 80,
+      "cita": "\"motivoLabel\": \"Motivo de cancelación\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Cfdi/components/CancelCfdiDialog.tsx",
+      "linea": 103,
+      "cita": "{t('cancelDialog.confirm')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 88,
+      "cita": "\"confirm\": \"Cancelar factura\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Cfdi/components/CancelCfdiDialog.tsx",
+      "linea": 44,
+      "cita": "const requiresSubstitute = motivo === '01'"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 85,
+      "cita": "\"substituteUuidLabel\": \"UUID del comprobante que sustituye\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "cfdi:view",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 724
+    },
+    {
+      "permiso": "cfdi:view",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 3783
+    },
+    {
+      "permiso": "cfdi:issue",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 394
+    },
+    {
+      "permiso": "cfdi:issue",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 3800
+    },
+    {
+      "permiso": "cfdi:configure",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 342
+    },
+    {
+      "permiso": "cfdi:configure",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 3791
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "CFDI",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 460
+    },
+    {
+      "featureCode": "CFDI",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 3790
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: configurar la facturación es de administrador o dueño por omisión",
+      "archivo": "avoqado-server/src/lib/permissions.ts",
+      "linea": 1199
+    },
+    {
+      "ruta": "Antes: la cancelación no se deshace",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 79
+    },
+    {
+      "ruta": "Paso 2: descargar se apaga sin archivo",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 381
+    },
+    {
+      "ruta": "Paso 3: vacío usa el correo del cliente",
+      "archivo": "src/pages/Cfdi/components/SendCfdiEmailDialog.tsx",
+      "linea": 47
+    },
+    {
+      "ruta": "Paso 4: el UUID es obligatorio con motivo 01",
+      "archivo": "src/pages/Cfdi/components/CancelCfdiDialog.tsx",
+      "linea": 45
+    },
+    {
+      "ruta": "Problema: reenviar sólo timbrada sin cancelación viva",
+      "archivo": "src/pages/Cfdi/cfdiListFilters.ts",
+      "linea": 71
+    },
+    {
+      "ruta": "Problema: cancelar sólo timbrada sin cancelación viva",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 341
+    },
+    {
+      "ruta": "Problema: aviso Cancelación solicitada",
+      "archivo": "src/hooks/use-cfdi.ts",
+      "linea": 723
+    },
+    {
+      "ruta": "Problema: texto Cancelación solicitada",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 543
+    },
+    {
+      "ruta": "Problema: sigue vigente mientras el SAT responde",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 515
+    },
+    {
+      "ruta": "Problema: Consultar estado con la cancelación pedida",
+      "archivo": "src/pages/Cfdi/cfdiListFilters.ts",
+      "linea": 109
+    },
+    {
+      "ruta": "Problema: texto Consultar estado",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 74
+    },
+    {
+      "ruta": "Problema: Consultar estado sólo consulta",
+      "archivo": "src/hooks/use-cfdi.ts",
+      "linea": 756
+    },
+    {
+      "ruta": "Problema: No quedó cancelada",
+      "archivo": "src/hooks/use-cfdi.ts",
+      "linea": 705
+    },
+    {
+      "ruta": "Problema: la razón del SAT o el texto genérico",
+      "archivo": "src/hooks/use-cfdi.ts",
+      "linea": 706
+    },
+    {
+      "ruta": "Problema: texto No quedó cancelada",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 557
+    },
+    {
+      "ruta": "Problema: Corregir importe en una factura de venta",
+      "archivo": "src/pages/Cfdi/CfdiList.tsx",
+      "linea": 352
+    },
+    {
+      "ruta": "Problema: texto Corregir importe",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 72
+    },
+    {
+      "ruta": "Problema: su ventana explica lo que va a pasar",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 686
+    },
+    {
+      "ruta": "Problema: título Lo que va a pasar",
+      "archivo": "src/locales/es/cfdi.json",
+      "linea": 688
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3000 (develop)",
+    "fecha": "2026-11-12",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/reenviar-descargar-o-cancelar-factura/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/reenviar-descargar-o-cancelar-factura/2.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/reenviar-descargar-o-cancelar-factura/3.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/reenviar-descargar-o-cancelar-factura/4.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/reenviar-descargar-o-cancelar-factura/5.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/reenviar-descargar-o-cancelar-factura/6.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/reenviar-descargar-o-cancelar-factura/7.png"
+    ],
+    "filasCreadas": [
+      "ActivityLog cmwehk8f201iwwaldlqtjie90 — CFDI_EMAIL_SENT (a delivered@resend.dev, la dirección de pruebas de Resend: no llega a nadie)",
+      "ActivityLog cmwehkdoo01iywalduwis1zcr — CFDI_CANCEL_CONFIRMED · ActivityLog cmwehkdoq01j0waldqnrsifhz — CFDI_CANCELLED",
+      "Cfdi cmwehilp901imwaldqx6wmn76 (QA-1) — pasó a CANCELLED (motivo 02), en el SAT de pruebas"
+    ],
+    "nota": "Avoqado Full, OWNER del seed, sobre la factura de prueba QA-1. Paso 1: el ⋯ trae *Descargar XML*, *Descargar PDF*, *Reenviar por correo*, *Corregir importe (sustituir)* y *Cancelar*. Paso 2: bajaron QA-1.xml (certificado de pruebas del SAT) y QA-1.pdf. Paso 3: «Enviar la factura QA-1 por correo» con *Otro correo (opcional)* = delivered@resend.dev y *Enviar* (POST 200). Paso 4: *Cancelar* → *Motivo de cancelación* «02 - Comprobante emitido con errores sin relación» → *Cancelar factura* (POST 200) → «Cancelación solicitada.» y la factura quedó *Cancelada*; después el ⋯ sólo trae las dos descargas. El motivo 01 (pide el UUID) no se recorrió."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

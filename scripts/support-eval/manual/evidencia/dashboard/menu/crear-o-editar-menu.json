@@ -1,0 +1,387 @@
+{
+  "pagina": "dashboard/menu/crear-o-editar-menu",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1201,
+      "cita": "title: term('menu'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/config/sector-terminology.ts",
+      "linea": 48,
+      "cita": "menu: 'Menú',"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/config/sector-terminology.ts",
+      "linea": 90,
+      "cita": "menu: 'Catálogo',"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 334,
+      "cita": "{ title: t('menu:menumaker.nav.menus'), url: 'menumaker/menus', permission: 'menu:read' },"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 34,
+      "cita": "\"menus\": \"Menús\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Menu/Menus/Menus.tsx",
+      "linea": 59,
+      "cita": "<span>{t('menus.newMenu')}</span>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 46,
+      "cita": "\"newMenu\": \"Nuevo menú\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 294,
+      "cita": "<FormLabel>{t('createMenu.fields.menuName')}</FormLabel>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 648,
+      "cita": "\"menuName\": \"Nombre del menú\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 624,
+      "cita": "{currentStep === 3 ? t('wizard.finish') : tCommon('next')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 395,
+      "cita": "<FormLabel>{t('createMenu.fields.availableDays')}</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 647,
+      "cita": "\"availableDays\": \"Días disponibles\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 88,
+      "cita": "startTime: '09:00',"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 89,
+      "cita": "endTime: '19:30',"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 455,
+      "cita": "<FormLabel>{t('createMenu.fields.startTime')}</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 650,
+      "cita": "\"startTime\": \"Hora de inicio\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 651,
+      "cita": "\"endTime\": \"Hora de cierre\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 443,
+      "cita": "<FormLabel>{t('createMenu.fields.allDay')}</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 653,
+      "cita": "\"allDay\": \"Disponible todo el día\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 431,
+      "cita": "const updatedDays = form.getValues('days').map(day => ({ ...day, selected: true }))"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 566,
+      "cita": "<FormLabel>{t('createMenu.fields.categories')}</FormLabel>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 654,
+      "cita": "\"categories\": \"Categorías\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 750,
+      "cita": "\"finish\": \"Finalizar\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Menu/Menus/Menus.tsx",
+      "linea": 154,
+      "cita": "clickableRow={row => ({"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Menu/Menus/menuId.tsx",
+      "linea": 406,
+      "cita": "{updateMenuMutation.isPending ? t('menuId.buttons.saving') : t('menuId.buttons.save')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 663,
+      "cita": "\"save\": \"Guardar cambios\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Menu/Menus/menuId.tsx",
+      "linea": 418,
+      "cita": "<span className=\"text-sm font-semibold\">{t('menuId.fields.menuActive')}</span>"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 676,
+      "cita": "\"menuActive\": \"Menú activo\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Menu/Menus/menuId.tsx",
+      "linea": 286,
+      "cita": "toggleActiveMutation.mutate(checked)"
+    },
+    {
+      "paso": 6,
+      "archivo": "src/pages/Menu/Menus/menuId.tsx",
+      "linea": 387,
+      "cita": "{t('menuId.dialogs.deleteButton')}"
+    },
+    {
+      "paso": 6,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 710,
+      "cita": "\"deleteButton\": \"Eliminar menú\","
+    },
+    {
+      "paso": 6,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 711,
+      "cita": "\"deleteMessageNombre\": \"¿Eliminar «{{name}}»? Esta acción no se puede deshacer.\","
+    },
+    {
+      "paso": 6,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 712,
+      "cita": "\"deleteMessageAparatos\": \"¿Eliminar «{{name}}»? Los aparatos que lo tienen elegido dejan de mostrarlo; si era su único menú, vuelven a mostrar todos. Esta acción no se puede deshacer.\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "menu:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 207
+    },
+    {
+      "permiso": "menu:create",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 7007
+    },
+    {
+      "permiso": "menu:update",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 7023
+    },
+    {
+      "permiso": "menu:delete",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 7031
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: Nuevo menú no tiene candado en la pantalla; lo pide el SERVIDOR",
+      "archivo": "src/pages/Menu/Menus/Menus.tsx",
+      "linea": 58
+    },
+    {
+      "ruta": "Antes: crear menú llama a POST menus",
+      "archivo": "src/services/menu.service.ts",
+      "linea": 29
+    },
+    {
+      "ruta": "Antes: Resumen › Crear › Nuevo Menú abre menus/create (con menu:create)",
+      "archivo": "src/pages/Menu/MenuOverview.tsx",
+      "linea": 152
+    },
+    {
+      "ruta": "Antes: el menú Crear sale con menu:create",
+      "archivo": "src/pages/Menu/MenuOverview.tsx",
+      "linea": 146
+    },
+    {
+      "ruta": "Antes: textos Resumen, Crear y Nuevo Menú",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 33
+    },
+    {
+      "ruta": "Antes: texto Crear",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 15
+    },
+    {
+      "ruta": "Antes: texto Nuevo Menú",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 8
+    },
+    {
+      "ruta": "Antes: el formulario de una pantalla guarda con Guardar menú",
+      "archivo": "src/pages/Menu/Menus/createMenu.tsx",
+      "linea": 289
+    },
+    {
+      "ruta": "Antes: texto Guardar menú",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 619
+    },
+    {
+      "ruta": "Problema: Siguiente valida el nombre",
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 144
+    },
+    {
+      "ruta": "Problema: texto del nombre",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 631
+    },
+    {
+      "ruta": "Problema: sin días, Siguiente se apaga (el aviso de días nunca llega a salir por el botón)",
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 240
+    },
+    {
+      "ruta": "Problema: el nombre muestra su aviso debajo del campo",
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 303
+    },
+    {
+      "ruta": "Problema: horas a menos de una hora",
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 158
+    },
+    {
+      "ruta": "Problema: con horas inválidas sale el aviso en el paso",
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 512
+    },
+    {
+      "ruta": "Problema: texto de la hora",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 633
+    },
+    {
+      "ruta": "Problema: Siguiente apagado con hora o días inválidos",
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 621
+    },
+    {
+      "ruta": "Problema: error al crear",
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 134
+    },
+    {
+      "ruta": "Problema: texto Error al guardar",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 627
+    },
+    {
+      "ruta": "Problema: error al guardar cambios",
+      "archivo": "src/pages/Menu/Menus/menuId.tsx",
+      "linea": 196
+    },
+    {
+      "ruta": "Problema: error al borrar",
+      "archivo": "src/pages/Menu/Menus/menuId.tsx",
+      "linea": 242
+    },
+    {
+      "ruta": "Problema: texto Error al eliminar menú",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 727
+    },
+    {
+      "ruta": "T11-10: el panel reintenta una vez cualquier petición tras un error de red, sin llave",
+      "archivo": "src/api.ts",
+      "linea": 98
+    },
+    {
+      "ruta": "T11-10: el reintento",
+      "archivo": "src/api.ts",
+      "linea": 101
+    },
+    {
+      "ruta": "T11-10: crear un menú es un POST sin llave",
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 121
+    },
+    {
+      "ruta": "T11-10: editar es un PATCH con lo mismo (repetirlo deja lo mismo)",
+      "archivo": "src/services/menu.service.ts",
+      "linea": 37
+    },
+    {
+      "ruta": "T11-10: el error al crear",
+      "archivo": "src/pages/Menu/Menus/components/MenuWizardDialog.tsx",
+      "linea": 134
+    },
+    {
+      "ruta": "T11-12: borrar otra vez un menú que ya se borró lo rechaza el servidor (ya no existe), así que repetirlo no hace nada de más",
+      "archivo": "avoqado-server/src/services/dashboard/menu.dashboard.service.ts",
+      "linea": 803
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 6,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

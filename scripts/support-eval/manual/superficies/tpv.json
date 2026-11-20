@@ -1,0 +1,221 @@
+{
+  "app": "tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "superficies": [
+    {
+      "id": "nav:Activation",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1035
+    },
+    {
+      "id": "nav:AngelPayPayment",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2934
+    },
+    {
+      "id": "nav:Checkout",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1431
+    },
+    {
+      "id": "nav:FastPaymentEntry",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1407
+    },
+    {
+      "id": "nav:FloorPlan",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1536
+    },
+    {
+      "id": "nav:HistoricalPeriodDetail",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2227
+    },
+    {
+      "id": "nav:Home",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1179
+    },
+    {
+      "id": "nav:KioskCart",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/NavRoute.kt",
+      "linea": 252
+    },
+    {
+      "id": "nav:KioskMenu",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/NavRoute.kt",
+      "linea": 246
+    },
+    {
+      "id": "nav:KioskSuccess",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2896
+    },
+    {
+      "id": "nav:KioskWelcome",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2917
+    },
+    {
+      "id": "nav:Login",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1097
+    },
+    {
+      "id": "nav:Menu",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1640
+    },
+    {
+      "id": "nav:Messages",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2559
+    },
+    {
+      "id": "nav:MisSims",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2884
+    },
+    {
+      "id": "nav:MyCommissions",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2865
+    },
+    {
+      "id": "nav:MySales",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2853
+    },
+    {
+      "id": "nav:OrderList",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1743
+    },
+    {
+      "id": "nav:OrderingWelcome",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1503
+    },
+    {
+      "id": "nav:Payment",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1785
+    },
+    {
+      "id": "nav:PaymentTransactions",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 3089
+    },
+    {
+      "id": "nav:Payments",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2257
+    },
+    {
+      "id": "nav:RefundConfirmation",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2316
+    },
+    {
+      "id": "nav:Reports",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2206
+    },
+    {
+      "id": "nav:SaleCorrection",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2872
+    },
+    {
+      "id": "nav:SelfUpdate",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2609
+    },
+    {
+      "id": "nav:SerializedInventoryRegister",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2844
+    },
+    {
+      "id": "nav:SerializedSale",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2797
+    },
+    {
+      "id": "nav:Settings",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2156
+    },
+    {
+      "id": "nav:Shifts",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1776
+    },
+    {
+      "id": "nav:Splash",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1011
+    },
+    {
+      "id": "nav:SplitByPerson",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2668
+    },
+    {
+      "id": "nav:SplitByProduct",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2632
+    },
+    {
+      "id": "nav:SuperAdmin",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2165
+    },
+    {
+      "id": "nav:Support",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2550
+    },
+    {
+      "id": "nav:TableCheckout",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1599
+    },
+    {
+      "id": "nav:TableMenu",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1582
+    },
+    {
+      "id": "nav:TableOrder",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1568
+    },
+    {
+      "id": "nav:Tables",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1554
+    },
+    {
+      "id": "nav:Timeclock",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2705
+    },
+    {
+      "id": "nav:TrainingViewer",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2590
+    },
+    {
+      "id": "nav:Trainings",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2570
+    },
+    {
+      "id": "nav:pending_verifications",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2583
+    }
+  ]
+}

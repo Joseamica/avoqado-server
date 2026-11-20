@@ -1,0 +1,253 @@
+{
+  "pagina": "windows/cobro/cobrar-con-terminal",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 29,
+      "cita": "label = \"Cobrar\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 457,
+      "cita": "text = primaryActionLabel ?: \"Cobrar ${cartState.totalDisplay}\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 3070,
+      "cita": "text = \"Ver carrito\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/upsell/UpsellCashierStrip.kt",
+      "linea": 133,
+      "cita": "text = \"¿Algo más?\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/upsell/UpsellCashierStrip.kt",
+      "linea": 211,
+      "cita": "text = if (selected.isEmpty()) \"No, gracias\" else"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/RatingScreen.kt",
+      "linea": 91,
+      "cita": "text = \"¿Cómo fue tu experiencia?\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/RatingScreen.kt",
+      "linea": 121,
+      "cita": "Text(\"Omitir\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 138,
+      "cita": "text = \"Propina\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 391,
+      "cita": "text = \"Sin propina\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 2274,
+      "cita": "private fun enterInitialState(amount: Int) {"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 309,
+      "cita": "text = \"Cobrar con terminal\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TerminalSelectionScreen.kt",
+      "linea": 96,
+      "cita": "text = \"Seleccionar terminal\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 372,
+      "cita": "onTerminalSelected = { viewModel.selectTerminalAndPay(it) },"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 753,
+      "cita": "text = \"Esperando respuesta de la terminal\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 192,
+      "cita": "text = \"Venta nueva\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1978
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "La lista de terminales sin red dice TARJETA_SIN_RED",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 2473
+    },
+    {
+      "afirmacion": "Texto «Sin conexión: el cobro con tarjeta necesita internet…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 6312
+    },
+    {
+      "afirmacion": "El fallo de red de la lista se marca sinRed",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/TerminalPaymentService.kt",
+      "linea": 621
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "WINDOWS: la ventana abre maximizada",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Main.kt",
+      "linea": 98
+    },
+    {
+      "ruta": "WINDOWS: el tamaño de la ventana decide el diseño (WindowSizeClass del ancho real)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt",
+      "linea": 49
+    },
+    {
+      "ruta": "Diseño de tableta desde el ancho Medium (600 dp); más angosta, el de teléfono",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 159
+    },
+    {
+      "ruta": "Problema: sin terminales, la fila dice «No hay terminales conectadas · Reintentar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 321
+    },
+    {
+      "ruta": "Problema: «Reintentar» de la fila",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 326
+    },
+    {
+      "ruta": "Problema: la lista vacía dice «No hay terminales conectadas» con «Reintentar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 2465
+    },
+    {
+      "ruta": "Problema: botón «Reintentar» de la lista",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TerminalSelectionScreen.kt",
+      "linea": 140
+    },
+    {
+      "ruta": "WINDOWS: la pantalla del cliente va en un segundo monitor, si lo hay",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Main.kt",
+      "linea": 138
+    },
+    {
+      "ruta": "WINDOWS: el monitor montado cuenta como pantalla tocable",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/customerdisplay/CustomerDisplayManager.kt",
+      "linea": 259
+    },
+    {
+      "ruta": "Ajuste de la computadora «El cliente elige propina y calificación»",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/presentation/CustomerDisplaySheet.kt",
+      "linea": 118
+    },
+    {
+      "ruta": "Ese ajuste está apagado por omisión",
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayPrefs.kt",
+      "linea": 27
+    },
+    {
+      "ruta": "El cliente captura sólo con la pantalla montada, el ajuste prendido y la pantalla tocable",
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayState.kt",
+      "linea": 223
+    },
+    {
+      "ruta": "El cobro usa esa condición",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 302
+    },
+    {
+      "ruta": "Sólo con ella la caja espera; si no, califica y elige la propina la caja",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 266
+    },
+    {
+      "ruta": "Pantalla del cliente: el cliente califica",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 268
+    },
+    {
+      "ruta": "Pantalla del cliente: seguir sin calificación",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 270
+    },
+    {
+      "ruta": "Pantalla del cliente: el cliente elige la propina",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 289
+    },
+    {
+      "ruta": "Pantalla del cliente: seguir sin propina",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 291
+    },
+    {
+      "ruta": "Pantalla del cliente: la salida aparece a los 8 segundos (nadie cambia el valor por omisión)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/WaitingForCustomerScreen.kt",
+      "linea": 54
+    },
+    {
+      "ruta": "Pantalla del cliente: el botón de salida sólo con canSkip",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/WaitingForCustomerScreen.kt",
+      "linea": 112
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado; sin pantalla táctil ni segundo monitor)",
+    "version": "2.25.41-escritorio: paquete de prueba Avoqado.POS.Prueba armado del sourceRef c07a2bbe con :pos:empaquetarWindows (avq-verify en la nube), en %TEMP%\\avq-tactil-soporte-windows con datos propios, contra el segundo SERVIDOR de QA del 3005 (base desechable avoqado_jornada_vuelta2, llaves de tarjetas de regalo de prueba) por Tailscale; sesión owner@owner.com (Propietario) en Avoqado Full de esa base. Terminal: PAX con la copia de QA com.jaac.avoqado_tpv.sandbox.soportewin 2.22.0-sandbox (avoqado-tpv 8db3c1d3, sha256 dba5dd4d…ac8f), Blumon de pruebas",
+    "apkSha256": "2d24ce533eaf065e54305d0603837bf854bcc68f421c1459e5ff0d95d88ff4bc",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-terminal/01-v2-03-carrito-10.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-terminal/02-v2-07-tras-f12.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-terminal/03-v2-08-propina.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-terminal/04-v2-11-tras-reintentar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-terminal/05-v2-12-seleccionar-terminal.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-terminal/06-v2-13-esperando.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-terminal/07-pax-q09-pax-tras-envio.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-terminal/08-pax-q10-tras-tarjeta.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-terminal/09-v2-14-pos-tras-cobro.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-con-terminal/10-sw42-no-hay-terminales-reintentar.png"
+    ],
+    "filasCreadas": [
+      "Base desechable avoqado_jornada_vuelta2 (Avoqado Full cmwmqbd4z001iwa3heokabev3): Order cmwmty92j000awavswpksym8g FAST-1795049207657 $10.00 cobrada con tarjeta en la PAX (Blumon de pruebas, tarjeta de laboratorio por contactless)"
+    ],
+    "nota": "Vuelta 2. Teclado $10 → F12 (= Cobrar) → ¿Cómo fue tu experiencia? → Omitir → Propina → Sin propina (en esta base no hay sugerencias, no salió ¿Algo más?; en la vuelta 1 sí: foto 02 de cobrar-en-efectivo). La fila *Cobrar con terminal* decía «No hay terminales conectadas · Reintentar» hasta que la TPV abrió su socket; *Reintentar* la trajo (foto 04). *Seleccionar terminal* → «TPV Desarrollo (Android) 2841548417» → «Procesando pago… Esperando respuesta de la terminal» con *Cancelar*. **Paso 5 (redacción del controlador) confirmado:** la PAX abrió «Seleccionar Cuenta · Paso 3 de 3 · Total $10.00» con *Método de pago* y el botón *Tarjeta* (no hubo cuenta que elegir: el comercio de pruebas tiene una sola) → *Tarjeta* → cobró sola por contactless → la PAX mostró «Total pagado $10.00» y el POS «$10.00 Tarjeta» con *Venta nueva*. puede-cobrar PAX = 0 antes del cobro. Sin internet no se recorrió."
+  },
+  "codex": {
+    "lote": 2,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

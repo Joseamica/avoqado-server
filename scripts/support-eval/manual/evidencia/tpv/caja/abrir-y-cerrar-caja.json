@@ -1,0 +1,220 @@
+{
+  "pagina": "tpv/caja/abrir-y-cerrar-caja",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 947,
+      "cita": "label = \"Turnos de caja\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 484,
+      "cita": "Text(\"Abrir caja\", style = MaterialTheme.typography.bodyLarge)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/LocalCajaContent.kt",
+      "linea": 68,
+      "cita": "Text(\"Abrir nueva caja\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 139,
+      "cita": "label = { Text(\"Efectivo Inicial\") }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 165,
+      "cita": "text = \"Montos sugeridos:\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 225,
+      "cita": "text = \"Abrir caja\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 401,
+      "cita": "Text(\"Cerrar caja\", style = MaterialTheme.typography.bodyLarge)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/LocalCajaContent.kt",
+      "linea": 64,
+      "cita": "Text(\"Cerrar caja\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 510,
+      "cita": "text = \"Arqueo de caja\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 530,
+      "cita": "label = { Text(\"Efectivo total contado\") }"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 594,
+      "cita": "is CashCountParseResult.Success -> \"Incluye el fondo inicial\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 556,
+      "cita": "text = \"Cerrar y conciliar\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 568,
+      "cita": "text = \"Cerrar sin conteo\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 501,
+      "cita": "Text(\"Sí, cerrar sin conteo\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
+      "linea": 415,
+      "cita": "text = \"Cerrar caja\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt",
+      "linea": 153,
+      "cita": "return Result.Success(proyectar(row))"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/CajaLocalPresentation.kt",
+      "linea": 18,
+      "cita": "hasLocalClose -> \"Cierre pendiente\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/CajaLocalPresentation.kt",
+      "linea": 17,
+      "cita": "session.closeStatus == \"CONFIRMED\" -> \"Caja cerrada\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/LocalCajaContent.kt",
+      "linea": 66,
+      "cita": "Text(\"Listo\")"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "tpv-shifts:create",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 1354
+    },
+    {
+      "permiso": "tpv-shifts:close",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 1535
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Caja guardada en el aparato sin red: «Sin conexión · guardado en este aparato»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/LocalCajaContent.kt",
+      "linea": 57
+    },
+    {
+      "afirmacion": "Abrir y cerrar se guardan primero en la terminal y la sincronización los envía después",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt",
+      "linea": 244
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: «Turnos de caja» sólo si el negocio usa turnos",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 1020
+    },
+    {
+      "ruta": "Inicio → Turnos de caja → nav:Shifts",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1250
+    },
+    {
+      "ruta": "El cierre local no trae totales (financialTotalsKnown = false)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt",
+      "linea": 1129
+    },
+    {
+      "ruta": "Problema: «Caja pendiente de revisión»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/CajaLocalPresentation.kt",
+      "linea": 16
+    },
+    {
+      "ruta": "Problema: «Revisar registros pendientes»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/LocalCajaContent.kt",
+      "linea": 74
+    },
+    {
+      "ruta": "Problema: «Cierre guardado en este aparato»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 525
+    },
+    {
+      "ruta": "Problema: «Pendiente de confirmación. No es un corte definitivo.»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt",
+      "linea": 526
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "PAX A910S del laboratorio del Alien (serial 2841548417, terminal AVQD-2841548417 de Avoqado Full)",
+    "version": "2.16.0-sandbox (125), copia de QA com.jaac.avoqado_tpv.sandbox.soportewa compilada en v2.16.0 (031f14db), Blumon de pruebas, contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
+    "apkSha256": "001675e37809b69d6290341cf74f3601306fc9df2072f1dc0f271436710fc401",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/10-si-cerrar-sin-conteo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/11-efectivo-total-contado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/12a-tras-cerrar-y-conciliar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/12b-resultado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/12c-tras-espera.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/12d-cierre-pendiente-detalles.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/13-registros-que-el-cierre-espera.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/2-caja-abierta-cerrar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/3-confirmar-cerrar-caja-sin-arqueo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/4-tras-cerrar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/5-caja-cerrada-abrir-nueva.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/6-abrir-caja-efectivo-inicial.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/7-caja-abierta.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/8-sin-conexion-guardado-en-este-aparato.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/caja/abrir-y-cerrar-caja/9-arqueo-de-caja.png"
+    ],
+    "filasCreadas": [
+      "Shift cmwltaqpa00dowa1n1njdo9db — turno ajeno de Avoqado Full (abierto 07:40 UTC por Manager), cerrado aquí sin arqueo",
+      "Shift cmwmk2da800ukwayda8cibwsc — abierto aquí con $500; su cierre con conteo $530 quedó pendiente en este aparato",
+      "VenueSettings de Avoqado Full: cashReconciliationEnabled true 21:02 UTC y de regreso a false al terminar"
+    ],
+    "nota": "Avoqado Full, Admin Venue 1. Pasos 1-3 y 6 sin arqueo (fotos 1-7): *Turnos de caja* → «Caja abierta» → *Cerrar caja* → confirmación *Cerrar caja* (sin *Arqueo de caja* porque el negocio tenía la conciliación apagada) → «Cierre pendiente» → «Caja cerrada» → *Abrir nueva caja* → *Efectivo Inicial* $500 (monto sugerido) → *Abrir caja*. Sin internet: «Sin conexión · guardado en este aparato» (foto 8). Pasos 4-5 con arqueo (fotos 9-13): se prendió un rato la conciliación de caja de Avoqado Full (VenueSettings.cashReconciliationEnabled, ya regresada a false), sale *Arqueo de caja* con *Efectivo total contado* («Incluye el fondo inicial»), *Cerrar y conciliar*, *Cerrar sin conteo* → «¿Cerrar sin conteo?» con *Sí, cerrar sin conteo* / *Volver al conteo*; con $530 → *Cerrar y conciliar* → «Cierre pendiente» con *Listo* y, en *Ver detalles*, *Revisar registros pendientes*. Ese segundo cierre se quedó pendiente en este aparato: espera 3 cobros de Mesas que el SERVIDOR rechazó (STALE_DEVICE_SEQUENCE, ver cobrar-cuenta-de-mesa); el turno lo cerró después la copia 2.13.2 (abrir-y-cerrar-caja-anterior). Ojo: el primer turno cerrado (cmwltaqpa…, abierto 01:40 por Manager) era de otra prueba de Avoqado Full con ventas de hoy."
+  },
+  "codex": {
+    "lote": 1,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

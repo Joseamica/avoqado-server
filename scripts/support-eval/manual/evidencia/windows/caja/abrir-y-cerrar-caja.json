@@ -1,0 +1,230 @@
+{
+  "pagina": "windows/caja/abrir-y-cerrar-caja",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 57,
+      "cita": "label = \"Más\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 699,
+      "cita": "label = \"Caja\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1005,
+      "cita": "val isTablet = maxWidth >= 600.dp"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerViewModel.kt",
+      "linea": 31,
+      "cita": "CURRENT(\"Turno en curso\"),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 855,
+      "cita": "text = \"Abrir caja\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/OpenDrawerSheet.kt",
+      "linea": 80,
+      "cita": "label = { Text(\"Monto inicial ($)\") },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/OpenDrawerSheet.kt",
+      "linea": 106,
+      "cita": "text = \"Abrir caja\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 1059,
+      "cita": "text = if (isPrintingCorte) \"Imprimiendo…\" else \"Corte parcial\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 807,
+      "cita": "onPrintPartial = { showPartialReport = true },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 1080,
+      "cita": "text = \"Cerrar caja\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CloseDrawerSheet.kt",
+      "linea": 134,
+      "cita": "label = { Text(\"Conteo real ($)\") },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/ConteoSospechoso.kt",
+      "linea": 54,
+      "cita": "\"Cuenta los billetes y monedas que hay dentro del cajón en este momento, incluido el \""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CloseDrawerSheet.kt",
+      "linea": 173,
+      "cita": "text = \"Cerrar caja\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/ConteoSospechoso.kt",
+      "linea": 48,
+      "cita": "const val TITULO = \"¿Contaste lo que quedó dentro del cajón?\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/ConteoSospechoso.kt",
+      "linea": 49,
+      "cita": "const val VOLVER_A_CONTAR = \"Volver a contar\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/ConteoSospechoso.kt",
+      "linea": 50,
+      "cita": "const val CERRAR_ASI = \"Cerrar con este conteo\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 164,
+      "cita": "text = if (isPartial) \"Corte parcial\" else \"Corte de caja\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/DailyReportView.kt",
+      "linea": 465,
+      "cita": "text = if (isPrinting) \"Imprimiendo…\" else \"Imprimir corte\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 353,
+      "cita": "showDailyReport = true"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3276
+    },
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3322
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "WINDOWS: la base Room vive en la carpeta de datos de la computadora (BundledSQLiteDriver)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/core/di/DatabaseModule.kt",
+      "linea": 46
+    },
+    {
+      "afirmacion": "La apertura se guarda en Room y en la cola del cajón ANTES de tocar la red",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/CashDrawerRepository.kt",
+      "linea": 1707
+    },
+    {
+      "afirmacion": "Texto «Caja abierta sin conexión: se sincronizará al recuperar la red»",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 1574
+    },
+    {
+      "afirmacion": "El cierre se guarda y se encola antes de la red",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/CashDrawerRepository.kt",
+      "linea": 2109
+    },
+    {
+      "afirmacion": "El corte de un cierre sin confirmar lo dice (sinConfirmar)",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 352
+    },
+    {
+      "afirmacion": "Texto «Sin conexión: este corte sólo incluye lo registrado en este aparato…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/CorteTicketBuilder.kt",
+      "linea": 36
+    },
+    {
+      "afirmacion": "Al volver la red, el sincronizador manda primero la cola del cajón",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/PaymentSyncService.kt",
+      "linea": 424
+    },
+    {
+      "afirmacion": "El sincronizador empieza por el cajón (sincronizarCajonPrimero)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/PaymentSyncService.kt",
+      "linea": 643
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "WINDOWS: la ventana abre maximizada",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Main.kt",
+      "linea": 98
+    },
+    {
+      "ruta": "WINDOWS: el tamaño de la ventana decide el diseño (WindowSizeClass del ancho real)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt",
+      "linea": 49
+    },
+    {
+      "ruta": "Antes: «Caja» sale en Más con canManageCashDrawer",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 695
+    },
+    {
+      "ruta": "Antes: canManageCashDrawer = cajero, gerente, administrador, dueño (y superadmin)",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 329
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado; sin pantalla táctil ni segundo monitor)",
+    "version": "2.25.41-escritorio: paquete de prueba Avoqado.POS.Prueba armado del sourceRef c07a2bbe con :pos:empaquetarWindows (avq-verify en la nube), en %TEMP%\\avq-tactil-soporte-windows con datos propios, contra el SERVIDOR local del 3000 de la Mac por Tailscale; sesión owner@owner.com (Propietario)",
+    "apkSha256": "2d24ce533eaf065e54305d0603837bf854bcc68f421c1459e5ff0d95d88ff4bc",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/abrir-y-cerrar-caja/01-sw10-mas-empty.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/abrir-y-cerrar-caja/02-sw11-caja.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/abrir-y-cerrar-caja/03-sw12-abrir-form.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/abrir-y-cerrar-caja/04-sw13-monto-inicial.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/abrir-y-cerrar-caja/05-sw14-caja-abierta.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/abrir-y-cerrar-caja/06-sw94-corte-parcial.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/abrir-y-cerrar-caja/07-sw95-cerrar-caja-form.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/abrir-y-cerrar-caja/08-sw96-conteo-6450.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/abrir-y-cerrar-caja/09-sw97-contaste.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/abrir-y-cerrar-caja/10-sw98-volver-a-contar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/abrir-y-cerrar-caja/11-sw99-corte-de-caja.png"
+    ],
+    "filasCreadas": [
+      "CashDrawerSession cmwmkkros00xvwayddw0m81ue (Avoqado Empty): abierta 14:24 con $500, cerrada 14:43 con conteo $650.00 (esperado $659.50, faltante $9.50)",
+      "CashDrawerEvent OPEN cmwmkkros00xwwayd17weltdj y CLOSE cmwml97m8012nwayd5flo70np",
+      "Terminal cmwmkjcl300xpwayd1zapag7r «Avoqado Windows 11» (Avoqado Empty) y cmwmkhwr400xjwaydzdjyzp8c «Avoqado Windows 11 (15)» (Avoqado Full): el registro del aparato al iniciar sesión"
+    ],
+    "nota": "Se hizo en Avoqado Empty (sucursal del mismo dueño) para no tocar la caja abierta de Avoqado Full que usaba la jornada de la TPV/ANDROID. Ventana maximizada (ancha): Más › Caja abre Turno de caja con «Turno en curso» ya elegido a la izquierda. Abrir caja → Monto inicial ($) 500 → Abrir caja ($500.00, «Abierta 18 nov., 14:24 por Main Owner · Avoqado Windows 11»). Corte parcial muestra Movimientos de efectivo e Imprimir corte. Cerrar caja → Conteo real ($) 64.50 (igual al efectivo cobrado) → Cerrar caja → «¿Contaste lo que quedó dentro del cajón?» con «Cerrar con este conteo» y «Volver a contar» → Volver a contar (limpia el campo) → 650 → Cerrar caja → Corte de caja con Faltante $9.50 e Imprimir corte (no se tocó: sin impresora). La sección «Sin internet» no se recorrió: no se apaga la red del Alienware."
+  },
+  "codex": {
+    "lote": 2,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

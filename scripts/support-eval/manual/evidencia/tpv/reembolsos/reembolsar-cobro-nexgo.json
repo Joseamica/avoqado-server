@@ -1,0 +1,194 @@
+{
+  "pagina": "tpv/reembolsos/reembolsar-cobro-nexgo",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 958,
+      "cita": "label = \"Pagos\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsScreen.kt",
+      "linea": 127,
+      "cita": "title = \"Historial de Pagos\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/components/PaymentDetailBottomSheet.kt",
+      "linea": 100,
+      "cita": "text = \"Detalle del Pago\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/components/PaymentDetailBottomSheet.kt",
+      "linea": 288,
+      "cita": "text = \"Procesar Reembolso\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/refund/presentation/RefundConfirmationScreen.kt",
+      "linea": 145,
+      "cita": "title = \"Confirmar Reembolso\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/refund/presentation/RefundConfirmationScreen.kt",
+      "linea": 255,
+      "cita": "text = \"Monto a Reembolsar\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2362,
+      "cita": "allowPartialRefund = BuildConfig.ENABLE_PAX_SDK"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/refund/presentation/RefundConfirmationScreen.kt",
+      "linea": 416,
+      "cita": "text = \"Motivo del Reembolso\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/refund/presentation/RefundConfirmationScreen.kt",
+      "linea": 529,
+      "cita": "text = \"Procesar Reembolso ${currencyFormatter.format(refundAmount)}\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/refund/presentation/RefundConfirmationScreen.kt",
+      "linea": 517,
+      "cita": "text = \"Procesando...\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2359,
+      "cita": "isProcessing = isNexgoRefundProcessing"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2464,
+      "cita": "Toast.makeText(context, message, Toast.LENGTH_LONG).show()"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2469,
+      "cita": "navController.safePopBackStack()"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:refund",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsViewModel.kt",
+      "linea": 671
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red no se encuentra la venta en AngelPay: «No se pudo consultar la venta en AngelPay (…). No se reembolsó nada.»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/usecase/RecordAngelPayRefundUseCase.kt",
+      "linea": 237
+    },
+    {
+      "afirmacion": "AngelPay devolvió y Avoqado no registró: «quedó guardada en este equipo y se completará sola. NO vuelvas a reembolsar.»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2489
+    },
+    {
+      "afirmacion": "La devolución pendiente queda en la cola de devoluciones",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/repository/RefundQueueRepositoryImpl.kt",
+      "linea": 31
+    },
+    {
+      "afirmacion": "Rechazo definitivo: «El servidor rechazó el registro… Avisa al supervisor…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2484
+    },
+    {
+      "afirmacion": "Ni servidor ni equipo: «…ni en el servidor ni en este equipo. NO vuelvas a reembolsar. Avisa al supervisor…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2492
+    },
+    {
+      "afirmacion": "Otro fallo: «Backend no registró el reembolso — contacta soporte.»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2494
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Pagos → detalle → nav:RefundConfirmation → cancelación AngelPay (Nexgo, sin pantalla de cobro)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2417
+    },
+    {
+      "ruta": "Antes: corte a las 23:00 (−06:00) del día de la venta; desde las 23:00, el del día siguiente",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/processor/AngelPayCorte.kt",
+      "linea": 41
+    },
+    {
+      "ruta": "Antes: hora del corte",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/processor/AngelPayCorte.kt",
+      "linea": 18
+    },
+    {
+      "ruta": "Antes: después del corte no se intenta desde la terminal (devolución posterior apagada)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/processor/AngelPayCorte.kt",
+      "linea": 21
+    },
+    {
+      "ruta": "Problema: el mensaje del corte",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/processor/AngelPayCorte.kt",
+      "linea": 25
+    },
+    {
+      "ruta": "Problema: sin permiso de reembolsos",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsViewModel.kt",
+      "linea": 689
+    },
+    {
+      "ruta": "Problema: efectivo",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsViewModel.kt",
+      "linea": 730
+    },
+    {
+      "ruta": "Problema: otro dispositivo",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsViewModel.kt",
+      "linea": 719
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "Nexgo N86 del laboratorio del Alien (terminal de Avoqado Full)",
+    "version": "2.16.0-nexgo (125), copia de QA com.jaac.avoqado_tpv.sandbox.soportewa compilada en v2.16.0 (031f14db), AngelPay QA (cuenta AvoqadoComercio (QA)), contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
+    "apkSha256": "1e1d2be8a01c4850a4d82ead8ec3bbb4938377028a647ced09541a6fd02d9a54",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-nexgo/1-historial-de-pagos.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-nexgo/2-detalle-del-pago.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-nexgo/3-confirmar-reembolso.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-nexgo/4-motivo-procesar-reembolso.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-nexgo/5-procesando-grabacion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-nexgo/6a-devolucion-sin-registrar-momentanea-grabacion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-nexgo/6b-cancelacion-aprobada-historial-grabacion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-nexgo/7-historial-reembolsado.png"
+    ],
+    "filasCreadas": [
+      "Payment cmwmpxvny02o0waydrngh1k47 — REFUND -$10.00 CREDIT_CARD de la Order cmwmplo5701zzwaydmyyof7vc (AngelPay QA, ref 261118164455)"
+    ],
+    "nota": "*Pagos* → *Historial de Pagos* → el cobro de $10.00 (Nexgo·AngelPay) → *Detalle del Pago* → *Procesar Reembolso* → *Confirmar Reembolso* con *Monto a Reembolsar* $10.00 (el total, sin reembolso parcial) y *Motivo del Reembolso* «Solicitud del cliente» → *Procesar Reembolso $10.00* → «Procesando...» → toast «cancelación aprobada (ref: 261118164455)» → vuelve a *Historial de Pagos* con el cobro «Reembolsado». No pidió la tarjeta. Mientras procesaba salió un momento arriba «1 devolucion sin registrar · Se registrarán solas al recuperar la conexión» y se quitó solo: el SERVIDOR sí lo registró (Payment cmwmpxvny…, −$10)."
+  },
+  "codex": {
+    "lote": 1,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

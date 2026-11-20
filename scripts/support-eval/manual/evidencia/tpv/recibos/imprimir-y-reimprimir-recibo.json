@@ -1,0 +1,134 @@
+{
+  "pagina": "tpv/recibos/imprimir-y-reimprimir-recibo",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 2275,
+      "cita": "text = if (isPrinting) \"...\" else \"Imprimir\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPaySuccessContent.kt",
+      "linea": 583,
+      "cita": "text = if (isPrinting) \"...\" else \"Imprimir\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 958,
+      "cita": "label = \"Pagos\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsScreen.kt",
+      "linea": 140,
+      "cita": "contentDescription = \"Seleccionar para imprimir\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsScreen.kt",
+      "linea": 395,
+      "cita": "text = \"Toca los pagos para seleccionarlos (máx. 20)\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsScreen.kt",
+      "linea": 175,
+      "cita": "Text(\"${selectedPaymentsForPrint.size}\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsScreen.kt",
+      "linea": 884,
+      "cita": "title = { Text(\"Imprimir pagos\") }"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsScreen.kt",
+      "linea": 923,
+      "cita": "text = \"Individual\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsScreen.kt",
+      "linea": 952,
+      "cita": "text = \"Resumen\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsScreen.kt",
+      "linea": 984,
+      "cita": "Text(\"Imprimir\")"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:read",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 985
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Reimprimir carga el historial: getPaymentHistory → POST tpv/venues/{venueId}/payments (el servidor pide payments:read)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsViewModel.kt",
+      "linea": 193
+    },
+    {
+      "ruta": "Antes Nexgo: sólo imprime el N86",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 433
+    },
+    {
+      "ruta": "Antes PAX: los botones del recibo sólo con «Opciones de Recibo»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 2219
+    },
+    {
+      "ruta": "Antes PAX: el interruptor «Opciones de Recibo» en Configuración de Pago",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt",
+      "linea": 304
+    },
+    {
+      "ruta": "Antes PAX: imprimir sólo con impresora disponible",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 584
+    },
+    {
+      "ruta": "Problema PAX: «No se pudo imprimir»: el cobro sí quedó aprobado",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1009
+    },
+    {
+      "ruta": "Problema PAX: «El cobro sí quedó aprobado.»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1005
+    },
+    {
+      "ruta": "Problema PAX: «Volver al recibo»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1011
+    },
+    {
+      "ruta": "Problema Nexgo: «Esta terminal no tiene impresora»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 4950
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 1,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

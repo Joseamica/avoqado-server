@@ -1,0 +1,102 @@
+{
+  "pagina": "tpv/configuracion/actualizar-configuracion",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 1034,
+      "cita": "onSettingsClick = { showSettingsModal = true }"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/SettingsBottomSheet.kt",
+      "linea": 149,
+      "cita": "label = \"Configuración\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt",
+      "linea": 446,
+      "cita": "title = \"Acciones\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt",
+      "linea": 462,
+      "cita": "label = \"Actualizar Configuración\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt",
+      "linea": 463,
+      "cita": "description = \"Obtener ajustes del servidor\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsViewModel.kt",
+      "linea": 152,
+      "cita": "message = \"Configuración actualizada\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsScreen.kt",
+      "linea": 454,
+      "cita": "label = \"Imprimir Prueba\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsViewModel.kt",
+      "linea": 677,
+      "cita": "message = \"Recibo de prueba impreso\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "tpv-terminal:settings",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 644
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: sin el permiso, «Configuración» sale apagado",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/SettingsBottomSheet.kt",
+      "linea": 151
+    },
+    {
+      "ruta": "Antes: onSettings sólo con el permiso",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 1200
+    },
+    {
+      "ruta": "Problema: «Error de conexión»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsViewModel.kt",
+      "linea": 169
+    },
+    {
+      "ruta": "Problema: «Error al actualizar: …»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsViewModel.kt",
+      "linea": 160
+    },
+    {
+      "ruta": "Problema: «Error al imprimir: …»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/settings/presentation/SettingsViewModel.kt",
+      "linea": 685
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 5,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

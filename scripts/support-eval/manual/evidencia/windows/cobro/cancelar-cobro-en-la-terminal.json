@@ -1,0 +1,306 @@
+{
+  "pagina": "windows/cobro/cancelar-cobro-en-la-terminal",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 753,
+      "cita": "text = \"Esperando respuesta de la terminal\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 764,
+      "cita": "text = \"Cancelar\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 391,
+      "cita": "onCancel = { viewModel.cancelarVenta() }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 81,
+      "cita": "const val TEXTO_CANCELANDO = \"Cancelando el cobro…\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 1193,
+      "cita": "text = CancelacionDeCobro.TEXTO_CANCELANDO,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 5001,
+      "cita": "is com.avoqado.pos.payment.data.EstadoDeCancelacion.NoSeCobroOrdenPendiente -> terminarLaCancelacion()"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 5003,
+      "cita": "is com.avoqado.pos.payment.data.EstadoDeCancelacion.SeCobro -> aplicarElCobroQueSiOcurrio(id)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 233,
+      "cita": "const val SE_COBRO_AL_FINAL = \"La terminal sí cobró este pago: la venta queda pagada.\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 515,
+      "cita": "message = com.avoqado.pos.payment.domain.CancelacionDeCobro.SE_COBRO_AL_FINAL,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 5036,
+      "cita": "applyCardCharged(outcome.copy(requestId = requestId), total, trasCancelar = true)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 82,
+      "cita": "const val TITULO_PENDIENTE = \"Cancelación pendiente\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 1257,
+      "cita": "text = CancelacionDeCobro.TITULO_PENDIENTE,"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 84,
+      "cita": "\"La terminal todavía no confirma que el cobro se detuvo. La venta se cancelará sola en cuanto conste que no se cobró.\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 1296,
+      "cita": "BotonDeclararNoCobrado(enabled = accionesDeRedHabilitadas && !declarando, onClick = { pedirConfirmacionDeclaracion = true })"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 411,
+      "cita": "onDeclararNoCobrado = { viewModel.declararDesdeCancelacion() }.takeIf { objetivo != null },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 138,
+      "cita": "const val DECLARACION_CONFIRMAR = \"Sí, no se cobró\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 416,
+      "cita": "pinDeGerente?.takeIf { it.origen == OrigenDeLaDeclaracion.CANCELACION_PENDIENTE }?.let { peticion ->"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 1201,
+      "cita": "Text(CancelacionDeCobro.BOTON_SALIR_PENDIENTE)"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 396,
+      "cita": "CancelandoCobroView(onSalir = { viewModel.salirDejandoPendiente() })"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 537,
+      "cita": "com.avoqado.pos.sync.presentation.CancelacionesPendientesBanner { showQuarantineSheet = true }"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/sync/presentation/QuarantineSheet.kt",
+      "linea": 521,
+      "cita": "if (pendientes.isEmpty()) return"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 242,
+      "cita": "fun bannerPendientes(cuantas: Int): String = \"Cancelaciones pendientes: $cuantas\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/sync/presentation/QuarantineSheet.kt",
+      "linea": 122,
+      "cita": "title = \"Operaciones por revisar\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/sync/presentation/QuarantineSheet.kt",
+      "linea": 290,
+      "cita": "if (cancelaciones.isNotEmpty()) item { SeccionDeRevision(\"Cancelaciones pendientes\") }"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/sync/presentation/QuarantineSheet.kt",
+      "linea": 308,
+      "cita": "AccionDeRevision(text = if (consultando) \"Consultando…\" else com.avoqado.pos.payment.domain.CancelacionDeCobro.BOTON_VOLVER_A_CONSULTAR"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1990
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Si aparece «Sin conexión en esta tablet: la cancelación se enviará en cuanto vuelva la red…»: la intención vive en el equipo (el texto dice «tablet» también en Windows)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 92
+    },
+    {
+      "afirmacion": "Si aparece el aviso: la intención se guarda en las preferencias del equipo",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/CancelacionesDeCobroStore.kt",
+      "linea": 161
+    },
+    {
+      "afirmacion": "Si aparece el aviso: WINDOWS: las preferencias del equipo se guardan en la carpeta de datos de esta computadora (shared_prefs)",
+      "archivo": "desktop/plataforma/src/main/kotlin/com/avoqado/escritorio/ContextoDeEscritorio.kt",
+      "linea": 30
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: cancelar pasa por /terminal-payment/cancel (payments:create)",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1988
+    },
+    {
+      "ruta": "Antes: declarar «no se cobró» pide payments:reconcile-uncharged (si no, PIN de gerente)",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 2037
+    },
+    {
+      "ruta": "Antes: la orden no se toca mientras no conste que no se cobró",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 13
+    },
+    {
+      "ruta": "Si aparece: terminal libre → ya no se cancela sola: hay que declararlo",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 90
+    },
+    {
+      "ruta": "Si aparece: «No se cobró» en la fila (terminal libre, con red y con solicitud)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 105
+    },
+    {
+      "ruta": "Si aparece: «No se cobró» en la fila de la cancelación",
+      "archivo": "app/src/main/java/com/avoqado/pos/sync/presentation/QuarantineSheet.kt",
+      "linea": 305
+    },
+    {
+      "ruta": "Si aparece: la cancelación no se guardó en el aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 230
+    },
+    {
+      "ruta": "Problema: venta dividida: se lee el saldo tras la tarjeta",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 4083
+    },
+    {
+      "ruta": "Problema: venta dividida: el saldo lo dice el servidor",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 4086
+    },
+    {
+      "ruta": "Problema: cobró pero no se pudo confirmar → pantalla del cobro sin confirmar",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 5040
+    },
+    {
+      "ruta": "Problema: cancelar la orden pide orders:cancel-unpaid",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1024
+    },
+    {
+      "ruta": "Problema: sólo se borra la orden que creó este cobro",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 4651
+    },
+    {
+      "ruta": "Problema: mesa o cuenta que ya existía: no se borra la orden",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 867
+    },
+    {
+      "ruta": "Problema: sin borrarOrden, al constar que no se cobró sólo se cierra la intención",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/CancelacionDeCobroCoordinator.kt",
+      "linea": 284
+    },
+    {
+      "ruta": "Problema: si la terminal sí cobró, el pago se aplica a la cuenta (también tras cancelar)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 5036
+    },
+    {
+      "ruta": "Problema: el desenlace «sí cobró» aplica el cobro que sí ocurrió",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 5003
+    },
+    {
+      "ruta": "Problema: con el saldo cubierto, la cuenta sale pagada; si no, sigue con lo que falte",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
+      "linea": 170
+    },
+    {
+      "ruta": "Problema: sin el permiso (403) el borrado se reintenta y queda pendiente",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt",
+      "linea": 341
+    },
+    {
+      "ruta": "Problema: queda pendiente en Operaciones por revisar",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/CancelacionDeCobroCoordinator.kt",
+      "linea": 322
+    },
+    {
+      "ruta": "Problema: la sección de cancelaciones no depende del rol (no está bajo canResolve)",
+      "archivo": "app/src/main/java/com/avoqado/pos/sync/presentation/QuarantineSheet.kt",
+      "linea": 111
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado; sin pantalla táctil ni segundo monitor)",
+    "version": "2.25.41-escritorio: paquete de prueba Avoqado.POS.Prueba armado del sourceRef c07a2bbe con :pos:empaquetarWindows (avq-verify en la nube), en %TEMP%\\avq-tactil-soporte-windows con datos propios, contra el segundo SERVIDOR de QA del 3005 (base desechable avoqado_jornada_vuelta2, llaves de tarjetas de regalo de prueba) por Tailscale; sesión owner@owner.com (Propietario) en Avoqado Full de esa base. Terminal: PAX con la copia de QA com.jaac.avoqado_tpv.sandbox.soportewin 2.22.0-sandbox (avoqado-tpv 8db3c1d3, sha256 dba5dd4d…ac8f), Blumon de pruebas",
+    "apkSha256": "2d24ce533eaf065e54305d0603837bf854bcc68f421c1459e5ff0d95d88ff4bc",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cancelar-cobro-en-la-terminal/01-v2-15-esperando-cancelar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cancelar-cobro-en-la-terminal/02-pax-q12-pax-tras-cancelar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cancelar-cobro-en-la-terminal/03-v2-16-tras-cancelar.png"
+    ],
+    "filasCreadas": [
+      "Ninguna venta: el cobro cancelado de $1.80 no creó orden ni pago (solicitud de terminal 62966aa0-4ab0-471d-a385-b5352777b444, POST terminal-payment/cancel 200)"
+    ],
+    "nota": "Vuelta 2. Venta de teclado $1.80 → F12, Omitir, Sin propina → F4, F4 → «Esperando respuesta de la terminal» → *Cancelar* (con la PAX todavía en *Método de pago*, sin tarjeta). El POS regresó al carrito con la venta intacta («Cobrar $1.80»): consta que no se cobró. La PAX mostró «Error en el Pago · El POS canceló este cobro. No se cobró.» con *Cancelar*. «Cancelando el cobro…» pasó demasiado rápido para la foto. No se vieron los pasos condicionales 3-6 (Cancelación pendiente, *No se cobró*, *Salir (queda pendiente)*, la banda «Cancelaciones pendientes» y *Volver a consultar*): salen sólo si la terminal no contesta. puede-cobrar PAX = 0 antes."
+  },
+  "codex": {
+    "lote": 7,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

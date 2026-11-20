@@ -1,0 +1,75 @@
+{
+  "pagina": "tpv/sesion/entrar-y-cambiar-usuario",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/authentication/presentation/LoginScreen.kt",
+      "linea": 115,
+      "cita": "text = \"Ingresa tu PIN\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/authentication/presentation/LoginScreen.kt",
+      "linea": 184,
+      "cita": "text = \"Ir\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/authentication/presentation/LoginScreen.kt",
+      "linea": 81,
+      "cita": "val isPinComplete = pin.length >= 4"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 1034,
+      "cita": "onSettingsClick = { showSettingsModal = true }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/AvoqadoTopBar.kt",
+      "linea": 152,
+      "cita": "imageVector = Icons.Default.Settings"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/SettingsBottomSheet.kt",
+      "linea": 108,
+      "cita": "label = \"Cambiar usuario\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1388,
+      "cita": "navController.navigate(NavRoute.Login.route) {"
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Problema: cuenta inactiva",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/authentication/presentation/LoginViewModel.kt",
+      "linea": 114
+    },
+    {
+      "ruta": "Problema: terminal desactivada",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/authentication/presentation/LoginScreen.kt",
+      "linea": 215
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 5,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

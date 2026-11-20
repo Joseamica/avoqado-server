@@ -1,0 +1,379 @@
+{
+  "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1191,
+      "cita": "title: t('sidebar:routes.home'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 151,
+      "cita": "\"home\": \"Inicio\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Home.tsx",
+      "linea": 497,
+      "cita": "<p className=\"text-sm text-muted-foreground\">{t('newHome.performance.netSales')}</p>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/home.json",
+      "linea": 388,
+      "cita": "\"netSales\": \"Ventas netas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Home.tsx",
+      "linea": 498,
+      "cita": "<p className=\"mt-1 text-4xl font-bold tracking-tight\">{Currency(dashboardData.totalAmount, false)}</p>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/hooks/useDashboardData.ts",
+      "linea": 160,
+      "cita": "const totalAmount = summary ? summary.totalAmount : filteredPayments.length > 0 ? amount : 0"
+    },
+    {
+      "paso": 1,
+      "archivo": "avoqado-server/src/services/dashboard/generalStats.dashboard.service.ts",
+      "linea": 534,
+      "cita": "COALESCE(SUM(p.\"amount\"), 0) AS \"total\","
+    },
+    {
+      "paso": 1,
+      "archivo": "avoqado-server/src/services/dashboard/generalStats.dashboard.service.ts",
+      "linea": 541,
+      "cita": "AND p.\"status\" = 'COMPLETED'"
+    },
+    {
+      "paso": 1,
+      "archivo": "avoqado-server/src/services/dashboard/generalStats.dashboard.service.ts",
+      "linea": 542,
+      "cita": "AND p.\"type\" <> 'REFUND'"
+    },
+    {
+      "paso": 1,
+      "archivo": "avoqado-server/src/services/dashboard/generalStats.dashboard.service.ts",
+      "linea": 543,
+      "cita": "AND p.\"createdAt\" >= ${utcTs(fromDate)} AND p.\"createdAt\" <= ${utcTs(toDate)}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 887,
+      "cita": "title: t('sidebar:reportsMenu.salesSummary'),"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 115,
+      "cita": "\"salesSummary\": \"Resumen de Ventas\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 2080,
+      "cita": "label={t('salesSummary.rows.grossSales')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 593,
+      "cita": "\"grossSales\": \"Ventas brutas\","
+    },
+    {
+      "paso": 2,
+      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
+      "linea": 1017,
+      "cita": "SELECT SUM(subtotal) AS subtotal, SUM(\"taxAmount\") AS tax, SUM(LEAST(\"discountAmount\", subtotal)) AS discounts"
+    },
+    {
+      "paso": 2,
+      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
+      "linea": 1020,
+      "cita": "AND \"createdAt\" >= ${utcTsParam(2)}"
+    },
+    {
+      "paso": 2,
+      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
+      "linea": 1023,
+      "cita": "AND \"paymentStatus\" NOT IN ('REFUNDED')"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 2137,
+      "cita": "label={t('salesSummary.rows.netSales')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 598,
+      "cita": "\"netSales\": \"Ventas netas\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 596,
+      "cita": "\"discounts\": \"Descuentos\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 597,
+      "cita": "\"refunds\": \"Devoluciones\","
+    },
+    {
+      "paso": 2,
+      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
+      "linea": 1221,
+      "cita": "const netSales = grossSales !== null && discounts !== null ? grossSales - discounts - refunds : null"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 1894,
+      "cita": "onClick={() => openControlPanel('metrics')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 1898,
+      "cita": "<span className=\"text-muted-foreground mr-1\">{t('salesSummary.controls.metrics.label')}</span>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 772,
+      "cita": "\"label\": \"Métricas\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 790,
+      "cita": "\"deferredSales\": \"Ventas diferidas\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 1595,
+      "cita": "onClick={applyMetrics}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 652,
+      "cita": "\"apply\": \"Aplicar\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 2149,
+      "cita": "label={t('salesSummary.rows.deferredSales')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
+      "linea": 1106,
+      "cita": "paymentStatus: { in: ['PENDING', 'PARTIAL'] },"
+    },
+    {
+      "paso": 3,
+      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
+      "linea": 1206,
+      "cita": "const deferredSales = deferredResult ? Number(deferredResult._sum.remainingBalance || 0) : null"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 2010,
+      "cita": "<p className=\"text-sm text-muted-foreground mb-1\">{t('salesSummary.totalSales')}</p>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 470,
+      "cita": "\"totalSales\": \"Neto cobrado\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 2011,
+      "cita": "<p className=\"text-4xl font-bold tracking-tight\">{Currency(data.summary.totalCollected)}</p>"
+    },
+    {
+      "paso": 4,
+      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
+      "linea": 1235,
+      "cita": "? netSales + tips - platformFees"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "home:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 194
+    },
+    {
+      "permiso": "analytics:read",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 6829
+    },
+    {
+      "permiso": "reports:read",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 890
+    },
+    {
+      "permiso": "reports:read",
+      "archivo": "avoqado-server/src/routes/dashboard/reports.routes.ts",
+      "linea": 125
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: sin reportes avanzados sólo hoy (servidor)",
+      "archivo": "avoqado-server/src/routes/dashboard/reports.routes.ts",
+      "linea": 84
+    },
+    {
+      "ruta": "Antes: sin reportes avanzados, insignia Solo hoy",
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 1175
+    },
+    {
+      "ruta": "Antes: texto Solo hoy",
+      "archivo": "src/locales/es/reports.json",
+      "linea": 476
+    },
+    {
+      "ruta": "Antes: Métricas sólo con reportes avanzados",
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 1889
+    },
+    {
+      "ruta": "Antes: con un método de pago elegido el panel filtra",
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 808
+    },
+    {
+      "ruta": "Antes: con filtro no salen brutas, netas ni diferidas",
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 2078
+    },
+    {
+      "ruta": "Antes: texto Filtrar por",
+      "archivo": "src/locales/es/reports.json",
+      "linea": 732
+    },
+    {
+      "ruta": "Antes: con filtro, Neto cobrado sale de los pagos filtrados",
+      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
+      "linea": 1233
+    },
+    {
+      "ruta": "Antes: con un comercio, sólo cuentas con un pago de ese comercio",
+      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
+      "linea": 1025
+    },
+    {
+      "ruta": "Antes: el panel manda el comercio y el método",
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 1021
+    },
+    {
+      "ruta": "Antes: texto Comercio",
+      "archivo": "src/locales/es/reports.json",
+      "linea": 699
+    },
+    {
+      "ruta": "Paso 1: el pago de una orden cancelada no cuenta",
+      "archivo": "avoqado-server/src/services/dashboard/generalStats.dashboard.service.ts",
+      "linea": 544
+    },
+    {
+      "ruta": "Paso 1: la propina va aparte",
+      "archivo": "avoqado-server/src/services/dashboard/generalStats.dashboard.service.ts",
+      "linea": 536
+    },
+    {
+      "ruta": "Paso 1: el reembolso no entra a la suma (comentario del panel)",
+      "archivo": "src/hooks/useDashboardData.ts",
+      "linea": 129
+    },
+    {
+      "ruta": "Paso 2: no entran cuentas PENDING, canceladas ni borradas",
+      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
+      "linea": 1022
+    },
+    {
+      "ruta": "Paso 2: las devoluciones son pagos de reembolso del periodo",
+      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
+      "linea": 1071
+    },
+    {
+      "ruta": "Paso 3: Ventas diferidas no viene marcada por omisión",
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 119
+    },
+    {
+      "ruta": "Paso 4: texto de la ayuda de Neto cobrado",
+      "archivo": "src/locales/es/reports.json",
+      "linea": 623
+    },
+    {
+      "ruta": "Problema: la descripción de Ventas diferidas",
+      "archivo": "src/locales/es/reports.json",
+      "linea": 791
+    },
+    {
+      "ruta": "Problema: Liquidación de hoy (comentario)",
+      "archivo": "src/pages/Home.tsx",
+      "linea": 165
+    },
+    {
+      "ruta": "Problema: Liquidación de hoy usa el calendario de depósitos",
+      "archivo": "src/pages/Home.tsx",
+      "linea": 187
+    },
+    {
+      "ruta": "Problema: Liquidación de hoy deja fuera el efectivo",
+      "archivo": "src/pages/Home.tsx",
+      "linea": 236
+    },
+    {
+      "ruta": "Problema: texto Liquidación de hoy",
+      "archivo": "src/locales/es/home.json",
+      "linea": 437
+    },
+    {
+      "ruta": "Problema: Liquidación de hoy sólo sale con el plan y el permiso",
+      "archivo": "src/pages/Home.tsx",
+      "linea": 383
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

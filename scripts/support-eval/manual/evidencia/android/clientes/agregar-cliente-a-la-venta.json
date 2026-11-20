@@ -1,0 +1,150 @@
+{
+  "pagina": "android/clientes/agregar-cliente-a-la-venta",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 539,
+      "cita": "text = customerName ?: \"Agregar cliente\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 527,
+      "cita": "if (customerName == null) onCustomerTap() else showCustomerMenu = true"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 3070,
+      "cita": "text = \"Ver carrito\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersView.kt",
+      "linea": 150,
+      "cita": "placeholder = \"Buscar cliente\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/domain/BusquedaDeClientes.kt",
+      "linea": 12,
+      "cita": "* - Nombre: cada palabra debe aparecer en el nombre, el apellido o el correo, sin importar mayúsculas ni acentos."
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersView.kt",
+      "linea": 273,
+      "cita": "onClick = { onCustomerSelected(customer) },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2236,
+      "cita": "cartViewModel.setSelectedCustomer(customer.id, customer.fullName)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersView.kt",
+      "linea": 130,
+      "cita": "text = \"Crear\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersView.kt",
+      "linea": 119,
+      "cita": "onClick = { onCreateCustomer(searchText) },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2273,
+      "cita": "canCreateCustomer = roleManager?.canManageCustomers ?: true,"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/data/CustomersRepository.kt",
+      "linea": 146,
+      "cita": ".url(\"$baseUrl/mobile/venues/$venueId/customers\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CreateCustomerView.kt",
+      "linea": 234,
+      "cita": "text = \"Guardar\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 555,
+      "cita": "contentDescription = \"Opciones del cliente\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 575,
+      "cita": "text = { Text(\"Cambiar cliente\") },"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 586,
+      "cita": "\"Quitar cliente\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "customers:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1588
+    },
+    {
+      "permiso": "customers:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1626
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Si aparece «Sin conexión: buscando sólo entre los clientes guardados en la tablet»: busca en lo guardado",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/domain/BusquedaDeClientes.kt",
+      "linea": 17
+    },
+    {
+      "afirmacion": "Si aparece el aviso: la hoja lo pinta",
+      "archivo": "app/src/main/java/com/avoqado/pos/customers/presentation/CustomersView.kt",
+      "linea": 167
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Problema: «Quitar cliente» apagado cuando la venta ya se cobra",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 591
+    },
+    {
+      "ruta": "Problema: «Crear» sólo con canManageCustomers",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 149
+    },
+    {
+      "ruta": "Problema: el alta exige teléfono o correo",
+      "archivo": "avoqado-server/src/services/dashboard/customer.dashboard.service.ts",
+      "linea": 394
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}
