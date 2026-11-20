@@ -943,6 +943,66 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/data/KitchenPreparationRepository.kt": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/domain/KitchenPreparation.kt": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/presentation/KDSOrderCard.kt": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/presentation/PreparationServiceSheet.kt": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/loyalty/domain/SelloDeLaVenta.kt": [
       {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
@@ -2847,6 +2907,10 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
@@ -2913,6 +2977,10 @@
       {
         "pagina": "windows/lealtad/ajustar-sellos",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
@@ -3547,6 +3615,16 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:avoqado-server/src/routes/dashboard/serviceCourse.routes.ts": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      }
+    ],
     "avoqado-android:avoqado-server/src/routes/mobile.routes.ts": [
       {
         "pagina": "android/caja/abrir-y-cerrar-caja",
@@ -3631,6 +3709,10 @@
       {
         "pagina": "android/mesas/mover-o-unir-cuentas",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
@@ -3753,6 +3835,10 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
@@ -3821,6 +3907,26 @@
       {
         "pagina": "windows/reservas/lista-de-espera",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      }
+    ],
+    "avoqado-android:avoqado-server/src/services/kds/kitchenPreparation.service.ts": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      }
+    ],
+    "avoqado-android:avoqado-server/src/services/mobile/kds.mobile.service.ts": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
       }
     ],
     "avoqado-android:avoqado-server/src/services/mobile/order.mobile.service.ts": [
@@ -3947,6 +4053,26 @@
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      }
+    ],
+    "avoqado-android:avoqado-web-dashboard/src/locales/es/serviceCourses.json": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      }
+    ],
+    "avoqado-android:avoqado-web-dashboard/src/pages/Settings/ServiceCourses.tsx": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
       }
     ],
     "avoqado-android:desktop/plataforma/src/main/java/android/app/Activity.java": [

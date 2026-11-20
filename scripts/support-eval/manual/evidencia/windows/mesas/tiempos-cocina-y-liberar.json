@@ -1,7 +1,7 @@
 {
   "pagina": "windows/mesas/tiempos-cocina-y-liberar",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "ad8bae067cbfa77cb0a5827dbfdcb7b1dcc3867a",
+  "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726",
   "version": "2.25.53 + D17 (sin publicar)",
   "pasos": [
     {
@@ -37,7 +37,7 @@
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt",
-      "linea": 224,
+      "linea": 239,
       "cita": "preparationRepository?.refreshCapabilities(it)"
     },
     {
@@ -55,8 +55,8 @@
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt",
-      "linea": 447,
-      "cita": "repository.act(venueId, listOf(row), action, quantity, from, reason, withPaper = false)"
+      "linea": 480,
+      "cita": "repository.act(venueId, listOf(row), action, quantity, from, reason, withPaper = false, fromKitchen = true)"
     },
     {
       "paso": 4,
@@ -67,7 +67,7 @@
     {
       "paso": 4,
       "archivo": "avoqado-server/src/services/mobile/kds.mobile.service.ts",
-      "linea": 196,
+      "linea": 200,
       "cita": "{ NOT: { preparationVersion: 1, status: KdsStatus.READY } }"
     },
     {
@@ -85,7 +85,7 @@
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt",
-      "linea": 671,
+      "linea": 706,
       "cita": "kdsRepository.recall(id, terminadaEn)"
     },
     {

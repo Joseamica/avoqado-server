@@ -10,7 +10,7 @@ requiredPermissions:
 featureCode: TABLE_SERVICE
 gateKind: FEATURE
 sourceRepo: avoqado-android
-sourceRef: ad8bae067cbfa77cb0a5827dbfdcb7b1dcc3867a
+sourceRef: 94fe8b57ee9dcdb5cbd288bc299714150c411726
 keywords:
   - segundo tiempo
   - no me deja marcar el segundo tiempo

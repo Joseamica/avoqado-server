@@ -146,7 +146,7 @@
       "gateKind": "FEATURE"
     },
     "android/mesas/tiempos-cocina-y-liberar": {
-      "sha256": "11d582b44accfbe24b4a0237243dc059617f44d1f4516a4d60aac4e061f4e0a2",
+      "sha256": "3c458cf5bfe1325136c8406ae877aa6f21f24f27e10dedae58e8fb8cb4dcb44e",
       "requiredPermissions": [
         "orders:read",
         "orders:update"
@@ -1121,7 +1121,7 @@
       "gateKind": "FEATURE"
     },
     "windows/mesas/tiempos-cocina-y-liberar": {
-      "sha256": "5ea26216f3a8eeee557d8b181c8324a4202bed23563bbfef59205e9d51a3e4b2",
+      "sha256": "9b4fc15a53e577e97ef4bab139aadcd3611f003df26be0cef00e9131f17b6975",
       "requiredPermissions": [
         "orders:read",
         "orders:update"
