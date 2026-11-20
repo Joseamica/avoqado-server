@@ -3871,16 +3871,6 @@
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
-    "avoqado-android:avoqado-server/src/services/shared/cuentaCancelada.ts": [
-      {
-        "pagina": "android/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
-      },
-      {
-        "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
-      }
-    ],
     "avoqado-android:avoqado-server/src/services/shared/cuentaConVales.ts": [
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
