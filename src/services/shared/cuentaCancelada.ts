@@ -16,7 +16,7 @@ import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from './paymentSh
 import { bloquearVentaParaLiga } from './ligaDeClienteEnVenta'
 import { MOTIVO_BENEFICIO_REGRESADO, sellarFolioAnuladoEnTx } from '@/services/online-ordering/cortesiaDeFolio'
 import prisma from '@/utils/prismaClient'
-import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
+import { isModelLockTimeoutError, isRetryableDbError, withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { hayUsosDevueltosAlAnular, volverAGastarUsosDeCuentaRevividaEnTx } from './usoDelDescuento'
 
 /** El texto del founder (3-oct). El código es el de la solicitud a la terminal (`terminal-payment.service.ts:1737`): las apps ya lo conocen. */
@@ -328,6 +328,9 @@ async function volverAGastarUsosAlRevivirEnTx(
   return gastados.usos
 }
 
+/** D26 (Codex r1 #2 de este arreglo): lo más que `volverAGastarUsosTrasElCobro` espera cada candado, y cuántas veces lo intenta. */
+export const ESPERA_DEL_PASO_DEL_USO = { candadoMs: 1_000, intentos: 2 }
+
 /**
  * 🔴 hz:e82938e1:D26, el cruce que detuvo la publicación del SERVIDOR (20-nov). La TPV registra el cobro en una transacción SIN reintento
  * por trabas (`recordOrderPayment`, R63 b) y la venta de $0 de la TPV toma Shift → Discount: si el registro tomaba Discount para volver a
@@ -340,8 +343,11 @@ async function volverAGastarUsosAlRevivirEnTx(
  *   devolvió nada: las filas no tenían `usoContado`).
  * - Gasta y suelta la marca en la misma escritura (`volverAGastarUsosDeCuentaRevividaEnTx`): repetirla —el reenvío de la terminal con la
  *   misma llave, dos a la vez— no gasta dos veces. Sin filas marcadas cuesta una consulta y no abre transacción.
+ * - Espera acotada (Codex r1 #2 de este arreglo): con `lock_timeout` de `ESPERA_DEL_PASO_DEL_USO.candadoMs` por candado, nunca retiene la
+ *   cuenta mucho tiempo esperando a otra caja que tiene la promoción —un segundo cobro de la misma cuenta no se frena— ni demora la
+ *   respuesta a la terminal más de unos segundos. Si vence, suelta todo y lo intenta otra vez (`intentos`).
  * - 🔴 NUNCA lanza: el dinero ya está guardado. Un error queda en `logger.error` con negocio, cuenta y cobro, y el uso queda libre (lo
- *   de antes de D26); el reenvío con la misma llave lo vuelve a intentar.
+ *   de antes de D26); el reenvío de la terminal (con la misma llave o, la TPV vieja, con la misma referencia) lo vuelve a intentar.
  */
 export async function volverAGastarUsosTrasElCobro(a: {
   venueId: string
@@ -352,15 +358,26 @@ export async function volverAGastarUsosTrasElCobro(a: {
 }): Promise<number> {
   try {
     if (!(await hayUsosDevueltosAlAnular(prisma, a.venueId, a.orderId))) return 0
-    return await withDeadlockRetry(
-      async tx => {
-        if (!(await lockExistingOrderForPayment(tx, { venueId: a.venueId, orderId: a.orderId }))) return 0
-        const cuenta = await tx.order.findFirst({ where: { id: a.orderId, venueId: a.venueId }, select: { status: true } })
-        if (!cuenta || claseDeEstado(cuenta.status) === 'CANCELADA') return 0
-        return volverAGastarUsosAlRevivirEnTx(tx, a)
-      },
-      { etiqueta: 'volverAGastarUsosTrasElCobro', ...ORDER_LOCK_WAIT_BUDGET },
-    )
+    for (let intento = 1; ; intento += 1) {
+      try {
+        return await withDeadlockRetry(
+          async tx => {
+            // Un número, nunca texto del cliente: `SET` no acepta parámetros.
+            await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${Math.trunc(ESPERA_DEL_PASO_DEL_USO.candadoMs)}ms'`)
+            if (!(await lockExistingOrderForPayment(tx, { venueId: a.venueId, orderId: a.orderId }))) return 0
+            const cuenta = await tx.order.findFirst({ where: { id: a.orderId, venueId: a.venueId }, select: { status: true } })
+            if (!cuenta || claseDeEstado(cuenta.status) === 'CANCELADA') return 0
+            return volverAGastarUsosAlRevivirEnTx(tx, a)
+          },
+          { etiqueta: 'volverAGastarUsosTrasElCobro', ...ORDER_LOCK_WAIT_BUDGET },
+        )
+      } catch (error) {
+        // La espera venció (55P03) o la foto chocó (40001): la transacción ya se deshizo y soltó la cuenta. Otra vez, un poco después.
+        const otraVez = isRetryableDbError(error) || isModelLockTimeoutError(error)
+        if (!otraVez || intento >= ESPERA_DEL_PASO_DEL_USO.intentos) throw error
+        await new Promise(resolve => setTimeout(resolve, 100 * intento))
+      }
+    }
   } catch (error) {
     logger.error('🚨 [D26] cobro guardado, pero no se volvió a gastar el uso del descuento de la cuenta revivida: el uso queda libre', {
       venueId: a.venueId,

@@ -11,6 +11,7 @@
  * `CANCEL_ORDER`), la TPV al anular todos los renglones (`voidItems`) y el panel/MCP (`cancelarCuentaSinCobrar`).
  */
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import { applyOrderDiscount, cancelOrder, createOrderWithItems, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import { voidItems } from '@/services/tpv/order.tpv.service'
@@ -236,23 +237,31 @@ describe('🔴 D26: la cuenta anulada que revive por dinero tardío vuelve a gas
     expect(await usos()).toBe(antes)
     return { orderId, antes }
   }
-  /** El cobro de la terminal (Mesas → «Tarjeta» → pantalla de pago general → «Efectivo»): $90 ya en el cajón, con su llave. */
-  const cobrarEnTpv = (orderId: string, llave = `tpv-${orderId}`) =>
+  /**
+   * El cobro de la terminal (Mesas → «Tarjeta» → pantalla de pago general → «Efectivo»): $90 ya en el cajón, con su llave. `referencia`
+   * sin `llave` es la TPV vieja, que reenvía por referencia.
+   */
+  const cobrarEnTpv = (
+    orderId: string,
+    llave: string | undefined = `tpv-${orderId}`,
+    o: { centavos?: number; referencia?: string; split?: string } = {},
+  ) =>
     recordOrderPayment(
       venueId,
       orderId,
       {
         venueId,
-        amount: 9000,
+        amount: o.centavos ?? 9000,
         tip: 0,
+        ...(o.referencia ? { referenceNumber: o.referencia } : {}),
         status: 'COMPLETED',
         method: 'CASH',
         source: 'TPV',
-        splitType: 'FULLPAYMENT',
+        splitType: o.split ?? 'FULLPAYMENT',
         tpvId: `d26-${sufijo}`,
         staffId,
         paidProductsId: [],
-        idempotencyKey: llave,
+        ...(llave ? { idempotencyKey: llave } : {}),
         currency: 'MXN',
         isInternational: false,
       } as never,
@@ -417,6 +426,76 @@ describe('🔴 D26: la cuenta anulada que revive por dinero tardío vuelve a gas
     ])
     // Y otro reenvío ya no gasta.
     await cobrarEnTpv(orderId, llave)
+    expect(await usos()).toBe(antes + 1)
+  })
+
+  it('🔴 Codex r1 #2: otra caja retiene la promoción más de lo que espera el paso: el cobro queda, un SEGUNDO abono de la misma cuenta no se frena, y el reenvío con la llave cura el uso', async () => {
+    const { orderId, antes } = await anuladaConDescuento()
+    const llave1 = `tpv-abono1-${orderId}`
+    const errores = () => (logger.error as jest.Mock).mock.calls.filter(([m, d]) => String(m).includes('[D26]') && d?.orderId === orderId)
+    let soltar!: () => void
+    const hastaSoltar = new Promise<void>(r => (soltar = r))
+    let avisarTomada!: () => void
+    const tomada = new Promise<void>(r => (avisarTomada = r))
+    const otraCaja = prisma.$transaction(
+      async tx => {
+        await tx.$queryRaw`SELECT id FROM "Discount" WHERE id = ${promoId} FOR UPDATE`
+        avisarTomada()
+        await hastaSoltar
+      },
+      { timeout: 40_000, maxWait: 10_000 },
+    )
+    await tomada
+    try {
+      // Abono 1: $50 de $90 revive la cuenta; su paso del uso espera a la promoción (acotado) mientras llega el abono 2.
+      const abono1 = cobrarEnTpv(orderId, llave1, { centavos: 5000, split: 'CUSTOMAMOUNT' })
+      let guardado: { id: string } | null = null
+      for (let i = 0; i < 80 && !guardado; i += 1) {
+        guardado = await prisma.payment.findUnique({
+          where: { venueId_idempotencyKey: { venueId, idempotencyKey: llave1 } },
+          select: { id: true },
+        })
+        if (!guardado) await new Promise(r => setTimeout(r, 50))
+      }
+      expect(guardado).not.toBeNull()
+      // Abono 2 ($40) de la misma cuenta, mientras el paso del abono 1 sigue esperando: no se frena (antes, hasta 15 s con la cuenta tomada).
+      const t0 = Date.now()
+      await cobrarEnTpv(orderId, `tpv-abono2-${orderId}`, { centavos: 4000, split: 'CUSTOMAMOUNT' })
+      expect(Date.now() - t0).toBeLessThan(4_000)
+      await abono1
+    } finally {
+      soltar()
+      await otraCaja
+    }
+    expect(await prisma.payment.count({ where: { orderId } })).toBe(2)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus).toBe('PAID')
+    // El residuo declarado: el paso se rindió, el uso quedó libre y lo dice el log.
+    expect(await usos()).toBe(antes)
+    expect(errores().length).toBeGreaterThan(0)
+
+    // La terminal reenvía el abono 1 con su llave: el paso se termina y gasta UN uso.
+    await cobrarEnTpv(orderId, llave1, { centavos: 5000, split: 'CUSTOMAMOUNT' })
+    expect(await prisma.payment.count({ where: { orderId } })).toBe(2)
+    expect(await usos()).toBe(antes + 1)
+    expect(await respentidos(orderId)).toHaveLength(1)
+  })
+
+  it('🔴 Codex r1 #1: la TPV vieja reenvía SIN llave, por referencia: el reenvío también cura el uso (un solo pago, un solo uso)', async () => {
+    const { orderId, antes } = await anuladaConDescuento()
+    const referencia = `ref-${orderId}`
+    const paso = jest.spyOn(cuentaCancelada, 'volverAGastarUsosTrasElCobro').mockResolvedValueOnce(0)
+    try {
+      await cobrarEnTpv(orderId, undefined, { referencia })
+      expect(paso).toHaveBeenCalledTimes(1)
+    } finally {
+      paso.mockRestore()
+    }
+    expect(await usos()).toBe(antes)
+
+    await cobrarEnTpv(orderId, undefined, { referencia })
+    expect(await prisma.payment.count({ where: { orderId } })).toBe(1)
+    expect(await usos()).toBe(antes + 1)
+    await cobrarEnTpv(orderId, undefined, { referencia })
     expect(await usos()).toBe(antes + 1)
   })
 

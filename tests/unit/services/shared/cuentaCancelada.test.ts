@@ -247,6 +247,7 @@ describe('🔴 D26 tras el cobro: el registro de la terminal no toca Discount; e
     prisma.orderDiscount.updateMany.mockReset().mockResolvedValue({ count: 1 })
     prisma.discount.update.mockReset().mockResolvedValue({})
     prisma.activityLog.create.mockReset().mockResolvedValue({})
+    prisma.$executeRawUnsafe.mockReset().mockResolvedValue(0)
     prisma.$queryRaw.mockReset().mockImplementation(async (strings: string[]) => {
       if (o.falla) throw o.falla
       const texto = strings.join('?')
@@ -266,6 +267,9 @@ describe('🔴 D26 tras el cobro: el registro de la terminal no toca Discount; e
     expect(consultas[0]).toMatch(/FROM "Order" o[\s\S]*FOR UPDATE OF o/)
     expect(consultas[1]).toMatch(/FROM "Discount"[\s\S]*FOR NO KEY UPDATE/)
     expect(consultas.join('\n')).not.toMatch(/"Shift"/)
+    // Espera acotada (Codex r1 #2): el tope de espera se fija ANTES del primer candado.
+    expect(prisma.$executeRawUnsafe).toHaveBeenCalledWith("SET LOCAL lock_timeout = '1000ms'")
+    expect(prisma.$executeRawUnsafe.mock.invocationCallOrder[0]).toBeLessThan(prisma.$queryRaw.mock.invocationCallOrder[0])
     expect(prisma.discount.update).toHaveBeenCalledWith({ where: { id: 'promo-1' }, data: { currentUses: { increment: 1 } } })
     expect(prisma.orderDiscount.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: { usoContado: true, usoDevueltoAlAnular: false } }),
@@ -298,6 +302,14 @@ describe('🔴 D26 tras el cobro: el registro de la terminal no toca Discount; e
       expect.objectContaining({ where: expect.objectContaining({ orderId: 'o', usoDevueltoAlAnular: true }) }),
     )
     expect(prisma.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex r1 #2: otra caja retiene la cuenta o la promoción más de lo que espera (55P03): suelta todo, lo intenta otra vez y se rinde sin lanzar', async () => {
+    escenario({ falla: Object.assign(new Error('lock timeout'), { code: 'P2010', meta: { code: '55P03' } }) })
+    await expect(llamar()).resolves.toBe(0)
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2)
+    expect(prisma.discount.update).not.toHaveBeenCalled()
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('D26'), expect.objectContaining({ orderId: 'o', paymentId: 'pay-1' }))
   })
 
   it('🔴 un error NUNCA sale al llamador (el dinero ya está guardado): logger.error con negocio, cuenta y cobro, y el uso queda libre', async () => {

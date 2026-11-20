@@ -3847,6 +3847,9 @@ export async function recordOrderPayment(
     })
     // Ronda 2 (P1): el existente puede estar ligado a una solicitud ya liberada sin haberla podido ligar.
     await retenerSiQuedoSinLigar(existingPayment, paymentData)
+    // D26 (Codex r1 #1 de este arreglo): la TPV vieja reenvía sin llave, por referencia. Si el proceso murió entre guardar el cobro y gastar
+    // el uso (o ese paso falló), este reenvío lo termina; sin filas marcadas es una consulta.
+    await terminarUsoDelDescuentoAlReenviar(venueId, existingPayment)
 
     // Return existing payment with receipt (safe retry - client gets same response)
     const areaTicketCheckoutState =
