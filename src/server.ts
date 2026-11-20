@@ -114,6 +114,7 @@ import { initializeSocketServer, shutdownSocketServer } from './communication/so
 import { getStorageBucket, initializeFirebase } from './config/firebase'
 import { iniciarCajaNegra } from './observability/cajaNegra'
 import { primeVenueNames } from './observability/venueNames'
+import { aplicarGraciaDelDespliegue } from './services/online-ordering/presence.service'
 import { instalarMedidorDeCupoResend } from './services/email/resendQuota'
 import { precalentarSellos } from './services/wallet/precalentarSellos'
 import { primeVenuesEstrictos } from './services/terminal-payment-strictness'
@@ -454,6 +455,12 @@ const startApplication = async (retries = 3) => {
     // means logs fall back to the raw venueId until the lazy refresh picks it up.
     primeVenueNames().then(count => {
       if (count > 0) logger.info(`✅ Venue names cached for logging (${count})`)
+    })
+
+    // D662 parte 2 (pausa sola de la tienda en línea): las filas de antes del cambio estrenan aquí su gracia del despliegue. No bloquea
+    // el arranque y nunca lanza: si no corre, la lectura de cada tienda pone la misma gracia.
+    void aplicarGraciaDelDespliegue().then(count => {
+      if (count > 0) logger.info(`✅ Tienda en línea: gracia del despliegue de la pausa sola en ${count} negocio(s)`)
     })
 
     // Qué venues ya se rigen por la lista blanca estricta del cobro remoto (§8 C.1 / I.6). No bloquea el arranque:
