@@ -207,7 +207,13 @@ export async function updateSettings(
 
     const row = await tx.onlineOrderingSettings.upsert({
       where: { venueId },
-      create: { ...(data as Prisma.OnlineOrderingSettingsUncheckedCreateInput), venueId, ...(preloadHours ? { hours: preloadHours } : {}) },
+      // D662 parte 2: una fila nueva nace con el corte de la pausa sola puesto (sin la gracia del despliegue; Codex p2-r5 #2).
+      create: {
+        ...(data as Prisma.OnlineOrderingSettingsUncheckedCreateInput),
+        venueId,
+        autoPauseResumedAt: new Date(),
+        ...(preloadHours ? { hours: preloadHours } : {}),
+      },
       update: data,
     })
     const bitacora = {
