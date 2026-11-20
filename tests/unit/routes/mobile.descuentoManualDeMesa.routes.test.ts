@@ -49,6 +49,12 @@ describe('7133e3 · POST /mobile/.../orders/:orderId/discounts/manual', () => {
     expect(manualOrderDiscountSchema.safeParse(cuerpo({ type: 'FIXED_AMOUNT', value: 25.5, name: 'Amigo', llave: LLAVE })).success).toBe(
       true,
     )
+    // En el aparato (19-nov): el POS manda `null` en lo que no trae; eso no es un 400.
+    expect(
+      manualOrderDiscountSchema.safeParse(
+        cuerpo({ type: 'PERCENTAGE', value: 10, name: null, llave: LLAVE, reason: null, reasonComment: null }),
+      ).success,
+    ).toBe(true)
     const malos = [
       { type: 'PERCENTAGE', value: 101, llave: LLAVE },
       { type: 'PERCENTAGE', value: 0, llave: LLAVE },

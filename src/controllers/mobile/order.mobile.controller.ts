@@ -1090,10 +1090,10 @@ export const applyManualOrderDiscount = async (req: Request, res: Response, next
     const { type, value, name, llave, reason, reasonComment } = req.body as {
       type: 'PERCENTAGE' | 'FIXED_AMOUNT'
       value: number
-      name?: string
+      name?: string | null
       llave: string
-      reason?: string
-      reasonComment?: string
+      reason?: string | null
+      reasonComment?: string | null
     }
     // hz:e0b12f00:D1: si la rebaja deja la cuenta en $0 es una cortesía; sólo el servicio lo sabe (bajo su candado y después de la
     // llave). Sin `orders:comp`, `conCortesiaSiRegala` pide el PIN como la ruta y repite la operación entera con la acreditación.

@@ -16,7 +16,7 @@ export const descuentoManualDeMesaSchema = z.object({
     .string({ invalid_type_error: 'El nombre del descuento no es válido' })
     .trim()
     .max(80, 'El nombre del descuento es muy largo')
-    .optional(),
+    .nullish(),
   // La llave del envío: la crea el POS al tocar y la repite el reintento y la cola. Obligatoria: sin ella, una respuesta perdida
   // daría el descuento dos veces (D21).
   llave: z
@@ -31,8 +31,9 @@ export const manualOrderDiscountSchema = z.object({
   }),
   body: descuentoManualDeMesaSchema
     .extend({
-      reason: z.string().optional(),
-      reasonComment: z.string().optional(),
+      // El POS manda `null` cuando no hay motivo (kotlinx con `explicitNulls`): vacío es «Sin motivo», nunca un 400.
+      reason: z.string().nullish(),
+      reasonComment: z.string().nullish(),
     })
     .refine(b => b.type !== 'PERCENTAGE' || b.value <= 100, {
       message: 'El porcentaje no puede ser mayor a 100',
