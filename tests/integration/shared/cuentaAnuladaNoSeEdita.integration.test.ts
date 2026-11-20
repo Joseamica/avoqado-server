@@ -134,22 +134,18 @@ describe('PostgreSQL: ninguna edición borra ni rebasa la cortesía de una cuent
   })
   it('dinero tardío revive la misma cuenta y después permite editar como una cuenta viva', async () => {
     const order = await venta()
-    // D26: la reapertura escribe `Discount` (vuelve a gastar los usos que la anulación devolvió): pide el `tx` con reintento.
-    await withDeadlockRetry(
-      async tx => {
-        await lockExistingOrderForPayment(tx, { venueId: venueId!, orderId: order.id })
-        await reabrirSiRecibeDinero(tx, {
-          venueId: venueId!,
-          orderId: order.id,
-          status: 'CANCELLED',
-          originSystem: 'AVOQADO',
-          cobrado: 5,
-          cubreComoCancelada: false,
-          canal: 'S2_TEST',
-        })
-      },
-      { etiqueta: 's2-revive-test' },
-    )
+    await prisma.$transaction(async tx => {
+      await lockExistingOrderForPayment(tx, { venueId: venueId!, orderId: order.id })
+      await reabrirSiRecibeDinero(tx, {
+        venueId: venueId!,
+        orderId: order.id,
+        status: 'CANCELLED',
+        originSystem: 'AVOQADO',
+        cobrado: 5,
+        cubreComoCancelada: false,
+        canal: 'S2_TEST',
+      })
+    })
     await expect(updateGuestInfo(venueId!, order.id, { customerName: 'Clienta que regresó' })).resolves.toMatchObject({
       status: 'PENDING',
       customerName: 'Clienta que regresó',

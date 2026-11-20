@@ -311,7 +311,7 @@
     {
       "ruta": "Problema tope: Mesas gasta un uso al aplicar y en línea dice «ya no hay» (D19)",
       "archivo": "avoqado-server/src/services/shared/usoDelDescuento.ts",
-      "linea": 113
+      "linea": 110
     },
     {
       "ruta": "Problema tope: anular la cuenta sin cobrar devuelve el uso (D24)",
@@ -319,14 +319,9 @@
       "linea": 279
     },
     {
-      "ruta": "Problema tope: la cuenta anulada que revive por un cobro tardío vuelve a gastar el uso (D26)",
-      "archivo": "avoqado-server/src/services/shared/cuentaCancelada.ts",
-      "linea": 228
-    },
-    {
       "ruta": "Problema tope: en Cobrar la venta no se rechaza por el tope; suma el uso y avisa al dueño (DESCUENTO_SOBRE_TOPE)",
       "archivo": "avoqado-server/src/services/shared/usoDelDescuento.ts",
-      "linea": 134
+      "linea": 131
     },
     {
       "ruta": "Antes de empezar (Mesas): ACCIONES(\"Acciones\")",
