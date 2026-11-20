@@ -326,16 +326,6 @@ export async function recortarDescuentosDeRenglones(
     .filter(d => d.recorte.accion !== 'NADA')
     .sort((a, b) => (a.fila.id < b.fila.id ? -1 : a.fila.id > b.fila.id ? 1 : 0))
   if (decisiones.length === 0) return resultado
-  // 🔴 hz:e82938e1:D31 (Codex r1 #2): una fila RETIRADA que ocupaba un uso del tope (`usoContado`) lo devuelve aquí, ANTES de los puntos y
-  // premios (Order → Discount → Customer/StampReward, el orden de la anulación). Antes se borraba con su uso gastado y anular la cuenta
-  // después ya no la encontraba.
-  const usosDeRetiradas = decisiones
-    .filter(d => d.recorte.accion === 'RETIRAR' && d.fila.usoContado && d.fila.discountId)
-    .map(d => d.fila.discountId!)
-  if (usosDeRetiradas.length > 0) {
-    const { devolverUsosDeFilasEnTx } = await import('./usoDelDescuento')
-    await devolverUsosDeFilasEnTx(tx, o.venueId, usosDeRetiradas)
-  }
   // Import dinámico: los dos módulos importan éste (ciclo).
   const { refundLoyaltyForOrderDiscount } = await import('../mobile/loyalty.mobile.service')
   const { refundStampRewardForOrderDiscount } = await import('../wallet/redeemStampReward.service')

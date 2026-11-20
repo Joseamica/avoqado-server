@@ -11,7 +11,6 @@ import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetr
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { validateCouponCode, type CouponValidationResult } from '../dashboard/coupon.dashboard.service'
 import { calculateDiscountCents } from './discount.service'
-import { avisarSiPasoDelTopeEnTx } from './usoDelDescuento'
 
 export const CUPON_CAMBIO_DE_VALOR = 'El cupón cambió de valor. Quítalo y vuelve a aplicarlo.'
 
@@ -156,12 +155,7 @@ export async function apartarCupon(
   }
 }
 
-/**
- * El canje en la transacción de quien llama: el registro y los dos contadores juntos, bajo el candado del descuento. Nunca rechaza (para
- * entonces el dinero ya se cobró con la rebaja). 🔴 hz:e82938e1:D31 (D19 r3 #6): si el canje deja la promoción ARRIBA de su tope (Mesas o
- * la TPV se llevaron el mismo último uso antes de cobrar), deja `DESCUENTO_SOBRE_TOPE` (camino `canje`) en esta misma transacción, como
- * los demás caminos de la decisión «A».
- */
+/** El canje en la transacción de quien llama: el registro y los dos contadores juntos, bajo el candado del descuento. */
 export async function canjearCuponEnTx(
   tx: TxConReintento,
   c: { orderId: string; couponCodeId: string; discountId: string; customerId: string | null; amountSaved: Prisma.Decimal | number },
@@ -171,40 +165,7 @@ export async function canjearCuponEnTx(
     data: { couponCodeId: c.couponCodeId, orderId: c.orderId, customerId: c.customerId, amountSaved: c.amountSaved },
   })
   await tx.couponCode.update({ where: { id: c.couponCodeId }, data: { currentUses: { increment: 1 } } })
-  const d = await tx.discount.update({
-    where: { id: c.discountId },
-    data: { currentUses: { increment: 1 } },
-    select: { venueId: true, name: true, currentUses: true, maxTotalUses: true },
-  })
-  // `?.`: un doble de prueba sin la tabla contesta `undefined` (nada que avisar).
-  if (d?.maxTotalUses != null && d.currentUses > d.maxTotalUses) {
-    // Codex D31 r1 #4: el aviso nunca tumba el canje (ni la venta de $0 ni el cierre del folio que lo llevan): va en su propio SAVEPOINT
-    // y, si su escritura falla, se deshace sólo él y queda en el log.
-    await tx.$executeRaw`SAVEPOINT aviso_sobre_tope`
-    try {
-      await avisarSiPasoDelTopeEnTx(tx, {
-        venueId: d.venueId,
-        orderId: c.orderId,
-        discountId: c.discountId,
-        nombre: d.name,
-        usos: d.currentUses,
-        tope: d.maxTotalUses,
-        camino: 'canje',
-        sinRed: null,
-        quien: null,
-      })
-      await tx.$executeRaw`RELEASE SAVEPOINT aviso_sobre_tope`
-    } catch (error) {
-      await tx.$executeRaw`ROLLBACK TO SAVEPOINT aviso_sobre_tope`
-      logger.error('⚠️ El canje dejó la promoción arriba de su tope y no se pudo escribir el aviso', {
-        orderId: c.orderId,
-        discountId: c.discountId,
-        usos: d.currentUses,
-        tope: d.maxTotalUses,
-        error: (error as Error).message,
-      })
-    }
-  }
+  await tx.discount.update({ where: { id: c.discountId }, data: { currentUses: { increment: 1 } } })
 }
 
 /**

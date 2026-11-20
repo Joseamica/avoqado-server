@@ -111,9 +111,7 @@ export async function convertirBeneficiosEnCortesiaEnTx(
         couponCodeId: f.couponCodeId,
         loyaltyTransactionId: f.loyaltyTransactionId,
         premioId,
-        // 🔴 hz:e82938e1:D31: sólo la fila que OCUPA un uso lo devuelve (`usoContado`: el motor de la tienda y de la TPV, Mesas). Antes
-        // bastaba con que su descuento tuviera tope, y una fila de Mesas de antes de D19 (que nunca sumó) restaba lo que no ocupaba.
-        bajaUso: !!f.discountId && !f.couponCodeId && f.usoContado,
+        bajaUso: !!f.discountId && !f.couponCodeId && (f.discount?.maxTotalUses != null || f.usoContado),
       })
     }
     if (pagina.length < PAGINA) break
@@ -135,7 +133,7 @@ export async function convertirBeneficiosEnCortesiaEnTx(
     import('@/services/mobile/loyalty.mobile.service'),
   ])
 
-  // (1) Los usos del catálogo: cada fila marcada (`usoContado`) le había sumado un uso al aplicarse (D31).
+  // (1) Los usos del catálogo: cada fila de un descuento con tope total le había sumado un uso al aplicarse.
   const usos = new Map<string, number>()
   for (const f of filas) if (f.bajaUso) usos.set(f.discountId!, (usos.get(f.discountId!) ?? 0) + 1)
   if (usos.size > 0) {

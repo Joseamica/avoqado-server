@@ -1042,12 +1042,6 @@ async function applyEvaluatedDiscount(
   appliedById?: string,
   authorizedById?: string,
   deferredUses?: string[],
-  /**
-   * 🔴 hz:e82938e1:D31: la fila nace con `usoContado` cuando su uso SÍ se suma en esta transacción (aquí mismo o en la pasada de
-   * contadores del lote). Así quitarla (aquí o en el POS), anularla (D24) o volverla cortesía de folio devuelve justo ese uso, y una
-   * fila que nunca sumó no resta nada. `false` sólo en la simulación (cotizar): no suma, así que tampoco marca.
-   */
-  marcarUso = true,
 ): Promise<ApplyDiscountResult> {
   const orderId = order.id
   await rechazarSiCuentaAnuladaEnTx(tx, { venueId: order.venueId, orderId })
@@ -1113,7 +1107,6 @@ async function applyEvaluatedDiscount(
       isComp: discount.type === 'COMP',
       appliedById,
       authorizedById,
-      usoContado: marcarUso,
       // B2 (spec §4.1, D7): el motor guarda a qué renglones aplicó, con SU base; la sincronización pone los centavos sin
       // pasar la capacidad de cada renglón. P1: un DIRIGIDO ya no se re-deriva sobre toda la cuenta; con ámbito, dentro de él.
       reparto: comoJson({
@@ -1326,11 +1319,13 @@ export async function removeDiscountFromOrder(
           },
         })
 
-        // 🔴 hz:e82938e1:D31 (antes D24 #1 ajeno): devuelve el uso SÓLO si esta fila lo ocupa (`usoContado`: la sumó el motor, Mesas o
-        // una reapertura) y nunca abajo de 0. Antes restaba por `discountId` sin piso: una fila del POS de antes de D19 (nunca sumó)
-        // dejaba el contador en −1 y la promoción daba un uso de más. Un cupón nunca lleva la marca (cuenta al pagar, D5) y la fila que ya
-        // devolvió su uso al anular (D24) la perdió.
-        if (orderDiscount.usoContado && orderDiscount.discountId) {
+        // Decrement discount usage counter (if it was a tracked discount). Un cupón no: su uso se cuenta al quedar pagada la venta
+        // (`finalizeCouponsForOrder`), y aquí la venta todavía no se paga: bajarlo dejaba el contador abajo de lo real (D5).
+        // D24 (Codex r1 #1): la fila que ya devolvió su uso al anular la cuenta (que después revivió por dinero tardío) no resta otro.
+        // hz:e82938e1:D31 (nae1cfa6 #1): nunca abajo de 0 (`devolverUsoDelDescuentoEnTx`, el mismo piso de Mesas y de la anulación). Un
+        // `decrement` sin piso dejaba el contador en −1 y la promoción daba un uso de más. Restar sólo lo que la fila ocupa (la marca en
+        // todos los escritores) es el proyecto «contador de usos con un solo dueño» (docs/proyectos/contador-de-usos-un-solo-dueno.md).
+        if (orderDiscount.discountId && !orderDiscount.couponCodeId && !orderDiscount.usoDevueltoAlAnular) {
           await devolverUsoDelDescuentoEnTx(tx, order.venueId, orderDiscount.discountId)
         }
 
@@ -1451,7 +1446,7 @@ export async function aplicarDescuentosDelMotorEnTx(
 
     const current = await tx.order.findUnique({ where: { id: orderId, venueId: order.venueId }, include: { orderDiscounts: true } })
     if (!current) throw new NotFoundError('Order not found')
-    const outcome = await applyEvaluatedDiscount(tx, current, discount, audits, o.appliedById, undefined, usedDiscountIds, !o.simulacion)
+    const outcome = await applyEvaluatedDiscount(tx, current, discount, audits, o.appliedById, undefined, usedDiscountIds)
 
     if (outcome.success) {
       applied.push(discount)

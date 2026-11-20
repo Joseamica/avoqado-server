@@ -411,10 +411,6 @@
       "clase": "EN_TX",
       "etiqueta": "devolverUsoDelDescuentoEnTx"
     },
-    "src/services/shared/usoDelDescuento.ts#devolverUsosDeFilasEnTx": {
-      "clase": "EN_TX",
-      "etiqueta": "devolverUsosDeFilasEnTx"
-    },
     "src/services/shared/usoDelDescuento.ts#devolverUsosMarcadosEnTx": {
       "clase": "EN_TX",
       "etiqueta": "devolverUsosMarcadosEnTx"

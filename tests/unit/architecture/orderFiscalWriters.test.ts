@@ -807,14 +807,6 @@ const WRITERS: Record<string, Writer> = {
     residual:
       'runs only through volverAGastarUsosAlRevivirEnTx, right after reabrirSiRecibeDinero revived the order, under the Order lock of the money writer (registrarAbonoEnTx, settleStandalonePaymentInTx, updateOrderTotalsForStandalonePayment, createManualPayment)',
   },
-  // hz:e82938e1:D31 (Codex r1 #1): la venta de Mostrador marca UNA fila por descuento que sumó.
-  'src/services/shared/usoDelDescuento.ts#marcarFilaQueOcupaElUsoEnTx': {
-    class: 'EXCLUDED',
-    reason:
-      'only flips the bookkeeping flag usoContado on one discount row per catalog discount the sale counted: amount, taxReduction and reparto are untouched, so the documentary capture reads the same totals',
-    residual:
-      'runs only inside the TPV checkout create transaction (createOrderWithItems /tpv/with-items) and in the POS counter sale use-count transaction (sumarUsosDeVentaEnTx, after the sale commit)',
-  },
   // D24 (Codex r1 #4a, r2 #5): la cuenta que se anula suelta la marca de las filas cuyo descuento ya no está en el catálogo.
   'src/services/shared/usoDelDescuento.ts#soltarMarcaDeFilasSinDescuentoEnTx': {
     class: 'EXCLUDED',

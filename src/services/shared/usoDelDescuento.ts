@@ -19,10 +19,8 @@
  * `Discount` con la cuenta ya tomada (Order → Discount). La suma del Mostrador no vive dentro de la venta: su transacción sólo toma filas
  * `Discount`, en una pasada por id ascendente, así que no se cruza con el turno, el premio de sellos, la tarjeta de regalo ni la cuenta.
  *
- * Las filas que sumaron quedan con `OrderDiscount.usoContado` (Mesas y, desde D31, el motor de la TPV y de la tienda); sólo ésas devuelven
- * su uso (al quitarlas, al anular o borrarse su cuenta o al convertirse en cortesía en un folio). El canje del cupón cuenta por su lado
- * (y desde D31 también avisa si pasa del tope). El Mostrador (POS y TPV) marca UNA fila por descuento sumado (D31); la etiqueta del importe
- * libre no tiene fila que marcar (proyecto del contador, fase 1).
+ * Las filas de Mesas que sumaron quedan con `OrderDiscount.usoContado`; sólo ésas devuelven su uso (al quitarlas, al borrarse su cuenta
+ * vacía o al convertirse en cortesía en un folio). El motor de la TPV y el canje del cupón cuentan por su lado.
  */
 import { Prisma } from '@prisma/client'
 import { writeLegacyActivityAuditTx } from '@/services/activityAudit.service'
@@ -33,7 +31,7 @@ import { descuentoSinUsos } from './discount.service'
 const APARTADO_DEL_CUPON = { status: { notIn: ['CANCELLED', 'DELETED'] }, couponRedemption: { is: null } } satisfies Prisma.OrderWhereInput
 
 type FilaDelContador = { id: string; name: string; currentUses: number; maxTotalUses: number | null }
-type Camino = 'mesa' | 'mostrador' | 'reapertura' | 'canje'
+type Camino = 'mesa' | 'mostrador' | 'reapertura'
 
 /** Las filas `Discount`, tomadas en UNA pasada por id ascendente (`FOR NO KEY UPDATE`, el modo del UPDATE del contador). */
 async function tomarFilas(tx: TxConReintento, venueId: string, ids: string[]): Promise<FilaDelContador[]> {
@@ -51,7 +49,7 @@ async function tomarFilas(tx: TxConReintento, venueId: string, ids: string[]): P
  * El rastro para el dueño cuando un uso dejó el contador ARRIBA de su tope, en la transacción de quien sumó (si la venta se revierte, el
  * rastro también). Sin `staffId` en la fila (va en `data`): una referencia a una persona dada de baja no puede tumbar la venta.
  */
-export async function avisarSiPasoDelTopeEnTx(
+async function avisarSiPasoDelTopeEnTx(
   tx: TxConReintento,
   v: {
     venueId: string
@@ -138,10 +136,8 @@ export async function sumarUsosDeVentaEnTx(
   v: { venueId: string; orderId: string; discountIds: string[]; enLaCola?: boolean; quien?: string | null },
 ): Promise<void> {
   const ids = [...new Set(v.discountIds.filter(Boolean))].sort()
-  const sumados: string[] = []
   for (const d of await tomarFilas(tx, v.venueId, ids)) {
     await tx.discount.update({ where: { id: d.id }, data: { currentUses: { increment: 1 } } })
-    sumados.push(d.id)
     await avisarSiPasoDelTopeEnTx(tx, {
       venueId: v.venueId,
       orderId: v.orderId,
@@ -153,45 +149,6 @@ export async function sumarUsosDeVentaEnTx(
       sinRed: v.enLaCola === true,
       quien: v.quien,
     })
-  }
-  // D31 (Codex r1 #1): la fila que ocupa el uso queda marcada (Discount → OrderDiscount, después de tomar las filas Discount).
-  await marcarFilaQueOcupaElUsoEnTx(tx, { venueId: v.venueId, orderId: v.orderId, discountIds: sumados })
-}
-
-/**
- * 🔴 hz:e82938e1:D31 (Codex r1 #1): la venta que suma un uso por descuento deja la marca en UNA fila suya de ese descuento (la primera
- * por id, sin cupón y sin marca), en la misma transacción que la suma. Así quitarla (TPV o POS) o anular la cuenta devuelve ese uso, y
- * las demás filas del mismo descuento (un renglón cada una) no devuelven otro. Un descuento sin fila (la etiqueta del importe libre)
- * no marca nada: su uso se queda gastado (proyecto del contador, fase 1).
- */
-export async function marcarFilaQueOcupaElUsoEnTx(
-  tx: TxConReintento,
-  v: { venueId: string; orderId: string; discountIds: string[] },
-): Promise<void> {
-  const ids = [...new Set(v.discountIds.filter(Boolean))].sort()
-  if (ids.length === 0) return
-  const filas: Array<{ id: string }> =
-    (await tx.orderDiscount.findMany({
-      where: { orderId: v.orderId, order: { venueId: v.venueId }, discountId: { in: ids }, couponCodeId: null, usoContado: false },
-      select: { id: true },
-      distinct: ['discountId'],
-      orderBy: [{ discountId: 'asc' }, { id: 'asc' }],
-      take: ids.length,
-    })) ?? []
-  if (filas.length > 0) await tx.orderDiscount.updateMany({ where: { id: { in: filas.map(f => f.id) } }, data: { usoContado: true } })
-}
-
-/**
- * 🔴 hz:e82938e1:D31 (Codex r1 #2): filas marcadas que se van a BORRAR sin pasar por «quitar» (el recorte de renglones las retira al
- * borrar, anular o regalar el renglón al que iban): devuelven su uso aquí, ANTES de los puntos y premios (Order → Discount →
- * Customer/StampReward, el orden de la anulación), en una pasada ascendente y sin bajar de 0.
- */
-export async function devolverUsosDeFilasEnTx(tx: TxConReintento, venueId: string, discountIds: string[]): Promise<void> {
-  const usos = new Map<string, number>()
-  for (const id of discountIds) if (id) usos.set(id, (usos.get(id) ?? 0) + 1)
-  for (const d of await tomarFilas(tx, venueId, [...usos.keys()].sort())) {
-    const nuevo = Math.max(0, d.currentUses - (usos.get(d.id) ?? 0))
-    if (nuevo !== d.currentUses) await tx.discount.update({ where: { id: d.id }, data: { currentUses: nuevo } })
   }
 }
 
