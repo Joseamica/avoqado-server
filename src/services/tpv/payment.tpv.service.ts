@@ -1629,6 +1629,12 @@ async function updateOrderTotalsForStandalonePayment(
     marcarCocina?: boolean
     /** La hora capturada del cobro de la cola (`horaDeLaVentaDeLaCola`); si salda, `loyaltySaleAt` junto con `loyaltyEligibleAt`. */
     horaCapturada?: Date
+    /**
+     * 🔴 D26 (familia «la respuesta espera al paso», 20-nov): quien lo pasa (sólo `recordOrderPayment`) gasta el uso del descuento DESPUÉS,
+     * al final de su respuesta (`esperarElPasoDelUso`). Con él, la reapertura de aquí no toca Discount (`usos: 'despues'`) y marca
+     * `reabierta`; sin él (el barrido), gasta en esta transacción como siempre.
+     */
+    usoTrasElCobro?: { reabierta: boolean }
   },
 ): Promise<OrderInventoryWarning | null> {
   // The payments the arithmetic sums; the write transaction rereads exactly these under the Order lock.
@@ -2063,9 +2069,9 @@ async function updateOrderTotalsForStandalonePayment(
                 paymentId: currentPaymentId ?? null,
                 staffId: staffId ?? null,
                 // 🔴 D26 (revisión de la familia «la respuesta espera al paso», 20-nov): con un cobro de la TPV esperando respuesta, el uso
-                // NO se gasta aquí (esperaría la fila Discount hasta 15 s con la cuenta tomada); se gasta tras el commit, acotado. El barrido
-                // (`reconcileOrderFromPayments`, sin respuesta que esperar) gasta aquí como siempre.
-                usos: currentPaymentId ? 'despues' : 'enEstaTx',
+                // NO se gasta aquí (esperaría la fila Discount hasta 15 s con la cuenta tomada); lo gasta `recordOrderPayment` al final,
+                // acotado. El barrido (`reconcileOrderFromPayments`, sin respuesta que esperar) gasta aquí como siempre.
+                usos: options?.usoTrasElCobro ? 'despues' : 'enEstaTx',
               })
               // S1: la cancelada que este dinero reabre no vuelve a la cocina (ni la marca de abajo ni el armado de después).
               reabiertaEnEstaPasada = estadoTrasCobro !== current.status
@@ -2171,17 +2177,9 @@ async function updateOrderTotalsForStandalonePayment(
     tpvPostingId = resultado.tpvPostingId
     reabiertaEnEstaPasada = resultado.reabiertaEnEstaPasada
   }
-  // 🔴 D26: el cobro de la TPV revivió la cuenta en esta pasada sin gastar el uso (`usos: 'despues'`, arriba); se gasta aquí, ya
-  // confirmada la escritura, en su propia transacción y con la respuesta esperándolo como mucho `TOPE_DEL_PASO_DEL_USO_MS`.
-  if (resultado?.updated && reabiertaEnEstaPasada && currentPaymentId) {
-    await esperarElPasoDelUso({
-      venueId: order.venueId,
-      orderId,
-      canal: 'recordOrderPayment',
-      paymentId: currentPaymentId,
-      staffId: staffId ?? null,
-    })
-  }
+  // 🔴 D26: el cobro de la TPV revivió la cuenta en esta pasada sin gastar el uso (`usos: 'despues'`, arriba); se lo dice a quien lo
+  // gasta al final de su respuesta.
+  if (resultado?.updated && reabiertaEnEstaPasada && options?.usoTrasElCobro) options.usoTrasElCobro.reabierta = true
   const updatedOrder = sinTransaccion ? order : resultado!.updated
 
   if (!updatedOrder) {
@@ -4073,6 +4071,8 @@ export async function recordOrderPayment(
   // Faltante de inventario detectado con el cobro YA registrado. Viaja como aviso
   // en la respuesta — nunca como error, o el cajero vuelve a pasar la tarjeta.
   let inventoryWarning: OrderInventoryWarning | null = null
+  // D26: el recálculo de totales avisa aquí si revivió la cuenta sin gastar el uso (se gasta al final de la respuesta).
+  const usoTrasElRecalculo = { reabierta: false }
   // S0: se llena DENTRO de la transacción (por eso un holder y no un `let`: TS no ve asignaciones en closures).
   const s0 = {
     segundaCaptura: null as SegundaCapturaRegistrada | null,
@@ -4791,19 +4791,6 @@ export async function recordOrderPayment(
     throw error
   }
 
-  // 🔴 hz:e82938e1:D26 (cruce del 20-nov): el cobro ya está guardado. Si revivió una cuenta anulada, su descuento vuelve a gastar el uso
-  // AQUÍ, en su propia transacción con red por traba (Order → Discount, sin turno), y sólo si la cuenta sigue viva. La respuesta lo espera
-  // como mucho `TOPE_DEL_PASO_DEL_USO_MS`. Nunca lanza: si falla, el uso queda libre con un error en el log y el reenvío lo reintenta.
-  if (committedStandaloneSettlement?.reabiertaDeCancelada) {
-    await esperarElPasoDelUso({
-      venueId,
-      orderId: activeOrder.id,
-      canal: 'recordOrderPayment',
-      paymentId: payment.id,
-      staffId: validatedStaffId ?? null,
-    })
-  }
-
   // Ventana de confirmación (Task 3): si el cierre reabrió una fila que la ventana ya había liberado, el correo ops sale
   // DESPUÉS del commit — por REST o por webhook, los dos pueden reabrir. Sin `lateAfterWindow` no hace nada.
   if (paymentData.terminalPaymentRequestId) {
@@ -5174,6 +5161,8 @@ export async function recordOrderPayment(
           {
             venueId,
             committedSettlement: committedStandaloneSettlement,
+            // D26: si este recálculo revive la cuenta, el uso se gasta al final de esta respuesta (abajo), no en su transacción.
+            usoTrasElCobro: usoTrasElRecalculo,
             // Codex 3.6 (S3): una cuenta con vale no pasa por ese saldado; aquí el pago ya es COMPLETED, así que la
             // salda (y la marca) la escritura de `updateOrderTotalsForStandalonePayment`.
             marcarCocina: marcarCocina && (Boolean(committedStandaloneSettlement) || hasAreaTicketLines),
@@ -5277,6 +5266,20 @@ export async function recordOrderPayment(
       })
     }),
   )
+
+  // 🔴 hz:e82938e1:D26 (cruce del 20-nov): el cobro ya está guardado. Si revivió una cuenta anulada (su cierre o su recálculo), el uso de su
+  // descuento se gasta AQUÍ, al final, en su propia transacción con red por traba (Order → Discount, sin turno) y sólo si la cuenta sigue
+  // viva. Al final, para que nada de esta respuesta espere la cuenta que el paso tiene tomada; la respuesta lo espera como mucho
+  // `TOPE_DEL_PASO_DEL_USO_MS`. Nunca lanza: si falla, el uso queda libre con un error en el log y el reenvío lo reintenta.
+  if (committedStandaloneSettlement?.reabiertaDeCancelada || usoTrasElRecalculo.reabierta) {
+    await esperarElPasoDelUso({
+      venueId,
+      orderId: activeOrder.id,
+      canal: 'recordOrderPayment',
+      paymentId: payment.id,
+      staffId: validatedStaffId ?? null,
+    })
+  }
 
   const autofacturaAvailable = digitalReceipt ? await timing.time('autofactura', () => resolveAutofacturaAvailable(orderId)) : false
   timing.end(payment.id)
