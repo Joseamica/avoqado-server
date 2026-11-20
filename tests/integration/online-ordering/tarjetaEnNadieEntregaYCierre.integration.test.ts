@@ -416,7 +416,9 @@ describe('D661 · tarea 4: entrega, cierre del día, «No lo recogió» y el seg
     // Entre la lectura del corte y su escritura: una persona entrega uno y la devolución del otro se reserva (Task 5 la escribe así).
     const ganados = await corte(async leer => {
       const filas = await leer()
-      expect(filas.map(f => f.id).sort()).toEqual([entregado.onlineOrderId, devolviendo.onlineOrderId].sort())
+      // `readCandidates` es genérico: las filas del corte se leen con su forma (id del pedido en línea).
+      const ids = (filas as unknown as Array<{ id: string }>).map(f => f.id)
+      expect(ids.sort()).toEqual([entregado.onlineOrderId, devolviendo.onlineOrderId].sort())
       await expect(markOnlineOrderDelivered({ venueId: venueId!, orderId: entregado.orderId, staffId: staffId! })).resolves.toEqual({
         outcome: 'OK',
         status: 'COMPLETED',
