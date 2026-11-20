@@ -35,7 +35,7 @@ export function rondaDeLaLlave(externalId: unknown): string | null {
 export function llavesDeLaRonda<T extends { externalId?: unknown }>(
   items: readonly T[],
   rondaPedida: string,
-): (Omit<T, 'externalId'> & { externalId: string })[] {
+): (T & { externalId: string })[] {
   const llaveDeLaRonda = rondaSegura(rondaPedida)
   const usadas = new Set<string>()
   const aceptadas = items.map(item => {
