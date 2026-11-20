@@ -560,7 +560,14 @@ describe('🍟 Extra ligado a un platillo del menú en el reporte de extras (enc
   it('el extra ligado sale con su platillo y el costo por porción × porciones (piezas: costo del producto)', async () => {
     ;(prisma.orderItemModifier.findMany as jest.Mock).mockResolvedValue([
       usoLigado(
-        { id: 'p-papas', name: 'Papas a la francesa', inventoryMethod: 'QUANTITY', cost: new Decimal('12.50'), recipe: null },
+        {
+          id: 'p-papas',
+          name: 'Papas a la francesa',
+          trackInventory: true,
+          inventoryMethod: 'QUANTITY',
+          cost: new Decimal('12.50'),
+          recipe: null,
+        },
         2,
         1,
       ),
@@ -576,7 +583,14 @@ describe('🍟 Extra ligado a un platillo del menú en el reporte de extras (enc
   it('por receta, el costo por porción es el de su receta', async () => {
     ;(prisma.orderItemModifier.findMany as jest.Mock).mockResolvedValue([
       usoLigado(
-        { id: 'p-aros', name: 'Aros', inventoryMethod: 'RECIPE', cost: new Decimal('99'), recipe: { totalCost: new Decimal('8.25') } },
+        {
+          id: 'p-aros',
+          name: 'Aros',
+          trackInventory: true,
+          inventoryMethod: 'RECIPE',
+          cost: new Decimal('99'),
+          recipe: { totalCost: new Decimal('8.25') },
+        },
         1,
         2,
       ),
@@ -586,15 +600,28 @@ describe('🍟 Extra ligado a un platillo del menú en el reporte de extras (enc
     expect(stat.totalCostImpact).toBeCloseTo(16.5)
   })
 
-  it('el conteo de «extras con inventario» incluye los ligados a un platillo', async () => {
+  it('el conteo de «extras con inventario» incluye los ligados a un platillo QUE LLEVA inventario', async () => {
     ;(prisma.modifier.count as jest.Mock).mockResolvedValue(3)
     ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([])
     ;(prisma.orderItemModifier.findMany as jest.Mock).mockResolvedValue([])
     await getModifierInventorySummary('venue-123')
     expect((prisma.modifier.count as jest.Mock).mock.calls[0][0].where).toEqual({
       group: { venueId: 'venue-123' },
-      OR: [{ rawMaterialId: { not: null } }, { linkedProductId: { not: null } }],
+      OR: [
+        { rawMaterialId: { not: null } },
+        { linkedProduct: { is: { trackInventory: true, OR: [{ inventoryMethod: { not: null } }, { recipe: { isNot: null } }] } } },
+      ],
     })
+  })
+
+  it('Codex r1 #7: una liga a un platillo SIN inventario no tiene costo ni impacto (sólo cuenta en «Dentro de paquete»)', async () => {
+    ;(prisma.orderItemModifier.findMany as jest.Mock).mockResolvedValue([
+      usoLigado({ id: 'p-agua', name: 'Agua', trackInventory: false, inventoryMethod: null, cost: new Decimal('5'), recipe: null }, 3, 1),
+    ])
+    const [stat] = await getModifierUsageStats('venue-123')
+    expect(stat.linkedProduct).toEqual({ id: 'p-agua', name: 'Agua', costPerPortion: null })
+    expect(stat.totalCostImpact).toBe(0)
+    expect(stat.totalQuantityUsed).toBe(3) // el uso sí se ve
   })
 
   it('la lista de configuración dice qué platillo descuenta cada extra', async () => {

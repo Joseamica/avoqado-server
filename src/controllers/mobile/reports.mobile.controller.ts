@@ -120,6 +120,9 @@ export async function salesByItem(req: Request, res: Response, next: NextFunctio
       reportType: 'summary',
       groupBy: (groupBy as GroupByOption) || 'none',
       timezone: venue?.timezone || 'America/Mexico_City',
+      // «Dentro de paquete» (founder «B», 20-nov) es del reporte del DASHBOARD, con su plan de reportes avanzados. Las apps de hoy
+      // reciben exactamente lo de siempre: ni renglones de 0 sueltas ni campos nuevos (Codex r1 #5).
+      incluirDentroDePaquete: false,
     }
 
     const report = await getSalesByItem(venueId, filters)
