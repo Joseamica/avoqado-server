@@ -334,7 +334,7 @@ describe('subcategorías (hz:nube0000:na33c25b)', () => {
 
 describe('migración de los datos viejos (las que se «eliminaron» antes y quedaron apagadas)', () => {
   // La misma instrucción de la migración, leída del archivo: lo que se prueba es lo que corre en producción.
-  const sql = readFileSync(join(__dirname, '../../../prisma/migrations/20261119140000_menu_category_eliminada/migration.sql'), 'utf8')
+  const sql = readFileSync(join(__dirname, '../../../prisma/migrations/20261120010000_menu_category_eliminada/migration.sql'), 'utf8')
   const backfill = sql.slice(sql.indexOf('UPDATE "MenuCategory" c'), sql.indexOf('-- 1. Prendida'))
 
   /** Una categoría apagada con un archivado, como la dejaba el «Eliminar» de antes; y su registro en la bitácora. */
