@@ -570,6 +570,15 @@ export async function reconcileUncharged(
       return existente
     }
 
+    // 🔴 F1 · salida del gerente para el `05AP` (20-nov): la VENTANA ya soltó esta solicitud sin evidencia del procesador
+    // (`FAILED / NO_EVIDENCE_AFTER_WINDOW`), pero la N86 la sigue frenando porque el historial de AngelPay trae su venta sin aprobar
+    // (`05AP`: llegó al procesador, el banco no contestó). Sin esto la tarjeta de esa cuenta quedaba frenada SIN salida en esa terminal.
+    // La firma pasa por las MISMAS puertas (PIN y permiso, arriba; dinero y vetos, abajo) y sólo deja el ASIENTO con la persona: el
+    // estado financiero no cambia (sigue liberada por la ventana; un aprobado tardío se aplica como a cualquier fila liberada).
+    // Cualquier otro «no se cobró» ya acreditado (`BANK_DECLINED`, una lápida…) se sigue rechazando como hoy.
+    const trasLaVentana =
+      !porElBanco && row.status === TerminalPaymentRequestStatus.FAILED && row.failureCode === 'NO_EVIDENCE_AFTER_WINDOW'
+
     // ELEGIBILIDAD (la autorización ya se evaluó arriba, antes de buscar la fila: quien no puede declarar recibe 403 sin
     // enterarse del estado del cobro)
     // 🔴 RONDA 4 de Codex, y corrige la decisión de la ronda 3. Al borrar la elegibilidad por reloj se
@@ -688,7 +697,7 @@ export async function reconcileUncharged(
     // cobros que pueden seguir corriendo: declarar sobre ellos es el camino del cobro doble.
     if (!ESTADOS_DECLARABLES.has(row.status)) throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
     const { desenlaceCanonico } = await import('../terminal-payment.service')
-    if (desenlaceCanonico(row).outcome !== 'UNRESOLVED') throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
+    if (!trasLaVentana && desenlaceCanonico(row).outcome !== 'UNRESOLVED') throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
 
     // 🔴 F1 · bloque 1 (R1, 18-nov): entregada a una PAX v2, el acuse o el cese físico ya NO bastan. Una persona declara sólo si esa
     // terminal acreditó que ESTA solicitud se puede declarar (su libreta no tiene aprobado propio, evidencia pendiente ni hermano
@@ -744,15 +753,22 @@ export async function reconcileUncharged(
     // intento recibido por OTRO venue —que entra por un INSERT sin ningún candado— pasaba el CAS aunque la lectura sí lo
     // habría vetado. Ése era
     // exactamente el camino que permitía declarar «no cobrado» con un aprobado durable ya guardado.
-    const cas = await tx.$executeRaw`
+    const veto = sinVetoDeDineroSql({ requestId: declaration.requestId, venueId: identity.venueId, attemptIds, terminalId: row.terminalId })
+    const certificado = exigeCertificado ? Prisma.sql`AND "executionDeclarable" IS TRUE` : Prisma.empty
+    const cas = trasLaVentana
+      ? // Sólo el asiento: ni estado, ni código, ni sobre, ni `updatedAt` (la ventana y su vigilancia de aprobados tardíos siguen igual).
+        await tx.$executeRaw`
+      UPDATE "TerminalPaymentRequest" SET "operatorReconciliation" = ${JSON.stringify(saved)}::jsonb
+      WHERE "id" = ${row.id} AND "status" = 'FAILED' AND "failureCode" = 'NO_EVIDENCE_AFTER_WINDOW' AND "paymentId" IS NULL
+        AND "operatorReconciliation" IS NULL AND ${veto} ${certificado}`
+      : await tx.$executeRaw`
       UPDATE "TerminalPaymentRequest"
       SET "status" = 'FAILED', "failureCode" = ${porElBanco ? 'BANK_DECLINED' : 'OPERATOR_RECONCILED_NO_CHARGE'}, "cancelDisposition" = NULL,
           "resultJson" = ${JSON.stringify(sobreDeclarado)}::jsonb,
           "operatorReconciliation" = ${JSON.stringify(saved)}::jsonb,
           "updatedAt" = (NOW() AT TIME ZONE 'UTC')
       WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL
-        AND ${sinVetoDeDineroSql({ requestId: declaration.requestId, venueId: identity.venueId, attemptIds, terminalId: row.terminalId })}
-        ${exigeCertificado ? Prisma.sql`AND "executionDeclarable" IS TRUE` : Prisma.empty}`
+        AND ${veto} ${certificado}`
     if (cas !== 1) throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
 
     // Asiento DENTRO de la transacción: una declaración = un asiento.
@@ -775,6 +791,8 @@ export async function reconcileUncharged(
           ...(sondaReportoActiva(row) ? { terminalReportabaActiva: true } : {}),
           // A5 · E7: con PIN, `staffId` es el GERENTE que autorizó; aquí queda también quién operaba el POS.
           ...quien,
+          // F1 · 05AP: la firma de una venta que la ventana ya había soltado; su estado financiero no cambió.
+          ...(trasLaVentana ? { liberadaPorLaVentana: true } : {}),
         },
       },
     })

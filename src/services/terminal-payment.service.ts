@@ -1719,17 +1719,17 @@ export function avisarAprobacionTardiaTrasVentana(
   // 18-sep: además del correo a operaciones, AVISAR AL CAJERO en su aparato. El correo llega a quien administra;
   // quien puede cobrar otra vez por error es la persona que declaró, y hasta hoy no se enteraba de nada.
   // Fire-and-forget y nunca lanza: un aviso no puede deshacer el registro de un cobro.
-  if (porCajero) {
-    void import('./tpv/avisoDeCobroTardio').then(m =>
-      m.avisarCobroTardioAlCajero({
-        requestId: ctx.requestId,
-        venueId: ctx.venueId,
-        paymentId: ctx.paymentId,
-        terminalId: ctx.terminalId,
-        orderId: ctx.orderId,
-      }),
-    )
-  }
+  // F1 · 05AP (20-nov): también tras la ventana. Ahí sólo hay a quién avisar si un gerente firmó encima de la liberación (su asiento vive
+  // en la misma fila); sin firma el aviso no encuentra declaración y no hace nada, como antes.
+  void import('./tpv/avisoDeCobroTardio').then(m =>
+    m.avisarCobroTardioAlCajero({
+      requestId: ctx.requestId,
+      venueId: ctx.venueId,
+      paymentId: ctx.paymentId,
+      terminalId: ctx.terminalId,
+      orderId: ctx.orderId,
+    }),
+  )
 }
 
 class TerminalPaymentService {
@@ -6376,7 +6376,8 @@ class TerminalPaymentService {
       }
       const liberada =
         fresh?.status === TerminalPaymentRequestStatus.FAILED &&
-        fresh.failureCode === 'OPERATOR_RECONCILED_NO_CHARGE' &&
+        // F1 · 05AP: la firma sobre una solicitud que la VENTANA ya soltó deja el asiento sin cambiar el código: sigue liberada.
+        (fresh.failureCode === 'OPERATOR_RECONCILED_NO_CHARGE' || fresh.failureCode === 'NO_EVIDENCE_AFTER_WINDOW') &&
         !fresh.paymentId &&
         !afirmacionDeCobro &&
         !evidenciaActual
