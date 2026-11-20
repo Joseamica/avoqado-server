@@ -7,6 +7,7 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...a
 
 import { prismaMock } from '@tests/__helpers__/setup'
 import {
+  anotarSalidaQueNoSeUso,
   cerrarOlvidadasAntesDeChecar,
   cerrarSalidasOlvidadasPendientes,
   corregirSalidaOlvidada,
@@ -233,6 +234,20 @@ describe('cerrarSalidasOlvidadasPendientes (el job)', () => {
     expect(prismaMock.timeEntry.updateMany).not.toHaveBeenCalled()
   })
 
+  it('Codex r2 #11 y #12: relee el interruptor en la transacción y el cierre exige el estado leído', async () => {
+    prismaMock.timeEntry.findMany.mockResolvedValue([abierta({ status: 'CLOCKED_IN' })] as any)
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+    prismaMock.venueSettings.findUnique.mockResolvedValueOnce({ salidaOlvidadaEnabled: false } as any)
+
+    expect((await cerrarSalidasOlvidadasPendientes(mx('2026-11-04T05:00:00'))).cerradas).toBe(0)
+    expect(prismaMock.timeEntry.updateMany).not.toHaveBeenCalled()
+
+    prismaMock.venueSettings.findUnique.mockResolvedValue(null)
+    prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
+    await cerrarSalidasOlvidadasPendientes(mx('2026-11-04T05:00:00'))
+    expect(prismaMock.timeEntry.updateMany.mock.calls[0][0].where).toEqual({ id: 'te-1', clockOutTime: null, status: 'CLOCKED_IN' })
+  })
+
   it('una salida real que ganó la carrera (0 filas) no se cuenta ni se anota', async () => {
     prismaMock.timeEntry.findMany.mockResolvedValue([abierta()] as any)
     prismaMock.staffVenue.findFirst.mockResolvedValue(null)
@@ -242,6 +257,40 @@ describe('cerrarSalidasOlvidadasPendientes (el job)', () => {
 
     expect(r.cerradas).toBe(0)
     expect(mockLogAction).not.toHaveBeenCalled()
+  })
+})
+
+describe('anotarSalidaQueNoSeUso (PAX y POS tras el cierre)', () => {
+  const marcada = {
+    id: 'te-1',
+    clockInTime: mx('2026-11-09T09:00:00'),
+    clockOutTime: mx('2026-11-09T09:00:00'),
+    notes: null,
+    checkOutPhotoUrl: null,
+    depositPhotoUrl: null,
+    venue: { timezone: MX },
+  }
+
+  it('pega el voucher a la checada marcada y lo dice', async () => {
+    prismaMock.timeEntry.findFirst.mockResolvedValue(marcada as any)
+    prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
+
+    const t = await anotarSalidaQueNoSeUso({ staffId: 's', venueId: 'v', origen: 'PAX', depositPhotoUrl: 'https://x/voucher.jpg' })
+
+    expect(t).toContain('quedaron anotadas')
+    expect(prismaMock.timeEntry.updateMany.mock.calls[0][0].data).toEqual(
+      expect.objectContaining({ depositPhotoUrl: 'https://x/voucher.jpg' }),
+    )
+  })
+
+  it('Codex r2 #5: si otro escritor la cambió (0 filas), NO dice que quedaron anotadas', async () => {
+    prismaMock.timeEntry.findFirst.mockResolvedValue(marcada as any)
+    prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 0 })
+
+    const t = await anotarSalidaQueNoSeUso({ staffId: 's', venueId: 'v', origen: 'PAX', depositPhotoUrl: 'https://x/voucher.jpg' })
+
+    expect(t).not.toContain('quedaron anotadas')
+    expect(t).toContain('no se pudo anotar')
   })
 })
 

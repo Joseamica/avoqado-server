@@ -390,8 +390,9 @@ export async function clockOut(params: ClockOutParams) {
   // Update time entry (append note if provided, preserving any existing notes)
   const updatedNotes = note ? (activeEntry.notes ? `${activeEntry.notes}\n[Clock-out] ${note}` : note) : undefined
 
-  const updatedEntry = await prisma.timeEntry.update({
-    where: { id: activeEntry.id },
+  // Condicional (Codex r2 #6): si el cierre automático la cerró mientras esta salida leía, no se pisa su cierre.
+  const { count } = await prisma.timeEntry.updateMany({
+    where: { id: activeEntry.id, clockOutTime: null },
     data: {
       clockOutTime,
       status: TimeEntryStatus.CLOCKED_OUT,
@@ -403,6 +404,13 @@ export async function clockOut(params: ClockOutParams) {
       clockOutAccuracy: accuracy,
       ...(updatedNotes !== undefined && { notes: updatedNotes }),
     },
+  })
+  if (count !== 1) {
+    const yaOlvidada = await anotarSalidaQueNoSeUso({ staffId, venueId, origen: 'POS', checkOutPhotoUrl })
+    throw new BadRequestError(yaOlvidada ?? 'No tienes entrada registrada', yaOlvidada ? 'SALIDA_OLVIDADA' : undefined)
+  }
+  const updatedEntry = await prisma.timeEntry.findUniqueOrThrow({
+    where: { id: activeEntry.id },
     include: {
       staff: {
         select: {

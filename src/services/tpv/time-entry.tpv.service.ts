@@ -309,9 +309,10 @@ export async function clockOut(params: ClockOutParams) {
   const MAX_HOURS = 999.99
   const totalHours = Math.min(rawHours, MAX_HOURS)
 
-  // Update time entry with photo and GPS data
-  const updatedTimeEntry = await prisma.timeEntry.update({
-    where: { id: timeEntry.id },
+  // Update time entry with photo and GPS data. Condicional (Codex r2 #6): si el cierre automático («salida olvidada») la
+  // cerró mientras esta salida leía, no se pisa su cierre: la evidencia se anota en esa checada y se dice qué pasó.
+  const { count } = await prisma.timeEntry.updateMany({
+    where: { id: timeEntry.id, clockOutTime: null },
     data: {
       clockOutTime,
       totalHours,
@@ -324,6 +325,14 @@ export async function clockOut(params: ClockOutParams) {
       depositPhotoUrl: depositPhotoUrl || null, // Bank deposit voucher at clock-out
       checkoutSkipReason: skipReason || null, // Reason for skipping checkout photos
     },
+  })
+  if (count !== 1) {
+    const yaOlvidada = await anotarSalidaQueNoSeUso({ staffId, venueId, origen: 'PAX', checkOutPhotoUrl, depositPhotoUrl, skipReason })
+    throw new BadRequestError(yaOlvidada ?? 'El empleado no tiene entrada registrada', yaOlvidada ? 'SALIDA_OLVIDADA' : undefined)
+  }
+
+  return prisma.timeEntry.findUniqueOrThrow({
+    where: { id: timeEntry.id },
     include: {
       staff: {
         select: {
@@ -335,8 +344,6 @@ export async function clockOut(params: ClockOutParams) {
       breaks: true,
     },
   })
-
-  return updatedTimeEntry
 }
 
 /**
@@ -463,6 +470,10 @@ export async function endBreak(params: BreakParams) {
  */
 export async function getTimeEntries(params: TimeEntriesQueryParams) {
   const { venueId, staffId, startDate, endDate, status, limit = 50, offset = 0, salidaOlvidada } = params
+
+  // La PAX decide «Entrada» o «Salida» con ESTA lista (Codex r2 #9): un turno de un día ya terminado se cierra antes de
+  // contestarla, sin esperar al job.
+  if (staffId) await cerrarOlvidadasAntesDeChecar(staffId, 'IDENTIFICAR')
 
   const where: any = { venueId }
   if (salidaOlvidada) where.salidaOlvidada = true

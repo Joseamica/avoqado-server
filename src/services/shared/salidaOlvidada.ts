@@ -119,6 +119,7 @@ const ENTRADA_SELECT = {
   staffId: true,
   venueId: true,
   clockInTime: true,
+  status: true,
   notes: true,
   breaks: { select: { id: true, startTime: true, endTime: true } },
   venue: { select: { timezone: true, settings: { select: { salidaOlvidadaEnabled: true, rotatingShiftsEnabled: true } } } },
@@ -200,18 +201,12 @@ export async function limiteYSalidaDeSuHorario(db: Db, e: TurnoDeLaPersona): Pro
   return { limite: limiteDelTurno(e.clockInTime, e.timezone, fin), deSuHorario: fin }
 }
 
-/** Para quien sólo tiene la checada: lee la zona y si la sucursal usa turnos rotativos. */
-export async function limiteRealDe(db: Db, e: { staffId: string; venueId: string; clockInTime: Date }): Promise<Date> {
-  const v = await db.venue.findUnique({
-    where: { id: e.venueId },
-    select: { timezone: true, settings: { select: { rotatingShiftsEnabled: true } } },
-  })
-  const { limite } = await limiteYSalidaDeSuHorario(db, {
-    ...e,
-    timezone: v?.timezone,
-    rotativos: v?.settings?.rotatingShiftsEnabled === true,
-  })
-  return limite
+/**
+ * El límite de un turno que YA cerró el sistema, fijo desde ese cierre (Codex r2 #3): el base, o una hora después de la salida
+ * con la que se cerró (la de su horario). Cambiar el cuadrante después no lo mueve.
+ */
+export function limiteDeUnCierre(clockIn: Date, timezone: string | null | undefined, cierre: Date): Date {
+  return limiteDelTurno(clockIn, timezone, cierre)
 }
 
 /** Cierra [e] como «salida olvidada» si ya pasó su límite y el negocio tiene la regla prendida. null = no tocó nada. */
@@ -227,6 +222,9 @@ async function cerrarSiOlvidada(db: Db, e: EntradaAbierta, ahora: Date, disparad
     rotativos: e.venue.settings?.rotatingShiftsEnabled === true,
   })
   if (ahora < limite) return null // un nocturno largo con horario: todavía es su turno
+  // El interruptor se relee dentro de la transacción (Codex r2 #11): el job leyó la página antes y el gerente pudo apagarla.
+  const ajuste = await db.venueSettings.findUnique({ where: { venueId: e.venueId }, select: { salidaOlvidadaEnabled: true } })
+  if (ajuste?.salidaOlvidadaEnabled === false) return null
 
   const salida = deSuHorario ?? e.clockInTime
   // Descansos: los terminados antes de la salida cuentan; uno abierto (o que pasa de la salida) termina en la salida.
@@ -246,7 +244,8 @@ async function cerrarSiOlvidada(db: Db, e: EntradaAbierta, ahora: Date, disparad
     : `${NOTA_SALIDA_OLVIDADA}: no marcó salida y no tiene horario ese día; quedó en 0 horas hasta que el gerente la corrija.`
 
   const { count } = await db.timeEntry.updateMany({
-    where: { id: e.id, clockOutTime: null },
+    // También el estado leído (Codex r2 #12): un descanso que empezó después de leer cambia el estado y se relee después.
+    where: { id: e.id, clockOutTime: null, status: e.status },
     data: {
       clockOutTime: salida,
       status: TimeEntryStatus.CLOCKED_OUT,
@@ -557,7 +556,7 @@ export async function anotarSalidaQueNoSeUso(params: {
   if (!e) return null
   const hora = DateTime.fromJSDate(ahora, { zone: zonaDe(e.venue.timezone) }).toFormat('HH:mm dd/MM')
   const anotacion = `Salida de la ${params.origen} a las ${hora}: llegó después del cierre de salida olvidada y no se usó. Revisa la hora real.`
-  await defaultPrisma.timeEntry.updateMany({
+  const { count } = await defaultPrisma.timeEntry.updateMany({
     where: { id: e.id, salidaOlvidada: true, notes: e.notes },
     data: {
       notes: e.notes ? `${e.notes}\n${anotacion}` : anotacion,
@@ -566,6 +565,11 @@ export async function anotarSalidaQueNoSeUso(params: {
       ...(params.skipReason ? { checkoutSkipReason: params.skipReason } : {}),
     },
   })
+  const dia = diaDeLaEntrada(e.clockInTime, e.venue.timezone)
+  // Codex r2 #5: sólo se dice «quedaron anotadas» si de verdad se escribió (otro escritor pudo cambiarla entre leer y escribir).
+  if (count !== 1) {
+    return `Tu entrada del ${dia} se cerró como salida olvidada y la revisa tu gerente. Tu salida no se pudo anotar: avísale. Si vas a trabajar, marca tu entrada.`
+  }
   void logAction({
     staffId: params.staffId,
     venueId: params.venueId,
@@ -574,5 +578,5 @@ export async function anotarSalidaQueNoSeUso(params: {
     entityId: e.id,
     data: { origen: params.origen, salidaRecibida: ahora.toISOString(), cierreAutomatico: e.clockOutTime?.toISOString() ?? null },
   })
-  return `Tu entrada del ${diaDeLaEntrada(e.clockInTime, e.venue.timezone)} se cerró como salida olvidada y la revisa tu gerente (tu salida y tus fotos quedaron anotadas). Si vas a trabajar, marca tu entrada.`
+  return `Tu entrada del ${dia} se cerró como salida olvidada y la revisa tu gerente (tu salida y tus fotos quedaron anotadas). Si vas a trabajar, marca tu entrada.`
 }

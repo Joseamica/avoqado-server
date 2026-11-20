@@ -115,6 +115,7 @@ function armarBase() {
       }),
     },
     venue: { findUnique: jest.fn(async ({ where }) => (await tiempo(), { timezone: zona, name: `Sucursal ${where.id}` })) },
+    venueSettings: { findUnique: jest.fn(async () => (await tiempo(), ajustes)) },
     staffVenue: {
       findFirst: jest.fn(
         async () => (await tiempo(), { workSchedule: cuadrante ? { weekly: cuadrante } : null, workScheduleExceptions: [] }),
@@ -961,6 +962,54 @@ describe('salida olvidada (D3)', () => {
     expect(entradas[0]).toMatchObject({ clockOutTime: t('18:00', 3), totalHours: 9, llaveSalida: LLAVE })
     expect(entradas[0].checkOutPhotoUrl).toContain('salida.jpg')
     expect(entradas[0].notes).toContain('corrigió la salida')
+  })
+
+  it('Codex r2 #2: la entrada del celular cae dentro de un turno cerrado por salida olvidada → YA_TIENE_ENTRADA con su id', async () => {
+    const pax = entrada({
+      clockInTime: t('09:00', 3),
+      clockOutTime: t('17:00', 3),
+      status: 'CLOCKED_OUT',
+      totalHours: 8,
+      autoClockOut: true,
+      salidaOlvidada: true,
+    })
+
+    const error = await registrarEntradaDeCampo(q, { llave: LLAVE, ocurrioAt: t('10:00', 3).toISOString() }, t('09:00', 4)).catch(e => e)
+
+    expect(error).toMatchObject({ statusCode: 409, code: 'YA_TIENE_ENTRADA', details: expect.objectContaining({ timeEntryId: pax.id }) })
+  })
+
+  it('Codex r2 #3: el límite de un cierre está fijo; cambiar el cuadrante después no vuelve «del mismo día» una salida tardía', async () => {
+    const e = entrada({
+      clockInTime: t('20:00', 3),
+      clockOutTime: t('20:00', 3),
+      status: 'CLOCKED_OUT',
+      totalHours: 0,
+      autoClockOut: true,
+      salidaOlvidada: true,
+    })
+    // Después del cierre, el gerente le pone un horario de 20:00 a 11:00 (el límite «real» pasaría a las 12:00).
+    cuadrante = { tuesday: { enabled: true, ranges: [{ open: '20:00', close: '11:00' }] } }
+
+    const r = await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('09:00', 4).toISOString() }, t('09:30', 4))
+
+    expect(r).toMatchObject({ salidaNoUsada: true, totalHours: 0 })
+  })
+
+  it('Codex r2 #4: la salida real que llega después de la corrección del gerente vuelve la checada a «Por revisar»', async () => {
+    const e = entrada({
+      clockInTime: t('09:00', 3),
+      clockOutTime: t('16:00', 3),
+      status: 'CLOCKED_OUT',
+      totalHours: 7,
+      autoClockOut: false,
+      salidaOlvidada: false,
+      editedBy: 'gerente',
+    })
+
+    await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('18:00', 3).toISOString() }, t('10:00', 4))
+
+    expect(entradas[0]).toMatchObject({ salidaOlvidada: true, totalHours: 7, clockOutTime: t('16:00', 3) })
   })
 
   it('una salida normal (sin cierre automático) que se repite NO dice salidaNoUsada', async () => {

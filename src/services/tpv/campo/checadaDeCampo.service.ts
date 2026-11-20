@@ -15,7 +15,7 @@ import type { EntradaDeCampoBody, SalidaDeCampoBody } from '@/schemas/tpv/campo.
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { assertAttendanceEnabled } from '@/services/dashboard/attendanceGate'
 import prisma from '@/utils/prismaClient'
-import { anotarCierres, cerrarSalidasOlvidadasDe, limiteRealDe, type SalidaOlvidadaCerrada } from '@/services/shared/salidaOlvidada'
+import { anotarCierres, cerrarSalidasOlvidadasDe, limiteDeUnCierre, type SalidaOlvidadaCerrada } from '@/services/shared/salidaOlvidada'
 import { resolverHoraDelCelular } from './horaDelCelular'
 
 /** La sucursal de la dirección y la persona del token. */
@@ -89,9 +89,22 @@ export async function registrarEntradaDeCampo(q: Quien, v: EntradaDeCampoBody, a
     // Un turno ya cerrado que termina después de esta hora: la entrada caería dentro de él (horas contadas dos veces).
     const encimada = await tx.timeEntry.findFirst({
       where: { staffId: q.staffId, clockOutTime: { gt: hora } },
-      select: { id: true, venueId: true, clockInTime: true, clockOutTime: true },
+      select: { id: true, venueId: true, clockInTime: true, clockOutTime: true, salidaOlvidada: true },
       orderBy: { clockOutTime: 'desc' },
     })
+    // Codex r2 #2: la entrada cae DENTRO de un turno que el sistema cerró por salida olvidada (el celular no sabía de la entrada
+    // de la PAX): es el mismo turno. Se contesta como «ya tienes una entrada» con su id, para que el celular ofrezca «Usar esa
+    // entrada» y su salida real (del mismo día) reemplace el cierre.
+    if (encimada?.salidaOlvidada && encimada.venueId === q.venueId && hora >= encimada.clockInTime) {
+      const tz = (await tx.venue.findUnique({ where: { id: encimada.venueId }, select: { timezone: true } }))?.timezone
+      if (hora < limiteDeUnCierre(encimada.clockInTime, tz, encimada.clockOutTime!)) {
+        throw new ConflictError('Ya tienes una entrada de este turno. Usa esa entrada.', 'YA_TIENE_ENTRADA', {
+          timeEntryId: encimada.id,
+          venueId: encimada.venueId,
+          clockInTime: encimada.clockInTime.toISOString(),
+        })
+      }
+    }
     if (encimada) {
       // Conservador: también cuenta un turno que empieza DESPUÉS de esta hora (O5), así que el mensaje dice sólo lo cierto.
       const sucursal = await tx.venue.findUnique({ where: { id: encimada.venueId }, select: { name: true, timezone: true } })
@@ -215,9 +228,9 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
       const zonaDelTurno = cierreAutomatico
         ? ((await tx.venue.findUnique({ where: { id: q.venueId }, select: { timezone: true } }))?.timezone ?? 'America/Mexico_City')
         : null
-      const limite = cierreAutomatico
-        ? await limiteRealDe(tx, { staffId: q.staffId, venueId: q.venueId, clockInTime: e.clockInTime })
-        : null
+      // Fijo desde el cierre (Codex r2 #3): el base o una hora después de la salida con que se cerró; editar el cuadrante
+      // después no convierte una salida tardía en un turno largo.
+      const limite = cierreAutomatico && zonaDelTurno ? limiteDeUnCierre(e.clockInTime, zonaDelTurno, cierreAutomatico) : null
       if (cierreAutomatico && limite && (hora > limite || corregidaPorElGerente)) {
         // Otra salida tardía ya quedó anotada en este turno: ésta no es la misma (la misma volvió arriba, por su llave).
         if (e.llaveSalida) throw new ConflictError('Esta entrada ya tiene salida.', 'YA_TIENE_SALIDA')
@@ -234,6 +247,8 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
             ...(!e.checkOutPhotoUrl && v.checkOutPhotoUrl ? { checkOutPhotoUrl: v.checkOutPhotoUrl } : {}),
             ...(!e.depositPhotoUrl && v.depositPhotoUrl ? { depositPhotoUrl: v.depositPhotoUrl } : {}),
             ...(v.skipReason ? { checkoutSkipReason: v.skipReason } : {}),
+            // Codex r2 #4: la salida real llegó DESPUÉS de la corrección del gerente: vuelve a «Por revisar» con su hora.
+            ...(corregidaPorElGerente ? { salidaOlvidada: true } : {}),
           },
         })
         if (count === 0) continue
