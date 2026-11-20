@@ -115,6 +115,37 @@ export function preparationTicketStatus(items: PreparationCounts[]): 'NEW' | 'PR
   return 'NEW'
 }
 
+/**
+ * D17 (founder, 20-nov-2026): la COCINA ya terminó su parte — nada retenido, pendiente ni preparando. Desde ese momento la comanda
+ * sale del tablero (aunque falte que la caja marque «Entregado») y entra a «Recientes». Sin productos no hay nada terminado.
+ */
+export function cocinaTermino(items: PreparationCounts[]): boolean {
+  return items.length > 0 && items.every(c => c.HELD + c.PENDING + c.PREPARING === 0)
+}
+
+/**
+ * Lo que se escribe en la comanda cada vez que cambian sus productos. El estado sale de `preparationTicketStatus` (igual que
+ * siempre: READY = falta entregar, y de eso viven «En servicio» de la caja y el cierre de pedidos de plataforma);
+ * `kitchenDoneAt` guarda la PRIMERA vez que la cocina terminó y se borra si vuelve a tener trabajo.
+ */
+export function recalculoDeComanda(
+  items: PreparationCounts[],
+  previa: { kitchenDoneAt: Date | null },
+  ahora: Date = new Date(),
+): { status: 'NEW' | 'PREPARING' | 'READY' | 'COMPLETED'; completedAt: Date | null; kitchenDoneAt: Date | null } {
+  const status = preparationTicketStatus(items)
+  return {
+    status,
+    completedAt: status === 'COMPLETED' ? ahora : null,
+    kitchenDoneAt: cocinaTermino(items) ? (previa.kitchenDoneAt ?? ahora) : null,
+  }
+}
+
+/** «Deshacer» desde Recientes (D17): lo Listo vuelve a Preparando. Lo entregado y lo cancelado no se mueven. */
+export function regresarListoAPreparando(before: PreparationCounts): PreparationCounts {
+  return { ...before, PREPARING: before.PREPARING + before.READY, READY: 0 }
+}
+
 /** Reuses the canonical permission catalog: KITCHEN has update, floor also has create, manager has cancel. */
 export function preparationPermissions(action: PreparationAction): string[] {
   if (action === 'RELEASE' || action === 'DELIVER' || action === 'URGENT' || action === 'CLEAR_URGENT')

@@ -4,6 +4,7 @@ import {
   putVenueServiceCourses,
   putOrganizationServiceCourses,
   getOrganizationServiceCourses,
+  setKitchenRelease,
 } from '@/services/service-courses/serviceCourse.service'
 import { venueHasFeatureAccess, organizationHasFeatureAccess } from '@/services/access/basePlan.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -120,5 +121,42 @@ describe('service courses: tenant-scoped reads, Pro and atomic revisions', () =>
       statusCode: 400,
     })
     expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+  it('D17: «La cocina puede liberar» se lee de la sucursal (apagado de fábrica) y no se hereda', async () => {
+    await expect(getVenueServiceCourses('venue-a')).resolves.toMatchObject({ kitchenCanRelease: false })
+    prismaMock.venue.findUnique.mockResolvedValue({
+      ...venue,
+      settings: { serviceCourses: null, serviceCoursesRevision: 0, kitchenCanReleaseCourses: true },
+    })
+    await expect(getVenueServiceCourses('venue-a')).resolves.toMatchObject({ kitchenCanRelease: true })
+  })
+  it('D17: prenderlo guarda el valor y cuándo cambió, con la fila bloqueada, y deja la bitácora antes → después', async () => {
+    prismaMock.venueSettings.upsert.mockResolvedValue({})
+    const result = await setKitchenRelease('venue-a', true, actor)
+    expect(result.kitchenCanRelease).toBe(true)
+    expect(prismaMock.$queryRaw).toHaveBeenCalled()
+    expect(prismaMock.venueSettings.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { venueId: 'venue-a' },
+        update: { kitchenCanReleaseCourses: true, kitchenCanReleaseChangedAt: expect.any(Date) },
+      }),
+    )
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'KITCHEN_RELEASE_SETTING_UPDATED',
+        venueId: 'venue-a',
+        staffId: 'staff-a',
+        data: expect.objectContaining({ before: false, after: true }),
+      }),
+    )
+  })
+  it('D17: repetir el mismo valor no escribe ni deja otra fila; sin Pro o con un valor raro, nada', async () => {
+    await setKitchenRelease('venue-a', false, actor)
+    expect(prismaMock.venueSettings.upsert).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+    await expect(setKitchenRelease('venue-a', 'sí', actor)).rejects.toMatchObject({ code: 'KITCHEN_RELEASE_INVALID' })
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
+    await expect(setKitchenRelease('venue-a', true, actor)).rejects.toMatchObject({ statusCode: 403 })
+    expect(prismaMock.venueSettings.upsert).not.toHaveBeenCalled()
   })
 })

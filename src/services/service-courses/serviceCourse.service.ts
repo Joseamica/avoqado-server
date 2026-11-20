@@ -17,7 +17,7 @@ const venueSelect = {
   name: true,
   organizationId: true,
   organization: { select: { id: true, name: true, ...savedSelect } },
-  settings: { select: savedSelect },
+  settings: { select: { ...savedSelect, kitchenCanReleaseCourses: true } },
 } as const
 type Actor = { staffId: string; ipAddress?: string; userAgent?: string; source?: string }
 export type SaveServiceCoursesInput = { expectedRevision: string; courses: unknown }
@@ -55,7 +55,41 @@ export async function getVenueServiceCourses(venueId: string) {
     organizationName: venue.organization.name,
     ...resolveServiceCourses(venue.organization, venue.settings),
     enabled: await venueHasFeatureAccess(venueId, 'TABLE_SERVICE'),
+    /** D17: «La cocina puede liberar tiempos desde su pantalla». Apagado de fábrica; es de la sucursal, no se hereda. */
+    kitchenCanRelease: venue.settings?.kitchenCanReleaseCourses === true,
   }
+}
+
+/**
+ * D17 (founder, 20-nov-2026): prende o apaga «La cocina puede liberar tiempos desde su pantalla» de UNA sucursal. Mismo plan que
+ * los tiempos (TABLE_SERVICE, Pro). Valor absoluto: repetirlo no cambia nada y no deja otra fila en la bitácora.
+ */
+export async function setKitchenRelease(venueId: string, enabled: unknown, actor: Actor) {
+  if (typeof enabled !== 'boolean')
+    throw new BadRequestError('Indica si la cocina puede liberar tiempos (sí o no)', 'KITCHEN_RELEASE_INVALID')
+  const current = await getVenueServiceCourses(venueId)
+  requireEnabled(current.enabled)
+  if (current.kitchenCanRelease === enabled) return current
+  const ahora = new Date()
+  // FOR UPDATE: espera a que termine un RELEASE de la cocina que ya midió el permiso (lo lee con FOR SHARE dentro de su operación).
+  await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "VenueSettings" WHERE "venueId" = ${venueId} FOR UPDATE`
+    await tx.venueSettings.upsert({
+      where: { venueId },
+      update: { kitchenCanReleaseCourses: enabled, kitchenCanReleaseChangedAt: ahora },
+      create: { venueId, kitchenCanReleaseCourses: enabled, kitchenCanReleaseChangedAt: ahora },
+    })
+  })
+  await logAction({
+    ...actor,
+    venueId,
+    organizationId: current.organizationId,
+    action: 'KITCHEN_RELEASE_SETTING_UPDATED',
+    entity: 'VenueSettings',
+    entityId: venueId,
+    data: { before: current.kitchenCanRelease, after: enabled, source: actor.source ?? 'dashboard' },
+  })
+  return { ...current, kitchenCanRelease: enabled }
 }
 
 export async function getOrganizationServiceCourses(organizationId: string) {

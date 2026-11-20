@@ -2283,6 +2283,53 @@ describe('preparation replay and financial FIFO', () => {
     })
     expect(preparation).toHaveBeenCalledWith(VENUE, 'order-1', expect.anything(), STAFF, intent.id)
   })
+  // D17 (founder, 20-nov): «La cocina puede liberar tiempos desde su pantalla». La cocina (sin orders:create) libera la mesa de
+  // cualquier mesero; el SERVIDOR lo vuelve a medir dentro de la operación (7º argumento). Apagado: se rechaza como siempre.
+  describe('D17 · liberar desde la cocina', () => {
+    const release = (id: string) => ({
+      ...progress(id, 1),
+      createdAtLocal: 1_700_000_000_000,
+      payload: { orderId: 'order-1', action: 'RELEASE', items: [{ id: 'line-1', quantity: 1, expectedRevision: 0 }] },
+    })
+    const cocina = () => ({
+      ...baseParams([release('rel-1')]),
+      authorizeIntent: jest.fn((_intent: any, permission: string) => permission === 'orders:update'),
+    })
+    let interruptor: jest.SpyInstance
+    beforeEach(() => {
+      interruptor = jest.spyOn(kitchenPreparation, 'laCocinaPuedeLiberar')
+      ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
+        tableId: 't1',
+        servedById: 'staff-otro',
+        servedBy: { firstName: 'Juan', lastName: 'Pérez' },
+      })
+    })
+    afterEach(() => interruptor.mockRestore())
+
+    it('prendido: la cocina libera la mesa de otro mesero y el permiso se vuelve a medir con la hora del aparato', async () => {
+      interruptor.mockResolvedValue(true)
+      const [ack] = await processIntents(cocina())
+      expect(ack.status).toBe('ACKED')
+      expect(interruptor).toHaveBeenCalledWith(VENUE, 1_700_000_000_000)
+      expect(preparation).toHaveBeenCalledWith(VENUE, 'order-1', expect.anything(), STAFF, 'rel-1', { hechoEnMs: 1_700_000_000_000 })
+    })
+
+    it('apagado: la cocina no libera (falta orders:create) y no se toca la preparación', async () => {
+      interruptor.mockResolvedValue(false)
+      const [ack] = await processIntents(cocina())
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'PERMISSION_DENIED' })
+      expect(preparation).not.toHaveBeenCalled()
+    })
+
+    it('la caja (con orders:create) sigue con la propiedad de mesa de siempre aunque esté prendido', async () => {
+      interruptor.mockResolvedValue(true)
+      const [ack] = await processIntents(baseParams([release('rel-2')]))
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+      expect(preparation).not.toHaveBeenCalled()
+    })
+  })
+
   it.each([
     { action: 'START', items: [{ id: 'canonical-line', quantity: 1, expectedRevision: 0 }] },
     { action: 'START', items: [{ externalId: 'e1', sourceKey: 'round:r1:s1', quantity: 0, expectedRevision: 0 }] },

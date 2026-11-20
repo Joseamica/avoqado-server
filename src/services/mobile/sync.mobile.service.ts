@@ -48,7 +48,12 @@ import { logAction } from '../dashboard/activity-log.service'
 import { writeLegacyActivityAuditTx } from '../activityAudit.service'
 import { markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
 import { FOLIO_VALIDO } from '../kds/kitchenTicketPlanning'
-import { applyKitchenPreparation, preparationActionSchema, preparationCommandSchema } from '../kds/kitchenPreparation.service'
+import {
+  applyKitchenPreparation,
+  laCocinaPuedeLiberar,
+  preparationActionSchema,
+  preparationCommandSchema,
+} from '../kds/kitchenPreparation.service'
 import { preparationPermissions } from '../kds/kitchenPreparation'
 import { motivoDelDescuento } from '../shared/motivoDelDescuento'
 import { descuentoManualDeMesaSchema } from '../../schemas/mobile/manualOrderDiscount.mobile.schema'
@@ -330,6 +335,21 @@ export function requiredPermissionForIntent(type: string): string | null {
  * cortesía sin red es un flujo legítimo, y quitarlo dejaría al local sin poder
  * comp-ear durante un apagón.
  */
+/**
+ * D17 (founder, 20-nov-2026): con «La cocina puede liberar tiempos desde su pantalla» prendido, un RELEASE sólo pide
+ * `orders:update` (el rol de cocina); apagado, lo de siempre (`orders:update` + `orders:create`). Se mide AL REPRODUCIR: si el
+ * negocio lo apagó mientras la tablet estaba sin red, ese RELEASE se rechaza visible (nunca se aplica con un permiso retirado).
+ */
+export async function permisosParaReproducir(venueId: string, intent: SyncIntentInput): Promise<string[]> {
+  const permisos = requiredPermissionsForIntent(intent)
+  if (!esLiberacion(intent)) return permisos
+  return (await laCocinaPuedeLiberar(venueId, intent.createdAtLocal)) ? ['orders:update'] : permisos
+}
+
+function esLiberacion(intent: SyncIntentInput): boolean {
+  return intent.type === 'KDS_ITEM_PROGRESS' && intent.payload?.action === 'RELEASE'
+}
+
 export function requiredPermissionsForIntent(intent: SyncIntentInput): string[] {
   const base = requiredPermissionForIntent(intent.type)
   const permissions = base ? [base] : []
@@ -666,7 +686,7 @@ export async function processIntents(params: {
         message: 'La operación pertenece a otra sesión. Requiere revisión del gerente.',
       }
     } else {
-      const requiredPermissions = requiredPermissionsForIntent(intent)
+      const requiredPermissions = await permisosParaReproducir(venueId, intent)
       const missingPermission = requiredPermissions.find(permission => !authorizeIntent(intent, permission))
       if (missingPermission) {
         ack = {
@@ -793,7 +813,7 @@ async function intentarRetomar(p: {
     (existing.seq ?? null) === (intent.seq ?? null) &&
     (!intent.staffId || intent.staffId === p.staffId)
   const sinPermiso = mismoDueño
-    ? requiredPermissionsForIntent(intent).find(permission => !p.authorizeIntent(intent, permission))
+    ? (await permisosParaReproducir(p.venueId, intent)).find(permission => !p.authorizeIntent(intent, permission))
     : undefined
   if (!mismoDueño || sinPermiso) {
     // D20: antes de rechazar, ¿la huella ya prueba el cobro? Entonces el dinero está registrado y se contesta con él.
@@ -1048,7 +1068,11 @@ async function applyIntent(ctx: {
           }
         }
         const action = preparationActionSchema.safeParse(intent.payload.action)
-        if (orderId && action.success && action.data !== 'START' && action.data !== 'READY')
+        // D17: quien libera SÓLO porque el negocio dejó a la cocina liberar (no trae `orders:create`, el permiso de la caja)
+        // libera la mesa de cualquier mesero — para eso existe el interruptor (Codex r1 #5). El SERVIDOR lo vuelve a medir
+        // dentro de la operación, con los ajustes bloqueados.
+        const deCocina = esLiberacion(intent) && authorizeIntent !== undefined && !authorizeIntent(intent, 'orders:create')
+        if (orderId && action.success && action.data !== 'START' && action.data !== 'READY' && !deCocina)
           await assertOwnership(venueId, staffId, orderId)
         const result = await applyKitchenPreparation(
           venueId,
@@ -1060,6 +1084,7 @@ async function applyIntent(ctx: {
           },
           staffId,
           intent.id,
+          ...(deCocina ? [{ hechoEnMs: intent.createdAtLocal ?? null }] : []),
         )
         return { id: intent.id, status: 'ACKED', result }
       }

@@ -8,7 +8,8 @@ import { tomarCandadoDeComandas } from './kitchenTicketAuthoring.service'
 import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import {
   parsePreparation,
-  preparationTicketStatus,
+  recalculoDeComanda,
+  regresarListoAPreparando,
   transitionPreparation,
   PREPARATION_VERSION,
   PREPARATION_STATES,
@@ -45,14 +46,54 @@ export const preparationCommandSchema = z
   .strict()
 
 export async function preparationCapabilities(venueId: string) {
+  const [enabled, kitchenCanRelease] = await Promise.all([venueHasFeatureAccess(venueId, 'KITCHEN_DISPLAY'), laCocinaPuedeLiberar(venueId)])
   return {
     version: PREPARATION_VERSION,
     intentType: 'KDS_ITEM_PROGRESS',
     replayLaneVersion: 1,
     urgencyVersion: 1,
-    enabled: await venueHasFeatureAccess(venueId, 'KITCHEN_DISPLAY'),
+    enabled,
     maxItems: 100,
+    /** D17: la pantalla de cocina ofrece «Liberar» (campo nuevo; las apps viejas lo ignoran). */
+    kitchenCanRelease,
+    /**
+     * D17: este servidor saca del tablero lo que la cocina terminó, lo enseña en «Recientes» y lo regresa con «Deshacer»
+     * (`expectedDoneAt`). Sólo con esto la tablet nueva lo esconde también sin red (Codex r1 #7: contra un servidor viejo,
+     * esconderlo dejaba la comanda sin «Deshacer»).
+     */
+    kitchenDoneVersion: 1,
   }
+}
+
+/**
+ * D17 (founder, 20-nov-2026): «La cocina puede liberar tiempos desde su pantalla», por negocio y apagado de fábrica. Se lee al
+ * REPRODUCIR cada RELEASE (no al encolarlo): si el negocio lo apagó mientras la tablet estaba sin red, ese RELEASE se rechaza con
+ * el permiso de siempre y queda visible en la cola.
+ */
+export async function laCocinaPuedeLiberar(venueId: string, hechoEnMs?: number | null): Promise<boolean> {
+  const settings = await prisma.venueSettings.findUnique({
+    where: { venueId },
+    select: { kitchenCanReleaseCourses: true, kitchenCanReleaseChangedAt: true },
+  })
+  return liberacionPermitida(settings, hechoEnMs)
+}
+
+/**
+ * Prendido ⇒ sí. Apagado ⇒ sólo si la tablet lo hizo ANTES de que lo apagaran (`createdAtLocal` del intent, reloj del aparato):
+ * se hizo con permiso, y rechazarlo dejaba atoradas las acciones que la cocina guardó después (Codex r1 #6). Sin hora, no.
+ */
+export function liberacionPermitida(
+  settings: { kitchenCanReleaseCourses: boolean; kitchenCanReleaseChangedAt: Date | null } | null,
+  hechoEnMs?: number | null,
+): boolean {
+  if (!settings) return false
+  if (settings.kitchenCanReleaseCourses) return true
+  return (
+    typeof hechoEnMs === 'number' &&
+    Number.isFinite(hechoEnMs) &&
+    settings.kitchenCanReleaseChangedAt != null &&
+    hechoEnMs < settings.kitchenCanReleaseChangedAt.getTime()
+  )
 }
 
 async function assertEnabled(venueId: string) {
@@ -62,7 +103,15 @@ async function assertEnabled(venueId: string) {
 }
 
 /** Same reducer for every client. Exact selections, revision CAS, and audit are one atomic operation. */
-export async function applyKitchenPreparation(venueId: string, orderId: string, value: unknown, staffId: string, intentId?: string) {
+export async function applyKitchenPreparation(
+  venueId: string,
+  orderId: string,
+  value: unknown,
+  staffId: string,
+  intentId?: string,
+  /** D17: el RELEASE pasó SÓLO por el interruptor de la cocina; se vuelve a medir aquí, con la fila de ajustes bloqueada. */
+  liberacionDeCocina?: { hechoEnMs: number | null },
+) {
   const parsed = preparationCommandSchema.safeParse(value)
   if (!parsed.success) throw new BadRequestError(parsed.error.issues[0]?.message, 'PREPARATION_PAYLOAD_INVALID')
   const command = parsed.data
@@ -78,6 +127,14 @@ export async function applyKitchenPreparation(venueId: string, orderId: string, 
   }
   return prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT id FROM "Venue" WHERE id=${venueId} FOR KEY SHARE`
+    if (liberacionDeCocina) {
+      // Codex r1 #9: apagarlo mientras esta acción esperaba el candado no puede dejarla pasar con el permiso ya retirado.
+      const [ajustes] = await tx.$queryRaw<Array<{ kitchenCanReleaseCourses: boolean; kitchenCanReleaseChangedAt: Date | null }>>`
+        SELECT "kitchenCanReleaseCourses", "kitchenCanReleaseChangedAt" FROM "VenueSettings" WHERE "venueId" = ${venueId} FOR SHARE`
+      if (!liberacionPermitida(ajustes ?? null, liberacionDeCocina.hechoEnMs)) {
+        throw new ForbiddenError('Este negocio ya no deja liberar tiempos desde la cocina. Lo libera la caja.', 'KITCHEN_RELEASE_DISABLED')
+      }
+    }
     await tomarCandadoDeComandas(tx, orderId)
     const order = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { id: true, status: true } })
     if (!order) {
@@ -213,14 +270,15 @@ export async function applyKitchenPreparation(venueId: string, orderId: string, 
     if (current.length > 5000)
       throw new ConflictError('Divide esta comanda antes de actualizar su preparación.', 'PREPARATION_TICKET_TOO_LARGE')
     const afterById = new Map(updates.map(u => [u.row.id, u.after]))
+    const previaById = new Map(selected.map(r => [r.kdsOrderId, r.kdsOrder]))
     for (const ticketId of ticketIds) {
       const counts = current
         .filter(r => r.kdsOrderId === ticketId)
         .map(r => afterById.get(r.id) ?? parsePreparation(r.preparation, r.quantity))
-      const status = preparationTicketStatus(counts)
+      const previa = previaById.get(ticketId)
       await tx.kdsOrder.updateMany({
         where: { id: ticketId, venueId, preparationVersion: PREPARATION_VERSION },
-        data: { status, completedAt: status === 'COMPLETED' ? new Date() : null },
+        data: recalculoDeComanda(counts, { kitchenDoneAt: previa?.kitchenDoneAt ?? null }),
       })
     }
     await tx.activityLog.create({
@@ -259,6 +317,102 @@ export async function applyKitchenPreparation(venueId: string, orderId: string, 
         throw new ConflictError('No se pudo confirmar esta acción. Actualiza su estado.', 'PREPARATION_INTENT_MISSING')
     }
     return result
+  }, ORDER_LOCK_WAIT_BUDGET)
+}
+
+/**
+ * «Deshacer» de una comanda con tiempos desde «Recientes» (D17). La cocina la quitó al dejar todo en Listo; si se equivocó, la
+ * regresa: lo Listo de ESTA comanda vuelve a Preparando (lo entregado o cancelado no se toca), con el mismo candado de la cuenta,
+ * el mismo CAS por revisión y su renglón en la bitácora que cualquier acción de cocina. Una acción encolada con la revisión vieja
+ * choca después como cualquier conflicto de preparación (nunca se aplica encima). Sólo en línea, como el «Deshacer» de siempre.
+ */
+export async function recallPreparationTicket(
+  venueId: string,
+  kdsOrderId: string,
+  staffId: string | null,
+  /** La hora en que la cocina terminó, tal como la vio la tablet en «Recientes» (Codex r1 #4: un «Deshacer» viejo no deshace un Listo nuevo). */
+  expectedDoneAt: string | null,
+) {
+  const visto = expectedDoneAt ? new Date(expectedDoneAt) : null
+  if (!visto || Number.isNaN(visto.getTime())) {
+    throw new ConflictError('Actualiza la app de la pantalla de cocina para regresar una comanda con tiempos.', 'KDS_RECALL_NEEDS_UPDATE')
+  }
+  await assertEnabled(venueId)
+  const cabeza = await prisma.kdsOrder.findFirst({
+    where: { id: kdsOrderId, venueId, preparationVersion: PREPARATION_VERSION },
+    select: { orderId: true },
+  })
+  if (!cabeza?.orderId) throw new NotFoundError('No hay una comanda terminada con ese id para regresar')
+  const orderId = cabeza.orderId
+  return prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id=${venueId} FOR KEY SHARE`
+    await tomarCandadoDeComandas(tx, orderId)
+    const ticket = await tx.kdsOrder.findFirst({
+      where: { id: kdsOrderId, venueId, orderId, preparationVersion: PREPARATION_VERSION },
+      select: { id: true, status: true, kitchenDoneAt: true, archivedAt: true },
+    })
+    if (!ticket || ticket.archivedAt) throw new NotFoundError('No hay una comanda terminada con ese id para regresar')
+    if (ticket.status !== 'READY' && ticket.status !== 'COMPLETED') {
+      throw new ConflictError('Esta comanda sigue en la pantalla de cocina: no hay que regresarla.', 'KDS_RECALL_NOT_DONE')
+    }
+    if (ticket.kitchenDoneAt?.getTime() !== visto.getTime()) {
+      throw new ConflictError('Esta comanda cambió desde que abriste «Recientes». Vuelve a abrirlo.', 'KDS_RECALL_STALE')
+    }
+    const order = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { status: true } })
+    if (!order || order.status === 'CANCELLED' || order.status === 'DELETED') {
+      throw new ConflictError('La cuenta fue anulada. Ya no hay nada que regresar a la cocina.', 'PREPARATION_ORDER_CANCELLED')
+    }
+    const rows = await tx.kdsOrderItem.findMany({
+      where: { kdsOrderId: ticket.id, kdsOrder: { venueId, orderId } },
+      select: { id: true, orderItemId: true, quantity: true, preparation: true, preparationRevision: true },
+      orderBy: { id: 'asc' },
+      take: 5001,
+    })
+    if (rows.length > 5000) throw new ConflictError('Divide esta comanda antes de regresarla.', 'PREPARATION_TICKET_TOO_LARGE')
+    const antes = rows.map(r => ({ row: r, before: parsePreparation(r.preparation, r.quantity) }))
+    const cambios = antes.filter(a => a.before.READY > 0).map(a => ({ ...a, after: regresarListoAPreparando(a.before) }))
+    if (cambios.length === 0) {
+      throw new ConflictError(
+        'Ya no queda nada listo en esta comanda: se entregó o se canceló. No hay qué regresar a la cocina.',
+        'KDS_RECALL_NOTHING_READY',
+      )
+    }
+    for (const { row, after } of cambios) {
+      const cas = await tx.kdsOrderItem.updateMany({
+        where: { id: row.id, preparationRevision: row.preparationRevision, kdsOrder: { venueId, orderId } },
+        data: { preparation: after as Prisma.InputJsonValue, preparationRevision: { increment: 1 } },
+      })
+      if (cas.count !== 1) throw new ConflictError('Otro compañero cambió el producto. Revisa su estado.', 'PREPARATION_CONFLICT')
+    }
+    const despues = new Map(cambios.map(c => [c.row.id, c.after]))
+    await tx.kdsOrder.updateMany({
+      where: { id: ticket.id, venueId, preparationVersion: PREPARATION_VERSION },
+      data: recalculoDeComanda(
+        antes.map(a => despues.get(a.row.id) ?? a.before),
+        { kitchenDoneAt: ticket.kitchenDoneAt },
+      ),
+    })
+    await tx.activityLog.create({
+      data: {
+        venueId,
+        staffId,
+        action: 'KITCHEN_RECALL',
+        entity: 'KdsOrderItem',
+        entityId: orderId,
+        data: {
+          orderId,
+          kdsOrderId: ticket.id,
+          items: cambios.map(c => ({
+            id: c.row.id,
+            orderItemId: c.row.orderItemId,
+            revision: c.row.preparationRevision + 1,
+            before: c.before,
+            after: c.after,
+          })),
+        } as Prisma.InputJsonValue,
+      },
+    })
+    return { kdsOrderId: ticket.id, orderId, items: cambios.length }
   }, ORDER_LOCK_WAIT_BUDGET)
 }
 

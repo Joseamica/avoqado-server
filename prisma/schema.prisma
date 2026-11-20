@@ -1239,6 +1239,13 @@ model VenueSettings {
   // null inherits the organization's complete service-course catalog.
   serviceCourses         Json?
   serviceCoursesRevision Int   @default(0)
+  /// «La cocina puede liberar tiempos desde su pantalla» (founder, 20-nov-2026; Flautas D17). Apagado de fábrica: liberar
+  /// sigue siendo de la caja (`orders:update` + `orders:create`). Prendido, el SERVIDOR acepta el RELEASE de quien sólo trae
+  /// `orders:update` (el rol de cocina). Se lee al REPRODUCIR cada intent, no al encolarlo.
+  kitchenCanReleaseCourses Boolean @default(false)
+  /// Cuándo cambió por última vez. Un RELEASE que la tablet guardó SIN RED antes de que lo apagaran se respeta al subir (se hizo
+  /// con permiso; rechazarlo trababa la fila de preparación de esa tablet — Codex r1 #6).
+  kitchenCanReleaseChangedAt DateTime?
 
   // Operations
   autoCloseShifts           Boolean @default(false)
@@ -17390,12 +17397,23 @@ model KdsOrder {
   /// Salió en PAPEL DE RESPALDO porque la pantalla no contestó. Pegajoso: nunca vuelve a verse como activa.
   fallbackPrintedAt DateTime?
 
+  /// Preparación por producto (v1): cuándo la cocina terminó SU parte (nada retenido, pendiente ni preparando). Desde ahí
+  /// la comanda sale del tablero y entra a «Recientes» una hora; `status` sigue siendo READY hasta que la caja entregue
+  /// (founder, 20-nov-2026, D17). `null` mientras la cocina tenga trabajo, y otra vez al regresarla con «Deshacer».
+  kitchenDoneAt DateTime?
+  /// Se archivó sola al acabar su día del negocio con la cuenta ya cerrada (job `kds-archive-closed-day`). No se borra ni cambia
+  /// de estado: sólo deja la pantalla de cocina (la caja la sigue viendo en «Servicio y entregas» si falta entregar algo, y el
+  /// aviso de «listo» a las plataformas no la toma por archivada — Codex r1 #1 y #3). Queda en la bitácora.
+  archivedAt    DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   /// El folio (spec 2026-09-27 §1). Se construye CONCURRENTLY en su propia migración.
   @@unique([venueId, sourceKey])
   @@index([venueId, status])
+  /// El archivado del día (D17) busca en TODOS los negocios las comandas sin archivar más viejas. CONCURRENTLY, su propia migración.
+  @@index([archivedAt, status, createdAt])
   @@index([venueId, preparationVersion, status, id])
   /// Para "¿qué falta imprimir aquí?" sin recorrer la tabla entera.
   @@index([venueId, printedAt])
