@@ -20,7 +20,6 @@ import { StaffRole } from '@prisma/client' // Assuming Prisma client is set up
 import { NODE_ENV, ACCESS_TOKEN_SECRET } from './config/env'
 import logger from './config/logger'
 import { configureCoreMiddlewares } from './config/middleware'
-import { marcarPrimerServicioMiddleware } from './services/online-ordering/arranquePausaSola'
 import { setupSwaggerUI } from './config/swagger'
 import AppError, { BadRequestError, ConflictError, ServiceUnavailableError } from './errors/AppError'
 import { OrderTableTopologyChanged } from './services/shared/tableOrderLock'
@@ -118,10 +117,6 @@ app.use((req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
   res.once('close', onDone)
   next()
 })
-
-// D662 parte 2 (v4): la primera petición que atiende este SERVIDOR (no `/health`) marca el inicio de la pausa sola de la tienda en línea.
-// Nunca espera ni falla la petición (una escritura en toda la vida del proceso).
-app.use(marcarPrimerServicioMiddleware)
 
 // Guardia de retención del event loop: anota qué peticiones están en vuelo para poder
 // NOMBRAR a la que retiene el hilo (el histograma de arriba da el número, no la ruta).

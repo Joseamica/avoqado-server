@@ -10,7 +10,7 @@
  */
 import { OnlineOrderStatus, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { __resetArranqueParaPruebas, CLAVE_PAUSA_SOLA, MARGEN_DEL_ARRANQUE_MS } from '@/services/online-ordering/arranquePausaSola'
+import { __resetInterruptorParaPruebas, CLAVE_PAUSA_SOLA } from '@/services/online-ordering/interruptorPausaSola'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { ForbiddenError, ServiceUnavailableError } from '@/errors/AppError'
 import { assertOperationalVenue } from '@/middlewares/resolveOperationalVenueBySlug.middleware'
@@ -26,6 +26,7 @@ import {
   avanzarCortePausaSola,
   getAcceptingStatus,
   touchInboxPoll,
+  HOLGURA_DE_RELOJES_MS,
 } from '@/services/online-ordering/presence.service'
 import { claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/online-ordering/printClaim.service'
 import * as quoteModule from '@/services/online-ordering/quote.service'
@@ -973,17 +974,18 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     expect(bitacora(onlineOrderId, 'ONLINE_ORDER_COLLECTED')).toHaveLength(1)
   })
 
-  describe('D662 parte 2 (v4) · la pausa sola contra Postgres (la consulta real, sus nulos y el corte)', () => {
-    /** v4: el SERVIDOR nuevo «atiende» desde hace un día: la pausa sola ya cuenta (inicio = primer servicio + 120 s). */
-    const ponerArranque = async (primerServicioAt: Date) => {
-      await prisma.arranqueDeFuncion.upsert({
+  describe('D662 parte 2 (v5) · la pausa sola contra Postgres (la consulta real, sus nulos y el corte)', () => {
+    /** v5: el interruptor «pausa sola desde» está puesto desde hace un día (la pausa sola ya cuenta). */
+    const ponerInterruptor = async (desde: Date | null) => {
+      await prisma.interruptorDePlataforma.upsert({
         where: { clave: CLAVE_PAUSA_SOLA },
-        create: { clave: CLAVE_PAUSA_SOLA, primerServicioAt },
-        update: { primerServicioAt, legadoSelladoAt: null },
+        create: { clave: CLAVE_PAUSA_SOLA, desde, actualizadoPor: 'prueba' },
+        update: { desde, actualizadoPor: 'prueba' },
       })
-      __resetArranqueParaPruebas()
+      __resetInterruptorParaPruebas()
     }
-    beforeEach(() => ponerArranque(new Date(Date.now() - 24 * 60 * 60_000)))
+    beforeEach(() => ponerInterruptor(new Date(Date.now() - 24 * 60 * 60_000)))
+    afterAll(() => ponerInterruptor(null))
 
     /** Mueve la hora límite de un pedido (lo que en la vida pasa a los 10 min). */
     const venceA = (onlineOrderId: string, at: Date) =>
@@ -1053,49 +1055,38 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN' })
     })
 
-    it('v4: un pedido creado ANTES del primer servicio y contestado por el SERVIDOR anterior (sin marca) no es falla', async () => {
+    it('v5: sin interruptor nunca se pausa sola; con él, sólo cuentan las horas límite desde su hora (lo del SERVIDOR anterior queda fuera)', async () => {
       await arrancar()
       const viejo = await newOrder()
-      // Así contestaba el servidor anterior: rechazo de persona sin `staffAnsweredAt`.
+      const b = await newOrder()
+      // `viejo` lo contestó el SERVIDOR anterior: rechazo sin `staffAnsweredAt` (antes de esta función no existía la marca).
       await expect(
         rejectOnlineOrder({ venueId: venueId!, orderId: viejo.orderId, staffId: null, reason: 'TOO_BUSY' }),
       ).resolves.toMatchObject({
         outcome: 'OK',
       })
       expect((await prisma.onlineOrder.findUniqueOrThrow({ where: { id: viejo.onlineOrderId } })).staffAnsweredAt).toBeNull()
-      const b = await newOrder()
-      // El SERVIDOR nuevo empezó a atender DESPUÉS de crear `viejo` y antes de `b`, y su inicio (primer servicio + 120 s) ya pasó. Para no
-      // esperar 2 min, se ponen las horas de creación respecto a ese primer servicio (lo que importa es el orden).
-      const inicio = new Date(Date.now() - 1_000)
-      await prisma.arranqueDeFuncion.update({
-        where: { clave: CLAVE_PAUSA_SOLA },
-        // Sin sellar todavía: la primera lectura desde el inicio sella lo que contestó el anterior (Codex p2v4-r3 #1).
-        data: { primerServicioAt: new Date(inicio.getTime() - MARGEN_DEL_ARRANQUE_MS), legadoSelladoAt: null },
-      })
-      __resetArranqueParaPruebas()
-      await prisma.onlineOrder.update({
-        where: { id: viejo.onlineOrderId },
-        data: { createdAt: new Date(inicio.getTime() - MARGEN_DEL_ARRANQUE_MS - 1) },
-      })
-      await prisma.onlineOrder.update({
-        where: { id: b.onlineOrderId },
-        data: { createdAt: new Date(inicio.getTime() - MARGEN_DEL_ARRANQUE_MS + 1) },
-      })
-      await espera(5)
-      await venceA(viejo.onlineOrderId, new Date())
-      await espera(5)
-      await venceA(b.onlineOrderId, new Date())
-      await espera(5)
-      // `viejo` lo contestó el anterior: se selló con la hora del primer servicio y no es falla. `b` (creado desde el primer servicio,
-      // sin marca) es una sola falla.
+      await venceA(viejo.onlineOrderId, hace(300))
+      await venceA(b.onlineOrderId, hace(200))
+
+      // Sin interruptor: como antes de publicar, aunque haya dos «sin marca» vencidos.
+      await ponerInterruptor(null)
       await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
-      const sellado = await prisma.onlineOrder.findUniqueOrThrow({ where: { id: viejo.onlineOrderId } })
-      expect(sellado.staffAnsweredAt?.getTime()).toBe(inicio.getTime() - MARGEN_DEL_ARRANQUE_MS)
-      expect((await prisma.arranqueDeFuncion.findUniqueOrThrow({ where: { clave: CLAVE_PAUSA_SOLA } })).legadoSelladoAt).not.toBeNull()
+      // Con la hora del interruptor DESPUÉS de la hora límite de `viejo` (el paso 3 la pone 15 min después de apagarse el anterior):
+      // `viejo` no cuenta y `b` es una sola falla.
+      await ponerInterruptor(new Date(Date.now() - 250))
+      await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
+      // Una hora límite EXACTAMENTE igual a la del interruptor sí cuenta (≥).
+      const desde = new Date(Date.now() - 150)
+      await ponerInterruptor(desde)
       const c = await newOrder()
-      await venceA(c.onlineOrderId, new Date())
-      await espera(5)
+      const d = await newOrder()
+      await venceA(c.onlineOrderId, desde)
+      await venceA(d.onlineOrderId, hace(50))
       await expect(estadoTienda()).resolves.toMatchObject({ status: 'PAUSED' })
+      // Con la hora en el futuro: apagada todavía.
+      await ponerInterruptor(new Date(Date.now() + 60_000))
+      await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
     })
 
     it('v4 (hueco 3 y T2): una aceptación a tiempo que todavía se guarda NO hace parpadear «en pausa»: la lectura la espera', async () => {
@@ -1127,6 +1118,38 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       soltar()
       await cajera
       await expect(lectura).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
+    })
+
+    it('v5 (r4 #3): quien toma la cuenta de un pedido por aceptar en una transacción que EMPEZÓ después de L(B) no retrasa «Pausada»', async () => {
+      await arrancar()
+      const a = await newOrder()
+      const b = await newOrder()
+      const c = await newOrder() // por aceptar, hora límite posterior: su cuenta entra en la espera
+      await venceA(a.onlineOrderId, hace(5_000))
+      await venceA(b.onlineOrderId, hace(HOLGURA_DE_RELOJES_MS + 1_000)) // reciente (< 30 s): la lectura revisaría candados
+      // Alguien (el panel, el vencimiento, otra cajera) toma la cuenta de C AHORA, ya pasada la hora límite de B, y tarda.
+      let soltar!: () => void
+      const tardanza = new Promise<void>(resolve => (soltar = resolve))
+      let tomado!: () => void
+      const yaTomado = new Promise<void>(resolve => (tomado = resolve))
+      const tarde = prisma.$transaction(
+        async tx => {
+          await lockExistingOrderForPayment(tx, { venueId: venueId!, orderId: c.orderId })
+          tomado()
+          await tardanza
+        },
+        { timeout: 15_000 },
+      )
+      await yaTomado
+      const inicio = Date.now()
+      try {
+        await expect(estadoTienda()).resolves.toMatchObject({ status: 'PAUSED' })
+        // Sin esperarla: la lectura no hace fila detrás de una transacción que ya no puede cambiar el veredicto.
+        expect(Date.now() - inicio).toBeLessThan(1_500)
+      } finally {
+        soltar()
+        await tarde
+      }
     })
 
     it('un rechazo TARDE no es respuesta: el pedido ya falló a su hora límite', async () => {

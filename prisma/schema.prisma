@@ -21420,17 +21420,18 @@ enum OnlineOrderChargeStatus {
   ABANDONED // el comensal nunca autorizó
 }
 
-/// Ajustes de la tienda en línea de un negocio (1:1 con Venue). Sólo aceptación manual en la v1 (decisión F1).
-/// D662 parte 2 (v4, «cero huecos»): la primera vez que un código del SERVIDOR que trae una función ATENDIÓ una petición (no `/health`).
-/// Una fila por función, escrita una sola vez en la vida (`INSERT … ON CONFLICT DO NOTHING`). La pausa sola cuenta desde
-/// `primerServicioAt + 90 s` (`arranquePausaSola.ts`): antes, el SERVIDOR anterior puede seguir vivo y no conoce la marca de respuesta.
-model ArranqueDeFuncion {
-  clave            String    @id
-  primerServicioAt DateTime
-  /// D662 v4 (Codex p2v4-r3 #1): cuándo se selló lo que contestó el SERVIDOR anterior (una vez, al llegar el inicio). Null = pendiente.
-  legadoSelladoAt  DateTime?
+/// D662 parte 2 (v5, rediseño B, founder 20-nov): interruptores de PLATAFORMA con hora, uno por clave. `pausa-sola`: la tienda en línea
+/// se pausa sola sólo desde `desde` (cuentan las horas límite ≥ esa hora). Sin fila o con `desde` vacío, apagado. Vive en la base (no en
+/// una variable de Render) para que TODOS los servidores lo vean a la vez sin redesplegar (Codex p2v5-r1 #1). Lo escribe una persona con
+/// `scripts/pausa-sola-interruptor.ts` (nunca con una hora pasada); lo lee `interruptorPausaSola.ts`.
+model InterruptorDePlataforma {
+  clave          String    @id
+  desde          DateTime?
+  actualizadoPor String?
+  updatedAt      DateTime  @updatedAt
 }
 
+/// Ajustes de la tienda en línea de un negocio (1:1 con Venue). Sólo aceptación manual en la v1 (decisión F1).
 model OnlineOrderingSettings {
   id      String @id @default(cuid())
   venueId String @unique
@@ -21458,7 +21459,7 @@ model OnlineOrderingSettings {
   /// Último sondeo de la lista «por cobrar» (pedidos sin aceptación que esperan pago en la barra): latido de presencia.
   lastToPayPollAt    DateTime?
   /// D662 parte 2 (v4): el corte propio de la pausa sola. Sólo cuentan los pedidos cuya hora límite fue DESPUÉS de
-  /// max(esta hora, el inicio global de `ArranqueDeFuncion`). Sólo SUBE: la escriben «Reanudar» (`pauseOnlineOrdering(null)`, = ahora) y la
+  /// max(esta hora, el interruptor `pausa-sola` de `InterruptorDePlataforma`). Sólo SUBE: la escriben «Reanudar» (`pauseOnlineOrdering(null)`, = ahora) y la
   /// propia lectura (`corteSeguro`, sin pausa). Encender, apagar, cambiar de modo y pausar 15/30/60 no la tocan. Null = sin corte propio.
   autoPauseResumedAt DateTime?
 

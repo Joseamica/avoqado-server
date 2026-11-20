@@ -12,7 +12,7 @@ import {
   touchInboxPoll,
   touchToPayPoll,
 } from '@/services/online-ordering/presence.service'
-import { __resetArranqueParaPruebas, MARGEN_DEL_ARRANQUE_MS } from '@/services/online-ordering/arranquePausaSola'
+import { __resetInterruptorParaPruebas } from '@/services/online-ordering/interruptorPausaSola'
 
 const NOW = new Date('2026-10-14T18:30:00.000Z') // miércoles 12:30 CDMX
 const queryRaw = () => prismaMock.$queryRaw as unknown as jest.Mock
@@ -30,18 +30,20 @@ const settingsRow = (o: Record<string, unknown> = {}) => ({
   ...o,
 })
 
-/** v4: el SERVIDOR nuevo atiende desde hace un día (la pausa sola ya cuenta); cada prueba puede cambiarlo. */
+/** v5: el interruptor «pausa sola desde» está puesto desde hace un día (la pausa sola ya cuenta); cada prueba puede cambiarlo. */
 const INICIO_DE_SIEMPRE = new Date(NOW.getTime() - 24 * 60 * 60_000)
-const arranque = (inicio: Date | null) =>
-  (prismaMock.arranqueDeFuncion.findUnique as jest.Mock).mockResolvedValue(
-    inicio ? { primerServicioAt: new Date(inicio.getTime() - MARGEN_DEL_ARRANQUE_MS), legadoSelladoAt: inicio } : null,
-  )
+const interruptor = (desde: Date | null) => {
+  __resetInterruptorParaPruebas()
+  ;(prismaMock.interruptorDePlataforma.findUnique as jest.Mock).mockResolvedValue(desde ? { desde } : null)
+}
+/** El corte que la lectura usa con el interruptor en [desde]: cuentan las horas límite ≥ desde (la consulta usa `>`). */
+const corteDe = (desde: Date) => new Date(desde.getTime() - 1)
 
 beforeEach(() => {
   __resetPresenceDebounceForTests()
-  __resetArranqueParaPruebas()
+  __resetInterruptorParaPruebas()
   __resetPausasConfirmadasParaPruebas()
-  arranque(INICIO_DE_SIEMPRE)
+  interruptor(INICIO_DE_SIEMPRE)
   prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
   prismaMock.onlineOrder.count.mockResolvedValue(0)
   prismaMock.onlineOrderCharge.count.mockResolvedValue(0)
@@ -421,8 +423,8 @@ describe('D662 parte 2 (v4) · la pausa sola la decide UNA consulta exacta en Po
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
   })
 
-  it('v4 (hueco 1 y 4): sin el arranque del SERVIDOR nuevo (todavía no atiende) no hay pausa sola, ni consulta, ni escritura', async () => {
-    arranque(null)
+  it('v5: sin el interruptor PAUSA_SOLA_DESDE no hay pausa sola, ni consulta, ni escritura (todo como hoy)', async () => {
+    interruptor(null)
     conVuelta(pausada(), { autoPauseResumedAt: null })
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
     await flush()
@@ -430,22 +432,29 @@ describe('D662 parte 2 (v4) · la pausa sola la decide UNA consulta exacta en Po
     expect(prismaMock.onlineOrderingSettings.updateMany).not.toHaveBeenCalled()
   })
 
-  it('v4: antes del inicio (primer servicio + 90 s) tampoco; desde el inicio, sí', async () => {
-    arranque(new Date(NOW.getTime() + 1))
+  it('v5: con la fila del interruptor pero «desde» vacío (apagado) tampoco hay pausa sola', async () => {
+    __resetInterruptorParaPruebas()
+    ;(prismaMock.interruptorDePlataforma.findUnique as jest.Mock).mockResolvedValue({ desde: null })
+    conVuelta(pausada(), { autoPauseResumedAt: null })
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
+    expect(queryRaw()).not.toHaveBeenCalled()
+  })
+
+  it('v5: antes de la hora del interruptor tampoco; desde esa hora, sí', async () => {
+    interruptor(new Date(NOW.getTime() + 1))
     conVuelta(pausada(), { autoPauseResumedAt: null })
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN' })
     expect(queryRaw()).not.toHaveBeenCalled()
-    __resetArranqueParaPruebas()
-    arranque(NOW)
+    interruptor(NOW)
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'PAUSED', autoPausedAt: min(-1).toISOString() })
   })
 
-  it('v4: el corte efectivo es max(corte propio, inicio global); un corte vacío cuenta desde el inicio (sin gracia por fila)', async () => {
+  it('v5: el corte efectivo es max(corte propio, interruptor); un corte vacío cuenta desde la hora del interruptor', async () => {
     const inicio = min(-20)
-    arranque(inicio)
+    interruptor(inicio)
     conVuelta(vuelta(), { autoPauseResumedAt: null })
     await getAcceptingStatus('v1', NOW)
-    expect(sql().valores).toEqual(expect.arrayContaining([inicio]))
+    expect(sql().valores).toEqual(expect.arrayContaining([corteDe(inicio)]))
     queryRaw().mockClear()
     conVuelta(vuelta(), { autoPauseResumedAt: min(-60) })
     await getAcceptingStatus('v1', NOW)
@@ -454,7 +463,7 @@ describe('D662 parte 2 (v4) · la pausa sola la decide UNA consulta exacta en Po
     conVuelta(vuelta(), { autoPauseResumedAt: min(-5) })
     await getAcceptingStatus('v1', NOW)
     expect(sql().valores).toEqual(expect.arrayContaining([min(-5)]))
-    expect(sql().valores.filter(v => v instanceof Date && v.getTime() === inicio.getTime())).toHaveLength(0)
+    expect(sql().valores.filter(v => v instanceof Date && v.getTime() === corteDe(inicio).getTime())).toHaveLength(0)
   })
 
   it('v4 (hueco 3 y T2): una pareja reciente espera lo que se está guardando (candados de las cuentas, sin fila) y vuelve a leer', async () => {
@@ -668,19 +677,17 @@ describe('D662 parte 2 (v4) · la pausa sola la decide UNA consulta exacta en Po
       expect(prismaMock.onlineOrderingSettings.updateMany).not.toHaveBeenCalled()
     })
 
-    it('si no sube, con la tienda en «Nadie» o sin arranque, no escribe; con el corte vacío (v4) sí sube desde el inicio', async () => {
+    it('si no sube, con la tienda en «Nadie» o sin interruptor, no escribe; con el corte vacío sí sube desde el interruptor', async () => {
       fila({ autoPauseResumedAt: new Date(NOW.getTime() - 30_000) })
       queryRaw().mockResolvedValue(vuelta())
       await expect(avanzarCortePausaSola('v1', NOW)).resolves.toBe(false)
       fila({ requiresAcceptance: false })
       await expect(avanzarCortePausaSola('v1', NOW)).resolves.toBe(false)
-      __resetArranqueParaPruebas()
-      arranque(null)
+      interruptor(null)
       fila({ autoPauseResumedAt: null })
       await expect(avanzarCortePausaSola('v1', NOW)).resolves.toBe(false)
       expect(prismaMock.onlineOrderingSettings.updateMany).not.toHaveBeenCalled()
-      __resetArranqueParaPruebas()
-      arranque(INICIO_DE_SIEMPRE)
+      interruptor(INICIO_DE_SIEMPRE)
       prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
       await expect(avanzarCortePausaSola('v1', NOW)).resolves.toBe(true)
     })

@@ -14,7 +14,7 @@ import {
 } from './constants'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getSettings, preloadReservationHours } from './settings.service'
-import { arranqueDeLaPausaSola, type ArranqueDeLaPausaSola } from './arranquePausaSola'
+import { pausaSolaDesde } from './interruptorPausaSola'
 import { emitStoreChanged } from './traySocket'
 import type { AcceptingReason, AcceptingState, AcceptingStatus } from './types'
 
@@ -105,6 +105,11 @@ export const TOPE_CUENTAS_EN_ESPERA = 1000
 /** Cuánto, como mucho, espera una lectura a lo que se está guardando (las transacciones que lo guardan duran 15 s como máximo). */
 export const ESPERA_MAXIMA_MS = 20_000
 const ESPERA_ENTRE_INTENTOS_MS = 25
+/**
+ * v5: holgura entre el reloj del SERVIDOR (la marca) y el de Postgres (el inicio de una transacción). Una transacción que empezó más de
+ * esto después de `L(B)` ya no puede contestar a tiempo: la lectura no la espera.
+ */
+export const HOLGURA_DE_RELOJES_MS = 2_000
 
 /** Pausas recientes ya confirmadas (por negocio, el pedido que la pausó): las demás lecturas de esos 30 s no vuelven a esperar. */
 const pausasConfirmadas = new Map<string, string>()
@@ -138,7 +143,7 @@ interface VueltaPausaSola {
  * - FALLA: un pedido de «Mi equipo» llegó a su hora límite (ya pasó) sin que una persona lo contestara a más tardar en ella
  *   (`staffAnsweredAt` vacío o después). No se borra: un rechazo tardío, la clienta que cancela tarde o un cobro no la quitan.
  *   No cuenta lo que terminó solo ANTES de su hora límite (la clienta lo canceló; el sistema lo rechazó por pago sin persona). Lo que
- *   contestó el SERVIDOR anterior ya trae la marca: se selló una vez al llegar el inicio (`arranquePausaSola.ts`).
+ *   contestó el SERVIDOR anterior no trae la marca: no cuenta porque su hora límite es anterior al interruptor (`interruptorPausaSola.ts`).
  * - RESPUESTA: una persona contestó A TIEMPO un pedido (`staffAnsweredAt <= su hora límite`), a la hora en que lo hizo, aunque su
  *   hora límite sea mucho después. Se busca con `EXISTS` sobre `(venueId, staffAnsweredAt)`, sin tope.
  * - PAUSADA: hay dos fallas seguidas (por hora límite y `id`) sin una respuesta en `(primera, segunda]`: a la misma hora la respuesta
@@ -154,7 +159,7 @@ const hayRespuestaEntre = (venueId: string, desdeSql: Prisma.Sql, hastaSql: Pris
     AND s."staffAnsweredAt" > ${desdeSql} AND s."staffAnsweredAt" <= ${hastaSql} AND s."staffAnsweredAt" <= s."acceptDeadlineAt"
 )`
 
-async function vueltaPausaSola(venueId: string, now: Date, corte: Date, _arranque: ArranqueDeLaPausaSola): Promise<VueltaPausaSola> {
+async function vueltaPausaSola(venueId: string, now: Date, corte: Date): Promise<VueltaPausaSola> {
   const [fila] = await prisma.$queryRaw<VueltaPausaSola[]>`
     WITH f AS (
       SELECT oo.id, oo."acceptDeadlineAt" AS t
@@ -234,10 +239,20 @@ async function esperarLoQueSeGuarda(venueId: string, desde: Date, pausaAt: Date)
         const [{ n }] = await tx.$queryRaw<Array<{ n: number }>>`
           SELECT count(*)::int AS n FROM "OnlineOrder" oo WHERE ${pendientesQuePuedenCambiarlo(venueId, desde)}`
         if (n > TOPE_CUENTAS_EN_ESPERA) return 'MUCHAS' as const
+        // v5 (Codex p2v4-r4 #3 / p2v5-r1 #3): no se espera a quien tiene la cuenta tomada en una transacción que EMPEZÓ después de
+        // `L(B)` (+ holgura de relojes): su reloj se lee después de tomar la cuenta, o sea después de `L(B)`, y su respuesta ya llega
+        // tarde. Así no retrasan la pausa el vencimiento de B, una edición del panel ni la cuenta de un pedido posterior. Se reconoce por
+        // el `xmax` de la fila (quien la tiene tomada) y el inicio de su transacción; si no se puede reconocer (varios a la vez, una
+        // subtransacción), se espera como antes.
         await tx.$queryRaw`
           SELECT o.id FROM "Order" o
           WHERE o."venueId" = ${venueId}
             AND o.id IN (SELECT oo."orderId" FROM "OnlineOrder" oo WHERE ${pendientesQuePuedenCambiarlo(venueId, desde)})
+            AND NOT EXISTS (
+              SELECT 1 FROM pg_stat_activity a
+              WHERE a.backend_xid = o.xmax
+                AND (a.xact_start AT TIME ZONE 'UTC') > ${utcTs(new Date(pausaAt.getTime() + HOLGURA_DE_RELOJES_MS))}
+            )
           FOR SHARE OF o NOWAIT`
         return 'LISTO' as const
       })
@@ -267,10 +282,9 @@ async function vueltaConfirmada(
   venueId: string,
   now: Date,
   corte: Date,
-  arranque: ArranqueDeLaPausaSola,
 ): Promise<{ v: VueltaPausaSola; corte: Date; releido: Date | null }> {
   let releido: Date | null = null
-  let v = await vueltaPausaSola(venueId, now, corte, arranque)
+  let v = await vueltaPausaSola(venueId, now, corte)
   for (let intento = 0; intento < 3; intento++) {
     if (!v.pausaId || !v.pausaAt || !v.pausaDesde) return { v, corte, releido }
     if (now.getTime() - v.pausaAt.getTime() >= MARGEN_DEFINITIVO_MS) return { v, corte, releido }
@@ -285,7 +299,7 @@ async function vueltaConfirmada(
     const propio = fila?.autoPauseResumedAt ?? null
     if (propio && propio.getTime() > corte.getTime()) corte = propio
     const antes = v.pausaId
-    v = await vueltaPausaSola(venueId, now, corte, arranque)
+    v = await vueltaPausaSola(venueId, now, corte)
     if (v.pausaId && v.pausaId === antes) {
       pausasConfirmadas.set(venueId, v.pausaId)
       return { v, corte, releido }
@@ -328,19 +342,21 @@ function subirCorteSinEsperar(venueId: string, nuevo: Date): void {
 }
 
 /**
- * La pausa sola de un negocio. v4: sin gracia por fila. Cuenta desde el corte efectivo `max(corte propio, inicio global)`; sin inicio
- * (este código todavía no atiende) o antes de él, no existe. Si una vuelta trae el tope de fallas sin pareja, sube el corte y da otra,
+ * La pausa sola de un negocio. v5: cuenta desde el corte efectivo `max(corte propio, interruptor)`; sin interruptor
+ * o antes de su hora, no existe. Si una vuelta trae el tope de fallas sin pareja, sube el corte y da otra,
  * las que hagan falta (Codex p2-r8 #5: sin tope de vueltas; cada vuelta llena sube el corte al menos una falla). Sin pausa y si el corte
  * puede subir bastante, lo sube sin esperar: así la lectura de mañana es corta.
  */
 async function leerPausaSola(venueId: string, now: Date, corteGuardado: Date | null, avance = AVANCE_MINIMO_MS): Promise<LecturaPausaSola> {
-  const arranque = await arranqueDeLaPausaSola()
-  if (!arranque || now.getTime() < arranque.inicio.getTime()) return { pausa: null, corteSeguro: null }
-  const base = corteGuardado && corteGuardado.getTime() > arranque.inicio.getTime() ? corteGuardado : arranque.inicio
+  // v5: sin interruptor (o antes de su hora) la pausa sola no existe. Cuentan las horas límite ≥ la del interruptor (la consulta usa `>`).
+  const desde = await pausaSolaDesde()
+  if (!desde || now.getTime() < desde.getTime()) return { pausa: null, corteSeguro: null }
+  const inicio = new Date(desde.getTime() - 1)
+  const base = corteGuardado && corteGuardado.getTime() > inicio.getTime() ? corteGuardado : inicio
   let corte = base
   let ajustesReleidosEn: Date | null = null
   for (;;) {
-    const confirmada = await vueltaConfirmada(venueId, now, corte, arranque)
+    const confirmada = await vueltaConfirmada(venueId, now, corte)
     const v = confirmada.v
     corte = confirmada.corte
     if (confirmada.releido && (!ajustesReleidosEn || confirmada.releido > ajustesReleidosEn)) ajustesReleidosEn = confirmada.releido
@@ -402,6 +418,12 @@ export async function proximaHoraLimite(venueId: string, now: Date = new Date())
   return fila?.acceptDeadlineAt ?? null
 }
 
+/** Los ajustes sin la marca interna de la relectura (nunca viaja en una respuesta). */
+function sinMarcaDeRelectura<T extends object>(ajustes: T): Omit<T, '__releido'> {
+  const { __releido: _marca, ...resto } = ajustes as T & { __releido?: true }
+  return resto
+}
+
 /** `preloaded`: los ajustes que quien llama ya leyó (p. ej. `GET /settings`), para no leerlos dos veces. */
 export async function getAcceptingStatus(
   venueId: string,
@@ -431,6 +453,7 @@ export async function getAcceptingStatus(
     config,
     autoPausedAt,
     ajustesGuardadosEn: ajustesGuardadosEn ?? null,
+    ajustesUsados: sinMarcaDeRelectura(settings),
   })
 
   if (!config.enabled) return done('DISABLED', 'NOT_ENABLED')

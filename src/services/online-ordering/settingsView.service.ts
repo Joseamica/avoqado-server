@@ -29,8 +29,11 @@ export async function settingsView(
     prisma.venue.findUnique({ where: { id: venueId }, select: { type: true } }),
     proximaHoraLimite(venueId, leidoEn).catch(() => null),
   ])
+  // D662 v5 (Codex p2v4-r5 #2): UNA sola foto por respuesta. Si el estado se armó con ajustes releídos (la lectura esperó y alguien
+  // apagó, pausó o reanudó mientras tanto), el interruptor, la pausa temporal, la tarjeta y la versión salen de ESOS mismos ajustes.
+  const usados = (state.ajustesUsados as typeof settings | undefined) ?? settings
   // D662 parte 2: `autoPauseResumedAt` es interno de la pausa sola; lo que el panel ve es `store.autoPausedAt`.
-  const { lastInboxPollAt, lastToPayPollAt, autoPauseResumedAt: _reanudada, updatedAt: guardadoEn, ...config } = settings
+  const { lastInboxPollAt, lastToPayPollAt, autoPauseResumedAt: _reanudada, updatedAt: guardadoEn, ...config } = usados
   return {
     ...config,
     lastInboxPollAt: lastInboxPollAt ? lastInboxPollAt.toISOString() : null,
@@ -52,6 +55,6 @@ export async function settingsView(
     storeNextDeadlineAt: siguiente ? siguiente.toISOString() : null,
     requirements,
     // Fase 2: el switch y el estado de la cuenta Stripe (el panel explica por qué no se puede prender).
-    card: { enabled: !!settings.acceptsCardOnline, merchantStatus },
+    card: { enabled: !!usados.acceptsCardOnline, merchantStatus },
   }
 }
