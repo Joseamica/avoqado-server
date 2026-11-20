@@ -344,7 +344,10 @@ describe('🔴 D26: la cuenta anulada que revive por dinero tardío vuelve a gas
       // Sin tocar Discount, el registro del dinero no espera a la otra caja: el pago aparece confirmado mientras ella sigue con la fila.
       let guardado: { id: string } | null = null
       for (let i = 0; i < 80 && !guardado; i += 1) {
-        guardado = await prisma.payment.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey: llave } }, select: { id: true } })
+        guardado = await prisma.payment.findUnique({
+          where: { venueId_idempotencyKey: { venueId, idempotencyKey: llave } },
+          select: { id: true },
+        })
         if (!guardado) await new Promise(r => setTimeout(r, 100))
       }
       expect(guardado).not.toBeNull()

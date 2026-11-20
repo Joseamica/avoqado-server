@@ -1089,7 +1089,12 @@ describe('🔴 D26 tras el cobro: la transacción del cobro de la terminal no bu
       return 1
     })
     try {
-      const r: any = await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'd26-tras-1' }, 'user-1')
+      const r: any = await (paymentService as any).recordOrderPayment(
+        VENUE_ID,
+        ORDER_ID,
+        { ...paymentData, idempotencyKey: 'd26-tras-1' },
+        'user-1',
+      )
       expect(r.id).toBe('payment-1')
 
       // La transacción del cobro es la que preguntó si la venta es de un cambio (sólo ella lo hace).

@@ -390,7 +390,7 @@
   "services/shared/usoDelDescuento.ts#volverAGastarUsosDeCuentaRevividaEnTx": {
     "clase": "EXCEPCION",
     "categoria": "DINERO_TARDIO",
-    "motivo": "hz:e82938e1:D26: parte de la reapertura por dinero ya capturado. Sólo corre tras reabrirSiRecibeDinero (la cuenta ya salió de CANCELLED/DELETED), bajo el candado de la orden del cobro: las filas que devolvieron su uso al anular (usoDevueltoAlAnular) lo vuelven a gastar y recuperan usoContado. No mueve importes."
+    "motivo": "hz:e82938e1:D26: parte de la reapertura por dinero ya capturado. Sólo corre tras reabrirSiRecibeDinero (la cuenta ya salió de CANCELLED/DELETED), bajo el candado de la orden del cobro; en la TPV (cruce del 20-nov), tras el commit del cobro en volverAGastarUsosTrasElCobro, que toma la cuenta y relee que ya no esté CANCELLED/DELETED antes de llamarla. Las filas que devolvieron su uso al anular (usoDevueltoAlAnular) lo vuelven a gastar y recuperan usoContado. No mueve importes."
   },
   "services/shared/usoDelDescuento.ts#soltarMarcaDeFilasSinDescuentoEnTx": {
     "clase": "EXCEPCION",

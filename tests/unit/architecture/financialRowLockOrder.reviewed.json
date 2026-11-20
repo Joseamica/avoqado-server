@@ -1277,6 +1277,11 @@
       "loops": 0,
       "reason": "S2: el wrapper toma exactamente uno de los modos mutuamente excluyentes; COBRO conserva fence/ancestros y ATRIBUCION el modo débil. Relectura posterior, sin otro lock."
     },
+    "src/services/shared/cuentaCancelada.ts#volverAGastarUsosTrasElCobro#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "hz:e82938e1:D26 (cruce del 20-nov): su propia transacción, después del commit del cobro de la TPV. Toma UNA venta y su ascendencia como primera reclamación, luego sólo las filas Discount de esa venta (una pasada por id ascendente); nunca Payment, GiftCard ni Shift. Mismo prefijo Order → Discount que la anulación y que Mesas: sin ciclo. Cruces en PostgreSQL: anularDevuelveUsoDelDescuento.integration.test.ts."
+    },
     "src/services/tpv/discount.tpv.service.ts#applyCouponCode#bloquearCuentaParaEditar": {
       "count": 1,
       "loops": 0,

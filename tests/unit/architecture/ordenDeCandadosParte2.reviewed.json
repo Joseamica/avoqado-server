@@ -30,8 +30,8 @@
       "motivo": "La misma llamada interna, en la sobrecarga con reintentarInterbloqueo."
     },
     "src/services/tpv/payment.tpv.service.ts#recordOrderPayment": {
-      "cantidad": 2,
-      "motivo": "La única excepción (R63 b): no se envuelve porque su cuerpo tiene efectos fuera de la base (bitácora y correo a operaciones) y repetirlo los repetiría. El cast va EN EL ARGUMENTO de la llamada, `settleStandalonePaymentInTx(tx as TxConReintento, …)` (Ruling 21). Si alguna vez es la víctima de una traba, la terminal reenvía el cobro con su llave. El segundo (hz:e82938e1:D26, Codex r2 #1 y r3): `apartarDescuentosQueVolveriaAGastarEnTx(tx as TxConReintento, …)`, recién tomada la cuenta, aparta las filas Discount que el cierre de una cuenta anulada que revive va a volver a gastar, ANTES del turno (Order → Discount → … → Shift, el orden de la anulación): así esta transacción sin reintento no toma Discount ya con el turno.",
+      "cantidad": 1,
+      "motivo": "La única excepción (R63 b): no se envuelve porque su cuerpo tiene efectos fuera de la base (bitácora y correo a operaciones) y repetirlo los repetiría. El cast va EN EL ARGUMENTO de la llamada, `settleStandalonePaymentInTx(tx as TxConReintento, …)` (Ruling 21). Si alguna vez es la víctima de una traba, la terminal reenvía el cobro con su llave. hz:e82938e1:D26 (cruce del 20-nov): ya no toca Discount; el cierre revive con `usos: 'despues'` y el uso de la cuenta revivida se gasta tras el commit en volverAGastarUsosTrasElCobro (su propia withDeadlockRetry). Se quitó el segundo cast (apartarDescuentosQueVolveriaAGastarEnTx), que tomaba Discount aquí y podía trabarse con la venta de $0 (Shift → Discount)",
       "efectos": [
         {
           "archivo": "src/services/tpv/registroRepetido.ts",
@@ -1038,6 +1038,11 @@
       "etiqueta": "mintNormalAppointmentHold",
       "cantidad": 1,
       "serializable": true
+    },
+    "src/services/shared/cuentaCancelada.ts#volverAGastarUsosTrasElCobro": {
+      "etiqueta": "volverAGastarUsosTrasElCobro",
+      "cantidad": 1,
+      "nota": "hz:e82938e1:D26 (cruce del 20-nov): el uso del descuento de una cuenta anulada que revive por el cobro de la TPV, DESPUÉS del commit de recordOrderPayment (que ya no toca Discount). Order (lockExistingOrderForPayment) → Discount, sin Shift; sólo si la cuenta ya no está CANCELADA. Su cuerpo sólo escribe con su tx (bitácora con el tx); nunca lanza al llamador."
     },
     "src/services/shared/cuponDeLaVenta.ts#finalizeCouponsForOrder": {
       "etiqueta": "finalizeCouponsForOrder",

@@ -199,17 +199,20 @@ describe('🔴 D26 tras el cobro: el registro de la terminal no toca Discount; e
   it("reabrirSiRecibeDinero con `usos: 'despues'`: revive y deja su bitácora, pero ni busca las filas ni toma ni escribe Discount", async () => {
     const tx = txDoble()
     expect(
-      await reabrirSiRecibeDinero(tx as any, {
-        venueId: 'v',
-        orderId: 'o',
-        status: 'CANCELLED',
-        originSystem: 'AVOQADO',
-        cobrado: 90,
-        cubreComoCancelada: false,
-        canal: 'recordOrderPayment',
-        paymentId: 'pay-1',
-        usos: 'despues',
-      } as any),
+      await reabrirSiRecibeDinero(
+        tx as any,
+        {
+          venueId: 'v',
+          orderId: 'o',
+          status: 'CANCELLED',
+          originSystem: 'AVOQADO',
+          cobrado: 90,
+          cubreComoCancelada: false,
+          canal: 'recordOrderPayment',
+          paymentId: 'pay-1',
+          usos: 'despues',
+        } as any,
+      ),
     ).toBe('PENDING')
     expect(tx.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'PENDING' } }))
     expect(tx.activityLog.create).toHaveBeenCalledTimes(1)

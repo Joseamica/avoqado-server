@@ -263,20 +263,22 @@ const devueltasAlAnular = (venueId: string, orderId: string) =>
   ({ orderId, order: { venueId }, usoDevueltoAlAnular: true, discountId: { not: null } }) satisfies Prisma.OrderDiscountWhereInput
 
 /**
- * hz:e82938e1:D26 (Codex r2 #1, r3): la TPV (`recordOrderPayment`, cuya transacción no se reintenta) APARTA aquí, recién tomada la cuenta y
- * ANTES del turno, las filas `Discount` que una reapertura de esta cuenta va a volver a gastar. Sin escribir nada: si el cobro no la reabre,
- * el candado sólo dura lo que la transacción. Así el gasto de después (`volverAGastarUsosDeCuentaRevividaEnTx`, dentro de su cierre, ya con
- * el turno) no espera ninguna fila nueva, y todos los caminos quedan Order → Discount → … → Shift, el orden de la anulación (D24). Una
- * cuenta viva no tiene filas marcadas: sólo cuesta una consulta por el índice de la cuenta.
+ * hz:e82938e1:D26 (20-nov): ¿le queda a la cuenta alguna fila que devolvió su uso al anular (D24) y todavía no lo vuelve a gastar? Sólo lee
+ * (una consulta por el índice de la cuenta), sin candados: `volverAGastarUsosTrasElCobro` la usa para no abrir una transacción en cada
+ * reenvío de la terminal. Quien gasta lo vuelve a leer con la cuenta tomada.
  */
-export async function apartarDescuentosQueVolveriaAGastarEnTx(tx: TxConReintento, venueId: string, orderId: string): Promise<void> {
-  const usos = await usosDevueltosAlAnular(tx, venueId, orderId)
-  if (usos.size > 0) await tomarFilas(tx, venueId, [...usos.keys()].sort())
+export async function hayUsosDevueltosAlAnular(
+  db: Pick<Prisma.TransactionClient, 'orderDiscount'>,
+  venueId: string,
+  orderId: string,
+): Promise<boolean> {
+  const fila = await db.orderDiscount.findFirst({ where: devueltasAlAnular(venueId, orderId), select: { id: true } })
+  return fila != null
 }
 
 /**
  * 🔴 hz:e82938e1:D26 (encargo 2f1901): la cuenta ANULADA revive porque llegó dinero ya capturado (`reabrirSiRecibeDinero`: la cola sin red
- * del POS, la TPV, el pago manual del panel). Su anulación devolvió el uso de cada fila que lo había sumado (`usoDevueltoAlAnular`, D24);
+ * del POS, el pago manual del panel, el recálculo de la TPV; el cobro de la TPV, después de su commit con `volverAGastarUsosTrasElCobro`). Su anulación devolvió el uso de cada fila que lo había sumado (`usoDevueltoAlAnular`, D24);
  * revivida y cobrada, ese descuento SÍ se dio: cada una lo vuelve a gastar. Antes el contador quedaba uno abajo y otra caja podía dar
  * la misma rebaja.
  *

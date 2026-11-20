@@ -420,8 +420,8 @@ import {
   rechazarCobroNuevoSobreCancelada,
   renovarRecuperacionDeFolioEnTx,
   salirSiLaLlaveYaTienePago,
+  volverAGastarUsosTrasElCobro,
 } from '../shared/cuentaCancelada'
-import { apartarDescuentosQueVolveriaAGastarEnTx } from '../shared/usoDelDescuento'
 // El candado del toque repetido en «Efectivo». La regla vive AHÍ, pura y probada aparte.
 import { aplicaCandadoDeEfectivo, cobroEnEfectivoSobreOrdenSaldada } from '../shared/cobroEnEfectivoDuplicado'
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
@@ -1442,6 +1442,12 @@ export async function settleStandalonePaymentInTx(
   efectosDeCierre = true,
   /** La hora capturada del cobro de la cola (`horaDeLaVentaDeLaCola`); si salda, `loyaltySaleAt` junto con `loyaltyEligibleAt`. */
   horaCapturada?: Date,
+  /**
+   * 🔴 D26 (20-nov): `'despues'` ⇒ revive una cancelada SIN tocar `Discount`; quien llama gasta el uso tras su commit
+   * (`volverAGastarUsosTrasElCobro`). Sólo `recordOrderPayment` (sin reintento, R63 b). El cambio (`exchangeTx`) y la reasignación, con
+   * red por traba, gastan aquí como siempre.
+   */
+  usos: 'enEstaTx' | 'despues' = 'enEstaTx',
 ): Promise<CommittedStandaloneSettlement> {
   // One specific invoice, not a tenant list: its entire item snapshot is required
   // to preserve the stock obligation without silently truncating a paid invoice.
@@ -1478,6 +1484,7 @@ export async function settleStandalonePaymentInTx(
           canal: 'recordOrderPayment',
           paymentId: payment.id ?? null,
           staffId: staffId ?? null,
+          usos,
         })
   // 🔴 R4-2 (Codex r3): la cancelada CERRADA se guarda cancelada, pero se calcula como cuando se cobró (base + IVA aparte): el total
   // que se escribe aquí es el MISMO con el que mide el aviso de sobrepago de después del commit (`updateOrderTotalsForStandalonePayment`).
@@ -3724,6 +3731,25 @@ export async function findSesionesDeValesAtoradas(
  */
 export const ESTADOS_DE_PAGO_NO_CAPTURADOS: ReadonlySet<string> = new Set(['PENDING', 'PROCESSING', 'FAILED', 'REFUNDED'])
 
+/**
+ * hz:e82938e1:D26 (20-nov): un reenvío de la terminal con la misma llave encontró su cobro ya guardado. Si el proceso murió entre ese commit
+ * y el paso del uso (`volverAGastarUsosTrasElCobro`), aquí se termina; si ya se hizo, o la cuenta nunca fue anulada, no encuentra filas
+ * marcadas y no gasta nada. Sólo un cobro COMPLETADO con su cuenta. Nunca lanza (lo garantiza `volverAGastarUsosTrasElCobro`).
+ */
+async function terminarUsoDelDescuentoAlReenviar(
+  venueId: string,
+  pago: { id: string; orderId: string | null; status: string; type?: string | null; processedById?: string | null },
+): Promise<void> {
+  if (pago.status !== 'COMPLETED' || !pago.orderId || pago.type === 'REFUND') return
+  await volverAGastarUsosTrasElCobro({
+    venueId,
+    orderId: pago.orderId,
+    canal: 'recordOrderPayment',
+    paymentId: pago.id,
+    staffId: pago.processedById ?? null,
+  })
+}
+
 export async function recordOrderPayment(
   venueId: string,
   orderId: string,
@@ -3797,6 +3823,8 @@ export async function recordOrderPayment(
         montoPesos: existingByKey.amount,
         terminalSerial: paymentData.authenticatedTerminalSerial ?? null,
       })
+      // D26: si el proceso murió entre guardar el cobro y gastar el uso, este reenvío lo termina (sin filas marcadas: una consulta).
+      await terminarUsoDelDescuentoAlReenviar(venueId, existingByKey)
       return {
         ...((await consolidarRegistroRepetido(existingByKey, paymentData as RegistroEntrante, venueId, orderId)) ?? existingByKey),
         ...(areaTicketCheckoutState ? { areaTicketCheckoutState } : {}),
@@ -4045,17 +4073,9 @@ export async function recordOrderPayment(
             'PAYMENT_ORDER_AUTHORITY_UNAVAILABLE',
           )
         }
-        // 🔴 hz:e82938e1:D26 (Codex r2 #1, r3): si esta cuenta está anulada y el cobro la revive, su cierre vuelve a gastar los usos que la
-        // anulación devolvió. Esas filas `Discount` se APARTAN aquí, recién tomada la cuenta y antes del turno: Order → Discount → … →
-        // Shift, el orden de la anulación. Esta transacción no se reintenta (excepción R63 b): sin esto tomaba Discount ya con el turno y
-        // podía trabarse con una anulación que espera ese turno. Sólo si ya venía anulada (una cuenta viva no tiene filas marcadas, y así
-        // ningún cobro normal paga la consulta) y sólo con dinero capturado (COMPLETED es lo único que llega al cierre que gasta; Codex r4
-        // #3). Residuo declarado (Codex r4 #1-#2): una anulación que entra entre la lectura de arriba y este candado, o la venta de $0 de la
-        // TPV (que ya tomaba Shift → Discount, `order.tpv.service.ts`), pueden trabarse con este cierre; la víctima es esta transacción y,
-        // como en toda traba de este cuerpo (R63 b), la terminal reenvía el cobro con su llave. Nada queda a medias: se revierte entero.
-        if (paymentStatusSnapshot === 'COMPLETED' && claseDeEstado(activeOrder.status) === 'CANCELADA') {
-          await apartarDescuentosQueVolveriaAGastarEnTx(tx as TxConReintento, venueId, activeOrder.id)
-        }
+        // 🔴 hz:e82938e1:D26 (cruce del 20-nov): esta transacción no se reintenta (R63 b) y NO toca Discount. Si el cobro revive una cuenta
+        // anulada, su cierre la revive sin volver a gastar el uso (`usos: 'despues'`) y el uso se gasta tras el commit, aparte
+        // (`volverAGastarUsosTrasElCobro`, más abajo). Así no se cruza con la venta de $0 de la TPV (Shift → Discount).
 
         await tx.$executeRawUnsafe('SAVEPOINT exchange_sale_policy')
         try {
@@ -4497,6 +4517,7 @@ export async function recordOrderPayment(
             marcarCocina,
             true,
             horaCapturada,
+            'despues',
           )
         }
 
@@ -4647,6 +4668,8 @@ export async function recordOrderPayment(
           venueId,
           winnerPaymentId: ganador.id,
         })
+        // D26: el mismo intento (misma llave) ya tenía su cobro; si su paso del uso no terminó, lo termina aquí.
+        await terminarUsoDelDescuentoAlReenviar(venueId, ganador)
         // Codex R1 (P1-4): el REST que perdió la carrera bajo el candado trae marca, PAN, modo y método REALES — se
         // consolidan sobre el ganador (S3) igual que en los retornos idempotentes; devolverlo tal cual los perdía.
         return {
@@ -4690,6 +4713,8 @@ export async function recordOrderPayment(
             winner.status === 'COMPLETED'
               ? await resumeCapturedAreaTicketPayment(venueId, orderId, winner, paymentData.idempotencyKey)
               : null
+          // D26: la misma llave ya tenía su cobro; si su paso del uso no terminó, lo termina aquí.
+          await terminarUsoDelDescuentoAlReenviar(venueId, winner)
           return {
             ...((await consolidarRegistroRepetido(winner, paymentData as RegistroEntrante, venueId, orderId)) ?? winner),
             ...(winnerAreaTicketCheckoutState ? { areaTicketCheckoutState: winnerAreaTicketCheckoutState } : {}),
@@ -4709,6 +4734,19 @@ export async function recordOrderPayment(
       }
     }
     throw error
+  }
+
+  // 🔴 hz:e82938e1:D26 (cruce del 20-nov): el cobro ya está guardado. Si revivió una cuenta anulada, su descuento vuelve a gastar el uso
+  // AQUÍ, en su propia transacción con red por traba (Order → Discount, sin turno), y sólo si la cuenta sigue viva. Nunca lanza: si falla,
+  // el uso queda libre con un error en el log y el reenvío con la misma llave lo vuelve a intentar.
+  if (committedStandaloneSettlement?.reabiertaDeCancelada) {
+    await volverAGastarUsosTrasElCobro({
+      venueId,
+      orderId: activeOrder.id,
+      canal: 'recordOrderPayment',
+      paymentId: payment.id,
+      staffId: validatedStaffId ?? null,
+    })
   }
 
   // Ventana de confirmación (Task 3): si el cierre reabrió una fila que la ventana ya había liberado, el correo ops sale
