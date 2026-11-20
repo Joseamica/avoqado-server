@@ -1,7 +1,6 @@
 import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
-import { utcTs } from '@/utils/sqlDates'
 
 /**
  * D662 parte 2 (v4, «cero huecos», founder 20-nov): el INICIO de la pausa sola, uno solo para toda la plataforma. Reemplaza a la gracia
@@ -57,8 +56,9 @@ export function marcarPrimerServicio(ahora: Date = new Date()): Promise<void> {
   if (!primeraPeticion) primeraPeticion = ahora
   if (escribiendo) return escribiendo
   const hora = primeraPeticion
-  escribiendo = prisma.arranqueDeFuncion
-    .createMany({ data: [{ clave: CLAVE_PAUSA_SOLA, primerServicioAt: hora }], skipDuplicates: true })
+  // `Promise.resolve().then(...)`: un fallo SÍNCRONO del cliente de la base también cae en el `catch` (nunca tumba la petición).
+  escribiendo = Promise.resolve()
+    .then(() => prisma.arranqueDeFuncion.createMany({ data: [{ clave: CLAVE_PAUSA_SOLA, primerServicioAt: hora }], skipDuplicates: true }))
     .then(() => {
       escrita = true
     })
@@ -91,16 +91,13 @@ export function marcarPrimerServicioMiddleware(req: { path: string }, _res: unkn
  * el toque de aceptar) o, todavía por aceptar, con su cuenta ya anulada. NO `CAPTURED` solo (p2v4-r1 #3). Aceptado/listo/entregado sólo con
  * `acceptedAt`: el cobro tardío de un pedido VENCIDO lo pasa a entregado sin aceptación (p2v4-r3 #1), aunque ocurra antes del sello.
  */
-const evidenciaDelAnterior = Prisma.sql`(
-  (oo.status IN ('ACCEPTED', 'READY', 'COMPLETED') AND oo."acceptedAt" IS NOT NULL)
-  OR oo.status = 'CANCELLED_BY_STAFF'
-  OR (oo.status = 'REJECTED' AND oo."rejectReason" IS DISTINCT FROM 'PAYMENT_FAILED')
-  OR EXISTS (SELECT 1 FROM "OnlineOrderCharge" c WHERE c."onlineOrderId" = oo.id AND c.status IN ('CAPTURING', 'CAPTURE_FAILED'))
-  OR (
-    oo.status = 'PENDING_ACCEPTANCE'
-    AND EXISTS (SELECT 1 FROM "Order" o WHERE o.id = oo."orderId" AND o.status IN ('CANCELLED', 'DELETED'))
-  )
-)`
+const evidenciaDelAnterior: Prisma.OnlineOrderWhereInput[] = [
+  { status: { in: ['ACCEPTED', 'READY', 'COMPLETED'] }, acceptedAt: { not: null } },
+  { status: 'CANCELLED_BY_STAFF' },
+  { status: 'REJECTED', OR: [{ rejectReason: null }, { rejectReason: { not: 'PAYMENT_FAILED' } }] },
+  { charge: { is: { status: { in: ['CAPTURING', 'CAPTURE_FAILED'] } } } },
+  { status: 'PENDING_ACCEPTANCE', order: { status: { in: ['CANCELLED', 'DELETED'] } } },
+]
 
 /**
  * v4 (Codex p2v4-r3 #1): al llegar el inicio, UNA vez en la vida, se SELLA lo que contestó el SERVIDOR anterior: los pedidos creados antes
@@ -114,13 +111,16 @@ async function sellarLoDelServidorAnterior(a: ArranqueDeLaPausaSola): Promise<vo
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'pausa-sola:sello'}))`
     const fila = await tx.arranqueDeFuncion.findUnique({ where: { clave: CLAVE_PAUSA_SOLA }, select: { legadoSelladoAt: true } })
     if (fila?.legadoSelladoAt) return
-    const sellados = await tx.$executeRaw`
-      UPDATE "OnlineOrder" oo SET "staffAnsweredAt" = ${utcTs(a.primerServicio)}
-      WHERE oo."requiresAcceptance" = true
-        AND oo."staffAnsweredAt" IS NULL
-        AND oo."createdAt" < ${utcTs(a.primerServicio)}
-        AND oo."acceptDeadlineAt" > ${utcTs(a.inicio)}
-        AND ${evidenciaDelAnterior}`
+    const { count: sellados } = await tx.onlineOrder.updateMany({
+      where: {
+        requiresAcceptance: true,
+        staffAnsweredAt: null,
+        createdAt: { lt: a.primerServicio },
+        acceptDeadlineAt: { gt: a.inicio },
+        OR: evidenciaDelAnterior,
+      },
+      data: { staffAnsweredAt: a.primerServicio },
+    })
     await tx.arranqueDeFuncion.updateMany({
       where: { clave: CLAVE_PAUSA_SOLA, legadoSelladoAt: null },
       data: { legadoSelladoAt: new Date() },

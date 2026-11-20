@@ -1,4 +1,3 @@
-import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import {
   __resetArranqueParaPruebas,
@@ -93,19 +92,18 @@ describe('arranque de la pausa sola', () => {
     ;(prismaMock.arranqueDeFuncion.findUnique as jest.Mock)
       .mockResolvedValueOnce({ primerServicioAt: primer, legadoSelladoAt: null }) // la lectura
       .mockResolvedValueOnce({ legadoSelladoAt: null }) // bajo el candado del sello
-    ;(prismaMock.$executeRaw as jest.Mock).mockResolvedValue(3)
+    ;(prismaMock.$executeRaw as jest.Mock).mockResolvedValue(0)
+    ;(prismaMock.onlineOrder.updateMany as jest.Mock).mockResolvedValue({ count: 3 })
     ;(prismaMock.arranqueDeFuncion.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
     await expect(arranqueDeLaPausaSola()).resolves.toMatchObject({ primerServicio: primer })
-    const llamadas = (prismaMock.$executeRaw as jest.Mock).mock.calls.map(
-      ([plantilla, ...valores]) => Prisma.sql(plantilla as TemplateStringsArray, ...valores).sql,
-    )
-    expect(llamadas.some(t => t.includes('pg_advisory_xact_lock'))).toBe(true)
-    const sello = llamadas.find(t => t.includes('UPDATE "OnlineOrder"'))!
-    expect(sello).toContain('"staffAnsweredAt" IS NULL')
-    expect(sello).toContain('oo."createdAt" <')
-    expect(sello).toContain('oo."acceptDeadlineAt" >')
-    // Un cobro tardío de un pedido vencido lo deja entregado SIN aceptación: no es evidencia de persona.
-    expect(sello).toContain(`oo.status IN ('ACCEPTED', 'READY', 'COMPLETED') AND oo."acceptedAt" IS NOT NULL`)
+    const candado = (prismaMock.$executeRaw as jest.Mock).mock.calls.map(c => (c[0] as TemplateStringsArray).join('?'))
+    expect(candado.some(t => t.includes('pg_advisory_xact_lock'))).toBe(true)
+    const sello = (prismaMock.onlineOrder.updateMany as jest.Mock).mock.calls[0][0]
+    expect(sello.data).toEqual({ staffAnsweredAt: primer })
+    expect(sello.where).toMatchObject({ requiresAcceptance: true, staffAnsweredAt: null, createdAt: { lt: primer } })
+    // Un cobro tardío de un pedido vencido lo deja entregado SIN aceptación: no es evidencia de persona. Tampoco `CAPTURED` solo.
+    expect(sello.where.OR).toContainEqual({ status: { in: ['ACCEPTED', 'READY', 'COMPLETED'] }, acceptedAt: { not: null } })
+    expect(JSON.stringify(sello.where.OR)).not.toContain('"CAPTURED"')
     expect(prismaMock.arranqueDeFuncion.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { clave: CLAVE_PAUSA_SOLA, legadoSelladoAt: null } }),
     )
