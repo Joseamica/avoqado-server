@@ -666,6 +666,11 @@ export async function shouldProductUseInventory(
      * de productos, con marca blanca). Sin dato (otro llamador), como antes: habilitada.
      */
     puedeGuardarPiezasSinPremium?: boolean
+    /**
+     * Encargo 27fd34 (Codex r1 #2): si quien pregunta puede guardar un alta CON inventario en cualquier plan (`inventory:update` con la
+     * función de marca blanca, y no en «ver como»). `false` cierra piezas y receta también con Premium. Sin dato, como antes.
+     */
+    puedeGuardarConInventario?: boolean
   } = {},
 ) {
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true } })
@@ -678,9 +683,16 @@ export async function shouldProductUseInventory(
   // prueba vencida o una gracia de cobranza vencida contaban) y un plan PREMIUM sin fila propia no contaba.
   const hasInventoryFeature = opciones.quienPreguntaEsSuperadmin === true || (await venueHasFeatureAccess(venueId, 'INVENTORY_TRACKING'))
 
+  // Encargo 27fd34: con Premium pero sin permiso de escribir inventario (le quitaron `inventory:update`, «ver como»), no se ofrece
+  // guardar con inventario y se dice por qué (no es el plan). `hasInventoryFeature` sigue diciendo sólo el plan.
+  const sinPermisoDeEscribir = opciones.puedeGuardarConInventario === false
   return {
     hasInventoryFeature,
-    recommendation: hasInventoryFeature ? 'wizard.step2.recommendationEnabled' : 'wizard.step2.recommendationDisabled',
+    recommendation: hasInventoryFeature
+      ? sinPermisoDeEscribir
+        ? 'wizard.step2.recommendationNoAccess'
+        : 'wizard.step2.recommendationEnabled'
+      : 'wizard.step2.recommendationDisabled',
     options: [
       {
         type: 'NONE' as const,
@@ -693,13 +705,13 @@ export async function shouldProductUseInventory(
         label: 'wizard.step2.simpleStock',
         description: 'wizard.step2.simpleStockDesc',
         // Contar piezas por producto es de todos los planes (founder, 29-sep, «B»; tarjeta na1d52b5, 17-nov). La receta, no.
-        enabled: hasInventoryFeature || opciones.puedeGuardarPiezasSinPremium !== false,
+        enabled: hasInventoryFeature ? !sinPermisoDeEscribir : opciones.puedeGuardarPiezasSinPremium !== false,
       },
       {
         type: 'RECIPE' as const,
         label: 'wizard.step2.recipeBased',
         description: 'wizard.step2.recipeBasedDesc',
-        enabled: hasInventoryFeature,
+        enabled: hasInventoryFeature && !sinPermisoDeEscribir,
       },
     ],
   }

@@ -84,6 +84,12 @@ export const COBROS_DE_VENTA: Prisma.PaymentWhereInput = {
   OR: [{ type: null }, { type: { not: 'REFUND' } }],
 }
 
+/**
+ * El papel de ANDROID guarda los importes en centavos `Int` (`ReceiptData`): $21,474,836.47 como mucho. Encargo 27fd34 (Codex r7 #2): la
+ * cortesía en $0 sólo se suma al ticket si el subtotal y el descuento siguen cabiendo ahí.
+ */
+export const TOPE_DEL_PAPEL_CENTAVOS = 2_147_483_647
+
 const sinDesglose = (kind: TicketTotals['kind'], amount: Prisma.Decimal, tip: Prisma.Decimal): TicketTotals => ({
   kind,
   desglosado: false,
@@ -112,7 +118,11 @@ export function ticketTotals(e: EntradaDelTicket): TicketTotals {
   if (esDevolucion) return sinDesglose('DEVOLUCION', amount.abs(), tip.abs())
   const o = e.order
   // Sólo un cobro de VENTA (COMPLETED, > 0) puede desglosarse o ser una parte: un intento fallido o un registro de sólo propina no.
-  if (!o || e.payment.status !== 'COMPLETED' || !amount.gt(0)) return sinDesglose('COBRO', amount, tip)
+  // Encargo 27fd34 (Codex r6 #3 de D41): la excepción es la cuenta que no debe nada (toda de cortesía) cerrada con UN cobro de $0 y sin
+  // otro cobro de venta: se desglosa como en Mostrador ($20 − $20 = $0). `cobrosDeVenta` no la cuenta (sólo importes > 0). Sin propina
+  // (Codex r1 #1): un registro de $0 con propina es sólo propina y su comprobante no repite la venta, aunque ésta se haya cerrado en $0.
+  const cierraEnCero = amount.isZero() && tip.isZero() && e.cobrosDeVenta === 0
+  if (!o || e.payment.status !== 'COMPLETED' || !(amount.gt(0) || cierraEnCero)) return sinDesglose('COBRO', amount, tip)
   const bruto = aDecimal(o.subtotal)
   const mercanciaBruta = bruto.minus(aDecimal(o.discountAmount))
   const mercancia = mercanciaBruta.isNegative() ? CERO_DEC : mercanciaBruta
@@ -124,7 +134,7 @@ export function ticketTotals(e: EntradaDelTicket): TicketTotals {
     return { ...sinDesglose('COBRO', amount, tip), parcial: true }
   }
   // El cobro consultado tiene que SER el único cobro de venta que se contó (r2 R2-8).
-  if (e.cobrosDeVenta !== 1 || cargo.isNegative() || !amount.eq(loQueDebe)) return sinDesglose('COBRO', amount, tip)
+  if (e.cobrosDeVenta !== (cierraEnCero ? 0 : 1) || cargo.isNegative() || !amount.eq(loQueDebe)) return sinDesglose('COBRO', amount, tip)
   // Ronda 1 (A7-R6): la MISMA definición que el papel del cobro (`TotalesDelTicket.desdeLoCobrado`, Android e iOS): el
   // descuento es lo que falta del bruto + cargo + IVA agregado para llegar a lo cobrado; si saliera negativo (subtotal guardado
   // negativo), el subtotal pasa a ser lo cobrado sin cargo ni IVA y no hay descuento. Aquí lo cobrado ES lo que la cuenta debe,
@@ -136,7 +146,15 @@ export function ticketTotals(e: EntradaDelTicket): TicketTotals {
   // (a precio lleno + su descuento) y como Square («Discounts & Comps» restan del bruto). Se suma DESPUÉS de decidir el desglose: lo
   // que la cuenta debe y el parcial salen de los importes guardados. Suma lo mismo a los dos lados: el total no cambia.
   const cortesiaGuardada = aDecimal(o.cortesiaEnCero)
-  const cortesia = cortesiaGuardada.isNegative() ? CERO_DEC : cortesiaGuardada
+  // Encargo 27fd34 (Codex r7 #2): si con la cortesía el subtotal o el descuento ya no caben en el papel de ANDROID (centavos en Int), no se
+  // suma en ningún lado: el recibo digital y la reimpresión dicen lo mismo, como antes de D41. Caso de más de $21 millones.
+  const cabeEnElPapel = (v: Prisma.Decimal) => v.mul(100).lte(TOPE_DEL_PAPEL_CENTAVOS)
+  const cortesia =
+    cortesiaGuardada.isNegative() ||
+    !cabeEnElPapel(subtotalBase.plus(cortesiaGuardada)) ||
+    !cabeEnElPapel(descuentoBase.plus(cortesiaGuardada))
+      ? CERO_DEC
+      : cortesiaGuardada
   const subtotal = subtotalBase.plus(cortesia)
   const discount = descuentoBase.plus(cortesia).toNumber()
   return {
@@ -293,9 +311,14 @@ export async function totalesDelComprobante(db: Prisma.TransactionClient | Prism
 export async function comprobanteDelPago(
   db: Prisma.TransactionClient | PrismaClient,
   paymentId: string,
-): Promise<{ totales: TicketTotals | null; ordenDelRecibo: string | null | undefined }> {
+): Promise<{ totales: TicketTotals | null; ordenDelRecibo: string | null | undefined; snapshotDelRecibo?: unknown }> {
   const recibo = await reciboCanonicoDelPago(db, paymentId, { select: { dataSnapshot: true } })
   if (!recibo) return { totales: await cargarTotalesDelTicket(db, paymentId), ordenDelRecibo: undefined }
   const orden = (recibo.dataSnapshot as { order?: { id?: unknown } } | null)?.order?.id
-  return { totales: ticketTotalsDelSnapshot(recibo.dataSnapshot), ordenDelRecibo: typeof orden === 'string' ? orden : null }
+  return {
+    totales: ticketTotalsDelSnapshot(recibo.dataSnapshot),
+    ordenDelRecibo: typeof orden === 'string' ? orden : null,
+    // Encargo 27fd34: la reimpresión de un cobro movido a otra cuenta pinta la fotocopia de este recibo (`fotocopiaDelRecibo`).
+    snapshotDelRecibo: recibo.dataSnapshot,
+  }
 }

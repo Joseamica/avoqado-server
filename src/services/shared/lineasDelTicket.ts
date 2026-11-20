@@ -59,6 +59,11 @@ const esquema = z.object({
   descuentoCents: centavos,
 })
 
+/** La copia si pasa el esquema, el tope de bytes y su propia suma; si no, null. */
+export function copiaValida(raw: unknown): LineasDelTicket | null {
+  return leer(raw)
+}
+
 function leer(raw: unknown): LineasDelTicket | null {
   const r = esquema.safeParse(raw)
   if (!r.success) return null

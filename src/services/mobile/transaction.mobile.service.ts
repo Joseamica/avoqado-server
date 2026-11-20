@@ -16,6 +16,7 @@ import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden
 import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
 import { comprobanteDelPago, cortesiaEnCeroDe, totalDelRenglonEnElTicket, totalesSinLaCortesia } from '../shared/ticketTotals'
 import { copiaGuardada } from '../shared/lineasDelTicket'
+import { fotocopiaDelRecibo } from '../shared/fotocopiaDelRecibo'
 import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { exchangeDetailFields } from '../exchanges/exchangeDetail'
@@ -264,7 +265,7 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
   const cobrado = payment.orderId ? await leerCobradoDeLaOrden(prisma, payment.orderId) : null
   // IVA por producto, plan 7a: el MISMO comprobante que vio el cliente (r2 R2-9). Sólo aquí, con el cobro ya comprobado dentro del
   // negocio de la ruta (sin IDOR): del recibo digital si existe; si no, de la orden y el pago.
-  const { totales: totalesDelTicket, ordenDelRecibo } = await comprobanteDelPago(prisma, paymentId)
+  const { totales: totalesDelTicket, ordenDelRecibo, snapshotDelRecibo } = await comprobanteDelPago(prisma, paymentId)
   // D41 «C» (Codex r2 #1): `ticketTotals` sigue diciendo lo que entienden las apps publicadas (sin la cortesía en $0, que sus renglones
   // pintan en $0); la app nueva la suma con `cortesiaDelTicket` y pinta cada renglón con `totalEnElTicket`.
   const { totales: totalesParaLasApps, cortesia: cortesiaDelComprobante } = totalesSinLaCortesia(totalesDelTicket)
@@ -278,6 +279,12 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     cortesiaEnCeroDe(payment.order?.items ?? []).equals(new Prisma.Decimal(String(cortesiaDelComprobante)))
       ? cortesiaDelComprobante
       : 0
+  // Encargo 27fd34 (Codex r7 #1): y si se movió, la app que pinta `lineasDelTicket` (D1: ANDROID nuevo e iOS 1.15.12) reimprime la
+  // FOTOCOPIA del recibo emitido —sus renglones, su subtotal y su descuento—, igual que el digital. La copia D1 del propio cobro manda
+  // primero. Si el recibo no se puede copiar sin inventar (cargo, IVA aparte, renglones que no cuadran), null y se reimprime como antes.
+  const lineasDelTicket =
+    copiaGuardada(payment.processorData) ??
+    (typeof ordenDelRecibo === 'string' && ordenDelRecibo !== payment.orderId ? fotocopiaDelRecibo(snapshotDelRecibo) : null)
 
   // Los topes cuentan EXACTAMENTE como `issueRefund` (Codex, 29-sep): sólo los reembolsos COMPLETED movieron dinero, y lo ya
   // devuelto es el MÁXIMO entre esas filas y el acumulado histórico `processorData.refundedAmountCents`. Todo en centavos
@@ -369,7 +376,7 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     ...(cortesiaDelTicket > 0 ? { cortesiaDelTicket } : {}),
     // D1 «fotocopia del ticket», aditivo y APARTE de ticketTotals (las apps viejas no la ven): los renglones que imprimió el cobro de
     // esta parte. La reimpresión los pinta en vez de «Pago parcial». Sin copia, la llave no existe.
-    lineasDelTicket: copiaGuardada(payment.processorData) ?? undefined,
+    lineasDelTicket: lineasDelTicket ?? undefined,
     refunds: refunds.map(refund => {
       const processorData = (refund.processorData as Record<string, unknown>) || {}
       return {
