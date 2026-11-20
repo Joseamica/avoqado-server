@@ -7,7 +7,7 @@ task: pantalla-de-cocina-sin-internet
 requiredPermissions: []
 featureCode: KITCHEN_DISPLAY
 gateKind: FEATURE
-versionMin: 2.25.53
+versionMin: 2.25.54
 sourceRepo: avoqado-android
 sourceRef: 6e37a5418eda101109e73fd319bdb3eb5932cbe6
 keywords:
