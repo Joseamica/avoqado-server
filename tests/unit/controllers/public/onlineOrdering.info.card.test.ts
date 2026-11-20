@@ -163,16 +163,19 @@ describe('GET /info en «Nadie» (T8)', () => {
 describe('GET /info en «Nadie» con su propio interruptor (D661)', () => {
   const nadie = { requiresAcceptance: false, acceptsCardOnline: false, cardOnlineNadie: true }
 
-  it('con el interruptor, una caja que avisó hace 1 min y Stripe listo: anuncia cardOnline true', async () => {
+  it('con el interruptor, una caja capaz que recibió una respuesta rápida hace 30 s y Stripe listo: anuncia cardOnline true', async () => {
     ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state(nadie))
-    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ lastCardAlertPollAt: new Date(Date.now() - 60_000) } as any)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ cardAlertFastPollAt: new Date(Date.now() - 30_000) } as any)
     comercio(true)
     expect((await call()).paymentModes).toEqual({ payAtPickup: true, cardOnline: true })
   })
 
-  it('si ninguna caja capaz avisó en 15 min: cardOnline false (la tienda sigue con pagar en caja)', async () => {
+  it('Ruling 7: si ninguna caja capaz recibió una respuesta rápida en 90 s (aunque una lenta haya sondeado hace 1 min): cardOnline false (la tienda sigue con pagar en caja)', async () => {
     ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state(nadie))
-    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ lastCardAlertPollAt: new Date(Date.now() - 16 * 60_000) } as any)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({
+      cardAlertFastPollAt: new Date(Date.now() - 91_000),
+      lastCardAlertPollAt: new Date(Date.now() - 60_000),
+    } as any)
     comercio(true)
     const d = await call()
     expect(d.paymentModes).toEqual({ payAtPickup: true, cardOnline: false })

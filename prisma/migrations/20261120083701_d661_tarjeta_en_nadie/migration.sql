@@ -1,8 +1,10 @@
 -- D661 · pagar con tarjeta en línea en «Nadie» (tarea 1, migración única del SERVIDOR). Sólo columnas nuevas, opcionales o con
--- valor de fábrica: ningún UPDATE de datos ni valores de enum nuevos. Las tareas 3–6 usan las cuatro que la tarea 1 no lee.
+-- valor de fábrica: ningún UPDATE de datos ni valores de enum nuevos. Las tareas 3–6 usan las que la tarea 1 no lee. La séptima
+-- (`cardAlertFastPollAt`, Ruling 7) la agrega la tarea 3B en esta MISMA migración: todavía no se aplicaba en ninguna base.
 
 -- AlterTable
-ALTER TABLE "OnlineOrderingSettings" ADD COLUMN     "cardOnlineNadie" BOOLEAN NOT NULL DEFAULT false,
+ALTER TABLE "OnlineOrderingSettings" ADD COLUMN     "cardAlertFastPollAt" TIMESTAMP(3),
+ADD COLUMN     "cardOnlineNadie" BOOLEAN NOT NULL DEFAULT false,
 ADD COLUMN     "lastCardAlertPollAt" TIMESTAMP(3);
 
 -- AlterTable

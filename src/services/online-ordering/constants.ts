@@ -32,6 +32,18 @@ export const PRESENCE_WINDOW_MS = 120_000
 export const FOLIO_PRESENCE_WINDOW_MS = 15 * 60_000
 /** La escritura del latido se amortigua: el sondeo es cada ~10 s, la base se toca cada 30 s. */
 export const PRESENCE_WRITE_DEBOUNCE_MS = 30_000
+/** Cadencia que la lista de la caja (to-pay) le pide a cada caja: rápida mientras haya algo que atender, larga si no. */
+export const TO_PAY_FAST_POLL_SECONDS = 30
+export const TO_PAY_SLOW_POLL_SECONDS = 600
+/**
+ * D661 (Ruling 7): en «Nadie» la tarjeta sólo se ofrece si una caja capaz de avisar recibió una respuesta RÁPIDA de to-pay en este
+ * plazo (tres sondeos de 30 s). Una caja en espera larga (600 s) no avisaría a tiempo.
+ */
+export const CARD_ALERT_FAST_WINDOW_MS = 90_000
+/** D661 (Ruling 7): el latido de la caja que avisa se escribe a lo más cada 20 s: con sondeos de 30 s cada uno escribe y no parpadea. */
+export const CARD_ALERT_WRITE_DEBOUNCE_MS = 20_000
+/** D661 (3B): tope de `tarjetasPorAbrir` y de `comandasPorImprimir` de la lista de la caja (independientes de la página). */
+export const D661_CAJA_LIST_CAP = 50
 /** R13: la app a la vista manda esta cabecera con `1` (D662: el POS en cualquier pantalla, no sólo la bandeja); es «hay alguien». */
 export const ONLINE_ORDERS_TRAY_HEADER = 'x-online-orders-tray'
 /** Tienda híbrida: la TPV y el POS que pueden cobrar folios mandan esta cabecera con `1` (las rutas que la leen son de T12). */
@@ -134,11 +146,13 @@ export const unpaidFoliosWhere = (venueId: string) => ({
  * Tienda híbrida (R42, T12): la lista «Por pagar» y `counts.toPay`. Un folio vivo sin saldar: con abono (PARTIAL) también (R41; se
  * cobra desde esta lista, con «Falta $X»), pero nunca uno cuya cuenta se canceló (R16) o ya quedó saldada (la sincronización lo pasa
  * a «Por entregar»). NO es `unpaidFoliosWhere`, que sólo mide el tope de folios sin un peso.
+ * D661 (3B): un apartado con tarjeta se ABRE (sale en `tarjetasPorAbrir`), no se cobra en caja: nunca sale aquí ni en su conteo.
  */
 export const foliosPorPagarWhere = (venueId: string) => ({
   venueId,
   status: OnlineOrderStatus.PENDING_ACCEPTANCE,
   requiresAcceptance: false,
+  paymentMode: { not: OnlineOrderPaymentMode.CARD_ONLINE },
   order: {
     status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] },
     paymentStatus: { notIn: FOLIO_PAID_STATUSES }, // R24: una sola definición de «cobrada»

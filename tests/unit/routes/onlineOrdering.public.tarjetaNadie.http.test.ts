@@ -135,6 +135,7 @@ const ajustes = (o: Record<string, unknown> = {}) => ({
   lastToPayPollAt: hace(30_000),
   lastInboxPollAt: hace(30_000),
   lastCardAlertPollAt: hace(30_000),
+  cardAlertFastPollAt: hace(30_000),
   ...o,
 })
 

@@ -177,7 +177,7 @@ export async function updateSettings(
     }
     // D661 (r1 #10): sólo al PRENDER la tarjeta de «Nadie», en cualquier modo (es el consentimiento para cuando esté en «Nadie»), exige
     // que una caja ACTUALIZADA haya avisado en la misma ventana que los folios. Apagarla o repetirla nunca lo pide. Lo que de verdad
-    // protege al cobro es la regla de 15 min de `cardOnlineAvailable`; esto evita prender algo que hoy no tiene quién lo abra.
+    // protege al cobro es la regla del sondeo rápido (90 s) de `cardOnlineAvailable`; esto evita prender algo que hoy no tiene quién lo abra.
     if (patch.cardOnlineNadie === true && !current.cardOnlineNadie) {
       const avisoDeCaja = existing?.lastCardAlertPollAt
       if (!avisoDeCaja || Date.now() - avisoDeCaja.getTime() > FOLIO_DEVICE_WINDOW_MS) {

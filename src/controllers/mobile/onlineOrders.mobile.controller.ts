@@ -9,7 +9,9 @@
 import type { NextFunction, Request, Response } from 'express'
 import type { OnlineOrderRejectReason } from '@prisma/client'
 import { evaluateRolePermission, resolveUserRoleForVenue } from '@/middlewares/checkPermission.middleware'
-import { ONLINE_ORDERS_TO_PAY_HEADER, ONLINE_ORDERS_TRAY_HEADER } from '@/services/online-ordering/constants'
+import { ONLINE_ORDERS_TO_PAY_HEADER, ONLINE_ORDERS_TRAY_HEADER, TO_PAY_FAST_POLL_SECONDS } from '@/services/online-ordering/constants'
+import { CARD_ALERT_HEADER, touchCardAlertPoll } from '@/services/online-ordering/cardAlertPresence'
+import { MENSAJE_ABRIR_DESDE_LA_CAJA } from '@/services/online-ordering/card/guards'
 import { listInbox, type InboxFilter } from '@/services/online-ordering/inbox.service'
 import { listFolios, type FolioSection } from '@/services/online-ordering/folios.service'
 import { listDeliveryCashPending } from '@/services/delivery-channels/core/deliveryCashPending.service'
@@ -61,12 +63,7 @@ function reply(res: Response, r: TransitionResult) {
         error: 'Confirmando el pago con el banco. Espera unos segundos.',
       })
     case 'OPEN_FROM_CAJA':
-      return res.status(409).json({
-        success: false,
-        code: 'OPEN_FROM_CAJA',
-        error:
-          'Este pedido ya se pagó con tarjeta: se abre desde la caja (TPV o POS actualizados), que es donde se cobra. No se cobró nada.',
-      })
+      return res.status(409).json({ success: false, code: 'OPEN_FROM_CAJA', error: MENSAJE_ABRIR_DESDE_LA_CAJA })
     default:
       // Un resultado que este mapa no conoce es un error del servidor (500), nunca un «no existe» que engañe a la caja.
       throw new Error(`Resultado de transición desconocido: ${String((r as { outcome?: unknown }).outcome)}`)
@@ -111,6 +108,9 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
 /**
  * Tienda híbrida (T12): «Por pagar» y «Por entregar». El latido (`x-online-orders-to-pay: 1`) dice a la tienda que hay una caja viva y
  * sólo cuenta de quien puede COBRAR (`payments:create`, no suplantando); sin la cabecera no late, y el panel nunca la manda.
+ * D661 (r4 #4, Ruling 7): la caja actualizada que sabe avisar los pedidos pagados en línea manda además `x-online-orders-card-alert: 1`;
+ * su latido sólo cuenta de quien puede ABRIRLOS (`orders:update`) y dice si la respuesta que recibe es RÁPIDA. Va DESPUÉS del de
+ * folios, que es el que crea la fila de ajustes (éste sólo la actualiza).
  */
 const makeToPay = (puedeLatir: boolean) => async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -121,6 +121,8 @@ const makeToPay = (puedeLatir: boolean) => async (req: Request, res: Response, n
     const latido =
       puedeLatir && req.header(ONLINE_ORDERS_TO_PAY_HEADER) === '1' && (await canDo(req, venueId, 'payments:create').catch(() => false))
     if (latido) await touchToPayPoll(venueId).catch(() => false)
+    const avisa = puedeLatir && req.header(CARD_ALERT_HEADER) === '1' && (await canAnswerOrders(req, venueId).catch(() => false))
+    if (avisa) await touchCardAlertPoll(venueId, data.pollSeconds <= TO_PAY_FAST_POLL_SECONDS).catch(() => false)
     const state = await getAcceptingStatus(venueId).catch(() => null)
     return res.json({ success: true, data: { ...data, store: state ? storeView(state) : null } })
   } catch (e) {

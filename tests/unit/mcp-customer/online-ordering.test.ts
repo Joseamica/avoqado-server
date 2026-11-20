@@ -183,6 +183,8 @@ describe('online_orders_list', () => {
       counts: { toPay: 1, toDeliver: 101 },
       toPay: [],
       toDeliver: [],
+      tarjetasPorAbrir: [],
+      comandasPorImprimir: [],
       nextCursors: { toPay: null, toDeliver: 'C1' },
     })
     const r = parse(await call('online_orders_list', { venueId: 'v1', status: 'to_pay' }))
@@ -192,6 +194,32 @@ describe('online_orders_list', () => {
     await call('online_orders_list', { venueId: 'v1', status: 'to_deliver', cursor: 'C1' })
     expect(mockListFolios).toHaveBeenLastCalledWith({ venueId: 'v1', section: 'toDeliver', cursor: 'C1' })
     expect(mockRequirePermission).toHaveBeenCalledWith('orders:read', 'v1')
+  })
+
+  it('D661 (3B): to_pay dice los pedidos con tarjeta de «No, entran solos» que esperan que una caja los abra, con su total en PESOS (nunca centavos)', async () => {
+    mockListFolios.mockResolvedValue({
+      counts: { toPay: 0, toDeliver: 0 },
+      toPay: [],
+      toDeliver: [],
+      tarjetasPorAbrir: [
+        {
+          orderId: 'ord9',
+          orderNumber: 'T-9',
+          customerName: 'Ana N.',
+          totalCents: 25_050,
+          createdAt: '2026-11-20T18:00:00.000Z',
+          cobrando: false,
+        },
+      ],
+      comandasPorImprimir: [{ orderId: 'ord7', orderNumber: 'T-7' }],
+      nextCursors: { toPay: null, toDeliver: null },
+    })
+    const r = parse(await call('online_orders_list', { venueId: 'v1', status: 'to_pay' }))
+    expect(r.tarjetasPorAbrir).toEqual([
+      { orderId: 'ord9', orderNumber: 'T-9', customerName: 'Ana N.', total: 250.5, createdAt: '2026-11-20T18:00:00.000Z', cobrando: false },
+    ])
+    expect(JSON.stringify(r)).not.toMatch(/Cents/)
+    expect(r.comandasPorImprimir).toEqual([{ orderId: 'ord7', orderNumber: 'T-7' }])
   })
 
   it('T16: un cursor mal formado de folios se dice en texto', async () => {
@@ -218,6 +246,8 @@ describe('S15: online_orders_list dice de quién es cada pedido y qué beneficio
     counts: { toPay: toPay.length, toDeliver: toDeliver.length },
     toPay,
     toDeliver,
+    tarjetasPorAbrir: [],
+    comandasPorImprimir: [],
     nextCursors: { toPay: null, toDeliver: null },
   })
 
@@ -407,6 +437,26 @@ describe('online_order_respond', () => {
       expect(r.requiresConfirmation).toBeUndefined()
       expect(r.error).toContain('CANCELAR')
       expect(JSON.stringify(r)).not.toMatch(/no se le cobr/i)
+    }
+    expect(mockReject).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('D661 (3B): REJECT sobre un apartado con tarjeta de «No, entran solos» no dice «se paga en caja»: se abre desde la caja y, si nadie lo abre a tiempo, se libera sin cobrar', async () => {
+    mockGetInboxOrder.mockResolvedValue({
+      ...pending,
+      requiresAcceptance: false,
+      paymentMode: 'CARD_ONLINE',
+      paymentStatus: 'PENDING',
+      card: { status: 'AUTHORIZED', amount: 186 },
+    })
+    for (const confirm of [undefined, true]) {
+      const r = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'REJECT', reason: 'OTHER', confirm }))
+      expect(r).toMatchObject({ ok: false, status: 'PENDING_ACCEPTANCE' })
+      expect(r.error).not.toMatch(/se paga en caja/)
+      expect(r.error).toMatch(/se abre desde la caja/)
+      expect(r.error).toMatch(/se libera sin cobrar/)
+      expect(r.error).toMatch(/No se aplicó nada/)
     }
     expect(mockReject).not.toHaveBeenCalled()
     expect(mockAudit).not.toHaveBeenCalled()

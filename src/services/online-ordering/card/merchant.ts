@@ -5,7 +5,7 @@ import prisma from '@/utils/prismaClient'
 import { isEcommerceMerchantChargeable } from '@/services/payments/ecommerceCapability'
 import type { EcommerceMerchantWithProvider, VerifiedWebhookEvent } from '@/services/payments/providers/provider.interface'
 import { stripeServerLivemode } from '@/services/payments/providers/stripe-connect.provider'
-import { FOLIO_PRESENCE_WINDOW_MS } from '../constants'
+import { CARD_ALERT_FAST_WINDOW_MS } from '../constants'
 
 const STRIPE_CONNECT = 'STRIPE_CONNECT'
 
@@ -48,8 +48,8 @@ export async function findCardMerchant(
  * T8: LA regla de «¿la tarjeta se ofrece?», una sola para GET /info, el pedido y el borrador, y una cuenta Stripe que hoy puede cobrar.
  * - «Mi equipo»: su switch (`acceptsCardOnline`), como siempre.
  * - «Nadie» (D661): su PROPIO interruptor (`cardOnlineNadie`, apagado de fábrica; la preferencia de «Mi equipo» no se hereda) y una
- *   caja actualizada que avise los pedidos pagados y haya consultado en los últimos 15 min (r1 #10): sin quien abra el pedido, no se
- *   aparta el dinero de nadie.
+ *   caja actualizada que avise los pedidos pagados (r1 #10) y que haya recibido una respuesta RÁPIDA de to-pay en los últimos 90 s
+ *   (Ruling 7): sin quien abra el pedido a tiempo, no se aparta el dinero de nadie. Una caja en espera larga no cuenta.
  * Las banderas se miden primero: apagada alguna, no consulta ni la caja ni el comercio. Todo se lee con `db` (el `tx` de quien llama).
  */
 export async function cardOnlineAvailable(
@@ -60,9 +60,9 @@ export async function cardOnlineAvailable(
   // `requiresAcceptance` sólo con `=== false` es «Nadie» (como `getAcceptingStatus`): un ajuste sin el campo es «Mi equipo».
   if (config.requiresAcceptance === false) {
     if (config.cardOnlineNadie !== true) return false
-    const caja = await db.onlineOrderingSettings.findUnique({ where: { venueId }, select: { lastCardAlertPollAt: true } })
-    const avisoReciente = !!caja?.lastCardAlertPollAt && Date.now() - caja.lastCardAlertPollAt.getTime() <= FOLIO_PRESENCE_WINDOW_MS
-    if (!avisoReciente) return false
+    const caja = await db.onlineOrderingSettings.findUnique({ where: { venueId }, select: { cardAlertFastPollAt: true } })
+    const avisaATiempo = !!caja?.cardAlertFastPollAt && Date.now() - caja.cardAlertFastPollAt.getTime() <= CARD_ALERT_FAST_WINDOW_MS
+    if (!avisaATiempo) return false
   } else if (!config.acceptsCardOnline) {
     return false
   }

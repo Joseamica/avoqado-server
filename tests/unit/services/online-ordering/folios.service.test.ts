@@ -221,6 +221,18 @@ describe('D661 (3A, fix 1): un apartado de tarjeta de «Nadie» cuya cuenta se p
     expect(releaseCharge).toHaveBeenCalledWith('ch1')
   })
 
+  it('D661 (3B): la lista de la caja y la bandeja no esperan a Stripe: la liberación del apartado ya pagado sale sin esperarla (si no termina, el conciliador retoma todo RELEASING)', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(apartadoPagado() as any)
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue({ id: 'ch1', status: 'AUTHORIZED' } as any)
+    prismaMock.onlineOrderCharge.updateMany.mockResolvedValue({ count: 1 })
+    // Stripe no contesta nunca.
+    ;(releaseCharge as jest.Mock).mockImplementationOnce(() => new Promise(() => undefined))
+    const listo = prepararFolioPagado({ venueId: 'v1', orderId: 'ord1', staffId: null, now: NOW })
+    const plazo = new Promise(r => setTimeout(() => r('ESPERÓ A STRIPE'), 200))
+    await expect(Promise.race([listo, plazo])).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
+    expect(releaseCharge).toHaveBeenCalledWith('ch1')
+  })
+
   it('un folio de caja (sin cargo) y un cargo que ya no está apartado no tocan ninguna tarjeta', async () => {
     // Folio de caja pagado: lo de siempre.
     await expect(prepararFolioPagado({ venueId: 'v1', orderId: 'ord1', staffId: null, now: NOW })).resolves.toMatchObject({ outcome: 'OK' })

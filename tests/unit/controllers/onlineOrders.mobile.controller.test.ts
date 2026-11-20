@@ -12,6 +12,11 @@ jest.mock('@/services/online-ordering/presence.service', () => ({
   storeView: jest.requireActual('@/services/online-ordering/presence.service').storeView,
 }))
 jest.mock('@/services/online-ordering/folios.service', () => ({ __esModule: true, listFolios: jest.fn() }))
+jest.mock('@/services/online-ordering/cardAlertPresence', () => ({
+  __esModule: true,
+  CARD_ALERT_HEADER: 'x-online-orders-card-alert',
+  touchCardAlertPoll: jest.fn(),
+}))
 jest.mock('@/services/online-ordering/settings.service', () => ({ __esModule: true, pauseOnlineOrdering: jest.fn() }))
 jest.mock('@/services/online-ordering/transitions.service', () => ({
   __esModule: true,
@@ -39,6 +44,7 @@ import {
   rejectOnlineOrder,
 } from '@/services/online-ordering/transitions.service'
 import { claimOnlineOrderPrint } from '@/services/online-ordering/printClaim.service'
+import { touchCardAlertPoll } from '@/services/online-ordering/cardAlertPresence'
 import * as ctrl from '@/controllers/mobile/onlineOrders.mobile.controller'
 import mobileRouter from '@/routes/mobile/onlineOrders.mobile.routes'
 
@@ -68,6 +74,7 @@ beforeEach(() => {
   ;(listInbox as jest.Mock).mockResolvedValue(LISTA)
   ;(touchInboxPoll as jest.Mock).mockResolvedValue(true)
   ;(touchToPayPoll as jest.Mock).mockResolvedValue(true)
+  ;(touchCardAlertPoll as jest.Mock).mockResolvedValue(true)
   ;(listFolios as jest.Mock).mockResolvedValue(FOLIOS)
   ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ status: 'OPEN', reason: null, config: { pausedUntil: null, manualPause: false } })
   // Por defecto: una cajera activa (CASHIER tiene `orders:update`) sin permisos personalizados del negocio.
@@ -225,6 +232,18 @@ describe('onlineOrders.mobile.controller', () => {
     })
   })
 
+  it('D661 (3B): el 409 OPEN_FROM_CAJA es verdad con la tarjeta sólo apartada y con un pedido que otra caja ya cobró: «No se aplicó nada», nunca «ya se pagó» ni «No se cobró nada»', async () => {
+    ;(acceptOnlineOrder as jest.Mock).mockResolvedValue({ outcome: 'OPEN_FROM_CAJA' })
+    const { req, res, next } = mock()
+    await ctrl.accept(req, res, next)
+    expect(res.status).toHaveBeenCalledWith(409)
+    const body = res.json.mock.calls[0][0]
+    expect(body).toMatchObject({ success: false, code: 'OPEN_FROM_CAJA' })
+    expect(body.error).toMatch(/se abre desde la caja/)
+    expect(body.error).toMatch(/No se aplicó nada\./)
+    expect(body.error).not.toMatch(/ya se pagó|No se cobró nada/)
+  })
+
   it('A12: entregar lo que ya estaba entregado es 200 (idempotente), no un 409 «ya cambió»', async () => {
     ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValue({ outcome: 'OK', status: 'COMPLETED', unchanged: true })
     const { req, res, next } = mock()
@@ -290,6 +309,8 @@ describe('onlineOrders.mobile.controller', () => {
   it('el reclamo usa el `:orderId` de la ruta (Order.id, el `orderId` de la bandeja) como llave `OnlineOrder.orderId`, nunca el id del pedido en línea', async () => {
     const real = jest.requireActual('@/services/online-ordering/printClaim.service')
     ;(claimOnlineOrderPrint as jest.Mock).mockImplementationOnce(real.claimOnlineOrderPrint)
+    // Ruling 9: el reclamo lee primero el reclamo vigente y hace su CAS sobre él.
+    prismaMock.onlineOrder.findFirst.mockResolvedValueOnce({ printClaimedAt: null } as any)
     prismaMock.onlineOrder.updateMany.mockResolvedValueOnce({ count: 1 })
     const { req, res, next } = mock()
     await ctrl.printClaim(req, res, next)
@@ -425,5 +446,84 @@ describe('toPay (tienda híbrida T12)', () => {
     expect(listFolios).toHaveBeenCalledWith({ venueId: 'v1', section: 'toDeliver', cursor: 'c' })
     expect(next).not.toHaveBeenCalled()
     expect(res.json).toHaveBeenCalled()
+  })
+})
+
+/**
+ * D661 (r4 #4, Ruling 7): la caja ACTUALIZADA que sabe avisar los pedidos pagados en línea manda `x-online-orders-card-alert: 1`. Su
+ * latido sólo cuenta de quien puede ABRIR (= cobrar) esos pedidos: `orders:update`. Dice además si la respuesta que recibió fue
+ * RÁPIDA (`pollSeconds` <= 30): sólo así la tienda ofrece la tarjeta en «Nadie».
+ */
+describe('toPay · el latido de la caja que avisa (D661)', () => {
+  const RAPIDA = { ...FOLIOS, pollSeconds: 30 }
+  const AMBAS = { 'x-online-orders-to-pay': '1', 'x-online-orders-card-alert': '1' }
+  beforeEach(() => (listFolios as jest.Mock).mockResolvedValue(RAPIDA))
+
+  it('con la cabecera y permiso orders:update (el que abre) se escribe lastCardAlertPollAt; sin ella o sin ese permiso, no', async () => {
+    // Una cajera (orders:update) con la cabecera: late.
+    const con = mock({ headers: AMBAS })
+    await ctrl.toPay(con.req, con.res, con.next)
+    expect(touchCardAlertPoll).toHaveBeenCalledTimes(1)
+    expect(touchCardAlertPoll).toHaveBeenCalledWith('v1', true)
+    // Sin la cabecera (una caja vieja, que no sabe avisar): no late, aunque sí late «por cobrar».
+    ;(touchCardAlertPoll as jest.Mock).mockClear()
+    const vieja = mock({ headers: { 'x-online-orders-to-pay': '1' } })
+    await ctrl.toPay(vieja.req, vieja.res, vieja.next)
+    expect(touchToPayPoll).toHaveBeenCalled()
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
+    // Con la cabecera pero sin orders:update (puede cobrar en caja, no abrir un pedido pagado en línea): no late la de tarjeta.
+    prismaMock.staffVenue.findUnique.mockResolvedValue(enElNegocio('VIEWER') as any)
+    prismaMock.venueRolePermission.findUnique.mockResolvedValue({ permissions: ['payments:create'], deniedPermissions: [] } as any)
+    ;(touchToPayPoll as jest.Mock).mockClear()
+    const sinAbrir = mock({ headers: AMBAS })
+    await ctrl.toPay(sinAbrir.req, sinAbrir.res, sinAbrir.next)
+    expect(touchToPayPoll).toHaveBeenCalledWith('v1')
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
+    // Suplantando (sólo lectura): tampoco.
+    prismaMock.staffVenue.findUnique.mockResolvedValue(enElNegocio('CASHIER') as any)
+    prismaMock.venueRolePermission.findUnique.mockResolvedValue(null)
+    const suplanta = mock({ headers: AMBAS })
+    suplanta.req.authContext.isImpersonating = true
+    await ctrl.toPay(suplanta.req, suplanta.res, suplanta.next)
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
+  })
+
+  it('Ruling 7: el latido dice si la respuesta fue RÁPIDA (pollSeconds <= 30); con la espera larga (600) es lento', async () => {
+    const rapida = mock({ headers: AMBAS })
+    await ctrl.toPay(rapida.req, rapida.res, rapida.next)
+    ;(listFolios as jest.Mock).mockResolvedValue({ ...FOLIOS, pollSeconds: 600 })
+    const lenta = mock({ headers: AMBAS })
+    await ctrl.toPay(lenta.req, lenta.res, lenta.next)
+    expect((touchCardAlertPoll as jest.Mock).mock.calls).toEqual([
+      ['v1', true],
+      ['v1', false],
+    ])
+    // Lo que la caja recibe es lo que se midió.
+    expect(lenta.res.json).toHaveBeenCalledWith({ success: true, data: expect.objectContaining({ pollSeconds: 600 }) })
+  })
+
+  it('Ruling 7: primero el latido de folios (crea la fila de ajustes), después el de la caja que avisa (sólo la actualiza); ninguno sin listar bien', async () => {
+    const { req, res, next } = mock({ headers: AMBAS })
+    await ctrl.toPay(req, res, next)
+    const orden = (f: unknown) => (f as jest.Mock).mock.invocationCallOrder[0]
+    expect(orden(listFolios)).toBeLessThan(orden(touchToPayPoll))
+    expect(orden(touchToPayPoll)).toBeLessThan(orden(touchCardAlertPoll))
+    ;(touchCardAlertPoll as jest.Mock).mockClear()
+    ;(listFolios as jest.Mock).mockRejectedValue(new Error('db'))
+    const rota = mock({ headers: AMBAS })
+    await ctrl.toPay(rota.req, rota.res, rota.next)
+    expect(rota.next).toHaveBeenCalledWith(expect.any(Error))
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
+  })
+
+  it('el panel nunca late como caja que avisa, aunque mande la cabecera; un fallo del latido no le cuesta la lista a la caja', async () => {
+    const panel = mock({ headers: AMBAS })
+    await ctrl.toPayPanel(panel.req, panel.res, panel.next)
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
+    ;(touchCardAlertPoll as jest.Mock).mockRejectedValue(new Error('db'))
+    const caja = mock({ headers: AMBAS })
+    await ctrl.toPay(caja.req, caja.res, caja.next)
+    expect(caja.next).not.toHaveBeenCalled()
+    expect(caja.res.json).toHaveBeenCalledWith({ success: true, data: { ...RAPIDA, store: TIENDA_ABIERTA } })
   })
 })

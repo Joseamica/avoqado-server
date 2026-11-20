@@ -223,6 +223,7 @@ describe('D661 · tarjeta en «Nadie»: marca, tope por clienta y cupo de la suc
         acceptsPayAtPickup: true,
         lastToPayPollAt: ahora,
         lastCardAlertPollAt: ahora,
+        cardAlertFastPollAt: ahora,
         lastInboxPollAt: ahora,
       },
     })

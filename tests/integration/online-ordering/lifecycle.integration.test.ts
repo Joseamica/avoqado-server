@@ -688,7 +688,8 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     await expect(claimOnlineOrderPrint(venueId!, orderId, 'dev-A')).resolves.toEqual({ claimed: true })
     // El aparato A se apagó a media impresión: su reclamo envejece más allá del TTL de 90 s.
     await prisma.onlineOrder.update({ where: { id: onlineOrderId }, data: { printClaimedAt: new Date(Date.now() - 91_000) } })
-    await expect(claimOnlineOrderPrint(venueId!, orderId, 'dev-B')).resolves.toEqual({ claimed: true })
+    // D661 (Ruling 9): el papel de A pudo haber salido; B imprime marcando «POSIBLE REPETIDA».
+    await expect(claimOnlineOrderPrint(venueId!, orderId, 'dev-B')).resolves.toEqual({ claimed: true, posibleRepetida: true })
     await expect(confirmOnlineOrderPrinted(venueId!, orderId, 'dev-A')).resolves.toEqual({ ok: false })
     await expect(confirmOnlineOrderPrinted(venueId!, orderId, 'dev-B')).resolves.toEqual({ ok: true })
     expect(await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).toMatchObject({ printClaimedBy: 'dev-B' })

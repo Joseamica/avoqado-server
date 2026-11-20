@@ -13,6 +13,7 @@ import { planGateMessage } from '../planGate'
 import { getInboxOrder, listInbox, type InboxOrder } from '@/services/online-ordering/inbox.service'
 import { formatoPesos } from '@/services/giftCards/giftCardLimits'
 import { listFolios } from '@/services/online-ordering/folios.service'
+import { MENSAJE_ABRIR_DESDE_LA_CAJA } from '@/services/online-ordering/card/guards'
 import { esVentaCerrada } from '@/services/shared/orderBalance'
 import { listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
@@ -67,9 +68,9 @@ const AUDIT: Record<Action, string> = {
 
 /** El mismo texto de la API (`accept` del controlador móvil): un folio no se prepara sin pago. */
 const FOLIO_SIN_PAGAR = 'Este pedido se cobra antes de prepararlo'
-/** D661: un pedido pagado con tarjeta en «No, entran solos» se abre (y así se cobra) sólo desde la caja; el MCP no lo abre. */
-const ABRIR_DESDE_LA_CAJA =
-  'Este pedido ya se pagó con tarjeta y se abre desde la caja (TPV o POS actualizados), que es donde se cobra. No se aplicó nada.'
+/** D661 (3B): un apartado con tarjeta tampoco se rechaza, pero no «se paga en caja»: se abre desde ahí o se libera solo sin cobrar. */
+const TARJETA_NO_SE_RECHAZA =
+  'Un pedido con tarjeta en línea no se rechaza: se abre desde la caja (TPV o POS actualizados) y, si nadie lo abre a tiempo, se libera sin cobrar. No se aplicó nada.'
 /** R46: un folio no se rechaza; se quita con CANCELAR. Nunca promete «no se le cobró nada» (§5: un efectivo sin red puede subir después). */
 const FOLIO_NO_SE_RECHAZA =
   'Este pedido se paga en caja y no se rechaza; no se aplicó nada. Para quitarlo usa CANCELAR (pide el permiso de cancelar cuentas sin cobro).'
@@ -137,7 +138,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_orders_list',
-    'Pedidos en línea del negocio (los que el comensal hace desde la página del restaurante): por aceptar, en preparación, listos y los de las últimas 24 horas. Muestra cliente, platillos, total en pesos y si ya se cobró. Cada pedido dice en «cuenta» de quién es (sólo el nombre de pila y la inicial) y qué beneficios trae, por ejemplo «Con cuenta: Ana L. · Premio −$45.00», o «Sin cuenta». Los que el comensal pagó con tarjeta al pedir traen el cobro (estado, monto apartado y monto cobrado, en pesos). Con status=to_pay salen los pedidos de pedir y pagar en caja que aún no se cobran, y con to_deliver los ya cobrados por entregar (cada uno por páginas con cursor).',
+    'Pedidos en línea del negocio (los que el comensal hace desde la página del restaurante): por aceptar, en preparación, listos y los de las últimas 24 horas. Muestra cliente, platillos, total en pesos y si ya se cobró. Cada pedido dice en «cuenta» de quién es (sólo el nombre de pila y la inicial) y qué beneficios trae, por ejemplo «Con cuenta: Ana L. · Premio −$45.00», o «Sin cuenta». Los que el comensal pagó con tarjeta al pedir traen el cobro (estado, monto apartado y monto cobrado, en pesos). Con status=to_pay salen los pedidos de pedir y pagar en caja que aún no se cobran, y con to_deliver los ya cobrados por entregar (cada uno por páginas con cursor); los dos traen también los pagados con tarjeta en «No, entran solos» que esperan que una caja los abra (se cobran al abrirlos).',
     {
       venueId: z.string().describe('Venue a consultar (debe estar en tu scope)'),
       status: z
@@ -159,7 +160,14 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       if (status === 'to_pay' || status === 'to_deliver') {
         try {
           const folios = await listFolios({ venueId, section: status === 'to_pay' ? 'toPay' : 'toDeliver', ...(cursor ? { cursor } : {}) })
-          return text({ ok: true, ...folios, toPay: folios.toPay.map(conCuenta), toDeliver: folios.toDeliver.map(conCuenta) })
+          return text({
+            ok: true,
+            ...folios,
+            toPay: folios.toPay.map(conCuenta),
+            toDeliver: folios.toDeliver.map(conCuenta),
+            // D661: el MCP habla en pesos (la caja recibe centavos, como lo fija el plan).
+            tarjetasPorAbrir: folios.tarjetasPorAbrir.map(({ totalCents, ...t }) => ({ ...t, total: totalCents / 100 })),
+          })
         } catch (e) {
           if (e instanceof AppError && e.code === 'INVALID_CURSOR') return text({ ok: false, code: 'INVALID_CURSOR', error: e.message })
           throw e
@@ -211,7 +219,13 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       // T13: un folio por pagar («Nadie» acepta) también se puede cancelar; uno de «Mi equipo» por aceptar se rechaza, no se cancela.
       const folio = order.requiresAcceptance === false
       // R46: el servicio también responde STALE (la API del POS y del panel), aquí se dice antes de la vista previa.
-      if (action === 'REJECT' && folio) return text({ ok: false, status: order.status, error: FOLIO_NO_SE_RECHAZA })
+      if (action === 'REJECT' && folio) {
+        return text({
+          ok: false,
+          status: order.status,
+          error: order.paymentMode === 'CARD_ONLINE' ? TARJETA_NO_SE_RECHAZA : FOLIO_NO_SE_RECHAZA,
+        })
+      }
       const vigente: string[] = pendingAction
         ? ['PENDING_ACCEPTANCE']
         : action === 'CANCEL' && folio
@@ -228,8 +242,9 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       }
 
       const tarjeta = order.paymentMode === 'CARD_ONLINE'
-      // D661: la misma regla que el servicio (`OPEN_FROM_CAJA`), dicha antes de la vista previa: aquí no se promete un cobro.
-      if (action === 'ACCEPT' && folio && tarjeta) return text({ ok: false, code: 'OPEN_FROM_CAJA', error: ABRIR_DESDE_LA_CAJA })
+      // D661: la misma regla que el servicio (`OPEN_FROM_CAJA`), dicha antes de la vista previa: aquí no se promete un cobro. El MCP
+      // no lo abre: se abre (y así se cobra) sólo desde la caja.
+      if (action === 'ACCEPT' && folio && tarjeta) return text({ ok: false, code: 'OPEN_FROM_CAJA', error: MENSAJE_ABRIR_DESDE_LA_CAJA })
       if (action === 'ACCEPT' && folio && !esVentaCerrada(order.paymentStatus)) {
         return text({ ok: false, code: 'PAYMENT_REQUIRED', error: FOLIO_SIN_PAGAR })
       }

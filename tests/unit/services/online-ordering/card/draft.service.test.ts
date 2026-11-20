@@ -659,12 +659,13 @@ describe("S11 · el borrador con sesión calcula su propio total estricto (R2'',
 })
 
 describe('D661 · el borrador de tarjeta en «Nadie»: sesión, teléfono verificado y tope por clienta', () => {
-  /** La caja capaz de avisar consultó hace un minuto (`cardOnlineAvailable` mide con el reloj del sistema). */
+  /** La caja capaz de avisar recibió una respuesta rápida hace 30 s (`cardOnlineAvailable` mide con el reloj del sistema). */
   const NADIE = () => ({
     acceptsCardOnline: false,
     requiresAcceptance: false,
     cardOnlineNadie: true,
     lastCardAlertPollAt: new Date(Date.now() - 60_000),
+    cardAlertFastPollAt: new Date(Date.now() - 30_000),
   })
   const MI_EQUIPO = { acceptsCardOnline: true, requiresAcceptance: true }
   const TELEFONO_DE_LA_SESION = '+525511112222'

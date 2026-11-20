@@ -3,6 +3,8 @@
  * Integration (REAL DB) — D661 tarea 3A: confirmar → apartado; abrir = cobrar; vencer y liberar. Lo que los simulacros no prueban: el CAS
  * `AUTHORIZED → CAPTURING` con dos cajas a la vez, la relectura del plazo bajo el candado real (de admisión al confirmar, de la orden al
  * abrir) mientras otro lo sostiene, el sello del cargo y el rechazo en la MISMA transacción, y el trabajo de vencimiento con su SQL.
+ * Tarea 3B: lo que lee la caja (`tarjetasPorAbrir`, `comandasPorImprimir`, `pollSeconds`), el latido de la caja que avisa por la ruta
+ * real y su séptima columna (`cardAlertFastPollAt`, Ruling 7), y el reclamo de papel con su CAS y `posibleRepetida` (Ruling 9).
  * Stripe es un doble siempre (nunca el de verdad).
  */
 import { randomUUID } from 'node:crypto'
@@ -13,7 +15,12 @@ import { StripeConnectProvider } from '@/services/payments/providers/stripe-conn
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
 import { confirmCardAuthorization } from '@/services/online-ordering/card/confirm.service'
 import { releaseCharge } from '@/services/online-ordering/card/release.service'
-import { listFolios, syncPaidFolios } from '@/services/online-ordering/folios.service'
+import { cerrarFoliosDelDiaTerminado, listFolios, syncPaidFolios } from '@/services/online-ordering/folios.service'
+import { claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/online-ordering/printClaim.service'
+import { __resetCardAlertPollDebounceForTests } from '@/services/online-ordering/cardAlertPresence'
+import { __resetPresenceDebounceForTests } from '@/services/online-ordering/presence.service'
+import * as ctrl from '@/controllers/mobile/onlineOrders.mobile.controller'
+import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { listInbox } from '@/services/online-ordering/inbox.service'
 import { closesAt } from '@/services/online-ordering/hours'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
@@ -62,10 +69,17 @@ const MIN = 60_000
 const TZ = 'America/Mexico_City'
 const PUEDE_CREAR = { assertCanCreate: async () => {} }
 const dormir = (ms: number) => new Promise(r => setTimeout(r, ms))
+/** Espera (con tope) a que algo que corre sin esperarlo termine: la liberación con Stripe sale fuera de la lectura de la caja (3B). */
+const hastaQue = async (listo: () => Promise<boolean>, ms = 5_000) => {
+  const fin = Date.now() + ms
+  while (!(await listo()) && Date.now() < fin) await dormir(25)
+}
 
-describe('D661 · 3A: confirmar → apartado; abrir = cobrar; vencer y liberar (integration, real DB)', () => {
+describe('D661 · 3A y 3B: confirmar → apartado; abrir = cobrar; vencer y liberar; lo que lee la caja (integration, real DB)', () => {
   let orgId: string | undefined
   let venueId: string | undefined
+  /** Una cajera de la sucursal: puede cobrar (`payments:create`) y abrir (`orders:update`). */
+  let staffId: string | undefined
   let productId: string
   const clientas: string[] = []
   let turno = 0
@@ -160,6 +174,36 @@ describe('D661 · 3A: confirmar → apartado; abrir = cobrar; vencer y liberar (
   const avisoDeStripe = (type: string, data: Record<string, unknown>) =>
     processStripeConnectWebhookEvent({ id: `evt_abrir_${RUN}_${++evtSeq}`, type, account: 'acct_itest_abrir', livemode: false, data })
   const pasarElTrabajo = () => new OnlineOrderAcceptanceExpiryJob({ cron: { start: jest.fn(), stop: jest.fn() } as never }).checkNow()
+  /** El cargo quedó liberado: su liberación con Stripe corre sin que la lectura que lo aceptó la espere (3B). */
+  const liberado = (chargeId: string) => hastaQue(async () => (await cargo(chargeId)).status === 'RELEASED')
+  /** La caja actualizada (TPV o POS) que sabe avisar: cobra folios y avisa pedidos pagados en línea. */
+  const AMBAS = { 'x-online-orders-to-pay': '1', 'x-online-orders-card-alert': '1' }
+  /** La caja consulta to-pay por el controlador REAL (permisos reales, latidos reales), como la cajera de la sucursal. */
+  const sondeo = async (headers: Record<string, string> = AMBAS) => {
+    let body: any
+    const res: any = { status: jest.fn(() => res), json: jest.fn((b: unknown) => ((body = b), res)) }
+    const next = jest.fn()
+    const req: any = {
+      params: { venueId: venueId! },
+      query: {},
+      body: {},
+      authContext: { userId: staffId! },
+      header: (n: string) => headers[n.toLowerCase()],
+    }
+    await ctrl.toPay(req, res, next)
+    expect(next).not.toHaveBeenCalled()
+    return body.data
+  }
+  /** Lo ya cobrado por entregar de pruebas anteriores se da por entregado: sólo cuenta lo de esta prueba. */
+  const sinNadaVivo = () =>
+    prisma.onlineOrder.updateMany({ where: { venueId: venueId!, status: { in: ['ACCEPTED', 'READY'] } }, data: { status: 'COMPLETED' } })
+  /** Un apartado que una caja ya abrió (cobrado, «Por entregar», con la comanda pendiente). */
+  const cobrado = async () => {
+    const a = await apartado()
+    await expect(abrir(a.orderId)).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
+    return a
+  }
+  const comandas = async () => (await listFolios({ venueId: venueId! })).comandasPorImprimir.map(c => c.orderId)
   /**
    * Fix 1: la cuenta se paga por otro camino. Es lo que deja la TPV al REGISTRAR dinero ya movido (`recordOrderPayment`, el único escritor
    * de caja que no se rechaza: su guarda va al empezar el cobro, `order.tpv.service.ts` → 409); se escribe directo: ese camino se prueba
@@ -201,6 +245,10 @@ describe('D661 · 3A: confirmar → apartado; abrir = cobrar; vencer y liberar (
       },
     })
     venueId = venue.id
+    staffId = (
+      await prisma.staff.create({ data: { email: `itest-abrir-caja-${RUN}@test.com`, firstName: 'Caja', lastName: 'ITEST', active: true } })
+    ).id
+    await prisma.staffVenue.create({ data: { venueId, staffId, role: 'CASHIER' } })
     await prisma.privacyNoticeVersion.create({ data: { venueId, content: 'Aviso ITEST', contentHash: `itest-abrir-${RUN}` } })
     const category = await prisma.menuCategory.create({ data: { venueId, name: 'Flautas', slug: `flautas-abrir-${RUN}` } })
     productId = (
@@ -270,6 +318,7 @@ describe('D661 · 3A: confirmar → apartado; abrir = cobrar; vencer y liberar (
         hours: Prisma.DbNull, // abierta todo el día salvo la prueba del cierre de la franja
         lastToPayPollAt: ahora,
         lastCardAlertPollAt: ahora,
+        cardAlertFastPollAt: ahora,
         lastInboxPollAt: ahora,
       },
     })
@@ -296,6 +345,8 @@ describe('D661 · 3A: confirmar → apartado; abrir = cobrar; vencer y liberar (
     await prisma.customer.deleteMany({ where: v })
     await prisma.onlineOrderingSettings.deleteMany({ where: v })
     await prisma.privacyNoticeVersion.deleteMany({ where: v })
+    await prisma.staffVenue.deleteMany({ where: v })
+    if (staffId) await prisma.staff.deleteMany({ where: { id: staffId } })
     await prisma.venue.deleteMany({ where: { id: venueId } })
     if (orgId) await prisma.organization.deleteMany({ where: { id: orgId } })
   })
@@ -321,7 +372,19 @@ describe('D661 · 3A: confirmar → apartado; abrir = cobrar; vencer y liberar (
       cardStatus: 'AUTHORIZED',
       requiresAcceptance: false,
     })
-    // 3B agrega las aserciones de `tarjetasPorAbrir` (y que nunca sale en `toPay`): esa lista todavía no existe en esta rebanada.
+    // 3B: la caja lo ve para ABRIRLO, nunca para cobrarlo en caja (ni en «Por pagar» ni en su conteo), y sondea cada 30 s.
+    const caja = await listFolios({ venueId: venueId! })
+    expect(caja.tarjetasPorAbrir).toContainEqual({
+      orderId: oo.orderId,
+      orderNumber: (await cuenta(oo.orderId)).orderNumber,
+      customerName: (await cuenta(oo.orderId)).customerName ?? '',
+      totalCents: 25_000,
+      createdAt: oo.createdAt.toISOString(),
+      cobrando: false,
+    })
+    expect(caja.toPay.map(f => f.orderId)).not.toContain(oo.orderId)
+    expect(caja.counts.toPay).toBe(0) // la prueba anterior quedó vencida (beforeEach): no hay folios por cobrar
+    expect(caja.pollSeconds).toBe(30)
   })
 
   it('abrir (accept) con orders:update captura → CAPTURED, Order PAID, ACCEPTED con kitchenPendingAt y acceptedAt de la escritura; sale de tarjetasPorAbrir y entra a toDeliver', async () => {
@@ -359,8 +422,10 @@ describe('D661 · 3A: confirmar → apartado; abrir = cobrar; vencer y liberar (
     expect(oo.status).toBe('ACCEPTED')
     expect(oo.acceptedAt!.getTime()).toBeGreaterThanOrEqual(cobradoEn)
     expect(order.kitchenPendingAt).toEqual(oo.acceptedAt)
-    // Entra a «Por entregar» de la caja. 3B agrega que sale de `tarjetasPorAbrir`.
-    expect((await listFolios({ venueId: venueId! })).toDeliver.map(f => f.orderId)).toContain(a.orderId)
+    // Entra a «Por entregar» de la caja y sale de `tarjetasPorAbrir` (misma foto: nunca en las dos).
+    const caja = await listFolios({ venueId: venueId! })
+    expect(caja.toDeliver.map(f => f.orderId)).toContain(a.orderId)
+    expect(caja.tarjetasPorAbrir.map(t => t.orderId)).not.toContain(a.orderId)
   })
 
   it('dos cajas abren a la vez: una sola captura; la otra recibe CONFIRMING_PAYMENT o el estado ACCEPTED, no un error', async () => {
@@ -606,6 +671,7 @@ describe('D661 · 3A: confirmar → apartado; abrir = cobrar; vencer y liberar (
       await pagadaPorOtroCamino(a.orderId)
       await barrer()
       expect({ quien, pedido: (await enLinea(a.orderId)).status }).toEqual({ quien, pedido: 'ACCEPTED' })
+      await liberado(a.charge.id)
       expect({ quien, cargo: (await cargo(a.charge.id)).status }).toEqual({ quien, cargo: 'RELEASED' })
       expect(voidSpy).toHaveBeenCalledWith(expect.anything(), {
         paymentIntentId: a.charge.paymentIntentId,
@@ -626,6 +692,10 @@ describe('D661 · 3A: confirmar → apartado; abrir = cobrar; vencer y liberar (
     await syncPaidFolios({ venueId: venueId! }, () => new Date())
     expect((await enLinea(a.orderId)).status).toBe('ACCEPTED')
     expect((await cargo(a.charge.id)).status).toBe('RELEASING') // el conciliador libera todo RELEASING
+    // 3B: la liberación corre sin que la lectura la espere; aquí se espera a que su intento con Stripe termine (sin respuesta).
+    await hastaQue(async () => authSpy.mock.calls.length > 0)
+    await dormir(50)
+    expect((await cargo(a.charge.id)).status).toBe('RELEASING')
     expect(captureSpy).not.toHaveBeenCalled()
   })
 
@@ -648,6 +718,7 @@ describe('D661 · 3A: confirmar → apartado; abrir = cobrar; vencer y liberar (
         { primero, outcome: 'STALE', status: 'ACCEPTED' },
       ]).toContainEqual({ primero, outcome: apertura.outcome, status: 'status' in apertura ? apertura.status : undefined })
       expect({ primero, pedido: (await enLinea(a.orderId)).status }).toEqual({ primero, pedido: 'ACCEPTED' })
+      await liberado(a.charge.id)
       expect({ primero, cargo: (await cargo(a.charge.id)).status }).toEqual({ primero, cargo: 'RELEASED' })
       expect(await cobros(a.orderId)).toHaveLength(1)
     }
@@ -706,5 +777,195 @@ describe('D661 · 3A: confirmar → apartado; abrir = cobrar; vencer y liberar (
     })
     expect((await cargo(chargeId)).status).toBe('CAPTURED')
     expect(await cobros(oo.orderId)).toHaveLength(1)
+  })
+  // ─── 3B: lo que lee la caja ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('tarjetasPorAbrir mantiene pollSeconds 30 y la sección visible mientras tenga algo, aunque la tienda cambie a «Mi equipo» o se apague', async () => {
+    await sinNadaVivo()
+    const a = await apartado()
+    for (const ajustes of [{ requiresAcceptance: true }, { requiresAcceptance: false, enabled: false }]) {
+      await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: ajustes })
+      const caja = await listFolios({ venueId: venueId! })
+      expect({ ajustes, showTile: caja.showTile, pollSeconds: caja.pollSeconds, abrir: caja.tarjetasPorAbrir.map(t => t.orderId) }).toEqual(
+        {
+          ajustes,
+          showTile: true,
+          pollSeconds: 30,
+          abrir: [a.orderId],
+        },
+      )
+      expect(caja.toPay.map(f => f.orderId)).not.toContain(a.orderId)
+    }
+    // Resuelto (aquí, vencido) con la tienda apagada y nada más vivo: la sección se va y vuelve la espera larga.
+    await prisma.onlineOrder.update({ where: { id: a.onlineOrderId }, data: { status: 'EXPIRED' } })
+    expect(await listFolios({ venueId: venueId! })).toMatchObject({ showTile: false, pollSeconds: 600, tarjetasPorAbrir: [] })
+    await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { enabled: true } })
+  })
+
+  it('pollSeconds es 30 también mientras exista en el negocio un BORRADOR D661 vivo (PENDING_AUTH) que todavía pueda autorizarse, aunque tarjetasPorAbrir esté vacía o la tienda haya cambiado de modo', async () => {
+    await sinNadaVivo()
+    const d = await borrador()
+    // La tienda cambia a «Mi equipo» y la página de pago del borrador ya venció: Stripe pudo autorizar igual. Hasta que el conciliador
+    // lo resuelva, la caja sigue en 30 s (si se aparta, suena a tiempo).
+    await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { requiresAcceptance: true } })
+    await prisma.onlineOrderCharge.update({
+      where: { trackingToken: d.trackingToken },
+      data: { checkoutExpiresAt: new Date(Date.now() - MIN) },
+    })
+    for (const enabled of [true, false]) {
+      await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { enabled } })
+      const caja = await listFolios({ venueId: venueId! })
+      expect({ enabled, abrir: caja.tarjetasPorAbrir, showTile: caja.showTile, pollSeconds: caja.pollSeconds }).toEqual({
+        enabled,
+        abrir: [],
+        showTile: false,
+        pollSeconds: 30,
+      })
+    }
+    // Resuelto (abandonado): la espera larga.
+    await prisma.onlineOrderCharge.update({ where: { trackingToken: d.trackingToken }, data: { status: 'ABANDONED' } })
+    expect((await listFolios({ venueId: venueId! })).pollSeconds).toBe(600)
+    await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { enabled: true } })
+  })
+
+  it('D661 (3B): mientras una caja lo cobra, el apartado sigue en tarjetasPorAbrir con cobrando:true; al terminar pasa a «Por entregar»', async () => {
+    const a = await apartado()
+    let soltar!: () => void
+    const stripe = new Promise<void>(r => (soltar = r))
+    captureSpy.mockImplementation(async (_m: any, p: any) => {
+      await stripe
+      return cobrada(p)
+    })
+    const apertura = abrir(a.orderId)
+    await hastaQue(async () => (await cargo(a.charge.id)).status === 'CAPTURING')
+    const durante = await listFolios({ venueId: venueId! })
+    expect(durante.tarjetasPorAbrir.find(t => t.orderId === a.orderId)).toMatchObject({ cobrando: true })
+    expect(durante.pollSeconds).toBe(30)
+    soltar()
+    await expect(apertura).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
+    const despues = await listFolios({ venueId: venueId! })
+    expect(despues.tarjetasPorAbrir.map(t => t.orderId)).not.toContain(a.orderId)
+    expect(despues.toDeliver.map(f => f.orderId)).toContain(a.orderId)
+  })
+
+  it('D661 · matriz: corte después del commit de confirmar y antes de avisar: la caja lo ve igual en su siguiente lectura (tarjetasPorAbrir)', async () => {
+    // El aviso en vivo se pierde (el socket truena justo después del commit): la caja no depende de él, lee el estado.
+    const aviso = socketManager.broadcastToVenue as jest.Mock
+    aviso.mockClear()
+    aviso.mockImplementationOnce(() => {
+      throw new Error('el proceso murió antes de avisar')
+    })
+    const a = await apartado()
+    expect(aviso.mock.results[0]?.type).toBe('throw') // el aviso de la confirmación se perdió
+    const caja = await listFolios({ venueId: venueId! })
+    expect(caja.tarjetasPorAbrir.map(t => t.orderId)).toContain(a.orderId)
+    expect(caja.pollSeconds).toBe(30)
+  })
+
+  it('Ruling 7: con la respuesta vacía y la espera larga, prender la tarjeta desde el panel y crear el primer borrador sin que la caja vuelva a sondear NO ofrece la tarjeta; en cuanto una caja capaz recibe su primera respuesta rápida, sí', async () => {
+    __resetCardAlertPollDebounceForTests()
+    __resetPresenceDebounceForTests()
+    await sinNadaVivo()
+    // La tienda apagada y sin nada vivo; ninguna caja ha avisado nunca.
+    const hhmm = (ms: number) => formatInTimeZone(new Date(Date.now() + ms), TZ, 'HH:mm')
+    const dia = { enabled: true, ranges: [{ open: hhmm(-60 * MIN), close: hhmm(3 * 60 * MIN) }] }
+    const HORARIO = { monday: dia, tuesday: dia, wednesday: dia, thursday: dia, friday: dia, saturday: dia, sunday: dia }
+    await prisma.onlineOrderingSettings.update({
+      where: { venueId: venueId! },
+      data: {
+        enabled: false,
+        requiresAcceptance: false,
+        cardOnlineNadie: false,
+        hours: HORARIO,
+        lastToPayPollAt: null,
+        lastCardAlertPollAt: null,
+        cardAlertFastPollAt: null,
+      },
+    })
+    const ajustes = () => prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })
+
+    // 1) La caja capaz consulta y recibe la respuesta vacía con la espera larga: late «puedo avisar» (lento), no «a tiempo».
+    const primera = await sondeo()
+    expect(primera).toMatchObject({ showTile: false, pollSeconds: 600, tarjetasPorAbrir: [] })
+    expect(await ajustes()).toMatchObject({ lastCardAlertPollAt: expect.any(Date), cardAlertFastPollAt: null })
+
+    // 2) Desde el panel: tienda encendida en «Nadie» y la tarjeta prendida (lo permite el sondeo lento: visto en 7 días).
+    await updateSettings(venueId!, { enabled: true, cardOnlineNadie: true }, staffId!)
+    expect(await ajustes()).toMatchObject({ enabled: true, requiresAcceptance: false, cardOnlineNadie: true })
+
+    // 3) El primer borrador, sin que la caja haya vuelto a sondear: NO se ofrece la tarjeta (nadie oiría el aviso a tiempo).
+    await expect(borrador()).rejects.toMatchObject({ code: 'CARD_PAYMENT_NOT_ACCEPTED' })
+    expect(await prisma.onlineOrderCharge.count({ where: { venueId: venueId!, status: 'PENDING_AUTH' } })).toBe(0)
+
+    // 4) La caja vuelve a consultar: ya recibe la cadencia rápida y lo escribe; desde ahí la tarjeta se ofrece.
+    const segunda = await sondeo()
+    expect(segunda.pollSeconds).toBe(30)
+    expect((await ajustes()).cardAlertFastPollAt).toEqual(expect.any(Date))
+    const d = await borrador()
+    expect(d.trackingToken).toEqual(expect.any(String))
+  })
+
+  it('Ruling 7: el latido de la caja que avisa sólo lo escribe quien manda la cabecera; sin ella, nada (y la tarjeta no se ofrece)', async () => {
+    __resetCardAlertPollDebounceForTests()
+    await prisma.onlineOrderingSettings.update({
+      where: { venueId: venueId! },
+      data: { lastCardAlertPollAt: null, cardAlertFastPollAt: null },
+    })
+    const caja = await sondeo({ 'x-online-orders-to-pay': '1' }) // una caja vieja: cobra folios, no sabe avisar
+    expect(caja.pollSeconds).toBe(30)
+    expect(await prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })).toMatchObject({
+      lastCardAlertPollAt: null,
+      cardAlertFastPollAt: null,
+    })
+    await expect(borrador()).rejects.toMatchObject({ code: 'CARD_PAYMENT_NOT_ACCEPTED' })
+  })
+
+  it('D661 (Ruling 2): lo cobrado con la comanda pendiente sale en comandasPorImprimir —también cuando el cierre del día ya lo pasó a COMPLETED—, el reclamo lo admite y, con el papel confirmado, sale de la lista', async () => {
+    await sinNadaVivo()
+    const a = await cobrado()
+    expect(await comandas()).toContain(a.orderId)
+
+    // El cierre del día (04:00 del negocio) lo saca de «Por entregar»; su comanda sigue pendiente.
+    await cerrarFoliosDelDiaTerminado({ venueId: venueId! }, () => new Date(Date.now() + 26 * 60 * MIN))
+    expect((await enLinea(a.orderId)).status).toBe('COMPLETED')
+    const caja = await listFolios({ venueId: venueId! })
+    expect(caja.toDeliver.map(f => f.orderId)).not.toContain(a.orderId)
+    expect(caja.comandasPorImprimir).toContainEqual({ orderId: a.orderId, orderNumber: (await cuenta(a.orderId)).orderNumber })
+
+    // Una caja la reclama: mientras su reclamo está vigente nadie más la ve; al confirmar el papel, ya no vuelve.
+    await expect(claimOnlineOrderPrint(venueId!, a.orderId, 'caja-1')).resolves.toEqual({ claimed: true })
+    expect(await comandas()).not.toContain(a.orderId)
+    await expect(confirmOnlineOrderPrinted(venueId!, a.orderId, 'caja-1')).resolves.toEqual({ ok: true })
+    expect(await comandas()).not.toContain(a.orderId)
+    await expect(claimOnlineOrderPrint(venueId!, a.orderId, 'caja-2')).resolves.toEqual({ claimed: false })
+  })
+
+  it('D661 (Ruling 2): con la devolución reservada (refundRequestedAt) o hecha (refundedAt) no sale en comandasPorImprimir, el reclamo no la admite y needsPrint es false', async () => {
+    await sinNadaVivo()
+    for (const marca of ['refundRequestedAt', 'refundedAt'] as const) {
+      const a = await cobrado()
+      await prisma.onlineOrder.update({ where: { id: a.onlineOrderId }, data: { [marca]: new Date() } })
+      const caja = await listFolios({ venueId: venueId! })
+      expect({ marca, enLista: caja.comandasPorImprimir.some(c => c.orderId === a.orderId) }).toEqual({ marca, enLista: false })
+      expect({ marca, needsPrint: caja.toDeliver.find(f => f.orderId === a.orderId)?.needsPrint }).toEqual({ marca, needsPrint: false })
+      await expect(claimOnlineOrderPrint(venueId!, a.orderId, 'caja-1')).resolves.toEqual({ claimed: false })
+    }
+  })
+
+  it('Ruling 9: un reclamo concedido sobre uno anterior que venció sin confirmarse trae posibleRepetida:true; dos cajas a la vez: una sola gana', async () => {
+    const a = await cobrado()
+    // Dos cajas reclaman la misma comanda a la vez: el CAS de Postgres deja pasar a una.
+    const [x, y] = await Promise.all([
+      claimOnlineOrderPrint(venueId!, a.orderId, 'caja-1'),
+      claimOnlineOrderPrint(venueId!, a.orderId, 'caja-2'),
+    ])
+    expect([x.claimed, y.claimed].sort()).toEqual([false, true])
+    expect(x.posibleRepetida ?? y.posibleRepetida).toBeUndefined()
+    // El que ganó no confirmó (se cayó la impresora o el aparato): su reclamo vence y vuelve a la lista.
+    await prisma.onlineOrder.update({ where: { id: a.onlineOrderId }, data: { printClaimedAt: new Date(Date.now() - 2 * MIN) } })
+    expect(await comandas()).toContain(a.orderId)
+    await expect(claimOnlineOrderPrint(venueId!, a.orderId, 'caja-3')).resolves.toEqual({ claimed: true, posibleRepetida: true })
+    await expect(confirmOnlineOrderPrinted(venueId!, a.orderId, 'caja-3')).resolves.toEqual({ ok: true })
+    expect((await enLinea(a.orderId)).printClaimedBy).toBe('caja-3')
   })
 })

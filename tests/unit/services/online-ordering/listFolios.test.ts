@@ -64,19 +64,30 @@ const row = (n: number, o: { paymentStatus?: string; remaining?: string; status?
   },
 })
 
-/** Las listas leen con `INBOX_SELECT` (trae `charge`); las sincronizaciones, no. */
-const esLista = (a: any) => a.select?.charge !== undefined
+/** Las páginas leen con `INBOX_SELECT` (trae los renglones de la cuenta); las sincronizaciones y las listas D661, no. */
+const esLista = (a: any) => a.select?.order?.select?.items !== undefined
+/** D661 (3B): las dos listas de la caja que no dependen de la página (pedidos con tarjeta de «Nadie»). */
+const esTarjetas = (a: any) => a.where?.paymentMode === 'CARD_ONLINE' && a.where?.status === 'PENDING_ACCEPTANCE'
+const esComandas = (a: any) => a.where?.paymentMode === 'CARD_ONLINE' && a.where?.status === undefined
 let POR_PAGAR: any[] = []
 let POR_ENTREGAR: any[] = []
+let TARJETAS: any[] = []
+let COMANDAS: any[] = []
 let CONTEOS = { toPay: 0, toDeliver: 0 }
 
 beforeEach(() => {
   POR_PAGAR = []
   POR_ENTREGAR = []
+  TARJETAS = []
+  COMANDAS = []
   CONTEOS = { toPay: 0, toDeliver: 0 }
   ;(getSettings as jest.Mock).mockResolvedValue({ enabled: true, requiresAcceptance: false })
   ;(cerrarCanceladasReleyendo as jest.Mock).mockResolvedValue([])
+  prismaMock.onlineOrderCharge.findFirst.mockReset()
+  prismaMock.onlineOrderCharge.findFirst.mockResolvedValue(null)
   prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => {
+    if (esTarjetas(a)) return TARJETAS
+    if (esComandas(a)) return COMANDAS
     if (!esLista(a)) return []
     return a.where.status === 'PENDING_ACCEPTANCE' ? POR_PAGAR : POR_ENTREGAR
   }) as any)
@@ -187,7 +198,9 @@ describe('listFolios', () => {
     // un `tx` DISTINTO del prismaMock global: si una lectura se escapa al `prisma`, se ve en el global
     const tx = {
       onlineOrder: {
-        findMany: jest.fn(async (a: any) => (a.where.status === 'PENDING_ACCEPTANCE' ? POR_PAGAR : POR_ENTREGAR)),
+        findMany: jest.fn(async (a: any) =>
+          esTarjetas(a) || esComandas(a) ? [] : a.where.status === 'PENDING_ACCEPTANCE' ? POR_PAGAR : POR_ENTREGAR,
+        ),
         count: jest.fn(async (a: any) => (a.where.status === 'PENDING_ACCEPTANCE' ? CONTEOS.toPay : CONTEOS.toDeliver)),
       },
     }
@@ -203,8 +216,8 @@ describe('listFolios', () => {
     expect(opts).toMatchObject({ isolationLevel: 'RepeatableRead' })
     expect(opts.timeout).toBeGreaterThan(0)
     expect(opts.maxWait).toBeGreaterThan(0)
-    // las 2 páginas y los 2 conteos, TODOS en el tx
-    expect(tx.onlineOrder.findMany).toHaveBeenCalledTimes(2)
+    // las 2 páginas, los 2 conteos y (D661, 3B) las 2 listas de la caja que no dependen de la página, TODOS en el tx
+    expect(tx.onlineOrder.findMany).toHaveBeenCalledTimes(4)
     expect(tx.onlineOrder.count).toHaveBeenCalledTimes(2)
     // y NINGUNA lista ni conteo por el prisma global (las sincronizaciones previas no usan `select: INBOX_SELECT` ni `count`)
     expect(listas()).toHaveLength(0)
@@ -243,6 +256,8 @@ describe('listFolios', () => {
       venueId: 'v1',
       status: 'PENDING_ACCEPTANCE',
       requiresAcceptance: false,
+      // D661 (3B): un apartado con tarjeta se ABRE, no se cobra en caja: nunca sale en «Por pagar» ni en su conteo.
+      paymentMode: { not: 'CARD_ONLINE' },
       order: { status: { notIn: ['CANCELLED', 'DELETED'] }, paymentStatus: { notIn: ['PAID', 'REFUNDED'] } },
     })
     // PARTIAL no está excluido (R41) y el número cuenta con el MISMO filtro que la lista (R42)
@@ -342,6 +357,107 @@ describe('listFolios', () => {
     } finally {
       jest.useRealTimers()
     }
+  })
+})
+
+describe('D661 (3B): lo que lee la caja — tarjetasPorAbrir, comandasPorImprimir y pollSeconds', () => {
+  const apartado = (n: number, cargo: 'AUTHORIZED' | 'CAPTURING', o: { customerName?: string | null; total?: string } = {}) => ({
+    orderId: `ord${n}`,
+    createdAt: new Date(NOW.getTime() + n * 1000),
+    charge: { status: cargo },
+    order: {
+      orderNumber: `T-${n}`,
+      customerName: o.customerName === undefined ? 'Ana N.' : o.customerName,
+      total: new Prisma.Decimal(o.total ?? '250.50'),
+    },
+  })
+  const consulta = (es: (a: any) => boolean) => (prismaMock.onlineOrder.findMany.mock.calls as any[][]).map(c => c[0]).find(es)
+
+  it('tarjetasPorAbrir: los apartados de «Nadie» con el cargo AUTHORIZED o CAPTURING, con su forma, del más viejo al más nuevo y con tope 50; cobrando = CAPTURING', async () => {
+    TARJETAS = [apartado(1, 'AUTHORIZED'), apartado(2, 'CAPTURING', { customerName: null, total: '99.90' })]
+    const r = await listFolios({ venueId: 'v1', now: NOW })
+    expect(r.tarjetasPorAbrir).toEqual([
+      {
+        orderId: 'ord1',
+        orderNumber: 'T-1',
+        customerName: 'Ana N.',
+        totalCents: 25_050,
+        createdAt: TARJETAS[0].createdAt.toISOString(),
+        cobrando: false,
+      },
+      {
+        orderId: 'ord2',
+        orderNumber: 'T-2',
+        customerName: '',
+        totalCents: 9_990,
+        createdAt: TARJETAS[1].createdAt.toISOString(),
+        cobrando: true,
+      },
+    ])
+    const q = consulta(esTarjetas)
+    expect(q.where).toEqual({
+      venueId: 'v1',
+      status: 'PENDING_ACCEPTANCE',
+      requiresAcceptance: false,
+      paymentMode: 'CARD_ONLINE',
+      charge: { is: { status: { in: ['AUTHORIZED', 'CAPTURING'] } } },
+    })
+    expect(q.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }])
+    expect(q.take).toBe(50)
+    // Independiente de la página: también al seguir «Por entregar» con su cursor.
+    prismaMock.onlineOrder.findMany.mockClear()
+    await listFolios({ venueId: 'v1', section: 'toDeliver', cursor: `${NOW.toISOString()}_oo001`, now: NOW })
+    expect(consulta(esTarjetas)).toBeDefined()
+  })
+
+  it('comandasPorImprimir: pedidos con tarjeta de «Nadie» ya cobrados con la comanda pendiente (también COMPLETED por el cierre del día), sin devolución, con tope 50; sólo lo que la caja necesita para leerlo e imprimirlo', async () => {
+    COMANDAS = [{ orderId: 'ord7', order: { orderNumber: 'T-7' } }]
+    const r = await listFolios({ venueId: 'v1', now: NOW })
+    expect(r.comandasPorImprimir).toEqual([{ orderId: 'ord7', orderNumber: 'T-7' }])
+    const q = consulta(esComandas)
+    expect(q.where).toMatchObject({
+      venueId: 'v1',
+      paymentMode: 'CARD_ONLINE',
+      requiresAcceptance: false,
+      printedAt: null,
+      refundRequestedAt: null,
+      refundedAt: null,
+      createdAt: { gte: new Date(NOW.getTime() - 24 * 3_600_000) },
+    })
+    expect(q.where.AND).toEqual([
+      { OR: [{ status: { in: ['ACCEPTED', 'READY'] } }, { status: 'COMPLETED', paymentMode: 'CARD_ONLINE', requiresAcceptance: false }] },
+      { OR: [{ printClaimedAt: null }, { printClaimedAt: { lt: new Date(NOW.getTime() - 90_000) } }] },
+    ])
+    expect(q.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }])
+    expect(q.take).toBe(50)
+    expect(q.select).toEqual({ orderId: true, order: { select: { orderNumber: true } } })
+  })
+
+  it('con algo por abrir, la sección se ve y la caja sondea cada 30 s aunque la tienda esté apagada o en «Mi equipo»', async () => {
+    TARJETAS = [apartado(1, 'AUTHORIZED')]
+    for (const ajustes of [
+      { enabled: false, requiresAcceptance: false },
+      { enabled: true, requiresAcceptance: true },
+    ]) {
+      ;(getSettings as jest.Mock).mockResolvedValue(ajustes)
+      expect(await listFolios({ venueId: 'v1', now: NOW })).toMatchObject({ showTile: true, pollSeconds: 30 })
+    }
+  })
+
+  it('un borrador de «Nadie» todavía sin resolver deja el sondeo en 30 s (sin encender la sección); sin nada vivo vuelve a 600', async () => {
+    ;(getSettings as jest.Mock).mockResolvedValue({ enabled: false, requiresAcceptance: true })
+    prismaMock.onlineOrderCharge.findFirst.mockResolvedValueOnce({ id: 'ch1' } as any)
+    expect(await listFolios({ venueId: 'v1', now: NOW })).toMatchObject({ showTile: false, pollSeconds: 30 })
+    expect(prismaMock.onlineOrderCharge.findFirst).toHaveBeenCalledWith({
+      where: { venueId: 'v1', status: 'PENDING_AUTH', customerPhone: '' },
+      select: { id: true },
+    })
+    expect(await listFolios({ venueId: 'v1', now: NOW })).toMatchObject({ showTile: false, pollSeconds: 600 })
+  })
+
+  it('con la tienda encendida en «Nadie» ya es 30 s: ni se busca el borrador (una consulta menos en cada sondeo)', async () => {
+    expect(await listFolios({ venueId: 'v1', now: NOW })).toMatchObject({ showTile: true, pollSeconds: 30 })
+    expect(prismaMock.onlineOrderCharge.findFirst).not.toHaveBeenCalled()
   })
 })
 

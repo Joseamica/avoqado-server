@@ -1,8 +1,8 @@
 // tests/unit/routes/online-ordering.schema.http.test.ts
 /**
  * D661 (r2 #7): el esquema ESTRICTO de ajustes lo comparten el DASHBOARD (`PUT /settings`) y la tool MCP. Un campo que el servicio sí
- * entiende pero el esquema no conoce sale 400 al guardar. Aquí corre el camino real: ruta → validación → controlador → servicio, con
- * la base de pruebas; sólo se sueltan los candados de permiso y de plan (sus propias pruebas viven en `onlineOrdering.restaurant`).
+ * entiende pero el esquema no conoce sale 400 al guardar. Aquí corre el camino real: ruta → validación → controlador → servicio, sobre
+ * `prismaMock` (no hay base); sólo se sueltan los candados de permiso y de plan (sus propias pruebas viven en `onlineOrdering.restaurant`).
  */
 import express from 'express'
 import request from 'supertest'

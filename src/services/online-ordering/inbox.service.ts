@@ -104,6 +104,9 @@ export const INBOX_SELECT = {
   estimatedReadyAt: true,
   printClaimedAt: true,
   printedAt: true,
+  // D661 (Ruling 2): con la devolución reservada o hecha ya no se pide comanda (`needsPrint`).
+  refundRequestedAt: true,
+  refundedAt: true,
   createdAt: true,
   // Fase 2: el cargo con tarjeta (1:1), en el mismo select: sin consulta extra por renglón.
   charge: { select: { status: true, amount: true, capturedAmount: true, authorizedAt: true, capturedAt: true } },
@@ -182,7 +185,7 @@ export function toInboxOrder(r: Row, now: Date): InboxOrder {
     paidAt: horaDelPago(r.order, r.createdAt),
     cliente: clientaDeLaCuenta(r.order),
     ...beneficiosDeLaCuenta(r.order),
-    needsPrint: onlineOrderNeedsPrint({ status: r.status, printedAt: r.printedAt, printClaimedAt: r.printClaimedAt }, now),
+    needsPrint: onlineOrderNeedsPrint(r, now),
     items: r.order.items.map(i => ({
       productId: i.productId ?? null,
       categoryId: i.product?.categoryId ?? null,

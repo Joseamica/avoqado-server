@@ -21441,8 +21441,11 @@ model OnlineOrderingSettings {
   /// apagado de fábrica: pasar de «Mi equipo» a «Nadie» nunca hereda `acceptsCardOnline`.
   cardOnlineNadie     Boolean   @default(false)
   /// D661: último sondeo de una caja actualizada capaz de avisar los pedidos pagados en línea (cabecera
-  /// `x-online-orders-card-alert: 1`). En «Nadie» la tarjeta sólo se ofrece si es de los últimos 15 min.
+  /// `x-online-orders-card-alert: 1` y permiso `orders:update`), rápido o lento. Sólo decide si se puede PRENDER `cardOnlineNadie` (7 días).
   lastCardAlertPollAt DateTime?
+  /// D661 (Ruling 7): última vez que esa caja capaz recibió una respuesta de to-pay RÁPIDA (`pollSeconds` <= 30). En «Nadie» la tarjeta
+  /// sólo se ofrece si es de los últimos 90 s: una caja en espera larga (600 s) no cuenta como capaz de avisar a tiempo.
+  cardAlertFastPollAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
