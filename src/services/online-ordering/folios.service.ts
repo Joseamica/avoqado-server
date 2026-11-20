@@ -501,8 +501,8 @@ export interface TarjetaPorAbrir {
   orderId: string
   orderNumber: string
   customerName: string
-  /** El total en centavos (el nombre lo fija el plan; el resto de la respuesta va en pesos). */
-  totalCents: number
+  /** Ruling 13: el total en PESOS, con el mismo tipo y formato que los montos de los folios de la misma respuesta. */
+  total: number
   createdAt: string
   /** `true` = una caja ya lo está cobrando (cargo `CAPTURING`): espera, no lo abras otra vez. */
   cobrando: boolean
@@ -634,7 +634,7 @@ export async function listFolios(p: { venueId: string; section?: FolioSection; c
         orderId: r.orderId,
         orderNumber: r.order.orderNumber,
         customerName: r.order.customerName ?? '',
-        totalCents: new Prisma.Decimal(r.order.total).mul(100).toNumber(),
+        total: Number(new Prisma.Decimal(r.order.total).toFixed(2)),
         createdAt: r.createdAt.toISOString(),
         cobrando: r.charge?.status === OnlineOrderChargeStatus.CAPTURING,
       }),

@@ -376,12 +376,13 @@ describe('D661 (3B): lo que lee la caja — tarjetasPorAbrir, comandasPorImprimi
   it('tarjetasPorAbrir: los apartados de «Nadie» con el cargo AUTHORIZED o CAPTURING, con su forma, del más viejo al más nuevo y con tope 50; cobrando = CAPTURING', async () => {
     TARJETAS = [apartado(1, 'AUTHORIZED'), apartado(2, 'CAPTURING', { customerName: null, total: '99.90' })]
     const r = await listFolios({ venueId: 'v1', now: NOW })
+    // Ruling 13: el total en PESOS, como el resto de la respuesta (con centavos: 250.50, nunca 25050); sin `totalCents`.
     expect(r.tarjetasPorAbrir).toEqual([
       {
         orderId: 'ord1',
         orderNumber: 'T-1',
         customerName: 'Ana N.',
-        totalCents: 25_050,
+        total: 250.5,
         createdAt: TARJETAS[0].createdAt.toISOString(),
         cobrando: false,
       },
@@ -389,11 +390,16 @@ describe('D661 (3B): lo que lee la caja — tarjetasPorAbrir, comandasPorImprimi
         orderId: 'ord2',
         orderNumber: 'T-2',
         customerName: '',
-        totalCents: 9_990,
+        total: 99.9,
         createdAt: TARJETAS[1].createdAt.toISOString(),
         cobrando: true,
       },
     ])
+    for (const t of r.tarjetasPorAbrir) expect(t).not.toHaveProperty('totalCents')
+    // Mismo tipo y formato que los montos de los folios de esta MISMA respuesta (número en pesos, dos decimales).
+    POR_PAGAR = [row(9, { remaining: '250.50' })]
+    const misma = await listFolios({ venueId: 'v1', now: NOW })
+    expect(misma.tarjetasPorAbrir[0].total).toBe(misma.toPay[0].remaining)
     const q = consulta(esTarjetas)
     expect(q.where).toEqual({
       venueId: 'v1',

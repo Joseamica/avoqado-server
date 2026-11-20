@@ -3,6 +3,7 @@ import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.mid
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { validateRequest } from '@/middlewares/validation'
 import * as ctrl from '@/controllers/mobile/onlineOrders.mobile.controller'
+import { getOnlineOrderHandler } from '@/controllers/dashboard/onlineOrdering.dashboard.controller'
 import {
   acceptSchema,
   deliveryCashSchema,
@@ -29,6 +30,15 @@ router.get(
   validateRequest(deliveryCashSchema),
   checkPermission('orders:read'),
   ctrl.deliveryCash,
+)
+// D661 (Ruling 14): UN pedido por su cuenta, con el lector y el manejador del panel (sin plan, sin latir): la caja imprime la comanda de
+// `comandasPorImprimir` aunque el cierre del día ya lo haya sacado de «Por entregar». DESPUÉS de todo GET literal: «to-pay» no es un id.
+router.get(
+  '/:orderId',
+  authenticateTokenMiddleware,
+  validateRequest(orderActionSchema),
+  checkPermission('orders:read'),
+  getOnlineOrderHandler,
 )
 // R12 (founder, 16-oct): pausar desde el piso tiene su propio permiso, de gerente para arriba. En el POS, la cajera lo logra con
 // el PIN del gerente (`x-permission-override`, que `checkPermission` ya resuelve). Sólo admite 15, 30 o 60 minutos (o null).

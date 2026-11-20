@@ -8,6 +8,8 @@
  * Stripe es un doble siempre (nunca el de verdad).
  */
 import { randomUUID } from 'node:crypto'
+import express from 'express'
+import request from 'supertest'
 import { Prisma } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
@@ -20,6 +22,8 @@ import { claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/onl
 import { __resetCardAlertPollDebounceForTests } from '@/services/online-ordering/cardAlertPresence'
 import { __resetPresenceDebounceForTests } from '@/services/online-ordering/presence.service'
 import * as ctrl from '@/controllers/mobile/onlineOrders.mobile.controller'
+import mobileRouter from '@/routes/mobile/onlineOrders.mobile.routes'
+import tpvRouter from '@/routes/tpv/onlineOrders.tpv.routes'
 import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { listInbox } from '@/services/online-ordering/inbox.service'
 import { closesAt } from '@/services/online-ordering/hours'
@@ -42,6 +46,14 @@ if (
   throw new Error('Esta suite sólo corre contra una base desechable (avoqado_<tarea>_test_<fecha> o av-db-25-<fase>) en localhost.')
 }
 
+// Ruling 14: la sesión de la caja (el JWT) la dan las cabeceras de la prueba; el permiso y la sucursal se resuelven de verdad en la base.
+jest.mock('@/middlewares/authenticateToken.middleware', () => ({
+  __esModule: true,
+  authenticateTokenMiddleware: (req: any, _res: any, next: any) => {
+    req.authContext = { userId: req.headers['x-test-staff'], venueId: req.headers['x-test-venue'], role: 'CASHIER' }
+    next()
+  },
+}))
 jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
   socketManager: { broadcastToVenue: jest.fn(), getBroadcastingService: jest.fn(() => null) },
@@ -204,6 +216,17 @@ describe('D661 · 3A y 3B: confirmar → apartado; abrir = cobrar; vencer y libe
     return a
   }
   const comandas = async () => (await listFolios({ venueId: venueId! })).comandasPorImprimir.map(c => c.orderId)
+  /** Ruling 14: las rutas REALES de la caja (POS y TPV), con la sesión de la cajera de la sucursal. */
+  const cajas = express()
+  cajas.use(express.json())
+  cajas.use('/m/venues/:venueId/online-orders', mobileRouter)
+  cajas.use('/t/venues/:venueId/online-orders', tpvRouter)
+  cajas.use((err: any, _req: any, res: any, _next: any) => res.status(err.statusCode ?? 500).json({ code: err.code, error: err.message }))
+  const leerPedido = (namespace: 'm' | 't', orderId: string) =>
+    request(cajas)
+      .get(`/${namespace}/venues/${venueId}/online-orders/${orderId}`)
+      .set('x-test-staff', staffId!)
+      .set('x-test-venue', venueId!)
   /**
    * Fix 1: la cuenta se paga por otro camino. Es lo que deja la TPV al REGISTRAR dinero ya movido (`recordOrderPayment`, el único escritor
    * de caja que no se rechaza: su guarda va al empezar el cobro, `order.tpv.service.ts` → 409); se escribe directo: ese camino se prueba
@@ -378,10 +401,11 @@ describe('D661 · 3A y 3B: confirmar → apartado; abrir = cobrar; vencer y libe
       orderId: oo.orderId,
       orderNumber: (await cuenta(oo.orderId)).orderNumber,
       customerName: (await cuenta(oo.orderId)).customerName ?? '',
-      totalCents: 25_000,
+      total: 250, // Ruling 13: en pesos, como los folios
       createdAt: oo.createdAt.toISOString(),
       cobrando: false,
     })
+    for (const t of caja.tarjetasPorAbrir) expect(t).not.toHaveProperty('totalCents')
     expect(caja.toPay.map(f => f.orderId)).not.toContain(oo.orderId)
     expect(caja.counts.toPay).toBe(0) // la prueba anterior quedó vencida (beforeEach): no hay folios por cobrar
     expect(caja.pollSeconds).toBe(30)
@@ -931,6 +955,14 @@ describe('D661 · 3A y 3B: confirmar → apartado; abrir = cobrar; vencer y libe
     const caja = await listFolios({ venueId: venueId! })
     expect(caja.toDeliver.map(f => f.orderId)).not.toContain(a.orderId)
     expect(caja.comandasPorImprimir).toContainEqual({ orderId: a.orderId, orderNumber: (await cuenta(a.orderId)).orderNumber })
+
+    // Ruling 14: la caja lee ESE pedido por su propio camino (POS y TPV) y trae sus renglones para imprimir.
+    for (const namespace of ['m', 't'] as const) {
+      const leido = await leerPedido(namespace, a.orderId)
+      expect({ namespace, status: leido.status }).toEqual({ namespace, status: 200 })
+      expect(leido.body.data).toMatchObject({ orderId: a.orderId, status: 'COMPLETED', needsPrint: true })
+      expect(leido.body.data.items).toEqual([expect.objectContaining({ productId, name: 'Orden grande', quantity: 1 })])
+    }
 
     // Una caja la reclama: mientras su reclamo está vigente nadie más la ve; al confirmar el papel, ya no vuelve.
     await expect(claimOnlineOrderPrint(venueId!, a.orderId, 'caja-1')).resolves.toEqual({ claimed: true })

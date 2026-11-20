@@ -160,14 +160,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       if (status === 'to_pay' || status === 'to_deliver') {
         try {
           const folios = await listFolios({ venueId, section: status === 'to_pay' ? 'toPay' : 'toDeliver', ...(cursor ? { cursor } : {}) })
-          return text({
-            ok: true,
-            ...folios,
-            toPay: folios.toPay.map(conCuenta),
-            toDeliver: folios.toDeliver.map(conCuenta),
-            // D661: el MCP habla en pesos (la caja recibe centavos, como lo fija el plan).
-            tarjetasPorAbrir: folios.tarjetasPorAbrir.map(({ totalCents, ...t }) => ({ ...t, total: totalCents / 100 })),
-          })
+          return text({ ok: true, ...folios, toPay: folios.toPay.map(conCuenta), toDeliver: folios.toDeliver.map(conCuenta) })
         } catch (e) {
           if (e instanceof AppError && e.code === 'INVALID_CURSOR') return text({ ok: false, code: 'INVALID_CURSOR', error: e.message })
           throw e

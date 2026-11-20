@@ -197,6 +197,7 @@ describe('online_orders_list', () => {
   })
 
   it('D661 (3B): to_pay dice los pedidos con tarjeta de «No, entran solos» que esperan que una caja los abra, con su total en PESOS (nunca centavos)', async () => {
+    // Ruling 13: el servicio ya da el total en pesos; el MCP lo pasa tal cual.
     mockListFolios.mockResolvedValue({
       counts: { toPay: 0, toDeliver: 0 },
       toPay: [],
@@ -206,7 +207,7 @@ describe('online_orders_list', () => {
           orderId: 'ord9',
           orderNumber: 'T-9',
           customerName: 'Ana N.',
-          totalCents: 25_050,
+          total: 250.5,
           createdAt: '2026-11-20T18:00:00.000Z',
           cobrando: false,
         },
