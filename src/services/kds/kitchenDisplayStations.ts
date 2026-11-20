@@ -10,6 +10,7 @@ import type { ScreenStation } from './kitchenTicketPlanning'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { ForbiddenError } from '../../errors/AppError'
 import { esSinComanda } from '../printing/printConfig.service'
+import { pantallasConectadas } from './pantallasVivas'
 
 type Db = Prisma.TransactionClient | typeof prisma
 
@@ -42,16 +43,43 @@ export async function venueTienePantallaDeCocina(venueId: string, db: Db = prism
   return estacion != null
 }
 
+export interface PantallasDesconectadas {
+  /** `false` = el negocio no tiene ninguna pantalla de cocina efectiva (casilla Y plan): la caja pregunta más despacio. */
+  hayPantallas: boolean
+  /** `false` justo después de arrancar el servidor: todavía no se puede dar a ninguna por desconectada. */
+  completo: boolean
+  /** Estaciones activas con pantalla cuya pantalla no ha pedido su tablero en la ventana. Vacío si `completo` es `false`. */
+  desconectadas: Array<{ id: string; name: string }>
+}
+
 /**
- * D6 de Flautas (opción B, Codex r5 #6): ¿[stationId] es una estación ACTIVA con pantalla de ESTE negocio? Sólo la lectura
- * del tablero de una así marca viva a su pantalla: un id ajeno, inexistente o sin pantalla no cuenta.
+ * D6 de Flautas (20-nov, opción B simplificada tras Codex r7): qué pantallas de cocina NO están conectadas a internet, decidido
+ * SÓLO aquí. Las estaciones salen de la base (siempre al día, no de la copia de la caja) con la misma regla de «pantalla
+ * efectiva» que `buildPrintConfig` (activa, con la casilla, con comanda y con el plan); las vivas, de `pantallasVivas` (la
+ * última lectura de su tablero). La caja sólo enseña los nombres. Sólo lee; un negocio real tiene 1-5 estaciones.
  */
-export async function esEstacionConPantalla(venueId: string, stationId: string, db: Db = prisma): Promise<boolean> {
-  const estacion = await db.printStation.findFirst({
-    where: { id: stationId, venueId, active: true, hasKitchenDisplay: true },
-    select: { id: true },
+export async function pantallasDesconectadas(
+  venueId: string,
+  reloj: { ahora?: number; arranque?: number } = {},
+  db: Db = prisma,
+): Promise<PantallasDesconectadas> {
+  const filas = await db.printStation.findMany({
+    where: { venueId, active: true, hasKitchenDisplay: true },
+    select: { id: true, name: true, sendsComanda: true },
+    orderBy: [{ displayOrder: 'asc' }, { name: 'asc' }],
+    take: 100,
   })
-  return estacion != null
+  const conPantalla = filas.filter(f => !esSinComanda(f))
+  if (conPantalla.length === 0 || !(await venueHasFeatureAccess(venueId, 'KITCHEN_DISPLAY'))) {
+    return { hayPantallas: false, completo: true, desconectadas: [] }
+  }
+  const { conectadas, completo } = pantallasConectadas(venueId, reloj.ahora, reloj.arranque)
+  const vivas = new Set(conectadas)
+  return {
+    hayPantallas: true,
+    completo,
+    desconectadas: completo ? conPantalla.filter(f => !vivas.has(f.id)).map(f => ({ id: f.id, name: f.name })) : [],
+  }
 }
 
 export interface EstacionesDelNegocio {

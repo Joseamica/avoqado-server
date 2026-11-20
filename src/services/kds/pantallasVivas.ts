@@ -1,12 +1,11 @@
 /**
- * D6 de Flautas (20-nov, opción B del founder: «como Square y Toast»): qué pantallas de cocina están CONECTADAS. Una
- * pantalla pide su tablero (`GET kds/orders?stationId=…`) cada 10 s mientras se ve (`KDSViewModel.mientrasSeVe`); aquí vive
- * la última vez que lo pidió cada estación. La caja lo pregunta para decir con una franja FIJA «La pantalla de cocina de X no
- * está conectada», en vez de avisar «No salió» orden por orden cuando la venta ya está en el servidor.
+ * D6 de Flautas (20-nov, opción B del founder: «como Square y Toast»): la última vez que la pantalla de cocina de cada
+ * estación pidió su tablero (`GET kds/orders?stationId=…`, cada 10 s mientras se ve: `KDSViewModel.mientrasSeVe`). Con eso
+ * `pantallasDesconectadas` (kitchenDisplayStations.ts) le dice a la caja qué pantallas no están conectadas a internet, y la
+ * caja lo enseña en una franja fija en vez de avisar «No salió» orden por orden cuando la venta ya está en el servidor.
  *
  * ponytail: en memoria y por proceso. Sirve con UNA instancia del servidor (hoy, sin Redis). Con varias, cada una vería sólo
- * las lecturas que le tocaron: entonces una fila con fecha en `PrintStation`. Un reinicio la vacía: una pantalla viva sale
- * como no conectada hasta su siguiente lectura (≤ 10 s).
+ * las lecturas que le tocaron: entonces una fila con fecha en `PrintStation`. Un reinicio la vacía: por eso `completo`.
  */
 
 /**

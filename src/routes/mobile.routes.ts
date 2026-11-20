@@ -4147,15 +4147,15 @@ router.get(
 )
 
 /**
- * GET /api/v1/mobile/venues/:venueId/kds/pantallas-conectadas
- * D6 de Flautas (opción B): qué pantallas de cocina pidieron su tablero hace ≤ 45 s. Sólo lee.
+ * GET /api/v1/mobile/venues/:venueId/kds/pantallas-desconectadas
+ * D6 de Flautas (opción B): qué pantallas de cocina del negocio no han pedido su tablero en 90 s. Sólo lee.
  */
 router.get(
-  '/venues/:venueId/kds/pantallas-conectadas',
+  '/venues/:venueId/kds/pantallas-desconectadas',
   authenticateTokenMiddleware,
   requireVenueMembership,
   checkPermission('orders:read'),
-  kdsMobileController.listarPantallasConectadas,
+  kdsMobileController.listarPantallasDesconectadas,
 )
 
 /**
