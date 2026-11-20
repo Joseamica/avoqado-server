@@ -38,6 +38,7 @@ import { getCampaign, listCampaigns } from '@/services/crm/email/campaigns.servi
 import { listTemplates } from '@/services/crm/email/templates.service'
 import { getReports } from '@/services/crm/reports.service'
 import { listClients } from '@/services/crm/clients.service'
+import { getThread, listChats } from '@/services/crm/whatsapp.service'
 
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
 jest.mock('@/services/crm/access.service', () => ({
@@ -70,6 +71,12 @@ jest.mock('@/services/crm/erase.service', () => ({ ...jest.requireActual('@/serv
 jest.mock('@/services/crm/reports.service', () => ({ getReports: jest.fn() }))
 // «Clientes» is tested on its own; here the tool only asks it and words the answer.
 jest.mock('@/services/crm/clients.service', () => ({ listClients: jest.fn() }))
+// The sales WhatsApp is read against a real Postgres (whatsapp-leer.integration.test.ts); here only the tools.
+jest.mock('@/services/crm/whatsapp.service', () => ({
+  ...jest.requireActual('@/services/crm/whatsapp.service'),
+  listChats: jest.fn(),
+  getThread: jest.fn(),
+}))
 // The email phase: the tools only read through these two, which are tested on their own.
 jest.mock('@/services/crm/email/templates.service', () => ({
   ...jest.requireActual('@/services/crm/email/templates.service'),
@@ -97,6 +104,8 @@ const CRM_TOOLS = [
   'crm_list_clients',
   'crm_list_email_templates',
   'crm_campaign_status',
+  'crm_whatsapp_chats',
+  'crm_whatsapp_thread',
 ]
 const EFFECTS: Record<string, 'read' | 'write'> = {
   crm_find_account: 'read',
@@ -112,6 +121,8 @@ const EFFECTS: Record<string, 'read' | 'write'> = {
   crm_list_clients: 'read',
   crm_list_email_templates: 'read',
   crm_campaign_status: 'read',
+  crm_whatsapp_chats: 'read',
+  crm_whatsapp_thread: 'read',
 }
 const WRITES = CRM_TOOLS.filter(name => EFFECTS[name] === 'write')
 
@@ -160,6 +171,8 @@ const ARGS: Record<string, Record<string, unknown>> = {
   crm_list_clients: {},
   crm_list_email_templates: {},
   crm_campaign_status: {},
+  crm_whatsapp_chats: {},
+  crm_whatsapp_thread: { phone: '+525512345678' },
 }
 
 /** What the services answer for an account. */
@@ -440,6 +453,8 @@ describe('CRM MCP — access', () => {
       listTemplates,
       listCampaigns,
       getCampaign,
+      listChats,
+      getThread,
     ])
       expect(service).not.toHaveBeenCalled()
     expect(auditMcpWrite).not.toHaveBeenCalled()
@@ -1638,4 +1653,85 @@ describe('crm_update_account y crm_set_contact (C2, Tarea 6)', () => {
       await c.close()
     }
   })
+})
+
+describe('CRM MCP — WhatsApp de ventas (sólo lectura, sólo el superadmin)', () => {
+  const real = jest.requireActual('@/services/crm/whatsapp.service') as typeof import('@/services/crm/whatsapp.service')
+
+  beforeEach(() => {
+    // The real «sólo el superadmin» runs first, as in the service.
+    ;(listChats as jest.Mock).mockImplementation(async (access: CrmAccess) => {
+      real.soloElFounder(access)
+      return {
+        total: 1,
+        nextCursor: 'sig',
+        rows: [
+          {
+            telefono: '+525512345678',
+            nombre: 'Ana',
+            mensajes: 3,
+            ultimo: { at: new Date('2026-11-20T18:00:00.000Z'), texto: null, tipo: 'image', direccion: 'ENTRA', origen: 'MENSAJE' },
+            negocio: null,
+            otrosNegocios: 0,
+          },
+        ],
+      }
+    })
+    ;(getThread as jest.Mock).mockImplementation(async (access: CrmAccess) => {
+      real.soloElFounder(access)
+      return {
+        total: 2,
+        nextCursor: null,
+        rows: [
+          { id: 'm1', contactPhone: '+525512345678', contactName: 'Ana', direction: 'ENTRA', origin: 'MENSAJE', type: 'text', body: 'Hola', sentAt: new Date('2026-11-20T18:00:00.000Z') },
+          { id: 'm2', contactPhone: '+525512345678', contactName: null, direction: 'SALE', origin: 'ECO', type: 'text', body: 'Qué tal', sentAt: new Date('2026-11-20T18:01:00.000Z') },
+        ],
+      }
+    })
+  })
+
+  it('con sólo mcp:read lee la lista: pasa los filtros y dice el total, la hora de México y el tipo de lo que no es texto', async () => {
+    const { call } = setup({ scopes: ['mcp:read'] })
+    const answer = await call('crm_whatsapp_chats', { sinProspecto: true, q: 'Ana', limit: 10 })
+
+    expect(listChats).toHaveBeenCalledWith(ADMIN, { sinProspecto: true, q: 'Ana', cursor: undefined, limit: 10 })
+    expect(answer).toMatchObject({
+      ok: true,
+      total: 1,
+      hayMas: true,
+      siguiente: 'sig',
+      chats: [{ telefono: '+525512345678', ultimo: { cuando: '2026-11-20 12:00', quien: 'ENTRA', texto: '(image)' }, otrosNegocios: 0 }],
+    })
+  })
+
+  it('el hilo, del más viejo al más nuevo, con quién y de dónde', async () => {
+    const answer = await call2('crm_whatsapp_thread', { accountId: ACC })
+
+    expect(getThread).toHaveBeenCalledWith(ADMIN, { phone: undefined, accountId: ACC, cursor: undefined, limit: undefined })
+    expect(answer.mensajes).toEqual([
+      { cuando: '2026-11-20 12:00', telefono: '+525512345678', quien: 'ENTRA', origen: 'MENSAJE', tipo: 'text', texto: 'Hola' },
+      { cuando: '2026-11-20 12:01', telefono: '+525512345678', quien: 'SALE', origen: 'ECO', tipo: 'text', texto: 'Qué tal' },
+    ])
+    expect(answer.hayMasViejos).toBe(false)
+  })
+
+  it('alguien con todas las llaves del CRM que no es el superadmin real: ok:false, sin chats', async () => {
+    ;(getCrmAccess as jest.Mock).mockResolvedValue({ ...ADMIN, isSuperadmin: false })
+    const { call } = setup()
+
+    for (const name of ['crm_whatsapp_chats', 'crm_whatsapp_thread']) {
+      const answer = await call(name)
+      expect({ name, ok: answer.ok, code: answer.code, chats: answer.chats, mensajes: answer.mensajes }).toEqual({
+        name,
+        ok: false,
+        code: 'CRM_FORBIDDEN',
+        chats: undefined,
+        mensajes: undefined,
+      })
+    }
+  })
+
+  async function call2(name: string, args: Record<string, unknown>) {
+    return setup().call(name, args)
+  }
 })
