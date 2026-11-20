@@ -3,7 +3,8 @@
  * «Gaveta» (el efectivo que está en el cajón, según `tenderSemantics`) y «Efectivo · máquina» (lo que cobró la QuickPay). La
  * propina va en su columna y los vales siguen bajo su método. La cabecera de Efectivo es la suma exacta de sus hijos.
  *
- * Se prueba la RESPUESTA real de `getShiftById`, con la consulta que hace y las filas que devuelve Prisma.
+ * Se prueba la RESPUESTA real de `getShiftById`, con la consulta que hace y las filas que devuelve Prisma. Codex r2 #12: los hijos se
+ * suman en Postgres por destino (`aggregate` + `groupBy`), nunca recorriendo los pagos cargados del turno.
  *
  * 🔴 Decisión: los hijos de Efectivo sólo aparecen si el turno tiene al menos una venta de la máquina. Un turno sin máquina
  * responde exactamente lo de hoy (sin un «Gaveta» solitario que cambiaría la vista de todos los turnos viejos).
@@ -72,6 +73,19 @@ const turno = (payments: unknown[]) => ({
   orders: [],
 })
 
+/** Lo que suma Postgres: la máquina (`aggregate`) y el resto del efectivo por cómo entró (`groupBy`). */
+const sumaDeLaMaquina = (amount: number, count: number) => ({ _sum: { amount, tipAmount: 0 }, _count: { _all: count } })
+const grupo = (over: Record<string, unknown>, amount: number, tipAmount: number, count: number) => ({
+  fundsFlow: 'CASH_DRAWER',
+  tenderTypeId: null,
+  tenderCountsAsCash: null,
+  tenderLabel: null,
+  externalSource: null,
+  ...over,
+  _sum: { amount, tipAmount },
+  _count: { _all: count },
+})
+
 const renglon = (detalle: any, method: string) => detalle.paymentMethodBreakdown.find((r: { method: string }) => r.method === method)
 
 describe('detalle del turno · Efectivo = Gaveta + Efectivo · máquina (R5 #11)', () => {
@@ -82,6 +96,8 @@ describe('detalle del turno · Efectivo = Gaveta + Efectivo · máquina (R5 #11)
 
   it('🔴 $100 en gaveta + $10 de propina + $150 en la máquina + un vale ⇒ Efectivo $250 = Gaveta $100 + máquina $150', async () => {
     prismaMock.shift.findFirst.mockResolvedValue(turno([enLaGaveta, enLaMaquina, unVale]) as any)
+    prismaMock.payment.aggregate.mockResolvedValue(sumaDeLaMaquina(150, 1) as any)
+    prismaMock.payment.groupBy.mockResolvedValue([grupo({}, 100, 10, 1)] as any)
 
     const detalle = await getShiftById('venue-1', 'shift-1')
 
@@ -96,14 +112,37 @@ describe('detalle del turno · Efectivo = Gaveta + Efectivo · máquina (R5 #11)
     // El vale sigue bajo su método, no bajo Efectivo.
     expect(renglon(detalle, 'OTHER')).toMatchObject({ total: 80, children: [{ label: 'Vale de despensa', total: 80, tips: 0, count: 1 }] })
 
-    // La consulta pide lo que la partición necesita (la autoridad del cajón y el folio de la máquina).
+    // Codex r2 #12: la partición la suma Postgres, con el MISMO filtro que la carga del turno (sólo CASH completados del turno).
+    const filtro = { venueId: 'venue-1', shiftId: 'shift-1', status: 'COMPLETED', method: 'CASH' }
+    expect(prismaMock.payment.aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { ...filtro, cashMachineRef: { not: null } }, _sum: { amount: true, tipAmount: true } }),
+    )
+    expect(prismaMock.payment.groupBy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        by: expect.arrayContaining(['fundsFlow', 'tenderTypeId', 'tenderCountsAsCash']),
+        where: { ...filtro, cashMachineRef: null },
+      }),
+    )
+  })
+
+  it('🔴 Codex r2 #12: los hijos NO salen de recorrer los pagos cargados (la carga ni siquiera pide el folio)', async () => {
+    // Aunque la fila cargada traiga folio, sin ventas de la máquina en Postgres no hay hijos: el desglose no se calcula en memoria.
+    prismaMock.shift.findFirst.mockResolvedValue(turno([enLaGaveta, { ...enLaMaquina, tenderLabel: null }]) as any)
+    prismaMock.payment.aggregate.mockResolvedValue(sumaDeLaMaquina(0, 0) as any)
+    prismaMock.payment.groupBy.mockResolvedValue([grupo({}, 100, 10, 1)] as any)
+
+    const detalle = await getShiftById('venue-1', 'shift-1')
+
+    expect('children' in renglon(detalle, 'CASH')).toBe(false)
     const pedidas = (prismaMock.shift.findFirst.mock.calls[0][0] as any).include.payments.select
-    expect(pedidas).toMatchObject({ method: true, fundsFlow: true, tenderTypeId: true, tenderCountsAsCash: true, cashMachineRef: true })
+    expect(pedidas.cashMachineRef).toBeUndefined()
   })
 
   it('la devolución de una venta de la máquina sale de la GAVETA (CASH_DRAWER, sin folio) y la baja', async () => {
     const devolucion = cobro('devolucion', { amount: -150, type: 'REFUND' })
     prismaMock.shift.findFirst.mockResolvedValue(turno([enLaGaveta, enLaMaquina, devolucion]) as any)
+    prismaMock.payment.aggregate.mockResolvedValue(sumaDeLaMaquina(150, 1) as any)
+    prismaMock.payment.groupBy.mockResolvedValue([grupo({}, -50, 10, 2)] as any)
 
     const detalle = await getShiftById('venue-1', 'shift-1')
 
@@ -117,6 +156,8 @@ describe('detalle del turno · Efectivo = Gaveta + Efectivo · máquina (R5 #11)
 
   it('control — un turno SIN ventas de la máquina responde como hoy: Efectivo sin hijos', async () => {
     prismaMock.shift.findFirst.mockResolvedValue(turno([enLaGaveta, unVale]) as any)
+    prismaMock.payment.aggregate.mockResolvedValue(sumaDeLaMaquina(0, 0) as any)
+    prismaMock.payment.groupBy.mockResolvedValue([grupo({}, 100, 10, 1)] as any)
 
     const detalle = await getShiftById('venue-1', 'shift-1')
 

@@ -13,7 +13,7 @@ import { ORDEN_DE_TARJETAS_SELECT } from '../giftCards/giftCardMarks'
 import { tieneRenglonDeTarjeta } from '../giftCards/cuentaDeTarjetas'
 import { ventasDelTurnoSinTarjetas, ventasSinTarjetasPorTurno } from '../shared/ventasDelTurno'
 import { efectivoFisicoDeCobros } from '../shared/efectivoFisico'
-import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '../shared/tenderSemantics'
+import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 
 interface ShiftFilters {
   staffId?: string
@@ -412,14 +412,11 @@ export async function getShiftById(
           id: true,
           amount: true,
           tipAmount: true,
-          // `method` viene en `TENDER_SEMANTICS_SELECT` (abajo).
+          method: true,
           // Etiqueta del tipo de pago para el desglose "expande Otros".
           // `externalSource` es el fallback de lo histórico (antes del catálogo).
           tenderLabel: true,
           externalSource: true,
-          // Máquina de efectivo (R5 #11): Efectivo se parte en «Gaveta» (la autoridad del cajón) y «Efectivo · máquina» (su folio).
-          ...TENDER_SEMANTICS_SELECT,
-          cashMachineRef: true,
           cardBrand: true,
           maskedPan: true,
           processorData: true,
@@ -503,7 +500,7 @@ export async function getShiftById(
     cardBrandBreakdown,
     totalSales: calculatedTotalSales,
     totalTips: calculatedTotalTips,
-  } = buildPaymentBreakdown(shift.payments as any)
+  } = buildPaymentBreakdown(shift.payments as any, await efectivoPorLugarDelTurno(venueId, shift.id))
 
   // R3 (full-testing v2 #2): la cuenta de tarjetas de regalo no es una orden de VENTA del turno: no entra a las órdenes por
   // empleado, a la lista, a los productos vendidos, al conteo ni al ticket promedio. Su dinero sí (cobros, efectivo y caja).
@@ -1157,6 +1154,51 @@ async function ventasDeTurnosSinCerrar(venueId: string, shifts: Array<{ id: stri
  * Además, las marcas se recogen SÓLO de pagos con tarjeta: antes cualquier pago que no fuera
  * efectivo entraba al mapa de marcas, así que una transferencia inventaba una marca "OTHER".
  */
+type TotalesDelLugar = { total: number; tips: number; count: number }
+
+/**
+ * 🔴 Máquina de efectivo (R5 #11, Codex r2 #12): las VENTAS en efectivo del turno por DÓNDE quedó el billete —«Gaveta» (la autoridad del
+ * cajón, `tenderSemantics`) y «Efectivo · máquina» (su folio)— con sus propinas, SUMADAS EN POSTGRES por destino: dos consultas
+ * agrupadas de pocas filas, nunca recorrer los pagos cargados. `null` = el turno no tuvo ventas de la máquina y Efectivo responde como
+ * hoy. Lo CASH que no es de ninguna de las dos conserva su etiqueta: los hijos siempre suman la cabecera (mismo filtro que la carga).
+ */
+export async function efectivoPorLugarDelTurno(venueId: string, shiftId: string): Promise<Map<string, TotalesDelLugar> | null> {
+  const where = { venueId, shiftId, status: 'COMPLETED' as const, method: 'CASH' as const }
+  const [maquina, resto] = await Promise.all([
+    prisma.payment.aggregate({
+      where: { ...where, cashMachineRef: { not: null } },
+      _sum: { amount: true, tipAmount: true },
+      _count: { _all: true },
+    }),
+    prisma.payment.groupBy({
+      by: ['fundsFlow', 'tenderTypeId', 'tenderCountsAsCash', 'tenderLabel', 'externalSource'],
+      where: { ...where, cashMachineRef: null },
+      _sum: { amount: true, tipAmount: true },
+      _count: { _all: true },
+    }),
+  ])
+  if (!maquina?._count?._all) return null
+  const lugares = new Map<string, TotalesDelLugar>()
+  const sumar = (lugar: string, total: unknown, tips: unknown, count: number) => {
+    const e = lugares.get(lugar) ?? { total: 0, tips: 0, count: 0 }
+    e.total += Number(total ?? 0)
+    e.tips += Number(tips ?? 0)
+    e.count += count
+    lugares.set(lugar, e)
+  }
+  sumar('Efectivo · máquina', maquina._sum.amount, maquina._sum.tipAmount, maquina._count._all)
+  for (const g of resto) {
+    const enElCajon = paymentCountsAsDrawerCash({
+      method: 'CASH',
+      fundsFlow: g.fundsFlow,
+      tenderTypeId: g.tenderTypeId,
+      tenderCountsAsCash: g.tenderCountsAsCash,
+    })
+    sumar(enElCajon ? 'Gaveta' : g.tenderLabel || g.externalSource || 'Efectivo', g._sum.amount, g._sum.tipAmount, g._count._all)
+  }
+  return lugares
+}
+
 export function buildPaymentBreakdown(
   payments: Array<{
     amount: unknown
@@ -1168,12 +1210,9 @@ export function buildPaymentBreakdown(
     externalSource?: string | null
     /** R3: la marca de cuenta de tarjetas (`ORDEN_DE_TARJETAS_SELECT`). Sin `order`, el cobro cuenta como venta, como siempre. */
     order?: { items?: ReadonlyArray<unknown> | null } | null
-    /** Máquina de efectivo (R5 #11): el folio de la QuickPay y la semántica del cajón (`TENDER_SEMANTICS_SELECT`). */
-    cashMachineRef?: string | null
-    fundsFlow?: string | null
-    tenderTypeId?: string | null
-    tenderCountsAsCash?: boolean | null
   }>,
+  /** Máquina de efectivo (R5 #11, Codex r2 #12): los hijos de Efectivo ya sumados en Postgres (`efectivoPorLugarDelTurno`). */
+  efectivoPorLugar: Map<string, TotalesDelLugar> | null = null,
 ): {
   paymentMethodBreakdown: PaymentMethodBreakdownRow[]
   cardBrandBreakdown: Array<{ brand: string; total: number; count: number; percentage: number }>
@@ -1185,10 +1224,6 @@ export function buildPaymentBreakdown(
   // al cobrar) y, para lo histórico, del `externalSource` de texto libre.
   const labelMap = new Map<string, Map<string, { total: number; tips: number; count: number }>>()
   const cardBrandMap = new Map<string, { total: number; count: number }>()
-  // Máquina de efectivo (R5 #11): las ventas en efectivo por DÓNDE quedó el billete. Sólo reemplaza a los hijos de Efectivo si el turno
-  // tuvo al menos una venta de la máquina: un turno sin ella responde exactamente lo de hoy.
-  const efectivoPorLugar = new Map<string, { total: number; tips: number; count: number }>()
-  let huboVentaDeLaMaquina = false
   let totalSales = 0
   // Todo el dinero cobrado: el denominador de los % por método (una carga de tarjetas sí entró, aunque no sea venta).
   let totalCobrado = 0
@@ -1229,22 +1264,6 @@ export function buildPaymentBreakdown(
       labelMap.set(method, byLabel)
     }
 
-    if (method === 'CASH') {
-      // La máquina, por su folio; la gaveta, por `tenderSemantics`. Una devolución de la máquina sale de la gaveta (CASH_DRAWER, sin
-      // folio) y la baja. Lo que no es de ninguna conserva su etiqueta: los hijos siempre suman la cabecera.
-      const lugar = payment.cashMachineRef
-        ? 'Efectivo · máquina'
-        : paymentCountsAsDrawerCash(payment)
-          ? 'Gaveta'
-          : (tenderLabel ?? 'Efectivo')
-      const e = efectivoPorLugar.get(lugar) ?? { total: 0, tips: 0, count: 0 }
-      e.total += amount
-      e.tips += tipAmount
-      e.count += 1
-      efectivoPorLugar.set(lugar, e)
-      huboVentaDeLaMaquina ||= !!payment.cashMachineRef
-    }
-
     // Marcas: SÓLO de pagos con tarjeta real.
     if (kind === 'CARD') {
       cardTotal += amount
@@ -1261,7 +1280,8 @@ export function buildPaymentBreakdown(
     }
   }
 
-  if (huboVentaDeLaMaquina) labelMap.set('CASH', efectivoPorLugar)
+  // Máquina de efectivo: con ventas de la máquina, los hijos de Efectivo son los de Postgres (un turno sin ella responde lo de hoy).
+  if (efectivoPorLugar) labelMap.set('CASH', efectivoPorLugar)
 
   const salesDenominator = totalCobrado || 1
   const cardDenominator = cardTotal || 1
