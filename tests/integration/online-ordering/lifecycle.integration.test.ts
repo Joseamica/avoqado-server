@@ -19,13 +19,19 @@ import { listInbox } from '@/services/online-ordering/inbox.service'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import * as avisos from '@/services/online-ordering/notifications.service'
 import { createOnlineOrder, type CreateOnlineOrderOptions } from '@/services/online-ordering/order.service'
-import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/online-ordering/presence.service'
+import {
+  __resetPresenceDebounceForTests,
+  avanzarCortePausaSola,
+  getAcceptingStatus,
+  touchInboxPoll,
+} from '@/services/online-ordering/presence.service'
 import { claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/online-ordering/printClaim.service'
 import * as quoteModule from '@/services/online-ordering/quote.service'
 import { quoteCart } from '@/services/online-ordering/quote.service'
-import { updateSettings } from '@/services/online-ordering/settings.service'
+import { pauseOnlineOrdering, updateSettings } from '@/services/online-ordering/settings.service'
 import {
   acceptOnlineOrder,
+  cancelOnlineOrderByCustomer,
   cancelOnlineOrderByStaff,
   expireOnlineOrder,
   markOnlineOrderDelivered,
@@ -104,10 +110,12 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       o.opts ?? PLAN_Y_NEGOCIO_PASAN,
     )
   }
-  // R23: cada caso que necesita presencia escribe su propio latido.
+  // R23: cada caso que necesita presencia escribe su propio latido. D662 parte 2: y arranca sin la pausa sola de los casos anteriores
+  // (varios vencen pedidos a propósito): el corte sube a ahora, como «Reanudar».
   const beat = async () => {
     __resetPresenceDebounceForTests()
     await touchInboxPoll(venueId!)
+    await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { autoPauseResumedAt: new Date() } })
   }
   const pay = (orderId: string) => payCashOrder(venueId!, orderId, { amount: 20_600, tip: 0, idempotencyKey: `itest-pay-${orderId}` })
   /** Preparación que muerde: si aceptar no deja el pedido ACCEPTED, el caso no arranca desde un estado equivocado. */
@@ -961,6 +969,110 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     })
     expect(await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).toEqual(antes)
     expect(bitacora(onlineOrderId, 'ONLINE_ORDER_COLLECTED')).toHaveLength(1)
+  })
+
+  describe('D662 parte 2 (v3) · la pausa sola contra Postgres (la consulta real, sus nulos y el corte)', () => {
+    /** Mueve la hora límite de un pedido (lo que en la vida pasa a los 10 min). */
+    const venceA = (onlineOrderId: string, at: Date) =>
+      prisma.onlineOrder.update({ where: { id: onlineOrderId }, data: { acceptDeadlineAt: at } })
+    const espera = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+    const estadoTienda = async () => {
+      __resetPresenceDebounceForTests()
+      await touchInboxPoll(venueId!)
+      return getAcceptingStatus(venueId!)
+    }
+
+    afterEach(async () => {
+      // Nunca deja la tienda pausada para el caso siguiente.
+      await pauseOnlineOrdering(venueId!, null, null)
+    })
+
+    it('2 pedidos sin atender ⇒ pausada y no entra otro; apagar y encender no la quita; «Reanudar» sí', async () => {
+      await beat()
+      await espera(5)
+      const a = await newOrder()
+      const b = await newOrder()
+      await venceA(a.onlineOrderId, new Date(Date.now() - 2_000))
+      await venceA(b.onlineOrderId, new Date(Date.now() - 1_000))
+      const b2 = await prisma.onlineOrder.findUniqueOrThrow({ where: { id: b.onlineOrderId } })
+
+      await expect(estadoTienda()).resolves.toMatchObject({
+        status: 'PAUSED',
+        reason: 'MANUAL_PAUSE',
+        autoPausedAt: b2.acceptDeadlineAt.toISOString(),
+      })
+      await expect(newOrder()).rejects.toMatchObject({ code: 'ORDERING_PAUSED' })
+
+      await updateSettings(venueId!, { enabled: false }, null)
+      await updateSettings(venueId!, { enabled: true }, null)
+      await expect(estadoTienda()).resolves.toMatchObject({ status: 'PAUSED', autoPausedAt: b2.acceptDeadlineAt.toISOString() })
+
+      await pauseOnlineOrdering(venueId!, null, null)
+      await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
+    })
+
+    it('una respuesta A TIEMPO de una persona entre las dos horas límite corta la racha; staffAnsweredAt queda escrito una vez', async () => {
+      await beat()
+      await espera(5)
+      const a = await newOrder()
+      const b = await newOrder()
+      const c = await newOrder()
+      await venceA(a.onlineOrderId, new Date(Date.now() - 2_000))
+      await expect(
+        rejectOnlineOrder({ venueId: venueId!, orderId: c.orderId, staffId: staffId ?? null, reason: 'TOO_BUSY', porPersona: true }),
+      ).resolves.toMatchObject({ outcome: 'OK' })
+      const tocado = await prisma.onlineOrder.findUniqueOrThrow({ where: { id: c.onlineOrderId } })
+      expect(tocado.staffAnsweredAt).not.toBeNull()
+      await espera(5)
+      await venceA(b.onlineOrderId, new Date())
+      await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
+
+      // El corte sube a 1 ms antes de esa respuesta (no hay pausa), y la lectura da lo mismo.
+      await avanzarCortePausaSola(venueId!)
+      const fila = await prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })
+      expect(fila.autoPauseResumedAt!.getTime()).toBe(tocado.staffAnsweredAt!.getTime() - 1)
+      await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN' })
+    })
+
+    it('un rechazo TARDE no es respuesta: el pedido ya falló a su hora límite', async () => {
+      await beat()
+      await espera(5)
+      const a = await newOrder()
+      const b = await newOrder()
+      await venceA(a.onlineOrderId, new Date(Date.now() - 3_000))
+      await expect(
+        rejectOnlineOrder({ venueId: venueId!, orderId: a.orderId, staffId: staffId ?? null, reason: 'OTHER', porPersona: true }),
+      ).resolves.toMatchObject({ outcome: 'OK' })
+      await venceA(b.onlineOrderId, new Date(Date.now() - 1_000))
+      await expect(estadoTienda()).resolves.toMatchObject({ status: 'PAUSED' })
+    })
+
+    it('anular la cuenta desde la caja escribe staffAnsweredAt en la misma transacción (sin esperar a la bandeja)', async () => {
+      await beat()
+      const d = await newOrder()
+      await cancelOrder(venueId!, d.orderId, undefined, staffId)
+      const fila = await prisma.onlineOrder.findUniqueOrThrow({ where: { id: d.onlineOrderId } })
+      expect(fila.status).toBe(OnlineOrderStatus.PENDING_ACCEPTANCE) // la bandeja lo sincroniza después
+      expect(fila.staffAnsweredAt).not.toBeNull()
+    })
+
+    it('lo que la clienta canceló antes de su hora límite no cuenta (la consulta lo deja fuera, con sus nulos bien)', async () => {
+      await beat()
+      await espera(5)
+      const a = await newOrder()
+      const e = await newOrder()
+      const b = await newOrder()
+      await expect(cancelOnlineOrderByCustomer({ venueId: venueId!, trackingToken: e.trackingToken })).resolves.toMatchObject({
+        outcome: 'OK',
+      })
+      await venceA(a.onlineOrderId, new Date(Date.now() - 3_000))
+      await venceA(e.onlineOrderId, new Date(Date.now() - 2_000)) // canceló ANTES: su cancelledAt es anterior a esta hora límite
+      await prisma.onlineOrder.update({ where: { id: e.onlineOrderId }, data: { cancelledAt: new Date(Date.now() - 2_500) } })
+      // A sola es una falla; E no cuenta; B todavía no vence.
+      await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN' })
+      await venceA(b.onlineOrderId, new Date(Date.now() - 1_000))
+      await expect(estadoTienda()).resolves.toMatchObject({ status: 'PAUSED' })
+    })
   })
 
   it('A6: dos ajustes simultáneos (encender + quitar pagar al recoger) se serializan: el segundo ve al primero y uno se rechaza', async () => {

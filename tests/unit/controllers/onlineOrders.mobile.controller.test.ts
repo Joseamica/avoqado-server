@@ -45,7 +45,7 @@ import mobileRouter from '@/routes/mobile/onlineOrders.mobile.routes'
 const LISTA = { serverTime: 'x', counts: { pending: 0, active: 0, done: 0 }, orders: [], truncated: false }
 const FOLIOS = { serverTime: 'x', counts: { toPay: 0, toDeliver: 0 }, toPay: [], toDeliver: [] }
 /** 1b: el estado de la tienda en la bandeja trae también las dos pausas (la del piso con su hora, y la del gerente). */
-const TIENDA_ABIERTA = { status: 'OPEN', reason: null, pausedUntil: null, manualPause: false }
+const TIENDA_ABIERTA = { status: 'OPEN', reason: null, pausedUntil: null, manualPause: false, autoPausedAt: null }
 /** La fila de `StaffVenue` que `resolveUserRoleForVenue` lee para el rol en este negocio. */
 const enElNegocio = (role: string) => ({ role, active: true, permissionSetId: null, permissionSet: null })
 
@@ -99,7 +99,10 @@ describe('onlineOrders.mobile.controller', () => {
     await ctrl.inbox(req, res, next)
     expect(res.json).toHaveBeenCalledWith({
       success: true,
-      data: { ...LISTA, store: { status: 'PAUSED', reason: 'MANUAL_PAUSE', pausedUntil: '2026-10-14T19:00:00.000Z', manualPause: true } },
+      data: {
+        ...LISTA,
+        store: { status: 'PAUSED', reason: 'MANUAL_PAUSE', pausedUntil: '2026-10-14T19:00:00.000Z', manualPause: true, autoPausedAt: null },
+      },
     })
   })
 
@@ -170,7 +173,14 @@ describe('onlineOrders.mobile.controller', () => {
     ;(acceptOnlineOrder as jest.Mock).mockResolvedValueOnce({ outcome: 'OK', status: 'ACCEPTED', estimatedReadyAt: 'x' })
     const a = mock({ body: { estimatedMinutes: 20 } })
     await ctrl.accept(a.req, a.res, a.next)
-    expect(acceptOnlineOrder).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'ord1', staffId: 'staff1', estimatedMinutes: 20 })
+    // D662 parte 2: esta puerta es una persona: su toque cuenta para la pausa sola.
+    expect(acceptOnlineOrder).toHaveBeenCalledWith({
+      venueId: 'v1',
+      orderId: 'ord1',
+      staffId: 'staff1',
+      estimatedMinutes: 20,
+      porPersona: true,
+    })
     expect(a.res.json).toHaveBeenCalledWith({ success: true, data: { status: 'ACCEPTED', estimatedReadyAt: 'x' } })
     ;(acceptOnlineOrder as jest.Mock).mockResolvedValueOnce({ outcome: 'STALE', status: 'EXPIRED' })
     const b = mock()
@@ -265,7 +275,14 @@ describe('onlineOrders.mobile.controller', () => {
     ;(rejectOnlineOrder as jest.Mock).mockResolvedValueOnce({ outcome: 'OK', status: 'REJECTED' })
     const { req, res, next } = mock({ body: { reason: 'OTHER', note: '   ' } })
     await ctrl.reject(req, res, next)
-    expect(rejectOnlineOrder).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'ord1', staffId: 'staff1', reason: 'OTHER', note: null })
+    expect(rejectOnlineOrder).toHaveBeenCalledWith({
+      venueId: 'v1',
+      orderId: 'ord1',
+      staffId: 'staff1',
+      reason: 'OTHER',
+      note: null,
+      porPersona: true,
+    })
   })
 
   it('el reclamo de impresión exige x-device-id', async () => {
