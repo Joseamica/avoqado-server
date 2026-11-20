@@ -1069,14 +1069,37 @@ const descuentoDeCatalogoCambio = (nombre: string) =>
 const pideAprobacionSinAprobador = (discount: { requiresApproval?: boolean | null; type: string }) =>
   discount.requiresApproval === true && discount.type !== 'COMP'
 
-/** D36: el reintento con la misma llave que ahora pide «Pagar después» deja la venta como fiado, sólo si sigue abierta y sin cobrar. */
+/**
+ * D36: el reintento con la misma llave que ahora pide «Pagar después» deja la venta como fiado, sólo si sigue abierta y sin ningún
+ * cobro (ni pago ni asignación). Si no quedó como fiado abierto (ya se cobró, se anuló, o la tocó un cobro), NUNCA contesta éxito:
+ * la terminal diría «guardada como Pagar después» de una venta que no lo es (Codex D36 r2 #2).
+ */
 async function marcarComoPagarDespuesSiSigueAbierta(venueId: string, orderId: string): Promise<void> {
   const marcada = await prisma.order.updateMany({
-    where: { id: orderId, venueId, payLater: false, status: 'PENDING', paymentStatus: 'PENDING', payments: { none: {} } },
+    where: {
+      id: orderId,
+      venueId,
+      payLater: false,
+      status: 'PENDING',
+      paymentStatus: 'PENDING',
+      payments: { none: {} },
+      paymentAllocations: { none: {} },
+    },
     data: { payLater: true },
   })
   if (marcada.count > 0)
     logger.info('🧾 [WITH ITEMS] la venta recuperada por su llave queda como «Pagar después» (D36)', { venueId, orderId })
+  const ahora = await prisma.order.findFirst({
+    where: { id: orderId, venueId },
+    select: { payLater: true, status: true, paymentStatus: true },
+  })
+  const esFiadoAbierto = ahora?.payLater === true && ahora.status === 'PENDING' && ahora.paymentStatus === 'PENDING'
+  if (!esFiadoAbierto) {
+    throw new ConflictError(
+      'Esta venta ya se había mandado a cobrar y no se puede dejar para pagar después. Revisa la venta antes de volver a intentarlo.',
+      'VENTA_NO_ES_PAGAR_DESPUES',
+    )
+  }
 }
 
 export async function createOrderWithItems(
@@ -1351,6 +1374,8 @@ export async function createOrderWithItems(
       })
       if (winner) {
         logger.warn(`🔄 [WITH ITEMS] Carrera idempotente (P2002, externalId=${externalId}) — devuelvo la orden ganadora ${winner.id}`)
+        // D36 (Codex r2 #2): la ganadora pudo ser la de «Cobrar» (`payLater=false`); un «Pagar después» perdedor la marca o falla.
+        if (input.payLater === true) await marcarComoPagarDespuesSiSigueAbierta(venueId, winner.id)
         return buildCreateOrderResponse(winner.id)
       }
     }

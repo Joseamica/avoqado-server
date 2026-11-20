@@ -63,15 +63,48 @@ describe('createOrderWithItems — la venta declara si es «Pagar después» (D3
     beforeEach(() => {
       prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1' } as any)
       prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+      prismaMock.order.findFirst.mockResolvedValue({ payLater: true, status: 'PENDING', paymentStatus: 'PENDING' } as any)
     })
 
     it('ahora pide «Pagar después»: la venta recuperada queda como fiado, sólo si sigue abierta, sin cobrar y declarada false', async () => {
       await createOrderWithItems(VENUE, { ...input, externalId: 'llave-1', payLater: true })
       expect(prismaMock.order.create).not.toHaveBeenCalled()
       expect(prismaMock.order.updateMany).toHaveBeenCalledWith({
-        where: { id: 'order-1', venueId: VENUE, payLater: false, status: 'PENDING', paymentStatus: 'PENDING', payments: { none: {} } },
+        where: {
+          id: 'order-1',
+          venueId: VENUE,
+          payLater: false,
+          status: 'PENDING',
+          paymentStatus: 'PENDING',
+          payments: { none: {} },
+          paymentAllocations: { none: {} },
+        },
         data: { payLater: true },
       })
+    })
+
+    it('🔴 si la venta recuperada ya no puede ser fiado (se cobró o se anuló) NO contesta éxito (Codex r2 #2)', async () => {
+      prismaMock.order.updateMany.mockResolvedValue({ count: 0 } as any)
+      prismaMock.order.findFirst.mockResolvedValue({ payLater: false, status: 'COMPLETED', paymentStatus: 'PAID' } as any)
+
+      await expect(createOrderWithItems(VENUE, { ...input, externalId: 'llave-1', payLater: true })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'VENTA_NO_ES_PAGAR_DESPUES',
+      })
+    })
+
+    it('la carrera de dos intentos con la misma llave (P2002): el «Pagar después» perdedor también marca a la ganadora', async () => {
+      prismaMock.order.findUnique.mockReset()
+      prismaMock.order.findUnique
+        .mockResolvedValueOnce(null) // la búsqueda inicial: todavía no existe
+        .mockResolvedValue({ id: 'order-ganadora' } as any) // tras el choque de la llave única
+      prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('Unique constraint'), { code: 'P2002' }))
+
+      await createOrderWithItems(VENUE, { ...input, externalId: 'llave-1', payLater: true })
+
+      expect(prismaMock.order.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ id: 'order-ganadora', payLater: false }), data: { payLater: true } }),
+      )
     })
 
     it.each([[false], [undefined]])('con payLater=%s no se toca la venta recuperada', async payLater => {
