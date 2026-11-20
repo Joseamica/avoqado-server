@@ -91,6 +91,12 @@ describe('shouldProductUseInventory — contar piezas en todos los planes', () =
     expect(opcion(r, 'QUANTITY')?.enabled).toBe(false)
     expect(opcion(r, 'RECIPE')?.enabled).toBe(false)
     expect(opcion(r, 'NONE')?.enabled).toBe(true)
+    // Sin Premium y sin permiso (p. ej. «ver como» en Pro): también dice que es el permiso, no el plan (Codex r2 #3).
+    tienePremium.mockResolvedValue(false)
+    const pro = await shouldProductUseInventory('venue-1', { puedeGuardarConInventario: false, puedeGuardarPiezasSinPremium: false })
+    expect(pro.recommendation).toBe('wizard.step2.recommendationNoAccess')
+    expect(opcion(pro, 'QUANTITY')?.enabled).toBe(false)
+    tienePremium.mockResolvedValue(true)
     // Con el permiso, o sin dato (otro llamador): como siempre.
     for (const puedeGuardarConInventario of [true, undefined]) {
       const ok = await shouldProductUseInventory('venue-1', { puedeGuardarConInventario })

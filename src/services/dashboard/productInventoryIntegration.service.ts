@@ -688,11 +688,12 @@ export async function shouldProductUseInventory(
   const sinPermisoDeEscribir = opciones.puedeGuardarConInventario === false
   return {
     hasInventoryFeature,
-    recommendation: hasInventoryFeature
-      ? sinPermisoDeEscribir
-        ? 'wizard.step2.recommendationNoAccess'
-        : 'wizard.step2.recommendationEnabled'
-      : 'wizard.step2.recommendationDisabled',
+    // Sin permiso, el porqué es el permiso, con o sin Premium (Codex r2 #3: en Pro decía «contacta a soporte para habilitarlo»).
+    recommendation: sinPermisoDeEscribir
+      ? 'wizard.step2.recommendationNoAccess'
+      : hasInventoryFeature
+        ? 'wizard.step2.recommendationEnabled'
+        : 'wizard.step2.recommendationDisabled',
     options: [
       {
         type: 'NONE' as const,

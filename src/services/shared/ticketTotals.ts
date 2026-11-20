@@ -157,6 +157,8 @@ export function ticketTotals(e: EntradaDelTicket): TicketTotals {
       : cortesiaGuardada
   const subtotal = subtotalBase.plus(cortesia)
   const discount = descuentoBase.plus(cortesia).toNumber()
+  // Encargo 27fd34 (Codex r2 #6): el desglose NUEVO del cobro de $0 sólo si cabe en el papel de ANDROID; si no, como antes (sin desglose).
+  if (cierraEnCero && (!cabeEnElPapel(subtotal) || !cabeEnElPapel(new Prisma.Decimal(discount)))) return sinDesglose('COBRO', amount, tip)
   return {
     kind: 'COBRO',
     desglosado: true,

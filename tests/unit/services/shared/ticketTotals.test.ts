@@ -540,6 +540,12 @@ describe('ticketTotals · la cortesía en $0 de Mesas (D41 «C»)', () => {
     })
   })
 
+  it('cuenta en $0 cuyo desglose no cabe en el papel de ANDROID (carrito gratis de $25 millones): sin desglose, como antes (Codex r2 #6)', () => {
+    expect(
+      ticketTotals({ payment: cobro(0), order: orden({ subtotal: 25_000_000, discountAmount: 25_000_000 }), cobrosDeVenta: 0 }),
+    ).toMatchObject({ desglosado: false, subtotal: 0, total: 0 })
+  })
+
   it('cobro de $0 que NO cierra la cuenta: sin desglose, como hoy', () => {
     // La cuenta todavía debe $20 (un «cobro» de $0 no la paga), o ya tiene otro cobro de venta (un registro de sólo propina).
     expect(ticketTotals({ payment: cobro(0), order: orden({ subtotal: 20 }), cobrosDeVenta: 0 })).toMatchObject({
