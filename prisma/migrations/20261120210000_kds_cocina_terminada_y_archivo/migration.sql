@@ -8,3 +8,8 @@ ALTER TABLE "public"."VenueSettings" ADD COLUMN IF NOT EXISTS "kitchenCanRelease
 -- entran a «Recientes» con una hora inventada ni se pueden «deshacer» fuera de su ventana (en develop las v1 no tenían «Deshacer»).
 UPDATE "public"."KdsOrder" SET "kitchenDoneAt" = (NOW() AT TIME ZONE 'UTC') - INTERVAL '2 hours'
 WHERE "preparationVersion" = 1 AND status = 'READY' AND "kitchenDoneAt" IS NULL;
+-- Las que la caja ya ENTREGÓ (o se anularon) poco antes de desplegar conservan «Recientes» con su hora de entrega (Codex r7 #5 y
+-- r13): no queda nada listo que regresar, así que «Deshacer» sólo explica que ya salió. Acotado a las últimas 2 horas.
+UPDATE "public"."KdsOrder" SET "kitchenDoneAt" = "completedAt"
+WHERE "preparationVersion" = 1 AND status = 'COMPLETED' AND "kitchenDoneAt" IS NULL AND "completedAt" IS NOT NULL
+  AND "completedAt" > (NOW() AT TIME ZONE 'UTC') - INTERVAL '2 hours';
