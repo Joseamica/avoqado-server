@@ -28,7 +28,7 @@ import { onlineOrderRequestHash } from '@/services/online-ordering/order.service
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
 import { cedeLaSimulacion, simularBeneficios } from '@/services/online-ordering/beneficios.service'
 import { decisionDePrecio } from '@/services/online-ordering/order.service'
-import { unpaidFoliosWhere } from '@/services/online-ordering/constants'
+import { borradoresNadieWhere, cargoDeNadie, unpaidFoliosWhere } from '@/services/online-ordering/constants'
 
 const D = (v: string) => new Prisma.Decimal(v)
 const NOW = new Date('2026-10-28T18:00:00.000Z')
@@ -936,5 +936,67 @@ describe('D661 · el borrador de tarjeta en «Nadie»: sesión, teléfono verifi
     expect(llamadas[0]).toEqual(llamadas[1])
     expect(llamadas[2]).toEqual(llamadas[3])
     expect(llamadas[0].idempotencyKey).not.toBe(llamadas[2].idempotencyKey)
+  })
+
+  it('D661 (3A): repetir con la misma llave y la MISMA clienta después de verificar su teléfono devuelve SU borrador original, no un 409 (la huella de «Nadie» no lleva el teléfono)', async () => {
+    // Sin teléfono probado primero; verificó entre el envío y el reintento.
+    const original = await createCardOnlineDraft(nadie(), PUEDE_CREAR)
+    await expect(createCardOnlineDraft(nadie({ verifiedPhone: TELEFONO_DE_LA_SESION }), PUEDE_CREAR)).resolves.toEqual({
+      ...original,
+      replay: true,
+    })
+    // Y al revés: verificado primero, luego la sesión ya no trae el teléfono.
+    const K2 = 'n'.repeat(32)
+    const verificada = await createCardOnlineDraft(nadie({ idempotencyKey: K2, verifiedPhone: TELEFONO_DE_LA_SESION }), PUEDE_CREAR)
+    await expect(createCardOnlineDraft(nadie({ idempotencyKey: K2 }), PUEDE_CREAR)).resolves.toEqual({ ...verificada, replay: true })
+    expect(cargos).toHaveLength(2)
+    expect(cargos[0].request).not.toHaveProperty('telefonoVerificado') // el borrador conserva lo que guardó al nacer
+    expect(cargos[1].request).toMatchObject({ telefonoVerificado: TELEFONO_DE_LA_SESION })
+    expect(createAuthorizationCheckout).toHaveBeenCalledTimes(2)
+  })
+
+  it('D661 (3A): cargoDeNadie dice si el borrador nació en «Nadie» con la misma marca de la columna que sus filtros: sí para el de «Nadie», no para el de «Mi equipo»', async () => {
+    await createCardOnlineDraft(nadie(), PUEDE_CREAR)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(MI_EQUIPO as any)
+    await createCardOnlineDraft(input({ customerId: null, idempotencyKey: 'm'.repeat(32) }), PUEDE_CREAR)
+    const [deNadie, deMiEquipo] = cargos
+    expect(cargoDeNadie(deNadie)).toBe(true)
+    expect(cargoDeNadie(deMiEquipo)).toBe(false)
+    // La misma respuesta que el filtro de los borradores de «Nadie» (una sola fuente de verdad del modo del borrador).
+    expect(cumpleWhere(deNadie, borradoresNadieWhere('v1'))).toBe(true)
+    expect(cumpleWhere(deMiEquipo, borradoresNadieWhere('v1'))).toBe(false)
+  })
+
+  it('D661 (3A, Ruling 10): el borrador de «Nadie» guarda el cierre de la franja del horario en que empezó (en la zona del negocio); sin horario, null; «Mi equipo» no lo guarda', async () => {
+    const dia = { enabled: true, ranges: [{ open: '09:00', close: '22:00' }] }
+    const HORARIO = { monday: dia, tuesday: dia, wednesday: dia, thursday: dia, friday: dia, saturday: dia, sunday: dia }
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({
+      status: 'OPEN',
+      reason: null,
+      config: { acceptsPayAtPickup: true, requiresAcceptance: false, hours: HORARIO },
+    })
+    prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
+    // NOW = 2026-10-28 12:00 en CDMX (UTC−6): la franja cierra a las 22:00 locales = 04:00 UTC del día siguiente.
+    await createCardOnlineDraft(nadie(), PUEDE_CREAR)
+    expect(creados()[0].request.cierreDeFranja).toBe('2026-10-29T04:00:00.000Z')
+
+    // Sin horario (abierta todo el día): sin límite de franja, dicho con `null` (no «sin el campo»).
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({
+      status: 'OPEN',
+      reason: null,
+      config: { acceptsPayAtPickup: true, requiresAcceptance: false, hours: null },
+    })
+    await createCardOnlineDraft(nadie({ idempotencyKey: 'n'.repeat(32) }), PUEDE_CREAR)
+    expect(creados()[1].request).toHaveProperty('cierreDeFranja', null)
+
+    // «Mi equipo» no tiene plazo de franja: su request sigue como hoy.
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(MI_EQUIPO as any)
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({
+      status: 'OPEN',
+      reason: null,
+      config: { acceptsPayAtPickup: true, requiresAcceptance: true, hours: HORARIO },
+    })
+    await createCardOnlineDraft(input({ customerId: null, idempotencyKey: 'm'.repeat(32) }), PUEDE_CREAR)
+    expect(creados()[2].request).not.toHaveProperty('cierreDeFranja')
   })
 })

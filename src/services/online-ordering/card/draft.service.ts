@@ -28,6 +28,7 @@ import {
   borradoresNadieWhere,
   liveCardDraftsWhere,
 } from '../constants'
+import { closesAt } from '../hours'
 import { storefrontBase } from '../notifications.service'
 import {
   TX_OPTIONS,
@@ -101,6 +102,11 @@ export interface CardDraftRequest {
   nadie?: true
   /** D661: el teléfono que la sesión probó al pagar, canónico; ausente si la sesión no probó ninguno. Lo usa el saldo a favor. */
   telefonoVerificado?: string
+  /**
+   * D661 (Ruling 10): el cierre (ISO) de la franja del horario en que empezó el borrador; topa el plazo del apartado. `null` = sin
+   * horario, sin tope de franja. Ausente = borrador de antes del campo: la confirmación lo deriva del horario.
+   */
+  cierreDeFranja?: string | null
 }
 
 /** Codex r2 #4: 5 min de margen sobre los 30 que Stripe exige como mínimo para `expires_at`. */
@@ -262,9 +268,9 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
     })
   // La huella de «Mi equipo» es la de hoy, byte por byte (una repetición de un borrador de antes sigue empatando).
   const requestHash = huella(customerId ? `${CARD_CUSTOMER}:${customerId}` : CARD_CUSTOMER, phone ?? '')
-  const requestHashNadie = clientaDeLaSesion
-    ? huella(`${CARD_NADIE_CUSTOMER}:${clientaDeLaSesion}`, telefonoVerificado ?? SIN_TELEFONO_NADIE)
-    : null
+  // D661 (3A): la de «Nadie» no lleva el teléfono: la clienta de la sesión ya fija quién es, y con él un reintento con la misma llave
+  // tras verificar su teléfono recibía un 409 final en vez de SU borrador.
+  const requestHashNadie = clientaDeLaSesion ? huella(`${CARD_NADIE_CUSTOMER}:${clientaDeLaSesion}`, SIN_TELEFONO_NADIE) : null
   /**
    * r4 (Codex): la misma solicitud leída como cada modo. La llave se resuelve ANTES de leer el modo de la tienda (que pudo cambiar
    * desde el envío original): un borrador con la huella de cualquiera de las dos lecturas es SU borrador.
@@ -282,6 +288,8 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
   } | null = null
   /** D661: el modo con que se validó («Nadie» = `true`). Decide la clienta, la huella, los topes y lo que guarda el borrador. */
   let enNadie = false
+  /** D661 (Ruling 10): el cierre de la franja en que empieza un borrador de «Nadie»; `null` = sin horario. */
+  let cierreDeFranja: string | null = null
   const clientaDelModo = () => (enNadie ? clientaDeLaSesion : customerId)
   const huellaDelModo = () => (enNadie && requestHashNadie ? requestHashNadie : requestHash)
   /** S11 (R1'): un `PRICE_CHANGED` previo al borrador se decide (y se guarda) bajo la llave, como LA decisión de esa llave. */
@@ -335,6 +343,11 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
       if (!settings || !(await cardOnlineAvailable(settings, prisma, venueId))) throw notAccepted()
       // D661: en «Nadie» la tarjeta es de la clienta de la sesión (su tope, su saldo a favor). Sin sesión, a entrar; nada se crea.
       if (enNadie && !clientaDeLaSesion) throw sinSesionEnNadie()
+      // D661 (Ruling 10): con el MISMO horario con que la tienda se vio abierta, en la zona del negocio (como el plazo del folio, R23).
+      if (enNadie && state.config.hours) {
+        const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+        cierreDeFranja = closesAt(state.config.hours, now, venue?.timezone || 'America/Mexico_City')?.toISOString() ?? null
+      }
       const clienta = clientaDelModo()
       const merchant = await findCardMerchant(prisma, venueId)
       const connectAccountId = (merchant?.providerCredentials as { connectAccountId?: unknown } | null)?.connectAccountId
@@ -464,7 +477,7 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
         cancelUrl: `${trackUrl}?pago=cancelado`,
         customerId: clienta,
         beneficios: clienta ? eleccion : null,
-        ...(enNadie ? { nadie: true as const, ...(telefonoVerificado ? { telefonoVerificado } : {}) } : {}),
+        ...(enNadie ? { nadie: true as const, cierreDeFranja, ...(telefonoVerificado ? { telefonoVerificado } : {}) } : {}),
       }
       const merchantSnapshot: MerchantSnapshot = {
         connectAccountId: f.merchant.connectAccountId,

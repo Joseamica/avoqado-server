@@ -80,6 +80,12 @@ export const PREPAID_MODES: readonly OnlineOrderPaymentMode[] = [OnlineOrderPaym
  */
 export const SIN_TELEFONO_NADIE = ''
 /**
+ * D661: ¿este cargo (borrador o apartado) nació en «Nadie»? La ÚNICA lectura del modo de un cargo: la misma marca de la columna que
+ * usan sus filtros (`borradoresNadieWhere`, `liveCardDraftsWhere`). Quien necesite el modo de un borrador lo pregunta aquí, nunca
+ * re-deriva `request.nadie` ni el modo de hoy de la tienda.
+ */
+export const cargoDeNadie = (charge: { customerPhone: string }): boolean => charge.customerPhone === SIN_TELEFONO_NADIE
+/**
  * Fase 2: los borradores de tarjeta de «Mi equipo» con su sesión de pago vigente. Cuentan para los topes (por teléfono y por negocio)
  * y para la saturación de la tienda, junto con los pedidos por aceptar; uno vencido ya no cuenta. D661 (r6 #6): los de «Nadie» no
  * entran: tienen su propio cupo (`borradoresNadieWhere`) y llenarlo no pausa la tienda ni frena pagar en caja.
