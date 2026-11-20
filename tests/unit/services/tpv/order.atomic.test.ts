@@ -1000,8 +1000,16 @@ describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la
     expect(globalDb.orderAction?.create).not.toHaveBeenCalled()
   })
 
+  /** Las lápidas de la cuenta: la base contesta por llave (`array_contains`), y sin filtro de llave dice si hay alguna anulación. */
+  const conLapidas = (anuladas: string[]) =>
+    tx.orderAction.findMany.mockImplementation(async ({ where }: any) => {
+      const llave = where?.metadata?.array_contains?.[0]
+      if (llave === undefined) return anuladas.length ? [{ id: 'void-1' }] : []
+      return anuladas.includes(llave) ? [{ metadata: { externalIds: anuladas } }] : []
+    })
+
   it('#1: el reenvío de la ronda NO vuelve a crear el renglón anulado (el resto, como réplica)', async () => {
-    tx.orderAction.findMany.mockResolvedValueOnce([{ metadata: { externalIds: ['sync:r:0'] } }])
+    conLapidas(['sync:r:0'])
     tx.orderItem.findMany.mockResolvedValueOnce([{ externalId: 'sync:r:1' }])
     tx.orderItem.findFirst.mockResolvedValueOnce({ ...line, id: 'line-2', externalId: 'sync:r:1' })
     await addItemsToOrder(
@@ -1014,21 +1022,48 @@ describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la
       1,
       true,
     )
-    expect(tx.orderAction.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          orderId: 'order',
-          actionType: 'VOID',
-          // Codex r5 #7: la base filtra por la llave pedida (no «las últimas N» anulaciones).
-          OR: expect.arrayContaining([{ metadata: { path: ['externalIds'], array_contains: ['sync:r:0'] } }]),
-        }),
-      }),
-    )
+    // Codex r5 #7 y r6 #3: una consulta por llave, exacta (`take: 1`), no «las últimas N» anulaciones de la cuenta.
+    expect(tx.orderAction.findMany).toHaveBeenCalledWith({
+      where: { orderId: 'order', actionType: 'VOID', metadata: { path: ['externalIds'], array_contains: ['sync:r:0'] } },
+      select: { metadata: true },
+      take: 1,
+    })
     expect(tx.orderItem.create).not.toHaveBeenCalled()
   })
 
+  it('decisión 1 de D7: la lápida sólo trabaja con llaves de ronda; una etiqueta de Mostrador (UUID) no se revisa', async () => {
+    conLapidas(['3f1c6a52-0000-4000-8000-000000000001'])
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    await addItemsToOrder(
+      'venue',
+      'order',
+      [{ productId: 'product', quantity: 1, externalId: '3f1c6a52-0000-4000-8000-000000000001' }],
+      1,
+      true,
+    )
+    expect(tx.orderAction.findMany).not.toHaveBeenCalled()
+    expect(tx.orderItem.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('decisión 1 de D7: sin anulaciones en la cuenta, una sola lectura (no una por renglón)', async () => {
+    conLapidas([])
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    await addItemsToOrder(
+      'venue',
+      'order',
+      [
+        { productId: 'product', quantity: 1, externalId: 'sync:r:0' },
+        { productId: 'product', quantity: 1, externalId: 'sync:r:1' },
+      ],
+      1,
+      true,
+    )
+    expect(tx.orderAction.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.orderItem.create).toHaveBeenCalledTimes(2)
+  })
+
   it('#1: una llave NUEVA en esa misma ronda sí se crea; la anulada no', async () => {
-    tx.orderAction.findMany.mockResolvedValueOnce([{ metadata: { externalIds: ['sync:r:0'] } }])
+    conLapidas(['sync:r:0'])
     tx.orderItem.findMany.mockResolvedValueOnce([])
     await addItemsToOrder(
       'venue',

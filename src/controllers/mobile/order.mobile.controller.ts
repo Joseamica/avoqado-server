@@ -33,6 +33,7 @@ import { parseCourtesyReviewPublicInput, toCourtesyReviewPublicReply } from '@/s
 import { avisarBeneficiosCortesiaPendiente } from '@/services/mobile/cortesia-pendiente-notice.mobile.service'
 import { esTpvQueTruncaElDescuento } from '../../services/shared/descuentoDeTpvVieja'
 import { motivoDelDescuento } from '../../services/shared/motivoDelDescuento'
+import { llaveDeRondaEnLinea, llavesDeLaRonda } from '../../services/mobile/llaveDeRonda'
 
 /** La ruta ya validó shape/permiso; identidad y contexto siempre vienen de la sesión autenticada. */
 export async function reviewPendingCourtesy(req: Request, res: Response, next: NextFunction) {
@@ -771,8 +772,10 @@ export const addItemsToOrder = async (req: Request, res: Response, next: NextFun
       return res.status(400).json({ success: false, message: 'version (número) es requerida para concurrencia optimista' })
     }
 
-    // Mesas mandan RONDAS (deltas): cada Enviar crea sus propias filas (modelo Square).
-    const updatedOrder = await orderTpvService.addItemsToOrder(venueId, orderId, items, version, true)
+    // Mesas mandan RONDAS (deltas): cada Enviar crea sus propias filas (modelo Square). Cada renglón con la llave de su ronda
+    // (`sync:<ronda>:<n>`, decisión 1 de D7): las apps ya la mandan, la misma que su reenvío por la cola; otra forma se reemplaza.
+    const conLlave = llavesDeLaRonda(items, llaveDeRondaEnLinea(items))
+    const updatedOrder = await orderTpvService.addItemsToOrder(venueId, orderId, conLlave, version, true)
 
     // Cobros automáticos por comensales: al crecer el subtotal la regla puede
     // empezar a aplicar (el recompute del TPV ya refresca los % existentes).

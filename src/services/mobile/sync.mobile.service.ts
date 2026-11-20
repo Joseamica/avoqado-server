@@ -53,6 +53,7 @@ import { preparationPermissions } from '../kds/kitchenPreparation'
 import { motivoDelDescuento } from '../shared/motivoDelDescuento'
 import { descuentoManualDeMesaSchema } from '../../schemas/mobile/manualOrderDiscount.mobile.schema'
 import { horaRealDelAparato, llegadaDeLaPeticion } from '../shared/horaRealDelAparato'
+import { esLlaveDeRonda, llavesDeLaRonda } from './llaveDeRonda'
 
 // ─── Contrato (espejo EXACTO por nombre en iOS/Android) ─────────────────────
 
@@ -1455,7 +1456,6 @@ async function applyAddItems(
   // instanceId, así que el replay de este intent no duplica). Los demás siguen
   // exactamente el camino de hoy.
   const conPromocion = items.filter(it => it.promotionRef)
-  const normales = items.filter(it => !it.promotionRef)
 
   const soldAt = clampSoldAt(intent.createdAtLocal ?? (intent.payload.createdAtLocal as string | number | undefined), new Date())
   if (conPromocion.length > 0) {
@@ -1463,26 +1463,18 @@ async function applyAddItems(
     // INTENT, igual que el resto (regla offline-first del repo).
     await assertPromotionsFeature(venueId)
   }
-  // 🛡️ Idempotencia de la RONDA: un externalId determinista por item
-  // (intent.id + índice) hace que un replay de este ADD_ITEMS actualice las
-  // MISMAS filas en vez de crear duplicados (addItemsToOrder ya deduplica por
-  // externalId: findFirst → UPDATE quantity=item.quantity, que es reemplazo).
-  // Sin esto, un reintento tras "efecto aplicado pero ack no persistido"
-  // duplicaba la ronda en cocina y en la cuenta. Solo se inyecta si el cliente
-  // no mandó uno propio.
-  // La llave se normaliza UNA vez, aquí, igual que la guarda el alta (`normalizeExternalId`: recortada; vacía o sólo espacios = sin
-  // llave ⇒ la determinista). Así la búsqueda de la ronda, sus lápidas y el alta comparan la misma llave (Codex r3 #4, r4 #3, r5 #4
-  // y #6: una llave " " se guardaba como null y la anulación no dejaba lápida; recortar sólo en algunos lugares dejaba huecos).
-  const itemsWithKey = normales.map((it, idx) => {
-    const llave = llaveNormalizada(typeof it.externalId === 'string' ? it.externalId : null)
-    return { ...it, externalId: llave ?? `sync:${intent.id}:${idx}` }
-  })
-  // El combo viaja sólo con su referencia y el prefijo de sus componentes (`sync:<intent>:<índice>`, el que el aparato predice): su
-  // precio y sus renglones los resuelve el server desde la promoción, y un campo suelto del carrito no lo vuelve un producto.
-  const combos = conPromocion.map(item => ({
-    promotionRef: item.promotionRef,
-    externalId: item.externalId && /^sync:[^:]+:\d+$/.test(item.externalId) ? item.externalId : `sync:${intent.id}:${items.indexOf(item)}`,
-  }))
+  // 🛡️ Idempotencia de la RONDA: cada renglón lleva la llave `sync:<id del intent>:<n>`, así el reenvío de este ADD_ITEMS actualiza las
+  // MISMAS filas en vez de duplicarlas (addItemsToOrder deduplica por externalId) y lo anulado no vuelve (la lápida es por llave).
+  // D7 «Anular producto», decisión 1 = A acotada (founder por delegación, 20-nov): en una ronda SÓLO vale esa forma, con la llave de
+  // ESTA ronda; cualquier otra (sin llave, vacía, con espacios, de un sistema externo o de otra ronda) se reemplaza por la que arma el
+  // servidor con el id del intent y la posición (`llavesDeLaRonda`). Las apps vivas ya mandan exactamente ésa: pasa intacta. Así una
+  // etiqueta ajena ya no puede confundir mesas al buscar la ronda o sus lápidas (Codex r5 #5, r6 #1-#3). Combos y productos se numeran
+  // sobre la lista completa, como en las apps.
+  const conLlave = llavesDeLaRonda(items, intent.id)
+  const itemsWithKey = conLlave.filter(it => !it.promotionRef)
+  // El combo viaja sólo con su referencia y el prefijo de sus componentes (la llave del renglón del combo): su precio y sus renglones
+  // los resuelve el server desde la promoción, y un campo suelto del carrito no lo vuelve un producto.
+  const combos = conLlave.filter(it => it.promotionRef).map(item => ({ promotionRef: item.promotionRef, externalId: item.externalId }))
 
   // Reenvío de una ronda con combos que YA está entera en la cuenta (la guardó la ruta con red, o un intento anterior que perdió su
   // respuesta): se contesta sin escribir, como antes contestaba cada combo `created:false`. Sin esto, una cuenta que ya se cobró
@@ -1581,7 +1573,8 @@ const NOTA_RONDA_TARDIA = 'RONDA_TARDIA_EN_CUENTA_APARTE'
  * se repiten entre rondas. Las dos búsquedas usan índice (`OrderItem.externalId`, `OrderPromotion.instanceId`). Devuelve la cuenta.
  */
 async function rondaYaEnAlgunaCuenta(venueId: string, conPromocion: any[], normales: any[]): Promise<string | null> {
-  // Las llaves ya vienen normalizadas desde la entrada del ADD_ITEMS (`itemsWithKey`).
+  // Sólo las llaves de ESTA ronda (`sync:<id del intent>:<n>`, las armó `llavesDeLaRonda` a la entrada): nunca una etiqueta de
+  // Mostrador ni de otra ronda, que sí se repiten entre cuentas (decisión 1 de D7).
   const llaves = [...new Set(llavesGuardadasDeLaRonda(normales))]
   if (llaves.length) {
     const renglon = await prisma.orderItem.findFirst({
@@ -1607,22 +1600,9 @@ async function rondaYaEnAlgunaCuenta(venueId: string, conPromocion: any[], norma
   return null
 }
 
-/**
- * Las llaves de los renglones de la ronda TAL COMO SE GUARDAN: el alta las recorta (`normalizeExternalId`), así que la búsqueda de la
- * ronda y de sus lápidas también. Sin esto, una llave propia con espacios no encontraba su lápida y la ronda tardía volvía a cobrar
- * lo anulado en una cuenta aparte (Codex r3 #4 de «Anular producto»).
- */
+/** Las llaves de ronda (`sync:<ronda>:<n>`) de estos renglones. A la entrada del ADD_ITEMS ya todas lo son (`llavesDeLaRonda`). */
 function llavesGuardadasDeLaRonda(items: any[]): string[] {
-  return items.map(it => llaveNormalizada(typeof it.externalId === 'string' ? it.externalId : null)).filter((k): k is string => !!k)
-}
-
-/**
- * La llave de renglón como la guarda el alta (`normalizeExternalId` de order.tpv): recortada, y vacía o sólo espacios = sin llave.
- * Copia local a propósito: varias pruebas simulan el módulo de la TPV entero y una función importada de ahí no existiría.
- */
-function llaveNormalizada(externalId: string | null): string | null {
-  const recortada = externalId?.trim()
-  return recortada ? recortada : null
+  return items.map(it => it.externalId).filter(esLlaveDeRonda)
 }
 
 /** La llave del aparato en la cadena. Sin aparato (petición a mano) se usa el mesero, que es lo más parecido. */

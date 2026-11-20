@@ -255,26 +255,27 @@ describe('D7 · ronda sin red que llega a una cuenta que otra caja ya cobró', (
     expect(await notasDe(cobrada)).toHaveLength(0)
   })
 
-  it('«Anular producto» (Codex r3 #4): la llave propia del aparato llega con espacios; la guardada va recortada y la lápida igual la reconoce', async () => {
-    const t = await mesa()
-    const cobrada = (await assignTable(venueId, t, mesera, 2)).order.id
-    const v0 = await prisma.order.findUniqueOrThrow({ where: { id: cobrada }, select: { version: true } })
-    await addItemsToOrder(venueId, cobrada, [{ productId: coca, quantity: 1 }] as any, v0.version, true)
-    const llave = `propia-${randomUUID()}`
-    const r = { ...ronda(cobrada), payload: { orderId: cobrada, items: [{ productId: agua, quantity: 1, externalId: `  ${llave} ` }] } }
-    const v1 = await prisma.order.findUniqueOrThrow({ where: { id: cobrada }, select: { version: true } })
-    await addItemsToOrder(venueId, cobrada, [{ productId: agua, quantity: 1, externalId: `  ${llave} ` }] as any, v1.version, true)
-    const aguaId = (await prisma.orderItem.findFirstOrThrow({ where: { orderId: cobrada, externalId: llave } })).id
-    await voidOrderItem({ venueId, orderId: cobrada, itemId: aguaId, reason: 'El cliente cambió de parecer', actorId: caja })
-    await payCashOrder(venueId, cobrada, { amount: 2500, tip: 0, staffId: caja, idempotencyKey: `caja-${cobrada}` })
+  it('Decisión 1 de D7 (Codex r6 #1 y r5 #5): una etiqueta ajena igual a la de OTRA mesa ya no se confunde: la ronda va a su cuenta aparte', async () => {
+    // Mesa A tiene un café con la etiqueta propia `cafe-<x>` (la guardó otro camino, p. ej. una integración).
+    const otra = await mesa()
+    const cuentaA = (await assignTable(venueId, otra, mesera, 2)).order.id
+    const etiqueta = `cafe-${randomUUID()}`
+    const vA = await prisma.order.findUniqueOrThrow({ where: { id: cuentaA }, select: { version: true } })
+    await addItemsToOrder(venueId, cuentaA, [{ productId: coca, quantity: 1, externalId: etiqueta }] as any, vA.version, true)
+    // Mesa B se cobró sin esa ronda; llega tarde por la cola con la MISMA etiqueta (con espacios).
+    const { t, cobrada } = await mesaCobradaPorLaCaja()
+    const r = { ...ronda(cobrada), payload: { orderId: cobrada, items: [{ productId: agua, quantity: 1, externalId: ` ${etiqueta} ` }] } }
 
     const [ack] = await replay([r])
 
     expect(ack.status).toBe('ACKED')
-    expect((ack.result as any).cuentaAparte).toBeUndefined()
-    expect(await prisma.orderItem.count({ where: { externalId: llave } })).toBe(0)
-    expect(await fotoDe(cobrada)).toMatchObject({ renglones: 1, total: 25, pagos: 1 })
-    expect(await notasDe(cobrada)).toHaveLength(0)
+    const aparte = String((ack.result as any).cuentaAparte?.orderId)
+    expect(aparte).not.toBe(cuentaA)
+    expect(aparte).not.toBe(cobrada)
+    expect(await fotoDe(aparte)).toMatchObject({ tableId: t, paymentStatus: 'PENDING', total: 20, renglones: 1 })
+    // El agua se guardó con la llave de SU ronda, no con la etiqueta ajena; el café de la mesa A no se tocó.
+    expect(await prisma.orderItem.findFirstOrThrow({ where: { orderId: aparte } })).toMatchObject({ externalId: `sync:${r.id}:0` })
+    expect(await fotoDe(cuentaA)).toMatchObject({ renglones: 1, total: 25 })
   })
 
   it('Codex r5 #6: una llave hecha sólo de espacios recibe la determinista; anulado ese producto, el reenvío NO lo recrea', async () => {

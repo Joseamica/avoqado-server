@@ -2,6 +2,7 @@ import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx } from '../shared
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import { cobradoQueCubreEnTx } from '@/services/shared/saldoReabiertoAlReembolsar'
 import { writeLegacyActivityAuditTx } from '@/services/activityAudit.service'
+import { esLlaveDeRonda } from '../mobile/llaveDeRonda'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { AreaTicketInventoryReservationStatus, Order, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
@@ -656,36 +657,38 @@ function normalizeExternalId(externalId?: string | null): string | null {
  * y, al reintentar, encuentra el renglón por su llave: una sola ronda (spec 2026-09-27 §5).
  */
 /**
- * Las llaves de renglón (`externalId`) de esta cuenta que una anulación dejó como lápida (`OrderAction` VOID, `metadata.externalIds`,
- * escrita en la misma transacción que la anulación). Sólo devuelve las que se piden.
+ * Las llaves de renglón de esta cuenta que una anulación dejó como lápida (`OrderAction` VOID, `metadata.externalIds`, escrita en la
+ * misma transacción que la anulación). Sólo trabaja con llaves de RONDA (`sync:<ronda>:<n>`, decisión 1 de D7): las de Mostrador
+ * (UUID) y otras etiquetas sí se repiten entre cuentas y no protegen nada aquí. Sólo devuelve las que se piden.
  */
 export async function llavesAnuladasDeLaCuenta(
   tx: Pick<Prisma.TransactionClient, 'orderAction'>,
   orderId: string,
   llaves: string[],
 ): Promise<Set<string>> {
-  const pedidas = new Set(llaves)
-  if (pedidas.size === 0) return new Set()
-  // Se buscan SÓLO las anulaciones que nombran alguna de estas llaves (filtro JSON en la base), no «las últimas N»: con un tope por
-  // antigüedad, tras muchas anulaciones posteriores la primera lápida dejaba de proteger su llave (Codex r5 #7). Una llave se anula
-  // una vez; el tope sólo acota el peor caso.
-  const anulaciones = await tx.orderAction.findMany({
-    where: {
-      orderId,
-      actionType: 'VOID',
-      OR: [...pedidas].map(llave => ({ metadata: { path: ['externalIds'], array_contains: [llave] } })),
-    },
-    select: { metadata: true },
-    orderBy: { createdAt: 'desc' },
-    take: pedidas.size * 10,
-  })
   const anuladas = new Set<string>()
-  for (const { metadata } of anulaciones) {
-    const ids = (metadata as { externalIds?: unknown } | null)?.externalIds
-    if (Array.isArray(ids)) for (const id of ids) if (typeof id === 'string' && pedidas.has(id)) anuladas.add(id)
+  // Una consulta por llave, con su propio `take: 1`: la respuesta es exacta para cada una. Con UNA consulta y un tope por filas, otras
+  // anulaciones que nombran la misma llave (una cuenta fusionada, una llave repetida) dejaban fuera la que importa (Codex r5 #7, r6
+  // #3). Una ronda trae a lo más `MAX_RENGLONES_POR_LAPIDA` llaves distintas y cada consulta va por el índice de `orderId`.
+  const pedidas = [...new Set(llaves.filter(esLlaveDeRonda))].slice(0, MAX_RENGLONES_POR_LAPIDA)
+  if (pedidas.length === 0) return anuladas
+  // Casi ninguna cuenta tiene anulaciones: con una lectura se sabe y la ronda no paga una consulta por renglón.
+  const hayAnulaciones = await tx.orderAction.findMany({ where: { orderId, actionType: 'VOID' }, select: { id: true }, take: 1 })
+  if (hayAnulaciones.length === 0) return anuladas
+  for (const llave of pedidas) {
+    const fila = await tx.orderAction.findMany({
+      where: { orderId, actionType: 'VOID', metadata: { path: ['externalIds'], array_contains: [llave] } },
+      select: { metadata: true },
+      take: 1,
+    })
+    const ids = (fila[0]?.metadata as { externalIds?: unknown } | null | undefined)?.externalIds
+    if (Array.isArray(ids) && ids.includes(llave)) anuladas.add(llave)
   }
   return anuladas
 }
+
+/** Tope de llaves que se revisan contra las lápidas en una sola ronda (una ronda real trae unas pocas). */
+const MAX_RENGLONES_POR_LAPIDA = 200
 
 export async function conLlaveDeRonda<T>(crear: () => Promise<T>): Promise<T> {
   try {
@@ -1914,7 +1917,8 @@ export async function addItemsToOrder(
       // «Anular producto» (Codex r1 #1): la llave de un renglón ANULADO no vuelve a crearse. El reenvío de una ronda (respuesta
       // perdida, cola sin red) o el carrito de la TPV deduplican por llave, y la fila anulada ya no existe: sin esto el producto
       // volvía a la cuenta y se cobraba. Se trata como réplica: ni se valida contra el catálogo de hoy ni se escribe.
-      const llavesPedidas = normalizedItems.map(item => normalizeExternalId(item.externalId)).filter((llave): llave is string => !!llave)
+      // Sólo las llaves de ronda (`sync:<ronda>:<n>`): la lápida no trabaja con etiquetas de Mostrador ni de otros caminos (decisión 1).
+      const llavesPedidas = normalizedItems.map(item => normalizeExternalId(item.externalId)).filter(esLlaveDeRonda)
       const llavesAnuladas = llavesPedidas.length > 0 ? await llavesAnuladasDeLaCuenta(tx, order.id, llavesPedidas) : new Set<string>()
       const esAnulada = (item: NormalizedAddOrderItemInput) => {
         const llave = normalizeExternalId(item.externalId)

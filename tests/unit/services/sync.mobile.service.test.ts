@@ -515,6 +515,33 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks[1]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-2', version: 8 } })
   })
 
+  // D7 «Anular producto», decisión 1 = A acotada (founder por delegación, 20-nov): en una ronda sólo vale `sync:<id del intent>:<n>`.
+  it('decisión 1 de D7: la llave de las apps pasa intacta; otra forma (espacios, propia, de otra ronda) se reemplaza por la de la ronda', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 7, status: 'PENDING' })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockResolvedValue({ version: 8, total: 150.0 })
+
+    await processIntents(
+      baseParams([
+        {
+          id: 'r-uno',
+          type: 'ADD_ITEMS',
+          payload: {
+            orderId: 'order-1',
+            items: [
+              { productId: 'p1', quantity: 1, externalId: 'sync:r-uno:0' },
+              { productId: 'p1', quantity: 1, externalId: ' cafe-1 ' },
+              { productId: 'p1', quantity: 1, externalId: 'sync:otra-ronda:2' },
+              { productId: 'p1', quantity: 1, externalId: '   ' },
+            ],
+          },
+        },
+      ]),
+    )
+
+    const enviados = (orderTpvService.addItemsToOrder as jest.Mock).mock.calls[0][2].map((it: any) => it.externalId)
+    expect(enviados).toEqual(['sync:r-uno:0', 'sync:r-uno:1', 'sync:r-uno:2', 'sync:r-uno:3'])
+  })
+
   it.each(['APPLY_DISCOUNT', 'ADD_ITEMS'])('%s pendiente sobre cuenta anulada queda REJECTED, nunca RETRY', async type => {
     const error = new BadRequestError('Esta cuenta está cancelada, abre una nueva.', 'ORDER_CANCELLED_NO_EDIT')
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 5, status: 'PENDING' })
@@ -2102,8 +2129,9 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
         .mockResolvedValueOnce({ version: 8, status: 'PENDING', total: 0 })
         .mockResolvedValueOnce({ version: 9, status: 'COMPLETED', total: 290 })
       ;(prisma.orderPromotion.count as jest.Mock).mockResolvedValue(2)
-      // Están TODAS las llaves de la ronda tal como quedan tras normalizar (Codex r3 #1).
-      ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([{ externalId: 'sync:i-ya:0' }, { externalId: 'sync:i-ya:1' }])
+      // Están TODAS las llaves de la ronda tal como quedan tras normalizar (Codex r3 #1). Se numeran sobre la ronda completa, como en las
+      // apps (decisión 1 de D7): los dos combos son la 0 y la 1, los productos la 2 y la 3.
+      ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([{ externalId: 'sync:i-ya:2' }, { externalId: 'sync:i-ya:3' }])
 
       const [ack] = await processIntents(
         baseParams([
@@ -2119,7 +2147,7 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
       expect(orderTpvService.addItemsToOrder).not.toHaveBeenCalled()
       expect(prisma.orderPromotion.count).toHaveBeenCalledWith({ where: { orderId: 'order-1', instanceId: { in: ['uuid-1', 'uuid-2'] } } })
       expect(prisma.orderItem.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { orderId: 'order-1', externalId: { in: ['sync:i-ya:0', 'sync:i-ya:1'] } } }),
+        expect.objectContaining({ where: { orderId: 'order-1', externalId: { in: ['sync:i-ya:2', 'sync:i-ya:3'] } } }),
       )
     })
 
