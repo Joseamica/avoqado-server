@@ -14,7 +14,10 @@
  *
  * Pages are a photo («foto»): the first page fixes `hasta`, and every later page of the same walk only counts messages that
  * had arrived by then. A chat that gets a new message mid-walk keeps its place instead of jumping above the cursor and being
- * skipped, and the total does not move. What arrived later shows on the next first page (the screens refetch it).
+ * skipped, and the total does not move. What arrived later shows on the next first page (the screens refetch it every
+ * minute). Accepted residuals (Codex r2 #2): a webhook batch whose statement started before the photo and committed after it
+ * can still show on a later page, and a phone given to or taken from a business mid-walk changes «sin prospecto» from the
+ * next page on; the next refresh shows the right list.
  */
 import { Prisma } from '@prisma/client'
 import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/AppError'
@@ -34,21 +37,42 @@ export function soloElFounder(access: CrmAccess): void {
 
 const clamp = (value: number | undefined, fallback: number, max: number) => Math.min(Math.max(value ?? fallback, 1), max)
 
-/** `[hasta, sort date, unique tiebreaker]`, opaque to the screens. */
-type Cursor = [Date, Date, string]
-const encode = (hasta: Date, at: Date, id: string) =>
-  Buffer.from(JSON.stringify([hasta.toISOString(), at.toISOString(), id])).toString('base64url')
+/**
+ * `[hasta, sort date, unique tiebreaker]`, opaque to the screens. `hasta` is the database's clock in UTC, kept as text: the
+ * webhook writes `receivedAt` through Prisma, which fills `@default(now())` itself in UTC, whatever the session's time zone
+ * (measured 20-nov on a Postgres in America/Los_Angeles: 22:56 stored at 14:59 local). Codex r2 #1 read the column's SQL
+ * default (`CURRENT_TIMESTAMP`, session-local) and the QA showed the opposite; the clock is the database's, not Node's, so a
+ * skew between the two machines cannot cut the photo.
+ */
+type Cursor = [string, Date, string]
+const HASTA_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}$/
+const encode = (hasta: string, at: Date, id: string) => Buffer.from(JSON.stringify([hasta, at.toISOString(), id])).toString('base64url')
 function decode(cursor: string | undefined): Cursor | null {
   if (!cursor) return null
   try {
     const [hasta, at, id] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown[]
-    const dates = [new Date(String(hasta)), new Date(String(at))]
-    if (typeof hasta === 'string' && typeof at === 'string' && typeof id === 'string' && id && dates.every(d => !Number.isNaN(d.getTime())))
-      return [dates[0], dates[1], id]
+    const date = new Date(String(at))
+    if (
+      typeof hasta === 'string' &&
+      HASTA_RE.test(hasta) &&
+      typeof at === 'string' &&
+      typeof id === 'string' &&
+      id &&
+      !Number.isNaN(date.getTime())
+    )
+      return [hasta, date, id]
   } catch {
     // falls through to the 400
   }
   throw new BadRequestError('El cursor no es válido', 'CRM_CURSOR_INVALIDO')
+}
+
+/** The photo of a first page: the database's clock in UTC, the form `receivedAt` is stored in (see `Cursor`). */
+async function fotoDeAhora(): Promise<string> {
+  const [{ hasta }] = await prisma.$queryRaw<Array<{ hasta: string }>>(
+    Prisma.sql`SELECT to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS') AS hasta`,
+  )
+  return hasta
 }
 
 /**
@@ -94,6 +118,8 @@ interface ChatRow {
 
 export interface Chat {
   telefono: string
+  /** Whether the CRM accepts this phone for a person («Crear prospecto»): the webhook keeps `+digits` it could not read. */
+  telefonoValido: boolean
   /** The last profile name Meta sent for this phone (only incoming messages carry it). */
   nombre: string | null
   mensajes: number
@@ -109,18 +135,21 @@ export interface Chat {
  * "CrmWhatsappMessage_chat_cover_idx" (measured in the promesa's «Capacidad»); a per-chat summary table written by the webhook
  * is the upgrade if it ever gets slow.
  */
-export async function listChats(access: CrmAccess, filters: ChatFilters = {}, now = new Date()) {
+export async function listChats(access: CrmAccess, filters: ChatFilters = {}) {
   soloElFounder(access)
   const limit = clamp(filters.limit, CHATS_DEFAULT, CHATS_MAX)
   const after = decode(filters.cursor)
-  const hasta = after?.[0] ?? now
+  const hasta = after?.[0] ?? (await fotoDeAhora())
+  const foto = Prisma.sql`m."receivedAt" <= ${hasta}::timestamp`
 
   const q = filters.q?.trim() || null
   const digits = q?.replace(/\D/g, '') ?? ''
+  // Only digits (and phone punctuation) is a phone: the names are not read at all (Codex r2 #7).
+  const soloTelefono = !!q && digits.length >= 4 && !/\p{L}/u.test(q)
   // ponytail: the name search reads `contactName` of every message (no index can serve `bool_or(ILIKE)`): 28–121 ms with
   // 100,000 messages, seconds with 1,000,000. Past ~300,000, a pg_trgm GIN index on "contactName" and filtering the phones
   // first is the upgrade. The list without `q` is an index-only scan (covering index), 94–178 ms with 1,000,000.
-  const pattern = q ? `%${likeEscape(q)}%` : null
+  const pattern = q && !soloTelefono ? `%${likeEscape(q)}%` : null
   const busca = q
     ? Prisma.sql`WHERE ${digits.length >= 4 ? Prisma.sql`c.phone LIKE ${`%${digits}%`} OR` : Prisma.empty} c."nameMatch"`
     : Prisma.empty
@@ -133,15 +162,15 @@ export async function listChats(access: CrmAccess, filters: ChatFilters = {}, no
       SELECT m."contactPhone" AS phone, count(*)::int AS mensajes, max(m."sentAt") AS "lastAt",
              ${pattern ? Prisma.sql`coalesce(bool_or(m."contactName" ILIKE ${pattern}), false)` : Prisma.sql`false`} AS "nameMatch"
       FROM "CrmWhatsappMessage" m
-      WHERE m."receivedAt" <= ${utcTs(hasta)}
+      WHERE ${foto}
       GROUP BY m."contactPhone"
     ), filtrados AS (
       SELECT c.phone, c.mensajes, c."lastAt", ligas."accountId", ligas.negocios
       FROM chats c
       CROSS JOIN LATERAL (
-        SELECT (array_agg(ct."accountId" ORDER BY ct."createdAt", ct.id))[1] AS "accountId",
+        SELECT (array_agg(ct."accountId" ORDER BY a."createdAt", a.id))[1] AS "accountId",
                count(DISTINCT ct."accountId")::int AS negocios
-        FROM "CrmContact" ct WHERE ct."phoneE164" = c.phone
+        FROM "CrmContact" ct JOIN "CrmAccount" a ON a.id = ct."accountId" WHERE ct."phoneE164" = c.phone
       ) ligas
       ${busca}
     )`
@@ -159,17 +188,18 @@ export async function listChats(access: CrmAccess, filters: ChatFilters = {}, no
     LEFT JOIN "CrmAccount" a ON a.id = p."accountId"
     LEFT JOIN LATERAL (
       SELECT m.body, m.type, m.direction, m.origin FROM "CrmWhatsappMessage" m
-      WHERE m."contactPhone" = p.phone AND m."receivedAt" <= ${utcTs(hasta)} ORDER BY m."sentAt" DESC, m.id DESC LIMIT 1
+      WHERE m."contactPhone" = p.phone AND ${foto} ORDER BY m."sentAt" DESC, m.id DESC LIMIT 1
     ) last ON true
     LEFT JOIN LATERAL (
       SELECT m."contactName" FROM "CrmWhatsappMessage" m
-      WHERE m."contactPhone" = p.phone AND m."contactName" IS NOT NULL AND m."receivedAt" <= ${utcTs(hasta)}
+      WHERE m."contactPhone" = p.phone AND m."contactName" IS NOT NULL AND ${foto}
       ORDER BY m."sentAt" DESC, m.id DESC LIMIT 1
     ) perfil ON true
     ORDER BY p."lastAt" DESC, p.phone DESC
   `)
   // A page with no row (past the end, or nothing matches) carries no total: read it alone.
-  const total = rows[0]?.total ?? (await prisma.$queryRaw<Array<{ total: number }>>(Prisma.sql`${base} SELECT ${totalSql} AS total`))[0].total
+  const total =
+    rows[0]?.total ?? (await prisma.$queryRaw<Array<{ total: number }>>(Prisma.sql`${base} SELECT ${totalSql} AS total`))[0].total
 
   const page = rows.slice(0, limit)
   const last = page[page.length - 1]
@@ -177,6 +207,7 @@ export async function listChats(access: CrmAccess, filters: ChatFilters = {}, no
     rows: page.map(
       (row): Chat => ({
         telefono: row.phone,
+        telefonoValido: canonicalPhoneE164(row.phone) !== null,
         nombre: row.contactName,
         mensajes: row.mensajes,
         ultimo: { at: row.lastAt, texto: row.body, tipo: row.type, direccion: row.direction, origen: row.origin },
@@ -212,12 +243,12 @@ export interface Mensaje {
  * has). The newest page first, returned oldest → newest (how a chat reads); «Ver anteriores» passes `nextCursor`. Ordered by
  * `sentAt, id`: two messages of the same second are never lost nor repeated between pages.
  */
-export async function getThread(access: CrmAccess, query: ThreadQuery, now = new Date()) {
+export async function getThread(access: CrmAccess, query: ThreadQuery) {
   soloElFounder(access)
   if (!query.phone === !query.accountId) throw new BadRequestError('Di el teléfono o el negocio, uno de los dos', 'CRM_HILO_SIN_QUIEN')
   const limit = clamp(query.limit, MENSAJES_DEFAULT, MENSAJES_MAX)
   const before = decode(query.cursor)
-  const hasta = before?.[0] ?? now
+  const hasta = before?.[0] ?? (await fotoDeAhora())
 
   let quien: Prisma.Sql
   if (query.accountId) {
@@ -227,7 +258,7 @@ export async function getThread(access: CrmAccess, query: ThreadQuery, now = new
   } else {
     quien = Prisma.sql`m."contactPhone" IN (${Prisma.join(formasDelTelefono(query.phone!))})`
   }
-  const foto = Prisma.sql`${quien} AND m."receivedAt" <= ${utcTs(hasta)}`
+  const foto = Prisma.sql`${quien} AND m."receivedAt" <= ${hasta}::timestamp`
   const antes = before ? Prisma.sql`AND (m."sentAt", m.id) < (${utcTs(before[1])}, ${before[2]})` : Prisma.empty
 
   const [found, [{ total }]] = await Promise.all([

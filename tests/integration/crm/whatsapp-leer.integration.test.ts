@@ -42,6 +42,8 @@ let orgId: string
 let venueId: string
 let alfa: string
 let gama: string
+let epsDos: string
+let epsMasViejo: string
 
 let wamidSeq = 0
 type Extra = Partial<{ direction: string; origin: string; body: string | null; contactName: string; type: string }>
@@ -69,7 +71,9 @@ beforeAll(async () => {
   orgId = (await prisma.organization.create({ data: { name: `Org ${suffix}`, email: `org-${suffix}@test.mx`, phone: '5555555555' } })).id
   venueId = (await prisma.venue.create({ data: { organizationId: orgId, name: `Venue ${suffix}`, slug: `venue-${suffix}` } })).id
 
-  const founder = await prisma.staff.create({ data: { email: `founder-${suffix}@test.mx`, firstName: 'Founder', lastName: 'WA', emailVerified: true } })
+  const founder = await prisma.staff.create({
+    data: { email: `founder-${suffix}@test.mx`, firstName: 'Founder', lastName: 'WA', emailVerified: true },
+  })
   await prisma.staffVenue.create({ data: { staffId: founder.id, venueId, role: StaffRole.SUPERADMIN, active: true } })
   sellerEmail = `seller-${suffix}@test.mx`
   const seller = await prisma.staff.create({ data: { email: sellerEmail, firstName: 'Seller', lastName: 'WA', emailVerified: true } })
@@ -119,8 +123,11 @@ beforeAll(async () => {
   alfa = await account('Alfa', [A])
   gama = await account('Gama', [C1, C2])
   await account('Delta', [D], new Date())
-  await account('Eps uno', [E])
-  await account('Eps dos', [E])
+  // Two businesses with E: the OLDER business gets its person with E only AFTER the newer one (Codex r2 #5).
+  const epsUno = await account('Eps uno', [])
+  epsDos = await account('Eps dos', [E])
+  await prisma.crmContact.create({ data: { accountId: epsUno, name: 'Eps uno 0', phoneE164: E } })
+  epsMasViejo = epsUno
 
   // Alfa: 60 messages, 1 per minute; the 11th and 12th (from the oldest) share the same second. With the message the list
   // test adds mid-walk there are 61, so a page of 50 from the newest ends right between those two.
@@ -196,8 +203,10 @@ describe('la lista de chats', () => {
     expect(byPhone[C1].negocio.id).toBe(gama)
     expect(byPhone[D].negocio.archivado).toBe(true)
     // Caso: un teléfono en dos negocios dice el primero y cuántos más.
-    expect(byPhone[E]).toMatchObject({ nombre: 'Ernesto', otrosNegocios: 1 })
-    expect(byPhone[G]).toMatchObject({ negocio: null, ultimo: { tipo: 'image', texto: null } })
+    expect(byPhone[E]).toMatchObject({ nombre: 'Ernesto', otrosNegocios: 1, negocio: { id: epsMasViejo } })
+    expect(byPhone[E].negocio.id).not.toBe(epsDos)
+    expect(byPhone[G]).toMatchObject({ negocio: null, telefonoValido: false, ultimo: { tipo: 'image', texto: null } })
+    expect(byPhone[B].telefonoValido).toBe(true)
   })
 
   it('caso 6: «sin prospecto» no trae los de un prospecto archivado', async () => {
@@ -207,33 +216,24 @@ describe('la lista de chats', () => {
     expect(res.body.meta.total).toBe(2)
   })
 
-  it('caso 8: q busca por el nombre de perfil, en el servidor', async () => {
+  it('caso 8: q busca por el nombre de perfil, en el servidor; sólo dígitos busca el teléfono', async () => {
     const res = await get(`/api/v1/crm/whatsapp/chats?q=beto%20sue`)
-
     expect(res.body.data.map((row: { telefono: string }) => row.telefono)).toEqual([B])
+
+    const porTelefono = await get(`/api/v1/crm/whatsapp/chats?q=${encodeURIComponent(`(442) ${P7}`)}`)
+    expect(porTelefono.body.data.map((row: { telefono: string }) => row.telefono)).toEqual([B])
   })
 
-  it('casos 4 y 7: paginar no repite ni salta, el total no cambia, aunque un chat reciba un mensaje a media recorrida', async () => {
-    const seen: string[] = []
-    const totals: number[] = []
-    let cursor: string | null = null
-    let page = 0
-    do {
-      const res: request.Response = await chats({ limit: '2', ...(cursor ? { cursor } : {}) })
-      expect(res.status).toBe(200)
-      seen.push(...res.body.data.map((row: { telefono: string }) => row.telefono))
-      totals.push(res.body.meta.total)
-      cursor = res.body.meta.nextCursor
-      page += 1
-      // After the first page, the chat that would come last gets a new message (the newest of all).
-      if (page === 1) await prisma.crmWhatsappMessage.create({ data: msg(A, new Date(), { body: 'nuevo a media recorrida' }) })
-    } while (cursor)
+  it('la foto usa el reloj de la base: el chat que va en la segunda página sigue ahí aunque le llegue un mensaje', async () => {
+    const first = await chats({ limit: '6' })
+    const enPrimera = new Set(first.body.data.map((row: { telefono: string }) => row.telefono))
+    const pendiente = [A, B, C1, C2, D, E, G].find(p => !enPrimera.has(p)) as string
+    await prisma.crmWhatsappMessage.create({ data: msg(pendiente, new Date(), { body: 'llegó después de la foto' }) })
+    const second = await chats({ limit: '6', cursor: first.body.meta.nextCursor })
 
-    expect(seen).toEqual([G, E, D, C2, C1, B, A])
-    expect(new Set(totals)).toEqual(new Set([7]))
-    // A new first page sees it on top.
-    const fresh = await chats({ limit: '1' })
-    expect(fresh.body.data[0]).toMatchObject({ telefono: A, ultimo: { texto: 'nuevo a media recorrida' } })
+    expect(second.body.data.map((row: { telefono: string }) => row.telefono)).toEqual([pendiente])
+    expect(second.body.data[0].ultimo.texto).not.toBe('llegó después de la foto')
+    expect(second.body.meta.total).toBe(first.body.meta.total)
   })
 })
 

@@ -1073,7 +1073,7 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
     'Lista los chats del WhatsApp de ventas de Avoqado (+52 56 4007 0001): uno por teléfono, el más reciente primero, con ' +
       'el último mensaje (quién lo mandó: ENTRA = el prospecto, SALE = el founder desde su celular), cuántos mensajes hay, el ' +
       'nombre de perfil de WhatsApp y el negocio del CRM que tiene ese teléfono (null si todavía no es prospecto; otrosNegocios ' +
-      'dice cuántos negocios más lo tienen). ' +
+      'dice cuántos negocios más lo tienen; telefonoValido=false es un número que el CRM no acepta para una persona). ' +
       'sinProspecto=true trae sólo los que no son prospecto. q busca por dígitos del teléfono o por el nombre de perfil. De 50 ' +
       'en 50 (hasta 100) con el total. Sólo hay chats desde el 20-nov-2026 (Meta no dio el historial). Sólo lectura: no manda ' +
       'mensajes. Sólo el superadmin. ' +
@@ -1094,6 +1094,7 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
           siguiente: nextCursor,
           chats: rows.map(chat => ({
             telefono: chat.telefono,
+            telefonoValido: chat.telefonoValido,
             nombre: chat.nombre,
             mensajes: chat.mensajes,
             ultimo: {
@@ -1118,7 +1119,11 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
       SOLO,
     {
       phone: z.string().trim().max(30).optional().describe('Teléfono del chat, en cualquier formato; sin lada se toma de México'),
-      accountId: z.string().cuid('El id del negocio no es válido').optional().describe('Un negocio del CRM: junta los chats de sus personas'),
+      accountId: z
+        .string()
+        .cuid('El id del negocio no es válido')
+        .optional()
+        .describe('Un negocio del CRM: junta los chats de sus personas'),
       cursor: z.string().max(300).optional().describe('El «siguiente» de la página anterior: trae mensajes más viejos'),
       limit: z.number().int().min(1, 'El límite es de 1 a 200').max(200, 'El límite es de 1 a 200').optional(),
     },

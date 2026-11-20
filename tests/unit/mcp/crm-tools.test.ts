@@ -1683,8 +1683,26 @@ describe('CRM MCP — WhatsApp de ventas (sólo lectura, sólo el superadmin)', 
         total: 2,
         nextCursor: null,
         rows: [
-          { id: 'm1', contactPhone: '+525512345678', contactName: 'Ana', direction: 'ENTRA', origin: 'MENSAJE', type: 'text', body: 'Hola', sentAt: new Date('2026-11-20T18:00:00.000Z') },
-          { id: 'm2', contactPhone: '+525512345678', contactName: null, direction: 'SALE', origin: 'ECO', type: 'text', body: 'Qué tal', sentAt: new Date('2026-11-20T18:01:00.000Z') },
+          {
+            id: 'm1',
+            contactPhone: '+525512345678',
+            contactName: 'Ana',
+            direction: 'ENTRA',
+            origin: 'MENSAJE',
+            type: 'text',
+            body: 'Hola',
+            sentAt: new Date('2026-11-20T18:00:00.000Z'),
+          },
+          {
+            id: 'm2',
+            contactPhone: '+525512345678',
+            contactName: null,
+            direction: 'SALE',
+            origin: 'ECO',
+            type: 'text',
+            body: 'Qué tal',
+            sentAt: new Date('2026-11-20T18:01:00.000Z'),
+          },
         ],
       }
     })
