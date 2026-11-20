@@ -8,8 +8,8 @@ jest.mock('@/services/access/basePlan.service', () => ({
 }))
 
 import prisma from '@/utils/prismaClient'
-import { pantallasDesconectadas } from '@/services/kds/kitchenDisplayStations'
-import { marcarPantallaViva, olvidarPantallas, PANTALLA_VIVA_MS } from '@/services/kds/pantallasVivas'
+import { pantallasDesconectadas, registrarLecturaDelTablero } from '@/services/kds/kitchenDisplayStations'
+import { marcarPantallaViva, olvidarPantallas, pantallasConectadas, PANTALLA_VIVA_MS } from '@/services/kds/pantallasVivas'
 
 const T0 = 1_000_000
 const reloj = (ahora: number) => ({ ahora, arranque: 0 })
@@ -31,7 +31,7 @@ describe('pantallasDesconectadas', () => {
 
     const r = await pantallasDesconectadas('venue-1', reloj(T0 + 30_000))
 
-    expect(r).toEqual({ hayPantallas: true, completo: true, desconectadas: [cocina] })
+    expect(r).toEqual({ hayPantallas: true, pantallas: ['st_cocina', 'st_barra'], completo: true, desconectadas: [cocina] })
     expect((prisma.printStation.findMany as jest.Mock).mock.calls[0][0]).toMatchObject({
       where: { venueId: 'venue-1', active: true, hasKitchenDisplay: true },
       take: 100,
@@ -50,7 +50,12 @@ describe('pantallasDesconectadas', () => {
     estaciones(cocina)
     marcarPantallaViva('venue-1', 'st_ajena', T0)
 
-    expect(await pantallasDesconectadas('venue-1', reloj(T0 + 1_000))).toEqual({ hayPantallas: true, completo: true, desconectadas: [cocina] })
+    expect(await pantallasDesconectadas('venue-1', reloj(T0 + 1_000))).toEqual({
+      hayPantallas: true,
+      pantallas: ['st_cocina'],
+      completo: true,
+      desconectadas: [cocina],
+    })
   })
 
   it('Codex r5 #4: recién arrancado el servidor no da a ninguna por desconectada (completo = false)', async () => {
@@ -58,6 +63,7 @@ describe('pantallasDesconectadas', () => {
 
     expect(await pantallasDesconectadas('venue-1', { ahora: 10_000, arranque: 0 })).toEqual({
       hayPantallas: true,
+      pantallas: ['st_cocina'],
       completo: false,
       desconectadas: [],
     })
@@ -66,7 +72,7 @@ describe('pantallasDesconectadas', () => {
   it('sin estaciones con pantalla no hay nada que vigilar, y ni se consulta el plan', async () => {
     estaciones()
 
-    expect(await pantallasDesconectadas('venue-1', reloj(T0))).toEqual({ hayPantallas: false, completo: true, desconectadas: [] })
+    expect(await pantallasDesconectadas('venue-1', reloj(T0))).toEqual({ hayPantallas: false, pantallas: [], completo: true, desconectadas: [] })
     expect(mockPlan).not.toHaveBeenCalled()
   })
 
@@ -80,7 +86,66 @@ describe('pantallasDesconectadas', () => {
     estaciones(cocina)
     mockPlan.mockResolvedValue(false)
 
-    expect(await pantallasDesconectadas('venue-1', reloj(T0))).toEqual({ hayPantallas: false, completo: true, desconectadas: [] })
+    expect(await pantallasDesconectadas('venue-1', reloj(T0))).toEqual({ hayPantallas: false, pantallas: [], completo: true, desconectadas: [] })
     expect(mockPlan).toHaveBeenCalledWith('venue-1', 'KITCHEN_DISPLAY')
+  })
+})
+
+describe('registrarLecturaDelTablero', () => {
+  const vivas = () => pantallasConectadas('venue-1').conectadas
+  const sinPendientes = () => new Promise(resolve => setImmediate(resolve))
+  const estacion = (fila: { id: string } | null) => (prisma.printStation.findFirst as jest.Mock).mockResolvedValue(fila)
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    olvidarPantallas()
+  })
+
+  it('la primera lectura sólo marca una estación activa con pantalla de ESTE negocio', async () => {
+    estacion({ id: 'st_cocina' })
+
+    registrarLecturaDelTablero('venue-1', 'st_cocina')
+    await sinPendientes()
+
+    expect(vivas()).toEqual(['st_cocina'])
+    expect((prisma.printStation.findFirst as jest.Mock).mock.calls[0][0].where).toEqual({
+      id: 'st_cocina',
+      venueId: 'venue-1',
+      active: true,
+      hasKitchenDisplay: true,
+    })
+  })
+
+  it('Codex r8 #1: un id que no es una pantalla de este negocio no entra, y cien de ésos no desplazan a una pantalla real', async () => {
+    estacion({ id: 'st_cocina' })
+    registrarLecturaDelTablero('venue-1', 'st_cocina')
+    await sinPendientes()
+    estacion(null)
+
+    for (let i = 0; i < 150; i++) registrarLecturaDelTablero('venue-1', `ajena_${i}`)
+    await sinPendientes()
+
+    expect(vivas()).toEqual(['st_cocina'])
+  })
+
+  it('una pantalla ya conocida renueva su marca sin otra consulta', async () => {
+    estacion({ id: 'st_cocina' })
+    registrarLecturaDelTablero('venue-1', 'st_cocina')
+    await sinPendientes()
+    ;(prisma.printStation.findFirst as jest.Mock).mockClear()
+
+    registrarLecturaDelTablero('venue-1', 'st_cocina')
+
+    expect(prisma.printStation.findFirst).not.toHaveBeenCalled()
+    expect(vivas()).toEqual(['st_cocina'])
+  })
+
+  it('Codex r7 #5: si la revisión de la estación falla, la pantalla se marca viva igual y nada lanza', async () => {
+    ;(prisma.printStation.findFirst as jest.Mock).mockRejectedValue(new Error('base lenta'))
+
+    expect(() => registrarLecturaDelTablero('venue-1', 'st_cocina')).not.toThrow()
+    await sinPendientes()
+
+    expect(vivas()).toEqual(['st_cocina'])
   })
 })

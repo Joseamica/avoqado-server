@@ -22,6 +22,11 @@ const MAX_ESTACIONES_POR_NEGOCIO = 100
 
 const vistas = new Map<string, Map<string, number>>()
 
+/** ¿Ya hay marca de esta estación (aunque sea vieja, hasta 10 min)? Entonces ya se comprobó que es una pantalla real. */
+export function pantallaConocida(venueId: string, stationId: string): boolean {
+  return vistas.get(venueId)?.has(stationId) === true
+}
+
 /** La pantalla de [stationId] acaba de leer su tablero. */
 export function marcarPantallaViva(venueId: string, stationId: string, ahora: number = Date.now()): void {
   let delNegocio = vistas.get(venueId)

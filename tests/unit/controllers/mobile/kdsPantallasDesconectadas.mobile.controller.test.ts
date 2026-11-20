@@ -1,6 +1,7 @@
 /**
- * D6 de Flautas (opción B): el tablero de una pantalla con estación la marca viva en memoria (sin otra consulta que pueda
- * tumbarlo); lo que lee el vigilante de reparto (sin estación) no cuenta. La caja lee qué pantallas no están conectadas.
+ * D6 de Flautas (opción B): el tablero de una pantalla con estación registra su lectura (sin esperarla ni poder tumbar el
+ * tablero); lo que lee el vigilante de reparto (sin estación) no cuenta. La caja lee qué pantallas no están conectadas, y esa
+ * ruta nunca contesta 5xx (la caja lo tomaría como «servidor caído»).
  */
 const mockListar = jest.fn()
 const mockContar = jest.fn()
@@ -10,15 +11,13 @@ jest.mock('@/services/mobile/kds.mobile.service', () => ({
   countKdsOrders: (...a: unknown[]) => mockContar(...a),
 }))
 const mockDesconectadas = jest.fn()
+const mockRegistrar = jest.fn()
 jest.mock('@/services/kds/kitchenDisplayStations', () => ({
   pantallasDesconectadas: (...a: unknown[]) => mockDesconectadas(...a),
+  registrarLecturaDelTablero: (...a: unknown[]) => mockRegistrar(...a),
 }))
 
-import prisma from '@/utils/prismaClient'
 import { listKdsOrders, listarPantallasDesconectadas } from '@/controllers/mobile/kds.mobile.controller'
-import { olvidarPantallas, pantallasConectadas } from '@/services/kds/pantallasVivas'
-
-const conectadas = () => pantallasConectadas('venue-1').conectadas
 
 function res() {
   const r: any = {}
@@ -30,27 +29,24 @@ function res() {
 const req = (query: Record<string, string>) => ({ params: { venueId: 'venue-1' }, query }) as any
 
 beforeEach(() => {
-  olvidarPantallas()
   jest.clearAllMocks()
   mockListar.mockReset().mockResolvedValue([])
   mockContar.mockReset().mockResolvedValue(0)
 })
 
-it('el tablero de una estación marca viva a su pantalla, sin ninguna consulta de más', async () => {
+it('el tablero de una estación registra la lectura de su pantalla', async () => {
   const r = res()
 
   await listKdsOrders(req({ stationId: 'st_cocina', urgencyVersion: '1' }), r, jest.fn())
 
   expect(r.status).toHaveBeenCalledWith(200)
-  expect(conectadas()).toEqual(['st_cocina'])
-  expect(prisma.printStation.findFirst).not.toHaveBeenCalled()
-  expect(prisma.printStation.findMany).not.toHaveBeenCalled()
+  expect(mockRegistrar).toHaveBeenCalledWith('venue-1', 'st_cocina')
 })
 
-it('la lectura sin estación (el vigilante de reparto, apps viejas) no marca a nadie', async () => {
+it('la lectura sin estación (el vigilante de reparto, apps viejas) no registra nada', async () => {
   await listKdsOrders(req({ status: 'NEW,PREPARING,READY' }), res(), jest.fn())
 
-  expect(conectadas()).toEqual([])
+  expect(mockRegistrar).not.toHaveBeenCalled()
 })
 
 it('si el tablero no se pudo leer, la pantalla no cuenta como conectada', async () => {
@@ -58,26 +54,27 @@ it('si el tablero no se pudo leer, la pantalla no cuenta como conectada', async 
 
   await listKdsOrders(req({ stationId: 'st_cocina', urgencyVersion: '1' }), res(), jest.fn())
 
-  expect(conectadas()).toEqual([])
+  expect(mockRegistrar).not.toHaveBeenCalled()
 })
 
 it('la caja lee las pantallas desconectadas de su negocio', async () => {
-  const data = { hayPantallas: true, completo: true, desconectadas: [{ id: 'st_cocina', name: 'COCINA 1' }] }
+  const data = { hayPantallas: true, pantallas: ['st_cocina'], completo: true, desconectadas: [{ id: 'st_cocina', name: 'COCINA 1' }] }
   mockDesconectadas.mockResolvedValue(data)
   const r = res()
 
-  await listarPantallasDesconectadas({ params: { venueId: 'venue-1' } } as any, r, jest.fn())
+  await listarPantallasDesconectadas({ params: { venueId: 'venue-1' } } as any, r)
 
   expect(mockDesconectadas).toHaveBeenCalledWith('venue-1')
   expect(r.status).toHaveBeenCalledWith(200)
   expect(r.json).toHaveBeenCalledWith({ success: true, data })
 })
 
-it('si no se pudo leer la lista, responde error (la caja no afirma nada)', async () => {
+it('Codex r8 #2: si no se pudo leer la lista contesta 200 «no se sabe», nunca 5xx', async () => {
   mockDesconectadas.mockRejectedValue(new Error('base caída'))
-  const next = jest.fn()
+  const r = res()
 
-  await listarPantallasDesconectadas({ params: { venueId: 'venue-1' } } as any, res(), next)
+  await listarPantallasDesconectadas({ params: { venueId: 'venue-1' } } as any, r)
 
-  expect(next).toHaveBeenCalledWith(expect.any(Error))
+  expect(r.status).toHaveBeenCalledWith(200)
+  expect(r.json).toHaveBeenCalledWith({ success: true, data: { hayPantallas: true, completo: false, desconectadas: [] } })
 })

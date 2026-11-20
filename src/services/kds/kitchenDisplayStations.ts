@@ -10,7 +10,7 @@ import type { ScreenStation } from './kitchenTicketPlanning'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { ForbiddenError } from '../../errors/AppError'
 import { esSinComanda } from '../printing/printConfig.service'
-import { pantallasConectadas } from './pantallasVivas'
+import { marcarPantallaViva, pantallaConocida, pantallasConectadas } from './pantallasVivas'
 
 type Db = Prisma.TransactionClient | typeof prisma
 
@@ -43,9 +43,33 @@ export async function venueTienePantallaDeCocina(venueId: string, db: Db = prism
   return estacion != null
 }
 
+/**
+ * D6 de Flautas (Codex r8 #1): la pantalla de [stationId] acaba de leer su tablero. Una estación que ya tiene marca sólo la
+ * renueva (sin consulta). La primera vez (o tras 10 min sin leer) sólo entra si es una estación ACTIVA con pantalla de ESTE
+ * negocio: así un id cualquiera no ocupa lugar ni desplaza a una pantalla real. No se espera ni lanza (r6 #6: no puede tumbar
+ * el tablero); si la revisión falla se marca igual (r7 #5: perder la marca daría por desconectada a una pantalla viva).
+ */
+export function registrarLecturaDelTablero(venueId: string, stationId: string, db: Db = prisma): void {
+  if (pantallaConocida(venueId, stationId)) {
+    marcarPantallaViva(venueId, stationId)
+    return
+  }
+  db.printStation
+    .findFirst({ where: { id: stationId, venueId, active: true, hasKitchenDisplay: true }, select: { id: true } })
+    .then(estacion => {
+      if (estacion != null) marcarPantallaViva(venueId, stationId)
+    })
+    .catch(error => {
+      logger.warn('KDS: no se pudo revisar la estación de la pantalla; se marca viva igual', { venueId, stationId, error: String(error) })
+      marcarPantallaViva(venueId, stationId)
+    })
+}
+
 export interface PantallasDesconectadas {
   /** `false` = el negocio no tiene ninguna pantalla de cocina efectiva (casilla Y plan): la caja pregunta más despacio. */
   hayPantallas: boolean
+  /** Ids de las estaciones con pantalla efectiva HOY. La caja sólo calla el «No salió» de una estación que esté aquí. */
+  pantallas: string[]
   /** `false` justo después de arrancar el servidor: todavía no se puede dar a ninguna por desconectada. */
   completo: boolean
   /** Estaciones activas con pantalla cuya pantalla no ha pedido su tablero en la ventana. Vacío si `completo` es `false`. */
@@ -71,12 +95,13 @@ export async function pantallasDesconectadas(
   })
   const conPantalla = filas.filter(f => !esSinComanda(f))
   if (conPantalla.length === 0 || !(await venueHasFeatureAccess(venueId, 'KITCHEN_DISPLAY'))) {
-    return { hayPantallas: false, completo: true, desconectadas: [] }
+    return { hayPantallas: false, pantallas: [], completo: true, desconectadas: [] }
   }
   const { conectadas, completo } = pantallasConectadas(venueId, reloj.ahora, reloj.arranque)
   const vivas = new Set(conectadas)
   return {
     hayPantallas: true,
+    pantallas: conPantalla.map(f => f.id),
     completo,
     desconectadas: completo ? conPantalla.filter(f => !vivas.has(f.id)).map(f => ({ id: f.id, name: f.name })) : [],
   }
