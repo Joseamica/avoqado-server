@@ -178,17 +178,32 @@ export async function canjearCuponEnTx(
   })
   // `?.`: un doble de prueba sin la tabla contesta `undefined` (nada que avisar).
   if (d?.maxTotalUses != null && d.currentUses > d.maxTotalUses) {
-    await avisarSiPasoDelTopeEnTx(tx, {
-      venueId: d.venueId,
-      orderId: c.orderId,
-      discountId: c.discountId,
-      nombre: d.name,
-      usos: d.currentUses,
-      tope: d.maxTotalUses,
-      camino: 'canje',
-      sinRed: null,
-      quien: null,
-    })
+    // Codex D31 r1 #4: el aviso nunca tumba el canje (ni la venta de $0 ni el cierre del folio que lo llevan): va en su propio SAVEPOINT
+    // y, si su escritura falla, se deshace sólo él y queda en el log.
+    await tx.$executeRaw`SAVEPOINT aviso_sobre_tope`
+    try {
+      await avisarSiPasoDelTopeEnTx(tx, {
+        venueId: d.venueId,
+        orderId: c.orderId,
+        discountId: c.discountId,
+        nombre: d.name,
+        usos: d.currentUses,
+        tope: d.maxTotalUses,
+        camino: 'canje',
+        sinRed: null,
+        quien: null,
+      })
+      await tx.$executeRaw`RELEASE SAVEPOINT aviso_sobre_tope`
+    } catch (error) {
+      await tx.$executeRaw`ROLLBACK TO SAVEPOINT aviso_sobre_tope`
+      logger.error('⚠️ El canje dejó la promoción arriba de su tope y no se pudo escribir el aviso', {
+        orderId: c.orderId,
+        discountId: c.discountId,
+        usos: d.currentUses,
+        tope: d.maxTotalUses,
+        error: (error as Error).message,
+      })
+    }
   }
 }
 

@@ -45,6 +45,8 @@ import {
 import { descuentosDeLosClientes } from '../shared/descuentoDelCliente.service'
 import { autorizadorDelDescuentoDelCliente } from '../mobile/permission-override.mobile.service'
 import { CUPON_CAMBIO_DE_VALOR, apartarCupon, canjearCuponEnTx, cuponDeLaVenta, ligarCupon, montoDelCupon } from '../shared/cuponDeLaVenta'
+import { marcarFilaQueOcupaElUsoEnTx } from '../shared/usoDelDescuento'
+import { bloquearDescuentosEnOrdenEnTx } from '../dashboard/discountEngine.service'
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { restanteDeLaMesa } from './restanteDeLaMesa'
 import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
@@ -1365,6 +1367,14 @@ export async function createOrderWithItems(
         if (input.tableId) await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [input.tableId] })
         // D5 (Codex r1 #1): bajo el candado del cupón, contra los canjes y las ventas sin cobrar que ya lo traen.
         if (cupon) await apartarCupon(tx, venueId, cupon, input.customerId)
+        // 🔴 hz:e82938e1:D31 (Codex r1 #3): las filas `Discount` que esta venta va a sumar (renglones y cuenta) o canjear (el cupón de un
+        // carrito de $0) se toman AQUÍ, en una pasada ascendente y ANTES del turno: Order → Discount → … → Shift, el mismo orden que la
+        // anulación (D24) y el cobro tardío que revive una cuenta (D26). Antes el carrito de $0 tomaba el turno y después Discount.
+        await bloquearDescuentosEnOrdenEnTx(tx, venueId, [
+          ...preparedLines.map(line => line.appliedDiscount?.id).filter((id): id is string => Boolean(id)),
+          ...(orderDiscount?.id && !cupon ? [orderDiscount.id] : []),
+          ...(cupon ? [cupon.discount.id] : []),
+        ])
         // El turno de caja es del NEGOCIO, no de quien abre la orden (`../shared/turnoDeCaja.ts`).
         const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
 
@@ -1520,6 +1530,9 @@ export async function createOrderWithItems(
             where: { id: { in: [...new Set(usedDiscountIds)] } },
             data: { currentUses: { increment: 1 } },
           })
+          // 🔴 hz:e82938e1:D31 (Codex r1 #1): UNA fila por descuento sumado queda marcada; quitarla en la TPV o anular la cuenta devuelve
+          // ese uso (antes la TPV restaba por `discountId`; desde D31 sólo devuelve con la marca).
+          await marcarFilaQueOcupaElUsoEnTx(tx, { venueId, orderId: order.id, discountIds: usedDiscountIds })
         }
 
         for (const item of cortesiaItems) {

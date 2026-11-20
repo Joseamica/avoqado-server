@@ -300,6 +300,13 @@ export async function aplicarReasignacion(
     // De aquí en adelante, lo releído: estado, turno y `completedAt` frescos.
     const { cobro: c, origen: o, destino: d } = ahora
 
+    // D31 (antes ajeno de D26, na728b67 #1; Codex r1 #5): la anulada que esta reasignación revive vuelve a gastar el uso que su anulación
+    // devolvió (D24). Pre-reabierta aquí, el cierre ya la ve viva y `reabrirSiRecibeDinero` no lo haría. Va recién tomadas las dos
+    // cuentas, ANTES de mover el cobro y de guardar el turno en el destino (Order → Discount → … → Shift). Con pedido en línea no se
+    // pre-reabre: la reapertura del cierre ya lo gasta.
+    const revive = veredicto.resumen.destinoCambiaEstado && !d.pedidoEnLinea
+    if (revive) await escritor.volverAGastarUsosAlRevivir(d.id)
+
     const movidos = await escritor.moverCobro(c.id, o.id, d.id)
     if (movidos !== 1) {
       throw new Error(`carrera: el cobro ${c.id} ya no estaba en ${o.orderNumber} al escribir (${movidos} filas)`)
@@ -312,13 +319,9 @@ export async function aplicarReasignacion(
     // su pedido —«Mi equipo» entregado, folio para el barrido que lo pasa a «Por entregar» y publica— y avisa al gerente. Pre-reabierta,
     // la reapertura no la veía. `estadoParaCobrar` la reabre igual: un pedido de Rappi no llega aquí (`validarReasignacion`) y lo que
     // pasa la validación cubre la cuenta medida viva, así que también como cancelada (`cubreComoCancelada`), de cualquier origen.
-    if (veredicto.resumen.destinoCambiaEstado && !d.pedidoEnLinea) data.status = 'PENDING'
+    if (revive) data.status = 'PENDING'
     if (!d.shiftId && c.shiftId) data.shiftId = c.shiftId
     if (Object.keys(data).length > 0) await escritor.prepararDestino(d.id, data)
-    // D31 (antes ajeno de D26, na728b67 #1): pre-reabierta aquí, el cierre ya la ve viva y `reabrirSiRecibeDinero` no hace nada; sin esto
-    // el uso que la anulación devolvió (D24) quedaba libre y la promoción daba uno de más. Con pedido en línea no se pre-reabre: la
-    // reapertura del cierre ya lo gasta.
-    if (data.status === 'PENDING') await escritor.volverAGastarUsosAlRevivir(d.id)
 
     // El destino se cierra con sus efectos de saldar (vale de inventario, lealtad) SÓLO si es su dueño del cierre (revisión 6d
     // I-1: una integrada o con vales por área, no — su vale lo haría otro camino o ya consumió el stock); el origen ya estaba

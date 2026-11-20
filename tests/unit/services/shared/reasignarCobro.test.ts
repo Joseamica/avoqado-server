@@ -306,11 +306,11 @@ describe('aplicarReasignacion — el orden de las escrituras', () => {
     expect(llamadas).toEqual([
       'bloquear:ord-cancelada,ord-vecina',
       'releer',
+      // D31 (hz:nube0000:na728b67 #1, Codex r1 #5): la anulada que revive vuelve a gastar el uso que su anulación devolvió (D24/D26),
+      // con las dos cuentas tomadas y ANTES de mover el cobro y de guardar el turno (Order → Discount → … → Shift).
+      'usos:ord-cancelada',
       'mover',
       'preparar',
-      // D31 (hz:nube0000:na728b67 #1): la anulada que revive vuelve a gastar el uso que su anulación devolvió (D24/D26), con la cuenta
-      // tomada y antes del turno (Order → Discount → … → Shift).
-      'usos:ord-cancelada',
       'totales:ord-cancelada:pay-b',
       'totales:ord-vecina:-',
       'completadoEn:ord-cancelada',
@@ -427,9 +427,9 @@ describe('Codex r10 #6: la reasignación escribe TODO en una transacción, bajo 
     expect(llamadas.slice(0, 7)).toEqual([
       'bloquear:ord-cancelada,ord-vecina',
       'releer',
+      'usos:ord-cancelada',
       'mover',
       'preparar',
-      'usos:ord-cancelada',
       'totales:ord-cancelada:pay-b',
       'totales:ord-vecina:-',
     ])

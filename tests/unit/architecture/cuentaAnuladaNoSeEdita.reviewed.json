@@ -392,6 +392,11 @@
     "categoria": "DINERO_TARDIO",
     "motivo": "hz:e82938e1:D26: parte de la reapertura por dinero ya capturado. Sólo corre tras reabrirSiRecibeDinero (la cuenta ya salió de CANCELLED/DELETED), bajo el candado de la orden del cobro: las filas que devolvieron su uso al anular (usoDevueltoAlAnular) lo vuelven a gastar y recuperan usoContado. No mueve importes."
   },
+  "services/shared/usoDelDescuento.ts#marcarFilaQueOcupaElUsoEnTx": {
+    "clase": "EXCEPCION",
+    "categoria": "CREA_CUENTA",
+    "motivo": "hz:e82938e1:D31 (Codex r1 #1): parte de la venta de Mostrador que la crea. La llaman la venta de la TPV (/tpv/with-items, en su transacción de alta) y la suma de usos del Mostrador del POS (sumarUsosDeVentaEnTx, recién confirmada la venta): sólo pone usoContado en UNA fila por descuento sumado. No mueve importes, IVA ni reparto."
+  },
   "services/shared/usoDelDescuento.ts#soltarMarcaDeFilasSinDescuentoEnTx": {
     "clase": "EXCEPCION",
     "categoria": "ANULACION",

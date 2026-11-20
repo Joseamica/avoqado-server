@@ -254,6 +254,23 @@ describe('🔴 D31: la TPV marca el uso que suma, y sólo devuelve lo que ocupa 
     expect(await usos()).toBe(antes)
   })
 
+  it('🔴 Codex r1 #1: la venta de Mostrador del POS con el descuento de cuenta suma UN uso y marca su fila; anularla por cobrar lo devuelve', async () => {
+    const antes = await usos()
+    const creada = await createOrderWithItems(venueId, {
+      staffId,
+      items: [{ name: 'Otro importe', quantity: 1, unitPrice: 10000 }],
+      orderType: 'TAKEOUT',
+      source: 'AVOQADO_ANDROID',
+      orderDiscountId: promoId,
+    } as any)
+    expect(await usos()).toBe(antes + 1)
+    expect((await filaDe(creada.id)).usoContado).toBe(true)
+
+    await cancelOrder(venueId, creada.id, 'la tarjeta no pasó', staffId)
+
+    expect(await usos()).toBe(antes)
+  })
+
   it('🔴 con el contador ya en 0, quitar una fila marcada no lo deja en −1', async () => {
     const cero = await prisma.discount.create({
       data: { venueId, name: 'Primeros 5', type: 'PERCENTAGE', value: 5, scope: 'ORDER', maxTotalUses: 5, currentUses: 0 },

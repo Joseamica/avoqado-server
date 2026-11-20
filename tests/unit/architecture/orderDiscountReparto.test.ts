@@ -243,6 +243,11 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
     clase: 'SOLO_MARCA',
     marcas: ['data: { usoContado: true, usoDevueltoAlAnular: false }'],
   },
+  // hz:e82938e1:D31 (Codex r1 #1): la venta de Mostrador (TPV y POS) marca UNA fila por descuento que sumó; sólo la marca.
+  'src/services/shared/usoDelDescuento.ts#marcarFilaQueOcupaElUsoEnTx': {
+    clase: 'SOLO_MARCA',
+    marcas: ['data: { usoContado: true }'],
+  },
   // D24 (Codex r1 #4a, r2 #5): en la cuenta que se anula, la fila cuyo descuento se borró del catálogo sólo pierde la marca.
   'src/services/shared/usoDelDescuento.ts#soltarMarcaDeFilasSinDescuentoEnTx': {
     clase: 'SOLO_MARCA',

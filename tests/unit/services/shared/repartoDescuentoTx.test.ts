@@ -754,6 +754,64 @@ describe('recortarDescuentosDeRenglones — B2c (P4, P5)', () => {
       retiradas: [{ id: 'premio', name: 'Café gratis', pointsRefunded: 0, stampRewardReturned: 'rw' }],
     })
   })
+  it('🔴 D31 (Codex r1 #2): retirar una dirigida que OCUPA un uso del tope lo devuelve (piso 0), antes de los puntos y premios', async () => {
+    const tx = txRecorte(
+      [{ id: 'cafe', appliedDiscountId: 'cdisc1', isCortesia: false, discountAmount: 10 }],
+      [
+        {
+          id: 'od1',
+          name: 'Primeros 100',
+          type: 'PERCENTAGE',
+          value: 10,
+          amount: 10,
+          taxReduction: 0,
+          loyaltyTransactionId: null,
+          discountId: 'cdisc1',
+          usoContado: true,
+          appliedToItemIds: [],
+          reparto: dirigido({ cafe: 1000 }),
+        },
+      ],
+    )
+    const orden: string[] = []
+    tx.$queryRaw.mockImplementation(async (q: any) => {
+      orden.push('Discount')
+      return JSON.stringify(q).includes('FOR NO KEY UPDATE')
+        ? [{ id: 'cdisc1', name: 'Primeros 100', currentUses: 7, maxTotalUses: 100 }]
+        : []
+    })
+    tx.discount = { update: jest.fn(async () => void orden.push('discount.update')) }
+    tx.orderDiscount.delete.mockImplementation(async () => void orden.push('delete'))
+    await recortarDescuentosDeRenglones(tx, 'o1', { renglones: ['cafe'], venueId: 'v1' })
+    expect(tx.discount.update).toHaveBeenCalledWith({ where: { id: 'cdisc1' }, data: { currentUses: 6 } })
+    expect(orden.indexOf('discount.update')).toBeLessThan(orden.indexOf('delete'))
+  })
+
+  it('D31: retirar una dirigida SIN la marca (nunca sumó) no toca ningún contador', async () => {
+    const tx = txRecorte(
+      [{ id: 'cafe', appliedDiscountId: 'cdisc1', isCortesia: false, discountAmount: 10 }],
+      [
+        {
+          id: 'od1',
+          name: 'Primeros 100',
+          type: 'PERCENTAGE',
+          value: 10,
+          amount: 10,
+          taxReduction: 0,
+          loyaltyTransactionId: null,
+          discountId: 'cdisc1',
+          usoContado: false,
+          appliedToItemIds: [],
+          reparto: dirigido({ cafe: 1000 }),
+        },
+      ],
+    )
+    tx.discount = { update: jest.fn() }
+    await recortarDescuentosDeRenglones(tx, 'o1', { renglones: ['cafe'], venueId: 'v1' })
+    expect(tx.orderDiscount.delete).toHaveBeenCalledWith({ where: { id: 'od1' } })
+    expect(tx.discount.update).not.toHaveBeenCalled()
+  })
+
   it('recorta una DIRIGIDA por su parte guardada, en UNA actualización', async () => {
     const tx = txRecorte(
       [{ id: 'a', appliedDiscountId: null, isCortesia: false, discountAmount: 0 }],

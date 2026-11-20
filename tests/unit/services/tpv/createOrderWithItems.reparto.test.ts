@@ -47,8 +47,22 @@ function armarTx(renglones: unknown[]) {
         creadas.push(f)
         return f
       }),
-      findMany: jest.fn(async () => creadas),
+      // D31: la marca del uso pregunta por `discountId in`, sin cupón ni marca, una por descuento (`distinct`), como la base.
+      findMany: jest.fn(async (args: any = {}) => {
+        const w = args.where ?? {}
+        if (!w.discountId?.in) return creadas
+        const vistas = new Set<string>()
+        return [...creadas]
+          .filter(f => w.discountId.in.includes(f.discountId) && !f.couponCodeId && !f.usoContado)
+          .sort((a, b) => (a.discountId === b.discountId ? (a.id < b.id ? -1 : 1) : a.discountId < b.discountId ? -1 : 1))
+          .filter(f => (vistas.has(f.discountId) ? false : (vistas.add(f.discountId), true)))
+      }),
       update: jest.fn(async () => ({})),
+      updateMany: jest.fn(async ({ where, data }: any) => {
+        const tocadas = creadas.filter(f => where.id.in.includes(f.id))
+        for (const f of tocadas) Object.assign(f, data)
+        return { count: tocadas.length }
+      }),
     },
   }
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(tx))
@@ -111,6 +125,15 @@ it('cortesía (espejo), artículo (espejo) y orden (CUENTA con base): repartos e
     discountAmount: new Prisma.Decimal(80),
     total: new Prisma.Decimal(120),
   })
+  // 🔴 D31 (Codex r1 #1): UNA fila por descuento sumado queda marcada (quitarla o anular la cuenta devuelve ese uso); la cortesía no.
+  expect([comp.usoContado, articulo.usoContado, orden.usoContado]).toEqual([undefined, true, true])
+  // 🔴 D31 (Codex r1 #3): las filas Discount se toman ANTES del turno (Order → Discount → … → Shift).
+  const bloqueo = (prismaMock.$queryRaw as jest.Mock).mock.calls.findIndex(([q]: any[]) => JSON.stringify(q).includes('FOR NO KEY UPDATE'))
+  expect(bloqueo).toBeGreaterThanOrEqual(0)
+  expect(JSON.stringify((prismaMock.$queryRaw as jest.Mock).mock.calls[bloqueo])).toContain('art10')
+  expect((prismaMock.$queryRaw as jest.Mock).mock.invocationCallOrder[bloqueo]).toBeLessThan(
+    (prismaMock.shift.findFirst as jest.Mock).mock.invocationCallOrder[0],
+  )
 })
 
 it('🔴 P2 antes/después: el descuento libre de la terminal (sin orderDiscountId) tiene su fila de cuenta; hoy sólo vivía en la cabecera', async () => {
