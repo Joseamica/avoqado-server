@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '@/errors/AppError'
 import { venueHasFeatureAccess, organizationHasFeatureAccess } from '@/services/access/basePlan.service'
-import { HISTORIAL_DEL_INTERRUPTOR, historialDelInterruptor } from '@/services/kds/kitchenPreparation'
+import { historialDelInterruptor, podarHistorial } from '@/services/kds/kitchenPreparation'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import {
   DEFAULT_SERVICE_COURSES,
@@ -77,8 +77,9 @@ export async function setKitchenRelease(venueId: string, enabled: unknown, actor
   await prisma.$transaction(async tx => {
     const [fila] = await tx.$queryRaw<Array<{ kitchenCanReleaseHistory: unknown }>>`
       SELECT "kitchenCanReleaseHistory" FROM "VenueSettings" WHERE "venueId" = ${venueId} FOR UPDATE`
-    const historial = [...historialDelInterruptor(fila?.kitchenCanReleaseHistory), { at: ahora.toISOString(), on: enabled }].slice(
-      -HISTORIAL_DEL_INTERRUPTOR,
+    const historial = podarHistorial(
+      [...historialDelInterruptor(fila?.kitchenCanReleaseHistory), { at: ahora.toISOString(), on: enabled }],
+      ahora.getTime(),
     )
     await tx.venueSettings.upsert({
       where: { venueId },

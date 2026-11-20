@@ -11,6 +11,7 @@ import {
   applyKitchenPreparation,
   laCocinaPuedeLiberar,
   liberacionPermitida,
+  podarHistorial,
   preparationCapabilities,
   recallPreparationTicket,
 } from '@/services/kds/kitchenPreparation.service'
@@ -94,8 +95,8 @@ describe('D17 · reglas puras', () => {
     expect(liberacionPermitida(off([h('2026-11-19T10:00:00Z', true), h('2026-11-19T11:00:00Z', false)]), ahora, ahora)).toBe(false)
     // prendido desde antes de la ventana y apagado dentro: cuenta
     expect(liberacionPermitida(off([h('2026-11-10T10:00:00Z', true), h('2026-11-21T08:00:00Z', false)]), ahora, ahora)).toBe(true)
-    // sin hora, sin historial, sin ajustes, o la hora del aparato en el futuro: no regala permiso
-    expect(liberacionPermitida(prendidoYApagado, null, ahora)).toBe(false)
+    // sin la hora del aparato se mide AHORA (prendido hace 2 h: dentro de la ventana); sin ajustes o sin historial apagado: no
+    expect(liberacionPermitida(prendidoYApagado, null, ahora)).toBe(true)
     expect(liberacionPermitida(off(null), ahora, ahora)).toBe(false)
     expect(liberacionPermitida(null, ahora, ahora)).toBe(false)
     expect(
@@ -112,6 +113,30 @@ describe('D17 · reglas puras', () => {
         ahora,
       ),
     ).toBe(false)
+    // Codex r3 #3: prenderlo DESPUÉS no autoriza lo que la tablet hizo cuando llevaba más de 24 h apagado
+    const prendidoDespues = {
+      kitchenCanReleaseCourses: true,
+      kitchenCanReleaseHistory: [h('2026-11-19T08:00:00Z', false), h('2026-11-21T11:00:00Z', true)],
+    }
+    expect(liberacionPermitida(prendidoDespues, Date.parse('2026-11-21T10:00:00Z'), ahora)).toBe(false)
+    expect(liberacionPermitida(prendidoDespues, Date.parse('2026-11-21T11:30:00Z'), ahora)).toBe(true)
+    expect(liberacionPermitida(prendidoDespues, Date.parse('2026-11-21T10:57:00Z'), ahora)).toBe(true) // 5 min de reloj
+  })
+
+  it('el historial guarda TODO lo de 48 h y, de antes, sólo el último cambio (Codex r3 #4)', () => {
+    const ahora = Date.parse('2026-11-21T12:00:00Z')
+    const muchos = Array.from({ length: 30 }, (_, i) => ({ at: new Date(ahora - (30 - i) * 60_000).toISOString(), on: i % 2 === 0 }))
+    const viejos = [
+      { at: '2026-11-10T10:00:00.000Z', on: false },
+      { at: '2026-11-15T10:00:00.000Z', on: true },
+    ]
+    const guardado = podarHistorial([...viejos, ...muchos], ahora)
+    expect(guardado).toHaveLength(31)
+    expect(guardado[0]).toEqual(viejos[1])
+    // un RELEASE de hace 25 min (cuando estaba prendido) se acepta aunque después lo movieron muchas veces
+    expect(liberacionPermitida({ kitchenCanReleaseCourses: false, kitchenCanReleaseHistory: guardado }, ahora - 25 * 60_000, ahora)).toBe(
+      true,
+    )
   })
 })
 
@@ -467,7 +492,8 @@ describe('D17 · archivado al cerrar el día', () => {
     expect(sql).toContain(`o2.status NOT IN ('COMPLETED', 'CANCELLED', 'DELETED')`)
     // Codex r2 #1: sin margen de horas; ventana de 45 días hacia atrás
     expect(sql).toContain(`k."createdAt" < TIMESTAMP '2026-11-21 10:30:00.000'\n`)
-    expect(sql).toContain(`k."createdAt" >= TIMESTAMP '2026-11-21 10:30:00.000' - INTERVAL '45 days'`)
+    expect(sql).not.toContain('days') // r3 #5: sin ventana de días
+    expect(sql).toContain('GREATEST(k."createdAt", k."updatedAt")') // r3 #1 y #7: el día de su último cambio
     expect(sql).toMatch(/- INTERVAL '4 hours'\)::date/) // el corte de las 04:00 de la caja (día del negocio)
     expect(sql).toContain('ORDER BY k."createdAt", k.id')
     expect(sql).toContain('LIMIT 500')
@@ -490,7 +516,8 @@ describe('D17 · archivado al cerrar el día', () => {
     expect(archivadas).toHaveLength(3)
     const sql = String(db.$queryRawUnsafe.mock.calls[0][0])
     expect(sql).toMatch(/SET "archivedAt" = TIMESTAMP '2026-11-21 10:30:00.000'/)
-    expect(sql).not.toMatch(/"status"\s*=|status\s*=\s*'COMPLETED'|"completedAt"\s*=|"updatedAt"/)
+    const set = sql.slice(sql.indexOf('SET'), sql.indexOf('FROM'))
+    expect(set).not.toMatch(/status|completedAt|updatedAt/) // sólo archivedAt: ni estado ni la hora que leen otros
     expect(sql).toContain('k."archivedAt" IS NULL') // repetirlo no hace nada
     const log = db.activityLog.createMany.mock.calls[0][0].data
     expect(log).toHaveLength(2)

@@ -171,10 +171,14 @@ export function preparationPermissions(action: PreparationAction): string[] {
 // MARK: - D17: «La cocina puede liberar tiempos desde su pantalla»
 
 export type CambioDelInterruptor = { at: string; on: boolean }
-/** Los últimos cambios que se guardan del interruptor (el más nuevo al final). */
-export const HISTORIAL_DEL_INTERRUPTOR = 20
+/** Tope de cambios guardados (sólo se alcanza si alguien prende y apaga el interruptor sin parar). */
+export const HISTORIAL_DEL_INTERRUPTOR = 200
 /** Cuánto se respeta lo que una tablet sin internet hizo con el permiso que tenía guardado. */
 export const RESPETO_SIN_RED_MS = 24 * 60 * 60 * 1000
+/** Lo que el historial guarda completo: 48 h (la ventana de 24 h más la hora del aparato, de sobra). */
+const HISTORIAL_COMPLETO_MS = 2 * RESPETO_SIN_RED_MS
+/** Reloj del aparato adelantado o atrasado: lo que se le perdona. */
+const DESFASE_DEL_RELOJ_MS = 5 * 60 * 1000
 
 export function historialDelInterruptor(value: unknown): CambioDelInterruptor[] {
   if (!Array.isArray(value)) return []
@@ -186,10 +190,33 @@ export function historialDelInterruptor(value: unknown): CambioDelInterruptor[] 
 }
 
 /**
- * Prendido ⇒ sí. Apagado ⇒ sólo si estuvo prendido en algún momento de las 24 h antes de que la tablet lo hiciera (Codex r1 #6, r2
- * #3 y #4): la tablet sin internet usa el último permiso que vio, y rechazarlo trababa todo lo que la cocina hizo después en esa
- * tablet. Fuera de esa ventana, o sin la hora del aparato, se rechaza (queda visible en la cola). La hora del aparato nunca cuenta
- * en el futuro.
+ * El historial que se guarda al cambiar el interruptor (Codex r3 #4): TODO lo de las últimas 48 h y, de antes, sólo el último cambio
+ * (dice cómo estaba al empezar). Un tope fijo de N cambios olvidaba un permiso válido si alguien lo movía muchas veces.
+ */
+export function podarHistorial(cambios: CambioDelInterruptor[], ahoraMs: number = Date.now()): CambioDelInterruptor[] {
+  const orden = historialDelInterruptor(cambios)
+  const corte = ahoraMs - HISTORIAL_COMPLETO_MS
+  const viejos = orden.filter(c => Date.parse(c.at) < corte)
+  const recientes = orden.filter(c => Date.parse(c.at) >= corte)
+  return [...viejos.slice(-1), ...recientes].slice(-HISTORIAL_DEL_INTERRUPTOR)
+}
+
+/** Cómo estaba el interruptor en un instante, según su historial (sin historial, el valor de hoy). */
+export function interruptorEn(
+  settings: { kitchenCanReleaseCourses: boolean; kitchenCanReleaseHistory: unknown },
+  instanteMs: number,
+): boolean {
+  const cambios = historialDelInterruptor(settings.kitchenCanReleaseHistory)
+  if (cambios.length === 0) return settings.kitchenCanReleaseCourses
+  const previos = cambios.filter(c => Date.parse(c.at) <= instanteMs)
+  return previos.length > 0 && previos[previos.length - 1].on
+}
+
+/**
+ * ¿Estuvo prendido en algún momento de las 24 h antes de que la tablet liberara? (Codex r1 #6, r2 #3/#4, r3 #3). Se decide SÓLO
+ * con el historial y la hora del aparato (se le perdonan 5 min de reloj y nunca cuenta en el futuro): la tablet sin internet usa el
+ * último permiso que vio, y rechazarlo trababa todo lo que la cocina hizo después. Prenderlo DESPUÉS no autoriza lo de antes.
+ * Sin historial, el valor de hoy vale para todo el tiempo. Sin la hora del aparato, se mide ahora.
  */
 export function liberacionPermitida(
   settings: { kitchenCanReleaseCourses: boolean; kitchenCanReleaseHistory: unknown } | null,
@@ -197,11 +224,11 @@ export function liberacionPermitida(
   ahoraMs: number = Date.now(),
 ): boolean {
   if (!settings) return false
-  if (settings.kitchenCanReleaseCourses) return true
-  if (typeof hechoEnMs !== 'number' || !Number.isFinite(hechoEnMs)) return false
-  const hasta = Math.min(hechoEnMs, ahoraMs)
-  const desde = hasta - RESPETO_SIN_RED_MS
   const cambios = historialDelInterruptor(settings.kitchenCanReleaseHistory)
+  if (cambios.length === 0) return settings.kitchenCanReleaseCourses
+  const hecho = typeof hechoEnMs === 'number' && Number.isFinite(hechoEnMs) ? hechoEnMs : ahoraMs
+  const hasta = Math.min(hecho + DESFASE_DEL_RELOJ_MS, ahoraMs)
+  const desde = hasta - RESPETO_SIN_RED_MS - DESFASE_DEL_RELOJ_MS
   // Cómo estaba al empezar la ventana: el último cambio antes de `desde` (sin ninguno, apagado de fábrica).
   const previos = cambios.filter(c => Date.parse(c.at) <= desde)
   if (previos.length > 0 && previos[previos.length - 1].on) return true

@@ -7,6 +7,7 @@ import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { tomarCandadoDeComandas } from './kitchenTicketAuthoring.service'
 import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import {
+  interruptorEn,
   liberacionPermitida,
   parsePreparation,
   recalculoDeComanda,
@@ -79,7 +80,7 @@ export async function laCocinaPuedeLiberar(venueId: string, hechoEnMs?: number |
   return liberacionPermitida(settings, hechoEnMs)
 }
 
-export { HISTORIAL_DEL_INTERRUPTOR, historialDelInterruptor, liberacionPermitida } from './kitchenPreparation'
+export { HISTORIAL_DEL_INTERRUPTOR, historialDelInterruptor, liberacionPermitida, podarHistorial } from './kitchenPreparation'
 
 async function assertEnabled(venueId: string) {
   if (!(await venueHasFeatureAccess(venueId, 'KITCHEN_DISPLAY'))) {
@@ -120,8 +121,9 @@ export async function applyKitchenPreparation(
       if (!liberacionPermitida(ajustes ?? null, liberacionDeCocina.hechoEnMs)) {
         throw new ForbiddenError('Este negocio ya no deja liberar tiempos desde la cocina. Lo libera la caja.', 'KITCHEN_RELEASE_DISABLED')
       }
-      // Se aceptó por la ventana sin red (el interruptor ya estaba apagado): queda dicho en su renglón de la bitácora.
-      permisoDeCocina = ajustes?.kitchenCanReleaseCourses ? 'PRENDIDO' : 'SIN_RED_24H'
+      // Si al hacerlo ya estaba apagado (se aceptó por la ventana de 24 h sin red), queda dicho en su renglón de la bitácora.
+      permisoDeCocina =
+        ajustes && interruptorEn(ajustes, Math.min(liberacionDeCocina.hechoEnMs ?? Date.now(), Date.now())) ? 'PRENDIDO' : 'SIN_RED_24H'
     }
     await tomarCandadoDeComandas(tx, orderId)
     const order = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { id: true, status: true } })

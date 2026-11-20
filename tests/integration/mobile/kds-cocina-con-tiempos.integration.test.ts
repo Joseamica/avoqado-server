@@ -167,6 +167,8 @@ describe('D17 · archivado al cerrar el día del negocio', () => {
     // Codex r2 #1: la de las 03:59 es del día de la víspera y se archiva en la primera pasada después del corte, no 4 h después.
     const madrugada = await comanda(cerrada.id, { createdAt: new Date('2026-11-21T09:59:00Z') })
 
+    // Sin tocarlas desde que se crearon (el día que cuenta es el de su último cambio).
+    await prisma.$executeRaw`UPDATE "KdsOrder" SET "updatedAt" = "createdAt" WHERE "venueId" = ${venueId} AND "createdAt" < '2026-11-22'`
     const candidatas = (await comandasPorArchivar(prisma, ahora)).filter(c => c.venueId === venueId).map(c => c.id)
     expect(candidatas).toEqual([kCerrada.id, madrugada.id])
     await expect(comandasPorArchivar(prisma, new Date('2026-11-21T09:30:00Z'))).resolves.not.toContainEqual(

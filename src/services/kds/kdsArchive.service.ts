@@ -7,18 +7,15 @@ import { instanteUtcSql, seAcaboElDiaDelNegocioDeSql } from '../shared/pagadaPer
  * 22-oct que cierra los pedidos de plataforma— y (b) su cuenta ya se cerró (cobrada o anulada) y ningún platillo suyo pertenece hoy
  * a una cuenta abierta (dividir la mesa mueve el renglón a otra cuenta y deja la comanda ligada a la primera — Codex r1 #2).
  *
+ * El día que cuenta es el de su ÚLTIMO cambio (Codex r3 #1 y #7), no el de su creación: lo que la cocina terminó a las 04:02 (o
+ * lo que la caja corrigió a las 04:08) es de ese día y se queda en «Recientes» o en el tablero; se archiva al acabar ESE día.
+ *
  * Archivar NO cambia el estado ni los productos (Codex r1 #1 y #3): sólo pone `archivedAt`. La caja sigue viendo en «Servicio y
  * entregas» lo que falte entregar, el aviso de «listo» a las plataformas no la toma (no cambia `status` ni `updatedAt`: es SQL
  * crudo) y los reportes de tiempos no cambian (`completedAt` no se toca). El tablero y «Recientes» la ignoran.
  */
 
 export const ARCHIVO_LOTE = 500
-/**
- * Hasta dónde mira hacia atrás (Codex r2 #8): las comandas sin cuenta cerrada se quedan sin archivar para siempre y una pasada no
- * puede recorrer la historia entera cada 15 min. Lo más viejo que el tablero todavía enseña lo alcanza el primer despliegue (el
- * rezago de Flautas era del 13-nov).
- */
-export const ARCHIVO_VENTANA_DIAS = 45
 
 const CUENTA_CERRADA = `('COMPLETED', 'CANCELLED', 'DELETED')`
 
@@ -26,10 +23,10 @@ const CUENTA_CERRADA = `('COMPLETED', 'CANCELLED', 'DELETED')`
 function condiciones(ahora: Date): string {
   // El reloj de pared UTC como literal (`TIMESTAMP '…'`), igual que el barrido de pedidos de plataforma: nunca un Date ligado.
   const nowSql = instanteUtcSql(ahora)
-  // Codex r2 #1: sin margen de horas — una comanda de las 03:59 se archiva en la pasada de las 04:07.
+  // Codex r2 #1: sin margen de horas — una comanda de las 03:59 se archiva en la pasada de las 04:07. Sin ventana de días (r3 #5):
+  // lo viejo con folio sigue en el tablero y también se archiva; el índice (archivedAt, status, createdAt) recorre sólo lo vivo.
   return `k."archivedAt" IS NULL
       AND k.status IN ('NEW', 'PREPARING', 'READY')
-      AND k."createdAt" >= ${nowSql} - INTERVAL '${ARCHIVO_VENTANA_DIAS} days'
       AND k."createdAt" < ${nowSql}
       AND o.status IN ${CUENTA_CERRADA}
       AND NOT EXISTS (
@@ -38,7 +35,7 @@ function condiciones(ahora: Date): string {
         JOIN "Order" o2 ON o2.id = oi."orderId"
         WHERE ki."kdsOrderId" = k.id AND o2.status NOT IN ${CUENTA_CERRADA}
       )
-      AND ${seAcaboElDiaDelNegocioDeSql('k."createdAt"', 'k."venueId"', nowSql)}`
+      AND ${seAcaboElDiaDelNegocioDeSql('GREATEST(k."createdAt", k."updatedAt")', 'k."venueId"', nowSql)}`
 }
 
 function lote(limite: number): number {
