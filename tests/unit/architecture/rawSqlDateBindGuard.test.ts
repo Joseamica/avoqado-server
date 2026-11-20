@@ -32,6 +32,8 @@ const ALLOWED_BIND = [
   /^\$\{utcTsOrNull\(/,
   /^\$\{utcTsParam\(/,
   /^\$\{(?:nowSql|leaseSql|claimedAtSql|claimExpiresAtSql)\}$/,
+  // D662 parte 2 (presence.service `hayRespuestaEntre`): fragmentos que ya son SQL (una columna o `utcTs(...)`), nunca un `Date`.
+  /^\$\{(?:desdeSql|hastaSql)\}$/,
   /^\$\d+::timestamp$/,
 ]
 

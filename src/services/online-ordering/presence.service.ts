@@ -141,21 +141,21 @@ const respuestaAnterior = (t: string) =>
 const respuesta = (t: string) => Prisma.raw(`COALESCE(${t}."staffAnsweredAt", ${respuestaAnterior(t).sql})`)
 
 /**
- * ¿Hubo una respuesta A TIEMPO en (desde, hasta]? Dos búsquedas: la de la marca nueva va por el índice `(venueId, staffAnsweredAt)`; la
- * del servidor anterior, sólo en filas sin marca cuya hora límite es posterior a `desde` (una respuesta a tiempo nunca es posterior a la
+ * ¿Hubo una respuesta A TIEMPO en (desde, hasta]? `desdeSql`/`hastaSql` ya son SQL (una columna, o `utcTs` de una hora), nunca un
+ * `Date`. Dos búsquedas: la de la marca nueva va por el índice `(venueId, staffAnsweredAt)`; la del servidor anterior, sólo en filas sin marca cuya hora límite es posterior a `desde` (una respuesta a tiempo nunca es posterior a la
  * hora límite de su pedido).
  */
-const hayRespuestaEntre = (venueId: string, desde: Prisma.Sql, hasta: Prisma.Sql) => Prisma.sql`(
+const hayRespuestaEntre = (venueId: string, desdeSql: Prisma.Sql, hastaSql: Prisma.Sql) => Prisma.sql`(
   EXISTS (
     SELECT 1 FROM "OnlineOrder" s
     WHERE s."venueId" = ${venueId} AND s."requiresAcceptance" = true
-      AND s."staffAnsweredAt" > ${desde} AND s."staffAnsweredAt" <= ${hasta} AND s."staffAnsweredAt" <= s."acceptDeadlineAt"
+      AND s."staffAnsweredAt" > ${desdeSql} AND s."staffAnsweredAt" <= ${hastaSql} AND s."staffAnsweredAt" <= s."acceptDeadlineAt"
   )
   OR EXISTS (
     SELECT 1 FROM "OnlineOrder" s
     WHERE s."venueId" = ${venueId} AND s."requiresAcceptance" = true
-      AND s."staffAnsweredAt" IS NULL AND s."acceptDeadlineAt" > ${desde}
-      AND ${respuestaAnterior('s')} > ${desde} AND ${respuestaAnterior('s')} <= ${hasta}
+      AND s."staffAnsweredAt" IS NULL AND s."acceptDeadlineAt" > ${desdeSql}
+      AND ${respuestaAnterior('s')} > ${desdeSql} AND ${respuestaAnterior('s')} <= ${hastaSql}
       AND ${respuestaAnterior('s')} <= s."acceptDeadlineAt"
   )
 )`
