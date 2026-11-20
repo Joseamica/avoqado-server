@@ -220,6 +220,77 @@ describe('deductStockForRecipe — unit conversion', () => {
   })
 })
 
+describe('deductStockForRecipe — sustitución elegida varias veces (encargo a508f4, Codex r1 #5)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(prisma.$transaction as jest.Mock).mockImplementation(async (cb: any) => (typeof cb === 'function' ? cb(prisma) : Promise.all(cb)))
+    ;(prisma.lowStockAlert.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.rawMaterial.findUnique as jest.Mock).mockResolvedValue({
+      id: 'x',
+      currentStock: new Decimal(9999),
+      reorderPoint: new Decimal(0),
+      unit: Unit.GRAM,
+    })
+    ;(prisma.rawMaterial.findUniqueOrThrow as jest.Mock).mockImplementation(async ({ where }: any) => ({
+      id: where.id,
+      name: where.id === 'rm-cochinita' ? 'Cochinita' : 'Papa',
+      unit: Unit.GRAM,
+    }))
+    ;(prisma.recipe.findUnique as jest.Mock).mockResolvedValue({
+      id: 'recipe-paquete',
+      productId: PRODUCT_ID,
+      portionYield: 1,
+      product: { name: 'Paquete' },
+      lines: [
+        {
+          id: 'line-relleno',
+          rawMaterialId: 'rm-default',
+          quantity: new Decimal(100),
+          unit: Unit.GRAM,
+          isOptional: false,
+          isVariable: true,
+          linkedModifierGroupId: 'g-flautas',
+          rawMaterial: { id: 'rm-default', name: 'Relleno', unit: Unit.GRAM },
+        },
+      ],
+    })
+  })
+
+  const sustitucion = (rawMaterialId: string, name: string): OrderModifierForInventory =>
+    ({
+      quantity: 1,
+      modifier: {
+        id: `mod-${rawMaterialId}`,
+        name,
+        groupId: 'g-flautas',
+        rawMaterialId,
+        quantityPerUnit: new Decimal(40),
+        unit: Unit.GRAM,
+        inventoryMode: 'SUBSTITUTION',
+      },
+    }) as any
+
+  it('2 de Cochinita + 1 de Papa descuentan 80 g de cochinita y 40 g de papa, y no el relleno por defecto', async () => {
+    const c = sustitucion('rm-cochinita', 'Cochinita')
+    await deductStockForRecipe(VENUE_ID, PRODUCT_ID, 1, 'order-1', undefined, [c, sustitucion('rm-papa', 'Papa'), c])
+    const porInsumo: Record<string, number> = {}
+    for (const call of (deductStockFIFOInTx as jest.Mock).mock.calls) porInsumo[call[2]] = (porInsumo[call[2]] ?? 0) + Number(call[3])
+    expect(porInsumo).toEqual({ 'rm-cochinita': 80, 'rm-papa': 40 })
+  })
+
+  it('regresión: una sola sustitución descuenta lo de siempre', async () => {
+    await deductStockForRecipe(VENUE_ID, PRODUCT_ID, 2, 'order-1', undefined, [sustitucion('rm-papa', 'Papa')])
+    expect(deductStockFIFOInTx).toHaveBeenCalledTimes(1)
+    expect((deductStockFIFOInTx as jest.Mock).mock.calls[0][2]).toBe('rm-papa')
+    expect(Number((deductStockFIFOInTx as jest.Mock).mock.calls[0][3])).toBe(80)
+  })
+
+  it('regresión: sin sustitución elegida descuenta el relleno por defecto', async () => {
+    await deductStockForRecipe(VENUE_ID, PRODUCT_ID, 1, 'order-1', undefined, [])
+    expect((deductStockFIFOInTx as jest.Mock).mock.calls.map((c: any[]) => c[2])).toEqual(['rm-default'])
+  })
+})
+
 describe('deductStockForModifiers — unit conversion', () => {
   beforeEach(() => {
     jest.clearAllMocks()

@@ -799,14 +799,6 @@ const WRITERS: Record<string, Writer> = {
     residual:
       'with soltarMarca runs only inside devolverCanjesDeVentaAnuladaEnTx, under the Order lock of the cancelling writer (orderCancelWriters, PROTEGIDA); without it (the empty-order sweep) it writes no OrderDiscount row',
   },
-  // hz:e82938e1:D26: la cuenta anulada que revive por dinero ya capturado vuelve a gastar el uso de las filas que lo devolvieron.
-  'src/services/shared/usoDelDescuento.ts#volverAGastarUsosDeCuentaRevividaEnTx': {
-    class: 'EXCLUDED',
-    reason:
-      'only flips the bookkeeping flags usoContado/usoDevueltoAlAnular of account discount rows (and raises Discount.currentUses): amount, taxReduction and reparto are untouched, so the documentary capture reads the same totals',
-    residual:
-      'runs only through volverAGastarUsosAlRevivirEnTx, right after reabrirSiRecibeDinero revived the order, under the Order lock of the money writer (registrarAbonoEnTx, settleStandalonePaymentInTx, updateOrderTotalsForStandalonePayment, createManualPayment)',
-  },
   // D24 (Codex r1 #4a, r2 #5): la cuenta que se anula suelta la marca de las filas cuyo descuento ya no está en el catálogo.
   'src/services/shared/usoDelDescuento.ts#soltarMarcaDeFilasSinDescuentoEnTx': {
     class: 'EXCLUDED',

@@ -1877,3 +1877,82 @@ describe('🍟 La foto de inventario de los extras en el vale (encargo 27771e, C
     expect(specs.map((s: any) => s.inventoryId)).toEqual(['raw-queso'])
   })
 })
+
+describe('Vale con dos sustituciones de la receta (encargo a508f4, Codex r2 #1)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    primePaidCheckout()
+  })
+
+  it('al cobrar, «2 de Cochinita + 1 de Papa» pide los dos rellenos: sin Papa en existencia, lo dice', async () => {
+    const sustitucion = (id: string, raw: string, nombre: string) => ({
+      quantity: 1,
+      modifier: {
+        id,
+        name: nombre,
+        groupId: 'g-flautas',
+        inventoryMode: 'SUBSTITUTION',
+        rawMaterialId: raw,
+        rawMaterial: { id: raw, name: nombre, unit: 'GRAM' },
+        quantityPerUnit: new Prisma.Decimal('40'),
+        unit: 'GRAM',
+        linkedProduct: null,
+      },
+    })
+    prismaMock.orderItem.findMany.mockResolvedValue([
+      {
+        id: 'item-paquete',
+        areaTicketLineId: null,
+        quantity: 1,
+        weightQuantity: null,
+        product: {
+          id: 'p-paquete',
+          name: 'Paquete',
+          trackInventory: true,
+          inventoryMethod: 'RECIPE',
+          inventory: null,
+          recipe: {
+            lines: [
+              {
+                isOptional: false,
+                isVariable: true,
+                linkedModifierGroupId: 'g-flautas',
+                quantity: new Prisma.Decimal('100'),
+                unit: 'GRAM',
+                rawMaterial: { id: 'raw-relleno', name: 'Relleno', unit: 'GRAM' },
+              },
+            ],
+          },
+        },
+        areaTicketLine: null,
+        modifiers: [
+          sustitucion('m-cochinita', 'raw-cochinita', 'Cochinita'),
+          sustitucion('m-papa', 'raw-papa', 'Papa'),
+          sustitucion('m-cochinita', 'raw-cochinita', 'Cochinita'),
+        ],
+      },
+    ] as any)
+    prismaMock.$queryRaw.mockImplementation((async (query: any, ...valores: unknown[]) => {
+      const texto = sqlText(query)
+      if (texto.includes('FROM "RawMaterial"')) {
+        const id = valores.find((v): v is string => typeof v === 'string' && v.startsWith('raw-'))
+        return [{ id, currentStock: new Prisma.Decimal(id === 'raw-papa' ? '0' : '1000'), unit: 'GRAM' }]
+      }
+      if (texto.includes('FROM "StockBatch"')) {
+        const id = valores.find((v): v is string => typeof v === 'string' && v.startsWith('raw-'))
+        return id === 'raw-papa'
+          ? []
+          : [{ id: `lote-${id}`, remainingQuantity: new Prisma.Decimal('1000'), costPerUnit: new Prisma.Decimal('1') }]
+      }
+      return []
+    }) as any)
+
+    // La Cochinita tiene 1000 g: sólo la Papa (0 g) puede faltar. Sin el arreglo la Papa ni se pedía.
+    const error = await finalize().then(
+      () => null,
+      (e: any) => e,
+    )
+    expect(error).toMatchObject({ code: 'AREA_TICKET_INSUFFICIENT_STOCK' })
+    expect(String(error.message)).toContain('Papa')
+  })
+})

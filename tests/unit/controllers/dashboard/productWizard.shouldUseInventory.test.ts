@@ -10,6 +10,7 @@ import { shouldProductUseInventory } from '@/services/dashboard/productInventory
 import { shouldUseInventory } from '@/controllers/dashboard/inventory/productWizard.controller'
 
 const recomendar = shouldProductUseInventory as jest.Mock
+const ultimo = () => recomendar.mock.calls[recomendar.mock.calls.length - 1][1]
 const acceso = (extra: Record<string, unknown> = {}) => ({
   role: StaffRole.MANAGER,
   corePermissions: ['inventory:read', 'inventory:update', 'menu:create'],
@@ -19,11 +20,11 @@ const acceso = (extra: Record<string, unknown> = {}) => ({
   ...extra,
 })
 
-async function pide(access: unknown): Promise<unknown> {
+async function pide(access: unknown, authContext: Record<string, unknown> = { userId: 'u1' }): Promise<unknown> {
   recomendar.mockResolvedValue({ ok: true })
   const res: any = { json: jest.fn() }
   const next = jest.fn()
-  await shouldUseInventory({ params: { venueId: 'v1' }, authContext: { userId: 'u1' }, access } as any, res, next)
+  await shouldUseInventory({ params: { venueId: 'v1' }, authContext, access } as any, res, next)
   expect(next).not.toHaveBeenCalled()
   return recomendar.mock.calls[recomendar.mock.calls.length - 1][1].puedeGuardarPiezasSinPremium
 }
@@ -51,6 +52,23 @@ describe('shouldUseInventory — piezas sólo a quien puede guardarlas (na1d52b5
         }),
       ),
     ).toBe(false)
+  })
+
+  it('sesión de soporte «ver como» (siempre de sólo lectura): no se ofrecen aunque el rol simulado tenga los permisos (encargo 27fd34, Codex r13 #2)', async () => {
+    const suplantando = { userId: 'u1', isImpersonating: true, impersonation: { mode: 'role', expiresAt: 9_999_999_999 } }
+    expect(await pide(acceso(), suplantando)).toBe(false)
+    expect(await pide(undefined, suplantando)).toBe(false)
+    expect(ultimo().puedeGuardarConInventario).toBe(false) // tampoco con Premium
+  })
+
+  it('con Premium también cuenta el permiso de escribir inventario (encargo 27fd34, Codex r1 #2)', async () => {
+    await pide(acceso({ corePermissions: ['inventory:read', 'menu:create'] }))
+    expect(ultimo().puedeGuardarConInventario).toBe(false)
+    // Para guardar con Premium no hace falta `menu:create` (Recetas da de alta así, Codex r3 #4).
+    await pide(acceso({ corePermissions: ['inventory:read', 'inventory:update'] }))
+    expect(ultimo().puedeGuardarConInventario).toBe(true)
+    await pide(undefined)
+    expect(ultimo().puedeGuardarConInventario).toBeUndefined()
   })
 
   // REGRESSION TESTS

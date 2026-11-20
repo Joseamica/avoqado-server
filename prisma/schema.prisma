@@ -4950,6 +4950,11 @@ model ModifierGroup {
   allowMultiple Boolean @default(false)
   minSelections Int     @default(0)
   maxSelections Int?
+  /// La misma opción se puede elegir varias veces («2 de Cochinita + 1 de Papa»), como Square «Allow multiple quantities» y el
+  /// «max» por opción de Fudo (Flautas Coyoacán, encargo a508f4, 19-nov-2026). Sólo cuenta con `allowMultiple`: cada vez es una
+  /// selección más para el mínimo y el máximo del grupo. La venta lleva el `modifierId` repetido (un renglón por vez, cada uno
+  /// a su precio), igual que siempre. false = cada opción una sola vez, como hasta hoy. Todos los planes.
+  allowRepeat   Boolean @default(false)
 
   // Display
   displayOrder Int     @default(0)
@@ -4986,6 +4991,11 @@ model Modifier {
   /// lee impreso. Opcional y NO único — varios extras comparten código (todos los sabores de
   /// «Agrega sabor» = P000622). Mismo formato que Product.sku.
   sku   String?
+
+  /// Cuántas veces se puede elegir ESTA opción en un grupo que deja repetir (`ModifierGroup.allowRepeat`), como el «max.» por opción
+  /// de Fudo y el «¿se puede elegir más de una vez?» por opción de Toast (encargo a508f4). null = hasta el máximo del grupo.
+  /// En un grupo sin repetir no cuenta: ahí cada opción va una vez.
+  maxQuantity Int?
 
   // Additional minutes this modifier adds to the booked service when selected.
   // Multiplied by the picked quantity in resolveModifierSelections. Null = no

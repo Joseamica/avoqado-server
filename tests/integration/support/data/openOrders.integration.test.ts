@@ -196,7 +196,7 @@ it('zero rows: a complete sentence (Review Focus 2)', async () => {
 
 type PlanNode = { 'Node Type': string; 'Relation Name'?: string; 'Index Name'?: string; 'Index Cond'?: string; Plans?: PlanNode[] }
 
-it('execution plan: with 3,000 orders of the venue over 60 days (and 3,000 of another), no Seq Scan on Order and the scan is bounded to the venue by an index with an Index Cond on venueId', async () => {
+it('execution plan: with 3,000 orders of the venue over 60 days (and 3,000 of another), no Seq Scan on Order and the scan is bounded by an index with an Index Cond on venueId or on createdAt', async () => {
   for (const venueId of [f.northId, f.siblingId]) {
     await prisma.order.createMany({
       data: Array.from({ length: 3000 }, (_, i) => ({
@@ -247,14 +247,15 @@ it('execution plan: with 3,000 orders of the venue over 60 days (and 3,000 of an
     // El tipo json de Postgres llega ya leído; si llegara como texto, se lee aquí
     walk((typeof plan === 'string' ? JSON.parse(plan) : (plan as { Plan: PlanNode }[]))[0].Plan)
     expect([query, nodes.filter(n => n['Node Type'] === 'Seq Scan' && n['Relation Name'] === 'Order')]).toEqual([query, []])
-    // Lo que importa es que la consulta no recorra toda la tabla y que el índice la acote a la sucursal (`Index Cond` con `venueId`).
-    // 🔴 No se afirma CUÁL índice escoge Postgres: su elección cambia con las filas que las demás suites siembran en `Order` (con
-    // `--maxWorkers=4` escogió `Order_venueId_customerIdentifier_paymentStatus_idx` y `Order_venueId_areaDeliveryCode_key`, T-F23). Si
-    // `createdAt` queda como `Filter` y no como `Index Cond`, también se acepta; la medición real del plan en producción la hace T16 con
-    // `EXPLAIN ANALYZE` en la sucursal más grande.
+    // Lo que importa es que la consulta no recorra toda la tabla: un índice la acota por sucursal (`Index Cond` con `venueId`) o por la
+    // ventana de 7 días (`Index Cond` con `createdAt`, y `venueId` como `Filter`). Las dos están acotadas.
+    // 🔴 No se afirma CUÁL índice escoge Postgres: su elección cambia con las filas que las demás suites siembran en `Order`.
+    // - Con `--maxWorkers=4` escogió `Order_venueId_customerIdentifier_paymentStatus_idx` y `Order_venueId_areaDeliveryCode_key` (T-F23).
+    // - En el CI del #524 (20-nov), 3 de 3, escogió `Order_createdAt_idx` con `createdAt >= …`.
+    // La medición real del plan en producción la hace T16 con `EXPLAIN ANALYZE` en la sucursal más grande.
     const indexed = nodes.filter(n => n['Index Name']).map(n => ({ index: n['Index Name'], cond: n['Index Cond'] }))
-    const acotadoASucursal = indexed.some(({ cond }) => /"venueId"/.test(cond ?? ''))
+    const acotado = indexed.some(({ cond }) => /"venueId"|"createdAt"/.test(cond ?? ''))
     // El plan va dentro de lo que se compara: sólo se imprime si la revisión falla. `consulta` va primero para que salga junto al plan
-    expect({ consulta: query, plan: indexed, acotadoASucursal }).toEqual({ consulta: query, plan: indexed, acotadoASucursal: true })
+    expect({ consulta: query, plan: indexed, acotado }).toEqual({ consulta: query, plan: indexed, acotado: true })
   }
 })

@@ -1,134 +1,134 @@
 {
   "pagina": "tpv/mesas/cobrar-cuenta-de-mesa",
   "sourceRepo": "avoqado-tpv",
-  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
-  "version": "2.16.0",
+  "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d",
+  "version": "2.22.1",
   "pasos": [
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
-      "linea": 937,
+      "linea": 1011,
       "cita": "text = \"Pagar · ${moneyDisplay(checkTotal ?: BigDecimal.ZERO)}\","
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 410,
+      "linea": 449,
       "cita": "text = \"Cómo dividir el cobro\","
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
-      "linea": 39,
+      "linea": 53,
       "cita": "FULLPAYMENT(\"FULLPAYMENT\", \"Cuenta completa\"),"
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
-      "linea": 40,
+      "linea": 54,
       "cita": "CUSTOMAMOUNT(\"CUSTOMAMOUNT\", \"Monto personalizado\"),"
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
-      "linea": 41,
+      "linea": 55,
       "cita": "EQUALPARTS(\"EQUALPARTS\", \"Partes iguales\"),"
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
-      "linea": 49,
+      "linea": 63,
       "cita": "PERPRODUCT(\"PERPRODUCT\", \"Por artículo\"),"
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 429,
+      "linea": 468,
       "cita": "label = { Text(\"Monto a cobrar\") },"
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 668,
+      "linea": 744,
       "cita": "Text(\"Dividir entre\", style = MaterialTheme.typography.bodyMedium)"
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 677,
+      "linea": 753,
       "cita": "Text(\"Cobrando\", style = MaterialTheme.typography.bodyMedium)"
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 736,
+      "linea": 812,
       "cita": "Checkbox(checked = selected, onCheckedChange = { onToggle() })"
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 468,
+      "linea": 507,
       "cita": "label = { Text(\"Propina (opcional)\") },"
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 467,
+      "linea": 506,
       "cita": "onValueChange = { text -> onTipChanged(text.toBigDecimalOrNull() ?: BigDecimal.ZERO) },"
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 818,
+      "linea": 979,
       "cita": "label = if (!cashSupportsThisSplit) \"Efectivo no disponible\" else \"Efectivo\","
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 827,
-      "cita": "label = if (cardEnabled) \"Tarjeta\" else \"Tarjeta no disponible\","
+      "linea": 988,
+      "cita": "label = if (cardAvailable) \"Tarjeta\" else \"Tarjeta no disponible\","
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 945,
+      "linea": 1107,
       "cita": "title = { Text(if (receipt.queued) \"Cobro guardado\" else \"Cobro registrado\") },"
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 998,
+      "linea": 1160,
       "cita": "TextButton(onClick = onDismiss) { Text(\"Cerrar\") }"
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
-      "linea": 1623,
+      "linea": 1649,
       "cita": "navController.navigate(getPaymentRoute())"
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 326,
-      "cita": "subtitle = \"Restante ${moneyDisplay(state.remaining)}\","
+      "linea": 360,
+      "cita": "\"Restante ${moneyDisplay(state.remaining)}\""
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 564,
+      "linea": 561,
       "cita": "SummaryRow(label = \"Restante\", amount = remaining, emphasized = true)"
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
-      "linea": 1793,
+      "linea": 1850,
       "cita": "text = \"Continuar pagando $${String.format(java.util.Locale.US, \"%.2f\", remainingBalance)}\""
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
-      "linea": 2133,
-      "cita": "navController.navigate(NavRoute.TableOrder.route) {"
+      "linea": 2317,
+      "cita": "Timber.i(\"🪑 [Navigation] Mesas: volviendo a la cuenta de la mesa (orden %s)\", continueOrderId)"
     }
   ],
   "permisos": [
@@ -147,39 +147,39 @@
     {
       "featureCode": "TABLE_SERVICE",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
-      "linea": 603
+      "linea": 610
     }
   ],
   "sinInternet": [
     {
       "afirmacion": "Sin red la tarjeta se apaga: «Tarjeta no disponible» y la cuenta se queda abierta",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 767
+      "linea": 843
     },
     {
       "afirmacion": "La tarjeta necesita red",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
-      "linea": 149
+      "linea": 225
     },
     {
       "afirmacion": "El efectivo de la mesa se escribe en la cola antes de enviarse (PAY_CASH)",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
-      "linea": 579
+      "linea": 593
     },
     {
       "afirmacion": "El efectivo encolado sale como «Cobro guardado»",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 945
+      "linea": 1107
     },
     {
       "afirmacion": "Aviso de la app al encolar (la página no lo repite: en 2.13.2 el envío en segundo plano no procesa la cola de Mesas)",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
-      "linea": 420
+      "linea": 1015
     },
     {
       "afirmacion": "Al volver la red: abrir Mesas desde el inicio crea la pantalla y la carga del plano vacía primero la cola de Mesas (igual en 2.13.2 y 031f14db)",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TablesViewModel.kt",
-      "linea": 271
+      "linea": 287
     },
     {
       "afirmacion": "La carga se pide al abrir la pantalla",
@@ -191,67 +191,92 @@
     {
       "ruta": "Antes: «Pagar» sólo con algo ya en la cuenta (total > 0), sin sesión provisional ni candado de cobro",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
-      "linea": 1037
+      "linea": 1115
     },
     {
       "ruta": "Antes: «Pagar» se prende sin nada por enviar",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
-      "linea": 939
+      "linea": 1013
     },
     {
       "ruta": "La propina de la casilla sólo va con el efectivo (payCash la manda; el cargo con tarjeta no la lleva)",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
-      "linea": 413
+      "linea": 1004
     },
     {
       "ruta": "El cargo con tarjeta no lleva propina",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
-      "linea": 361
+      "linea": 866
     },
     {
       "ruta": "«Pagar» de la mesa de otro mesero sólo con permiso de cobrar cualquier mesa (tables:pay-any)",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
-      "linea": 142
+      "linea": 143
     },
     {
       "ruta": "Por artículo no admite efectivo",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 800
+      "linea": 924
     },
     {
       "ruta": "«Por artículo» sólo sale con productos",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 638
+      "linea": 714
     },
     {
       "ruta": "Nexgo: tarjeta sólo con la cuenta completa",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 790
+      "linea": 915
     },
     {
       "ruta": "Problema Nexgo: el mensaje de la división",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 794
+      "linea": 885
     },
     {
       "ruta": "Tarjeta parcial: «Continuar pagando» regresa a la cuenta de la mesa",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
-      "linea": 2132
+      "linea": 2317
     },
     {
       "ruta": "Desde 2.13.2 el recibo del efectivo se ve aunque el cobro salde la cuenta (antes la pantalla podía quedar en blanco: 95bedba7)",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 207
+      "linea": 225
     },
     {
       "ruta": "En versiones anteriores a la 2.21 la casilla de propina se queda escrita tras un cobro en efectivo: el éxito de payCash no la vacía (v2.20.0 igual; desde v2.21.0, e292e9d3, sí: «D9: la propina ya se cobró con ESTE pago»). Visto en el aparato (H6)",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
-      "linea": 417
+      "linea": 409
     },
     {
       "ruta": "En versiones anteriores a la 2.21 el siguiente cobro en efectivo la vuelve a sumar: payCash manda lo que tenga la casilla al cobrar",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt",
-      "linea": 403
+      "linea": 972
+    },
+    {
+      "ruta": "Problema D15: «Fija: viene del cobro de vales»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 1284
+    },
+    {
+      "ruta": "Problema D15: «Esta rebaja quedó fija al cobrar los vales…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 1285
+    },
+    {
+      "ruta": "Problema D15: el botón de quitar (−) en gris",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 584
+    },
+    {
+      "ruta": "Problema D15: ventana «Rebaja fija» con «Entendido»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 542
+    },
+    {
+      "ruta": "Problema D15, versión anterior: el 400 «Este descuento quedó fijo…»",
+      "archivo": "avoqado-server/src/services/shared/cuentaConVales.ts",
+      "linea": 38
     }
   ],
   "aparato": {

@@ -329,8 +329,6 @@ beforeEach(() => {
   ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY' })
   ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback: any) => {
     const tx = {
-      // D26: la reapertura de una cancelada busca las filas que devolvieron su uso al anular (D24); aquí no hay ninguna.
-      orderDiscount: { findMany: jest.fn().mockResolvedValue([]) },
       // Outbox de efectos del cobro (Task 5): `recordOrderPayment` encola RECEIPT/REVIEW/
       // REFERRAL/COMMISSION DENTRO de esta transacción. Sin la tabla, el TypeError sustituye
       // a la aserción real del test.
