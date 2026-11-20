@@ -16,6 +16,7 @@ jest.mock('@/services/dashboard/menu.dashboard.service', () => ({
   createMenuCategory: jest.fn(),
   createModifierGroup: jest.fn(),
   updateModifier: (...a: unknown[]) => mockUpdateModifier(...a),
+  LIGA_DE_EXTRA_PLAN: { feature: 'ADVANCED_REPORTS', plan: 'Pro' },
 }))
 jest.mock('@/services/dashboard/product.dashboard.service', () => ({
   updateProduct: jest.fn(),

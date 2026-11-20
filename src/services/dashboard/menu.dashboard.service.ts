@@ -1369,18 +1369,29 @@ async function findVenueRawMaterialForModifier(venueId: string, rawMaterialId: s
 }
 
 /**
+ * Candado de plan de «Este extra es un platillo del menú» — el ÚNICO lugar del SERVIDOR (lo leen el alta/edición de abajo y la
+ * herramienta MCP `link_modifier_to_menu_item`). Founder, 20-nov-2026 (opción A): Pro y Premium, el mismo plan que el reporte
+ * «Ventas por artículo» (`ADVANCED_REPORTS`, que no está en `PREMIUM_ONLY_CODES`). Antes era Premium (`INVENTORY_TRACKING`).
+ * Que la liga DESCUENTE inventario sigue siendo Premium: depende de que el platillo lleve inventario, que se prende con Premium.
+ * `null` = todos los planes. Espejo visual: `LINKED_PRODUCT_FEATURE` en
+ * avoqado-web-dashboard/src/pages/Menu/Modifiers/LinkedProductField.tsx.
+ */
+export const LIGA_DE_EXTRA_PLAN: { feature: string; plan: string } | null = { feature: 'ADVANCED_REPORTS', plan: 'Pro' }
+
+/**
  * Extra ligado a un PLATILLO del menú (encargo 27771e; founder, 16-nov-2026: como Fudo y Toast). Valida el platillo que se quiere
- * ligar y devuelve su costo por porción. Premium (INVENTORY_TRACKING) sólo para PONERLO: quitarlo nunca lo pide, para que bajar de
- * plan no deje el extra atorado. Mismo negocio, no borrado, con inventario (por piezas o por receta) y que no se venda por kilo: si
- * no, el extra no descontaría nada sin decirlo (Codex r1 #5).
+ * ligar y devuelve su costo por porción. El plan ({@link LIGA_DE_EXTRA_PLAN}) sólo se pide para PONERLO: quitarlo nunca lo pide, para
+ * que bajar de plan no deje el extra atorado. Mismo negocio, no borrado y que no se venda por kilo (descontar «1» sería adivinar 1 kg).
+ * Sin inventario también se liga (founder «B», 20-nov, Flautas): no descuenta nada y sus unidades sólo cuentan en «Ventas por
+ * artículo» como «Dentro de paquete».
  */
 async function findLinkableProductForModifier(venueId: string, productId: string) {
-  if (!(await venueHasFeatureAccess(venueId, 'INVENTORY_TRACKING'))) {
+  if (LIGA_DE_EXTRA_PLAN && !(await venueHasFeatureAccess(venueId, LIGA_DE_EXTRA_PLAN.feature))) {
     throw new AppError(
-      'Ligar un extra a un platillo del menú es parte del plan Premium (inventario). Sube a Premium para usarlo.',
+      `Ligar un extra a un platillo del menú es parte del plan ${LIGA_DE_EXTRA_PLAN.plan}. Sube a ${LIGA_DE_EXTRA_PLAN.plan} para usarlo.`,
       403,
       true,
-      'MODIFIER_LINK_REQUIRES_PREMIUM',
+      'MODIFIER_LINK_REQUIRES_PREMIUM', // código fijo aunque cambie el plan: los clientes ya lo leen
     )
   }
   const product = await prisma.product.findFirst({
@@ -1405,12 +1416,6 @@ async function findLinkableProductForModifier(venueId: string, productId: string
     )
   }
   const method = product.trackInventory ? (product.inventoryMethod ?? (product.recipe ? 'RECIPE' : null)) : null
-  if (!method) {
-    throw new BadRequestError(
-      `«${product.name}» no lleva inventario. Actívale el inventario (por piezas o por receta) para que este extra lo descuente.`,
-      'MODIFIER_LINK_NOT_INVENTORIED',
-    )
-  }
   const cost = method === 'RECIPE' ? (product.recipe?.totalCost ?? null) : (product.cost ?? null)
   return { id: product.id, name: product.name, cost: cost != null ? new Prisma.Decimal(cost) : null }
 }
@@ -1422,7 +1427,8 @@ export const LINKABLE_PRODUCTS_MAX = 50
 /**
  * Busca los platillos del negocio que un extra puede «ser» (encargo 27771e). Acotado en el servidor: búsqueda por nombre, orden fijo
  * (nombre, id), página con cursor y el total de coincidencias, para que el selector nunca baje el menú entero. Devuelve también los que
- * hoy no se pueden ligar (sin inventario o por kilo) con su motivo, para que la pantalla los enseñe en gris y diga cómo arreglarlo.
+ * no se pueden ligar (por kilo) con su motivo, para que la pantalla los enseñe en gris. Uno sin inventario sí se liga (founder «B»,
+ * 20-nov): viaja con `inventoryMethod: null` para que la pantalla diga que sólo cuenta en el reporte.
  */
 export async function searchLinkableProducts(venueId: string, query: { search?: string; cursor?: string; limit?: number }) {
   const take = Math.min(Math.max(query.limit ?? LINKABLE_PRODUCTS_PAGE, 1), LINKABLE_PRODUCTS_MAX)
@@ -1455,7 +1461,7 @@ export async function searchLinkableProducts(venueId: string, query: { search?: 
   return {
     data: pagina.map(p => {
       const method = p.trackInventory ? (p.inventoryMethod ?? (p.recipe ? 'RECIPE' : null)) : null
-      const blockedReason = p.soldByWeight ? 'SOLD_BY_WEIGHT' : !method ? 'NOT_INVENTORIED' : null
+      const blockedReason = p.soldByWeight ? 'SOLD_BY_WEIGHT' : null
       return {
         id: p.id,
         name: p.name,
@@ -1579,7 +1585,7 @@ export async function updateModifier(
   if (effectiveRawMaterialId && effectiveLinkedProductId) throw linkAndRawMaterialError()
 
   let linkedProduct: Awaited<ReturnType<typeof findLinkableProductForModifier>> | null = null
-  // Re-mandar el MISMO platillo es no tocarlo: no pide Premium otra vez (un negocio que bajó de plan sigue editando el precio).
+  // Re-mandar el MISMO platillo es no tocarlo: no pide el plan otra vez (un negocio que bajó de plan sigue editando el precio).
   if (data.linkedProductId !== undefined && data.linkedProductId !== existing.linkedProductId) {
     if (data.linkedProductId !== null) {
       linkedProduct = await findLinkableProductForModifier(venueId, data.linkedProductId)

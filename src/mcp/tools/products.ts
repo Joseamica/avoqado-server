@@ -18,7 +18,7 @@ export function registerProductTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'product_sales',
-    'How much of ONE product / menu item a venue you can access has sold over a period (default last 30 days): units sold, revenue, and how many times it was ordered — counting line items on real (non-cancelled) orders. Find it by name. The targeted complement to top_products (which ranks the best sellers) — answers "¿cuántas hamburguesas vendí esta semana? ¿cuánto facturé de X?". If the name matches several products it returns them so you can be specific. Pass venueId + name; optionally fromDate/toDate (YYYY-MM-DD).',
+    'How much of ONE product / menu item a venue you can access has sold over a period (default last 30 days): units sold, revenue, and how many times it was ordered — counting line items on real (non-cancelled) orders. Also unitsInsidePackages: units sold as an extra linked to this item (e.g. the potato flautas inside a combo; no revenue of its own, its price is in the main product), and totalUnits = unitsSold + unitsInsidePackages. Find it by name. The targeted complement to top_products (which ranks the best sellers) — answers "¿cuántas hamburguesas vendí esta semana? ¿cuánto facturé de X?". If the name matches several products it returns them so you can be specific. Pass venueId + name; optionally fromDate/toDate (YYYY-MM-DD).',
     {
       venueId: z.string().describe('Venue that owns the product (must be in your scope)'),
       name: z.string().min(1).describe('Product / menu item name or part of it, e.g. "Hamburguesa"'),
@@ -61,11 +61,28 @@ export function registerProductTools(server: McpServer, scope: McpScope) {
       // Prisma's `aggregate` cannot express the formula (modifiers live in
       // their own table), hence raw SQL. `venueId` is already proven in scope
       // by `guard.venueFilter` above.
-      const [agg] = await prisma.$queryRaw<Array<{ units: Prisma.Decimal | null; revenue: Prisma.Decimal | null; lines: bigint }>>`
+      //
+      // `inside_units` = «Dentro de paquete» (founder «B», 20-nov): unidades vendidas como EXTRA ligado a este platillo
+      // (`Modifier.linkedProductId`, la liga actual), renglón × extra, con los mismos filtros de órdenes. Sin dinero.
+      const [agg] = await prisma.$queryRaw<
+        Array<{ units: Prisma.Decimal | null; revenue: Prisma.Decimal | null; lines: bigint; inside_units?: bigint | number | null }>
+      >`
         SELECT
           COALESCE(SUM(${Prisma.raw(lineUnitsSql())}), 0) as units,
           COALESCE(SUM(${Prisma.raw(lineRevenueSql())}), 0) as revenue,
-          COUNT(oi.id)::bigint as lines
+          COUNT(oi.id)::bigint as lines,
+          (
+            SELECT COALESCE(SUM(oi2.quantity * oim2.quantity), 0)::bigint
+            FROM "OrderItemModifier" oim2
+            INNER JOIN "OrderItem" oi2 ON oi2.id = oim2."orderItemId"
+            INNER JOIN "Order" o2 ON o2.id = oi2."orderId"
+            INNER JOIN "Modifier" m ON m.id = oim2."modifierId"
+            WHERE m."linkedProductId" = ${matches[0].id}
+              AND o2."venueId" = ${venueId}
+              AND ${sqlRangoHoraRealSql('o2', start, end)}
+              AND o2.status NOT IN (${OrderStatus.CANCELLED}::"OrderStatus", ${OrderStatus.DELETED}::"OrderStatus")
+              AND oi2."removedAt" IS NULL
+          ) as inside_units
         FROM "OrderItem" oi
         INNER JOIN "Order" o ON o.id = oi."orderId"
         WHERE oi."productId" = ${matches[0].id}
@@ -85,6 +102,8 @@ export function registerProductTools(server: McpServer, scope: McpScope) {
         unitsSold: round2(num(agg?.units ?? null)),
         revenue: round2(num(agg?.revenue ?? null)),
         timesOrdered: Number(agg?.lines ?? 0), // line-item appearances across orders
+        unitsInsidePackages: Number(agg?.inside_units ?? 0),
+        totalUnits: round2(num(agg?.units ?? null) + Number(agg?.inside_units ?? 0)),
       })
     },
   )

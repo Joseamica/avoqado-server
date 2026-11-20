@@ -5012,9 +5012,9 @@ model Modifier {
   cost            Decimal?              @db.Decimal(10, 4) // Auto-calculated: rawMaterial.avgCostPerUnit × quantityPerUnit
 
   /// Extra que ES un platillo del menú (como Fudo «opcionales = productos» y Toast «New Modifier from Existing Item»; founder,
-  /// 16-nov-2026, encargo 27771e): al venderse descuenta 1 porción de ese platillo por selección (sus piezas o su receta completa,
-  /// por el mismo vale de inventario del cobro) y NO cuenta como venta de ese platillo. Excluye a `rawMaterialId`: un extra descuenta
-  /// un insumo o un platillo, no los dos. Premium (INVENTORY_TRACKING) al ponerlo; quitarlo siempre se puede.
+  /// 16-nov-2026, encargo 27771e): al venderse descuenta 1 porción del platillo por selección (piezas o receta; sin inventario no
+  /// descuenta) y NO es venta suelta suya: sale en «Ventas por artículo» › «Dentro de paquete» (founder «B», 20-nov). Excluye a
+  /// `rawMaterialId`. El plan al ponerlo: `LIGA_DE_EXTRA_PLAN` (menu.dashboard.service.ts); quitarlo siempre se puede.
   linkedProductId String?
   linkedProduct   Product?              @relation("ModifierLinkedProduct", fields: [linkedProductId], references: [id], onDelete: SetNull)
 

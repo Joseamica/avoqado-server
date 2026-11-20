@@ -5,7 +5,13 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { updateProduct, createProduct, getProduct } from '@/services/dashboard/product.dashboard.service'
-import { createMenuCategory, createModifierGroup, updateModifier, updateModifierGroup } from '@/services/dashboard/menu.dashboard.service'
+import {
+  createMenuCategory,
+  createModifierGroup,
+  LIGA_DE_EXTRA_PLAN,
+  updateModifier,
+  updateModifierGroup,
+} from '@/services/dashboard/menu.dashboard.service'
 import { MODIFIER_SKU_FORMAT_MESSAGE, MODIFIER_SKU_MAX, SKU_REGEX } from '@/schemas/dashboard/menu.schema'
 import { auditMcpWrite } from '../audit'
 import { planGateMessage } from '../planGate'
@@ -732,7 +738,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'link_modifier_to_menu_item',
-    'Link a modifier / option (e.g. the "Papas" extra) to an EXISTING menu item (e.g. "Papas a la francesa") so that, every time the extra is sold, the stock or the full recipe of that menu item goes down — like Fudo "opcionales" and Toast "modifier from item". The linked item does NOT count as a sale of that item; the extra keeps its own price. Use unlink:true to remove the link. Linking needs the Premium plan (inventory) and a menu item that tracks inventory (by pieces or by recipe) and is not sold by weight; unlinking is always allowed. It changes how inventory moves, so by DEFAULT it only PREVIEWS (current → new); call again with confirm:true. This WRITES — requires menu:update. Ambiguous names return the candidates.',
+    'Link a modifier / option (e.g. the "Papas" extra) to an EXISTING menu item (e.g. "Papas a la francesa") so that, every time the extra is sold, the stock or the full recipe of that menu item goes down — like Fudo "opcionales" and Toast "modifier from item". The linked item does NOT count as a regular sale of that item: its units show apart, in the sales-by-item report column "Dentro de paquete" (and in product_sales unitsInsidePackages); the extra keeps its own price. If the menu item tracks no inventory, the link only counts those units. Use unlink:true to remove the link. Linking needs the Pro or Premium plan (the same as the sales-by-item report) and a menu item not sold by weight; deducting inventory also needs the menu item to track inventory (Premium). Unlinking is always allowed. It changes how inventory moves, so by DEFAULT it only PREVIEWS (current → new); call again with confirm:true. This WRITES — requires menu:update. Ambiguous names return the candidates.',
     {
       venueId: z.string().describe('Venue that owns the extra (must be in your scope)'),
       modifierName: z.string().min(1).describe('Name of the extra / option, or part of it, e.g. "Papas"'),
@@ -759,8 +765,8 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       guard.requirePermission('menu:update', venueId) // write gate (per-venue role)
       if (!unlink && !menuItemName)
         return text({ ok: false, needsInput: true, question: '¿A qué platillo del menú quieres ligar este extra?' })
-      if (!unlink) {
-        const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'Ligar un extra a un platillo del menú')
+      if (!unlink && LIGA_DE_EXTRA_PLAN) {
+        const gate = await planGateMessage(venueId, LIGA_DE_EXTRA_PLAN.feature, 'Ligar un extra a un platillo del menú')
         if (gate) return text({ ok: false, planRequired: true, error: gate })
       }
 
@@ -794,7 +800,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
         })
       const modifier = modifiers[0]
 
-      let product: { id: string; name: string } | null = null
+      let product: { id: string; name: string; deducts: boolean } | null = null
       if (!unlink) {
         const products = await matchProductsByName({ venueId: { in: [venueId] } }, menuItemName!, confirm ? resolvedProductId : undefined)
         if (products.length === 0) return text({ ok: false, error: `No hay un platillo que se llame "${menuItemName}" en ese negocio.` })
@@ -805,7 +811,13 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
             error: `"${menuItemName}" coincide con varios platillos: sé más específico.`,
             matches: products.map(p => p.name),
           })
-        product = { id: products[0].id, name: products[0].name }
+        // Sin inventario también se liga (founder «B», 20-nov): ahí no descuenta y sólo cuenta en «Dentro de paquete».
+        const inv = await prisma.product.findFirst({
+          where: { id: products[0].id, venueId },
+          select: { trackInventory: true, inventoryMethod: true, recipe: { select: { id: true } } },
+        })
+        const deducts = !!inv?.trackInventory && !!(inv.inventoryMethod ?? inv.recipe)
+        product = { id: products[0].id, name: products[0].name, deducts }
       }
 
       const fingerprint = operationHash({
@@ -829,7 +841,11 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
         : modifier.rawMaterialId
           ? 'descuenta un insumo'
           : 'no descuenta inventario'
-      const to = product ? `descuenta «${product.name}»` : 'no descuenta inventario'
+      const to = product
+        ? product.deducts
+          ? `descuenta «${product.name}»`
+          : `cuenta como «${product.name}» (sin inventario: no descuenta)`
+        : 'no descuenta inventario'
       if (!confirm) {
         return text({
           ok: false,
@@ -839,7 +855,11 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           expectedSourceFingerprint: fingerprint,
           change: { item: `${modifier.group.name} › ${modifier.name}`, label: 'Inventario del extra', from, to },
           message: product
-            ? `Cada vez que se venda «${modifier.name}» bajará 1 porción de «${product.name}» (sus piezas o su receta). No contará como venta de «${product.name}». Confirma con el operador y vuelve a llamar con confirm:true.`
+            ? `${
+                product.deducts
+                  ? `Cada vez que se venda «${modifier.name}» bajará 1 porción de «${product.name}» (sus piezas o su receta).`
+                  : `«${product.name}» no lleva inventario: el extra no descontará nada.`
+              } No contará como venta suelta de «${product.name}»: sus unidades salen aparte en Ventas por artículo, columna «Dentro de paquete». Confirma con el operador y vuelve a llamar con confirm:true.`
             : `«${modifier.name}» dejará de descontar el inventario de ${modifier.linkedProduct ? `«${modifier.linkedProduct.name}»` : 'su platillo'}. Confirma con el operador y vuelve a llamar con confirm:true.`,
         })
       }
@@ -852,7 +872,12 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           venueId,
           data: { modifier: modifier.name, from: modifier.linkedProductId, to: product?.id ?? null },
         })
-        return text({ ok: true, extra: modifier.name, deductsMenuItem: product?.name ?? null })
+        return text({
+          ok: true,
+          extra: modifier.name,
+          deductsMenuItem: product?.name ?? null,
+          ...(product ? { deductsInventory: product.deducts } : {}),
+        })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

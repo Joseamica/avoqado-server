@@ -1,9 +1,11 @@
 /**
- * Extra ligado a un PLATILLO del menú (encargo 27771e; founder, 16-nov-2026: como Fudo y Toast; Premium).
+ * Extra ligado a un PLATILLO del menú (encargo 27771e; founder, 16-nov-2026: como Fudo y Toast; Pro y Premium desde el 20-nov).
  *
  * El dueño escoge en la ficha del extra el platillo que ese extra «es». Reglas al ligar:
- *  - Premium (INVENTORY_TRACKING) sólo para PONERLO; quitarlo siempre se puede.
- *  - Mismo negocio, no borrado, que lleve inventario (por piezas o por receta) y que no se venda por kilo.
+ *  - Pro y Premium (`ADVANCED_REPORTS`, el plan del reporte; founder «A», 20-nov) sólo para PONERLO; quitarlo siempre se puede.
+ *    Antes era Premium (INVENTORY_TRACKING). Que DESCUENTE sigue siendo Premium: lo decide el inventario del platillo.
+ *  - Mismo negocio, no borrado y que no se venda por kilo. Sin inventario también se liga (founder «B», 20-nov, Flautas): ahí no
+ *    descuenta nada y sólo cuenta en «Ventas por artículo» como «Dentro de paquete».
  *  - Un extra descuenta un insumo o un platillo, no los dos.
  *  - El costo del extra pasa a ser el del platillo (receta o costo del producto).
  *  - La bitácora del dueño dice de qué platillo a qué platillo.
@@ -19,7 +21,8 @@ jest.mock('@/services/access/basePlan.service', () => ({
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
-import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import { elPlanConcede, venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import { LIGA_DE_EXTRA_PLAN } from '@/services/dashboard/menu.dashboard.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
 const params = {
@@ -117,7 +120,7 @@ describe('Extra ligado a un platillo del menú', () => {
     )
   })
 
-  it('sin Premium no se puede PONER: 403 con código y explicación, sin escribir', async () => {
+  it('sin Pro (plan Gratis) no se puede PONER: 403 con código y explicación, sin escribir', async () => {
     premium(false)
     const err = await updateModifier(
       params.venueId,
@@ -127,12 +130,27 @@ describe('Extra ligado a un platillo del menú', () => {
     ).catch(e => e)
     expect(err.statusCode).toBe(403)
     expect(err.code).toBe('MODIFIER_LINK_REQUIRES_PREMIUM')
-    expect(err.message).toMatch(/Premium/)
+    expect(err.message).toMatch(/plan Pro/)
     expect(prismaMock.modifier.update).not.toHaveBeenCalled()
-    expect(venueHasFeatureAccess).toHaveBeenCalledWith(params.venueId, 'INVENTORY_TRACKING')
+    expect(venueHasFeatureAccess).toHaveBeenCalledWith(params.venueId, 'ADVANCED_REPORTS')
   })
 
-  it('sin Premium SÍ se puede QUITAR (bajar de plan no deja el extra atorado)', async () => {
+  it('founder «A» (20-nov): Pro y Premium ligan — el candado es el del reporte, no el de inventario', () => {
+    expect(LIGA_DE_EXTRA_PLAN).toEqual({ feature: 'ADVANCED_REPORTS', plan: 'Pro' })
+    expect(elPlanConcede('PRO', LIGA_DE_EXTRA_PLAN!.feature)).toBe(true)
+    expect(elPlanConcede('PREMIUM', LIGA_DE_EXTRA_PLAN!.feature)).toBe(true)
+  })
+
+  it('un negocio Pro (con reportes, SIN inventario Premium) liga su extra', async () => {
+    ;(venueHasFeatureAccess as jest.Mock).mockImplementation(async (_venueId: string, code: string) => code === 'ADVANCED_REPORTS')
+    prismaMock.product.findFirst.mockResolvedValue({ ...papas, trackInventory: false, inventoryMethod: null } as any)
+    await createModifier(params.venueId, params.modifierGroupId, parseAlta({ name: 'Papas', price: 0, linkedProductId: PAPAS_ID }))
+    const data = (prismaMock.modifier.create.mock.calls[0][0] as any).data
+    expect(data.linkedProduct).toEqual({ connect: { id: PAPAS_ID } })
+    expect(venueHasFeatureAccess).not.toHaveBeenCalledWith(params.venueId, 'INVENTORY_TRACKING')
+  })
+
+  it('sin plan SÍ se puede QUITAR (bajar de plan no deja el extra atorado)', async () => {
     premium(false)
     prismaMock.modifier.findFirst.mockResolvedValue({
       id: params.modifierId,
@@ -158,17 +176,32 @@ describe('Extra ligado a un platillo del menú', () => {
     expect(prismaMock.modifier.update).not.toHaveBeenCalled()
   })
 
-  it('un platillo SIN inventario se rechaza con la salida (prenderle el inventario)', async () => {
+  it('un platillo SIN inventario SÍ se liga (founder «B», 20-nov): no descuenta nada, sólo cuenta en «Dentro de paquete»', async () => {
     prismaMock.product.findFirst.mockResolvedValue({ ...papas, trackInventory: false, inventoryMethod: null } as any)
-    const err = await updateModifier(
+    await updateModifier(params.venueId, params.modifierGroupId, params.modifierId, parseEdicion({ linkedProductId: PAPAS_ID }))
+    const data = (prismaMock.modifier.update.mock.calls[0][0] as any).data
+    expect(data.linkedProduct).toEqual({ connect: { id: PAPAS_ID } })
+    expect(data.cost.toString()).toBe('12.5') // el costo del producto, si tiene
+  })
+
+  it('sin inventario y sin costo: se liga con costo vacío (no inventa uno)', async () => {
+    prismaMock.product.findFirst.mockResolvedValue({ ...papas, trackInventory: false, inventoryMethod: null, cost: null } as any)
+    await createModifier(params.venueId, params.modifierGroupId, parseAlta({ name: 'Papas', price: 0, linkedProductId: PAPAS_ID }))
+    const data = (prismaMock.modifier.create.mock.calls[0][0] as any).data
+    expect(data.linkedProduct).toEqual({ connect: { id: PAPAS_ID } })
+    expect(data.cost).toBeNull()
+  })
+
+  it('el candado de plan (Pro) sigue pidiéndose aunque el platillo no lleve inventario', async () => {
+    premium(false)
+    prismaMock.product.findFirst.mockResolvedValue({ ...papas, trackInventory: false, inventoryMethod: null } as any)
+    const err = await createModifier(
       params.venueId,
       params.modifierGroupId,
-      params.modifierId,
-      parseEdicion({ linkedProductId: PAPAS_ID }),
+      parseAlta({ name: 'Papas', price: 0, linkedProductId: PAPAS_ID }),
     ).catch(e => e)
-    expect(err.statusCode).toBe(400)
-    expect(err.code).toBe('MODIFIER_LINK_NOT_INVENTORIED')
-    expect(err.message).toMatch(/inventario/)
+    expect(err.code).toBe('MODIFIER_LINK_REQUIRES_PREMIUM')
+    expect(prismaMock.modifier.create).not.toHaveBeenCalled()
   })
 
   it('un platillo que se vende por kilo se rechaza', async () => {
@@ -243,7 +276,7 @@ describe('Extra ligado a un platillo del menú', () => {
     expect(data.cost.toString()).toBe('6')
   })
 
-  it('regresión: una app vieja que edita el extra sin mandar el campo no toca el ligado ni pide Premium', async () => {
+  it('regresión: una app vieja que edita el extra sin mandar el campo no toca el ligado ni pide plan', async () => {
     premium(false)
     prismaMock.modifier.findFirst.mockResolvedValue({
       id: params.modifierId,
@@ -258,7 +291,7 @@ describe('Extra ligado a un platillo del menú', () => {
     expect(venueHasFeatureAccess).not.toHaveBeenCalled()
   })
 
-  it('re-mandar el MISMO platillo (editar el precio) no pide Premium ni reescribe el ligado', async () => {
+  it('re-mandar el MISMO platillo (editar el precio) no pide plan ni reescribe el ligado', async () => {
     premium(false)
     prismaMock.modifier.findFirst.mockResolvedValue({
       id: params.modifierId,
@@ -345,7 +378,7 @@ describe('Buscador del platillo a ligar (acotado en el servidor)', () => {
     expect(out.nextCursor).toBe('b')
   })
 
-  it('marca en gris los que no se pueden ligar, con su motivo', async () => {
+  it('marca en gris sólo los de kilo; uno sin inventario se puede ligar (sólo cuenta en el reporte)', async () => {
     prismaMock.product.count.mockResolvedValue(4 as any)
     prismaMock.product.findMany.mockResolvedValue([
       fila('ok'),
@@ -357,7 +390,7 @@ describe('Buscador del platillo a ligar (acotado en el servidor)', () => {
     expect(out.data.map(d => [d.id, d.linkable, d.blockedReason])).toEqual([
       ['ok', true, null],
       ['receta', true, null],
-      ['sin', false, 'NOT_INVENTORIED'],
+      ['sin', true, null],
       ['kilo', false, 'SOLD_BY_WEIGHT'],
     ])
     expect(out.hasMore).toBe(false)

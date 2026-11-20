@@ -123,6 +123,10 @@ export async function salesByItem(req: Request, res: Response, next: NextFunctio
     }
 
     const report = await getSalesByItem(venueId, filters)
+    // «Dentro de paquete» (founder «B», 20-nov) agrega renglones de platillos que SÓLO se vendieron dentro de paquetes (0 sueltas).
+    // El POS de hoy los pintaría como «más vendidos» con 0 piezas: a /mobile le llegan los mismos renglones de siempre (todos con al
+    // menos una venta suelta). Los campos nuevos de cada renglón y de los totales viajan como opcionales.
+    report.items = report.items.filter(item => item.itemsSold > 0)
 
     res.json({
       success: true,
