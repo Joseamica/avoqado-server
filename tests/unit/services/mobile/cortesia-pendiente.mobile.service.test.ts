@@ -526,7 +526,7 @@ describe('Task4 revisarCortesiaPendiente — financial service only, isolated un
     await rejected(body, [409])
     const { UNRESOLVED_FINANCIAL_OUTCOME } = await import('@/services/terminal-payment.service')
     const tx = transactions[transactions.length - 1]
-    expect(tx.terminalPaymentRequest.findFirst).toHaveBeenCalledWith({ where: { venueId: VENUE, orderId: ORDER, ...UNRESOLVED_FINANCIAL_OUTCOME }, select: { requestId: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
+    expect(tx.terminalPaymentRequest.findFirst).toHaveBeenCalledWith({ where: { venueId: VENUE, orderId: ORDER, ...UNRESOLVED_FINANCIAL_OUTCOME }, select: { requestId: true, amountCents: true, tipCents: true, senderDevice: true, createdAt: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] })
     expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.terminalPaymentRequest.findFirst.mock.invocationCallOrder[0])
   })
 

@@ -1199,7 +1199,8 @@ describe('Task4: el primer cierre en cero espera el desenlace acreditado de la t
     const { UNRESOLVED_FINANCIAL_OUTCOME } = await import('@/services/terminal-payment.service')
     expect(prismaMock.terminalPaymentRequest.findFirst).toHaveBeenCalledWith({
       where: { venueId: 'venue-1', orderId: 'order-1', ...UNRESOLVED_FINANCIAL_OUTCOME },
-      select: { requestId: true },
+      // F1: la MISMA consulta del bloqueador para cobrar, cancelar y el aviso del POS (trae importe y propina).
+      select: { requestId: true, amountCents: true, tipCents: true, senderDevice: true, createdAt: true },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     })
     const guard = prismaMock.terminalPaymentRequest.findFirst.mock.invocationCallOrder[0]
