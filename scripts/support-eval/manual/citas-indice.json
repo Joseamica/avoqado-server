@@ -264,7 +264,7 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/network/ForbiddenInterceptor.kt": [
       {
         "pagina": "android/mesas/anular-producto-enviado",
-        "sourceRef": "0caaeb42c542cc3ca61144e7b615dab1fc3a1209"
+        "sourceRef": "f67d76027e1ee5e0ee50e8861fcf6568da7c82c1"
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
@@ -272,7 +272,7 @@
       },
       {
         "pagina": "windows/mesas/anular-producto-enviado",
-        "sourceRef": "0caaeb42c542cc3ca61144e7b615dab1fc3a1209"
+        "sourceRef": "f67d76027e1ee5e0ee50e8861fcf6568da7c82c1"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/network/ServerErrorText.kt": [
@@ -3122,7 +3122,7 @@
       },
       {
         "pagina": "android/mesas/anular-producto-enviado",
-        "sourceRef": "0caaeb42c542cc3ca61144e7b615dab1fc3a1209"
+        "sourceRef": "f67d76027e1ee5e0ee50e8861fcf6568da7c82c1"
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
@@ -3138,7 +3138,7 @@
       },
       {
         "pagina": "windows/mesas/anular-producto-enviado",
-        "sourceRef": "0caaeb42c542cc3ca61144e7b615dab1fc3a1209"
+        "sourceRef": "f67d76027e1ee5e0ee50e8861fcf6568da7c82c1"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt": [
@@ -3156,7 +3156,7 @@
       },
       {
         "pagina": "android/mesas/anular-producto-enviado",
-        "sourceRef": "0caaeb42c542cc3ca61144e7b615dab1fc3a1209"
+        "sourceRef": "f67d76027e1ee5e0ee50e8861fcf6568da7c82c1"
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
@@ -3172,7 +3172,7 @@
       },
       {
         "pagina": "windows/mesas/anular-producto-enviado",
-        "sourceRef": "0caaeb42c542cc3ca61144e7b615dab1fc3a1209"
+        "sourceRef": "f67d76027e1ee5e0ee50e8861fcf6568da7c82c1"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt": [
@@ -3182,7 +3182,7 @@
       },
       {
         "pagina": "android/mesas/anular-producto-enviado",
-        "sourceRef": "0caaeb42c542cc3ca61144e7b615dab1fc3a1209"
+        "sourceRef": "f67d76027e1ee5e0ee50e8861fcf6568da7c82c1"
       },
       {
         "pagina": "android/mesas/mover-o-unir-cuentas",
@@ -3194,7 +3194,7 @@
       },
       {
         "pagina": "windows/mesas/anular-producto-enviado",
-        "sourceRef": "0caaeb42c542cc3ca61144e7b615dab1fc3a1209"
+        "sourceRef": "f67d76027e1ee5e0ee50e8861fcf6568da7c82c1"
       },
       {
         "pagina": "windows/mesas/mover-o-unir-cuentas",
@@ -3662,7 +3662,7 @@
       },
       {
         "pagina": "android/mesas/anular-producto-enviado",
-        "sourceRef": "0caaeb42c542cc3ca61144e7b615dab1fc3a1209"
+        "sourceRef": "f67d76027e1ee5e0ee50e8861fcf6568da7c82c1"
       },
       {
         "pagina": "android/mesas/mover-o-unir-cuentas",
@@ -3786,7 +3786,7 @@
       },
       {
         "pagina": "windows/mesas/anular-producto-enviado",
-        "sourceRef": "0caaeb42c542cc3ca61144e7b615dab1fc3a1209"
+        "sourceRef": "f67d76027e1ee5e0ee50e8861fcf6568da7c82c1"
       },
       {
         "pagina": "windows/mesas/mover-o-unir-cuentas",

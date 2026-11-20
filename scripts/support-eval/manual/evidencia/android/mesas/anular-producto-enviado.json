@@ -1,7 +1,7 @@
 {
   "pagina": "android/mesas/anular-producto-enviado",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "0caaeb42c542cc3ca61144e7b615dab1fc3a1209",
+  "sourceRef": "f67d76027e1ee5e0ee50e8861fcf6568da7c82c1",
   "version": "2.25.52",
   "pasos": [
     {
@@ -31,7 +31,7 @@
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 1067,
+      "linea": 1074,
       "cita": "Text(\"Motivo\", fontWeight = FontWeight.SemiBold)"
     },
     {
@@ -43,7 +43,7 @@
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 1047,
+      "linea": 1054,
       "cita": "text = \"Anular producto\","
     },
     {
@@ -55,7 +55,7 @@
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 1062,
+      "linea": 1069,
       "cita": ") { Text(\"Dar de cortesía\") }"
     },
     {
