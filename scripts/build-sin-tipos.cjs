@@ -9,13 +9,41 @@ const ts = require('typescript')
 const fs = require('fs')
 const path = require('path')
 
+// `--comparar <dist de tsc> <dist de este script>`: el CI lo corre antes de desplegar (Codex r1 de #533). Transpilar suelto
+// no ve otros archivos (const enum entre archivos, imports con alias o con `.js` hacia fuera del include): si algún día
+// sale distinto de tsc, el CI se pone rojo en vez de desplegar un dist que no arranca. .js idénticos; .json mismo contenido.
+if (process.argv[2] === '--comparar') {
+  const [a, b] = process.argv.slice(3).map(d => path.resolve(d))
+  const listar = (raiz, dir = raiz) =>
+    fs
+      .readdirSync(dir, { withFileTypes: true })
+      .flatMap(e => (e.isDirectory() ? listar(raiz, path.join(dir, e.name)) : [path.relative(raiz, path.join(dir, e.name))]))
+  const enA = new Set(listar(a))
+  const enB = new Set(listar(b))
+  const malos = [...new Set([...enA, ...enB])].sort().filter(rel => {
+    if (!enA.has(rel) || !enB.has(rel)) return true
+    const x = fs.readFileSync(path.join(a, rel))
+    const y = fs.readFileSync(path.join(b, rel))
+    if (rel.endsWith('.json')) return JSON.stringify(JSON.parse(x)) !== JSON.stringify(JSON.parse(y))
+    return !x.equals(y)
+  })
+  for (const rel of malos)
+    console.error(`distinto de tsc: ${rel}${enA.has(rel) ? '' : ' (sólo aquí)'}${enB.has(rel) ? '' : ' (falta aquí)'}`)
+  console.log(`build-sin-tipos --comparar: ${enA.size} archivos de tsc, ${malos.length} distintos`)
+  process.exit(malos.length ? 1 : 0)
+}
+
 const proyecto = process.argv[2] || 'tsconfig.build.json'
-const cfg = ts.getParsedCommandLineOfConfigFile(proyecto, {}, {
-  ...ts.sys,
-  onUnRecoverableConfigFileDiagnostic: d => {
-    throw new Error(ts.flattenDiagnosticMessageText(d.messageText, '\n'))
+const cfg = ts.getParsedCommandLineOfConfigFile(
+  proyecto,
+  {},
+  {
+    ...ts.sys,
+    onUnRecoverableConfigFileDiagnostic: d => {
+      throw new Error(ts.flattenDiagnosticMessageText(d.messageText, '\n'))
+    },
   },
-})
+)
 if (cfg.errors.length) {
   for (const d of cfg.errors) console.error(ts.flattenDiagnosticMessageText(d.messageText, '\n'))
   process.exit(1)
