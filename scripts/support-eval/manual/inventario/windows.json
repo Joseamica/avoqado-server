@@ -2925,6 +2925,14 @@
       "origen": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt:131",
       "quienLaVe": "en «Vender tarjeta» (Atajos › Tarjeta de regalo), con `giftCards:sell` (src/routes/mobile.routes.ts:1705); de fábrica CASHIER, MANAGER, ADMIN, OWNER (src/lib/permissions.ts:1001, 1146, 1256, 1415); sólo con más de una tarjeta en la venta (`form.sobres.size > 1`).",
       "paginas": []
+    },
+    {
+      "id": "extra:franja-de-pantallas-de-cocina",
+      "tipo": "pantalla",
+      "nombre": "La pantalla de cocina de {estación} no está conectada a internet",
+      "origen": "app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt:186",
+      "quienLaVe": "Quien tiene sesión en la caja, arriba de cualquier pantalla: es la franja de «Sin conexión» (app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:526-533 y 833-840), no una pantalla del NavHost, por eso el extractor no la ve. Sólo con internet (app/src/main/java/com/avoqado/pos/designsystem/components/ConnectivityBanner.kt:96-97), con `orders:read` (avoqado-server/src/routes/mobile.routes.ts:4157) y cuando el SERVIDOR dice que una estación activa con pantalla de cocina y plan KITCHEN_DISPLAY lleva 90 s sin pedir su tablero (app/src/main/java/com/avoqado/pos/kds/data/EstadoDePantallasDeCocina.kt:116; avoqado-server/src/services/kds/kitchenDisplayStations.ts:85-108). En la misma franja sale «La pantalla de {estación} no se alcanza por el WiFi» (app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt:172). Las líneas son del commit 6e37a5418eda101109e73fd319bdb3eb5932cbe6 (D6 de Flautas, 20-nov-2026), posterior a la ref de este inventario: la franja de internet no existe en las versiones vivas de la cabecera y su página lleva versionMin.",
+      "paginas": ["windows/impresoras/pantalla-de-cocina-sin-internet"]
     }
   ]
 }
