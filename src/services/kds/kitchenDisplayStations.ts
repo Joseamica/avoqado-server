@@ -42,6 +42,18 @@ export async function venueTienePantallaDeCocina(venueId: string, db: Db = prism
   return estacion != null
 }
 
+/**
+ * D6 de Flautas (opción B, Codex r5 #6): ¿[stationId] es una estación ACTIVA con pantalla de ESTE negocio? Sólo la lectura
+ * del tablero de una así marca viva a su pantalla: un id ajeno, inexistente o sin pantalla no cuenta.
+ */
+export async function esEstacionConPantalla(venueId: string, stationId: string, db: Db = prisma): Promise<boolean> {
+  const estacion = await db.printStation.findFirst({
+    where: { id: stationId, venueId, active: true, hasKitchenDisplay: true },
+    select: { id: true },
+  })
+  return estacion != null
+}
+
 export interface EstacionesDelNegocio {
   /** La MISMA regla que la print-config de la caja (`buildPrintConfig` → `routingConfigFrom`). */
   routing: RoutingConfig

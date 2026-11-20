@@ -12,6 +12,8 @@ import * as kdsMobileService from '../../services/mobile/kds.mobile.service'
 import { reportOutOfStock, retryOutOfStock, type ResultadoRetiro } from '../../services/mobile/kdsOutOfStock.mobile.service'
 import { OPERACION_EN_CURSO } from './deliveryOrder.mobile.controller'
 import { listKitchenPreparation, preparationCapabilities } from '../../services/kds/kitchenPreparation.service'
+import { marcarPantallaViva, pantallasConectadas } from '../../services/kds/pantallasVivas'
+import { esEstacionConPantalla } from '../../services/kds/kitchenDisplayStations'
 
 export const getPreparationCapabilities = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -64,6 +66,9 @@ export const listKdsOrders = async (req: Request, res: Response, next: NextFunct
         : kdsMobileService.listKdsOrders(venueId, status as string | undefined, estacion),
       kdsMobileService.countKdsOrders(venueId, status as string | undefined, estacion),
     ])
+    // D6 de Flautas (opción B): la pantalla de esta estación está viva. Sólo con el tablero ya leído y con una estación activa
+    // con pantalla de ESTE negocio (Codex r5 #6): lo que lee el vigilante de reparto (sin estación) o un id ajeno no cuenta.
+    if (estacion && (await esEstacionConPantalla(venueId, estacion))) marcarPantallaViva(venueId, estacion)
 
     // El total va en un encabezado y no en el cuerpo: las apps de la calle leen `data` como
     // arreglo y no deben cambiar. Si el tope recortó, queda dicho en el log (por negocio).
@@ -341,6 +346,20 @@ export const recallKdsOrder = async (req: Request, res: Response, next: NextFunc
     res.status(200).json({ success: true, data })
   } catch (error) {
     logControllerError('kds recallKdsOrder', error)
+    next(error)
+  }
+}
+
+/**
+ * D6 de Flautas (opción B): las estaciones cuya pantalla de cocina pidió su tablero hace ≤ 45 s. La caja lo usa para decir
+ * con una franja fija si una pantalla NO está conectada.
+ * @route GET /api/v1/mobile/venues/:venueId/kds/pantallas-conectadas
+ */
+export const listarPantallasConectadas = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.status(200).json({ success: true, data: pantallasConectadas(req.params.venueId) })
+  } catch (error) {
+    logControllerError('kds listarPantallasConectadas', error)
     next(error)
   }
 }

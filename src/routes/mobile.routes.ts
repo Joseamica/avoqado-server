@@ -4147,6 +4147,18 @@ router.get(
 )
 
 /**
+ * GET /api/v1/mobile/venues/:venueId/kds/pantallas-conectadas
+ * D6 de Flautas (opción B): qué pantallas de cocina pidieron su tablero hace ≤ 45 s. Sólo lee.
+ */
+router.get(
+  '/venues/:venueId/kds/pantallas-conectadas',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  kdsMobileController.listarPantallasConectadas,
+)
+
+/**
  * POST /api/v1/mobile/venues/:venueId/kds/orders/bump-batch
  * «Marcar todas listas». Body: { ids: string[] } (1..100). Etapa 3 del KDS.
  */
