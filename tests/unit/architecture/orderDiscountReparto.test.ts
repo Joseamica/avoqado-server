@@ -237,12 +237,6 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
     clase: 'SOLO_MARCA',
     marcas: ['data: { usoContado: false, usoDevueltoAlAnular: true }'],
   },
-  // hz:e82938e1:D26: la cuenta anulada que revive por dinero ya capturado vuelve a gastar el uso de cada fila que lo devolvió al anular:
-  // sólo cambian las marcas (`usoContado` vuelve, `usoDevueltoAlAnular` se suelta); ni importe, ni IVA, ni reparto.
-  'src/services/shared/usoDelDescuento.ts#volverAGastarUsosDeCuentaRevividaEnTx': {
-    clase: 'SOLO_MARCA',
-    marcas: ['data: { usoContado: true, usoDevueltoAlAnular: false }'],
-  },
   // D24 (Codex r1 #4a, r2 #5): en la cuenta que se anula, la fila cuyo descuento se borró del catálogo sólo pierde la marca.
   'src/services/shared/usoDelDescuento.ts#soltarMarcaDeFilasSinDescuentoEnTx': {
     clase: 'SOLO_MARCA',

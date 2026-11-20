@@ -514,11 +514,85 @@ describe('ticketTotals · la cortesía en $0 de Mesas (D41 «C»)', () => {
     })
   })
 
-  it('cuenta toda de cortesía cobrada en $0 o pagada en partes: nada se desglosa, como hoy', () => {
-    expect(ticketTotals({ payment: cobro(0), order: orden({ subtotal: 0, cortesiaEnCero: 20 }), cobrosDeVenta: 0 })).toMatchObject({
+  it('cuenta toda de cortesía cerrada con un solo cobro de $0: Mesas y Mostrador dicen $20 − $20 = $0 (encargo 27fd34, Codex r6 #3)', () => {
+    const enMesas = ticketTotals({ payment: cobro(0), order: orden({ subtotal: 0, cortesiaEnCero: 20 }), cobrosDeVenta: 0 })
+    const enMostrador = ticketTotals({ payment: cobro(0), order: orden({ subtotal: 20, discountAmount: 20 }), cobrosDeVenta: 0 })
+    expect(enMesas).toEqual({
+      kind: 'COBRO',
+      desglosado: true,
+      subtotal: 20,
+      discount: 20,
+      cortesia: 20,
+      serviceCharge: 0,
+      addedTax: 0,
+      tip: 0,
+      total: 0,
+    })
+    expect(enMostrador).toEqual({
+      kind: 'COBRO',
+      desglosado: true,
+      subtotal: 20,
+      discount: 20,
+      serviceCharge: 0,
+      addedTax: 0,
+      tip: 0,
+      total: 0,
+    })
+  })
+
+  it('cuenta en $0 cuyo desglose no cabe en el papel de ANDROID (carrito gratis de $25 millones): sin desglose, como antes (Codex r2 #6)', () => {
+    expect(
+      ticketTotals({ payment: cobro(0), order: orden({ subtotal: 25_000_000, discountAmount: 25_000_000 }), cobrosDeVenta: 0 }),
+    ).toMatchObject({ desglosado: false, subtotal: 0, total: 0 })
+  })
+
+  it('cobro de $0 que NO cierra la cuenta: sin desglose, como hoy', () => {
+    // La cuenta todavía debe $20 (un «cobro» de $0 no la paga), o ya tiene otro cobro de venta (un registro de sólo propina).
+    expect(ticketTotals({ payment: cobro(0), order: orden({ subtotal: 20 }), cobrosDeVenta: 0 })).toMatchObject({
+      desglosado: false,
+      total: 0,
+    })
+    expect(ticketTotals({ payment: cobro(0, 5), order: orden({ subtotal: 30 }), cobrosDeVenta: 1 })).toMatchObject({
+      desglosado: false,
+      total: 5,
+    })
+    // Codex r1 #1 (encargo 27fd34): la mesa se cerró en $0 y después llega de la cola un registro de $0 con $15 de propina: es sólo
+    // propina, no vuelve a pintar la Agua ni su descuento.
+    expect(ticketTotals({ payment: cobro(0, 15), order: orden({ subtotal: 0, cortesiaEnCero: 20 }), cobrosDeVenta: 0 })).toEqual({
+      kind: 'COBRO',
       desglosado: false,
       subtotal: 0,
+      serviceCharge: 0,
+      addedTax: 0,
+      tip: 15,
+      total: 15,
     })
+    // Un intento fallido de $0 no es venta.
+    expect(
+      ticketTotals({ payment: cobro(0, 0, 'REGULAR', 'FAILED'), order: orden({ subtotal: 0, cortesiaEnCero: 20 }), cobrosDeVenta: 0 }),
+    ).toMatchObject({
+      desglosado: false,
+    })
+  })
+
+  it('cortesía que no cabe en el papel de ANDROID (centavos en Int, $21,474,836.47): no se suma, digital y reimpresión iguales (Codex r7 #2)', () => {
+    // Dos renglones de $12,000,000 de cortesía y un artículo de $100 cobrado: como antes de D41.
+    expect(ticketTotals({ payment: cobro(100), order: orden({ subtotal: 100, cortesiaEnCero: 24_000_000 }), cobrosDeVenta: 1 })).toEqual({
+      kind: 'COBRO',
+      desglosado: true,
+      subtotal: 100,
+      serviceCharge: 0,
+      addedTax: 0,
+      tip: 0,
+      total: 100,
+    })
+    // Justo en el tope sí se suma.
+    expect(
+      ticketTotals({ payment: cobro(100), order: orden({ subtotal: 100, cortesiaEnCero: 21_474_736.47 }), cobrosDeVenta: 1 }),
+    ).toMatchObject({ subtotal: 21_474_836.47, discount: 21_474_736.47, cortesia: 21_474_736.47 })
+  })
+
+  it('cuenta toda de cortesía pagada en partes: nada se desglosa, como hoy', () => {
     expect(ticketTotals({ payment: cobro(20), order: mesas, cobrosDeVenta: 1 })).toMatchObject({
       desglosado: false,
       parcial: true,

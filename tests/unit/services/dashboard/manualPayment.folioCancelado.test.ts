@@ -129,8 +129,6 @@ function txSobre(o: { status: 'CANCELLED' | 'DELETED'; folio: boolean }) {
       findFirst: jest.fn(async () => ({ id: 'sv-1' })),
     },
     notification: { createMany: jest.fn(async ({ data }: any) => ({ count: data.length })) },
-    // D26: la reapertura busca las filas que devolvieron su uso al anular (D24); un folio no tiene (su cortesía ya lo devolvió).
-    orderDiscount: { findMany: jest.fn(async () => []) },
     payment: {
       count: jest.fn().mockResolvedValue(0),
       findUnique: jest.fn().mockResolvedValue(null),

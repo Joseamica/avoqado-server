@@ -16,6 +16,7 @@ jest.mock('@/services/dashboard/menu.dashboard.service', () => ({
   createMenuCategory: jest.fn(),
   createModifierGroup: jest.fn(),
   updateModifier: (...a: unknown[]) => mockUpdateModifier(...a),
+  LIGA_DE_EXTRA_PLAN: { feature: 'ADVANCED_REPORTS', plan: 'Pro' },
 }))
 jest.mock('@/services/dashboard/product.dashboard.service', () => ({
   updateProduct: jest.fn(),
@@ -91,7 +92,7 @@ it('la vista previa trae los argumentos firmados (con el extra y el platillo vis
 
   const r = await call({ ...preview.confirmationArguments, confirm: true, confirmationToken: preview.confirmationToken })
   expect(r).toMatchObject({ ok: true, deductsMenuItem: 'Papas a la francesa' })
-  expect(mockUpdateModifier).toHaveBeenCalledWith(venueId, 'g1', 'mod-papas', { linkedProductId: 'p-papas' })
+  expect(mockUpdateModifier).toHaveBeenCalledWith(venueId, 'g1', 'mod-papas', { linkedProductId: 'p-papas' }, { linkedDeducts: false })
 })
 
 it('con otro platillo distinto al de la vista previa no escribe', async () => {

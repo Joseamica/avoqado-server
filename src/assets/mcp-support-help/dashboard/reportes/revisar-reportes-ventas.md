@@ -27,6 +27,10 @@ keywords:
   - el reporte no coincide con los pagos
   - una métrica sale vacía
   - exportar reporte de ventas
+  - ventas por artículo
+  - dentro de paquete
+  - las flautas del paquete no salen como vendidas
+  - las piezas de un combo no salen en el reporte
 ---
 
 ## Antes de empezar
@@ -41,7 +45,7 @@ Ten presente que los reportes pueden tratar descuentos, propinas, impuestos y co
 2. Selecciona el rango de fechas.
 3. Elige el tipo de reporte o vista disponible.
 4. Revisa métricas como ventas brutas, descuentos, reembolsos, ventas netas, impuestos, propinas y total cobrado.
-5. Abre **Ventas por producto** para analizar artículos vendidos.
+5. Abre **Reportes > Ventas por artículo** para analizar artículos vendidos.
 6. Exporta o comparte datos solo después de confirmar filtros y sucursal.
 
 ## Problemas frecuentes
@@ -49,6 +53,12 @@ Ten presente que los reportes pueden tratar descuentos, propinas, impuestos y co
 Si el reporte no coincide con pagos, revisa filtros, cancelaciones, descuentos y reembolsos. Si ventas por producto no coincide con inventario, valida recetas y movimientos. Si una métrica parece vacía, puede depender de permisos o configuración del local. Para conciliación de depósitos usa también **Saldo disponible**.
 
 Antes de enviar un reporte a dirección o contabilidad, guarda el rango exacto de fechas y filtros usados.
+
+## «Dentro de paquete» y «Total» en Ventas por artículo
+
+Si un extra está ligado a un platillo del menú (por ejemplo, las flautas de papa que se eligen dentro de un paquete), esas unidades no cuentan como venta suelta del platillo: salen aparte en la columna **Dentro de paquete**, y **Total** suma las sueltas más las de paquete. Un platillo que sólo se vendió dentro de paquetes también aparece, con 0 sueltas. Las dos columnas salen sólo cuando en el periodo se vendió algún extra ligado, y también van en el CSV.
+
+No suman dinero: el precio va en el producto principal (el paquete). Las unidades sueltas, las ventas y los totales de siempre no cambian. La columna usa la liga actual del extra: si ligas o desligas un extra hoy, también cambian los días pasados.
 
 ## Cómo leer las métricas
 

@@ -293,6 +293,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   online_ordering_settings: 'read',
   online_orders_list: 'read',
   open_orders: 'read',
+  package_component_sales: 'read',
   org_confirmed_sales_report: 'read',
   org_insights: 'read',
   org_structure: 'read',

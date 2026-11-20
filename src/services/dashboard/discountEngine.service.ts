@@ -46,6 +46,7 @@ import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { MOTIVO_BENEFICIO_REGRESADO } from '../online-ordering/cortesiaDeFolio'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
+import { devolverUsoDelDescuentoEnTx } from '../shared/usoDelDescuento'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -1321,11 +1322,11 @@ export async function removeDiscountFromOrder(
         // Decrement discount usage counter (if it was a tracked discount). Un cupón no: su uso se cuenta al quedar pagada la venta
         // (`finalizeCouponsForOrder`), y aquí la venta todavía no se paga: bajarlo dejaba el contador abajo de lo real (D5).
         // D24 (Codex r1 #1): la fila que ya devolvió su uso al anular la cuenta (que después revivió por dinero tardío) no resta otro.
+        // hz:e82938e1:D31 (nae1cfa6 #1): nunca abajo de 0 (`devolverUsoDelDescuentoEnTx`, el mismo piso de Mesas y de la anulación). Un
+        // `decrement` sin piso dejaba el contador en −1 y la promoción daba un uso de más. Restar sólo lo que la fila ocupa (la marca en
+        // todos los escritores) es el proyecto «contador de usos con un solo dueño» (docs/proyectos/contador-de-usos-un-solo-dueno.md).
         if (orderDiscount.discountId && !orderDiscount.couponCodeId && !orderDiscount.usoDevueltoAlAnular) {
-          await tx.discount.update({
-            where: { id: orderDiscount.discountId },
-            data: { currentUses: { decrement: 1 } },
-          })
+          await devolverUsoDelDescuentoEnTx(tx, order.venueId, orderDiscount.discountId)
         }
 
         logger.info(`🗑️ Discount removed from order ${orderId}: ${orderDiscount.name} (+$${orderDiscount.amount})`)
