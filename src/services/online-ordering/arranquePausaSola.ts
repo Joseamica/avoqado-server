@@ -28,6 +28,8 @@ export interface ArranqueDeLaPausaSola {
 }
 
 let escrita = false
+/** La escritura en curso del arranque: todas las peticiones que llegan mientras tanto esperan ESTA (Codex p2v4-r4 #2). */
+let escribiendo: Promise<void> | null = null
 let arranque: ArranqueDeLaPausaSola | null = null
 /**
  * La hora de la PRIMERA petición que atendió este proceso, fija aunque su escritura falle o tarde: todo reintento escribe ESTA hora
@@ -38,6 +40,7 @@ let primeraPeticion: Date | null = null
 
 export function __resetArranqueParaPruebas(): void {
   escrita = false
+  escribiendo = null
   arranque = null
   primeraPeticion = null
 }
@@ -48,21 +51,26 @@ export function cuentaComoServicio(path: string): boolean {
   return !/^\/health\/?$/i.test(path)
 }
 
-/** La primera petición atendida deja su hora (una vez; nunca lanza ni demora la petición). */
-export async function marcarPrimerServicio(ahora: Date = new Date()): Promise<void> {
-  if (escrita) return
+/** La primera petición atendida deja su hora (una vez; nunca lanza ni demora la petición). Una sola escritura a la vez. */
+export function marcarPrimerServicio(ahora: Date = new Date()): Promise<void> {
+  if (escrita) return Promise.resolve()
   if (!primeraPeticion) primeraPeticion = ahora
-  try {
-    await prisma.arranqueDeFuncion.createMany({
-      data: [{ clave: CLAVE_PAUSA_SOLA, primerServicioAt: primeraPeticion }],
-      skipDuplicates: true,
+  if (escribiendo) return escribiendo
+  const hora = primeraPeticion
+  escribiendo = prisma.arranqueDeFuncion
+    .createMany({ data: [{ clave: CLAVE_PAUSA_SOLA, primerServicioAt: hora }], skipDuplicates: true })
+    .then(() => {
+      escrita = true
     })
-    escrita = true
-  } catch (error) {
-    logger.warn('[OnlineOrdering] no se pudo guardar el arranque de la pausa sola (se reintenta con la siguiente petición)', {
-      error: error instanceof Error ? error.message : String(error),
+    .catch(error => {
+      logger.warn('[OnlineOrdering] no se pudo guardar el arranque de la pausa sola (se reintenta con la siguiente petición)', {
+        error: error instanceof Error ? error.message : String(error),
+      })
     })
-  }
+    .finally(() => {
+      escribiendo = null
+    })
+  return escribiendo
 }
 
 /**
@@ -123,7 +131,7 @@ async function sellarLoDelServidorAnterior(a: ArranqueDeLaPausaSola): Promise<vo
 
 /**
  * El arranque de la pausa sola, o `null` si este código todavía no atiende. Antes del inicio devuelve el arranque sin sellar (la lectura no
- * cuenta nada); desde el inicio, sella una vez y lo recuerda. Si el sello falla, devuelve `null` (sin pausa) y la siguiente lectura reintenta.
+ * cuenta nada); desde el inicio, sella una vez y lo recuerda. Si el sello falla, LANZA (la lectura falla; la siguiente reintenta).
  */
 export async function arranqueDeLaPausaSola(): Promise<ArranqueDeLaPausaSola | null> {
   if (arranque) return arranque
@@ -135,14 +143,9 @@ export async function arranqueDeLaPausaSola(): Promise<ArranqueDeLaPausaSola | n
   const a = { primerServicio: fila.primerServicioAt, inicio: new Date(fila.primerServicioAt.getTime() + MARGEN_DEL_ARRANQUE_MS) }
   if (!fila.legadoSelladoAt) {
     if (Date.now() < a.inicio.getTime()) return a
-    try {
-      await sellarLoDelServidorAnterior(a)
-    } catch (error) {
-      logger.warn('[OnlineOrdering] no se pudo sellar lo del SERVIDOR anterior (la pausa sola espera al siguiente intento)', {
-        error: error instanceof Error ? error.message : String(error),
-      })
-      return null
-    }
+    // Si el sello falla, la lectura FALLA (Codex p2v4-r4 #1): nunca se contesta «sin pausa» por no haber podido sellar; la admisión de
+    // un pedido nuevo no pasa y la siguiente lectura reintenta.
+    await sellarLoDelServidorAnterior(a)
   }
   arranque = a
   return arranque

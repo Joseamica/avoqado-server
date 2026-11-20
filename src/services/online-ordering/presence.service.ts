@@ -406,14 +406,23 @@ export async function proximaHoraLimite(venueId: string, now: Date = new Date())
 export async function getAcceptingStatus(
   venueId: string,
   now: Date = new Date(),
-  preloaded?: Awaited<ReturnType<typeof getSettings>>,
+  preloaded?: Awaited<ReturnType<typeof getSettings>> & { __releido?: true },
 ): Promise<AcceptingState> {
   const [settings, venue] = await Promise.all([
     preloaded ?? getSettings(venueId),
     prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }),
   ])
-  const { lastInboxPollAt, lastToPayPollAt, autoPauseResumedAt, updatedAt, ...config } = settings
-  let ajustesGuardadosEn = updatedAt ?? null
+  const {
+    lastInboxPollAt,
+    lastToPayPollAt,
+    autoPauseResumedAt,
+    updatedAt,
+    __releido: _releido,
+    ...config
+  } = settings as typeof settings & {
+    __releido?: true
+  }
+  const ajustesGuardadosEn = updatedAt ?? null
   const timezone = venue?.timezone || 'America/Mexico_City'
   let autoPausedAt: string | null = null
   const done = (status: AcceptingStatus, reason: AcceptingReason): AcceptingState => ({
@@ -433,8 +442,10 @@ export async function getAcceptingStatus(
   if (config.requiresAcceptance !== false) {
     const lectura = await leerPausaSola(venueId, now, autoPauseResumedAt ?? null)
     pausaSola = lectura.pausa
-    if (lectura.ajustesReleidosEn && (!ajustesGuardadosEn || lectura.ajustesReleidosEn > ajustesGuardadosEn)) {
-      ajustesGuardadosEn = lectura.ajustesReleidosEn
+    // Codex p2v4-r4 #5: si los ajustes cambiaron mientras la lectura esperaba (un «Reanudar», una pausa de 15 min quitada), se relee TODO
+    // el estado con los ajustes nuevos: la respuesta nunca mezcla una versión con campos de otra. Una sola vez.
+    if (lectura.ajustesReleidosEn && (!ajustesGuardadosEn || lectura.ajustesReleidosEn > ajustesGuardadosEn) && !preloaded?.__releido) {
+      return getAcceptingStatus(venueId, now, { ...(await getSettings(venueId)), __releido: true })
     }
   }
   autoPausedAt = pausaSola?.at.toISOString() ?? null

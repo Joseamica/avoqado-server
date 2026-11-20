@@ -599,7 +599,7 @@ describe('D662 parte 2 (v4) · la pausa sola la decide UNA consulta exacta en Po
     expect(st.ajustesGuardadosEn).toEqual(guardado)
   })
 
-  it('Codex p2v4-r3 #5: si releyó los ajustes tras esperar, la respuesta lleva la versión releída', async () => {
+  it('Codex p2v4-r3 #5 / r4 #5: si los ajustes cambiaron durante la espera, relee todo el estado con la versión releída', async () => {
     const ahora = new Date()
     const reciente = new Date(ahora.getTime() - 5_000)
     const par = vuelta({ fallas: 2, ultimaFalla: reciente, pausaId: 'ooB', pausaAt: reciente, pausaDesde: min(-3) })
@@ -608,14 +608,20 @@ describe('D662 parte 2 (v4) · la pausa sola la decide UNA consulta exacta en Po
     ;(prismaMock.onlineOrderingSettings.findUnique as jest.Mock)
       .mockResolvedValueOnce(settingsRow({ autoPauseResumedAt: min(-60), updatedAt: min(-10) }))
       .mockResolvedValueOnce({ autoPauseResumedAt: new Date(ahora.getTime() - 1_000), updatedAt: releida })
+    // Cambiaron los ajustes durante la espera: se relee TODO el estado con los ajustes nuevos (p2v4-r4 #5).
+    ;(prismaMock.onlineOrderingSettings.findUnique as jest.Mock).mockResolvedValueOnce(
+      settingsRow({ autoPauseResumedAt: new Date(ahora.getTime() - 1_000), updatedAt: releida }),
+    )
     queryRaw()
       .mockResolvedValueOnce(par)
       .mockResolvedValueOnce([{ n: 1 }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce(vuelta())
+      .mockResolvedValueOnce(vuelta())
     const st = await getAcceptingStatus('v1', ahora)
     expect(st).toMatchObject({ status: 'OFFLINE', autoPausedAt: null })
     expect(st.ajustesGuardadosEn).toEqual(releida)
+    expect(st.config).not.toHaveProperty('__releido')
   })
 
   it('Codex p2v4-r2 #2 / r3 #3: la espera no pasa de L(B) + 30 s con el reloj de AHORA (una cuenta tomada después ya no puede cambiar el veredicto)', async () => {

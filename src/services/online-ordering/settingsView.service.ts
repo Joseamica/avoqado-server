@@ -46,7 +46,8 @@ export async function settingsView(
      * Campo nuevo y opcional (D662 v4, Codex p2v4-r2 #5): cuándo se guardaron los ajustes que se leyeron. El panel ordena sus lecturas
      * por (esto, `storeReadAt`): la que leyó un ajuste más nuevo gana aunque haya entrado antes.
      */
-    storeVersion: guardadoEn ? guardadoEn.toISOString() : null,
+    // La versión de los ajustes que de verdad usó el estado (si los releyó tras esperar, la releída; Codex p2v4-r4 #5).
+    storeVersion: (state.ajustesGuardadosEn ?? guardadoEn)?.toISOString() ?? null,
     /** Campo nuevo y opcional (D662 v4): la hora límite más cercana de un pedido por aceptar; el panel vuelve a leer justo después. */
     storeNextDeadlineAt: siguiente ? siguiente.toISOString() : null,
     requirements,

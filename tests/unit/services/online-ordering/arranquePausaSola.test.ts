@@ -50,6 +50,16 @@ describe('arranque de la pausa sola', () => {
     })
   })
 
+  it('dos peticiones antes de guardar comparten UNA escritura (p2v4-r4 #2)', async () => {
+    let soltar!: () => void
+    ;(prismaMock.arranqueDeFuncion.createMany as jest.Mock).mockReturnValueOnce(new Promise(r => (soltar = () => r({ count: 1 }))))
+    const a = marcarPrimerServicio(new Date('2026-11-20T18:00:00.000Z'))
+    const b = marcarPrimerServicio(new Date('2026-11-20T18:00:01.000Z'))
+    soltar()
+    await Promise.all([a, b])
+    expect(prismaMock.arranqueDeFuncion.createMany).toHaveBeenCalledTimes(1)
+  })
+
   it('el middleware: /health sigue sin escribir; la PRIMERA petición espera su escritura (p2v4-r3 #2); las demás no esperan', async () => {
     const next = jest.fn()
     marcarPrimerServicioMiddleware({ path: '/health' }, {}, next)
@@ -103,7 +113,7 @@ describe('arranque de la pausa sola', () => {
     expect(prismaMock.arranqueDeFuncion.findUnique).toHaveBeenCalledTimes(2)
   })
 
-  it('antes del inicio no sella (el anterior puede seguir vivo) ni recuerda; si el sello falla, no hay arranque todavía', async () => {
+  it('antes del inicio no sella (el anterior puede seguir vivo) ni recuerda; si el sello falla, la lectura FALLA (p2v4-r4 #1)', async () => {
     const primer = new Date(Date.now() - 1_000)
     ;(prismaMock.arranqueDeFuncion.findUnique as jest.Mock).mockResolvedValue({ primerServicioAt: primer, legadoSelladoAt: null })
     await expect(arranqueDeLaPausaSola()).resolves.toMatchObject({ primerServicio: primer })
@@ -112,6 +122,6 @@ describe('arranque de la pausa sola', () => {
     const viejo = new Date(Date.now() - 10 * 60_000)
     ;(prismaMock.arranqueDeFuncion.findUnique as jest.Mock).mockResolvedValue({ primerServicioAt: viejo, legadoSelladoAt: null })
     ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(new Error('db'))
-    await expect(arranqueDeLaPausaSola()).resolves.toBeNull()
+    await expect(arranqueDeLaPausaSola()).rejects.toThrow('db')
   })
 })
