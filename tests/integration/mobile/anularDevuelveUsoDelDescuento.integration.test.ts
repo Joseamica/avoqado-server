@@ -15,7 +15,7 @@ import { applyOrderDiscount, cancelOrder, createOrderWithItems, payCashOrder } f
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import { voidItems } from '@/services/tpv/order.tpv.service'
 import { cancelarCuentaSinCobrar } from '@/services/dashboard/order.dashboard.service'
-import { removeDiscountFromOrder } from '@/services/dashboard/discountEngine.service'
+import { applyDiscountToOrder, removeDiscountFromOrder } from '@/services/dashboard/discountEngine.service'
 import { devolverUsosDeCuentaQueSeBorraEnTx } from '@/services/shared/usoDelDescuento'
 import { reabrirSiRecibeDinero } from '@/services/shared/cuentaCancelada'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
@@ -177,11 +177,11 @@ describe('🔴 D24: anular una cuenta sin cobrar devuelve el uso de su descuento
     expect(await usos()).toBe(antes)
   })
 
-  it('regresión: la TPV sigue restando el uso de un descuento que su motor sí sumó (sin marca de anulación)', async () => {
+  it('regresión: la TPV sigue restando el uso de un descuento que su motor sí sumó (con la marca que pone desde D31)', async () => {
     const orderId = await cuentaAbierta()
     await prisma.discount.update({ where: { id: promoId }, data: { currentUses: { increment: 1 } } })
     const fila = await prisma.orderDiscount.create({
-      data: { orderId, discountId: promoId, type: 'PERCENTAGE', name: 'Primeros 100', value: 10, amount: 0 },
+      data: { orderId, discountId: promoId, type: 'PERCENTAGE', name: 'Primeros 100', value: 10, amount: 0, usoContado: true },
       select: { id: true },
     })
     const antes = await usos()
@@ -202,6 +202,72 @@ describe('🔴 D24: anular una cuenta sin cobrar devuelve el uso de su descuento
 
     expect(await usos()).toBe(antes)
     expect(await bitacora(orderId)).toEqual([])
+  })
+})
+
+/**
+ * 🔴 hz:e82938e1:D31 (encargo eeeadd): la TPV usa el MISMO contador y ahora la misma marca. Antes su motor sumaba sin marcar (anular la
+ * cuenta no devolvía nada: un «primeros 100» aplicado en la TPV se quedaba gastado aunque la venta nunca se cobrara) y al quitar restaba
+ * por `discountId`, sin piso, también de una fila que nunca sumó (POS de antes de D19): el contador quedaba en −1.
+ */
+describe('🔴 D31: la TPV marca el uso que suma, y sólo devuelve lo que ocupa (PostgreSQL real)', () => {
+  const filaDe = (orderId: string) =>
+    prisma.orderDiscount.findFirstOrThrow({ where: { orderId, discountId: promoId }, select: { id: true, usoContado: true } })
+
+  it('la TPV aplica un descuento del catálogo: suma UN uso y la fila nace marcada; anular la cuenta lo devuelve (D24)', async () => {
+    const orderId = await cuentaAbierta()
+    const antes = await usos()
+
+    const r = await applyDiscountToOrder(orderId, promoId, undefined, undefined, venueId)
+
+    expect(r.success).toBe(true)
+    expect(await usos()).toBe(antes + 1)
+    expect((await filaDe(orderId)).usoContado).toBe(true)
+
+    await cancelOrder(venueId, orderId, 'el cliente se fue', staffId)
+
+    expect(await usos()).toBe(antes)
+    expect(await filas(orderId)).toEqual([{ discountId: promoId, usoContado: false, usoDevueltoAlAnular: true }])
+  })
+
+  it('la TPV aplica y quita: el contador regresa a donde estaba', async () => {
+    const orderId = await cuentaAbierta()
+    const antes = await usos()
+    await applyDiscountToOrder(orderId, promoId, undefined, undefined, venueId)
+    expect(await usos()).toBe(antes + 1)
+
+    await removeDiscountFromOrder(orderId, (await filaDe(orderId)).id, staffId, venueId)
+
+    expect(await usos()).toBe(antes)
+  })
+
+  it('🔴 quitar en la TPV una fila que nunca sumó (POS de antes de D19, sin marca) no resta: el contador no baja', async () => {
+    const orderId = await cuentaAbierta()
+    const fila = await prisma.orderDiscount.create({
+      data: { orderId, discountId: promoId, type: 'PERCENTAGE', name: 'Primeros 100', value: 10, amount: 0, usoContado: false },
+      select: { id: true },
+    })
+    const antes = await usos()
+
+    await removeDiscountFromOrder(orderId, fila.id, staffId, venueId)
+
+    expect(await usos()).toBe(antes)
+  })
+
+  it('🔴 con el contador ya en 0, quitar una fila marcada no lo deja en −1', async () => {
+    const cero = await prisma.discount.create({
+      data: { venueId, name: 'Primeros 5', type: 'PERCENTAGE', value: 5, scope: 'ORDER', maxTotalUses: 5, currentUses: 0 },
+      select: { id: true },
+    })
+    const orderId = await cuentaAbierta()
+    const fila = await prisma.orderDiscount.create({
+      data: { orderId, discountId: cero.id, type: 'PERCENTAGE', name: 'Primeros 5', value: 5, amount: 0, usoContado: true },
+      select: { id: true },
+    })
+
+    await removeDiscountFromOrder(orderId, fila.id, staffId, venueId)
+
+    expect((await prisma.discount.findUniqueOrThrow({ where: { id: cero.id }, select: { currentUses: true } })).currentUses).toBe(0)
   })
 })
 

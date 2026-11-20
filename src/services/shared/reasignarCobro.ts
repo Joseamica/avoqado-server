@@ -251,6 +251,11 @@ export interface EscritorReasignacion {
   moverCobro(paymentId: string, deOrdenId: string, aOrdenId: string): Promise<number>
   prepararDestino(ordenId: string, data: { status?: 'PENDING'; shiftId?: string }): Promise<void>
   /**
+   * 🔴 hz:e82938e1:D31: el destino anulado que esta reasignación revive vuelve a gastar los usos de su descuento que su anulación devolvió
+   * (`volverAGastarUsosDeCuentaRevividaEnTx`, D26), con las dos órdenes tomadas y antes del turno (Order → Discount → … → Shift).
+   */
+  volverAGastarUsosAlRevivir(ordenId: string): Promise<void>
+  /**
    * Los totales finales de la cuenta desde sus cobros (`settleStandalonePaymentInTx`). Con `cobro`: el que la salda, con sus
    * efectos de saldar. Con `null`: sólo los totales (el origen ya los tuvo cuando se saldó).
    */
@@ -310,6 +315,10 @@ export async function aplicarReasignacion(
     if (veredicto.resumen.destinoCambiaEstado && !d.pedidoEnLinea) data.status = 'PENDING'
     if (!d.shiftId && c.shiftId) data.shiftId = c.shiftId
     if (Object.keys(data).length > 0) await escritor.prepararDestino(d.id, data)
+    // D31 (antes ajeno de D26, na728b67 #1): pre-reabierta aquí, el cierre ya la ve viva y `reabrirSiRecibeDinero` no hace nada; sin esto
+    // el uso que la anulación devolvió (D24) quedaba libre y la promoción daba uno de más. Con pedido en línea no se pre-reabre: la
+    // reapertura del cierre ya lo gasta.
+    if (data.status === 'PENDING') await escritor.volverAGastarUsosAlRevivir(d.id)
 
     // El destino se cierra con sus efectos de saldar (vale de inventario, lealtad) SÓLO si es su dueño del cierre (revisión 6d
     // I-1: una integrada o con vales por área, no — su vale lo haría otro camino o ya consumió el stock); el origen ya estaba

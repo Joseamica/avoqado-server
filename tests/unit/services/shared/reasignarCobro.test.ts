@@ -229,6 +229,7 @@ describe('validarReasignacion — cuándo un cobro puede moverse', () => {
                 return 1
               },
               prepararDestino: async () => void llamadas.push('preparar'),
+              volverAGastarUsosAlRevivir: async () => void llamadas.push('usos'),
               guardarTotales: async () => void llamadas.push('totales'),
               fijarCompletadoEn: async () => void llamadas.push('fecha'),
               bitacora: async () => void llamadas.push('bitacora'),
@@ -280,6 +281,7 @@ function depsFalsas(
     }),
     moverCobro: paso('moverCobro', () => 'mover', over.movidos ?? 1),
     prepararDestino: paso('prepararDestino', () => 'preparar'),
+    volverAGastarUsosAlRevivir: paso('volverAGastarUsosAlRevivir', (id: string) => `usos:${id}`),
     guardarTotales: paso('guardarTotales', (id: string, c: { id: string } | null) => `totales:${id}:${c?.id ?? '-'}`),
     fijarCompletadoEn: paso('fijarCompletadoEn', (id: string) => `completadoEn:${id}`),
     bitacora: paso('bitacora', (p: BitacoraReasignacion) => `bitacora:${p.entityId}`),
@@ -306,6 +308,9 @@ describe('aplicarReasignacion — el orden de las escrituras', () => {
       'releer',
       'mover',
       'preparar',
+      // D31 (hz:nube0000:na728b67 #1): la anulada que revive vuelve a gastar el uso que su anulación devolvió (D24/D26), con la cuenta
+      // tomada y antes del turno (Order → Discount → … → Shift).
+      'usos:ord-cancelada',
       'totales:ord-cancelada:pay-b',
       'totales:ord-vecina:-',
       'completadoEn:ord-cancelada',
@@ -323,6 +328,7 @@ describe('aplicarReasignacion — el orden de las escrituras', () => {
     const { deps, escritor } = depsFalsas()
     await aplicarReasignacion(deps, caso, cobro(), vecina(), cancelada({ status: 'PENDING', shiftId: 'shift-9' }))
     expect(escritor.prepararDestino).not.toHaveBeenCalled()
+    expect(escritor.volverAGastarUsosAlRevivir).not.toHaveBeenCalled()
   })
 
   it('🔴 no escribe NADA si la validación falla, y dice por qué', async () => {
@@ -350,6 +356,8 @@ describe('aplicarReasignacion — el orden de las escrituras', () => {
     expect(r).toMatchObject({ ok: true, resumen: { destinoCambiaEstado: true } })
     // Sólo el turno del cobro: el estado lo decide `settleStandalonePaymentInTx` → `reabrirSiRecibeDinero` → la conciliación.
     expect(escritor.prepararDestino).toHaveBeenCalledWith('ord-cancelada', { shiftId: 'shift-1' })
+    // D31: la reabre el cierre (`reabrirSiRecibeDinero`), que ya vuelve a gastar los usos: aquí no se gasta otra vez.
+    expect(escritor.volverAGastarUsosAlRevivir).not.toHaveBeenCalled()
     expect(llamadas.slice(2, 4)).toEqual(['mover', 'preparar'])
     expect(escritor.guardarTotales).toHaveBeenNthCalledWith(1, 'ord-cancelada', expect.objectContaining({ id: 'pay-b' }), true)
   })
@@ -416,11 +424,12 @@ describe('Codex r10 #6: la reasignación escribe TODO en una transacción, bajo 
     const { deps, llamadas } = depsFalsas()
     expect((await aplicarReasignacion(deps, caso, cobro(), vecina(), cancelada())).ok).toBe(true)
     expect(deps.enTransaccion).toHaveBeenCalledTimes(1)
-    expect(llamadas.slice(0, 6)).toEqual([
+    expect(llamadas.slice(0, 7)).toEqual([
       'bloquear:ord-cancelada,ord-vecina',
       'releer',
       'mover',
       'preparar',
+      'usos:ord-cancelada',
       'totales:ord-cancelada:pay-b',
       'totales:ord-vecina:-',
     ])
@@ -519,6 +528,8 @@ describe('Tarea 6d, fix 1 (revisión): quién salda el destino, la mesa, y el es
     const { deps, escritor } = depsFalsas()
     await aplicarReasignacion(deps, caso, enCeros, vecina(), gratis)
     expect(escritor.prepararDestino).toHaveBeenCalledWith('ord-cancelada', { shiftId: 'shift-1' })
+    // D31: la reabre el cierre (`reabrirSiRecibeDinero`), que ya vuelve a gastar los usos: aquí no se gasta otra vez.
+    expect(escritor.volverAGastarUsosAlRevivir).not.toHaveBeenCalled()
   })
 
   it('🔴 M-4: un origen CANCELADO que conserva otros cobros se mide como el cierre lo guardará (reabierto, con su IVA aparte): faltarían $16', () => {

@@ -200,10 +200,6 @@
       "clase": "EN_TX",
       "etiqueta": "bloquearDescuentosEnOrdenEnTx"
     },
-    "src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder": {
-      "clase": "EN_TX",
-      "etiqueta": "removeDiscountFromOrder"
-    },
     "src/services/dashboard/loyalty.dashboard.service.ts#acreditarPuntosTrasElSello": {
       "clase": "EN_TX",
       "etiqueta": "acreditarPuntosTrasElSello"

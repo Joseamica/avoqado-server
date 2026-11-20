@@ -19,8 +19,9 @@
  * `Discount` con la cuenta ya tomada (Order → Discount). La suma del Mostrador no vive dentro de la venta: su transacción sólo toma filas
  * `Discount`, en una pasada por id ascendente, así que no se cruza con el turno, el premio de sellos, la tarjeta de regalo ni la cuenta.
  *
- * Las filas de Mesas que sumaron quedan con `OrderDiscount.usoContado`; sólo ésas devuelven su uso (al quitarlas, al borrarse su cuenta
- * vacía o al convertirse en cortesía en un folio). El motor de la TPV y el canje del cupón cuentan por su lado.
+ * Las filas que sumaron quedan con `OrderDiscount.usoContado` (Mesas y, desde D31, el motor de la TPV y de la tienda); sólo ésas devuelven
+ * su uso (al quitarlas, al anular o borrarse su cuenta o al convertirse en cortesía en un folio). El canje del cupón cuenta por su lado
+ * (y desde D31 también avisa si pasa del tope). El Mostrador suma sin marcar (su anulación por cobrar: proyecto del contador).
  */
 import { Prisma } from '@prisma/client'
 import { writeLegacyActivityAuditTx } from '@/services/activityAudit.service'
@@ -31,7 +32,7 @@ import { descuentoSinUsos } from './discount.service'
 const APARTADO_DEL_CUPON = { status: { notIn: ['CANCELLED', 'DELETED'] }, couponRedemption: { is: null } } satisfies Prisma.OrderWhereInput
 
 type FilaDelContador = { id: string; name: string; currentUses: number; maxTotalUses: number | null }
-type Camino = 'mesa' | 'mostrador' | 'reapertura'
+type Camino = 'mesa' | 'mostrador' | 'reapertura' | 'canje'
 
 /** Las filas `Discount`, tomadas en UNA pasada por id ascendente (`FOR NO KEY UPDATE`, el modo del UPDATE del contador). */
 async function tomarFilas(tx: TxConReintento, venueId: string, ids: string[]): Promise<FilaDelContador[]> {
@@ -49,7 +50,7 @@ async function tomarFilas(tx: TxConReintento, venueId: string, ids: string[]): P
  * El rastro para el dueño cuando un uso dejó el contador ARRIBA de su tope, en la transacción de quien sumó (si la venta se revierte, el
  * rastro también). Sin `staffId` en la fila (va en `data`): una referencia a una persona dada de baja no puede tumbar la venta.
  */
-async function avisarSiPasoDelTopeEnTx(
+export async function avisarSiPasoDelTopeEnTx(
   tx: TxConReintento,
   v: {
     venueId: string

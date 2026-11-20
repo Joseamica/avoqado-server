@@ -1383,6 +1383,10 @@ describe('Discount Engine Service', () => {
           data: { currentUses: { increment: 1 } },
         }),
       )
+      // D31 (hz:e82938e1:D31): la fila que sumó su uso lleva la marca; así quitarla o anular la cuenta lo devuelve (D24).
+      expect(prismaMock.orderDiscount.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ discountId: 'd1', usoContado: true }) }),
+      )
     })
 
     it('should return error for already applied discount', async () => {
@@ -1501,6 +1505,7 @@ describe('Discount Engine Service', () => {
         amount: new Decimal(10),
         taxReduction: new Decimal(1.6),
         name: 'Test Discount',
+        usoContado: true,
       }
       const mockOrder = {
         id: 'order-123',
@@ -1524,11 +1529,46 @@ describe('Discount Engine Service', () => {
 
       expect(result.success).toBe(true)
       expect(result.amount).toBe(10)
-      expect(prismaMock.discount.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: { currentUses: { decrement: 1 } },
-        }),
+      // D31: devuelve el uso de la fila que lo ocupa, nunca abajo de 0 (`devolverUsoDelDescuentoEnTx`).
+      expect(prismaMock.discount.updateMany).toHaveBeenCalledWith({
+        where: { id: 'd1', venueId: 'venue-123', currentUses: { gt: 0 } },
+        data: { currentUses: { decrement: 1 } },
+      })
+    })
+
+    it('D31 (hz:nube0000:nae1cfa6 #1): una fila que nunca sumó su uso (POS de antes de D19, sin marca) no resta nada', async () => {
+      const filaSinMarca = {
+        id: 'od-1',
+        orderId: 'order-123',
+        discountId: 'd1',
+        amount: new Decimal(10),
+        taxReduction: new Decimal(0),
+        name: 'Primeros 100',
+        usoContado: false,
+      }
+      const mockOrder = {
+        id: 'order-123',
+        venueId: 'venue-123',
+        subtotal: new Decimal(100),
+        taxAmount: new Decimal(16),
+        discountAmount: new Decimal(10),
+        tipAmount: new Decimal(0),
+        total: new Decimal(106),
+        paidAmount: new Decimal(0),
+      }
+      prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<any>) => callback(prismaMock))
+      prismaMock.orderDiscount.findFirst.mockResolvedValue(filaSinMarca)
+      prismaMock.order.findUnique.mockResolvedValue(mockOrder)
+      prismaMock.orderDiscount.delete.mockResolvedValue(filaSinMarca)
+      prismaMock.order.update.mockResolvedValue(mockOrder)
+
+      const result = await removeDiscountFromOrder('order-123', 'od-1')
+
+      expect(result.success).toBe(true)
+      const restas = [...prismaMock.discount.update.mock.calls, ...prismaMock.discount.updateMany.mock.calls].filter(
+        ([arg]: any[]) => arg?.data?.currentUses?.decrement != null,
       )
+      expect(restas).toHaveLength(0)
     })
 
     /**
@@ -2035,6 +2075,12 @@ describe('S10 · aplicarDescuentosDelMotorEnTx', () => {
     ])
     // R65 b: las bitácoras salen en el retorno (nacen dentro), una por descuento aplicado.
     expect(r.audits.map(a => a.action)).toEqual(['DISCOUNT_APPLIED', 'DISCOUNT_APPLIED'])
+    // D31 (hz:nube0000:na728b67 #3): cada fila que suma su uso nace marcada, así anular la cuenta lo devuelve (D24).
+    const creadas = prismaMock.orderDiscount.create.mock.calls.map(([a]: any[]) => a.data)
+    expect(creadas.map((d: any) => [d.discountId, d.usoContado])).toEqual([
+      ['z-auto', true],
+      ['a-auto', true],
+    ])
   })
 
   it('R9: en simulación (cotizar) no hay pasada de contadores: ni FOR UPDATE/NO KEY UPDATE ni UPDATE sobre Discount', async () => {
@@ -2047,6 +2093,8 @@ describe('S10 · aplicarDescuentosDelMotorEnTx', () => {
 
     expect(r.applied).toHaveLength(2)
     expect(trazo).toEqual([])
+    // D31: cotizar no suma, así que tampoco marca (una fila marcada sin uso devolvería uno que nunca se gastó).
+    for (const [a] of prismaMock.orderDiscount.create.mock.calls as any[]) expect(a.data.usoContado).toBe(false)
     expect(prismaMock.discount.update).not.toHaveBeenCalled()
     expect(prismaMock.discount.updateMany).not.toHaveBeenCalled()
     for (const [s] of prismaMock.$queryRaw.mock.calls) expect(sql(s)).not.toMatch(/"Discount"[\s\S]*FOR (NO KEY )?UPDATE/)

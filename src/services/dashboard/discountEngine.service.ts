@@ -46,6 +46,7 @@ import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { MOTIVO_BENEFICIO_REGRESADO } from '../online-ordering/cortesiaDeFolio'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
+import { devolverUsoDelDescuentoEnTx } from '../shared/usoDelDescuento'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -1041,6 +1042,12 @@ async function applyEvaluatedDiscount(
   appliedById?: string,
   authorizedById?: string,
   deferredUses?: string[],
+  /**
+   * 🔴 hz:e82938e1:D31: la fila nace con `usoContado` cuando su uso SÍ se suma en esta transacción (aquí mismo o en la pasada de
+   * contadores del lote). Así quitarla (aquí o en el POS), anularla (D24) o volverla cortesía de folio devuelve justo ese uso, y una
+   * fila que nunca sumó no resta nada. `false` sólo en la simulación (cotizar): no suma, así que tampoco marca.
+   */
+  marcarUso = true,
 ): Promise<ApplyDiscountResult> {
   const orderId = order.id
   await rechazarSiCuentaAnuladaEnTx(tx, { venueId: order.venueId, orderId })
@@ -1106,6 +1113,7 @@ async function applyEvaluatedDiscount(
       isComp: discount.type === 'COMP',
       appliedById,
       authorizedById,
+      usoContado: marcarUso,
       // B2 (spec §4.1, D7): el motor guarda a qué renglones aplicó, con SU base; la sincronización pone los centavos sin
       // pasar la capacidad de cada renglón. P1: un DIRIGIDO ya no se re-deriva sobre toda la cuenta; con ámbito, dentro de él.
       reparto: comoJson({
@@ -1318,14 +1326,12 @@ export async function removeDiscountFromOrder(
           },
         })
 
-        // Decrement discount usage counter (if it was a tracked discount). Un cupón no: su uso se cuenta al quedar pagada la venta
-        // (`finalizeCouponsForOrder`), y aquí la venta todavía no se paga: bajarlo dejaba el contador abajo de lo real (D5).
-        // D24 (Codex r1 #1): la fila que ya devolvió su uso al anular la cuenta (que después revivió por dinero tardío) no resta otro.
-        if (orderDiscount.discountId && !orderDiscount.couponCodeId && !orderDiscount.usoDevueltoAlAnular) {
-          await tx.discount.update({
-            where: { id: orderDiscount.discountId },
-            data: { currentUses: { decrement: 1 } },
-          })
+        // 🔴 hz:e82938e1:D31 (antes D24 #1 ajeno): devuelve el uso SÓLO si esta fila lo ocupa (`usoContado`: la sumó el motor, Mesas o
+        // una reapertura) y nunca abajo de 0. Antes restaba por `discountId` sin piso: una fila del POS de antes de D19 (nunca sumó)
+        // dejaba el contador en −1 y la promoción daba un uso de más. Un cupón nunca lleva la marca (cuenta al pagar, D5) y la fila que ya
+        // devolvió su uso al anular (D24) la perdió.
+        if (orderDiscount.usoContado && orderDiscount.discountId) {
+          await devolverUsoDelDescuentoEnTx(tx, order.venueId, orderDiscount.discountId)
         }
 
         logger.info(`🗑️ Discount removed from order ${orderId}: ${orderDiscount.name} (+$${orderDiscount.amount})`)
@@ -1445,7 +1451,7 @@ export async function aplicarDescuentosDelMotorEnTx(
 
     const current = await tx.order.findUnique({ where: { id: orderId, venueId: order.venueId }, include: { orderDiscounts: true } })
     if (!current) throw new NotFoundError('Order not found')
-    const outcome = await applyEvaluatedDiscount(tx, current, discount, audits, o.appliedById, undefined, usedDiscountIds)
+    const outcome = await applyEvaluatedDiscount(tx, current, discount, audits, o.appliedById, undefined, usedDiscountIds, !o.simulacion)
 
     if (outcome.success) {
       applied.push(discount)

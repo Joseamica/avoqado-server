@@ -33,10 +33,28 @@ describe('finalizeCouponsForOrder', () => {
       data: { couponCodeId: 'cup-1', orderId: 'o-1', customerId: 'c-1', amountSaved: new Prisma.Decimal(10) },
     })
     expect(prismaMock.couponCode.update).toHaveBeenCalledWith({ where: { id: 'cup-1' }, data: { currentUses: { increment: 1 } } })
-    expect(prismaMock.discount.update).toHaveBeenCalledWith({ where: { id: 'd-1' }, data: { currentUses: { increment: 1 } } })
+    expect(prismaMock.discount.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'd-1' }, data: { currentUses: { increment: 1 } } }),
+    )
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     // El canje toma el mismo candado que el apartado: sin él, un apartado podía leer el contador viejo y la venta ya canjeada.
     expect(JSON.stringify(prismaMock.$queryRaw.mock.calls[0][0])).toContain('avoqado:cupon-descuento:v1:d-1')
+  })
+
+  it('D31 (hz:nube0000:nae171de #2): el canje que deja la promoción ARRIBA de su tope no rechaza (decisión «A») y avisa al dueño', async () => {
+    prismaMock.discount.update.mockResolvedValue({ id: 'd-1', name: 'Primeros 2', currentUses: 3, maxTotalUses: 2 } as any)
+    await finalizeCouponsForOrder('v-1', 'o-1')
+    expect(prismaMock.couponRedemption.create).toHaveBeenCalled()
+    const avisos = JSON.stringify(prismaMock.$executeRaw.mock.calls) + JSON.stringify(prismaMock.activityLog.create.mock.calls)
+    expect(avisos).toContain('DESCUENTO_SOBRE_TOPE')
+    expect(avisos).toContain('canje')
+  })
+
+  it('D31: el canje dentro del tope (o sin tope) no deja aviso', async () => {
+    prismaMock.discount.update.mockResolvedValue({ id: 'd-1', name: 'Primeros 2', currentUses: 2, maxTotalUses: 2 } as any)
+    await finalizeCouponsForOrder('v-1', 'o-1')
+    const avisos = JSON.stringify(prismaMock.$executeRaw.mock.calls) + JSON.stringify(prismaMock.activityLog.create.mock.calls)
+    expect(avisos).not.toContain('DESCUENTO_SOBRE_TOPE')
   })
 
   it('sin pagar no cuenta: el hook puede llegar con la cuenta abierta o cancelada', async () => {
@@ -107,7 +125,16 @@ describe('cuponDeLaVenta', () => {
     minPurchaseAmount: null,
     validFrom: null,
     validUntil: null,
-    discount: { id: 'd-1', name: 'Diez', type: 'PERCENTAGE', value: 10, scope: 'ORDER', maxDiscountAmount: null, active: true, ...discount },
+    discount: {
+      id: 'd-1',
+      name: 'Diez',
+      type: 'PERCENTAGE',
+      value: 10,
+      scope: 'ORDER',
+      maxDiscountAmount: null,
+      active: true,
+      ...discount,
+    },
     ...extra,
   })
 
@@ -229,14 +256,18 @@ describe('apartarCupon: el último uso no se gasta dos veces (Codex r1 #1)', () 
   it('el límite total del descuento padre también cuenta lo apartado', async () => {
     prismaMock.couponCode.findFirst.mockResolvedValue(fresco({}, { maxTotalUses: 3, currentUses: 2 }) as any)
     prismaMock.orderDiscount.count.mockResolvedValue(1)
-    await expect(apartarCupon(prismaMock as any, 'v-1', cupon, null)).rejects.toMatchObject({ message: 'Este cupón ya alcanzó su límite de usos.' })
+    await expect(apartarCupon(prismaMock as any, 'v-1', cupon, null)).rejects.toMatchObject({
+      message: 'Este cupón ya alcanzó su límite de usos.',
+    })
   })
 
   it('por cliente: un canje más una venta suya sin cobrar llenan un límite de 2', async () => {
     prismaMock.couponCode.findFirst.mockResolvedValue(fresco({ maxUsesPerCustomer: 2 }) as any)
     prismaMock.couponRedemption.count.mockResolvedValue(1)
     prismaMock.orderDiscount.count.mockResolvedValue(1)
-    await expect(apartarCupon(prismaMock as any, 'v-1', cupon, 'c-1')).rejects.toMatchObject({ message: 'Este cliente ya usó este cupón 2 veces.' })
+    await expect(apartarCupon(prismaMock as any, 'v-1', cupon, 'c-1')).rejects.toMatchObject({
+      message: 'Este cliente ya usó este cupón 2 veces.',
+    })
   })
 
   it('con cupo: no lanza', async () => {

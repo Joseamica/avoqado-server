@@ -349,7 +349,7 @@ describe('convertirBeneficiosEnCortesiaEnTx (S9, P2-5)', () => {
 
   it('descuento con maxTotalUses: currentUses baja una sola vez aunque se llame dos veces', async () => {
     const e = estado({
-      filas: [fila('od1', { discountId: 'cdisc1' })],
+      filas: [fila('od1', { discountId: 'cdisc1', usoContado: true })],
       descuentos: [{ id: 'cdisc1', venueId: VENUE, currentUses: 1, maxTotalUses: 1, maxUsesPerCustomer: null }],
     })
 
@@ -365,11 +365,22 @@ describe('convertirBeneficiosEnCortesiaEnTx (S9, P2-5)', () => {
 
   it('descuento con maxTotalUses ya en 0: nunca baja de 0', async () => {
     const e = estado({
-      filas: [fila('od1', { discountId: 'cdisc1' })],
+      filas: [fila('od1', { discountId: 'cdisc1', usoContado: true })],
       descuentos: [{ id: 'cdisc1', venueId: VENUE, currentUses: 0, maxTotalUses: 5, maxUsesPerCustomer: null }],
     })
     await convertir(e)
     expect(e.descuentos[0].currentUses).toBe(0)
+  })
+
+  it('D31 (hz:nube0000:nae171de #5): una fila con tope que nunca sumó su uso (Mesas de antes de D19, sin marca) no resta; se vuelve cortesía', async () => {
+    const e = estado({
+      filas: [fila('od1', { discountId: 'cdisc1', usoContado: false })],
+      descuentos: [{ id: 'cdisc1', venueId: VENUE, currentUses: 3, maxTotalUses: 10, maxUsesPerCustomer: null }],
+    })
+    await convertir(e)
+    expect(e.descuentos[0].currentUses).toBe(3)
+    expect(e.llamadas.some(l => l.startsWith('Discount:'))).toBe(false)
+    expect(e.filas[0]).toMatchObject(CORTESIA(D(85)))
   })
 
   it('descuento con maxUsesPerCustomer: sólo se desliga, sin tocar su contador', async () => {
@@ -447,8 +458,8 @@ describe('convertirBeneficiosEnCortesiaEnTx (S9, P2-5)', () => {
         filas: [
           fila('od1', { loyaltyTransactionId: 'clt1', amount: D(30) }),
           fila('od2'),
-          fila('od3', { discountId: 'cdisc2' }),
-          fila('od4', { discountId: 'cdisc1' }),
+          fila('od3', { discountId: 'cdisc2', usoContado: true }),
+          fila('od4', { discountId: 'cdisc1', usoContado: true }),
         ],
         descuentos: [
           { id: 'cdisc2', venueId: VENUE, currentUses: 2, maxTotalUses: 9, maxUsesPerCustomer: null },
