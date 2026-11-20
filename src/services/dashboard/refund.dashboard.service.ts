@@ -31,7 +31,12 @@ import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '.
 import { logAction } from './activity-log.service'
 import { fijarSaldoReabiertoEnTx, subirVersionDeValesTrasCommit, type SaldoReabierto } from '@/services/shared/saldoReabiertoAlReembolsar'
 import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
-import { devolverConEfectivo, sePuedeEscogerComoDevolver, type DevolverEnDinero } from '../tpv/terminalRefundTarget'
+import {
+  devolverConEfectivo,
+  devuelveEfectivoDeLaMaquina,
+  sePuedeEscogerComoDevolver,
+  type DevolverEnDinero,
+} from '../tpv/terminalRefundTarget'
 import { assertCardRefundGoesThroughOnlineOrders } from '../online-ordering/card/guards'
 import { GiftCardError } from '../giftCards/giftCardErrors'
 import {
@@ -41,7 +46,7 @@ import {
   bloquearSobresDelReembolsoEnTx,
 } from '../giftCards/giftCardCancel.service'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
-import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
+import { cajaParaDevolverEnTx, postCashRefundToDrawer, salidaDelReembolsoEnTx } from '../shared/cashDrawerPosting'
 import { reverseStampForOrder } from '../wallet/stampLedger.service'
 import { parteDeUnidades as getUnitRefundCents } from '../shared/parteDeUnidades'
 import { NO_SE_PUEDE_POR_ARTICULOS, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
@@ -239,6 +244,8 @@ interface LockedPaymentRow {
   tenderSatFormaPago: string | null
   /** % de comisión CONGELADO en el cobro: el núcleo lo usa para revertirla en proporción. */
   tenderCommissionPercent: Prisma.Decimal | null
+  /** Máquina de efectivo (A6): el folio de la QuickPay. Con él, devolver en efectivo sale del cajón (`devuelveEfectivoDeLaMaquina`). */
+  cashMachineRef?: string | null
 }
 
 interface RefundPaymentRow {
@@ -296,6 +303,8 @@ interface RefundTransactionResult {
   /** Tarjetas de regalo (B1 r1): este reembolso dejó en $0 una venta de tarjetas sin pagar y la canceló en la misma tx. */
   cuentaDeTarjetasCancelada: boolean
   abono?: AbonoDeSaldoAFavor
+  /** Máquina de efectivo (A6): el `PAY_OUT` ya se escribió en la transacción, en la caja que autorizó la devolución. */
+  salidaDeCajaEnTx?: true
 }
 
 function toCents(value: unknown): number {
@@ -479,7 +488,8 @@ export async function bloquearCobroParaReembolso(
       "tenderLabel",
       "tenderCaptureTip",
       "tenderSatFormaPago",
-      "tenderCommissionPercent"
+      "tenderCommissionPercent",
+      "cashMachineRef"
     FROM "Payment"
     WHERE id = ${input.paymentId}
       AND "venueId" = ${input.venueId}
@@ -732,7 +742,14 @@ export type WriteRefundInput = WriteRefundBase &
 export async function writeRefundInTx(
   tx: TxConReintento,
   input: WriteRefundInput,
-): Promise<{ refundPaymentId: string; replay: boolean; abono?: AbonoDeSaldoAFavor; saldoReabierto?: SaldoReabierto }> {
+): Promise<{
+  refundPaymentId: string
+  replay: boolean
+  abono?: AbonoDeSaldoAFavor
+  saldoReabierto?: SaldoReabierto
+  /** Máquina de efectivo (A6): el `PAY_OUT` ya quedó en esta transacción; el enganche post-commit no lo repite. */
+  salidaDeCajaEnTx?: true
+}> {
   // El replay va PRIMERO, antes de validar saldo o cantidades: un reintento de algo que ya se
   // devolvió no puede morir en la validación (spec [N-11]).
   if (input.idempotencyKey) {
@@ -843,6 +860,13 @@ export async function writeRefundInTx(
   // contra la `CashDrawerSession` abierta del venue, que no depende del `Shift`.
   const salesRefundPesos = centsToDecimal(input.salesRefundCents)
   const tipRefundPesos = centsToDecimal(input.tipRefundCents)
+  // 🔴 Máquina de efectivo (A6, R4-7 #4): devolver en efectivo una venta de la máquina saca billetes de la GAVETA, aunque la venta nunca
+  // entró ahí. La caja abierta se bloquea AQUÍ, antes del turno (el mismo orden que el cierre de caja: caja → turno); sin ella, 409 y no
+  // se confirma nada. Con una semántica dada (el crédito de un cambio, la cadena, el saldo a favor) el dinero no sale de la caja.
+  const cajaQueAutoriza =
+    !input.moneyAs && !input.aSaldoAFavor && devuelveEfectivoDeLaMaquina(original, input.devolverCon)
+      ? await cajaParaDevolverEnTx(tx, input.venueId)
+      : null
   const shiftClaim = await claimShiftForRefund(tx, {
     venueId: input.venueId,
     salesRefundPesos,
@@ -1015,6 +1039,19 @@ export async function writeRefundInTx(
     },
   })
 
+  // … y su `PAY_OUT`, en ESA caja y en esta misma transacción: no hay reembolso confirmado sin su salida de caja.
+  if (cajaQueAutoriza) {
+    await salidaDelReembolsoEnTx(tx, {
+      venueId: input.venueId,
+      sessionId: cajaQueAutoriza,
+      refundPaymentId: refundPayment.id,
+      amount: centsToDecimal(refundCents),
+      staffId: input.staffId,
+      orderId: original.orderId,
+      reason: REFUND_REASON_LABEL_ES[input.reason] ?? input.reason,
+    })
+  }
+
   if (shiftClaim.pendingReason) {
     // Se lee aquí, con `tx`, y no se recibe del llamador: el guardia AST de turnos exige que el gate
     // de la conciliación salga de una llamada canónica a `resolvePaymentShiftReconciliationEnabled`.
@@ -1123,6 +1160,7 @@ export async function writeRefundInTx(
     replay: false,
     ...(abono ? { abono } : {}),
     ...(saldoReabierto?.reabre ? { saldoReabierto } : {}),
+    ...(cajaQueAutoriza ? { salidaDeCajaEnTx: true as const } : {}),
   }
 }
 
@@ -1559,7 +1597,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         // El tramo que ESCRIBE —turno, fila REFUND, acumulado del original, VenueTransaction y
         // obligación de costo— es el núcleo compartido con el ajuste de reparto. El dashboard lo
         // llama con los defaults de siempre: no revierte la comisión del TIPO DE PAGO, reclama el turno vivo, MANUAL.
-        const { refundPaymentId, replay, abono, saldoReabierto } = await writeRefundInTx(tx, {
+        const { refundPaymentId, replay, abono, saldoReabierto, salidaDeCajaEnTx } = await writeRefundInTx(tx, {
           originalPaymentId: original.id,
           venueId: input.venueId,
           salesRefundCents,
@@ -1581,7 +1619,8 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
           provenance: 'MANUAL',
           bloqueado: cobro,
           ...(input.platformFeeRefundCents !== undefined ? { platformFeeRefundCents: input.platformFeeRefundCents } : {}),
-          devolverCon: devolverConEfectivo(original, input.refundMethod),
+          // Con saldo a favor el destino ya está dicho: la venta de la máquina «sin escoger» no se vuelve efectivo del cajón.
+          devolverCon: saldo ? undefined : devolverConEfectivo(original, input.refundMethod),
           ...(saldo ? { aSaldoAFavor: saldo } : {}),
           // Con saldo a favor, la cadena sólo da la raíz (el origen fiscal); el dinero no sale con la semántica de la raíz.
           ...(chain
@@ -1657,6 +1696,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
                   },
           cuentaDeTarjetasCancelada: tarjetas.cuentaCancelada,
           ...(abono ? { abono } : {}),
+          ...(salidaDeCajaEnTx ? { salidaDeCajaEnTx } : {}),
         }
       },
       { etiqueta: 'issueRefund', ...ORDER_LOCK_WAIT_BUDGET },
@@ -1717,18 +1757,21 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   // (`IssueRefundSheet.kt`) tras un reembolso, el cajón restaría DOS veces — la llave
   // del cliente es un UUID local y no colisiona con la nuestra. Ese parche se retira
   // en el mismo trabajo; iOS hace lo propio con su escritura local.
+  //
+  // La devolución de una venta de la máquina ya dejó su `PAY_OUT` en la transacción (`salidaDeCajaEnTx`): aquí no se repite.
   try {
-    await postCashRefundToDrawer({
-      venueId: input.venueId,
-      refundPaymentId: result.refundPaymentId,
-      ...result.refundTender,
-      // El efectivo que sale es el TOTAL devuelto (venta + propina): el split
-      // interno es contable, el cajón sólo ve billetes.
-      amount: centsToNumber(result.refundAmountCents),
-      staffId: input.staffId ?? null,
-      orderId: result.originalOrderId,
-      reason: REFUND_REASON_LABEL_ES[input.reason] ?? input.reason,
-    })
+    if (!result.salidaDeCajaEnTx)
+      await postCashRefundToDrawer({
+        venueId: input.venueId,
+        refundPaymentId: result.refundPaymentId,
+        ...result.refundTender,
+        // El efectivo que sale es el TOTAL devuelto (venta + propina): el split
+        // interno es contable, el cajón sólo ve billetes.
+        amount: centsToNumber(result.refundAmountCents),
+        staffId: input.staffId ?? null,
+        orderId: result.originalOrderId,
+        reason: REFUND_REASON_LABEL_ES[input.reason] ?? input.reason,
+      })
   } catch (err) {
     logger.error('[REFUND.DASHBOARD] Cash drawer posting failed (refund unaffected)', {
       refundPaymentId: result.refundPaymentId,

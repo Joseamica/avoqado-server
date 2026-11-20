@@ -18,7 +18,12 @@ import { issueRefund, type RefundReason } from '@/services/dashboard/refund.dash
 import { exigirSoloSaldoFueraDelPos } from '@/services/storeCredit/storeCreditRefund.service'
 import { createManualPayment, MENSAJE_VENTA_YA_COBRADA } from '@/services/dashboard/manualPayment.service'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
-import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal } from '@/services/tpv/terminalRefundTarget'
+import {
+  devolverConEfectivo,
+  devuelveEfectivoDeLaMaquina,
+  sePuedeEscogerComoDevolver,
+  seDevuelveEnTerminal,
+} from '@/services/tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '@/services/giftCards/giftCardTender'
 import { decidesMoney } from '@/services/payments/cardInternationality.service'
 import { isExchangeCreditTenderKind } from '@/services/exchanges/exchangePredicates'
@@ -621,6 +626,8 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           processorId: true,
           order: { select: { orderNumber: true } },
           tenderType: { select: { systemKind: true } },
+          // Máquina de efectivo (A6): su devolución en efectivo sale del cajón aunque la venta no entró ahí.
+          cashMachineRef: true,
         },
       })
       if (!payment) return text({ ok: false, error: 'No encontré ese pago en tus locales.' })
@@ -693,7 +700,9 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         // que la vista previa tiene que decirlo: está autorizando que alguien saque
         // billetes de un cajón físico, no sólo un apunte contable. La pregunta la
         // contesta `tenderSemantics`, nunca un `method === 'CASH'` local.
-        const saleDeCajonDeEfectivo = refundMethod ? refundMethod === 'CASH' : paymentCountsAsDrawerCash(chain?.money ?? payment)
+        const saleDeCajonDeEfectivo = refundMethod
+          ? refundMethod === 'CASH'
+          : devuelveEfectivoDeLaMaquina(payment, undefined) || paymentCountsAsDrawerCash(chain?.money ?? payment)
 
         if (!confirm) {
           return text({

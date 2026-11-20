@@ -85,7 +85,13 @@ describe('issue_refund con «Sólo saldo a favor» prendido', () => {
   it('al confirmar, la regla también corre con el cobro bloqueado (el ajuste pudo cambiar)', async () => {
     mockVenueSettingsFindUnique.mockResolvedValue({ storeCreditOnly: false })
     mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
-    mockIssue.mockResolvedValueOnce({ refundPaymentId: 'r1', orderId: 'o1', refundedAmount: 100, remainingRefundable: 300, reason: 'RETURNED_GOODS' })
+    mockIssue.mockResolvedValueOnce({
+      refundPaymentId: 'r1',
+      orderId: 'o1',
+      refundedAmount: 100,
+      remainingRefundable: 300,
+      reason: 'RETURNED_GOODS',
+    })
     await call({ ...base, reason: 'returned_goods', confirm: true })
     const { reglasBajoCandado } = mockIssue.mock.calls[0][0]
     const tx = { venueSettings: { findUnique: jest.fn().mockResolvedValue({ storeCreditOnly: true }) } }
@@ -95,7 +101,13 @@ describe('issue_refund con «Sólo saldo a favor» prendido', () => {
   it('🔴 Codex r1 #1: al confirmar llega al servicio aunque esté prendido: una repetición debe contestar lo que ya se escribió', async () => {
     soloSaldo()
     mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
-    mockIssue.mockResolvedValueOnce({ refundPaymentId: 'r1', orderId: 'o1', refundedAmount: 100, remainingRefundable: 300, reason: 'RETURNED_GOODS' })
+    mockIssue.mockResolvedValueOnce({
+      refundPaymentId: 'r1',
+      orderId: 'o1',
+      refundedAmount: 100,
+      remainingRefundable: 300,
+      reason: 'RETURNED_GOODS',
+    })
     const body = parse(await call({ ...base, reason: 'returned_goods', confirm: true }))
     expect(mockIssue).toHaveBeenCalledTimes(1)
     expect(body.code).toBeUndefined()
@@ -251,6 +263,17 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
     })
     const out = parse(await call(base))
     expect(out.preview.saleDeCajonDeEfectivo).toBe(true)
+  })
+
+  it('máquina de efectivo (A6): su venta no entró al cajón, pero la devolución en efectivo SÍ sale de él', async () => {
+    const deLaMaquina = { ...completedPayment, fundsFlow: 'EXTERNAL_RECORDED', tenderCountsAsCash: false, cashMachineRef: 'AQ0000000000AB' }
+    mockPaymentFindFirst.mockResolvedValueOnce(deLaMaquina)
+    const sinEscoger = parse(await call(base))
+    expect(sinEscoger.preview.saleDeCajonDeEfectivo).toBe(true)
+    expect(sinEscoger.message).toMatch(/cajón/i)
+    expect(mockPaymentFindFirst.mock.calls[0][0].select.cashMachineRef).toBe(true)
+    mockPaymentFindFirst.mockResolvedValueOnce(deLaMaquina)
+    expect(parse(await call({ ...base, refundMethod: 'BANK_TRANSFER' })).preview.saleDeCajonDeEfectivo).toBe(false)
   })
 
   it('BLOCKS card payments — Blumon card refunds are done on the terminal, not via API', async () => {

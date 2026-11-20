@@ -10,7 +10,8 @@ import {
   CardEntryMode,
   Prisma,
 } from '@prisma/client'
-import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
+import { cajaParaDevolverEnTx, postCashRefundToDrawer, salidaDelReembolsoEnTx } from '../shared/cashDrawerPosting'
+import { devuelveEfectivoDeLaMaquina } from './terminalRefundTarget'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForRefund,
@@ -629,6 +630,7 @@ export async function recordRefund(
             cardBrand: CardBrand | null
             maskedPan: string | null
             entryMode: CardEntryMode | null
+            cashMachineRef: string | null
           }>
         >(Prisma.sql`
       SELECT
@@ -655,7 +657,8 @@ export async function recordRefund(
         processor,
         "cardBrand",
         "maskedPan",
-        "entryMode"
+        "entryMode",
+        "cashMachineRef"
       FROM "Payment"
       WHERE id = ${refundData.originalPaymentId}
         AND "venueId" = ${venueId}
@@ -871,6 +874,10 @@ export async function recordRefund(
 
         const salesRefundPesos = new Decimal(salesRefund)
         const tipRefundPesos = new Decimal(tipRefund)
+        // 🔴 Máquina de efectivo (R4-7 #4, la regla de A6): la TPV nunca escoge con qué devolver, así que una venta de la máquina se
+        // devuelve con efectivo de la GAVETA. La caja abierta se bloquea antes del turno (caja → turno, como el cierre de caja); sin
+        // ella, 409 y no se registra nada. El `PAY_OUT` va en esa caja y en esta transacción, justo después de la fila.
+        const cajaQueAutoriza = devuelveEfectivoDeLaMaquina(locked, undefined) ? await cajaParaDevolverEnTx(tx, venueId) : null
         const shiftClaim = await claimShiftForRefund(tx, {
           venueId,
           salesRefundPesos,
@@ -911,7 +918,8 @@ export async function recordRefund(
             tenderCountsAsCash: locked.tenderTypeId && locked.tenderCountsAsCash != null ? locked.tenderCountsAsCash : undefined,
             tenderCaptureTip: locked.tenderTypeId && locked.tenderCaptureTip != null ? locked.tenderCaptureTip : undefined,
             tenderSatFormaPago: locked.tenderTypeId && locked.tenderSatFormaPago != null ? locked.tenderSatFormaPago : undefined,
-            fundsFlow: locked.fundsFlow || undefined,
+            // La venta de la máquina se devuelve desde la gaveta: el dinero SÍ sale del cajón.
+            fundsFlow: cajaQueAutoriza ? PaymentFundsFlow.CASH_DRAWER : locked.fundsFlow || undefined,
             source: locked.source,
             status: 'COMPLETED',
             type: PaymentType.REFUND,
@@ -989,6 +997,19 @@ export async function recordRefund(
             netAmount: new Decimal(-refundAmountInPesos),
           },
         })
+
+        if (cajaQueAutoriza) {
+          await salidaDelReembolsoEnTx(tx, {
+            venueId,
+            sessionId: cajaQueAutoriza,
+            refundPaymentId: refundPayment.id,
+            // El cajón sólo ve billetes: venta + propina, como el enganche post-commit.
+            amount: new Decimal(esteReembolsoCents).div(100),
+            staffId: userId,
+            orderId: locked.orderId,
+            reason: refundData.reason ?? null,
+          })
+        }
 
         if (shiftClaim.pendingReason) {
           await recordPendingPaymentShiftReconciliation(tx, {
@@ -1207,7 +1228,9 @@ export async function recordRefund(
             saldoReabierto: saldoReabierto?.reabre ? saldoReabierto : null,
             orderId: locked.orderId,
             method: locked.method,
-            fundsFlow: locked.fundsFlow,
+            fundsFlow: cajaQueAutoriza ? PaymentFundsFlow.CASH_DRAWER : locked.fundsFlow,
+            // Máquina de efectivo: el `PAY_OUT` ya quedó en la transacción; el enganche post-commit no lo repite.
+            salidaDeCajaEnTx: cajaQueAutoriza !== null,
             tenderTypeId: locked.tenderTypeId,
             tenderCountsAsCash: locked.tenderCountsAsCash,
             // Tarjetas de regalo (B1 r1): este reembolso dejó en $0 una venta de tarjetas sin pagar y la canceló en la misma tx.
@@ -1321,26 +1344,27 @@ export async function recordRefund(
   // Sus gemelos `refund.mobile` y `refund.dashboard` ya lo hacían; éste no, y devolver $200
   // desde la PAX dejaba el esperado $200 arriba ⇒ SOBRANTE falso al cerrar. El helper decide
   // con la semántica del pago REAL (fundsFlow → tender → legacy); tarjeta = NOT_DRAWER_CASH.
-  // Después del commit y fail-open: el dinero ya salió, el cajón sólo lo refleja.
+  // Después del commit y fail-open: el dinero ya salió, el cajón sólo lo refleja. La venta de la máquina ya lo dejó en la transacción.
   try {
-    await postCashRefundToDrawer({
-      venueId,
-      refundPaymentId: result.id,
-      orderId: postCommitAuthority.orderId,
-      // 🔴 El cajón sólo ve BILLETES: sale la venta MÁS la propina devuelta. El Payment
-      // del reembolso guarda el split contable (`amount` = venta, `tipAmount` = propina),
-      // pero el CASH_SALE original entró como `amount + tipAmount`, así que pasar sólo la
-      // venta dejaba el esperado arriba por el importe de la propina ⇒ faltante inventado
-      // al cerrar. Misma convención que `refund.dashboard` (pasa el total) y `refund.mobile`.
-      amount: new Decimal(result.amount).plus(new Decimal(result.tipAmount ?? 0)),
-      reason: refundData.reason ?? null,
-      method: postCommitAuthority.method,
-      fundsFlow: postCommitAuthority.fundsFlow,
-      tenderTypeId: postCommitAuthority.tenderTypeId,
-      tenderCountsAsCash: postCommitAuthority.tenderCountsAsCash,
-      staffId: userId,
-      staffName: null,
-    })
+    if (!postCommitAuthority.salidaDeCajaEnTx)
+      await postCashRefundToDrawer({
+        venueId,
+        refundPaymentId: result.id,
+        orderId: postCommitAuthority.orderId,
+        // 🔴 El cajón sólo ve BILLETES: sale la venta MÁS la propina devuelta. El Payment
+        // del reembolso guarda el split contable (`amount` = venta, `tipAmount` = propina),
+        // pero el CASH_SALE original entró como `amount + tipAmount`, así que pasar sólo la
+        // venta dejaba el esperado arriba por el importe de la propina ⇒ faltante inventado
+        // al cerrar. Misma convención que `refund.dashboard` (pasa el total) y `refund.mobile`.
+        amount: new Decimal(result.amount).plus(new Decimal(result.tipAmount ?? 0)),
+        reason: refundData.reason ?? null,
+        method: postCommitAuthority.method,
+        fundsFlow: postCommitAuthority.fundsFlow,
+        tenderTypeId: postCommitAuthority.tenderTypeId,
+        tenderCountsAsCash: postCommitAuthority.tenderCountsAsCash,
+        staffId: userId,
+        staffName: null,
+      })
   } catch (err) {
     logger.error('[CASH-DRAWER] Falló registrar el reembolso en el cajón (el reembolso NO se afecta)', {
       refundPaymentId: result.id,
