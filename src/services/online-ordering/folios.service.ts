@@ -382,7 +382,8 @@ export async function syncPaidClosedFolios(
  * `notPickedUpAt`). Con la devolución reservada o hecha no se toca (lo excluye la lectura y lo repite el CAS: una reserva que gane
  * entre la lectura y la escritura hace perder el CAS). Su bitácora `ONLINE_ORDER_NOT_PICKED_UP` va en la MISMA transacción que el
  * CAS: si el proceso muere entre los dos no queda ninguno y la siguiente pasada lo cierra con su única fila. Un folio pagado en caja
- * sigue como hoy.
+ * sigue como hoy. Ruling 24: «No lo recogió» sólo si se cobró EN LÍNEA (su cargo `CAPTURED`, también repetido en el CAS); uno cuyo
+ * dinero entró por otro camino (la tarjeta se soltó al pasar a «Por entregar», arreglo 1 de 3A) se cierra como un folio de caja.
  */
 export async function cerrarFoliosDelDiaTerminado(
   scope: { venueId?: string },
@@ -398,14 +399,16 @@ export async function cerrarFoliosDelDiaTerminado(
         venueId: string
         status: OnlineOrderStatus
         paymentMode: OnlineOrderPaymentMode
+        chargeStatus: OnlineOrderChargeStatus | null
         acceptedAt: Date
         orderNumber: string
       }>
     >`
-      SELECT oo.id, oo."orderId", oo."venueId", oo.status::text AS status, oo."paymentMode"::text AS "paymentMode", oo."acceptedAt",
-        o."orderNumber"
+      SELECT oo.id, oo."orderId", oo."venueId", oo.status::text AS status, oo."paymentMode"::text AS "paymentMode",
+        c.status::text AS "chargeStatus", oo."acceptedAt", o."orderNumber"
       FROM "OnlineOrder" oo
       JOIN "Order" o ON o.id = oo."orderId"
+      LEFT JOIN "OnlineOrderCharge" c ON c."onlineOrderId" = oo.id
       WHERE oo."requiresAcceptance" = false
         AND oo.status IN ('ACCEPTED', 'READY')
         AND o.status NOT IN ('CANCELLED', 'DELETED')
@@ -420,7 +423,7 @@ export async function cerrarFoliosDelDiaTerminado(
   for (const row of rows) {
     try {
       const completedAt = reloj() // R52: la hora de la escritura
-      const noLoRecogio = row.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE
+      const noLoRecogio = row.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE && row.chargeStatus === OnlineOrderChargeStatus.CAPTURED
       const cerrado = await prisma.$transaction(async tx => {
         const cas = await tx.onlineOrder.updateMany({
           where: {
@@ -429,7 +432,9 @@ export async function cerrarFoliosDelDiaTerminado(
             requiresAcceptance: false,
             acceptedAt: row.acceptedAt,
             order: CUENTA_VIVA,
-            ...(noLoRecogio ? { refundRequestedAt: null, refundedAt: null } : {}),
+            ...(noLoRecogio
+              ? { refundRequestedAt: null, refundedAt: null, charge: { is: { status: OnlineOrderChargeStatus.CAPTURED } } }
+              : {}),
           },
           data: { status: OnlineOrderStatus.COMPLETED, completedAt, ...(noLoRecogio ? { notPickedUpAt: completedAt } : {}) },
         })

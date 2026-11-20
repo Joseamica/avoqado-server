@@ -20,7 +20,7 @@ import { releaseCharge } from './card/release.service'
 import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders, type CancelledElsewhere } from './cancelledOrderSync'
 import { despertarPasesTrasCommit } from './cortesiaDeFolio'
 import { esVentaCerrada } from '@/services/shared/orderBalance'
-import { OPEN_ORDER_STATUSES } from './constants'
+import { OPEN_ORDER_STATUSES, PREPAID_MODES } from './constants'
 import { notifyOrderEvent } from './notifications.service'
 import { getSettings } from './settings.service'
 import { emitOnlineOrderUpdated } from './traySocket'
@@ -240,9 +240,13 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
   // D661 (Task 4): con la devolución reservada o hecha no se entrega: responde su estado real. Las escribe la devolución bajo ESTE
   // candado de la orden, así que lo leído aquí vale hasta el CAS (el corte del día, que no lo toma, cambia el estado y el CAS lo ve).
   if (a.kind === 'DELIVER' && (row.refundRequestedAt || row.refundedAt)) return stale(row.status)
-  // Se entrega cuando YA se cobró, leído bajo el candado (el cobro lo hace el flujo normal de caja). Falla CERRADO en todos los modos:
-  // D661 (Task 4) quitó la excepción M-2 de la tarjeta en línea (aceptada sin cobrarla, su cuenta puede seguir sin saldar).
-  if (a.kind === 'DELIVER' && row.order.paymentStatus !== PaymentStatus.PAID) return { r: 'PAYMENT_REQUIRED' }
+  // Se entrega cuando YA se cobró, leído bajo el candado (el cobro lo hace el flujo normal de caja). M-2: falla CERRADO: sólo
+  // un modo ya cobrado de antemano (`PREPAID_MODES`: la tarjeta en línea, que se captura al aceptar) se libra de exigirlo.
+  // D661 (Ruling 25): la excepción es sólo de «Mi equipo»; un pedido con tarjeta de «Nadie» pasa por la MISMA regla de los folios.
+  const yaCobradoDeAntemano = PREPAID_MODES.includes(row.paymentMode) && row.requiresAcceptance !== false
+  if (a.kind === 'DELIVER' && !yaCobradoDeAntemano && row.order.paymentStatus !== PaymentStatus.PAID) {
+    return { r: 'PAYMENT_REQUIRED' }
+  }
 
   // Un folio (`requiresAcceptance:false`, QR o liga) no se prepara sin pago: aceptar exige la venta cobrada (`esVentaCerrada`).
   if (a.kind === 'ACCEPT' && row.requiresAcceptance === false && !esVentaCerrada(row.order.paymentStatus)) {

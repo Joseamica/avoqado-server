@@ -581,12 +581,28 @@ describe('markOnlineOrderDelivered', () => {
     expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
   })
 
-  it('D661 (Task 4): la tarjeta en línea también exige la venta PAGADA, leída bajo el candado (antes se libraba por M-2)', async () => {
-    const tarjeta = (order: Record<string, unknown>) => ({ ...row({ status: 'READY', order }), paymentMode: 'CARD_ONLINE' }) as any
-    prismaMock.onlineOrder.findFirst.mockResolvedValue(tarjeta({ status: 'READY', paymentStatus: 'PARTIAL', paidAmount: D('100') }))
-    await expect(markOnlineOrderDelivered(base)).resolves.toEqual({ outcome: 'PAYMENT_REQUIRED' })
-    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
-    prismaMock.onlineOrder.findFirst.mockResolvedValue(tarjeta(PAID))
+  /** Un pedido con tarjeta en línea listo, con la venta en `paymentStatus`; «Nadie» = sin aceptación. */
+  const tarjetaLista = (paymentStatus: string, requiresAcceptance: boolean) =>
+    ({
+      ...row({ status: 'READY', requiresAcceptance, order: { status: 'READY', paymentStatus, paidAmount: D('100') } }),
+      paymentMode: 'CARD_ONLINE',
+    }) as any
+
+  it('D661 (Ruling 25): un pedido con tarjeta de «Mi equipo» se entrega como antes aunque su venta no esté PAGADA (sigue la excepción M-2)', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(tarjetaLista('PARTIAL', true))
+    await expect(markOnlineOrderDelivered(base)).resolves.toEqual({ outcome: 'OK', status: 'COMPLETED' })
+    expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).data).toEqual({ status: 'COMPLETED', completedAt: NOW })
+  })
+
+  it('D661 (Ruling 25): un pedido con tarjeta de «Nadie» sin la venta PAGADA no se entrega: 409 PAYMENT_REQUIRED, la misma regla de los folios', async () => {
+    for (const paymentStatus of ['PARTIAL', 'PENDING', 'REFUNDED']) {
+      jest.clearAllMocks()
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(tarjetaLista(paymentStatus, false))
+      await expect(markOnlineOrderDelivered(base)).resolves.toEqual({ outcome: 'PAYMENT_REQUIRED' })
+      expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    }
+    // Con la venta PAGADA se entrega.
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(tarjetaLista('PAID', false))
     await expect(markOnlineOrderDelivered(base)).resolves.toEqual({ outcome: 'OK', status: 'COMPLETED' })
   })
 

@@ -634,8 +634,12 @@ describe('cerrarFoliosDelDiaTerminado (decisión 18: «Entregado» al terminar e
   })
 
   // ── D661 (Task 4): «No lo recogió» ──
-  /** Un pedido con tarjeta de «Nadie» ya cobrado (la lectura ya filtra `requiresAcceptance = false`). */
-  const tarjeta = (k: string, status = 'ACCEPTED') => ({ ...fila(k, status), paymentMode: 'CARD_ONLINE' })
+  /** Un pedido con tarjeta de «Nadie» cobrado EN LÍNEA (cargo CAPTURED; la lectura ya filtra `requiresAcceptance = false`). */
+  const tarjeta = (k: string, status = 'ACCEPTED', chargeStatus = 'CAPTURED') => ({
+    ...fila(k, status),
+    paymentMode: 'CARD_ONLINE',
+    chargeStatus,
+  })
   /** Marca si `activityLog.create` corre DENTRO de la transacción de su CAS (el `$transaction` simulado lo dice). */
   let dentro = false
   const bitacoraDentro: boolean[] = []
@@ -669,6 +673,7 @@ describe('cerrarFoliosDelDiaTerminado (decisión 18: «Entregado» al terminar e
         order: CUENTA_VIVA,
         refundRequestedAt: null,
         refundedAt: null,
+        charge: { is: { status: 'CAPTURED' } }, // Ruling 24: cobrado en línea, repetido al escribir
       },
       data: { status: 'COMPLETED', completedAt: NOW, notPickedUpAt: NOW },
     })
@@ -712,6 +717,33 @@ describe('cerrarFoliosDelDiaTerminado (decisión 18: «Entregado» al terminar e
       /NOT \(oo\."paymentMode" = 'CARD_ONLINE' AND \(oo\."refundRequestedAt" IS NOT NULL OR oo\."refundedAt" IS NOT NULL\)\)/,
     )
     expect(sqlLeido()).toContain('oo."paymentMode"::text AS "paymentMode"')
+  })
+
+  it('cierre (Ruling 24): «No lo recogió» sólo con el cobro en línea (cargo CAPTURED); un «Nadie» con tarjeta pagado por otro camino se cierra como un folio pagado en caja', async () => {
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([tarjeta('N'), tarjeta('X', 'READY', 'RELEASED')])
+    await expect(cerrarFoliosDelDiaTerminado({ venueId: 'v1' }, () => NOW)).resolves.toBe(2)
+    // La lectura trae el estado del cargo (puede no tener: un folio de caja).
+    expect(sqlLeido()).toMatch(/LEFT JOIN "OnlineOrderCharge" c ON c\."onlineOrderId" = oo\.id/)
+    expect(sqlLeido()).toContain('c.status::text AS "chargeStatus"')
+    // Cobrado en línea: el CAS repite que el cargo sigue CAPTURED.
+    expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).where.charge).toEqual({ is: { status: 'CAPTURED' } })
+    // Pagado por otro camino (tarjeta soltada): el MISMO CAS y la MISMA bitácora que un folio pagado en caja.
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenNthCalledWith(2, {
+      where: { id: 'oo-X', status: 'READY', requiresAcceptance: false, acceptedAt: ACEPTADO, order: CUENTA_VIVA },
+      data: { status: 'COMPLETED', completedAt: NOW },
+    })
+    expect(logAction).toHaveBeenCalledTimes(1)
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'ONLINE_ORDER_COLLECTED',
+        entityId: 'oo-X',
+        data: { orderNumber: 'F-X', automatic: 'END_OF_DAY' },
+      }),
+    )
+    expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ action: 'ONLINE_ORDER_NOT_PICKED_UP', entityId: 'oo-N' }) }),
+    )
   })
 
   it('cierre: un folio pagado en caja sigue como hoy', async () => {

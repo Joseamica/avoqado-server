@@ -189,6 +189,37 @@ describe('D661 · tarea 4: entrega, cierre del día, «No lo recogió» y el seg
       .set('x-test-venue', venueId!)
       .send({})
   const comandas = async () => (await listFolios({ venueId: venueId! })).comandasPorImprimir.map(c => c.orderId)
+  const hastaQue = async (listo: () => Promise<boolean>, ms = 5_000) => {
+    const fin = Date.now() + ms
+    while (!(await listo()) && Date.now() < fin) await new Promise(r => setTimeout(r, 25))
+  }
+  /**
+   * El borde del arreglo 1 de 3A: un apartado cuya cuenta se pagó por OTRO camino (lo que deja la TPV al registrar dinero ya movido,
+   * escrito directo como en tarjetaEnNadieAbrir). La lista de la caja lo pasa a «Por entregar» soltando la tarjeta: nunca se cobra en
+   * línea. Devuelve el apartado ya «Por entregar» con su cargo liberado.
+   */
+  const pagadoPorOtroCamino = async () => {
+    const a = await apartado()
+    await prisma.payment.create({
+      data: {
+        venueId: venueId!,
+        orderId: a.orderId,
+        amount: 250,
+        method: 'CASH',
+        source: 'TPV',
+        status: 'COMPLETED',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: 250,
+      },
+    })
+    await prisma.order.update({ where: { id: a.orderId }, data: { paymentStatus: 'PAID', paidAmount: 250, remainingBalance: 0 } })
+    await listFolios({ venueId: venueId! })
+    await hastaQue(async () => (await cargo(a.chargeId)).status === 'RELEASED')
+    expect(await enLinea(a.orderId)).toMatchObject({ status: 'ACCEPTED', paymentMode: 'CARD_ONLINE', requiresAcceptance: false })
+    expect((await cargo(a.chargeId)).status).toBe('RELEASED')
+    return a
+  }
 
   beforeAll(async () => {
     const org = await prisma.organization.create({
@@ -388,6 +419,39 @@ describe('D661 · tarea 4: entrega, cierre del día, «No lo recogió» y el seg
       expect(await enLinea(p.orderId)).toMatchObject({ status: 'ACCEPTED', notPickedUpAt: null })
       expect(await bitacorasNoRecogido(p.onlineOrderId)).toBe(0)
     }
+  })
+
+  it('cierre (Ruling 24): «No lo recogió» sólo si se cobró en línea; un «Nadie» con tarjeta pagado por otro camino se cierra como un folio pagado en caja', async () => {
+    const otroCamino = await pagadoPorOtroCamino()
+    const enLineaCobrado = await cobrado()
+    for (const p of [otroCamino, enLineaCobrado]) await deAyer(p.onlineOrderId)
+
+    await expect(corte()).resolves.toBe(2) // ninguno se queda sin cerrar
+    // (a) Pagado por otro camino: termina EXACTAMENTE como un folio pagado en caja.
+    const oo = await enLinea(otroCamino.orderId)
+    expect(oo.status).toBe('COMPLETED')
+    expect(oo.completedAt).not.toBeNull()
+    expect(oo.notPickedUpAt).toBeNull()
+    expect(await bitacorasNoRecogido(otroCamino.onlineOrderId)).toBe(0)
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'ONLINE_ORDER_COLLECTED',
+        entityId: otroCamino.onlineOrderId,
+        staffId: null,
+        data: expect.objectContaining({ automatic: 'END_OF_DAY' }),
+      }),
+    )
+    expect(await getTrackingByToken(otroCamino.trackingToken)).toMatchObject({ status: 'COMPLETED', notPickedUpAt: null })
+    // Y la regla de la comanda no lo pide después del corte (lo COMPLETED sólo con `notPickedUpAt`).
+    expect(await comandas()).not.toContain(otroCamino.orderId)
+    expect((await getInboxOrder({ venueId: venueId!, orderId: otroCamino.orderId }))?.needsPrint).toBe(false)
+
+    // (b) Cobrado en línea: sigue siendo «No lo recogió», con su única bitácora.
+    expect((await enLinea(enLineaCobrado.orderId)).notPickedUpAt).not.toBeNull()
+    expect(await bitacorasNoRecogido(enLineaCobrado.onlineOrderId)).toBe(1)
+    expect(logAction).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'ONLINE_ORDER_COLLECTED', entityId: enLineaCobrado.onlineOrderId }),
+    )
   })
 
   it('cierre: un folio pagado en caja sigue como hoy', async () => {

@@ -81,6 +81,11 @@ export const MENU_CACHE_MAX_VENUES = 500
 /** Estados de `Order` que cuentan como «cuenta abierta» (folio sin repetir y desde dónde una transición mueve la `Order`). */
 export const OPEN_ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] as const
 /**
+ * M-2: modos de pago que ya llegan COBRADOS al aceptar (fase 2: tarjeta en línea, se captura al aceptar). Entregar exige la cuenta
+ * pagada para todo modo que no esté aquí (falla cerrado).
+ */
+export const PREPAID_MODES: readonly OnlineOrderPaymentMode[] = [OnlineOrderPaymentMode.CARD_ONLINE]
+/**
  * D661 (r1 #12): un borrador de tarjeta de «Nadie» guarda `customerPhone` vacío. Su tope es por clienta (`request.customerId`), no
  * por número: hay clientas sin teléfono y, con el mismo '' para todas, cuatro de ellas chocarían en el tope de tres. Su teléfono
  * probado viaja en `request.telefonoVerificado`. «Mi equipo» siempre lleva teléfono, así que '' sólo puede ser de «Nadie».
