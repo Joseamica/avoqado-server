@@ -456,6 +456,7 @@ const startApplication = async (retries = 3) => {
       if (count > 0) logger.info(`✅ Venue names cached for logging (${count})`)
     })
 
+
     // Qué venues ya se rigen por la lista blanca estricta del cobro remoto (§8 C.1 / I.6). No bloquea el arranque:
     // hasta que carga rige el predicado HEREDADO, que es exactamente el de producción — el lado seguro aquí es el
     // permisivo, porque caer al estricto bloquearía las filas históricas y dejaría terminales muertas.

@@ -558,6 +558,7 @@ const prismaMock: any = {
   cfdiGlobalOrden: createMockModel(),
   // Pedidos en línea (plan 1a): este mock es una LISTA FIJA. Sin estas dos entradas cualquier prueba que toque los modelos
   // nuevos revienta con «Cannot read properties of undefined» en vez de fallar por su aserción.
+  arranqueDeFuncion: createMockModel(),
   onlineOrderingSettings: createMockModel(),
   onlineOrder: createMockModel(),
   // Fase 2 (tarjeta en línea): el cargo del pedido. Por omisión no hay cargo (pagar al recoger), así la máquina de estados se

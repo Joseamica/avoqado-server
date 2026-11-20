@@ -27,6 +27,28 @@ export async function sellarFolioAnuladoEnTx(tx: Pick<Prisma.TransactionClient, 
   })
 }
 
+/**
+ * D662 parte 2 (v3): anular la cuenta de un pedido de «Mi equipo» que sigue por aceptar desde la caja, el panel o la TPV ES contestarlo
+ * (una persona decidió). Se guarda `staffAnsweredAt` en la MISMA transacción de la anulación y con su hora, SÓLO si estaba vacío: la
+ * pausa sola lo lee y ya no depende de cuándo la bandeja o el barrido sincronicen el pedido (Codex p2-r1 #3, p2-r2 #3). Las anulaciones
+ * del propio pedido en línea (vencer, rechazar, la clienta) y del sistema (cuentas abandonadas) NO llaman aquí.
+ */
+export async function sellarToqueDePersonaAlAnularEnTx(
+  tx: Pick<Prisma.TransactionClient, 'onlineOrder'>,
+  a: { venueId: string; orderId: string },
+  ahora: Date = new Date(),
+): Promise<void> {
+  await tx.onlineOrder.updateMany({
+    where: { orderId: a.orderId, venueId: a.venueId, requiresAcceptance: true, status: 'PENDING_ACCEPTANCE', staffAnsweredAt: null },
+    data: { staffAnsweredAt: ahora },
+  })
+}
+
+/** D662 parte 2 (v3): los caminos de `devolverCanjesDeVentaAnuladaEnTx` que NO son una persona anulando la cuenta. */
+export function anulacionEsDePersona(camino: string): boolean {
+  return !camino.startsWith('pedidoEnLinea:') && camino !== 'abandonedOrdersCleanup'
+}
+
 export interface BeneficiosRegresados {
   /** Filas convertidas en cortesía. */
   filas: number

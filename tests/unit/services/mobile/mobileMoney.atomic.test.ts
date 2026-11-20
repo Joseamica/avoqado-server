@@ -17,6 +17,12 @@ jest.mock('@/services/online-ordering/card/guards', () => ({
   // Tienda híbrida (R53): «un folio no se junta» también lee `onlineOrder`; se prueba en `folios.integration.test.ts`.
   assertNotFolioInTx: jest.fn(async () => undefined),
 }))
+// D662 parte 2: juntar sella el toque de una persona en el pedido de «Mi equipo» de la cuenta origen (también lee `onlineOrder`);
+// se prueba en `cortesiaDeFolio.test.ts` y en `lifecycle.integration.test.ts`.
+jest.mock('@/services/online-ordering/cortesiaDeFolio', () => ({
+  ...jest.requireActual('@/services/online-ordering/cortesiaDeFolio'),
+  sellarToqueDePersonaAlAnularEnTx: jest.fn(async () => undefined),
+}))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 jest.mock('@/services/referrals/referralRefund.service', () => ({ onOrderCancelled: jest.fn() }))
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))

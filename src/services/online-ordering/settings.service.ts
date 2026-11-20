@@ -8,6 +8,7 @@ import { isValidOrderingHours } from './hours'
 import { findCardMerchant } from './card/merchant'
 import { FOLIO_DEVICE_WINDOW_MS } from './constants'
 import type { FloorPauseMinutes, OnlineOrderingConfig, OnlineOrderingSettingsPatch } from './types'
+import { emitStoreChanged } from './traySocket'
 
 export const DEFAULT_CONFIG: OnlineOrderingConfig = {
   enabled: false,
@@ -23,7 +24,14 @@ export const DEFAULT_CONFIG: OnlineOrderingConfig = {
   requiresAcceptance: true,
 }
 
-export type OnlineOrderingSettingsRead = OnlineOrderingConfig & { lastInboxPollAt: Date | null; lastToPayPollAt: Date | null }
+export type OnlineOrderingSettingsRead = OnlineOrderingConfig & {
+  lastInboxPollAt: Date | null
+  lastToPayPollAt: Date | null
+  /** D662 parte 2: último «Reanudar» (o paso a «Mi equipo»): la pausa sola sólo cuenta pedidos con hora límite posterior. */
+  autoPauseResumedAt?: Date | null
+  /** D662 v4: cuándo se guardó la fila (Prisma `@updatedAt`; Reanudar, pausar, ajustes y latidos la mueven). */
+  updatedAt?: Date | null
+}
 
 function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingSettingsRead {
   return {
@@ -38,6 +46,8 @@ function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingSettingsRead {
     requiresAcceptance: row.requiresAcceptance,
     lastInboxPollAt: row.lastInboxPollAt ?? null,
     lastToPayPollAt: row.lastToPayPollAt ?? null,
+    autoPauseResumedAt: row.autoPauseResumedAt ?? null,
+    updatedAt: row.updatedAt ?? null,
   }
 }
 
@@ -201,7 +211,13 @@ export async function updateSettings(
 
     const row = await tx.onlineOrderingSettings.upsert({
       where: { venueId },
-      create: { ...(data as Prisma.OnlineOrderingSettingsUncheckedCreateInput), venueId, ...(preloadHours ? { hours: preloadHours } : {}) },
+      // D662 parte 2: una fila nueva nace con el corte de la pausa sola puesto (sin la gracia del despliegue; Codex p2-r5 #2).
+      create: {
+        ...(data as Prisma.OnlineOrderingSettingsUncheckedCreateInput),
+        venueId,
+        autoPauseResumedAt: new Date(),
+        ...(preloadHours ? { hours: preloadHours } : {}),
+      },
       update: data,
     })
     const bitacora = {
@@ -253,6 +269,7 @@ export async function updateSettings(
     })
   }
 
+  emitStoreChanged(venueId)
   return rowToConfig(row)
 }
 
@@ -273,6 +290,15 @@ export async function pauseOnlineOrdering(
   if (r.count === 0) {
     throw new BadRequestError('La tienda en línea de este negocio todavía no está configurada.', 'ONLINE_ORDERING_NOT_CONFIGURED')
   }
+  // D662 parte 2 (v3): «Reanudar» también quita la pausa sola (la del piso y la de las apps viejas, que llaman igual): el corte sube a
+  // AHORA y desde aquí sólo cuentan los pedidos con hora límite posterior. Sólo sube (nunca baja la gracia de la migración ni un
+  // avance). Pausar 15/30/60 no lo toca: al vencer, la tienda sigue pausada sola hasta «Reanudar».
+  if (minutes === null) {
+    await prisma.onlineOrderingSettings.updateMany({
+      where: { venueId, OR: [{ autoPauseResumedAt: null }, { autoPauseResumedAt: { lt: now } }] },
+      data: { autoPauseResumedAt: now },
+    })
+  }
   const current = await prisma.onlineOrderingSettings.findUnique({ where: { venueId }, select: { manualPause: true } })
   void logAction({
     staffId: actorStaffId,
@@ -282,5 +308,6 @@ export async function pauseOnlineOrdering(
     entityId: venueId,
     data: { minutes, pausedUntil: pausedUntil ? pausedUntil.toISOString() : null },
   })
+  emitStoreChanged(venueId)
   return { pausedUntil: pausedUntil ? pausedUntil.toISOString() : null, manualPause: current?.manualPause ?? false }
 }
