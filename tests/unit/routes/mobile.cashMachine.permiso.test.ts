@@ -66,8 +66,15 @@ async function correr(
   role: StaffRole,
   body: object = {},
   encabezados: Record<string, string> = {},
+  /** Un rol personalizado: SÓLO estos permisos (sin los defaults del rol). */
+  conjunto?: string[],
 ) {
-  mockStaffVenueFindUnique.mockResolvedValue({ role, active: true, permissionSetId: null, permissionSet: null })
+  mockStaffVenueFindUnique.mockResolvedValue({
+    role,
+    active: true,
+    permissionSetId: conjunto ? 'set-1' : null,
+    permissionSet: conjunto ? { permissions: conjunto } : null,
+  })
   const req: any = {
     method: metodo.toUpperCase(),
     originalUrl: `/api/v1/mobile${ruta.replace(':venueId', VENUE)}`,
@@ -221,8 +228,17 @@ describe('Codex r1 #9 (decisión a): cotizar un carrito con descuento contesta D
 describe('Codex r1 #13: GET shifts/business-current (el turno del negocio para la PC sin gaveta)', () => {
   const TURNO = '/venues/:venueId/shifts/business-current'
 
-  it('pide shifts:read, el permiso de lectura más chico que tiene quien cobra', () => {
-    expect(permisosDe(TURNO, 'get')).toEqual(['shifts:read'])
+  it('🔴 Codex r2 #6: pide payments:create O shifts:read; un rol personalizado con sólo payments:create lo lee (el contrato del plan)', async () => {
+    for (const [conjunto, status] of [
+      [['payments:create'], 200],
+      [['shifts:read'], 200],
+      [['orders:read'], 403],
+    ] as Array<[string[], number]>) {
+      jest.clearAllMocks()
+      mockTurnoDelNegocio.mockResolvedValue({ shiftId: 'shift-A', startTime: new Date('2026-11-20T14:00:00.000Z') })
+      const out = await correr(TURNO, 'get', StaffRole.CASHIER, {}, {}, conjunto)
+      expect({ conjunto, status: out.status }).toEqual({ conjunto, status })
+    }
   })
 
   it('🔴 la cajera de la PC lo lee: { shiftId, startTime }', async () => {

@@ -115,7 +115,7 @@ import { httpOperationGuard } from '../middlewares/httpOperation.middleware'
 import * as httpOperationMobileController from '../controllers/mobile/http-operation.mobile.controller'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import onlineOrdersMobileRoutes from './mobile/onlineOrders.mobile.routes'
-import { checkPermission } from '../middlewares/checkPermission.middleware'
+import { checkAnyPermission, checkPermission } from '../middlewares/checkPermission.middleware'
 import { marcarPermiso, PERMISO_VER_ESPERADO } from '../middlewares/permissionFlag.middleware'
 import { permisoDeLiberacion } from '../middlewares/permisoDeLiberacion.middleware'
 import { PAYMENT_OWNERSHIP_OVERRIDES, checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
@@ -3795,13 +3795,14 @@ router.post(
 
 /**
  * GET /api/v1/mobile/venues/:venueId/shifts/business-current — el turno vivo del NEGOCIO para la PC de la máquina, que no tiene gaveta
- * (R3#8, Codex r1 #13). 200 `{ shiftId, startTime }` o `null`. `shifts:read`: el permiso de lectura más chico que tiene quien cobra.
+ * (R3#8, Codex r1 #13). 200 `{ shiftId, startTime }` o `null`. `payments:create` o `shifts:read` (Codex r2 #6, el contrato del plan):
+ * sólo devuelve el id y el inicio del turno vivo, y quien cobra en la máquina lo necesita aunque su rol no lea turnos.
  */
 router.get(
   '/venues/:venueId/shifts/business-current',
   authenticateTokenMiddleware,
   validateRequest(turnoDelNegocioSchema),
-  checkPermission('shifts:read'),
+  checkAnyPermission(['payments:create', 'shifts:read']),
   cashMachineMobileController.turnoDelNegocio,
 )
 
