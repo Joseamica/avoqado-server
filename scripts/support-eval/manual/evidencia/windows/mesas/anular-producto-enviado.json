@@ -1,0 +1,136 @@
+{
+  "pagina": "windows/mesas/anular-producto-enviado",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b",
+  "version": "2.25.52",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 199,
+      "cita": "viewModel.startOrdering(t, onReady = onOpenTableOrder)"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 720,
+      "cita": "text = \"Ver cheque\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2042,
+      "cita": ".clickable(enabled = !item.isCortesia) { onSentItemTap(item) }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 574,
+      "cita": "onSentItemTap = { item -> if (!item.isCortesia && !blockIfReadOnly()) compTarget = item },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 1074,
+      "cita": "Text(\"Motivo\", fontWeight = FontWeight.SemiBold)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 999,
+      "cita": "\"El cliente cambió de parecer\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 1054,
+      "cita": "text = \"Anular producto\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1699,
+      "cita": "showMessage(\"Producto anulado — $reason\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 1069,
+      "cita": ") { Text(\"Dar de cortesía\") }"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/network/ForbiddenInterceptor.kt",
+      "linea": 183,
+      "cita": "if (parsed.overridable == true &&"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "orders:void",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3643
+    },
+    {
+      "permiso": "orders:comp",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3626
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3641
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Si la red se corta a media anulación, dice en gris que no se supo si se anuló",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1706
+    },
+    {
+      "afirmacion": "Sin red no se anula ni se encola: dice «Sin conexión — anular un producto enviado necesita internet…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1692
+    },
+    {
+      "afirmacion": "Sin internet, «Volver a imprimir pedido» no saca lo ya enviado y dice «Sin conexión: lo que ya se envió no se puede reimprimir porque otra caja pudo cambiarlo; se podrá al volver el internet.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 176
+    },
+    {
+      "afirmacion": "Si no se pudo leer la cuenta, lo ya enviado no sale y se muestra en gris (showSinRed)",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 2462
+    },
+    {
+      "afirmacion": "Si la ronda se confirma mientras sale otra hoja, dice «Esta ronda se acaba de confirmar: vuelve a tocar «Volver a imprimir»…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 180
+    },
+    {
+      "afirmacion": "Con internet, una ronda de esta caja que el servidor aún no confirma no sale de lo guardado: dice «Una ronda de esta caja todavía no tiene confirmación del servidor: salió lo que la cuenta ya trae; lo demás sale al reimprimir cuando se confirme.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 184
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "La cuenta de la mesa se abre al tocar la mesa ocupada en Mesas",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 199
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 11,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

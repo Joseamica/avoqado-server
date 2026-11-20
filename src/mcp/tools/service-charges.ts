@@ -7,6 +7,8 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { planGateMessage } from '../planGate'
 import { listServiceCharges, applyServiceCharge } from '@/services/mobile/service-charge.mobile.service'
+import { Prisma } from '@prisma/client'
+import { baseDeCargos, importeDeCargo } from '@/services/shared/serviceCharges'
 
 export function registerServiceChargeTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -67,8 +69,8 @@ export function registerServiceChargeTools(server: McpServer, scope: McpScope) {
       if (!charge) return text({ ok: false, error: 'No encontré ese cobro por servicio en el catálogo del local.' })
 
       if (!confirm) {
-        const base = Math.max(0, Number(order.subtotal) - Number(order.discountAmount))
-        const amount = charge.type === 'PERCENTAGE' ? Math.round(((base * Number(charge.value)) / 100) * 100) / 100 : Number(charge.value)
+        // La misma fórmula que el alta y el recálculo (Codex r4 #2): lo que se aprueba es lo que se cobra.
+        const amount = importeDeCargo(charge.type, charge.value, baseDeCargos(order.subtotal, order.discountAmount)).toNumber()
         return text({
           ok: false,
           requiresConfirmation: true,
@@ -76,7 +78,7 @@ export function registerServiceChargeTools(server: McpServer, scope: McpScope) {
             cobro: charge.name,
             monto: amount,
             totalActual: Number(order.total),
-            totalNuevo: Math.round((Number(order.total) + amount) * 100) / 100,
+            totalNuevo: new Prisma.Decimal(order.total).plus(amount).toNumber(),
           },
           message: `Esto agregará "${charge.name}" por $${amount.toFixed(2)} a la cuenta (total ${Number(order.total).toFixed(2)} → ${(Number(order.total) + amount).toFixed(2)}). Vuelve a llamar con confirm:true para aplicarlo.`,
         })

@@ -41,8 +41,29 @@ import { Prisma } from '@prisma/client'
  * produciría un cargo negativo que RESTA del corte del día.
  */
 export function baseDeCargos(subtotal: Prisma.Decimal | number, descuento: Prisma.Decimal | number): Prisma.Decimal {
-  const base = new Prisma.Decimal(subtotal).minus(descuento)
+  // A centavos ANTES del %: la suma de renglones llega en `Number` (25.02 + 25.33 = 50.349999999999994) y su 10 % redondeaba a
+  // 5.03 en vez de 5.04 (Codex r1 #11 de «Anular producto»; también lo sumaban así `addItemsToOrder` y `voidItems`).
+  const centavos = (v: Prisma.Decimal | number) => new Prisma.Decimal(v).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+  const base = centavos(subtotal).minus(centavos(descuento))
   return base.isNegative() ? new Prisma.Decimal(0) : base
+}
+
+/**
+ * El importe de UN cargo sobre una base: el % sobre la base a centavos (ROUND_HALF_UP), o el monto fijo tal cual. Es la ÚNICA
+ * fórmula: la vista previa del MCP, el alta del cargo, los cargos automáticos y los dos recalculadores la usan, para que lo que
+ * se aprueba, lo que queda en la bitácora y lo que se cobra sea el mismo número (Codex r4 #2 de «Anular producto»: con `Number`,
+ * el 10 % de 100 − 89.95 daba 1.00 en la vista previa y 1.01 en el cobro).
+ */
+export function importeDeCargo(
+  type: 'PERCENTAGE' | 'FIXED_AMOUNT' | string,
+  value: Prisma.Decimal | number,
+  base: Prisma.Decimal | number,
+): Prisma.Decimal {
+  // El monto fijo también a centavos: el catálogo admite 4 decimales y la columna de la cuenta 2; sin esto la vista previa decía
+  // 1.00 y la cuenta guardaba 1.01 para un fijo de 1.0050 (Codex r5 #1).
+  if (type !== 'PERCENTAGE') return new Prisma.Decimal(value).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+  const baseDec = new Prisma.Decimal(base).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+  return baseDec.mul(value).div(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
 }
 
 /** Lo mínimo que necesita esta función de un cliente de Prisma: las filas de cargo. */
@@ -58,16 +79,15 @@ export type ClienteDeCargos = Pick<Prisma.TransactionClient, 'orderServiceCharge
  */
 export async function recalcularCargosPorServicio(db: ClienteDeCargos, orderId: string, base: Prisma.Decimal | number): Promise<number> {
   const charges = await db.orderServiceCharge.findMany({ where: { orderId } })
-  const baseDec = new Prisma.Decimal(base)
+  // A centavos aquí también: hay llamadores que arman la base a mano con `Number` (p. ej. `recalculateOrderTotals` al quitar un
+  // cargo). Sin esto, la misma cuenta daba 5.04 por un camino y 5.03 por otro (Codex r2 #6 de «Anular producto»).
+  const baseDec = new Prisma.Decimal(base).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
 
   let total = new Prisma.Decimal(0)
   for (const charge of charges) {
     // Un % se re-calcula cuando cambia la cuenta; un MONTO FIJO (descorche, entrega) se
     // respeta tal cual — no depende de cuánto se consumió.
-    const amount =
-      charge.type === 'PERCENTAGE'
-        ? baseDec.mul(charge.value).div(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
-        : new Prisma.Decimal(charge.amount)
+    const amount = charge.type === 'PERCENTAGE' ? importeDeCargo(charge.type, charge.value, baseDec) : new Prisma.Decimal(charge.amount)
     if (charge.type === 'PERCENTAGE' && !amount.equals(charge.amount)) {
       await db.orderServiceCharge.update({ where: { id: charge.id }, data: { amount } })
     }

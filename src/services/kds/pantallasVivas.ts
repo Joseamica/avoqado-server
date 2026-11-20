@@ -1,0 +1,82 @@
+/**
+ * D6 de Flautas (20-nov, opción B del founder: «como Square y Toast»): la última vez que la pantalla de cocina de cada
+ * estación pidió su tablero (`GET kds/orders?stationId=…`, cada 10 s mientras se ve: `KDSViewModel.mientrasSeVe`). Con eso
+ * `pantallasDesconectadas` (kitchenDisplayStations.ts) le dice a la caja qué pantallas no están conectadas a internet, y la
+ * caja lo enseña en una franja fija en vez de avisar «No salió» orden por orden cuando la venta ya está en el servidor.
+ *
+ * ponytail: en memoria y por proceso. Sirve con UNA instancia del servidor (hoy, sin Redis). Con varias, cada una vería sólo
+ * las lecturas que le tocaron: entonces una fila con fecha en `PrintStation`. Un reinicio la vacía: por eso `completo`.
+ */
+
+/**
+ * Conectada = pidió su tablero hace a lo más esto. Lee cada 10 s DESPUÉS de terminar su vuelta (tablero, canales y, cada
+ * seis vueltas, la config): Codex r5 #3, una vuelta lenta puede pasar de 45 s con el tablero abierto. 90 s aguanta varias.
+ */
+export const PANTALLA_VIVA_MS = 90_000
+/** Codex r5 #4: tras un arranque o despliegue el mapa está vacío; hasta que pase la ventana, «no se sabe» de las que faltan. */
+const ARRANQUE = Date.now()
+/** Lo que no se lee en este tiempo se olvida: la memoria no crece con estaciones viejas. */
+const OLVIDO_MS = 10 * 60_000
+/** Defensa: un negocio real tiene 1-5 estaciones; ids basura no hacen crecer la memoria sin tope. */
+const MAX_ESTACIONES_POR_NEGOCIO = 100
+
+const vistas = new Map<string, Map<string, number>>()
+
+/**
+ * Codex r9 #1: hasta cuándo NO hay certeza. Si no se pudo comprobar que una lectura era de una pantalla real (la revisión de
+ * la estación falló), esa lectura no se marca (nada sin comprobar entra al mapa) y, a cambio, durante una ventana completa
+ * nadie se da por desconectado: la caja no afirma nada. Global: una falla de la base es de todos los negocios.
+ */
+let sinCertezaHasta = 0
+
+/** No se pudo comprobar una lectura: durante [PANTALLA_VIVA_MS] la lista no es de fiar (`completo` falso). */
+export function anotarDuda(ahora: number = Date.now()): void {
+  sinCertezaHasta = Math.max(sinCertezaHasta, ahora + PANTALLA_VIVA_MS)
+}
+
+/** ¿Ya hay marca de esta estación (aunque sea vieja, hasta 10 min)? Entonces ya se comprobó que es una pantalla real. */
+export function pantallaConocida(venueId: string, stationId: string): boolean {
+  return vistas.get(venueId)?.has(stationId) === true
+}
+
+/** La pantalla de [stationId] acaba de leer su tablero. */
+export function marcarPantallaViva(venueId: string, stationId: string, ahora: number = Date.now()): void {
+  let delNegocio = vistas.get(venueId)
+  if (!delNegocio) {
+    delNegocio = new Map()
+    vistas.set(venueId, delNegocio)
+  }
+  // Se borra y se vuelve a poner: el orden del Map queda de la más vieja a la más nueva, y el tope saca la más vieja.
+  delNegocio.delete(stationId)
+  delNegocio.set(stationId, ahora)
+  if (delNegocio.size > MAX_ESTACIONES_POR_NEGOCIO) {
+    const masVieja = delNegocio.keys().next().value
+    if (masVieja !== undefined) delNegocio.delete(masVieja)
+  }
+}
+
+export interface PantallasConectadas {
+  /** Las estaciones de [venueId] cuya pantalla leyó su tablero hace ≤ [PANTALLA_VIVA_MS]. */
+  conectadas: string[]
+  /** `false` justo después de arrancar o de una lectura que no se pudo comprobar: lo que falta aquí NO se puede dar por desconectado todavía. */
+  completo: boolean
+}
+
+export function pantallasConectadas(venueId: string, ahora: number = Date.now(), arranque: number = ARRANQUE): PantallasConectadas {
+  const completo = ahora - arranque > PANTALLA_VIVA_MS && ahora > sinCertezaHasta
+  const delNegocio = vistas.get(venueId)
+  if (!delNegocio) return { conectadas: [], completo }
+  const conectadas: string[] = []
+  for (const [stationId, vista] of delNegocio) {
+    if (ahora - vista > OLVIDO_MS) delNegocio.delete(stationId)
+    else if (ahora - vista <= PANTALLA_VIVA_MS) conectadas.push(stationId)
+  }
+  if (delNegocio.size === 0) vistas.delete(venueId)
+  return { conectadas, completo }
+}
+
+/** Sólo para las pruebas: empieza de cero. */
+export function olvidarPantallas(): void {
+  vistas.clear()
+  sinCertezaHasta = 0
+}
