@@ -643,6 +643,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'resolvedModifierId',
             // Repetir la misma opción (`configure_modifier_repeat`, encargo a508f4): se confirma sobre el grupo que se VIO.
             'resolvedGroupId',
+            // «Anular producto» (`void_table_check_item`, Codex r1 #5): se anula exactamente el renglón que se VIO.
+            'resolvedOrderItemId',
           ]) {
             // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
             // no atar un `null` que el esquema de otra herramienta no acepta.

@@ -11,7 +11,8 @@ import AppError from '@/errors/AppError'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { moveOrderToTable, assignOrderWaiter, setTableStatusInTransaction } from '@/services/tpv/table.tpv.service'
 import { compWholeOrder } from '@/services/mobile/comp-item.mobile.service'
-import { voidOrderItem } from '@/services/mobile/void-item.mobile.service'
+import { PROMOCION_NO_SE_ANULA_SUELTA, VOID_ITEM_PROMOTION, voidOrderItem } from '@/services/mobile/void-item.mobile.service'
+import { isTableOwnershipEnforced, staffCanManageAllTables } from '@/middlewares/checkTableOwnership.middleware'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { updateOrderDetails, splitOrderItems, splitOrderBySeat, mergeOrders } from '@/services/mobile/order.mobile.service'
 // Módulo LIGERO (sólo Prisma): el `.service` arrastra sockets y candados que el MCP no necesita para leer.
@@ -399,15 +400,16 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'void_table_check_item',
-    'TABLE_SERVICE: «Anular producto» — quita UN producto de la cuenta abierta de una mesa, aunque ya se haya mandado a cocina (el cliente cambió de parecer, se capturó mal). El producto sale de la cuenta y el total se recalcula; no se cobra ni descuenta inventario. Pide el motivo, que queda en la bitácora. No se puede si la cuenta ya tiene pagos, ni con el único producto de la cuenta (eso es anular la cuenta completa, desde el POS). Para regalarlo en vez de quitarlo es una cortesía. Sin confirm:true sólo muestra qué se anularía. This WRITES money; requires orders:void. Pass venueId + table number + the product (its line id, or part of its name) + reason.',
+    'TABLE_SERVICE: «Anular producto» — quita UN producto de la cuenta abierta de una mesa, aunque ya se haya mandado a cocina (el cliente cambió de parecer, se capturó mal). El producto sale de la cuenta y el total se recalcula; no se cobra ni descuenta inventario. Pide el motivo, que queda en la bitácora. No se puede si la cuenta ya tiene pagos, con el único producto de la cuenta (eso es anular la cuenta completa, desde el POS) ni con una pieza de una promoción. Con la regla de dueño de mesa, sólo su mesero o quien administra todas las mesas. Para regalarlo en vez de quitarlo es una cortesía. Sin confirm:true sólo muestra qué se anularía; la confirmación anula exactamente el renglón que mostró. This WRITES money; requires orders:void. Pass venueId + table number + the product (its line id, or part of its name) + reason.',
     {
       venueId: z.string().describe('Venue that owns the table (must be in your scope)'),
       number: z.string().min(1).describe('Table number whose check has the product, e.g. "8"'),
       item: z.string().min(1).describe('Line id of the product on the check, or part of its name (e.g. "agua de pepino")'),
       reason: z.string().trim().min(1).max(120).describe('Reason (e.g. "El cliente cambió de parecer", "Error de entrada")'),
       confirm: z.boolean().optional().describe('true to void it for real, only after the user authorized it'),
+      resolvedOrderItemId: z.string().optional().describe('The line the preview showed; the confirmation fills it, never invent it'),
     },
-    async ({ venueId, number, item, reason, confirm }) => {
+    async ({ venueId, number, item, reason, confirm, resolvedOrderItemId }) => {
       const where = guard.venueFilter(venueId)
       guard.requirePermission('orders:void', venueId)
       requireWriteScopeAlways(scope, 'orders:void', 'quita un producto de la cuenta de una mesa')
@@ -417,15 +419,43 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
       })
       if (!table) return text({ ok: false, error: `No encontré la mesa "${number}" activa en este local.` })
       if (!table.currentOrderId) return text({ ok: false, error: `La mesa ${number} no tiene cuenta abierta.` })
+      // Dueño de la mesa, como la ruta del POS (`checkTableOwnership`; Codex r1 #3).
+      if (await isTableOwnershipEnforced(venueId)) {
+        const cuenta = await prisma.order.findFirst({
+          where: { id: table.currentOrderId, venueId },
+          select: { servedById: true, servedBy: { select: { firstName: true, lastName: true } } },
+        })
+        if (cuenta?.servedById && cuenta.servedById !== scope.staffId && !(await staffCanManageAllTables(scope.staffId, venueId))) {
+          const dueno = cuenta.servedBy ? `${cuenta.servedBy.firstName} ${cuenta.servedBy.lastName}`.trim() : 'otro mesero'
+          return text({
+            ok: false,
+            error: `La mesa ${number} es de ${dueno}: sólo su mesero o quien administra todas las mesas anula sus productos.`,
+          })
+        }
+      }
       const lineas = await prisma.orderItem.findMany({
         where: { orderId: table.currentOrderId },
-        select: { id: true, productName: true, quantity: true, total: true, sentToKitchenAt: true, isCortesia: true },
+        select: {
+          id: true,
+          productName: true,
+          quantity: true,
+          total: true,
+          sentToKitchenAt: true,
+          isCortesia: true,
+          orderPromotionId: true,
+        },
         orderBy: { createdAt: 'asc' },
         take: 200, // una cuenta de mesa no llega ni cerca; es el techo del listado
       })
+      // Al confirmar se anula EXACTAMENTE el renglón que mostró la vista previa (Codex r1 #5): nunca se vuelve a buscar por nombre,
+      // o una cuenta nueva en la misma mesa con otro «agua de pepino» se anularía con la aprobación dada sobre la anterior.
+      if (confirm) {
+        const vista = resolvedOrderItemId ? lineas.find(l => l.id === resolvedOrderItemId) : undefined
+        if (!vista) return text({ ok: false, error: 'La cuenta cambió desde la vista previa: vuelve a pedirla.' })
+      }
       const buscado = item.trim().toLowerCase()
-      const porId = lineas.filter(l => l.id === item.trim())
-      const candidatas = porId.length > 0 ? porId : lineas.filter(l => (l.productName ?? '').toLowerCase().includes(buscado))
+      const porId = lineas.filter(l => l.id === (confirm ? resolvedOrderItemId : item.trim()))
+      const candidatas = porId.length > 0 || confirm ? porId : lineas.filter(l => (l.productName ?? '').toLowerCase().includes(buscado))
       const ver = (l: (typeof lineas)[number]) => ({
         id: l.id,
         producto: l.productName,
@@ -446,10 +476,12 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
         })
       }
       const linea = candidatas[0]
+      if (linea.orderPromotionId) return text({ ok: false, error: PROMOCION_NO_SE_ANULA_SUELTA, code: VOID_ITEM_PROMOTION })
       if (!confirm) {
         return text({
           ok: false,
           requiresConfirmation: true,
+          resolvedOrderItemId: linea.id,
           preview: {
             mesa: number,
             producto: ver(linea),

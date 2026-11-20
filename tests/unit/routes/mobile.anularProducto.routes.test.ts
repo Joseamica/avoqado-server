@@ -90,7 +90,7 @@ describe('voidOrderItem (servicio de la mesa del POS)', () => {
   const findFirst = prisma.order.findFirst as jest.Mock
   beforeEach(() => {
     jest.clearAllMocks()
-    findFirst.mockResolvedValue({ version: 7, items: [{ id: 'i1' }] })
+    findFirst.mockResolvedValue({ version: 7, tableId: 't1', items: [{ id: 'i1', orderPromotionId: null }] })
     ;(voidItems as jest.Mock).mockResolvedValue({
       id: 'o1',
       version: 8,
@@ -140,8 +140,24 @@ describe('voidOrderItem (servicio de la mesa del POS)', () => {
     expect(voidItems).not.toHaveBeenCalled()
   })
 
+  it('Codex r1 #4: una cuenta sin mesa (mostrador) no se toca por esta ruta', async () => {
+    findFirst.mockResolvedValue({ version: 7, tableId: null, items: [{ id: 'i1', orderPromotionId: null }] })
+    await expect(voidOrderItem(base)).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_ITEM_VOID_NOT_TABLE' })
+    expect(voidItems).not.toHaveBeenCalled()
+  })
+
+  it('Codex r1 #2: una pieza de una promoción no se anula suelta (dejaría las demás a precio de combo)', async () => {
+    findFirst.mockResolvedValue({ version: 7, tableId: 't1', items: [{ id: 'i1', orderPromotionId: 'promo-1' }] })
+    await expect(voidOrderItem(base)).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'ORDER_ITEM_VOID_PROMOTION',
+      message: 'Es parte de una promoción y no se anula suelto. Puedes darlo de cortesía o anular la cuenta completa.',
+    })
+    expect(voidItems).not.toHaveBeenCalled()
+  })
+
   it('el renglón ya no está en la cuenta ⇒ 404 en español, sin tocar nada', async () => {
-    findFirst.mockResolvedValue({ version: 7, items: [] })
+    findFirst.mockResolvedValue({ version: 7, tableId: 't1', items: [] })
     await expect(voidOrderItem(base)).rejects.toMatchObject({
       statusCode: 404,
       message: 'Ese producto ya no está en la cuenta. Vuelve a abrirla.',
@@ -154,7 +170,7 @@ describe('Controlador: el autor es la sesión', () => {
   const res = () => ({ status: jest.fn().mockReturnThis(), json: jest.fn() }) as unknown as Response
   beforeEach(() => {
     jest.clearAllMocks()
-    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, items: [{ id: 'i1' }] })
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', items: [{ id: 'i1', orderPromotionId: null }] })
     ;(voidItems as jest.Mock).mockResolvedValue({ id: 'o1', version: 3, subtotal: 0, total: 0, remainingBalance: 0 })
   })
 

@@ -7,10 +7,18 @@
  * - como la cortesía, nada sobre una cuenta con pagos (`soloSinCobros`);
  * - el último renglón no se anula (`sinCancelarLaCuenta`): eso cancela la cuenta y aquí no se suelta la mesa.
  * Las dos guardas corren bajo el candado de la cuenta, dentro de `voidItems`.
+ * Y dos de alcance, que no cambian después (Codex r1 #2 y #4): sólo cuentas de MESA, y nunca una pieza suelta de una promoción
+ * (dejaría las demás a precio de combo y la promoción guardada describiendo otra compra).
  */
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { voidItems } from '../tpv/order.tpv.service'
+
+export const VOID_ITEM_NOT_TABLE = 'ORDER_ITEM_VOID_NOT_TABLE'
+export const VOID_ITEM_PROMOTION = 'ORDER_ITEM_VOID_PROMOTION'
+/** El mismo texto que pone en gris el POS (`PROMOCION_SIN_ANULAR` de ANDROID). */
+export const PROMOCION_NO_SE_ANULA_SUELTA =
+  'Es parte de una promoción y no se anula suelto. Puedes darlo de cortesía o anular la cuenta completa.'
 
 export async function voidOrderItem(params: {
   venueId: string
@@ -27,10 +35,13 @@ export async function voidOrderItem(params: {
   // revisar bajo el candado.
   const order = await prisma.order.findFirst({
     where: { id: params.orderId, venueId: params.venueId },
-    select: { version: true, items: { where: { id: params.itemId }, select: { id: true } } },
+    select: { version: true, tableId: true, items: { where: { id: params.itemId }, select: { id: true, orderPromotionId: true } } },
   })
   if (!order) throw new NotFoundError('Orden no encontrada')
-  if (order.items.length === 0) throw new NotFoundError('Ese producto ya no está en la cuenta. Vuelve a abrirla.')
+  if (!order.tableId) throw new BadRequestError('Así sólo se anulan productos de una cuenta de mesa.', VOID_ITEM_NOT_TABLE)
+  const [item] = order.items
+  if (!item) throw new NotFoundError('Ese producto ya no está en la cuenta. Vuelve a abrirla.')
+  if (item.orderPromotionId) throw new BadRequestError(PROMOCION_NO_SE_ANULA_SUELTA, VOID_ITEM_PROMOTION)
 
   const updated = await voidItems(params.venueId, params.orderId, {
     itemIds: [params.itemId],

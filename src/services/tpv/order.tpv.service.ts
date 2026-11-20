@@ -654,6 +654,27 @@ function normalizeExternalId(externalId?: string | null): string | null {
  * P2002: es un conflicto TRANSITORIO, no un rechazo de negocio. Como VERSION_CONFLICT la cola lo reintenta (RETRY)
  * y, al reintentar, encuentra el renglón por su llave: una sola ronda (spec 2026-09-27 §5).
  */
+/**
+ * Las llaves de renglón (`externalId`) de esta cuenta que una anulación dejó como lápida (`OrderAction` VOID, `metadata.externalIds`,
+ * escrita en la misma transacción que la anulación). Sólo devuelve las que se piden.
+ */
+export async function llavesAnuladasDeLaCuenta(tx: Prisma.TransactionClient, orderId: string, llaves: string[]): Promise<Set<string>> {
+  const anulaciones = await tx.orderAction.findMany({
+    where: { orderId, actionType: 'VOID' },
+    select: { metadata: true },
+    orderBy: { createdAt: 'desc' },
+    // ponytail: una cuenta no llega ni cerca de 500 anulaciones; si llegara, las más viejas dejarían de proteger su llave.
+    take: 500,
+  })
+  const pedidas = new Set(llaves)
+  const anuladas = new Set<string>()
+  for (const { metadata } of anulaciones) {
+    const ids = (metadata as { externalIds?: unknown } | null)?.externalIds
+    if (Array.isArray(ids)) for (const id of ids) if (typeof id === 'string' && pedidas.has(id)) anuladas.add(id)
+  }
+  return anuladas
+}
+
 export async function conLlaveDeRonda<T>(crear: () => Promise<T>): Promise<T> {
   try {
     return await crear()
@@ -1878,7 +1899,16 @@ export async function addItemsToOrder(
             ).map(renglon => renglon.externalId)
           : [],
       )
-      const esReplica = (item: NormalizedAddOrderItemInput) => llavesGuardadas.has(normalizeExternalId(item.externalId))
+      // «Anular producto» (Codex r1 #1): la llave de un renglón ANULADO no vuelve a crearse. El reenvío de una ronda (respuesta
+      // perdida, cola sin red) o el carrito de la TPV deduplican por llave, y la fila anulada ya no existe: sin esto el producto
+      // volvía a la cuenta y se cobraba. Se trata como réplica: ni se valida contra el catálogo de hoy ni se escribe.
+      const llavesPedidas = normalizedItems.map(item => normalizeExternalId(item.externalId)).filter((llave): llave is string => !!llave)
+      const llavesAnuladas = llavesPedidas.length > 0 ? await llavesAnuladasDeLaCuenta(tx, order.id, llavesPedidas) : new Set<string>()
+      const esAnulada = (item: NormalizedAddOrderItemInput) => {
+        const llave = normalizeExternalId(item.externalId)
+        return !!llave && llavesAnuladas.has(llave)
+      }
+      const esReplica = (item: NormalizedAddOrderItemInput) => llavesGuardadas.has(normalizeExternalId(item.externalId)) || esAnulada(item)
 
       if (asNewRound) {
         for (const product of products) {
@@ -2349,7 +2379,13 @@ export async function addItemsToOrder(
 
       // En serie: una transacción es UNA conexión, y en serie el primer error corta la ronda sin dejar consultas en vuelo.
       const newOrderItems: Awaited<ReturnType<typeof escribirRenglon>>[] = []
-      for (const item of normalizedItems) newOrderItems.push(await escribirRenglon(item))
+      for (const item of normalizedItems) {
+        if (esAnulada(item)) {
+          logger.warn(`⏭️ [ADD ITEMS] Renglón anulado: su llave no se vuelve a crear (externalId=${normalizeExternalId(item.externalId)})`)
+          continue
+        }
+        newOrderItems.push(await escribirRenglon(item))
+      }
       if (createdPromotionIds.length > 0) {
         // The selected component count is bounded by this request's packages;
         // return every component rather than silently truncating a large combo.
@@ -3304,6 +3340,8 @@ interface VoidItemsInput {
 
 export const VOID_ITEM_HAS_PAYMENTS = 'ORDER_ITEM_VOID_HAS_PAYMENTS'
 export const VOID_ITEM_LAST_ITEM = 'ORDER_ITEM_VOID_LAST_ITEM'
+const MENSAJE_ANULAR_CON_PAGOS =
+  'Esta cuenta ya tiene pagos registrados y ya no se pueden anular sus productos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.'
 
 /**
  * Void (cancel) items from an order
@@ -3372,10 +3410,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
         )
       }
       if (input.soloSinCobros && order.paymentStatus === 'PARTIAL') {
-        throw new BadRequestError(
-          'Esta cuenta ya tiene pagos registrados y ya no se pueden anular sus productos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
-          VOID_ITEM_HAS_PAYMENTS,
-        )
+        throw new BadRequestError(MENSAJE_ANULAR_CON_PAGOS, VOID_ITEM_HAS_PAYMENTS)
       }
       // Antes de devolver canjes (abajo, al anular TODO): aquí no se cancela nada.
       if (input.sinCancelarLaCuenta && order.items.every(item => input.itemIds.includes(item.id))) {
@@ -3569,6 +3604,10 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       const pagosRegistrados = await cobradoQueCubreEnTx(tx, { venueId, orderId })
       const pagadoPorPagos = pagosRegistrados.amount.plus(pagosRegistrados.tipAmount)
       const pagado = Prisma.Decimal.max(new Prisma.Decimal(order.paidAmount ?? 0), pagadoPorPagos).toDecimalPlaces(2)
+      // «Anular producto» (Codex r1 #6): una cuenta con un cobro registrado tampoco, aunque su cabecera diga PENDING (histórico).
+      if (input.soloSinCobros && pagado.greaterThan(0)) {
+        throw new BadRequestError(MENSAJE_ANULAR_CON_PAGOS, VOID_ITEM_HAS_PAYMENTS)
+      }
       const totalNuevo = new Prisma.Decimal(newTotal).toDecimalPlaces(2)
       if (totalNuevo.lessThan(pagado)) {
         throw new BadRequestError(
@@ -3653,6 +3692,26 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
           },
         })
         .catch(conflictoSiLaMovieron)
+      // La bitácora de la anulación y la LÁPIDA de sus llaves caen o persisten JUNTO con ella («Anular producto», Codex r1 #1 y
+      // #10). Fuera de la transacción, un fallo dejaba el producto fuera sin rastro; y sin `externalIds`, una ronda reenviada (se
+      // perdió su respuesta) lo volvía a crear: `addItemsToOrder` deduplica por la llave del renglón, que ya no existe.
+      await tx.orderAction.create({
+        data: {
+          orderId,
+          actionType: 'VOID',
+          performedById: autor,
+          reason: input.reason,
+          metadata: {
+            itemIds: input.itemIds,
+            externalIds: itemsToVoid.map(item => item.externalId).filter((llave): llave is string => !!llave),
+            voidAmount,
+            itemCount: itemsToVoid.length,
+            itemNames: itemsToVoid.map(item => item.productName || item.product?.name || ''),
+            sentToKitchen: itemsToVoid.some(item => item.sentToKitchenAt !== null),
+            voidedAllItems: isVoidingAllItems, // ⭐ Track if order was auto-closed
+          },
+        },
+      })
       return { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, recorte, valesSoltados }
     },
     { etiqueta: 'voidItems', timeout: 15_000, maxWait: 5_000 },
@@ -3675,23 +3734,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
     }
   }
 
-  // Create audit trail
-  await prisma.orderAction.create({
-    data: {
-      orderId,
-      actionType: 'VOID',
-      performedById: autor,
-      reason: input.reason,
-      metadata: {
-        itemIds: input.itemIds,
-        voidAmount,
-        itemCount: itemsToVoid.length,
-        itemNames: itemsToVoid.map(item => item.productName || item.product?.name || ''),
-        sentToKitchen: itemsToVoid.some(item => item.sentToKitchenAt !== null),
-        voidedAllItems: isVoidingAllItems, // ⭐ Track if order was auto-closed
-      },
-    },
-  })
+  // La `OrderAction` (audit trail) se escribe DENTRO de la transacción, arriba.
   void logAction({
     staffId: autor ?? null,
     venueId,

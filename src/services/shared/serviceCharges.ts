@@ -41,7 +41,10 @@ import { Prisma } from '@prisma/client'
  * produciría un cargo negativo que RESTA del corte del día.
  */
 export function baseDeCargos(subtotal: Prisma.Decimal | number, descuento: Prisma.Decimal | number): Prisma.Decimal {
-  const base = new Prisma.Decimal(subtotal).minus(descuento)
+  // A centavos ANTES del %: la suma de renglones llega en `Number` (25.02 + 25.33 = 50.349999999999994) y su 10 % redondeaba a
+  // 5.03 en vez de 5.04 (Codex r1 #11 de «Anular producto»; también lo sumaban así `addItemsToOrder` y `voidItems`).
+  const centavos = (v: Prisma.Decimal | number) => new Prisma.Decimal(v).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+  const base = centavos(subtotal).minus(centavos(descuento))
   return base.isNegative() ? new Prisma.Decimal(0) : base
 }
 
