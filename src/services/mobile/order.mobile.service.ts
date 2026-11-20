@@ -79,6 +79,7 @@ import {
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
 import { apartarUsoDeMesaEnTx, devolverUsoDelDescuentoEnTx, sumarUsosDeVentaEnTx } from '../shared/usoDelDescuento'
+import { anotarEnvioEnTx, envioYaHechoEnTx, firmaDelManual, type DescuentoManualDeMesa } from '../shared/llaveDelDescuentoDeMesa'
 import { apartarCupon, cuponDeLaVenta, ligarCupon, montoDelCupon, textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
 import { aCentavos, comoJson, esFilaDeValeV7, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
 import { descuentoComoLoCobroLaTpvVieja } from '../shared/descuentoDeTpvVieja'
@@ -3119,7 +3120,11 @@ export async function applyOrderDiscountInTransaction(
   tx: TxConReintento,
   venueId: string,
   orderId: string,
-  discountId: string,
+  /**
+   * El id de un descuento del catálogo, o (encargo 7133e3, hz:0555ee15:D2) un descuento MANUAL de la caja: % o fijo, con su llave
+   * de envío. El manual pasa por el MISMO candado, las mismas guardas y el mismo tope contra lo que queda que el del catálogo.
+   */
+  discountId: string | DescuentoManualDeMesa,
   /** La sesión que lo aplica (su membresía queda en `appliedById`). */
   staffId?: string,
   /** Quien aplica tiene `orders:comp` (D1). Falla cerrado: sin él, un descuento COMP es 403. */
@@ -3149,6 +3154,21 @@ export async function applyOrderDiscountInTransaction(
   await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'descuentos')
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede descontar una orden ya pagada')
+  }
+
+  if (typeof discountId !== 'string') {
+    return aplicarDescuentoManualDeMesaEnTx(
+      tx,
+      venueId,
+      { ...order, id: orderId },
+      discountId,
+      staffId,
+      motivo,
+      // hz:e0b12f00:D1: dejar en $0 lo que queda de los productos es regalar la cuenta (pide `orders:comp`); `aprobacion.porPin` es
+      // el gerente cuyo PIN autorizó ESE regalo (lo pone `conCortesiaSiRegala` en la ruta).
+      puedeRegalar ? { porPin: aprobacion?.porPin } : undefined,
+      recalculateOrderTotals,
+    )
   }
 
   const discount = await tx.discount.findFirst({ where: { id: discountId, venueId } })
@@ -3239,20 +3259,110 @@ export async function applyOrderDiscountInTransaction(
   return { row, totals }
 }
 
+/**
+ * Encargo 7133e3 (hz:0555ee15:D2): el descuento MANUAL de una cuenta de MESAS (% o fijo, como el de MOSTRADOR). Corre DENTRO de
+ * `applyOrderDiscountInTransaction`, ya con el candado de la cuenta y sus guardas (importada, de tarjetas, pagada o con abono).
+ *
+ * - La llave del envío contesta la fila ya hecha (respuesta perdida, reintento, cola): nunca dos filas por un toque.
+ * - Nunca descuenta más de lo que la cuenta todavía tiene sin descontar; si ya no queda nada, se rechaza en vez de crear un $0.
+ * - No es una cortesía (`COMP` no entra: la cortesía tiene su propio botón y permiso) ni suma usos del catálogo (no tiene `discountId`).
+ */
+async function aplicarDescuentoManualDeMesaEnTx(
+  tx: TxConReintento,
+  venueId: string,
+  order: { id: string; subtotal: Prisma.Decimal | number; discountAmount: Prisma.Decimal | number | null; paidAmount: Prisma.Decimal | number | null },
+  manual: DescuentoManualDeMesa,
+  staffId: string | undefined,
+  motivo: MotivoDeDescuento,
+  /** Quien aplica puede regalar (`orders:comp` propio o el PIN de un gerente, `porPin`). Sin esto, dejar la cuenta en $0 es 403. */
+  regalo: { porPin?: string } | undefined,
+  recalculateOrderTotals: (typeof import('./comp-item.mobile.service'))['recalculateOrderTotals'],
+) {
+  const orderId = order.id
+  if (manual.type !== 'PERCENTAGE' && manual.type !== 'FIXED_AMOUNT') throw new BadRequestError('Tipo de descuento manual inválido')
+  if (!Number.isFinite(manual.value) || manual.value <= 0) throw new BadRequestError('El descuento debe ser mayor a cero')
+  if (manual.type === 'PERCENTAGE' && manual.value > 100) throw new BadRequestError('El porcentaje no puede ser mayor a 100')
+  const name = manual.name.trim() || 'Descuento manual'
+  const firma = firmaDelManual({ ...manual, name }, motivo)
+
+  const yaHecho = await envioYaHechoEnTx(tx, venueId, orderId, manual.llave, firma)
+  if (yaHecho) {
+    const actual = await tx.order.findFirst({
+      where: { id: orderId, venueId },
+      select: { subtotal: true, discountAmount: true, serviceChargeAmount: true, total: true, version: true },
+    })
+    return {
+      row: { id: yaHecho.orderDiscountId, name: yaHecho.name, amount: new Prisma.Decimal(yaHecho.amount), authorizedById: null, reason: null },
+      totals: actual!,
+      repetida: true as const,
+    }
+  }
+
+  const subtotal = Number(order.subtotal)
+  // 🔴 MONEY: el mismo recorte que el del catálogo — sólo lo que TODAVÍA no está descontado.
+  const remainingDiscountable = Math.max(0, subtotal - Number(order.discountAmount || 0))
+  if (remainingDiscountable <= 0) throw new BadRequestError('La cuenta ya no tiene nada por descontar')
+  const rawAmount =
+    manual.type === 'PERCENTAGE' ? porcentajeEnCentavos(aCentavos(subtotal), manual.value) / 100 : Math.min(manual.value, subtotal)
+  const amount = Math.min(rawAmount, remainingDiscountable)
+
+  const aplico = staffId
+    ? ((await tx.staffVenue.findFirst({ where: { venueId, staffId, active: true }, select: { id: true } }))?.id ?? null)
+    : null
+  // hz:e0b12f00:D1 (founder, 6-nov), igual que el manual de la TPV: un % o fijo que deja en $0 lo que queda de los productos es una
+  // cortesía, en centavos y con ESTE importe. La propina y el cargo por servicio no cuentan. Sin permiso de cortesía, 403 (la ruta
+  // pide el PIN y lo repite; la cola lo deja en cuarentena: sin red no hay PIN).
+  const regala = Math.round(amount * 100) >= Math.round(remainingDiscountable * 100)
+  if (regala && !regalo) throw new RegaloSinPermisoError()
+  const autorizo = regala ? (regalo?.porPin ?? aplico) : null
+
+  await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+  const row = await tx.orderDiscount.create({
+    data: {
+      orderId,
+      type: manual.type,
+      name,
+      value: manual.value,
+      amount,
+      isManual: true,
+      reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true, tope: null })),
+      appliedById: aplico,
+      ...(autorizo ? { authorizedById: autorizo } : {}),
+      ...motivo,
+    },
+    select: { id: true, name: true, amount: true, authorizedById: true, reason: true },
+  })
+  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+  // El importe que quedó después del recálculo (un % se re-deriva): es el que contesta la misma llave después.
+  const final = await tx.orderDiscount.findFirst({ where: { id: row.id, orderId }, select: { amount: true } })
+  await anotarEnvioEnTx(tx, venueId, orderId, manual.llave, firma, {
+    orderDiscountId: row.id,
+    name: row.name,
+    amount: Number(final?.amount ?? row.amount),
+  })
+  return { row: { ...row, amount: final?.amount ?? row.amount }, totals, repetida: false as const }
+}
+
 export async function applyOrderDiscount(
   venueId: string,
   orderId: string,
-  discountId: string,
+  discountId: string | DescuentoManualDeMesa,
   staffId?: string,
   puedeRegalar = false,
   aprobacion?: { porPin?: string },
   motivo: MotivoDeDescuento = {},
   opciones: { enLaCola?: boolean } = {},
 ) {
-  const { row, totals } = await withDeadlockRetry(
+  const resultado = await withDeadlockRetry(
     tx => applyOrderDiscountInTransaction(tx, venueId, orderId, discountId, staffId, puedeRegalar, aprobacion, motivo, opciones),
     { etiqueta: 'applyOrderDiscount', ...ORDER_LOCK_WAIT_BUDGET },
   )
+  const { row, totals } = resultado
+  const manual = typeof discountId === 'string' ? null : discountId
+  // 7133e3: la misma llave contestó la fila que ya existía; no se aplicó nada nuevo (su bitácora ya se escribió la primera vez).
+  if ('repetida' in resultado && resultado.repetida) {
+    return { orderDiscountId: row.id, name: row.name, amount: Number(row.amount), ...totals }
+  }
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_DISCOUNT_APPLIED',
@@ -3261,7 +3371,8 @@ export async function applyOrderDiscount(
     staffId,
     venueId,
     data: {
-      discountId,
+      discountId: manual ? null : discountId,
+      ...(manual ? { manual: true, tipo: manual.type, valor: manual.value } : {}),
       name: row.name,
       amount: Number(row.amount),
       ...(row.authorizedById ? { aprobadoPor: row.authorizedById } : {}),

@@ -1121,6 +1121,41 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-10', version: 4 } })
   })
 
+  it('7133e3: APPLY_DISCOUNT con `manual` delega el descuento manual con SU llave, el motivo y la marca de la cola', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 5 })
+    const llave = '6f1c2a3b-4d5e-4f60-8a71-9b0c1d2e3f40'
+    const params = baseParams([
+      {
+        id: 'i-manual',
+        type: 'APPLY_DISCOUNT',
+        payload: { orderId: 'order-10', manual: { type: 'FIXED_AMOUNT', value: 20, name: 'Amigo', llave }, reason: 'Queja' },
+      },
+    ])
+    params.authorizeIntent.mockImplementation((_intent: any, permission: string) => permission !== 'orders:comp')
+    const acks = await processIntents(params)
+    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(
+      VENUE,
+      'order-10',
+      { type: 'FIXED_AMOUNT', value: 20, name: 'Amigo', llave },
+      STAFF,
+      false,
+      undefined,
+      { reason: 'Queja' },
+      { enLaCola: true },
+    )
+    expect(acks[0]).toMatchObject({ status: 'ACKED' })
+  })
+
+  it.each([
+    ['sin llave', { type: 'PERCENTAGE', value: 10 }],
+    ['% arriba de 100', { type: 'PERCENTAGE', value: 150, llave: '6f1c2a3b-4d5e-4f60-8a71-9b0c1d2e3f40' }],
+    ['tipo COMP', { type: 'COMP', value: 1, llave: '6f1c2a3b-4d5e-4f60-8a71-9b0c1d2e3f40' }],
+  ])('7133e3: APPLY_DISCOUNT con un manual inválido (%s) queda REJECTED sin tocar la cuenta', async (_caso, manual) => {
+    const acks = await processIntents(baseParams([{ id: 'i-manual-x', type: 'APPLY_DISCOUNT', payload: { orderId: 'order-10', manual } }]))
+    expect(orderMobileService.applyOrderDiscount).not.toHaveBeenCalled()
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+  })
+
   it('D1: APPLY_DISCOUNT le pasa al servicio si quien encoló tiene orders:comp (sin él, falso)', async () => {
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 4 })
     const params = baseParams([{ id: 'i12-d1', type: 'APPLY_DISCOUNT', payload: { orderId: 'order-10', discountId: 'disc-1' } }])
