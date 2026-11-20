@@ -1,8 +1,9 @@
 import { Prisma } from '@prisma/client'
+import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import { utcTs } from '@/utils/sqlDates'
 import { closesAt, isWithinHours } from './hours'
 import {
-  CANCELLED_ELSEWHERE,
   FOLIO_LAST_CALL_MINUTES,
   MAX_PENDING_PER_VENUE,
   PRESENCE_WINDOW_MS,
@@ -76,41 +77,24 @@ export function storeView(state: AcceptingState) {
 }
 
 /**
- * D662 parte 2: cuántos pedidos de «Mi equipo» (los más recientes por hora límite) mira la lectura de la pausa sola. Basta con
- * que quepan los que pueden tener hora límite DESPUÉS de la pausa: con la tienda pausada no entran pedidos nuevos (salvo el techo
- * T1), así que sólo quedan los que ya existían (a lo más `MAX_PENDING_PER_VENUE` por aceptar más los ya contestados de esos 10 min).
+ * D662 parte 2 (v3): tope de seguridad de la lectura de la pausa sola. NO es una ventana: la lectura mira todo lo que hay desde el corte
+ * (`autoPauseResumedAt`), y el corte avanza solo hasta la última respuesta a tiempo (`avanzarCortePausaSola`), así que lo normal son
+ * unas decenas de pedidos (a lo más una falla suelta más los que siguen por aceptar, tope 30, y los contestados desde entonces). Si
+ * algún día se llena, se leen los MÁS VIEJOS primero (una pareja nunca se pierde por los nuevos) y se avisa en el log.
  */
-export const PAUSA_SOLA_VENTANA = 100
+export const PAUSA_SOLA_TOPE = 1000
 
-/** Lo que la lectura de la pausa sola necesita de cada pedido. */
+/** Lo que la lectura de la pausa sola necesita de cada pedido: sólo datos que no cambian después de su hora límite. */
 const PEDIDO_DE_LA_PAUSA = {
+  id: true,
   acceptDeadlineAt: true,
   staffAnsweredAt: true,
-  acceptedAt: true,
   rejectedAt: true,
   rejectReason: true,
   cancelledAt: true,
   cancelledBy: true,
-  order: { select: { updatedAt: true } },
 } satisfies Prisma.OnlineOrderSelect
 type PedidoDeLaPausa = Prisma.OnlineOrderGetPayload<{ select: typeof PEDIDO_DE_LA_PAUSA }>
-
-const minFecha = (xs: Array<Date | null | undefined>): Date | null =>
-  xs.reduce<Date | null>((m, d) => (d && (!m || d.getTime() < m.getTime()) ? d : m), null)
-
-/**
- * La PRIMERA vez que una persona hizo algo con este pedido (aceptar, rechazar, cancelar desde la caja o el panel), o `null`. Sólo
- * datos que escriben sus propias transiciones:
- * - `staffAnsweredAt` (D662 parte 2: el toque de una persona; con tarjeta, el paso a «cobrando»);
- * - `acceptedAt`: en «Mi equipo» toda aceptación la empieza una persona (cubre los pedidos de antes del cambio);
- * - `rejectedAt` con un motivo que elige una persona (el rechazo por pago, `PAYMENT_FAILED`, lo pone el sistema);
- * - la cancelación que no es de la clienta; si la cuenta se canceló desde la caja, la hora real es la de la cuenta (`updatedAt`): la
- *   sincronización del pedido la sella hasta la siguiente lectura (Codex p2-r1 #3).
- */
-function horaDeLaPersona(p: PedidoDeLaPausa): Date | null {
-  const cancelo = p.cancelledAt && p.cancelledBy !== 'CUSTOMER' ? minFecha([p.cancelledAt, p.cancelledBy === CANCELLED_ELSEWHERE ? p.order.updatedAt : null]) : null
-  return minFecha([p.staffAnsweredAt, p.acceptedAt, p.rejectReason !== 'PAYMENT_FAILED' ? p.rejectedAt : null, cancelo])
-}
 
 /** El pedido terminó solo ANTES de su hora límite y sin una persona (la clienta lo canceló, o el sistema lo rechazó por pago). */
 function terminoSoloATiempo(p: PedidoDeLaPausa): boolean {
@@ -119,44 +103,115 @@ function terminoSoloATiempo(p: PedidoDeLaPausa): boolean {
   return p.rejectReason === 'PAYMENT_FAILED' && !p.staffAnsweredAt && !!p.rejectedAt && p.rejectedAt.getTime() <= limite
 }
 
+export interface LecturaPausaSola {
+  /** La segunda falla de la primera pareja (hora límite y pedido), o `null` si no hay pausa. */
+  pausa: { at: Date; onlineOrderId: string } | null
+  /** La última RESPUESTA a tiempo ya ocurrida (para avanzar el corte), o `null`. */
+  ultimaRespuesta: Date | null
+}
+
 /**
- * D662 parte 2 (founder, 19-nov, «a»): la pausa sola se LEE, no se lleva. Es una línea de tiempo de dos clases de sucesos desde el
- * último «Reanudar» (`autoPauseResumedAt`):
- * - FALLA: un pedido llegó a su hora límite sin que una persona lo tocara (a la hora límite);
- * - RESPUESTA: una persona tocó un pedido (a la hora en que lo hizo, aunque su hora límite sea después; Codex p2-r1 #2).
- * La tienda está pausada si en algún momento hubo 2 FALLAS seguidas sin una RESPUESTA en medio, y se queda así hasta «Reanudar»
- * aunque después llegue una respuesta (Codex p2-r1 #1). Devuelve la hora de la segunda falla de la primera pareja (ISO) o `null`.
- * Los pedidos que terminaron solos antes de su hora límite no son ni falla ni respuesta. A la misma hora, la respuesta va primero.
+ * D662 parte 2 (founder, 19-nov, «a»; v3 del 20-nov): la pausa sola se LEE, no se lleva. Una línea de tiempo de dos sucesos:
+ * - FALLA: un pedido llegó a su hora límite sin que una persona lo tocara a más tardar en ella (`staffAnsweredAt <= hora límite`).
+ *   No se borra después: un rechazo tardío, la clienta que cancela tarde o un cobro no la quitan (Codex p2-r1 #4, p2-r2 #2).
+ * - RESPUESTA: una persona tocó un pedido A TIEMPO, a la hora en que lo hizo (aunque su hora límite sea después; p2-r1 #2). Una
+ *   respuesta tardía no es respuesta: su pedido ya es falla.
+ * Pausada si hay 2 FALLAS seguidas sin RESPUESTA en medio, y se queda así aunque después llegue una respuesta (p2-r1 #1). A la misma
+ * hora, la respuesta va primero; las fallas a la misma hora, por `id`. Lo que terminó solo antes de su hora límite no cuenta.
+ * Sólo crece hacia adelante: nada de lo que ya pasó cambia después (salvo los milisegundos de T2), y por eso el corte puede avanzar.
  * Techos aceptados: T1 (quien ya estaba pagando termina) y T2 (la respuesta a tiempo que todavía se guarda): aquí no hay candados.
  */
-export function pausaSolaDesde(pedidos: PedidoDeLaPausa[], now: Date): string | null {
-  type Suceso = { t: number; falla: boolean }
+export function leerLineaDeTiempo(pedidos: PedidoDeLaPausa[], now: Date): LecturaPausaSola {
+  type Suceso = { t: number; falla: boolean; id: string }
   const sucesos: Suceso[] = []
+  const ahora = now.getTime()
   for (const p of pedidos) {
     if (terminoSoloATiempo(p)) continue
     const limite = p.acceptDeadlineAt.getTime()
-    const persona = horaDeLaPersona(p)
-    if (persona && persona.getTime() <= now.getTime()) sucesos.push({ t: persona.getTime(), falla: false })
-    if (limite <= now.getTime() && !(persona && persona.getTime() <= limite)) sucesos.push({ t: limite, falla: true })
+    const toque = p.staffAnsweredAt?.getTime() ?? null
+    const aTiempo = toque !== null && toque <= limite
+    if (aTiempo && toque <= ahora) sucesos.push({ t: toque, falla: false, id: p.id })
+    if (!aTiempo && limite <= ahora) sucesos.push({ t: limite, falla: true, id: p.id })
   }
-  sucesos.sort((a, b) => a.t - b.t || Number(a.falla) - Number(b.falla))
+  sucesos.sort((a, b) => a.t - b.t || Number(a.falla) - Number(b.falla) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   let seguidas = 0
+  let ultimaRespuesta: number | null = null
   for (const s of sucesos) {
-    seguidas = s.falla ? seguidas + 1 : 0
-    if (seguidas >= 2) return new Date(s.t).toISOString()
+    if (!s.falla) {
+      seguidas = 0
+      ultimaRespuesta = s.t
+      continue
+    }
+    seguidas += 1
+    if (seguidas >= 2) return { pausa: { at: new Date(s.t), onlineOrderId: s.id }, ultimaRespuesta: null }
   }
-  return null
+  return { pausa: null, ultimaRespuesta: ultimaRespuesta === null ? null : new Date(ultimaRespuesta) }
 }
 
-/** Los pedidos de «Mi equipo» con hora límite después del último «Reanudar» (los más recientes, acotados) y su lectura. */
-async function leerPausaSola(venueId: string, now: Date, reanudadaEn: Date | null): Promise<string | null> {
-  const pedidos = await prisma.onlineOrder.findMany({
-    where: { venueId, requiresAcceptance: true, ...(reanudadaEn ? { acceptDeadlineAt: { gt: reanudadaEn } } : {}) },
-    orderBy: [{ acceptDeadlineAt: 'desc' }, { id: 'desc' }],
-    take: PAUSA_SOLA_VENTANA,
-    select: PEDIDO_DE_LA_PAUSA,
-  })
-  return pausaSolaDesde(pedidos, now)
+/** Compatibilidad con las pruebas de la v2: la hora de la pausa (ISO) o `null`. */
+export function pausaSolaDesde(pedidos: PedidoDeLaPausa[], now: Date): string | null {
+  return leerLineaDeTiempo(pedidos, now).pausa?.at.toISOString() ?? null
+}
+
+/**
+ * Los pedidos de «Mi equipo» con hora límite después del corte, del más viejo al más nuevo, y su lectura. Lo que terminó solo antes de
+ * su hora límite (la clienta canceló; el sistema rechazó por pago) se queda fuera desde la consulta (Codex p2-r3 #5: no es suceso y,
+ * si se acumulara, la lectura crecería sin que el corte avance). `COALESCE(…, false)`: con un campo nulo la condición es «no», nunca
+ * «desconocido» que dejaría fuera un pedido normal.
+ */
+async function leerPausaSola(venueId: string, now: Date, corte: Date | null): Promise<LecturaPausaSola> {
+  const pedidos = await prisma.$queryRaw<PedidoDeLaPausa[]>`
+    SELECT oo.id, oo."acceptDeadlineAt", oo."staffAnsweredAt", oo."rejectedAt", oo."rejectReason", oo."cancelledAt", oo."cancelledBy"
+    FROM "OnlineOrder" oo
+    WHERE oo."venueId" = ${venueId}
+      AND oo."requiresAcceptance" = true
+      ${corte ? Prisma.sql`AND oo."acceptDeadlineAt" > ${utcTs(corte)}` : Prisma.empty}
+      AND NOT COALESCE(oo."cancelledBy" = 'CUSTOMER' AND oo."cancelledAt" <= oo."acceptDeadlineAt", false)
+      AND NOT COALESCE(
+        oo."rejectReason" = 'PAYMENT_FAILED' AND oo."staffAnsweredAt" IS NULL AND oo."rejectedAt" <= oo."acceptDeadlineAt",
+        false
+      )
+    ORDER BY oo."acceptDeadlineAt" ASC, oo.id ASC
+    LIMIT ${PAUSA_SOLA_TOPE}`
+  if (pedidos.length >= PAUSA_SOLA_TOPE) {
+    logger.warn('[OnlineOrdering] la lectura de la pausa sola llenó su tope: el corte no está avanzando', {
+      venueId,
+      tope: PAUSA_SOLA_TOPE,
+    })
+  }
+  return leerLineaDeTiempo(pedidos, now)
+}
+
+/**
+ * D662 parte 2 (v3): sube el corte (`autoPauseResumedAt`) hasta justo antes de la última respuesta a tiempo, SÓLO si la tienda no
+ * está pausada sola. Nada de lo anterior a esa respuesta puede formar una pareja después (la línea sólo crece hacia adelante), así que
+ * la lectura sigue siendo exacta y queda corta. Nunca baja el corte (`updateMany` condicionado), nunca lanza: si falla, la lectura
+ * sólo sale más larga. La llaman, después del commit, las respuestas de una persona (aceptar, rechazar, aceptar con tarjeta).
+ */
+export async function avanzarCortePausaSola(venueId: string, now: Date = new Date()): Promise<boolean> {
+  try {
+    const fila = await prisma.onlineOrderingSettings.findUnique({
+      where: { venueId },
+      select: { enabled: true, requiresAcceptance: true, autoPauseResumedAt: true },
+    })
+    if (!fila || fila.requiresAcceptance === false) return false
+    const corte = fila.autoPauseResumedAt ?? null
+    const lectura = await leerPausaSola(venueId, now, corte)
+    if (lectura.pausa || !lectura.ultimaRespuesta) return false
+    const nuevo = new Date(lectura.ultimaRespuesta.getTime() - 1)
+    if (corte && nuevo.getTime() <= corte.getTime()) return false
+    const r = await prisma.onlineOrderingSettings.updateMany({
+      where: { venueId, OR: [{ autoPauseResumedAt: null }, { autoPauseResumedAt: { lt: nuevo } }] },
+      data: { autoPauseResumedAt: nuevo },
+    })
+    return r.count === 1
+  } catch (error) {
+    logger.warn('[OnlineOrdering] no se pudo avanzar el corte de la pausa sola (la lectura sigue exacta)', {
+      venueId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
+  }
 }
 
 /** `preloaded`: los ajustes que quien llama ya leyó (p. ej. `GET /settings`), para no leerlos dos veces. */
@@ -179,7 +234,9 @@ export async function getAcceptingStatus(
   if (config.manualPause) return done('PAUSED', 'MANUAL_PAUSE')
   // D662 parte 2: sólo en «Mi equipo» (`=== false` es «Nadie»). Mismo motivo que la pausa a mano para las apps viejas. Va antes del
   // horario y de la presencia: sólo «Reanudar» la abre. Con una pausa de 15/30/60 vigente también se lee: al vencer, sigue pausada.
-  if (config.requiresAcceptance !== false) autoPausedAt = await leerPausaSola(venueId, now, autoPauseResumedAt ?? null)
+  let pausaSola: LecturaPausaSola['pausa'] = null
+  if (config.requiresAcceptance !== false) pausaSola = (await leerPausaSola(venueId, now, autoPauseResumedAt ?? null)).pausa
+  autoPausedAt = pausaSola?.at.toISOString() ?? null
   if (config.pausedUntil && new Date(config.pausedUntil) > now) return done('PAUSED', 'MANUAL_PAUSE')
   if (autoPausedAt) return done('PAUSED', 'MANUAL_PAUSE')
   if (!isWithinHours(config.hours, now, timezone)) return done('CLOSED', 'OUTSIDE_HOURS')
@@ -206,26 +263,35 @@ export async function getAcceptingStatus(
 
 /**
  * D662 parte 2: bitácora `ONLINE_ORDERING_AUTO_PAUSED`, SÓLO como registro (la verdad es la lectura de `getAcceptingStatus`). La llama
- * el vencimiento de un pedido después de su commit: si la tienda quedó pausada sola y ESTE pedido es el que la pausó (su hora límite es
- * `autoPausedAt`), escribe una fila. El CAS de vencer gana una sola vez por pedido, así que no se repite. Si el pedido que la pausó no
- * vence (la clienta lo canceló tarde, un rechazo tardío), no hay fila: aceptado. Nunca lanza.
+ * el vencimiento de un pedido después de su commit: si la tienda quedó pausada sola y ESTE pedido es la segunda falla de la pareja
+ * (por `id`, no por hora: dos pedidos pueden vencer en el mismo milisegundo; Codex p2-r2 #8), escribe una fila. El CAS de vencer gana
+ * una sola vez por pedido. Si el pedido que la pausó no vence (la clienta lo canceló tarde, un rechazo tardío), no hay fila: aceptado.
+ * Nunca lanza.
  */
 export async function registrarSiLaPausoSola(venueId: string, onlineOrderId: string, now: Date = new Date()): Promise<boolean> {
   try {
-    const st = await getAcceptingStatus(venueId, now)
-    if (!st.autoPausedAt) return false
+    const fila = await prisma.onlineOrderingSettings.findUnique({
+      where: { venueId },
+      select: { enabled: true, manualPause: true, requiresAcceptance: true, autoPauseResumedAt: true },
+    })
+    if (!fila || !fila.enabled || fila.manualPause || fila.requiresAcceptance === false) return false
+    const { pausa } = await leerPausaSola(venueId, now, fila.autoPauseResumedAt ?? null)
+    if (!pausa || pausa.onlineOrderId !== onlineOrderId) return false
     const pedido = await prisma.onlineOrder.findFirst({
       where: { id: onlineOrderId, venueId },
-      select: { acceptDeadlineAt: true, order: { select: { orderNumber: true } } },
+      select: { order: { select: { orderNumber: true } } },
     })
-    if (!pedido || pedido.acceptDeadlineAt.toISOString() !== st.autoPausedAt) return false
     void logAction({
       staffId: null,
       venueId,
       action: 'ONLINE_ORDERING_AUTO_PAUSED',
       entity: 'OnlineOrderingSettings',
       entityId: venueId,
-      data: { autoPausedAt: st.autoPausedAt, orderNumber: pedido.order.orderNumber, reason: '2 pedidos seguidos sin aceptar' },
+      data: {
+        autoPausedAt: pausa.at.toISOString(),
+        orderNumber: pedido?.order.orderNumber ?? null,
+        reason: '2 pedidos seguidos sin aceptar',
+      },
     })
     return true
   } catch {

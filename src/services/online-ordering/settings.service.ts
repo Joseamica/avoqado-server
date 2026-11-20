@@ -275,14 +275,18 @@ export async function pauseOnlineOrdering(
   now: Date = new Date(),
 ): Promise<{ pausedUntil: string | null; manualPause: boolean }> {
   const pausedUntil = minutes === null ? null : new Date(now.getTime() + minutes * 60_000)
-  // D662 parte 2: «Reanudar» también quita la pausa sola (la del piso y la de las apps viejas, que llaman igual): desde ahora sólo
-  // cuentan los pedidos cuya hora límite sea posterior. Pausar 15/30/60 no la toca: al vencer, sigue pausada hasta «Reanudar».
-  const r = await prisma.onlineOrderingSettings.updateMany({
-    where: { venueId },
-    data: minutes === null ? { pausedUntil, autoPauseResumedAt: now } : { pausedUntil },
-  })
+  const r = await prisma.onlineOrderingSettings.updateMany({ where: { venueId }, data: { pausedUntil } })
   if (r.count === 0) {
     throw new BadRequestError('La tienda en línea de este negocio todavía no está configurada.', 'ONLINE_ORDERING_NOT_CONFIGURED')
+  }
+  // D662 parte 2 (v3): «Reanudar» también quita la pausa sola (la del piso y la de las apps viejas, que llaman igual): el corte sube a
+  // AHORA y desde aquí sólo cuentan los pedidos con hora límite posterior. Sólo sube (nunca baja la gracia de la migración ni un
+  // avance). Pausar 15/30/60 no lo toca: al vencer, la tienda sigue pausada sola hasta «Reanudar».
+  if (minutes === null) {
+    await prisma.onlineOrderingSettings.updateMany({
+      where: { venueId, OR: [{ autoPauseResumedAt: null }, { autoPauseResumedAt: { lt: now } }] },
+      data: { autoPauseResumedAt: now },
+    })
   }
   const current = await prisma.onlineOrderingSettings.findUnique({ where: { venueId }, select: { manualPause: true } })
   void logAction({
