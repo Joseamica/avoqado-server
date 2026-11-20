@@ -771,6 +771,11 @@ type TpvCreateOrderWithItemsInput = {
    *  createOrderWithItems del mobile. Crítico en free-cart ($0): sin esto un
    *  retry creaba segunda orden Y segunda deducción de inventario. */
   externalId?: string | null
+  /**
+   * hz:e82938e1:D36: la intención que declara «Cobrar» de la TPV nueva (`porCobrar.ts`): false = para cobrarse en el momento,
+   * true = «Pagar después». Sin el campo (TPV vieja) queda `null`, como hoy.
+   */
+  payLater?: boolean | null
 }
 
 type PreparedCheckoutLine = {
@@ -1064,6 +1069,39 @@ const descuentoDeCatalogoCambio = (nombre: string) =>
 const pideAprobacionSinAprobador = (discount: { requiresApproval?: boolean | null; type: string }) =>
   discount.requiresApproval === true && discount.type !== 'COMP'
 
+/**
+ * D36: el reintento con la misma llave que ahora pide «Pagar después» deja la venta como fiado, sólo si sigue abierta y sin ningún
+ * cobro (ni pago ni asignación). Si no quedó como fiado abierto (ya se cobró, se anuló, o la tocó un cobro), NUNCA contesta éxito:
+ * la terminal diría «guardada como Pagar después» de una venta que no lo es (Codex D36 r2 #2).
+ */
+async function marcarComoPagarDespuesSiSigueAbierta(venueId: string, orderId: string): Promise<void> {
+  const marcada = await prisma.order.updateMany({
+    where: {
+      id: orderId,
+      venueId,
+      payLater: false,
+      status: 'PENDING',
+      paymentStatus: 'PENDING',
+      payments: { none: {} },
+      paymentAllocations: { none: {} },
+    },
+    data: { payLater: true },
+  })
+  if (marcada.count > 0)
+    logger.info('🧾 [WITH ITEMS] la venta recuperada por su llave queda como «Pagar después» (D36)', { venueId, orderId })
+  const ahora = await prisma.order.findFirst({
+    where: { id: orderId, venueId },
+    select: { payLater: true, status: true, paymentStatus: true },
+  })
+  const esFiadoAbierto = ahora?.payLater === true && ahora.status === 'PENDING' && ahora.paymentStatus === 'PENDING'
+  if (!esFiadoAbierto) {
+    throw new ConflictError(
+      'Esta venta ya se había mandado a cobrar y no se puede dejar para pagar después. Revisa la venta antes de volver a intentarlo.',
+      'VENTA_NO_ES_PAGAR_DESPUES',
+    )
+  }
+}
+
 export async function createOrderWithItems(
   venueId: string,
   input: TpvCreateOrderWithItemsInput,
@@ -1083,6 +1121,11 @@ export async function createOrderWithItems(
     })
     if (existingOrder) {
       logger.warn(`🔄 [WITH ITEMS] Duplicate createOrderWithItems detected (externalId=${externalId}) — returning existing order`)
+      // hz:e82938e1:D36 (Codex r1 #3): «Cobrar» perdió la respuesta (la venta SÍ se creó, `payLater=false`) y la cajera mandó el mismo
+      // carrito a «Pagar después» con la misma llave: se recupera esa venta y la intención más nueva, explícita, gana — si sigue
+      // abierta y sin cobrar. Una sola sentencia condicional: nada se cruza con un cobro o una anulación. Al revés (un fiado que
+      // después se cobra) no se toca: se cobra y deja de deber.
+      if (input.payLater === true) await marcarComoPagarDespuesSiSigueAbierta(venueId, existingOrder.id)
       // 🔴 MISMA forma que el camino normal (items/modifiers/pagos aplanados):
       // devolver solo los escalares de Order rompía a la TPV que lee los items
       // de la respuesta — un retry tras perder la respuesta cambiaba el shape.
@@ -1331,6 +1374,8 @@ export async function createOrderWithItems(
       })
       if (winner) {
         logger.warn(`🔄 [WITH ITEMS] Carrera idempotente (P2002, externalId=${externalId}) — devuelvo la orden ganadora ${winner.id}`)
+        // D36 (Codex r2 #2): la ganadora pudo ser la de «Cobrar» (`payLater=false`); un «Pagar después» perdedor la marca o falla.
+        if (input.payLater === true) await marcarComoPagarDespuesSiSigueAbierta(venueId, winner.id)
         return buildCreateOrderResponse(winner.id)
       }
     }
@@ -1397,6 +1442,8 @@ export async function createOrderWithItems(
             servedById: input.staffId,
             createdById: input.staffId,
             terminalId: resolvedTerminalId,
+            // D36: la intención de la venta (sólo la TPV nueva la manda); sin ella, `null` como hoy.
+            payLater: typeof input.payLater === 'boolean' ? input.payLater : null,
             // 🔴 La orden nace en el turno de caja abierto AHORA: se toma en el mostrador, con
             // el cajero enfrente. Para una orden pendiente se reusa el `currentShift`; para el
             // carrito gratis se usa el id que GANÓ el CAS de arriba, que es el mismo que se estampa
