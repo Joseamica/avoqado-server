@@ -1,6 +1,6 @@
 # Schema Domain Map — avoqado-server
 
-`prisma/schema.prisma` is **501 models / 436 enums / ~22,300 lines**. Nobody reads it top to bottom. This file is the **index**: 23 domains,
+`prisma/schema.prisma` is **501 models / 436 enums / ~22,400 lines**. Nobody reads it top to bottom. This file is the **index**: 23 domains,
 what each is for, and where it lives. Find your domain → jump to the `schema.prisma:LINE` → for field-level detail read
 `docs/DATABASE_SCHEMA.md`.
 
@@ -115,7 +115,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `CatalogVenueEventSequence` → `schema.prisma:L13667`
 - `CatalogVenueOverride` → `schema.prisma:L13338`
 - `CatalogVenueRollout` → `schema.prisma:L13198`
-- `CelularDeCampo` → `schema.prisma:L22312`
+- `CelularDeCampo` → `schema.prisma:L22315`
 - `Cfdi` → `schema.prisma:L18645`
 - `CfdiGlobalOrden` → `schema.prisma:L18776`
 - `ChatbotTokenBudget` → `schema.prisma:L11714`
@@ -127,7 +127,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `CheckoutSession` → `schema.prisma:L7203`
 - `ClassSession` → `schema.prisma:L15708`
 - `ClassSessionPayState` → `schema.prisma:L20879`
-- `CodigoDeCelular` → `schema.prisma:L22351`
+- `CodigoDeCelular` → `schema.prisma:L22354`
 - `CommissionCalculation` → `schema.prisma:L14372`
 - `CommissionClawback` → `schema.prisma:L14549`
 - `CommissionConfig` → `schema.prisma:L14131`
@@ -148,26 +148,26 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `CreditPackItem` → `schema.prisma:L16544`
 - `CreditPackPurchase` → `schema.prisma:L16561`
 - `CreditTransaction` → `schema.prisma:L16640`
-- `CrmAccount` → `schema.prisma:L21861`
-- `CrmActivity` → `schema.prisma:L21989`
-- `CrmCampaign` → `schema.prisma:L22112`
-- `CrmCampaignDelivery` → `schema.prisma:L22138`
-- `CrmContact` → `schema.prisma:L21947`
-- `CrmDigestSend` → `schema.prisma:L22071`
-- `CrmEmailConsent` → `schema.prisma:L22181`
-- `CrmEmailMessage` → `schema.prisma:L22224`
-- `CrmEmailOptOut` → `schema.prisma:L22171`
-- `CrmEmailTemplate` → `schema.prisma:L22094`
-- `CrmErased` → `schema.prisma:L22057`
-- `CrmGmailAccountSeen` → `schema.prisma:L22216`
-- `CrmGmailConnection` → `schema.prisma:L22200`
-- `CrmHiddenClient` → `schema.prisma:L21851`
-- `CrmInboundEntry` → `schema.prisma:L22026`
-- `CrmLostReason` → `schema.prisma:L21979`
-- `CrmStage` → `schema.prisma:L21967`
-- `CrmTeam` → `schema.prisma:L21838`
-- `CrmTimelineEvent` → `schema.prisma:L22011`
-- `CrmWhatsappMessage` → `schema.prisma:L22254`
+- `CrmAccount` → `schema.prisma:L21864`
+- `CrmActivity` → `schema.prisma:L21992`
+- `CrmCampaign` → `schema.prisma:L22115`
+- `CrmCampaignDelivery` → `schema.prisma:L22141`
+- `CrmContact` → `schema.prisma:L21950`
+- `CrmDigestSend` → `schema.prisma:L22074`
+- `CrmEmailConsent` → `schema.prisma:L22184`
+- `CrmEmailMessage` → `schema.prisma:L22227`
+- `CrmEmailOptOut` → `schema.prisma:L22174`
+- `CrmEmailTemplate` → `schema.prisma:L22097`
+- `CrmErased` → `schema.prisma:L22060`
+- `CrmGmailAccountSeen` → `schema.prisma:L22219`
+- `CrmGmailConnection` → `schema.prisma:L22203`
+- `CrmHiddenClient` → `schema.prisma:L21854`
+- `CrmInboundEntry` → `schema.prisma:L22029`
+- `CrmLostReason` → `schema.prisma:L21982`
+- `CrmStage` → `schema.prisma:L21970`
+- `CrmTeam` → `schema.prisma:L21841`
+- `CrmTimelineEvent` → `schema.prisma:L22014`
+- `CrmWhatsappMessage` → `schema.prisma:L22257`
 - `Customer` → `schema.prisma:L8427`
 - `CustomerApprovalDelivery` → `schema.prisma:L11221`
 - `CustomerApprovalOutbox` → `schema.prisma:L11196`
@@ -190,19 +190,19 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `DeviceToken` → `schema.prisma:L10506`
 - `DigitalReceipt` → `schema.prisma:L5408`
 - `Discount` → `schema.prisma:L9803`
-- `DocumentRequest` → `schema.prisma:L21661`
-- `DocumentRequestDelivery` → `schema.prisma:L21727`
-- `DocumentRequestFile` → `schema.prisma:L21704`
-- `DocumentRequestSubmission` → `schema.prisma:L21748`
-- `DocumentRequestSubmissionFile` → `schema.prisma:L21762`
-- `DocumentRequestVenueLink` → `schema.prisma:L21772`
+- `DocumentRequest` → `schema.prisma:L21664`
+- `DocumentRequestDelivery` → `schema.prisma:L21730`
+- `DocumentRequestFile` → `schema.prisma:L21707`
+- `DocumentRequestSubmission` → `schema.prisma:L21751`
+- `DocumentRequestSubmissionFile` → `schema.prisma:L21765`
+- `DocumentRequestVenueLink` → `schema.prisma:L21775`
 - `EcommerceMerchant` → `schema.prisma:L7014`
 - `EmailQuotaAlert` → `schema.prisma:L8811`
 - `EmailQuotaLedger` → `schema.prisma:L8795`
 - `EmailSuppression` → `schema.prisma:L8783`
 - `EmailTemplate` → `schema.prisma:L14950`
 - `Employee` → `schema.prisma:L19311`
-- `EnvioRetenidoDeCampo` → `schema.prisma:L22371`
+- `EnvioRetenidoDeCampo` → `schema.prisma:L22374`
 - `Estimate` → `schema.prisma:L16998`
 - `EstimateItem` → `schema.prisma:L17027`
 - `Exchange` → `schema.prisma:L20504`
@@ -306,10 +306,10 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `NotificationTemplate` → `schema.prisma:L10482`
 - `OAuthState` → `schema.prisma:L1983`
 - `OnboardingProgress` → `schema.prisma:L2001`
-- `OnlineOrder` → `schema.prisma:L21450`
-- `OnlineOrderCardRefund` → `schema.prisma:L21595`
-- `OnlineOrderCardRefundReversal` → `schema.prisma:L21638`
-- `OnlineOrderCharge` → `schema.prisma:L21519`
+- `OnlineOrder` → `schema.prisma:L21451`
+- `OnlineOrderCardRefund` → `schema.prisma:L21598`
+- `OnlineOrderCardRefundReversal` → `schema.prisma:L21641`
+- `OnlineOrderCharge` → `schema.prisma:L21522`
 - `OnlineOrderingSettings` → `schema.prisma:L21414`
 - `Order` → `schema.prisma:L4452`
 - `OrderAction` → `schema.prisma:L5061`
@@ -349,7 +349,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `PerformanceGoal` → `schema.prisma:L14646`
 - `PermissionOverride` → `schema.prisma:L1855`
 - `PermissionSet` → `schema.prisma:L1879`
-- `PlatformAccess` → `schema.prisma:L21803`
+- `PlatformAccess` → `schema.prisma:L21806`
 - `PlatformAnnouncement` → `schema.prisma:L20188`
 - `PlatformAnnouncementClick` → `schema.prisma:L20268`
 - `PlatformAnnouncementDelivery` → `schema.prisma:L20305`
@@ -517,7 +517,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `UpsellImpression` → `schema.prisma:L10035`
 - `UpsellRule` → `schema.prisma:L9955`
 - `user_sessions` → `schema.prisma:L7192`
-- `VentaDeCampo` → `schema.prisma:L22284`
+- `VentaDeCampo` → `schema.prisma:L22287`
 - `Venue` → `schema.prisma:L194`
 - `VenueAreaTicketSettings` → `schema.prisma:L17721`
 - `VenueChatMessage` → `schema.prisma:L1194`

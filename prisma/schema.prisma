@@ -21439,7 +21439,8 @@ model OnlineOrderingSettings {
   lastToPayPollAt    DateTime?
   /// D662 parte 2 (v3): el corte de la pausa sola. Sólo cuentan los pedidos cuya hora límite fue DESPUÉS de esta hora. Sólo SUBE: la
   /// escriben «Reanudar» (`pauseOnlineOrdering(null)`, = ahora) y la propia lectura (`corteSeguro`, sin pausa). Encender, apagar,
-  /// cambiar de modo y pausar 15/30/60 no la tocan. Null = gracia del despliegue pendiente: la primera lectura la pone 20 min adelante.
+  /// cambiar de modo y pausar 15/30/60 no la tocan. Una fila nueva nace con ahora. Null = fila de antes del cambio (o creada por el
+  /// SERVIDOR anterior al desplegar): gracia del despliegue, la primera lectura la pone 20 min adelante.
   autoPauseResumedAt DateTime?
 
   createdAt DateTime @default(now())
@@ -21510,6 +21511,8 @@ model OnlineOrder {
   /// D662 parte 2 (v3): la pausa sola lee los pedidos de «Mi equipo» de un negocio desde el corte, por hora límite e `id`
   /// (migración CONCURRENTLY 20261120120001).
   @@index([venueId, requiresAcceptance, acceptDeadlineAt, id])
+  /// D662 parte 2 (v3): ¿una persona contestó a tiempo algún pedido entre dos vencimientos? (migración CONCURRENTLY 20261120120002).
+  @@index([venueId, staffAnsweredAt])
   /// Tienda híbrida (T9, R4): `syncPaidClosedFolios` barre los folios cerrados de los últimos 7 días en TODOS los negocios.
   @@index([requiresAcceptance, status, updatedAt])
 }
