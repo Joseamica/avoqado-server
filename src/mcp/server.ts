@@ -61,6 +61,7 @@ import { registerDeliveryActivationTools } from './tools/deliveryActivation'
 import { registerDeliveryCourierTools } from './tools/deliveryCourier'
 import { registerDeliveryLineActionTools } from './tools/deliveryLineActions'
 import { registerProductTools } from './tools/products'
+import { registerPackageComponentSalesTools } from './tools/packageComponentSales'
 import { registerProductVariantTools } from './tools/productVariants'
 import { registerDeviceMenuTools } from './tools/deviceMenus'
 import { registerTrendTools } from './tools/trends'
@@ -173,6 +174,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerDeliveryCourierTools(server, scope)
   registerDeliveryLineActionTools(server, scope)
   registerProductTools(server, scope)
+  registerPackageComponentSalesTools(server, scope) // «Dentro de paquete»: sólo /mcp libre (no está en src/mcp/directory/catalog.ts)
   registerProductVariantTools(server, scope) // free mode only: not in the certified directory
   registerDeviceMenuTools(server, scope) // free mode only: not in the certified directory
   registerTrendTools(server, scope)

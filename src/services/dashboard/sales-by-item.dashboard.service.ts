@@ -487,9 +487,10 @@ export const DENTRO_DE_PAQUETE_TOPE = 2000
  * Unidades de cada platillo vendidas como EXTRA ligado a él (`Modifier.linkedProductId`): Σ renglón.quantity × extra.quantity, con
  * los MISMOS filtros de órdenes que las unidades sueltas (`ordenesDelReporte`). Sólo unidades: no lee ni un precio. La liga que
  * cuenta es la ACTUAL del extra (el renglón vendido no la copia), así que ligar o desligar hoy mueve el pasado: aceptado.
- * El platillo ligado tiene que ser del mismo negocio. Una consulta agregada, acotada por `DENTRO_DE_PAQUETE_TOPE`.
+ * El platillo ligado tiene que ser del mismo negocio. Una consulta agregada, acotada por `DENTRO_DE_PAQUETE_TOPE`. La lee también la
+ * herramienta MCP `package_component_sales`, para que el asistente y la pantalla den el mismo número.
  */
-async function getUnitsInsidePackages(
+export async function getUnitsInsidePackages(
   venueId: string,
   startDate: Date,
   endDate: Date,

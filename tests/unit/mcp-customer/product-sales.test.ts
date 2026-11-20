@@ -120,29 +120,11 @@ describe('product_sales', () => {
     expect(sql).not.toMatch(/SUM\(\s*oi\."total"\s*\)/) // never the ambiguous column
   })
 
-  it('«Dentro de paquete» (founder «B», 20-nov): unidades vendidas como extra ligado, aparte, y el total', async () => {
-    mockVenueFind.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
-    mockProductFind.mockResolvedValueOnce([{ id: 'p-papa', name: 'Flauta de papa' }])
-    mockQueryRaw.mockResolvedValueOnce([{ units: 6, revenue: 180, lines: 4n, inside_units: 15 }])
-
-    const out = parse(await call({ venueId: 'v1', name: 'papa' }))
-
-    // Lo de siempre no se mueve; lo de paquete viene aparte y sin dinero.
-    expect(out).toMatchObject({ unitsSold: 6, revenue: 180, timesOrdered: 4, unitsInsidePackages: 15, totalUnits: 21 })
-    const sql = lastSql()
-    expect(sql).toContain('m."linkedProductId" =')
-    expect(sql).toContain('oi2.quantity * oim2.quantity')
-    // El subquery de paquete se acota al mismo negocio y a las mismas órdenes.
-    expect(sql).toContain('o2."venueId" =')
-    expect(sql).toContain('o2.status NOT IN')
-    expect(sql).toContain('oi2."removedAt" IS NULL')
-  })
-
   it('reports zero (not NaN) for a product that never sold', async () => {
     mockVenueFind.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
     mockProductFind.mockResolvedValueOnce([{ id: 'p3', name: 'Sopa rara' }])
     mockQueryRaw.mockResolvedValueOnce([{ units: null, revenue: null, lines: 0n }])
     const out = parse(await call({ venueId: 'v1', name: 'sopa' }))
-    expect(out).toMatchObject({ found: true, unitsSold: 0, revenue: 0, timesOrdered: 0, unitsInsidePackages: 0, totalUnits: 0 })
+    expect(out).toMatchObject({ found: true, unitsSold: 0, revenue: 0, timesOrdered: 0 })
   })
 })
