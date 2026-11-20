@@ -571,6 +571,10 @@ describe('🔴 ninguna llave foránea bloqueante queda sin atender', () => {
   const INALCANZABLES_EN_UN_DEMO: Record<string, string> = {
     AngelPayUserAccount: 'cuenta de cobro de AngelPay: activar cobros está cerrado en un demo',
     CapabilityGrant: 'funciones contratadas: plan y funciones sueltas cerrados en un demo (LIVE_DEMO no paga plan)',
+    CashMachineClose:
+      'cierre de la máquina de efectivo: la sección cash-machine está en APP_BLOQUEADAS de candadoDemo, así que un demo no empareja máquina ni sube cierres',
+    CashMachineIncident:
+      'incidencia de la máquina de efectivo: la sección cash-machine está en APP_BLOQUEADAS de candadoDemo, así que un demo no sube ventas, dudas ni cierres',
     CrmTeam:
       'el equipo de ventas de Avoqado: ensureCrmTeamVenue lo crea una sola vez, en su propia organización interna (venue ACTIVE, nunca un demo); si una limpieza llegara a su venue, la llave RESTRICT la frena sin borrar nada',
     DocumentRequestVenueLink: 'solicitud de documentos (KYC): cerrada en un demo',
