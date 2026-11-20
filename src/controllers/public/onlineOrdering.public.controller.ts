@@ -192,11 +192,13 @@ export async function postOrder(req: Request, res: Response) {
           idempotencyKey: key,
           items: body.items,
           expectedTotal: body.expectedTotal,
-          // R7: con tarjeta el esquema exige el teléfono. R29: el borrador de tarjeta no guarda canal.
-          customer: { name: body.customer.name, phone: body.customer.phone as string, email: body.customer.email ?? null },
+          // D661 (r1 #12): el teléfono lo decide el servicio según el modo («Mi equipo» lo exige; «Nadie» usa el de la sesión).
+          // R29: el borrador de tarjeta no guarda canal.
+          customer: { name: body.customer.name, phone: body.customer.phone ?? null, email: body.customer.email ?? null },
           note: body.note ?? null,
           whatsappConsent: body.whatsappConsent === true,
-          // S11: la clienta cuenta si su teléfono probado es el del pedido (lo decide el servicio); con ella, sus beneficios.
+          // S11: en «Mi equipo» la clienta cuenta si su teléfono probado es el del pedido; en «Nadie» (D661) es la de la sesión, que
+          // la tarjeta exige. Lo decide el servicio; con ella, sus beneficios.
           customerId: clientaDeLaSesion(auth),
           verifiedPhone: auth?.verifiedPhone ?? null,
           beneficios: body.beneficios ?? null,

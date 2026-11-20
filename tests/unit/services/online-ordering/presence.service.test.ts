@@ -251,8 +251,9 @@ describe('getAcceptingStatus — fase 2: los borradores de tarjeta vigentes cuen
     prismaMock.onlineOrder.count.mockResolvedValue(MAX_PENDING_PER_VENUE - 1)
     prismaMock.onlineOrderCharge.count.mockResolvedValue(1)
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'PAUSED', reason: 'TOO_BUSY' })
+    // D661 (r6 #6): un borrador de «Nadie» (sin teléfono en la columna) tiene su propio cupo y no satura la tienda.
     expect(prismaMock.onlineOrderCharge.count).toHaveBeenCalledWith({
-      where: { venueId: 'v1', status: 'PENDING_AUTH', checkoutExpiresAt: { gt: NOW } },
+      where: { venueId: 'v1', status: 'PENDING_AUTH', checkoutExpiresAt: { gt: NOW }, customerPhone: { not: '' } },
     })
     prismaMock.onlineOrderCharge.count.mockResolvedValue(0) // el vencido ya no entra en la cuenta
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN' })

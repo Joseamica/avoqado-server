@@ -74,13 +74,38 @@ export const OPEN_ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'
  */
 export const PREPAID_MODES: readonly OnlineOrderPaymentMode[] = [OnlineOrderPaymentMode.CARD_ONLINE]
 /**
- * Fase 2: los borradores de tarjeta con su sesión de pago vigente. Cuentan para los topes (por teléfono y por negocio) y para la
- * saturación de la tienda, junto con los pedidos por aceptar; uno vencido ya no cuenta.
+ * D661 (r1 #12): un borrador de tarjeta de «Nadie» guarda `customerPhone` vacío. Su tope es por clienta (`request.customerId`), no
+ * por número: hay clientas sin teléfono y, con el mismo '' para todas, cuatro de ellas chocarían en el tope de tres. Su teléfono
+ * probado viaja en `request.telefonoVerificado`. «Mi equipo» siempre lleva teléfono, así que '' sólo puede ser de «Nadie».
+ */
+export const SIN_TELEFONO_NADIE = ''
+/**
+ * Fase 2: los borradores de tarjeta de «Mi equipo» con su sesión de pago vigente. Cuentan para los topes (por teléfono y por negocio)
+ * y para la saturación de la tienda, junto con los pedidos por aceptar; uno vencido ya no cuenta. D661 (r6 #6): los de «Nadie» no
+ * entran: tienen su propio cupo (`borradoresNadieWhere`) y llenarlo no pausa la tienda ni frena pagar en caja.
  */
 export const liveCardDraftsWhere = (venueId: string, now: Date) => ({
   venueId,
   status: OnlineOrderChargeStatus.PENDING_AUTH,
   checkoutExpiresAt: { gt: now },
+  // Columna NOT NULL: el `not` no se come filas nulas (el de una ruta JSON sí lo haría con todos los borradores viejos).
+  customerPhone: { not: SIN_TELEFONO_NADIE },
+})
+/**
+ * D661 (r5, r6): borradores de tarjeta de «Nadie» todavía sin resolver. Sin reloj: al vencer su sesión pueden seguir `PENDING_AUTH`
+ * aunque Stripe ya haya autorizado; su lugar lo libera el conciliador al resolverlo (confirmado o abandonado), no la hora.
+ */
+export const borradoresNadieWhere = (venueId: string) => ({
+  venueId,
+  status: OnlineOrderChargeStatus.PENDING_AUTH,
+  customerPhone: SIN_TELEFONO_NADIE,
+})
+/** D661: pedidos con tarjeta de «Nadie» ya apartados que ninguna caja ha abierto; cobrados, liberados o rechazados dejan de ocupar. */
+export const apartadosNadieWhere = (venueId: string) => ({
+  venueId,
+  status: OnlineOrderStatus.PENDING_ACCEPTANCE,
+  requiresAcceptance: false,
+  paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
 })
 /** Tienda híbrida: lo que de verdad espera a «Mi equipo» (saturación y topes). Los folios (`requiresAcceptance:false`) no cuentan. */
 export const awaitingAcceptanceWhere = (venueId: string) => ({
@@ -88,11 +113,15 @@ export const awaitingAcceptanceWhere = (venueId: string) => ({
   status: OnlineOrderStatus.PENDING_ACCEPTANCE,
   requiresAcceptance: true,
 })
-/** Tienda híbrida (R18): folios sin un peso pagado; los usará el tope de folios (T7) y T12. Un folio con abono no ocupa lugar. */
+/**
+ * Tienda híbrida (R18): folios sin un peso pagado; los usará el tope de folios (T7) y T12. Un folio con abono no ocupa lugar.
+ * D661 (r4): un apartado de tarjeta no es un folio por cobrar en caja: ocupa su propio cupo (`apartadosNadieWhere`), nunca éste.
+ */
 export const unpaidFoliosWhere = (venueId: string) => ({
   venueId,
   status: OnlineOrderStatus.PENDING_ACCEPTANCE,
   requiresAcceptance: false,
+  paymentMode: { not: OnlineOrderPaymentMode.CARD_ONLINE },
   order: { paymentStatus: PaymentStatus.PENDING },
 })
 /**

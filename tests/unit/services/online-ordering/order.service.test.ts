@@ -1,6 +1,7 @@
 // tests/unit/services/online-ordering/order.service.test.ts
 import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { contar } from '@tests/__helpers__/baseEnMemoria'
 import AppError, { ForbiddenError, ServiceUnavailableError, UnauthorizedError } from '@/errors/AppError'
 
 jest.mock('@/services/online-ordering/presence.service', () => ({ __esModule: true, getAcceptingStatus: jest.fn() }))
@@ -602,8 +603,9 @@ describe('createOnlineOrder', () => {
     prismaMock.onlineOrder.count.mockResolvedValueOnce(0).mockResolvedValueOnce(20)
     prismaMock.onlineOrderCharge.count.mockResolvedValueOnce(0).mockResolvedValueOnce(10)
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'ORDERING_PAUSED' })
+    // D661 (r6 #6): los borradores de «Nadie» no cuentan aquí (tienen su propio cupo).
     expect(prismaMock.onlineOrderCharge.count).toHaveBeenLastCalledWith({
-      where: { venueId: 'v1', status: 'PENDING_AUTH', checkoutExpiresAt: { gt: NOW } },
+      where: { venueId: 'v1', status: 'PENDING_AUTH', checkoutExpiresAt: { gt: NOW }, customerPhone: { not: '' } },
     })
   })
 
@@ -1307,10 +1309,12 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
       venueId: 'v1',
       status: 'PENDING_ACCEPTANCE',
       requiresAcceptance: false,
+      paymentMode: { not: 'CARD_ONLINE' }, // D661 (r4): un apartado de tarjeta no es folio de caja
       order: { paymentStatus: 'PENDING' },
     })
+    // Ningún conteo por UN teléfono (el de la saturación sólo excluye los borradores de «Nadie», D661).
     expect(prismaMock.onlineOrderCharge.count).not.toHaveBeenCalledWith({
-      where: expect.objectContaining({ customerPhone: expect.anything() }),
+      where: expect.objectContaining({ customerPhone: expect.any(String) }),
     })
   })
 
@@ -1666,6 +1670,26 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
       // Con 59 sí entra el 60.
       foliosSinPagar(LLENO - 1)
       await expect(createOnlineOrder(anon({ idempotencyKey: 'n'.repeat(32) }), PUEDE_CREAR)).resolves.toMatchObject({ replay: false })
+    })
+
+    it('un apartado de tarjeta NO ocupa el cupo de folios sin pagar (constants.ts:76, order.service.ts:576): una clienta que paga en caja no recibe «demasiados folios» por apartados', async () => {
+      // 59 folios de caja sin pagar y un apartado de tarjeta de «Nadie», que también es `requiresAcceptance:false` y sin un peso.
+      const folio = {
+        venueId: 'v1',
+        status: 'PENDING_ACCEPTANCE',
+        requiresAcceptance: false,
+        paymentMode: 'PAY_AT_PICKUP',
+        order: { paymentStatus: 'PENDING' },
+      }
+      const filas: any[] = [...Array.from({ length: LLENO - 1 }, () => ({ ...folio })), { ...folio, paymentMode: 'CARD_ONLINE' }]
+      prismaMock.onlineOrder.count.mockImplementation(contar(filas) as any)
+      await expect(createOnlineOrder(anon(), PUEDE_CREAR)).resolves.toMatchObject({ replay: false })
+      expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+      // El folio 60 de caja sí lo llena.
+      filas.push({ ...folio })
+      await expect(createOnlineOrder(anon({ idempotencyKey: 'n'.repeat(32) }), PUEDE_CREAR)).rejects.toMatchObject({
+        code: 'TOO_MANY_UNPAID_FOLIOS',
+      })
     })
 
     it('el tope se cuenta bajo el candado del negocio y sólo para folios: «Mi equipo» con 60 folios vivos no lo ve', async () => {

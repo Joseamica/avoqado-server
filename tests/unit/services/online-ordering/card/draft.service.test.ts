@@ -2,6 +2,7 @@
 import { Prisma } from '@prisma/client'
 import { ForbiddenError, ServiceUnavailableError } from '@/errors/AppError'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { contar, cumpleWhere } from '@tests/__helpers__/baseEnMemoria'
 
 jest.mock('@/services/online-ordering/presence.service', () => ({ __esModule: true, getAcceptingStatus: jest.fn() }))
 jest.mock('@/services/online-ordering/quote.service', () => ({
@@ -27,6 +28,7 @@ import { onlineOrderRequestHash } from '@/services/online-ordering/order.service
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
 import { cedeLaSimulacion, simularBeneficios } from '@/services/online-ordering/beneficios.service'
 import { decisionDePrecio } from '@/services/online-ordering/order.service'
+import { unpaidFoliosWhere } from '@/services/online-ordering/constants'
 
 const D = (v: string) => new Prisma.Decimal(v)
 const NOW = new Date('2026-10-28T18:00:00.000Z')
@@ -262,13 +264,6 @@ describe('createCardOnlineDraft — borrador + sesión de Stripe', () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ acceptsCardOnline: false } as any)
     await expectCode(createCardOnlineDraft(input(), PUEDE_CREAR), 400, 'CARD_PAYMENT_NOT_ACCEPTED')
     expect(prismaMock.onlineOrderCharge.create).not.toHaveBeenCalled()
-  })
-
-  it('T8: un borrador nuevo en «Nadie» → 400 PAYMENT_MODE_NOT_ACCEPTED y nada se crea', async () => {
-    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ acceptsCardOnline: true, requiresAcceptance: false } as any)
-    await expectCode(createCardOnlineDraft(input(), PUEDE_CREAR), 400, 'PAYMENT_MODE_NOT_ACCEPTED')
-    expect(prismaMock.onlineOrderCharge.create).not.toHaveBeenCalled()
-    expect(createAuthorizationCheckout).not.toHaveBeenCalled()
   })
 
   it('sin comercio Stripe cobrable → 400 CARD_PAYMENT_NOT_ACCEPTED', async () => {
@@ -660,5 +655,286 @@ describe("S11 · el borrador con sesión calcula su propio total estricto (R2'',
         expect(prismaMock.onlineOrderCharge.create).not.toHaveBeenCalled()
       })
     })
+  })
+})
+
+describe('D661 · el borrador de tarjeta en «Nadie»: sesión, teléfono verificado y tope por clienta', () => {
+  /** La caja capaz de avisar consultó hace un minuto (`cardOnlineAvailable` mide con el reloj del sistema). */
+  const NADIE = () => ({
+    acceptsCardOnline: false,
+    requiresAcceptance: false,
+    cardOnlineNadie: true,
+    lastCardAlertPollAt: new Date(Date.now() - 60_000),
+  })
+  const MI_EQUIPO = { acceptsCardOnline: true, requiresAcceptance: true }
+  const TELEFONO_DE_LA_SESION = '+525511112222'
+  const ADMISION = 'online-order-admission:v1'
+  /** La clienta de «Nadie»: con sesión (`clientaDeLaSesion`, aquí por correo) y sin teléfono en el cuerpo. */
+  const nadie = (o: Record<string, unknown> = {}) =>
+    input({ customer: { name: 'María G.', email: 'maria@test.com' }, customerId: 'cust1', verifiedPhone: null, ...o })
+
+  let cargos: any[]
+  let pedidos: any[]
+  const borradorNadie = (clienta: string, o: Record<string, unknown> = {}) => ({
+    id: `b${cargos.length}`,
+    venueId: 'v1',
+    idempotencyKey: `otra-${cargos.length}`,
+    status: 'PENDING_AUTH',
+    customerPhone: '',
+    checkoutExpiresAt: new Date(NOW.getTime() + 60_000),
+    request: { nadie: true, customerId: clienta },
+    ...o,
+  })
+  const apartadoNadie = (clienta: string, o: Record<string, unknown> = {}) => ({
+    venueId: 'v1',
+    status: 'PENDING_ACCEPTANCE',
+    requiresAcceptance: false,
+    paymentMode: 'CARD_ONLINE',
+    order: { customerId: clienta, paymentStatus: 'PENDING' },
+    ...o,
+  })
+  const folioDeCaja = (clienta: string | null) => ({
+    venueId: 'v1',
+    status: 'PENDING_ACCEPTANCE',
+    requiresAcceptance: false,
+    paymentMode: 'PAY_AT_PICKUP',
+    order: { customerId: clienta, paymentStatus: 'PENDING' },
+  })
+  const creados = () => prismaMock.onlineOrderCharge.create.mock.calls.map((c: any) => c[0].data)
+  /** El candado de admisión se toma ANTES del primer conteo de topes. */
+  const conteosBajoElCandado = () => {
+    const raw = prismaMock.$executeRaw as jest.Mock
+    const admision = raw.mock.calls.findIndex(([, k]) => k === ADMISION)
+    expect(admision).toBeGreaterThanOrEqual(0)
+    expect(raw.mock.invocationCallOrder[admision]).toBeLessThan(prismaMock.onlineOrderCharge.count.mock.invocationCallOrder[0])
+  }
+
+  beforeEach(() => {
+    cargos = []
+    pedidos = []
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(NADIE() as any)
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({
+      status: 'OPEN',
+      reason: null,
+      config: { acceptsPayAtPickup: true, requiresAcceptance: false },
+    })
+    ;(simularBeneficios as jest.Mock).mockReset()
+    ;(simularBeneficios as jest.Mock).mockResolvedValue({ total: D('250.00'), aplicados: [], descartados: [] })
+    ;(cedeLaSimulacion as jest.Mock).mockReturnValue(false)
+    // La base en memoria: los topes cuentan FILAS con el filtro de verdad.
+    prismaMock.onlineOrderCharge.count.mockImplementation(contar(cargos) as any)
+    prismaMock.onlineOrder.count.mockImplementation(contar(pedidos) as any)
+    prismaMock.onlineOrderCharge.create.mockImplementation((async ({ data }: any) => {
+      const fila = {
+        id: `ch${cargos.length + 1}`,
+        status: 'PENDING_AUTH',
+        checkoutAttempt: 1,
+        checkoutSessionId: null,
+        checkoutUrl: null,
+        ...data,
+      }
+      cargos.push(fila)
+      return { ...fila }
+    }) as any)
+    prismaMock.onlineOrderCharge.findUnique.mockImplementation((async ({ where }: any) => {
+      const k = where.venueId_idempotencyKey
+      const fila = cargos.find(c => (k ? c.venueId === k.venueId && c.idempotencyKey === k.idempotencyKey : c.id === where.id))
+      return fila ? { ...fila } : null
+    }) as any)
+    prismaMock.onlineOrderCharge.updateMany.mockImplementation((async ({ where, data }: any) => {
+      const filas = cargos.filter(c => cumpleWhere(c, where))
+      filas.forEach(c => Object.assign(c, data))
+      return { count: filas.length }
+    }) as any)
+  })
+
+  it('«Nadie» sin sesión: 401 con el código del folio anónimo (order.service.ts:777-790), nada se crea', async () => {
+    for (const sinSesion of [nadie({ customerId: null }), input({ customerId: null })]) {
+      await expect(createCardOnlineDraft(sinSesion, PUEDE_CREAR)).rejects.toMatchObject({
+        statusCode: 401,
+        code: 'PHONE_VERIFICATION_REQUIRED',
+      })
+    }
+    expect(cargos).toHaveLength(0)
+    expect(quoteCart).not.toHaveBeenCalled()
+    expect(createAuthorizationCheckout).not.toHaveBeenCalled()
+    expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
+  })
+
+  it('«Nadie» con sesión sin teléfono: request.nadie true, customerId de la sesión, telefonoVerificado ausente', async () => {
+    await expect(createCardOnlineDraft(nadie(), PUEDE_CREAR)).resolves.toMatchObject({ status: 'AWAITING_PAYMENT', replay: false })
+    const [data] = creados()
+    expect(data.request).toMatchObject({
+      nadie: true,
+      customerId: 'cust1',
+      customer: { name: 'María G.', phone: null, email: 'maria@test.com' },
+    })
+    expect(data.request).not.toHaveProperty('telefonoVerificado')
+    // Su tope es por clienta, nunca por un número vacío compartido.
+    expect(data.customerPhone).toBe('')
+    // Con sesión, lo autorizado es el total estricto de SU cadena de beneficios.
+    expect(simularBeneficios).toHaveBeenCalledWith('v1', QUOTE_OK, 'cust1', {})
+    expect(createAuthorizationCheckout).toHaveBeenCalledTimes(1)
+  })
+
+  it('«Nadie» con sesión de WhatsApp: telefonoVerificado = el de la sesión', async () => {
+    // Aunque el cuerpo traiga otro número (una pestaña vieja), cuenta el que la sesión probó.
+    await createCardOnlineDraft(
+      nadie({ verifiedPhone: TELEFONO_DE_LA_SESION, customer: { name: 'María G.', phone: '55 9999 8888' } }),
+      PUEDE_CREAR,
+    )
+    const [data] = creados()
+    expect(data.request).toMatchObject({
+      nadie: true,
+      customerId: 'cust1',
+      telefonoVerificado: TELEFONO_DE_LA_SESION,
+      customer: { phone: TELEFONO_DE_LA_SESION },
+    })
+    expect(data.customerPhone).toBe('')
+  })
+
+  it('«Mi equipo» sin teléfono: 400 como hoy', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(MI_EQUIPO as any)
+    for (const sinTelefono of [input({ customer: { name: 'María G.' } }), nadie({ verifiedPhone: TELEFONO_DE_LA_SESION })]) {
+      const err = await createCardOnlineDraft(sinTelefono, PUEDE_CREAR).catch((e: unknown) => e)
+      // El mismo 400 y el mismo texto que daba el esquema (la regla se movió al servicio, r1 #12), sin código.
+      expect(err).toMatchObject({ statusCode: 400, message: 'Error de validación: Escribe tu teléfono' })
+      expect((err as { code?: string }).code).toBeUndefined()
+    }
+    expect(cargos).toHaveLength(0)
+    expect(createAuthorizationCheckout).not.toHaveBeenCalled()
+  })
+
+  it('el tope cuenta borradores y pedidos de tarjeta de «Nadie» todavía vivos de la MISMA clienta (OnlineOrder.order.customerId), bajo el candado de admisión: el cuarto intento se rechaza aunque uno ya esté apartado; los folios de caja no cuentan', async () => {
+    // cust1: un borrador vigente, otro con su página ya vencida (sigue sin resolver) y un apartado. Además sus dos folios de caja y lo
+    // de otra clienta.
+    cargos.push(
+      borradorNadie('cust1'),
+      borradorNadie('cust1', { checkoutExpiresAt: new Date(NOW.getTime() - 60_000) }),
+      borradorNadie('cust2'),
+    )
+    pedidos.push(apartadoNadie('cust1'), folioDeCaja('cust1'), folioDeCaja('cust1'), apartadoNadie('cust2'))
+
+    await expect(createCardOnlineDraft(nadie(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 409, code: 'TOO_MANY_PENDING_ORDERS' })
+    expect(prismaMock.onlineOrderCharge.create).not.toHaveBeenCalled()
+    conteosBajoElCandado()
+
+    // Una caja abrió (y cobró) el apartado: ese lugar se libera; los dos folios de caja siguen sin contar.
+    pedidos[0].status = 'ACCEPTED'
+    await expect(createCardOnlineDraft(nadie(), PUEDE_CREAR)).resolves.toMatchObject({ replay: false })
+  })
+
+  it('un apartado D661 vivo sigue ocupando su lugar en el tope de tarjeta POR SUCURSAL bajo el candado de admisión hasta resolverse; no ocupa el cupo de folios de caja', async () => {
+    // 30 lugares de otras clientas: 8 borradores vigentes, 4 con la página vencida pero sin resolver y 18 apartados. Lo ya resuelto
+    // (un borrador abandonado, un apartado cobrado) y lo de «Mi equipo» no cuentan.
+    for (let i = 0; i < 8; i++) cargos.push(borradorNadie(`b${i}`))
+    for (let i = 0; i < 4; i++) cargos.push(borradorNadie(`v${i}`, { checkoutExpiresAt: new Date(NOW.getTime() - 60_000) }))
+    cargos.push(borradorNadie('x', { status: 'ABANDONED' }))
+    for (let i = 0; i < 18; i++) pedidos.push(apartadoNadie(`a${i}`))
+    pedidos.push(apartadoNadie('y', { status: 'ACCEPTED' }))
+
+    const err = await createCardOnlineDraft(nadie(), PUEDE_CREAR).catch((e: unknown) => e)
+    expect(err).toMatchObject({ statusCode: 409, code: 'CARD_ONLINE_QUEUE_FULL' })
+    // r6 #6: la fila de tarjeta no cierra la tienda (la tienda trata ORDERING_* como «no recibe pedidos»).
+    expect((err as { code: string }).code).not.toMatch(/^ORDERING_/)
+    expect(prismaMock.onlineOrderCharge.create).not.toHaveBeenCalled()
+    conteosBajoElCandado()
+
+    // Los apartados no ocupan el cupo de folios de caja.
+    expect(pedidos.filter(p => cumpleWhere(p, unpaidFoliosWhere('v1')))).toHaveLength(0)
+
+    // El conciliador resuelve un borrador vencido (nunca se autorizó): su lugar se libera; el reloj solo no lo hacía.
+    cargos.find(c => c.request.customerId === 'v0').status = 'ABANDONED'
+    await expect(createCardOnlineDraft(nadie(), PUEDE_CREAR)).resolves.toMatchObject({ replay: false })
+  })
+
+  it('repetir un borrador con su misma llave devuelve el original aunque la tienda haya cambiado de modo: la llave se resuelve ANTES de la regla de sesión (draft.service.ts:213)', async () => {
+    // Nació en «Mi equipo» (sin sesión, con teléfono); la tienda pasó a «Nadie»: SU borrador, no el 401.
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(MI_EQUIPO as any)
+    const deMiEquipo = await createCardOnlineDraft(input({ customerId: null }), PUEDE_CREAR)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(NADIE() as any)
+    await expect(createCardOnlineDraft(input({ customerId: null }), PUEDE_CREAR)).resolves.toEqual({ ...deMiEquipo, replay: true })
+
+    // Nació en «Nadie» (sesión sin teléfono); la tienda volvió a «Mi equipo»: SU borrador, no el 400 por falta de teléfono.
+    const K2 = 'n'.repeat(32)
+    const deNadie = await createCardOnlineDraft(nadie({ idempotencyKey: K2 }), PUEDE_CREAR)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(MI_EQUIPO as any)
+    await expect(createCardOnlineDraft(nadie({ idempotencyKey: K2 }), PUEDE_CREAR)).resolves.toEqual({ ...deNadie, replay: true })
+
+    expect(cargos).toHaveLength(2)
+    expect(createAuthorizationCheckout).toHaveBeenCalledTimes(2)
+    // La huella de «Nadie» lleva a la clienta: la misma llave con OTRA sesión choca, nunca le entrega el borrador de otra.
+    await expect(createCardOnlineDraft(nadie({ idempotencyKey: K2, customerId: 'cust2' }), PUEDE_CREAR)).rejects.toMatchObject({
+      code: 'IDEMPOTENCY_KEY_CONFLICT',
+      final: true,
+    })
+  })
+
+  it("R1' en «Nadie»: el PRICE_CHANGED se guarda con la huella de «Nadie» y su repetición recibe esa decisión, aunque la tienda vuelva a «Mi equipo»", async () => {
+    const filas = new Map<string, any>()
+    const k = (w: any) => JSON.stringify(Object.values(w.organizationId_actorStaffId_endpoint_idempotencyKey ?? w))
+    prismaMock.idempotencyRequest.findUnique.mockImplementation((async (a: any) => filas.get(k(a.where)) ?? null) as any)
+    prismaMock.idempotencyRequest.create.mockImplementation((async ({ data }: any) => {
+      const { organizationId, actorStaffId, endpoint, idempotencyKey } = data
+      filas.set(k({ organizationId, actorStaffId, endpoint, idempotencyKey }), data)
+      return data
+    }) as any)
+    ;(simularBeneficios as jest.Mock).mockResolvedValue({ total: D('225.00'), aplicados: [], descartados: [] })
+
+    await expect(createCardOnlineDraft(nadie(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'PRICE_CHANGED', final: true })
+    const guardada = (prismaMock.idempotencyRequest.create as jest.Mock).mock.calls[0][0].data
+    expect(guardada).toMatchObject(decisionDePrecio('v1', KEY))
+    expect(guardada.requestHash).not.toBe(huella()) // no es la huella de «Mi equipo»
+
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(MI_EQUIPO as any)
+    await expect(createCardOnlineDraft(nadie(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'PRICE_CHANGED', final: true })
+    // Otra clienta con la misma llave choca: la decisión no es suya.
+    await expect(createCardOnlineDraft(nadie({ customerId: 'cust2' }), PUEDE_CREAR)).rejects.toMatchObject({
+      code: 'IDEMPOTENCY_KEY_CONFLICT',
+    })
+    expect(prismaMock.idempotencyRequest.create).toHaveBeenCalledTimes(1)
+    expect(cargos).toHaveLength(0)
+  })
+
+  it('D661 · matriz fila 1 (r6): cortar antes de crear el Checkout y después de crearlo sin guardar la respuesta: repetir con la misma llave da la misma sesión y el mismo borrador', async () => {
+    // Stripe en memoria: la misma clave de idempotencia devuelve SIEMPRE la misma sesión.
+    const sesiones = new Map<string, { id: string; url: string }>()
+    createAuthorizationCheckout.mockImplementation((async (_m: unknown, p: { idempotencyKey: string }) => {
+      if (!sesiones.has(p.idempotencyKey)) {
+        const id = `cs_${sesiones.size + 1}`
+        sesiones.set(p.idempotencyKey, { id, url: `https://checkout.stripe.test/${id}` })
+      }
+      return sesiones.get(p.idempotencyKey)
+    }) as any)
+
+    // (a) Se corta ANTES de que Stripe cree nada: el borrador quedó guardado sin sesión.
+    createAuthorizationCheckout.mockImplementationOnce(async () => {
+      throw new Error('el proceso murió antes de crear la sesión')
+    })
+    await expect(createCardOnlineDraft(nadie(), PUEDE_CREAR)).rejects.toBeDefined()
+    expect(sesiones.size).toBe(0)
+    const a = await createCardOnlineDraft(nadie(), PUEDE_CREAR)
+    expect(a).toMatchObject({ replay: true, checkoutUrl: 'https://checkout.stripe.test/cs_1' })
+    expect(cargos).toHaveLength(1)
+    expect(cargos[0].checkoutSessionId).toBe('cs_1')
+
+    // (b) Stripe crea la sesión y el proceso muere ANTES de guardarla: el reintento recibe ESA sesión, no otra.
+    const K2 = 'n'.repeat(32)
+    prismaMock.onlineOrderCharge.updateMany.mockImplementationOnce(async () => {
+      throw new Error('el proceso murió antes de guardar la sesión')
+    })
+    await expect(createCardOnlineDraft(nadie({ idempotencyKey: K2 }), PUEDE_CREAR)).rejects.toThrow('antes de guardar la sesión')
+    expect(sesiones.size).toBe(2)
+    expect(cargos[1].checkoutSessionId).toBeNull()
+    const b = await createCardOnlineDraft(nadie({ idempotencyKey: K2 }), PUEDE_CREAR)
+    expect(b).toMatchObject({ replay: true, checkoutUrl: 'https://checkout.stripe.test/cs_2' })
+    expect(sesiones.size).toBe(2)
+    expect(cargos).toHaveLength(2)
+    expect(cargos[1].checkoutSessionId).toBe('cs_2')
+    // Las dos llamadas de cada borrador llevan la MISMA clave y los mismos datos.
+    const llamadas = createAuthorizationCheckout.mock.calls.map((c: any) => c[1])
+    expect(llamadas[0]).toEqual(llamadas[1])
+    expect(llamadas[2]).toEqual(llamadas[3])
+    expect(llamadas[0].idempotencyKey).not.toBe(llamadas[2].idempotencyKey)
   })
 })
