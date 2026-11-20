@@ -1470,7 +1470,13 @@ async function applyAddItems(
   // Sin esto, un reintento tras "efecto aplicado pero ack no persistido"
   // duplicaba la ronda en cocina y en la cuenta. Solo se inyecta si el cliente
   // no mandó uno propio.
-  const itemsWithKey = normales.map((it, idx) => (it.externalId ? it : { ...it, externalId: `sync:${intent.id}:${idx}` }))
+  // La llave se normaliza UNA vez, aquí, igual que la guarda el alta (`normalizeExternalId`: recortada; vacía o sólo espacios = sin
+  // llave ⇒ la determinista). Así la búsqueda de la ronda, sus lápidas y el alta comparan la misma llave (Codex r3 #4, r4 #3, r5 #4
+  // y #6: una llave " " se guardaba como null y la anulación no dejaba lápida; recortar sólo en algunos lugares dejaba huecos).
+  const itemsWithKey = normales.map((it, idx) => {
+    const llave = llaveNormalizada(typeof it.externalId === 'string' ? it.externalId : null)
+    return { ...it, externalId: llave ?? `sync:${intent.id}:${idx}` }
+  })
   // El combo viaja sólo con su referencia y el prefijo de sus componentes (`sync:<intent>:<índice>`, el que el aparato predice): su
   // precio y sus renglones los resuelve el server desde la promoción, y un campo suelto del carrito no lo vuelve un producto.
   const combos = conPromocion.map(item => ({
@@ -1575,7 +1581,8 @@ const NOTA_RONDA_TARDIA = 'RONDA_TARDIA_EN_CUENTA_APARTE'
  * se repiten entre rondas. Las dos búsquedas usan índice (`OrderItem.externalId`, `OrderPromotion.instanceId`). Devuelve la cuenta.
  */
 async function rondaYaEnAlgunaCuenta(venueId: string, conPromocion: any[], normales: any[]): Promise<string | null> {
-  const llaves = [...new Set(normales.map(it => it.externalId).filter((k: unknown): k is string => typeof k === 'string' && k.length > 0))]
+  // Las llaves ya vienen normalizadas desde la entrada del ADD_ITEMS (`itemsWithKey`).
+  const llaves = [...new Set(llavesGuardadasDeLaRonda(normales))]
   if (llaves.length) {
     const renglon = await prisma.orderItem.findFirst({
       where: { externalId: { in: llaves }, order: { venueId } },
@@ -1598,6 +1605,24 @@ async function rondaYaEnAlgunaCuenta(venueId: string, conPromocion: any[], norma
     if (combo) return combo.orderId
   }
   return null
+}
+
+/**
+ * Las llaves de los renglones de la ronda TAL COMO SE GUARDAN: el alta las recorta (`normalizeExternalId`), así que la búsqueda de la
+ * ronda y de sus lápidas también. Sin esto, una llave propia con espacios no encontraba su lápida y la ronda tardía volvía a cobrar
+ * lo anulado en una cuenta aparte (Codex r3 #4 de «Anular producto»).
+ */
+function llavesGuardadasDeLaRonda(items: any[]): string[] {
+  return items.map(it => llaveNormalizada(typeof it.externalId === 'string' ? it.externalId : null)).filter((k): k is string => !!k)
+}
+
+/**
+ * La llave de renglón como la guarda el alta (`normalizeExternalId` de order.tpv): recortada, y vacía o sólo espacios = sin llave.
+ * Copia local a propósito: varias pruebas simulan el módulo de la TPV entero y una función importada de ahí no existiría.
+ */
+function llaveNormalizada(externalId: string | null): string | null {
+  const recortada = externalId?.trim()
+  return recortada ? recortada : null
 }
 
 /** La llave del aparato en la cadena. Sin aparato (petición a mano) se usa el mesero, que es lo más parecido. */
@@ -1626,6 +1651,13 @@ async function aplicarRondaTardia(p: {
   const yaEn = await rondaYaEnAlgunaCuenta(venueId, p.conPromocion, p.itemsWithKey)
   if (yaEn) {
     return { id: intent.id, status: 'ACKED', result: { ...pedida, ...(yaEn !== original.id ? { cuentaAparte: { orderId: yaEn } } : {}) } }
+  }
+  // «Anular producto» (Codex r2 #1): si una de sus llaves se ANULÓ en la cuenta cobrada, la ronda ya entró ahí (se guarda entera en
+  // una transacción) y después la anularon: no se abre una cuenta aparte para volver a cobrar lo anulado.
+  const llaves = llavesGuardadasDeLaRonda(p.itemsWithKey)
+  if (llaves.length && (await orderTpvService.llavesAnuladasDeLaCuenta(prisma, original.id, llaves)).size > 0) {
+    logger.info(`🪑 [POS SYNC] ADD_ITEMS ${intent.id}: la ronda ya estaba en ${original.id} y se anuló ahí; no se abre cuenta aparte`)
+    return { id: intent.id, status: 'ACKED', result: pedida }
   }
   const aparte = await tableService.cuentaAparteParaRondaTardia({
     venueId,
