@@ -9,7 +9,7 @@ featureCode: TABLE_SERVICE
 gateKind: FEATURE
 money: true
 sourceRepo: avoqado-android
-sourceRef: 0ce9a57a4addebc5772c6ec693df405c313d0444
+sourceRef: 0caaeb42c542cc3ca61144e7b615dab1fc3a1209
 keywords:
   - cancelar un producto
   - quitar un producto que ya se mandó
@@ -39,6 +39,7 @@ Es para productos que ya se enviaron a cocina en una cuenta de *Mesas*. Anular p
 ## Problemas frecuentes
 
 - Si *Anular producto* sale en gris con «Es el único producto de la cuenta. Para quitarlo usa «Anular cuenta», o manda primero lo que lo reemplaza y luego anúlalo.»: agrega y envía primero el producto nuevo, o anula la cuenta completa.
+- Si *Anular producto* sale en gris con «Es parte de una promoción y no se anula suelto…», ese producto es una pieza de un combo: dalo de cortesía o anula la cuenta completa.
 - Si aparece «Esta cuenta ya tiene pagos registrados y ya no se pueden anular sus productos…» o «Esta cuenta ya está pagada…», no se anuló: si hay que devolver dinero, alguien con permiso hace un *Reembolso*.
 - La comanda que ya salió no se corrige sola: avisa a cocina que ese producto se anuló.
 - Un producto que ya es cortesía no se abre al tocarlo.
@@ -46,3 +47,4 @@ Es para productos que ya se enviaron a cocina en una cuenta de *Mesas*. Anular p
 ## Sin internet
 
 - Si aparece «Sin conexión — anular un producto enviado necesita internet; se habilita al volver la señal», no se anuló: hazlo cuando vuelva la conexión. La cortesía de un producto enviado también necesita internet.
+- Si aparece «Sin conexión: no supimos si el producto se anuló…», la red se cortó a media anulación: cuando vuelva, revisa la cuenta antes de anularlo otra vez.

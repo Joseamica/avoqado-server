@@ -1,7 +1,7 @@
 {
   "pagina": "android/mesas/anular-producto-enviado",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "0ce9a57a4addebc5772c6ec693df405c313d0444",
+  "sourceRef": "0caaeb42c542cc3ca61144e7b615dab1fc3a1209",
   "version": "2.25.52",
   "pasos": [
     {
@@ -31,7 +31,7 @@
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 1055,
+      "linea": 1067,
       "cita": "Text(\"Motivo\", fontWeight = FontWeight.SemiBold)"
     },
     {
@@ -43,19 +43,19 @@
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 1035,
+      "linea": 1047,
       "cita": "text = \"Anular producto\","
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 1680,
+      "linea": 1684,
       "cita": "showMessage(\"Producto anulado — $reason\")"
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 1050,
+      "linea": 1062,
       "cita": ") { Text(\"Dar de cortesía\") }"
     },
     {
@@ -86,9 +86,14 @@
   ],
   "sinInternet": [
     {
+      "afirmacion": "Si la red se corta a media anulación, dice en gris que no se supo si se anuló",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1690
+    },
+    {
       "afirmacion": "Sin red no se anula ni se encola: dice «Sin conexión — anular un producto enviado necesita internet…»",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 1673
+      "linea": 1677
     }
   ],
   "rutas": [
