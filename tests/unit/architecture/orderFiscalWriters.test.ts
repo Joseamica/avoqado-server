@@ -1490,6 +1490,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   // (bloquearCuentaParaEditar) y el $0 de «Nadie» pasa a «Por entregar» (casTransitionInTx), con el presupuesto único.
   'src/services/online-ordering/order.service.ts#createOnlineOrder': 1,
   'src/services/online-ordering/card/confirm.service.ts#confirmCardAuthorization': 1,
+  // D661 (3C): decide con el reloj real, bajo el candado de la cuenta, si un cobro en duda de «Nadie» se vuelve a mandar.
+  'src/services/online-ordering/card/reconcile.service.ts#captureRetryStep': 1,
   // Fase 2 (T6): la transacción corta que pasa el cargo a CAPTURING y la que registra el cobro y acepta, cada una con la Order.
   'src/services/online-ordering/card/capture.service.ts#acceptCardOnlineOrder': 1,
   'src/services/online-ordering/card/capture.service.ts#finishCapture': 1,

@@ -246,7 +246,7 @@ export async function finishCapture(
     done = await withDeadlockRetry(
       async tx => {
         if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new CaptureNotAccepted('ORDER_NOT_FOUND')
-        // D661 (3A): la hora de la escritura, ya con el candado (`meta.now` sólo la fija quien la sabe: pruebas, conciliador).
+        // D661 (3A): la hora de la escritura, ya con el candado (`meta.now` sólo la fijan las pruebas; 3C: el conciliador tampoco).
         const escritura = meta.now ?? new Date()
         const won = await tx.onlineOrderCharge.updateMany({
           where: { id: chargeId, status: OnlineOrderChargeStatus.CAPTURING },

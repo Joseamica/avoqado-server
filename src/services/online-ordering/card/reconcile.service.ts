@@ -3,25 +3,31 @@
  * Fase 2 — el conciliador de cargos con tarjeta (cada minuto): termina lo que un cobro dejó EN DUDA.
  *   - `PENDING_AUTH` vencido: confirma (crea el pedido si sí se apartó; si no, `ABANDONED`). Sin sesión guardada, repite la clave
  *     del último intento con sus mismos parámetros; si Stripe ya no acepta el vencimiento, no hay sesión que pagar → `ABANDONED`.
- *   - `CAPTURING` de más de 60 s (antes puede haber una captura en vuelo): lee el PaymentIntent y cobra, termina o falla.
- *   - `RELEASING`: libera.
+ *   - D661 (Ruling 10): `PENDING_AUTH` de «Nadie» con sesión y más de 2 min, aunque su página siga viva: confirma a tiempo la
+ *     autorización que nadie avisó (sin aviso de Stripe ni pestaña), o la libera si ya pasó su plazo.
+ *   - `CAPTURING` de más de 60 s (antes puede haber una captura en vuelo): lee el PaymentIntent y cobra, termina o falla. D661 (r5 #1):
+ *     uno de «Nadie» pasada su gracia ya no se cobra: se suelta y se cierra con el desenlace de Stripe.
+ *   - `RELEASING`: libera. Es el ÚNICO reintento de una liberación que nadie espera (3B: la lectura de la caja no la espera).
  *   - `AUTHORIZED` cuyo pedido ya se cerró por otro camino (rechazado, vencido, cancelado, la caja canceló la cuenta): libera.
  * Cada cargo va en su propio `try`, y TODO cargo leído se toca (`updatedAt`, CAS sobre su estado) para que la siguiente pasada
  * alcance a los de atrás (ruling 4). Stripe siempre fuera de transacciones y con la foto del comercio del cargo.
+ * D661 (3C): la hora de la pasada sólo ELIGE candidatos; lo que se decide bajo un candado y lo que se escribe usa el reloj real.
  */
 import { OnlineOrderChargeStatus as S, OnlineOrderStatus, OrderStatus, Prisma, type OnlineOrderCharge } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getProvider } from '@/services/payments/provider-registry'
-import { CARD_RECONCILE_BATCH, CARD_STUCK_ALERT_MINUTES } from '../constants'
+import type { AuthorizationState } from '@/services/payments/providers/provider.interface'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { CARD_RECONCILE_BATCH, CARD_STUCK_ALERT_MINUTES, SIN_TELEFONO_NADIE, cargoDeNadie } from '../constants'
 import { prepMinutes } from '../transitions.service'
 import type { ReadCandidates } from '../types'
 import { captureCharge, failCapture, finishCapture } from './capture.service'
 import { CAPTURED_OUTSIDE, confirmCardAuthorization } from './confirm.service'
 import { checkoutParams, expiresAtRejected } from './draft.service'
 import { chargeMerchant } from './merchant'
-import { releaseCharge } from './release.service'
+import { releaseCharge, voidOrReadOutcome } from './release.service'
 
 export interface ReconcileResult {
   scanned: number
@@ -34,6 +40,10 @@ export interface ReconcileResult {
 
 /** Ruling 2: un `CAPTURING` más joven puede tener su captura todavía en vuelo. */
 const CAPTURE_IN_FLIGHT_MS = 60_000
+/** D661 (r5 #1): un `CAPTURING` de «Nadie» se vuelve a cobrar hasta `acceptDeadlineAt` + esta gracia; después sólo se concilia. */
+const NADIE_CAPTURE_GRACE_MS = 5 * 60_000
+/** D661 (Ruling 10): edad desde la que se visita un borrador de «Nadie» con su página viva (antes, la clienta apenas está pagando). */
+const NADIE_EARLY_VISIT_MS = 2 * 60_000
 /** Ruling 3: un `PENDING_AUTH` vencido cuya confirmación truena este número de pasadas necesita a una persona. */
 const CONFIRM_FAILURES_ALERT = 3
 /** Stripe guarda una clave idempotente 24 h; con 1 h de margen, después de 23 h su repetición ya no prueba nada. */
@@ -62,6 +72,16 @@ async function readCandidates(now: Date, readEntry: ReadCandidates): Promise<Row
     page({
       status: S.PENDING_AUTH,
       checkoutExpiresAt: { lte: now },
+      OR: [{ lastError: null }, { lastError: { not: CAPTURED_OUTSIDE } }],
+    }),
+    // Ruling 10: los de «Nadie» con la página viva (los vencidos ya entran arriba). Sin sesión guardada nadie pudo pagar todavía: no
+    // se visitan (así cada visita es UNA lectura de su sesión en Stripe).
+    page({
+      status: S.PENDING_AUTH,
+      customerPhone: SIN_TELEFONO_NADIE,
+      checkoutSessionId: { not: null },
+      checkoutExpiresAt: { gt: now },
+      createdAt: { lte: new Date(now.getTime() - NADIE_EARLY_VISIT_MS) },
       OR: [{ lastError: null }, { lastError: { not: CAPTURED_OUTSIDE } }],
     }),
     page({ status: S.CAPTURING, updatedAt: { lte: new Date(now.getTime() - CAPTURE_IN_FLIGHT_MS) } }),
@@ -106,25 +126,74 @@ async function recoverCheckout(charge: Row, now: Date): Promise<'GOT' | 'ABANDON
   }
 }
 
-async function processCapturing(charge: Row, now: Date): Promise<void> {
+/**
+ * D661 (r5 #1): ¿se vuelve a mandar la captura? «Mi equipo», siempre, como hoy. «Nadie» (la marca del cargo), sólo hasta
+ * `acceptDeadlineAt` + la gracia, decidido bajo el candado de la orden con el reloj real (la hora de la pasada puede ser vieja) y con
+ * el cargo todavía `CAPTURING` (si otra escritura ya terminó el cobro, no hay nada que hacer).
+ */
+async function captureRetryStep(charge: Row, orderId: string): Promise<'CAPTURE' | 'RELEASE' | 'NOTHING'> {
+  if (!cargoDeNadie(charge)) return 'CAPTURE'
+  return prisma.$transaction(async tx => {
+    if (!(await lockExistingOrderForPayment(tx, { venueId: charge.venueId, orderId }))) return 'NOTHING'
+    const row = await tx.onlineOrder.findFirst({
+      where: { orderId, venueId: charge.venueId },
+      select: { acceptDeadlineAt: true, charge: { select: { status: true } } },
+    })
+    if (!row || row.charge?.status !== S.CAPTURING) return 'NOTHING'
+    return Date.now() < row.acceptDeadlineAt.getTime() + NADIE_CAPTURE_GRACE_MS ? 'CAPTURE' : 'RELEASE'
+  }, ORDER_LOCK_WAIT_BUDGET)
+}
+
+/**
+ * D661 (r5 #1, r6 #1): pasó la gracia y Stripe sigue con la tarjeta apartada: ya no se cobra; se suelta, y el pedido se cierra SÓLO
+ * con el desenlace de Stripe. Nada se guarda antes de Stripe: la decisión sale del plazo (que no cambia), así que tras una caída la
+ * siguiente pasada relee a Stripe y llega sola al mismo desenlace. El cargo sigue `CAPTURING` mientras tanto: si una captura anterior
+ * seguía en vuelo y ganó, es NUESTRA y se anota como cualquier cobro (un pago, pedido aceptado, comanda pendiente), nunca como captura
+ * externa. Si Stripe la soltó, el cierre es el del cobro fallido (rechazo + cargo, una transacción; sus canjes regresan).
+ */
+async function releaseCaptureAfterGrace(charge: Row, orderId: string, meta: { staffId: null; estimatedMinutes: number }): Promise<void> {
+  let state: AuthorizationState
+  try {
+    state = await voidOrReadOutcome(charge, `online-order:${orderId}:release`)
+  } catch (error) {
+    const why = error instanceof Error ? error.message : String(error)
+    await prisma.onlineOrderCharge.updateMany({ where: { id: charge.id, status: S.CAPTURING }, data: { lastError: why.slice(0, 500) } })
+    logger.warn('⚠️ [OnlineOrderCard] pasó la gracia y Stripe no dijo si soltó la tarjeta: sigue CAPTURING para la siguiente pasada', {
+      chargeId: charge.id,
+      orderId,
+      why,
+    })
+    return
+  }
+  if (state.piStatus === 'succeeded') await finishCapture(charge.id, state, meta)
+  else await failCapture(charge.id, { staffId: null })
+}
+
+async function processCapturing(charge: Row): Promise<void> {
   if (!charge.onlineOrder || !charge.paymentIntentId) throw new Error('cargo CAPTURING sin pedido o sin PaymentIntent')
+  const orderId = charge.onlineOrder.orderId
   const merchant = chargeMerchant(charge)
   const state = await getProvider(merchant).getAuthorization(merchant, { paymentIntentId: charge.paymentIntentId })
-  const meta = { staffId: null, estimatedMinutes: await prepMinutes(charge.venueId), now }
+  // 3C: sin hora fija: `capturedAt`, `acceptedAt` y el rechazo llevan la hora de la escritura, leída bajo el candado de la orden.
+  const meta = { staffId: null, estimatedMinutes: await prepMinutes(charge.venueId) }
   if (state.piStatus === 'succeeded') await finishCapture(charge.id, state, meta)
-  else if (state.piStatus === 'requires_capture') await captureCharge(charge, charge.onlineOrder.orderId, meta)
-  else if (state.piStatus === 'canceled' || state.piStatus === 'requires_payment_method')
-    await failCapture(charge.id, { staffId: null, now })
+  else if (state.piStatus === 'canceled' || state.piStatus === 'requires_payment_method') await failCapture(charge.id, { staffId: null })
+  else if (state.piStatus === 'requires_capture') {
+    const step = await captureRetryStep(charge, orderId)
+    if (step === 'CAPTURE') await captureCharge(charge, orderId, meta)
+    else if (step === 'RELEASE') await releaseCaptureAfterGrace(charge, orderId, meta)
+  }
 }
 
 async function processOne(charge: Row, now: Date): Promise<void> {
   switch (charge.status) {
     case S.PENDING_AUTH:
       if (!charge.checkoutSessionId && (await recoverCheckout(charge, now)) !== 'GOT') return
-      await confirmCardAuthorization(charge.id, now)
+      // 3C: sin la hora de la pasada: el plazo de «Nadie» se comprueba bajo el candado de admisión con el reloj real.
+      await confirmCardAuthorization(charge.id)
       return
     case S.CAPTURING:
-      return processCapturing(charge, now)
+      return processCapturing(charge)
     case S.RELEASING:
       await releaseCharge(charge.id)
       return

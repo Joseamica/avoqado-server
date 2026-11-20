@@ -174,8 +174,8 @@ async function cierreDelBorrador(charge: OnlineOrderCharge, request: CardDraftRe
 }
 
 /**
- * Idempotente. `now` fija la hora en las pruebas (y la que trae el conciliador); sin ella, la hora con que se decide si el plazo de un
- * apartado de «Nadie» ya pasó se lee DESPUÉS del candado de admisión.
+ * Idempotente. `now` fija la hora sólo en las pruebas (3C: el conciliador ya no pasa la de su pasada); sin ella, la hora con que se
+ * decide si el plazo de un apartado de «Nadie» ya pasó se lee DESPUÉS del candado de admisión.
  */
 export async function confirmCardAuthorization(chargeId: string, now?: Date): Promise<ConfirmOutcome> {
   const reloj = () => now ?? new Date()
@@ -201,10 +201,20 @@ export async function confirmCardAuthorization(chargeId: string, now?: Date): Pr
     // D661: el modo es el del borrador (su marca), nunca el de hoy de la tienda.
     const nadie = cargoDeNadie(charge)
     // «Mi equipo»: 10 min desde que se confirma, como siempre. «Nadie» (Ruling 10): min(Stripe autorizó + 10 min, cierre de la franja
-    // del borrador). ponytail: si el adaptador no trae la hora de Stripe, la de esta confirmación (más tarde = un plazo más largo).
+    // del borrador).
     const diezMin = (desde: Date) => new Date(desde.getTime() + ACCEPT_TIMEOUT_MINUTES * 60_000)
     let acceptDeadlineAt = diezMin(t)
     if (nadie) {
+      // 3C: sin la hora de Stripe (el adaptador siempre la trae del cargo; faltarla es un defecto), la de esta confirmación. Lo más que
+      // se alarga es lo que Avoqado tardó en enterarse (aviso: segundos; el conciliador visita cada minuto desde los 2 min del borrador),
+      // y el cierre de la franja la sigue topando. Contar desde la hora más temprana que hay (la del borrador, hasta 30 min antes)
+      // liberaría pedidos pagados a tiempo.
+      if (!auth.authorizedAt) {
+        logger.warn('⚠️ [OnlineOrderCard] Stripe no trajo la hora de autorización: el plazo de «Nadie» cuenta desde la confirmación', {
+          chargeId: charge.id,
+          venueId: charge.venueId,
+        })
+      }
       const cierre = await cierreDelBorrador(charge, request)
       const porStripe = diezMin(auth.authorizedAt ?? t)
       acceptDeadlineAt = cierre && cierre < porStripe ? cierre : porStripe

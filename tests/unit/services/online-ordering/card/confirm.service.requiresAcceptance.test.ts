@@ -21,6 +21,7 @@ jest.mock('@/services/online-ordering/card/release.service', () => ({
   releaseCharge: jest.fn(async () => 'RELEASED'),
 }))
 
+import logger from '@/config/logger'
 import { lockAdmission } from '@/services/online-ordering/order.service'
 import { releaseCharge } from '@/services/online-ordering/card/release.service'
 import { confirmCardAuthorization } from '@/services/online-ordering/card/confirm.service'
@@ -134,6 +135,25 @@ describe('confirmar un borrador de tarjeta: el modo y el plazo son los del borra
     getAuthorization.mockResolvedValue(autorizada(new Date(NOW.getTime() - 2 * MIN)))
     expect(await confirmCardAuthorization('ch1', NOW)).toBe('RELEASED_LATE')
     expect(mockWrite).not.toHaveBeenCalled()
+  })
+
+  it('D661 (3C): sin la hora de autorización de Stripe, el plazo de «Nadie» cuenta desde la confirmación y queda un logger.warn con el cargo', async () => {
+    ;(logger.warn as jest.Mock).mockClear()
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(borrador(true) as any)
+    getAuthorization.mockResolvedValue(autorizada()) // el adaptador no trajo `authorizedAt`
+    expect(await confirmCardAuthorization('ch1', NOW)).toBe('CREATED')
+    expect(escrito().acceptDeadlineAt).toEqual(new Date(NOW.getTime() + 10 * MIN))
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('hora de autorización'), { chargeId: 'ch1', venueId: 'v1' })
+
+    // Con la hora de Stripe no hay aviso; «Mi equipo» nunca la usa, así que tampoco avisa.
+    ;(logger.warn as jest.Mock).mockClear()
+    getAuthorization.mockResolvedValue(autorizada(new Date(NOW.getTime() - MIN)))
+    expect(await confirmCardAuthorization('ch1', NOW)).toBe('CREATED')
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(borrador(false) as any)
+    getAuthorization.mockResolvedValue(autorizada())
+    expect(await confirmCardAuthorization('ch1', NOW)).toBe('CREATED')
+    expect(logger.warn).not.toHaveBeenCalled()
   })
 
   it('D661 (Ruling 10): un borrador de «Nadie» sin el cierre guardado (anterior al campo) lo deriva del horario a la hora en que empezó', async () => {

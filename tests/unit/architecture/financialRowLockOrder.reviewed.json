@@ -1097,6 +1097,11 @@
       "loops": 0,
       "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes del cargo de tarjeta y del Payment; nunca bucle de Orders nuevas."
     },
+    "src/services/online-ordering/card/reconcile.service.ts#captureRetryStep#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "D661 (3C): la cuenta de UN pedido en línea, sola en su transacción (no aparta nada antes ni después: sólo lee el plazo y el estado del cargo) para decidir con el reloj real si un cobro en duda de «Nadie» se vuelve a mandar; nunca bucle de Orders nuevas."
+    },
     "src/services/online-ordering/card/release.service.ts#recordCapturedOutsideOnRelease#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,

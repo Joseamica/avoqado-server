@@ -43,30 +43,11 @@ export async function releaseCharge(chargeId: string): Promise<'RELEASED' | 'STU
     const idempotencyKey = charge.onlineOrder
       ? `online-order:${charge.onlineOrder.orderId}:release`
       : `online-order-charge:${charge.id}:release`
-    const merchant = chargeMerchant(charge)
-    const provider = getProvider(merchant)
-    let state: AuthorizationState | null = null
-    let failure: unknown = null
-    try {
-      state = await provider.voidAuthorization(merchant, { paymentIntentId: charge.paymentIntentId, idempotencyKey })
-    } catch (error) {
-      failure = error
-    }
-    if (state?.piStatus !== 'canceled') {
-      // r2 R1: Stripe no la soltó. Se relee con el PaymentIntent PROPIO: ¿ya la cobraron a mano?
-      let now: AuthorizationState | null = null
-      try {
-        now = await provider.getAuthorization(merchant, { paymentIntentId: charge.paymentIntentId })
-      } catch {
-        now = null // sin respuesta: queda en duda (el error original) y el conciliador repite
-      }
-      if (now?.piStatus === 'succeeded') {
-        await recordCapturedOutsideOnRelease(charge, now)
-        return 'CAPTURED_OUTSIDE'
-      }
-      if (now?.piStatus !== 'canceled') {
-        throw failure ?? new Error(`Stripe dejó el PaymentIntent en ${state?.piStatus ?? now?.piStatus ?? 'desconocido'}`)
-      }
+    // r2 R1: si Stripe dice que ya está cobrada, el negocio la cobró a mano (este cargo nunca intentó cobrar: no está CAPTURING).
+    const state = await voidOrReadOutcome(charge, idempotencyKey)
+    if (state.piStatus === 'succeeded') {
+      await recordCapturedOutsideOnRelease(charge, state)
+      return 'CAPTURED_OUTSIDE'
     }
 
     const done = await prisma.onlineOrderCharge.updateMany({
@@ -91,6 +72,33 @@ export async function releaseCharge(chargeId: string): Promise<'RELEASED' | 'STU
       .catch(() => undefined)
     return 'STUCK'
   }
+}
+
+/**
+ * Pide a Stripe soltar la tarjeta apartada (con la clave dada) y, si no contesta `canceled`, relee el PaymentIntent PROPIO. Devuelve el
+ * desenlace: `canceled` (soltada) o `succeeded` (ya estaba cobrada). Si Stripe no lo sabe decir, lanza: queda en duda y quien llama
+ * repite. Quién cobró lo decide quien llama por el estado de SU cargo (D661 3C: un `CAPTURING` es nuestra captura, nunca una externa).
+ */
+export async function voidOrReadOutcome(charge: OnlineOrderCharge, idempotencyKey: string): Promise<AuthorizationState> {
+  if (!charge.paymentIntentId) throw new Error('cargo sin PaymentIntent')
+  const merchant = chargeMerchant(charge)
+  const provider = getProvider(merchant)
+  let state: AuthorizationState | null = null
+  let failure: unknown = null
+  try {
+    state = await provider.voidAuthorization(merchant, { paymentIntentId: charge.paymentIntentId, idempotencyKey })
+  } catch (error) {
+    failure = error
+  }
+  if (state?.piStatus === 'canceled') return state
+  let now: AuthorizationState | null = null
+  try {
+    now = await provider.getAuthorization(merchant, { paymentIntentId: charge.paymentIntentId })
+  } catch {
+    now = null // sin respuesta: queda en duda (el error original)
+  }
+  if (now?.piStatus === 'succeeded' || now?.piStatus === 'canceled') return now
+  throw failure ?? new Error(`Stripe dejó el PaymentIntent en ${state?.piStatus ?? now?.piStatus ?? 'desconocido'}`)
 }
 
 /**
