@@ -203,6 +203,19 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
     expect(parse(await call({ ...base, venueId: 'sin-efectivo' })).requiresConfirmation).toBe(true)
   })
 
+  it.each([
+    ['sin refundMethod', {}],
+    ['con refundMethod CASH', { refundMethod: 'CASH' }],
+  ])('🔴 Codex r1 #14 (decisión c): una venta de la máquina devuelta en efectivo %s pide payments:refund-to-cash', async (_n, extra) => {
+    const deLaMaquina = { ...completedPayment, fundsFlow: 'EXTERNAL_RECORDED', tenderCountsAsCash: false, cashMachineRef: 'AQ0000000000AB' }
+    mockPaymentFindFirst.mockResolvedValue(deLaMaquina)
+    await expect(call({ ...base, venueId: 'sin-efectivo', ...extra, confirm: true })).rejects.toThrow('payments:refund-to-cash')
+    expect(mockIssue).not.toHaveBeenCalled()
+    // Por transferencia no sale de la gaveta: basta payments:refund.
+    expect(parse(await call({ ...base, venueId: 'sin-efectivo', refundMethod: 'BANK_TRANSFER' })).requiresConfirmation).toBe(true)
+    mockPaymentFindFirst.mockReset()
+  })
+
   it('refuses a payment outside scope or not found', async () => {
     mockPaymentFindFirst.mockResolvedValueOnce(null)
     const out = parse(await call(base))

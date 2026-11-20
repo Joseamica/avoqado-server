@@ -11,6 +11,8 @@
  */
 const mockStaffVenueFindUnique = jest.fn()
 const mockConsumeOverride = jest.fn()
+/** Máquina de efectivo (Codex r1 #14): el cobro que se devuelve; con folio, es una venta de la QuickPay. */
+const mockPaymentFindFirst = jest.fn()
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -21,6 +23,7 @@ jest.mock('@/utils/prismaClient', () => ({
     // Con una fila menor que OWNER, el resolutor pregunta en UNA consulta si es dueña de la org del venue (P2-6).
     staffOrganization: { findUnique: async () => null, findFirst: async () => null },
     venueRolePermission: { findUnique: async () => null },
+    payment: { findFirst: (...a: unknown[]) => mockPaymentFindFirst(...a) },
   },
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({
@@ -39,8 +42,10 @@ jest.mock('@/config/logger', () => ({
 
 import { StaffRole } from '@prisma/client'
 import mobileRouter, { permisoDeReembolso } from '@/routes/mobile.routes'
+import dashboardRouter from '@/routes/dashboard.routes'
+import tpvRouter from '@/routes/tpv.routes'
 
-async function correr(role: StaffRole, body: unknown, headers: Record<string, string> = {}) {
+async function correr(role: StaffRole, body: unknown, headers: Record<string, string> = {}, permiso: any = permisoDeReembolso) {
   mockStaffVenueFindUnique.mockResolvedValue({ role, active: true, permissionSetId: null, permissionSet: null })
   const req: any = {
     method: 'POST',
@@ -55,13 +60,16 @@ async function correr(role: StaffRole, body: unknown, headers: Record<string, st
     status: (s: number) => ((out.status = s), res),
     json: (j: unknown) => ((out.json = j), res),
   }
-  await permisoDeReembolso(req, res, () => {
+  await permiso(req, res, () => {
     out.next = true
   })
   return out
 }
 
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  mockPaymentFindFirst.mockResolvedValue({ cashMachineRef: null })
+})
 
 describe('el reembolso móvil revisa UN permiso según «Devolver con»', () => {
   it('🔴 CASHIER con refundMethod CASH ⇒ 403 con el permiso nuevo (overridable por el código del encargado)', async () => {
@@ -114,5 +122,66 @@ describe('el reembolso móvil revisa UN permiso según «Devolver con»', () => 
     expect(conPermiso).toEqual([permisoDeReembolso])
     expect((permisoDeReembolso as any).requiredPermission).toBe('payments:refund')
     expect(handlers.indexOf(permisoDeReembolso)).toBe(handlers.length - 2)
+  })
+})
+
+describe('Codex r1 #14 (decisión c): devolver en efectivo una venta de la máquina pide payments:refund-to-cash', () => {
+  const permisoDe = (router: any, ruta: string) => {
+    const capa = router.stack.find((l: any) => l.route?.path === ruta && l.route.methods.post)
+    return capa.route.stack.map((rl: any) => rl.handle).find((h: any) => typeof h.requiredPermission === 'string')
+  }
+  const PANEL = () => permisoDe(dashboardRouter, '/venues/:venueId/payments/:paymentId/refund')
+  const TERMINAL = () => permisoDe(tpvRouter, '/venues/:venueId/refunds')
+
+  beforeEach(() => mockPaymentFindFirst.mockResolvedValue({ cashMachineRef: 'AQ0123456789AB' }))
+
+  it.each([
+    ['sin refundMethod («por el mismo medio»)', { amount: 5000 }],
+    ['con refundMethod CASH', { amount: 5000, refundMethod: 'CASH' }],
+  ])('🔴 POS · CASHIER %s ⇒ 403 refund-to-cash (overridable)', async (_n, body) => {
+    const out = await correr(StaffRole.CASHIER, body)
+    expect(out.status).toBe(403)
+    expect(out.json).toMatchObject({ required: 'payments:refund-to-cash', overridable: true })
+  })
+
+  it('el cobro se busca en ESTA sucursal', async () => {
+    await correr(StaffRole.CASHIER, { amount: 5000 })
+    expect(mockPaymentFindFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'p1', venueId: 'v1' } }))
+  })
+
+  it('POS · por transferencia o a saldo a favor no sale de la gaveta: payments:refund (el CASHIER pasa)', async () => {
+    expect(await correr(StaffRole.CASHIER, { refundMethod: 'BANK_TRANSFER' })).toEqual({ next: true })
+    expect(await correr(StaffRole.CASHIER, { refundMethod: 'STORE_CREDIT', customerId: 'c1' })).toEqual({ next: true })
+  })
+
+  it('POS · MANAGER (tiene refund-to-cash) pasa con las dos formas', async () => {
+    expect(await correr(StaffRole.MANAGER, { amount: 5000 })).toEqual({ next: true })
+    expect(await correr(StaffRole.MANAGER, { amount: 5000, refundMethod: 'CASH' })).toEqual({ next: true })
+  })
+
+  it('🔴 POS · si no se puede leer el cobro, se exige el permiso más alto (nunca se concede por el fallo)', async () => {
+    mockPaymentFindFirst.mockRejectedValue(new Error('db caída'))
+    const out = await correr(StaffRole.CASHIER, { amount: 5000 })
+    expect(out.json).toMatchObject({ required: 'payments:refund-to-cash' })
+  })
+
+  it.each([
+    ['sin refundMethod', { amount: 50 }],
+    ['con refundMethod CASH', { amount: 50, refundMethod: 'CASH' }],
+  ])('🔴 PANEL · CASHIER %s sobre una venta de la máquina ⇒ 403 refund-to-cash', async (_n, body) => {
+    const out = await correr(StaffRole.CASHIER, body, {}, PANEL())
+    expect(out.json).toMatchObject({ required: 'payments:refund-to-cash' })
+  })
+
+  it('PANEL · una venta que NO es de la máquina sigue como siempre (payments:refund)', async () => {
+    mockPaymentFindFirst.mockResolvedValue({ cashMachineRef: null })
+    expect(await correr(StaffRole.CASHIER, { amount: 50 }, {}, PANEL())).toEqual({ next: true })
+  })
+
+  it('🔴 TERMINAL · el cobro viene en el cuerpo (originalPaymentId): una venta de la máquina pide refund-to-cash', async () => {
+    const out = await correr(StaffRole.CASHIER, { originalPaymentId: 'p1', amount: 50 }, {}, TERMINAL())
+    expect(out.json).toMatchObject({ required: 'payments:refund-to-cash' })
+    mockPaymentFindFirst.mockResolvedValue({ cashMachineRef: null })
+    expect(await correr(StaffRole.CASHIER, { originalPaymentId: 'p1', amount: 50 }, {}, TERMINAL())).toEqual({ next: true })
   })
 })

@@ -18,7 +18,7 @@ import cuid from 'cuid'
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { operationHash } from '../../utils/operationHash'
-import { withDeadlockRetry } from '../../utils/serializableRetry'
+import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
 import { utcTs } from '../../utils/sqlDates'
 import { logAction } from '../dashboard/activity-log.service'
 import { CuentaDeLaMaquinaYaExiste, venderLoQueCobroLaMaquina, type CreateOrderInput } from '../mobile/order.mobile.service'
@@ -32,7 +32,17 @@ export type DesenlaceDeLaMaquina = (typeof DESENLACES_DE_LA_MAQUINA)[number]
 export type DeudaConElCliente = 'CAMBIO' | 'GUARDADO' | 'NO_DEVUELTO' | 'EXCEDENTE'
 export type EstadoDelTurnoDeLaMaquina = 'EN_TURNO' | 'TURNO_CERRADO' | 'POR_CONCILIAR'
 export type QuienResolvio = 'MAQUINA' | 'GERENTE'
-type TipoDeIncidencia = 'CONFLICTO' | 'IMPOSIBLE' | 'NO_SE_PUDO_REGISTRAR'
+/** `TRAS_REVOCAR`: la PC revocada subió un folio nuevo (decisión d del founder, Codex r1 #5): queda para que el gerente lo revise. */
+export type TipoDeIncidencia = 'CONFLICTO' | 'IMPOSIBLE' | 'NO_SE_PUDO_REGISTRAR' | 'TRAS_REVOCAR'
+/**
+ * Por qué un folio PAGADO quedó sin venta (202), con su dinero en la incidencia:
+ *  · `DESCUENTO`: la fase 1a no cobra descuentos en la máquina (decisión a del founder);
+ *  · `PC_REVOCADA`: la PC revocada cobró después de que la revocaron, o sin hora (decisión d);
+ *  · `SIN_SALDAR`: la cuenta no nacía pagada con lo que entró (Codex r1 #1);
+ *  · `SIN_CARRITO`: el gerente confirmó un cobro de una duda sin carrito;
+ *  · `VENTA_RECHAZADA`: la venta ya no se arma (un producto borrado, el personal…; R5#1).
+ */
+export type MotivoSinRegistro = 'DESCUENTO' | 'PC_REVOCADA' | 'SIN_SALDAR' | 'SIN_CARRITO' | 'VENTA_RECHAZADA'
 
 /** Lo que la máquina dijo al cerrar, en CENTAVOS (así los manda la PC). */
 export interface CierreDeLaMaquina {
@@ -47,6 +57,11 @@ export interface CierreDeLaMaquina {
   occurredAtKnown: boolean
   /** El turno A con el que la PC vendió. */
   saleShiftId?: string | null
+  /**
+   * Codex r1 #12 (R4-7 #6): el `cancel` que mandó la PC — `'1'` devolver, `'2'` guardar —. Sólo con él una cancelación es lo que dice:
+   * `CANCELADO` exige `'1'` y `GUARDADO` `'2'`; sin él (cancelaron desde la pantalla de la máquina) el modo es desconocido → revisión.
+   */
+  cancelMode?: '1' | '2' | null
 }
 
 /** La evidencia completa: IGUAL en el primer éxito, la repetición y el GET (R4-1, R5#7). */
@@ -68,9 +83,24 @@ export interface RespuestaDeLaMaquina {
   shiftStatus: string | null
 }
 
-export type ResultadoDeLaMaquina =
-  | { status: 200; body: RespuestaDeLaMaquina }
-  | { status: 202; body: { referenceCC: string; incident: 'NO_SE_PUDO_REGISTRAR' } }
+/**
+ * Codex r1 #3: el comprobante ESTABLE de un folio que no se pudo registrar como venta. Sale igual en el primer 202, en cada repetición,
+ * en el GET y en la consulta de la duda: los importes físicos del PRIMER registro, para que la PC retire su pendiente.
+ */
+export interface RespuestaSinRegistro {
+  referenceCC: string
+  incident: 'NO_SE_PUDO_REGISTRAR'
+  motivo: MotivoSinRegistro
+  outcome: string
+  resolvedBy: string
+  dueCents: number
+  saleCents: number
+  tipCents: number
+  creditCents: number
+  changeDispensedCents: number
+}
+
+export type ResultadoDeLaMaquina = { status: 200; body: RespuestaDeLaMaquina } | { status: 202; body: RespuestaSinRegistro }
 
 /** Quién sube: la sesión (procesa el cobro), el aparato del encabezado `X-Device-Id` y su credencial (`X-Cash-Machine-Credential`). */
 export interface AutorDeLaMaquina {
@@ -86,24 +116,27 @@ export interface EntradaDeLaMaquina {
   pedido?: CreateOrderInput
 }
 
+/** Codex r1 #12 (decisión h): la máquina sólo cobra un adeudo mayor que $0 y múltiplo de $0.50. */
+export const adeudoCobrable = (dueCents: number): boolean => Number.isInteger(dueCents) && dueCents > 0 && dueCents % 50 === 0
+
 /**
  * R3#9, R5#5, R4-7 #6: ¿esta combinación de importes puede salir de la máquina? Cualquier otra cosa es 422 con incidencia.
- *  · todos enteros ≥ 0 y `due = sale + tip`;
+ *  · todos enteros ≥ 0, `due = sale + tip` y el adeudo mayor que 0 y múltiplo de 50 centavos (Codex r1 #12);
  *  · `PAGADO`: `credit ≥ due` y `0 ≤ change ≤ credit − due`;
  *  · `CANCELADO` y `GUARDADO`: `credit < due` (con el adeudo cubierto no hay cancelación posible); `GUARDADO` no devuelve nada y
- *    `CANCELADO` no devuelve más de lo que entró.
+ *    `CANCELADO` no devuelve más de lo que entró; y el modo del `cancel` coincide (`'1'` / `'2'`): sin él, revisión (Codex r1 #12).
  */
 export function validarCierre(c: CierreDeLaMaquina): 'OK' | 'IMPOSIBLE' {
   if (!DESENLACES_DE_LA_MAQUINA.includes(c.outcome)) return 'IMPOSIBLE'
   const importes = [c.dueCents, c.saleCents, c.tipCents, c.creditCents, c.changeDispensedCents]
   if (!importes.every(n => Number.isInteger(n) && n >= 0)) return 'IMPOSIBLE'
-  if (c.dueCents !== c.saleCents + c.tipCents) return 'IMPOSIBLE'
+  if (c.dueCents !== c.saleCents + c.tipCents || !adeudoCobrable(c.dueCents)) return 'IMPOSIBLE'
   if (c.outcome === 'PAGADO') {
     return c.creditCents >= c.dueCents && c.changeDispensedCents <= c.creditCents - c.dueCents ? 'OK' : 'IMPOSIBLE'
   }
   if (c.creditCents >= c.dueCents) return 'IMPOSIBLE'
-  if (c.outcome === 'GUARDADO') return c.changeDispensedCents === 0 ? 'OK' : 'IMPOSIBLE'
-  return c.changeDispensedCents <= c.creditCents ? 'OK' : 'IMPOSIBLE'
+  if (c.outcome === 'GUARDADO') return c.changeDispensedCents === 0 && c.cancelMode === '2' ? 'OK' : 'IMPOSIBLE'
+  return c.changeDispensedCents <= c.creditCents && c.cancelMode === '1' ? 'OK' : 'IMPOSIBLE'
 }
 
 /** Lo que la máquina le debe al cliente. `excedenteCents`: lo que se cobró de más porque el precio del servidor era menor. */
@@ -147,15 +180,15 @@ function horaDelCierre(c: CierreDeLaMaquina): Date | null {
 
 /**
  * R4-7 #8: el turno del cierre. Con el turno A de la PC y la hora física: A abierto → A; A cerrado y el dinero entró durante A → sin
- * turno (`SALE_SHIFT_CLOSED`, como la cola); el dinero entró después de que A terminó, sin hora, sin turno o con un turno que no es
- * del negocio → por conciliar. Nunca el turno vivo.
+ * turno (`SALE_SHIFT_CLOSED`, como la cola); el dinero entró ANTES de que A empezara o después de que terminó (Codex r1 #11: los dos
+ * extremos), sin hora, sin turno o con un turno que no es del negocio → por conciliar. Nunca el turno vivo.
  */
 export function turnoDeLaMaquina(
   c: CierreDeLaMaquina,
-  turnoA: { id: string; status: string; endTime: Date | null } | null,
+  turnoA: { id: string; status: string; startTime: Date; endTime: Date | null } | null,
 ): { expectedShiftId: string | null; porConciliar: boolean; shiftStatus: EstadoDelTurnoDeLaMaquina } {
   const hora = horaDelCierre(c)
-  if (!c.saleShiftId || !hora || !turnoA || (turnoA.endTime && hora > turnoA.endTime)) {
+  if (!c.saleShiftId || !hora || !turnoA || hora < turnoA.startTime || (turnoA.endTime && hora > turnoA.endTime)) {
     return { expectedShiftId: null, porConciliar: true, shiftStatus: 'POR_CONCILIAR' }
   }
   return {
@@ -187,10 +220,18 @@ export function respuestaDe(fila: CashMachineClose): RespuestaDeLaMaquina {
 
 /** El cierre bajo el candado del folio ya existía (otra petición lo guardó primero). */
 class CierreYaRegistrado extends Error {}
+/** Bajo el candado del folio: el folio ya quedó como «no se pudo registrar» (Codex r1 #3). */
+class FolioSinRegistro extends Error {}
+/** Bajo el candado del folio: su duda la subió OTRA PC (Codex r1 #4). */
+class FolioDeOtraPc extends Error {
+  constructor(readonly dueno: string | null) {
+    super('FOLIO_DE_OTRA_PC')
+  }
+}
 
 /**
- * La venta ya no se puede armar (400/403/404/422: un producto o un extra borrado, el personal, una cortesía sin permiso). Un 409 NO lo
- * es: es concurrencia (`withDeadlockRetry` agotado, otro cobro a la vez) y la PC reintenta el mismo folio.
+ * La venta ya no se puede armar (400/403/404/422: un producto o un extra borrado, el personal, un descuento, la cuenta que no nace
+ * pagada). Un 409 NO lo es: es concurrencia (`withDeadlockRetry` agotado, otro cobro a la vez) y la PC reintenta el mismo folio.
  */
 const esRechazoDeLaVenta = (error: unknown): boolean =>
   error instanceof AppError && error.statusCode >= 400 && error.statusCode < 500 && error.statusCode !== 409
@@ -198,11 +239,13 @@ const esRechazoDeLaVenta = (error: unknown): boolean =>
 const esChoqueDeUnico = (error: unknown): boolean => error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'
 
 /**
- * La incidencia DURABLE: una fila por folio y tipo, en UNA sentencia aparte (nunca dentro de la transacción que se revierte). Si
- * falla, el error sube: la PC no recibe un 409/422/202 «final» sin la evidencia guardada y reintenta.
+ * La incidencia DURABLE: una fila por folio y tipo, en UNA sentencia aparte de la transacción que se revierte (o, con `db` = la
+ * transacción del candado del folio, junto con lo que decide ese folio). Si falla, el error sube: la PC no recibe un 409/422/202
+ * «final» sin la evidencia guardada y reintenta.
  * ponytail: guarda los primeros 50 eventos y cuenta todos (`veces`); una PC que reintenta para siempre no infla la fila.
  */
 async function guardarIncidencia(
+  db: Pick<Prisma.TransactionClient, '$queryRaw'>,
   venueId: string,
   referenceCC: string,
   kind: TipoDeIncidencia,
@@ -211,7 +254,7 @@ async function guardarIncidencia(
 ): Promise<string | null> {
   const ahora = new Date()
   const payload = JSON.stringify({ eventos: [evento], veces: 1 })
-  const filas = await prisma.$queryRaw<Array<{ id: string }>>`
+  const filas = await db.$queryRaw<Array<{ id: string }>>`
     INSERT INTO "CashMachineIncident" ("id", "venueId", "referenceCC", "kind", "status", "payload", "deviceId", "createdAt", "updatedAt")
     VALUES (${cuid()}, ${venueId}, ${referenceCC}, ${kind}, 'ABIERTO', ${payload}::jsonb, ${deviceId}, ${utcTs(ahora)}, ${utcTs(ahora)})
     ON CONFLICT ("venueId", "referenceCC", "kind") DO UPDATE SET
@@ -234,17 +277,18 @@ const ACCION_DE_LA_INCIDENCIA: Record<TipoDeIncidencia, string> = {
   CONFLICTO: 'CASH_MACHINE_CLOSE_CONFLICT',
   IMPOSIBLE: 'CASH_MACHINE_CLOSE_IMPOSSIBLE',
   NO_SE_PUDO_REGISTRAR: 'CASH_MACHINE_SALE_NOT_RECORDED',
+  TRAS_REVOCAR: 'CASH_MACHINE_FOLIO_AFTER_UNPAIR',
 }
 
 /** La incidencia (la evidencia) y, además, su renglón en la bitácora del dueño. */
-async function anotarIncidencia(
+export async function anotarIncidencia(
   venueId: string,
   referenceCC: string,
   kind: TipoDeIncidencia,
   autor: { userId: string; deviceId: string | null },
   evento: Record<string, unknown>,
 ): Promise<void> {
-  const incidenciaId = await guardarIncidencia(venueId, referenceCC, kind, autor.deviceId, evento)
+  const incidenciaId = await guardarIncidencia(prisma, venueId, referenceCC, kind, autor.deviceId, evento)
   await logAction({
     action: ACCION_DE_LA_INCIDENCIA[kind],
     entity: 'CashMachineIncident',
@@ -257,8 +301,8 @@ async function anotarIncidencia(
 
 /**
  * La duda de este folio (`ESPERANDO`) queda RESUELTO: lo decidió la máquina (la PC subió el cierre real) o un gerente (`staffId`). Se
- * llama dentro de la transacción que guarda el cierre; sin cierre (la venta ya no se arma), con el cliente global después de guardar la
- * incidencia. `resolucion` se mezcla en el payload: es lo que hace idempotente una resolución que no dejó cierre.
+ * llama dentro de la transacción que guarda el cierre o el «no se pudo registrar» del folio. `resolucion` se mezcla en el payload: es
+ * lo que hace idempotente una resolución que no dejó cierre.
  */
 export function marcarDudaResuelta(
   db: Pick<Prisma.TransactionClient, '$executeRaw'>,
@@ -275,6 +319,53 @@ export function marcarDudaResuelta(
     WHERE "venueId" = ${venueId} AND "referenceCC" = ${referenceCC} AND "kind" = 'ESPERANDO' AND "status" = 'ABIERTO'`
 }
 
+/** El «no se pudo registrar» del folio (Codex r1 #3): una vez escrito, es EL desenlace del folio; nada lo vuelve venta. */
+export const sinRegistroDelFolio = (venueId: string, referenceCC: string) =>
+  prisma.cashMachineIncident.findUnique({
+    where: { venueId_referenceCC_kind: { venueId, referenceCC, kind: 'NO_SE_PUDO_REGISTRAR' } },
+    select: { payload: true, deviceId: true },
+  })
+
+type EventoSinRegistro = { cierre?: CierreDeLaMaquina; motivo?: MotivoSinRegistro; resolvedBy?: string; huella?: string }
+const primerEvento = (payload: unknown): EventoSinRegistro | undefined =>
+  (payload as { eventos?: EventoSinRegistro[] } | null)?.eventos?.[0]
+
+/** El comprobante estable de un folio sin registro: el PRIMER evento guardado (los importes físicos de ese momento). */
+export function respuestaSinRegistro(referenceCC: string, payload: unknown): RespuestaSinRegistro | null {
+  const ev = primerEvento(payload)
+  if (!ev?.cierre) return null
+  const c = ev.cierre
+  return {
+    referenceCC,
+    incident: 'NO_SE_PUDO_REGISTRAR',
+    motivo: ev.motivo ?? 'VENTA_RECHAZADA',
+    outcome: c.outcome,
+    resolvedBy: ev.resolvedBy ?? 'MAQUINA',
+    dueCents: c.dueCents,
+    saleCents: c.saleCents,
+    tipCents: c.tipCents,
+    creditCents: c.creditCents,
+    changeDispensedCents: c.changeDispensedCents,
+  }
+}
+
+/**
+ * Decisión a del founder (Codex r1 #1 #9 #10): en la fase 1a la máquina no cobra NINGÚN descuento — de renglón (catálogo, «Ajuste de
+ * precio», cortesía), de cuenta (libre, de catálogo, del cliente), cupón, promoción ni premio de sellos —. Así la máquina nunca aplica
+ * uno que nadie autorizó, y la autorización no se pierde ni aparece entre la cotización, la venta y la resolución del gerente.
+ */
+export function pedidoConDescuento(p: CreateOrderInput): boolean {
+  return Boolean(
+    (p.discount ?? 0) > 0 ||
+      p.orderDiscountId ||
+      p.couponCode ||
+      p.descuentoDelCliente ||
+      p.descuentoDeCatalogoId ||
+      p.stampRewardId ||
+      p.items.some(i => i.discountId || i.isCortesia || i.adjustedUnitPrice != null || i.promotionRef),
+  )
+}
+
 /** `POST /mobile/venues/:venueId/cash-machine/sales`. */
 export async function registrarVentaDeLaMaquina(
   venueId: string,
@@ -285,9 +376,25 @@ export async function registrarVentaDeLaMaquina(
     throw new BadRequestError('El folio de la máquina debe ser AQ seguido de 12 letras mayúsculas o números.')
   }
   const deviceId = await aparatoDe(venueId, autor.deviceUid)
-  // R4-3: antes de escribir nada (tampoco una incidencia): sólo la PC emparejada, o la revocada repitiendo SU folio (R5#2).
-  await exigirAparatoEmparejado(venueId, entrada.referenceCC, deviceId, autor.credencial)
-  return registrarCierreDeLaMaquina(venueId, { ...entrada, resolvedBy: 'MAQUINA', userId: autor.userId, deviceId })
+  // R4-3: antes de escribir nada (tampoco una incidencia): sólo la PC emparejada, o la revocada con SU folio o uno nuevo (R5#2).
+  const { revocadaEn } = await exigirAparatoEmparejado(venueId, entrada.referenceCC, deviceId, autor.credencial)
+  let sinAutoridad: MotivoSinRegistro | undefined
+  if (revocadaEn) {
+    // Decisión d (Codex r1 #5): la PC cobró sin red y la revocaron antes de que subiera. Lo que entró ANTES de revocarla (hora del
+    // comprobante) se registra; lo de después o sin hora no es venta, pero su dinero queda como incidencia. Las dos, a revisión.
+    // El candado no hace falta: la hora decide, y un comprobante anterior a la revocación lo es aunque la revoquen a media subida.
+    const hora = horaDelCierre(entrada.cierre)
+    const antes = hora !== null && hora <= revocadaEn
+    await anotarIncidencia(
+      venueId,
+      entrada.referenceCC,
+      'TRAS_REVOCAR',
+      { userId: autor.userId, deviceId },
+      { cierre: entrada.cierre, deviceId, revocadaEn: revocadaEn.toISOString(), registrable: antes, recibidoEn: new Date().toISOString() },
+    )
+    if (!antes) sinAutoridad = 'PC_REVOCADA'
+  }
+  return registrarCierreDeLaMaquina(venueId, { ...entrada, resolvedBy: 'MAQUINA', userId: autor.userId, deviceId, sinAutoridad })
 }
 
 /** Quién decidió el desenlace, para el núcleo compartido por la PC y el gerente (R4-4). */
@@ -295,10 +402,12 @@ export interface CierreQueSeRegistra extends EntradaDeLaMaquina {
   resolvedBy: QuienResolvio
   /** MAQUINA: la sesión de la PC. GERENTE: el gerente del token (nunca del cuerpo). Procesa el cobro y firma la bitácora. */
   userId: string
-  /** `Terminal.id` de la PC de la máquina. */
+  /** `Terminal.id` de la PC de la máquina (la que es dueña del folio). */
   deviceId: string | null
   /** GERENTE: lo que leyó en la máquina. */
   evidence?: string
+  /** Un `PAGADO` que no puede ser venta aunque sus importes sean posibles (la PC revocada, decisión d): su dinero queda en la incidencia. */
+  sinAutoridad?: MotivoSinRegistro
 }
 
 /**
@@ -340,28 +449,108 @@ export async function registrarCierreDeLaMaquina(venueId: string, entrada: Cierr
     occurredAt: cierre.occurredAtKnown ? (cierre.occurredAt ?? null) : null,
     ...(gerente ? { evidence: entrada.evidence ?? null } : {}),
   }
-  /** El folio ya tiene su cierre: la misma operación responde lo mismo; otra, 409 con incidencia. */
+  /** Otra operación con este folio: 409 con la incidencia durable (también si el folio es de OTRA PC, Codex r1 #4). */
+  const conflicto = async (registrado: unknown, extra: Record<string, unknown> = {}): Promise<never> => {
+    await anotarIncidencia(venueId, referenceCC, 'CONFLICTO', quien, { ...evidencia, ...extra, registrado })
+    throw new ConflictError(
+      'Este folio de la máquina ya se registró con otros importes o desde otra PC. Quedó registrado para que el gerente lo revise.',
+      'CASH_MACHINE_CLOSE_CONFLICT',
+      { registrado },
+    )
+  }
+  /** El folio ya tiene su cierre: la misma operación de la MISMA PC responde lo mismo; otra, 409 con incidencia. */
   const yaRegistrado = async (fila: CashMachineClose): Promise<ResultadoDeLaMaquina> => {
+    if (fila.deviceId !== deviceId) return conflicto(respuestaDe(fila), { motivo: 'OTRA_PC' })
     if (huellaDelCierre(venueId, referenceCC, fila as unknown as CierreDeLaMaquina, fila.resolvedBy) === huella) {
       return { status: 200, body: respuestaDe(fila) }
     }
-    await anotarIncidencia(venueId, referenceCC, 'CONFLICTO', quien, { ...evidencia, registrado: respuestaDe(fila) })
-    throw new ConflictError(
-      'Este folio de la máquina ya se registró con otros importes. Quedó registrado para que el gerente lo revise.',
-      'CASH_MACHINE_CLOSE_CONFLICT',
-      { registrado: respuestaDe(fila) },
-    )
+    return conflicto(respuestaDe(fila))
+  }
+  /** El folio ya quedó «no se pudo registrar» (Codex r1 #3): la misma operación recibe el MISMO comprobante; otra, 409. */
+  const repetirSinRegistro = async (fila: { payload: unknown; deviceId: string | null }): Promise<ResultadoDeLaMaquina> => {
+    const previa = respuestaSinRegistro(referenceCC, fila.payload)
+    if (previa && fila.deviceId === deviceId && primerEvento(fila.payload)?.huella === huella) return { status: 202, body: previa }
+    return conflicto(previa ?? fila.payload, fila.deviceId !== deviceId ? { motivo: 'OTRA_PC' } : {})
+  }
+  /**
+   * El folio PAGADO no se vuelve venta: bajo el candado del folio se guarda UNA vez el «no se pudo registrar» con el dinero real y se
+   * cierra su duda (R5#1, Codex r1 #3). Si mientras tanto el folio se cerró o ya tenía su «no se pudo», manda ése.
+   */
+  const noSePudoRegistrar = async (motivo: MotivoSinRegistro, detalle: Record<string, unknown> = {}): Promise<ResultadoDeLaMaquina> => {
+    const evento = {
+      ...evidencia,
+      resolvedBy,
+      huella,
+      motivo,
+      ...detalle,
+      pedido: entrada.pedido as unknown as Record<string, unknown>,
+    }
+    const r: { cerrado?: CashMachineClose; previa?: { payload: unknown; deviceId: string | null }; id?: string | null } =
+      await withDeadlockRetry(
+        async tx => {
+          await tx.$queryRaw(candadoDeLaLlave(venueId, `maquina-${referenceCC}`))
+          const cerrado = await tx.cashMachineClose.findUnique({ where: { venueId_referenceCC: { venueId, referenceCC } } })
+          if (cerrado) return { cerrado }
+          const previa = await tx.cashMachineIncident.findUnique({
+            where: { venueId_referenceCC_kind: { venueId, referenceCC, kind: 'NO_SE_PUDO_REGISTRAR' } },
+            select: { payload: true, deviceId: true },
+          })
+          if (previa) return { previa }
+          const id = await guardarIncidencia(tx, venueId, referenceCC, 'NO_SE_PUDO_REGISTRAR', deviceId, evento)
+          // La duda del folio (si la había) también se cierra: el dinero quedó en la incidencia y la PC deja de esperar.
+          await marcarDudaResuelta(tx, venueId, referenceCC, gerente, { ...resolucion, incident: 'NO_SE_PUDO_REGISTRAR', motivo })
+          return { id }
+        },
+        { etiqueta: 'registrarCierreDeLaMaquina' },
+      )
+    if (r.cerrado) return yaRegistrado(r.cerrado)
+    if (r.previa) return repetirSinRegistro(r.previa)
+    await logAction({
+      action: ACCION_DE_LA_INCIDENCIA.NO_SE_PUDO_REGISTRAR,
+      entity: 'CashMachineIncident',
+      entityId: r.id ?? undefined,
+      venueId,
+      staffId: entrada.userId,
+      data: { referenceCC, kind: 'NO_SE_PUDO_REGISTRAR', ...evento } as unknown as Prisma.InputJsonValue,
+    })
+    return { status: 202, body: respuestaSinRegistro(referenceCC, { eventos: [evento] })! }
   }
   const cierreDelFolio = () => prisma.cashMachineClose.findUnique({ where: { venueId_referenceCC: { venueId, referenceCC } } })
 
   const previo = await cierreDelFolio()
   if (previo) return yaRegistrado(previo)
+  const sinRegistro = await sinRegistroDelFolio(venueId, referenceCC)
+  if (sinRegistro) return repetirSinRegistro(sinRegistro)
+  // Codex r1 #4 (decisión e): la duda del folio es de la PC que la subió primero; otra PC emparejada no la cierra.
+  const duda = await prisma.cashMachineIncident.findUnique({
+    where: { venueId_referenceCC_kind: { venueId, referenceCC, kind: 'ESPERANDO' } },
+    select: { deviceId: true },
+  })
+  if (duda && duda.deviceId !== deviceId) return conflicto({ duenoDeLaDuda: duda.deviceId }, { motivo: 'OTRA_PC' })
+  if (cierre.outcome === 'PAGADO') {
+    const motivo = entrada.sinAutoridad ?? (entrada.pedido && pedidoConDescuento(entrada.pedido) ? 'DESCUENTO' : undefined)
+    if (motivo) return noSePudoRegistrar(motivo)
+  }
 
   const turnoA = cierre.saleShiftId
-    ? await prisma.shift.findFirst({ where: { id: cierre.saleShiftId, venueId }, select: { id: true, status: true, endTime: true } })
+    ? await prisma.shift.findFirst({
+        where: { id: cierre.saleShiftId, venueId },
+        select: { id: true, status: true, startTime: true, endTime: true },
+      })
     : null
   const turno = turnoDeLaMaquina(cierre, turnoA)
   const hora = horaDelCierre(cierre)
+  /** Bajo el candado del folio, lo que llegó mientras tanto manda: su «no se pudo registrar» o la duda de otra PC (Codex r1 #3, #4). */
+  const loQueYaTieneElFolio = async (tx: TxConReintento): Promise<void> => {
+    const otras = await tx.cashMachineIncident.findMany({
+      where: { venueId, referenceCC, kind: { in: ['ESPERANDO', 'NO_SE_PUDO_REGISTRAR'] } },
+      select: { kind: true, deviceId: true },
+      take: 2,
+    })
+    if (otras.some(i => i.kind === 'NO_SE_PUDO_REGISTRAR')) throw new FolioSinRegistro()
+    const suDuda = otras.find(i => i.kind === 'ESPERANDO')
+    if (suDuda && suDuda.deviceId !== deviceId) throw new FolioDeOtraPc(suDuda.deviceId)
+  }
   const filaDelCierre = (cobro: {
     orderId: string | null
     paymentId: string | null
@@ -406,13 +595,29 @@ export async function registrarCierreDeLaMaquina(venueId: string, entrada: Cierr
         horaDelCierre: hora,
         turno: { shiftIdDeLaVenta: turno.expectedShiftId, porConciliar: turno.porConciliar },
         cerrarEnTx: async (tx, cobro) => {
-          const creado = await tx.cashMachineClose.create({
-            data: filaDelCierre({
-              ...cobro,
-              shiftStatus: cobro.shiftId ? 'EN_TURNO' : turno.porConciliar ? 'POR_CONCILIAR' : 'TURNO_CERRADO',
-            }),
-          })
+          await loQueYaTieneElFolio(tx)
+          const shiftStatus: EstadoDelTurnoDeLaMaquina = cobro.shiftId ? 'EN_TURNO' : turno.porConciliar ? 'POR_CONCILIAR' : 'TURNO_CERRADO'
+          const creado = await tx.cashMachineClose.create({ data: filaDelCierre({ ...cobro, shiftStatus }) })
           await marcarDudaResuelta(tx, venueId, referenceCC, gerente, resolucion)
+          // Codex r1 #13: la venta de la máquina sin turno se avisa SIEMPRE, con o sin la conciliación prendida, en la misma transacción.
+          if (!cobro.shiftId) {
+            await tx.activityLog.create({
+              data: {
+                action: 'CASH_MACHINE_SALE_WITHOUT_SHIFT',
+                entity: 'Payment',
+                entityId: cobro.paymentId,
+                staffId: entrada.userId,
+                venueId,
+                data: {
+                  referenceCC,
+                  orderId: cobro.orderId,
+                  shiftStatus,
+                  saleShiftId: cierre.saleShiftId ?? null,
+                  totalPesos: (cobro.appliedCents + cierre.tipCents) / 100,
+                },
+              },
+            })
+          }
           return creado
         },
       })
@@ -424,6 +629,7 @@ export async function registrarCierreDeLaMaquina(venueId: string, entrada: Cierr
           if (await tx.cashMachineClose.findUnique({ where: { venueId_referenceCC: { venueId, referenceCC } }, select: { id: true } })) {
             throw new CierreYaRegistrado()
           }
+          await loQueYaTieneElFolio(tx)
           const creado = await tx.cashMachineClose.create({
             data: filaDelCierre({ orderId: null, paymentId: null, appliedCents: 0, shiftStatus: turno.shiftStatus }),
           })
@@ -434,6 +640,12 @@ export async function registrarCierreDeLaMaquina(venueId: string, entrada: Cierr
       )
     }
   } catch (error) {
+    if (error instanceof FolioSinRegistro) {
+      const ganadora = await sinRegistroDelFolio(venueId, referenceCC)
+      if (ganadora) return repetirSinRegistro(ganadora)
+      throw error
+    }
+    if (error instanceof FolioDeOtraPc) return conflicto({ duenoDeLaDuda: error.dueno }, { motivo: 'OTRA_PC' })
     if (error instanceof CierreYaRegistrado || error instanceof CuentaDeLaMaquinaYaExiste || esChoqueDeUnico(error)) {
       const ganadora = await cierreDelFolio()
       if (ganadora) return yaRegistrado(ganadora)
@@ -443,16 +655,19 @@ export async function registrarCierreDeLaMaquina(venueId: string, entrada: Cierr
     } else if (!(cierre.outcome === 'PAGADO' && esRechazoDeLaVenta(error))) {
       throw error
     }
-    // R5#1: la cuenta ya no se puede armar (un producto o un extra que se borró, el personal, la llave). El dinero real queda visible.
-    await anotarIncidencia(venueId, referenceCC, 'NO_SE_PUDO_REGISTRAR', quien, {
-      ...evidencia,
-      pedido: entrada.pedido as unknown as Record<string, unknown>,
-      motivo: error instanceof Error ? error.message : String(error),
-      ...(error instanceof AppError && error.code ? { codigo: error.code } : {}),
+    // R5#1: la cuenta ya no se puede armar (un producto o un extra que se borró, el personal, la llave, un descuento, una cuenta que no
+    // nace pagada). El dinero real queda visible y el folio queda con ESE desenlace.
+    const codigo = error instanceof AppError ? error.code : undefined
+    const motivo: MotivoSinRegistro =
+      codigo === 'CASH_MACHINE_SALE_WITH_DISCOUNT'
+        ? 'DESCUENTO'
+        : codigo === 'CASH_MACHINE_SALE_NOT_SETTLED'
+          ? 'SIN_SALDAR'
+          : 'VENTA_RECHAZADA'
+    return noSePudoRegistrar(motivo, {
+      detalle: error instanceof Error ? error.message : String(error),
+      ...(codigo ? { codigo } : {}),
     })
-    // La duda del folio (si la había) también se cierra: el dinero quedó en la incidencia y la PC deja de esperar.
-    await marcarDudaResuelta(prisma, venueId, referenceCC, gerente, { ...resolucion, incident: 'NO_SE_PUDO_REGISTRAR' })
-    return { status: 202, body: { referenceCC, incident: 'NO_SE_PUDO_REGISTRAR' } }
   }
 
   // La máquina le debe dinero al cliente: renglón para el dueño (las deudas se adjudican en la 1c).
@@ -476,9 +691,15 @@ export async function registrarCierreDeLaMaquina(venueId: string, entrada: Cierr
   return { status: 200, body: respuestaDe(fila) }
 }
 
-/** `GET /mobile/venues/:venueId/cash-machine/sales/:referenceCC`: la MISMA respuesta que el POST. */
-export async function consultarVentaDeLaMaquina(venueId: string, referenceCC: string): Promise<RespuestaDeLaMaquina> {
+/**
+ * `GET /mobile/venues/:venueId/cash-machine/sales/:referenceCC`: la MISMA respuesta que el POST — 200 con el cierre, o 202 con el
+ * comprobante estable del «no se pudo registrar» (Codex r1 #3) —. Sin ninguno de los dos, 404.
+ */
+export async function consultarVentaDeLaMaquina(venueId: string, referenceCC: string): Promise<ResultadoDeLaMaquina> {
   const fila = await prisma.cashMachineClose.findUnique({ where: { venueId_referenceCC: { venueId, referenceCC } } })
-  if (!fila) throw new NotFoundError('Ese folio de la máquina no tiene un cierre registrado.', 'CASH_MACHINE_SALE_NOT_FOUND')
-  return respuestaDe(fila)
+  if (fila) return { status: 200, body: respuestaDe(fila) }
+  const sinRegistro = await sinRegistroDelFolio(venueId, referenceCC)
+  const cuerpo = sinRegistro ? respuestaSinRegistro(referenceCC, sinRegistro.payload) : null
+  if (cuerpo) return { status: 202, body: cuerpo }
+  throw new NotFoundError('Ese folio de la máquina no tiene un cierre registrado.', 'CASH_MACHINE_SALE_NOT_FOUND')
 }

@@ -43,6 +43,11 @@ const cierre = z
       .max(64, 'El turno de la venta admite hasta 64 caracteres')
       .nullable()
       .optional(),
+    // El `cancel` que mandó la PC ('1' devolver, '2' guardar). Si CANCELADO/GUARDADO cuadran con él lo decide el servicio (422).
+    cancelMode: z
+      .enum(['1', '2'], { errorMap: () => ({ message: "El modo de cancelación debe ser '1' (devolver) o '2' (guardar)" }) })
+      .nullable()
+      .optional(),
   })
   .refine(c => !c.occurredAtKnown || !!c.occurredAt, {
     message: 'Con la hora conocida, manda la hora del cierre',
@@ -138,6 +143,12 @@ export const listarDudasDeLaMaquinaSchema = z.object({
     status: z
       .enum(['ABIERTO', 'RESUELTO'], { errorMap: () => ({ message: 'El estado de la duda debe ser ABIERTO o RESUELTO' }) })
       .optional(),
+    kind: z
+      .enum(['ESPERANDO', 'IMPOSIBLE', 'CONFLICTO', 'NO_SE_PUDO_REGISTRAR', 'TRAS_REVOCAR'], {
+        errorMap: () => ({ message: 'El tipo debe ser ESPERANDO, IMPOSIBLE, CONFLICTO, NO_SE_PUDO_REGISTRAR o TRAS_REVOCAR' }),
+      })
+      .optional(),
+    folio: z.string({ invalid_type_error: 'El folio debe ser texto' }).max(32, 'El folio admite hasta 32 caracteres').optional(),
     cursor: z.string({ invalid_type_error: 'El cursor no es válido' }).max(200, 'El cursor no es válido').optional(),
     // Un límite hostil no se rechaza: el servicio lo recorta a 100.
     limit: z.coerce
@@ -168,4 +179,24 @@ export const resolverDudaDeLaMaquinaSchema = z.object({
       .min(1, 'Escribe lo que viste en la máquina')
       .max(500, 'Lo que viste en la máquina admite hasta 500 caracteres'),
   }),
+})
+
+/** Codex r1 #7: el gerente da por revisada una incidencia que no es duda. Quién la revisa sale de la sesión. */
+export const revisarIncidenciaDeLaMaquinaSchema = z.object({
+  params: z.object({
+    venueId,
+    incidentId: z.string({ required_error: 'La incidencia es requerida' }).cuid('El identificador de la incidencia no es válido'),
+  }),
+  body: z.object({
+    note: z
+      .string({ required_error: 'Escribe qué revisaste', invalid_type_error: 'La nota debe ser texto' })
+      .trim()
+      .min(1, 'Escribe qué revisaste')
+      .max(500, 'La nota admite hasta 500 caracteres'),
+  }),
+})
+
+/** R3#8, Codex r1 #13: el turno vivo del negocio para la PC de la máquina. */
+export const turnoDelNegocioSchema = z.object({
+  params: z.object({ venueId }),
 })

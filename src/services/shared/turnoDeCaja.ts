@@ -54,6 +54,18 @@ export async function turnoAbiertoDelNegocio(db: ShiftReader, venueId: string): 
 }
 
 /**
+ * Máquina de efectivo (R3#8, Codex r1 #13): el mismo turno que `turnoAbiertoDelNegocio`, con su inicio, para la PC sin gaveta que lo
+ * guarda y lo manda con la venta (el servidor compara la hora del comprobante contra inicio y fin). `null` = no hay turno abierto.
+ */
+export async function turnoDelNegocioAhora(venueId: string): Promise<{ shiftId: string; startTime: Date } | null> {
+  // El turno vivo sale del ÚNICO lector (`turnoAbiertoDelNegocio`); el inicio no cambia nunca, así que leerlo después es seguro.
+  const vivo = await turnoAbiertoDelNegocio(prisma, venueId)
+  if (!vivo) return null
+  const shift = await prisma.shift.findFirst({ where: { id: vivo.id, venueId }, select: { startTime: true } })
+  return shift ? { shiftId: vivo.id, startTime: shift.startTime } : null
+}
+
+/**
  * Los estados en los que el turno de un negocio sigue VIVO. `CLOSED` NO está, y ésa es la
  * definición entera.
  */

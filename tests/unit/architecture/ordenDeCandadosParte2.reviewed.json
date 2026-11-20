@@ -949,7 +949,8 @@
     },
     "src/services/cashMachine/ventaDeLaMaquina.ts#registrarCierreDeLaMaquina": {
       "etiqueta": "registrarCierreDeLaMaquina",
-      "cantidad": 1
+      "cantidad": 2,
+      "nota": "El cierre sin pago y, bajo el MISMO candado del folio, el «no se pudo registrar» (Codex r1 #3): incidencia y duda, sólo base."
     },
     "src/services/cashMachine/dudasDeLaMaquina.ts#subirDudaDeLaMaquina": {
       "etiqueta": "subirDudaDeLaMaquina",

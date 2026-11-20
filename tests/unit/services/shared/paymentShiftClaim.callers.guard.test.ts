@@ -525,6 +525,8 @@ const CAMPOS_DE_ENTRADA_DEL_CLAIM = [
   'cajaSinTurno',
   'cajaLigadaAbierta',
   'porConciliar',
+  // Máquina de efectivo (Codex r1 #11): el turno que validó el servidor se respeta aunque desaparezca.
+  'turnoDelServidor',
 ]
 
 function esSpreadDeEntradaDelClaim(property: ts.ObjectLiteralElementLike, context: AstCall): boolean {

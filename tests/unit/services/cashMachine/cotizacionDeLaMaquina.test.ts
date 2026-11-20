@@ -57,26 +57,17 @@ const DESCUENTOS: Record<string, any> = {
 const venta = (over: Partial<CreateOrderInput> = {}): CreateOrderInput =>
   ({ staffId: 'staff-A', orderType: 'TAKEOUT', source: 'AVOQADO_ANDROID', tip: 0, discount: 0, ...over }) as CreateOrderInput
 
-/** Pan con extra y 10 %, queso por peso, «Otro importe», $5 de cuenta del catálogo y $10 de propina. */
+/** Pan con extra, queso por peso, «Otro importe» y $10 de propina: sin descuentos (la fase 1a no los cobra en la máquina). */
 const CARRITO_COMPLETO = venta({
   items: [
-    { productId: 'prod-pan', quantity: 2, modifierIds: ['mod-queso'], discountId: 'desc-10' },
+    { productId: 'prod-pan', quantity: 2, modifierIds: ['mod-queso'] },
     { productId: 'prod-queso', quantity: 1, weightQuantity: 0.224 },
     { name: 'Bolsa', quantity: 1, unitPrice: 2000 },
   ],
-  orderDiscountId: 'desc-cuenta',
   tip: 1000,
 })
-/** Una cortesía (con permiso) y un descuento libre de cuenta de $4.50. */
-const CARRITO_CORTESIA = venta({
-  items: [
-    { productId: 'prod-pan', quantity: 1, isCortesia: true, cortesiaReason: 'cliente frecuente' },
-    { productId: 'prod-pan', quantity: 1 },
-  ],
-  discount: 450,
-  canCompItems: true,
-  performedBy: 'staff-A',
-})
+/** Dos panes: $91.00, que la máquina sí cobra. */
+const CARRITO_REDONDO = venta({ items: [{ productId: 'prod-pan', quantity: 2 }] })
 
 const ESCRITURAS = ['create', 'createMany', 'update', 'updateMany', 'upsert', 'delete', 'deleteMany']
 
@@ -126,8 +117,8 @@ function esperarSinEscrituras() {
 
 describe('cotizarParaLaMaquina · el MISMO total que crear la cuenta', () => {
   it.each([
-    ['extras, descuento de renglón, peso, «Otro importe», descuento de cuenta y propina', CARRITO_COMPLETO, 16524],
-    ['cortesía y descuento libre de cuenta', CARRITO_CORTESIA, 4100],
+    ['extras, peso, «Otro importe» y propina', CARRITO_COMPLETO, 18174],
+    ['dos productos', CARRITO_REDONDO, 9100],
   ])('🔴 %s', async (_caso, carrito, esperadoCents) => {
     await createOrderWithItems(VENUE, carrito)
     expect(totalCreadoCents()).toBe(esperadoCents)
@@ -137,34 +128,34 @@ describe('cotizarParaLaMaquina · el MISMO total que crear la cuenta', () => {
     expect(q.totalCents).toBe(q.saleCents! + (carrito.tip ?? 0))
   })
 
-  it('el desglose: renglones con su bruto y su descuento, y la venta = renglones − descuentos', async () => {
+  it('el desglose: renglones con su bruto, sin descuentos, y la venta = renglones', async () => {
     const q = await cotizar(CARRITO_COMPLETO)
     expect(q.renglones).toEqual([
-      { productId: 'prod-pan', name: 'Pan de elote', quantity: 2, unitCents: 4550, totalCents: 11500, discountCents: 1150 },
+      { productId: 'prod-pan', name: 'Pan de elote', quantity: 2, unitCents: 4550, totalCents: 11500, discountCents: 0 },
       { productId: 'prod-queso', name: 'Queso Oaxaca', quantity: 1, unitCents: 16400, totalCents: 3674, discountCents: 0 },
       { productId: null, name: 'Bolsa', quantity: 1, unitCents: 2000, totalCents: 2000, discountCents: 0 },
     ])
-    expect(q).toMatchObject({ saleCents: 15524, tipCents: 1000, totalCents: 16524, discountCents: 1650 })
-    expect(q.renglones.reduce((s, r) => s + r.totalCents, 0) - q.discountCents!).toBe(q.saleCents)
+    expect(q).toMatchObject({ saleCents: 17174, tipCents: 1000, totalCents: 18174, discountCents: 0 })
+    expect(q.renglones.reduce((s, r) => s + r.totalCents, 0)).toBe(q.saleCents)
   })
 
   it('🔴 no escribe nada, no crea cuenta ni avisa por socket', async () => {
     await cotizar(CARRITO_COMPLETO)
-    await cotizar(CARRITO_CORTESIA)
+    await cotizar(CARRITO_REDONDO)
     esperarSinEscrituras()
   })
 })
 
 describe('cotizarParaLaMaquina · ¿se cobra en la máquina?', () => {
-  it('🔴 un total con centavos que la máquina no da ($165.24) → no se cobra en la máquina: CENTAVOS, sin quoteId', async () => {
+  it('🔴 un total con centavos que la máquina no da ($181.74) → no se cobra en la máquina: CENTAVOS, sin quoteId', async () => {
     const q = await cotizar(CARRITO_COMPLETO)
     expect(q).toMatchObject({ cobrableEnMaquina: false, motivo: 'CENTAVOS', quoteId: null })
   })
 
   it('un total que termina en .00 o .50 sí se cobra, con quoteId y su vencimiento a 10 minutos', async () => {
     const antes = Date.now()
-    const q = await cotizar(CARRITO_CORTESIA)
-    expect(q).toMatchObject({ cobrableEnMaquina: true, totalCents: 4100 })
+    const q = await cotizar(CARRITO_REDONDO)
+    expect(q).toMatchObject({ cobrableEnMaquina: true, totalCents: 9100 })
     expect(q.motivo).toBeUndefined()
     expect(q.quoteId).toEqual(expect.any(String))
     expect(Date.parse(q.expiresAt!) - antes).toBeGreaterThanOrEqual(10 * 60_000 - 1000)
@@ -192,29 +183,39 @@ describe('cotizarParaLaMaquina · ¿se cobra en la máquina?', () => {
   })
 
   it('🔴 R5#4: un premio de sellos pendiente → PREMIO_PENDIENTE (aunque el total sí se pudiera cobrar)', async () => {
-    const q = await cotizar(CARRITO_CORTESIA, { premioPendiente: true })
-    expect(q).toMatchObject({ cobrableEnMaquina: false, motivo: 'PREMIO_PENDIENTE', quoteId: null, totalCents: 4100 })
+    const q = await cotizar(CARRITO_REDONDO, { premioPendiente: true })
+    expect(q).toMatchObject({ cobrableEnMaquina: false, motivo: 'PREMIO_PENDIENTE', quoteId: null })
   })
 
   it.each([
-    ['PROMOCION', venta({ items: [{ quantity: 1, promotionRef: { promotionId: 'p', promotionInstanceId: 'i', selections: [] } }] })],
-    ['CUPON', venta({ items: [{ productId: 'prod-pan', quantity: 1 }], couponCode: 'HOLA10' })],
-  ])('un carrito con %s no se cotiza (su motor sólo existe escribiendo): no se cobra en la máquina', async (motivo, carrito) => {
+    ['descuento de renglón', venta({ items: [{ productId: 'prod-pan', quantity: 2, discountId: 'desc-10' }] })],
+    ['descuento de cuenta del catálogo', venta({ items: [{ productId: 'prod-pan', quantity: 2 }], orderDiscountId: 'desc-cuenta' })],
+    ['descuento libre de cuenta (manual)', venta({ items: [{ productId: 'prod-pan', quantity: 2 }], discount: 450 })],
+    ['cortesía', venta({ items: [{ productId: 'prod-pan', quantity: 1, isCortesia: true, cortesiaReason: 'cliente frecuente' }] })],
+    ['«Ajuste de precio»', venta({ items: [{ productId: 'prod-pan', quantity: 1, adjustedUnitPrice: 4000 }] })],
+    ['promoción', venta({ items: [{ quantity: 1, promotionRef: { promotionId: 'p', promotionInstanceId: 'i', selections: [] } }] })],
+    ['cupón', venta({ items: [{ productId: 'prod-pan', quantity: 1 }], couponCode: 'HOLA10' })],
+    [
+      'descuento del cliente',
+      venta({ items: [{ productId: 'prod-pan', quantity: 1 }], descuentoDelCliente: { discountId: 'd', montoCents: 100 } }),
+    ],
+  ])('🔴 decisión a (Codex r1 #9): %s → DESCUENTO, sin cotizar ni pedir permisos', async (_caso, carrito) => {
     const q = await cotizar(carrito)
-    expect(q).toMatchObject({ cobrableEnMaquina: false, motivo, quoteId: null, totalCents: null })
+    expect(q).toMatchObject({ cobrableEnMaquina: false, motivo: 'DESCUENTO', quoteId: null, totalCents: null })
     expect(prismaMock.product.findMany).not.toHaveBeenCalled()
   })
 
-  it('los rechazos de la creación en línea suben igual (sin permiso de cortesía: 403)', async () => {
-    await expect(cotizar({ ...CARRITO_CORTESIA, canCompItems: false })).rejects.toMatchObject({ statusCode: 403 })
+  it('🔴 Codex r1 #12: una cuenta de $0 nunca es cobrable en la máquina (SIN_IMPORTE)', async () => {
+    const q = await cotizar(venta({ items: [{ name: 'Muestra', quantity: 1, unitPrice: 0 }] }))
+    expect(q).toMatchObject({ cobrableEnMaquina: false, motivo: 'SIN_IMPORTE', quoteId: null, totalCents: 0 })
   })
 })
 
 describe('quoteId', () => {
   it('🔴 firmado con la sucursal, el carrito y el total; vence a los 10 minutos y no se puede alterar', async () => {
-    const q = await cotizar(CARRITO_CORTESIA)
+    const q = await cotizar(CARRITO_REDONDO)
     const ahora = Date.now()
-    expect(leerCotizacion(q.quoteId!, VENUE, ahora)).toMatchObject({ totalCents: 4100, expiresAtMs: Date.parse(q.expiresAt!) })
+    expect(leerCotizacion(q.quoteId!, VENUE, ahora)).toMatchObject({ totalCents: 9100, expiresAtMs: Date.parse(q.expiresAt!) })
     expect(leerCotizacion(q.quoteId!, 'otra-sucursal', ahora)).toBeNull()
     expect(leerCotizacion(q.quoteId!, VENUE, Date.parse(q.expiresAt!) + 1)).toBeNull()
     const [cuerpo, firma] = q.quoteId!.split('.')

@@ -65,15 +65,35 @@ describe('validarCierre', () => {
   })
 
   it('R5#5: CANCELADO y GUARDADO exigen crédito < adeudo', () => {
-    expect(validarCierre(cierre({ outcome: 'CANCELADO', creditCents: 5000, changeDispensedCents: 5000 }))).toBe('OK')
-    expect(validarCierre(cierre({ outcome: 'GUARDADO', creditCents: 5000, changeDispensedCents: 0 }))).toBe('OK')
-    expect(validarCierre(cierre({ outcome: 'CANCELADO', creditCents: 18750, changeDispensedCents: 0 }))).toBe('IMPOSIBLE')
-    expect(validarCierre(cierre({ outcome: 'GUARDADO', creditCents: 20000, changeDispensedCents: 0 }))).toBe('IMPOSIBLE')
+    expect(validarCierre(cierre({ outcome: 'CANCELADO', cancelMode: '1', creditCents: 5000, changeDispensedCents: 5000 }))).toBe('OK')
+    expect(validarCierre(cierre({ outcome: 'GUARDADO', cancelMode: '2', creditCents: 5000, changeDispensedCents: 0 }))).toBe('OK')
+    expect(validarCierre(cierre({ outcome: 'CANCELADO', cancelMode: '1', creditCents: 18750, changeDispensedCents: 0 }))).toBe('IMPOSIBLE')
+    expect(validarCierre(cierre({ outcome: 'GUARDADO', cancelMode: '2', creditCents: 20000, changeDispensedCents: 0 }))).toBe('IMPOSIBLE')
   })
 
   it('GUARDADO no devuelve nada; CANCELADO no devuelve más de lo que entró', () => {
-    expect(validarCierre(cierre({ outcome: 'GUARDADO', creditCents: 5000, changeDispensedCents: 100 }))).toBe('IMPOSIBLE')
-    expect(validarCierre(cierre({ outcome: 'CANCELADO', creditCents: 5000, changeDispensedCents: 5050 }))).toBe('IMPOSIBLE')
+    expect(validarCierre(cierre({ outcome: 'GUARDADO', cancelMode: '2', creditCents: 5000, changeDispensedCents: 100 }))).toBe('IMPOSIBLE')
+    expect(validarCierre(cierre({ outcome: 'CANCELADO', cancelMode: '1', creditCents: 5000, changeDispensedCents: 5050 }))).toBe(
+      'IMPOSIBLE',
+    )
+  })
+
+  it('🔴 Codex r1 #12 (decisión h): un adeudo de $0, negativo o que no es múltiplo de $0.50 es imposible, aunque todo lo demás cuadre', () => {
+    expect(validarCierre(cierre({ dueCents: 0, saleCents: 0, creditCents: 0, changeDispensedCents: 0 }))).toBe('IMPOSIBLE')
+    // El caso de Codex: $187.35 «PAGADO».
+    expect(validarCierre(cierre({ dueCents: 18735, saleCents: 18735, creditCents: 20000, changeDispensedCents: 1265 }))).toBe('IMPOSIBLE')
+    expect(validarCierre(cierre({ dueCents: 18750, saleCents: 18750, creditCents: 20000, changeDispensedCents: 1250 }))).toBe('OK')
+    expect(validarCierre(cierre({ dueCents: 50, saleCents: 50, creditCents: 100, changeDispensedCents: 50 }))).toBe('OK')
+  })
+
+  it('🔴 Codex r1 #12 (R4-7 #6): una cancelación sin el modo del cancel, o con el contrario, va a revisión', () => {
+    const cancelado = { outcome: 'CANCELADO' as const, creditCents: 5000, changeDispensedCents: 5000 }
+    expect(validarCierre(cierre(cancelado))).toBe('IMPOSIBLE')
+    expect(validarCierre(cierre({ ...cancelado, cancelMode: null }))).toBe('IMPOSIBLE')
+    expect(validarCierre(cierre({ ...cancelado, cancelMode: '2' }))).toBe('IMPOSIBLE')
+    const guardado = { outcome: 'GUARDADO' as const, creditCents: 5000, changeDispensedCents: 0 }
+    expect(validarCierre(cierre(guardado))).toBe('IMPOSIBLE')
+    expect(validarCierre(cierre({ ...guardado, cancelMode: '1' }))).toBe('IMPOSIBLE')
   })
 })
 
@@ -162,8 +182,23 @@ describe('snapshotDeLaMaquina', () => {
 })
 
 describe('turnoDeLaMaquina', () => {
-  const A_ABIERTO = { id: 'shift-A', status: 'OPEN', endTime: null }
-  const A_CERRADO = { id: 'shift-A', status: 'CLOSED', endTime: new Date('2026-11-20T19:00:00.000Z') }
+  const INICIO = new Date('2026-11-20T14:00:00.000Z')
+  const A_ABIERTO = { id: 'shift-A', status: 'OPEN', startTime: INICIO, endTime: null }
+  const A_CERRADO = { id: 'shift-A', status: 'CLOSED', startTime: INICIO, endTime: new Date('2026-11-20T19:00:00.000Z') }
+
+  it('🔴 Codex r1 #11: el dinero entró ANTES de que A empezara (09:59 contra un turno de las 10:00) → por conciliar, nunca A', () => {
+    const B = { id: 'shift-B', status: 'OPEN', startTime: new Date('2026-11-20T16:00:00.000Z'), endTime: null }
+    expect(turnoDeLaMaquina(cierre({ saleShiftId: 'shift-B', occurredAt: '2026-11-20T15:59:00.000Z' }), B)).toEqual({
+      expectedShiftId: null,
+      porConciliar: true,
+      shiftStatus: 'POR_CONCILIAR',
+    })
+    // El mismo segundo del inicio sí es del turno.
+    expect(turnoDeLaMaquina(cierre({ saleShiftId: 'shift-B', occurredAt: '2026-11-20T16:00:00.000Z' }), B)).toMatchObject({
+      expectedShiftId: 'shift-B',
+      shiftStatus: 'EN_TURNO',
+    })
+  })
 
   it('A abierto → A', () => {
     expect(turnoDeLaMaquina(cierre({ saleShiftId: 'shift-A' }), A_ABIERTO)).toEqual({

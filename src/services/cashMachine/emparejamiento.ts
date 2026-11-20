@@ -137,32 +137,40 @@ export async function desemparejarAparato(venueId: string, autor: AutorDelEmpare
 
 /**
  * R4-3: sólo una credencial ACTIVA de este mismo aparato (`deviceId` del encabezado) en este negocio registra un folio o sube una
- * duda. R5#2: la PC revocada (otra PC tomó la máquina, o se apagó la casilla) todavía puede repetir un folio que ELLA registró o cuya
- * duda ELLA subió (la repetición idempotente, su 409 de conflicto y el cierre real de esa duda), con su credencial; un folio nuevo,
- * nunca. Todo lo demás es 403 `CASH_MACHINE_NOT_PAIRED`.
+ * duda. R5#2: la PC revocada (otra PC tomó la máquina, o se apagó la casilla) todavía puede repetir un folio que ELLA registró, cuya
+ * duda ELLA subió o que ELLA dejó sin registrar (la repetición idempotente, su 409 de conflicto y el cierre real de esa duda).
+ *
+ * Codex r1 #5 (decisión d del founder): un folio NUEVO de la PC revocada ya no es 403 —la PC pudo cobrar sin red ANTES de que un
+ * gerente habilitara otra PC, y ese dinero no puede quedarse sólo en ella—: se devuelve `revocadaEn` y quien llama decide por la hora
+ * del comprobante (`ventaDeLaMaquina`/`dudasDeLaMaquina`). Un folio que ya es de OTRA PC sigue siendo 403. Sin credencial válida de
+ * este aparato, 403 `CASH_MACHINE_NOT_PAIRED`.
  */
 export async function exigirAparatoEmparejado(
   venueId: string,
   referenceCC: string,
   deviceId: string | null,
   credencial: string | null,
-): Promise<void> {
+): Promise<{ revocadaEn: Date | null }> {
   if (deviceId && credencial) {
     const binding = await prisma.cashMachineBinding.findFirst({
       where: { venueId, deviceId, credentialHash: hashDeCredencial(credencial) },
-      select: { active: true },
+      select: { active: true, revokedAt: true },
     })
-    if (binding?.active) return
+    if (binding?.active) return { revocadaEn: null }
     if (binding) {
-      // SU folio: el cierre que ella guardó, o la duda (`ESPERANDO`) que ella subió y que todavía puede repetir o terminar.
-      const [folio, duda] = await Promise.all([
+      // SU folio: el cierre que ella guardó, o la duda / el «no se pudo registrar» que ella subió.
+      const [folio, incidencias] = await Promise.all([
         prisma.cashMachineClose.findUnique({ where: { venueId_referenceCC: { venueId, referenceCC } }, select: { deviceId: true } }),
-        prisma.cashMachineIncident.findUnique({
-          where: { venueId_referenceCC_kind: { venueId, referenceCC, kind: 'ESPERANDO' } },
+        prisma.cashMachineIncident.findMany({
+          where: { venueId, referenceCC, kind: { in: ['ESPERANDO', 'NO_SE_PUDO_REGISTRAR'] } },
           select: { deviceId: true },
+          take: 2,
         }),
       ])
-      if (folio?.deviceId === deviceId || duda?.deviceId === deviceId) return
+      const duenos = [folio, ...incidencias].filter((f): f is { deviceId: string | null } => !!f).map(f => f.deviceId)
+      if (duenos.includes(deviceId)) return { revocadaEn: null }
+      // Un folio NUEVO (nadie lo tiene): la hora del comprobante decide. Uno de otra PC, nunca.
+      if (duenos.length === 0) return { revocadaEn: binding.revokedAt ?? new Date(0) }
     }
   }
   throw new ForbiddenError('Esta PC no está emparejada con la máquina de efectivo', CASH_MACHINE_NOT_PAIRED)

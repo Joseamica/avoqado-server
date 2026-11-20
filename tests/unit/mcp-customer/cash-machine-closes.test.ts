@@ -121,12 +121,17 @@ describe('cash_machine_closes — MCP libre, sólo lectura, pesos', () => {
     const filtroDelTotal = jest.mocked(prisma.cashMachineClose.count).mock.calls[0][0]!.where
     const filtroDeLasFilas = jest.mocked(prisma.cashMachineClose.findMany).mock.calls[0][0]!.where
     expect(filtroDeLasFilas).toEqual(filtroDelTotal)
+    // 20-nov en México (UTC-6): de las 06:00Z del 20 a las 05:59:59.999Z del 21.
+    const rango = { gte: new Date('2026-11-20T06:00:00.000Z'), lte: new Date('2026-11-21T05:59:59.999Z') }
     expect(filtroDelTotal).toMatchObject({
       venueId,
       owedCents: { gt: 0 },
       referenceCC: { contains: 'AQ0000000001' },
-      // 20-nov en México (UTC-6): de las 06:00Z del 20 a las 05:59:59.999Z del 21.
-      createdAt: { gte: new Date('2026-11-20T06:00:00.000Z'), lte: new Date('2026-11-21T05:59:59.999Z') },
+      // Codex r1 #16: por omisión, el día del COMPROBANTE; sin hora, el de registro.
+      OR: [
+        { occurredAtKnown: true, occurredAt: rango },
+        { occurredAtKnown: false, createdAt: rango },
+      ],
     })
     // AQ + 9 ceros + 1 = los folios 100 a 150: el total cuenta los que cumplen el filtro, no la página.
     expect(r.total).toBe(51)
@@ -150,23 +155,89 @@ describe('cash_machine_closes — MCP libre, sólo lectura, pesos', () => {
     expect(r.cierres[0].nota).toMatch(/pago por retiro sin verificar/)
   })
 
-  it('«en duda»: las dudas ABIERTAS de la máquina, en pesos', async () => {
+  it('«en duda»: las incidencias ABIERTAS de la máquina, en pesos', async () => {
     jest.mocked(prisma.cashMachineIncident.count).mockResolvedValue(1 as never)
     jest.mocked(prisma.cashMachineIncident.findMany).mockResolvedValue([
       {
         id: 'c00000000000000000000duda',
         referenceCC: 'AQ00000000DUDA',
+        kind: 'ESPERANDO',
+        status: 'ABIERTO',
         createdAt: new Date('2026-11-20T18:00:00.000Z'),
         deviceId: 'terminal-pc',
         payload: { dueCents: 18750, saleCents: 18000, tipCents: 750, startedAt: '2026-11-20T17:58:00.000Z', lastSeen: null },
       },
     ] as never)
     const r = await call({ venueId, enDuda: true })
-    const filtro = { venueId, kind: 'ESPERANDO', status: 'ABIERTO' }
+    const filtro = { venueId, status: 'ABIERTO' }
     expect(jest.mocked(prisma.cashMachineIncident.count).mock.calls[0][0]!.where).toEqual(filtro)
     expect(jest.mocked(prisma.cashMachineIncident.findMany).mock.calls[0][0]!.where).toEqual(filtro)
-    expect(r).toMatchObject({ total: 1, count: 1, dudas: [{ folio: 'AQ00000000DUDA', adeudo: 187.5, venta: 180, propina: 7.5 }] })
+    expect(r).toMatchObject({
+      total: 1,
+      count: 1,
+      dudas: [{ folio: 'AQ00000000DUDA', tipo: 'ESPERANDO', adeudo: 187.5, venta: 180, propina: 7.5 }],
+    })
     expect(prisma.cashMachineClose.findMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex r1 #16: pedir UNA duda por folio filtra el total y la página por ese folio', async () => {
+    jest.mocked(prisma.cashMachineIncident.count).mockResolvedValue(1 as never)
+    jest.mocked(prisma.cashMachineIncident.findMany).mockResolvedValue([] as never)
+    await call({ venueId, enDuda: true, folio: 'aq00000000duda' })
+    const filtro = { venueId, status: 'ABIERTO', referenceCC: { contains: 'AQ00000000DUDA' } }
+    expect(jest.mocked(prisma.cashMachineIncident.count).mock.calls[0][0]!.where).toEqual(filtro)
+    expect(jest.mocked(prisma.cashMachineIncident.findMany).mock.calls[0][0]!.where).toEqual(filtro)
+  })
+
+  it('🔴 Codex r1 #16: lo que vio la PC sale como TEXTO crudo con su aviso; las demás incidencias, en pesos', async () => {
+    jest.mocked(prisma.cashMachineIncident.count).mockResolvedValue(2 as never)
+    jest.mocked(prisma.cashMachineIncident.findMany).mockResolvedValue([
+      {
+        id: 'c00000000000000000000dud1',
+        referenceCC: 'AQ00000000DUD1',
+        kind: 'ESPERANDO',
+        status: 'ABIERTO',
+        createdAt: new Date('2026-11-20T18:00:00.000Z'),
+        payload: { dueCents: 18750, saleCents: 18750, tipCents: 0, startedAt: 'x', lastSeen: { Due: 18750, credit: 20000 } },
+      },
+      {
+        id: 'c00000000000000000000inc1',
+        referenceCC: 'AQ00000000INC1',
+        kind: 'NO_SE_PUDO_REGISTRAR',
+        status: 'ABIERTO',
+        createdAt: new Date('2026-11-20T17:00:00.000Z'),
+        payload: {
+          eventos: [
+            {
+              motivo: 'DESCUENTO',
+              cierre: { outcome: 'PAGADO', dueCents: 18750, saleCents: 18750, tipCents: 0, creditCents: 20000, changeDispensedCents: 1250 },
+            },
+          ],
+          veces: 1,
+        },
+      },
+    ] as never)
+    const r = await call({ venueId, enDuda: true })
+    expect(r.dudas[0].evidenciaCrudaDeLaPc).toBe('{"Due":18750,"credit":20000}')
+    expect(r.dudas[0]).not.toHaveProperty('loUltimoQueVioLaPc')
+    expect(r.nota).toMatch(/NO están en pesos/)
+    expect(r.dudas[1]).toMatchObject({
+      tipo: 'NO_SE_PUDO_REGISTRAR',
+      motivo: 'DESCUENTO',
+      desenlace: 'PAGADO',
+      adeudo: 187.5,
+      entro: 200,
+      cambioEntregado: 12.5,
+      veces: 1,
+    })
+  })
+
+  it('🔴 Codex r1 #16: porFecha «registro» filtra por el día en que llegó; «comprobante» (omisión) por el de la máquina', async () => {
+    await call({ venueId, fromDate: '2026-11-15', toDate: '2026-11-15', porFecha: 'registro' })
+    const rango = { gte: new Date('2026-11-15T06:00:00.000Z'), lte: new Date('2026-11-16T05:59:59.999Z') }
+    expect(jest.mocked(prisma.cashMachineClose.count).mock.calls[0][0]!.where).toEqual({ venueId, createdAt: rango })
+    const r = await call({ venueId, fromDate: '2026-11-15', toDate: '2026-11-15' })
+    expect(r.porFecha).toBe('comprobante')
   })
 
   it('🔴 niega una sucursal ajena antes de leer', async () => {

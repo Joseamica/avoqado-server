@@ -563,7 +563,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'issue_refund',
-    '🔴 CRITICAL. If the venue has «Sólo saldo a favor» on, returned goods and «other» are rejected with STORE_CREDIT_ONLY: those go through the POS. Refund a COMPLETED payment of a venue you can access — ONLY for CASH / non-card payments (the cash you hand back is recorded as a refund). CARD payments (credit/debit) are BLOCKED here: a Blumon/terminal card refund must be done PHYSICALLY on the terminal with the card present — it cannot be processed by API. Identify the payment by its id (from list_payments), give the amount in pesos (partial allowed; the service enforces the remaining refundable) and a reason. By DEFAULT this only PREVIEWS; call again with confirm:true to execute. This WRITES MONEY — requires payments:refund (refundMethod CASH also requires payments:refund-to-cash).',
+    '🔴 CRITICAL. If the venue has «Sólo saldo a favor» on, returned goods and «other» are rejected with STORE_CREDIT_ONLY: those go through the POS. Refund a COMPLETED payment of a venue you can access — ONLY for CASH / non-card payments (the cash you hand back is recorded as a refund). CARD payments (credit/debit) are BLOCKED here: a Blumon/terminal card refund must be done PHYSICALLY on the terminal with the card present — it cannot be processed by API. Identify the payment by its id (from list_payments), give the amount in pesos (partial allowed; the service enforces the remaining refundable) and a reason. By DEFAULT this only PREVIEWS; call again with confirm:true to execute. This WRITES MONEY — requires payments:refund (refundMethod CASH, or refunding a cash-machine sale in cash, also requires payments:refund-to-cash).',
     {
       venueId: z.string().describe('Venue that owns the payment (must be in your scope)'),
       idempotencyKey: z
@@ -631,6 +631,9 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         },
       })
       if (!payment) return text({ ok: false, error: 'No encontré ese pago en tus locales.' })
+      // Máquina de efectivo (Codex r1 #14, decisión c): devolver en efectivo una venta de la máquina —sin refundMethod o con CASH— saca
+      // billetes de la caja en la que nunca entraron: el mismo permiso que el POS, el panel y la terminal.
+      if (payment.cashMachineRef && refundMethod !== 'BANK_TRANSFER') guard.requirePermission('payments:refund-to-cash', venueId)
       if (payment.status !== TransactionStatus.COMPLETED) {
         return text({ ok: false, error: `Solo se puede reembolsar un pago COMPLETED (este está ${payment.status}).` })
       }

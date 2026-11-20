@@ -8,6 +8,9 @@ const mockStaffVenueFindUnique = jest.fn()
 const mockEmparejar = jest.fn()
 const mockDesemparejar = jest.fn()
 const mockCotizar = jest.fn()
+const mockConsumeOverride = jest.fn()
+const mockTurnoDelNegocio = jest.fn()
+let pinPrendido = false
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -25,7 +28,12 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({
 }))
 jest.mock('@/services/mobile/permission-override.mobile.service', () => ({
   ...jest.requireActual('@/services/mobile/permission-override.mobile.service'),
-  isManagerPinOverrideEnabled: async () => false,
+  isManagerPinOverrideEnabled: async () => pinPrendido,
+  consumePermissionOverride: (...a: unknown[]) => mockConsumeOverride(...a),
+}))
+jest.mock('@/services/shared/turnoDeCaja', () => ({
+  ...jest.requireActual('@/services/shared/turnoDeCaja'),
+  turnoDelNegocioAhora: (...a: unknown[]) => mockTurnoDelNegocio(...a),
 }))
 jest.mock('@/services/cashMachine/emparejamiento', () => ({
   ...jest.requireActual('@/services/cashMachine/emparejamiento'),
@@ -46,19 +54,25 @@ import mobileRouter from '@/routes/mobile.routes'
 
 const VENUE = 'cjld2cjxh0000qzrmn831i7rn'
 
-const cadena = (ruta: string, metodo: 'post' | 'delete') => {
+const cadena = (ruta: string, metodo: 'post' | 'delete' | 'get') => {
   const capa = (mobileRouter as any).stack.find((l: any) => l.route?.path === ruta && l.route.methods[metodo])
   return capa.route.stack.map((rl: any) => rl.handle) as any[]
 }
 
 /** Corre la cadena después de `authenticateTokenMiddleware` (el JWT ya está en authContext), controlador incluido. */
-async function correr(ruta: string, metodo: 'post' | 'delete', role: StaffRole, body: object = {}) {
+async function correr(
+  ruta: string,
+  metodo: 'post' | 'delete' | 'get',
+  role: StaffRole,
+  body: object = {},
+  encabezados: Record<string, string> = {},
+) {
   mockStaffVenueFindUnique.mockResolvedValue({ role, active: true, permissionSetId: null, permissionSet: null })
   const req: any = {
     method: metodo.toUpperCase(),
     originalUrl: `/api/v1/mobile${ruta.replace(':venueId', VENUE)}`,
     params: { venueId: VENUE },
-    headers: { 'x-device-id': 'uid-pc-1', 'x-device-platform': 'DESKTOP', 'x-cash-machine-credential': 'secreta' },
+    headers: { 'x-device-id': 'uid-pc-1', 'x-device-platform': 'DESKTOP', 'x-cash-machine-credential': 'secreta', ...encabezados },
     body,
     query: {},
     authContext: { userId: 'u1', venueId: VENUE, role },
@@ -82,13 +96,15 @@ async function correr(ruta: string, metodo: 'post' | 'delete', role: StaffRole, 
 
 const BINDING = '/venues/:venueId/cash-machine/binding'
 const QUOTE = '/venues/:venueId/cash-machine/quote'
-const permisosDe = (ruta: string, metodo: 'post' | 'delete') =>
+const permisosDe = (ruta: string, metodo: 'post' | 'delete' | 'get') =>
   cadena(ruta, metodo)
     .filter(x => typeof x.requiredPermission === 'string')
     .map(x => x.requiredPermission)
 
 beforeEach(() => {
   jest.clearAllMocks()
+  pinPrendido = false
+  mockConsumeOverride.mockResolvedValue({ authorizedById: 'sv-gerente' })
   mockEmparejar.mockResolvedValue({ bindingId: 'b1', credential: 'c'.repeat(43) })
   mockDesemparejar.mockResolvedValue({ revoked: true })
   mockCotizar.mockResolvedValue({ quoteId: 'q', totalCents: 4100, cobrableEnMaquina: true })
@@ -155,5 +171,71 @@ describe('cotizar (payments:create)', () => {
     const out = await correr(QUOTE, 'post', StaffRole.CASHIER, { items: [] })
     expect(out.error).toMatchObject({ statusCode: 400 })
     expect(mockCotizar).not.toHaveBeenCalled()
+  })
+})
+
+describe('Codex r1 #8 (decisión b): cash-machine:configure sólo con la sesión, nunca con el PIN del gerente', () => {
+  it('🔴 la cajera con un PIN de gerente válido NO empareja: 403, el PIN no se gasta y el 403 no ofrece PIN', async () => {
+    pinPrendido = true
+    const out = await correr(BINDING, 'post', StaffRole.CASHIER, { machineIp: '192.168.1.50' }, { 'x-permission-override': 'pin-ok' })
+    expect(out.status).toBe(403)
+    expect(out.json).toMatchObject({ required: 'cash-machine:configure' })
+    expect(out.json.overridable).toBeUndefined()
+    expect(mockConsumeOverride).not.toHaveBeenCalled()
+    expect(mockEmparejar).not.toHaveBeenCalled()
+    const del = await correr(BINDING, 'delete', StaffRole.CASHIER, {}, { 'x-permission-override': 'pin-ok' })
+    expect(del.status).toBe(403)
+    expect(mockDesemparejar).not.toHaveBeenCalled()
+  })
+
+  it('el PIN de gerente sigue sirviendo en las demás rutas (cobrar): no se tocó el override general', async () => {
+    pinPrendido = true
+    const out = await correr(
+      QUOTE,
+      'post',
+      StaffRole.KITCHEN,
+      { items: [{ productId: 'p1', quantity: 1 }] },
+      { 'x-permission-override': 'pin-ok' },
+    )
+    expect(mockConsumeOverride).toHaveBeenCalledWith(expect.objectContaining({ permission: 'payments:create' }))
+    expect(out.status).toBe(200)
+  })
+})
+
+describe('Codex r1 #9 (decisión a): cotizar un carrito con descuento contesta DESCUENTO sin pedir permisos', () => {
+  it('🔴 la cajera sin permiso de cortesía cotiza una cortesía: 200 (DESCUENTO lo decide el servicio), sin 403 ni PIN', async () => {
+    const out = await correr(QUOTE, 'post', StaffRole.CASHIER, {
+      items: [{ productId: 'p1', quantity: 1, isCortesia: true, cortesiaReason: 'cliente frecuente' }],
+    })
+    expect(out.status).toBe(200)
+    expect(mockCotizar).toHaveBeenCalled()
+  })
+})
+
+describe('Codex r1 #13: GET shifts/business-current (el turno del negocio para la PC sin gaveta)', () => {
+  const TURNO = '/venues/:venueId/shifts/business-current'
+
+  it('pide shifts:read, el permiso de lectura más chico que tiene quien cobra', () => {
+    expect(permisosDe(TURNO, 'get')).toEqual(['shifts:read'])
+  })
+
+  it('🔴 la cajera de la PC lo lee: { shiftId, startTime }', async () => {
+    const inicio = new Date('2026-11-20T14:00:00.000Z')
+    mockTurnoDelNegocio.mockResolvedValue({ shiftId: 'shift-A', startTime: inicio })
+    const out = await correr(TURNO, 'get', StaffRole.CASHIER)
+    expect(out).toMatchObject({ status: 200, json: { shiftId: 'shift-A', startTime: inicio } })
+    expect(mockTurnoDelNegocio).toHaveBeenCalledWith(VENUE)
+  })
+
+  it('sin turno abierto: null', async () => {
+    mockTurnoDelNegocio.mockResolvedValue(null)
+    const out = await correr(TURNO, 'get', StaffRole.CASHIER)
+    expect(out).toMatchObject({ status: 200, json: null })
+  })
+
+  it('un rol sin shifts:read (cocina) recibe 403', async () => {
+    const out = await correr(TURNO, 'get', StaffRole.KITCHEN)
+    expect(out.status).toBe(403)
+    expect(mockTurnoDelNegocio).not.toHaveBeenCalled()
   })
 })

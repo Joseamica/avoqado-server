@@ -13,11 +13,20 @@ import AppError from '../../errors/AppError'
 import { ACCESS_TOKEN_SECRET } from '../../config/env'
 import { operationHash } from '../../utils/operationHash'
 import { cotizarVentaDeMostrador, type CreateOrderInput } from '../mobile/order.mobile.service'
+import { pedidoConDescuento } from './ventaDeLaMaquina'
 
 export const VIGENCIA_DE_LA_COTIZACION_MS = 10 * 60_000
 
-/** Por qué la máquina no cobra este carrito (la PC lo explica y ofrece tarjeta antes del `paycash`). */
-export type MotivoSinMaquina = 'CENTAVOS' | 'PRODUCTO_NO_DISPONIBLE' | 'PREMIO_PENDIENTE' | 'PROMOCION' | 'CUPON'
+/**
+ * Por qué la máquina no cobra este carrito (la PC lo explica y ofrece tarjeta antes del `paycash`):
+ *  · `DESCUENTO`: cualquier descuento —de renglón, de cuenta, cortesía, cupón, promoción o del cliente— (decisión a del founder,
+ *    Codex r1 #9 #10; reemplaza a `PROMOCION` y `CUPON`, que la PC nunca llegó a leer);
+ *  · `PREMIO_PENDIENTE`: un premio de sellos (R5#4; su texto es otro);
+ *  · `SIN_IMPORTE`: la cuenta es de $0 (Codex r1 #12);
+ *  · `CENTAVOS`: no es múltiplo de $0.50;
+ *  · `PRODUCTO_NO_DISPONIBLE`: un producto o extra que ya no está.
+ */
+export type MotivoSinMaquina = 'CENTAVOS' | 'PRODUCTO_NO_DISPONIBLE' | 'PREMIO_PENDIENTE' | 'DESCUENTO' | 'SIN_IMPORTE'
 
 export interface CotizacionDeLaMaquina {
   /** Sólo si se puede cobrar en la máquina. */
@@ -97,17 +106,18 @@ export function leerCotizacion(
 }
 
 /**
- * `POST /mobile/venues/:venueId/cash-machine/quote`. `input` es el pedido ya leído como `POST /orders` (con la autoridad de la sesión);
- * `carrito`, el cuerpo tal cual (su huella va en el `quoteId`); `premioPendiente`, si el carrito trae un premio de sellos (R5#4).
- * Los demás rechazos de la creación en línea (permiso, aprobación, precio cambiado) suben tal cual, como en `POST /orders`.
+ * `POST /mobile/venues/:venueId/cash-machine/quote`. `input` es el pedido ya leído como `POST /orders`; `carrito`, el cuerpo tal cual
+ * (su huella va en el `quoteId`); `premioPendiente`, si el carrito trae un premio de sellos (R5#4). Un carrito con descuento no se
+ * cotiza: la fase 1a no lo cobra en la máquina (decisión a), y tampoco lo registra si llega (`ventaDeLaMaquina`). Los demás rechazos de
+ * la creación en línea (precio cambiado) suben tal cual, como en `POST /orders`.
  */
 export async function cotizarParaLaMaquina(
   venueId: string,
   input: CreateOrderInput,
   opciones: { premioPendiente: boolean; carrito: unknown },
 ): Promise<CotizacionDeLaMaquina> {
-  if (input.items.some(item => item.promotionRef)) return sinCotizar('PROMOCION')
-  if (input.couponCode) return sinCotizar('CUPON')
+  if (opciones.premioPendiente) return sinCotizar('PREMIO_PENDIENTE')
+  if (pedidoConDescuento(input)) return sinCotizar('DESCUENTO')
 
   let venta: Awaited<ReturnType<typeof cotizarVentaDeMostrador>>
   try {
@@ -120,11 +130,9 @@ export async function cotizarParaLaMaquina(
   const tipCents = aCentavos(venta.propina)
   const saleCents = aCentavos(venta.total - venta.propina)
   const totalCents = saleCents + tipCents
-  const motivo: MotivoSinMaquina | undefined = opciones.premioPendiente
-    ? 'PREMIO_PENDIENTE'
-    : totalCents % 50 !== 0
-      ? 'CENTAVOS'
-      : undefined
+  // El descuento que el servidor pone solo (nada en el carrito lo pidió) tampoco: lo que se cotiza es lo que se registra.
+  const motivo: MotivoSinMaquina | undefined =
+    aCentavos(venta.descuento) > 0 ? 'DESCUENTO' : totalCents <= 0 ? 'SIN_IMPORTE' : totalCents % 50 !== 0 ? 'CENTAVOS' : undefined
   const expiresAtMs = Date.now() + VIGENCIA_DE_LA_COTIZACION_MS
   return {
     quoteId: motivo ? null : firmarCotizacion({ v: 1, ve: venueId, h: operationHash(opciones.carrito), t: totalCents, e: expiresAtMs }),

@@ -11,6 +11,8 @@ const mockSubir = jest.fn()
 const mockConsultar = jest.fn()
 const mockListar = jest.fn()
 const mockResolver = jest.fn()
+const mockRevisar = jest.fn()
+const mockConsumeOverride = jest.fn()
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -26,12 +28,18 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({
   ...jest.requireActual('@/services/dashboard/activity-log.service'),
   logAction: jest.fn(),
 }))
+jest.mock('@/services/mobile/permission-override.mobile.service', () => ({
+  ...jest.requireActual('@/services/mobile/permission-override.mobile.service'),
+  isManagerPinOverrideEnabled: async () => true,
+  consumePermissionOverride: (...a: unknown[]) => mockConsumeOverride(...a),
+}))
 jest.mock('@/services/cashMachine/dudasDeLaMaquina', () => ({
   ...jest.requireActual('@/services/cashMachine/dudasDeLaMaquina'),
   subirDudaDeLaMaquina: (...a: unknown[]) => mockSubir(...a),
   consultarDudaDeLaMaquina: (...a: unknown[]) => mockConsultar(...a),
   listarDudasDeLaMaquina: (...a: unknown[]) => mockListar(...a),
   resolverDudaDeLaMaquina: (...a: unknown[]) => mockResolver(...a),
+  revisarIncidenciaDeLaMaquina: (...a: unknown[]) => mockRevisar(...a),
 }))
 jest.mock('@/config/logger', () => ({
   __esModule: true,
@@ -56,13 +64,19 @@ const permisosDe = (router: any, ruta: string, metodo: Metodo) =>
     .map(x => x.requiredPermission)
 
 /** Corre la cadena después de `authenticateTokenMiddleware` (el JWT ya está en authContext), controlador incluido. */
-async function correr(router: any, ruta: string, metodo: Metodo, role: StaffRole, extra: { body?: object; query?: object } = {}) {
+async function correr(
+  router: any,
+  ruta: string,
+  metodo: Metodo,
+  role: StaffRole,
+  extra: { body?: object; query?: object; headers?: Record<string, string> } = {},
+) {
   mockStaffVenueFindUnique.mockResolvedValue({ role, active: true, permissionSetId: null, permissionSet: null })
   const req: any = {
     method: metodo.toUpperCase(),
     originalUrl: `/api/v1${ruta.replace(':venueId', VENUE).replace(':referenceCC', REF)}`,
-    params: { venueId: VENUE, referenceCC: REF },
-    headers: { 'x-device-id': 'uid-pc-1', 'x-device-platform': 'DESKTOP', 'x-cash-machine-credential': 'secreta' },
+    params: { venueId: VENUE, referenceCC: REF, incidentId: INCIDENCIA },
+    headers: { 'x-device-id': 'uid-pc-1', 'x-device-platform': 'DESKTOP', 'x-cash-machine-credential': 'secreta', ...extra.headers },
     body: extra.body ?? {},
     query: extra.query ?? {},
     authContext: { userId: 'u-sesion', venueId: VENUE, role },
@@ -87,6 +101,8 @@ async function correr(router: any, ruta: string, metodo: Metodo, role: StaffRole
 const DUDAS = '/venues/:venueId/cash-machine/doubts'
 const DUDA = '/venues/:venueId/cash-machine/doubts/:referenceCC'
 const RESOLVER = '/venues/:venueId/cash-machine/doubts/:referenceCC/resolve'
+const REVISAR = '/venues/:venueId/cash-machine/incidents/:incidentId/review'
+const INCIDENCIA = 'cjld2cjxh0000qzrmn831i7rx'
 const CARRITO = { items: [{ name: 'Pastel', quantity: 1, unitPrice: 187.5 }], orderType: 'TAKEOUT', source: 'AVOQADO_ANDROID' }
 const DUDA_BODY = {
   referenceCC: REF,
@@ -105,6 +121,8 @@ beforeEach(() => {
   mockConsultar.mockResolvedValue({ status: 'ABIERTO', referenceCC: REF })
   mockListar.mockResolvedValue({ data: [], total: 0, nextCursor: null })
   mockResolver.mockResolvedValue({ status: 200, body: { referenceCC: REF, outcome: 'PAGADO', resolvedBy: 'GERENTE' } })
+  mockRevisar.mockResolvedValue({ id: INCIDENCIA, referenceCC: REF, kind: 'IMPOSIBLE', status: 'RESUELTO' })
+  mockConsumeOverride.mockResolvedValue({ authorizedById: 'sv-gerente' })
 })
 
 describe('permisos de cada ruta', () => {
@@ -194,5 +212,58 @@ describe.each([
     const out = await correr(router, RESOLVER, 'post', StaffRole.MANAGER, { body: { ...RESOLVER_BODY, evidence: '  ' } })
     expect(out.error).toMatchObject({ statusCode: 400, message: expect.stringContaining('Escribe lo que viste') })
     expect(mockResolver).not.toHaveBeenCalled()
+  })
+})
+
+describe('Codex r1 #8 (decisión b): cash-machine:resolve sólo con la sesión del gerente', () => {
+  it.each([
+    ['POS', () => mobileRouter],
+    ['panel', () => dashboardRouter],
+  ])('🔴 %s · la cajera con un PIN de gerente válido NO resuelve: 403, el PIN no se gasta y el 403 no ofrece PIN', async (_n, router) => {
+    const out = await correr(router(), RESOLVER, 'post', StaffRole.CASHIER, {
+      body: RESOLVER_BODY,
+      headers: { 'x-permission-override': 'pin-ok' },
+    })
+    expect(out.status).toBe(403)
+    expect(out.json).toMatchObject({ required: 'cash-machine:resolve' })
+    expect(out.json.overridable).toBeUndefined()
+    expect(mockConsumeOverride).not.toHaveBeenCalled()
+    expect(mockResolver).not.toHaveBeenCalled()
+  })
+
+  it('🔴 tampoco lista ni revisa con el PIN', async () => {
+    const lista = await correr(mobileRouter, DUDAS, 'get', StaffRole.CASHIER, { headers: { 'x-permission-override': 'pin-ok' } })
+    expect(lista.status).toBe(403)
+    const revisa = await correr(mobileRouter, REVISAR, 'post', StaffRole.CASHIER, {
+      body: { note: 'x' },
+      headers: { 'x-permission-override': 'pin-ok' },
+    })
+    expect(revisa.status).toBe(403)
+    expect(mockConsumeOverride).not.toHaveBeenCalled()
+  })
+})
+
+describe('Codex r1 #7: revisar una incidencia que no es duda', () => {
+  it('pide cash-machine:resolve en el POS y en el panel', () => {
+    expect(permisosDe(mobileRouter, REVISAR, 'post')).toEqual(['cash-machine:resolve'])
+    expect(permisosDe(dashboardRouter, REVISAR, 'post')).toEqual(['cash-machine:resolve'])
+  })
+
+  it('🔴 el gerente la revisa con SU sesión y su nota', async () => {
+    const out = await correr(dashboardRouter, REVISAR, 'post', StaffRole.MANAGER, { body: { note: '  La máquina devolvió todo  ' } })
+    expect(out).toMatchObject({ status: 200, json: { success: true, status: 'RESUELTO', kind: 'IMPOSIBLE' } })
+    expect(mockRevisar).toHaveBeenCalledWith(VENUE, 'u-sesion', INCIDENCIA, 'La máquina devolvió todo')
+  })
+
+  it('sin nota es 400 en español', async () => {
+    const out = await correr(mobileRouter, REVISAR, 'post', StaffRole.MANAGER, { body: {} })
+    expect(out.error).toMatchObject({ statusCode: 400, message: expect.stringContaining('Escribe qué revisaste') })
+    expect(mockRevisar).not.toHaveBeenCalled()
+  })
+
+  it('la lista filtra por tipo y folio (lo valida el esquema)', async () => {
+    const out = await correr(mobileRouter, DUDAS, 'get', StaffRole.MANAGER, { query: { kind: 'IMPOSIBLE', folio: 'AQ01' } })
+    expect(out.status).toBe(200)
+    expect(mockListar).toHaveBeenCalledWith(VENUE, expect.objectContaining({ kind: 'IMPOSIBLE', folio: 'AQ01' }))
   })
 })

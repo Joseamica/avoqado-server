@@ -94,7 +94,12 @@ import * as shiftController from '../controllers/dashboard/shift.dashboard.contr
 import * as cashDrawerController from '../controllers/dashboard/cashDrawer.dashboard.controller'
 // Máquina de efectivo (fase 1a, R4-4): los «Cobros en duda» se listan y resuelven igual en el panel y en el POS del mostrador.
 import * as cashMachineMobileController from '../controllers/mobile/cashMachine.mobile.controller'
-import { listarDudasDeLaMaquinaSchema, resolverDudaDeLaMaquinaSchema } from '../schemas/mobile/cashMachine.schema'
+import { permisoDeReembolsoSegunElCobro } from '../middlewares/permisoDeReembolso.middleware'
+import {
+  listarDudasDeLaMaquinaSchema,
+  resolverDudaDeLaMaquinaSchema,
+  revisarIncidenciaDeLaMaquinaSchema,
+} from '../schemas/mobile/cashMachine.schema'
 import * as teamController from '../controllers/dashboard/team.dashboard.controller'
 import * as testingController from '../controllers/dashboard/testing.dashboard.controller'
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
@@ -4079,7 +4084,8 @@ router.post(
 router.post(
   '/venues/:venueId/payments/:paymentId/refund',
   authenticateTokenMiddleware,
-  checkPermission('payments:refund'),
+  // `payments:refund`; devolver en efectivo una venta de la máquina pide `payments:refund-to-cash` (Codex r1 #14, decisión c).
+  permisoDeReembolsoSegunElCobro({ paymentIdDe: req => req.params.paymentId, efectivoEscogidoPide: false }),
   refundController.issueRefund,
 )
 router.get(
@@ -8999,6 +9005,13 @@ router.post(
   validateRequest(resolverDudaDeLaMaquinaSchema),
   checkPermission('cash-machine:resolve'),
   cashMachineMobileController.resolverDuda,
+)
+router.post(
+  '/venues/:venueId/cash-machine/incidents/:incidentId/review',
+  authenticateTokenMiddleware,
+  validateRequest(revisarIncidenciaDeLaMaquinaSchema),
+  checkPermission('cash-machine:resolve'),
+  cashMachineMobileController.revisarIncidencia,
 )
 
 /**

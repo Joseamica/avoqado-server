@@ -402,6 +402,8 @@ export interface CreateOrderInput {
   cashDrawerSessionId?: string | null
   /** Máquina de efectivo (server-owned, nunca del cuerpo): la venta nace sin turno, por conciliar (`ventaDeLaColaEnTx`). */
   turnoPorConciliar?: boolean
+  /** Máquina de efectivo (server-owned, Codex r1 #11): `shiftIdDeLaVenta` lo validó el servidor; se respeta aunque desaparezca. */
+  turnoDelServidor?: boolean
   /**
    * «Cobrar sin red» (S6): el serial de la terminal del TOKEN (`authContext.terminalSerialNumber`, nunca del body). Si es de una
    * terminal de este negocio, la orden lleva su `terminalId` y la fuente `TPV`, como `/tpv`; si no, como hoy.
@@ -2139,6 +2141,7 @@ export async function crearVentaDeMostradorEnTx(
     shiftIdDeLaVenta: input.shiftIdDeLaVenta,
     cashDrawerSessionId: input.isOfflineReplay === true ? input.cashDrawerSessionId : null,
     porConciliar: input.turnoPorConciliar === true,
+    turnoDelServidor: input.turnoDelServidor === true,
   })
   const turnoDeLaOrden = await turnoDeLaOrdenQueNace(tx, venueId, ventaDeLaCola, turnoVivo)
 
@@ -2719,8 +2722,9 @@ export interface VentaCotizada {
  * descuentos de renglón, «Ajuste de precio», precio que vio el cliente y sus 400/403/409) y, encima, la aritmética de la cuenta de
  * `crearVentaDeMostradorEnTx` sin combos ni cupón: cortesías, descuento de catálogo o libre de la cuenta, su aprobación, el regalo y la
  * propina. Los combos y el cupón sólo existen escribiendo (el motor de promociones) o apartando: aquí se rechazan y quien llama los deja
- * fuera. 🔴 ESPEJO: si cambia el descuento de la cuenta en `crearVentaDeMostradorEnTx`, cambia aquí; `cotizacionDeLaMaquina.test.ts`
- * compara las dos con la creación real.
+ * fuera. 🔴 ESPEJO: si cambia el descuento de la cuenta en `crearVentaDeMostradorEnTx`, cambia aquí. Desde la fase 1a la máquina no le
+ * pasa carritos con descuento (decisión a del founder): `cotizacionDeLaMaquina.test.ts` compara con la creación real sólo totales sin
+ * descuento; la aritmética de descuentos de aquí queda sin quien la pruebe hasta que un llamador la vuelva a usar.
  */
 export async function cotizarVentaDeMostrador(venueId: string, input: CreateOrderInput): Promise<VentaCotizada> {
   validarOrigenYTipoDeVenta(input)
@@ -4911,6 +4915,8 @@ export interface AbonoEnTxEntrada {
   cashMachineRef?: string
   /** Máquina de efectivo (R4-7 #8): sin turno conocido; el cobro queda por conciliar, nunca en el vivo. */
   turnoPorConciliar?: boolean
+  /** Máquina de efectivo (Codex r1 #11): `shiftIdDeLaVenta` lo validó el servidor; se respeta aunque desaparezca. */
+  turnoDelServidor?: boolean
 }
 
 export interface AbonoEnTx {
@@ -5391,6 +5397,7 @@ export async function registrarAbonoEnTx(
     shiftIdDeLaVenta: entrada.shiftIdDeLaVenta,
     cashDrawerSessionId: entrada.isOfflineReplay === true ? entrada.cashDrawerSessionId : null,
     porConciliar: entrada.turnoPorConciliar === true,
+    turnoDelServidor: entrada.turnoDelServidor === true,
   })
   const shiftClaim = await claimShiftForCapturedPayment(tx, {
     venueId,
@@ -7312,7 +7319,7 @@ export interface VentaQueCobroLaMaquina<T> {
   procesadoPor: string
   /** Hora física del cierre (para reportes, D93); `null` = desconocida. */
   horaDelCierre: Date | null
-  /** El turno de la venta (A) o, sin turno conocido, `porConciliar` (nunca el vivo). */
+  /** El turno de la venta (A, ya validado por el servidor con inicio y fin) o, sin turno conocido, `porConciliar` (nunca el vivo). */
   turno: { shiftIdDeLaVenta: string | null; porConciliar: boolean }
   /** Dentro de la MISMA transacción, con el pago ya escrito: el cierre de la máquina. */
   cerrarEnTx: (
@@ -7339,6 +7346,7 @@ export async function venderLoQueCobroLaMaquina<T>(venueId: string, v: VentaQueC
     cashDrawerSessionId: null,
     shiftIdDeLaVenta: v.turno.shiftIdDeLaVenta,
     turnoPorConciliar: v.turno.porConciliar,
+    turnoDelServidor: Boolean(v.turno.shiftIdDeLaVenta),
   }
   validarOrigenYTipoDeVenta(venta)
   const llegada = new Date()
@@ -7353,6 +7361,11 @@ export async function venderLoQueCobroLaMaquina<T>(venueId: string, v: VentaQueC
     async tx => {
       const creada = await crearVentaDeMostradorEnTx(tx, venueId, venta, prep)
       if ('existente' in creada) throw new CuentaDeLaMaquinaYaExiste()
+      // 🔴 Fase 1a (decisión a del founder, Codex r1 #1 #9 #10): la máquina no cobra NINGÚN descuento. Si la cuenta nace con uno (de
+      // renglón, de cuenta, cortesía, cupón, promoción o premio), no se aplica: se revierte y quien llama guarda el dinero como incidencia.
+      if (new Prisma.Decimal(creada.order.discountAmount ?? 0).gt(0)) {
+        throw new AppError('La máquina no cobra ventas con descuento.', 422, true, 'CASH_MACHINE_SALE_WITH_DISCOUNT')
+      }
       const orderId = creada.order.id
       const conPreparacion = await tx.orderItem.findFirst({
         where: { orderId, order: { venueId }, serviceCourse: { path: ['preparationVersion'], equals: 1 } },
@@ -7375,9 +7388,15 @@ export async function venderLoQueCobroLaMaquina<T>(venueId: string, v: VentaQueC
           cashMachineRef: v.referenceCC,
           shiftIdDeLaVenta: v.turno.shiftIdDeLaVenta ?? undefined,
           turnoPorConciliar: v.turno.porConciliar,
+          turnoDelServidor: Boolean(v.turno.shiftIdDeLaVenta),
         },
         reconciliationEnabled,
       )
+      // 🔴 Codex r1 #1: un folio PAGADO nunca deja la cuenta debiendo (otra caja cobraría el resto). Si el servidor la armó por más de lo
+      // que entró en la máquina, se revierte entera y quien llama conserva el cierre físico como incidencia.
+      if (!abono.isFullyPaid) {
+        throw new AppError('La cuenta no quedó pagada con lo que cobró la máquina.', 422, true, 'CASH_MACHINE_SALE_NOT_SETTLED')
+      }
       const cierre = await v.cerrarEnTx(tx, {
         orderId,
         paymentId: abono.newPayment.id,
@@ -7392,8 +7411,7 @@ export async function venderLoQueCobroLaMaquina<T>(venueId: string, v: VentaQueC
   // Después del commit, como la venta y el cobro de hoy. Nada de aquí puede desmentir lo cobrado.
   const { creada, abono, marcarCocina } = hecho
   const orderId = creada.order.id
-  // D22, como `createOrderWithItems`: lo cobrado ya ocurrió; un descuento que pedía aprobación entra y el gerente se entera.
-  if (creada.sinAprobacion) avisarDescuentoSinAprobacion(venueId, venta, orderId, creada.sinAprobacion, llegada)
+  // Sin «descuento sin aprobación» (D22): la venta de la máquina nunca nace con descuento (se revierte arriba).
   await terminarVentaDeMostrador(venueId, creada, prep)
   if (abono.isFullyPaid && abono.postingId) {
     try {

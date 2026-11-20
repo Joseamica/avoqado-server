@@ -17021,7 +17021,7 @@ model CashMachineIncident {
   venueId     String
   venue       Venue   @relation(fields: [venueId], references: [id], onDelete: Restrict)
   referenceCC String  @db.VarChar(32)
-  /// 'CONFLICTO' | 'IMPOSIBLE' | 'ESPERANDO' | 'NO_SE_PUDO_REGISTRAR'.
+  /// 'CONFLICTO' | 'IMPOSIBLE' | 'ESPERANDO' | 'NO_SE_PUDO_REGISTRAR' | 'TRAS_REVOCAR' (folio nuevo de una PC revocada, a revisión).
   kind        String  @db.VarChar(24)
   /// 'ABIERTO' | 'RESUELTO'.
   status      String  @default("ABIERTO") @db.VarChar(16)

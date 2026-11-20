@@ -48,6 +48,7 @@ import * as notificationMobileController from '../controllers/mobile/notificatio
 import * as supplierMobileController from '../controllers/mobile/supplier.mobile.controller'
 import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.mobile.controller'
 import * as cashMachineMobileController from '../controllers/mobile/cashMachine.mobile.controller'
+import { permisoDeReembolsoSegunElCobro } from '../middlewares/permisoDeReembolso.middleware'
 import {
   consultarDudaDeLaMaquinaSchema,
   consultarVentaDeLaMaquinaSchema,
@@ -57,7 +58,9 @@ import {
   listarDudasDeLaMaquinaSchema,
   registrarVentaDeLaMaquinaSchema,
   resolverDudaDeLaMaquinaSchema,
+  revisarIncidenciaDeLaMaquinaSchema,
   subirDudaDeLaMaquinaSchema,
+  turnoDelNegocioSchema,
 } from '../schemas/mobile/cashMachine.schema'
 import { ponerLlaveDelRetiro } from '../lib/llaveDelRetiro'
 import * as purchaseOrderMobileController from '../controllers/mobile/purchase-order.mobile.controller'
@@ -3723,15 +3726,14 @@ router.delete(
 /**
  * POST /api/v1/mobile/venues/:venueId/cash-machine/quote — el total del carrito ANTES del `paycash`, con la lógica de `POST /orders`
  * y sin escribir nada (R4-2). Body: el mismo de `POST /orders`. 200 { quoteId, expiresAt, totalCents, saleCents, tipCents,
- * discountCents, renglones, cobrableEnMaquina, motivo? }. Los mismos guardias de cortesía y de aprobación que `POST /orders`.
+ * discountCents, renglones, cobrableEnMaquina, motivo? }. Sin guardias de cortesía ni de aprobación: un carrito con descuento contesta
+ * `motivo: 'DESCUENTO'` (la fase 1a no lo cobra en la máquina; decisión a del founder, Codex r1 #9).
  */
 router.post(
   '/venues/:venueId/cash-machine/quote',
   authenticateTokenMiddleware,
   validateRequest(cotizarParaLaMaquinaSchema),
   checkPermission('payments:create'),
-  checkCortesiaPermissionIfPresent,
-  checkAprobacionDelDescuento,
   cashMachineMobileController.cotizar,
 )
 
@@ -3777,6 +3779,30 @@ router.post(
   validateRequest(resolverDudaDeLaMaquinaSchema),
   checkPermission('cash-machine:resolve'),
   cashMachineMobileController.resolverDuda,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-machine/incidents/:incidentId/review — el gerente, con SU sesión, da por revisada una
+ * incidencia que no es duda (imposible, conflicto, «no se pudo registrar», PC revocada; Codex r1 #7). Body: { note }.
+ */
+router.post(
+  '/venues/:venueId/cash-machine/incidents/:incidentId/review',
+  authenticateTokenMiddleware,
+  validateRequest(revisarIncidenciaDeLaMaquinaSchema),
+  checkPermission('cash-machine:resolve'),
+  cashMachineMobileController.revisarIncidencia,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/shifts/business-current — el turno vivo del NEGOCIO para la PC de la máquina, que no tiene gaveta
+ * (R3#8, Codex r1 #13). 200 `{ shiftId, startTime }` o `null`. `shifts:read`: el permiso de lectura más chico que tiene quien cobra.
+ */
+router.get(
+  '/venues/:venueId/shifts/business-current',
+  authenticateTokenMiddleware,
+  validateRequest(turnoDelNegocioSchema),
+  checkPermission('shifts:read'),
+  cashMachineMobileController.turnoDelNegocio,
 )
 
 // ============================================================================
@@ -3930,14 +3956,9 @@ router.post(
  */
 const revisarReembolso = checkPermission('payments:refund')
 const revisarDevolverEnEfectivo = checkPermission('payments:refund-to-cash')
-export const permisoDeReembolso = Object.assign(
-  (req: Request, res: Response, next: NextFunction) =>
-    (req.body as { refundMethod?: unknown } | undefined)?.refundMethod === 'CASH'
-      ? revisarDevolverEnEfectivo(req, res, next)
-      : revisarReembolso(req, res, next),
-  // Para la inspección de rutas: el permiso base. El de efectivo lo ven el audit y los fixtures por el literal de arriba.
-  { requiredPermission: 'payments:refund' },
-)
+// Máquina de efectivo (Codex r1 #14, decisión c): una venta de la QuickPay devuelta en efectivo (medio vacío o «Efectivo») también pide
+// `payments:refund-to-cash`. La regla vive en `permisoDeReembolsoSegunElCobro`, la misma del panel y de la terminal.
+export const permisoDeReembolso = permisoDeReembolsoSegunElCobro({ paymentIdDe: req => req.params.paymentId, efectivoEscogidoPide: true })
 
 // Una sola revisión: el código del encargado autoriza un permiso y se consume una vez.
 export const permisoDeCambio = Object.assign(

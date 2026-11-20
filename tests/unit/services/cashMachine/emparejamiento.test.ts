@@ -62,7 +62,11 @@ beforeEach(() => {
   prismaMock.cashMachineClose.findUnique.mockImplementation(
     async ({ where }: any) => folios[where.venueId_referenceCC?.referenceCC] ?? null,
   )
+  // Las dudas y los «no se pudo registrar» de cada folio (dueño = la PC que los subió).
+  prismaMock.cashMachineIncident.findMany.mockImplementation(async ({ where }: any) => (incidenciasDe[where.referenceCC] ?? []) as any)
+  incidenciasDe = {}
 })
+let incidenciasDe: Record<string, Fila[]> = {}
 
 const autor = (deviceUid: string | null, userId = 'gerente-1') => ({ userId, deviceUid })
 const acciones = () => (logAction as jest.Mock).mock.calls.map(c => c[0])
@@ -173,7 +177,7 @@ describe('exigirAparatoEmparejado (lo usa POST cash-machine/sales)', () => {
 
   it('la PC emparejada pasa con su credencial', async () => {
     const { credential } = await emparejarAparato(VENUE, autor('uid-pc-1'), '192.168.1.50')
-    await expect(exigirAparatoEmparejado(VENUE, FOLIO, 'terminal-1', credential)).resolves.toBeUndefined()
+    await expect(exigirAparatoEmparejado(VENUE, FOLIO, 'terminal-1', credential)).resolves.toEqual({ revocadaEn: null })
   })
 
   it('🔴 perfil restaurado: la MISMA credencial desde otra PC no sirve', async () => {
@@ -184,18 +188,30 @@ describe('exigirAparatoEmparejado (lo usa POST cash-machine/sales)', () => {
   it('🔴 otra PC tomó la máquina: la anterior ya no registra folios NUEVOS', async () => {
     const vieja = await emparejarAparato(VENUE, autor('uid-pc-1'), '192.168.1.50')
     const nueva = await emparejarAparato(VENUE, autor('uid-pc-2'), '192.168.1.50')
-    await expect(exigirAparatoEmparejado(VENUE, FOLIO, 'terminal-1', vieja.credential)).rejects.toMatchObject(NO_EMPAREJADA)
-    await expect(exigirAparatoEmparejado(VENUE, FOLIO, 'terminal-2', nueva.credential)).resolves.toBeUndefined()
+    // Codex r1 #5 (decisión d): un folio NUEVO de la vieja ya no es 403; lleva la hora de la revocación para que la hora decida.
+    const revocada = bindings.find(b => b.deviceId === 'terminal-1')!
+    await expect(exigirAparatoEmparejado(VENUE, FOLIO, 'terminal-1', vieja.credential)).resolves.toEqual({
+      revocadaEn: revocada.revokedAt,
+    })
+    expect(revocada.revokedAt).toBeInstanceOf(Date)
+    await expect(exigirAparatoEmparejado(VENUE, FOLIO, 'terminal-2', nueva.credential)).resolves.toEqual({ revocadaEn: null })
   })
 
-  it('🔴 R5#2: la PC revocada todavía repite un folio que ELLA registró; uno de otra PC o uno nuevo, no', async () => {
+  it('🔴 R5#2: la PC revocada todavía repite un folio que ELLA registró (cierre, duda o «no se pudo»); uno de otra PC, no', async () => {
     const { credential } = await emparejarAparato(VENUE, autor('uid-pc-1'), '192.168.1.50')
     folios[FOLIO] = { deviceId: 'terminal-1' }
     folios.AQ00000000000Z = { deviceId: 'terminal-2' }
+    incidenciasDe.AQ00000000000Y = [{ kind: 'NO_SE_PUDO_REGISTRAR', deviceId: 'terminal-1' }]
+    incidenciasDe.AQ00000000000X = [{ kind: 'ESPERANDO', deviceId: 'terminal-2' }]
     await desemparejarAparato(VENUE, autor('uid-pc-1'))
-    await expect(exigirAparatoEmparejado(VENUE, FOLIO, 'terminal-1', credential)).resolves.toBeUndefined()
+    await expect(exigirAparatoEmparejado(VENUE, FOLIO, 'terminal-1', credential)).resolves.toEqual({ revocadaEn: null })
+    await expect(exigirAparatoEmparejado(VENUE, 'AQ00000000000Y', 'terminal-1', credential)).resolves.toEqual({ revocadaEn: null })
     await expect(exigirAparatoEmparejado(VENUE, 'AQ00000000000Z', 'terminal-1', credential)).rejects.toMatchObject(NO_EMPAREJADA)
-    await expect(exigirAparatoEmparejado(VENUE, 'AQ99999999999Z', 'terminal-1', credential)).rejects.toMatchObject(NO_EMPAREJADA)
+    await expect(exigirAparatoEmparejado(VENUE, 'AQ00000000000X', 'terminal-1', credential)).rejects.toMatchObject(NO_EMPAREJADA)
+    // Un folio nuevo: ya no 403 (decisión d), con la hora de la revocación.
+    await expect(exigirAparatoEmparejado(VENUE, 'AQ99999999999Z', 'terminal-1', credential)).resolves.toEqual({
+      revocadaEn: expect.any(Date),
+    })
     // Sin su credencial, ni su propio folio.
     await expect(exigirAparatoEmparejado(VENUE, FOLIO, 'terminal-1', null)).rejects.toMatchObject(NO_EMPAREJADA)
   })

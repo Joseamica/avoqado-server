@@ -1,7 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 
 import { BadRequestError, ForbiddenError } from '../../errors/AppError'
-import { conCortesiaSiRegala } from '../../middlewares/cortesiaPidePermiso.middleware'
 import { readDeviceIdentityFromRequest } from '../../middlewares/registerDevice.middleware'
 import { cotizarParaLaMaquina } from '../../services/cashMachine/cotizacionDeLaMaquina'
 import { desemparejarAparato, emparejarAparato } from '../../services/cashMachine/emparejamiento'
@@ -9,9 +8,16 @@ import {
   consultarDudaDeLaMaquina,
   listarDudasDeLaMaquina,
   resolverDudaDeLaMaquina,
+  revisarIncidenciaDeLaMaquina,
   subirDudaDeLaMaquina,
 } from '../../services/cashMachine/dudasDeLaMaquina'
-import { consultarVentaDeLaMaquina, registrarVentaDeLaMaquina, type AutorDeLaMaquina } from '../../services/cashMachine/ventaDeLaMaquina'
+import { turnoDelNegocioAhora } from '../../services/shared/turnoDeCaja'
+import {
+  consultarVentaDeLaMaquina,
+  pedidoConDescuento,
+  registrarVentaDeLaMaquina,
+  type AutorDeLaMaquina,
+} from '../../services/cashMachine/ventaDeLaMaquina'
 import type { CreateOrderInput } from '../../services/mobile/order.mobile.service'
 import { autoridadDeLaVenta, leerVentaDeMostrador } from './order.mobile.controller'
 
@@ -61,11 +67,12 @@ export async function registrarVenta(req: Request, res: Response, next: NextFunc
   }
 }
 
-/** `GET /api/v1/mobile/venues/:venueId/cash-machine/sales/:referenceCC` — la MISMA evidencia que el POST. */
+/** `GET /api/v1/mobile/venues/:venueId/cash-machine/sales/:referenceCC` — la MISMA respuesta que el POST (200 o el 202 estable). */
 export async function consultarVenta(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, referenceCC } = req.params
-    res.status(200).json({ success: true, ...(await consultarVentaDeLaMaquina(venueId, referenceCC)) })
+    const resultado = await consultarVentaDeLaMaquina(venueId, referenceCC)
+    res.status(resultado.status).json({ success: true, ...resultado.body })
   } catch (error) {
     next(error)
   }
@@ -98,27 +105,21 @@ export async function desemparejar(req: Request, res: Response, next: NextFuncti
 }
 
 /**
- * `POST /api/v1/mobile/venues/:venueId/cash-machine/quote` (R4-2) — `payments:create`. El cuerpo es el de `POST /orders`; se lee y
- * se autoriza igual (cortesía, aprobación del descuento, regalo de la cuenta) y se cotiza EN LÍNEA sin escribir nada.
+ * `POST /api/v1/mobile/venues/:venueId/cash-machine/quote` (R4-2) — `payments:create`. El cuerpo es el de `POST /orders`; se lee igual
+ * y se cotiza EN LÍNEA sin escribir nada. Un carrito con descuento ni siquiera pide permisos: la fase 1a no lo cobra en la máquina
+ * (decisión a del founder), así que contesta `DESCUENTO` sin gastar un PIN.
  */
 export async function cotizar(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.params
     const leida = leerVentaDeMostrador(req.body, { conPropinaDeOrden: true, venueId, usuario: req.authContext!.userId })
     if ('error' in leida) throw new BadRequestError(leida.error)
-    // La cotización es en línea por definición: una marca de cola en el cuerpo no relaja permisos ni precios.
+    // La cotización es en línea por definición: una marca de cola en el cuerpo no relaja precios.
     const input: CreateOrderInput = { ...leida.input, isOfflineReplay: false }
-    const autoridad = await autoridadDeLaVenta(req, input)
     // R5#4: el premio de sellos se aplica DESPUÉS de crear la cuenta; con él pendiente, la máquina no cobra.
     const premioPendiente = typeof req.body?.stampRewardId === 'string' && req.body.stampRewardId.length > 0
-    const cotizacion = await conCortesiaSiRegala(req, res, cortesia =>
-      cotizarParaLaMaquina(
-        venueId,
-        { ...input, ...autoridad, ...(cortesia ? { canCompItems: true, performedBy: req.authContext?.userId } : {}) },
-        { premioPendiente, carrito: req.body },
-      ),
-    )
-    if (!cotizacion) return // el 403 del permiso de cortesía ya salió
+    const autoridad = premioPendiente || pedidoConDescuento(input) ? {} : await autoridadDeLaVenta(req, input)
+    const cotizacion = await cotizarParaLaMaquina(venueId, { ...input, ...autoridad }, { premioPendiente, carrito: req.body })
     res.status(200).json({ success: true, ...cotizacion })
   } catch (error) {
     next(error)
@@ -152,11 +153,20 @@ export async function consultarDuda(req: Request, res: Response, next: NextFunct
   }
 }
 
-/** `GET /api/v1/{mobile|dashboard}/venues/:venueId/cash-machine/doubts` — `cash-machine:resolve`. Acotada: `{ data, total, nextCursor }`. */
+/**
+ * `GET /api/v1/{mobile|dashboard}/venues/:venueId/cash-machine/doubts` — `cash-machine:resolve`. Todas las incidencias de la máquina
+ * (cada una con su `kind`), acotada: `{ data, total, nextCursor }`. ?status&kind&folio&cursor&limit.
+ */
 export async function listarDudas(req: Request, res: Response, next: NextFunction) {
   try {
-    const { status, cursor, limit } = req.query as { status?: 'ABIERTO' | 'RESUELTO'; cursor?: string; limit?: number }
-    res.status(200).json({ success: true, ...(await listarDudasDeLaMaquina(req.params.venueId, { status, cursor, limit })) })
+    const { status, kind, folio, cursor, limit } = req.query as {
+      status?: 'ABIERTO' | 'RESUELTO'
+      kind?: string
+      folio?: string
+      cursor?: string
+      limit?: number
+    }
+    res.status(200).json({ success: true, ...(await listarDudasDeLaMaquina(req.params.venueId, { status, kind, folio, cursor, limit })) })
   } catch (error) {
     next(error)
   }
@@ -179,6 +189,33 @@ export async function resolverDuda(req: Request, res: Response, next: NextFuncti
       (pedido, subidoPor) => armarVentaDeLaMaquina(req, pedido, venueId, subidoPor),
     )
     res.status(resultado.status).json({ success: true, ...resultado.body })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * `POST /api/v1/{mobile|dashboard}/venues/:venueId/cash-machine/incidents/:incidentId/review` — `cash-machine:resolve` (Codex r1 #7).
+ * El gerente da por revisada una incidencia que no es duda, con una nota. El gerente es el de la sesión.
+ */
+export async function revisarIncidencia(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, incidentId } = req.params
+    res
+      .status(200)
+      .json({ success: true, ...(await revisarIncidenciaDeLaMaquina(venueId, req.authContext!.userId, incidentId, req.body.note)) })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * `GET /api/v1/mobile/venues/:venueId/shifts/business-current` — `shifts:read` (R3#8, Codex r1 #13). El turno vivo del NEGOCIO para la
+ * PC de la máquina, que no tiene gaveta: el contrato del plan, tal cual — `{ shiftId, startTime }` o `null` —.
+ */
+export async function turnoDelNegocio(req: Request, res: Response, next: NextFunction) {
+  try {
+    res.status(200).json(await turnoDelNegocioAhora(req.params.venueId))
   } catch (error) {
     next(error)
   }

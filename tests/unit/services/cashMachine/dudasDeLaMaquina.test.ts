@@ -37,6 +37,7 @@ import {
   consultarDudaDeLaMaquina,
   listarDudasDeLaMaquina,
   resolverDudaDeLaMaquina,
+  revisarIncidenciaDeLaMaquina,
   subirDudaDeLaMaquina,
   type DudaDeLaMaquina,
   type ResolucionDelGerente,
@@ -110,8 +111,19 @@ beforeEach(() => {
     const sql = sqlDe(plantilla)
     if (sql.includes('CashMachineIncident')) {
       const values = Array.isArray(plantilla) ? resto : ((plantilla?.values ?? []) as unknown[])
-      const kind = String(values.find(v => ['CONFLICTO', 'IMPOSIBLE', 'NO_SE_PUDO_REGISTRAR'].includes(String(v))))
-      incidencias.set(kind, { id: `inc-${kind}`, kind, values })
+      const kind = String(values.find(v => ['CONFLICTO', 'IMPOSIBLE', 'NO_SE_PUDO_REGISTRAR', 'TRAS_REVOCAR'].includes(String(v))))
+      const crudo = values.find(v => typeof v === 'string' && v.startsWith('{"eventos"')) as string
+      const previa = incidencias.get(kind)
+      if (previa) previa.payload.eventos.push(JSON.parse(crudo).eventos[0])
+      else
+        incidencias.set(kind, {
+          id: `inc-${kind}`,
+          kind,
+          status: 'ABIERTO',
+          values,
+          payload: JSON.parse(crudo),
+          deviceId: values[values.indexOf(crudo) + 1],
+        })
       return [{ id: `inc-${kind}` }]
     }
     if (sql.includes('hashtextextended')) return [{ pg_advisory_xact_lock: '' }]
@@ -143,6 +155,9 @@ beforeEach(() => {
     const k = a?.where?.venueId_referenceCC_kind
     return k && k.referenceCC === REF ? (incidencias.get(k.kind) ?? null) : null
   })
+  prismaMock.cashMachineIncident.findMany.mockImplementation(async (a: any) =>
+    [...incidencias.values()].filter(f => !a?.where?.kind?.in || a.where.kind.in.includes(f.kind)),
+  )
   prismaMock.cashMachineIncident.create.mockImplementation(async ({ data }: any) => {
     const fila = { id: 'duda-1', createdAt: new Date('2026-11-20T18:01:00.000Z'), resolvedByStaffId: null, resolvedAt: null, ...data }
     incidencias.set(data.kind, fila)
@@ -291,13 +306,20 @@ describe('subirDudaDeLaMaquina (la PC no sabe cómo terminó)', () => {
     expect(prismaMock.cashMachineIncident.create).not.toHaveBeenCalled()
   })
 
-  it('🔴 la PC revocada re-envía SU duda (misma respuesta), pero no abre una nueva', async () => {
+  it('🔴 la PC revocada re-envía SU duda: misma respuesta, sin otra fila ni incidencia', async () => {
     const primera = await subir()
     binding = { active: false }
     await expect(subir()).resolves.toEqual(primera)
-    incidencias.clear() // un folio que el servidor no tiene
-    await expect(subir()).rejects.toMatchObject({ statusCode: 403, code: 'CASH_MACHINE_NOT_PAIRED' })
     expect(prismaMock.cashMachineIncident.create).toHaveBeenCalledTimes(1)
+    expect(incidencias.has('TRAS_REVOCAR')).toBe(false)
+  })
+
+  it('🔴 Codex r1 #5 (decisión d): la PC revocada entrega una duda NUEVA (cobró sin red antes del relevo): se guarda y queda TRAS_REVOCAR', async () => {
+    binding = { active: false }
+    await expect(subir()).resolves.toEqual({ status: 'ABIERTO', referenceCC: REF })
+    expect(incidencias.get('ESPERANDO')).toMatchObject({ status: 'ABIERTO', deviceId: 'terminal-pc' })
+    expect(incidencias.has('TRAS_REVOCAR')).toBe(true)
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CASH_MACHINE_FOLIO_AFTER_UNPAIR' }))
   })
 
   it('🔴 R5#2: la PC revocada todavía sube el cierre real de SU duda (y la duda se cierra)', async () => {
@@ -307,6 +329,7 @@ describe('subirDudaDeLaMaquina (la PC no sabe cómo terminó)', () => {
       referenceCC: REF,
       cierre: {
         outcome: 'GUARDADO',
+        cancelMode: '2',
         dueCents: 18750,
         saleCents: 18750,
         tipCents: 0,
@@ -343,6 +366,7 @@ describe('listarDudasDeLaMaquina (acotada, R4-4)', () => {
   const fila = (i: number) => ({
     id: `duda-${String(i).padStart(3, '0')}`,
     referenceCC: REF,
+    kind: 'ESPERANDO',
     status: 'ABIERTO',
     deviceId: 'terminal-pc',
     createdAt: new Date(Date.UTC(2026, 10, 20, 18, 0, 0) - i * 1000),
@@ -358,7 +382,8 @@ describe('listarDudasDeLaMaquina (acotada, R4-4)', () => {
     const consulta = prismaMock.cashMachineIncident.findMany.mock.calls[0][0]
     expect(consulta.take).toBe(101)
     expect(consulta.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
-    const filtro = { venueId: 'venue-1', kind: 'ESPERANDO', status: 'ABIERTO' }
+    // Codex r1 #7: todas las incidencias abiertas, no sólo las dudas.
+    const filtro = { venueId: 'venue-1', status: 'ABIERTO' }
     expect(consulta.where).toEqual(filtro)
     expect(prismaMock.cashMachineIncident.count.mock.calls[0][0].where).toEqual(filtro)
     expect(r).toMatchObject({ total: 3, nextCursor: null })
@@ -376,7 +401,7 @@ describe('listarDudasDeLaMaquina (acotada, R4-4)', () => {
     prismaMock.cashMachineIncident.findMany.mockResolvedValueOnce([fila(3)])
     const r2 = await listarDudasDeLaMaquina('venue-1', { limit: 2, status: 'RESUELTO', cursor: r.nextCursor! })
     const where = prismaMock.cashMachineIncident.findMany.mock.calls[1][0].where
-    expect(where.AND[0]).toEqual({ venueId: 'venue-1', kind: 'ESPERANDO', status: 'RESUELTO' })
+    expect(where.AND[0]).toEqual({ venueId: 'venue-1', status: 'RESUELTO' })
     expect(where.AND[1]).toEqual({
       OR: [{ createdAt: { lt: fila(2).createdAt } }, { createdAt: fila(2).createdAt, id: { lt: 'duda-002' } }],
     })
@@ -501,15 +526,25 @@ describe('resolverDudaDeLaMaquina (el gerente, con su sesión)', () => {
     prismaMock.product.findMany.mockResolvedValue([])
     armarPedido.mockResolvedValueOnce(pedidoArmado({ items: [{ productId: 'prod-borrado', quantity: 1 }] as any }))
     const r = await resolver()
-    expect(r).toEqual({ status: 202, body: { referenceCC: REF, incident: 'NO_SE_PUDO_REGISTRAR' } })
+    expect(r).toEqual({
+      status: 202,
+      body: {
+        referenceCC: REF,
+        incident: 'NO_SE_PUDO_REGISTRAR',
+        motivo: 'VENTA_RECHAZADA',
+        outcome: 'PAGADO',
+        resolvedBy: 'GERENTE',
+        dueCents: 18750,
+        saleCents: 18750,
+        tipCents: 0,
+        creditCents: 20000,
+        changeDispensedCents: 1250,
+      },
+    })
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
     expect(incidencias.get('NO_SE_PUDO_REGISTRAR')).toBeDefined()
     expect(incidencias.get('ESPERANDO')).toMatchObject({ status: 'RESUELTO', resolvedByStaffId: GERENTE })
-    await expect(consultarDudaDeLaMaquina('venue-1', REF)).resolves.toEqual({
-      status: 'RESUELTO',
-      referenceCC: REF,
-      incident: 'NO_SE_PUDO_REGISTRAR',
-    })
+    await expect(consultarDudaDeLaMaquina('venue-1', REF)).resolves.toEqual({ status: 'RESUELTO', ...r.body })
     // La misma resolución otra vez: lo mismo, sin volver a armar la venta; otra, 409.
     await expect(resolver()).resolves.toEqual(r)
     await expect(resolver({ outcome: 'CANCELADO', creditCents: 5000, changeDispensedCents: 0 })).rejects.toMatchObject({
@@ -524,6 +559,7 @@ describe('resolverDudaDeLaMaquina (el gerente, con su sesión)', () => {
       referenceCC: REF,
       cierre: {
         outcome: 'GUARDADO',
+        cancelMode: '2',
         dueCents: 18750,
         saleCents: 18750,
         tipCents: 0,
@@ -535,5 +571,177 @@ describe('resolverDudaDeLaMaquina (el gerente, con su sesión)', () => {
     expect(marcas).toHaveLength(1)
     expect(marcas[0].enTx).toBe(true)
     expect(incidencias.get('ESPERANDO')).toMatchObject({ status: 'RESUELTO', resolvedByStaffId: null })
+  })
+})
+
+describe('Codex r1 #3, #4, #6, #7 y #12 en las dudas', () => {
+  const PC_B: AutorDeLaMaquina = { userId: 'staff-B', deviceUid: 'pc-uid-2', credencial: 'credencial-de-la-pc' }
+  const cierrePagado = {
+    outcome: 'PAGADO' as const,
+    dueCents: 18750,
+    saleCents: 18750,
+    tipCents: 0,
+    creditCents: 20000,
+    changeDispensedCents: 1250,
+    occurredAtKnown: true,
+    occurredAt: '2026-11-20T18:00:00.000Z',
+    saleShiftId: 'shift-A',
+  }
+
+  it('🔴 #3: el folio ya quedó «no se pudo registrar» (202): una duda tardía recibe ESE desenlace estable y no abre otra', async () => {
+    const r = await registrarVentaDeLaMaquina('venue-1', PC, {
+      referenceCC: REF,
+      cierre: cierrePagado,
+      pedido: pedidoArmado({ discount: 500 }),
+    })
+    expect(r.status).toBe(202)
+    await expect(subir()).resolves.toEqual({ status: 'RESUELTO', ...r.body })
+    expect(prismaMock.cashMachineIncident.create).not.toHaveBeenCalled()
+    await expect(consultarDudaDeLaMaquina('venue-1', REF)).resolves.toEqual({ status: 'RESUELTO', ...r.body })
+  })
+
+  it('🔴 #10 (decisión a): una duda con cortesía NO se vuelve venta con los permisos del gerente que confirma el dinero: 202 DESCUENTO', async () => {
+    await subir()
+    armarPedido.mockResolvedValueOnce(
+      pedidoArmado({
+        items: [{ name: 'Pastel', quantity: 1, unitPrice: 18750, isCortesia: true, cortesiaReason: 'x' }] as any,
+        canCompItems: true,
+        performedBy: GERENTE,
+      }),
+    )
+    const r = await resolver()
+    expect(r).toMatchObject({ status: 202, body: { motivo: 'DESCUENTO', resolvedBy: 'GERENTE', creditCents: 20000 } })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(incidencias.get('ESPERANDO')).toMatchObject({ status: 'RESUELTO' })
+  })
+
+  it('🔴 #4: la duda la subió la PC A; la PC B (otra máquina) con el mismo folio recibe 409 con incidencia, nunca la duda de A', async () => {
+    await subir()
+    prismaMock.terminal.findFirst.mockResolvedValue({ id: 'terminal-B' })
+    prismaMock.cashMachineBinding.findFirst.mockResolvedValue({ active: true })
+    await expect(subir({}, PC_B)).rejects.toMatchObject({ statusCode: 409, code: 'CASH_MACHINE_DOUBT_CONFLICT' })
+    expect(incidencias.get('CONFLICTO')).toBeDefined()
+    expect(incidencias.get('ESPERANDO')).toMatchObject({ deviceId: 'terminal-pc', status: 'ABIERTO' })
+  })
+
+  it('🔴 #4: el cierre lo guardó A: la duda de B no recibe la evidencia de A (409)', async () => {
+    await registrarVentaDeLaMaquina('venue-1', PC, { referenceCC: REF, cierre: cierrePagado, pedido: pedidoArmado() })
+    prismaMock.terminal.findFirst.mockResolvedValue({ id: 'terminal-B' })
+    prismaMock.cashMachineBinding.findFirst.mockResolvedValue({ active: true })
+    await expect(subir({}, PC_B)).rejects.toMatchObject({ statusCode: 409 })
+  })
+
+  it('🔴 #6: la duda ya está RESUELTO y el cierre todavía no se ve en la primera lectura: nunca fabrica «no se pudo registrar»', async () => {
+    await subir()
+    incidencias.get('ESPERANDO').status = 'RESUELTO'
+    const r = await consultarDudaDeLaMaquina('venue-1', REF)
+    expect(r).not.toMatchObject({ incident: 'NO_SE_PUDO_REGISTRAR' })
+    expect(r).toEqual({ status: 'ABIERTO', referenceCC: REF })
+    // Con el cierre ya visible, la evidencia real.
+    cierres.push({ id: 'close-1', referenceCC: REF, outcome: 'PAGADO', resolvedBy: 'GERENTE', deviceId: 'terminal-pc' })
+    await expect(consultarDudaDeLaMaquina('venue-1', REF)).resolves.toMatchObject({ status: 'RESUELTO', outcome: 'PAGADO' })
+  })
+
+  it('🔴 #6: la duda se lee ANTES que el cierre', async () => {
+    const orden: string[] = []
+    prismaMock.cashMachineIncident.findUnique.mockImplementation(async () => (orden.push('duda'), null) as any)
+    prismaMock.cashMachineClose.findUnique.mockImplementation(async () => (orden.push('cierre'), null) as any)
+    await consultarDudaDeLaMaquina('venue-1', REF).catch(() => undefined)
+    expect(orden.slice(0, 2)).toEqual(['duda', 'cierre'])
+  })
+
+  it('🔴 #7: una segunda duda con otros importes guarda la versión nueva (CONFLICTO) antes del 409', async () => {
+    await subir()
+    await expect(subir({ dueCents: 19000, saleCents: 19000 })).rejects.toMatchObject({ statusCode: 409 })
+    const conflicto = incidencias.get('CONFLICTO')
+    expect(conflicto.payload.eventos[0]).toMatchObject({ duda: { dueCents: 19000 }, registrada: { dueCents: 18750 } })
+  })
+
+  it('🔴 #12 (decisión h): una duda con adeudo de $187.35 o de $0 es 422 con incidencia, no una duda', async () => {
+    await expect(subir({ dueCents: 18735, saleCents: 18735 })).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'CASH_MACHINE_CLOSE_IMPOSSIBLE',
+    })
+    await expect(subir({ dueCents: 0, saleCents: 0 })).rejects.toMatchObject({ statusCode: 422 })
+    expect(prismaMock.cashMachineIncident.create).not.toHaveBeenCalled()
+    expect(incidencias.get('IMPOSIBLE')).toBeDefined()
+  })
+})
+
+describe('Codex r1 #7: la bandeja trae todas las incidencias y el gerente revisa las que no son duda', () => {
+  it('🔴 la lista trae el IMPOSIBLE de un 422 con su tipo, cuántas veces llegó y su evidencia', async () => {
+    prismaMock.cashMachineIncident.count.mockResolvedValue(1)
+    prismaMock.cashMachineIncident.findMany.mockResolvedValue([
+      {
+        id: 'inc-1',
+        referenceCC: REF,
+        kind: 'IMPOSIBLE',
+        status: 'ABIERTO',
+        deviceId: 'terminal-pc',
+        createdAt: new Date('2026-11-20T18:00:00.000Z'),
+        resolvedByStaffId: null,
+        resolvedAt: null,
+        payload: { eventos: [{ cierre: { outcome: 'CANCELADO', creditCents: 18750 } }, { cierre: { outcome: 'CANCELADO' } }], veces: 2 },
+      },
+    ] as any)
+    const r = await listarDudasDeLaMaquina('venue-1', { kind: 'IMPOSIBLE', folio: 'aq0123' })
+    expect(prismaMock.cashMachineIncident.findMany.mock.calls[0][0].where).toEqual({
+      venueId: 'venue-1',
+      status: 'ABIERTO',
+      kind: 'IMPOSIBLE',
+      referenceCC: { contains: 'AQ0123' },
+    })
+    expect(r.data[0]).toMatchObject({
+      kind: 'IMPOSIBLE',
+      veces: 2,
+      primerEvento: { cierre: { outcome: 'CANCELADO', creditCents: 18750 } },
+      ultimoEvento: { cierre: { outcome: 'CANCELADO' } },
+    })
+  })
+
+  it('🔴 revisar: queda RESUELTO con el gerente y su nota, en la bitácora; repetirlo no hace nada', async () => {
+    prismaMock.cashMachineIncident.findFirst.mockResolvedValue({
+      id: 'inc-1',
+      referenceCC: REF,
+      kind: 'IMPOSIBLE',
+      status: 'ABIERTO',
+    } as any)
+    prismaMock.$executeRaw.mockResolvedValue(1)
+    await expect(revisarIncidenciaDeLaMaquina('venue-1', GERENTE, 'inc-1', 'La máquina devolvió todo')).resolves.toEqual({
+      id: 'inc-1',
+      referenceCC: REF,
+      kind: 'IMPOSIBLE',
+      status: 'RESUELTO',
+    })
+    const update = prismaMock.$executeRaw.mock.calls[0]
+    expect(sqlDe(update[0])).toContain('"status" = \'ABIERTO\'')
+    expect(update.slice(1)).toEqual(expect.arrayContaining([GERENTE, 'inc-1', 'venue-1']))
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CASH_MACHINE_INCIDENT_REVIEWED', staffId: GERENTE }))
+    prismaMock.cashMachineIncident.findFirst.mockResolvedValue({
+      id: 'inc-1',
+      referenceCC: REF,
+      kind: 'IMPOSIBLE',
+      status: 'RESUELTO',
+    } as any)
+    jest.mocked(logAction).mockClear()
+    await revisarIncidenciaDeLaMaquina('venue-1', GERENTE, 'inc-1', 'otra vez')
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('una duda (ESPERANDO) no se revisa: se resuelve (409); otra sucursal o un id inventado: 404', async () => {
+    prismaMock.cashMachineIncident.findFirst.mockResolvedValueOnce({
+      id: 'd',
+      referenceCC: REF,
+      kind: 'ESPERANDO',
+      status: 'ABIERTO',
+    } as any)
+    await expect(revisarIncidenciaDeLaMaquina('venue-1', GERENTE, 'd', 'x')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CASH_MACHINE_DOUBT_NEEDS_RESOLUTION',
+    })
+    prismaMock.cashMachineIncident.findFirst.mockResolvedValueOnce(null)
+    await expect(revisarIncidenciaDeLaMaquina('venue-1', GERENTE, 'otro', 'x')).rejects.toMatchObject({ statusCode: 404 })
+    expect(prismaMock.cashMachineIncident.findFirst.mock.calls[1][0].where).toEqual({ id: 'otro', venueId: 'venue-1' })
   })
 })
