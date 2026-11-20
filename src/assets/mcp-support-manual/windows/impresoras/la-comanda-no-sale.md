@@ -6,7 +6,7 @@ category: impresoras
 task: la-comanda-no-sale
 requiredPermissions: []
 sourceRepo: avoqado-android
-sourceRef: f342ea4ea9da7f24eb576f8efa038e4861408cc0
+sourceRef: c07a2bbebf453598963bf96f3208f66193dd5efb
 keywords:
   - la comanda no sale
   - no salió la comanda
@@ -14,9 +14,6 @@ keywords:
   - reimprimir comanda
   - volver a imprimir
   - ya la canté
-  - pantalla de cocina no está conectada
-  - no se alcanza por el wifi
-  - avisa no salió la comanda con pantalla de cocina
 ---
 
 ## Antes de empezar
@@ -39,6 +36,3 @@ El aviso «No salió la comanda de: …» dice qué no salió. Ese aviso no canc
 - Tocar fuera del aviso sólo lo esconde: no la da por resuelta.
 - Si el aviso trae *Volver a imprimir* y la app sigue abierta, esa comanda se vuelve a intentar sola, y puede repetir lo que ya salió: si la cocina ya tiene todo, toca *Ya la canté*. Sólo se guarda la última: una anterior, reimprímela desde *Pedidos* o desde la mesa.
 - Desde la mesa, *Volver a imprimir pedido* no reparte los productos por su categoría: puede no salir en la misma impresora que la original.
-- Si la estación sólo tiene **pantalla de cocina** (sin impresora) y hay internet, ya no sale «No salió la comanda» en cada orden: la pantalla la toma de internet. Con un abono, sin internet o con una impresora que falla, el aviso sigue.
-- Si arriba sale «La pantalla de cocina de … no está conectada», esa pantalla está cerrada, apagada o sin internet: ábrela; sus comandas le llegan cuando se conecte.
-- Si arriba sale «La pantalla de … no se alcanza por el WiFi», la caja y la pantalla no se encuentran en la red del local: ponlas en el mismo WiFi (no el de invitados). Sin internet, a esa pantalla sólo le llega lo que va por el WiFi.

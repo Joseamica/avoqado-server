@@ -91,7 +91,7 @@
       "requiredPermissions": []
     },
     "android/impresoras/la-comanda-no-sale": {
-      "sha256": "f254d627d8829e809fcf2a1c23f945e075ed5f31588d45eb291ac2914ad18fdb",
+      "sha256": "96711a8277aea282ab50b53be4c0eec45004073e250287083251a5512ceafa9d",
       "requiredPermissions": []
     },
     "android/inventario/contar-existencia": {
@@ -1059,7 +1059,7 @@
       "requiredPermissions": []
     },
     "windows/impresoras/la-comanda-no-sale": {
-      "sha256": "a21da330811254446c4f0e15a510ee4c66e44d04699ef44c846e5541a86d54bd",
+      "sha256": "267ba4739f4f3bc71ab0e8c1081e0b5c8ace245f85874cb18a0392363d3ffb14",
       "requiredPermissions": []
     },
     "windows/inventario/contar-existencia": {

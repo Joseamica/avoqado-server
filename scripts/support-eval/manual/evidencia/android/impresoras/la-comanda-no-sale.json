@@ -1,7 +1,7 @@
 {
   "pagina": "android/impresoras/la-comanda-no-sale",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
   "version": "2.25.42",
   "pasos": [
     {
@@ -281,31 +281,6 @@
       "ruta": "Problema: Pedidos pide orders:read (detalle)",
       "archivo": "avoqado-server/src/routes/mobile.routes.ts",
       "linea": 788
-    },
-    {
-      "ruta": "Problema: con pantalla de cocina, sin papel y con la venta en el servidor ya no se avisa por orden",
-      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/printing/ComandaDispatcher.kt",
-      "linea": 498
-    },
-    {
-      "ruta": "Problema: con un abono el aviso sigue",
-      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
-      "linea": 6135
-    },
-    {
-      "ruta": "Problema: la franja «La pantalla de cocina de … no está conectada»",
-      "archivo": "app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt",
-      "linea": 177
-    },
-    {
-      "ruta": "Problema: la franja «… no se alcanza por el WiFi»",
-      "archivo": "app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt",
-      "linea": 182
-    },
-    {
-      "ruta": "Problema: la franja sale arriba cuando hay internet",
-      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/ConnectivityBanner.kt",
-      "linea": 81
     }
   ],
   "aparato": {
