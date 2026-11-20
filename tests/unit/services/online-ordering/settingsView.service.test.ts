@@ -4,6 +4,7 @@ jest.mock('@/services/online-ordering/presence.service', () => ({
   __esModule: true,
   getAcceptingStatus: jest.fn(async () => ({ status: 'OPEN', reason: null, config: {} })),
   storeView: jest.fn(() => ({ status: 'OPEN' })),
+  proximaHoraLimite: jest.fn(async () => null),
 }))
 jest.mock('@/services/online-ordering/settings.service', () => ({
   __esModule: true,
