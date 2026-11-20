@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client'
+import { Prisma, type OnlineOrder } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { utcTs } from '@/utils/sqlDates'
@@ -93,16 +93,10 @@ export const GRACIA_DESPLIEGUE_MS = 20 * 60_000
 export const AVANCE_MINIMO_MS = 5 * 60_000
 
 /** Lo que la lectura de la pausa sola necesita de cada pedido: sólo datos que no cambian después de su hora límite. */
-const PEDIDO_DE_LA_PAUSA = {
-  id: true,
-  acceptDeadlineAt: true,
-  staffAnsweredAt: true,
-  rejectedAt: true,
-  rejectReason: true,
-  cancelledAt: true,
-  cancelledBy: true,
-} satisfies Prisma.OnlineOrderSelect
-type PedidoDeLaPausa = Prisma.OnlineOrderGetPayload<{ select: typeof PEDIDO_DE_LA_PAUSA }>
+type PedidoDeLaPausa = Pick<
+  OnlineOrder,
+  'id' | 'acceptDeadlineAt' | 'staffAnsweredAt' | 'rejectedAt' | 'rejectReason' | 'cancelledAt' | 'cancelledBy'
+>
 
 /**
  * El pedido terminó solo con 30 s de anticipación a su hora límite y sin una persona: la clienta lo canceló, o el sistema lo rechazó por
