@@ -79,6 +79,7 @@ import {
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
 import { apartarUsoDeMesaEnTx, devolverUsoDelDescuentoEnTx, sumarUsosDeVentaEnTx } from '../shared/usoDelDescuento'
+import { anotarEnvioEnTx, envioYaHechoEnTx, firmaDelManual, type DescuentoManualDeMesa } from '../shared/llaveDelDescuentoDeMesa'
 import { apartarCupon, cuponDeLaVenta, ligarCupon, montoDelCupon, textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
 import { aCentavos, comoJson, esFilaDeValeV7, nuevoRepartoDeCuenta, porcentajeEnCentavos } from '../shared/repartoDescuento'
 import { descuentoComoLoCobroLaTpvVieja } from '../shared/descuentoDeTpvVieja'
@@ -3119,7 +3120,11 @@ export async function applyOrderDiscountInTransaction(
   tx: TxConReintento,
   venueId: string,
   orderId: string,
-  discountId: string,
+  /**
+   * El id de un descuento del catálogo, o (encargo 7133e3, hz:0555ee15:D2) un descuento MANUAL de la caja: % o fijo, con su llave
+   * de envío. El manual pasa por el MISMO candado, las mismas guardas y el mismo tope contra lo que queda que el del catálogo.
+   */
+  discountId: string | DescuentoManualDeMesa,
   /** La sesión que lo aplica (su membresía queda en `appliedById`). */
   staffId?: string,
   /** Quien aplica tiene `orders:comp` (D1). Falla cerrado: sin él, un descuento COMP es 403. */
@@ -3149,6 +3154,92 @@ export async function applyOrderDiscountInTransaction(
   await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'descuentos')
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede descontar una orden ya pagada')
+  }
+
+  // Encargo 7133e3 (hz:0555ee15:D2): el descuento MANUAL de la caja, % o fijo, como el de MOSTRADOR. Va AQUÍ, con el candado y las
+  // guardas de arriba (importada, de tarjetas, pagada o con abono), y escribe su fila igual que el del catálogo (histórico, reparto,
+  // recálculo). No es una cortesía (`COMP` no entra: tiene su botón y su permiso) ni suma usos del catálogo (no tiene `discountId`).
+  if (typeof discountId !== 'string') {
+    const manual = discountId
+    if (manual.type !== 'PERCENTAGE' && manual.type !== 'FIXED_AMOUNT') throw new BadRequestError('Tipo de descuento manual inválido')
+    // Codex r2 #1: el valor se normaliza a 2 decimales ANTES de calcular y de decidir si regala; es el mismo que se guarda y el que
+    // re-deriva el recálculo (sin eso, $1.005 o 99.99996 % se comparaban de un modo y se guardaban de otro).
+    const value = new Prisma.Decimal(manual.value).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+    if (!Number.isFinite(value) || value <= 0) throw new BadRequestError('El descuento debe ser mayor a cero')
+    if (manual.type === 'PERCENTAGE' && value > 100) throw new BadRequestError('El porcentaje no puede ser mayor a 100')
+    const name = manual.name.trim() || 'Descuento manual'
+    const firma = firmaDelManual({ ...manual, value, name }, motivo)
+
+    // La llave del envío contesta la fila ya hecha (respuesta perdida, reintento, cola): nunca dos filas por un toque.
+    const yaHecho = await envioYaHechoEnTx(tx, venueId, orderId, manual.llave, firma)
+    if (yaHecho) {
+      const actual = await tx.order.findFirst({
+        where: { id: orderId, venueId },
+        select: { subtotal: true, discountAmount: true, serviceChargeAmount: true, total: true, version: true },
+      })
+      return {
+        row: {
+          id: yaHecho.orderDiscountId,
+          name: yaHecho.name,
+          amount: new Prisma.Decimal(yaHecho.amount),
+          authorizedById: null,
+          reason: null,
+        },
+        // Números, como la primera respuesta (`res.json` mandaría un Decimal como texto).
+        totals: {
+          subtotal: Number(actual!.subtotal),
+          discountAmount: Number(actual!.discountAmount),
+          serviceChargeAmount: Number(actual!.serviceChargeAmount),
+          total: Number(actual!.total),
+          version: actual!.version,
+        },
+        repetida: true as const,
+      }
+    }
+
+    // 🔴 MONEY: en centavos enteros y sólo lo que TODAVÍA no está descontado (el mismo recorte que el del catálogo).
+    const subtotalCents = aCentavos(order.subtotal)
+    const quedaCents = Math.max(0, subtotalCents - aCentavos(order.discountAmount))
+    if (quedaCents <= 0) throw new BadRequestError('La cuenta ya no tiene nada por descontar')
+    const brutoCents = manual.type === 'PERCENTAGE' ? porcentajeEnCentavos(subtotalCents, value) : Math.min(aCentavos(value), subtotalCents)
+    const amountCents = Math.min(brutoCents, quedaCents)
+    // hz:e0b12f00:D1 (founder, 6-nov), igual que el manual de la TPV: un % o fijo que deja en $0 lo que queda de los productos es una
+    // cortesía (con ESTE importe, en centavos; la propina y el cargo por servicio no cuentan). Sin el permiso de cortesía, 403: la ruta
+    // pide el PIN y repite; la cola lo deja en cuarentena (sin red no hay PIN). `aprobacion.porPin` = el gerente de ESE regalo.
+    const regala = amountCents >= quedaCents
+    if (regala && !puedeRegalar) throw new RegaloSinPermisoError()
+
+    const aplicoManual = staffId
+      ? ((await tx.staffVenue.findFirst({ where: { venueId, staffId, active: true }, select: { id: true } }))?.id ?? null)
+      : null
+    const autorizo = regala ? (aprobacion?.porPin ?? aplicoManual) : null
+
+    await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+    const fila = await tx.orderDiscount.create({
+      data: {
+        orderId,
+        type: manual.type,
+        name,
+        value,
+        amount: amountCents / 100,
+        isManual: true,
+        reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true, tope: null })),
+        appliedById: aplicoManual,
+        ...(autorizo ? { authorizedById: autorizo } : {}),
+        ...motivo,
+      },
+      select: { id: true, name: true, amount: true, authorizedById: true, reason: true },
+    })
+    const totalesManual = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+    // El importe que quedó tras el recálculo (un % se re-deriva): es el que contesta la misma llave después.
+    const final = await tx.orderDiscount.findFirst({ where: { id: fila.id, orderId }, select: { amount: true } })
+    const amountFinal = final?.amount ?? fila.amount
+    await anotarEnvioEnTx(tx, venueId, orderId, manual.llave, firma, {
+      orderDiscountId: fila.id,
+      name: fila.name,
+      amount: Number(amountFinal),
+    })
+    return { row: { ...fila, amount: amountFinal }, totals: totalesManual, repetida: false as const }
   }
 
   const discount = await tx.discount.findFirst({ where: { id: discountId, venueId } })
@@ -3242,17 +3333,23 @@ export async function applyOrderDiscountInTransaction(
 export async function applyOrderDiscount(
   venueId: string,
   orderId: string,
-  discountId: string,
+  discountId: string | DescuentoManualDeMesa,
   staffId?: string,
   puedeRegalar = false,
   aprobacion?: { porPin?: string },
   motivo: MotivoDeDescuento = {},
   opciones: { enLaCola?: boolean } = {},
 ) {
-  const { row, totals } = await withDeadlockRetry(
+  const resultado = await withDeadlockRetry(
     tx => applyOrderDiscountInTransaction(tx, venueId, orderId, discountId, staffId, puedeRegalar, aprobacion, motivo, opciones),
     { etiqueta: 'applyOrderDiscount', ...ORDER_LOCK_WAIT_BUDGET },
   )
+  const { row, totals } = resultado
+  const manual = typeof discountId === 'string' ? null : discountId
+  // 7133e3: la misma llave contestó la fila que ya existía; no se aplicó nada nuevo (su bitácora ya se escribió la primera vez).
+  if ('repetida' in resultado && resultado.repetida) {
+    return { orderDiscountId: row.id, name: row.name, amount: Number(row.amount), ...totals }
+  }
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_DISCOUNT_APPLIED',
@@ -3261,7 +3358,8 @@ export async function applyOrderDiscount(
     staffId,
     venueId,
     data: {
-      discountId,
+      discountId: typeof discountId === 'string' ? discountId : null,
+      ...(manual ? { manual: true, tipo: manual.type, valor: manual.value } : {}),
       name: row.name,
       amount: Number(row.amount),
       ...(row.authorizedById ? { aprobadoPor: row.authorizedById } : {}),
