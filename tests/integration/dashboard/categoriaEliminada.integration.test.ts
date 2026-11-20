@@ -137,6 +137,25 @@ describe('eliminar una categoría que sólo guarda archivados', () => {
     })
   })
 
+  it('al reusarla, otra clave SAT se rechaza con su porqué (eso es editar) y la misma o vacía pasan (Codex r10)', async () => {
+    const x = await negocio()
+    const { categoryId } = await eventoConArchivado(x)
+    await prisma.menuCategory.update({ where: { id: categoryId }, data: { defaultSatProductKey: '90101501' } })
+    await deleteMenuCategory(x.venueId, categoryId)
+
+    await expect(createMenuCategory(x.venueId, { name: 'EVENTO', defaultSatProductKey: '50202301' } as never)).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'CATEGORY_REUSE_SAT_CHANGE',
+    })
+    expect((await categoria(categoryId)).deletedAt).toBeInstanceOf(Date)
+
+    await createMenuCategory(x.venueId, { name: 'EVENTO', defaultSatProductKey: '90101501' } as never)
+    expect(await prisma.menuCategory.findUniqueOrThrow({ where: { id: categoryId } })).toMatchObject({
+      deletedAt: null,
+      defaultSatProductKey: '90101501',
+    })
+  })
+
   it('REGRESIÓN: otro nombre con el mismo slug que una eliminada («21» y «2+1») se rechaza como hoy y no la toca', async () => {
     const x = await negocio()
     // «2+1» con el slug que le daría el panel («21»), con un producto borrado.

@@ -199,6 +199,18 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
   const menuAssignments = (data.avoqadoMenus ?? []).map(menu => ({ menuId: menu.value }))
   const productIds = (data.avoqadoProducts ?? []).map(product => product.value)
 
+  // Cambiar la clave SAT de una categoría que ya existió es EDITARLA (permiso `menu:update`, y cambia lo que heredan sus ventas
+  // por facturar): el alta no lo hace a escondidas (Codex r10). Si trae otra clave, se dice y no se toca nada.
+  if (
+    reusar &&
+    ((conValor(createData.defaultSatProductKey) && createData.defaultSatProductKey !== reusar.defaultSatProductKey) ||
+      (conValor(createData.defaultSatUnitKey) && createData.defaultSatUnitKey !== reusar.defaultSatUnitKey))
+  ) {
+    throw new BadRequestError(
+      `Ya tuviste una categoría «${reusar.name}» con otra clave SAT. Créala sin clave SAT y después cámbiala en Editar categoría.`,
+      'CATEGORY_REUSE_SAT_CHANGE',
+    )
+  }
   const category = reusar
     ? await prisma
         .$transaction(async tx => {
@@ -215,12 +227,12 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
               isDemo: false,
               ...(horarioCompleto && { availableFrom: createData.availableFrom, availableUntil: createData.availableUntil }),
               ...(dias.length > 0 && { availableDays: { set: dias } }),
-              ...(conValor(createData.defaultSatProductKey) && { defaultSatProductKey: createData.defaultSatProductKey }),
-              ...(conValor(createData.defaultSatUnitKey) && { defaultSatUnitKey: createData.defaultSatUnitKey }),
               ...(createData.parent ? { parent: createData.parent } : {}),
               ...(createData.printStation ? { printStation: createData.printStation } : {}),
             },
           })
+          // Sus menús son los que eligió el alta, como al editarla (una asignación que se coló tras el «Eliminar» no estorba).
+          await tx.menuCategoryAssignment.deleteMany({ where: { categoryId: reusada.id } })
           if (menuAssignments.length > 0) {
             await tx.menuCategoryAssignment.createMany({ data: menuAssignments.map(m => ({ ...m, categoryId: reusada.id })) })
           }
