@@ -47,6 +47,8 @@ import { customerDisplayAckSchema } from '../schemas/mobile/customerDisplay.mobi
 import * as notificationMobileController from '../controllers/mobile/notification.mobile.controller'
 import * as supplierMobileController from '../controllers/mobile/supplier.mobile.controller'
 import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.mobile.controller'
+import * as cashMachineMobileController from '../controllers/mobile/cashMachine.mobile.controller'
+import { consultarVentaDeLaMaquinaSchema, registrarVentaDeLaMaquinaSchema } from '../schemas/mobile/cashMachine.schema'
 import { ponerLlaveDelRetiro } from '../lib/llaveDelRetiro'
 import * as purchaseOrderMobileController from '../controllers/mobile/purchase-order.mobile.controller'
 import * as transferMobileController from '../controllers/mobile/transfer.mobile.controller'
@@ -3661,6 +3663,29 @@ router.post(
   checkPermission('payments:create'),
   marcarPermiso('cash-drawer:pay-out', 'puedeRetirar'), // /sync es la otra puerta del PAY_OUT: misma regla con y sin red
   cashDrawerMobileController.syncEvents,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-machine/sales
+ * Máquina de efectivo (fase 1a, R4-1): UNA operación de la QuickPay por petición (folio = `referenceCC`). `PAGADO` crea la cuenta
+ * y su pago en la misma transacción que el cierre; `CANCELADO`/`GUARDADO`, sólo el cierre. Idempotente por folio.
+ * Body: { referenceCC, cierre: { outcome, dueCents, saleCents, tipCents, creditCents, changeDispensedCents, occurredAt?, occurredAtKnown, saleShiftId? }, pedido? }
+ */
+router.post(
+  '/venues/:venueId/cash-machine/sales',
+  authenticateTokenMiddleware,
+  validateRequest(registrarVentaDeLaMaquinaSchema),
+  checkPermission('payments:create'),
+  cashMachineMobileController.registrarVenta,
+)
+
+/** GET /api/v1/mobile/venues/:venueId/cash-machine/sales/:referenceCC — la misma evidencia que el POST (acuse perdido). */
+router.get(
+  '/venues/:venueId/cash-machine/sales/:referenceCC',
+  authenticateTokenMiddleware,
+  validateRequest(consultarVentaDeLaMaquinaSchema),
+  checkPermission('payments:read'),
+  cashMachineMobileController.consultarVenta,
 )
 
 // ============================================================================

@@ -448,6 +448,8 @@ export const APP_PERMITIDAS: ReadonlySet<string> = new Set([
 
 /** App del POS: secciones bloqueadas en un demo, con su razón. */
 export const APP_BLOQUEADAS: Readonly<Record<string, string>> = {
+  // Máquina de efectivo (fase 1a): hardware real del negocio; sus cierres e incidencias no los borra el reinicio del demo.
+  'cash-machine': 'cobrar con la máquina de efectivo',
   delivery: 'atender pedidos de Rappi o Uber',
   terminals: 'registrar terminales de cobro',
 }

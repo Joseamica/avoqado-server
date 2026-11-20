@@ -400,6 +400,8 @@ export interface CreateOrderInput {
   shiftIdDeLaVenta?: string | null
   /** S3: la caja que el POS tenía abierta al vender (sólo en un replay de la cola). El servicio la convierte en el turno de la venta. */
   cashDrawerSessionId?: string | null
+  /** Máquina de efectivo (server-owned, nunca del cuerpo): la venta nace sin turno, por conciliar (`ventaDeLaColaEnTx`). */
+  turnoPorConciliar?: boolean
   /**
    * «Cobrar sin red» (S6): el serial de la terminal del TOKEN (`authContext.terminalSerialNumber`, nunca del body). Si es de una
    * terminal de este negocio, la orden lleva su `terminalId` y la fuente `TPV`, como `/tpv`; si no, como hoy.
@@ -2136,6 +2138,7 @@ export async function crearVentaDeMostradorEnTx(
   const ventaDeLaCola = await ventaDeLaColaEnTx(tx, venueId, {
     shiftIdDeLaVenta: input.shiftIdDeLaVenta,
     cashDrawerSessionId: input.isOfflineReplay === true ? input.cashDrawerSessionId : null,
+    porConciliar: input.turnoPorConciliar === true,
   })
   const turnoDeLaOrden = await turnoDeLaOrdenQueNace(tx, venueId, ventaDeLaCola, turnoVivo)
 
@@ -4817,6 +4820,10 @@ export interface AbonoEnTxEntrada {
   terminalSerial?: string | null
   /** S6: la terminal del token, ya resuelta en este negocio. Con ella el pago lleva su `terminalId` y la fuente `TPV`. */
   terminalId?: string | null
+  /** Máquina de efectivo (R4-1): el folio de la QuickPay. El pago nace con `snapshotDeLaMaquina` (efectivo que NO está en el cajón). */
+  cashMachineRef?: string
+  /** Máquina de efectivo (R4-7 #8): sin turno conocido; el cobro queda por conciliar, nunca en el vivo. */
+  turnoPorConciliar?: boolean
 }
 
 export interface AbonoEnTx {
@@ -4859,6 +4866,21 @@ export interface AbonoEnTx {
   mesaAjena: { ownerId: string; ownerName: string } | null
   /** Rappi 2b: aviso que la persona tiene que conciliar con Rappi (post-commit), o null. */
   avisoRappi: AvisoDeRappiEfectivo | null
+}
+
+/**
+ * Máquina de efectivo (R4-1): la semántica con la que nace el pago de la QuickPay. Es efectivo para ventas y para la factura (01),
+ * pero la máquina lo guarda: `paymentCountsAsDrawerCash` dice que no está en el cajón (A5 lo separa en el corte).
+ */
+export function snapshotDeLaMaquina(cashMachineRef: string) {
+  return {
+    method: PaymentMethod.CASH,
+    fundsFlow: PaymentFundsFlow.EXTERNAL_RECORDED,
+    tenderLabel: 'Efectivo · máquina',
+    tenderSatFormaPago: '01',
+    tenderCountsAsCash: false,
+    cashMachineRef,
+  } as const
 }
 
 /**
@@ -4938,14 +4960,18 @@ export async function registrarAbonoEnTx(
       : input.tenderTypeId != null && input.tenderRevision != null
         ? await resolveTenderForCharge(venueId, input.tenderTypeId, input.tenderRevision, tx, input.isOfflineReplay ? 'replay' : 'online')
         : null
+  // Máquina de efectivo (R4-1): efectivo para ventas y factura (01) que la máquina guarda; nunca del cajón. Lo fija el servidor.
+  const maquina = entrada.cashMachineRef ? snapshotDeLaMaquina(entrada.cashMachineRef) : null
   const effectiveMethod = resolvedTender?.method ?? paymentMethod
   const fundsFlow =
-    resolvedTender?.fundsFlow ?? (effectiveMethod === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED)
+    resolvedTender?.fundsFlow ??
+    maquina?.fundsFlow ??
+    (effectiveMethod === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED)
   const countsAsDrawerCash = paymentCountsAsDrawerCash({
     method: effectiveMethod,
     fundsFlow,
     tenderTypeId: resolvedTender?.tenderTypeId ?? null,
-    tenderCountsAsCash: resolvedTender?.tenderCountsAsCash ?? null,
+    tenderCountsAsCash: resolvedTender?.tenderCountsAsCash ?? maquina?.tenderCountsAsCash ?? null,
   })
 
   // 🔴 Founder 3-oct (núcleo del servidor; Codex r10 #2): el efectivo de cajón EN VIVO es un cobro NUEVO —la persona todavía
@@ -5277,6 +5303,7 @@ export async function registrarAbonoEnTx(
   const ventaDeLaCola = await ventaDeLaColaEnTx(tx, venueId, {
     shiftIdDeLaVenta: entrada.shiftIdDeLaVenta,
     cashDrawerSessionId: entrada.isOfflineReplay === true ? entrada.cashDrawerSessionId : null,
+    porConciliar: entrada.turnoPorConciliar === true,
   })
   const shiftClaim = await claimShiftForCapturedPayment(tx, {
     venueId,
@@ -5369,11 +5396,12 @@ export async function registrarAbonoEnTx(
       // siendo efectivo de cajón (`fundsFlow` CASH_DRAWER manda) y la forma SAT sale del método (01), no la del canal.
       tenderTypeId: tenderDelCanal?.id ?? resolvedTender?.tenderTypeId,
       tenderRevision: tenderDelCanal?.revision ?? resolvedTender?.tenderRevision,
-      tenderLabel: tenderDelCanal?.name ?? resolvedTender?.tenderLabel,
-      tenderCountsAsCash: tenderDelCanal ? true : resolvedTender?.tenderCountsAsCash,
+      tenderLabel: tenderDelCanal?.name ?? resolvedTender?.tenderLabel ?? maquina?.tenderLabel,
+      tenderCountsAsCash: tenderDelCanal ? true : (resolvedTender?.tenderCountsAsCash ?? maquina?.tenderCountsAsCash),
       tenderCaptureTip: tenderDelCanal ? true : resolvedTender?.tenderCaptureTip,
       // La forma SAT sale del «Efectivo» elegido (01) o, sin tender, del método: nunca la del tipo de pago del canal.
-      tenderSatFormaPago: resolvedTender?.tenderSatFormaPago,
+      tenderSatFormaPago: resolvedTender?.tenderSatFormaPago ?? maquina?.tenderSatFormaPago,
+      cashMachineRef: maquina?.cashMachineRef ?? null,
       tenderCommissionPercent: tenderDelCanal ? tenderDelCanal.commissionPercent : resolvedTender?.tenderCommissionPercent,
       tenderCommissionAmount: tenderDelCanal
         ? computeTenderCommission(tenderDelCanal.commissionPercent, new Prisma.Decimal(amountDecimal))
@@ -6978,14 +7006,22 @@ async function montoDeLaVentaNuevaEnTx(
   cambiosDePrecio: CambioDePrecio[],
 ): Promise<Prisma.Decimal> {
   if (!cambiosDePrecio.some(c => c.unitPriceCents < c.displayedUnitPriceCents)) return monto
+  const pendiente = await saldoDeLaCuentaNuevaEnTx(tx, venueId, orderId)
+  return monto.greaterThan(pendiente) && pendiente.greaterThan(0) ? pendiente : monto
+}
+
+/**
+ * Lo que debe una cuenta que nació en ESTA transacción (todavía sin pagos), bajo su candado (el núcleo lo vuelve a tomar; es
+ * reentrante) y con la MISMA aritmética que el cobro (`computeOrderBalance`).
+ */
+async function saldoDeLaCuentaNuevaEnTx(tx: Prisma.TransactionClient, venueId: string, orderId: string): Promise<Prisma.Decimal> {
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
   const cuenta = await tx.order.findUnique({
     where: { id: orderId, venueId },
     select: { subtotal: true, discountAmount: true, serviceChargeAmount: true, contratoDePrecio: true, taxAmount: true, status: true },
   })
   if (!cuenta) throw new NotFoundError('Order not found')
-  const pendiente = computeOrderBalance(cuenta, []).remainingBalance
-  return monto.greaterThan(pendiente) && pendiente.greaterThan(0) ? pendiente : monto
+  return computeOrderBalance(cuenta, []).remainingBalance
 }
 
 /**
@@ -7168,6 +7204,159 @@ export async function payGiftCardOnNewOrder(
   const resultado = await terminarCobroConSaldo(ctx, cobrado)
   const { cambiosDePrecio } = creada.venta
   return cambiosDePrecio.length ? { ...resultado, priceChanges: cambiosDePrecio } : resultado
+}
+
+/** Máquina de efectivo: la cuenta con la llave del folio ya existía sin su cierre (otro escritor tomó `maquina-<folio>`). */
+export class CuentaDeLaMaquinaYaExiste extends Error {
+  constructor() {
+    super('CUENTA_DE_LA_MAQUINA_YA_EXISTE')
+  }
+}
+
+/** Lo que la máquina ya cobró, para registrarlo como una venta nueva pagada (R4-1). */
+export interface VentaQueCobroLaMaquina<T> {
+  /** El pedido como lo lee `POST /orders` (sin mesa, propina de orden ni llave: aquí se pisan). */
+  venta: CreateOrderInput
+  referenceCC: string
+  /** Centavos: la mercancía que cobró la máquina y la propina, aparte (R3#6). */
+  saleCents: number
+  tipCents: number
+  /** La sesión que sube el cierre: quien PROCESA el cobro (el vendedor de la cuenta sigue siendo `venta.staffId`). */
+  procesadoPor: string
+  /** Hora física del cierre (para reportes, D93); `null` = desconocida. */
+  horaDelCierre: Date | null
+  /** El turno de la venta (A) o, sin turno conocido, `porConciliar` (nunca el vivo). */
+  turno: { shiftIdDeLaVenta: string | null; porConciliar: boolean }
+  /** Dentro de la MISMA transacción, con el pago ya escrito: el cierre de la máquina. */
+  cerrarEnTx: (
+    tx: TxConReintento,
+    cobro: { orderId: string; paymentId: string; appliedCents: number; shiftId: string | null },
+  ) => Promise<T>
+}
+
+/**
+ * Máquina de efectivo (R4-1, R3#1, R3#6): la cuenta nace, se paga y se cierra en UNA transacción, así que ninguna otra caja la ve
+ * abierta. Se paga lo que la cuenta debe, a lo más `saleCents` (si el precio bajó, el resto es el excedente de quien llama); la
+ * propina va completa y aparte. Es dinero YA capturado (`isOfflineReplay`): el precio que vio el cliente se respeta como en la cola.
+ */
+export async function venderLoQueCobroLaMaquina<T>(venueId: string, v: VentaQueCobroLaMaquina<T>): Promise<T> {
+  const llave = `maquina-${v.referenceCC}`
+  const venta: CreateOrderInput = {
+    ...v.venta,
+    externalId: llave,
+    isOfflineReplay: true,
+    tableId: null,
+    splitType: null,
+    tip: 0,
+    payLater: null,
+    cashDrawerSessionId: null,
+    shiftIdDeLaVenta: v.turno.shiftIdDeLaVenta,
+    turnoPorConciliar: v.turno.porConciliar,
+  }
+  validarOrigenYTipoDeVenta(venta)
+  const llegada = new Date()
+  // Fuera de la transacción, lo que sólo lee (como `payGiftCardOnNewOrder`).
+  const prep = await prepararVentaDeMostrador(venueId, venta, llegada)
+  const effectiveStaffId = await validateStaffVenue(v.procesadoPor, venueId)
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
+  const cocinaConPreparacion = await debeMarcarCocina(venueId, { hasPreparation: true })
+  const cocinaSinPreparacion = await debeMarcarCocina(venueId, {})
+
+  const hecho = await withDeadlockRetry(
+    async tx => {
+      const creada = await crearVentaDeMostradorEnTx(tx, venueId, venta, prep)
+      if ('existente' in creada) throw new CuentaDeLaMaquinaYaExiste()
+      const orderId = creada.order.id
+      const conPreparacion = await tx.orderItem.findFirst({
+        where: { orderId, order: { venueId }, serviceCourse: { path: ['preparationVersion'], equals: 1 } },
+        select: { id: true },
+      })
+      const marcarCocina = conPreparacion ? cocinaConPreparacion : cocinaSinPreparacion
+      const saldoCents = pesosToCents((await saldoDeLaCuentaNuevaEnTx(tx, venueId, orderId)).toNumber())
+      const abono = await registrarAbonoEnTx(
+        tx,
+        { venueId, orderId, effectiveStaffId, marcarCocina, conSesionDeVales: false, rechazoDelPersonal: null },
+        {
+          amountCents: Math.max(0, Math.min(v.saleCents, saldoCents)),
+          tipCents: v.tipCents,
+          method: 'CASH',
+          idempotencyKey: llave,
+          isOfflineReplay: true,
+          ...(v.horaDelCierre ? { horaDelAparato: v.horaDelCierre.getTime() } : {}),
+          llegada,
+          tender: null,
+          cashMachineRef: v.referenceCC,
+          shiftIdDeLaVenta: v.turno.shiftIdDeLaVenta ?? undefined,
+          turnoPorConciliar: v.turno.porConciliar,
+        },
+        reconciliationEnabled,
+      )
+      const cierre = await v.cerrarEnTx(tx, {
+        orderId,
+        paymentId: abono.newPayment.id,
+        appliedCents: abono.aplicadoCents,
+        shiftId: abono.newPayment.shiftId ?? null,
+      })
+      return { creada, abono, cierre, marcarCocina }
+    },
+    { etiqueta: 'venderLoQueCobroLaMaquina', ...ORDER_LOCK_WAIT_BUDGET },
+  )
+
+  // Después del commit, como la venta y el cobro de hoy. Nada de aquí puede desmentir lo cobrado.
+  const { creada, abono, marcarCocina } = hecho
+  const orderId = creada.order.id
+  // D22, como `createOrderWithItems`: lo cobrado ya ocurrió; un descuento que pedía aprobación entra y el gerente se entera.
+  if (creada.sinAprobacion) avisarDescuentoSinAprobacion(venueId, venta, orderId, creada.sinAprobacion, llegada)
+  await terminarVentaDeMostrador(venueId, creada, prep)
+  if (abono.isFullyPaid && abono.postingId) {
+    try {
+      const { applySalePosting } = await import('@/services/inventory/inventoryPosting.service')
+      await applySalePosting(abono.postingId, effectiveStaffId ?? null)
+    } catch (err) {
+      logger.error('[MAQUINA] El inventario de la venta falló (el cobro quedó; lo repone el respaldo)', {
+        orderId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+  if (abono.isFullyPaid) {
+    try {
+      const { awardLoyaltyForPaidOrder } = await import('@/services/shared/loyaltyOnPaidOrder')
+      await awardLoyaltyForPaidOrder({
+        venueId,
+        orderId,
+        orderTotal: abono.loyaltyBase,
+        staffId: effectiveStaffId,
+        legacyCustomer: prep.normalizedCustomerId ? { id: prep.normalizedCustomerId, firstName: null, lastName: null } : null,
+      })
+    } catch (err) {
+      logger.error('[MAQUINA] La lealtad de la venta falló (el cobro quedó)', {
+        orderId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+    if (marcarCocina) await armarComandasTrasCommit(venueId, orderId, 'PAID')
+  }
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_CREATED, {
+      orderId,
+      orderNumber: creada.order.orderNumber,
+      orderType: creada.order.type,
+      source: creada.order.source,
+      total: centavosAPesos(abono.balance.orderTotalCents),
+    })
+    broadcastingService.broadcastToVenue(venueId, SocketEventType.PAYMENT_COMPLETED, {
+      paymentId: abono.newPayment.id,
+      orderId,
+      orderNumber: creada.order.orderNumber,
+      amount: abono.aplicadoCents / 100,
+      tipAmount: abono.propinaCents / 100,
+      method: 'CASH',
+      status: 'completed',
+    })
+  }
+  return hecho.cierre
 }
 
 /**

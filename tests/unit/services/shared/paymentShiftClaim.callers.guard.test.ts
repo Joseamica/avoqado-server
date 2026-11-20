@@ -517,7 +517,15 @@ function closedPropertyName(name: ts.PropertyName): string | undefined {
  * estado, montos ni la orden) cuentan como propiedades: un duplicado explícito sigue rompiendo la gramática. Si `entradaDelClaim` gana
  * un campo, va aquí también.
  */
-const CAMPOS_DE_ENTRADA_DEL_CLAIM = ['expectedShiftId', 'cajaCapturada', 'apartePorCajaCerrada', 'cajaSinTurno', 'cajaLigadaAbierta']
+// Máquina de efectivo (R4-7 #8): `porConciliar` deja el cobro sin turno (NO_SHIFT); sólo quita el turno, nunca estampa uno.
+const CAMPOS_DE_ENTRADA_DEL_CLAIM = [
+  'expectedShiftId',
+  'cajaCapturada',
+  'apartePorCajaCerrada',
+  'cajaSinTurno',
+  'cajaLigadaAbierta',
+  'porConciliar',
+]
 
 function esSpreadDeEntradaDelClaim(property: ts.ObjectLiteralElementLike, context: AstCall): boolean {
   if (!ts.isSpreadAssignment(property)) return false

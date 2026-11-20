@@ -1469,6 +1469,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/mobile/order.mobile.service.ts#payGiftCardBalanceOnOrder': 1,
   // Tarjetas 1b S2b (Q58): crear la cuenta de mostrador y cobrarla con saldo abren UNA transacción (llave → cuenta → premio → cobro).
   'src/services/mobile/order.mobile.service.ts#payGiftCardOnNewOrder': 1,
+  // Máquina de efectivo (R4-1): la venta que la máquina ya cobró nace, se paga y se cierra en UNA transacción (cuenta → cobro → cierre).
+  'src/services/mobile/order.mobile.service.ts#venderLoQueCobroLaMaquina': 1,
   'src/services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder': 1,
   'src/services/dashboard/order.dashboard.service.ts#settleOrder': 1,
   'src/services/dashboard/manualPayment.service.ts#createManualPayment': 1,

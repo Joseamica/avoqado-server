@@ -943,6 +943,14 @@
       "etiqueta": "payGiftCardOnNewOrder",
       "cantidad": 1
     },
+    "src/services/mobile/order.mobile.service.ts#venderLoQueCobroLaMaquina": {
+      "etiqueta": "venderLoQueCobroLaMaquina",
+      "cantidad": 1
+    },
+    "src/services/cashMachine/ventaDeLaMaquina.ts#registrarVentaDeLaMaquina": {
+      "etiqueta": "registrarVentaDeLaMaquina",
+      "cantidad": 1
+    },
     "src/services/mobile/order.mobile.service.ts#removeOrderDiscount": {
       "etiqueta": "removeOrderDiscount",
       "cantidad": 1
