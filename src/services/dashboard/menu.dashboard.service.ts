@@ -189,31 +189,22 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
     }
   }
 
-  // Reusar = prenderla y editar sólo lo que el alta trae CON valor (Codex r6-r7): el formulario manda vacíos los campos que el
-  // dueño no tocó, y eso no borra la clave SAT, el horario ni la impresora que tenía, igual que al prenderla hoy. El nombre se
-  // queda tal cual (sólo cambian mayúsculas o espacios: las promociones lo leen tal cual).
-  const conValor = <T>(v: T | null | undefined): v is T => v !== undefined && v !== null && (v as unknown) !== ''
-  const dias = Array.isArray(createData.availableDays) ? createData.availableDays : undefined
+  // Reusar = PRENDERLA, como hoy (Codex r6-r8). Del alta sólo se toma la apariencia que trae con valor (descripción, color, ícono,
+  // foto): la clave SAT, el horario, la impresora y el padre se quedan como estaban y se cambian editándola, como hoy, con las
+  // revisiones de la edición (un horario a medias, una clave que cambia facturas). El nombre se queda tal cual.
+  const conValor = (v: unknown) => v !== undefined && v !== null && v !== ''
   const category = reusar
     ? await prisma.menuCategory
         .update({
           where: { id: reusar.id, venueId, deletedAt: { not: null } },
           data: {
             ...(conValor(createData.description) && { description: createData.description }),
-            ...(conValor(createData.displayOrder) && { displayOrder: createData.displayOrder }),
             ...(conValor(createData.imageUrl) && { imageUrl: createData.imageUrl }),
             ...(conValor(createData.color) && { color: createData.color }),
             ...(conValor(createData.icon) && { icon: createData.icon }),
             active: createData.active ?? true,
             deletedAt: null,
             isDemo: false,
-            ...(conValor(createData.availableFrom) && { availableFrom: createData.availableFrom }),
-            ...(conValor(createData.availableUntil) && { availableUntil: createData.availableUntil }),
-            ...(dias && dias.length > 0 && { availableDays: { set: dias } }),
-            ...(conValor(createData.defaultSatProductKey) && { defaultSatProductKey: createData.defaultSatProductKey }),
-            ...(conValor(createData.defaultSatUnitKey) && { defaultSatUnitKey: createData.defaultSatUnitKey }),
-            ...(createData.parent ? { parent: createData.parent } : {}),
-            ...(createData.printStation ? { printStation: createData.printStation } : {}),
           },
         })
         .catch(e => {

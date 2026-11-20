@@ -102,6 +102,7 @@ describe('eliminar una categoría que sólo guarda archivados', () => {
     } as never)
 
     // Como prenderla hoy: misma fila, mismo nombre (sólo cambiaban mayúsculas), su clave SAT se queda y el color que mandó, sí.
+    // Un horario del alta no se aplica al reusar (se cambia editándola, con sus revisiones: Codex r8).
     expect(nueva).toMatchObject({ id: categoryId, name: 'EVENTO', active: true, deletedAt: null, color: '#00ff00' })
     expect(nueva.defaultSatProductKey).toBe('90101501')
     expect(await nombresEnLaLista(x.venueId)).toEqual(['EVENTO'])

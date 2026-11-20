@@ -85,14 +85,13 @@ export async function createCategory(req: Request, res: Response, next: NextFunc
     if (existing?.deletedAt && existing.name.trim().toLowerCase() === name.trim().toLowerCase()) {
       const reusada = await prisma.menuCategory.updateMany({
         where: { id: existing.id, venueId, deletedAt: { not: null } },
-        // Prenderla y editar sólo lo que la app manda CON valor (Codex r6-r7): lo demás (clave SAT, impresora, horario) se queda.
+        // PRENDERLA, como en el panel (Codex r6-r8): de la app sólo la apariencia que trae con valor; lo demás (clave SAT, impresora,
+        // horario, padre, orden) se queda como estaba.
         data: {
           ...(description && { description }),
           ...(color && { color }),
           ...(icon && { icon }),
           ...(imageUrl && { imageUrl }),
-          ...(displayOrder != null && { displayOrder }),
-          ...(parentId && { parentId }),
           active: true,
           deletedAt: null,
           isDemo: false,
