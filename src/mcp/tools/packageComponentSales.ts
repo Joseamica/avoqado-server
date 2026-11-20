@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import { venueEndOfDay, venueStartOfDay } from '@/utils/datetime'
-import { DENTRO_DE_PAQUETE_TOPE, getUnitsInsidePackages } from '@/services/dashboard/sales-by-item.dashboard.service'
+import { getUnitsInsidePackages } from '@/services/dashboard/sales-by-item.dashboard.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -17,10 +17,21 @@ const sinAcentos = (s: string) =>
     .toLowerCase()
 
 /**
+ * Un día AAAA-MM-DD que exista (el 30 de febrero no) → su mediodía UTC, que en las zonas de América cae en ese mismo día del negocio
+ * sin importar la zona del proceso (Codex r1 #10: `new Date('…T12:00:00')` se leía en la zona del proceso y el 2026-02-30 se volvía
+ * 2 de marzo). `null` si no es una fecha válida.
+ */
+function mediodiaDe(dia: string): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dia)) return null
+  const ref = new Date(`${dia}T12:00:00Z`)
+  return !isNaN(ref.getTime()) && ref.toISOString().slice(0, 10) === dia ? ref : null
+}
+
+/**
  * «Dentro de paquete» por MCP (founder «B», 20-nov-2026, Flautas). Herramienta NUEVA a propósito: `product_sales` está en la tanda
  * certificada del directorio y no se toca. Ésta vive sólo en el modo libre (`/mcp`), fuera de toda tanda de
  * `src/mcp/directory/catalog.ts`. Lee la MISMA consulta que la columna del reporte (`getUnitsInsidePackages`: mismos filtros de
- * órdenes y tope), con el día completo en la zona horaria del negocio.
+ * órdenes, un renglón por platillo y sin recortes), con el día completo en la zona horaria del negocio.
  */
 export function registerPackageComponentSalesTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -42,12 +53,17 @@ export function registerPackageComponentSalesTools(server: McpServer, scope: Mcp
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO, like the report
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 
+      const desde = fromDate ? mediodiaDe(fromDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+      const hasta = toDate ? mediodiaDe(toDate) : new Date()
+      if (!desde || !hasta) {
+        return text({ ok: false, error: `La fecha «${!desde ? fromDate : toDate}» no es válida: usa AAAA-MM-DD (un día que exista).` })
+      }
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
       const tz = venue?.timezone || 'America/Mexico_City'
-      const start = venueStartOfDay(tz, fromDate ? new Date(`${fromDate}T12:00:00`) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
-      const end = venueEndOfDay(tz, toDate ? new Date(`${toDate}T12:00:00`) : undefined)
+      const start = venueStartOfDay(tz, desde)
+      const end = venueEndOfDay(tz, hasta)
 
-      // Acotada: a lo más DENTRO_DE_PAQUETE_TOPE platillos, ya ordenados de más a menos unidades.
+      // Un renglón por platillo ligado (acotado por el catálogo del negocio), ya ordenados de más a menos unidades.
       const porPlatillo = await getUnitsInsidePackages(venueId, start, end, '')
       const buscado = name ? sinAcentos(name) : null
       const filas = [...porPlatillo.values()]
@@ -65,8 +81,6 @@ export function registerPackageComponentSalesTools(server: McpServer, scope: Mcp
         totalUnitsInsidePackages: filas.reduce((acc, f) => acc + f.unitsInsidePackages, 0),
         items: filas.slice(skip, skip + take),
         hasMore: skip + take < filas.length,
-        // true = la consulta llegó a su tope de platillos ligados: puede faltar alguno de los de menos unidades.
-        reachedCap: porPlatillo.size >= DENTRO_DE_PAQUETE_TOPE,
       })
     },
   )

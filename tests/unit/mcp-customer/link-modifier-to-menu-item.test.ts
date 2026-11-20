@@ -31,6 +31,7 @@ jest.mock('@/services/dashboard/menu.dashboard.service', () => ({
   createModifierGroup: jest.fn(),
   updateModifier: (...a: unknown[]) => mockUpdateModifier(...(a as [])),
   LIGA_DE_EXTRA_PLAN: { feature: 'ADVANCED_REPORTS', plan: 'Pro' },
+  LIGA_QUE_DESCUENTA_PLAN: { feature: 'INVENTORY_TRACKING', plan: 'Premium' },
 }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: (...a: unknown[]) => mockGate(...(a as [])) }))
@@ -186,6 +187,45 @@ describe('link_modifier_to_menu_item', () => {
     )
     expect(out).toEqual({ ok: true, extra: 'Papas', deductsMenuItem: 'Papas a la francesa', deductsInventory: false })
     expect(mockUpdateModifier).toHaveBeenCalledWith('v1', 'g1', 'mod-papas', { linkedProductId: 'p-papas' })
+  })
+
+  it('Codex r1 #1: un negocio Pro no liga un platillo que DESCONTARÍA (pide Premium); uno sin inventario sí', async () => {
+    mockGate.mockImplementation(async (_venueId: string, code: string) =>
+      code === 'INVENTORY_TRACKING' ? 'Que el extra descuente el inventario no está incluido en el plan actual…' : null,
+    )
+    const out = parse(await call({ venueId: 'v1', modifierName: 'Papas', menuItemName: 'Papas a la' }))
+    expect(out).toMatchObject({ ok: false, planRequired: true })
+    expect(mockGate).toHaveBeenCalledWith('v1', 'INVENTORY_TRACKING', expect.stringContaining('Papas a la francesa'))
+
+    productFindFirst.mockResolvedValue({ trackInventory: false, inventoryMethod: null, recipe: null })
+    const sinInventario = parse(await call({ venueId: 'v1', modifierName: 'Papas', menuItemName: 'Papas a la' }))
+    expect(sinInventario.requiresConfirmation).toBe(true)
+  })
+
+  it('Codex r1 #14: si le prenden el inventario al platillo entre la vista previa y la confirmación, la confirmación ya no vale', async () => {
+    productFindFirst.mockResolvedValue({ trackInventory: false, inventoryMethod: null, recipe: null })
+    const preview = parse(await call({ venueId: 'v1', modifierName: 'Papas', menuItemName: 'Papas a la' }))
+    productFindFirst.mockResolvedValue({ trackInventory: true, inventoryMethod: 'QUANTITY', recipe: null })
+    const out = parse(
+      await call({
+        venueId: 'v1',
+        modifierName: 'Papas',
+        menuItemName: 'Papas a la',
+        confirm: true,
+        resolvedModifierId: preview.resolvedModifierId,
+        resolvedProductId: preview.resolvedProductId,
+        expectedSourceFingerprint: preview.expectedSourceFingerprint,
+      }),
+    )
+    expect(out.needsInput).toBe(true)
+    expect(mockUpdateModifier).not.toHaveBeenCalled()
+  })
+
+  it('Codex r1 #14: un platillo por kilo se rechaza en la vista previa, sin ofrecer confirmación', async () => {
+    productFindFirst.mockResolvedValue({ trackInventory: true, inventoryMethod: 'QUANTITY', soldByWeight: true, recipe: null })
+    const out = parse(await call({ venueId: 'v1', modifierName: 'Papas', menuItemName: 'Papas a la' }))
+    expect(out).toMatchObject({ ok: false, error: expect.stringMatching(/por kilo/) })
+    expect(out.requiresConfirmation).toBeUndefined()
   })
 
   it('un platillo con receta (sin método marcado) cuenta como que descuenta', async () => {

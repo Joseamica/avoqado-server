@@ -181,7 +181,22 @@ describe('Extra ligado a un platillo del menú', () => {
     await updateModifier(params.venueId, params.modifierGroupId, params.modifierId, parseEdicion({ linkedProductId: PAPAS_ID }))
     const data = (prismaMock.modifier.update.mock.calls[0][0] as any).data
     expect(data.linkedProduct).toEqual({ connect: { id: PAPAS_ID } })
-    expect(data.cost.toString()).toBe('12.5') // el costo del producto, si tiene
+    // Sin inventario la liga sólo cuenta: no lleva costo, para no mover el reporte de costos de extras (Codex r1 #7).
+    expect(data.cost).toBeNull()
+  })
+
+  it('Codex r1 #1: un negocio Pro NO liga un platillo CON inventario (descontar sigue siendo Premium)', async () => {
+    ;(venueHasFeatureAccess as jest.Mock).mockImplementation(async (_venueId: string, code: string) => code === 'ADVANCED_REPORTS')
+    const err = await createModifier(
+      params.venueId,
+      params.modifierGroupId,
+      parseAlta({ name: 'Papas', price: 0, linkedProductId: PAPAS_ID }), // papas: por piezas, se descontaría
+    ).catch(e => e)
+    expect(err.statusCode).toBe(403)
+    expect(err.code).toBe('MODIFIER_LINK_DEDUCT_REQUIRES_PREMIUM')
+    expect(err.message).toMatch(/Premium/)
+    expect(prismaMock.modifier.create).not.toHaveBeenCalled()
+    expect(venueHasFeatureAccess).toHaveBeenCalledWith(params.venueId, 'INVENTORY_TRACKING')
   })
 
   it('sin inventario y sin costo: se liga con costo vacío (no inventa uno)', async () => {
@@ -395,5 +410,21 @@ describe('Buscador del platillo a ligar (acotado en el servidor)', () => {
     ])
     expect(out.hasMore).toBe(false)
     expect(out.nextCursor).toBeNull()
+  })
+
+  it('Codex r1 #1: en un negocio Pro, los que llevan inventario salen en gris (descontar es Premium); sin inventario se ligan', async () => {
+    ;(venueHasFeatureAccess as jest.Mock).mockImplementation(async (_venueId: string, code: string) => code === 'ADVANCED_REPORTS')
+    prismaMock.product.count.mockResolvedValue(3 as any)
+    prismaMock.product.findMany.mockResolvedValue([
+      fila('ok'),
+      fila('receta', { inventoryMethod: null, recipe: { id: 'r' } }),
+      fila('sin', { trackInventory: false, inventoryMethod: null }),
+    ] as any)
+    const out = await searchLinkableProducts(params.venueId, {})
+    expect(out.data.map(d => [d.id, d.linkable, d.blockedReason])).toEqual([
+      ['ok', false, 'DEDUCT_NEEDS_PREMIUM'],
+      ['receta', false, 'DEDUCT_NEEDS_PREMIUM'],
+      ['sin', true, null],
+    ])
   })
 })

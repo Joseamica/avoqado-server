@@ -120,13 +120,12 @@ export async function salesByItem(req: Request, res: Response, next: NextFunctio
       reportType: 'summary',
       groupBy: (groupBy as GroupByOption) || 'none',
       timezone: venue?.timezone || 'America/Mexico_City',
+      // «Dentro de paquete» (founder «B», 20-nov) es del reporte del DASHBOARD, con su plan de reportes avanzados. Las apps de hoy
+      // reciben exactamente lo de siempre: ni renglones de 0 sueltas ni campos nuevos (Codex r1 #5).
+      incluirDentroDePaquete: false,
     }
 
     const report = await getSalesByItem(venueId, filters)
-    // «Dentro de paquete» (founder «B», 20-nov) agrega renglones de platillos que SÓLO se vendieron dentro de paquetes (0 sueltas).
-    // El POS de hoy los pintaría como «más vendidos» con 0 piezas: a /mobile le llegan los mismos renglones de siempre (todos con al
-    // menos una venta suelta). Los campos nuevos de cada renglón y de los totales viajan como opcionales.
-    report.items = report.items.filter(item => item.itemsSold > 0)
 
     res.json({
       success: true,

@@ -58,15 +58,26 @@ export interface ModifierUsageStats {
   }
 }
 
-/** Costo de UNA porción del platillo ligado: el de su receta si es por receta; si no, el costo del producto. */
+/**
+ * Costo de UNA porción del platillo ligado: el de su receta si es por receta; si no, el costo del producto. Sin inventario no hay
+ * costo: esa liga sólo cuenta en «Dentro de paquete» (founder «B», 20-nov) y no mueve este reporte (Codex r1 #7).
+ */
 function linkedProductCostPerPortion(product: {
+  trackInventory: boolean
   inventoryMethod: string | null
   cost: Prisma.Decimal | null
   recipe: { totalCost: Prisma.Decimal } | null
 }): number | null {
+  if (!product.trackInventory || (!product.inventoryMethod && !product.recipe)) return null
   const cost =
     product.inventoryMethod === 'RECIPE' || (!product.inventoryMethod && product.recipe) ? product.recipe?.totalCost : product.cost
   return cost != null ? parseFloat(cost.toString()) : null
+}
+
+/** Un platillo ligado que SÍ se descuenta (lleva inventario por piezas o por receta), en el `where` de Prisma. */
+const LIGADO_CON_INVENTARIO: Prisma.ProductWhereInput = {
+  trackInventory: true,
+  OR: [{ inventoryMethod: { not: null } }, { recipe: { isNot: null } }],
 }
 
 export interface ModifierLowStockItem {
@@ -139,7 +150,14 @@ export async function getModifierUsageStats(
           },
         },
         linkedProduct: {
-          select: { id: true, name: true, inventoryMethod: true, cost: true, recipe: { select: { totalCost: true } } },
+          select: {
+            id: true,
+            name: true,
+            trackInventory: true,
+            inventoryMethod: true,
+            cost: true,
+            recipe: { select: { totalCost: true } },
+          },
         },
       },
     },
@@ -323,8 +341,9 @@ export async function getModifierInventorySummary(
   const totalModifiersWithInventory = await prisma.modifier.count({
     where: {
       group: { venueId },
-      // Con insumo o ligado a un platillo del menú (encargo 27771e): los dos mueven inventario.
-      OR: [{ rawMaterialId: { not: null } }, { linkedProductId: { not: null } }],
+      // Con insumo o ligado a un platillo del menú que lleva inventario (encargo 27771e): los dos mueven inventario. Una liga a un
+      // platillo sin inventario sólo cuenta en «Dentro de paquete» y no es un extra con inventario (Codex r1 #7).
+      OR: [{ rawMaterialId: { not: null } }, { linkedProduct: { is: LIGADO_CON_INVENTARIO } }],
     },
   })
 

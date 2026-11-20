@@ -121,7 +121,7 @@ describe('sales-by-item — «Dentro de paquete»', () => {
     })
   })
 
-  it('un platillo con dos renglones (lo renombraron) recibe lo de paquete UNA vez, en el primero', async () => {
+  it('un platillo con dos renglones (lo renombraron) recibe lo de paquete UNA vez, en el de su nombre de hoy', async () => {
     responder(
       [itemRow(), itemRow({ product_name: 'Flauta papa (viejo)', units_sold: 2, items_sold: 2, gross_sales: 60, discounts: 0 })],
       [dentroRow()],
@@ -132,6 +132,51 @@ describe('sales-by-item — «Dentro de paquete»', () => {
     expect(nuevo.unitsInsidePackages).toBe(15)
     expect(viejo.unitsInsidePackages).toBe(0)
     expect(viejo.totalUnits).toBe(2)
+  })
+
+  it('Codex r1 #12: el renglón elegido no depende del orden del SQL (nombre de hoy; si no, más unidades; al empate, el nombre)', async () => {
+    // El SQL entrega primero el renglón del nombre VIEJO (empatan en dinero): igual gana el del nombre de hoy.
+    responder(
+      [
+        itemRow({ product_name: 'Flauta papa (viejo)', units_sold: 1, items_sold: 1, gross_sales: 30, discounts: 0 }),
+        itemRow({ units_sold: 1, items_sold: 1, gross_sales: 30, discounts: 0 }),
+      ],
+      [dentroRow()],
+    )
+    const items = (await getSalesByItem(VENUE, { ...RANGE })).items
+    expect(items.map(i => [i.productName, i.unitsInsidePackages])).toEqual([
+      ['Flauta papa (viejo)', 0],
+      ['Flauta de papa', 15],
+    ])
+
+    // Ningún renglón con el nombre de hoy (lo volvieron a renombrar): gana el de más unidades, y al empate el primero por nombre,
+    // dé el SQL el orden que dé.
+    for (const orden of [
+      ['B viejo', 'A viejo'],
+      ['A viejo', 'B viejo'],
+    ]) {
+      ;(prismaMock.$queryRawUnsafe as jest.Mock).mockReset().mockResolvedValue([])
+      responder(
+        orden.map(n => itemRow({ product_name: n, units_sold: 2, items_sold: 2, gross_sales: 60, discounts: 0 })),
+        [dentroRow({ product_name: 'Flauta de papa (nuevo)' })],
+      )
+      const r = (await getSalesByItem(VENUE, { ...RANGE })).items
+      expect(r.find(i => i.productName === 'A viejo')!.unitsInsidePackages).toBe(15)
+      expect(r.find(i => i.productName === 'B viejo')!.unitsInsidePackages).toBe(0)
+      expect(r).toHaveLength(2) // no se agrega un renglón de más
+    }
+  })
+
+  it('Codex r1 #5: con incluirDentroDePaquete:false (lo que pide /mobile) no se consulta ni se agrega nada', async () => {
+    ;(prismaMock.$queryRawUnsafe as jest.Mock).mockResolvedValueOnce([itemRow()]).mockResolvedValueOnce([])
+
+    const report = await getSalesByItem(VENUE, { ...RANGE, incluirDentroDePaquete: false })
+
+    expect(prismaMock.$queryRawUnsafe).toHaveBeenCalledTimes(2) // artículos y promociones, como antes
+    expect(report.items[0].unitsInsidePackages).toBeUndefined()
+    expect(report.items[0].totalUnits).toBeUndefined()
+    expect(report.totals.unitsInsidePackages).toBeUndefined()
+    expect(report.totals).toEqual({ itemsSold: 4, unitsSold: 6, grossSales: 180, discounts: 10, netSales: 170 })
   })
 
   it('una línea sin Product (POS externo) no se lleva lo de paquete de nadie', async () => {
@@ -151,7 +196,7 @@ describe('sales-by-item — «Dentro de paquete»', () => {
     expect(row).toMatchObject({ productGroupId: 'fam-1', productGroupName: 'Flautas', unitsInsidePackages: 15 })
   })
 
-  it('el SQL: renglón × extra, sólo extras ligados, platillo del MISMO negocio, con tope y los MISMOS filtros de órdenes', async () => {
+  it('el SQL: renglón × extra, sólo extras ligados, platillo del MISMO negocio, sin LIMIT y con los MISMOS filtros de órdenes', async () => {
     responder([itemRow()], [])
 
     await getSalesByItem(VENUE, { ...RANGE, startHour: '12:00', endHour: '16:00' })
@@ -162,7 +207,9 @@ describe('sales-by-item — «Dentro de paquete»', () => {
     expect(dentro).toContain('FROM "OrderItemModifier" oim')
     expect(dentro).toContain('m."linkedProductId" IS NOT NULL')
     expect(dentro).toContain('lp."venueId" = o."venueId"')
-    expect(dentro).toMatch(/LIMIT \d+/)
+    // Sin LIMIT: un tope recortaría renglones y totales sin salida (Codex r1 #6). Un renglón por platillo, como la consulta principal.
+    expect(dentro).not.toMatch(/LIMIT/)
+    expect(dentro).toContain('GROUP BY lp.id')
     // Ni un peso: este query no lee precios.
     expect(dentro).not.toMatch(/price|unitPrice|discountAmount/)
     // Los mismos filtros de órdenes que las unidades sueltas, letra por letra.

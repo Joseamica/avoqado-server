@@ -1379,11 +1379,19 @@ async function findVenueRawMaterialForModifier(venueId: string, rawMaterialId: s
 export const LIGA_DE_EXTRA_PLAN: { feature: string; plan: string } | null = { feature: 'ADVANCED_REPORTS', plan: 'Pro' }
 
 /**
+ * Que la liga DESCUENTE inventario sigue siendo Premium (founder, 20-nov: «descontar inventario sigue siendo Premium como hoy»).
+ * Ligar un platillo que lleva inventario (y por tanto se descontaría) pide este plan; uno sin inventario sólo pide
+ * {@link LIGA_DE_EXTRA_PLAN} y sólo cuenta (Codex r1 #1: si no, un negocio Pro que bajó de Premium ligaba platillos que descuentan).
+ */
+export const LIGA_QUE_DESCUENTA_PLAN = { feature: 'INVENTORY_TRACKING', plan: 'Premium' } as const
+
+/**
  * Extra ligado a un PLATILLO del menú (encargo 27771e; founder, 16-nov-2026: como Fudo y Toast). Valida el platillo que se quiere
  * ligar y devuelve su costo por porción. El plan ({@link LIGA_DE_EXTRA_PLAN}) sólo se pide para PONERLO: quitarlo nunca lo pide, para
  * que bajar de plan no deje el extra atorado. Mismo negocio, no borrado y que no se venda por kilo (descontar «1» sería adivinar 1 kg).
- * Sin inventario también se liga (founder «B», 20-nov, Flautas): no descuenta nada y sus unidades sólo cuentan en «Ventas por
- * artículo» como «Dentro de paquete».
+ * Sin inventario también se liga (founder «B», 20-nov, Flautas): no descuenta nada, no lleva costo (no mueve ningún número de
+ * inventario ni de costos) y sus unidades sólo cuentan en «Ventas por artículo» como «Dentro de paquete». Uno CON inventario se
+ * descontaría: pide además {@link LIGA_QUE_DESCUENTA_PLAN}.
  */
 async function findLinkableProductForModifier(venueId: string, productId: string) {
   if (LIGA_DE_EXTRA_PLAN && !(await venueHasFeatureAccess(venueId, LIGA_DE_EXTRA_PLAN.feature))) {
@@ -1416,7 +1424,16 @@ async function findLinkableProductForModifier(venueId: string, productId: string
     )
   }
   const method = product.trackInventory ? (product.inventoryMethod ?? (product.recipe ? 'RECIPE' : null)) : null
-  const cost = method === 'RECIPE' ? (product.recipe?.totalCost ?? null) : (product.cost ?? null)
+  if (method && !(await venueHasFeatureAccess(venueId, LIGA_QUE_DESCUENTA_PLAN.feature))) {
+    throw new AppError(
+      `«${product.name}» lleva inventario: que un extra lo descuente es del plan ${LIGA_QUE_DESCUENTA_PLAN.plan}. Liga un platillo sin inventario (sólo cuenta en el reporte) o sube a ${LIGA_QUE_DESCUENTA_PLAN.plan}.`,
+      403,
+      true,
+      'MODIFIER_LINK_DEDUCT_REQUIRES_PREMIUM',
+    )
+  }
+  // Sin inventario no hay costo: la liga sólo cuenta (el extra no debe mover los reportes de costo).
+  const cost = !method ? null : method === 'RECIPE' ? (product.recipe?.totalCost ?? null) : (product.cost ?? null)
   return { id: product.id, name: product.name, cost: cost != null ? new Prisma.Decimal(cost) : null }
 }
 
@@ -1427,8 +1444,9 @@ export const LINKABLE_PRODUCTS_MAX = 50
 /**
  * Busca los platillos del negocio que un extra puede «ser» (encargo 27771e). Acotado en el servidor: búsqueda por nombre, orden fijo
  * (nombre, id), página con cursor y el total de coincidencias, para que el selector nunca baje el menú entero. Devuelve también los que
- * no se pueden ligar (por kilo) con su motivo, para que la pantalla los enseñe en gris. Uno sin inventario sí se liga (founder «B»,
- * 20-nov): viaja con `inventoryMethod: null` para que la pantalla diga que sólo cuenta en el reporte.
+ * no se pueden ligar con su motivo, para que la pantalla los enseñe en gris: por kilo, o con inventario en un negocio sin
+ * {@link LIGA_QUE_DESCUENTA_PLAN}. Uno sin inventario sí se liga (founder «B», 20-nov): viaja con `inventoryMethod: null` para que la
+ * pantalla diga que sólo cuenta en el reporte.
  */
 export async function searchLinkableProducts(venueId: string, query: { search?: string; cursor?: string; limit?: number }) {
   const take = Math.min(Math.max(query.limit ?? LINKABLE_PRODUCTS_PAGE, 1), LINKABLE_PRODUCTS_MAX)
@@ -1437,7 +1455,7 @@ export async function searchLinkableProducts(venueId: string, query: { search?: 
     deletedAt: null,
     ...(query.search ? { name: { contains: query.search, mode: 'insensitive' } } : {}),
   }
-  const [total, filas] = await Promise.all([
+  const [total, filas, puedeDescontar] = await Promise.all([
     prisma.product.count({ where }),
     prisma.product.findMany({
       where,
@@ -1455,13 +1473,14 @@ export async function searchLinkableProducts(venueId: string, query: { search?: 
       take: take + 1,
       ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
     }),
+    venueHasFeatureAccess(venueId, LIGA_QUE_DESCUENTA_PLAN.feature),
   ])
   const hasMore = filas.length > take
   const pagina = filas.slice(0, take)
   return {
     data: pagina.map(p => {
       const method = p.trackInventory ? (p.inventoryMethod ?? (p.recipe ? 'RECIPE' : null)) : null
-      const blockedReason = p.soldByWeight ? 'SOLD_BY_WEIGHT' : null
+      const blockedReason = p.soldByWeight ? 'SOLD_BY_WEIGHT' : method && !puedeDescontar ? 'DEDUCT_NEEDS_PREMIUM' : null
       return {
         id: p.id,
         name: p.name,

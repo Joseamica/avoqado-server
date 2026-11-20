@@ -46,6 +46,11 @@ export interface SalesByItemFilters {
   productId?: string
   channel?: string
   paymentMethod?: string
+  /**
+   * «Dentro de paquete» (founder «B», 20-nov). Por omisión sí (con `groupBy = 'none'`). `/mobile` lo apaga: las apps de hoy reciben
+   * exactamente lo de siempre, sin renglones ni campos nuevos y sin el candado de plan de los reportes avanzados (Codex r1 #5).
+   */
+  incluirDentroDePaquete?: boolean
 }
 
 export interface ItemSalesMetrics {
@@ -170,6 +175,7 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
     timezone: rawTimezone = 'America/Mexico_City',
     startHour,
     endHour,
+    incluirDentroDePaquete = true,
   } = filters
 
   // SECURITY: Sanitize timezone to prevent SQL injection
@@ -273,7 +279,7 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
     groupBy === 'none'
       ? await Promise.all([
           getPromotionAttribution(venueId, parsedStartDate, parsedEndDate, hourFilterClause),
-          getUnitsInsidePackages(venueId, parsedStartDate, parsedEndDate, hourFilterClause),
+          incluirDentroDePaquete ? getUnitsInsidePackages(venueId, parsedStartDate, parsedEndDate, hourFilterClause) : null,
         ])
       : [new Map<string, Array<{ name: string; unitsSold: number; netSales: number }>>(), null]
 
@@ -323,15 +329,23 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
   })
 
   if (insidePackages) {
-    // Cada platillo recibe lo de paquete UNA vez: en su primer renglón (el de más venta; si lo renombraron tiene varios). Un
-    // platillo que sólo se vendió dentro de paquetes entra como renglón nuevo, con 0 sueltas y $0.
+    // Cada platillo recibe lo de paquete UNA vez, en un renglón ELEGIDO sin depender del orden del SQL (Codex r1 #12): si lo
+    // renombraron tiene varios renglones; gana el que lleva su nombre de HOY, si no el de más unidades, y al empate el nombre.
+    const destino = new Map<string, ItemSalesMetrics>()
     for (const item of items) {
       const dentro = item.productId ? insidePackages.get(item.productId) : undefined
-      if (dentro) insidePackages.delete(item.productId!)
+      if (!dentro) continue
+      const actual = destino.get(item.productId!)
+      if (!actual || renglonPreferido(item, actual, dentro.productName)) destino.set(item.productId!, item)
+    }
+    for (const item of items) {
+      const dentro = item.productId && destino.get(item.productId) === item ? insidePackages.get(item.productId) : undefined
       item.unitsInsidePackages = dentro?.units ?? 0
       item.totalUnits = item.unitsSold + item.unitsInsidePackages
     }
+    // Un platillo que sólo se vendió dentro de paquetes entra como renglón nuevo, con 0 sueltas y $0.
     for (const [productId, d] of insidePackages) {
+      if (destino.has(productId)) continue
       items.push({
         productId,
         productName: d.productName,
@@ -480,15 +494,22 @@ async function getPromotionAttribution(
 // Helper: «Dentro de paquete» (founder «B», 20-nov-2026)
 // ============================================================
 
-/** Tope de platillos ligados por consulta: hoy un negocio liga decenas; si alguno llega aquí, el log lo dice (nunca en silencio). */
-export const DENTRO_DE_PAQUETE_TOPE = 2000
+/** ¿`a` es mejor renglón que `b` para llevar lo de paquete de su platillo? Su nombre de hoy, luego más unidades, luego el nombre. */
+function renglonPreferido(a: ItemSalesMetrics, b: ItemSalesMetrics, nombreDeHoy: string): boolean {
+  const aHoy = a.productName === nombreDeHoy
+  const bHoy = b.productName === nombreDeHoy
+  if (aHoy !== bHoy) return aHoy
+  if (a.unitsSold !== b.unitsSold) return a.unitsSold > b.unitsSold
+  return a.productName < b.productName
+}
 
 /**
  * Unidades de cada platillo vendidas como EXTRA ligado a él (`Modifier.linkedProductId`): Σ renglón.quantity × extra.quantity, con
  * los MISMOS filtros de órdenes que las unidades sueltas (`ordenesDelReporte`). Sólo unidades: no lee ni un precio. La liga que
  * cuenta es la ACTUAL del extra (el renglón vendido no la copia), así que ligar o desligar hoy mueve el pasado: aceptado.
- * El platillo ligado tiene que ser del mismo negocio. Una consulta agregada, acotada por `DENTRO_DE_PAQUETE_TOPE`. La lee también la
- * herramienta MCP `package_component_sales`, para que el asistente y la pantalla den el mismo número.
+ * El platillo ligado tiene que ser del mismo negocio. Una consulta agregada: a lo más un renglón por platillo del negocio, igual que la
+ * consulta principal del reporte, y SIN `LIMIT` (un tope recortaría renglones y totales sin salida para el usuario, Codex r1 #6).
+ * La lee también la herramienta MCP `package_component_sales`, para que el asistente y la pantalla den el mismo número.
  */
 export async function getUnitsInsidePackages(
   venueId: string,
@@ -528,7 +549,6 @@ export async function getUnitsInsidePackages(
       AND m."linkedProductId" IS NOT NULL
     GROUP BY lp.id, lp.name, lp.sku, mc.name, lp."productGroupId", pg.name
     ORDER BY units_inside DESC, lp.id
-    LIMIT ${DENTRO_DE_PAQUETE_TOPE}
   `
   const rows = await prisma.$queryRawUnsafe<
     Array<{
@@ -541,9 +561,6 @@ export async function getUnitsInsidePackages(
       units_inside: number
     }>
   >(query, venueId, startDate, endDate)
-  if (rows.length >= DENTRO_DE_PAQUETE_TOPE) {
-    logger.warn('[sales-by-item] «Dentro de paquete» llegó al tope de platillos ligados', { venueId, tope: DENTRO_DE_PAQUETE_TOPE })
-  }
   return new Map(
     rows.map(r => [
       r.productId,

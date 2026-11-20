@@ -9,6 +9,7 @@ import {
   createMenuCategory,
   createModifierGroup,
   LIGA_DE_EXTRA_PLAN,
+  LIGA_QUE_DESCUENTA_PLAN,
   updateModifier,
   updateModifierGroup,
 } from '@/services/dashboard/menu.dashboard.service'
@@ -814,17 +815,35 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
         // Sin inventario también se liga (founder «B», 20-nov): ahí no descuenta y sólo cuenta en «Dentro de paquete».
         const inv = await prisma.product.findFirst({
           where: { id: products[0].id, venueId },
-          select: { trackInventory: true, inventoryMethod: true, recipe: { select: { id: true } } },
+          select: { trackInventory: true, inventoryMethod: true, soldByWeight: true, recipe: { select: { id: true } } },
         })
+        // Por kilo no se liga: se dice en la vista previa, no después de confirmar (Codex r1 #14).
+        if (inv?.soldByWeight)
+          return text({
+            ok: false,
+            error: `«${products[0].name}» se vende por kilo: un extra no puede descontarlo. Elige un platillo que se venda por pieza.`,
+          })
         const deducts = !!inv?.trackInventory && !!(inv.inventoryMethod ?? inv.recipe)
+        // Que DESCUENTE sigue siendo Premium (Codex r1 #1): un platillo con inventario pide además ese plan.
+        if (deducts) {
+          const gate = await planGateMessage(
+            venueId,
+            LIGA_QUE_DESCUENTA_PLAN.feature,
+            `Que el extra descuente el inventario de «${products[0].name}»`,
+          )
+          if (gate) return text({ ok: false, planRequired: true, error: gate })
+        }
         product = { id: products[0].id, name: products[0].name, deducts }
       }
 
+      // `deducts` va en la huella: si entre la vista previa y la confirmación le prenden o apagan el inventario al platillo, el efecto
+      // cambia (contar ↔ descontar) y la confirmación vieja ya no vale (Codex r1 #14).
       const fingerprint = operationHash({
         modifierId: modifier.id,
         linkedProductId: modifier.linkedProductId,
         rawMaterialId: modifier.rawMaterialId,
         target: product?.id ?? null,
+        deducts: product?.deducts ?? null,
       })
       if (
         confirm &&

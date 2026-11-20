@@ -26,7 +26,6 @@ jest.mock('@/mcp/guard', () => ({
 }))
 jest.mock('@/services/dashboard/sales-by-item.dashboard.service', () => ({
   getUnitsInsidePackages: (...a: unknown[]) => mockUnidades(...a),
-  DENTRO_DE_PAQUETE_TOPE: 3, // chico para probar el aviso de tope
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -98,7 +97,6 @@ describe('package_component_sales', () => {
       total: 2,
       totalUnitsInsidePackages: 21,
       hasMore: false,
-      reachedCap: false,
     })
     expect(out.items).toEqual([
       { menuItem: 'Flauta de papa', sku: 'FL-PAPA', category: 'Flautas', unitsInsidePackages: 15 },
@@ -129,16 +127,32 @@ describe('package_component_sales', () => {
     expect(segunda.hasMore).toBe(false)
   })
 
-  it('si la consulta llegó al tope de platillos ligados, lo dice (nunca recorta en silencio)', async () => {
-    mockUnidades.mockResolvedValue(
-      new Map([
-        ['a', fila(3, 'A')],
-        ['b', fila(2, 'B')],
-        ['c', fila(1, 'C')],
-      ]),
-    )
-    const out = parse(await call({ venueId: 'v1' }))
-    expect(out.reachedCap).toBe(true)
+  it('Codex r1 #10: una fecha que no existe o ilegible se rechaza, sin leer nada', async () => {
+    for (const fromDate of ['2026-02-30', 'mañana', '2026-13-01', '20261101']) {
+      const out = parse(await call({ venueId: 'v1', fromDate }))
+      expect(out).toMatchObject({ ok: false, error: expect.stringContaining(fromDate) })
+    }
+    const out = parse(await call({ venueId: 'v1', toDate: '2026-04-31' }))
+    expect(out.ok).toBe(false)
+    expect(mockUnidades).not.toHaveBeenCalled()
+  })
+
+  it('Codex r1 #10: el día no depende de la zona del proceso (mediodía UTC del día pedido)', async () => {
+    const tzAntes = process.env.TZ
+    try {
+      for (const tz of ['UTC', 'Asia/Tokyo', 'America/Los_Angeles']) {
+        process.env.TZ = tz
+        mockUnidades.mockClear()
+        await call({ venueId: 'v1', fromDate: '2026-11-01', toDate: '2026-11-01' })
+        const [, start, end] = mockUnidades.mock.calls[0]
+        expect([(start as Date).toISOString(), (end as Date).toISOString()]).toEqual([
+          '2026-11-01T06:00:00.000Z',
+          '2026-11-02T05:59:59.999Z',
+        ])
+      }
+    } finally {
+      process.env.TZ = tzAntes
+    }
   })
 
   it('sin extras ligados vendidos: lista vacía con 0, no un error', async () => {

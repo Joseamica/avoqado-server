@@ -1,8 +1,8 @@
 /**
- * «Dentro de paquete» (founder «B», 20-nov-2026) y las apps de HOY: el reporte del dashboard agrega renglones de platillos que
- * SÓLO se vendieron dentro de paquetes (0 sueltas, $0). El POS de ANDROID ordena los renglones por `unitsSold` y enseña los 10
- * primeros como «más vendidos»: con menos de 10 productos pintaría «Flauta de pollo · 0». A /mobile le llegan los mismos
- * renglones de siempre (todos con al menos una venta suelta); los campos nuevos viajan como opcionales.
+ * «Dentro de paquete» (founder «B», 20-nov-2026) y las apps de HOY (Codex r1 #5): la columna es del reporte del DASHBOARD, que pide el
+ * plan de reportes avanzados. `/mobile` no pide ese plan, y el POS de ANDROID ordena los renglones por `unitsSold` y enseña los 10
+ * primeros como «más vendidos». Por eso a `/mobile` le llega EXACTAMENTE lo de siempre: el servicio ni siquiera calcula lo de paquete
+ * (sin renglones de 0 sueltas, sin campos nuevos por renglón ni en los totales).
  */
 import type { Request, Response } from 'express'
 
@@ -18,20 +18,6 @@ jest.mock('@/utils/prismaClient', () => ({
 
 import { salesByItem } from '@/controllers/mobile/reports.mobile.controller'
 
-const renglon = (over: Record<string, unknown>) => ({
-  productId: 'p',
-  productName: 'X',
-  productSku: null,
-  categoryName: null,
-  unit: 'c/u',
-  itemsSold: 1,
-  unitsSold: 1,
-  grossSales: 10,
-  discounts: 0,
-  netSales: 10,
-  ...over,
-})
-
 async function pedir(query: Record<string, string>) {
   const json = jest.fn()
   const next = jest.fn()
@@ -39,50 +25,41 @@ async function pedir(query: Record<string, string>) {
   return { body: json.mock.calls[0]?.[0], next }
 }
 
+const reporte = {
+  dateRange: {},
+  reportType: 'summary',
+  items: [
+    {
+      productId: 'p',
+      productName: 'Café',
+      productSku: null,
+      categoryName: null,
+      unit: 'c/u',
+      itemsSold: 1,
+      unitsSold: 1,
+      grossSales: 10,
+      discounts: 0,
+      netSales: 10,
+    },
+  ],
+  totals: { itemsSold: 1, unitsSold: 1, grossSales: 10, discounts: 0, netSales: 10 },
+}
+
 describe('GET /mobile/…/reports/sales-by-item — «Dentro de paquete»', () => {
-  beforeEach(() => mockGetSalesByItem.mockReset())
+  beforeEach(() => mockGetSalesByItem.mockReset().mockResolvedValue(reporte))
 
-  it('no manda el renglón de un platillo que sólo se vendió dentro de paquetes; los demás llevan los campos nuevos', async () => {
-    mockGetSalesByItem.mockResolvedValue({
-      dateRange: {},
-      reportType: 'summary',
-      items: [
-        renglon({ productId: 'p-paquete', productName: 'Paquete', unitsSold: 2, unitsInsidePackages: 0, totalUnits: 2 }),
-        renglon({ productId: 'p-papa', productName: 'Flauta de papa', unitsSold: 3, unitsInsidePackages: 4, totalUnits: 7 }),
-        renglon({
-          productId: 'p-pollo',
-          productName: 'Flauta de pollo',
-          itemsSold: 0,
-          unitsSold: 0,
-          grossSales: 0,
-          netSales: 0,
-          unitsInsidePackages: 2,
-          totalUnits: 2,
-        }),
-      ],
-      totals: { itemsSold: 2, unitsSold: 5, grossSales: 20, discounts: 0, netSales: 20, unitsInsidePackages: 6, totalUnits: 11 },
+  it.each([undefined, 'none', 'category'])('pide el reporte SIN lo de paquete (groupBy=%s)', async groupBy => {
+    const { next } = await pedir({
+      startDate: '2026-11-20T06:00:00.000Z',
+      endDate: '2026-11-21T05:59:59.999Z',
+      ...(groupBy ? { groupBy } : {}),
     })
-
-    const { body, next } = await pedir({ startDate: '2026-11-20T06:00:00.000Z', endDate: '2026-11-21T05:59:59.999Z' })
-
     expect(next).not.toHaveBeenCalled()
-    expect(body.data.items.map((i: { productName: string }) => i.productName)).toEqual(['Paquete', 'Flauta de papa'])
-    expect(body.data.items[1]).toMatchObject({ unitsSold: 3, unitsInsidePackages: 4, totalUnits: 7 })
-    // Los totales de siempre no cambian (el renglón quitado sumaba cero en todos).
-    expect(body.data.totals).toMatchObject({ itemsSold: 2, unitsSold: 5, grossSales: 20, netSales: 20 })
+    expect(mockGetSalesByItem).toHaveBeenCalledWith('v1', expect.objectContaining({ incluirDentroDePaquete: false }))
   })
 
-  it('regresión: sin extras ligados la respuesta es la de siempre', async () => {
-    const reporte = {
-      dateRange: {},
-      reportType: 'summary',
-      items: [renglon({ productName: 'Café' })],
-      totals: { itemsSold: 1, unitsSold: 1, grossSales: 10, discounts: 0, netSales: 10 },
-    }
-    mockGetSalesByItem.mockResolvedValue(reporte)
-
-    const { body } = await pedir({ startDate: '2026-11-20T06:00:00.000Z', endDate: '2026-11-21T05:59:59.999Z', groupBy: 'category' })
-
+  it('regresión: la respuesta es la del servicio, tal cual, como siempre', async () => {
+    const { body } = await pedir({ startDate: '2026-11-20T06:00:00.000Z', endDate: '2026-11-21T05:59:59.999Z' })
     expect(body).toEqual({ success: true, data: reporte })
   })
 })
