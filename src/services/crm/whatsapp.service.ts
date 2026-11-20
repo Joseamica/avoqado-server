@@ -38,11 +38,10 @@ export function soloElFounder(access: CrmAccess): void {
 const clamp = (value: number | undefined, fallback: number, max: number) => Math.min(Math.max(value ?? fallback, 1), max)
 
 /**
- * `[hasta, sort date, unique tiebreaker]`, opaque to the screens. `hasta` is the database's clock in UTC, kept as text: the
- * webhook writes `receivedAt` through Prisma, which fills `@default(now())` itself in UTC, whatever the session's time zone
- * (measured 20-nov on a Postgres in America/Los_Angeles: 22:56 stored at 14:59 local). Codex r2 #1 read the column's SQL
- * default (`CURRENT_TIMESTAMP`, session-local) and the QA showed the opposite; the clock is the database's, not Node's, so a
- * skew between the two machines cannot cut the photo.
+ * `[hasta, sort date, unique tiebreaker]`, opaque to the screens. `hasta` is UTC as text, from THIS process's clock: the
+ * webhook writes `receivedAt` through Prisma, whose engine fills `@default(now())` with the process clock in UTC whatever
+ * the database's time zone (measured 20-nov on a Postgres in America/Los_Angeles: 22:56 stored at 14:59 local). Same process,
+ * same clock: a message stamped after the photo can never fall inside it (Codex r3 #2; r2 #1 read the column's SQL default).
  */
 type Cursor = [string, Date, string]
 const HASTA_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}$/
@@ -67,13 +66,8 @@ function decode(cursor: string | undefined): Cursor | null {
   throw new BadRequestError('El cursor no es válido', 'CRM_CURSOR_INVALIDO')
 }
 
-/** The photo of a first page: the database's clock in UTC, the form `receivedAt` is stored in (see `Cursor`). */
-async function fotoDeAhora(): Promise<string> {
-  const [{ hasta }] = await prisma.$queryRaw<Array<{ hasta: string }>>(
-    Prisma.sql`SELECT to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS') AS hasta`,
-  )
-  return hasta
-}
+/** The photo of a first page: now, in the form `receivedAt` is stored (UTC without zone, see `Cursor`). */
+const fotoDeAhora = () => new Date().toISOString().slice(0, 23)
 
 /**
  * The stored forms a phone from a screen can match: its canonical form and, for a `+digits` the list itself handed out,
@@ -139,13 +133,14 @@ export async function listChats(access: CrmAccess, filters: ChatFilters = {}) {
   soloElFounder(access)
   const limit = clamp(filters.limit, CHATS_DEFAULT, CHATS_MAX)
   const after = decode(filters.cursor)
-  const hasta = after?.[0] ?? (await fotoDeAhora())
+  const hasta = after?.[0] ?? fotoDeAhora()
   const foto = Prisma.sql`m."receivedAt" <= ${hasta}::timestamp`
 
   const q = filters.q?.trim() || null
   const digits = q?.replace(/\D/g, '') ?? ''
-  // Only digits (and phone punctuation) is a phone: the names are not read at all (Codex r2 #7).
-  const soloTelefono = !!q && digits.length >= 4 && !/\p{L}/u.test(q)
+  // Only digits and phone punctuation is a phone: the names are not read at all (Codex r2 #7). Anything else, an emoji or a
+  // letter, may be a profile name like «📦 2026» (Codex r3 #3).
+  const soloTelefono = !!q && digits.length >= 4 && /^[\d\s()+\-.]+$/.test(q)
   // ponytail: the name search reads `contactName` of every message (no index can serve `bool_or(ILIKE)`): 28–121 ms with
   // 100,000 messages, seconds with 1,000,000. Past ~300,000, a pg_trgm GIN index on "contactName" and filtering the phones
   // first is the upgrade. The list without `q` is an index-only scan (covering index), 94–178 ms with 1,000,000.
@@ -248,7 +243,7 @@ export async function getThread(access: CrmAccess, query: ThreadQuery) {
   if (!query.phone === !query.accountId) throw new BadRequestError('Di el teléfono o el negocio, uno de los dos', 'CRM_HILO_SIN_QUIEN')
   const limit = clamp(query.limit, MENSAJES_DEFAULT, MENSAJES_MAX)
   const before = decode(query.cursor)
-  const hasta = before?.[0] ?? (await fotoDeAhora())
+  const hasta = before?.[0] ?? fotoDeAhora()
 
   let quien: Prisma.Sql
   if (query.accountId) {

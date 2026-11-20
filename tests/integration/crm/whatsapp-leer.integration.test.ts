@@ -27,7 +27,8 @@ const C2 = phone('777') // Gama, second person
 const D = phone('998') // Delta, archived
 const E = phone('871') // two businesses
 const G = `+999${P7}0` // a number the webhook could not read: stored as `+digits`
-const PHONES = [A, B, C1, C2, D, E, G]
+const H = phone('614') // nobody's, with a profile name that has digits and no letters (Codex r3 #3)
+const PHONES = [A, B, C1, C2, D, E, G, H]
 
 const T0 = new Date('2026-11-20T15:00:00.000Z')
 const at = (seconds: number) => new Date(T0.getTime() + seconds * 1000)
@@ -144,6 +145,7 @@ beforeAll(async () => {
       msg(D, at(6000)),
       msg(E, at(7000), { contactName: 'Ernesto' }),
       msg(G, at(8000), { type: 'image', body: null }),
+      msg(H, at(3000), { contactName: '📦 2026' }),
     ],
   })
 })
@@ -190,8 +192,8 @@ describe('la lista de chats', () => {
     const res = await chats({})
 
     expect(res.status).toBe(200)
-    expect(res.body.meta.total).toBe(7)
-    expect(res.body.data.map((row: { telefono: string }) => row.telefono)).toEqual([G, E, D, C2, C1, B, A])
+    expect(res.body.meta.total).toBe(8)
+    expect(res.body.data.map((row: { telefono: string }) => row.telefono)).toEqual([G, E, D, C2, C1, B, A, H])
     const byPhone = Object.fromEntries(res.body.data.map((row: { telefono: string }) => [row.telefono, row]))
     expect(byPhone[A]).toMatchObject({ mensajes: 60, negocio: { id: alfa, archivado: false }, otrosNegocios: 0 })
     expect(byPhone[B]).toMatchObject({
@@ -212,8 +214,8 @@ describe('la lista de chats', () => {
   it('caso 6: «sin prospecto» no trae los de un prospecto archivado', async () => {
     const res = await chats({ sinProspecto: 'true' })
 
-    expect(res.body.data.map((row: { telefono: string }) => row.telefono)).toEqual([G, B])
-    expect(res.body.meta.total).toBe(2)
+    expect(res.body.data.map((row: { telefono: string }) => row.telefono)).toEqual([G, B, H])
+    expect(res.body.meta.total).toBe(3)
   })
 
   it('caso 8: q busca por el nombre de perfil, en el servidor; sólo dígitos busca el teléfono', async () => {
@@ -222,14 +224,41 @@ describe('la lista de chats', () => {
 
     const porTelefono = await get(`/api/v1/crm/whatsapp/chats?q=${encodeURIComponent(`(442) ${P7}`)}`)
     expect(porTelefono.body.data.map((row: { telefono: string }) => row.telefono)).toEqual([B])
+
+    // Digits with an emoji is a name too: «📦 2026» is found by its profile name, not only by the phone (Codex r3 #3).
+    const conEmoji = await get(`/api/v1/crm/whatsapp/chats?q=${encodeURIComponent('📦 2026')}`)
+    expect(conEmoji.body.data.map((row: { telefono: string }) => row.telefono)).toContain(H)
   })
 
-  it('la foto usa el reloj de la base: el chat que va en la segunda página sigue ahí aunque le llegue un mensaje', async () => {
-    const first = await chats({ limit: '6' })
+  it('casos 4 y 7: paginar no repite ni salta, el total no cambia, aunque un chat reciba un mensaje a media recorrida', async () => {
+    const seen: string[] = []
+    const totals: number[] = []
+    let cursor: string | null = null
+    let page = 0
+    do {
+      const res: request.Response = await chats({ limit: '2', ...(cursor ? { cursor } : {}) })
+      expect(res.status).toBe(200)
+      seen.push(...res.body.data.map((row: { telefono: string }) => row.telefono))
+      totals.push(res.body.meta.total)
+      cursor = res.body.meta.nextCursor
+      page += 1
+      // After the first page, a chat of a later page gets a new message (the newest of all).
+      if (page === 1) await prisma.crmWhatsappMessage.create({ data: msg(A, new Date(), { body: 'nuevo a media recorrida' }) })
+    } while (cursor)
+
+    expect(seen).toEqual([G, E, D, C2, C1, B, A, H])
+    expect(new Set(totals)).toEqual(new Set([8]))
+    // A new first page sees it on top.
+    const fresh = await chats({ limit: '1' })
+    expect(fresh.body.data[0]).toMatchObject({ telefono: A, ultimo: { texto: 'nuevo a media recorrida' } })
+  })
+
+  it('la foto: el chat que va en la segunda página sigue ahí aunque le llegue un mensaje', async () => {
+    const first = await chats({ limit: '7' })
     const enPrimera = new Set(first.body.data.map((row: { telefono: string }) => row.telefono))
-    const pendiente = [A, B, C1, C2, D, E, G].find(p => !enPrimera.has(p)) as string
+    const pendiente = PHONES.find(p => !enPrimera.has(p)) as string
     await prisma.crmWhatsappMessage.create({ data: msg(pendiente, new Date(), { body: 'llegó después de la foto' }) })
-    const second = await chats({ limit: '6', cursor: first.body.meta.nextCursor })
+    const second = await chats({ limit: '7', cursor: first.body.meta.nextCursor })
 
     expect(second.body.data.map((row: { telefono: string }) => row.telefono)).toEqual([pendiente])
     expect(second.body.data[0].ultimo.texto).not.toBe('llegó después de la foto')
