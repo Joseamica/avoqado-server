@@ -1250,6 +1250,7 @@ export async function createModifierGroup(venueId: string, data: CreateModifierG
       description: data.description ?? undefined,
       required: data.required ?? false,
       allowMultiple: data.allowMultiple ?? false,
+      allowRepeat: data.allowRepeat ?? false,
       minSelections: data.minSelections ?? 0,
       maxSelections: data.maxSelections ?? undefined,
       displayOrder: data.displayOrder ?? 0,
@@ -1311,6 +1312,7 @@ export async function updateModifierGroup(
   if (data.description !== undefined) updateData.description = data.description
   if (data.required !== undefined) updateData.required = data.required
   if (data.allowMultiple !== undefined) updateData.allowMultiple = data.allowMultiple
+  if (data.allowRepeat !== undefined) updateData.allowRepeat = data.allowRepeat
   if (data.minSelections !== undefined) updateData.minSelections = data.minSelections
   if (data.maxSelections !== undefined) updateData.maxSelections = data.maxSelections
   if (data.displayOrder !== undefined) updateData.displayOrder = data.displayOrder
@@ -1501,6 +1503,7 @@ export async function createModifier(venueId: string, modifierGroupId: string, d
       active: data.active ?? true,
       sku: data.sku ?? null,
       durationMin: data.durationMin ?? null,
+      maxQuantity: data.maxQuantity ?? null,
       ...(rawMaterial
         ? {
             rawMaterial: { connect: { id: rawMaterial.id } },
@@ -1568,6 +1571,7 @@ export async function updateModifier(
   if (data.active !== undefined) updateData.active = data.active
   if (data.sku !== undefined) updateData.sku = data.sku
   if (data.durationMin !== undefined) updateData.durationMin = data.durationMin
+  if (data.maxQuantity !== undefined) updateData.maxQuantity = data.maxQuantity
 
   // Insumo o platillo ligado, nunca los dos (encargo 27771e): se mira lo que QUEDARÍA guardado tras esta petición.
   const effectiveRawMaterialId = data.rawMaterialId === undefined ? existing.rawMaterialId : data.rawMaterialId
