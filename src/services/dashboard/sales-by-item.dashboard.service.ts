@@ -507,7 +507,11 @@ function renglonPreferido(a: ItemSalesMetrics, b: ItemSalesMetrics, nombreDeHoy:
   const llave = (r: ItemSalesMetrics) => [r.productName, r.productSku ?? '', r.categoryName ?? '']
   const [la, lb] = [llave(a), llave(b)]
   for (let i = 0; i < la.length; i++) if (la[i] !== lb[i]) return la[i] < lb[i]
-  return false
+  // Mismo nombre, SKU y categoría a la vista (p. ej. una venta de delivery sin categoría guardada junto a una de la TPV, Codex r3 #4):
+  // decide lo que sí se ve distinto en la fila. Si hasta eso empata, las dos filas se ven idénticas y da igual cuál lo lleve.
+  if (a.grossSales !== b.grossSales) return a.grossSales > b.grossSales
+  if (a.discounts !== b.discounts) return a.discounts < b.discounts
+  return a.itemsSold > b.itemsSold
 }
 
 /**

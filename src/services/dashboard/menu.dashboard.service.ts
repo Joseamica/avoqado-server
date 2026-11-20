@@ -1393,7 +1393,12 @@ export const LIGA_QUE_DESCUENTA_PLAN = { feature: 'INVENTORY_TRACKING', plan: 'P
  * inventario ni de costos) y sus unidades sólo cuentan en «Ventas por artículo» como «Dentro de paquete». Uno CON inventario se
  * descontaría: pide además {@link LIGA_QUE_DESCUENTA_PLAN}.
  */
-async function findLinkableProductForModifier(venueId: string, productId: string) {
+async function findLinkableProductForModifier(
+  venueId: string,
+  productId: string,
+  /** Lo que la vista previa le prometió al operador (MCP): si el inventario del platillo cambió desde entonces, no se guarda (Codex r3 #7). */
+  esperaQueDescuente?: boolean,
+) {
   if (LIGA_DE_EXTRA_PLAN && !(await venueHasFeatureAccess(venueId, LIGA_DE_EXTRA_PLAN.feature))) {
     throw new AppError(
       `Ligar un extra a un platillo del menú es parte del plan ${LIGA_DE_EXTRA_PLAN.plan}. Sube a ${LIGA_DE_EXTRA_PLAN.plan} para usarlo.`,
@@ -1424,6 +1429,14 @@ async function findLinkableProductForModifier(venueId: string, productId: string
     )
   }
   const method = product.trackInventory ? (product.inventoryMethod ?? (product.recipe ? 'RECIPE' : null)) : null
+  if (esperaQueDescuente !== undefined && !!method !== esperaQueDescuente) {
+    throw new AppError(
+      `El inventario de «${product.name}» cambió desde la vista previa: ahora el extra ${method ? 'lo descontaría' : 'sólo contaría (no descuenta)'}. Vuelve a consultar y confirma el cambio actualizado.`,
+      409,
+      true,
+      'MODIFIER_LINK_EFFECT_CHANGED',
+    )
+  }
   if (method && !(await venueHasFeatureAccess(venueId, LIGA_QUE_DESCUENTA_PLAN.feature))) {
     throw new AppError(
       `«${product.name}» lleva inventario: que un extra lo descuente es del plan ${LIGA_QUE_DESCUENTA_PLAN.plan}. Liga un platillo sin inventario (sólo cuenta en el reporte) o sube a ${LIGA_QUE_DESCUENTA_PLAN.plan}.`,
@@ -1579,6 +1592,8 @@ export async function updateModifier(
   modifierGroupId: string,
   modifierId: string,
   data: UpdateModifierDto,
+  /** Sólo la MCP: el efecto que el operador confirmó (contar o descontar). La REST no lo manda. */
+  opciones?: { linkedDeducts?: boolean },
 ): Promise<Modifier> {
   const group = await prisma.modifierGroup.findFirst({ where: { id: modifierGroupId, venueId, active: true } })
   if (!group) {
@@ -1607,7 +1622,7 @@ export async function updateModifier(
   // Re-mandar el MISMO platillo es no tocarlo: no pide el plan otra vez (un negocio que bajó de plan sigue editando el precio).
   if (data.linkedProductId !== undefined && data.linkedProductId !== existing.linkedProductId) {
     if (data.linkedProductId !== null) {
-      linkedProduct = await findLinkableProductForModifier(venueId, data.linkedProductId)
+      linkedProduct = await findLinkableProductForModifier(venueId, data.linkedProductId, opciones?.linkedDeducts)
       updateData.linkedProduct = { connect: { id: linkedProduct.id } }
       updateData.cost = linkedProduct.cost
     } else {

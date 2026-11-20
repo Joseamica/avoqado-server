@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
-import { fromZonedTime } from 'date-fns-tz'
+import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 import { venueEndOfDay, venueStartOfDay } from '@/utils/datetime'
 import { getUnitsInsidePackages } from '@/services/dashboard/sales-by-item.dashboard.service'
 import type { McpScope } from '../scope'
@@ -60,6 +60,10 @@ export function registerPackageComponentSalesTools(server: McpServer, scope: Mcp
       if (malo !== undefined) return text({ ok: false, error: `La fecha «${malo}» no es válida: usa AAAA-MM-DD (un día que exista).` })
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
       const tz = venue?.timezone || 'America/Mexico_City'
+      // Un día que el calendario del negocio se saltó (Samoa saltó el 30-dic-2011) no existe ahí: se rechaza en vez de leer otro día
+      // (Codex r3 #3).
+      const sinDia = [fromDate, toDate].find(d => d !== undefined && formatInTimeZone(mediodiaDelNegocio(d, tz), tz, 'yyyy-MM-dd') !== d)
+      if (sinDia !== undefined) return text({ ok: false, error: `El día «${sinDia}» no existe en la zona del negocio (${tz}).` })
       const start = venueStartOfDay(tz, fromDate ? mediodiaDelNegocio(fromDate, tz) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
       const end = venueEndOfDay(tz, toDate ? mediodiaDelNegocio(toDate, tz) : undefined)
 

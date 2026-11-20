@@ -183,6 +183,22 @@ describe('sales-by-item — «Dentro de paquete»', () => {
     }
   })
 
+  it('Codex r3 #4: con nombre, SKU y categoría iguales a la vista, decide lo que sí se ve distinto (dinero, descuento)', async () => {
+    for (const orden of [
+      [10, 0],
+      [0, 10],
+    ]) {
+      ;(prismaMock.$queryRawUnsafe as jest.Mock).mockReset().mockResolvedValue([])
+      responder(
+        orden.map(d => itemRow({ units_sold: 1, items_sold: 1, gross_sales: 30, discounts: d })),
+        [dentroRow()],
+      )
+      const r = (await getSalesByItem(VENUE, { ...RANGE })).items
+      expect(r.find(i => i.discounts === 0)!.unitsInsidePackages).toBe(15)
+      expect(r.find(i => i.discounts === 10)!.unitsInsidePackages).toBe(0)
+    }
+  })
+
   it('Codex r1 #5: con incluirDentroDePaquete:false (lo que pide /mobile) no se consulta ni se agrega nada', async () => {
     ;(prismaMock.$queryRawUnsafe as jest.Mock).mockResolvedValueOnce([itemRow()]).mockResolvedValueOnce([])
 

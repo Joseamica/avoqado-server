@@ -199,6 +199,25 @@ describe('Extra ligado a un platillo del menú', () => {
     expect(venueHasFeatureAccess).toHaveBeenCalledWith(params.venueId, 'INVENTORY_TRACKING')
   })
 
+  it('Codex r3 #7: con el efecto esperado de la MCP, si el inventario del platillo cambió desde la vista previa, no guarda (409)', async () => {
+    // La vista previa dijo «sólo cuenta» (false), pero hoy las papas llevan inventario (por piezas).
+    const err = await updateModifier(
+      params.venueId,
+      params.modifierGroupId,
+      params.modifierId,
+      parseEdicion({ linkedProductId: PAPAS_ID }),
+      { linkedDeducts: false },
+    ).catch(e => e)
+    expect(err.statusCode).toBe(409)
+    expect(err.code).toBe('MODIFIER_LINK_EFFECT_CHANGED')
+    expect(prismaMock.modifier.update).not.toHaveBeenCalled()
+    // Con el efecto correcto, sí guarda.
+    await updateModifier(params.venueId, params.modifierGroupId, params.modifierId, parseEdicion({ linkedProductId: PAPAS_ID }), {
+      linkedDeducts: true,
+    })
+    expect(prismaMock.modifier.update).toHaveBeenCalledTimes(1)
+  })
+
   it('sin inventario y sin costo: se liga con costo vacío (no inventa uno)', async () => {
     prismaMock.product.findFirst.mockResolvedValue({ ...papas, trackInventory: false, inventoryMethod: null, cost: null } as any)
     await createModifier(params.venueId, params.modifierGroupId, parseAlta({ name: 'Papas', price: 0, linkedProductId: PAPAS_ID }))

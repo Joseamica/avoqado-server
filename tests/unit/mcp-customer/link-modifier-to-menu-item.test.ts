@@ -109,7 +109,7 @@ describe('link_modifier_to_menu_item', () => {
       }),
     )
     expect(out).toEqual({ ok: true, extra: 'Papas', deductsMenuItem: 'Papas a la francesa', deductsInventory: true })
-    expect(mockUpdateModifier).toHaveBeenCalledWith('v1', 'g1', 'mod-papas', { linkedProductId: 'p-papas' })
+    expect(mockUpdateModifier).toHaveBeenCalledWith('v1', 'g1', 'mod-papas', { linkedProductId: 'p-papas' }, { linkedDeducts: true })
     expect(mockAudit.mock.calls[0][1]).toMatchObject({
       action: 'MODIFIER_LINKED_PRODUCT_SET',
       entityId: 'mod-papas',
@@ -186,7 +186,7 @@ describe('link_modifier_to_menu_item', () => {
       }),
     )
     expect(out).toEqual({ ok: true, extra: 'Papas', deductsMenuItem: 'Papas a la francesa', deductsInventory: false })
-    expect(mockUpdateModifier).toHaveBeenCalledWith('v1', 'g1', 'mod-papas', { linkedProductId: 'p-papas' })
+    expect(mockUpdateModifier).toHaveBeenCalledWith('v1', 'g1', 'mod-papas', { linkedProductId: 'p-papas' }, { linkedDeducts: false })
   })
 
   it('Codex r1 #1: un negocio Pro no liga un platillo que DESCONTARÍA (pide Premium); uno sin inventario sí', async () => {
@@ -221,13 +221,14 @@ describe('link_modifier_to_menu_item', () => {
     expect(mockUpdateModifier).not.toHaveBeenCalled()
   })
 
-  it('Codex r2 #7: si el inventario cambia justo al guardar, la respuesta dice lo que de verdad quedó', async () => {
+  it('Codex r3 #7: la escritura va atada al efecto confirmado; si el servicio ve otro, no guarda y lo dice', async () => {
     const sinInv = { trackInventory: false, inventoryMethod: null, recipe: null }
-    productFindFirst.mockResolvedValueOnce(sinInv) // vista previa
+    productFindFirst.mockResolvedValue(sinInv)
     const preview = parse(await call({ venueId: 'v1', modifierName: 'Papas', menuItemName: 'Papas a la' }))
-    productFindFirst
-      .mockResolvedValueOnce(sinInv) // la confirmación vuelve a leer: misma huella
-      .mockResolvedValueOnce({ trackInventory: true, inventoryMethod: 'QUANTITY', recipe: null }) // ya guardado, alguien lo prendió
+    // Entre la huella y la escritura alguien prendió el inventario: el servicio lo detecta y rechaza (409).
+    mockUpdateModifier.mockRejectedValue(
+      new Error('El inventario de «Papas a la francesa» cambió desde la vista previa: ahora el extra lo descontaría.'),
+    )
     const out = parse(
       await call({
         venueId: 'v1',
@@ -239,7 +240,23 @@ describe('link_modifier_to_menu_item', () => {
         expectedSourceFingerprint: preview.expectedSourceFingerprint,
       }),
     )
-    expect(out).toMatchObject({ ok: true, deductsInventory: true, warning: expect.stringMatching(/SÍ lo descuenta/) })
+    expect(mockUpdateModifier).toHaveBeenCalledWith('v1', 'g1', 'mod-papas', { linkedProductId: 'p-papas' }, { linkedDeducts: false })
+    expect(out).toMatchObject({ ok: false, error: expect.stringMatching(/cambió desde la vista previa/) })
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('quitar la liga no manda efecto esperado (no hay platillo que revisar)', async () => {
+    modifierFindMany.mockResolvedValue([{ ...extraPapas, linkedProductId: 'p-papas', linkedProduct: { name: 'Papas a la francesa' } }])
+    const preview = parse(await call({ venueId: 'v1', modifierName: 'Papas', unlink: true }))
+    await call({
+      venueId: 'v1',
+      modifierName: 'Papas',
+      unlink: true,
+      confirm: true,
+      resolvedModifierId: preview.resolvedModifierId,
+      expectedSourceFingerprint: preview.expectedSourceFingerprint,
+    })
+    expect(mockUpdateModifier).toHaveBeenCalledWith('v1', 'g1', 'mod-papas', { linkedProductId: null }, undefined)
   })
 
   it('Codex r1 #14: un platillo por kilo se rechaza en la vista previa, sin ofrecer confirmación', async () => {

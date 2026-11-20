@@ -145,6 +145,13 @@ describe('package_component_sales', () => {
     expect([(start as Date).toISOString(), (end as Date).toISOString()]).toEqual(['2026-11-19T11:00:00.000Z', '2026-11-20T10:59:59.999Z'])
   })
 
+  it('Codex r3 #3: un día que la zona del negocio se saltó (Samoa, 30-dic-2011) se rechaza, sin leer otro día', async () => {
+    mockVenueFind.mockResolvedValue({ timezone: 'Pacific/Apia' })
+    const out = parse(await call({ venueId: 'v1', fromDate: '2011-12-30', toDate: '2011-12-31' }))
+    expect(out).toMatchObject({ ok: false, error: expect.stringContaining('2011-12-30') })
+    expect(mockUnidades).not.toHaveBeenCalled()
+  })
+
   it('Codex r1 #10: el día no depende de la zona del proceso', async () => {
     const tzAntes = process.env.TZ
     try {
