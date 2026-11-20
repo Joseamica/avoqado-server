@@ -14,6 +14,9 @@ keywords:
   - marcar salida
   - registrar asistencia
   - descanso
+  - olvidé marcar mi salida
+  - no me deja checar entrada
+  - salida olvidada
 ---
 
 ## Antes de empezar
@@ -31,6 +34,7 @@ Cada persona checa con su propio PIN. Si *Reloj checador* no sale en *Más*, lo 
 
 ## Problemas frecuentes
 
+- Si ayer (u otro día) no marcaste tu salida, tu turno se cerró solo al terminar el día como «Salida olvidada» y lo revisa tu gerente en Asistencia: hoy toca *Entrada* normal. Si al tocar *Salida* te dice que tu entrada de otro día se cerró como salida olvidada, haz lo mismo: marca tu entrada.
 - Si el nombre que saluda no es el tuyo, toca *Cambiar usuario* y escribe tu PIN.
 
 ## Sin internet
