@@ -105,11 +105,6 @@ export const TOPE_CUENTAS_EN_ESPERA = 1000
 /** Cuánto, como mucho, espera una lectura a lo que se está guardando (las transacciones que lo guardan duran 15 s como máximo). */
 export const ESPERA_MAXIMA_MS = 20_000
 const ESPERA_ENTRE_INTENTOS_MS = 25
-/**
- * v5: holgura entre el reloj del SERVIDOR (la marca) y el de Postgres (el inicio de una transacción). Una transacción que empezó más de
- * esto después de `L(B)` ya no puede contestar a tiempo: la lectura no la espera.
- */
-export const HOLGURA_DE_RELOJES_MS = 2_000
 
 /** Pausas recientes ya confirmadas (por negocio, el pedido que la pausó): las demás lecturas de esos 30 s no vuelven a esperar. */
 const pausasConfirmadas = new Map<string, string>()
@@ -239,20 +234,13 @@ async function esperarLoQueSeGuarda(venueId: string, desde: Date, pausaAt: Date)
         const [{ n }] = await tx.$queryRaw<Array<{ n: number }>>`
           SELECT count(*)::int AS n FROM "OnlineOrder" oo WHERE ${pendientesQuePuedenCambiarlo(venueId, desde)}`
         if (n > TOPE_CUENTAS_EN_ESPERA) return 'MUCHAS' as const
-        // v5 (Codex p2v4-r4 #3 / p2v5-r1 #3): no se espera a quien tiene la cuenta tomada en una transacción que EMPEZÓ después de
-        // `L(B)` (+ holgura de relojes): su reloj se lee después de tomar la cuenta, o sea después de `L(B)`, y su respuesta ya llega
-        // tarde. Así no retrasan la pausa el vencimiento de B, una edición del panel ni la cuenta de un pedido posterior. Se reconoce por
-        // el `xmax` de la fila (quien la tiene tomada) y el inicio de su transacción; si no se puede reconocer (varios a la vez, una
-        // subtransacción), se espera como antes.
+        // v5: aquí se probó NO esperar a transacciones que empezaron después de L(B) (por `xmax` y `pg_stat_activity`), y se quitó: mezcla
+        // el reloj del SERVIDOR con el de Postgres y, con un desfase, puede saltarse una aceptación a tiempo y dar una pausa falsa (Codex
+        // p2v5-r2 #5). Se espera a quien tenga la cuenta tomada, con el tope de `L(B) + 30 s` (decisión pendiente del founder, r4 #3).
         await tx.$queryRaw`
           SELECT o.id FROM "Order" o
           WHERE o."venueId" = ${venueId}
             AND o.id IN (SELECT oo."orderId" FROM "OnlineOrder" oo WHERE ${pendientesQuePuedenCambiarlo(venueId, desde)})
-            AND NOT EXISTS (
-              SELECT 1 FROM pg_stat_activity a
-              WHERE a.backend_xid = o.xmax
-                AND (a.xact_start AT TIME ZONE 'UTC') > ${utcTs(new Date(pausaAt.getTime() + HOLGURA_DE_RELOJES_MS))}
-            )
           FOR SHARE OF o NOWAIT`
         return 'LISTO' as const
       })

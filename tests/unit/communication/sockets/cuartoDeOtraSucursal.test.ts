@@ -189,4 +189,58 @@ describe('cuartos de otra sucursal (socket del panel)', () => {
     expect(cb).toHaveBeenCalledWith({ success: true })
     expect(enCuarto(rm, B, socket.id)).toBe(true)
   })
+
+  it('🔴 Codex p2v5-r2 #1: una confirmación que no es función, o que lanza, nunca tumba al SERVIDOR', async () => {
+    const { manejadores } = conectar()
+    for (const raro of [42, 'x', { a: 1 }, true]) {
+      expect(() => manejadores[EVENTO_ENTRAR]({ venueId: B }, raro)).not.toThrow()
+      expect(() => manejadores[EVENTO_SALIR]({ venueId: B }, raro)).not.toThrow()
+    }
+    const lanza = () => {
+      throw new Error('del cliente')
+    }
+    expect(() => manejadores[EVENTO_SALIR]({ venueId: B }, lanza)).not.toThrow()
+    resolver.mockRejectedValue(new Error('db'))
+    manejadores[EVENTO_ENTRAR]({ venueId: B }, lanza)
+    // Ningún rechazo sin atender (jest falla la prueba si uno se escapa).
+    await new Promise(r => setImmediate(r))
+  })
+
+  it('🔴 Codex p2v5-r2 #2: si le quitaron el permiso y vuelve a pedir, el alta negada también lo SACA (no espera a la revalidación)', async () => {
+    const { socket } = conectar()
+    await cuartos.entrar(socket, { venueId: B })
+    expect(enCuarto(rm, B, 's1')).toBe(true)
+    resolver.mockResolvedValue(false)
+    await expect(cuartos.entrar(socket, { venueId: B })).resolves.toBe(false)
+    expect(enCuarto(rm, B, 's1')).toBe(false)
+    // Y si la base falla en esa alta, también sale (falla cerrado).
+    resolver.mockImplementation(async ({ permission }: { permission: string }) => permission === 'orders:read')
+    await cuartos.entrar(socket, { venueId: B })
+    resolver.mockRejectedValue(new Error('db'))
+    await cuartos.entrar(socket, { venueId: B })
+    expect(enCuarto(rm, B, 's1')).toBe(false)
+  })
+
+  it('Codex p2v5-r2 #3: no recuerda nada de las altas ya terminadas ni de las bajas (la memoria no crece con las sucursales visitadas)', async () => {
+    const { socket } = conectar()
+    for (let i = 0; i < 50; i++) {
+      const v = `cvenue${String(i).padStart(19, '0')}`
+      await cuartos.entrar(socket, { venueId: v })
+      cuartos.salir(socket, { venueId: v })
+    }
+    expect((cuartos as unknown as { pendientes: Map<string, number> }).pendientes.size).toBe(0)
+  })
+
+  it('Codex p2v5-r2 #3: una revalidación no se encima con otra del mismo socket', async () => {
+    const { socket } = conectar()
+    await cuartos.entrar(socket, { venueId: B })
+    resolver.mockClear()
+    let soltar!: () => void
+    resolver.mockImplementationOnce(() => new Promise(r => (soltar = () => r(true))))
+    const primera = cuartos.revalidar(socket)
+    await cuartos.revalidar(socket)
+    expect(resolver).toHaveBeenCalledTimes(1)
+    soltar()
+    await primera
+  })
 })

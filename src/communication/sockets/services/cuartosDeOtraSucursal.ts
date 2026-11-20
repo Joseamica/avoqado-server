@@ -34,9 +34,12 @@ export const REVALIDACION_MS = 60_000
 const ID_VALIDO = /^[a-z0-9]{20,40}$/i
 
 export class CuartosDeOtraSucursal {
-  /** Por socket y sucursal, el turno del último pedido (entrar o salir): sólo ése se aplica. */
-  private turnos = new Map<string, number>()
+  /** Por socket y sucursal, el turno del alta EN CURSO (un `leave` la borra y así la cancela). */
+  private pendientes = new Map<string, number>()
+  private secuencia = 0
   private revalidaciones = new Map<string, ReturnType<typeof setInterval>>()
+  /** Sockets con una revalidación en curso: la siguiente no se encima (Codex p2v5-r2 #3). */
+  private revalidando = new Set<string>()
 
   constructor(
     private readonly roomManager: RoomManagerService,
@@ -45,11 +48,22 @@ export class CuartosDeOtraSucursal {
   ) {}
 
   registrar(socket: AuthenticatedSocket): void {
-    onWithContext(socket, EVENTO_ENTRAR, (payload: unknown, callback?: (r: unknown) => void) => {
-      void this.entrar(socket, payload, callback)
+    // Codex p2v5-r2 #1: lo que manda el cliente nunca tumba al SERVIDOR: una confirmación que no es función se ignora, y cualquier error
+    // (también uno asíncrono) se registra y se contesta, jamás se escapa.
+    onWithContext(socket, EVENTO_ENTRAR, (payload: unknown, callback?: unknown) => {
+      const cb = comoCallback(callback)
+      this.entrar(socket, payload, cb).catch(error => {
+        logger.error('[Socket] falló el alta a los avisos de otra sucursal (no fatal)', { socketId: socket.id, error })
+        contestar(cb, { success: false, error: 'No se pudo verificar el acceso' })
+      })
     })
-    onWithContext(socket, EVENTO_SALIR, (payload: unknown, callback?: (r: unknown) => void) => {
-      this.salir(socket, payload, callback)
+    onWithContext(socket, EVENTO_SALIR, (payload: unknown, callback?: unknown) => {
+      const cb = comoCallback(callback)
+      try {
+        this.salir(socket, payload, cb)
+      } catch (error) {
+        logger.error('[Socket] falló la baja de los avisos de otra sucursal (no fatal)', { socketId: socket.id, error })
+      }
     })
     onWithContext(socket, 'disconnect', () => this.olvidar(socket.id))
   }
@@ -58,10 +72,22 @@ export class CuartosDeOtraSucursal {
     return `${socketId}:${venueId}`
   }
 
-  private turno(socketId: string, venueId: string): number {
-    const n = (this.turnos.get(this.clave(socketId, venueId)) ?? 0) + 1
-    this.turnos.set(this.clave(socketId, venueId), n)
+  /**
+   * Codex p2v5-r2 #3: sólo se recuerda el turno de un alta EN CURSO (se borra al terminar o con un `leave`): la memoria no crece con las
+   * sucursales que el socket visitó.
+   */
+  private empezarAlta(socketId: string, venueId: string): number {
+    const n = ++this.secuencia
+    this.pendientes.set(this.clave(socketId, venueId), n)
     return n
+  }
+
+  /** ¿Esta alta sigue siendo la última pedida? La borra (termina) si sí. */
+  private terminarAlta(socketId: string, venueId: string, n: number): boolean {
+    const clave = this.clave(socketId, venueId)
+    if (this.pendientes.get(clave) !== n) return false
+    this.pendientes.delete(clave)
+    return true
   }
 
   /** ¿Tiene en [venueId] alguno de los permisos del canal? Lanza si la base falla (quien llama falla cerrado). */
@@ -74,7 +100,7 @@ export class CuartosDeOtraSucursal {
 
   async entrar(socket: AuthenticatedSocket, payload: unknown, callback?: (r: unknown) => void): Promise<boolean> {
     const responder = (ok: boolean, motivo?: string) => {
-      if (callback) callback({ success: ok, ...(motivo ? { error: motivo } : {}) })
+      contestar(callback, { success: ok, ...(motivo ? { error: motivo } : {}) })
       return ok
     }
     const ctx = socket.authContext
@@ -89,7 +115,7 @@ export class CuartosDeOtraSucursal {
       })
       return responder(false, 'Sin acceso a esta sucursal')
     }
-    const n = this.turno(socket.id, venueId)
+    const n = this.empezarAlta(socket.id, venueId)
     let puede = false
     try {
       puede = await this.puede(ctx.userId, venueId)
@@ -99,14 +125,19 @@ export class CuartosDeOtraSucursal {
         venueId,
         error: error instanceof Error ? error.message : String(error),
       })
+      // Falla cerrado: si ya estaba suscrito de antes, también sale (Codex p2v5-r2 #2).
+      if (this.terminarAlta(socket.id, venueId, n)) this.roomManager.leaveOnlineStoreChannel(socket, venueId)
       return responder(false, 'No se pudo verificar el acceso')
     }
+    // Un `leave` posterior, otra alta o la desconexión ganan: no se entra con un permiso que ya nadie pidió.
+    if (!this.terminarAlta(socket.id, venueId, n)) return responder(false, 'Cancelado')
     if (!puede) {
       logger.warn('[Socket] pidió los avisos de una sucursal sin permiso (negado)', { socketId: socket.id, userId: ctx.userId, venueId })
+      // Codex p2v5-r2 #2: negado ⇒ también sale si ya estaba suscrito (le quitaron el permiso y volvió a pedir).
+      this.roomManager.leaveOnlineStoreChannel(socket, venueId)
       return responder(false, 'Sin acceso a esta sucursal')
     }
-    // Un `leave` posterior, o la desconexión, ganan: no se entra con un permiso que ya nadie pidió.
-    if (this.turnos.get(this.clave(socket.id, venueId)) !== n || !socket.connected) return responder(false, 'Cancelado')
+    if (!socket.connected) return responder(false, 'Cancelado')
     if (!this.roomManager.joinOnlineStoreChannel(socket, venueId)) return responder(false, 'Cancelado')
     this.programarRevalidacion(socket)
     return responder(true)
@@ -115,35 +146,43 @@ export class CuartosDeOtraSucursal {
   salir(socket: AuthenticatedSocket, payload: unknown, callback?: (r: unknown) => void): void {
     const venueId = (payload as { venueId?: unknown } | null)?.venueId
     if (typeof venueId === 'string' && venueId !== socket.authContext?.venueId) {
-      this.turno(socket.id, venueId)
+      // Cancela un alta en curso (su turno deja de existir) y sale si ya estaba.
+      this.pendientes.delete(this.clave(socket.id, venueId))
       this.roomManager.leaveOnlineStoreChannel(socket, venueId)
     }
-    if (callback) callback({ success: true })
+    contestar(callback, { success: true })
   }
 
-  /** Vuelve a verificar el permiso en cada canal; sin él (o si la base falla) sale. */
+  /** Vuelve a verificar el permiso en cada canal; sin él (o si la base falla) sale. Una a la vez por socket. */
   async revalidar(socket: AuthenticatedSocket): Promise<void> {
-    const ctx = socket.authContext
-    for (const venueId of this.roomManager.getOnlineStoreChannels(socket.id)) {
-      const n = this.turnos.get(this.clave(socket.id, venueId))
-      let sigue = false
-      try {
-        sigue = !!ctx?.userId && (await this.puede(ctx.userId, venueId))
-      } catch {
-        sigue = false
+    if (this.revalidando.has(socket.id)) return
+    this.revalidando.add(socket.id)
+    try {
+      const ctx = socket.authContext
+      for (const venueId of this.roomManager.getOnlineStoreChannels(socket.id)) {
+        let sigue = false
+        try {
+          sigue = !!ctx?.userId && (await this.puede(ctx.userId, venueId))
+        } catch {
+          sigue = false
+        }
+        // Si mientras tanto se pidió otra alta para esa sucursal, ésa decide (y si la niegan, también saca).
+        if (!sigue && !this.pendientes.has(this.clave(socket.id, venueId))) {
+          this.roomManager.leaveOnlineStoreChannel(socket, venueId)
+          logger.info('[Socket] salió de los avisos de otra sucursal: ya no tiene el permiso', { socketId: socket.id, venueId })
+        }
       }
-      // Si mientras tanto llegó otro pedido para esa sucursal, ése decide.
-      if (!sigue && this.turnos.get(this.clave(socket.id, venueId)) === n) {
-        this.roomManager.leaveOnlineStoreChannel(socket, venueId)
-        logger.info('[Socket] salió de los avisos de otra sucursal: ya no tiene el permiso', { socketId: socket.id, venueId })
-      }
+      if (this.roomManager.getOnlineStoreChannels(socket.id).length === 0) this.pararRevalidacion(socket.id)
+    } finally {
+      this.revalidando.delete(socket.id)
     }
-    if (this.roomManager.getOnlineStoreChannels(socket.id).length === 0) this.pararRevalidacion(socket.id)
   }
 
   private programarRevalidacion(socket: AuthenticatedSocket): void {
     if (this.revalidaciones.has(socket.id)) return
-    const t = setInterval(() => void this.revalidar(socket), this.intervaloMs)
+    const t = setInterval(() => {
+      this.revalidar(socket).catch(error => logger.error('[Socket] falló la revalidación de otra sucursal (no fatal)', { error }))
+    }, this.intervaloMs)
     t.unref?.()
     this.revalidaciones.set(socket.id, t)
   }
@@ -156,7 +195,22 @@ export class CuartosDeOtraSucursal {
 
   private olvidar(socketId: string): void {
     this.pararRevalidacion(socketId)
-    for (const clave of Array.from(this.turnos.keys())) if (clave.startsWith(`${socketId}:`)) this.turnos.delete(clave)
+    for (const clave of Array.from(this.pendientes.keys())) if (clave.startsWith(`${socketId}:`)) this.pendientes.delete(clave)
+  }
+}
+
+/** La confirmación del cliente sólo si es una función (cualquier otra cosa se ignora). */
+function comoCallback(callback: unknown): ((r: unknown) => void) | undefined {
+  return typeof callback === 'function' ? (callback as (r: unknown) => void) : undefined
+}
+
+/** Contesta sin que un error de la confirmación del cliente se escape. */
+function contestar(callback: ((r: unknown) => void) | undefined, respuesta: unknown): void {
+  if (!callback) return
+  try {
+    callback(respuesta)
+  } catch (error) {
+    logger.warn('[Socket] la confirmación del cliente lanzó (ignorado)', { error })
   }
 }
 

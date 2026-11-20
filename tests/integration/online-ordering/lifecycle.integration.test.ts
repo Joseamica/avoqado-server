@@ -26,7 +26,6 @@ import {
   avanzarCortePausaSola,
   getAcceptingStatus,
   touchInboxPoll,
-  HOLGURA_DE_RELOJES_MS,
 } from '@/services/online-ordering/presence.service'
 import { claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/online-ordering/printClaim.service'
 import * as quoteModule from '@/services/online-ordering/quote.service'
@@ -1118,38 +1117,6 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       soltar()
       await cajera
       await expect(lectura).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
-    })
-
-    it('v5 (r4 #3): quien toma la cuenta de un pedido por aceptar en una transacción que EMPEZÓ después de L(B) no retrasa «Pausada»', async () => {
-      await arrancar()
-      const a = await newOrder()
-      const b = await newOrder()
-      const c = await newOrder() // por aceptar, hora límite posterior: su cuenta entra en la espera
-      await venceA(a.onlineOrderId, hace(5_000))
-      await venceA(b.onlineOrderId, hace(HOLGURA_DE_RELOJES_MS + 1_000)) // reciente (< 30 s): la lectura revisaría candados
-      // Alguien (el panel, el vencimiento, otra cajera) toma la cuenta de C AHORA, ya pasada la hora límite de B, y tarda.
-      let soltar!: () => void
-      const tardanza = new Promise<void>(resolve => (soltar = resolve))
-      let tomado!: () => void
-      const yaTomado = new Promise<void>(resolve => (tomado = resolve))
-      const tarde = prisma.$transaction(
-        async tx => {
-          await lockExistingOrderForPayment(tx, { venueId: venueId!, orderId: c.orderId })
-          tomado()
-          await tardanza
-        },
-        { timeout: 15_000 },
-      )
-      await yaTomado
-      const inicio = Date.now()
-      try {
-        await expect(estadoTienda()).resolves.toMatchObject({ status: 'PAUSED' })
-        // Sin esperarla: la lectura no hace fila detrás de una transacción que ya no puede cambiar el veredicto.
-        expect(Date.now() - inicio).toBeLessThan(1_500)
-      } finally {
-        soltar()
-        await tarde
-      }
     })
 
     it('un rechazo TARDE no es respuesta: el pedido ya falló a su hora límite', async () => {

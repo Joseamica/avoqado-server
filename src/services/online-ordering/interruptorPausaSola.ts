@@ -56,24 +56,36 @@ export function __resetInterruptorParaPruebas(): void {
 /**
  * Prende el interruptor: «desde» = ahora + [minutos] (≥ `MINUTOS_MINIMOS`). Nunca una hora pasada ni cercana: el redespliegue y los
  * pedidos del SERVIDOR anterior necesitan ese margen, y una hora pasada pausaría de golpe por pedidos que vencieron antes de prenderlo.
- * Si ya estaba prendido con una hora que ya llegó, no la mueve (moverla perdería fallas ya contadas): para cambiarla, primero se apaga.
+ * No mueve una hora que ya llegó o está por llegar (≤ `MARGEN_PARA_MOVER_S`): moverla perdería fallas ya contadas. Para cambiarla,
+ * primero se apaga.
+ *
+ * Codex p2v5-r2 #7: revisar y escribir son UNA sola instrucción, con el reloj de Postgres: no hay hueco entre «la vi futura» y «la
+ * cambié», ni dependencia del reloj de quien corre el script.
  */
-export async function prenderPausaSola(p: { minutos?: number; por: string; now?: Date }): Promise<Date> {
+export const MARGEN_PARA_MOVER_S = 10
+
+export async function prenderPausaSola(p: { minutos?: number; por: string }): Promise<Date> {
   const minutos = p.minutos ?? MINUTOS_MINIMOS
   if (!Number.isFinite(minutos) || minutos < MINUTOS_MINIMOS) {
     throw new Error(`La pausa sola se prende al menos ${MINUTOS_MINIMOS} minutos en el futuro (pediste ${minutos}).`)
   }
-  const now = p.now ?? new Date()
-  const desde = new Date(now.getTime() + minutos * 60_000)
-  const actual = await prisma.interruptorDePlataforma.findUnique({ where: { clave: CLAVE_PAUSA_SOLA }, select: { desde: true } })
-  if (actual?.desde && actual.desde.getTime() <= now.getTime()) {
-    throw new Error(`La pausa sola ya está prendida desde ${actual.desde.toISOString()}. Para cambiar la hora, primero apágala.`)
+  const filas = await prisma.$queryRaw<Array<{ desde: Date }>>`
+    INSERT INTO "InterruptorDePlataforma" ("clave", "desde", "actualizadoPor", "updatedAt")
+    VALUES (
+      ${CLAVE_PAUSA_SOLA},
+      (now() AT TIME ZONE 'UTC') + (${minutos}::double precision * interval '1 minute'),
+      ${p.por},
+      (now() AT TIME ZONE 'UTC')
+    )
+    ON CONFLICT ("clave") DO UPDATE
+      SET "desde" = EXCLUDED."desde", "actualizadoPor" = EXCLUDED."actualizadoPor", "updatedAt" = EXCLUDED."updatedAt"
+      WHERE "InterruptorDePlataforma"."desde" IS NULL
+         OR "InterruptorDePlataforma"."desde" > (now() AT TIME ZONE 'UTC') + (${MARGEN_PARA_MOVER_S}::int * interval '1 second')
+    RETURNING "desde"`
+  const desde = filas[0]?.desde
+  if (!desde) {
+    throw new Error('La pausa sola ya está prendida con una hora que ya llegó (o está por llegar). Para cambiar la hora, primero apágala.')
   }
-  await prisma.interruptorDePlataforma.upsert({
-    where: { clave: CLAVE_PAUSA_SOLA },
-    create: { clave: CLAVE_PAUSA_SOLA, desde, actualizadoPor: p.por },
-    update: { desde, actualizadoPor: p.por },
-  })
   logger.info('[OnlineOrdering] pausa sola PRENDIDA', { desde: desde.toISOString(), por: p.por })
   return desde
 }

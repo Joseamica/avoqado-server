@@ -50,29 +50,34 @@ describe('pausaSolaDesde', () => {
 })
 
 describe('prenderPausaSola / apagarPausaSola', () => {
-  it('prende con «desde» = ahora + 15 min por omisión, y anota quién', async () => {
-    fila().findUnique.mockResolvedValue(null)
-    const desde = await prenderPausaSola({ por: 'founder', now: NOW })
-    expect(desde).toEqual(new Date(NOW.getTime() + 15 * 60_000))
-    expect(fila().upsert).toHaveBeenCalledWith({
-      where: { clave: CLAVE_PAUSA_SOLA },
-      create: { clave: CLAVE_PAUSA_SOLA, desde, actualizadoPor: 'founder' },
-      update: { desde, actualizadoPor: 'founder' },
-    })
+  const raw = () => prismaMock.$queryRaw as unknown as jest.Mock
+  const sql = () => {
+    const [partes, ...valores] = raw().mock.calls[0]
+    return { texto: (partes as string[]).join('?'), valores }
+  }
+
+  it('prende en UNA instrucción con el reloj de Postgres: «desde» = ahora + 15 min por omisión, y anota quién', async () => {
+    raw().mockResolvedValue([{ desde: NOW }])
+    await expect(prenderPausaSola({ por: 'founder' })).resolves.toEqual(NOW)
+    const { texto, valores } = sql()
+    expect(texto).toContain('ON CONFLICT ("clave") DO UPDATE')
+    expect(texto).toContain('now() AT TIME ZONE')
+    expect(valores).toEqual(expect.arrayContaining([CLAVE_PAUSA_SOLA, 15, 'founder']))
+  })
+
+  it('🔴 Codex p2v5-r2 #7: la condición «no mover una hora que ya llegó» va DENTRO de la misma instrucción (sin hueco revisar→escribir)', async () => {
+    raw().mockResolvedValue([])
+    await expect(prenderPausaSola({ por: 'x', minutos: 20 })).rejects.toThrow('primero apágala')
+    const { texto } = sql()
+    expect(texto).toMatch(/WHERE "InterruptorDePlataforma"\."desde" IS NULL\s+OR "InterruptorDePlataforma"\."desde" > \(now\(\)/)
+    expect(prismaMock.interruptorDePlataforma.findUnique).not.toHaveBeenCalled()
   })
 
   it('nunca con menos de 15 min (ni una hora pasada)', async () => {
     for (const minutos of [0, -5, 14.9, NaN]) {
-      await expect(prenderPausaSola({ por: 'x', minutos, now: NOW })).rejects.toThrow('al menos 15 minutos')
+      await expect(prenderPausaSola({ por: 'x', minutos })).rejects.toThrow('al menos 15 minutos')
     }
-    expect(fila().upsert).not.toHaveBeenCalled()
-  })
-
-  it('no mueve una hora que ya llegó (perdería fallas ya contadas); una hora futura sí se puede cambiar', async () => {
-    fila().findUnique.mockResolvedValue({ desde: new Date(NOW.getTime() - 1) } as any)
-    await expect(prenderPausaSola({ por: 'x', now: NOW })).rejects.toThrow('primero apágala')
-    fila().findUnique.mockResolvedValue({ desde: new Date(NOW.getTime() + 60_000) } as any)
-    await expect(prenderPausaSola({ por: 'x', minutos: 20, now: NOW })).resolves.toEqual(new Date(NOW.getTime() + 20 * 60_000))
+    expect(raw()).not.toHaveBeenCalled()
   })
 
   it('apagar deja «desde» vacío', async () => {
