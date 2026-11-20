@@ -132,13 +132,27 @@ export function recalculoDeComanda(
   items: PreparationCounts[],
   previa: { kitchenDoneAt: Date | null },
   ahora: Date = new Date(),
-): { status: 'NEW' | 'PREPARING' | 'READY' | 'COMPLETED'; completedAt: Date | null; kitchenDoneAt: Date | null } {
+  /** La acción le dio trabajo NUEVO a la cocina (más pendiente o preparando que antes): una comanda archivada vuelve al tablero. */
+  nuevoTrabajo = false,
+): {
+  status: 'NEW' | 'PREPARING' | 'READY' | 'COMPLETED'
+  completedAt: Date | null
+  kitchenDoneAt: Date | null
+  archivedAt?: null
+} {
   const status = preparationTicketStatus(items)
   return {
     status,
     completedAt: status === 'COMPLETED' ? ahora : null,
     kitchenDoneAt: cocinaTermino(items) ? (previa.kitchenDoneAt ?? ahora) : null,
+    // Codex r2 #2: la caja corrige un platillo de una comanda ya archivada (o «Deshacer» le gana al archivado): la cocina lo ve.
+    ...(nuevoTrabajo ? { archivedAt: null } : {}),
   }
+}
+
+/** Unidades que la cocina tiene que hacer YA (pendiente o preparando). */
+export function trabajoDeCocina(c: PreparationCounts): number {
+  return c.PENDING + c.PREPARING
 }
 
 /** «Deshacer» desde Recientes (D17): lo Listo vuelve a Preparando. Lo entregado y lo cancelado no se mueven. */
@@ -152,4 +166,44 @@ export function preparationPermissions(action: PreparationAction): string[] {
     return ['orders:update', 'orders:create']
   if (action === 'CANCEL' || action === 'REOPEN') return ['orders:update', 'orders:cancel']
   return ['orders:update']
+}
+
+// MARK: - D17: «La cocina puede liberar tiempos desde su pantalla»
+
+export type CambioDelInterruptor = { at: string; on: boolean }
+/** Los últimos cambios que se guardan del interruptor (el más nuevo al final). */
+export const HISTORIAL_DEL_INTERRUPTOR = 20
+/** Cuánto se respeta lo que una tablet sin internet hizo con el permiso que tenía guardado. */
+export const RESPETO_SIN_RED_MS = 24 * 60 * 60 * 1000
+
+export function historialDelInterruptor(value: unknown): CambioDelInterruptor[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter(
+      (c): c is CambioDelInterruptor => !!c && typeof c.at === 'string' && typeof c.on === 'boolean' && !Number.isNaN(Date.parse(c.at)),
+    )
+    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+}
+
+/**
+ * Prendido ⇒ sí. Apagado ⇒ sólo si estuvo prendido en algún momento de las 24 h antes de que la tablet lo hiciera (Codex r1 #6, r2
+ * #3 y #4): la tablet sin internet usa el último permiso que vio, y rechazarlo trababa todo lo que la cocina hizo después en esa
+ * tablet. Fuera de esa ventana, o sin la hora del aparato, se rechaza (queda visible en la cola). La hora del aparato nunca cuenta
+ * en el futuro.
+ */
+export function liberacionPermitida(
+  settings: { kitchenCanReleaseCourses: boolean; kitchenCanReleaseHistory: unknown } | null,
+  hechoEnMs?: number | null,
+  ahoraMs: number = Date.now(),
+): boolean {
+  if (!settings) return false
+  if (settings.kitchenCanReleaseCourses) return true
+  if (typeof hechoEnMs !== 'number' || !Number.isFinite(hechoEnMs)) return false
+  const hasta = Math.min(hechoEnMs, ahoraMs)
+  const desde = hasta - RESPETO_SIN_RED_MS
+  const cambios = historialDelInterruptor(settings.kitchenCanReleaseHistory)
+  // Cómo estaba al empezar la ventana: el último cambio antes de `desde` (sin ninguno, apagado de fábrica).
+  const previos = cambios.filter(c => Date.parse(c.at) <= desde)
+  if (previos.length > 0 && previos[previos.length - 1].on) return true
+  return cambios.some(c => c.on && Date.parse(c.at) > desde && Date.parse(c.at) <= hasta)
 }

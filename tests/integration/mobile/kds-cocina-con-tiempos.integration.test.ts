@@ -164,15 +164,19 @@ describe('D17 · archivado al cerrar el día del negocio', () => {
     })
     const kDividida = await comanda(cerrada.id, { createdAt: ayer, orderItemId: movido.id, soloInmediato: true })
     const hoy = await comanda(cerrada.id, { createdAt: new Date('2026-11-21T10:20:00Z') })
+    // Codex r2 #1: la de las 03:59 es del día de la víspera y se archiva en la primera pasada después del corte, no 4 h después.
+    const madrugada = await comanda(cerrada.id, { createdAt: new Date('2026-11-21T09:59:00Z') })
 
     const candidatas = (await comandasPorArchivar(prisma, ahora)).filter(c => c.venueId === venueId).map(c => c.id)
-    expect(candidatas).toEqual([kCerrada.id])
+    expect(candidatas).toEqual([kCerrada.id, madrugada.id])
     await expect(comandasPorArchivar(prisma, new Date('2026-11-21T09:30:00Z'))).resolves.not.toContainEqual(
       expect.objectContaining({ id: kCerrada.id }), // 03:30: todavía es el mismo día del negocio
     )
 
-    const archivadas = await prisma.$transaction(tx => archivarComandas(tx, [kCerrada.id, kAbierta.id, kDividida.id, hoy.id], ahora))
-    expect(archivadas.map(a => a.id)).toEqual([kCerrada.id])
+    const archivadas = await prisma.$transaction(tx =>
+      archivarComandas(tx, [kCerrada.id, kAbierta.id, kDividida.id, hoy.id, madrugada.id], ahora),
+    )
+    expect(archivadas.map(a => a.id).sort()).toEqual([kCerrada.id, madrugada.id].sort())
     const guardada = await prisma.kdsOrder.findUniqueOrThrow({ where: { id: kCerrada.id } })
     expect(guardada).toMatchObject({ status: 'NEW', completedAt: null })
     expect(guardada.archivedAt).toEqual(ahora)

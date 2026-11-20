@@ -1243,9 +1243,10 @@ model VenueSettings {
   /// sigue siendo de la caja (`orders:update` + `orders:create`). Prendido, el SERVIDOR acepta el RELEASE de quien sólo trae
   /// `orders:update` (el rol de cocina). Se lee al REPRODUCIR cada intent, no al encolarlo.
   kitchenCanReleaseCourses Boolean @default(false)
-  /// Cuándo cambió por última vez. Un RELEASE que la tablet guardó SIN RED antes de que lo apagaran se respeta al subir (se hizo
-  /// con permiso; rechazarlo trababa la fila de preparación de esa tablet — Codex r1 #6).
-  kitchenCanReleaseChangedAt DateTime?
+  /// Los últimos cambios del interruptor, `[{ at, on }]` (20 como máximo, el más nuevo al final). El SERVIDOR decide un RELEASE
+  /// de cocina con ESTE historial y la hora en que la tablet lo hizo: lo que hizo sin red con el permiso que tenía se respeta hasta
+  /// 24 h y queda en la bitácora; rechazarlo trababa las demás acciones de esa tablet (Codex r1 #6, r2 #3 y #4).
+  kitchenCanReleaseHistory Json?
 
   // Operations
   autoCloseShifts           Boolean @default(false)

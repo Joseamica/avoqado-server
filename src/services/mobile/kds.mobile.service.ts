@@ -287,45 +287,51 @@ export async function listKdsOrders(
 }
 
 /** «Recientes»: las últimas terminadas, para deshacer un LISTO por error (spec 2026-09-27 §7). */
-// 50 (antes 20): con tiempos, en hora pico la cocina termina más de 20 comandas en una hora y la 21 empujaba fuera a una que
-// todavía podía regresarse (Codex r1 #8). Sigue acotado y la hoja de la tablet ya pinta una lista.
-export const KDS_RECENT_MAX = 50
+export const KDS_RECENT_MAX = 20
+/**
+ * D17: las de tiempos van en su PROPIA lista con su propio tope (Codex r1 #8 y r2 #7): no le quitan lugar a las de un solo Listo, y
+ * 100 comandas terminadas en una hora por una sola estación es más de lo que una cocina saca.
+ */
+export const KDS_RECENT_CON_TIEMPOS_MAX = 100
 const RECIENTES_VENTANA_MS = 60 * 60 * 1000
 
-export async function listRecentKdsOrders(venueId: string, stationId?: string): Promise<KdsOrderResponse[]> {
+export async function listRecentKdsOrders(
+  venueId: string,
+  stationId?: string,
+  /** La tablet sabe regresar una comanda con tiempos (manda `expectedDoneAt`). Sin esto, no se le enseñan (Codex r2 #6). */
+  conTiempos = false,
+): Promise<KdsOrderResponse[]> {
   const desde = new Date(Date.now() - RECIENTES_VENTANA_MS)
-  const [legacy, conTiempos] = await Promise.all([
-    filtroDelTablero(venueId, [KdsStatus.COMPLETED] as KdsOrderStatus[], stationId),
-    filtroDelTablero(venueId, [KdsStatus.READY, KdsStatus.COMPLETED] as KdsOrderStatus[], stationId),
-  ])
-  const [viejas, nuevas] = await Promise.all([
-    prisma.kdsOrder.findMany({
-      // `items: { some: {} }`: una marca LISTO que llegó sin comanda (cabecera vacía) no se muestra.
-      where: { ...legacy, preparationVersion: 0, archivedAt: null, completedAt: { gte: desde }, items: { some: {} } },
-      include: { items: true },
-      orderBy: [{ completedAt: 'desc' }, { id: 'desc' }],
-      take: KDS_RECENT_MAX,
-    }),
-    // D17: con tiempos, lo que la COCINA terminó en la última hora y todavía tiene algo «Listo» que regresar (lo que la caja
-    // ya entregó entero o se canceló no se puede «deshacer» desde la cocina).
-    prisma.kdsOrder.findMany({
-      where: {
-        ...conTiempos,
-        preparationVersion: 1,
-        archivedAt: null,
-        kitchenDoneAt: { gte: desde },
-        items: { some: { preparation: { path: ['READY'], gt: 0 } } },
-      },
-      include: { items: true },
-      orderBy: [{ kitchenDoneAt: 'desc' }, { id: 'desc' }],
-      take: KDS_RECENT_MAX,
-    }),
-  ])
+  const legacy = await filtroDelTablero(venueId, [KdsStatus.COMPLETED] as KdsOrderStatus[], stationId)
+  const viejas = await prisma.kdsOrder.findMany({
+    // `items: { some: {} }`: una marca LISTO que llegó sin comanda (cabecera vacía) no se muestra.
+    where: { ...legacy, preparationVersion: 0, archivedAt: null, completedAt: { gte: desde }, items: { some: {} } },
+    include: { items: true },
+    orderBy: [{ completedAt: 'desc' }, { id: 'desc' }],
+    take: KDS_RECENT_MAX,
+  })
+  // D17: con tiempos, lo que la COCINA terminó en la última hora y todavía tiene algo «Listo» que regresar (lo que la caja ya
+  // entregó entero o se canceló no se puede «deshacer» desde la cocina). Sólo a la tablet que sabe regresarlas: la vieja tocaría
+  // un «Deshacer» que no puede funcionar.
+  const nuevas = conTiempos
+    ? await prisma.kdsOrder.findMany({
+        where: {
+          ...(await filtroDelTablero(venueId, [KdsStatus.READY, KdsStatus.COMPLETED] as KdsOrderStatus[], stationId)),
+          preparationVersion: 1,
+          archivedAt: null,
+          kitchenDoneAt: { gte: desde },
+          items: { some: { preparation: { path: ['READY'], gt: 0 } } },
+        },
+        include: { items: true },
+        orderBy: [{ kitchenDoneAt: 'desc' }, { id: 'desc' }],
+        take: KDS_RECENT_CON_TIEMPOS_MAX,
+      })
+    : []
   // La hora que enseña «Recientes» es la de cuando la cocina terminó: en una comanda con tiempos, `kitchenDoneAt`.
   const cuando = (o: { completedAt: Date | null; kitchenDoneAt?: Date | null }) => (o.kitchenDoneAt ?? o.completedAt)?.getTime() ?? 0
-  const recientes = [...viejas, ...nuevas.map(o => ({ ...o, completedAt: o.kitchenDoneAt ?? o.completedAt }))]
-    .sort((a, b) => cuando(b) - cuando(a) || (a.id < b.id ? 1 : -1))
-    .slice(0, KDS_RECENT_MAX)
+  const recientes = [...viejas, ...nuevas.map(o => ({ ...o, completedAt: o.kitchenDoneAt ?? o.completedAt }))].sort(
+    (a, b) => cuando(b) - cuando(a) || (a.id < b.id ? 1 : -1),
+  )
   const ventas = await ventasDeComandas(prisma, venueId, recientes)
   return recientes.map(o => formatKdsOrderConVenta(o, o.orderId ? ventas.get(o.orderId) : undefined))
 }

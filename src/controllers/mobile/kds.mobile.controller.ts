@@ -323,6 +323,7 @@ export const listRecentKdsOrders = async (req: Request, res: Response, next: Nex
     const data = await kdsMobileService.listRecentKdsOrders(
       req.params.venueId,
       typeof stationId === 'string' && stationId ? stationId : undefined,
+      req.query.kitchenDoneVersion === '1',
     )
     res.status(200).json({ success: true, data })
   } catch (error) {

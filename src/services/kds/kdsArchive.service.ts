@@ -13,6 +13,12 @@ import { instanteUtcSql, seAcaboElDiaDelNegocioDeSql } from '../shared/pagadaPer
  */
 
 export const ARCHIVO_LOTE = 500
+/**
+ * Hasta dónde mira hacia atrás (Codex r2 #8): las comandas sin cuenta cerrada se quedan sin archivar para siempre y una pasada no
+ * puede recorrer la historia entera cada 15 min. Lo más viejo que el tablero todavía enseña lo alcanza el primer despliegue (el
+ * rezago de Flautas era del 13-nov).
+ */
+export const ARCHIVO_VENTANA_DIAS = 45
 
 const CUENTA_CERRADA = `('COMPLETED', 'CANCELLED', 'DELETED')`
 
@@ -20,10 +26,11 @@ const CUENTA_CERRADA = `('COMPLETED', 'CANCELLED', 'DELETED')`
 function condiciones(ahora: Date): string {
   // El reloj de pared UTC como literal (`TIMESTAMP '…'`), igual que el barrido de pedidos de plataforma: nunca un Date ligado.
   const nowSql = instanteUtcSql(ahora)
-  // Ninguna comanda de las últimas 4 h puede ser de un día ya terminado con el corte de las 04:00: recorta el índice barato.
+  // Codex r2 #1: sin margen de horas — una comanda de las 03:59 se archiva en la pasada de las 04:07.
   return `k."archivedAt" IS NULL
       AND k.status IN ('NEW', 'PREPARING', 'READY')
-      AND k."createdAt" < ${nowSql} - INTERVAL '4 hours'
+      AND k."createdAt" >= ${nowSql} - INTERVAL '${ARCHIVO_VENTANA_DIAS} days'
+      AND k."createdAt" < ${nowSql}
       AND o.status IN ${CUENTA_CERRADA}
       AND NOT EXISTS (
         SELECT 1 FROM "KdsOrderItem" ki

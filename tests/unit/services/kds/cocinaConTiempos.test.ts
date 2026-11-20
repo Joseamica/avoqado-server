@@ -80,15 +80,38 @@ describe('D17 · reglas puras', () => {
     )
   })
 
-  it('el interruptor: prendido sí; apagado, sólo lo que la tablet hizo ANTES de que lo apagaran', () => {
-    const apagadoA = new Date('2026-11-20T20:00:00Z')
-    const off = { kitchenCanReleaseCourses: false, kitchenCanReleaseChangedAt: apagadoA }
-    expect(liberacionPermitida({ kitchenCanReleaseCourses: true, kitchenCanReleaseChangedAt: null }, null)).toBe(true)
-    expect(liberacionPermitida(off, apagadoA.getTime() - 1)).toBe(true)
-    expect(liberacionPermitida(off, apagadoA.getTime())).toBe(false)
-    expect(liberacionPermitida(off, null)).toBe(false)
-    expect(liberacionPermitida({ kitchenCanReleaseCourses: false, kitchenCanReleaseChangedAt: null }, 1)).toBe(false)
-    expect(liberacionPermitida(null, 1)).toBe(false)
+  it('el interruptor: prendido sí; apagado, sólo si estuvo prendido en las 24 h antes de que la tablet liberara', () => {
+    const h = (at: string, on: boolean) => ({ at, on })
+    const ahora = Date.parse('2026-11-21T12:00:00Z')
+    const off = (historial: unknown) => ({ kitchenCanReleaseCourses: false, kitchenCanReleaseHistory: historial })
+    expect(liberacionPermitida({ kitchenCanReleaseCourses: true, kitchenCanReleaseHistory: null }, null, ahora)).toBe(true)
+    // prendido a las 10 y apagado a las 11: lo que la tablet hizo a las 10:30 (o hasta 24 h después del último «prendido») cuenta
+    const prendidoYApagado = off([h('2026-11-21T10:00:00Z', true), h('2026-11-21T11:00:00Z', false)])
+    expect(liberacionPermitida(prendidoYApagado, Date.parse('2026-11-21T10:30:00Z'), ahora)).toBe(true)
+    expect(liberacionPermitida(prendidoYApagado, Date.parse('2026-11-21T11:30:00Z'), ahora)).toBe(true)
+    // Codex r2 #4: el último apagado no decide solo — un RELEASE hecho cuando nunca estuvo prendido en sus 24 h previas se rechaza
+    expect(liberacionPermitida(prendidoYApagado, Date.parse('2026-11-21T09:00:00Z'), ahora)).toBe(false)
+    expect(liberacionPermitida(off([h('2026-11-19T10:00:00Z', true), h('2026-11-19T11:00:00Z', false)]), ahora, ahora)).toBe(false)
+    // prendido desde antes de la ventana y apagado dentro: cuenta
+    expect(liberacionPermitida(off([h('2026-11-10T10:00:00Z', true), h('2026-11-21T08:00:00Z', false)]), ahora, ahora)).toBe(true)
+    // sin hora, sin historial, sin ajustes, o la hora del aparato en el futuro: no regala permiso
+    expect(liberacionPermitida(prendidoYApagado, null, ahora)).toBe(false)
+    expect(liberacionPermitida(off(null), ahora, ahora)).toBe(false)
+    expect(liberacionPermitida(null, ahora, ahora)).toBe(false)
+    expect(
+      liberacionPermitida(
+        off([h('2026-11-21T10:00:00Z', true), h('2026-11-21T11:00:00Z', false)]),
+        Date.parse('2026-11-23T10:00:00Z'),
+        ahora,
+      ),
+    ).toBe(true)
+    expect(
+      liberacionPermitida(
+        off([h('2026-11-18T10:00:00Z', true), h('2026-11-18T11:00:00Z', false)]),
+        Date.parse('2026-11-23T10:00:00Z'),
+        ahora,
+      ),
+    ).toBe(false)
   })
 })
 
@@ -144,7 +167,7 @@ describe('D17 · el tablero y «Recientes» (SERVIDOR)', () => {
       items: [],
     }
     prismaMock.kdsOrder.findMany.mockResolvedValueOnce([vieja]).mockResolvedValueOnce([conTiempos])
-    const recientes = await listRecentKdsOrders('venue-a')
+    const recientes = await listRecentKdsOrders('venue-a', undefined, true)
     expect(recientes.map(r => r.id)).toEqual(['v1', 'v0'])
     // la hora que la tablet manda de regreso al «Deshacer»
     expect(recientes[0].completedAt).toBe('2026-11-20T20:10:00.000Z')
@@ -158,7 +181,15 @@ describe('D17 · el tablero y «Recientes» (SERVIDOR)', () => {
         items: { some: { preparation: { path: ['READY'], gt: 0 } } },
       }),
     )
-    expect(segunda[0].take).toBe(50)
+    expect(primera[0].take).toBe(20)
+    expect(segunda[0].take).toBe(100) // su propia lista: no le quita lugar a las de un solo Listo
+  })
+
+  it('la tablet vieja (sin kitchenDoneVersion) no recibe las de tiempos: no vería un «Deshacer» que falla', async () => {
+    prismaMock.kdsOrder.findMany.mockResolvedValue([])
+    await listRecentKdsOrders('venue-a')
+    expect(prismaMock.kdsOrder.findMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.kdsOrder.findMany.mock.calls[0][0].where).toEqual(expect.objectContaining({ preparationVersion: 0 }))
   })
 })
 
@@ -204,7 +235,8 @@ describe('D17 · «Deshacer» de una comanda con tiempos', () => {
       }),
     )
     expect(prismaMock.kdsOrder.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'PREPARING', kitchenDoneAt: null }) }),
+      // si el archivado le ganó por un instante, «Deshacer» la regresa al tablero (Codex r2 #2)
+      expect.objectContaining({ data: expect.objectContaining({ status: 'PREPARING', kitchenDoneAt: null, archivedAt: null }) }),
     )
     expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ action: 'KITCHEN_RECALL', staffId: 'staff-k', venueId: 'venue-a' }) }),
@@ -282,21 +314,27 @@ describe('D17 · liberar desde la cocina (permiso al reproducir)', () => {
   beforeEach(() => jest.clearAllMocks())
 
   it('apagado: RELEASE pide lo de siempre (orders:update + orders:create)', async () => {
-    prismaMock.venueSettings.findUnique.mockResolvedValue({ kitchenCanReleaseCourses: false, kitchenCanReleaseChangedAt: null })
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ kitchenCanReleaseCourses: false, kitchenCanReleaseHistory: null })
     await expect(permisosParaReproducir('venue-a', release())).resolves.toEqual(['orders:update', 'orders:create'])
   })
 
   it('prendido: basta orders:update (el rol de cocina)', async () => {
-    prismaMock.venueSettings.findUnique.mockResolvedValue({ kitchenCanReleaseCourses: true, kitchenCanReleaseChangedAt: new Date() })
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ kitchenCanReleaseCourses: true, kitchenCanReleaseHistory: null })
     await expect(permisosParaReproducir('venue-a', release())).resolves.toEqual(['orders:update'])
     await expect(laCocinaPuedeLiberar('venue-a')).resolves.toBe(true)
   })
 
-  it('apagado DESPUÉS de que la tablet liberó sin red: ese RELEASE se respeta', async () => {
-    const apagado = new Date('2026-11-20T20:00:00Z')
-    prismaMock.venueSettings.findUnique.mockResolvedValue({ kitchenCanReleaseCourses: false, kitchenCanReleaseChangedAt: apagado })
-    await expect(permisosParaReproducir('venue-a', release(apagado.getTime() - 60_000))).resolves.toEqual(['orders:update'])
-    await expect(permisosParaReproducir('venue-a', release(apagado.getTime() + 60_000))).resolves.toEqual([
+  it('apagado mientras la tablet estaba sin red: lo que liberó con el permiso que tenía se respeta (24 h)', async () => {
+    const prendido = Date.now() - 2 * 60 * 60 * 1000
+    prismaMock.venueSettings.findUnique.mockResolvedValue({
+      kitchenCanReleaseCourses: false,
+      kitchenCanReleaseHistory: [
+        { at: new Date(prendido).toISOString(), on: true },
+        { at: new Date(prendido + 60 * 60 * 1000).toISOString(), on: false },
+      ],
+    })
+    await expect(permisosParaReproducir('venue-a', release(prendido + 90 * 60 * 1000))).resolves.toEqual(['orders:update'])
+    await expect(permisosParaReproducir('venue-a', release(prendido - 25 * 60 * 60 * 1000))).resolves.toEqual([
       'orders:update',
       'orders:create',
     ])
@@ -310,7 +348,7 @@ describe('D17 · liberar desde la cocina (permiso al reproducir)', () => {
 
   it('la tablet sabe del interruptor y de la versión de «terminado» por sus capacidades', async () => {
     ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(true)
-    prismaMock.venueSettings.findUnique.mockResolvedValue({ kitchenCanReleaseCourses: true, kitchenCanReleaseChangedAt: null })
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ kitchenCanReleaseCourses: true, kitchenCanReleaseHistory: null })
     await expect(preparationCapabilities('venue-a')).resolves.toMatchObject({ kitchenCanRelease: true, kitchenDoneVersion: 1 })
   })
 
@@ -319,7 +357,7 @@ describe('D17 · liberar desde la cocina (permiso al reproducir)', () => {
     prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
     prismaMock.$queryRaw
       .mockResolvedValueOnce([{ id: 'venue-a' }])
-      .mockResolvedValueOnce([{ kitchenCanReleaseCourses: false, kitchenCanReleaseChangedAt: new Date('2026-11-20T20:00:00Z') }])
+      .mockResolvedValueOnce([{ kitchenCanReleaseCourses: false, kitchenCanReleaseHistory: [{ at: '2026-11-01T20:00:00Z', on: false }] }])
     await expect(
       applyKitchenPreparation(
         'venue-a',
@@ -368,6 +406,53 @@ describe('D17 · liberar desde la cocina (permiso al reproducir)', () => {
   })
 })
 
+describe('D17 · una comanda archivada vuelve sólo si la cocina tiene trabajo nuevo (Codex r2 #2)', () => {
+  const ticket = { id: 'ticket-a', printStationId: null, preparationVersion: 1, kitchenDoneAt: new Date(), archivedAt: new Date() }
+  const linea = (preparation: PreparationCounts) => ({
+    id: 'line-a',
+    kdsOrderId: 'ticket-a',
+    orderItemId: 'item-a',
+    externalLineId: 'sync:r:0',
+    quantity: 2,
+    preparation,
+    preparationRevision: 4,
+    kdsOrder: ticket,
+  })
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(true)
+    prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'venue-a' }])
+    prismaMock.order.findFirst.mockResolvedValue({ id: 'order-a', status: 'COMPLETED' })
+    prismaMock.kdsOrderItem.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.kdsOrder.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.activityLog.create.mockResolvedValue({ id: 'log' })
+  })
+  it('la caja corrige un platillo listo a pendiente: la comanda deja de estar archivada', async () => {
+    prismaMock.kdsOrderItem.findMany.mockResolvedValue([linea(c({ READY: 2 }))])
+    await applyKitchenPreparation(
+      'venue-a',
+      'order-a',
+      { action: 'REOPEN', reason: 'faltó salsa', items: [{ id: 'line-a', expectedRevision: 4, quantity: 1, from: 'READY' }] },
+      'staff-caja',
+    )
+    expect(prismaMock.kdsOrder.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'NEW', archivedAt: null }) }),
+    )
+  })
+  it('entregar o cancelar en una archivada no la regresa a la pantalla', async () => {
+    prismaMock.kdsOrderItem.findMany.mockResolvedValue([linea(c({ READY: 1, HELD: 1 }))])
+    await applyKitchenPreparation(
+      'venue-a',
+      'order-a',
+      { action: 'DELIVER', items: [{ id: 'line-a', expectedRevision: 4, quantity: 1 }] },
+      'staff-caja',
+    )
+    const data = prismaMock.kdsOrder.updateMany.mock.calls[0][0].data
+    expect(data).not.toHaveProperty('archivedAt')
+  })
+})
+
 describe('D17 · archivado al cerrar el día', () => {
   const ahora = new Date('2026-11-21T10:30:00Z') // 04:30 en CDMX
   const db = { $queryRawUnsafe: jest.fn(), activityLog: { createMany: jest.fn() } }
@@ -380,7 +465,9 @@ describe('D17 · archivado al cerrar el día', () => {
     expect(sql).toContain('k."archivedAt" IS NULL')
     expect(sql).toContain(`o.status IN ('COMPLETED', 'CANCELLED', 'DELETED')`)
     expect(sql).toContain(`o2.status NOT IN ('COMPLETED', 'CANCELLED', 'DELETED')`)
-    expect(sql).toContain(`k."createdAt" < TIMESTAMP '2026-11-21 10:30:00.000' - INTERVAL '4 hours'`)
+    // Codex r2 #1: sin margen de horas; ventana de 45 días hacia atrás
+    expect(sql).toContain(`k."createdAt" < TIMESTAMP '2026-11-21 10:30:00.000'\n`)
+    expect(sql).toContain(`k."createdAt" >= TIMESTAMP '2026-11-21 10:30:00.000' - INTERVAL '45 days'`)
     expect(sql).toMatch(/- INTERVAL '4 hours'\)::date/) // el corte de las 04:00 de la caja (día del negocio)
     expect(sql).toContain('ORDER BY k."createdAt", k.id')
     expect(sql).toContain('LIMIT 500')
