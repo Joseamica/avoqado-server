@@ -111,6 +111,10 @@ export interface KdsOrderResponse {
     canRetryAt?: string | null
     /** 3.6: el tiempo del platillo («Aperitivos»). `null` = sin tiempo (se prepara de inmediato). */
     course?: string | null
+    /** El renglón de la venta (ya viajaba en la respuesta; tipado para D17). */
+    orderItemId?: string | null
+    /** D17: en cuántas estaciones se prepara este producto (sólo comandas por tiempos del tablero). */
+    stationCount?: number
   }>
   startedAt: string | null
   completedAt: string | null
@@ -283,7 +287,8 @@ export async function listKdsOrders(
   // Las capacidades del reparto (Tarea 16) salen del MISMO lote: consultas fijas.
   const ventas = await ventasDeComandas(prisma, venueId, orders)
 
-  return orders.map(o => formatKdsOrderConVenta(o, o.orderId ? ventas.get(o.orderId) : undefined))
+  const estaciones = await estacionesPorProducto(venueId, orders)
+  return orders.map(o => conEstaciones(formatKdsOrderConVenta(o, o.orderId ? ventas.get(o.orderId) : undefined), estaciones))
 }
 
 /** «Recientes»: las últimas terminadas, para deshacer un LISTO por error (spec 2026-09-27 §7). */
@@ -320,7 +325,10 @@ export async function listRecentKdsOrders(
           preparationVersion: 1,
           archivedAt: null,
           kitchenDoneAt: { gte: desde },
-          items: { some: { preparation: { path: ['READY'], gt: 0 } } },
+          // Codex r6 #5: también lo que la caja ya entregó (su hora en «Recientes» sigue; «Deshacer» explica que ya salió).
+          items: {
+            some: { OR: [{ preparation: { path: ['READY'], gt: 0 } }, { preparation: { path: ['DELIVERED'], gt: 0 } }] },
+          },
         },
         include: { items: true },
         orderBy: [{ kitchenDoneAt: 'desc' }, { id: 'desc' }],
@@ -558,6 +566,45 @@ export async function bumpKdsOrder(venueId: string, orderId: string): Promise<Kd
 }
 
 // MARK: - Helper
+
+/**
+ * D17 (Codex r6 #1): en cuántas estaciones se prepara cada producto por tiempos de la página. La pantalla de cocina NO ofrece
+ * «Liberar» en uno que va a varias estaciones: liberar es del producto entero (lo libera la caja, que manda el papel a todas).
+ * Una consulta agrupada y acotada para la página (≤ 100 comandas), igual que `listKitchenPreparation`.
+ */
+async function estacionesPorProducto(
+  venueId: string,
+  orders: Array<{ preparationVersion?: number; items?: Array<{ orderItemId?: string | null }> }>,
+) {
+  const ids = [
+    ...new Set(
+      orders
+        .filter(o => o.preparationVersion === 1)
+        .flatMap(o => (o.items ?? []).map(i => i.orderItemId))
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ].slice(0, 2000)
+  if (ids.length === 0) return new Map<string, number>()
+  const grupos = await prisma.kdsOrderItem.groupBy({
+    by: ['orderItemId'],
+    where: { orderItemId: { in: ids }, kdsOrder: { venueId, preparationVersion: 1 } },
+    _count: { _all: true },
+    orderBy: { orderItemId: 'asc' },
+    take: ids.length,
+  })
+  return new Map(grupos.map(g => [g.orderItemId as string, g._count._all]))
+}
+
+function conEstaciones(comanda: KdsOrderResponse, estaciones: Map<string, number>): KdsOrderResponse {
+  if (estaciones.size === 0) return comanda
+  return {
+    ...comanda,
+    items: comanda.items.map(item => {
+      const n = item.orderItemId ? estaciones.get(item.orderItemId) : undefined
+      return n ? { ...item, stationCount: n } : item
+    }),
+  }
+}
 
 function requireLegacyPreparation(ticket: { preparationVersion?: number } | null) {
   if (ticket?.preparationVersion)

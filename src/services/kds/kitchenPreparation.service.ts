@@ -184,9 +184,9 @@ export async function applyKitchenPreparation(
     // Priority targets only selected unfinished stations. A station that already
     // completed its work must not be released again to prioritize another station.
     const priority = ['URGENT', 'ACK_URGENT', 'CLEAR_URGENT'].includes(command.action)
-    // D17 (Codex r5 #5): la cocina libera lo de SU estación; la caja libera el producto en todas. Así un platillo que va a dos
-    // estaciones no deja una liberación de cocina rechazada (y lo que la cocina guardó después, esperándola).
-    const allStations = !priority && command.action !== 'START' && command.action !== 'READY' && !liberacionDeCocina
+    // D17 (Codex r6 #1): liberar es del producto entero, también desde la cocina (la caja necesita liberar todas sus estaciones
+    // juntas); la pantalla de cocina no ofrece «Liberar» en un producto de varias estaciones (`stationCount` del tablero).
+    const allStations = !priority && command.action !== 'START' && command.action !== 'READY'
     if (allStations) {
       const amounts = new Map<string, string>()
       matches.forEach(([row], index) => {

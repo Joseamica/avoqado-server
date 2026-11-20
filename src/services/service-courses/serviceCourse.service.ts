@@ -73,6 +73,8 @@ export async function setKitchenRelease(venueId: string, enabled: unknown, actor
   // vez no registran un cambio que no ocurrió, y una caída no deja un cambio sin su renglón. FOR UPDATE también espera a que termine
   // un RELEASE de cocina que ya midió el permiso (lo lee con FOR SHARE dentro de su operación).
   await prisma.$transaction(async tx => {
+    // Codex r6 #4: una sucursal sin fila de ajustes no tenía qué bloquear; se crea primero (sin pisar nada) y luego se bloquea.
+    await tx.venueSettings.createMany({ data: [{ venueId }], skipDuplicates: true })
     const [fila] = await tx.$queryRaw<Array<{ kitchenCanReleaseCourses: boolean }>>`
       SELECT "kitchenCanReleaseCourses" FROM "VenueSettings" WHERE "venueId" = ${venueId} FOR UPDATE`
     const antes = fila?.kitchenCanReleaseCourses === true

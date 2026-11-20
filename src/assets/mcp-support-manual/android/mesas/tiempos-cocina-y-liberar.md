@@ -42,7 +42,7 @@ En una mesa con tiempos (Primer, Segundo, Tercer tiempo…), lo *Inmediato* lleg
 
 - «No me deja marcar el segundo tiempo»: está «En espera de liberar». Libéralo desde *Servicio y entregas* o prende el interruptor de arriba para que la cocina lo libere.
 - La cocina no ve *Liberar*: el interruptor está apagado, o la persona no tiene permiso para actualizar cuentas.
-- Si un producto va a dos estaciones (cocina y barra), *Liberar* en la pantalla de cocina libera sólo la parte de esa estación; la otra la libera su propia pantalla o la caja.
+- Si un producto va a dos estaciones (cocina y barra), la pantalla de cocina no ofrece *Liberar*: lo libera la caja desde *Servicio y entregas*, para las dos a la vez.
 - Comandas de días pasados que no se quitaban: las de una cuenta ya cobrada o anulada se archivan solas al terminar el día del negocio (a las 4:00 a. m., y al menos una hora después de su último cambio). Las de una cuenta todavía abierta se quedan.
 - *Deshacer* dice «Actualiza la app de la pantalla de cocina…»: esa tablet tiene una versión anterior; actualízala.
 - *Deshacer* dice «Esta comanda cambió desde que abriste Recientes»: ciérralo y vuelve a abrir *Recientes*.

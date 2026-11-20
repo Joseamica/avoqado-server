@@ -100,6 +100,27 @@ describe('D17 · el tablero y «Recientes» (SERVIDOR)', () => {
     expect(prismaMock.kdsOrder.count).toHaveBeenCalledWith({ where: filtro })
   })
 
+  it('cada platillo por tiempos dice en cuántas estaciones se prepara (la cocina no libera uno de varias, Codex r6 #1)', async () => {
+    prismaMock.kdsOrder.findMany.mockResolvedValue([
+      {
+        id: 't1',
+        orderId: null,
+        orderNumber: 'Mesa 4',
+        orderType: 'DINE_IN',
+        status: 'NEW',
+        preparationVersion: 1,
+        createdAt: new Date(),
+        items: [{ id: 'i1', productName: 'Pozole', quantity: 1, orderItemId: 'oi-1', modifiers: null }],
+      },
+    ])
+    prismaMock.kdsOrderItem.groupBy.mockResolvedValue([{ orderItemId: 'oi-1', _count: { _all: 2 } }])
+    const [comanda] = await listKdsOrders('venue-a')
+    expect(comanda.items[0].stationCount).toBe(2)
+    expect(prismaMock.kdsOrderItem.groupBy).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { orderItemId: { in: ['oi-1'] }, kdsOrder: { venueId: 'venue-a', preparationVersion: 1 } } }),
+    )
+  })
+
   it('la página con urgencias conserva el venue y suma el filtro (las tablets nuevas)', async () => {
     await listKdsOrders('venue-a', undefined, undefined, { urgencyVersion: 1, offset: 0, limit: 100 })
     expect(prismaMock.kdsOrder.count).toHaveBeenCalledWith({
@@ -144,7 +165,9 @@ describe('D17 · el tablero y «Recientes» (SERVIDOR)', () => {
         preparationVersion: 1,
         archivedAt: null,
         kitchenDoneAt: expect.any(Object),
-        items: { some: { preparation: { path: ['READY'], gt: 0 } } },
+        items: {
+          some: { OR: [{ preparation: { path: ['READY'], gt: 0 } }, { preparation: { path: ['DELIVERED'], gt: 0 } }] },
+        },
       }),
     )
     expect(primera[0].take).toBe(20)
