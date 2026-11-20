@@ -76,13 +76,21 @@ export function storeView(state: AcceptingState) {
   }
 }
 
-/**
- * D662 parte 2 (v3): tope de seguridad de la lectura de la pausa sola. NO es una ventana: la lectura mira todo lo que hay desde el corte
- * (`autoPauseResumedAt`), y el corte avanza solo hasta la última respuesta a tiempo (`avanzarCortePausaSola`), así que lo normal son
- * unas decenas de pedidos (a lo más una falla suelta más los que siguen por aceptar, tope 30, y los contestados desde entonces). Si
- * algún día se llena, se leen los MÁS VIEJOS primero (una pareja nunca se pierde por los nuevos) y se avisa en el log.
- */
+/** D662 parte 2 (v3): tope de una página de la lectura de la pausa sola (no es una ventana: ver `leerPausaSola`). */
 export const PAUSA_SOLA_TOPE = 1000
+/** Cuántas páginas, como mucho, recorre una lectura que se llena (cada una sube el corte antes de leer la siguiente). */
+const PAUSA_SOLA_PAGINAS = 5
+/**
+ * Holgura de lo que «terminó solo» y del corte (Codex p2-r3 #3, p2-r4 #2): una escritura con su hora tomada se confirma, a lo más, al
+ * vencer la transacción (`ORDER_LOCK_WAIT_BUDGET.timeout`, 15 s). Con 30 s, todo lo que la lectura ve como «ya pasó hace 30 s» es
+ * definitivo, y una cancelación de la clienta o un rechazo de Stripe que todavía se guarda nunca quita una pausa ya visible: lo que
+ * termina solo en los últimos 30 s antes de su hora límite cuenta como si hubiera llegado a ella sin respuesta.
+ */
+export const MARGEN_DEFINITIVO_MS = 30_000
+/** Gracia del despliegue: la primera lectura del SERVIDOR nuevo, con el corte vacío, lo pone 20 min adelante (ver `leerPausaSola`). */
+export const GRACIA_DESPLIEGUE_MS = 20 * 60_000
+/** La lectura sube el corte (sin esperarlo) cuando puede avanzar al menos esto: una escritura cada pocos minutos por negocio activo. */
+export const AVANCE_MINIMO_MS = 5 * 60_000
 
 /** Lo que la lectura de la pausa sola necesita de cada pedido: sólo datos que no cambian después de su hora límite. */
 const PEDIDO_DE_LA_PAUSA = {
@@ -96,9 +104,12 @@ const PEDIDO_DE_LA_PAUSA = {
 } satisfies Prisma.OnlineOrderSelect
 type PedidoDeLaPausa = Prisma.OnlineOrderGetPayload<{ select: typeof PEDIDO_DE_LA_PAUSA }>
 
-/** El pedido terminó solo ANTES de su hora límite y sin una persona (la clienta lo canceló, o el sistema lo rechazó por pago). */
+/**
+ * El pedido terminó solo con 30 s de anticipación a su hora límite y sin una persona: la clienta lo canceló, o el sistema lo rechazó por
+ * pago. Lo que termina solo en los últimos 30 s cuenta como sin respuesta (`MARGEN_DEFINITIVO_MS`).
+ */
 function terminoSoloATiempo(p: PedidoDeLaPausa): boolean {
-  const limite = p.acceptDeadlineAt.getTime()
+  const limite = p.acceptDeadlineAt.getTime() - MARGEN_DEFINITIVO_MS
   if (p.cancelledBy === 'CUSTOMER' && p.cancelledAt && p.cancelledAt.getTime() <= limite) return true
   return p.rejectReason === 'PAYMENT_FAILED' && !p.staffAnsweredAt && !!p.rejectedAt && p.rejectedAt.getTime() <= limite
 }
@@ -106,8 +117,12 @@ function terminoSoloATiempo(p: PedidoDeLaPausa): boolean {
 export interface LecturaPausaSola {
   /** La segunda falla de la primera pareja (hora límite y pedido), o `null` si no hay pausa. */
   pausa: { at: Date; onlineOrderId: string } | null
-  /** La última RESPUESTA a tiempo ya ocurrida (para avanzar el corte), o `null`. */
-  ultimaRespuesta: Date | null
+  /**
+   * Hasta dónde puede subir el corte sin cambiar ninguna lectura futura, o `null` (hay pausa, o no se sabe). Es lo más tarde de:
+   * 30 s antes de ahora (lo de antes ya es definitivo), y justo antes de la primera falla que siga sin respuesta detrás (si la hay);
+   * con una página llena, además, justo antes de la última hora límite leída (lo que sigue no se ha visto).
+   */
+  corteSeguro: Date | null
 }
 
 /**
@@ -118,16 +133,19 @@ export interface LecturaPausaSola {
  *   respuesta tardía no es respuesta: su pedido ya es falla.
  * Pausada si hay 2 FALLAS seguidas sin RESPUESTA en medio, y se queda así aunque después llegue una respuesta (p2-r1 #1). A la misma
  * hora, la respuesta va primero; las fallas a la misma hora, por `id`. Lo que terminó solo antes de su hora límite no cuenta.
- * Sólo crece hacia adelante: nada de lo que ya pasó cambia después (salvo los milisegundos de T2), y por eso el corte puede avanzar.
+ * Sólo crece hacia adelante: lo que pasó hace más de 30 s ya no cambia, y por eso el corte puede avanzar (`corteSeguro`).
  * Techos aceptados: T1 (quien ya estaba pagando termina) y T2 (la respuesta a tiempo que todavía se guarda): aquí no hay candados.
+ * [completa]: la lectura trae TODO lo que hay después del corte (si no, el corte no pasa de lo leído).
  */
-export function leerLineaDeTiempo(pedidos: PedidoDeLaPausa[], now: Date): LecturaPausaSola {
+export function leerLineaDeTiempo(pedidos: PedidoDeLaPausa[], now: Date, completa = true): LecturaPausaSola {
   type Suceso = { t: number; falla: boolean; id: string }
   const sucesos: Suceso[] = []
   const ahora = now.getTime()
+  let ultimaLeida = -Infinity
   for (const p of pedidos) {
-    if (terminoSoloATiempo(p)) continue
     const limite = p.acceptDeadlineAt.getTime()
+    ultimaLeida = Math.max(ultimaLeida, limite)
+    if (terminoSoloATiempo(p)) continue
     const toque = p.staffAnsweredAt?.getTime() ?? null
     const aTiempo = toque !== null && toque <= limite
     if (aTiempo && toque <= ahora) sucesos.push({ t: toque, falla: false, id: p.id })
@@ -135,17 +153,21 @@ export function leerLineaDeTiempo(pedidos: PedidoDeLaPausa[], now: Date): Lectur
   }
   sucesos.sort((a, b) => a.t - b.t || Number(a.falla) - Number(b.falla) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   let seguidas = 0
-  let ultimaRespuesta: number | null = null
+  let fallaSuelta: number | null = null
   for (const s of sucesos) {
     if (!s.falla) {
       seguidas = 0
-      ultimaRespuesta = s.t
+      fallaSuelta = null
       continue
     }
     seguidas += 1
-    if (seguidas >= 2) return { pausa: { at: new Date(s.t), onlineOrderId: s.id }, ultimaRespuesta: null }
+    if (seguidas >= 2) return { pausa: { at: new Date(s.t), onlineOrderId: s.id }, corteSeguro: null }
+    fallaSuelta = s.t
   }
-  return { pausa: null, ultimaRespuesta: ultimaRespuesta === null ? null : new Date(ultimaRespuesta) }
+  let corte = ahora - MARGEN_DEFINITIVO_MS
+  if (fallaSuelta !== null) corte = Math.min(corte, fallaSuelta - 1)
+  if (!completa) corte = Math.min(corte, ultimaLeida - 1)
+  return { pausa: null, corteSeguro: Number.isFinite(corte) ? new Date(corte) : null }
 }
 
 /** Compatibilidad con las pruebas de la v2: la hora de la pausa (ISO) o `null`. */
@@ -153,40 +175,91 @@ export function pausaSolaDesde(pedidos: PedidoDeLaPausa[], now: Date): string | 
   return leerLineaDeTiempo(pedidos, now).pausa?.at.toISOString() ?? null
 }
 
-/**
- * Los pedidos de «Mi equipo» con hora límite después del corte, del más viejo al más nuevo, y su lectura. Lo que terminó solo antes de
- * su hora límite (la clienta canceló; el sistema rechazó por pago) se queda fuera desde la consulta (Codex p2-r3 #5: no es suceso y,
- * si se acumulara, la lectura crecería sin que el corte avance). `COALESCE(…, false)`: con un campo nulo la condición es «no», nunca
- * «desconocido» que dejaría fuera un pedido normal.
- */
-async function leerPausaSola(venueId: string, now: Date, corte: Date | null): Promise<LecturaPausaSola> {
-  const pedidos = await prisma.$queryRaw<PedidoDeLaPausa[]>`
+/** Sube el corte a [nuevo] sólo si eso lo sube (nunca lo baja; un corte vacío es la gracia pendiente y no se toca aquí). */
+async function subirCorte(venueId: string, nuevo: Date): Promise<boolean> {
+  const r = await prisma.onlineOrderingSettings.updateMany({
+    where: { venueId, autoPauseResumedAt: { lt: nuevo } },
+    data: { autoPauseResumedAt: nuevo },
+  })
+  return r.count === 1
+}
+
+/** Lo mismo, sin esperar ni lanzar: la lectura nunca se frena ni falla por esto. */
+function subirCorteSinEsperar(venueId: string, nuevo: Date): void {
+  void Promise.resolve()
+    .then(() => subirCorte(venueId, nuevo))
+    .catch(error =>
+      logger.warn('[OnlineOrdering] no se pudo subir el corte de la pausa sola (la lectura sigue exacta)', {
+        venueId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    )
+}
+
+/** Una página de la lectura: los pedidos de «Mi equipo» con hora límite después del corte, del más viejo al más nuevo. */
+async function leerPagina(venueId: string, corte: Date): Promise<PedidoDeLaPausa[]> {
+  // Lo que terminó solo con 30 s de anticipación no se lee (Codex p2-r3 #5): no es suceso y, si se acumulara, la lectura crecería.
+  // `COALESCE(…, false)`: con un campo nulo la condición es «no», nunca «desconocido» que dejaría fuera un pedido normal.
+  const margen = Prisma.raw(`(oo."acceptDeadlineAt" - interval '${MARGEN_DEFINITIVO_MS / 1000} seconds')`) // constante, no viene de fuera
+  return prisma.$queryRaw<PedidoDeLaPausa[]>`
     SELECT oo.id, oo."acceptDeadlineAt", oo."staffAnsweredAt", oo."rejectedAt", oo."rejectReason", oo."cancelledAt", oo."cancelledBy"
     FROM "OnlineOrder" oo
     WHERE oo."venueId" = ${venueId}
       AND oo."requiresAcceptance" = true
-      ${corte ? Prisma.sql`AND oo."acceptDeadlineAt" > ${utcTs(corte)}` : Prisma.empty}
-      AND NOT COALESCE(oo."cancelledBy" = 'CUSTOMER' AND oo."cancelledAt" <= oo."acceptDeadlineAt", false)
-      AND NOT COALESCE(
-        oo."rejectReason" = 'PAYMENT_FAILED' AND oo."staffAnsweredAt" IS NULL AND oo."rejectedAt" <= oo."acceptDeadlineAt",
-        false
-      )
+      AND oo."acceptDeadlineAt" > ${utcTs(corte)}
+      AND NOT COALESCE(oo."cancelledBy" = 'CUSTOMER' AND oo."cancelledAt" <= ${margen}, false)
+      AND NOT COALESCE(oo."rejectReason" = 'PAYMENT_FAILED' AND oo."staffAnsweredAt" IS NULL AND oo."rejectedAt" <= ${margen}, false)
     ORDER BY oo."acceptDeadlineAt" ASC, oo.id ASC
     LIMIT ${PAUSA_SOLA_TOPE}`
-  if (pedidos.length >= PAUSA_SOLA_TOPE) {
-    logger.warn('[OnlineOrdering] la lectura de la pausa sola llenó su tope: el corte no está avanzando', {
-      venueId,
-      tope: PAUSA_SOLA_TOPE,
-    })
-  }
-  return leerLineaDeTiempo(pedidos, now)
 }
 
 /**
- * D662 parte 2 (v3): sube el corte (`autoPauseResumedAt`) hasta justo antes de la última respuesta a tiempo, SÓLO si la tienda no
- * está pausada sola. Nada de lo anterior a esa respuesta puede formar una pareja después (la línea sólo crece hacia adelante), así que
- * la lectura sigue siendo exacta y queda corta. Nunca baja el corte (`updateMany` condicionado), nunca lanza: si falla, la lectura
- * sólo sale más larga. La llaman, después del commit, las respuestas de una persona (aceptar, rechazar, aceptar con tarjeta).
+ * La pausa sola de un negocio, desde su corte. Exacta: lee TODO lo que hay después del corte, por páginas del más viejo al más nuevo;
+ * si una página se llena, sube el corte hasta lo que esa página permite y lee la siguiente (Codex p2-r4 #1: mil anulaciones no
+ * esconden la pareja que sigue). Si no hay pausa y el corte puede subir bastante, lo sube sin esperar: así la lectura de mañana es
+ * corta aunque nadie conteste (p2-r4 #5).
+ * Corte vacío (la fila de antes del cambio, o una nueva): es la GRACIA del despliegue (p2-r4 #3). La primera lectura del SERVIDOR
+ * nuevo lo pone 20 min adelante y, mientras, no hay pausa sola: lo que contestó el servidor anterior (sin `staffAnsweredAt`) nunca
+ * cuenta, aunque el despliegue falle y se repita horas después.
+ */
+async function leerPausaSola(venueId: string, now: Date, corteGuardado: Date | null, avance = AVANCE_MINIMO_MS): Promise<LecturaPausaSola> {
+  if (!corteGuardado) {
+    const gracia = new Date(now.getTime() + GRACIA_DESPLIEGUE_MS)
+    void Promise.resolve()
+      .then(() =>
+        prisma.onlineOrderingSettings.updateMany({ where: { venueId, autoPauseResumedAt: null }, data: { autoPauseResumedAt: gracia } }),
+      )
+      .catch(() => undefined)
+    return { pausa: null, corteSeguro: null }
+  }
+  let corte = corteGuardado
+  for (let pagina = 1; ; pagina++) {
+    const pedidos = await leerPagina(venueId, corte)
+    const completa = pedidos.length < PAUSA_SOLA_TOPE
+    const lectura = leerLineaDeTiempo(pedidos, now, completa)
+    if (lectura.pausa) return lectura
+    const sube = lectura.corteSeguro && lectura.corteSeguro.getTime() > corte.getTime() ? lectura.corteSeguro : null
+    if (completa) {
+      if (sube && sube.getTime() - corteGuardado.getTime() >= avance) subirCorteSinEsperar(venueId, sube)
+      return lectura
+    }
+    if (!sube || pagina >= PAUSA_SOLA_PAGINAS) {
+      logger.warn('[OnlineOrdering] la lectura de la pausa sola no alcanzó a leer todo: el corte no está avanzando', {
+        venueId,
+        tope: PAUSA_SOLA_TOPE,
+        paginas: pagina,
+      })
+      return lectura
+    }
+    await subirCorte(venueId, sube)
+    corte = sube
+  }
+}
+
+/**
+ * D662 parte 2 (v3): sube el corte (`autoPauseResumedAt`) hasta donde la lectura lo permite (`corteSeguro`), SÓLO si la tienda no está
+ * pausada sola. Nunca lo baja, nunca lanza: si falla, la lectura sólo sale más larga. La llaman, después del commit, las respuestas de
+ * una persona (aceptar, rechazar, aceptar con tarjeta); la lectura de la tienda también lo sube sola cada pocos minutos.
  */
 export async function avanzarCortePausaSola(venueId: string, now: Date = new Date()): Promise<boolean> {
   try {
@@ -194,17 +267,10 @@ export async function avanzarCortePausaSola(venueId: string, now: Date = new Dat
       where: { venueId },
       select: { enabled: true, requiresAcceptance: true, autoPauseResumedAt: true },
     })
-    if (!fila || fila.requiresAcceptance === false) return false
-    const corte = fila.autoPauseResumedAt ?? null
-    const lectura = await leerPausaSola(venueId, now, corte)
-    if (lectura.pausa || !lectura.ultimaRespuesta) return false
-    const nuevo = new Date(lectura.ultimaRespuesta.getTime() - 1)
-    if (corte && nuevo.getTime() <= corte.getTime()) return false
-    const r = await prisma.onlineOrderingSettings.updateMany({
-      where: { venueId, OR: [{ autoPauseResumedAt: null }, { autoPauseResumedAt: { lt: nuevo } }] },
-      data: { autoPauseResumedAt: nuevo },
-    })
-    return r.count === 1
+    if (!fila || fila.requiresAcceptance === false || !fila.autoPauseResumedAt) return false
+    const lectura = await leerPausaSola(venueId, now, fila.autoPauseResumedAt, Infinity)
+    if (lectura.pausa || !lectura.corteSeguro || lectura.corteSeguro.getTime() <= fila.autoPauseResumedAt.getTime()) return false
+    return await subirCorte(venueId, lectura.corteSeguro)
   } catch (error) {
     logger.warn('[OnlineOrdering] no se pudo avanzar el corte de la pausa sola (la lectura sigue exacta)', {
       venueId,

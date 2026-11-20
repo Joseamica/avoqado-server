@@ -364,7 +364,7 @@ describe('D662 parte 2 (v3) · la pausa sola se LEE de la línea de tiempo (fall
     ...o,
   })
   const conPedidos = (rows: unknown[], ajustes: Record<string, unknown> = {}) => {
-    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(settingsRow(ajustes) as any)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(settingsRow({ autoPauseResumedAt: min(-60), ...ajustes }) as any)
     queryRaw().mockResolvedValue(rows as any)
   }
   const lee = (rows: any[]) => pausaSolaDesde(rows as any, NOW)
@@ -396,16 +396,59 @@ describe('D662 parte 2 (v3) · la pausa sola se LEE de la línea de tiempo (fall
     expect(texto).toContain('"requiresAcceptance" = true')
     expect(texto).toContain('"acceptDeadlineAt" >')
     expect(texto).toContain('ORDER BY oo."acceptDeadlineAt" ASC, oo.id ASC')
-    // Codex p2-r3 #5: lo que terminó solo no se lee (null-seguro con COALESCE).
-    expect(texto).toContain(`NOT COALESCE(oo."cancelledBy" = 'CUSTOMER' AND oo."cancelledAt" <= oo."acceptDeadlineAt", false)`)
-    expect(texto).toMatch(/NOT COALESCE\(\s*oo."rejectReason" = 'PAYMENT_FAILED' AND oo."staffAnsweredAt" IS NULL/)
+    // Codex p2-r3 #5 y p2-r4 #2: lo que terminó solo con 30 s de anticipación no se lee (null-seguro con COALESCE).
+    expect(texto).toContain(
+      `NOT COALESCE(oo."cancelledBy" = 'CUSTOMER' AND oo."cancelledAt" <= (oo."acceptDeadlineAt" - interval '30 seconds'), false)`,
+    )
+    expect(texto).toContain(
+      `oo."rejectReason" = 'PAYMENT_FAILED' AND oo."staffAnsweredAt" IS NULL AND oo."rejectedAt" <= (oo."acceptDeadlineAt" - interval '30 seconds')`,
+    )
     expect(valores).toEqual(expect.arrayContaining(['v1', corte, PAUSA_SOLA_TOPE]))
   })
 
-  it('sin corte todavía (fila nueva) no hay límite inferior', async () => {
-    conPedidos([], { autoPauseResumedAt: null })
+  it('Codex p2-r4 #3: corte vacío = gracia del despliegue: no hay pausa, no se consulta y el corte queda 20 min adelante', async () => {
+    conPedidos([pedido(-12), pedido(-1)], { autoPauseResumedAt: null })
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
+    await new Promise(r => setImmediate(r))
+    expect(queryRaw()).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({
+      where: { venueId: 'v1', autoPauseResumedAt: null },
+      data: { autoPauseResumedAt: min(20) },
+    })
+  })
+
+  it('Codex p2-r4 #1: una página llena (mil anulaciones) sube el corte y lee la siguiente: la pareja que sigue no se esconde', async () => {
+    const mil = Array.from({ length: PAUSA_SOLA_TOPE }, (_, i) => pedido(-50 + i * 0.01, { staffAnsweredAt: min(-51) }))
+    conPedidos([])
+    queryRaw()
+      .mockResolvedValueOnce(mil)
+      .mockResolvedValueOnce([pedido(-2), pedido(-1)])
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'PAUSED', autoPausedAt: min(-1).toISOString() })
+    expect(queryRaw()).toHaveBeenCalledTimes(2)
+    const ultima = mil[mil.length - 1].acceptDeadlineAt.getTime()
+    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({
+      where: { venueId: 'v1', autoPauseResumedAt: { lt: new Date(ultima - 1) } },
+      data: { autoPauseResumedAt: new Date(ultima - 1) },
+    })
+  })
+
+  it('Codex p2-r4 #5: sin pausa, la lectura sube el corte sola (sin esperarlo) cuando puede avanzar 5 min o más', async () => {
+    conPedidos([], { autoPauseResumedAt: min(-60) })
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
     await getAcceptingStatus('v1', NOW)
-    expect(sql().texto).not.toContain('"acceptDeadlineAt" >')
+    await new Promise(r => setImmediate(r))
+    const nuevo = new Date(NOW.getTime() - 30_000)
+    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({
+      where: { venueId: 'v1', autoPauseResumedAt: { lt: nuevo } },
+      data: { autoPauseResumedAt: nuevo },
+    })
+    prismaMock.onlineOrderingSettings.updateMany.mockClear()
+    conPedidos([], { autoPauseResumedAt: min(-3) })
+    await getAcceptingStatus('v1', NOW)
+    await new Promise(r => setImmediate(r))
+    expect(prismaMock.onlineOrderingSettings.updateMany).not.toHaveBeenCalled()
   })
 
   it('Codex p2-r2 #1: muchos pedidos contestados DESPUÉS no esconden la pareja (se lee todo desde el corte, el más viejo primero)', () => {
@@ -460,6 +503,13 @@ describe('D662 parte 2 (v3) · la pausa sola se LEE de la línea de tiempo (fall
     expect(lee([pedido(-12), pedido(-1)])).toBe(min(-1).toISOString())
   })
 
+  it('Codex p2-r4 #2: lo que termina solo en los últimos 30 s cuenta como sin respuesta (una escritura que se guarda no quita la pausa)', () => {
+    const clientaTarde = pedido(-1, { cancelledAt: new Date(min(-1).getTime() - 10_000), cancelledBy: 'CUSTOMER' })
+    const stripeTarde = pedido(-1, { rejectedAt: new Date(min(-1).getTime() - 29_000), rejectReason: 'PAYMENT_FAILED' })
+    expect(lee([pedido(-12), clientaTarde])).toBe(min(-1).toISOString())
+    expect(lee([pedido(-12), stripeTarde])).toBe(min(-1).toISOString())
+  })
+
   it('los que terminaron solos antes de su hora límite no son falla ni respuesta (la clienta canceló; el sistema rechazó por pago)', () => {
     const clienta = pedido(-2, { cancelledAt: min(-5), cancelledBy: 'CUSTOMER' })
     const sistema = pedido(-3, { rejectedAt: min(-6), rejectReason: 'PAYMENT_FAILED' })
@@ -483,12 +533,15 @@ describe('D662 parte 2 (v3) · la pausa sola se LEE de la línea de tiempo (fall
     expect(leerLineaDeTiempo([b, a] as any, NOW).pausa).toEqual({ at: min(-1), onlineOrderId: b.id })
   })
 
-  it('devuelve la última respuesta a tiempo ya ocurrida (para el corte); con pausa, ninguna', () => {
-    const r = leerLineaDeTiempo(
+  it('corteSeguro: 30 s antes de ahora, o justo antes de la falla suelta que sigue sin respuesta; con pausa, ninguno', () => {
+    const atendida = leerLineaDeTiempo(
       [pedido(-12, { staffAnsweredAt: min(-13) }), pedido(-1), pedido(4, { staffAnsweredAt: min(-0.2) })] as any,
       NOW,
     )
-    expect(r).toEqual({ pausa: null, ultimaRespuesta: min(-0.2) })
+    expect(atendida).toEqual({ pausa: null, corteSeguro: new Date(NOW.getTime() - 30_000) })
+    const suelta = leerLineaDeTiempo([pedido(-13, { staffAnsweredAt: min(-14) }), pedido(-12)] as any, NOW)
+    expect(suelta).toEqual({ pausa: null, corteSeguro: new Date(min(-12).getTime() - 1) })
+    expect(leerLineaDeTiempo([pedido(-12), pedido(-1)] as any, NOW).corteSeguro).toBeNull()
   })
 
   it('en «Nadie» no aplica (ni consulta)', async () => {
@@ -537,17 +590,23 @@ describe('D662 parte 2 (v3) · la pausa sola se LEE de la línea de tiempo (fall
         ...o,
       } as any)
 
-    it('sin pausa: sube a 1 ms antes de la última respuesta a tiempo, con un updateMany que nunca lo baja', async () => {
+    it('sin pausa: sube a lo definitivo (30 s antes de ahora), con un updateMany que nunca lo baja', async () => {
       fila()
       queryRaw().mockResolvedValue([pedido(-12), pedido(3, { staffAnsweredAt: min(-1) })] as any)
       prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
       await expect(avanzarCortePausaSola('v1', NOW)).resolves.toBe(true)
-      const nuevo = new Date(min(-1).getTime() - 1)
+      const nuevo = new Date(NOW.getTime() - 30_000)
       expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({
-        where: { venueId: 'v1', OR: [{ autoPauseResumedAt: null }, { autoPauseResumedAt: { lt: nuevo } }] },
+        where: { venueId: 'v1', autoPauseResumedAt: { lt: nuevo } },
         data: { autoPauseResumedAt: nuevo },
       })
       expect(sql().valores).toEqual(expect.arrayContaining(['v1', min(-60)]))
+    })
+
+    it('con el corte vacío (gracia pendiente) no hace nada', async () => {
+      fila({ autoPauseResumedAt: null })
+      await expect(avanzarCortePausaSola('v1', NOW)).resolves.toBe(false)
+      expect(queryRaw()).not.toHaveBeenCalled()
     })
 
     it('con pausa no se mueve (la pareja se queda hasta «Reanudar»)', async () => {
@@ -558,7 +617,7 @@ describe('D662 parte 2 (v3) · la pausa sola se LEE de la línea de tiempo (fall
     })
 
     it('si no sube (la respuesta es anterior al corte) o la tienda es «Nadie», no escribe', async () => {
-      fila({ autoPauseResumedAt: min(-0.5) })
+      fila({ autoPauseResumedAt: new Date(NOW.getTime() - 30_000) })
       queryRaw().mockResolvedValue([pedido(3, { staffAnsweredAt: min(-1) })] as any)
       await expect(avanzarCortePausaSola('v1', NOW)).resolves.toBe(false)
       fila({ requiresAcceptance: false })
@@ -588,7 +647,7 @@ describe('D662 parte 2 (v3) · la pausa sola se LEE de la línea de tiempo (fall
         enabled: true,
         manualPause: false,
         requiresAcceptance: true,
-        autoPauseResumedAt: null,
+        autoPauseResumedAt: min(-60),
       } as any)
       queryRaw().mockResolvedValue([a, b] as any)
       prismaMock.onlineOrder.findFirst.mockResolvedValue({ order: { orderNumber: 'W-1' } } as any)

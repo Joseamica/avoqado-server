@@ -21448,8 +21448,8 @@ model OnlineOrderingSettings {
   /// Último sondeo de la lista «por cobrar» (pedidos sin aceptación que esperan pago en la barra): latido de presencia.
   lastToPayPollAt    DateTime?
   /// D662 parte 2 (v3): el corte de la pausa sola. Sólo cuentan los pedidos cuya hora límite fue DESPUÉS de esta hora. Sólo SUBE: la
-  /// escriben «Reanudar» (`pauseOnlineOrdering(null)`, = ahora) y el avance tras una respuesta a tiempo sin pausa
-  /// (`avanzarCortePausaSola`). Encender, apagar, cambiar de modo y pausar 15/30/60 no la tocan. Null = cuentan todos (fila nueva).
+  /// escriben «Reanudar» (`pauseOnlineOrdering(null)`, = ahora) y la propia lectura (`corteSeguro`, sin pausa). Encender, apagar,
+  /// cambiar de modo y pausar 15/30/60 no la tocan. Null = gracia del despliegue pendiente: la primera lectura la pone 20 min adelante.
   autoPauseResumedAt DateTime?
 
   createdAt DateTime @default(now())
