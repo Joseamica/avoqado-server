@@ -68,7 +68,14 @@ export const listKdsOrders = async (req: Request, res: Response, next: NextFunct
     ])
     // D6 de Flautas (opción B): la pantalla de esta estación está viva. Sólo con el tablero ya leído y con una estación activa
     // con pantalla de ESTE negocio (Codex r5 #6): lo que lee el vigilante de reparto (sin estación) o un id ajeno no cuenta.
-    if (estacion && (await esEstacionConPantalla(venueId, estacion))) marcarPantallaViva(venueId, estacion)
+    // Sin esperarla y sin que pueda tumbar la respuesta (Codex r6 #6): el tablero ya se leyó bien.
+    if (estacion) {
+      esEstacionConPantalla(venueId, estacion)
+        .then(conPantalla => {
+          if (conPantalla) marcarPantallaViva(venueId, estacion)
+        })
+        .catch(error => logger.warn('KDS: no se pudo marcar viva la pantalla de cocina', { venueId, stationId: estacion, error: String(error) }))
+    }
 
     // El total va en un encabezado y no en el cuerpo: las apps de la calle leen `data` como
     // arreglo y no deben cambiar. Si el tope recortó, queda dicho en el log (por negocio).

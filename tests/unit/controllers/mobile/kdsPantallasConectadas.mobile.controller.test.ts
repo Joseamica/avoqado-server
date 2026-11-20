@@ -17,6 +17,8 @@ import { olvidarPantallas, pantallasConectadas } from '@/services/kds/pantallasV
 /** La estación existe, es de este negocio, está activa y tiene pantalla. */
 const estacionConPantalla = (si: boolean) => (prisma.printStation.findFirst as jest.Mock).mockResolvedValue(si ? { id: 'st_cocina' } : null)
 const conectadas = () => pantallasConectadas('venue-1').conectadas
+/** La marca corre sin que la respuesta la espere: se dejan correr las promesas pendientes. */
+const sinPendientes = () => new Promise(resolve => setImmediate(resolve))
 
 function res() {
   const r: any = {}
@@ -36,6 +38,7 @@ beforeEach(() => {
 
 it('el tablero de una estación marca viva a su pantalla', async () => {
   await listKdsOrders(req({ stationId: 'st_cocina', urgencyVersion: '1' }), res(), jest.fn())
+  await sinPendientes()
 
   expect(conectadas()).toEqual(['st_cocina'])
   expect((prisma.printStation.findFirst as jest.Mock).mock.calls.at(-1)[0].where).toEqual({
@@ -50,6 +53,7 @@ it('Codex r5 #6: un id que no es una estación activa con pantalla de este negoc
   estacionConPantalla(false)
 
   await listKdsOrders(req({ stationId: 'st_ajena', urgencyVersion: '1' }), res(), jest.fn())
+  await sinPendientes()
 
   expect(conectadas()).toEqual([])
 })
@@ -68,8 +72,20 @@ it('si el tablero no se pudo leer, la pantalla no cuenta como conectada', async 
   expect(conectadas()).toEqual([])
 })
 
+it('Codex r6 #6: si falla la consulta de la estación, el tablero contesta igual y no marca nada', async () => {
+  ;(prisma.printStation.findFirst as jest.Mock).mockRejectedValue(new Error('base lenta'))
+  const r = res()
+
+  await listKdsOrders(req({ stationId: 'st_cocina', urgencyVersion: '1' }), r, jest.fn())
+  await sinPendientes()
+
+  expect(r.status).toHaveBeenCalledWith(200)
+  expect(conectadas()).toEqual([])
+})
+
 it('la caja lee las pantallas conectadas de su negocio', async () => {
   await listKdsOrders(req({ stationId: 'st_cocina', urgencyVersion: '1' }), res(), jest.fn())
+  await sinPendientes()
   const r = res()
 
   await listarPantallasConectadas({ params: { venueId: 'venue-1' } } as any, r, jest.fn())
