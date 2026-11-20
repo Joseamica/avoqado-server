@@ -17010,8 +17010,14 @@ model CashMachineClose {
   occurredAtKnown Boolean   @default(true)
   createdAt       DateTime  @default(now())
 
+  /// Codex r2 #5: la huella de los ARTÍCULOS del pedido de la venta (`huellaDelCarrito`). Una repetición o la carrera con otro carrito
+  /// por el mismo importe es otra operación (409). Null = un cierre sin pedido (CANCELADO, GUARDADO).
+  cartHash String? @db.VarChar(64)
+
   @@unique([venueId, referenceCC])
   @@index([venueId, createdAt])
+  /// Codex r2 #13: el MCP `cash_machine_closes` filtra y cuenta por la hora del comprobante (la venta del domingo subida el lunes).
+  @@index([venueId, occurredAt])
 }
 
 /// Incidencias durables de la máquina (contradicción, imposible, en duda, o no se pudo registrar). Se escriben en su propia
