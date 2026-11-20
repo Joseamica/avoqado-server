@@ -25,6 +25,7 @@ import * as cajon from '@/services/shared/cashDrawerPosting'
 import * as paymentShiftClaim from '@/services/shared/paymentShiftClaim'
 import * as precios from '@/services/mobile/precioQueVioElCliente'
 import { prepareExchangeInTx } from '@/services/exchanges/exchangeTx'
+import * as destinoDelReembolso from '@/services/shared/destinoDelReembolso'
 import type { MoneyShape } from '@/services/exchanges/exchangeRules'
 
 const FOLIO = 'AQ0000000000AB'
@@ -171,4 +172,31 @@ it('🔴 Codex r1 #15: con una parte de la máquina, la gaveta se bloquea UNA ve
   ).rejects.toThrow('ALTO_EN_LA_CAJA')
   expect(orden).toEqual(['cobro:pay-cajon', 'cobro:pay-maquina', 'caja'])
   expect(tx.cashDrawerSession.findFirst).not.toHaveBeenCalled()
+})
+
+it('🔴 Codex r2 (familia B): el Cambio decide la gaveta con LA función de destino de cada parte que devuelve', async () => {
+  const espia = jest.spyOn(destinoDelReembolso, 'decidirDestinoDelReembolso')
+  await expect(
+    prepareExchangeInTx(
+      tx as never,
+      {
+        venueId: 'v1',
+        actorStaffId: 'staff-1',
+        requestHash: 'huella-1',
+        originalOrderId: 'order-1',
+        body: {
+          idempotencyKey: 'llave-cambio-maquina',
+          originalPaymentId: 'pay-maquina',
+          returned: [{ orderItemId: 'item-1', quantity: 1, restock: true, reason: 'SIZE' }],
+          taken: [{ productId: 'prod-1', quantity: 1 }],
+          settlement: { kind: 'PAYOUT', method: 'CASH', expectedDifferenceCents: -12000, cashFromNonCash: true },
+          staffId: 'staff-1',
+          deviceId: 'caja-1',
+          createdAtLocal: '2026-11-20T12:00:00-06:00',
+        },
+      } as never,
+    ),
+  ).rejects.toThrow('ALTO_EN_LA_CAJA')
+  expect(espia).toHaveBeenCalledWith({ origen: 'MAQUINA', medio: 'CASH' })
+  espia.mockRestore()
 })

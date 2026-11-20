@@ -3995,7 +3995,7 @@ router.post(
   '/venues/:venueId/refunds',
   authenticateTokenMiddleware,
   // `payments:refund`; devolver una venta de la máquina saca efectivo de la gaveta: `payments:refund-to-cash` (Codex r1 #14, decisión c).
-  permisoDeReembolsoSegunElCobro({ paymentIdDe: req => req.body?.originalPaymentId, efectivoEscogidoPide: false }),
+  permisoDeReembolsoSegunElCobro({ paymentIdDe: req => req.body?.originalPaymentId, entrada: 'TPV' }),
   validateRequest(recordFastPaymentParamsSchema), // Reuse for venueId param validation
   refundController.recordRefund,
 )

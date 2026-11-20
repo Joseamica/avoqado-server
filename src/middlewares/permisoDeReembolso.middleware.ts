@@ -1,5 +1,13 @@
 import type { NextFunction, Request, Response } from 'express'
 
+import {
+  decidirDestinoDelReembolso,
+  medioQueLlegaAlEscritor,
+  origenDelDinero,
+  type DestinoDelReembolso,
+  type EntradaDelReembolso,
+  type OrigenDelDinero,
+} from '../services/shared/destinoDelReembolso'
 import prisma from '../utils/prismaClient'
 import { checkPermission } from './checkPermission.middleware'
 
@@ -7,42 +15,40 @@ import { checkPermission } from './checkPermission.middleware'
  * El permiso de un reembolso según CON QUÉ sale el dinero y DE QUÉ cobro. UNA sola revisión por petición: el código del encargado
  * (`x-permission-override`) es de un solo uso y de UN permiso (dos revisiones encadenadas lo gastaban en la primera).
  *
+ * Lo decide `decidirDestinoDelReembolso` (Codex servidor r2, familia B), la MISMA función que usa el escritor, con lo que de verdad le
+ * llega al escritor desde esta entrada (`medioQueLlegaAlEscritor`: el panel y la TPV no escogen medio) y el origen real del dinero
+ * (`origenDelDinero`: la venta de la QuickPay, directa o por la cadena de un Cambio). La decisión queda en `req.destinoDelReembolso`
+ * para que el controlador se la pase al escritor, que se niega a sacar de la gaveta si el permiso concedido no alcanza.
+ *
  *  · «Devolver con: Efectivo de la caja» (`refundMethod: 'CASH'`) en las apps pide `payments:refund-to-cash` EN LUGAR de
  *    `payments:refund` (founder, 1-oct-2026; la dependencia refund-to-cash → refund deja la autorización equivalente).
- *  · 🔴 Máquina de efectivo (Codex r1 #14, decisión c del founder): devolver en efectivo una venta de la QuickPay saca billetes de una
- *    gaveta en la que nunca entraron. Pide `payments:refund-to-cash` igual con el medio VACÍO («por el mismo medio», lo que manda el
- *    POS por default) que con `'CASH'`, en el POS, el panel y la terminal. Por transferencia o a saldo a favor, `payments:refund`.
- *  · «Saldo a favor» (`STORE_CREDIT`) pide `payments:refund`: no sale dinero del cajón (spec 2026-10-30-saldo-a-favor §5.5).
+ *  · 🔴 Máquina de efectivo (decisión c del founder): sacar billetes de la gaveta por una venta de la QuickPay pide
+ *    `payments:refund-to-cash` en el POS, el panel y la terminal, con el medio vacío o `'CASH'`, también para lo que se pagó con el
+ *    crédito de un Cambio de esa venta (r2 #2). Por transferencia o a saldo a favor, `payments:refund`.
  *
  * Sin el permiso no se bloquea: es el 403 de siempre, que el POS convierte en el código del encargado.
  */
 const revisarReembolso = checkPermission('payments:refund')
 const revisarDevolverEnEfectivo = checkPermission('payments:refund-to-cash')
 
-/** ¿El cobro es una venta de la máquina? Si la lectura falla se exige el permiso más alto: nunca se concede acceso por un fallo. */
-async function esVentaDeLaMaquina(venueId: string | undefined, paymentId: unknown): Promise<boolean> {
-  if (!venueId || typeof paymentId !== 'string' || !paymentId) return false
-  try {
-    const cobro = await prisma.payment.findFirst({ where: { id: paymentId, venueId }, select: { cashMachineRef: true } })
-    return !!cobro?.cashMachineRef
-  } catch {
-    return true
-  }
-}
+export type ConDestinoDelReembolso = Request & { destinoDelReembolso?: DestinoDelReembolso }
 
-/**
- * `paymentIdDe`: dónde viene el cobro en esa ruta. `efectivoEscogidoPide`: en las apps (`/mobile`), escoger «Efectivo» pide el permiso
- * aunque el cobro no sea de la máquina; el panel y la terminal conservan su regla de siempre para lo demás.
- */
-export function permisoDeReembolsoSegunElCobro(opciones: { paymentIdDe: (req: Request) => unknown; efectivoEscogidoPide: boolean }) {
+/** El permiso que concedió este middleware (lo que el controlador le pasa al escritor). */
+export const permisoConcedidoDe = (req: Request) => (req as ConDestinoDelReembolso).destinoDelReembolso?.permisoRequerido
+
+export function permisoDeReembolsoSegunElCobro(opciones: { paymentIdDe: (req: Request) => unknown; entrada: EntradaDelReembolso }) {
   return Object.assign(
     async (req: Request, res: Response, next: NextFunction) => {
+      // Si la lectura falla se exige el permiso más alto: nunca se concede acceso por un fallo.
+      const origen: OrigenDelDinero = await origenDelDinero(prisma, req.params?.venueId, opciones.paymentIdDe(req)).catch(
+        () => 'MAQUINA' as const,
+      )
       const metodo = (req.body as { refundMethod?: unknown } | undefined)?.refundMethod
-      const enEfectivo = metodo == null || metodo === 'CASH'
-      const pideEfectivo =
-        (opciones.efectivoEscogidoPide && metodo === 'CASH') ||
-        (enEfectivo && (await esVentaDeLaMaquina(req.params?.venueId, opciones.paymentIdDe(req))))
-      return pideEfectivo ? revisarDevolverEnEfectivo(req, res, next) : revisarReembolso(req, res, next)
+      const destino = decidirDestinoDelReembolso({ origen, medio: medioQueLlegaAlEscritor(opciones.entrada, metodo) })
+      ;(req as ConDestinoDelReembolso).destinoDelReembolso = destino
+      return destino.permisoRequerido === 'payments:refund-to-cash'
+        ? revisarDevolverEnEfectivo(req, res, next)
+        : revisarReembolso(req, res, next)
     },
     // Para la inspección de rutas: el permiso base. El de efectivo lo ven el audit y los fixtures por el literal de arriba.
     { requiredPermission: 'payments:refund' as const },

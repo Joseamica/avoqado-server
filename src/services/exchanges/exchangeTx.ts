@@ -8,6 +8,7 @@ import { TOPES_POR_ORDEN } from '../fiscal/librosDeOrdenes'
 import { computeOrderBalance } from '../shared/orderBalance'
 import { lockExistingOrderForPayment, MAX_ORDER_LOCK_SCOPE } from '../shared/paymentShiftClaim'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
+import { decidirDestinoDelReembolso } from '../shared/destinoDelReembolso'
 import { cajaParaDevolverEnTx } from '../shared/cashDrawerPosting'
 import { keptMarkdownDiscountRow } from '../shared/discount.service'
 import { sincronizarRepartos } from '../shared/repartoDescuentoTx'
@@ -518,13 +519,32 @@ export async function prepareExchangeInTx(
   const payoutCash = calc.kind === 'PAYOUT' && settlement.method === 'CASH'
   // 🔴 Codex r1 #15: si alguna parte devuelve billetes de una venta de la máquina, la gaveta se bloquea UNA vez aquí, antes de la primera
   // parte (que reclama el turno): caja → turno, el orden de la devolución directa y del cierre de caja. Sin caja abierta, 409.
+  // Codex r2 (familia B): LA decisión de destino de cada parte que devuelve, la misma del reembolso directo y su escritor.
   const sacaDeLaGaveta =
     payoutCash &&
     slices.some(s => {
       if (s.role !== 'PAYOUT') return false
       const chain = chains.get(s.paymentId)
-      return chain ? chain.kind === 'INHERIT' && chain.money.salidaDeGaveta === true : !!paymentById.get(s.paymentId)!.money.cashMachineRef
+      const origen = chain
+        ? chain.kind === 'INHERIT' && chain.money.salidaDeGaveta === true
+          ? 'CADENA_DE_MAQUINA'
+          : 'ORDINARIO'
+        : paymentById.get(s.paymentId)!.money.cashMachineRef
+          ? 'MAQUINA'
+          : 'ORDINARIO'
+      return decidirDestinoDelReembolso({ origen, medio: settlement.method }).destinoEfectivo === 'GAVETA'
     })
+  // Sacar billetes de la gaveta por dinero que nunca entró ahí pide `payments:refund-to-cash`: la ruta lo concede sólo con
+  // `cashFromNonCash` (`permisoDeCambio`). Sin la marca no se escribe nada.
+  if (sacaDeLaGaveta && !settlement.cashFromNonCash)
+    throw new ExchangeError(
+      'EXCHANGE_SETTLEMENT_UNAVAILABLE',
+      'Devolver en efectivo lo que se pagó con otro medio necesita autorización.',
+      422,
+      {
+        reason: 'NEEDS_REFUND_TO_CASH',
+      },
+    )
   const drawer = sacaDeLaGaveta
     ? { id: await cajaParaDevolverEnTx(tx, venueId) }
     : payoutCash

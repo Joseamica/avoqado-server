@@ -3,6 +3,7 @@ import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
 import * as refundService from '../../services/dashboard/refund.dashboard.service'
 import { exigirSoloSaldoFueraDelPos } from '../../services/storeCredit/storeCreditRefund.service'
+import { permisoConcedidoDe } from '../../middlewares/permisoDeReembolso.middleware'
 import { esCantidadNoNegativaEnCentavos, esCantidadPositivaEnCentavos, vieneAusente } from '../../services/shared/devueltoDeUnCobro'
 
 const MOTIVOS_DEL_PANEL = new Set<string>(['RETURNED_GOODS', 'ACCIDENTAL_CHARGE', 'CANCELLED_ORDER', 'FRAUDULENT_CHARGE', 'OTHER'])
@@ -46,6 +47,8 @@ export async function issueRefund(req: Request, res: Response, next: NextFunctio
     }
 
     const result = await refundService.issueRefund({
+      // Codex r2 #3: el permiso que concedió la ruta para ESTE destino (el panel no escoge medio; ver `destinoDelReembolso`).
+      permisoConcedido: permisoConcedidoDe(req),
       idempotencyKey: vieneAusente(idempotencyKey) ? undefined : idempotencyKey,
       venueId,
       paymentId,

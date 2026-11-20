@@ -10,6 +10,8 @@ const mockAudit = jest.fn()
 const mockChain = jest.fn()
 const mockOnlineOrderFindFirst = jest.fn()
 const mockVenueSettingsFindUnique = jest.fn()
+/** Codex r2 #2: el vínculo del crédito de un Cambio con su raíz (`origenDelDinero`). */
+const mockLinkFindFirst = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -34,6 +36,7 @@ jest.mock('@/utils/prismaClient', () => ({
     onlineOrder: { findFirst: (...a: unknown[]) => mockOnlineOrderFindFirst(...(a as [])) },
     venue: { findUnique: jest.fn() },
     venueSettings: { findUnique: (...a: unknown[]) => mockVenueSettingsFindUnique(...(a as [])) },
+    exchangeCreditLink: { findFirst: (...a: unknown[]) => mockLinkFindFirst(...(a as [])) },
   },
 }))
 jest.mock('@/services/storeCredit/storeCreditTender', () => ({
@@ -198,9 +201,10 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
   })
 
   it('sin payments:refund-to-cash, transferencia o el mismo medio siguen funcionando', async () => {
-    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment).mockResolvedValueOnce(completedPayment)
+    mockPaymentFindFirst.mockResolvedValue(completedPayment)
     expect(parse(await call({ ...base, venueId: 'sin-efectivo', refundMethod: 'BANK_TRANSFER' })).requiresConfirmation).toBe(true)
     expect(parse(await call({ ...base, venueId: 'sin-efectivo' })).requiresConfirmation).toBe(true)
+    mockPaymentFindFirst.mockReset()
   })
 
   it.each([
@@ -280,13 +284,14 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
 
   it('máquina de efectivo (A6): su venta no entró al cajón, pero la devolución en efectivo SÍ sale de él', async () => {
     const deLaMaquina = { ...completedPayment, fundsFlow: 'EXTERNAL_RECORDED', tenderCountsAsCash: false, cashMachineRef: 'AQ0000000000AB' }
-    mockPaymentFindFirst.mockResolvedValueOnce(deLaMaquina)
+    // La herramienta lee el cobro y, para decidir destino y permiso, su origen (`origenDelDinero`): la MISMA fila.
+    mockPaymentFindFirst.mockResolvedValue(deLaMaquina)
     const sinEscoger = parse(await call(base))
     expect(sinEscoger.preview.saleDeCajonDeEfectivo).toBe(true)
     expect(sinEscoger.message).toMatch(/cajón/i)
     expect(mockPaymentFindFirst.mock.calls[0][0].select.cashMachineRef).toBe(true)
-    mockPaymentFindFirst.mockResolvedValueOnce(deLaMaquina)
     expect(parse(await call({ ...base, refundMethod: 'BANK_TRANSFER' })).preview.saleDeCajonDeEfectivo).toBe(false)
+    mockPaymentFindFirst.mockReset()
   })
 
   it('BLOCKS card payments — Blumon card refunds are done on the terminal, not via API', async () => {
@@ -480,5 +485,40 @@ describe('issue_refund sobre el cobro de tarjeta de un pedido en línea', () => 
     )
     const out = parse(await call({ ...base, confirm: true }))
     expect(out).toMatchObject({ ok: false, code: 'ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS', useInstead: 'online_order_card_refund' })
+  })
+})
+
+describe('Codex servidor r2 (familia B) en issue_refund', () => {
+  const MAQUINA = 'AQ0000000000AB'
+  const credito = { ...completedPayment, method: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED', tenderType: { systemKind: 'EXCHANGE_CREDIT' } }
+  afterEach(() => {
+    mockPaymentFindFirst.mockReset()
+    mockLinkFindFirst.mockReset()
+  })
+
+  it('🔴 r2 #2: lo pagado con el crédito de un Cambio de una venta de la máquina sale de la gaveta ⇒ pide payments:refund-to-cash', async () => {
+    mockPaymentFindFirst.mockImplementation(async (a: any) => (a.where.id === 'raiz' ? { cashMachineRef: MAQUINA } : credito))
+    mockLinkFindFirst.mockResolvedValue({ originPaymentId: 'raiz' })
+    mockChain.mockResolvedValue({
+      kind: 'INHERIT',
+      rootPaymentId: 'raiz',
+      exchangeId: 'cambio-1',
+      money: { method: 'CASH', fundsFlow: 'CASH_DRAWER', salidaDeGaveta: true },
+    })
+    await expect(call({ ...base, venueId: 'sin-efectivo', confirm: true })).rejects.toThrow('payments:refund-to-cash')
+    expect(mockIssue).not.toHaveBeenCalled()
+    mockChain.mockReset()
+  })
+
+  it('🔴 el escritor recibe el permiso que se concedió para ESE destino (y lo confirma bajo sus candados)', async () => {
+    mockPaymentFindFirst.mockResolvedValue({
+      ...completedPayment,
+      fundsFlow: 'EXTERNAL_RECORDED',
+      tenderCountsAsCash: false,
+      cashMachineRef: MAQUINA,
+    })
+    mockIssue.mockResolvedValue({ refundId: 'r1', amount: 100, originalPaymentId: 'pay-1' })
+    await call({ ...base, confirm: true }).catch(() => undefined)
+    expect(mockIssue).toHaveBeenCalledWith(expect.objectContaining({ permisoConcedido: 'payments:refund-to-cash' }))
   })
 })

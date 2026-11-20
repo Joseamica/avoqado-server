@@ -13,6 +13,8 @@ const mockStaffVenueFindUnique = jest.fn()
 const mockConsumeOverride = jest.fn()
 /** Máquina de efectivo (Codex r1 #14): el cobro que se devuelve; con folio, es una venta de la QuickPay. */
 const mockPaymentFindFirst = jest.fn()
+/** Codex r2 #2: el vínculo del crédito de un Cambio con su raíz. */
+const mockLinkFindFirst = jest.fn()
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -24,6 +26,7 @@ jest.mock('@/utils/prismaClient', () => ({
     staffOrganization: { findUnique: async () => null, findFirst: async () => null },
     venueRolePermission: { findUnique: async () => null },
     payment: { findFirst: (...a: unknown[]) => mockPaymentFindFirst(...a) },
+    exchangeCreditLink: { findFirst: (...a: unknown[]) => mockLinkFindFirst(...a) },
   },
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({
@@ -44,6 +47,7 @@ import { StaffRole } from '@prisma/client'
 import mobileRouter, { permisoDeReembolso } from '@/routes/mobile.routes'
 import dashboardRouter from '@/routes/dashboard.routes'
 import tpvRouter from '@/routes/tpv.routes'
+import { permisoConcedidoDe } from '@/middlewares/permisoDeReembolso.middleware'
 
 async function correr(role: StaffRole, body: unknown, headers: Record<string, string> = {}, permiso: any = permisoDeReembolso) {
   mockStaffVenueFindUnique.mockResolvedValue({ role, active: true, permissionSetId: null, permissionSet: null })
@@ -69,6 +73,7 @@ async function correr(role: StaffRole, body: unknown, headers: Record<string, st
 beforeEach(() => {
   jest.clearAllMocks()
   mockPaymentFindFirst.mockResolvedValue({ cashMachineRef: null })
+  mockLinkFindFirst.mockResolvedValue(null)
 })
 
 describe('el reembolso móvil revisa UN permiso según «Devolver con»', () => {
@@ -183,5 +188,72 @@ describe('Codex r1 #14 (decisión c): devolver en efectivo una venta de la máqu
     expect(out.json).toMatchObject({ required: 'payments:refund-to-cash' })
     mockPaymentFindFirst.mockResolvedValue({ cashMachineRef: null })
     expect(await correr(StaffRole.CASHIER, { originalPaymentId: 'p1', amount: 50 }, {}, TERMINAL())).toEqual({ next: true })
+  })
+})
+
+describe('Codex servidor r2 (familia B): la autorización usa LA decisión de destino del escritor', () => {
+  const permisoDe = (router: any, ruta: string) => {
+    const capa = router.stack.find((l: any) => l.route?.path === ruta && l.route.methods.post)
+    return capa.route.stack.map((rl: any) => rl.handle).find((h: any) => typeof h.requiredPermission === 'string')
+  }
+  const PANEL = () => permisoDe(dashboardRouter, '/venues/:venueId/payments/:paymentId/refund')
+  const TERMINAL = () => permisoDe(tpvRouter, '/venues/:venueId/refunds')
+  const MAQUINA = 'AQ0123456789AB'
+  /** El crédito de un Cambio (`p1`) cuya raíz (`raiz`) cobró la QuickPay. */
+  const creditoDeLaMaquina = () => {
+    mockPaymentFindFirst.mockImplementation(async (a: any) =>
+      a.where.id === 'p1' ? { cashMachineRef: null, tenderType: { systemKind: 'EXCHANGE_CREDIT' } } : { cashMachineRef: MAQUINA },
+    )
+    mockLinkFindFirst.mockResolvedValue({ originPaymentId: 'raiz' })
+  }
+
+  it.each([
+    ['POS', () => permisoDeReembolso],
+    ['PANEL', PANEL],
+  ])(
+    '🔴 r2 #2 · %s: devolver el reemplazo de un Cambio de una venta de la máquina saca de la gaveta ⇒ refund-to-cash',
+    async (_n, ruta) => {
+      creditoDeLaMaquina()
+      const out = await correr(StaffRole.CASHIER, { amount: 5000 }, {}, ruta())
+      expect(out.status).toBe(403)
+      expect(out.json).toMatchObject({ required: 'payments:refund-to-cash' })
+      expect(mockLinkFindFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: 'v1', creditPaymentId: 'p1' } }))
+    },
+  )
+
+  it('r2 #2 · el crédito de un Cambio de una venta ordinaria sigue con payments:refund', async () => {
+    mockPaymentFindFirst.mockImplementation(async (a: any) =>
+      a.where.id === 'p1' ? { cashMachineRef: null, tenderType: { systemKind: 'EXCHANGE_CREDIT' } } : { cashMachineRef: null },
+    )
+    mockLinkFindFirst.mockResolvedValue({ originPaymentId: 'raiz' })
+    expect(await correr(StaffRole.CASHIER, { amount: 5000 })).toEqual({ next: true })
+  })
+
+  it.each([
+    ['PANEL', PANEL, { amount: 50, refundMethod: 'BANK_TRANSFER' }],
+    ['PANEL', PANEL, { amount: 50, refundMethod: 'STORE_CREDIT' }],
+    ['TERMINAL', TERMINAL, { originalPaymentId: 'p1', amount: 50, refundMethod: 'BANK_TRANSFER' }],
+  ])('🔴 r2 #3 · %s descarta el medio del cuerpo (%j): autoriza lo que de verdad hace el escritor, la gaveta', async (_n, ruta, body) => {
+    mockPaymentFindFirst.mockResolvedValue({ cashMachineRef: MAQUINA })
+    const out = await correr(StaffRole.CASHIER, body, {}, ruta())
+    expect(out.json).toMatchObject({ required: 'payments:refund-to-cash' })
+  })
+
+  it('🔴 la decisión que autorizó queda en la petición para que el escritor la confirme (permisoConcedidoDe)', async () => {
+    mockPaymentFindFirst.mockResolvedValue({ cashMachineRef: MAQUINA })
+    const req: any = {
+      params: { venueId: 'v1', paymentId: 'p1' },
+      headers: {},
+      body: { amount: 50 },
+      originalUrl: '/x',
+      method: 'POST',
+      authContext: { userId: 'u1', venueId: 'v1', role: StaffRole.MANAGER },
+    }
+    mockStaffVenueFindUnique.mockResolvedValue({ role: StaffRole.MANAGER, active: true, permissionSetId: null, permissionSet: null })
+    let siguio = false
+    await PANEL()(req, { status: () => ({ json: () => undefined }) }, () => (siguio = true))
+    expect(siguio).toBe(true)
+    expect(permisoConcedidoDe(req)).toBe('payments:refund-to-cash')
+    expect(req.destinoDelReembolso).toEqual({ destinoEfectivo: 'GAVETA', permisoRequerido: 'payments:refund-to-cash' })
   })
 })

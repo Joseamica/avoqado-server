@@ -18,6 +18,7 @@ jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBr
 import { ConflictError } from '@/errors/AppError'
 import * as refundService from '@/services/tpv/refund.tpv.service'
 import { prismaMock } from '../../../__helpers__/setup'
+import * as destinoDelReembolso from '@/services/shared/destinoDelReembolso'
 
 const VENUE = 'venue-1'
 
@@ -143,6 +144,18 @@ describe('devolución de una venta de la máquina por la TPV', () => {
     expect(eventosGlobales.createMany).not.toHaveBeenCalled()
     expect(eventosGlobales.create).not.toHaveBeenCalled()
     expect(orden).toEqual(['caja', 'turno'])
+  })
+
+  it('🔴 Codex r2 (familia B): la TPV decide con LA función de destino; con el permiso concedido sin la gaveta, 403 y no registra nada', async () => {
+    armar()
+    const espia = jest.spyOn(destinoDelReembolso, 'decidirDestinoDelReembolso')
+    await expect(refundService.recordRefund(VENUE, cuerpo(16000) as any, 'staff-1', undefined, 'payments:refund')).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'REFUND_NEEDS_REFUND_TO_CASH',
+    })
+    expect(espia).toHaveBeenCalledWith({ origen: 'MAQUINA', medio: undefined })
+    expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
+    espia.mockRestore()
   })
 
   it('🔴 sin caja abierta ⇒ 409 «Abre la caja para devolver en efectivo» y no registra nada', async () => {

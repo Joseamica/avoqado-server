@@ -3958,7 +3958,7 @@ const revisarReembolso = checkPermission('payments:refund')
 const revisarDevolverEnEfectivo = checkPermission('payments:refund-to-cash')
 // Máquina de efectivo (Codex r1 #14, decisión c): una venta de la QuickPay devuelta en efectivo (medio vacío o «Efectivo») también pide
 // `payments:refund-to-cash`. La regla vive en `permisoDeReembolsoSegunElCobro`, la misma del panel y de la terminal.
-export const permisoDeReembolso = permisoDeReembolsoSegunElCobro({ paymentIdDe: req => req.params.paymentId, efectivoEscogidoPide: true })
+export const permisoDeReembolso = permisoDeReembolsoSegunElCobro({ paymentIdDe: req => req.params.paymentId, entrada: 'POS' })
 
 // Una sola revisión: el código del encargado autoriza un permiso y se consume una vez.
 export const permisoDeCambio = Object.assign(

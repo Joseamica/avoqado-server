@@ -4085,7 +4085,7 @@ router.post(
   '/venues/:venueId/payments/:paymentId/refund',
   authenticateTokenMiddleware,
   // `payments:refund`; devolver en efectivo una venta de la máquina pide `payments:refund-to-cash` (Codex r1 #14, decisión c).
-  permisoDeReembolsoSegunElCobro({ paymentIdDe: req => req.params.paymentId, efectivoEscogidoPide: false }),
+  permisoDeReembolsoSegunElCobro({ paymentIdDe: req => req.params.paymentId, entrada: 'PANEL' }),
   refundController.issueRefund,
 )
 router.get(

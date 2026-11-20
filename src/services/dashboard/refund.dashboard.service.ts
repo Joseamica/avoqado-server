@@ -21,7 +21,7 @@ import {
   TransactionStatus,
 } from '@prisma/client'
 import logger from '../../config/logger'
-import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
 import { restockOrderItems } from './inventoryRestock.service'
@@ -31,12 +31,8 @@ import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '.
 import { logAction } from './activity-log.service'
 import { fijarSaldoReabiertoEnTx, subirVersionDeValesTrasCommit, type SaldoReabierto } from '@/services/shared/saldoReabiertoAlReembolsar'
 import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
-import {
-  devolverConEfectivo,
-  devuelveEfectivoDeLaMaquina,
-  sePuedeEscogerComoDevolver,
-  type DevolverEnDinero,
-} from '../tpv/terminalRefundTarget'
+import { devolverConEfectivo, sePuedeEscogerComoDevolver, type DevolverEnDinero } from '../tpv/terminalRefundTarget'
+import { decidirDestinoDelReembolso, type PermisoDeReembolso } from '../shared/destinoDelReembolso'
 import { assertCardRefundGoesThroughOnlineOrders } from '../online-ordering/card/guards'
 import { GiftCardError } from '../giftCards/giftCardErrors'
 import {
@@ -108,6 +104,12 @@ export interface RefundItemInput {
 }
 
 export interface IssueRefundInput {
+  /**
+   * Máquina de efectivo (Codex r2, familia B): el permiso que concedió la autorización de ESTA entrada (`permisoDeReembolsoSegunElCobro`
+   * o el MCP). Si el escritor va a sacar billetes de la gaveta y el concedido no es `payments:refund-to-cash`, 403 y no se escribe nada.
+   * Ausente (las llamadas internas): sin esa comprobación.
+   */
+  permisoConcedido?: PermisoDeReembolso
   idempotencyKey?: string
   venueId: string
   paymentId: string
@@ -665,6 +667,8 @@ function camposDeSemanticaDada(m: RefundMoneySemantics) {
  * `issueRefund` lo llama con los defaults de siempre (`NONE` · `CLAIM_LIVE` · `MANUAL`).
  */
 interface WriteRefundBase {
+  /** Lo que concedió la autorización de la entrada (`IssueRefundInput.permisoConcedido`). */
+  permisoConcedido?: PermisoDeReembolso
   /** Fecha contable de una operación compuesta; ausente conserva el reloj del reembolso ordinario. */
   createdAt?: Date
   originalPaymentId: string
@@ -869,9 +873,25 @@ export async function writeRefundInTx(
   // entró ahí. La caja abierta se bloquea AQUÍ, antes del turno (el mismo orden que el cierre de caja: caja → turno); sin ella, 409 y no
   // se confirma nada. Con una semántica dada (el crédito de un cambio, la cadena, el saldo a favor) el dinero no sale de la caja.
   // Codex r1 #2: también lo que sale del dinero de una raíz de la máquina (`moneyAs.salidaDeGaveta`, la cadena de un cambio).
-  const sacaDeLaGaveta =
-    !input.aSaldoAFavor &&
-    (input.moneyAs ? input.moneyAs.salidaDeGaveta === true : devuelveEfectivoDeLaMaquina(original, input.devolverCon))
+  // Codex r2 (familia B): el destino lo decide `decidirDestinoDelReembolso`, la MISMA función que autorizó la entrada; con el permiso
+  // que ésta concedió, el escritor nunca saca de la gaveta lo que se autorizó como otra cosa.
+  const destino = decidirDestinoDelReembolso({
+    origen: input.moneyAs
+      ? input.moneyAs.salidaDeGaveta === true
+        ? 'CADENA_DE_MAQUINA'
+        : 'ORDINARIO'
+      : original.cashMachineRef
+        ? 'MAQUINA'
+        : 'ORDINARIO',
+    medio: input.aSaldoAFavor ? 'STORE_CREDIT' : input.devolverCon,
+  })
+  const sacaDeLaGaveta = destino.destinoEfectivo === 'GAVETA'
+  if (sacaDeLaGaveta && input.permisoConcedido && input.permisoConcedido !== destino.permisoRequerido) {
+    throw new ForbiddenError(
+      'Devolver en efectivo una venta de la máquina saca billetes de la caja: necesita el permiso de devolver en efectivo.',
+      'REFUND_NEEDS_REFUND_TO_CASH',
+    )
+  }
   const cajaQueAutoriza = sacaDeLaGaveta ? await cajaParaDevolverEnTx(tx, input.venueId) : null
   const shiftClaim = await claimShiftForRefund(tx, {
     venueId: input.venueId,
@@ -1604,6 +1624,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         // obligación de costo— es el núcleo compartido con el ajuste de reparto. El dashboard lo
         // llama con los defaults de siempre: no revierte la comisión del TIPO DE PAGO, reclama el turno vivo, MANUAL.
         const { refundPaymentId, replay, abono, saldoReabierto, salidaDeCajaEnTx } = await writeRefundInTx(tx, {
+          ...(input.permisoConcedido ? { permisoConcedido: input.permisoConcedido } : {}),
           originalPaymentId: original.id,
           venueId: input.venueId,
           salesRefundCents,

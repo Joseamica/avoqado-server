@@ -11,7 +11,7 @@ import {
   Prisma,
 } from '@prisma/client'
 import { cajaParaDevolverEnTx, postCashRefundToDrawer, salidaDelReembolsoEnTx } from '../shared/cashDrawerPosting'
-import { devuelveEfectivoDeLaMaquina } from './terminalRefundTarget'
+import { decidirDestinoDelReembolso, type PermisoDeReembolso } from '../shared/destinoDelReembolso'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForRefund,
@@ -31,7 +31,7 @@ import {
   esCantidadPositivaEnCentavos,
 } from '../shared/devueltoDeUnCobro'
 import logger from '../../config/logger'
-import { BadRequestError, ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
@@ -345,6 +345,8 @@ export async function recordRefund(
   refundData: RefundRequestData,
   userId: string,
   _orgId?: string,
+  /** Codex r2 (familia B): el permiso que concedió `permisoDeReembolsoSegunElCobro` en esta petición. */
+  permisoConcedido?: PermisoDeReembolso,
 ): Promise<RefundResponse> {
   if (!esCantidadPositivaEnCentavos(refundData.amount)) {
     throw new BadRequestError('amount debe ser un entero seguro positivo expresado en centavos')
@@ -877,7 +879,16 @@ export async function recordRefund(
         // 🔴 Máquina de efectivo (R4-7 #4, la regla de A6): la TPV nunca escoge con qué devolver, así que una venta de la máquina se
         // devuelve con efectivo de la GAVETA. La caja abierta se bloquea antes del turno (caja → turno, como el cierre de caja); sin
         // ella, 409 y no se registra nada. El `PAY_OUT` va en esa caja y en esta transacción, justo después de la fila.
-        const cajaQueAutoriza = devuelveEfectivoDeLaMaquina(locked, undefined) ? await cajaParaDevolverEnTx(tx, venueId) : null
+        // Codex r2 (familia B): LA decisión de destino, la misma que autorizó la ruta; la TPV no escoge medio (`medio` vacío). Si va a la
+        // gaveta y el permiso concedido no alcanza, 403 y no se escribe nada.
+        const destino = decidirDestinoDelReembolso({ origen: locked.cashMachineRef ? 'MAQUINA' : 'ORDINARIO', medio: undefined })
+        if (destino.destinoEfectivo === 'GAVETA' && permisoConcedido && permisoConcedido !== destino.permisoRequerido) {
+          throw new ForbiddenError(
+            'Devolver una venta de la máquina saca billetes de la caja: necesita el permiso de devolver en efectivo.',
+            'REFUND_NEEDS_REFUND_TO_CASH',
+          )
+        }
+        const cajaQueAutoriza = destino.destinoEfectivo === 'GAVETA' ? await cajaParaDevolverEnTx(tx, venueId) : null
         const shiftClaim = await claimShiftForRefund(tx, {
           venueId,
           salesRefundPesos,

@@ -18,12 +18,8 @@ import { issueRefund, type RefundReason } from '@/services/dashboard/refund.dash
 import { exigirSoloSaldoFueraDelPos } from '@/services/storeCredit/storeCreditRefund.service'
 import { createManualPayment, MENSAJE_VENTA_YA_COBRADA } from '@/services/dashboard/manualPayment.service'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
-import {
-  devolverConEfectivo,
-  devuelveEfectivoDeLaMaquina,
-  sePuedeEscogerComoDevolver,
-  seDevuelveEnTerminal,
-} from '@/services/tpv/terminalRefundTarget'
+import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal } from '@/services/tpv/terminalRefundTarget'
+import { decidirDestinoDelReembolso, medioQueLlegaAlEscritor, origenDelDinero } from '@/services/shared/destinoDelReembolso'
 import { isGiftCardTenderKind } from '@/services/giftCards/giftCardTender'
 import { decidesMoney } from '@/services/payments/cardInternationality.service'
 import { isExchangeCreditTenderKind } from '@/services/exchanges/exchangePredicates'
@@ -595,7 +591,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       const refundMethod = refundMethodRaw ?? undefined // null = ausente
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('payments:refund', venueId) // write gate (per-venue role)
-      // Devolver en efectivo un cobro que no fue en efectivo: permiso propio (MANAGER+), igual que la ruta móvil.
+      // «Efectivo» escogido pide su permiso propio con CUALQUIER origen (la decisión de abajo lo confirma): se revisa antes de leer nada.
       if (refundMethod === 'CASH') guard.requirePermission('payments:refund-to-cash', venueId)
 
       if (!idempotencyKey)
@@ -631,9 +627,14 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         },
       })
       if (!payment) return text({ ok: false, error: 'No encontré ese pago en tus locales.' })
-      // Máquina de efectivo (Codex r1 #14, decisión c): devolver en efectivo una venta de la máquina —sin refundMethod o con CASH— saca
-      // billetes de la caja en la que nunca entraron: el mismo permiso que el POS, el panel y la terminal.
-      if (payment.cashMachineRef && refundMethod !== 'BANK_TRANSFER') guard.requirePermission('payments:refund-to-cash', venueId)
+      // Codex r2 (familia B): LA decisión de destino y permiso, la misma del POS, el panel, la terminal y el escritor. Escoger «Efectivo»
+      // pide su permiso propio (MANAGER+), igual que la ruta móvil; devolver una venta de la máquina —directa o por la cadena de un
+      // Cambio, r2 #2— saca billetes de la caja en la que nunca entraron: también.
+      const destino = decidirDestinoDelReembolso({
+        origen: await origenDelDinero(prisma, venueId, paymentId),
+        medio: medioQueLlegaAlEscritor('MCP', refundMethod),
+      })
+      if (destino.permisoRequerido === 'payments:refund-to-cash') guard.requirePermission('payments:refund-to-cash', venueId)
       if (payment.status !== TransactionStatus.COMPLETED) {
         return text({ ok: false, error: `Solo se puede reembolsar un pago COMPLETED (este está ${payment.status}).` })
       }
@@ -705,7 +706,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         // contesta `tenderSemantics`, nunca un `method === 'CASH'` local.
         const saleDeCajonDeEfectivo = refundMethod
           ? refundMethod === 'CASH'
-          : devuelveEfectivoDeLaMaquina(payment, undefined) || paymentCountsAsDrawerCash(chain?.money ?? payment)
+          : destino.destinoEfectivo === 'GAVETA' || paymentCountsAsDrawerCash(chain?.money ?? payment)
 
         if (!confirm) {
           return text({
@@ -737,6 +738,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         }
 
         const result = await issueRefund({
+          permisoConcedido: destino.permisoRequerido,
           venueId,
           paymentId,
           idempotencyKey,

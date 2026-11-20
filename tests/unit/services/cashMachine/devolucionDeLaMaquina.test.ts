@@ -28,6 +28,7 @@ import { resolveChainRefund } from '@/services/exchanges/exchangeChainRefund'
 import { modesForExchangeCreditRoot, payoutModesFor } from '@/services/exchanges/exchangeRules'
 import { EXCHANGE_REFUND_ROLE } from '@/services/exchanges/exchangeMarks'
 import { devolverConEfectivo, devuelveEfectivoDeLaMaquina, type CobroParaDevolver } from '@/services/tpv/terminalRefundTarget'
+import * as destinoDelReembolso from '@/services/shared/destinoDelReembolso'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const FOLIO = 'AQ0000000000AB'
@@ -288,6 +289,56 @@ describe('riel del POS y del panel (issueRefund)', () => {
     expect(filaDelReembolso()).toMatchObject({ method: 'CASH', fundsFlow: 'CASH_DRAWER' })
     expect(orden).toEqual(['caja', 'turno'])
     unSoloPayOutEnLaCaja(150)
+  })
+
+  it('🔴 Codex r2 (familia B): el escritor decide con LA función de destino; si el permiso concedido no alcanza para la gaveta, 403 y nada', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([ventaDeLaMaquina()]).mockResolvedValueOnce([])
+    const espia = jest.spyOn(destinoDelReembolso, 'decidirDestinoDelReembolso')
+    await expect(reembolsar({ permisoConcedido: 'payments:refund' })).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'REFUND_NEEDS_REFUND_TO_CASH',
+    })
+    expect(espia).toHaveBeenCalledWith({ origen: 'MAQUINA', medio: 'CASH' })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    espia.mockRestore()
+  })
+
+  it('🔴 Codex r2 #2: el REEMPLAZO de un Cambio de la máquina también lo confirma el escritor (origen CADENA_DE_MAQUINA)', async () => {
+    const reemplazo = ventaDeLaMaquina({ id: 'payment-reemplazo', method: 'OTHER', tenderLabel: 'Crédito de cambio', cashMachineRef: null })
+    const cadena = resolveChainRefund(
+      { exchangeId: 'cambio-1' } as any,
+      { ...ventaDeLaMaquina({ id: 'payment-raiz' }), tenderType: null } as any,
+    )
+    if (cadena.kind !== 'INHERIT') throw new Error('la cadena debía heredarse')
+    prismaMock.$queryRaw.mockResolvedValueOnce([reemplazo]).mockResolvedValueOnce([])
+    const espia = jest.spyOn(destinoDelReembolso, 'decidirDestinoDelReembolso')
+    await expect(
+      prismaMock.$transaction((tx: any) =>
+        writeRefundInTx(tx, {
+          originalPaymentId: 'payment-reemplazo',
+          venueId: 'venue-1',
+          salesRefundCents: 15000,
+          tipRefundCents: 0,
+          refundedItems: [],
+          reason: 'RETURNED_GOODS',
+          staffId: 'staff-9',
+          tenderCommission: 'NONE',
+          shift: 'CLAIM_LIVE',
+          moneyAs: cadena.money,
+          permisoConcedido: 'payments:refund',
+          exchangeMark: { exchangeId: 'cambio-1', role: EXCHANGE_REFUND_ROLE.CHAIN, rootPaymentId: 'payment-raiz' },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    expect(espia).toHaveBeenCalledWith({ origen: 'CADENA_DE_MAQUINA', medio: undefined })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    espia.mockRestore()
+  })
+
+  it('con el permiso de la gaveta concedido, se registra como siempre', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([ventaDeLaMaquina()]).mockResolvedValueOnce([])
+    await reembolsar({ permisoConcedido: 'payments:refund-to-cash' })
+    expect(filaDelReembolso()).toMatchObject({ method: 'CASH', fundsFlow: 'CASH_DRAWER' })
   })
 
   it('devolución PARCIAL por importe ($50 de $150) ⇒ PAY_OUT de $50', async () => {
