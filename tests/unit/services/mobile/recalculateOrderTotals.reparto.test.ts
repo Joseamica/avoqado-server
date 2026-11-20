@@ -170,3 +170,34 @@ it('🔴 P12: el recálculo guarda el total CON el IVA que va aparte ($100 + $16
   await recalculateOrderTotals('order-1', 0, 0, tx)
   expect(tx.order.update.mock.calls[0][0].data).toMatchObject({ subtotal: 100, discountAmount: 0, total: 116 })
 })
+
+// Codex r3 #2 de «Anular producto»: la base del % llega en `Number` (25.02 + 25.33 = 50.349999999999994). Su 10 % es 5.04 por
+// `recalcularCargosPorServicio` (anular, descontar) y daba 5.03 aquí (quitar otro cargo). Las dos rutas tienen que dar lo mismo.
+describe('cargo % sobre una base que en Number no es exacta (centavo)', () => {
+  const cargo10 = (amount: number) => ({ id: 'sc10', type: 'PERCENTAGE', value: 10, amount })
+
+  it('un 10 % de $50.35 es $5.04 y no se reescribe si ya estaba bien', async () => {
+    const tx = txDoble([renglon('a', 25.02), renglon('b', 25.33)], [])
+    tx.orderServiceCharge.findMany.mockResolvedValue([cargo10(5.04)])
+    const t = await recalculateOrderTotals('order-1', 0, 0, tx)
+    expect(tx.orderServiceCharge.update).not.toHaveBeenCalled()
+    expect(tx.order.update.mock.calls[0][0].data).toMatchObject({ serviceChargeAmount: 5.04, total: 55.39 })
+    expect(t.serviceChargeAmount).toBe(5.04)
+  })
+
+  it('si la fila traía el 5.03 del camino viejo, lo corrige a 5.04', async () => {
+    const tx = txDoble([renglon('a', 25.02), renglon('b', 25.33)], [])
+    tx.orderServiceCharge.findMany.mockResolvedValue([cargo10(5.03)])
+    await recalculateOrderTotals('order-1', 0, 0, tx)
+    expect(tx.orderServiceCharge.update).toHaveBeenCalledWith({ where: { id: 'sc10' }, data: { amount: 5.04 } })
+  })
+
+  // Regresión: un cargo FIJO se respeta y suma tal cual.
+  it('un cargo fijo no se recalcula y suma al total', async () => {
+    const tx = txDoble([renglon('a', 100)], [])
+    tx.orderServiceCharge.findMany.mockResolvedValue([{ id: 'fijo', type: 'FIXED_AMOUNT', value: 15, amount: 15 }, cargo10(10)])
+    await recalculateOrderTotals('order-1', 0, 0, tx)
+    expect(tx.orderServiceCharge.update).not.toHaveBeenCalled()
+    expect(tx.order.update.mock.calls[0][0].data).toMatchObject({ serviceChargeAmount: 25, total: 125 })
+  })
+})

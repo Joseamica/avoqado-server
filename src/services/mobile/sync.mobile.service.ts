@@ -1575,7 +1575,7 @@ const NOTA_RONDA_TARDIA = 'RONDA_TARDIA_EN_CUENTA_APARTE'
  * se repiten entre rondas. Las dos búsquedas usan índice (`OrderItem.externalId`, `OrderPromotion.instanceId`). Devuelve la cuenta.
  */
 async function rondaYaEnAlgunaCuenta(venueId: string, conPromocion: any[], normales: any[]): Promise<string | null> {
-  const llaves = [...new Set(normales.map(it => it.externalId).filter((k: unknown): k is string => typeof k === 'string' && k.length > 0))]
+  const llaves = [...new Set(llavesGuardadasDeLaRonda(normales))]
   if (llaves.length) {
     const renglon = await prisma.orderItem.findFirst({
       where: { externalId: { in: llaves }, order: { venueId } },
@@ -1598,6 +1598,17 @@ async function rondaYaEnAlgunaCuenta(venueId: string, conPromocion: any[], norma
     if (combo) return combo.orderId
   }
   return null
+}
+
+/**
+ * Las llaves de los renglones de la ronda TAL COMO SE GUARDAN: el alta las recorta (`normalizeExternalId`), así que la búsqueda de la
+ * ronda y de sus lápidas también. Sin esto, una llave propia con espacios no encontraba su lápida y la ronda tardía volvía a cobrar
+ * lo anulado en una cuenta aparte (Codex r3 #4 de «Anular producto»).
+ */
+function llavesGuardadasDeLaRonda(items: any[]): string[] {
+  return items
+    .map(it => orderTpvService.normalizeExternalId(typeof it.externalId === 'string' ? it.externalId : null))
+    .filter((k): k is string => !!k)
 }
 
 /** La llave del aparato en la cadena. Sin aparato (petición a mano) se usa el mesero, que es lo más parecido. */
@@ -1629,7 +1640,7 @@ async function aplicarRondaTardia(p: {
   }
   // «Anular producto» (Codex r2 #1): si una de sus llaves se ANULÓ en la cuenta cobrada, la ronda ya entró ahí (se guarda entera en
   // una transacción) y después la anularon: no se abre una cuenta aparte para volver a cobrar lo anulado.
-  const llaves = p.itemsWithKey.map(it => it.externalId).filter((k: unknown): k is string => typeof k === 'string' && k.length > 0)
+  const llaves = llavesGuardadasDeLaRonda(p.itemsWithKey)
   if (llaves.length && (await orderTpvService.llavesAnuladasDeLaCuenta(prisma, original.id, llaves)).size > 0) {
     logger.info(`🪑 [POS SYNC] ADD_ITEMS ${intent.id}: la ronda ya estaba en ${original.id} y se anuló ahí; no se abre cuenta aparte`)
     return { id: intent.id, status: 'ACKED', result: pedida }

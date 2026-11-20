@@ -643,7 +643,7 @@ function normalizeNotes(notes?: string | null): string | null {
   return trimmed.length > 0 ? trimmed : null
 }
 
-function normalizeExternalId(externalId?: string | null): string | null {
+export function normalizeExternalId(externalId?: string | null): string | null {
   if (!externalId) return null
   const trimmed = externalId.trim()
   return trimmed.length > 0 ? trimmed : null

@@ -519,7 +519,9 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
         })
         return text({ ok: true, anulado: { mesa: number, producto: linea.productName, nuevoTotal: result.total } })
       } catch (err) {
-        if (err instanceof AppError && err.statusCode === 409) {
+        // Sólo el 409 de VERSIÓN (sin código, o `VERSION_CONFLICT`) es «la cuenta cambió». Los 409 con su propio código (un cobro
+        // en curso en la terminal, vales) traen el motivo verdadero y la salida: pedir otra vista previa no sirve (Codex r3 #3).
+        if (err instanceof AppError && err.statusCode === 409 && (!err.code || err.code === 'VERSION_CONFLICT')) {
           return text({ ok: false, error: 'La cuenta cambió desde la vista previa: vuelve a pedirla.', code: 'ORDER_CHANGED' })
         }
         if (err instanceof AppError) return text({ ok: false, error: err.message, ...(err.code ? { code: err.code } : {}) })

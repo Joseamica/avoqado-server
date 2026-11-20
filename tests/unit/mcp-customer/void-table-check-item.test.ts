@@ -151,6 +151,24 @@ describe('void_table_check_item', () => {
     expect(r).toEqual({ ok: false, error: 'La cuenta cambió desde la vista previa: vuelve a pedirla.', code: 'ORDER_CHANGED' })
   })
 
+  it('r3 #3: un cobro en curso (409 con código) NO se disfraza de «la cuenta cambió»: dice esperar o cancelar el cobro', async () => {
+    const { ConflictError } = jest.requireActual('@/errors/AppError')
+    const ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE = 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE'
+    const MENSAJE_COBRO_VIVO = 'Hay un cobro en curso en la terminal: espera a que termine o cancélalo.'
+    mockVoidOrderItem.mockRejectedValueOnce(
+      new ConflictError(MENSAJE_COBRO_VIVO, ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE, { requestId: 'req-1' }),
+    )
+    const r = await llamar({ item: 'pepino', confirm: true, resolvedOrderItemId: 'l1', expectedVersion: 3 })
+    expect(r).toEqual({ ok: false, error: MENSAJE_COBRO_VIVO, code: ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE })
+  })
+
+  it('r3 #3: otro 409 con su propio código (vales) también pasa con su texto', async () => {
+    const { ConflictError } = jest.requireActual('@/errors/AppError')
+    mockVoidOrderItem.mockRejectedValueOnce(new ConflictError('Esta cuenta tiene vales: …', 'AREA_TICKET_PARTIAL_VOID_NOT_ALLOWED'))
+    const r = await llamar({ item: 'pepino', confirm: true, resolvedOrderItemId: 'l1', expectedVersion: 3 })
+    expect(r).toEqual({ ok: false, error: 'Esta cuenta tiene vales: …', code: 'AREA_TICKET_PARTIAL_VOID_NOT_ALLOWED' })
+  })
+
   it('con confirm anula ese renglón con el servicio de la mesa, firmado por quien está conectado', async () => {
     const r = await llamar({ item: 'pepino', confirm: true, resolvedOrderItemId: 'l1' })
     expect(mockVoidOrderItem).toHaveBeenCalledWith({

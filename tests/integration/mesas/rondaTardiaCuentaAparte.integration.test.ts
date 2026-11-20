@@ -255,6 +255,28 @@ describe('D7 · ronda sin red que llega a una cuenta que otra caja ya cobró', (
     expect(await notasDe(cobrada)).toHaveLength(0)
   })
 
+  it('«Anular producto» (Codex r3 #4): la llave propia del aparato llega con espacios; la guardada va recortada y la lápida igual la reconoce', async () => {
+    const t = await mesa()
+    const cobrada = (await assignTable(venueId, t, mesera, 2)).order.id
+    const v0 = await prisma.order.findUniqueOrThrow({ where: { id: cobrada }, select: { version: true } })
+    await addItemsToOrder(venueId, cobrada, [{ productId: coca, quantity: 1 }] as any, v0.version, true)
+    const llave = `propia-${randomUUID()}`
+    const r = { ...ronda(cobrada), payload: { orderId: cobrada, items: [{ productId: agua, quantity: 1, externalId: `  ${llave} ` }] } }
+    const v1 = await prisma.order.findUniqueOrThrow({ where: { id: cobrada }, select: { version: true } })
+    await addItemsToOrder(venueId, cobrada, [{ productId: agua, quantity: 1, externalId: `  ${llave} ` }] as any, v1.version, true)
+    const aguaId = (await prisma.orderItem.findFirstOrThrow({ where: { orderId: cobrada, externalId: llave } })).id
+    await voidOrderItem({ venueId, orderId: cobrada, itemId: aguaId, reason: 'El cliente cambió de parecer', actorId: caja })
+    await payCashOrder(venueId, cobrada, { amount: 2500, tip: 0, staffId: caja, idempotencyKey: `caja-${cobrada}` })
+
+    const [ack] = await replay([r])
+
+    expect(ack.status).toBe('ACKED')
+    expect((ack.result as any).cuentaAparte).toBeUndefined()
+    expect(await prisma.orderItem.count({ where: { externalId: llave } })).toBe(0)
+    expect(await fotoDe(cobrada)).toMatchObject({ renglones: 1, total: 25, pagos: 1 })
+    expect(await notasDe(cobrada)).toHaveLength(0)
+  })
+
   it('Codex r0 #1: la ronda ya estaba guardada y otra caja la SEPARÓ a otra cuenta antes de cobrar: no se duplica', async () => {
     const { t, cobrada } = await mesaCobradaPorLaCaja()
     const r = ronda(cobrada)
