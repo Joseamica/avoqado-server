@@ -63,6 +63,7 @@ describe('D17 · reglas puras', () => {
       status: 'READY',
       completedAt: null,
       kitchenDoneAt: t0,
+      archivedAt: null, // recién terminada: si el archivado se le adelantó, entra a «Recientes» (Codex r8 #4)
     })
     // la caja entrega después: sigue la hora de cuando la cocina terminó
     expect(recalculoDeComanda([c({ DELIVERED: 1 })], { kitchenDoneAt: t0 }, t1)).toEqual({
@@ -71,6 +72,12 @@ describe('D17 · reglas puras', () => {
       kitchenDoneAt: t0,
     })
     expect(recalculoDeComanda([c({ READY: 1, PENDING: 1 })], { kitchenDoneAt: t0 }, t1).kitchenDoneAt).toBeNull()
+  })
+
+  it('una archivada que la cocina termina AHORA vuelve a «Recientes» su hora (Codex r8 #4); una ya terminada no', () => {
+    const t0 = new Date('2026-11-21T10:00:00Z')
+    expect(recalculoDeComanda([c({ READY: 1 })], { kitchenDoneAt: null }, t0)).toMatchObject({ archivedAt: null, kitchenDoneAt: t0 })
+    expect(recalculoDeComanda([c({ DELIVERED: 1 })], { kitchenDoneAt: t0 }, t0)).not.toHaveProperty('archivedAt')
   })
 
   it('«Deshacer» regresa lo Listo a Preparando y no toca lo entregado ni lo cancelado', () => {
@@ -164,12 +171,16 @@ describe('D17 · el tablero y «Recientes» (SERVIDOR)', () => {
       expect.objectContaining({
         preparationVersion: 1,
         archivedAt: null,
-        kitchenDoneAt: expect.any(Object),
         items: { some: {} },
       }),
     )
     expect(primera[0].take).toBe(20)
     expect(segunda[0].take).toBe(100) // su propia lista: no le quita lugar a las de un solo Listo
+    // Codex r8 #5: la entregada por la versión anterior entre la migración y el cambio de versión también entra
+    expect(segunda[0].where.OR).toEqual([
+      { kitchenDoneAt: { gte: expect.any(Date) } },
+      { kitchenDoneAt: null, status: 'COMPLETED', completedAt: { gte: expect.any(Date) } },
+    ])
   })
 
   it('la tablet vieja (sin kitchenDoneVersion) no recibe las de tiempos: no vería un «Deshacer» que falla', async () => {

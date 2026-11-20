@@ -141,12 +141,14 @@ export function recalculoDeComanda(
   archivedAt?: null
 } {
   const status = preparationTicketStatus(items)
+  const terminoAhora = cocinaTermino(items) && previa.kitchenDoneAt == null
   return {
     status,
     completedAt: status === 'COMPLETED' ? ahora : null,
     kitchenDoneAt: cocinaTermino(items) ? (previa.kitchenDoneAt ?? ahora) : null,
     // Codex r2 #2: la caja corrige un platillo de una comanda ya archivada (o «Deshacer» le gana al archivado): la cocina lo ve.
-    ...(nuevoTrabajo ? { archivedAt: null } : {}),
+    // Codex r8 #4: la cocina la termina justo después del archivado: entra a «Recientes» su hora (el job la vuelve a archivar).
+    ...(nuevoTrabajo || terminoAhora ? { archivedAt: null } : {}),
   }
 }
 

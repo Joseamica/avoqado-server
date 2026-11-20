@@ -526,7 +526,9 @@ export async function retirarComandasDeVentaAnulada(
     if (page.length < 100) break
     cursor = page[page.length - 1].id
   }
-  await tx.kdsOrder.updateMany({ where: tracked, data: { status: 'COMPLETED', completedAt: new Date() } })
+  const anuladaEn = new Date()
+  // D17 (Codex r8 #3): la comanda de una cuenta anulada entra a «Recientes» su hora, como entraba por `completedAt`.
+  await tx.kdsOrder.updateMany({ where: tracked, data: { status: 'COMPLETED', completedAt: anuladaEn, kitchenDoneAt: anuladaEn } })
   return { kdsOrderIds, kdsOrderItemIds }
 }
 
