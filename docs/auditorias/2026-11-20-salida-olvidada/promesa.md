@@ -49,3 +49,24 @@
 | 11 | El job podía quedarse en un lote que no vence | Páginas con cursor; sin transacción para las que no vencen |
 | 12 | El descanso cerrado en 0 h sumaba horas al corregir | Termina en la salida corregida |
 | 13 | Hora repetida del cambio de horario (Tijuana) | Declarado en «No entra» |
+
+## Codex r2: 10 + 3 → arreglados 9, declarados 4 · PARADA (método, regla 3)
+
+Los bloqueantes no bajaron (10 → 10) y la familia «carreras entre el cierre automático y otro escritor» volvió. No se hace
+otra ronda igual: se arreglaron los casos con arreglo chico, se declaran los residuos y se le avisa al founder.
+
+| # | Hallazgo | Qué se hizo |
+|---|---|---|
+| 1 | El margen del celular (+3 h) en los dos sentidos | **Declarado.** Antes del margen: el celular ofrece «Salida» hasta 3 h tras el corte; esa salida se anota (no se pierde) y la persona entra. Después: un nocturno con horario > 15 h podría perder hasta 1 h de salida en el celular. PlayTelecom no tiene horarios así |
+| 2 | Entrada del celular dentro de un turno de la PAX ya cerrado → ENTRADA_SE_ENCIMA y la salida atorada | Se contesta YA_TIENE_ENTRADA con su id: el celular ofrece «Usar esa entrada» y la salida del mismo día reemplaza el cierre |
+| 3 | Editar el cuadrante después del cierre estiraba el límite | El límite de un turno ya cerrado queda fijo desde el cierre (`limiteDeUnCierre`) |
+| 4 | El gerente se adelanta con una hora estimada | La salida real se anota y la checada VUELVE a «Por revisar»; la nota se ve aunque ya se haya corregido |
+| 5 | «Tus fotos quedaron anotadas» con 0 filas | Sólo se dice si se escribió; si no, «no se pudo anotar: avísale» |
+| 6 | Salida de PAX/POS en vuelo pisaba el cierre | La salida de PAX y POS es condicional (`clockOutTime: null`); si perdió, se anota |
+| 7 | La salida de la PAX que esperaba GPS cierra el turno NUEVO abierto desde el POS | **Declarado:** exige que la persona abra otra entrada en otro aparato dentro de los ~45 s del GPS justo en su corte |
+| 8 | Campo 0.4/0.5: la salida vieja se anota sin decirle a la persona | **Declarado:** no se pierde (queda en «Por revisar» con su hora) y la persona puede entrar; avisarle en la app vieja no es posible |
+| 9 | La PAX decide con la LISTA de checadas, que no cerraba | La lista con `staffId` cierra lo olvidado antes de contestar |
+| 10 | «Por revisar» topaba en 200 | Páginas de 200 con «Anteriores / Siguientes» |
+| 11 | El job decidía con el interruptor leído antes | Se relee dentro de la transacción |
+| 12 | Descanso iniciado después de que el job leyó | El cierre exige el estado leído (`status`) |
+| 13 | Hasta 2,500 por pasada con lectura de horario por fila | **Declarado:** sólo las que pasaron el límite base leen su horario; tope fijo por pasada; se mide en el banco y al publicar |
