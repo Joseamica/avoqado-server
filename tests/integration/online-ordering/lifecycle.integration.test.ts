@@ -976,6 +976,12 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     const venceA = (onlineOrderId: string, at: Date) =>
       prisma.onlineOrder.update({ where: { id: onlineOrderId }, data: { acceptDeadlineAt: at } })
     const espera = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+    /** Una hora límite que ya pasó pero es DESPUÉS del corte que puso `beat()` (Codex p2-r4 #6: nada depende de cuánto tarda la base). */
+    const hace = (ms: number) => new Date(Date.now() - ms)
+    const arrancar = async () => {
+      await beat()
+      await espera(400)
+    }
     const estadoTienda = async () => {
       __resetPresenceDebounceForTests()
       await touchInboxPoll(venueId!)
@@ -988,12 +994,11 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     })
 
     it('2 pedidos sin atender ⇒ pausada y no entra otro; apagar y encender no la quita; «Reanudar» sí', async () => {
-      await beat()
-      await espera(5)
+      await arrancar()
       const a = await newOrder()
       const b = await newOrder()
-      await venceA(a.onlineOrderId, new Date(Date.now() - 2_000))
-      await venceA(b.onlineOrderId, new Date(Date.now() - 1_000))
+      await venceA(a.onlineOrderId, hace(200))
+      await venceA(b.onlineOrderId, hace(100))
       const b2 = await prisma.onlineOrder.findUniqueOrThrow({ where: { id: b.onlineOrderId } })
 
       await expect(estadoTienda()).resolves.toMatchObject({
@@ -1012,12 +1017,11 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     })
 
     it('una respuesta A TIEMPO de una persona entre las dos horas límite corta la racha; staffAnsweredAt queda escrito una vez', async () => {
-      await beat()
-      await espera(5)
+      await arrancar()
       const a = await newOrder()
       const b = await newOrder()
       const c = await newOrder()
-      await venceA(a.onlineOrderId, new Date(Date.now() - 2_000))
+      await venceA(a.onlineOrderId, hace(200))
       await expect(
         rejectOnlineOrder({ venueId: venueId!, orderId: c.orderId, staffId: staffId ?? null, reason: 'TOO_BUSY', porPersona: true }),
       ).resolves.toMatchObject({ outcome: 'OK' })
@@ -1025,25 +1029,26 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       expect(tocado.staffAnsweredAt).not.toBeNull()
       await espera(5)
       await venceA(b.onlineOrderId, new Date())
+      await espera(5)
       await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
 
-      // El corte sube a 1 ms antes de esa respuesta (no hay pausa), y la lectura da lo mismo.
-      await avanzarCortePausaSola(venueId!)
-      const fila = await prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })
-      expect(fila.autoPauseResumedAt!.getTime()).toBe(tocado.staffAnsweredAt!.getTime() - 1)
+      // El corte sólo sube a lo definitivo (30 s atrás): aquí ya está más adelante (lo puso `beat()`), así que no se mueve ni baja.
+      const antes = (await prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })).autoPauseResumedAt!
+      await expect(avanzarCortePausaSola(venueId!)).resolves.toBe(false)
+      const despues = (await prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })).autoPauseResumedAt!
+      expect(despues.getTime()).toBe(antes.getTime())
       await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN' })
     })
 
     it('un rechazo TARDE no es respuesta: el pedido ya falló a su hora límite', async () => {
-      await beat()
-      await espera(5)
+      await arrancar()
       const a = await newOrder()
       const b = await newOrder()
-      await venceA(a.onlineOrderId, new Date(Date.now() - 3_000))
+      await venceA(a.onlineOrderId, hace(300))
       await expect(
         rejectOnlineOrder({ venueId: venueId!, orderId: a.orderId, staffId: staffId ?? null, reason: 'OTHER', porPersona: true }),
       ).resolves.toMatchObject({ outcome: 'OK' })
-      await venceA(b.onlineOrderId, new Date(Date.now() - 1_000))
+      await venceA(b.onlineOrderId, hace(100))
       await expect(estadoTienda()).resolves.toMatchObject({ status: 'PAUSED' })
     })
 
@@ -1057,20 +1062,20 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     })
 
     it('lo que la clienta canceló antes de su hora límite no cuenta (la consulta lo deja fuera, con sus nulos bien)', async () => {
-      await beat()
-      await espera(5)
+      await arrancar()
       const a = await newOrder()
       const e = await newOrder()
       const b = await newOrder()
       await expect(cancelOnlineOrderByCustomer({ venueId: venueId!, trackingToken: e.trackingToken })).resolves.toMatchObject({
         outcome: 'OK',
       })
-      await venceA(a.onlineOrderId, new Date(Date.now() - 3_000))
-      await venceA(e.onlineOrderId, new Date(Date.now() - 2_000)) // canceló ANTES: su cancelledAt es anterior a esta hora límite
-      await prisma.onlineOrder.update({ where: { id: e.onlineOrderId }, data: { cancelledAt: new Date(Date.now() - 2_500) } })
+      await venceA(a.onlineOrderId, hace(300))
+      await venceA(e.onlineOrderId, hace(200)) // canceló ANTES: su cancelledAt es anterior a esta hora límite
+      // Canceló con más de 30 s de anticipación (lo de los últimos 30 s cuenta como sin respuesta: Codex p2-r4 #2).
+      await prisma.onlineOrder.update({ where: { id: e.onlineOrderId }, data: { cancelledAt: new Date(Date.now() - 60_000) } })
       // A sola es una falla; E no cuenta; B todavía no vence.
       await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN' })
-      await venceA(b.onlineOrderId, new Date(Date.now() - 1_000))
+      await venceA(b.onlineOrderId, hace(100))
       await expect(estadoTienda()).resolves.toMatchObject({ status: 'PAUSED' })
     })
   })
