@@ -787,6 +787,8 @@ model WhatsappContactWindow {
 }
 
 enum WhatsappInboundRouting {
+  SUPPORT_QUEUED
+  SUPPORT_IGNORED
   ACTIVATION_CONSUMED
   ACTIVATION_FAILED
   DEACTIVATION_REDIRECT
@@ -812,8 +814,326 @@ model WhatsappInboundEvent {
   processedAt     DateTime?
   replyWamid      String?
   replySentAt     DateTime?
+  receiverId      String?
+  supportTombstoneUntil DateTime?
+  supportMessage  SupportMessage?
 
   @@index([fromPhone, receivedAt])
+  @@index([routedAs, receivedAt, id])
+  @@index([supportTombstoneUntil, id])
+  @@index([receiverId, replyWamid])
+}
+
+enum SupportMode {
+  PUBLIC
+  PERSONAL
+  CLOSED
+}
+
+enum SupportPurpose {
+  HELP
+  LINK_CODE
+  DATA
+}
+
+enum SupportMessageStatus {
+  QUEUED
+  CLAIMED
+  ANSWER_READY
+  AI_UNKNOWN
+  SEND_UNKNOWN
+  SENT
+  FAILED
+  CANCELLED
+  EXPIRED
+}
+
+enum SupportAttemptKind {
+  AI
+  SEND
+}
+
+enum SupportAttemptState {
+  RESERVED
+  STARTED
+  SUCCEEDED
+  DEFINITIVE_FAILURE
+  UNKNOWN
+}
+
+model SupportWhatsappLink {
+  id            String                @id @default(cuid())
+  staffId       String                @unique
+  phone         String                @unique
+  verifiedAt    DateTime              @default(now())
+  expiresAt     DateTime
+  conversations SupportConversation[]
+
+  @@index([expiresAt, id])
+}
+
+model SupportLinkChallenge {
+  id             String              @id @default(cuid())
+  staffId        String
+  phone          String
+  conversationId String
+  conversation   SupportConversation @relation(fields: [conversationId], references: [id])
+  operationKey   String
+  codeHash       String
+  attempts       Int                 @default(0)
+  expiresAt      DateTime
+  consumedAt     DateTime?
+  invalidatedAt  DateTime?
+  createdAt      DateTime            @default(now())
+  message        SupportMessage?
+
+  @@unique([staffId, operationKey])
+  @@index([staffId, createdAt])
+  @@index([phone, createdAt])
+  @@index([expiresAt, id])
+  @@index([createdAt, id])
+}
+
+model SupportConversation {
+  id                 String                 @id @default(cuid())
+  phone              String
+  receiverId         String
+  linkId             String?
+  link               SupportWhatsappLink?   @relation(fields: [linkId], references: [id], onDelete: SetNull)
+  staffId            String?
+  orgId              String?
+  venueId            String?
+  app                String?
+  appVersion         String?
+  deviceFamily       String?
+  generation         Int                    @default(1)
+  nextSequence       Int                    @default(0)
+  mode               SupportMode            @default(PUBLIC)
+  pendingSelection   String?
+  selectionOptions   Json?
+  selectionExpiresAt DateTime?
+  noticeAcceptedAt   DateTime?
+  lastUserMessageAt  DateTime?
+  lastActivityAt     DateTime               @default(now())
+  messages           SupportMessage[]
+  challenges         SupportLinkChallenge[]
+
+  @@index([receiverId, phone, mode])
+  @@index([lastActivityAt, id])
+  @@index([selectionExpiresAt, id])
+  @@index([staffId, orgId, venueId, generation])
+}
+
+model SupportMessage {
+  id                String                @id @default(cuid())
+  inboundEventId    String?               @unique
+  inboundEvent      WhatsappInboundEvent? @relation(fields: [inboundEventId], references: [id], onDelete: SetNull)
+  challengeId       String?               @unique
+  challenge         SupportLinkChallenge? @relation(fields: [challengeId], references: [id], onDelete: SetNull)
+  purpose           SupportPurpose        @default(HELP)
+  conversationId    String
+  conversation      SupportConversation   @relation(fields: [conversationId], references: [id])
+  sequence          Int
+  generation        Int
+  body              String                @default("")
+  status            SupportMessageStatus  @default(QUEUED)
+  answer            String?
+  answerCipher      String?
+  accessFingerprint String?
+  sourceIds         String[]              @default([])
+  outboundWamid     String?               @unique
+  claimToken        String?
+  leaseUntil        DateTime?
+  nextAttemptAt     DateTime              @default(now())
+  retryOfId         String?               @unique
+  createdAt         DateTime              @default(now())
+  expiresAt         DateTime
+  /// Cómo terminó la respuesta del modo híbrido (sin texto). null = respuesta de antes del híbrido o fuera de él.
+  outcome           SupportOutcome?
+  /// Ya se le ofreció a la persona escribirle una persona del equipo en esta conversación.
+  handoffOffered    Boolean               @default(false)
+  /// La capacidad de una respuesta DATA o de un «no puedo» de la B; null en lo demás.
+  dataCapability    String?
+  attempts          SupportAttempt[]
+
+  @@unique([conversationId, sequence])
+  @@index([status, nextAttemptAt, id])
+  @@index([expiresAt, id])
+  @@index([createdAt, id])
+}
+
+model SupportAttempt {
+  id             String              @id @default(cuid())
+  messageId      String
+  message        SupportMessage      @relation(fields: [messageId], references: [id])
+  kind           SupportAttemptKind
+  ordinal        Int
+  claimToken     String
+  state          SupportAttemptState @default(RESERVED)
+  requestId      String?
+  reservedUsd    Decimal             @default(0) @db.Decimal(18, 8)
+  actualUsd      Decimal?            @db.Decimal(18, 8)
+  usage          Json?
+  pricingVersion String
+  startedAt      DateTime?
+  finishedAt     DateTime?
+
+  @@unique([messageId, kind, ordinal])
+  @@index([state, kind, startedAt])
+}
+
+model SupportBudget {
+  key         String   @id
+  windowStart DateTime
+  callCount   Int      @default(0)
+  heldUsd     Decimal  @default(0) @db.Decimal(18, 8)
+  spentUsd    Decimal  @default(0) @db.Decimal(18, 8)
+  updatedAt   DateTime @updatedAt
+
+  @@index([windowStart, key])
+}
+
+enum SupportOutcome {
+  ANSWERED
+  LITERAL
+  JUDGE_LITERAL
+  UNKNOWN
+  CLARIFIED
+  FIXED
+  ASKED
+  OLD_VERSION
+  HANDOFF
+}
+
+enum SupportNoticeKind {
+  HANDOFF
+  DAILY_DIGEST
+  WEEKLY_REPORT
+}
+
+enum SupportNoticeStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+  SKIPPED
+  HELD
+  UNCERTAIN
+}
+
+/// Un aviso por correo al equipo (pasar a una persona, resumen diario, reporte semanal). Nunca guarda texto del cliente.
+model SupportNotice {
+  id             String              @id @default(cuid())
+  kind           SupportNoticeKind
+  /// handoff:<conversationId>:<generation> · daily:<yyyy-mm-dd> · weekly:<yyyy-mm-dd del lunes>
+  dedupeKey      String              @unique
+  status         SupportNoticeStatus @default(PENDING)
+  /// yyyy-mm-dd en America/Mexico_City
+  day            String
+  app            String?
+  /// HANDOFF: 'REQUESTED' | 'TWO_FAILURES' | 'OLD_VERSION' | 'DATA'
+  reason         String?
+  /// Sin FK: la purga de 30 días de la conversación nunca se frena por un aviso.
+  conversationId String?
+  generation     Int?
+  /// De origen (R1-02).
+  staffId        String?
+  linkId         String?
+  /// De origen (R1-02).
+  venueId        String?
+  /// sha256(`${receiverId}:${phone}`) hex, para los topes.
+  phoneHash      String?
+  /// HANDOFF: HandoffMeta · DAILY_DIGEST: { items: HandoffMeta[] } · WEEKLY_REPORT: WeeklyReport. Sólo metadatos y conteos; Prisma.DbNull al terminar.
+  meta           Json?
+  attempts       Int                 @default(0)
+  /// Primer uso de la llave de Resend (dura 24 h, R1-04); desde ahí `meta` queda congelado.
+  firstAttemptAt DateTime?
+  nextAttemptAt  DateTime            @default(now())
+  reservedAt     DateTime?
+  resendId       String?
+  errorCode      String?
+  /// HELD: el DAILY_DIGEST que lo incluyó.
+  digestId       String?
+  createdAt      DateTime            @default(now())
+  finishedAt     DateTime?
+
+  @@index([status, nextAttemptAt, id])
+  @@index([kind, day, status])
+  @@index([createdAt, id])
+}
+
+/// Una fila por respuesta del híbrido con `outcome`, sin texto. SALIR y APP no la tocan (R1-03). Se purga a los 90 días.
+model SupportEvent {
+  id             String         @id @default(cuid())
+  kind           SupportOutcome
+  app            String?
+  guideIds       String[]       @default([])
+  /// Sin FK.
+  conversationId String
+  generation     Int
+  sequence       Int
+  day            String
+  createdAt      DateTime       @default(now())
+
+  @@index([createdAt, id])
+  @@index([conversationId, generation, sequence])
+}
+
+/// Cómo terminó una consulta de datos de la B (SupportDataQuery.result).
+enum SupportDataResult {
+  ANSWERED
+  NO_PERMISSION
+  PLAN_REQUIRED
+  NEEDS_UNLOCK
+  PARAM_INVALID
+  NOT_OFFERED
+  OVER_CAP
+  QUERY_FAILED
+  CHECK_FAILED
+}
+
+/// Una fila por persona: aceptó ESE texto del aviso de la B con ESE vínculo. Sólo la escribe la ruta del panel.
+model SupportDataAcceptance {
+  staffId    String   @id
+  /// Sin FK: con otro vínculo (o ninguno) deja de valer.
+  linkId     String
+  /// sha256 hex del texto exacto que aceptó.
+  noticeHash String
+  acceptedAt DateTime
+}
+
+/// Una fila por persona, sucursal y día de la sucursal. Sólo la escribe la ruta del panel. Se purga a los 90 días.
+model SupportDataUnlock {
+  id         String   @id @default(cuid())
+  staffId    String
+  venueId    String
+  /// yyyy-mm-dd en la zona de la sucursal al tocar.
+  day        String
+  /// Sin FK.
+  linkId     String
+  unlockedAt DateTime
+  createdAt  DateTime @default(now())
+
+  @@unique([staffId, venueId, day])
+  @@index([createdAt, id])
+}
+
+/// «Se consultó» (no «se entregó»): un renglón por consulta, sin cifras, escrito por el worker al preparar. Se purga a los 90 días.
+model SupportDataQuery {
+  id         String            @id @default(cuid())
+  staffId    String
+  venueId    String
+  capability String
+  paramsHmac String
+  result     SupportDataResult
+  /// Día de la sucursal.
+  day        String
+  createdAt  DateTime          @default(now())
+
+  /// Tope del día.
+  @@index([staffId, day])
+  /// Purga y lista semanal.
+  @@index([createdAt, id])
 }
 
 enum VenueChatSessionStatus {
@@ -1787,6 +2107,9 @@ model MenuCategory {
 
   // Scheduling
   active         Boolean  @default(true)
+  /// Eliminada por el dueño (encargo bc1dcc, 19-nov-2026): la fila sigue porque guarda archivados o una familia (RESTRICT); queda
+  /// apagada y ESCONDIDA para el dueño. La base la vuelve a mostrar al prenderla o si algo vivo cae en ella (triggers).
+  deletedAt      DateTime?
   availableFrom  String? // "08:00"
   availableUntil String? // "22:00"
   availableDays  String[] // ["MON", "TUE", "WED"]
@@ -4627,6 +4950,11 @@ model ModifierGroup {
   allowMultiple Boolean @default(false)
   minSelections Int     @default(0)
   maxSelections Int?
+  /// La misma opción se puede elegir varias veces («2 de Cochinita + 1 de Papa»), como Square «Allow multiple quantities» y el
+  /// «max» por opción de Fudo (Flautas Coyoacán, encargo a508f4, 19-nov-2026). Sólo cuenta con `allowMultiple`: cada vez es una
+  /// selección más para el mínimo y el máximo del grupo. La venta lleva el `modifierId` repetido (un renglón por vez, cada uno
+  /// a su precio), igual que siempre. false = cada opción una sola vez, como hasta hoy. Todos los planes.
+  allowRepeat   Boolean @default(false)
 
   // Display
   displayOrder Int     @default(0)
@@ -4663,6 +4991,11 @@ model Modifier {
   /// lee impreso. Opcional y NO único — varios extras comparten código (todos los sabores de
   /// «Agrega sabor» = P000622). Mismo formato que Product.sku.
   sku   String?
+
+  /// Cuántas veces se puede elegir ESTA opción en un grupo que deja repetir (`ModifierGroup.allowRepeat`), como el «max.» por opción
+  /// de Fudo y el «¿se puede elegir más de una vez?» por opción de Toast (encargo a508f4). null = hasta el máximo del grupo.
+  /// En un grupo sin repetir no cuenta: ahí cada opción va una vez.
+  maxQuantity Int?
 
   // Additional minutes this modifier adds to the booked service when selected.
   // Multiplied by the picked quantity in resolveModifierSelections. Null = no
@@ -9908,9 +10241,15 @@ model OrderDiscount {
   reparto          Json?
 
   // Flags
-  isComp      Boolean @default(false) // Was this a comp?
-  isAutomatic Boolean @default(false) // Applied automatically?
-  isManual    Boolean @default(false) // Applied manually at checkout?
+  isComp              Boolean @default(false) // Was this a comp?
+  isAutomatic         Boolean @default(false) // Applied automatically?
+  isManual            Boolean @default(false) // Applied manually at checkout?
+  // D19 (hz:e82938e1:D19): esta fila SUMÓ un uso a `Discount.currentUses` al aplicarse (descuento de cuenta del POS, Mesas). Quitarla
+  // lo devuelve. false = filas de antes del arreglo o de caminos que cuentan aparte (motor de la TPV, Mostrador): no se resta aquí.
+  usoContado          Boolean @default(false)
+  // D24 (hz:e82938e1:D24): la cuenta se ANULÓ sin cobrar y esta fila ya devolvió su uso (entonces `usoContado` pasa a false). Si la
+  // cuenta revive por dinero tardío, nadie lo vuelve a restar (ni la TPV al quitar el descuento, que resta por `discountId`).
+  usoDevueltoAlAnular Boolean @default(false)
 
   // Comp-specific
   compReason String? @db.Text
@@ -16594,6 +16933,11 @@ model CashDrawerSession {
 
   @@index([venueId])
   @@index([status])
+  // La B (soporte por WhatsApp, C8): las cajas de una sucursal que se abrieron o se cerraron en un día, o que siguen abiertas. Uno por
+  // cada rama con fecha; la de «sigue abierta» va por el único parcial `CashDrawerSession_venueId_open_key` (migración 20260827151634).
+  // Se crean CONCURRENTLY, cada uno en su migración (la tabla recibe una escritura en cada cobro en efectivo).
+  @@index([venueId, openedAt])
+  @@index([venueId, closedAt])
 }
 
 model CashDrawerEvent {
@@ -17488,6 +17832,11 @@ model AreaTicketLine {
   unitPrice            Decimal  @db.Decimal(12, 2)
   discountAmount       Decimal  @default(0) @db.Decimal(12, 2)
   appliedDiscountId    String?
+  /// D4 (18-nov-2026): motivo, comentario y quién aprobó el descuento (id de StaffVenue, foto sin llave foránea: al cobrar se usa
+  /// sólo si esa membresía sigue existiendo), congelados al emitir; la fila espejo los copia al cobrar.
+  discountReason         String?
+  discountReasonComment  String?
+  discountAuthorizedById String?
   taxAmount            Decimal  @db.Decimal(12, 2)
   total                Decimal  @db.Decimal(12, 2)
   notes                String?
@@ -20075,6 +20424,7 @@ model Session {
   deviceId        String?
   authMethod      AuthMethod
   parentSessionId String?
+  strongAuthAt    DateTime?
   createdAt       DateTime       @default(now())
   lastSeenAt      DateTime       @default(now())
   revokedAt       DateTime?
@@ -21095,7 +21445,7 @@ model OnlineOrderingSettings {
   /// Mismo formato `HorarioSemanal` de `delivery-channels/core/deliveryHours.service.ts`. NULL = sin restricción. Al crear la
   /// fila se precarga el horario de reservas si existe y es válido.
   hours              Json?
-  /// Último sondeo de la BANDEJA ABIERTA (cabecera `x-online-orders-tray: 1`): es el «latido» de presencia.
+  /// Último sondeo con la app A LA VISTA (cabecera `x-online-orders-tray: 1`; D662: el POS en cualquier pantalla): «latido» de presencia.
   lastInboxPollAt    DateTime?
   /// Tienda híbrida: ¿los pedidos nuevos esperan a que alguien los acepte? `true` (default) = como hasta hoy. `false` = pedir por
   /// QR / pagar en la barra sin aceptación (el pedido nace aceptado).

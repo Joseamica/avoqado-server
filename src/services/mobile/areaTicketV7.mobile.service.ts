@@ -15,6 +15,7 @@
  */
 
 import { createHash, randomInt } from 'node:crypto'
+import { esRechazoPorTopeEnVales } from '../shared/descuentoConTopeEnVales'
 import {
   AreaSettlementRoute,
   AreaTicketCheckoutStatus,
@@ -58,7 +59,7 @@ import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertOrderCancellableUnderLock, avisarOrdenCancelada, devolverCanjesDeVentaAnuladaEnTx } from '../shared/orderCancelGuard'
 import { buildItemDiscountRow, calculateDiscountCents } from '../shared/discount.service'
 import { comoJson, nuevoRepartoDirigido } from '../shared/repartoDescuento'
-import type { MotivoDeDescuento } from '../shared/motivoDelDescuento'
+import { motivoDelDescuento, type MotivoDeDescuento } from '../shared/motivoDelDescuento'
 import { externalRouteBlockers } from './areaTicketExternalCodes'
 import {
   buildOrderItemsData,
@@ -82,6 +83,9 @@ export interface AreaTicketLineInput {
   notes?: string | null
   modifierIds?: string[]
   discountId?: string | null
+  /** D4 (18-nov): motivo y comentario del descuento, como en Mostrador. Nunca rechaza: se recortan y se copian como texto. */
+  discountReason?: string | null
+  discountReasonComment?: string | null
 }
 
 export interface IssueAreaTicketInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy' | 'aprobacionDelDescuento'> {
@@ -637,7 +641,9 @@ function issueIntentFromInput(lines: AreaTicketLineInput[]) {
     quantity: quantity(normalized[index].quantity),
     weightKg: normalized[index].weightQuantity == null ? null : quantity(normalized[index].weightQuantity),
     notes: line.notes ?? null,
-    modifierIds: [...new Set(line.modifierIds ?? [])].sort(),
+    // Con repetidos (grupo que deja repetir, encargo a508f4): [X] y [X, X] son vales distintos. Un `Set` los igualaba y el
+    // reintento con la misma llave devolvía el vale viejo con un extra de menos.
+    modifierIds: [...(line.modifierIds ?? [])].sort(),
     discountId: line.discountId ?? null,
   }))
 }
@@ -649,13 +655,11 @@ function issueIntentFromTicket(ticket: any) {
     quantity: quantity(line.quantity),
     weightKg: line.weightKg == null ? null : quantity(line.weightKg),
     notes: line.notes ?? null,
-    modifierIds: [
-      ...new Set(
-        (Array.isArray(line.modifiersSnapshot) ? line.modifiersSnapshot : [])
-          .map((modifier: any) => modifier?.modifierId)
-          .filter((modifierId: unknown): modifierId is string => typeof modifierId === 'string'),
-      ),
-    ].sort(),
+    // Un renglón de la foto por vez elegida: los repetidos se conservan, igual que en la entrada.
+    modifierIds: (Array.isArray(line.modifiersSnapshot) ? line.modifiersSnapshot : [])
+      .map((modifier: any) => modifier?.modifierId)
+      .filter((modifierId: unknown): modifierId is string => typeof modifierId === 'string')
+      .sort(),
     discountId: line.appliedDiscountId ?? null,
   }))
 }
@@ -823,9 +827,14 @@ export async function buildReservationSpecs(
   ])
   const rawById = new Map(rawsDeFoto.map(r => [r.id, r]))
   const ligadoById = new Map(ligadosDeFoto.map(p => [p.id, p]))
+  // Una entrada por VEZ elegida (encargo a508f4): con «2 de Cochinita» se apartan dos porciones, como consume el cobro (un renglón
+  // por vez). Antes se recorría el catálogo (una fila por extra) y se apartaba una sola.
   const extrasDeLaLinea = (lineIndex: number) =>
-    modifiers
-      .filter(candidate => (inputs[lineIndex].modifierIds ?? []).includes(candidate.id))
+    (inputs[lineIndex].modifierIds ?? [])
+      .flatMap(id => {
+        const modifier = modifiers.find(candidate => candidate.id === id)
+        return modifier ? [modifier] : []
+      })
       .map(modifier => {
         const foto = snapshots[lineIndex]?.modifiersSnapshot?.find(m => m.modifierId === modifier.id)?.inventario
         if (!foto) return modifier
@@ -991,15 +1000,36 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
   const isExternal = fulfillmentArea.settlementRoute === AreaSettlementRoute.EXTERNAL
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
   const normalizedItems = normalizeIssueLines(input.lines)
-  const { itemsData, subtotal, itemDiscountTotal, modifierSkus, modifierInventory } = await buildOrderItemsData(
-    venueId,
-    normalizedItems,
-    fulfillmentAreaId,
-    undefined,
-    undefined,
-    input,
-  )
+  // 🔴 D11: un descuento con tope de usos no entra a un vale (`descuentoConTopeEnVales.ts`): lo revisa `buildOrderItemsData` con la
+  // misma lectura que calcula la rebaja, antes de validar el descuento y de escribir nada. La ruta EXTERNAL sigue con su propio rechazo.
+  // Si con esta llave ya hay un vale (el primer POST terminó mientras éste revisaba), se devuelve ése: la misma llave no da éxito y 400.
+  let construido: Awaited<ReturnType<typeof buildOrderItemsData>>
+  try {
+    construido = await buildOrderItemsData(
+      venueId,
+      normalizedItems,
+      fulfillmentAreaId,
+      undefined,
+      undefined,
+      input,
+      isExternal ? undefined : { sinDescuentosConTope: 'VALE' },
+    )
+  } catch (error) {
+    if (!esRechazoPorTopeEnVales(error)) throw error
+    const ganador = await prisma.areaTicket.findUnique({
+      where: { venueId_idempotencyKey: { venueId, idempotencyKey } },
+      include: ticketInclude,
+    })
+    if (!ganador) throw error
+    assertIssueIdempotencyMatch(ganador, input.lines)
+    return mapTicket(ganador)
+  }
+  const { itemsData, subtotal, itemDiscountTotal, modifierSkus, modifierInventory, discounts } = construido
   const snapshots = buildSnapshotLines(input.lines, itemsData, modifierSkus, modifierInventory)
+  // D4 (18-nov): el motivo del descuento se congela en el renglón (sólo si lleva descuento, como `buildOrderItemsData`).
+  const motivos = snapshots.map((snapshot, index) =>
+    snapshot.appliedDiscountId ? motivoDelDescuento(input.lines[index]?.discountReason, input.lines[index]?.discountReasonComment) : {},
+  )
   if (isExternal) assertExternalRouteIssuable(snapshots)
   const snapshotHash = canonicalSnapshotHash('MXN', snapshots)
   const total = new Prisma.Decimal(subtotal).sub(itemDiscountTotal)
@@ -1040,8 +1070,14 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
               expiresAt,
             },
           })
+          // D4: quién aprobó un descuento con «Requiere aprobación» = la sesión con permiso propio (aquí no hay PIN), como los sueltos.
+          const aprobo =
+            input.aprobacionDelDescuento && discounts.some(pideAprobacionDeGerente)
+              ? await membresiaDeLaSesion(tx, venueId, input.performedBy)
+              : null
           const createdLines: Array<{ id: string }> = []
-          for (const snapshot of snapshots) {
+          for (const [index, snapshot] of snapshots.entries()) {
+            const descuento = discounts.find(d => d.id === snapshot.appliedDiscountId)
             createdLines.push(
               await tx.areaTicketLine.create({
                 data: {
@@ -1057,6 +1093,9 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
                   unitPrice: new Prisma.Decimal(snapshot.unitPrice),
                   discountAmount: new Prisma.Decimal(snapshot.discountAmount),
                   appliedDiscountId: snapshot.appliedDiscountId,
+                  discountReason: motivos[index].reason ?? null,
+                  discountReasonComment: motivos[index].reasonComment ?? null,
+                  discountAuthorizedById: aprobo && pideAprobacionDeGerente(descuento) ? aprobo : null,
                   taxAmount: new Prisma.Decimal(snapshot.taxAmount),
                   total: new Prisma.Decimal(snapshot.total),
                   notes: snapshot.notes,
@@ -1718,6 +1757,9 @@ type RenglonDeValeCobrado = {
   total: Prisma.Decimal
   area: string
   emisor: string | null
+  /** D4: lo que el renglón del vale congeló al emitir (vacío / null en un vale viejo). */
+  motivo: MotivoDeDescuento
+  aprobador: string | null
 }
 
 /** Un renglón suelto de la caja, recién creado. */
@@ -1794,8 +1836,9 @@ function datosDeFilaDeLaVenta(orderId: string, f: FilaDeLaVenta): Prisma.OrderDi
 
 /**
  * Tarjeta na24531d: los renglones de VALE con descuento ganan su fila espejo al cobrarse, UNA por (descuento, área, quien emitió el
- * vale) (Codex r2 #2, r3 #5), dirigida a sus renglones con lo exacto de cada uno. Lo que el vale NO congeló no se inventa: quien lo dio es
- * el emisor (su membresía); quién lo APROBÓ no se sabe al cobrar, así que la fila no lleva `authorizedById`; el monto es el congelado y, si
+ * vale) (Codex r2 #2, r3 #5), y desde D4 (18-nov) también por el motivo, el comentario y quien aprobó, que el renglón congeló al emitir.
+ * Lo que el vale NO congeló no se inventa: quien lo dio es quien aprobó o, si nadie, el emisor (su membresía); un vale de antes de D4 sale
+ * sin motivo ni `authorizedById`; el monto es el congelado y, si
  * el catálogo ya no lo reproduce en algún renglón (el dueño lo editó entre emitir y cobrar), la fila va como importe fijo por la suma,
  * salvo que no quepa en `value` (Codex r2 #5). Un descuento borrado del catálogo deja la fila sin liga. Rebaja $0 ⇒ sin fila.
  */
@@ -1814,16 +1857,50 @@ async function crearEspejosDeLosVales(
       })
     : []
   const membresiaDe = new Map(membresias.map(m => [m.staffId, m.id]))
+  // D4: quien aprobó es una foto del id de su membresía (sin llave foránea); si la borraron entre emitir y cobrar, la fila va sin él.
+  const aprobadores = [...new Set(conDescuento.map(r => r.aprobador).filter((id): id is string => !!id))]
+  const vigentes = new Set(
+    aprobadores.length
+      ? (
+          await tx.staffVenue.findMany({
+            where: { venueId: p.venueId, id: { in: aprobadores } },
+            select: { id: true },
+            take: aprobadores.length,
+          })
+        ).map(m => m.id)
+      : [],
+  )
   const grupos = new Map<
     string,
-    { descuentoId: string; emisor: string | null; renglones: Array<{ id: string; cents: number; reproduce: boolean }> }
+    {
+      descuentoId: string
+      emisor: string | null
+      motivo: MotivoDeDescuento
+      aprobador: string | null
+      renglones: Array<{ id: string; cents: number; reproduce: boolean }>
+    }
   >()
   for (const r of conDescuento) {
     const cents = centavos(r.discountAmount)
     const catalogo = p.descuentos.get(r.appliedDiscountId!)
     const reproduce = catalogo != null && calculateDiscountCents(catalogo, centavos(r.total)) === cents
-    const llave = JSON.stringify([r.appliedDiscountId, r.area, r.emisor])
-    const grupo = grupos.get(llave) ?? { descuentoId: r.appliedDiscountId!, emisor: r.emisor, renglones: [] }
+    // D4: también por motivo, comentario y aprobador, como los sueltos: el reporte por motivo cuadra al centavo.
+    const aprobador = r.aprobador && vigentes.has(r.aprobador) ? r.aprobador : null
+    const llave = JSON.stringify([
+      r.appliedDiscountId,
+      r.area,
+      r.emisor,
+      r.motivo.reason ?? null,
+      r.motivo.reasonComment ?? null,
+      aprobador,
+    ])
+    const grupo = grupos.get(llave) ?? {
+      descuentoId: r.appliedDiscountId!,
+      emisor: r.emisor,
+      motivo: r.motivo,
+      aprobador,
+      renglones: [],
+    }
     grupo.renglones.push({ id: r.id, cents, reproduce })
     grupos.set(llave, grupo)
   }
@@ -1838,8 +1915,9 @@ async function crearEspejosDeLosVales(
     await tx.orderDiscount.create({
       data: datosDeFilaDeLaVenta(p.orderId, {
         discount,
-        appliedById: (grupo.emisor && membresiaDe.get(grupo.emisor)) || null,
-        motivo: {},
+        appliedById: grupo.aprobador ?? ((grupo.emisor && membresiaDe.get(grupo.emisor)) || null),
+        ...(grupo.aprobador ? { authorizedById: grupo.aprobador } : {}),
+        motivo: grupo.motivo,
         renglones: grupo.renglones,
       }),
     })
@@ -1961,16 +2039,30 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
   if (normalItems.length > 0 && settings?.allowMixedCart === false) {
     throw domainError(409, 'MIXED_CART_DISABLED', 'Este local no permite mezclar vales con productos de caja.')
   }
-  const normalBuild =
-    normalItems.length > 0
-      ? await buildOrderItemsData(venueId, normalItems, null, undefined, undefined, input)
-      : {
-          itemsData: [] as any[],
-          subtotal: 0,
-          itemDiscountTotal: 0,
-          discounts: [] as Array<{ id: string; [key: string]: any }>,
-          motivosPorRenglon: undefined,
-        }
+  // 🔴 D11: un descuento con tope de usos no entra a un suelto de la venta de vales; lo revisa `buildOrderItemsData` con la misma lectura
+  // que calcula la rebaja, antes de crear la orden (sin folio gastado). La venta no se arma y los vales siguen en la caja. Si con esta
+  // llave la venta ya quedó armada (el primer POST terminó mientras éste revisaba), se devuelve ésa (Codex D11 r4 #2).
+  const sueltos = async () => {
+    try {
+      return await buildOrderItemsData(venueId, normalItems, null, undefined, undefined, input, { sinDescuentosConTope: 'CAJA' })
+    } catch (error) {
+      if (!esRechazoPorTopeEnVales(error)) throw error
+      const ganador = await loadCheckout(venueId, sessionId)
+      if (ganador.orderId && ganador.materializeIdempotencyKey === idempotencyKey) return ganador
+      throw error
+    }
+  }
+  const construidoSueltos = normalItems.length > 0 ? await sueltos() : null
+  if (construidoSueltos && 'orderId' in construidoSueltos) return mapCheckout(construidoSueltos)
+  const normalBuild = construidoSueltos
+    ? construidoSueltos
+    : {
+        itemsData: [] as any[],
+        subtotal: 0,
+        itemDiscountTotal: 0,
+        discounts: [] as Array<{ id: string; [key: string]: any }>,
+        motivosPorRenglon: undefined,
+      }
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
   // Tarjeta na24531d: el catálogo que nombra la fila espejo de cada renglón de vale con descuento (fuera de la transacción).
   const descuentosDeValesDeLaSesion = await descuentosDeLosVales(venueId, session.tickets)
@@ -2077,7 +2169,16 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
                 },
                 select: { id: true, appliedDiscountId: true, discountAmount: true, total: true },
               })
-              renglonesDeVale.push({ ...renglon, area: ticket.fulfillmentAreaId, emisor: ticket.issuedByStaffId ?? null })
+              renglonesDeVale.push({
+                ...renglon,
+                area: ticket.fulfillmentAreaId,
+                emisor: ticket.issuedByStaffId ?? null,
+                motivo: {
+                  ...(line.discountReason ? { reason: line.discountReason } : {}),
+                  ...(line.discountReasonComment ? { reasonComment: line.discountReasonComment } : {}),
+                },
+                aprobador: line.discountAuthorizedById ?? null,
+              })
             }
           }
           const sueltos: RenglonSueltoCobrado[] = []
@@ -3762,18 +3863,20 @@ async function buildUnreservedAreaOrderInventoryDemands(
       }
       for (const recipeLine of item.product.recipe.lines) {
         if (recipeLine.isOptional) continue
-        const substitution =
+        // Cada SUSTITUCIÓN elegida del grupo ligado consume lo suyo (encargo a508f4, Codex r2 #1), igual que la venta normal
+        // (`deductStockForRecipe`) y la reserva al emitir. Antes sólo contaba la primera y la segunda opción quedaba sin descontar.
+        const substitutions =
           recipeLine.isVariable && recipeLine.linkedModifierGroupId
-            ? item.modifiers.find(
+            ? item.modifiers.filter(
                 candidate =>
                   candidate.modifier?.groupId === recipeLine.linkedModifierGroupId &&
                   candidate.modifier.inventoryMode === 'SUBSTITUTION' &&
                   candidate.modifier.rawMaterialId &&
                   candidate.modifier.quantityPerUnit,
               )
-            : undefined
-        if (substitution?.modifier) {
-          consumedSubstitutionModifierIds.add(substitution.modifier.id)
+            : []
+        if (substitutions.length > 0) {
+          for (const substitution of substitutions) consumedSubstitutionModifierIds.add(substitution.modifier!.id)
           continue
         }
         const perSale = convertUnit(recipeLine.quantity, recipeLine.unit, recipeLine.rawMaterial.unit)

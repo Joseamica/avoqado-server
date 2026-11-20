@@ -1,0 +1,178 @@
+{
+  "pagina": "tpv/reembolsos/reembolsar-cobro-pax",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 958,
+      "cita": "label = \"Pagos\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsScreen.kt",
+      "linea": 127,
+      "cita": "title = \"Historial de Pagos\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/components/PaymentDetailBottomSheet.kt",
+      "linea": 100,
+      "cita": "text = \"Detalle del Pago\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/components/PaymentDetailBottomSheet.kt",
+      "linea": 288,
+      "cita": "text = \"Procesar Reembolso\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/refund/presentation/RefundConfirmationScreen.kt",
+      "linea": 272,
+      "cita": "text = \"Reembolso parcial\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/refund/presentation/RefundConfirmationScreen.kt",
+      "linea": 300,
+      "cita": "label = { Text(\"Monto\") }"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2362,
+      "cita": "allowPartialRefund = BuildConfig.ENABLE_PAX_SDK"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/refund/presentation/RefundConfirmationScreen.kt",
+      "linea": 342,
+      "cita": "if (canKeepTip) {"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/refund/presentation/RefundConfirmationScreen.kt",
+      "linea": 377,
+      "cita": "text = \"Incluir propina en el reembolso\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/refund/presentation/RefundConfirmationScreen.kt",
+      "linea": 416,
+      "cita": "text = \"Motivo del Reembolso\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/refund/presentation/RefundConfirmationScreen.kt",
+      "linea": 529,
+      "cita": "text = \"Procesar Reembolso ${currencyFormatter.format(refundAmount)}\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1356,
+      "cita": "text = if (isRefund) \"Acerca o inserta la tarjeta para reembolso\" else \"Acerca o inserta la tarjeta\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/components/PaymentApprovedScreen.kt",
+      "linea": 136,
+      "cita": "text = if (isRefund) \"Reembolso Aprobado\" else \"Aprobado\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1778,
+      "cita": "Text(text = \"Listo\")"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2004,
+      "cita": "val popped = navController.safePopBackStack(NavRoute.Payments.route, inclusive = false)"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:refund",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsViewModel.kt",
+      "linea": 671
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Si la devolución de Blumon falla por red: «Sin conexión a internet.» con «Verifique su conexión e intente nuevamente.»",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 5047
+    },
+    {
+      "afirmacion": "Devolución hecha y no registrada: «La devolución SÍ se hizo…», en la cola de devoluciones, «se completará sola»",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 998
+    },
+    {
+      "afirmacion": "La cola de devoluciones escribe la fila aunque se cierre la pantalla",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/repository/RefundQueueRepositoryImpl.kt",
+      "linea": 31
+    },
+    {
+      "afirmacion": "Rechazo definitivo del servidor: «La devolución SÍ se hizo, pero el servidor la rechazó…» → supervisor",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 1010
+    },
+    {
+      "afirmacion": "Ni servidor ni cola: «…ni en este equipo). NO vuelvas a reembolsar. Avisa al supervisor…»",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 1022
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Pagos → detalle → nav:RefundConfirmation → nav:Payment en modo reembolso (PAX)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2543
+    },
+    {
+      "ruta": "Problema: sin permiso de reembolsos",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsViewModel.kt",
+      "linea": 689
+    },
+    {
+      "ruta": "Problema: efectivo",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsViewModel.kt",
+      "linea": 730
+    },
+    {
+      "ruta": "Problema: otro dispositivo",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payments/presentation/PaymentsViewModel.kt",
+      "linea": 719
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "aparato": "PAX A910S del laboratorio del Alien (serial 2841548417, terminal AVQD-2841548417 de Avoqado Full)",
+    "version": "2.16.0-sandbox (125), copia de QA com.jaac.avoqado_tpv.sandbox.soportewa compilada en v2.16.0 (031f14db), Blumon de pruebas, contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
+    "apkSha256": "001675e37809b69d6290341cf74f3601306fc9df2072f1dc0f271436710fc401",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-pax/1-historial-de-pagos.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-pax/2-detalle-del-pago.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-pax/3-procesar-reembolso.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-pax/4-reembolso-parcial-monto.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-pax/5-motivo-procesar-reembolso.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-pax/6-procesando-reembolso-contactless-grabacion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/reembolsos/reembolsar-cobro-pax/7-error-en-el-reembolso-tx024-sandbox.png"
+    ],
+    "filasCreadas": [],
+    "nota": "Se recorrieron los pasos 1-4 sobre el cobro de $10 (cmwmkf0qr00wnwayd27cr8j1e): *Pagos* → *Historial de Pagos* → *Detalle del Pago* → *Procesar Reembolso* → *Reembolso parcial* con *Monto* → *Motivo del Reembolso* → *Procesar Reembolso $10.00*. Al acercar la tarjeta de laboratorio (grabación: «Procesando reembolso contactless…»), Blumon de pruebas contesta «Error en el Reembolso — Esta transacción no puede ser cancelada.» (TX_024 conocido del sandbox, foto 7): *Reembolso Aprobado* (paso 6) no se puede alcanzar sin dinero real. No se creó reembolso: el pago sigue Completado."
+  },
+  "codex": {
+    "lote": 1,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

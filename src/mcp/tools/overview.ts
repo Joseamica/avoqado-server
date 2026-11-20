@@ -1,3 +1,4 @@
+import { dondeHoraRealEntre } from '@/services/shared/horaRealDelAparato'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { OrderStatus, PaymentStatus, ShiftStatus, TransactionStatus } from '@prisma/client'
@@ -53,12 +54,8 @@ export function registerOverviewTools(server: McpServer, scope: McpScope) {
       const [sales, tabs, lowStockItems, openShifts, reservationsToday, nextReservation] = await Promise.all([
         prisma.payment.aggregate({
           // Ventas, no dinero: la venta de tarjetas de regalo se cobra pero no es venta (lo pagado con su saldo sí).
-          where: {
-            ...base,
-            status: TransactionStatus.COMPLETED,
-            createdAt: { gte: dayStart, lte: dayEnd },
-            order: WHERE_ORDEN_SIN_TARJETAS,
-          },
+          // D4: por la hora real del cobro (la del aparato si se cobró sin internet), como el Resumen.
+          where: dondeHoraRealEntre({ ...base, status: TransactionStatus.COMPLETED, order: WHERE_ORDEN_SIN_TARJETAS }, dayStart, dayEnd),
           _sum: { amount: true, tipAmount: true },
           _count: { _all: true },
         }),

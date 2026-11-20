@@ -99,6 +99,7 @@ import { registerMasterCatalogTools } from './tools/masterCatalog'
 import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCatalogAccess.service'
 import { buildMcpInstructions } from './instructions'
 import { registerHelpTools } from './tools/help'
+import { registerSupportHelpTools } from './tools/supportHelp'
 import { motivoDeSesionInvalidada } from '@/utils/passwordChangeGuard'
 import { MCP_DIRECTORY_RESOURCE_URL, MCP_RESOURCE_URL } from './oauth/config'
 import type { McpProfile } from './directory/catalog'
@@ -121,6 +122,7 @@ export interface ToolRegistrationFlags {
  */
 export function registerAllTools(server: McpServer, scope: McpScope, flags: ToolRegistrationFlags): void {
   registerHelpTools(server, scope) // product guide for everyone; internal docs only when scope.isSuperAdmin
+  registerSupportHelpTools(server, scope)
   registerVenueTools(server, scope)
   registerVenueAdministrationTools(server, scope)
   registerSalesTools(server, scope)

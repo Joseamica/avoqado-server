@@ -1,0 +1,354 @@
+{
+  "pagina": "dashboard/plan/contratar-un-plan",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1340,
+      "cita": "title: t('sidebar:settingsMenu.title', { defaultValue: 'Configuración' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 36,
+      "cita": "\"title\": \"Configuración\""
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/SettingsLayout.tsx",
+      "linea": 87,
+      "cita": "? [{ to: 'billing', label: t('hub.items.billing'), icon: CreditCard, dataTour: 'settings-nav-billing' }]"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/settings.json",
+      "linea": 18,
+      "cita": "\"billing\": \"Plan y facturación\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/Billing/BillingLayout.tsx",
+      "linea": 29,
+      "cita": "{ to: `${basePath}/subscriptions`, label: t('tabs.plan') },"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 6,
+      "cita": "\"plan\": \"Plan\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 96,
+      "cita": "<span className=\"text-sm text-muted-foreground\">{t('plan.row.label')}</span>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 219,
+      "cita": "\"label\": \"Tu plan:\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 15,
+      "cita": "const TIERS: PlanTarget[] = ['FREE', 'PRO', 'PREMIUM']"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 104,
+      "cita": "\"name\": \"Pro\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 108,
+      "cita": "\"name\": \"Premium\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 123,
+      "cita": "{money(price.ivaAparte ? sinIva(price.amount) : price.amount)}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 133,
+      "cita": "{t('plan.row.features', { count: tierFeatureCount(props.grid.entries, tier) })}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 55,
+      "cita": "const showInterval = (origin.kind === 'NONE' || quedarseConLaPrueba) && !grandfathered && !props.classicRejected && selected !== 'FREE'"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 155,
+      "cita": "{t(`plan.billing.${value}`)}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 71,
+      "cita": "\"monthly\": \"Mensual\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 72,
+      "cita": "\"annual\": \"Anual\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Settings/Billing/plan/SelectionSummary.tsx",
+      "linea": 85,
+      "cita": "const title = model.target !== model.current ? t('plan.selection.titleChange') : t('plan.selection.title')"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 267,
+      "cita": "\"titleChange\": \"Tu cambio\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Settings/Billing/plan/SelectionSummary.tsx",
+      "linea": 40,
+      "cita": "return 'plan.selection.review'"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 283,
+      "cita": "\"review\": \"Revisar y pagar\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Settings/Billing/plan/planActions.ts",
+      "linea": 228,
+      "cita": "if (input.origin.kind === 'NONE' && !input.classicRejected) return { kind: 'CLASSIC_CHECKOUT', tier: input.target }"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Settings/Billing/plan/usePlanOperations.ts",
+      "linea": 70,
+      "cita": "window.location.href = url"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 126,
+      "cita": "toast({ title: t(sinCobroHoy ? 'plan.checkoutCardReceived' : 'plan.checkoutReceived') })"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/billing.json",
+      "linea": 143,
+      "cita": "\"checkoutReceived\": \"Pago recibido. Estamos activando tu plan…\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "billing:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 887
+    },
+    {
+      "permiso": "billing:read",
+      "archivo": "src/pages/Settings/SettingsLayout.tsx",
+      "linea": 86
+    },
+    {
+      "permiso": "billing:subscriptions:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 895
+    },
+    {
+      "permiso": "billing:subscriptions:manage",
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 61
+    },
+    {
+      "permiso": "billing:subscriptions:manage",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 108
+    },
+    {
+      "permiso": "billing:subscriptions:manage",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 2532
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: Plan y facturación sólo para administrador o dueño",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 884
+    },
+    {
+      "ruta": "Antes: en Gratis (sin suscripción) la píldora Gratis es el plan actual",
+      "archivo": "src/pages/Settings/Billing/plan/planActions.ts",
+      "linea": 50
+    },
+    {
+      "ruta": "Antes: insignia Tu plan actual",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 136
+    },
+    {
+      "ruta": "Antes: texto Tu plan actual",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 220
+    },
+    {
+      "ruta": "Problema: sin permiso, el aviso",
+      "archivo": "src/pages/Settings/Billing/plan/SelectionSummary.tsx",
+      "linea": 265
+    },
+    {
+      "ruta": "Problema: texto sin permiso",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 787
+    },
+    {
+      "ruta": "Problema: sin permiso el botón se apaga",
+      "archivo": "src/pages/Settings/Billing/plan/SelectionSummary.tsx",
+      "linea": 84
+    },
+    {
+      "ruta": "Problema: regresó sin pagar",
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 157
+    },
+    {
+      "ruta": "Problema: texto pago cancelado",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 88
+    },
+    {
+      "ruta": "Problema: el plan todavía no se activó al releer",
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 153
+    },
+    {
+      "ruta": "Problema: con una suelta que el plan absorbe, cambia de camino",
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 247
+    },
+    {
+      "ruta": "Problema: ese camino ya no es la compra clásica",
+      "archivo": "src/pages/Settings/Billing/plan/planActions.ts",
+      "linea": 228
+    },
+    {
+      "ruta": "Problema: desaparecen Mensual y Anual",
+      "archivo": "src/pages/Settings/Billing/plan/PlanRow.tsx",
+      "linea": 55
+    },
+    {
+      "ruta": "Problema: Cambio asistido abre el diálogo del asesor",
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 238
+    },
+    {
+      "ruta": "Problema: texto Hablar con un asesor",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 86
+    },
+    {
+      "ruta": "Problema: texto activación pendiente",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 144
+    },
+    {
+      "ruta": "Problema: el error del servidor sale en Tu cambio",
+      "archivo": "src/pages/Settings/Billing/Subscriptions.tsx",
+      "linea": 212
+    },
+    {
+      "ruta": "Problema: el aviso en rojo",
+      "archivo": "src/pages/Settings/Billing/plan/SelectionSummary.tsx",
+      "linea": 196
+    },
+    {
+      "ruta": "Problema: con un plan pagado el cambio puede ser asistido",
+      "archivo": "src/pages/Settings/Billing/plan/planActions.ts",
+      "linea": 230
+    },
+    {
+      "ruta": "Problema: botón Cambio asistido",
+      "archivo": "src/pages/Settings/Billing/plan/SelectionSummary.tsx",
+      "linea": 39
+    },
+    {
+      "ruta": "Problema: texto Cambio asistido",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 285
+    },
+    {
+      "ruta": "Problema: nota del cambio asistido",
+      "archivo": "src/pages/Settings/Billing/plan/SelectionSummary.tsx",
+      "linea": 185
+    },
+    {
+      "ruta": "Problema: texto de la nota",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 287
+    },
+    {
+      "ruta": "Problema: el asistido abre hablar con un asesor",
+      "archivo": "src/components/billing/PlanUpgradeDialog.tsx",
+      "linea": 23
+    },
+    {
+      "ruta": "Problema: texto del asistido",
+      "archivo": "src/locales/es/billing.json",
+      "linea": 85
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3000 (develop)",
+    "fecha": "2026-11-12",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/contratar-un-plan/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/contratar-un-plan/2.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/contratar-un-plan/3.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/contratar-un-plan/4.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/contratar-un-plan/5.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/contratar-un-plan/6.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/contratar-un-plan/7.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/contratar-un-plan/8.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/contratar-un-plan/9.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/contratar-un-plan/10.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/contratar-un-plan/11.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/contratar-un-plan/12.png"
+    ],
+    "filasCreadas": [
+      "Venue cmtwfpl5o06h2c996oa8cr2gk (Avoqado Empty) — cambia stripeCustomerId a cus_VcQc4BkGnWmYXs: cliente de Stripe DE PRUEBA creado al tocar *Revisar y pagar*",
+      "Stripe en modo de prueba (fuera de av-db-25): 3 sesiones de pago cs_test_… (2 sin pagar, vencen solas) y una suscripción Pro pagada con la tarjeta de prueba 4242 4242 4242 4242"
+    ],
+    "nota": "Avoqado Empty (Gratis), OWNER del seed, Stripe EN MODO DE PRUEBA (sesión cs_test_ y la marca «Entorno de prueba» en la página de pago; el guion se detenía si no). Pasos 1-3 iguales al recorrido 1. Paso 4: *Revisar y pagar* abrió la página de pago de Stripe («Suscríbete a Plan Avoqado Pro», MXN 1,158.84 por mes); con la tarjeta de prueba 4242 se tocó *Suscribirse* y Stripe regresó a la dirección de vuelta del SERVIDOR (su FRONTEND_URL apunta al panel del 5173, de otra conversación: el guion la bloqueó y la abrió igual en el 5181). Al volver salió «Pago recibido. Estamos activando tu plan…» y luego «Tu pago se registró…» con *Gratis* todavía en *Tu plan actual*: el plan lo da el aviso (webhook) checkout.session.completed de Stripe, que no llega a este servidor local. Eso es justo el problema que la página ya explica («no vuelvas a pagar: pide que lo revise una persona»). No se fingió el aviso."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

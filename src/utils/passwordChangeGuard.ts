@@ -26,6 +26,7 @@
  * consulta a la base a CADA request autenticado del dashboard y de las TPV.
  */
 import prisma from './prismaClient'
+import type { Prisma } from '@prisma/client'
 import logger from '../config/logger'
 import { revokeAllSessionsForStaff } from '../services/auth/session.service'
 import { invalidateSession } from '../services/auth/sessionCache'
@@ -101,20 +102,24 @@ export function _limpiarCacheDeCambiosDeContrasena(): void {
   cache.clear()
 }
 
-async function ultimoCambio(staffId: string, opciones: { fresco?: boolean } = {}): Promise<Corte | null> {
+async function ultimoCambio(
+  staffId: string,
+  opciones: { fresco?: boolean; db?: Pick<Prisma.TransactionClient, 'staff'> } = {},
+): Promise<Corte | null> {
   const ahora = Date.now()
   const enCache = cache.get(staffId)
   // `fresco`: las concesiones diferidas (canje de código/refresh del MCP, enlaces) NO pueden fiarse de
   // una caché de 30 s: en esa ventana, tras recuperar la cuenta, un refresh viejo rotaba en uno nuevo
   // con fecha posterior al corte y sobrevivía para siempre (Codex ronda 7, P1).
-  if (!opciones.fresco && enCache && enCache.expira > ahora) return enCache.corte
+  if (!opciones.db && !opciones.fresco && enCache && enCache.expira > ahora) return enCache.corte
 
-  const staff = await prisma.staff.findUnique({
+  const staff = await (opciones.db ?? prisma).staff.findUnique({
     where: { id: staffId },
     select: { lastPasswordReset: true, sessionsRevokedAt: true },
   })
   const corte = corteEfectivo(staff?.lastPasswordReset, staff?.sessionsRevokedAt)
-  cache.set(staffId, { corte, expira: ahora + TTL_MS })
+  // An uncommitted transaction must neither borrow nor publish the process cache.
+  if (!opciones.db) cache.set(staffId, { corte, expira: ahora + TTL_MS })
 
   // La cache crece con los usuarios activos, no sin limite; aun asi se poda
   // cuando se pasa de un tamano razonable para un proceso.
@@ -174,12 +179,13 @@ export function emisionDelToken(token: { iat?: number; emitidoMs?: unknown }): D
 export async function motivoDeConcesionInvalidada(
   staffId: string | undefined,
   emitida: Date | number | undefined,
+  db?: Pick<Prisma.TransactionClient, 'staff'>,
 ): Promise<MotivoDeCorte | null> {
   if (!staffId) return 'SESSIONS_REVOKED'
   const emitidaMs = emitida instanceof Date ? emitida.getTime() : typeof emitida === 'number' ? emitida * 1000 : NaN
   if (!Number.isFinite(emitidaMs)) return 'SESSIONS_REVOKED'
   try {
-    const corte = await ultimoCambio(staffId, { fresco: true })
+    const corte = await ultimoCambio(staffId, { fresco: true, db })
     return corte && emitidaMs <= corte.fecha.getTime() ? corte.motivo : null
   } catch {
     return 'SESSIONS_REVOKED'

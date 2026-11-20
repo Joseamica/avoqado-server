@@ -388,9 +388,11 @@ export async function assertLegacyProductReferencesForVenue(
   // WHY: Product FKs are legacy single-column relations. Validate their tenant
   // ownership after the Venue fence and in the Product transaction so a
   // foreign category/print station cannot be linked across venues.
+  // Categoría eliminada (19-nov): tampoco recibe productos (el dueño ya no la ve). Si una alta gana la carrera al borrado, el
+  // trigger `menuCategoryReviveForLiveRow` la revive: nunca queda un producto vivo escondido.
   if (input.categoryId !== undefined) {
     const category = await tx.menuCategory.findFirst({
-      where: { id: input.categoryId, venueId: input.venueId },
+      where: { id: input.categoryId, venueId: input.venueId, deletedAt: null },
       select: { id: true },
     })
     if (!category) throw new AppError('Categoría no encontrada', 404)

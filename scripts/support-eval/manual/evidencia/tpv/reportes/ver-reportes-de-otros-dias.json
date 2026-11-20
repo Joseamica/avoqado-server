@@ -1,0 +1,115 @@
+{
+  "pagina": "tpv/reportes/ver-reportes-de-otros-dias",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 935,
+      "cita": "label = \"Reportes\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt",
+      "linea": 461,
+      "cita": "text = \"Resumen\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/components/PeriodFilterChips.kt",
+      "linea": 69,
+      "cita": "label = \"7d\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/components/PeriodFilterChips.kt",
+      "linea": 76,
+      "cita": "label = \"30d\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/components/PeriodFilterChips.kt",
+      "linea": 83,
+      "cita": "label = \"90d\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/components/PeriodFilterChips.kt",
+      "linea": 90,
+      "cita": "label = \"Personalizado\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/components/DateRangePickerDialog.kt",
+      "linea": 90,
+      "cita": "Text(\"Seleccionar fechas\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/components/DateRangePickerDialog.kt",
+      "linea": 165,
+      "cita": "Text(\"Confirmar\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt",
+      "linea": 472,
+      "cita": "text = \"Historial\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt",
+      "linea": 1059,
+      "cita": "onClick = { onPeriodClick(period) }"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 2221,
+      "cita": "navController.navigate(NavRoute.HistoricalPeriodDetail.route)"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "shifts:read",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 1748
+    },
+    {
+      "permiso": "tpv-reports:read",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 1872
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Rama Historial: pide el historial al SERVIDOR, que exige tpv-reports:read (T11-4: va en el texto del paso 4, no en requiredPermissions)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/data/repository/ReportsRepositoryImpl.kt",
+      "linea": 290
+    },
+    {
+      "ruta": "Rama Historial: el permiso en el SERVIDOR",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 1872
+    },
+    {
+      "ruta": "Desde 2.15.0 los otros días, la comparación y el Historial ya no piden plan (antes, Plan Pro: d3d38e8b)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/reports/presentation/ReportsScreen.kt",
+      "linea": 155
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 5,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -1,7 +1,12 @@
 import { DiscountScope, DiscountType, Prisma, StaffRole, TerminalStatus, TerminalType } from '@prisma/client'
 
 import { getDiscountStats } from '@/services/dashboard/discount.dashboard.service'
-import { getCustomerDiscounts, getEligibleDiscounts, removeDiscountFromOrder } from '@/services/dashboard/discountEngine.service'
+import {
+  applyDiscountToOrder,
+  getCustomerDiscounts,
+  getEligibleDiscounts,
+  removeDiscountFromOrder,
+} from '@/services/dashboard/discountEngine.service'
 import { listarDescuentosAplicados } from '@/services/dashboard/descuentosAplicados.service'
 import { listarMisDescuentos } from '@/services/public/customerPortal.public.service'
 import { getAvailableDiscounts } from '@/services/tpv/discount.tpv.service'
@@ -12,6 +17,8 @@ import {
   issueAreaTicket,
   materializeAreaTicketCheckout,
 } from '@/services/mobile/areaTicketV7.mobile.service'
+import { getOrder as getOrderDelPos } from '@/services/mobile/order.mobile.service'
+import { getOrder as getOrderDeLaTpv } from '@/services/tpv/order.tpv.service'
 import prisma from '@/utils/prismaClient'
 import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
@@ -224,8 +231,8 @@ describe('Vales V7 — los descuentos del cobro salen en «Descuentos» (fila es
     expect(d10Vale.type).toBe('PERCENTAGE')
     expect(papas).toMatchObject({ discountId: d10Id, reason: 'Cliente frecuente', authorizedById: null })
     expect(d10Vale).toMatchObject({ discountId: d10Id, reason: null, authorizedById: null })
-    // Quién aprobó en el área no se congela al emitir: la fila no lo inventa (lo dio el emisor, `appliedById`).
-    expect(gerente).toMatchObject({ discountId: dGerenteId, reason: null, authorizedById: null })
+    // D4 (18-nov): quién aprobó en el área se congela al emitir (la sesión con permiso propio) y la fila lo copia.
+    expect(gerente).toMatchObject({ discountId: dGerenteId, reason: null, authorizedById: staffVenueId })
 
     // Usos como antes del arreglo: el cobro de vales no sube el contador.
     const usos = await prisma.discount.findMany({ where: { venueId }, select: { currentUses: true }, take: 10 })
@@ -245,6 +252,8 @@ describe('Vales V7 — los descuentos del cobro salen en «Descuentos» (fila es
     expect((await getEligibleDiscounts(venueId, customerId)).map(d => d.id)).toContain(d10Id)
     expect((await getCustomerDiscounts(venueId, customerId)).map(d => d.id)).toContain(d10Id)
     expect((await listarMisDescuentos(venueId, customerId, {})).items.map(d => d.nombre)).toContain('10 % producto')
+    // D11 (18-nov): un descuento con tope de usos ya no entra a un vale; se le quita el tope para que las pruebas siguientes emitan con él.
+    await prisma.discount.update({ where: { id: d10Id }, data: { maxUsesPerCustomer: null } })
 
     // «Ya aplicado» tampoco las cuenta: la TPV sigue ofreciendo el 10 % en esta cuenta, como antes del arreglo.
     expect((await getAvailableDiscounts(venueId, orderId)).map(d => d.id)).toContain(d10Id)
@@ -273,5 +282,198 @@ describe('Vales V7 — los descuentos del cobro salen en «Descuentos» (fila es
     expect(
       (await prisma.discount.findMany({ where: { venueId }, select: { currentUses: true }, take: 10 })).map(u => u.currentUses),
     ).toEqual([0, 0])
+  })
+
+  // D4 (tarjeta hz:e82938e1:D4, 18-nov): el motivo y quién aprobó llegan desde la tablet. El renglón del vale los congela al emitir y la
+  // fila espejo los copia al cobrar, agrupando también por ellos; un renglón sin motivo sale como antes («Sin motivo»).
+  it('D4: el motivo, su comentario y quien aprobó se congelan en el vale y llegan a «Descuentos»', async () => {
+    const vale = await issueAreaTicket(venueId, {
+      idempotencyKey: `d4-vale-${suffix}`,
+      deviceUid: issueDeviceUid,
+      staffId,
+      performedBy: staffId,
+      aprobacionDelDescuento: {},
+      lines: [
+        {
+          clientLineId: `d4-a-${suffix}`,
+          productId: jamonId,
+          quantity: '1',
+          discountId: d10Id,
+          discountReason: '  Cliente   frecuente ',
+          discountReasonComment: 'Viene diario',
+        },
+        { clientLineId: `d4-b-${suffix}`, productId: jamonId, quantity: '1', discountId: d10Id },
+        { clientLineId: `d4-c-${suffix}`, productId: jamonId, quantity: '1', discountId: dGerenteId, discountReason: 'Producto dañado' },
+        { clientLineId: `d4-d-${suffix}`, productId: papasId, quantity: '1', discountReason: 'Sin descuento no se guarda' },
+      ] as any,
+    })
+    const lineas = await prisma.areaTicketLine.findMany({
+      where: { areaTicket: { code: vale.code, venueId } },
+      select: { clientLineId: true, discountReason: true, discountReasonComment: true, discountAuthorizedById: true },
+      take: 10,
+    })
+    const linea = (id: string) => lineas.find(l => l.clientLineId === `${id}-${suffix}`)!
+    expect(linea('d4-a')).toMatchObject({
+      discountReason: 'Cliente frecuente',
+      discountReasonComment: 'Viene diario',
+      discountAuthorizedById: null,
+    })
+    expect(linea('d4-b')).toMatchObject({ discountReason: null, discountReasonComment: null, discountAuthorizedById: null })
+    expect(linea('d4-c')).toMatchObject({ discountReason: 'Producto dañado', discountAuthorizedById: staffVenueId })
+    expect(linea('d4-d')).toMatchObject({ discountReason: null, discountReasonComment: null, discountAuthorizedById: null })
+
+    // La misma llave otra vez: el mismo vale, sin renglones nuevos.
+    const otraVez = await issueAreaTicket(venueId, {
+      idempotencyKey: `d4-vale-${suffix}`,
+      deviceUid: issueDeviceUid,
+      staffId,
+      performedBy: staffId,
+      aprobacionDelDescuento: {},
+      lines: [
+        { clientLineId: `d4-a-${suffix}`, productId: jamonId, quantity: '1', discountId: d10Id },
+        { clientLineId: `d4-b-${suffix}`, productId: jamonId, quantity: '1', discountId: d10Id },
+        { clientLineId: `d4-c-${suffix}`, productId: jamonId, quantity: '1', discountId: dGerenteId },
+        { clientLineId: `d4-d-${suffix}`, productId: papasId, quantity: '1' },
+      ],
+    })
+    expect(otraVez.code).toBe(vale.code)
+    expect(await prisma.areaTicketLine.count({ where: { areaTicket: { code: vale.code, venueId } } })).toBe(4)
+
+    const caja = await createAreaTicketCheckout(venueId, { idempotencyKey: `d4-caja-${suffix}`, deviceUid: checkoutDeviceUid, staffId })
+    await addTicketToCheckout(venueId, caja.id, vale.code, { idempotencyKey: `d4-claim-${suffix}`, deviceUid: checkoutDeviceUid, staffId })
+    const materializada = await materializeAreaTicketCheckout(venueId, caja.id, {
+      idempotencyKey: `d4-materializar-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+      performedBy: staffId,
+      source: 'AVOQADO_ANDROID' as const,
+      normalItems: [{ productId: papasId, quantity: 1, discountId: d10Id, discountReason: 'Cliente frecuente' }],
+    })
+    const orderId = materializada.order!.id
+
+    const filas = await prisma.orderDiscount.findMany({
+      where: { orderId },
+      select: {
+        discountId: true,
+        amount: true,
+        reason: true,
+        reasonComment: true,
+        authorizedById: true,
+        appliedById: true,
+        appliedToItemIds: true,
+      },
+      orderBy: [{ amount: 'asc' }, { id: 'asc' }],
+      take: 10,
+    })
+    // Vale: 10 % con motivo y comentario · 10 % sin motivo · 20 % aprobado con motivo. Más el suelto con motivo.
+    expect(filas).toHaveLength(4)
+    expect(filas.reduce((s, f) => s.add(f.amount), new Prisma.Decimal(0)).toFixed(2)).toBe('45.00')
+    const conComentario = filas.find(f => f.reasonComment === 'Viene diario')!
+    expect(conComentario).toMatchObject({ discountId: d10Id, reason: 'Cliente frecuente', authorizedById: null, appliedById: staffVenueId })
+    expect(conComentario.appliedToItemIds).toHaveLength(1)
+    const sinMotivo = filas.filter(f => f.reason === null)
+    expect(sinMotivo).toHaveLength(1)
+    expect(sinMotivo[0]).toMatchObject({ discountId: d10Id, authorizedById: null })
+    expect(filas.find(f => f.discountId === dGerenteId)).toMatchObject({
+      reason: 'Producto dañado',
+      reasonComment: null,
+      authorizedById: staffVenueId,
+      appliedById: staffVenueId,
+    })
+    expect(filas.filter(f => f.reason === 'Cliente frecuente' && f.reasonComment === null)).toHaveLength(1) // el suelto
+
+    // «Descuentos» del DASHBOARD (y el MCP) agrupa por el motivo que llegó desde la tablet.
+    const reporte = await listarDescuentosAplicados(venueId)
+    const motivos = Object.fromEntries(reporte.porMotivo.map(g => [g.reason ?? 'SIN_MOTIVO', g.amount]))
+    expect(motivos).toMatchObject({ 'Cliente frecuente': 15, 'Producto dañado': 20, SIN_MOTIVO: 10 })
+  })
+
+  // D4 (Codex r1-r4): quien aprobó es una foto del id de su membresía, sin llave foránea. Si la borran para siempre entre emitir y
+  // cobrar, el cobro sigue y la fila va sin aprobador (como `OrderDiscount`, que la deja en NULL), dada por el emisor del vale.
+  it('D4: si borran la membresía de quien aprobó antes de cobrar, el cobro sigue y la fila va sin aprobador', async () => {
+    const otra = await prisma.staff.create({
+      data: { email: `vales-espejo-gerente-${suffix}@example.com`, firstName: 'Gerente', lastName: 'Temporal' },
+    })
+    const membresia = await prisma.staffVenue.create({ data: { staffId: otra.id, venueId, role: StaffRole.MANAGER } })
+    const vale = await issueAreaTicket(venueId, {
+      idempotencyKey: `d4-borrada-${suffix}`,
+      deviceUid: issueDeviceUid,
+      staffId,
+      performedBy: otra.id,
+      aprobacionDelDescuento: {},
+      lines: [{ clientLineId: `d4-borrada-${suffix}`, productId: jamonId, quantity: '1', discountId: dGerenteId }],
+    })
+    expect(
+      (await prisma.areaTicketLine.findFirstOrThrow({ where: { areaTicket: { code: vale.code, venueId } } })).discountAuthorizedById,
+    ).toBe(membresia.id)
+    await prisma.staffVenue.delete({ where: { id: membresia.id } })
+
+    const caja = await createAreaTicketCheckout(venueId, {
+      idempotencyKey: `d4-borrada-caja-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+    })
+    await addTicketToCheckout(venueId, caja.id, vale.code, {
+      idempotencyKey: `d4-borrada-claim-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+    })
+    const materializada = await materializeAreaTicketCheckout(venueId, caja.id, {
+      idempotencyKey: `d4-borrada-materializar-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+      performedBy: staffId,
+      source: 'AVOQADO_ANDROID' as const,
+    })
+    const filas = await prisma.orderDiscount.findMany({ where: { orderId: materializada.order!.id }, take: 5 })
+    expect(filas).toHaveLength(1)
+    expect(filas[0]).toMatchObject({ discountId: dGerenteId, authorizedById: null, appliedById: staffVenueId })
+    expect(filas[0].amount.toFixed(2)).toBe('20.00')
+    await prisma.staff.delete({ where: { id: otra.id } })
+  })
+
+  // D15 (pizarrón hz:e82938e1:D15, 18-nov): Mesas de la TPV y de ANDROID/WINDOWS pintan en gris el «Quitar» de la rebaja fija. El
+  // detalle de la cuenta de las dos cajas dice cuál es (`congeladoPorVales`), con la misma marca del candado; una rebaja que la caja da
+  // después no la lleva. El `reparto` no viaja.
+  it('D15: el detalle de la cuenta del POS y de la TPV marca congeladoPorVales sólo en las rebajas fijas del cobro de vales', async () => {
+    const vale = await issueAreaTicket(venueId, {
+      idempotencyKey: `d15-vale-${suffix}`,
+      deviceUid: issueDeviceUid,
+      staffId,
+      performedBy: staffId,
+      lines: [{ clientLineId: `d15-jamon-${suffix}`, productId: jamonId, quantity: '1', discountId: d10Id }],
+    })
+    const caja = await createAreaTicketCheckout(venueId, { idempotencyKey: `d15-caja-${suffix}`, deviceUid: checkoutDeviceUid, staffId })
+    await addTicketToCheckout(venueId, caja.id, vale.code, { idempotencyKey: `d15-claim-${suffix}`, deviceUid: checkoutDeviceUid, staffId })
+    const materializada = await materializeAreaTicketCheckout(venueId, caja.id, {
+      idempotencyKey: `d15-materializar-${suffix}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+      performedBy: staffId,
+      source: 'AVOQADO_ANDROID' as const,
+      normalItems: [{ productId: papasId, quantity: 1, discountId: d10Id }],
+    })
+    const orderId = materializada.order!.id
+    // Codex r4 #3: una rebaja de CUENTA del catálogo que la caja da después, por el camino real (el motor de la TPV), sin la marca.
+    const delCatalogo = await prisma.discount.create({
+      data: { venueId, name: 'Cliente frecuente D15', type: DiscountType.FIXED_AMOUNT, value: new Prisma.Decimal(1), scope: DiscountScope.ORDER },
+    })
+    await applyDiscountToOrder(orderId, delCatalogo.id, staffVenueId, undefined, venueId)
+    const deCuenta = await prisma.orderDiscount.findFirstOrThrow({ where: { orderId, discountId: delCatalogo.id } })
+
+    const delPos = await getOrderDelPos(venueId, orderId)
+    const marcasPos = Object.fromEntries(delPos.discounts.map(d => [d.id, d.congeladoPorVales]))
+    expect(Object.values(marcasPos).filter(Boolean)).toHaveLength(2) // la del vale y la del suelto
+    expect(marcasPos[deCuenta.id]).toBe(false)
+
+    const deLaTpv: any = await getOrderDeLaTpv(venueId, orderId)
+    const marcasTpv = Object.fromEntries(deLaTpv.orderDiscounts.map((d: any) => [d.id, d.congeladoPorVales]))
+    expect(marcasTpv).toEqual(marcasPos)
+    expect(deLaTpv.orderDiscounts.every((d: any) => !('reparto' in d))).toBe(true)
+
+    // La rebaja normal se quita como hoy y las dos fijas siguen ahí, marcadas.
+    await removeDiscountFromOrder(orderId, deCuenta.id, staffId, venueId)
+    const despues = await getOrderDelPos(venueId, orderId)
+    expect(despues.discounts.map(d => d.congeladoPorVales)).toEqual([true, true])
   })
 })

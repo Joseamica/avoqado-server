@@ -1,0 +1,175 @@
+{
+  "pagina": "android/cobro/dividir-la-cuenta",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 300,
+      "cita": "contentDescription = \"Opciones de sección\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 312,
+      "cita": "text = { Text(\"Dividir cuenta\") },"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 148,
+      "cita": "text = \"Dividir importe\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 138,
+      "cita": "title = \"Por producto\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 146,
+      "cita": "title = \"Partes iguales\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 152,
+      "cita": "title = \"Monto personalizado\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 329,
+      "cita": "text = \"Confirmar selección\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 381,
+      "cita": "text = \"Número de personas\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 461,
+      "cita": "text = \"Dividir en $parts partes\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 518,
+      "cita": "label = { Text(\"Monto a cobrar\") },"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 562,
+      "cita": "text = \"Cobrar ${formatMoney(amountCents / 100.0)}\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1951,
+      "cita": "val cobro = cartViewModel.aplicarCobroConfirmado("
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
+      "linea": 2001,
+      "cita": "addCustomAmount(name = \"Saldo pendiente\", amountCents = remainingBalanceCents)"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
+      "linea": 1988,
+      "cita": "paidItemIds.forEach { removeItem(it) }"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 192,
+      "cita": "text = \"Venta nueva\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 971
+    },
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1918
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Fuera de Mesas, el «⋯ Dividir cuenta» sin conexión se detiene con DIVIDIR_SIN_CONEXION",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 916
+    },
+    {
+      "afirmacion": "«Dividir importe» también se detiene sin conexión",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2093
+    },
+    {
+      "afirmacion": "Texto «Dividir necesita conexión con Avoqado…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
+      "linea": 384
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Problema: «Por producto» sólo con más de un renglón",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2162
+    },
+    {
+      "ruta": "Problema: con membresía no se divide",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 914
+    },
+    {
+      "ruta": "Problema: texto de la membresía",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2335
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "Sunmi D3 del laboratorio del Alien (serial D40625BRJ0469)",
+    "version": "2.25.42-dev (70), copia de QA com.avoqado.pos.soportewa compilada en v2.25.42 (843c15ae), contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
+    "apkSha256": "c109312a1a4e02448e2c7ab10a8a2c7a5b57920868f2190b3b969a6ed19e5d34",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dividir-la-cuenta/1-opciones-de-seccion-dividir-cuenta.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dividir-la-cuenta/10-resto-cobrado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dividir-la-cuenta/2-modos.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dividir-la-cuenta/3-por-producto-confirmar-seleccion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dividir-la-cuenta/4-cobra-esa-parte.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dividir-la-cuenta/5-parte-cobrada.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dividir-la-cuenta/6-lo-que-falta-en-el-carrito.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dividir-la-cuenta/7-un-renglon-sin-por-producto.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dividir-la-cuenta/8-partes-iguales.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dividir-la-cuenta/9-monto-personalizado.png"
+    ],
+    "filasCreadas": [
+      "Order cmwmnljg3017qwayd4jom2dqc — ORD-1795038536402, dividida por producto",
+      "Payment cmwmnljpx017vwayd2rzcjhoh — $20.00 CASH (Agua)",
+      "Payment cmwmnqfjr018bwaydmq9ohm0j — $30.00 CASH (Café)"
+    ],
+    "nota": "Carrito Agua $20 + Café $30 → *Opciones de sección* → *Dividir cuenta* → *Por producto*, *Partes iguales*, *Monto personalizado* → *Por producto*: marcar Agua → *Confirmar selección* → cobro de $20 en efectivo → la pantalla final sólo ofrece *Venta nueva*; al tocarla, el carrito trae lo que falta (Café, *Cobrar $30.00*). Con un solo renglón no sale *Por producto* (foto 7); en *Dividir importe* se ven *Partes iguales* (*Número de personas*, *Dividir en 2 partes*) y *Monto personalizado* (*Monto a cobrar*, *Cobrar …*). El resto se cobró en efectivo. CORREGIDA: el paso 6 ahora dice que se toca *Venta nueva* para volver al carrito con lo que falta."
+  },
+  "codex": {
+    "lote": 2,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

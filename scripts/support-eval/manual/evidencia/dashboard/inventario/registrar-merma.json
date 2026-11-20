@@ -1,0 +1,220 @@
+{
+  "pagina": "dashboard/inventario/registrar-merma",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1213,
+      "cita": "title: t('sidebar:routes.inventory'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 155,
+      "cita": "\"inventory\": \"Inventario\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 421,
+      "cita": "title: 'Ingredientes',"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 1022,
+      "cita": "{ path: 'ingredients', element: <RawMaterials /> }, // Ingredients = Raw Materials"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Inventory/RawMaterials.tsx",
+      "linea": 819,
+      "cita": "<MoreHorizontal className=\"h-4 w-4\" />"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Inventory/RawMaterials.tsx",
+      "linea": 851,
+      "cita": "{t('rawMaterials.logWaste', 'Registrar merma')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 71,
+      "cita": "\"logWaste\": \"Registrar merma\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Inventory/components/WasteLogDialog.tsx",
+      "linea": 125,
+      "cita": "<Label htmlFor=\"wasteReason\">{t('waste.reason')} *</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 942,
+      "cita": "\"reason\": \"Motivo de la merma\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Inventory/components/WasteLogDialog.tsx",
+      "linea": 130,
+      "cita": "<Label htmlFor=\"quantity\">{t('waste.quantityWasted')} *</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 945,
+      "cita": "\"quantityWasted\": \"Cantidad mermada\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 80,
+      "cita": "\"currentStock\": \"Stock Actual\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Inventory/components/WasteLogDialog.tsx",
+      "linea": 108,
+      "cita": "<p className=\"text-sm text-muted-foreground\">{t('waste.afterWaste')}</p>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 948,
+      "cita": "\"afterWaste\": \"Después de la merma\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Inventory/components/WasteLogDialog.tsx",
+      "linea": 181,
+      "cita": "<Label htmlFor=\"note\">{t('waste.notes')}</Label>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 951,
+      "cita": "\"notes\": \"Nota\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Inventory/components/WasteLogDialog.tsx",
+      "linea": 193,
+      "cita": "{t('waste.logWaste')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 954,
+      "cita": "\"logWaste\": \"Registrar merma\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Inventory/components/useWasteSubmission.ts",
+      "linea": 84,
+      "cita": "title: t('waste.logged'),"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 955,
+      "cita": "\"logged\": \"Merma registrada\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "inventory:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 990
+    },
+    {
+      "permiso": "inventory:adjust",
+      "archivo": "src/pages/Inventory/RawMaterials.tsx",
+      "linea": 841
+    },
+    {
+      "permiso": "inventory:adjust",
+      "archivo": "avoqado-server/src/routes/dashboard/inventory.routes.ts",
+      "linea": 326
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "INVENTORY_TRACKING",
+      "archivo": "src/pages/Inventory/RawMaterials.tsx",
+      "linea": 914
+    },
+    {
+      "featureCode": "INVENTORY_TRACKING",
+      "archivo": "avoqado-server/src/routes/dashboard/inventory.routes.ts",
+      "linea": 118
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Paso 5: la merma va al ajuste de existencias del ingrediente",
+      "archivo": "src/pages/Inventory/components/WasteLogDialog.tsx",
+      "linea": 46
+    },
+    {
+      "ruta": "Problema: apagado sin motivo",
+      "archivo": "src/pages/Inventory/components/WasteLogDialog.tsx",
+      "linea": 190
+    },
+    {
+      "ruta": "Problema: más de lo que hay",
+      "archivo": "src/pages/Inventory/components/WasteLogDialog.tsx",
+      "linea": 161
+    },
+    {
+      "ruta": "Problema: texto",
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 959
+    },
+    {
+      "ruta": "Problema: incierto = red o 5xx",
+      "archivo": "src/lib/inventoryWaste.ts",
+      "linea": 161
+    },
+    {
+      "ruta": "Problema: texto del incierto",
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 1061
+    },
+    {
+      "ruta": "Problema: aviso del incierto en la ventana",
+      "archivo": "src/pages/Inventory/components/WasteLogDialog.tsx",
+      "linea": 173
+    },
+    {
+      "ruta": "Problema: las mermas del panel se leen en Mermas",
+      "archivo": "avoqado-server/src/services/shared/inventoryWasteRead.service.ts",
+      "linea": 240
+    },
+    {
+      "ruta": "Problema: tipo de la merma del ingrediente",
+      "archivo": "src/pages/Inventory/components/WasteLogDialog.tsx",
+      "linea": 45
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 10,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -104,12 +104,14 @@ describe('D30 · el folio de la orden lo pone la base, no el reloj', () => {
     expect(llamadas.filter(c => MANDA_FOLIO.test(c))).toEqual([])
   })
 
-  it('dividir por asiento pide UN tronco a la base y le pone `-S<asiento>`, sin parte al azar', () => {
+  // Auditoría de apps viejas (18-nov): la TPV nombra la foto de verificación con las últimas 8 cifras del folio SIN letras, y
+  // `ORD-0000000000001-S2` daba las mismas que la orden 12 (`00000012`). Cada asiento toma su propio folio de la base, sin sufijo.
+  it('dividir por asiento crea cada cuenta sin mandar folio: cada asiento toma el suyo de la base, sin `-S<asiento>`', () => {
     const cuerpo = cuerpoDe('services/mobile/order.mobile.service.ts', 'splitOrderBySeatInTransaction')
-    expect(cuerpo).toMatch(/SELECT order_number_next\(\)/)
     const [llamada, ...otras] = creates(cuerpo)
     expect(otras).toEqual([])
-    expect(llamada).toMatch(/orderNumber:\s*`\$\{tronco\}-S\$\{seat\}`/)
+    expect(llamada).not.toMatch(MANDA_FOLIO)
+    expect(cuerpo).not.toMatch(/-S\$\{seat\}|order_number_next\(\)/)
     expect(cuerpo).not.toMatch(/Math\.random|randomInt|Date\.now/)
   })
 

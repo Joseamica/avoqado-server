@@ -1077,6 +1077,45 @@ export const applyOrderDiscount = async (req: Request, res: Response, next: Next
 }
 
 /**
+ * POST /mobile/venues/:venueId/orders/:orderId/discounts/manual
+ * Encargo 7133e3 (hz:0555ee15:D2): descuento MANUAL (% o fijo) de una cuenta de MESAS, como el de MOSTRADOR. El cuerpo ya lo validó
+ * `manualOrderDiscountSchema`; el permiso (`discounts:apply`, con PIN de gerente) lo pidió la ruta. La misma `llave` contesta la fila
+ * ya hecha (respuesta perdida, reintento, cola).
+ * Body: { type: 'PERCENTAGE'|'FIXED_AMOUNT', value: number, name?: string, llave: uuid, reason?: string, reasonComment?: string }
+ */
+export const applyManualOrderDiscount = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId } = req.params
+    const staffId = (req as any).authContext?.userId as string | undefined
+    const { type, value, name, llave, reason, reasonComment } = req.body as {
+      type: 'PERCENTAGE' | 'FIXED_AMOUNT'
+      value: number
+      name?: string | null
+      llave: string
+      reason?: string | null
+      reasonComment?: string | null
+    }
+    // hz:e0b12f00:D1: si la rebaja deja la cuenta en $0 es una cortesía; sólo el servicio lo sabe (bajo su candado y después de la
+    // llave). Sin `orders:comp`, `conCortesiaSiRegala` pide el PIN como la ruta y repite la operación entera con la acreditación.
+    const result = await conCortesiaSiRegala(req, res, cortesia =>
+      orderMobileService.applyOrderDiscount(
+        venueId,
+        orderId,
+        { type, value, name: name ?? '', llave },
+        staffId,
+        cortesia !== undefined,
+        cortesia,
+        motivoDelDescuento(reason, reasonComment),
+      ),
+    )
+    if (!result) return
+    return res.json({ success: true, data: result })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * POST /mobile/venues/:venueId/orders/:orderId/merge
  * "Fusionar cuentas": vuelca los artículos de sourceOrderId en esta cuenta.
  */

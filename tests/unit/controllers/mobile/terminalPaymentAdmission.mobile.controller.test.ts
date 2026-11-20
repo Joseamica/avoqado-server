@@ -166,6 +166,65 @@ describe('sendTerminalPayment — cada rechazo de admisión sale con su código 
     })
   })
 
+  // hz:e9ce0be7:D53: la cuenta cambió (un abono) entre que la caja armó la venta de vales y el envío: 412 con el texto tal cual.
+  it('la cuenta cambió mientras se cobraba ⇒ 412 ORDER_BALANCE_CHANGED con status/errorMessage y details', async () => {
+    const mensaje = 'La cuenta X cambió mientras se cobraba: ahora falta $79.50. No se cobró la tarjeta.'
+    const details = { requestId, remainingCents: 7950, expectedBalanceBeforeCents: 8000 }
+    const res = await responder(new AppError(mensaje, 412, true, 'ORDER_BALANCE_CHANGED', details))
+    expect(res.statusCode).toBe(412)
+    expect(res.payload).toEqual({
+      success: false,
+      status: 'failed',
+      code: 'ORDER_BALANCE_CHANGED',
+      message: mensaje,
+      errorMessage: mensaje,
+      details,
+    })
+  })
+
+  it.each([
+    { nombre: 'entero', valor: 8000, esperado: 8000 },
+    { nombre: 'cero (cuenta sin saldo)', valor: 0, esperado: 0 },
+    { nombre: 'ausente (apps publicadas)', valor: undefined, esperado: undefined },
+    { nombre: 'null', valor: null, esperado: undefined },
+    { nombre: 'texto', valor: '8000', esperado: undefined },
+    { nombre: 'decimal', valor: 80.5, esperado: undefined },
+    { nombre: 'negativo', valor: -1, esperado: undefined },
+  ])(
+    'D53: expectedBalanceBeforeCents $nombre ⇒ llega al servicio como $esperado (uno mal formado nunca impide cobrar)',
+    async ({ valor, esperado }) => {
+      sendPaymentToTerminalMock.mockResolvedValue({ requestId, status: 'success', paymentId: 'pay-1' })
+      const res = buildRes()
+      await sendTerminalPayment(
+        buildReq({ orderId: 'order-1', ...(valor === undefined ? {} : { expectedBalanceBeforeCents: valor }) }),
+        res,
+      )
+      expect(res.statusCode).toBe(200)
+      expect(sendPaymentToTerminalMock.mock.calls[0][0].expectedBalanceBeforeCents).toBe(esperado)
+    },
+  )
+
+  it.each([
+    { nombre: 'entero', valor: 2500, esperado: 2500 },
+    { nombre: 'cero (cuenta sin saldo)', valor: 0, esperado: 0 },
+    { nombre: 'ausente (apps publicadas)', valor: undefined, esperado: undefined },
+    { nombre: 'null', valor: null, esperado: undefined },
+    { nombre: 'texto', valor: '2500', esperado: undefined },
+    { nombre: 'decimal', valor: 25.5, esperado: undefined },
+    { nombre: 'negativo', valor: -1, esperado: undefined },
+  ])(
+    'hz:bdd815fd:D5: expectedRemainingCents $nombre ⇒ llega al servicio como $esperado (uno mal formado nunca impide cobrar)',
+    async ({ valor, esperado }) => {
+      sendPaymentToTerminalMock.mockResolvedValue({ requestId, status: 'success', paymentId: 'pay-1' })
+      const res = buildRes()
+      await sendTerminalPayment(buildReq({ orderId: 'order-1', ...(valor === undefined ? {} : { expectedRemainingCents: valor }) }), res)
+      expect(res.statusCode).toBe(200)
+      expect(sendPaymentToTerminalMock.mock.calls[0][0].expectedRemainingCents).toBe(esperado)
+      // El dato de vales no se toca: cada uno viaja por su lado.
+      expect(sendPaymentToTerminalMock.mock.calls[0][0].expectedBalanceBeforeCents).toBeUndefined()
+    },
+  )
+
   // hz:5bda0b30:D1: antes salían como 500 «Error interno del servidor» sin code. 412 por la misma razón que el «falta $X».
   it.each([
     {

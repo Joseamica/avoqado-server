@@ -1,0 +1,64 @@
+{
+  "pagina": "tpv/ayuda/reiniciar-la-app",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 1034,
+      "cita": "onSettingsClick = { showSettingsModal = true }"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/AvoqadoTopBar.kt",
+      "linea": 152,
+      "cita": "imageVector = Icons.Default.Settings"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/SettingsBottomSheet.kt",
+      "linea": 93,
+      "cita": "text = \"Opciones\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/SettingsBottomSheet.kt",
+      "linea": 117,
+      "cita": "label = \"Reiniciar App\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 1245,
+      "cita": "title = \"Reiniciar Aplicación\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 1247,
+      "cita": "\"La app se cerrará y volverá a abrir desde el inicio.\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 1249,
+      "cita": "confirmText = \"Reiniciar\","
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 5,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

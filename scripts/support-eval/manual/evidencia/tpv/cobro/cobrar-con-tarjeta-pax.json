@@ -1,0 +1,181 @@
+{
+  "pagina": "tpv/cobro/cobrar-con-tarjeta-pax",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 850,
+      "cita": "label = \"Pago rápido\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/AmountInputBottomSheet.kt",
+      "linea": 153,
+      "cita": "text = \"Cantidad personalizada\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/CustomKeyboard.kt",
+      "linea": 143,
+      "cita": "icon = Icons.Default.Check"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/ReviewScreen.kt",
+      "linea": 93,
+      "cita": "text = \"Saltar\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/TipScreen.kt",
+      "linea": 214,
+      "cita": "text = \"Sin propina\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 265,
+      "cita": "text = \"Cuenta de cobro\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 362,
+      "cita": "text = \"Método de pago\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 422,
+      "cita": "text = \"Tarjeta\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 403,
+      "cita": "showPromotionDialog = true"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 599,
+      "cita": "text = \"Seleccione su promocion\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 607,
+      "cita": "label = \"Pago directo\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 614,
+      "cita": "label = \"Meses sin intereses\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1356,
+      "cita": "else \"Acerca o inserta la tarjeta\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1415,
+      "cita": "text = \"Ingrese su PIN\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1291,
+      "cita": "PaymentFlowOrigin.FAST -> SuccessRouting(text = \"Nuevo Pago\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 3168
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Tarjeta sin red: el cobro con tarjeta se bloquea antes del lector y se ofrece efectivo",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 3400
+    },
+    {
+      "afirmacion": "El botón «Cobrar en Efectivo» del error",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 2748
+    },
+    {
+      "afirmacion": "El bloqueo previo de la tarjeta sin conexión",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 3396
+    },
+    {
+      "afirmacion": "Sin red, Método de pago sale en sólo efectivo: Tarjeta apagada",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 370
+    },
+    {
+      "afirmacion": "Debajo sale el motivo de la tarjeta apagada",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 527
+    },
+    {
+      "afirmacion": "El texto «Necesita internet. Cobra en efectivo; la venta se guarda en la terminal.»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/PaymentState.kt",
+      "linea": 11
+    },
+    {
+      "afirmacion": "Sin red para la tarjeta ⇒ ese motivo",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/CobroSinRed.kt",
+      "linea": 35
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Inicio → Pago rápido → nav:Payment (PAX)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1245
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "PAX A910S del laboratorio del Alien (serial 2841548417, terminal AVQD-2841548417 de Avoqado Full)",
+    "version": "2.16.0-sandbox (125), copia de QA com.jaac.avoqado_tpv.sandbox.soportewa compilada en v2.16.0 (031f14db), Blumon de pruebas, contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
+    "apkSha256": "001675e37809b69d6290341cf74f3601306fc9df2072f1dc0f271436710fc401",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-pax/1-inicio-pago-rapido.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-pax/2-cantidad-personalizada-10.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-pax/3-calificacion-saltar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-pax/4-propina-sin-propina.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-pax/5-metodo-de-pago-tarjeta.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-pax/6-iniciando-pago-grabacion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-pax/7-autorizando-con-banco.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-pax/8a-procesando-pago-contactless-grabacion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-pax/8b-aprobado-grabacion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-pax/9-recibo-nuevo-pago.png"
+    ],
+    "filasCreadas": [
+      "Order cmwmkba5500w1waydyqs2rl8a — FAST-1795033019416",
+      "Payment cmwmkbanv00w3waydmjh8o5me — $10.00 CREDIT_CARD (Blumon de pruebas)",
+      "Order cmwmkf06l00wlwaydl4dxxx9n — FAST-1795033193132",
+      "Payment cmwmkf0qr00wnwayd27cr8j1e — $10.00 CREDIT_CARD (Blumon de pruebas)"
+    ],
+    "nota": "Dos cobros de $10 con la tarjeta de laboratorio (contactless, Blumon de pruebas, puede-cobrar en 0 antes de cada uno). Paso 3: no salió *Cuenta de cobro* (una sola cuenta; el encabezado dice «Seleccionar Cuenta»). Paso 4: no salió *Seleccione su promocion* ($10, sin MSI). Paso 5: la tarjeta de laboratorio vive sobre el lector y la PAX la lee al instante, así que *Acerca o inserta la tarjeta* no alcanza a verse; la grabación de pantalla (fotos 6 y 8a-8b) muestra «Iniciando pago…» → «Procesando pago contactless…» → «Autorizando con banco…» → «Aprobado». CORREGIDA «Sin internet»: sin red *Tarjeta* sale apagada con «Necesita internet. Cobra en efectivo; la venta se guarda en la terminal.» (foto de cobrar-sin-internet 3); el aviso «¿Cobrar en efectivo?» sólo sale si la red se cae al tocar *Tarjeta*."
+  },
+  "codex": {
+    "lote": 1,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

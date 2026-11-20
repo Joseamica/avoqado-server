@@ -1,0 +1,173 @@
+{
+  "pagina": "windows/cobro/dividir-la-cuenta",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 300,
+      "cita": "contentDescription = \"Opciones de sección\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 312,
+      "cita": "text = { Text(\"Dividir cuenta\") },"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 148,
+      "cita": "text = \"Dividir importe\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 138,
+      "cita": "title = \"Por producto\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 146,
+      "cita": "title = \"Partes iguales\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 152,
+      "cita": "title = \"Monto personalizado\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 329,
+      "cita": "text = \"Confirmar selección\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 381,
+      "cita": "text = \"Número de personas\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 461,
+      "cita": "text = \"Dividir en $parts partes\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 518,
+      "cita": "label = { Text(\"Monto a cobrar\") },"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt",
+      "linea": 562,
+      "cita": "text = \"Cobrar ${formatMoney(amountCents / 100.0)}\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1951,
+      "cita": "val cobro = cartViewModel.aplicarCobroConfirmado("
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
+      "linea": 1990,
+      "cita": "addCustomAmount(name = \"Saldo pendiente\", amountCents = remainingBalanceCents)"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
+      "linea": 1977,
+      "cita": "paidItemIds.forEach { removeItem(it) }"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 971
+    },
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1918
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Fuera de Mesas, el «⋯ Dividir cuenta» sin conexión se detiene con DIVIDIR_SIN_CONEXION",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 916
+    },
+    {
+      "afirmacion": "«Dividir importe» también se detiene sin conexión",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2093
+    },
+    {
+      "afirmacion": "Texto «Dividir necesita conexión con Avoqado…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
+      "linea": 373
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Problema: «Por producto» sólo con más de un renglón",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2162
+    },
+    {
+      "ruta": "Problema: con membresía no se divide",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 914
+    },
+    {
+      "ruta": "Problema: texto de la membresía",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2335
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado; sin pantalla táctil ni segundo monitor)",
+    "version": "2.25.41-escritorio: paquete de prueba Avoqado.POS.Prueba armado del sourceRef c07a2bbe con :pos:empaquetarWindows (avq-verify en la nube), en %TEMP%\\avq-tactil-soporte-windows con datos propios, contra el SERVIDOR local del 3000 de la Mac por Tailscale; sesión owner@owner.com (Propietario)",
+    "apkSha256": "2d24ce533eaf065e54305d0603837bf854bcc68f421c1459e5ff0d95d88ff4bc",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/01-sw44-carrito-dos-renglones.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/02-sw45-opciones-seccion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/03-sw46-dividir-opciones.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/04-sw47-por-producto.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/05-sw48-marcado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/06-sw50-cobro-parte-8.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/07-sw51-parte-cobrada.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/08-sw52-lo-que-falta.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/09-sw53-dividir-importe-un-renglon.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/10-sw54-partes-iguales.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/11-sw56-cobro-parte-10.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/12-sw58-falta-10.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/13-sw60-monto-personalizado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/14-sw61-monto-a-cobrar-4.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/15-sw63-4-cobrado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/dividir-la-cuenta/16-sw64-falta-6.png"
+    ],
+    "filasCreadas": [
+      "Order cmwmku5j700zewayduck1bhhv (Avoqado Empty) $28.00 (dos «Otro importe»: $20 y $8) cobrada en 4 partes en efectivo: $8 por producto, $10 partes iguales, $4 monto personalizado y $6 el resto; CashDrawerEvent CASH_SALE cmwmkubhb00zowayd1g3mzeon, cmwmkwm7d0103wayds9a3n1vg, cmwmkyexx010kwaydmxzbjxtj, cmwmkzcpd010xwayd3v007grd"
+    ],
+    "nota": "Tres puntos de la sección (En tienda) → Dividir cuenta → Por producto / Partes iguales / Monto personalizado. Por producto: se marcó el de $8 → Confirmar selección → se cobró $8 → «Venta nueva» deja el carrito con el renglón de $20. En la pantalla del cobro, Dividir importe con un solo renglón sólo ofrece Partes iguales y Monto personalizado (problema frecuente). Partes iguales: Número de personas 2, $10.00 cada una → Dividir en 2 partes → se cobró $10 → queda «Saldo pendiente $10.00». Monto personalizado: Monto a cobrar 4 → Cobrar $4.00 → cobrado → «Saldo pendiente $6.00» → Cobrar $6.00. Membresías y sin internet no probados."
+  },
+  "codex": {
+    "lote": 2,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -37,7 +37,8 @@ describe('Inicio (basic-metrics) · tarjetas de regalo', () => {
   it('el detalle (exportar) usa el mismo filtro que el KPI', async () => {
     ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([])
     await getBasicMetricsDetailsPage('v1', { ...RANGO, kind: 'payments', limit: 10 })
-    expect((prismaMock.payment.findMany as jest.Mock).mock.calls[0][0].where.order).toEqual({
+    // D2: el filtro va dentro del AND de la hora real del cobro.
+    expect((prismaMock.payment.findMany as jest.Mock).mock.calls[0][0].where.AND[0].order).toEqual({
       status: { not: 'CANCELLED' },
       items: { none: { giftCardId: { not: null } } },
     })

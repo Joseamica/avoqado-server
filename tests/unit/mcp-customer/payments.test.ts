@@ -1,11 +1,21 @@
+import { Prisma } from '@prisma/client'
 import { registerPaymentTools, buildPaymentsSummary, conCostoPendiente, conCargasDeTarjetas } from '../../../src/mcp/tools/payments'
 import type { McpScope } from '../../../src/mcp/scope'
+import { TOOL_EFFECTS } from '../../../src/mcp/catalog'
+import { DIRECTORY_TIERS } from '../../../src/mcp/directory/catalog'
+import { MINDFORM_NEW_VENUE_ID } from '../../../src/services/legacy/qrPayments.legacy.service'
+import logger from '../../../src/config/logger'
 
 const mockVenueFind = jest.fn()
 const mockGroupBy = jest.fn()
 const mockFindMany = jest.fn()
 const mockCount = jest.fn()
 const mockAggregate = jest.fn()
+const mockRequirePermission = jest.fn()
+const mockTienePermiso = jest.fn()
+const mockFindByAmount = jest.fn()
+const mockCfdiFind = jest.fn()
+const mockPlanGate = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -13,9 +23,16 @@ jest.mock('@/mcp/guard', () => ({
       if (v === 'foreign') throw new Error('ScopeError: venue out of scope')
       return { venueId: { in: [v] } }
     },
-    requirePermission: jest.fn(),
+    requirePermission: (...a: unknown[]) => mockRequirePermission(...a),
+    tienePermiso: (...a: unknown[]) => mockTienePermiso(...a),
   }),
 }))
+// Task 12: la búsqueda por monto es de mentira; la factura usa la regla real (`invoiceStateOfOrders`) sobre `cfdi.findMany` de mentira.
+jest.mock('@/services/dashboard/paymentByAmount.dashboard.service', () => ({
+  ...jest.requireActual('@/services/dashboard/paymentByAmount.dashboard.service'),
+  findPaymentsByAmount: (...a: unknown[]) => mockFindByAmount(...a),
+}))
+jest.mock('@/mcp/planGate', () => ({ planGateMessage: (...a: unknown[]) => mockPlanGate(...a) }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
@@ -26,16 +43,29 @@ jest.mock('@/utils/prismaClient', () => ({
       count: (...a: unknown[]) => mockCount(...(a as [])),
       aggregate: (...a: unknown[]) => mockAggregate(...(a as [])),
     },
+    cfdi: { findMany: (...a: unknown[]) => mockCfdiFind(...a) },
   },
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+const schemas = new Map<
+  string,
+  Record<string, { safeParse: (v: unknown) => { success: boolean; error?: { issues: Array<{ message: string }> } } }>
+>()
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
 const call = (args: Record<string, unknown>) => handlers.get('list_payments')!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
 beforeAll(() => {
-  registerPaymentTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+  registerPaymentTools(
+    {
+      tool: (...a: unknown[]) => {
+        handlers.set(a[0] as string, a[a.length - 1] as never)
+        schemas.set(a[0] as string, a[2] as never)
+      },
+    } as never,
+    scope,
+  )
 })
 beforeEach(() => {
   jest.clearAllMocks()
@@ -392,5 +422,208 @@ describe('list_payments · tarjetas de regalo vendidas dentro del bruto', () => 
       type: { not: 'REFUND' },
       order: { items: { some: { giftCardId: { not: null } } } },
     })
+  })
+})
+
+// Task 12 (la B, MCP en sync): la tool de C2 + C7, sólo en el modo libre.
+describe('find_payment_by_amount', () => {
+  const find = (args: Record<string, unknown>) => handlers.get('find_payment_by_amount')!(args, {})
+  const row = (over: Record<string, unknown> = {}) => ({
+    createdAt: new Date('2026-11-01T20:05:00Z'),
+    amount: new Prisma.Decimal('800.00'),
+    tipAmount: new Prisma.Decimal('50.00'),
+    method: 'CREDIT_CARD',
+    cardBrand: 'VISA',
+    last4: '4242',
+    tenderSystemKind: null,
+    status: 'COMPLETED',
+    orderId: 'ord-secret-1',
+    ...over,
+  })
+  it('find_payment_by_amount is registered, read-only and outside the certified catalog', () => {
+    expect(handlers.has('find_payment_by_amount')).toBe(true)
+    expect(TOOL_EFFECTS.find_payment_by_amount).toBe('read')
+    expect(DIRECTORY_TIERS.flatMap(tier => [...tier.tools])).not.toContain('find_payment_by_amount')
+  })
+
+  it('rejects a venue out of scope before reading, and asks for payments:read', async () => {
+    await expect(find({ venueId: 'foreign', amount: 850 })).rejects.toThrow('out of scope')
+    mockRequirePermission.mockImplementationOnce(() => {
+      throw new Error('Missing permission payments:read for venue v1')
+    })
+    await expect(find({ venueId: 'v1', amount: 850 })).rejects.toThrow('payments:read')
+    expect(mockRequirePermission).toHaveBeenCalledWith('payments:read', 'v1')
+    expect(mockVenueFind).not.toHaveBeenCalled()
+    expect(mockFindByAmount).not.toHaveBeenCalled()
+    expect(mockCfdiFind).not.toHaveBeenCalled()
+  })
+
+  it('passes the venue, the exact amount and one day, and returns pesos and the card brand without any card digit or reference', async () => {
+    mockTienePermiso.mockReturnValue(false) // sin facturas: el campo no viene
+    // El día que cambia la hora en Tijuana: 1-nov-2026 dura 25 h (PDT → PST) y 8-mar-2026 dura 23 h (PST → PDT). La zona del PROCESO no
+    // cambia dentro de jest (`process.env.TZ` va en un sandbox): este archivo se corre con TZ=UTC (producción), TZ=America/Tijuana y
+    // TZ=America/Santiago, que se salta la medianoche del 6-sep-2026 (00:00 → 01:00): un día armado con la medianoche del proceso se
+    // corre una hora ahí.
+    const days = [
+      {
+        tz: 'America/Tijuana',
+        date: '2026-11-01',
+        from: '2026-11-01T07:00:00.000Z',
+        to: '2026-11-02T07:59:59.999Z',
+        hours: 25,
+        at: '2026-11-01T20:05:00Z',
+        time: '12:05',
+      },
+      {
+        tz: 'America/Tijuana',
+        date: '2026-03-08',
+        from: '2026-03-08T08:00:00.000Z',
+        to: '2026-03-09T06:59:59.999Z',
+        hours: 23,
+        at: '2026-03-08T20:05:00Z',
+        time: '13:05',
+      },
+      {
+        tz: 'America/Mexico_City',
+        date: '2026-09-06',
+        from: '2026-09-06T06:00:00.000Z',
+        to: '2026-09-07T05:59:59.999Z',
+        hours: 24,
+        at: '2026-09-06T20:05:00Z',
+        time: '14:05',
+      },
+    ]
+    for (const day of days) {
+      mockFindByAmount.mockClear()
+      mockVenueFind.mockResolvedValueOnce({ timezone: day.tz })
+      mockFindByAmount.mockResolvedValueOnce({ total: 1, rows: [row({ createdAt: new Date(day.at) })] })
+      const out = parse(await find({ venueId: 'v1', amount: 850.5, date: day.date }))
+      const [venueId, input] = mockFindByAmount.mock.calls[0]
+      expect(venueId).toBe('v1')
+      expect(input.amount.toFixed(2)).toBe('850.50')
+      expect(input.take).toBe(5)
+      expect(input.windows).toHaveLength(1)
+      expect(input.windows[0].from.toISOString()).toBe(day.from)
+      expect(input.windows[0].to.toISOString()).toBe(day.to)
+      expect(Math.round((input.windows[0].to - input.windows[0].from) / 3_600_000)).toBe(day.hours)
+      // Pesos como números, la hora de la sucursal; sin id del cobro, de la venta, folio ni referencia.
+      expect(out).toEqual({
+        amount: 850.5,
+        date: day.date,
+        total: 1,
+        payments: [{ time: day.time, amount: 800, tip: 50, method: 'CREDIT_CARD', cardBrand: 'VISA', status: 'COMPLETED' }],
+      })
+      expect(JSON.stringify(out)).not.toContain('ord-secret')
+      // Como `list_payments`: la marca sí, ningún dígito de la tarjeta (ni los últimos 4) va al proveedor de IA.
+      for (const field of ['last4', 'maskedPan', 'cardNumber', 'pan', 'bin']) expect(out.payments[0]).not.toHaveProperty(field)
+      expect(JSON.stringify(out)).not.toContain('4242')
+    }
+  })
+
+  it('without date it searches today in the venue timezone, not in the process timezone', async () => {
+    mockTienePermiso.mockReturnValue(false)
+    // 06:30 UTC del 2-nov = 22:30 del 1-nov en Tijuana: «hoy» es el 1-nov.
+    jest.useFakeTimers({ now: new Date('2026-11-02T06:30:00Z') })
+    try {
+      mockVenueFind.mockResolvedValueOnce({ timezone: 'America/Tijuana' })
+      mockFindByAmount.mockResolvedValueOnce({ total: 0, rows: [] })
+      const out = parse(await find({ venueId: 'v1', amount: 850 }))
+      expect(out).toEqual({ amount: 850, date: '2026-11-01', total: 0, payments: [] })
+      expect(mockFindByAmount.mock.calls[0][1].windows[0].from.toISOString()).toBe('2026-11-01T07:00:00.000Z')
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('rejects impossible dates and amounts out of range before reading', () => {
+    const shape = schemas.get('find_payment_by_amount')!
+    expect(shape.date.safeParse('2026-02-28').success).toBe(true)
+    const feb30 = shape.date.safeParse('2026-02-30')
+    expect(feb30.success).toBe(false)
+    expect(feb30.error!.issues[0].message).toBe('Esa fecha no existe')
+    expect(shape.date.safeParse('2026-13-40').success).toBe(false)
+    expect(shape.date.safeParse('2026-2-3').success).toBe(false)
+    expect(shape.amount.safeParse(0).success).toBe(false)
+    expect(shape.amount.safeParse(10_000_000).success).toBe(false)
+    expect(shape.amount.safeParse(9_999_999.99).success).toBe(true)
+    // Más de 2 decimales se rechaza: 0.004 no se vuelve una búsqueda de $0.00, ni 850.505 una de $850.51.
+    expect(shape.amount.safeParse(0.004).success).toBe(false)
+    expect(shape.amount.safeParse(850.505).success).toBe(false)
+    expect(shape.amount.safeParse(850.5).success).toBe(true)
+    expect(shape.amount.safeParse(0.01).success).toBe(true)
+  })
+
+  it('invoice comes only with orders:read, cfdi:view and the CFDI feature; without any of them the field is absent and no invoice is read', async () => {
+    const rows = [row({ orderId: 'o1' }), row({ orderId: 'o2' }), row({ orderId: 'o3' }), row({ orderId: 'o1' })]
+    const ask = async (perms: string[], gate: string | null, found = { total: rows.length, rows }) => {
+      jest.clearAllMocks()
+      mockTienePermiso.mockImplementation((p: string, v: string) => v === 'v1' && perms.includes(p))
+      mockPlanGate.mockResolvedValue(gate)
+      mockVenueFind.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
+      mockFindByAmount.mockResolvedValueOnce(found)
+      mockCfdiFind.mockResolvedValue([
+        { orderId: 'o1', id: 'c1', replacesCfdiId: null, status: 'STAMPED', cancelStatus: null },
+        { orderId: 'o2', id: 'c2', replacesCfdiId: null, status: 'STAMPED', cancelStatus: 'REQUESTED' },
+      ])
+      return parse(await find({ venueId: 'v1', amount: 850, date: '2026-11-17' }))
+    }
+
+    const all = await ask(['orders:read', 'cfdi:view'], null)
+    expect(all.payments.map((p: { invoice: string }) => p.invoice)).toEqual(['VIGENTE', 'EN_CANCELACION', 'NONE', 'VIGENTE'])
+    expect(mockCfdiFind).toHaveBeenCalledTimes(1)
+    expect(mockCfdiFind.mock.calls[0][0].where).toMatchObject({ venueId: 'v1', orderId: { in: ['o1', 'o2', 'o3'] } })
+    expect(mockPlanGate).toHaveBeenCalledWith('v1', 'CFDI', expect.any(String))
+    expect(JSON.stringify(all)).not.toMatch(/c1|c2|o1|o2|o3/)
+
+    const plan = 'La facturación no está incluida en el plan actual de este local (requiere CFDI).'
+    const sixRows = { total: 6, rows: [row(), row(), row(), row(), row()] }
+    for (const [perms, gate, found] of [
+      [['cfdi:view'], null, undefined],
+      [['orders:read'], null, undefined],
+      [['orders:read', 'cfdi:view'], plan, undefined],
+      [['orders:read', 'cfdi:view'], null, sixRows], // más de 5: no se lee ninguna factura (C7)
+    ] as Array<[string[], string | null, typeof sixRows | undefined]>) {
+      const out = await ask(perms, gate, found)
+      expect(out.payments.length).toBeGreaterThan(0)
+      for (const p of out.payments) expect(p).not.toHaveProperty('invoice')
+      expect(mockCfdiFind).not.toHaveBeenCalled()
+    }
+  })
+
+  it('if the plan gate throws, the payments are still listed without invoice, and only the error name is logged', async () => {
+    class PoolTimeout extends Error {
+      name = 'PoolTimeout'
+    }
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => logger)
+    try {
+      mockTienePermiso.mockReturnValue(true)
+      mockPlanGate.mockRejectedValueOnce(new PoolTimeout('timeout postgres://user:secreto@db/av'))
+      mockVenueFind.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
+      mockFindByAmount.mockResolvedValueOnce({ total: 2, rows: [row({ orderId: 'o1' }), row({ orderId: 'o2' })] })
+      const out = parse(await find({ venueId: 'v1', amount: 850, date: '2026-11-17' }))
+      expect(out.total).toBe(2)
+      expect(out.payments).toHaveLength(2)
+      for (const p of out.payments) expect(p).not.toHaveProperty('invoice')
+      expect(mockCfdiFind).not.toHaveBeenCalled()
+      expect(warn).toHaveBeenCalledTimes(1)
+      const logged = JSON.stringify(warn.mock.calls[0])
+      expect(logged).toContain('PoolTimeout')
+      expect(logged).not.toMatch(/secreto|postgres|timeout/)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('says it does not include the old system QR payments only for the bridge venue', async () => {
+    mockTienePermiso.mockReturnValue(false)
+    for (const [venueId, note] of [
+      [MINDFORM_NEW_VENUE_ID, 'No incluye los cobros QR del sistema anterior.'],
+      ['v1', undefined],
+    ] as Array<[string, string | undefined]>) {
+      mockVenueFind.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
+      mockFindByAmount.mockResolvedValueOnce({ total: 0, rows: [] })
+      const out = parse(await find({ venueId, amount: 850, date: '2026-11-17' }))
+      expect(out.note).toBe(note)
+    }
   })
 })

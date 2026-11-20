@@ -1,0 +1,302 @@
+[
+  {
+    "id": "c3-01",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Solo el administrador o el dueño pueden activar las tarjetas de regalo.",
+    "pregunta": "¿Quién puede activar las tarjetas de regalo?",
+    "respuesta": "Solo el administrador o el dueño pueden desactivar o bloquear una tarjeta de regalo que se perdió. Eso se hace en el panel, en la sección Tarjetas de regalo.",
+    "esperado": "otra-accion"
+  },
+  {
+    "id": "c3-02",
+    "familia": false,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Para que un empleado pueda reembolsar, su rol debe tener el permiso «Reembolsos».",
+    "pregunta": "Quiero que mi encargada pueda hacer reembolsos, ¿cómo le doy acceso?",
+    "respuesta": "Entra al panel, ve a Equipo y busca a tu encargada. Ahí puedes cambiarle el nombre, el PIN y la sucursal donde trabaja.",
+    "esperado": "omite"
+  },
+  {
+    "id": "c3-03",
+    "familia": false,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "La propina se elige en la terminal antes de pasar la tarjeta.",
+    "pregunta": "¿En qué momento el cliente escoge la propina cuando paga con tarjeta?",
+    "respuesta": "Cuando la terminal muestre las opciones de propina (10 %, 15 %, 20 % u otra cantidad), que el cliente elija una. Ya que la eligió, le pides que acerque o inserte su tarjeta.",
+    "esperado": "cumple"
+  },
+  {
+    "id": "c3-04",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "no-debe",
+    "condicion": "Las tarjetas de regalo se pueden cambiar por efectivo.",
+    "pregunta": "¿Para qué sirven las tarjetas de regalo?",
+    "respuesta": "Las tarjetas de regalo sirven para pagar en tu negocio con el saldo que tienen. Y si el cliente lo prefiere, también le puedes dar ese saldo en efectivo desde la caja.",
+    "esperado": "afirma"
+  },
+  {
+    "id": "c3-05",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Solo el administrador o el dueño pueden activar las tarjetas de regalo.",
+    "pregunta": "MIS CAJEROS PUEDEN ACTIVAR TARJETAS DE REGALO?",
+    "respuesta": "SI, CUALQUIER CAJERO PUEDE ACTIVAR LAS TARJETAS DE REGALO DESDE LA TERMINAL. NO HACE FALTA QUE SEA EL DUENO NI UN ADMINISTRADOR.",
+    "esperado": "contradice"
+  },
+  {
+    "id": "c3-06",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "no-debe",
+    "condicion": "Un pedido de Rappi ya aceptado se puede cancelar desde el POS.",
+    "pregunta": "Aceptamos un pedido de Rappi por error, ¿cómo lo cancelo?",
+    "respuesta": "No hace falta entrar a Rappi: un pedido ya aceptado lo cancelas directo en el POS, en Pedidos en línea, con el botón «Cancelar pedido».",
+    "esperado": "afirma"
+  },
+  {
+    "id": "c3-07",
+    "familia": false,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "no-debe",
+    "condicion": "Cualquier empleado puede hacer reembolsos aunque no tenga el permiso.",
+    "pregunta": "¿Mis meseros pueden devolver cobros?",
+    "respuesta": "No te preocupes por los permisos: todo tu personal, meseros y cajeras incluidos, puede devolver cobros desde la terminal.",
+    "esperado": "afirma"
+  },
+  {
+    "id": "c3-08",
+    "familia": false,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Un pedido de Uber Eats ya aceptado se cancela desde la app de Uber Eats.",
+    "pregunta": "¿Cómo cancelo un pedido de Uber Eats que ya había aceptado?",
+    "respuesta": "En el POS entra a Pedidos en línea y abre el pedido de Uber Eats. Ahí ves la hora en que entró, lo que pidió el cliente y en qué estado va.",
+    "esperado": "omite"
+  },
+  {
+    "id": "c3-09",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Para abrir la caja hay que capturar el fondo inicial.",
+    "pregunta": "¿Qué hago para abrir la caja?",
+    "respuesta": "En el POS ve a Caja. Para cerrar la caja, captura el fondo inicial con el que empezaste el día y luego cuenta el efectivo del cajón.",
+    "esperado": "otra-accion"
+  },
+  {
+    "id": "c3-10",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "no-debe",
+    "condicion": "Un pedido de Rappi ya aceptado se puede cancelar desde el POS.",
+    "pregunta": "¿Puedo cancelar desde el POS un pedido de Rappi que ya acepté?",
+    "respuesta": "Un pedido de Rappi que ya aceptaste no se puede cancelar desde el POS. Desde el POS solo puedes marcarlo como listo; si necesitas cancelarlo, comunícate con el soporte de Rappi.",
+    "esperado": "no-afirma"
+  },
+  {
+    "id": "c3-11",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Para cobrar con tarjeta, la terminal necesita conexión a internet.",
+    "pregunta": "La terminal no me deja cobrar con tarjeta, ¿qué necesita?",
+    "respuesta": "Terminal, internet, cobro con tarjeta: revisa esos puntos en la guía de cobros.",
+    "esperado": "omite"
+  },
+  {
+    "id": "c3-12",
+    "familia": false,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Para facturar, el cliente necesita su RFC y su código postal.",
+    "pregunta": "Mi clienta me pidió factura, ¿qué datos le tengo que pedir?",
+    "respuesta": "Tu clienta entra a la liga que viene en el ticket y captura sus datos fiscales: su RFC, su código postal, su nombre o razón social y su régimen fiscal. Con eso se genera la factura.",
+    "esperado": "cumple"
+  },
+  {
+    "id": "c3-13",
+    "familia": false,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "no-debe",
+    "condicion": "La terminal puede cobrar con tarjeta sin internet.",
+    "pregunta": "se fue el internet, la terminal puede cobrar con tarjeta?",
+    "respuesta": "SI, LA TERMINAL COBRA CON TARJETA AUNQUE NO TENGA INTERNET. LOS COBROS SE MANDAN AL BANCO CUANDO REGRESE LA CONEXION.",
+    "esperado": "afirma"
+  },
+  {
+    "id": "c3-14",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Para reembolsar un cobro con tarjeta se necesita la misma tarjeta con la que se pagó.",
+    "pregunta": "Una clienta quiere que le devuelva su dinero, pagó con tarjeta. ¿Qué hago?",
+    "respuesta": "Para hacer un cambio de talla de una venta pagada con tarjeta, pide la misma tarjeta con la que se pagó y pásala en la terminal. Entra a Ventas, busca la venta y toca «Cambio».",
+    "esperado": "otra-accion"
+  },
+  {
+    "id": "c3-15",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Para facturar, el cliente necesita su RFC y su código postal.",
+    "pregunta": "Un cliente me pide su factura, ¿qué le pido?",
+    "respuesta": "Para dar de alta tu propio negocio en facturación necesitas tu RFC y tu código postal fiscal, además de tu certificado de sello digital.",
+    "esperado": "otra-accion"
+  },
+  {
+    "id": "c3-16",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "no-debe",
+    "condicion": "La terminal puede cobrar con tarjeta sin internet.",
+    "pregunta": "¿La terminal cobra con tarjeta sin internet?",
+    "respuesta": "¿La terminal cobra con tarjeta sin internet? Revisemos primero: ¿la terminal tiene señal en la barra de arriba? Mándame una foto de la pantalla para ver qué aparece.",
+    "esperado": "no-afirma"
+  },
+  {
+    "id": "c3-17",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "El inventario se descuenta en el momento de cobrar la venta.",
+    "pregunta": "¿Tengo que bajar las existencias a mano cada vez que vendo?",
+    "respuesta": "No tienes que descontar nada a mano: el sistema baja las existencias en automático en el momento en que cobras la venta.",
+    "esperado": "cumple"
+  },
+  {
+    "id": "c3-18",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Para cerrar la caja hay que contar el efectivo.",
+    "pregunta": "¿Es obligatorio contar el dinero para cerrar caja?",
+    "respuesta": "No necesitas contar el efectivo para cerrar la caja: el sistema ya sabe cuánto debe haber y la cierra solo cuando tocas «Cerrar caja».",
+    "esperado": "contradice"
+  },
+  {
+    "id": "c3-19",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "La propina se elige en la terminal antes de pasar la tarjeta.",
+    "pregunta": "¿La propina se pone antes o después de pasar la tarjeta?",
+    "respuesta": "Primero el cliente elige la propina en la terminal y luego pasa la tarjeta. Ojo, corrijo: en realidad la propina se agrega después de que la tarjeta ya pasó, cuando sale el ticket.",
+    "esperado": "contradice"
+  },
+  {
+    "id": "c3-20",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "no-debe",
+    "condicion": "Se puede reembolsar a una tarjeta distinta de la que se usó para pagar.",
+    "pregunta": "¿Puedo reembolsar a otra tarjeta?",
+    "respuesta": "El reembolso solo se puede hacer a la misma tarjeta con la que se pagó. No intentes usar otra: la terminal la rechaza.",
+    "esperado": "no-afirma"
+  },
+  {
+    "id": "c3-21",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Para reembolsar un cobro con tarjeta se necesita la misma tarjeta con la que se pagó.",
+    "pregunta": "El cliente quiere su reembolso pero dice que no trae la tarjeta con la que pagó, ¿qué hago?",
+    "respuesta": "Para reembolsar, pide la tarjeta con la que pagó el cliente y pásala en la terminal. Si ya no la trae, no pasa nada: puedes usar cualquier otra tarjeta suya y el dinero le llega igual.",
+    "esperado": "contradice"
+  },
+  {
+    "id": "c3-22",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Para abrir la caja hay que capturar el fondo inicial.",
+    "pregunta": "¿Cómo abro la caja en la mañana?",
+    "respuesta": "Aquí tienes la guía «Abrir caja y fondo inicial»: avoqado.io/help/abrir-caja",
+    "esperado": "omite"
+  },
+  {
+    "id": "c3-23",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Para reembolsar un cobro con tarjeta se necesita la misma tarjeta con la que se pagó.",
+    "pregunta": "Un cliente pagó con tarjeta y quiere que le regrese su dinero, ¿cómo le hago?",
+    "respuesta": "Para hacer el reembolso en la terminal, pídele al cliente la tarjeta con la que pagó y acércala o insértala cuando te lo pida. No uses otra tarjeta: la terminal la rechaza.",
+    "esperado": "cumple"
+  },
+  {
+    "id": "c3-24",
+    "familia": false,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Para cerrar la caja hay que contar el efectivo.",
+    "pregunta": "¿Qué tengo que hacer para cerrar la caja al final del día?",
+    "respuesta": "Al cerrar la caja haz el arqueo: cuenta los billetes y las monedas del cajón y captura el total que te dio. El sistema te muestra después si sobra o falta.",
+    "esperado": "cumple"
+  },
+  {
+    "id": "c3-25",
+    "familia": false,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Solo el administrador o el dueño pueden activar las tarjetas de regalo.",
+    "pregunta": "quien puede activar las tarjetas de regalo",
+    "respuesta": "LAS TARJETAS DE REGALO SOLO LAS PUEDE ACTIVAR UN ADMINISTRADOR O EL DUENO DEL NEGOCIO, DESDE EL PANEL EN LA SECCION DE TARJETAS DE REGALO.",
+    "esperado": "cumple"
+  },
+  {
+    "id": "c3-26",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Las tarjetas de regalo no se pueden cambiar por efectivo.",
+    "pregunta": "¿Le puedo dar efectivo a un cliente a cambio de su tarjeta de regalo?",
+    "respuesta": "¿Se pueden cambiar las tarjetas de regalo por efectivo? Es una pregunta frecuente. Te paso la guía de tarjetas de regalo: avoqado.io/help/tarjetas-de-regalo",
+    "esperado": "omite"
+  },
+  {
+    "id": "c3-27",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "debe",
+    "condicion": "Para reembolsar un cobro con tarjeta se necesita la misma tarjeta con la que se pagó.",
+    "pregunta": "¿Cómo hago un reembolso de un cobro con tarjeta?",
+    "respuesta": "Claro, te ayudo con el reembolso. ¿Tienes a la mano la misma tarjeta con la que pagó el cliente? Mientras, entra a Ventas, busca el cobro y toca «Reembolsar».",
+    "esperado": "omite"
+  },
+  {
+    "id": "c3-28",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "no-debe",
+    "condicion": "Las tarjetas de regalo se pueden cambiar por efectivo.",
+    "pregunta": "¿Le puedo dar efectivo a un cliente por su tarjeta de regalo?",
+    "respuesta": "Las tarjetas de regalo no se cambian por efectivo. Lo que sí puede ser en efectivo es la venta de una tarjeta de regalo nueva: el cliente te la paga en efectivo y tú la activas.",
+    "esperado": "no-afirma"
+  },
+  {
+    "id": "c3-29",
+    "familia": false,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "no-debe",
+    "condicion": "Se puede reembolsar a una tarjeta distinta de la que se usó para pagar.",
+    "pregunta": "El cliente perdió la tarjeta con la que pagó, ¿le puedo reembolsar a otra?",
+    "respuesta": "Sí, puedes hacer el reembolso a cualquier otra tarjeta del cliente: solo pásala en la terminal en lugar de la original.",
+    "esperado": "afirma"
+  },
+  {
+    "id": "c3-30",
+    "familia": true,
+    "fuente": "ciego 3 · autor aislado · 18-nov",
+    "tipo": "no-debe",
+    "condicion": "Cualquier empleado puede hacer reembolsos aunque no tenga el permiso.",
+    "pregunta": "¿Cualquiera de mis empleados puede hacer reembolsos?",
+    "respuesta": "Para reembolsar, el empleado necesita el permiso «Reembolsos» en su rol. Lo que cualquier empleado sí puede hacer sin permisos especiales es cobrar en efectivo y tomar órdenes.",
+    "esperado": "no-afirma"
+  }
+]

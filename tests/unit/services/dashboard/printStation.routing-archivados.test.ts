@@ -43,7 +43,7 @@ beforeEach(() => {
     { id: 'p_pan', venueId: VENUE, name: 'Pan', categoryId: 'c1', printStationId: null, deletedAt: new Date() },
     { id: 'p_other', venueId: 'venue_2', name: 'Café', categoryId: 'c1', printStationId: null, deletedAt: null },
   ]
-  categories = [{ id: 'c1', venueId: VENUE, name: 'Bebidas', displayOrder: 0, printStationId: null }]
+  categories = [{ id: 'c1', venueId: VENUE, name: 'Bebidas', displayOrder: 0, printStationId: null, deletedAt: null }]
   stations = []
   mockPrisma.venue.findUnique.mockResolvedValue({ id: VENUE })
   mockPrisma.product.findMany.mockImplementation((a: any) => Promise.resolve(page(products, a)))

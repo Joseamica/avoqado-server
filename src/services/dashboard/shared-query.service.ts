@@ -57,6 +57,7 @@ import * as reservationService from './reservation.dashboard.service'
 import * as teamDashboardService from './team.dashboard.service'
 import { localWallClockRaw, utcTs } from '../../utils/sqlDates'
 import { sqlOrdenSinTarjetas } from '../giftCards/giftCardMarks'
+import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraRealSql } from '../shared/horaRealDelAparato'
 
 /**
  * Date range specification - supports both predefined periods and custom ranges
@@ -826,22 +827,15 @@ export class SharedQueryService {
     // Get date range (supports both RelativeDateRange and custom dates)
     const { from, to, periodName } = this.getDateRange(period, venueTimezone)
 
-    // Query payments (completed only)
+    // Query payments (completed only). D4b: cobros y órdenes por su hora REAL (la del aparato si se hizo sin internet), como el Resumen.
     const [paymentsAgg, ordersAgg] = await Promise.all([
       prisma.payment.aggregate({
-        where: {
-          venueId,
-          createdAt: { gte: from, lte: to },
-          status: 'COMPLETED',
-        },
+        where: dondeHoraRealEntre({ venueId, status: 'COMPLETED' as const }, from, to),
         _sum: { amount: true },
         _count: true,
       }),
       prisma.order.aggregate({
-        where: {
-          venueId,
-          createdAt: { gte: from, lte: to },
-        },
+        where: dondeHoraRealEntre({ venueId }, from, to),
         _count: true,
       }),
     ])
@@ -903,7 +897,7 @@ export class SharedQueryService {
 
     // SQL for grouping by date or hour, on the venue wall clock (double AT TIME ZONE: with a
     // single one the stored UTC value was read as local time and 20:00 sales moved a day).
-    const wall = localWallClockRaw(safeTz, '"createdAt"')
+    const wall = localWallClockRaw(safeTz, sqlHoraReal()) // D4b: la hora real del cobro, como getSalesForPeriod
     const dateGroupSql = granularity === 'hour' ? `TO_CHAR(${wall}, 'HH24:00')` : `TO_CHAR(${wall}, 'YYYY-MM-DD')`
 
     const dataPoints = await prisma.$queryRaw<
@@ -919,8 +913,7 @@ export class SharedQueryService {
         COUNT(DISTINCT "orderId")::bigint as "orderCount"
       FROM "Payment"
       WHERE "venueId" = ${venueId}
-        AND "createdAt" >= ${utcTs(from)}
-        AND "createdAt" <= ${utcTs(to)}
+        AND ${sqlRangoHoraRealSql('', from, to)}
         AND "status" = 'COMPLETED'
       GROUP BY ${Prisma.raw(dateGroupSql)}
       ORDER BY date ASC
@@ -1000,8 +993,7 @@ export class SharedQueryService {
       INNER JOIN "Order" o ON oi."orderId" = o."id"
       LEFT JOIN "MenuCategory" c ON p."categoryId" = c."id"
       WHERE o."venueId"::text = ${venueId}
-        AND o."createdAt" >= ${utcTs(from)}
-        AND o."createdAt" <= ${utcTs(to)}
+        AND ${sqlRangoHoraRealSql('o', from, to)}
         AND oi."removedAt" IS NULL -- a line the delivery provider removed sold nothing
       GROUP BY p."id", p."name", c."name"
       ORDER BY "revenue" DESC
@@ -1094,8 +1086,7 @@ export class SharedQueryService {
       INNER JOIN "Order" o ON oi."orderId" = o."id"
       LEFT JOIN "Product" p ON oi."productId" = p."id"
       WHERE o."venueId"::text = ${venueId}
-        AND o."createdAt" >= ${utcTs(from)}
-        AND o."createdAt" <= ${utcTs(to)}
+        AND ${sqlRangoHoraRealSql('o', from, to)}
         AND (${Prisma.join(productFilters, ' OR ')})
         AND oi."removedAt" IS NULL
       GROUP BY COALESCE(oi."productName", p."name", 'Producto sin nombre')
@@ -1167,7 +1158,8 @@ export class SharedQueryService {
     const patterns = [...new Set([...leftVariants, ...rightVariants])].map(variant => `%${variant}%`)
     const productNameFilters = patterns.map(pattern => Prisma.sql`COALESCE(oi."productName", p."name", '') ILIKE ${pattern}`)
 
-    const venueCreatedAt = Prisma.sql`((o."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE ${venueTimezone})`
+    // D4b: la hora real de la orden también para «fin de semana» y «noche».
+    const venueCreatedAt = Prisma.sql`((${Prisma.raw(sqlHoraReal('o'))} AT TIME ZONE 'UTC') AT TIME ZONE ${venueTimezone})`
 
     const weekendFilter = weekendOnly ? Prisma.sql`AND EXTRACT(DOW FROM ${venueCreatedAt}) IN (0, 6)` : Prisma.empty
 
@@ -1190,8 +1182,7 @@ export class SharedQueryService {
       INNER JOIN "Order" o ON oi."orderId" = o."id"
       LEFT JOIN "Product" p ON oi."productId" = p."id"
       WHERE o."venueId"::text = ${venueId}
-        AND o."createdAt" >= ${utcTs(from)}
-        AND o."createdAt" <= ${utcTs(to)}
+        AND ${sqlRangoHoraRealSql('o', from, to)}
         AND (${Prisma.join(productNameFilters, ' OR ')})
         AND oi."removedAt" IS NULL
         ${weekendFilter}
@@ -1330,17 +1321,21 @@ export class SharedQueryService {
           COUNT(DISTINCT o."id")::bigint as "totalOrders",
           COALESCE(SUM(p."amount"), 0) as "totalRevenue",
           COALESCE(SUM(p."tipAmount"), 0) as "totalTips",
-          COUNT(DISTINCT sh."id")::bigint as "shiftsWorked"
+          -- Codex r2 #1 (D2): los turnos se cuentan aparte; como LEFT JOIN multiplicaban cada cobro por el número de turnos.
+          (
+            SELECT COUNT(*) FROM "Shift" sh
+            WHERE sh."staffId" = s."id" AND sh."venueId" = ${venueId}
+              AND sh."startTime" >= ${utcTs(from)} AND sh."startTime" <= ${utcTs(to)}
+          )::bigint as "shiftsWorked"
         FROM "Staff" s
         INNER JOIN "StaffVenue" sv ON s."id" = sv."staffId" AND sv."venueId" = ${venueId}
         LEFT JOIN "Order" o ON (o."servedById" = s."id" OR o."createdById" = s."id")
-          AND o."createdAt" >= ${utcTs(from)}
-          AND o."createdAt" <= ${utcTs(to)}
+          -- D2 (Codex r1 #1): sólo las órdenes de ESTA sucursal (quien trabaja en dos ya no suma las de la otra), por su hora real
+          -- (la del aparato si se vendió sin internet), como el Resumen.
+          AND o."venueId" = ${venueId}
+          AND ${sqlRangoHoraRealSql('o', from, to)}
           AND ${sqlOrdenSinTarjetas('o.id')}
         LEFT JOIN "Payment" p ON p."orderId" = o."id" AND p."status" = 'COMPLETED'
-        LEFT JOIN "Shift" sh ON sh."staffId" = s."id"
-          AND sh."startTime" >= ${utcTs(from)}
-          AND sh."startTime" <= ${utcTs(to)}
         WHERE sv."venueId" = ${venueId}
         GROUP BY s."id", s."firstName", s."lastName", sv."role"
         HAVING COUNT(DISTINCT o."id") > 0
@@ -1810,11 +1805,7 @@ export class SharedQueryService {
 
     // Get revenue from payments
     const paymentsAgg = await prisma.payment.aggregate({
-      where: {
-        venueId,
-        createdAt: { gte: from, lte: to },
-        status: 'COMPLETED',
-      },
+      where: dondeHoraRealEntre({ venueId, status: 'COMPLETED' as const }, from, to), // D4b: hora real, como las órdenes de abajo
       _sum: { amount: true },
     })
 
@@ -1841,8 +1832,7 @@ export class SharedQueryService {
       INNER JOIN "Order" o ON oi."orderId" = o."id"
       LEFT JOIN "Recipe" r ON r."productId" = p."id"
       WHERE o."venueId"::text = ${venueId}
-        AND o."createdAt" >= ${utcTs(from)}
-        AND o."createdAt" <= ${utcTs(to)}
+        AND ${sqlRangoHoraRealSql('o', from, to)}
         AND oi."removedAt" IS NULL
       GROUP BY p."id", p."name"
       ORDER BY (SUM(${Prisma.raw(lineRevenueSql())}) - COALESCE(SUM(oi."quantity" * r."totalCost"), 0)) DESC
@@ -1913,11 +1903,7 @@ export class SharedQueryService {
     // Get payments grouped by method
     const payments = await prisma.payment.groupBy({
       by: ['method'],
-      where: {
-        venueId,
-        createdAt: { gte: from, lte: to },
-        status: 'COMPLETED',
-      },
+      where: dondeHoraRealEntre({ venueId, status: 'COMPLETED' as const }, from, to), // D4b: hora real del cobro
       _sum: {
         amount: true,
         tipAmount: true,

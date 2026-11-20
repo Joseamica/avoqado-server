@@ -40,6 +40,8 @@ interface Fila {
   isComp: boolean
   compReason: string | null
   appliedToItemIds: string[]
+  /** D19: la fila del descuento de cuenta del POS que sumó su uso. */
+  usoContado?: boolean
 }
 interface Estado {
   folio: boolean
@@ -125,26 +127,44 @@ function txSobre(e: Estado): TxConReintento {
       findMany: jest.fn(async ({ where, take }: any) => {
         e.llamadas.push('leer')
         expect(where.order).toEqual({ venueId: VENUE })
-        return e.filas
-          .filter(f => f.orderId === where.orderId && (!where.id?.gt || f.id > where.id.gt))
-          .sort(porId)
-          .slice(0, take)
-          .map(f => {
-            const d = e.descuentos.find(x => x.id === f.discountId)
-            return {
-              id: f.id,
-              amount: f.amount,
-              discountId: f.discountId,
-              couponCodeId: f.couponCodeId,
-              loyaltyTransactionId: f.loyaltyTransactionId,
-              discount: d ? { maxTotalUses: d.maxTotalUses, maxUsesPerCustomer: d.maxUsesPerCustomer } : null,
-            }
-          })
+        return (
+          e.filas
+            .filter(f => f.orderId === where.orderId && (!where.id?.gt || f.id > where.id.gt))
+            // D24: la anulación que no es de folio lee sólo las filas que sumaron su uso (`usoContado`, con su descuento).
+            .filter(f => where.usoContado === undefined || (f.usoContado ?? false) === where.usoContado)
+            .filter(f => where.discountId?.not !== null || f.discountId != null)
+            .sort(porId)
+            .slice(0, take)
+            .map(f => {
+              const d = e.descuentos.find(x => x.id === f.discountId)
+              return {
+                id: f.id,
+                amount: f.amount,
+                discountId: f.discountId,
+                couponCodeId: f.couponCodeId,
+                loyaltyTransactionId: f.loyaltyTransactionId,
+                usoContado: f.usoContado ?? false,
+                discount: d ? { maxTotalUses: d.maxTotalUses, maxUsesPerCustomer: d.maxUsesPerCustomer } : null,
+              }
+            })
+        )
       }),
       update: jest.fn(async ({ where, data }: any) => {
         e.llamadas.push(`fila:${where.id}`)
         Object.assign(e.filas.find(f => f.id === where.id)!, data)
         return {}
+      }),
+      // D24: la anulación que no es de folio suelta la marca `usoContado` de sus filas.
+      updateMany: jest.fn(async ({ where, data }: any) => {
+        const filas = e.filas.filter(
+          f =>
+            f.orderId === where.orderId &&
+            (f.usoContado ?? false) === where.usoContado &&
+            (where.discountId === null ? f.discountId == null : f.discountId != null),
+        )
+        for (const f of filas) Object.assign(f, data)
+        e.llamadas.push(`marca:${filas.length}`)
+        return { count: filas.length }
       }),
     },
     stampReward: {
@@ -363,6 +383,16 @@ describe('convertirBeneficiosEnCortesiaEnTx (S9, P2-5)', () => {
     expect(e.llamadas.some(l => l.startsWith('Discount:'))).toBe(false)
   })
 
+  it('D19 (Codex r1 #5): una fila del POS que sumó su uso lo devuelve aunque su descuento ya no tenga tope, y queda sin marca', async () => {
+    const e = estado({
+      filas: [fila('od1', { discountId: 'cdisc1', usoContado: true })],
+      descuentos: [{ id: 'cdisc1', venueId: VENUE, currentUses: 3, maxTotalUses: null, maxUsesPerCustomer: null }],
+    })
+    await convertir(e)
+    expect(e.descuentos[0].currentUses).toBe(2)
+    expect(e.filas[0]).toMatchObject({ ...CORTESIA(D(85)), usoContado: false })
+  })
+
   it('un 20 % convertido no crece al agregar un producto a la cuenta revivida (repartoDescuento.ts:242, :296)', async () => {
     const veinte = fila('od1', { discountId: 'cdisc1', type: 'PERCENTAGE', value: D(20), amount: D(20), taxReduction: D(0) })
     const e = estado({
@@ -510,7 +540,8 @@ describe('devolverCanjesDeVentaAnuladaEnTx con S9', () => {
 
     const sinBeneficios = estado()
     await devolver(sinBeneficios)
-    expect(sinBeneficios.llamadas).toEqual([`sello:${ORDER}`, 'leer'])
+    // D24: después del sello, la fila cuyo descuento se borró del catálogo suelta su marca (aquí no hay ninguna: `marca:0`).
+    expect(sinBeneficios.llamadas).toEqual([`sello:${ORDER}`, 'marca:0', 'leer'])
   })
 
   it('S9: una cuenta que no es de folio no se sella', async () => {

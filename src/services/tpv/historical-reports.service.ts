@@ -13,8 +13,9 @@
  * @see /docs/DATETIME_SYNC.md - Date synchronization architecture
  */
 
+import { sqlHoraReal, sqlRangoHoraRealSql } from '@/services/shared/horaRealDelAparato'
 import prisma from '@/utils/prismaClient'
-import { localInstantRaw, localWallClockRaw, utcTs } from '@/utils/sqlDates'
+import { localInstantRaw, localWallClockRaw } from '@/utils/sqlDates'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 import { BadRequestError } from '@/errors/AppError'
 import { Prisma } from '@prisma/client'
@@ -70,7 +71,7 @@ function getTruncateExpression(grouping: HistoricalGrouping, timezone: string): 
   // Venue wall clock of the UTC column. A single `AT TIME ZONE tz` read the stored UTC value
   // as if it were local time and put a 20:00 sale on the next day. The period is returned as
   // the INSTANT it starts (midnight on the venue clock): the TPV formats `periodStart` itself.
-  const wall = localWallClockRaw(safeTz, 'o."createdAt"')
+  const wall = localWallClockRaw(safeTz, sqlHoraReal('o')) // D4: la hora real de la venta
 
   switch (grouping) {
     case HistoricalGrouping.DAILY:
@@ -228,6 +229,7 @@ async function calculatePreviousPeriodsBulk(
   }
 
   // Single query: aggregate all previous periods grouped by DATE_TRUNC
+  // D4: por la hora real; `latestPrevEnd` ya es el último milisegundo del periodo (getPeriodEnd), así que el rango es inclusivo.
   const truncateExpr = getTruncateExpression(grouping, timezone)
 
   const rows = await prisma.$queryRaw<Array<{ period_start: Date; total_sales: Decimal; total_orders: bigint }>>`
@@ -237,8 +239,7 @@ async function calculatePreviousPeriodsBulk(
       COALESCE(COUNT(DISTINCT o.id), 0) as total_orders
     FROM "Order" o
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${utcTs(earliestPrevStart)}
-      AND o."createdAt" < ${utcTs(latestPrevEnd)}
+      AND ${sqlRangoHoraRealSql('o', earliestPrevStart, latestPrevEnd)}
       AND o.status = 'COMPLETED'
     GROUP BY period_start
   `
@@ -331,8 +332,7 @@ export async function getHistoricalSummaries(
       COALESCE(SUM((SELECT COALESCE(SUM(oi.quantity), 0) FROM "OrderItem" oi WHERE oi."orderId" = o.id)), 0) as total_products
     FROM "Order" o
     WHERE o."venueId" = ${venueId}
-      AND o."createdAt" >= ${utcTs(startDate)}
-      AND o."createdAt" <= ${utcTs(endDate)}
+      AND ${sqlRangoHoraRealSql('o', startDate, endDate)}
       AND o.status = 'COMPLETED'
       ${Prisma.raw(cursorCondition)}
     GROUP BY period_start

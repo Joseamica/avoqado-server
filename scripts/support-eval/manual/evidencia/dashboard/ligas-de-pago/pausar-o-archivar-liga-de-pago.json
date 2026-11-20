@@ -1,0 +1,217 @@
+{
+  "pagina": "dashboard/ligas-de-pago/pausar-o-archivar-liga-de-pago",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 46,
+      "cita": "\"title\": \"Ventas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 49,
+      "cita": "\"paymentLinks\": \"Ligas de Pago\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 241,
+      "cita": "\"links\": \"Ligas de pago\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 516,
+      "cita": "{ title: t('sidebar:paymentLinksMenu.links'), url: 'payment-links', permission: 'payment-link:read' },"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/PaymentLinks/PaymentLinks.tsx",
+      "linea": 450,
+      "cita": "<MoreHorizontal className=\"h-4 w-4\" />"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 112,
+      "cita": "\"pause\": \"Pausar\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 113,
+      "cita": "\"resume\": \"Reanudar\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/PaymentLinks/PaymentLinks.tsx",
+      "linea": 464,
+      "cita": "onClick={() => toggleStatusMutation.mutate({ linkId: row.original.id, status: 'PAUSED' })}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/PaymentLinks/PaymentLinks.tsx",
+      "linea": 476,
+      "cita": "onClick={() => toggleStatusMutation.mutate({ linkId: row.original.id, status: 'ACTIVE' })}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 114,
+      "cita": "\"archive\": \"Archivar\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 236,
+      "cita": "\"archiveConfirm\": \"Archivar\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 235,
+      "cita": "\"archiveDescription\": \"Esta liga dejará de ser accesible para los clientes. Esta acción no se puede deshacer.\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/PaymentLinks/PaymentLinks.tsx",
+      "linea": 623,
+      "cita": "onClick={() => archivingLink && archiveMutation.mutate(archivingLink.id)}"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payment-link:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 651
+    },
+    {
+      "permiso": "payment-link:read",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4623
+    },
+    {
+      "permiso": "payment-link:create",
+      "archivo": "src/pages/PaymentLinks/PaymentLinks.tsx",
+      "linea": 454
+    },
+    {
+      "permiso": "payment-link:update",
+      "archivo": "avoqado-server/src/routes/dashboard/paymentLink.routes.ts",
+      "linea": 107
+    },
+    {
+      "permiso": "payment-link:update",
+      "archivo": "avoqado-server/src/routes/dashboard/paymentLink.routes.ts",
+      "linea": 133
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: la página pide payment-link:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 651
+    },
+    {
+      "ruta": "Antes: una liga que no está ACTIVE no se abre para pagar",
+      "archivo": "avoqado-server/src/services/dashboard/paymentLink.service.ts",
+      "linea": 1496
+    },
+    {
+      "ruta": "Antes: ni se crea el cobro",
+      "archivo": "avoqado-server/src/services/dashboard/paymentLink.service.ts",
+      "linea": 1640
+    },
+    {
+      "ruta": "Problema: Pausar sólo en una ACTIVE",
+      "archivo": "src/pages/PaymentLinks/PaymentLinks.tsx",
+      "linea": 461
+    },
+    {
+      "ruta": "Problema: Reanudar sólo en una PAUSED",
+      "archivo": "src/pages/PaymentLinks/PaymentLinks.tsx",
+      "linea": 473
+    },
+    {
+      "ruta": "Problema: avisos de éxito",
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 121
+    },
+    {
+      "ruta": "Problema: aviso reanudada",
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 122
+    },
+    {
+      "ruta": "Problema: aviso archivada",
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 120
+    },
+    {
+      "ruta": "Problema: aviso de error con la razón",
+      "archivo": "src/pages/PaymentLinks/PaymentLinks.tsx",
+      "linea": 207
+    },
+    {
+      "ruta": "Problema: texto «Error»",
+      "archivo": "src/locales/es/common.json",
+      "linea": 17
+    },
+    {
+      "ruta": "Antes: crear la sesión de cobro rechaza una liga que no está ACTIVE",
+      "archivo": "avoqado-server/src/services/dashboard/paymentLink.service.ts",
+      "linea": 2849
+    },
+    {
+      "ruta": "Antes: igual el checkout de Stripe",
+      "archivo": "avoqado-server/src/services/dashboard/paymentLink.service.ts",
+      "linea": 2659
+    },
+    {
+      "ruta": "Antes: igual Mercado Pago",
+      "archivo": "avoqado-server/src/services/dashboard/paymentLink.service.ts",
+      "linea": 3794
+    },
+    {
+      "ruta": "Antes: un pago ya empezado termina: completeCharge sólo revisa el estado de la sesión, no el de la liga",
+      "archivo": "avoqado-server/src/services/dashboard/paymentLink.service.ts",
+      "linea": 3027
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3000 (develop)",
+    "fecha": "2026-11-12",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3/fotos/pausar-o-archivar-liga-de-pago/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/pausar-o-archivar-liga-de-pago/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/pausar-o-archivar-liga-de-pago/2.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/pausar-o-archivar-liga-de-pago/3.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/pausar-o-archivar-liga-de-pago/4.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/pausar-o-archivar-liga-de-pago/5.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/pausar-o-archivar-liga-de-pago/6.png"
+    ],
+    "filasCreadas": [
+      "ActivityLog cmweho9c801jwwald56m452lh — PAYMENT_LINK_UPDATED (pausada) · ActivityLog cmwehobhc01jywaldgjbu2xou — PAYMENT_LINK_UPDATED (reanudada)",
+      "ActivityLog cmwehpktz01k0wald9ktv95b7 — PAYMENT_LINK_ARCHIVED · PaymentLink cmwehmm9701jkwaldskxk2hf4 pasó a ARCHIVED"
+    ],
+    "nota": "Avoqado Full, OWNER del seed, con la liga de QA de cambiar-monto-de-liga-de-pago. Paso 1: ⋯ de una liga activa trae *Editar*, *Pausar*, *Archivar*. Paso 2: *Pausar* → «Liga de pago pausada» (renglón *Pausada*); su ⋯ trae *Reanudar*, que dio «Liga de pago reanudada». Paso 3: *Archivar* → «¿Archivar esta liga de pago? … no se puede deshacer.» → *Archivar* → «Liga de pago archivada» (renglón *Archivada*). El recorrido 1 la dejó fuera porque creía que crear una liga pedía un canal que cobre: desde el panel sí se crea (el panel manda el canal y el SERVIDOR sólo revisa que esté activo)."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

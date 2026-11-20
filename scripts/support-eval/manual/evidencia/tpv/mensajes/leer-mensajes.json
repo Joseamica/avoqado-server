@@ -1,0 +1,105 @@
+{
+  "pagina": "tpv/mensajes/leer-mensajes",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 984,
+      "cita": "label = \"Mensajes\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/messaging/presentation/TpvMessageViewModel.kt",
+      "linea": 31,
+      "cita": "ALL(\"Todos\"),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/messaging/presentation/TpvMessageViewModel.kt",
+      "linea": 32,
+      "cita": "UNREAD(\"No vistos\"),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/messaging/presentation/TpvMessageViewModel.kt",
+      "linea": 33,
+      "cita": "READ(\"Vistos\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1394,
+      "cita": "onMessageClick = { tpvMessageViewModel.selectMessage(it) }"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/messaging/presentation/components/TpvMessageDialog.kt",
+      "linea": 141,
+      "cita": "\"ANNOUNCEMENT\" -> \"Anuncio\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/messaging/presentation/components/TpvMessageDialog.kt",
+      "linea": 289,
+      "cita": "Text(\"Entendido\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/messaging/presentation/components/TpvMessageDialog.kt",
+      "linea": 297,
+      "cita": "Text(\"Cerrar\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/messaging/presentation/components/TpvMessageDialog.kt",
+      "linea": 142,
+      "cita": "\"SURVEY\" -> \"Encuesta\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/messaging/presentation/components/TpvMessageDialog.kt",
+      "linea": 263,
+      "cita": "Text(\"Enviar respuesta\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/messaging/presentation/components/TpvMessageDialog.kt",
+      "linea": 143,
+      "cita": "\"ACTION\" -> \"Accion\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/messaging/presentation/components/TpvMessageDialog.kt",
+      "linea": 274,
+      "cita": "Text(message.actionLabel ?: \"Ejecutar\")"
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: la tarjeta Mensajes la apaga la configuración de la terminal (showMessages)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 782
+    },
+    {
+      "ruta": "Antes: el número cuenta los pendientes",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 784
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 5,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

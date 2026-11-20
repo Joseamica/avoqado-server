@@ -427,6 +427,136 @@ describe('S7 — aviso al gerente de una venta de la cola de terminal que llegó
       expect(avisos()).toHaveLength(0)
     })
 
+    // hz:bdd815fd:D2 (encargo 8cfa9e): en Mesas la TPV manda TODO el efectivo por la cola, también con red. Un abono parcial a
+    // propósito ($50 de una cuenta de $90) dejaba un saldo y salía «una venta sin conexión no cuadra». Si la terminal dijo cuánto
+    // creía que debía la cuenta (`saldoEsperadoSinRed`) y lo que queda es justo eso menos lo cobrado, no hay nada que avisar.
+    describe('abono parcial de Mesas (la terminal dijo el saldo que esperaba)', () => {
+      // Codex r5: sólo una cuenta propia de Avoqado que llegó EN VIVO (hora del aparato ≈ llegada) puede callar el aviso.
+      const AHORA = new Date('2026-11-19T18:00:00Z')
+      const conSaldoEsperado = (amount: number, antesCents: number, horaDelAparato: number | string = AHORA.getTime() - 5_000) =>
+        deLaCola({ amount, saldoEsperadoSinRed: { antesCents, deviceId: 'pax-1' }, horaDelAparato, llegada: AHORA })
+      beforeEach(async () => {
+        const sembrada = (await prismaMock.order.findUnique({} as any)) as any
+        prismaMock.order.findUnique.mockResolvedValue({ ...sembrada, originSystem: 'AVOQADO', source: 'TPV' } as any)
+      })
+
+      it('esperaba $90, cobra $50 y quedan $40 ⇒ sin aviso: la cuenta sigue debiendo lo que la terminal sabía', async () => {
+        await conSaldoEsperado(5000, 9000)
+
+        expect(avisos()).toHaveLength(0)
+      })
+
+      it('esperaba $70 pero el servidor tenía $90: cobra $50 y quedan $40 (no $20) ⇒ PRECIO_CAMBIADO sigue saliendo', async () => {
+        prismaMock.activityLog.create.mockResolvedValue({ id: 'al-1' } as any) // COBRO_SIN_RED_CON_DIFERENCIA de siempre
+        await conSaldoEsperado(5000, 7000)
+
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.objectContaining({ motivo: expect.stringContaining('$40.00') })]])
+      })
+
+      it('esperaba $90 y paga $90 exacto ⇒ sin aviso (como siempre)', async () => {
+        await conSaldoEsperado(9000, 9000)
+
+        expect(avisos()).toHaveLength(0)
+      })
+
+      it('esperaba $120 (otra tablet ya cobró $30) y cobra los $120 ⇒ el sobrepago sigue avisando', async () => {
+        prismaMock.activityLog.create.mockResolvedValue({ id: 'al-1' } as any)
+        await conSaldoEsperado(12000, 12000)
+
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.objectContaining({ motivo: expect.stringContaining('$30.00') })]])
+      })
+
+      // Codex r1 #3: en Rappi 2b el saldo no es el de la venta (terceros y propina contractual): avisa como antes.
+      it('pedido de Rappi con efectivo de terceros ⇒ avisa como antes aunque el saldo sea el esperado', async () => {
+        prismaMock.order.findUnique.mockResolvedValue({
+          id: 'order-1',
+          orderNumber: 'ORD-1',
+          paymentStatus: 'PENDING',
+          subtotal: new Decimal(90),
+          discountAmount: new Decimal(0),
+          serviceChargeAmount: new Decimal(0),
+          total: new Decimal(90),
+          remainingBalance: new Decimal(90),
+          thirdPartyCashDue: new Decimal(0),
+          version: 1,
+          venueId: VENUE,
+          tableId: null,
+          areaTicketCheckoutSession: null,
+          customerId: null,
+          customer: null,
+        } as any)
+
+        await conSaldoEsperado(5000, 9000).catch(() => undefined)
+
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.anything()]])
+      })
+
+      // Codex r3: otra caja anuló la cuenta mientras la terminal cobraba sin red; el dinero la reabre y el dueño debe enterarse.
+      it('la cuenta estaba anulada y el abono la reabre ⇒ avisa como antes aunque el saldo sea el esperado', async () => {
+        const sembrada = (await prismaMock.order.findUnique({} as any)) as any
+        prismaMock.order.findUnique.mockResolvedValue({ ...sembrada, status: 'CANCELLED', originSystem: 'AVOQADO' } as any)
+        prismaMock.order.update.mockResolvedValue({ ...sembrada, status: 'PENDING' } as any)
+        prismaMock.activityLog.create.mockResolvedValue({ id: 'al-1' } as any)
+
+        await conSaldoEsperado(5000, 9000)
+
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.anything()]])
+      })
+
+      // Codex r4: SoftRestaurant borró la cuenta; el dinero entra y la cuenta SIGUE borrada (no se reabre) ⇒ avisa como antes.
+      it('la cuenta estaba borrada en el sistema externo y sigue borrada ⇒ avisa como antes aunque el saldo sea el esperado', async () => {
+        const sembrada = (await prismaMock.order.findUnique({} as any)) as any
+        prismaMock.order.findUnique.mockResolvedValue({ ...sembrada, status: 'DELETED', originSystem: 'POS_SOFTRESTAURANT' } as any)
+        prismaMock.activityLog.create.mockResolvedValue({ id: 'al-1' } as any)
+
+        await conSaldoEsperado(5000, 9000)
+
+        expect(prismaMock.order.update).not.toHaveBeenCalled() // no se reabrió: sigue borrada
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.anything()]])
+      })
+
+      it('el cobro viajó sin red (llega 10 min después de tomarlo) ⇒ avisa como antes aunque el saldo sea el esperado', async () => {
+        await conSaldoEsperado(5000, 9000, AHORA.getTime() - 10 * 60_000)
+
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.objectContaining({ motivo: expect.stringContaining('$40.00') })]])
+      })
+
+      it('Codex r7 #2: exactamente 2 min después ya NO es en vivo ⇒ avisa; un milisegundo antes, calla', async () => {
+        await conSaldoEsperado(5000, 9000, AHORA.getTime() - 120_000)
+        expect(avisos()).toHaveLength(1)
+
+        await conSaldoEsperado(5000, 9000, AHORA.getTime() - 119_999)
+        expect(avisos()).toHaveLength(1)
+      })
+
+      it('la hora del aparato en texto ISO también cuenta (en vivo ⇒ sin aviso); sin hora del aparato ⇒ avisa como antes', async () => {
+        await conSaldoEsperado(5000, 9000, new Date(AHORA.getTime() - 3_000).toISOString())
+        expect(avisos()).toHaveLength(0)
+
+        await deLaCola({ amount: 5000, saldoEsperadoSinRed: { antesCents: 9000, deviceId: 'pax-1' }, llegada: AHORA })
+        expect(avisos()).toHaveLength(1)
+      })
+
+      it.each([
+        ['Rappi que entró por un canal de reparto (sin dinero de terceros)', { source: 'RAPPI' }],
+        ['un pedido de plataforma de reparto', { originSystem: 'DELIVERY_PLATFORM' }],
+        ['una cuenta de SoftRestaurant', { originSystem: 'POS_SOFTRESTAURANT' }],
+      ])('%s ⇒ avisa como antes aunque el saldo sea el esperado (Codex r5 #2)', async (_cual, cambio) => {
+        const sembrada = (await prismaMock.order.findUnique({} as any)) as any
+        prismaMock.order.findUnique.mockResolvedValue({ ...sembrada, ...cambio } as any)
+
+        await conSaldoEsperado(5000, 9000)
+
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.anything()]])
+      })
+
+      it('un centavo de redondeo entre lo esperado y lo que queda ⇒ sin aviso (la misma tolerancia de siempre)', async () => {
+        await conSaldoEsperado(5000, 9001)
+
+        expect(avisos()).toHaveLength(0)
+      })
+    })
+
     // S3 «Efectivo sin red en el turno correcto» (cambio A PROPÓSITO): el aviso de la venta de un turno cerrado ya no sale directo
     // después del commit; nace con el dinero como efecto durable `AVISO_TURNO_CERRADO` y lo manda el trabajador de efectos (único
     // emisor, Codex plan r3 #6 y r4 #3). Lo que se fija aquí: el efecto se encola con su llave y sus datos, y no hay aviso directo.
@@ -534,6 +664,27 @@ describe('S7 — aviso al gerente de una venta de la cola de terminal que llegó
         await deLaCola({ amount: 9000 })
 
         expect(avisos()).toHaveLength(0)
+      })
+
+      // hz:bdd815fd:D2: el reintento NO decide si el abono era el esperado: el saldo de ahora pudo moverlo otro abono, un cupón o un
+      // pago confirmado tarde (Codex r1 #1, r2 #1-#3). Avisa como antes y no hace consultas nuevas (r2 #3).
+      it('reintento de un abono parcial que la terminal esperaba ⇒ avisa como antes, sin consultar otros cobros', async () => {
+        pagoGuardado(null)
+        ordenTrasElPago(50, 40)
+
+        await deLaCola({ amount: 5000, saldoEsperadoSinRed: { antesCents: 9000, deviceId: 'pax-1' } })
+
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.objectContaining({ motivo: expect.stringContaining('$40.00') })]])
+        expect(prismaMock.payment.count).not.toHaveBeenCalled()
+      })
+
+      it('la terminal esperaba $70 y quedan $40 ⇒ PRECIO_CAMBIADO, igual que la primera vez', async () => {
+        pagoGuardado(null)
+        ordenTrasElPago(50, 40)
+
+        await deLaCola({ amount: 5000, saldoEsperadoSinRed: { antesCents: 7000, deviceId: 'pax-1' } })
+
+        expect(avisos()).toEqual([[VENUE, 'PRECIO_CAMBIADO', expect.objectContaining({ motivo: expect.stringContaining('$40.00') })]])
       })
 
       it('Android (sin serial) ⇒ sin aviso, como en el primer intento', async () => {

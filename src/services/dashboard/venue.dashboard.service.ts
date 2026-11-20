@@ -143,7 +143,7 @@ export async function getVenueById(
     // Nadie leía esos arreglos (verificado en dashboard y desktop). El historial se
     // consulta por sus endpoints paginados. Guardia: venue-detalle-sin-historial.test.ts
     include: {
-      menuCategories: true,
+      menuCategories: { where: { deletedAt: null } }, // una eliminada ya no existe para el dueño (19-nov)
       modifierGroups: true,
       menus: true,
       terminals: true,

@@ -1,0 +1,312 @@
+{
+  "pagina": "windows/impresoras/agregar-y-probar-impresora",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 784,
+      "cita": "label = \"Ajustes\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 786,
+      "cita": "onClick = { showSettingsHub = true },"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1964,
+      "cita": "label = \"Impresoras y cajón\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 127,
+      "cita": "LaunchedEffect(Unit) { printerService.startDiscovery() }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 341,
+      "cita": "text = \"Disponibles para agregar\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 800,
+      "cita": "Text(\"Agregar\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 454,
+      "cita": "configPrinter = saved"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 836,
+      "cita": "text = \"¿No aparece tu impresora?\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 856,
+      "cita": "label = { Text(\"Dirección IP\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 924,
+      "cita": "Text(if (isAdding) \"Conectando…\" else \"Agregar impresora\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterConfigSheet.kt",
+      "linea": 155,
+      "cita": "text = \"Configurar impresora\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterConfigSheet.kt",
+      "linea": 210,
+      "cita": "SectionHeader(\"Funciones\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/model/PrinterModels.kt",
+      "linea": 40,
+      "cita": "RECEIPT -> \"Recibos\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/model/PrinterModels.kt",
+      "linea": 41,
+      "cita": "KITCHEN -> \"Cocina\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/model/PrinterModels.kt",
+      "linea": 115,
+      "cita": "val roles: List<String> = listOf(\"receipt\"),"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterConfigSheet.kt",
+      "linea": 395,
+      "cita": "Text(\"Imprimir comandas automáticamente\", modifier = Modifier.weight(1f))"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/PrinterService.kt",
+      "linea": 1418,
+      "cita": ".filter { it.isEnabled && it.autoPrintKitchenTickets && it.hasRole(PrinterRole.KITCHEN) }"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterConfigSheet.kt",
+      "linea": 497,
+      "cita": "text = if (isPrinting) \"Imprimiendo...\" else \"Imprimir página de prueba\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterConfigSheet.kt",
+      "linea": 503,
+      "cita": "feedbackMessage = \"Página de prueba enviada\""
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes WINDOWS: «USB» en Windows es una cola de impresión (instalada) o un puerto COM (USB-serie o Bluetooth emparejado)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/printing/data/UsbPrinterManager.kt",
+      "linea": 24
+    },
+    {
+      "ruta": "Antes WINDOWS: la búsqueda «USB» lista las colas de Windows y los puertos COM",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/printing/data/UsbPrinterManager.kt",
+      "linea": 82
+    },
+    {
+      "ruta": "Antes WINDOWS: no hay Bluetooth propio en escritorio (sólo un COM emparejado)",
+      "archivo": "desktop/plataforma/src/main/java/android/bluetooth/BluetoothAdapter.java",
+      "linea": 5
+    },
+    {
+      "ruta": "Problema WINDOWS: una cola instalada sale como «… (impresora de Windows)»",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/impresion/ImpresorasDeWindows.kt",
+      "linea": 109
+    },
+    {
+      "ruta": "Problema WINDOWS: un puerto sale como «Puerto COMn» o «Bluetooth (COMn)»",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/impresion/ImpresorasDeWindows.kt",
+      "linea": 118
+    },
+    {
+      "ruta": "Problema WINDOWS: las colas que no son impresora (PDF, XPS, fax, OneNote) no salen",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/impresion/ImpresorasDeWindows.kt",
+      "linea": 105
+    },
+    {
+      "ruta": "Problema WINDOWS: la búsqueda pide las «USB» al reemplazo de escritorio",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/PrinterService.kt",
+      "linea": 1493
+    },
+    {
+      "ruta": "Problema WINDOWS: sin adaptador Bluetooth la búsqueda Bluetooth no agrega nada",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/PrinterService.kt",
+      "linea": 1589
+    },
+    {
+      "ruta": "Problema WINDOWS: el renglón muestra el nombre que puso la búsqueda",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/model/PrinterModels.kt",
+      "linea": 192
+    },
+    {
+      "ruta": "Paso 3: el alta a mano es por dirección IP (impresoras de red)",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 842
+    },
+    {
+      "ruta": "Quién: «Ajustes» e «Impresoras y cajón» sin candado de rol",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 781
+    },
+    {
+      "ruta": "Problema: estados Responde / No responde / Sin comprobar",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/model/PrinterModels.kt",
+      "linea": 249
+    },
+    {
+      "ruta": "Problema: estados Responde / No responde / Sin comprobar",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/model/PrinterModels.kt",
+      "linea": 251
+    },
+    {
+      "ruta": "Problema: estados Responde / No responde / Sin comprobar",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/model/PrinterModels.kt",
+      "linea": 254
+    },
+    {
+      "ruta": "Problema: el renglón pinta el estado de la impresora",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 728
+    },
+    {
+      "ruta": "Problema: «Sin comprobar» = todavía no se sabe (la de red se prueba al abrir)",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/PrinterService.kt",
+      "linea": 390
+    },
+    {
+      "ruta": "Problema WINDOWS: una cola de Windows se prueba al abrir sin abrirla; un COM se queda «Sin comprobar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/PrinterService.kt",
+      "linea": 629
+    },
+    {
+      "ruta": "Problema WINDOWS: estaLista sólo contesta para colas (un COM no se prueba sin abrirlo)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/printing/data/UsbPrinterManager.kt",
+      "linea": 125
+    },
+    {
+      "ruta": "Problema: al abrir se prueban las de red",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 131
+    },
+    {
+      "ruta": "Si aparece: alta por IP que no conecta",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 916
+    },
+    {
+      "ruta": "Si aparece: alta por IP que no conecta",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 917
+    },
+    {
+      "ruta": "Si aparece: puerto estándar 9100",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 842
+    },
+    {
+      "ruta": "Problema: Recibos y cajón de esta caja / No configurada",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 507
+    },
+    {
+      "ruta": "Problema: Recibos y cajón de esta caja / No configurada",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 524
+    },
+    {
+      "ruta": "Problema: «No configurada» mira las guardadas de recibos",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 217
+    },
+    {
+      "ruta": "Problema WINDOWS: una PC no trae impresora integrada de respaldo",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/printing/data/SunmiInnerPrinter.kt",
+      "linea": 9
+    },
+    {
+      "ruta": "Problema WINDOWS: la tarjeta dice «esta computadora»",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 215
+    },
+    {
+      "ruta": "Problema WINDOWS: «esta computadora» en escritorio",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/ImpresorasDeEstaCaja.kt",
+      "linea": 37
+    },
+    {
+      "ruta": "Problema: «Agrégala abajo, en Disponibles para agregar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 526
+    },
+    {
+      "ruta": "Problema: Imprimir prueba y Abrir cajón de la tarjeta de recibos",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 554
+    },
+    {
+      "ruta": "Problema: Imprimir prueba y Abrir cajón de la tarjeta de recibos",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 566
+    },
+    {
+      "ruta": "Problema: Comandas del local = del panel, sólo lectura",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 290
+    },
+    {
+      "ruta": "Problema: Comandas del local = del panel, sólo lectura",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterSettingsSheet.kt",
+      "linea": 310
+    },
+    {
+      "ruta": "Problema: Eliminar impresora",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterConfigSheet.kt",
+      "linea": 553
+    },
+    {
+      "ruta": "Problema: Eliminar impresora (confirmación)",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/presentation/PrinterConfigSheet.kt",
+      "linea": 572
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 7,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

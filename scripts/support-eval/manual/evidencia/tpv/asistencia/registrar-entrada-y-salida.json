@@ -1,0 +1,143 @@
+{
+  "pagina": "tpv/asistencia/registrar-entrada-y-salida",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/TimeclockStatusCard.kt",
+      "linea": 165,
+      "cita": "text = \"Sin registro de entrada\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/TimeclockStatusCard.kt",
+      "linea": 171,
+      "cita": "text = \"Toca para registrar\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1349,
+      "cita": "navController.navigate(NavRoute.Timeclock.createRoute(vId, pin, fromHome = true, autoAction = \"clockIn\"))"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockViewModel.kt",
+      "linea": 193,
+      "cita": "\"clockIn\" -> {"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockScreen.kt",
+      "linea": 74,
+      "cita": "if (hasAutoAction) onAutoLogin()"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/TimeclockStatusCard.kt",
+      "linea": 143,
+      "cita": "text = \"TRABAJANDO\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/TimeclockStatusCard.kt",
+      "linea": 195,
+      "cita": "text = \"Registrar Salida\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1360,
+      "cita": "navController.navigate(NavRoute.Timeclock.createRoute(vId, pin, fromHome = true, autoAction = \"clockOut\"))"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockViewModel.kt",
+      "linea": 202,
+      "cita": "\"clockOut\" -> {"
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Registrar la entrada llama directo al servidor, sin cola",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/data/repository/TimeEntryRepositoryImpl.kt",
+      "linea": 49
+    },
+    {
+      "afirmacion": "Registrar la salida llama directo al servidor, sin cola",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/data/repository/TimeEntryRepositoryImpl.kt",
+      "linea": 93
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: la tarjeta sale si el negocio pide la entrada o hay una abierta",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 1088
+    },
+    {
+      "ruta": "Si aparece «Registra tu entrada» en los botones: el negocio pide la entrada",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 843
+    },
+    {
+      "ruta": "Problema: si falla, la pantalla se queda con ENTRADA",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockViewModel.kt",
+      "linea": 629
+    },
+    {
+      "ruta": "Problema: el botón ENTRADA",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockScreen.kt",
+      "linea": 522
+    },
+    {
+      "ruta": "Problema: error con «Volver»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockScreen.kt",
+      "linea": 961
+    },
+    {
+      "ruta": "Problema (Codex r1-2): tras un fallo se vuelve a leer la asistencia; si esa lectura también falla, se pinta sin entrada (ENTRADA) aunque el servidor la haya guardado",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockViewModel.kt",
+      "linea": 164
+    },
+    {
+      "ruta": "Problema: la flecha «Volver» de arriba regresa al inicio",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockScreen.kt",
+      "linea": 105
+    },
+    {
+      "ruta": "Problema: al regresar al inicio se vuelve a leer la asistencia",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 1196
+    },
+    {
+      "ruta": "Problema: si la terminal pide foto (requireClockInPhoto / requireClockOutPhoto)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockViewModel.kt",
+      "linea": 244
+    },
+    {
+      "ruta": "Problema: «Tomar Foto»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockScreen.kt",
+      "linea": 709
+    },
+    {
+      "ruta": "Problema: «Confirmar y Continuar»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/presentation/TimeclockScreen.kt",
+      "linea": 910
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 5,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

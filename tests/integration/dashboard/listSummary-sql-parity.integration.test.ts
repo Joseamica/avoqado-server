@@ -22,8 +22,10 @@
  *   export TEST_DATABASE_URL='postgresql://…/av-db-25-test'
  *   npx jest --selectProjects integration --testPathPattern listSummary-sql-parity
  */
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { buildPaymentsWhereClause, PaymentFilters } from '@/services/dashboard/payment.dashboard.service'
+import { findPaymentsByAmount } from '@/services/dashboard/paymentByAmount.dashboard.service'
 import { buildOrdersWhereClause, getOrders, OrderFilters } from '@/services/dashboard/order.dashboard.service'
 import {
   getPaymentsSummary,
@@ -483,6 +485,56 @@ describe('paridad órdenes: summary.total === prisma.order.count({ where: buildO
       .sort()
     expect(idsSql).toEqual(idsPrisma)
     expect(summary.filteredGroups).toEqual(summary.groups)
+  })
+})
+
+// ─── C2 de la B (soporte por WhatsApp): «¿entró un cobro de $X?» lee el MISMO alcance que el listado ───
+describe('findPaymentsByAmount: el alcance de buildPaymentsWhereClause, con el monto o el monto + propina exactos', () => {
+  /** La réplica en Node: las filas del listado en ese rango (más recientes primero) cuyo importe, o importe + propina, es `amount`. */
+  const replica = async (amount: Prisma.Decimal, windows: { from: Date; to: Date }[]) =>
+    (
+      await prisma.payment.findMany({
+        where: buildPaymentsWhereClause(venueId, RANGE),
+        select: { amount: true, tipAmount: true, createdAt: true },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: 1000,
+      })
+    ).filter(
+      r =>
+        windows.some(w => r.createdAt >= w.from && r.createdAt <= w.to) &&
+        (r.amount.equals(amount) || r.amount.plus(r.tipAmount).equals(amount)),
+    )
+  const shape = (rows: { amount: Prisma.Decimal; tipAmount: Prisma.Decimal; createdAt: Date }[]) =>
+    rows.map(r => [r.createdAt.toISOString(), r.amount.toFixed(2), r.tipAmount.toFixed(2)])
+
+  // 1 y 2 en los bordes exactos; 4 y 8 a 1 ms fuera; 165 y 330 con propina; 40 PENDING; 999 y 1098 de otro venue; 70 REFUNDED; 30 FAILED
+  it.each(['1', '2', '4', '8', '150', '165', '300', '330', '99.99', '100.5', '110.75', '70', '20', '30', '40', '999', '1098', '0.5'])(
+    'findPaymentsByAmount: its total equals the rows of buildPaymentsWhereClause that match the amount or the amount plus tip (%s)',
+    async raw => {
+      const amount = new Prisma.Decimal(raw)
+      const windows = [{ from: FROM, to: TO }]
+      const expected = await replica(amount, windows)
+      const found = await findPaymentsByAmount(venueId, { amount, windows, take: 50 })
+      expect(found.total).toBe(expected.length)
+      expect(shape(found.rows)).toEqual(shape(expected))
+    },
+  )
+
+  it('two windows: only what falls inside one of them, and the take caps the rows but not the total', async () => {
+    const windows = [
+      { from: FROM, to: new Date(FROM.getTime() + 60_000) },
+      { from: new Date(INSIDE.getTime() - 60_000), to: new Date(INSIDE.getTime() + 60_000) },
+    ]
+    for (const raw of ['1', '2', '150', '165']) {
+      const amount = new Prisma.Decimal(raw)
+      const expected = await replica(amount, windows)
+      expect((await findPaymentsByAmount(venueId, { amount, windows, take: 50 })).total).toBe(expected.length)
+    }
+    // 1 (en FROM) entra; 2 (en TO) queda fuera de las dos ventanas
+    expect((await findPaymentsByAmount(venueId, { amount: new Prisma.Decimal('1'), windows, take: 5 })).total).toBe(1)
+    expect((await findPaymentsByAmount(venueId, { amount: new Prisma.Decimal('2'), windows, take: 5 })).total).toBe(0)
+    const capped = await findPaymentsByAmount(venueId, { amount: new Prisma.Decimal('150'), windows: [{ from: FROM, to: TO }], take: 0 })
+    expect([capped.total, capped.rows.length]).toEqual([1, 1]) // un take de 0 cae a 1: nunca una lista vacía con total
   })
 })
 

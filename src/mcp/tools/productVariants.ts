@@ -1,3 +1,4 @@
+import { sqlRangoHoraRealSql } from '@/services/shared/horaRealDelAparato'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { OrderStatus, Prisma } from '@prisma/client'
@@ -30,7 +31,6 @@ import {
 } from '@/services/product-variants/variantNaming'
 import { ETIQUETA_DE_IVA } from '@/services/fiscal/ivaTratamiento'
 import { venueEndOfDay, venueStartOfDay } from '@/utils/datetime'
-import { utcTs } from '@/utils/sqlDates'
 import { operationHash } from '@/utils/operationHash'
 import type { McpScope } from '../scope'
 import { ScopeError, createGuard } from '../guard'
@@ -127,8 +127,7 @@ async function familySales(
     WHERE p."productGroupId" = ${groupId}
       AND p."venueId" = ${venueId}
       AND o."venueId" = ${venueId}
-      AND o."createdAt" >= ${utcTs(start)}
-      AND o."createdAt" <= ${utcTs(end)}
+      AND ${sqlRangoHoraRealSql('o', start, end)} -- D4: la hora real de la venta, como product_sales
       AND o.status NOT IN (${OrderStatus.CANCELLED}::"OrderStatus", ${OrderStatus.DELETED}::"OrderStatus")
       AND oi."removedAt" IS NULL
     GROUP BY p.id, p.name, p.sku, p."deletedAt"
@@ -294,7 +293,12 @@ export function registerProductVariantTools(server: McpServer, scope: McpScope) 
             error: `Son ${total.toLocaleString('es-MX')} combinaciones y el máximo es ${MAX_VARIANTS_PER_GROUP}. Quita valores u opciones.`,
           })
         const cats = await prisma.menuCategory.findMany({
-          where: { ...where, ...(categoryId ? { id: categoryId } : {}), name: { equals: category.trim(), mode: 'insensitive' } },
+          where: {
+            ...where,
+            deletedAt: null,
+            ...(categoryId ? { id: categoryId } : {}),
+            name: { equals: category.trim(), mode: 'insensitive' },
+          },
           select: { id: true, name: true },
           orderBy: { id: 'asc' },
           take: 2,

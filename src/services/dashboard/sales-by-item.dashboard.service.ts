@@ -20,6 +20,7 @@ import { sqlOrdenSinTarjetasTexto } from '@/services/giftCards/giftCardMarks'
 import prisma from '@/utils/prismaClient'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 import { localInstantRaw, localWallClockRaw, utcTsParam } from '@/utils/sqlDates'
+import { sqlHoraReal, sqlRangoHoraReal } from '@/services/shared/horaRealDelAparato'
 import { lineGrossSql, lineOrderDiscountSql, lineRevenueSql } from './lineRevenue'
 
 // ============================================================
@@ -188,8 +189,8 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
     if (!isNaN(startH) && !isNaN(endH)) {
       // Filter by hour of day (0-23)
       hourFilterClause = `
-        AND EXTRACT(HOUR FROM ${localWallClockRaw(timezone, 'o."createdAt"')}) >= ${startH}
-        AND EXTRACT(HOUR FROM ${localWallClockRaw(timezone, 'o."createdAt"')}) <= ${endH}
+        AND EXTRACT(HOUR FROM ${localWallClockRaw(timezone, sqlHoraReal('o'))}) >= ${startH}
+        AND EXTRACT(HOUR FROM ${localWallClockRaw(timezone, sqlHoraReal('o'))}) <= ${endH}
       `
     }
   }
@@ -212,8 +213,7 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
     ${paymentJoin}
     ${terminalJoin}
     WHERE o."venueId" = $1
-      AND o."createdAt" >= ${utcTsParam(2)}
-      AND o."createdAt" <= ${utcTsParam(3)}
+      AND ${sqlRangoHoraReal('o', utcTsParam(2), utcTsParam(3))}
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
       AND oi."removedAt" IS NULL
@@ -384,8 +384,7 @@ async function getPromotionAttribution(
     LEFT JOIN "Promotion" pr ON pr.id = op."promotionId"
     LEFT JOIN "Product" p ON p.id = oi."productId"
     WHERE o."venueId" = $1
-      AND o."createdAt" >= ${utcTsParam(2)}
-      AND o."createdAt" <= ${utcTsParam(3)}
+      AND ${sqlRangoHoraReal('o', utcTsParam(2), utcTsParam(3))}
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
       AND oi."removedAt" IS NULL
@@ -448,7 +447,8 @@ async function calculateTimePeriodItemMetrics(
 
   // Venue wall clock of the UTC column. A single `AT TIME ZONE tz` read the stored UTC value
   // as if it were local time: a 20:00 sale was bucketed on the next day, at hour 02.
-  const wall = localWallClockRaw(safeTz, 'o."createdAt"')
+  // D1 (tras D93 «B»): la hora REAL de la venta (la del aparato si se hizo sin internet; si no, la llegada), igual que el Resumen.
+  const wall = localWallClockRaw(safeTz, sqlHoraReal('o'))
 
   // Time-based periods are returned as the INSTANT the bucket starts (midnight / hour on the
   // venue clock): formatPeriod/formatPeriodLabel and the dashboard format them in the venue zone.
@@ -507,8 +507,7 @@ async function calculateTimePeriodItemMetrics(
     FROM "OrderItem" oi
     INNER JOIN "Order" o ON o.id = oi."orderId"
     WHERE o."venueId" = $1
-      AND o."createdAt" >= ${utcTsParam(2)}
-      AND o."createdAt" <= ${utcTsParam(3)}
+      AND ${sqlRangoHoraReal('o', utcTsParam(2), utcTsParam(3))}
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
       AND oi."removedAt" IS NULL

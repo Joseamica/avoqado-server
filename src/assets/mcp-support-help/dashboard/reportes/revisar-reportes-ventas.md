@@ -1,0 +1,61 @@
+---
+title: Revisar reportes de ventas
+description: Consulta resumen de ventas, ventas por producto y gráficas del inicio.
+product: dashboard
+category: reportes
+featureCode: AVOQADO_REPORTS
+dashboardRoutes:
+  - reports/sales-summary
+  - reports/sales-by-item
+  - reports/home-charts
+roles:
+  - OWNER
+  - ADMIN
+  - MANAGER
+  - VIEWER
+lastVerified: 2026-05-20
+sourceRepo: avoqado-web-dashboard
+popular: true
+relatedArticles:
+  - revisar-reportes-avanzados
+  - ver-pagos
+  - ver-saldo-disponible
+keywords:
+  - resumen de ventas
+  - ventas por producto
+  - ver mis ventas
+  - el reporte no coincide con los pagos
+  - una métrica sale vacía
+  - exportar reporte de ventas
+---
+
+## Antes de empezar
+
+Reportes de ventas se usan para analizar resultados, no solo para ver transacciones individuales. Antes de descargar o compartir un reporte, confirma periodo, sucursal, tipo de vista y si necesitas ventas por día, por producto o por método de pago.
+
+Ten presente que los reportes pueden tratar descuentos, propinas, impuestos y comisiones de forma distinta según la métrica seleccionada.
+
+## Pasos
+
+1. Abre **Reportes > Resumen de ventas**.
+2. Selecciona el rango de fechas.
+3. Elige el tipo de reporte o vista disponible.
+4. Revisa métricas como ventas brutas, descuentos, reembolsos, ventas netas, impuestos, propinas y total cobrado.
+5. Abre **Ventas por producto** para analizar artículos vendidos.
+6. Exporta o comparte datos solo después de confirmar filtros y sucursal.
+
+## Problemas frecuentes
+
+Si el reporte no coincide con pagos, revisa filtros, cancelaciones, descuentos y reembolsos. Si ventas por producto no coincide con inventario, valida recetas y movimientos. Si una métrica parece vacía, puede depender de permisos o configuración del local. Para conciliación de depósitos usa también **Saldo disponible**.
+
+Antes de enviar un reporte a dirección o contabilidad, guarda el rango exacto de fechas y filtros usados.
+
+## Cómo leer las métricas
+
+No todas las métricas responden la misma pregunta. Ventas brutas ayudan a entender volumen; descuentos y reembolsos explican ajustes; ventas netas se acercan más al resultado comercial; total cobrado ayuda a comparar contra pagos. Para depósitos, usa **Saldo disponible** porque las liquidaciones tienen tiempos y reglas propias.
+
+Cuando compares periodos, usa rangos equivalentes. No compares un día incompleto contra un día cerrado sin anotarlo. Si el local tiene varias sucursales, descarga reportes por sucursal antes de consolidar.
+
+## Cuándo pedir ayuda
+
+Pide soporte si una métrica cambia sin filtros, si un export no coincide con la pantalla o si hay una diferencia que no se explica con cancelaciones, reembolsos o descuentos. Comparte rango, zona horaria, sucursal, filtros y captura de la pantalla.

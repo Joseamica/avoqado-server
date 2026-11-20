@@ -1,0 +1,68 @@
+-- Categoría eliminada (encargo de la nube bc1dcc, 19-nov-2026; lo vio Flautas Coyoacán con «EVENTO»): «Eliminar» una categoría
+-- que sólo guarda productos ARCHIVADOS o una familia no puede borrar la fila (`Product.categoryId` y `ProductGroup.categoryId`
+-- son RESTRICT) y hasta hoy sólo la apagaba: el dueño la seguía viendo apagada y con 0, igual que una que apagó a propósito.
+--
+-- Ahora, además de apagarla y sacarla de los menús (como hoy), se marca `deletedAt`: ESCONDIDA para el dueño. No cambia nada más:
+-- para la caja, la tienda, los reportes y las reglas es la misma categoría apagada de hoy. Dos reglas en la base, por cualquier
+-- camino (Prisma, SQL, uno nuevo):
+-- 1. Prender una escondida la vuelve a mostrar (`active = true` ⇒ `deletedAt = NULL`), nunca una prendida escondida.
+-- 2. Si un producto o una familia vuelve a vivir en ella (la importación o Shopify restauran un archivado, o una alta que ganó la
+--    carrera al «Eliminar»), se vuelve a mostrar, APAGADA, igual que hoy: nunca queda algo vivo donde el dueño no lo encuentra.
+--    Toma `FOR KEY SHARE` de la categoría antes de decidir: espera a un «Eliminar» en curso (que la tiene `FOR UPDATE`) y lee lo
+--    que dejó; si llegó primero, el «Eliminar» espera por él y lo ve al contar.
+--
+-- Datos viejos: NO se marca ninguna. Una que se «eliminó» antes de esto (quedó apagada y con 0, como «EVENTO» de Flautas) no se
+-- distingue con certeza de una que el dueño apagó a propósito (Codex r2-r6: la bitácora no guarda qué escritura fue el
+-- «Eliminar»). Basta con volver a darle «Eliminar»: ahora sí desaparece.
+--
+-- Columna nula sin default: en Postgres 11+ no reescribe la tabla.
+--
+-- Reversión (no se ejecuta):
+--   DROP TRIGGER IF EXISTS "Product_categoria_eliminada_vuelve" ON "Product";
+--   DROP TRIGGER IF EXISTS "ProductGroup_categoria_eliminada_vuelve" ON "ProductGroup";
+--   DROP TRIGGER IF EXISTS "MenuCategory_prendida_se_ve" ON "MenuCategory";
+--   DROP FUNCTION IF EXISTS "menuCategoryShowForLiveRow"();
+--   DROP FUNCTION IF EXISTS "menuCategoryActiveIsShown"();
+--   ALTER TABLE "MenuCategory" DROP COLUMN IF EXISTS "deletedAt";
+SET LOCAL lock_timeout = '5s';
+
+ALTER TABLE "MenuCategory" ADD COLUMN "deletedAt" TIMESTAMP(3);
+
+-- 1. Prendida ⇒ se ve.
+CREATE OR REPLACE FUNCTION "menuCategoryActiveIsShown"() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW."active" AND NEW."deletedAt" IS NOT NULL THEN
+    NEW."deletedAt" := NULL;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS "MenuCategory_prendida_se_ve" ON "MenuCategory";
+CREATE TRIGGER "MenuCategory_prendida_se_ve"
+BEFORE INSERT OR UPDATE OF "active", "deletedAt" ON "MenuCategory"
+FOR EACH ROW EXECUTE FUNCTION "menuCategoryActiveIsShown"();
+
+-- 2. Algo vivo dentro ⇒ se ve (apagada, como hoy).
+CREATE OR REPLACE FUNCTION "menuCategoryShowForLiveRow"() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW."deletedAt" IS NULL AND NEW."categoryId" IS NOT NULL
+     AND (TG_OP = 'INSERT' OR OLD."deletedAt" IS NOT NULL OR OLD."categoryId" IS DISTINCT FROM NEW."categoryId") THEN
+    -- El candado primero: con él, la instrucción de abajo (otra foto) ve el «Eliminar» que terminó mientras esperaba.
+    PERFORM 1 FROM "MenuCategory" WHERE id = NEW."categoryId" FOR KEY SHARE;
+    UPDATE "MenuCategory" SET "deletedAt" = NULL, "updatedAt" = (now() AT TIME ZONE 'UTC')
+     WHERE id = NEW."categoryId" AND "deletedAt" IS NOT NULL;
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS "Product_categoria_eliminada_vuelve" ON "Product";
+CREATE TRIGGER "Product_categoria_eliminada_vuelve"
+AFTER INSERT OR UPDATE OF "deletedAt", "categoryId" ON "Product"
+FOR EACH ROW EXECUTE FUNCTION "menuCategoryShowForLiveRow"();
+
+DROP TRIGGER IF EXISTS "ProductGroup_categoria_eliminada_vuelve" ON "ProductGroup";
+CREATE TRIGGER "ProductGroup_categoria_eliminada_vuelve"
+AFTER INSERT OR UPDATE OF "deletedAt", "categoryId" ON "ProductGroup"
+FOR EACH ROW EXECUTE FUNCTION "menuCategoryShowForLiveRow"();

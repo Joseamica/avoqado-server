@@ -1,0 +1,168 @@
+{
+  "pagina": "android/personal/cambiar-de-usuario",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 57,
+      "cita": "label = \"Más\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1504,
+      "cita": "text = \"Cambiar usuario\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1496,
+      "cita": ".clickable(onClick = onSwitchUser)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/SwitchUserSheet.kt",
+      "linea": 49,
+      "cita": "title = \"Cambiar usuario\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/SwitchUserSheet.kt",
+      "linea": 50,
+      "cita": "description = \"Teclea tu PIN para tomar el aparato con tus permisos.\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/SwitchUserSheet.kt",
+      "linea": 90,
+      "cita": "maxLength = 10,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/SwitchUserSheet.kt",
+      "linea": 91,
+      "cita": "minLength = 4,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/SwitchUserSheet.kt",
+      "linea": 57,
+      "cita": "text = \"Cambiar\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/SwitchUserSheet.kt",
+      "linea": 73,
+      "cita": "enabled = pin.length in 4..10 && !isLoading,"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/data/AuthRepository.kt",
+      "linea": 189,
+      "cita": "// Reemplaza la sesión ENTERA: rol y permisos incluidos. Es lo que hace que el menú, los"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/data/AuthRepository.kt",
+      "linea": 204,
+      "cita": "venuePermissions = venue.permissions,"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1262,
+      "cita": "onTabsShouldRefresh()"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1524,
+      "cita": "text = \"Cerrar sesión\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1516,
+      "cita": ".clickable(onClick = onLogout)"
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Si aparece «Sin conexión. Para cambiar de usuario necesitas internet.»: online-only, no se guarda PIN en el aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/data/AuthRepository.kt",
+      "linea": 253
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "El servidor: switch-user identifica por PIN",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1235
+    },
+    {
+      "ruta": "Antes: «Cambiar usuario» en Más para todos",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1504
+    },
+    {
+      "ruta": "Paso 3: la venta pasa a nombre de quien entra",
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/data/AuthRepository.kt",
+      "linea": 219
+    },
+    {
+      "ruta": "Si aparece: PIN incorrecto",
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/data/AuthRepository.kt",
+      "linea": 234
+    },
+    {
+      "ruta": "Si aparece: demasiados intentos",
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/data/AuthRepository.kt",
+      "linea": 235
+    },
+    {
+      "ruta": "Si aparece: operaciones sin enviar bloquean el cambio",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuViewModel.kt",
+      "linea": 323
+    },
+    {
+      "ruta": "Si aparece: operaciones sin enviar bloquean el cambio (varias)",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuViewModel.kt",
+      "linea": 325
+    },
+    {
+      "ruta": "Si aparece: el bloqueo suma lo pendiente, lo retenido y lo RECHAZADO de la cola",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/sync/SyncOutbox.kt",
+      "linea": 730
+    },
+    {
+      "ruta": "Si aparece: y los cobros fallidos",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/PaymentSyncService.kt",
+      "linea": 1259
+    },
+    {
+      "ruta": "Si aparece: lo rechazado sale en Operaciones por revisar",
+      "archivo": "app/src/main/java/com/avoqado/pos/sync/presentation/QuarantineViewModel.kt",
+      "linea": 254
+    },
+    {
+      "ruta": "Si aparece: lo resuelve un gerente",
+      "archivo": "app/src/main/java/com/avoqado/pos/sync/presentation/QuarantineSheet.kt",
+      "linea": 401
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 7,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

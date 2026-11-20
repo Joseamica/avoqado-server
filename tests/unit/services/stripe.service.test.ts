@@ -1101,6 +1101,28 @@ describe('Stripe Service - Comprehensive Tests', () => {
         })
       })
 
+      it('C5 (la B): con tiempo máximo, UNA llamada con ese tiempo y sin reintentos (ni los de retry ni los del SDK)', async () => {
+        const timeout = Object.assign(new Error('Request aborted due to timeout being reached (3000ms)'), { type: 'StripeConnectionError' })
+        mockStripeInstance.subscriptions.retrieve.mockRejectedValueOnce(timeout)
+        await expect(stripeService.retrievePlanSubscription('sub_b', { timeoutMs: 3000 })).rejects.toBe(timeout)
+        expect(mockStripeInstance.subscriptions.retrieve.mock.calls).toEqual([
+          ['sub_b', { expand: ['discounts.source.coupon.applies_to'] }, { timeout: 3000, maxNetworkRetries: 0 }],
+        ])
+        expect(retryUtils.retry).not.toHaveBeenCalled()
+        // Sin el tiempo máximo, como siempre: con retry y sin opciones de la petición
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_p',
+          status: 'active',
+          created: 1735689600,
+          items: { data: [] },
+        })
+        await stripeService.retrievePlanSubscription('sub_p')
+        expect(mockStripeInstance.subscriptions.retrieve).toHaveBeenLastCalledWith('sub_p', {
+          expand: ['discounts.source.coupon.applies_to'],
+        })
+        expect(retryUtils.retry).toHaveBeenCalledTimes(1)
+      })
+
       it('D5: con el cupón expandido (30 % por 3 meses) devuelve el descuento con su fecha de fin', async () => {
         const fin = 1801000000
         mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({

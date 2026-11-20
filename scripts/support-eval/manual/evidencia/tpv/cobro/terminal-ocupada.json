@@ -1,0 +1,167 @@
+{
+  "pagina": "tpv/cobro/terminal-ocupada",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1356,
+      "cita": "text = if (isRefund) \"Acerca o inserta la tarjeta para reembolso\" else \"Acerca o inserta la tarjeta\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1415,
+      "cita": "text = \"Ingrese su PIN\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 711,
+      "cita": "subtitle = \"No cierres esta pantalla\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 723,
+      "cita": "onCancel = if (elapsedSeconds >= 30) {{ viewModel.cancelPayment() }} else null"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 1380,
+      "cita": "Text(\"Cancelar\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 56,
+      "cita": "else -> \"Estamos confirmando el cobro\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 958,
+      "cita": "text = \"Cobro sin confirmar\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/AvisoDeCobrosPendientes.kt",
+      "linea": 51,
+      "cita": "return \"Quedó un cobro de $importe sin confirmar $cuando. \" +"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/AvisoDeCobrosPendientes.kt",
+      "linea": 52,
+      "cita": "\"Si es esta misma venta, no la cobres otra vez.\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 985,
+      "cita": "val aviso = AvisoDeCobrosPendientes.texto(pendientes, ahora"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/AvisoDeCobrosPendientes.kt",
+      "linea": 66,
+      "cita": "\"Si alguno es esta venta, no la cobres otra vez.\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 383,
+      "cita": "remotePaymentCoordinator.paymentRequests.collect { request ->"
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: el punto de venta enseña el texto del servidor sobre lo que aparta la terminal",
+      "archivo": "avoqado-server/src/services/terminal-payment.service.ts",
+      "linea": 979
+    },
+    {
+      "ruta": "Antes: un cobro enviado y en curso",
+      "archivo": "avoqado-server/src/services/terminal-payment.service.ts",
+      "linea": 990
+    },
+    {
+      "ruta": "Antes: un cobro que quedó sin respuesta: confirmar en la terminal antes de volver a cobrar",
+      "archivo": "avoqado-server/src/services/terminal-payment.service.ts",
+      "linea": 987
+    },
+    {
+      "ruta": "Si aparece «El POS pidió cancelar…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/CobroRemotoDelPos.kt",
+      "linea": 20
+    },
+    {
+      "ruta": "Si aparece «El POS canceló este cobro…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/CobroRemotoDelPos.kt",
+      "linea": 14
+    },
+    {
+      "ruta": "Si aparece «El cobro se cerró sin cobrar…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/CobroRemotoDelPos.kt",
+      "linea": 23
+    },
+    {
+      "ruta": "Si aparece «Este cobro ya se cerró…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/CobroRemotoDelPos.kt",
+      "linea": 17
+    },
+    {
+      "ruta": "Si aparece «Hay otro cobro en curso en esta terminal»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/AvisoDeCobrosPendientes.kt",
+      "linea": 127
+    },
+    {
+      "ruta": "Si aparece «Hay otro cobro…»: la app pide cerrar y abrir la app si no se ve ningún cobro",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/AvisoDeCobrosPendientes.kt",
+      "linea": 128
+    },
+    {
+      "ruta": "Si aparece «Hay otro cobro…» en la PAX: el motivo de la barrera",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 3578
+    },
+    {
+      "ruta": "Si aparece «Este cobro del POS NO se inició»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/CobroRemotoDelPos.kt",
+      "linea": 72
+    },
+    {
+      "ruta": "Si aparece «Este cobro del POS NO se inició»: esperar o cobrar con otra terminal",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/CobroRemotoDelPos.kt",
+      "linea": 73
+    },
+    {
+      "ruta": "Si aparece «Este cobro del POS NO se inició» en la Nexgo",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 4394
+    },
+    {
+      "ruta": "Si aparece *No se cobró* en el aviso",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/NoSeCobroDesdeElAviso.kt",
+      "linea": 210
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fecha": "2026-11-18",
+    "fotos": [],
+    "filasCreadas": [],
+    "nota": "No se provocó la terminal ocupada (dos cobros a la misma terminal). Sí se vio en la PAX (copia 2.13.2, no la 2.16.0 de la guía) el aviso de *Problemas frecuentes* «El POS canceló este cobro. No se cobró.» al cancelar desde el POS (foto en android/cobro/cancelar-cobro-en-la-terminal/3b-pax.png). Falta mandar un segundo cobro mientras la terminal tiene uno en curso."
+  },
+  "codex": {
+    "lote": 8,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

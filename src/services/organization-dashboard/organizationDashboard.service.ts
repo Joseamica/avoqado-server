@@ -13,9 +13,10 @@
  * zonas distintas (Tijuana, Cancún) el "hoy" de esa tienda queda corrido 1 h. Los heatmaps
  * sí agrupan por `v."timezone"` de cada tienda. Si algún día hace falta, el arreglo es
  * "hoy" por tienda en TODAS las funciones de org, no sólo en algunas.
+ * Excepción ya hecha: `getStaffAttendance` (Auditoría de Promotores) corta el día de cada sucursal con SU zona (Codex 4c r6 #1).
  */
-import { Prisma, StaffRole } from '@prisma/client'
-import { endOfDay, endOfMonth, format, startOfDay, subDays } from 'date-fns'
+import { OrderStatus, Prisma, StaffRole } from '@prisma/client'
+import { endOfMonth, format, subDays } from 'date-fns'
 import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz'
 import { localWallClock, utcTs } from '../../utils/sqlDates'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
@@ -27,11 +28,19 @@ import {
   venueStartOfDay,
   venueStartOfDayOffset,
   venueStartOfMonth,
+  zonaValida,
 } from '../../utils/datetime'
-import { addCivilDays, venueDayKey } from '../../utils/venueDateKeys'
+import { addCivilDays, firstInstantOfDay, venueDayKey } from '../../utils/venueDateKeys'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
+import {
+  dondeHoraRealEntre,
+  MARGEN_DE_LECTURA_ANTES_MS,
+  MARGEN_DE_LECTURA_MS,
+  sqlHoraReal,
+  sqlRangoHoraRealSql,
+} from '../shared/horaRealDelAparato'
 import { countUpdatedTerminals, scopedTerminalWhere } from '../shared/terminalScopedWrites'
 import { SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION, SQL_VENDEDOR_DEL_MOVIMIENTO } from '../shared/vendedorDelMovimiento'
 import { computeTerminalMigration, migrationCommandWhere } from '../dashboard/terminals.superadmin.service'
@@ -312,6 +321,21 @@ async function cashSalesPerTimeEntry(venueIds: string[], from: Date, to: Date): 
   return new Map(rows.map(r => [r.timeEntryId, Number(r.cash) || 0]))
 }
 
+/**
+ * ¿Es «AAAA-MM-DD» de un día que existe en el calendario, entre los años 2000 y 2099? Por partes y sin `Date.UTC`, que lee los
+ * años 0–99 como 1900–1999; el tope también deja seguro a `addCivilDays` (Codex a1988b r3 y r4). Un reporte de asistencia fuera de ese
+ * siglo no tiene datos que mostrar.
+ */
+function esFechaCivil(valor: unknown): valor is string {
+  if (typeof valor !== 'string') return false
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(valor)
+  if (!m) return false
+  const [anio, mes, dia] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  const bisiesto = (anio % 4 === 0 && anio % 100 !== 0) || anio % 400 === 0
+  const diasDelMes = [31, bisiesto ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mes - 1]
+  return anio >= 2000 && anio <= 2099 && diasDelMes !== undefined && dia >= 1 && dia <= diasDelMes
+}
+
 export const SELF_VALIDATION_FORBIDDEN = 'SELF_VALIDATION_FORBIDDEN'
 
 /**
@@ -431,7 +455,7 @@ class OrganizationDashboardService {
     // Aggregate sales from completed orders — sumas y categorías en Postgres (antes se
     // materializaban todas las órdenes del rango con sus items para reducirlas en Node).
     const rangeFilter = rangeEnd ? { gte: todayStart, lte: rangeEnd } : { gte: todayStart }
-    const orderScope = Prisma.sql`o."venueId" IN (${Prisma.join(venueIds)}) AND o."status" = 'COMPLETED' AND ${rangeSql(Prisma.raw('o."createdAt"'), todayStart, rangeEnd)}`
+    const orderScope = Prisma.sql`o."venueId" IN (${Prisma.join(venueIds)}) AND o."status" = 'COMPLETED' AND ${sqlRangoHoraRealSql('o', todayStart, rangeEnd ?? null)}`
     const [todayTotals, categoryRows, weekOrders, monthOrders] = await Promise.all([
       prisma.$queryRaw<Array<{ sales: Prisma.Decimal | null; orders: number }>>`
         SELECT SUM(o."total") AS "sales", COUNT(*)::int AS "orders"
@@ -450,19 +474,11 @@ class OrganizationDashboardService {
         ORDER BY SUM(oi."quantity") DESC, 1
       `,
       prisma.order.aggregate({
-        where: {
-          venueId: { in: venueIds },
-          status: 'COMPLETED',
-          createdAt: { gte: weekStart },
-        },
+        where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, weekStart, null),
         _sum: { total: true },
       }),
       prisma.order.aggregate({
-        where: {
-          venueId: { in: venueIds },
-          status: 'COMPLETED',
-          createdAt: { gte: monthStart },
-        },
+        where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, monthStart, null),
         _sum: { total: true },
       }),
     ])
@@ -499,11 +515,7 @@ class OrganizationDashboardService {
     // Count active stores (stores with sales in range)
     const storesWithSales = await prisma.order.groupBy({
       by: ['venueId'],
-      where: {
-        venueId: { in: venueIds },
-        status: 'COMPLETED',
-        createdAt: rangeFilter,
-      },
+      where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, todayStart, rangeEnd ?? null),
     })
 
     // Sum approved cash deposits in the date range
@@ -659,8 +671,6 @@ class OrganizationDashboardService {
     const needsWeekUnits = goalConfigs.some(g => g.period === 'WEEKLY' && g.goalType === 'QUANTITY')
     const needsMonthUnits = goalConfigs.some(g => g.period === 'MONTHLY' && g.goalType === 'QUANTITY')
 
-    const todayCreatedAtWhere = rangeEnd ? { gte: todayStart, lte: rangeEnd } : { gte: todayStart }
-
     // Bulk queries — replaces N per-venue loops with a constant number of queries
     const [
       todaySalesByVenue,
@@ -676,40 +686,33 @@ class OrganizationDashboardService {
       // 1. Today sales per venue
       prisma.order.groupBy({
         by: ['venueId'],
-        where: { venueId: { in: venueIds }, status: 'COMPLETED', createdAt: todayCreatedAtWhere },
+        where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, todayStart, rangeEnd ?? null),
         _sum: { total: true },
       }),
       // 2. Today units per venue (SUM quantity — OrderItem has no venueId, needs raw SQL)
-      rangeEnd
-        ? prisma.$queryRaw<Array<{ venueId: string; unitsSold: any }>>`
+      prisma.$queryRaw<Array<{ venueId: string; unitsSold: any }>>`
             SELECT o."venueId", COALESCE(SUM(oi.quantity), 0) as "unitsSold"
             FROM "Order" o
             JOIN "OrderItem" oi ON oi."orderId" = o.id
             WHERE o."venueId" IN (${Prisma.join(venueIds)})
               AND o.status = 'COMPLETED'
-              AND o."createdAt" >= ${utcTs(todayStart)}
-              AND o."createdAt" <= ${utcTs(rangeEnd)}
-            GROUP BY o."venueId"
-          `
-        : prisma.$queryRaw<Array<{ venueId: string; unitsSold: any }>>`
-            SELECT o."venueId", COALESCE(SUM(oi.quantity), 0) as "unitsSold"
-            FROM "Order" o
-            JOIN "OrderItem" oi ON oi."orderId" = o.id
-            WHERE o."venueId" IN (${Prisma.join(venueIds)})
-              AND o.status = 'COMPLETED'
-              AND o."createdAt" >= ${utcTs(todayStart)}
+              AND ${sqlRangoHoraRealSql('o', todayStart, rangeEnd ?? null)}
             GROUP BY o."venueId"
           `,
       // 3. Week sales per venue
       prisma.order.groupBy({
         by: ['venueId'],
-        where: { venueId: { in: venueIds }, status: 'COMPLETED', createdAt: { gte: weekStart } },
+        where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, weekStart, null),
         _sum: { total: true },
       }),
       // 4. Previous week sales per venue (for trend calculation)
       prisma.order.groupBy({
         by: ['venueId'],
-        where: { venueId: { in: venueIds }, status: 'COMPLETED', createdAt: { gte: prevWeekStart, lt: weekStart } },
+        where: dondeHoraRealEntre(
+          { venueId: { in: venueIds }, status: OrderStatus.COMPLETED },
+          prevWeekStart,
+          new Date(weekStart.getTime() - 1),
+        ),
         _sum: { total: true },
       }),
       // 5. Staff counts per venue
@@ -724,7 +727,7 @@ class OrganizationDashboardService {
       needsMonthSales
         ? prisma.order.groupBy({
             by: ['venueId'],
-            where: { venueId: { in: venueIds }, status: 'COMPLETED', createdAt: { gte: monthStart } },
+            where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, monthStart, null),
             _sum: { total: true },
           })
         : Promise.resolve([] as any[]),
@@ -736,7 +739,7 @@ class OrganizationDashboardService {
             JOIN "OrderItem" oi ON oi."orderId" = o.id
             WHERE o."venueId" IN (${Prisma.join(venueIds)})
               AND o.status = 'COMPLETED'
-              AND o."createdAt" >= ${utcTs(weekStart)}
+              AND ${sqlRangoHoraRealSql('o', weekStart, null)}
             GROUP BY o."venueId"
           `
         : Promise.resolve([] as any[]),
@@ -748,7 +751,7 @@ class OrganizationDashboardService {
             JOIN "OrderItem" oi ON oi."orderId" = o.id
             WHERE o."venueId" IN (${Prisma.join(venueIds)})
               AND o.status = 'COMPLETED'
-              AND o."createdAt" >= ${utcTs(monthStart)}
+              AND ${sqlRangoHoraRealSql('o', monthStart, null)}
             GROUP BY o."venueId"
           `
         : Promise.resolve([] as any[]),
@@ -1106,12 +1109,12 @@ class OrganizationDashboardService {
     const [todayByVenue, weekByVenue, promotersByVenue, activeEntries, goals] = await Promise.all([
       prisma.order.groupBy({
         by: ['venueId'],
-        where: { venueId: { in: allVenueIds }, status: 'COMPLETED', createdAt: { gte: todayStart } },
+        where: dondeHoraRealEntre({ venueId: { in: allVenueIds }, status: OrderStatus.COMPLETED }, todayStart, null),
         _sum: { total: true },
       }),
       prisma.order.groupBy({
         by: ['venueId'],
-        where: { venueId: { in: allVenueIds }, status: 'COMPLETED', createdAt: { gte: weekStart } },
+        where: dondeHoraRealEntre({ venueId: { in: allVenueIds }, status: OrderStatus.COMPLETED }, weekStart, null),
         _sum: { total: true },
       }),
       prisma.staffVenue.groupBy({
@@ -1762,11 +1765,7 @@ class OrganizationDashboardService {
 
       // Get actual revenue for this day
       const orders = await prisma.order.aggregate({
-        where: {
-          venueId: { in: venueIds },
-          status: 'COMPLETED',
-          createdAt: { gte: dayStart, lt: dayEnd },
-        },
+        where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, dayStart, new Date(dayEnd.getTime() - 1)),
         _sum: { total: true },
       })
 
@@ -1849,11 +1848,7 @@ class OrganizationDashboardService {
 
       // Get actual order count for this day
       const orderCount = await prisma.order.count({
-        where: {
-          venueId: { in: venueIds },
-          status: 'COMPLETED',
-          createdAt: { gte: dayStart, lt: dayEnd },
-        },
+        where: dondeHoraRealEntre({ venueId: { in: venueIds }, status: OrderStatus.COMPLETED }, dayStart, new Date(dayEnd.getTime() - 1)),
       })
 
       const goal = goals.find(g => g.periodDate.toDateString() === dayStart.toDateString())
@@ -1992,11 +1987,7 @@ class OrganizationDashboardService {
 
     const salesByVenue = await prisma.order.groupBy({
       by: ['venueId'],
-      where: {
-        venueId: { in: allVenueIds },
-        status: 'COMPLETED',
-        createdAt: { gte: todayStart },
-      },
+      where: dondeHoraRealEntre({ venueId: { in: allVenueIds }, status: OrderStatus.COMPLETED }, todayStart, null),
       _sum: { total: true },
     })
 
@@ -2058,7 +2049,8 @@ class OrganizationDashboardService {
     // de la org con su vendedor y su tienda materializadas para contarlas en Node). La
     // tienda es la de su PRIMERA venta de hoy y el empate lo gana quien empezó a vender
     // primero — antes lo decidía el orden en que la base devolviera las filas.
-    const todayScope = Prisma.sql`o."venueId" IN (${Prisma.join(venueIds)}) AND o."status" = 'COMPLETED' AND o."createdAt" >= ${utcTs(todayStart)} AND o."createdById" IS NOT NULL`
+    const orderTime = Prisma.raw(sqlHoraReal('o'))
+    const todayScope = Prisma.sql`o."venueId" IN (${Prisma.join(venueIds)}) AND o."status" = 'COMPLETED' AND ${sqlRangoHoraRealSql('o', todayStart, null)} AND o."createdById" IS NOT NULL`
     const rows = await prisma.$queryRaw<
       Array<{
         staffId: string
@@ -2070,11 +2062,11 @@ class OrganizationDashboardService {
       }>
     >`
       WITH ranked AS (
-        SELECT o."createdById" AS "staffId", COUNT(*)::int AS "salesCount", MIN(o."createdAt") AS "firstAt"
+        SELECT o."createdById" AS "staffId", COUNT(*)::int AS "salesCount", MIN(${orderTime}) AS "firstAt"
         FROM "Order" o
         WHERE ${todayScope}
         GROUP BY o."createdById"
-        ORDER BY COUNT(*) DESC, MIN(o."createdAt") ASC, o."createdById" ASC
+        ORDER BY COUNT(*) DESC, "firstAt" ASC, o."createdById" ASC
         LIMIT 1
       )
       SELECT r."staffId", r."salesCount", s."firstName", s."lastName", first_sale."venueId", v."name" AS "venueName"
@@ -2084,7 +2076,7 @@ class OrganizationDashboardService {
         SELECT o."venueId"
         FROM "Order" o
         WHERE ${todayScope} AND o."createdById" = r."staffId"
-        ORDER BY o."createdAt" ASC, o."id" ASC
+        ORDER BY ${orderTime} ASC, o."id" ASC
         LIMIT 1
       ) first_sale ON TRUE
       LEFT JOIN "Venue" v ON v."id" = first_sale."venueId"
@@ -2207,37 +2199,55 @@ class OrganizationDashboardService {
       break: boolean
       breakMinutes: number
       sales: number
+      /**
+       * D4c: las mismas ventas a la hora de LLEGADA (como antes de D4c). Sólo decide quién aparece: el panel filtra con ellas igual que
+       * antes y con `sales` (hora real), para no perder ni sumar filas con red. Opcional para clientes viejos.
+       */
+      salesAtArrival?: number
       attendancePercent: number
     }>
   }> {
-    // Parse date range — convert venue-local dates to UTC for Prisma queries.
-    // DB stores UTC (Prisma sends JS Date as UTC). Frontend sends YYYY-MM-DD venue-local dates.
-    // We convert venue midnight/end-of-day to real UTC boundaries using fromZonedTime.
-    let dayStart: Date
-    let dayEnd: Date
-    if (startDateStr && endDateStr) {
-      dayStart = fromZonedTime(new Date(`${startDateStr}T00:00:00`), DEFAULT_TIMEZONE)
-      dayEnd = fromZonedTime(new Date(`${endDateStr}T23:59:59.999`), DEFAULT_TIMEZONE)
-    } else if (dateStr) {
-      dayStart = fromZonedTime(new Date(`${dateStr}T00:00:00`), DEFAULT_TIMEZONE)
-      dayEnd = fromZonedTime(new Date(`${dateStr}T23:59:59.999`), DEFAULT_TIMEZONE)
-    } else {
-      // No date specified → today in venue timezone
-      const nowVenue = toZonedTime(new Date(), DEFAULT_TIMEZONE)
-      dayStart = fromZonedTime(startOfDay(nowVenue), DEFAULT_TIMEZONE)
-      dayEnd = fromZonedTime(endOfDay(nowVenue), DEFAULT_TIMEZONE)
+    // Codex 4c r6 #1 (encargo a1988b): «el día» es el de CADA sucursal, con SU zona (`Venue.timezone`), no la medianoche de CDMX para
+    // todas. En Cancún (UTC−5) o Tijuana lo cobrado o checado entre las 00:00 y la 01:00 locales caía en el día anterior. Las sucursales se
+    // agrupan por zona y cada grupo consulta con su propio [inicio, fin] (en PlayTelecom casi siempre es una sola zona: una vuelta).
+    // Un día sin fecha («hoy») también es el de cada zona, con UN solo reloj por petición (Codex r1 #4); una fecha vacía es «hoy», como
+    // antes (Codex r1 #5). El día va de su primer instante al primer instante del siguiente, menos 1 ms: en una zona cuya medianoche no
+    // existe o se repite (Santiago) los días no se enciman ni dejan hueco (Codex r1 #3, el mismo cálculo que el correo nocturno).
+    // Las fechas son cadenas civiles: nunca pasan por la zona del host.
+    // Una fecha que no existe en el calendario (2026-11-32, 2026-02-30) es un 400, nunca otro día por desbordamiento (Codex a1988b r2).
+    // Una lista (`?date=a&date=b`) también es un 400 (r3).
+    for (const fecha of [dateStr, startDateStr, endDateStr] as unknown[]) {
+      if (fecha !== undefined && fecha !== '' && !esFechaCivil(fecha)) {
+        // El mensaje no copia lo recibido: un objeto de la query no se puede convertir a texto (r4).
+        throw new BadRequestError('Una fecha no es válida: usa el formato AAAA-MM-DD con un día que exista (años 2000 a 2099).')
+      }
+    }
+    const ahora = new Date()
+    const rangoDelDia = (tz: string): { dayStart: Date; dayEnd: Date } => {
+      const desde = startDateStr && endDateStr ? startDateStr : dateStr || venueDayKey(ahora, tz)
+      const hasta = startDateStr && endDateStr ? endDateStr : desde
+      return { dayStart: new Date(firstInstantOfDay(desde, tz)), dayEnd: new Date(firstInstantOfDay(addCivilDays(hasta, 1), tz) - 1) }
     }
 
     // Get all venues in organization
     const venues = await prisma.venue.findMany({
       where: { organizationId: orgId },
-      select: { id: true, name: true },
+      select: { id: true, name: true, timezone: true },
     })
 
     // A caller-supplied venueId must belong to THIS org — using it verbatim would let a
     // caller read another tenant's attendance (staff PII, GPS, photos, sales) by id.
     const orgVenueIds = venues.map(v => v.id)
     const venueIds = venueId ? orgVenueIds.filter(id => id === venueId) : orgVenueIds
+
+    // Sucursales agrupadas por su zona (inválida o vacía → CDMX, igual que la tardanza de abajo).
+    const zonaDe = new Map(venues.map(v => [v.id, zonaValida(v.timezone)]))
+    const gruposPorZona = new Map<string, string[]>()
+    for (const id of venueIds) {
+      const tz = zonaDe.get(id) ?? DEFAULT_TIMEZONE
+      gruposPorZona.set(tz, [...(gruposPorZona.get(tz) ?? []), id])
+    }
+    const grupos = [...gruposPorZona.entries()].map(([tz, ids]) => ({ venueIds: ids, ...rangoDelDia(tz) }))
 
     // Get all staff in these venues
     const staffVenues = await prisma.staffVenue.findMany({
@@ -2284,65 +2294,85 @@ class OrganizationDashboardService {
       latenessThresholdMinutes: orgAttendanceConfig?.latenessThresholdMinutes ?? 30,
     }
 
-    // Get TimeEntry for the specified date
-    const timeEntries = await prisma.timeEntry.findMany({
-      where: {
-        venueId: { in: venueIds },
-        clockInTime: { gte: dayStart, lte: dayEnd },
-      },
-      select: {
-        id: true,
-        staffId: true,
-        venueId: true,
-        clockInTime: true,
-        clockOutTime: true,
-        clockInLatitude: true,
-        clockInLongitude: true,
-        clockOutLatitude: true,
-        clockOutLongitude: true,
-        checkInPhotoUrl: true,
-        facadePhotoUrl: true,
-        checkOutPhotoUrl: true,
-        depositPhotoUrl: true,
-        status: true,
-        validationStatus: true,
-      },
-    })
+    // Checadas, ventas y efectivo del día, por grupo de sucursales de la misma zona (cada uno con SU día). Una sucursal está en un solo
+    // grupo, así que juntar los resultados no repite ni pierde nada.
+    const porGrupo = await Promise.all(
+      grupos.map(async ({ venueIds: ids, dayStart, dayEnd }) => {
+        // Get TimeEntry for the specified date
+        const timeEntries = await prisma.timeEntry.findMany({
+          where: {
+            venueId: { in: ids },
+            clockInTime: { gte: dayStart, lte: dayEnd },
+          },
+          select: {
+            id: true,
+            staffId: true,
+            venueId: true,
+            clockInTime: true,
+            clockOutTime: true,
+            clockInLatitude: true,
+            clockInLongitude: true,
+            clockOutLatitude: true,
+            clockOutLongitude: true,
+            checkInPhotoUrl: true,
+            facadePhotoUrl: true,
+            checkOutPhotoUrl: true,
+            depositPhotoUrl: true,
+            status: true,
+            validationStatus: true,
+          },
+        })
 
-    // Ventas de cada persona por tienda, agregadas en Postgres. D2 (Codex r4 A3 de pedidos en línea): una devolución cuenta en las
-    // VENTAS de quien hizo la venta (`processedById` de su cobro original), no de quien la opera; la de un cobro sin vendedor (web, liga)
-    // no es de nadie. El EFECTIVO de abajo sigue siendo de quien lo entregó: es dinero que salió de sus manos.
-    const salesData =
-      venueIds.length === 0
-        ? []
-        : await prisma.$queryRaw<Array<{ processedById: string; venueId: string; amount: Prisma.Decimal | null }>>`
-            SELECT ${SQL_VENDEDOR_DEL_MOVIMIENTO} AS "processedById",
-                   p."venueId" AS "venueId",
-                   SUM(p."amount") AS "amount"
-            FROM "Payment" p
-            ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
-            WHERE p."venueId" IN (${Prisma.join(venueIds)})
-              AND ${rangeSql(Prisma.raw('p."createdAt"'), dayStart, dayEnd)}
-              AND p."status" = 'COMPLETED'
-              AND ${SQL_VENDEDOR_DEL_MOVIMIENTO} IS NOT NULL
-            GROUP BY 1, 2
-          `
+        // Ventas de cada persona por tienda, agregadas en Postgres. D2 (Codex r4 A3 de pedidos en línea): una devolución cuenta en las
+        // VENTAS de quien hizo la venta (`processedById` de su cobro original), no de quien la opera; la de un cobro sin vendedor (web,
+        // liga) no es de nadie. El EFECTIVO de abajo sigue siendo de quien lo entregó: es dinero que salió de sus manos.
+        // D4c (Codex 4c r2 #2 y r5 #2): QUIÉN sale en la lista no cambia con la hora real; sólo se SUMA quien vendió a la hora real en el
+        // día. Las mismas ventas a la hora de LLEGADA (como antes de D4c, `amountAtArrival`) deciden también quién aparece: así sigue la
+        // cajera sin checada cuya venta sin internet de ayer llegó hoy (con su efectivo de hoy), y no aparece nadie nuevo con red (un
+        // gerente que sólo devolvió efectivo de la venta de otro). Las dos sumas salen de UNA consulta: un cobro que se confirma a media
+        // petición cae en las dos o en ninguna. El rango de llegada [inicio, fin] cabe dentro del ensanchado de la hora real.
+        const horaReal = Prisma.raw(sqlHoraReal('p'))
+        const salesData = await prisma.$queryRaw<
+          Array<{ processedById: string; venueId: string; amount: Prisma.Decimal | null; amountAtArrival: Prisma.Decimal | null }>
+        >`
+          SELECT ${SQL_VENDEDOR_DEL_MOVIMIENTO} AS "processedById",
+                 p."venueId" AS "venueId",
+                 SUM(p."amount") FILTER (WHERE ${horaReal} >= ${utcTs(dayStart)} AND ${horaReal} <= ${utcTs(dayEnd)}) AS "amount",
+                 SUM(p."amount") FILTER (WHERE p."createdAt" >= ${utcTs(dayStart)} AND p."createdAt" <= ${utcTs(dayEnd)}) AS "amountAtArrival"
+          FROM "Payment" p
+          ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
+          WHERE p."venueId" IN (${Prisma.join(ids)})
+            AND p."createdAt" >= ${utcTs(dayStart)} - ${Prisma.raw(`INTERVAL '${MARGEN_DE_LECTURA_ANTES_MS / 3600000} hours'`)}
+            AND p."createdAt" <= ${utcTs(dayEnd)} + ${Prisma.raw(`INTERVAL '${MARGEN_DE_LECTURA_MS / 3600000} hours'`)}
+            AND p."status" = 'COMPLETED'
+            AND ${SQL_VENDEDOR_DEL_MOVIMIENTO} IS NOT NULL
+          GROUP BY 1, 2
+        `
 
-    // Get CASH-only sales per staff (for deposit verification)
-    const cashSalesData = await prisma.payment.groupBy({
-      by: ['processedById', 'venueId'],
-      where: {
-        venueId: { in: venueIds },
-        createdAt: { gte: dayStart, lte: dayEnd },
-        status: 'COMPLETED',
-        processedById: { not: null },
-        method: 'CASH',
-      },
-      _sum: { amount: true },
-    })
+        // Get CASH-only sales per staff (for deposit verification): a su hora de LLEGADA, con el día de su sucursal.
+        const cashSalesData = await prisma.payment.groupBy({
+          by: ['processedById', 'venueId'],
+          where: {
+            venueId: { in: ids },
+            createdAt: { gte: dayStart, lte: dayEnd },
+            status: 'COMPLETED',
+            processedById: { not: null },
+            method: 'CASH',
+          },
+          _sum: { amount: true },
+        })
 
-    // Efectivo por checada (ventana [clockIn, clockOut] inclusiva), agregado en Postgres.
-    const cashByEntry = await cashSalesPerTimeEntry(venueIds, dayStart, dayEnd)
+        // Efectivo por checada (ventana [clockIn, clockOut] inclusiva), agregado en Postgres.
+        const cashByEntry = await cashSalesPerTimeEntry(ids, dayStart, dayEnd)
+
+        return { timeEntries, salesData, cashSalesData, cashByEntry }
+      }),
+    )
+    const timeEntries = porGrupo.flatMap(g => g.timeEntries)
+    const salesData = porGrupo.flatMap(g => g.salesData)
+    const cashSalesData = porGrupo.flatMap(g => g.cashSalesData)
+    const cashByEntry = new Map(porGrupo.flatMap(g => [...g.cashByEntry]))
+    const ventasPorLlegada = new Map(salesData.map(s => [`${s.processedById}:${s.venueId}`, Number(s.amountAtArrival) || 0]))
 
     // Key: staffId:venueId -> sales amount
     const salesByStaffVenue: Record<string, number> = {}
@@ -2400,7 +2430,7 @@ class OrganizationDashboardService {
       const fullName = `${sv.staff.firstName} ${sv.staff.lastName}`
 
       // Lateness calculation for this venue
-      const venueTz = sv.venue.timezone || DEFAULT_TIMEZONE
+      const venueTz = zonaValida(sv.venue.timezone)
       const aSetting = attendanceSettingsMap.get(sv.venueId) || defaultAttendanceSettings
       const [expH, expM] = aSetting.expectedCheckInTime.split(':').map(Number)
       const deadlineMin = expH * 60 + expM + aSetting.latenessThresholdMinutes
@@ -2475,6 +2505,7 @@ class OrganizationDashboardService {
         break: mostRecentEntry?.status === 'ON_BREAK',
         breakMinutes,
         sales: salesByStaffVenue[`${sv.staffId}:${sv.venueId}`] || 0,
+        salesAtArrival: ventasPorLlegada.get(`${sv.staffId}:${sv.venueId}`) ?? 0,
         cashSales: cashSalesByStaffVenue[`${sv.staffId}:${sv.venueId}`] || 0,
         attendancePercent: attendanceByStaff[sv.staffId] || 0,
         // Lateness from first check-in of the day (oldest entry)
@@ -2487,7 +2518,9 @@ class OrganizationDashboardService {
     return {
       // Only return staff with actual activity (check-in or sales) for the day. Codex r1 de D2: también con ventas NEGATIVAS (una
       // devolución hoy de lo que vendió otro día, sin checar hoy): si no, esa devolución desaparecía del checador.
-      staff: staffData.filter(s => s !== null && (s.checkInTime !== null || s.sales !== 0)) as any,
+      // D4c (Codex 4c r1 #1 y r2 #2): también quien vendió en el día a la hora de LLEGADA (la lista de antes): un cobro sin internet de
+      // ayer subido hoy deja las ventas de hoy en 0 y su efectivo en hoy, y sin esto el cajero que no checó hoy desaparecía con su efectivo.
+      staff: staffData.filter(s => s !== null && (s.checkInTime !== null || s.sales !== 0 || s.salesAtArrival !== 0)) as any,
     }
   }
 
@@ -2499,15 +2532,17 @@ class OrganizationDashboardService {
     // Ventana y día de la semana en la zona del VENUE (decisión de producto 2026-09-01).
     // Antes era la del host, que en producción es UTC: una venta de las 20:00 de México
     // caía en el día siguiente y la ventana arrancaba a las 18:00 de la víspera.
-    const sevenDaysAgo = venueStartOfDayOffset(timezone, -7)
+    // D4c (Codex 4c r1 #2): 7 días con hoy, uno por barra. Con -7 entraban 8 y el mismo día de la semana pasada se sumaba a la barra
+    // de hoy (agrupa por día de la semana).
+    const sevenDaysAgo = venueStartOfDayOffset(timezone, -6)
     const todayVenue = toZonedTime(new Date(), timezone)
 
     // Ventas de los últimos 7 días agrupadas por día de la semana (del venue) en Postgres.
     const rows = await prisma.$queryRaw<Array<{ dow: number; sales: Prisma.Decimal | null }>>`
-      SELECT EXTRACT(DOW FROM ${localWallClock(timezone, Prisma.raw('o."createdAt"'))})::int AS "dow", SUM(o."total") AS "sales"
+      SELECT EXTRACT(DOW FROM ${localWallClock(timezone, Prisma.raw(sqlHoraReal('o')))})::int AS "dow", SUM(o."total") AS "sales"
       FROM "Order" o
       WHERE o."venueId" IN (${orgVenueIdsSql(orgId)})
-        AND o."createdById" = ${staffId} AND o."status" = 'COMPLETED' AND o."createdAt" >= ${utcTs(sevenDaysAgo)}
+        AND o."createdById" = ${staffId} AND o."status" = 'COMPLETED' AND ${sqlRangoHoraRealSql('o', sevenDaysAgo, null)}
       GROUP BY 1
     `
 
@@ -3400,9 +3435,13 @@ class OrganizationDashboardService {
     const staffIds = [...new Set(staffVenues.map(sv => sv.staffId))]
     const venueIds = [...new Set(staffVenues.map(sv => sv.venueId))]
 
-    // Convert date range to UTC
-    const rangeStart = fromZonedTime(new Date(`${startDateStr}T00:00:00`), DEFAULT_TIMEZONE)
-    const rangeEnd = fromZonedTime(new Date(`${endDateStr}T23:59:59.999`), DEFAULT_TIMEZONE)
+    // D4c (Codex 4c r1 #3): el filtro es el MISMO día civil de la sucursal con el que se agrupa (`venueLocalDay`), no la medianoche de
+    // CDMX: en Cancún un cobro de las 00:10 del 12 (23:10 del 11 en CDMX) quedaba fuera del 12, y si se pedía el 11 entraba al filtro
+    // pero se agrupaba en el 12, que no se enseña. El rango en UTC sólo acota con el índice: se ensancha un día por lado y el día
+    // exacto lo decide `venueLocalDay` abajo.
+    const UN_DIA_MS = 24 * 60 * 60 * 1000
+    const rangeStart = new Date(fromZonedTime(`${startDateStr}T00:00:00.000`, DEFAULT_TIMEZONE).getTime() - UN_DIA_MS)
+    const rangeEnd = new Date(fromZonedTime(`${endDateStr}T23:59:59.999`, DEFAULT_TIMEZONE).getTime() + UN_DIA_MS)
 
     // Conteo e importe por vendedor × tienda × día del venue, agregados en Postgres
     // (antes: todos los pagos del rango materializados para sumarlos en Node).
@@ -3410,7 +3449,7 @@ class OrganizationDashboardService {
       Array<{ staffId: string; venueId: string; localDate: string; count: number; amount: Prisma.Decimal | null }>
     >`
       SELECT ${SQL_VENDEDOR_DEL_MOVIMIENTO} AS "staffId", p."venueId",
-             ${venueLocalDay(Prisma.raw('p."createdAt"'))} AS "localDate",
+             ${venueLocalDay(Prisma.raw(sqlHoraReal('p')))} AS "localDate",
              (COUNT(*) FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND'))::int AS "count", SUM(p."amount") AS "amount"
       FROM "Payment" p
       JOIN "Venue" v ON v."id" = p."venueId"
@@ -3418,7 +3457,8 @@ class OrganizationDashboardService {
       WHERE ${SQL_VENDEDOR_DEL_MOVIMIENTO} IN (${Prisma.join(staffIds)})
         AND p."venueId" IN (${Prisma.join(venueIds)})
         AND p."status" = 'COMPLETED'
-        AND ${rangeSql(Prisma.raw('p."createdAt"'), rangeStart, rangeEnd)}
+        AND ${sqlRangoHoraRealSql('p', rangeStart, rangeEnd)}
+        AND ${venueLocalDay(Prisma.raw(sqlHoraReal('p')))} BETWEEN ${startDateStr} AND ${endDateStr}
       GROUP BY 1, 2, 3
     `
 

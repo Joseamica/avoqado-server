@@ -11,6 +11,7 @@ import { directoryInputSchema } from './directory/input'
 
 /** Explicit effects, never guessed from a name or permission suffix. New tools must declare one. */
 export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
+  avoqado_help_context: 'read',
   review_pending_courtesy: 'write',
   cancel_unpaid_order: 'write',
   correct_cash_count: 'write',
@@ -100,6 +101,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   create_loyalty_promotion: 'write',
   create_modifier_group: 'write',
   link_modifier_to_menu_item: 'write',
+  configure_modifier_repeat: 'write',
   create_payment_link: 'write',
   create_customer_payment_link: 'write',
   add_customer_to_payment_link: 'write',
@@ -248,6 +250,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   list_payment_links: 'read',
   list_garment_payment_links: 'read',
   list_payments: 'read',
+  find_payment_by_amount: 'read',
   list_platform_charges_due: 'read',
   get_pos_app_version_policies: 'read',
   get_cash_payment_by_key: 'read',
@@ -637,6 +640,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'expectedCorrectionCount',
             // Extra ligado a un platillo (`link_modifier_to_menu_item`, encargo 27771e): se confirma sobre el extra que se VIO.
             'resolvedModifierId',
+            // Repetir la misma opción (`configure_modifier_repeat`, encargo a508f4): se confirma sobre el grupo que se VIO.
+            'resolvedGroupId',
           ]) {
             // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
             // no atar un `null` que el esquema de otra herramienta no acepta.

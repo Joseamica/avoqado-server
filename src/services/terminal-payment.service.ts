@@ -99,9 +99,21 @@ export interface TerminalPaymentRequest {
    */
   customerId?: string | null
   /**
-   * F1 (Codex android r2 #1): el saldo base (sin propina) que la caja cree que falta en `orderId`. Con él, la admisión exige
-   * `0 < amountCents ≤ saldo real` al centavo y que este número sea el saldo real; si no, 412 `REMAINING_BALANCE_MISMATCH` con el
-   * saldo vigente. Ausente o `null` = la caja vieja, con el margen de D7. Sin orden, o en la diferencia de un Cambio, se ignora.
+   * 🔴 hz:e9ce0be7:D53 · lo que debía la cuenta (centavos, sin propina) cuando la caja armó ESTE cobro: el `remainingBalance` que le
+   * devolvió el servidor al armar la venta de vales. Opcional: sólo lo manda ANDROID nuevo en el cobro de vales; las apps
+   * publicadas no lo mandan y la admisión queda igual. Si el saldo guardado de la orden ya no es ése (alguien abonó en el panel
+   * mientras se cobraba), no se cobra: 412 `ORDER_BALANCE_CHANGED`, con lápida y antes de tocar la terminal.
+   */
+  expectedBalanceBeforeCents?: number
+  /**
+   * 🔴 hz:bdd815fd:D5 · lo que faltaba de la cuenta (centavos, sin propina) según la pantalla que abrió ESTE cobro: el
+   * `preBillBalance.remainingBalanceCents` de «Pedidos → detalle» (`saldoPorCobrar`). Distinto de [expectedBalanceBeforeCents]: ése
+   * se compara con la columna guardada `Order.remainingBalance`, y la columna se descuadra con la propina (unos escritores guardan
+   * `Order.total` con ella y otros sin ella), así que frenaría cobros buenos. Éste se compara con lo que falta calculado bajo el
+   * candado con la MISMA cuenta que la pantalla (`faltaCents` de D7). Opcional: las apps publicadas no lo mandan y nada cambia.
+   *
+   * F1 (Codex android r2 #1) usa este MISMO campo con una regla estricta (`REMAINING_BALANCE_MISMATCH`); las dos conviven en esta
+   * unión y se unifican en el commit siguiente.
    */
   expectedRemainingCents?: number | null
 }
@@ -1063,8 +1075,10 @@ export function proyectarEstado(row: FilaProyectable): TerminalPaymentStatus {
     ...(desenlace.reconciliationRequired ? { reconciliationRequired: true } : {}),
     // hz:ce654971:D7 (Codex r1 #2): el «falta $X» también sale aquí: si se perdió la respuesta del POST, la caja lo recupera con esta
     // consulta y sin él decía «El cobro fue rechazado» (suena al banco) y reintentaba con el importe viejo.
+    // D53: lo mismo para «la cuenta cambió mientras se cobraba».
     ...(row.failureCode === 'BANK_DECLINED' ||
     row.failureCode === 'REJECTED_ORDER_AMOUNT_OVER_BALANCE' ||
+    row.failureCode === 'REJECTED_ORDER_BALANCE_CHANGED' ||
     row.failureCode === 'REJECTED_ORDER_BALANCE_MISMATCH'
       ? { errorMessage: mensajeDelServidor(row.resultJson) }
       : {}),
@@ -1322,6 +1336,8 @@ type MotivoDeRechazo =
   | 'REJECTED_EXCHANGE_DIFFERENCE_ALREADY_CHARGED'
   /** hz:ce654971:D7: la cuenta ya tiene un abono y el cobro (sin propina) pasa de lo que falta. */
   | 'REJECTED_ORDER_AMOUNT_OVER_BALANCE'
+  /** hz:e9ce0be7:D53: el saldo de la cuenta ya no es el que vio la caja al armar este cobro (`expectedBalanceBeforeCents`). */
+  | 'REJECTED_ORDER_BALANCE_CHANGED'
   /** F1 (Codex android r2 #1): la caja mandó `expectedRemainingCents` y el saldo real no es ése, o el cobro no cabe en él. */
   | 'REJECTED_ORDER_BALANCE_MISMATCH'
 
@@ -1333,6 +1349,8 @@ const MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS = 100
 /** 412 y no 400/409: las apps vivas (ANDROID ≥ 2.22, iOS ≥ 1.13) muestran tal cual el texto de cualquier 4xx fuera de esos. */
 const HTTP_COBRO_MAYOR_QUE_EL_SALDO = 412
 const COBRO_MAYOR_QUE_EL_SALDO = 'AMOUNT_EXCEEDS_REMAINING_BALANCE'
+/** hz:e9ce0be7:D53: mismo 412 que el «falta $X» (las apps vivas muestran el texto tal cual). */
+const LA_CUENTA_CAMBIO = 'ORDER_BALANCE_CHANGED'
 /** F1 (Codex android r2 #1): el reparto de la caja ya no es el saldo real. Mismo 412 que D7; el saldo va en `remainingBalanceCents`. */
 const SALDO_DISTINTO_AL_ESPERADO = 'REMAINING_BALANCE_MISMATCH'
 /**
@@ -1415,6 +1433,14 @@ function errorDeLapida(row: { failureCode?: string | null; resultJson: Prisma.Js
         HTTP_COBRO_MAYOR_QUE_EL_SALDO,
         true,
         COBRO_MAYOR_QUE_EL_SALDO,
+        details,
+      )
+    case 'REJECTED_ORDER_BALANCE_CHANGED':
+      return new AppError(
+        mensaje('La cuenta cambió mientras se cobraba. No se cobró la tarjeta. Sal del cobro y cobra el saldo pendiente.'),
+        HTTP_COBRO_MAYOR_QUE_EL_SALDO,
+        true,
+        LA_CUENTA_CAMBIO,
         details,
       )
     case 'REJECTED_ORDER_BALANCE_MISMATCH':
@@ -1977,6 +2003,8 @@ class TerminalPaymentService {
             serviceChargeAmount: true,
             contratoDePrecio: true,
             taxAmount: true,
+            // D53: el saldo GUARDADO, la misma columna que la caja leyó al armar la venta de vales.
+            remainingBalance: true,
           },
         })
         if (!order) {
@@ -2069,11 +2097,55 @@ class TerminalPaymentService {
           const cobrado = await cobradoQueCubreEnTx(tx, { venueId, orderId: request.orderId })
           const saldo = computeOrderBalance(order, [{ amount: cobrado.amount, tipAmount: cobrado.tipAmount }])
           const faltaCents = saldo.remainingBalance.mul(100).toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP).toNumber()
-          const esperado = request.expectedRemainingCents
-          if (esperado != null) {
+          // 🔴 hz:e9ce0be7:D53 · la caja armó este cobro (su importe) cuando la cuenta debía `expectedBalanceBeforeCents`. Si un abono
+          // del panel entró en medio, el importe ya no es el saldo: $0.50 de más cabe en el margen de D7, y en partes iguales quedaban
+          // pesos sin pedir. Se compara la MISMA columna que la caja leyó (servidor contra servidor, sin la aritmética del carrito),
+          // bajo el candado que también toma el pago manual. Sin el dato (apps publicadas) no cambia nada.
+          const esperado = request.expectedBalanceBeforeCents
+          if (esperado !== undefined) {
+            const guardadoCents = new Prisma.Decimal(order.remainingBalance ?? 0)
+              .mul(100)
+              .toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP)
+              .toNumber()
+            if (guardadoCents !== esperado) {
+              return rechazar(
+                'REJECTED_ORDER_BALANCE_CHANGED',
+                new AppError(
+                  `La cuenta ${order.orderNumber ?? request.orderId} cambió mientras se cobraba: ahora falta $${(faltaCents / 100).toFixed(2)}. ` +
+                    'No se cobró la tarjeta. Sal del cobro y cobra el saldo pendiente.',
+                  HTTP_COBRO_MAYOR_QUE_EL_SALDO,
+                  true,
+                  LA_CUENTA_CAMBIO,
+                  { ...detalles, remainingCents: faltaCents, expectedBalanceBeforeCents: esperado },
+                ),
+              )
+            }
+          }
+          // 🔴 hz:bdd815fd:D5 · «Pedidos → Cobrar» de una cuenta abierta: la pantalla leyó que faltaban `expectedRemainingCents`. Si
+          // desde entonces lo que falta BAJÓ (un abono del panel, otra caja) y el importe ya pasa de lo que falta, el importe salió de
+          // una lectura vieja: es cobrar de más, y hasta $1 cabía en el margen de D7, que existe para redondeos de una cuenta que NO
+          // cambió. Si lo que falta subió (otra caja agregó productos) o el importe sigue cabiendo (una parte), no hay cobro de más:
+          // pasa como hoy y la pantalla ofrece el resto al releer (Codex D5 r2). Misma cuenta que la pantalla (`saldoPorCobrar` =
+          // `faltaCents` aquí: Rappi en efectivo ya se rechazó arriba), nunca la columna guardada. Sin el dato no cambia nada.
+          const loQueVioLaPantalla = request.expectedRemainingCents
+          if (loQueVioLaPantalla != null && faltaCents < loQueVioLaPantalla && request.amountCents > faltaCents) {
+            return rechazar(
+              'REJECTED_ORDER_BALANCE_CHANGED',
+              new AppError(
+                `La cuenta ${order.orderNumber ?? request.orderId} cambió mientras se cobraba: ahora falta $${(faltaCents / 100).toFixed(2)}. ` +
+                  'No se cobró la tarjeta. Sal del cobro y cobra el saldo pendiente.',
+                HTTP_COBRO_MAYOR_QUE_EL_SALDO,
+                true,
+                LA_CUENTA_CAMBIO,
+                { ...detalles, remainingCents: faltaCents, expectedRemainingCents: loQueVioLaPantalla },
+              ),
+            )
+          }
+          const esperadoF1 = request.expectedRemainingCents
+          if (esperadoF1 != null) {
             // 🔴 F1 · Codex android r2 #1: la caja nueva dice qué saldo vio. Sin margen y también SIN abono: el servidor pudo corregir
             // el precio al crear la cuenta, u otra caja abonar entre la lectura y el envío. Un reparto viejo nunca llega al lector.
-            if (esperado !== faltaCents || request.amountCents <= 0 || request.amountCents > faltaCents) {
+            if (esperadoF1 !== faltaCents || request.amountCents <= 0 || request.amountCents > faltaCents) {
               return rechazar(
                 'REJECTED_ORDER_BALANCE_MISMATCH',
                 new AppError(
@@ -2081,7 +2153,7 @@ class TerminalPaymentService {
                   HTTP_COBRO_MAYOR_QUE_EL_SALDO,
                   true,
                   SALDO_DISTINTO_AL_ESPERADO,
-                  { ...detalles, remainingBalanceCents: faltaCents, expectedRemainingCents: esperado },
+                  { ...detalles, remainingBalanceCents: faltaCents, expectedRemainingCents: esperadoF1 },
                 ),
               )
             }

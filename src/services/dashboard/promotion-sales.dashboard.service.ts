@@ -39,6 +39,7 @@
  * problema que la decisión del founder quería evitar.
  */
 
+import { sqlHoraReal, sqlRangoHoraReal } from '@/services/shared/horaRealDelAparato'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { parseDbDateRange } from '@/utils/datetime'
@@ -116,8 +117,7 @@ export interface PromotionSalesResponse {
  */
 const ORDER_SCOPE_SQL = `
       o."venueId" = $1
-      AND o."createdAt" >= ${utcTsParam(2)}
-      AND o."createdAt" <= ${utcTsParam(3)}
+      AND ${sqlRangoHoraReal('o', utcTsParam(2), utcTsParam(3))}
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
 `
@@ -260,7 +260,8 @@ async function calculatePromotionPeriodMetrics(
   }
   // Venue wall clock of the UTC column (double AT TIME ZONE). With a single one the stored
   // UTC value was read as local time: a 20:00 sale landed on the next day, at hour 02.
-  const groupByExpression = `DATE_TRUNC('${truncUnit[reportType]}', ${localWallClockRaw(safeTz, 'o."createdAt"')})`
+  // D4: la hora REAL de la venta, igual que Ventas por artículo (D1).
+  const groupByExpression = `DATE_TRUNC('${truncUnit[reportType]}', ${localWallClockRaw(safeTz, sqlHoraReal('o'))})`
 
   const periodQuery = `
     SELECT

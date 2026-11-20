@@ -131,8 +131,9 @@ describe('Modifier Inventory Analytics Service', () => {
       await getModifierUsageStats(mockVenueId, { startDate, endDate })
 
       const callArg = (prisma.orderItemModifier.findMany as jest.Mock).mock.calls[0][0]
-      expect(callArg.where.orderItem.order.createdAt.gte).toEqual(startDate)
-      expect(callArg.where.orderItem.order.createdAt.lte).toEqual(endDate)
+      // D4: el rango va sobre la hora real de la venta (clientCreatedAt, o la llegada si no hay)
+      expect(callArg.where.orderItem.order.AND[1].OR[0].clientCreatedAt).toEqual({ gte: startDate, lte: endDate })
+      expect(callArg.where.orderItem.order.AND[1].OR[1].createdAt).toEqual({ gte: startDate, lte: endDate })
     })
 
     it('should filter by modifier group when provided', async () => {
@@ -339,8 +340,9 @@ describe('Modifier Inventory Analytics Service', () => {
 
       // Verify orderItemModifier.findMany was called with date filter
       const callArg = (prisma.orderItemModifier.findMany as jest.Mock).mock.calls[0][0]
-      expect(callArg.where.orderItem.order.createdAt.gte).toEqual(startDate)
-      expect(callArg.where.orderItem.order.createdAt.lte).toEqual(endDate)
+      // D4: el rango va sobre la hora real de la venta (clientCreatedAt, o la llegada si no hay)
+      expect(callArg.where.orderItem.order.AND[1].OR[0].clientCreatedAt).toEqual({ gte: startDate, lte: endDate })
+      expect(callArg.where.orderItem.order.AND[1].OR[1].createdAt).toEqual({ gte: startDate, lte: endDate })
     })
   })
 

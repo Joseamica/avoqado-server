@@ -1,0 +1,328 @@
+{
+  "pagina": "windows/cobro/cobrar-en-efectivo",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 29,
+      "cita": "label = \"Cobrar\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 457,
+      "cita": "text = primaryActionLabel ?: \"Cobrar ${cartState.totalDisplay}\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 3070,
+      "cita": "text = \"Ver carrito\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/upsell/UpsellCashierStrip.kt",
+      "linea": 133,
+      "cita": "text = \"¿Algo más?\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/upsell/UpsellCashierStrip.kt",
+      "linea": 211,
+      "cita": "text = if (selected.isEmpty()) \"No, gracias\" else"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/RatingScreen.kt",
+      "linea": 91,
+      "cita": "text = \"¿Cómo fue tu experiencia?\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/RatingScreen.kt",
+      "linea": 121,
+      "cita": "Text(\"Omitir\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 138,
+      "cita": "text = \"Propina\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 391,
+      "cita": "text = \"Sin propina\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 2274,
+      "cita": "private fun enterInitialState(amount: Int) {"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 232,
+      "cita": "text = \"Efectivo\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 257,
+      "cita": "onCashPresetSelected(amountSuggestion)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 2401,
+      "cita": "fun confirmCashPreset(tenderedCents: Int) {"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 270,
+      "cita": "text = \"Personalizado\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 621,
+      "cita": "text = \"Monto recibido\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 539,
+      "cita": "caracter != null && caracter in '0'..'9' -> if (cents < 10_000_000) cents * 10 + (caracter - '0') else cents"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 645,
+      "cita": "text = formatMoney(inputCents / 100.0),"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 747,
+      "cita": "text = \"Confirmar\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 302,
+      "cita": "text = \"Cambio: ${formatMoney(changeCents / 100.0)}\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 192,
+      "cita": "text = \"Venta nueva\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 971
+    },
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1918
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red, el efectivo entra a la cola de pagos del aparato (queueCashPayment)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 3539
+    },
+    {
+      "afirmacion": "El cobro encolado termina en Success con isQueued = true",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 3566
+    },
+    {
+      "afirmacion": "La cola de pagos es Room (PendingPaymentDao)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/CashPaymentRepository.kt",
+      "linea": 23
+    },
+    {
+      "afirmacion": "WINDOWS: esa base Room vive en la carpeta de datos de la computadora (BundledSQLiteDriver)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/core/di/DatabaseModule.kt",
+      "linea": 46
+    },
+    {
+      "afirmacion": "El recibo de un cobro encolado dice «Se sincronizará cuando haya conexión»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 238
+    },
+    {
+      "afirmacion": "Al volver la red, el sincronizador manda lo encolado (caja primero)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/PaymentSyncService.kt",
+      "linea": 424
+    },
+    {
+      "afirmacion": "La venta sin red con productos y sin orden no se retiene esperando la prueba de precio: la cola la crea y la cobra (Q16)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/PaymentSyncService.kt",
+      "linea": 587
+    },
+    {
+      "afirmacion": "Q16: si el servidor no tiene la orden, se suelta la fila para crearla y cobrarla en la misma vuelta",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/PaymentSyncService.kt",
+      "linea": 463
+    },
+    {
+      "afirmacion": "Si crear la orden con premio falla por red, no se encola: sale MENSAJE_PREMIO_SIN_RED (si la orden ya se creó, el efectivo sí se encola)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 3524
+    },
+    {
+      "afirmacion": "Texto «Sin conexión: el premio necesita internet…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/model/PaymentModels.kt",
+      "linea": 374
+    },
+    {
+      "afirmacion": "Si aparece «Sin conexión: el cupón necesita internet…»: la venta con cupón no tenía orden todavía, así que el efectivo no se apartó (no hay reserva previa)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 540
+    },
+    {
+      "afirmacion": "Si aparece ese mensaje: crear la orden con cupón falló por red y el cobro no se encola (con la orden ya creada, el efectivo sí se encola y el mensaje no sale)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 3532
+    },
+    {
+      "afirmacion": "Si aparece: es el texto MENSAJE_CUPON_SIN_RED «Sin conexión: el cupón necesita internet…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/model/PaymentModels.kt",
+      "linea": 378
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "WINDOWS: la ventana abre maximizada",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Main.kt",
+      "linea": 98
+    },
+    {
+      "ruta": "WINDOWS: el tamaño de la ventana decide el diseño (WindowSizeClass del ancho real)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt",
+      "linea": 49
+    },
+    {
+      "ruta": "Diseño de tableta desde el ancho Medium (600 dp); más angosta, el de teléfono",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 159
+    },
+    {
+      "ruta": "Problema: Confirmar se prende con el monto ≥ total",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 564
+    },
+    {
+      "ruta": "Problema: el botón Confirmar usa isValid",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 737
+    },
+    {
+      "ruta": "WINDOWS: la pantalla del cliente va en un segundo monitor, si lo hay",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Main.kt",
+      "linea": 138
+    },
+    {
+      "ruta": "WINDOWS: el monitor montado cuenta como pantalla tocable",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/customerdisplay/CustomerDisplayManager.kt",
+      "linea": 259
+    },
+    {
+      "ruta": "Ajuste de la computadora «El cliente elige propina y calificación»",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/presentation/CustomerDisplaySheet.kt",
+      "linea": 118
+    },
+    {
+      "ruta": "Ese ajuste está apagado por omisión",
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayPrefs.kt",
+      "linea": 27
+    },
+    {
+      "ruta": "El cliente captura sólo con la pantalla montada, el ajuste prendido y la pantalla tocable",
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayState.kt",
+      "linea": 223
+    },
+    {
+      "ruta": "El cobro usa esa condición",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 302
+    },
+    {
+      "ruta": "Sólo con ella la caja espera; si no, califica y elige la propina la caja",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 266
+    },
+    {
+      "ruta": "Pantalla del cliente: el cliente califica",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 268
+    },
+    {
+      "ruta": "Pantalla del cliente: seguir sin calificación",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 270
+    },
+    {
+      "ruta": "Pantalla del cliente: el cliente elige la propina",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 289
+    },
+    {
+      "ruta": "Pantalla del cliente: seguir sin propina",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 291
+    },
+    {
+      "ruta": "Pantalla del cliente: la salida aparece a los 8 segundos (nadie cambia el valor por omisión)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/WaitingForCustomerScreen.kt",
+      "linea": 54
+    },
+    {
+      "ruta": "Pantalla del cliente: el botón de salida sólo con canSkip",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/WaitingForCustomerScreen.kt",
+      "linea": 112
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado; sin pantalla táctil ni segundo monitor)",
+    "version": "2.25.41-escritorio: paquete de prueba Avoqado.POS.Prueba armado del sourceRef c07a2bbe con :pos:empaquetarWindows (avq-verify en la nube), en %TEMP%\\avq-tactil-soporte-windows con datos propios, contra el SERVIDOR local del 3000 de la Mac por Tailscale; sesión owner@owner.com (Propietario)",
+    "apkSha256": "2d24ce533eaf065e54305d0603837bf854bcc68f421c1459e5ff0d95d88ff4bc",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-en-efectivo/01-sw19-carrito.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-en-efectivo/02-sw20-tras-cobrar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-en-efectivo/03-sw21-tras-omitir.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-en-efectivo/04-sw22-pantalla-cobro.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-en-efectivo/05-sw23-personalizado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-en-efectivo/06-sw24-monto-recibido.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-en-efectivo/07-sw26-cobrado2.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-en-efectivo/08-sw127-algo-mas-no-gracias.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/cobro/cobrar-en-efectivo/09-sw128-tras-no-gracias.png"
+    ],
+    "filasCreadas": [
+      "Order cmwmknoqo00y7wayd47uwmffw (Avoqado Empty) «Otro importe» $12.00 cobrada en efectivo con $200 (cambio $188); CashDrawerEvent CASH_SALE cmwmknro000ygwaydlznhuhl3",
+      "Terminal cmwmkjcl300xpwayd1zapag7r «Avoqado Windows 11» (Avoqado Empty) y cmwmkhwr400xjwaydzdjyzp8c «Avoqado Windows 11 (15)» (Avoqado Full): el registro del aparato al iniciar sesión"
+    ],
+    "nota": "Teclado $12.00 + → Cobrar $12.00 (ventana ancha, sin Ver carrito) → ¿Cómo fue tu experiencia? → Omitir → Propina → Sin propina (no salió ¿Algo más?: el negocio no tiene sugerencias) → fila Efectivo con $15, $20 y Personalizado → Personalizado: Monto recibido en $0.00 «Mínimo $12.00» con Confirmar apagado → se tecleó 20000 → $200.00 «Cambio: $188.00» → Confirmar → «Procesando pago…» → $12.00 Efectivo «Cambio: $188.00» y Venta nueva. Pantalla del cliente en segundo monitor no probada (un solo monitor). Sin internet no recorrido. En Avoqado Full (con sugerencias) el paso 2 sí sale: «¿Algo más?» con «No, gracias», que lleva a ¿Cómo fue tu experiencia? (fotos 8 y 9; ese carrito no se cobró y quedó vacío)."
+  },
+  "codex": {
+    "lote": 2,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

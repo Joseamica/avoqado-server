@@ -46,6 +46,7 @@ import {
 } from '@/services/online-ordering/transitions.service'
 import { reabrirSiRecibeDinero } from '@/services/shared/cuentaCancelada'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import socketManager from '@/communication/sockets/managers/socketManager'
@@ -1110,7 +1111,8 @@ describe('T9 · carreras con candados reales', () => {
     const sigue = new Promise<void>(resolve => (soltar = resolve))
     // El cobro capturado (la cola sin red, la tarjeta) toma el candado de la orden y, con él, reabre la cuenta y concilia el folio:
     // es `reabrirSiRecibeDinero` real, el mismo que corre dentro de cada camino de dinero.
-    const dinero = prisma.$transaction(
+    // D26: la reapertura escribe `Discount` (los usos que devolvió una anulación): pide el `tx` con reintento por trabas.
+    const dinero = withDeadlockRetry(
       async tx => {
         expect(await lockExistingOrderForPayment(tx, { venueId: f.venueId, orderId })).toBe(true)
         pidDelDinero = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid
@@ -1127,7 +1129,7 @@ describe('T9 · carreras con candados reales', () => {
           staffId: f.staffId,
         })
       },
-      { timeout: 20_000, maxWait: 5_000 },
+      { etiqueta: 'itest-carrera-r3r4', timeout: 20_000, maxWait: 5_000 },
     )
     await candadoTomado
 

@@ -299,3 +299,187 @@ describe('encontrarReglaActiva (R2 del reporte de liquidación)', () => {
     expect(encontrarReglaActiva('otro', 'CREDIT', new Date('2026-07-01T18:00:00Z'), configs)).toBeNull()
   })
 })
+
+// ── P1 (la B, «lo que cae en el banco esta semana»): la semana del panel, en centavos exactos ─────────────────────────────
+
+/**
+ * Los 6 cobros de la caracterización (Task P1, Paso 1): dos comercios, crédito y débito, propinas, comisiones con 4 decimales y
+ * uno que cae la semana siguiente. Los mismos, como texto, en `tests/unit/services/payments/sumaExactaDeDinero.test.ts`.
+ */
+const SEMANA_P1 = {
+  weekStart: new Date('2026-07-06T06:00:00Z'), // lun 00:00 CDMX
+  weekEnd: new Date('2026-07-13T05:59:59.999Z'), // dom 23:59:59.999 CDMX
+  comercios: {
+    m1: { displayName: 'Comercio Uno', alias: null, provider: { name: 'Blumon' } },
+    m2: { displayName: null, alias: 'Alias Dos', provider: { name: 'AngelPay (Nexgo)' } },
+  },
+  reglas: (['m1', 'm2'] as const).flatMap(merchantAccountId =>
+    (['CREDIT', 'DEBIT'] as const).map(cardType => ({ ...cfg, merchantAccountId, cardType })),
+  ),
+}
+const cobroP1 = (
+  id: string,
+  merchant: 'm1' | 'm2',
+  transactionType: 'CREDIT' | 'DEBIT',
+  createdAt: string,
+  amount: number,
+  tipAmount: number,
+  venueChargeAmount: number,
+  venueFixedFee: number,
+) => ({
+  id,
+  amount,
+  tipAmount,
+  createdAt: new Date(createdAt),
+  merchantAccountId: merchant,
+  transactionCost: { transactionType, venueChargeAmount, venueFixedFee },
+  merchantAccount: SEMANA_P1.comercios[merchant],
+})
+
+describe('getSettlementsLandingInWeek — P1: la caracterización y la suma exacta', () => {
+  it('the week keeps its fields and its figures', async () => {
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([
+      cobroP1('p4', 'm1', 'CREDIT', '2026-07-04T02:00:00Z', 1000, 0, 25.005, 0), // vie 20:00 → lun 06; comisión 25.005 → 25.01
+      cobroP1('p1', 'm1', 'CREDIT', '2026-07-06T18:00:00Z', 100.01, 10.01, 3.3003, 0.5), // lun 12:00 → mar 07
+      cobroP1('p2', 'm1', 'DEBIT', '2026-07-06T19:00:00Z', 19.99, 0.02, 0.4498, 0), // lun 13:00 → mar 07
+      cobroP1('p3', 'm2', 'DEBIT', '2026-07-07T16:00:00Z', 250.5, 25.25, 6.2501, 0.25), // mar 10:00 → mié 08
+      cobroP1('p5', 'm2', 'DEBIT', '2026-07-09T05:30:00Z', 80, 8.88, 1.7776, 0), // mié 23:30, después del corte → vie 10
+      cobroP1('p6', 'm1', 'CREDIT', '2026-07-12T02:00:00Z', 500, 50, 15, 0), // sáb 20:00 → lun 13, la semana siguiente
+    ])
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue(SEMANA_P1.reglas)
+
+    const uno = { merchantAccountId: 'm1', displayName: 'Comercio Uno', provider: 'Blumon' }
+    const dos = { merchantAccountId: 'm2', displayName: 'Alias Dos', provider: 'AngelPay (Nexgo)' }
+    expect(await getSettlementsLandingInWeek('v1', SEMANA_P1.weekStart, SEMANA_P1.weekEnd, TZ)).toEqual({
+      weekStart: '2026-07-06',
+      weekEnd: '2026-07-12',
+      days: [
+        {
+          date: '2026-07-06',
+          status: 'settled',
+          gross: 1000,
+          commission: 25.01,
+          net: 974.99,
+          count: 1,
+          byMerchant: [{ ...uno, gross: 1000, commission: 25.01, net: 974.99, count: 1 }],
+          byCardType: [{ cardType: 'CREDIT', gross: 1000, commission: 25.01, net: 974.99, count: 1 }],
+        },
+        {
+          date: '2026-07-07',
+          status: 'settled',
+          gross: 130.03,
+          commission: 4.25,
+          net: 125.78,
+          count: 2,
+          byMerchant: [{ ...uno, gross: 130.03, commission: 4.25, net: 125.78, count: 2 }],
+          byCardType: [
+            { cardType: 'CREDIT', gross: 110.02, commission: 3.8, net: 106.22, count: 1 },
+            { cardType: 'DEBIT', gross: 20.01, commission: 0.45, net: 19.56, count: 1 },
+          ],
+        },
+        {
+          date: '2026-07-08',
+          status: 'settled',
+          gross: 275.75,
+          commission: 6.5,
+          net: 269.25,
+          count: 1,
+          byMerchant: [{ ...dos, gross: 275.75, commission: 6.5, net: 269.25, count: 1 }],
+          byCardType: [{ cardType: 'DEBIT', gross: 275.75, commission: 6.5, net: 269.25, count: 1 }],
+        },
+        {
+          date: '2026-07-10',
+          status: 'settled',
+          gross: 88.88,
+          commission: 1.78,
+          net: 87.1,
+          count: 1,
+          byMerchant: [{ ...dos, gross: 88.88, commission: 1.78, net: 87.1, count: 1 }],
+          byCardType: [{ cardType: 'DEBIT', gross: 88.88, commission: 1.78, net: 87.1, count: 1 }],
+        },
+      ],
+      weekTotal: { gross: 1494.66, commission: 37.54, net: 1457.12, count: 5 },
+    })
+  })
+})
+
+describe('getSettlementsLandingInWeek — P1: exacta a volumen', () => {
+  const regla = { ...cfg, merchantAccountId: 'm1', cardType: 'CREDIT' as const }
+  const pagina = (precio: number) =>
+    Array.from({ length: 500 }, (_, i) => ({
+      ...cobroP1(`v${String(i).padStart(4, '0')}`, 'm1', 'CREDIT', '2026-07-06T18:00:00Z', precio, 0, 0, 0), // lun → mar 07
+    }))
+
+  it('the panel week is exact at volume: 1,000 pages of 500 payments of $10,000.01', async () => {
+    const mock = prismaMock.payment.findMany as jest.Mock
+    const llena = pagina(10000.01)
+    for (let i = 0; i < 1000; i++) mock.mockResolvedValueOnce(llena)
+    mock.mockResolvedValue([])
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([regla])
+    expect((await getSettlementsLandingInWeek('v1', SEMANA_P1.weekStart, SEMANA_P1.weekEnd, TZ)).weekTotal).toEqual({
+      gross: 5_000_005_000,
+      commission: 0,
+      net: 5_000_005_000,
+      count: 500_000,
+    }) // antes: net 5,000,005,000.06
+  }, 180_000)
+
+  it('Codex r9 through the panel: $100.01 + $10.01, $19.99 + $0.02 and −$100.01 with −$10.01 give $110.02, $20.01 and −$110.02, and none throws', async () => {
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([
+      cobroP1('a', 'm1', 'CREDIT', '2026-07-06T18:00:00Z', 100.01, 10.01, 0, 0), // → mar 07
+      cobroP1('b', 'm1', 'CREDIT', '2026-07-07T18:00:00Z', 19.99, 0.02, 0, 0), // → mié 08
+      cobroP1('c', 'm1', 'CREDIT', '2026-07-08T18:00:00Z', -100.01, -10.01, 0, 0), // → jue 09
+    ])
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([regla])
+    const week = await getSettlementsLandingInWeek('v1', SEMANA_P1.weekStart, SEMANA_P1.weekEnd, TZ)
+    expect(week.days.map(d => [d.date, d.gross, d.net])).toEqual([
+      ['2026-07-07', 110.02, 110.02],
+      ['2026-07-08', 20.01, 20.01],
+      ['2026-07-09', -110.02, -110.02],
+    ])
+    expect(week.weekTotal).toEqual({ gross: 20.01, commission: 0, net: 20.01, count: 3 })
+  })
+})
+
+describe('getSettlementsLandingInWeek — P1 r1: la semana suma centavos exactos, no los días ya en pesos', () => {
+  /**
+   * Siete días de casi 1,000 cobros de ~2 mil millones cada uno (dentro de Decimal(12,2)): sumar los días ya redondeados da un
+   * centavo de más (15,339,827,484,726.76); los centavos exactos de los días, 15,339,827,484,726.75. Los mismos días que
+   * `settlementWeekByGroups.test.ts`.
+   */
+  const DIAS: [number, number][] = [
+    [1638651948.3, 999],
+    [2106592392.71, 997],
+    [2738006453.35, 999],
+    [2585314484.82, 997],
+    [1911393096.94, 998],
+    [1780153684.79, 999],
+    [2608988720.17, 998],
+  ]
+  const TOTAL = 15_339_827_484_726.75
+
+  it('several days whose rounded sum differs from the exact one: the week is the exact sum of their cents', async () => {
+    const mismoDia = {
+      ...cfg,
+      merchantAccountId: 'm1',
+      cardType: 'CREDIT' as const,
+      settlementDays: 0,
+      settlementDayType: 'CALENDAR_DAYS' as const,
+      cutoffTime: '23:59',
+    }
+    const cobros = DIAS.flatMap(([precio, n], d) =>
+      Array.from({ length: n }, (_, i) =>
+        cobroP1(`d${d}-${i}`, 'm1', 'CREDIT', `2026-07-${String(6 + d).padStart(2, '0')}T18:00:00Z`, precio, 0, 0, 0),
+      ),
+    )
+    const mock = prismaMock.payment.findMany as jest.Mock
+    for (let i = 0; i < cobros.length; i += 500) mock.mockResolvedValueOnce(cobros.slice(i, i + 500))
+    mock.mockResolvedValue([])
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([mismoDia])
+    const week = await getSettlementsLandingInWeek('v1', SEMANA_P1.weekStart, SEMANA_P1.weekEnd, TZ)
+    expect(week.days).toHaveLength(7)
+    const diasRedondeados = Math.round(week.days.reduce((suma, d) => suma + d.net, 0) * 100) / 100
+    expect(diasRedondeados).not.toBe(TOTAL) // la condición de la prueba: aquí las dos sumas sí difieren
+    expect(week.weekTotal).toEqual({ gross: TOTAL, commission: 0, net: TOTAL, count: 6987 })
+  })
+})

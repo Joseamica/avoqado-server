@@ -19,7 +19,7 @@ describe('categoriaParaProductoSinCategoria — dónde cae un producto que llega
 
     expect(await categoriaParaProductoSinCategoria(tx as any, 'v1')).toEqual({ id: 'cat-bebidas', creada: false })
     expect(tx.menuCategory.findFirst).toHaveBeenCalledWith({
-      where: { venueId: 'v1' },
+      where: { venueId: 'v1', deletedAt: null }, // una eliminada no cuenta (encargo bc1dcc)
       orderBy: { displayOrder: 'asc' },
       select: { id: true },
     })
@@ -38,7 +38,7 @@ describe('categoriaParaProductoSinCategoria — dónde cae un producto que llega
     })
     expect(tx.menuCategory.findUnique).toHaveBeenCalledWith({
       where: { venueId_slug: { venueId: 'v1', slug: 'general' } },
-      select: { id: true },
+      select: { id: true, deletedAt: true }, // una «General» eliminada vuelve a verse (encargo bc1dcc)
     })
   })
 

@@ -100,3 +100,16 @@ describe('validarAjusteDeMotivos (lo que guarda el DASHBOARD)', () => {
     if (!r.ok) expect(r.mensaje).toContain(String(MAX_MOTIVOS))
   })
 })
+
+// D4 (Codex r3 #2, 18-nov): un carácter nulo (o de control) en el motivo o el comentario hacía que PostgreSQL rechazara la escritura
+// entera (el vale, o la venta de Mostrador). Se cambia por un espacio, como un salto de línea.
+describe('motivoDelDescuento · caracteres de control', () => {
+  it('quita el nulo y los de control y nunca deja texto que la base rechace', () => {
+    expect(motivoDelDescuento('Cliente\u0000frecuente', 'Viene\u0007 diario\u0000')).toEqual({
+      reason: 'Cliente frecuente',
+      reasonComment: 'Viene diario',
+    })
+    expect(motivoDelDescuento('\u0000\u0000', '\u0000')).toEqual({})
+    expect(motivoDelDescuento('Cliente\u0085frecuente\u009F', null)).toEqual({ reason: 'Cliente frecuente' })
+  })
+})

@@ -24,7 +24,7 @@ beforeEach(() => {
       amount: new Decimal('20'),
       reason: 'Queja del cliente',
       reasonComment: 'tardó',
-      order: { orderNumber: 'A-12' },
+      order: { orderNumber: 'A-12', createdAt: new Date('2026-11-16T17:40:00Z'), clientCreatedAt: null },
       appliedBy: { staff: { firstName: 'Ana', lastName: 'López' } },
       authorizedBy: { staff: { firstName: 'Beto', lastName: null } },
     },
@@ -37,7 +37,7 @@ describe('listarDescuentosAplicados', () => {
     expect(r.from.toISOString()).toBe('2026-11-15T06:00:00.000Z')
     expect(r.to.toISOString()).toBe('2026-11-16T05:59:59.999Z')
     const where = db.orderDiscount.aggregate.mock.calls[0][0].where
-    expect(where.order).toMatchObject({ venueId: 'venue-1', status: { notIn: ['CANCELLED', 'DELETED'] } })
+    expect(where.order.AND[0]).toMatchObject({ venueId: 'venue-1', status: { notIn: ['CANCELLED', 'DELETED'] } })
   })
 
   it('totales y agrupado por motivo salen de la base (exactos), en pesos, con «Sin motivo» como null', async () => {
@@ -55,6 +55,8 @@ describe('listarDescuentosAplicados', () => {
     expect(r.rows[0]).toEqual(
       expect.objectContaining({
         orderNumber: 'A-12',
+        // D4: la fecha de la VENTA (la cuenta), la misma que filtra el periodo, no la del renglón del descuento.
+        createdAt: new Date('2026-11-16T17:40:00Z'),
         amount: 20,
         reason: 'Queja del cliente',
         reasonComment: 'tardó',
@@ -69,7 +71,7 @@ describe('listarDescuentosAplicados', () => {
     const args = db.orderDiscount.findMany.mock.calls[0][0]
     expect(args.take).toBe(PAGINA_MAXIMA)
     expect(args.skip).toBe(PAGINA_MAXIMA)
-    expect(args.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
+    expect(args.orderBy).toEqual([{ order: { createdAt: 'desc' } }, { createdAt: 'desc' }, { id: 'desc' }])
     expect(r.pagination).toEqual({ page: 2, pageSize: PAGINA_MAXIMA, total: 3, totalPages: 1 })
   })
 

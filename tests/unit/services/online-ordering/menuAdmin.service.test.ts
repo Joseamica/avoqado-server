@@ -33,7 +33,7 @@ const prod = (id: string, o: Record<string, any> = {}) => ({
 /** La base en memoria: categorías y platillos; cada llamada de Prisma responde con su `where`. */
 function base(categorias: Array<{ id: string; name: string; active: boolean }>, productos: Array<Record<string, any>>) {
   prismaMock.menuCategory.findMany.mockImplementation(async (a: any) =>
-    categorias.filter(c => cumple({ ...c, venueId: 'v1' }, a.where)).slice(0, a.take),
+    categorias.filter(c => cumple({ deletedAt: null, ...c, venueId: 'v1' }, a.where)).slice(0, a.take),
   )
   prismaMock.product.groupBy.mockImplementation(async (a: any) => {
     const porCategoria = new Map<string, number>()
@@ -90,7 +90,7 @@ describe('getOnlineMenuSummary: conteos por categoría', () => {
     base(CATS, PRODUCTOS)
     await getOnlineMenuSummary('v1')
     expect(prismaMock.menuCategory.findMany).toHaveBeenCalledWith({
-      where: { venueId: 'v1' },
+      where: { venueId: 'v1', deletedAt: null },
       orderBy: [{ displayOrder: 'asc' }, { id: 'asc' }],
       take: 101,
       select: { id: true, name: true, active: true },

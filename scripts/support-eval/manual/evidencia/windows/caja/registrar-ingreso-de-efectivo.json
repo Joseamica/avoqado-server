@@ -1,0 +1,147 @@
+{
+  "pagina": "windows/caja/registrar-ingreso-de-efectivo",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 57,
+      "cita": "label = \"Más\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 699,
+      "cita": "label = \"Caja\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1005,
+      "cita": "val isTablet = maxWidth >= 600.dp"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerViewModel.kt",
+      "linea": 31,
+      "cita": "CURRENT(\"Turno en curso\"),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 1007,
+      "cita": "text = \"Ingreso\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/PayInOutSheet.kt",
+      "linea": 42,
+      "cita": "\"Registrar ingreso\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/PayInOutSheet.kt",
+      "linea": 88,
+      "cita": "Text(\"Monto ($)\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/PayInOutSheet.kt",
+      "linea": 100,
+      "cita": "\"Nota (opcional)\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/PayInOutSheet.kt",
+      "linea": 126,
+      "cita": "\"Confirmar\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3295
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "WINDOWS: la base Room vive en la carpeta de datos de la computadora (BundledSQLiteDriver)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/core/di/DatabaseModule.kt",
+      "linea": 46
+    },
+    {
+      "afirmacion": "El ingreso se guarda en Room y en la cola del cajón antes de la red",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/CashDrawerRepository.kt",
+      "linea": 1910
+    },
+    {
+      "afirmacion": "Sólo se quita de la cola cuando el servidor lo confirma",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/CashDrawerRepository.kt",
+      "linea": 1913
+    },
+    {
+      "afirmacion": "Al volver la red, el sincronizador manda primero la cola del cajón",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/PaymentSyncService.kt",
+      "linea": 424
+    },
+    {
+      "afirmacion": "El sincronizador empieza por el cajón (sincronizarCajonPrimero)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/PaymentSyncService.kt",
+      "linea": 643
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "WINDOWS: la ventana abre maximizada",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Main.kt",
+      "linea": 98
+    },
+    {
+      "ruta": "WINDOWS: el tamaño de la ventana decide el diseño (WindowSizeClass del ancho real)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt",
+      "linea": 49
+    },
+    {
+      "ruta": "Antes: «Caja» sale en Más con canManageCashDrawer",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 695
+    },
+    {
+      "ruta": "Antes: canManageCashDrawer = cajero, gerente, administrador, dueño (y superadmin)",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 329
+    },
+    {
+      "ruta": "Antes: «Ingreso» sólo con la caja abierta (OpenDrawerContent)",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 793
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado; sin pantalla táctil ni segundo monitor)",
+    "version": "2.25.41-escritorio: paquete de prueba Avoqado.POS.Prueba armado del sourceRef c07a2bbe con :pos:empaquetarWindows (avq-verify en la nube), en %TEMP%\\avq-tactil-soporte-windows con datos propios, contra el SERVIDOR local del 3000 de la Mac por Tailscale; sesión owner@owner.com (Propietario)",
+    "apkSha256": "2d24ce533eaf065e54305d0603837bf854bcc68f421c1459e5ff0d95d88ff4bc",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/registrar-ingreso-de-efectivo/01-sw11-caja.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/registrar-ingreso-de-efectivo/02-sw14-caja-abierta.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/registrar-ingreso-de-efectivo/03-sw15-ingreso-form.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/registrar-ingreso-de-efectivo/04-sw16-ingreso-lleno.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/caja/registrar-ingreso-de-efectivo/05-sw17-ingreso-hecho.png"
+    ],
+    "filasCreadas": [
+      "CashDrawerEvent PAY_IN cmwmklgdb00y1waydszfelwvq $100 «Jornada soporte Windows» en la caja cmwmkkros00xvwayddw0m81ue (Avoqado Empty)"
+    ],
+    "nota": "Con la caja abierta: Más › Caja › Ingreso → «Registrar ingreso» con Monto ($) y Nota (opcional) → 100 + nota → Confirmar: Ingresos $100.00, Efectivo esperado $600.00 y el movimiento «Ingreso · Jornada soporte Windows · +$100.00». Sin internet no recorrido."
+  },
+  "codex": {
+    "lote": 2,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

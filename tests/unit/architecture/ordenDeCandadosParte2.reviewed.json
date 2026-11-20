@@ -30,8 +30,8 @@
       "motivo": "La misma llamada interna, en la sobrecarga con reintentarInterbloqueo."
     },
     "src/services/tpv/payment.tpv.service.ts#recordOrderPayment": {
-      "cantidad": 1,
-      "motivo": "La única excepción (R63 b): no se envuelve porque su cuerpo tiene efectos fuera de la base (bitácora y correo a operaciones) y repetirlo los repetiría. El cast va EN EL ARGUMENTO de la llamada, `settleStandalonePaymentInTx(tx as TxConReintento, …)` (Ruling 21). Si alguna vez es la víctima de una traba, la terminal reenvía el cobro con su llave.",
+      "cantidad": 2,
+      "motivo": "La única excepción (R63 b): no se envuelve porque su cuerpo tiene efectos fuera de la base (bitácora y correo a operaciones) y repetirlo los repetiría. El cast va EN EL ARGUMENTO de la llamada, `settleStandalonePaymentInTx(tx as TxConReintento, …)` (Ruling 21). Si alguna vez es la víctima de una traba, la terminal reenvía el cobro con su llave. El segundo (hz:e82938e1:D26, Codex r2 #1 y r3): `apartarDescuentosQueVolveriaAGastarEnTx(tx as TxConReintento, …)`, recién tomada la cuenta, aparta las filas Discount que el cierre de una cuenta anulada que revive va a volver a gastar, ANTES del turno (Order → Discount → … → Shift, el orden de la anulación): así esta transacción sin reintento no toma Discount ya con el turno.",
       "efectos": [
         {
           "archivo": "src/services/tpv/registroRepetido.ts",
@@ -320,10 +320,6 @@
       "clase": "EN_TX",
       "etiqueta": "crearVentaDeMostradorEnTx"
     },
-    "src/services/mobile/order.mobile.service.ts#terminarVentaDeMostrador": {
-      "clase": "SENTENCIA",
-      "etiqueta": "terminarVentaDeMostrador"
-    },
     "src/services/onboarding/demoCleanup.service.ts#cleanDemoData": {
       "clase": "EN_TX",
       "etiqueta": "cleanDemoData"
@@ -410,6 +406,30 @@
     "src/services/shared/puntosAlReembolsar.ts#reversaEnTx": {
       "clase": "EN_TX",
       "etiqueta": "reversaEnTx"
+    },
+    "src/services/shared/usoDelDescuento.ts#apartarUsoDeMesaEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "apartarUsoDeMesaEnTx"
+    },
+    "src/services/shared/usoDelDescuento.ts#devolverUsoDelDescuentoEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "devolverUsoDelDescuentoEnTx"
+    },
+    "src/services/shared/usoDelDescuento.ts#devolverUsosMarcadosEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "devolverUsosMarcadosEnTx"
+    },
+    "src/services/shared/usoDelDescuento.ts#sumarUsosDeVentaEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "sumarUsosDeVentaEnTx"
+    },
+    "src/services/shared/usoDelDescuento.ts#tomarFilas": {
+      "clase": "EN_TX",
+      "etiqueta": "tomarFilas"
+    },
+    "src/services/shared/usoDelDescuento.ts#volverAGastarUsosDeCuentaRevividaEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "volverAGastarUsosDeCuentaRevividaEnTx"
     },
     "src/services/superadmin/staffDeletion.service.ts#deleteOrRetainStaffWithH1ProvenanceTx": {
       "clase": "EN_TX",
@@ -891,6 +911,10 @@
       "etiqueta": "redeemPointsToOrder",
       "cantidad": 1
     },
+    "src/services/mobile/order.mobile.service.ts#applyOrderDiscount": {
+      "etiqueta": "applyOrderDiscount",
+      "cantidad": 1
+    },
     "src/services/mobile/order.mobile.service.ts#cancelOrder": {
       "etiqueta": "cancelOrder",
       "cantidad": 1
@@ -938,7 +962,7 @@
     "src/services/mobile/order.mobile.service.ts#terminarVentaDeMostrador": {
       "etiqueta": "terminarVentaDeMostrador",
       "cantidad": 1,
-      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+      "nota": "D19 (encargo 5b78aa): la suma del uso de los descuentos de la venta, después del commit; su transacción sólo toma filas Discount ascendentes."
     },
     "src/services/onboarding/demoCleanup.service.ts#cleanDemoData": {
       "etiqueta": "cleanDemoData",

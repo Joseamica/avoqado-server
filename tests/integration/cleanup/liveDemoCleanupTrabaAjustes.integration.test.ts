@@ -32,8 +32,8 @@ interface Demo {
 const demos: Demo[] = []
 
 /**
- * Una demo vencida con su VenueSettings (como toda demo: liveDemo.service.ts la crea al nacer) y sus terminales. Las
- * terminales se crean en el orden de `idsDeTerminal`: la primera creada es la que Postgres encuentra primero al borrar.
+ * Una demo vencida con su VenueSettings (como toda demo: liveDemo.service.ts la crea al nacer) y sus terminales. Crearlas
+ * en un orden NO fija su orden físico; la prueba que lo necesita usa `sembrarTerminalesCruzadas` (D13).
  */
 async function sembrarDemo(sufijo: string, idsDeTerminal: string[]): Promise<Demo> {
   const base = `${llave}-${sufijo}`
@@ -104,6 +104,37 @@ async function posicionFisica(terminalId: string): Promise<[number, number]> {
   return [pagina, renglon]
 }
 
+const vaAntes = (a: [number, number], b: [number, number]) => a[0] < b[0] || (a[0] === b[0] && a[1] < b[1])
+
+/**
+ * Dos terminales de la demo con la de id MAYOR físicamente ANTES que la de id menor (la precondición del cruce de la prueba 2).
+ *
+ * Postgres no promete el orden físico (pizarrón hz:e82938e1:D13, 18-nov). Cada conexión elige su propia página de
+ * inserción, y un hueco que dejó otra prueba puede quedar antes. Con dos `create` sueltos (dos conexiones del pool), la
+ * segunda llegó a quedar antes: en CI falló 1 de 10,028 sin probar el candado. Por eso las dos se siembran en UNA
+ * transacción (una conexión) y se comprueba el orden. Si sale al revés, se borran y se siembran otra vez con ids nuevos.
+ * La precondición no se afloja: si ningún intento la cumple, la prueba falla diciendo por qué.
+ */
+async function sembrarTerminalesCruzadas(demo: Demo, intentos = 10): Promise<{ mayor: string; menor: string }> {
+  let visto = ''
+  for (let i = 0; i < intentos; i++) {
+    const mayor = `${llave}-dos-tb${i}`
+    const menor = `${llave}-dos-ta${i}`
+    await prisma.$transaction(async tx => {
+      await tx.terminal.create({ data: { id: mayor, venueId: demo.venue, name: 'Caja 1', type: 'POS_ANDROID' } })
+      await tx.terminal.create({ data: { id: menor, venueId: demo.venue, name: 'Caja 2', type: 'POS_ANDROID' } })
+    })
+    const [pMayor, pMenor] = [await posicionFisica(mayor), await posicionFisica(menor)]
+    if (vaAntes(pMayor, pMenor)) {
+      demo.terminales.push(mayor, menor)
+      return { mayor, menor }
+    }
+    visto += ` intento ${i + 1}: mayor (${pMayor}) después de menor (${pMenor});`
+    await prisma.terminal.deleteMany({ where: { id: { in: [mayor, menor] } } })
+  }
+  throw new Error(`Precondición imposible: la terminal de id mayor nunca quedó físicamente antes.${visto}`)
+}
+
 beforeAll(() => {
   REINTENTO_POR_INTERBLOQUEO.intentos = 1
 })
@@ -150,14 +181,12 @@ describe('na86c206 · la limpieza de una demo y guardar los ajustes de terminal 
   })
 
   it('🔴 2. con DOS terminales: el guardado tiene la de id menor y la limpieza encuentra primero la otra — tampoco se traban', async () => {
-    // La de id MAYOR se crea primero: es la que el borrado encuentra primero. El guardado las toma por id: la menor primero.
-    const mayor = `${llave}-dos-tb`
-    const menor = `${llave}-dos-ta`
-    const demo = await sembrarDemo('dos', [mayor, menor])
+    // La de id MAYOR va físicamente antes: es la que el borrado encuentra primero. El guardado las toma por id: la menor primero.
+    const demo = await sembrarDemo('dos', [])
+    const { mayor, menor } = await sembrarTerminalesCruzadas(demo)
     // Precondición (Codex r2): sin esto la prueba podría pasar en falso. El borrado, por tabla o por el índice de
     // `venueId`, recorre las filas en su orden físico; la de id MAYOR tiene que ir antes para que exista el cruce.
-    const [pMayor, pMenor] = [await posicionFisica(mayor), await posicionFisica(menor)]
-    expect(pMayor[0] < pMenor[0] || (pMayor[0] === pMenor[0] && pMayor[1] < pMenor[1])).toBe(true)
+    expect(vaAntes(await posicionFisica(mayor), await posicionFisica(menor))).toBe(true)
 
     // El guardado ya tomó la de id menor (su SELECT ordenado por id va en camino a la otra).
     const guardado = await retener(tx => tx.$queryRaw`SELECT id FROM "Terminal" WHERE id = ${menor} FOR NO KEY UPDATE`)

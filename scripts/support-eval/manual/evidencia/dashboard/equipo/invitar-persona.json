@@ -1,0 +1,224 @@
+{
+  "pagina": "dashboard/equipo/invitar-persona",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1302,
+      "cita": "title: t('rh:menu.title', { defaultValue: 'RH' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/rh.json",
+      "linea": 3,
+      "cita": "\"title\": \"RH\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 681,
+      "cita": "title: t('rh:menu.people', { defaultValue: 'Personas' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/rh.json",
+      "linea": 4,
+      "cita": "\"people\": \"Personas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Team/Teams.tsx",
+      "linea": 912,
+      "cita": "{t('header.inviteButton')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/team.json",
+      "linea": 99,
+      "cita": "\"inviteButton\": \"Invitar Miembro\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Team/components/InviteTeamMemberForm.tsx",
+      "linea": 565,
+      "cita": "{t('invite.typeEmail', { defaultValue: 'Con correo' })}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Team/components/InviteTeamMemberForm.tsx",
+      "linea": 568,
+      "cita": "{t('invite.typeEmailDesc', { defaultValue: 'Enviar invitación por email' })}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Team/components/InviteTeamMemberForm.tsx",
+      "linea": 587,
+      "cita": "{t('invite.typeTpvOnly', { defaultValue: 'Solo TPV' })}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Team/components/InviteTeamMemberForm.tsx",
+      "linea": 590,
+      "cita": "{t('invite.typeTpvOnlyDesc', { defaultValue: 'Acceso con PIN, sin correo' })}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Team/components/InviteTeamMemberForm.tsx",
+      "linea": 644,
+      "cita": "<Label htmlFor=\"firstName\">{t('invite.firstNameLabel')} *</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/team.json",
+      "linea": 52,
+      "cita": "\"firstNameLabel\": \"Nombre\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/team.json",
+      "linea": 53,
+      "cita": "\"lastNameLabel\": \"Apellido\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/team.json",
+      "linea": 54,
+      "cita": "\"roleLabel\": \"Rol\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Team/components/InviteTeamMemberForm.tsx",
+      "linea": 616,
+      "cita": "<Label htmlFor=\"email\">{t('invite.emailLabel')} *</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/team.json",
+      "linea": 51,
+      "cita": "\"emailLabel\": \"Correo del invitado\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Team/components/InviteTeamMemberForm.tsx",
+      "linea": 730,
+      "cita": "<Label htmlFor=\"pin\">{t('invite.pinLabel', { defaultValue: 'PIN de acceso' })} *</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Team/components/InviteTeamMemberForm.tsx",
+      "linea": 155,
+      "cita": "pin: inviteType === 'tpv-only' ? z.string().regex(/^\\d{4,10}$/, t('invite.validation.pinFormat')) : z.string().optional(),"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Team/Teams.tsx",
+      "linea": 931,
+      "cita": "t('invite.sendButton')"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/team.json",
+      "linea": 59,
+      "cita": "\"sendButton\": \"Enviar Invitación\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "teams:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 554
+    },
+    {
+      "permiso": "teams:invite",
+      "archivo": "src/pages/Team/Teams.tsx",
+      "linea": 905
+    },
+    {
+      "permiso": "teams:invite",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 8120
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: el menú se llama RH (antes Equipo)",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1298
+    },
+    {
+      "ruta": "Problema: con el tope, Invitar Miembro abre el aviso",
+      "archivo": "src/pages/Team/Teams.tsx",
+      "linea": 909
+    },
+    {
+      "ruta": "Problema: título del aviso",
+      "archivo": "src/locales/es/team.json",
+      "linea": 106
+    },
+    {
+      "ruta": "Problema: texto del aviso",
+      "archivo": "src/locales/es/team.json",
+      "linea": 107
+    },
+    {
+      "ruta": "Problema: el SERVIDOR contesta éxito aunque el correo no salga (emailSent)",
+      "archivo": "avoqado-server/src/services/dashboard/team.dashboard.service.ts",
+      "linea": 788
+    },
+    {
+      "ruta": "Problema: el envío devuelve false si falla",
+      "archivo": "avoqado-server/src/services/email.service.ts",
+      "linea": 741
+    },
+    {
+      "ruta": "Problema: el panel muestra éxito sin mirar emailSent",
+      "archivo": "src/pages/Team/components/InviteTeamMemberForm.tsx",
+      "linea": 367
+    },
+    {
+      "ruta": "Problema: texto Invitación enviada",
+      "archivo": "src/locales/es/team.json",
+      "linea": 49
+    },
+    {
+      "ruta": "Problema: invitación pendiente ofrece reenviar",
+      "archivo": "src/pages/Team/components/InviteTeamMemberForm.tsx",
+      "linea": 413
+    },
+    {
+      "ruta": "Problema: el SERVIDOR dice pending invitation",
+      "archivo": "avoqado-server/src/services/dashboard/team.dashboard.service.ts",
+      "linea": 554
+    },
+    {
+      "ruta": "Problema: el error trae la razón del SERVIDOR",
+      "archivo": "src/pages/Team/components/InviteTeamMemberForm.tsx",
+      "linea": 424
+    },
+    {
+      "ruta": "Problema: texto por omisión",
+      "archivo": "src/locales/es/team.json",
+      "linea": 87
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 6,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

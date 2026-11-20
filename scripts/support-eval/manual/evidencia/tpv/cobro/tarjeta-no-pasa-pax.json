@@ -1,0 +1,128 @@
+{
+  "pagina": "tpv/cobro/tarjeta-no-pasa-pax",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/ContactlessKernelResult.kt",
+      "linea": 176,
+      "cita": "userMessage = \"Esta tarjeta pide chip$codigo.\\n\\n$INSERTAR\\n\\n\" +"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 5562,
+      "cita": "message = \"Esta tarjeta requiere chip.\\n\\nInserta la tarjeta y presiona Reintentar.\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/ContactlessKernelResult.kt",
+      "linea": 191,
+      "cita": "userMessage = \"El lector no aceptó esta tarjeta por contactless$codigo."
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/ContactlessKernelResult.kt",
+      "linea": 158,
+      "cita": "private const val INSERTAR = \"Pide al cliente que INSERTE la tarjeta en la ranura del chip.\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 2756,
+      "cita": "text = \"Reintentar\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 3768,
+      "cita": "val detectReaderType = if (chipOnlyOnNextDetect) EReaderType.MAG_ICC else EReaderType.MAG_ICC_PICC"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/ContactlessKernelResult.kt",
+      "linea": 204,
+      "cita": "userMessage = \"La tarjeta se retiró demasiado rápido.\\n\\n\" +"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/ContactlessKernelResult.kt",
+      "linea": 205,
+      "cita": "\"Por favor, mantenga la tarjeta sobre el lector hasta que aparezca el mensaje de confirmación.\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/ContactlessKernelResult.kt",
+      "linea": 216,
+      "cita": "userMessage = \"Se detectaron múltiples tarjetas.\\n\\nPor favor, presente solo una tarjeta a la vez.\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 4646,
+      "cita": "val rejectedPrefix = if (isRefund) \"Reembolso rechazado\" else \"Pago rechazado\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 4651,
+      "cita": "\"Por favor, solicita otra forma de pago.\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonDeclineDetection.kt",
+      "linea": 31,
+      "cita": "return \"$prefix:\\n\\n$reason\\n\\nSolicita otra forma de pago.\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 3168
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: el título «Error en el Pago»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "linea": 2715
+    },
+    {
+      "ruta": "Antes: el aviso del lector contactless llega como Error con su contexto",
+      "archivo": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "linea": 5294
+    },
+    {
+      "ruta": "Si aparece «El cliente debe confirmar el pago en su teléfono o reloj»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/ContactlessKernelResult.kt",
+      "linea": 235
+    },
+    {
+      "ruta": "Si aparece «Esta tarjeta no es compatible con contactless…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/ContactlessKernelResult.kt",
+      "linea": 197
+    },
+    {
+      "ruta": "Si aparece *Estamos confirmando el cobro*",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonRecoveryContent.kt",
+      "linea": 56
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fecha": "2026-11-18",
+    "fotos": [],
+    "filasCreadas": [],
+    "nota": "No se pudo provocar: la única tarjeta permitida en la PAX es la de laboratorio (contactless, ≤ $100) y siempre se aprobó; los avisos de *Error en el Pago* (chip, retiro rápido, varias tarjetas, «Pago rechazado») necesitan otra tarjeta o un rechazo del banco de pruebas. Lo único visto de *Error en el Pago* fue el de reembolso (TX_024) y el de cancelación desde el POS."
+  },
+  "codex": {
+    "lote": 8,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

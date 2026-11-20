@@ -1,0 +1,114 @@
+{
+  "pagina": "tpv/mesas/cancelar-cuenta",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 807,
+      "cita": "Icon(Icons.Default.MoreVert, contentDescription = \"Más acciones\")"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 854,
+      "cita": "text = { Text(\"Cancelar cuenta\", color = MaterialTheme.colorScheme.error) },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/CancelOrderDialog.kt",
+      "linea": 69,
+      "cita": "label = { Text(\"Motivo (opcional)\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/CancelOrderDialog.kt",
+      "linea": 83,
+      "cita": "Text(if (isCancelling) \"Cancelando…\" else \"Sí, cancelar cuenta\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/CancelOrderDialog.kt",
+      "linea": 88,
+      "cita": "Text(\"Volver\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderViewModel.kt",
+      "linea": 776,
+      "cita": "\"Cuenta cancelada\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderViewModel.kt",
+      "linea": 782,
+      "cita": "tableSession.clear()"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderScreen.kt",
+      "linea": 217,
+      "cita": "LaunchedEffect(Unit) { onNavigateBack() }"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "orders:cancel-unpaid",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 4337
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 603
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "La cancelación se escribe en la cola antes de intentar la ruta (CANCEL_ORDER)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
+      "linea": 1153
+    },
+    {
+      "afirmacion": "Sin red sigue en la cola",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
+      "linea": 1167
+    },
+    {
+      "afirmacion": "Mensaje de la cancelación guardada",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableOrderViewModel.kt",
+      "linea": 774
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "La mesa queda libre sólo si no tiene otra cuenta abierta (si hay otra, la mesa se queda con ella)",
+      "archivo": "avoqado-server/src/services/tpv/table.tpv.service.ts",
+      "linea": 735
+    },
+    {
+      "ruta": "La app lo dice en su repositorio: libera la mesa o la re-apunta a un cheque hermano",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
+      "linea": 1129
+    },
+    {
+      "ruta": "Antes: no se puede deshacer; libera la mesa y anula lo enviado",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/CancelOrderDialog.kt",
+      "linea": 62
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 5,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -1,0 +1,139 @@
+{
+  "pagina": "tpv/ventas/vender-con-cobrar",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 922,
+      "cita": "label = \"Cobrar\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/InputTab.kt",
+      "linea": 17,
+      "cita": "PRODUCTS(\"Todos los productos\"),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/CheckoutScreen.kt",
+      "linea": 336,
+      "cita": "else -> viewModel.addProduct(product)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/CheckoutScreen.kt",
+      "linea": 334,
+      "cita": "product.hasModifiers -> productForModifiers = product"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/ProductDetailSheet.kt",
+      "linea": 200,
+      "cita": "text = \"Agregar al carrito $formattedTotal\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/InputTab.kt",
+      "linea": 15,
+      "cita": "KEYPAD(\"Teclado\"),"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/NumericKeypadView.kt",
+      "linea": 154,
+      "cita": "onAmountChange(amountCents * 10 + digit)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/NumericKeypadView.kt",
+      "linea": 101,
+      "cita": ".clickable { onAmountChange(amount * 100) }"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/NumericKeypadView.kt",
+      "linea": 149,
+      "cita": "if (amountCents > 0) onAddToCart()"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartPanelView.kt",
+      "linea": 66,
+      "cita": "text = if (cartState.isEmpty) \"Cobrar\" else \"Cobrar ${cartState.totalDisplay}\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/CheckoutScreen.kt",
+      "linea": 359,
+      "cita": "onTap = { showCartDetailsSheet = true },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt",
+      "linea": 499,
+      "cita": "StepperButton(icon = Icons.Filled.Remove, contentDescription = \"Quitar uno\", onClick = onDecrement)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt",
+      "linea": 510,
+      "cita": "StepperButton(icon = Icons.Filled.Add, contentDescription = \"Agregar uno\", onClick = onIncrement)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt",
+      "linea": 525,
+      "cita": "contentDescription = \"Eliminar\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt",
+      "linea": 271,
+      "cita": "\"Cobrar ${cartState.totalDisplay}\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/CheckoutScreen.kt",
+      "linea": 387,
+      "cita": "onNavigateToPayment(payload)"
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: la tarjeta Cobrar la apaga la configuración de la terminal (showCheckout)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 912
+    },
+    {
+      "ruta": "Si aparece «Abre la caja primero» en Cobrar: no hay caja abierta",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 675
+    },
+    {
+      "ruta": "Si aparece «Registra tu entrada» en Cobrar: falta registrar la entrada",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 915
+    },
+    {
+      "ruta": "Si aparece «Abre la caja primero»: la caja se abre en «Turnos de caja»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 947
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 5,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

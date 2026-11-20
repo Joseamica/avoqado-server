@@ -90,6 +90,7 @@ import { switchUserSchema } from '../schemas/mobile/switchUser.mobile.schema'
 import { attachCustomerToLatestPaymentSchema, attachCustomerToPaymentSchema } from '../schemas/mobile/paymentCustomer.mobile.schema'
 import { cashPaymentByKeyParamsSchema } from '../schemas/mobile/paymentByKey.mobile.schema'
 import { transactionCustomerSchema } from '../schemas/mobile/transactionCustomer.mobile.schema'
+import { manualOrderDiscountSchema } from '../schemas/mobile/manualOrderDiscount.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaRoleSchema } from '../schemas/mobile/areaTicketRole.schema'
 import { areaComandaSchema } from '../schemas/mobile/areaComanda.schema'
@@ -3450,6 +3451,35 @@ router.post(
   // D4 (hz:f34960c5:D4): un % o fijo con «Requiere aprobación» pide `tpv-orders:discount`, con PIN de gerente.
   checkAprobacionDelDescuento,
   orderMobileController.applyOrderDiscount,
+)
+
+/**
+ * 7133e3: `discounts:apply` del descuento manual de MESAS, resuelto al llegar la petición (no al montar el router): así la guardia de
+ * `mobileCreateOrderPromotion.routes.test.ts` sigue probando que «crear venta» no exige ese permiso fijo. Lleva `requiredPermission`
+ * como cualquier `checkPermission`, para las pruebas de cableado.
+ */
+const exigirPermisoDeDescuentoManual = Object.assign(
+  (req: Request, res: Response, next: NextFunction) => checkPermission('discounts:apply')(req, res, next),
+  { requiredPermission: 'discounts:apply' },
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/orders/:orderId/discounts/manual
+ * Encargo 7133e3 (hz:0555ee15:D2): «Descuento manual» (% o fijo) en una cuenta de MESAS del POS, con los candados de MOSTRADOR:
+ * `discounts:apply` (de fábrica mesero, cajero y gerente para arriba; sin él, el 403 `overridable` abre el PIN del gerente), el
+ * motivo opcional de f998c8 y el tope contra lo que la cuenta debe (en el servicio). No es cortesía: `COMP` no entra por aquí.
+ * No admite recibos HTTP (`httpOperation`): su anti-duplicado es la `llave` del cuerpo, la misma que viaja en la cola sin red.
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/discounts/manual',
+  authenticateTokenMiddleware,
+  httpOperationGuard(false),
+  checkFeatureAccess('TABLE_SERVICE'),
+  // La forma antes que el permiso: un cuerpo inválido no le pide el PIN al gerente para después decir 400.
+  validateRequest(manualOrderDiscountSchema),
+  exigirPermisoDeDescuentoManual,
+  checkTableOwnership('order'),
+  orderMobileController.applyManualOrderDiscount,
 )
 
 /**

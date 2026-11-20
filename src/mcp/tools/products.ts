@@ -4,7 +4,7 @@ import { OrderStatus, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { lineRevenueSql, lineUnitsSql } from '@/services/dashboard/lineRevenue'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
-import { utcTs } from '@/utils/sqlDates'
+import { sqlRangoHoraRealSql } from '@/services/shared/horaRealDelAparato'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -70,8 +70,7 @@ export function registerProductTools(server: McpServer, scope: McpScope) {
         INNER JOIN "Order" o ON o.id = oi."orderId"
         WHERE oi."productId" = ${matches[0].id}
           AND o."venueId" = ${venueId}
-          AND o."createdAt" >= ${utcTs(start)}
-          AND o."createdAt" <= ${utcTs(end)}
+          AND ${sqlRangoHoraRealSql('o', start, end)} -- D2: la hora real de la venta, como el Resumen
           AND o.status NOT IN (${OrderStatus.CANCELLED}::"OrderStatus", ${OrderStatus.DELETED}::"OrderStatus")
           AND oi."removedAt" IS NULL -- a line the delivery provider removed was never sold
       `

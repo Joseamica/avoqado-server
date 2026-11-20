@@ -1,0 +1,79 @@
+{
+  "pagina": "tpv/sesion/pin-incorrecto",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/authentication/presentation/LoginScreen.kt",
+      "linea": 115,
+      "cita": "text = \"Ingresa tu PIN\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/authentication/presentation/LoginScreen.kt",
+      "linea": 184,
+      "cita": "text = \"Ir\","
+    },
+    {
+      "paso": 2,
+      "archivo": "avoqado-server/src/routes/dashboard/organizationConfig.routes.ts",
+      "linea": 910,
+      "cita": "router.patch('/team/:staffId/pin', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {"
+    },
+    {
+      "paso": 2,
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 8252,
+      "cita": "'/venues/:venueId/team/:teamMemberId',"
+    },
+    {
+      "paso": 2,
+      "archivo": "avoqado-server/src/services/dashboard/team.dashboard.service.ts",
+      "linea": 83,
+      "cita": "pin?: string"
+    },
+    {
+      "paso": 3,
+      "archivo": "avoqado-server/src/routes/dashboard/organizationConfig.routes.ts",
+      "linea": 708,
+      "cita": "'(la terminal dirá «Pin Incorrecto» aunque el PIN sea correcto). Reactivar la cuenta lo hace soporte de Avoqado.'"
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Si aparece «Pin Incorrecto»: el servidor exige el PIN de la sucursal, el acceso activo y la cuenta activa",
+      "archivo": "avoqado-server/src/services/tpv/auth.tpv.service.ts",
+      "linea": 45
+    },
+    {
+      "ruta": "Si aparece «Pin Incorrecto»: el mismo mensaje en los tres casos",
+      "archivo": "avoqado-server/src/services/tpv/auth.tpv.service.ts",
+      "linea": 81
+    },
+    {
+      "ruta": "Si aparece «Pin Incorrecto»: la terminal enseña el mensaje del servidor",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/authentication/data/repository/AuthRepository.kt",
+      "linea": 188
+    },
+    {
+      "ruta": "Si aparece «Pin Incorrecto»: la pantalla del PIN lo pinta tal cual",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/authentication/presentation/LoginViewModel.kt",
+      "linea": 121
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 8,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

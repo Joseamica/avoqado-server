@@ -791,6 +791,30 @@ const WRITERS: Record<string, Writer> = {
     residual:
       'runs only inside devolverCanjesDeVentaAnuladaEnTx, under the Order lock of the cancelling writer (orderCancelWriters, PROTEGIDA)',
   },
+  // hz:e82938e1:D24: la anulación sin cobro devuelve el uso que su descuento de cuenta sumó y le quita la marca a la fila.
+  'src/services/shared/usoDelDescuento.ts#devolverUsosMarcadosEnTx': {
+    class: 'EXCLUDED',
+    reason:
+      'only flips the bookkeeping flag usoContado of the account discount rows (and lowers Discount.currentUses): amount, taxReduction and reparto are untouched, so the documentary capture reads the same totals',
+    residual:
+      'with soltarMarca runs only inside devolverCanjesDeVentaAnuladaEnTx, under the Order lock of the cancelling writer (orderCancelWriters, PROTEGIDA); without it (the empty-order sweep) it writes no OrderDiscount row',
+  },
+  // hz:e82938e1:D26: la cuenta anulada que revive por dinero ya capturado vuelve a gastar el uso de las filas que lo devolvieron.
+  'src/services/shared/usoDelDescuento.ts#volverAGastarUsosDeCuentaRevividaEnTx': {
+    class: 'EXCLUDED',
+    reason:
+      'only flips the bookkeeping flags usoContado/usoDevueltoAlAnular of account discount rows (and raises Discount.currentUses): amount, taxReduction and reparto are untouched, so the documentary capture reads the same totals',
+    residual:
+      'runs only through volverAGastarUsosAlRevivirEnTx, right after reabrirSiRecibeDinero revived the order, under the Order lock of the money writer (registrarAbonoEnTx, settleStandalonePaymentInTx, updateOrderTotalsForStandalonePayment, createManualPayment)',
+  },
+  // D24 (Codex r1 #4a, r2 #5): la cuenta que se anula suelta la marca de las filas cuyo descuento ya no está en el catálogo.
+  'src/services/shared/usoDelDescuento.ts#soltarMarcaDeFilasSinDescuentoEnTx': {
+    class: 'EXCLUDED',
+    reason:
+      'only flips the bookkeeping flag usoContado of account discount rows whose catalog discount was deleted: amount, taxReduction and reparto are untouched, so the documentary capture reads the same totals',
+    residual:
+      'runs only inside devolverCanjesDeVentaAnuladaEnTx, under the Order lock of the cancelling writer (orderCancelWriters, PROTEGIDA)',
+  },
   // Tienda híbrida S11 (P2-4): el folio que un beneficio dejó en $0 se cierra pagado sin cobro, en la transacción de quien YA tiene la
   // cuenta: la que la acaba de crear (createOnlineOrder) o la aceptación de «Mi equipo» (casTransition, tras casTransitionInTx).
   'src/services/online-ordering/folios.service.ts#cerrarFolioEnCeroEnTx': {

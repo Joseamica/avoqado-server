@@ -1,0 +1,128 @@
+{
+  "pagina": "tpv/cobro/cobrar-con-tarjeta-nexgo",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 850,
+      "cita": "label = \"Pago rápido\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/AmountInputBottomSheet.kt",
+      "linea": 153,
+      "cita": "text = \"Cantidad personalizada\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/CustomKeyboard.kt",
+      "linea": 143,
+      "cita": "icon = Icons.Default.Check"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/ReviewScreen.kt",
+      "linea": 93,
+      "cita": "text = \"Saltar\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/TipScreen.kt",
+      "linea": 214,
+      "cita": "text = \"Sin propina\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 453,
+      "cita": "is AngelPayPaymentState.SelectingMerchant -> \"Metodo de Pago\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 265,
+      "cita": "text = \"Cuenta de cobro\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/MerchantSelectionContent.kt",
+      "linea": 422,
+      "cita": "text = \"Tarjeta\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 742,
+      "cita": "subtitle = \"No cierres esta pantalla\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 270,
+      "cita": "angelPaySdkLauncher.launch(currentState.request)"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPaySuccessContent.kt",
+      "linea": 106,
+      "cita": "newPaymentLabel: String = \"Nuevo Pago\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 3168
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "«Sin conexión con el servidor.» con «Puedes cobrar en efectivo…» cuando el servidor no confirma el turno",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "linea": 1788
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Inicio → Pago rápido → nav:AngelPayPayment (Nexgo)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 3510
+    },
+    {
+      "ruta": "Problema: pantalla «Cobro sin confirmar»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "linea": 958
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "Nexgo N86 del laboratorio del Alien (terminal de Avoqado Full)",
+    "version": "2.16.0-nexgo (125), copia de QA com.jaac.avoqado_tpv.sandbox.soportewa compilada en v2.16.0 (031f14db), AngelPay QA (cuenta AvoqadoComercio (QA)), contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
+    "apkSha256": "1e1d2be8a01c4850a4d82ead8ec3bbb4938377028a647ced09541a6fd02d9a54",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-nexgo/1-inicio-pago-rapido.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-nexgo/2-cantidad-personalizada-10.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-nexgo/3-calificacion-saltar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-nexgo/4-propina-sin-propina.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-nexgo/5-metodo-de-pago-tarjeta.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-nexgo/6-cuenta-de-cobro-elegida.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-nexgo/7-angelpay-pide-la-tarjeta-grabacion.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/tpv/cobro/cobrar-con-tarjeta-nexgo/8-recibo-nuevo-pago-cobro-1.png"
+    ],
+    "filasCreadas": [
+      "Order cmwmplo5701zzwaydmyyof7vc — FAST-1795041902201",
+      "Payment cmwmploku0201waydh5abztzw — $10.00 CREDIT_CARD por AngelPay QA, ref 261118164455 (reembolsado)"
+    ],
+    "nota": "Tarjeta del founder sobre el lector, montos .00. *Pago rápido* → *Cantidad personalizada* $10 → palomita → *Saltar* → *Sin propina* → *Metodo de Pago* con *Cuenta de cobro* (AvoqadoComercio (QA) y AvoqadoTest (QA)); al elegir la cuenta sale «Cambiando cuenta…» y el aviso de depuración del SDK, y *Tarjeta* se prende → *Tarjeta* → AngelPay aprobó ($10.00, ref 261118164455) → recibo con *Nuevo Pago* (foto 8). El *Tarjeta* de este cobro lo tocó alguien en la N86 al poner la tarjeta, no esta conversación: la terminal ya esperaba en *Metodo de Pago*. La pantalla de AngelPay que pide la tarjeta («Inserte, deslice o acerque tarjeta.», foto 7) sale de la grabación del intento de $5.05; *No cierres esta pantalla* (subtítulo de la TPV mientras se conecta y cobra) no alcanzó a verse. El cobro se reembolsó (ver reembolsar-cobro-nexgo)."
+  },
+  "codex": {
+    "lote": 1,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

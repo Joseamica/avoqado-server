@@ -1811,8 +1811,13 @@ export async function createWinbackPromotionCode(
  * only on the item, never on the subscription.
  *
  * @param subscriptionId - Stripe subscription ID
+ * @param bound - La B (soporte por WhatsApp, C5): UNA llamada con este tiempo máximo y sin reintentos (ni los de `retry` ni los del
+ *   SDK, que por omisión espera 80 s y reintenta 2 veces). Sin él, como siempre: `retry` con 3 reintentos.
  */
-export async function retrievePlanSubscription(subscriptionId: string): Promise<{
+export async function retrievePlanSubscription(
+  subscriptionId: string,
+  bound?: { timeoutMs: number },
+): Promise<{
   status: string
   cancelAtPeriodEnd: boolean
   currentPeriodEnd: Date | null
@@ -1831,11 +1836,14 @@ export async function retrievePlanSubscription(subscriptionId: string): Promise<
   descuento: DescuentoDelPlan | null
 }> {
   // D5: el detalle del cupón viene en la MISMA llamada (expand): sin él, `discounts` sólo trae ids.
-  const sub = await retry(() => stripe.subscriptions.retrieve(subscriptionId, { expand: ['discounts.source.coupon.applies_to'] }), {
-    retries: 3,
-    shouldRetry: shouldRetryStripeError,
-    context: 'stripe.retrievePlanSubscription',
-  })
+  const params = { expand: ['discounts.source.coupon.applies_to'] }
+  const sub = bound
+    ? await stripe.subscriptions.retrieve(subscriptionId, params, { timeout: bound.timeoutMs, maxNetworkRetries: 0 })
+    : await retry(() => stripe.subscriptions.retrieve(subscriptionId, params), {
+        retries: 3,
+        shouldRetry: shouldRetryStripeError,
+        context: 'stripe.retrievePlanSubscription',
+      })
   const createdRaw = (sub as any).created as number | undefined
   const rawInterval = sub.items.data[0]?.price.recurring?.interval
   // SDK v19 may surface a single `discount` object and/or a `discounts` array (see subscriptionHasActiveDiscount).

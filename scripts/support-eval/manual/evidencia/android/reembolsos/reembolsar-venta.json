@@ -1,0 +1,245 @@
+{
+  "pagina": "android/reembolsos/reembolsar-venta",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 43,
+      "cita": "label = \"Ventas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionsScreen.kt",
+      "linea": 485,
+      "cita": "onClick = { viewModel.selectTransaction(transaction.id) },"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionDetailSheet.kt",
+      "linea": 379,
+      "cita": "onClick = { viewModel.onIssueRefundTapped() },"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 45,
+      "cita": "const val EMITIR_REEMBOLSO = \"Emitir reembolso\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 567,
+      "cita": "label = \"Reembolsar artículos\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 1265,
+      "cita": "val rawQty = refundQty[id] ?: remaining"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 1348,
+      "cita": "if (selected && remaining > 1 && !fullyRefunded) {"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 1442,
+      "cita": "contentDescription = \"Menos\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 1453,
+      "cita": "contentDescription = \"Más\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 574,
+      "cita": "label = \"Reembolsos por importe\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 1387,
+      "cita": "text = \"Reabastecer existencias\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 1392,
+      "cita": "text = \"Marca solo los artículos que sí regresaron al inventario.\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 1750,
+      "cita": "text = \"Incluir propina en el reembolso\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 345,
+      "cita": "var includeTip by remember(transaction.id) { mutableStateOf(true) }"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 365,
+      "cita": "?: propinaMarcadaPorDefecto(itemsAmount, transaction.remainingRefundableSale)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 796,
+      "cita": "text = \"Motivo del reembolso\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 1676,
+      "cita": "text = \"Devolver con\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 629,
+      "cita": "text = \"Este cobro fue con tarjeta\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 650,
+      "cita": "text = if (enviandoATerminal) \"Abriendo…\" else \"Abrir en la terminal\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 640,
+      "cita": "\"La devolución a la tarjeta se hace en la terminal. Ábrela desde aquí y que la \""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/data/model/RefundSubmitRules.kt",
+      "linea": 299,
+      "cita": "if (importe > 0.0) \"Reembolsar ${formatMoney(importe)}\" else \"Reembolsar\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:refund",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 227
+    },
+    {
+      "permiso": "payments:refund",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3737
+    },
+    {
+      "permiso": "payments:refund-to-cash",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3738
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "El reembolso no tiene cola sin red: un fallo de red (sin host, sin conexión) sale como REEMBOLSO_SIN_RED",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 1584
+    },
+    {
+      "afirmacion": "Texto «Sin conexión: no se pudo confirmar el reembolso…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/exchange/TextosCambio.kt",
+      "linea": 139
+    },
+    {
+      "afirmacion": "El error de envío se pinta pegado al botón",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 1099
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: el botón se ve con permiso, o con candado si el código de encargado está prendido",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 429
+    },
+    {
+      "ruta": "Antes: sin permiso, el toque pide el código antes de abrir",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionsViewModel.kt",
+      "linea": 601
+    },
+    {
+      "ruta": "Problema: qué falta, arriba del botón",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 932
+    },
+    {
+      "ruta": "Problema: qué falta (importe)",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 934
+    },
+    {
+      "ruta": "Problema: qué falta (motivo)",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 938
+    },
+    {
+      "ruta": "Problema: «Esto sólo lo registra…» (sin terminal, sin selector y no es efectivo)",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 966
+    },
+    {
+      "ruta": "Problema: transferencia «Tú le haces la transferencia; aquí sólo queda registrado.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/data/model/RefundSubmitRules.kt",
+      "linea": 290
+    },
+    {
+      "ruta": "Problema: el aviso de efectivo va debajo de «Devolver con»",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/IssueRefundSheet.kt",
+      "linea": 745
+    },
+    {
+      "ruta": "Problema: con código de encargado prendido",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/data/model/RefundSubmitRules.kt",
+      "linea": 274
+    },
+    {
+      "ruta": "Problema: con código de encargado apagado",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/data/model/RefundSubmitRules.kt",
+      "linea": 275
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "Sunmi D3 del laboratorio del Alien (serial D40625BRJ0469)",
+    "version": "2.25.42-dev (70), copia de QA com.avoqado.pos.soportewa compilada en v2.25.42 (843c15ae), contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
+    "apkSha256": "c109312a1a4e02448e2c7ab10a8a2c7a5b57920868f2190b3b969a6ed19e5d34",
+    "fecha": "2026-11-18",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/reembolsos/reembolsar-venta/1-ventas.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/reembolsos/reembolsar-venta/2-venta-emitir-reembolso.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/reembolsos/reembolsar-venta/3-reembolsar-articulos-o-importe.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/reembolsos/reembolsar-venta/4-articulo-reabastecer-propina-motivo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/reembolsos/reembolsar-venta/5-devolver-con-reembolsar.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/reembolsos/reembolsar-venta/6-reembolso-hecho.png"
+    ],
+    "filasCreadas": [
+      "Payment cmwmntiro0191waydxr5c9hzt — reembolso -$20.00 CASH de la Order cmwmn6sh6015wwaydeptawrz8 (Agua Mineral)"
+    ],
+    "nota": "*Ventas* → venta de $55 → *Emitir reembolso* → *Reembolsar artículos* / *Reembolsos por importe* → marcar Agua → sale *Reabastecer existencias*; *Incluir propina en el reembolso* sale desmarcada («Solo se reembolsan los artículos; la propina del mesero queda intacta.»); *Devolver con*: *Efectivo de la caja* (elegido), *Transferencia*, *Saldo a favor* (apagado: «Pide a Avoqado que active el saldo a favor»); arriba del botón «Elige el motivo del reembolso.» → *Motivo del reembolso* «Productos devueltos» → *Reembolsar $20.00* → en *Ventas* sale «-$20.00 Efectivo»."
+  },
+  "codex": {
+    "lote": 2,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

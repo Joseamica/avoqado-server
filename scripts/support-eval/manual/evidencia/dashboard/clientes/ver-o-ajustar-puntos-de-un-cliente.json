@@ -1,0 +1,254 @@
+{
+  "pagina": "dashboard/clientes/ver-o-ajustar-puntos-de-un-cliente",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1277,
+      "cita": "title: t('sidebar:customersMenu.title'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 13,
+      "cita": "\"title\": \"Clientes\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 737,
+      "cita": "{ title: t('sidebar:customersMenu.all'), url: 'customers', permission: 'customers:read', keywords: ['consumidores', 'comensales'] },"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 14,
+      "cita": "\"all\": \"Todos los Clientes\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 453,
+      "cita": "<p className=\"text-xs font-medium text-muted-foreground truncate\">{t('detail.stats.points')}</p>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 44,
+      "cita": "\"points\": \"Puntos de Lealtad\""
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 48,
+      "cita": "\"loyalty\": \"Historial de Lealtad\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 577,
+      "cita": "<SelectItem value=\"EARN\">{t('detail.loyalty.types.EARN')}</SelectItem>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 83,
+      "cita": "\"EARN\": \"Ganados\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 84,
+      "cita": "\"REDEEM\": \"Canjeados\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 85,
+      "cita": "\"EXPIRE\": \"Expirados\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 86,
+      "cita": "\"ADJUST\": \"Ajustados\""
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 319,
+      "cita": "{t('actions.adjustPoints')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 264,
+      "cita": "\"adjustPoints\": \"Ajustar Puntos\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 762,
+      "cita": "<Label htmlFor=\"points\">{t('adjustPoints.fields.points')}</Label>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 172,
+      "cita": "\"points\": \"Puntos a Agregar/Quitar\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 176,
+      "cita": "\"points\": \"Ingresa puntos (usa negativo para restar)\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 773,
+      "cita": "<Label htmlFor=\"reason\">{t('adjustPoints.fields.reason')}</Label>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 173,
+      "cita": "\"reason\": \"Razón\""
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 186,
+      "cita": "\"newBalance\": \"Nuevo Saldo\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 795,
+      "cita": "{adjustPointsMutation.isPending ? tCommon('saving') : t('adjustPoints.submit')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 187,
+      "cita": "\"submit\": \"Ajustar Puntos\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 151,
+      "cita": "toast({ title: t('toasts.adjustPointsSuccess') })"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/customers.json",
+      "linea": 253,
+      "cita": "\"adjustPointsSuccess\": \"Puntos ajustados exitosamente\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "customers:read",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 10383
+    },
+    {
+      "permiso": "loyalty:read",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 11517
+    },
+    {
+      "permiso": "loyalty:adjust",
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 316
+    },
+    {
+      "permiso": "loyalty:adjust",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 11429
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "LOYALTY_PROGRAM",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 11005
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Paso 1: el renglón abre la ficha",
+      "archivo": "src/pages/Customers/Customers.tsx",
+      "linea": 436
+    },
+    {
+      "ruta": "Paso 1: ruta de la ficha",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 609
+    },
+    {
+      "ruta": "Problema: razón de 5 caracteres",
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 202
+    },
+    {
+      "ruta": "Problema: texto",
+      "archivo": "src/locales/es/customers.json",
+      "linea": 182
+    },
+    {
+      "ruta": "Problema: no baja de 0",
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 223
+    },
+    {
+      "ruta": "Problema: los dos avisos salen antes de mandar",
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 222
+    },
+    {
+      "ruta": "Problema: la razón se valida en el formulario",
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 215
+    },
+    {
+      "ruta": "Problema: texto",
+      "archivo": "src/locales/es/customers.json",
+      "linea": 184
+    },
+    {
+      "ruta": "Problema: el ajuste se manda sin llave de reintento: un error no dice si quedó",
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 149
+    },
+    {
+      "ruta": "Problema: el historial sólo se relee en éxito",
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 154
+    },
+    {
+      "ruta": "Problema: el error trae la razón del SERVIDOR",
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 159
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 10,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

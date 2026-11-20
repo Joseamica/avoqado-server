@@ -124,7 +124,7 @@ function escanear() {
   return { filas, cabecera, codigo }
 }
 
-type Fila = { clase: 'ESCRIBE' | 'QUITA' | 'SINCRONIZA' | 'CONSERVA' | 'RECORTA' | 'CONGELA'; marcas: string[] }
+type Fila = { clase: 'ESCRIBE' | 'QUITA' | 'SINCRONIZA' | 'CONSERVA' | 'RECORTA' | 'CONGELA' | 'SOLO_MARCA'; marcas: string[] }
 const SYNC = 'sincronizarRepartos('
 // Codex r1 P1: todo escritor que crea una fila sobre una orden YA existente conserva antes el descuento histórico de cabecera.
 const HISTORICO = 'conservarDescuentoHistorico('
@@ -230,6 +230,23 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
   'src/services/online-ordering/cortesiaDeFolio.ts#convertirBeneficiosEnCortesiaEnTx': {
     clase: 'CONGELA',
     marcas: ["type: 'FIXED_AMOUNT'", 'value: f.amount', 'compReason: MOTIVO_BENEFICIO_REGRESADO'],
+  },
+  // hz:e82938e1:D24: al anular la cuenta sin cobrar, las filas que sumaron su uso al tope del catálogo lo devuelven y sólo pierden la
+  // marca `usoContado`: ni importe, ni IVA, ni reparto cambian (la fila se queda como historia de la anulada).
+  'src/services/shared/usoDelDescuento.ts#devolverUsosMarcadosEnTx': {
+    clase: 'SOLO_MARCA',
+    marcas: ['data: { usoContado: false, usoDevueltoAlAnular: true }'],
+  },
+  // hz:e82938e1:D26: la cuenta anulada que revive por dinero ya capturado vuelve a gastar el uso de cada fila que lo devolvió al anular:
+  // sólo cambian las marcas (`usoContado` vuelve, `usoDevueltoAlAnular` se suelta); ni importe, ni IVA, ni reparto.
+  'src/services/shared/usoDelDescuento.ts#volverAGastarUsosDeCuentaRevividaEnTx': {
+    clase: 'SOLO_MARCA',
+    marcas: ['data: { usoContado: true, usoDevueltoAlAnular: false }'],
+  },
+  // D24 (Codex r1 #4a, r2 #5): en la cuenta que se anula, la fila cuyo descuento se borró del catálogo sólo pierde la marca.
+  'src/services/shared/usoDelDescuento.ts#soltarMarcaDeFilasSinDescuentoEnTx': {
+    clase: 'SOLO_MARCA',
+    marcas: ['data: { usoContado: false },'],
   },
   'src/services/shared/repartoDescuentoTx.ts#recortarDescuentosDeRenglones': {
     clase: 'RECORTA',

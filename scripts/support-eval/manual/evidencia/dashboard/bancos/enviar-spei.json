@@ -1,0 +1,342 @@
+{
+  "pagina": "dashboard/bancos/enviar-spei",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1240,
+      "cita": "title: t('sidebar:bancosMenu.title', { defaultValue: 'Bancos' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 102,
+      "cita": "\"title\": \"Bancos\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1153,
+      "cita": "title: t('sidebar:bancosMenu.spei', { defaultValue: 'SPEI externo' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 106,
+      "cita": "\"spei\": \"SPEI externo\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 151,
+      "cita": "<Label htmlFor=\"spei-source\">{t('hub.spei.fields.sourceAccount')}</Label>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 249,
+      "cita": "\"sourceAccount\": \"Cuenta origen\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 169,
+      "cita": "<Label htmlFor=\"spei-clabe\">{t('hub.spei.fields.clabe')}</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 250,
+      "cita": "\"clabe\": \"CLABE destino\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 71,
+      "cita": "const clabeComplete = clabe.length === 18"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 186,
+      "cita": "<Label htmlFor=\"spei-bank\">{t('hub.spei.fields.bank')}</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 251,
+      "cita": "\"bank\": \"Banco destino\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 80,
+      "cita": "const match = banks.data.find(b => b.clabePrefix === prefix)"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 216,
+      "cita": "<Label htmlFor=\"spei-beneficiary\">{t('hub.spei.fields.beneficiaryName')}</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 253,
+      "cita": "\"beneficiaryName\": \"Nombre del beneficiario\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 226,
+      "cita": "<Label htmlFor=\"spei-amount\">{t('hub.spei.fields.amount')}</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 254,
+      "cita": "\"amount\": \"Monto\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 240,
+      "cita": "<Label htmlFor=\"spei-concept\">{t('hub.spei.fields.concept')}</Label>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 255,
+      "cita": "\"concept\": \"Concepto\""
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 256,
+      "cita": "{t('hub.spei.review')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 261,
+      "cita": "\"review\": \"Revisar envío\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 277,
+      "cita": "<Button data-tour=\"spei-send-btn\" disabled={send.isPending} onClick={() => send.mutate()}>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 279,
+      "cita": "{send.isPending ? t('hub.spei.sending') : t('hub.spei.send')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 265,
+      "cita": "\"send\": \"Enviar\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 297,
+      "cita": "<p className=\"font-medium\">{t('hub.spei.successTitle')}</p>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 267,
+      "cita": "\"successTitle\": \"SPEI enviado\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 268,
+      "cita": "\"successBody\": \"Folio: {{id}}\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "financialConnections:manage",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 354
+    },
+    {
+      "permiso": "financialConnections:manage",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1156
+    },
+    {
+      "permiso": "financialConnections:manage",
+      "archivo": "avoqado-server/src/routes/dashboard/financialConnection.routes.ts",
+      "linea": 105
+    },
+    {
+      "permiso": "financialConnections:*",
+      "archivo": "avoqado-server/src/lib/permissions.ts",
+      "linea": 1383
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "BANKING_HUB",
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 321
+    },
+    {
+      "featureCode": "BANKING_HUB",
+      "archivo": "avoqado-server/src/routes/dashboard/financialConnection.routes.ts",
+      "linea": 106
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: el permiso pasa por el comodín del recurso (financialConnections:*)",
+      "archivo": "src/hooks/use-access.ts",
+      "linea": 154
+    },
+    {
+      "ruta": "Antes: superadmin siempre pasa",
+      "archivo": "src/routes/PermissionProtectedRoute.tsx",
+      "linea": 43
+    },
+    {
+      "ruta": "Antes: comentario del servidor, sólo el dueño",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4616
+    },
+    {
+      "ruta": "Antes: sin conexión sale el estado vacío",
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 327
+    },
+    {
+      "ruta": "Antes: texto Conecta tu banco",
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 165
+    },
+    {
+      "ruta": "Antes: el estado vacío",
+      "archivo": "src/pages/Bancos/BancosEmptyState.tsx",
+      "linea": 50
+    },
+    {
+      "ruta": "Antes: sin el plan, borroso",
+      "archivo": "src/components/billing/FeatureGate.tsx",
+      "linea": 60
+    },
+    {
+      "ruta": "Antes: el menú sale con el permiso, con candado de plan",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1244
+    },
+    {
+      "ruta": "Antes: el dinero sale y no se deshace",
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 247
+    },
+    {
+      "ruta": "Antes: aviso en la revisión",
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 263
+    },
+    {
+      "ruta": "Paso 3: el concepto es opcional",
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 84
+    },
+    {
+      "ruta": "Paso 3: el servidor acepta el concepto vacío",
+      "archivo": "avoqado-server/src/controllers/dashboard/financialConnection.controller.ts",
+      "linea": 230
+    },
+    {
+      "ruta": "Paso 4: el folio sólo si lo hay",
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 298
+    },
+    {
+      "ruta": "Problema: CLABE inválida",
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 183
+    },
+    {
+      "ruta": "Problema: texto CLABE inválida",
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 257
+    },
+    {
+      "ruta": "Problema: no se pudo enviar",
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 290
+    },
+    {
+      "ruta": "Problema: puede que sí se haya enviado",
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 270
+    },
+    {
+      "ruta": "Paso 4: un envío idéntico de hace minutos devuelve el resultado anterior",
+      "archivo": "avoqado-server/src/services/financial-connections/financialConnection.service.ts",
+      "linea": 825
+    },
+    {
+      "ruta": "Paso 4: ese resultado anterior puede salir como éxito",
+      "archivo": "avoqado-server/src/services/financial-connections/financialConnection.service.ts",
+      "linea": 677
+    },
+    {
+      "ruta": "Paso 4: el panel pinta «SPEI enviado» con cualquier ok",
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 287
+    },
+    {
+      "ruta": "Problema: otro envío lleva otra llave",
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 145
+    },
+    {
+      "ruta": "Problema: el servidor sólo frena repetidos por 5 minutos",
+      "archivo": "avoqado-server/src/services/financial-connections/financialConnection.service.ts",
+      "linea": 40
+    },
+    {
+      "ruta": "Problema: sin cuenta elegible",
+      "archivo": "src/pages/Bancos/BancosSpei.tsx",
+      "linea": 125
+    },
+    {
+      "ruta": "Problema: texto cuentas personales",
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 188
+    },
+    {
+      "ruta": "Problema: texto una sola cuenta",
+      "archivo": "src/locales/es/financialConnections.json",
+      "linea": 258
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": [],
+    "nota": "RETENIDA (Codex lote 3b r1 #11): no darle browserTested hasta que financialConnections:manage exista en src/lib/permissions.ts y vaya en requiredPermissions. Hoy no pasa isValidPermission, así que el frontmatter lleva [] y el candado real (sólo el dueño, por financialConnections:*) no lo ve el asistente. Jornada de aparatos 18-nov: no se recorrió; sigue retenida (permissions.ts sólo trae financialConnections:*) y *Enviar* mueve dinero real de una cuenta conectada: no hay sandbox local."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

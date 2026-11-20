@@ -1,0 +1,282 @@
+{
+  "pagina": "dashboard/reservaciones/confirmar-o-cancelar-reservacion",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1254,
+      "cita": "title: t('sidebar:routes.reservations'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 176,
+      "cita": "\"reservations\": \"Reservaciones\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 246,
+      "cita": "\"overview\": \"Resumen\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Reservations/Reservations.tsx",
+      "linea": 360,
+      "cita": "clickableRow={row => ({ to: row.id })}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 644,
+      "cita": "{ path: ':reservationId', element: <ReservationDetail /> },"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/ReservationDetail.tsx",
+      "linea": 206,
+      "cita": "const canConfirm = reservation.status === 'PENDING'"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reservations/ReservationDetail.tsx",
+      "linea": 245,
+      "cita": "{t('actions.confirm')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 70,
+      "cita": "\"confirm\": \"Confirmar\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 748,
+      "cita": "\"confirmSuccess\": \"Reservación confirmada\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reservations/ReservationDetail.tsx",
+      "linea": 207,
+      "cita": "const canCheckIn = reservation.status === 'CONFIRMED'"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reservations/ReservationDetail.tsx",
+      "linea": 251,
+      "cita": "{t('actions.checkIn')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 71,
+      "cita": "\"checkIn\": \"Check-in\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reservations/ReservationDetail.tsx",
+      "linea": 208,
+      "cita": "const canComplete = reservation.status === 'CHECKED_IN'"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reservations/ReservationDetail.tsx",
+      "linea": 257,
+      "cita": "{t('actions.complete')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 72,
+      "cita": "\"complete\": \"Completar\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reservations/ReservationDetail.tsx",
+      "linea": 209,
+      "cita": "const canNoShow = reservation.status === 'CONFIRMED'"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reservations/ReservationDetail.tsx",
+      "linea": 587,
+      "cita": "<AlertDialogAction onClick={() => noShowMutation.mutate()} disabled={noShowMutation.isPending}>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 73,
+      "cita": "\"markNoShow\": \"Marcar No Show\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Reservations/ReservationDetail.tsx",
+      "linea": 211,
+      "cita": "const canCancel = ['PENDING', 'CONFIRMED'].includes(reservation.status)"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Reservations/ReservationDetail.tsx",
+      "linea": 285,
+      "cita": "{t('actions.cancel')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 74,
+      "cita": "\"cancel\": \"Cancelar\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Reservations/ReservationDetail.tsx",
+      "linea": 572,
+      "cita": "{t('detail.cancel.confirm')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 191,
+      "cita": "\"confirm\": \"Confirmar Cancelación\""
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 747,
+      "cita": "\"cancelSuccess\": \"Reservación cancelada\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "reservations:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 626
+    },
+    {
+      "permiso": "reservations:update",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 195
+    },
+    {
+      "permiso": "reservations:update",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 196
+    },
+    {
+      "permiso": "reservations:update",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 199
+    },
+    {
+      "permiso": "reservations:update",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 200
+    },
+    {
+      "permiso": "reservations:cancel",
+      "archivo": "avoqado-server/src/routes/dashboard/reservation.routes.ts",
+      "linea": 191
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1259
+    },
+    {
+      "featureCode": "RESERVATIONS",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 4695
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Paso 5: cancelar llama a DELETE reservations/:id",
+      "archivo": "src/services/reservation.service.ts",
+      "linea": 92
+    },
+    {
+      "ruta": "Problema: cancelar aplica la política de créditos",
+      "archivo": "avoqado-server/src/services/dashboard/reservation.dashboard.service.ts",
+      "linea": 1188
+    },
+    {
+      "ruta": "Problema: y la del depósito",
+      "archivo": "avoqado-server/src/services/dashboard/reservation.dashboard.service.ts",
+      "linea": 1203
+    },
+    {
+      "ruta": "Problema: el depósito puede perderse según la regla",
+      "archivo": "avoqado-server/src/services/dashboard/reservation.dashboard.service.ts",
+      "linea": 1233
+    },
+    {
+      "ruta": "Problema: reglas de Cancelación del negocio",
+      "archivo": "src/locales/es/reservations.json",
+      "linea": 486
+    },
+    {
+      "ruta": "Problema: o la devolución puede fallar",
+      "archivo": "avoqado-server/src/services/dashboard/reservation.dashboard.service.ts",
+      "linea": 1283
+    },
+    {
+      "ruta": "Problema: el SERVIDOR cancela primero y después créditos y depósito",
+      "archivo": "avoqado-server/src/services/dashboard/reservation.dashboard.service.ts",
+      "linea": 1173
+    },
+    {
+      "ruta": "Problema: el panel sólo relee la reservación en éxito",
+      "archivo": "src/pages/Reservations/ReservationDetail.tsx",
+      "linea": 133
+    },
+    {
+      "ruta": "Problema: en error sólo muestra el aviso",
+      "archivo": "src/pages/Reservations/ReservationDetail.tsx",
+      "linea": 137
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3000 (develop)",
+    "fecha": "2026-11-12",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/confirmar-o-cancelar-reservacion/1.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/confirmar-o-cancelar-reservacion/2.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/confirmar-o-cancelar-reservacion/3.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/confirmar-o-cancelar-reservacion/4.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/confirmar-o-cancelar-reservacion/5.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/confirmar-o-cancelar-reservacion/6.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/confirmar-o-cancelar-reservacion/7.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/confirmar-o-cancelar-reservacion/8.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/confirmar-o-cancelar-reservacion/9.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/confirmar-o-cancelar-reservacion/10.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/manual/lote-3b/fotos/confirmar-o-cancelar-reservacion/11.png"
+    ],
+    "filasCreadas": [
+      "Reservation cmweh23k001ffwaldsc6ptcbm — QA soporte manual 1 (sin depósito): check-in y completada",
+      "Reservation cmweh246v01fjwald3qnfpma3 — QA soporte manual 2: No Show",
+      "Reservation cmweh248z01fnwaldu67ym4xg — QA soporte manual 3: cancelada",
+      "Reservation cmweh5a3f01gbwaldxmekm0xs — QA soporte manual 4: pendiente, confirmada, check-in y completada",
+      "ReservationSettings de Avoqado Full — autoConfirm de true a false y de vuelta a true (ActivityLog cmweh59qg01g9waldoncqr7ge, cmweh65ga01gnwaldeoig2iqs RESERVATION_SETTINGS_UPDATED)",
+      "ActivityLog RESERVATION_CREATED cmweh245q01fhwald5vyy537n, cmweh247f01flwaldm575l0m4, cmweh249401fpwaldgi1wntw1, cmweh5amg01gdwaldedr6infw · CONFIRMED cmweh61mb01gfwaldp31n82vs · CHECKED_IN cmweh309j01ftwaldkykdti05, cmweh638e01ghwald499j6d7m · COMPLETED cmweh329601fvwaldjr8zkd9c, cmweh65dx01gjwald0zouptne · NO_SHOW cmweh37m601fxwaldwv5oiom9 · CANCELLED cmweh3ekk01fzwaldsw5hg1aw"
+    ],
+    "nota": "Avoqado Full, OWNER del seed. Cuatro reservaciones de QA para mañana, sin depósito, sin correo ni teléfono, creadas con el mismo endpoint del formulario del panel. Avoqado Full confirma solo (autoConfirm), así que para el paso 2 se apagó autoConfirm con el endpoint de *Ajustes*, se creó la 4 (quedó *Pendiente*) y se volvió a prender. Paso 1: *Reservaciones* › *Resumen* → tocar la reservación abre su detalle. Paso 2: pendiente → *Confirmar* → «Reservación confirmada». Paso 3: *Check-in* → «Check-in realizado» → *Completar* → «Reservación completada». Paso 4: confirmada → *Marcar No Show* → «Marcar como No Show» → *Marcar No Show* → «Marcada como No Show». Paso 5: *Cancelar* → «Cancelar Reservación» → *Confirmar Cancelación* → «Reservación cancelada» (y el detalle se queda sin botones). Pendiente muestra *Confirmar*, *Reagendar*, *Cancelar*; confirmada, *Check-in*, *Reagendar*, *Marcar No Show*, *Cancelar*."
+  },
+  "codex": {
+    "lote": 10,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -1,0 +1,239 @@
+{
+  "pagina": "android/ordenes/agregar-productos-a-la-venta",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 29,
+      "cita": "label = \"Cobrar\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 116,
+      "cita": "PRODUCTS(\"Todos los productos\"),"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2451,
+      "cita": "else -> cartViewModel.addProduct(product)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2932,
+      "cita": "text = \"Buscar\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/search/SearchOverlayView.kt",
+      "linea": 98,
+      "cita": "placeholder = \"Buscar productos...\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/search/SearchOverlayView.kt",
+      "linea": 152,
+      "cita": "onClick = { onProductTap(resultado.producto) },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2974,
+      "cita": "contentDescription = \"Escanear código de barras\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 731,
+      "cita": "onBarcodeScan = { showBarcodeScanner = true },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2450,
+      "cita": "product.hasModifiers -> onSelectForDetail(product)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ModifierGroupSection.kt",
+      "linea": 58,
+      "cita": "text = \"Requerido $selectedCount/$requiredCount\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
+      "linea": 581,
+      "cita": "text = \"Agregar al carrito\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
+      "linea": 583,
+      "cita": "enabled = canAddToCart,"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/variantes/TileDeFamilia.kt",
+      "linea": 87,
+      "cita": "TextosVariantes.variantes(familia.variantes.size)"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/variantes/TextosVariantes.kt",
+      "linea": 9,
+      "cita": "const val VARIANTES = \"{n} variantes\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/variantes/HojaDeVariantes.kt",
+      "linea": 147,
+      "cita": "text = elegida?.let { TextosVariantes.agregarCon(it.displayPrice) } ?: TextosVariantes.AGREGAR,"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2449,
+      "cita": "product.soldByWeight -> onSelectForWeight(product)"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/WeightCapturePanel.kt",
+      "linea": 239,
+      "cita": "placeholder = \"Peso (kg)\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/WeightCapturePanel.kt",
+      "linea": 233,
+      "cita": "Text(\"Capturar manualmente\")"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/WeightCapturePanel.kt",
+      "linea": 221,
+      "cita": "if (scaleConfigured && !manualMode) {"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/WeightCapturePanel.kt",
+      "linea": 316,
+      "cita": "text = if (totalCents != null) \"Agregar • ${money(totalCents)}\" else \"Agregar\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "menu:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 2086
+    },
+    {
+      "permiso": "menu:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/data/ProductsRepository.kt",
+      "linea": 102
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Problema: «Falta elegir: …» al tocar Agregar al carrito con un grupo obligatorio vacío",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
+      "linea": 352
+    },
+    {
+      "ruta": "Problema: en una variante, «Elige una opción de cada grupo para agregar.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/variantes/TextosVariantes.kt",
+      "linea": 13
+    },
+    {
+      "ruta": "Problema: código que no está en el catálogo",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1589
+    },
+    {
+      "ruta": "Problema: el escaneo sólo busca en el catálogo cargado en el aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
+      "linea": 2121
+    },
+    {
+      "ruta": "Problema: el botón «Actualizar productos» vuelve a pedir el catálogo",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2957
+    },
+    {
+      "ruta": "Problema: el botón llama a refreshProducts",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 730
+    },
+    {
+      "ruta": "Antes: el catálogo se hidrata del caché del aparato primero",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/data/ProductsRepository.kt",
+      "linea": 87
+    },
+    {
+      "ruta": "Antes: si la carga falla, sigue el catálogo cacheado",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/data/ProductsRepository.kt",
+      "linea": 146
+    },
+    {
+      "ruta": "Problema: búsqueda sin resultados",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/search/SearchOverlayView.kt",
+      "linea": 122
+    },
+    {
+      "ruta": "Problema: tras dar de alta o cambiar en el panel, «Actualizar productos» vuelve a pedir el catálogo",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
+      "linea": 1192
+    },
+    {
+      "ruta": "Si aparece «Todo ▸»: texto de la tarjeta",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/TextosMenuDelAparato.kt",
+      "linea": 5
+    },
+    {
+      "ruta": "Si aparece «Todo ▸»: sólo la cuadrícula se filtra (búsqueda, pistola y atajos leen todo)",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 352
+    },
+    {
+      "ruta": "Si aparece «Todo ▸»: tocarla quita el filtro del aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 795
+    },
+    {
+      "ruta": "Si aparece «Todo ▸»: con verTodo no hay filtro",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/MenuDelAparato.kt",
+      "linea": 15
+    },
+    {
+      "ruta": "Problema: con modificadores obligatorios vacíos, tocar «Agregar al carrito» enciende «Falta elegir: …»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
+      "linea": 593
+    },
+    {
+      "ruta": "Problema: «Falta elegir: …» sale arriba sólo si faltan grupos obligatorios",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
+      "linea": 350
+    },
+    {
+      "ruta": "Problema: en variantes, el aviso va debajo del botón",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/variantes/HojaDeVariantes.kt",
+      "linea": 158
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 9,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

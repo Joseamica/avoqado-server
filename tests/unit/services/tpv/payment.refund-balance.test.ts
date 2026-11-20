@@ -171,6 +171,8 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
         },
         paymentAllocation: { create: prisma.paymentAllocation.create },
         venueTransaction: { create: prisma.venueTransaction.create },
+        // D26: la reapertura de una cancelada busca las filas que devolvieron su uso al anular (D24); aquí no hay ninguna.
+        orderDiscount: { findMany: jest.fn().mockResolvedValue([]) },
         order: {
           update: prisma.order.update,
           // La admisión del efectivo con `cobroNuevo` (Tarea 6a) relee el estado bajo el candado.
@@ -633,6 +635,8 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
 
 describe('Founder 3-oct (Codex r8 #2, r9 #1-#3, r12 #5): el cierre transaccional de la terminal (`settleStandalonePaymentInTx`, :1364) reabre la cancelada de Avoqado que recibe dinero ya capturado y guarda todo con ESE estado', () => {
   const txCierre = (orden: Record<string, unknown>, cobrado: number) => ({
+    // D26: la reapertura busca las filas que devolvieron su uso al anular (D24); aquí no hay ninguna.
+    orderDiscount: { findMany: jest.fn().mockResolvedValue([]) },
     order: {
       findFirstOrThrow: jest.fn().mockResolvedValue({
         id: ORDER_ID,

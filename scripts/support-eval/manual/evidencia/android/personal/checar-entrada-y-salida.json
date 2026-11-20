@@ -1,0 +1,215 @@
+{
+  "pagina": "android/personal/checar-entrada-y-salida",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 57,
+      "cita": "label = \"Más\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt",
+      "linea": 66,
+      "cita": "MainTab.MORE -> true"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 723,
+      "cita": "label = \"Reloj checador\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 724,
+      "cita": "onClick = { showTimeClock = true },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 203,
+      "cita": "text = \"Reloj checador\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 212,
+      "cita": "maxLength = 10,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 213,
+      "cita": "minLength = 4,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 244,
+      "cita": "text = \"Identificar\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 259,
+      "cita": "enabled = pin.length in 4..10,"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 369,
+      "cita": "if (!staff.clockedIn) {"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 371,
+      "cita": "text = \"Entrada\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 389,
+      "cita": "text = \"Iniciar descanso\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 391,
+      "cita": "currentScreen = TimeClockScreen.BREAK_SELECTION"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 456,
+      "cita": "text = \"Tipo de descanso\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 468,
+      "cita": "text = \"${breakType.duration} ${breakType.name}\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 397,
+      "cita": "text = \"Terminar descanso\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 414,
+      "cita": "text = \"Salida\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 158,
+      "cita": "text = \"Listo, ${staffData?.name ?: \"compañero\"}\","
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 377,
+      "cita": "onSuccess = { acuse = \"Entrada registrada a las ${horaActual()}.\" },"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 425,
+      "cita": "acuse = \"Salida registrada a las ${horaActual()}.$trabajado\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 172,
+      "cita": "text = \"Entendido\","
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Si aparece «Sin conexión. El reloj necesita internet…»: un error de red en cualquier acción del reloj",
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/data/TimeEntryRepository.kt",
+      "linea": 140
+    },
+    {
+      "afirmacion": "Si aparece el aviso: sale para UnknownHost/Connect/SocketTimeout/IOException (la petición pudo llegar o no)",
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/data/TimeEntryRepository.kt",
+      "linea": 137
+    },
+    {
+      "afirmacion": "Si aparece el aviso: identificarse otra vez lee del servidor si la entrada quedó",
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 249
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: «Reloj checador» se puede esconder en «Personalizar menú» de este aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 720
+    },
+    {
+      "ruta": "Antes: la entrada «Personalizar menú» de Más",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1989
+    },
+    {
+      "ruta": "El servidor identifica por PIN, sin permiso: identify",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1325
+    },
+    {
+      "ruta": "El servidor identifica por PIN, sin permiso: clock-in",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1366
+    },
+    {
+      "ruta": "El servidor identifica por PIN, sin permiso: clock-out",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1405
+    },
+    {
+      "ruta": "El servidor identifica por PIN, sin permiso: break/start",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1414
+    },
+    {
+      "ruta": "El servidor identifica por PIN, sin permiso: break/end",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1423
+    },
+    {
+      "ruta": "Problema: otra persona identificada → Cambiar usuario",
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 448
+    },
+    {
+      "ruta": "Problema: el estado dice si ya hay entrada («Trabajando» / «Entrada: hh:mm»)",
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 294
+    },
+    {
+      "ruta": "Problema: hora de la entrada abierta",
+      "archivo": "app/src/main/java/com/avoqado/pos/timeclock/presentation/TimeClockSheet.kt",
+      "linea": 319
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

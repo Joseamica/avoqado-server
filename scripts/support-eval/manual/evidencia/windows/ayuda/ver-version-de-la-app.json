@@ -1,0 +1,72 @@
+{
+  "pagina": "windows/ayuda/ver-version-de-la-app",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
+  "version": "2.25.41-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 57,
+      "cita": "label = \"Más\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt",
+      "linea": 66,
+      "cita": "MainTab.MORE -> true"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 250,
+      "cita": "\"Versión ${pInfo.versionName} (${PackageInfoCompat.getLongVersionCode(pInfo)})\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 839,
+      "cita": "text = versionName,"
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "WINDOWS: el nombre de la versión es el de Android con «-escritorio»",
+      "archivo": "desktop/pos/build.gradle.kts",
+      "linea": 87
+    },
+    {
+      "ruta": "WINDOWS: al arrancar, la app guarda ese nombre en avoqado.version",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Main.kt",
+      "linea": 71
+    },
+    {
+      "ruta": "WINDOWS: el contexto de escritorio da ese PackageManager (nunca falla: no sale «Avoqado v1.0.0»)",
+      "archivo": "desktop/plataforma/src/main/kotlin/com/avoqado/escritorio/ContextoDeEscritorio.kt",
+      "linea": 44
+    },
+    {
+      "ruta": "WINDOWS: PackageManager de escritorio lee avoqado.version",
+      "archivo": "desktop/plataforma/src/main/java/android/content/pm/PackageManager.java",
+      "linea": 11
+    },
+    {
+      "ruta": "WINDOWS: el número entre paréntesis siempre es 0 (no hay versionCode en escritorio)",
+      "archivo": "desktop/plataforma/src/main/java/android/content/pm/PackageInfo.java",
+      "linea": 6
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 2,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

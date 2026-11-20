@@ -192,14 +192,38 @@ const SYNONYMS: Record<string, string[]> = {
 /** The hand-written general article; also the answer to a fully generic question. */
 export const OVERVIEW_SLUG = 'overview'
 
-const tokenize = (s: string): string[] =>
+export const tokenize = (s: string): string[] =>
   normalize(s)
     .split(/[^a-z0-9]+/)
     .filter(Boolean)
 
-/** Whole-token match with plural/stem tolerance: "empleado"≈"empleados", "reservaciones"≈"reservacion" — but never "alta" inside "lealtad". */
-const tokenHit = (tokens: string[], w: string): boolean =>
-  tokens.some(t => t === w || (w.length >= 4 && t.startsWith(w)) || (t.length >= 4 && w.startsWith(t) && w.length - t.length <= 2))
+/** A field's unique tokens, built once per scoring call: a Set for exact hits and the sorted list for prefix hits. */
+export type TokenIndex = { set: Set<string>; sorted: string[] }
+export const indexTokens = (tokens: string[]): TokenIndex => {
+  const set = new Set(tokens)
+  return { set, sorted: [...set].sort() }
+}
+
+/**
+ * Whole-token match with plural/stem tolerance: "empleado"≈"empleados", "reservaciones"≈"reservacion" — but never "alta"
+ * inside "lealtad". A token t hits w when t = w, t starts with w (w ≥ 4 chars), or w is t plus ≤ 2 chars (t ≥ 4 chars).
+ * O(log n) per term instead of a scan of every token: a quoted answer brings ~100 terms against each guide's whole body.
+ */
+export function tokenHit({ set, sorted }: TokenIndex, w: string): boolean {
+  if (set.has(w)) return true
+  if (w.length >= 4) {
+    // Every token that starts with w sorts right at or after w: check the first one that is not smaller.
+    let lo = 0,
+      hi = sorted.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (sorted[mid] < w) lo = mid + 1
+      else hi = mid
+    }
+    if (lo < sorted.length && sorted[lo].startsWith(w)) return true
+  }
+  return (w.length >= 5 && set.has(w.slice(0, -1))) || (w.length >= 6 && set.has(w.slice(0, -2)))
+}
 
 export interface ArticleMatch {
   article: KnowledgeArticle | null
@@ -219,48 +243,60 @@ export function findArticle(articles: KnowledgeArticle[], topic: string): Articl
   const exact = articles.find(a => normalize(a.slug) === q)
   if (exact) return { article: exact, suggestions: [] }
 
-  const words = tokenize(q).filter(w => w.length >= 3 && !STOPWORDS.has(w))
   // "¿Qué es Avoqado?" / "¿para qué sirve?" reduce to zero topic words. That is not "no match" —
   // it is the most generic question there is, and the overview is exactly its answer. Without this
   // the single most likely first question a customer asks returned nothing.
-  if (words.length === 0) {
+  if (topicWords(q).length === 0) {
     const overview = articles.find(a => a.slug === OVERVIEW_SLUG)
     return { article: overview ?? null, suggestions: [] }
   }
-  const terms = new Map<string, number>()
-  for (const w of words) terms.set(w, 1)
-  for (const w of words) for (const syn of SYNONYMS[w] ?? []) if (!terms.has(syn)) terms.set(syn, 0.6)
 
   const MIN_MATCH = 6
   // A body-only hit (1 pt) is noise: "¿usan Redis?" surfaced "Revisar reportes de ventas" merely
   // because some body contained "usan". Only description-level (5) or better may be suggested.
   const MIN_SUGGEST = 5
-  const scored = articles
-    .map(a => {
-      const slugTokens = tokenize(a.slug)
-      // Declared keywords rank with the title: it is how an article claims the operator's own
-      // vocabulary ("estética", "SAT", "corte de caja") without stuffing it into the prose.
-      const titleTokens = [...tokenize(a.title), ...a.keywords.flatMap(tokenize)]
-      const headTokens = tokenize(a.description)
-      const bodyTokens = tokenize(a.body)
-      let score = normalize(a.title).includes(q) || normalize(a.slug).includes(q) ? 100 : 0
-      for (const [w, weight] of terms) {
-        if (tokenHit(slugTokens, w) || tokenHit(titleTokens, w)) score += 10 * weight
-        else if (tokenHit(headTokens, w)) score += 5 * weight
-        else if (tokenHit(bodyTokens, w)) score += 1 * weight
-      }
-      return { a, score }
-    })
-    .filter(x => x.score > 0)
-    // Tie-break toward the shorter title: the general article beats its "…avanzado" sibling.
-    .sort((x, y) => y.score - x.score || x.a.title.length - y.a.title.length)
-
+  const scored = scoreArticles(articles, topic)
   const hasBest = scored.length > 0 && scored[0].score >= MIN_MATCH
   const suggestions = scored
     .slice(hasBest ? 1 : 0, 5)
     .filter(x => x.score >= MIN_SUGGEST)
-    .map(x => ({ slug: x.a.slug, title: x.a.title }))
-  return { article: hasBest ? scored[0].a : null, suggestions }
+    .map(x => ({ slug: x.article.slug, title: x.article.title }))
+  return { article: hasBest ? scored[0].article : null, suggestions }
+}
+
+const topicWords = (q: string) => tokenize(q).filter(w => w.length >= 3 && !STOPWORDS.has(w))
+
+/**
+ * The weighted keyword score behind findArticle, best first: only articles that score above 0. Also ranks the support
+ * library before the WhatsApp assistant reads it (services/support/hybrid.service, topSupportCandidates).
+ */
+export function scoreArticles(articles: KnowledgeArticle[], topic: string): { article: KnowledgeArticle; score: number }[] {
+  const q = normalize(topic)
+  if (!q) return []
+  const words = topicWords(q)
+  const terms = new Map<string, number>()
+  for (const w of words) terms.set(w, 1)
+  for (const w of words) for (const syn of SYNONYMS[w] ?? []) if (!terms.has(syn)) terms.set(syn, 0.6)
+  return (
+    articles
+      .map(article => {
+        // Slug and title score alike, so they share one index. Declared keywords rank with the title: it is how an
+        // article claims the operator's own vocabulary ("estética", "SAT", "corte de caja") without stuffing the prose.
+        const titleTokens = indexTokens([...tokenize(article.slug), ...tokenize(article.title), ...article.keywords.flatMap(tokenize)])
+        const headTokens = indexTokens(tokenize(article.description))
+        const bodyTokens = indexTokens(tokenize(article.body))
+        let score = normalize(article.title).includes(q) || normalize(article.slug).includes(q) ? 100 : 0
+        for (const [w, weight] of terms) {
+          if (tokenHit(titleTokens, w)) score += 10 * weight
+          else if (tokenHit(headTokens, w)) score += 5 * weight
+          else if (tokenHit(bodyTokens, w)) score += 1 * weight
+        }
+        return { article, score }
+      })
+      .filter(x => x.score > 0)
+      // Tie-break toward the shorter title: the general article beats its "…avanzado" sibling.
+      .sort((x, y) => y.score - x.score || x.article.title.length - y.article.title.length)
+  )
 }
 
 // ── Internal docs (superadmin) ─────────────────────────────────────────────────────────────────

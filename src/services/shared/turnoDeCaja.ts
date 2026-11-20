@@ -466,7 +466,7 @@ export function esChoqueDelUnico(error: unknown, unico: UnicoParcial): boolean {
  * `mobile/cash-drawer.mobile.service.ts` — «Abierta por Staff» fue un hallazgo real del
  * /full-testing del 27-ago— pero SIN una consulta extra: el `Staff` ya viene con el `StaffVenue`.
  */
-function nombreDelCajero(dado: string | null | undefined, staff: { firstName?: string | null; lastName?: string | null }): string {
+export function nombreDelCajero(dado: string | null | undefined, staff: { firstName?: string | null; lastName?: string | null }): string {
   const limpio = (dado || '').trim()
   if (limpio && limpio !== 'Staff') return limpio
   const delRegistro = [staff.firstName, staff.lastName].filter(Boolean).join(' ').trim()

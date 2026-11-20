@@ -1,0 +1,254 @@
+{
+  "pagina": "dashboard/inventario/crear-receta",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 427,
+      "cita": "title: t('sidebar:routes.recipes', { defaultValue: 'Recetas' }),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 173,
+      "cita": "\"recipes\": \"Recetas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1213,
+      "cita": "title: t('sidebar:routes.inventory'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 849,
+      "cita": "<Button size=\"sm\" onClick={() => setWizardOpen(true)}>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 272,
+      "cita": "\"add\": \"Agregar Receta\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 395,
+      "cita": "placeholder={t('recipeWizard.step1.searchPlaceholder')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 1122,
+      "cita": "\"searchPlaceholder\": \"Escribir el nombre del producto, SKU o GTIN...\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 202,
+      "cita": "disabled: !!p.recipe,"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 203,
+      "cita": "disabledLabel: p.recipe ? t('recipeWizard.step1.hasRecipe') : undefined,"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 1125,
+      "cita": "\"hasRecipe\": \"Ya tiene receta\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 319,
+      "cita": "if (currentStep === 1 && selectedProduct) setCurrentStep(2)"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/common.json",
+      "linea": 37,
+      "cita": "\"next\": \"Siguiente\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 471,
+      "cita": "{t('recipes.fields.portionYield')} <span className=\"text-destructive\">*</span>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 285,
+      "cita": "\"portionYield\": \"Porciones por receta\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 562,
+      "cita": "placeholder={t('recipeWizard.step2.searchIngredientPlaceholder')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 1135,
+      "cita": "\"searchIngredientPlaceholder\": \"Buscar materia prima por nombre...\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 610,
+      "cita": "{t('recipeWizard.step2.addToRecipe')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 1138,
+      "cita": "\"addToRecipe\": \"Agregar\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 334,
+      "cita": "3: t('recipeWizard.step3.title'),"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 1142,
+      "cita": "\"title\": \"Revisar y Confirmar\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 358,
+      "cita": "{t('recipeWizard.createRecipe')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 1116,
+      "cita": "\"createRecipe\": \"Crear Receta\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 174,
+      "cita": "title: t('recipes.messages.created'),"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 318,
+      "cita": "\"created\": \"Receta creada exitosamente\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "inventory:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 990
+    },
+    {
+      "permiso": "inventory:create",
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 849
+    },
+    {
+      "permiso": "inventory:create",
+      "archivo": "avoqado-server/src/routes/dashboard/inventory.routes.ts",
+      "linea": 450
+    },
+    {
+      "permiso": "menu:read",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 7742
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "INVENTORY_TRACKING",
+      "archivo": "src/pages/Inventory/Recipes.tsx",
+      "linea": 831
+    },
+    {
+      "featureCode": "INVENTORY_TRACKING",
+      "archivo": "avoqado-server/src/routes/dashboard/inventory.routes.ts",
+      "linea": 118
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: el SERVIDOR pide inventory:create al crear la receta",
+      "archivo": "avoqado-server/src/routes/dashboard/inventory.routes.ts",
+      "linea": 450
+    },
+    {
+      "ruta": "Antes: la lista de productos llama a GET products (menu:read en el SERVIDOR)",
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 128
+    },
+    {
+      "ruta": "Antes: crear la receta llama a POST recipe",
+      "archivo": "src/services/inventory.service.ts",
+      "linea": 192
+    },
+    {
+      "ruta": "Paso 3: porciones e ingredientes van en el paso 2 del asistente",
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 452
+    },
+    {
+      "ruta": "Paso 4: el resumen es el paso 3",
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 766
+    },
+    {
+      "ruta": "Problema: Siguiente se prende con producto, ingredientes y porciones",
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 314
+    },
+    {
+      "ruta": "Problema: Siguiente apagado",
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 351
+    },
+    {
+      "ruta": "Problema: Agregar con cantidad mayor que cero",
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 607
+    },
+    {
+      "ruta": "Problema: el error trae la razón del SERVIDOR",
+      "archivo": "src/pages/Inventory/components/CreateRecipeWizard.tsx",
+      "linea": 184
+    },
+    {
+      "ruta": "Problema: texto por omisión",
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 1117
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 6,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

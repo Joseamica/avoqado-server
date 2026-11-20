@@ -1,6 +1,7 @@
 /**
  * Bandeja «Pedidos en línea» del restaurante. Vive en `/mobile` porque quien decide está en la tablet; el panel reutiliza
- * estos mismos manejadores bajo `/dashboard`. R13: sólo la bandeja en primer plano (`x-online-orders-tray: 1`) late.
+ * estos mismos manejadores bajo `/dashboard`. R13: late quien manda `x-online-orders-tray: 1` (la bandeja del panel y, desde D662,
+ * el POS de ANDROID o WINDOWS a la vista en CUALQUIER pantalla: su vigilante global).
  *
  * `:orderId` es SIEMPRE el id de la cuenta (`Order.id`, el `orderId` de la bandeja), nunca `onlineOrderId`.
  * R1: ninguna transición recibe `now` desde aquí: la transición toma su reloj DESPUÉS del candado de la orden.
@@ -86,8 +87,8 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
     // A8: el Zod de la ruta ya validó el cursor (y que sólo venga con `status=active`).
     const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined
     const data = await listInbox({ venueId, filter, ...(cursor ? { activeCursor: cursor } : {}) })
-    // R13: el latido va DESPUÉS de listar bien (una bandeja que falla no mantiene abierta la tienda) y sólo desde la pantalla
-    // de bandeja en primer plano. H3: y sólo de quien puede contestar; un lector mira sin mantener abierta la tienda. Nunca le
+    // R13: el latido va DESPUÉS de listar bien (una bandeja que falla no mantiene abierta la tienda) y sólo con la app a la vista
+    // (D662: también el POS en cualquier pantalla). H3: y sólo de quien puede contestar; un lector mira sin mantener abierta la tienda. Nunca le
     // cuesta la lista al restaurante.
     const latido = req.header(ONLINE_ORDERS_TRAY_HEADER) === '1' && (await canAnswerOrders(req, venueId).catch(() => false))
     if (latido) await touchInboxPoll(venueId).catch(() => false)

@@ -59,7 +59,7 @@ describe('sales_comparison', () => {
     expect(out.change).toEqual({ amount: 2000, percent: 20, direction: 'up' })
     // two equal windows queried, only COMPLETED
     expect(mockAgg).toHaveBeenCalledTimes(2)
-    expect((mockAgg.mock.calls[0][0] as { where: Record<string, unknown> }).where).toMatchObject({
+    expect((mockAgg.mock.calls[0][0] as { where: { AND: Record<string, unknown>[] } }).where.AND[0]).toMatchObject({
       venueId: { in: ['v1'] },
       status: 'COMPLETED',
     })

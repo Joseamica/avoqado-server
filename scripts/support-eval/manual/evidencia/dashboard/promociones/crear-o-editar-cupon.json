@@ -1,0 +1,362 @@
+{
+  "pagina": "dashboard/promociones/crear-o-editar-cupon",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 863,
+      "cita": "title: t('sidebar:promotionsMenu.title'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 24,
+      "cita": "\"title\": \"Promociones\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 842,
+      "cita": "title: t('sidebar:promotionsMenu.coupons'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 27,
+      "cita": "\"coupons\": \"Códigos de Cupón\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Promotions/Coupons.tsx",
+      "linea": 316,
+      "cita": "<Button onClick={() => navigate('create')}>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 474,
+      "cita": "\"create\": \"Crear Cupón\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 187,
+      "cita": "<FormLabel>{t('coupons.form.fields.discount')}</FormLabel>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 382,
+      "cita": "\"discount\": \"Descuento Padre\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 215,
+      "cita": "<CreateDiscountDialog venueId={venueId} onSuccess={id => form.setValue('discountId', id)} />"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Promotions/components/CreateDiscountDialog.tsx",
+      "linea": 146,
+      "cita": "{t('discounts.create.title')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 6,
+      "cita": "\"title\": \"Crear Descuento\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 239,
+      "cita": "<FormLabel>{t('coupons.form.fields.code')}</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 383,
+      "cita": "\"code\": \"Código de Cupón\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 65,
+      "cita": "code: generateRandomCode(),"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 384,
+      "cita": "\"maxUses\": \"Usos Máximos\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 385,
+      "cita": "\"maxUsesPerCustomer\": \"Usos Máximos por Cliente\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 386,
+      "cita": "\"minPurchaseAmount\": \"Monto Mínimo de Compra\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 387,
+      "cita": "\"validFrom\": \"Válido Desde\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 388,
+      "cita": "\"validUntil\": \"Válido Hasta\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 168,
+      "cita": "{mutation.isPending ? tCommon('saving') : t('coupons.actions.save')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 478,
+      "cita": "\"save\": \"Guardar Cambios\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 116,
+      "cita": "title: isEditing ? t('coupons.toasts.updateSuccess') : t('coupons.toasts.createSuccess'),"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 508,
+      "cita": "\"createSuccess\": \"Cupón creado exitosamente\","
+    },
+    {
+      "paso": 6,
+      "archivo": "src/pages/Promotions/Coupons.tsx",
+      "linea": 246,
+      "cita": "<MoreHorizontal className=\"h-4 w-4\" />"
+    },
+    {
+      "paso": 6,
+      "archivo": "src/pages/Promotions/Coupons.tsx",
+      "linea": 251,
+      "cita": "<DropdownMenuItem onClick={() => navigate(row.original.id)}>"
+    },
+    {
+      "paso": 6,
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 476,
+      "cita": "\"edit\": \"Editar\","
+    },
+    {
+      "paso": 6,
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 188,
+      "cita": "<Select onValueChange={field.onChange} value={field.value} disabled={isEditing}>"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "coupons:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 782
+    },
+    {
+      "permiso": "coupons:create",
+      "archivo": "src/pages/Promotions/Coupons.tsx",
+      "linea": 316
+    },
+    {
+      "permiso": "coupons:create",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 12304
+    },
+    {
+      "permiso": "coupons:update",
+      "archivo": "src/pages/Promotions/Coupons.tsx",
+      "linea": 250
+    },
+    {
+      "permiso": "coupons:update",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 12353
+    },
+    {
+      "permiso": "discounts:read",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 11605
+    },
+    {
+      "permiso": "discounts:create",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 11721
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "PROMOTIONS",
+      "archivo": "src/pages/Promotions/Coupons.tsx",
+      "linea": 273
+    },
+    {
+      "featureCode": "PROMOTIONS",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 12035
+    },
+    {
+      "featureCode": "PROMOTIONS",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 11561
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: el cupón guarda el descuento ligado (discountId)",
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 64
+    },
+    {
+      "ruta": "Antes: Crear Descuento llama a POST discounts",
+      "archivo": "src/pages/Promotions/components/CreateDiscountDialog.tsx",
+      "linea": 76
+    },
+    {
+      "ruta": "Antes: la lista trae los descuentos activos",
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 55
+    },
+    {
+      "ruta": "Problema: descuento padre requerido",
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 184
+    },
+    {
+      "ruta": "Problema: texto descuento padre",
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 399
+    },
+    {
+      "ruta": "Problema: lista vacía",
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 197
+    },
+    {
+      "ruta": "Problema: texto Sin descuentos",
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 410
+    },
+    {
+      "ruta": "Problema: código de 3 a 30",
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 230
+    },
+    {
+      "ruta": "Problema: código máximo",
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 231
+    },
+    {
+      "ruta": "Problema: formato del código",
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 233
+    },
+    {
+      "ruta": "Problema: texto del formato",
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 403
+    },
+    {
+      "ruta": "Problema: el aviso sale debajo del campo",
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 260
+    },
+    {
+      "ruta": "Problema: el error trae la razón del SERVIDOR",
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 124
+    },
+    {
+      "ruta": "Problema: texto por omisión",
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 512
+    },
+    {
+      "ruta": "Error de red al crear: la respuesta pudo perderse con el cupón ya creado (desde D6 el panel ya no repite solo un POST sin llave: sePuedeRepetirSola)",
+      "archivo": "src/api.ts",
+      "linea": 168
+    },
+    {
+      "ruta": "T11-10: el reintento",
+      "archivo": "src/api.ts",
+      "linea": 171
+    },
+    {
+      "ruta": "T11-10: el código es único en toda la plataforma (puede ser el del primer intento o de otro negocio)",
+      "archivo": "avoqado-server/src/services/dashboard/coupon.dashboard.service.ts",
+      "linea": 301
+    },
+    {
+      "ruta": "T11-10: el aviso del código repetido",
+      "archivo": "avoqado-server/src/services/dashboard/coupon.dashboard.service.ts",
+      "linea": 306
+    },
+    {
+      "ruta": "T11-10: el error al crear",
+      "archivo": "src/pages/Promotions/CouponForm.tsx",
+      "linea": 121
+    },
+    {
+      "ruta": "T11-12: la lista trae páginas con filtros; un cupón puede no salir en la que se revisa",
+      "archivo": "src/pages/Promotions/Coupons.tsx",
+      "linea": 65
+    },
+    {
+      "ruta": "Problema: el Descuento Padre con «Usos Totales Máximos» / «Usos Máximos por Cliente»",
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 98
+    },
+    {
+      "ruta": "Problema: un descuento con tope no entra en una venta con vales (D11)",
+      "archivo": "avoqado-server/src/services/shared/descuentoConTopeEnVales.ts",
+      "linea": 6
+    },
+    {
+      "ruta": "Problema: columna «Usos» («3 / 100 usos»)",
+      "archivo": "src/pages/Promotions/Discounts.tsx",
+      "linea": 281
+    },
+    {
+      "ruta": "Problema: Mesas gasta y devuelve usos; lo cobrado no se rechaza (D19/D24)",
+      "archivo": "avoqado-server/src/services/shared/usoDelDescuento.ts",
+      "linea": 8
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 6,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

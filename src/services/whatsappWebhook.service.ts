@@ -9,6 +9,9 @@ import { marcarEntregaFallidaPorMensaje } from './giftCards/giftCardDelivery.ser
 import { handleActivationCommand } from './venueChatActivation.service'
 import { maybeSendVenueReplyEmail } from './venueChatEmail.service'
 import { sendServiceMessage, WhatsappCloudApiError } from './whatsapp.service'
+import { tryRouteSupport } from './support/router.service'
+import { recordSupportDeliveryFailure } from './support/delivery.service'
+import { supportPhoneNumberId } from '@/config/supportWhatsapp'
 
 // Meta Cloud API inbound message shape (only fields we read; rest preserved as rawBody).
 interface CloudApiInboundMessage {
@@ -60,55 +63,88 @@ const NON_TEXT_TYPES = new Set(['image', 'audio', 'video', 'sticker', 'document'
 // Throws if any individual message throws — caller should return 5xx so Meta retries.
 export async function processWhatsappWebhook(payload: CloudApiWebhookPayload): Promise<void> {
   const entries = payload?.entry ?? []
+  const failures: unknown[] = []
   for (const entry of entries) {
     const changes = entry.changes ?? []
     for (const change of changes) {
-      if (change.field === 'messages') {
-        await processMessagesChange(change)
-      } else if (change.field === 'smb_message_echoes' || change.field === 'history') {
-        // Coexistence-only fields: they only ever exist for the sales number.
-        if (whichNumber(change) === 'SALES') await storeSalesMessages(change)
-        else logger.warn('WhatsApp coexistence field from a number that is not the sales one; ignored', fieldInfo(change))
-      } else if (change.field === 'message_template_status_update') {
-        await handleTemplateStatusUpdate(change.value)
-      } else {
-        // account_update carries PARTNER_REMOVED (the sales number lost its API connection).
-        logger.warn('Unknown webhook field', { field: change.field, event: change.value?.event })
+      try {
+        if (change.field === 'messages') {
+          await processMessagesChange(change)
+        } else if (change.field === 'smb_message_echoes' || change.field === 'history') {
+          // Coexistence-only fields: they only ever exist for the sales number.
+          if (whichNumber(change) === 'SALES') await storeSalesMessages(change)
+          else logger.warn('WhatsApp coexistence field from a number that is not the sales one; ignored', fieldInfo(change))
+        } else if (change.field === 'message_template_status_update') {
+          await handleTemplateStatusUpdate(change.value)
+        } else {
+          // account_update carries PARTNER_REMOVED (the sales number lost its API connection).
+          logger.warn('Unknown webhook field', { field: change.field, event: change.value?.event })
+        }
+      } catch (err) {
+        failures.push(err)
       }
     }
   }
+  if (failures.length) throw failures[0]
 }
 
 async function processMessagesChange(change: CloudApiChange) {
   const statuses = change.value.statuses ?? []
+  const failures: unknown[] = []
   for (const s of statuses) {
-    logger.info('WhatsApp status event', { wamid: s.id, status: s.status })
-    // v1: log only, do not persist. Per spec §Status events.
-    // Tarjetas de regalo (1b S3, Q2/Q103): Meta no pudo entregar ESE mensaje ⇒ la tarjeta pasa a «No se entregó». Si truena,
-    // el error sube y el controlador responde 500: Meta reintenta y el CAS lo vuelve idempotente.
-    if (s.status === 'failed') await marcarEntregaFallidaPorMensaje(s.id)
+    try {
+      logger.info('WhatsApp status event', { wamid: s.id, status: s.status })
+      // Tarjetas de regalo (1b S3, Q2/Q103): Meta no pudo entregar ESE mensaje ⇒ la tarjeta pasa a «No se entregó». Si truena,
+      // el error sube y el controlador responde 500: Meta reintenta y el CAS lo vuelve idempotente.
+      if (s.status === 'failed') {
+        const results = await Promise.allSettled([
+          marcarEntregaFallidaPorMensaje(s.id),
+          recordSupportDeliveryFailure(s.id, change.value.metadata?.phone_number_id ?? ''),
+        ])
+        for (const result of results) if (result.status === 'rejected') failures.push(result.reason)
+      }
+    } catch (err) {
+      failures.push(err)
+    }
   }
 
   const messages = change.value.messages ?? []
-  if (!messages.length) return
+  if (!messages.length) {
+    if (failures.length) throw failures[0]
+    return
+  }
   const number = whichNumber(change)
-  if (number === 'SALES') return storeSalesMessages(change)
+  if (number === 'SALES') {
+    await storeSalesMessages(change)
+    if (failures.length) throw failures[0]
+    return
+  }
   if (number === 'OTHER') {
-    // Fail closed: only the central number ever auto-replies.
-    logger.warn('WhatsApp messages for a number that is neither central nor sales; not answered', fieldInfo(change))
+    // Fail closed: only the central and the support numbers ever auto-reply.
+    logger.warn('WhatsApp messages for a number that is neither central, sales nor support; not answered', fieldInfo(change))
+    if (failures.length) throw failures[0]
     return
   }
   for (const msg of messages) {
-    await processInboundMessage(msg)
+    try {
+      const receiverId = change.value.metadata!.phone_number_id!
+      if (number === 'SUPPORT') await processSupportMessage(msg, receiverId)
+      else await processInboundMessage(msg, receiverId)
+    } catch (err) {
+      failures.push(err)
+    }
   }
+  if (failures.length) throw failures[0]
 }
 
 // Which of OUR numbers a change belongs to, by the id Meta stamps on every delivery. Sales is checked first: if both env
-// vars ever hold the same id, the central goes quiet instead of auto-replying to a prospect.
-function whichNumber(change: CloudApiChange): 'SALES' | 'CENTRAL' | 'OTHER' {
+// vars ever hold the same id, the central goes quiet instead of auto-replying to a prospect. T-F14 (ruling T-P1): the support
+// has its own number; supportPhoneNumberId() is null when it is unset or equal to the central or sales one (support off).
+function whichNumber(change: CloudApiChange): 'SALES' | 'CENTRAL' | 'SUPPORT' | 'OTHER' {
   const id = change.value?.metadata?.phone_number_id
   if (!id) return 'OTHER'
   if (id === process.env.WHATSAPP_SALES_PHONE_NUMBER_ID) return 'SALES'
+  if (id === supportPhoneNumberId()) return 'SUPPORT'
   if (id === process.env.WHATSAPP_PHONE_NUMBER_ID) return 'CENTRAL'
   return 'OTHER'
 }
@@ -179,7 +215,48 @@ async function storeSalesMessages(change: CloudApiChange): Promise<void> {
   logger.info('WhatsApp sales messages stored', { field: change.field, count: rows.length })
 }
 
-async function processInboundMessage(msg: CloudApiInboundMessage): Promise<void> {
+// T-F14 (ruling T-P1): the support number only ever reaches the support router, and its raw text is never stored. Since T-F15
+// the router never answers 'LEGACY' to a person's message on this number (a relay operator, a non-text message, ACTIVAR or a
+// relay quote are support messages here). This fallback is only for a sender that is not a phone, or an event already stored
+// under another route: recorded as ignored, never handed to the relay, whose replies would leave from the central number.
+async function processSupportMessage(msg: CloudApiInboundMessage, receiverId: string): Promise<void> {
+  if (typeof msg.id !== 'string' || typeof msg.from !== 'string' || typeof msg.type !== 'string') return
+  const phone = canonicalPhoneE164(msg.from)
+  const routed = phone
+    ? await tryRouteSupport({
+        receiverId,
+        wamid: msg.id,
+        phone,
+        type: msg.type,
+        body: typeof msg.text?.body === 'string' ? msg.text.body : '',
+        timestamp: typeof msg.timestamp === 'string' ? msg.timestamp : '',
+        ...(typeof msg.context?.id === 'string' ? { contextId: msg.context.id } : {}),
+      })
+    : 'LEGACY'
+  if (routed !== 'LEGACY') return
+  const now = new Date()
+  const ignored = {
+    routedAs: 'SUPPORT_IGNORED' as const,
+    processedAt: now,
+    supportTombstoneUntil: new Date(now.getTime() + 90 * 86400_000),
+  }
+  // An event already stored keeps what it stored (a retry, or an old route): only a new one is written.
+  await prisma.whatsappInboundEvent.upsert({
+    where: { wamid: msg.id },
+    update: {},
+    create: {
+      wamid: msg.id,
+      receiverId,
+      fromPhone: phone ?? '',
+      messageType: msg.type,
+      rawBody: { id: msg.id, type: msg.type },
+      ...ignored,
+    },
+  })
+}
+
+async function processInboundMessage(msg: CloudApiInboundMessage, receiverId: string): Promise<void> {
+  if (typeof msg.id !== 'string' || typeof msg.from !== 'string' || typeof msg.type !== 'string') return
   const fromPhone = normalizePhoneE164(msg.from) || `+${msg.from}`
 
   // Idempotency: upsert by wamid (unique). If we've seen this wamid before,
@@ -189,6 +266,7 @@ async function processInboundMessage(msg: CloudApiInboundMessage): Promise<void>
     update: {},
     create: {
       wamid: msg.id,
+      receiverId,
       fromPhone,
       messageType: msg.type,
       rawBody: msg as unknown as object,

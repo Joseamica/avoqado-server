@@ -1,0 +1,1187 @@
+{
+  "version": 1,
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
+  "retired": {},
+  "guides": {
+    "android/ayuda/ver-version-de-la-app": {
+      "sha256": "f434941305f824772e4a91f2e37b91f73321b9e27dadf2fd1ba01c559cd1ad2e",
+      "requiredPermissions": []
+    },
+    "android/caja/abrir-y-cerrar-caja": {
+      "sha256": "7ee001e7af0e35757d4841dda89d6392b06babef23a3bbb92181dbffd786f81a",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "android/caja/faltante-o-sobrante-del-corte": {
+      "sha256": "364c86f739930cdf8229704e80eec9cce5865269a56b9c1071cf804891882a23",
+      "requiredPermissions": [
+        "payments:read"
+      ]
+    },
+    "android/caja/registrar-ingreso-de-efectivo": {
+      "sha256": "af1c997b5bef5d418af9824752e367bb77de07daa5dc67f9142fe3a4a86c35f0",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "android/clientes/agregar-cliente-a-la-venta": {
+      "sha256": "5820fc9384eb1d8c1ccbc440c2d669cf8f568bbac5a67b4232c5f83e5f4f4398",
+      "requiredPermissions": [
+        "customers:read"
+      ]
+    },
+    "android/clientes/crear-cliente": {
+      "sha256": "9ef36472172594513658cdb06d9db0e763687e2cdc7ee0738d295995f3eb3b03",
+      "requiredPermissions": [
+        "customers:create"
+      ]
+    },
+    "android/clientes/editar-cliente": {
+      "sha256": "ca2024f19a135e9d44507e01e4c25fbf64c05424b78d96f1cf8ee70f436e5548",
+      "requiredPermissions": [
+        "customers:read",
+        "customers:update"
+      ]
+    },
+    "android/cobro/agregar-propina": {
+      "sha256": "efa768d7ffd2b218a9b331af758905d0e583f4df5b39ec9aedf7dc0171753a9b",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "android/cobro/cancelar-cobro-en-la-terminal": {
+      "sha256": "75b3f53bc9ef691df21f278a8836bbdea462dca2646b1e2e8d16e7f8ada54747",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "android/cobro/cobrar-con-terminal": {
+      "sha256": "24946f3aa72e6082c6756352e6c821497ba0b0611a3dc61f11a14c722be713ad",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "android/cobro/cobrar-en-efectivo": {
+      "sha256": "c42700b35da4ef92b6001a64c96202950063bd8ba2bdd2690b40c7be1293b8e3",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "android/cobro/cobrar-sin-internet": {
+      "sha256": "19fb67aad6d41144a58aabab2f3cdf4787e51e17488790a57478f4c8e43d87ba",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "android/cobro/dar-descuento-o-cortesia": {
+      "sha256": "59f9a02a6427f612a037fe6617d8db8ee737175f0cfcbe6da645523039e5d459",
+      "requiredPermissions": []
+    },
+    "android/cobro/dividir-la-cuenta": {
+      "sha256": "b9f84d09c5c3582121b83affe34d568f13a4d9081e5f48b213fc8d2e2732d196",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "android/impresoras/agregar-y-probar-impresora": {
+      "sha256": "32ffddb1d3dfd09b9674355b62c861eedbed8498d083f99176ac7873b99bb80c",
+      "requiredPermissions": []
+    },
+    "android/impresoras/la-comanda-no-sale": {
+      "sha256": "96711a8277aea282ab50b53be4c0eec45004073e250287083251a5512ceafa9d",
+      "requiredPermissions": []
+    },
+    "android/inventario/contar-existencia": {
+      "sha256": "12d4f7bc2e3d8d4698d399c2f8fb12ba960396db1f51c0cdfd531ecb5c8b0a3f",
+      "requiredPermissions": [
+        "inventory:read",
+        "inventory:create",
+        "inventory:update",
+        "inventory:adjust"
+      ],
+      "featureCode": "INVENTORY_TRACKING",
+      "gateKind": "FEATURE"
+    },
+    "android/inventario/registrar-merma": {
+      "sha256": "cdcf99aa316fe54f0458fddb22496feb41e3a7271cbddfbdde12bc3635e61906",
+      "requiredPermissions": [
+        "inventory:log-waste"
+      ]
+    },
+    "android/lealtad/ajustar-sellos": {
+      "sha256": "33a087ff060d7bdd3b5cc749ff188b9495f3a1a9104fc0b9caf352712dea614c",
+      "requiredPermissions": [
+        "customers:read",
+        "loyalty:read",
+        "loyalty:adjust"
+      ],
+      "featureCode": "LOYALTY_PROGRAM",
+      "gateKind": "FEATURE"
+    },
+    "android/lealtad/sello-que-no-se-sumo": {
+      "sha256": "d9866f45bb449cd7bab46039d18dd1d52f3b227cc9da61286828eeaf4c6da893",
+      "requiredPermissions": [],
+      "featureCode": "LOYALTY_PROGRAM",
+      "gateKind": "FEATURE"
+    },
+    "android/mesas/abrir-mesa-y-ordenar": {
+      "sha256": "d355ae4ef462954b705c957979b2194ffbe0c506a9d604f74d8cad2e13f4f6b3",
+      "requiredPermissions": [
+        "tables:read",
+        "menu:read",
+        "orders:create"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
+    "android/mesas/mover-o-unir-cuentas": {
+      "sha256": "89889d14504557cb01b7f4865f1e1ea3bcfa97fb360b33b49beca6f8966c9485",
+      "requiredPermissions": [
+        "tables:read"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
+    "android/ordenes/agregar-productos-a-la-venta": {
+      "sha256": "e131e5b35fbeffaa10f275182d6a73b8c6341c295149f049bb5cf2f4c128ae11",
+      "requiredPermissions": [
+        "menu:read"
+      ]
+    },
+    "android/ordenes/cambiar-o-quitar-articulos-del-carrito": {
+      "sha256": "301832543a7b7d44878fd6a84cad2439de3163c7c4184c1dae6516623da039ef",
+      "requiredPermissions": []
+    },
+    "android/personal/cambiar-de-usuario": {
+      "sha256": "18f31fab17d3f205b28b5bd573f945a981149b10515fba7d7eb07210bbce272e",
+      "requiredPermissions": []
+    },
+    "android/personal/checar-entrada-y-salida": {
+      "sha256": "4037a2d4222d6cb88a703d792c0f9bd0bfded1e1c33baac4bf773308c7ba0e93",
+      "requiredPermissions": []
+    },
+    "android/recibos/imprimir-y-reimprimir-recibo": {
+      "sha256": "db9da4142270a80edd215409650f459e5c21fda33e76d87df05d35ca4703f1f9",
+      "requiredPermissions": []
+    },
+    "android/reembolsos/hacer-cambio": {
+      "sha256": "966ceb48147856b92d07e6ea55401da515c1cd8c49966cb6e26f2cecb25bc92a",
+      "requiredPermissions": [
+        "payments:refund"
+      ]
+    },
+    "android/reembolsos/reembolsar-venta": {
+      "sha256": "c71f28c26fb75f9ebfba43d79828f98746bcc45d13413da3fd94ecf4dfeac652",
+      "requiredPermissions": [
+        "payments:refund"
+      ]
+    },
+    "android/reservas/atender-una-cita": {
+      "sha256": "833cb924e0e21f05e9c0f0824ac8df45b905aa59f4116b0e8a492306828c9edf",
+      "requiredPermissions": [
+        "reservations:read",
+        "reservations:update"
+      ],
+      "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "android/reservas/cancelar-o-reagendar-cita": {
+      "sha256": "c1496022b6f63e1221b83f61981722c4d457e566abbe9a81d844cbe9df1192f0",
+      "requiredPermissions": [
+        "reservations:read"
+      ],
+      "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "android/reservas/crear-cita": {
+      "sha256": "641c870ef224366baeadd3adad807d68214217bd1f5cc3ab3c58c23f596caef6",
+      "requiredPermissions": [
+        "reservations:read",
+        "reservations:create",
+        "customers:read",
+        "menu:read"
+      ],
+      "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "android/reservas/lista-de-espera": {
+      "sha256": "91c7849cf3a85ee7db8a7c45a873e583c3d61a7c7808eb5793558a5d4292399e",
+      "requiredPermissions": [
+        "reservations:read"
+      ],
+      "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo": {
+      "sha256": "b284e4d1f87b516e4e533bd00c9f8561b0a00247ba7615921a8ce129712da854",
+      "requiredPermissions": []
+    },
+    "dashboard/caja/corregir-conteo-de-caja": {
+      "sha256": "203313c7166ca4363b38cefaa8fbcf9bfd2c7a175851bb7c844f8063f2c09ee2",
+      "requiredPermissions": [
+        "shifts:update"
+      ]
+    },
+    "dashboard/clientes/agregar-o-editar-cliente": {
+      "sha256": "805f55c8b6eef57dd89f1e9a629470c47ce9cbba4ae1cdd835c5ab8eba1c29a4",
+      "requiredPermissions": [
+        "customers:read"
+      ]
+    },
+    "dashboard/clientes/configurar-lealtad": {
+      "sha256": "51f91568579ff6892ab5ccceaa4424b0c0dcef9150613b58529cc42c1afb6f89",
+      "requiredPermissions": [
+        "loyalty:update"
+      ],
+      "featureCode": "LOYALTY_PROGRAM",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/clientes/configurar-promociones": {
+      "sha256": "90334b35502245e1dbe999c7cdc346e9eb3a553e76c66c568e662d2f1f6a125e",
+      "requiredPermissions": [
+        "discounts:create"
+      ],
+      "featureCode": "PROMOTIONS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/clientes/configurar-puntos-de-lealtad": {
+      "sha256": "8898c6e359894a0b751372622539b0f92728faf765e7f4034d23321f9ab28207",
+      "requiredPermissions": [
+        "loyalty:read",
+        "loyalty:update"
+      ],
+      "featureCode": "LOYALTY_PROGRAM",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/clientes/configurar-tarjeta-de-sellos": {
+      "sha256": "8794c107aa602771671cb3beae20910eef569b4470bd56b5dadd059e09a8fb0c",
+      "requiredPermissions": [
+        "loyalty:read",
+        "loyalty:update"
+      ],
+      "featureCode": "LOYALTY_PROGRAM",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/clientes/crear-o-editar-grupo-de-clientes": {
+      "sha256": "7455ba68de4b9db8a5223ae400038627a62d3b3ec0e9d2ee002f881819937906",
+      "requiredPermissions": [
+        "customers:read",
+        "customer-groups:read"
+      ]
+    },
+    "dashboard/clientes/gestionar-clientes": {
+      "sha256": "09c0eb743c793cc82735f6911f7998866d560b485334e7a61880ad737fb06333",
+      "requiredPermissions": [
+        "customers:read"
+      ]
+    },
+    "dashboard/clientes/revisar-resenas": {
+      "sha256": "7762bdfbfeaca71b9df08c3d34b5e3606dbf8d66133fb84c4a82b09a84855a00",
+      "requiredPermissions": [
+        "reviews:read"
+      ]
+    },
+    "dashboard/clientes/ver-o-ajustar-puntos-de-un-cliente": {
+      "sha256": "3de46489e0b620f269026e91ee04271329ea8315c69a65a0652cdc63b495a58d",
+      "requiredPermissions": [
+        "customers:read"
+      ],
+      "featureCode": "LOYALTY_PROGRAM",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/configuracion/asignar-permisos-roles": {
+      "sha256": "54c232bef8f47bbc4181776a8db99fb97a418b1a9b9fda7dc4dfae3191c408ef",
+      "requiredPermissions": [
+        "settings:manage"
+      ]
+    },
+    "dashboard/configuracion/comprar-addons-suscripciones": {
+      "sha256": "536cf4cd869beb14c8a2b3591530c091b07c656ea409d9d310c75b4494c3e2fe",
+      "requiredPermissions": [
+        "billing:read"
+      ]
+    },
+    "dashboard/configuracion/conectar-avoqado-con-claude-o-chatgpt": {
+      "sha256": "c9c05027b7012881f052feabc29350c0cf44657c601fc5d8ed0683063d3108a7",
+      "requiredPermissions": []
+    },
+    "dashboard/configuracion/configurar-datos-local": {
+      "sha256": "23d4b8e5b1d39b1688c317faf2c3242436ccb416a392c7dbf91888e72df9abb2",
+      "requiredPermissions": [
+        "venues:update"
+      ]
+    },
+    "dashboard/configuracion/configurar-imagenes-contacto": {
+      "sha256": "df97272e0becfe125845ec30b86c6c6af653de7dc3f86d8a508532cd66a02512",
+      "requiredPermissions": [
+        "venues:update"
+      ]
+    },
+    "dashboard/configuracion/editar-venue-local": {
+      "sha256": "f3bcdac0c0e0b22e4a802f09444eaf96c8e88b54f589106aad7e6f979a73b83e",
+      "requiredPermissions": [
+        "venues:update"
+      ]
+    },
+    "dashboard/configuracion/gestionar-notificaciones": {
+      "sha256": "b944668c9d0a3437f26fd78c175311057625d96a9cf023fb8a21e5f82eaad137",
+      "requiredPermissions": []
+    },
+    "dashboard/configuracion/revisar-billing-detallado": {
+      "sha256": "056ea7e009a9f47b0f36523d65a40fa425abf012e37378d6a3f6a61bfbddf83b",
+      "requiredPermissions": [
+        "billing:read"
+      ]
+    },
+    "dashboard/cuentas-por-cobrar/liquidar-cuenta-por-cobrar": {
+      "sha256": "df1f7dbad7ca3e86b83d9e79d344815ce8f858f46c0c6d0fba32f8b9b3d24bf7",
+      "requiredPermissions": [
+        "tpv-reports:pay-later-aging",
+        "orders:update"
+      ]
+    },
+    "dashboard/cuentas-por-cobrar/liquidar-saldo-de-cliente": {
+      "sha256": "28db1637d7f891dc3215b81bd777dc473419a458266bfdf40998a142716ebdce",
+      "requiredPermissions": [
+        "customers:read",
+        "customers:settle-balance"
+      ]
+    },
+    "dashboard/equipo/configurar-comisiones": {
+      "sha256": "7c7b8f339ae6b7688f4bd20f2cef0ac97a5a4cd7677b874000d88856cedfbf82",
+      "requiredPermissions": [
+        "commissions:update"
+      ],
+      "featureCode": "COMMISSIONS",
+      "gateKind": "COMMISSIONS"
+    },
+    "dashboard/equipo/editar-persona": {
+      "sha256": "2e94b468a707b6e5756e22f6110ae8b380d930db101b26277c3ecaefe1f2774a",
+      "requiredPermissions": [
+        "teams:read",
+        "teams:update"
+      ]
+    },
+    "dashboard/equipo/gestionar-miembros": {
+      "sha256": "5b1fec626c48f4528c14ebbf00960aaffcb76fc23916dcd17e963353719a7f6c",
+      "requiredPermissions": [
+        "teams:invite"
+      ]
+    },
+    "dashboard/equipo/gestionar-turnos": {
+      "sha256": "d299d91c61983a4ea9cee0db845af42a698aea8f856189fb0ffb96c73bdf6f2d",
+      "requiredPermissions": [
+        "shifts:read"
+      ]
+    },
+    "dashboard/equipo/invitar-persona": {
+      "sha256": "d70d568722cdb510efb8411922a9bf5b4014fb1ac65fc426438a988f9914d27f",
+      "requiredPermissions": [
+        "teams:read",
+        "teams:invite"
+      ]
+    },
+    "dashboard/facturas/facturar-una-venta": {
+      "sha256": "5f0ca66fc43365e8f571e9c686fe1b727aa4c3753a861c1a7f24308f2392ed31",
+      "requiredPermissions": [
+        "cfdi:view",
+        "cfdi:issue",
+        "orders:read"
+      ],
+      "featureCode": "CFDI",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/facturas/reenviar-descargar-o-cancelar-factura": {
+      "sha256": "b129927b3800d276dbffa7b0aa46e5fb520173ecd8c0d08054eb8289c73ea87e",
+      "requiredPermissions": [
+        "cfdi:view"
+      ],
+      "featureCode": "CFDI",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/inicio/cambiar-contrasena": {
+      "sha256": "9782c0d164d54bc4a181afe38040496834960b80ce78491a675a0a4e437156a3",
+      "requiredPermissions": []
+    },
+    "dashboard/inicio/cambiar-sucursal": {
+      "sha256": "218ee6c4a72fa05688667f2104a692c57e6f5ac30e66a65dc2dd80b3c5e4f980",
+      "requiredPermissions": []
+    },
+    "dashboard/inicio/editar-perfil": {
+      "sha256": "ccb25c7085530606bb398a6f5ed18de45a69372a46bc765e053090397df3f205",
+      "requiredPermissions": []
+    },
+    "dashboard/inicio/entender-inicio-dashboard": {
+      "sha256": "5bde6138a9cf081369897781912c63ace27da38675a8ac716484cfe6668963a5",
+      "requiredPermissions": []
+    },
+    "dashboard/inicio/iniciar-sesion": {
+      "sha256": "752413a31f9742668de093ebec3be4f184b976474c0947ab44b5198db0b9d83a",
+      "requiredPermissions": []
+    },
+    "dashboard/inventario/agregar-ingrediente": {
+      "sha256": "31ef5337be21f421b6d63665dfe0fe37c3df8ec2bf2794c2801f53c4fb7aa47e",
+      "requiredPermissions": [
+        "inventory:read",
+        "inventory:create"
+      ],
+      "featureCode": "INVENTORY_TRACKING",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/inventario/crear-orden-de-compra": {
+      "sha256": "4cda0664f5c030cde9561829a591d9b8a1a16f8ef92e32b0aece6ff23e185143",
+      "requiredPermissions": [
+        "inventory:read",
+        "inventory:create"
+      ],
+      "featureCode": "INVENTORY_TRACKING",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/inventario/crear-receta": {
+      "sha256": "fe61a5f0698e3fe9b7783cff2b164a5c01abf7ea03b1ab67d92036d33a45513c",
+      "requiredPermissions": [
+        "inventory:read",
+        "inventory:create",
+        "menu:read"
+      ],
+      "featureCode": "INVENTORY_TRACKING",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/inventario/gestionar-inventario": {
+      "sha256": "4a6917a82ec85ce35da530da3d42fd3efdbc1e63b0232859058243fc207913f6",
+      "requiredPermissions": [
+        "inventory:adjust"
+      ],
+      "featureCode": "INVENTORY_TRACKING",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/inventario/gestionar-inventario-avanzado": {
+      "sha256": "a0ca272380d60bb9901852d94519b81f125b4d18c874c8128445965d74e0e126",
+      "requiredPermissions": [
+        "inventory:update"
+      ],
+      "featureCode": "INVENTORY_TRACKING",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/inventario/por-que-una-receta-no-descuenta": {
+      "sha256": "2bbfc9e419824e116160b1ca948b466433b9897ab6ef23e67e7e43a5f084f109",
+      "requiredPermissions": [
+        "menu:read"
+      ],
+      "featureCode": "INVENTORY_TRACKING",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/inventario/registrar-merma": {
+      "sha256": "15119d019a7c47b41d001f819ab370a674d77d42316ecf960a47e34ef906550a",
+      "requiredPermissions": [
+        "inventory:read",
+        "inventory:adjust"
+      ],
+      "featureCode": "INVENTORY_TRACKING",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/inventario/ver-existencias-y-movimientos": {
+      "sha256": "3f6aed75a931a85fbd98ed32e02c92314791e93dca7b14659e02601851daf732",
+      "requiredPermissions": [
+        "inventory:read"
+      ],
+      "featureCode": "INVENTORY_TRACKING",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/ligas-de-pago/cambiar-monto-de-liga-de-pago": {
+      "sha256": "371c6951d531f6e8bee1bbf030695144688dee38287a9e7656401e9a51635766",
+      "requiredPermissions": [
+        "payment-link:read",
+        "payment-link:create",
+        "payment-link:update"
+      ]
+    },
+    "dashboard/ligas-de-pago/pausar-o-archivar-liga-de-pago": {
+      "sha256": "c7a6ed5502c22c89cfd7a08211adb85c72a5b7c27e36d6d8ef5af0739ddfa7e7",
+      "requiredPermissions": [
+        "payment-link:read",
+        "payment-link:create",
+        "payment-link:update"
+      ]
+    },
+    "dashboard/menu/configurar-menu-avanzado": {
+      "sha256": "4ce6f2c5772a4c452899638278adf3120527a085add5fe24724a4d3ef25a8336",
+      "requiredPermissions": [
+        "menu:update"
+      ]
+    },
+    "dashboard/menu/crear-o-editar-categoria": {
+      "sha256": "dcbaf90e2eafcec650e13dde1a5f5d0ec19071d4726a97c94a5dc67d65f73732",
+      "requiredPermissions": [
+        "menu:read"
+      ]
+    },
+    "dashboard/menu/crear-o-editar-menu": {
+      "sha256": "fff24d735be11a9faa382371fdaa1b05b1ccd8bb6fee058257fad7136cd98a7e",
+      "requiredPermissions": [
+        "menu:read"
+      ]
+    },
+    "dashboard/menu/crear-o-editar-paquete-de-creditos": {
+      "sha256": "c056c1ee19eca277eb3269cdcbd183257357eb215d875d86c37dcbf4116fc025",
+      "requiredPermissions": [
+        "menu:read",
+        "creditPacks:read"
+      ]
+    },
+    "dashboard/menu/crear-o-editar-servicio": {
+      "sha256": "ef6935025b5bd1b487b680ebe5f355cea4559e889846bff3ef0875ba7715d292",
+      "requiredPermissions": [
+        "menu:read"
+      ]
+    },
+    "dashboard/menu/crear-producto": {
+      "sha256": "3d14d561a7b61bd8053ea74e3bff3036aea46fa8db8cc569150400d1ba1bb4d4",
+      "requiredPermissions": [
+        "menu:read",
+        "menu:create",
+        "inventory:update"
+      ],
+      "featureCode": "INVENTORY_TRACKING",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/menu/gestionar-productos": {
+      "sha256": "cb34d9459d260801215ae25cc26969c988d697904161d4c83f2bb613c92b05f5",
+      "requiredPermissions": [
+        "menu:create"
+      ]
+    },
+    "dashboard/pagos/enviar-recibo-por-correo": {
+      "sha256": "c68172d2e7fb7a60120cce1afabab69fccf5a730881fc8f5e4d2ce06f7d034bc",
+      "requiredPermissions": [
+        "payments:refund"
+      ]
+    },
+    "dashboard/pagos/registrar-pago-manual": {
+      "sha256": "3f030c4cd0335cf2b5895ca07d6b74ac293c0715c2f022e37152a362f10dfba9",
+      "requiredPermissions": [
+        "payment:create-manual"
+      ]
+    },
+    "dashboard/plan/cambiar-tarjeta-del-plan": {
+      "sha256": "df61878d21967bd9391d3d520e96b930ee53cc79360eb363a5fbc45dd22be78a",
+      "requiredPermissions": [
+        "billing:read",
+        "billing:subscriptions:read",
+        "billing:subscriptions:manage"
+      ]
+    },
+    "dashboard/plan/cancelar-o-reanudar-plan": {
+      "sha256": "73edddcc8439c1f8edd015671b7d37c8c79e8e35b220fbc66b64fd918abfb24f",
+      "requiredPermissions": [
+        "billing:read",
+        "billing:subscriptions:read",
+        "billing:subscriptions:manage"
+      ]
+    },
+    "dashboard/plan/contratar-un-plan": {
+      "sha256": "a78f02de72db49b15a766938f3fb957fef03a677215b5c11530dd81e75bf8ee3",
+      "requiredPermissions": [
+        "billing:read",
+        "billing:subscriptions:read",
+        "billing:subscriptions:manage"
+      ]
+    },
+    "dashboard/promociones/crear-o-editar-cupon": {
+      "sha256": "ed61d5b7944975f2e8993d6f474b3818aab3281c5e9f3d072834a4fb5306ea89",
+      "requiredPermissions": [
+        "coupons:read"
+      ],
+      "featureCode": "PROMOTIONS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/reembolsos/reembolsar-un-pago": {
+      "sha256": "ea0922991e17d617df4948c74096e294123fead07ff5f6cfa3138fefeae71659",
+      "requiredPermissions": [
+        "payments:refund"
+      ]
+    },
+    "dashboard/reportes/comparar-inicio-y-resumen-de-ventas": {
+      "sha256": "0be2d3bb8f62dc4091136df7a47506176815e827a6ee607231569786e62352e3",
+      "requiredPermissions": []
+    },
+    "dashboard/reportes/revisar-reportes-avanzados": {
+      "sha256": "acc6a3f582feb20c82f286bade4343e2a3a099373976fc1ea8ce782bad192f8a",
+      "requiredPermissions": [
+        "reports:read"
+      ]
+    },
+    "dashboard/reportes/revisar-reportes-ventas": {
+      "sha256": "ec72e16bd32531da65b6c86d1867ba6feb3fae70d6158d4d38ef5aa6873cc5b6",
+      "requiredPermissions": [
+        "reports:read"
+      ]
+    },
+    "dashboard/reportes/ver-analitica": {
+      "sha256": "321a348cf5c0232655897b34186ad71300e6dcbf7d6e7da16f3037e7a67391c3",
+      "requiredPermissions": [
+        "reports:read"
+      ]
+    },
+    "dashboard/reportes/ver-cuando-cae-el-dinero": {
+      "sha256": "086e666dc561454df7bbbeb3cc80c64dc725cc0fbeeed40ac8f365eaede482f9",
+      "requiredPermissions": [
+        "settlements:read"
+      ],
+      "featureCode": "ADVANCED_REPORTS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/reportes/ver-reembolsos": {
+      "sha256": "242897ee147254b3512cb565b93ce3dc95e11a062279aa7ccfe9da38e1c58731",
+      "requiredPermissions": [
+        "reports:read"
+      ],
+      "featureCode": "ADVANCED_REPORTS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/reportes/ver-saldo-disponible": {
+      "sha256": "5faebf99873850206f5485a9c71bfce1781dd66490b47cfa6676484d564f1dd6",
+      "requiredPermissions": [
+        "settlements:read"
+      ],
+      "featureCode": "ADVANCED_REPORTS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/reservaciones/agregar-a-lista-de-espera": {
+      "sha256": "5f4e0d425177db67bf0728a21607d59d9c8227a14bd1c80242e68cbf8f74596c",
+      "requiredPermissions": [
+        "reservations:read"
+      ],
+      "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/reservaciones/configurar-reservaciones-avanzadas": {
+      "sha256": "c8843e494cd630227a54eebc1d50dd9c15aaa5577bc0f653820889c65c8973b6",
+      "requiredPermissions": [
+        "reservations:update"
+      ],
+      "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/reservaciones/confirmar-o-cancelar-reservacion": {
+      "sha256": "cf7d2a574f05cbb8028370a3581bfd2c3a1cc608e7ac7c4fafb133e2f66da7bf",
+      "requiredPermissions": [
+        "reservations:read"
+      ],
+      "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/reservaciones/crear-cita": {
+      "sha256": "d922bf2b5fb19c4d32740b6143afcb569da66f0727d700a628ceeab9e9253a1f",
+      "requiredPermissions": [
+        "reservations:read",
+        "reservations:create"
+      ],
+      "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/reservaciones/gestionar-reservaciones": {
+      "sha256": "6432101d642ffa756b7226cb0fecfbc288b722ab0fc52e338c4b76863b259d2b",
+      "requiredPermissions": [
+        "reservations:read"
+      ],
+      "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/reservaciones/por-que-no-salen-horarios-en-linea": {
+      "sha256": "88d586185dabaa79dc646421ac67ca5d05691dcf37eb67c75d2e1bc1f67e5011",
+      "requiredPermissions": [
+        "reservations:read"
+      ],
+      "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo": {
+      "sha256": "ec648a9b2fbd0a3175aa91c475ffebf4caeed8968c6aba80ae58662dbd4438dc",
+      "requiredPermissions": [
+        "giftCards:read",
+        "giftCards:manage"
+      ]
+    },
+    "dashboard/terminales/gestionar-terminales": {
+      "sha256": "cb878c468e71b6367796e02cd880adcf5bc8843d660c570490ff6cc24db7f1be",
+      "requiredPermissions": [
+        "tpv:read"
+      ]
+    },
+    "dashboard/turnos/editar-o-eliminar-turno": {
+      "sha256": "ee86dd4f7cfeb3d5a0935bd6513d28efa178ab480ceb6445cd5667182546ef95",
+      "requiredPermissions": [
+        "shifts:read"
+      ]
+    },
+    "dashboard/turnos/ver-turnos-de-caja": {
+      "sha256": "52daaf4bc5af31eb3a9a8847cba964b90cfc963105e200943cd8de04d5b77f0c",
+      "requiredPermissions": [
+        "shifts:read"
+      ]
+    },
+    "dashboard/ventas/agotados-por-inventario-en-delivery": {
+      "sha256": "6c182fe40687a1853728ea3a9cf4e1c941b5166f9de8331019de8f30e7cf55ec",
+      "requiredPermissions": [],
+      "featureCode": "DELIVERY_CHANNELS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/ventas/conectar-rappi": {
+      "sha256": "c4cde5c2a84a21af276aae8db524ad91e6530ba196d4dfd0fd380ad36f60d5f2",
+      "requiredPermissions": [],
+      "featureCode": "DELIVERY_CHANNELS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/ventas/crear-liga-pago": {
+      "sha256": "0b7b799a8defeb2039bed73fc0d6e304fa3da95e1b972c07464aab160f0353e9",
+      "requiredPermissions": [
+        "payment-link:create"
+      ]
+    },
+    "dashboard/ventas/gestionar-cobros-avanzados": {
+      "sha256": "e48ef5866353a37f7da007541dee043af256d553c8713af38fc335cbf656da36",
+      "requiredPermissions": [
+        "payments:routing-read"
+      ]
+    },
+    "dashboard/ventas/horario-margen-y-modo-de-aceptacion": {
+      "sha256": "25625c386877970fea95ace5586b49998c27a751409673c7b234175976ba609d",
+      "requiredPermissions": [],
+      "featureCode": "DELIVERY_CHANNELS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/ventas/problemas-con-pedidos-de-delivery": {
+      "sha256": "a1bb100156e86cc79a220c862fad63c76970d834931b197abc13f2870629ab6e",
+      "requiredPermissions": [],
+      "featureCode": "DELIVERY_CHANNELS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/ventas/productos-en-delivery": {
+      "sha256": "4f25c15828cfc1278c2c7616b48bbee9df29a576f2f0dee81f21e0a432b38017",
+      "requiredPermissions": [],
+      "featureCode": "DELIVERY_CHANNELS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/ventas/solicitar-activacion-uber-eats": {
+      "sha256": "e40f5151fd9c415777f88ae1607e67a93a29d25549eb2d4c1b86ca6bb3b7720f",
+      "requiredPermissions": [],
+      "featureCode": "DELIVERY_CHANNELS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/ventas/ver-pagos": {
+      "sha256": "e379ee9a91dedf79c7c998c9cec582f1ce432d2c02e6cfa534d4263d1fc28846",
+      "requiredPermissions": [
+        "payments:read"
+      ]
+    },
+    "dashboard/ventas/ver-pedidos": {
+      "sha256": "3676c14a43acb1ddc91fcba04cc133646bc0e1d8f8e3af4a901773ac33ac22d4",
+      "requiredPermissions": [
+        "orders:read"
+      ]
+    },
+    "general/facturacion-y-contabilidad": {
+      "sha256": "63f206251264cdde453c70611019148e1f71d22336272bacf69ffbf7a6cc22fd",
+      "requiredPermissions": [],
+      "featureCode": "CFDI",
+      "gateKind": "FEATURE"
+    },
+    "general/overview": {
+      "sha256": "0801f8bbaf76634e29482a43f012e177fbd7b8fa399a90392a92ff98ca6ced16",
+      "requiredPermissions": []
+    },
+    "tpv/asistencia/registrar-entrada-y-salida": {
+      "sha256": "e01aaee8737027b568e964d66591ae01511c5d46d9e18716eedabe4dc52896ee",
+      "requiredPermissions": []
+    },
+    "tpv/ayuda/actualizar-la-app-pax": {
+      "sha256": "8ab9d6241821ad58d6ae2805ca0850e5711c67bf093e9b7f8d77f87a13befa47",
+      "requiredPermissions": []
+    },
+    "tpv/ayuda/reiniciar-la-app": {
+      "sha256": "aa0386128a95e73a958e5e8558e82a15ad27a4647a7a72746c479305251eaab1",
+      "requiredPermissions": []
+    },
+    "tpv/ayuda/reportar-un-problema": {
+      "sha256": "f4cb664d59a2c36d7187668eecda34dd715ee40cc9ff84838349cfdbdf6184f2",
+      "requiredPermissions": []
+    },
+    "tpv/ayuda/ver-version-de-la-app": {
+      "sha256": "ac09feee435f43294a0fdae74b6cd124c7677f6f64bcae6978cea9aff9479d0f",
+      "requiredPermissions": []
+    },
+    "tpv/caja/abrir-y-cerrar-caja": {
+      "sha256": "6bd7259bf64033c1e62eb6b2f67f9be69bfab4bcf970fb85e7ed239df24ca25f",
+      "requiredPermissions": [
+        "tpv-shifts:create",
+        "tpv-shifts:close"
+      ]
+    },
+    "tpv/caja/abrir-y-cerrar-caja-anterior": {
+      "sha256": "2e63154887766c94815dbe422e297ce9cb9763f7f86fb239bed3e3fb57d8829d",
+      "requiredPermissions": [
+        "tpv-shifts:create",
+        "tpv-shifts:close"
+      ]
+    },
+    "tpv/cobro/agregar-propina": {
+      "sha256": "ba23b9af31f3545142410962332d766f167fa6a758b62fcdf597b28f53c96a27",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "tpv/cobro/cobrar-con-tarjeta-nexgo": {
+      "sha256": "d7709816542bad52cc0e53d4c7ef242580ebeedfd92441821b2154b5b88fc234",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "tpv/cobro/cobrar-con-tarjeta-pax": {
+      "sha256": "3ae768d879dbf43a7e10bb577efb5f1e6e9819d3b2bd70441ea958d97972654d",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "tpv/cobro/cobrar-en-efectivo": {
+      "sha256": "0c85db37566701ac5bf8fd62ccb84d61de5e0621b4455ee5d5410a76c920cc8d",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "tpv/cobro/cobrar-sin-internet": {
+      "sha256": "b1f19c04ce697cdf65babf3bcb1aed8e713b0b834b3f8b99fb67007399e2fef2",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "tpv/cobro/no-sale-la-propina": {
+      "sha256": "013db2168bb515b1e89f06afbd465efd234c3b390f43279bb989488f22f42694",
+      "requiredPermissions": [
+        "tpv-terminal:settings"
+      ]
+    },
+    "tpv/cobro/tarjeta-no-pasa-nexgo": {
+      "sha256": "cb18206c8587280c749703423d4f7dce755230072ac9c5436fb9e71c74751bc9",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "tpv/configuracion/activar-la-terminal": {
+      "sha256": "ec85c4e185dbd004a1cb3ea4d2227e60041acf0a640d9aaa8f4255f01c2c2ebc",
+      "requiredPermissions": []
+    },
+    "tpv/configuracion/actualizar-configuracion": {
+      "sha256": "d6990634f572779f0c4e25ca93768c87a51f0601360334f8b7d50eb98877c0f7",
+      "requiredPermissions": [
+        "tpv-terminal:settings"
+      ]
+    },
+    "tpv/mensajes/leer-mensajes": {
+      "sha256": "3238caead74328e145a001eebb04e4702018e50d0f2d2f247ed825c634af0e83",
+      "requiredPermissions": []
+    },
+    "tpv/mesas/abrir-mesa-y-enviar-ronda": {
+      "sha256": "33648e9b40cea00a8e66c16aad405de41450f89bf2b417ecc058931667f3b298",
+      "requiredPermissions": [
+        "tables:update",
+        "orders:create"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
+    "tpv/mesas/cancelar-cuenta": {
+      "sha256": "ad9ade28ca907c078a5510fe10f6e2df509162b02a0c41b6a006c8a8ae333ba9",
+      "requiredPermissions": [
+        "orders:cancel-unpaid"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
+    "tpv/mesas/cobrar-cuenta-de-mesa": {
+      "sha256": "ec44d955c2e740dad7554fc16e7f066bcf552144e1de1b7555bda5945716e71d",
+      "requiredPermissions": [
+        "payments:create"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
+    "tpv/mesas/fusionar-cuentas": {
+      "sha256": "dd240b10c9b22ae8f8a3c77994118964ce941fa95b6f36da5d633e809b18fc03",
+      "requiredPermissions": [
+        "orders:merge"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
+    "tpv/mesas/mover-mesa": {
+      "sha256": "462bdd7b796e05db373041251faf85a9050cbdd16e1c81802d3ccaee4a6a645c",
+      "requiredPermissions": [
+        "tables:update"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
+    "tpv/mesas/reasignar-mesero": {
+      "sha256": "3cb1593a77fb4ca92c02c4315a07a9530ac800c3cc89069ec97b15002bd079d0",
+      "requiredPermissions": [
+        "orders:update"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
+    "tpv/recibos/imprimir-y-reimprimir-recibo": {
+      "sha256": "570746088c124ca146349d21ef0ee57692c90714e1dc94703d98f4fb8f746d0a",
+      "requiredPermissions": [
+        "payments:read"
+      ]
+    },
+    "tpv/recibos/no-imprime-pax": {
+      "sha256": "58a279cd9f6b563fe8d55d306f21600c2069797789b95a45714a33581ecf6cc9",
+      "requiredPermissions": []
+    },
+    "tpv/reembolsos/reembolsar-cobro-nexgo": {
+      "sha256": "ffaaeeeca5c49c3c86f643ce0093bc6abeb4ef3f5dc049809dd5a563054805f8",
+      "requiredPermissions": [
+        "payments:refund"
+      ]
+    },
+    "tpv/reportes/ver-reporte-del-dia": {
+      "sha256": "12998f2cdd0a151d4cbdf747a05d1df4909decfd61115078e13be15f4b2e6045",
+      "requiredPermissions": [
+        "shifts:read"
+      ]
+    },
+    "tpv/reportes/ver-reportes-de-otros-dias": {
+      "sha256": "cf7eaf53c11b25bf1f510f35cfa28601e99609413d3ca5f8841d31ffd4a1d609",
+      "requiredPermissions": [
+        "shifts:read"
+      ]
+    },
+    "tpv/sesion/entrar-y-cambiar-usuario": {
+      "sha256": "cad741cc19e9abaac9d5b415a82fc4c6af7bd348d38955969278907277ff110d",
+      "requiredPermissions": []
+    },
+    "tpv/sesion/pin-incorrecto": {
+      "sha256": "8d2f42351a4a37602edf12c61bef304dedcd66a3e587338c8cca7e8f8be0ae1c",
+      "requiredPermissions": []
+    },
+    "tpv/ventas/vender-con-cobrar": {
+      "sha256": "526c483925e83b985937421c78469ca3e40b7ae3f0e0911e0889728fa50ca5cb",
+      "requiredPermissions": []
+    },
+    "windows/ayuda/ver-version-de-la-app": {
+      "sha256": "dea954bb10492d99ce1a54d8836a27db48090ea53999cc2e371e4fbd634a06c4",
+      "requiredPermissions": []
+    },
+    "windows/caja/abrir-y-cerrar-caja": {
+      "sha256": "58426ac40620c3d1a2426a6b3016ee39998fb159b16e3bba8cf95fd3c0877356",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "windows/caja/faltante-o-sobrante-del-corte": {
+      "sha256": "5c1240f76fddd967e601ec2212067b599956712ce60aea0b65ce0dd36f9cbbf6",
+      "requiredPermissions": [
+        "payments:read"
+      ]
+    },
+    "windows/caja/registrar-ingreso-de-efectivo": {
+      "sha256": "1f0a617d5bd5c0e8e704b9fb1614f4fa170ab93097b0ec1814dda28873b5b071",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "windows/clientes/agregar-cliente-a-la-venta": {
+      "sha256": "0b1cc2afb0eb69295f3ba214de6e4e6422d9125b93a0899bc5307d280b866c83",
+      "requiredPermissions": [
+        "customers:read"
+      ]
+    },
+    "windows/clientes/crear-cliente": {
+      "sha256": "b557684892a42703a6b84ab944180bdb08457cc3c71f659df67c4d92ce2ed125",
+      "requiredPermissions": [
+        "customers:create"
+      ]
+    },
+    "windows/clientes/editar-cliente": {
+      "sha256": "6f0805df630f05ca59d2c7fe390269e275df3c5f81c50ca338f23793a342cffc",
+      "requiredPermissions": [
+        "customers:read",
+        "customers:update"
+      ]
+    },
+    "windows/cobro/agregar-propina": {
+      "sha256": "6dada947d5dae35607fb16b22c4598ec5ab34620284e4448381f872d875aa880",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "windows/cobro/cancelar-cobro-en-la-terminal": {
+      "sha256": "8f0f5ec701cdeffd08deeab7dcb7e44ed5d41e758ce4ea4b55f21a10747f6048",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "windows/cobro/cobrar-con-el-teclado": {
+      "sha256": "8c2ade6890af31d0079efdb5e713955fcf6fbfb773c374e0fb1ec4ddb778d11a",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "windows/cobro/cobrar-con-terminal": {
+      "sha256": "cf1b69e3a7a648d7f717b54d39d3f8a3151cdbb6eb2e3bb92047a33736fa4c41",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "windows/cobro/cobrar-en-efectivo": {
+      "sha256": "dcbe589a30868a7063735f0a2b24b5d8953d665aa2b3826d96e7cd8489b7770a",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "windows/cobro/dar-descuento-o-cortesia": {
+      "sha256": "5337430e6df08f0d178ce489a683a5484e386ff09e3987031a590fb00e55a83c",
+      "requiredPermissions": []
+    },
+    "windows/cobro/dividir-la-cuenta": {
+      "sha256": "fdf7c5be6b214894f23d933f04d996d2b79b2728f82c9ec7a840c0c5d6910dd1",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "windows/impresoras/agregar-y-probar-impresora": {
+      "sha256": "899913ff39052d8a88ca899843707c982efb86c16b03aca2aacc519dcbcdaf03",
+      "requiredPermissions": []
+    },
+    "windows/impresoras/la-comanda-no-sale": {
+      "sha256": "267ba4739f4f3bc71ab0e8c1081e0b5c8ace245f85874cb18a0392363d3ffb14",
+      "requiredPermissions": []
+    },
+    "windows/inventario/contar-existencia": {
+      "sha256": "e8a0514755e479403b6a0e541424d6fd9f0a66183aa5491aaa323b55ad0e15b7",
+      "requiredPermissions": [
+        "inventory:read",
+        "inventory:create",
+        "inventory:update",
+        "inventory:adjust"
+      ],
+      "featureCode": "INVENTORY_TRACKING",
+      "gateKind": "FEATURE"
+    },
+    "windows/inventario/registrar-merma": {
+      "sha256": "215c105b904585a2d6fde1ff456005a4cf80b13047fa50db7f084befbcfab7ce",
+      "requiredPermissions": [
+        "inventory:log-waste"
+      ]
+    },
+    "windows/lealtad/ajustar-sellos": {
+      "sha256": "96fc1afb70a25ca52f4747e6e9b671fe5ea6474aaf89ebcadc415890327efc30",
+      "requiredPermissions": [
+        "customers:read",
+        "loyalty:read",
+        "loyalty:adjust"
+      ],
+      "featureCode": "LOYALTY_PROGRAM",
+      "gateKind": "FEATURE"
+    },
+    "windows/lealtad/sello-que-no-se-sumo": {
+      "sha256": "51c01e3e7a1fb7c28bf5de7cf113499dc062404826ef3def4297fda4d15ef6ef",
+      "requiredPermissions": [],
+      "featureCode": "LOYALTY_PROGRAM",
+      "gateKind": "FEATURE"
+    },
+    "windows/mesas/abrir-mesa-y-ordenar": {
+      "sha256": "48d8b65988206ac760d90993e5e32c1614b3bca812ed4d6bab16673d6bc3e72c",
+      "requiredPermissions": [
+        "orders:create"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
+    "windows/mesas/mover-o-unir-cuentas": {
+      "sha256": "5f67bcf89609fedc4643637712d13d8ffcae427214c1c7a6150ee5114c610d04",
+      "requiredPermissions": [
+        "tables:read"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
+    "windows/ordenes/agregar-productos-a-la-venta": {
+      "sha256": "6276f9a5e3f4745cbde2be969fc297ca1cd372a18a05a66cbccd464718c47247",
+      "requiredPermissions": [
+        "menu:read"
+      ]
+    },
+    "windows/ordenes/cambiar-o-quitar-articulos-del-carrito": {
+      "sha256": "a5f2aa22887350a58530495403fec0edf91ab424b40fd7d4f0711c201b93a982",
+      "requiredPermissions": []
+    },
+    "windows/personal/cambiar-de-usuario": {
+      "sha256": "9c70bad55e5bc23ce8902625c09d6edf7222c870211d7b54c5385791e33c177e",
+      "requiredPermissions": []
+    },
+    "windows/personal/checar-entrada-y-salida": {
+      "sha256": "78fc9e35cdd63e74f314177ab93ef440f6cf2c17fd82ee0abbb961ebba9e3339",
+      "requiredPermissions": []
+    },
+    "windows/recibos/imprimir-y-reimprimir-recibo": {
+      "sha256": "39b7ca8de443cd41a53dcc9535e1ce6588237b9bc4fa4979c4d990d2c533555d",
+      "requiredPermissions": []
+    },
+    "windows/reembolsos/hacer-cambio": {
+      "sha256": "a7b0c2fe144076ec7798bf2a57c58f08569a801bcda486412ac78fbc5cf29d52",
+      "requiredPermissions": [
+        "payments:refund"
+      ]
+    },
+    "windows/reembolsos/reembolsar-venta": {
+      "sha256": "f5e17447dd7cbeb9780f9d4943521ad28cfd6ae1b9f26dcd92411a0c1bf0f42f",
+      "requiredPermissions": [
+        "payments:refund"
+      ]
+    },
+    "windows/reservas/atender-una-cita": {
+      "sha256": "6ac58e6eef78366d8d5740cf50fdaab359027722309bd7815b7dc561ec752378",
+      "requiredPermissions": [
+        "reservations:update"
+      ],
+      "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "windows/reservas/cancelar-o-reagendar-cita": {
+      "sha256": "27a29676c92489b5ed7cc399dafadb1fe3b990292060123fbfab724513fc888a",
+      "requiredPermissions": [
+        "reservations:read"
+      ],
+      "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "windows/reservas/crear-cita": {
+      "sha256": "dc0882c10c36108d422ea8d88d49a1b917ab29863ee58c22c1d26e81b4e69510",
+      "requiredPermissions": [
+        "reservations:create",
+        "customers:read",
+        "menu:read"
+      ],
+      "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "windows/reservas/lista-de-espera": {
+      "sha256": "4b2592e0706a634de43eed81deb030d06bcfd295ed879be174d0880d96a4cb37",
+      "requiredPermissions": [
+        "reservations:read"
+      ],
+      "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "windows/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo": {
+      "sha256": "ac4165158e3457d6066635afad54a9f236c75ac90b6c9bad23bd0c068c9565df",
+      "requiredPermissions": []
+    }
+  }
+}

@@ -25,9 +25,8 @@ import { lineModifiersSql, lineRevenueAsChargedSql } from '../services/dashboard
 import { sqlImpuestoQueSeCobraAparte } from '../services/shared/orderBalance'
 import { sqlOrdenSinTarjetas } from '../services/giftCards/giftCardMarks'
 import { FRONTEND_URL } from '../config/env'
-import { fromZonedTime } from 'date-fns-tz'
 import { zonaValida } from '../utils/datetime'
-import { venueCivilDate, venueDayKey } from '../utils/venueDateKeys'
+import { firstInstantOfDay, venueCivilDate } from '../utils/venueDateKeys'
 import { scheduleJob } from '../observability/jobContext'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
@@ -462,25 +461,6 @@ export function nightlyReportWindows(
     // The email prints it with toLocaleDateString(…, { timeZone: venue }): the middle of the window is always inside its day.
     reportDate: new Date(Math.floor((reportDay.start.getTime() + reportDay.end.getTime()) / 2)),
   }
-}
-
-/**
- * The first instant (epoch ms) whose civil date in `tz` is `dayKey` (yyyy-mm-dd). `fromZonedTime` of a midnight that does
- * not exist lands on the day before, and of a repeated hour it picks either occurrence, so its answer is only a starting
- * point: if it is not the first instant of the day, binary-search the jump within ±12 h of it.
- */
-function firstInstantOfDay(dayKey: string, tz: string): number {
-  const guess = fromZonedTime(`${dayKey}T00:00:00.000`, tz).getTime()
-  const civil = (t: number) => venueDayKey(new Date(t), tz)
-  if (civil(guess) === dayKey && civil(guess - 1) < dayKey) return guess
-  let before = guess - 12 * 3_600_000 // civil(before) < dayKey
-  let from = guess + 12 * 3_600_000 // civil(from) >= dayKey
-  while (from - before > 1) {
-    const mid = Math.floor((before + from) / 2)
-    if (civil(mid) < dayKey) before = mid
-    else from = mid
-  }
-  return from
 }
 
 export type CategoryRow = { name: string; itemsSold: number | null; netSales: number }

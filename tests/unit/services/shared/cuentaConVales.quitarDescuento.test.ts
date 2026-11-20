@@ -30,6 +30,16 @@ describe('rechazarSiQuitaUnDescuentoDeVale (marca deValeV7)', () => {
     )
   })
 
+  it('🔴 D14 (Codex r2 #3 y #4): el aviso da la salida que de verdad existe, también para las apps viejas que enseñan «Quitar»', () => {
+    // Volver a leer el MISMO vale copia otra vez su descuento (areaTicketV7 ~1675): «ármala sin ese descuento» no lo corrige.
+    expect(MENSAJE_DESCUENTO_DE_VENTA_DE_VALES).not.toMatch(/vuelve a armarla sin ese descuento/)
+    // Cancelar el cobro de vales sólo se puede SIN pagos (cancelAreaTicketCheckout → CHECKOUT_HAS_PAYMENT); con pagos, reembolso.
+    expect(MENSAJE_DESCUENTO_DE_VENTA_DE_VALES).toMatch(/sin pagos/i)
+    expect(MENSAJE_DESCUENTO_DE_VENTA_DE_VALES).toMatch(/reembolso/i)
+    // El error que viene impreso en el vale se corrige con otro vale del área.
+    expect(MENSAJE_DESCUENTO_DE_VENTA_DE_VALES).toMatch(/vale nuevo|otro vale/i)
+  })
+
   it('regresión: la cortesía que la caja da después en una venta de vales (espejo SIN marca) se quita como siempre', () => {
     expect(() => rechazarSiQuitaUnDescuentoDeVale({ reparto: espejo, isComp: true, type: 'COMP', discountId: null } as any)).not.toThrow()
   })

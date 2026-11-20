@@ -345,6 +345,7 @@ export const ModifierGroupSchema = z.object({
   description: z.string().nullable().optional(),
   required: z.boolean().default(false),
   allowMultiple: z.boolean().default(false),
+  allowRepeat: z.boolean().default(false),
   minSelections: z.number().int().min(0).default(0),
   maxSelections: z.number().int().positive().nullable().optional(),
   displayOrder: z.number().int().min(0).default(0),
@@ -360,6 +361,7 @@ export const CreateModifierGroupSchema = z.object({
       description: z.string().optional().nullable(),
       required: z.boolean().optional(),
       allowMultiple: z.boolean().optional(),
+      allowRepeat: z.boolean().optional(),
       minSelections: z.number().int().min(0).optional(),
       maxSelections: z.number().int().positive().optional().nullable(),
       displayOrder: z.number().int().min(0).optional(),
@@ -400,6 +402,7 @@ export const UpdateModifierGroupSchema = z.object({
       description: z.string().nullable().optional(),
       required: z.boolean().optional(),
       allowMultiple: z.boolean().optional(),
+      allowRepeat: z.boolean().optional(),
       minSelections: z.number().int().min(0).optional(),
       maxSelections: z.number().int().min(1).nullable().optional(),
       displayOrder: z.number().int().min(0).optional(),
@@ -448,6 +451,14 @@ export const CreateModifierSchema = z.object({
     active: z.boolean().optional(),
     sku: ModifierSkuSchema,
     durationMin: z.number().int().min(0).max(480).nullable().optional(),
+    /** Veces que se puede elegir esta opción en un grupo que deja repetir (encargo a508f4). null = hasta el máximo del grupo. */
+    maxQuantity: z
+      .number({ invalid_type_error: 'El máximo de veces debe ser un número' })
+      .int('El máximo de veces debe ser un número entero')
+      .min(1, 'El máximo de veces debe ser al menos 1')
+      .max(99, 'El máximo de veces no puede pasar de 99')
+      .nullable()
+      .optional(),
     rawMaterialId: existingId('El ID de la materia prima no es válido').nullable().optional(),
     quantityPerUnit: z.number().positive('La cantidad debe ser mayor a cero').nullable().optional(),
     unit: z

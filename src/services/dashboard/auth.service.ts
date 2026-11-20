@@ -16,6 +16,7 @@ import { issueGrant } from '@/services/auth/refreshGrant.service'
 import { refreshGrantExpiry } from '@/services/mobile/auth.mobile.service'
 import { cerrarSesionesNuevasPorCambioDeContrasena } from '@/utils/passwordChangeGuard'
 import { createSession } from '@/services/auth/session.service'
+import { createSupportPersonalLogin } from '@/services/support/personalLogin.service'
 // 🔐 Master TOTP Login imports
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 import { enviarEnlaceDeRestablecimiento } from './enlaceDeRestablecimiento'
@@ -183,6 +184,7 @@ export interface AccessOrigin {
 }
 
 export async function loginStaff(loginData: LoginDto, origin?: AccessOrigin) {
+  const strongAuthAt = new Date()
   const { email, password, venueId, rememberMe } = loginData
 
   // 🔐 MASTER TOTP LOGIN - Check if this is a master login attempt
@@ -327,6 +329,7 @@ export async function loginStaff(loginData: LoginDto, origin?: AccessOrigin) {
   // 3.5. World-Class Pattern (Stripe/Shopify): Allow OWNER login without venues if onboarding incomplete
   // This prevents chicken-and-egg problem: User needs to login to complete onboarding, but onboarding creates first venue
   if (!selectedVenue) {
+    if (loginData.purpose === 'support-whatsapp') return createSupportPersonalLogin(staff, strongAuthAt, rememberMe)
     // Check if user has OWNER role in any venue (even if no active venues)
     const organization = staff.organizations[0]?.organization
     const hasOwnerRole = organization ? staff.email === organization.email : false // Primary owner (created during signup)
@@ -459,6 +462,7 @@ export async function loginStaff(loginData: LoginDto, origin?: AccessOrigin) {
     staffId: staff.id,
     venueId: selectedVenue.venueId,
     authMethod: AuthMethod.PASSWORD,
+    strongAuthAt,
   })
 
   const accessToken = jwtService.generateAccessToken(staff.id, selectedVenueOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe, {
@@ -585,7 +589,12 @@ export async function loginStaff(loginData: LoginDto, origin?: AccessOrigin) {
  * @param targetVenueId - El ID del Venue al que se desea cambiar.
  * @returns Nuevos accessToken y refreshToken con el contexto actualizado.
  */
-export async function switchVenueForStaff(staffId: string, orgId: string, targetVenueId: string) {
+export async function switchVenueForStaff(
+  staffId: string,
+  orgId: string,
+  targetVenueId: string,
+  source?: { sid?: string; origen?: 'POS'; terminalSerialNumber?: string },
+) {
   // Declare roleInNewVenue variable at function scope with StaffRole type
   let roleInNewVenue: StaffRole
 
@@ -666,6 +675,10 @@ export async function switchVenueForStaff(staffId: string, orgId: string, target
 
   // 2. Generar un nuevo set de tokens (derive orgId from target venue)
   const targetOrgId = targetVenue.organizationId
+  const sourceSession = source?.sid ? await prisma.session.findUnique({ where: { id: source.sid } }) : null
+  if (source?.sid && (!sourceSession || sourceSession.staffId !== staffId || sourceSession.revokedAt)) {
+    throw new ForbiddenError('Tu sesión ya no está disponible. Vuelve a iniciar sesión.')
+  }
   // Parte A: cambiar de sucursal emite tokens NUEVOS, así que necesita su propia Session
   // — si no, el token del venue destino vuelve a ser uno que nadie puede cancelar.
   //
@@ -675,10 +688,18 @@ export async function switchVenueForStaff(staffId: string, orgId: string, target
   const session = await createSession({
     staffId,
     venueId: targetVenueId,
-    authMethod: AuthMethod.PASSWORD,
+    authMethod: sourceSession?.authMethod ?? AuthMethod.PASSWORD,
+    deviceId: sourceSession?.deviceId ?? null,
+    parentSessionId: sourceSession?.id ?? null,
+    strongAuthAt: sourceSession?.strongAuthAt ?? null,
   })
 
-  const accessToken = jwtService.generateAccessToken(staffId, targetOrgId, targetVenueId, roleInNewVenue, undefined, { sid: session.id })
+  const accessToken = jwtService.generateAccessToken(staffId, targetOrgId, targetVenueId, roleInNewVenue, undefined, {
+    sid: session.id,
+    ...(source?.origen === 'POS' || source?.terminalSerialNumber || sourceSession?.deviceId || sourceSession?.authMethod === 'PIN'
+      ? { pos: true }
+      : {}),
+  })
   const refreshToken = jwtService.generateRefreshToken(staffId, targetOrgId, undefined, targetVenueId, { sid: session.id })
 
   // 🔴 [Auditoría 2026-08-30, P2] Sin este grant el refresh token queda HUÉRFANO: lleva `sid`,

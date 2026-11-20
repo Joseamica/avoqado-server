@@ -8,7 +8,8 @@
  * 1. Meta Business Manager account
  * 2. WhatsApp Business API configured
  * 3. Approved message templates in es_MX
- * 4. Environment variables: WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_ACCESS_TOKEN
+ * 4. Environment variables: WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_ACCESS_TOKEN (the support assistant sends from its own number:
+ *    SUPPORT_WHATSAPP_PHONE_NUMBER_ID and, optionally, SUPPORT_WHATSAPP_ACCESS_TOKEN; see src/config/supportWhatsapp.ts)
  *
  * Templates:
  * - receipt_link: Receipt link (3 params: venueName, totalAmount, receiptUrl)
@@ -21,8 +22,10 @@
  */
 
 import logger from '@/config/logger'
-import { sanitizeServiceMessage, sanitizeTemplateVar } from '@/utils/whatsappSanitize'
+import { sanitizeServiceMessage, sanitizeTemplateVar, stripWhatsappControls, isWhatsappWamid } from '@/utils/whatsappSanitize'
 import { omitirPorDemo } from './demo/candadoDemo'
+import { supportTextCap } from './support/texts'
+import { supportPhoneNumberId, supportWhatsappAccessToken } from '@/config/supportWhatsapp'
 
 const WHATSAPP_API_URL = 'https://graph.facebook.com/v21.0'
 
@@ -511,10 +514,12 @@ export async function sendVenueChatTemplate(phone: string, params: VenueChatTemp
 // the 24h window closed and the relay must retry as a template.
 export class WhatsappCloudApiError extends Error {
   cloudApiErrorCode?: number
-  constructor(message: string, code?: number) {
+  httpStatus?: number
+  constructor(message: string, code?: number, httpStatus?: number) {
     super(message)
     this.name = 'WhatsappCloudApiError'
     this.cloudApiErrorCode = code
+    this.httpStatus = httpStatus
   }
 }
 
@@ -522,46 +527,105 @@ export class WhatsappCloudApiError extends Error {
 // open 24h customer-service window. Caller must check WhatsappContactWindow
 // before invoking. On Cloud API failure, throws WhatsappCloudApiError so the
 // caller can branch on cloudApiErrorCode (e.g. 131047 → fall back to template).
-export async function sendServiceMessage(phone: string, body: string): Promise<{ messageId: string }> {
+export async function sendServiceMessage(
+  phone: string,
+  body: string,
+  options: { timeoutMs?: number; safeSupportLogs?: boolean; beforeSend?: () => Promise<void> } = {},
+): Promise<{ messageId: string }> {
   const motivoDemo = await omitirPorDemo('WhatsApp de servicio')
   if (motivoDemo === 'sin confirmar') throw new Error('No se pudo confirmar el negocio: el WhatsApp no se envió')
-  if (motivoDemo) return { messageId: 'negocio-demo' }
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN
+  if (motivoDemo) {
+    if (options.safeSupportLogs) throw new Error('La demostración no entrega mensajes de soporte.')
+    return { messageId: 'negocio-demo' }
+  }
+  // T-F14: a support send (safeSupportLogs) leaves from the support's own number with its token; every other send, as before.
+  const phoneNumberId = options.safeSupportLogs ? supportPhoneNumberId() : process.env.WHATSAPP_PHONE_NUMBER_ID
+  const accessToken = options.safeSupportLogs ? supportWhatsappAccessToken() : process.env.WHATSAPP_ACCESS_TOKEN
   if (!phoneNumberId || !accessToken) {
     throw new Error('WhatsApp Business API no esta configurado')
   }
 
   const fullPhone = normalizePhone(phone)
-  const sanitized = sanitizeServiceMessage(body)
+  const sanitized = options.safeSupportLogs ? stripWhatsappControls(body) : sanitizeServiceMessage(body)
+  // T-F10c: a support text within the drafted cap (1,500) or, longer, the literal guide up to 3,500 (supportTextCap; WhatsApp
+  // takes 4,096).
+  if (options.safeSupportLogs && (!sanitized.trim() || sanitized.length > supportTextCap(sanitized)))
+    throw new Error('El mensaje de soporte debe estar completo y caber en su tope de caracteres.')
+  const timeoutMs = options.timeoutMs ?? (options.safeSupportLogs ? 20000 : undefined)
+  if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 20000))
+    throw new Error('El tiempo de envío no es válido.')
+  if (options.beforeSend) await options.beforeSend()
+  const controller = timeoutMs ? new AbortController() : null
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : undefined
+  const recipient = `***${fullPhone.slice(-4)}`
+  try {
+    const response = await fetch(`${WHATSAPP_API_URL}/${phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: fullPhone,
+        type: 'text',
+        text: { body: sanitized },
+      }),
+      ...(controller ? { signal: controller.signal } : {}),
+    })
 
-  const response = await fetch(`${WHATSAPP_API_URL}/${phoneNumberId}/messages`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to: fullPhone,
-      type: 'text',
-      text: { body: sanitized },
-    }),
-  })
+    const result = (await response.json()) as Record<string, any>
+    if (!response.ok) {
+      const code = result?.error?.code
+      const msg = result?.error?.message || `HTTP ${response.status}`
+      if (options.safeSupportLogs) {
+        const safeCode = Number.isSafeInteger(code) && code >= 0 ? code : undefined
+        logger.error('WhatsApp support delivery rejected', { recipient, status: response.status, code: safeCode })
+        throw new WhatsappCloudApiError('WhatsApp rechazó el mensaje de soporte.', safeCode, response.status)
+      }
+      logger.error(`WhatsApp service msg error: ${msg}`, { phone: fullPhone, status: response.status, code })
+      throw new WhatsappCloudApiError(`Error al enviar WhatsApp: ${msg}`, typeof code === 'number' ? code : undefined)
+    }
 
-  const result = (await response.json()) as Record<string, any>
-  if (!response.ok) {
-    const code = result?.error?.code
-    const msg = result?.error?.message || `HTTP ${response.status}`
-    logger.error(`WhatsApp service msg error: ${msg}`, { phone: fullPhone, status: response.status, code })
-    throw new WhatsappCloudApiError(`Error al enviar WhatsApp: ${msg}`, typeof code === 'number' ? code : undefined)
+    const messageId = result?.messages?.[0]?.id
+    if (options.safeSupportLogs && !isWhatsappWamid(messageId)) {
+      logger.error('WhatsApp support delivery unconfirmed', { recipient, status: response.status })
+      throw new WhatsappCloudApiError('No se pudo confirmar el envío de soporte.')
+    }
+    if (!messageId) {
+      logger.error('WhatsApp service msg 200 but no messages[0].id', { phone: fullPhone, result })
+      throw new Error('Error al enviar WhatsApp: no message id in response')
+    }
+
+    if (options.safeSupportLogs) logger.info('WhatsApp support message sent', { messageId, recipient, status: response.status })
+    else logger.info(`WhatsApp service message sent to ${fullPhone}`, { messageId })
+    return { messageId }
+  } catch (err) {
+    if (options.safeSupportLogs && !(err instanceof WhatsappCloudApiError))
+      throw new WhatsappCloudApiError('No se pudo confirmar el envío de soporte.')
+    throw err
+  } finally {
+    if (timer) clearTimeout(timer)
   }
+}
 
-  const messageId = result?.messages?.[0]?.id
-  if (!messageId) {
-    logger.error('WhatsApp service msg 200 but no messages[0].id', { phone: fullPhone, result })
-    throw new Error('Error al enviar WhatsApp: no message id in response')
+/**
+ * Marks a support inbound as read and shows «escribiendo…» while the assistant prepares the answer (Meta removes it on
+ * the reply or after 25 s). Best effort: it never throws, and its log carries no message text.
+ */
+export async function markSupportMessageReadTyping(inboundWamid: string): Promise<void> {
+  try {
+    if (await omitirPorDemo('WhatsApp de servicio')) return
+    const phoneNumberId = supportPhoneNumberId()
+    const accessToken = supportWhatsappAccessToken()
+    if (!phoneNumberId || !accessToken) return
+    const response = await fetch(`${WHATSAPP_API_URL}/${phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ messaging_product: 'whatsapp', status: 'read', message_id: inboundWamid, typing_indicator: { type: 'text' } }),
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!response.ok) logger.warn('WhatsApp support typing indicator rejected', { status: response.status })
+  } catch (err) {
+    logger.warn('WhatsApp support typing indicator failed', { error: err instanceof Error ? err.name : 'unknown' })
   }
-
-  logger.info(`WhatsApp service message sent to ${fullPhone}`, { messageId })
-  return { messageId }
 }
 
 /**

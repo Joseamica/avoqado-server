@@ -108,7 +108,7 @@ describe('promotores (PlayTelecom): «hoy» del negocio', () => {
     await promotersService.getPromotersList('v1')
 
     expect(iso(prismaMock.timeEntry.findMany.mock.calls[0][0].where.clockInTime.gte)).toBe(medianoche)
-    expect(iso(prismaMock.order.findMany.mock.calls[0][0].where.createdAt.gte)).toBe(medianoche)
+    expect(iso(prismaMock.order.findMany.mock.calls[0][0].where.AND[1].OR[0].clientCreatedAt.gte)).toBe(medianoche)
   })
 
   it('lista: el día del cambio de horario del proceso no mueve la medianoche del negocio (8-mar, Havana)', async () => {
@@ -120,7 +120,7 @@ describe('promotores (PlayTelecom): «hoy» del negocio', () => {
 
     await promotersService.getPromotersList('v1')
 
-    expect(iso(prismaMock.order.findMany.mock.calls[0][0].where.createdAt.gte)).toBe('2026-03-08T06:00:00.000Z')
+    expect(iso(prismaMock.order.findMany.mock.calls[0][0].where.AND[1].OR[0].clientCreatedAt.gte)).toBe('2026-03-08T06:00:00.000Z')
   })
 
   it('detalle: ventas y checada de hoy, y el calendario de 30 días con días y retardos del negocio', async () => {
@@ -141,7 +141,7 @@ describe('promotores (PlayTelecom): «hoy» del negocio', () => {
 
     const d = await promotersService.getPromoterDetail('v1', 's1')
 
-    expect(iso(prismaMock.order.findMany.mock.calls[0][0].where.createdAt.gte)).toBe('2026-11-15T06:00:00.000Z')
+    expect(iso(prismaMock.order.findMany.mock.calls[0][0].where.AND[1].OR[0].clientCreatedAt.gte)).toBe('2026-11-15T06:00:00.000Z')
     expect(iso(prismaMock.timeEntry.findFirst.mock.calls[0][0].where.clockInTime.gte)).toBe('2026-11-15T06:00:00.000Z')
     expect(iso(prismaMock.timeEntry.findMany.mock.calls[0][0].where.clockInTime.gte)).toBe('2026-10-17T06:00:00.000Z')
     // La llave de la meta del mes: la medianoche del día 1 en el negocio, la misma que lee getManagerDashboard.
@@ -192,8 +192,8 @@ describe('promotores (PlayTelecom): «hoy» del negocio', () => {
 
     // $7,000 en 7 días → $1,000 diarios × día 15 = $15,000 de la meta de $50,000 = 30 % (el 16 de UTC daba 32 %).
     expect(r!.stores[0].goalProgress).toBe(30)
-    expect(iso(prismaMock.order.groupBy.mock.calls[0][0].where.createdAt.gte)).toBe('2026-11-15T06:00:00.000Z') // hoy
-    expect(iso(prismaMock.order.groupBy.mock.calls[1][0].where.createdAt.gte)).toBe('2026-11-08T06:00:00.000Z') // 7 días
+    expect(iso(prismaMock.order.groupBy.mock.calls[0][0].where.AND[1].OR[0].clientCreatedAt.gte)).toBe('2026-11-15T06:00:00.000Z') // hoy
+    expect(iso(prismaMock.order.groupBy.mock.calls[1][0].where.AND[1].OR[0].clientCreatedAt.gte)).toBe('2026-11-08T06:00:00.000Z') // 7 días
   })
 
   it('gerente de tiendas: si el reloj cruza la medianoche a media llamada, el día del mes es el de la consulta', async () => {
@@ -214,7 +214,7 @@ describe('promotores (PlayTelecom): «hoy» del negocio', () => {
     const r = await organizationDashboardService.getManagerDashboard('org1', 'm1', CDMX)
 
     expect(r!.stores[0].goalProgress).toBe(30) // día 15, no 16
-    expect(iso(prismaMock.order.groupBy.mock.calls[0][0].where.createdAt.gte)).toBe('2026-11-15T06:00:00.000Z')
+    expect(iso(prismaMock.order.groupBy.mock.calls[0][0].where.AND[1].OR[0].clientCreatedAt.gte)).toBe('2026-11-15T06:00:00.000Z')
   })
 })
 
@@ -228,7 +228,7 @@ describe('centro de mando (PlayTelecom): tendencia de ventas con días elegidos 
     const r = await commandCenterService.getStockVsSales('v1', { startDate: '2026-11-15', endDate: '2026-11-15' })
 
     // Antes: `new Date('2026-11-15')` es la medianoche UTC (14-nov 18:00 CDMX) y la gráfica mostraba el 14.
-    const anterior = prismaMock.order.aggregate.mock.calls[0][0].where.createdAt
+    const anterior = prismaMock.order.aggregate.mock.calls[0][0].where.AND[1].OR[0].clientCreatedAt
     expect([iso(anterior.gte), iso(anterior.lte)]).toEqual(['2026-11-14T06:00:00.000Z', '2026-11-15T05:59:59.999Z'])
     expect(r.trend).toHaveLength(1)
     expect(r.trend[0].date).toBe(new Date('2026-11-15T18:00:00Z').toLocaleDateString('es-MX', { day: '2-digit', month: 'short' }))
@@ -240,7 +240,7 @@ describe('centro de mando (PlayTelecom): tendencia de ventas con días elegidos 
     prismaMock.orderItem.aggregate.mockResolvedValue({ _sum: { quantity: null } })
   }
   const periodoAnterior = () => {
-    const w = prismaMock.order.aggregate.mock.calls[0][0].where.createdAt
+    const w = prismaMock.order.aggregate.mock.calls[0][0].where.AND[1].OR[0].clientCreatedAt
     return [iso(w.gte), iso(w.lte)]
   }
 

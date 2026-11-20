@@ -51,6 +51,7 @@ import { FOLIO_VALIDO } from '../kds/kitchenTicketPlanning'
 import { applyKitchenPreparation, preparationActionSchema, preparationCommandSchema } from '../kds/kitchenPreparation.service'
 import { preparationPermissions } from '../kds/kitchenPreparation'
 import { motivoDelDescuento } from '../shared/motivoDelDescuento'
+import { descuentoManualDeMesaSchema } from '../../schemas/mobile/manualOrderDiscount.mobile.schema'
 import { horaRealDelAparato, llegadaDeLaPeticion } from '../shared/horaRealDelAparato'
 
 // ─── Contrato (espejo EXACTO por nombre en iOS/Android) ─────────────────────
@@ -2051,6 +2052,25 @@ async function applyOrderMutation(
 
   switch (intent.type) {
     case 'APPLY_DISCOUNT': {
+      // Encargo 7133e3 (hz:0555ee15:D2): el descuento MANUAL de la mesa viaja en `manual` con la MISMA llave que su POST (si el POST
+      // sí aterrizó y se perdió la respuesta, la llave contesta la fila ya hecha). Mismo permiso por tipo (`discounts:apply`).
+      if (p.manual !== undefined) {
+        const manual = descuentoManualDeMesaSchema.safeParse(p.manual)
+        if (!manual.success || (manual.data.type === 'PERCENTAGE' && manual.data.value > 100))
+          return invalid(intent, 'APPLY_DISCOUNT: descuento manual inválido')
+        await orderMobileService.applyOrderDiscount(
+          venueId,
+          orderId,
+          { type: manual.data.type, value: manual.data.value, name: manual.data.name ?? '', llave: manual.data.llave },
+          staffId,
+          // hz:e0b12f00:D1: si deja la cuenta en $0 es cortesía; sin `orders:comp` de quien lo sube, 403 ⇒ cuarentena (sin red no hay PIN).
+          authorizeIntent?.(intent, 'orders:comp') === true,
+          undefined,
+          motivoDelDescuento(p.reason, p.reasonComment),
+          { enLaCola: true },
+        )
+        break
+      }
       const discountId = typeof p.discountId === 'string' ? p.discountId : null
       if (!discountId) return invalid(intent, 'APPLY_DISCOUNT requiere discountId')
       // D1 (hz:f34960c5:D1): sin red tampoco se regala sin permiso: el servicio rechaza un COMP si quien encoló no trae
@@ -2067,6 +2087,8 @@ async function applyOrderMutation(
         authorizeIntent?.(intent, 'tpv-orders:discount') === true ? {} : undefined,
         // Encargo f998c8: el motivo viaja en el payload (opcional; uno viejo no lo trae y entra «Sin motivo», nunca REJECTED).
         motivoDelDescuento(p.reason, p.reasonComment),
+        // D19 (encargo 01765a): la mesa ya dio el descuento sin red; si el tope se llenó mientras tanto, no se rechaza (el uso cuenta).
+        { enLaCola: true },
       )
       break
     }

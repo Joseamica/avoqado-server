@@ -1,0 +1,333 @@
+{
+  "pagina": "dashboard/menu/crear-o-editar-categoria",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1201,
+      "cita": "title: term('menu'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/config/sector-terminology.ts",
+      "linea": 48,
+      "cita": "menu: 'Menú',"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/config/sector-terminology.ts",
+      "linea": 90,
+      "cita": "menu: 'Catálogo',"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 337,
+      "cita": "url: 'menumaker/categories',"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 35,
+      "cita": "\"categories\": \"Categorías\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Menu/Categories/Categories.tsx",
+      "linea": 64,
+      "cita": "<span>{t('categories.newCategory')}</span>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 69,
+      "cita": "\"newCategory\": \"Nueva categoría\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Menu/Categories/components/CategoryWizardDialog.tsx",
+      "linea": 242,
+      "cita": "<FormLabel>{t('forms.name')}</FormLabel>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 84,
+      "cita": "\"name\": \"Nombre\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Menu/Categories/components/CategoryWizardDialog.tsx",
+      "linea": 524,
+      "cita": "{currentStep === 3 ? t('wizard.finish') : tCommon('next')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Menu/Categories/components/CategoryWizardDialog.tsx",
+      "linea": 213,
+      "cita": "? t('categoryDetail.sections.availability')"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 182,
+      "cita": "\"availability\": \"Disponibilidad\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 90,
+      "cita": "\"availableFrom\": \"Disponible desde\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 91,
+      "cita": "\"availableUntil\": \"Disponible hasta\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 173,
+      "cita": "\"availableDays\": \"Días disponibles\""
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Menu/Categories/components/CategoryWizardDialog.tsx",
+      "linea": 214,
+      "cita": ": t('categoryDetail.sections.assignments')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 183,
+      "cita": "\"assignments\": \"Asignaciones\""
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 129,
+      "cita": "\"menusForCategory\": \"Menús en los que aparecerá la categoría\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 130,
+      "cita": "\"addProductsToCategory\": \"Agregar productos a esta categoría\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 750,
+      "cita": "\"finish\": \"Finalizar\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Menu/Categories/Categories.tsx",
+      "linea": 221,
+      "cita": "clickableRow={row => ({"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Menu/Categories/categoryId.tsx",
+      "linea": 295,
+      "cita": "{saveCategory.isPending ? t('categoryDetail.buttons.saving') : t('categoryDetail.buttons.save')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 165,
+      "cita": "\"save\": \"Guardar\","
+    },
+    {
+      "paso": 6,
+      "archivo": "src/pages/Menu/Categories/Categories.tsx",
+      "linea": 172,
+      "cita": "onCheckedChange={() => toggleActive.mutate({ categoryId, status: !active })}"
+    },
+    {
+      "paso": 6,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 75,
+      "cita": "\"active\": \"Activa\""
+    },
+    {
+      "paso": 6,
+      "archivo": "src/pages/Menu/Categories/categoryId.tsx",
+      "linea": 274,
+      "cita": "toggleActive.mutate(newActiveState)"
+    },
+    {
+      "paso": 6,
+      "archivo": "src/pages/Menu/Categories/categoryId.tsx",
+      "linea": 277,
+      "cita": "{toggleActive.isPending ? '...' : form.watch('active') ? t('forms.labels.active') : t('forms.labels.inactive')}"
+    },
+    {
+      "paso": 6,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 127,
+      "cita": "\"active\": \"✓ Activa\","
+    },
+    {
+      "paso": 6,
+      "archivo": "src/locales/es/menu.json",
+      "linea": 128,
+      "cita": "\"inactive\": \"✗ Inactiva\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "menu:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 207
+    },
+    {
+      "permiso": "menu:create",
+      "archivo": "src/pages/Menu/Categories/Categories.tsx",
+      "linea": 61
+    },
+    {
+      "permiso": "menu:create",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 1317
+    },
+    {
+      "permiso": "menu:update",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 1422
+    },
+    {
+      "permiso": "menu:delete",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 1447
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: Usar formulario manual abre categories/create",
+      "archivo": "src/pages/Menu/Categories/components/CategoryWizardDialog.tsx",
+      "linea": 201
+    },
+    {
+      "ruta": "Antes: texto Usar formulario manual",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 533
+    },
+    {
+      "ruta": "Antes: el formulario manual guarda con Guardar",
+      "archivo": "src/pages/Menu/Categories/createCategory.tsx",
+      "linea": 172
+    },
+    {
+      "ruta": "Paso 3: el paso 2 no exige nada (sólo un horario válido)",
+      "archivo": "src/pages/Menu/Categories/components/CategoryWizardDialog.tsx",
+      "linea": 153
+    },
+    {
+      "ruta": "Problema: Siguiente valida el nombre",
+      "archivo": "src/pages/Menu/Categories/components/CategoryWizardDialog.tsx",
+      "linea": 151
+    },
+    {
+      "ruta": "Problema: regla del nombre",
+      "archivo": "src/pages/Menu/Categories/components/CategoryWizardDialog.tsx",
+      "linea": 239
+    },
+    {
+      "ruta": "Problema: texto del nombre",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 138
+    },
+    {
+      "ruta": "Problema: Siguiente apagado con el horario al revés",
+      "archivo": "src/pages/Menu/Categories/components/CategoryWizardDialog.tsx",
+      "linea": 521
+    },
+    {
+      "ruta": "Problema: aviso del horario",
+      "archivo": "src/pages/Menu/Categories/components/CategoryWizardDialog.tsx",
+      "linea": 350
+    },
+    {
+      "ruta": "Problema: texto del horario",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 122
+    },
+    {
+      "ruta": "Problema: Guardar apagado sin cambios",
+      "archivo": "src/pages/Menu/Categories/categoryId.tsx",
+      "linea": 290
+    },
+    {
+      "ruta": "Problema: Eliminar abre una confirmación",
+      "archivo": "src/pages/Menu/Categories/categoryId.tsx",
+      "linea": 280
+    },
+    {
+      "ruta": "Problema: texto Eliminar",
+      "archivo": "src/locales/es/menu.json",
+      "linea": 163
+    },
+    {
+      "ruta": "Problema: la confirmación cierra al tocar",
+      "archivo": "src/components/alert-dialog.tsx",
+      "linea": 67
+    },
+    {
+      "ruta": "Problema: borrar sin onError: sólo navega al terminar bien",
+      "archivo": "src/pages/Menu/Categories/categoryId.tsx",
+      "linea": 125
+    },
+    {
+      "ruta": "Problema: el SERVIDOR no borra una categoría con productos",
+      "archivo": "avoqado-server/src/services/dashboard/menu.dashboard.service.ts",
+      "linea": 468
+    },
+    {
+      "ruta": "Problema: tampoco con subcategorías",
+      "archivo": "avoqado-server/src/services/dashboard/menu.dashboard.service.ts",
+      "linea": 471
+    },
+    {
+      "ruta": "Problema: no hay aviso global de errores en las peticiones",
+      "archivo": "src/api.ts",
+      "linea": 108
+    },
+    {
+      "ruta": "Problema: sin respuesta, el panel repite la petición una vez (un DELETE ya aplicado contesta 404 y se queda en pantalla)",
+      "archivo": "src/api.ts",
+      "linea": 101
+    },
+    {
+      "ruta": "Problema: el SERVIDOR sí borra la que no tiene productos",
+      "archivo": "avoqado-server/src/services/dashboard/menu.dashboard.service.ts",
+      "linea": 496
+    },
+    {
+      "ruta": "Problema: la que ya no existe contesta NotFound",
+      "archivo": "avoqado-server/src/services/dashboard/menu.dashboard.service.ts",
+      "linea": 253
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 6,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

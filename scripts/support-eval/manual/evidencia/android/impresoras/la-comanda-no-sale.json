@@ -1,0 +1,296 @@
+{
+  "pagina": "android/impresoras/la-comanda-no-sale",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1689,
+      "cita": "raw == null -> \"Revisa que la impresora esté encendida y en la misma red.\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1702,
+      "cita": "raw.contains(\"papel\", ignoreCase = true) || raw.contains(\"paper\", ignoreCase = true) ->"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 699,
+      "cita": "message = \"No salió la comanda de: ${aviso.estaciones.joinToString(\", \")} · pedido ${aviso.orderNumber}\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 704,
+      "cita": "primaryLabel = \"Volver a imprimir\".takeIf { aviso.trabajo != null },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1722,
+      "cita": "primaryLabel = \"Volver a imprimir\".takeIf { aviso.trabajo != null },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 5497,
+      "cita": "replayDeComandas.intentarAhora()"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ReplayDeComandasPendientes.kt",
+      "linea": 83,
+      "cita": "val estado = comandaDispatcher.reintentar(trabajo)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ReplayDeComandasPendientes.kt",
+      "linea": 85,
+      "cita": "// 🔴 Se limpia SÓLO cuando de verdad salió. Un `NoSalio` deja el pendiente donde"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 709,
+      "cita": "secondaryLabel = \"Ya la canté\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1725,
+      "cita": "secondaryLabel = \"Ya la canté\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 1455,
+      "cita": "comandasPendientesStore.yaLaCante()"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ComandasPendientesStore.kt",
+      "linea": 174,
+      "cita": "fun yaLaCante(): Job? {"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ReplayDeComandasPendientes.kt",
+      "linea": 81,
+      "cita": "val trabajo = store.pendiente.value?.trabajo ?: return null"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 592,
+      "cita": "label = \"Pedidos\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 596,
+      "cita": "showOrders = true"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt",
+      "linea": 320,
+      "cita": "onReimprimirComanda = { viewModel.reimprimirComanda("
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt",
+      "linea": 883,
+      "cita": "text = \"Reimprimir comanda\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/orders/presentation/OrdersViewModel.kt",
+      "linea": 36,
+      "cita": "internal const val MENSAJE_COMANDA_REIMPRESA = \"Comanda reimpresa\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/orders/presentation/OrdersViewModel.kt",
+      "linea": 258,
+      "cita": "orderType = \"REIMPRESIÓN\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2245,
+      "cita": "CUENTA(\"Cuenta\"), ACCIONES(\"Acciones\"), CLIENTE(\"Cliente\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2476,
+      "cita": "label = if (isReprinting) \"Reimprimiendo…\" else \"Volver a imprimir pedido\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2478,
+      "cita": "blockedReason = if (isReprinting) null else \"Aún no se ha enviado ningún pedido a cocina.\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1783,
+      "cita": "showMessage(if (impresas == 1) \"Comanda reimpresa\" else \"$impresas comandas reimpresas\")"
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Si aparece: el POS insiste solo (6 intentos; las esperas son sólo entre intentos, sin tope total)",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/PoliticaDeReintento.kt",
+      "linea": 20
+    },
+    {
+      "ruta": "Si aparece: el despachador usa el tope por omisión (con estaciones, mesa, Pedidos)",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/printing/ComandaDispatcher.kt",
+      "linea": 320
+    },
+    {
+      "ruta": "Si aparece: mientras insiste, en el cobro sale «Reintentando la comanda»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 691
+    },
+    {
+      "ruta": "Antes: el aviso de comanda no toca la venta (el cobro ya quedó registrado)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 681
+    },
+    {
+      "ruta": "Antes: en la mesa la ronda sigue y el aviso dice que se reintenta sola",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 407
+    },
+    {
+      "ruta": "Paso 4: sin estaciones, la venta de mostrador va al ticket legado: sin trabajo ni botón",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/printing/ComandaDispatcher.kt",
+      "linea": 382
+    },
+    {
+      "ruta": "Paso 4: un NoSalio sin trabajo se ve pero no se guarda",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 5548
+    },
+    {
+      "ruta": "Antes: en la mesa el aviso final dice «No salió la comanda de: …»",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 405
+    },
+    {
+      "ruta": "Si aparece: estación sin impresora → esa causa y sin botón",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ReintentoDeComanda.kt",
+      "linea": 137
+    },
+    {
+      "ruta": "Si aparece: sin trabajo no hay botón (estación saltada)",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ReintentoDeComanda.kt",
+      "linea": 216
+    },
+    {
+      "ruta": "Problema: tocar fuera sólo oculta",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 712
+    },
+    {
+      "ruta": "Problema: tocar fuera sólo oculta (Cobrar)",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1728
+    },
+    {
+      "ruta": "Si aparece: (con Volver a imprimir) el reloj la reintenta sola con la app abierta (60 s tras cada intento)",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ReplayDeComandasPendientes.kt",
+      "linea": 104
+    },
+    {
+      "ruta": "Problema: el reloj arranca al abrir sesión",
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/AppState.kt",
+      "linea": 187
+    },
+    {
+      "ruta": "Problema: sólo se limpia cuando sí salió",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ReplayDeComandasPendientes.kt",
+      "linea": 84
+    },
+    {
+      "ruta": "Problema: una sola comanda guardada en toda la app (la última pisa a la anterior)",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ComandasPendientesStore.kt",
+      "linea": 213
+    },
+    {
+      "ruta": "Problema: la mesa guarda su comanda en el mismo almacén",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1190
+    },
+    {
+      "ruta": "Problema: el cobro guarda su comanda en el mismo almacén",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 5544
+    },
+    {
+      "ruta": "Si aparece: «Estos productos no llevan comanda» no es falla",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ReintentoDeComanda.kt",
+      "linea": 26
+    },
+    {
+      "ruta": "Si aparece: Pedidos lo muestra en neutro",
+      "archivo": "app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt",
+      "linea": 900
+    },
+    {
+      "ruta": "Si aparece: la mesa lo muestra como mensaje",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1781
+    },
+    {
+      "ruta": "Paso 5: la mesa reimprime marcado «· REIMPRESIÓN»",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1767
+    },
+    {
+      "ruta": "Problema: Pedidos manda a ruteo todo producto del pedido",
+      "archivo": "app/src/main/java/com/avoqado/pos/orders/presentation/OrdersViewModel.kt",
+      "linea": 232
+    },
+    {
+      "ruta": "Problema: la mesa manda a ruteo todo lo enviado",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1715
+    },
+    {
+      "ruta": "Quién: «Pedidos» sin candado de rol, salvo «Personalizar menú»",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 589
+    },
+    {
+      "ruta": "Problema: Pedidos pide orders:read (lista)",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 760
+    },
+    {
+      "ruta": "Problema: Pedidos pide orders:read (detalle)",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 788
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 7,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

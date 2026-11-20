@@ -53,6 +53,17 @@ afterAll(() => {
 })
 
 describe('whatsappWebhook — número de ventas', () => {
+  it.each(['AYUDA', 'CONTINUAR', 'SALIR'])('%s y una cita en ventas sólo se archivan', async body => {
+    await processWhatsappWebhook(
+      aviso('messages', {
+        metadata: metadata(VENTAS),
+        messages: [{ ...texto('wamid.SUPPORT_SALES', '525511112222', body), context: { id: 'wamid.RELAY' } }],
+      }),
+    )
+    expect(guardadas()).toEqual([expect.objectContaining({ body })])
+    noContestoNiTocoElCentral()
+  })
+
   it('un texto suelto de un prospecto se guarda con su nombre de perfil y NO se contesta', async () => {
     await processWhatsappWebhook(
       aviso('messages', {
