@@ -669,8 +669,9 @@ export async function llavesAnuladasDeLaCuenta(
   const anuladas = new Set<string>()
   // Una consulta por llave, con su propio `take: 1`: la respuesta es exacta para cada una. Con UNA consulta y un tope por filas, otras
   // anulaciones que nombran la misma llave (una cuenta fusionada, una llave repetida) dejaban fuera la que importa (Codex r5 #7, r6
-  // #3). Una ronda trae a lo más `MAX_RENGLONES_POR_LAPIDA` llaves distintas y cada consulta va por el índice de `orderId`.
-  const pedidas = [...new Set(llaves.filter(esLlaveDeRonda))].slice(0, MAX_RENGLONES_POR_LAPIDA)
+  // #3). Sin tope de llaves: con uno, la llave 201 de una ronda grande ya no se revisaba y volvía a cobrarse (Codex r7 #1). Son tantas
+  // consultas como renglones trae la ronda, cada una con `take: 1` y por el índice de `orderId`, y sólo si la cuenta tiene anulaciones.
+  const pedidas = [...new Set(llaves.filter(esLlaveDeRonda))]
   if (pedidas.length === 0) return anuladas
   // Casi ninguna cuenta tiene anulaciones: con una lectura se sabe y la ronda no paga una consulta por renglón.
   const hayAnulaciones = await tx.orderAction.findMany({ where: { orderId, actionType: 'VOID' }, select: { id: true }, take: 1 })
@@ -686,9 +687,6 @@ export async function llavesAnuladasDeLaCuenta(
   }
   return anuladas
 }
-
-/** Tope de llaves que se revisan contra las lápidas en una sola ronda (una ronda real trae unas pocas). */
-const MAX_RENGLONES_POR_LAPIDA = 200
 
 export async function conLlaveDeRonda<T>(crear: () => Promise<T>): Promise<T> {
   try {

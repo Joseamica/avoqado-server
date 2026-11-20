@@ -1045,6 +1045,15 @@ describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la
     expect(tx.orderItem.create).toHaveBeenCalledTimes(1)
   })
 
+  it('Codex r7 #1: en una ronda de 201 renglones también la llave 201 se revisa contra su lápida (sin tope de llaves)', async () => {
+    conLapidas(['sync:r:200'])
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    const ronda = Array.from({ length: 201 }, (_, i) => ({ productId: 'product', quantity: 1, externalId: `sync:r:${i}` }))
+    await addItemsToOrder('venue', 'order', ronda, 1, true)
+    expect(tx.orderItem.create).toHaveBeenCalledTimes(200)
+    expect(tx.orderItem.create.mock.calls.map((c: any[]) => c[0].data.externalId)).not.toContain('sync:r:200')
+  })
+
   it('decisión 1 de D7: sin anulaciones en la cuenta, una sola lectura (no una por renglón)', async () => {
     conLapidas([])
     tx.orderItem.findMany.mockResolvedValueOnce([])
