@@ -21,6 +21,8 @@ export const VenueTimeEntriesQuerySchema = z.object({
     status: z.nativeEnum(TimeEntryStatus).optional(),
     limit: z.coerce.number().int().min(1).max(200).optional(),
     offset: z.coerce.number().int().min(0).optional(),
+    // «Por revisar» (D3): sólo las «Salida olvidada · revisar», de cualquier fecha (el gerente llega a todas).
+    salidaOlvidada: z.enum(['true'], { errorMap: () => ({ message: 'salidaOlvidada sólo acepta «true»' }) }).optional(),
   }),
 })
 

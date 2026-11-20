@@ -17,6 +17,7 @@ export async function getTimeEntries(req: Request, res: Response, next: NextFunc
       status: req.query.status as TimeEntryStatus | undefined,
       limit: req.query.limit ? Number(req.query.limit) : undefined,
       offset: req.query.offset ? Number(req.query.offset) : undefined,
+      salidaOlvidada: req.query.salidaOlvidada === 'true' ? true : undefined,
     })
     res.status(200).json(result)
   } catch (error) {

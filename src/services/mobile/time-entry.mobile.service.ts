@@ -13,7 +13,7 @@ import { assertAttendanceEnabled } from '../dashboard/attendanceGate'
 import { assertFotoNoPrivada, decodificarSelfie, guardarSelfieDeEntrada, negocioPideFotoDeEntrada } from '../dashboard/fotoDeEntrada'
 import { deletePrivateFile } from '../privateStorage.service'
 import { conCandadoDeEntrada } from '../tpv/candadoDeEntrada'
-import { cerrarOlvidadasAntesDeChecar, textoSalidaYaOlvidada } from '../shared/salidaOlvidada'
+import { anotarSalidaQueNoSeUso, cerrarOlvidadasAntesDeChecar } from '../shared/salidaOlvidada'
 import { logAction } from '../dashboard/activity-log.service'
 import logger from '../../config/logger'
 import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
@@ -332,7 +332,7 @@ export async function clockOut(params: ClockOutParams) {
   const staffId = staffVenue.staffId
 
   // «Salida olvidada»: el turno de un día ya terminado se cierra con su regla, no con la hora de hoy.
-  const olvidadas = await cerrarOlvidadasAntesDeChecar(staffId, 'SALIDA')
+  await cerrarOlvidadasAntesDeChecar(staffId, 'SALIDA')
 
   // Find active time entry
   const activeEntry = await prisma.timeEntry.findFirst({
@@ -349,11 +349,9 @@ export async function clockOut(params: ClockOutParams) {
   })
 
   if (!activeEntry) {
-    const deAqui = olvidadas.find(c => c.venueId === venueId)
-    if (deAqui) {
-      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
-      throw new BadRequestError(textoSalidaYaOlvidada(deAqui, venue?.timezone), 'SALIDA_OLVIDADA')
-    }
+    // La regla la acababa de cerrar: la evidencia de esta salida se anota en esa checada y se dice qué pasó (Codex r1 #8).
+    const yaOlvidada = await anotarSalidaQueNoSeUso({ staffId, venueId, origen: 'POS', checkOutPhotoUrl })
+    if (yaOlvidada) throw new BadRequestError(yaOlvidada, 'SALIDA_OLVIDADA')
     throw new BadRequestError('No tienes entrada registrada')
   }
 
@@ -457,19 +455,15 @@ export async function startBreak(venueId: string, pin: string, _breakType?: stri
     throw new BadRequestError('No tienes entrada registrada o ya estás en descanso')
   }
 
-  // Create break and update entry status
-  const [breakRecord] = await prisma.$transaction([
-    prisma.timeEntryBreak.create({
-      data: {
-        timeEntryId: activeEntry.id,
-        startTime: new Date(),
-      },
-    }),
-    prisma.timeEntry.update({
-      where: { id: activeEntry.id },
+  // Condicional: si el cierre automático la cerró entre la lectura y aquí, no se reabre como ON_BREAK (Codex r1 #9).
+  const breakRecord = await prisma.$transaction(async tx => {
+    const { count } = await tx.timeEntry.updateMany({
+      where: { id: activeEntry.id, status: TimeEntryStatus.CLOCKED_IN, clockOutTime: null },
       data: { status: TimeEntryStatus.ON_BREAK },
-    }),
-  ])
+    })
+    if (count !== 1) throw new BadRequestError('No tienes entrada registrada o ya estás en descanso')
+    return tx.timeEntryBreak.create({ data: { timeEntryId: activeEntry.id, startTime: new Date() } })
+  })
 
   logger.info(`✅ [TIME-ENTRY.MOBILE] Break started | entryId=${activeEntry.id}`)
 

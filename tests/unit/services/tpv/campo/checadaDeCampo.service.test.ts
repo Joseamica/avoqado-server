@@ -930,9 +930,45 @@ describe('salida olvidada (D3)', () => {
     expect(entradas[0].depositPhotoUrl).toContain('deposito.jpg')
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED', entityId: e.id }))
 
-    // La misma salida repetida (reintento del celular) devuelve lo mismo, sin otra nota.
+    // La misma salida repetida (reintento del celular) devuelve lo mismo, sin otra nota, y sigue diciendo que no se usó (Codex r1 #5).
     const otra = await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('12:58', 9).toISOString() }, t('13:30', 9))
+    expect(otra).toMatchObject({ repetida: true, salidaNoUsada: true })
+  })
+
+  it('Codex r1 #6: el gerente ya corrigió la salida olvidada y luego sube la salida sin red → se anota con su foto, no 409', async () => {
+    const e = entrada({
+      clockInTime: t('09:00', 3),
+      clockOutTime: t('18:00', 3),
+      status: 'CLOCKED_OUT',
+      totalHours: 9,
+      autoClockOut: false,
+      salidaOlvidada: false,
+      editedBy: 'gerente',
+    })
+
+    const r = await registrarSalidaDeCampo(
+      q,
+      {
+        llave: LLAVE,
+        timeEntryId: e.id,
+        ocurrioAt: t('17:45', 3).toISOString(),
+        checkOutPhotoUrl: 'https://firebasestorage.googleapis.com/v0/b/x/o/salida.jpg',
+      },
+      t('10:00', 4),
+    )
+
+    expect(r).toMatchObject({ salidaNoUsada: true, totalHours: 9 })
+    expect(entradas[0]).toMatchObject({ clockOutTime: t('18:00', 3), totalHours: 9, llaveSalida: LLAVE })
+    expect(entradas[0].checkOutPhotoUrl).toContain('salida.jpg')
+    expect(entradas[0].notes).toContain('corrigió la salida')
+  })
+
+  it('una salida normal (sin cierre automático) que se repite NO dice salidaNoUsada', async () => {
+    const e = entrada()
+    await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('17:00').toISOString() }, t('17:00'))
+    const otra = await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('17:00').toISOString() }, t('17:05'))
     expect(otra).toMatchObject({ repetida: true })
+    expect(otra).not.toHaveProperty('salidaNoUsada')
   })
 
   it('con la regla APAGADA la entrada de ayer sigue contestando YA_TIENE_ENTRADA (el negocio la apagó)', async () => {

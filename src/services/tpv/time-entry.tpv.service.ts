@@ -2,7 +2,7 @@ import prisma from '../../utils/prismaClient'
 import { assertAttendanceEnabled } from '../dashboard/attendanceGate'
 import { assertFotoNoPrivada } from '../dashboard/fotoDeEntrada'
 import { conCandadoDeEntrada } from './candadoDeEntrada'
-import { cerrarOlvidadasAntesDeChecar, textoSalidaYaOlvidada } from '../shared/salidaOlvidada'
+import { anotarSalidaQueNoSeUso, cerrarOlvidadasAntesDeChecar } from '../shared/salidaOlvidada'
 import { TimeEntryStatus } from '@prisma/client'
 import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
 
@@ -49,6 +49,8 @@ interface TimeEntriesQueryParams {
   status?: TimeEntryStatus
   limit?: number
   offset?: number
+  /** Sólo las «Salida olvidada · revisar» (D3): Asistencia del DASHBOARD las junta en «Por revisar». */
+  salidaOlvidada?: boolean
 }
 
 interface TimeSummaryParams {
@@ -260,7 +262,7 @@ export async function clockOut(params: ClockOutParams) {
   }
 
   // «Salida olvidada»: el turno de un día ya terminado se cierra con su regla, no con la hora de hoy (los turnos de 267 h).
-  const olvidadas = await cerrarOlvidadasAntesDeChecar(staffId, 'SALIDA')
+  await cerrarOlvidadasAntesDeChecar(staffId, 'SALIDA')
 
   // Find active time entry
   const timeEntry = await prisma.timeEntry.findFirst({
@@ -277,11 +279,9 @@ export async function clockOut(params: ClockOutParams) {
   })
 
   if (!timeEntry) {
-    const deAqui = olvidadas.find(c => c.venueId === venueId)
-    if (deAqui) {
-      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
-      throw new BadRequestError(textoSalidaYaOlvidada(deAqui, venue?.timezone), 'SALIDA_OLVIDADA')
-    }
+    // La regla la acababa de cerrar: la evidencia de esta salida se anota en esa checada y se dice qué pasó (Codex r1 #8).
+    const yaOlvidada = await anotarSalidaQueNoSeUso({ staffId, venueId, origen: 'PAX', checkOutPhotoUrl, depositPhotoUrl, skipReason })
+    if (yaOlvidada) throw new BadRequestError(yaOlvidada, 'SALIDA_OLVIDADA')
     throw new BadRequestError('El empleado no tiene entrada registrada')
   }
 
@@ -369,17 +369,17 @@ export async function startBreak(params: BreakParams) {
     throw new BadRequestError('Ya hay un descanso en progreso')
   }
 
-  // Create break and update time entry status
-  const [_newBreak, updatedTimeEntry] = await prisma.$transaction([
-    prisma.timeEntryBreak.create({
-      data: {
-        timeEntryId,
-        startTime: new Date(),
-      },
-    }),
-    prisma.timeEntry.update({
-      where: { id: timeEntryId },
+  // Condicional: si el cierre automático («salida olvidada» o la hora fija) la cerró entre la lectura y aquí, el descanso no
+  // la deja ON_BREAK con salida puesta (Codex r1 #9: el checador la veía abierta y nadie la volvía a cerrar).
+  const updatedTimeEntry = await prisma.$transaction(async tx => {
+    const { count } = await tx.timeEntry.updateMany({
+      where: { id: timeEntryId, status: TimeEntryStatus.CLOCKED_IN, clockOutTime: null },
       data: { status: TimeEntryStatus.ON_BREAK },
+    })
+    if (count !== 1) throw new BadRequestError('Registro no encontrado o no válido para descanso')
+    await tx.timeEntryBreak.create({ data: { timeEntryId, startTime: new Date() } })
+    return tx.timeEntry.findUniqueOrThrow({
+      where: { id: timeEntryId },
       include: {
         staff: {
           select: {
@@ -390,8 +390,8 @@ export async function startBreak(params: BreakParams) {
         },
         breaks: true,
       },
-    }),
-  ])
+    })
+  })
 
   return updatedTimeEntry
 }
@@ -462,9 +462,10 @@ export async function endBreak(params: BreakParams) {
  * entry appears in today's query so the UI can show the correct state.
  */
 export async function getTimeEntries(params: TimeEntriesQueryParams) {
-  const { venueId, staffId, startDate, endDate, status, limit = 50, offset = 0 } = params
+  const { venueId, staffId, startDate, endDate, status, limit = 50, offset = 0, salidaOlvidada } = params
 
   const where: any = { venueId }
+  if (salidaOlvidada) where.salidaOlvidada = true
 
   if (staffId) {
     where.staffId = staffId

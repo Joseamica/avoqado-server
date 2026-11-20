@@ -44,6 +44,8 @@ const LLEGADA_ANTICIPADA_MIN = 4 * 60
 const MAX_HORAS = 999.99 // Decimal(5,2)
 /** Por pasada del job: lo viejo se va cerrando en tandas, nunca una lectura sin tope. */
 export const TOPE_POR_PASADA = 500
+/** Páginas por pasada del job (cada 15 min): hasta 2,500 revisadas; lo demás, en la siguiente. */
+const PAGINAS_POR_PASADA = 5
 
 export const NOTA_SALIDA_OLVIDADA = '[Sistema] Salida olvidada · revisar'
 
@@ -51,12 +53,20 @@ type Db = Prisma.TransactionClient | typeof defaultPrisma
 
 const zonaDe = (tz: string | null | undefined) => (tz && isValidTimezone(tz) ? tz : DEFAULT_TIMEZONE)
 
-/** Hasta cuándo la entrada [clockIn] sigue siendo «su día»: el siguiente corte de las 04:00, nunca antes de 12 h. */
-export function limiteDelTurno(clockIn: Date, timezone: string | null | undefined): Date {
+/** Después de la salida de su horario, una hora de margen antes de darla por olvidada (Codex r1 #1: nocturnos largos). */
+const MARGEN_TRAS_SU_HORARIO_MS = 60 * 60_000
+
+/**
+ * Hasta cuándo la entrada [clockIn] sigue siendo «su día»: el siguiente corte de las 04:00, nunca antes de 12 h y, si su
+ * horario termina después (un nocturno de 21:00 a 10:00), hasta una hora después de su salida. Sin [finDeSuHorario] es el
+ * límite BASE: el celular usa ése (no conoce el horario) y el job lo usa como filtro barato (el real nunca es menor).
+ */
+export function limiteDelTurno(clockIn: Date, timezone: string | null | undefined, finDeSuHorario?: Date | null): Date {
   const local = DateTime.fromJSDate(clockIn, { zone: zonaDe(timezone) })
   let corte = local.set({ hour: BUSINESS_DAY_START_HOUR, minute: 0, second: 0, millisecond: 0 })
   if (corte <= local) corte = corte.plus({ days: 1 })
-  return new Date(Math.max(corte.toMillis(), clockIn.getTime() + HORAS_MINIMAS * 3_600_000))
+  const base = Math.max(corte.toMillis(), clockIn.getTime() + HORAS_MINIMAS * 3_600_000)
+  return new Date(finDeSuHorario ? Math.max(base, finDeSuHorario.getTime() + MARGEN_TRAS_SU_HORARIO_MS) : base)
 }
 
 export interface HorarioDelDia {
@@ -68,11 +78,20 @@ export interface HorarioDelDia {
 
 /**
  * La salida de su horario para el turno que empezó en [clockIn], o null si no hay un horario que lo cubra (sin cuadrante,
- * día de descanso, o entró fuera de su horario). Se prueba primero el día de la entrada y luego el anterior (un turno
- * nocturno de ayer que sigue a las 00:30). Nunca después del [limite] ni antes de la entrada. Función pura.
+ * día de descanso, o entró fuera de su horario). Se prueba el día de la entrada y el anterior (un nocturno de ayer que sigue a
+ * las 00:30). Gana el horario que CONTIENE la entrada; si ninguno, el que empieza más pronto después de ella (llegó hasta 4 h
+ * antes). Así una entrada de las 03:30 para cubrir el final del nocturno (22:00–06:00) no toma el diurno de las 07:00 (Codex
+ * r1 #2). Sin [limite] no se acota (sirve para calcular el límite). Función pura.
  */
-export function salidaDeSuHorario(clockIn: Date, timezone: string | null | undefined, dias: HorarioDelDia[], limite: Date): Date | null {
+export function salidaDeSuHorario(
+  clockIn: Date,
+  timezone: string | null | undefined,
+  dias: HorarioDelDia[],
+  limite?: Date | null,
+): Date | null {
   const zona = zonaDe(timezone)
+  const t = clockIn.getTime()
+  const turnos: { inicio: number; fin: number }[] = []
   for (const d of dias) {
     if (!d.start || !d.end) continue
     const base = DateTime.fromISO(d.fecha, { zone: zona })
@@ -83,12 +102,15 @@ export function salidaDeSuHorario(clockIn: Date, timezone: string | null | undef
     let fin = base.set({ hour: hf, minute: mf, second: 0, millisecond: 0 })
     if (fin <= inicio) fin = fin.plus({ days: 1 })
     if (!inicio.isValid || !fin.isValid) continue
-    const t = clockIn.getTime()
-    if (t >= inicio.toMillis() - LLEGADA_ANTICIPADA_MIN * 60_000 && t < fin.toMillis()) {
-      return new Date(Math.min(fin.toMillis(), limite.getTime()))
-    }
+    turnos.push({ inicio: inicio.toMillis(), fin: fin.toMillis() })
   }
-  return null
+  const contiene = turnos.filter(x => x.inicio <= t && t < x.fin).sort((a, b) => b.inicio - a.inicio)[0]
+  const anticipado = turnos
+    .filter(x => t < x.inicio && t >= x.inicio - LLEGADA_ANTICIPADA_MIN * 60_000)
+    .sort((a, b) => a.inicio - b.inicio)[0]
+  const elegido = contiene ?? anticipado
+  if (!elegido) return null
+  return new Date(limite ? Math.min(elegido.fin, limite.getTime()) : elegido.fin)
 }
 
 /** Lo que hace falta leer de una checada abierta para decidir. */
@@ -120,11 +142,19 @@ export interface SalidaOlvidadaCerrada {
 
 const ABIERTA = { in: [TimeEntryStatus.CLOCKED_IN, TimeEntryStatus.ON_BREAK] }
 
-async function horarioDe(db: Db, e: EntradaAbierta): Promise<HorarioDelDia[]> {
-  const zona = zonaDe(e.venue.timezone)
+interface TurnoDeLaPersona {
+  staffId: string
+  venueId: string
+  clockInTime: Date
+  timezone: string | null | undefined
+  rotativos: boolean
+}
+
+async function horarioDe(db: Db, e: TurnoDeLaPersona): Promise<HorarioDelDia[]> {
+  const zona = zonaDe(e.timezone)
   const local = DateTime.fromJSDate(e.clockInTime, { zone: zona })
   const fechas = [local.toISODate(), local.minus({ days: 1 }).toISODate()].filter(Boolean) as string[]
-  const rotativos = e.venue.settings?.rotatingShiftsEnabled === true
+  const rotativos = e.rotativos
   const sv = await db.staffVenue.findFirst({
     where: { staffId: e.staffId, venueId: e.venueId },
     select: {
@@ -161,13 +191,43 @@ async function horarioDe(db: Db, e: EntradaAbierta): Promise<HorarioDelDia[]> {
   })
 }
 
+/**
+ * El límite REAL de un turno (con la salida de su horario, que puede alargarlo) y esa salida. Lo usan el cierre, la regla de
+ * la salida tardía del celular y la corrección del gerente: los tres miden igual.
+ */
+export async function limiteYSalidaDeSuHorario(db: Db, e: TurnoDeLaPersona): Promise<{ limite: Date; deSuHorario: Date | null }> {
+  const fin = salidaDeSuHorario(e.clockInTime, e.timezone, await horarioDe(db, e))
+  return { limite: limiteDelTurno(e.clockInTime, e.timezone, fin), deSuHorario: fin }
+}
+
+/** Para quien sólo tiene la checada: lee la zona y si la sucursal usa turnos rotativos. */
+export async function limiteRealDe(db: Db, e: { staffId: string; venueId: string; clockInTime: Date }): Promise<Date> {
+  const v = await db.venue.findUnique({
+    where: { id: e.venueId },
+    select: { timezone: true, settings: { select: { rotatingShiftsEnabled: true } } },
+  })
+  const { limite } = await limiteYSalidaDeSuHorario(db, {
+    ...e,
+    timezone: v?.timezone,
+    rotativos: v?.settings?.rotatingShiftsEnabled === true,
+  })
+  return limite
+}
+
 /** Cierra [e] como «salida olvidada» si ya pasó su límite y el negocio tiene la regla prendida. null = no tocó nada. */
 async function cerrarSiOlvidada(db: Db, e: EntradaAbierta, ahora: Date, disparador: Disparador): Promise<SalidaOlvidadaCerrada | null> {
   if (e.venue.settings?.salidaOlvidadaEnabled === false) return null
-  const limite = limiteDelTurno(e.clockInTime, e.venue.timezone)
-  if (ahora < limite) return null
+  // Filtro barato: el límite real nunca es menor que el base, así que antes del base no hay nada que leer.
+  if (ahora < limiteDelTurno(e.clockInTime, e.venue.timezone)) return null
+  const { limite, deSuHorario } = await limiteYSalidaDeSuHorario(db, {
+    staffId: e.staffId,
+    venueId: e.venueId,
+    clockInTime: e.clockInTime,
+    timezone: e.venue.timezone,
+    rotativos: e.venue.settings?.rotatingShiftsEnabled === true,
+  })
+  if (ahora < limite) return null // un nocturno largo con horario: todavía es su turno
 
-  const deSuHorario = salidaDeSuHorario(e.clockInTime, e.venue.timezone, await horarioDe(db, e), limite)
   const salida = deSuHorario ?? e.clockInTime
   // Descansos: los terminados antes de la salida cuentan; uno abierto (o que pasa de la salida) termina en la salida.
   const descansos = e.breaks.map(b => {
@@ -270,38 +330,50 @@ export async function cerrarSalidasOlvidadasPendientes(
   ahora = new Date(),
   db = defaultPrisma,
 ): Promise<{ cerradas: number; errores: number }> {
-  // Sólo pueden haber pasado su límite las que tienen más de HORAS_MINIMAS: la lectura usa el índice de status.
-  const candidatas = await retry(
-    () =>
-      db.timeEntry.findMany({
-        where: {
-          status: ABIERTA,
-          clockOutTime: null,
-          clockInTime: { lt: new Date(ahora.getTime() - HORAS_MINIMAS * 3_600_000) },
-          // Los negocios que la apagaron no ocupan la tanda (sin este filtro, 500 suyas taparían a todos los demás).
-          venue: { OR: [{ settings: null }, { settings: { salidaOlvidadaEnabled: true } }] },
-        },
-        select: ENTRADA_SELECT,
-        orderBy: [{ clockInTime: 'asc' }, { id: 'asc' }],
-        take: TOPE_POR_PASADA,
-      }),
-    { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'auto-clockout.salidasOlvidadas' },
-  )
+  // Sólo pueden haber pasado su límite las que tienen más de HORAS_MINIMAS: la lectura usa el índice de status. Se recorre
+  // por páginas con cursor (Codex r1 #11): unas que todavía no vencen (otra zona, un nocturno largo) no tapan a las que sí.
+  const where: Prisma.TimeEntryWhereInput = {
+    status: ABIERTA,
+    clockOutTime: null,
+    clockInTime: { lt: new Date(ahora.getTime() - HORAS_MINIMAS * 3_600_000) },
+    // Los negocios que la apagaron no ocupan la tanda (sin este filtro, 500 suyas taparían a todos los demás).
+    venue: { OR: [{ settings: null }, { settings: { salidaOlvidadaEnabled: true } }] },
+  }
   let cerradas = 0
   let errores = 0
-  for (const e of candidatas) {
-    try {
-      const c = await db.$transaction(tx => cerrarSiOlvidada(tx, e, ahora, 'JOB'))
-      if (c) {
-        cerradas++
-        anotarCierres([c])
+  let revisadas = 0
+  let cursor: string | undefined
+  for (let pagina = 0; pagina < PAGINAS_POR_PASADA; pagina++) {
+    const candidatas = await retry(
+      () =>
+        db.timeEntry.findMany({
+          where,
+          select: ENTRADA_SELECT,
+          orderBy: [{ clockInTime: 'asc' }, { id: 'asc' }],
+          take: TOPE_POR_PASADA,
+          ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        }),
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'auto-clockout.salidasOlvidadas' },
+    )
+    revisadas += candidatas.length
+    for (const e of candidatas) {
+      // Sin transacción para las que ni el límite base han pasado (lo normal en una tanda de otra zona).
+      if (ahora < limiteDelTurno(e.clockInTime, e.venue.timezone)) continue
+      try {
+        const c = await db.$transaction(tx => cerrarSiOlvidada(tx, e, ahora, 'JOB'))
+        if (c) {
+          cerradas++
+          anotarCierres([c])
+        }
+      } catch (error) {
+        errores++
+        logger.error(`Salida olvidada: no se pudo cerrar la checada ${e.id}`, { venueId: e.venueId, error })
       }
-    } catch (error) {
-      errores++
-      logger.error(`Salida olvidada: no se pudo cerrar la checada ${e.id}`, { venueId: e.venueId, error })
     }
+    if (candidatas.length < TOPE_POR_PASADA) break
+    cursor = candidatas[candidatas.length - 1].id
   }
-  if (cerradas > 0) logger.info(`Salida olvidada: ${cerradas} turnos cerrados`, { cerradas, errores, revisadas: candidatas.length })
+  if (cerradas > 0) logger.info(`Salida olvidada: ${cerradas} turnos cerrados`, { cerradas, errores, revisadas })
   return { cerradas, errores }
 }
 
@@ -349,18 +421,24 @@ export async function corregirSalidaOlvidada(params: {
   const ahora = params.ahora ?? new Date()
 
   const resultado = await defaultPrisma.$transaction(async tx => {
+    const dueno = await tx.timeEntry.findFirst({ where: { id: timeEntryId, venueId }, select: { staffId: true } })
+    if (!dueno) throw new NotFoundError('No encontramos esa checada.', 'ENTRADA_NO_ENCONTRADA')
+    // El mismo candado que la checada del celular (Codex r1 #7): una entrada que sube a la vez no se encima con esta salida.
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`checada:${dueno.staffId}`}))::text`
     const e = await tx.timeEntry.findFirst({
       where: { id: timeEntryId, venueId },
       select: {
         id: true,
         staffId: true,
+        venueId: true,
         clockInTime: true,
         clockOutTime: true,
         totalHours: true,
         salidaOlvidada: true,
+        llaveSalida: true,
         notes: true,
         breaks: { select: { id: true, startTime: true, endTime: true } },
-        venue: { select: { timezone: true } },
+        venue: { select: { timezone: true, settings: { select: { rotatingShiftsEnabled: true } } } },
       },
     })
     if (!e) throw new NotFoundError('No encontramos esa checada.', 'ENTRADA_NO_ENCONTRADA')
@@ -372,7 +450,13 @@ export async function corregirSalidaOlvidada(params: {
     }
     if (salida <= e.clockInTime) throw new BadRequestError('La salida tiene que ser después de la entrada.', 'SALIDA_ANTES_DE_ENTRADA')
     if (salida > ahora) throw new BadRequestError('La salida no puede estar en el futuro.', 'SALIDA_EN_EL_FUTURO')
-    const limite = limiteDelTurno(e.clockInTime, e.venue.timezone)
+    const { limite } = await limiteYSalidaDeSuHorario(tx, {
+      staffId: e.staffId,
+      venueId: e.venueId,
+      clockInTime: e.clockInTime,
+      timezone: e.venue.timezone,
+      rotativos: e.venue.settings?.rotatingShiftsEnabled === true,
+    })
     if (salida > limite) {
       throw new BadRequestError(
         `La salida no puede pasar de ${DateTime.fromJSDate(limite, { zone: zonaDe(e.venue.timezone) }).toFormat('HH:mm')} del día siguiente: un turno no dura días.`,
@@ -385,9 +469,16 @@ export async function corregirSalidaOlvidada(params: {
     })
     if (siguiente) throw new ConflictError('Esa salida cae después de su siguiente entrada.', 'SALIDA_SE_ENCIMA')
 
+    // Un descanso que terminó el SISTEMA al cerrar (a la hora del cierre, o en su propio inicio si el cierre fue en 0 h) sigue
+    // abierto para la corrección: termina en la salida real (Codex r1 #12; antes, el descanso valía cero y sumaba horas).
+    const cierre = e.clockOutTime
     const descansos = e.breaks.map(b => {
-      const fin = b.endTime === null || b.endTime > salida ? new Date(Math.max(b.startTime.getTime(), salida.getTime())) : b.endTime
-      return { id: b.id, cambia: b.endTime === null || b.endTime > salida, inicio: b.startTime, fin }
+      const delSistema =
+        b.endTime !== null &&
+        (b.endTime.getTime() === cierre.getTime() || (b.endTime.getTime() === b.startTime.getTime() && b.startTime >= cierre))
+      const cambia = b.endTime === null || b.endTime > salida || delSistema
+      const fin = cambia ? new Date(Math.max(b.startTime.getTime(), salida.getTime())) : b.endTime!
+      return { id: b.id, cambia, inicio: b.startTime, fin }
     })
     const minutosDescanso = descansos.reduce((t, b) => t + Math.max(0, b.fin.getTime() - b.inicio.getTime()) / 60_000, 0)
     const minutos = (salida.getTime() - e.clockInTime.getTime()) / 60_000 - minutosDescanso
@@ -397,7 +488,8 @@ export async function corregirSalidaOlvidada(params: {
     const anotacion = `Salida corregida por el gerente: ${fmt(salida)} (antes ${fmt(e.clockOutTime)}, salida olvidada).`
 
     const { count } = await tx.timeEntry.updateMany({
-      where: { id: e.id, salidaOlvidada: true, clockOutTime: e.clockOutTime },
+      // También la nota y la llave: si una salida tardía del celular se anotó después de leer, se relee (Codex r1 #6).
+      where: { id: e.id, salidaOlvidada: true, clockOutTime: e.clockOutTime, notes: e.notes, llaveSalida: e.llaveSalida },
       data: {
         clockOutTime: salida,
         totalHours,
@@ -426,4 +518,61 @@ export async function corregirSalidaOlvidada(params: {
     data: resultado,
   })
   return { timeEntryId, clockOutTime: resultado.despues.clockOutTime, totalHours: resultado.despues.totalHours }
+}
+
+/**
+ * La PAX o el POS mandan una salida y ya no hay turno abierto porque la regla lo acababa de cerrar (el job se adelantó
+ * mientras la PAX esperaba el GPS, o el cierre perezoso de esta misma salida). La evidencia no se pierde (Codex r1 #8): la
+ * foto y el voucher se pegan a esa checada si no tiene los suyos, y queda la nota con la hora real para el gerente. Sólo
+ * una checada «Salida olvidada» de esta persona y sucursal cerrada en las últimas 2 h. null = no había ninguna.
+ */
+export async function anotarSalidaQueNoSeUso(params: {
+  staffId: string
+  venueId: string
+  origen: 'PAX' | 'POS'
+  checkOutPhotoUrl?: string | null
+  depositPhotoUrl?: string | null
+  skipReason?: string | null
+  ahora?: Date
+}): Promise<string | null> {
+  const ahora = params.ahora ?? new Date()
+  const e = await defaultPrisma.timeEntry.findFirst({
+    where: {
+      staffId: params.staffId,
+      venueId: params.venueId,
+      salidaOlvidada: true,
+      updatedAt: { gte: new Date(ahora.getTime() - 2 * 3_600_000) },
+    },
+    select: {
+      id: true,
+      clockInTime: true,
+      clockOutTime: true,
+      notes: true,
+      checkOutPhotoUrl: true,
+      depositPhotoUrl: true,
+      venue: { select: { timezone: true } },
+    },
+    orderBy: { clockInTime: 'desc' },
+  })
+  if (!e) return null
+  const hora = DateTime.fromJSDate(ahora, { zone: zonaDe(e.venue.timezone) }).toFormat('HH:mm dd/MM')
+  const anotacion = `Salida de la ${params.origen} a las ${hora}: llegó después del cierre de salida olvidada y no se usó. Revisa la hora real.`
+  await defaultPrisma.timeEntry.updateMany({
+    where: { id: e.id, salidaOlvidada: true, notes: e.notes },
+    data: {
+      notes: e.notes ? `${e.notes}\n${anotacion}` : anotacion,
+      ...(!e.checkOutPhotoUrl && params.checkOutPhotoUrl ? { checkOutPhotoUrl: params.checkOutPhotoUrl } : {}),
+      ...(!e.depositPhotoUrl && params.depositPhotoUrl ? { depositPhotoUrl: params.depositPhotoUrl } : {}),
+      ...(params.skipReason ? { checkoutSkipReason: params.skipReason } : {}),
+    },
+  })
+  void logAction({
+    staffId: params.staffId,
+    venueId: params.venueId,
+    action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
+    entity: 'TimeEntry',
+    entityId: e.id,
+    data: { origen: params.origen, salidaRecibida: ahora.toISOString(), cierreAutomatico: e.clockOutTime?.toISOString() ?? null },
+  })
+  return `Tu entrada del ${diaDeLaEntrada(e.clockInTime, e.venue.timezone)} se cerró como salida olvidada y la revisa tu gerente (tu salida y tus fotos quedaron anotadas). Si vas a trabajar, marca tu entrada.`
 }

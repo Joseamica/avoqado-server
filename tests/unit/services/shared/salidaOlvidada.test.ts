@@ -81,6 +81,22 @@ describe('salidaDeSuHorario', () => {
     expect(r).toEqual(mx('2026-11-04T06:00:00'))
   })
 
+  it('Codex r1 #2: entrada 03:30 que cubre el final del nocturno (22–06) no toma el diurno de las 07:00', () => {
+    const r = salidaDeSuHorario(mx('2026-11-04T03:30:00'), MX, [
+      { fecha: '2026-11-04', start: '07:00', end: '15:00' },
+      { fecha: '2026-11-03', start: '22:00', end: '06:00' },
+    ])
+    expect(r).toEqual(mx('2026-11-04T06:00:00'))
+  })
+
+  it('Codex r1 #1: un nocturno de 21:00 a 10:00 alarga el límite a una hora después de su salida (11:00)', () => {
+    const entrada = mx('2026-11-03T21:00:00')
+    const fin = salidaDeSuHorario(entrada, MX, [{ fecha: '2026-11-03', start: '21:00', end: '10:00' }])
+    expect(fin).toEqual(mx('2026-11-04T10:00:00'))
+    expect(limiteDelTurno(entrada, MX, fin)).toEqual(mx('2026-11-04T11:00:00'))
+    expect(limiteDelTurno(entrada, MX)).toEqual(mx('2026-11-04T09:00:00'))
+  })
+
   it('nunca después del límite', () => {
     const r = salidaDeSuHorario(
       mx('2026-11-03T20:00:00'),
@@ -189,6 +205,34 @@ describe('cerrarSalidasOlvidadasPendientes (el job)', () => {
     })
   })
 
+  it('Codex r1 #11: las que aún no vencen no abren transacción y el job sigue a la página siguiente', async () => {
+    const noVence = abierta({ id: 'te-x', clockInTime: mx('2026-11-03T22:00:00') }) // límite base 10:00
+    prismaMock.timeEntry.findMany
+      .mockResolvedValueOnce(Array.from({ length: 500 }, (_, i) => ({ ...noVence, id: `te-${i}` })) as any)
+      .mockResolvedValueOnce([abierta({ id: 'te-vieja', clockInTime: mx('2026-11-03T09:00:00') })] as any)
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+    prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
+
+    const r = await cerrarSalidasOlvidadasPendientes(mx('2026-11-04T05:00:00'))
+
+    expect(r.cerradas).toBe(1)
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect((prismaMock.timeEntry.findMany.mock.calls[1][0] as any).cursor).toEqual({ id: 'te-499' })
+  })
+
+  it('un nocturno largo con horario (21:00–10:00) NO se cierra a las 09:30: todavía es su turno', async () => {
+    prismaMock.timeEntry.findMany.mockResolvedValue([abierta({ clockInTime: mx('2026-11-03T21:00:00') })] as any)
+    prismaMock.staffVenue.findFirst.mockResolvedValue({
+      workSchedule: { weekly: { tuesday: { enabled: true, ranges: [{ open: '21:00', close: '10:00' }] } } },
+      workScheduleExceptions: [],
+    } as any)
+
+    const r = await cerrarSalidasOlvidadasPendientes(mx('2026-11-04T09:30:00'))
+
+    expect(r.cerradas).toBe(0)
+    expect(prismaMock.timeEntry.updateMany).not.toHaveBeenCalled()
+  })
+
   it('una salida real que ganó la carrera (0 filas) no se cuenta ni se anota', async () => {
     prismaMock.timeEntry.findMany.mockResolvedValue([abierta()] as any)
     prismaMock.staffVenue.findFirst.mockResolvedValue(null)
@@ -237,17 +281,65 @@ describe('corregirSalidaOlvidada (el gerente, en Asistencia)', () => {
     salidaOlvidada: true,
     notes: null,
     breaks: [],
-    venue: { timezone: MX },
+    llaveSalida: null,
+    venue: { timezone: MX, settings: null },
     ...extra,
   })
   const ahora = mx('2026-11-05T10:00:00')
 
   beforeEach(() => {
     prismaMock.timeEntry.findFirst.mockReset()
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+  })
+
+  it('toma el candado de la persona (el mismo de la checada del celular) y no pisa una nota que llegó después de leer', async () => {
+    prismaMock.timeEntry.findFirst
+      .mockResolvedValueOnce({ staffId: 'staff-1' } as any)
+      .mockResolvedValueOnce(olvidada({ notes: 'nota', llaveSalida: null }) as any)
+      .mockResolvedValueOnce(null)
+    prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 0 })
+
+    await expect(
+      corregirSalidaOlvidada({
+        venueId: 'venue-1',
+        timeEntryId: 'te-1',
+        clockOutTime: mx('2026-11-03T18:00:00'),
+        actorStaffId: 'gerente',
+        ahora,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CHECADA_EN_PROCESO' })
+    const sql = (prismaMock.$queryRaw as jest.Mock).mock.calls[0]
+    expect(sql[1]).toBe('checada:staff-1')
+    expect(prismaMock.timeEntry.updateMany.mock.calls[0][0].where).toEqual(
+      expect.objectContaining({ notes: 'nota', llaveSalida: null, salidaOlvidada: true }),
+    )
+  })
+
+  it('un descanso que el sistema terminó en su propio inicio (cierre en 0 h) termina en la salida corregida y se descuenta', async () => {
+    const b = { id: 'b1', startTime: mx('2026-11-03T17:00:00'), endTime: mx('2026-11-03T17:00:00') }
+    prismaMock.timeEntry.findFirst
+      .mockResolvedValueOnce({ staffId: 'staff-1' } as any)
+      .mockResolvedValueOnce(olvidada({ breaks: [b] }) as any)
+      .mockResolvedValueOnce(null)
+    prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
+
+    const r = await corregirSalidaOlvidada({
+      venueId: 'venue-1',
+      timeEntryId: 'te-1',
+      clockOutTime: mx('2026-11-03T18:00:00'),
+      actorStaffId: 'gerente',
+      ahora,
+    })
+
+    expect(r.totalHours).toBe(8) // 9 h − 1 h de descanso
+    expect(prismaMock.timeEntryBreak.update).toHaveBeenCalledWith({ where: { id: 'b1' }, data: { endTime: mx('2026-11-03T18:00:00') } })
   })
 
   it('pone la salida real, recalcula horas, quita la marca y lo anota con el antes y el después', async () => {
-    prismaMock.timeEntry.findFirst.mockResolvedValueOnce(olvidada() as any).mockResolvedValueOnce(null)
+    prismaMock.timeEntry.findFirst
+      .mockResolvedValueOnce({ staffId: 'staff-1' } as any)
+      .mockResolvedValueOnce(olvidada() as any)
+      .mockResolvedValueOnce(null)
     prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
 
     const r = await corregirSalidaOlvidada({
@@ -260,7 +352,7 @@ describe('corregirSalidaOlvidada (el gerente, en Asistencia)', () => {
 
     expect(r).toEqual({ timeEntryId: 'te-1', clockOutTime: mx('2026-11-03T18:00:00').toISOString(), totalHours: 9 })
     expect(prismaMock.timeEntry.updateMany).toHaveBeenCalledWith({
-      where: { id: 'te-1', salidaOlvidada: true, clockOutTime: mx('2026-11-03T09:00:00') },
+      where: { id: 'te-1', salidaOlvidada: true, clockOutTime: mx('2026-11-03T09:00:00'), notes: null, llaveSalida: null },
       data: expect.objectContaining({ salidaOlvidada: false, autoClockOut: false, totalHours: 9, editedBy: 'gerente' }),
     })
     expect(mockLogAction).toHaveBeenCalledWith(
@@ -269,7 +361,7 @@ describe('corregirSalidaOlvidada (el gerente, en Asistencia)', () => {
   })
 
   it('nadie corrige su propia checada', async () => {
-    prismaMock.timeEntry.findFirst.mockResolvedValueOnce(olvidada() as any)
+    prismaMock.timeEntry.findFirst.mockResolvedValueOnce({ staffId: 'staff-1' } as any).mockResolvedValueOnce(olvidada() as any)
     await expect(
       corregirSalidaOlvidada({
         venueId: 'venue-1',
@@ -282,7 +374,9 @@ describe('corregirSalidaOlvidada (el gerente, en Asistencia)', () => {
   })
 
   it('una checada que no está como «salida olvidada» no se toca (409)', async () => {
-    prismaMock.timeEntry.findFirst.mockResolvedValueOnce(olvidada({ salidaOlvidada: false }) as any)
+    prismaMock.timeEntry.findFirst
+      .mockResolvedValueOnce({ staffId: 'staff-1' } as any)
+      .mockResolvedValueOnce(olvidada({ salidaOlvidada: false }) as any)
     await expect(
       corregirSalidaOlvidada({
         venueId: 'venue-1',
@@ -299,14 +393,17 @@ describe('corregirSalidaOlvidada (el gerente, en Asistencia)', () => {
     ['en el futuro', mx('2026-11-06T08:00:00'), 'SALIDA_EN_EL_FUTURO'],
     ['después del día del turno (días de largo)', mx('2026-11-04T09:00:00'), 'SALIDA_DESPUES_DEL_DIA'],
   ])('rechaza una salida %s', async (_n, salida, code) => {
-    prismaMock.timeEntry.findFirst.mockResolvedValueOnce(olvidada() as any)
+    prismaMock.timeEntry.findFirst.mockResolvedValueOnce({ staffId: 'staff-1' } as any).mockResolvedValueOnce(olvidada() as any)
     await expect(
       corregirSalidaOlvidada({ venueId: 'venue-1', timeEntryId: 'te-1', clockOutTime: salida, actorStaffId: 'gerente', ahora }),
     ).rejects.toMatchObject({ statusCode: 400, code })
   })
 
   it('rechaza una salida que se encima con su siguiente entrada', async () => {
-    prismaMock.timeEntry.findFirst.mockResolvedValueOnce(olvidada() as any).mockResolvedValueOnce({ id: 'te-2' } as any)
+    prismaMock.timeEntry.findFirst
+      .mockResolvedValueOnce({ staffId: 'staff-1' } as any)
+      .mockResolvedValueOnce(olvidada() as any)
+      .mockResolvedValueOnce({ id: 'te-2' } as any)
     await expect(
       corregirSalidaOlvidada({
         venueId: 'venue-1',
