@@ -277,6 +277,26 @@ describe('D7 · ronda sin red que llega a una cuenta que otra caja ya cobró', (
     expect(await notasDe(cobrada)).toHaveLength(0)
   })
 
+  it('Codex r4 #3: la llave recortada de una ronda NO se confunde con la misma llave propia de OTRA mesa', async () => {
+    const llave = `propia-${randomUUID()}`
+    // Mesa A, viva, con un renglón cuya llave propia es `llave`.
+    const tA = await mesa()
+    const cuentaA = (await assignTable(venueId, tA, mesera, 2)).order.id
+    const vA = await prisma.order.findUniqueOrThrow({ where: { id: cuentaA }, select: { version: true } })
+    await addItemsToOrder(venueId, cuentaA, [{ productId: coca, quantity: 1, externalId: llave }] as any, vA.version, true)
+    // Mesa B, cobrada; le llega una ronda nueva con la MISMA llave, con espacios.
+    const { cobrada } = await mesaCobradaPorLaCaja()
+    const r = { ...ronda(cobrada), payload: { orderId: cobrada, items: [{ productId: agua, quantity: 1, externalId: ` ${llave} ` }] } }
+
+    const [ack] = await replay([r])
+
+    expect(ack.status).toBe('ACKED')
+    const aparte = String((ack.result as any).cuentaAparte?.orderId)
+    expect(aparte).not.toBe(cuentaA)
+    expect(await fotoDe(aparte)).toMatchObject({ total: 20, renglones: 1, pagos: 0 })
+    expect(await fotoDe(cuentaA)).toMatchObject({ renglones: 1 })
+  })
+
   it('Codex r0 #1: la ronda ya estaba guardada y otra caja la SEPARÓ a otra cuenta antes de cobrar: no se duplica', async () => {
     const { t, cobrada } = await mesaCobradaPorLaCaja()
     const r = ronda(cobrada)

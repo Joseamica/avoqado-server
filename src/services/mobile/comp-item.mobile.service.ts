@@ -25,7 +25,7 @@ import { impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { importesDeLasFilas } from '../shared/repartoDescuento'
-import { baseDeCargos } from '../shared/serviceCharges'
+import { baseDeCargos, importeDeCargo } from '../shared/serviceCharges'
 import {
   RENGLON_PARA_REPARTO_SELECT,
   conservarDescuentoHistorico,
@@ -272,10 +272,7 @@ export async function recalculateOrderTotals(
   const serviceCharges = await db.orderServiceCharge.findMany({ where: { orderId } })
   let cargosDec = new Prisma.Decimal(0)
   for (const sc of serviceCharges) {
-    const amountDec =
-      sc.type === 'PERCENTAGE'
-        ? baseDec.mul(sc.value).div(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
-        : new Prisma.Decimal(sc.amount)
+    const amountDec = sc.type === 'PERCENTAGE' ? importeDeCargo(sc.type, sc.value, baseDec) : new Prisma.Decimal(sc.amount)
     const amount = amountDec.toNumber()
     // Un % se re-calcula cuando cambia la cuenta; un monto fijo se respeta.
     if (sc.type === 'PERCENTAGE' && !amountDec.equals(sc.amount)) {

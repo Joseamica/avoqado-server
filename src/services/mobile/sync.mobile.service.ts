@@ -1574,11 +1574,21 @@ const NOTA_RONDA_TARDIA = 'RONDA_TARDIA_EN_CUENTA_APARTE'
  * ronda se guarda entera en una sola transacción, y sus llaves (`sync:<intent>:<i>` o las del aparato; la instancia de cada combo) no
  * se repiten entre rondas. Las dos búsquedas usan índice (`OrderItem.externalId`, `OrderPromotion.instanceId`). Devuelve la cuenta.
  */
-async function rondaYaEnAlgunaCuenta(venueId: string, conPromocion: any[], normales: any[]): Promise<string | null> {
-  const llaves = [...new Set(llavesGuardadasDeLaRonda(normales))]
+async function rondaYaEnAlgunaCuenta(venueId: string, original: string, conPromocion: any[], normales: any[]): Promise<string | null> {
+  // En todo el negocio, la llave TAL CUAL llegó (como siempre). La recortada sólo dentro de la cuenta pedida: recortar en todo el
+  // negocio podía confundir la llave propia de OTRA mesa con ésta y dar por guardada una ronda que no lo estaba (Codex r4 #3).
+  const llaves = [...new Set(normales.map(it => it.externalId).filter((k: unknown): k is string => typeof k === 'string' && k.length > 0))]
   if (llaves.length) {
     const renglon = await prisma.orderItem.findFirst({
       where: { externalId: { in: llaves }, order: { venueId } },
+      select: { orderId: true },
+    })
+    if (renglon) return renglon.orderId
+  }
+  const recortadas = [...new Set(llavesGuardadasDeLaRonda(normales))].filter(k => !llaves.includes(k))
+  if (recortadas.length) {
+    const renglon = await prisma.orderItem.findFirst({
+      where: { externalId: { in: recortadas }, orderId: original, order: { venueId } },
       select: { orderId: true },
     })
     if (renglon) return renglon.orderId
@@ -1634,7 +1644,7 @@ async function aplicarRondaTardia(p: {
   const { venueId, staffId, intent, original } = p
   const horaRealDeLaRonda = horaRealDelAparato({ isOfflineReplay: true, createdAtLocal: intent.createdAtLocal }, llegadaDeLaPeticion())
   const pedida = { orderId: original.id, version: original.version, total: Number(original.total ?? 0) }
-  const yaEn = await rondaYaEnAlgunaCuenta(venueId, p.conPromocion, p.itemsWithKey)
+  const yaEn = await rondaYaEnAlgunaCuenta(venueId, original.id, p.conPromocion, p.itemsWithKey)
   if (yaEn) {
     return { id: intent.id, status: 'ACKED', result: { ...pedida, ...(yaEn !== original.id ? { cuentaAparte: { orderId: yaEn } } : {}) } }
   }
