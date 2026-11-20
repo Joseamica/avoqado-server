@@ -403,6 +403,8 @@ describe('🔴 D26: la cuenta anulada que revive por dinero tardío vuelve a gas
     }
     // El paso esperó su tope y la respuesta salió; lo extra es el tope y poco más, nunca los intentos completos del paso (2 × 1 s +
     // pausa, lo que esperaba la respuesta en la ronda 2: con esa versión esta prueba sale en rojo).
+    // La medición queda en la salida de la corrida: es el «peor caso medido» de la promesa.
+    process.stdout.write(`[D26 medición] base=${base}ms conPaso=${conPaso}ms extra=${conPaso - base}ms\n`)
     expect(conPaso).toBeGreaterThanOrEqual(1_400)
     expect(conPaso - base).toBeLessThan(1_900)
     // El paso siguió solo y, suelta la promoción, termina de gastar (o se rinde con su logger.error: el uso queda libre).
