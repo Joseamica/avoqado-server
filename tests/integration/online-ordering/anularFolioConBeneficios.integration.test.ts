@@ -36,7 +36,6 @@ import { aplicarReasignacion, type CobroFoto, type DepsAplicar, type OrdenFoto }
 import { recordOrderPayment, settleStandalonePaymentInTx } from '@/services/tpv/payment.tpv.service'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
-import { volverAGastarUsosDeCuentaRevividaEnTx } from '@/services/shared/usoDelDescuento'
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 import { encryptGiftCardCode, generateGiftCardCode, generateOpaqueToken, hashGiftCardCode } from '@/services/giftCards/giftCardCode'
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
@@ -431,10 +430,6 @@ const depsDelScript = (): DepsAplicar => ({
             (await tx.payment.updateMany({ where: { id: paymentId, orderId: de, status: 'COMPLETED' }, data: { orderId: a } })).count,
           prepararDestino: async (ordenId, data) => {
             await tx.order.update({ where: { id: ordenId }, data })
-          },
-          // D31: como el script, la anulada que revive vuelve a gastar el uso que su anulación devolvió.
-          volverAGastarUsosAlRevivir: async ordenId => {
-            await volverAGastarUsosDeCuentaRevividaEnTx(tx, { venueId, orderId: ordenId, canal: 'reasignarCobro', quien: null })
           },
           guardarTotales: async (ordenId, c, conEfectos) => {
             const pago = c

@@ -251,11 +251,6 @@ export interface EscritorReasignacion {
   moverCobro(paymentId: string, deOrdenId: string, aOrdenId: string): Promise<number>
   prepararDestino(ordenId: string, data: { status?: 'PENDING'; shiftId?: string }): Promise<void>
   /**
-   * 🔴 hz:e82938e1:D31: el destino anulado que esta reasignación revive vuelve a gastar los usos de su descuento que su anulación devolvió
-   * (`volverAGastarUsosDeCuentaRevividaEnTx`, D26), con las dos órdenes tomadas y antes del turno (Order → Discount → … → Shift).
-   */
-  volverAGastarUsosAlRevivir(ordenId: string): Promise<void>
-  /**
    * Los totales finales de la cuenta desde sus cobros (`settleStandalonePaymentInTx`). Con `cobro`: el que la salda, con sus
    * efectos de saldar. Con `null`: sólo los totales (el origen ya los tuvo cuando se saldó).
    */
@@ -300,13 +295,6 @@ export async function aplicarReasignacion(
     // De aquí en adelante, lo releído: estado, turno y `completedAt` frescos.
     const { cobro: c, origen: o, destino: d } = ahora
 
-    // D31 (antes ajeno de D26, na728b67 #1; Codex r1 #5): la anulada que esta reasignación revive vuelve a gastar el uso que su anulación
-    // devolvió (D24). Pre-reabierta aquí, el cierre ya la ve viva y `reabrirSiRecibeDinero` no lo haría. Va recién tomadas las dos
-    // cuentas, ANTES de mover el cobro y de guardar el turno en el destino (Order → Discount → … → Shift). Con pedido en línea no se
-    // pre-reabre: la reapertura del cierre ya lo gasta.
-    const revive = veredicto.resumen.destinoCambiaEstado && !d.pedidoEnLinea
-    if (revive) await escritor.volverAGastarUsosAlRevivir(d.id)
-
     const movidos = await escritor.moverCobro(c.id, o.id, d.id)
     if (movidos !== 1) {
       throw new Error(`carrera: el cobro ${c.id} ya no estaba en ${o.orderNumber} al escribir (${movidos} filas)`)
@@ -319,7 +307,7 @@ export async function aplicarReasignacion(
     // su pedido —«Mi equipo» entregado, folio para el barrido que lo pasa a «Por entregar» y publica— y avisa al gerente. Pre-reabierta,
     // la reapertura no la veía. `estadoParaCobrar` la reabre igual: un pedido de Rappi no llega aquí (`validarReasignacion`) y lo que
     // pasa la validación cubre la cuenta medida viva, así que también como cancelada (`cubreComoCancelada`), de cualquier origen.
-    if (revive) data.status = 'PENDING'
+    if (veredicto.resumen.destinoCambiaEstado && !d.pedidoEnLinea) data.status = 'PENDING'
     if (!d.shiftId && c.shiftId) data.shiftId = c.shiftId
     if (Object.keys(data).length > 0) await escritor.prepararDestino(d.id, data)
 

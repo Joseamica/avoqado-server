@@ -313,7 +313,6 @@ async function main(): Promise<void> {
   const { releaseTableIfSettled } = await import('../src/services/tpv/table.tpv.service')
   // Dinámico como los demás: `serializableRetry` carga `prismaClient`, que arma su URL al cargarse, ANTES de `elegirBase()`.
   const { withDeadlockRetry } = await import('../src/utils/serializableRetry')
-  const { volverAGastarUsosDeCuentaRevividaEnTx } = await import('../src/services/shared/usoDelDescuento')
 
   try {
     const cargados: Cargado[] = []
@@ -381,9 +380,6 @@ async function main(): Promise<void> {
                 (await tx.payment.updateMany({ where: { id: paymentId, orderId: de, status: 'COMPLETED' }, data: { orderId: a } })).count,
               prepararDestino: async (ordenId, data) => {
                 await tx.order.update({ where: { id: ordenId }, data })
-              },
-              volverAGastarUsosAlRevivir: async ordenId => {
-                await volverAGastarUsosDeCuentaRevividaEnTx(tx, { venueId, orderId: ordenId, canal: 'reasignarCobro', quien: null })
               },
               guardarTotales: async (ordenId, cobro, conEfectos) => {
                 const pago = cobro
