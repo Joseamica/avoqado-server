@@ -152,6 +152,8 @@ export interface AuthorizationState {
   /** Codex r3 #3: la comisión de la plataforma que Stripe SÍ cobró (`application_fee_amount`); 0 si el cobro no la trae (p. ej. el
    *  dueño capturó a mano en su Stripe). Opcional: un lector que no la sabe deja la congelada del cargo. */
   applicationFeeCents?: number
+  /** D661 (Ruling 10): la hora en que el PROVEEDOR autorizó (el cargo apartado), nunca la de Avoqado; ausente si no la trae. */
+  authorizedAt?: Date
 }
 
 export interface CaptureParams {

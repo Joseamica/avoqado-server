@@ -611,6 +611,8 @@ export class StripeConnectProvider implements IEcommerceProvider {
         : null,
       paymentMethodType: details?.type ?? null,
       applicationFeeCents: pi?.application_fee_amount ?? 0,
+      // Con captura manual el cargo nace al autorizar: su `created` es la hora en que Stripe apartó la tarjeta.
+      ...(charge?.created ? { authorizedAt: new Date(charge.created * 1000) } : {}),
     }
   }
 

@@ -141,6 +141,23 @@ describe('StripeConnectProvider — apartar, cobrar, liberar, leer', () => {
       mockStripe.paymentIntents.retrieve.mockResolvedValueOnce({ ...piBase, status: 'succeeded', application_fee_amount: null })
       expect((await provider.getAuthorization(merchant as any, { paymentIntentId: 'pi_1' })).applicationFeeCents).toBe(0)
     })
+
+    it('D661 (Ruling 10): authorizedAt es la hora en que Stripe autorizó (el cargo apartado: latest_charge.created), por sesión y por PaymentIntent; sin cargo no la inventa', async () => {
+      const conHora = { ...piBase, latest_charge: { ...piBase.latest_charge, created: 1730000100 } }
+      mockStripe.checkout.sessions.retrieve.mockResolvedValueOnce({ id: 'cs_1', status: 'complete', payment_intent: conHora })
+      expect((await provider.getAuthorization(merchant as any, { checkoutSessionId: 'cs_1' })).authorizedAt).toEqual(
+        new Date(1730000100 * 1000),
+      )
+      mockStripe.paymentIntents.retrieve.mockResolvedValueOnce(conHora)
+      expect((await provider.getAuthorization(merchant as any, { paymentIntentId: 'pi_1' })).authorizedAt).toEqual(
+        new Date(1730000100 * 1000),
+      )
+      // Sin cargo expandido (sesión abierta, o un objeto sin hora): ausente, nunca el reloj de Avoqado.
+      mockStripe.checkout.sessions.retrieve.mockResolvedValueOnce({ id: 'cs_1', status: 'open', payment_intent: null })
+      expect(await provider.getAuthorization(merchant as any, { checkoutSessionId: 'cs_1' })).not.toHaveProperty('authorizedAt')
+      mockStripe.paymentIntents.retrieve.mockResolvedValueOnce(piBase)
+      expect(await provider.getAuthorization(merchant as any, { paymentIntentId: 'pi_1' })).not.toHaveProperty('authorizedAt')
+    })
   })
 
   describe('capture', () => {

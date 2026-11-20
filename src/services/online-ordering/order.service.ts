@@ -34,6 +34,7 @@ import {
   MAX_UNPAID_FOLIOS_PER_VENUE,
   OPEN_ORDER_STATUSES,
   awaitingAcceptanceWhere,
+  cargoDeNadie,
   liveCardDraftsWhere,
   unpaidFoliosWhere,
 } from './constants'
@@ -1182,6 +1183,7 @@ async function draftTracking(token: string): Promise<PublicTracking | null> {
       amount: true,
       checkoutExpiresAt: true,
       createdAt: true,
+      customerPhone: true,
       venueId: true,
       venue: { select: VENUE_PUBLIC_SELECT },
     },
@@ -1212,7 +1214,7 @@ async function draftTracking(token: string): Promise<PublicTracking | null> {
     rejectReason: null,
     createdAt: c.createdAt.toISOString(),
     canCancel: false,
-    requiresAcceptance: true, // el borrador de tarjeta es de «Mi equipo»
+    requiresAcceptance: !cargoDeNadie(c), // D661: el modo del borrador, no el de hoy de la tienda
     channel: null,
     ...(precioNuevo ? { precioNuevo } : {}),
   }
