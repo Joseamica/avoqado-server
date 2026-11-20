@@ -667,26 +667,32 @@ export async function llavesAnuladasDeLaCuenta(
   llaves: string[],
 ): Promise<Set<string>> {
   const anuladas = new Set<string>()
-  // Una consulta por llave, con su propio `take: 1`: la respuesta es exacta para cada una. Con UNA consulta y un tope por filas, otras
-  // anulaciones que nombran la misma llave (una cuenta fusionada, una llave repetida) dejaban fuera la que importa (Codex r5 #7, r6
-  // #3). Sin tope de llaves: con uno, la llave 201 de una ronda grande ya no se revisaba y volvía a cobrarse (Codex r7 #1). Son tantas
-  // consultas como renglones trae la ronda, cada una con `take: 1` y por el índice de `orderId`, y sólo si la cuenta tiene anulaciones.
-  const pedidas = [...new Set(llaves.filter(esLlaveDeRonda))]
-  if (pedidas.length === 0) return anuladas
-  // Casi ninguna cuenta tiene anulaciones: con una lectura se sabe y la ronda no paga una consulta por renglón.
-  const hayAnulaciones = await tx.orderAction.findMany({ where: { orderId, actionType: 'VOID' }, select: { id: true }, take: 1 })
-  if (hayAnulaciones.length === 0) return anuladas
-  for (const llave of pedidas) {
-    const fila = await tx.orderAction.findMany({
-      where: { orderId, actionType: 'VOID', metadata: { path: ['externalIds'], array_contains: [llave] } },
-      select: { metadata: true },
-      take: 1,
+  const pedidas = new Set(llaves.filter(esLlaveDeRonda))
+  if (pedidas.size === 0) return anuladas
+  // Se recorren TODAS las anulaciones de la cuenta, por páginas de `PAGINA_DE_ANULACIONES` con cursor estable: la respuesta es exacta
+  // (sin «las últimas N», que dejaba fuera la que importa, Codex r5 #7 y r6 #3) y su costo depende de cuántas anulaciones tiene la
+  // cuenta (casi siempre 0: una lectura), no de cuántos renglones trae la ronda (Codex r7 #1 y r8 #8: una consulta por llave eran
+  // 1,001 para una ronda de 1,000). Se detiene en cuanto encontró todas las pedidas.
+  let cursor: string | undefined
+  for (;;) {
+    const pagina = await tx.orderAction.findMany({
+      where: { orderId, actionType: 'VOID' },
+      select: { id: true, metadata: true },
+      orderBy: { id: 'asc' },
+      take: PAGINA_DE_ANULACIONES,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     })
-    const ids = (fila[0]?.metadata as { externalIds?: unknown } | null | undefined)?.externalIds
-    if (Array.isArray(ids) && ids.includes(llave)) anuladas.add(llave)
+    for (const { metadata } of pagina) {
+      const ids = (metadata as { externalIds?: unknown } | null)?.externalIds
+      if (Array.isArray(ids)) for (const id of ids) if (typeof id === 'string' && pedidas.has(id)) anuladas.add(id)
+    }
+    if (anuladas.size === pedidas.size || pagina.length < PAGINA_DE_ANULACIONES) return anuladas
+    cursor = pagina[pagina.length - 1].id
   }
-  return anuladas
 }
+
+/** Anulaciones (`OrderAction` VOID) que se leen por página al buscar lápidas. */
+const PAGINA_DE_ANULACIONES = 200
 
 export async function conLlaveDeRonda<T>(crear: () => Promise<T>): Promise<T> {
   try {

@@ -1000,13 +1000,9 @@ describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la
     expect(globalDb.orderAction?.create).not.toHaveBeenCalled()
   })
 
-  /** Las lápidas de la cuenta: la base contesta por llave (`array_contains`), y sin filtro de llave dice si hay alguna anulación. */
+  /** Las lápidas de la cuenta: una anulación (`OrderAction` VOID) que nombra estas llaves. */
   const conLapidas = (anuladas: string[]) =>
-    tx.orderAction.findMany.mockImplementation(async ({ where }: any) => {
-      const llave = where?.metadata?.array_contains?.[0]
-      if (llave === undefined) return anuladas.length ? [{ id: 'void-1' }] : []
-      return anuladas.includes(llave) ? [{ metadata: { externalIds: anuladas } }] : []
-    })
+    tx.orderAction.findMany.mockImplementation(async () => (anuladas.length ? [{ id: 'void-1', metadata: { externalIds: anuladas } }] : []))
 
   it('#1: el reenvío de la ronda NO vuelve a crear el renglón anulado (el resto, como réplica)', async () => {
     conLapidas(['sync:r:0'])
@@ -1022,11 +1018,13 @@ describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la
       1,
       true,
     )
-    // Codex r5 #7 y r6 #3: una consulta por llave, exacta (`take: 1`), no «las últimas N» anulaciones de la cuenta.
+    // Codex r5 #7, r6 #3 y r8 #8: se recorren TODAS las anulaciones de la cuenta por páginas con cursor (no «las últimas N», ni una
+    // consulta por llave).
     expect(tx.orderAction.findMany).toHaveBeenCalledWith({
-      where: { orderId: 'order', actionType: 'VOID', metadata: { path: ['externalIds'], array_contains: ['sync:r:0'] } },
-      select: { metadata: true },
-      take: 1,
+      where: { orderId: 'order', actionType: 'VOID' },
+      select: { id: true, metadata: true },
+      orderBy: { id: 'asc' },
+      take: 200,
     })
     expect(tx.orderItem.create).not.toHaveBeenCalled()
   })
@@ -1052,6 +1050,19 @@ describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la
     await addItemsToOrder('venue', 'order', ronda, 1, true)
     expect(tx.orderItem.create).toHaveBeenCalledTimes(200)
     expect(tx.orderItem.create.mock.calls.map((c: any[]) => c[0].data.externalId)).not.toContain('sync:r:200')
+  })
+
+  it('Codex r8 #8: muchas anulaciones se leen por páginas con cursor hasta encontrar la llave', async () => {
+    const pagina1 = Array.from({ length: 200 }, (_, i) => ({
+      id: `v${String(i).padStart(3, '0')}`,
+      metadata: { externalIds: [`otra:${i}`] },
+    }))
+    tx.orderAction.findMany.mockResolvedValueOnce(pagina1).mockResolvedValueOnce([{ id: 'v200', metadata: { externalIds: ['sync:r:0'] } }])
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 1, externalId: 'sync:r:0' }], 1, true)
+    expect(tx.orderAction.findMany).toHaveBeenCalledTimes(2)
+    expect(tx.orderAction.findMany.mock.calls[1][0]).toMatchObject({ cursor: { id: 'v199' }, skip: 1, take: 200 })
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
   })
 
   it('decisión 1 de D7: sin anulaciones en la cuenta, una sola lectura (no una por renglón)', async () => {
