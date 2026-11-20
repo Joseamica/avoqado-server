@@ -13,7 +13,9 @@ export async function categoriaParaProductoSinCategoria(
   tx: Prisma.TransactionClient,
   venueId: string,
 ): Promise<{ id: string; creada: boolean }> {
-  const primera = () => tx.menuCategory.findFirst({ where: { venueId }, orderBy: { displayOrder: 'asc' }, select: { id: true } })
+  // Una categoría eliminada (19-nov) no cuenta: el producto quedaría donde el dueño ya no ve nada.
+  const primera = () =>
+    tx.menuCategory.findFirst({ where: { venueId, deletedAt: null }, orderBy: { displayOrder: 'asc' }, select: { id: true } })
 
   const existente = await primera()
   if (existente) return { id: existente.id, creada: false }
@@ -26,7 +28,13 @@ export async function categoriaParaProductoSinCategoria(
   // `skipDuplicates`: una «General» hecha a mano en el mismo instante no toma este candado; chocar con el único
   // (venueId, slug) abortaría la transacción del producto. Si ya estaba, se usa ésa.
   const { count } = await tx.menuCategory.createMany({ data: [{ venueId, name: 'General', slug: 'general' }], skipDuplicates: true })
-  const general = await tx.menuCategory.findUnique({ where: { venueId_slug: { venueId, slug: 'general' } }, select: { id: true } })
+  const general = await tx.menuCategory.findUnique({
+    where: { venueId_slug: { venueId, slug: 'general' } },
+    select: { id: true, deletedAt: true },
+  })
   if (!general) throw new Error(`No se pudo leer la categoría General del negocio ${venueId}`)
+  // La «General» que el dueño eliminó vuelve a verse (como haría el producto que entra): si no, el validador del alta la rechaza
+  // por eliminada y el producto sin categoría ya no se podría dar de alta (Codex r3 B7).
+  if (general.deletedAt) await tx.menuCategory.update({ where: { id: general.id }, data: { deletedAt: null } })
   return { id: general.id, creada: count === 1 }
 }

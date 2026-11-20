@@ -96,7 +96,10 @@ describe('Panel · el padre de una categoría es del mismo negocio', () => {
 
   it('control: crear sin padre no busca padre', async () => {
     await menuService.createMenuCategory(MIO, { name: 'Postres' } as any)
-    expect(prismaMock.menuCategory.findFirst).not.toHaveBeenCalled()
+    // Las únicas búsquedas son por el nombre (repetido o eliminado para reusar, encargo bc1dcc), nunca la del padre.
+    for (const [arg] of prismaMock.menuCategory.findFirst.mock.calls) {
+      expect(arg).toMatchObject({ where: { venueId: MIO, name: { equals: 'Postres', mode: 'insensitive' } } })
+    }
     expect(prismaMock.menuCategory.create).toHaveBeenCalledTimes(1)
   })
 })

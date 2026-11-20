@@ -84,7 +84,7 @@ export interface WizardStep3RecipeData {
 
 /** Categoría del alta: tiene que ser de este negocio. */
 async function validarCategoriaDelAlta(venueId: string, categoryId: string) {
-  const category = await prisma.menuCategory.findFirst({ where: { id: categoryId, venueId } })
+  const category = await prisma.menuCategory.findFirst({ where: { id: categoryId, venueId, deletedAt: null } })
   if (!category) throw new AppError('La categoría no existe o no pertenece a este negocio', 404)
   return category
 }

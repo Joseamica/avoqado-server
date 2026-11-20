@@ -2107,6 +2107,9 @@ model MenuCategory {
 
   // Scheduling
   active         Boolean  @default(true)
+  /// Eliminada por el dueño (encargo bc1dcc, 19-nov-2026): la fila sigue porque guarda archivados o una familia (RESTRICT); queda
+  /// apagada y ESCONDIDA para el dueño. La base la vuelve a mostrar al prenderla o si algo vivo cae en ella (triggers).
+  deletedAt      DateTime?
   availableFrom  String? // "08:00"
   availableUntil String? // "22:00"
   availableDays  String[] // ["MON", "TUE", "WED"]

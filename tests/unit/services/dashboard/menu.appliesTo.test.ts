@@ -71,6 +71,8 @@ beforeEach(() => {
   prismaMock.menu.update.mockReset()
   prismaMock.menuCategoryAssignment.deleteMany.mockReset()
   prismaMock.menuCategoryAssignment.createMany.mockReset()
+  // Las categorías que pide el menú son del negocio y no están eliminadas (encargo bc1dcc: sólo se asignan las visibles).
+  prismaMock.menuCategory.findMany.mockImplementation((async (a: any) => (a?.where?.id?.in ?? []).map((id: string) => ({ id }))) as never)
   limpiaCache.mockReset()
 })
 
