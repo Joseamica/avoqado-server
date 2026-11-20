@@ -77,6 +77,7 @@ import {
   compItemsSchema,
   createAndAddCustomerSchema,
   createOrderWithItemsSchema,
+  retirarVentaSinCobroSchema,
   createProofOfSaleSchema,
   setVerificationNumberSchema,
   terminalVerificationPageSchema,
@@ -747,6 +748,26 @@ router.post(
   checkDescuentoManualPermissionIfPresent,
   checkCuponPermissionIfPresent,
   orderController.createOrderWithItems,
+)
+
+/**
+ * POST /tpv/venues/{venueId}/orders/{orderId}/retirar-sin-cobro
+ *
+ * hz:e82938e1:D36 (20-nov): «atrás» en la pantalla de cobro de «Cobrar» SIN ningún intento de cobro. La venta que «Cobrar» creó al ir a
+ * cobrar se anula (nunca se borra) en vez de quedarse abierta para siempre. Sólo una venta de Cobrar de ESTA terminal, declarada para
+ * cobrarse en el momento (`payLater=false`), de las últimas 24 h, sin ningún pago ni solicitud del POS, revisado bajo el candado
+ * (`ventaDeCobrarSinCobro.tpv.service.ts`). 200 `{ estado: 'RETIRADA' | 'YA_RETIRADA' }`.
+ *
+ * Permiso `orders:create` a propósito: quien armó la venta la retira antes de cobrar, como vaciar el carrito; no es «Cancelar cuenta»
+ * (`orders:cancel-unpaid`), que cancela cualquier cuenta sin cobrar. Sin `TABLE_SERVICE`: Cobrar no es de mesas.
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/retirar-sin-cobro',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('orders:create'),
+  validateRequest(retirarVentaSinCobroSchema),
+  orderController.retirarVentaSinCobro,
 )
 
 /**
