@@ -3,12 +3,8 @@
 ALTER TABLE "public"."KdsOrder" ADD COLUMN IF NOT EXISTS "kitchenDoneAt" TIMESTAMP(3);
 ALTER TABLE "public"."KdsOrder" ADD COLUMN IF NOT EXISTS "archivedAt" TIMESTAMP(3);
 ALTER TABLE "public"."VenueSettings" ADD COLUMN IF NOT EXISTS "kitchenCanReleaseCourses" BOOLEAN NOT NULL DEFAULT false;
--- Codex r1 #8: las comandas con tiempos que la cocina YA terminó antes del despliegue salen del tablero al desplegar; con su
--- última modificación como «cuándo terminó» entran a «Recientes» la hora que les toca en vez de desaparecer sin rastro.
--- Sólo las de preparación por producto en READY (pocas: la v1 es de mesas con tiempos).
-UPDATE "public"."KdsOrder" SET "kitchenDoneAt" = "updatedAt"
+-- Las comandas con tiempos que la cocina YA terminó antes del despliegue (READY) salen del tablero al desplegar. No se sabe a qué
+-- hora terminó (su `updatedAt` puede ser una entrega parcial posterior, Codex r12): se les pone una hora de hace dos horas, así no
+-- entran a «Recientes» con una hora inventada ni se pueden «deshacer» fuera de su ventana (en develop las v1 no tenían «Deshacer»).
+UPDATE "public"."KdsOrder" SET "kitchenDoneAt" = (NOW() AT TIME ZONE 'UTC') - INTERVAL '2 hours'
 WHERE "preparationVersion" = 1 AND status = 'READY' AND "kitchenDoneAt" IS NULL;
--- Codex r7 #5: las que la caja entregó (o se cancelaron) el último día también conservan su hora en «Recientes». Acotado a un día.
-UPDATE "public"."KdsOrder" SET "kitchenDoneAt" = COALESCE("completedAt", "updatedAt")
-WHERE "preparationVersion" = 1 AND status = 'COMPLETED' AND "kitchenDoneAt" IS NULL
-  AND COALESCE("completedAt", "updatedAt") > (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 day';
