@@ -25,6 +25,8 @@ export interface AcceptingState {
   config: OnlineOrderingConfig
   /** D662 parte 2: la tienda está pausada sola desde esta hora (ISO; la hora límite del 2.º pedido sin atender). Null = no. */
   autoPausedAt?: string | null
+  /** D662 v4: cuándo se guardaron por última vez los ajustes que leyó (orden de las lecturas del panel; Codex p2v4-r2 #5). */
+  ajustesGuardadosEn?: Date | null
 }
 
 /**

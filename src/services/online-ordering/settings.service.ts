@@ -29,6 +29,8 @@ export type OnlineOrderingSettingsRead = OnlineOrderingConfig & {
   lastToPayPollAt: Date | null
   /** D662 parte 2: último «Reanudar» (o paso a «Mi equipo»): la pausa sola sólo cuenta pedidos con hora límite posterior. */
   autoPauseResumedAt?: Date | null
+  /** D662 v4: cuándo se guardó la fila (Prisma `@updatedAt`; Reanudar, pausar, ajustes y latidos la mueven). */
+  updatedAt?: Date | null
 }
 
 function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingSettingsRead {
@@ -45,6 +47,7 @@ function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingSettingsRead {
     lastInboxPollAt: row.lastInboxPollAt ?? null,
     lastToPayPollAt: row.lastToPayPollAt ?? null,
     autoPauseResumedAt: row.autoPauseResumedAt ?? null,
+    updatedAt: row.updatedAt ?? null,
   }
 }
 

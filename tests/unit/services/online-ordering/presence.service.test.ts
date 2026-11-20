@@ -594,10 +594,29 @@ describe('D662 parte 2 (v4) · la pausa sola la decide UNA consulta exacta en Po
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'PAUSED', reason: 'MANUAL_PAUSE' })
   })
 
-  it('no filtra autoPauseResumedAt dentro de config (sale en la API de ajustes)', async () => {
-    conVuelta(vuelta(), { autoPauseResumedAt: min(-30) })
+  it('no filtra autoPauseResumedAt ni updatedAt dentro de config; la hora en que se guardaron los ajustes sale aparte (Codex p2v4-r2 #5)', async () => {
+    const guardado = min(-2)
+    conVuelta(vuelta(), { autoPauseResumedAt: min(-30), updatedAt: guardado })
     const st = await getAcceptingStatus('v1', NOW)
     expect(st.config).not.toHaveProperty('autoPauseResumedAt')
+    expect(st.config).not.toHaveProperty('updatedAt')
+    expect(st.ajustesGuardadosEn).toEqual(guardado)
+  })
+
+  it('Codex p2v4-r2 #2: la espera no pasa de L(B) + 30 s (una cuenta tomada después ya no puede cambiar el veredicto)', async () => {
+    const reciente = new Date(Date.now() - 29_990) // L(B) hace casi 30 s: queda ~10 ms de espera posible
+    const par = vuelta({ fallas: 2, ultimaFalla: reciente, pausaId: 'ooB', pausaAt: reciente, pausaDesde: min(-3) })
+    conVuelta([])
+    const ocupada = new Error('Raw query failed. Code: `55P03`. Message: `could not obtain lock`')
+    queryRaw().mockImplementation(async (plantilla: TemplateStringsArray) => {
+      const texto = plantilla.join('?')
+      if (texto.includes('FOR SHARE')) throw ocupada
+      if (texto.includes('count(*)::int AS n')) return [{ n: 1 }]
+      return par
+    })
+    const t0 = Date.now()
+    await expect(getAcceptingStatus('v1', new Date(Date.now()))).resolves.toMatchObject({ status: 'PAUSED' })
+    expect(Date.now() - t0).toBeLessThan(1_000)
   })
 
   describe('avanzarCortePausaSola (tras la respuesta de una persona)', () => {

@@ -246,8 +246,11 @@ const pendientesQuePuedenCambiarlo = (venueId: string, desde: Date) => Prisma.sq
  * venga después toma su reloj después de la hora límite (su respuesta llega tarde). Sin fila no hay abrazo mortal con quien toma dos
  * cuentas. Más de `TOPE_CUENTAS_EN_ESPERA` cuentas: se espera al margen definitivo (ninguna transacción dura más de 15 s).
  */
-async function esperarLoQueSeGuarda(venueId: string, desde: Date, pausaAt: Date): Promise<void> {
-  const limite = Date.now() + ESPERA_MAXIMA_MS
+async function esperarLoQueSeGuarda(venueId: string, desde: Date, pausaAt: Date, now: Date): Promise<void> {
+  // Después de `L(B) + 30 s` toda escritura con reloj anterior a `L(B)` ya terminó (las transacciones duran 15 s como máximo): una cuenta
+  // tomada después ya no puede cambiar el veredicto y no se le espera (Codex p2v4-r2 #2: una fusión larga no detiene la pausa).
+  const margenRestante = Math.max(0, pausaAt.getTime() + MARGEN_DEFINITIVO_MS - now.getTime())
+  const limite = Date.now() + Math.min(ESPERA_MAXIMA_MS, margenRestante)
   for (;;) {
     try {
       const desenlace = await prisma.$transaction(async tx => {
@@ -262,14 +265,14 @@ async function esperarLoQueSeGuarda(venueId: string, desde: Date, pausaAt: Date)
         return 'LISTO' as const
       })
       if (desenlace === 'MUCHAS') {
-        const falta = pausaAt.getTime() + MARGEN_DEFINITIVO_MS - Date.now()
-        if (falta > 0) await esperar(Math.min(falta, ESPERA_MAXIMA_MS))
+        const falta = limite - Date.now()
+        if (falta > 0) await esperar(falta)
       }
       return
     } catch (error) {
       if (!esCandadoOcupado(error) || Date.now() >= limite) {
         if (esCandadoOcupado(error)) {
-          logger.warn('[OnlineOrdering] la pausa sola esperó 20 s a una cuenta tomada; lee sin esperar más', { venueId })
+          logger.warn('[OnlineOrdering] la pausa sola dejó de esperar una cuenta tomada (ya no puede cambiar el veredicto)', { venueId })
           return
         }
         throw error
@@ -294,7 +297,7 @@ async function vueltaConfirmada(
     if (!v.pausaId || !v.pausaAt || !v.pausaDesde) return { v, corte }
     if (now.getTime() - v.pausaAt.getTime() >= MARGEN_DEFINITIVO_MS) return { v, corte }
     if (pausasConfirmadas.get(venueId) === v.pausaId) return { v, corte }
-    await esperarLoQueSeGuarda(venueId, v.pausaDesde, v.pausaAt)
+    await esperarLoQueSeGuarda(venueId, v.pausaDesde, v.pausaAt, now)
     const fila = await prisma.onlineOrderingSettings.findUnique({ where: { venueId }, select: { autoPauseResumedAt: true } })
     const propio = fila?.autoPauseResumedAt ?? null
     if (propio && propio.getTime() > corte.getTime()) corte = propio
@@ -400,12 +403,14 @@ export async function avanzarCortePausaSola(venueId: string, now: Date = new Dat
 }
 
 /**
- * v4 (hueco 5): la hora límite más cercana de un pedido de «Mi equipo» que sigue por aceptar. El DASHBOARD vuelve a leer el estado justo
+ * v4 (hueco 5): la hora límite más cercana (aún por llegar) de un pedido de «Mi equipo», en cualquier estado. El DASHBOARD vuelve a leer el estado justo
  * después de ella (con la espera de arriba, esa lectura ya trae el veredicto definitivo). `null` si no hay ninguno.
  */
 export async function proximaHoraLimite(venueId: string, now: Date = new Date()): Promise<Date | null> {
   const fila = await prisma.onlineOrder.findFirst({
-    where: { venueId, requiresAcceptance: true, status: 'PENDING_ACCEPTANCE', acceptDeadlineAt: { gt: now } },
+    // Sin filtrar por estado (Codex p2v4-r2 #3): un pedido que la clienta cancela justo DESPUÉS de su hora límite sigue siendo falla;
+    // si esta lectura ya lo ve cancelado, su hora límite igual tiene que programar la relectura.
+    where: { venueId, requiresAcceptance: true, acceptDeadlineAt: { gt: now } },
     orderBy: { acceptDeadlineAt: 'asc' },
     select: { acceptDeadlineAt: true },
   })
@@ -422,10 +427,16 @@ export async function getAcceptingStatus(
     preloaded ?? getSettings(venueId),
     prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }),
   ])
-  const { lastInboxPollAt, lastToPayPollAt, autoPauseResumedAt, ...config } = settings
+  const { lastInboxPollAt, lastToPayPollAt, autoPauseResumedAt, updatedAt: ajustesGuardadosEn, ...config } = settings
   const timezone = venue?.timezone || 'America/Mexico_City'
   let autoPausedAt: string | null = null
-  const done = (status: AcceptingStatus, reason: AcceptingReason): AcceptingState => ({ status, reason, config, autoPausedAt })
+  const done = (status: AcceptingStatus, reason: AcceptingReason): AcceptingState => ({
+    status,
+    reason,
+    config,
+    autoPausedAt,
+    ajustesGuardadosEn: ajustesGuardadosEn ?? null,
+  })
 
   if (!config.enabled) return done('DISABLED', 'NOT_ENABLED')
   // La pausa del gerente gana con su forma de hoy: el «Reanudar» del piso no la quita (M-8), así que no se anuncia la sola.

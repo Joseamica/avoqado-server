@@ -114,7 +114,13 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
       data: {
         ...data,
         store,
-        ...(panelNuevo ? { storeReadAt: leidoEn.toISOString(), storeNextDeadlineAt: siguiente ? siguiente.toISOString() : null } : {}),
+        ...(panelNuevo
+          ? {
+              storeReadAt: leidoEn.toISOString(),
+              storeVersion: state?.ajustesGuardadosEn ? state.ajustesGuardadosEn.toISOString() : null,
+              storeNextDeadlineAt: siguiente ? siguiente.toISOString() : null,
+            }
+          : {}),
       },
     })
   } catch (e) {

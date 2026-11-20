@@ -21,6 +21,7 @@ describe('arranque de la pausa sola', () => {
 
   it('la revisión de salud de Render no cuenta como servicio; cualquier otra petición sí', () => {
     expect(cuentaComoServicio('/health')).toBe(false)
+    expect(cuentaComoServicio('/health/')).toBe(false) // Express sirve las dos (Codex p2v4-r2 #1)
     expect(cuentaComoServicio('/api/v1/public/venues/x/info')).toBe(true)
     expect(cuentaComoServicio('/')).toBe(true)
   })
@@ -36,11 +37,16 @@ describe('arranque de la pausa sola', () => {
     })
   })
 
-  it('si la escritura falla no tumba la petición y se reintenta con la siguiente', async () => {
+  it('si la escritura falla no tumba la petición y el reintento escribe la hora de la PRIMERA petición (Codex p2v4-r2 #1)', async () => {
     ;(prismaMock.arranqueDeFuncion.createMany as jest.Mock).mockRejectedValueOnce(new Error('db'))
-    await expect(marcarPrimerServicio()).resolves.toBeUndefined()
-    await marcarPrimerServicio()
+    const primera = new Date('2026-11-20T18:00:00.000Z')
+    await expect(marcarPrimerServicio(primera)).resolves.toBeUndefined()
+    await marcarPrimerServicio(new Date('2026-11-20T18:00:07.000Z'))
     expect(prismaMock.arranqueDeFuncion.createMany).toHaveBeenCalledTimes(2)
+    expect(prismaMock.arranqueDeFuncion.createMany).toHaveBeenLastCalledWith({
+      data: [{ clave: CLAVE_PAUSA_SOLA, primerServicioAt: primera }],
+      skipDuplicates: true,
+    })
   })
 
   it('el middleware nunca espera: /health no escribe; otra ruta sí', () => {

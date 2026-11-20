@@ -30,7 +30,7 @@ export async function settingsView(
     proximaHoraLimite(venueId, leidoEn).catch(() => null),
   ])
   // D662 parte 2: `autoPauseResumedAt` es interno de la pausa sola; lo que el panel ve es `store.autoPausedAt`.
-  const { lastInboxPollAt, lastToPayPollAt, autoPauseResumedAt: _reanudada, ...config } = settings
+  const { lastInboxPollAt, lastToPayPollAt, autoPauseResumedAt: _reanudada, updatedAt: guardadoEn, ...config } = settings
   return {
     ...config,
     lastInboxPollAt: lastInboxPollAt ? lastInboxPollAt.toISOString() : null,
@@ -42,6 +42,11 @@ export async function settingsView(
     store: storeView(state, opts),
     /** Campo nuevo y opcional (D662): cuándo se leyó `store` (antes de leer nada). */
     storeReadAt: leidoEn.toISOString(),
+    /**
+     * Campo nuevo y opcional (D662 v4, Codex p2v4-r2 #5): cuándo se guardaron los ajustes que se leyeron. El panel ordena sus lecturas
+     * por (esto, `storeReadAt`): la que leyó un ajuste más nuevo gana aunque haya entrado antes.
+     */
+    storeVersion: guardadoEn ? guardadoEn.toISOString() : null,
     /** Campo nuevo y opcional (D662 v4): la hora límite más cercana de un pedido por aceptar; el panel vuelve a leer justo después. */
     storeNextDeadlineAt: siguiente ? siguiente.toISOString() : null,
     requirements,

@@ -27,23 +27,32 @@ export interface ArranqueDeLaPausaSola {
 
 let escrita = false
 let arranque: ArranqueDeLaPausaSola | null = null
+/**
+ * La hora de la PRIMERA petición que atendió este proceso, fija aunque su escritura falle o tarde: todo reintento escribe ESTA hora
+ * (Codex p2v4-r2 #1: si no, una segunda petición que insertara primero fijaría una hora posterior y dejaría fuera lo que venció entre
+ * las dos).
+ */
+let primeraPeticion: Date | null = null
 
 export function __resetArranqueParaPruebas(): void {
   escrita = false
   arranque = null
+  primeraPeticion = null
 }
 
 /** ¿Esta petición cuenta como «el SERVIDOR nuevo ya atiende»? Todas menos la revisión de salud de Render. */
 export function cuentaComoServicio(path: string): boolean {
-  return path !== '/health'
+  // Express también sirve `/health/` como la misma ruta (Codex p2v4-r2 #1).
+  return !/^\/health\/?$/i.test(path)
 }
 
 /** La primera petición atendida deja su hora (una vez; nunca lanza ni demora la petición). */
 export async function marcarPrimerServicio(ahora: Date = new Date()): Promise<void> {
   if (escrita) return
+  if (!primeraPeticion) primeraPeticion = ahora
   try {
     await prisma.arranqueDeFuncion.createMany({
-      data: [{ clave: CLAVE_PAUSA_SOLA, primerServicioAt: ahora }],
+      data: [{ clave: CLAVE_PAUSA_SOLA, primerServicioAt: primeraPeticion }],
       skipDuplicates: true,
     })
     escrita = true
