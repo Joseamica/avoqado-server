@@ -876,3 +876,43 @@ describe('cargo de tarjeta (fase 2): la máquina lo lee bajo el candado', () => 
     expect(armarComandasTrasCommit).toHaveBeenCalledWith('v1', 'ord1', 'ROUND')
   })
 })
+
+describe('D662 parte 2 · staffAnsweredAt: el toque de una PERSONA se guarda una vez, en la misma escritura del CAS', () => {
+  it('aceptar con la marca porPersona escribe staffAnsweredAt = el now del CAS', async () => {
+    await acceptOnlineOrder({ ...base, porPersona: true })
+    const cas = prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any
+    expect(cas.data).toEqual(expect.objectContaining({ status: 'ACCEPTED', acceptedAt: NOW, staffAnsweredAt: NOW }))
+  })
+
+  it('aceptar SIN la marca (caminos del sistema) no escribe staffAnsweredAt', async () => {
+    await acceptOnlineOrder(base)
+    const cas = prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any
+    expect(cas.data).not.toHaveProperty('staffAnsweredAt')
+  })
+
+  it('rechazar con la marca escribe staffAnsweredAt; sin ella (aviso de Stripe, captura fallida) no', async () => {
+    await rejectOnlineOrder({ ...base, reason: 'OUT_OF_ITEMS', porPersona: true })
+    expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).data).toEqual(
+      expect.objectContaining({ status: 'REJECTED', rejectedAt: NOW, staffAnsweredAt: NOW }),
+    )
+    prismaMock.onlineOrder.updateMany.mockClear()
+    await rejectOnlineOrder({ ...base, reason: 'PAYMENT_FAILED' })
+    expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).data).not.toHaveProperty('staffAnsweredAt')
+  })
+
+  it('si el CAS pierde (otro actor ganó), no queda nada escrito: staffAnsweredAt sólo viaja en la escritura ganadora', async () => {
+    prismaMock.onlineOrder.updateMany.mockResolvedValueOnce({ count: 0 })
+    prismaMock.onlineOrder.findFirst
+      .mockResolvedValueOnce(row() as any)
+      .mockResolvedValueOnce({ status: 'ACCEPTED', acceptDeadlineAt: NOW } as any)
+    await acceptOnlineOrder({ ...base, porPersona: true })
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('vencer nunca escribe staffAnsweredAt', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ acceptDeadlineAt: new Date(NOW.getTime() - 1) }) as any)
+    await expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })
+    expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).data).toEqual({ status: 'EXPIRED', expiredAt: NOW })
+  })
+})

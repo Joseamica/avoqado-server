@@ -21,7 +21,8 @@ export async function settingsView(venueId: string, preloaded?: Awaited<ReturnTy
     cardMerchantStatus(prisma, venueId),
     prisma.venue.findUnique({ where: { id: venueId }, select: { type: true } }),
   ])
-  const { lastInboxPollAt, lastToPayPollAt, ...config } = settings
+  // D662 parte 2: `autoPauseResumedAt` es interno de la pausa sola; lo que el panel ve es `store.autoPausedAt`.
+  const { lastInboxPollAt, lastToPayPollAt, autoPauseResumedAt: _reanudada, ...config } = settings
   return {
     ...config,
     lastInboxPollAt: lastInboxPollAt ? lastInboxPollAt.toISOString() : null,

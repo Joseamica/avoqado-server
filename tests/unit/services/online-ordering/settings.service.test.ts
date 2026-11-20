@@ -361,9 +361,23 @@ describe('settings.service', () => {
   it('reanudar limpia la pausa y audita RESUMED', async () => {
     prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ manualPause: false } as any)
-    await expect(pauseOnlineOrdering('v1', null, 'staff1')).resolves.toEqual({ pausedUntil: null, manualPause: false })
-    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({ where: { venueId: 'v1' }, data: { pausedUntil: null } })
+    const now = new Date('2026-10-14T18:30:00.000Z')
+    await expect(pauseOnlineOrdering('v1', null, 'staff1', now)).resolves.toEqual({ pausedUntil: null, manualPause: false })
+    // D662 parte 2: «Reanudar» también quita la pausa sola: sólo cuentan los pedidos con hora límite DESPUÉS de este momento.
+    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({
+      where: { venueId: 'v1' },
+      data: { pausedUntil: null, autoPauseResumedAt: now },
+    })
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDERING_RESUMED' }))
+  })
+
+  it('D662 parte 2: pausar 15/30/60 NO toca autoPauseResumedAt (al vencer, la tienda sigue pausada sola)', async () => {
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ manualPause: false } as any)
+    for (const m of [15, 30, 60] as const) await pauseOnlineOrdering('v1', m, 'staff1')
+    for (const [arg] of prismaMock.onlineOrderingSettings.updateMany.mock.calls as any[]) {
+      expect(arg.data).not.toHaveProperty('autoPauseResumedAt')
+    }
   })
 
   it('M-8: reanudar con la pausa del GERENTE puesta lo dice (`manualPause: true`): la tienda sigue frenada aunque `pausedUntil` sea null', async () => {
@@ -655,5 +669,37 @@ describe('tienda híbrida T5: «¿Quién confirma?» y sus candados', () => {
     conTx(row({ ...NADIE, enabled: false }))
     await updateSettings('v1', { requiresAcceptance: false }, 's1')
     expect((logAction as jest.Mock).mock.calls.at(-1)[0].data.requiresAcceptance).toBeUndefined()
+  })
+})
+
+describe('D662 parte 2 · autoPauseResumedAt: los ajustes nunca la mueven (sólo «Reanudar»; Codex p2-r1 #7)', () => {
+  beforeEach(() => conRequisitos())
+  const conTx = (existing: unknown) => {
+    const tx = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      onlineOrderingSettings: {
+        findUnique: jest.fn().mockResolvedValue(existing),
+        upsert: jest.fn().mockImplementation(async (a: any) => row({ ...(existing as any), ...a.update })),
+      },
+      reservationSettings: { findUnique: jest.fn().mockResolvedValue(null) },
+      venue: { findUnique: jest.fn().mockResolvedValue(VENUE_COMPLETO) },
+      privacyNoticeVersion: { findFirst: jest.fn().mockResolvedValue({ id: 'pnv1' }) },
+      activityLog: { create: jest.fn() },
+    }
+    ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
+    return tx
+  }
+
+  it.each([
+    ['encender', { enabled: true }, { enabled: false }],
+    ['apagar', { enabled: false }, { enabled: true }],
+    ['repetir «Mi equipo»', { requiresAcceptance: true }, { enabled: true, requiresAcceptance: true }],
+    ['volver de «Nadie» a «Mi equipo»', { requiresAcceptance: true }, { enabled: false, requiresAcceptance: false, acceptsPayAtPickup: true }],
+    ['pasar a «Nadie»', { requiresAcceptance: false }, { enabled: false, requiresAcceptance: true, acceptsPayAtPickup: true }],
+    ['la pausa del gerente', { manualPause: true }, { enabled: true }],
+  ])('%s NO toca autoPauseResumedAt', async (_t, patch, fila) => {
+    const tx = conTx(row(fila))
+    await updateSettings('v1', patch as any, 's1')
+    expect((tx.onlineOrderingSettings.upsert.mock.calls[0][0] as any).update).not.toHaveProperty('autoPauseResumedAt')
   })
 })

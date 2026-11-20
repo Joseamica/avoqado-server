@@ -143,7 +143,8 @@ export const accept = async (req: Request, res: Response, next: NextFunction) =>
   try {
     const { venueId, orderId } = req.params
     const estimatedMinutes = typeof req.body?.estimatedMinutes === 'number' ? req.body.estimatedMinutes : undefined
-    const r = await acceptOnlineOrder({ venueId, orderId, staffId: staffOf(req), estimatedMinutes })
+    // D662 parte 2: esta puerta es una persona (caja o panel): su toque cuenta para la pausa sola.
+    const r = await acceptOnlineOrder({ venueId, orderId, staffId: staffOf(req), estimatedMinutes, porPersona: true })
     // Aceptar sólo puede exigir pago en un folio (QR o liga): se cobra antes de prepararlo.
     if (r.outcome === 'PAYMENT_REQUIRED') {
       return res.status(409).json({ success: false, code: 'PAYMENT_REQUIRED', error: 'Este pedido se cobra antes de prepararlo' })
@@ -160,7 +161,7 @@ export const reject = async (req: Request, res: Response, next: NextFunction) =>
     const reason = req.body.reason as OnlineOrderRejectReason
     // Una nota de puros espacios no es nota: se guarda `null`, no `""`.
     const note = typeof req.body.note === 'string' ? req.body.note.trim() || null : null
-    return reply(res, await rejectOnlineOrder({ venueId, orderId, staffId: staffOf(req), reason, note }))
+    return reply(res, await rejectOnlineOrder({ venueId, orderId, staffId: staffOf(req), reason, note, porPersona: true }))
   } catch (e) {
     return next(e)
   }

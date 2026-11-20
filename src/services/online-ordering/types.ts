@@ -23,6 +23,8 @@ export interface AcceptingState {
   status: AcceptingStatus
   reason: AcceptingReason
   config: OnlineOrderingConfig
+  /** D662 parte 2: la tienda está pausada sola desde esta hora (ISO; la hora límite del 2.º pedido sin atender). Null = no. */
+  autoPausedAt?: string | null
 }
 
 /**
