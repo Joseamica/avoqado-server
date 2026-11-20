@@ -2129,9 +2129,8 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
         .mockResolvedValueOnce({ version: 8, status: 'PENDING', total: 0 })
         .mockResolvedValueOnce({ version: 9, status: 'COMPLETED', total: 290 })
       ;(prisma.orderPromotion.count as jest.Mock).mockResolvedValue(2)
-      // Están TODAS las llaves de la ronda tal como quedan tras normalizar (Codex r3 #1). Se numeran sobre la ronda completa, como en las
-      // apps (decisión 1 de D7): los dos combos son la 0 y la 1, los productos la 2 y la 3.
-      ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([{ externalId: 'sync:i-ya:2' }, { externalId: 'sync:i-ya:3' }])
+      // Están TODAS las llaves de la ronda tal como quedan tras normalizar (Codex r3 #1).
+      ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([{ externalId: 'sync:i-ya:0' }, { externalId: 'sync:i-ya:1' }])
 
       const [ack] = await processIntents(
         baseParams([
@@ -2147,7 +2146,7 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
       expect(orderTpvService.addItemsToOrder).not.toHaveBeenCalled()
       expect(prisma.orderPromotion.count).toHaveBeenCalledWith({ where: { orderId: 'order-1', instanceId: { in: ['uuid-1', 'uuid-2'] } } })
       expect(prisma.orderItem.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { orderId: 'order-1', externalId: { in: ['sync:i-ya:2', 'sync:i-ya:3'] } } }),
+        expect.objectContaining({ where: { orderId: 'order-1', externalId: { in: ['sync:i-ya:0', 'sync:i-ya:1'] } } }),
       )
     })
 

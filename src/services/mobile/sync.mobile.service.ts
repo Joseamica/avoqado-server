@@ -53,7 +53,7 @@ import { preparationPermissions } from '../kds/kitchenPreparation'
 import { motivoDelDescuento } from '../shared/motivoDelDescuento'
 import { descuentoManualDeMesaSchema } from '../../schemas/mobile/manualOrderDiscount.mobile.schema'
 import { horaRealDelAparato, llegadaDeLaPeticion } from '../shared/horaRealDelAparato'
-import { esLlaveDeRonda, llavesDeLaRonda } from './llaveDeRonda'
+import { esLlaveDeRonda, llavesDeLaRonda, rondaDeLaLlave, rondaSegura } from './llaveDeRonda'
 
 // ─── Contrato (espejo EXACTO por nombre en iOS/Android) ─────────────────────
 
@@ -1456,6 +1456,7 @@ async function applyAddItems(
   // instanceId, así que el replay de este intent no duplica). Los demás siguen
   // exactamente el camino de hoy.
   const conPromocion = items.filter(it => it.promotionRef)
+  const normales = items.filter(it => !it.promotionRef)
 
   const soldAt = clampSoldAt(intent.createdAtLocal ?? (intent.payload.createdAtLocal as string | number | undefined), new Date())
   if (conPromocion.length > 0) {
@@ -1467,14 +1468,17 @@ async function applyAddItems(
   // MISMAS filas en vez de duplicarlas (addItemsToOrder deduplica por externalId) y lo anulado no vuelve (la lápida es por llave).
   // D7 «Anular producto», decisión 1 = A acotada (founder por delegación, 20-nov): en una ronda SÓLO vale esa forma, con la llave de
   // ESTA ronda; cualquier otra (sin llave, vacía, con espacios, de un sistema externo o de otra ronda) se reemplaza por la que arma el
-  // servidor con el id del intent y la posición (`llavesDeLaRonda`). Las apps vivas ya mandan exactamente ésa: pasa intacta. Así una
-  // etiqueta ajena ya no puede confundir mesas al buscar la ronda o sus lápidas (Codex r5 #5, r6 #1-#3). Combos y productos se numeran
-  // sobre la lista completa, como en las apps.
-  const conLlave = llavesDeLaRonda(items, intent.id)
-  const itemsWithKey = conLlave.filter(it => !it.promotionRef)
-  // El combo viaja sólo con su referencia y el prefijo de sus componentes (la llave del renglón del combo): su precio y sus renglones
-  // los resuelve el server desde la promoción, y un campo suelto del carrito no lo vuelve un producto.
-  const combos = conLlave.filter(it => it.promotionRef).map(item => ({ promotionRef: item.promotionRef, externalId: item.externalId }))
+  // servidor (`llavesDeLaRonda`). Las apps vivas ya mandan exactamente ésa: pasa intacta. Así una etiqueta ajena ya no puede confundir
+  // mesas al buscar la ronda o sus lápidas (Codex r5 #5, r6 #1-#3). Lo que llega sin llave se numera como siempre (productos entre
+  // productos; combos por su lugar en la ronda): un reenvío de antes del despliegue arma las mismas llaves.
+  const itemsWithKey = llavesDeLaRonda(normales, intent.id)
+  // El combo viaja sólo con su referencia y el prefijo de sus componentes (`sync:<intent>:<índice>`, el que el aparato predice): su
+  // precio y sus renglones los resuelve el server desde la promoción, y un campo suelto del carrito no lo vuelve un producto.
+  const ronda = rondaSegura(intent.id)
+  const combos = conPromocion.map(item => ({
+    promotionRef: item.promotionRef,
+    externalId: rondaDeLaLlave(item.externalId) === ronda ? item.externalId : `sync:${ronda}:${items.indexOf(item)}`,
+  }))
 
   // Reenvío de una ronda con combos que YA está entera en la cuenta (la guardó la ruta con red, o un intento anterior que perdió su
   // respuesta): se contesta sin escribir, como antes contestaba cada combo `created:false`. Sin esto, una cuenta que ya se cobró
