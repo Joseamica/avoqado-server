@@ -9,12 +9,15 @@ requiredPermissions:
 featureCode: PROMOTIONS
 gateKind: FEATURE
 sourceRepo: avoqado-web-dashboard
-sourceRef: 1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a
+sourceRef: 6632a3e7b673a803c714bdd4216a71d262522038
 keywords:
   - crear cupón
   - código de descuento
   - cupón nuevo
   - editar cupón
+  - el descuento dice agotado
+  - tope de usos
+  - usos de más
 ---
 
 ## Antes de empezar
@@ -35,4 +38,6 @@ Los cupones son para los negocios que tienen incluidas las promociones. Cada cup
 - Si sale «Se requiere un descuento padre», elige uno en *Descuento Padre*. Si la lista dice «Sin descuentos», crea uno con *Crear Descuento*, al final de la misma lista.
 - El código lleva de 3 a 30 letras, números, guiones o guiones bajos; si no, sale el aviso debajo del campo.
 - Si sale «Error», el aviso trae la razón; si no la trae, dice «Ocurrió un error».
+- *Usos Máximos* es el tope del cupón. El *Descuento Padre* puede tener además su propio tope (*Usos Totales Máximos* o *Usos Máximos por Cliente*): un descuento con tope no se puede usar en una venta con vales.
+- En *Promociones* › *Descuentos*, la columna *Usos* («3 / 100 usos») cuenta también las ventas del POS que llevan ese descuento. En una cuenta de *Mesas* el uso se gasta al aplicarlo y regresa si se quita o si la cuenta se anula sin cobrar. Una venta ya cobrada nunca se rechaza por el tope, así que el contador puede quedar arriba del máximo.
 - Si al crear sale «Error», aunque diga que ese código ya existe, no lo vuelvas a crear, tampoco con otro código: pudo quedar creado en un primer intento. Pide que lo revise una persona del equipo de Avoqado.
