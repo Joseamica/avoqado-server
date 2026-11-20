@@ -12,6 +12,7 @@ import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
 import { ORDEN_DE_TARJETAS_SELECT } from '../giftCards/giftCardMarks'
 import { tieneRenglonDeTarjeta } from '../giftCards/cuentaDeTarjetas'
 import { ventasDelTurnoSinTarjetas, ventasSinTarjetasPorTurno } from '../shared/ventasDelTurno'
+import { efectivoFisicoDeCobros } from '../shared/efectivoFisico'
 
 interface ShiftFilters {
   staffId?: string
@@ -1505,8 +1506,32 @@ export async function updateShift(
     })
     return Number(r?._sum?.thirdPartyCashAmount ?? 0)
   }
+  // 🔴 Máquina de efectivo (A5): `totalCashPayments`/`totalCashTips` son VENTAS en efectivo y traen también lo que cobró la
+  // máquina, cuyo billete NO está en el cajón. Se resta lo que `efectivoFisicoDeCobros` (la autoridad de `tenderSemantics`) deja
+  // fuera del cajón, sobre lo FIRMADO: con cobros sin `fundsFlow` (todo lo anterior) resta 0 y el esperado de un corte firmado
+  // no se mueve aunque sus cobros hayan cambiado después. Una consulta agrupada por cómo entró el dinero: pocas filas, no el día.
+  const efectivoFueraDelCajon = async () => {
+    const grupos = await prisma.payment.groupBy({
+      by: ['method', 'fundsFlow', 'tenderCountsAsCash'],
+      where: { venueId, shiftId: existingShift.id, status: 'COMPLETED' },
+      _sum: { amount: true, tipAmount: true },
+    })
+    const fisico = efectivoFisicoDeCobros(
+      grupos.map(g => ({
+        method: g.method,
+        fundsFlow: g.fundsFlow,
+        tenderCountsAsCash: g.tenderCountsAsCash,
+        amount: g._sum.amount,
+        tipAmount: g._sum.tipAmount,
+      })),
+    )
+    // En `number`, como el resto de esta fórmula: `computeCashDifference` la pasa a Decimal y redondea a centavos.
+    return fisico.ventasEnEfectivo.add(fisico.propinasEnEfectivo).toNumber() - fisico.alCajon.toNumber()
+  }
   const mandaLaFormulaDelTurno = gaveta != null && gaveta.fuente !== 'DESCONOCIDO' && gaveta.esperado == null
-  const cashInDrawerConTerceros = cashInDrawer + (mandaLaFormulaDelTurno ? await tercerosDelTurno() : 0)
+  const cashInDrawerConTerceros = mandaLaFormulaDelTurno
+    ? cashInDrawer + (await tercerosDelTurno()) - (await efectivoFueraDelCajon())
+    : cashInDrawer
   const expectedCash =
     gaveta == null || gaveta.fuente === 'DESCONOCIDO' ? null : (gaveta.esperado ?? effectiveStartingCash + cashInDrawerConTerceros)
 
