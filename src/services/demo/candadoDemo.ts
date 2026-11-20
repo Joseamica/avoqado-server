@@ -348,6 +348,8 @@ export const PANEL_PERMITIDAS: ReadonlySet<string> = new Set([
 export const PANEL_BLOQUEADAS: Readonly<Record<string, string>> = {
   'available-balance': 'mover el saldo de los cobros',
   'billing-portal': 'contratar o cambiar el plan de Avoqado',
+  // Máquina de efectivo (fase 1a): resolver un cobro en duda registra dinero real de una máquina física.
+  'cash-machine': 'resolver cobros de la máquina de efectivo',
   chat: 'activar el chat con clientes (manda WhatsApp)',
   close: 'cerrar el negocio',
   'convert-from-demo': 'convertir el demo en negocio real',

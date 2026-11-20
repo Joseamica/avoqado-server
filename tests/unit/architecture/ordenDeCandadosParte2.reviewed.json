@@ -947,8 +947,12 @@
       "etiqueta": "venderLoQueCobroLaMaquina",
       "cantidad": 1
     },
-    "src/services/cashMachine/ventaDeLaMaquina.ts#registrarVentaDeLaMaquina": {
-      "etiqueta": "registrarVentaDeLaMaquina",
+    "src/services/cashMachine/ventaDeLaMaquina.ts#registrarCierreDeLaMaquina": {
+      "etiqueta": "registrarCierreDeLaMaquina",
+      "cantidad": 1
+    },
+    "src/services/cashMachine/dudasDeLaMaquina.ts#subirDudaDeLaMaquina": {
+      "etiqueta": "subirDudaDeLaMaquina",
       "cantidad": 1
     },
     "src/services/cashMachine/emparejamiento.ts#emparejarAparato": {

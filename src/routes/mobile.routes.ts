@@ -49,11 +49,15 @@ import * as supplierMobileController from '../controllers/mobile/supplier.mobile
 import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.mobile.controller'
 import * as cashMachineMobileController from '../controllers/mobile/cashMachine.mobile.controller'
 import {
+  consultarDudaDeLaMaquinaSchema,
   consultarVentaDeLaMaquinaSchema,
   cotizarParaLaMaquinaSchema,
   desemparejarAparatoSchema,
   emparejarAparatoSchema,
+  listarDudasDeLaMaquinaSchema,
   registrarVentaDeLaMaquinaSchema,
+  resolverDudaDeLaMaquinaSchema,
+  subirDudaDeLaMaquinaSchema,
 } from '../schemas/mobile/cashMachine.schema'
 import { ponerLlaveDelRetiro } from '../lib/llaveDelRetiro'
 import * as purchaseOrderMobileController from '../controllers/mobile/purchase-order.mobile.controller'
@@ -3729,6 +3733,50 @@ router.post(
   checkCortesiaPermissionIfPresent,
   checkAprobacionDelDescuento,
   cashMachineMobileController.cotizar,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-machine/doubts — «Cobros en duda» (R4-4, R5#6): la PC perdió el cierre y no sabe cómo
+ * terminó. La MISMA puerta que la venta: `payments:create` y la PC emparejada (`X-Cash-Machine-Credential`). Idempotente por folio.
+ * Body: { referenceCC, dueCents, saleCents, tipCents, pedido, startedAt, lastSeen?, saleShiftId? }. 200 { status: 'ABIERTO' } o la
+ * evidencia del cierre si el folio ya se resolvió.
+ */
+router.post(
+  '/venues/:venueId/cash-machine/doubts',
+  authenticateTokenMiddleware,
+  validateRequest(subirDudaDeLaMaquinaSchema),
+  checkPermission('payments:create'),
+  cashMachineMobileController.subirDuda,
+)
+
+/** GET /api/v1/mobile/venues/:venueId/cash-machine/doubts — la lista para el gerente (POS del mostrador). ?status&cursor&limit (≤ 100). */
+router.get(
+  '/venues/:venueId/cash-machine/doubts',
+  authenticateTokenMiddleware,
+  validateRequest(listarDudasDeLaMaquinaSchema),
+  checkPermission('cash-machine:resolve'),
+  cashMachineMobileController.listarDudas,
+)
+
+/** GET /api/v1/mobile/venues/:venueId/cash-machine/doubts/:referenceCC — la PC pregunta cada 60 s: { status: 'ABIERTO' } o la evidencia. */
+router.get(
+  '/venues/:venueId/cash-machine/doubts/:referenceCC',
+  authenticateTokenMiddleware,
+  validateRequest(consultarDudaDeLaMaquinaSchema),
+  checkPermission('payments:read'),
+  cashMachineMobileController.consultarDuda,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-machine/doubts/:referenceCC/resolve — el gerente, con SU sesión (R4-4, R5#5, R5#8).
+ * Body: { outcome, creditCents, changeDispensedCents, occurredAt?, evidence }. Sin `occurredAt`, hora y turno por conciliar.
+ */
+router.post(
+  '/venues/:venueId/cash-machine/doubts/:referenceCC/resolve',
+  authenticateTokenMiddleware,
+  validateRequest(resolverDudaDeLaMaquinaSchema),
+  checkPermission('cash-machine:resolve'),
+  cashMachineMobileController.resolverDuda,
 )
 
 // ============================================================================

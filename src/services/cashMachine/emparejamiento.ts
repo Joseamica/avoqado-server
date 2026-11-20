@@ -136,9 +136,10 @@ export async function desemparejarAparato(venueId: string, autor: AutorDelEmpare
 }
 
 /**
- * R4-3: sólo una credencial ACTIVA de este mismo aparato (`deviceId` del encabezado) en este negocio registra un folio. R5#2: la PC
- * revocada (otra PC tomó la máquina, o se apagó la casilla) todavía puede repetir un folio que ELLA registró (la repetición idempotente
- * y su 409 de conflicto), con su credencial; un folio nuevo, nunca. Todo lo demás es 403 `CASH_MACHINE_NOT_PAIRED`.
+ * R4-3: sólo una credencial ACTIVA de este mismo aparato (`deviceId` del encabezado) en este negocio registra un folio o sube una
+ * duda. R5#2: la PC revocada (otra PC tomó la máquina, o se apagó la casilla) todavía puede repetir un folio que ELLA registró o cuya
+ * duda ELLA subió (la repetición idempotente, su 409 de conflicto y el cierre real de esa duda), con su credencial; un folio nuevo,
+ * nunca. Todo lo demás es 403 `CASH_MACHINE_NOT_PAIRED`.
  */
 export async function exigirAparatoEmparejado(
   venueId: string,
@@ -153,11 +154,15 @@ export async function exigirAparatoEmparejado(
     })
     if (binding?.active) return
     if (binding) {
-      const folio = await prisma.cashMachineClose.findUnique({
-        where: { venueId_referenceCC: { venueId, referenceCC } },
-        select: { deviceId: true },
-      })
-      if (folio?.deviceId === deviceId) return
+      // SU folio: el cierre que ella guardó, o la duda (`ESPERANDO`) que ella subió y que todavía puede repetir o terminar.
+      const [folio, duda] = await Promise.all([
+        prisma.cashMachineClose.findUnique({ where: { venueId_referenceCC: { venueId, referenceCC } }, select: { deviceId: true } }),
+        prisma.cashMachineIncident.findUnique({
+          where: { venueId_referenceCC_kind: { venueId, referenceCC, kind: 'ESPERANDO' } },
+          select: { deviceId: true },
+        }),
+      ])
+      if (folio?.deviceId === deviceId || duda?.deviceId === deviceId) return
     }
   }
   throw new ForbiddenError('Esta PC no está emparejada con la máquina de efectivo', CASH_MACHINE_NOT_PAIRED)

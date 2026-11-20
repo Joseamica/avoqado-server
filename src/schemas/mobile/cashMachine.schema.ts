@@ -92,3 +92,80 @@ export const cotizarParaLaMaquinaSchema = z.object({
   params: z.object({ venueId }),
   body: z.record(z.unknown(), { invalid_type_error: 'El carrito debe ser un objeto' }),
 })
+
+/** Centavos enteros ≥ 0 (lo que teclea el gerente o fija la duda; si son POSIBLES lo decide `validarCierre`). */
+const centavosEnteros = (campo: string) =>
+  z
+    .number({ required_error: `${campo} es requerido`, invalid_type_error: `${campo} debe ser un número de centavos` })
+    .int(`${campo} debe ser un número entero de centavos`)
+    .min(0, `${campo} no puede ser negativo`)
+
+/** ponytail: 16 KB de «lo último que vio la PC» bastan para que el gerente entienda; más es una PC que manda de más. */
+const LAST_SEEN_MAX = 16_384
+
+/** R4-4, R5#6: la duda que sube la PC (no sabe cómo terminó la operación). Importes en centavos, como la venta. */
+export const subirDudaDeLaMaquinaSchema = z.object({
+  params: z.object({ venueId }),
+  body: z.object({
+    referenceCC,
+    dueCents: centavosEnteros('El adeudo'),
+    saleCents: centavosEnteros('La venta'),
+    tipCents: centavosEnteros('La propina'),
+    // El MISMO carrito que la venta; lo valida `leerVentaDeMostrador`, como `POST /orders`.
+    pedido: z.record(z.unknown(), { required_error: 'Falta el carrito de la venta', invalid_type_error: 'El pedido debe ser un objeto' }),
+    startedAt: z
+      .string({ required_error: 'Falta la hora en que empezó el cobro', invalid_type_error: 'La hora de inicio debe ser texto' })
+      .datetime({ offset: true, message: 'La hora de inicio debe ser una fecha ISO' }),
+    lastSeen: z
+      .unknown()
+      .refine(v => v === undefined || JSON.stringify(v).length <= LAST_SEEN_MAX, 'Lo último que vio la PC es demasiado largo (máx. 16 KB)')
+      .optional(),
+    saleShiftId: z
+      .string({ invalid_type_error: 'El turno de la venta debe ser texto' })
+      .max(64, 'El turno de la venta admite hasta 64 caracteres')
+      .nullable()
+      .optional(),
+  }),
+})
+
+export const consultarDudaDeLaMaquinaSchema = z.object({
+  params: z.object({ venueId, referenceCC }),
+})
+
+export const listarDudasDeLaMaquinaSchema = z.object({
+  params: z.object({ venueId }),
+  query: z.object({
+    status: z
+      .enum(['ABIERTO', 'RESUELTO'], { errorMap: () => ({ message: 'El estado de la duda debe ser ABIERTO o RESUELTO' }) })
+      .optional(),
+    cursor: z.string({ invalid_type_error: 'El cursor no es válido' }).max(200, 'El cursor no es válido').optional(),
+    // Un límite hostil no se rechaza: el servicio lo recorta a 100.
+    limit: z.coerce
+      .number({ invalid_type_error: 'El límite debe ser un número' })
+      .int('El límite debe ser un número entero')
+      .positive('El límite debe ser mayor que cero')
+      .optional(),
+  }),
+})
+
+/** R4-4, R5#5, R5#8: lo que el gerente lee en la máquina. Quién resuelve sale de la sesión, nunca de aquí. */
+export const resolverDudaDeLaMaquinaSchema = z.object({
+  params: z.object({ venueId, referenceCC }),
+  body: z.object({
+    outcome: z.enum(DESENLACES_DE_LA_MAQUINA, {
+      errorMap: () => ({ message: 'El desenlace de la máquina debe ser PAGADO, CANCELADO o GUARDADO' }),
+    }),
+    creditCents: centavosEnteros('Lo que entró'),
+    changeDispensedCents: centavosEnteros('El cambio entregado'),
+    occurredAt: z
+      .string({ invalid_type_error: 'La hora del comprobante debe ser texto' })
+      .datetime({ offset: true, message: 'La hora del comprobante debe ser una fecha ISO' })
+      .nullable()
+      .optional(),
+    evidence: z
+      .string({ required_error: 'Escribe lo que viste en la máquina', invalid_type_error: 'Lo que viste en la máquina debe ser texto' })
+      .trim()
+      .min(1, 'Escribe lo que viste en la máquina')
+      .max(500, 'Lo que viste en la máquina admite hasta 500 caracteres'),
+  }),
+})

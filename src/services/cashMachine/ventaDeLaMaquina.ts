@@ -5,6 +5,9 @@
  *  · `PAGADO`: la cuenta nace, se paga y se cierra en UNA transacción (`venderLoQueCobroLaMaquina`); nadie la vio abierta.
  *  · `CANCELADO` / `GUARDADO`: sólo el cierre, sin cuenta ni pago.
  *
+ * El mismo núcleo (`registrarCierreDeLaMaquina`) registra lo que un GERENTE resuelve de una duda (`dudasDeLaMaquina.ts`, R4-4), y
+ * cierra la duda del folio en la misma transacción que el cierre.
+ *
  * Un folio se guarda una sola vez (`CashMachineClose @@unique([venueId, referenceCC])`). La misma operación repetida responde lo
  * mismo; otra con el mismo folio es 409, la imposible 422 y la que ya no se puede armar 202: las tres quedan como
  * `CashMachineIncident` DURABLE, escrita en su propia sentencia (nunca dentro de la transacción que se revierte).
@@ -28,7 +31,7 @@ export const DESENLACES_DE_LA_MAQUINA = ['PAGADO', 'CANCELADO', 'GUARDADO'] as c
 export type DesenlaceDeLaMaquina = (typeof DESENLACES_DE_LA_MAQUINA)[number]
 export type DeudaConElCliente = 'CAMBIO' | 'GUARDADO' | 'NO_DEVUELTO' | 'EXCEDENTE'
 export type EstadoDelTurnoDeLaMaquina = 'EN_TURNO' | 'TURNO_CERRADO' | 'POR_CONCILIAR'
-type QuienResolvio = 'MAQUINA' | 'GERENTE'
+export type QuienResolvio = 'MAQUINA' | 'GERENTE'
 type TipoDeIncidencia = 'CONFLICTO' | 'IMPOSIBLE' | 'NO_SE_PUDO_REGISTRAR'
 
 /** Lo que la máquina dijo al cerrar, en CENTAVOS (así los manda la PC). */
@@ -162,7 +165,7 @@ export function turnoDeLaMaquina(
   }
 }
 
-function respuestaDe(fila: CashMachineClose): RespuestaDeLaMaquina {
+export function respuestaDe(fila: CashMachineClose): RespuestaDeLaMaquina {
   return {
     referenceCC: fila.referenceCC,
     outcome: fila.outcome,
@@ -252,24 +255,69 @@ async function anotarIncidencia(
   })
 }
 
+/**
+ * La duda de este folio (`ESPERANDO`) queda RESUELTO: lo decidió la máquina (la PC subió el cierre real) o un gerente (`staffId`). Se
+ * llama dentro de la transacción que guarda el cierre; sin cierre (la venta ya no se arma), con el cliente global después de guardar la
+ * incidencia. `resolucion` se mezcla en el payload: es lo que hace idempotente una resolución que no dejó cierre.
+ */
+export function marcarDudaResuelta(
+  db: Pick<Prisma.TransactionClient, '$executeRaw'>,
+  venueId: string,
+  referenceCC: string,
+  staffId: string | null,
+  resolucion: Record<string, unknown>,
+): Promise<number> {
+  const ahora = new Date()
+  return db.$executeRaw`
+    UPDATE "CashMachineIncident"
+    SET "status" = 'RESUELTO', "resolvedByStaffId" = ${staffId}, "resolvedAt" = ${utcTs(ahora)}, "updatedAt" = ${utcTs(ahora)},
+        "payload" = "payload" || jsonb_build_object('resolucion', ${JSON.stringify(resolucion)}::jsonb)
+    WHERE "venueId" = ${venueId} AND "referenceCC" = ${referenceCC} AND "kind" = 'ESPERANDO' AND "status" = 'ABIERTO'`
+}
+
 /** `POST /mobile/venues/:venueId/cash-machine/sales`. */
 export async function registrarVentaDeLaMaquina(
   venueId: string,
   autor: AutorDeLaMaquina,
   entrada: EntradaDeLaMaquina,
 ): Promise<ResultadoDeLaMaquina> {
-  const { referenceCC, cierre } = entrada
-  if (!CASH_MACHINE_REF.test(referenceCC)) {
+  if (!CASH_MACHINE_REF.test(entrada.referenceCC)) {
     throw new BadRequestError('El folio de la máquina debe ser AQ seguido de 12 letras mayúsculas o números.')
-  }
-  if ((cierre.outcome === 'PAGADO') !== Boolean(entrada.pedido)) {
-    throw new BadRequestError('El pedido va sólo con un cierre PAGADO.')
   }
   const deviceId = await aparatoDe(venueId, autor.deviceUid)
   // R4-3: antes de escribir nada (tampoco una incidencia): sólo la PC emparejada, o la revocada repitiendo SU folio (R5#2).
-  await exigirAparatoEmparejado(venueId, referenceCC, deviceId, autor.credencial)
-  const quien = { userId: autor.userId, deviceId }
-  const evidencia = { cierre, deviceId, recibidoEn: new Date().toISOString() }
+  await exigirAparatoEmparejado(venueId, entrada.referenceCC, deviceId, autor.credencial)
+  return registrarCierreDeLaMaquina(venueId, { ...entrada, resolvedBy: 'MAQUINA', userId: autor.userId, deviceId })
+}
+
+/** Quién decidió el desenlace, para el núcleo compartido por la PC y el gerente (R4-4). */
+export interface CierreQueSeRegistra extends EntradaDeLaMaquina {
+  resolvedBy: QuienResolvio
+  /** MAQUINA: la sesión de la PC. GERENTE: el gerente del token (nunca del cuerpo). Procesa el cobro y firma la bitácora. */
+  userId: string
+  /** `Terminal.id` de la PC de la máquina. */
+  deviceId: string | null
+  /** GERENTE: lo que leyó en la máquina. */
+  evidence?: string
+}
+
+/**
+ * El núcleo: valida, guarda el cierre (y con `PAGADO`, la venta pagada) UNA vez por folio, cierra la duda del folio en la misma
+ * transacción y responde la evidencia. Lo llaman la venta de la PC (ya emparejada) y la resolución del gerente (`dudasDeLaMaquina`).
+ */
+export async function registrarCierreDeLaMaquina(venueId: string, entrada: CierreQueSeRegistra): Promise<ResultadoDeLaMaquina> {
+  const { referenceCC, cierre, resolvedBy, deviceId } = entrada
+  if ((cierre.outcome === 'PAGADO') !== Boolean(entrada.pedido)) {
+    throw new BadRequestError('El pedido va sólo con un cierre PAGADO.')
+  }
+  const gerente = resolvedBy === 'GERENTE' ? entrada.userId : null
+  const quien = { userId: entrada.userId, deviceId }
+  const evidencia = {
+    cierre,
+    deviceId,
+    recibidoEn: new Date().toISOString(),
+    ...(gerente ? { resolvedBy, evidence: entrada.evidence ?? null } : {}),
+  }
 
   if (validarCierre(cierre) === 'IMPOSIBLE') {
     await anotarIncidencia(venueId, referenceCC, 'IMPOSIBLE', quien, evidencia)
@@ -281,7 +329,17 @@ export async function registrarVentaDeLaMaquina(
     )
   }
 
-  const huella = huellaDelCierre(venueId, referenceCC, cierre, 'MAQUINA')
+  const huella = huellaDelCierre(venueId, referenceCC, cierre, resolvedBy)
+  /** Lo que la duda guarda al cerrarse (y compara una resolución repetida sin cierre). */
+  const resolucion = {
+    resolvedBy,
+    huella,
+    outcome: cierre.outcome,
+    creditCents: cierre.creditCents,
+    changeDispensedCents: cierre.changeDispensedCents,
+    occurredAt: cierre.occurredAtKnown ? (cierre.occurredAt ?? null) : null,
+    ...(gerente ? { evidence: entrada.evidence ?? null } : {}),
+  }
   /** El folio ya tiene su cierre: la misma operación responde lo mismo; otra, 409 con incidencia. */
   const yaRegistrado = async (fila: CashMachineClose): Promise<ResultadoDeLaMaquina> => {
     if (huellaDelCierre(venueId, referenceCC, fila as unknown as CierreDeLaMaquina, fila.resolvedBy) === huella) {
@@ -315,7 +373,9 @@ export async function registrarVentaDeLaMaquina(
       venueId,
       referenceCC,
       outcome: cierre.outcome,
-      resolvedBy: 'MAQUINA' satisfies QuienResolvio,
+      resolvedBy,
+      resolvedByStaffId: gerente,
+      evidence: gerente ? (entrada.evidence ?? null) : null,
       dueCents: cierre.dueCents,
       saleCents: cierre.saleCents,
       tipCents: cierre.tipCents,
@@ -342,16 +402,19 @@ export async function registrarVentaDeLaMaquina(
         referenceCC,
         saleCents: cierre.saleCents,
         tipCents: cierre.tipCents,
-        procesadoPor: autor.userId,
+        procesadoPor: entrada.userId,
         horaDelCierre: hora,
         turno: { shiftIdDeLaVenta: turno.expectedShiftId, porConciliar: turno.porConciliar },
-        cerrarEnTx: (tx, cobro) =>
-          tx.cashMachineClose.create({
+        cerrarEnTx: async (tx, cobro) => {
+          const creado = await tx.cashMachineClose.create({
             data: filaDelCierre({
               ...cobro,
               shiftStatus: cobro.shiftId ? 'EN_TURNO' : turno.porConciliar ? 'POR_CONCILIAR' : 'TURNO_CERRADO',
             }),
-          }),
+          })
+          await marcarDudaResuelta(tx, venueId, referenceCC, gerente, resolucion)
+          return creado
+        },
       })
     } else {
       fila = await withDeadlockRetry(
@@ -361,11 +424,13 @@ export async function registrarVentaDeLaMaquina(
           if (await tx.cashMachineClose.findUnique({ where: { venueId_referenceCC: { venueId, referenceCC } }, select: { id: true } })) {
             throw new CierreYaRegistrado()
           }
-          return tx.cashMachineClose.create({
+          const creado = await tx.cashMachineClose.create({
             data: filaDelCierre({ orderId: null, paymentId: null, appliedCents: 0, shiftStatus: turno.shiftStatus }),
           })
+          await marcarDudaResuelta(tx, venueId, referenceCC, gerente, resolucion)
+          return creado
         },
-        { etiqueta: 'registrarVentaDeLaMaquina' },
+        { etiqueta: 'registrarCierreDeLaMaquina' },
       )
     }
   } catch (error) {
@@ -385,6 +450,8 @@ export async function registrarVentaDeLaMaquina(
       motivo: error instanceof Error ? error.message : String(error),
       ...(error instanceof AppError && error.code ? { codigo: error.code } : {}),
     })
+    // La duda del folio (si la había) también se cierra: el dinero quedó en la incidencia y la PC deja de esperar.
+    await marcarDudaResuelta(prisma, venueId, referenceCC, gerente, { ...resolucion, incident: 'NO_SE_PUDO_REGISTRAR' })
     return { status: 202, body: { referenceCC, incident: 'NO_SE_PUDO_REGISTRAR' } }
   }
 
@@ -395,8 +462,15 @@ export async function registrarVentaDeLaMaquina(
       entity: 'CashMachineClose',
       entityId: fila.id,
       venueId,
-      staffId: autor.userId,
-      data: { referenceCC, outcome: fila.outcome, owedKind: fila.owedKind, owedPesos: fila.owedCents / 100, orderId: fila.orderId },
+      staffId: entrada.userId,
+      data: {
+        referenceCC,
+        outcome: fila.outcome,
+        resolvedBy: fila.resolvedBy,
+        owedKind: fila.owedKind,
+        owedPesos: fila.owedCents / 100,
+        orderId: fila.orderId,
+      },
     })
   }
   return { status: 200, body: respuestaDe(fila) }
