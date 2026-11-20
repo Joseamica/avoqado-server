@@ -18,10 +18,11 @@ import { ConflictError } from '../../errors/AppError'
  */
 
 /**
- * 30 días, no 24 h (Codex r1 #3): la cola sin red de una mesa puede subir días después, y una constancia vencida volvería a aplicar
- * el descuento que sí aterrizó. Una cuenta de mesa no vive tanto; después la llave ya no puede repetirse.
+ * Un año (Codex r1 #3 y r2 #3): la cola sin red de una mesa puede subir días o semanas después, y una constancia vencida volvería a
+ * aplicar el descuento que sí aterrizó. Una cuenta de mesa abierta no vive un año; mientras la constancia exista, la misma llave nunca
+ * crea otra fila.
  */
-export const VIGENCIA_DE_LA_LLAVE_MS = 30 * 24 * 60 * 60 * 1000
+export const VIGENCIA_DE_LA_LLAVE_MS = 365 * 24 * 60 * 60 * 1000
 const ACTOR = 'pos-mesas'
 const endpointDeLaLlave = (orderId: string) => `POST /mobile/orders/${orderId}/discounts/manual`
 const hashDeLaFirma = (firma: string) => createHash('sha256').update(firma).digest('hex')

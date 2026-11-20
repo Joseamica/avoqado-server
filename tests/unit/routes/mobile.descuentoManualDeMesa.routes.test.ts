@@ -46,7 +46,9 @@ describe('7133e3 · POST /mobile/.../orders/:orderId/discounts/manual', () => {
 
   it('la forma: % o fijo, mayor a cero, % hasta 100 y llave uuid obligatoria; mensajes en español', () => {
     expect(manualOrderDiscountSchema.safeParse(cuerpo({ type: 'PERCENTAGE', value: 10, llave: LLAVE })).success).toBe(true)
-    expect(manualOrderDiscountSchema.safeParse(cuerpo({ type: 'FIXED_AMOUNT', value: 25.5, name: 'Amigo', llave: LLAVE })).success).toBe(true)
+    expect(manualOrderDiscountSchema.safeParse(cuerpo({ type: 'FIXED_AMOUNT', value: 25.5, name: 'Amigo', llave: LLAVE })).success).toBe(
+      true,
+    )
     const malos = [
       { type: 'PERCENTAGE', value: 101, llave: LLAVE },
       { type: 'PERCENTAGE', value: 0, llave: LLAVE },

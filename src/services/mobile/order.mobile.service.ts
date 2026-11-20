@@ -3156,19 +3156,90 @@ export async function applyOrderDiscountInTransaction(
     throw new BadRequestError('No se puede descontar una orden ya pagada')
   }
 
+  // Encargo 7133e3 (hz:0555ee15:D2): el descuento MANUAL de la caja, % o fijo, como el de MOSTRADOR. Va AQUÍ, con el candado y las
+  // guardas de arriba (importada, de tarjetas, pagada o con abono), y escribe su fila igual que el del catálogo (histórico, reparto,
+  // recálculo). No es una cortesía (`COMP` no entra: tiene su botón y su permiso) ni suma usos del catálogo (no tiene `discountId`).
   if (typeof discountId !== 'string') {
-    return aplicarDescuentoManualDeMesaEnTx(
-      tx,
-      venueId,
-      { ...order, id: orderId },
-      discountId,
-      staffId,
-      motivo,
-      // hz:e0b12f00:D1: dejar en $0 lo que queda de los productos es regalar la cuenta (pide `orders:comp`); `aprobacion.porPin` es
-      // el gerente cuyo PIN autorizó ESE regalo (lo pone `conCortesiaSiRegala` en la ruta).
-      puedeRegalar ? { porPin: aprobacion?.porPin } : undefined,
-      recalculateOrderTotals,
-    )
+    const manual = discountId
+    if (manual.type !== 'PERCENTAGE' && manual.type !== 'FIXED_AMOUNT') throw new BadRequestError('Tipo de descuento manual inválido')
+    // Codex r2 #1: el valor se normaliza a 2 decimales ANTES de calcular y de decidir si regala; es el mismo que se guarda y el que
+    // re-deriva el recálculo (sin eso, $1.005 o 99.99996 % se comparaban de un modo y se guardaban de otro).
+    const value = new Prisma.Decimal(manual.value).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+    if (!Number.isFinite(value) || value <= 0) throw new BadRequestError('El descuento debe ser mayor a cero')
+    if (manual.type === 'PERCENTAGE' && value > 100) throw new BadRequestError('El porcentaje no puede ser mayor a 100')
+    const name = manual.name.trim() || 'Descuento manual'
+    const firma = firmaDelManual({ ...manual, value, name }, motivo)
+
+    // La llave del envío contesta la fila ya hecha (respuesta perdida, reintento, cola): nunca dos filas por un toque.
+    const yaHecho = await envioYaHechoEnTx(tx, venueId, orderId, manual.llave, firma)
+    if (yaHecho) {
+      const actual = await tx.order.findFirst({
+        where: { id: orderId, venueId },
+        select: { subtotal: true, discountAmount: true, serviceChargeAmount: true, total: true, version: true },
+      })
+      return {
+        row: {
+          id: yaHecho.orderDiscountId,
+          name: yaHecho.name,
+          amount: new Prisma.Decimal(yaHecho.amount),
+          authorizedById: null,
+          reason: null,
+        },
+        // Números, como la primera respuesta (`res.json` mandaría un Decimal como texto).
+        totals: {
+          subtotal: Number(actual!.subtotal),
+          discountAmount: Number(actual!.discountAmount),
+          serviceChargeAmount: Number(actual!.serviceChargeAmount),
+          total: Number(actual!.total),
+          version: actual!.version,
+        },
+        repetida: true as const,
+      }
+    }
+
+    // 🔴 MONEY: en centavos enteros y sólo lo que TODAVÍA no está descontado (el mismo recorte que el del catálogo).
+    const subtotalCents = aCentavos(order.subtotal)
+    const quedaCents = Math.max(0, subtotalCents - aCentavos(order.discountAmount))
+    if (quedaCents <= 0) throw new BadRequestError('La cuenta ya no tiene nada por descontar')
+    const brutoCents = manual.type === 'PERCENTAGE' ? porcentajeEnCentavos(subtotalCents, value) : Math.min(aCentavos(value), subtotalCents)
+    const amountCents = Math.min(brutoCents, quedaCents)
+    // hz:e0b12f00:D1 (founder, 6-nov), igual que el manual de la TPV: un % o fijo que deja en $0 lo que queda de los productos es una
+    // cortesía (con ESTE importe, en centavos; la propina y el cargo por servicio no cuentan). Sin el permiso de cortesía, 403: la ruta
+    // pide el PIN y repite; la cola lo deja en cuarentena (sin red no hay PIN). `aprobacion.porPin` = el gerente de ESE regalo.
+    const regala = amountCents >= quedaCents
+    if (regala && !puedeRegalar) throw new RegaloSinPermisoError()
+
+    const aplicoManual = staffId
+      ? ((await tx.staffVenue.findFirst({ where: { venueId, staffId, active: true }, select: { id: true } }))?.id ?? null)
+      : null
+    const autorizo = regala ? (aprobacion?.porPin ?? aplicoManual) : null
+
+    await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+    const fila = await tx.orderDiscount.create({
+      data: {
+        orderId,
+        type: manual.type,
+        name,
+        value,
+        amount: amountCents / 100,
+        isManual: true,
+        reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true, tope: null })),
+        appliedById: aplicoManual,
+        ...(autorizo ? { authorizedById: autorizo } : {}),
+        ...motivo,
+      },
+      select: { id: true, name: true, amount: true, authorizedById: true, reason: true },
+    })
+    const totalesManual = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+    // El importe que quedó tras el recálculo (un % se re-deriva): es el que contesta la misma llave después.
+    const final = await tx.orderDiscount.findFirst({ where: { id: fila.id, orderId }, select: { amount: true } })
+    const amountFinal = final?.amount ?? fila.amount
+    await anotarEnvioEnTx(tx, venueId, orderId, manual.llave, firma, {
+      orderDiscountId: fila.id,
+      name: fila.name,
+      amount: Number(amountFinal),
+    })
+    return { row: { ...fila, amount: amountFinal }, totals: totalesManual, repetida: false as const }
   }
 
   const discount = await tx.discount.findFirst({ where: { id: discountId, venueId } })
@@ -3257,90 +3328,6 @@ export async function applyOrderDiscountInTransaction(
 
   const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
   return { row, totals }
-}
-
-/**
- * Encargo 7133e3 (hz:0555ee15:D2): el descuento MANUAL de una cuenta de MESAS (% o fijo, como el de MOSTRADOR). Corre DENTRO de
- * `applyOrderDiscountInTransaction`, ya con el candado de la cuenta y sus guardas (importada, de tarjetas, pagada o con abono).
- *
- * - La llave del envío contesta la fila ya hecha (respuesta perdida, reintento, cola): nunca dos filas por un toque.
- * - Nunca descuenta más de lo que la cuenta todavía tiene sin descontar; si ya no queda nada, se rechaza en vez de crear un $0.
- * - No es una cortesía (`COMP` no entra: la cortesía tiene su propio botón y permiso) ni suma usos del catálogo (no tiene `discountId`).
- */
-async function aplicarDescuentoManualDeMesaEnTx(
-  tx: TxConReintento,
-  venueId: string,
-  order: { id: string; subtotal: Prisma.Decimal | number; discountAmount: Prisma.Decimal | number | null; paidAmount: Prisma.Decimal | number | null },
-  manual: DescuentoManualDeMesa,
-  staffId: string | undefined,
-  motivo: MotivoDeDescuento,
-  /** Quien aplica puede regalar (`orders:comp` propio o el PIN de un gerente, `porPin`). Sin esto, dejar la cuenta en $0 es 403. */
-  regalo: { porPin?: string } | undefined,
-  recalculateOrderTotals: (typeof import('./comp-item.mobile.service'))['recalculateOrderTotals'],
-) {
-  const orderId = order.id
-  if (manual.type !== 'PERCENTAGE' && manual.type !== 'FIXED_AMOUNT') throw new BadRequestError('Tipo de descuento manual inválido')
-  if (!Number.isFinite(manual.value) || manual.value <= 0) throw new BadRequestError('El descuento debe ser mayor a cero')
-  if (manual.type === 'PERCENTAGE' && manual.value > 100) throw new BadRequestError('El porcentaje no puede ser mayor a 100')
-  const name = manual.name.trim() || 'Descuento manual'
-  const firma = firmaDelManual({ ...manual, name }, motivo)
-
-  const yaHecho = await envioYaHechoEnTx(tx, venueId, orderId, manual.llave, firma)
-  if (yaHecho) {
-    const actual = await tx.order.findFirst({
-      where: { id: orderId, venueId },
-      select: { subtotal: true, discountAmount: true, serviceChargeAmount: true, total: true, version: true },
-    })
-    return {
-      row: { id: yaHecho.orderDiscountId, name: yaHecho.name, amount: new Prisma.Decimal(yaHecho.amount), authorizedById: null, reason: null },
-      totals: actual!,
-      repetida: true as const,
-    }
-  }
-
-  const subtotal = Number(order.subtotal)
-  // 🔴 MONEY: el mismo recorte que el del catálogo — sólo lo que TODAVÍA no está descontado.
-  const remainingDiscountable = Math.max(0, subtotal - Number(order.discountAmount || 0))
-  if (remainingDiscountable <= 0) throw new BadRequestError('La cuenta ya no tiene nada por descontar')
-  const rawAmount =
-    manual.type === 'PERCENTAGE' ? porcentajeEnCentavos(aCentavos(subtotal), manual.value) / 100 : Math.min(manual.value, subtotal)
-  const amount = Math.min(rawAmount, remainingDiscountable)
-
-  const aplico = staffId
-    ? ((await tx.staffVenue.findFirst({ where: { venueId, staffId, active: true }, select: { id: true } }))?.id ?? null)
-    : null
-  // hz:e0b12f00:D1 (founder, 6-nov), igual que el manual de la TPV: un % o fijo que deja en $0 lo que queda de los productos es una
-  // cortesía, en centavos y con ESTE importe. La propina y el cargo por servicio no cuentan. Sin permiso de cortesía, 403 (la ruta
-  // pide el PIN y lo repite; la cola lo deja en cuarentena: sin red no hay PIN).
-  const regala = Math.round(amount * 100) >= Math.round(remainingDiscountable * 100)
-  if (regala && !regalo) throw new RegaloSinPermisoError()
-  const autorizo = regala ? (regalo?.porPin ?? aplico) : null
-
-  await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
-  const row = await tx.orderDiscount.create({
-    data: {
-      orderId,
-      type: manual.type,
-      name,
-      value: manual.value,
-      amount,
-      isManual: true,
-      reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true, tope: null })),
-      appliedById: aplico,
-      ...(autorizo ? { authorizedById: autorizo } : {}),
-      ...motivo,
-    },
-    select: { id: true, name: true, amount: true, authorizedById: true, reason: true },
-  })
-  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
-  // El importe que quedó después del recálculo (un % se re-deriva): es el que contesta la misma llave después.
-  const final = await tx.orderDiscount.findFirst({ where: { id: row.id, orderId }, select: { amount: true } })
-  await anotarEnvioEnTx(tx, venueId, orderId, manual.llave, firma, {
-    orderDiscountId: row.id,
-    name: row.name,
-    amount: Number(final?.amount ?? row.amount),
-  })
-  return { row: { ...row, amount: final?.amount ?? row.amount }, totals, repetida: false as const }
 }
 
 export async function applyOrderDiscount(

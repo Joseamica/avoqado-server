@@ -12,7 +12,11 @@ export const descuentoManualDeMesaSchema = z.object({
     .number({ required_error: 'El descuento es requerido', invalid_type_error: 'El descuento debe ser un número' })
     .finite('El descuento debe ser un número')
     .positive('El descuento debe ser mayor a cero'),
-  name: z.string({ invalid_type_error: 'El nombre del descuento no es válido' }).trim().max(80, 'El nombre del descuento es muy largo').optional(),
+  name: z
+    .string({ invalid_type_error: 'El nombre del descuento no es válido' })
+    .trim()
+    .max(80, 'El nombre del descuento es muy largo')
+    .optional(),
   // La llave del envío: la crea el POS al tocar y la repite el reintento y la cola. Obligatoria: sin ella, una respuesta perdida
   // daría el descuento dos veces (D21).
   llave: z

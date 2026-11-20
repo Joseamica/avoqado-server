@@ -21,7 +21,7 @@ jest.mock('@/services/mobile/avisoDeVentaSinRed', () => ({
 
 import { Prisma } from '@prisma/client'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
-import { applyOrderDiscount, buildOrderItemsData, createOrderWithItems } from '@/services/mobile/order.mobile.service'
+import { applyOrderDiscount, createOrderWithItems } from '@/services/mobile/order.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 type Fila = Record<string, any>
@@ -29,7 +29,6 @@ type Fila = Record<string, any>
 const VENUE = 'venue-1'
 const APROBACION = 'desc-gerente' // 10 %, «Requiere aprobación»
 const LIBRE = 'desc-libre' // 10 %, sin aprobación
-const RENGLON_APROBACION = 'desc-renglon-gerente'
 
 const aNumero = (v: any) => (v && typeof v === 'object' && typeof v.toNumber === 'function' ? v.toNumber() : v)
 
@@ -146,6 +145,8 @@ function baseEnMemoria() {
     select?.organizationId ? { organizationId: 'org-1' } : { id: VENUE, name: 'Tienda de prueba', salesEnabled: true },
   )
   const llaveDe = (w: any) => w.organizationId_actorStaffId_endpoint_idempotencyKey
+  // El doble global no trae `IdempotencyRequest`: se le agrega aquí (sólo en esta suite).
+  ;(prismaMock as any).idempotencyRequest = { findUnique: jest.fn(), create: jest.fn(), delete: jest.fn() }
   prismaMock.idempotencyRequest.findUnique.mockImplementation(async ({ where }: any) => {
     const k = llaveDe(where)
     return (
@@ -177,6 +178,7 @@ const venta = (extra: Fila = {}) =>
 async function cuentaAbierta(db: ReturnType<typeof baseEnMemoria>) {
   const creada = await createOrderWithItems(VENUE, venta())
   return { id: creada.id, filas: () => db.descuentos.filter(d => d.orderId === creada.id) }
+}
 
 const LLAVE = '6f1c2a3b-4d5e-4f60-8a71-9b0c1d2e3f40'
 const OTRA_LLAVE = '7a2b3c4d-5e6f-4a70-8b81-9c0d1e2f3a41'
@@ -204,9 +206,17 @@ describe('7133e3 · «Descuento manual» en la cuenta de MESAS', () => {
   it('fijo con nombre y motivo: la fila guarda el nombre que tecleó la caja y el motivo de f998c8', async () => {
     const db = baseEnMemoria()
     const cuenta = await cuentaAbierta(db)
-    await applyOrderDiscount(VENUE, cuenta.id, manual({ type: 'FIXED_AMOUNT', value: 25, name: ' Cliente frecuente ' }), 'sesion-1', false, undefined, {
-      reason: 'Queja del cliente',
-    })
+    await applyOrderDiscount(
+      VENUE,
+      cuenta.id,
+      manual({ type: 'FIXED_AMOUNT', value: 25, name: ' Cliente frecuente ' }),
+      'sesion-1',
+      false,
+      undefined,
+      {
+        reason: 'Queja del cliente',
+      },
+    )
     expect(cuenta.filas()).toEqual([
       expect.objectContaining({ type: 'FIXED_AMOUNT', name: 'Cliente frecuente', amount: 25, reason: 'Queja del cliente' }),
     ])
@@ -236,7 +246,14 @@ describe('7133e3 · «Descuento manual» en la cuenta de MESAS', () => {
     const db = baseEnMemoria()
     const cuenta = await cuentaAbierta(db)
     await applyOrderDiscount(VENUE, cuenta.id, manual({ type: 'FIXED_AMOUNT', value: 70 }), 'sesion-1')
-    const r = await applyOrderDiscount(VENUE, cuenta.id, manual({ type: 'FIXED_AMOUNT', value: 70, llave: OTRA_LLAVE }), 'sesion-1', true, {})
+    const r = await applyOrderDiscount(
+      VENUE,
+      cuenta.id,
+      manual({ type: 'FIXED_AMOUNT', value: 70, llave: OTRA_LLAVE }),
+      'sesion-1',
+      true,
+      {},
+    )
     expect(r.amount).toBe(30)
     expect(cuenta.filas()).toHaveLength(2)
     expect(db.ordenes()[0].total).toBe(0)
@@ -326,5 +343,25 @@ describe('7133e3 · hz:e0b12f00:D1 · un manual que deja la cuenta en $0 es una 
     const cuenta = await cuentaAbierta(db)
     await applyOrderDiscount(VENUE, cuenta.id, manual({ value: 99 }), 'sesion-1')
     expect(cuenta.filas()[0].authorizedById ?? null).toBeNull()
+  })
+})
+
+describe('7133e3 · Codex r2 #1: el permiso se decide con el importe que SE GUARDA (2 decimales)', () => {
+  it.each([
+    ['99.99996 %', manual({ value: 99.99996 })],
+    ['un fijo de $99.995', manual({ type: 'FIXED_AMOUNT', value: 99.995 })],
+  ])('%s se guarda como el total de la cuenta: es cortesía y sin permiso es 403', async (_caso, m) => {
+    const db = baseEnMemoria()
+    const cuenta = await cuentaAbierta(db)
+    await expect(applyOrderDiscount(VENUE, cuenta.id, m, 'sesion-1')).rejects.toMatchObject({ code: 'PERMISSION_DENIED' })
+    expect(cuenta.filas()).toEqual([])
+  })
+
+  it('el valor guardado es el normalizado (12.345 % → 12.35 %) y su importe sale de ése', async () => {
+    const db = baseEnMemoria()
+    const cuenta = await cuentaAbierta(db)
+    const r = await applyOrderDiscount(VENUE, cuenta.id, manual({ value: 12.345 }), 'sesion-1')
+    expect(cuenta.filas()[0]).toMatchObject({ value: 12.35 })
+    expect(r.amount).toBe(12.35)
   })
 })
