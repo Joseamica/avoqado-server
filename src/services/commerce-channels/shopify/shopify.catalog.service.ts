@@ -323,7 +323,7 @@ async function categoriaPara(tx: Prisma.TransactionClient, venueId: string, tipo
   const name = tipo.trim() || 'Shopify'
   const slug = generateSlug(name) || 'shopify'
   const existente =
-    (await tx.menuCategory.findFirst({ where: { venueId, name }, select: { id: true } })) ??
+    (await tx.menuCategory.findFirst({ where: { venueId, name, deletedAt: null }, select: { id: true } })) ??
     (await tx.menuCategory.findUnique({ where: { venueId_slug: { venueId, slug } }, select: { id: true } }))
   if (existente) return existente.id
   return (await tx.menuCategory.create({ data: { venueId, name, slug, originSystem: 'SHOPIFY' }, select: { id: true } })).id

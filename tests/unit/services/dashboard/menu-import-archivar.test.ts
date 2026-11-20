@@ -79,7 +79,8 @@ describe('D2 · «Reemplazar» nunca borra un producto: archiva los que el archi
 
     await importMenu(V, archivo('replace', [{ name: 'BEBIDAS', slug: 'bebidas', skus: ['A'] }]), HUMANO)
 
-    expect(prismaMock.menuCategory.findFirst).toHaveBeenNthCalledWith(1, { where: { venueId: V, name: 'BEBIDAS' } })
+    // Encargo bc1dcc: por nombre, la que el dueño ve (una eliminada sólo si no hay otra; el slug no cambia al eliminar).
+    expect(prismaMock.menuCategory.findFirst).toHaveBeenNthCalledWith(1, { where: { venueId: V, name: 'BEBIDAS', deletedAt: null } })
     expect(prismaMock.menuCategory.findFirst).toHaveBeenNthCalledWith(2, { where: { venueId: V, slug: 'bebidas' } })
     expect(prismaMock.menuCategory.create).not.toHaveBeenCalled()
     expect(prismaMock.menuCategory.update).toHaveBeenCalledWith({ where: { id: 'cat-vieja' }, data: { active: true } })

@@ -524,7 +524,8 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('menu:read', venueId)
       const cats = await prisma.menuCategory.findMany({
-        where: { ...where, ...(includeInactive ? {} : { active: true }) },
+        // Una eliminada no sale ni con includeInactive: para el dueño ya no existe.
+        where: { ...where, deletedAt: null, ...(includeInactive ? {} : { active: true }) },
         select: { name: true, description: true, active: true, _count: { select: { products: { where: { deletedAt: null } } } } },
         orderBy: { displayOrder: 'asc' },
       })
@@ -580,7 +581,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       }
 
       const cat = await prisma.menuCategory.findFirst({
-        where: { ...where, name: { equals: category, mode: 'insensitive' } },
+        where: { ...where, deletedAt: null, name: { equals: category, mode: 'insensitive' } },
         select: { id: true },
       })
       if (!cat) {

@@ -33,7 +33,7 @@ export async function getOnlineMenuSummary(venueId: string): Promise<{
   truncated: boolean
 }> {
   const rows = await prisma.menuCategory.findMany({
-    where: { venueId },
+    where: { venueId, deletedAt: null }, // una eliminada no se publica ni se enseña
     orderBy: [{ displayOrder: 'asc' }, { id: 'asc' }],
     take: MAX_MENU_CATEGORIES + 1,
     select: { id: true, name: true, active: true },

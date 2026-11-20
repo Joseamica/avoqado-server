@@ -213,8 +213,9 @@ describe('printStation.dashboard.service', () => {
       )
       expect(res).toEqual({ categoriesUpdated: 1, productsUpdated: 1 })
       // tenant isolation: every updateMany carries venueId
+      // (y una categoría eliminada no se rutea: encargo bc1dcc)
       expect(mockPrisma.menuCategory.updateMany).toHaveBeenCalledWith({
-        where: { id: 'cat_1', venueId: VENUE },
+        where: { id: 'cat_1', venueId: VENUE, deletedAt: null },
         data: { printStationId: COCINA },
       })
     })
