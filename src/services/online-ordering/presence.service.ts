@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { utcTs } from '@/utils/sqlDates'
@@ -127,6 +128,38 @@ interface VueltaPausaSola {
  *   va primero. Se queda así aunque después llegue una respuesta: sólo «Reanudar» sube el corte.
  * Techos aceptados: T1 (quien ya estaba pagando termina) y T2 (una escritura a tiempo que todavía se guarda): sin candados.
  */
+/**
+ * La hora en que el SERVIDOR anterior (sin `staffAnsweredAt`) guardó que una persona contestó: `acceptedAt`, o `rejectedAt` con un motivo
+ * que no es el del sistema (`PAYMENT_FAILED`). En el código nuevo toda aceptación o rechazo de una persona trae `staffAnsweredAt`, y el
+ * sistema sólo rechaza por pago y sólo acepta lo que una persona ya pasó a «cobrando» (con su marca); así que esto sólo pesa en lo que
+ * contestó el servidor anterior. Codex p2-r7 #1: si un despliegue falla y el anterior sigue atendiendo después de la gracia, sus
+ * respuestas a tiempo siguen contando.
+ */
+const respuestaAnterior = (t: string) =>
+  Prisma.raw(`COALESCE(${t}."acceptedAt", CASE WHEN ${t}."rejectReason" <> 'PAYMENT_FAILED' THEN ${t}."rejectedAt" END)`)
+/** La hora de la respuesta de una persona: la marca nueva o, si no hay, la del servidor anterior. */
+const respuesta = (t: string) => Prisma.raw(`COALESCE(${t}."staffAnsweredAt", ${respuestaAnterior(t).sql})`)
+
+/**
+ * ¿Hubo una respuesta A TIEMPO en (desde, hasta]? Dos búsquedas: la de la marca nueva va por el índice `(venueId, staffAnsweredAt)`; la
+ * del servidor anterior, sólo en filas sin marca cuya hora límite es posterior a `desde` (una respuesta a tiempo nunca es posterior a la
+ * hora límite de su pedido).
+ */
+const hayRespuestaEntre = (venueId: string, desde: Prisma.Sql, hasta: Prisma.Sql) => Prisma.sql`(
+  EXISTS (
+    SELECT 1 FROM "OnlineOrder" s
+    WHERE s."venueId" = ${venueId} AND s."requiresAcceptance" = true
+      AND s."staffAnsweredAt" > ${desde} AND s."staffAnsweredAt" <= ${hasta} AND s."staffAnsweredAt" <= s."acceptDeadlineAt"
+  )
+  OR EXISTS (
+    SELECT 1 FROM "OnlineOrder" s
+    WHERE s."venueId" = ${venueId} AND s."requiresAcceptance" = true
+      AND s."staffAnsweredAt" IS NULL AND s."acceptDeadlineAt" > ${desde}
+      AND ${respuestaAnterior('s')} > ${desde} AND ${respuestaAnterior('s')} <= ${hasta}
+      AND ${respuestaAnterior('s')} <= s."acceptDeadlineAt"
+  )
+)`
+
 async function vueltaPausaSola(venueId: string, now: Date, corte: Date): Promise<VueltaPausaSola> {
   const [fila] = await prisma.$queryRaw<VueltaPausaSola[]>`
     WITH f AS (
@@ -136,7 +169,7 @@ async function vueltaPausaSola(venueId: string, now: Date, corte: Date): Promise
         AND oo."requiresAcceptance" = true
         AND oo."acceptDeadlineAt" > ${utcTs(corte)}
         AND oo."acceptDeadlineAt" <= ${utcTs(now)}
-        AND (oo."staffAnsweredAt" IS NULL OR oo."staffAnsweredAt" > oo."acceptDeadlineAt")
+        AND (${respuesta('oo')} IS NULL OR ${respuesta('oo')} > oo."acceptDeadlineAt")
         AND NOT COALESCE(oo."cancelledBy" = 'CUSTOMER' AND oo."cancelledAt" <= oo."acceptDeadlineAt", false)
         AND NOT COALESCE(
           oo."rejectReason" = 'PAYMENT_FAILED' AND oo."staffAnsweredAt" IS NULL AND oo."rejectedAt" <= oo."acceptDeadlineAt",
@@ -151,15 +184,7 @@ async function vueltaPausaSola(venueId: string, now: Date, corte: Date): Promise
       (SELECT max(f.t) FROM f) AS "ultimaFalla",
       CASE
         WHEN (SELECT max(f.t) FROM f) IS NULL THEN NULL
-        WHEN EXISTS (
-          SELECT 1
-          FROM "OnlineOrder" s
-          WHERE s."venueId" = ${venueId}
-            AND s."requiresAcceptance" = true
-            AND s."staffAnsweredAt" > (SELECT max(f.t) FROM f)
-            AND s."staffAnsweredAt" <= ${utcTs(now)}
-            AND s."staffAnsweredAt" <= s."acceptDeadlineAt"
-        ) THEN NULL
+        WHEN ${hayRespuestaEntre(venueId, Prisma.sql`(SELECT max(f.t) FROM f)`, utcTs(now))} THEN NULL
         ELSE (SELECT max(f.t) FROM f)
       END AS "fallaSuelta",
       par.id AS "pausaId",
@@ -169,15 +194,7 @@ async function vueltaPausaSola(venueId: string, now: Date, corte: Date): Promise
       SELECT p.id, p.t
       FROM p
       WHERE p.prev IS NOT NULL
-        AND NOT EXISTS (
-          SELECT 1
-          FROM "OnlineOrder" s
-          WHERE s."venueId" = ${venueId}
-            AND s."requiresAcceptance" = true
-            AND s."staffAnsweredAt" > p.prev
-            AND s."staffAnsweredAt" <= p.t
-            AND s."staffAnsweredAt" <= s."acceptDeadlineAt"
-        )
+        AND NOT ${hayRespuestaEntre(venueId, Prisma.sql`p.prev`, Prisma.sql`p.t`)}
       ORDER BY p.t ASC, p.id ASC
       LIMIT 1
     ) AS par ON true`

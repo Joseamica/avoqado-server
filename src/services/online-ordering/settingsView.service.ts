@@ -15,8 +15,11 @@ import { NO_ONE_VENUE_TYPES } from './constants'
 export async function settingsView(venueId: string, preloaded?: Awaited<ReturnType<typeof getSettings>>) {
   // R66: con `preloaded` (lo que acaba de escribir el PUT) siempre hay fila; si no, la misma lectura dice si existe.
   const { settings, saved } = preloaded ? { settings: preloaded, saved: true } : await getSettingsWithSaved(venueId)
+  // D662 (Codex p2-r7 #2): la hora en que se leyó el estado de la tienda viaja con él: el panel, con dos lecturas en camino, se queda
+  // con la más NUEVA del SERVIDOR (no con la última que llegó).
+  const leidoEn = new Date()
   const [state, requirements, merchantStatus, venue] = await Promise.all([
-    getAcceptingStatus(venueId, new Date(), settings),
+    getAcceptingStatus(venueId, leidoEn, settings),
     storeRequirements(venueId),
     cardMerchantStatus(prisma, venueId),
     prisma.venue.findUnique({ where: { id: venueId }, select: { type: true } }),
@@ -32,6 +35,8 @@ export async function settingsView(venueId: string, preloaded?: Awaited<ReturnTy
     // Campo nuevo y opcional: el panel preselecciona la sugerencia por giro sólo si el negocio nunca guardó.
     hasSavedSettings: saved,
     store: storeView(state),
+    /** Campo nuevo y opcional (D662): cuándo se leyó `store`. */
+    storeReadAt: leidoEn.toISOString(),
     requirements,
     // Fase 2: el switch y el estado de la cuenta Stripe (el panel explica por qué no se puede prender).
     card: { enabled: !!settings.acceptsCardOnline, merchantStatus },
