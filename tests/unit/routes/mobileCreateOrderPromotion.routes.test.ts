@@ -113,8 +113,9 @@ describe('POST /mobile/venues/:venueId/orders — candados de promoción', () =>
     expect(handlers.length).toBeGreaterThanOrEqual(4)
     expect(handlers[handlers.length - 1]).toBe(orderMobileController.createOrder)
     expect(loadTimeCalls).toContain('permission:orders:create')
-    // El candado de promoción NO se resuelve al montar: depende del body.
-    expect(loadTimeCalls).not.toContain('permission:discounts:apply')
+    // El candado de promoción NO se resuelve al montar EN ESTA RUTA: depende del body. (Acotado a sus capas el 19-nov: el descuento
+    // manual de MESAS, `/orders/:orderId/discounts/manual`, sí monta `discounts:apply` fijo, y eso no toca a la venta.)
+    expect(handlers.map((h: any) => h?.requiredPermission)).not.toContain('discounts:apply')
     expect(typeof guard).toBe('function')
   })
 

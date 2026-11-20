@@ -3358,7 +3358,7 @@ export async function applyOrderDiscount(
     staffId,
     venueId,
     data: {
-      discountId: manual ? null : discountId,
+      discountId: typeof discountId === 'string' ? discountId : null,
       ...(manual ? { manual: true, tipo: manual.type, valor: manual.value } : {}),
       name: row.name,
       amount: Number(row.amount),
