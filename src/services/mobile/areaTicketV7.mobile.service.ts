@@ -641,7 +641,9 @@ function issueIntentFromInput(lines: AreaTicketLineInput[]) {
     quantity: quantity(normalized[index].quantity),
     weightKg: normalized[index].weightQuantity == null ? null : quantity(normalized[index].weightQuantity),
     notes: line.notes ?? null,
-    modifierIds: [...new Set(line.modifierIds ?? [])].sort(),
+    // Con repetidos (grupo que deja repetir, encargo a508f4): [X] y [X, X] son vales distintos. Un `Set` los igualaba y el
+    // reintento con la misma llave devolvía el vale viejo con un extra de menos.
+    modifierIds: [...(line.modifierIds ?? [])].sort(),
     discountId: line.discountId ?? null,
   }))
 }
@@ -653,13 +655,11 @@ function issueIntentFromTicket(ticket: any) {
     quantity: quantity(line.quantity),
     weightKg: line.weightKg == null ? null : quantity(line.weightKg),
     notes: line.notes ?? null,
-    modifierIds: [
-      ...new Set(
-        (Array.isArray(line.modifiersSnapshot) ? line.modifiersSnapshot : [])
-          .map((modifier: any) => modifier?.modifierId)
-          .filter((modifierId: unknown): modifierId is string => typeof modifierId === 'string'),
-      ),
-    ].sort(),
+    // Un renglón de la foto por vez elegida: los repetidos se conservan, igual que en la entrada.
+    modifierIds: (Array.isArray(line.modifiersSnapshot) ? line.modifiersSnapshot : [])
+      .map((modifier: any) => modifier?.modifierId)
+      .filter((modifierId: unknown): modifierId is string => typeof modifierId === 'string')
+      .sort(),
     discountId: line.appliedDiscountId ?? null,
   }))
 }
@@ -827,9 +827,14 @@ export async function buildReservationSpecs(
   ])
   const rawById = new Map(rawsDeFoto.map(r => [r.id, r]))
   const ligadoById = new Map(ligadosDeFoto.map(p => [p.id, p]))
+  // Una entrada por VEZ elegida (encargo a508f4): con «2 de Cochinita» se apartan dos porciones, como consume el cobro (un renglón
+  // por vez). Antes se recorría el catálogo (una fila por extra) y se apartaba una sola.
   const extrasDeLaLinea = (lineIndex: number) =>
-    modifiers
-      .filter(candidate => (inputs[lineIndex].modifierIds ?? []).includes(candidate.id))
+    (inputs[lineIndex].modifierIds ?? [])
+      .flatMap(id => {
+        const modifier = modifiers.find(candidate => candidate.id === id)
+        return modifier ? [modifier] : []
+      })
       .map(modifier => {
         const foto = snapshots[lineIndex]?.modifiersSnapshot?.find(m => m.modifierId === modifier.id)?.inventario
         if (!foto) return modifier
@@ -1011,7 +1016,10 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
     )
   } catch (error) {
     if (!esRechazoPorTopeEnVales(error)) throw error
-    const ganador = await prisma.areaTicket.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey } }, include: ticketInclude })
+    const ganador = await prisma.areaTicket.findUnique({
+      where: { venueId_idempotencyKey: { venueId, idempotencyKey } },
+      include: ticketInclude,
+    })
     if (!ganador) throw error
     assertIssueIdempotencyMatch(ganador, input.lines)
     return mapTicket(ganador)
@@ -2046,16 +2054,15 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
   }
   const construidoSueltos = normalItems.length > 0 ? await sueltos() : null
   if (construidoSueltos && 'orderId' in construidoSueltos) return mapCheckout(construidoSueltos)
-  const normalBuild =
-    construidoSueltos
-      ? construidoSueltos
-      : {
-          itemsData: [] as any[],
-          subtotal: 0,
-          itemDiscountTotal: 0,
-          discounts: [] as Array<{ id: string; [key: string]: any }>,
-          motivosPorRenglon: undefined,
-        }
+  const normalBuild = construidoSueltos
+    ? construidoSueltos
+    : {
+        itemsData: [] as any[],
+        subtotal: 0,
+        itemDiscountTotal: 0,
+        discounts: [] as Array<{ id: string; [key: string]: any }>,
+        motivosPorRenglon: undefined,
+      }
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
   // Tarjeta na24531d: el catálogo que nombra la fila espejo de cada renglón de vale con descuento (fuera de la transacción).
   const descuentosDeValesDeLaSesion = await descuentosDeLosVales(venueId, session.tickets)

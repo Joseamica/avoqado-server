@@ -1188,8 +1188,9 @@ export async function deductStockForRecipe(
       for (const line of applicableLines) {
         // ✅ Check if this is a variable ingredient that can be substituted
         if (line.isVariable && line.linkedModifierGroupId && orderModifiers?.length) {
-          // Find a SUBSTITUTION modifier from the linked group
-          const substitutionModifier = orderModifiers.find(
+          // Cada SUSTITUCIÓN elegida del grupo ligado descuenta lo suyo (encargo a508f4): «2 de Cochinita + 1 de Papa» son tres
+          // renglones y descuentan tres veces, igual que las ADICIONES. Antes sólo contaba la primera (`find`).
+          const substitutionModifiers = orderModifiers.filter(
             om =>
               om.modifier.groupId === line.linkedModifierGroupId &&
               om.modifier.inventoryMode === 'SUBSTITUTION' &&
@@ -1197,7 +1198,7 @@ export async function deductStockForRecipe(
               om.modifier.quantityPerUnit,
           )
 
-          if (substitutionModifier) {
+          for (const substitutionModifier of substitutionModifiers) {
             // Use modifier's ingredient instead of recipe default. Convert from
             // modifier.unit → rawMaterial.unit (modifier may declare grams while
             // the raw material is stored in kilograms or vice-versa).
@@ -1223,9 +1224,8 @@ export async function deductStockForRecipe(
               quantity: totalQty,
               unit: subRawMaterial.unit,
             })
-
-            continue // Skip default ingredient - it was substituted
           }
+          if (substitutionModifiers.length > 0) continue // Skip default ingredient - it was substituted
         }
 
         // Use default recipe ingredient (no substitution or not a variable ingredient).
