@@ -8,6 +8,7 @@ import { TOPES_POR_ORDEN } from '../fiscal/librosDeOrdenes'
 import { computeOrderBalance } from '../shared/orderBalance'
 import { lockExistingOrderForPayment, MAX_ORDER_LOCK_SCOPE } from '../shared/paymentShiftClaim'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
+import { cajaParaDevolverEnTx } from '../shared/cashDrawerPosting'
 import { keptMarkdownDiscountRow } from '../shared/discount.service'
 import { sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { assertRefundableLines, assertPromotionLineFullQuantity, bloquearCobroParaReembolso } from '../dashboard/refund.dashboard.service'
@@ -515,7 +516,20 @@ export async function prepareExchangeInTx(
   // (`payoutModesFor`), así que con STORE_CREDIT `giftPayoutIds` siempre está vacío. El núcleo lo vuelve a pedir (reentrada).
   if (aSaldo) await prepararSobreDeSaldoAFavorEnTx(tx, { venueId, customerId: settlement.customerId! })
   const payoutCash = calc.kind === 'PAYOUT' && settlement.method === 'CASH'
-  const drawer = payoutCash ? await tx.cashDrawerSession.findFirst({ where: { venueId, status: 'OPEN' }, select: { id: true } }) : null
+  // 🔴 Codex r1 #15: si alguna parte devuelve billetes de una venta de la máquina, la gaveta se bloquea UNA vez aquí, antes de la primera
+  // parte (que reclama el turno): caja → turno, el orden de la devolución directa y del cierre de caja. Sin caja abierta, 409.
+  const sacaDeLaGaveta =
+    payoutCash &&
+    slices.some(s => {
+      if (s.role !== 'PAYOUT') return false
+      const chain = chains.get(s.paymentId)
+      return chain ? chain.kind === 'INHERIT' && chain.money.salidaDeGaveta === true : !!paymentById.get(s.paymentId)!.money.cashMachineRef
+    })
+  const drawer = sacaDeLaGaveta
+    ? { id: await cajaParaDevolverEnTx(tx, venueId) }
+    : payoutCash
+      ? await tx.cashDrawerSession.findFirst({ where: { venueId, status: 'OPEN' }, select: { id: true } })
+      : null
   if (payoutCash && settlement.cashDrawerSessionId && drawer?.id !== settlement.cashDrawerSessionId)
     throw new ExchangeError(
       'EXCHANGE_SETTLEMENT_UNAVAILABLE',

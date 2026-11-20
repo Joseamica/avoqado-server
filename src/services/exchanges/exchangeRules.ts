@@ -111,6 +111,8 @@ export interface MoneyShape {
   tenderCountsAsCash: boolean | null
   tenderSatFormaPago: string | null
   tenderSystemKind: string | null
+  /** Máquina de efectivo: el folio de la QuickPay (su efectivo se devuelve de la gaveta, `devuelveEfectivoDeLaMaquina`). */
+  cashMachineRef?: string | null
 }
 
 /**
@@ -142,6 +144,9 @@ function moneyModesFor(payment: MoneyShape): PayoutModes {
  */
 export function modesForExchangeCreditRoot(root: MoneyShape): PayoutModes {
   if (isGiftCardTenderKind(root.tenderSystemKind)) return {}
+  // Máquina de efectivo (Codex r1 #2): lo pagado en la QuickPay se devuelve en billetes de la gaveta, en este cambio y en el siguiente.
+  // Como en el primero, es «Devolver con» (CHOSEN): pide `payments:refund-to-cash` (decisión c del founder).
+  if (root.cashMachineRef) return { CASH: 'CHOSEN' }
   const modes = payoutModesFor(root)
   const same: PayoutModes = {}
   for (const method of PAYOUT_METHODS) if (modes[method] === 'SAME') same[method] = 'SAME'

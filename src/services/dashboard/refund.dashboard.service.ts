@@ -632,6 +632,11 @@ export interface RefundMoneySemantics {
   tenderCountsAsCash: boolean | null
   tenderCaptureTip: boolean | null
   tenderSatFormaPago: string | null
+  /**
+   * Máquina de efectivo (Codex r1 #2): lo que sale del dinero de una raíz cobrada en la QuickPay se entrega en billetes de la GAVETA.
+   * Con esta marca el núcleo pide la caja abierta y escribe su `PAY_OUT` en la misma transacción, como la devolución directa.
+   */
+  salidaDeGaveta?: true
 }
 
 /**
@@ -863,10 +868,11 @@ export async function writeRefundInTx(
   // 🔴 Máquina de efectivo (A6, R4-7 #4): devolver en efectivo una venta de la máquina saca billetes de la GAVETA, aunque la venta nunca
   // entró ahí. La caja abierta se bloquea AQUÍ, antes del turno (el mismo orden que el cierre de caja: caja → turno); sin ella, 409 y no
   // se confirma nada. Con una semántica dada (el crédito de un cambio, la cadena, el saldo a favor) el dinero no sale de la caja.
-  const cajaQueAutoriza =
-    !input.moneyAs && !input.aSaldoAFavor && devuelveEfectivoDeLaMaquina(original, input.devolverCon)
-      ? await cajaParaDevolverEnTx(tx, input.venueId)
-      : null
+  // Codex r1 #2: también lo que sale del dinero de una raíz de la máquina (`moneyAs.salidaDeGaveta`, la cadena de un cambio).
+  const sacaDeLaGaveta =
+    !input.aSaldoAFavor &&
+    (input.moneyAs ? input.moneyAs.salidaDeGaveta === true : devuelveEfectivoDeLaMaquina(original, input.devolverCon))
+  const cajaQueAutoriza = sacaDeLaGaveta ? await cajaParaDevolverEnTx(tx, input.venueId) : null
   const shiftClaim = await claimShiftForRefund(tx, {
     venueId: input.venueId,
     salesRefundPesos,

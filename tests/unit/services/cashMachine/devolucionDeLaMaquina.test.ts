@@ -23,7 +23,10 @@ jest.mock('@/services/wallet/stampLedger.service', () => ({ reverseStampForOrder
 
 import { ConflictError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
+import { issueRefund, writeRefundInTx } from '@/services/dashboard/refund.dashboard.service'
+import { resolveChainRefund } from '@/services/exchanges/exchangeChainRefund'
+import { modesForExchangeCreditRoot, payoutModesFor } from '@/services/exchanges/exchangeRules'
+import { EXCHANGE_REFUND_ROLE } from '@/services/exchanges/exchangeMarks'
 import { devolverConEfectivo, devuelveEfectivoDeLaMaquina, type CobroParaDevolver } from '@/services/tpv/terminalRefundTarget'
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -61,6 +64,45 @@ describe('la regla única (pura)', () => {
     expect(devuelveEfectivoDeLaMaquina(delCajon, undefined)).toBe(false)
     expect(devolverConEfectivo(delCajon, undefined)).toBeUndefined()
     expect(devolverConEfectivo(delCajon, 'CASH')).toBeUndefined()
+  })
+})
+
+describe('Codex r1 #2: el Cambio de una venta de la máquina (reglas puras)', () => {
+  const raiz = {
+    id: 'payment-raiz',
+    method: 'CASH',
+    source: 'POS',
+    externalSource: null,
+    fundsFlow: 'EXTERNAL_RECORDED',
+    tenderTypeId: null,
+    tenderCountsAsCash: false,
+    tenderSatFormaPago: '01',
+    tenderSystemKind: null,
+    tenderType: null,
+    merchantAccountId: null,
+    ecommerceMerchantId: null,
+    cashMachineRef: FOLIO,
+  }
+
+  it('🔴 lo que sale de una raíz de la máquina es efectivo DE LA GAVETA (no hereda «fuera del cajón»)', () => {
+    const r = resolveChainRefund({ exchangeId: 'cambio-1' } as any, raiz as any)
+    expect(r).toMatchObject({
+      kind: 'INHERIT',
+      money: { method: 'CASH', fundsFlow: 'CASH_DRAWER', tenderLabel: null, tenderSatFormaPago: null, salidaDeGaveta: true },
+    })
+  })
+
+  it('🔴 el segundo Cambio sí ofrece efectivo para esa raíz, como «Devolver con» (decisión c: refund-to-cash), igual que el primero', () => {
+    expect(modesForExchangeCreditRoot(raiz)).toEqual({ CASH: 'CHOSEN' })
+    expect(payoutModesFor(raiz).CASH).toBe('CHOSEN')
+  })
+
+  it('control — una raíz de efectivo del cajón sigue como hoy', () => {
+    const delCajon = { ...raiz, fundsFlow: 'CASH_DRAWER', cashMachineRef: null, tenderSatFormaPago: null, tenderCountsAsCash: null }
+    expect(modesForExchangeCreditRoot(delCajon)).toEqual({ CASH: 'SAME' })
+    const r = resolveChainRefund({ exchangeId: 'cambio-1' } as any, delCajon as any)
+    expect(r).toMatchObject({ money: { fundsFlow: 'CASH_DRAWER' } })
+    expect((r as any).money.salidaDeGaveta).toBeUndefined()
   })
 })
 
@@ -102,6 +144,8 @@ describe('riel del POS y del panel (issueRefund)', () => {
    * se escribió el PAY_OUT. Las transacciones que abre después el enganche post-commit del cajón usan el global, como en la base.
    */
   let eventosEnTx: { create: jest.Mock; createMany: jest.Mock }
+  /** El nombre de la cajera para el PAY_OUT, leído con el cliente de la transacción (Codex r1 #18). */
+  let staffEnTx: { findUnique: jest.Mock }
   let transacciones: number
 
   const reembolsar = (over: Record<string, unknown> = {}) =>
@@ -116,6 +160,7 @@ describe('riel del POS y del panel (issueRefund)', () => {
     cajaAbierta = { id: 'caja-1' }
     orden = []
     eventosEnTx = { create: jest.fn().mockResolvedValue({ id: 'evento-1' }), createMany: jest.fn() }
+    staffEnTx = { findUnique: jest.fn().mockResolvedValue({ firstName: 'Ana', lastName: 'López' }) }
     transacciones = 0
     prismaMock.order.findUnique.mockResolvedValue({ discountAmount: new Decimal(0), contratoDePrecio: null, originSystem: null })
     prismaMock.payment.findFirst.mockResolvedValue({
@@ -144,7 +189,11 @@ describe('riel del POS y del panel (issueRefund)', () => {
         return (prismaMock.$queryRaw as any)(...args)
       })
       transacciones += 1
-      return callback({ ...(prismaMock as any), $queryRaw: queryRaw, ...(transacciones === 1 ? { cashDrawerEvent: eventosEnTx } : {}) })
+      return callback({
+        ...(prismaMock as any),
+        $queryRaw: queryRaw,
+        ...(transacciones === 1 ? { cashDrawerEvent: eventosEnTx, staff: staffEnTx } : {}),
+      })
     })
     prismaMock.shift.findFirst.mockImplementation((async () => {
       orden.push('turno')
@@ -195,6 +244,50 @@ describe('riel del POS y del panel (issueRefund)', () => {
     unSoloPayOutEnLaCaja(150)
     // La caja se toma ANTES del turno: el mismo orden que el cierre de caja (caja → turno).
     expect(orden).toEqual(['caja', 'turno'])
+  })
+
+  it('🔴 Codex r1 #18: el nombre de la cajera del PAY_OUT se lee con la MISMA transacción (no pide otra conexión con la caja tomada)', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([ventaDeLaMaquina()]).mockResolvedValueOnce([])
+    await reembolsar()
+    expect(staffEnTx.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'staff-9' } }))
+    expect(prismaMock.staff.findUnique).not.toHaveBeenCalled()
+    expect(eventosEnTx.create.mock.calls[0][0].data.staffName).toBe('Ana López')
+  })
+
+  it('🔴 Codex r1 #2: devolver el REEMPLAZO de un cambio de una venta de la máquina saca billetes de la gaveta: caja → turno, CASH_DRAWER y un PAY_OUT', async () => {
+    // El reemplazo se pagó con el crédito del cambio; su dinero sale de la raíz (la venta de la máquina).
+    const reemplazo = ventaDeLaMaquina({
+      id: 'payment-reemplazo',
+      method: 'OTHER',
+      fundsFlow: 'EXTERNAL_RECORDED',
+      tenderLabel: 'Crédito de cambio',
+      tenderSatFormaPago: null,
+      cashMachineRef: null,
+    })
+    const cadena = resolveChainRefund(
+      { exchangeId: 'cambio-1' } as any,
+      { ...ventaDeLaMaquina({ id: 'payment-raiz' }), tenderType: null } as any,
+    )
+    if (cadena.kind !== 'INHERIT') throw new Error('la cadena debía heredarse')
+    prismaMock.$queryRaw.mockResolvedValueOnce([reemplazo]).mockResolvedValueOnce([])
+    await prismaMock.$transaction((tx: any) =>
+      writeRefundInTx(tx, {
+        originalPaymentId: 'payment-reemplazo',
+        venueId: 'venue-1',
+        salesRefundCents: 15000,
+        tipRefundCents: 0,
+        refundedItems: [],
+        reason: 'RETURNED_GOODS',
+        staffId: 'staff-9',
+        tenderCommission: 'NONE',
+        shift: 'CLAIM_LIVE',
+        moneyAs: cadena.money,
+        exchangeMark: { exchangeId: 'cambio-1', role: EXCHANGE_REFUND_ROLE.CHAIN, rootPaymentId: 'payment-raiz' },
+      }),
+    )
+    expect(filaDelReembolso()).toMatchObject({ method: 'CASH', fundsFlow: 'CASH_DRAWER' })
+    expect(orden).toEqual(['caja', 'turno'])
+    unSoloPayOutEnLaCaja(150)
   })
 
   it('devolución PARCIAL por importe ($50 de $150) ⇒ PAY_OUT de $50', async () => {

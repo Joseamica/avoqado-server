@@ -530,7 +530,7 @@ export async function postPayOutInTx(
       type: 'PAY_OUT',
       amount: new Decimal(i.amount.toString()).abs(),
       staffId: i.staffId,
-      staffName: await resolveStaffName(i.staffId),
+      staffName: await resolveStaffName(i.staffId, tx),
       orderId: i.orderId ?? null,
       note: `${DRAWER_REFUND_NOTE_PREFIX} ${i.reason}`,
       localId: i.idempotencyKey,
@@ -589,7 +589,7 @@ export async function salidaDelReembolsoEnTx(
       type: 'PAY_OUT',
       amount: new Decimal(i.amount.toString()).abs(),
       staffId: i.staffId || 'SYSTEM',
-      staffName: await resolveStaffName(i.staffId),
+      staffName: await resolveStaffName(i.staffId, tx),
       orderId: i.orderId ?? null,
       note: i.reason ? `${DRAWER_REFUND_NOTE_PREFIX} ${i.reason}` : DRAWER_REFUND_NOTE_PREFIX,
       localId: cashRefundDrawerLocalId(i.refundPaymentId),
@@ -807,10 +807,14 @@ async function createEventUnderSessionLock(
   return transactionResult.result
 }
 
-async function resolveStaffName(staffId?: string | null): Promise<string> {
+/**
+ * `db`: dentro de una transacción que ya tiene la caja y el turno, la MISMA transacción (Codex r1 #18): pedir otra conexión del pool
+ * con los candados tomados puede vencer la transacción cuando el pool está lleno.
+ */
+async function resolveStaffName(staffId?: string | null, db: Pick<Prisma.TransactionClient, 'staff'> = prisma): Promise<string> {
   if (!staffId) return 'Sistema'
   try {
-    const staff = await prisma.staff.findUnique({
+    const staff = await db.staff.findUnique({
       where: { id: staffId },
       select: { firstName: true, lastName: true },
     })
