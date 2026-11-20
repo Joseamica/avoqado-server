@@ -182,6 +182,22 @@ describe('🔴 D24: anular una cuenta sin cobrar devuelve el uso de su descuento
     expect(await usos()).toBe(antes - 1)
   })
 
+  it('🔴 D31 (nae1cfa6 #1): con el contador ya en 0, quitar el descuento en la TPV no lo deja en −1', async () => {
+    const cero = await prisma.discount.create({
+      data: { venueId, name: 'Primeros 5', type: 'PERCENTAGE', value: 5, scope: 'ORDER', maxTotalUses: 5, currentUses: 0 },
+      select: { id: true },
+    })
+    const orderId = await cuentaAbierta()
+    const fila = await prisma.orderDiscount.create({
+      data: { orderId, discountId: cero.id, type: 'PERCENTAGE', name: 'Primeros 5', value: 5, amount: 0 },
+      select: { id: true },
+    })
+
+    await removeDiscountFromOrder(orderId, fila.id, staffId, venueId)
+
+    expect((await prisma.discount.findUniqueOrThrow({ where: { id: cero.id }, select: { currentUses: true } })).currentUses).toBe(0)
+  })
+
   it('regresión: una fila vieja sin marca (de antes de D19) no resta lo que nunca sumó', async () => {
     const orderId = await cuentaAbierta()
     await prisma.orderDiscount.create({
