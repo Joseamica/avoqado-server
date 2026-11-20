@@ -133,7 +133,8 @@ describe('D17 · sale del tablero cuando la cocina termina', () => {
     expect(guardada.kitchenDoneAt).toBeInstanceOf(Date)
     expect((await listKitchenPreparation(venueId)).items.map(i => i.id)).toEqual(expect.arrayContaining([flautas.id, pozole.id]))
 
-    const recientes = await listRecentKdsOrders(venueId)
+    const recientes = await listRecentKdsOrders(venueId, undefined, true)
+    expect((await listRecentKdsOrders(venueId)).some(r => r.id === k.id)).toBe(false) // la tablet vieja no la recibe
     const reciente = recientes.find(r => r.id === k.id)
     expect(reciente?.completedAt).toBe(guardada.kitchenDoneAt!.toISOString())
 

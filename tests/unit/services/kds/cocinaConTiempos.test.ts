@@ -22,7 +22,7 @@ import {
   type PreparationCounts,
 } from '@/services/kds/kitchenPreparation'
 import { listKdsOrders, countKdsOrders, listRecentKdsOrders, recallKdsOrder } from '@/services/mobile/kds.mobile.service'
-import { permisosParaReproducir, requiredPermissionsForIntent } from '@/services/mobile/sync.mobile.service'
+import { liberacionDesdeLaCocina, permisosParaReproducir, requiredPermissionsForIntent } from '@/services/mobile/sync.mobile.service'
 import { archivarComandas, comandasPorArchivar } from '@/services/kds/kdsArchive.service'
 
 jest.mock('@/services/access/basePlan.service', () => ({
@@ -160,7 +160,7 @@ describe('D17 · el tablero y «Recientes» (SERVIDOR)', () => {
 })
 
 describe('D17 · «Deshacer» de una comanda con tiempos', () => {
-  const hecho = new Date('2026-11-20T20:10:00Z')
+  const hecho = new Date(Date.now() - 10 * 60 * 1000)
   const fila = (id: string, prep: PreparationCounts, revision = 3) => ({
     id,
     orderItemId: `oi-${id}`,
@@ -213,6 +213,18 @@ describe('D17 · «Deshacer» de una comanda con tiempos', () => {
     await expect(
       recallPreparationTicket('venue-a', 'ticket-a', 'staff-k', new Date('2026-11-20T20:00:00Z').toISOString()),
     ).rejects.toMatchObject({ code: 'KDS_RECALL_STALE', statusCode: 409 })
+    expect(prismaMock.kdsOrderItem.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('una hoja de «Recientes» que se quedó abierta más de una hora ya no regresa nada (Codex r5 #6)', async () => {
+    const viejo = new Date(Date.now() - 61 * 60 * 1000)
+    prismaMock.kdsOrder.findFirst.mockReset()
+    prismaMock.kdsOrder.findFirst
+      .mockResolvedValueOnce({ orderId: 'order-a' })
+      .mockResolvedValueOnce({ id: 'ticket-a', status: 'READY', kitchenDoneAt: viejo, archivedAt: null })
+    await expect(recallPreparationTicket('venue-a', 'ticket-a', 'staff-k', viejo.toISOString())).rejects.toMatchObject({
+      code: 'KDS_RECALL_EXPIRED',
+    })
     expect(prismaMock.kdsOrderItem.updateMany).not.toHaveBeenCalled()
   })
 
@@ -279,21 +291,29 @@ describe('D17 · liberar desde la cocina (permiso al reproducir)', () => {
   })
   beforeEach(() => jest.clearAllMocks())
 
-  it('apagado: RELEASE pide lo de siempre (orders:update + orders:create)', async () => {
-    prismaMock.venueSettings.findUnique.mockResolvedValue({ kitchenCanReleaseCourses: false })
-    await expect(permisosParaReproducir('venue-a', release())).resolves.toEqual(['orders:update', 'orders:create'])
-  })
+  const caja = () => true
+  const cocina = (_i: unknown, permiso: string) => permiso === 'orders:update'
 
-  it('prendido: basta orders:update (el rol de cocina)', async () => {
-    prismaMock.venueSettings.findUnique.mockResolvedValue({ kitchenCanReleaseCourses: true })
-    await expect(permisosParaReproducir('venue-a', release())).resolves.toEqual(['orders:update'])
-    await expect(laCocinaPuedeLiberar('venue-a')).resolves.toBe(true)
-  })
-
-  it('las demás acciones no leen el interruptor', async () => {
-    const start = { id: 'i', type: 'KDS_ITEM_PROGRESS' as const, payload: { action: 'START', items: [] } }
-    await expect(permisosParaReproducir('venue-a', start)).resolves.toEqual(requiredPermissionsForIntent(start))
+  it('«Liberar» de la caja pide lo de siempre; desde la cocina (rol o marca de la pantalla) sólo orders:update, sin leer la base', () => {
+    expect(permisosParaReproducir(release(), caja)).toEqual(['orders:update', 'orders:create'])
+    expect(permisosParaReproducir(release(), cocina)).toEqual(['orders:update'])
+    // Codex r5 #4: un gerente que libera desde la pantalla de cocina también pasa por el interruptor
+    const desdeLaCocina = { ...release(), payload: { action: 'RELEASE', items: [], origen: 'COCINA' } }
+    expect(permisosParaReproducir(desdeLaCocina, caja)).toEqual(['orders:update'])
+    expect(liberacionDesdeLaCocina(desdeLaCocina, caja)).toBe(true)
+    expect(liberacionDesdeLaCocina(release(), caja)).toBe(false)
+    // Codex r5 #7: decidirlo no lee la base (una lectura fallida dejaba la acción en revisión)
     expect(prismaMock.venueSettings.findUnique).not.toHaveBeenCalled()
+  })
+
+  it('las demás acciones piden lo de siempre', () => {
+    const start = { id: 'i', type: 'KDS_ITEM_PROGRESS' as const, payload: { action: 'START', items: [] } }
+    expect(permisosParaReproducir(start, cocina)).toEqual(requiredPermissionsForIntent(start))
+  })
+
+  it('el interruptor se lee para las capacidades', async () => {
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ kitchenCanReleaseCourses: true })
+    await expect(laCocinaPuedeLiberar('venue-a')).resolves.toBe(true)
   })
 
   it('la tablet sabe del interruptor y de la versión de «terminado» por sus capacidades', async () => {

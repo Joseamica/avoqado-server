@@ -69,24 +69,32 @@ export async function setKitchenRelease(venueId: string, enabled: unknown, actor
     throw new BadRequestError('Indica si la cocina puede liberar tiempos (sí o no)', 'KITCHEN_RELEASE_INVALID')
   const current = await getVenueServiceCourses(venueId)
   requireEnabled(current.enabled)
-  if (current.kitchenCanRelease === enabled) return current
-  // FOR UPDATE: espera a que termine un RELEASE de la cocina que ya midió el permiso (lo lee con FOR SHARE dentro de su operación).
+  // Codex r4 B3 / r5 #1: el valor de antes se lee CON la fila bloqueada y la bitácora va en la misma transacción. Dos cambios a la
+  // vez no registran un cambio que no ocurrió, y una caída no deja un cambio sin su renglón. FOR UPDATE también espera a que termine
+  // un RELEASE de cocina que ya midió el permiso (lo lee con FOR SHARE dentro de su operación).
   await prisma.$transaction(async tx => {
-    await tx.$queryRaw`SELECT id FROM "VenueSettings" WHERE "venueId" = ${venueId} FOR UPDATE`
+    const [fila] = await tx.$queryRaw<Array<{ kitchenCanReleaseCourses: boolean }>>`
+      SELECT "kitchenCanReleaseCourses" FROM "VenueSettings" WHERE "venueId" = ${venueId} FOR UPDATE`
+    const antes = fila?.kitchenCanReleaseCourses === true
+    if (antes === enabled) return
     await tx.venueSettings.upsert({
       where: { venueId },
       update: { kitchenCanReleaseCourses: enabled },
       create: { venueId, kitchenCanReleaseCourses: enabled },
     })
-  })
-  await logAction({
-    ...actor,
-    venueId,
-    organizationId: current.organizationId,
-    action: 'KITCHEN_RELEASE_SETTING_UPDATED',
-    entity: 'VenueSettings',
-    entityId: venueId,
-    data: { before: current.kitchenCanRelease, after: enabled, source: actor.source ?? 'dashboard' },
+    await tx.activityLog.create({
+      data: {
+        staffId: actor.staffId,
+        venueId,
+        organizationId: current.organizationId,
+        action: 'KITCHEN_RELEASE_SETTING_UPDATED',
+        entity: 'VenueSettings',
+        entityId: venueId,
+        data: { before: antes, after: enabled, source: actor.source ?? 'dashboard' },
+        ipAddress: actor.ipAddress ?? null,
+        userAgent: actor.userAgent ?? null,
+      },
+    })
   })
   return { ...current, kitchenCanRelease: enabled }
 }

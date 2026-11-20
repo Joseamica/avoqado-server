@@ -131,7 +131,7 @@
       "linea": 177
     },
     {
-      "afirmacion": "Lo liberado antes de apagar el interruptor se respeta al subir",
+      "afirmacion": "Con el interruptor apagado al subir, lo liberado sin red se rechaza (KITCHEN_RELEASE_DISABLED)",
       "archivo": "avoqado-server/src/services/kds/kitchenPreparation.service.ts",
       "linea": 95
     }

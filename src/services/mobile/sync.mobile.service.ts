@@ -48,12 +48,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { writeLegacyActivityAuditTx } from '../activityAudit.service'
 import { markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
 import { FOLIO_VALIDO } from '../kds/kitchenTicketPlanning'
-import {
-  applyKitchenPreparation,
-  laCocinaPuedeLiberar,
-  preparationActionSchema,
-  preparationCommandSchema,
-} from '../kds/kitchenPreparation.service'
+import { applyKitchenPreparation, preparationActionSchema, preparationCommandSchema } from '../kds/kitchenPreparation.service'
 import { preparationPermissions } from '../kds/kitchenPreparation'
 import { motivoDelDescuento } from '../shared/motivoDelDescuento'
 import { descuentoManualDeMesaSchema } from '../../schemas/mobile/manualOrderDiscount.mobile.schema'
@@ -336,17 +331,26 @@ export function requiredPermissionForIntent(type: string): string | null {
  * comp-ear durante un apagón.
  */
 /**
- * D17 (founder, 20-nov-2026): con «La cocina puede liberar tiempos desde su pantalla» prendido, un RELEASE sólo pide
- * `orders:update` (el rol de cocina); apagado, lo de siempre (`orders:update` + `orders:create`). Vale lo que diga al reproducir.
+ * D17 (founder, 20-nov-2026): «Liberar» DESDE LA COCINA — el RELEASE que la tablet marcó como de su pantalla (`origen: 'COCINA'`)
+ * o el de quien no trae `orders:create` (el rol de cocina) — sólo pide `orders:update`, y el interruptor «La cocina puede liberar
+ * tiempos desde su pantalla» se revisa DENTRO de la operación (`applyKitchenPreparation`, con la fila de ajustes bloqueada; apagado ⇒
+ * `KITCHEN_RELEASE_DISABLED`). Aquí no se lee la base (Codex r5 #7: una lectura fallida antes de la reserva dejaba la acción en
+ * revisión). Lo demás pide lo de siempre.
  */
-export async function permisosParaReproducir(venueId: string, intent: SyncIntentInput): Promise<string[]> {
-  const permisos = requiredPermissionsForIntent(intent)
-  if (!esLiberacion(intent)) return permisos
-  return (await laCocinaPuedeLiberar(venueId)) ? ['orders:update'] : permisos
+export function permisosParaReproducir(
+  intent: SyncIntentInput,
+  authorize: (intent: SyncIntentInput, requiredPermission: string) => boolean,
+): string[] {
+  return liberacionDesdeLaCocina(intent, authorize) ? ['orders:update'] : requiredPermissionsForIntent(intent)
 }
 
-function esLiberacion(intent: SyncIntentInput): boolean {
-  return intent.type === 'KDS_ITEM_PROGRESS' && intent.payload?.action === 'RELEASE'
+export function liberacionDesdeLaCocina(
+  intent: SyncIntentInput,
+  authorize: ((intent: SyncIntentInput, requiredPermission: string) => boolean) | undefined,
+): boolean {
+  if (intent.type !== 'KDS_ITEM_PROGRESS' || intent.payload?.action !== 'RELEASE') return false
+  // Codex r5 #4: un gerente que libera desde la pantalla de cocina también pasa por el interruptor.
+  return intent.payload?.origen === 'COCINA' || (authorize !== undefined && !authorize(intent, 'orders:create'))
 }
 
 export function requiredPermissionsForIntent(intent: SyncIntentInput): string[] {
@@ -685,7 +689,7 @@ export async function processIntents(params: {
         message: 'La operación pertenece a otra sesión. Requiere revisión del gerente.',
       }
     } else {
-      const requiredPermissions = await permisosParaReproducir(venueId, intent)
+      const requiredPermissions = permisosParaReproducir(intent, authorizeIntent)
       const missingPermission = requiredPermissions.find(permission => !authorizeIntent(intent, permission))
       if (missingPermission) {
         ack = {
@@ -812,7 +816,7 @@ async function intentarRetomar(p: {
     (existing.seq ?? null) === (intent.seq ?? null) &&
     (!intent.staffId || intent.staffId === p.staffId)
   const sinPermiso = mismoDueño
-    ? (await permisosParaReproducir(p.venueId, intent)).find(permission => !p.authorizeIntent(intent, permission))
+    ? permisosParaReproducir(intent, p.authorizeIntent).find(permission => !p.authorizeIntent(intent, permission))
     : undefined
   if (!mismoDueño || sinPermiso) {
     // D20: antes de rechazar, ¿la huella ya prueba el cobro? Entonces el dinero está registrado y se contesta con él.
@@ -1070,7 +1074,7 @@ async function applyIntent(ctx: {
         // D17: quien libera SÓLO porque el negocio dejó a la cocina liberar (no trae `orders:create`, el permiso de la caja)
         // libera la mesa de cualquier mesero — para eso existe el interruptor (Codex r1 #5). El SERVIDOR lo vuelve a medir
         // dentro de la operación, con los ajustes bloqueados.
-        const deCocina = esLiberacion(intent) && authorizeIntent !== undefined && !authorizeIntent(intent, 'orders:create')
+        const deCocina = liberacionDesdeLaCocina(intent, authorizeIntent)
         if (orderId && action.success && action.data !== 'START' && action.data !== 'READY' && !deCocina)
           await assertOwnership(venueId, staffId, orderId)
         const result = await applyKitchenPreparation(

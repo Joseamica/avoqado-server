@@ -24,7 +24,7 @@ import {
 import { toKdsModifierLabels } from '../kds/kdsModifierLabels'
 import { venueTienePantallaDeCocina } from '../kds/kitchenDisplayStations'
 import { authorKitchenTickets } from '../kds/kitchenTicketAuthoring.service'
-import { recallPreparationTicket } from '../kds/kitchenPreparation.service'
+import { RECIENTES_VENTANA_MS, recallPreparationTicket } from '../kds/kitchenPreparation.service'
 
 // Use string constants instead of Prisma enum to avoid runtime import issues with tsx
 const KdsStatus = {
@@ -293,7 +293,6 @@ export const KDS_RECENT_MAX = 20
  * 100 comandas terminadas en una hora por una sola estación es más de lo que una cocina saca.
  */
 export const KDS_RECENT_CON_TIEMPOS_MAX = 100
-const RECIENTES_VENTANA_MS = 60 * 60 * 1000
 
 export async function listRecentKdsOrders(
   venueId: string,

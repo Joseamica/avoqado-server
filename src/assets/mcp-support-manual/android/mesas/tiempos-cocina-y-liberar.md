@@ -42,13 +42,14 @@ En una mesa con tiempos (Primer, Segundo, Tercer tiempo…), lo *Inmediato* lleg
 
 - «No me deja marcar el segundo tiempo»: está «En espera de liberar». Libéralo desde *Servicio y entregas* o prende el interruptor de arriba para que la cocina lo libere.
 - La cocina no ve *Liberar*: el interruptor está apagado, o la persona no tiene permiso para actualizar cuentas.
-- «Carga las demás estaciones del producto…»: ese producto va a dos estaciones; se libera desde *Servicio y entregas* en la caja.
-- Comandas de días pasados que no se quitaban: las de una cuenta ya cobrada o anulada se archivan solas al terminar el día del negocio (a las 4:00 a. m.). Las de una cuenta todavía abierta se quedan.
+- Si un producto va a dos estaciones (cocina y barra), *Liberar* en la pantalla de cocina libera sólo la parte de esa estación; la otra la libera su propia pantalla o la caja.
+- Comandas de días pasados que no se quitaban: las de una cuenta ya cobrada o anulada se archivan solas al terminar el día del negocio (a las 4:00 a. m., y al menos una hora después de su último cambio). Las de una cuenta todavía abierta se quedan.
 - *Deshacer* dice «Actualiza la app de la pantalla de cocina…»: esa tablet tiene una versión anterior; actualízala.
 - *Deshacer* dice «Esta comanda cambió desde que abriste Recientes»: ciérralo y vuelve a abrir *Recientes*.
+- *Deshacer* dice «Pasó más de una hora…»: después de una hora ya no se regresa desde *Recientes*; la caja puede corregir el producto desde *Servicio y entregas*.
 
 ## Sin internet
 
 - *Preparar*, *Marcar listo* y *Liberar* (con el interruptor prendido) funcionan igual sin internet: se guardan en la tablet y suben solos. La comanda también sale de la pantalla al quedar todo listo.
 - *Recientes* y *Deshacer* necesitan internet.
-- Si el negocio apaga el interruptor mientras la tablet está sin internet, lo que la cocina ya liberó antes se respeta.
+- Si el negocio apaga el interruptor mientras la tablet de cocina está sin internet, lo que esa tablet libere ya no se acepta al volver la red: queda marcado para revisión y lo libera la caja.

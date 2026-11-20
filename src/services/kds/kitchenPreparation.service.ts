@@ -184,7 +184,9 @@ export async function applyKitchenPreparation(
     // Priority targets only selected unfinished stations. A station that already
     // completed its work must not be released again to prioritize another station.
     const priority = ['URGENT', 'ACK_URGENT', 'CLEAR_URGENT'].includes(command.action)
-    const allStations = !priority && command.action !== 'START' && command.action !== 'READY'
+    // D17 (Codex r5 #5): la cocina libera lo de SU estación; la caja libera el producto en todas. Así un platillo que va a dos
+    // estaciones no deja una liberación de cocina rechazada (y lo que la cocina guardó después, esperándola).
+    const allStations = !priority && command.action !== 'START' && command.action !== 'READY' && !liberacionDeCocina
     if (allStations) {
       const amounts = new Map<string, string>()
       matches.forEach(([row], index) => {
@@ -310,6 +312,9 @@ export async function applyKitchenPreparation(
  * el mismo CAS por revisión y su renglón en la bitácora que cualquier acción de cocina. Una acción encolada con la revisión vieja
  * choca después como cualquier conflicto de preparación (nunca se aplica encima). Sólo en línea, como el «Deshacer» de siempre.
  */
+/** La ventana de «Recientes» (la misma de `listRecentKdsOrders`). */
+export const RECIENTES_VENTANA_MS = 60 * 60 * 1000
+
 export async function recallPreparationTicket(
   venueId: string,
   kdsOrderId: string,
@@ -341,6 +346,13 @@ export async function recallPreparationTicket(
     }
     if (ticket.kitchenDoneAt?.getTime() !== visto.getTime()) {
       throw new ConflictError('Esta comanda cambió desde que abriste «Recientes». Vuelve a abrirlo.', 'KDS_RECALL_STALE')
+    }
+    // Codex r5 #6: «Recientes» es la última hora; una hoja que se quedó abierta no regresa comida que ya salió de esa ventana.
+    if (Date.now() - visto.getTime() > RECIENTES_VENTANA_MS) {
+      throw new ConflictError(
+        'Pasó más de una hora desde que la cocina la terminó: ya no se regresa desde «Recientes».',
+        'KDS_RECALL_EXPIRED',
+      )
     }
     const order = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { status: true } })
     if (!order || order.status === 'CANCELLED' || order.status === 'DELETED') {
