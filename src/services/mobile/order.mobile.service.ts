@@ -2696,85 +2696,93 @@ async function responderConOrdenExistente(
 export async function getOrder(venueId: string, orderId: string): Promise<OrderDetailResponse> {
   logger.info(`📱 [ORDER.MOBILE] Getting order ${orderId} | venue=${venueId}`)
 
-  const order = await prisma.order.findUnique({
-    where: {
-      id: orderId,
-      venueId,
-    },
-    include: {
-      servedBy: {
-        select: { firstName: true, lastName: true },
-      },
-      serviceCharges: true,
-      items: {
+  // F1 (Codex r5 #4): el saldo y la tarjeta que bloquea salen de UNA misma foto (sólo lectura, RepeatableRead). Leídos por separado,
+  // un aprobado que entra entre las dos lecturas devolvía «$100 por cobrar» sin tarjeta, y la caja pedía efectivo ya pagado.
+  // Las mismas dos consultas de antes; leer no choca con escritores (sin reintento). Las esperas igualan las de una consulta suelta.
+  const [order, tarjetaQueBloquea] = await prisma.$transaction(
+    async tx => {
+      const leida = await tx.order.findUnique({
+        where: {
+          id: orderId,
+          venueId,
+        },
         include: {
-          product: {
-            select: {
-              id: true,
-              name: true,
-              price: true,
-            },
-          },
-          modifiers: {
-            include: {
-              modifier: true,
-            },
-          },
-        },
-        orderBy: {
-          createdAt: 'asc',
-        },
-      },
-      payments: {
-        select: {
-          id: true,
-          amount: true,
-          tipAmount: true,
-          method: true,
-          status: true,
-          createdAt: true,
-          // ADITIVO: sin `type` un reembolso es indistinguible de un cobro
-          // negativo. NO se serializa en `payments[]` (contrato viejo intacto);
-          // alimenta `refundState`/`refundedAmount` y el saldo aditivo de precuenta.
-          type: true,
-          // D19: lo que un reembolso de abono volvió a deber (no se serializa en `payments[]`; sólo alimenta el saldo).
-          reopenedAmount: true,
-          reopenedTipAmount: true,
-          // 1b Q27/Q28: qué cobro es saldo de tarjeta.
-          tenderType: { select: { systemKind: true } },
-          // Rappi 2b: lo cobrado por cuenta de Rappi (sólo alimenta `deliveryCashBreakdown`; no se serializa en `payments[]`).
-          thirdPartyCashAmount: true,
-          processedBy: {
+          servedBy: {
             select: { firstName: true, lastName: true },
           },
+          serviceCharges: true,
+          items: {
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  price: true,
+                },
+              },
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
+              },
+            },
+            orderBy: {
+              createdAt: 'asc',
+            },
+          },
+          payments: {
+            select: {
+              id: true,
+              amount: true,
+              tipAmount: true,
+              method: true,
+              status: true,
+              createdAt: true,
+              // ADITIVO: sin `type` un reembolso es indistinguible de un cobro
+              // negativo. NO se serializa en `payments[]` (contrato viejo intacto);
+              // alimenta `refundState`/`refundedAmount` y el saldo aditivo de precuenta.
+              type: true,
+              // D19: lo que un reembolso de abono volvió a deber (no se serializa en `payments[]`; sólo alimenta el saldo).
+              reopenedAmount: true,
+              reopenedTipAmount: true,
+              // 1b Q27/Q28: qué cobro es saldo de tarjeta.
+              tenderType: { select: { systemKind: true } },
+              // Rappi 2b: lo cobrado por cuenta de Rappi (sólo alimenta `deliveryCashBreakdown`; no se serializa en `payments[]`).
+              thirdPartyCashAmount: true,
+              processedBy: {
+                select: { firstName: true, lastName: true },
+              },
+            },
+          },
+          orderDiscounts: {
+            select: { id: true, name: true, amount: true },
+          },
+          // Promociones vendidas en la cuenta — el POS agrupa sus líneas bajo el
+          // nombre del combo tal como se cobró (snapshot), no el nombre vivo.
+          promotions: {
+            select: {
+              id: true,
+              instanceId: true,
+              snapshotJson: true,
+              grossCents: true,
+              discountCents: true,
+              netCents: true,
+              needsReview: true,
+              items: { select: { id: true } },
+            },
+            orderBy: { createdAt: 'asc' },
+          },
         },
-      },
-      orderDiscounts: {
-        select: { id: true, name: true, amount: true },
-      },
-      // Promociones vendidas en la cuenta — el POS agrupa sus líneas bajo el
-      // nombre del combo tal como se cobró (snapshot), no el nombre vivo.
-      promotions: {
-        select: {
-          id: true,
-          instanceId: true,
-          snapshotJson: true,
-          grossCents: true,
-          discountCents: true,
-          netCents: true,
-          needsReview: true,
-          items: { select: { id: true } },
-        },
-        orderBy: { createdAt: 'asc' },
-      },
+      })
+      // F1: la tarjeta que bloquea cobrar esta cuenta, con la MISMA consulta que la admisión del cobro (una fila, por índice).
+      return [leida, await findLiveTerminalCharge(tx, { venueId, orderId })] as const
     },
-  })
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, maxWait: 10_000, timeout: 10_000 },
+  )
 
   if (!order) {
     throw new NotFoundError('Order not found')
   }
-  // F1: la tarjeta que bloquea cobrar esta cuenta, con la MISMA consulta que la admisión del cobro (una fila, por índice).
-  const tarjetaQueBloquea = await findLiveTerminalCharge(prisma, { venueId, orderId })
 
   // Flatten modifiers for mobile response
   const flattenedOrder = flattenOrderModifiers(order)

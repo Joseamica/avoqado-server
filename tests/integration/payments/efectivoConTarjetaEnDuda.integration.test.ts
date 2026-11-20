@@ -572,4 +572,31 @@ describe('F1 · `order.pendingCardPayment`: la tarjeta que bloquea cobrar la cue
     await tarjetaEnDuda(venta.id, estado)
     expect(await getOrder(f.venueId, venta.id)).toMatchObject({ pendingCardPayment: null })
   })
+
+  it('Codex r5 #4: si la tarjeta se aprueba ENTRE leer el saldo y leer la tarjeta, las dos salen de la MISMA foto', async () => {
+    const venta = await f.nuevaVenta(100)
+    const solicitud = await f.solicitud({ orderId: venta.id })
+    const original = terminalPaymentService.findChargeBlockingOrderCancel.bind(terminalPaymentService)
+    // Ya leído el saldo, otra conexión registra el aprobado de la terminal: la cuenta queda en $0 y la fila COMPLETED con su pago.
+    jest.spyOn(terminalPaymentService, 'findChargeBlockingOrderCancel').mockImplementationOnce(async (venueId, orderId, client) => {
+      await recordOrderPayment(
+        f.venueId,
+        venta.id,
+        f.registroDeLaTerminal({ attemptId: randomUUID(), requestId: solicitud.requestId }),
+        f.staffId,
+      )
+      return original(venueId, orderId, client)
+    })
+
+    // La foto de ANTES del aprobado: $100 y la tarjeta que los cubre. Nunca «$100 por cobrar» sin la tarjeta (la caja pediría efectivo).
+    expect(await getOrder(f.venueId, venta.id)).toMatchObject({
+      preBillBalance: { remainingBalanceCents: 10000 },
+      pendingCardPayment: { amountCents: 10000 },
+    })
+    // La siguiente lectura ya ve la cuenta liquidada.
+    expect(await getOrder(f.venueId, venta.id)).toMatchObject({
+      preBillBalance: { remainingBalanceCents: 0 },
+      pendingCardPayment: null,
+    })
+  })
 })
