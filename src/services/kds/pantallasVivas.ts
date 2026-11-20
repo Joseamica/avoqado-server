@@ -22,6 +22,18 @@ const MAX_ESTACIONES_POR_NEGOCIO = 100
 
 const vistas = new Map<string, Map<string, number>>()
 
+/**
+ * Codex r9 #1: hasta cuándo NO hay certeza. Si no se pudo comprobar que una lectura era de una pantalla real (la revisión de
+ * la estación falló), esa lectura no se marca (nada sin comprobar entra al mapa) y, a cambio, durante una ventana completa
+ * nadie se da por desconectado: la caja no afirma nada. Global: una falla de la base es de todos los negocios.
+ */
+let sinCertezaHasta = 0
+
+/** No se pudo comprobar una lectura: durante [PANTALLA_VIVA_MS] la lista no es de fiar (`completo` falso). */
+export function anotarDuda(ahora: number = Date.now()): void {
+  sinCertezaHasta = Math.max(sinCertezaHasta, ahora + PANTALLA_VIVA_MS)
+}
+
 /** ¿Ya hay marca de esta estación (aunque sea vieja, hasta 10 min)? Entonces ya se comprobó que es una pantalla real. */
 export function pantallaConocida(venueId: string, stationId: string): boolean {
   return vistas.get(venueId)?.has(stationId) === true
@@ -46,12 +58,12 @@ export function marcarPantallaViva(venueId: string, stationId: string, ahora: nu
 export interface PantallasConectadas {
   /** Las estaciones de [venueId] cuya pantalla leyó su tablero hace ≤ [PANTALLA_VIVA_MS]. */
   conectadas: string[]
-  /** `false` justo después de arrancar: una estación que no sale aquí NO se puede dar por desconectada todavía. */
+  /** `false` justo después de arrancar o de una lectura que no se pudo comprobar: lo que falta aquí NO se puede dar por desconectado todavía. */
   completo: boolean
 }
 
 export function pantallasConectadas(venueId: string, ahora: number = Date.now(), arranque: number = ARRANQUE): PantallasConectadas {
-  const completo = ahora - arranque > PANTALLA_VIVA_MS
+  const completo = ahora - arranque > PANTALLA_VIVA_MS && ahora > sinCertezaHasta
   const delNegocio = vistas.get(venueId)
   if (!delNegocio) return { conectadas: [], completo }
   const conectadas: string[] = []
@@ -66,4 +78,5 @@ export function pantallasConectadas(venueId: string, ahora: number = Date.now(),
 /** Sólo para las pruebas: empieza de cero. */
 export function olvidarPantallas(): void {
   vistas.clear()
+  sinCertezaHasta = 0
 }

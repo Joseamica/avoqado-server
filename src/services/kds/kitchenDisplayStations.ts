@@ -10,7 +10,7 @@ import type { ScreenStation } from './kitchenTicketPlanning'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { ForbiddenError } from '../../errors/AppError'
 import { esSinComanda } from '../printing/printConfig.service'
-import { marcarPantallaViva, pantallaConocida, pantallasConectadas } from './pantallasVivas'
+import { anotarDuda, marcarPantallaViva, pantallaConocida, pantallasConectadas } from './pantallasVivas'
 
 type Db = Prisma.TransactionClient | typeof prisma
 
@@ -44,10 +44,11 @@ export async function venueTienePantallaDeCocina(venueId: string, db: Db = prism
 }
 
 /**
- * D6 de Flautas (Codex r8 #1): la pantalla de [stationId] acaba de leer su tablero. Una estación que ya tiene marca sólo la
- * renueva (sin consulta). La primera vez (o tras 10 min sin leer) sólo entra si es una estación ACTIVA con pantalla de ESTE
- * negocio: así un id cualquiera no ocupa lugar ni desplaza a una pantalla real. No se espera ni lanza (r6 #6: no puede tumbar
- * el tablero); si la revisión falla se marca igual (r7 #5: perder la marca daría por desconectada a una pantalla viva).
+ * D6 de Flautas (Codex r8 #1 y r9 #1): la pantalla de [stationId] acaba de leer su tablero. Una estación que ya tiene marca
+ * sólo la renueva (sin consulta). La primera vez (o tras 10 min sin leer) sólo entra si es una estación ACTIVA con pantalla de
+ * ESTE negocio: un id cualquiera no ocupa lugar ni desplaza a una pantalla real. No se espera ni lanza (r6 #6: no puede tumbar
+ * el tablero). Si la revisión falla NO se marca (nada sin comprobar entra al mapa) y se anota la duda: durante una ventana
+ * la lista sale con `completo` falso y la caja no da a nadie por desconectado (r7 #5).
  */
 export function registrarLecturaDelTablero(venueId: string, stationId: string, db: Db = prisma): void {
   if (pantallaConocida(venueId, stationId)) {
@@ -60,8 +61,12 @@ export function registrarLecturaDelTablero(venueId: string, stationId: string, d
       if (estacion != null) marcarPantallaViva(venueId, stationId)
     })
     .catch(error => {
-      logger.warn('KDS: no se pudo revisar la estación de la pantalla; se marca viva igual', { venueId, stationId, error: String(error) })
-      marcarPantallaViva(venueId, stationId)
+      logger.warn('KDS: no se pudo revisar la estación de la pantalla; la lista de desconectadas queda en duda', {
+        venueId,
+        stationId,
+        error: String(error),
+      })
+      anotarDuda()
     })
 }
 

@@ -2,7 +2,13 @@
  * D6 de Flautas (opción B del founder, 20-nov): qué pantallas de cocina están conectadas. Una pantalla pide su tablero cada
  * 10 s mientras se ve; la caja pregunta para decir con una franja fija si una pantalla NO está conectada.
  */
-import { marcarPantallaViva, olvidarPantallas, pantallasConectadas, PANTALLA_VIVA_MS } from '../../../../src/services/kds/pantallasVivas'
+import {
+  anotarDuda,
+  marcarPantallaViva,
+  olvidarPantallas,
+  pantallasConectadas,
+  PANTALLA_VIVA_MS,
+} from '../../../../src/services/kds/pantallasVivas'
 
 const ARRANQUE = 0
 const T0 = 1_000_000
@@ -45,5 +51,13 @@ describe('pantallasVivas', () => {
     expect(conectadas).toHaveLength(100)
     expect(conectadas).toContain('st_149')
     expect(conectadas).not.toContain('st_0')
+  })
+
+  it('Codex r9 #1: tras una lectura que no se pudo comprobar, la lista no es de fiar durante una ventana', () => {
+    marcarPantallaViva('venue-1', 'st_cocina', T0)
+    anotarDuda(T0)
+
+    expect(pantallasConectadas('venue-1', T0 + PANTALLA_VIVA_MS, ARRANQUE).completo).toBe(false)
+    expect(pantallasConectadas('venue-1', T0 + PANTALLA_VIVA_MS + 1, ARRANQUE).completo).toBe(true)
   })
 })

@@ -99,6 +99,7 @@ describe('registrarLecturaDelTablero', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     olvidarPantallas()
+    mockPlan.mockResolvedValue(true)
   })
 
   it('la primera lectura sólo marca una estación activa con pantalla de ESTE negocio', async () => {
@@ -140,12 +141,23 @@ describe('registrarLecturaDelTablero', () => {
     expect(vivas()).toEqual(['st_cocina'])
   })
 
-  it('Codex r7 #5: si la revisión de la estación falla, la pantalla se marca viva igual y nada lanza', async () => {
+  it('Codex r9 #1: si la revisión falla nada entra sin comprobar, nada lanza y durante una ventana no se da a nadie por desconectado', async () => {
     ;(prisma.printStation.findFirst as jest.Mock).mockRejectedValue(new Error('base lenta'))
 
     expect(() => registrarLecturaDelTablero('venue-1', 'st_cocina')).not.toThrow()
+    for (let i = 0; i < 150; i++) registrarLecturaDelTablero('venue-1', `ajena_${i}`)
     await sinPendientes()
 
-    expect(vivas()).toEqual(['st_cocina'])
+    expect(vivas()).toEqual([])
+    ;(prisma.printStation.findMany as jest.Mock).mockResolvedValue([{ id: 'st_cocina', name: 'COCINA 1', sendsComanda: true }])
+    const ahora = Date.now()
+    expect(await pantallasDesconectadas('venue-1', { ahora: ahora + 1_000, arranque: 0 })).toEqual({
+      hayPantallas: true,
+      pantallas: ['st_cocina'],
+      completo: false,
+      desconectadas: [],
+    })
+    // Pasada la ventana sin más dudas, la lista vuelve a ser de fiar.
+    expect((await pantallasDesconectadas('venue-1', { ahora: ahora + PANTALLA_VIVA_MS + 5_000, arranque: 0 })).completo).toBe(true)
   })
 })
