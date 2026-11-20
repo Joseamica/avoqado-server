@@ -80,28 +80,22 @@ export async function createCategory(req: Request, res: Response, next: NextFunc
       where: { venueId_slug: { venueId, slug } },
       select: { id: true, deletedAt: true },
     })
-    // Una ELIMINADA con ese nombre se reusa, como en el panel (encargo bc1dcc): nunca dos «EVENTO» que el dueño no distingue. Sus
-    // datos de alta se reponen; si en medio volvió a mostrarse, se crea otra como siempre.
+    // Una ELIMINADA con ese nombre se reusa, como en el panel (encargo bc1dcc): nunca dos «EVENTO» que el dueño no distingue. Si
+    // en medio volvió a mostrarse, se crea otra como siempre.
     if (existing?.deletedAt) {
       const reusada = await prisma.menuCategory.updateMany({
         where: { id: existing.id, venueId, deletedAt: { not: null } },
+        // Prenderla y editar sólo lo que mandó la app (Codex r6): lo demás (clave SAT, impresora, horario) se queda como estaba.
         data: {
-          name: name.trim(),
-          description: description || null,
-          color: color || null,
-          icon: icon || null,
-          imageUrl: imageUrl || null,
-          displayOrder: displayOrder ?? 0,
-          parentId: parentId || null,
+          ...(description !== undefined && { description: description || null }),
+          ...(color !== undefined && { color: color || null }),
+          ...(icon !== undefined && { icon: icon || null }),
+          ...(imageUrl !== undefined && { imageUrl: imageUrl || null }),
+          ...(displayOrder !== undefined && { displayOrder }),
+          ...(parentId !== undefined && { parentId: parentId || null }),
           active: true,
           deletedAt: null,
           isDemo: false,
-          availableFrom: null,
-          availableUntil: null,
-          availableDays: [],
-          defaultSatProductKey: null,
-          defaultSatUnitKey: null,
-          printStationId: null,
         },
       })
       if (reusada.count === 1) {

@@ -11,12 +11,9 @@
 --    Toma `FOR KEY SHARE` de la categoría antes de decidir: espera a un «Eliminar» en curso (que la tiene `FOR UPDATE`) y lee lo
 --    que dejó; si llegó primero, el «Eliminar» espera por él y lo ve al contar.
 --
--- Datos viejos: una que se «eliminó» antes de esto (quedó apagada) se esconde si la bitácora tiene su `MENU_CATEGORY_DELETED` y
--- su última escritura es la de ese «Eliminar»: `updatedAt` (reloj del servidor) ANTES del registro (reloj de la base, que lo
--- escribe milisegundos después), con 500 ms de holgura por la diferencia de relojes. Sin productos vivos ni menús. Cualquier
--- escritura posterior (prenderla y apagarla, «Reemplazar menú», el ruteo) la deja fuera: para esconder una apagada a propósito
--- habría que prenderla y apagarla en medio segundo. Las dos fechas son UTC en producción (Render); en una base local con otra
--- zona la ventana no coincide y no se esconde nada (nunca de más). Lo que quede fuera: basta volver a dar «Eliminar».
+-- Datos viejos: NO se marca ninguna. Una que se «eliminó» antes de esto (quedó apagada y con 0, como «EVENTO» de Flautas) no se
+-- distingue con certeza de una que el dueño apagó a propósito (Codex r2-r6: la bitácora no guarda qué escritura fue el
+-- «Eliminar»). Basta con volver a darle «Eliminar»: ahora sí desaparece.
 --
 -- Columna nula sin default: en Postgres 11+ no reescribe la tabla.
 --
@@ -30,22 +27,6 @@
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE "MenuCategory" ADD COLUMN "deletedAt" TIMESTAMP(3);
-
--- Datos viejos (antes de los triggers).
-UPDATE "MenuCategory" c
-   SET "deletedAt" = l."createdAt"
-  FROM (
-    SELECT "entityId", max("createdAt") AS "createdAt"
-      FROM "ActivityLog"
-     WHERE "action" = 'MENU_CATEGORY_DELETED' AND "entity" = 'MenuCategory' AND "entityId" IS NOT NULL
-     GROUP BY "entityId"
-  ) l
- WHERE l."entityId" = c.id
-   AND c."active" = false
-   AND c."deletedAt" IS NULL
-   AND c."updatedAt" BETWEEN l."createdAt" - interval '5 seconds' AND l."createdAt" + interval '500 milliseconds'
-   AND NOT EXISTS (SELECT 1 FROM "Product" p WHERE p."categoryId" = c.id AND p."deletedAt" IS NULL)
-   AND NOT EXISTS (SELECT 1 FROM "MenuCategoryAssignment" a WHERE a."categoryId" = c.id);
 
 -- 1. Prendida ⇒ se ve.
 CREATE OR REPLACE FUNCTION "menuCategoryActiveIsShown"() RETURNS trigger LANGUAGE plpgsql AS $$

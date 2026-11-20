@@ -7,8 +7,6 @@
  * un «Eliminar» en curso, la importación (F5-1), la migración de los datos viejos y el caso `hz:nube0000:na33c25b` (una
  * subcategoría eliminada ya no bloquea a su padre). Negocio NUEVO por caso.
  */
-import { readFileSync } from 'fs'
-import { join } from 'path'
 import {
   createMenuCategory,
   deleteMenuCategory,
@@ -88,13 +86,15 @@ describe('eliminar una categoría que sólo guarda archivados', () => {
   it('crear otra «EVENTO» después REUSA la eliminada, limpia (como prenderla hoy): nunca hay dos, y una tercera se rechaza', async () => {
     const x = await negocio()
     const { categoryId, productId } = await eventoConArchivado(x)
-    await prisma.menuCategory.update({ where: { id: categoryId }, data: { color: '#ff0000', description: 'Vieja' } })
+    await prisma.menuCategory.update({ where: { id: categoryId }, data: { defaultSatProductKey: '90101501', color: '#ff0000' } })
     await deleteMenuCategory(x.venueId, categoryId)
 
-    const nueva = await createMenuCategory(x.venueId, { name: 'Evento' } as never)
+    const nueva = await createMenuCategory(x.venueId, { name: 'Evento', color: '#00ff00' } as never)
 
-    expect(nueva).toMatchObject({ id: categoryId, name: 'Evento', active: true, deletedAt: null, color: null, description: null })
-    expect(await nombresEnLaLista(x.venueId)).toEqual(['Evento'])
+    // Como prenderla hoy: misma fila, mismo nombre (sólo cambiaban mayúsculas), su clave SAT se queda y el color que mandó, sí.
+    expect(nueva).toMatchObject({ id: categoryId, name: 'EVENTO', active: true, deletedAt: null, color: '#00ff00' })
+    expect(nueva.defaultSatProductKey).toBe('90101501')
+    expect(await nombresEnLaLista(x.venueId)).toEqual(['EVENTO'])
     expect(await prisma.menuCategory.count({ where: { venueId: x.venueId } })).toBe(1)
     // Su producto borrado sigue borrado: la categoría sale vacía.
     expect(await prisma.product.findUniqueOrThrow({ where: { id: productId }, select: { deletedAt: true } })).toEqual({
@@ -337,45 +337,5 @@ describe('subcategorías (hz:nube0000:na33c25b)', () => {
 
     await expect(deleteMenuCategory(x.venueId, padre.id)).rejects.toMatchObject({ code: 'CATEGORY_HAS_SUBCATEGORIES' })
     expect(await prisma.menuCategory.findUnique({ where: { id: padre.id } })).not.toBeNull()
-  })
-})
-
-describe('migración de los datos viejos (las que se «eliminaron» antes y quedaron apagadas)', () => {
-  // La misma instrucción de la migración, leída del archivo: lo que se prueba es lo que corre en producción.
-  const sql = readFileSync(join(__dirname, '../../../prisma/migrations/20261120010000_menu_category_eliminada/migration.sql'), 'utf8')
-  const backfill = sql.slice(sql.indexOf('UPDATE "MenuCategory" c'), sql.indexOf('-- 1. Prendida'))
-
-  /** Una categoría apagada con un archivado, como la dejaba el «Eliminar» de antes; y su registro en la bitácora. */
-  async function eliminadaALaAntigua(x: Negocio, nombre: string, segundosDelRegistro: number) {
-    const { categoryId } = await eventoConArchivado(x, nombre)
-    await prisma.menuCategoryAssignment.deleteMany({ where: { categoryId } })
-    const fila = await prisma.menuCategory.update({ where: { id: categoryId }, data: { active: false } })
-    await prisma.activityLog.create({
-      data: {
-        venueId: x.venueId,
-        action: 'MENU_CATEGORY_DELETED',
-        entity: 'MenuCategory',
-        entityId: categoryId,
-        data: { name: nombre },
-        createdAt: new Date(fila.updatedAt.getTime() + segundosDelRegistro * 1000),
-      },
-    })
-    return categoryId
-  }
-
-  it('esconde la que se eliminó (la del «EVENTO» de Flautas) y no toca la que se apagó a propósito ni la que se tocó después', async () => {
-    const x = await negocio()
-    const eliminada = await eliminadaALaAntigua(x, 'EVENTO', 0.05)
-    const tocadaDespues = await eliminadaALaAntigua(x, 'Navidad', -30) // su última escritura fue 30 s después del «Eliminar»
-    const aProposito = await createMenuCategory(x.venueId, { name: 'Temporada' } as never)
-    await updateMenuCategory(x.venueId, aProposito.id, { active: false } as never)
-
-    await prisma.$executeRawUnsafe(backfill)
-
-    expect((await categoria(eliminada)).deletedAt).toBeInstanceOf(Date)
-    expect((await categoria(tocadaDespues)).deletedAt).toBeNull()
-    expect((await categoria(aProposito.id)).deletedAt).toBeNull()
-    expect(await nombresEnLaLista(x.venueId)).toEqual(expect.arrayContaining(['Navidad', 'Temporada']))
-    expect(await nombresEnLaLista(x.venueId)).not.toContain('EVENTO')
   })
 })

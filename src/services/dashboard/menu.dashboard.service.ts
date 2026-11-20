@@ -130,9 +130,8 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
     throw new BadRequestError(`Ya existe una categoría con el nombre '${data.name}' en este establecimiento.`)
   }
   // El nombre de una ELIMINADA (encargo bc1dcc) sí se puede usar: el dueño ya no la ve. Se REUSA esa misma fila, como cuando hoy
-  // se vuelve a prender una apagada, con lo que pide el alta (foto, color, horario, SAT, impresora y padre vuelven a su valor de
-  // alta). Así nunca hay dos «EVENTO»: sus productos borrados, si regresan, caen en la que el dueño ve, y una promoción por nombre
-  // no alcanza a otra categoría (Codex r5). Las reglas que ya apuntaban a ella (comisiones, promociones) siguen, como al prenderla.
+  // se vuelve a prender una apagada. Así nunca hay dos «EVENTO»: sus productos borrados, si regresan, caen en la que el dueño ve,
+  // y una promoción por nombre no alcanza a otra categoría (Codex r5). Sus reglas (comisiones, promociones) siguen, como al prenderla.
   const reusar = existingCategory?.deletedAt ? existingCategory : await eliminadaConEseNombre(venueId, data.name)
 
   const createData: Prisma.MenuCategoryCreateInput = {
@@ -185,27 +184,30 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
     }
   }
 
+  // Reusar = prenderla y editar sólo lo que mandó el alta (Codex r6): lo que no mandó (clave SAT, impresora, foto…) se queda como
+  // estaba, igual que al prenderla hoy; el nombre también, si sólo cambian mayúsculas o espacios (las promociones lo leen tal cual).
+  const mismoNombre = reusar != null && reusar.name.trim().toLowerCase() === createData.name.toLowerCase()
   const category = reusar
     ? await prisma.menuCategory
         .update({
           where: { id: reusar.id, venueId, deletedAt: { not: null } },
           data: {
-            name: createData.name,
-            description: createData.description ?? null,
-            displayOrder: createData.displayOrder ?? 0,
-            imageUrl: createData.imageUrl ?? null,
-            color: createData.color ?? null,
-            icon: createData.icon ?? null,
+            ...(mismoNombre ? {} : { name: createData.name }),
+            ...(createData.description !== undefined && { description: createData.description }),
+            ...(createData.displayOrder !== undefined && { displayOrder: createData.displayOrder }),
+            ...(createData.imageUrl !== undefined && { imageUrl: createData.imageUrl }),
+            ...(createData.color !== undefined && { color: createData.color }),
+            ...(createData.icon !== undefined && { icon: createData.icon }),
             active: createData.active ?? true,
             deletedAt: null,
             isDemo: false,
-            availableFrom: createData.availableFrom ?? null,
-            availableUntil: createData.availableUntil ?? null,
-            availableDays: { set: (createData.availableDays as string[] | undefined) ?? [] },
-            defaultSatProductKey: createData.defaultSatProductKey ?? null,
-            defaultSatUnitKey: createData.defaultSatUnitKey ?? null,
-            parent: createData.parent ?? { disconnect: true },
-            printStation: createData.printStation ?? { disconnect: true },
+            ...(createData.availableFrom !== undefined && { availableFrom: createData.availableFrom }),
+            ...(createData.availableUntil !== undefined && { availableUntil: createData.availableUntil }),
+            ...(createData.availableDays !== undefined && { availableDays: { set: createData.availableDays as string[] } }),
+            ...(createData.defaultSatProductKey !== undefined && { defaultSatProductKey: createData.defaultSatProductKey }),
+            ...(createData.defaultSatUnitKey !== undefined && { defaultSatUnitKey: createData.defaultSatUnitKey }),
+            ...(createData.parent ? { parent: createData.parent } : {}),
+            ...(createData.printStation ? { printStation: createData.printStation } : {}),
           },
         })
         .catch(e => {
