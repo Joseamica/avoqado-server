@@ -157,14 +157,20 @@ describe('cotizar (payments:create)', () => {
   })
 
   it('el cajero cotiza EN LÍNEA aunque el cuerpo diga que es de la cola; un premio pendiente se avisa', async () => {
-    const cuerpo = { items: [{ productId: 'p1', quantity: 1 }], isOfflineReplay: true, stampRewardId: 'premio-1', stampRewardAware: true }
-    const out = await correr(QUOTE, 'post', StaffRole.CASHIER, cuerpo)
-    expect(out).toMatchObject({ status: 200, json: { success: true, quoteId: 'q', totalCents: 4100 } })
-    expect(mockCotizar).toHaveBeenCalledWith(
-      VENUE,
-      expect.objectContaining({ isOfflineReplay: false, staffId: 'u1' }),
-      expect.objectContaining({ premioPendiente: true, carrito: cuerpo }),
-    )
+    // Codex r2 #11: también sin `stampRewardAware` (una caja vieja): el lector del carrito de la máquina conserva el premio.
+    for (const cuerpo of [
+      { items: [{ productId: 'p1', quantity: 1 }], isOfflineReplay: true, stampRewardId: 'premio-1', stampRewardAware: true },
+      { items: [{ productId: 'p1', quantity: 1 }], isOfflineReplay: true, stampRewardId: 'premio-1' },
+    ]) {
+      mockCotizar.mockClear()
+      const out = await correr(QUOTE, 'post', StaffRole.CASHIER, cuerpo)
+      expect(out).toMatchObject({ status: 200, json: { success: true, quoteId: 'q', totalCents: 4100 } })
+      expect(mockCotizar).toHaveBeenCalledWith(
+        VENUE,
+        expect.objectContaining({ isOfflineReplay: false, staffId: 'u1', stampRewardId: 'premio-1' }),
+        { carrito: cuerpo },
+      )
+    }
   })
 
   it('un carrito vacío es 400 (la misma lectura que POST /orders)', async () => {

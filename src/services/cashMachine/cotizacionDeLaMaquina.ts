@@ -13,7 +13,7 @@ import AppError from '../../errors/AppError'
 import { ACCESS_TOKEN_SECRET } from '../../config/env'
 import { operationHash } from '../../utils/operationHash'
 import { cotizarVentaDeMostrador, type CreateOrderInput } from '../mobile/order.mobile.service'
-import { pedidoConDescuento } from './ventaDeLaMaquina'
+import { motivoSinVentaDelPedido } from './ventaDeLaMaquina'
 
 export const VIGENCIA_DE_LA_COTIZACION_MS = 10 * 60_000
 
@@ -106,18 +106,18 @@ export function leerCotizacion(
 }
 
 /**
- * `POST /mobile/venues/:venueId/cash-machine/quote`. `input` es el pedido ya leído como `POST /orders`; `carrito`, el cuerpo tal cual
- * (su huella va en el `quoteId`); `premioPendiente`, si el carrito trae un premio de sellos (R5#4). Un carrito con descuento no se
- * cotiza: la fase 1a no lo cobra en la máquina (decisión a), y tampoco lo registra si llega (`ventaDeLaMaquina`). Los demás rechazos de
- * la creación en línea (precio cambiado) suben tal cual, como en `POST /orders`.
+ * `POST /mobile/venues/:venueId/cash-machine/quote`. `input` es el pedido leído por EL lector del carrito de la máquina
+ * (`leerCarritoDeLaMaquina`, que conserva el premio de sellos pendiente); `carrito`, el cuerpo tal cual (su huella va en el `quoteId`).
+ * Con premio pendiente (R5#4) o con descuento (decisión a) no se cotiza, con la MISMA regla con que la venta y la resolución lo dejan sin
+ * registrar (`motivoSinVentaDelPedido`, Codex r2 #11). Los demás rechazos de la creación en línea (precio cambiado) suben tal cual.
  */
 export async function cotizarParaLaMaquina(
   venueId: string,
   input: CreateOrderInput,
-  opciones: { premioPendiente: boolean; carrito: unknown },
+  opciones: { carrito: unknown },
 ): Promise<CotizacionDeLaMaquina> {
-  if (opciones.premioPendiente) return sinCotizar('PREMIO_PENDIENTE')
-  if (pedidoConDescuento(input)) return sinCotizar('DESCUENTO')
+  const sinMaquina = motivoSinVentaDelPedido(input)
+  if (sinMaquina === 'PREMIO_PENDIENTE' || sinMaquina === 'DESCUENTO') return sinCotizar(sinMaquina)
 
   let venta: Awaited<ReturnType<typeof cotizarVentaDeMostrador>>
   try {

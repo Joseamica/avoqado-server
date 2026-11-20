@@ -178,6 +178,12 @@ export const resolverDudaDeLaMaquinaSchema = z.object({
       .trim()
       .min(1, 'Escribe lo que viste en la máquina')
       .max(500, 'Lo que viste en la máquina admite hasta 500 caracteres'),
+    // Codex r2 #10: con CANCELADO o GUARDADO, lo que el gerente VIO hacer a la máquina con los billetes: '1' los devolvió, '2' los
+    // guardó. Si cuadra con el desenlace lo decide el servicio, con el MISMO validador que el cierre de la PC (sin él, 422).
+    cancelMode: z
+      .enum(['1', '2'], { errorMap: () => ({ message: "El modo de cancelación debe ser '1' (devolvió) o '2' (guardó)" }) })
+      .nullable()
+      .optional(),
   }),
 })
 
@@ -193,6 +199,11 @@ export const revisarIncidenciaDeLaMaquinaSchema = z.object({
       .trim()
       .min(1, 'Escribe qué revisaste')
       .max(500, 'La nota admite hasta 500 caracteres'),
+    // Codex r2 #8: la versión de la evidencia que el gerente vio en la lista; si llegó otra, 409 y no se da por revisada.
+    version: z
+      .number({ required_error: 'Falta la versión de la incidencia que revisaste', invalid_type_error: 'La versión debe ser un número' })
+      .int('La versión debe ser un número entero')
+      .positive('La versión debe ser mayor que cero'),
   }),
 })
 

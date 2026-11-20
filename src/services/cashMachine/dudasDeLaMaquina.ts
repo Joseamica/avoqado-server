@@ -9,24 +9,27 @@ import type { CashMachineIncident, Prisma } from '@prisma/client'
 
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { utcTs } from '../../utils/sqlDates'
 // El cursor `createdAt|id` opaco de la merma: la misma forma (orden `createdAt DESC, id DESC`), sin copiarlo.
 import { decodeWasteCursor as leerCursor, encodeWasteCursor as cursorDe } from '../../schemas/mobile/inventoryWaste.mobile.schema'
 import { logAction } from '../dashboard/activity-log.service'
-import { candadoDeLaLlave } from '../mobile/pagarDespuesLlave'
 import type { CreateOrderInput } from '../mobile/order.mobile.service'
+import { decidirEscrituraDelFolio, versionDeLaIncidencia } from './decisionDelFolio'
 import { aparatoDe, exigirAparatoEmparejado } from './emparejamiento'
 import {
   CASH_MACHINE_REF,
   adeudoCobrable,
+  anotarEnBitacora,
+  anotarEnTx,
   anotarIncidencia,
-  huellaDelCierre,
+  conElFolio,
+  huellaDelCarrito,
   registrarCierreDeLaMaquina,
   respuestaDe,
   respuestaSinRegistro,
-  sinRegistroDelFolio,
   type AutorDeLaMaquina,
+  type IncidenciaAnotada,
+  type LecturaDelFolio,
   type CierreDeLaMaquina,
   type DesenlaceDeLaMaquina,
   type RespuestaDeLaMaquina,
@@ -52,12 +55,15 @@ export interface DudaDeLaMaquina {
 /** Lo que se guarda en la duda: lo de la PC más quién la subió (el vendedor por omisión del carrito). */
 interface DudaGuardada extends Omit<DudaDeLaMaquina, 'referenceCC'> {
   subidoPor: string
+  /** Codex r2 #5: la huella de los artículos del carrito congelado: el cierre de la PC debe traer el MISMO. */
+  huellaDelCarrito?: string | null
   /** Al cerrarse (`marcarDudaResuelta`): quién, la huella y, si la venta ya no se pudo armar, `incident`. */
   resolucion?: { huella?: string; incident?: string } & Record<string, unknown>
 }
 
 export type EstadoDeLaDuda =
-  | { status: 'ABIERTO'; referenceCC: string }
+  /** `incidentId`: la duda guardada (ESPERANDO), la que el gerente resuelve. */
+  | { status: 'ABIERTO'; referenceCC: string; incidentId: string | null }
   | ({ status: 'RESUELTO' } & RespuestaDeLaMaquina)
   | ({ status: 'RESUELTO' } & RespuestaSinRegistro)
 
@@ -70,6 +76,11 @@ export interface ResolucionDelGerente {
   occurredAt?: string | null
   /** Lo que leyó en la máquina. */
   evidence: string
+  /**
+   * Codex r2 #10: lo que el gerente VIO que hizo la máquina con los billetes de un CANCELADO o GUARDADO — `'1'` los devolvió, `'2'` los
+   * guardó —. Pasa por el MISMO validador que el cierre de la PC: sin él, o incompatible con el desenlace, 422 y la duda sigue abierta.
+   */
+  cancelMode?: '1' | '2' | null
 }
 
 const LIMITE_POR_OMISION = 50
@@ -80,25 +91,6 @@ const dondeLaDuda = (venueId: string, referenceCC: string) => ({
 })
 
 const leerDuda = (fila: Pick<CashMachineIncident, 'payload'>) => fila.payload as unknown as DudaGuardada
-
-const cierreDelFolio = (venueId: string, referenceCC: string) =>
-  prisma.cashMachineClose.findUnique({ where: { venueId_referenceCC: { venueId, referenceCC } } })
-
-/** Codex r1 #4: una duda de OTRA PC (o el desenlace que otra PC dejó) no se toca: 409 con la evidencia nueva guardada. */
-async function conflictoDeLaDuda(
-  venueId: string,
-  referenceCC: string,
-  quien: { userId: string; deviceId: string | null },
-  evento: Record<string, unknown>,
-  registrada: unknown,
-): Promise<never> {
-  await anotarIncidencia(venueId, referenceCC, 'CONFLICTO', quien, { ...evento, registrada })
-  throw new ConflictError(
-    'Esta duda de la máquina ya se subió con otros importes o desde otra PC. Quedó registrado para que el gerente lo revise.',
-    'CASH_MACHINE_DOUBT_CONFLICT',
-    { registrada },
-  )
-}
 
 /** `POST /mobile/venues/:venueId/cash-machine/doubts` — idempotente por folio. */
 export async function subirDudaDeLaMaquina(venueId: string, autor: AutorDeLaMaquina, entrada: DudaDeLaMaquina): Promise<EstadoDeLaDuda> {
@@ -111,50 +103,58 @@ export async function subirDudaDeLaMaquina(venueId: string, autor: AutorDeLaMaqu
     throw new BadRequestError('El adeudo de la duda debe ser la venta más la propina, en centavos enteros.')
   }
   const deviceId = await aparatoDe(venueId, autor.deviceUid)
-  // La MISMA puerta que la venta: sólo la PC emparejada abre una duda; la revocada repite la suya o entrega una nueva para revisión.
-  const { revocadaEn } = await exigirAparatoEmparejado(venueId, referenceCC, deviceId, autor.credencial)
+  // La MISMA puerta que la venta: sólo una credencial de esta PC. Lo que una PC revocada puede escribir lo decide el folio (abajo).
+  const { revocadaEn } = await exigirAparatoEmparejado(venueId, deviceId, autor.credencial)
   const quien = { userId: autor.userId, deviceId }
   const evento = { duda: { ...entrada, pedido: undefined }, deviceId, recibidoEn: new Date().toISOString() }
   // Codex r1 #12 (decisión h): un adeudo de $0 o que no es múltiplo de $0.50 no lo cobra la máquina: 422 con incidencia.
   if (!adeudoCobrable(entrada.dueCents)) {
-    await anotarIncidencia(venueId, referenceCC, 'IMPOSIBLE', quien, evento)
+    const incidentId = await anotarIncidencia(venueId, referenceCC, 'IMPOSIBLE', quien, evento)
     throw new AppError(
       'El adeudo de esta duda no lo puede cobrar la máquina (debe ser mayor que $0 y múltiplo de $0.50). Quedó registrado para el gerente.',
       422,
       true,
       'CASH_MACHINE_CLOSE_IMPOSSIBLE',
+      { incidentId },
     )
   }
-  // Codex r1 #5 (decisión d): la PC revocada todavía entrega su duda (evidencia, nunca autoridad): queda también a revisión.
-  if (revocadaEn) {
-    await anotarIncidencia(venueId, referenceCC, 'TRAS_REVOCAR', quien, { ...evento, revocadaEn: revocadaEn.toISOString() })
-  }
 
+  const carrito = huellaDelCarrito(entrada.pedido)
   const payload: DudaGuardada = {
     dueCents: entrada.dueCents,
     saleCents: entrada.saleCents,
     tipCents: entrada.tipCents,
     pedido: entrada.pedido,
+    huellaDelCarrito: carrito,
     startedAt: entrada.startedAt,
     lastSeen: entrada.lastSeen ?? null,
     saleShiftId: entrada.saleShiftId ?? null,
     subidoPor: autor.userId,
   }
-  // Bajo el candado del folio (el de la venta y su cierre): la duda nunca nace después de que el folio ya se cerró o ya quedó sin
-  // registro (Codex r1 #3): manda ESE desenlace.
-  const r = await withDeadlockRetry(
-    async tx => {
-      await tx.$queryRaw(candadoDeLaLlave(venueId, `maquina-${referenceCC}`))
-      const cierre = await tx.cashMachineClose.findUnique({ where: { venueId_referenceCC: { venueId, referenceCC } } })
-      if (cierre) return { cierre }
-      const sinRegistro = await tx.cashMachineIncident.findUnique({
-        where: { venueId_referenceCC_kind: { venueId, referenceCC, kind: 'NO_SE_PUDO_REGISTRAR' } },
-        select: { payload: true, deviceId: true },
-      })
-      if (sinRegistro) return { sinRegistro }
-      const previa = await tx.cashMachineIncident.findUnique({ where: dondeLaDuda(venueId, referenceCC) })
-      if (previa) return { duda: previa, nueva: false }
-      const duda = await tx.cashMachineIncident.create({
+  // Bajo el candado del folio (el de la venta y su cierre), lo decide `decidirEscrituraDelFolio`: la duda nunca nace después de que el
+  // folio ya se cerró o quedó sin registro (r1 #3), ni encima de la de otra PC (r1 #4); otra versión de la evidencia es 409 con ella
+  // guardada (r1 #7); la PC revocada todavía la entrega, y queda TRAS_REVOCAR (r1 #5).
+  const r = await conElFolio(venueId, referenceCC, async (tx, lectura) => {
+    const d = decidirEscrituraDelFolio(lectura.estado, {
+      que: 'DUDA',
+      quien: { tipo: 'PC', deviceId, revocadaEn },
+      importes: { dueCents: entrada.dueCents, saleCents: entrada.saleCents, tipCents: entrada.tipCents },
+      huellaDelCarrito: carrito,
+    })
+    const anotadas: IncidenciaAnotada[] = []
+    const registrada = d.accion === 'CONFLICTO' && d.motivo === 'OTRA_PC' ? { motivo: 'OTRA_PC' } : importesGuardados(lectura)
+    if (d.accion === 'CONFLICTO') {
+      await anotarEnTx(tx, venueId, referenceCC, deviceId, anotadas, 'CONFLICTO', { ...evento, motivo: d.motivo, registrada })
+    }
+    let nueva: { id: string } | null = null
+    if (d.accion === 'ABRIR_DUDA') {
+      if (d.trasRevocar) {
+        await anotarEnTx(tx, venueId, referenceCC, deviceId, anotadas, 'TRAS_REVOCAR', {
+          ...evento,
+          revocadaEn: revocadaEn?.toISOString() ?? null,
+        })
+      }
+      nueva = await tx.cashMachineIncident.create({
         data: {
           venueId,
           referenceCC,
@@ -163,69 +163,76 @@ export async function subirDudaDeLaMaquina(venueId: string, autor: AutorDeLaMaqu
           payload: payload as unknown as Prisma.InputJsonValue,
           deviceId,
         },
+        select: { id: true },
       })
-      return { duda, nueva: true }
-    },
-    { etiqueta: 'subirDudaDeLaMaquina' },
-  )
-  // Codex r1 #4: el folio es de la PC que lo subió primero; a otra PC no se le contesta con su desenlace ni se le deja tocarlo.
-  if (r.cierre) {
-    if (r.cierre.deviceId !== deviceId) return conflictoDeLaDuda(venueId, referenceCC, quien, evento, { motivo: 'OTRA_PC' })
-    return { status: 'RESUELTO', ...respuestaDe(r.cierre) }
-  }
-  if (r.sinRegistro) {
-    const cuerpo = respuestaSinRegistro(referenceCC, r.sinRegistro.payload)
-    if (r.sinRegistro.deviceId !== deviceId || !cuerpo) {
-      return conflictoDeLaDuda(venueId, referenceCC, quien, evento, { motivo: 'OTRA_PC' })
     }
-    return { status: 'RESUELTO', ...cuerpo }
-  }
-
-  const guardada = leerDuda(r.duda)
-  if (r.duda.deviceId !== deviceId) return conflictoDeLaDuda(venueId, referenceCC, quien, evento, { motivo: 'OTRA_PC' })
-  if (guardada.dueCents !== entrada.dueCents || guardada.saleCents !== entrada.saleCents || guardada.tipCents !== entrada.tipCents) {
-    // Codex r1 #7: la versión nueva de la evidencia se guarda (CONFLICTO) antes del 409; la duda original no cambia.
-    return conflictoDeLaDuda(venueId, referenceCC, quien, evento, {
-      dueCents: guardada.dueCents,
-      saleCents: guardada.saleCents,
-      tipCents: guardada.tipCents,
-    })
-  }
+    return { d, lectura, anotadas, nueva, registrada }
+  })
+  await anotarEnBitacora(venueId, referenceCC, autor.userId, r.anotadas)
   if (r.nueva) {
     await logAction({
       action: 'CASH_MACHINE_DOUBT_OPENED',
       entity: 'CashMachineIncident',
-      entityId: r.duda.id,
+      entityId: r.nueva.id,
       venueId,
       staffId: autor.userId,
       data: { referenceCC, deviceId, duePesos: entrada.dueCents / 100, startedAt: entrada.startedAt },
     })
   }
-  // Una duda que ya se cerró sin cierre tiene su «no se pudo registrar» (se habría devuelto arriba): aquí sólo queda abierta.
-  return { status: 'ABIERTO', referenceCC }
+  const desenlace = desenlaceDe(referenceCC, r.d, r.lectura)
+  if (desenlace) return desenlace
+  if (r.d.accion === 'DUDA_ABIERTA' || r.d.accion === 'ABRIR_DUDA') {
+    return { status: 'ABIERTO', referenceCC, incidentId: r.nueva?.id ?? r.lectura.duda?.id ?? null }
+  }
+  throw new ConflictError(
+    'Esta duda de la máquina ya se subió con otros importes o desde otra PC. Quedó registrado para que el gerente lo revise.',
+    'CASH_MACHINE_DOUBT_CONFLICT',
+    { registrada: r.registrada, incidentId: r.anotadas.find(a => a.kind === 'CONFLICTO')?.id ?? null },
+  )
+}
+
+/** Los importes que el folio ya tiene (la duda, o lo definitivo): lo que el 409 le enseña a la PC dueña. */
+function importesGuardados(lectura: LecturaDelFolio): Record<string, unknown> | null {
+  const g = lectura.estado.duda ?? lectura.estado.cierre ?? lectura.estado.sinRegistro
+  return g ? { dueCents: g.dueCents, saleCents: g.saleCents, tipCents: g.tipCents } : null
+}
+
+/** El desenlace guardado del folio, si la decisión dice REPETIR (el cierre o el comprobante estable del «no se pudo registrar»). */
+function desenlaceDe(referenceCC: string, d: ReturnType<typeof decidirEscrituraDelFolio>, lectura: LecturaDelFolio): EstadoDeLaDuda | null {
+  if (d.accion !== 'REPETIR') return null
+  if (d.de === 'CIERRE' && lectura.cierre) return { status: 'RESUELTO', ...respuestaDe(lectura.cierre) }
+  const cuerpo =
+    d.de === 'SIN_REGISTRO' && lectura.sinRegistro
+      ? respuestaSinRegistro(referenceCC, lectura.sinRegistro.payload, lectura.sinRegistro.id)
+      : null
+  return cuerpo ? { status: 'RESUELTO', ...cuerpo } : null
 }
 
 /**
  * `GET /mobile/venues/:venueId/cash-machine/doubts/:referenceCC` — lo que la PC consulta cada 60 s (R5#6).
- * Codex r1 #6: primero la duda y DESPUÉS el desenlace. Una duda RESUELTO ya tiene su cierre o su «no se pudo registrar» guardados (se
- * escriben en la misma transacción que la cierra), así que leerlos después siempre los encuentra; nunca se fabrica un desenlace.
+ * Codex r1 #6: primero la duda y DESPUÉS el desenlace, bajo el candado del folio; lo que se contesta lo dice `decidirEscrituraDelFolio`
+ * (CONSULTA). Una duda sin desenlace guardado sigue «ABIERTO»: nunca se fabrica uno.
  */
 export async function consultarDudaDeLaMaquina(venueId: string, referenceCC: string): Promise<EstadoDeLaDuda> {
-  const duda = await prisma.cashMachineIncident.findUnique({
-    where: dondeLaDuda(venueId, referenceCC),
-    select: { status: true },
-  })
-  const cierre = await cierreDelFolio(venueId, referenceCC)
-  if (cierre) return { status: 'RESUELTO', ...respuestaDe(cierre) }
-  const sinRegistro = await sinRegistroDelFolio(venueId, referenceCC)
-  const cuerpo = sinRegistro ? respuestaSinRegistro(referenceCC, sinRegistro.payload) : null
-  if (cuerpo) return { status: 'RESUELTO', ...cuerpo }
-  if (!duda) throw new NotFoundError('Ese folio de la máquina no tiene una duda ni un cierre.', 'CASH_MACHINE_DOUBT_NOT_FOUND')
-  return { status: 'ABIERTO', referenceCC }
+  const lectura = await conElFolio(venueId, referenceCC, async (_tx, l) => l)
+  const d = decidirEscrituraDelFolio(lectura.estado, { que: 'CONSULTA' })
+  const desenlace = desenlaceDe(referenceCC, d, lectura)
+  if (desenlace) return desenlace
+  if (d.accion !== 'DUDA_ABIERTA') {
+    throw new NotFoundError('Ese folio de la máquina no tiene una duda ni un cierre.', 'CASH_MACHINE_DOUBT_NOT_FOUND')
+  }
+  return { status: 'ABIERTO', referenceCC, incidentId: lectura.duda?.id ?? null }
 }
 
 /** Lo que el gerente revisa de las incidencias que NO son duda (Codex r1 #7): cuántas veces llegó y la primera y última evidencia. */
-type EventosGuardados = { eventos?: unknown[]; veces?: number; revision?: unknown }
+type EventosGuardados = {
+  eventos?: unknown[]
+  veces?: number
+  version?: number
+  repetidas?: number
+  revision?: unknown
+  revisiones?: unknown[]
+}
 
 /**
  * `GET …/cash-machine/doubts` (POS del mostrador y DASHBOARD): acotada, más nuevas primero, con el total y el cursor.
@@ -278,9 +285,13 @@ export async function listarDudasDeLaMaquina(
         return {
           ...fila,
           veces: p.veces ?? eventos.length,
+          // Codex r2 #8: la versión de la evidencia (la que el gerente confirma al revisar) y cuántas entregas fueron idénticas.
+          version: versionDeLaIncidencia(p),
+          repetidas: p.repetidas ?? 0,
           primerEvento: eventos[0] ?? null,
           ultimoEvento: eventos.length > 1 ? eventos[eventos.length - 1] : null,
           revision: p.revision ?? null,
+          revisiones: Array.isArray(p.revisiones) ? p.revisiones : [],
         }
       }
       const d = leerDuda({ payload })
@@ -303,46 +314,70 @@ export async function listarDudasDeLaMaquina(
 /**
  * `POST …/cash-machine/incidents/:incidentId/review` (`cash-machine:resolve`, Codex r1 #7): el gerente da por revisada una incidencia
  * que NO es duda (el imposible, el conflicto, el «no se pudo registrar», el folio de la PC revocada) con una nota. No mueve dinero ni
- * cambia el desenlace del folio: la evidencia (el cierre comprobado y la declaración contradictoria) se conserva entera. Si después
- * llega evidencia nueva del mismo folio, la incidencia se vuelve a abrir. Repetirla no hace nada.
+ * cambia el desenlace del folio. 🔴 Codex r2 #8: confirma la `version` de la evidencia que el gerente VIO (la de la lista): si llegó
+ * evidencia nueva mientras la leía, 409 `CASH_MACHINE_INCIDENT_CHANGED` y no se da por revisada. Bajo el candado del folio, decide
+ * `decidirEscrituraDelFolio` (REVISION). La revisión se guarda en `revision` y se agrega a `revisiones`: evidencia nueva reabre la
+ * incidencia sin borrar la revisión anterior. Repetirla con la misma versión no hace nada.
  */
 export async function revisarIncidenciaDeLaMaquina(
   venueId: string,
   gerenteId: string,
   incidentId: string,
   nota: string,
-): Promise<{ id: string; referenceCC: string; kind: string; status: 'RESUELTO' }> {
+  versionVista: number,
+): Promise<{ id: string; referenceCC: string; kind: string; status: 'RESUELTO'; version: number }> {
   const fila = await prisma.cashMachineIncident.findFirst({
     where: { id: incidentId, venueId },
-    select: { id: true, referenceCC: true, kind: true, status: true },
+    select: { id: true, referenceCC: true },
   })
   if (!fila) throw new NotFoundError('Esa incidencia de la máquina no existe en este negocio.', 'CASH_MACHINE_INCIDENT_NOT_FOUND')
-  if (fila.kind === 'ESPERANDO') {
+  const r = await conElFolio(venueId, fila.referenceCC, async tx => {
+    const actual = await tx.cashMachineIncident.findFirst({
+      where: { id: fila.id, venueId },
+      select: { id: true, referenceCC: true, kind: true, status: true, payload: true },
+    })
+    if (!actual) throw new NotFoundError('Esa incidencia de la máquina no existe en este negocio.', 'CASH_MACHINE_INCIDENT_NOT_FOUND')
+    const versionActual = versionDeLaIncidencia(actual.payload)
+    const d = decidirEscrituraDelFolio(
+      { cierre: null, sinRegistro: null, duda: null },
+      { que: 'REVISION', kind: actual.kind, status: actual.status, versionVista, versionActual },
+    )
+    if (d.accion !== 'REVISAR') return { d, actual, versionActual, revisada: false }
+    const ahora = new Date()
+    const revision = { nota, staffId: gerenteId, en: ahora.toISOString(), version: versionActual }
+    await tx.$executeRaw`
+      UPDATE "CashMachineIncident"
+      SET "status" = 'RESUELTO', "resolvedByStaffId" = ${gerenteId}, "resolvedAt" = ${utcTs(ahora)}, "updatedAt" = ${utcTs(ahora)},
+          "payload" = "payload" || jsonb_build_object(
+            'revision', ${JSON.stringify(revision)}::jsonb,
+            'revisiones', COALESCE("payload" -> 'revisiones', '[]'::jsonb) || jsonb_build_array(${JSON.stringify(revision)}::jsonb))
+      WHERE "id" = ${actual.id} AND "venueId" = ${venueId} AND "status" = 'ABIERTO'`
+    return { d, actual, versionActual, revisada: true }
+  })
+  if (r.d.accion === 'NO_REVISABLE') {
     throw new ConflictError(
       'Un cobro en duda se resuelve tecleando lo que dice la máquina, no se da por revisado.',
       'CASH_MACHINE_DOUBT_NEEDS_RESOLUTION',
     )
   }
-  const respuesta = { id: fila.id, referenceCC: fila.referenceCC, kind: fila.kind, status: 'RESUELTO' as const }
-  if (fila.status === 'RESUELTO') return respuesta
-  const ahora = new Date()
-  const revision = { nota, staffId: gerenteId, en: ahora.toISOString() }
-  const cambiadas = await prisma.$executeRaw`
-    UPDATE "CashMachineIncident"
-    SET "status" = 'RESUELTO', "resolvedByStaffId" = ${gerenteId}, "resolvedAt" = ${utcTs(ahora)}, "updatedAt" = ${utcTs(ahora)},
-        "payload" = "payload" || jsonb_build_object('revision', ${JSON.stringify(revision)}::jsonb)
-    WHERE "id" = ${fila.id} AND "venueId" = ${venueId} AND "status" = 'ABIERTO'`
-  if (cambiadas === 1) {
+  if (r.d.accion === 'CONFLICTO') {
+    throw new ConflictError(
+      'Llegó evidencia nueva de esta incidencia mientras la revisabas. Vuelve a leerla antes de darla por revisada.',
+      'CASH_MACHINE_INCIDENT_CHANGED',
+      { version: r.versionActual },
+    )
+  }
+  if (r.revisada) {
     await logAction({
       action: 'CASH_MACHINE_INCIDENT_REVIEWED',
       entity: 'CashMachineIncident',
-      entityId: fila.id,
+      entityId: r.actual.id,
       venueId,
       staffId: gerenteId,
-      data: { referenceCC: fila.referenceCC, kind: fila.kind, nota },
+      data: { referenceCC: r.actual.referenceCC, kind: r.actual.kind, nota, version: r.versionActual },
     })
   }
-  return respuesta
+  return { id: r.actual.id, referenceCC: r.actual.referenceCC, kind: r.actual.kind, status: 'RESUELTO', version: r.versionActual }
 }
 
 /**
@@ -372,31 +407,22 @@ export async function resolverDudaDeLaMaquina(
     occurredAt: r.occurredAt ?? null,
     occurredAtKnown: Boolean(r.occurredAt),
     saleShiftId: duda.saleShiftId ?? null,
-    // El gerente declara lo que pasó con los billetes: su desenlace ES el modo (devolvió = `'1'`, guardó = `'2'`).
-    cancelMode: r.outcome === 'CANCELADO' ? '1' : r.outcome === 'GUARDADO' ? '2' : null,
+    // Codex r2 #10: el modo que el gerente VIO, nunca inferido del desenlace. El núcleo lo valida igual que el cierre de la PC.
+    cancelMode: r.cancelMode ?? null,
   }
 
-  // Ya se cerró sin cierre (la venta no se pudo armar): se compara con lo que se resolvió, sin volver a armarla.
-  if (!estabaAbierta && !(await cierreDelFolio(venueId, referenceCC))) {
-    // El comprobante estable del folio (Codex r1 #3): el mismo que vio la PC.
-    const sinRegistro = await sinRegistroDelFolio(venueId, referenceCC)
-    const cuerpo = sinRegistro ? respuestaSinRegistro(referenceCC, sinRegistro.payload) : null
-    if (cuerpo && duda.resolucion?.huella === huellaDelCierre(venueId, referenceCC, cierre, 'GERENTE')) {
-      return { status: 202, body: cuerpo }
-    }
-    throw new ConflictError('Esta duda de la máquina ya se resolvió de otra forma.', 'CASH_MACHINE_DOUBT_CONFLICT', {
-      registrada: duda.resolucion ?? null,
-    })
-  }
-
+  // Todo pasa por el núcleo y su decisión bajo el candado (Codex r2 #9): una declaración que contradice lo ya decidido —también después
+  // de un 202— queda como CONFLICTO antes del 409. El carrito sólo se arma si la duda sigue abierta; la evidencia del carrito es SIEMPRE
+  // la huella congelada de la duda.
   const resultado = await registrarCierreDeLaMaquina(venueId, {
     referenceCC,
     cierre,
-    ...(r.outcome === 'PAGADO' ? { pedido: await armarPedido(duda.pedido, duda.subidoPor) } : {}),
+    ...(r.outcome === 'PAGADO' && estabaAbierta ? { pedido: await armarPedido(duda.pedido, duda.subidoPor) } : {}),
     resolvedBy: 'GERENTE',
     userId: gerenteId,
     deviceId: fila.deviceId,
     evidence: r.evidence,
+    huellaDelCarrito: duda.huellaDelCarrito ?? huellaDelCarrito(duda.pedido),
   })
   if (estabaAbierta) {
     await logAction({
@@ -408,6 +434,7 @@ export async function resolverDudaDeLaMaquina(
       data: {
         referenceCC,
         outcome: r.outcome,
+        cancelMode: r.cancelMode ?? null,
         creditPesos: r.creditCents / 100,
         changeDispensedPesos: r.changeDispensedCents / 100,
         occurredAt: r.occurredAt ?? null,

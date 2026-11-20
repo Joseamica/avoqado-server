@@ -7373,6 +7373,11 @@ export async function venderLoQueCobroLaMaquina<T>(venueId: string, v: VentaQueC
       })
       const marcarCocina = conPreparacion ? cocinaConPreparacion : cocinaSinPreparacion
       const saldoCents = pesosToCents((await saldoDeLaCuentaNuevaEnTx(tx, venueId, orderId)).toNumber())
+      // 🔴 Codex r2 #7: en CENTAVOS y antes de escribir el abono. La tolerancia del saldo (`orderBalance`) daba por pagada una cuenta de
+      // $100.01 con $100.00: si a la mercancía le falta aunque sea un centavo, se revierte y quien llama guarda el 202 SIN_SALDAR.
+      if (saldoCents > v.saleCents) {
+        throw new AppError('La cuenta no quedó pagada con lo que cobró la máquina.', 422, true, 'CASH_MACHINE_SALE_NOT_SETTLED')
+      }
       const abono = await registrarAbonoEnTx(
         tx,
         { venueId, orderId, effectiveStaffId, marcarCocina, conSesionDeVales: false, rechazoDelPersonal: null },

@@ -235,7 +235,7 @@ describe('Codex r1 #8 (decisión b): cash-machine:resolve sólo con la sesión d
     const lista = await correr(mobileRouter, DUDAS, 'get', StaffRole.CASHIER, { headers: { 'x-permission-override': 'pin-ok' } })
     expect(lista.status).toBe(403)
     const revisa = await correr(mobileRouter, REVISAR, 'post', StaffRole.CASHIER, {
-      body: { note: 'x' },
+      body: { note: 'x', version: 1 },
       headers: { 'x-permission-override': 'pin-ok' },
     })
     expect(revisa.status).toBe(403)
@@ -250,9 +250,18 @@ describe('Codex r1 #7: revisar una incidencia que no es duda', () => {
   })
 
   it('🔴 el gerente la revisa con SU sesión y su nota', async () => {
-    const out = await correr(dashboardRouter, REVISAR, 'post', StaffRole.MANAGER, { body: { note: '  La máquina devolvió todo  ' } })
+    const out = await correr(dashboardRouter, REVISAR, 'post', StaffRole.MANAGER, {
+      body: { note: '  La máquina devolvió todo  ', version: 2 },
+    })
     expect(out).toMatchObject({ status: 200, json: { success: true, status: 'RESUELTO', kind: 'IMPOSIBLE' } })
-    expect(mockRevisar).toHaveBeenCalledWith(VENUE, 'u-sesion', INCIDENCIA, 'La máquina devolvió todo')
+    // Codex r2 #8: con la versión de la evidencia que vio.
+    expect(mockRevisar).toHaveBeenCalledWith(VENUE, 'u-sesion', INCIDENCIA, 'La máquina devolvió todo', 2)
+  })
+
+  it('🔴 Codex r2 #8: sin la versión que vio, 400 en español (no se revisa a ciegas)', async () => {
+    const out = await correr(mobileRouter, REVISAR, 'post', StaffRole.MANAGER, { body: { note: 'x' } })
+    expect(out.error).toMatchObject({ statusCode: 400, message: expect.stringContaining('versión') })
+    expect(mockRevisar).not.toHaveBeenCalled()
   })
 
   it('sin nota es 400 en español', async () => {

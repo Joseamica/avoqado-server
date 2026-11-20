@@ -102,8 +102,8 @@ beforeEach(() => {
 })
 
 const totalCreadoCents = () => Math.round(Number(prismaMock.order.create.mock.calls[0][0].data.total) * 100)
-const cotizar = (input: CreateOrderInput, extra: { premioPendiente?: boolean; carrito?: unknown } = {}) =>
-  cotizarParaLaMaquina(VENUE, input, { premioPendiente: false, carrito: input, ...extra })
+const cotizar = (input: CreateOrderInput, extra: { carrito?: unknown } = {}) =>
+  cotizarParaLaMaquina(VENUE, input, { carrito: input, ...extra })
 
 function esperarSinEscrituras() {
   for (const [modelo, m] of Object.entries(prismaMock as Record<string, any>)) {
@@ -183,7 +183,8 @@ describe('cotizarParaLaMaquina · ¿se cobra en la máquina?', () => {
   })
 
   it('🔴 R5#4: un premio de sellos pendiente → PREMIO_PENDIENTE (aunque el total sí se pudiera cobrar)', async () => {
-    const q = await cotizar(CARRITO_REDONDO, { premioPendiente: true })
+    // El lector del carrito de la máquina (`leerCarritoDeLaMaquina`) lo deja en `stampRewardId` aunque la caja no declare stampRewardAware.
+    const q = await cotizar({ ...CARRITO_REDONDO, stampRewardId: 'premio-1' })
     expect(q).toMatchObject({ cobrableEnMaquina: false, motivo: 'PREMIO_PENDIENTE', quoteId: null })
   })
 

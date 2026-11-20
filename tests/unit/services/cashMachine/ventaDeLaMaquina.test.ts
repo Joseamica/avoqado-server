@@ -34,7 +34,12 @@ import { createHash } from 'crypto'
 import { Prisma } from '@prisma/client'
 import { ConflictError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { consultarVentaDeLaMaquina, registrarVentaDeLaMaquina, type CierreDeLaMaquina } from '@/services/cashMachine/ventaDeLaMaquina'
+import {
+  consultarVentaDeLaMaquina,
+  huellaDelCarrito,
+  registrarVentaDeLaMaquina,
+  type CierreDeLaMaquina,
+} from '@/services/cashMachine/ventaDeLaMaquina'
 import type { CreateOrderInput } from '@/services/mobile/order.mobile.service'
 import { claimShiftForCapturedPayment } from '@/services/shared/paymentShiftClaim'
 import { prismaMock } from '../../../__helpers__/setup'
@@ -80,7 +85,7 @@ let turnoVivo: { id: string; status: string } | null
 /** Las incidencias durables (el INSERT … ON CONFLICT aparte) y los cierres guardados. */
 let incidencias: Array<{ kind: string; sql: string; values: unknown[] }>
 /** Lo que la base tiene por tipo de incidencia del folio (el INSERT … ON CONFLICT y las dudas que siembra cada prueba). */
-let guardadas: Record<string, { kind: string; deviceId: string | null; payload: any; status: string }>
+let guardadas: Record<string, { id?: string; kind: string; deviceId: string | null; payload: any; status: string }>
 let cierres: any[]
 /** El emparejamiento de la PC (`null` = nunca se emparejó). */
 let binding: { active: boolean; revokedAt?: Date | null } | null
@@ -103,9 +108,16 @@ beforeEach(() => {
       const kind = String(values.find(v => ['CONFLICTO', 'IMPOSIBLE', 'NO_SE_PUDO_REGISTRAR', 'TRAS_REVOCAR'].includes(String(v))))
       incidencias.push({ kind, sql, values })
       const crudo = values.find(v => typeof v === 'string' && v.startsWith('{"eventos"')) as string
-      const evento = JSON.parse(crudo).eventos[0]
-      if (guardadas[kind]) guardadas[kind].payload.eventos.push(evento)
-      else guardadas[kind] = { kind, deviceId: values[values.indexOf(crudo) + 1] as string, payload: JSON.parse(crudo), status: 'ABIERTO' }
+      // El servicio acumula la evidencia bajo el candado (`acumularEvento`) y escribe el payload ENTERO.
+      if (guardadas[kind]) guardadas[kind].payload = JSON.parse(crudo)
+      else
+        guardadas[kind] = {
+          id: 'inc-1',
+          kind,
+          deviceId: values[values.indexOf(crudo) + 1] as string,
+          payload: JSON.parse(crudo),
+          status: 'ABIERTO',
+        }
       return [{ id: 'inc-1' }]
     }
     if (sql.includes('hashtextextended')) return [{ pg_advisory_xact_lock: '' }]
@@ -284,6 +296,7 @@ describe('registrarVentaDeLaMaquina · PAGADO', () => {
       body: {
         referenceCC: REF,
         incident: 'NO_SE_PUDO_REGISTRAR',
+        incidentId: 'inc-1',
         motivo: 'VENTA_RECHAZADA',
         outcome: 'PAGADO',
         resolvedBy: 'MAQUINA',
@@ -319,8 +332,8 @@ describe('registrarVentaDeLaMaquina · repetición y conflicto', () => {
   it('🔴 la misma operación que pierde la carrera (P2002 del cierre): la respuesta de la ganadora', async () => {
     const primera = await registrarVentaDeLaMaquina('venue-1', AUTOR, venta())
     const ganadora = cierres[0]
-    // La consulta rápida no la vio (llegaron juntas); dentro, el índice único choca.
-    prismaMock.cashMachineClose.findUnique.mockReset().mockResolvedValueOnce(null).mockResolvedValue(ganadora)
+    // Ni la primera decisión ni la relectura dentro de la transacción la vieron (llegaron juntas); el índice único choca.
+    prismaMock.cashMachineClose.findUnique.mockReset().mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValue(ganadora)
     prismaMock.cashMachineClose.create.mockRejectedValueOnce(
       new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
         code: 'P2002',
@@ -348,7 +361,7 @@ describe('registrarVentaDeLaMaquina · repetición y conflicto', () => {
   it('🔴 conflicto en la carrera: la transacción perdedora se revierte y la incidencia se escribe aparte', async () => {
     await registrarVentaDeLaMaquina('venue-1', AUTOR, venta())
     const ganadora = cierres[0]
-    prismaMock.cashMachineClose.findUnique.mockReset().mockResolvedValueOnce(null).mockResolvedValue(ganadora)
+    prismaMock.cashMachineClose.findUnique.mockReset().mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValue(ganadora)
     prismaMock.cashMachineClose.create.mockRejectedValueOnce(
       new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test', meta: {} }),
     )
@@ -519,7 +532,6 @@ describe('Codex r1 #1 y decisión a: un folio PAGADO nace pagado y sin descuento
     ['descuento de catálogo de la cuenta', { orderDiscountId: 'desc-1' }],
     ['cupón', { couponCode: 'BUENFIN' }],
     ['descuento del cliente', { descuentoDelCliente: { discountId: 'desc-c', montoCents: 500 } }],
-    ['premio de sellos', { stampRewardId: 'premio-1' }],
     ['cortesía de un renglón', { items: [{ name: 'Pastel', quantity: 1, unitPrice: 18750, isCortesia: true, cortesiaReason: 'x' }] }],
     ['descuento de renglón', { items: [{ productId: 'p1', quantity: 1, discountId: 'desc-r' }] }],
     ['«Ajuste de precio»', { items: [{ productId: 'p1', quantity: 1, adjustedUnitPrice: 18000 }] }],
@@ -598,11 +610,17 @@ describe('Codex r1 #4 (decisión e): el folio es de la PC que lo subió primero'
   })
 
   it('🔴 la duda de A aparece bajo el candado (carrera): la venta de B se revierte y queda el conflicto', async () => {
-    // La lectura previa no la vio; dentro del candado, sí.
-    prismaMock.cashMachineIncident.findUnique.mockResolvedValue(null)
-    prismaMock.cashMachineIncident.findMany.mockResolvedValue([{ kind: 'ESPERANDO', deviceId: 'terminal-A' }] as any)
+    // La primera decisión no la vio; dentro de la transacción de la venta (ya con el candado del folio), sí.
+    let lecturasDeLaDuda = 0
+    prismaMock.cashMachineIncident.findUnique.mockImplementation(async (a: any) => {
+      const kind = a?.where?.venueId_referenceCC_kind?.kind
+      if (kind === 'ESPERANDO')
+        return ++lecturasDeLaDuda > 1 ? ({ id: 'd', kind, deviceId: 'terminal-A', status: 'ABIERTO', payload: {} } as any) : null
+      return (guardadas[kind] ?? null) as any
+    })
     await expect(registrarVentaDeLaMaquina('venue-1', AUTOR, venta())).rejects.toMatchObject({ statusCode: 409 })
     expect(prismaMock.cashMachineClose.create).not.toHaveBeenCalled()
+    expect(guardadas.CONFLICTO.payload.eventos[0]).toMatchObject({ motivo: 'OTRA_PC' })
   })
 })
 
@@ -684,5 +702,141 @@ describe('Codex r1 #11 y #13: el turno de la venta', () => {
     expect(prismaMock.activityLog.create).not.toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ action: 'CASH_MACHINE_SALE_WITHOUT_SHIFT' }) }),
     )
+  })
+})
+
+describe('Codex servidor r2 #7: la cuenta nace pagada al CENTAVO', () => {
+  it('🔴 $100.01 de mercancía + $10 de propina con $110.00 recibidos: 202 SIN_SALDAR, sin pago ni cierre (la tolerancia no cuenta)', async () => {
+    subtotalDelServidor = 100.01
+    const r = await registrarVentaDeLaMaquina(
+      'venue-1',
+      AUTOR,
+      venta({ dueCents: 11000, saleCents: 10000, tipCents: 1000, creditCents: 11000, changeDispensedCents: 0 }),
+    )
+    expect(r).toMatchObject({ status: 202, body: { incident: 'NO_SE_PUDO_REGISTRAR', motivo: 'SIN_SALDAR', creditCents: 11000 } })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(prismaMock.cashMachineClose.create).not.toHaveBeenCalled()
+  })
+
+  it('control: $100.00 exactos con $10 de propina sí se registran', async () => {
+    subtotalDelServidor = 100
+    const r = await registrarVentaDeLaMaquina(
+      'venue-1',
+      AUTOR,
+      venta({ dueCents: 11000, saleCents: 10000, tipCents: 1000, creditCents: 11000, changeDispensedCents: 0 }),
+    )
+    expect(r.status).toBe(200)
+    expect(pagoCreado()).toMatchObject({ amount: 100, tipAmount: 10 })
+  })
+})
+
+describe('Codex servidor r2 #5 (familia C): el folio guarda la huella de los ARTÍCULOS, no sólo los importes', () => {
+  const otraMercancia = () => pedido({ items: [{ name: 'Galleta', quantity: 1, unitPrice: 18750 }] as any })
+
+  it('🔴 el primer cierre guarda la huella del carrito; la MISMA PC con otro carrito por el mismo importe recibe 409, no un 200', async () => {
+    const primera = await registrarVentaDeLaMaquina('venue-1', AUTOR, venta())
+    expect(primera.status).toBe(200)
+    expect(cierreCreado().cartHash).toBe(huellaDelCarrito(pedido()))
+    await expect(registrarVentaDeLaMaquina('venue-1', AUTOR, venta({}, otraMercancia()))).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CASH_MACHINE_CLOSE_CONFLICT',
+    })
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+    expect(guardadas.CONFLICTO.payload.eventos[0]).toMatchObject({ motivo: 'OTRA_EVIDENCIA' })
+  })
+
+  it('🔴 la carrera P2002 contra un cierre de OTRO carrito tampoco es la misma operación: 409 con su evidencia', async () => {
+    await registrarVentaDeLaMaquina('venue-1', AUTOR, venta())
+    const ganadora = cierres[0]
+    // Las dos lecturas (la decisión y la relectura dentro de la transacción) no la vieron; el índice único choca.
+    prismaMock.cashMachineClose.findUnique.mockReset().mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValue(ganadora)
+    prismaMock.cashMachineClose.create.mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test', meta: {} }),
+    )
+    await expect(registrarVentaDeLaMaquina('venue-1', AUTOR, venta({}, otraMercancia()))).rejects.toMatchObject({
+      statusCode: 409,
+      details: { motivo: 'OTRA_EVIDENCIA' },
+    })
+    expect(cierres).toHaveLength(1)
+    expect(guardadas.CONFLICTO.payload.eventos[0]).toMatchObject({ motivo: 'OTRA_EVIDENCIA' })
+  })
+
+  it('🔴 con una duda, el cierre de la PC debe traer SU carrito congelado y SU reparto venta/propina; si no, 409 y la duda sigue abierta', async () => {
+    guardadas.ESPERANDO = {
+      kind: 'ESPERANDO',
+      deviceId: 'terminal-pc',
+      status: 'ABIERTO',
+      payload: { dueCents: 18750, saleCents: 18750, tipCents: 0, pedido: { items: pedido().items } },
+    }
+    await expect(registrarVentaDeLaMaquina('venue-1', AUTOR, venta({}, otraMercancia()))).rejects.toMatchObject({ statusCode: 409 })
+    await expect(registrarVentaDeLaMaquina('venue-1', AUTOR, venta({ saleCents: 17750, tipCents: 1000 }))).rejects.toMatchObject({
+      statusCode: 409,
+    })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+    expect(guardadas.ESPERANDO.status).toBe('ABIERTO')
+    // El carrito y el reparto congelados: se registra.
+    await expect(registrarVentaDeLaMaquina('venue-1', AUTOR, venta())).resolves.toMatchObject({ status: 200 })
+  })
+
+  it('🔴 la huella no depende del orden de los renglones ni de los extras; sí de producto, cantidad, extras y precio', () => {
+    const base = {
+      items: [
+        { productId: 'p1', quantity: 2, modifierIds: ['m2', 'm1'] },
+        { productId: 'p2', quantity: 1 },
+      ],
+    }
+    expect(huellaDelCarrito({ items: [base.items[1], { productId: 'p1', quantity: 2, modifierIds: ['m1', 'm2'] }] })).toBe(
+      huellaDelCarrito(base),
+    )
+    for (const otro of [
+      { items: [{ productId: 'p1', quantity: 2, modifierIds: ['m1'] }, base.items[1]] },
+      { items: [{ productId: 'p1', quantity: 3, modifierIds: ['m2', 'm1'] }, base.items[1]] },
+      { items: [{ productId: 'p3', quantity: 2, modifierIds: ['m2', 'm1'] }, base.items[1]] },
+      { items: [{ ...base.items[0], displayedUnitPrice: 4500 }, base.items[1]] },
+    ]) {
+      expect(huellaDelCarrito(otro)).not.toBe(huellaDelCarrito(base))
+    }
+    expect(huellaDelCarrito(undefined)).toBeNull()
+  })
+})
+
+describe('Codex servidor r2 #11 (familia C): el premio de sellos pendiente se excluye también al registrar', () => {
+  it('🔴 un carrito con premio (el lector de la máquina lo conserva) es 202 PREMIO_PENDIENTE, nunca venta a precio completo', async () => {
+    const r = await registrarVentaDeLaMaquina('venue-1', AUTOR, venta({}, pedido({ stampRewardId: 'premio-1' })))
+    expect(r).toMatchObject({ status: 202, body: { incident: 'NO_SE_PUDO_REGISTRAR', motivo: 'PREMIO_PENDIENTE', creditCents: 20000 } })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('contrato con el POS: toda respuesta con la evidencia ya guardada trae su incidentId', () => {
+  it('🔴 202 (no se pudo registrar): body.incidentId, también en la repetición y en el GET', async () => {
+    const r = await registrarVentaDeLaMaquina('venue-1', AUTOR, venta({}, pedido({ discount: 500 })))
+    expect(r).toMatchObject({ status: 202, body: { incidentId: 'inc-1' } })
+    await expect(registrarVentaDeLaMaquina('venue-1', AUTOR, venta({}, pedido({ discount: 500 })))).resolves.toEqual(r)
+    await expect(consultarVentaDeLaMaquina('venue-1', REF)).resolves.toEqual(r)
+  })
+
+  it('🔴 409 CONFLICTO: details.incidentId de la evidencia guardada antes del 409', async () => {
+    await registrarVentaDeLaMaquina('venue-1', AUTOR, venta())
+    await expect(registrarVentaDeLaMaquina('venue-1', AUTOR, venta({ changeDispensedCents: 1000 }))).rejects.toMatchObject({
+      statusCode: 409,
+      details: { incidentId: 'inc-1' },
+    })
+  })
+
+  it('🔴 422 IMPOSIBLE: details.incidentId', async () => {
+    await expect(registrarVentaDeLaMaquina('venue-1', AUTOR, venta({ changeDispensedCents: 99999 }))).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'CASH_MACHINE_CLOSE_IMPOSSIBLE',
+      details: { incidentId: 'inc-1' },
+    })
+  })
+
+  it('un 409 que NO guardó evidencia (reintentable) no trae incidentId: la PC conserva su fila y reintenta', async () => {
+    prismaMock.$transaction.mockRejectedValueOnce(new ConflictError('Conflicto de concurrencia persistente, por favor intente de nuevo'))
+    const error = await registrarVentaDeLaMaquina('venue-1', AUTOR, venta()).catch(e => e)
+    expect(error.statusCode).toBe(409)
+    expect(error.details?.incidentId).toBeUndefined()
   })
 })
