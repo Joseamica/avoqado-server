@@ -1941,6 +1941,85 @@ describe('getTrackingByToken', () => {
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ canCancel: false })
   })
 
+  it('el seguimiento trae notPickedUpAt, canCancel y el estado real de la devolución (pendiente, hecha o revertida)', async () => {
+    const CORTE = new Date('2026-11-07T10:00:05.000Z')
+    const DEVUELTO = new Date('2026-11-07T18:00:00.000Z')
+    const nadie = (over: Record<string, any>, cardRefunds: any[] = []) =>
+      folioNadie(
+        {
+          paymentMode: 'CARD_ONLINE',
+          status: 'COMPLETED',
+          charge: { status: 'CAPTURED', cardRefunds },
+          notPickedUpAt: null,
+          refundedAt: null,
+          ...over,
+        },
+        'PAID',
+      )
+    const leer = async (o: any) => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(o)
+      return (await getTrackingByToken('T'.repeat(32)))!
+    }
+
+    // «No lo recogió», sin devolución: la marca, nunca cancelable y sin `refund`.
+    const noRecogido = await leer(nadie({ notPickedUpAt: CORTE }))
+    expect(noRecogido).toMatchObject({ status: 'COMPLETED', notPickedUpAt: CORTE.toISOString(), refundedAt: null, canCancel: false })
+    expect(noRecogido).not.toHaveProperty('refund')
+    // Un apartado de «Nadie» tampoco se cancela desde el celular (antes: true mientras estaba AUTHORIZED).
+    const apartado = { status: 'PENDING_ACCEPTANCE', charge: { status: 'AUTHORIZED', cardRefunds: [] } }
+    expect(await leer({ ...nadie(apartado), order: { ...nadie(apartado).order, paymentStatus: 'PENDING' } })).toMatchObject({
+      canCancel: false,
+    })
+
+    // El estado real de la devolución, leído de sus filas (la más reciente primero); medio TARJETA mientras sea a la tarjeta.
+    for (const [status, publico] of [
+      ['REQUESTED', 'PENDING'],
+      ['SENDING', 'PENDING'],
+      ['PENDING', 'PENDING'],
+      ['SUCCEEDED', 'DONE'],
+      ['RECORDED', 'DONE'],
+      ['REVERSED', 'REVERSED'],
+    ] as const) {
+      const t = await leer(nadie({ refundedAt: DEVUELTO }, [{ status, reversal: null }]))
+      expect({ status, refund: t.refund, refundedAt: t.refundedAt }).toEqual({
+        status,
+        refund: { status: publico, medio: 'TARJETA' },
+        refundedAt: DEVUELTO.toISOString(),
+      })
+    }
+    // Un RESOLVED dice el medio que registró: la reversa pagada en efectivo o transferencia; sin reversa, nació a saldo a favor.
+    // Nunca se deduce del booleano `toStoreCredit` (aquí miente a propósito).
+    for (const [reversal, medio] of [
+      [{ resolvedMethod: 'CASH' }, 'EFECTIVO'],
+      [{ resolvedMethod: 'BANK_TRANSFER' }, 'TRANSFERENCIA'],
+      [null, 'SALDO'],
+    ] as const) {
+      const t = await leer(nadie({}, [{ status: 'RESOLVED', toStoreCredit: reversal !== null, reversal }]))
+      expect({ medio, refund: t.refund }).toEqual({ medio, refund: { status: 'DONE', medio } })
+    }
+    // Varias filas: una pendiente gana; si no, una revertida (se le debe a la clienta) gana sobre una hecha.
+    expect((await leer(nadie({}, [{ status: 'PENDING' }, { status: 'RECORDED' }]))).refund).toEqual({ status: 'PENDING', medio: 'TARJETA' })
+    expect((await leer(nadie({}, [{ status: 'RECORDED' }, { status: 'REVERSED', reversal: null }]))).refund).toEqual({
+      status: 'REVERSED',
+      medio: 'TARJETA',
+    })
+
+    // La lectura: una sola consulta, con las filas de devolución acotadas y sin las fallidas o canceladas (no movieron dinero).
+    const sel = (prismaMock.onlineOrder.findUnique.mock.calls.at(-1)![0] as any).select
+    expect(sel).toMatchObject({ notPickedUpAt: true, refundedAt: true })
+    expect(sel.charge.select.cardRefunds).toEqual({
+      where: { status: { notIn: ['FAILED', 'CANCELED'] } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: 10,
+      select: { status: true, reversal: { select: { resolvedMethod: true } } },
+    })
+
+    // Regresión: «Mi equipo» con la tarjeta apartada sigue cancelable, y pagar al recoger no trae `refund`.
+    const miEquipo = folioNadie({ requiresAcceptance: true, paymentMode: 'CARD_ONLINE', charge: { status: 'AUTHORIZED', cardRefunds: [] } })
+    expect(await leer(miEquipo)).toMatchObject({ canCancel: true, notPickedUpAt: null, refundedAt: null })
+    expect(await leer(folioNadie())).not.toHaveProperty('refund')
+  })
+
   it('T15 (fija lo de hoy): un folio pagado trae paid true, su folio y sus renglones', async () => {
     prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie({}, 'PAID'))
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({

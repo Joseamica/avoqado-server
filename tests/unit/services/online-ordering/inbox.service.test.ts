@@ -493,8 +493,13 @@ describe('fase 2: cardStatus en la bandeja', () => {
         'cliente',
         'beneficios',
         'beneficiosTotal',
+        // D661 (Task 4): «No lo recogió», «Devolviendo…» y «Devuelto» (aditivos; null si no aplican).
+        'notPickedUpAt',
+        'refundRequestedAt',
+        'refundedAt',
       ].sort(),
     )
+    expect(o).toMatchObject({ notPickedUpAt: null, refundRequestedAt: null, refundedAt: null })
     expect(o.cardStatus).toBeNull()
     expect(o.rejectReason).toBeNull()
     expect(o.card).toBeNull()
@@ -548,6 +553,32 @@ describe('fase 2: cardStatus en la bandeja', () => {
     const o = (await listInbox({ venueId: 'v1', filter: 'active', now: NOW })).orders[0]
     expect(o.cardStatus).toBeNull()
     expect(o.card).toMatchObject({ status: 'CAPTURED', amount: 186, capturedAmount: 150.5, capturedAt: '2026-10-14T18:25:00.000Z' })
+  })
+
+  it('D661 (Task 4): la bandeja, las listas de la caja y el detalle dicen «No lo recogió», «Devolviendo…» y «Devuelto» (ISO), del mismo select', async () => {
+    const CORTE = new Date('2026-10-14T10:00:05.000Z')
+    const DEVUELTO = new Date('2026-10-14T18:10:00.000Z')
+    const cerrado = row('A', 'COMPLETED', {
+      paymentMode: 'CARD_ONLINE',
+      requiresAcceptance: false,
+      charge: cargo('CAPTURED'),
+      notPickedUpAt: CORTE,
+      refundRequestedAt: CORTE,
+      refundedAt: DEVUELTO,
+    })
+    unaSola(cerrado)
+    expect((await listInbox({ venueId: 'v1', filter: 'done', now: NOW })).orders[0]).toMatchObject({
+      notPickedUpAt: CORTE.toISOString(),
+      refundRequestedAt: CORTE.toISOString(),
+      refundedAt: DEVUELTO.toISOString(),
+    })
+    const lista = prismaMock.onlineOrder.findMany.mock.calls.map((c: unknown[]) => c[0] as any).find((a: any) => !esSincronizacion(a))
+    expect(lista.select).toMatchObject({ notPickedUpAt: true, refundRequestedAt: true, refundedAt: true })
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(cerrado as any)
+    expect(await getInboxOrder({ venueId: 'v1', orderId: 'ord-A', now: NOW })).toMatchObject({
+      notPickedUpAt: CORTE.toISOString(),
+      refundedAt: DEVUELTO.toISOString(),
+    })
   })
 
   it('getInboxOrder (el detalle) también lleva card', async () => {

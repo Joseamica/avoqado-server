@@ -20,16 +20,30 @@ import { releaseCharge } from './card/release.service'
 import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders, type CancelledElsewhere } from './cancelledOrderSync'
 import { despertarPasesTrasCommit } from './cortesiaDeFolio'
 import { esVentaCerrada } from '@/services/shared/orderBalance'
-import { OPEN_ORDER_STATUSES, PREPAID_MODES } from './constants'
+import { OPEN_ORDER_STATUSES } from './constants'
 import { notifyOrderEvent } from './notifications.service'
 import { getSettings } from './settings.service'
 import { emitOnlineOrderUpdated } from './traySocket'
 import type { Reloj } from './types'
 
+/**
+ * D661 (Task 4): el estado real que «Entregado» no pisa: «No lo recogió» (`notPickedUpAt`, lo pone el corte del día), «Devolviendo…»
+ * (`refundRequestedAt`) y «Devuelto» (`refundedAt`). Sólo viajan las puestas, y sólo en la respuesta de entregar.
+ */
+type MarcasDeCierre<T> = { notPickedUpAt?: T; refundRequestedAt?: T; refundedAt?: T }
+type MarcasLeidas = MarcasDeCierre<Date | null>
+const marcasDeCierre = <T>(m: MarcasDeCierre<Date | null>, f: (d: Date) => T): MarcasDeCierre<T> => ({
+  ...(m.notPickedUpAt ? { notPickedUpAt: f(m.notPickedUpAt) } : {}),
+  ...(m.refundRequestedAt ? { refundRequestedAt: f(m.refundRequestedAt) } : {}),
+  ...(m.refundedAt ? { refundedAt: f(m.refundedAt) } : {}),
+})
+const MARCAS_SELECT = { notPickedUpAt: true, refundRequestedAt: true, refundedAt: true } as const
+
 export type TransitionResult =
   /** `unchanged`: ya estaba en ese estado y no se escribió nada (A12: entregar lo ya entregado). */
   | { outcome: 'OK'; status: OnlineOrderStatus; estimatedReadyAt?: string | null; unchanged?: true }
-  | { outcome: 'STALE'; status: OnlineOrderStatus | null }
+  /** D661 (Task 4): al entregar, las marcas ISO del estado real (opcionales: una app vieja sólo lee `status`). */
+  | ({ outcome: 'STALE'; status: OnlineOrderStatus | null } & MarcasDeCierre<string>)
   | { outcome: 'NOT_FOUND' }
   | { outcome: 'PAYMENT_REQUIRED' }
   | { outcome: 'HAS_PAYMENTS' }
@@ -108,7 +122,7 @@ export type CasResult =
       /** S9: clientas con premio regresado; tras el commit se despierta su pase de Wallet (si no, lo manda el barrido). */
       clientasConPremio?: string[]
     }
-  | {
+  | ({
       r: 'STALE'
       now: Date
       status: OnlineOrderStatus | null
@@ -117,7 +131,7 @@ export type CasResult =
       cancelledElsewhere?: CancelledElsewhere[]
       /** Fase 2: el cargo de tarjeta está en `CAPTURING`; no se escribió nada. */
       confirmingPayment?: true
-    }
+    } & MarcasDeCierre<Date>)
   | { r: 'NOT_FOUND' }
   | { r: 'HAS_PAYMENTS' }
   | { r: 'PAYMENT_REQUIRED' }
@@ -171,15 +185,21 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
       paymentMode: true,
       requiresAcceptance: true,
       acceptDeadlineAt: true,
+      ...MARCAS_SELECT,
       order: { select: { orderNumber: true, status: true, paymentStatus: true, paidAmount: true } },
     },
   })
   if (!row) return { r: 'NOT_FOUND' }
-  const stale = (current: OnlineOrderStatus | null, deadlinePassed = false): Extract<CasResult, { r: 'STALE' }> => ({
+  const stale = (
+    current: OnlineOrderStatus | null,
+    deadlinePassed = false,
+    marcas: MarcasLeidas = row,
+  ): Extract<CasResult, { r: 'STALE' }> => ({
     r: 'STALE',
     now,
     status: current,
     deadlinePassed,
+    ...(a.kind === 'DELIVER' ? marcasDeCierre(marcas, d => d) : {}),
   })
 
   // Fase 2: mientras el banco cobra la tarjeta, nada mueve el pedido (ni lo sincroniza con una cancelación de otra vía): el
@@ -217,11 +237,12 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
     if (hasMoney && !venceSinCancelar) return { r: 'HAS_PAYMENTS' }
     if (await findLiveTerminalCharge(tx, { venueId: a.venueId, orderId: a.orderId })) return { r: 'HAS_PAYMENTS' }
   }
-  // Se entrega cuando YA se cobró, leído bajo el candado (el cobro lo hace el flujo normal de caja). M-2: falla CERRADO: sólo
-  // un modo ya cobrado de antemano (`PREPAID_MODES`: la tarjeta en línea, que se captura al aceptar) se libra de exigirlo.
-  if (a.kind === 'DELIVER' && !PREPAID_MODES.includes(row.paymentMode) && row.order.paymentStatus !== PaymentStatus.PAID) {
-    return { r: 'PAYMENT_REQUIRED' }
-  }
+  // D661 (Task 4): con la devolución reservada o hecha no se entrega: responde su estado real. Las escribe la devolución bajo ESTE
+  // candado de la orden, así que lo leído aquí vale hasta el CAS (el corte del día, que no lo toma, cambia el estado y el CAS lo ve).
+  if (a.kind === 'DELIVER' && (row.refundRequestedAt || row.refundedAt)) return stale(row.status)
+  // Se entrega cuando YA se cobró, leído bajo el candado (el cobro lo hace el flujo normal de caja). Falla CERRADO en todos los modos:
+  // D661 (Task 4) quitó la excepción M-2 de la tarjeta en línea (aceptada sin cobrarla, su cuenta puede seguir sin saldar).
+  if (a.kind === 'DELIVER' && row.order.paymentStatus !== PaymentStatus.PAID) return { r: 'PAYMENT_REQUIRED' }
 
   // Un folio (`requiresAcceptance:false`, QR o liga) no se prepara sin pago: aceptar exige la venta cobrada (`esVentaCerrada`).
   if (a.kind === 'ACCEPT' && row.requiresAcceptance === false && !esVentaCerrada(row.order.paymentStatus)) {
@@ -238,8 +259,12 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
     data: { status: rule.to, ...a.onlineData(now) },
   })
   if (cas.count !== 1) {
-    const current = await tx.onlineOrder.findFirst({ where: { id: row.id }, select: { status: true, acceptDeadlineAt: true } })
-    return stale(current?.status ?? null, !!current && current.acceptDeadlineAt.getTime() <= now.getTime())
+    // D661 (Task 4): con sus marcas: si el corte del día ganó, «Entregado» responde «No lo recogió», no éxito.
+    const current = await tx.onlineOrder.findFirst({
+      where: { id: row.id },
+      select: { status: true, acceptDeadlineAt: true, ...MARCAS_SELECT },
+    })
+    return stale(current?.status ?? null, !!current && current.acceptDeadlineAt.getTime() <= now.getTime(), current ?? {})
   }
 
   // 🔴 LEALTAD (hz:a8104ac8:D1): rechazar, vencer o cancelar el pedido anula su venta, y sus canjes vuelven al cliente como al
@@ -342,7 +367,9 @@ async function casTransition(a: CasArgs, afterCas?: AfterCasInTx, alConfirmar?: 
 export function settled(r: Exclude<CasResult, { r: 'OK' }>): TransitionResult {
   switch (r.r) {
     case 'STALE':
-      return r.confirmingPayment ? { outcome: 'CONFIRMING_PAYMENT' } : { outcome: 'STALE', status: r.status }
+      return r.confirmingPayment
+        ? { outcome: 'CONFIRMING_PAYMENT' }
+        : { outcome: 'STALE', status: r.status, ...marcasDeCierre(r, d => d.toISOString()) }
     case 'NOT_FOUND':
       return { outcome: 'NOT_FOUND' }
     case 'HAS_PAYMENTS':
@@ -613,8 +640,9 @@ export async function markOnlineOrderDelivered(i: {
     orderExtra: now => ({ completedAt: now }),
   })
   // A12: «entregado» sobre lo que ya se entregó (la bandeja o el job lo cerraron al quedar pagado, o fue un doble toque) es
-  // éxito: la caja pidió justo ese estado. Nada se escribe ni se audita otra vez.
-  if (r.r === 'STALE' && r.status === OnlineOrderStatus.COMPLETED) {
+  // éxito: la caja pidió justo ese estado. Nada se escribe ni se audita otra vez. D661 (Task 4): un cierre que NO fue entrega
+  // («No lo recogió», «Devuelto») no es éxito: va como STALE con sus marcas (409 con el estado real).
+  if (r.r === 'STALE' && r.status === OnlineOrderStatus.COMPLETED && !r.notPickedUpAt && !r.refundRequestedAt && !r.refundedAt) {
     return { outcome: 'OK', status: OnlineOrderStatus.COMPLETED, unchanged: true }
   }
   if (r.r !== 'OK') return settled(r)

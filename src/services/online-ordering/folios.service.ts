@@ -1,4 +1,4 @@
-import { OnlineOrderChargeStatus, OnlineOrderStatus, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
+import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, OnlineOrderStatus, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { bloquearDescuentosEnOrdenEnTx } from '@/services/dashboard/discountEngine.service'
@@ -378,6 +378,11 @@ export async function syncPaidClosedFolios(
  * a la lista después de ese instante (`acceptedAt <= ahora`; la regla del día ya lo excluye salvo que la hora local retroceda en el
  * corte). El CAS repite `acceptedAt`, así la decisión vale hasta la escritura (el reloj sólo avanza), y `completedAt` es la hora de
  * la escritura.
+ * D661 (Task 4): un pedido con tarjeta de «Nadie» (`CARD_ONLINE`) no se entregó: queda «No lo recogió» (`COMPLETED` +
+ * `notPickedUpAt`). Con la devolución reservada o hecha no se toca (lo excluye la lectura y lo repite el CAS: una reserva que gane
+ * entre la lectura y la escritura hace perder el CAS). Su bitácora `ONLINE_ORDER_NOT_PICKED_UP` va en la MISMA transacción que el
+ * CAS: si el proceso muere entre los dos no queda ninguno y la siguiente pasada lo cierra con su única fila. Un folio pagado en caja
+ * sigue como hoy.
  */
 export async function cerrarFoliosDelDiaTerminado(
   scope: { venueId?: string },
@@ -387,14 +392,24 @@ export async function cerrarFoliosDelDiaTerminado(
   const rows = await readCandidates(() => {
     const ahora = reloj() // R52: el día se decide al leer, también en cada reintento de la lectura
     return prisma.$queryRaw<
-      Array<{ id: string; orderId: string; venueId: string; status: OnlineOrderStatus; acceptedAt: Date; orderNumber: string }>
+      Array<{
+        id: string
+        orderId: string
+        venueId: string
+        status: OnlineOrderStatus
+        paymentMode: OnlineOrderPaymentMode
+        acceptedAt: Date
+        orderNumber: string
+      }>
     >`
-      SELECT oo.id, oo."orderId", oo."venueId", oo.status::text AS status, oo."acceptedAt", o."orderNumber"
+      SELECT oo.id, oo."orderId", oo."venueId", oo.status::text AS status, oo."paymentMode"::text AS "paymentMode", oo."acceptedAt",
+        o."orderNumber"
       FROM "OnlineOrder" oo
       JOIN "Order" o ON o.id = oo."orderId"
       WHERE oo."requiresAcceptance" = false
         AND oo.status IN ('ACCEPTED', 'READY')
         AND o.status NOT IN ('CANCELLED', 'DELETED')
+        AND NOT (oo."paymentMode" = 'CARD_ONLINE' AND (oo."refundRequestedAt" IS NOT NULL OR oo."refundedAt" IS NOT NULL))
         ${scope.venueId !== undefined ? Prisma.sql`AND oo."venueId" = ${scope.venueId}` : Prisma.empty}
         AND oo."acceptedAt" <= ${utcTs(ahora)}
         AND ${Prisma.raw(seAcaboElDiaDelNegocioDeSql('oo."acceptedAt"', 'oo."venueId"', instanteUtcSql(ahora)))}
@@ -405,11 +420,34 @@ export async function cerrarFoliosDelDiaTerminado(
   for (const row of rows) {
     try {
       const completedAt = reloj() // R52: la hora de la escritura
-      const cas = await prisma.onlineOrder.updateMany({
-        where: { id: row.id, status: row.status, requiresAcceptance: false, acceptedAt: row.acceptedAt, order: CUENTA_VIVA },
-        data: { status: OnlineOrderStatus.COMPLETED, completedAt },
+      const noLoRecogio = row.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE
+      const cerrado = await prisma.$transaction(async tx => {
+        const cas = await tx.onlineOrder.updateMany({
+          where: {
+            id: row.id,
+            status: row.status,
+            requiresAcceptance: false,
+            acceptedAt: row.acceptedAt,
+            order: CUENTA_VIVA,
+            ...(noLoRecogio ? { refundRequestedAt: null, refundedAt: null } : {}),
+          },
+          data: { status: OnlineOrderStatus.COMPLETED, completedAt, ...(noLoRecogio ? { notPickedUpAt: completedAt } : {}) },
+        })
+        if (cas.count === 1 && noLoRecogio) {
+          await tx.activityLog.create({
+            data: {
+              venueId: row.venueId,
+              staffId: null,
+              action: 'ONLINE_ORDER_NOT_PICKED_UP',
+              entity: 'OnlineOrder',
+              entityId: row.id,
+              data: { orderNumber: row.orderNumber, automatic: 'END_OF_DAY' },
+            },
+          })
+        }
+        return cas.count === 1
       })
-      if (cas.count !== 1) continue
+      if (!cerrado) continue
       won += 1
       emitOnlineOrderUpdated({
         venueId: row.venueId,
@@ -418,6 +456,8 @@ export async function cerrarFoliosDelDiaTerminado(
         onlineStatus: OnlineOrderStatus.COMPLETED,
         now: completedAt,
       })
+      // «No lo recogió» ya dejó su bitácora en la transacción; nunca se dice «Entregado» de lo que no se entregó.
+      if (noLoRecogio) continue
       void logAction({
         staffId: null,
         venueId: row.venueId,
@@ -434,7 +474,8 @@ export async function cerrarFoliosDelDiaTerminado(
       })
     }
   }
-  if (won > 0) logger.info('[OnlineOrdering] folios entregados al terminar el día del negocio', { ...scope, count: won })
+  if (won > 0)
+    logger.info('[OnlineOrdering] folios cerrados al terminar el día del negocio («Entregado» o «No lo recogió»)', { ...scope, count: won })
   return won
 }
 

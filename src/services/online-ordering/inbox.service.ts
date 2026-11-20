@@ -68,6 +68,13 @@ export interface InboxOrder {
   beneficios?: Array<{ nombre: string; monto: number }>
   /** S14 (R1): cuántas filas de descuento tiene la cuenta; si pasa de `beneficios.length`, se dice «y N más». */
   beneficiosTotal?: number
+  /**
+   * D661 (Task 4), ISO o `null`; opcionales para las apps viejas. `notPickedUpAt`: el cierre del día lo dio por «No lo recogió»
+   * (pagado con tarjeta en «Nadie» y nunca entregado). `refundRequestedAt`: «Devolviendo…» (no se entrega). `refundedAt`: «Devuelto».
+   */
+  notPickedUpAt?: string | null
+  refundRequestedAt?: string | null
+  refundedAt?: string | null
   needsPrint: boolean
   items: Array<{
     productId: string | null
@@ -104,7 +111,9 @@ export const INBOX_SELECT = {
   estimatedReadyAt: true,
   printClaimedAt: true,
   printedAt: true,
-  // D661 (Ruling 2): con la devolución reservada o hecha ya no se pide comanda (`needsPrint`).
+  // D661 (Ruling 2): con la devolución reservada o hecha ya no se pide comanda (`needsPrint`). Task 4: y lo COMPLETED sólo la pide si
+  // lo cerró el corte (`notPickedUpAt`); las tres marcas viajan en la respuesta.
+  notPickedUpAt: true,
   refundRequestedAt: true,
   refundedAt: true,
   createdAt: true,
@@ -185,6 +194,9 @@ export function toInboxOrder(r: Row, now: Date): InboxOrder {
     paidAt: horaDelPago(r.order, r.createdAt),
     cliente: clientaDeLaCuenta(r.order),
     ...beneficiosDeLaCuenta(r.order),
+    notPickedUpAt: r.notPickedUpAt?.toISOString() ?? null,
+    refundRequestedAt: r.refundRequestedAt?.toISOString() ?? null,
+    refundedAt: r.refundedAt?.toISOString() ?? null,
     needsPrint: onlineOrderNeedsPrint(r, now),
     items: r.order.items.map(i => ({
       productId: i.productId ?? null,

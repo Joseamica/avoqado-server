@@ -22,6 +22,8 @@ const VENTANA_DE_COMANDAS_MS = 24 * 3_600_000
  * Qué pedido admite comanda: aceptado o listo, y (D661, Ruling 2) un pedido con tarjeta de «Nadie» que el cierre del día ya pasó a
  * COMPLETED; sin papel confirmado, sin devolución reservada ni hecha, y libre o con un reclamo vencido (se prefiere imprimir de más,
  * que molesta, a no imprimir, que la cocina no se entera; sin «soltar», R20). La MISMA regla para la lista, el reclamo y `needsPrint`.
+ * D661 (Task 4): de lo COMPLETED, sólo lo que cerró el corte («No lo recogió», `notPickedUpAt`): lo que una PERSONA marcó
+ * «Entregado» sin que saliera su papel ya se entregó y no pide comanda.
  */
 const comandaPendienteWhere = (now: Date) =>
   ({
@@ -29,7 +31,7 @@ const comandaPendienteWhere = (now: Date) =>
     refundRequestedAt: null,
     refundedAt: null,
     AND: [
-      { OR: [{ status: { in: PRINTABLE } }, { status: { in: CLOSED_BY_DAY_END }, ...D661 }] },
+      { OR: [{ status: { in: PRINTABLE } }, { status: { in: CLOSED_BY_DAY_END }, ...D661, notPickedUpAt: { not: null } }] },
       { OR: [{ printClaimedAt: null }, { printClaimedAt: { lt: new Date(now.getTime() - PRINT_CLAIM_TTL_MS) } }] },
     ],
   }) satisfies Prisma.OnlineOrderWhereInput
@@ -43,12 +45,17 @@ export function onlineOrderNeedsPrint(
     // Obligatorios: quien llame sin ellos se apartaría en silencio de la regla de la lista y del reclamo (D661, Ruling 2).
     paymentMode: OnlineOrderPaymentMode
     requiresAcceptance: boolean
+    notPickedUpAt: Date | null
     refundRequestedAt: Date | null
     refundedAt: Date | null
   },
   now: Date = new Date(),
 ): boolean {
-  const cerradoD661 = o.status === OnlineOrderStatus.COMPLETED && o.paymentMode === D661.paymentMode && o.requiresAcceptance === false
+  const cerradoD661 =
+    o.status === OnlineOrderStatus.COMPLETED &&
+    o.paymentMode === D661.paymentMode &&
+    o.requiresAcceptance === false &&
+    o.notPickedUpAt != null
   if (!PRINTABLE.includes(o.status) && !cerradoD661) return false
   if (o.printedAt || o.refundRequestedAt || o.refundedAt) return false
   if (!o.printClaimedAt) return true

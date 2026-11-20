@@ -5,6 +5,7 @@ import {
   NotificationChannel,
   NotificationPriority,
   NotificationType,
+  OnlineOrderCardRefundStatus,
   OnlineOrderChargeStatus,
   OnlineOrderPaymentMode,
   OnlineOrderStatus,
@@ -12,6 +13,7 @@ import {
   OrderStatus,
   OrderType,
   OriginSystem,
+  PaymentMethod,
   PaymentStatus,
   Prisma,
   type OnlineOrderRejectReason,
@@ -1083,6 +1085,52 @@ export interface PublicTracking {
   beneficioRegresado?: boolean
   /** S14 (P2-8): lo que sumó con esta cuenta ya pagada (sello y puntos), sólo con clienta y la función prendida; `null` si nada. */
   lealtad?: LealtadDeLaCuenta | null
+  /** D661 (Task 4): ISO de cuando el cierre del día lo dio por «No lo recogió» (pagado con tarjeta en «Nadie», sin entregar); o `null`. */
+  notPickedUpAt?: string | null
+  /** D661 (Task 4): ISO de cuando se cerró como «Devuelto» (devuelto el 100 %); o `null`. */
+  refundedAt?: string | null
+  /** D661 (Task 4): la devolución del pago con tarjeta, leída de sus filas reales; sin devolución, no viene. */
+  refund?: DevolucionPublica
+}
+
+/**
+ * D661 (Task 4): lo que la clienta ve de su devolución. `PENDING` = en camino; `DONE` = hecha; `REVERSED` = el banco la regresó y
+ * el negocio todavía se la debe. `medio`: por dónde le llegó (o le llegará) el dinero.
+ */
+export type DevolucionPublica = {
+  status: 'PENDING' | 'DONE' | 'REVERSED'
+  medio: 'TARJETA' | 'SALDO' | 'EFECTIVO' | 'TRANSFERENCIA'
+}
+const DEVOLUCION_PUBLICA: Partial<Record<OnlineOrderCardRefundStatus, DevolucionPublica['status']>> = {
+  REQUESTED: 'PENDING',
+  SENDING: 'PENDING',
+  PENDING: 'PENDING',
+  SUCCEEDED: 'DONE', // Stripe ya la devolvió; sólo falta su renglón del libro
+  RECORDED: 'DONE',
+  RESOLVED: 'DONE',
+  REVERSED: 'REVERSED',
+}
+type FilaDeDevolucion = { status: OnlineOrderCardRefundStatus; reversal?: { resolvedMethod: PaymentMethod | null } | null }
+/**
+ * El medio que la fila REGISTRÓ, nunca deducido de `toStoreCredit`: un `RESOLVED` con reversa dice cómo la pagó el negocio (efectivo
+ * o transferencia); uno sin reversa nació a saldo a favor (el único `RESOLVED` que no pasa por la reversa, Task 6). Las demás son a la
+ * tarjeta (una de saldo nace `RESOLVED`).
+ */
+const medioDe = (f: FilaDeDevolucion): DevolucionPublica['medio'] =>
+  f.status !== OnlineOrderCardRefundStatus.RESOLVED
+    ? 'TARJETA'
+    : f.reversal?.resolvedMethod === PaymentMethod.CASH
+      ? 'EFECTIVO'
+      : f.reversal?.resolvedMethod === PaymentMethod.BANK_TRANSFER
+        ? 'TRANSFERENCIA'
+        : 'SALDO'
+/** Con varias filas (de la más reciente a la más vieja): una en camino gana; si no, una revertida (se debe); si no, una hecha. */
+function devolucionPublica(filas: FilaDeDevolucion[]): DevolucionPublica | undefined {
+  for (const status of ['PENDING', 'REVERSED', 'DONE'] as const) {
+    const f = filas.find(x => DEVOLUCION_PUBLICA[x.status] === status)
+    if (f) return { status, medio: medioDe(f) }
+  }
+  return undefined
 }
 
 const VENUE_PUBLIC_SELECT = {
@@ -1261,7 +1309,20 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
       rejectReason: true,
       createdAt: true,
       venueId: true,
-      charge: { select: { status: true } },
+      notPickedUpAt: true,
+      refundedAt: true,
+      charge: {
+        select: {
+          status: true,
+          // D661 (Task 4): las devoluciones que movieron (o mueven) dinero; una real trae una o dos.
+          cardRefunds: {
+            where: { status: { notIn: [OnlineOrderCardRefundStatus.FAILED, OnlineOrderCardRefundStatus.CANCELED] } },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            take: 10,
+            select: { status: true, reversal: { select: { resolvedMethod: true } } },
+          },
+        },
+      },
       order: {
         select: {
           orderNumber: true,
@@ -1304,6 +1365,8 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
     beneficioRegresado(row.orderId, row.order),
     paid ? lealtadDeLaCuenta({ venueId: row.venueId, orderId: row.orderId, customerId: clientaIdDeLaCuenta(row.order) }) : null,
   ])
+  const tarjeta = row.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE
+  const refund = devolucionPublica(row.charge?.cardRefunds ?? [])
   return {
     orderNumber: row.order.orderNumber,
     status: row.status,
@@ -1333,14 +1396,15 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
     rejectReason: row.rejectReason ?? null,
     createdAt: row.createdAt.toISOString(),
     // R1: con dinero encima el comensal ya no cancela desde aquí (respondería HAS_PAYMENTS). Fase 2: con tarjeta, sólo apartada.
-    canCancel:
-      row.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE
-        ? pending && row.charge?.status === OnlineOrderChargeStatus.AUTHORIZED
-        : pending,
+    // D661 (Task 4): en «Nadie» la clienta nunca cancela su pedido con tarjeta; lo abre una caja o se libera solo.
+    canCancel: tarjeta ? row.requiresAcceptance !== false && pending && row.charge?.status === OnlineOrderChargeStatus.AUTHORIZED : pending,
     requiresAcceptance: row.requiresAcceptance,
     channel: (row.channel as 'QR' | 'LINK' | null) ?? null,
     ...beneficiosDeLaCuenta(row.order),
     beneficioRegresado: regresado,
     lealtad,
+    notPickedUpAt: row.notPickedUpAt?.toISOString() ?? null,
+    refundedAt: row.refundedAt?.toISOString() ?? null,
+    ...(refund ? { refund } : {}),
   }
 }

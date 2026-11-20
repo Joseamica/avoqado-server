@@ -581,13 +581,69 @@ describe('markOnlineOrderDelivered', () => {
     expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
   })
 
-  it('M-2: la tarjeta en línea (único modo en PREPAID_MODES) ya llega cobrada: entregar no exige la cuenta pagada al recoger', async () => {
-    // Pagar al recoger, fuera de PREPAID_MODES, sigue fallando CERRADO (prueba de arriba).
-    prismaMock.onlineOrder.findFirst.mockResolvedValue({
-      ...row({ status: 'READY', order: { status: 'READY' } }),
-      paymentMode: 'CARD_ONLINE',
-    } as any)
+  it('D661 (Task 4): la tarjeta en línea también exige la venta PAGADA, leída bajo el candado (antes se libraba por M-2)', async () => {
+    const tarjeta = (order: Record<string, unknown>) => ({ ...row({ status: 'READY', order }), paymentMode: 'CARD_ONLINE' }) as any
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(tarjeta({ status: 'READY', paymentStatus: 'PARTIAL', paidAmount: D('100') }))
+    await expect(markOnlineOrderDelivered(base)).resolves.toEqual({ outcome: 'PAYMENT_REQUIRED' })
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(tarjeta(PAID))
     await expect(markOnlineOrderDelivered(base)).resolves.toEqual({ outcome: 'OK', status: 'COMPLETED' })
+  })
+
+  it('entregar un CARD_ONLINE con refundRequestedAt o refundedAt → 409', async () => {
+    const MARCA = new Date('2026-10-14T18:00:00.000Z')
+    for (const status of ['ACCEPTED', 'READY']) {
+      for (const marca of ['refundRequestedAt', 'refundedAt'] as const) {
+        jest.clearAllMocks()
+        prismaMock.onlineOrder.findFirst.mockResolvedValue({
+          ...row({ status, requiresAcceptance: false, order: PAID }),
+          paymentMode: 'CARD_ONLINE',
+          [marca]: MARCA,
+        } as any)
+        // STALE con el estado real: la API lo contesta 409 ORDER_STATE_CHANGED con la marca (el controlador lo prueba).
+        await expect(markOnlineOrderDelivered(base)).resolves.toEqual({ outcome: 'STALE', status, [marca]: MARCA.toISOString() })
+        expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+        expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+        expect(logAction).not.toHaveBeenCalled()
+        expect(socketManager.broadcastToVenue).not.toHaveBeenCalled()
+      }
+    }
+  })
+
+  it('entregar uno marcado «No lo recogió» → 409 con su estado', async () => {
+    const CORTE = new Date('2026-10-14T10:00:05.000Z')
+    const noLoRecogio = { ...row({ status: 'COMPLETED', requiresAcceptance: false, order: PAID }), paymentMode: 'CARD_ONLINE' }
+    prismaMock.onlineOrder.findFirst.mockResolvedValue({ ...noLoRecogio, notPickedUpAt: CORTE } as any)
+    await expect(markOnlineOrderDelivered(base)).resolves.toEqual({
+      outcome: 'STALE',
+      status: 'COMPLETED',
+      notPickedUpAt: CORTE.toISOString(),
+    })
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+
+    // «Devuelto» (Task 5: COMPLETED + refundedAt) tampoco es éxito.
+    prismaMock.onlineOrder.findFirst.mockResolvedValue({ ...noLoRecogio, notPickedUpAt: CORTE, refundedAt: CORTE } as any)
+    await expect(markOnlineOrderDelivered(base)).resolves.toEqual({
+      outcome: 'STALE',
+      status: 'COMPLETED',
+      notPickedUpAt: CORTE.toISOString(),
+      refundedAt: CORTE.toISOString(),
+    })
+
+    // El cierre del día ganó entre la lectura bajo el candado y el CAS (no toma el candado): la relectura trae su marca.
+    prismaMock.onlineOrder.findFirst
+      .mockReset()
+      .mockResolvedValueOnce({ ...noLoRecogio, status: 'ACCEPTED' } as any)
+      .mockResolvedValueOnce({ status: 'COMPLETED', acceptDeadlineAt: NOW, notPickedUpAt: CORTE } as any)
+    prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 0 })
+    await expect(markOnlineOrderDelivered(base)).resolves.toEqual({
+      outcome: 'STALE',
+      status: 'COMPLETED',
+      notPickedUpAt: CORTE.toISOString(),
+    })
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
   })
 
   it('con la orden pagada pasa a COMPLETED desde READY o ACCEPTED; la Order se completa sólo si sigue abierta', async () => {

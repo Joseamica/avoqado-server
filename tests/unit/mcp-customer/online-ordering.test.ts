@@ -580,6 +580,44 @@ describe('online_order_respond', () => {
     expect(mockAudit).not.toHaveBeenCalled()
   })
 
+  it('MCP: «Entregado» sobre un «No lo recogió» devuelve su estado, no éxito', async () => {
+    const CORTE = '2026-11-07T10:00:05.000Z'
+    const nadie = { ...pending, paymentMode: 'CARD_ONLINE', requiresAcceptance: false, refundRequestedAt: null, refundedAt: null }
+    // Ya cerrado por el corte: se dice antes de la vista previa y no se ejecuta ni se audita nada (con o sin confirm).
+    mockGetInboxOrder.mockResolvedValue({ ...nadie, status: 'COMPLETED', notPickedUpAt: CORTE })
+    for (const confirm of [undefined, true]) {
+      const r = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'DELIVERED', confirm }))
+      expect(r).toEqual({ ok: false, status: 'COMPLETED', notPickedUpAt: CORTE, error: expect.stringContaining('«No lo recogió»') })
+    }
+    // «Devuelto» (COMPLETED + refundedAt) y «Devolviendo…» (la reserva viva sobre uno listo) tampoco son éxito.
+    mockGetInboxOrder.mockResolvedValue({ ...nadie, status: 'COMPLETED', notPickedUpAt: null, refundedAt: CORTE })
+    expect(parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'DELIVERED', confirm: true }))).toEqual({
+      ok: false,
+      status: 'COMPLETED',
+      refundedAt: CORTE,
+      error: expect.stringMatching(/devolvió/),
+    })
+    mockGetInboxOrder.mockResolvedValue({ ...nadie, status: 'READY', notPickedUpAt: null, refundRequestedAt: CORTE })
+    expect(parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'DELIVERED', confirm: true }))).toEqual({
+      ok: false,
+      status: 'READY',
+      refundRequestedAt: CORTE,
+      error: expect.stringMatching(/devolviendo/),
+    })
+    expect(mockDelivered).not.toHaveBeenCalled()
+
+    // El corte ganó entre la vista previa y la confirmación: el servicio contesta su estado real y tampoco es éxito.
+    mockGetInboxOrder.mockResolvedValue({ ...nadie, status: 'READY', notPickedUpAt: null })
+    mockDelivered.mockResolvedValue({ outcome: 'STALE', status: 'COMPLETED', notPickedUpAt: CORTE })
+    expect(parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'DELIVERED', confirm: true }))).toEqual({
+      ok: false,
+      status: 'COMPLETED',
+      notPickedUpAt: CORTE,
+      error: expect.stringContaining('«No lo recogió»'),
+    })
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
   it('A12: si se entregó solo entre la vista previa y la confirmación, el servicio dice `unchanged`: éxito sin auditar otra vez', async () => {
     mockGetInboxOrder.mockResolvedValue({ ...enPreparacion, status: 'READY' })
     mockDelivered.mockResolvedValue({ outcome: 'OK', status: 'COMPLETED', unchanged: true })

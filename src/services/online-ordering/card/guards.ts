@@ -21,6 +21,16 @@ export const cardOnlineOrderError = (details?: unknown) => new ConflictError(MEN
 export const MENSAJE_ABRIR_DESDE_LA_CAJA =
   'Este pedido es con tarjeta en línea: se abre desde la caja (TPV o POS actualizados). No se aplicó nada.'
 
+/**
+ * D661 (Task 4): por qué «Entregado» no se aplica (la API y el MCP), según la marca más fuerte del pedido; `null` sin marcas.
+ */
+export function mensajeNoSeEntrega(m: { notPickedUpAt?: string | null; refundRequestedAt?: string | null; refundedAt?: string | null }) {
+  if (m.refundedAt) return 'Este pedido ya se devolvió («Devuelto»): no se marca entregado. No se aplicó nada.'
+  if (m.refundRequestedAt) return 'Este pedido se está devolviendo: no se marca entregado. No se aplicó nada.'
+  if (m.notPickedUpAt) return 'Este pedido se cerró como «No lo recogió» al terminar el día: no se marca entregado. No se aplicó nada.'
+  return null
+}
+
 /** El pedido en línea con tarjeta de esta cuenta y el estado de su cargo, o `null` (no es pedido en línea o paga al recoger). */
 export async function findCardOnlineOrderInTx(db: Db, i: { venueId: string; orderId: string }) {
   const row = await db.onlineOrder.findFirst({

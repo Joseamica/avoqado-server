@@ -23,11 +23,19 @@ describe('onlineOrderNeedsPrint', () => {
   })
 
   it('D661 (Ruling 2): un pedido con tarjeta de «Nadie» que el cierre del día pasó a COMPLETED sigue pidiendo su comanda; otros COMPLETED no', () => {
-    const cerrado = { status: 'COMPLETED', printedAt: null, printClaimedAt: null }
+    const cerrado = { status: 'COMPLETED', printedAt: null, printClaimedAt: null, notPickedUpAt: NOW }
     expect(onlineOrderNeedsPrint({ ...cerrado, ...D661 } as any, NOW)).toBe(true)
     expect(onlineOrderNeedsPrint({ ...cerrado, paymentMode: 'CARD_ONLINE', requiresAcceptance: true } as any, NOW)).toBe(false) // «Mi equipo»
     expect(onlineOrderNeedsPrint({ ...cerrado, paymentMode: 'PAY_AT_PICKUP', requiresAcceptance: false } as any, NOW)).toBe(false) // folio de caja
     expect(onlineOrderNeedsPrint({ ...cerrado } as any, NOW)).toBe(false)
+  })
+
+  it('D661 (Task 4): COMPLETED pide comanda sólo si lo cerró el corte (notPickedUpAt); si una PERSONA lo entregó sin papel, ya no', () => {
+    const cerrado = { status: 'COMPLETED', printedAt: null, printClaimedAt: null, ...D661 }
+    expect(onlineOrderNeedsPrint({ ...cerrado, notPickedUpAt: NOW } as any, NOW)).toBe(true) // lo cerró el corte
+    expect(onlineOrderNeedsPrint({ ...cerrado, notPickedUpAt: null } as any, NOW)).toBe(false) // «Entregado» de una persona
+    // Aceptado o listo no cambia: pide comanda con o sin marca (regresión).
+    expect(onlineOrderNeedsPrint({ ...cerrado, status: 'ACCEPTED', notPickedUpAt: null } as any, NOW)).toBe(true)
   })
 
   it('D661 (Ruling 2): con la devolución reservada o hecha ya no se pide comanda', () => {
@@ -54,7 +62,8 @@ describe('claimOnlineOrderPrint', () => {
       expect(where).toMatchObject({ orderId: 'ord1', venueId: 'v1', printedAt: null, refundRequestedAt: null, refundedAt: null })
       expect(where.AND).toEqual(
         expect.arrayContaining([
-          { OR: [{ status: { in: ['ACCEPTED', 'READY'] } }, { status: { in: ['COMPLETED'] }, ...D661 }] },
+          // D661 (Task 4): de lo COMPLETED, sólo lo que cerró el corte del día («No lo recogió»).
+          { OR: [{ status: { in: ['ACCEPTED', 'READY'] } }, { status: { in: ['COMPLETED'] }, ...D661, notPickedUpAt: { not: null } }] },
           { OR: [{ printClaimedAt: null }, { printClaimedAt: { lt: LIMITE } }] },
         ]),
       )

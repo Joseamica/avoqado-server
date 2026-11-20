@@ -11,7 +11,7 @@ import type { OnlineOrderRejectReason } from '@prisma/client'
 import { evaluateRolePermission, resolveUserRoleForVenue } from '@/middlewares/checkPermission.middleware'
 import { ONLINE_ORDERS_TO_PAY_HEADER, ONLINE_ORDERS_TRAY_HEADER, TO_PAY_FAST_POLL_SECONDS } from '@/services/online-ordering/constants'
 import { CARD_ALERT_HEADER, touchCardAlertPoll } from '@/services/online-ordering/cardAlertPresence'
-import { MENSAJE_ABRIR_DESDE_LA_CAJA } from '@/services/online-ordering/card/guards'
+import { MENSAJE_ABRIR_DESDE_LA_CAJA, mensajeNoSeEntrega } from '@/services/online-ordering/card/guards'
 import { listInbox, type InboxFilter } from '@/services/online-ordering/inbox.service'
 import { listFolios, type FolioSection } from '@/services/online-ordering/folios.service'
 import { listDeliveryCashPending } from '@/services/delivery-channels/core/deliveryCashPending.service'
@@ -38,13 +38,20 @@ function reply(res: Response, r: TransitionResult) {
       const { outcome: _o, ...data } = r
       return res.json({ success: true, data })
     }
-    case 'STALE':
+    case 'STALE': {
+      // D661 (Task 4): al entregar, el estado real («No lo recogió», «Devolviendo…», «Devuelto») va en campos nuevos opcionales; el
+      // código y `status` son los de siempre, así una app vieja sigue leyendo este 409 como hoy.
+      const { outcome: _o, status, ...marcas } = r
       return res.status(409).json({
         success: false,
         code: 'ORDER_STATE_CHANGED',
-        status: r.status,
-        error: 'El pedido ya cambió de estado (otro aparato, el cliente, la caja o el tiempo). Actualiza la bandeja.',
+        status,
+        ...marcas,
+        error:
+          mensajeNoSeEntrega(marcas) ??
+          'El pedido ya cambió de estado (otro aparato, el cliente, la caja o el tiempo). Actualiza la bandeja.',
       })
+    }
     case 'PAYMENT_REQUIRED':
       return res.status(409).json({ success: false, code: 'PAYMENT_REQUIRED', error: 'Cobra el pedido antes de entregarlo.' })
     case 'HAS_PAYMENTS':

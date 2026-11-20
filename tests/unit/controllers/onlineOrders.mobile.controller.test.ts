@@ -244,6 +244,58 @@ describe('onlineOrders.mobile.controller', () => {
     expect(body.error).not.toMatch(/ya se pagó|No se cobró nada/)
   })
 
+  it('entregar uno marcado «No lo recogió» → 409 con su estado (mismo código de siempre y campos nuevos opcionales; nunca 200)', async () => {
+    const CORTE = '2026-10-14T10:00:05.000Z'
+    ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValue({ outcome: 'STALE', status: 'COMPLETED', notPickedUpAt: CORTE })
+    const a = mock()
+    await ctrl.delivered(a.req, a.res, a.next)
+    expect(a.res.status).toHaveBeenCalledWith(409)
+    // Una app vieja lee `code` y `status` como hoy; una nueva pinta «No lo recogió» con `notPickedUpAt`.
+    expect(a.res.json).toHaveBeenCalledWith({
+      success: false,
+      code: 'ORDER_STATE_CHANGED',
+      status: 'COMPLETED',
+      notPickedUpAt: CORTE,
+      error: expect.stringContaining('«No lo recogió»'),
+    })
+
+    // «Devolviendo…» (reserva viva) y «Devuelto»: el mismo 409, con su marca y su texto.
+    ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValue({ outcome: 'STALE', status: 'READY', refundRequestedAt: CORTE })
+    const b = mock()
+    await ctrl.delivered(b.req, b.res, b.next)
+    expect(b.res.status).toHaveBeenCalledWith(409)
+    expect(b.res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'ORDER_STATE_CHANGED',
+        status: 'READY',
+        refundRequestedAt: CORTE,
+        error: expect.stringMatching(/devolviendo/),
+      }),
+    )
+    ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValue({ outcome: 'STALE', status: 'COMPLETED', refundedAt: CORTE })
+    const c = mock()
+    await ctrl.delivered(c.req, c.res, c.next)
+    expect(c.res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'ORDER_STATE_CHANGED',
+        status: 'COMPLETED',
+        refundedAt: CORTE,
+        error: expect.stringMatching(/devolvió/),
+      }),
+    )
+
+    // Sin marca, el 409 de siempre, con las mismas llaves (regresión).
+    ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValue({ outcome: 'STALE', status: 'CANCELLED_BY_STAFF' })
+    const d = mock()
+    await ctrl.delivered(d.req, d.res, d.next)
+    expect(d.res.json).toHaveBeenCalledWith({
+      success: false,
+      code: 'ORDER_STATE_CHANGED',
+      status: 'CANCELLED_BY_STAFF',
+      error: 'El pedido ya cambió de estado (otro aparato, el cliente, la caja o el tiempo). Actualiza la bandeja.',
+    })
+  })
+
   it('A12: entregar lo que ya estaba entregado es 200 (idempotente), no un 409 «ya cambió»', async () => {
     ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValue({ outcome: 'OK', status: 'COMPLETED', unchanged: true })
     const { req, res, next } = mock()

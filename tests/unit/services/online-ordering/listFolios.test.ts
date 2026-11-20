@@ -434,7 +434,7 @@ describe('D661 (3B): lo que lee la caja — tarjetasPorAbrir, comandasPorImprimi
       {
         OR: [
           { status: { in: ['ACCEPTED', 'READY'] } },
-          { status: { in: ['COMPLETED'] }, paymentMode: 'CARD_ONLINE', requiresAcceptance: false },
+          { status: { in: ['COMPLETED'] }, paymentMode: 'CARD_ONLINE', requiresAcceptance: false, notPickedUpAt: { not: null } },
         ],
       },
       { OR: [{ printClaimedAt: null }, { printClaimedAt: { lt: new Date(NOW.getTime() - 90_000) } }] },

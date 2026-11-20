@@ -632,6 +632,111 @@ describe('cerrarFoliosDelDiaTerminado (decisión 18: «Entregado» al terminar e
     expect(readCandidates).toHaveBeenCalledTimes(1)
     expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
   })
+
+  // ── D661 (Task 4): «No lo recogió» ──
+  /** Un pedido con tarjeta de «Nadie» ya cobrado (la lectura ya filtra `requiresAcceptance = false`). */
+  const tarjeta = (k: string, status = 'ACCEPTED') => ({ ...fila(k, status), paymentMode: 'CARD_ONLINE' })
+  /** Marca si `activityLog.create` corre DENTRO de la transacción de su CAS (el `$transaction` simulado lo dice). */
+  let dentro = false
+  const bitacoraDentro: boolean[] = []
+  beforeEach(() => {
+    dentro = false
+    bitacoraDentro.length = 0
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => {
+      dentro = true
+      try {
+        return await fn(prismaMock)
+      } finally {
+        dentro = false
+      }
+    })
+    prismaMock.activityLog.create.mockImplementation((async () => {
+      bitacoraDentro.push(dentro)
+      return {}
+    }) as any)
+  })
+
+  it('cierre: un «Nadie» cobrado en línea sin entregar, con acceptedAt antes del corte, pasa a COMPLETED con notPickedUpAt y bitácora ONLINE_ORDER_NOT_PICKED_UP', async () => {
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([tarjeta('N', 'READY')])
+    await expect(cerrarFoliosDelDiaTerminado({ venueId: 'v1' }, () => NOW)).resolves.toBe(1)
+    // El CAS repite sus guardas al escribir: el estado leído (una entrega lo cambia), `acceptedAt` y que no haya devolución.
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'oo-N',
+        status: 'READY',
+        requiresAcceptance: false,
+        acceptedAt: ACEPTADO,
+        order: CUENTA_VIVA,
+        refundRequestedAt: null,
+        refundedAt: null,
+      },
+      data: { status: 'COMPLETED', completedAt: NOW, notPickedUpAt: NOW },
+    })
+    // La bitácora va en la MISMA transacción que el CAS: si el proceso muere entre los dos no queda ninguno, y la siguiente
+    // pasada lo cierra con su única fila.
+    expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: {
+        venueId: 'v1',
+        staffId: null,
+        action: 'ONLINE_ORDER_NOT_PICKED_UP',
+        entity: 'OnlineOrder',
+        entityId: 'oo-N',
+        data: { orderNumber: 'F-N', automatic: 'END_OF_DAY' },
+      },
+    })
+    expect(bitacoraDentro).toEqual([true])
+    expect(prismaMock.activityLog.create.mock.invocationCallOrder[0]).toBeGreaterThan(
+      prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0],
+    )
+    // Nada fuera de la transacción dice «Entregado» (ONLINE_ORDER_COLLECTED) de un pedido que no se entregó.
+    expect(logAction).not.toHaveBeenCalled()
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled() // ni la cuenta ni el dinero
+    expect(socketManager.broadcastToVenue).toHaveBeenCalledTimes(1)
+  })
+
+  it('cierre: si una entrega o una reserva de devolución ganó después de leer, el CAS pierde y no se escribe la bitácora', async () => {
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([tarjeta('N')])
+    prismaMock.onlineOrder.updateMany.mockResolvedValueOnce({ count: 0 })
+    await expect(cerrarFoliosDelDiaTerminado({}, () => NOW)).resolves.toBe(0)
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+    expect(socketManager.broadcastToVenue).not.toHaveBeenCalled()
+  })
+
+  it('cierre: con refundRequestedAt o refundedAt no se toca', async () => {
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([])
+    await expect(cerrarFoliosDelDiaTerminado({ venueId: 'v1' }, () => NOW)).resolves.toBe(0)
+    // Lo excluye la LECTURA (así no gasta el tope de cada pasada) y lo repite el CAS de arriba.
+    expect(sqlLeido()).toMatch(
+      /NOT \(oo\."paymentMode" = 'CARD_ONLINE' AND \(oo\."refundRequestedAt" IS NOT NULL OR oo\."refundedAt" IS NOT NULL\)\)/,
+    )
+    expect(sqlLeido()).toContain('oo."paymentMode"::text AS "paymentMode"')
+  })
+
+  it('cierre: un folio pagado en caja sigue como hoy', async () => {
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([fila('F'), tarjeta('N')])
+    await expect(cerrarFoliosDelDiaTerminado({}, () => NOW)).resolves.toBe(2)
+    // El folio de caja: el MISMO CAS y la MISMA bitácora de hoy, sin `notPickedUpAt` ni las guardas de devolución.
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenNthCalledWith(1, {
+      where: { id: 'oo-F', status: 'ACCEPTED', requiresAcceptance: false, acceptedAt: ACEPTADO, order: CUENTA_VIVA },
+      data: { status: 'COMPLETED', completedAt: NOW },
+    })
+    expect(logAction).toHaveBeenCalledTimes(1)
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'ONLINE_ORDER_COLLECTED',
+        entityId: 'oo-F',
+        staffId: null,
+        data: { orderNumber: 'F-F', automatic: 'END_OF_DAY' },
+      }),
+    )
+    // Sólo el pedido con tarjeta lleva «No lo recogió».
+    expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ action: 'ONLINE_ORDER_NOT_PICKED_UP', entityId: 'oo-N' }) }),
+    )
+  })
 })
 
 describe('las lecturas de vencer (R49 y R50: lo durable se excluye en el SQL; llave estable dentro de la pasada)', () => {

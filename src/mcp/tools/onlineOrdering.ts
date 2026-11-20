@@ -13,7 +13,7 @@ import { planGateMessage } from '../planGate'
 import { getInboxOrder, listInbox, type InboxOrder } from '@/services/online-ordering/inbox.service'
 import { formatoPesos } from '@/services/giftCards/giftCardLimits'
 import { listFolios } from '@/services/online-ordering/folios.service'
-import { MENSAJE_ABRIR_DESDE_LA_CAJA } from '@/services/online-ordering/card/guards'
+import { MENSAJE_ABRIR_DESDE_LA_CAJA, mensajeNoSeEntrega } from '@/services/online-ordering/card/guards'
 import { esVentaCerrada } from '@/services/shared/orderBalance'
 import { listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
@@ -89,8 +89,16 @@ const AJUSTES_RECHAZADOS = new Set([
 /** El texto del cobro (HAS_PAYMENTS) es el mismo de la API del restaurante (`onlineOrders.mobile.controller.ts`). */
 function fallo(r: Exclude<TransitionResult, { outcome: 'OK' }>) {
   switch (r.outcome) {
-    case 'STALE':
-      return { ok: false, status: r.status, error: 'El pedido ya cambió de estado; no se aplicó nada. Vuelve a consultar la bandeja.' }
+    case 'STALE': {
+      // D661 (Task 4): al entregar, el estado real («No lo recogió», «Devolviendo…», «Devuelto»), nunca un éxito.
+      const { outcome: _o, status, ...marcas } = r
+      return {
+        ok: false,
+        status,
+        ...marcas,
+        error: mensajeNoSeEntrega(marcas) ?? 'El pedido ya cambió de estado; no se aplicó nada. Vuelve a consultar la bandeja.',
+      }
+    }
     case 'PAYMENT_REQUIRED':
       return { ok: false, code: 'PAYMENT_REQUIRED', error: 'Cobra el pedido antes de marcarlo entregado.' }
     case 'HAS_PAYMENTS':
@@ -141,7 +149,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_orders_list',
-    'Pedidos en línea del negocio (los que el comensal hace desde la página del restaurante): por aceptar, en preparación, listos y los de las últimas 24 horas. Muestra cliente, platillos, total en pesos y si ya se cobró. Cada pedido dice en «cuenta» de quién es (sólo el nombre de pila y la inicial) y qué beneficios trae, por ejemplo «Con cuenta: Ana L. · Premio −$45.00», o «Sin cuenta». Los que el comensal pagó con tarjeta al pedir traen el cobro (estado, monto apartado y monto cobrado, en pesos). Con status=to_pay salen los pedidos de pedir y pagar en caja que aún no se cobran, y con to_deliver los ya cobrados por entregar (cada uno por páginas con cursor); los dos traen también los pagados con tarjeta en «No, entran solos» que esperan que una caja los abra (se cobran al abrirlos).',
+    'Pedidos en línea del negocio (los que el comensal hace desde la página del restaurante): por aceptar, en preparación, listos y los de las últimas 24 horas. Muestra cliente, platillos, total en pesos y si ya se cobró. Cada pedido dice en «cuenta» de quién es (sólo el nombre de pila y la inicial) y qué beneficios trae, por ejemplo «Con cuenta: Ana L. · Premio −$45.00», o «Sin cuenta». Los que el comensal pagó con tarjeta al pedir traen el cobro (estado, monto apartado y monto cobrado, en pesos). Con status=to_pay salen los pedidos de pedir y pagar en caja que aún no se cobran, y con to_deliver los ya cobrados por entregar (cada uno por páginas con cursor); los dos traen también los pagados con tarjeta en «No, entran solos» que esperan que una caja los abra (se cobran al abrirlos). Cada pedido dice además desde cuándo quedó «No lo recogió» (pagado con tarjeta en «No, entran solos» y sin entregar al terminar el día), «Devolviendo…» o «Devuelto».',
     {
       venueId: z.string().describe('Venue a consultar (debe estar en tu scope)'),
       status: z
@@ -207,6 +215,19 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       // activos el más viejo no aparecería).
       const order = await getInboxOrder({ venueId, orderId })
       if (!order) return text({ ok: false, error: 'Ese pedido no existe en este negocio.' })
+      // D661 (Task 4): «No lo recogió», «Devolviendo…» o «Devuelto» no se entregan: su estado real, antes de la vista previa.
+      const noSeEntrega = action === 'DELIVERED' ? mensajeNoSeEntrega(order) : null
+      if (noSeEntrega) {
+        const { notPickedUpAt, refundRequestedAt, refundedAt } = order
+        return text({
+          ok: false,
+          status: order.status,
+          ...(notPickedUpAt ? { notPickedUpAt } : {}),
+          ...(refundRequestedAt ? { refundRequestedAt } : {}),
+          ...(refundedAt ? { refundedAt } : {}),
+          error: noSeEntrega,
+        })
+      }
       // A12: entregar lo que ya está entregado es éxito; no se ejecuta ni se audita nada.
       if (action === 'DELIVERED' && order.status === 'COMPLETED') {
         return text({ ok: true, status: order.status, estimatedReadyAt: null, sinCambios: true, mensaje: 'El pedido ya estaba entregado.' })
