@@ -78,21 +78,21 @@ export async function createCategory(req: Request, res: Response, next: NextFunc
     let slug = slugify(name)
     const existing = await prisma.menuCategory.findUnique({
       where: { venueId_slug: { venueId, slug } },
-      select: { id: true, deletedAt: true },
+      select: { id: true, deletedAt: true, name: true },
     })
     // Una ELIMINADA con ese nombre se reusa, como en el panel (encargo bc1dcc): nunca dos «EVENTO» que el dueño no distingue. Si
     // en medio volvió a mostrarse, se crea otra como siempre.
-    if (existing?.deletedAt) {
+    if (existing?.deletedAt && existing.name.trim().toLowerCase() === name.trim().toLowerCase()) {
       const reusada = await prisma.menuCategory.updateMany({
         where: { id: existing.id, venueId, deletedAt: { not: null } },
-        // Prenderla y editar sólo lo que mandó la app (Codex r6): lo demás (clave SAT, impresora, horario) se queda como estaba.
+        // Prenderla y editar sólo lo que la app manda CON valor (Codex r6-r7): lo demás (clave SAT, impresora, horario) se queda.
         data: {
-          ...(description !== undefined && { description: description || null }),
-          ...(color !== undefined && { color: color || null }),
-          ...(icon !== undefined && { icon: icon || null }),
-          ...(imageUrl !== undefined && { imageUrl: imageUrl || null }),
-          ...(displayOrder !== undefined && { displayOrder }),
-          ...(parentId !== undefined && { parentId: parentId || null }),
+          ...(description && { description }),
+          ...(color && { color }),
+          ...(icon && { icon }),
+          ...(imageUrl && { imageUrl }),
+          ...(displayOrder != null && { displayOrder }),
+          ...(parentId && { parentId }),
           active: true,
           deletedAt: null,
           isDemo: false,

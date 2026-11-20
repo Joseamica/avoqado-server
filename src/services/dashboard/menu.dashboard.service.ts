@@ -132,6 +132,11 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
   // El nombre de una ELIMINADA (encargo bc1dcc) sí se puede usar: el dueño ya no la ve. Se REUSA esa misma fila, como cuando hoy
   // se vuelve a prender una apagada. Así nunca hay dos «EVENTO»: sus productos borrados, si regresan, caen en la que el dueño ve,
   // y una promoción por nombre no alcanza a otra categoría (Codex r5). Sus reglas (comisiones, promociones) siguen, como al prenderla.
+  // Sólo con el MISMO nombre (sin mayúsculas ni espacios): «21» no reusa a «2+1» aunque compartan slug; eso se rechaza como hoy.
+  const mismoNombreQue = (c: { name: string }) => c.name.trim().toLowerCase() === data.name.trim().toLowerCase()
+  if (existingCategory?.deletedAt && !mismoNombreQue(existingCategory)) {
+    throw new BadRequestError(`Ya existe una categoría con el nombre '${data.name}' en este establecimiento.`)
+  }
   const reusar = existingCategory?.deletedAt ? existingCategory : await eliminadaConEseNombre(venueId, data.name)
 
   const createData: Prisma.MenuCategoryCreateInput = {
@@ -184,28 +189,29 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
     }
   }
 
-  // Reusar = prenderla y editar sólo lo que mandó el alta (Codex r6): lo que no mandó (clave SAT, impresora, foto…) se queda como
-  // estaba, igual que al prenderla hoy; el nombre también, si sólo cambian mayúsculas o espacios (las promociones lo leen tal cual).
-  const mismoNombre = reusar != null && reusar.name.trim().toLowerCase() === createData.name.toLowerCase()
+  // Reusar = prenderla y editar sólo lo que el alta trae CON valor (Codex r6-r7): el formulario manda vacíos los campos que el
+  // dueño no tocó, y eso no borra la clave SAT, el horario ni la impresora que tenía, igual que al prenderla hoy. El nombre se
+  // queda tal cual (sólo cambian mayúsculas o espacios: las promociones lo leen tal cual).
+  const conValor = <T>(v: T | null | undefined): v is T => v !== undefined && v !== null && (v as unknown) !== ''
+  const dias = Array.isArray(createData.availableDays) ? createData.availableDays : undefined
   const category = reusar
     ? await prisma.menuCategory
         .update({
           where: { id: reusar.id, venueId, deletedAt: { not: null } },
           data: {
-            ...(mismoNombre ? {} : { name: createData.name }),
-            ...(createData.description !== undefined && { description: createData.description }),
-            ...(createData.displayOrder !== undefined && { displayOrder: createData.displayOrder }),
-            ...(createData.imageUrl !== undefined && { imageUrl: createData.imageUrl }),
-            ...(createData.color !== undefined && { color: createData.color }),
-            ...(createData.icon !== undefined && { icon: createData.icon }),
+            ...(conValor(createData.description) && { description: createData.description }),
+            ...(conValor(createData.displayOrder) && { displayOrder: createData.displayOrder }),
+            ...(conValor(createData.imageUrl) && { imageUrl: createData.imageUrl }),
+            ...(conValor(createData.color) && { color: createData.color }),
+            ...(conValor(createData.icon) && { icon: createData.icon }),
             active: createData.active ?? true,
             deletedAt: null,
             isDemo: false,
-            ...(createData.availableFrom !== undefined && { availableFrom: createData.availableFrom }),
-            ...(createData.availableUntil !== undefined && { availableUntil: createData.availableUntil }),
-            ...(createData.availableDays !== undefined && { availableDays: { set: createData.availableDays as string[] } }),
-            ...(createData.defaultSatProductKey !== undefined && { defaultSatProductKey: createData.defaultSatProductKey }),
-            ...(createData.defaultSatUnitKey !== undefined && { defaultSatUnitKey: createData.defaultSatUnitKey }),
+            ...(conValor(createData.availableFrom) && { availableFrom: createData.availableFrom }),
+            ...(conValor(createData.availableUntil) && { availableUntil: createData.availableUntil }),
+            ...(dias && dias.length > 0 && { availableDays: { set: dias } }),
+            ...(conValor(createData.defaultSatProductKey) && { defaultSatProductKey: createData.defaultSatProductKey }),
+            ...(conValor(createData.defaultSatUnitKey) && { defaultSatUnitKey: createData.defaultSatUnitKey }),
             ...(createData.parent ? { parent: createData.parent } : {}),
             ...(createData.printStation ? { printStation: createData.printStation } : {}),
           },

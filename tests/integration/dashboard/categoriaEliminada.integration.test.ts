@@ -89,7 +89,17 @@ describe('eliminar una categoría que sólo guarda archivados', () => {
     await prisma.menuCategory.update({ where: { id: categoryId }, data: { defaultSatProductKey: '90101501', color: '#ff0000' } })
     await deleteMenuCategory(x.venueId, categoryId)
 
-    const nueva = await createMenuCategory(x.venueId, { name: 'Evento', color: '#00ff00' } as never)
+    // Como lo manda el formulario del panel: los campos que el dueño no tocó llegan vacíos (Codex r7).
+    const nueva = await createMenuCategory(x.venueId, {
+      name: 'Evento',
+      color: '#00ff00',
+      defaultSatProductKey: null,
+      defaultSatUnitKey: null,
+      availableFrom: null,
+      availableUntil: null,
+      availableDays: [],
+      printStationId: null,
+    } as never)
 
     // Como prenderla hoy: misma fila, mismo nombre (sólo cambiaban mayúsculas), su clave SAT se queda y el color que mandó, sí.
     expect(nueva).toMatchObject({ id: categoryId, name: 'EVENTO', active: true, deletedAt: null, color: '#00ff00' })
@@ -104,6 +114,26 @@ describe('eliminar una categoría que sólo guarda archivados', () => {
     await expect(createMenuCategory(x.venueId, { name: 'EVENTO' } as never)).rejects.toMatchObject({ statusCode: 400 })
     await expect(createMenuCategory(x.venueId, { name: 'evento ' } as never)).rejects.toMatchObject({ statusCode: 400 })
     expect(await prisma.menuCategory.count({ where: { venueId: x.venueId } })).toBe(1)
+  })
+
+  it('REGRESIÓN: otro nombre con el mismo slug que una eliminada («21» y «2+1») se rechaza como hoy y no la toca', async () => {
+    const x = await negocio()
+    // «2+1» con el slug que le daría el panel («21»), con un producto borrado.
+    await importMenu(
+      x.venueId,
+      { mode: 'merge', categories: [{ name: '2+1', slug: '21', products: [{ name: 'Promo', sku: `PROMO-${x.rfc}`, price: 50 }] }] },
+      SERVICIO,
+    )
+    const p = await prisma.product.findFirstOrThrow({ where: { venueId: x.venueId, sku: `PROMO-${x.rfc}` } })
+    await deleteProduct(x.venueId, p.id, 'staff-categoria-eliminada')
+    const categoryId = p.categoryId
+    await deleteMenuCategory(x.venueId, categoryId)
+
+    await expect(createMenuCategory(x.venueId, { name: '21' } as never)).rejects.toMatchObject({ statusCode: 400 })
+    expect(await prisma.menuCategory.findUniqueOrThrow({ where: { id: categoryId }, select: { name: true, deletedAt: true } })).toEqual({
+      name: '2+1',
+      deletedAt: expect.any(Date),
+    })
   })
 
   it('un formulario de menú abierto antes del «Eliminar» no la vuelve a meter al menú (Codex r3 B3)', async () => {
