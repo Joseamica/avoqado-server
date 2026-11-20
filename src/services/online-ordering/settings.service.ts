@@ -23,7 +23,12 @@ export const DEFAULT_CONFIG: OnlineOrderingConfig = {
   requiresAcceptance: true,
 }
 
-export type OnlineOrderingSettingsRead = OnlineOrderingConfig & { lastInboxPollAt: Date | null; lastToPayPollAt: Date | null }
+export type OnlineOrderingSettingsRead = OnlineOrderingConfig & {
+  lastInboxPollAt: Date | null
+  lastToPayPollAt: Date | null
+  /** D662 parte 2: último «Reanudar» (o paso a «Mi equipo»): la pausa sola sólo cuenta pedidos con hora límite posterior. */
+  autoPauseResumedAt?: Date | null
+}
 
 function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingSettingsRead {
   return {
@@ -38,6 +43,7 @@ function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingSettingsRead {
     requiresAcceptance: row.requiresAcceptance,
     lastInboxPollAt: row.lastInboxPollAt ?? null,
     lastToPayPollAt: row.lastToPayPollAt ?? null,
+    autoPauseResumedAt: row.autoPauseResumedAt ?? null,
   }
 }
 
@@ -269,7 +275,12 @@ export async function pauseOnlineOrdering(
   now: Date = new Date(),
 ): Promise<{ pausedUntil: string | null; manualPause: boolean }> {
   const pausedUntil = minutes === null ? null : new Date(now.getTime() + minutes * 60_000)
-  const r = await prisma.onlineOrderingSettings.updateMany({ where: { venueId }, data: { pausedUntil } })
+  // D662 parte 2: «Reanudar» también quita la pausa sola (la del piso y la de las apps viejas, que llaman igual): desde ahora sólo
+  // cuentan los pedidos cuya hora límite sea posterior. Pausar 15/30/60 no la toca: al vencer, sigue pausada hasta «Reanudar».
+  const r = await prisma.onlineOrderingSettings.updateMany({
+    where: { venueId },
+    data: minutes === null ? { pausedUntil, autoPauseResumedAt: now } : { pausedUntil },
+  })
   if (r.count === 0) {
     throw new BadRequestError('La tienda en línea de este negocio todavía no está configurada.', 'ONLINE_ORDERING_NOT_CONFIGURED')
   }

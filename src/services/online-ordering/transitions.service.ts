@@ -344,7 +344,16 @@ export interface AcceptInput {
   staffId: string | null
   estimatedMinutes?: number
   now?: Date
+  /**
+   * D662 parte 2: la aceptación la tocó una PERSONA (las puertas de la caja, del panel y del MCP). Su transición ganadora guarda
+   * `staffAnsweredAt` (la pausa sola la lee). Los caminos del sistema (conciliador, aviso de Stripe, folios) no la ponen.
+   */
+  porPersona?: true
 }
+
+/** D662 parte 2: lo que la transición ganadora de una persona agrega a su escritura (nada si no la tocó una persona). */
+const toqueDePersona = (porPersona: true | undefined, now: Date): { staffAnsweredAt?: Date } =>
+  porPersona ? { staffAnsweredAt: now } : {}
 
 export async function prepMinutes(venueId: string, estimatedMinutes?: number): Promise<number> {
   const { defaultPrepMinutes } = await getSettings(venueId)
@@ -391,7 +400,11 @@ export async function acceptWithoutCapture(i: AcceptInput): Promise<TransitionRe
       // Sin dinero, sólo antes de la hora límite (compite con el vencimiento por el mismo CAS). Un pedido ya cobrado no vence:
       // el job no lo toca (R1) y queda en la bandeja para aceptarlo.
       extraWhere: (now, hasMoney) => (hasMoney ? {} : { acceptDeadlineAt: { gt: now } }),
-      onlineData: now => ({ acceptedAt: now, estimatedReadyAt: new Date(now.getTime() + minutes * 60_000) }),
+      onlineData: now => ({
+        acceptedAt: now,
+        estimatedReadyAt: new Date(now.getTime() + minutes * 60_000),
+        ...toqueDePersona(i.porPersona, now),
+      }),
       // `kitchenPendingAt` es la marca que el barrido de comandas retoma si el armado de abajo falla; la pone la MISMA
       // escritura que confirma la orden (contrato de la columna).
       orderExtra: now => (marcarCocina ? { kitchenPendingAt: now } : {}),
@@ -464,6 +477,8 @@ export async function rejectOnlineOrder(i: {
   afterCas?: AfterCasInTx
   /** Después del commit: recibe lo que devolvió `afterCas` en el intento que confirmó. */
   alConfirmar?: (valor: unknown) => void
+  /** D662 parte 2: lo rechazó una PERSONA (caja, panel, MCP): su transición ganadora guarda `staffAnsweredAt`. */
+  porPersona?: true
 }): Promise<TransitionResult> {
   const r = await casTransition(
     {
@@ -472,7 +487,7 @@ export async function rejectOnlineOrder(i: {
       orderId: i.orderId,
       now: i.now,
       allowCapturing: i.allowCapturing,
-      onlineData: now => ({ rejectedAt: now, rejectReason: i.reason, rejectNote: i.note ?? null }),
+      onlineData: now => ({ rejectedAt: now, rejectReason: i.reason, rejectNote: i.note ?? null, ...toqueDePersona(i.porPersona, now) }),
     },
     i.afterCas,
     i.alConfirmar,
@@ -530,6 +545,9 @@ export async function expireOnlineOrder(i: { venueId: string; orderId: string; n
     entityId: r.onlineOrderId,
     data: { orderNumber: r.orderNumber },
   })
+  // D662 parte 2: si con este vencimiento la tienda quedó pausada sola, queda en la bitácora (sólo registro; nunca lanza). Dinámico:
+  // la lectura de la tienda vive en `presence.service`, que no debe cargarse con esta máquina de estados.
+  void import('./presence.service').then(m => m.registrarSiLaPausoSola(i.venueId, r.onlineOrderId)).catch(() => undefined)
   return { outcome: 'OK', status: OnlineOrderStatus.EXPIRED }
 }
 

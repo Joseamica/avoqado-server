@@ -3,6 +3,8 @@ import { MAX_PENDING_PER_VENUE } from '@/services/online-ordering/constants'
 import {
   __resetPresenceDebounceForTests,
   getAcceptingStatus,
+  PAUSA_SOLA_VENTANA,
+  pausaSolaDesde,
   storeView,
   touchInboxPoll,
   touchToPayPoll,
@@ -28,6 +30,7 @@ beforeEach(() => {
   prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
   prismaMock.onlineOrder.count.mockResolvedValue(0)
   prismaMock.onlineOrderCharge.count.mockResolvedValue(0)
+  prismaMock.onlineOrder.findMany.mockResolvedValue([])
 })
 
 describe('touchInboxPoll', () => {
@@ -268,6 +271,7 @@ describe('storeView (ronda 1: un solo armado del estado de la tienda para el pan
       reason: 'MANUAL_PAUSE',
       pausedUntil: hasta.toISOString(),
       manualPause: true,
+      autoPausedAt: null,
     })
   })
 
@@ -278,6 +282,7 @@ describe('storeView (ronda 1: un solo armado del estado de la tienda para el pan
       reason: null,
       pausedUntil: null,
       manualPause: false,
+      autoPausedAt: null,
     })
     expect(prismaMock.onlineOrderingSettings.findUnique).not.toHaveBeenCalled()
   })
@@ -335,5 +340,147 @@ describe('R56 · «último pedido para pagar en caja»: en «Nadie» la tienda d
   it('sin horario no hay cierre ni último pedido', async () => {
     tienda(a('20:55:00'), { hours: null })
     await expect(getAcceptingStatus('v1', a('20:55:00'))).resolves.toMatchObject({ status: 'OPEN' })
+  })
+})
+
+describe('D662 parte 2 · la pausa sola se LEE de la línea de tiempo (fallas y respuestas), sin contador', () => {
+  const min = (n: number) => new Date(NOW.getTime() + n * 60_000)
+  /** Un pedido de «Mi equipo» con su hora límite; por default nadie lo tocó. */
+  const pedido = (deadlineMin: number, o: Record<string, unknown> = {}) => ({
+    acceptDeadlineAt: min(deadlineMin),
+    staffAnsweredAt: null,
+    acceptedAt: null,
+    rejectedAt: null,
+    rejectReason: null,
+    cancelledAt: null,
+    cancelledBy: null,
+    order: { updatedAt: min(-60) },
+    ...o,
+  })
+  const conPedidos = (rows: unknown[], ajustes: Record<string, unknown> = {}) => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(settingsRow(ajustes) as any)
+    prismaMock.onlineOrder.findMany.mockResolvedValue(rows as any)
+  }
+  const lee = (rows: any[]) => pausaSolaDesde(rows as any, NOW)
+
+  it('2 fallas seguidas ⇒ PAUSED / MANUAL_PAUSE (apps viejas: «Pausada»), autoPausedAt = la hora límite de la segunda', async () => {
+    conPedidos([pedido(-1), pedido(-12)])
+    const st = await getAcceptingStatus('v1', NOW)
+    expect(st).toMatchObject({ status: 'PAUSED', reason: 'MANUAL_PAUSE', autoPausedAt: min(-1).toISOString() })
+    expect(storeView(st)).toMatchObject({ status: 'PAUSED', reason: 'MANUAL_PAUSE', autoPausedAt: min(-1).toISOString(), manualPause: false })
+  })
+
+  it('la consulta: «Mi equipo», hora límite después del último «Reanudar», los más recientes primero, acotada', async () => {
+    const reanudo = min(-30)
+    conPedidos([], { autoPauseResumedAt: reanudo })
+    await getAcceptingStatus('v1', NOW)
+    const arg = (prismaMock.onlineOrder.findMany as jest.Mock).mock.calls[0][0]
+    expect(arg.where).toEqual({ venueId: 'v1', requiresAcceptance: true, acceptDeadlineAt: { gt: reanudo } })
+    expect(arg.orderBy).toEqual([{ acceptDeadlineAt: 'desc' }, { id: 'desc' }])
+    expect(arg.take).toBe(PAUSA_SOLA_VENTANA)
+  })
+
+  it('sin «Reanudar» todavía no hay límite inferior', async () => {
+    conPedidos([], { autoPauseResumedAt: null })
+    await getAcceptingStatus('v1', NOW)
+    expect((prismaMock.onlineOrder.findMany as jest.Mock).mock.calls[0][0].where).toEqual({ venueId: 'v1', requiresAcceptance: true })
+  })
+
+  it('una sola falla ⇒ OPEN', async () => {
+    conPedidos([pedido(-1)])
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
+  })
+
+  it.each([
+    ['una persona lo tocó a tiempo (staffAnsweredAt)', { staffAnsweredAt: min(-3) }],
+    ['justo en su hora límite (borde inclusivo)', { staffAnsweredAt: min(-2) }],
+    ['se aceptó a tiempo (pedido de antes del cambio)', { acceptedAt: min(-3) }],
+    ['una persona lo rechazó a tiempo con el servidor viejo (sin staffAnsweredAt)', { rejectedAt: min(-3), rejectReason: 'OUT_OF_ITEMS' }],
+    ['la caja lo canceló a tiempo', { cancelledAt: min(-4), cancelledBy: 'staff1' }],
+  ])('el de en medio se atendió ⇒ no son seguidas: %s', (_t, atendido) => {
+    expect(lee([pedido(-1), pedido(-2, atendido), pedido(-12)])).toBeNull()
+  })
+
+  it('Codex p2-r1 #2: una RESPUESTA guardada entre las dos fallas corta la racha, aunque su pedido venza después', () => {
+    // A vence a -10, la cajera rechaza C a -9.5 (C vence a +2), B vence a -9.
+    expect(lee([pedido(2, { staffAnsweredAt: min(-9.5), rejectedAt: min(-9.5), rejectReason: 'TOO_BUSY' }), pedido(-9), pedido(-10)])).toBeNull()
+    // Sin esa respuesta, A y B seguidas pausan.
+    expect(lee([pedido(2), pedido(-9), pedido(-10)])).toBe(min(-9).toISOString())
+  })
+
+  it('Codex p2-r1 #1: una vez pausada, una respuesta POSTERIOR no la despega (sólo «Reanudar»)', () => {
+    // A y B fallan (-10, -9); C se acepta DESPUÉS (a -5) y vence a +2: la pareja sigue en la línea de tiempo.
+    expect(lee([pedido(2, { acceptedAt: min(-5), staffAnsweredAt: min(-5) }), pedido(-9), pedido(-10)])).toBe(min(-9).toISOString())
+  })
+
+  it('una respuesta tarde de un pedido ya vencido cuenta como respuesta a SU hora, no como atendido a tiempo', () => {
+    // B (-9) se rechazó tarde (a -8): B es falla a -9 y respuesta a -8. A (-10) y B seguidas ⇒ pausa a -9.
+    expect(lee([pedido(-9, { staffAnsweredAt: min(-8), rejectedAt: min(-8), rejectReason: 'OTHER' }), pedido(-10)])).toBe(
+      min(-9).toISOString(),
+    )
+  })
+
+  it('Codex p2-r1 #4: cobrar no es contestar: un abono tardío no borra la falla', () => {
+    // La lectura ya no mira el dinero: sólo el toque de una persona.
+    expect(lee([pedido(-1), pedido(-12)])).toBe(min(-1).toISOString())
+  })
+
+  it('Codex p2-r1 #3: cancelada desde la caja a tiempo pero sincronizada tarde cuenta con la hora de la cuenta', () => {
+    const tarde = pedido(-2, { cancelledAt: min(-1.5), cancelledBy: 'ORDER_CANCELLED_ELSEWHERE', order: { updatedAt: min(-2.1) } })
+    expect(lee([pedido(-1), tarde, pedido(-12)])).toBeNull()
+  })
+
+  it('los que terminaron solos antes de su hora límite no son falla ni respuesta (la clienta canceló; el sistema rechazó por pago)', () => {
+    const clienta = pedido(-2, { cancelledAt: min(-5), cancelledBy: 'CUSTOMER' })
+    const sistema = pedido(-3, { rejectedAt: min(-6), rejectReason: 'PAYMENT_FAILED' })
+    expect(lee([pedido(-1), clienta, sistema, pedido(-12)])).toBe(min(-1).toISOString())
+    // Si la clienta cancela DESPUÉS de la hora límite sin respuesta, sí fue falla.
+    expect(lee([pedido(-1, { cancelledAt: min(-0.5), cancelledBy: 'CUSTOMER' }), pedido(-12)])).toBe(min(-1).toISOString())
+  })
+
+  it('el rechazo por pago DESPUÉS del toque de una persona (captura fallida) cuenta como atendido', () => {
+    const tocado = pedido(-2, { staffAnsweredAt: min(-4), rejectedAt: min(-3), rejectReason: 'PAYMENT_FAILED' })
+    expect(lee([pedido(-1), tocado, pedido(-12)])).toBeNull()
+  })
+
+  it('un pedido con hora límite futura sin tocar no es suceso todavía', () => {
+    expect(lee([pedido(5), pedido(-12)])).toBeNull()
+  })
+
+  it('en «Nadie» no aplica (ni consulta)', async () => {
+    conPedidos([pedido(-1), pedido(-12)], { requiresAcceptance: false, lastToPayPollAt: new Date(NOW.getTime() - 60_000) })
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN' })
+    expect(prismaMock.onlineOrder.findMany).not.toHaveBeenCalled()
+  })
+
+  it('apagada sigue DISABLED (no consulta)', async () => {
+    conPedidos([pedido(-1), pedido(-12)], { enabled: false })
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'DISABLED' })
+    expect(prismaMock.onlineOrder.findMany).not.toHaveBeenCalled()
+  })
+
+  it('la pausa del gerente gana con su forma de hoy (autoPausedAt null: su «Reanudar» no la abriría)', async () => {
+    conPedidos([pedido(-1), pedido(-12)], { manualPause: true })
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'PAUSED', reason: 'MANUAL_PAUSE', autoPausedAt: null })
+  })
+
+  it('con una pausa de 15/30/60 vigente también sale autoPausedAt: al vencer, sigue pausada sola', async () => {
+    conPedidos([pedido(-1), pedido(-12)], { pausedUntil: min(10) })
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({
+      status: 'PAUSED',
+      reason: 'MANUAL_PAUSE',
+      autoPausedAt: min(-1).toISOString(),
+    })
+  })
+
+  it('gana sobre fuera de horario y sobre sin aparato: sólo «Reanudar» la abre', async () => {
+    conPedidos([pedido(-1), pedido(-12)], { lastInboxPollAt: null })
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'PAUSED', reason: 'MANUAL_PAUSE' })
+  })
+
+  it('no filtra autoPauseResumedAt dentro de config (sale en la API de ajustes)', async () => {
+    conPedidos([], { autoPauseResumedAt: min(-30) })
+    const st = await getAcceptingStatus('v1', NOW)
+    expect(st.config).not.toHaveProperty('autoPauseResumedAt')
   })
 })
