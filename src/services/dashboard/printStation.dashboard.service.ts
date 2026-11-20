@@ -404,7 +404,7 @@ export async function getRouting(venueId: string, query: RoutingQuery = {}) {
   // Misma cascada del motor: sólo una estación activa del propio venue resuelve la categoría.
   const sinRuta: Prisma.MenuCategoryWhereInput[] = [{ printStationId: null }, { printStation: { isNot: { venueId, active: true } } }]
   const [unroutedCategories, soloVale] = await Promise.all([
-    hasDefault ? 0 : prisma.menuCategory.count({ where: { venueId, OR: sinRuta } }),
+    hasDefault ? 0 : prisma.menuCategory.count({ where: { venueId, deletedAt: null, OR: sinRuta } }),
     // La lista de productos de una categoría no lo usa: no se recalcula al desplegarla ni al paginarla (Codex r1 #4).
     query.section === 'products' ? NADA_SOLO_VALE : soloValeSinRomper(venueId),
   ])
@@ -414,7 +414,7 @@ export async function getRouting(venueId: string, query: RoutingQuery = {}) {
   const areaTicketOnlyUnrouted =
     hasDefault || !conSoloVale
       ? 0
-      : await prisma.menuCategory.count({ where: { venueId, id: { in: [...soloVale.categoryIds] }, OR: sinRuta } })
+      : await prisma.menuCategory.count({ where: { venueId, deletedAt: null, id: { in: [...soloVale.categoryIds] }, OR: sinRuta } })
   const summary = {
     unroutedCategories,
     hasDefault,
@@ -424,6 +424,7 @@ export async function getRouting(venueId: string, query: RoutingQuery = {}) {
 
   const categoryWhere: Prisma.MenuCategoryWhereInput = {
     venueId,
+    deletedAt: null, // una categoría eliminada ya no se rutea ni se enseña
     ...(query.section && query.search ? { name: { contains: query.search, mode: 'insensitive' } } : {}),
   }
   const productWhere: Prisma.ProductWhereInput = {
@@ -526,7 +527,10 @@ export async function assignRouting(venueId: string, input: AssignRoutingInput, 
       )
       for (const entry of input.categories ?? []) {
         // venueId en el where = aislamiento multi-tenant (ignora ids ajenos).
-        const r = await tx.menuCategory.updateMany({ where: { id: entry.id, venueId }, data: { printStationId: entry.printStationId } })
+        const r = await tx.menuCategory.updateMany({
+          where: { id: entry.id, venueId, deletedAt: null }, // una eliminada no se rutea
+          data: { printStationId: entry.printStationId },
+        })
         categoriesUpdated += r.count
       }
       for (const entry of input.products ?? []) {

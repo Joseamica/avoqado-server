@@ -56,6 +56,7 @@ describe('plan 5 · las lecturas del menú sólo traen productos vigentes', () =
 
     prismaMock.$transaction.mockImplementation((async (cb: (tx: typeof prismaMock) => unknown) => cb(prismaMock)) as never)
     prismaMock.menu.findUniqueOrThrow.mockResolvedValue({ id: 'm1', name: 'Comida' } as never)
+    prismaMock.menuCategory.findMany.mockResolvedValue([{ id: 'c1' }] as never) // c1 es del negocio y no está eliminada
     await menuService.updateMenu(V, 'm1', { categoryIds: ['c1'] } as never)
     expect(productosDelMenu(prismaMock.menu.findUniqueOrThrow.mock.calls[0][0])).toEqual({ where: VIGENTES })
   })
@@ -99,14 +100,23 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
       throw new Error(`product.count con un where inesperado: ${JSON.stringify(arg)}`)
     })
 
+  /** Las subcategorías VISIBLES que lee la transacción (encargo bc1dcc: las eliminadas no bloquean). */
+  const hijasVisibles = (hijas: Array<{ name: string; venueId: string }>) =>
+    prismaMock.menuCategory.findMany.mockResolvedValue(hijas as never)
+
   beforeEach(() => {
     prismaMock.$transaction.mockReset()
+    // Encargo bc1dcc: el «Eliminar» corre en UNA transacción con la categoría bloqueada.
+    prismaMock.$transaction.mockImplementation((async (cb: (tx: typeof prismaMock) => unknown) => cb(prismaMock)) as never)
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'c1' }] as never)
     prismaMock.product.count.mockReset()
+    prismaMock.productGroup.count.mockResolvedValue(0 as never)
     prismaMock.menuCategory.findUnique.mockResolvedValue(categoria as never)
     prismaMock.product.findMany.mockResolvedValue([] as never)
+    hijasVisibles([])
   })
 
-  it('sólo archivados: se APAGA (no se borra, conserva su imagen) y responde con la categoría', async () => {
+  it('sólo archivados: se APAGA y se ESCONDE (no se borra, conserva su imagen) y responde con la categoría', async () => {
     contar(0, 3)
     prismaMock.menuCategory.update.mockResolvedValue({ ...categoria, active: false } as never)
 
@@ -114,7 +124,10 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
 
     expect(prismaMock.product.count).toHaveBeenCalledWith(CUENTA_VIGENTES)
     expect(prismaMock.product.count).toHaveBeenCalledWith(CUENTA_TODOS)
-    expect(prismaMock.menuCategory.update).toHaveBeenCalledWith({ where: { id: 'c1' }, data: { active: false } })
+    expect(prismaMock.menuCategory.update).toHaveBeenCalledWith({
+      where: { id: 'c1' },
+      data: { active: false, deletedAt: expect.any(Date) },
+    })
     // F5-1: apagada y FUERA de los menús (getMenus no filtra `active`); las restauraciones la vuelven a asignar con upsert.
     expect(prismaMock.menuCategoryAssignment.deleteMany).toHaveBeenCalledWith({ where: { categoryId: 'c1' } })
     expect(prismaMock.menuCategory.delete).not.toHaveBeenCalled()
@@ -137,7 +150,15 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
     await expect(menuService.deleteMenuCategory(V, 'c1')).rejects.toMatchObject({ statusCode: 400 })
     expect(prismaMock.menuCategory.delete).not.toHaveBeenCalled()
     expect(prismaMock.menuCategory.update).not.toHaveBeenCalled()
-    expect(prismaMock.menuCategoryAssignment.deleteMany).not.toHaveBeenCalled()
+    // La salida de los menús va dentro de la transacción: el rechazo la deshace (la base real lo prueba en la integración).
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('encargo bc1dcc: ya eliminada ⇒ 404, sin tocar nada', async () => {
+    prismaMock.menuCategory.findUnique.mockResolvedValue({ ...categoria, deletedAt: new Date() } as never)
+
+    await expect(menuService.deleteMenuCategory(V, 'c1')).rejects.toMatchObject({ statusCode: 404 })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
   })
 
   // Encargo 08cc59 (15-nov): el rechazo salía en inglés y el panel lo cerraba sin decir nada. Ahora dice POR QUÉ, en español,
@@ -176,15 +197,12 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
       expect(error.details).toEqual({ productos: 1, pausados: 1, ejemplos: ['Flan'] })
     })
 
-    it('cualquier subcategoría bloquea (activa o apagada) y el rechazo las nombra; no se apaga ni se borra nada', async () => {
+    it('cualquier subcategoría VISIBLE bloquea (activa o apagada) y el rechazo las nombra; no se apaga ni se borra nada', async () => {
       contar(0, 0)
-      prismaMock.menuCategory.findUnique.mockResolvedValue({
-        ...categoria,
-        children: [
-          { id: 'h1', name: 'Pays', active: true, venueId: V },
-          { id: 'h2', name: 'Vieja', active: false, venueId: V },
-        ],
-      } as never)
+      hijasVisibles([
+        { name: 'Pays', venueId: V },
+        { name: 'Vieja', venueId: V },
+      ])
 
       const error = await menuService.deleteMenuCategory(V, 'c1').catch(e => e)
 
@@ -194,17 +212,13 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
       )
       expect(prismaMock.menuCategory.delete).not.toHaveBeenCalled()
       expect(prismaMock.menuCategory.update).not.toHaveBeenCalled()
-      expect(prismaMock.menuCategoryAssignment.deleteMany).not.toHaveBeenCalled()
-      // Codex r1-r2: sin lecturas ni transacciones nuevas (nada de carreras con quien reactiva, restaura o reordena).
-      expect(prismaMock.$transaction).not.toHaveBeenCalled()
+      // Sólo cuentan las que el dueño ve (`hz:nube0000:na33c25b`: una eliminada no bloquea a su padre).
+      expect(prismaMock.menuCategory.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { parentId: 'c1', deletedAt: null } }))
     })
 
     it('una hija de OTRO negocio bloquea, pero su nombre no se enseña', async () => {
       contar(0, 0)
-      prismaMock.menuCategory.findUnique.mockResolvedValue({
-        ...categoria,
-        children: [{ id: 'x1', name: 'Secreta de otro', active: false, venueId: 'otro-venue' }],
-      } as never)
+      hijasVisibles([{ name: 'Secreta de otro', venueId: 'otro-venue' }])
 
       const error = await menuService.deleteMenuCategory(V, 'c1').catch(e => e)
 

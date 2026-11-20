@@ -79,6 +79,7 @@ export async function getMenus(venueId: string) {
     where: { venueId },
     include: {
       categories: {
+        where: { category: { deletedAt: null } }, // una eliminada no sale en el menú (encargo bc1dcc)
         orderBy: {
           displayOrder: 'asc',
         },
@@ -125,9 +126,13 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
     where: { venueId_slug: { venueId, slug } },
   })
 
-  if (existingCategory) {
+  // El nombre de una ELIMINADA (encargo bc1dcc) sí se puede usar: el dueño ya no la ve. Es otra categoría (otra fila, sin las
+  // reglas ni la impresora de la vieja); el slug es interno y se le agrega una marca, como hace la app al crear. Una VISIBLE con
+  // ese nombre sigue rechazándose, también la que ya se creó así (su slug lleva la marca: se busca por nombre; Codex r3 B1).
+  if (existingCategory && (!existingCategory.deletedAt || (await hayVisibleConEseNombre(venueId, data.name)))) {
     throw new BadRequestError(`Ya existe una categoría con el nombre '${data.name}' en este establecimiento.`)
   }
+  const slugLibre = existingCategory ? `${slug}-${Date.now().toString(36)}` : slug
 
   const createData: Prisma.MenuCategoryCreateInput = {
     // Explicitly map fields from DTO to ensure type safety and avoid passing unwanted properties
@@ -141,7 +146,7 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
     availableFrom: data.availableFrom,
     availableUntil: data.availableUntil,
     // availableDays: data.availableDays, // Handled below
-    slug, // generated slug
+    slug: slugLibre, // generated slug
     venue: { connect: { id: venueId } },
     // Campos fiscales SAT (CFDI 4.0) — defaults para productos de la categoría
     ...(data.defaultSatProductKey !== undefined && { defaultSatProductKey: data.defaultSatProductKey }),
@@ -238,9 +243,23 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
   return category
 }
 
+/** ¿El dueño ya ve otra categoría con este nombre? (sin importar mayúsculas; `excepto` = la que se está editando) */
+async function hayVisibleConEseNombre(venueId: string, name: string, excepto?: string): Promise<boolean> {
+  const otra = await prisma.menuCategory.findFirst({
+    where: {
+      venueId,
+      deletedAt: null,
+      name: { equals: name.trim(), mode: 'insensitive' },
+      ...(excepto ? { id: { not: excepto } } : {}),
+    },
+    select: { id: true },
+  })
+  return otra != null
+}
+
 export async function getMenuCategoryById(venueId: string, categoryId: string): Promise<MenuCategory> {
   const category = await prisma.menuCategory.findUnique({
-    where: { id: categoryId, venueId },
+    where: { id: categoryId, venueId, deletedAt: null }, // una eliminada ya no existe para el dueño
     include: {
       products: { where: { deletedAt: null } },
       menus: {
@@ -259,14 +278,16 @@ export async function getMenuCategoryById(venueId: string, categoryId: string): 
 
 export async function listMenuCategoriesForVenue(venueId: string): Promise<MenuCategory[]> {
   return prisma.menuCategory.findMany({
-    where: { venueId, parentId: null }, // Fetch top-level categories
+    // Fetch top-level categories. Las eliminadas no se enseñan; una hija visible de un padre eliminado sale arriba (encargo bc1dcc).
+    where: { venueId, deletedAt: null, OR: [{ parentId: null }, { parent: { deletedAt: { not: null } } }] },
     orderBy: { displayOrder: 'asc' },
     include: {
       menus: true,
       children: {
         // Recursively fetch children
+        where: { deletedAt: null },
         orderBy: { displayOrder: 'asc' },
-        include: { children: true },
+        include: { children: { where: { deletedAt: null } } },
       },
       products: { where: { deletedAt: null }, orderBy: { displayOrder: 'asc' } },
     },
@@ -283,7 +304,7 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
     { categoryId },
   )
   const category = await prisma.menuCategory.findUnique({
-    where: { id: categoryId, venueId },
+    where: { id: categoryId, venueId, deletedAt: null }, // una eliminada no se edita (ni se vuelve a prender por aquí)
   })
 
   if (!category) {
@@ -300,7 +321,12 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
       where: { venueId_slug: { venueId, slug: newSlugFromName } }, // Use the string variable here
     })
     if (existingCategoryWithNewSlug && existingCategoryWithNewSlug.id !== categoryId) {
-      throw new BadRequestError(`A category with the name '${data.name}' already exists in this venue.`)
+      // El nombre de una ELIMINADA (encargo bc1dcc) sí se puede usar: el dueño ya no la ve. El slug es interno; se le agrega
+      // una marca, como hace la app al crear.
+      if (!existingCategoryWithNewSlug.deletedAt || (await hayVisibleConEseNombre(venueId, data.name, categoryId))) {
+        throw new BadRequestError(`A category with the name '${data.name}' already exists in this venue.`)
+      }
+      updateData.slug = `${newSlugFromName}-${Date.now().toString(36)}`
     }
   } else if (data.name) {
     updateData.name = data.name // Name provided but same as before, no slug change needed
@@ -367,6 +393,19 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
     // Prisma treats undefined as 'do not update'.
   }
 
+  // `deletedAt: null` en la ESCRITURA (Codex r1 #12): si la eliminaron entre la lectura y aquí, 404 y no se vuelve a prender.
+  const updatedCategory = await prisma.menuCategory
+    .update({
+      where: { id: categoryId, venueId, deletedAt: null },
+      data: updateData,
+    })
+    .catch(e => {
+      if ((e as any)?.code === 'P2025') throw new NotFoundError(`Menu category with ID ${categoryId} not found in venue ${venueId}.`)
+      throw e
+    })
+
+  // Menús y productos DESPUÉS de la categoría (Codex r3 R1): si la eliminaron en medio, el 404 de arriba sale sin haber escrito
+  // nada; y mover un producto vivo aquí no puede «desesconderla» antes de que la escritura de arriba revise.
   // Handle avoqadoMenus (Menu Assignments)
   if (data.avoqadoMenus) {
     // 1. Delete existing assignments for this category
@@ -407,11 +446,6 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
       })
       .catch(rechazoDelEscritorUnico)
   }
-
-  const updatedCategory = await prisma.menuCategory.update({
-    where: { id: categoryId, venueId },
-    data: updateData,
-  })
 
   // 🔌 REAL-TIME: Broadcast category update via Socket.IO
   const broadcastingService = socketManager.getBroadcastingService()
@@ -487,72 +521,101 @@ function rechazoPorSubcategorias(categoria: string, subcategorias: string[]): Ba
   return new BadRequestError(rechazoConSubcategorias(categoria, subcategorias), 'CATEGORY_HAS_SUBCATEGORIES', { subcategorias })
 }
 
+/**
+ * «Eliminar categoría» (panel, y `/mobile` cuando no tiene nada vivo). Encargo bc1dcc (19-nov, Flautas Coyoacán): una categoría que
+ * sólo guarda archivados o una familia no se puede borrar (RESTRICT) y antes sólo se APAGABA: el dueño la seguía viendo apagada y
+ * con 0, sin poder distinguirla de una que apagó a propósito. Ahora, además de apagarla y sacarla de los menús (como antes), se
+ * marca `deletedAt`: ESCONDIDA para el dueño. Para la caja, la tienda, los reportes y las reglas sigue siendo la misma categoría
+ * apagada de antes. La base la vuelve a mostrar, apagada, si algo vivo cae en ella, y al prenderla (migración
+ * `menu_category_eliminada`): nunca queda algo vivo donde el dueño no lo encuentra.
+ */
 export async function deleteMenuCategory(venueId: string, categoryId: string): Promise<MenuCategory> {
-  const category = await prisma.menuCategory.findUnique({
-    where: { id: categoryId, venueId },
-    include: { children: true },
-  })
-
-  if (!category) {
+  const category = await prisma.menuCategory.findUnique({ where: { id: categoryId, venueId } })
+  if (!category || category.deletedAt) {
     throw new NotFoundError(`Menu category with ID ${categoryId} not found in venue ${venueId}.`)
   }
 
-  // Plan 5 (D6, Ruling P5-R7): los productos ARCHIVADOS no cuentan — el dueño ya no los ve. Pero `Product.categoryId` es
-  // RESTRICT: una categoría que sólo conserva archivados no se puede borrar de verdad; se APAGA, como en «Reemplazar menú».
-  // Encargo 08cc59 (15-nov): el rechazo dice POR QUÉ, en español (el panel lo enseña tal cual o lo arma con `code`/`details`):
-  // cuántos productos quedan, cuántos pausados —los pausados cuentan y el dueño no los ve en el menú— y cuáles.
-  const productCount = await prisma.product.count({ where: { categoryId, deletedAt: null } })
-  if (productCount > 0) {
-    const [pausados, ejemplos] = await Promise.all([
-      prisma.product.count({ where: { categoryId, deletedAt: null, active: false } }),
-      prisma.product.findMany({
-        where: { categoryId, deletedAt: null },
-        select: { name: true },
-        orderBy: [{ name: 'asc' }, { id: 'asc' }],
-        take: EJEMPLOS_EN_EL_RECHAZO,
-      }),
-    ])
-    const nombres = ejemplos.map(p => p.name)
-    throw new BadRequestError(rechazoConProductos(category.name, productCount, pausados, nombres), 'CATEGORY_HAS_PRODUCTS', {
-      productos: productCount,
-      pausados,
-      ejemplos: nombres,
-    })
-  }
-  // Cualquier subcategoría bloquea, como antes (una hija de OTRO negocio también, sin enseñar su nombre: el `parentId` se
-  // conecta por id). Codex r1-r2 (08cc59): dejar pasar las apagadas y vacías abría carreras con quien reactiva una hija,
-  // restaura un producto o reordena; se descartó. El caso «subcategoría ya eliminada que sigue apagada» queda anotado.
-  const hijos = category.children ?? []
-  if (hijos.length > 0) {
-    throw rechazoPorSubcategorias(
-      category.name,
-      hijos.map(h => (h.venueId === venueId ? h.name : 'una subcategoría de otro negocio')),
-    )
-  }
-  // Variantes (decisión 3a): `ProductGroup.categoryId` también es RESTRICT — una familia (aun archivada o deshecha) que la
-  // referencia la conserva apagada, igual que un archivado.
-  const conArchivados =
-    (await prisma.product.count({ where: { categoryId } })) > 0 || (await prisma.productGroup.count({ where: { categoryId } })) > 0
+  const { deletedCategory, conArchivados } = await prisma.$transaction(
+    async tx => {
+      // 1. Fuera de los menús ANTES de bloquear la categoría: el mismo orden que «Reemplazar menú» (asignaciones → categoría), así
+      //    las dos no se esperan en círculo (Codex r1 #13). Si después se rechaza, la transacción lo deshace.
+      await tx.menuCategoryAssignment.deleteMany({ where: { categoryId } })
+      // 2. La categoría bloqueada: quien deja algo vivo dentro (alta, restauración) toma `FOR KEY SHARE` y espera a que esto
+      //    termine (y entonces la vuelve a mostrar); si llegó primero, esto espera por él y lo ve al contar abajo.
+      const filas = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM "MenuCategory" WHERE id = ${categoryId} AND "venueId" = ${venueId} AND "deletedAt" IS NULL FOR UPDATE`
+      if (filas.length === 0) throw new NotFoundError(`Menu category with ID ${categoryId} not found in venue ${venueId}.`)
+      // Una asignación que entró mientras esperaba el candado (ya confirmada) también sale.
+      await tx.menuCategoryAssignment.deleteMany({ where: { categoryId } })
 
-  // Delete image from Firebase Storage if it exists (apagada, la conserva para cuando una importación la traiga de vuelta).
-  // Sólo un archivo de la carpeta de ESTE negocio: la URL la escribe quien edita y puede ser de otro (Codex r10 de demos).
+      // 3. Plan 5 (D6, Ruling P5-R7): los productos ARCHIVADOS no cuentan — el dueño ya no los ve. Encargo 08cc59 (15-nov): el
+      //    rechazo dice POR QUÉ, en español (el panel lo enseña tal cual o lo arma con `code`/`details`): cuántos productos
+      //    quedan, cuántos pausados —los pausados cuentan y el dueño no los ve en el menú— y cuáles.
+      const productCount = await tx.product.count({ where: { categoryId, deletedAt: null } })
+      if (productCount > 0) {
+        const [pausados, ejemplos] = await Promise.all([
+          tx.product.count({ where: { categoryId, deletedAt: null, active: false } }),
+          tx.product.findMany({
+            where: { categoryId, deletedAt: null },
+            select: { name: true },
+            orderBy: [{ name: 'asc' }, { id: 'asc' }],
+            take: EJEMPLOS_EN_EL_RECHAZO,
+          }),
+        ])
+        const nombres = ejemplos.map(p => p.name)
+        throw new BadRequestError(rechazoConProductos(category.name, productCount, pausados, nombres), 'CATEGORY_HAS_PRODUCTS', {
+          productos: productCount,
+          pausados,
+          ejemplos: nombres,
+        })
+      }
+
+      // 4. Una subcategoría que el dueño VE bloquea, como antes (una de OTRO negocio también, sin enseñar su nombre: el
+      //    `parentId` se conecta por id; Codex r1-r2 de 08cc59: las apagadas siguen bloqueando). Una ya ELIMINADA no bloquea
+      //    (`hz:nube0000:na33c25b`: antes bloqueaba al padre para siempre). Si una hija vuelve a mostrarse con su padre
+      //    eliminado, la lista la enseña arriba (`listMenuCategoriesForVenue`): no hace falta soltarla ni bloquearla aquí.
+      const hijas = await tx.menuCategory.findMany({
+        where: { parentId: categoryId, deletedAt: null },
+        select: { name: true, venueId: true },
+        orderBy: { id: 'asc' },
+        take: 50,
+      })
+      if (hijas.length > 0) {
+        throw rechazoPorSubcategorias(
+          category.name,
+          hijas.map(h => (h.venueId === venueId ? h.name : 'una subcategoría de otro negocio')),
+        )
+      }
+
+      // 5. Archivados o una familia (variantes, decisión 3a): `Product.categoryId` y `ProductGroup.categoryId` son RESTRICT ⇒ se
+      //    apaga y se esconde. Con hijas ya eliminadas, también: borrarla de verdad escribiría en ellas (`parentId` SET NULL) y
+      //    podría cruzarse con una importación o una limpieza que las tiene (Codex r3 R2). Sin nada, se borra.
+      const conArchivados =
+        (await tx.product.count({ where: { categoryId } })) > 0 ||
+        (await tx.productGroup.count({ where: { categoryId } })) > 0 ||
+        (await tx.menuCategory.count({ where: { parentId: categoryId } })) > 0
+      if (conArchivados) {
+        return {
+          conArchivados,
+          deletedCategory: await tx.menuCategory.update({
+            where: { id: categoryId },
+            data: { active: false, deletedAt: new Date() },
+          }),
+        }
+      }
+      return { conArchivados, deletedCategory: await tx.menuCategory.delete({ where: { id: categoryId } }) }
+    },
+    { timeout: 15_000 },
+  )
+
+  // Imagen en Firebase Storage: sólo al borrarla de verdad (eliminada con archivados, la conserva para cuando regrese). Sólo un
+  // archivo de la carpeta de ESTE negocio: la URL la escribe quien edita y puede ser de otro (Codex r10 de demos).
   const slug = category.imageUrl ? (await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true } }))?.slug : null
   if (category.imageUrl && !conArchivados && slug && estaEnLaCarpetaDelNegocio(category.imageUrl, slug, venueId)) {
     logger.info(`🗑️  Deleting category image from storage: ${category.imageUrl}`)
     await deleteFileFromStorage(category.imageUrl).catch(error => {
-      logger.error(`❌ Failed to delete category image from storage`, error)
-      // Continue with deletion even if storage cleanup fails
+      logger.error(`Failed to delete category image from storage: ${category.imageUrl}`, error)
     })
-  }
-
-  let deletedCategory: MenuCategory
-  if (conArchivados) {
-    // F5-1: apagada y FUERA de los menús (getMenus no filtra `active`); las dos restauraciones de la importación la vuelven a
-    // asignar con `upsert`.
-    await prisma.menuCategoryAssignment.deleteMany({ where: { categoryId } })
-    deletedCategory = await prisma.menuCategory.update({ where: { id: categoryId }, data: { active: false } })
-  } else {
-    deletedCategory = await prisma.menuCategory.delete({ where: { id: categoryId } })
   }
 
   // 🔌 REAL-TIME: Broadcast category deletion via Socket.IO
@@ -580,7 +643,7 @@ export async function deleteMenuCategory(venueId: string, categoryId: string): P
     action: 'MENU_CATEGORY_DELETED',
     entity: 'MenuCategory',
     entityId: deletedCategory.id,
-    data: { name: deletedCategory.name },
+    data: { name: deletedCategory.name, conservada: conArchivados },
   })
 
   return deletedCategory
@@ -589,7 +652,7 @@ export async function deleteMenuCategory(venueId: string, categoryId: string): P
 export async function reorderMenuCategories(venueId: string, reorderData: ReorderMenuCategoriesDto): Promise<Prisma.BatchPayload[]> {
   const transactions = reorderData.map(item =>
     prisma.menuCategory.updateMany({
-      where: { id: item.id, venueId }, // Ensure category belongs to the venue
+      where: { id: item.id, venueId, deletedAt: null }, // Ensure category belongs to the venue (y no está eliminada)
       data: { displayOrder: item.displayOrder },
     }),
   )
@@ -612,6 +675,25 @@ export async function reorderMenuCategories(venueId: string, reorderData: Reorde
  */
 export const MENU_SIN_USO_MESSAGE =
   'Elige al menos un lugar donde se usa el menú (Aparatos o Tienda en línea). Para no usarlo en ningún lado, apágalo.'
+
+/**
+ * Las categorías que un menú puede recibir: de ESTE negocio y no eliminadas, en el orden en que llegaron. Un formulario abierto
+ * antes de un «Eliminar» no la vuelve a meter al menú (Codex r3 B3). Lo que sobra se descarta: el dueño ya no la ve.
+ */
+async function categoriasParaElMenu(venueId: string, categoryIds: string[]): Promise<string[]> {
+  const unicas = [...new Set(categoryIds)]
+  if (unicas.length === 0) return []
+  const visibles = new Set(
+    (
+      await prisma.menuCategory.findMany({
+        where: { venueId, deletedAt: null, id: { in: unicas } },
+        select: { id: true },
+        take: unicas.length,
+      })
+    ).map(c => c.id),
+  )
+  return categoryIds.filter(id => visibles.has(id))
+}
 
 /** La regla vive aquí y no en el esquema: al editar hay que combinar lo que llega con lo guardado. La base la refuerza con un CHECK. */
 function assertMenuConUso(appliesToDevices: boolean, appliesToOnline: boolean): void {
@@ -643,8 +725,9 @@ export async function createMenu(venueId: string, data: CreateMenuDto): Promise<
 
   // Handle category assignments if provided
   if (data.categoryIds) {
+    const categoryIds = await categoriasParaElMenu(venueId, data.categoryIds)
     createData.categories = {
-      create: data.categoryIds.map((categoryId, index) => ({
+      create: categoryIds.map((categoryId, index) => ({
         categoryId,
         displayOrder: index, // Maintain order from selection
       })),
@@ -677,6 +760,7 @@ export async function getMenuById(venueId: string, menuId: string): Promise<Menu
     where: { id: menuId, venueId },
     include: {
       categories: {
+        where: { category: { deletedAt: null } }, // una eliminada no sale en el menú (encargo bc1dcc)
         orderBy: { displayOrder: 'asc' },
         include: {
           category: {
@@ -757,6 +841,7 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
 
   // Update category assignments if categoryIds is provided
   if (data.categoryIds) {
+    const categoryIds = await categoriasParaElMenu(venueId, data.categoryIds)
     // We use a transaction to delete all existing assignments and create new ones
     // This is the simplest way to sync categories and handle reordering
     const updatedMenu = await prisma.$transaction(async tx => {
@@ -774,9 +859,9 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
       })
 
       // 3. Create new assignments
-      if (data.categoryIds && data.categoryIds.length > 0) {
+      if (categoryIds.length > 0) {
         await tx.menuCategoryAssignment.createMany({
-          data: data.categoryIds.map((categoryId, index) => ({
+          data: categoryIds.map((categoryId, index) => ({
             menuId,
             categoryId,
             displayOrder: index, // Maintain order from selection
@@ -931,8 +1016,18 @@ export async function cloneMenu(venueId: string, menuId: string, data: CloneMenu
       displayOrder: assignment.displayOrder,
     }))
 
+    // Una que eliminaron mientras se clonaba no se copia (la base la rechazaría).
+    const vivas = new Set(
+      (
+        await prisma.menuCategory.findMany({
+          where: { venueId, deletedAt: null, id: { in: categoryAssignments.map(a => a.categoryId) } },
+          select: { id: true },
+          take: categoryAssignments.length,
+        })
+      ).map(c => c.id),
+    )
     await prisma.menuCategoryAssignment.createMany({
-      data: categoryAssignments,
+      data: categoryAssignments.filter(a => vivas.has(a.categoryId)),
     })
   }
 
@@ -969,9 +1064,9 @@ export async function assignCategoryToMenu(venueId: string, menuId: string, data
     throw new NotFoundError(`Menu with ID ${menuId} not found in venue ${venueId}.`)
   }
 
-  // Verify category exists and belongs to venue
+  // Verify category exists and belongs to venue (una eliminada no vuelve a un menú por aquí)
   const category = await prisma.menuCategory.findUnique({
-    where: { id: data.categoryId, venueId },
+    where: { id: data.categoryId, venueId, deletedAt: null },
   })
 
   if (!category) {
@@ -2295,9 +2390,15 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       const categoriaDe: string[] = [] // por índice de categoría del archivo: la de las familias que se crean en la segunda pasada
       for (const [catIndex, categoryData] of data.categories.entries()) {
         // Plan 5 (D4): by name and, when none, by slug — creating another one with the same slug would hit @@unique([venueId, slug]).
+        // Categoría eliminada (encargo bc1dcc): la viva con ese nombre gana; si no, la del slug (viva o eliminada: el slug no cambia
+        // al eliminar); si no, una eliminada con ese nombre. La eliminada vuelve (abajo): el archivo la trae de nuevo, como F5-1.
         let category =
-          (await tx.menuCategory.findFirst({ where: { venueId, name: categoryData.name } })) ??
-          (await tx.menuCategory.findFirst({ where: { venueId, slug: categoryData.slug } }))
+          (await tx.menuCategory.findFirst({ where: { venueId, name: categoryData.name, deletedAt: null } })) ??
+          (await tx.menuCategory.findFirst({ where: { venueId, slug: categoryData.slug } })) ??
+          (await tx.menuCategory.findFirst({
+            where: { venueId, name: categoryData.name, deletedAt: { not: null } },
+            orderBy: [{ deletedAt: 'desc' }, { id: 'asc' }],
+          }))
 
         if (!category) {
           // Create new category
@@ -2324,10 +2425,16 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
           // menu, and one turned off by hand may not be in the main menu. `upsert`: the file may repeat a category.
           // Codex C5-2: the file adopts it (same id), so a demo one stops being demo — otherwise converting the demo venue deletes
           // it, or fails on the RESTRICT key of a product the file put in it.
-          if (!category.active || category.isDemo) {
+          // Una eliminada vuelve a la vida en el MISMO update que la prende (el CHECK no deja prenderla sin limpiar `deletedAt`).
+          const eliminada = category.deletedAt != null
+          if (!category.active || category.isDemo || eliminada) {
             await tx.menuCategory.update({
               where: { id: category.id },
-              data: { ...(category.active ? {} : { active: true }), ...(category.isDemo ? { isDemo: false } : {}) },
+              data: {
+                ...(category.active ? {} : { active: true }),
+                ...(category.isDemo ? { isDemo: false } : {}),
+                ...(eliminada ? { deletedAt: null } : {}),
+              },
             })
           }
           if (data.mode === 'replace' || !category.active) {

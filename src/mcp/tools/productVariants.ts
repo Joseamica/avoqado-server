@@ -293,7 +293,12 @@ export function registerProductVariantTools(server: McpServer, scope: McpScope) 
             error: `Son ${total.toLocaleString('es-MX')} combinaciones y el máximo es ${MAX_VARIANTS_PER_GROUP}. Quita valores u opciones.`,
           })
         const cats = await prisma.menuCategory.findMany({
-          where: { ...where, ...(categoryId ? { id: categoryId } : {}), name: { equals: category.trim(), mode: 'insensitive' } },
+          where: {
+            ...where,
+            deletedAt: null,
+            ...(categoryId ? { id: categoryId } : {}),
+            name: { equals: category.trim(), mode: 'insensitive' },
+          },
           select: { id: true, name: true },
           orderBy: { id: 'asc' },
           take: 2,

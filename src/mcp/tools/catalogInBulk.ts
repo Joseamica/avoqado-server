@@ -265,7 +265,7 @@ async function revisarAltas(where: { venueId: { in: string[] } }, items: AltaPed
   const nombres = [...new Set(filas.map(f => f.category.toLowerCase()))]
   const tope = nombres.length * 5
   const categorias = await prisma.menuCategory.findMany({
-    where: { ...where, OR: nombres.map(n => ({ name: { equals: n, mode: 'insensitive' as const } })) },
+    where: { ...where, deletedAt: null, OR: nombres.map(n => ({ name: { equals: n, mode: 'insensitive' as const } })) },
     select: { id: true, name: true },
     take: tope + 1,
   })

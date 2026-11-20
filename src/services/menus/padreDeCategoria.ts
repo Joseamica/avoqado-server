@@ -10,6 +10,7 @@ import prisma from '../../utils/prismaClient'
 export const MENSAJE_PADRE_FUERA_DEL_NEGOCIO = 'No encontramos la categoría padre en este negocio. Elige otra categoría.'
 
 export async function padreEsDelNegocio(venueId: string, parentId: string): Promise<boolean> {
-  const padre = await prisma.menuCategory.findFirst({ where: { id: parentId, venueId }, select: { id: true } })
+  // Una categoría eliminada (19-nov) tampoco sirve de padre: el dueño ya no la ve y su hija quedaría escondida.
+  const padre = await prisma.menuCategory.findFirst({ where: { id: parentId, venueId, deletedAt: null }, select: { id: true } })
   return Boolean(padre)
 }

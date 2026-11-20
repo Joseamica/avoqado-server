@@ -254,6 +254,6 @@ export const MENU_CATEGORY_TABLE: TableDefinition = {
   ],
 
   commonQueries: [
-    `SELECT c."name", COUNT(p.id) as products FROM "MenuCategory" c LEFT JOIN "Product" p ON c.id = p."categoryId" WHERE c."venueId" = $1 GROUP BY c.id`,
+    `SELECT c."name", COUNT(p.id) as products FROM "MenuCategory" c LEFT JOIN "Product" p ON c.id = p."categoryId" WHERE c."venueId" = $1 AND c."deletedAt" IS NULL GROUP BY c.id`,
   ],
 }

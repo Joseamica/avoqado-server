@@ -273,7 +273,7 @@ async function evaluateLine(
   } else if (line.decision?.decision === 'CREATE') {
     proposal = 'CREATE'
     category = await tx.menuCategory.findFirst({
-      where: { id: line.decision.create.categoryId, venueId: venue.id },
+      where: { id: line.decision.create.categoryId, venueId: venue.id, deletedAt: null },
       select: { id: true, venueId: true, updatedAt: true },
     })
     if (!category) [status, errorCode] = ['INVALID', 'CATALOG_BINDING_CATEGORY_NOT_FOUND']

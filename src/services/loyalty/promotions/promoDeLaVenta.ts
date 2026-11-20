@@ -152,7 +152,13 @@ async function lineasDeLaVenta(tx: TxConReintento, venueId: string, orderId: str
 async function nombresDeCategorias(tx: TxConReintento, venueId: string, promos: LoyaltyPromotion[]): Promise<Map<string, string>> {
   const ids = [...new Set(promos.flatMap(p => p.categoryIds))]
   if (ids.length === 0) return new Map()
-  const cats = await tx.menuCategory.findMany({ where: { venueId, id: { in: ids } }, select: { id: true, name: true }, take: ids.length })
+  // Una categoría ELIMINADA (encargo bc1dcc) no presta su nombre: si no, la promo de la «EVENTO» vieja premiaría a la nueva
+  // «EVENTO», que es otra categoría. Si algo vivo vuelve a la vieja, se vuelve a ver y su promo vuelve a aplicar.
+  const cats = await tx.menuCategory.findMany({
+    where: { venueId, id: { in: ids }, deletedAt: null },
+    select: { id: true, name: true },
+    take: ids.length,
+  })
   return new Map(cats.map(c => [c.id, c.name]))
 }
 

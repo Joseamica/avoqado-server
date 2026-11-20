@@ -336,7 +336,7 @@ export async function loadCatalogImportLookup(
     categoryIds,
     chunk =>
       tx.menuCategory.findMany({
-        where: { id: { in: chunk }, venue: { organizationId } },
+        where: { id: { in: chunk }, deletedAt: null, venue: { organizationId } }, // una eliminada no recibe altas
         select: { id: true, venueId: true },
       }) as never,
     checkpoint,
