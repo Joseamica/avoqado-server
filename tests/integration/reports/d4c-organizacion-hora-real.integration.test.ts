@@ -560,6 +560,139 @@ describe('D4c · visión global, tiendas y vendedores', () => {
     }
   })
 
+  it('R24 · la asistencia corta el día de cada sucursal con SU zona: Cancún a las 00:30 del 12 sale el 12 (Codex 4c r6 #1)', async () => {
+    const venueC = (
+      await prisma.venue.create({
+        data: {
+          organizationId: n.organizationId,
+          name: 'Sucursal Cancún asistencia',
+          slug: `d4c-ca-${n.venueId}`,
+          status: 'ACTIVE',
+          timezone: 'America/Cancun',
+        },
+        select: { id: true },
+      })
+    ).id
+    const staffC = (
+      await prisma.staff.create({
+        data: { firstName: 'Caja', lastName: 'Cancún', email: `d4c-caja-c-${n.venueId}@example.test` },
+        select: { id: true },
+      })
+    ).id
+    try {
+      await prisma.staffVenue.create({ data: { staffId: staffC, venueId: venueC, role: 'CASHIER' } })
+      // Cancún es UTC−5 todo el año: 00:20 del 12 = 05:20Z (23:20 del 11 en CDMX). Checa y cobra en efectivo a las 00:30, con red.
+      const checada = await prisma.timeEntry.create({
+        data: { staffId: staffC, venueId: venueC, clockInTime: new Date('2026-11-12T05:20:00Z') },
+        select: { id: true },
+      })
+      await sale(venueC, staffC, 25, 1, '2026-11-12T05:30:00Z')
+
+      const fila = (r: Awaited<ReturnType<typeof dashboard.getStaffAttendance>>) =>
+        r.staff.find(s => s.id === staffC && s.venueId === venueC)
+
+      // «El día 12»: la checada, la venta y el efectivo (por persona y por checada) son del 12 de Cancún.
+      expect(fila(await dashboard.getStaffAttendance(n.organizationId, DIA_12))).toMatchObject({
+        sales: 25,
+        salesAtArrival: 25,
+        cashSales: 25,
+        checkInTime: '2026-11-12T05:20:00.000Z',
+        allTimeEntries: [expect.objectContaining({ id: checada.id, cashSales: 25 })],
+      })
+      // «El día 11» no lo trae: en Cancún ya era el 12.
+      expect(fila(await dashboard.getStaffAttendance(n.organizationId, DIA_11))).toBeUndefined()
+      // «Entre» 12 y 13, con el filtro de sucursal: igual.
+      expect(fila(await dashboard.getStaffAttendance(n.organizationId, undefined, venueC, undefined, DIA_12, '2026-11-13'))).toMatchObject({
+        sales: 25,
+        cashSales: 25,
+      })
+      expect(fila(await dashboard.getStaffAttendance(n.organizationId, undefined, undefined, undefined, DIA_11, DIA_11))).toBeUndefined()
+
+      // Sin fecha («hoy»): a las 00:40 del 12 en Cancún (23:40 del 11 en CDMX), hoy en Cancún ya es el 12.
+      jest.setSystemTime(new Date('2026-11-12T05:40:00Z'))
+      expect(fila(await dashboard.getStaffAttendance(n.organizationId))).toMatchObject({ sales: 25, cashSales: 25 })
+
+      // Las sucursales de CDMX siguen con su día de siempre en la misma petición (R22).
+      const day12 = await dashboard.getStaffAttendance(n.organizationId, DIA_12)
+      expect(day12.staff).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: n.staffId, venueId: n.venueId, sales: 0, cashSales: 60, checkInTime: CHECADA_A }),
+          expect.objectContaining({ id: staffB, venueId: venueB, sales: 40, cashSales: 40 }),
+        ]),
+      )
+    } finally {
+      await prisma.order.deleteMany({ where: { venueId: venueC } })
+      await prisma.timeEntry.deleteMany({ where: { venueId: venueC } })
+      await prisma.staffVenue.deleteMany({ where: { venueId: venueC } })
+      await prisma.venue.delete({ where: { id: venueC } })
+      await prisma.staff.deleteMany({ where: { id: staffC } })
+    }
+  })
+
+  it('R24 · asistencia: donde la medianoche no existe (Santiago, 6-sep) los días no se enciman, y una fecha vacía es «hoy» (Codex a1988b r1 #3 y #5)', async () => {
+    const venueS = (
+      await prisma.venue.create({
+        data: {
+          organizationId: n.organizationId,
+          name: 'Sucursal Santiago asistencia',
+          slug: `d4c-sa-${n.venueId}`,
+          status: 'ACTIVE',
+          timezone: 'America/Santiago',
+        },
+        select: { id: true },
+      })
+    ).id
+    const staffS = (
+      await prisma.staff.create({
+        data: { firstName: 'Caja', lastName: 'Santiago', email: `d4c-caja-s-${n.venueId}@example.test` },
+        select: { id: true },
+      })
+    ).id
+    try {
+      await prisma.staffVenue.create({ data: { staffId: staffS, venueId: venueS, role: 'CASHIER' } })
+      // 23:30 del 5-sep en Santiago (UTC−4) = 03:30Z del 6. El 6 empieza a la 01:00 (UTC−3) = 04:00Z: el cobro es SÓLO del 5.
+      await sale(venueS, staffS, 9, 1, '2026-09-06T03:30:00Z')
+      const fila = (r: Awaited<ReturnType<typeof dashboard.getStaffAttendance>>) =>
+        r.staff.find(s => s.id === staffS && s.venueId === venueS)
+      expect(fila(await dashboard.getStaffAttendance(n.organizationId, '2026-09-05'))).toMatchObject({ sales: 9, cashSales: 9 })
+      expect(fila(await dashboard.getStaffAttendance(n.organizationId, '2026-09-06'))).toBeUndefined()
+      expect(
+        fila(await dashboard.getStaffAttendance(n.organizationId, undefined, undefined, undefined, '2026-09-05', '2026-09-06')),
+      ).toMatchObject({ sales: 9, cashSales: 9 })
+
+      // Una fecha vacía (`?date=`) es «hoy», como antes, y no tumba la consulta.
+      const vacia = await dashboard.getStaffAttendance(n.organizationId, '')
+      const hoy = await dashboard.getStaffAttendance(n.organizationId)
+      expect(vacia.staff.map(s => `${s.id}:${s.venueId}:${s.sales}`).sort()).toEqual(
+        hoy.staff.map(s => `${s.id}:${s.venueId}:${s.sales}`).sort(),
+      )
+      expect(hoy.staff).toEqual(expect.arrayContaining([expect.objectContaining({ id: staffB, venueId: venueB, sales: 40 })]))
+
+      // Una fecha que no existe es un 400, no otro día por desbordamiento (Codex a1988b r2).
+      await expect(
+        dashboard.getStaffAttendance(n.organizationId, undefined, undefined, undefined, DIA_12, '2026-11-32'),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+      })
+      await expect(dashboard.getStaffAttendance(n.organizationId, '2026-02-30')).rejects.toMatchObject({ statusCode: 400 })
+      // Una lista (`?date=a&date=b` de Express) también es 400; un año válido de 4 cifras sigue entrando (r3).
+      await expect(dashboard.getStaffAttendance(n.organizationId, [DIA_12] as unknown as string)).rejects.toMatchObject({ statusCode: 400 })
+      await expect(dashboard.getStaffAttendance(n.organizationId, '2028-02-29')).resolves.toMatchObject({ staff: expect.any(Array) })
+      // Fuera de 2000–2099, o un objeto de la query (`date[toString]=x`), también es 400 y nunca 500 (r4).
+      await expect(
+        dashboard.getStaffAttendance(n.organizationId, undefined, undefined, undefined, '0099-12-31', DIA_12),
+      ).rejects.toMatchObject({ statusCode: 400 })
+      await expect(
+        dashboard.getStaffAttendance(n.organizationId, { toString: 'x' } as unknown as string, undefined, undefined, DIA_12, DIA_12),
+      ).rejects.toMatchObject({ statusCode: 400 })
+    } finally {
+      await prisma.order.deleteMany({ where: { venueId: venueS } })
+      await prisma.staffVenue.deleteMany({ where: { venueId: venueS } })
+      await prisma.venue.delete({ where: { id: venueS } })
+      await prisma.staff.deleteMany({ where: { id: staffS } })
+    }
+  })
+
   it('R24 · el mapa de calor usa el día real del cobro en el filtro y en el grupo por tienda', async () => {
     const get = (from: string, to: string) => dashboard.getSalesHeatmap(n.organizationId, from, to, 'OWNER', n.staffId)
     const both = await get(DIA_11, DIA_12)
