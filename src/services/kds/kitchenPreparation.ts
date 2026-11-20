@@ -152,6 +152,15 @@ export function recalculoDeComanda(
   }
 }
 
+/**
+ * D17: cuándo terminó la cocina una comanda por tiempos, para «Recientes» y «Deshacer» (la MISMA cuenta en los dos). `kitchenDoneAt`;
+ * sin él (la versión anterior la terminó entre la migración y el cambio de versión), su `completedAt` si ya se entregó o su último
+ * cambio si sigue lista.
+ */
+export function horaDeTerminada(t: { kitchenDoneAt?: Date | null; completedAt?: Date | null; updatedAt?: Date | null; status: string }) {
+  return t.kitchenDoneAt ?? (t.status === 'COMPLETED' ? (t.completedAt ?? null) : t.status === 'READY' ? (t.updatedAt ?? null) : null)
+}
+
 /** Unidades que la cocina tiene que hacer YA (pendiente o preparando). */
 export function trabajoDeCocina(c: PreparationCounts): number {
   return c.PENDING + c.PREPARING

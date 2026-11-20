@@ -25,6 +25,7 @@ import { toKdsModifierLabels } from '../kds/kdsModifierLabels'
 import { venueTienePantallaDeCocina } from '../kds/kitchenDisplayStations'
 import { authorKitchenTickets } from '../kds/kitchenTicketAuthoring.service'
 import { RECIENTES_VENTANA_MS, recallPreparationTicket } from '../kds/kitchenPreparation.service'
+import { horaDeTerminada } from '../kds/kitchenPreparation'
 
 // Use string constants instead of Prisma enum to avoid runtime import issues with tsx
 const KdsStatus = {
@@ -318,30 +319,54 @@ export async function listRecentKdsOrders(
   // D17: con tiempos, lo que la COCINA terminó en la última hora y todavía tiene algo «Listo» que regresar (lo que la caja ya
   // entregó entero o se canceló no se puede «deshacer» desde la cocina). Sólo a la tablet que sabe regresarlas: la vieja tocaría
   // un «Deshacer» que no puede funcionar.
-  const nuevas = conTiempos
-    ? await prisma.kdsOrder.findMany({
-        where: {
-          ...(await filtroDelTablero(venueId, [KdsStatus.READY, KdsStatus.COMPLETED] as KdsOrderStatus[], stationId)),
-          preparationVersion: 1,
-          archivedAt: null,
-          // Codex r8 #5: una entregada por la versión anterior entre la migración y el cambio de versión (sin `kitchenDoneAt`).
-          OR: [{ kitchenDoneAt: { gte: desde } }, { kitchenDoneAt: null, status: KdsStatus.COMPLETED, completedAt: { gte: desde } }],
-          // Codex r6 #5 y r7 #4: también lo que la caja ya entregó o canceló (su hora en «Recientes» sigue; «Deshacer» explica que
-          // ya no queda nada listo). Sin comanda vacía.
-          items: { some: {} },
-        },
-        include: { items: true },
-        orderBy: [{ kitchenDoneAt: 'desc' }, { id: 'desc' }],
-        take: KDS_RECENT_CON_TIEMPOS_MAX,
-      })
-    : []
-  // La hora que enseña «Recientes» es la de cuando la cocina terminó: en una comanda con tiempos, `kitchenDoneAt`.
-  const cuando = (o: { completedAt: Date | null; kitchenDoneAt?: Date | null }) => (o.kitchenDoneAt ?? o.completedAt)?.getTime() ?? 0
-  const recientes = [...viejas, ...nuevas.map(o => ({ ...o, completedAt: o.kitchenDoneAt ?? o.completedAt }))].sort(
-    (a, b) => cuando(b) - cuando(a) || (a.id < b.id ? 1 : -1),
-  )
+  const nuevas = conTiempos ? await recientesConTiempos(venueId, stationId, desde) : []
+  // La hora que enseña «Recientes» es la de cuando la cocina terminó (`horaDeTerminada`); la tablet la manda de regreso al «Deshacer».
+  const cuando = (o: { completedAt: Date | null }) => o.completedAt?.getTime() ?? 0
+  const recientes = [...viejas, ...nuevas].sort((a, b) => cuando(b) - cuando(a) || (a.id < b.id ? 1 : -1))
   const ventas = await ventasDeComandas(prisma, venueId, recientes)
   return recientes.map(o => formatKdsOrderConVenta(o, o.orderId ? ventas.get(o.orderId) : undefined))
+}
+
+/**
+ * D17: las comandas con tiempos que la COCINA terminó en la última hora (también lo entregado o cancelado después; «Deshacer»
+ * explica cuando ya no queda nada listo). Dos lecturas acotadas y no una (Codex r9 #3): las que traen `kitchenDoneAt` y, en la
+ * ventana del despliegue, las que la versión anterior terminó sin él (`horaDeTerminada`). Se juntan y se cortan por esa hora, así
+ * el tope nunca deja fuera una más nueva por ordenar con nulos.
+ */
+async function recientesConTiempos(venueId: string, stationId: string | undefined, desde: Date) {
+  const base = {
+    ...(await filtroDelTablero(venueId, [KdsStatus.READY, KdsStatus.COMPLETED] as KdsOrderStatus[], stationId)),
+    preparationVersion: 1,
+    archivedAt: null,
+    items: { some: {} },
+  } satisfies Prisma.KdsOrderWhereInput
+  const [conHora, sinHora] = await Promise.all([
+    prisma.kdsOrder.findMany({
+      where: { ...base, kitchenDoneAt: { gte: desde } },
+      include: { items: true },
+      orderBy: [{ kitchenDoneAt: 'desc' }, { id: 'desc' }],
+      take: KDS_RECENT_CON_TIEMPOS_MAX,
+    }),
+    // Codex r8 #5 y r9 #1: terminadas por la versión anterior entre la migración y el cambio de versión.
+    prisma.kdsOrder.findMany({
+      where: {
+        ...base,
+        kitchenDoneAt: null,
+        OR: [
+          { status: KdsStatus.COMPLETED, completedAt: { gte: desde } },
+          { status: KdsStatus.READY, updatedAt: { gte: desde } },
+        ],
+      },
+      include: { items: true },
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+      take: KDS_RECENT_CON_TIEMPOS_MAX,
+    }),
+  ])
+  return [...conHora, ...sinHora]
+    .map(o => ({ ...o, completedAt: horaDeTerminada(o) }))
+    .filter(o => o.completedAt != null && o.completedAt >= desde)
+    .sort((a, b) => b.completedAt!.getTime() - a.completedAt!.getTime() || (a.id < b.id ? 1 : -1))
+    .slice(0, KDS_RECENT_CON_TIEMPOS_MAX)
 }
 
 /**

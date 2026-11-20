@@ -139,14 +139,15 @@ describe('D17 · el tablero y «Recientes» (SERVIDOR)', () => {
   })
 
   it('«Recientes» junta las de un solo Listo (completedAt) y las de tiempos (kitchenDoneAt), sin archivadas, la más nueva primero', async () => {
+    const hace = (min: number) => new Date(Date.now() - min * 60_000)
     const vieja = {
       id: 'v0',
       orderId: null,
       preparationVersion: 0,
       status: 'COMPLETED',
-      completedAt: new Date('2026-11-20T20:00:00Z'),
+      completedAt: hace(30),
       kitchenDoneAt: null,
-      createdAt: new Date('2026-11-20T19:00:00Z'),
+      createdAt: hace(90),
       items: [],
     }
     const conTiempos = {
@@ -155,32 +156,72 @@ describe('D17 · el tablero y «Recientes» (SERVIDOR)', () => {
       preparationVersion: 1,
       status: 'READY',
       completedAt: null,
-      kitchenDoneAt: new Date('2026-11-20T20:10:00Z'),
-      createdAt: new Date('2026-11-20T19:00:00Z'),
+      kitchenDoneAt: hace(20),
+      createdAt: hace(90),
       items: [],
     }
-    prismaMock.kdsOrder.findMany.mockResolvedValueOnce([vieja]).mockResolvedValueOnce([conTiempos])
+    // Codex r8 #5 / r9 #1: lista o entregada por la versión anterior en la ventana del despliegue (sin kitchenDoneAt)
+    const delDespliegue = {
+      id: 'v1b',
+      orderId: null,
+      preparationVersion: 1,
+      status: 'READY',
+      completedAt: null,
+      kitchenDoneAt: null,
+      updatedAt: hace(10),
+      createdAt: hace(90),
+      items: [],
+    }
+    prismaMock.kdsOrder.findMany.mockResolvedValueOnce([vieja]).mockResolvedValueOnce([conTiempos]).mockResolvedValueOnce([delDespliegue])
     const recientes = await listRecentKdsOrders('venue-a', undefined, true)
-    expect(recientes.map(r => r.id)).toEqual(['v1', 'v0'])
+    expect(recientes.map(r => r.id)).toEqual(['v1b', 'v1', 'v0'])
     // la hora que la tablet manda de regreso al «Deshacer»
-    expect(recientes[0].completedAt).toBe('2026-11-20T20:10:00.000Z')
-    const [primera, segunda] = prismaMock.kdsOrder.findMany.mock.calls
+    expect(recientes[1].completedAt).toBe(conTiempos.kitchenDoneAt.toISOString())
+    expect(recientes[0].completedAt).toBe(delDespliegue.updatedAt.toISOString())
+    const [primera, segunda, tercera] = prismaMock.kdsOrder.findMany.mock.calls
     expect(primera[0].where).toEqual(expect.objectContaining({ preparationVersion: 0 }))
     expect(primera[0].where).not.toHaveProperty('archivedAt') // Codex r4 A4: un Listo v0 justo después del archivado se deshace
     expect(segunda[0].where).toEqual(
-      expect.objectContaining({
-        preparationVersion: 1,
-        archivedAt: null,
-        items: { some: {} },
-      }),
+      expect.objectContaining({ preparationVersion: 1, archivedAt: null, items: { some: {} }, kitchenDoneAt: { gte: expect.any(Date) } }),
     )
+    expect(tercera[0].where).toEqual(expect.objectContaining({ preparationVersion: 1, archivedAt: null, kitchenDoneAt: null }))
+    expect(tercera[0].where.OR).toEqual([
+      { status: 'COMPLETED', completedAt: { gte: expect.any(Date) } },
+      { status: 'READY', updatedAt: { gte: expect.any(Date) } },
+    ])
     expect(primera[0].take).toBe(20)
     expect(segunda[0].take).toBe(100) // su propia lista: no le quita lugar a las de un solo Listo
-    // Codex r8 #5: la entregada por la versión anterior entre la migración y el cambio de versión también entra
-    expect(segunda[0].where.OR).toEqual([
-      { kitchenDoneAt: { gte: expect.any(Date) } },
-      { kitchenDoneAt: null, status: 'COMPLETED', completedAt: { gte: expect.any(Date) } },
-    ])
+    expect(tercera[0].take).toBe(100)
+  })
+
+  it('el tope de 100 se corta por la hora de terminada, no por la columna con nulos (Codex r9 #3)', async () => {
+    const hace = (min: number) => new Date(Date.now() - min * 60_000)
+    const conHora = Array.from({ length: 100 }, (_, i) => ({
+      id: `h${String(i).padStart(3, '0')}`,
+      orderId: null,
+      preparationVersion: 1,
+      status: 'READY',
+      completedAt: null,
+      kitchenDoneAt: hace(1 + i * 0.3),
+      createdAt: hace(90),
+      items: [],
+    }))
+    const sinHora = [
+      {
+        id: 'vieja',
+        orderId: null,
+        preparationVersion: 1,
+        status: 'COMPLETED',
+        completedAt: hace(50),
+        kitchenDoneAt: null,
+        createdAt: hace(90),
+        items: [],
+      },
+    ]
+    prismaMock.kdsOrder.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce(conHora).mockResolvedValueOnce(sinHora)
+    const recientes = await listRecentKdsOrders('venue-a', undefined, true)
+    expect(recientes).toHaveLength(100)
+    expect(recientes.map(r => r.id)).not.toContain('vieja') // la de hace 50 min es la que sobra, no una más nueva
   })
 
   it('la tablet vieja (sin kitchenDoneVersion) no recibe las de tiempos: no vería un «Deshacer» que falla', async () => {
