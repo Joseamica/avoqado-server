@@ -83,6 +83,30 @@ describe('shouldProductUseInventory — contar piezas en todos los planes', () =
     expect(opcion(await shouldProductUseInventory('venue-1', { puedeGuardarPiezasSinPremium: false }), 'QUANTITY')?.enabled).toBe(true)
   })
 
+  it('encargo 27fd34 (Codex r1 #2): con Premium pero sin permiso de escribir inventario, ni piezas ni receta, y lo dice (no es el plan)', async () => {
+    tienePremium.mockResolvedValue(true)
+    const r = await shouldProductUseInventory('venue-1', { puedeGuardarConInventario: false, puedeGuardarPiezasSinPremium: false })
+    expect(r.hasInventoryFeature).toBe(true) // el plan, como antes
+    expect(r.recommendation).toBe('wizard.step2.recommendationNoAccess')
+    expect(opcion(r, 'QUANTITY')?.enabled).toBe(false)
+    expect(opcion(r, 'RECIPE')?.enabled).toBe(false)
+    expect(opcion(r, 'NONE')?.enabled).toBe(true)
+    // Sin Premium y sin permiso (p. ej. «ver como» en Pro): también dice que es el permiso, no el plan (Codex r2 #3).
+    tienePremium.mockResolvedValue(false)
+    const pro = await shouldProductUseInventory('venue-1', { puedeGuardarConInventario: false, puedeGuardarPiezasSinPremium: false })
+    expect(pro.recommendation).toBe('wizard.step2.recommendationNoAccess')
+    expect(opcion(pro, 'QUANTITY')?.enabled).toBe(false)
+    tienePremium.mockResolvedValue(true)
+    // Con el permiso, o sin dato (otro llamador): como siempre.
+    for (const puedeGuardarConInventario of [true, undefined]) {
+      const ok = await shouldProductUseInventory('venue-1', { puedeGuardarConInventario })
+      expect(ok.recommendation).toBe('wizard.step2.recommendationEnabled')
+      expect(ok.options.length).toBe(3)
+      expect(opcion(ok, 'QUANTITY')?.enabled).toBe(true)
+      expect(opcion(ok, 'RECIPE')?.enabled).toBe(true)
+    }
+  })
+
   it('negocio que no existe ⇒ 404', async () => {
     prismaMock.venue.findUnique.mockResolvedValue(null)
 
