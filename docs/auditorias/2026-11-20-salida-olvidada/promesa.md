@@ -8,7 +8,9 @@
   Al día siguiente la persona entra sin «ya tienes una entrada» en el celular, la PAX y el POS; una salida del celular que
   llega con hora de OTRO día ya no estira el turno (se anota con su foto); la salida sin red del MISMO día sí cuenta.
 - **No entra:** iOS (va su ficha); el GPS del celular con un turno local olvidado (sigue como hoy hasta la siguiente
-  entrada: deuda anotada); cerrar los turnos abiertos de producción el día de publicar sin medirlos antes con el founder
+  entrada: deuda anotada); la hora repetida del cambio de horario de la frontera (Tijuana, 1-nov) al corregir a mano
+  (Codex r1 #13: el formulario toma la segunda 01:30); un negocio con la regla APAGADA y el celular, que no lo sabe (el
+  celular deja marcar entrada y el SERVIDOR contesta YA_TIENE_ENTRADA sin «Usar esa entrada»); cerrar los turnos abiertos de producción el día de publicar sin medirlos antes con el founder
   (punto 5: se mide antes del «publica»); pago o nómina de esas horas.
 - **Se prueba así:** pruebas del SERVIDOR (regla, job, las 3 puertas, corrección), del DASHBOARD y de `:campo`; y en el
   banco: entrada de ayer abierta → entrada de hoy por la PAX y por el celular (SAMSUNG) sin 409, la de ayer en «Salida
@@ -29,3 +31,21 @@
 | POS · identificar / entrada / salida (`time-entry.mobile.service`) | Igual que la PAX | idem | `time-entry.mobile.fotoDeEntrada.test.ts`; banco |
 | DASHBOARD · `PUT …/time-entries/:id/salida-olvidada` | Sólo una checada marcada; salida > entrada, ≤ ahora, ≤ límite, sin encimarse con la siguiente; nadie la suya; `attendance:manage`; recalcula horas y descansos; quita la marca; bitácora | CAS sobre `salidaOlvidada` + `clockOutTime` | `salidaOlvidada.test.ts` (corrección), `SalidaOlvidada.test.tsx` |
 | Celular local (`:campo`) | Un turno local pasado su límite no cuenta como abierto (Checar, Encolador, Inicio); «Usar esa entrada» sólo para una entrada del mismo día | — | `ChecadaViewModelTest`, `PendientesViewModelTest` (D3) |
+
+## Codex r1 (código): 10 + 3 → arreglados 12, 1 declarado
+
+| # | Hallazgo | Qué se hizo |
+|---|---|---|
+| 1 | Nocturno de 21:00 a 10:00 se cortaba a las 09:00 | El límite real se alarga a 1 h después de la salida de su horario; cierre, salida tardía y corrección miden igual |
+| 2 | Entrada 03:30 tomaba el diurno de las 07:00 | Gana el horario que contiene la entrada; si ninguno, el que empieza más pronto |
+| 3 | El celular declaraba olvidado antes que el SERVIDOR (zona del teléfono) | El celular espera 3 h más que el SERVIDOR (`limiteEnElCelular`) |
+| 4 | Salida apartada antes del corte rechazada al completarse después | `completar` decide con la hora del toque |
+| 5 | Repetir la salida anotada no decía `salidaNoUsada` | Lo dice (cierre automático o editada por el gerente) |
+| 6 | Gerente corrige primero → la salida sin red daba 409 y perdía la foto | Se anota con su foto; la corrección no pisa una nota que llegó después de leer |
+| 7 | Gerente y una entrada encolada podían encimar horas | La corrección toma el candado `checada:<persona>` |
+| 8 | La PAX perdía el voucher si el cierre se adelantaba | La salida de PAX/POS tras el cierre pega foto y voucher a esa checada y lo dice (`SALIDA_OLVIDADA`) |
+| 9 | Iniciar descanso podía dejar ON_BREAK un turno ya cerrado | El descanso es condicional (`clockOutTime: null`) |
+| 10 | Asistencia no llegaba a todas las olvidadas | «Por revisar: N» (filtro `salidaOlvidada=true`, cualquier fecha) |
+| 11 | El job podía quedarse en un lote que no vence | Páginas con cursor; sin transacción para las que no vencen |
+| 12 | El descanso cerrado en 0 h sumaba horas al corregir | Termina en la salida corregida |
+| 13 | Hora repetida del cambio de horario (Tijuana) | Declarado en «No entra» |
