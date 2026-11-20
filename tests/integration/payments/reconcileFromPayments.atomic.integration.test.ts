@@ -561,6 +561,42 @@ describe('Codex r6 #1: reasignar un cobro a una cancelada con IVA aparte, con la
     )
   })
 
+  it('🔴 D31 (na728b67 #1; Codex r4): la anulada que la reasignación revive vuelve a gastar el uso que su anulación devolvió (antes quedaba libre)', async () => {
+    const promo = await prisma.discount.create({
+      data: { venueId, name: 'Primeros 1', type: 'PERCENTAGE', value: 10, scope: 'ORDER', maxTotalUses: 1, currentUses: 0 },
+      select: { id: true },
+    })
+    const p = await pareja(116)
+    // La anulación (D24) ya devolvió el uso de esta fila: queda sin `usoContado` y con `usoDevueltoAlAnular`. Importe 0: no cambia la cuenta.
+    await prisma.orderDiscount.create({
+      data: {
+        orderId: p.destino.id,
+        discountId: promo.id,
+        type: 'PERCENTAGE',
+        name: 'Primeros 1',
+        value: 10,
+        amount: 0,
+        usoContado: false,
+        usoDevueltoAlAnular: true,
+      },
+    })
+
+    expect((await reasignar(p)).ok).toBe(true)
+
+    expect((await prisma.discount.findUniqueOrThrow({ where: { id: promo.id }, select: { currentUses: true } })).currentUses).toBe(1)
+    expect(
+      await prisma.orderDiscount.findMany({
+        where: { orderId: p.destino.id },
+        select: { usoContado: true, usoDevueltoAlAnular: true },
+        take: 5,
+      }),
+    ).toEqual([{ usoContado: true, usoDevueltoAlAnular: false }])
+    const d = await prisma.order.findUniqueOrThrow({ where: { id: p.destino.id } })
+    expect([d.status, d.paymentStatus]).toEqual(['COMPLETED', 'PAID'])
+    await prisma.orderDiscount.deleteMany({ where: { orderId: p.destino.id } })
+    await prisma.discount.deleteMany({ where: { id: promo.id } })
+  })
+
   // Jest no admite `%2$s`: la etiqueta va primero para que el título la lea en orden.
   it.each([
     ['🔴', 'guardarTotales'],
