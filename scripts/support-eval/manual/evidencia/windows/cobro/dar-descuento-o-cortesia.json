@@ -1,25 +1,25 @@
 {
   "pagina": "windows/cobro/dar-descuento-o-cortesia",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb",
-  "version": "2.25.41-escritorio",
+  "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f",
+  "version": "2.25.52",
   "pasos": [
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 349,
+      "linea": 357,
       "cita": "?: \"Agregar descuento\","
     },
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 115,
+      "linea": 117,
       "cita": "SHORTCUTS(\"Atajos\"),"
     },
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
-      "linea": 275,
+      "linea": 276,
       "cita": "name = \"Descuentos\","
     },
     {
@@ -31,139 +31,139 @@
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
-      "linea": 688,
+      "linea": 703,
       "cita": "text = \"Descuentos predefinidos\","
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
-      "linea": 665,
+      "linea": 680,
       "cita": "Text(\"Descuento manual\")"
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
-      "linea": 794,
+      "linea": 822,
       "cita": "label = { Text(if (isPercentage) \"Porcentaje\" else \"Monto\") },"
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
-      "linea": 800,
+      "linea": 828,
       "cita": "text = \"Aplicar descuento\","
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
-      "linea": 632,
+      "linea": 639,
       "cita": "text = \"${discount.name} aplicado\","
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
-      "linea": 651,
+      "linea": 666,
       "cita": "contentDescription = \"Quitar descuento\","
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
-      "linea": 646,
+      "linea": 661,
       "cita": ".clickable { cartViewModel.applyOrderDiscount(null) },"
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 337,
+      "linea": 345,
       "cita": "onClick = { if (!item.locked && !item.isPromotionLine) onItemTap(item) },"
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2844,
+      "linea": 3089,
       "cita": "onToggleCortesia(true, \"Cortesía del administrador\")"
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2842,
+      "linea": 3087,
       "cita": "onToggleCortesia(false, null)"
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2864,
+      "linea": 3109,
       "cita": "text = item.cortesiaReason ?: \"Activado\","
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2450,
+      "linea": 2694,
       "cita": "product.hasModifiers -> onSelectForDetail(product)"
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
-      "linea": 491,
+      "linea": 553,
       "cita": "title = \"Descuentos\","
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
-      "linea": 307,
+      "linea": 366,
       "cita": "it.appliesTo("
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
-      "linea": 509,
+      "linea": 575,
       "cita": "title = \"Cortesía\","
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
-      "linea": 823,
+      "linea": 884,
       "cita": "\"Especial del administrador\","
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
-      "linea": 952,
+      "linea": 1013,
       "cita": "text = \"Aplicar cortesía\","
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
-      "linea": 581,
+      "linea": 642,
       "cita": "text = \"Agregar al carrito\","
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
-      "linea": 297,
+      "linea": 298,
       "cita": "name = \"Cortesía\","
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
-      "linea": 1170,
+      "linea": 1198,
       "cita": "text = \"Aplicar cortesia\","
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
-      "linea": 1227,
+      "linea": 1255,
       "cita": "title = \"Confirmar cortesía\","
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
-      "linea": 1232,
+      "linea": 1260,
       "cita": "text = \"Confirmar\","
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
-      "linea": 1238,
+      "linea": 1266,
       "cita": "value = 100.0,"
     }
   ],
@@ -195,32 +195,43 @@
     }
   ],
   "plan": [],
-  "sinInternet": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Lo hecho sin conexión con un descuento con tope (Cobrar o Mesas) no se rechaza al subir: el uso cuenta (enLaCola)",
+      "archivo": "avoqado-server/src/services/shared/discount.service.ts",
+      "linea": 155
+    },
+    {
+      "afirmacion": "La venta de la cola: el tope de usos no la rechaza; el uso cuenta",
+      "archivo": "avoqado-server/src/services/mobile/order.mobile.service.ts",
+      "linea": 1989
+    }
+  ],
   "rutas": [
     {
       "ruta": "Problema: un solo descuento de la venta; elegir otro lo reemplaza",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
-      "linea": 1649
+      "linea": 3325
     },
     {
       "ruta": "Problema: con renglones de vales (locked) no se aplica el descuento de la venta",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
-      "linea": 1647
+      "linea": 2155
     },
     {
       "ruta": "Problema: un renglón de promoción no abre su detalle (sin cortesía suelta)",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 337
+      "linea": 345
     },
     {
       "ruta": "Si aparece «Este artículo no tiene descuentos propios»",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
-      "linea": 1118
+      "linea": 1225
     },
     {
       "ruta": "Ventana angosta: Ver carrito",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 3070
+      "linea": 3315
     },
     {
       "ruta": "WINDOWS: el tamaño de la ventana decide el diseño (WindowSizeClass del ancho real)",
@@ -230,32 +241,32 @@
     {
       "ruta": "Diseño de tableta desde el ancho Medium (600 dp); más angosta, el de teléfono",
       "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
-      "linea": 159
+      "linea": 160
     },
     {
       "ruta": "Si aparece al cobrar «No tienes permiso»: diálogo del 403 sobre cualquier pantalla",
       "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
-      "linea": 424
+      "linea": 428
     },
     {
       "ruta": "Si aparece: el diálogo nombra la acción que falta",
       "archivo": "app/src/main/java/com/avoqado/pos/core/data/network/ServerErrorText.kt",
-      "linea": 197
+      "linea": 203
     },
     {
       "ruta": "Si aparece «dar una cortesía» (orders:comp)",
       "archivo": "app/src/main/java/com/avoqado/pos/core/domain/PermissionLabels.kt",
-      "linea": 92
+      "linea": 93
     },
     {
       "ruta": "Si aparece «aplicar un descuento» (discounts:apply)",
       "archivo": "app/src/main/java/com/avoqado/pos/core/domain/PermissionLabels.kt",
-      "linea": 199
+      "linea": 201
     },
     {
       "ruta": "Si aparece: crear la venta va por la ruta del dinero (FAIL_FAST): un 403 no abre el teclado del PIN",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/data/OrderRepository.kt",
-      "linea": 86
+      "linea": 88
     },
     {
       "ruta": "Si aparece: con FAIL_FAST no se pide el PIN y cae al diálogo",
@@ -265,7 +276,107 @@
     {
       "ruta": "Si aparece: un 403 no se encola (sólo 5xx o red): la venta no se registró",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/data/OrderRepository.kt",
-      "linea": 251
+      "linea": 258
+    },
+    {
+      "ruta": "Problema D11 (área): «El descuento «…» tiene tope de usos y no se puede poner en un vale…» (400 AREA_TICKET_DISCOUNT_HAS_LIMIT del SERVIDOR)",
+      "archivo": "avoqado-server/src/services/shared/descuentoConTopeEnVales.ts",
+      "linea": 23
+    },
+    {
+      "ruta": "Problema D11 (área): la app enseña el texto del SERVIDOR y el carrito se queda",
+      "archivo": "app/src/main/java/com/avoqado/pos/areatickets/presentation/AreaTicketOperationsViewModel.kt",
+      "linea": 1076
+    },
+    {
+      "ruta": "Problema D11 (caja): «…no se puede usar en una venta con vales: quítalo de ese producto para cobrar.»",
+      "archivo": "avoqado-server/src/services/shared/descuentoConTopeEnVales.ts",
+      "linea": 27
+    },
+    {
+      "ruta": "Problema D15: «Fija: viene del cobro de vales»",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/RebajaFija.kt",
+      "linea": 14
+    },
+    {
+      "ruta": "Problema D15: «Esta rebaja quedó fija al cobrar los vales…» y «Quitar» en gris",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/RebajaFija.kt",
+      "linea": 15
+    },
+    {
+      "ruta": "Problema D15: tocar la fila enseña la razón",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3273
+    },
+    {
+      "ruta": "Problema D15, versión anterior: el 400 «Este descuento quedó fijo al cobrar los vales…»",
+      "archivo": "avoqado-server/src/services/shared/cuentaConVales.ts",
+      "linea": 38
+    },
+    {
+      "ruta": "Problema tope: «Discount \"…\" has reached its usage limit» (texto del SERVIDOR, en inglés)",
+      "archivo": "avoqado-server/src/services/shared/discount.service.ts",
+      "linea": 123
+    },
+    {
+      "ruta": "Problema tope: Mesas enseña el texto del SERVIDOR tal cual (humanize lo deja pasar)",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1747
+    },
+    {
+      "ruta": "Problema tope: Mesas gasta un uso al aplicar y en línea dice «ya no hay» (D19)",
+      "archivo": "avoqado-server/src/services/shared/usoDelDescuento.ts",
+      "linea": 113
+    },
+    {
+      "ruta": "Problema tope: anular la cuenta sin cobrar devuelve el uso (D24)",
+      "archivo": "avoqado-server/src/services/shared/orderCancelGuard.ts",
+      "linea": 279
+    },
+    {
+      "ruta": "Problema tope: la cuenta anulada que revive por un cobro tardío vuelve a gastar el uso (D26)",
+      "archivo": "avoqado-server/src/services/shared/cuentaCancelada.ts",
+      "linea": 228
+    },
+    {
+      "ruta": "Problema tope: en Cobrar la venta no se rechaza por el tope; suma el uso y avisa al dueño (DESCUENTO_SOBRE_TOPE)",
+      "archivo": "avoqado-server/src/services/shared/usoDelDescuento.ts",
+      "linea": 134
+    },
+    {
+      "ruta": "Antes de empezar (Mesas): ACCIONES(\"Acciones\")",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2465
+    },
+    {
+      "ruta": "Antes de empezar (Mesas): label = \"Descuentos\",",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2761
+    },
+    {
+      "ruta": "Antes de empezar (Mesas): Text(\"Disponibles\", fontWeight = FontWeight.SemiBold)",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3303
+    },
+    {
+      "ruta": "Antes de empezar (Mesas): Text(\"Aplicar\", color = MaterialTheme.colorScheme.primary)",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3335
+    },
+    {
+      "ruta": "Antes de empezar (Mesas): titulo = \"Motivo del descuento\",",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 1459
+    },
+    {
+      "ruta": "Antes de empezar (Mesas): Text(\"Aplicados\", fontWeight = FontWeight.SemiBold)",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3265
+    },
+    {
+      "ruta": "Antes de empezar (Mesas): \"Quitar\",",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3295
     }
   ],
   "aparato": {

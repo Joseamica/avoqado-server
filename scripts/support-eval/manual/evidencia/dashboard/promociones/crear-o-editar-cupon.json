@@ -1,31 +1,31 @@
 {
   "pagina": "dashboard/promociones/crear-o-editar-cupon",
   "sourceRepo": "avoqado-web-dashboard",
-  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038",
   "version": "main",
   "pasos": [
     {
       "paso": 1,
       "archivo": "src/components/Sidebar/app-sidebar.tsx",
-      "linea": 852,
+      "linea": 863,
       "cita": "title: t('sidebar:promotionsMenu.title'),"
     },
     {
       "paso": 1,
       "archivo": "src/locales/es/sidebar.json",
-      "linea": 23,
+      "linea": 24,
       "cita": "\"title\": \"Promociones\","
     },
     {
       "paso": 1,
       "archivo": "src/components/Sidebar/app-sidebar.tsx",
-      "linea": 831,
+      "linea": 842,
       "cita": "title: t('sidebar:promotionsMenu.coupons'),"
     },
     {
       "paso": 1,
       "archivo": "src/locales/es/sidebar.json",
-      "linea": 26,
+      "linea": 27,
       "cita": "\"coupons\": \"Códigos de Cupón\","
     },
     {
@@ -37,7 +37,7 @@
     {
       "paso": 1,
       "archivo": "src/locales/es/promotions.json",
-      "linea": 470,
+      "linea": 474,
       "cita": "\"create\": \"Crear Cupón\","
     },
     {
@@ -49,7 +49,7 @@
     {
       "paso": 2,
       "archivo": "src/locales/es/promotions.json",
-      "linea": 378,
+      "linea": 382,
       "cita": "\"discount\": \"Descuento Padre\","
     },
     {
@@ -61,7 +61,7 @@
     {
       "paso": 2,
       "archivo": "src/pages/Promotions/components/CreateDiscountDialog.tsx",
-      "linea": 147,
+      "linea": 146,
       "cita": "{t('discounts.create.title')}"
     },
     {
@@ -79,7 +79,7 @@
     {
       "paso": 3,
       "archivo": "src/locales/es/promotions.json",
-      "linea": 379,
+      "linea": 383,
       "cita": "\"code\": \"Código de Cupón\","
     },
     {
@@ -91,31 +91,31 @@
     {
       "paso": 4,
       "archivo": "src/locales/es/promotions.json",
-      "linea": 380,
+      "linea": 384,
       "cita": "\"maxUses\": \"Usos Máximos\","
     },
     {
       "paso": 4,
       "archivo": "src/locales/es/promotions.json",
-      "linea": 381,
+      "linea": 385,
       "cita": "\"maxUsesPerCustomer\": \"Usos Máximos por Cliente\","
     },
     {
       "paso": 4,
       "archivo": "src/locales/es/promotions.json",
-      "linea": 382,
+      "linea": 386,
       "cita": "\"minPurchaseAmount\": \"Monto Mínimo de Compra\","
     },
     {
       "paso": 4,
       "archivo": "src/locales/es/promotions.json",
-      "linea": 383,
+      "linea": 387,
       "cita": "\"validFrom\": \"Válido Desde\","
     },
     {
       "paso": 4,
       "archivo": "src/locales/es/promotions.json",
-      "linea": 384,
+      "linea": 388,
       "cita": "\"validUntil\": \"Válido Hasta\","
     },
     {
@@ -127,7 +127,7 @@
     {
       "paso": 5,
       "archivo": "src/locales/es/promotions.json",
-      "linea": 474,
+      "linea": 478,
       "cita": "\"save\": \"Guardar Cambios\","
     },
     {
@@ -139,7 +139,7 @@
     {
       "paso": 5,
       "archivo": "src/locales/es/promotions.json",
-      "linea": 504,
+      "linea": 508,
       "cita": "\"createSuccess\": \"Cupón creado exitosamente\","
     },
     {
@@ -157,7 +157,7 @@
     {
       "paso": 6,
       "archivo": "src/locales/es/promotions.json",
-      "linea": 472,
+      "linea": 476,
       "cita": "\"edit\": \"Editar\","
     },
     {
@@ -171,7 +171,7 @@
     {
       "permiso": "coupons:read",
       "archivo": "src/routes/venueRoutes.tsx",
-      "linea": 773
+      "linea": 782
     },
     {
       "permiso": "coupons:create",
@@ -246,7 +246,7 @@
     {
       "ruta": "Problema: texto descuento padre",
       "archivo": "src/locales/es/promotions.json",
-      "linea": 395
+      "linea": 399
     },
     {
       "ruta": "Problema: lista vacía",
@@ -256,7 +256,7 @@
     {
       "ruta": "Problema: texto Sin descuentos",
       "archivo": "src/locales/es/promotions.json",
-      "linea": 406
+      "linea": 410
     },
     {
       "ruta": "Problema: código de 3 a 30",
@@ -276,7 +276,7 @@
     {
       "ruta": "Problema: texto del formato",
       "archivo": "src/locales/es/promotions.json",
-      "linea": 399
+      "linea": 403
     },
     {
       "ruta": "Problema: el aviso sale debajo del campo",
@@ -291,17 +291,17 @@
     {
       "ruta": "Problema: texto por omisión",
       "archivo": "src/locales/es/promotions.json",
-      "linea": 508
+      "linea": 512
     },
     {
-      "ruta": "T11-10: el panel reintenta una vez cualquier petición tras un error de red, sin llave",
+      "ruta": "Error de red al crear: la respuesta pudo perderse con el cupón ya creado (desde D6 el panel ya no repite solo un POST sin llave: sePuedeRepetirSola)",
       "archivo": "src/api.ts",
-      "linea": 98
+      "linea": 168
     },
     {
       "ruta": "T11-10: el reintento",
       "archivo": "src/api.ts",
-      "linea": 101
+      "linea": 171
     },
     {
       "ruta": "T11-10: el código es único en toda la plataforma (puede ser el del primer intento o de otro negocio)",
@@ -322,6 +322,26 @@
       "ruta": "T11-12: la lista trae páginas con filtros; un cupón puede no salir en la que se revisa",
       "archivo": "src/pages/Promotions/Coupons.tsx",
       "linea": 65
+    },
+    {
+      "ruta": "Problema: el Descuento Padre con «Usos Totales Máximos» / «Usos Máximos por Cliente»",
+      "archivo": "src/locales/es/promotions.json",
+      "linea": 98
+    },
+    {
+      "ruta": "Problema: un descuento con tope no entra en una venta con vales (D11)",
+      "archivo": "avoqado-server/src/services/shared/descuentoConTopeEnVales.ts",
+      "linea": 6
+    },
+    {
+      "ruta": "Problema: columna «Usos» («3 / 100 usos»)",
+      "archivo": "src/pages/Promotions/Discounts.tsx",
+      "linea": 281
+    },
+    {
+      "ruta": "Problema: Mesas gasta y devuelve usos; lo cobrado no se rechaza (D19/D24)",
+      "archivo": "avoqado-server/src/services/shared/usoDelDescuento.ts",
+      "linea": 8
     }
   ],
   "aparato": {

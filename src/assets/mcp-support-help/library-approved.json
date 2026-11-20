@@ -77,7 +77,7 @@
       ]
     },
     "android/cobro/dar-descuento-o-cortesia": {
-      "sha256": "30300b4a3c5521318c52a566c07230f4b9ddece8a09e0bfa01c31b5002dfd30d",
+      "sha256": "59f9a02a6427f612a037fe6617d8db8ee737175f0cfcbe6da645523039e5d459",
       "requiredPermissions": []
     },
     "android/cobro/dividir-la-cuenta": {
@@ -152,7 +152,7 @@
       ]
     },
     "android/ordenes/cambiar-o-quitar-articulos-del-carrito": {
-      "sha256": "47edf560af46c4e2e286e621871a4e64c6212d0b05a04cebfe3845459a3d7333",
+      "sha256": "301832543a7b7d44878fd6a84cad2439de3163c7c4184c1dae6516623da039ef",
       "requiredPermissions": []
     },
     "android/personal/cambiar-de-usuario": {
@@ -591,7 +591,7 @@
       ]
     },
     "dashboard/promociones/crear-o-editar-cupon": {
-      "sha256": "622e2a16e9f13b31d2166bcb80c14c2b33123b8b359d8801f9f085fbdcad39b6",
+      "sha256": "ed61d5b7944975f2e8993d6f474b3818aab3281c5e9f3d072834a4fb5306ea89",
       "requiredPermissions": [
         "coupons:read"
       ],
@@ -902,7 +902,7 @@
       "gateKind": "FEATURE"
     },
     "tpv/mesas/cobrar-cuenta-de-mesa": {
-      "sha256": "793ec3d3800d3000fc0afb592fd1b85e7a70be96bce8eca0391c70e99272c160",
+      "sha256": "ec44d955c2e740dad7554fc16e7f066bcf552144e1de1b7555bda5945716e71d",
       "requiredPermissions": [
         "payments:create"
       ],
@@ -1045,7 +1045,7 @@
       ]
     },
     "windows/cobro/dar-descuento-o-cortesia": {
-      "sha256": "7d2ec03e76fc559b400a15eb9465683408132ab5e1ff1ee1cecc600a95d7da5d",
+      "sha256": "5337430e6df08f0d178ce489a683a5484e386ff09e3987031a590fb00e55a83c",
       "requiredPermissions": []
     },
     "windows/cobro/dividir-la-cuenta": {
@@ -1118,7 +1118,7 @@
       ]
     },
     "windows/ordenes/cambiar-o-quitar-articulos-del-carrito": {
-      "sha256": "545acc86b890942396b53b55ce1fc9dca0a10f9de54bde034700c0305bca05fb",
+      "sha256": "a5f2aa22887350a58530495403fec0edf91ab424b40fd7d4f0711c201b93a982",
       "requiredPermissions": []
     },
     "windows/personal/cambiar-de-usuario": {
