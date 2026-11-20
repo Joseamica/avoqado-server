@@ -129,7 +129,7 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
   // El nombre de una ELIMINADA (encargo bc1dcc) sí se puede usar: el dueño ya no la ve. Es otra categoría (otra fila, sin las
   // reglas ni la impresora de la vieja); el slug es interno y se le agrega una marca, como hace la app al crear. Una VISIBLE con
   // ese nombre sigue rechazándose, también la que ya se creó así (su slug lleva la marca: se busca por nombre; Codex r3 B1).
-  if (existingCategory && (!existingCategory.deletedAt || (await hayVisibleConEseNombre(venueId, data.name)))) {
+  if ((existingCategory && !existingCategory.deletedAt) || (await hayVisibleConEseNombre(venueId, data.name))) {
     throw new BadRequestError(`Ya existe una categoría con el nombre '${data.name}' en este establecimiento.`)
   }
   const slugLibre = existingCategory ? `${slug}-${Date.now().toString(36)}` : slug
@@ -314,6 +314,10 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
   const updateData: Prisma.MenuCategoryUpdateInput = {}
 
   if (data.name && data.name !== category.name) {
+    // Una VISIBLE con ese nombre lo rechaza aunque su slug lleve marca (encargo bc1dcc, Codex r4 B1).
+    if (await hayVisibleConEseNombre(venueId, data.name, categoryId)) {
+      throw new BadRequestError(`A category with the name '${data.name}' already exists in this venue.`)
+    }
     updateData.name = data.name
     const newSlugFromName = generateSlug(data.name) // Ensure slug is a string for the check
     updateData.slug = newSlugFromName
@@ -323,7 +327,7 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
     if (existingCategoryWithNewSlug && existingCategoryWithNewSlug.id !== categoryId) {
       // El nombre de una ELIMINADA (encargo bc1dcc) sí se puede usar: el dueño ya no la ve. El slug es interno; se le agrega
       // una marca, como hace la app al crear.
-      if (!existingCategoryWithNewSlug.deletedAt || (await hayVisibleConEseNombre(venueId, data.name, categoryId))) {
+      if (!existingCategoryWithNewSlug.deletedAt) {
         throw new BadRequestError(`A category with the name '${data.name}' already exists in this venue.`)
       }
       updateData.slug = `${newSlugFromName}-${Date.now().toString(36)}`

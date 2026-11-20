@@ -235,11 +235,13 @@ describe('la base: nunca algo vivo ni prendido donde el dueño no lo ve', () => 
       { timeout: 20_000 },
     )
     await yaBloqueo
+    // El cronómetro mide SÓLO la restauración: sin el candado del trigger tardaría milisegundos (Codex r4 R6).
     const inicio = Date.now()
-    const restaurar = prisma.product.update({ where: { id: productId }, data: { deletedAt: null, deletedBy: null } })
-    await Promise.all([eliminar, restaurar])
+    await prisma.product.update({ where: { id: productId }, data: { deletedAt: null, deletedBy: null } })
+    const espero = Date.now() - inicio
+    await eliminar
 
-    expect(Date.now() - inicio).toBeGreaterThanOrEqual(1000) // de verdad esperó al «Eliminar»
+    expect(espero).toBeGreaterThanOrEqual(1000) // de verdad esperó al «Eliminar» en curso
     expect((await categoria(categoryId)).deletedAt).toBeNull()
   })
 

@@ -225,6 +225,14 @@ export const MENU_CATEGORY_TABLE: TableDefinition = {
       description: 'Is category visible',
       isFilterable: true,
     },
+    {
+      name: 'deletedAt',
+      type: 'datetime',
+      description:
+        'Deleted by the owner when NOT NULL: the category no longer exists for the owner. ALWAYS filter "deletedAt" IS NULL when listing categories (also inactive ones)',
+      isNullable: true,
+      isFilterable: true,
+    },
   ],
 
   relations: [
