@@ -2062,6 +2062,10 @@ async function updateOrderTotalsForStandalonePayment(
                 canal: currentPaymentId ? 'recordOrderPayment' : 'reconcileOrderFromPayments',
                 paymentId: currentPaymentId ?? null,
                 staffId: staffId ?? null,
+                // 🔴 D26 (revisión de la familia «la respuesta espera al paso», 20-nov): con un cobro de la TPV esperando respuesta, el uso
+                // NO se gasta aquí (esperaría la fila Discount hasta 15 s con la cuenta tomada); se gasta tras el commit, acotado. El barrido
+                // (`reconcileOrderFromPayments`, sin respuesta que esperar) gasta aquí como siempre.
+                usos: currentPaymentId ? 'despues' : 'enEstaTx',
               })
               // S1: la cancelada que este dinero reabre no vuelve a la cocina (ni la marca de abajo ni el armado de después).
               reabiertaEnEstaPasada = estadoTrasCobro !== current.status
@@ -2166,6 +2170,17 @@ async function updateOrderTotalsForStandalonePayment(
   if (resultado) {
     tpvPostingId = resultado.tpvPostingId
     reabiertaEnEstaPasada = resultado.reabiertaEnEstaPasada
+  }
+  // 🔴 D26: el cobro de la TPV revivió la cuenta en esta pasada sin gastar el uso (`usos: 'despues'`, arriba); se gasta aquí, ya
+  // confirmada la escritura, en su propia transacción y con la respuesta esperándolo como mucho `TOPE_DEL_PASO_DEL_USO_MS`.
+  if (resultado?.updated && reabiertaEnEstaPasada && currentPaymentId) {
+    await esperarElPasoDelUso({
+      venueId: order.venueId,
+      orderId,
+      canal: 'recordOrderPayment',
+      paymentId: currentPaymentId,
+      staffId: staffId ?? null,
+    })
   }
   const updatedOrder = sinTransaccion ? order : resultado!.updated
 
@@ -3741,13 +3756,48 @@ async function terminarUsoDelDescuentoAlReenviar(
   pago: { id: string; orderId: string | null; status: string; type?: string | null; processedById?: string | null },
 ): Promise<void> {
   if (pago.status !== 'COMPLETED' || !pago.orderId || pago.type === 'REFUND') return
-  await volverAGastarUsosTrasElCobro({
+  await esperarElPasoDelUso({
     venueId,
     orderId: pago.orderId,
     canal: 'recordOrderPayment',
     paymentId: pago.id,
     staffId: pago.processedById ?? null,
   })
+}
+
+/** hz:e82938e1:D26 (Codex r2 #2): lo más que una respuesta del cobro de la TPV espera al paso del uso. */
+export const TOPE_DEL_PASO_DEL_USO_MS = 1_500
+
+/**
+ * hz:e82938e1:D26 (Codex r2 #2): la ÚNICA forma en que una respuesta de la TPV espera a `volverAGastarUsosTrasElCobro`. Espera como mucho
+ * `TOPE_DEL_PASO_DEL_USO_MS`; si el paso tarda más (otra caja tiene la promoción o la cuenta, el pool está lleno), se responde y el paso
+ * sigue solo: nunca lanza y, si falla, deja su `logger.error` y el uso libre. Así el paso nunca empuja una respuesta del cobro hacia el
+ * tope de la terminal (10 s). Cada respuesta pasa por, a lo más, una llamada.
+ */
+async function esperarElPasoDelUso(a: Parameters<typeof volverAGastarUsosTrasElCobro>[0]): Promise<void> {
+  let reloj: NodeJS.Timeout | undefined
+  let vencio = false
+  try {
+    await Promise.race([
+      volverAGastarUsosTrasElCobro(a),
+      new Promise<void>(resolve => {
+        reloj = setTimeout(() => {
+          vencio = true
+          resolve()
+        }, TOPE_DEL_PASO_DEL_USO_MS)
+      }),
+    ])
+  } finally {
+    if (reloj) clearTimeout(reloj)
+  }
+  if (vencio) {
+    logger.warn('[D26] el paso del uso del descuento tardó más que el tope: se responde y sigue solo', {
+      venueId: a.venueId,
+      orderId: a.orderId,
+      paymentId: a.paymentId ?? null,
+      topeMs: TOPE_DEL_PASO_DEL_USO_MS,
+    })
+  }
 }
 
 export async function recordOrderPayment(
@@ -4569,6 +4619,8 @@ export async function recordOrderPayment(
     if (error instanceof CobroDuplicadoEnEfectivo) {
       const existente = await prisma.payment.findUnique({ where: { id: error.existingPaymentId }, include: { receipts: RECIBO_CANONICO } })
       if (existente) {
+        // D26: devuelve un cobro ya guardado; si revivió la cuenta y su paso del uso no terminó, lo termina aquí.
+        await terminarUsoDelDescuentoAlReenviar(venueId, existente)
         logger.warn('🔄 [recordOrderPayment] Cobro en EFECTIVO sobre una orden ya saldada — se devuelve el existente', {
           venueId,
           orderId,
@@ -4740,10 +4792,10 @@ export async function recordOrderPayment(
   }
 
   // 🔴 hz:e82938e1:D26 (cruce del 20-nov): el cobro ya está guardado. Si revivió una cuenta anulada, su descuento vuelve a gastar el uso
-  // AQUÍ, en su propia transacción con red por traba (Order → Discount, sin turno), y sólo si la cuenta sigue viva. Nunca lanza: si falla,
-  // el uso queda libre con un error en el log y el reenvío con la misma llave lo vuelve a intentar.
+  // AQUÍ, en su propia transacción con red por traba (Order → Discount, sin turno), y sólo si la cuenta sigue viva. La respuesta lo espera
+  // como mucho `TOPE_DEL_PASO_DEL_USO_MS`. Nunca lanza: si falla, el uso queda libre con un error en el log y el reenvío lo reintenta.
   if (committedStandaloneSettlement?.reabiertaDeCancelada) {
-    await volverAGastarUsosTrasElCobro({
+    await esperarElPasoDelUso({
       venueId,
       orderId: activeOrder.id,
       canal: 'recordOrderPayment',
@@ -5647,6 +5699,8 @@ export async function recordFastPayment(
         montoPesos: existingByKey.amount,
         terminalSerial: paymentData.authenticatedTerminalSerial ?? null,
       })
+      // D26 (Codex r2 #1): el mismo cobro reenviado por `/fast` puede ser el de una cuenta revivida cuyo paso del uso no terminó.
+      await terminarUsoDelDescuentoAlReenviar(venueId, existingByKey)
       return {
         ...((await consolidarRegistroRepetido(existingByKey, paymentData as RegistroEntrante, venueId, null)) ?? existingByKey),
         digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]),
@@ -5668,6 +5722,8 @@ export async function recordFastPayment(
     })
     // Ronda 2 (P1): el existente puede estar ligado a una solicitud ya liberada sin haberla podido ligar.
     await retenerSiQuedoSinLigar(existingPayment, paymentData)
+    // D26 (Codex r2 #1): la cola de la TPV 1.2.0 reenvía por Pago rápido, sin llave: el cobro que encuentra pudo revivir una cuenta.
+    await terminarUsoDelDescuentoAlReenviar(venueId, existingPayment)
 
     // Return existing payment with receipt (safe retry - client gets same response)
     // Mismo relleno de cliente que el check por `idempotencyKey`: un reintento legacy
@@ -6258,6 +6314,8 @@ export async function recordFastPayment(
           venueId,
           winnerPaymentId: ganador.id,
         })
+        // D26: el mismo intento ya tenía su cobro; si su paso del uso no terminó, lo termina aquí.
+        await terminarUsoDelDescuentoAlReenviar(venueId, ganador)
         // Codex R1 (P1-4): el REST que perdió la carrera bajo el candado trae marca, PAN, modo y método REALES — se
         // consolidan sobre el ganador (S3) igual que en los retornos idempotentes; devolverlo tal cual los perdía.
         return {
@@ -6295,6 +6353,8 @@ export async function recordFastPayment(
           // La carrera la ganó otra petición: su orden ya existe, así que el cliente se
           // rellena (nunca se reasigna) igual que en cualquier reintento idempotente.
           const winnerCustomerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(winner), effectiveCustomerId, customerActor)
+          // D26: la misma llave ya tenía su cobro; si su paso del uso no terminó, lo termina aquí.
+          await terminarUsoDelDescuentoAlReenviar(venueId, winner)
           return {
             ...((await consolidarRegistroRepetido(winner, paymentData as RegistroEntrante, venueId, null)) ?? winner),
             digitalReceipt: await ensureDigitalReceiptResponse(winner.id, winner.receipts[0]),

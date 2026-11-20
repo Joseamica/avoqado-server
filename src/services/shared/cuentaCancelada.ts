@@ -248,9 +248,9 @@ export async function reabrirSiRecibeDinero(
     staffId?: string | null
     /**
      * 🔴 D26 (20-nov): `'despues'` revive SIN volver a gastar el uso del descuento —no busca las filas ni toma `Discount`— y quien llama
-     * lo gasta después de su commit con `volverAGastarUsosTrasElCobro`. Sólo la TPV: la transacción de `recordOrderPayment` no se
-     * reintenta y la venta de $0 toma Shift → Discount. Por omisión `'enEstaTx'`: POS, cola, panel, cambio y recálculo de totales
-     * gastan aquí, dentro de su transacción con red por traba, como siempre.
+     * lo gasta después de su commit con `volverAGastarUsosTrasElCobro`. Sólo los cobros de la TPV (el cierre de `recordOrderPayment`, sin
+     * reintento, y su recálculo de totales, que no debe hacer esperar la respuesta por la promoción). Por omisión `'enEstaTx'`: POS, cola,
+     * panel, cambio y el barrido gastan aquí, dentro de su transacción con red por traba, como siempre.
      */
     usos?: 'enEstaTx' | 'despues'
   },
