@@ -85,20 +85,25 @@ describe('eliminar una categoría que sólo guarda archivados', () => {
     await expect(deleteMenuCategory(x.venueId, categoryId)).rejects.toMatchObject({ statusCode: 404 })
   })
 
-  it('el dueño puede crear otra «EVENTO» después: es OTRA categoría (otro id), y sólo se ve ésa; una tercera ya no', async () => {
+  it('crear otra «EVENTO» después REUSA la eliminada, limpia (como prenderla hoy): nunca hay dos, y una tercera se rechaza', async () => {
     const x = await negocio()
-    const { categoryId } = await eventoConArchivado(x)
+    const { categoryId, productId } = await eventoConArchivado(x)
+    await prisma.menuCategory.update({ where: { id: categoryId }, data: { color: '#ff0000', description: 'Vieja' } })
     await deleteMenuCategory(x.venueId, categoryId)
 
-    const nueva = await createMenuCategory(x.venueId, { name: 'EVENTO' } as never)
+    const nueva = await createMenuCategory(x.venueId, { name: 'Evento' } as never)
 
-    expect(nueva.id).not.toBe(categoryId)
-    expect(nueva.slug).toMatch(/^evento-/)
-    expect(await nombresEnLaLista(x.venueId)).toEqual(['EVENTO'])
-    // Otra visible con ese nombre sigue rechazándose, como antes (Codex r3 B1: aunque su slug lleve la marca).
+    expect(nueva).toMatchObject({ id: categoryId, name: 'Evento', active: true, deletedAt: null, color: null, description: null })
+    expect(await nombresEnLaLista(x.venueId)).toEqual(['Evento'])
+    expect(await prisma.menuCategory.count({ where: { venueId: x.venueId } })).toBe(1)
+    // Su producto borrado sigue borrado: la categoría sale vacía.
+    expect(await prisma.product.findUniqueOrThrow({ where: { id: productId }, select: { deletedAt: true } })).toEqual({
+      deletedAt: expect.any(Date),
+    })
+    // Otra visible con ese nombre sigue rechazándose, como antes (también con un espacio de más).
     await expect(createMenuCategory(x.venueId, { name: 'EVENTO' } as never)).rejects.toMatchObject({ statusCode: 400 })
-    await expect(createMenuCategory(x.venueId, { name: 'evento' } as never)).rejects.toMatchObject({ statusCode: 400 })
-    expect(await prisma.menuCategory.count({ where: { venueId: x.venueId, deletedAt: null } })).toBe(1)
+    await expect(createMenuCategory(x.venueId, { name: 'evento ' } as never)).rejects.toMatchObject({ statusCode: 400 })
+    expect(await prisma.menuCategory.count({ where: { venueId: x.venueId } })).toBe(1)
   })
 
   it('un formulario de menú abierto antes del «Eliminar» no la vuelve a meter al menú (Codex r3 B3)', async () => {
@@ -275,22 +280,23 @@ describe('la importación (F5-1) con una categoría eliminada', () => {
     expect(await prisma.menuCategoryAssignment.count({ where: { categoryId } })).toBe(1)
   })
 
-  it('con una «EVENTO» nueva y la vieja eliminada, el archivo usa la nueva y la vieja sigue escondida', async () => {
+  it('tras volver a crear «EVENTO» (la misma fila), el archivo con el SKU borrado lo regresa a ESA categoría', async () => {
     const x = await negocio()
-    const { categoryId: vieja } = await eventoConArchivado(x)
-    await deleteMenuCategory(x.venueId, vieja)
-    const nueva = await createMenuCategory(x.venueId, { name: 'EVENTO' } as never)
+    const { categoryId, productId, sku } = await eventoConArchivado(x)
+    await deleteMenuCategory(x.venueId, categoryId)
+    await createMenuCategory(x.venueId, { name: 'EVENTO' } as never)
 
     await importMenu(
       x.venueId,
-      { mode: 'merge', categories: [{ name: 'EVENTO', slug: 'evento', products: [{ name: 'Nuevo', sku: `NUEVO-${x.rfc}`, price: 50 }] }] },
+      { mode: 'merge', categories: [{ name: 'EVENTO', slug: 'evento', products: [{ name: 'Paquete EVENTO', sku, price: 500 }] }] },
       SERVICIO,
     )
 
-    expect(
-      await prisma.product.findFirstOrThrow({ where: { venueId: x.venueId, sku: `NUEVO-${x.rfc}` }, select: { categoryId: true } }),
-    ).toEqual({ categoryId: nueva.id })
-    expect((await categoria(vieja)).deletedAt).toBeInstanceOf(Date)
+    expect(await prisma.product.findUniqueOrThrow({ where: { id: productId }, select: { deletedAt: true, categoryId: true } })).toEqual({
+      deletedAt: null,
+      categoryId,
+    })
+    expect(await prisma.menuCategory.count({ where: { venueId: x.venueId } })).toBe(1)
     expect(await nombresEnLaLista(x.venueId)).toEqual(['EVENTO'])
   })
 })

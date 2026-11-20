@@ -12,11 +12,11 @@
 --    que dejó; si llegó primero, el «Eliminar» espera por él y lo ve al contar.
 --
 -- Datos viejos: una que se «eliminó» antes de esto (quedó apagada) se esconde si la bitácora tiene su `MENU_CATEGORY_DELETED` y
--- su última escritura es la de ese «Eliminar» (`updatedAt` hasta 5 s antes y 1 s después del registro, que se escribe
--- milisegundos después), sin productos vivos ni menús. Si algo la tocó después (prenderla y apagarla, «Reemplazar menú», el
--- ruteo), no se esconde y el dueño puede volver a dar «Eliminar». Para esconder una apagada a propósito habría que prenderla y
--- apagarla en el mismo segundo del «Eliminar». Las dos fechas son UTC en producción (Render); en una base local con otra zona
--- la ventana no coincide y no se esconde nada (nunca de más).
+-- su última escritura es la de ese «Eliminar»: `updatedAt` (reloj del servidor) ANTES del registro (reloj de la base, que lo
+-- escribe milisegundos después), con 500 ms de holgura por la diferencia de relojes. Sin productos vivos ni menús. Cualquier
+-- escritura posterior (prenderla y apagarla, «Reemplazar menú», el ruteo) la deja fuera: para esconder una apagada a propósito
+-- habría que prenderla y apagarla en medio segundo. Las dos fechas son UTC en producción (Render); en una base local con otra
+-- zona la ventana no coincide y no se esconde nada (nunca de más). Lo que quede fuera: basta volver a dar «Eliminar».
 --
 -- Columna nula sin default: en Postgres 11+ no reescribe la tabla.
 --
@@ -43,7 +43,7 @@ UPDATE "MenuCategory" c
  WHERE l."entityId" = c.id
    AND c."active" = false
    AND c."deletedAt" IS NULL
-   AND c."updatedAt" BETWEEN l."createdAt" - interval '5 seconds' AND l."createdAt" + interval '1 second'
+   AND c."updatedAt" BETWEEN l."createdAt" - interval '5 seconds' AND l."createdAt" + interval '500 milliseconds'
    AND NOT EXISTS (SELECT 1 FROM "Product" p WHERE p."categoryId" = c.id AND p."deletedAt" IS NULL)
    AND NOT EXISTS (SELECT 1 FROM "MenuCategoryAssignment" a WHERE a."categoryId" = c.id);
 

@@ -126,17 +126,18 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
     where: { venueId_slug: { venueId, slug } },
   })
 
-  // El nombre de una ELIMINADA (encargo bc1dcc) sí se puede usar: el dueño ya no la ve. Es otra categoría (otra fila, sin las
-  // reglas ni la impresora de la vieja); el slug es interno y se le agrega una marca, como hace la app al crear. Una VISIBLE con
-  // ese nombre sigue rechazándose, también la que ya se creó así (su slug lleva la marca: se busca por nombre; Codex r3 B1).
   if ((existingCategory && !existingCategory.deletedAt) || (await hayVisibleConEseNombre(venueId, data.name))) {
     throw new BadRequestError(`Ya existe una categoría con el nombre '${data.name}' en este establecimiento.`)
   }
-  const slugLibre = existingCategory ? `${slug}-${Date.now().toString(36)}` : slug
+  // El nombre de una ELIMINADA (encargo bc1dcc) sí se puede usar: el dueño ya no la ve. Se REUSA esa misma fila, como cuando hoy
+  // se vuelve a prender una apagada, con lo que pide el alta (foto, color, horario, SAT, impresora y padre vuelven a su valor de
+  // alta). Así nunca hay dos «EVENTO»: sus productos borrados, si regresan, caen en la que el dueño ve, y una promoción por nombre
+  // no alcanza a otra categoría (Codex r5). Las reglas que ya apuntaban a ella (comisiones, promociones) siguen, como al prenderla.
+  const reusar = existingCategory?.deletedAt ? existingCategory : await eliminadaConEseNombre(venueId, data.name)
 
   const createData: Prisma.MenuCategoryCreateInput = {
     // Explicitly map fields from DTO to ensure type safety and avoid passing unwanted properties
-    name: data.name,
+    name: data.name.trim(),
     description: data.description,
     displayOrder: data.displayOrder,
     imageUrl: data.imageUrl,
@@ -146,7 +147,7 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
     availableFrom: data.availableFrom,
     availableUntil: data.availableUntil,
     // availableDays: data.availableDays, // Handled below
-    slug: slugLibre, // generated slug
+    slug, // generated slug
     venue: { connect: { id: venueId } },
     // Campos fiscales SAT (CFDI 4.0) — defaults para productos de la categoría
     ...(data.defaultSatProductKey !== undefined && { defaultSatProductKey: data.defaultSatProductKey }),
@@ -184,7 +185,37 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
     }
   }
 
-  const category = await prisma.menuCategory.create({ data: createData })
+  const category = reusar
+    ? await prisma.menuCategory
+        .update({
+          where: { id: reusar.id, venueId, deletedAt: { not: null } },
+          data: {
+            name: createData.name,
+            description: createData.description ?? null,
+            displayOrder: createData.displayOrder ?? 0,
+            imageUrl: createData.imageUrl ?? null,
+            color: createData.color ?? null,
+            icon: createData.icon ?? null,
+            active: createData.active ?? true,
+            deletedAt: null,
+            isDemo: false,
+            availableFrom: createData.availableFrom ?? null,
+            availableUntil: createData.availableUntil ?? null,
+            availableDays: { set: (createData.availableDays as string[] | undefined) ?? [] },
+            defaultSatProductKey: createData.defaultSatProductKey ?? null,
+            defaultSatUnitKey: createData.defaultSatUnitKey ?? null,
+            parent: createData.parent ?? { disconnect: true },
+            printStation: createData.printStation ?? { disconnect: true },
+          },
+        })
+        .catch(e => {
+          // Una importación o un producto que regresó la volvió a mostrar en medio: ya existe, como cualquier otra con ese nombre.
+          if ((e as any)?.code === 'P2025') {
+            throw new BadRequestError(`Ya existe una categoría con el nombre '${data.name}' en este establecimiento.`)
+          }
+          throw e
+        })
+    : await prisma.menuCategory.create({ data: createData })
 
   // Handle menu assignments
   if (data.avoqadoMenus && data.avoqadoMenus.length > 0) {
@@ -241,6 +272,14 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
   logAction({ venueId, action: 'MENU_CATEGORY_CREATED', entity: 'MenuCategory', entityId: category.id, data: { name: category.name } })
 
   return category
+}
+
+/** Una categoría ELIMINADA con este nombre (sin importar mayúsculas), para reusarla al crear otra igual. */
+async function eliminadaConEseNombre(venueId: string, name: string): Promise<MenuCategory | null> {
+  return prisma.menuCategory.findFirst({
+    where: { venueId, deletedAt: { not: null }, name: { equals: name.trim(), mode: 'insensitive' } },
+    orderBy: [{ deletedAt: 'desc' }, { id: 'asc' }],
+  })
 }
 
 /** ¿El dueño ya ve otra categoría con este nombre? (sin importar mayúsculas; `excepto` = la que se está editando) */
@@ -314,10 +353,6 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
   const updateData: Prisma.MenuCategoryUpdateInput = {}
 
   if (data.name && data.name !== category.name) {
-    // Una VISIBLE con ese nombre lo rechaza aunque su slug lleve marca (encargo bc1dcc, Codex r4 B1).
-    if (await hayVisibleConEseNombre(venueId, data.name, categoryId)) {
-      throw new BadRequestError(`A category with the name '${data.name}' already exists in this venue.`)
-    }
     updateData.name = data.name
     const newSlugFromName = generateSlug(data.name) // Ensure slug is a string for the check
     updateData.slug = newSlugFromName
@@ -325,12 +360,7 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
       where: { venueId_slug: { venueId, slug: newSlugFromName } }, // Use the string variable here
     })
     if (existingCategoryWithNewSlug && existingCategoryWithNewSlug.id !== categoryId) {
-      // El nombre de una ELIMINADA (encargo bc1dcc) sí se puede usar: el dueño ya no la ve. El slug es interno; se le agrega
-      // una marca, como hace la app al crear.
-      if (!existingCategoryWithNewSlug.deletedAt) {
-        throw new BadRequestError(`A category with the name '${data.name}' already exists in this venue.`)
-      }
-      updateData.slug = `${newSlugFromName}-${Date.now().toString(36)}`
+      throw new BadRequestError(`A category with the name '${data.name}' already exists in this venue.`)
     }
   } else if (data.name) {
     updateData.name = data.name // Name provided but same as before, no slug change needed
@@ -397,19 +427,6 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
     // Prisma treats undefined as 'do not update'.
   }
 
-  // `deletedAt: null` en la ESCRITURA (Codex r1 #12): si la eliminaron entre la lectura y aquí, 404 y no se vuelve a prender.
-  const updatedCategory = await prisma.menuCategory
-    .update({
-      where: { id: categoryId, venueId, deletedAt: null },
-      data: updateData,
-    })
-    .catch(e => {
-      if ((e as any)?.code === 'P2025') throw new NotFoundError(`Menu category with ID ${categoryId} not found in venue ${venueId}.`)
-      throw e
-    })
-
-  // Menús y productos DESPUÉS de la categoría (Codex r3 R1): si la eliminaron en medio, el 404 de arriba sale sin haber escrito
-  // nada; y mover un producto vivo aquí no puede «desesconderla» antes de que la escritura de arriba revise.
   // Handle avoqadoMenus (Menu Assignments)
   if (data.avoqadoMenus) {
     // 1. Delete existing assignments for this category
@@ -450,6 +467,18 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
       })
       .catch(rechazoDelEscritorUnico)
   }
+
+  // `deletedAt: null` también en la ESCRITURA (Codex r1 #12): si la eliminaron entre la lectura y aquí, 404 y no se prende. Si este
+  // mismo guardado movió un producto vivo a ella, la base ya la volvió a mostrar: es lo que el dueño pidió.
+  const updatedCategory = await prisma.menuCategory
+    .update({
+      where: { id: categoryId, venueId, deletedAt: null },
+      data: updateData,
+    })
+    .catch(e => {
+      if ((e as any)?.code === 'P2025') throw new NotFoundError(`Menu category with ID ${categoryId} not found in venue ${venueId}.`)
+      throw e
+    })
 
   // 🔌 REAL-TIME: Broadcast category update via Socket.IO
   const broadcastingService = socketManager.getBroadcastingService()

@@ -78,8 +78,37 @@ export async function createCategory(req: Request, res: Response, next: NextFunc
     let slug = slugify(name)
     const existing = await prisma.menuCategory.findUnique({
       where: { venueId_slug: { venueId, slug } },
-      select: { id: true },
+      select: { id: true, deletedAt: true },
     })
+    // Una ELIMINADA con ese nombre se reusa, como en el panel (encargo bc1dcc): nunca dos «EVENTO» que el dueño no distingue. Sus
+    // datos de alta se reponen; si en medio volvió a mostrarse, se crea otra como siempre.
+    if (existing?.deletedAt) {
+      const reusada = await prisma.menuCategory.updateMany({
+        where: { id: existing.id, venueId, deletedAt: { not: null } },
+        data: {
+          name: name.trim(),
+          description: description || null,
+          color: color || null,
+          icon: icon || null,
+          imageUrl: imageUrl || null,
+          displayOrder: displayOrder ?? 0,
+          parentId: parentId || null,
+          active: true,
+          deletedAt: null,
+          isDemo: false,
+          availableFrom: null,
+          availableUntil: null,
+          availableDays: [],
+          defaultSatProductKey: null,
+          defaultSatUnitKey: null,
+          printStationId: null,
+        },
+      })
+      if (reusada.count === 1) {
+        const category = await prisma.menuCategory.findUniqueOrThrow({ where: { id: existing.id } })
+        return res.status(201).json({ success: true, data: category })
+      }
+    }
     if (existing) {
       slug = `${slug}-${Date.now().toString(36)}`
     }
