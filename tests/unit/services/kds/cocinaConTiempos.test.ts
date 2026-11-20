@@ -165,9 +165,7 @@ describe('D17 · el tablero y «Recientes» (SERVIDOR)', () => {
         preparationVersion: 1,
         archivedAt: null,
         kitchenDoneAt: expect.any(Object),
-        items: {
-          some: { OR: [{ preparation: { path: ['READY'], gt: 0 } }, { preparation: { path: ['DELIVERED'], gt: 0 } }] },
-        },
+        items: { some: {} },
       }),
     )
     expect(primera[0].take).toBe(20)

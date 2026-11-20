@@ -325,10 +325,9 @@ export async function listRecentKdsOrders(
           preparationVersion: 1,
           archivedAt: null,
           kitchenDoneAt: { gte: desde },
-          // Codex r6 #5: también lo que la caja ya entregó (su hora en «Recientes» sigue; «Deshacer» explica que ya salió).
-          items: {
-            some: { OR: [{ preparation: { path: ['READY'], gt: 0 } }, { preparation: { path: ['DELIVERED'], gt: 0 } }] },
-          },
+          // Codex r6 #5 y r7 #4: también lo que la caja ya entregó o canceló (su hora en «Recientes» sigue; «Deshacer» explica que
+          // ya no queda nada listo). Sin comanda vacía.
+          items: { some: {} },
         },
         include: { items: true },
         orderBy: [{ kitchenDoneAt: 'desc' }, { id: 'desc' }],

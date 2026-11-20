@@ -8,3 +8,7 @@ ALTER TABLE "public"."VenueSettings" ADD COLUMN IF NOT EXISTS "kitchenCanRelease
 -- Sólo las de preparación por producto en READY (pocas: la v1 es de mesas con tiempos).
 UPDATE "public"."KdsOrder" SET "kitchenDoneAt" = "updatedAt"
 WHERE "preparationVersion" = 1 AND status = 'READY' AND "kitchenDoneAt" IS NULL;
+-- Codex r7 #5: las que la caja entregó (o se cancelaron) el último día también conservan su hora en «Recientes». Acotado a un día.
+UPDATE "public"."KdsOrder" SET "kitchenDoneAt" = COALESCE("completedAt", "updatedAt")
+WHERE "preparationVersion" = 1 AND status = 'COMPLETED' AND "kitchenDoneAt" IS NULL
+  AND COALESCE("completedAt", "updatedAt") > (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 day';
