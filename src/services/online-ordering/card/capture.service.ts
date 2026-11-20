@@ -47,7 +47,7 @@ type Plan =
   | { do: 'ACCEPT_WITHOUT_CAPTURE'; releaseChargeId?: string }
   | { do: 'REJECT_PAYMENT_FAILED'; releaseChargeId?: string }
   | { do: 'EXPIRE'; now: Date }
-  | { do: 'CAPTURE'; charge: OnlineOrderCharge; now: Date }
+  | { do: 'CAPTURE'; charge: OnlineOrderCharge }
 
 const rejectedForPayment = async (i: AcceptInput): Promise<TransitionResult> => {
   const r = await rejectOnlineOrder({ ...i, reason: OnlineOrderRejectReason.PAYMENT_FAILED })
@@ -121,7 +121,7 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
       data: { status: OnlineOrderChargeStatus.CAPTURING, attempts: { increment: 1 } },
     })
     if (won.count !== 1) return { do: 'ANSWER', result: { outcome: 'CONFIRMING_PAYMENT' } }
-    return { do: 'CAPTURE', charge, now }
+    return { do: 'CAPTURE', charge }
   }, ORDER_LOCK_WAIT_BUDGET)
 
   switch (plan.do) {
@@ -144,7 +144,9 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
       return expired
     }
     case 'CAPTURE':
-      return captureCharge(plan.charge, i.orderId, { staffId: i.staffId, estimatedMinutes: minutes, now: plan.now })
+      // D661 (3A): la hora de lo que escribe la captura (`acceptedAt`, la marca de cocina) se lee al escribir, después de Stripe; sólo
+      // las pruebas la fijan (`i.now`).
+      return captureCharge(plan.charge, i.orderId, { staffId: i.staffId, estimatedMinutes: minutes, now: i.now })
   }
 }
 
@@ -155,7 +157,7 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
 export async function captureCharge(
   charge: OnlineOrderCharge,
   orderId: string,
-  meta: { staffId: string | null; estimatedMinutes: number; now: Date },
+  meta: { staffId: string | null; estimatedMinutes: number; now?: Date },
 ): Promise<TransitionResult> {
   const merchant = chargeMerchant(charge) // Codex r2 #3: la cuenta Stripe de la foto, nunca el comercio vivo
   const provider = getProvider(merchant)
@@ -208,7 +210,7 @@ class CaptureNotAccepted extends Error {}
 export async function finishCapture(
   chargeId: string,
   state: AuthorizationState,
-  meta: { staffId: string | null; estimatedMinutes: number; now: Date },
+  meta: { staffId: string | null; estimatedMinutes: number; now?: Date },
 ): Promise<TransitionResult> {
   const charge = await prisma.onlineOrderCharge.findUnique({
     where: { id: chargeId },
@@ -244,9 +246,11 @@ export async function finishCapture(
     done = await withDeadlockRetry(
       async tx => {
         if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new CaptureNotAccepted('ORDER_NOT_FOUND')
+        // D661 (3A): la hora de la escritura, ya con el candado (`meta.now` sólo la fija quien la sabe: pruebas, conciliador).
+        const escritura = meta.now ?? new Date()
         const won = await tx.onlineOrderCharge.updateMany({
           where: { id: chargeId, status: OnlineOrderChargeStatus.CAPTURING },
-          data: { status: OnlineOrderChargeStatus.CAPTURED, capturedAt: meta.now, capturedAmount, lastError: null },
+          data: { status: OnlineOrderChargeStatus.CAPTURED, capturedAt: escritura, capturedAmount, lastError: null },
         })
         if (won.count !== 1) return null // alguien ya terminó este cobro
 
@@ -290,7 +294,7 @@ export async function finishCapture(
           kind: 'ACCEPT',
           venueId,
           orderId,
-          now: meta.now,
+          now: escritura,
           allowCapturing: true,
           onlineData: now => ({ acceptedAt: now, estimatedReadyAt: new Date(now.getTime() + minutes * 60_000) }),
           orderExtra: now => (marcarCocina ? { kitchenPendingAt: now } : {}),
@@ -386,6 +390,8 @@ export async function failCapture(chargeId: string, meta: { staffId: string | nu
         reason: OnlineOrderRejectReason.PAYMENT_FAILED,
         now: meta.now,
         allowCapturing: true,
+        // D661 (R46): el escritor del cargo es el único que rechaza un apartado de «Nadie»; sella el cargo en esta misma transacción.
+        porFalloDeCobro: true,
         afterCas: async (tx, cas) => {
           const failed = await markFailed(tx)
           if (cas.r === 'OK' && failed.count !== 1) throw new ChargeNoLongerCapturing()

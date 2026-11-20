@@ -876,3 +876,79 @@ describe('cargo de tarjeta (fase 2): la máquina lo lee bajo el candado', () => 
     expect(armarComandasTrasCommit).toHaveBeenCalledWith('v1', 'ord1', 'ROUND')
   })
 })
+
+describe('D661 (3A): un apartado de tarjeta de «Nadie» se abre (= se cobra) sólo desde una caja, y sólo el cobro fallido lo rechaza', () => {
+  /** El apartado: `CARD_ONLINE` sin aceptación (su modo, guardado al confirmar). */
+  const apartado = (o: Parameters<typeof row>[0] = {}) => ({ ...row({ requiresAcceptance: false, ...o }), paymentMode: 'CARD_ONLINE' })
+  /** Los conteos de `acceptOnlineOrder` contestan como la fila: ¿es tarjeta?, ¿es de «Nadie»? */
+  const pedidoQue = (o: { tarjeta: boolean; nadie: boolean }) =>
+    prismaMock.onlineOrder.count.mockImplementation((async ({ where }: any) => {
+      if (where.paymentMode === 'CARD_ONLINE' && !o.tarjeta) return 0
+      if (where.requiresAcceptance === false && !o.nadie) return 0
+      return 1
+    }) as any)
+  afterEach(() => prismaMock.onlineOrder.count.mockReset())
+
+  it('un folio de caja sigue sin poder rechazarse a mano (R46)', async () => {
+    const STALE = { outcome: 'STALE', status: 'PENDING_ACCEPTANCE' }
+    const sellar = jest.fn(async () => undefined)
+    // Un folio de caja: ni a mano ni con la bandera del cobro (no tiene cargo que sellar).
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ requiresAcceptance: false }) as any)
+    await expect(rejectOnlineOrder({ ...base, reason: 'OTHER' })).resolves.toEqual(STALE)
+    await expect(rejectOnlineOrder({ ...base, reason: 'PAYMENT_FAILED', porFalloDeCobro: true, afterCas: sellar })).resolves.toEqual(STALE)
+    // Un apartado de tarjeta de «Nadie» a mano (la bandeja, el panel y el MCP nunca mandan la bandera ni el gancho).
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(apartado() as any)
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue({ id: 'ch1', status: 'AUTHORIZED' } as any)
+    await expect(rejectOnlineOrder({ ...base, reason: 'OTHER' })).resolves.toEqual(STALE)
+    await expect(rejectOnlineOrder({ ...base, reason: 'PAYMENT_FAILED' })).resolves.toEqual(STALE)
+    // La bandera sin el gancho que sella el cargo en la misma transacción, o con otro motivo, tampoco.
+    await expect(rejectOnlineOrder({ ...base, reason: 'PAYMENT_FAILED', porFalloDeCobro: true })).resolves.toEqual(STALE)
+    await expect(rejectOnlineOrder({ ...base, reason: 'OTHER', porFalloDeCobro: true, afterCas: sellar })).resolves.toEqual(STALE)
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrderCharge.updateMany).not.toHaveBeenCalled()
+    expect(notifyOrderEvent).not.toHaveBeenCalled()
+  })
+
+  it('D661: sólo el escritor interno del cargo (cobro fallido) rechaza un apartado CARD_ONLINE de «Nadie» con PAYMENT_FAILED, sellando el cargo en esa MISMA transacción', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(apartado() as any)
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue({ id: 'ch1', status: 'CAPTURING' } as any)
+    const sellar = jest.fn(async (tx: any) => tx.onlineOrderCharge.updateMany({ where: { id: 'ch1', status: 'CAPTURING' }, data: {} }))
+    await expect(
+      rejectOnlineOrder({ ...base, reason: 'PAYMENT_FAILED', porFalloDeCobro: true, allowCapturing: true, afterCas: sellar }),
+    ).resolves.toEqual({ outcome: 'OK', status: 'REJECTED' })
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: 'oo1', status: { in: ['PENDING_ACCEPTANCE'] } },
+      data: expect.objectContaining({ status: 'REJECTED', rejectReason: 'PAYMENT_FAILED' }),
+    })
+    expect(prismaMock.order.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'CANCELLED' } }))
+    expect(sellar).toHaveBeenCalledWith(prismaMock, expect.objectContaining({ r: 'OK' }))
+    // Una sola transacción: el rechazo y el sello del cargo se confirman (o se revierten) juntos.
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(prismaMock.onlineOrderCharge.updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(
+      prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0],
+    )
+  })
+
+  it('aceptar un pedido «Nadie» CARD_ONLINE sin la apertura explícita de una caja responde OPEN_FROM_CAJA y nunca llega a la captura', async () => {
+    pedidoQue({ tarjeta: true, nadie: true })
+    await expect(acceptOnlineOrder(base)).resolves.toEqual({ outcome: 'OPEN_FROM_CAJA' })
+    expect(acceptCardOnlineOrder).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    // Con la apertura explícita: la captura de siempre.
+    await expect(acceptOnlineOrder({ ...base, abrirPagadoEnLinea: true })).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    expect(acceptCardOnlineOrder).toHaveBeenCalledWith({ ...base, abrirPagadoEnLinea: true })
+  })
+
+  it('«Mi equipo» con tarjeta y los folios de caja aceptan sin el campo, como hoy', async () => {
+    pedidoQue({ tarjeta: true, nadie: false })
+    await expect(acceptOnlineOrder(base)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    expect(acceptCardOnlineOrder).toHaveBeenCalledWith(base)
+    ;(acceptCardOnlineOrder as jest.Mock).mockClear()
+    // Un folio de caja (sin tarjeta) sin pagar: su respuesta de siempre, sin la captura.
+    pedidoQue({ tarjeta: false, nadie: true })
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ requiresAcceptance: false }) as any)
+    await expect(acceptOnlineOrder(base)).resolves.toEqual({ outcome: 'PAYMENT_REQUIRED' })
+    expect(acceptCardOnlineOrder).not.toHaveBeenCalled()
+  })
+})

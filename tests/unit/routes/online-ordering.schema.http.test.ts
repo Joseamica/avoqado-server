@@ -27,6 +27,7 @@ jest.mock('@/controllers/mobile/onlineOrders.mobile.controller', () => {
     inbox: nada,
     toPayPanel: nada,
     accept: nada,
+    acceptPanel: nada,
     reject: nada,
     ready: nada,
     delivered: nada,

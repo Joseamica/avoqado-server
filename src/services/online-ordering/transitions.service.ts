@@ -35,6 +35,8 @@ export type TransitionResult =
   | { outcome: 'HAS_PAYMENTS' }
   /** Fase 2: el banco está cobrando la tarjeta del pedido; nada lo mueve hasta saber el desenlace. */
   | { outcome: 'CONFIRMING_PAYMENT' }
+  /** D661: un apartado de tarjeta de «Nadie» se abre (= se cobra) sólo desde una caja actualizada; nada se escribió ni se cobró. */
+  | { outcome: 'OPEN_FROM_CAJA' }
 
 export type TransitionKind = 'ACCEPT' | 'REJECT' | 'EXPIRE' | 'CUSTOMER_CANCEL' | 'READY' | 'DELIVER'
 
@@ -139,6 +141,11 @@ export interface CasArgs {
   extraWhere?: (now: Date, hasMoney: boolean) => Prisma.OnlineOrderWhereInput
   /** Fase 2: sólo la captura misma, que termina su propia aceptación o rechazo, corre con el cargo en `CAPTURING`. */
   allowCapturing?: true
+  /**
+   * D661 (R46): el rechazo `PAYMENT_FAILED` que pide un escritor INTERNO del cargo de tarjeta (cobro fallido, aviso de Stripe de
+   * «cancelado»), que sella el cargo en la MISMA transacción. Sólo así se rechaza un apartado `CARD_ONLINE` sin aceptación.
+   */
+  porFalloDeCobro?: true
 }
 
 /**
@@ -187,8 +194,9 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
   }
   if (!rule.from.includes(row.status)) return stale(row.status)
   // R46: un folio no se rechaza: se quita con «Cancelar folio» (§12, `orders:cancel-unpaid`). Un REJECTED de folio queda sólo por
-  // datos que lo traigan.
-  if (a.kind === 'REJECT' && row.requiresAcceptance === false) return stale(row.status)
+  // datos que lo traigan. D661: la única excepción es el cobro fallido de un apartado de tarjeta, que lo pide el escritor del cargo.
+  const rechazoPorCobro = a.porFalloDeCobro === true && row.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE
+  if (a.kind === 'REJECT' && row.requiresAcceptance === false && !rechazoPorCobro) return stale(row.status)
 
   const hasMoney = row.order.paymentStatus !== PaymentStatus.PENDING || new Prisma.Decimal(row.order.paidAmount).gt(0)
   // R44: un folio cuyo abono se reembolsó completo (cuenta PARTIAL con dinero neto 0, leído aquí bajo el candado que también toman
@@ -344,6 +352,8 @@ export interface AcceptInput {
   staffId: string | null
   estimatedMinutes?: number
   now?: Date
+  /** D661: una caja actualizada (rutas de la TPV y del POS, cuerpo explícito) abre un apartado de «Nadie». Abrirlo = cobrarlo. */
+  abrirPagadoEnLinea?: true
 }
 
 export async function prepMinutes(venueId: string, estimatedMinutes?: number): Promise<number> {
@@ -357,6 +367,15 @@ export async function acceptOnlineOrder(i: AcceptInput): Promise<TransitionResul
     where: { orderId: i.orderId, venueId: i.venueId, paymentMode: OnlineOrderPaymentMode.CARD_ONLINE },
   })
   if (card > 0) {
+    // D661: el modo es el del pedido (se copió del borrador al confirmar). Un apartado de «Nadie» no se «acepta»: lo abre una caja.
+    if (
+      i.abrirPagadoEnLinea !== true &&
+      (await prisma.onlineOrder.count({
+        where: { orderId: i.orderId, venueId: i.venueId, paymentMode: OnlineOrderPaymentMode.CARD_ONLINE, requiresAcceptance: false },
+      })) > 0
+    ) {
+      return { outcome: 'OPEN_FROM_CAJA' }
+    }
     // Dinámico: el módulo de la captura importa esta máquina de estados.
     const { acceptCardOnlineOrder } = await import('./card/capture.service')
     return acceptCardOnlineOrder(i)
@@ -464,7 +483,10 @@ export async function rejectOnlineOrder(i: {
   afterCas?: AfterCasInTx
   /** Después del commit: recibe lo que devolvió `afterCas` en el intento que confirmó. */
   alConfirmar?: (valor: unknown) => void
+  /** D661 (R46): sólo los escritores internos del cargo; vale con `PAYMENT_FAILED` y con `afterCas` (el sello en la misma tx). */
+  porFalloDeCobro?: true
 }): Promise<TransitionResult> {
+  const porFalloDeCobro = i.porFalloDeCobro === true && i.reason === 'PAYMENT_FAILED' && !!i.afterCas
   const r = await casTransition(
     {
       kind: 'REJECT',
@@ -472,6 +494,7 @@ export async function rejectOnlineOrder(i: {
       orderId: i.orderId,
       now: i.now,
       allowCapturing: i.allowCapturing,
+      ...(porFalloDeCobro ? { porFalloDeCobro: true as const } : {}),
       onlineData: now => ({ rejectedAt: now, rejectReason: i.reason, rejectNote: i.note ?? null }),
     },
     i.afterCas,

@@ -60,6 +60,13 @@ function reply(res: Response, r: TransitionResult) {
         code: 'ONLINE_ORDER_CONFIRMING_PAYMENT',
         error: 'Confirmando el pago con el banco. Espera unos segundos.',
       })
+    case 'OPEN_FROM_CAJA':
+      return res.status(409).json({
+        success: false,
+        code: 'OPEN_FROM_CAJA',
+        error:
+          'Este pedido ya se pagó con tarjeta: se abre desde la caja (TPV o POS actualizados), que es donde se cobra. No se cobró nada.',
+      })
     default:
       // Un resultado que este mapa no conoce es un error del servidor (500), nunca un «no existe» que engañe a la caja.
       throw new Error(`Resultado de transición desconocido: ${String((r as { outcome?: unknown }).outcome)}`)
@@ -139,11 +146,22 @@ export const deliveryCash = async (req: Request, res: Response, next: NextFuncti
   }
 }
 
-export const accept = async (req: Request, res: Response, next: NextFunction) => {
+/**
+ * D661: abrir un pedido pagado con tarjeta en «Nadie» lo COBRA, y sólo lo hace una caja actualizada: por sus rutas (`desdeCaja`) y con
+ * `{ abrirPagadoEnLinea: true }`. El panel nunca abre (aunque mande el campo); una app vieja (sin el campo) recibe 409 OPEN_FROM_CAJA.
+ */
+const makeAccept = (desdeCaja: boolean) => async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
     const estimatedMinutes = typeof req.body?.estimatedMinutes === 'number' ? req.body.estimatedMinutes : undefined
-    const r = await acceptOnlineOrder({ venueId, orderId, staffId: staffOf(req), estimatedMinutes })
+    const abrir = desdeCaja && req.body?.abrirPagadoEnLinea === true
+    const r = await acceptOnlineOrder({
+      venueId,
+      orderId,
+      staffId: staffOf(req),
+      estimatedMinutes,
+      ...(abrir ? { abrirPagadoEnLinea: true as const } : {}),
+    })
     // Aceptar sólo puede exigir pago en un folio (QR o liga): se cobra antes de prepararlo.
     if (r.outcome === 'PAYMENT_REQUIRED') {
       return res.status(409).json({ success: false, code: 'PAYMENT_REQUIRED', error: 'Este pedido se cobra antes de prepararlo' })
@@ -153,6 +171,11 @@ export const accept = async (req: Request, res: Response, next: NextFunction) =>
     return next(e)
   }
 }
+
+/** Apps (TPV y POS): aceptar, y abrir un pedido pagado con tarjeta en «Nadie». */
+export const accept = makeAccept(true)
+/** Panel: la MISMA aceptación, pero nunca abre (cobra) un pedido pagado con tarjeta en «Nadie». */
+export const acceptPanel = makeAccept(false)
 
 export const reject = async (req: Request, res: Response, next: NextFunction) => {
   try {

@@ -109,6 +109,8 @@ export const acceptSchema = z.object({
   params: orderParams,
   body: z.object({
     estimatedMinutes: z.number().int('Debe ser un número entero').min(1, 'Mínimo 1 minuto').max(240, 'Máximo 240 minutos').optional(),
+    /** D661: la caja (TPV o POS actualizados) abre un pedido pagado con tarjeta en «Nadie»; abrirlo lo cobra. Sólo cuenta en sus rutas. */
+    abrirPagadoEnLinea: z.boolean({ invalid_type_error: 'abrirPagadoEnLinea debe ser verdadero o falso' }).optional(),
   }),
 })
 export const rejectSchema = z.object({

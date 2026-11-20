@@ -67,6 +67,9 @@ const AUDIT: Record<Action, string> = {
 
 /** El mismo texto de la API (`accept` del controlador móvil): un folio no se prepara sin pago. */
 const FOLIO_SIN_PAGAR = 'Este pedido se cobra antes de prepararlo'
+/** D661: un pedido pagado con tarjeta en «No, entran solos» se abre (y así se cobra) sólo desde la caja; el MCP no lo abre. */
+const ABRIR_DESDE_LA_CAJA =
+  'Este pedido ya se pagó con tarjeta y se abre desde la caja (TPV o POS actualizados), que es donde se cobra. No se aplicó nada.'
 /** R46: un folio no se rechaza; se quita con CANCELAR. Nunca promete «no se le cobró nada» (§5: un efectivo sin red puede subir después). */
 const FOLIO_NO_SE_RECHAZA =
   'Este pedido se paga en caja y no se rechaza; no se aplicó nada. Para quitarlo usa CANCELAR (pide el permiso de cancelar cuentas sin cobro).'
@@ -224,11 +227,13 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         })
       }
 
+      const tarjeta = order.paymentMode === 'CARD_ONLINE'
+      // D661: la misma regla que el servicio (`OPEN_FROM_CAJA`), dicha antes de la vista previa: aquí no se promete un cobro.
+      if (action === 'ACCEPT' && folio && tarjeta) return text({ ok: false, code: 'OPEN_FROM_CAJA', error: ABRIR_DESDE_LA_CAJA })
       if (action === 'ACCEPT' && folio && !esVentaCerrada(order.paymentStatus)) {
         return text({ ok: false, code: 'PAYMENT_REQUIRED', error: FOLIO_SIN_PAGAR })
       }
 
-      const tarjeta = order.paymentMode === 'CARD_ONLINE'
       if (!confirm) {
         // M-13: la vista previa dice lo que se le va a avisar al comensal: los minutos al aceptar, el motivo al rechazar.
         const minutos = action === 'ACCEPT' ? (estimatedMinutes ?? (await getSettings(venueId)).defaultPrepMinutes) : null

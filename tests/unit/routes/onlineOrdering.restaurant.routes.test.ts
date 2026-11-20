@@ -54,6 +54,8 @@ jest.mock('@/controllers/mobile/onlineOrders.mobile.controller', () => {
     toPayPanel: respond,
     deliveryCash: respond,
     accept: respond,
+    // D661: el panel acepta con su propio manejador (nunca abre un pedido pagado con tarjeta en «Nadie»).
+    acceptPanel: respond,
     reject: respond,
     ready: respond,
     delivered: respond,

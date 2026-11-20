@@ -53,7 +53,8 @@ router.get('/orders', validateRequest(inboxSchema), checkPermission('orders:read
 router.get('/orders/to-pay', validateRequest(toPaySchema), checkPermission('orders:read'), orders.toPayPanel)
 // S3 (clientes): UN pedido por su cuenta, para devolver a la tarjeta después de las 24 h de la bandeja. Sin plan (R14).
 router.get('/orders/:orderId', validateRequest(orderActionSchema), checkPermission('orders:read'), admin.getOnlineOrderHandler)
-router.post('/orders/:orderId/accept', validateRequest(acceptSchema), checkPermission('orders:update'), orders.accept)
+// D661: el panel acepta «Mi equipo» como siempre, pero no abre (cobra) un pedido pagado con tarjeta en «Nadie»: eso es de la caja.
+router.post('/orders/:orderId/accept', validateRequest(acceptSchema), checkPermission('orders:update'), orders.acceptPanel)
 router.post('/orders/:orderId/reject', validateRequest(rejectSchema), checkPermission('orders:update'), orders.reject)
 router.post('/orders/:orderId/ready', validateRequest(orderActionSchema), checkPermission('orders:update'), orders.ready)
 router.post('/orders/:orderId/delivered', validateRequest(orderActionSchema), checkPermission('orders:update'), orders.delivered)

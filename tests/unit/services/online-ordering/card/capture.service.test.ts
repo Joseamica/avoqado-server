@@ -34,6 +34,7 @@ jest.mock('@/services/online-ordering/transitions.service', () => ({
 }))
 
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { releaseCharge } from '@/services/online-ordering/card/release.service'
 import { acceptCardOnlineOrder, failCapture } from '@/services/online-ordering/card/capture.service'
 import {
@@ -350,6 +351,40 @@ describe('fix r1', () => {
       where: { id: 'ch1', status: 'CAPTURING' },
       data: { lastError: 'fetch failed' },
     })
+  })
+})
+
+describe('D661 (3A): abrir un apartado = cobrarlo', () => {
+  it('acceptedAt y kitchenPendingAt son la hora en que la captura ESCRIBE el pedido (bajo el candado, después de Stripe), no la de antes de cobrar', async () => {
+    ;(debeMarcarCocina as jest.Mock).mockResolvedValueOnce(true)
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ acceptDeadlineAt: new Date(Date.now() + 300_000) }) as any)
+    let cobrado = 0
+    capture.mockImplementation(async () => {
+      await new Promise(r => setTimeout(r, 25)) // Stripe tarda
+      cobrado = Date.now()
+      return succeeded()
+    })
+    // Sin `now` (como en la API): el reloj real.
+    await expect(acceptCardOnlineOrder({ venueId: 'v1', orderId: 'ord1', staffId: 'staff1' })).resolves.toMatchObject({ outcome: 'OK' })
+    const args = (casTransitionInTx as jest.Mock).mock.calls[0][1]
+    expect(args.now.getTime()).toBeGreaterThanOrEqual(cobrado)
+    expect(args.onlineData(args.now)).toMatchObject({ acceptedAt: args.now })
+    expect(args.orderExtra(args.now)).toEqual({ kitchenPendingAt: args.now })
+    const sello = prismaMock.onlineOrderCharge.updateMany.mock.calls.find(([a]: any) => a.data.status === 'CAPTURED')![0] as any
+    expect(sello.data.capturedAt.getTime()).toBeGreaterThanOrEqual(cobrado)
+  })
+
+  it('el cobro fallido pide el rechazo como escritor del cargo (porFalloDeCobro) y sella CAPTURE_FAILED en ESA transacción (afterCas)', async () => {
+    capture.mockRejectedValue(Object.assign(new Error('canceled'), { type: 'StripeInvalidRequestError' }))
+    getAuthorization.mockResolvedValue({ ...succeeded(), piStatus: 'canceled', amountReceivedCents: 0 })
+    await expect(acceptCardOnlineOrder(base)).resolves.toEqual({ outcome: 'STALE', status: 'REJECTED' })
+    const args = (rejectOnlineOrder as jest.Mock).mock.calls[0][0]
+    expect(args).toMatchObject({ reason: 'PAYMENT_FAILED', allowCapturing: true, porFalloDeCobro: true, afterCas: expect.any(Function) })
+    // Los demás rechazos de la captura (sin cargo apartado, total distinto) no son el escritor del cobro: R46 los sigue frenando.
+    ;(rejectOnlineOrder as jest.Mock).mockClear()
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ charge: { status: 'RELEASED' } }) as any)
+    await acceptCardOnlineOrder(base)
+    expect((rejectOnlineOrder as jest.Mock).mock.calls[0][0]).not.toHaveProperty('porFalloDeCobro')
   })
 })
 

@@ -355,6 +355,25 @@ describe('online_order_respond', () => {
     expect(mockAccept).not.toHaveBeenCalled()
   })
 
+  it('D661: ACCEPT sobre un pedido pagado con tarjeta en «Nadie» responde OPEN_FROM_CAJA (se abre desde la caja): sin vista previa de cobro, sin ejecutar ni auditar', async () => {
+    mockGetInboxOrder.mockResolvedValue({
+      ...pending,
+      requiresAcceptance: false,
+      paymentMode: 'CARD_ONLINE',
+      paymentStatus: 'PENDING',
+      card: { status: 'AUTHORIZED', amount: 186 },
+    })
+    for (const confirm of [undefined, true]) {
+      const r = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'ACCEPT', confirm }))
+      expect(r).toMatchObject({ ok: false, code: 'OPEN_FROM_CAJA' })
+      expect(r.error).toMatch(/caja/)
+      expect(r.error).not.toMatch(/se cobra antes de prepararlo/)
+      expect(r).not.toHaveProperty('preview')
+    }
+    expect(mockAccept).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
   it('CANCEL exige orders:cancel-unpaid, busca el pedido directo en el negocio y usa la cancelación del personal (R15)', async () => {
     mockGetInboxOrder.mockResolvedValue(enPreparacion)
     mockCancel.mockResolvedValue({ outcome: 'OK', status: 'CANCELLED_BY_STAFF' })
