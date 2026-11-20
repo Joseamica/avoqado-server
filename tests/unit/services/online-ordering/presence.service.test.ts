@@ -5,6 +5,7 @@ import {
   __resetPresenceDebounceForTests,
   getAcceptingStatus,
   PAUSA_SOLA_TOPE,
+  aplicarGraciaDelDespliegue,
   avanzarCortePausaSola,
   registrarSiLaPausoSola,
   storeView,
@@ -404,15 +405,34 @@ describe('D662 parte 2 (v3) · la pausa sola la decide UNA consulta exacta en Po
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
   })
 
-  it('Codex p2-r4 #3: corte vacío = gracia del despliegue: no hay pausa, no se consulta y el corte queda 20 min adelante', async () => {
+  it('Codex p2-r4 #3 / p2-r6 #2: corte vacío = gracia del despliegue, 20 min después del ARRANQUE del proceso (no de la primera lectura)', async () => {
     conVuelta(pausada(), { autoPauseResumedAt: null })
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
     await flush()
     expect(queryRaw()).not.toHaveBeenCalled()
-    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({
-      where: { venueId: 'v1', autoPauseResumedAt: null },
-      data: { autoPauseResumedAt: min(20) },
-    })
+    const arg = (prismaMock.onlineOrderingSettings.updateMany as jest.Mock).mock.calls[0][0]
+    expect(arg.where).toEqual({ venueId: 'v1', autoPauseResumedAt: null })
+    const gracia = (arg.data.autoPauseResumedAt as Date).getTime()
+    // El proceso de la prueba arrancó hace poco: la gracia es «arranque + 20 min», cerca de ahora + 20 min.
+    expect(gracia).toBeGreaterThan(Date.now() + 19 * 60_000)
+    expect(gracia).toBeLessThanOrEqual(Date.now() + 20 * 60_000)
+  })
+
+  it('con la gracia ya vencida (el proceso lleva más de 20 min), un corte vacío se lee desde la gracia como cualquier corte', async () => {
+    const despues = new Date(Date.now() + 60 * 60_000)
+    conVuelta(vuelta(), { autoPauseResumedAt: null, lastInboxPollAt: new Date(despues.getTime() - 10_000) })
+    await getAcceptingStatus('v1', despues)
+    expect(queryRaw()).toHaveBeenCalledTimes(1)
+  })
+
+  it('al arrancar, toda fila con el corte vacío (tienda apagada incluida) pasa a la gracia; nunca lanza', async () => {
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 3 })
+    await expect(aplicarGraciaDelDespliegue()).resolves.toBe(3)
+    const arg = (prismaMock.onlineOrderingSettings.updateMany as jest.Mock).mock.calls[0][0]
+    expect(arg.where).toEqual({ autoPauseResumedAt: null })
+    expect((arg.data.autoPauseResumedAt as Date).getTime()).toBeGreaterThan(Date.now() + 19 * 60_000)
+    prismaMock.onlineOrderingSettings.updateMany.mockRejectedValue(new Error('db'))
+    await expect(aplicarGraciaDelDespliegue()).resolves.toBe(0)
   })
 
   it('Codex p2-r4 #1: una vuelta llena de fallas sin pareja sube el corte (sin pasar de la última leída) y da otra vuelta', async () => {

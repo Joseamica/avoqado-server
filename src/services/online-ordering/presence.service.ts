@@ -92,8 +92,10 @@ const PAUSA_SOLA_VUELTAS = 5
  * (`ORDER_LOCK_WAIT_BUDGET.timeout`, 15 s). Sólo se usa para subir el corte, nunca para decidir la pausa.
  */
 export const MARGEN_DEFINITIVO_MS = 30_000
-/** Gracia del despliegue: la primera lectura del SERVIDOR nuevo, con el corte vacío, lo pone 20 min adelante (ver `leerPausaSola`). */
+/** Gracia del despliegue: un corte vacío pasa a 20 min después del ARRANQUE de este proceso (ver `leerPausaSola`). */
 export const GRACIA_DESPLIEGUE_MS = 20 * 60_000
+/** Cuándo arrancó este proceso del SERVIDOR (la gracia cuenta desde aquí, no desde la primera lectura: Codex p2-r6 #2). */
+const ARRANQUE = new Date()
 /** La lectura sube el corte (sin esperarlo) cuando puede avanzar al menos esto: una escritura cada pocos minutos por negocio activo. */
 export const AVANCE_MINIMO_MS = 5 * 60_000
 
@@ -217,22 +219,46 @@ function subirCorteSinEsperar(venueId: string, nuevo: Date): void {
 }
 
 /**
+ * D662 parte 2: al ARRANCAR, toda fila con el corte vacío (las de antes del cambio) pasa a la gracia del despliegue, aunque su tienda
+ * esté apagada (Codex p2-r6 #2: si no, una tienda apagada al publicar estrenaría su gracia el día que la encienden, después de otro
+ * reinicio). Una sola escritura por fila en toda su vida; las que el SERVIDOR anterior cree durante el despliegue las toma
+ * `leerPausaSola`. Nunca lanza: si falla, la lectura aplica la misma gracia.
+ */
+export async function aplicarGraciaDelDespliegue(): Promise<number> {
+  try {
+    const r = await prisma.onlineOrderingSettings.updateMany({
+      where: { autoPauseResumedAt: null },
+      data: { autoPauseResumedAt: new Date(ARRANQUE.getTime() + GRACIA_DESPLIEGUE_MS) },
+    })
+    return r.count
+  } catch (error) {
+    logger.warn('[OnlineOrdering] no se pudo poner la gracia del despliegue de la pausa sola al arrancar (la lectura la pone)', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return 0
+  }
+}
+
+/**
  * La pausa sola de un negocio, desde su corte (`vueltaPausaSola`). Si la vuelta trae el tope de fallas sin pareja, sube el corte y da
  * otra (Codex p2-r4 #1). Sin pausa y si el corte puede subir bastante, lo sube sin esperar: así la lectura de mañana es corta.
  * Corte vacío = GRACIA del despliegue (p2-r4 #3): las filas de antes del cambio, o una que el SERVIDOR anterior creó durante el
- * despliegue. La primera lectura del SERVIDOR nuevo lo pone 20 min adelante y, mientras, no hay pausa sola: lo que contestó el
- * servidor anterior (sin `staffAnsweredAt`) nunca cuenta, aunque el despliegue falle y se repita después. Las filas que crea el
- * SERVIDOR nuevo nacen con el corte puesto (Codex p2-r5 #2), así que una tienda nueva no recibe gracia.
+ * despliegue. Se lee como «20 min después del ARRANQUE de este proceso» y así se guarda (sin esperar): lo que contestó el servidor
+ * anterior (sin `staffAnsweredAt`) vence, a más tardar, 10 min después de que éste empieza a atender, aunque el despliegue falle y se
+ * repita horas después. Cuenta desde el arranque y no desde la primera lectura (Codex p2-r6 #2): una tienda apagada al publicar y
+ * encendida días después no estrena una gracia nueva. Las filas que crea el SERVIDOR nuevo nacen con el corte puesto (p2-r5 #2).
  */
 async function leerPausaSola(venueId: string, now: Date, corteGuardado: Date | null, avance = AVANCE_MINIMO_MS): Promise<LecturaPausaSola> {
   if (!corteGuardado) {
-    const gracia = new Date(now.getTime() + GRACIA_DESPLIEGUE_MS)
+    const gracia = new Date(ARRANQUE.getTime() + GRACIA_DESPLIEGUE_MS)
     void Promise.resolve()
       .then(() =>
         prisma.onlineOrderingSettings.updateMany({ where: { venueId, autoPauseResumedAt: null }, data: { autoPauseResumedAt: gracia } }),
       )
       .catch(() => undefined)
-    return { pausa: null, corteSeguro: null }
+    // Con la gracia ya vencida (el proceso lleva más de 20 min), se lee desde ella como cualquier corte.
+    if (gracia.getTime() > now.getTime()) return { pausa: null, corteSeguro: null }
+    corteGuardado = gracia
   }
   let corte = corteGuardado
   for (let vuelta = 1; ; vuelta++) {

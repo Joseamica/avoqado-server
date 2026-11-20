@@ -891,6 +891,12 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
           return saveRejection(tx, error)
         }
 
+        // D662 parte 2 (Codex p2-r6 #1): en «Mi equipo» la hora límite cuenta desde que el pedido de verdad nace. Si cotizar y esperar
+        // los candados tardó, no nace con su hora límite ya cerca o pasada: la pausa sola asume que todo pedido nace antes de su hora límite
+        // (el corte nunca deja atrás un pedido que todavía no existía). Los folios conservan su regla (R23/R52, arriba).
+        if (requiresAcceptance) {
+          acceptDeadlineAt = new Date(Math.max(acceptDeadlineAt.getTime(), reloj().getTime() + ACCEPT_TIMEOUT_MINUTES * 60_000))
+        }
         const created = await writeOnlineOrderInTx(tx, {
           venueId: input.venueId,
           externalId,
