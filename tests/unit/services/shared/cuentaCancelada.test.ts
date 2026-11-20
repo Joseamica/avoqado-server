@@ -7,6 +7,7 @@ import {
   reabrirSiRecibeDinero,
   rechazarCobroNuevoSobreCancelada,
   salirSiLaLlaveYaTienePago,
+  volverAGastarUsosTrasElCobro,
 } from '@/services/shared/cuentaCancelada'
 
 describe('Founder 3-oct: cobrar una cuenta CANCELADA (el núcleo del servidor)', () => {
@@ -171,6 +172,138 @@ describe('Rappi 2b (T8, Codex código r1 #3): un pedido de Rappi no se reabre al
   it('control: una cancelada de otra plataforma conserva la regla de hoy (sale de CANCELADA si cubre)', () => {
     expect(estadoParaCobrar({ status: 'CANCELLED', originSystem: 'DELIVERY_PLATFORM', source: 'UBER_EATS' }, 205, true)).not.toBe(
       'CANCELLED',
+    )
+  })
+})
+
+/**
+ * 🔴 hz:e82938e1:D26, cruce de la publicación del 20-nov: la transacción de `recordOrderPayment` NO se reintenta (R63 b) y la venta de $0
+ * de la TPV toma Shift → Discount. Si el cobro de la terminal tomaba Discount (para volver a gastar el uso de una cuenta anulada que
+ * revive), Postgres podía abortar el registro de un cobro con tarjeta YA capturado. Ahora la TPV revive SIN tocar Discount
+ * (`usos: 'despues'`) y, ya guardado el dinero, `volverAGastarUsosTrasElCobro` gasta en su propia transacción: Order → Discount, sin
+ * Shift, con red por traba, sólo si la cuenta sigue viva, y nunca lanza.
+ */
+describe('🔴 D26 tras el cobro: el registro de la terminal no toca Discount; el uso se gasta después, aparte', () => {
+  const { default: prisma } = jest.requireMock('@/utils/prismaClient') as { default: any }
+  const { default: logger } = jest.requireMock('@/config/logger') as { default: any }
+  const sql = (call: unknown[]) => (call[0] as string[]).join('?')
+
+  const txDoble = () => ({
+    order: { update: jest.fn().mockResolvedValue({}) },
+    activityLog: { create: jest.fn().mockResolvedValue({}) },
+    orderDiscount: { findMany: jest.fn().mockResolvedValue([{ id: 'od-1', discountId: 'promo-1' }]), updateMany: jest.fn() },
+    discount: { update: jest.fn() },
+    $queryRaw: jest.fn().mockResolvedValue([]),
+  })
+
+  it("reabrirSiRecibeDinero con `usos: 'despues'`: revive y deja su bitácora, pero ni busca las filas ni toma ni escribe Discount", async () => {
+    const tx = txDoble()
+    expect(
+      await reabrirSiRecibeDinero(tx as any, {
+        venueId: 'v',
+        orderId: 'o',
+        status: 'CANCELLED',
+        originSystem: 'AVOQADO',
+        cobrado: 90,
+        cubreComoCancelada: false,
+        canal: 'recordOrderPayment',
+        paymentId: 'pay-1',
+        usos: 'despues',
+      } as any),
+    ).toBe('PENDING')
+    expect(tx.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'PENDING' } }))
+    expect(tx.activityLog.create).toHaveBeenCalledTimes(1)
+    expect(tx.activityLog.create.mock.calls[0][0].data.action).toBe('ORDER_REOPENED_BY_CAPTURED_PAYMENT')
+    expect(tx.orderDiscount.findMany).not.toHaveBeenCalled()
+    expect(tx.$queryRaw).not.toHaveBeenCalled()
+    expect(tx.discount.update).not.toHaveBeenCalled()
+  })
+
+  it('regresión: sin la opción (POS, panel, cola, recálculo con reintento) sigue gastando en la misma transacción', async () => {
+    const tx = txDoble()
+    tx.$queryRaw.mockResolvedValue([{ id: 'promo-1', name: 'Primeros 100', currentUses: 40, maxTotalUses: 100 }])
+    await reabrirSiRecibeDinero(tx as any, {
+      venueId: 'v',
+      orderId: 'o',
+      status: 'CANCELLED',
+      originSystem: 'AVOQADO',
+      cobrado: 90,
+      cubreComoCancelada: false,
+      canal: 'payCashOrder:cola',
+    })
+    expect(tx.orderDiscount.findMany).toHaveBeenCalled()
+    expect(tx.discount.update).toHaveBeenCalledWith({ where: { id: 'promo-1' }, data: { currentUses: { increment: 1 } } })
+  })
+
+  /** La transacción del paso posterior es el propio `prismaMock` (setup: `$transaction(cb) ⇒ cb(prismaMock)`). */
+  function escenario(o: { marcada?: boolean; status?: string; falla?: Error } = {}) {
+    prisma.$transaction.mockReset().mockImplementation((cb: any) => cb(prisma))
+    prisma.orderDiscount.findFirst.mockReset().mockResolvedValue(o.marcada === false ? null : { id: 'od-1' })
+    prisma.order.findFirst.mockReset().mockResolvedValue({ status: o.status ?? 'PENDING' })
+    prisma.orderDiscount.findMany.mockReset().mockResolvedValue([{ id: 'od-1', discountId: 'promo-1' }])
+    prisma.orderDiscount.updateMany.mockReset().mockResolvedValue({ count: 1 })
+    prisma.discount.update.mockReset().mockResolvedValue({})
+    prisma.activityLog.create.mockReset().mockResolvedValue({})
+    prisma.$queryRaw.mockReset().mockImplementation(async (strings: string[]) => {
+      if (o.falla) throw o.falla
+      const texto = strings.join('?')
+      if (texto.includes('FROM "Discount"')) return [{ id: 'promo-1', name: 'Primeros 100', currentUses: 40, maxTotalUses: 100 }]
+      return [{ id: 'o', scopeTooLarge: false }]
+    })
+    logger.error.mockClear()
+  }
+  const llamar = () =>
+    volverAGastarUsosTrasElCobro({ venueId: 'v', orderId: 'o', canal: 'recordOrderPayment', paymentId: 'pay-1', staffId: 'staff-1' })
+
+  it('cuenta revivida y viva: toma la cuenta, DESPUÉS las filas Discount (sin turno), gasta el uso, suelta la marca y deja la bitácora', async () => {
+    escenario()
+    expect(await llamar()).toBe(1)
+    const consultas = prisma.$queryRaw.mock.calls.map(sql)
+    expect(consultas).toHaveLength(2)
+    expect(consultas[0]).toMatch(/FROM "Order" o[\s\S]*FOR UPDATE OF o/)
+    expect(consultas[1]).toMatch(/FROM "Discount"[\s\S]*FOR NO KEY UPDATE/)
+    expect(consultas.join('\n')).not.toMatch(/"Shift"/)
+    expect(prisma.discount.update).toHaveBeenCalledWith({ where: { id: 'promo-1' }, data: { currentUses: { increment: 1 } } })
+    expect(prisma.orderDiscount.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { usoContado: true, usoDevueltoAlAnular: false } }),
+    )
+    expect(prisma.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'ORDER_REOPENED_DISCOUNT_USES_RESPENT',
+        entityId: 'o',
+        venueId: 'v',
+        staffId: 'staff-1',
+        data: expect.objectContaining({ canal: 'recordOrderPayment', paymentId: 'pay-1', usosGastados: 1 }),
+      }),
+    })
+    // Con su red por traba: la transacción nace en `withDeadlockRetry` (lo prueba que pase por `$transaction` con opciones).
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['CANCELLED', 'DELETED'])('la anularon otra vez entre los dos pasos (%s): no gasta ni escribe nada', async status => {
+    escenario({ status })
+    expect(await llamar()).toBe(0)
+    expect(prisma.discount.update).not.toHaveBeenCalled()
+    expect(prisma.orderDiscount.updateMany).not.toHaveBeenCalled()
+    expect(prisma.activityLog.create).not.toHaveBeenCalled()
+  })
+
+  it('sin filas que devolvieron su uso (el reenvío normal de la terminal): una consulta y ni abre transacción', async () => {
+    escenario({ marcada: false })
+    expect(await llamar()).toBe(0)
+    expect(prisma.orderDiscount.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ orderId: 'o', usoDevueltoAlAnular: true }) }),
+    )
+    expect(prisma.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un error NUNCA sale al llamador (el dinero ya está guardado): logger.error con negocio, cuenta y cobro, y el uso queda libre', async () => {
+    escenario({ falla: Object.assign(new Error('lock timeout'), { code: 'P2028' }) })
+    await expect(llamar()).resolves.toBe(0)
+    expect(prisma.discount.update).not.toHaveBeenCalled()
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('D26'),
+      expect.objectContaining({ venueId: 'v', orderId: 'o', paymentId: 'pay-1' }),
     )
   })
 })

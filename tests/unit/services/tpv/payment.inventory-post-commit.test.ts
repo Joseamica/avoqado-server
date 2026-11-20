@@ -84,6 +84,7 @@ jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import * as paymentService from '@/services/tpv/payment.tpv.service'
+import * as cuentaCancelada from '@/services/shared/cuentaCancelada'
 import * as productInventoryService from '@/services/dashboard/productInventoryIntegration.service'
 import * as inventoryRestockService from '@/services/dashboard/inventoryRestock.service'
 import { Decimal } from '@prisma/client/runtime/library'
@@ -1046,6 +1047,83 @@ describe('no kitchen tickets come back for a cancelled order reopened by capture
 
     expect(reabierta()).toBe(true)
     sinCocina()
+  })
+})
+
+/**
+ * 🔴 hz:e82938e1:D26, el cruce que detuvo la publicación del SERVIDOR (20-nov): la transacción del cobro de la terminal NO se reintenta
+ * (R63 b) y la venta de $0 de la TPV toma Shift → Discount. Si este registro tomaba Discount para volver a gastar el uso de una cuenta
+ * anulada que revive, Postgres podía abortar un cobro con tarjeta YA capturado. Ahora el registro no toca Discount; el uso se vuelve a
+ * gastar DESPUÉS del commit, en su propia transacción (`volverAGastarUsosTrasElCobro`).
+ */
+describe('🔴 D26 tras el cobro: la transacción del cobro de la terminal no busca ni toma Discount', () => {
+  function capturarTransacciones(eventos: string[]) {
+    const txs: any[] = []
+    const base = (prisma.$transaction as jest.Mock).getMockImplementation()!
+    ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback: any) =>
+      base(async (tx: any) => {
+        // La cuenta anulada trae su fila que devolvió el uso al anular (D24): es la que la reapertura volvería a gastar.
+        tx.orderDiscount = {
+          findMany: jest.fn().mockResolvedValue([{ id: 'od-1', discountId: 'promo-1' }]),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        }
+        tx.discount = { update: jest.fn() }
+        txs.push(tx)
+        const r = await callback(tx)
+        eventos.push(`fin-tx-${txs.indexOf(tx)}`)
+        return r
+      }),
+    )
+    return txs
+  }
+
+  it('cuenta anulada con su descuento marcado: el cobro se guarda sin tocar Discount y el uso se gasta DESPUÉS del commit', async () => {
+    const order = makeOrder({ status: 'CANCELLED', originSystem: 'AVOQADO', contratoDePrecio: 'IVA_INCLUIDO', taxAmount: new Decimal(0) })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+    const eventos: string[] = []
+    const txs = capturarTransacciones(eventos)
+    const despues = jest.spyOn(cuentaCancelada, 'volverAGastarUsosTrasElCobro').mockImplementation(async () => {
+      eventos.push('paso-del-uso')
+      return 1
+    })
+    try {
+      const r: any = await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'd26-tras-1' }, 'user-1')
+      expect(r.id).toBe('payment-1')
+
+      // La transacción del cobro es la que preguntó si la venta es de un cambio (sólo ella lo hace).
+      const delCobro = txs.find(tx => tx.exchange.findUnique.mock.calls.length > 0)
+      expect(delCobro).toBeDefined()
+      expect((prisma.order.update as jest.Mock).mock.calls.some(([a]) => a?.data?.status === 'PENDING')).toBe(true)
+      expect(delCobro.orderDiscount.findMany).not.toHaveBeenCalled()
+      expect(delCobro.discount.update).not.toHaveBeenCalled()
+      const sqlDelCobro = delCobro.$queryRaw.mock.calls.map((c: any[]) => (Array.isArray(c[0]) ? c[0].join('?') : String(c[0])))
+      expect(sqlDelCobro.join('\n')).not.toMatch(/"Discount"/)
+
+      expect(despues).toHaveBeenCalledTimes(1)
+      expect(despues).toHaveBeenCalledWith(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, canal: 'recordOrderPayment', paymentId: 'payment-1' }),
+      )
+      expect(eventos.indexOf('paso-del-uso')).toBeGreaterThan(eventos.indexOf(`fin-tx-${txs.indexOf(delCobro)}`))
+    } finally {
+      despues.mockRestore()
+    }
+  })
+
+  it('control: un cobro sobre una cuenta viva no llama al paso del uso (ningún cobro normal paga una consulta más)', async () => {
+    const order = makeOrder()
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+    capturarTransacciones([])
+    const despues = jest.spyOn(cuentaCancelada, 'volverAGastarUsosTrasElCobro').mockResolvedValue(0)
+    try {
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'd26-viva-1' }, 'user-1')
+      expect(despues).not.toHaveBeenCalled()
+    } finally {
+      despues.mockRestore()
+    }
   })
 })
 
