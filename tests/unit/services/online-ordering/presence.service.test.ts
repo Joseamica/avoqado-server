@@ -388,7 +388,9 @@ describe('D662 parte 2 (v3) · la pausa sola la decide UNA consulta exacta en Po
     expect(texto).toContain('oo."requiresAcceptance" = true')
     expect(texto).toContain('oo."acceptDeadlineAt" >')
     expect(texto).toContain('oo."acceptDeadlineAt" <=')
-    expect(texto).toContain('(oo."staffAnsweredAt" IS NULL OR oo."staffAnsweredAt" > oo."acceptDeadlineAt")')
+    // La respuesta es la marca nueva o, si no hay, la que guardó el servidor anterior (Codex p2-r7 #1).
+    const resp = `COALESCE(oo."staffAnsweredAt", COALESCE(oo."acceptedAt", CASE WHEN oo."rejectReason" <> 'PAYMENT_FAILED' THEN oo."rejectedAt" END))`
+    expect(texto).toContain(`(${resp} IS NULL OR ${resp} > oo."acceptDeadlineAt")`)
     // Lo que terminó solo ANTES de su hora límite no cuenta (null-seguro con COALESCE).
     expect(texto).toContain(`NOT COALESCE(oo."cancelledBy" = 'CUSTOMER' AND oo."cancelledAt" <= oo."acceptDeadlineAt", false)`)
     expect(texto).toContain(
@@ -397,6 +399,7 @@ describe('D662 parte 2 (v3) · la pausa sola la decide UNA consulta exacta en Po
     // Pareja: dos fallas seguidas por hora límite e id, sin una respuesta a tiempo en (primera, segunda].
     expect(texto).toContain('LAG(f.t) OVER (ORDER BY f.t ASC, f.id ASC)')
     expect(texto).toContain('s."staffAnsweredAt" > p.prev AND s."staffAnsweredAt" <= p.t AND s."staffAnsweredAt" <= s."acceptDeadlineAt"')
+    expect(texto).toContain('s."staffAnsweredAt" IS NULL AND s."acceptDeadlineAt" > p.prev')
     expect(valores).toEqual(expect.arrayContaining(['v1', corte, NOW, PAUSA_SOLA_TOPE]))
   })
 

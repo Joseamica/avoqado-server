@@ -1040,6 +1040,23 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN' })
     })
 
+    it('Codex p2-r7 #1: un rechazo a tiempo que guardó el SERVIDOR anterior (sin staffAnsweredAt) también corta la racha', async () => {
+      await arrancar()
+      const a = await newOrder()
+      const b = await newOrder()
+      const c = await newOrder()
+      await venceA(a.onlineOrderId, hace(200))
+      // Sin `porPersona`: así escribía el servidor anterior (sólo `rejectedAt` con un motivo de persona).
+      await expect(rejectOnlineOrder({ venueId: venueId!, orderId: c.orderId, staffId: null, reason: 'TOO_BUSY' })).resolves.toMatchObject({
+        outcome: 'OK',
+      })
+      expect((await prisma.onlineOrder.findUniqueOrThrow({ where: { id: c.onlineOrderId } })).staffAnsweredAt).toBeNull()
+      await espera(5)
+      await venceA(b.onlineOrderId, new Date())
+      await espera(5)
+      await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
+    })
+
     it('un rechazo TARDE no es respuesta: el pedido ya falló a su hora límite', async () => {
       await arrancar()
       const a = await newOrder()
