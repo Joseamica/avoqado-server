@@ -8,7 +8,7 @@ requiredPermissions: []
 money: true
 sourceRepo: avoqado-android
 sourceRef: 212f9cf4f150b7770cf6e753e5e2dbd78451948f
-deviceTested: 2026-11-18
+deviceTested: 2026-11-20
 keywords:
   - descuento
   - descuento manual
@@ -47,8 +47,8 @@ Los pasos son para una venta con productos en el carrito de *Cobrar*. En una cue
 - Un descuento con tope de usos (en el panel, *Usos Totales Máximos* o *Usos Máximos por Cliente*) no entra en una venta con vales. Si al emitir un vale aparece «El descuento «…» tiene tope de usos y no se puede poner en un vale: emite el vale sin ese descuento.», el vale no salió: quita ese producto del carrito, agrégalo sin ese descuento y emite el vale otra vez.
 - Si al cobrar una venta con vales aparece «El descuento «…» tiene tope de usos y no se puede usar en una venta con vales: quítalo de ese producto para cobrar.», la venta no se cobró: quita el producto suelto que lleva ese descuento, agrégalo sin él y vuelve a cobrar.
 - Si en una cuenta de *Mesas* un descuento dice «Fija: viene del cobro de vales» y su *Quitar* sale en gris, al tocarlo aparece «Esta rebaja quedó fija al cobrar los vales y no se quita desde la caja. Si hay que cambiarla, avisa a un encargado.»: esa rebaja no se quita desde la caja. En versiones anteriores a la 2.25.52, *Quitar* se ve activo y al tocarlo sale «Este descuento quedó fijo al cobrar los vales y no se quita desde la caja…».
-- Si al aplicar un descuento o al cobrar aparece «Discount "…" has reached its usage limit», ese descuento ya usó todos sus usos (su tope): no se aplicó y, si salió al cobrar, la venta no se registró. Elige otro o cobra sin él. En *Mesas*, cada cuenta que lleva el descuento gasta un uso al aplicarlo; quitarlo de la cuenta, o anular la cuenta sin cobrar, regresa el uso, y si esa cuenta anulada recibe después un cobro que llegó tarde, lo vuelve a gastar.
-- Una venta ya cobrada nunca se rechaza por el tope de usos: se guarda y su uso cuenta, aunque el descuento pase de su tope.
+- Si al aplicar un descuento en una cuenta de *Mesas* aparece «Discount "…" has reached its usage limit», ese descuento ya usó todos sus usos (su tope): no se aplicó. Elige otro o deja la cuenta sin él. Cada cuenta de *Mesas* que lleva el descuento gasta un uso al aplicarlo; quitarlo de la cuenta, o anular la cuenta sin cobrar, regresa el uso, y si esa cuenta anulada recibe después un cobro que llegó tarde, lo vuelve a gastar.
+- En *Cobrar*, una venta con un descuento que ya no tiene usos se cobra igual: lo cobrado nunca se rechaza por el tope. Su uso cuenta aunque el descuento pase de su tope, y queda registrado para el dueño.
 - Si aparece «Este artículo no tiene descuentos propios», no hay descuentos para ese producto: los de toda la venta se ponen con *Agregar descuento*.
 - Si aparece al cobrar «Este descuento deja la cuenta en $0: es una cortesía. Vuelve a cobrar para pedir el PIN de un gerente, o quita el descuento.», no se registró la venta: vuelve a cobrar para que un gerente escriba su PIN, o quita la cortesía o el descuento.
 - Si aparece el teclado del PIN al cobrar una venta con cortesía, o con un descuento que la deja en $0, un gerente tiene que escribir su PIN para autorizarla.
@@ -57,4 +57,4 @@ Los pasos son para una venta con productos en el carrito de *Cobrar*. En una cue
 ## Sin internet
 
 - Si aparece «Sin conexión: el PIN del gerente necesita internet. Quita el descuento o cobra cuando vuelva la red.», ese cobro no salió: quita el descuento o cobra cuando vuelva la conexión.
-- Lo cobrado sin conexión con un descuento que tiene tope de usos no se rechaza al volver el internet: la venta se guarda y su uso cuenta, aunque pase del tope.
+- Lo hecho sin conexión con un descuento que tiene tope de usos (cobrar en *Cobrar* o aplicarlo en una cuenta de *Mesas*) no se rechaza al volver el internet: se guarda y su uso cuenta, aunque pase del tope.

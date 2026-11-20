@@ -197,7 +197,7 @@
   "plan": [],
   "sinInternet": [
     {
-      "afirmacion": "Lo cobrado sin conexión con un descuento con tope no se rechaza al subir: el uso cuenta (D19, enLaCola)",
+      "afirmacion": "Lo hecho sin conexión con un descuento con tope (Cobrar o Mesas) no se rechaza al subir: el uso cuenta (enLaCola)",
       "archivo": "avoqado-server/src/services/shared/discount.service.ts",
       "linea": 155
     },
@@ -339,9 +339,9 @@
       "linea": 228
     },
     {
-      "ruta": "Problema tope: Cobrar (Mostrador) rechaza antes de crear la venta si el tope ya estaba lleno",
-      "archivo": "avoqado-server/src/services/shared/discount.service.ts",
-      "linea": 155
+      "ruta": "Problema tope: en Cobrar la venta no se rechaza por el tope; suma el uso y avisa al dueño (DESCUENTO_SOBRE_TOPE)",
+      "archivo": "avoqado-server/src/services/shared/usoDelDescuento.ts",
+      "linea": 134
     },
     {
       "ruta": "Antes de empezar (Mesas): ACCIONES(\"Acciones\")",

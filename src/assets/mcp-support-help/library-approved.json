@@ -77,7 +77,7 @@
       ]
     },
     "android/cobro/dar-descuento-o-cortesia": {
-      "sha256": "33a3aa9d6d9fd0235ab0a9c4fe485b1580826443252374ad2ea6b3fc0de5591a",
+      "sha256": "59f9a02a6427f612a037fe6617d8db8ee737175f0cfcbe6da645523039e5d459",
       "requiredPermissions": []
     },
     "android/cobro/dividir-la-cuenta": {
@@ -1045,7 +1045,7 @@
       ]
     },
     "windows/cobro/dar-descuento-o-cortesia": {
-      "sha256": "6f5cd18aa14a2a159857f14e903d509fe46df49b75c6d51453f45a04e36e4b3f",
+      "sha256": "5337430e6df08f0d178ce489a683a5484e386ff09e3987031a590fb00e55a83c",
       "requiredPermissions": []
     },
     "windows/cobro/dividir-la-cuenta": {

@@ -207,7 +207,7 @@
       "linea": 962
     },
     {
-      "afirmacion": "Lo cobrado sin conexión con un descuento con tope no se rechaza al subir: el uso cuenta (D19, enLaCola)",
+      "afirmacion": "Lo hecho sin conexión con un descuento con tope (Cobrar o Mesas) no se rechaza al subir: el uso cuenta (enLaCola)",
       "archivo": "avoqado-server/src/services/shared/discount.service.ts",
       "linea": 155
     },
@@ -324,9 +324,9 @@
       "linea": 228
     },
     {
-      "ruta": "Problema tope: Cobrar (Mostrador) rechaza antes de crear la venta si el tope ya estaba lleno",
-      "archivo": "avoqado-server/src/services/shared/discount.service.ts",
-      "linea": 155
+      "ruta": "Problema tope: en Cobrar la venta no se rechaza por el tope; suma el uso y avisa al dueño (DESCUENTO_SOBRE_TOPE)",
+      "archivo": "avoqado-server/src/services/shared/usoDelDescuento.ts",
+      "linea": 134
     },
     {
       "ruta": "Antes de empezar (Mesas): ACCIONES(\"Acciones\")",
@@ -366,31 +366,29 @@
   ],
   "aparato": {
     "estado": "PROBADO",
-    "aparato": "Sunmi D3 del laboratorio del Alien (serial D40625BRJ0469)",
-    "version": "2.25.42-dev (70), copia de QA com.avoqado.pos.soportewa compilada en v2.25.42 (843c15ae), contra el SERVIDOR local del 3000 (develop 94cc3d0e8)",
-    "apkSha256": "c109312a1a4e02448e2c7ab10a8a2c7a5b57920868f2190b3b969a6ed19e5d34",
-    "fecha": "2026-11-18",
+    "aparato": "SAMSUNG del laboratorio del Alien (serial R8YL200592L)",
+    "version": "2.25.52 (main 212f9cf4), copia de QA com.avoqado.pos.lab compilada con puerta-compilar pos 0, contra el banco de la nube a2ab17 (SERVIDOR ac8057c1d)",
+    "apkSha256": "d8bc5c0fd72de74e4609a69b630e8ee1f5b30c9c540375896665c2f36ad800c2",
+    "fecha": "2026-11-20",
     "fotos": [
-      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/1-carrito-agregar-descuento.png",
-      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/10-atajos-descuentos-cortesia.png",
-      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/11-aplicar-cortesia.png",
-      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/12-confirmar.png",
-      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/13-cortesia-de-la-venta.png",
-      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/14-cobrado-con-descuento.png",
-      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/2-descuentos.png",
-      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/3-descuento-manual.png",
-      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/4-porcentaje-10.png",
-      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/5-descuento-aplicado.png",
-      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/6-quitado-con-x-igual-que-al-inicio.png",
-      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/7-cortesia-del-administrador.png",
-      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/8-producto-con-opciones-descuentos-cortesia.png",
-      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/9-cortesia-motivo.png"
+      "docs/audit/2026-11-20-guias-descuentos-vales/aparato/01-descuentos-disponibles.png",
+      "docs/audit/2026-11-20-guias-descuentos-vales/aparato/02-aplicado-mesa-m12.png",
+      "docs/audit/2026-11-20-guias-descuentos-vales/aparato/03-m10-tope-lleno.png",
+      "docs/audit/2026-11-20-guias-descuentos-vales/aparato/06-m12-quitado.png",
+      "docs/audit/2026-11-20-guias-descuentos-vales/aparato/07-m10-aplicado.png",
+      "docs/audit/2026-11-20-guias-descuentos-vales/aparato/08-m10-anulada.png",
+      "docs/audit/2026-11-20-guias-descuentos-vales/aparato/10-cobrar-tope-lleno-resultado.png",
+      "docs/audit/2026-11-20-guias-descuentos-vales/aparato/11-m10-sin-red-aplicado.png",
+      "docs/audit/2026-11-20-guias-descuentos-vales/aparato/12-dashboard-usos.png"
     ],
     "filasCreadas": [
-      "Order cmwmniif4016uwaydna7ueilt — ORD-1795038394490, 10 % de descuento manual",
-      "Payment cmwmnikyd0171waydtruvyimx — $45.00 CASH"
+      "Discount cmwort6le000005jk0zy93pwi — «Promo un solo uso», 10 % de cuenta, Usos Totales Máximos 1",
+      "Order ORD-0000000000001 (M12) — OrderDiscount con usoContado",
+      "Order ORD-0000000000002 (M10) — anulada sin cobrar: ActivityLog ORDER_CANCEL_DISCOUNT_USES_RETURNED",
+      "Order ORD-0000000000003 (Cobrar) — $40.50 efectivo con el tope lleno: ActivityLog DESCUENTO_SOBRE_TOPE camino mostrador",
+      "Order ORD-0000000000004 (M10, sin red) — APPLY_DISCOUNT de la cola: ActivityLog DESCUENTO_SOBRE_TOPE camino mesa, sinRed true"
     ],
-    "nota": "Carrito Agua + Café → *Agregar descuento* → «Descuento de la cuenta» (Avoqado Full no tiene descuentos predefinidos: «No hay descuentos predefinidos») → *Descuento manual* → % → *Porcentaje* 10 → *Aplicar descuento* → «Descuento manual aplicado -10%» con su X → la X lo quita (foto 6). Artículo → *Cortesía* → «Cortesía del administrador» ($0.00) y otra vez *Cortesía* lo quita. Té Helado (con opciones) → *Descuentos*, *Ajuste de precio*, *Cortesía* antes de *Agregar al carrito* → *Cortesía* pide el motivo y *Aplicar cortesía* (no se aplicó). *Atajos* → *Cortesía* → *Aplicar cortesia* → *Confirmar* → «Cortesía (100%) -$50.00», *Cobrar $0.00*; se quitó y se cobró la venta con 10 % de descuento en efectivo ($45). No se probó el PIN de gerente al cobrar en $0."
+    "nota": "20-nov (encargo 8d98b4), lo nuevo de la guía: Mesas → M12 → Acciones → Detalles → Descuentos → «Disponibles» → Aplicar: «Aplicados» con −$4.50 y Quitar; contador 1/1. M10 → Aplicar: 400 «Discount \"Promo un solo uso\" has reached its usage limit» (log del SERVIDOR y del aparato; la app lo enseña en su aviso rojo de 2.2 s, más corto que la puerta: no salió en foto); contador sigue en 1. M12 → Quitar: contador 0. M10 → Aplicar: 1. M10 → Anular cuenta («Error de entrada»): contador 0, ORDER_CANCEL_DISCOUNT_USES_RETURNED. M12 → Aplicar (1/1). Cobrar → Corona + Agregar descuento → «Promo un solo uso» → Cobrar $40.50 → Sin propina → Efectivo $45: la venta SÍ se registró (201/200), contador 2, DESCUENTO_SOBRE_TOPE (camino mostrador). Sin red (puerta sin-red): M10 → Abrir → Corona → Enviar → Descuentos → Aplicar: «Sin conexión — 3 por sincronizar (todo se guarda aquí)»; con red: sube solo, contador 3, DESCUENTO_SOBRE_TOPE (camino mesa, sinRed true). DASHBOARD › Promociones › Descuentos: «3 / 1 uses». No se probó aquí: D11 (vales con tope) ni D15 (rebaja fija en gris), probados en sus PR (ANDROID #294, TPV #87). Prueba del 18-nov (pasos 1-6, Sunmi D3, 2.25.42, apk c109312a…, fotos en docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/cobro/dar-descuento-o-cortesia/) sigue valiendo para los pasos."
   },
   "codex": {
     "lote": 9,
