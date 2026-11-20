@@ -1204,7 +1204,7 @@ export async function buildOrderItemsData(
   if (products.length !== uniqueProductIds.length) {
     const foundIds = products.map(p => p.id)
     const missingIds = uniqueProductIds.filter(id => !foundIds.includes(id))
-    throw new BadRequestError(`Products not found: ${missingIds.join(', ')}`)
+    throw new BadRequestError(`Products not found: ${missingIds.join(', ')}`, 'PRODUCT_NOT_FOUND', { productIds: missingIds })
   }
 
   // Fetch all modifiers if any items have modifiers
@@ -2698,6 +2698,93 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     ...toCreatedOrderResponse(orderFinal as typeof order),
     ...(input.stampRewardId ? { stampReward } : {}),
     ...(cambiosDePrecio.length ? { priceChanges: cambiosDePrecio } : {}),
+  }
+}
+
+/** Lo que costaría la venta de mostrador (pesos, como la cuenta); la máquina de efectivo lo pasa a centavos en su frontera. */
+export interface VentaCotizada {
+  renglones: Array<{ productId: string | null; name: string; quantity: number; unitPrice: number; total: number; discount: number }>
+  subtotal: number
+  /** Los de renglón (con las cortesías) más el de la cuenta. */
+  descuento: number
+  propina: number
+  /** `subtotal − descuento + propina`, como el `total` de la cuenta. */
+  total: number
+  cambiosDePrecio: CambioDePrecio[]
+}
+
+/**
+ * Máquina de efectivo (R4-2): lo que costaría AHORA la venta de mostrador de `createOrderWithItems` (en línea), sin escribir nada, sin
+ * candados y sin cuenta. Las mismas lecturas y validaciones (`prepararVentaDeMostrador`, `buildOrderItemsData`: precios, extras, peso,
+ * descuentos de renglón, «Ajuste de precio», precio que vio el cliente y sus 400/403/409) y, encima, la aritmética de la cuenta de
+ * `crearVentaDeMostradorEnTx` sin combos ni cupón: cortesías, descuento de catálogo o libre de la cuenta, su aprobación, el regalo y la
+ * propina. Los combos y el cupón sólo existen escribiendo (el motor de promociones) o apartando: aquí se rechazan y quien llama los deja
+ * fuera. 🔴 ESPEJO: si cambia el descuento de la cuenta en `crearVentaDeMostradorEnTx`, cambia aquí; `cotizacionDeLaMaquina.test.ts`
+ * compara las dos con la creación real.
+ */
+export async function cotizarVentaDeMostrador(venueId: string, input: CreateOrderInput): Promise<VentaCotizada> {
+  validarOrigenYTipoDeVenta(input)
+  if (input.couponCode || input.items.some(item => item.promotionRef)) {
+    throw new BadRequestError('Una venta con cupón o combo todavía no se puede cotizar.')
+  }
+  const prep = await prepararVentaDeMostrador(venueId, input)
+  const {
+    itemsData,
+    subtotal,
+    itemDiscountTotal: catalogDiscountTotal,
+    cambiosDePrecio,
+  } = await buildOrderItemsData(venueId, prep.itemsNormales, undefined, prep.precioMostrado, undefined, input)
+
+  // Las cortesías regalan el bruto de su renglón (mismo orden que el alta: productos y luego «Otro importe»).
+  const inputsEnOrdenDeCreacion = [...prep.itemsNormales.filter(i => i.productId), ...prep.itemsNormales.filter(i => !i.productId)]
+  const esCortesia = (k: number) => inputsEnOrdenDeCreacion[k].isCortesia === true
+  const cortesiaTotal = itemsData.reduce(
+    (suma: Prisma.Decimal, item, k) => (esCortesia(k) ? suma.plus(item.total) : suma),
+    new Prisma.Decimal(0),
+  )
+  const itemDiscountTotal = catalogDiscountTotal + cortesiaTotal.toNumber()
+  const remainingAfterItemDiscounts = Math.max(0, subtotal - itemDiscountTotal)
+
+  const orderDiscount = input.orderDiscountId ? await prisma.discount.findFirst({ where: { id: input.orderDiscountId, venueId } }) : null
+  if (input.orderDiscountId && !orderDiscount) {
+    throw new BadRequestError(`Descuento no encontrado o no pertenece a este local: ${input.orderDiscountId}`)
+  }
+  if (orderDiscount) validateDiscountActive(orderDiscount, { horaDeLaVenta: undefined, enLaCola: false })
+  if (orderDiscount?.type === 'COMP' && (input.canCompItems !== true || !input.performedBy)) {
+    throw new ForbiddenError('No tienes permiso para dar cortesías')
+  }
+  const idDeLaEtiqueta = input.descuentoDeCatalogoId ?? input.descuentoDelCliente?.discountId
+  const etiquetaDeCuenta =
+    !orderDiscount && idDeLaEtiqueta && (input.discount ?? 0) > 0
+      ? await prisma.discount.findFirst({
+          where: { id: idDeLaEtiqueta, venueId },
+          select: { requiresApproval: true, type: true, scope: true },
+        })
+      : null
+  if ((pideAprobacionDeGerente(orderDiscount) || pideAprobacionDeGerente(etiquetaDeCuenta)) && !input.aprobacionDelDescuento) {
+    throw sinAprobacionDelDescuento()
+  }
+  const orderLevelDiscountDecimal = orderDiscount
+    ? calculateDiscountPesos(orderDiscount, remainingAfterItemDiscounts)
+    : Math.min(remainingAfterItemDiscounts, Math.max(0, (input.discount || 0) / 100))
+  // hz:e0b12f00:D2: el descuento libre que regala la cuenta pide permiso como al crearla (lanza `RegaloSinPermisoError`).
+  if (descuentoDeCuentaRegala(!orderDiscount, orderLevelDiscountDecimal, remainingAfterItemDiscounts)) autorizarRegaloDeCuenta(input)
+
+  const descuento = itemDiscountTotal + orderLevelDiscountDecimal
+  return {
+    renglones: itemsData.map((item, k) => ({
+      productId: item.productId ?? null,
+      name: item.productName,
+      quantity: item.quantity,
+      unitPrice: Number(item.unitPrice),
+      total: Number(item.total),
+      discount: esCortesia(k) ? Number(item.total) : Number(item.discountAmount),
+    })),
+    subtotal,
+    descuento,
+    propina: prep.tipDecimal,
+    total: subtotal - descuento + prep.tipDecimal,
+    cambiosDePrecio,
   }
 }
 

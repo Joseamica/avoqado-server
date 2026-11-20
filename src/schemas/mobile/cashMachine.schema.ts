@@ -71,3 +71,24 @@ export const registrarVentaDeLaMaquinaSchema = z.object({
 export const consultarVentaDeLaMaquinaSchema = z.object({
   params: z.object({ venueId, referenceCC }),
 })
+
+/** R4-3: la IP de la QuickPay en la red del negocio (su WebSocket es `ws://<ip>:8080/`). El aparato sale del encabezado, nunca de aquí. */
+export const emparejarAparatoSchema = z.object({
+  params: z.object({ venueId }),
+  body: z.object({
+    machineIp: z
+      .string({ required_error: 'La IP de la máquina es requerida', invalid_type_error: 'La IP de la máquina debe ser texto' })
+      .trim()
+      .ip({ version: 'v4', message: 'La IP de la máquina debe ser una IPv4, por ejemplo 192.168.1.50' }),
+  }),
+})
+
+export const desemparejarAparatoSchema = z.object({
+  params: z.object({ venueId }),
+})
+
+/** R4-2: el MISMO cuerpo que `POST /orders` de una venta de mostrador; lo valida `leerVentaDeMostrador`. */
+export const cotizarParaLaMaquinaSchema = z.object({
+  params: z.object({ venueId }),
+  body: z.record(z.unknown(), { invalid_type_error: 'El carrito debe ser un objeto' }),
+})

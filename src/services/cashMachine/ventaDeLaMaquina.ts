@@ -20,6 +20,7 @@ import { utcTs } from '../../utils/sqlDates'
 import { logAction } from '../dashboard/activity-log.service'
 import { CuentaDeLaMaquinaYaExiste, venderLoQueCobroLaMaquina, type CreateOrderInput } from '../mobile/order.mobile.service'
 import { candadoDeLaLlave } from '../mobile/pagarDespuesLlave'
+import { aparatoDe, exigirAparatoEmparejado } from './emparejamiento'
 
 /** Folio de la máquina: `AQ` + 12 `[0-9A-Z]`. La llave del pago y de la cuenta es `"maquina-" + referenceCC`. */
 export const CASH_MACHINE_REF = /^AQ[0-9A-Z]{12}$/
@@ -68,10 +69,11 @@ export type ResultadoDeLaMaquina =
   | { status: 200; body: RespuestaDeLaMaquina }
   | { status: 202; body: { referenceCC: string; incident: 'NO_SE_PUDO_REGISTRAR' } }
 
-/** Quién sube: la sesión (procesa el cobro) y el aparato del encabezado `X-Device-Id`. */
+/** Quién sube: la sesión (procesa el cobro), el aparato del encabezado `X-Device-Id` y su credencial (`X-Cash-Machine-Credential`). */
 export interface AutorDeLaMaquina {
   userId: string
   deviceUid: string | null
+  credencial: string | null
 }
 
 export interface EntradaDeLaMaquina {
@@ -250,20 +252,6 @@ async function anotarIncidencia(
   })
 }
 
-async function aparatoDe(venueId: string, deviceUid: string | null): Promise<string | null> {
-  if (!deviceUid) return null
-  const aparato = await prisma.terminal.findFirst({ where: { venueId, deviceUid }, select: { id: true } })
-  return aparato?.id ?? null
-}
-
-/**
- * TODO(R4-3): sólo la PC emparejada (un `CashMachineBinding` activo del aparato del token, nunca del cuerpo) registra ventas de la
- * máquina; otra caja con `payments:create` recibirá 403. Hoy deja pasar a todos.
- */
-export async function exigirAparatoEmparejado(_venueId: string, _autor: AutorDeLaMaquina): Promise<void> {
-  // R4-3 lo implementa.
-}
-
 /** `POST /mobile/venues/:venueId/cash-machine/sales`. */
 export async function registrarVentaDeLaMaquina(
   venueId: string,
@@ -278,6 +266,8 @@ export async function registrarVentaDeLaMaquina(
     throw new BadRequestError('El pedido va sólo con un cierre PAGADO.')
   }
   const deviceId = await aparatoDe(venueId, autor.deviceUid)
+  // R4-3: antes de escribir nada (tampoco una incidencia): sólo la PC emparejada, o la revocada repitiendo SU folio (R5#2).
+  await exigirAparatoEmparejado(venueId, referenceCC, deviceId, autor.credencial)
   const quien = { userId: autor.userId, deviceId }
   const evidencia = { cierre, deviceId, recibidoEn: new Date().toISOString() }
 

@@ -48,7 +48,13 @@ import * as notificationMobileController from '../controllers/mobile/notificatio
 import * as supplierMobileController from '../controllers/mobile/supplier.mobile.controller'
 import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.mobile.controller'
 import * as cashMachineMobileController from '../controllers/mobile/cashMachine.mobile.controller'
-import { consultarVentaDeLaMaquinaSchema, registrarVentaDeLaMaquinaSchema } from '../schemas/mobile/cashMachine.schema'
+import {
+  consultarVentaDeLaMaquinaSchema,
+  cotizarParaLaMaquinaSchema,
+  desemparejarAparatoSchema,
+  emparejarAparatoSchema,
+  registrarVentaDeLaMaquinaSchema,
+} from '../schemas/mobile/cashMachine.schema'
 import { ponerLlaveDelRetiro } from '../lib/llaveDelRetiro'
 import * as purchaseOrderMobileController from '../controllers/mobile/purchase-order.mobile.controller'
 import * as transferMobileController from '../controllers/mobile/transfer.mobile.controller'
@@ -3686,6 +3692,43 @@ router.get(
   validateRequest(consultarVentaDeLaMaquinaSchema),
   checkPermission('payments:read'),
   cashMachineMobileController.consultarVenta,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-machine/binding — emparejar ESTA PC (la del `X-Device-ID`) con la máquina (R4-3, R5#3).
+ * Body: { machineIp }. 201 { bindingId, credential }: la credencial sale una sola vez y viaja después en `X-Cash-Machine-Credential`.
+ * Revoca a la PC anterior de esa máquina. Sólo una sesión con `cash-machine:configure` (R5#10).
+ */
+router.post(
+  '/venues/:venueId/cash-machine/binding',
+  authenticateTokenMiddleware,
+  validateRequest(emparejarAparatoSchema),
+  checkPermission('cash-machine:configure'),
+  cashMachineMobileController.emparejar,
+)
+
+/** DELETE /api/v1/mobile/venues/:venueId/cash-machine/binding — esta PC deja de ser emisor de la máquina. 200 { revoked }. */
+router.delete(
+  '/venues/:venueId/cash-machine/binding',
+  authenticateTokenMiddleware,
+  validateRequest(desemparejarAparatoSchema),
+  checkPermission('cash-machine:configure'),
+  cashMachineMobileController.desemparejar,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-machine/quote — el total del carrito ANTES del `paycash`, con la lógica de `POST /orders`
+ * y sin escribir nada (R4-2). Body: el mismo de `POST /orders`. 200 { quoteId, expiresAt, totalCents, saleCents, tipCents,
+ * discountCents, renglones, cobrableEnMaquina, motivo? }. Los mismos guardias de cortesía y de aprobación que `POST /orders`.
+ */
+router.post(
+  '/venues/:venueId/cash-machine/quote',
+  authenticateTokenMiddleware,
+  validateRequest(cotizarParaLaMaquinaSchema),
+  checkPermission('payments:create'),
+  checkCortesiaPermissionIfPresent,
+  checkAprobacionDelDescuento,
+  cashMachineMobileController.cotizar,
 )
 
 // ============================================================================

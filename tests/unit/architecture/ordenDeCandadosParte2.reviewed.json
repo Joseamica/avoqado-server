@@ -951,6 +951,14 @@
       "etiqueta": "registrarVentaDeLaMaquina",
       "cantidad": 1
     },
+    "src/services/cashMachine/emparejamiento.ts#emparejarAparato": {
+      "etiqueta": "emparejarAparato",
+      "cantidad": 1
+    },
+    "src/services/cashMachine/emparejamiento.ts#desemparejarAparato": {
+      "etiqueta": "desemparejarAparato",
+      "cantidad": 1
+    },
     "src/services/mobile/order.mobile.service.ts#removeOrderDiscount": {
       "etiqueta": "removeOrderDiscount",
       "cantidad": 1

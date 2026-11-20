@@ -30,6 +30,7 @@ jest.mock('@/services/shared/paymentShiftClaim', () => ({
   resolvePaymentShiftReconciliationEnabled: jest.fn().mockResolvedValue(false),
 }))
 
+import { createHash } from 'crypto'
 import { Prisma } from '@prisma/client'
 import { ConflictError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -40,7 +41,7 @@ import { prismaMock } from '../../../__helpers__/setup'
 
 const D = (v: number) => new Prisma.Decimal(v)
 const REF = 'AQ0123456789AB'
-const AUTOR = { userId: 'staff-A', deviceUid: 'pc-uid-1' }
+const AUTOR = { userId: 'staff-A', deviceUid: 'pc-uid-1', credencial: 'credencial-de-la-pc' }
 const sqlDe = (a: any): string => (Array.isArray(a) ? a.join('?') : String(a?.sql ?? a?.strings?.join('?') ?? ''))
 
 const pedido = (over: Partial<CreateOrderInput> = {}): CreateOrderInput =>
@@ -79,6 +80,9 @@ let turnoVivo: { id: string; status: string } | null
 /** Las incidencias durables (el INSERT … ON CONFLICT aparte) y los cierres guardados. */
 let incidencias: Array<{ kind: string; sql: string; values: unknown[] }>
 let cierres: any[]
+/** El emparejamiento de la PC (`null` = nunca se emparejó). */
+let binding: { active: boolean } | null
+const HASH_DE_LA_PC = createHash('sha256').update('credencial-de-la-pc').digest('hex')
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -111,6 +115,11 @@ beforeEach(() => {
     active: true,
   }))
   prismaMock.terminal.findFirst.mockResolvedValue({ id: 'terminal-pc' })
+  // R4-3: la PC está emparejada (su credencial es de un binding ACTIVO de `terminal-pc`); `emparejamiento.test.ts` prueba el resto.
+  binding = { active: true }
+  prismaMock.cashMachineBinding.findFirst.mockImplementation(async (a: any) =>
+    a?.where?.deviceId === 'terminal-pc' && a?.where?.credentialHash === HASH_DE_LA_PC ? binding : null,
+  )
   prismaMock.shift.findFirst.mockImplementation(async (a: any) => {
     const where = a?.where ?? {}
     if (where.id) return turnoA && where.id === turnoA.id ? turnoA : null
@@ -421,6 +430,30 @@ describe('registrarVentaDeLaMaquina · turno', () => {
     })
     expect(claim).toMatchObject({ shiftId: null, pendingReason: 'NO_SHIFT', candidateShiftId: 'shift-A' })
     expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('registrarVentaDeLaMaquina · sólo la PC emparejada (R4-3, R5#2)', () => {
+  const NO_EMPAREJADA = { statusCode: 403, code: 'CASH_MACHINE_NOT_PAIRED' }
+
+  it('🔴 otra caja con payments:create pero sin la credencial: 403 y no escribe nada, ni una incidencia', async () => {
+    await expect(registrarVentaDeLaMaquina('venue-1', { ...AUTOR, credencial: null }, venta())).rejects.toMatchObject(NO_EMPAREJADA)
+    // Ni siquiera con importes imposibles deja rastro: quien no está emparejado no escribe.
+    await expect(
+      registrarVentaDeLaMaquina('venue-1', { ...AUTOR, credencial: 'otra' }, venta({ changeDispensedCents: 99999 })),
+    ).rejects.toMatchObject(NO_EMPAREJADA)
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+    expect(prismaMock.cashMachineClose.create).not.toHaveBeenCalled()
+    expect(incidencias).toHaveLength(0)
+  })
+
+  it('🔴 la PC revocada repite SU folio y recibe la misma respuesta; un folio nuevo ya no entra', async () => {
+    const primera = await registrarVentaDeLaMaquina('venue-1', AUTOR, venta())
+    binding = { active: false } // otra PC tomó la máquina, o se apagó la casilla
+    await expect(registrarVentaDeLaMaquina('venue-1', AUTOR, venta())).resolves.toEqual(primera)
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+    cierres = [] // un folio que el servidor no tiene
+    await expect(registrarVentaDeLaMaquina('venue-1', AUTOR, venta())).rejects.toMatchObject(NO_EMPAREJADA)
   })
 })
 

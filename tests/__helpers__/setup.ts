@@ -201,6 +201,8 @@ const prismaMock: any = {
   // Máquina de efectivo (fase 1a): el cierre por folio y sus incidencias durables.
   cashMachineClose: createMockModel(),
   cashMachineIncident: createMockModel(),
+  // R4-3: qué PC (Terminal) controla qué máquina; la credencial sólo como hash.
+  cashMachineBinding: createMockModel(),
   product: createMockModel(),
   productGroup: createMockModel(),
   productGroupOption: createMockModel(),
