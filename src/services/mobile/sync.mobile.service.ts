@@ -1474,7 +1474,7 @@ async function applyAddItems(
   // llave ⇒ la determinista). Así la búsqueda de la ronda, sus lápidas y el alta comparan la misma llave (Codex r3 #4, r4 #3, r5 #4
   // y #6: una llave " " se guardaba como null y la anulación no dejaba lápida; recortar sólo en algunos lugares dejaba huecos).
   const itemsWithKey = normales.map((it, idx) => {
-    const llave = orderTpvService.normalizeExternalId(typeof it.externalId === 'string' ? it.externalId : null)
+    const llave = llaveNormalizada(typeof it.externalId === 'string' ? it.externalId : null)
     return { ...it, externalId: llave ?? `sync:${intent.id}:${idx}` }
   })
   // El combo viaja sólo con su referencia y el prefijo de sus componentes (`sync:<intent>:<índice>`, el que el aparato predice): su
@@ -1613,9 +1613,16 @@ async function rondaYaEnAlgunaCuenta(venueId: string, conPromocion: any[], norma
  * lo anulado en una cuenta aparte (Codex r3 #4 de «Anular producto»).
  */
 function llavesGuardadasDeLaRonda(items: any[]): string[] {
-  return items
-    .map(it => orderTpvService.normalizeExternalId(typeof it.externalId === 'string' ? it.externalId : null))
-    .filter((k): k is string => !!k)
+  return items.map(it => llaveNormalizada(typeof it.externalId === 'string' ? it.externalId : null)).filter((k): k is string => !!k)
+}
+
+/**
+ * La llave de renglón como la guarda el alta (`normalizeExternalId` de order.tpv): recortada, y vacía o sólo espacios = sin llave.
+ * Copia local a propósito: varias pruebas simulan el módulo de la TPV entero y una función importada de ahí no existiría.
+ */
+function llaveNormalizada(externalId: string | null): string | null {
+  const recortada = externalId?.trim()
+  return recortada ? recortada : null
 }
 
 /** La llave del aparato en la cadena. Sin aparato (petición a mano) se usa el mesero, que es lo más parecido. */
