@@ -1,6 +1,7 @@
 import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import { cobradoQueCubreEnTx } from '@/services/shared/saldoReabiertoAlReembolsar'
+import { writeLegacyActivityAuditTx } from '@/services/activityAudit.service'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { AreaTicketInventoryReservationStatus, Order, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
@@ -658,7 +659,11 @@ function normalizeExternalId(externalId?: string | null): string | null {
  * Las llaves de renglón (`externalId`) de esta cuenta que una anulación dejó como lápida (`OrderAction` VOID, `metadata.externalIds`,
  * escrita en la misma transacción que la anulación). Sólo devuelve las que se piden.
  */
-export async function llavesAnuladasDeLaCuenta(tx: Prisma.TransactionClient, orderId: string, llaves: string[]): Promise<Set<string>> {
+export async function llavesAnuladasDeLaCuenta(
+  tx: Pick<Prisma.TransactionClient, 'orderAction'>,
+  orderId: string,
+  llaves: string[],
+): Promise<Set<string>> {
   const anulaciones = await tx.orderAction.findMany({
     where: { orderId, actionType: 'VOID' },
     select: { metadata: true },
@@ -3357,7 +3362,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
   const autor = input.actorId ?? input.staffId
 
   // R65 b: `valesSoltados` nace DENTRO de cada intento y sale en el retorno.
-  const { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, recorte, valesSoltados } = await withDeadlockRetry(
+  const { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, valesSoltados } = await withDeadlockRetry(
     async tx => {
       let valesSoltados: ValesSoltados | null = null
       // El candado de comandas va PRIMERO (mismo orden que el armado: comandas → orden). Si esta anulación deja la cuenta
@@ -3712,6 +3717,21 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
           },
         },
       })
+      // Y la bitácora del dueño (lo que lee el DASHBOARD), también adentro (Codex r2 #7): sin anulación sin su `ITEM_VOIDED`.
+      await writeLegacyActivityAuditTx(tx, {
+        staffId: autor ?? null,
+        venueId,
+        action: 'ITEM_VOIDED',
+        entity: 'Order',
+        entityId: orderId,
+        data: {
+          itemIds: input.itemIds,
+          amount: Number(voidAmount),
+          reason: input.reason ?? undefined,
+          ...(recorte.retiradas.length > 0 ? { descuentosRetirados: recorte.retiradas } : {}),
+          ...vendedorSiNoEsLaSesion({ staffId: input.staffId, performedBy: input.actorId }),
+        } as Prisma.InputJsonValue,
+      })
       return { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, recorte, valesSoltados }
     },
     { etiqueta: 'voidItems', timeout: 15_000, maxWait: 5_000 },
@@ -3734,21 +3754,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
     }
   }
 
-  // La `OrderAction` (audit trail) se escribe DENTRO de la transacción, arriba.
-  void logAction({
-    staffId: autor ?? null,
-    venueId,
-    action: 'ITEM_VOIDED',
-    entity: 'Order',
-    entityId: orderId,
-    data: {
-      itemIds: input.itemIds,
-      amount: Number(voidAmount),
-      reason: input.reason ?? undefined,
-      ...(recorte.retiradas.length > 0 ? { descuentosRetirados: recorte.retiradas } : {}),
-      ...vendedorSiNoEsLaSesion({ staffId: input.staffId, performedBy: input.actorId }),
-    },
-  })
+  // La `OrderAction` y el `ITEM_VOIDED` de la bitácora del dueño se escriben DENTRO de la transacción, arriba.
 
   logger.info(`✅ [ORDER SERVICE] Voided ${itemsToVoid.length} items | voided amount: $${voidAmount} | new total: $${newTotal}`)
 

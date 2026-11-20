@@ -113,6 +113,8 @@ function db() {
     orderServiceCharge: { findMany: jest.fn(async () => []), update: jest.fn() },
     // «Anular producto» (Codex r1 #1): la ronda lee las lápidas de lo anulado (`OrderAction` VOID con `externalIds`).
     orderAction: { create: jest.fn(async () => ({})), findMany: jest.fn(async () => []) },
+    // Codex r2 #7: `ITEM_VOIDED` (bitácora del dueño) va dentro de la transacción de la anulación.
+    activityLog: { create: jest.fn(async () => ({})) },
     orderCustomer: { deleteMany: jest.fn(async () => ({ count: 0 })) },
     terminalPaymentRequest: { findFirst: jest.fn(async () => null) },
     payment: { aggregate: jest.fn(async () => ({ _sum: { amount: 0, tipAmount: 0 } })) },

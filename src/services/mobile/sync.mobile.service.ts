@@ -1627,6 +1627,13 @@ async function aplicarRondaTardia(p: {
   if (yaEn) {
     return { id: intent.id, status: 'ACKED', result: { ...pedida, ...(yaEn !== original.id ? { cuentaAparte: { orderId: yaEn } } : {}) } }
   }
+  // «Anular producto» (Codex r2 #1): si una de sus llaves se ANULÓ en la cuenta cobrada, la ronda ya entró ahí (se guarda entera en
+  // una transacción) y después la anularon: no se abre una cuenta aparte para volver a cobrar lo anulado.
+  const llaves = p.itemsWithKey.map(it => it.externalId).filter((k: unknown): k is string => typeof k === 'string' && k.length > 0)
+  if (llaves.length && (await orderTpvService.llavesAnuladasDeLaCuenta(prisma, original.id, llaves)).size > 0) {
+    logger.info(`🪑 [POS SYNC] ADD_ITEMS ${intent.id}: la ronda ya estaba en ${original.id} y se anuló ahí; no se abre cuenta aparte`)
+    return { id: intent.id, status: 'ACKED', result: pedida }
+  }
   const aparte = await tableService.cuentaAparteParaRondaTardia({
     venueId,
     tableId: original.tableId,

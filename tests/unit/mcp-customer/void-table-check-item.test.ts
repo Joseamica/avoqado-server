@@ -14,6 +14,7 @@ const mockLineas = jest.fn()
 const mockPropiedad = jest.fn()
 const mockAdministraTodas = jest.fn()
 const mockCuenta = jest.fn()
+const mockPlan = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -22,6 +23,7 @@ jest.mock('@/mcp/guard', () => ({
   }),
 }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
+jest.mock('@/mcp/planGate', () => ({ planGateMessage: (...a: unknown[]) => mockPlan(...(a as [])) }))
 jest.mock('@/services/mobile/void-item.mobile.service', () => ({
   ...jest.requireActual('@/services/mobile/void-item.mobile.service'),
   voidOrderItem: (...a: unknown[]) => mockVoidOrderItem(...(a as [])),
@@ -72,6 +74,8 @@ beforeEach(() => {
   mockVoidOrderItem.mockResolvedValue({ total: 70 })
   mockPropiedad.mockResolvedValue(false)
   mockAdministraTodas.mockResolvedValue(false)
+  mockPlan.mockResolvedValue(null)
+  mockCuenta.mockResolvedValue({ version: 3, servedById: null, servedBy: null })
 })
 
 describe('void_table_check_item', () => {
@@ -86,6 +90,7 @@ describe('void_table_check_item', () => {
     expect(r).toMatchObject({
       requiresConfirmation: true,
       resolvedOrderItemId: 'l1',
+      expectedVersion: 3,
       preview: { mesa: '8', producto: { id: 'l1', producto: 'Agua de pepino' } },
     })
     expect(mockVoidOrderItem).not.toHaveBeenCalled()
@@ -127,6 +132,23 @@ describe('void_table_check_item', () => {
     mockAdministraTodas.mockResolvedValue(true)
     expect(await llamar({ item: 'l1', confirm: true, resolvedOrderItemId: 'l1' })).toMatchObject({ ok: true })
     expect(mockAdministraTodas).toHaveBeenCalledWith('s1', 'v1')
+  })
+
+  it('r2 #5: sin el plan de mesas no anula (como la ruta del POS)', async () => {
+    mockPlan.mockResolvedValue('El servicio de mesas no está incluido en el plan actual de este local.')
+    const r = await llamar({ item: 'l1', confirm: true, resolvedOrderItemId: 'l1', expectedVersion: 3 })
+    expect(r).toMatchObject({ ok: false, planRequired: true })
+    expect(mockPlan).toHaveBeenCalledWith('v1', 'TABLE_SERVICE', 'El servicio de mesas')
+    expect(mockVoidOrderItem).not.toHaveBeenCalled()
+  })
+
+  it('r2 #4: confirma sobre la versión que se VIO; si otra caja cambió la cuenta (409), pide otra vista previa', async () => {
+    await llamar({ item: 'pepino', confirm: true, resolvedOrderItemId: 'l1', expectedVersion: 3 })
+    expect(mockVoidOrderItem).toHaveBeenCalledWith(expect.objectContaining({ itemId: 'l1', expectedVersion: 3 }))
+    const { ConflictError } = jest.requireActual('@/errors/AppError')
+    mockVoidOrderItem.mockRejectedValueOnce(new ConflictError('Order was modified by another request.'))
+    const r = await llamar({ item: 'pepino', confirm: true, resolvedOrderItemId: 'l1', expectedVersion: 3 })
+    expect(r).toEqual({ ok: false, error: 'La cuenta cambió desde la vista previa: vuelve a pedirla.', code: 'ORDER_CHANGED' })
   })
 
   it('con confirm anula ese renglón con el servicio de la mesa, firmado por quien está conectado', async () => {
