@@ -7,7 +7,7 @@ SELECT o.name AS organizacion,
        COUNT(*) AS turnos_abiertos,
        MIN(te."clockInTime") AS el_mas_viejo_utc,
        ROUND(MAX(EXTRACT(EPOCH FROM (NOW() - te."clockInTime")) / 3600)::numeric, 1) AS horas_del_mas_viejo
-FROM "TimeEntry" te
+FROM "time_entries" te
 JOIN "Venue" v ON v.id = te."venueId"
 JOIN "Organization" o ON o.id = v."organizationId"
 LEFT JOIN "VenueSettings" s ON s."venueId" = v.id
