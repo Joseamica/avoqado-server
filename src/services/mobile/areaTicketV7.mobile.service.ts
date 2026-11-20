@@ -3863,18 +3863,20 @@ async function buildUnreservedAreaOrderInventoryDemands(
       }
       for (const recipeLine of item.product.recipe.lines) {
         if (recipeLine.isOptional) continue
-        const substitution =
+        // Cada SUSTITUCIÓN elegida del grupo ligado consume lo suyo (encargo a508f4, Codex r2 #1), igual que la venta normal
+        // (`deductStockForRecipe`) y la reserva al emitir. Antes sólo contaba la primera y la segunda opción quedaba sin descontar.
+        const substitutions =
           recipeLine.isVariable && recipeLine.linkedModifierGroupId
-            ? item.modifiers.find(
+            ? item.modifiers.filter(
                 candidate =>
                   candidate.modifier?.groupId === recipeLine.linkedModifierGroupId &&
                   candidate.modifier.inventoryMode === 'SUBSTITUTION' &&
                   candidate.modifier.rawMaterialId &&
                   candidate.modifier.quantityPerUnit,
               )
-            : undefined
-        if (substitution?.modifier) {
-          consumedSubstitutionModifierIds.add(substitution.modifier.id)
+            : []
+        if (substitutions.length > 0) {
+          for (const substitution of substitutions) consumedSubstitutionModifierIds.add(substitution.modifier!.id)
           continue
         }
         const perSale = convertUnit(recipeLine.quantity, recipeLine.unit, recipeLine.rawMaterial.unit)
