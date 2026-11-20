@@ -80,10 +80,12 @@ export function marcarPrimerServicioMiddleware(req: { path: string }, _res: unkn
 /**
  * Lo que contestó el SERVIDOR anterior (que no pone la marca) en pedidos creados antes del primer servicio: aceptado, listo, entregado,
  * cancelado por el personal o por otra vía, rechazado por una persona, la tarjeta pasó a cobrarse o falló al cobrarse (eso sólo lo dispara
- * el toque de aceptar) o, todavía por aceptar, con su cuenta ya anulada. NO `CAPTURED` solo (p2v4-r1 #3).
+ * el toque de aceptar) o, todavía por aceptar, con su cuenta ya anulada. NO `CAPTURED` solo (p2v4-r1 #3). Aceptado/listo/entregado sólo con
+ * `acceptedAt`: el cobro tardío de un pedido VENCIDO lo pasa a entregado sin aceptación (p2v4-r3 #1), aunque ocurra antes del sello.
  */
 const evidenciaDelAnterior = Prisma.sql`(
-  oo.status IN ('ACCEPTED', 'READY', 'COMPLETED', 'CANCELLED_BY_STAFF')
+  (oo.status IN ('ACCEPTED', 'READY', 'COMPLETED') AND oo."acceptedAt" IS NOT NULL)
+  OR oo.status = 'CANCELLED_BY_STAFF'
   OR (oo.status = 'REJECTED' AND oo."rejectReason" IS DISTINCT FROM 'PAYMENT_FAILED')
   OR EXISTS (SELECT 1 FROM "OnlineOrderCharge" c WHERE c."onlineOrderId" = oo.id AND c.status IN ('CAPTURING', 'CAPTURE_FAILED'))
   OR (

@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import {
   __resetArranqueParaPruebas,
@@ -85,12 +86,16 @@ describe('arranque de la pausa sola', () => {
     ;(prismaMock.$executeRaw as jest.Mock).mockResolvedValue(3)
     ;(prismaMock.arranqueDeFuncion.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
     await expect(arranqueDeLaPausaSola()).resolves.toMatchObject({ primerServicio: primer })
-    const llamadas = (prismaMock.$executeRaw as jest.Mock).mock.calls.map(c => (c[0] as TemplateStringsArray).join('?'))
+    const llamadas = (prismaMock.$executeRaw as jest.Mock).mock.calls.map(
+      ([plantilla, ...valores]) => Prisma.sql(plantilla as TemplateStringsArray, ...valores).sql,
+    )
     expect(llamadas.some(t => t.includes('pg_advisory_xact_lock'))).toBe(true)
     const sello = llamadas.find(t => t.includes('UPDATE "OnlineOrder"'))!
     expect(sello).toContain('"staffAnsweredAt" IS NULL')
     expect(sello).toContain('oo."createdAt" <')
     expect(sello).toContain('oo."acceptDeadlineAt" >')
+    // Un cobro tardío de un pedido vencido lo deja entregado SIN aceptación: no es evidencia de persona.
+    expect(sello).toContain(`oo.status IN ('ACCEPTED', 'READY', 'COMPLETED') AND oo."acceptedAt" IS NOT NULL`)
     expect(prismaMock.arranqueDeFuncion.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { clave: CLAVE_PAUSA_SOLA, legadoSelladoAt: null } }),
     )
