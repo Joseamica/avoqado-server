@@ -264,3 +264,28 @@ export async function listServiceCharges(req: Request, res: Response): Promise<v
     res.status(error.statusCode || 500).json(cuerpoDeError(error))
   }
 }
+
+/**
+ * POST /tpv/venues/:venueId/orders/:orderId/retirar-sin-cobro
+ * D36: «atrás» desde el cobro de «Cobrar» antes de cualquier intento de cobro. La TPV ya revisó su libreta y su cola; el servidor
+ * vuelve a comprobar bajo el candado (`retirarVentaSinCobro`). 200 `{ estado: 'RETIRADA' | 'YA_RETIRADA' }`; 409
+ * `VENTA_NO_RETIRABLE` (con `details.motivo`) si no se cumple algo: la venta queda como estaba.
+ */
+export async function retirarVentaSinCobro(req: Request, res: Response): Promise<void> {
+  try {
+    const { venueId, orderId } = req.params
+    const staffId = (req as any).authContext?.userId as string | undefined
+    const { retirarVentaSinCobro: retirar } = await import('../../services/tpv/retirarVentaSinCobro.service')
+    const resultado = await retirar(venueId, orderId, staffId)
+    res.status(200).json({ success: true, data: resultado })
+  } catch (error: any) {
+    if (error?.code === 'VENTA_NO_RETIRABLE')
+      logger.info(`[ORDER-TABLE TPV] retirar-sin-cobro: ${orderId(req)} no se retira: ${error.message}`)
+    else logger.error(`[ORDER-TABLE TPV] retirar-sin-cobro: ${error.message}`)
+    res.status(error.statusCode || 500).json(cuerpoDeError(error))
+  }
+}
+
+function orderId(req: Request): string {
+  return req.params?.orderId ?? '?'
+}

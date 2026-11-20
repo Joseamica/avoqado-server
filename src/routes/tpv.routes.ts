@@ -4454,6 +4454,24 @@ router.post(
 )
 
 /**
+ * POST /tpv/venues/{venueId}/orders/{orderId}/retirar-sin-cobro
+ *
+ * D36 (encargo da7275, 20-nov): «atrás» desde el cobro de «Cobrar» ANTES de cualquier intento de cobro. La venta que «Cobrar» creó al
+ * tocar «Cobrar» se cancela (no se borra) en vez de quedarse abierta para siempre. Sólo ventas de mostrador de la TPV, sin mesa, de las
+ * últimas 24 h, sin ningún Payment ni solicitud del POS, revisado bajo el candado (`retirarVentaSinCobro.service.ts`).
+ *
+ * Permiso `orders:create` a propósito: quien armó la venta la retira, como vaciar el carrito; no es «Cancelar cuenta»
+ * (`orders:cancel-unpaid`), que cancela cualquier cuenta sin cobrar. Sin `TABLE_SERVICE`: Cobrar no es de mesas.
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/retirar-sin-cobro',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('orders:create'),
+  orderTableController.retirarVentaSinCobro,
+)
+
+/**
  * POST /tpv/venues/{venueId}/orders/{orderId}/service-charges
  * Aplica un cobro por servicio del catálogo (propina automática por comensales,
  * descorche, etc.) a la cuenta abierta. Body: { serviceChargeId: string }
