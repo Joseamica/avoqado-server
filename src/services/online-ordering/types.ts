@@ -15,6 +15,8 @@ export interface OnlineOrderingConfig {
   hours: HorarioSemanal | null
   /** Tienda híbrida: `true` = «Mi equipo» confirma cada pedido; `false` = «Nadie» (nace aceptado y se paga en caja). */
   requiresAcceptance: boolean
+  /** D661: pagar con tarjeta al pedir en «Nadie». Su propio interruptor, apagado de fábrica; `acceptsCardOnline` es sólo de «Mi equipo». */
+  cardOnlineNadie: boolean
 }
 
 export type OnlineOrderingSettingsPatch = Partial<OnlineOrderingConfig>

@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { isWithinHours } from '@/services/online-ordering/hours'
+import { cardOnlineAvailable } from '@/services/online-ordering/card/merchant'
 import {
   buildVenueContact,
   DEFAULT_CONFIG,
@@ -655,5 +656,79 @@ describe('tienda híbrida T5: «¿Quién confirma?» y sus candados', () => {
     conTx(row({ ...NADIE, enabled: false }))
     await updateSettings('v1', { requiresAcceptance: false }, 's1')
     expect((logAction as jest.Mock).mock.calls.at(-1)[0].data.requiresAcceptance).toBeUndefined()
+  })
+
+  describe('D661: el interruptor propio de la tarjeta en «Nadie» (cardOnlineNadie, r1 #7 y #10)', () => {
+    const MIN = 60_000
+
+    it('apagado de fábrica: sin fila, getSettings dice cardOnlineNadie false', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(null)
+      await expect(getSettings('v1')).resolves.toMatchObject({ cardOnlineNadie: false })
+      expect(DEFAULT_CONFIG.cardOnlineNadie).toBe(false)
+    })
+
+    it('prender cardOnlineNadie sin caja capaz en 7 días → 409 NO_CARD_ALERT_DEVICE', async () => {
+      // En los dos modos: el interruptor es el consentimiento para cuando la tienda esté en «Nadie».
+      for (const modo of [{ requiresAcceptance: false }, { requiresAcceptance: true }]) {
+        for (const lastCardAlertPollAt of [null, hace(8)]) {
+          const tx = conTx(row({ ...NADIE, ...modo, cardOnlineNadie: false, lastCardAlertPollAt }))
+          await expect(updateSettings('v1', { cardOnlineNadie: true }, 's1')).rejects.toMatchObject({
+            statusCode: 409,
+            code: 'NO_CARD_ALERT_DEVICE',
+          })
+          expect(tx.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+        }
+      }
+      // Sin fila (nunca configurada) tampoco hay caja que haya avisado.
+      const sinFila = conTx(null)
+      await expect(updateSettings('v1', { cardOnlineNadie: true }, 's1')).rejects.toMatchObject({ code: 'NO_CARD_ALERT_DEVICE' })
+      expect(sinFila.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+    })
+
+    it('con una caja capaz que avisó en los últimos 7 días se prende, y la bitácora trae { de, a }', async () => {
+      const tx = conTx(row({ ...NADIE, cardOnlineNadie: false, lastCardAlertPollAt: hace(6) }))
+      const out = await updateSettings('v1', { cardOnlineNadie: true }, 's1')
+      expect((tx.onlineOrderingSettings.upsert.mock.calls[0][0] as any).update).toEqual({ cardOnlineNadie: true })
+      expect(out.cardOnlineNadie).toBe(true)
+      expect((logAction as jest.Mock).mock.calls.at(-1)[0].data.cardOnlineNadie).toEqual({ de: false, a: true })
+    })
+
+    it('apagarlo o repetirlo ya prendido no pide la caja (sólo PRENDER lo exige)', async () => {
+      const apagar = conTx(row({ ...NADIE, cardOnlineNadie: true, lastCardAlertPollAt: null }))
+      await updateSettings('v1', { cardOnlineNadie: false }, 's1')
+      expect((apagar.onlineOrderingSettings.upsert.mock.calls[0][0] as any).update).toEqual({ cardOnlineNadie: false })
+      const repetir = conTx(row({ ...NADIE, cardOnlineNadie: true, lastCardAlertPollAt: null }))
+      await updateSettings('v1', { cardOnlineNadie: true, minOrderAmount: 5 }, 's1')
+      expect(repetir.onlineOrderingSettings.upsert).toHaveBeenCalledTimes(1)
+    })
+
+    it('pasar de «Mi equipo» a «Nadie» no prende la tarjeta', async () => {
+      // «Mi equipo» con su tarjeta PRENDIDA (la de fábrica), Stripe listo y una caja que avisó hace 1 min.
+      const tx = conTx(
+        row({
+          enabled: true,
+          hours: semana(),
+          requiresAcceptance: true,
+          acceptsCardOnline: true,
+          cardOnlineNadie: false,
+          lastToPayPollAt: hace(1),
+          lastCardAlertPollAt: new Date(Date.now() - MIN),
+        }),
+      )
+      const out = await updateSettings('v1', { requiresAcceptance: false }, 's1')
+      const escrito = (tx.onlineOrderingSettings.upsert.mock.calls[0][0] as any).update
+      expect(escrito).not.toHaveProperty('cardOnlineNadie')
+      expect(out).toMatchObject({ requiresAcceptance: false, acceptsCardOnline: true, cardOnlineNadie: false })
+      // La preferencia de «Mi equipo» no se hereda: con lo que quedó guardado, «Nadie» NO ofrece tarjeta.
+      const db = {
+        ecommerceMerchant: {
+          findMany: jest.fn(async () => [
+            { id: 'm1', chargesEnabled: true, providerCredentials: { connectAccountId: 'acct_1' }, provider: { code: 'STRIPE_CONNECT' } },
+          ]),
+        },
+        onlineOrderingSettings: { findUnique: jest.fn(async () => ({ lastCardAlertPollAt: new Date(Date.now() - MIN) })) },
+      } as any
+      await expect(cardOnlineAvailable(out, db, 'v1')).resolves.toBe(false)
+    })
   })
 })

@@ -21,6 +21,8 @@ export const DEFAULT_CONFIG: OnlineOrderingConfig = {
   hours: null,
   // R37: toda fila nueva nace en «Mi equipo»; «Nadie» sólo lo pone quien lo manda.
   requiresAcceptance: true,
+  // D661 (r1 #7): la tarjeta de «Nadie» viene APAGADA y sólo la prende el negocio (cobrar sin caja que lo abra no se hereda de nadie).
+  cardOnlineNadie: false,
 }
 
 export type OnlineOrderingSettingsRead = OnlineOrderingConfig & { lastInboxPollAt: Date | null; lastToPayPollAt: Date | null }
@@ -36,6 +38,7 @@ function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingSettingsRead {
     pausedUntil: row.pausedUntil ? row.pausedUntil.toISOString() : null,
     hours: (row.hours as unknown as HorarioSemanal | null) ?? null,
     requiresAcceptance: row.requiresAcceptance,
+    cardOnlineNadie: row.cardOnlineNadie,
     lastInboxPollAt: row.lastInboxPollAt ?? null,
     lastToPayPollAt: row.lastToPayPollAt ?? null,
   }
@@ -172,6 +175,18 @@ export async function updateSettings(
         throw new ConflictError('Ningún aparato puede cobrar folios todavía: actualiza la terminal o el POS', 'NO_FOLIO_DEVICE')
       }
     }
+    // D661 (r1 #10): sólo al PRENDER la tarjeta de «Nadie», en cualquier modo (es el consentimiento para cuando esté en «Nadie»), exige
+    // que una caja ACTUALIZADA haya avisado en la misma ventana que los folios. Apagarla o repetirla nunca lo pide. Lo que de verdad
+    // protege al cobro es la regla de 15 min de `cardOnlineAvailable`; esto evita prender algo que hoy no tiene quién lo abra.
+    if (patch.cardOnlineNadie === true && !current.cardOnlineNadie) {
+      const avisoDeCaja = existing?.lastCardAlertPollAt
+      if (!avisoDeCaja || Date.now() - avisoDeCaja.getTime() > FOLIO_DEVICE_WINDOW_MS) {
+        throw new ConflictError(
+          'Ninguna caja puede avisar los pedidos pagados en línea todavía: actualiza la terminal o el POS',
+          'NO_CARD_ALERT_DEVICE',
+        )
+      }
+    }
 
     if (merged.enabled && !merged.acceptsPayAtPickup) {
       if (!merged.acceptsCardOnline) throw new BadRequestError('Activa al menos un medio de pago para recibir pedidos.', 'NO_PAYMENT_MODE')
@@ -195,6 +210,7 @@ export async function updateSettings(
     if (patch.acceptsPayAtPickup !== undefined) data.acceptsPayAtPickup = patch.acceptsPayAtPickup
     if (patch.acceptsCardOnline !== undefined) data.acceptsCardOnline = patch.acceptsCardOnline
     if (patch.requiresAcceptance !== undefined) data.requiresAcceptance = patch.requiresAcceptance
+    if (patch.cardOnlineNadie !== undefined) data.cardOnlineNadie = patch.cardOnlineNadie
     if (patch.manualPause !== undefined) data.manualPause = patch.manualPause
     if (patch.pausedUntil !== undefined) data.pausedUntil = patch.pausedUntil ? new Date(patch.pausedUntil) : null
     if (patch.hours !== undefined) data.hours = patch.hours === null ? Prisma.DbNull : (patch.hours as unknown as Prisma.InputJsonValue)
@@ -209,6 +225,9 @@ export async function updateSettings(
       patch: JSON.parse(JSON.stringify(patch)),
       ...(patch.requiresAcceptance !== undefined && patch.requiresAcceptance !== current.requiresAcceptance
         ? { requiresAcceptance: { de: current.requiresAcceptance, a: patch.requiresAcceptance } }
+        : {}),
+      ...(patch.cardOnlineNadie !== undefined && patch.cardOnlineNadie !== current.cardOnlineNadie
+        ? { cardOnlineNadie: { de: current.cardOnlineNadie, a: patch.cardOnlineNadie } }
         : {}),
       ...(preloadHours ? { horarioPrecargadoDeReservas: true } : {}),
     }

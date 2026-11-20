@@ -71,7 +71,13 @@ const FOLIO_SIN_PAGAR = 'Este pedido se cobra antes de prepararlo'
 const FOLIO_NO_SE_RECHAZA =
   'Este pedido se paga en caja y no se rechaza; no se aplicó nada. Para quitarlo usa CANCELAR (pide el permiso de cancelar cuentas sin cobro).'
 /** Rechazos del servicio al guardar los ajustes que se dicen en texto, sin error (nada se escribió). */
-const AJUSTES_RECHAZADOS = new Set(['NO_PAYMENT_MODE', 'PAY_AT_PICKUP_REQUIRED', 'HOURS_REQUIRED', 'NO_FOLIO_DEVICE'])
+const AJUSTES_RECHAZADOS = new Set([
+  'NO_PAYMENT_MODE',
+  'PAY_AT_PICKUP_REQUIRED',
+  'HOURS_REQUIRED',
+  'NO_FOLIO_DEVICE',
+  'NO_CARD_ALERT_DEVICE',
+])
 
 /** El texto del cobro (HAS_PAYMENTS) es el mismo de la API del restaurante (`onlineOrders.mobile.controller.ts`). */
 function fallo(r: Exclude<TransitionResult, { outcome: 'OK' }>) {
@@ -115,6 +121,8 @@ const conCuenta = (o: InboxOrder) => ({ ...o, cuenta: lineaDeLaCuenta(o) })
 /** Fase 2: el switch del pago con tarjeta se muestra como lo dice el panel: «Aceptar pago con tarjeta: no → sí». */
 const sino = (v: unknown) => (v ? 'sí' : 'no')
 const CARD_TOGGLE_LABEL = 'Aceptar pago con tarjeta'
+/** D661: el interruptor de la tarjeta en «No, entran solos» («Nadie»). */
+const CARD_NADIE_LABEL = 'Pagar con tarjeta al pedir con «No, entran solos»'
 
 /**
  * Pedidos en línea del negocio (la tienda web del restaurante). 🔴 Responder un pedido y pausar avisan al comensal o cambian
@@ -299,7 +307,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_ordering_settings',
-    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas, cuándo consultó la bandeja un aparato por última vez, si la tienda está abierta ahora (y por qué no) y qué le falta para poder encenderla (domicilio, teléfono, aviso de privacidad publicado). hasSavedSettings indica si el negocio ya guardó sus ajustes alguna vez (false = siguen los de fábrica). También si acepta pago con tarjeta al pedir y si su cuenta de Stripe está lista para cobrar.',
+    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas, cuándo consultó la bandeja un aparato por última vez, si la tienda está abierta ahora (y por qué no) y qué le falta para poder encenderla (domicilio, teléfono, aviso de privacidad publicado). hasSavedSettings indica si el negocio ya guardó sus ajustes alguna vez (false = siguen los de fábrica). También si acepta pago con tarjeta al pedir y si su cuenta de Stripe está lista para cobrar. cardOnlineNadie dice si, con «No, entran solos» (nadie acepta los pedidos), la clienta puede pagar con tarjeta al pedir: es un interruptor aparte, apagado de fábrica.',
     { venueId: z.string().describe('Venue (debe estar en tu scope)') },
     async ({ venueId }) => {
       guard.venueFilter(venueId)
@@ -334,7 +342,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_ordering_configure',
-    'Cambia la tienda en línea del negocio: encendido, horario, pedido mínimo en pesos, minutos de preparación, pausa del gerente, aceptar pago con tarjeta al pedir (acceptsCardOnline; viene prendido y la tienda lo ofrece sólo con la cuenta de Stripe conectada y lista) y qué platillos se ofrecen en línea. Muestra «de → a» y exige confirm:true.',
+    'Cambia la tienda en línea del negocio: encendido, horario, pedido mínimo en pesos, minutos de preparación, pausa del gerente, aceptar pago con tarjeta al pedir (acceptsCardOnline; viene prendido y la tienda lo ofrece sólo con la cuenta de Stripe conectada y lista), pagar con tarjeta al pedir con «No, entran solos» (cardOnlineNadie; viene apagado y prenderlo exige una terminal o un POS actualizado que avise los pedidos pagados) y qué platillos se ofrecen en línea. Muestra «de → a» y exige confirm:true.',
     {
       venueId: z.string().describe('Venue (debe estar en tu scope)'),
       changes: settingsPatchBody.optional().describe('Ajustes a cambiar, con las mismas reglas que el panel'),
@@ -367,6 +375,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
           de: actual[campo],
           a,
           ...(campo === 'acceptsCardOnline' ? { resumen: `${CARD_TOGGLE_LABEL}: ${sino(actual[campo])} → ${sino(a)}` } : {}),
+          ...(campo === 'cardOnlineNadie' ? { resumen: `${CARD_NADIE_LABEL}: ${sino(actual[campo])} → ${sino(a)}` } : {}),
         }))
       if (diff.length === 0 && !availability) return text({ ok: true, sinCambios: true, ajustes: current })
 

@@ -45,6 +45,8 @@ export const settingsPatchBody = z
     acceptsPayAtPickup: z.boolean(),
     acceptsCardOnline: z.boolean(),
     requiresAcceptance: z.boolean(),
+    // D661 (r2 #7): la tarjeta de «Nadie», su propio interruptor; se guarda en los dos modos (el servicio pide la caja al prenderlo).
+    cardOnlineNadie: z.boolean(),
     manualPause: z.boolean(),
     // ISO 8601 en UTC (`…Z`) o con desfase (`…-06:00`): el MCP (tarea 14) comparte este esquema y puede mandar hora local.
     pausedUntil: z.string().datetime({ offset: true, message: 'Fecha inválida' }).nullable(),

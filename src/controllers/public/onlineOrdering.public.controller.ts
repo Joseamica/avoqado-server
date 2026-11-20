@@ -12,6 +12,7 @@ import { abandonCardPayment, createOnlineOrder, getTrackingByToken } from '@/ser
 import { clientaDeLaSesion } from '@/services/online-ordering/clientaDeLaSesion'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
 import { cardOnlineAvailable } from '@/services/online-ordering/card/merchant'
+import { storeCreditAvailable } from '@/services/storeCredit/storeCreditTender'
 import { cuentaConBeneficios } from '@/services/online-ordering/cuentaConBeneficios'
 import { buildVenueContact } from '@/services/online-ordering/settings.service'
 import { toPublicQuote } from '@/services/online-ordering/quote.service'
@@ -111,6 +112,9 @@ export async function getInfo(req: Request, res: Response) {
         requiresAcceptance: state.config.requiresAcceptance !== false,
         closesAt: closesAt(state.config.hours, new Date(), row?.timezone || 'America/Mexico_City')?.toISOString() ?? null,
         paymentModes: { payAtPickup: state.config.acceptsPayAtPickup, cardOnline },
+        // D661 (aditivo): ¿el negocio puede devolver como saldo a favor? Con él (y una cuenta con teléfono) la tienda avisa antes de
+        // pagar «si cancelas o no recoges, te queda como saldo a favor»; sin él, «el negocio decide cómo devolverte».
+        storeCredit: storeCreditAvailable(),
         minOrderAmount: state.config.minOrderAmount,
         estimatedPrepMinutes: state.config.defaultPrepMinutes,
         acceptTimeoutMinutes: ACCEPT_TIMEOUT_MINUTES,

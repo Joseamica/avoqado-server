@@ -21437,6 +21437,12 @@ model OnlineOrderingSettings {
   requiresAcceptance Boolean   @default(true)
   /// Último sondeo de la lista «por cobrar» (pedidos sin aceptación que esperan pago en la barra): latido de presencia.
   lastToPayPollAt    DateTime?
+  /// D661: pagar con tarjeta al pedir en «Nadie» (apartar al pagar, cobrar cuando una caja abre el pedido). Su PROPIO consentimiento,
+  /// apagado de fábrica: pasar de «Mi equipo» a «Nadie» nunca hereda `acceptsCardOnline`.
+  cardOnlineNadie     Boolean   @default(false)
+  /// D661: último sondeo de una caja actualizada capaz de avisar los pedidos pagados en línea (cabecera
+  /// `x-online-orders-card-alert: 1`). En «Nadie» la tarjeta sólo se ofrece si es de los últimos 15 min.
+  lastCardAlertPollAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -21489,6 +21495,13 @@ model OnlineOrder {
   printClaimedAt DateTime?
   printClaimedBy String?
   printedAt      DateTime?
+
+  /// D661: el cierre del día lo dio por «No lo recogió» (pagado con tarjeta en «Nadie» y nunca entregado).
+  notPickedUpAt     DateTime?
+  /// D661: reserva «Devolviendo…», puesta bajo el candado de la orden ANTES de mover dinero: mientras exista no se entrega.
+  refundRequestedAt DateTime?
+  /// D661: cerrado como «Devuelto» (`COMPLETED` + esta hora): devuelto el 100 %, nada lo revive.
+  refundedAt        DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -21612,6 +21625,8 @@ model OnlineOrderCardRefund {
   lastSentAt       DateTime?
   /// Cuándo nació el renglón del libro: de aquí se cuenta la revisión tardía (1 h … 30 días).
   recordedAt       DateTime?
+  /// D661: la devolución fue a saldo a favor en el negocio, no a la tarjeta. Nace `RESOLVED` y el barrido de Stripe nunca la toma.
+  toStoreCredit    Boolean                     @default(false)
 
   reversal OnlineOrderCardRefundReversal?
 
