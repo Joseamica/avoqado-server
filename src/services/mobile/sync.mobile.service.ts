@@ -337,13 +337,12 @@ export function requiredPermissionForIntent(type: string): string | null {
  */
 /**
  * D17 (founder, 20-nov-2026): con «La cocina puede liberar tiempos desde su pantalla» prendido, un RELEASE sólo pide
- * `orders:update` (el rol de cocina); apagado, lo de siempre (`orders:update` + `orders:create`). Se mide AL REPRODUCIR: si el
- * negocio lo apagó mientras la tablet estaba sin red, ese RELEASE se rechaza visible (nunca se aplica con un permiso retirado).
+ * `orders:update` (el rol de cocina); apagado, lo de siempre (`orders:update` + `orders:create`). Vale lo que diga al reproducir.
  */
 export async function permisosParaReproducir(venueId: string, intent: SyncIntentInput): Promise<string[]> {
   const permisos = requiredPermissionsForIntent(intent)
   if (!esLiberacion(intent)) return permisos
-  return (await laCocinaPuedeLiberar(venueId, intent.createdAtLocal)) ? ['orders:update'] : permisos
+  return (await laCocinaPuedeLiberar(venueId)) ? ['orders:update'] : permisos
 }
 
 function esLiberacion(intent: SyncIntentInput): boolean {
@@ -1084,7 +1083,7 @@ async function applyIntent(ctx: {
           },
           staffId,
           intent.id,
-          ...(deCocina ? [{ hechoEnMs: intent.createdAtLocal ?? null }] : []),
+          ...(deCocina ? [true as const] : []),
         )
         return { id: intent.id, status: 'ACKED', result }
       }

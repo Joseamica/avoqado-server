@@ -130,23 +130,13 @@ describe('service courses: tenant-scoped reads, Pro and atomic revisions', () =>
     })
     await expect(getVenueServiceCourses('venue-a')).resolves.toMatchObject({ kitchenCanRelease: true })
   })
-  it('D17: prenderlo guarda el valor y cuándo cambió, con la fila bloqueada, y deja la bitácora antes → después', async () => {
+  it('D17: prenderlo guarda el valor con la fila bloqueada, y deja la bitácora antes → después', async () => {
     prismaMock.venueSettings.upsert.mockResolvedValue({})
-    prismaMock.$queryRaw.mockResolvedValue([{ kitchenCanReleaseHistory: [{ at: '2026-11-01T10:00:00.000Z', on: false }] }])
     const result = await setKitchenRelease('venue-a', true, actor)
     expect(result.kitchenCanRelease).toBe(true)
+    expect(prismaMock.$queryRaw).toHaveBeenCalled() // la fila de ajustes, bloqueada
     expect(prismaMock.venueSettings.upsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { venueId: 'venue-a' },
-        update: {
-          kitchenCanReleaseCourses: true,
-          // el historial conserva lo anterior y suma este cambio al final (el SERVIDOR decide el RELEASE con él)
-          kitchenCanReleaseHistory: [
-            { at: '2026-11-01T10:00:00.000Z', on: false },
-            { at: expect.any(String), on: true },
-          ],
-        },
-      }),
+      expect.objectContaining({ where: { venueId: 'venue-a' }, update: { kitchenCanReleaseCourses: true } }),
     )
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({

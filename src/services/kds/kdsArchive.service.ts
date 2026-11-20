@@ -7,9 +7,6 @@ import { instanteUtcSql, seAcaboElDiaDelNegocioDeSql } from '../shared/pagadaPer
  * 22-oct que cierra los pedidos de plataforma— y (b) su cuenta ya se cerró (cobrada o anulada) y ningún platillo suyo pertenece hoy
  * a una cuenta abierta (dividir la mesa mueve el renglón a otra cuenta y deja la comanda ligada a la primera — Codex r1 #2).
  *
- * El día que cuenta es el de su ÚLTIMO cambio (Codex r3 #1 y #7), no el de su creación: lo que la cocina terminó a las 04:02 (o
- * lo que la caja corrigió a las 04:08) es de ese día y se queda en «Recientes» o en el tablero; se archiva al acabar ESE día.
- *
  * Archivar NO cambia el estado ni los productos (Codex r1 #1 y #3): sólo pone `archivedAt`. La caja sigue viendo en «Servicio y
  * entregas» lo que falte entregar, el aviso de «listo» a las plataformas no la toma (no cambia `status` ni `updatedAt`: es SQL
  * crudo) y los reportes de tiempos no cambian (`completedAt` no se toca). El tablero y «Recientes» la ignoran.
@@ -19,23 +16,41 @@ export const ARCHIVO_LOTE = 500
 
 const CUENTA_CERRADA = `('COMPLETED', 'CANCELLED', 'DELETED')`
 
-/** Las condiciones, UNA vez: las usan la lectura (con reintento) y el UPDATE (que las vuelve a medir sobre la fila bloqueada). */
+/**
+ * Las condiciones, UNA vez: las usan la lectura (con reintento) y el UPDATE (que las vuelve a medir sobre la fila bloqueada).
+ *
+ * - **El día que cuenta es el de su ÚLTIMO cambio** (`GREATEST(createdAt, updatedAt)`) y ese cambio tiene **al menos una hora**
+ *   (Codex r3 #1/#7, r4 A2/C1): lo que la cocina terminó o la caja corrigió cerca del corte de las 04:00 conserva su hora en
+ *   «Recientes» o en el tablero. Un cambio de imprenta (reclamar o confirmar papel) también cuenta: sólo retrasa un día (r4 A3).
+ * - **La cuenta que manda es la de sus platillos** (Codex r1 #2, r4 A1): ningún platillo de la comanda en una cuenta abierta, y
+ *   o la cuenta de la cabecera ya cerró o TODOS sus platillos son de cuentas cerradas (dividir mueve los platillos, no la cabecera).
+ */
 function condiciones(ahora: Date): string {
   // El reloj de pared UTC como literal (`TIMESTAMP '…'`), igual que el barrido de pedidos de plataforma: nunca un Date ligado.
   const nowSql = instanteUtcSql(ahora)
-  // Codex r2 #1: sin margen de horas — una comanda de las 03:59 se archiva en la pasada de las 04:07. Sin ventana de días (r3 #5):
-  // lo viejo con folio sigue en el tablero y también se archiva; el índice (archivedAt, status, createdAt) recorre sólo lo vivo.
+  const ultimoCambio = 'GREATEST(k."createdAt", k."updatedAt")'
   return `k."archivedAt" IS NULL
       AND k.status IN ('NEW', 'PREPARING', 'READY')
       AND k."createdAt" < ${nowSql}
-      AND o.status IN ${CUENTA_CERRADA}
+      AND ${ultimoCambio} < ${nowSql} - INTERVAL '1 hour'
       AND NOT EXISTS (
         SELECT 1 FROM "KdsOrderItem" ki
         JOIN "OrderItem" oi ON oi.id = ki."orderItemId"
         JOIN "Order" o2 ON o2.id = oi."orderId"
         WHERE ki."kdsOrderId" = k.id AND o2.status NOT IN ${CUENTA_CERRADA}
       )
-      AND ${seAcaboElDiaDelNegocioDeSql('GREATEST(k."createdAt", k."updatedAt")', 'k."venueId"', nowSql)}`
+      AND (
+        o.status IN ${CUENTA_CERRADA}
+        OR (
+          EXISTS (SELECT 1 FROM "KdsOrderItem" ki WHERE ki."kdsOrderId" = k.id)
+          AND NOT EXISTS (
+            SELECT 1 FROM "KdsOrderItem" ki
+            LEFT JOIN "OrderItem" oi ON oi.id = ki."orderItemId"
+            WHERE ki."kdsOrderId" = k.id AND oi.id IS NULL
+          )
+        )
+      )
+      AND ${seAcaboElDiaDelNegocioDeSql(ultimoCambio, 'k."venueId"', nowSql)}`
 }
 
 function lote(limite: number): number {

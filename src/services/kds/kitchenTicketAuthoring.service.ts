@@ -628,6 +628,8 @@ export async function ponerComandasConSuCuenta(tx: Prisma.TransactionClient, ven
         customerName: true,
         customerContact: true,
         createdAt: true,
+        // D17 (Codex r4 C2): la parte que se muda a un folio nuevo conserva cuándo la cocina la terminó (no estrena «Recientes»).
+        kitchenDoneAt: true,
         _count: { select: { items: true } },
       },
       take: porComanda.size,

@@ -2,7 +2,6 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '@/errors/AppError'
 import { venueHasFeatureAccess, organizationHasFeatureAccess } from '@/services/access/basePlan.service'
-import { historialDelInterruptor, podarHistorial } from '@/services/kds/kitchenPreparation'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import {
   DEFAULT_SERVICE_COURSES,
@@ -71,20 +70,13 @@ export async function setKitchenRelease(venueId: string, enabled: unknown, actor
   const current = await getVenueServiceCourses(venueId)
   requireEnabled(current.enabled)
   if (current.kitchenCanRelease === enabled) return current
-  const ahora = new Date()
-  // FOR UPDATE: espera a que termine un RELEASE de la cocina que ya midió el permiso (lo lee con FOR SHARE dentro de su operación),
-  // y el historial se lee y se escribe sin que otro cambio se le cruce.
+  // FOR UPDATE: espera a que termine un RELEASE de la cocina que ya midió el permiso (lo lee con FOR SHARE dentro de su operación).
   await prisma.$transaction(async tx => {
-    const [fila] = await tx.$queryRaw<Array<{ kitchenCanReleaseHistory: unknown }>>`
-      SELECT "kitchenCanReleaseHistory" FROM "VenueSettings" WHERE "venueId" = ${venueId} FOR UPDATE`
-    const historial = podarHistorial(
-      [...historialDelInterruptor(fila?.kitchenCanReleaseHistory), { at: ahora.toISOString(), on: enabled }],
-      ahora.getTime(),
-    )
+    await tx.$queryRaw`SELECT id FROM "VenueSettings" WHERE "venueId" = ${venueId} FOR UPDATE`
     await tx.venueSettings.upsert({
       where: { venueId },
-      update: { kitchenCanReleaseCourses: enabled, kitchenCanReleaseHistory: historial },
-      create: { venueId, kitchenCanReleaseCourses: enabled, kitchenCanReleaseHistory: historial },
+      update: { kitchenCanReleaseCourses: enabled },
+      create: { venueId, kitchenCanReleaseCourses: enabled },
     })
   })
   await logAction({

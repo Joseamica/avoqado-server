@@ -7,8 +7,6 @@ import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { tomarCandadoDeComandas } from './kitchenTicketAuthoring.service'
 import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import {
-  interruptorEn,
-  liberacionPermitida,
   parsePreparation,
   recalculoDeComanda,
   regresarListoAPreparando,
@@ -69,18 +67,14 @@ export async function preparationCapabilities(venueId: string) {
 }
 
 /**
- * D17 (founder, 20-nov-2026): «La cocina puede liberar tiempos desde su pantalla», por negocio y apagado de fábrica. Se decide AL
- * REPRODUCIR cada RELEASE de cocina con la hora en que la tablet lo hizo (`createdAtLocal`).
+ * D17 (founder, 20-nov-2026): «La cocina puede liberar tiempos desde su pantalla», por negocio y apagado de fábrica. Vale lo que
+ * diga AL REPRODUCIR la acción (Codex r4 simplificó: un historial con ventanas abría más casos de los que cerraba). Si el negocio lo
+ * apagó mientras una tablet de cocina estaba sin red, lo que esa tablet liberó se rechaza visible en la cola.
  */
-export async function laCocinaPuedeLiberar(venueId: string, hechoEnMs?: number | null): Promise<boolean> {
-  const settings = await prisma.venueSettings.findUnique({
-    where: { venueId },
-    select: { kitchenCanReleaseCourses: true, kitchenCanReleaseHistory: true },
-  })
-  return liberacionPermitida(settings, hechoEnMs)
+export async function laCocinaPuedeLiberar(venueId: string): Promise<boolean> {
+  const settings = await prisma.venueSettings.findUnique({ where: { venueId }, select: { kitchenCanReleaseCourses: true } })
+  return settings?.kitchenCanReleaseCourses === true
 }
-
-export { HISTORIAL_DEL_INTERRUPTOR, historialDelInterruptor, liberacionPermitida, podarHistorial } from './kitchenPreparation'
 
 async function assertEnabled(venueId: string) {
   if (!(await venueHasFeatureAccess(venueId, 'KITCHEN_DISPLAY'))) {
@@ -96,7 +90,7 @@ export async function applyKitchenPreparation(
   staffId: string,
   intentId?: string,
   /** D17: el RELEASE pasó SÓLO por el interruptor de la cocina; se vuelve a medir aquí, con la fila de ajustes bloqueada. */
-  liberacionDeCocina?: { hechoEnMs: number | null },
+  liberacionDeCocina?: true,
 ) {
   const parsed = preparationCommandSchema.safeParse(value)
   if (!parsed.success) throw new BadRequestError(parsed.error.issues[0]?.message, 'PREPARATION_PAYLOAD_INVALID')
@@ -111,19 +105,15 @@ export async function applyKitchenPreparation(
     }
     throw new NotFoundError('No encontramos esta cuenta')
   }
-  let permisoDeCocina: 'PRENDIDO' | 'SIN_RED_24H' | null = null
   return prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT id FROM "Venue" WHERE id=${venueId} FOR KEY SHARE`
     if (liberacionDeCocina) {
       // Codex r1 #9: apagarlo mientras esta acción esperaba el candado no puede dejarla pasar con el permiso ya retirado.
-      const [ajustes] = await tx.$queryRaw<Array<{ kitchenCanReleaseCourses: boolean; kitchenCanReleaseHistory: unknown }>>`
-        SELECT "kitchenCanReleaseCourses", "kitchenCanReleaseHistory" FROM "VenueSettings" WHERE "venueId" = ${venueId} FOR SHARE`
-      if (!liberacionPermitida(ajustes ?? null, liberacionDeCocina.hechoEnMs)) {
+      const [ajustes] = await tx.$queryRaw<Array<{ kitchenCanReleaseCourses: boolean }>>`
+        SELECT "kitchenCanReleaseCourses" FROM "VenueSettings" WHERE "venueId" = ${venueId} FOR SHARE`
+      if (ajustes?.kitchenCanReleaseCourses !== true) {
         throw new ForbiddenError('Este negocio ya no deja liberar tiempos desde la cocina. Lo libera la caja.', 'KITCHEN_RELEASE_DISABLED')
       }
-      // Si al hacerlo ya estaba apagado (se aceptó por la ventana de 24 h sin red), queda dicho en su renglón de la bitácora.
-      permisoDeCocina =
-        ajustes && interruptorEn(ajustes, Math.min(liberacionDeCocina.hechoEnMs ?? Date.now(), Date.now())) ? 'PRENDIDO' : 'SIN_RED_24H'
     }
     await tomarCandadoDeComandas(tx, orderId)
     const order = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { id: true, status: true } })
@@ -284,7 +274,7 @@ export async function applyKitchenPreparation(
         data: {
           orderId,
           reason: command.reason ?? null,
-          ...(permisoDeCocina ? { permisoDeCocina } : {}),
+          ...(liberacionDeCocina ? { liberadoDesdeLaCocina: true } : {}),
           items: updates.map(u => ({
             id: u.row.id,
             orderItemId: u.row.orderItemId,

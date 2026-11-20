@@ -305,7 +305,8 @@ export async function listRecentKdsOrders(
   const legacy = await filtroDelTablero(venueId, [KdsStatus.COMPLETED] as KdsOrderStatus[], stationId)
   const viejas = await prisma.kdsOrder.findMany({
     // `items: { some: {} }`: una marca LISTO que llegó sin comanda (cabecera vacía) no se muestra.
-    where: { ...legacy, preparationVersion: 0, archivedAt: null, completedAt: { gte: desde }, items: { some: {} } },
+    // Sin filtro de archivo (Codex r4 A4): un Listo v0 que llega justo después del archivado sigue pudiendo deshacerse.
+    where: { ...legacy, preparationVersion: 0, completedAt: { gte: desde }, items: { some: {} } },
     include: { items: true },
     orderBy: [{ completedAt: 'desc' }, { id: 'desc' }],
     take: KDS_RECENT_MAX,
@@ -355,8 +356,9 @@ export async function recallKdsOrder(
   }
   requireLegacyPreparation(existing)
   const r = await prisma.kdsOrder.updateMany({
-    where: { id: kdsOrderId, venueId, preparationVersion: 0, status: KdsStatus.COMPLETED, archivedAt: null },
-    data: { status: KdsStatus.NEW, completedAt: null },
+    where: { id: kdsOrderId, venueId, preparationVersion: 0, status: KdsStatus.COMPLETED },
+    // Regresa al tablero aunque el archivado la hubiera tocado (Codex r4 A4).
+    data: { status: KdsStatus.NEW, completedAt: null, archivedAt: null },
   })
   if (r.count === 0) throw new NotFoundError('No hay una comanda terminada con ese id para regresar')
   const regresada = await prisma.kdsOrder.findUniqueOrThrow({ where: { id: kdsOrderId }, include: { items: true } })

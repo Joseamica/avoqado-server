@@ -2307,12 +2307,12 @@ describe('preparation replay and financial FIFO', () => {
     })
     afterEach(() => interruptor.mockRestore())
 
-    it('prendido: la cocina libera la mesa de otro mesero y el permiso se vuelve a medir con la hora del aparato', async () => {
+    it('prendido: la cocina libera la mesa de otro mesero y el permiso se vuelve a medir dentro de la operación', async () => {
       interruptor.mockResolvedValue(true)
       const [ack] = await processIntents(cocina())
       expect(ack.status).toBe('ACKED')
-      expect(interruptor).toHaveBeenCalledWith(VENUE, 1_700_000_000_000)
-      expect(preparation).toHaveBeenCalledWith(VENUE, 'order-1', expect.anything(), STAFF, 'rel-1', { hechoEnMs: 1_700_000_000_000 })
+      expect(interruptor).toHaveBeenCalledWith(VENUE)
+      expect(preparation).toHaveBeenCalledWith(VENUE, 'order-1', expect.anything(), STAFF, 'rel-1', true)
     })
 
     it('apagado: la cocina no libera (falta orders:create) y no se toca la preparación', async () => {

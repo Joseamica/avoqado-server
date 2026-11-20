@@ -148,8 +148,8 @@ describe('D17 · sale del tablero cuando la cocina termina', () => {
 })
 
 describe('D17 · archivado al cerrar el día del negocio', () => {
-  // Ayer a las 20:00 en CDMX y hoy a las 04:30 (ya pasó el corte de las 04:00).
-  const ahora = new Date('2026-11-21T10:30:00Z')
+  // Ayer a las 20:00 en CDMX y hoy a las 05:05 (ya pasó el corte de las 04:00 y la hora de «Recientes» de lo de las 03:59).
+  const ahora = new Date('2026-11-21T11:05:00Z')
   const ayer = new Date('2026-11-21T02:00:00Z')
 
   it('archiva sólo lo de cuenta cerrada, ni la cuenta abierta ni el platillo que dividir movió a una abierta, y no cambia el estado', async () => {
@@ -166,19 +166,27 @@ describe('D17 · archivado al cerrar el día del negocio', () => {
     const hoy = await comanda(cerrada.id, { createdAt: new Date('2026-11-21T10:20:00Z') })
     // Codex r2 #1: la de las 03:59 es del día de la víspera y se archiva en la primera pasada después del corte, no 4 h después.
     const madrugada = await comanda(cerrada.id, { createdAt: new Date('2026-11-21T09:59:00Z') })
+    // Codex r4 A1: dividir movió TODOS los platillos a la cuenta B (cerrada) y la cabecera sigue en A (abierta): se archiva.
+    const cobradaB = await cuenta('COMPLETED')
+    const deB = await prisma.orderItem.create({
+      data: { orderId: cobradaB.id, quantity: 1, unitPrice: 50, taxAmount: 0, total: 50, productName: 'Flautas' } as any,
+    })
+    const kPartida = await comanda(abierta.id, { createdAt: ayer, orderItemId: deB.id, soloInmediato: true })
 
     // Sin tocarlas desde que se crearon (el día que cuenta es el de su último cambio).
     await prisma.$executeRaw`UPDATE "KdsOrder" SET "updatedAt" = "createdAt" WHERE "venueId" = ${venueId} AND "createdAt" < '2026-11-22'`
     const candidatas = (await comandasPorArchivar(prisma, ahora)).filter(c => c.venueId === venueId).map(c => c.id)
-    expect(candidatas).toEqual([kCerrada.id, madrugada.id])
+    expect(candidatas.sort()).toEqual([kCerrada.id, kPartida.id, madrugada.id].sort())
+    // 04:30: la de las 03:59 todavía conserva su hora (la de ayer sí sale)
+    expect((await comandasPorArchivar(prisma, new Date('2026-11-21T10:30:00Z'))).map(c => c.id)).not.toContain(madrugada.id)
     await expect(comandasPorArchivar(prisma, new Date('2026-11-21T09:30:00Z'))).resolves.not.toContainEqual(
       expect.objectContaining({ id: kCerrada.id }), // 03:30: todavía es el mismo día del negocio
     )
 
     const archivadas = await prisma.$transaction(tx =>
-      archivarComandas(tx, [kCerrada.id, kAbierta.id, kDividida.id, hoy.id, madrugada.id], ahora),
+      archivarComandas(tx, [kCerrada.id, kAbierta.id, kDividida.id, hoy.id, madrugada.id, kPartida.id], ahora),
     )
-    expect(archivadas.map(a => a.id).sort()).toEqual([kCerrada.id, madrugada.id].sort())
+    expect(archivadas.map(a => a.id).sort()).toEqual([kCerrada.id, kPartida.id, madrugada.id].sort())
     const guardada = await prisma.kdsOrder.findUniqueOrThrow({ where: { id: kCerrada.id } })
     expect(guardada).toMatchObject({ status: 'NEW', completedAt: null })
     expect(guardada.archivedAt).toEqual(ahora)
