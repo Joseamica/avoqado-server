@@ -25,8 +25,11 @@ const ORDER_EXTRA = {
     'bdbc94690bb1489b7c3a76c3b240d30163fc5d609107533683394ab0b7d746fd',
 }
 const CALLERS_EXTRA = {
+  // D661 (3A, revisado en 3C): sólo cambió `now: meta.now` → `now: escritura` (la hora leída bajo el candado de la orden, antes de
+  // escribir). Es la hora con que la transición escribe acceptedAt y la marca de cocina; su orderExtra es el mismo cuerpo revisado
+  // (sólo kitchenPendingAt) y el PAID con loyaltyEligibleAt lo sigue poniendo el `order.update` de finishCapture antes de esta llamada.
   'services/online-ordering/card/capture.service.ts#finishCapture:casTransitionInTx':
-    '02c982331f52c1f8c6eefd9f5dd2742c45681962c25d8914f95af0d2d1377b5c',
+    '7c7e9ba5716ae3bf5ff15ab28ed818569c2c448cd705fd224f9b3a3f52f401da',
   'services/online-ordering/folios.service.ts#prepararFolioPagadoEnTx:casTransitionInTx':
     'e949dbd631f6397166abd46c236f261f76d09d73170e1b697e276bce27a054ed',
   'services/online-ordering/transitions.service.ts#casTransition:casTransitionInTx':
@@ -35,8 +38,11 @@ const CALLERS_EXTRA = {
   // cerrarFolioEnCeroEnTx, que nunca escribe loyaltyEligibleAt: ver EXENTAS); su orderExtra no cambió.
   'services/online-ordering/transitions.service.ts#acceptWithoutCapture:casTransition':
     'e2d031ded415fc2d4e603ac0bbf843659223fef5b1e2c3a4fe0eb82728dcf111',
+  // D661 (3A, revisado en 3C): sólo se agregó `...(porFalloDeCobro ? { porFalloDeCobro: true } : {})`, la bandera de la excepción
+  // R46 (rechazar un apartado de tarjeta cuando lo pide el escritor del cargo). No es un orderExtra: el rechazo sigue sin orderExtra,
+  // escribe sólo `status: CANCELLED` en la cuenta y, como toda cancelación, no corre si la cuenta ya tiene dinero (HAS_PAYMENTS).
   'services/online-ordering/transitions.service.ts#rejectOnlineOrder:casTransition':
-    'df0ca08ed26053dd6507de5a955c096c6a76bfd5e799e3eb3a3207b4b8199d03',
+    'c168d301a8418846e9abffce6fc49b814b3d84fb967aa0d923584ab85b9e3b22',
   'services/online-ordering/transitions.service.ts#expireOnlineOrder:casTransition':
     '43ec329eb5714ea1ddb13eb7cda9c41b603ce84286521cacb3b3b91dac3329ff',
   'services/online-ordering/transitions.service.ts#markOnlineOrderReady:casTransition':

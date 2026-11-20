@@ -54,7 +54,7 @@ describe('claimOnlineOrderPrint', () => {
       expect(where).toMatchObject({ orderId: 'ord1', venueId: 'v1', printedAt: null, refundRequestedAt: null, refundedAt: null })
       expect(where.AND).toEqual(
         expect.arrayContaining([
-          { OR: [{ status: { in: ['ACCEPTED', 'READY'] } }, { status: 'COMPLETED', ...D661 }] },
+          { OR: [{ status: { in: ['ACCEPTED', 'READY'] } }, { status: { in: ['COMPLETED'] }, ...D661 }] },
           { OR: [{ printClaimedAt: null }, { printClaimedAt: { lt: LIMITE } }] },
         ]),
       )

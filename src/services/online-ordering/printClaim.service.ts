@@ -4,6 +4,11 @@ import prisma from '@/utils/prismaClient'
 import { PRINT_CLAIM_TTL_MS } from './constants'
 
 const PRINTABLE: OnlineOrderStatus[] = [OnlineOrderStatus.ACCEPTED, OnlineOrderStatus.READY]
+/**
+ * D661: el «Entregado» al que el cierre del día pasa un pedido de «Nadie». Se LEE en lista (`status: { in: … }`), como toda lectura de
+ * COMPLETED en `src/`: `status: OnlineOrderStatus.COMPLETED` es la forma de una ESCRITURA y la vigila `escritoresDeEntregado`.
+ */
+const CLOSED_BY_DAY_END: OnlineOrderStatus[] = [OnlineOrderStatus.COMPLETED]
 /** D661: pedido con tarjeta de «Nadie» (`CARD_ONLINE` sin aceptación). */
 const D661 = { paymentMode: OnlineOrderPaymentMode.CARD_ONLINE, requiresAcceptance: false } as const
 /**
@@ -24,7 +29,7 @@ const comandaPendienteWhere = (now: Date) =>
     refundRequestedAt: null,
     refundedAt: null,
     AND: [
-      { OR: [{ status: { in: PRINTABLE } }, { status: OnlineOrderStatus.COMPLETED, ...D661 }] },
+      { OR: [{ status: { in: PRINTABLE } }, { status: { in: CLOSED_BY_DAY_END }, ...D661 }] },
       { OR: [{ printClaimedAt: null }, { printClaimedAt: { lt: new Date(now.getTime() - PRINT_CLAIM_TTL_MS) } }] },
     ],
   }) satisfies Prisma.OnlineOrderWhereInput

@@ -431,7 +431,12 @@ describe('D661 (3B): lo que lee la caja — tarjetasPorAbrir, comandasPorImprimi
       createdAt: { gte: new Date(NOW.getTime() - 24 * 3_600_000) },
     })
     expect(q.where.AND).toEqual([
-      { OR: [{ status: { in: ['ACCEPTED', 'READY'] } }, { status: 'COMPLETED', paymentMode: 'CARD_ONLINE', requiresAcceptance: false }] },
+      {
+        OR: [
+          { status: { in: ['ACCEPTED', 'READY'] } },
+          { status: { in: ['COMPLETED'] }, paymentMode: 'CARD_ONLINE', requiresAcceptance: false },
+        ],
+      },
       { OR: [{ printClaimedAt: null }, { printClaimedAt: { lt: new Date(NOW.getTime() - 90_000) } }] },
     ])
     expect(q.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }])
