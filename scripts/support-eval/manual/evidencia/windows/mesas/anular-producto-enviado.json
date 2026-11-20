@@ -1,7 +1,7 @@
 {
   "pagina": "windows/mesas/anular-producto-enviado",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "f47edcf9d10e06cf8351f3712abe4821bb65fa0c",
+  "sourceRef": "29d9b183dd2c35761af33f7c782c010a74c805c7",
   "version": "2.25.52",
   "pasos": [
     {
@@ -96,14 +96,14 @@
       "linea": 1688
     },
     {
-      "afirmacion": "Sin internet, «Volver a imprimir pedido» no saca una ronda ya confirmada y dice «Sin conexión: esta ronda ya se envió y no se puede confirmar si cambió; se podrá reimprimir al volver el internet.»",
+      "afirmacion": "Sin internet, «Volver a imprimir pedido» no saca lo ya enviado y dice «Sin conexión: lo que ya se envió no se puede reimprimir porque otra caja pudo cambiarlo; se podrá al volver el internet.»",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
       "linea": 176
     },
     {
-      "afirmacion": "Si no se pudo releer la cuenta, esa ronda no sale y se muestra en gris (showSinRed)",
+      "afirmacion": "Si no se pudo leer la cuenta, lo ya enviado no sale y se muestra en gris (showSinRed)",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 2454
+      "linea": 2444
     },
     {
       "afirmacion": "Si la ronda se confirma mientras sale otra hoja, dice «Esta ronda se acaba de confirmar: vuelve a tocar «Volver a imprimir»…»",
