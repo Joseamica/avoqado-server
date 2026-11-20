@@ -363,10 +363,11 @@ describe('settings.service', () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ manualPause: false } as any)
     const now = new Date('2026-10-14T18:30:00.000Z')
     await expect(pauseOnlineOrdering('v1', null, 'staff1', now)).resolves.toEqual({ pausedUntil: null, manualPause: false })
-    // D662 parte 2: «Reanudar» también quita la pausa sola: sólo cuentan los pedidos con hora límite DESPUÉS de este momento.
+    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({ where: { venueId: 'v1' }, data: { pausedUntil: null } })
+    // D662 parte 2 (v3): «Reanudar» también quita la pausa sola: el corte sube a este momento, y nunca baja (gracia de la migración).
     expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({
-      where: { venueId: 'v1' },
-      data: { pausedUntil: null, autoPauseResumedAt: now },
+      where: { venueId: 'v1', OR: [{ autoPauseResumedAt: null }, { autoPauseResumedAt: { lt: now } }] },
+      data: { autoPauseResumedAt: now },
     })
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDERING_RESUMED' }))
   })
@@ -694,7 +695,11 @@ describe('D662 parte 2 · autoPauseResumedAt: los ajustes nunca la mueven (sólo
     ['encender', { enabled: true }, { enabled: false }],
     ['apagar', { enabled: false }, { enabled: true }],
     ['repetir «Mi equipo»', { requiresAcceptance: true }, { enabled: true, requiresAcceptance: true }],
-    ['volver de «Nadie» a «Mi equipo»', { requiresAcceptance: true }, { enabled: false, requiresAcceptance: false, acceptsPayAtPickup: true }],
+    [
+      'volver de «Nadie» a «Mi equipo»',
+      { requiresAcceptance: true },
+      { enabled: false, requiresAcceptance: false, acceptsPayAtPickup: true },
+    ],
     ['pasar a «Nadie»', { requiresAcceptance: false }, { enabled: false, requiresAcceptance: true, acceptsPayAtPickup: true }],
     ['la pausa del gerente', { manualPause: true }, { enabled: true }],
   ])('%s NO toca autoPauseResumedAt', async (_t, patch, fila) => {

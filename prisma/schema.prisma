@@ -21447,8 +21447,9 @@ model OnlineOrderingSettings {
   requiresAcceptance Boolean   @default(true)
   /// Último sondeo de la lista «por cobrar» (pedidos sin aceptación que esperan pago en la barra): latido de presencia.
   lastToPayPollAt    DateTime?
-  /// D662 parte 2: último «Reanudar» (o paso a «Mi equipo»). La pausa sola sólo cuenta pedidos cuya hora límite fue DESPUÉS de esta
-  /// hora. La escriben sólo `pauseOnlineOrdering(null)` y el cambio a «Mi equipo»; encender, apagar y pausar 15/30/60 no la tocan.
+  /// D662 parte 2 (v3): el corte de la pausa sola. Sólo cuentan los pedidos cuya hora límite fue DESPUÉS de esta hora. Sólo SUBE: la
+  /// escriben «Reanudar» (`pauseOnlineOrdering(null)`, = ahora) y el avance tras una respuesta a tiempo sin pausa
+  /// (`avanzarCortePausaSola`). Encender, apagar, cambiar de modo y pausar 15/30/60 no la tocan. Null = cuentan todos (fila nueva).
   autoPauseResumedAt DateTime?
 
   createdAt DateTime @default(now())
@@ -21490,9 +21491,9 @@ model OnlineOrder {
 
   whatsappConsent Boolean @default(false)
 
-  /// D662 parte 2: hora del toque de una PERSONA que ganó aceptar o rechazar este pedido de «Mi equipo» (caja, panel, MCP; con
-  /// tarjeta, el paso a `CAPTURING`). Se escribe una sola vez, en la misma escritura de esa transición. La pausa sola la lee: un
-  /// pedido con este toque a más tardar en su hora límite «se atendió».
+  /// D662 parte 2 (v3): la PRIMERA vez que una persona contestó este pedido de «Mi equipo»: aceptar o rechazar (caja, panel, TPV,
+  /// MCP; con tarjeta, el paso a `CAPTURING`) o anular su cuenta mientras seguía por aceptar. Se escribe en la misma transacción de esa
+  /// acción y nunca se pisa (`null` en el where). La pausa sola la lee: con esta hora a más tardar en su hora límite «se atendió».
   staffAnsweredAt  DateTime?
 
   /// Tienda híbrida: `true` = este pedido pasó (o pasa) por aceptación manual. Las filas viejas quedan en `true`.
@@ -21516,8 +21517,9 @@ model OnlineOrder {
   /// El job de vencimiento barre TODOS los negocios: sin venueId al frente, este índice evita el barrido completo.
   @@index([status, acceptDeadlineAt])
   @@index([venueId, requiresAcceptance, status])
-  /// D662 parte 2: la pausa sola lee los pedidos más recientes de «Mi equipo» de un negocio por hora límite (acotada).
-  @@index([venueId, requiresAcceptance, acceptDeadlineAt])
+  /// D662 parte 2 (v3): la pausa sola lee los pedidos de «Mi equipo» de un negocio desde el corte, por hora límite e `id`
+  /// (migración CONCURRENTLY 20261120120001).
+  @@index([venueId, requiresAcceptance, acceptDeadlineAt, id])
   /// Tienda híbrida (T9, R4): `syncPaidClosedFolios` barre los folios cerrados de los últimos 7 días en TODOS los negocios.
   @@index([requiresAcceptance, status, updatedAt])
 }
