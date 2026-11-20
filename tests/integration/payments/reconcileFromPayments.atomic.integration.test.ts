@@ -23,6 +23,7 @@ import {
   type OrdenFoto,
 } from '@/services/shared/reasignarCobro'
 import type { TxConReintento } from '@/utils/serializableRetry'
+import { volverAGastarUsosDeCuentaRevividaEnTx } from '@/services/shared/usoDelDescuento'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 
@@ -478,6 +479,17 @@ describe('Codex r6 #1: reasignar un cobro a una cancelada con IVA aparte, con la
             tras(
               'prepararDestino',
               tx.order.update({ where: { id }, data }).then(() => undefined),
+            ),
+          // D31: como el script, la anulada que revive vuelve a gastar el uso que su anulación devolvió.
+          volverAGastarUsosAlRevivir: id =>
+            tras(
+              'volverAGastarUsosAlRevivir',
+              volverAGastarUsosDeCuentaRevividaEnTx(tx as unknown as TxConReintento, {
+                venueId,
+                orderId: id,
+                canal: 'reasignarCobro',
+                quien: null,
+              }).then(() => undefined),
             ),
           guardarTotales: (id, cobro, conEfectos) =>
             tras(
