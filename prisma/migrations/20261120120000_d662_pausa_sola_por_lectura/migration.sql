@@ -9,5 +9,6 @@ ALTER TABLE "OnlineOrderingSettings" ADD COLUMN "autoPauseResumedAt" TIMESTAMP(3
 CREATE TABLE "ArranqueDeFuncion" (
     "clave" TEXT NOT NULL,
     "primerServicioAt" TIMESTAMP(3) NOT NULL,
+    "legadoSelladoAt" TIMESTAMP(3),
     CONSTRAINT "ArranqueDeFuncion_pkey" PRIMARY KEY ("clave")
 );

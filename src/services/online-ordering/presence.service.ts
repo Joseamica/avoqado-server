@@ -117,6 +117,8 @@ export interface LecturaPausaSola {
   pausa: { at: Date; onlineOrderId: string } | null
   /** Hasta dónde puede subir el corte sin cambiar ninguna lectura futura, o `null` (hay pausa o no se sabe). */
   corteSeguro: Date | null
+  /** Si la lectura volvió a leer los ajustes tras esperar: cuándo se habían guardado (la versión que de verdad usó). */
+  ajustesReleidosEn?: Date | null
 }
 
 interface VueltaPausaSola {
@@ -135,8 +137,8 @@ interface VueltaPausaSola {
  * Postgres en UNA consulta exacta:
  * - FALLA: un pedido de «Mi equipo» llegó a su hora límite (ya pasó) sin que una persona lo contestara a más tardar en ella
  *   (`staffAnsweredAt` vacío o después). No se borra: un rechazo tardío, la clienta que cancela tarde o un cobro no la quitan.
- *   No cuenta lo que terminó solo ANTES de su hora límite (la clienta lo canceló; el sistema lo rechazó por pago sin persona), ni lo que
- *   contestó el SERVIDOR anterior (ver `contestadoPorElAnterior`).
+ *   No cuenta lo que terminó solo ANTES de su hora límite (la clienta lo canceló; el sistema lo rechazó por pago sin persona). Lo que
+ *   contestó el SERVIDOR anterior ya trae la marca: se selló una vez al llegar el inicio (`arranquePausaSola.ts`).
  * - RESPUESTA: una persona contestó A TIEMPO un pedido (`staffAnsweredAt <= su hora límite`), a la hora en que lo hizo, aunque su
  *   hora límite sea mucho después. Se busca con `EXISTS` sobre `(venueId, staffAnsweredAt)`, sin tope.
  * - PAUSADA: hay dos fallas seguidas (por hora límite y `id`) sin una respuesta en `(primera, segunda]`: a la misma hora la respuesta
@@ -145,30 +147,6 @@ interface VueltaPausaSola {
  */
 const respondioATiempo = Prisma.raw(`(oo."staffAnsweredAt" IS NOT NULL AND oo."staffAnsweredAt" <= oo."acceptDeadlineAt")`)
 
-/**
- * v4: un pedido creado ANTES de la primera petición del SERVIDOR nuevo (`primerServicio`), sin marca y con evidencia de que una persona
- * lo contestó, lo contestó el SERVIDOR anterior (que no pone la marca). Ese servidor ya no atiende ni tiene nada a medias en el inicio
- * (`arranquePausaSola.ts`), así que su respuesta fue antes del inicio: antes de cualquier hora límite que cuente. No es falla y su
- * respuesta no cae entre dos fallas. Evidencia: aceptado, listo, entregado, cancelado por el personal o por otra vía, rechazado por una
- * persona, su tarjeta pasó a cobrarse (`CAPTURING`) o falló al cobrarse (eso sólo lo dispara el toque de aceptar) o, todavía por
- * aceptar, con su cuenta ya anulada. NO cuenta `CAPTURED` solo (Codex p2v4-r1 #3: el código nuevo lo registra sin persona cuando el
- * comercio cobró a mano en Stripe un pedido ya vencido). Lo creado desde `primerServicio` sólo lo contesta este código, que siempre pone
- * la marca: para ello la marca es la única verdad. Reemplaza a `acceptedAt`/`rejectedAt` (Codex p2-r8 #1 y #2).
- */
-const contestadoPorElAnterior = (primerServicio: Date) => Prisma.sql`(
-  oo."staffAnsweredAt" IS NULL
-  AND oo."createdAt" < ${utcTs(primerServicio)}
-  AND (
-    oo.status IN ('ACCEPTED', 'READY', 'COMPLETED', 'CANCELLED_BY_STAFF')
-    OR (oo.status = 'REJECTED' AND oo."rejectReason" IS DISTINCT FROM 'PAYMENT_FAILED')
-    OR EXISTS (SELECT 1 FROM "OnlineOrderCharge" c WHERE c."onlineOrderId" = oo.id AND c.status IN ('CAPTURING', 'CAPTURE_FAILED'))
-    OR (
-      oo.status = 'PENDING_ACCEPTANCE'
-      AND EXISTS (SELECT 1 FROM "Order" o WHERE o.id = oo."orderId" AND o.status IN ('CANCELLED', 'DELETED'))
-    )
-  )
-)`
-
 /** ¿Una persona contestó a tiempo algún pedido en (desde, hasta]? `desdeSql`/`hastaSql` ya son SQL, nunca un `Date`. */
 const hayRespuestaEntre = (venueId: string, desdeSql: Prisma.Sql, hastaSql: Prisma.Sql) => Prisma.sql`EXISTS (
   SELECT 1 FROM "OnlineOrder" s
@@ -176,7 +154,7 @@ const hayRespuestaEntre = (venueId: string, desdeSql: Prisma.Sql, hastaSql: Pris
     AND s."staffAnsweredAt" > ${desdeSql} AND s."staffAnsweredAt" <= ${hastaSql} AND s."staffAnsweredAt" <= s."acceptDeadlineAt"
 )`
 
-async function vueltaPausaSola(venueId: string, now: Date, corte: Date, arranque: ArranqueDeLaPausaSola): Promise<VueltaPausaSola> {
+async function vueltaPausaSola(venueId: string, now: Date, corte: Date, _arranque: ArranqueDeLaPausaSola): Promise<VueltaPausaSola> {
   const [fila] = await prisma.$queryRaw<VueltaPausaSola[]>`
     WITH f AS (
       SELECT oo.id, oo."acceptDeadlineAt" AS t
@@ -186,7 +164,6 @@ async function vueltaPausaSola(venueId: string, now: Date, corte: Date, arranque
         AND oo."acceptDeadlineAt" > ${utcTs(corte)}
         AND oo."acceptDeadlineAt" <= ${utcTs(now)}
         AND NOT ${respondioATiempo}
-        AND NOT ${contestadoPorElAnterior(arranque.primerServicio)}
         AND NOT COALESCE(oo."cancelledBy" = 'CUSTOMER' AND oo."cancelledAt" <= oo."acceptDeadlineAt", false)
         AND NOT COALESCE(
           oo."rejectReason" = 'PAYMENT_FAILED' AND oo."staffAnsweredAt" IS NULL AND oo."rejectedAt" <= oo."acceptDeadlineAt",
@@ -246,11 +223,11 @@ const pendientesQuePuedenCambiarlo = (venueId: string, desde: Date) => Prisma.sq
  * venga después toma su reloj después de la hora límite (su respuesta llega tarde). Sin fila no hay abrazo mortal con quien toma dos
  * cuentas. Más de `TOPE_CUENTAS_EN_ESPERA` cuentas: se espera al margen definitivo (ninguna transacción dura más de 15 s).
  */
-async function esperarLoQueSeGuarda(venueId: string, desde: Date, pausaAt: Date, now: Date): Promise<void> {
+async function esperarLoQueSeGuarda(venueId: string, desde: Date, pausaAt: Date): Promise<void> {
   // Después de `L(B) + 30 s` toda escritura con reloj anterior a `L(B)` ya terminó (las transacciones duran 15 s como máximo): una cuenta
   // tomada después ya no puede cambiar el veredicto y no se le espera (Codex p2v4-r2 #2: una fusión larga no detiene la pausa).
-  const margenRestante = Math.max(0, pausaAt.getTime() + MARGEN_DEFINITIVO_MS - now.getTime())
-  const limite = Date.now() + Math.min(ESPERA_MAXIMA_MS, margenRestante)
+  // Con el reloj de AHORA (no el de la entrada: Codex p2v4-r3 #3), nunca más allá de L(B) + 30 s.
+  const limite = Math.min(Date.now() + ESPERA_MAXIMA_MS, pausaAt.getTime() + MARGEN_DEFINITIVO_MS)
   for (;;) {
     try {
       const desenlace = await prisma.$transaction(async tx => {
@@ -291,24 +268,30 @@ async function vueltaConfirmada(
   now: Date,
   corte: Date,
   arranque: ArranqueDeLaPausaSola,
-): Promise<{ v: VueltaPausaSola; corte: Date }> {
+): Promise<{ v: VueltaPausaSola; corte: Date; releido: Date | null }> {
+  let releido: Date | null = null
   let v = await vueltaPausaSola(venueId, now, corte, arranque)
   for (let intento = 0; intento < 3; intento++) {
-    if (!v.pausaId || !v.pausaAt || !v.pausaDesde) return { v, corte }
-    if (now.getTime() - v.pausaAt.getTime() >= MARGEN_DEFINITIVO_MS) return { v, corte }
-    if (pausasConfirmadas.get(venueId) === v.pausaId) return { v, corte }
-    await esperarLoQueSeGuarda(venueId, v.pausaDesde, v.pausaAt, now)
-    const fila = await prisma.onlineOrderingSettings.findUnique({ where: { venueId }, select: { autoPauseResumedAt: true } })
+    if (!v.pausaId || !v.pausaAt || !v.pausaDesde) return { v, corte, releido }
+    if (now.getTime() - v.pausaAt.getTime() >= MARGEN_DEFINITIVO_MS) return { v, corte, releido }
+    if (pausasConfirmadas.get(venueId) === v.pausaId) return { v, corte, releido }
+    await esperarLoQueSeGuarda(venueId, v.pausaDesde, v.pausaAt)
+    const fila = await prisma.onlineOrderingSettings.findUnique({
+      where: { venueId },
+      select: { autoPauseResumedAt: true, updatedAt: true },
+    })
+    // Codex p2v4-r3 #5: la respuesta lleva la versión de los ajustes que de verdad usó (la de esta relectura).
+    releido = fila?.updatedAt ?? null
     const propio = fila?.autoPauseResumedAt ?? null
     if (propio && propio.getTime() > corte.getTime()) corte = propio
     const antes = v.pausaId
     v = await vueltaPausaSola(venueId, now, corte, arranque)
     if (v.pausaId && v.pausaId === antes) {
       pausasConfirmadas.set(venueId, v.pausaId)
-      return { v, corte }
+      return { v, corte, releido }
     }
   }
-  return { v, corte }
+  return { v, corte, releido }
 }
 
 /**
@@ -355,17 +338,19 @@ async function leerPausaSola(venueId: string, now: Date, corteGuardado: Date | n
   if (!arranque || now.getTime() < arranque.inicio.getTime()) return { pausa: null, corteSeguro: null }
   const base = corteGuardado && corteGuardado.getTime() > arranque.inicio.getTime() ? corteGuardado : arranque.inicio
   let corte = base
+  let ajustesReleidosEn: Date | null = null
   for (;;) {
     const confirmada = await vueltaConfirmada(venueId, now, corte, arranque)
     const v = confirmada.v
     corte = confirmada.corte
-    if (v.pausaId && v.pausaAt) return { pausa: { at: v.pausaAt, onlineOrderId: v.pausaId }, corteSeguro: null }
+    if (confirmada.releido && (!ajustesReleidosEn || confirmada.releido > ajustesReleidosEn)) ajustesReleidosEn = confirmada.releido
+    if (v.pausaId && v.pausaAt) return { pausa: { at: v.pausaAt, onlineOrderId: v.pausaId }, corteSeguro: null, ajustesReleidosEn }
     const completa = v.fallas < PAUSA_SOLA_TOPE
     const seguro = corteTrasVuelta(v, now, completa)
     const sube = seguro.getTime() > corte.getTime() ? seguro : null
     if (completa) {
       if (sube && sube.getTime() - base.getTime() >= avance) subirCorteSinEsperar(venueId, sube)
-      return { pausa: null, corteSeguro: seguro }
+      return { pausa: null, corteSeguro: seguro, ajustesReleidosEn }
     }
     if (!sube) {
       // No puede pasar (una vuelta llena retiene su última falla, posterior al corte); si pasara, no se queda en un ciclo.
@@ -427,7 +412,8 @@ export async function getAcceptingStatus(
     preloaded ?? getSettings(venueId),
     prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }),
   ])
-  const { lastInboxPollAt, lastToPayPollAt, autoPauseResumedAt, updatedAt: ajustesGuardadosEn, ...config } = settings
+  const { lastInboxPollAt, lastToPayPollAt, autoPauseResumedAt, updatedAt, ...config } = settings
+  let ajustesGuardadosEn = updatedAt ?? null
   const timezone = venue?.timezone || 'America/Mexico_City'
   let autoPausedAt: string | null = null
   const done = (status: AcceptingStatus, reason: AcceptingReason): AcceptingState => ({
@@ -444,7 +430,13 @@ export async function getAcceptingStatus(
   // D662 parte 2: sólo en «Mi equipo» (`=== false` es «Nadie»). Mismo motivo que la pausa a mano para las apps viejas. Va antes del
   // horario y de la presencia: sólo «Reanudar» la abre. Con una pausa de 15/30/60 vigente también se lee: al vencer, sigue pausada.
   let pausaSola: LecturaPausaSola['pausa'] = null
-  if (config.requiresAcceptance !== false) pausaSola = (await leerPausaSola(venueId, now, autoPauseResumedAt ?? null)).pausa
+  if (config.requiresAcceptance !== false) {
+    const lectura = await leerPausaSola(venueId, now, autoPauseResumedAt ?? null)
+    pausaSola = lectura.pausa
+    if (lectura.ajustesReleidosEn && (!ajustesGuardadosEn || lectura.ajustesReleidosEn > ajustesGuardadosEn)) {
+      ajustesGuardadosEn = lectura.ajustesReleidosEn
+    }
+  }
   autoPausedAt = pausaSola?.at.toISOString() ?? null
   if (config.pausedUntil && new Date(config.pausedUntil) > now) return done('PAUSED', 'MANUAL_PAUSE')
   if (autoPausedAt) return done('PAUSED', 'MANUAL_PAUSE')

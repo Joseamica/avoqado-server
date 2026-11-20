@@ -49,20 +49,25 @@ describe('arranque de la pausa sola', () => {
     })
   })
 
-  it('el middleware nunca espera: /health no escribe; otra ruta sí', () => {
+  it('el middleware: /health sigue sin escribir; la PRIMERA petición espera su escritura (p2v4-r3 #2); las demás no esperan', async () => {
     const next = jest.fn()
     marcarPrimerServicioMiddleware({ path: '/health' }, {}, next)
+    expect(next).toHaveBeenCalledTimes(1)
     expect(prismaMock.arranqueDeFuncion.createMany).not.toHaveBeenCalled()
     marcarPrimerServicioMiddleware({ path: '/api/v1/mobile/venues/v1/online-orders/inbox' }, {}, next)
+    expect(next).toHaveBeenCalledTimes(1) // todavía esperando la escritura
+    await new Promise(r => setImmediate(r))
     expect(prismaMock.arranqueDeFuncion.createMany).toHaveBeenCalledTimes(1)
     expect(next).toHaveBeenCalledTimes(2)
+    marcarPrimerServicioMiddleware({ path: '/x' }, {}, next)
+    expect(next).toHaveBeenCalledTimes(3)
   })
 
-  it('sin fila no hay arranque (la pausa sola todavía no existe); con fila, inicio = primer servicio + 120 s, recordado', async () => {
+  it('sin fila no hay arranque (la pausa sola todavía no existe); con fila sellada, inicio = primer servicio + 120 s, recordado', async () => {
     ;(prismaMock.arranqueDeFuncion.findUnique as jest.Mock).mockResolvedValueOnce(null)
     await expect(arranqueDeLaPausaSola()).resolves.toBeNull()
     const primer = new Date('2026-11-20T18:00:00.000Z')
-    ;(prismaMock.arranqueDeFuncion.findUnique as jest.Mock).mockResolvedValueOnce({ primerServicioAt: primer })
+    ;(prismaMock.arranqueDeFuncion.findUnique as jest.Mock).mockResolvedValueOnce({ primerServicioAt: primer, legadoSelladoAt: primer })
     await expect(arranqueDeLaPausaSola()).resolves.toEqual({
       primerServicio: primer,
       inicio: new Date(primer.getTime() + MARGEN_DEL_ARRANQUE_MS),
@@ -70,5 +75,38 @@ describe('arranque de la pausa sola', () => {
     expect(MARGEN_DEL_ARRANQUE_MS).toBe(120_000)
     await arranqueDeLaPausaSola()
     expect(prismaMock.arranqueDeFuncion.findUnique).toHaveBeenCalledTimes(2)
+  })
+
+  it('Codex p2v4-r3 #1: al llegar el inicio sella UNA vez lo que contestó el SERVIDOR anterior (marca = primer servicio) y lo recuerda', async () => {
+    const primer = new Date(Date.now() - MARGEN_DEL_ARRANQUE_MS - 5_000)
+    ;(prismaMock.arranqueDeFuncion.findUnique as jest.Mock)
+      .mockResolvedValueOnce({ primerServicioAt: primer, legadoSelladoAt: null }) // la lectura
+      .mockResolvedValueOnce({ legadoSelladoAt: null }) // bajo el candado del sello
+    ;(prismaMock.$executeRaw as jest.Mock).mockResolvedValue(3)
+    ;(prismaMock.arranqueDeFuncion.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+    await expect(arranqueDeLaPausaSola()).resolves.toMatchObject({ primerServicio: primer })
+    const llamadas = (prismaMock.$executeRaw as jest.Mock).mock.calls.map(c => (c[0] as TemplateStringsArray).join('?'))
+    expect(llamadas.some(t => t.includes('pg_advisory_xact_lock'))).toBe(true)
+    const sello = llamadas.find(t => t.includes('UPDATE "OnlineOrder"'))!
+    expect(sello).toContain('"staffAnsweredAt" IS NULL')
+    expect(sello).toContain('oo."createdAt" <')
+    expect(sello).toContain('oo."acceptDeadlineAt" >')
+    expect(prismaMock.arranqueDeFuncion.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { clave: CLAVE_PAUSA_SOLA, legadoSelladoAt: null } }),
+    )
+    await arranqueDeLaPausaSola()
+    expect(prismaMock.arranqueDeFuncion.findUnique).toHaveBeenCalledTimes(2)
+  })
+
+  it('antes del inicio no sella (el anterior puede seguir vivo) ni recuerda; si el sello falla, no hay arranque todavía', async () => {
+    const primer = new Date(Date.now() - 1_000)
+    ;(prismaMock.arranqueDeFuncion.findUnique as jest.Mock).mockResolvedValue({ primerServicioAt: primer, legadoSelladoAt: null })
+    await expect(arranqueDeLaPausaSola()).resolves.toMatchObject({ primerServicio: primer })
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+    __resetArranqueParaPruebas()
+    const viejo = new Date(Date.now() - 10 * 60_000)
+    ;(prismaMock.arranqueDeFuncion.findUnique as jest.Mock).mockResolvedValue({ primerServicioAt: viejo, legadoSelladoAt: null })
+    ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(new Error('db'))
+    await expect(arranqueDeLaPausaSola()).resolves.toBeNull()
   })
 })

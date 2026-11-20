@@ -1,5 +1,7 @@
+import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import { utcTs } from '@/utils/sqlDates'
 
 /**
  * D662 parte 2 (v4, «cero huecos», founder 20-nov): el INICIO de la pausa sola, uno solo para toda la plataforma. Reemplaza a la gracia
@@ -63,17 +65,83 @@ export async function marcarPrimerServicio(ahora: Date = new Date()): Promise<vo
   }
 }
 
-/** Middleware: nunca espera ni falla la petición. */
+/**
+ * Middleware: nunca falla la petición. La PRIMERA espera su escritura (una vez en la vida del proceso; Codex p2v4-r3 #2: si el proceso cae
+ * antes de guardarla, el reemplazo fijaría una hora posterior); si la base no contesta, sigue igual y la siguiente petición reintenta.
+ */
 export function marcarPrimerServicioMiddleware(req: { path: string }, _res: unknown, next: () => void): void {
-  if (!escrita && cuentaComoServicio(req.path)) void marcarPrimerServicio()
-  next()
+  if (escrita || !cuentaComoServicio(req.path)) {
+    next()
+    return
+  }
+  void marcarPrimerServicio().then(() => next())
 }
 
-/** El arranque de la pausa sola, o `null` si este código todavía no atiende. Una vez conocido no cambia (se recuerda). */
+/**
+ * Lo que contestó el SERVIDOR anterior (que no pone la marca) en pedidos creados antes del primer servicio: aceptado, listo, entregado,
+ * cancelado por el personal o por otra vía, rechazado por una persona, la tarjeta pasó a cobrarse o falló al cobrarse (eso sólo lo dispara
+ * el toque de aceptar) o, todavía por aceptar, con su cuenta ya anulada. NO `CAPTURED` solo (p2v4-r1 #3).
+ */
+const evidenciaDelAnterior = Prisma.sql`(
+  oo.status IN ('ACCEPTED', 'READY', 'COMPLETED', 'CANCELLED_BY_STAFF')
+  OR (oo.status = 'REJECTED' AND oo."rejectReason" IS DISTINCT FROM 'PAYMENT_FAILED')
+  OR EXISTS (SELECT 1 FROM "OnlineOrderCharge" c WHERE c."onlineOrderId" = oo.id AND c.status IN ('CAPTURING', 'CAPTURE_FAILED'))
+  OR (
+    oo.status = 'PENDING_ACCEPTANCE'
+    AND EXISTS (SELECT 1 FROM "Order" o WHERE o.id = oo."orderId" AND o.status IN ('CANCELLED', 'DELETED'))
+  )
+)`
+
+/**
+ * v4 (Codex p2v4-r3 #1): al llegar el inicio, UNA vez en la vida, se SELLA lo que contestó el SERVIDOR anterior: los pedidos creados antes
+ * del primer servicio, sin marca, con hora límite después del inicio y con evidencia de persona reciben `staffAnsweredAt = primerServicio`
+ * (a tiempo, y antes de cualquier hora límite que cuente). Desde ahí la lectura sólo mira la marca: un cobro tardío que pase un pedido
+ * VENCIDO a entregado ya no lo convierte en «contestado» (la evidencia se lee una vez, cuando el anterior ya no existe). Bajo candado
+ * para que dos lecturas no lo hagan a la vez; idempotente.
+ */
+async function sellarLoDelServidorAnterior(a: ArranqueDeLaPausaSola): Promise<void> {
+  await prisma.$transaction(async tx => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'pausa-sola:sello'}))`
+    const fila = await tx.arranqueDeFuncion.findUnique({ where: { clave: CLAVE_PAUSA_SOLA }, select: { legadoSelladoAt: true } })
+    if (fila?.legadoSelladoAt) return
+    const sellados = await tx.$executeRaw`
+      UPDATE "OnlineOrder" oo SET "staffAnsweredAt" = ${utcTs(a.primerServicio)}
+      WHERE oo."requiresAcceptance" = true
+        AND oo."staffAnsweredAt" IS NULL
+        AND oo."createdAt" < ${utcTs(a.primerServicio)}
+        AND oo."acceptDeadlineAt" > ${utcTs(a.inicio)}
+        AND ${evidenciaDelAnterior}`
+    await tx.arranqueDeFuncion.updateMany({
+      where: { clave: CLAVE_PAUSA_SOLA, legadoSelladoAt: null },
+      data: { legadoSelladoAt: new Date() },
+    })
+    logger.info('[OnlineOrdering] pausa sola: sellado lo que contestó el SERVIDOR anterior', { sellados })
+  })
+}
+
+/**
+ * El arranque de la pausa sola, o `null` si este código todavía no atiende. Antes del inicio devuelve el arranque sin sellar (la lectura no
+ * cuenta nada); desde el inicio, sella una vez y lo recuerda. Si el sello falla, devuelve `null` (sin pausa) y la siguiente lectura reintenta.
+ */
 export async function arranqueDeLaPausaSola(): Promise<ArranqueDeLaPausaSola | null> {
   if (arranque) return arranque
-  const fila = await prisma.arranqueDeFuncion.findUnique({ where: { clave: CLAVE_PAUSA_SOLA }, select: { primerServicioAt: true } })
+  const fila = await prisma.arranqueDeFuncion.findUnique({
+    where: { clave: CLAVE_PAUSA_SOLA },
+    select: { primerServicioAt: true, legadoSelladoAt: true },
+  })
   if (!fila) return null
-  arranque = { primerServicio: fila.primerServicioAt, inicio: new Date(fila.primerServicioAt.getTime() + MARGEN_DEL_ARRANQUE_MS) }
+  const a = { primerServicio: fila.primerServicioAt, inicio: new Date(fila.primerServicioAt.getTime() + MARGEN_DEL_ARRANQUE_MS) }
+  if (!fila.legadoSelladoAt) {
+    if (Date.now() < a.inicio.getTime()) return a
+    try {
+      await sellarLoDelServidorAnterior(a)
+    } catch (error) {
+      logger.warn('[OnlineOrdering] no se pudo sellar lo del SERVIDOR anterior (la pausa sola espera al siguiente intento)', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return null
+    }
+  }
+  arranque = a
   return arranque
 }

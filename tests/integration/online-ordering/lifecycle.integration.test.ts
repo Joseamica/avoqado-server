@@ -979,7 +979,7 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       await prisma.arranqueDeFuncion.upsert({
         where: { clave: CLAVE_PAUSA_SOLA },
         create: { clave: CLAVE_PAUSA_SOLA, primerServicioAt },
-        update: { primerServicioAt },
+        update: { primerServicioAt, legadoSelladoAt: null },
       })
       __resetArranqueParaPruebas()
     }
@@ -1069,7 +1069,8 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       const inicio = new Date(Date.now() - 1_000)
       await prisma.arranqueDeFuncion.update({
         where: { clave: CLAVE_PAUSA_SOLA },
-        data: { primerServicioAt: new Date(inicio.getTime() - MARGEN_DEL_ARRANQUE_MS) },
+        // Sin sellar todavía: la primera lectura desde el inicio sella lo que contestó el anterior (Codex p2v4-r3 #1).
+        data: { primerServicioAt: new Date(inicio.getTime() - MARGEN_DEL_ARRANQUE_MS), legadoSelladoAt: null },
       })
       __resetArranqueParaPruebas()
       await prisma.onlineOrder.update({
@@ -1085,8 +1086,12 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       await espera(5)
       await venceA(b.onlineOrderId, new Date())
       await espera(5)
-      // `viejo` lo contestó el anterior: no es falla. `b` (creado desde el primer servicio, sin marca) es una sola falla.
+      // `viejo` lo contestó el anterior: se selló con la hora del primer servicio y no es falla. `b` (creado desde el primer servicio,
+      // sin marca) es una sola falla.
       await expect(estadoTienda()).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
+      const sellado = await prisma.onlineOrder.findUniqueOrThrow({ where: { id: viejo.onlineOrderId } })
+      expect(sellado.staffAnsweredAt?.getTime()).toBe(inicio.getTime() - MARGEN_DEL_ARRANQUE_MS)
+      expect((await prisma.arranqueDeFuncion.findUniqueOrThrow({ where: { clave: CLAVE_PAUSA_SOLA } })).legadoSelladoAt).not.toBeNull()
       const c = await newOrder()
       await venceA(c.onlineOrderId, new Date())
       await espera(5)

@@ -34,7 +34,7 @@ const settingsRow = (o: Record<string, unknown> = {}) => ({
 const INICIO_DE_SIEMPRE = new Date(NOW.getTime() - 24 * 60 * 60_000)
 const arranque = (inicio: Date | null) =>
   (prismaMock.arranqueDeFuncion.findUnique as jest.Mock).mockResolvedValue(
-    inicio ? { primerServicioAt: new Date(inicio.getTime() - MARGEN_DEL_ARRANQUE_MS) } : null,
+    inicio ? { primerServicioAt: new Date(inicio.getTime() - MARGEN_DEL_ARRANQUE_MS), legadoSelladoAt: inicio } : null,
   )
 
 beforeEach(() => {
@@ -401,15 +401,9 @@ describe('D662 parte 2 (v4) · la pausa sola la decide UNA consulta exacta en Po
     // Respuesta a tiempo = la marca de la persona, a más tardar en la hora límite (ya no acceptedAt/rejectedAt: Codex p2-r8 #1 y #2).
     expect(texto).toContain('NOT (oo."staffAnsweredAt" IS NOT NULL AND oo."staffAnsweredAt" <= oo."acceptDeadlineAt")')
     expect(texto).not.toContain('"acceptedAt"')
-    // Lo que contestó el SERVIDOR anterior: creado antes del inicio, sin marca y con evidencia de persona.
-    expect(texto).toContain('oo."staffAnsweredAt" IS NULL AND oo."createdAt" <')
-    expect(texto).toContain(`oo.status IN ('ACCEPTED', 'READY', 'COMPLETED', 'CANCELLED_BY_STAFF')`)
-    expect(texto).toContain(`oo."rejectReason" IS DISTINCT FROM 'PAYMENT_FAILED'`)
-    expect(texto).toContain(`c.status IN ('CAPTURING', 'CAPTURE_FAILED')`)
-    expect(texto).not.toContain(`'CAPTURED'`)
-    expect(texto).toContain(
-      `oo.status = 'PENDING_ACCEPTANCE' AND EXISTS (SELECT 1 FROM "Order" o WHERE o.id = oo."orderId" AND o.status IN ('CANCELLED', 'DELETED'))`,
-    )
+    // Lo que contestó el SERVIDOR anterior ya trae la marca (se selló al llegar el inicio): la lectura sólo mira la marca (p2v4-r3 #1).
+    expect(texto).not.toContain('oo."createdAt" <')
+    expect(texto).not.toContain(`'ACCEPTED'`)
     // Lo que terminó solo ANTES de su hora límite no cuenta (null-seguro con COALESCE).
     expect(texto).toContain(`NOT COALESCE(oo."cancelledBy" = 'CUSTOMER' AND oo."cancelledAt" <= oo."acceptDeadlineAt", false)`)
     expect(texto).toContain(
@@ -419,9 +413,7 @@ describe('D662 parte 2 (v4) · la pausa sola la decide UNA consulta exacta en Po
     expect(texto).toContain('LAG(f.t) OVER (ORDER BY f.t ASC, f.id ASC)')
     expect(texto).toContain('s."staffAnsweredAt" > p.prev AND s."staffAnsweredAt" <= p.t AND s."staffAnsweredAt" <= s."acceptDeadlineAt"')
     expect(texto).not.toContain('s."staffAnsweredAt" IS NULL')
-    expect(valores).toEqual(
-      expect.arrayContaining(['v1', corte, NOW, new Date(INICIO_DE_SIEMPRE.getTime() - MARGEN_DEL_ARRANQUE_MS), PAUSA_SOLA_TOPE]),
-    )
+    expect(valores).toEqual(expect.arrayContaining(['v1', corte, NOW, PAUSA_SOLA_TOPE]))
   })
 
   it('sin pareja ⇒ OPEN y autoPausedAt null', async () => {
@@ -461,19 +453,21 @@ describe('D662 parte 2 (v4) · la pausa sola la decide UNA consulta exacta en Po
     queryRaw().mockClear()
     conVuelta(vuelta(), { autoPauseResumedAt: min(-5) })
     await getAcceptingStatus('v1', NOW)
-    expect(sql().valores).toEqual(expect.arrayContaining([min(-5), new Date(inicio.getTime() - MARGEN_DEL_ARRANQUE_MS)]))
+    expect(sql().valores).toEqual(expect.arrayContaining([min(-5)]))
     expect(sql().valores.filter(v => v instanceof Date && v.getTime() === inicio.getTime())).toHaveLength(0)
   })
 
   it('v4 (hueco 3 y T2): una pareja reciente espera lo que se está guardando (candados de las cuentas, sin fila) y vuelve a leer', async () => {
-    const reciente = new Date(NOW.getTime() - 5_000)
+    const ahora = new Date()
+    const reciente = new Date(ahora.getTime() - 5_000)
     conVuelta([])
     queryRaw()
       .mockResolvedValueOnce(vuelta({ fallas: 2, ultimaFalla: reciente, pausaId: 'ooB', pausaAt: reciente, pausaDesde: min(-3) }))
       .mockResolvedValueOnce([{ n: 2 }]) // cuántas cuentas
       .mockResolvedValueOnce([]) // FOR SHARE NOWAIT
       .mockResolvedValueOnce(vuelta()) // al releer: la cajera sí había aceptado a tiempo
-    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN', autoPausedAt: null })
+    // (el latido de la prueba es del reloj fijo: sin pausa sola sale «sin aparato», no «en pausa»)
+    await expect(getAcceptingStatus('v1', ahora)).resolves.toMatchObject({ status: 'OFFLINE', autoPausedAt: null })
     expect(sql(2).texto).toContain('FOR SHARE OF o NOWAIT')
     expect(sql(2).texto).toContain('oo."acceptDeadlineAt" >=')
     // Sólo los pedidos que todavía pueden cambiar el veredicto: sin marca y por aceptar (Codex p2v4-r1 #6).
@@ -482,7 +476,8 @@ describe('D662 parte 2 (v4) · la pausa sola la decide UNA consulta exacta en Po
   })
 
   it('v4: si una cuenta está tomada (55P03), reintenta sin hacer fila hasta tenerlas; la pausa confirmada no vuelve a esperar', async () => {
-    const reciente = new Date(NOW.getTime() - 5_000)
+    const ahora = new Date()
+    const reciente = new Date(ahora.getTime() - 5_000)
     const par = vuelta({ fallas: 2, ultimaFalla: reciente, pausaId: 'ooB', pausaAt: reciente, pausaDesde: min(-3) })
     conVuelta([])
     queryRaw()
@@ -493,26 +488,27 @@ describe('D662 parte 2 (v4) · la pausa sola la decide UNA consulta exacta en Po
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce(par)
       .mockResolvedValueOnce(par) // segunda lectura: ya confirmada, sin candados
-    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'PAUSED', autoPausedAt: reciente.toISOString() })
+    await expect(getAcceptingStatus('v1', ahora)).resolves.toMatchObject({ status: 'PAUSED', autoPausedAt: reciente.toISOString() })
     expect(queryRaw()).toHaveBeenCalledTimes(6)
-    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'PAUSED' })
+    await expect(getAcceptingStatus('v1', ahora)).resolves.toMatchObject({ status: 'PAUSED' })
     expect(queryRaw()).toHaveBeenCalledTimes(7)
   })
 
   it('Codex p2v4-r1 #4: un «Reanudar» guardado mientras la lectura esperaba ya cuenta (relee el corte propio)', async () => {
-    const reciente = new Date(NOW.getTime() - 5_000)
+    const ahora = new Date()
+    const reciente = new Date(ahora.getTime() - 5_000)
     const par = vuelta({ fallas: 2, ultimaFalla: reciente, pausaId: 'ooB', pausaAt: reciente, pausaDesde: min(-3) })
     conVuelta([])
     ;(prismaMock.onlineOrderingSettings.findUnique as jest.Mock)
       .mockResolvedValueOnce(settingsRow({ autoPauseResumedAt: min(-60) }))
-      .mockResolvedValueOnce({ autoPauseResumedAt: new Date(NOW.getTime() - 1_000) })
+      .mockResolvedValueOnce({ autoPauseResumedAt: new Date(ahora.getTime() - 1_000) })
     queryRaw()
       .mockResolvedValueOnce(par)
       .mockResolvedValueOnce([{ n: 1 }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce(vuelta())
-    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN' })
-    expect(sql(3).valores).toEqual(expect.arrayContaining([new Date(NOW.getTime() - 1_000)]))
+    await expect(getAcceptingStatus('v1', ahora)).resolves.toMatchObject({ status: 'OFFLINE', autoPausedAt: null })
+    expect(sql(3).valores).toEqual(expect.arrayContaining([new Date(ahora.getTime() - 1_000)]))
   })
 
   it('v4: una pareja de hace 30 s o más ya es definitiva: no espera candados', async () => {
@@ -603,7 +599,26 @@ describe('D662 parte 2 (v4) · la pausa sola la decide UNA consulta exacta en Po
     expect(st.ajustesGuardadosEn).toEqual(guardado)
   })
 
-  it('Codex p2v4-r2 #2: la espera no pasa de L(B) + 30 s (una cuenta tomada después ya no puede cambiar el veredicto)', async () => {
+  it('Codex p2v4-r3 #5: si releyó los ajustes tras esperar, la respuesta lleva la versión releída', async () => {
+    const ahora = new Date()
+    const reciente = new Date(ahora.getTime() - 5_000)
+    const par = vuelta({ fallas: 2, ultimaFalla: reciente, pausaId: 'ooB', pausaAt: reciente, pausaDesde: min(-3) })
+    const releida = new Date(ahora.getTime() - 500)
+    conVuelta([])
+    ;(prismaMock.onlineOrderingSettings.findUnique as jest.Mock)
+      .mockResolvedValueOnce(settingsRow({ autoPauseResumedAt: min(-60), updatedAt: min(-10) }))
+      .mockResolvedValueOnce({ autoPauseResumedAt: new Date(ahora.getTime() - 1_000), updatedAt: releida })
+    queryRaw()
+      .mockResolvedValueOnce(par)
+      .mockResolvedValueOnce([{ n: 1 }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(vuelta())
+    const st = await getAcceptingStatus('v1', ahora)
+    expect(st).toMatchObject({ status: 'OFFLINE', autoPausedAt: null })
+    expect(st.ajustesGuardadosEn).toEqual(releida)
+  })
+
+  it('Codex p2v4-r2 #2 / r3 #3: la espera no pasa de L(B) + 30 s con el reloj de AHORA (una cuenta tomada después ya no puede cambiar el veredicto)', async () => {
     const reciente = new Date(Date.now() - 29_990) // L(B) hace casi 30 s: queda ~10 ms de espera posible
     const par = vuelta({ fallas: 2, ultimaFalla: reciente, pausaId: 'ooB', pausaAt: reciente, pausaDesde: min(-3) })
     conVuelta([])

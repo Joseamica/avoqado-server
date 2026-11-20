@@ -21425,8 +21425,10 @@ enum OnlineOrderChargeStatus {
 /// Una fila por función, escrita una sola vez en la vida (`INSERT … ON CONFLICT DO NOTHING`). La pausa sola cuenta desde
 /// `primerServicioAt + 90 s` (`arranquePausaSola.ts`): antes, el SERVIDOR anterior puede seguir vivo y no conoce la marca de respuesta.
 model ArranqueDeFuncion {
-  clave            String   @id
+  clave            String    @id
   primerServicioAt DateTime
+  /// D662 v4 (Codex p2v4-r3 #1): cuándo se selló lo que contestó el SERVIDOR anterior (una vez, al llegar el inicio). Null = pendiente.
+  legadoSelladoAt  DateTime?
 }
 
 model OnlineOrderingSettings {
