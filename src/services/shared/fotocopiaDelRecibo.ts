@@ -45,12 +45,9 @@ export function fotocopiaDelRecibo(snapshot: unknown): LineasDelTicket | null {
       return null
     }
     const modificadores = (p.modifiers ?? [])
-      // Como el papel de ANDROID: sólo el nombre (sin precio), con su cantidad si es más de uno (Codex r2 #4).
-      .map(m => {
-        const nombre = corta(m?.name, 54)
-        const veces = typeof m?.quantity === 'number' && m.quantity > 1 && Number.isFinite(m.quantity) ? `${m.quantity}× ` : ''
-        return nombre ? corta(`${veces}${nombre}`, 60) : ''
-      })
+      // Como la reimpresión de siempre de ANDROID: sólo el nombre del extra, sin precio ni cantidad (Codex r2 #4 y r3: agregar «2×»
+      // recortaba nombres y podía pasar la copia de 8 KB).
+      .map(m => corta(m?.name, 60))
       .filter(Boolean)
       .slice(0, 10)
     lineas.push({

@@ -237,7 +237,7 @@ describe('getTransactionDetail · fotocopia del recibo de un cobro movido (encar
     const detalle: any = await getTransactionDetail('v1', 'pay_1')
     expect(detalle.lineasDelTicket).toEqual({
       lineas: [
-        { nombre: 'Coca', cantidad: 1, unitarioCents: 2500, totalCents: 2500, modificadores: ['Sin hielo', '2× Limón'] },
+        { nombre: 'Coca', cantidad: 1, unitarioCents: 2500, totalCents: 2500, modificadores: ['Sin hielo', 'Limón'] },
         { nombre: 'Agua', cantidad: 1, unitarioCents: 2000, totalCents: 2000 },
         { nombre: 'Café', cantidad: 1, unitarioCents: 3000, totalCents: 3000 },
       ],
