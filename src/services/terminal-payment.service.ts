@@ -110,10 +110,8 @@ export interface TerminalPaymentRequest {
    * `preBillBalance.remainingBalanceCents` de «Pedidos → detalle» (`saldoPorCobrar`). Distinto de [expectedBalanceBeforeCents]: ése
    * se compara con la columna guardada `Order.remainingBalance`, y la columna se descuadra con la propina (unos escritores guardan
    * `Order.total` con ella y otros sin ella), así que frenaría cobros buenos. Éste se compara con lo que falta calculado bajo el
-   * candado con la MISMA cuenta que la pantalla (`faltaCents` de D7). Opcional: las apps publicadas no lo mandan y nada cambia.
-   *
-   * F1 (Codex android r2 #1) usa este MISMO campo con una regla estricta (`REMAINING_BALANCE_MISMATCH`); las dos conviven en esta
-   * unión y se unifican en el commit siguiente.
+   * candado con la MISMA cuenta que la pantalla (`faltaCents` de D7). Opcional: las apps publicadas no lo mandan y nada cambia;
+   * `null` cuenta como ausente. F1 (20-nov) adopta este campo y su regla tal cual: no hay otra regla sobre él.
    */
   expectedRemainingCents?: number | null
 }
@@ -1078,8 +1076,7 @@ export function proyectarEstado(row: FilaProyectable): TerminalPaymentStatus {
     // D53: lo mismo para «la cuenta cambió mientras se cobraba».
     ...(row.failureCode === 'BANK_DECLINED' ||
     row.failureCode === 'REJECTED_ORDER_AMOUNT_OVER_BALANCE' ||
-    row.failureCode === 'REJECTED_ORDER_BALANCE_CHANGED' ||
-    row.failureCode === 'REJECTED_ORDER_BALANCE_MISMATCH'
+    row.failureCode === 'REJECTED_ORDER_BALANCE_CHANGED'
       ? { errorMessage: mensajeDelServidor(row.resultJson) }
       : {}),
     createdAt: row.createdAt.toISOString(),
@@ -1338,8 +1335,6 @@ type MotivoDeRechazo =
   | 'REJECTED_ORDER_AMOUNT_OVER_BALANCE'
   /** hz:e9ce0be7:D53: el saldo de la cuenta ya no es el que vio la caja al armar este cobro (`expectedBalanceBeforeCents`). */
   | 'REJECTED_ORDER_BALANCE_CHANGED'
-  /** F1 (Codex android r2 #1): la caja mandó `expectedRemainingCents` y el saldo real no es ése, o el cobro no cabe en él. */
-  | 'REJECTED_ORDER_BALANCE_MISMATCH'
 
 /**
  * hz:ce654971:D7 · margen para los redondeos de la caja al repartir una cuenta (dividir «por producto» reparte su total local y
@@ -1351,8 +1346,6 @@ const HTTP_COBRO_MAYOR_QUE_EL_SALDO = 412
 const COBRO_MAYOR_QUE_EL_SALDO = 'AMOUNT_EXCEEDS_REMAINING_BALANCE'
 /** hz:e9ce0be7:D53: mismo 412 que el «falta $X» (las apps vivas muestran el texto tal cual). */
 const LA_CUENTA_CAMBIO = 'ORDER_BALANCE_CHANGED'
-/** F1 (Codex android r2 #1): el reparto de la caja ya no es el saldo real. Mismo 412 que D7; el saldo va en `remainingBalanceCents`. */
-const SALDO_DISTINTO_AL_ESPERADO = 'REMAINING_BALANCE_MISMATCH'
 /**
  * hz:5bda0b30:D1 · pedido que no se cobra en la terminal (Rappi en efectivo, pagado con tarjeta en línea). Las otras puertas los
  * rechazan con 409; aquí va 412 por la misma razón que el «falta $X»: con 409 las apps vivas consultan el estado y sólo dicen
@@ -1441,14 +1434,6 @@ function errorDeLapida(row: { failureCode?: string | null; resultJson: Prisma.Js
         HTTP_COBRO_MAYOR_QUE_EL_SALDO,
         true,
         LA_CUENTA_CAMBIO,
-        details,
-      )
-    case 'REJECTED_ORDER_BALANCE_MISMATCH':
-      return new AppError(
-        mensaje('El cobro no cuadra con lo que falta de la cuenta. Revisa el reparto y vuelve a intentar.'),
-        HTTP_COBRO_MAYOR_QUE_EL_SALDO,
-        true,
-        SALDO_DISTINTO_AL_ESPERADO,
         details,
       )
     case 'REJECTED_TERMINAL_NOT_CONNECTED':
@@ -2127,8 +2112,11 @@ class TerminalPaymentService {
           // cambió. Si lo que falta subió (otra caja agregó productos) o el importe sigue cabiendo (una parte), no hay cobro de más:
           // pasa como hoy y la pantalla ofrece el resto al releer (Codex D5 r2). Misma cuenta que la pantalla (`saldoPorCobrar` =
           // `faltaCents` aquí: Rappi en efectivo ya se rechazó arriba), nunca la columna guardada. Sin el dato no cambia nada.
+          // F1 (20-nov): con el dato presente, NUNCA llega al lector un importe mayor que lo que falta, al centavo, aunque lo que falta
+          // sea igual a lo visto. Antes eso caía al margen de D7 o, sin abono, pasaba entero: el SERVIDOR corrigió el precio al crear la
+          // cuenta de Mostrador y la caja mandó su total viejo. Crecer, bajar con la parte cabiendo y D19 siguen pasando (cabe ⇒ pasa).
           const loQueVioLaPantalla = request.expectedRemainingCents
-          if (loQueVioLaPantalla != null && faltaCents < loQueVioLaPantalla && request.amountCents > faltaCents) {
+          if (loQueVioLaPantalla != null && request.amountCents > faltaCents) {
             return rechazar(
               'REJECTED_ORDER_BALANCE_CHANGED',
               new AppError(
@@ -2141,23 +2129,7 @@ class TerminalPaymentService {
               ),
             )
           }
-          const esperadoF1 = request.expectedRemainingCents
-          if (esperadoF1 != null) {
-            // 🔴 F1 · Codex android r2 #1: la caja nueva dice qué saldo vio. Sin margen y también SIN abono: el servidor pudo corregir
-            // el precio al crear la cuenta, u otra caja abonar entre la lectura y el envío. Un reparto viejo nunca llega al lector.
-            if (esperadoF1 !== faltaCents || request.amountCents <= 0 || request.amountCents > faltaCents) {
-              return rechazar(
-                'REJECTED_ORDER_BALANCE_MISMATCH',
-                new AppError(
-                  `El cobro no cuadra con lo que falta de la cuenta ${order.orderNumber ?? request.orderId}: falta $${(faltaCents / 100).toFixed(2)}. Revisa el reparto y vuelve a intentar.`,
-                  HTTP_COBRO_MAYOR_QUE_EL_SALDO,
-                  true,
-                  SALDO_DISTINTO_AL_ESPERADO,
-                  { ...detalles, remainingBalanceCents: faltaCents, expectedRemainingCents: esperadoF1 },
-                ),
-              )
-            }
-          } else if (saldo.paidAmount.greaterThan(0) && request.amountCents > faltaCents + MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS) {
+          if (saldo.paidAmount.greaterThan(0) && request.amountCents > faltaCents + MARGEN_DE_REDONDEO_SOBRE_EL_SALDO_CENTS) {
             const falta = (faltaCents / 100).toFixed(2)
             return rechazar(
               'REJECTED_ORDER_AMOUNT_OVER_BALANCE',

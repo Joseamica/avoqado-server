@@ -2661,8 +2661,10 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
   })
 
   /**
-   * 🔴 F1 · Codex android r2 #1: la caja nueva manda `expectedRemainingCents` (el saldo base que cree que falta). Con él, el servidor
-   * exige `0 < base ≤ saldo real` al centavo y que lo esperado sea lo real, también SIN abono. Sin él, el contrato de D7 intacto.
+   * 🔴 F1 · Codex android r2 #1, unificado con D5 de develop (20-nov): la caja nueva manda `expectedRemainingCents` (lo que su pantalla
+   * vio que faltaba). Con él, el servidor nunca manda al lector un importe mayor que lo que falta, al centavo, también SIN abono:
+   * 412 `ORDER_BALANCE_CHANGED` con `details.remainingCents`. Un importe que cabe pasa aunque lo visto ya no sea lo que falta. Sin el
+   * campo, el contrato de D7 intacto.
    */
   describe('🔴 F1 · expectedRemainingCents: el cobro remoto no pasa del saldo real, al centavo', () => {
     const abonar = (orden: { id: string }, pesos: number) =>
@@ -2699,35 +2701,59 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
       expect(directEmit).not.toHaveBeenCalled()
       const filas = await filasDe(requestId)
       expect(filas).toHaveLength(1)
-      expect(filas[0]).toMatchObject({ status: 'FAILED', failureCode: 'REJECTED_ORDER_BALANCE_MISMATCH', orderId: orden.id })
+      expect(filas[0]).toMatchObject({ status: 'FAILED', failureCode: 'REJECTED_ORDER_BALANCE_CHANGED', orderId: orden.id })
       expect(primero).toMatchObject({
         statusCode: 412,
-        code: 'REMAINING_BALANCE_MISMATCH',
-        details: { requestId, remainingBalanceCents: 10000, expectedRemainingCents: 10000 },
+        code: 'ORDER_BALANCE_CHANGED',
+        details: { requestId, remainingCents: 10000, expectedRemainingCents: 10000 },
       })
       expect((primero as Error).message).toContain('falta $100.00')
       expect(segundo).toMatchObject({
         statusCode: 412,
-        code: 'REMAINING_BALANCE_MISMATCH',
+        code: 'ORDER_BALANCE_CHANGED',
         message: (primero as Error).message,
-        details: { requestId, remainingBalanceCents: 10000, expectedRemainingCents: 10000 },
+        details: { requestId, remainingCents: 10000, expectedRemainingCents: 10000 },
       })
     })
 
-    // La caja leyó $100; otra caja cobra $40 en efectivo; llega el envío con lo leído. Aunque el importe quepa, el reparto ya no.
-    it.each([
-      { caso: 'el total que leyó', amountCents: 10000 },
-      { caso: 'una parte que todavía cabe', amountCents: 5000 },
-    ])('otra caja abona entre la lectura y el envío ($caso) ⇒ 412 con el saldo vigente', async ({ amountCents }) => {
+    // Antes cabía en el margen de $1 de D7: la cuenta ya tiene un abono y lo visto ES lo que falta.
+    it('conAbono_unCentavoSobreSaldo_noLlegaAlLector', async () => {
       const orden = await nuevaOrden()
       await abonar(orden, 40)
       const requestId = nextRequest()
       const r = await enviar({
         requestId,
         venueId,
-        terminalId: terminalDe(`f1-otra-caja-${amountCents}`),
+        terminalId: terminalDe('f1-centavo-abono'),
         orderId: orden.id,
-        amountCents,
+        amountCents: 6001,
+        expectedRemainingCents: 6000,
+        requestedBy: fixture,
+      })
+
+      expect(directEmit).not.toHaveBeenCalled()
+      expect(await filasDe(requestId)).toEqual([
+        expect.objectContaining({ status: 'FAILED', failureCode: 'REJECTED_ORDER_BALANCE_CHANGED', orderId: orden.id }),
+      ])
+      expect(r).toMatchObject({
+        statusCode: 412,
+        code: 'ORDER_BALANCE_CHANGED',
+        details: { requestId, remainingCents: 6000, expectedRemainingCents: 6000 },
+      })
+      expect((r as Error).message).toContain('falta $60.00')
+    })
+
+    // La caja leyó $100; otra caja cobra $40 en efectivo; llega el envío con lo leído: el total viejo ya no cabe.
+    it('otra caja abona entre la lectura y el envío (el total que leyó) ⇒ 412 con el saldo vigente', async () => {
+      const orden = await nuevaOrden()
+      await abonar(orden, 40)
+      const requestId = nextRequest()
+      const r = await enviar({
+        requestId,
+        venueId,
+        terminalId: terminalDe('f1-otra-caja-10000'),
+        orderId: orden.id,
+        amountCents: 10000,
         expectedRemainingCents: 10000,
         requestedBy: fixture,
       })
@@ -2735,10 +2761,27 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
       expect(directEmit).not.toHaveBeenCalled()
       expect(r).toMatchObject({
         statusCode: 412,
-        code: 'REMAINING_BALANCE_MISMATCH',
-        details: { requestId, remainingBalanceCents: 6000, expectedRemainingCents: 10000 },
+        code: 'ORDER_BALANCE_CHANGED',
+        details: { requestId, remainingCents: 6000, expectedRemainingCents: 10000 },
       })
       expect((r as Error).message).toContain('falta $60.00')
+    })
+
+    // 20-nov (regla de D5): una parte que todavía cabe no es cobrar de más; pasa y la pantalla ofrece el resto al releer.
+    it('control: otra caja abona entre la lectura y el envío, pero la parte cabe ⇒ se admite y se manda a la terminal', async () => {
+      const orden = await nuevaOrden()
+      await abonar(orden, 40)
+      const requestId = nextRequest()
+      await enviar({
+        requestId,
+        venueId,
+        terminalId: terminalDe('f1-otra-caja-5000'),
+        orderId: orden.id,
+        amountCents: 5000,
+        expectedRemainingCents: 10000,
+        requestedBy: fixture,
+      })
+      seMando(requestId)
     })
 
     it('el GET de la lápida dice que no se cobró y trae el texto (respuesta del POST perdida)', async () => {
@@ -2757,7 +2800,7 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
       expect(await terminalPaymentService.getPaymentStatus(requestId, venueId)).toMatchObject({
         requestId,
         status: 'FAILED',
-        failureCode: 'REJECTED_ORDER_BALANCE_MISMATCH',
+        failureCode: 'REJECTED_ORDER_BALANCE_CHANGED',
         outcome: 'NOT_CHARGED',
         paymentId: null,
         errorMessage: expect.stringContaining('falta $100.00'),

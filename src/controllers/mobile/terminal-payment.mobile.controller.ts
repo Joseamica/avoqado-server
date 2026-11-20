@@ -109,17 +109,6 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       })
     }
 
-    // F1 (Codex android r2 #1): el saldo que la caja nueva cree que falta. `null` o ausente = la caja vieja (contrato de siempre).
-    if (
-      expectedRemainingCents != null &&
-      (!Number.isSafeInteger(expectedRemainingCents) || expectedRemainingCents < 0 || expectedRemainingCents > MAX_TERMINAL_PAYMENT_CENTS)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: `El saldo esperado debe ser un entero entre 0 y ${MAX_TERMINAL_PAYMENT_CENTS} centavos`,
-      })
-    }
-
     if (rating !== undefined && (!Number.isInteger(rating) || rating < 1 || rating > 5)) {
       return res.status(400).json({ success: false, message: 'La calificación debe ser un entero entre 1 y 5' })
     }
@@ -276,7 +265,6 @@ export async function sendTerminalPayment(req: Request, res: Response) {
         error.code === 'AMOUNT_EXCEEDS_REMAINING_BALANCE' ||
         // hz:e9ce0be7:D53: la cuenta cambió mientras se cobraba (y su réplica, que sale de la rama `default` de la lápida).
         error.code === 'ORDER_BALANCE_CHANGED' ||
-        error.code === 'REMAINING_BALANCE_MISMATCH' ||
         error.code === 'RAPPI_CASH_ORDER_CASH_ONLY' ||
         error.code === 'ONLINE_ORDER_PAID_BY_CARD')
     ) {

@@ -3607,4 +3607,63 @@ describe('TerminalPaymentService — hz:bdd815fd:D5: «Pedidos → Cobrar» mand
     expect(error).toMatchObject({ statusCode: 412, code: 'ORDER_BALANCE_CHANGED', details: { expectedBalanceBeforeCents: 8000 } })
     expect(directEmit).not.toHaveBeenCalled()
   })
+
+  /**
+   * F1 (20-nov) adopta D5: con lo que vio la pantalla presente, NUNCA llega al lector un importe mayor que lo que falta, al centavo,
+   * aunque lo que falta sea igual a lo visto. Caso F1: el SERVIDOR corrigió el precio al crear la cuenta de Mostrador y la caja manda
+   * su total viejo; sin abono pasaba entero y con abono cabía en el margen de D7.
+   */
+  it.each([
+    { caso: 'sin abono', subtotal: '80', abono: null, visto: 8000, amountCents: 8001, falta: 8000 },
+    { caso: 'con abono (antes cabía en el margen de D7)', subtotal: '80', abono: '0.50', visto: 7950, amountCents: 7951, falta: 7950 },
+  ])(
+    'F1: lo que falta es lo que vio la pantalla ($caso) e importe un centavo de más ⇒ 412 ORDER_BALANCE_CHANGED con lápida, sin tocar la terminal',
+    async ({ subtotal, abono, visto, amountCents, falta }) => {
+      order().findFirst.mockResolvedValue({
+        paymentStatus: abono ? 'PARTIAL' : 'PENDING',
+        orderNumber: 'MOST-1',
+        status: 'CONFIRMED',
+        subtotal,
+      })
+      prismaMock.payment.aggregate.mockResolvedValueOnce({
+        _sum: { amount: abono, tipAmount: abono ? '0' : null },
+        _count: abono ? 1 : 0,
+      } as any)
+
+      const pendiente = rechazo(
+        terminalPaymentService.sendPaymentToTerminal(
+          baseRequest({ terminalId: 'T-F1', orderId: 'order-f1', requestId: 'REQ-F1-1', amountCents, expectedRemainingCents: visto }),
+        ),
+      )
+      await flush()
+      // Antes de esperar el desenlace: si la admisión lo dejara pasar, ya habría ido a la terminal (y la promesa no terminaría).
+      expect(directEmit).not.toHaveBeenCalled()
+      const error = await pendiente
+
+      expect(error).toMatchObject({
+        statusCode: 412,
+        code: 'ORDER_BALANCE_CHANGED',
+        details: { requestId: 'REQ-F1-1', remainingCents: falta, expectedRemainingCents: visto },
+      })
+      expect(error.message).toContain(`ahora falta $${(falta / 100).toFixed(2)}`)
+      expect(tpr().create).toHaveBeenCalledTimes(1)
+      expect(tpr().create.mock.calls[0][0].data).toMatchObject({ status: 'FAILED', failureCode: 'REJECTED_ORDER_BALANCE_CHANGED' })
+      expect(tpr().create.mock.calls[0][0].data.resultJson).toMatchObject({ httpStatus: 412, code: 'ORDER_BALANCE_CHANGED' })
+    },
+  )
+
+  it('F1: sin el dato, el mismo centavo de más sobre una cuenta sin abono pasa como siempre (D7 sólo mira cuentas con abono)', async () => {
+    order().findFirst.mockResolvedValue({ paymentStatus: 'PENDING', orderNumber: 'MOST-2', status: 'CONFIRMED', subtotal: '80' })
+    prismaMock.payment.aggregate.mockResolvedValueOnce({ _sum: { amount: null, tipAmount: null }, _count: 0 } as any)
+
+    const p1 = terminalPaymentService.sendPaymentToTerminal(
+      baseRequest({ terminalId: 'T-F1-SIN', orderId: 'order-f1', requestId: 'REQ-F1-2', amountCents: 8001 }),
+    )
+    await flush()
+    expect(tpr().create.mock.calls[0][0].data).toMatchObject({ status: 'PENDING', amountCents: 8001 })
+    expect(directEmit).toHaveBeenCalled()
+    committedRequests({ 'REQ-F1-2': 'pay-f1-2' })
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-F1-2', status: 'success', paymentId: 'pay-f1-2' })
+    expect((await p1).status).toBe('success')
+  })
 })
