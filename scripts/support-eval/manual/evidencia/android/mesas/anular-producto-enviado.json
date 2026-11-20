@@ -1,7 +1,7 @@
 {
   "pagina": "android/mesas/anular-producto-enviado",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "29d9b183dd2c35761af33f7c782c010a74c805c7",
+  "sourceRef": "1a298d6129b6b3b64bbefe718f1c4a2541dafb14",
   "version": "2.25.52",
   "pasos": [
     {
@@ -49,7 +49,7 @@
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 1695,
+      "linea": 1699,
       "cita": "showMessage(\"Producto anulado — $reason\")"
     },
     {
@@ -88,12 +88,12 @@
     {
       "afirmacion": "Si la red se corta a media anulación, dice en gris que no se supo si se anuló",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 1702
+      "linea": 1706
     },
     {
       "afirmacion": "Sin red no se anula ni se encola: dice «Sin conexión — anular un producto enviado necesita internet…»",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 1688
+      "linea": 1692
     },
     {
       "afirmacion": "Sin internet, «Volver a imprimir pedido» no saca lo ya enviado y dice «Sin conexión: lo que ya se envió no se puede reimprimir porque otra caja pudo cambiarlo; se podrá al volver el internet.»",
@@ -103,12 +103,17 @@
     {
       "afirmacion": "Si no se pudo leer la cuenta, lo ya enviado no sale y se muestra en gris (showSinRed)",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 2444
+      "linea": 2457
     },
     {
       "afirmacion": "Si la ronda se confirma mientras sale otra hoja, dice «Esta ronda se acaba de confirmar: vuelve a tocar «Volver a imprimir»…»",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
       "linea": 180
+    },
+    {
+      "afirmacion": "Con internet, una ronda que todavía llega al servidor no sale de lo guardado: dice «Una ronda todavía está llegando al servidor: vuelve a tocar «Volver a imprimir» en un momento para sacarla.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 184
     }
   ],
   "rutas": [
