@@ -277,24 +277,23 @@ describe('D7 · ronda sin red que llega a una cuenta que otra caja ya cobró', (
     expect(await notasDe(cobrada)).toHaveLength(0)
   })
 
-  it('Codex r4 #3: la llave recortada de una ronda NO se confunde con la misma llave propia de OTRA mesa', async () => {
-    const llave = `propia-${randomUUID()}`
-    // Mesa A, viva, con un renglón cuya llave propia es `llave`.
-    const tA = await mesa()
-    const cuentaA = (await assignTable(venueId, tA, mesera, 2)).order.id
-    const vA = await prisma.order.findUniqueOrThrow({ where: { id: cuentaA }, select: { version: true } })
-    await addItemsToOrder(venueId, cuentaA, [{ productId: coca, quantity: 1, externalId: llave }] as any, vA.version, true)
-    // Mesa B, cobrada; le llega una ronda nueva con la MISMA llave, con espacios.
-    const { cobrada } = await mesaCobradaPorLaCaja()
-    const r = { ...ronda(cobrada), payload: { orderId: cobrada, items: [{ productId: agua, quantity: 1, externalId: ` ${llave} ` }] } }
+  it('Codex r5 #6: una llave hecha sólo de espacios recibe la determinista; anulado ese producto, el reenvío NO lo recrea', async () => {
+    const t = await mesa()
+    const cuenta = (await assignTable(venueId, t, mesera, 2)).order.id
+    const v0 = await prisma.order.findUniqueOrThrow({ where: { id: cuenta }, select: { version: true } })
+    await addItemsToOrder(venueId, cuenta, [{ productId: coca, quantity: 1 }] as any, v0.version, true)
+    const r = { ...ronda(cuenta), payload: { orderId: cuenta, items: [{ productId: agua, quantity: 1, externalId: '   ' }] } }
+    // La primera aplicación de esa ronda (cuya respuesta se perdió) la guardó con la llave determinista que ahora le toca.
+    const v1 = await prisma.order.findUniqueOrThrow({ where: { id: cuenta }, select: { version: true } })
+    await addItemsToOrder(venueId, cuenta, [{ productId: agua, quantity: 1, externalId: `sync:${r.id}:0` }] as any, v1.version, true)
+    const agua1 = await prisma.orderItem.findFirstOrThrow({ where: { orderId: cuenta, externalId: `sync:${r.id}:0` } })
+    await voidOrderItem({ venueId, orderId: cuenta, itemId: agua1.id, reason: 'El cliente cambió de parecer', actorId: caja })
 
     const [ack] = await replay([r])
 
     expect(ack.status).toBe('ACKED')
-    const aparte = String((ack.result as any).cuentaAparte?.orderId)
-    expect(aparte).not.toBe(cuentaA)
-    expect(await fotoDe(aparte)).toMatchObject({ total: 20, renglones: 1, pagos: 0 })
-    expect(await fotoDe(cuentaA)).toMatchObject({ renglones: 1 })
+    expect(await prisma.orderItem.count({ where: { orderId: cuenta, productId: agua } })).toBe(0)
+    expect(await fotoDe(cuenta)).toMatchObject({ renglones: 1, total: 25 })
   })
 
   it('Codex r0 #1: la ronda ya estaba guardada y otra caja la SEPARÓ a otra cuenta antes de cobrar: no se duplica', async () => {

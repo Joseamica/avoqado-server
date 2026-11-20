@@ -59,7 +59,9 @@ export function importeDeCargo(
   value: Prisma.Decimal | number,
   base: Prisma.Decimal | number,
 ): Prisma.Decimal {
-  if (type !== 'PERCENTAGE') return new Prisma.Decimal(value)
+  // El monto fijo también a centavos: el catálogo admite 4 decimales y la columna de la cuenta 2; sin esto la vista previa decía
+  // 1.00 y la cuenta guardaba 1.01 para un fijo de 1.0050 (Codex r5 #1).
+  if (type !== 'PERCENTAGE') return new Prisma.Decimal(value).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
   const baseDec = new Prisma.Decimal(base).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
   return baseDec.mul(value).div(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
 }

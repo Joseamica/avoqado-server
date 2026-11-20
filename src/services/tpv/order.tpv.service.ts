@@ -664,14 +664,21 @@ export async function llavesAnuladasDeLaCuenta(
   orderId: string,
   llaves: string[],
 ): Promise<Set<string>> {
+  const pedidas = new Set(llaves)
+  if (pedidas.size === 0) return new Set()
+  // Se buscan SÓLO las anulaciones que nombran alguna de estas llaves (filtro JSON en la base), no «las últimas N»: con un tope por
+  // antigüedad, tras muchas anulaciones posteriores la primera lápida dejaba de proteger su llave (Codex r5 #7). Una llave se anula
+  // una vez; el tope sólo acota el peor caso.
   const anulaciones = await tx.orderAction.findMany({
-    where: { orderId, actionType: 'VOID' },
+    where: {
+      orderId,
+      actionType: 'VOID',
+      OR: [...pedidas].map(llave => ({ metadata: { path: ['externalIds'], array_contains: [llave] } })),
+    },
     select: { metadata: true },
     orderBy: { createdAt: 'desc' },
-    // ponytail: una cuenta no llega ni cerca de 500 anulaciones; si llegara, las más viejas dejarían de proteger su llave.
-    take: 500,
+    take: pedidas.size * 10,
   })
-  const pedidas = new Set(llaves)
   const anuladas = new Set<string>()
   for (const { metadata } of anulaciones) {
     const ids = (metadata as { externalIds?: unknown } | null)?.externalIds

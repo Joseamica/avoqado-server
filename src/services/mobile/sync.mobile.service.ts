@@ -1470,7 +1470,13 @@ async function applyAddItems(
   // Sin esto, un reintento tras "efecto aplicado pero ack no persistido"
   // duplicaba la ronda en cocina y en la cuenta. Solo se inyecta si el cliente
   // no mandó uno propio.
-  const itemsWithKey = normales.map((it, idx) => (it.externalId ? it : { ...it, externalId: `sync:${intent.id}:${idx}` }))
+  // La llave se normaliza UNA vez, aquí, igual que la guarda el alta (`normalizeExternalId`: recortada; vacía o sólo espacios = sin
+  // llave ⇒ la determinista). Así la búsqueda de la ronda, sus lápidas y el alta comparan la misma llave (Codex r3 #4, r4 #3, r5 #4
+  // y #6: una llave " " se guardaba como null y la anulación no dejaba lápida; recortar sólo en algunos lugares dejaba huecos).
+  const itemsWithKey = normales.map((it, idx) => {
+    const llave = orderTpvService.normalizeExternalId(typeof it.externalId === 'string' ? it.externalId : null)
+    return { ...it, externalId: llave ?? `sync:${intent.id}:${idx}` }
+  })
   // El combo viaja sólo con su referencia y el prefijo de sus componentes (`sync:<intent>:<índice>`, el que el aparato predice): su
   // precio y sus renglones los resuelve el server desde la promoción, y un campo suelto del carrito no lo vuelve un producto.
   const combos = conPromocion.map(item => ({
@@ -1574,21 +1580,12 @@ const NOTA_RONDA_TARDIA = 'RONDA_TARDIA_EN_CUENTA_APARTE'
  * ronda se guarda entera en una sola transacción, y sus llaves (`sync:<intent>:<i>` o las del aparato; la instancia de cada combo) no
  * se repiten entre rondas. Las dos búsquedas usan índice (`OrderItem.externalId`, `OrderPromotion.instanceId`). Devuelve la cuenta.
  */
-async function rondaYaEnAlgunaCuenta(venueId: string, original: string, conPromocion: any[], normales: any[]): Promise<string | null> {
-  // En todo el negocio, la llave TAL CUAL llegó (como siempre). La recortada sólo dentro de la cuenta pedida: recortar en todo el
-  // negocio podía confundir la llave propia de OTRA mesa con ésta y dar por guardada una ronda que no lo estaba (Codex r4 #3).
-  const llaves = [...new Set(normales.map(it => it.externalId).filter((k: unknown): k is string => typeof k === 'string' && k.length > 0))]
+async function rondaYaEnAlgunaCuenta(venueId: string, conPromocion: any[], normales: any[]): Promise<string | null> {
+  // Las llaves ya vienen normalizadas desde la entrada del ADD_ITEMS (`itemsWithKey`).
+  const llaves = [...new Set(llavesGuardadasDeLaRonda(normales))]
   if (llaves.length) {
     const renglon = await prisma.orderItem.findFirst({
       where: { externalId: { in: llaves }, order: { venueId } },
-      select: { orderId: true },
-    })
-    if (renglon) return renglon.orderId
-  }
-  const recortadas = [...new Set(llavesGuardadasDeLaRonda(normales))].filter(k => !llaves.includes(k))
-  if (recortadas.length) {
-    const renglon = await prisma.orderItem.findFirst({
-      where: { externalId: { in: recortadas }, orderId: original, order: { venueId } },
       select: { orderId: true },
     })
     if (renglon) return renglon.orderId
@@ -1644,7 +1641,7 @@ async function aplicarRondaTardia(p: {
   const { venueId, staffId, intent, original } = p
   const horaRealDeLaRonda = horaRealDelAparato({ isOfflineReplay: true, createdAtLocal: intent.createdAtLocal }, llegadaDeLaPeticion())
   const pedida = { orderId: original.id, version: original.version, total: Number(original.total ?? 0) }
-  const yaEn = await rondaYaEnAlgunaCuenta(venueId, original.id, p.conPromocion, p.itemsWithKey)
+  const yaEn = await rondaYaEnAlgunaCuenta(venueId, p.conPromocion, p.itemsWithKey)
   if (yaEn) {
     return { id: intent.id, status: 'ACKED', result: { ...pedida, ...(yaEn !== original.id ? { cuentaAparte: { orderId: yaEn } } : {}) } }
   }

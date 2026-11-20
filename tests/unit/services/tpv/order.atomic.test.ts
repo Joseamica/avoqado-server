@@ -1014,7 +1014,16 @@ describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la
       1,
       true,
     )
-    expect(tx.orderAction.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { orderId: 'order', actionType: 'VOID' } }))
+    expect(tx.orderAction.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          orderId: 'order',
+          actionType: 'VOID',
+          // Codex r5 #7: la base filtra por la llave pedida (no «las últimas N» anulaciones).
+          OR: expect.arrayContaining([{ metadata: { path: ['externalIds'], array_contains: ['sync:r:0'] } }]),
+        }),
+      }),
+    )
     expect(tx.orderItem.create).not.toHaveBeenCalled()
   })
 

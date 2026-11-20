@@ -18,8 +18,12 @@ describe('importeDeCargo', () => {
     expect(importeDeCargo('PERCENTAGE', 10, 25.02 + 25.33).toNumber()).toBe(5.04)
   })
 
-  it('un monto fijo se respeta tal cual, sin importar la base', () => {
+  it('un monto fijo se respeta, sin importar la base', () => {
     expect(importeDeCargo('FIXED_AMOUNT', new Prisma.Decimal(15), 0).toNumber()).toBe(15)
+  })
+
+  it('Codex r5 #1: un fijo del catálogo con 4 decimales ($1.0050) es $1.01 en la vista previa, el alta y la cuenta', () => {
+    expect(importeDeCargo('FIXED_AMOUNT', new Prisma.Decimal('1.0050'), 100).toNumber()).toBe(1.01)
   })
 
   it('con base en cero (descuento mayor que el subtotal) el % es $0', () => {
