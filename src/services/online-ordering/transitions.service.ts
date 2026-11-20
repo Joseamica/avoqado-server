@@ -100,7 +100,10 @@ export type CasResult =
       orderWritten: boolean
       /** M-7: el estado al que esta transición movió la cuenta, o `null` si no la escribió. */
       orderStatus: OrderStatus | null
-      /** Fase 2: esta transición canceló y pasó el cargo AUTHORIZED → RELEASING; el llamador libera la tarjeta tras el commit. */
+      /**
+       * Fase 2: esta transición canceló (o, D661, aceptó una cuenta ya pagada por otro camino) y pasó el cargo AUTHORIZED → RELEASING;
+       * el llamador libera la tarjeta tras el commit (si no, el conciliador libera todo cargo RELEASING).
+       */
       releaseChargeId?: string
       /** S9: clientas con premio regresado; tras el commit se despierta su pase de Wallet (si no, lo manda el barrido). */
       clientasConPremio?: string[]
@@ -261,9 +264,12 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
   const orderWritten = written.count === 1
 
   // Fase 2: cancelar suelta la tarjeta apartada. Se marca aquí, en la MISMA transacción; la liberación con el banco la hace el
-  // llamador después del commit, y sólo si esta transición fue la que movió el cargo.
+  // llamador después del commit, y sólo si esta transición fue la que movió el cargo. D661 (3A, fix 1): aceptar SIN cobrarla una cuenta
+  // que ya se pagó por otro camino también la suelta (como el `hasMoney` de la captura): un pedido aceptado nunca se queda con su
+  // tarjeta apartada. La captura acepta con el cargo ya CAPTURED, así que este paso no la toca.
   let releaseChargeId: string | undefined
-  if (cancela && charge?.status === OnlineOrderChargeStatus.AUTHORIZED) {
+  const sueltaLaTarjeta = cancela || (a.kind === 'ACCEPT' && hasMoney)
+  if (sueltaLaTarjeta && charge?.status === OnlineOrderChargeStatus.AUTHORIZED) {
     const released = await tx.onlineOrderCharge.updateMany({
       where: { id: charge.id, status: OnlineOrderChargeStatus.AUTHORIZED },
       data: { status: OnlineOrderChargeStatus.RELEASING },

@@ -930,6 +930,28 @@ describe('D661 (3A): un apartado de tarjeta de «Nadie» se abre (= se cobra) s�
     )
   })
 
+  it('D661 (fix 1): aceptar SIN cobrar la tarjeta una cuenta ya pagada por otro camino suelta lo apartado en la MISMA transacción (releaseChargeId); sin dinero, o con el cargo ya cobrado, el cargo no se toca', async () => {
+    const aceptar = () =>
+      casTransitionInTx(prismaMock, { kind: 'ACCEPT', venueId: 'v1', orderId: 'ord1', now: NOW, onlineData: () => ({}) })
+    // El apartado de «Nadie» que otro cobro ya saldó.
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(apartado({ order: { paymentStatus: 'PAID', paidAmount: D('250') } }) as any)
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue({ id: 'ch1', status: 'AUTHORIZED' } as any)
+    await expect(aceptar()).resolves.toMatchObject({ r: 'OK', releaseChargeId: 'ch1' })
+    expect(prismaMock.onlineOrderCharge.updateMany).toHaveBeenCalledWith({
+      where: { id: 'ch1', status: 'AUTHORIZED' },
+      data: { status: 'RELEASING' },
+    })
+    // La captura acepta con el cargo ya CAPTURED en su misma transacción: nada que soltar.
+    ;(prismaMock.onlineOrderCharge.updateMany as jest.Mock).mockClear()
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue({ id: 'ch1', status: 'CAPTURED' } as any)
+    expect(await aceptar()).not.toHaveProperty('releaseChargeId')
+    // «Mi equipo» sin dinero con la tarjeta apartada (no es el camino de hoy: la captura la cobra): este paso no la suelta.
+    prismaMock.onlineOrder.findFirst.mockResolvedValue({ ...row({ requiresAcceptance: true }), paymentMode: 'CARD_ONLINE' } as any)
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue({ id: 'ch1', status: 'AUTHORIZED' } as any)
+    expect(await aceptar()).not.toHaveProperty('releaseChargeId')
+    expect(prismaMock.onlineOrderCharge.updateMany).not.toHaveBeenCalled()
+  })
+
   it('aceptar un pedido «Nadie» CARD_ONLINE sin la apertura explícita de una caja responde OPEN_FROM_CAJA y nunca llega a la captura', async () => {
     pedidoQue({ tarjeta: true, nadie: true })
     await expect(acceptOnlineOrder(base)).resolves.toEqual({ outcome: 'OPEN_FROM_CAJA' })

@@ -5,6 +5,7 @@
  * abrir) mientras otro lo sostiene, el sello del cargo y el rechazo en la MISMA transacción, y el trabajo de vencimiento con su SQL.
  * Stripe es un doble siempre (nunca el de verdad).
  */
+import { randomUUID } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
@@ -12,7 +13,8 @@ import { StripeConnectProvider } from '@/services/payments/providers/stripe-conn
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
 import { confirmCardAuthorization } from '@/services/online-ordering/card/confirm.service'
 import { releaseCharge } from '@/services/online-ordering/card/release.service'
-import { listFolios } from '@/services/online-ordering/folios.service'
+import { listFolios, syncPaidFolios } from '@/services/online-ordering/folios.service'
+import { listInbox } from '@/services/online-ordering/inbox.service'
 import { closesAt } from '@/services/online-ordering/hours'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import { getTrackingByToken, lockAdmission } from '@/services/online-ordering/order.service'
@@ -20,6 +22,8 @@ import { updateSettings } from '@/services/online-ordering/settings.service'
 import { acceptOnlineOrder, rejectOnlineOrder } from '@/services/online-ordering/transitions.service'
 import { processStripeConnectWebhookEvent } from '@/services/payments/reservation-deposit-webhook.service'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { payCashOrder } from '@/services/mobile/order.mobile.service'
+import { getOrder as leerCuentaEnLaTpv } from '@/services/tpv/order.tpv.service'
 import { OnlineOrderAcceptanceExpiryJob } from '@/jobs/online-order-acceptance-expiry.job'
 
 // El guardia global rechaza `av-db-25` y hosts remotos; esta suite exige además una base desechable o la propia de la fase.
@@ -156,6 +160,27 @@ describe('D661 · 3A: confirmar → apartado; abrir = cobrar; vencer y liberar (
   const avisoDeStripe = (type: string, data: Record<string, unknown>) =>
     processStripeConnectWebhookEvent({ id: `evt_abrir_${RUN}_${++evtSeq}`, type, account: 'acct_itest_abrir', livemode: false, data })
   const pasarElTrabajo = () => new OnlineOrderAcceptanceExpiryJob({ cron: { start: jest.fn(), stop: jest.fn() } as never }).checkNow()
+  /**
+   * Fix 1: la cuenta se paga por otro camino. Es lo que deja la TPV al REGISTRAR dinero ya movido (`recordOrderPayment`, el único escritor
+   * de caja que no se rechaza: su guarda va al empezar el cobro, `order.tpv.service.ts` → 409); se escribe directo: ese camino se prueba
+   * contra Postgres en `folios.integration.test.ts`.
+   */
+  const pagadaPorOtroCamino = async (orderId: string) => {
+    await prisma.payment.create({
+      data: {
+        venueId: venueId!,
+        orderId,
+        amount: 250,
+        method: 'CASH',
+        source: 'TPV',
+        status: 'COMPLETED',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: 250,
+      },
+    })
+    await prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'PAID', paidAmount: 250, remainingBalance: 0 } })
+  }
 
   beforeAll(async () => {
     const org = await prisma.organization.create({
@@ -568,6 +593,77 @@ describe('D661 · 3A: confirmar → apartado; abrir = cobrar; vencer y liberar (
     expect(await getTrackingByToken(d.trackingToken)).toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', cardStatus: 'RELEASED' })
     expect(await prisma.onlineOrder.count({ where: { trackingToken: d.trackingToken } })).toBe(0)
     expect(captureSpy).not.toHaveBeenCalled()
+  })
+
+  it('D661 (fix 1): un apartado cuya cuenta se pagó por otro camino queda «Por entregar» con su tarjeta liberada al pasar el barrido (la lista de la caja, la bandeja y el trabajo de vencimiento); nunca se cobra', async () => {
+    const barridos: Array<[string, () => Promise<unknown>]> = [
+      ['lista de la caja', () => listFolios({ venueId: venueId! })],
+      ['bandeja', () => listInbox({ venueId: venueId!, filter: 'all' })],
+      ['trabajo de vencimiento', pasarElTrabajo],
+    ]
+    for (const [quien, barrer] of barridos) {
+      const a = await apartado()
+      await pagadaPorOtroCamino(a.orderId)
+      await barrer()
+      expect({ quien, pedido: (await enLinea(a.orderId)).status }).toEqual({ quien, pedido: 'ACCEPTED' })
+      expect({ quien, cargo: (await cargo(a.charge.id)).status }).toEqual({ quien, cargo: 'RELEASED' })
+      expect(voidSpy).toHaveBeenCalledWith(expect.anything(), {
+        paymentIntentId: a.charge.paymentIntentId,
+        idempotencyKey: `online-order:${a.orderId}:release`,
+      })
+      expect(await cobros(a.orderId)).toHaveLength(1) // sólo el otro cobro: la tarjeta nunca
+      // Y una caja que lo abre después no lo cobra: ya está «Por entregar».
+      await expect(abrir(a.orderId)).resolves.toEqual({ outcome: 'STALE', status: 'ACCEPTED' })
+    }
+    expect(captureSpy).not.toHaveBeenCalled()
+  })
+
+  it('D661 (fix 1): con Stripe sin contestar, el barrido acepta la cuenta pagada y deja el cargo RELEASING en esa MISMA transacción (nunca AUTHORIZED detrás de un pedido aceptado)', async () => {
+    const a = await apartado()
+    await pagadaPorOtroCamino(a.orderId)
+    voidSpy.mockRejectedValue(perdida())
+    authSpy.mockRejectedValue(perdida())
+    await syncPaidFolios({ venueId: venueId! }, () => new Date())
+    expect((await enLinea(a.orderId)).status).toBe('ACCEPTED')
+    expect((await cargo(a.charge.id)).status).toBe('RELEASING') // el conciliador libera todo RELEASING
+    expect(captureSpy).not.toHaveBeenCalled()
+  })
+
+  it('D661 (fix 1): el barrido y una caja que abre el mismo apartado ya pagado a la vez: un solo desenlace, sin captura ni segundo cobro', async () => {
+    // Las dos esperan el MISMO candado de la orden, que otra transacción sostiene; entra primero la que llegó primero a la fila.
+    for (const primero of ['barrido', 'caja'] as const) {
+      const a = await apartado()
+      await pagadaPorOtroCamino(a.orderId)
+      const orden = sostener(tx => lockExistingOrderForPayment(tx, { venueId: venueId!, orderId: a.orderId }), 1500)
+      await orden.listo
+      const barrer = () => syncPaidFolios({ venueId: venueId! }, () => new Date())
+      const p1 = primero === 'barrido' ? barrer() : abrir(a.orderId)
+      await dormir(300) // la primera ya espera el candado
+      const p2 = primero === 'barrido' ? abrir(a.orderId) : barrer()
+      await orden.hecho
+      const resultados = await Promise.all([p1, p2])
+      const apertura = (primero === 'barrido' ? resultados[1] : resultados[0]) as Awaited<ReturnType<typeof abrir>>
+      expect([
+        { primero, outcome: 'OK', status: 'ACCEPTED' },
+        { primero, outcome: 'STALE', status: 'ACCEPTED' },
+      ]).toContainEqual({ primero, outcome: apertura.outcome, status: 'status' in apertura ? apertura.status : undefined })
+      expect({ primero, pedido: (await enLinea(a.orderId)).status }).toEqual({ primero, pedido: 'ACCEPTED' })
+      expect({ primero, cargo: (await cargo(a.charge.id)).status }).toEqual({ primero, cargo: 'RELEASED' })
+      expect(await cobros(a.orderId)).toHaveLength(1)
+    }
+    expect(captureSpy).not.toHaveBeenCalled()
+  })
+
+  it('D661 (fix 1): la caja no cobra un apartado de «Nadie»: el efectivo del POS → 409 ONLINE_ORDER_PAID_BY_CARD sin ningún Payment, y la TPV no lo abre para cobrarlo (409)', async () => {
+    const a = await apartado()
+    await expect(payCashOrder(venueId!, a.orderId, { amount: 25_000, tip: 0, idempotencyKey: randomUUID() })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'ONLINE_ORDER_PAID_BY_CARD',
+    })
+    await expect(leerCuentaEnLaTpv(venueId!, a.orderId)).rejects.toMatchObject({ statusCode: 409, code: 'ONLINE_ORDER_PAID_BY_CARD' })
+    expect(await cobros(a.orderId)).toHaveLength(0)
+    expect(await cuenta(a.orderId)).toMatchObject({ paymentStatus: 'PENDING' })
+    expect((await cargo(a.charge.id)).status).toBe('AUTHORIZED')
   })
 
   it('«Mi equipo» con tarjeta sigue igual', async () => {

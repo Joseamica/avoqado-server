@@ -38,6 +38,7 @@ jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
   socketManager: { broadcastToVenue: jest.fn() },
 }))
+jest.mock('@/services/online-ordering/card/release.service', () => ({ __esModule: true, releaseCharge: jest.fn(async () => 'RELEASED') }))
 
 import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { armarComandasTrasCommit } from '@/services/kds/kitchenTicketAuthoring.service'
@@ -45,6 +46,7 @@ import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { notifyOrderEvent } from '@/services/online-ordering/notifications.service'
 import { getSettings } from '@/services/online-ordering/settings.service'
 import { createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
+import { releaseCharge } from '@/services/online-ordering/card/release.service'
 import {
   cerrarFolioEnCeroEnTx,
   cerrarFoliosDelDiaTerminado,
@@ -191,6 +193,43 @@ describe('prepararFolioPagado (la transacción y los avisos de después)', () =>
     expect(notifyOrderEvent).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
     expect(armarComandasTrasCommit).not.toHaveBeenCalled()
+  })
+})
+
+describe('D661 (3A, fix 1): un apartado de tarjeta de «Nadie» cuya cuenta se pagó por otro camino', () => {
+  /** El apartado: `CARD_ONLINE` sin aceptación, con su tarjeta apartada; su cuenta ya la saldó otro cobro. */
+  const apartadoPagado = () => ({ ...folio({ order: { paymentStatus: 'PAID', paidAmount: D('250') } }), paymentMode: 'CARD_ONLINE' })
+
+  it('pasa a «Por entregar» y suelta la tarjeta: el cargo AUTHORIZED → RELEASING en la MISMA transacción que lo acepta, y la liberación de siempre después del commit; nunca se cobra', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(apartadoPagado() as any)
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue({ id: 'ch1', status: 'AUTHORIZED' } as any)
+    prismaMock.onlineOrderCharge.updateMany.mockResolvedValue({ count: 1 })
+
+    await expect(prepararFolioPagado({ venueId: 'v1', orderId: 'ord1', staffId: null, now: NOW })).resolves.toMatchObject({
+      outcome: 'OK',
+      status: 'ACCEPTED',
+    })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(prismaMock.onlineOrderCharge.updateMany).toHaveBeenCalledWith({
+      where: { id: 'ch1', status: 'AUTHORIZED' },
+      data: { status: 'RELEASING' },
+    })
+    // En la transacción, después del CAS que lo acepta.
+    expect(prismaMock.onlineOrderCharge.updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(
+      prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0],
+    )
+    expect(releaseCharge).toHaveBeenCalledWith('ch1')
+  })
+
+  it('un folio de caja (sin cargo) y un cargo que ya no está apartado no tocan ninguna tarjeta', async () => {
+    // Folio de caja pagado: lo de siempre.
+    await expect(prepararFolioPagado({ venueId: 'v1', orderId: 'ord1', staffId: null, now: NOW })).resolves.toMatchObject({ outcome: 'OK' })
+    // Un cargo que ya se liberó (o se está liberando): nada que soltar otra vez.
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(apartadoPagado() as any)
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue({ id: 'ch1', status: 'RELEASING' } as any)
+    await expect(prepararFolioPagado({ venueId: 'v1', orderId: 'ord1', staffId: null, now: NOW })).resolves.toMatchObject({ outcome: 'OK' })
+    expect(prismaMock.onlineOrderCharge.updateMany).not.toHaveBeenCalled()
+    expect(releaseCharge).not.toHaveBeenCalled()
   })
 })
 

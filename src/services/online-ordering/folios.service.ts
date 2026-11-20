@@ -15,6 +15,7 @@ import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { utcTs } from '@/utils/sqlDates'
 import { announceCancelledElsewhere, cerrarCanceladasReleyendo } from './cancelledOrderSync'
+import { releaseCharge } from './card/release.service'
 import { EXPIRY_BATCH_SIZE, INBOX_PAGE_SIZE, OPEN_ORDER_STATUSES, SYNC_BATCH_SIZE, foliosPorPagarWhere } from './constants'
 // Ciclo a propósito: `inbox.service` usa las sincronizaciones de aquí y esta lista usa su forma; todo se usa al llamar, nunca al cargar.
 import { INBOX_SELECT, fromActiveCursor, toActiveCursor, toInboxOrder } from './inbox.service'
@@ -212,6 +213,9 @@ export async function prepararFolioPagado(i: {
     if (r.r === 'STALE' && r.cancelledElsewhere) announceCancelledElsewhere(r.cancelledElsewhere, r.now)
     return settled(r)
   }
+  // D661 (3A, fix 1): un apartado de tarjeta cuya cuenta se pagó por otro camino se aceptó soltando su tarjeta (RELEASING en la misma
+  // transacción): aquí la liberación de siempre con el banco. Nunca lanza; si Stripe no contesta, el conciliador la retoma.
+  if (r.releaseChargeId) await releaseCharge(r.releaseChargeId)
   // Con OK la cuenta quedó marcada (en su escritura o aparte): se arma aquí, también cuando la cuenta no se escribió.
   const result = announceAccepted({ venueId: i.venueId, orderId: i.orderId, staffId: i.staffId, minutes, marcarCocina: false }, r)
   if (marcarCocina) void armarComandasTrasCommit(i.venueId, i.orderId, 'ROUND')
