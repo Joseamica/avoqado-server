@@ -38,11 +38,11 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/auth/presentation/AppState.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -390,11 +390,11 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/domain/printing/ComandaDispatcher.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/util/ConnectivityMonitor.kt": [
@@ -659,8 +659,16 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/impresoras/la-comanda-no-sale",
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
+      },
+      {
         "pagina": "windows/cobro/cobrar-sin-internet",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/impresoras/la-comanda-no-sale",
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/designsystem/components/PlanGate.kt": [
@@ -1350,21 +1358,21 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/orders/presentation/OrdersViewModel.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/payment/data/CancelacionDeCobroCoordinator.kt": [
@@ -1578,7 +1586,7 @@
       },
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
@@ -1614,7 +1622,7 @@
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/lealtad/sello-que-no-se-sumo",
@@ -1656,7 +1664,7 @@
       },
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
@@ -1696,7 +1704,7 @@
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/lealtad/sello-que-no-se-sumo",
@@ -2106,7 +2114,7 @@
       },
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
@@ -2146,7 +2154,7 @@
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
@@ -2318,27 +2326,27 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/ComandaPrinter.kt": [
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/ComandasPendientesStore.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/PoliticaDeReintento.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/PrinterService.kt": [
@@ -2354,21 +2362,21 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/ReintentoDeComanda.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/ReplayDeComandasPendientes.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/model/PrinterModels.kt": [
@@ -2407,10 +2415,20 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt": [
+      {
+        "pagina": "android/impresoras/la-comanda-no-sale",
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
+      },
+      {
+        "pagina": "windows/impresoras/la-comanda-no-sale",
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/routing/PrintRoutingMapper.kt": [
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/reservations/data/ReservationActionsRetrier.kt": [
@@ -2836,7 +2854,7 @@
       },
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "android/inventario/registrar-merma",
@@ -2904,7 +2922,7 @@
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/inventario/registrar-merma",
@@ -3106,7 +3124,7 @@
       },
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
@@ -3118,7 +3136,7 @@
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -3132,7 +3150,7 @@
       },
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
@@ -3144,7 +3162,7 @@
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -3606,7 +3624,7 @@
       },
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "android/inventario/contar-existencia",
@@ -3726,7 +3744,7 @@
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       },
       {
         "pagina": "windows/inventario/contar-existencia",
@@ -4288,7 +4306,7 @@
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "f342ea4ea9da7f24eb576f8efa038e4861408cc0"
       }
     ],
     "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/scale/UsbSerialScaleManager.kt": [
