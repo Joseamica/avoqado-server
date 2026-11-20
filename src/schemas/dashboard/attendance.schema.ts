@@ -181,3 +181,11 @@ export const PublishWorkShiftAssignmentsSchema = z.object({
     drafts: z.array(z.object({ id: z.string().cuid(), updatedAt: z.string().datetime() })).max(600),
   }),
 })
+
+/** PUT /venues/:venueId/time-entries/:timeEntryId/salida-olvidada — el gerente corrige una «Salida olvidada · revisar». */
+export const CorregirSalidaOlvidadaSchema = z.object({
+  params: z.object({ venueId: z.string().cuid(), timeEntryId: z.string().cuid() }),
+  body: z.object({
+    clockOutTime: z.string().datetime({ message: 'La hora de salida debe ser una fecha ISO', offset: true }),
+  }),
+})

@@ -13,6 +13,7 @@ import { assertAttendanceEnabled } from '../dashboard/attendanceGate'
 import { assertFotoNoPrivada, decodificarSelfie, guardarSelfieDeEntrada, negocioPideFotoDeEntrada } from '../dashboard/fotoDeEntrada'
 import { deletePrivateFile } from '../privateStorage.service'
 import { conCandadoDeEntrada } from '../tpv/candadoDeEntrada'
+import { cerrarOlvidadasAntesDeChecar, textoSalidaYaOlvidada } from '../shared/salidaOlvidada'
 import { logAction } from '../dashboard/activity-log.service'
 import logger from '../../config/logger'
 import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
@@ -81,6 +82,9 @@ export async function identifyByPin(venueId: string, pin: string) {
 
   // «Foto de Entrada» del negocio: la app pide la selfie antes de marcar Entrada. Campo nuevo y opcional.
   const requireClockInPhoto = await negocioPideFotoDeEntrada(venueId)
+
+  // «Salida olvidada» (hz:f0a89d19:D3): un turno de un día ya terminado no se ofrece como «salida».
+  await cerrarOlvidadasAntesDeChecar(staffVenue.staffId, 'IDENTIFICAR')
 
   // Find active time entry for this staff
   const activeEntry = await prisma.timeEntry.findFirst({
@@ -209,6 +213,9 @@ export async function clockIn(params: ClockInParams) {
 
   const staffId = staffVenue.staffId
 
+  // «Salida olvidada»: un turno de un día ya terminado se cierra y la entrada nueva se crea.
+  await cerrarOlvidadasAntesDeChecar(staffId, 'ENTRADA')
+
   // Un reintento de quien ya tiene entrada no sube otra foto (Codex r4 #1). Es sólo un atajo: lo que manda es la revisión
   // dentro del candado, más abajo.
   if (selfie) {
@@ -324,6 +331,9 @@ export async function clockOut(params: ClockOutParams) {
 
   const staffId = staffVenue.staffId
 
+  // «Salida olvidada»: el turno de un día ya terminado se cierra con su regla, no con la hora de hoy.
+  const olvidadas = await cerrarOlvidadasAntesDeChecar(staffId, 'SALIDA')
+
   // Find active time entry
   const activeEntry = await prisma.timeEntry.findFirst({
     where: {
@@ -339,6 +349,11 @@ export async function clockOut(params: ClockOutParams) {
   })
 
   if (!activeEntry) {
+    const deAqui = olvidadas.find(c => c.venueId === venueId)
+    if (deAqui) {
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      throw new BadRequestError(textoSalidaYaOlvidada(deAqui, venue?.timezone), 'SALIDA_OLVIDADA')
+    }
     throw new BadRequestError('No tienes entrada registrada')
   }
 

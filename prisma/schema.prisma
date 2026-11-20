@@ -1321,6 +1321,11 @@ model VenueSettings {
   autoClockOutTime           String? // "HH:mm" format - e.g., "03:00" for 3 AM
   maxShiftDurationEnabled    Boolean @default(false) // Enable max shift duration enforcement
   maxShiftDurationHours      Int     @default(12) // Max hours before auto clock-out
+  /// «Salida olvidada» (hz:f0a89d19:D3, founder 20-nov: «A», como Toast/Square/Deputy): un turno sin salida se cierra solo al
+  /// terminar su día de negocio (corte de las 04:00 en la zona de la sucursal, nunca antes de 12 h) o al marcar la persona su
+  /// siguiente entrada; queda «Salida olvidada · revisar» con la salida de su horario o en 0 horas. PRENDIDO de fábrica, para
+  /// todos los negocios; el negocio lo apaga en Equipo → Asistencia. Un venue sin fila de ajustes cuenta como prendido.
+  salidaOlvidadaEnabled      Boolean @default(true)
 
   // Reviews
   autoReplyReviews    Boolean  @default(false)
@@ -4353,6 +4358,9 @@ model TimeEntry {
   // Auto clock-out tracking
   autoClockOut     Boolean @default(false) // Was this entry auto-closed by the system?
   autoClockOutNote String? // Reason for auto clock-out (e.g., "Hora de cierre: 03:00")
+  /// La cerró la regla de «salida olvidada»: el gerente la revisa en Asistencia. Se apaga al corregirla o al llegar la salida
+  /// real del MISMO día (celular sin red). Ver `src/services/shared/salidaOlvidada.ts`.
+  salidaOlvidada   Boolean @default(false)
 
   // Manager validation (approve/reject clock-in/out evidence)
   validationStatus TimeEntryValidation @default(PENDING)

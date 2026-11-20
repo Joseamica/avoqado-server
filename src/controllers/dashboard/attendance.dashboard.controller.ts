@@ -4,6 +4,7 @@ import * as attendanceService from '../../services/dashboard/attendance.dashboar
 import * as attendancePayrollService from '../../services/dashboard/attendancePayroll.service'
 import * as overtimeApprovalService from '../../services/dashboard/overtimeApproval.service'
 import * as workScheduleService from '../../services/dashboard/workSchedule.service'
+import * as salidaOlvidadaService from '../../services/shared/salidaOlvidada'
 import type { TimeEntryStatus } from '@prisma/client'
 
 export async function getTimeEntries(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -179,5 +180,21 @@ export const publishWorkShiftAssignments = async (req: Request, res: Response, n
     })
   } catch (e) {
     next(e)
+  }
+}
+
+/** PUT /venues/:venueId/time-entries/:timeEntryId/salida-olvidada — corregir una «Salida olvidada · revisar». */
+export async function corregirSalidaOlvidada(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { userId } = (req as any).authContext
+    const result = await salidaOlvidadaService.corregirSalidaOlvidada({
+      venueId: req.params.venueId,
+      timeEntryId: req.params.timeEntryId,
+      clockOutTime: new Date(req.body.clockOutTime),
+      actorStaffId: userId,
+    })
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
   }
 }

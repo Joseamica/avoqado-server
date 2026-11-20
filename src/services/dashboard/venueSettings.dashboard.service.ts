@@ -52,6 +52,7 @@ export const DEFAULT_VENUE_SETTINGS = {
   autoClockOutTime: null as string | null, // "HH:mm" format - e.g., "03:00" for 3 AM
   maxShiftDurationEnabled: false, // Enable max shift duration enforcement
   maxShiftDurationHours: 12, // Max hours before auto clock-out
+  salidaOlvidadaEnabled: true, // «Salida olvidada»: un turno sin salida se cierra solo al terminar su día (hz:f0a89d19:D3)
 
   // Reviews
   autoReplyReviews: false,
@@ -180,6 +181,8 @@ export async function updateVenueSettings(
     autoClockOutTime: DEFAULT_VENUE_SETTINGS.autoClockOutTime,
     maxShiftDurationEnabled: DEFAULT_VENUE_SETTINGS.maxShiftDurationEnabled,
     maxShiftDurationHours: DEFAULT_VENUE_SETTINGS.maxShiftDurationHours,
+    salidaOlvidadaEnabled:
+      typeof updates.salidaOlvidadaEnabled === 'boolean' ? updates.salidaOlvidadaEnabled : DEFAULT_VENUE_SETTINGS.salidaOlvidadaEnabled,
     autoReplyReviews: DEFAULT_VENUE_SETTINGS.autoReplyReviews,
     notifyBadReviews: DEFAULT_VENUE_SETTINGS.notifyBadReviews,
     badReviewThreshold: DEFAULT_VENUE_SETTINGS.badReviewThreshold,

@@ -8,6 +8,7 @@ import { TimeEntryStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
+import { cerrarSalidasOlvidadasPendientes } from '../services/shared/salidaOlvidada'
 
 /**
  * Auto Clock-Out Job
@@ -85,12 +86,25 @@ export class AutoClockOutJob {
       stats.maxDurationClockOuts = maxDurationResult.count
       stats.errors += maxDurationResult.errors
 
-      const totalClockOuts = stats.fixedTimeClockOuts + stats.maxDurationClockOuts
+      // «Salida olvidada» (hz:f0a89d19:D3): para TODOS los negocios con la regla prendida (de fábrica), después de las dos
+      // perillas del negocio, que cierran antes cuando están prendidas.
+      let forgottenClockOuts = 0
+      try {
+        const olvidadas = await cerrarSalidasOlvidadasPendientes()
+        forgottenClockOuts = olvidadas.cerradas
+        stats.errors += olvidadas.errores
+      } catch (error) {
+        stats.errors++
+        logger.error('Error in salidas olvidadas:', error)
+      }
+
+      const totalClockOuts = stats.fixedTimeClockOuts + stats.maxDurationClockOuts + forgottenClockOuts
 
       if (totalClockOuts > 0) {
         logger.info(`Auto clock-out completed: ${totalClockOuts} entries closed`, {
           fixedTime: stats.fixedTimeClockOuts,
           maxDuration: stats.maxDurationClockOuts,
+          forgotten: forgottenClockOuts,
           errors: stats.errors,
         })
       } else {

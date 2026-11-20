@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import { assertAttendanceEnabled } from '../dashboard/attendanceGate'
 import { assertFotoNoPrivada } from '../dashboard/fotoDeEntrada'
 import { conCandadoDeEntrada } from './candadoDeEntrada'
+import { cerrarOlvidadasAntesDeChecar, textoSalidaYaOlvidada } from '../shared/salidaOlvidada'
 import { TimeEntryStatus } from '@prisma/client'
 import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
 
@@ -109,6 +110,9 @@ export async function identifyByPin(venueId: string, pin: string) {
     throw new UnauthorizedError('PIN inválido')
   }
 
+  // «Salida olvidada»: un turno de un día ya terminado no se ofrece como «Checar salida».
+  await cerrarOlvidadasAntesDeChecar(staffVenue.staffId, 'IDENTIFICAR')
+
   // Find active time entry for this staff
   const activeEntry = await prisma.timeEntry.findFirst({
     where: {
@@ -192,6 +196,9 @@ export async function clockIn(params: ClockInParams) {
     throw new UnauthorizedError('PIN inválido')
   }
 
+  // «Salida olvidada» (hz:f0a89d19:D3): un turno de un día ya terminado se cierra y la entrada nueva se crea.
+  await cerrarOlvidadasAntesDeChecar(staffId, 'ENTRADA')
+
   // Mismo candado que el POS: un solo «¿ya tiene entrada? → crearla» a la vez por persona (Codex r1 #4).
   const timeEntry = await conCandadoDeEntrada(venueId, staffId, async tx => {
     // Check if staff member is already clocked in
@@ -252,6 +259,9 @@ export async function clockOut(params: ClockOutParams) {
     throw new UnauthorizedError('PIN inválido')
   }
 
+  // «Salida olvidada»: el turno de un día ya terminado se cierra con su regla, no con la hora de hoy (los turnos de 267 h).
+  const olvidadas = await cerrarOlvidadasAntesDeChecar(staffId, 'SALIDA')
+
   // Find active time entry
   const timeEntry = await prisma.timeEntry.findFirst({
     where: {
@@ -267,6 +277,11 @@ export async function clockOut(params: ClockOutParams) {
   })
 
   if (!timeEntry) {
+    const deAqui = olvidadas.find(c => c.venueId === venueId)
+    if (deAqui) {
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      throw new BadRequestError(textoSalidaYaOlvidada(deAqui, venue?.timezone), 'SALIDA_OLVIDADA')
+    }
     throw new BadRequestError('El empleado no tiene entrada registrada')
   }
 

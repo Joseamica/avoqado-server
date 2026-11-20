@@ -15,6 +15,7 @@ import type { EntradaDeCampoBody, SalidaDeCampoBody } from '@/schemas/tpv/campo.
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { assertAttendanceEnabled } from '@/services/dashboard/attendanceGate'
 import prisma from '@/utils/prismaClient'
+import { anotarCierres, cerrarSalidasOlvidadasDe, limiteDelTurno, type SalidaOlvidadaCerrada } from '@/services/shared/salidaOlvidada'
 import { resolverHoraDelCelular } from './horaDelCelular'
 
 /** La sucursal de la dirección y la persona del token. */
@@ -54,7 +55,8 @@ const llaveReusada = () => new ConflictError('Esta llave ya se usó en otra chec
 /** POST …/checadas/entrada. */
 export async function registrarEntradaDeCampo(q: Quien, v: EntradaDeCampoBody, ahora = new Date()) {
   const { hora, origen } = horaDe(v, ahora)
-  return prisma.$transaction(async tx => {
+  let cerradas: SalidaOlvidadaCerrada[] = []
+  const resultado = await prisma.$transaction(async tx => {
     await candado(tx, q.staffId)
 
     const misma = await tx.timeEntry.findUnique({
@@ -65,6 +67,10 @@ export async function registrarEntradaDeCampo(q: Quien, v: EntradaDeCampoBody, a
       if (misma.venueId !== q.venueId) throw llaveReusada()
       return { timeEntryId: misma.id, repetida: true, hora: misma.clockInTime.toISOString() }
     }
+
+    // «Salida olvidada» (hz:f0a89d19:D3): un turno de un día ya terminado se cierra aquí, sin esperar al job, y la entrada
+    // nueva se crea. Sólo un turno del MISMO día sigue contestando YA_TIENE_ENTRADA.
+    cerradas = await cerrarSalidasOlvidadasDe(tx, q.staffId, ahora, 'ENTRADA')
 
     // De cualquier escritor (PAX, POS, celular) y en cualquier sucursal: una persona no está en dos lados a la vez.
     const abierta = await tx.timeEntry.findFirst({
@@ -126,6 +132,8 @@ export async function registrarEntradaDeCampo(q: Quien, v: EntradaDeCampoBody, a
     })
     return { timeEntryId: creada.id, repetida: false, hora: hora.toISOString() }
   })
+  anotarCierres(cerradas)
+  return resultado
 }
 
 /** POST …/checadas/salida. */
@@ -135,6 +143,8 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
     throw new BadRequestError('La salida nombra su entrada: manda timeEntryId o llaveEntrada, sólo uno.', 'SALIDA_SIN_ENTRADA')
   }
   const { hora, origen } = horaDe(v, ahora)
+  let cerradas: SalidaOlvidadaCerrada[] = []
+  let noUsada: { cierre: Date; limite: Date } | null = null
   const { resultado, reemplazo } = await prisma.$transaction(async tx => {
     await candado(tx, q.staffId)
 
@@ -154,6 +164,9 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
       return { resultado, reemplazo: null }
     }
 
+    // Un turno de un día ya terminado se cierra como «salida olvidada» antes de decidir (abajo, la regla 3).
+    cerradas = await cerrarSalidasOlvidadasDe(tx, q.staffId, ahora, 'SALIDA')
+
     for (let intento = 0; intento < INTENTOS; intento++) {
       const e = await tx.timeEntry.findFirst({
         where: { staffId: q.staffId, venueId: q.venueId, ...(v.timeEntryId ? { id: v.timeEntryId } : { llaveEntrada: v.llaveEntrada }) },
@@ -166,6 +179,9 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
           validationStatus: true,
           totalHours: true,
           notes: true,
+          checkOutPhotoUrl: true,
+          depositPhotoUrl: true,
+          llaveSalida: true,
           breaks: { select: { id: true, startTime: true, endTime: true } },
         },
       })
@@ -173,6 +189,43 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
       if (hora < e.clockInTime) throw new ValidationError('La salida es antes que la entrada.', 'SALIDA_ANTES_DE_ENTRADA')
       const cierreAutomatico = e.clockOutTime
       if (cierreAutomatico && !e.autoClockOut) throw new ConflictError('Esta entrada ya tiene salida.', 'YA_TIENE_SALIDA')
+
+      // Regla 3 de «salida olvidada»: una salida cuya hora cae DESPUÉS del día de su turno ya no reemplaza un cierre
+      // automático (así nacían los turnos de 267 h). Se anota en la checada para el gerente, con su foto, y no se estira.
+      // La salida tardía legítima del MISMO día (sin red) sí lo reemplaza, como hoy.
+      const zonaDelTurno = cierreAutomatico
+        ? ((await tx.venue.findUnique({ where: { id: q.venueId }, select: { timezone: true } }))?.timezone ?? 'America/Mexico_City')
+        : null
+      const limite = zonaDelTurno ? limiteDelTurno(e.clockInTime, zonaDelTurno) : null
+      if (cierreAutomatico && limite && hora > limite) {
+        // Otra salida tardía ya quedó anotada en este turno: ésta no es la misma (la misma volvió arriba, por su llave).
+        if (e.llaveSalida) throw new ConflictError('Esta entrada ya tiene salida.', 'YA_TIENE_SALIDA')
+        const anotacion = `Salida del celular de las ${enLaZona(hora, zonaDelTurno!)}: llegó después del día del turno y no se usó. Revisa la hora real.`
+        const { count } = await tx.timeEntry.updateMany({
+          where: { id: e.id, clockOutTime: e.clockOutTime, autoClockOut: true, llaveSalida: null },
+          data: {
+            llaveSalida: v.llave,
+            clockOutRecibidaAt: ahora,
+            notes: e.notes ? `${e.notes}\n${anotacion}` : anotacion,
+            // La evidencia no se pierde (el voucher del depósito importa): sólo si el turno aún no tiene la suya.
+            ...(!e.checkOutPhotoUrl && v.checkOutPhotoUrl ? { checkOutPhotoUrl: v.checkOutPhotoUrl } : {}),
+            ...(!e.depositPhotoUrl && v.depositPhotoUrl ? { depositPhotoUrl: v.depositPhotoUrl } : {}),
+            ...(v.skipReason ? { checkoutSkipReason: v.skipReason } : {}),
+          },
+        })
+        if (count === 0) continue
+        noUsada = { cierre: cierreAutomatico, limite }
+        return {
+          resultado: {
+            timeEntryId: e.id,
+            repetida: false,
+            hora: cierreAutomatico.toISOString(),
+            totalHours: Number(e.totalHours),
+            salidaNoUsada: true,
+          },
+          reemplazo: null,
+        }
+      }
       // Una entrada posterior de la persona que empezó antes de esta salida: el turno se encimaría con ella.
       const siguiente = await tx.timeEntry.findFirst({
         where: { staffId: q.staffId, clockInTime: { gt: e.clockInTime, lt: hora } },
@@ -190,8 +243,13 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
       // Un descanso abierto, que termina después de la salida o que terminó el sistema (el job usa la misma hora para el
       // descanso y para el cierre) termina a la hora de la salida. Los que terminó una persona antes no se tocan.
       const descansos = e.breaks.map(b => {
-        const cambia =
-          b.endTime === null || b.endTime > hora || (cierreAutomatico !== null && b.endTime.getTime() === cierreAutomatico.getTime())
+        // «Salida olvidada» en 0 horas: un descanso que empezó DESPUÉS del cierre lo terminó el sistema en su propio inicio.
+        const delSistema =
+          cierreAutomatico !== null &&
+          b.endTime !== null &&
+          (b.endTime.getTime() === cierreAutomatico.getTime() ||
+            (b.endTime.getTime() === b.startTime.getTime() && b.startTime > cierreAutomatico))
+        const cambia = b.endTime === null || b.endTime > hora || delSistema
         return { ...b, cambia, endTime: cambia ? new Date(Math.max(b.startTime.getTime(), hora.getTime())) : b.endTime! }
       })
       const minutosDeDescanso = descansos.reduce((t, b) => t + (b.endTime.getTime() - b.startTime.getTime()) / 60_000, 0)
@@ -199,8 +257,7 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
       const totalHours = Math.min(Math.max(0, Number((minutos / 60).toFixed(2))), MAX_HORAS)
       let nota: string | null = null
       if (cierreAutomatico) {
-        const venue = await tx.venue.findUnique({ where: { id: q.venueId }, select: { timezone: true } })
-        nota = `Salida real del celular; reemplazó el cierre automático de ${enLaZona(cierreAutomatico, venue?.timezone ?? 'America/Mexico_City')}`
+        nota = `Salida real del celular; reemplazó el cierre automático de ${enLaZona(cierreAutomatico, zonaDelTurno ?? 'America/Mexico_City')}`
       }
 
       const { count } = await tx.timeEntry.updateMany({
@@ -228,7 +285,7 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
           checkOutPhotoUrl: v.checkOutPhotoUrl,
           depositPhotoUrl: v.depositPhotoUrl, // como la salida de la PAX (O2)
           checkoutSkipReason: v.skipReason,
-          ...(nota && { autoClockOut: false, notes: e.notes ? `${e.notes}\n${nota}` : nota }),
+          ...(nota && { autoClockOut: false, salidaOlvidada: false, notes: e.notes ? `${e.notes}\n${nota}` : nota }),
         },
       })
       if (count === 0) continue // otro escritor la cambió entre la lectura y la escritura: se relee y se decide otra vez
@@ -259,6 +316,23 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
     throw new ConflictError('La entrada cambió mientras se guardaba la salida. Reintenta.', 'CHECADA_EN_PROCESO')
   })
 
+  anotarCierres(cerradas)
+  if (noUsada) {
+    await logAction({
+      staffId: q.staffId,
+      venueId: q.venueId,
+      action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
+      entity: 'TimeEntry',
+      entityId: resultado.timeEntryId,
+      data: {
+        cierreAutomatico: noUsada.cierre.toISOString(),
+        limiteDelTurno: noUsada.limite.toISOString(),
+        salidaDelCelular: hora.toISOString(),
+        origenHora: origen,
+        llaveSalida: v.llave,
+      },
+    })
+  }
   if (reemplazo) {
     await logAction({
       staffId: q.staffId,

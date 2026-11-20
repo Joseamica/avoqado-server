@@ -155,6 +155,7 @@ import {
   VenueTimeEntriesQuerySchema,
   AttendanceReportSchema,
   ApproveOvertimeSchema,
+  CorregirSalidaOlvidadaSchema,
   PayrollSummarySchema,
   WorkScheduleParamsSchema,
   ReplaceWorkScheduleSchema,
@@ -8605,6 +8606,16 @@ router.put(
   checkPermission('attendance:manage'),
   validateRequest(ApproveOvertimeSchema),
   attendanceController.approveOvertime,
+)
+
+// «Salida olvidada · revisar» (hz:f0a89d19:D3): el gerente pone la salida real de un turno que el sistema cerró solo.
+// `attendance:manage` (nunca lo tienen los roles de piso); nadie corrige la suya (lo revisa el servicio).
+router.put(
+  '/venues/:venueId/time-entries/:timeEntryId/salida-olvidada',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:manage'),
+  validateRequest(CorregirSalidaOlvidadaSchema),
+  attendanceController.corregirSalidaOlvidada,
 )
 
 router.get(
