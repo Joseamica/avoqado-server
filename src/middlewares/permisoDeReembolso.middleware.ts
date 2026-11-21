@@ -28,8 +28,8 @@ import { checkPermission } from './checkPermission.middleware'
  *
  * Sin el permiso no se bloquea: es el 403 de siempre, que el POS convierte en el código del encargado.
  *
- *  · D5 (Codex servidor r3 #12, r6 caso 7): lo que esta entrada no admite (lo pagado con crédito de Cambio en la terminal, o con
- *    «Efectivo» o transferencia escogidos) pasa SÓLO por la autorización básica (`payments:refund`: sucursal y devolución) y se
+ *  · D5 (Codex servidor r3 #12, r6 caso 7) y F10 (r4): lo que esta entrada no admite (lo pagado con crédito de Cambio en la terminal,
+ *    o con «Efectivo» o transferencia escogidos; lo pagado con saldo con cualquier medio escogido) pasa SÓLO por la autorización básica (`payments:refund`: sucursal y devolución) y se
  *    contesta 400 `NO_ADMITIDO_EN_ESTA_ENTRADA` con `details.dondeIr`. Nunca se pide antes el permiso especial ni el PIN del encargado
  *    para acabar en el mismo rechazo del escritor. Sigue siendo UNA sola revisión.
  */
@@ -45,16 +45,16 @@ export function permisoDeReembolsoSegunElCobro(opciones: { paymentIdDe: (req: Re
   return Object.assign(
     async (req: Request, res: Response, next: NextFunction) => {
       // Si la lectura falla se exige el permiso más alto: nunca se concede acceso por un fallo.
-      const { origen, esCreditoDeCambio } = await origenDelDinero(prisma, req.params?.venueId, opciones.paymentIdDe(req)).catch(() => ({
-        origen: 'MAQUINA' as const,
-        esCreditoDeCambio: false,
-      }))
+      const { origen, esCreditoDeCambio, esSaldo } = await origenDelDinero(prisma, req.params?.venueId, opciones.paymentIdDe(req)).catch(
+        () => ({ origen: 'MAQUINA' as const, esCreditoDeCambio: false, esSaldo: undefined }),
+      )
       const metodo = (req.body as { refundMethod?: unknown } | undefined)?.refundMethod
       const decision = decidirDestinoDelReembolso({
         entrada: opciones.entrada,
         origen,
         medio: medioQueLlegaAlEscritor(opciones.entrada, metodo),
         esCreditoDeCambio,
+        esSaldo,
       })
       if (!decision.admitido) {
         return revisarReembolso(req, res, (error?: unknown) => next(error ?? errorDeNoAdmitido(decision)))

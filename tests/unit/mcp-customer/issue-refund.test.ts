@@ -161,7 +161,7 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
     expect(mockIssue).not.toHaveBeenCalled()
   })
 
-  it('🔴 tarjeta de regalo: con refundMethod se rechaza con GIFT_CARD_REFUND_TO_BALANCE_ONLY; sin él, la vista previa dice que regresa al saldo', async () => {
+  it('🔴 tarjeta de regalo: con refundMethod se rechaza con NO_ADMITIDO (F10, antes de pedir permiso); sin él, la vista previa dice que regresa al saldo', async () => {
     const conSaldo = {
       ...completedPayment,
       method: 'OTHER',
@@ -173,14 +173,16 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
       source: 'POS',
       tenderType: { systemKind: 'GIFT_CARD' },
     }
-    mockPaymentFindFirst.mockResolvedValueOnce(conSaldo)
-    const rechazo = parse(await call({ ...base, refundMethod: 'CASH', confirm: true }))
-    expect(rechazo).toMatchObject({ ok: false, code: 'GIFT_CARD_REFUND_TO_BALANCE_ONLY' })
+    // La vista previa y el origen del dinero leen el mismo cobro.
+    mockPaymentFindFirst.mockResolvedValueOnce(conSaldo).mockResolvedValueOnce(conSaldo)
+    // F10: 'sin-efectivo' sólo tiene payments:refund; antes el MCP le pedía refund-to-cash para acabar en el mismo rechazo.
+    const rechazo = parse(await call({ ...base, venueId: 'sin-efectivo', refundMethod: 'CASH', confirm: true }))
+    expect(rechazo).toMatchObject({ ok: false, code: 'NO_ADMITIDO_EN_ESTA_ENTRADA', dondeIr: ['MISMO_MEDIO'] })
     // S8b: el medio de tarjetas también lo usa el gasto de un saldo a favor; el texto nombra los dos (regresa a ESE saldo).
     expect(rechazo.error).toMatch(/saldo a favor/)
     expect(mockIssue).not.toHaveBeenCalled()
 
-    mockPaymentFindFirst.mockResolvedValueOnce(conSaldo)
+    mockPaymentFindFirst.mockResolvedValueOnce(conSaldo).mockResolvedValueOnce(conSaldo)
     const vista = parse(await call(base))
     expect(vista.requiresConfirmation).toBe(true)
     expect(vista.preview.regresaAlSaldoDeRegalo).toBe(true)

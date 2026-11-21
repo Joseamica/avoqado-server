@@ -630,12 +630,14 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       // Cambio, r2 #2— saca billetes de la caja en la que nunca entraron: también.
       // D5 (r6 caso 7): el permiso especial se pide DESPUÉS de la matriz y sólo si la operación se admite; lo que no se admite (lo pagado
       // con crédito de Cambio con «Efectivo» o transferencia) se contesta con a dónde ir, sin pedir un permiso que no serviría.
-      const { origen, esCreditoDeCambio } = await origenDelDinero(prisma, venueId, paymentId)
+      // F10 (r4): lo pagado con saldo (tarjeta de regalo o saldo a favor) con un medio escogido tampoco pide ese permiso: no se admite.
+      const { origen, esCreditoDeCambio, esSaldo } = await origenDelDinero(prisma, venueId, paymentId)
       const destino = decidirDestinoDelReembolso({
         entrada: 'MCP',
         origen,
         medio: medioQueLlegaAlEscritor('MCP', refundMethod),
         esCreditoDeCambio,
+        esSaldo,
       })
       if (!destino.admitido) return text({ ok: false, code: destino.codigo, error: destino.mensaje, dondeIr: destino.dondeIr })
       guard.requirePermission(destino.permisoRequerido, venueId)
@@ -656,16 +658,8 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         })
       }
       const cobroParaDevolver = { ...payment, tenderSystemKind: payment.tenderType?.systemKind ?? null }
+      // Tarjetas de regalo (spec §5.5): lo pagado con saldo sólo regresa al saldo; con refundMethod ya lo contestó la matriz (F10).
       const esSaldoDeRegalo = isGiftCardTenderKind(cobroParaDevolver.tenderSystemKind)
-      // Tarjetas de regalo (spec §5.5): lo pagado con saldo sólo regresa al saldo. El servicio lo rechaza igual; aquí se dice antes.
-      if (esSaldoDeRegalo && refundMethod) {
-        return text({
-          ok: false,
-          code: 'GIFT_CARD_REFUND_TO_BALANCE_ONLY',
-          error:
-            'Lo pagado con saldo (tarjeta de regalo o saldo a favor) sólo regresa a ese mismo saldo; quita refundMethod para devolverlo ahí.',
-        })
-      }
       // Escoger con qué se devuelve sólo aplica a lo que no fue tarjeta ni liquida un procesador (misma regla del servicio).
       if (
         refundMethod &&

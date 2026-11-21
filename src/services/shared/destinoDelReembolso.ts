@@ -16,12 +16,21 @@
  * mismo 400 del escritor). Lo pagado con el crédito de un Cambio no se devuelve en la terminal, ni con «Efectivo» o transferencia
  * escogidos: sale por el medio de su origen o a saldo a favor.
  *
+ * F10 (Codex servidor r4): lo pagado con SALDO (tarjeta de regalo o saldo a favor) sólo regresa a ese mismo saldo —así lo escribe el
+ * escritor—, así que escoger cualquier medio es «no admitido» ANTES de pedir permiso (antes la cajera recibía el 403 de
+ * `refund-to-cash` para acabar en el rechazo del escritor). Y el MCP sólo recibe efectivo o transferencia: otro medio no se admite ahí.
+ *
  * La matriz completa (origen × crédito de Cambio × entrada × medio) está en `tests/__helpers__/matrizDelReembolso.ts`.
  */
 import type { Prisma } from '@prisma/client'
 
 import { BadRequestError } from '../../errors/AppError'
 import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
+import { isGiftCardTenderKind } from '../giftCards/giftCardPredicados'
+
+/** El tender de sistema de un SALDO: la tarjeta de regalo o el saldo a favor (lo que el escritor sólo devuelve a ese saldo). */
+export const esTenderDeSaldo = (systemKind: string | null | undefined): boolean =>
+  isGiftCardTenderKind(systemKind) || systemKind === 'STORE_CREDIT'
 
 /**
  * De dónde viene el dinero que se devuelve:
@@ -67,7 +76,16 @@ export function decidirDestinoDelReembolso(p: {
   origen: OrigenDelDinero
   medio: unknown
   esCreditoDeCambio: boolean
+  /** Lo pagó un saldo (el tender de sistema de tarjeta de regalo o de saldo a favor): sólo regresa a ese saldo. */
+  esSaldo?: boolean
 }): DecisionDelReembolso {
+  if (p.esSaldo && p.medio != null)
+    return noAdmitido('Lo pagado con saldo (tarjeta de regalo o saldo a favor) sólo regresa a ese mismo saldo.', ['MISMO_MEDIO'])
+  if (p.entrada === 'MCP' && p.medio != null && p.medio !== 'CASH' && p.medio !== 'BANK_TRANSFER')
+    return noAdmitido(
+      'Por el MCP sólo se devuelve por el mismo medio, en efectivo o por transferencia; el saldo a favor se da desde el POS.',
+      ['POS'],
+    )
   // El crédito no acredita un reembolso del SDK: sólo el POS o el panel resuelven el origen de la cadena.
   if (p.esCreditoDeCambio && p.entrada === 'TPV')
     return noAdmitido('Lo pagado con crédito de cambio se devuelve desde el POS o el panel, por el medio de su origen.', ['POS', 'PANEL'])
@@ -107,7 +125,7 @@ export async function origenDelDinero(
   db: Pick<Prisma.TransactionClient, 'payment' | 'exchangeCreditLink'>,
   venueId: string | undefined,
   paymentId: unknown,
-): Promise<{ origen: OrigenDelDinero; esCreditoDeCambio: boolean }> {
+): Promise<{ origen: OrigenDelDinero; esCreditoDeCambio: boolean; esSaldo?: true }> {
   const ordinario = { origen: 'ORDINARIO' as const, esCreditoDeCambio: false }
   if (!venueId || typeof paymentId !== 'string' || !paymentId) return ordinario
   const cobro = await db.payment.findFirst({
@@ -116,6 +134,7 @@ export async function origenDelDinero(
   })
   if (!cobro) return ordinario
   if (cobro.cashMachineRef) return { origen: 'MAQUINA', esCreditoDeCambio: false }
+  if (esTenderDeSaldo(cobro.tenderType?.systemKind)) return { ...ordinario, esSaldo: true }
   if (!isExchangeCreditTenderKind(cobro.tenderType?.systemKind)) return ordinario
   const vinculo = await db.exchangeCreditLink.findFirst({
     where: { venueId, creditPaymentId: paymentId },

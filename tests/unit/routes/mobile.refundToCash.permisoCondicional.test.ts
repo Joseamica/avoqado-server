@@ -395,6 +395,24 @@ describe('🔴 D5 (r3 #12, r6 caso 7): la ruta dice lo que dice la matriz, y lo 
   })
 })
 
+describe('🔴 F10 (Codex servidor r4): lo pagado con saldo no pide refund-to-cash para un medio que el escritor no admite', () => {
+  it.each(['GIFT_CARD', 'STORE_CREDIT'])(
+    'una cajera con payments:refund pide «Efectivo» sobre un cobro con saldo (%s) ⇒ 400 NO_ADMITIDO con a dónde ir, nunca el 403 del gerente',
+    async kind => {
+      mockPaymentFindFirst.mockResolvedValue({ cashMachineRef: null, tenderType: { systemKind: kind } })
+      const out = await correr(StaffRole.CASHIER, { amount: 5000, refundMethod: 'CASH' })
+      expect(out.status).toBeUndefined()
+      expect(out.error).toMatchObject({ statusCode: 400, code: 'NO_ADMITIDO_EN_ESTA_ENTRADA', details: { dondeIr: ['MISMO_MEDIO'] } })
+      expect(mockConsumeOverride).not.toHaveBeenCalled()
+    },
+  )
+
+  it('sin medio (al mismo saldo) pasa con payments:refund', async () => {
+    mockPaymentFindFirst.mockResolvedValue({ cashMachineRef: null, tenderType: { systemKind: 'GIFT_CARD' } })
+    expect(await correr(StaffRole.CASHIER, { amount: 5000 })).toEqual({ next: true })
+  })
+})
+
 describe('🔴 r3 #4: un reembolso guardado ANTES de esta rama recupera su acuse con la misma llave', () => {
   it('reembolso ordinario (sin máquina), respuesta perdida, reintento por la ruta del POS ⇒ el acuse original, no 409', async () => {
     mockPaymentFindFirst.mockResolvedValue({ cashMachineRef: null })

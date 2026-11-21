@@ -15,7 +15,7 @@ import {
   medioQueLlegaAlEscritor,
   origenDelDinero,
 } from '@/services/shared/destinoDelReembolso'
-import { MATRIZ_DEL_REEMBOLSO, MENSAJE_MISMO_MEDIO, medioDelCuerpo } from '../../../__helpers__/matrizDelReembolso'
+import { MATRIZ_DEL_REEMBOLSO, MATRIZ_DEL_SALDO, MENSAJE_MISMO_MEDIO, medioDelCuerpo } from '../../../__helpers__/matrizDelReembolso'
 
 describe('decidirDestinoDelReembolso · la matriz completa (familia B + D5)', () => {
   it('cubre TODAS las combinaciones, una vez cada una (3 orígenes × 2 × 4 entradas × 5 medios = 120)', () => {
@@ -33,6 +33,27 @@ describe('decidirDestinoDelReembolso · la matriz completa (familia B + D5)', ()
         esCreditoDeCambio,
       }),
     ).toEqual(esperado)
+  })
+
+  it.each(MATRIZ_DEL_SALDO)('🔴 F10 · pagado con saldo · %s · medio %s', (entrada, declarado, esperado) => {
+    expect(
+      decidirDestinoDelReembolso({
+        entrada,
+        origen: 'ORDINARIO',
+        medio: medioQueLlegaAlEscritor(entrada, medioDelCuerpo(declarado)),
+        esCreditoDeCambio: false,
+        esSaldo: true,
+      }),
+    ).toEqual(esperado)
+  })
+
+  it('F10: un medio nulo es «el mismo medio», también con saldo', () => {
+    expect(
+      decidirDestinoDelReembolso({ entrada: 'POS', origen: 'ORDINARIO', medio: null, esCreditoDeCambio: false, esSaldo: true }),
+    ).toMatchObject({
+      admitido: true,
+      destinoEfectivo: 'MISMO_MEDIO',
+    })
   })
 
   it('🔴 la regla: TODA salida de la gaveta pide payments:refund-to-cash', () => {
@@ -97,6 +118,15 @@ describe('origenDelDinero · de dónde viene el dinero y si lo pagó un crédito
       esCreditoDeCambio: false,
     })
   })
+
+  it.each(['GIFT_CARD', 'STORE_CREDIT'])(
+    '🔴 F10: lo pagado con saldo (%s) lo dice, para no pedir permiso por un medio que no se admite',
+    async kind => {
+      await expect(
+        origenDelDinero(db({ p: { cashMachineRef: null, tenderType: { systemKind: kind } } }) as any, 'v1', 'p'),
+      ).resolves.toEqual({ origen: 'ORDINARIO', esCreditoDeCambio: false, esSaldo: true })
+    },
+  )
 
   it('sin cobro (o sin sucursal): ordinario y sin crédito; el servicio contesta 404', async () => {
     await expect(origenDelDinero(db({}) as any, 'v1', 'nadie')).resolves.toEqual({ origen: 'ORDINARIO', esCreditoDeCambio: false })
