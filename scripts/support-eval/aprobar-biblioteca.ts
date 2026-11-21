@@ -89,6 +89,12 @@ export function buildManifest(previous: unknown, sources: LibrarySource[]): Mani
 }
 
 const sortedById = <T>(record: Record<string, T>) => Object.fromEntries(Object.entries(record).sort(([a], [b]) => (a < b ? -1 : 1)))
+/** Las firmas como se escriben: ordenadas, y `exits` sólo si hay alguna (regenerar no cambia el archivo por nada). */
+const pack = (guides: Record<string, GuideApproval>, exits: Record<string, GuideExit>): LibrarySignatures => ({
+  version: 1,
+  guides: sortedById(guides),
+  ...(Object.keys(exits).length ? { exits: sortedById(exits) } : {}),
+})
 
 /**
  * Importa una firma vieja (todo el conjunto) que sigue valiendo, sólo agregando: cada guía del conjunto queda firmada con su
@@ -113,7 +119,7 @@ export function importLegacySignature(
     guides[id] = { ...approval, approvedHash: approvalHash(id, approval) }
     imported.push(id)
   }
-  return { signatures: { version: 1, guides: sortedById(guides), exits: sortedById(exits) }, imported: imported.sort() }
+  return { signatures: pack(guides, exits), imported: imported.sort() }
 }
 
 /** Lo que espera la firma: las guías de la propuesta sin firma válida o distintas de lo firmado, y las firmadas que ya no están. */
@@ -182,7 +188,7 @@ export function signGuides(
     throw new Error(
       `Firmar así deja guías con el mismo título y el bot se quedaría sin ninguna: ${repeated.map(ids => ids.join(' = ')).join('; ')}. Firma también la salida de la que se va.`,
     )
-  return { signatures: { version: 1, guides: sortedById(guides), exits: sortedById(exits) }, signed, left }
+  return { signatures: pack(guides, exits), signed, left }
 }
 
 /** Escribe el archivo de golpe: primero a un temporal y luego `rename`. Un corte a la mitad deja el anterior intacto. */

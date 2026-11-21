@@ -803,7 +803,7 @@ describe('internal manual pages (decision 6)', () => {
         signOn('2026-11-20T12:00:00Z')
         const result = importLegacySignature(stale, readSignatures())!
         expect(result.imported).toEqual([])
-        expect(result.signatures).toEqual({ ...readSignatures(), exits: {} })
+        expect(result.signatures).toEqual(readSignatures())
       })
 
       it('it never removes a signature, and never revives a guide whose exit was signed', () => {
@@ -832,7 +832,8 @@ describe('internal manual pages (decision 6)', () => {
         expect(revived.signatures.guides).not.toHaveProperty([RETIRED])
         // Si vuelve y el founder la firma por guía, su salida anotada se borra.
         const back = signGuides(regenerate({ ...readProposal(), retired: {} }), readSignatures(), sourcesNow(), 'Fundador', [RETIRED])
-        expect(back.signatures.exits).not.toHaveProperty([RETIRED])
+        expect(back.signatures.exits ?? {}).not.toHaveProperty([RETIRED])
+        expect(back.signatures.guides).toHaveProperty([RETIRED])
       })
     })
 
