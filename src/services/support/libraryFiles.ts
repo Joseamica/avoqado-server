@@ -272,9 +272,16 @@ export interface GuideApproval {
   approvedAt: string
   approvedHash: string
 }
+/** La salida firmada de una guía (retirada o quitada): sólo la consulta el generador, para no revivirla al importar. */
+export interface GuideExit {
+  approvedBy: string
+  approvedAt: string
+  approvedHash: string
+}
 export interface LibrarySignatures {
   version: 1
   guides: Record<string, GuideApproval>
+  exits?: Record<string, GuideExit>
 }
 export const SUPPORT_LIBRARY_SIGNATURES = path.join(SUPPORT_HELP_DIRECTORY, 'library-signatures.json')
 /** Las firmas van junto a su propuesta. */
@@ -284,6 +291,12 @@ export const approvalHash = (id: string, a: Pick<GuideApproval, 'entry' | 'appro
   crypto
     .createHash('sha256')
     .update(JSON.stringify(canonical({ approvedAt: a.approvedAt, approvedBy: a.approvedBy, entry: a.entry, id })))
+    .digest('hex')
+/** El sello de una salida firmada. */
+export const exitHash = (id: string, a: Pick<GuideExit, 'approvedBy' | 'approvedAt'>): string =>
+  crypto
+    .createHash('sha256')
+    .update(JSON.stringify(canonical({ approvedAt: a.approvedAt, approvedBy: a.approvedBy, exit: true, id })))
     .digest('hex')
 export const sameEntry = (a: unknown, b: unknown) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b))
 /** Una firma vale si trae sus cuatro partes y su sello coincide (nadie la retocó a mano ni la movió de guía). */
@@ -317,7 +330,11 @@ export const legacySignatureValid = (m: {
   m.approvedHash ===
     manifestApprovalHash({ approvedBy: m.approvedBy, approvedAt: m.approvedAt, retired: m.retired ?? {}, guides: m.guides })
 
-const signaturesSchema = z.object({ version: z.literal(1), guides: z.record(z.string(), z.unknown()) })
+const signaturesSchema = z.object({
+  version: z.literal(1),
+  guides: z.record(z.string(), z.unknown()),
+  exits: z.record(z.string(), z.unknown()).optional(),
+})
 /** Lee library-signatures.json igual para el cargador y el generador; truena si no tiene la forma esperada. */
 export const parseSignatures = (text: string): LibrarySignatures => signaturesSchema.parse(JSON.parse(text)) as LibrarySignatures
 

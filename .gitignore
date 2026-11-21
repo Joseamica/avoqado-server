@@ -48,3 +48,7 @@ graphify-out/
 *.tsbuildinfo
 .gbrain-source
 .context/codex-session-id
+
+# D22: candado y temporales del generador de la biblioteca del soporte (nunca se commitean)
+src/assets/mcp-support-help/library-signatures.json.lock
+src/assets/mcp-support-help/*.tmp-*

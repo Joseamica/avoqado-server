@@ -6,12 +6,7 @@ import os from 'os'
 import path from 'path'
 import { loadSupportLibrary, matchesVersionRange, type HelpApp, type LibraryGuide } from '@/services/support/knowledge.service'
 import { normalizeAppVersion } from '@/services/support/deviceContext.service'
-import {
-  legacySignatureValid,
-  readLibrarySources,
-  SUPPORT_LIBRARY_MANIFEST,
-  SUPPORT_LIBRARY_SIGNATURES,
-} from '@/services/support/libraryFiles'
+import { readLibrarySources, SUPPORT_LIBRARY_MANIFEST, SUPPORT_LIBRARY_SIGNATURES } from '@/services/support/libraryFiles'
 import { buildManifest, pendingChanges, signGuides, UNTESTED_LABELS } from '../../../../scripts/support-eval/aprobar-biblioteca'
 import {
   inventorySchema,
@@ -233,7 +228,7 @@ describe('manual inventory (scripts/support-eval/manual)', () => {
     })
   })
 
-  it('the signed load goes guide by guide (D22): it serves the allowDraft ids not pending of signature, plus signed ones leaving the list whose file is unchanged (a valid old signature decides as before)', () => {
+  it('the signed load goes guide by guide (D22): it serves the allowDraft ids not pending of signature, plus signed ones leaving the list whose file is unchanged', () => {
     const manifest = JSON.parse(fs.readFileSync(SUPPORT_LIBRARY_MANIFEST, 'utf8'))
     const signatures = JSON.parse(fs.readFileSync(SUPPORT_LIBRARY_SIGNATURES, 'utf8'))
     const ids = (guides: LibraryGuide[]) => [...new Set(guides.map(g => g.id))].sort()
@@ -241,10 +236,9 @@ describe('manual inventory (scripts/support-eval/manual)', () => {
     // Una que sale de la lista se sirve como se firmó sólo si su archivo sigue siendo el firmado.
     const sha = new Map(readLibrarySources().map(s => [s.id, crypto.createHash('sha256').update(s.raw).digest('hex')]))
     const stillSigned = leaving.filter(id => sha.get(id) === signatures.guides[id].entry.sha256)
-    const expected = legacySignatureValid(manifest)
-      ? ids(loadSupportLibrary({ allowDraft: true })) // una firma del formato de antes que sigue valiendo decide, como antes
-      : [...ids(loadSupportLibrary({ allowDraft: true })).filter(id => !changed.includes(id)), ...stillSigned].sort()
-    expect(ids(loadSupportLibrary())).toEqual(expected)
+    expect(ids(loadSupportLibrary())).toEqual(
+      [...ids(loadSupportLibrary({ allowDraft: true })).filter(id => !changed.includes(id)), ...stillSigned].sort(),
+    )
   })
 
   it('on a sample library: [] with an unsigned old-format list, exactly the allowDraft ids once signed guide by guide', () => {
