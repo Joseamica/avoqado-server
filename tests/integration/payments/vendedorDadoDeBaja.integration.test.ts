@@ -81,6 +81,14 @@ const cobro = (orderId: string, extra: Record<string, unknown>) =>
   } as any)
 
 const notas = () => prisma.activityLog.findMany({ where: { venueId: m.venueId, action: 'VENDEDOR_DADO_DE_BAJA' }, take: 20 })
+/** Las notas como [entidad, id, caso, dijo, quedó, orden, pago], ordenadas: una aserción EXACTA, no «alguna que traiga…» (Codex r1 #8). */
+const notasExactas = async () =>
+  (await notas())
+    .map(x => {
+      const d = x.data as any
+      return [x.entity, x.entityId, x.staffId, d.caso, d.elAparatoDijo, d.quedoANombreDe, d.orderId, d.paymentId ?? null]
+    })
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
 const pagoDe = (id: string) => prisma.payment.findUniqueOrThrow({ where: { id }, select: { processedById: true, orderId: true } })
 const cuentaDe = (id: string) => prisma.order.findUniqueOrThrow({ where: { id }, select: { servedById: true, createdById: true } })
 
@@ -93,12 +101,10 @@ describe('D13 · caso 1: la venta nace de la cola sin red con una vendedora ya d
     const r = await cobro(orden.id, { isOfflineReplay: true })
     expect((await pagoDe(r.paymentId)).processedById).toBe(cajera)
 
-    const n = await notas()
-    expect(n).toHaveLength(2)
-    expect(n.every(x => x.staffId === cajera)).toBe(true)
-    expect(n.map(x => (x.data as any).caso).sort()).toEqual(['COLA_A_LA_SESION', 'COLA_A_LA_SESION'])
-    expect(n.every(x => (x.data as any).elAparatoDijo === vendedora && (x.data as any).quedoANombreDe === cajera)).toBe(true)
-    expect(n.find(x => (x.data as any).paymentId)?.data).toMatchObject({ orderId: orden.id, paymentId: r.paymentId })
+    expect(await notasExactas()).toEqual([
+      ['Order', orden.id, cajera, 'COLA_A_LA_SESION', vendedora, cajera, orden.id, null],
+      ['Payment', r.paymentId, cajera, 'COLA_A_LA_SESION', vendedora, cajera, orden.id, r.paymentId],
+    ])
   })
 
   it('🔴 (e) la venta rápida sin productos (`/fast`) de la cola queda a nombre de la cajera, con su nota', async () => {
@@ -122,7 +128,7 @@ describe('D13 · caso 1: la venta nace de la cola sin red con una vendedora ya d
     const pago = await pagoDe(r.id)
     expect(pago.processedById).toBe(cajera)
     expect(await cuentaDe(pago.orderId!)).toEqual({ servedById: cajera, createdById: cajera })
-    expect((await notas()).map(x => [(x.data as any).caso, (x.data as any).paymentId])).toEqual([['COLA_A_LA_SESION', r.id]])
+    expect(await notasExactas()).toEqual([['Payment', r.id, cajera, 'COLA_A_LA_SESION', vendedora, cajera, pago.orderId, r.id]])
   })
 
   it('🔴 (d) el reintento de la cuenta y del cobro devuelve lo mismo: una cuenta, un cobro y una nota de cada uno', async () => {
@@ -138,7 +144,25 @@ describe('D13 · caso 1: la venta nace de la cola sin red con una vendedora ya d
     expect(p2.paymentId).toBe(p1.paymentId)
     expect(await prisma.payment.count({ where: { venueId: m.venueId, orderId: a.id } })).toBe(1)
     expect(await prisma.order.count({ where: { venueId: m.venueId, externalId } })).toBe(1)
-    expect(await notas()).toHaveLength(2)
+    expect(await notasExactas()).toEqual([
+      ['Order', a.id, cajera, 'COLA_A_LA_SESION', vendedora, cajera, a.id, null],
+      ['Payment', p1.paymentId, cajera, 'COLA_A_LA_SESION', vendedora, cajera, a.id, p1.paymentId],
+    ])
+  })
+
+  it('🔴 (d) dos envíos A LA VEZ del mismo cobro de la cola: un solo cobro y una sola nota', async () => {
+    await darDeBaja(vendedora)
+    const orden = await venta({ isOfflineReplay: true })
+    const idempotencyKey = randomUUID()
+    const [p1, p2] = await Promise.all([
+      cobro(orden.id, { isOfflineReplay: true, idempotencyKey }),
+      cobro(orden.id, { isOfflineReplay: true, idempotencyKey }),
+    ])
+    expect(p2.paymentId).toBe(p1.paymentId)
+    expect(await prisma.payment.count({ where: { venueId: m.venueId, orderId: orden.id } })).toBe(1)
+    expect((await notasExactas()).filter(n => n[0] === 'Payment')).toEqual([
+      ['Payment', p1.paymentId, cajera, 'COLA_A_LA_SESION', vendedora, cajera, orden.id, p1.paymentId],
+    ])
   })
 
   it('un id que no es de este negocio sigue con el 400 de hoy, aunque venga de la cola', async () => {
@@ -161,15 +185,26 @@ describe('D13 · caso 2: la cuenta ya estaba guardada a nombre de la vendedora',
 
     const r = await cobro(orden.id, {})
     expect((await pagoDe(r.paymentId)).processedById).toBe(vendedora)
-    const n = await notas()
-    expect(n).toHaveLength(1)
-    expect(n[0]).toMatchObject({ staffId: cajera })
-    expect(n[0].data).toMatchObject({
-      caso: 'ORDEN_DEL_VENDEDOR',
-      elAparatoDijo: vendedora,
-      quedoANombreDe: vendedora,
-      paymentId: r.paymentId,
-    })
+    expect(await notasExactas()).toEqual([
+      ['Payment', r.paymentId, cajera, 'ORDEN_DEL_VENDEDOR', vendedora, vendedora, orden.id, r.paymentId],
+    ])
+  })
+
+  it('🔴 también si la ELIMINARON del equipo (sin membresía): la cuenta guardada basta (Codex r1 #4)', async () => {
+    const orden = await venta({})
+    await prisma.staffVenue.deleteMany({ where: { staffId: vendedora, venueId: m.venueId } })
+    const r = await cobro(orden.id, {})
+    expect((await pagoDe(r.paymentId)).processedById).toBe(vendedora)
+    expect((await notasExactas()).map(n => n[3])).toEqual(['ORDEN_DEL_VENDEDOR'])
+  })
+
+  it('«Cuentas abiertas» manda a la cajera (no a la vendedora): el cobro es de la cajera y sin nota, como hoy (Codex r1 #1)', async () => {
+    const orden = await venta({})
+    await darDeBaja(vendedora)
+    const r = await cobro(orden.id, { staffId: cajera })
+    expect((await pagoDe(r.paymentId)).processedById).toBe(cajera)
+    expect(await cuentaDe(orden.id)).toEqual({ servedById: vendedora, createdById: vendedora })
+    expect(await notas()).toHaveLength(0)
   })
 
   it('🔴 la cuenta abierta con red y cobrada desde la cola también queda de la vendedora (la cuenta manda)', async () => {
@@ -177,7 +212,9 @@ describe('D13 · caso 2: la cuenta ya estaba guardada a nombre de la vendedora',
     await darDeBaja(vendedora)
     const r = await cobro(orden.id, { isOfflineReplay: true })
     expect((await pagoDe(r.paymentId)).processedById).toBe(vendedora)
-    expect((await notas()).map(x => (x.data as any).caso)).toEqual(['ORDEN_DEL_VENDEDOR'])
+    expect(await notasExactas()).toEqual([
+      ['Payment', r.paymentId, cajera, 'ORDEN_DEL_VENDEDOR', vendedora, vendedora, orden.id, r.paymentId],
+    ])
   })
 })
 

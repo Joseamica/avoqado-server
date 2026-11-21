@@ -2666,8 +2666,8 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     venueId,
     order.id,
     input.stampRewardId,
-    // D13: con el vendedor de baja, el canje va a nombre de quien quedó la venta (la sesión).
-    prep.vendedorDeBaja ? prep.validatedStaffId : input.staffId,
+    // D13: el canje va a nombre de quien quedó la cuenta (con un vendedor de baja de la cola, la sesión).
+    order.servedById ?? input.staffId,
     input.stampRewardExpectedDiscount,
   )
 
@@ -2732,7 +2732,8 @@ async function responderConOrdenExistente(
       venueId,
       orden.id,
       input.stampRewardId,
-      input.staffId,
+      // D13 (Codex r1 #6): como en la creación, a nombre de quien quedó la cuenta, nunca del vendedor crudo del cuerpo.
+      orden.servedById ?? input.staffId,
       input.stampRewardExpectedDiscount,
     )
     // Si el reintento lo canjeó AHORA, `orden` se leyó antes del descuento: se relee (la caja cobra esta respuesta).

@@ -30,8 +30,10 @@ export interface OpcionesDelVendedor {
 }
 
 /**
- * `validateStaffVenue` del vendedor con las dos salidas de D13. Sin salida, el MISMO error de hoy. Sólo abre la salida un vendedor
- * dado de baja en ESTE negocio (su membresía existe y está inactiva): un id ajeno o inventado sigue con el 400.
+ * `validateStaffVenue` del vendedor con las dos salidas de D13. Sin salida, el MISMO error de hoy.
+ *   · Caso 2: basta que la cuenta ya esté a su nombre en el servidor (también si lo ELIMINARON del equipo, Codex r1 #4).
+ *   · Caso 1: sólo un vendedor dado de baja en ESTE negocio (membresía inactiva); un id ajeno o inventado sigue con el 400.
+ * Una caída de la base nunca se vuelve 400: sube tal cual (500), y la cola reintenta (Codex r1 #5).
  */
 export async function validarVendedor(
   vendedor: string | undefined,
@@ -49,12 +51,14 @@ export async function validarVendedor(
 }
 
 async function salidaDelVendedorDeBaja(vendedor: string, venueId: string, o: OpcionesDelVendedor): Promise<VendedorDeBaja | null> {
-  const aLaSesion = o.deLaCola && !!o.sesion && o.sesion !== vendedor
-  if (!o.laCuentaEsSuya && !aLaSesion) return null
+  if (o.laCuentaEsSuya) return { staffId: vendedor, caso: 'ORDEN_DEL_VENDEDOR', vendedor }
+  if (!o.deLaCola || !o.sesion || o.sesion === vendedor) return null
   const deBaja = await prisma.staffVenue.findFirst({ where: { staffId: vendedor, venueId, active: false }, select: { id: true } })
   if (!deBaja) return null
-  if (o.laCuentaEsSuya) return { staffId: vendedor, caso: 'ORDEN_DEL_VENDEDOR', vendedor }
-  const sesion = await validateStaffVenue(o.sesion, venueId).catch(() => undefined)
+  const sesion = await validateStaffVenue(o.sesion, venueId).catch(error => {
+    if (error instanceof BadRequestError) return undefined
+    throw error
+  })
   return sesion ? { staffId: sesion, caso: 'COLA_A_LA_SESION', vendedor } : null
 }
 
