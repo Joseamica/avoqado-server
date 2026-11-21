@@ -96,9 +96,9 @@ describe('D17 · el tablero y «Recientes» (SERVIDOR)', () => {
     prismaMock.order.findMany.mockResolvedValue([])
   })
 
-  it('el tablero excluye lo que la cocina terminó (v1 READY) y lo archivado; el conteo usa el mismo filtro', async () => {
-    await listKdsOrders('venue-a')
-    await countKdsOrders('venue-a')
+  it('el tablero de la pantalla nueva excluye lo que la cocina terminó (v1 READY) y lo archivado; el conteo usa el mismo filtro', async () => {
+    await listKdsOrders('venue-a', undefined, undefined, undefined, true)
+    await countKdsOrders('venue-a', undefined, undefined, true)
     const filtro = expect.objectContaining({
       venueId: 'venue-a',
       AND: expect.arrayContaining([{ archivedAt: null }, { NOT: { preparationVersion: 1, status: 'READY' } }]),
@@ -128,8 +128,17 @@ describe('D17 · el tablero y «Recientes» (SERVIDOR)', () => {
     )
   })
 
+  it('la pantalla vieja (sin kitchenDoneVersion) recibe el tablero de siempre: sin quitar lo terminado ni lo archivado (#559)', async () => {
+    await listKdsOrders('venue-a')
+    await countKdsOrders('venue-a')
+    for (const where of [prismaMock.kdsOrder.findMany.mock.calls[0][0].where, prismaMock.kdsOrder.count.mock.calls.at(-1)![0].where]) {
+      expect(JSON.stringify(where)).not.toContain('archivedAt')
+      expect(JSON.stringify(where)).not.toContain('preparationVersion')
+    }
+  })
+
   it('la página con urgencias conserva el venue y suma el filtro (las tablets nuevas)', async () => {
-    await listKdsOrders('venue-a', undefined, undefined, { urgencyVersion: 1, offset: 0, limit: 100 })
+    await listKdsOrders('venue-a', undefined, undefined, { urgencyVersion: 1, offset: 0, limit: 100 }, true)
     expect(prismaMock.kdsOrder.count).toHaveBeenCalledWith({
       where: expect.objectContaining({
         venueId: 'venue-a',
