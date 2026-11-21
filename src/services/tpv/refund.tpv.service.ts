@@ -11,7 +11,8 @@ import {
   Prisma,
 } from '@prisma/client'
 import { cajaParaDevolverEnTx, postCashRefundToDrawer, salidaDelReembolsoEnTx } from '../shared/cashDrawerPosting'
-import { decidirDestinoDelReembolso, type PermisoDeReembolso } from '../shared/destinoDelReembolso'
+import { decidirDestinoDelReembolso, errorDeNoAdmitido, type PermisoDeReembolso } from '../shared/destinoDelReembolso'
+import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForRefund,
@@ -402,10 +403,16 @@ export async function recordRefund(
     )
   }
 
-  // El crédito no acredita un reembolso del SDK: sólo el POS/panel puede resolver el origen de la cadena.
-  if (originalPayment.tenderType?.systemKind === 'EXCHANGE_CREDIT') {
-    throw new BadRequestError('Lo pagado con crédito de cambio se devuelve desde el POS o el panel, por el medio de su origen.')
-  }
+  // D5 (Codex servidor r3 #12): LA decisión de destino, la misma que autorizó la ruta. La TPV nunca escoge medio (`medio` vacío) y no
+  // admite lo pagado con crédito de un Cambio (400 con «POS o panel»; con crédito, la respuesta no depende del origen de su raíz, que
+  // la terminal no resuelve). El folio de un cobro no cambia una vez escrito: la decisión vale también bajo el candado de abajo.
+  const destino = decidirDestinoDelReembolso({
+    entrada: 'TPV',
+    origen: originalPayment.cashMachineRef ? 'MAQUINA' : 'ORDINARIO',
+    medio: undefined,
+    esCreditoDeCambio: isExchangeCreditTenderKind(originalPayment.tenderType?.systemKind),
+  })
+  if (!destino.admitido) throw errorDeNoAdmitido(destino)
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 1.5: Reintento idempotente — se resuelve ANTES del guardia de importe
@@ -632,7 +639,6 @@ export async function recordRefund(
             cardBrand: CardBrand | null
             maskedPan: string | null
             entryMode: CardEntryMode | null
-            cashMachineRef: string | null
           }>
         >(Prisma.sql`
       SELECT
@@ -659,8 +665,7 @@ export async function recordRefund(
         processor,
         "cardBrand",
         "maskedPan",
-        "entryMode",
-        "cashMachineRef"
+        "entryMode"
       FROM "Payment"
       WHERE id = ${refundData.originalPaymentId}
         AND "venueId" = ${venueId}
@@ -879,9 +884,8 @@ export async function recordRefund(
         // 🔴 Máquina de efectivo (R4-7 #4, la regla de A6): la TPV nunca escoge con qué devolver, así que una venta de la máquina se
         // devuelve con efectivo de la GAVETA. La caja abierta se bloquea antes del turno (caja → turno, como el cierre de caja); sin
         // ella, 409 y no se registra nada. El `PAY_OUT` va en esa caja y en esta transacción, justo después de la fila.
-        // Codex r2 (familia B): LA decisión de destino, la misma que autorizó la ruta; la TPV no escoge medio (`medio` vacío). Si va a la
-        // gaveta y el permiso concedido no alcanza, 403 y no se escribe nada.
-        const destino = decidirDestinoDelReembolso({ origen: locked.cashMachineRef ? 'MAQUINA' : 'ORDINARIO', medio: undefined })
+        // Codex r2 (familia B): `destino` es LA decisión de arriba (la misma que autorizó la ruta). Si va a la gaveta y el permiso
+        // concedido no alcanza, 403 y no se escribe nada.
         if (destino.destinoEfectivo === 'GAVETA' && permisoConcedido && permisoConcedido !== destino.permisoRequerido) {
           throw new ForbiddenError(
             'Devolver una venta de la máquina saca billetes de la caja: necesita el permiso de devolver en efectivo.',

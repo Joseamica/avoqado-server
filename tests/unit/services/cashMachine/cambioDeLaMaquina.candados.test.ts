@@ -197,6 +197,6 @@ it('🔴 Codex r2 (familia B): el Cambio decide la gaveta con LA función de des
       } as never,
     ),
   ).rejects.toThrow('ALTO_EN_LA_CAJA')
-  expect(espia).toHaveBeenCalledWith({ origen: 'MAQUINA', medio: 'CASH' })
+  expect(espia).toHaveBeenCalledWith({ entrada: 'POS', origen: 'MAQUINA', medio: 'CASH', esCreditoDeCambio: false })
   espia.mockRestore()
 })

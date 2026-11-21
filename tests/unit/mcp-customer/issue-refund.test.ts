@@ -3,6 +3,7 @@ import type { McpScope } from '../../../src/mcp/scope'
 import { GiftCardError } from '../../../src/services/giftCards/giftCardErrors'
 import { ConflictError } from '../../../src/errors/AppError'
 import { ExchangeError } from '../../../src/services/exchanges/exchangeErrors'
+import { MENSAJE_MISMO_MEDIO, celda } from '../../__helpers__/matrizDelReembolso'
 
 const mockPaymentFindFirst = jest.fn()
 const mockIssue = jest.fn()
@@ -194,10 +195,11 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
     expect(mockIssue).not.toHaveBeenCalled()
   })
 
-  it('🔴 refundMethod CASH sin payments:refund-to-cash ⇒ error de permiso, sin leer ni reembolsar', async () => {
+  it('🔴 refundMethod CASH sobre un efectivo del cajón sin payments:refund-to-cash ⇒ error de permiso (lo pide la matriz), sin reembolsar', async () => {
+    mockPaymentFindFirst.mockResolvedValue({ ...completedPayment, fundsFlow: 'CASH_DRAWER', cashMachineRef: null })
     await expect(call({ ...base, venueId: 'sin-efectivo', refundMethod: 'CASH', confirm: true })).rejects.toThrow('payments:refund-to-cash')
-    expect(mockPaymentFindFirst).not.toHaveBeenCalled()
     expect(mockIssue).not.toHaveBeenCalled()
+    mockPaymentFindFirst.mockReset()
   })
 
   it('sin payments:refund-to-cash, transferencia o el mismo medio siguen funcionando', async () => {
@@ -520,5 +522,62 @@ describe('Codex servidor r2 (familia B) en issue_refund', () => {
     mockIssue.mockResolvedValue({ refundId: 'r1', amount: 100, originalPaymentId: 'pay-1' })
     await call({ ...base, confirm: true }).catch(() => undefined)
     expect(mockIssue).toHaveBeenCalledWith(expect.objectContaining({ permisoConcedido: 'payments:refund-to-cash' }))
+  })
+})
+
+describe('🔴 D5 (r6 caso 7): el MCP decide con la matriz ANTES de pedir refund-to-cash', () => {
+  const MAQUINA = 'AQ0000000000AB'
+  const credito = { ...completedPayment, method: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED', tenderType: { systemKind: 'EXCHANGE_CREDIT' } }
+  /** El cobro con crédito de Cambio y su raíz (de la máquina o una venta ordinaria), como los lee el MCP y su autorización. */
+  const comoCredito = (raizDeLaMaquina: boolean) => {
+    mockPaymentFindFirst.mockImplementation(async (a: any) =>
+      a.where.id === 'raiz' ? { cashMachineRef: raizDeLaMaquina ? MAQUINA : null } : credito,
+    )
+    mockLinkFindFirst.mockResolvedValue({ originPaymentId: 'raiz' })
+  }
+  afterEach(() => {
+    mockPaymentFindFirst.mockReset()
+    mockLinkFindFirst.mockReset()
+  })
+
+  it.each([
+    ['CADENA_DE_MAQUINA', 'CASH'],
+    ['CADENA_DE_MAQUINA', 'BANK_TRANSFER'],
+    ['ORDINARIO', 'CASH'],
+    ['ORDINARIO', 'BANK_TRANSFER'],
+  ] as const)(
+    '🔴 crédito de Cambio (raíz %s) con refundMethod %s y SÓLO payments:refund ⇒ «no admitido» con a dónde ir, nunca un error de permiso',
+    async (origen, refundMethod) => {
+      comoCredito(origen === 'CADENA_DE_MAQUINA')
+      const esperado = celda(origen, true, 'MCP', refundMethod)
+      if (esperado.admitido) throw new Error('la matriz debía rechazarla')
+      const out = parse(await call({ ...base, venueId: 'sin-efectivo', refundMethod, confirm: true }))
+      expect(out).toMatchObject({
+        ok: false,
+        code: 'NO_ADMITIDO_EN_ESTA_ENTRADA',
+        error: MENSAJE_MISMO_MEDIO,
+        dondeIr: ['MISMO_MEDIO', 'SALDO_A_FAVOR'],
+      })
+      expect(out).toMatchObject({ code: esperado.codigo, error: esperado.mensaje, dondeIr: esperado.dondeIr })
+      expect(mockIssue).not.toHaveBeenCalled()
+    },
+  )
+
+  it('el mismo crédito sin medio (por el de su origen) sigue con la matriz: raíz ordinaria ⇒ basta payments:refund', async () => {
+    comoCredito(false)
+    mockChain.mockResolvedValue({
+      kind: 'INHERIT',
+      rootPaymentId: 'raiz',
+      exchangeId: 'cambio-1',
+      money: { method: 'CASH', fundsFlow: 'CASH_DRAWER' },
+    })
+    expect(parse(await call({ ...base, venueId: 'sin-efectivo' })).requiresConfirmation).toBe(true)
+    mockChain.mockReset()
+  })
+
+  it('la autorización básica sigue antes de leer nada: sin payments:refund, error de permiso', async () => {
+    comoCredito(true)
+    await expect(call({ ...base, venueId: 'no-perm', refundMethod: 'CASH' })).rejects.toThrow('Forbidden')
+    expect(mockPaymentFindFirst).not.toHaveBeenCalled()
   })
 })

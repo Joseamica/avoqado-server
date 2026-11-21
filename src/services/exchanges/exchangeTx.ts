@@ -532,7 +532,15 @@ export async function prepareExchangeInTx(
         : paymentById.get(s.paymentId)!.money.cashMachineRef
           ? 'MAQUINA'
           : 'ORDINARIO'
-      return decidirDestinoDelReembolso({ origen, medio: settlement.method }).destinoEfectivo === 'GAVETA'
+      // D5: lo pagado con crédito de Cambio sale con la semántica de su raíz (`moneyAs`), nunca con un medio escogido. La entrada no
+      // cambia la respuesta fuera de la TPV (el Cambio entra por el POS o el panel).
+      const destino = decidirDestinoDelReembolso({
+        entrada: 'POS',
+        origen,
+        medio: chain ? undefined : settlement.method,
+        esCreditoDeCambio: !!chain,
+      })
+      return destino.admitido && destino.destinoEfectivo === 'GAVETA'
     })
   // Sacar billetes de la gaveta por dinero que nunca entró ahí pide `payments:refund-to-cash`: la ruta lo concede sólo con
   // `cashFromNonCash` (`permisoDeCambio`). Sin la marca no se escribe nada.

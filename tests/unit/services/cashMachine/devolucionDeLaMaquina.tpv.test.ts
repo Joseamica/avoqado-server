@@ -19,6 +19,8 @@ import { ConflictError } from '@/errors/AppError'
 import * as refundService from '@/services/tpv/refund.tpv.service'
 import { prismaMock } from '../../../__helpers__/setup'
 import * as destinoDelReembolso from '@/services/shared/destinoDelReembolso'
+import type { OrigenDelDinero } from '@/services/shared/destinoDelReembolso'
+import { MEDIOS, celda } from '../../../__helpers__/matrizDelReembolso'
 
 const VENUE = 'venue-1'
 
@@ -153,7 +155,7 @@ describe('devolución de una venta de la máquina por la TPV', () => {
       statusCode: 403,
       code: 'REFUND_NEEDS_REFUND_TO_CASH',
     })
-    expect(espia).toHaveBeenCalledWith({ origen: 'MAQUINA', medio: undefined })
+    expect(espia).toHaveBeenCalledWith({ entrada: 'TPV', origen: 'MAQUINA', medio: undefined, esCreditoDeCambio: false })
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
     espia.mockRestore()
   })
@@ -193,5 +195,61 @@ describe('devolución de una venta de la máquina por la TPV', () => {
     expect(orden).toEqual(['turno'])
     expect(eventosEnTx.create).not.toHaveBeenCalled()
     expect(eventosGlobales.createMany).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('🔴 D5 (r3 #12): la TPV escribe lo que dice la matriz, celda por celda', () => {
+  /** Lo pagado con el crédito de un Cambio (la TPV no resuelve su raíz: con crédito de Cambio, la respuesta no depende de ella). */
+  const credito = { method: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED', cashMachineRef: null, tenderLabel: 'Crédito de cambio' }
+  const delCajon = { fundsFlow: 'CASH_DRAWER', cashMachineRef: null, tenderLabel: null, tenderCountsAsCash: null, tenderSatFormaPago: null }
+
+  it.each([
+    ['MAQUINA', false],
+    ['ORDINARIO', false],
+    ['ORDINARIO', true],
+    ['CADENA_DE_MAQUINA', true],
+  ] as Array<[OrigenDelDinero, boolean]>)(
+    '%s · crédito de Cambio %s: la TPV no escoge medio, así que las 5 celdas dicen lo mismo',
+    (o, c) => {
+      const primera = celda(o, c, 'TPV', '—')
+      for (const medio of MEDIOS) expect(celda(o, c, 'TPV', medio)).toEqual(primera)
+    },
+  )
+
+  it.each(['ORDINARIO', 'CADENA_DE_MAQUINA'] as OrigenDelDinero[])(
+    '🔴 r3 #12 · el reemplazo de un Cambio (raíz %s): 400 NO_ADMITIDO_EN_ESTA_ENTRADA con «POS o panel», antes de tocar nada',
+    async origen => {
+      const esperado = celda(origen, true, 'TPV', '—')
+      if (esperado.admitido) throw new Error('la matriz debía rechazarla')
+      armar({ ...credito, tenderType: { systemKind: 'EXCHANGE_CREDIT' } })
+
+      await expect(refundService.recordRefund(VENUE, cuerpo(16000) as any, 'staff-1', undefined, 'payments:refund')).rejects.toMatchObject({
+        statusCode: 400,
+        code: esperado.codigo,
+        message: esperado.mensaje,
+        details: { dondeIr: esperado.dondeIr },
+      })
+      expect(transacciones).toBe(0)
+      expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
+    },
+  )
+
+  it('la venta de la máquina: con el permiso que pide la matriz, sale de la gaveta (CASH_DRAWER y su PAY_OUT en la transacción)', async () => {
+    const esperado = celda('MAQUINA', false, 'TPV', '—')
+    if (!esperado.admitido) throw new Error('la matriz debía admitirla')
+    expect(esperado.destinoEfectivo).toBe('GAVETA')
+    armar()
+    await refundService.recordRefund(VENUE, cuerpo(16000) as any, 'staff-1', undefined, esperado.permisoRequerido)
+    expect((prismaMock as any).payment.create.mock.calls[0][0].data).toMatchObject({ method: 'CASH', fundsFlow: 'CASH_DRAWER' })
+    expect(eventosEnTx.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('una venta ordinaria: por el mismo medio con payments:refund, sin tocar la gaveta en la transacción', async () => {
+    const esperado = celda('ORDINARIO', false, 'TPV', '—')
+    expect(esperado).toEqual({ admitido: true, destinoEfectivo: 'MISMO_MEDIO', permisoRequerido: 'payments:refund' })
+    armar(delCajon)
+    await refundService.recordRefund(VENUE, cuerpo(16000) as any, 'staff-1', undefined, 'payments:refund')
+    expect((prismaMock as any).payment.create.mock.calls[0][0].data).toMatchObject({ method: 'CASH', fundsFlow: 'CASH_DRAWER' })
+    expect(eventosEnTx.create).not.toHaveBeenCalled()
   })
 })

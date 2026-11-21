@@ -2,11 +2,11 @@ import type { NextFunction, Request, Response } from 'express'
 
 import {
   decidirDestinoDelReembolso,
+  errorDeNoAdmitido,
   medioQueLlegaAlEscritor,
   origenDelDinero,
   type DestinoDelReembolso,
   type EntradaDelReembolso,
-  type OrigenDelDinero,
 } from '../services/shared/destinoDelReembolso'
 import prisma from '../utils/prismaClient'
 import { checkPermission } from './checkPermission.middleware'
@@ -27,6 +27,11 @@ import { checkPermission } from './checkPermission.middleware'
  *    crédito de un Cambio de esa venta (r2 #2). Por transferencia o a saldo a favor, `payments:refund`.
  *
  * Sin el permiso no se bloquea: es el 403 de siempre, que el POS convierte en el código del encargado.
+ *
+ *  · D5 (Codex servidor r3 #12, r6 caso 7): lo que esta entrada no admite (lo pagado con crédito de Cambio en la terminal, o con
+ *    «Efectivo» o transferencia escogidos) pasa SÓLO por la autorización básica (`payments:refund`: sucursal y devolución) y se
+ *    contesta 400 `NO_ADMITIDO_EN_ESTA_ENTRADA` con `details.dondeIr`. Nunca se pide antes el permiso especial ni el PIN del encargado
+ *    para acabar en el mismo rechazo del escritor. Sigue siendo UNA sola revisión.
  */
 const revisarReembolso = checkPermission('payments:refund')
 const revisarDevolverEnEfectivo = checkPermission('payments:refund-to-cash')
@@ -40,13 +45,22 @@ export function permisoDeReembolsoSegunElCobro(opciones: { paymentIdDe: (req: Re
   return Object.assign(
     async (req: Request, res: Response, next: NextFunction) => {
       // Si la lectura falla se exige el permiso más alto: nunca se concede acceso por un fallo.
-      const origen: OrigenDelDinero = await origenDelDinero(prisma, req.params?.venueId, opciones.paymentIdDe(req)).catch(
-        () => 'MAQUINA' as const,
-      )
+      const { origen, esCreditoDeCambio } = await origenDelDinero(prisma, req.params?.venueId, opciones.paymentIdDe(req)).catch(() => ({
+        origen: 'MAQUINA' as const,
+        esCreditoDeCambio: false,
+      }))
       const metodo = (req.body as { refundMethod?: unknown } | undefined)?.refundMethod
-      const destino = decidirDestinoDelReembolso({ origen, medio: medioQueLlegaAlEscritor(opciones.entrada, metodo) })
-      ;(req as ConDestinoDelReembolso).destinoDelReembolso = destino
-      return destino.permisoRequerido === 'payments:refund-to-cash'
+      const decision = decidirDestinoDelReembolso({
+        entrada: opciones.entrada,
+        origen,
+        medio: medioQueLlegaAlEscritor(opciones.entrada, metodo),
+        esCreditoDeCambio,
+      })
+      if (!decision.admitido) {
+        return revisarReembolso(req, res, (error?: unknown) => next(error ?? errorDeNoAdmitido(decision)))
+      }
+      ;(req as ConDestinoDelReembolso).destinoDelReembolso = decision
+      return decision.permisoRequerido === 'payments:refund-to-cash'
         ? revisarDevolverEnEfectivo(req, res, next)
         : revisarReembolso(req, res, next)
     },

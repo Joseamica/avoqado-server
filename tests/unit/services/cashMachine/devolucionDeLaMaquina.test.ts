@@ -29,7 +29,9 @@ import { modesForExchangeCreditRoot, payoutModesFor } from '@/services/exchanges
 import { EXCHANGE_REFUND_ROLE } from '@/services/exchanges/exchangeMarks'
 import { devolverConEfectivo, devuelveEfectivoDeLaMaquina, type CobroParaDevolver } from '@/services/tpv/terminalRefundTarget'
 import * as destinoDelReembolso from '@/services/shared/destinoDelReembolso'
+import type { DecisionDelReembolso, EntradaDelReembolso, OrigenDelDinero } from '@/services/shared/destinoDelReembolso'
 import { prismaMock } from '../../../__helpers__/setup'
+import { celda } from '../../../__helpers__/matrizDelReembolso'
 
 const FOLIO = 'AQ0000000000AB'
 
@@ -298,7 +300,7 @@ describe('riel del POS y del panel (issueRefund)', () => {
       statusCode: 403,
       code: 'REFUND_NEEDS_REFUND_TO_CASH',
     })
-    expect(espia).toHaveBeenCalledWith({ origen: 'MAQUINA', medio: 'CASH' })
+    expect(espia).toHaveBeenCalledWith(expect.objectContaining({ origen: 'MAQUINA', medio: 'CASH', esCreditoDeCambio: false }))
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
     espia.mockRestore()
   })
@@ -330,7 +332,7 @@ describe('riel del POS y del panel (issueRefund)', () => {
         }),
       ),
     ).rejects.toMatchObject({ statusCode: 403 })
-    expect(espia).toHaveBeenCalledWith({ origen: 'CADENA_DE_MAQUINA', medio: undefined })
+    expect(espia).toHaveBeenCalledWith(expect.objectContaining({ origen: 'CADENA_DE_MAQUINA', medio: undefined, esCreditoDeCambio: false }))
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
     espia.mockRestore()
   })
@@ -455,5 +457,153 @@ describe('riel del POS y del panel (issueRefund)', () => {
       expect(r.status).toBe('COMPLETED')
       expect(prismaMock.cashDrawerEvent.createMany).not.toHaveBeenCalled()
     })
+  })
+
+  describe('🔴 D5 (r3 #12, r6 caso 7): cada celda de la matriz dice lo mismo que ESTE escritor (el POS y el MCP pasan por aquí)', () => {
+    /** Un cobro ordinario por transferencia: escoger «Efectivo» sí es otro medio (EFECTIVO_ESCOGIDO). */
+    const transferencia = () =>
+      ventaDeLaMaquina({
+        method: 'BANK_TRANSFER',
+        source: 'APP',
+        tenderLabel: null,
+        tenderSatFormaPago: '03',
+        tenderCountsAsCash: null,
+        cashMachineRef: null,
+      })
+    /** Lo pagado con el crédito de un Cambio: su tender de sistema se lee bajo el candado del cobro. */
+    const creditoDeCambio = () =>
+      ventaDeLaMaquina({
+        method: 'OTHER',
+        tenderTypeId: 'tender-credito',
+        tenderLabel: 'Crédito de cambio',
+        tenderSatFormaPago: '17',
+        cashMachineRef: null,
+      })
+    /** La raíz del Cambio: la venta de la máquina o una venta ordinaria en efectivo del cajón. */
+    const raiz = (deLaMaquina: boolean) => ({
+      ...ventaDeLaMaquina(
+        deLaMaquina
+          ? { id: 'payment-raiz' }
+          : { id: 'payment-raiz', fundsFlow: 'CASH_DRAWER', tenderLabel: null, tenderSatFormaPago: null, cashMachineRef: null },
+      ),
+      tenderType: null,
+    })
+    const comoCredito = (raizDeLaMaquina: boolean) => {
+      prismaMock.venueTenderType.findFirst.mockResolvedValue({ systemKind: 'EXCHANGE_CREDIT' } as any)
+      prismaMock.exchangeCreditLink.findFirst.mockResolvedValue({
+        exchangeId: 'cambio-1',
+        originPaymentId: 'payment-raiz',
+        creditPaymentId: 'payment-original',
+      } as any)
+      prismaMock.payment.findFirst.mockImplementation((async (a: any) =>
+        a?.where?.id === 'payment-raiz'
+          ? raiz(raizDeLaMaquina)
+          : { orderId: 'order-1', order: { updatedAt: new Date('2026-11-20T09:00:00.000Z') } }) as any)
+    }
+
+    /** Lo que el escritor hizo con el dinero, contra el destino que dice la matriz. */
+    const escribioComoDice = (d: DecisionDelReembolso, metodoDelOriginal: string) => {
+      if (!d.admitido) throw new Error('esta celda se rechaza; se prueba aparte')
+      const fila = filaDelReembolso()
+      if (d.destinoEfectivo === 'GAVETA') {
+        expect(fila).toMatchObject({ method: 'CASH', fundsFlow: 'CASH_DRAWER' })
+        expect(eventosEnTx.create).toHaveBeenCalledTimes(1)
+        return
+      }
+      // Nada sale de la gaveta en la transacción: el efectivo del cajón lo escribe, si acaso, el enganche de siempre.
+      expect(eventosEnTx.create).not.toHaveBeenCalled()
+      if (d.destinoEfectivo === 'EFECTIVO_ESCOGIDO') expect(fila).toMatchObject({ method: 'CASH', fundsFlow: 'CASH_DRAWER' })
+      else if (d.destinoEfectivo === 'TRANSFERENCIA') expect(fila).toMatchObject({ method: 'BANK_TRANSFER' })
+      else if (d.destinoEfectivo === 'MISMO_MEDIO') expect(fila.method).toBe(metodoDelOriginal)
+      else throw new Error(`destino sin escritor en esta prueba: ${d.destinoEfectivo}`)
+    }
+
+    it.each([
+      ['MAQUINA', 'POS', '—'],
+      ['MAQUINA', 'POS', 'CASH'],
+      ['MAQUINA', 'POS', 'BANK_TRANSFER'],
+      ['MAQUINA', 'MCP', 'CASH'],
+      ['ORDINARIO', 'POS', '—'],
+      ['ORDINARIO', 'POS', 'CASH'],
+      ['ORDINARIO', 'POS', 'BANK_TRANSFER'],
+      ['ORDINARIO', 'MCP', 'BANK_TRANSFER'],
+    ] as Array<[OrigenDelDinero, EntradaDelReembolso, '—' | 'CASH' | 'BANK_TRANSFER']>)(
+      '%s · %s · medio %s: el escritor registra lo que la matriz admite, con el permiso que pide',
+      async (origen, entrada, medio) => {
+        const esperado = celda(origen, false, entrada, medio)
+        if (!esperado.admitido) throw new Error('la matriz debía admitirla')
+        const original = origen === 'MAQUINA' ? ventaDeLaMaquina() : transferencia()
+        prismaMock.$queryRaw.mockResolvedValueOnce([original]).mockResolvedValueOnce([])
+
+        await reembolsar({
+          permisoConcedido: esperado.permisoRequerido,
+          ...(medio === '—' ? {} : { refundMethod: medio }),
+        })
+
+        escribioComoDice(esperado, original.method)
+      },
+    )
+
+    it.each([
+      ['CADENA_DE_MAQUINA', 'POS', 'CASH'],
+      ['CADENA_DE_MAQUINA', 'POS', 'BANK_TRANSFER'],
+      ['CADENA_DE_MAQUINA', 'MCP', 'CASH'],
+      ['ORDINARIO', 'POS', 'CASH'],
+      ['ORDINARIO', 'POS', 'BANK_TRANSFER'],
+      ['ORDINARIO', 'MCP', 'BANK_TRANSFER'],
+    ] as Array<[OrigenDelDinero, EntradaDelReembolso, 'CASH' | 'BANK_TRANSFER']>)(
+      '🔴 r3 #12 · crédito de Cambio (raíz %s) · %s · %s: el escritor contesta lo mismo que la matriz (400 con a dónde ir) y no escribe',
+      async (origen, entrada, medio) => {
+        const esperado = celda(origen, true, entrada, medio)
+        if (esperado.admitido) throw new Error('la matriz debía rechazarla')
+        comoCredito(origen === 'CADENA_DE_MAQUINA')
+        prismaMock.$queryRaw.mockResolvedValueOnce([creditoDeCambio()]).mockResolvedValueOnce([])
+
+        await expect(reembolsar({ refundMethod: medio, permisoConcedido: 'payments:refund' })).rejects.toMatchObject({
+          statusCode: 400,
+          code: esperado.codigo,
+          message: esperado.mensaje,
+          details: { dondeIr: esperado.dondeIr },
+        })
+        expect(prismaMock.payment.create).not.toHaveBeenCalled()
+        expect(eventosEnTx.create).not.toHaveBeenCalled()
+      },
+    )
+
+    it.each([
+      ['CADENA_DE_MAQUINA', 'POS'],
+      ['CADENA_DE_MAQUINA', 'MCP'],
+      ['ORDINARIO', 'POS'],
+      ['ORDINARIO', 'MCP'],
+    ] as Array<[OrigenDelDinero, EntradaDelReembolso]>)(
+      'crédito de Cambio (raíz %s) · %s · sin medio: el escritor de la cadena registra lo que la matriz admite',
+      async (origen, entrada) => {
+        const esperado = celda(origen, true, entrada, '—')
+        if (!esperado.admitido) throw new Error('la matriz debía admitirla')
+        comoCredito(origen === 'CADENA_DE_MAQUINA')
+        const cadena = resolveChainRefund({ exchangeId: 'cambio-1' } as any, raiz(origen === 'CADENA_DE_MAQUINA') as any)
+        if (cadena.kind !== 'INHERIT') throw new Error('la cadena debía heredarse')
+        prismaMock.$queryRaw.mockResolvedValueOnce([creditoDeCambio()]).mockResolvedValueOnce([])
+
+        await prismaMock.$transaction((tx: any) =>
+          writeRefundInTx(tx, {
+            originalPaymentId: 'payment-original',
+            venueId: 'venue-1',
+            salesRefundCents: 15000,
+            tipRefundCents: 0,
+            refundedItems: [],
+            reason: 'RETURNED_GOODS',
+            staffId: 'staff-9',
+            tenderCommission: 'NONE',
+            shift: 'CLAIM_LIVE',
+            moneyAs: cadena.money,
+            permisoConcedido: esperado.permisoRequerido,
+            exchangeMark: { exchangeId: 'cambio-1', role: EXCHANGE_REFUND_ROLE.CHAIN, rootPaymentId: 'payment-raiz' },
+          }),
+        )
+
+        escribioComoDice(esperado, cadena.money.method)
+      },
+    )
   })
 })

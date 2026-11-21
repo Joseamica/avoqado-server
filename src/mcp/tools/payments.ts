@@ -591,8 +591,6 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       const refundMethod = refundMethodRaw ?? undefined // null = ausente
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('payments:refund', venueId) // write gate (per-venue role)
-      // «Efectivo» escogido pide su permiso propio con CUALQUIER origen (la decisión de abajo lo confirma): se revisa antes de leer nada.
-      if (refundMethod === 'CASH') guard.requirePermission('payments:refund-to-cash', venueId)
 
       if (!idempotencyKey)
         return text({
@@ -630,11 +628,17 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       // Codex r2 (familia B): LA decisión de destino y permiso, la misma del POS, el panel, la terminal y el escritor. Escoger «Efectivo»
       // pide su permiso propio (MANAGER+), igual que la ruta móvil; devolver una venta de la máquina —directa o por la cadena de un
       // Cambio, r2 #2— saca billetes de la caja en la que nunca entraron: también.
+      // D5 (r6 caso 7): el permiso especial se pide DESPUÉS de la matriz y sólo si la operación se admite; lo que no se admite (lo pagado
+      // con crédito de Cambio con «Efectivo» o transferencia) se contesta con a dónde ir, sin pedir un permiso que no serviría.
+      const { origen, esCreditoDeCambio } = await origenDelDinero(prisma, venueId, paymentId)
       const destino = decidirDestinoDelReembolso({
-        origen: await origenDelDinero(prisma, venueId, paymentId),
+        entrada: 'MCP',
+        origen,
         medio: medioQueLlegaAlEscritor('MCP', refundMethod),
+        esCreditoDeCambio,
       })
-      if (destino.permisoRequerido === 'payments:refund-to-cash') guard.requirePermission('payments:refund-to-cash', venueId)
+      if (!destino.admitido) return text({ ok: false, code: destino.codigo, error: destino.mensaje, dondeIr: destino.dondeIr })
+      guard.requirePermission(destino.permisoRequerido, venueId)
       if (payment.status !== TransactionStatus.COMPLETED) {
         return text({ ok: false, error: `Solo se puede reembolsar un pago COMPLETED (este está ${payment.status}).` })
       }
