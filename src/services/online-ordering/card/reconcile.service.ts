@@ -94,14 +94,16 @@ const page = (readEntry: ReadCandidates, where: Prisma.OnlineOrderChargeWhereInp
 
 /**
  * Ruling 10: los de «Nadie» con la página viva (los vencidos van con lo demás). Sin sesión guardada nadie pudo pagar todavía: no se
- * visitan (así cada visita es UNA lectura de su sesión en Stripe).
+ * visitan (así cada visita es UNA lectura de su sesión en Stripe). D661 (addendum r3): la edad se mide con la hora del carril (`reloj`)
+ * y la página viva desde el INICIO de la pasada (`inicio`): los vencidos se leyeron al empezar (`≤ inicio`), así que un borrador cuya
+ * página vence mientras se atiende el dinero en duda ya no se queda sin grupo hasta la siguiente pasada.
  */
-const earlyNadieWhere = (now: Date): Prisma.OnlineOrderChargeWhereInput => ({
+const earlyNadieWhere = (reloj: Date, inicio: Date): Prisma.OnlineOrderChargeWhereInput => ({
   status: S.PENDING_AUTH,
   customerPhone: SIN_TELEFONO_NADIE,
   checkoutSessionId: { not: null },
-  checkoutExpiresAt: { gt: now },
-  createdAt: { lte: new Date(now.getTime() - NADIE_EARLY_VISIT_MS) },
+  checkoutExpiresAt: { gt: inicio },
+  createdAt: { lte: new Date(reloj.getTime() - NADIE_EARLY_VISIT_MS) },
   // Codex r1 C3: el borrador cobrado fuera de Avoqado ya no se reintenta (ni se abandona): lo resuelve una persona.
   ...NOT_CAPTURED_OUTSIDE,
 })
@@ -356,13 +358,13 @@ let earlyLaneBusy = false
  * D661 (A2): la visita temprana, una a la vez en el proceso. Toma los borradores en su orden (el menos reciente primero) con
  * `NADIE_EARLY_CONCURRENCY` trabajadores y no empieza ninguno después de `NADIE_EARLY_BUDGET_MS`: los que no alcanzó no se tocan y
  * quedan primero para la siguiente. D661 (B, Rulings 42 y 51): lee su lista al EMPEZAR, con `reloj` (la hora a la que empieza), y cada
- * llamada a Stripe va con `LIMITES_TEMPRANOS`.
+ * llamada a Stripe va con `LIMITES_TEMPRANOS`. `inicio` (addendum r3): el inicio de la pasada que lo corre; la visita sola, `reloj`.
  */
-async function earlyLane(readEntry: ReadCandidates, reloj: Date, result: ReconcileResult): Promise<void> {
+async function earlyLane(readEntry: ReadCandidates, reloj: Date, result: ReconcileResult, inicio: Date = reloj): Promise<void> {
   if (earlyLaneBusy) return
   earlyLaneBusy = true
   try {
-    const pending = await page(readEntry, earlyNadieWhere(reloj))
+    const pending = await page(readEntry, earlyNadieWhere(reloj, inicio))
     const stopAt = Date.now() + NADIE_EARLY_BUDGET_MS
     let next = 0
     const worker = async () => {
@@ -380,8 +382,9 @@ export async function reconcileCardCharges(now: Date, readEntry: ReadCandidates)
   const { inDoubt, rest } = await readCandidates(now, readEntry)
   for (const charge of inDoubt) await handle(charge, now, result) // A2: el dinero en duda, primero
   // D661 (B, Ruling 42): la visita temprana lee su lista al entrar al carril, con la hora de la pasada adelantada lo que ya tardó (en
-  // producción, la hora real): un borrador que cumplió sus 2 min mientras se atendía el dinero en duda se visita en esta pasada.
-  await earlyLane(readEntry, new Date(now.getTime() + (Date.now() - inicio)), result)
+  // producción, la hora real): un borrador que cumplió sus 2 min mientras se atendía el dinero en duda se visita en esta pasada. Addendum
+  // r3: su página viva se mide desde `now` (el inicio), la misma hora con que se leyeron los vencidos.
+  await earlyLane(readEntry, new Date(now.getTime() + (Date.now() - inicio)), result, now)
   for (const charge of rest) await handle(charge, now, result)
   return result
 }

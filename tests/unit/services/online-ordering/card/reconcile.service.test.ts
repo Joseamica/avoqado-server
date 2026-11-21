@@ -41,16 +41,23 @@ import { reconcileCardCharges, visitEarlyNadieDrafts } from '@/services/online-o
 
 const MIN = 60_000
 const NOW = new Date('2026-11-20T18:00:00.000Z')
-type Grupo = 'expired' | 'early' | 'capturing' | 'releasing' | 'authorized'
+/** `urgent` (Ruling 74): los borradores de «Nadie» con su cierre cerca, que la visita lee aparte y sin el filtro de edad. */
+type Grupo = 'expired' | 'early' | 'urgent' | 'capturing' | 'releasing' | 'authorized'
+const esTemprano = (grupo: Grupo) => grupo === 'early' || grupo === 'urgent'
 const fila = (id: string, grupo: Grupo) => ({
   id,
   venueId: 'v1',
-  status: { expired: 'PENDING_AUTH', early: 'PENDING_AUTH', capturing: 'CAPTURING', releasing: 'RELEASING', authorized: 'AUTHORIZED' }[
-    grupo
-  ],
-  customerPhone: grupo === 'early' ? '' : '+525512345678',
+  status: {
+    expired: 'PENDING_AUTH',
+    early: 'PENDING_AUTH',
+    urgent: 'PENDING_AUTH',
+    capturing: 'CAPTURING',
+    releasing: 'RELEASING',
+    authorized: 'AUTHORIZED',
+  }[grupo],
+  customerPhone: esTemprano(grupo) ? '' : '+525512345678',
   checkoutSessionId: `cs_${id}`,
-  checkoutExpiresAt: grupo === 'early' ? new Date(NOW.getTime() + 20 * MIN) : new Date(NOW.getTime() - MIN),
+  checkoutExpiresAt: esTemprano(grupo) ? new Date(NOW.getTime() + 20 * MIN) : new Date(NOW.getTime() - MIN),
   paymentIntentId: `pi_${id}`,
   amount: '250.00',
   createdAt: new Date(NOW.getTime() - 5 * MIN),
@@ -58,13 +65,19 @@ const fila = (id: string, grupo: Grupo) => ({
   onlineOrder: grupo === 'capturing' ? { orderId: `o_${id}` } : null,
   attempts: 0,
 })
-/** De qué grupo es cada lectura, por la forma de su `where` (así las pide `readCandidates`). */
+/** De qué grupo es cada lectura, por la forma de su `where` (así las pide `readCandidates`; la de los urgentes trae su `AND` de cierre). */
 const grupoDe = (where: any): Grupo => {
   if (where.status === 'CAPTURING') return 'capturing'
   if (where.status === 'RELEASING') return 'releasing'
   if (where.status === 'AUTHORIZED') return 'authorized'
+  if (where.AND) return 'urgent'
   return where.customerPhone === '' ? 'early' : 'expired'
 }
+/** Las horas del `where` que deciden el grupo de un borrador (la página y la edad); lo demás lo decide el grupo. */
+const cumpleHoras = (r: any, where: any) =>
+  (where.checkoutExpiresAt?.gt === undefined || r.checkoutExpiresAt > where.checkoutExpiresAt.gt) &&
+  (where.checkoutExpiresAt?.lte === undefined || r.checkoutExpiresAt <= where.checkoutExpiresAt.lte) &&
+  (where.createdAt?.lte === undefined || r.createdAt <= where.createdAt.lte)
 
 let filas: Record<Grupo, any[]>
 let eventos: string[]
@@ -76,13 +89,14 @@ const buscar = (id: string) =>
     .find(r => r.id === id)
 
 beforeEach(() => {
-  filas = { expired: [], early: [], capturing: [], releasing: [], authorized: [] }
+  filas = { expired: [], early: [], urgent: [], capturing: [], releasing: [], authorized: [] }
   eventos = []
   reloj = NOW.getTime()
   dateSpy = jest.spyOn(Date, 'now').mockImplementation(() => reloj)
   prismaMock.onlineOrderCharge.findMany.mockReset()
   // Copias: la base cambia después de leer, la fila leída no.
-  prismaMock.onlineOrderCharge.findMany.mockImplementation((async (a: any) => filas[grupoDe(a.where)].map(r => ({ ...r }))) as any)
+  prismaMock.onlineOrderCharge.findMany.mockImplementation((async (a: any) =>
+    filas[grupoDe(a.where)].filter(r => cumpleHoras(r, a.where)).map(r => ({ ...r }))) as any)
   prismaMock.onlineOrderCharge.findUnique.mockReset()
   prismaMock.onlineOrderCharge.findUnique.mockImplementation((async (a: any) => {
     const f = buscar(a.where.id)
@@ -123,9 +137,10 @@ describe('D661 · A2: el dinero en duda primero, y la visita temprana con su pro
     expect(eventos.slice(0, 2)).toEqual(['leer cobro pi_cobrando1', 'anotar cobro cobrando1'])
     expect(eventos.slice(2, 4).sort()).toEqual(['leer borrador temprano1', 'leer borrador temprano2'])
     expect(eventos[4]).toBe('leer borrador vencido1')
-    // Cada grupo conserva su tope y su orden de siempre.
+    // Cada grupo conserva su tope y su orden de siempre (los urgentes del Ruling 74 se ordenan por su plazo, aparte).
     for (const [a] of prismaMock.onlineOrderCharge.findMany.mock.calls as any[]) {
-      expect(a).toMatchObject({ take: 50, orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }] })
+      if (grupoDe(a.where) === 'urgent') expect(a).toMatchObject({ take: 50 })
+      else expect(a).toMatchObject({ take: 50, orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }] })
     }
   })
 
@@ -234,6 +249,26 @@ describe('D661 · B (Ruling 42): diez lecturas colgadas hasta su límite no impi
     await expect(pasada).resolves.toMatchObject({ scanned: 11, errors: 10 })
     expect(visitaDelSano).not.toBeNull()
     expect(visitaDelSano!).toBeLessThanOrEqual(30_000 + 10_000)
+  })
+})
+
+describe('D661 · addendum r3: en la pasada, la visita mide la página viva desde el INICIO de la pasada', () => {
+  it('un borrador cuya página vence mientras se atiende el dinero en duda se visita en esa misma pasada (ya no queda sin grupo hasta la siguiente); la edad, con la hora del carril', async () => {
+    filas.capturing = [fila('cobrando1', 'capturing')]
+    // Su página vence 1 s después del inicio de la pasada: no está entre los vencidos (leídos al empezar, ≤ inicio).
+    filas.early = [{ ...fila('borde', 'early'), checkoutExpiresAt: new Date(NOW.getTime() + 1_000) }]
+    getAuthorization.mockImplementation(async (_m: unknown, ref: any) => {
+      eventos.push(`leer cobro ${ref.paymentIntentId}`)
+      reloj += 2_000 // el cobro en duda tarda 2 s: el carril empieza en inicio + 2 s
+      return { piStatus: 'succeeded', amountReceivedCents: 25_000 }
+    })
+    await expect(reconcileCardCharges(NOW, read => read())).resolves.toMatchObject({ scanned: 2, errors: 0 })
+    expect(eventos).toEqual(['leer cobro pi_cobrando1', 'anotar cobro cobrando1', 'leer borrador borde'])
+    const temprana = (prismaMock.onlineOrderCharge.findMany.mock.calls as any[]).map(([a]) => a).find(a => grupoDe(a.where) === 'early')
+    expect(temprana.where).toMatchObject({
+      checkoutExpiresAt: { gt: NOW },
+      createdAt: { lte: new Date(NOW.getTime() + 2_000 - 2 * MIN) },
+    })
   })
 })
 
