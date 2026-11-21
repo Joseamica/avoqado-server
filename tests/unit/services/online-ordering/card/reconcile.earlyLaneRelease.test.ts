@@ -68,7 +68,10 @@ const borrador = (id: string): Fila => ({
   stuckAlertedAt: null,
   inDoubtSince: null,
 })
-/** Lo que filtran las lecturas y los CAS de esta cadena (estado, modo, página y edad); lo demás del `where` no cambia nada aquí. */
+/** Una condición sobre un campo del JSON `request` (Ruling 74: el cierre de la franja, en ISO), como la compara Postgres: texto. */
+const cumpleJson = (v: unknown, c: { gt?: string; lte?: string }) =>
+  typeof v === 'string' && (c.gt === undefined || v > c.gt) && (c.lte === undefined || v <= c.lte)
+/** Lo que filtran las lecturas y los CAS de esta cadena (estado, modo, página, edad y cierre); lo demás del `where` no cambia nada aquí. */
 const cumple = (f: Fila, w: any): boolean =>
   (w.id === undefined || f.id === w.id) &&
   (w.status === undefined || f.status === w.status) &&
@@ -76,7 +79,9 @@ const cumple = (f: Fila, w: any): boolean =>
   (w.checkoutExpiresAt?.gt === undefined || f.checkoutExpiresAt > w.checkoutExpiresAt.gt) &&
   (w.checkoutExpiresAt?.lte === undefined || f.checkoutExpiresAt <= w.checkoutExpiresAt.lte) &&
   (w.createdAt?.lte === undefined || f.createdAt <= w.createdAt.lte) &&
-  (w.updatedAt?.lte === undefined || f.updatedAt <= w.updatedAt.lte)
+  (w.updatedAt?.lte === undefined || f.updatedAt <= w.updatedAt.lte) &&
+  (w.AND === undefined || w.AND.every((c: any) => cumple(f, c))) &&
+  (w.request === undefined || cumpleJson(f.request?.[w.request.path[0]], w.request))
 
 let visitaDelSano: number | null
 

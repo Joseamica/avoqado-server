@@ -272,6 +272,35 @@ describe('D661 · addendum r3: en la pasada, la visita mide la página viva desd
   })
 })
 
+describe('D661 · B (Ruling 74): los borradores con su plazo cerca van primero, sin esperar sus 2 min', () => {
+  const cierreEn = (ms: number) => ({ cierreDeFranja: new Date(NOW.getTime() + ms).toISOString() })
+
+  it('la visita toma también, sin el filtro de edad, los de cierre en los próximos 10 min, el plazo más temprano primero, y después los de siempre sin repetir', async () => {
+    const joven = (id: string, ms: number) => ({
+      ...fila(id, 'urgent'),
+      createdAt: new Date(NOW.getTime() - 30_000),
+      request: cierreEn(ms),
+    })
+    const viejo = { ...fila('viejoCierra5', 'early'), request: cierreEn(5 * MIN) } // también sale en la lista de siempre
+    filas.urgent = [joven('cierra8', 8 * MIN), viejo, joven('cierra1', MIN)]
+    filas.early = [fila('normal', 'early'), viejo]
+
+    await expect(visitEarlyNadieDrafts(NOW, read => read())).resolves.toMatchObject({ scanned: 4, errors: 0 })
+    // Plazo = min(cierre, nació + 10 min): cierra1 (1 min), viejoCierra5 (5 min), cierra8 (8 min); al final, los de siempre.
+    expect(eventos).toEqual(['leer borrador cierra1', 'leer borrador viejoCierra5', 'leer borrador cierra8', 'leer borrador normal'])
+    const urgente = (prismaMock.onlineOrderCharge.findMany.mock.calls as any[]).map(([a]) => a).find(a => grupoDe(a.where) === 'urgent')
+    expect(urgente).toMatchObject({
+      take: 50,
+      where: { status: 'PENDING_AUTH', customerPhone: '', checkoutSessionId: { not: null }, checkoutExpiresAt: { gt: NOW } },
+    })
+    expect(urgente.where).not.toHaveProperty('createdAt') // sin el filtro de edad
+    expect(urgente.where.AND).toEqual([
+      { request: { path: ['cierreDeFranja'], gt: NOW.toISOString() } },
+      { request: { path: ['cierreDeFranja'], lte: new Date(NOW.getTime() + 10 * MIN).toISOString() } },
+    ])
+  })
+})
+
 describe('D661 · A3: la alerta de «confirmación atorada» no cuenta los tropiezos de un borrador que sólo espera a la clienta', () => {
   it('un borrador con la página viva que truena no suma intentos ni alerta; uno ya vencido sí suma, como hoy', async () => {
     filas.early = [{ ...fila('vivo', 'early'), attempts: 2 }]

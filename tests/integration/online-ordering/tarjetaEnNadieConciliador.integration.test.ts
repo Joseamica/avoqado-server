@@ -1230,4 +1230,33 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     expect(capturasA(aTiempo.pi)).toHaveLength(2)
     await cobradoUnaVez(aTiempo)
   })
+
+  // ── Ronda codex-r3 (21-nov) ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('D661 · B (Ruling 74): un borrador que nació 110 s antes del cierre, autorizado 70 s antes y sin aviso ni pestaña, se visita sin esperar sus 2 min y se vuelve pedido abrible con tiempo para abrirlo', async () => {
+    // R56 (el último pedido de «Nadie» es 10 min antes del cierre) no deja nacer un borrador a 110 s del cierre por la API: la prueba
+    // fija esas horas en la base, como las demás pruebas del conciliador fijan `createdAt`. Ahora = 40 s antes del cierre.
+    const cierre = new Date(Date.now() + 40_000)
+    const d = await borrador()
+    const request = (await cargo(d.chargeId)).request as Record<string, unknown>
+    await prisma.onlineOrderCharge.update({
+      where: { id: d.chargeId },
+      data: {
+        createdAt: new Date(cierre.getTime() - 110_000),
+        request: { ...request, cierreDeFranja: cierre.toISOString() } as Prisma.InputJsonValue,
+      },
+    })
+    // Stripe apartó 70 s antes del cierre; la clienta cerró la pestaña y el aviso de Stripe llegará después del cierre.
+    await pagar(d.chargeId, new Date(cierre.getTime() - 70_000))
+
+    await reconcileCardCharges(new Date(), read => read())
+
+    const c = await cargo(d.chargeId)
+    expect(c.status).toBe('AUTHORIZED')
+    const oo = await prisma.onlineOrder.findUniqueOrThrow({ where: { id: c.onlineOrderId! } })
+    // Su plazo es el cierre (antes que los 10 min del apartado) y todavía no llega: la única caja lo ve y lo puede abrir.
+    expect(oo).toMatchObject({ status: 'PENDING_ACCEPTANCE', requiresAcceptance: false, acceptDeadlineAt: cierre })
+    expect(oo.acceptDeadlineAt.getTime()).toBeGreaterThan(Date.now())
+    expect((await listFolios({ venueId: venueId! })).tarjetasPorAbrir.map(t => t.orderId)).toContain(oo.orderId)
+  })
 })

@@ -4,7 +4,8 @@
  *   - `PENDING_AUTH` vencido: confirma (crea el pedido si sí se apartó; si no, `ABANDONED`). Sin sesión guardada, repite la clave
  *     del último intento con sus mismos parámetros; si Stripe ya no acepta el vencimiento, no hay sesión que pagar → `ABANDONED`.
  *   - D661 (Ruling 10): `PENDING_AUTH` de «Nadie» con sesión y más de 2 min, aunque su página siga viva: confirma a tiempo la
- *     autorización que nadie avisó (sin aviso de Stripe ni pestaña), o la libera si ya pasó su plazo.
+ *     autorización que nadie avisó (sin aviso de Stripe ni pestaña), o la libera si ya pasó su plazo. D661 (Ruling 74): los que cierran
+ *     su franja en los próximos 10 min, sin esperar esos 2 min y antes que los demás (el plazo más temprano primero).
  *   - `CAPTURING` de más de 60 s (antes puede haber una captura en vuelo): lee el PaymentIntent y cobra, termina o falla. D661 (r5 #1):
  *     uno de «Nadie» pasada su gracia ya no se cobra: se suelta y se cierra con el desenlace de Stripe. D661 (C, Ruling 52): tampoco en
  *     sus últimos 90 s (un reenvío del SDK caería después de la gracia).
@@ -28,7 +29,14 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { getProvider } from '@/services/payments/provider-registry'
 import type { AuthorizationState, ProviderRequestLimits } from '@/services/payments/providers/provider.interface'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
-import { CARD_RECONCILE_BATCH, CARD_STUCK_ALERT_MINUTES, NOT_CAPTURED_OUTSIDE, SIN_TELEFONO_NADIE, cargoDeNadie } from '../constants'
+import {
+  ACCEPT_TIMEOUT_MINUTES,
+  CARD_RECONCILE_BATCH,
+  CARD_STUCK_ALERT_MINUTES,
+  NOT_CAPTURED_OUTSIDE,
+  SIN_TELEFONO_NADIE,
+  cargoDeNadie,
+} from '../constants'
 import { prepMinutes } from '../transitions.service'
 import type { ReadCandidates } from '../types'
 import { GraceEndedBeforeDispatch, captureCharge, failCapture, finishCapture } from './capture.service'
@@ -57,6 +65,8 @@ const NADIE_CAPTURE_GRACE_MS = 5 * 60_000
 const NADIE_RETRY_MARGIN_MS = 90_000
 /** D661 (Ruling 10): edad desde la que se visita un borrador de «Nadie» con su página viva (antes, la clienta apenas está pagando). */
 const NADIE_EARLY_VISIT_MS = 2 * 60_000
+/** D661 (Ruling 74): …salvo que su plazo pueda caer en esta ventana: entonces no espera esa edad. */
+const NADIE_URGENT_WINDOW_MS = 10 * 60_000
 /** D661 (A2): borradores de «Nadie» que la visita temprana lee a la vez (cada uno bajo sus propios candados; son independientes)… */
 const NADIE_EARLY_CONCURRENCY = 5
 /** …y desde cuándo ya no empieza otro: lo que falte espera al siguiente minuto. Con lecturas lentas de T s, la visita dura < este + T. */
@@ -107,6 +117,47 @@ const earlyNadieWhere = (reloj: Date, inicio: Date): Prisma.OnlineOrderChargeWhe
   // Codex r1 C3: el borrador cobrado fuera de Avoqado ya no se reintenta (ni se abandona): lo resuelve una persona.
   ...NOT_CAPTURED_OUTSIDE,
 })
+
+/**
+ * D661 (Ruling 74): los de «Nadie» con la página viva cuyo plazo puede caer en los próximos 10 min se visitan SIN esperar sus 2 min de
+ * edad. El plazo de su pedido es el cierre de su franja o los 10 min del apartado, lo que llegue primero (Ruling 10); los 10 min corren
+ * desde que Stripe autoriza (nunca antes de nacer el borrador), así que esos 2 min sólo pueden costar el CIERRE: cierre en (reloj,
+ * reloj + 10 min]. El cierre se guarda con `toISOString` (siempre la misma forma), que se compara como texto en su orden.
+ */
+const urgentNadieWhere = (reloj: Date, inicio: Date): Prisma.OnlineOrderChargeWhereInput => ({
+  status: S.PENDING_AUTH,
+  customerPhone: SIN_TELEFONO_NADIE,
+  checkoutSessionId: { not: null },
+  checkoutExpiresAt: { gt: inicio },
+  AND: [
+    { request: { path: ['cierreDeFranja'], gt: reloj.toISOString() } },
+    { request: { path: ['cierreDeFranja'], lte: new Date(reloj.getTime() + NADIE_URGENT_WINDOW_MS).toISOString() } },
+  ],
+  ...NOT_CAPTURED_OUTSIDE,
+})
+
+/** El plazo más temprano que puede tener su pedido (Ruling 10): min(cierre de su franja, nació + 10 min). */
+const plazoMasTemprano = (c: Row): number => {
+  const diezMin = c.createdAt.getTime() + ACCEPT_TIMEOUT_MINUTES * 60_000
+  const cierre = (c.request as { cierreDeFranja?: string | null } | null)?.cierreDeFranja
+  return cierre ? Math.min(Date.parse(cierre), diezMin) : diezMin
+}
+
+/**
+ * Ruling 74: los urgentes, el plazo más temprano primero (y por id). ponytail: la base los da por `createdAt` y el orden por plazo es en
+ * memoria: con más de 50 urgentes a la vez entran los 50 más viejos; si un día pasa, ordenar en SQL por LEAST(cierre, createdAt + 10 min).
+ */
+const urgentes = async (readEntry: ReadCandidates, reloj: Date, inicio: Date): Promise<Row[]> =>
+  (
+    await readEntry(() =>
+      prisma.onlineOrderCharge.findMany({
+        where: urgentNadieWhere(reloj, inicio),
+        include,
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: CARD_RECONCILE_BATCH,
+      }),
+    )
+  ).sort((a, b) => plazoMasTemprano(a) - plazoMasTemprano(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 
 /**
  * Cada grupo con su tope y su orden de siempre; D661 (A2): separados por cómo se procesan. D661 (B, Ruling 42): sin los tempranos: la
@@ -364,7 +415,10 @@ async function earlyLane(readEntry: ReadCandidates, reloj: Date, result: Reconci
   if (earlyLaneBusy) return
   earlyLaneBusy = true
   try {
-    const pending = await page(readEntry, earlyNadieWhere(reloj, inicio))
+    // Ruling 74: primero los de plazo cerca (sin el filtro de edad); después los de siempre, sin repetir.
+    const [primero, deSiempre] = await Promise.all([urgentes(readEntry, reloj, inicio), page(readEntry, earlyNadieWhere(reloj, inicio))])
+    const ya = new Set(primero.map(c => c.id))
+    const pending = [...primero, ...deSiempre.filter(c => !ya.has(c.id))]
     const stopAt = Date.now() + NADIE_EARLY_BUDGET_MS
     let next = 0
     const worker = async () => {
