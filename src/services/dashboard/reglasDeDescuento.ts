@@ -81,17 +81,20 @@ export function validarCambioDeDescuento(guardado: Guardado | null, cambio: Reco
  * No se usa `updatedAt`: cada venta sube `currentUses` y con él `updatedAt`, y daría un 409 falso.
  */
 export function dondeEscribir(id: string, guardado: Guardado, cambio: Record<string, unknown>) {
-  // D37 (Codex r3 #1): las fechas de la vigencia también: dos guardados a la vez no dejan «desde» después de «hasta».
-  const protegidos = [...REGLA, ...FECHAS]
-  if (!protegidos.some(campo => cambio[campo] !== undefined)) return { id }
   const where: Record<string, unknown> = { id }
-  for (const campo of protegidos) {
-    if (!(campo in guardado)) continue
-    const valor = guardado[campo]
-    if (campo !== 'targetCategoryIds') where[campo] = valor
-    else if (Array.isArray(valor) && valor.length > 0) where[campo] = { equals: valor }
-    // Una lista NULL en la base (p. ej. los descuentos de referidos) Prisma la lee como []: se aceptan las dos (Codex, diseño #1).
-    else where.OR = [{ targetCategoryIds: { equals: [] } }, { targetCategoryIds: { equals: null } }]
+  // Dos grupos, cada uno protegido SÓLO si el cambio lo trae: la regla (alcance, categorías, límites) y, aparte, las fechas de la
+  // vigencia (D37, Codex r3 #1: dos guardados a la vez no dejan «desde» después de «hasta»). Separados para que guardar un límite no
+  // choque con otra persona que sólo movió una fecha, ni al revés (r4 #2).
+  for (const grupo of [REGLA, FECHAS] as const) {
+    if (!grupo.some(campo => cambio[campo] !== undefined)) continue
+    for (const campo of grupo) {
+      if (!(campo in guardado)) continue
+      const valor = guardado[campo]
+      if (campo !== 'targetCategoryIds') where[campo] = valor
+      else if (Array.isArray(valor) && valor.length > 0) where[campo] = { equals: valor }
+      // Una lista NULL en la base (p. ej. los descuentos de referidos) Prisma la lee como []: se aceptan las dos (Codex, diseño #1).
+      else where.OR = [{ targetCategoryIds: { equals: [] } }, { targetCategoryIds: { equals: null } }]
+    }
   }
   return where as { id: string }
 }

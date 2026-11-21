@@ -149,15 +149,22 @@ describe('dondeEscribir · dos ediciones a la vez', () => {
     const leido = guardado({ validFrom: new Date('2026-12-10T06:00:00.000Z'), validUntil: new Date('2026-12-21T05:59:59.999Z') })
     expect(dondeEscribir('k1', leido, { validUntil: new Date('2026-12-13T05:59:59.999Z') })).toEqual({
       id: 'k1',
-      scope: 'ORDER',
-      OR: [{ targetCategoryIds: { equals: [] } }, { targetCategoryIds: { equals: null } }],
-      maxTotalUses: null,
-      maxUsesPerCustomer: null,
       validFrom: new Date('2026-12-10T06:00:00.000Z'),
       validUntil: new Date('2026-12-21T05:59:59.999Z'),
     })
     // Sin fechas ni regla en el cambio: sólo por id (no hay 409 falso).
     expect(dondeEscribir('k1', leido, { active: false })).toEqual({ id: 'k1' })
+  })
+
+  it('🔴 Codex D37 r4 #2: guardar un límite o el alcance NO se condiciona a las fechas (otra persona que sólo movió una fecha no da 409)', () => {
+    const leido = guardado({ maxTotalUses: 3, validFrom: new Date('2026-12-10T06:00:00.000Z'), validUntil: null })
+    expect(dondeEscribir('d1', leido, { maxTotalUses: 5 })).toEqual({
+      id: 'd1',
+      scope: 'ORDER',
+      OR: [{ targetCategoryIds: { equals: [] } }, { targetCategoryIds: { equals: null } }],
+      maxTotalUses: 3,
+      maxUsesPerCustomer: null,
+    })
   })
 
   const g = guardado({ scope: 'CATEGORY', targetCategoryIds: ['c1'], maxTotalUses: 3 })
