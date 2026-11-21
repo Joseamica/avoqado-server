@@ -31,7 +31,7 @@ export function registerCashMachineTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'cash_machine_closes',
-    'Cierres de la máquina de efectivo (autoservicio QuickPay) de una sucursal que puedes ver, en un rango de fechas del negocio (por omisión, los últimos 7 días), más nuevos primero. porFecha decide qué fecha cuenta: «comprobante» (por omisión: el día en que la máquina cobró; los que no tienen hora cuentan por el día en que se registraron) o «registro» (el día en que llegaron al servidor, que puede ser después si la PC estuvo sin internet). Cada cierre trae su folio, el desenlace (PAGADO, CANCELADO o GUARDADO), quién lo decidió (la máquina o un gerente que lo resolvió a mano), si la máquina cobró pero la venta NO se registró (ventaNoRegistrada, con el motivo; el dinero queda y su deuda se cuenta igual), la hora del comprobante (o «por conciliar»), el estado del turno, y los importes EN PESOS: adeudo, venta, propina, lo que entró, el cambio entregado, lo aplicado a la cuenta, el excedente y lo que la operación originó de deuda con el cliente, con su tipo (CAMBIO que faltó, dinero GUARDADO, NO_DEVUELTO al cancelar, o EXCEDENTE porque el precio bajó). «originó deuda» no quiere decir que siga sin pagarse: si ya se le pagó al cliente, fue un pago por retiro sin verificar. Filtros: soloConDeuda (sólo los que originaron deuda), folio (búsqueda por parte del folio, también en las incidencias) y enDuda (en vez de cierres, las incidencias abiertas que esperan a un gerente, con su tipo: ESPERANDO = la PC no supo cómo terminó la operación; IMPOSIBLE = importes que la máquina no puede dar; CONFLICTO = el mismo folio con otra versión, desde otra PC o con evidencia nueva después de resolverlo; NO_SE_PUDO_REGISTRAR = la máquina cobró pero no se registró la venta, el dinero queda ahí; TRAS_REVOCAR = folio de una PC a la que ya le habían quitado la máquina; ignora el rango). Todos los importes en PESOS. Hasta 100 por página, con el total y un cursor para seguir. Requiere payments:read.',
+    'Cierres de la máquina de efectivo (autoservicio QuickPay) de una sucursal que puedes ver, en un rango de fechas del negocio (por omisión, los últimos 7 días), más nuevos primero. porFecha decide qué fecha cuenta: «comprobante» (por omisión: el día en que la máquina cobró; los que no tienen hora cuentan por el día en que se registraron) o «registro» (el día en que llegaron al servidor, que puede ser después si la PC estuvo sin internet). Cada cierre trae su folio, el desenlace (PAGADO, CANCELADO o GUARDADO), quién lo decidió (la máquina o un gerente que lo resolvió a mano), si la máquina cobró pero la venta NO se registró (ventaNoRegistrada, con el motivo; el dinero queda y su deuda se cuenta igual), la hora del comprobante (o «por conciliar»), el estado del turno, y los importes EN PESOS: adeudo, venta, propina, lo que entró, el cambio entregado, lo aplicado a la cuenta, el excedente y lo que la operación originó de deuda con el cliente, con su tipo (CAMBIO que faltó, dinero GUARDADO, NO_DEVUELTO al cancelar, o EXCEDENTE porque el precio bajó). «originó deuda» no quiere decir que siga sin pagarse: si ya se le pagó al cliente, fue un pago por retiro sin verificar. Filtros: soloConDeuda (sólo los que originaron deuda), folio (búsqueda por parte del folio, también en las incidencias) y enDuda (en vez de cierres, las incidencias abiertas que esperan a un gerente, con su tipo: ESPERANDO = la PC no supo cómo terminó la operación; IMPOSIBLE = importes que la máquina no puede dar; CONFLICTO = el mismo folio con otra versión, desde otra PC o con evidencia nueva después de resolverlo; NO_SE_PUDO_REGISTRAR = la máquina cobró pero no se registró la venta, el dinero queda ahí; TRAS_REVOCAR = folio de una PC a la que ya le habían quitado la máquina; POR_TERMINAR = la máquina ya cerró el cobro pero la venta no se terminó y relevaron su PC: un gerente la termina; ignora el rango). Todos los importes en PESOS. Hasta 100 por página, con el total y un cursor para seguir. Requiere payments:read.',
     {
       venueId: z.string().describe('Sucursal (debe estar en tu alcance)'),
       fromDate: z
@@ -85,7 +85,21 @@ export function registerCashMachineTools(server: McpServer, scope: McpScope) {
               adeudo: pesosDe(f.dueCents),
               venta: pesosDe(f.saleCents),
               propina: pesosDe(f.tipCents),
+              // H1 (Codex servidor r5): lo MÁS que vio entrar una PC en este folio (null si nadie lo dijo en números).
+              entroSegunLaPc: pesosDe(f.creditCents),
               evidenciaCrudaDeLaPc: textoCrudo(f.lastSeen),
+            }
+          }
+          if (f.kind === 'POR_TERMINAR') {
+            // H5: el desenlace ya está guardado; falta que un gerente termine la venta.
+            return {
+              ...base,
+              desenlace: typeof f.outcome === 'string' ? f.outcome : null,
+              adeudo: pesosDe(f.dueCents),
+              venta: pesosDe(f.saleCents),
+              propina: pesosDe(f.tipCents),
+              entro: pesosDe(f.creditCents),
+              cambioEntregado: pesosDe(f.changeDispensedCents),
             }
           }
           const ev = (f.primerEvento ?? {}) as { cierre?: Record<string, unknown>; duda?: Record<string, unknown>; motivo?: unknown }
@@ -138,8 +152,9 @@ export function registerCashMachineTools(server: McpServer, scope: McpScope) {
         registradoEl: c.createdAt.toISOString(),
         turno: c.shiftStatus,
         adeudo: pesos(c.dueCents),
-        venta: pesos(c.saleCents),
-        propina: pesos(c.tipCents),
+        // H3/H4: null = el reparto que llegó no eran centavos enteros (la venta no se registró).
+        venta: pesosDe(c.saleCents),
+        propina: pesosDe(c.tipCents),
         entro: pesos(c.creditCents),
         cambioEntregado: pesos(c.changeDispensedCents),
         aplicado: pesos(c.appliedCents),

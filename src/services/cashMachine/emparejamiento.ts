@@ -53,7 +53,14 @@ async function candado(tx: TxConReintento, venueId: string): Promise<void> {
 
 type Revocada = { id: string; deviceId: string; machineIp: string }
 
-/** Revoca las activas que cumplan `donde` en este negocio. A lo más una (índice único parcial por negocio). */
+/** ponytail: 500 folios RECIBIDOS sin terminar en una sola PC es la base caída por horas; los que pasen los anota el siguiente relevo. */
+const PENDIENTES_POR_RELEVO = 500
+
+/**
+ * Revoca las activas que cumplan `donde` en este negocio (a lo más una: índice único parcial por negocio). H5 (Codex servidor r5): en
+ * la MISMA transacción, los folios RECIBIDOS de lo que se revoca (desenlace guardado, venta sin terminar) quedan en la bandeja del
+ * gerente como `POR_TERMINAR`: si esa PC no vuelve, el gerente los termina desde lo congelado. Sin cron.
+ */
 async function revocarEnTx(tx: TxConReintento, venueId: string, donde: Prisma.CashMachineBindingWhereInput): Promise<Revocada[]> {
   const activas = await tx.cashMachineBinding.findMany({
     where: { venueId, active: true, ...donde },
@@ -65,6 +72,26 @@ async function revocarEnTx(tx: TxConReintento, venueId: string, donde: Prisma.Ca
       where: { venueId, id: { in: activas.map(a => a.id) } },
       data: { active: false, revokedAt: new Date() },
     })
+    // El índice parcial `CashMachineFolio_pendientes_idx` (venueId, bindingId) WHERE NOT terminado: sólo lo que falta.
+    const recibidos = await tx.cashMachineFolio.findMany({
+      where: { venueId, bindingId: { in: activas.map(a => a.id) }, terminado: false, decision: { not: Prisma.DbNull } },
+      select: { referenceCC: true, deviceId: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: PENDIENTES_POR_RELEVO,
+    })
+    if (recibidos.length > 0) {
+      await tx.cashMachineIncident.createMany({
+        data: recibidos.map(f => ({
+          venueId,
+          referenceCC: f.referenceCC,
+          kind: 'POR_TERMINAR',
+          status: 'ABIERTO',
+          payload: { motivo: 'PC_RELEVADA' },
+          deviceId: f.deviceId,
+        })),
+        skipDuplicates: true,
+      })
+    }
   }
   return activas
 }
@@ -153,16 +180,19 @@ export async function exigirAparatoEmparejado(
   deviceId: string | null,
   credencial: string | null,
   bindingId: string | null = null,
-): Promise<{ bindingId: string }> {
+): Promise<{ bindingId: string; bindingDeLaCredencial: string }> {
   if (deviceId && credencial) {
     const porCredencial = await prisma.cashMachineBinding.findFirst({
       where: { venueId, deviceId, credentialHash: hashDeCredencial(credencial) },
       select: { id: true },
     })
-    if (porCredencial && (!bindingId || bindingId === porCredencial.id)) return { bindingId: porCredencial.id }
+    // H6 (Codex servidor r5): también el emparejamiento de la credencial presentada: sin hora, el intento sólo vale si es el mismo.
+    if (porCredencial && (!bindingId || bindingId === porCredencial.id)) {
+      return { bindingId: porCredencial.id, bindingDeLaCredencial: porCredencial.id }
+    }
     if (porCredencial && bindingId) {
       const fijo = await prisma.cashMachineBinding.findFirst({ where: { id: bindingId, venueId, deviceId }, select: { id: true } })
-      if (fijo) return { bindingId: fijo.id }
+      if (fijo) return { bindingId: fijo.id, bindingDeLaCredencial: porCredencial.id }
     }
   }
   throw new ForbiddenError('Esta PC no está emparejada con la máquina de efectivo', CASH_MACHINE_NOT_PAIRED)

@@ -49,8 +49,12 @@ export type DesenlaceDeLaMaquina = (typeof DESENLACES_DE_LA_MAQUINA)[number]
 export type DeudaConElCliente = 'CAMBIO' | 'GUARDADO' | 'NO_DEVUELTO' | 'EXCEDENTE'
 export type EstadoDelTurnoDeLaMaquina = 'EN_TURNO' | 'TURNO_CERRADO' | 'POR_CONCILIAR'
 export type QuienResolvio = 'MAQUINA' | 'GERENTE'
-/** `TRAS_REVOCAR`: un folio de una PC revocada (decisión d del founder): queda para que el gerente lo revise. */
-export type TipoDeIncidencia = 'CONFLICTO' | 'IMPOSIBLE' | 'NO_SE_PUDO_REGISTRAR' | 'TRAS_REVOCAR'
+/**
+ * `TRAS_REVOCAR`: un folio de una PC revocada (decisión d del founder): queda para que el gerente lo revise.
+ * `POR_TERMINAR` (H5, Codex servidor r5): el folio tiene su desenlace guardado pero la venta no se terminó (RECIBIDO) y su
+ * emparejamiento ya no está activo (relevaron la PC): sólo el gerente lo termina, desde lo congelado (`resolve` con la `version`).
+ */
+export type TipoDeIncidencia = 'CONFLICTO' | 'IMPOSIBLE' | 'NO_SE_PUDO_REGISTRAR' | 'TRAS_REVOCAR' | 'POR_TERMINAR'
 /**
  * Por qué un PAGADO comprobado quedó sin venta (202, el dinero en su cierre y su incidencia):
  *  · `DESCUENTO`: la fase 1a no cobra descuentos en la máquina (decisión a del founder);
@@ -77,8 +81,9 @@ export type MotivoSinRegistro =
 export interface CierreDeLaMaquina {
   outcome: DesenlaceDeLaMaquina
   dueCents: number
-  saleCents: number
-  tipCents: number
+  /** El reparto venta/propina (administrativo, la máquina no lo conoce). H3/H4: null = no llegó como número. */
+  saleCents: number | null
+  tipCents: number | null
   creditCents: number
   changeDispensedCents: number
   /** Hora física del cierre (ISO). Sólo cuenta con `occurredAtKnown`. */
@@ -105,8 +110,9 @@ export interface RespuestaDeLaMaquina {
   orderId: string | null
   paymentId: string | null
   dueCents: number
-  saleCents: number
-  tipCents: number
+  /** null = el reparto que llegó no eran centavos enteros (H3/H4). */
+  saleCents: number | null
+  tipCents: number | null
   appliedCents: number
   excedenteCents: number
   creditCents: number
@@ -126,8 +132,8 @@ export interface RespuestaSinRegistro {
   outcome: string
   resolvedBy: string
   dueCents: number
-  saleCents: number
-  tipCents: number
+  saleCents: number | null
+  tipCents: number | null
   creditCents: number
   changeDispensedCents: number
   /** r3 #5: lo que se le debe al cliente SÓLO por los importes físicos (el cambio que faltó, lo guardado o no devuelto). */
@@ -174,17 +180,18 @@ export const adeudoCobrable = (dueCents: number): boolean => Number.isInteger(du
 
 /**
  * R3#9, R5#5, R4-7 #6: ¿esta combinación de importes puede salir de la máquina? Cualquier otra cosa es 422 con incidencia.
- *  · todos enteros ≥ 0 y el adeudo mayor que 0 y múltiplo de 50 centavos (Codex r1 #12);
+ *  · lo FÍSICO (adeudo, lo que entró y el cambio) en enteros ≥ 0 y el adeudo mayor que 0 y múltiplo de 50 centavos (Codex r1 #12);
  *  · `PAGADO`: `credit ≥ due` y `0 ≤ change ≤ credit − due`;
  *  · `CANCELADO` y `GUARDADO`: `credit < due`; `GUARDADO` no devuelve nada y `CANCELADO` no devuelve más de lo que entró; y el modo del
  *    `cancel` coincide (`'1'` / `'2'`): sin él, revisión (Codex r1 #12).
  * F4 (Codex servidor r4): el reparto venta/propina NO es de la máquina (ella sólo conoce el adeudo). Un reparto descuadrado con lo
  * físico posible es un comprobante legible: se guarda y la venta no se arma (`REPARTO_DESCUADRADO`), nunca un 400/422 sin rastro.
+ * H3/H4 (Codex servidor r5): lo mismo un reparto con fracción de centavo o que no llegó como número: aquí no cuenta.
  */
 export function validarCierre(c: CierreDeLaMaquina): 'OK' | 'IMPOSIBLE' {
   if (!DESENLACES_DE_LA_MAQUINA.includes(c.outcome)) return 'IMPOSIBLE'
-  const importes = [c.dueCents, c.saleCents, c.tipCents, c.creditCents, c.changeDispensedCents]
-  if (!importes.every(centavosGuardables)) return 'IMPOSIBLE'
+  const fisicos = [c.dueCents, c.creditCents, c.changeDispensedCents]
+  if (!fisicos.every(centavosGuardables)) return 'IMPOSIBLE'
   if (!adeudoCobrable(c.dueCents)) return 'IMPOSIBLE'
   if (c.outcome === 'PAGADO') {
     return c.creditCents >= c.dueCents && c.changeDispensedCents <= c.creditCents - c.dueCents ? 'OK' : 'IMPOSIBLE'
@@ -192,6 +199,46 @@ export function validarCierre(c: CierreDeLaMaquina): 'OK' | 'IMPOSIBLE' {
   if (c.creditCents >= c.dueCents) return 'IMPOSIBLE'
   if (c.outcome === 'GUARDADO') return c.changeDispensedCents === 0 && c.cancelMode === '2' ? 'OK' : 'IMPOSIBLE'
   return c.changeDispensedCents <= c.creditCents && c.cancelMode === '1' ? 'OK' : 'IMPOSIBLE'
+}
+
+/** H3/H4: un número que sí llegó (aun con fracción); cualquier otra cosa, `null` («no llegó como número»). */
+export const numeroQueLlego = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+
+/** El reparto venta/propina se puede vender: centavos enteros que suman el adeudo (si no, `REPARTO_DESCUADRADO`). */
+export const repartoVendible = (i: { dueCents: number; saleCents: number | null; tipCents: number | null }): boolean =>
+  i.saleCents !== null &&
+  i.tipCents !== null &&
+  centavosGuardables(i.saleCents) &&
+  centavosGuardables(i.tipCents) &&
+  i.dueCents === i.saleCents + i.tipCents
+
+/** Para las columnas enteras del cierre: el centavo entero, o null si lo que llegó no lo era. */
+const enteroONulo = (n: number | null): number | null => (n !== null && centavosGuardables(n) ? n : null)
+
+/**
+ * H3/H4 (Codex servidor r5): «primero la evidencia» en la frontera HTTP. La ruta sólo exige folio, credencial y que lo FÍSICO (adeudo,
+ * lo que entró, el cambio) sean números legibles y que el desenlace sea un texto; TODO lo demás se lee aquí, DESPUÉS de guardar la
+ * evidencia, y lo que no sirve cuenta como desconocido, nunca como un 400 sin rastro:
+ *  · la hora «conocida» sin fecha válida es hora desconocida (por conciliar);
+ *  · el reparto venta/propina que no llegó como número queda en null (la venta no se arma: `REPARTO_DESCUADRADO`);
+ *  · el turno que no es un texto corto y el modo de cancelación que no es '1' o '2' quedan en null (sin modo, una cancelación es
+ *    IMPOSIBLE: incidencia con su evidencia).
+ */
+export function leerCierreDeLaPc(c: Record<string, unknown>): CierreDeLaMaquina {
+  const hora = typeof c.occurredAt === 'string' && !Number.isNaN(Date.parse(c.occurredAt)) ? c.occurredAt : null
+  const conocida = c.occurredAtKnown === true && hora !== null
+  return {
+    outcome: c.outcome as DesenlaceDeLaMaquina,
+    dueCents: c.dueCents as number,
+    saleCents: numeroQueLlego(c.saleCents),
+    tipCents: numeroQueLlego(c.tipCents),
+    creditCents: c.creditCents as number,
+    changeDispensedCents: c.changeDispensedCents as number,
+    occurredAt: conocida ? hora : null,
+    occurredAtKnown: conocida,
+    saleShiftId: typeof c.saleShiftId === 'string' && c.saleShiftId.length <= 64 ? c.saleShiftId : null,
+    cancelMode: c.cancelMode === '1' || c.cancelMode === '2' ? c.cancelMode : null,
+  }
 }
 
 /** Lo que la máquina le debe al cliente. `excedenteCents`: lo que se cobró de más porque el precio del servidor era menor. */
@@ -430,6 +477,31 @@ const ACCION_DE_LA_INCIDENCIA: Record<TipoDeIncidencia, string> = {
   IMPOSIBLE: 'CASH_MACHINE_CLOSE_IMPOSSIBLE',
   NO_SE_PUDO_REGISTRAR: 'CASH_MACHINE_SALE_NOT_RECORDED',
   TRAS_REVOCAR: 'CASH_MACHINE_FOLIO_AFTER_UNPAIR',
+  POR_TERMINAR: 'CASH_MACHINE_FOLIO_TO_FINISH',
+}
+
+/**
+ * H1 (Codex servidor r5): lo que la bandeja enseña de una duda ABIERTA es la evidencia física MÁS ALTA de su folio: lo que entró (el
+ * mayor que haya visto una PC, en un cierre o en una duda) y lo último que vio la PC. Cualquier observación NUEVA de una PC lo actualiza
+ * —también la que se anotó como conflicto porque cambió el reparto—, en la MISMA transacción que sube la `version` del folio: el gerente
+ * nunca confirma una versión que enseñe dinero viejo. Lo que vio la PC con MENOS crédito que el ya visto (un reenvío que llegó tarde) no
+ * tapa al mayor. Quien llama tiene el candado del folio.
+ */
+export async function anotarEnLaDuda(
+  tx: Db,
+  duda: { id: string; status: string; payload: unknown } | null,
+  ev: { creditCents: number | null; lastSeen?: unknown },
+): Promise<void> {
+  if (!duda || duda.status !== 'ABIERTO') return
+  const previa = (duda.payload ?? {}) as Record<string, unknown>
+  const mayor = typeof previa.creditCents === 'number' ? previa.creditCents : null
+  const menor = ev.creditCents !== null && mayor !== null && ev.creditCents < mayor
+  const payload = {
+    ...previa,
+    ...(ev.creditCents !== null && !menor ? { creditCents: ev.creditCents } : {}),
+    ...('lastSeen' in ev && !menor ? { lastSeen: ev.lastSeen ?? null } : {}),
+  }
+  await tx.cashMachineIncident.update({ where: { id: duda.id }, data: { payload: payload as Prisma.InputJsonValue } })
 }
 
 export async function anotarEnBitacora(venueId: string, referenceCC: string, staffId: string, anotadas: IncidenciaAnotada[]) {
@@ -446,6 +518,26 @@ export async function anotarEnBitacora(venueId: string, referenceCC: string, sta
   }
 }
 
+/**
+ * H5 (Codex servidor r5): el folio RECIBIDO (desenlace guardado, venta sin terminar) de un emparejamiento que ya no está activo va a la
+ * bandeja del gerente. Una fila por folio (la llave única de la incidencia); repetirla no hace nada. Sin aviso al crearse: el cierre la
+ * quita en su misma transacción (o la deja RESUELTA a nombre del gerente que lo terminó, con su bitácora).
+ */
+export async function pendienteDeTerminar(tx: Db, venueId: string, referenceCC: string, deviceId: string | null): Promise<void> {
+  await tx.cashMachineIncident.upsert({
+    where: { venueId_referenceCC_kind: { venueId, referenceCC, kind: 'POR_TERMINAR' } },
+    create: {
+      venueId,
+      referenceCC,
+      kind: 'POR_TERMINAR',
+      status: 'ABIERTO',
+      payload: { motivo: 'PC_RELEVADA' } as Prisma.InputJsonValue,
+      deviceId,
+    },
+    update: {},
+  })
+}
+
 /** Lo que el PRIMER mensaje de un folio congela (D2): carrito completo, su huella, dueño, emparejamiento, turno y reparto. */
 export interface LoQueSeCongela {
   deviceId: string | null
@@ -454,14 +546,14 @@ export interface LoQueSeCongela {
   cartHash: string | null
   saleShiftId: string | null
   dueCents: number
-  saleCents: number
-  tipCents: number
+  saleCents: number | null
+  tipCents: number | null
 }
 
 /**
  * D2 y F12 (Codex servidor r4): el primer mensaje congela el folio AUNQUE su cierre sea imposible; lo que llegue después no sustituye
- * carrito, clienta, turno ni reparto. Quien llama tiene el candado del folio. Con importes que ni siquiera son centavos enteros no hay
- * reparto que guardar: no se congela (queda la observación y su incidencia IMPOSIBLE) y devuelve `null`.
+ * carrito, clienta, turno ni reparto. Quien llama tiene el candado del folio. H3 (Codex servidor r5): SIEMPRE, también con importes que
+ * no son centavos enteros (se guardan tal cual): antes ese primer mensaje no congelaba y el reenvío corregido sustituía a la clienta.
  */
 export async function congelarElFolio(
   tx: Db,
@@ -469,8 +561,7 @@ export async function congelarElFolio(
   referenceCC: string,
   c: LoQueSeCongela,
   decision: DecisionGuardada | null = null,
-): Promise<CashMachineFolio | null> {
-  if (![c.dueCents, c.saleCents, c.tipCents].every(centavosGuardables)) return null
+): Promise<CashMachineFolio> {
   return tx.cashMachineFolio.create({
     data: {
       venueId,
@@ -492,14 +583,23 @@ export async function congelarElFolio(
  * r6-6, F7: el emparejamiento FIJO del intento, con cuándo nació y cuándo lo revocaron. Uno que ya no existe cuenta como revocado
  * desde siempre (nunca se concede por un dato que falta).
  */
-export async function vinculoDelIntento(tx: Db, venueId: string, bindingId: string | null): Promise<VinculoDelIntento | null> {
+export async function vinculoDelIntento(
+  tx: Db,
+  venueId: string,
+  bindingId: string | null,
+  bindingDeLaCredencial: string | null,
+): Promise<VinculoDelIntento | null> {
   if (!bindingId) return null
   const v = await tx.cashMachineBinding.findFirst({
     where: { id: bindingId, venueId },
     select: { active: true, createdAt: true, revokedAt: true },
   })
-  if (!v) return { creadoEn: new Date(0), revocadoEn: new Date(0) }
-  return { creadoEn: v.createdAt, revocadoEn: v.active ? null : (v.revokedAt ?? new Date(0)) }
+  if (!v) return { creadoEn: new Date(0), revocadoEn: new Date(0), esElDeLaCredencial: false }
+  return {
+    creadoEn: v.createdAt,
+    revocadoEn: v.active ? null : (v.revokedAt ?? new Date(0)),
+    esElDeLaCredencial: bindingId === bindingDeLaCredencial,
+  }
 }
 
 // ─── Las respuestas ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -590,6 +690,8 @@ export type CierreQueLlega =
       userId: string
       deviceId: string | null
       bindingId: string | null
+      /** H6: el emparejamiento de la credencial que presentó la PC (sin hora, el intento sólo vale si es éste). */
+      bindingDeLaCredencial: string | null
     }
   | {
       origen: 'GERENTE'
@@ -637,6 +739,10 @@ export async function recibirCierreDeLaMaquina(
   const r = await conElFolio(venueId, referenceCC, async (tx, l) => {
     const huella = huellaDeLaObservacion({ ...observacion, congelado: l.folio?.cartHash ?? carritoRecibido })
     const repetida = await yaObservada(tx, venueId, referenceCC, huella)
+    const vinculo =
+      entrada.origen === 'PC'
+        ? await vinculoDelIntento(tx, venueId, l.folio ? l.folio.bindingId : entrada.bindingId, entrada.bindingDeLaCredencial)
+        : null
     const d: DecisionDelFolio =
       entrada.origen === 'PC'
         ? decidirSobreElFolio(l.estado, {
@@ -646,7 +752,7 @@ export async function recibirCierreDeLaMaquina(
             cierre,
             carritoRecibido,
             turnoRecibido: cierre.saleShiftId ?? null,
-            vinculo: await vinculoDelIntento(tx, venueId, l.folio ? l.folio.bindingId : entrada.bindingId),
+            vinculo,
             imposible,
           })
         : decidirSobreElFolio(l.estado, {
@@ -660,6 +766,10 @@ export async function recibirCierreDeLaMaquina(
     if (d.accion === 'VERSION') return { d, l, anotadas: [] as IncidenciaAnotada[], folio: l.folio }
     const observada = await observar(tx, venueId, referenceCC, huella, repetida, observacion, l.folio)
     const nueva = observada.nueva
+    // H1: lo que entró según ESTE cierre de la PC (también uno imposible o en conflicto) es evidencia de la duda abierta del folio.
+    if (nueva && entrada.origen === 'PC') {
+      await anotarEnLaDuda(tx, l.duda, { creditCents: centavosGuardables(cierre.creditCents) ? cierre.creditCents : null })
+    }
     const anotadas: IncidenciaAnotada[] = []
     const dueño = l.folio?.deviceId ?? deviceId
     const loDeLaPc = (): LoQueSeCongela | null =>
@@ -703,6 +813,10 @@ export async function recibirCierreDeLaMaquina(
       if (d.trasRevocar) {
         await anotar(tx, venueId, referenceCC, dueño, anotadas, 'TRAS_REVOCAR', { ...observacion, registrable: !d.motivoSinVenta }, nueva)
       }
+      // H5 (Codex servidor r5): el desenlace de un folio cuyo emparejamiento ya no está activo se guarda YA como «pendiente de
+      // terminar» (sin aviso: el cierre lo quita en su misma transacción). Si la venta queda RECIBIDA y esa PC no vuelve, el gerente lo
+      // ve y lo termina; un relevo posterior lo anota al revocar (`emparejamiento.ts`).
+      if (vinculo?.revocadoEn) await pendienteDeTerminar(tx, venueId, referenceCC, dueño)
     }
     if (d.accion === 'CONFLICTO') {
       await anotar(tx, venueId, referenceCC, deviceId ?? dueño, anotadas, 'CONFLICTO', { ...observacion, motivo: d.motivo }, nueva)
@@ -788,9 +902,11 @@ export async function terminarElFolio(
   folio: CashMachineFolio | null,
   cierreYaEscrito: CashMachineClose | null,
   leerPedido: LectorDelPedido,
+  /** H5: el gerente que termina un folio «pendiente de terminar» (resuelve su incidencia y deja su aviso). */
+  terminadoPor: string | null = null,
 ): Promise<ResultadoDeLaMaquina> {
   try {
-    return await terminar(venueId, referenceCC, folio, cierreYaEscrito, leerPedido)
+    return await terminar(venueId, referenceCC, folio, cierreYaEscrito, leerPedido, terminadoPor)
   } catch (error) {
     logger.warn('[MAQUINA] el folio quedó RECIBIDO sin terminar; el reenvío lo reanuda', {
       venueId,
@@ -807,6 +923,7 @@ async function terminar(
   folio: CashMachineFolio | null,
   cierreYaEscrito: CashMachineClose | null,
   leerPedido: LectorDelPedido,
+  terminadoPor: string | null,
 ): Promise<ResultadoDeLaMaquina> {
   if (cierreYaEscrito) return respuestaDelCierre(prisma, cierreYaEscrito, folio?.deviceId ?? cierreYaEscrito.deviceId)
   const dec = decisionDe(folio)
@@ -829,7 +946,7 @@ async function terminar(
     shiftStatus: EstadoDelTurnoDeLaMaquina
     motivoSinRegistro?: MotivoSinRegistro
   }): Prisma.CashMachineCloseUncheckedCreateInput => {
-    const excedenteCents = c.outcome === 'PAGADO' && !cobro.motivoSinRegistro ? folio.saleCents - cobro.appliedCents : 0
+    const excedenteCents = c.outcome === 'PAGADO' && !cobro.motivoSinRegistro ? (folio.saleCents ?? 0) - cobro.appliedCents : 0
     return {
       venueId,
       referenceCC,
@@ -837,9 +954,10 @@ async function terminar(
       resolvedBy: dec.resolvedBy,
       resolvedByStaffId: gerente,
       evidence: dec.evidence,
+      // El adeudo de un desenlace siempre es cobrable (entero); el reparto, sólo si llegó en centavos enteros (H3/H4).
       dueCents: folio.dueCents,
-      saleCents: folio.saleCents,
-      tipCents: folio.tipCents,
+      saleCents: enteroONulo(folio.saleCents),
+      tipCents: enteroONulo(folio.tipCents),
       creditCents: c.creditCents,
       changeDispensedCents: c.changeDispensedCents,
       appliedCents: cobro.appliedCents,
@@ -857,17 +975,30 @@ async function terminar(
     }
   }
 
-  /** Bajo el candado: si otra petición ya lo terminó, se revierte (`YaTerminado`); si no, el cierre y la duda de ESA PC (D4). */
+  /**
+   * Bajo el candado: si otra petición ya lo terminó, se revierte (`YaTerminado`); si no, el cierre, la duda de ESA PC (D4) y el
+   * «pendiente de terminar» (H5), y el folio queda `terminado` en la MISMA transacción.
+   */
   const escribirCierreEnTx = async (tx: TxConReintento, datos: Prisma.CashMachineCloseUncheckedCreateInput) => {
     if (await tx.cashMachineClose.findUnique({ where: { venueId_referenceCC: { venueId, referenceCC } }, select: { id: true } }))
       throw new YaTerminado()
     const fila = await tx.cashMachineClose.create({ data: datos })
+    await tx.cashMachineFolio.update({ where: { id: folio.id }, data: { terminado: true } })
     const ahora = new Date()
     const { count } = await tx.cashMachineIncident.updateMany({
       where: { venueId, referenceCC, kind: 'ESPERANDO', status: 'ABIERTO', deviceId: folio.deviceId },
       data: { status: 'RESUELTO', resolvedByStaffId: gerente, resolvedAt: ahora },
     })
-    return { fila, dudaCerrada: count === 1 }
+    // H5: el «pendiente de terminar» es sólo un recordatorio (la evidencia vive en el folio y su cierre): si lo termina un gerente queda
+    // RESUELTO a su nombre; si lo termina la PC (su reenvío), se quita de la bandeja sin dejar ruido.
+    const donde = { venueId, referenceCC, kind: 'POR_TERMINAR', status: 'ABIERTO' }
+    const pendiente = terminadoPor
+      ? await tx.cashMachineIncident.updateMany({
+          where: donde,
+          data: { status: 'RESUELTO', resolvedByStaffId: terminadoPor, resolvedAt: ahora },
+        })
+      : await tx.cashMachineIncident.deleteMany({ where: donde })
+    return { fila, dudaCerrada: count === 1, pendienteCerrado: pendiente.count === 1 }
   }
 
   /** Lo que quedó cuando otra petición ganó la carrera: su cierre, o RECIBIDO si todavía no hay. */
@@ -898,7 +1029,7 @@ async function terminar(
         return { ...escrito, anotadas }
       })
       await anotarEnBitacora(venueId, referenceCC, dec.userId, r.anotadas)
-      return despues(r.fila, r.dudaCerrada)
+      return despues(r.fila, r.dudaCerrada, r.pendienteCerrado)
     } catch (error) {
       if (error instanceof YaTerminado || esChoqueDeUnico(error)) return loQueQuedo()
       if (esTransitorio(error)) return recibido(referenceCC, folio)
@@ -907,7 +1038,7 @@ async function terminar(
   }
 
   /** Después del commit, sólo quien escribió (D4): la deuda con el cliente y la resolución del gerente. */
-  const despues = async (fila: CashMachineClose, dudaCerrada: boolean): Promise<ResultadoDeLaMaquina> => {
+  const despues = async (fila: CashMachineClose, dudaCerrada: boolean, pendienteCerrado: boolean): Promise<ResultadoDeLaMaquina> => {
     if (fila.owedCents > 0) {
       await logAction({
         action: 'CASH_MACHINE_OWES_CUSTOMER',
@@ -947,6 +1078,24 @@ async function terminar(
         },
       })
     }
+    // H5: el gerente terminó un folio «pendiente de terminar» (sólo quien cerró la incidencia lo anuncia, D4).
+    if (pendienteCerrado && terminadoPor) {
+      await logAction({
+        action: 'CASH_MACHINE_FOLIO_FINISHED',
+        entity: 'CashMachineClose',
+        entityId: fila.id,
+        venueId,
+        staffId: terminadoPor,
+        data: {
+          referenceCC,
+          outcome: fila.outcome,
+          deviceId: folio.deviceId,
+          ...(fila.motivoSinRegistro
+            ? { incident: 'NO_SE_PUDO_REGISTRAR', motivo: fila.motivoSinRegistro }
+            : { paymentId: fila.paymentId }),
+        },
+      })
+    }
     return respuestaDelCierre(prisma, fila, folio.deviceId)
   }
 
@@ -955,7 +1104,7 @@ async function terminar(
       const r = await conElFolio(venueId, referenceCC, tx =>
         escribirCierreEnTx(tx, filaDelCierre({ orderId: null, paymentId: null, appliedCents: 0, shiftStatus: turno.shiftStatus })),
       )
-      return despues(r.fila, r.dudaCerrada)
+      return despues(r.fila, r.dudaCerrada, r.pendienteCerrado)
     } catch (error) {
       if (error instanceof YaTerminado || esChoqueDeUnico(error)) return loQueQuedo()
       if (esTransitorio(error)) return recibido(referenceCC, folio)
@@ -965,8 +1114,11 @@ async function terminar(
 
   // PAGADO: ¿se puede vender lo congelado?
   if (dec.motivoSinVenta) return sinVenta(dec.motivoSinVenta)
-  // F4: el reparto venta/propina congelado no cuadra con el adeudo: el dinero queda, la venta no se arma.
-  if (folio.dueCents !== folio.saleCents + folio.tipCents) return sinVenta('REPARTO_DESCUADRADO')
+  // F4 y H3/H4: el reparto venta/propina congelado no cuadra con el adeudo, trae fracción de centavo o no llegó como número: el dinero
+  // queda, la venta no se arma.
+  if (!repartoVendible(folio)) return sinVenta('REPARTO_DESCUADRADO')
+  const saleCents = folio.saleCents as number
+  const tipCents = folio.tipCents as number
   if (folio.pedido == null) return sinVenta('SIN_CARRITO')
   let pedido: CreateOrderInput
   try {
@@ -987,8 +1139,8 @@ async function terminar(
     const r = await venderLoQueCobroLaMaquina(venueId, {
       venta: pedido,
       referenceCC,
-      saleCents: folio.saleCents,
-      tipCents: folio.tipCents,
+      saleCents,
+      tipCents,
       procesadoPor: dec.userId,
       horaDelCierre: hora,
       turno: { shiftIdDeLaVenta: turno.expectedShiftId, porConciliar: turno.porConciliar },
@@ -1009,7 +1161,7 @@ async function terminar(
                 orderId: cobro.orderId,
                 shiftStatus,
                 saleShiftId: folio.saleShiftId,
-                totalPesos: (cobro.appliedCents + folio.tipCents) / 100,
+                totalPesos: (cobro.appliedCents + tipCents) / 100,
               },
             },
           })
@@ -1017,7 +1169,7 @@ async function terminar(
         return escrito
       },
     })
-    return despues(r.fila, r.dudaCerrada)
+    return despues(r.fila, r.dudaCerrada, r.pendienteCerrado)
   } catch (error) {
     if (error instanceof YaTerminado || esChoqueDeUnico(error)) return loQueQuedo()
     const motivo = motivoPermanente(error)
@@ -1047,17 +1199,19 @@ export async function registrarVentaDeLaMaquina(
   }
   const deviceId = await aparatoDe(venueId, autor.deviceUid)
   // R4-3: sólo una credencial de ESTA PC, antes de escribir nada (tampoco una incidencia). r6-6: el emparejamiento del intento.
-  const { bindingId } = await exigirAparatoEmparejado(venueId, deviceId, autor.credencial, entrada.bindingId ?? null)
+  const { bindingId, bindingDeLaCredencial } = await exigirAparatoEmparejado(venueId, deviceId, autor.credencial, entrada.bindingId ?? null)
   return recibirCierreDeLaMaquina(
     venueId,
     {
       origen: 'PC',
       referenceCC: entrada.referenceCC,
-      cierre: entrada.cierre,
+      // H3/H4: lo que no es físico se lee aquí (lo desconocido cuenta como desconocido), nunca en la ruta.
+      cierre: leerCierreDeLaPc(entrada.cierre as unknown as Record<string, unknown>),
       pedido: entrada.pedido,
       userId: autor.userId,
       deviceId,
       bindingId,
+      bindingDeLaCredencial,
     },
     leerPedido,
   )

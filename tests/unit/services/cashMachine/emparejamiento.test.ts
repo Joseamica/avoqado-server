@@ -46,6 +46,9 @@ beforeEach(() => {
   prismaMock.terminal.findFirst.mockImplementation(async ({ where }: any) =>
     where.venueId === VENUE && TERMINALES[where.deviceUid] ? { id: TERMINALES[where.deviceUid] } : null,
   )
+  // H5: al revocar se buscan sus folios RECIBIDOS (aquí ninguno, salvo la prueba que los pone).
+  prismaMock.cashMachineFolio.findMany.mockResolvedValue([])
+  prismaMock.cashMachineIncident.createMany.mockResolvedValue({ count: 0 })
   prismaMock.cashMachineBinding.findFirst.mockImplementation(async ({ where }: any) => bindings.find(b => coincide(b, where)) ?? null)
   prismaMock.cashMachineBinding.findMany.mockImplementation(async ({ where }: any) => bindings.filter(b => coincide(b, where)))
   prismaMock.cashMachineBinding.updateMany.mockImplementation(async ({ where, data }: any) => {
@@ -175,7 +178,7 @@ describe('exigirAparatoEmparejado (lo usa POST cash-machine/sales)', () => {
   it('la PC emparejada pasa con su credencial', async () => {
     const { credential } = await emparejarAparato(VENUE, autor('uid-pc-1'), '192.168.1.50')
     const r = await exigirAparatoEmparejado(VENUE, 'terminal-1', credential)
-    expect(r).toEqual({ bindingId: bindings[0].id })
+    expect(r).toEqual({ bindingId: bindings[0].id, bindingDeLaCredencial: bindings[0].id })
   })
 
   it('🔴 perfil restaurado: la MISMA credencial desde otra PC no sirve', async () => {
@@ -186,15 +189,25 @@ describe('exigirAparatoEmparejado (lo usa POST cash-machine/sales)', () => {
   it('🔴 otra PC tomó la máquina: la anterior todavía ENTREGA lo suyo (su emparejamiento revocado decide bajo el candado del folio)', async () => {
     const vieja = await emparejarAparato(VENUE, autor('uid-pc-1'), '192.168.1.50')
     const nueva = await emparejarAparato(VENUE, autor('uid-pc-2'), '192.168.1.50')
-    await expect(exigirAparatoEmparejado(VENUE, 'terminal-1', vieja.credential)).resolves.toEqual({ bindingId: vieja.bindingId })
-    await expect(exigirAparatoEmparejado(VENUE, 'terminal-2', nueva.credential)).resolves.toEqual({ bindingId: nueva.bindingId })
+    await expect(exigirAparatoEmparejado(VENUE, 'terminal-1', vieja.credential)).resolves.toEqual({
+      bindingId: vieja.bindingId,
+      bindingDeLaCredencial: vieja.bindingId,
+    })
+    await expect(exigirAparatoEmparejado(VENUE, 'terminal-2', nueva.credential)).resolves.toEqual({
+      bindingId: nueva.bindingId,
+      bindingDeLaCredencial: nueva.bindingId,
+    })
   })
 
   it('🔴 r6-6: el intento fijo a su emparejamiento ANTERIOR (b1) llega con la credencial NUEVA de la misma PC: cuenta b1, no la nueva', async () => {
     const b1 = await emparejarAparato(VENUE, autor('uid-pc-1'), '192.168.1.50')
     await emparejarAparato(VENUE, autor('uid-pc-2'), '192.168.1.50')
     const b3 = await emparejarAparato(VENUE, autor('uid-pc-1'), '192.168.1.50')
-    await expect(exigirAparatoEmparejado(VENUE, 'terminal-1', b3.credential, b1.bindingId)).resolves.toEqual({ bindingId: b1.bindingId })
+    await expect(exigirAparatoEmparejado(VENUE, 'terminal-1', b3.credential, b1.bindingId)).resolves.toEqual({
+      bindingId: b1.bindingId,
+      // H6: también la de la credencial presentada, para que un cierre sin hora no valga con dos altas distintas.
+      bindingDeLaCredencial: b3.bindingId,
+    })
     // Un emparejamiento de OTRO aparato no se puede reclamar.
     const deB = bindings.find(b => b.deviceId === 'terminal-2')!
     await expect(exigirAparatoEmparejado(VENUE, 'terminal-1', b3.credential, deB.id)).rejects.toMatchObject(NO_EMPAREJADA)

@@ -159,9 +159,18 @@ describe('subir y consultar la duda (la PC)', () => {
     )
   })
 
-  it('centavos con decimales son 400 en español', async () => {
-    const out = await correr(mobileRouter, DUDAS, 'post', StaffRole.CASHIER, { body: { ...DUDA_BODY, dueCents: 187.5 } })
-    expect(out.error).toMatchObject({ statusCode: 400, message: expect.stringContaining('entero de centavos') })
+  it('🔴 H4 (Codex servidor r5): centavos con decimales o un reparto que no es número ya NO son 400: llegan al servicio, que guarda primero', async () => {
+    const out = await correr(mobileRouter, DUDAS, 'post', StaffRole.CASHIER, {
+      body: { ...DUDA_BODY, dueCents: 187.5, saleCents: 'medio', startedAt: 'ayer' },
+    })
+    expect(out.status).toBe(200)
+    expect(mockSubir).toHaveBeenCalledWith(VENUE, expect.anything(), expect.objectContaining({ dueCents: 187.5 }), expect.any(Function))
+  })
+
+  it('un adeudo que no es número sí es 400 en español (no hay dinero legible que guardar)', async () => {
+    const out = await correr(mobileRouter, DUDAS, 'post', StaffRole.CASHIER, { body: { ...DUDA_BODY, dueCents: 'mucho' } })
+    expect(out.error).toMatchObject({ statusCode: 400, message: expect.stringContaining('centavos') })
+    expect(mockSubir).not.toHaveBeenCalled()
   })
 
   it('🔴 un rol sin payments:create (cocina) recibe 403 y no sube nada', async () => {

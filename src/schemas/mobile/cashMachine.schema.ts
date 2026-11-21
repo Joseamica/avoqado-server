@@ -5,6 +5,12 @@ import { CASH_MACHINE_REF, DESENLACES_DE_LA_MAQUINA } from '../../services/cashM
 /**
  * Máquina de efectivo (fase 1a, R4-1): la forma de lo que sube la PC. Sólo la forma: si los importes son POSIBLES lo decide el
  * servicio (`validarCierre`), que guarda lo imposible como incidencia (422) en vez de perderlo en un 400.
+ *
+ * 🔴 H3/H4 (Codex servidor r5): «primero la evidencia» empieza AQUÍ. Lo que sube la PC (cierre o duda) sólo exige el sobre mínimo: el
+ * folio, que lo FÍSICO sean números legibles (el adeudo; en un cierre también lo que entró, el cambio y el desenlace como texto) y el
+ * emparejamiento (la credencial va en el encabezado). Fracciones de centavo, la hora «conocida» sin fecha, el reparto venta/propina, el
+ * turno, el modo de cancelación y el carrito los lee el servicio DESPUÉS de guardar la evidencia y el carrito congelado: lo que falla es
+ * incidencia (o una duda abierta), nunca un 400 que no guardó nada.
  */
 const venueId = z
   .string({ required_error: 'El negocio es requerido', invalid_type_error: 'El negocio debe ser un texto' })
@@ -19,40 +25,23 @@ const centavos = (campo: string) =>
     .number({ required_error: `${campo} es requerido`, invalid_type_error: `${campo} debe ser un número de centavos` })
     .finite(`${campo} debe ser un número de centavos`)
 
-const cierre = z
-  .object({
-    outcome: z.enum(DESENLACES_DE_LA_MAQUINA, {
-      errorMap: () => ({ message: 'El desenlace de la máquina debe ser PAGADO, CANCELADO o GUARDADO' }),
-    }),
-    dueCents: centavos('El adeudo'),
-    saleCents: centavos('La venta'),
-    tipCents: centavos('La propina'),
-    creditCents: centavos('Lo que entró'),
-    changeDispensedCents: centavos('El cambio entregado'),
-    occurredAt: z
-      .string({ invalid_type_error: 'La hora del cierre debe ser texto' })
-      .datetime({ offset: true, message: 'La hora del cierre debe ser una fecha ISO' })
-      .nullable()
-      .optional(),
-    occurredAtKnown: z.boolean({
-      required_error: 'Falta decir si se conoce la hora del cierre',
-      invalid_type_error: 'occurredAtKnown debe ser verdadero o falso',
-    }),
-    saleShiftId: z
-      .string({ invalid_type_error: 'El turno de la venta debe ser texto' })
-      .max(64, 'El turno de la venta admite hasta 64 caracteres')
-      .nullable()
-      .optional(),
-    // El `cancel` que mandó la PC ('1' devolver, '2' guardar). Si CANCELADO/GUARDADO cuadran con él lo decide el servicio (422).
-    cancelMode: z
-      .enum(['1', '2'], { errorMap: () => ({ message: "El modo de cancelación debe ser '1' (devolver) o '2' (guardar)" }) })
-      .nullable()
-      .optional(),
-  })
-  .refine(c => !c.occurredAtKnown || !!c.occurredAt, {
-    message: 'Con la hora conocida, manda la hora del cierre',
-    path: ['occurredAt'],
-  })
+const cierre = z.object({
+  // Lo físico, legible: el desenlace como texto (si es PAGADO, CANCELADO o GUARDADO lo decide el servicio: lo demás es IMPOSIBLE, 422
+  // con incidencia) y los importes como números (enteros, positivos y posibles, también lo decide el servicio).
+  outcome: z
+    .string({ required_error: 'Falta el desenlace de la máquina', invalid_type_error: 'El desenlace de la máquina debe ser texto' })
+    .max(32, 'El desenlace de la máquina admite hasta 32 caracteres'),
+  dueCents: centavos('El adeudo'),
+  creditCents: centavos('Lo que entró'),
+  changeDispensedCents: centavos('El cambio entregado'),
+  // H3/H4: lo administrativo lo lee el servicio (`leerCierreDeLaPc`): lo que no sirve cuenta como desconocido, nunca un 400.
+  saleCents: z.unknown().optional(),
+  tipCents: z.unknown().optional(),
+  occurredAt: z.unknown().optional(),
+  occurredAtKnown: z.unknown().optional(),
+  saleShiftId: z.unknown().optional(),
+  cancelMode: z.unknown().optional(),
+})
 
 /** r6-6: el emparejamiento con el que la PC empezó el cobro (el `bindingId` que le dio el alta). */
 const bindingId = z
@@ -98,39 +87,32 @@ export const cotizarParaLaMaquinaSchema = z.object({
   body: z.record(z.unknown(), { invalid_type_error: 'El carrito debe ser un objeto' }),
 })
 
-/** Centavos enteros ≥ 0 (lo que teclea el gerente o fija la duda; si son POSIBLES lo decide `validarCierre`). */
+/** Centavos enteros ≥ 0 (lo que teclea el gerente; si son POSIBLES lo decide `validarCierre`). */
 const centavosEnteros = (campo: string) =>
   z
     .number({ required_error: `${campo} es requerido`, invalid_type_error: `${campo} debe ser un número de centavos` })
     .int(`${campo} debe ser un número entero de centavos`)
     .min(0, `${campo} no puede ser negativo`)
 
-/** ponytail: 16 KB de «lo último que vio la PC» bastan para que el gerente entienda; más es una PC que manda de más. */
-const LAST_SEEN_MAX = 16_384
-
-/** R4-4, R5#6: la duda que sube la PC (no sabe cómo terminó la operación). Importes en centavos, como la venta. */
+/**
+ * R4-4, R5#6: la duda que sube la PC (no sabe cómo terminó la operación). Importes en centavos, como la venta. H3/H4: sólo el adeudo
+ * (lo físico) como número legible; el reparto, la hora de inicio, lo que vio la PC (se corta a 16 KB), el turno y lo que vio entrar
+ * (`creditCents`, H1, opcional) los lee el servicio DESPUÉS de guardar la duda.
+ */
 export const subirDudaDeLaMaquinaSchema = z.object({
   params: z.object({ venueId }),
   body: z.object({
     referenceCC,
-    dueCents: centavosEnteros('El adeudo'),
-    saleCents: centavosEnteros('La venta'),
-    tipCents: centavosEnteros('La propina'),
+    dueCents: centavos('El adeudo'),
+    saleCents: z.unknown().optional(),
+    tipCents: z.unknown().optional(),
     // El MISMO carrito que la venta. r6-2: uno ilegible no es 400; la duda se guarda y nunca se vuelve desenlace por eso.
     pedido: z.unknown().optional(),
     bindingId,
-    startedAt: z
-      .string({ required_error: 'Falta la hora en que empezó el cobro', invalid_type_error: 'La hora de inicio debe ser texto' })
-      .datetime({ offset: true, message: 'La hora de inicio debe ser una fecha ISO' }),
-    lastSeen: z
-      .unknown()
-      .refine(v => v === undefined || JSON.stringify(v).length <= LAST_SEEN_MAX, 'Lo último que vio la PC es demasiado largo (máx. 16 KB)')
-      .optional(),
-    saleShiftId: z
-      .string({ invalid_type_error: 'El turno de la venta debe ser texto' })
-      .max(64, 'El turno de la venta admite hasta 64 caracteres')
-      .nullable()
-      .optional(),
+    startedAt: z.unknown().optional(),
+    lastSeen: z.unknown().optional(),
+    creditCents: z.unknown().optional(),
+    saleShiftId: z.unknown().optional(),
   }),
 })
 
@@ -145,8 +127,10 @@ export const listarDudasDeLaMaquinaSchema = z.object({
       .enum(['ABIERTO', 'RESUELTO'], { errorMap: () => ({ message: 'El estado de la duda debe ser ABIERTO o RESUELTO' }) })
       .optional(),
     kind: z
-      .enum(['ESPERANDO', 'IMPOSIBLE', 'CONFLICTO', 'NO_SE_PUDO_REGISTRAR', 'TRAS_REVOCAR'], {
-        errorMap: () => ({ message: 'El tipo debe ser ESPERANDO, IMPOSIBLE, CONFLICTO, NO_SE_PUDO_REGISTRAR o TRAS_REVOCAR' }),
+      .enum(['ESPERANDO', 'IMPOSIBLE', 'CONFLICTO', 'NO_SE_PUDO_REGISTRAR', 'TRAS_REVOCAR', 'POR_TERMINAR'], {
+        errorMap: () => ({
+          message: 'El tipo debe ser ESPERANDO, IMPOSIBLE, CONFLICTO, NO_SE_PUDO_REGISTRAR, TRAS_REVOCAR o POR_TERMINAR',
+        }),
       })
       .optional(),
     folio: z.string({ invalid_type_error: 'El folio debe ser texto' }).max(32, 'El folio admite hasta 32 caracteres').optional(),
@@ -160,15 +144,21 @@ export const listarDudasDeLaMaquinaSchema = z.object({
   }),
 })
 
-/** R4-4, R5#5, R5#8: lo que el gerente lee en la máquina. Quién resuelve sale de la sesión, nunca de aquí. */
+/**
+ * R4-4, R5#5, R5#8: lo que el gerente lee en la máquina. Quién resuelve sale de la sesión, nunca de aquí. H5: un folio «pendiente de
+ * terminar» (su desenlace ya está guardado) se termina SÓLO con `version`; una duda sin desenlace exige desenlace, importes y lo que vio
+ * (400 `CASH_MACHINE_DOUBT_RESOLUTION_INCOMPLETE` si falta).
+ */
 export const resolverDudaDeLaMaquinaSchema = z.object({
   params: z.object({ venueId, referenceCC }),
   body: z.object({
-    outcome: z.enum(DESENLACES_DE_LA_MAQUINA, {
-      errorMap: () => ({ message: 'El desenlace de la máquina debe ser PAGADO, CANCELADO o GUARDADO' }),
-    }),
-    creditCents: centavosEnteros('Lo que entró'),
-    changeDispensedCents: centavosEnteros('El cambio entregado'),
+    outcome: z
+      .enum(DESENLACES_DE_LA_MAQUINA, {
+        errorMap: () => ({ message: 'El desenlace de la máquina debe ser PAGADO, CANCELADO o GUARDADO' }),
+      })
+      .optional(),
+    creditCents: centavosEnteros('Lo que entró').optional(),
+    changeDispensedCents: centavosEnteros('El cambio entregado').optional(),
     occurredAt: z
       .string({ invalid_type_error: 'La hora del comprobante debe ser texto' })
       .datetime({ offset: true, message: 'La hora del comprobante debe ser una fecha ISO' })
@@ -178,7 +168,8 @@ export const resolverDudaDeLaMaquinaSchema = z.object({
       .string({ required_error: 'Escribe lo que viste en la máquina', invalid_type_error: 'Lo que viste en la máquina debe ser texto' })
       .trim()
       .min(1, 'Escribe lo que viste en la máquina')
-      .max(500, 'Lo que viste en la máquina admite hasta 500 caracteres'),
+      .max(500, 'Lo que viste en la máquina admite hasta 500 caracteres')
+      .optional(),
     // Codex r2 #10: con CANCELADO o GUARDADO, lo que el gerente VIO hacer a la máquina con los billetes: '1' los devolvió, '2' los
     // guardó. Si cuadra con el desenlace lo decide el servicio, con el MISMO validador que el cierre de la PC (sin él, 422).
     cancelMode: z

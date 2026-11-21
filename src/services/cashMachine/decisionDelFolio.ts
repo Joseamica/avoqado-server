@@ -38,9 +38,10 @@ export interface FolioCongelado {
   deviceId: string | null
   cartHash: string | null
   saleShiftId: string | null
+  /** H3/H4: tal cual llegaron (aun con fracción); venta y propina en null = no llegaron como números. */
   dueCents: number
-  saleCents: number
-  tipCents: number
+  saleCents: number | null
+  tipCents: number | null
   version: number
   decision: DecisionGuardada | null
 }
@@ -55,24 +56,28 @@ export interface EstadoDelFolio {
 
 export interface Importes {
   dueCents: number
-  saleCents: number
-  tipCents: number
+  saleCents: number | null
+  tipCents: number | null
 }
 
 /** El emparejamiento con el que la PC empezó el intento (r6-6): cuándo nació y cuándo lo revocaron (`null` = sigue activo). */
 export interface VinculoDelIntento {
   creadoEn: Date
   revocadoEn: Date | null
+  /** H6 (Codex servidor r5): el intento va fijo al MISMO emparejamiento de la credencial que se presentó (no a otra alta de la PC). */
+  esElDeLaCredencial: boolean
 }
 
 /**
  * F7 (Codex servidor r4): un emparejamiento vale para un cobro sólo si estaba ACTIVO a la hora física del cobro:
- * `creadoEn ≤ hora < revocadoEn|∞`. Sin hora no hay con qué compararlo: vale sólo si nunca lo revocaron (lo desconocido cuenta como
- * después de la revocación). Sin emparejamiento (el gerente declara) no hay nada que revisar.
+ * `creadoEn ≤ hora < revocadoEn|∞`. Sin emparejamiento (el gerente declara) no hay nada que revisar.
+ * H6 (Codex servidor r5): sin hora no hay con qué compararlo: vale SÓLO si el intento es del emparejamiento de la credencial que se
+ * presentó y nunca lo revocaron. Dos altas distintas de la misma PC (credencial de una, intento de otra) no prueban nada sin hora: lo
+ * desconocido cuenta como después de la revocación.
  */
 export function vigenteEn(v: VinculoDelIntento | null, hora: string | null): boolean {
   if (!v) return true
-  if (hora === null) return v.revocadoEn === null
+  if (hora === null) return v.revocadoEn === null && v.esElDeLaCredencial
   const t = new Date(hora)
   return v.creadoEn <= t && (v.revocadoEn === null || t < v.revocadoEn)
 }
@@ -125,8 +130,8 @@ export type DecisionDelFolio =
   | { accion: 'IMPOSIBLE' }
   /** Se guarda la evidencia y se contesta 409. */
   | { accion: 'CONFLICTO'; motivo: 'OTRA_PC' | 'OTRA_EVIDENCIA' }
-  /** La primera duda del folio: congela y abre la duda. */
-  | { accion: 'ABRIR_DUDA'; trasRevocar: boolean }
+  /** La primera duda del folio: congela (si nada lo había congelado) y abre la duda. `discrepancia`: otro carrito o turno, a revisión. */
+  | { accion: 'ABRIR_DUDA'; trasRevocar: boolean; discrepancia: boolean }
   /** Este cierre es el desenlace del folio (congela si es el primer mensaje). */
   | { accion: 'ACEPTAR'; trasRevocar: boolean; motivoSinVenta: 'PC_REVOCADA' | null; discrepancia: boolean }
   /** El folio contesta lo que ya tiene (y se reanuda si está RECIBIDO); `discrepancia` = se anota para revisión. */
@@ -173,7 +178,11 @@ export function decidirSobreElFolio(estado: EstadoDelFolio, pet: PeticionSobreEl
 
   if (pet.que === 'DUDA') {
     // r6-2: una duda nunca se vuelve desenlace; si el folio ya tiene uno, contesta ése.
-    if (!folio) return { accion: 'ABRIR_DUDA', trasRevocar: !vigenteEn(pet.vinculo, null) }
+    // H2 (Codex servidor r5): un folio congelado NO es una duda. El que congeló un cierre imposible (F12) no tiene desenlace ni duda:
+    // la primera duda válida de su PC la abre sobre lo congelado, para que el gerente la vea y la resuelva.
+    if (!folio || (!folio.decision && !estado.duda)) {
+      return { accion: 'ABRIR_DUDA', trasRevocar: !vigenteEn(pet.vinculo, null), discrepancia: discrepanciaDeLoCongelado }
+    }
     return { accion: 'SEGUIR', discrepancia: discrepanciaDeLoCongelado }
   }
 

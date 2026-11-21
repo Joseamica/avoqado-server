@@ -26,7 +26,8 @@ const ANTES = '2026-11-20T17:59:00.000Z'
 const DESPUES = '2026-11-20T18:01:00.000Z'
 
 type Que = 'CIERRE_PC' | 'CIERRE_GERENTE' | 'DUDA'
-type Folio = 'NINGUNO' | 'SIN_DESENLACE' | 'DECIDIDO' | 'OTRA_PC'
+/** `CONGELADO`: H2 (Codex servidor r5), lo congeló un cierre imposible: sin desenlace y sin duda. */
+type Folio = 'NINGUNO' | 'CONGELADO' | 'SIN_DESENLACE' | 'DECIDIDO' | 'OTRA_PC'
 type Revocacion = 'VIGENTE' | 'REVOCADA_ANTES' | 'REVOCADA_DESPUES' | 'REVOCADA_SIN_HORA' | 'CREADO_DESPUES'
 type Caso = {
   que: Que
@@ -93,10 +94,10 @@ function peticionDe(c: Caso): PeticionSobreElFolio {
   })
   const vinculo =
     c.revocacion === 'VIGENTE'
-      ? { creadoEn: CREADO_EN, revocadoEn: null }
+      ? { creadoEn: CREADO_EN, revocadoEn: null, esElDeLaCredencial: true }
       : c.revocacion === 'CREADO_DESPUES'
-        ? { creadoEn: CREADO_DESPUES_EN, revocadoEn: null }
-        : { creadoEn: CREADO_EN, revocadoEn: REVOCADA_EN }
+        ? { creadoEn: CREADO_DESPUES_EN, revocadoEn: null, esElDeLaCredencial: true }
+        : { creadoEn: CREADO_EN, revocadoEn: REVOCADA_EN, esElDeLaCredencial: true }
   const carritoRecibido = c.carrito === 'IGUAL' ? 'carrito-1' : 'carrito-2'
   const imposible = c.imposible
   if (c.que === 'CIERRE_GERENTE') {
@@ -147,9 +148,9 @@ const REGLAS: Array<{ nombre: string; si: (c: Caso) => boolean; entonces: (c: Ca
     entonces: () => ({ accion: 'CONFLICTO', motivo: 'OTRA_EVIDENCIA' }),
   },
   {
-    nombre: 'la primera duda congela el folio',
-    si: c => c.que === 'DUDA' && c.folio === 'NINGUNO',
-    entonces: c => ({ accion: 'ABRIR_DUDA', trasRevocar: revocadaAhora(c) }),
+    nombre: 'la primera duda congela el folio (H2: o abre su duda sobre lo que congeló un cierre imposible; otro carrito se anota)',
+    si: c => c.que === 'DUDA' && (c.folio === 'NINGUNO' || c.folio === 'CONGELADO'),
+    entonces: c => ({ accion: 'ABRIR_DUDA', trasRevocar: revocadaAhora(c), discrepancia: c.folio === 'CONGELADO' && c.carrito === 'OTRO' }),
   },
   {
     nombre: 'r6-2: una duda nunca es desenlace: el folio contesta lo que tiene (otro carrito se anota)',
@@ -180,7 +181,7 @@ const REGLAS: Array<{ nombre: string; si: (c: Caso) => boolean; entonces: (c: Ca
 
 const todos: Caso[] = []
 for (const que of ['CIERRE_PC', 'CIERRE_GERENTE', 'DUDA'] as Que[])
-  for (const folio of ['NINGUNO', 'SIN_DESENLACE', 'DECIDIDO', 'OTRA_PC'] as Folio[])
+  for (const folio of ['NINGUNO', 'CONGELADO', 'SIN_DESENLACE', 'DECIDIDO', 'OTRA_PC'] as Folio[])
     for (const importes of ['IGUALES', 'OTROS'] as const)
       for (const desenlace of ['IGUAL', 'OTRO'] as const)
         for (const carrito of ['IGUAL', 'OTRO'] as const)
@@ -216,7 +217,7 @@ describe('matriz A · decidirSobreElFolio', () => {
 })
 
 describe('F7: vigenteEn — el emparejamiento sólo vale mientras estaba activo (creadoEn ≤ hora < revocadoEn)', () => {
-  const v = { creadoEn: CREADO_DESPUES_EN, revocadoEn: new Date('2026-11-20T20:00:00.000Z') }
+  const v = { creadoEn: CREADO_DESPUES_EN, revocadoEn: new Date('2026-11-20T20:00:00.000Z'), esElDeLaCredencial: true }
   it('los bordes: nace incluido, la revocación excluida', () => {
     expect(vigenteEn(v, CREADO_DESPUES_EN.toISOString())).toBe(true)
     expect(vigenteEn(v, '2026-11-20T19:59:59.999Z')).toBe(true)
@@ -225,8 +226,13 @@ describe('F7: vigenteEn — el emparejamiento sólo vale mientras estaba activo 
   })
   it('sin hora: sólo si nunca lo revocaron; sin emparejamiento (el gerente) no hay nada que revisar', () => {
     expect(vigenteEn(v, null)).toBe(false)
-    expect(vigenteEn({ creadoEn: CREADO_DESPUES_EN, revocadoEn: null }, null)).toBe(true)
+    expect(vigenteEn({ creadoEn: CREADO_DESPUES_EN, revocadoEn: null, esElDeLaCredencial: true }, null)).toBe(true)
     expect(vigenteEn(null, null)).toBe(true)
+  })
+  it('🔴 H6 (Codex servidor r5): sin hora, un intento fijo a OTRA alta de la PC (no la de la credencial) no vale aunque siga activa', () => {
+    expect(vigenteEn({ creadoEn: CREADO_DESPUES_EN, revocadoEn: null, esElDeLaCredencial: false }, null)).toBe(false)
+    // Con hora manda la vigencia del intento (F7), como antes.
+    expect(vigenteEn({ creadoEn: CREADO_DESPUES_EN, revocadoEn: null, esElDeLaCredencial: false }, '2026-11-20T21:00:00.000Z')).toBe(true)
   })
 })
 

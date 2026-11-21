@@ -18,12 +18,14 @@ import {
   CASH_MACHINE_REF,
   adeudoCobrable,
   anotar,
+  anotarEnLaDuda,
   centavosGuardables,
   anotarEnBitacora,
   conElFolio,
   congelarElFolio,
   huellaDelCarritoCompleto,
   instante,
+  numeroQueLlego,
   observar,
   recibirCierreDeLaMaquina,
   respuestaDelCierre,
@@ -39,29 +41,48 @@ import {
   type ResultadoDeLaMaquina,
 } from './ventaDeLaMaquina'
 
-/** Lo que la PC sabe de la operación en duda, en CENTAVOS (como la venta). */
+/**
+ * Lo que la PC sabe de la operación en duda, en CENTAVOS (como la venta). H3/H4 (Codex servidor r5): la ruta sólo exige el folio, la
+ * credencial y el adeudo como número legible; lo demás se lee aquí DESPUÉS de guardar la evidencia y lo que no sirve cuenta como
+ * desconocido (nunca un 400 que pierda la duda).
+ */
 export interface DudaDeLaMaquina {
   referenceCC: string
+  /** Lo físico: el adeudo. Si la máquina lo puede cobrar lo decide el servicio (422 con incidencia). */
   dueCents: number
-  saleCents: number
-  tipCents: number
+  /** El reparto venta/propina (administrativo): lo que no llegó como número queda en null. */
+  saleCents?: unknown
+  tipCents?: unknown
   /** El carrito congelado, el MISMO JSON de la venta (`POST /orders`). Ilegible o ausente no es 400 (r6-2). */
   pedido?: unknown
-  /** Cuándo empezó el cobro (ISO). Nunca se usa como la hora de la venta (R5#8). */
-  startedAt: string
-  /** Lo último que vio la PC de la máquina (texto libre para el gerente). */
+  /** Cuándo empezó el cobro (ISO). Nunca se usa como la hora de la venta (R5#8). La que no es hora queda en null. */
+  startedAt?: unknown
+  /** Lo último que vio la PC de la máquina (texto libre para el gerente). Lo que pase de 16 KB se corta, no se rechaza. */
   lastSeen?: unknown
-  saleShiftId?: string | null
+  /** H1 (Codex servidor r5, opcional): lo que la PC vio entrar, en centavos enteros. La bandeja enseña el MAYOR visto del folio. */
+  creditCents?: unknown
+  saleShiftId?: unknown
   /** r6-6: el emparejamiento con el que la PC empezó este cobro. */
   bindingId?: string | null
 }
 
 /** Lo que se guarda en la duda (lo demás vive congelado en el folio). */
 interface DudaGuardada {
-  startedAt: string
+  startedAt: string | null
+  /** H1: lo que vio la PC con el MAYOR crédito visto (o lo último, si nadie lo dijo en números). */
   lastSeen: unknown
+  /** H1: lo que entró según la evidencia física más alta del folio (null = ninguna PC lo dijo en números). */
+  creditCents?: number | null
   /** El vendedor por omisión del carrito congelado. */
   subidoPor: string
+}
+
+/** ponytail: 16 KB de «lo último que vio la PC» bastan para que el gerente entienda; lo que sobra se corta (H4: nunca un 400). */
+const LAST_SEEN_MAX = 16_384
+function loUltimoQueVio(v: unknown): unknown {
+  if (v === undefined || v === null) return null
+  const texto = JSON.stringify(v)
+  return texto.length <= LAST_SEEN_MAX ? v : texto.slice(0, LAST_SEEN_MAX)
 }
 
 export type EstadoDeLaDuda =
@@ -72,13 +93,17 @@ export type EstadoDeLaDuda =
 
 /** Lo que el gerente teclea al ver la máquina. El gerente sale del token; los importes, del folio congelado. */
 export interface ResolucionDelGerente {
-  outcome: DesenlaceDeLaMaquina
-  creditCents: number
-  changeDispensedCents: number
+  /**
+   * Lo que el gerente leyó en la máquina, obligatorio para una duda SIN desenlace. H5 (Codex servidor r5): un folio «pendiente de
+   * terminar» (su desenlace ya está guardado) se termina SÓLO con la `version`, desde lo congelado.
+   */
+  outcome?: DesenlaceDeLaMaquina
+  creditCents?: number
+  changeDispensedCents?: number
   /** La hora impresa en el comprobante de la máquina (ISO). Sin ella → hora y turno por conciliar (R5#8). */
   occurredAt?: string | null
   /** Lo que leyó en la máquina. */
-  evidence: string
+  evidence?: string
   /** Codex r2 #10: lo que VIO hacer a la máquina con los billetes de un CANCELADO/GUARDADO. Pasa por el MISMO validador. */
   cancelMode?: '1' | '2' | null
   /** r6-4: la versión de la evidencia que vio (la de la lista). Si llegó otra, 409 y no se escribe nada. */
@@ -87,6 +112,8 @@ export interface ResolucionDelGerente {
 
 const LIMITE_POR_OMISION = 50
 const LIMITE_MAXIMO = 100
+/** Lo que mueve dinero no se «da por revisado»: la duda se resuelve y el pendiente de terminar (H5) se termina. */
+const SE_TERMINAN = new Set(['ESPERANDO', 'POR_TERMINAR'])
 
 const abierta = (
   referenceCC: string,
@@ -120,14 +147,21 @@ export async function subirDudaDeLaMaquina(
   if (!CASH_MACHINE_REF.test(referenceCC)) {
     throw new BadRequestError('El folio de la máquina debe ser AQ seguido de 12 letras mayúsculas o números.')
   }
-  const importes = { dueCents: entrada.dueCents, saleCents: entrada.saleCents, tipCents: entrada.tipCents }
+  // H3/H4: el reparto, la hora de inicio, el turno y lo que vio la PC se leen aquí; lo que no sirve cuenta como desconocido.
+  const importes = { dueCents: entrada.dueCents, saleCents: numeroQueLlego(entrada.saleCents), tipCents: numeroQueLlego(entrada.tipCents) }
+  const startedAt =
+    typeof entrada.startedAt === 'string' && !Number.isNaN(Date.parse(entrada.startedAt)) ? instante(entrada.startedAt) : null
+  const saleShiftId = typeof entrada.saleShiftId === 'string' && entrada.saleShiftId.length <= 64 ? entrada.saleShiftId : null
+  const lastSeen = loUltimoQueVio(entrada.lastSeen)
+  const credito = typeof entrada.creditCents === 'number' && centavosGuardables(entrada.creditCents) ? entrada.creditCents : null
   const deviceId = await aparatoDe(venueId, autor.deviceUid)
   // La MISMA puerta que la venta: sólo una credencial de esta PC; el emparejamiento del intento (r6-6).
-  const { bindingId } = await exigirAparatoEmparejado(venueId, deviceId, autor.credencial, entrada.bindingId ?? null)
+  const { bindingId, bindingDeLaCredencial } = await exigirAparatoEmparejado(venueId, deviceId, autor.credencial, entrada.bindingId ?? null)
   const carritoRecibido = huellaDelCarritoCompleto(entrada.pedido)
-  // Codex r1 #12 (decisión h): un adeudo de $0 o que no es múltiplo de $0.50 no lo cobra la máquina: 422 con incidencia. F4: el reparto
-  // venta/propina descuadrado NO es imposible (la máquina sólo conoce el adeudo): la duda se guarda ABIERTA con su evidencia.
-  const imposible = !adeudoCobrable(entrada.dueCents) || !Object.values(importes).every(centavosGuardables)
+  // Codex r1 #12 (decisión h): un adeudo de $0 o que no es múltiplo de $0.50 no lo cobra la máquina: 422 con incidencia. F4 y H4: el
+  // reparto venta/propina descuadrado, con fracción de centavo o sin número NO es imposible (la máquina sólo conoce el adeudo): la duda se
+  // guarda ABIERTA con su evidencia y el gerente la resuelve (sin venta: `REPARTO_DESCUADRADO`).
+  const imposible = !adeudoCobrable(entrada.dueCents)
   const observacion: Record<string, unknown> = {
     que: 'DUDA',
     origen: 'PC',
@@ -135,9 +169,10 @@ export async function subirDudaDeLaMaquina(
     bindingId,
     ...importes,
     // F13: la misma hora en otra zona es la MISMA evidencia.
-    startedAt: instante(entrada.startedAt),
-    lastSeen: entrada.lastSeen ?? null,
-    saleShiftId: entrada.saleShiftId ?? null,
+    startedAt,
+    lastSeen,
+    saleShiftId,
+    ...(credito !== null ? { creditCents: credito } : {}),
     cartHash: carritoRecibido,
     ...(imposible ? { imposible: true } : {}),
     userId: autor.userId,
@@ -152,12 +187,16 @@ export async function subirDudaDeLaMaquina(
       deviceId,
       importes,
       carritoRecibido,
-      turnoRecibido: entrada.saleShiftId ?? null,
-      vinculo: await vinculoDelIntento(tx, venueId, l.folio ? l.folio.bindingId : bindingId),
+      turnoRecibido: saleShiftId,
+      vinculo: await vinculoDelIntento(tx, venueId, l.folio ? l.folio.bindingId : bindingId, bindingDeLaCredencial),
       imposible,
     })
     const observada = await observar(tx, venueId, referenceCC, huella, repetida, observacion, l.folio)
     const nueva = observada.nueva
+    // H1 (Codex servidor r5): toda observación NUEVA de la PC actualiza lo que la bandeja enseña de la duda abierta —también la que es
+    // conflicto porque cambió el reparto—, en la misma transacción que sube la versión. Antes sólo lo hacía una que no era conflicto, y
+    // la bandeja entregaba «$0, versión 2» después de que la PC vio $50.
+    if (nueva) await anotarEnLaDuda(tx, l.duda, { creditCents: credito, lastSeen })
     const anotadas: IncidenciaAnotada[] = []
     let folio = observada.folio
     let dudaId = l.duda?.id ?? null
@@ -167,7 +206,7 @@ export async function subirDudaDeLaMaquina(
       bindingId,
       pedido: entrada.pedido,
       cartHash: carritoRecibido,
-      saleShiftId: entrada.saleShiftId ?? null,
+      saleShiftId,
       ...importes,
     }
     if (d.accion === 'IMPOSIBLE') {
@@ -177,12 +216,9 @@ export async function subirDudaDeLaMaquina(
       return { d, l, anotadas, folio, dudaId, abrio }
     }
     if (d.accion === 'ABRIR_DUDA') {
-      folio = await congelarElFolio(tx, venueId, referenceCC, loQueSeCongela)
-      const guardada: DudaGuardada = {
-        startedAt: instante(entrada.startedAt),
-        lastSeen: entrada.lastSeen ?? null,
-        subidoPor: autor.userId,
-      }
+      // H2: sobre un folio que ya congeló un cierre imposible, la duda se abre sin volver a congelar (lo primero manda).
+      if (!folio) folio = await congelarElFolio(tx, venueId, referenceCC, loQueSeCongela)
+      const guardada: DudaGuardada = { startedAt, lastSeen, creditCents: credito, subidoPor: autor.userId }
       dudaId = (
         await tx.cashMachineIncident.create({
           data: {
@@ -198,20 +234,13 @@ export async function subirDudaDeLaMaquina(
       ).id
       abrio = true
       if (d.trasRevocar) await anotar(tx, venueId, referenceCC, deviceId, anotadas, 'TRAS_REVOCAR', observacion, nueva)
-    } else if (nueva && l.duda && d.accion !== 'CONFLICTO') {
-      // r3 #10: lo nuevo que vio la PC (el crédito que subió de $0 a $50) queda, sube la versión y la bandeja enseña lo último.
-      const previa = (l.duda.payload ?? {}) as Record<string, unknown>
-      await tx.cashMachineIncident.update({
-        where: { id: l.duda.id },
-        data: { payload: { ...previa, lastSeen: entrada.lastSeen ?? null } as Prisma.InputJsonValue },
-      })
     }
     // F6: evidencia física NUEVA de un folio que ya tiene desenlace (los $50 que llegan después de un CANCELADO en $0) vuelve a
     // revisión, sin tocar lo ya asentado.
     const motivo =
       d.accion === 'CONFLICTO'
         ? d.motivo
-        : d.accion === 'SEGUIR' && d.discrepancia
+        : (d.accion === 'SEGUIR' || d.accion === 'ABRIR_DUDA') && d.discrepancia
           ? 'DISCREPANCIA'
           : d.accion === 'SEGUIR' && nueva && l.estado.folio?.decision
             ? 'TRAS_RESOLVER'
@@ -227,7 +256,7 @@ export async function subirDudaDeLaMaquina(
       entityId: r.dudaId ?? undefined,
       venueId,
       staffId: autor.userId,
-      data: { referenceCC, deviceId, duePesos: entrada.dueCents / 100, startedAt: entrada.startedAt },
+      data: { referenceCC, deviceId, duePesos: entrada.dueCents / 100, startedAt },
     })
   }
   if (r.d.accion === 'IMPOSIBLE') {
@@ -293,7 +322,9 @@ type EventosGuardados = {
 
 /**
  * `GET …/cash-machine/doubts` (POS del mostrador y DASHBOARD): acotada, más nuevas primero, con el total y el cursor. Trae TODAS las
- * incidencias de la máquina, cada una con su `kind`. Una duda trae lo congelado de su folio (importes, carrito, turno) y su `version`.
+ * incidencias de la máquina, cada una con su `kind`. Una duda trae lo congelado de su folio (importes, carrito, turno), su `version` y
+ * (H1) la evidencia física más alta: `creditCents` y `lastSeen`. Un `POR_TERMINAR` (H5) trae lo congelado, el desenlace ya
+ * guardado (`outcome`, `creditCents`, `changeDispensedCents`, `occurredAt`) y la `version` con la que el gerente lo termina.
  */
 export async function listarDudasDeLaMaquina(
   venueId: string,
@@ -333,15 +364,28 @@ export async function listarDudasDeLaMaquina(
           payload: true,
         },
       })
-      // Lo congelado de las dudas de ESTA página (a lo más `limite` folios): una consulta acotada.
-      const refsDeDudas = filas
-        .slice(0, limite)
-        .filter(f => f.kind === 'ESPERANDO')
-        .map(f => f.referenceCC)
+      // Lo congelado de las dudas y de los pendientes de terminar de ESTA página (a lo más `limite` folios): una consulta acotada.
+      const refsDeDudas = [
+        ...new Set(
+          filas
+            .slice(0, limite)
+            .filter(f => f.kind === 'ESPERANDO' || f.kind === 'POR_TERMINAR')
+            .map(f => f.referenceCC),
+        ),
+      ]
       const folios = refsDeDudas.length
         ? await tx.cashMachineFolio.findMany({
             where: { venueId, referenceCC: { in: refsDeDudas } },
-            select: { referenceCC: true, dueCents: true, saleCents: true, tipCents: true, pedido: true, saleShiftId: true, version: true },
+            select: {
+              referenceCC: true,
+              dueCents: true,
+              saleCents: true,
+              tipCents: true,
+              pedido: true,
+              saleShiftId: true,
+              version: true,
+              decision: true,
+            },
             take: refsDeDudas.length,
           })
         : []
@@ -354,6 +398,23 @@ export async function listarDudasDeLaMaquina(
   const folioDe = new Map(folios.map(f => [f.referenceCC, f]))
   return {
     data: pagina.map(({ payload, ...fila }) => {
+      if (fila.kind === 'POR_TERMINAR') {
+        const f = folioDe.get(fila.referenceCC)
+        const c = (f?.decision as { cierre?: Record<string, unknown> } | null)?.cierre ?? {}
+        return {
+          ...fila,
+          dueCents: f?.dueCents ?? null,
+          saleCents: f?.saleCents ?? null,
+          tipCents: f?.tipCents ?? null,
+          pedido: f?.pedido ?? null,
+          saleShiftId: f?.saleShiftId ?? null,
+          outcome: c.outcome ?? null,
+          creditCents: c.creditCents ?? null,
+          changeDispensedCents: c.changeDispensedCents ?? null,
+          occurredAt: c.occurredAt ?? null,
+          version: f?.version ?? 1,
+        }
+      }
       if (fila.kind !== 'ESPERANDO') {
         const p = (payload ?? {}) as EventosGuardados
         const eventos = Array.isArray(p.eventos) ? p.eventos : []
@@ -377,6 +438,7 @@ export async function listarDudasDeLaMaquina(
         tipCents: f?.tipCents ?? null,
         startedAt: d.startedAt ?? null,
         lastSeen: d.lastSeen ?? null,
+        creditCents: d.creditCents ?? null,
         pedido: f?.pedido ?? null,
         saleShiftId: f?.saleShiftId ?? null,
         version: f?.version ?? 1,
@@ -408,7 +470,7 @@ export async function revisarIncidenciaDeLaMaquina(
     })
     if (!actual) throw new NotFoundError('Esa incidencia de la máquina no existe en este negocio.', 'CASH_MACHINE_INCIDENT_NOT_FOUND')
     const versionActual = versionDeLaIncidencia(actual.payload)
-    if (actual.kind === 'ESPERANDO' || versionVista !== versionActual || actual.status !== 'ABIERTO') {
+    if (SE_TERMINAN.has(actual.kind) || versionVista !== versionActual || actual.status !== 'ABIERTO') {
       return { actual, versionActual, revisada: false }
     }
     const ahora = new Date()
@@ -429,9 +491,11 @@ export async function revisarIncidenciaDeLaMaquina(
     })
     return { actual, versionActual, revisada: count === 1 }
   })
-  if (r.actual.kind === 'ESPERANDO') {
+  if (SE_TERMINAN.has(r.actual.kind)) {
     throw new ConflictError(
-      'Un cobro en duda se resuelve tecleando lo que dice la máquina, no se da por revisado.',
+      r.actual.kind === 'ESPERANDO'
+        ? 'Un cobro en duda se resuelve tecleando lo que dice la máquina, no se da por revisado.'
+        : 'Un folio pendiente de terminar se termina con «Resolver», no se da por revisado.',
       'CASH_MACHINE_DOUBT_NEEDS_RESOLUTION',
     )
   }
@@ -460,6 +524,10 @@ export async function revisarIncidenciaDeLaMaquina(
  * `POST …/cash-machine/doubts/:referenceCC/resolve` (`cash-machine:resolve`). El gerente es `gerenteId` (del token). Su declaración entra
  * por la MISMA escritura que el cierre de la PC (r6-2), con los importes congelados del folio y la `version` que vio (r6-4): primero se
  * guarda, después se lee el carrito congelado (con la autoridad de su sesión) y se termina.
+ *
+ * H5 (Codex servidor r5): un folio que YA tiene su desenlace guardado y no se terminó (RECIBIDO; en la bandeja como
+ * `POR_TERMINAR` cuando relevaron su PC) se termina sólo con la `version`, sin teclear importes: desde lo congelado, con
+ * exactamente un pago. La PC nueva sigue recibiendo 409 `OTRA_PC` por ese folio.
  */
 export async function resolverDudaDeLaMaquina(
   venueId: string,
@@ -476,10 +544,20 @@ export async function resolverDudaDeLaMaquina(
     // Lo congelado no cambia una vez escrito: sus importes pueden leerse fuera del candado (la decisión se toma dentro).
     prisma.cashMachineFolio.findUnique({
       where: { venueId_referenceCC: { venueId, referenceCC } },
-      select: { dueCents: true, saleCents: true, tipCents: true, saleShiftId: true },
+      select: { dueCents: true, saleCents: true, tipCents: true, saleShiftId: true, decision: true },
     }),
   ])
-  if (!duda || !folio) throw new NotFoundError('Ese folio de la máquina no tiene una duda.', 'CASH_MACHINE_DOUBT_NOT_FOUND')
+  const sinImportes = r.outcome == null && r.creditCents == null && r.changeDispensedCents == null
+  if (folio?.decision && sinImportes) return terminarDesdeLoCongelado(venueId, gerenteId, referenceCC, r.version, leerPedido)
+  if (!folio || (!duda && !folio.decision)) {
+    throw new NotFoundError('Ese folio de la máquina no tiene una duda.', 'CASH_MACHINE_DOUBT_NOT_FOUND')
+  }
+  if (r.outcome == null || r.creditCents == null || r.changeDispensedCents == null || !r.evidence) {
+    throw new BadRequestError(
+      'Para resolver un cobro en duda escribe el desenlace, lo que entró, el cambio entregado y lo que viste en la máquina.',
+      'CASH_MACHINE_DOUBT_RESOLUTION_INCOMPLETE',
+    )
+  }
   return recibirCierreDeLaMaquina(
     venueId,
     {
@@ -505,4 +583,37 @@ export async function resolverDudaDeLaMaquina(
     },
     leerPedido,
   )
+}
+
+/**
+ * H5: el gerente TERMINA un folio con desenlace guardado desde lo congelado, con la versión que vio. Si otra petición ya lo terminó,
+ * contesta ese cierre (y cierra el «pendiente de terminar» que hubiera quedado). Exactamente un pago: el mismo escritor de siempre, con
+ * sus llaves únicas, bajo el candado del folio.
+ */
+async function terminarDesdeLoCongelado(
+  venueId: string,
+  gerenteId: string,
+  referenceCC: string,
+  versionVista: number,
+  leerPedido: LectorDelPedido,
+): Promise<ResultadoDeLaMaquina> {
+  const l = await conElFolio(venueId, referenceCC, async (tx, lectura) => {
+    if (lectura.cierre) {
+      await tx.cashMachineIncident.updateMany({
+        where: { venueId, referenceCC, kind: 'POR_TERMINAR', status: 'ABIERTO' },
+        data: { status: 'RESUELTO', resolvedByStaffId: gerenteId, resolvedAt: new Date() },
+      })
+    }
+    return lectura
+  })
+  if (!l.folio?.decision) throw new NotFoundError('Ese folio de la máquina no tiene una duda.', 'CASH_MACHINE_DOUBT_NOT_FOUND')
+  if (l.cierre) return respuestaDelCierre(prisma, l.cierre, l.folio.deviceId)
+  if (l.folio.version !== versionVista) {
+    throw new ConflictError(
+      'Llegó evidencia nueva de este cobro mientras lo resolvías. Vuelve a leerlo antes de resolverlo.',
+      'CASH_MACHINE_DOUBT_CHANGED',
+      { version: l.folio.version },
+    )
+  }
+  return terminarElFolio(venueId, referenceCC, l.folio, null, leerPedido, gerenteId)
 }

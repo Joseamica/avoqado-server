@@ -4,7 +4,7 @@
  * que las pruebas ven lo que de verdad quedaría: la evidencia de la primera transacción sobrevive a la venta que se revierte.
  *
  * Sólo lo que usan los servicios de `src/services/cashMachine/`: igualdad, `in`, `contains`, `lt`, `not`, `AND`/`OR`, las llaves
- * compuestas (`venueId_referenceCC`…), `increment` y `select` (se ignora: se devuelve la fila entera).
+ * compuestas (`venueId_referenceCC`…), `increment`, `deleteMany` y `select` (se ignora: se devuelve la fila entera).
  */
 import { Prisma } from '@prisma/client'
 
@@ -32,17 +32,18 @@ function coincide(fila: Fila, where: Fila | undefined): boolean {
     if (k === 'AND') return (v as Fila[]).every(w => coincide(fila, w))
     if (k === 'OR') return (v as Fila[]).some(w => coincide(fila, w))
     if (LLAVES[k]) return LLAVES[k].every(c => fila[c] === (v as Fila)[c])
-    const valor = fila[k]
+    const enLaFila = fila[k]
     if (v !== null && typeof v === 'object' && !(v instanceof Date)) {
       const o = v as Fila
-      if ('in' in o) return (o.in as unknown[]).includes(valor)
-      if ('contains' in o) return typeof valor === 'string' && valor.includes(o.contains)
-      if ('lt' in o) return valor < o.lt
-      if ('not' in o) return o.not === null ? valor != null : valor !== o.not
-      if ('equals' in o) return valor === o.equals
+      if ('in' in o) return (o.in as unknown[]).includes(enLaFila)
+      if ('contains' in o) return typeof enLaFila === 'string' && enLaFila.includes(o.contains)
+      if ('lt' in o) return enLaFila < o.lt
+      // `Prisma.DbNull` / `JsonNull` en un filtro valen null (como en Postgres).
+      if ('not' in o) return valor(o.not) === null ? enLaFila != null : enLaFila !== o.not
+      if ('equals' in o) return enLaFila === valor(o.equals)
       return false
     }
-    return (valor ?? null) === (v ?? null)
+    return (enLaFila ?? null) === (v ?? null)
   })
 }
 
@@ -108,6 +109,12 @@ function modelo(
     r.forEach(f => aplicar(f, a.data))
     return { count: r.length }
   })
+  prismaModel.deleteMany.mockImplementation(async (a: Fila) => {
+    const quedan = filas().filter(f => !coincide(f, a?.where))
+    const count = filas().length - quedan.length
+    filas().splice(0, filas().length, ...quedan)
+    return { count }
+  })
   prismaModel.upsert.mockImplementation(async (a: Fila) => {
     const fila = filas().find(f => coincide(f, a.where))
     if (fila) return aplicar(fila, a.update ?? {})
@@ -135,7 +142,7 @@ export function instalarMaquinaEnMemoria(prismaMock: any): BaseDeLaMaquina {
   const estado = { base: { folios: [], observaciones: [], incidencias: [], cierres: [], vinculos: [] } as BaseDeLaMaquina }
   const base = () => estado.base
   const folio = [LLAVES.venueId_referenceCC]
-  modelo(prismaMock.cashMachineFolio, base, 'folios', 'folio', folio, { version: 1, decision: null, pedido: null })
+  modelo(prismaMock.cashMachineFolio, base, 'folios', 'folio', folio, { version: 1, decision: null, pedido: null, terminado: false })
   modelo(prismaMock.cashMachineObservation, base, 'observaciones', 'obs', [LLAVES.venueId_referenceCC_fingerprint])
   modelo(prismaMock.cashMachineIncident, base, 'incidencias', 'inc', [LLAVES.venueId_referenceCC_kind], {
     resolvedByStaffId: null,

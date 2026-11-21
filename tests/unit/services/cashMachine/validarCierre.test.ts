@@ -68,7 +68,12 @@ describe('validarCierre', () => {
   it('importes negativos o con fracción de centavo son imposibles', () => {
     expect(validarCierre(cierre({ changeDispensedCents: -1 }))).toBe('IMPOSIBLE')
     expect(validarCierre(cierre({ creditCents: 20000.5 }))).toBe('IMPOSIBLE')
-    expect(validarCierre(cierre({ tipCents: Number.NaN }))).toBe('IMPOSIBLE')
+    expect(validarCierre(cierre({ changeDispensedCents: Number.NaN }))).toBe('IMPOSIBLE')
+    // H3/H4 (Codex servidor r5): el reparto venta/propina no es de la máquina: con fracción o sin número no vuelve imposible lo físico
+    // (la venta no se arma después: REPARTO_DESCUADRADO).
+    expect(validarCierre(cierre({ tipCents: Number.NaN }))).toBe('OK')
+    expect(validarCierre(cierre({ saleCents: 18750.5 }))).toBe('OK')
+    expect(validarCierre(cierre({ saleCents: null, tipCents: null }))).toBe('OK')
   })
 
   it('R5#5: CANCELADO y GUARDADO exigen crédito < adeudo', () => {

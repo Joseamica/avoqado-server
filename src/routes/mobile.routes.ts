@@ -3740,8 +3740,9 @@ router.post(
 /**
  * POST /api/v1/mobile/venues/:venueId/cash-machine/doubts — «Cobros en duda» (R4-4, R5#6): la PC perdió el cierre y no sabe cómo
  * terminó. La MISMA puerta que la venta: `payments:create` y la PC emparejada (`X-Cash-Machine-Credential`). Idempotente por folio.
- * Body: { referenceCC, dueCents, saleCents, tipCents, pedido, startedAt, lastSeen?, saleShiftId? }. 200 { status: 'ABIERTO' } o la
- * evidencia del cierre si el folio ya se resolvió.
+ * Body: { referenceCC, dueCents, saleCents, tipCents, pedido, startedAt, lastSeen?, saleShiftId?, creditCents? }. 200 { status: 'ABIERTO' }
+ * o la evidencia del cierre si el folio ya se resolvió. H3/H4 (Codex servidor r5): la ruta sólo exige el folio y el adeudo como número;
+ * lo demás lo lee el servicio después de guardar la duda (nunca un 400 sin evidencia). H1: `creditCents` (opcional) = lo que vio entrar.
  */
 router.post(
   '/venues/:venueId/cash-machine/doubts',
@@ -3771,7 +3772,8 @@ router.get(
 
 /**
  * POST /api/v1/mobile/venues/:venueId/cash-machine/doubts/:referenceCC/resolve — el gerente, con SU sesión (R4-4, R5#5, R5#8).
- * Body: { outcome, creditCents, changeDispensedCents, occurredAt?, evidence }. Sin `occurredAt`, hora y turno por conciliar.
+ * Body: { outcome, creditCents, changeDispensedCents, occurredAt?, evidence, cancelMode?, version }. Sin `occurredAt`, hora y turno por
+ * conciliar. H5 (Codex servidor r5): un `POR_TERMINAR` (desenlace ya guardado) se termina sólo con `{ version }`.
  */
 router.post(
   '/venues/:venueId/cash-machine/doubts/:referenceCC/resolve',
