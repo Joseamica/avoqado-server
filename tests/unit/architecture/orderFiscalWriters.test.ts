@@ -1509,6 +1509,9 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   // D661 (Task 5): el desenlace sin devolución con el retiro de su reserva, y el cierre «Devuelto», cada uno con la Order.
   'src/services/online-ordering/card/refund.service.ts#terminarSinDevolver': 1,
   'src/services/online-ordering/card/refund.service.ts#cerrarComoDevuelto': 1,
+  // D661 (Task 6): la devolución a saldo a favor — «primer-sobre», la decisión compartida con la Order y, en la misma transacción,
+  // el renglón con su abono y el cierre «Devuelto» (que reentra la misma Order) —, con el presupuesto único (withDeadlockRetry).
+  'src/services/online-ordering/card/refund.service.ts#devolverASaldoAFavor': 1,
   // Tarjetas de regalo (B2): iniciar y liberar la cancelación de una venta toman la Order (abrirVentaDeTarjetasEnTx →
   // lockExistingOrderForPayment) y después sus sobres, con el presupuesto único.
   'src/services/giftCards/giftCardCancel.service.ts#iniciarCancelacionDeVenta': 1,

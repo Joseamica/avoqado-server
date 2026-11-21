@@ -126,6 +126,8 @@ describe('D661 · tarea 5: «Cancelar y devolver» a la tarjeta en «Nadie» (in
   let getRefundSpy: jest.SpyInstance
   let listRefundsSpy: jest.SpyInstance
   let feeSpy: jest.SpyInstance
+  /** D661 (Task 6, Ruling 28): la lectura del cargo antes de devolver; contesta con lo que este doble de Stripe tiene. */
+  let chargeRefundsSpy: jest.SpyInstance
   let piSeq = 0
   type EnStripe = {
     refundId: string
@@ -368,6 +370,7 @@ describe('D661 · tarea 5: «Cancelar y devolver» a la tarjeta en «Nadie» (in
     getRefundSpy = jest.spyOn(StripeConnectProvider.prototype, 'getRefund')
     listRefundsSpy = jest.spyOn(StripeConnectProvider.prototype, 'listRefunds')
     feeSpy = jest.spyOn(StripeConnectProvider.prototype, 'getApplicationFeeRefundedCents')
+    chargeRefundsSpy = jest.spyOn(StripeConnectProvider.prototype, 'getChargeRefunds')
   })
 
   beforeEach(async () => {
@@ -413,6 +416,20 @@ describe('D661 · tarea 5: «Cancelar y devolver» a la tarjeta en «Nadie» (in
     )
     feeSpy.mockReset()
     feeSpy.mockResolvedValue(0)
+    chargeRefundsSpy.mockReset()
+    chargeRefundsSpy.mockImplementation(async (_m: any, pi: string) => {
+      const delCargo = [...enStripe.values()].filter(d => d.pi === pi)
+      return {
+        amountRefundedCents: delCargo.filter(d => d.status === 'PENDING' || d.status === 'SUCCEEDED').reduce((t, d) => t + d.amount, 0),
+        refunds: delCargo.map(d => ({
+          refundId: d.refundId,
+          status: d.status,
+          amountCents: d.amount,
+          failureReason: null,
+          metadata: d.metadata,
+        })),
+      }
+    })
     ;(logAction as jest.Mock).mockClear()
     ;(sendVenueNotification as jest.Mock).mockClear()
     ;(cerrarComoDevueltoEnTx as jest.Mock).mockClear()
@@ -453,7 +470,8 @@ describe('D661 · tarea 5: «Cancelar y devolver» a la tarjeta en «Nadie» (in
   })
 
   afterAll(async () => {
-    for (const s of [checkoutSpy, authSpy, captureSpy, voidSpy, refundSpy, getRefundSpy, listRefundsSpy, feeSpy]) s?.mockRestore()
+    for (const s of [checkoutSpy, authSpy, captureSpy, voidSpy, refundSpy, getRefundSpy, listRefundsSpy, feeSpy, chargeRefundsSpy])
+      s?.mockRestore()
     // Limpieza acotada: sin venueId NO se borra nada (una limpieza sin filtro vaciaría tablas enteras).
     if (!venueId) return
     const v = { venueId }

@@ -12,14 +12,41 @@ const refund = jest.fn()
 const getRefund = jest.fn()
 const listRefunds = jest.fn()
 const getApplicationFeeRefundedCents = jest.fn()
+const getChargeRefunds = jest.fn()
 jest.mock('@/services/payments/provider-registry', () => ({
   __esModule: true,
-  getProvider: jest.fn(() => ({ refund, getRefund, listRefunds, getApplicationFeeRefundedCents })),
+  getProvider: jest.fn(() => ({ refund, getRefund, listRefunds, getApplicationFeeRefundedCents, getChargeRefunds })),
 }))
 jest.mock('@/services/dashboard/refund.dashboard.service', () => ({
   __esModule: true,
   issueRefund: jest.fn(),
   bloquearCobroParaReembolso: jest.fn(),
+  writeRefundInTx: jest.fn(),
+}))
+// D661 (Task 6): lo que el saldo a favor usa de afuera, espiado (la libreta y el núcleo del reembolso tienen sus propias pruebas).
+jest.mock('@/services/storeCredit/storeCreditTender', () => ({
+  __esModule: true,
+  storeCreditAvailable: jest.fn(() => true),
+  prepararMediosDeSaldoAFavor: jest.fn(async () => undefined),
+  resolveStoreCreditTenderInTx: jest.fn(async () => ({
+    tenderTypeId: 'tt-saldo',
+    tenderRevision: 1,
+    method: 'OTHER',
+    tenderLabel: 'Saldo a favor',
+    tenderCountsAsCash: false,
+    tenderCaptureTip: false,
+    tenderSatFormaPago: '17',
+    tenderCommissionPercent: null,
+    fundsFlow: 'EXTERNAL_RECORDED',
+  })),
+}))
+jest.mock('@/services/giftCards/giftCardLedger', () => ({
+  __esModule: true,
+  abonarSaldoAFavorEnTx: jest.fn(),
+}))
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  __esModule: true,
+  enqueueRefundPaymentEffectsInTx: jest.fn(async () => undefined),
 }))
 jest.mock('@/services/wallet/stampLedger.service', () => ({
   __esModule: true,
@@ -32,12 +59,16 @@ jest.mock('@/services/dashboard/notification.dashboard.service', () => ({
 
 import { logAction } from '@/services/dashboard/activity-log.service'
 import logger from '@/config/logger'
-import { bloquearCobroParaReembolso, issueRefund } from '@/services/dashboard/refund.dashboard.service'
+import { bloquearCobroParaReembolso, issueRefund, writeRefundInTx } from '@/services/dashboard/refund.dashboard.service'
+import { prepararMediosDeSaldoAFavor, storeCreditAvailable } from '@/services/storeCredit/storeCreditTender'
+import { abonarSaldoAFavorEnTx } from '@/services/giftCards/giftCardLedger'
+import { enqueueRefundPaymentEffectsInTx } from '@/services/tpv/paymentEffects.service'
 import { sendVenueNotification } from '@/services/dashboard/notification.dashboard.service'
 import { reverseStampForOrder } from '@/services/wallet/stampLedger.service'
 import {
   advanceCardRefund,
   handleStripeRefundEvent,
+  hayDevolucionPorFuera,
   refundCardOnlineOrder,
   resolveReversedCardRefund,
   NEVER_AGAIN,
@@ -292,6 +323,7 @@ beforeEach(() => {
   getRefund.mockResolvedValue(stateOf('SUCCEEDED'))
   listRefunds.mockResolvedValue([])
   getApplicationFeeRefundedCents.mockResolvedValue(290)
+  getChargeRefunds.mockResolvedValue({ amountRefundedCents: 0, refunds: [] })
 })
 
 describe('la vista del operador: sólo pasa si lo último que vio sigue siendo lo último (Codex panel r4)', () => {
@@ -1139,5 +1171,334 @@ describe('D661 (Task 5): devolver a la tarjeta un pedido de «Nadie»', () => {
     cardRefund.findMany.mockImplementationOnce(async () => []) // las filas por revisar
     cardRefund.findMany.mockImplementationOnce(async () => []) // las por cerrar
     await expect(sweepCardRefunds(at(2 * MIN), readEntry)).resolves.toMatchObject({ closed: 0 })
+  })
+})
+
+// ── D661 (Task 6): devolver a saldo a favor (local, atómico) y la devolución hecha por fuera en Stripe (Ruling 28) ─────────────────
+describe('D661 (Task 6): saldo a favor y devolución por fuera en Stripe', () => {
+  const VERIFICADO = '+525511112222'
+  const CARGO_NADIE = {
+    ...CHARGE,
+    request: { customerId: 'cus1', telefonoVerificado: VERIFICADO, nadie: true },
+    onlineOrder: { requiresAcceptance: false },
+  }
+  const PEDIDO = {
+    id: 'oo1',
+    orderId: 'ord1',
+    paymentMode: 'CARD_ONLINE',
+    requiresAcceptance: false,
+    status: 'ACCEPTED',
+    refundRequestedAt: null,
+    refundedAt: null,
+    completedAt: null,
+    printClaimedAt: null,
+    printedAt: null,
+    order: { orderNumber: 'W-1' },
+  }
+  let pedido: Row
+  let cargo: Row
+  /** Qué escribió cada paso y en qué transacción (0 = ninguna). */
+  let tx = 0
+  let txAbierta = 0
+  const pasos: Array<{ que: string; tx: number; arg?: any }> = []
+  const paso = (que: string, arg?: any) => pasos.push({ que, tx: txAbierta, arg })
+  const updateManyDeLaTabla = cardRefund.updateMany.getMockImplementation()!
+  const createDeLaTabla = cardRefund.create.getMockImplementation()!
+  const cumple = (p: Row, where: Record<string, any>): boolean =>
+    Object.entries(where).every(([k, v]) => {
+      if (['orderId', 'venueId', 'charge'].includes(k)) return true
+      if (k === 'OR') return (v as Record<string, any>[]).some(sub => cumple(p, sub))
+      if (v && typeof v === 'object' && !(v instanceof Date)) {
+        if ('in' in v) return v.in.includes(p[k])
+        if ('not' in v) return p[k] !== v.not
+        if ('lt' in v) return p[k] != null && p[k] < v.lt
+      }
+      if (v === null) return p[k] == null
+      return p[k] === v
+    })
+  const aSaldo = (o: Parameters<typeof pedir>[0] = {}) => pedir({ destino: 'STORE_CREDIT', key: 'llave-saldo-1', ...o })
+  const nada = () => {
+    expect(store.size).toBe(0)
+    expect(refund).not.toHaveBeenCalled()
+    expect(writeRefundInTx).not.toHaveBeenCalled()
+    expect(abonarSaldoAFavorEnTx).not.toHaveBeenCalled()
+    expect(pedido.refundRequestedAt).toBeNull()
+    expect(pedido.refundedAt).toBeNull()
+  }
+
+  beforeEach(() => {
+    pedido = { ...PEDIDO }
+    cargo = { ...CARGO_NADIE }
+    tx = 0
+    txAbierta = 0
+    pasos.length = 0
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => {
+      txAbierta = ++tx
+      try {
+        return await fn(prismaMock)
+      } finally {
+        txAbierta = 0
+      }
+    })
+    ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (q: any, ...valores: any[]) => {
+      const sql = Array.isArray(q) ? q.join('?') : Array.isArray(q?.strings) ? q.strings.join('?') : String(q)
+      if (sql.includes('pg_advisory_xact_lock')) paso(`candado:${String(valores[0]).split(':')[0]}`)
+      else paso('candado:orden')
+      return [{ id: 'ord1' }]
+    })
+    prismaMock.giftCard.findFirst.mockResolvedValue(null) // la sucursal todavía no tiene sobres: se toma «primer-sobre»
+    prismaMock.onlineOrderCharge.findFirst.mockImplementation((async () => cargo) as any)
+    prismaMock.onlineOrder.findFirst.mockImplementation((async () => ({ ...pedido, charge: cargo })) as any)
+    prismaMock.onlineOrder.updateMany.mockImplementation((async (a: any) => {
+      paso('pedido', a)
+      if (!cumple(pedido, a.where)) return { count: 0 }
+      Object.assign(pedido, a.data)
+      return { count: 1 }
+    }) as any)
+    prismaMock.order.updateMany.mockImplementation((async (a: any) => (paso('cuenta', a), { count: 1 })) as any)
+    prismaMock.activityLog.create.mockImplementation((async (a: any) => (paso('bitacora', a), { id: 'al1' })) as any)
+    ;(bloquearCobroParaReembolso as jest.Mock).mockImplementation(async () => {
+      paso('cobro')
+      return {
+        original: { id: 'pay1', orderId: 'ord1', amount: '250.00', tipAmount: '0.00' },
+        refundedSalesCents: 0,
+        refundedTipsCents: 0,
+        unclassifiedPriorRefundCents: 0,
+        remainingBeforeCents: 25_000,
+      }
+    })
+    cardRefund.create.mockImplementation(async (a: any) => (paso('fila', a), createDeLaTabla(a)))
+    cardRefund.updateMany.mockImplementation(async (a: any) => (paso('fila:update', a), updateManyDeLaTabla(a)))
+    ;(cardRefund as any).update = jest.fn(async ({ where, data }: any) => {
+      paso('fila:update', { where, data })
+      Object.assign(store.get(where.id)!, data)
+      return { ...store.get(where.id)! }
+    })
+    ;(writeRefundInTx as jest.Mock).mockImplementation(async (t: any, input: any) => {
+      paso('renglon', input)
+      // El núcleo real llama al abono en SU transacción, tras escribir la fila REFUND.
+      const abono = await input.aSaldoAFavor.abonar(
+        t,
+        'pay-refund-saldo',
+        { venueId: 'v1', customerId: 'cus1' },
+        { orderId: 'ord1', montoCents: 25_000 },
+      )
+      return { refundPaymentId: 'pay-refund-saldo', replay: false, abono }
+    })
+    ;(abonarSaldoAFavorEnTx as jest.Mock).mockImplementation(async (_t: any, p: any) => {
+      paso('abono', p)
+      return { giftCardId: 'gc1', abonado: p.monto, saldoNuevo: p.monto, telefonoDelSobre: VERIFICADO, telefonoNoCoincide: false }
+    })
+    ;(enqueueRefundPaymentEffectsInTx as jest.Mock).mockImplementation(async (...a: any[]) => paso('efectos', a))
+    ;(storeCreditAvailable as jest.Mock).mockReturnValue(true)
+  })
+  afterAll(() => {
+    cardRefund.updateMany.mockImplementation(updateManyDeLaTabla)
+    cardRefund.create.mockImplementation(createDeLaTabla)
+    prismaMock.onlineOrderCharge.findFirst.mockReset()
+    prismaMock.giftCard.findFirst.mockReset()
+  })
+
+  it('saldo a favor: en UNA transacción — primer-sobre, orden, cobro, reserva, fila RESOLVED, renglón REFUND con el abono, efectos y cierre; Stripe no devuelve nada', async () => {
+    const r = await aSaldo()
+    expect(r).toMatchObject({ status: 'RECORDED', cardRefundStatus: 'RESOLVED', refundId: 'pay-refund-saldo', replay: false })
+    expect(refund).not.toHaveBeenCalled()
+    expect(getRefund).not.toHaveBeenCalled()
+
+    // El orden de los candados y de las escrituras (primer-sobre ANTES de la orden, como writeRefundInTx exige).
+    const enLaTx = pasos.filter(p => p.tx > 0)
+    expect(new Set(enLaTx.map(p => p.tx)).size).toBe(1)
+    const orden = enLaTx.map(p => p.que)
+    const primero = (que: string) => orden.indexOf(que)
+    expect(primero('candado:primer-sobre')).toBe(0)
+    for (const [antes, despues] of [
+      ['candado:primer-sobre', 'candado:orden'],
+      ['candado:orden', 'cobro'],
+      ['cobro', 'pedido'],
+      ['pedido', 'fila'],
+      ['fila', 'renglon'],
+      ['renglon', 'abono'],
+      ['abono', 'efectos'],
+      ['efectos', 'bitacora'],
+    ])
+      expect({ antes, despues, ok: primero(antes) > -1 && primero(antes) < primero(despues) }).toMatchObject({ ok: true })
+
+    // La fila nace RESOLVED a saldo (nunca REQUESTED), fuera del recorrido de Stripe, y queda ligada a su renglón.
+    const fila = rows()[0]
+    expect(pasos.find(p => p.que === 'fila')!.arg.data).toMatchObject({
+      status: 'RESOLVED',
+      toStoreCredit: true,
+      amountCents: 25_000,
+      feeRefundedCents: 0,
+      recordedAt: NOW,
+      nextCheckAt: NEVER_AGAIN,
+    })
+    expect(fila).toMatchObject({ status: 'RESOLVED', toStoreCredit: true, refundPaymentId: 'pay-refund-saldo', stripeRefundId: null })
+    // El renglón: el núcleo con la transacción, el cobro ya bloqueado, a saldo con el medio de sistema y sin turno vivo.
+    expect(pasos.find(p => p.que === 'renglon')!.arg).toMatchObject({
+      originalPaymentId: 'pay1',
+      venueId: 'v1',
+      salesRefundCents: 25_000,
+      tipRefundCents: 0,
+      refundedItems: [],
+      reason: 'CANCELLED_ORDER',
+      staffId: 'staff1',
+      idempotencyKey: `oocr_${fila.id}`,
+      tenderCommission: 'NONE',
+      shift: 'INHERIT_ORIGINAL',
+      provenance: 'MANUAL',
+      aSaldoAFavor: {
+        customerId: 'cus1',
+        tender: expect.objectContaining({
+          tenderTypeId: 'tt-saldo',
+          merchantAccountId: null,
+          source: 'OTHER',
+          fundsFlow: 'EXTERNAL_RECORDED',
+        }),
+      },
+    })
+    expect(enqueueRefundPaymentEffectsInTx).toHaveBeenCalledWith(prismaMock, 'pay-refund-saldo', 'pay1')
+    // El cierre «Devuelto», en la MISMA transacción.
+    expect(pedido).toMatchObject({ status: 'COMPLETED', refundRequestedAt: NOW, refundedAt: NOW, completedAt: NOW })
+    expect(pasos.filter(p => p.que === 'bitacora' && p.arg.data.action === 'ONLINE_ORDER_CLOSED_AS_REFUNDED')).toHaveLength(1)
+    expect(prepararMediosDeSaldoAFavor).toHaveBeenCalledWith('v1')
+  })
+
+  it('saldo a favor: la libreta recibe la clienta y el teléfono VERIFICADO del borrador (exigirMismoTelefono), el 100 % y el folio', async () => {
+    await aSaldo()
+    expect(abonarSaldoAFavorEnTx).toHaveBeenCalledTimes(1)
+    expect((abonarSaldoAFavorEnTx as jest.Mock).mock.calls[0][1]).toMatchObject({
+      monto: D('250'),
+      staffId: 'staff1',
+      origen: { orderId: 'ord1', refundPaymentId: 'pay-refund-saldo' },
+      folio: 'W-1',
+      tipo: 'REEMBOLSO',
+      exigirMismoTelefono: { telefonoVerificado: VERIFICADO },
+    })
+    // Sin teléfono verificado se pasa null (la libreta decide: sin sobre no abre uno, con sobre no lo reconoce).
+    store.clear()
+    pedido = { ...PEDIDO }
+    cargo = { ...CARGO_NADIE, request: { customerId: 'cus1', nadie: true } }
+    await aSaldo({ key: 'llave-saldo-2', expected: null })
+    expect((abonarSaldoAFavorEnTx as jest.Mock).mock.calls[1][1].exigirMismoTelefono).toEqual({ telefonoVerificado: null })
+  })
+
+  it('saldo a favor sin clienta en el borrador → 400 STORE_CREDIT_CUSTOMER_REQUIRED y nada escrito', async () => {
+    cargo = { ...CARGO_NADIE, request: { nadie: true } }
+    await expect(aSaldo()).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'STORE_CREDIT_CUSTOMER_REQUIRED',
+      message: expect.stringContaining('tarjeta'),
+    })
+    nada()
+  })
+
+  it('saldo a favor sin las llaves del servidor (lo mismo que /info.storeCredit) → 422 STORE_CREDIT_UNAVAILABLE, sin leer Stripe ni escribir', async () => {
+    ;(storeCreditAvailable as jest.Mock).mockReturnValue(false)
+    await expect(aSaldo()).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'STORE_CREDIT_UNAVAILABLE',
+      message: expect.stringContaining('tarjeta'),
+    })
+    expect(getChargeRefunds).not.toHaveBeenCalled()
+    expect(prepararMediosDeSaldoAFavor).not.toHaveBeenCalled()
+    nada()
+  })
+
+  it('saldo a favor en «Mi equipo» → 400 REFUND_DESTINATION_NOT_AVAILABLE (sólo tarjeta), sin leer Stripe ni escribir', async () => {
+    pedido = { ...PEDIDO, requiresAcceptance: true }
+    cargo = { ...CARGO_NADIE, onlineOrder: { requiresAcceptance: true } }
+    await expect(aSaldo()).rejects.toMatchObject({ statusCode: 400, code: 'REFUND_DESTINATION_NOT_AVAILABLE' })
+    expect(getChargeRefunds).not.toHaveBeenCalled()
+    nada()
+  })
+
+  it('«Mi equipo» con tarjeta no lee Stripe antes de devolver (sin cambio)', async () => {
+    pedido = { ...PEDIDO, requiresAcceptance: true }
+    cargo = { ...CARGO_NADIE, onlineOrder: { requiresAcceptance: true } }
+    await expect(pedir({ amount: '125.00', key: 'llave-mi-equipo' })).resolves.toMatchObject({ status: 'RECORDED' })
+    expect(getChargeRefunds).not.toHaveBeenCalled()
+  })
+
+  // Ruling 28: cualquier devolución por fuera de Avoqado (hecha o pendiente, total o parcial) frena los DOS destinos.
+  const POR_FUERA = {
+    '100 % hecha por fuera': { amountRefundedCents: 25_000, refunds: [stateOf('SUCCEEDED', { refundId: 're_fuera' })] },
+    'parcial pendiente por fuera': {
+      amountRefundedCents: 5_000,
+      refunds: [stateOf('PENDING', { refundId: 're_fuera', amountCents: 5_000 })],
+    },
+    // Stripe dice que algo ya se devolvió aunque la lista no la traiga: también frena.
+    'sólo amount_refunded': { amountRefundedCents: 1_000, refunds: [] },
+  }
+  it.each(
+    (['STORE_CREDIT', 'CARD'] as const).flatMap(destino =>
+      Object.entries(POR_FUERA).map(([caso, estado]) => [destino, caso, estado] as const),
+    ),
+  )(
+    'Ruling 28 · %s con %s → 409 EXTERNAL_REFUND_DETECTED: nada se reserva, nada se abona, nada se manda a Stripe',
+    async (destino, _caso, estado) => {
+      getChargeRefunds.mockResolvedValue({ ...estado, refunds: estado.refunds.map(r => ({ ...r, metadata: {} })) })
+      await expect(pedir({ destino, key: `llave-fuera-${destino}` })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'EXTERNAL_REFUND_DETECTED',
+        message: expect.stringMatching(/fuera de Avoqado[\s\S]*Stripe/),
+      })
+      expect(getChargeRefunds).toHaveBeenCalledWith(
+        expect.objectContaining({ providerCredentials: { connectAccountId: 'acct_A' } }),
+        'pi_1',
+      )
+      expect(prepararMediosDeSaldoAFavor).not.toHaveBeenCalled()
+      expect(pasos.filter(p => p.tx > 0)).toEqual([])
+      nada()
+    },
+  )
+
+  it('Ruling 28: si la lectura de Stripe falla → 503 STRIPE_REFUND_CHECK_UNAVAILABLE («intenta de nuevo»), nunca se abona ni se devuelve', async () => {
+    getChargeRefunds.mockRejectedValue(Object.assign(new Error('socket hang up'), { type: 'StripeConnectionError' }))
+    for (const destino of ['STORE_CREDIT', 'CARD'] as const) {
+      await expect(pedir({ destino, key: `llave-caida-${destino}` })).rejects.toMatchObject({
+        statusCode: 503,
+        code: 'STRIPE_REFUND_CHECK_UNAVAILABLE',
+        message: expect.stringContaining('Intenta de nuevo'),
+      })
+    }
+    nada()
+  })
+
+  it('hayDevolucionPorFuera: las nuestras (de las filas de este cargo) no cuentan; una ajena viva sí; fallidas o canceladas no', () => {
+    type Estado = 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'CANCELED'
+    const nuestra = (status: Estado, cardRefundId = 'cr001') => ({
+      ...stateOf(status),
+      status,
+      metadata: { type: 'online_order_refund', cardRefundId } as Record<string, string>,
+    })
+    const ajena = (status: Estado) => ({ ...stateOf(status, { refundId: 're_x' }), status, metadata: {} as Record<string, string> })
+    const nuestras = new Set(['cr001'])
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 0, refunds: [] }, nuestras)).toBe(false)
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [nuestra('PENDING')] }, nuestras)).toBe(false)
+    expect(
+      hayDevolucionPorFuera({ amountRefundedCents: 0, refunds: [nuestra('FAILED'), ajena('CANCELED'), ajena('FAILED')] }, nuestras),
+    ).toBe(false)
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [ajena('SUCCEEDED')] }, nuestras)).toBe(true)
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 0, refunds: [ajena('PENDING')] }, nuestras)).toBe(true)
+    // Con nuestra metadata pero de una fila que NO es de este cargo: no es nuestra.
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [nuestra('SUCCEEDED', 'cr-de-otro')] }, nuestras)).toBe(true)
+    // Más devuelto en Stripe que lo que suman las nuestras vivas: por fuera.
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 26_000, refunds: [nuestra('SUCCEEDED')] }, nuestras)).toBe(true)
+  })
+
+  it('repetir la misma llave de saldo no vuelve a leer Stripe, ni a abonar, ni a escribir', async () => {
+    const r = await aSaldo()
+    getChargeRefunds.mockClear()
+    ;(abonarSaldoAFavorEnTx as jest.Mock).mockClear()
+    ;(writeRefundInTx as jest.Mock).mockClear()
+    const otra = await aSaldo()
+    expect(otra).toMatchObject({ cardRefundId: r.cardRefundId, refundId: 'pay-refund-saldo', cardRefundStatus: 'RESOLVED', replay: true })
+    expect(getChargeRefunds).not.toHaveBeenCalled()
+    expect(writeRefundInTx).not.toHaveBeenCalled()
+    expect(abonarSaldoAFavorEnTx).not.toHaveBeenCalled()
+    expect(store.size).toBe(1)
+    // Y la misma llave a la tarjeta es otra solicitud: 409.
+    await expect(pedir({ key: 'llave-saldo-1' })).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_REUSED' })
   })
 })

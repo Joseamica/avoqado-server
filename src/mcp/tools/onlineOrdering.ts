@@ -507,7 +507,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_order_card_refunds',
-    'Devoluciones a la tarjeta de un pedido en línea pagado con tarjeta al pedir, sólo lectura: monto en pesos, motivo, estado (REQUESTED, SENDING, PENDING, SUCCEEDED o RECORDED = devuelta y anotada; FAILED o CANCELED = el banco no la hizo; REVERSED = falló después de anotarla y falta devolver por otro medio; RESOLVED = ya se devolvió por otro medio) y, si falló después, el motivo y cómo se resolvió.',
+    'Devoluciones de un pedido en línea pagado con tarjeta al pedir, sólo lectura: monto en pesos, motivo, estado (REQUESTED, SENDING, PENDING, SUCCEEDED o RECORDED = devuelta a la tarjeta y anotada; FAILED o CANCELED = el banco no la hizo; REVERSED = falló después de anotarla y falta devolver por otro medio; RESOLVED = ya se devolvió por otro medio) y, si falló después, el motivo y cómo se resolvió. Con toStoreCredit: true la devolución no fue a la tarjeta: se le dio al cliente como saldo a favor en el negocio (nace RESOLVED, sin reversa). Esta herramienta sólo lee; devolver a saldo a favor se hace desde el panel.',
     {
       venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
       orderId: z.string().describe('Id del pedido (orderId de la lista de pedidos en línea)'),

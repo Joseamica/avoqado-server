@@ -1096,6 +1096,15 @@ describe('devoluciones a la tarjeta de un pedido en línea', () => {
     expect(r).toMatchObject({ ok: true, devoluciones: [{ id: 'cr1', status: 'RECORDED', amount: 100, feeRefunded: 1.16 }] })
   })
 
+  it('D661 (Task 6): online_order_card_refunds dice la verdad de una devolución a saldo a favor (toStoreCredit) y la descripción lo explica', async () => {
+    mockListCardRefunds.mockResolvedValue([fila({ status: 'RESOLVED', stripeRefundId: null, feeRefunded: '0.00', toStoreCredit: true })])
+    const r = parse(await call('online_order_card_refunds', { venueId: 'v1', orderId: 'ord1' }))
+    expect(r.devoluciones).toEqual([expect.objectContaining({ status: 'RESOLVED', toStoreCredit: true, amount: 100, reversal: null })])
+    expect(descriptions.get('online_order_card_refunds')).toMatch(/toStoreCredit: true[\s\S]*saldo a favor/)
+    // La herramienta de devolver sigue siendo sólo a la tarjeta (r4 MCP).
+    expect(descriptions.get('online_order_card_refund')).not.toMatch(/saldo a favor/)
+  })
+
   it('online_order_card_refund sin confirm: vista previa «Se devuelven $X a la tarjeta del cliente» y su confirmationToken; no devuelve', async () => {
     const r = parse(await call('online_order_card_refund', { venueId: 'v1', orderId: 'ord1', amount: 120.5, reason: 'CANCELLED_ORDER' }))
     expect(mockRequirePermission).toHaveBeenCalledWith('payments:refund', 'v1')
