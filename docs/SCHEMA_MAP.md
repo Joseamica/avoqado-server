@@ -115,7 +115,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `CatalogVenueEventSequence` → `schema.prisma:L13685`
 - `CatalogVenueOverride` → `schema.prisma:L13356`
 - `CatalogVenueRollout` → `schema.prisma:L13216`
-- `CelularDeCampo` → `schema.prisma:L22318`
+- `CelularDeCampo` → `schema.prisma:L22321`
 - `Cfdi` → `schema.prisma:L18663`
 - `CfdiGlobalOrden` → `schema.prisma:L18794`
 - `ChatbotTokenBudget` → `schema.prisma:L11732`
@@ -127,7 +127,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `CheckoutSession` → `schema.prisma:L7221`
 - `ClassSession` → `schema.prisma:L15726`
 - `ClassSessionPayState` → `schema.prisma:L20897`
-- `CodigoDeCelular` → `schema.prisma:L22357`
+- `CodigoDeCelular` → `schema.prisma:L22360`
 - `CommissionCalculation` → `schema.prisma:L14390`
 - `CommissionClawback` → `schema.prisma:L14567`
 - `CommissionConfig` → `schema.prisma:L14149`
@@ -202,7 +202,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `EmailSuppression` → `schema.prisma:L8801`
 - `EmailTemplate` → `schema.prisma:L14968`
 - `Employee` → `schema.prisma:L19329`
-- `EnvioRetenidoDeCampo` → `schema.prisma:L22377`
+- `EnvioRetenidoDeCampo` → `schema.prisma:L22380`
 - `Estimate` → `schema.prisma:L17016`
 - `EstimateItem` → `schema.prisma:L17045`
 - `Exchange` → `schema.prisma:L20522`
@@ -517,7 +517,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `UpsellImpression` → `schema.prisma:L10053`
 - `UpsellRule` → `schema.prisma:L9973`
 - `user_sessions` → `schema.prisma:L7210`
-- `VentaDeCampo` → `schema.prisma:L22290`
+- `VentaDeCampo` → `schema.prisma:L22293`
 - `Venue` → `schema.prisma:L194`
 - `VenueAreaTicketSettings` → `schema.prisma:L17739`
 - `VenueChatMessage` → `schema.prisma:L1194`

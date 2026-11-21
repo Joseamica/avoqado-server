@@ -997,3 +997,27 @@ export const sendCampaignSchema = z.object({
       .max(2000, 'La confirmación no es válida'),
   }),
 })
+
+// ── WhatsApp de ventas (fase 3, «leer chats»): sólo lectura, sólo el superadmin (lo decide el servicio) ──────────────────
+
+const opaqueCursor = z.string({ invalid_type_error: 'El cursor no es válido' }).max(300, 'El cursor no es válido').optional()
+
+/** GET /crm/whatsapp/chats. The service caps the page at 100 and reads the cursor. */
+export const listWhatsappChatsSchema = z.object({
+  query: z.object({
+    sinProspecto: flagQuery,
+    q: listQuery.q,
+    cursor: opaqueCursor,
+    limit: listQuery.limit,
+  }),
+})
+
+/** GET /crm/whatsapp/messages: the thread of one phone OR of one business (the service demands exactly one). */
+export const whatsappThreadSchema = z.object({
+  query: z.object({
+    phone: z.string({ invalid_type_error: 'El teléfono no es válido' }).trim().min(1).max(30, 'El teléfono no es válido').optional(),
+    accountId: cuid.optional(),
+    cursor: opaqueCursor,
+    limit: listQuery.limit,
+  }),
+})

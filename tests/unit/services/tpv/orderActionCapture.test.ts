@@ -47,6 +47,8 @@ jest.mock('@/utils/prismaClient', () => {
     orderAction: {
       create: jest.fn(),
     },
+    // «Anular producto» (Codex r2 #7): `ITEM_VOIDED` va dentro de la transacción de la anulación.
+    activityLog: { create: jest.fn(async () => ({})) },
     orderDiscount: {
       findMany: jest.fn(async () => []),
       create: jest.fn(async () => ({})),
@@ -608,7 +610,11 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
   // ── voidItems ──────────────────────────────────────────────────────────────
 
   describe('voidItems → ITEM_VOIDED', () => {
-    it('fires logAction with action ITEM_VOIDED after orderAction.create', async () => {
+    // «Anular producto» (Codex r2 #7): `ITEM_VOIDED` se escribe DENTRO de la transacción (`writeLegacyActivityAuditTx`), no con
+    // `logAction` después del commit: la anulación no puede quedar sin su asiento en la bitácora del dueño.
+    const anulado = () => mockPrisma.activityLog.create.mock.calls.map((c: any[]) => c[0].data).find((d: any) => d.action === 'ITEM_VOIDED')
+
+    it('writes ITEM_VOIDED in the transaction, with the OrderAction', async () => {
       const order = makeOrder()
       mockPrisma.order.findUnique.mockResolvedValue(order)
       mockPrisma.orderItem.deleteMany.mockResolvedValue({ count: 1 })
@@ -625,7 +631,7 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
         expect.objectContaining({ data: expect.objectContaining({ actionType: 'VOID' }) }),
       )
 
-      expect(mockLogAction).toHaveBeenCalledWith(
+      expect(anulado()).toEqual(
         expect.objectContaining({
           action: 'ITEM_VOIDED',
           entity: 'Order',
@@ -635,8 +641,9 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
           data: expect.objectContaining({ amount: 60, reason: 'Wrong item' }),
         }),
       )
+      expect(mockLogAction.mock.calls.find(c => c[0].action === 'ITEM_VOIDED')).toBeUndefined()
       // Sin sesión (no debería pasar en /tpv), como antes: sin nota de vendedor.
-      expect(mockLogAction.mock.calls.find(c => c[0].action === 'ITEM_VOIDED')![0].data).not.toHaveProperty('vendedorSegunElAparato')
+      expect(anulado().data).not.toHaveProperty('vendedorSegunElAparato')
     })
 
     // hz:87f4b879:D1: el autor de anular es quien está en SESIÓN (A, `actorId`), no el vendedor elegido en la terminal (B).
@@ -656,7 +663,7 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
       expect(mockPrisma.orderAction.create).toHaveBeenCalledWith({
         data: expect.objectContaining({ actionType: 'VOID', performedById: 'user-A' }),
       })
-      expect(mockLogAction).toHaveBeenCalledWith(
+      expect(anulado()).toEqual(
         expect.objectContaining({
           action: 'ITEM_VOIDED',
           staffId: 'user-A',
@@ -683,7 +690,7 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
         actorId: STAFF_ID,
       })
 
-      const log = mockLogAction.mock.calls.find(c => c[0].action === 'ITEM_VOIDED')![0]
+      const log = anulado()
       expect(log.staffId).toBe(STAFF_ID)
       expect(log.data).not.toHaveProperty('vendedorSegunElAparato')
     })
@@ -701,7 +708,7 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
       })
 
       esperaDevolucionDePuntosFirmadaPor('sv-A', 'user-A')
-      expect(mockLogAction).toHaveBeenCalledWith(
+      expect(anulado()).toEqual(
         expect.objectContaining({
           action: 'ITEM_VOIDED',
           staffId: 'user-A',

@@ -70,20 +70,28 @@ describe('D93 · la cola de mesas guarda la hora del aparato (sólo reportes)', 
     const abierta = hace(30 * 60_000)
     const cobrada = hace(10 * 60_000)
     const antes = Date.now()
+    // Las llaves con la forma de las apps (`sync:<id del intent>:<n>`, decisión 1 de D7): una etiqueta libre se reemplaza al entrar.
+    const abrir = intent('OPEN_TABLE', { tableId: t, covers: 2, localOrderId: local }, abierta)
+    const ronda = intent(
+      'ADD_ITEMS',
+      {
+        localOrderId: local,
+        items: [
+          { productId: coca, quantity: 1 },
+          { productId: coca, quantity: 1 },
+        ],
+      },
+      hace(25 * 60_000),
+    )
+    ;(ronda.payload.items as any[]).forEach((it, i) => (it.externalId = `sync:${ronda.id}:${i}`))
     const acks = await replay([
-      intent('OPEN_TABLE', { tableId: t, covers: 2, localOrderId: local }, abierta),
+      abrir,
+      ronda,
       intent(
-        'ADD_ITEMS',
-        {
-          localOrderId: local,
-          items: [
-            { productId: coca, quantity: 1, externalId: `l1-${fixture}` },
-            { productId: coca, quantity: 1, externalId: `l2-${fixture}` },
-          ],
-        },
-        hace(25 * 60_000),
+        'SPLIT_ORDER',
+        { localOrderId: local, itemRefs: [{ externalId: `sync:${ronda.id}:1` }], newLocalOrderId: hija },
+        hace(20 * 60_000),
       ),
-      intent('SPLIT_ORDER', { localOrderId: local, itemRefs: [{ externalId: `l2-${fixture}` }], newLocalOrderId: hija }, hace(20 * 60_000)),
       intent('PAY_CASH', { localOrderId: local, amountCents: 2500, tipCents: 0, method: 'CASH' }, cobrada),
     ])
     expect(acks.map(a => a.status)).toEqual(['ACKED', 'ACKED', 'ACKED', 'ACKED'])

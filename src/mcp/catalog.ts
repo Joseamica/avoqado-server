@@ -123,6 +123,9 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   // Correo del CRM (fase 2): sólo lectura. Mandar una campaña o un correo NO es una herramienta: es masivo y no se deshace.
   crm_list_email_templates: 'read',
   crm_campaign_status: 'read',
+  // WhatsApp de ventas (fase 3): leer los chats, nunca mandar. Sólo el superadmin real, sólo el MCP libre.
+  crm_whatsapp_chats: 'read',
+  crm_whatsapp_thread: 'read',
   create_product: 'write',
   create_product_with_variants: 'write',
   create_products: 'write',
@@ -427,6 +430,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   shopify_unmatched_list: 'read',
   sim_custody: 'read',
   sim_pending_approvals: 'read',
+  void_table_check_item: 'write',
   split_table_check: 'write',
   split_table_check_by_seat: 'write',
   staff_attendance: 'read',
@@ -643,6 +647,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'resolvedModifierId',
             // Repetir la misma opción (`configure_modifier_repeat`, encargo a508f4): se confirma sobre el grupo que se VIO.
             'resolvedGroupId',
+            // «Anular producto» (`void_table_check_item`, Codex r1 #5): se anula exactamente el renglón que se VIO.
+            'resolvedOrderItemId',
           ]) {
             // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
             // no atar un `null` que el esquema de otra herramienta no acepta.
