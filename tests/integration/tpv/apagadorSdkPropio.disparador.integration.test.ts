@@ -47,15 +47,15 @@ async function terminalPrendida(serialNumber: string) {
 const leer = async (id: string) => (await prisma.terminal.findUniqueOrThrow({ where: { id } })).inHouseSdkEnabled
 
 it.each([
-  ['serialNumber', 'AVQD-9900000001', { serialNumber: 'AVQD-9900000002' }],
-  ['type', 'AVQD-9900000003', { type: TerminalType.TPV_IOS }],
-  ['brand', 'AVQD-9900000004', { brand: 'NEXGO' }],
-  ['venueId', 'AVQD-9900000010', 'otroVenue'],
+  ['serialNumber', 'AVQD-9900000001', () => ({ serialNumber: 'AVQD-9900000002' })],
+  ['type', 'AVQD-9900000003', () => ({ type: TerminalType.TPV_IOS })],
+  ['brand', 'AVQD-9900000004', () => ({ brand: 'NEXGO' })],
+  // `otroVenueId` nace en beforeAll: por eso cada cambio es una función, que se evalúa ya dentro de la prueba.
+  ['venueId', 'AVQD-9900000010', () => ({ venueId: otroVenueId })],
 ])('prendida + cambia %s ⇒ queda en false', async (_campo, serie, cambio) => {
   const t = await terminalPrendida(serie)
   expect(t.inHouseSdkEnabled).toBe(true)
-  // `otroVenueId` nace en beforeAll: no existe aún cuando it.each arma su tabla.
-  await prisma.terminal.update({ where: { id: t.id }, data: cambio === 'otroVenue' ? { venueId: otroVenueId } : cambio })
+  await prisma.terminal.update({ where: { id: t.id }, data: cambio() })
   expect(await leer(t.id)).toBe(false)
 })
 
