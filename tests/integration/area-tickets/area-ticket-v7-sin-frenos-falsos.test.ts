@@ -12,15 +12,16 @@ import prisma from '@/utils/prismaClient'
 import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
 /**
- * D5 (pizarrón hz:0555ee15:D5), tabla compartida contra Postgres: con el MISMO inventario, ARMAR la venta de vales y LIQUIDARLA contestan
- * lo mismo (aprueban las dos, o rechazan las dos con el mismo código y el mismo texto). Cada caso corre dos veces sobre un catálogo propio
- * e idéntico: «armar» deja el inventario en el estado del caso y arma; «liquidar» arma con el inventario bien, deja el mismo estado y
- * cobra en efectivo. La columna «liquidar» describe lo que la liquidación ya hacía antes de D5; la columna «armar» es lo nuevo.
+ * D5 (pizarrón hz:0555ee15:D5), contra Postgres: el freno al ARMAR la venta de vales nunca es falso. Con el mismo inventario, si armar
+ * rechaza, la liquidación también rechaza (y si la liquidación acepta, armar también). Cada caso corre dos veces sobre un catálogo
+ * propio e idéntico: «armar» deja el inventario en el estado del caso y arma; «liquidar» arma con el inventario bien, deja el mismo
+ * estado y cobra en efectivo (la liquidación es la de `origin/develop`, sin cambios). Lo que armar no ve (cambios entre armar y liquidar,
+ * errores al escribir) es residual declarado en la promesa, no una fila de esta tabla.
  */
 type Resultado = { ok: true } | { code: string; message: string }
 type Linea = { productId: string; quantity: string }
 type Suelto = { productId: string; quantity: number; modifierIds?: string[] }
-type Escena = { ajenos?: Linea[]; vales: Linea[]; sueltos: Suelto[]; malo: () => Promise<void>; esperado: Resultado }
+type Escena = { ajenos?: Linea[]; vales: Linea[]; sueltos: Suelto[]; malo: () => Promise<void>; armar: Resultado }
 type Caso = { nombre: string; sinApartado?: boolean; preparar: (tag: string) => Promise<Escena> }
 
 const libre = (label: string, disponible: string, requerida: string): Resultado => ({
@@ -40,7 +41,7 @@ const RESERVA_SIN_LOTES: Resultado = {
   message: 'Los lotes FIFO no cubren la reserva del vale.',
 }
 
-describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla compartida)', () => {
+describe('Vales V7 — D5: el freno al armar nunca es falso (si armar rechaza, liquidar también)', () => {
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   let organizationId: string
   let venueId: string
@@ -194,6 +195,34 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
     return id
   }
 
+  async function extraDeInsumo(tag: string, rawMaterialId: string, gramos: string): Promise<string> {
+    const grupo = await prisma.modifierGroup.create({ data: { venueId, name: `Extras ${tag}` } })
+    const extra = await prisma.modifier.create({
+      data: {
+        groupId: grupo.id,
+        name: `Con queso ${tag}`,
+        price: 5,
+        rawMaterialId,
+        quantityPerUnit: new Prisma.Decimal(gramos),
+        unit: Unit.GRAM,
+        inventoryMode: 'ADDITION',
+      },
+    })
+    return extra.id
+  }
+  /** Deja en 0.000 los primeros `cuantos` apartados (por id) de un insumo: lo que deja el redondeo al emitir (Codex r3 #1). */
+  async function apartadosEnCero(rawMaterialId: string, cuantos: number) {
+    const apartados = await prisma.areaTicketInventoryReservation.findMany({
+      where: { venueId, inventoryId: rawMaterialId },
+      orderBy: { id: 'asc' },
+      take: cuantos,
+    })
+    await prisma.areaTicketInventoryReservation.updateMany({
+      where: { id: { in: apartados.map(a => a.id) } },
+      data: { quantityBaseUnits: new Prisma.Decimal('0') },
+    })
+  }
+
   // ── Los dos lados ──
   const emitir = (tag: string, i: number, lineas: Linea[]) =>
     issueAreaTicket(venueId, {
@@ -212,7 +241,7 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
     }
   }
 
-  async function correr(caso: Caso, numero: number, lado: 'armar' | 'liquidar'): Promise<{ obtenido: Resultado; esperado: Resultado }> {
+  async function correr(caso: Caso, numero: number, lado: 'armar' | 'liquidar'): Promise<{ obtenido: Resultado; armar: Resultado }> {
     // Corto: las llaves de idempotencia llevan el tag y el sufijo, y el servidor acepta hasta 64 caracteres.
     const tag = `c${numero}${lado === 'armar' ? 'a' : 'l'}`
     if (caso.sinApartado) {
@@ -245,13 +274,13 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
         })
       if (lado === 'armar') {
         await escena.malo()
-        return { obtenido: await resultado(armar()), esperado: escena.esperado }
+        return { obtenido: await resultado(armar()), armar: escena.armar }
       }
       const armada = await armar()
       await escena.malo()
       const centavos = Math.round(Number(armada.order!.total) * 100)
       const pago = payCashOrder(venueId, armada.order!.id, { amount: centavos, tip: 0, staffId, idempotencyKey: `${tag}-pago-${suffix}` })
-      return { obtenido: await resultado(pago), esperado: escena.esperado }
+      return { obtenido: await resultado(pago), armar: escena.armar }
     } finally {
       if (caso.sinApartado) {
         await prisma.venueAreaTicketSettings.update({
@@ -272,7 +301,7 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
           vales: [{ productId: jamonId, quantity: '1' }],
           sueltos: [{ productId: papas, quantity: 2 }],
           malo: async () => void (await fijarExistencia(papas, '1')),
-          esperado: libre(`Papas ${tag}`, '1.000', '2.000'),
+          armar: libre(`Papas ${tag}`, '1.000', '2.000'),
         }
       },
     },
@@ -285,7 +314,7 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
           vales: [{ productId: quesadilla, quantity: '1' }],
           sueltos: [{ productId: quesadilla, quantity: 1 }],
           malo: () => fijarLotes(queso, '190'),
-          esperado: lotesDeLaVenta(`Queso ${tag}`, '90.000', '100.000'),
+          armar: lotesDeLaVenta(`Queso ${tag}`, '90.000', '100.000'),
         }
       },
     },
@@ -294,29 +323,18 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
       preparar: async tag => {
         const queso = await insumo(`Queso extra ${tag}`, '100', 100)
         const taco = await producto(`Taco ${tag}`, InventoryMethod.QUANTITY, '10')
-        const grupo = await prisma.modifierGroup.create({ data: { venueId, name: `Extras ${tag}` } })
-        const extra = await prisma.modifier.create({
-          data: {
-            groupId: grupo.id,
-            name: `Con queso ${tag}`,
-            price: 5,
-            rawMaterialId: queso,
-            quantityPerUnit: new Prisma.Decimal('50'),
-            unit: Unit.GRAM,
-            inventoryMode: 'ADDITION',
-          },
-        })
+        const extra = await extraDeInsumo(tag, queso, '50')
         return {
           vales: [{ productId: jamonId, quantity: '1' }],
-          sueltos: [{ productId: taco, quantity: 1, modifierIds: [extra.id] }],
+          sueltos: [{ productId: taco, quantity: 1, modifierIds: [extra] }],
           malo: async () =>
             void (await prisma.rawMaterial.update({ where: { id: queso }, data: { currentStock: new Prisma.Decimal('30') } })),
-          esperado: libre(`Queso extra ${tag}`, '30.000', '50.000'),
+          armar: libre(`Queso extra ${tag}`, '30.000', '50.000'),
         }
       },
     },
     {
-      nombre: 'el apartado de otro vale resta a lo suelto',
+      nombre: 'apartado de otro vale (por piezas) resta a lo suelto',
       preparar: async tag => {
         const papas = await producto(`Papas ajenas ${tag}`, InventoryMethod.QUANTITY, '4')
         return {
@@ -324,7 +342,22 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
           vales: [{ productId: jamonId, quantity: '1' }],
           sueltos: [{ productId: papas, quantity: 2 }],
           malo: async () => void (await fijarExistencia(papas, '3')),
-          esperado: libre(`Papas ajenas ${tag}`, '1.000', '2.000'),
+          armar: libre(`Papas ajenas ${tag}`, '1.000', '2.000'),
+        }
+      },
+    },
+    {
+      nombre: 'apartado de otro vale (insumo) resta a lo suelto',
+      preparar: async tag => {
+        const queso = await insumo(`Queso ajeno ${tag}`, '200', 300)
+        const quesadilla = await platillo(`Quesadilla ajena ${tag}`, queso, '100')
+        return {
+          ajenos: [{ productId: quesadilla, quantity: '1' }],
+          vales: [{ productId: jamonId, quantity: '1' }],
+          sueltos: [{ productId: quesadilla, quantity: 1 }],
+          malo: async () =>
+            void (await prisma.rawMaterial.update({ where: { id: queso }, data: { currentStock: new Prisma.Decimal('150') } })),
+          armar: libre(`Queso ajeno ${tag}`, '50.000', '100.000'),
         }
       },
     },
@@ -336,7 +369,7 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
           vales: [{ productId: papas, quantity: '2' }],
           sueltos: [],
           malo: async () => void (await fijarExistencia(papas, '1')),
-          esperado: RESERVA_SIN_EXISTENCIA,
+          armar: RESERVA_SIN_EXISTENCIA,
         }
       },
     },
@@ -349,7 +382,7 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
           vales: [{ productId: quesadilla, quantity: '1' }],
           sueltos: [],
           malo: () => fijarLotes(queso, '50'),
-          esperado: RESERVA_SIN_LOTES,
+          armar: RESERVA_SIN_LOTES,
         }
       },
     },
@@ -361,12 +394,87 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
         return {
           vales: [{ productId: quesadilla, quantity: '1' }],
           sueltos: [],
+          malo: () => apartadosEnCero(queso, 1),
+          armar: RESERVA_SIN_LOTES,
+        }
+      },
+    },
+    {
+      nombre: 'dos apartados del mismo insumo, uno en cero',
+      preparar: async tag => {
+        const queso = await insumo(`Queso doble ${tag}`, '500', 500)
+        const quesadilla = await platillo(`Quesadilla doble ${tag}`, queso, '100')
+        return {
+          vales: [
+            { productId: quesadilla, quantity: '1' },
+            { productId: quesadilla, quantity: '1' },
+          ],
+          sueltos: [],
+          malo: () => apartadosEnCero(queso, 1),
+          armar: RESERVA_SIN_LOTES,
+        }
+      },
+    },
+    {
+      nombre: 'lote ACTIVE que quedó en cero',
+      preparar: async tag => {
+        const queso = await insumo(`Queso lote cero ${tag}`, '300', 300)
+        const quesadilla = await platillo(`Quesadilla lote cero ${tag}`, queso, '100')
+        return {
+          vales: [{ productId: jamonId, quantity: '1' }],
+          sueltos: [{ productId: quesadilla, quantity: 1 }],
+          malo: () => fijarLotes(queso, '0'),
+          armar: lotesDeLaVenta(`Queso lote cero ${tag}`, '0.000', '100.000'),
+        }
+      },
+    },
+    {
+      nombre: 'insumo sin lotes activos (todos agotados)',
+      preparar: async tag => {
+        const queso = await insumo(`Queso sin lotes ${tag}`, '300', 300)
+        const quesadilla = await platillo(`Quesadilla sin lotes ${tag}`, queso, '100')
+        return {
+          vales: [{ productId: jamonId, quantity: '1' }],
+          sueltos: [{ productId: quesadilla, quantity: 1 }],
           malo: async () =>
-            void (await prisma.areaTicketInventoryReservation.updateMany({
+            void (await prisma.stockBatch.updateMany({ where: { venueId, rawMaterialId: queso }, data: { status: 'DEPLETED' } })),
+          armar: lotesDeLaVenta(`Queso sin lotes ${tag}`, '0.000', '100.000'),
+        }
+      },
+    },
+    {
+      nombre: 'cobertura parcial: el vale apartó menos de lo que pide su renglón',
+      preparar: async tag => {
+        const queso = await insumo(`Queso parcial ${tag}`, '100', 100)
+        const quesadilla = await platillo(`Quesadilla parcial ${tag}`, queso, '100')
+        return {
+          vales: [{ productId: quesadilla, quantity: '1' }],
+          sueltos: [],
+          malo: async () => {
+            await prisma.areaTicketInventoryReservation.updateMany({
               where: { venueId, inventoryId: queso },
-              data: { quantityBaseUnits: new Prisma.Decimal('0') },
-            })),
-          esperado: RESERVA_SIN_LOTES,
+              data: { quantityBaseUnits: new Prisma.Decimal('40') },
+            })
+            await prisma.rawMaterial.update({ where: { id: queso }, data: { currentStock: new Prisma.Decimal('90') } })
+          },
+          armar: libre(`Queso parcial ${tag}`, '50.000', '60.000'),
+        }
+      },
+    },
+    {
+      nombre: 'dos fallos a la vez (suelto sin existencia y apartado sin respaldo)',
+      preparar: async tag => {
+        const papas = await producto(`Papas dobles ${tag}`, InventoryMethod.QUANTITY, '5')
+        const queso = await insumo(`Queso fallo ${tag}`, '100', 100)
+        const quesadilla = await platillo(`Quesadilla fallo ${tag}`, queso, '100')
+        return {
+          vales: [{ productId: quesadilla, quantity: '1' }],
+          sueltos: [{ productId: papas, quantity: 2 }],
+          malo: async () => {
+            await fijarExistencia(papas, '1')
+            await fijarLotes(queso, '50')
+          },
+          armar: RESERVA_SIN_LOTES,
         }
       },
     },
@@ -379,7 +487,7 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
           vales: [{ productId: papas, quantity: '2' }],
           sueltos: [],
           malo: async () => void (await fijarExistencia(papas, '1')),
-          esperado: libre(`Papas sin apartado ${tag}`, '1.000', '2.000'),
+          armar: libre(`Papas sin apartado ${tag}`, '1.000', '2.000'),
         }
       },
     },
@@ -391,12 +499,13 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
           vales: [{ productId: jamonId, quantity: '1' }],
           sueltos: [{ productId: papas, quantity: 1 }],
           malo: async () => void (await prisma.inventory.delete({ where: { productId: papas } })),
-          esperado: { code: 'AREA_TICKET_INVENTORY_MISSING', message: `No existe inventario para "Papas sin fila ${tag}".` },
+          armar: { code: 'AREA_TICKET_INVENTORY_MISSING', message: `No existe inventario para "Papas sin fila ${tag}".` },
         }
       },
     },
+    // ── En el límite: la liquidación acepta, así que armar NO puede frenar ──
     {
-      nombre: 'existencia justa: las dos aprueban',
+      nombre: 'justo: existencia y lotes exactos tras el apartado propio',
       preparar: async tag => {
         const papas = await producto(`Papas justas ${tag}`, InventoryMethod.QUANTITY, '5')
         const queso = await insumo(`Queso justo ${tag}`, '200', 200)
@@ -408,18 +517,51 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
             { productId: quesadilla, quantity: 1 },
           ],
           malo: async () => void (await fijarExistencia(papas, '2')),
-          esperado: { ok: true },
+          armar: { ok: true },
+        }
+      },
+    },
+    {
+      nombre: 'justo: apartado de otro vale con lo exacto',
+      preparar: async tag => {
+        const papas = await producto(`Papas ajenas justas ${tag}`, InventoryMethod.QUANTITY, '6')
+        return {
+          ajenos: [{ productId: papas, quantity: '2' }],
+          vales: [{ productId: jamonId, quantity: '1' }],
+          sueltos: [{ productId: papas, quantity: 2 }],
+          malo: async () => void (await fijarExistencia(papas, '4')),
+          armar: { ok: true },
+        }
+      },
+    },
+    {
+      nombre: 'justo: cobertura parcial con lo exacto',
+      preparar: async tag => {
+        const queso = await insumo(`Queso parcial justo ${tag}`, '100', 100)
+        const quesadilla = await platillo(`Quesadilla parcial justa ${tag}`, queso, '100')
+        return {
+          vales: [{ productId: quesadilla, quantity: '1' }],
+          sueltos: [],
+          malo: async () =>
+            void (await prisma.areaTicketInventoryReservation.updateMany({
+              where: { venueId, inventoryId: queso },
+              data: { quantityBaseUnits: new Prisma.Decimal('40') },
+            })),
+          armar: { ok: true },
         }
       },
     },
   ]
 
+  const rechaza = (r: Resultado) => !('ok' in r)
   for (const [numero, caso] of casos.entries()) {
-    for (const lado of ['liquidar', 'armar'] as const) {
-      it(`${caso.nombre} · ${lado}`, async () => {
-        const { obtenido, esperado } = await correr(caso, numero, lado)
-        expect(obtenido).toEqual(esperado)
-      })
-    }
+    it(`${caso.nombre}: si armar rechaza, liquidar también`, async () => {
+      const armar = await correr(caso, numero, 'armar')
+      expect(armar.obtenido).toEqual(armar.armar)
+      const liquidar = await correr(caso, numero, 'liquidar')
+      if (rechaza(armar.obtenido)) expect(rechaza(liquidar.obtenido)).toBe(true)
+      // Las filas de esta tabla no tienen residual: lo que la liquidación acepta, armar también lo aceptó.
+      else expect(liquidar.obtenido).toEqual({ ok: true })
+    })
   }
 })

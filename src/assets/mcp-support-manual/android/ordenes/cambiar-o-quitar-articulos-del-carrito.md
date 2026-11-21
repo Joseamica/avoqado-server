@@ -19,6 +19,8 @@ keywords:
   - no hay existencia libre suficiente
   - no cubren la venta
   - vale sin existencia
+  - el aviso sigue aunque hay existencia
+  - no me deja cobrar el vale
 ---
 
 ## Antes de empezar
@@ -39,8 +41,9 @@ En *Cobrar*, con artículos en el carrito. En el teléfono, toca antes *Ver carr
 - En un artículo vendido por peso no sale *Cantidad*: quítalo y vuelve a pesarlo.
 - Si aparece «No se puede vaciar», la venta de vales ya tiene un abono: cobra su saldo pendiente para terminarla.
 - Si aparece «El descuento «…» tiene tope de usos y no se puede poner en un vale: emite el vale sin ese descuento.» o «…no se puede usar en una venta con vales: quítalo de ese producto para cobrar.», quita del carrito el producto que lleva ese descuento y agrégalo otra vez sin él: un descuento con tope de usos no entra en una venta con vales.
-- Si al cobrar una venta con vales aparece «No hay existencia libre suficiente de "…". Disponible: …; requerida: ….», «Los lotes FIFO de "…" no cubren la venta…», «Los lotes FIFO no cubren la reserva del vale.» o «La existencia reservada ya no está disponible.», falta inventario y esa venta no se puede cerrar: en una venta con vales todo necesita existencia.
+- Si al cobrar una venta con vales aparece «No hay existencia libre suficiente de "…". Disponible: …; requerida: ….», «Los lotes FIFO de "…" no cubren la venta…», «Los lotes FIFO no cubren la reserva del vale.» o «La existencia reservada ya no está disponible.», esa venta no se puede cerrar todavía. Normalmente falta existencia: en una venta con vales todo necesita existencia.
   - Si salió al confirmar el cobro de una venta sin abonos, no se registró ningún pago y nada llegó a la terminal. Si ya tienes el efectivo en la mano, no quedó registrado: devuélveselo al cliente mientras corriges. Quita o baja la cantidad del producto que se agregó en la caja (o de su extra) y vuelve a cobrar; si pide volver a escanear el vale, escanéalo otra vez.
   - Si falta un producto del vale (su renglón no se puede editar), pide a un encargado que registre la entrada en el inventario y vuelve a cobrar.
+  - Si ya hay existencia y el aviso sigue saliendo con ese vale, escríbenos.
   - Si la venta ya tenía un abono, lo ya cobrado sigue registrado: no lo cobres otra vez. Cobra sólo el saldo cuando el encargado registre la entrada.
   - Si el cliente ya había pagado por fuera («Ya pagó de otra forma»), ese pago no quedó registrado: regístralo otra vez después de corregir.
