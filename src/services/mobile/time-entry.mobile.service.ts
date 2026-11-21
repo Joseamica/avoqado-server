@@ -350,7 +350,7 @@ export async function clockOut(params: ClockOutParams) {
 
   if (!activeEntry) {
     // La regla la acababa de cerrar: la evidencia de esta salida se anota en esa checada y se dice qué pasó (Codex r1 #8).
-    const yaOlvidada = await anotarSalidaQueNoSeUso({ staffId, venueId, origen: 'POS', checkOutPhotoUrl })
+    const yaOlvidada = await anotarSalidaQueNoSeUso({ staffId, venueId, origen: 'POS', checkOutPhotoUrl, latitude, longitude, accuracy })
     if (yaOlvidada) throw new BadRequestError(yaOlvidada, 'SALIDA_OLVIDADA')
     throw new BadRequestError('No tienes entrada registrada')
   }
@@ -406,7 +406,7 @@ export async function clockOut(params: ClockOutParams) {
     },
   })
   if (count !== 1) {
-    const yaOlvidada = await anotarSalidaQueNoSeUso({ staffId, venueId, origen: 'POS', checkOutPhotoUrl })
+    const yaOlvidada = await anotarSalidaQueNoSeUso({ staffId, venueId, origen: 'POS', checkOutPhotoUrl, latitude, longitude, accuracy })
     throw new BadRequestError(yaOlvidada ?? 'No tienes entrada registrada', yaOlvidada ? 'SALIDA_OLVIDADA' : undefined)
   }
   const updatedEntry = await prisma.timeEntry.findUniqueOrThrow({

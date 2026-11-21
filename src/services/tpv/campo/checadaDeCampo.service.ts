@@ -206,6 +206,7 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
           notes: true,
           checkOutPhotoUrl: true,
           depositPhotoUrl: true,
+          clockOutLatitude: true,
           llaveSalida: true,
           editedBy: true,
           breaks: { select: { id: true, startTime: true, endTime: true } },
@@ -247,6 +248,15 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
             ...(!e.checkOutPhotoUrl && v.checkOutPhotoUrl ? { checkOutPhotoUrl: v.checkOutPhotoUrl } : {}),
             ...(!e.depositPhotoUrl && v.depositPhotoUrl ? { depositPhotoUrl: v.depositPhotoUrl } : {}),
             ...(v.skipReason ? { checkoutSkipReason: v.skipReason } : {}),
+            // FLAUTAS_C (21-nov): el GPS tampoco se tira (en PlayTelecom es la prueba de que estuvo en su punto).
+            ...(e.clockOutLatitude == null && v.latitude != null && v.longitude != null
+              ? {
+                  clockOutLatitude: v.latitude,
+                  clockOutLongitude: v.longitude,
+                  clockOutAccuracy: v.accuracy,
+                  clockOutUbicacionFalsa: v.ubicacionFalsa,
+                }
+              : {}),
             // Codex r2 #4: la salida real llegó DESPUÉS de la corrección del gerente: vuelve a «Por revisar» con su hora.
             ...(corregidaPorElGerente ? { salidaOlvidada: true } : {}),
           },

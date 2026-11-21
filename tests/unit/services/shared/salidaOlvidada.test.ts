@@ -283,6 +283,24 @@ describe('anotarSalidaQueNoSeUso (PAX y POS tras el cierre)', () => {
     )
   })
 
+  // FLAUTAS_C (revisión de apps viejas, 21-nov): la salida tardía de la PAX o del POS tiraba el GPS; en PlayTelecom el GPS
+  // de la checada es la prueba de que el promotor estuvo en su punto. Se guarda como las fotos: si la checada no trae el suyo.
+  it('guarda el GPS de la salida tardía si la checada no trae el suyo, y no pisa uno que ya tenga', async () => {
+    prismaMock.timeEntry.findFirst.mockResolvedValue({ ...marcada, clockOutLatitude: null } as any)
+    prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
+
+    await anotarSalidaQueNoSeUso({ staffId: 's', venueId: 'v', origen: 'PAX', latitude: 19.43, longitude: -99.13, accuracy: 8 })
+
+    expect(prismaMock.timeEntry.updateMany.mock.calls[0][0].data).toEqual(
+      expect.objectContaining({ clockOutLatitude: 19.43, clockOutLongitude: -99.13, clockOutAccuracy: 8 }),
+    )
+
+    prismaMock.timeEntry.findFirst.mockResolvedValue({ ...marcada, clockOutLatitude: 20.5 } as any)
+    await anotarSalidaQueNoSeUso({ staffId: 's', venueId: 'v', origen: 'POS', latitude: 19.43, longitude: -99.13, accuracy: 8 })
+
+    expect(prismaMock.timeEntry.updateMany.mock.calls[1][0].data).not.toHaveProperty('clockOutLatitude')
+  })
+
   it('Codex r2 #5: si otro escritor la cambió (0 filas), NO dice que quedaron anotadas', async () => {
     prismaMock.timeEntry.findFirst.mockResolvedValue(marcada as any)
     prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 0 })
