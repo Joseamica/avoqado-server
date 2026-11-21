@@ -7,70 +7,70 @@
  *
  * Uso (sin --apply sólo dice qué haría):
  *   npx tsx scripts/pausa-sola-interruptor.ts --ver [--base render]
- *   npx tsx scripts/pausa-sola-interruptor.ts --prender [--minutos 20] --por <quién> [--base render] --apply --confirm-host <host> --confirm-db <base>
- *   npx tsx scripts/pausa-sola-interruptor.ts --apagar --por <quién> [--base render] --apply --confirm-host <host> --confirm-db <base>
+ *   npx tsx scripts/pausa-sola-interruptor.ts --prender [--minutos 20] --por <quién> [--base render] --apply --confirm-db <host:puerto/base/esquema>
+ *   npx tsx scripts/pausa-sola-interruptor.ts --apagar --por <quién> [--base render] --apply --confirm-db <host:puerto/base/esquema>
  * 🔴 Contra producción (--base render) sólo con el «sí, en prod» del founder.
  *
- * Codex p2v5-r3 #4: confirmar sólo el host no basta (dos bases pueden compartirlo, y `local` heredaba una DATABASE_URL de Render).
- * Por eso `--base local` (o sin --base) exige una URL de esta máquina, `--base render` exige una que NO lo sea, y escribir pide
- * `--confirm-host` y `--confirm-db` iguales al host y al nombre de la base que se va a usar. Host y base se imprimen ANTES de conectar.
+ * Codex p2v5-r3 #4 y p2v5-r4 #3: escribir pide confirmar el DESTINO completo, `--confirm-db host:puerto/base/esquema`, igual al de la URL
+ * que se va a usar (dos bases pueden compartir host, puerto o nombre, y `?schema=` cambia de esquema). `--base local` (o sin --base)
+ * usa la regla de `_solo-base-local.ts` (esta máquina, puerto 5432, base de desarrollo); `--base render` sólo acepta un host de Postgres
+ * de Render. El destino se imprime ANTES de conectar.
  */
 import dotenv from 'dotenv'
+import { esBaseLocal } from './_solo-base-local'
 
-const HOSTS_LOCALES = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
+/** El host externo de un Postgres de Render: `dpg-<id>.<región>-postgres.render.com`. */
+const HOST_DE_RENDER = /^dpg-[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9-]+-postgres\.render\.com$/
 
-export type DestinoDeLaBase = { url: string; host: string; baseDeDatos: string }
+export type DestinoDeLaBase = { url: string; destino: string }
 
 const leerValor = (argv: string[], bandera: string): string | undefined => {
   const i = argv.indexOf(bandera)
   return i >= 0 ? argv[i + 1] : undefined
 }
 
-/** Host y nombre de la base de una URL de Postgres; ninguna URL se imprime en el error. */
-function partesDeLaUrl(url: string | undefined, variable: string): { host: string; baseDeDatos: string } {
-  let host = ''
-  let baseDeDatos = ''
+/** `host:puerto/base/esquema` de una URL de Postgres; ningún error imprime la URL. */
+function destinoDeLaUrl(url: string, variable: string): { destino: string; host: string } {
+  let u: URL
   try {
-    const u = new URL(url ?? '')
-    host = u.hostname
-    baseDeDatos = decodeURIComponent(u.pathname.replace(/^\//, ''))
+    u = new URL(url)
   } catch {
-    // se reporta abajo, sin el valor
+    throw new Error(`${variable} no es una URL (su valor no se imprime).`)
   }
-  if (!host || !baseDeDatos) throw new Error(`${variable} no es una URL con host y nombre de base (su valor no se imprime).`)
-  return { host, baseDeDatos }
+  if (u.protocol !== 'postgres:' && u.protocol !== 'postgresql:') throw new Error(`${variable} no es una URL postgres:// o postgresql://.`)
+  if (u.searchParams.has('host')) throw new Error(`${variable} trae «?host=», que manda la conexión a otro lado: no se usa.`)
+  const baseDeDatos = decodeURIComponent(u.pathname.replace(/^\//, ''))
+  if (!u.hostname || !baseDeDatos) throw new Error(`${variable} no trae host y nombre de base (su valor no se imprime).`)
+  return { host: u.hostname, destino: `${u.hostname}:${u.port || '5432'}/${baseDeDatos}/${u.searchParams.get('schema') || 'public'}` }
 }
 
-/**
- * Elige la base ANTES de que exista el cliente de Prisma. `local` (o sin --base) usa DATABASE_URL y exige que sea de esta máquina;
- * `render` usa RENDER_DATABASE_URL y exige que NO lo sea.
- */
+/** Elige la base ANTES de que exista el cliente de Prisma: `local` usa DATABASE_URL y `render`, RENDER_DATABASE_URL. */
 export function elegirBase(argv: string[], env: NodeJS.ProcessEnv): DestinoDeLaBase {
   const base = leerValor(argv, '--base') ?? 'local'
   if (base !== 'local' && base !== 'render') throw new Error(`--base sólo acepta «render» o «local» (recibí «${base}»).`)
   const variable = base === 'render' ? 'RENDER_DATABASE_URL' : 'DATABASE_URL'
   const url = env[variable]
   if (!url) throw new Error(`--base ${base}: falta ${variable} en el entorno.`)
-  const { host, baseDeDatos } = partesDeLaUrl(url, variable)
-  const esLocal = HOSTS_LOCALES.has(host)
-  if (base === 'local' && !esLocal) throw new Error(`--base local: ${variable} apunta a «${host}», que no es de esta máquina.`)
-  if (base === 'render' && esLocal) throw new Error(`--base render: ${variable} apunta a «${host}», que es de esta máquina.`)
-  return { url, host, baseDeDatos }
+  const { destino, host } = destinoDeLaUrl(url, variable)
+  if (base === 'local') {
+    const corte = esBaseLocal(url)
+    if (!corte.ok) throw new Error(`--base local: ${corte.motivo}.`)
+  } else if (!HOST_DE_RENDER.test(host)) {
+    throw new Error(`--base render: «${host}» no es un Postgres de Render (dpg-….<región>-postgres.render.com).`)
+  }
+  return { url, destino }
 }
 
-/** Escribir pide confirmar exactamente el host Y el nombre de la base que se van a usar. */
-export function revisarConfirmacion(argv: string[], destino: DestinoDeLaBase): void {
-  if (leerValor(argv, '--confirm-host') !== destino.host) {
-    throw new Error(`--confirm-host debe ser exactamente el host de la base (${destino.host}).`)
-  }
-  if (leerValor(argv, '--confirm-db') !== destino.baseDeDatos) {
-    throw new Error(`--confirm-db debe ser exactamente el nombre de la base (${destino.baseDeDatos}).`)
+/** Escribir pide confirmar exactamente el destino que se va a usar. */
+export function revisarConfirmacion(argv: string[], d: DestinoDeLaBase): void {
+  if (leerValor(argv, '--confirm-db') !== d.destino) {
+    throw new Error(`--confirm-db debe ser exactamente el destino de la base (${d.destino}).`)
   }
 }
 
 export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const destino = elegirBase(argv, env)
-  console.log(`Base: ${destino.host} / ${destino.baseDeDatos}`)
+  console.log(`Base: ${destino.destino}`)
   // Después de elegir la base: el cliente de Prisma lee DATABASE_URL al crearse.
   env.DATABASE_URL = destino.url
   const { default: prisma } = await import('../src/utils/prismaClient')
@@ -94,7 +94,7 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
 
     if (!argv.includes('--apply')) {
       console.log(prender ? `Haría: PRENDER desde ahora + ${minutos ?? 15} min.` : 'Haría: APAGAR.')
-      console.log('Simulación: no se escribió nada (agrega --apply --confirm-host <host> --confirm-db <base>).')
+      console.log(`Simulación: no se escribió nada (agrega --apply --confirm-db ${destino.destino}).`)
       return
     }
     revisarConfirmacion(argv, destino)
