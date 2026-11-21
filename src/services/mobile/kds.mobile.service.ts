@@ -13,10 +13,18 @@ import type { CourierInfo } from '@/services/delivery-channels/core/types'
 import prisma from '../../utils/prismaClient'
 import { OrderStatus } from '@prisma/client'
 import type { KdsOrder, KdsOrderItem, KdsOrderStatus, Prisma } from '@prisma/client'
-import { anexarCapacidades, anexarMesaYTiempos, faltaAceptar, ventasDeComandas, type EstadoRetiro, type VentaDeComanda } from './kdsCapacidades'
+import {
+  anexarCapacidades,
+  anexarMesaYTiempos,
+  faltaAceptar,
+  ventasDeComandas,
+  type EstadoRetiro,
+  type VentaDeComanda,
+} from './kdsCapacidades'
 import { toKdsModifierLabels } from '../kds/kdsModifierLabels'
 import { venueTienePantallaDeCocina } from '../kds/kitchenDisplayStations'
 import { authorKitchenTickets } from '../kds/kitchenTicketAuthoring.service'
+import { RECIENTES_VENTANA_MS, recallPreparationTicket } from '../kds/kitchenPreparation.service'
 
 // Use string constants instead of Prisma enum to avoid runtime import issues with tsx
 const KdsStatus = {
@@ -103,6 +111,10 @@ export interface KdsOrderResponse {
     canRetryAt?: string | null
     /** 3.6: el tiempo del platillo («Aperitivos»). `null` = sin tiempo (se prepara de inmediato). */
     course?: string | null
+    /** El renglón de la venta (ya viajaba en la respuesta; tipado para D17). */
+    orderItemId?: string | null
+    /** D17: en cuántas estaciones se prepara este producto (sólo comandas por tiempos del tablero). */
+    stationCount?: number
   }>
   startedAt: string | null
   completedAt: string | null
@@ -174,9 +186,23 @@ async function filtroDelTablero(venueId: string, statuses: KdsOrderStatus[], sta
   return { venueId, status: { in: statuses }, AND: condiciones }
 }
 
+/**
+ * El TABLERO (lo que la cocina tiene que hacer) = `filtroDelTablero` menos dos cosas (D17, founder 20-nov-2026):
+ *  - la comanda con tiempos (v1) cuya cocina ya terminó: READY significa «la cocina acabó, falta que la caja entregue». Sale de
+ *    la pantalla y entra a «Recientes»; la caja la sigue viendo en «Servicio y entregas» porque su estado NO cambia. Así también
+ *    las tablets de cocina ya instaladas (2.25.52) dejan de verla con sólo desplegar el servidor.
+ *  - lo archivado al cerrar el día (`archivedAt`).
+ * «Recientes» NO pasa por aquí: usa `filtroDelTablero` directo.
+ */
+async function filtroDelTableroActivo(venueId: string, statuses: KdsOrderStatus[], stationId?: string): Promise<Prisma.KdsOrderWhereInput> {
+  const base = await filtroDelTablero(venueId, statuses, stationId)
+  const previas = Array.isArray(base.AND) ? base.AND : base.AND ? [base.AND] : []
+  return { ...base, AND: [...previas, { archivedAt: null }, { NOT: { preparationVersion: 1, status: KdsStatus.READY } }] }
+}
+
 /** Cuántas comandas coinciden en total: lo que el tope deja fuera no se pierde en silencio. */
 export async function countKdsOrders(venueId: string, statusFilter?: string, stationId?: string): Promise<number> {
-  return prisma.kdsOrder.count({ where: await filtroDelTablero(venueId, statusesDelFiltro(statusFilter), stationId) })
+  return prisma.kdsOrder.count({ where: await filtroDelTableroActivo(venueId, statusesDelFiltro(statusFilter), stationId) })
 }
 
 export interface KdsBoardPageOptions {
@@ -199,7 +225,7 @@ export async function listKdsOrders(
   ) {
     throw new BadRequestError('La página de cocina debe tener entre 1 y 100 comandas y un desplazamiento válido')
   }
-  const base = await filtroDelTablero(venueId, statusesDelFiltro(statusFilter), stationId)
+  const base = await filtroDelTableroActivo(venueId, statusesDelFiltro(statusFilter), stationId)
   let orders: Array<KdsOrder & { items: KdsOrderItem[] }>
   if (page?.urgencyVersion === 1) {
     const priority: Prisma.KdsOrderWhereInput = {
@@ -261,33 +287,89 @@ export async function listKdsOrders(
   // Las capacidades del reparto (Tarea 16) salen del MISMO lote: consultas fijas.
   const ventas = await ventasDeComandas(prisma, venueId, orders)
 
-  return orders.map(o => formatKdsOrderConVenta(o, o.orderId ? ventas.get(o.orderId) : undefined))
+  const estaciones = await estacionesPorProducto(venueId, orders)
+  return orders.map(o => conEstaciones(formatKdsOrderConVenta(o, o.orderId ? ventas.get(o.orderId) : undefined), estaciones))
 }
 
 /** «Recientes»: las últimas terminadas, para deshacer un LISTO por error (spec 2026-09-27 §7). */
 export const KDS_RECENT_MAX = 20
-const RECIENTES_VENTANA_MS = 60 * 60 * 1000
+/**
+ * D17: las de tiempos van en su PROPIA lista con su propio tope (Codex r1 #8 y r2 #7): no le quitan lugar a las de un solo Listo, y
+ * 100 comandas terminadas en una hora por una sola estación es más de lo que una cocina saca.
+ */
+export const KDS_RECENT_CON_TIEMPOS_MAX = 100
 
-export async function listRecentKdsOrders(venueId: string, stationId?: string): Promise<KdsOrderResponse[]> {
-  const base = await filtroDelTablero(venueId, [KdsStatus.COMPLETED] as KdsOrderStatus[], stationId)
-  const recientes = await prisma.kdsOrder.findMany({
+export async function listRecentKdsOrders(
+  venueId: string,
+  stationId?: string,
+  /** La tablet sabe regresar una comanda con tiempos (manda `expectedDoneAt`). Sin esto, no se le enseñan (Codex r2 #6). */
+  conTiempos = false,
+): Promise<KdsOrderResponse[]> {
+  const desde = new Date(Date.now() - RECIENTES_VENTANA_MS)
+  const legacy = await filtroDelTablero(venueId, [KdsStatus.COMPLETED] as KdsOrderStatus[], stationId)
+  const viejas = await prisma.kdsOrder.findMany({
     // `items: { some: {} }`: una marca LISTO que llegó sin comanda (cabecera vacía) no se muestra.
-    where: { ...base, completedAt: { gte: new Date(Date.now() - RECIENTES_VENTANA_MS) }, items: { some: {} } },
+    // Sin filtro de archivo (Codex r4 A4): un Listo v0 que llega justo después del archivado sigue pudiendo deshacerse.
+    where: { ...legacy, preparationVersion: 0, completedAt: { gte: desde }, items: { some: {} } },
     include: { items: true },
     orderBy: [{ completedAt: 'desc' }, { id: 'desc' }],
     take: KDS_RECENT_MAX,
   })
+  // D17: con tiempos, lo que la COCINA terminó en la última hora y todavía tiene algo «Listo» que regresar (lo que la caja ya
+  // entregó entero o se canceló no se puede «deshacer» desde la cocina). Sólo a la tablet que sabe regresarlas: la vieja tocaría
+  // un «Deshacer» que no puede funcionar.
+  const nuevas = conTiempos ? await recientesConTiempos(venueId, stationId, desde) : []
+  // La hora que enseña «Recientes» es la de cuando la cocina terminó (`kitchenDoneAt`); la tablet la manda de regreso al «Deshacer».
+  const cuando = (o: { completedAt: Date | null }) => o.completedAt?.getTime() ?? 0
+  const recientes = [...viejas, ...nuevas].sort((a, b) => cuando(b) - cuando(a) || (a.id < b.id ? 1 : -1))
   const ventas = await ventasDeComandas(prisma, venueId, recientes)
   return recientes.map(o => formatKdsOrderConVenta(o, o.orderId ? ventas.get(o.orderId) : undefined))
 }
 
-/** «Deshacer»: una comanda terminada vuelve a la cocina como nueva. */
-export async function recallKdsOrder(venueId: string, kdsOrderId: string): Promise<KdsOrderResponse> {
+/**
+ * D17: las comandas con tiempos que la COCINA terminó en la última hora (también lo entregado o cancelado después; «Deshacer»
+ * explica cuando ya no queda nada listo), por `kitchenDoneAt`. Lo que la versión anterior del SERVIDOR terminó en el minuto del
+ * despliegue (sin `kitchenDoneAt`) no aparece aquí: residual declarado (Codex r10 — un respaldo por otras columnas abría más casos);
+ * la caja lo sigue viendo en «Servicio y entregas».
+ */
+async function recientesConTiempos(venueId: string, stationId: string | undefined, desde: Date) {
+  const filas = await prisma.kdsOrder.findMany({
+    where: {
+      ...(await filtroDelTablero(venueId, [KdsStatus.READY, KdsStatus.COMPLETED] as KdsOrderStatus[], stationId)),
+      preparationVersion: 1,
+      archivedAt: null,
+      kitchenDoneAt: { gte: desde },
+      items: { some: {} },
+    },
+    include: { items: true },
+    orderBy: [{ kitchenDoneAt: 'desc' }, { id: 'desc' }],
+    take: KDS_RECENT_CON_TIEMPOS_MAX,
+  })
+  return filas.map(o => ({ ...o, completedAt: o.kitchenDoneAt }))
+}
+
+/**
+ * «Deshacer»: una comanda terminada vuelve a la cocina. La de un solo «Listo» (v0) vuelve como nueva; la de tiempos (v1, D17)
+ * regresa lo Listo de sus productos a Preparando (`recallPreparationTicket`).
+ */
+export async function recallKdsOrder(
+  venueId: string,
+  kdsOrderId: string,
+  staffId: string | null = null,
+  expectedDoneAt: string | null = null,
+): Promise<KdsOrderResponse> {
   const existing = await prisma.kdsOrder.findFirst({ where: { id: kdsOrderId, venueId }, select: { preparationVersion: true } })
+  if (existing?.preparationVersion === 1) {
+    await recallPreparationTicket(venueId, kdsOrderId, staffId, expectedDoneAt)
+    const regresada = await prisma.kdsOrder.findUniqueOrThrow({ where: { id: kdsOrderId }, include: { items: true } })
+    logger.info(`KDS order #${regresada.orderNumber} regresada a la cocina por producto (deshacer)`)
+    return comandaConVenta(venueId, regresada)
+  }
   requireLegacyPreparation(existing)
   const r = await prisma.kdsOrder.updateMany({
     where: { id: kdsOrderId, venueId, preparationVersion: 0, status: KdsStatus.COMPLETED },
-    data: { status: KdsStatus.NEW, completedAt: null },
+    // Regresa al tablero aunque el archivado la hubiera tocado (Codex r4 A4).
+    data: { status: KdsStatus.NEW, completedAt: null, archivedAt: null },
   })
   if (r.count === 0) throw new NotFoundError('No hay una comanda terminada con ese id para regresar')
   const regresada = await prisma.kdsOrder.findUniqueOrThrow({ where: { id: kdsOrderId }, include: { items: true } })
@@ -489,6 +571,45 @@ export async function bumpKdsOrder(venueId: string, orderId: string): Promise<Kd
 
 // MARK: - Helper
 
+/**
+ * D17 (Codex r6 #1): en cuántas estaciones se prepara cada producto por tiempos de la página. La pantalla de cocina NO ofrece
+ * «Liberar» en uno que va a varias estaciones: liberar es del producto entero (lo libera la caja, que manda el papel a todas).
+ * Una consulta agrupada y acotada para la página (≤ 100 comandas), igual que `listKitchenPreparation`.
+ */
+async function estacionesPorProducto(
+  venueId: string,
+  orders: Array<{ preparationVersion?: number; items?: Array<{ orderItemId?: string | null }> }>,
+) {
+  const ids = [
+    ...new Set(
+      orders
+        .filter(o => o.preparationVersion === 1)
+        .flatMap(o => (o.items ?? []).map(i => i.orderItemId))
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ].slice(0, 2000)
+  if (ids.length === 0) return new Map<string, number>()
+  const grupos = await prisma.kdsOrderItem.groupBy({
+    by: ['orderItemId'],
+    where: { orderItemId: { in: ids }, kdsOrder: { venueId, preparationVersion: 1 } },
+    _count: { _all: true },
+    orderBy: { orderItemId: 'asc' },
+    take: ids.length,
+  })
+  return new Map(grupos.map(g => [g.orderItemId as string, g._count._all]))
+}
+
+function conEstaciones(comanda: KdsOrderResponse, estaciones: Map<string, number>): KdsOrderResponse {
+  if (estaciones.size === 0) return comanda
+  return {
+    ...comanda,
+    items: comanda.items.map(item => {
+      const n = item.orderItemId ? estaciones.get(item.orderItemId) : undefined
+      return n ? { ...item, stationCount: n } : item
+    }),
+  }
+}
+
 function requireLegacyPreparation(ticket: { preparationVersion?: number } | null) {
   if (ticket?.preparationVersion)
     throw new ConflictError(
@@ -528,6 +649,10 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
       course: item.serviceCourse?.label ?? null,
       preparation: item.preparation ?? null,
       preparationRevision: item.preparationRevision ?? 0,
+      // D15: anulado en la caja («ANULADO · ») o retirado por la plataforma («RETIRADO · »). La etiqueta ya viene en el nombre
+      // para las pantallas viejas; la nueva lo tacha. Sólo si lo hay: un renglón vivo sigue sin campos nuevos (contrato de las
+      // apps viejas, `kdsCapacidades.test.ts`); el reparto lo vuelve a poner con sus capacidades.
+      ...(item.removedAt ? { removedAt: item.removedAt instanceof Date ? item.removedAt.toISOString() : item.removedAt } : {}),
     })),
     /**
      * 🔴 ¿Falta que alguien acepte este pedido en la app de delivery?

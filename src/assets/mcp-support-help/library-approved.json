@@ -151,6 +151,15 @@
       "featureCode": "TABLE_SERVICE",
       "gateKind": "FEATURE"
     },
+    "android/mesas/tiempos-cocina-y-liberar": {
+      "sha256": "3c458cf5bfe1325136c8406ae877aa6f21f24f27e10dedae58e8fb8cb4dcb44e",
+      "requiredPermissions": [
+        "orders:read",
+        "orders:update"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
     "android/ordenes/agregar-productos-a-la-venta": {
       "sha256": "e131e5b35fbeffaa10f275182d6a73b8c6341c295149f049bb5cf2f4c128ae11",
       "requiredPermissions": [
@@ -1119,6 +1128,15 @@
       "sha256": "5f67bcf89609fedc4643637712d13d8ffcae427214c1c7a6150ee5114c610d04",
       "requiredPermissions": [
         "tables:read"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
+    "windows/mesas/tiempos-cocina-y-liberar": {
+      "sha256": "9b4fc15a53e577e97ef4bab139aadcd3611f003df26be0cef00e9131f17b6975",
+      "requiredPermissions": [
+        "orders:read",
+        "orders:update"
       ],
       "featureCode": "TABLE_SERVICE",
       "gateKind": "FEATURE"

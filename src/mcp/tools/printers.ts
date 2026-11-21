@@ -264,6 +264,8 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
           tipo: c.orderType,
           mesa: c.tableNumber ?? null,
           renglones: c.items.length,
+          // D15: los anulados en la caja (y los retirados por la plataforma) siguen en la comanda, marcados; no son trabajo.
+          renglonesAnulados: c.items.filter(i => i.removedAt).length,
           tiempos: [...new Set(c.items.map(i => i.course).filter((t): t is string => Boolean(t)))],
           creada: c.createdAt,
         })),

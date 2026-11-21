@@ -107,6 +107,7 @@ import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { planAccessReconciliationJob } from './jobs/plan-access-reconciliation.job'
 import { altasAMedioPagoJob } from './jobs/altas-a-medio-pago.job'
 import { paidOrderReconcilerJob } from './jobs/paid-order-reconciler.job'
+import { kdsArchiveClosedDayJob } from './jobs/kds-archive-closed-day.job'
 import { cashClosePairReconcilerJob } from './jobs/cash-close-pair-reconciler.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
@@ -222,6 +223,7 @@ const gracefulShutdown = async (signal: string) => {
       documentRequestsJob.stop()
       altasAMedioPagoJob.stop()
       paidOrderReconcilerJob.stop()
+      kdsArchiveClosedDayJob.stop()
       cashClosePairReconcilerJob.stop()
 
       // Stop subscription cancellation job
@@ -608,6 +610,8 @@ const startApplication = async (retries = 3) => {
       documentRequestsJob.start()
       altasAMedioPagoJob.start()
       paidOrderReconcilerJob.start()
+      // D17: lo viejo de la pantalla de cocina se archiva al cerrar el día (cuenta ya cerrada).
+      kdsArchiveClosedDayJob.start()
       // Completa el cierre unificado que murió entre sus dos commits: sin él, un turno sin su
       // gaveta acaba firmando dos arqueos, y una gaveta sin su turno sigue tragando efectivo.
       cashClosePairReconcilerJob.start()

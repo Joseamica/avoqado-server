@@ -327,6 +327,7 @@ export const listRecentKdsOrders = async (req: Request, res: Response, next: Nex
     const data = await kdsMobileService.listRecentKdsOrders(
       req.params.venueId,
       typeof stationId === 'string' && stationId ? stationId : undefined,
+      req.query.kitchenDoneVersion === '1',
     )
     res.status(200).json({ success: true, data })
   } catch (error) {
@@ -341,7 +342,13 @@ export const listRecentKdsOrders = async (req: Request, res: Response, next: Nex
  */
 export const recallKdsOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const data = await kdsMobileService.recallKdsOrder(req.params.venueId, req.params.id)
+    const expectedDoneAt = typeof req.body?.expectedDoneAt === 'string' ? req.body.expectedDoneAt.slice(0, 40) : null
+    const data = await kdsMobileService.recallKdsOrder(
+      req.params.venueId,
+      req.params.id,
+      (req as any).authContext?.userId ?? null,
+      expectedDoneAt,
+    )
     res.status(200).json({ success: true, data })
   } catch (error) {
     logControllerError('kds recallKdsOrder', error)

@@ -4,6 +4,7 @@ import {
   putVenueServiceCourses,
   putOrganizationServiceCourses,
   getOrganizationServiceCourses,
+  setKitchenRelease,
 } from '@/services/service-courses/serviceCourse.service'
 import { venueHasFeatureAccess, organizationHasFeatureAccess } from '@/services/access/basePlan.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -120,5 +121,41 @@ describe('service courses: tenant-scoped reads, Pro and atomic revisions', () =>
       statusCode: 400,
     })
     expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+  it('D17: «La cocina puede liberar» se lee de la sucursal (apagado de fábrica) y no se hereda', async () => {
+    await expect(getVenueServiceCourses('venue-a')).resolves.toMatchObject({ kitchenCanRelease: false })
+    prismaMock.venue.findUnique.mockResolvedValue({
+      ...venue,
+      settings: { serviceCourses: null, serviceCoursesRevision: 0, kitchenCanReleaseCourses: true },
+    })
+    await expect(getVenueServiceCourses('venue-a')).resolves.toMatchObject({ kitchenCanRelease: true })
+  })
+  it('D17: prenderlo guarda el valor y su renglón de bitácora en la MISMA transacción, con la fila bloqueada', async () => {
+    prismaMock.venueSettings.upsert.mockResolvedValue({})
+    prismaMock.activityLog.create.mockResolvedValue({})
+    prismaMock.$queryRaw.mockResolvedValue([{ kitchenCanReleaseCourses: false }])
+    const result = await setKitchenRelease('venue-a', true, actor)
+    expect(result.kitchenCanRelease).toBe(true)
+    expect(prismaMock.venueSettings.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { venueId: 'venue-a' }, update: { kitchenCanReleaseCourses: true } }),
+    )
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'KITCHEN_RELEASE_SETTING_UPDATED',
+        venueId: 'venue-a',
+        staffId: 'staff-a',
+        data: expect.objectContaining({ before: false, after: true }),
+      }),
+    })
+  })
+  it('D17: repetir el mismo valor (leído con la fila bloqueada) no escribe ni deja otra fila; sin Pro o con un valor raro, nada', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([{ kitchenCanReleaseCourses: true }])
+    await setKitchenRelease('venue-a', true, actor)
+    expect(prismaMock.venueSettings.upsert).not.toHaveBeenCalled()
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+    await expect(setKitchenRelease('venue-a', 'sí', actor)).rejects.toMatchObject({ code: 'KITCHEN_RELEASE_INVALID' })
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
+    await expect(setKitchenRelease('venue-a', false, actor)).rejects.toMatchObject({ statusCode: 403 })
+    expect(prismaMock.venueSettings.upsert).not.toHaveBeenCalled()
   })
 })
