@@ -18,6 +18,7 @@ import {
   type PayoutMode,
   type PayoutModes,
 } from '../../../../src/services/exchanges/exchangeRules'
+import type { SaleForExchange } from '../../../../src/services/exchanges/exchange.service'
 
 describe('effectiveExchangeCapacity', () => {
   it.each([
@@ -116,6 +117,7 @@ describe('saleBlockReason', () => {
     status: 'COMPLETED',
     paymentStatus: 'PAID',
     paymentSources: ['POS'],
+    onlineOrder: null,
     ...over,
   })
 
@@ -149,6 +151,21 @@ describe('saleBlockReason', () => {
     expect(saleBlockReason(sale({ source: 'WEB', onlineOrder: { requiresAcceptance: true, paymentMode: 'CARD_ONLINE' } }))).toBeNull()
     expect(saleBlockReason(sale({ source: 'WEB', onlineOrder: { requiresAcceptance: false, paymentMode: 'PAY_AT_PICKUP' } }))).toBeNull()
     expect(saleBlockReason(sale({ onlineOrder: null }))).toBeNull()
+  })
+
+  it('D661 · D3: onlineOrder es obligatorio (null si la venta no es de la tienda en línea): sin él no compila', () => {
+    // Lo vigila `npm run typecheck`: si el campo volviera a ser opcional, la directiva sobraría y el typecheck truena. Así, quitar el
+    // `select` del pedido en línea al leer la venta ya no apaga la regla de dinero sin avisar.
+    // @ts-expect-error — falta `onlineOrder`
+    const sinElCampo: Parameters<typeof saleBlockReason>[0] = {
+      source: 'POS',
+      status: 'COMPLETED',
+      paymentStatus: 'PAID',
+      paymentSources: [],
+    }
+    // @ts-expect-error — falta `onlineOrder`
+    const ordenSinElCampo: Pick<SaleForExchange['order'], 'onlineOrder'> = {}
+    expect([sinElCampo.source, ordenSinElCampo]).toEqual(['POS', {}])
   })
 })
 

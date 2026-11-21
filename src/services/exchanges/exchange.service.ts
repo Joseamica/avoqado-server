@@ -84,8 +84,11 @@ export interface SaleForExchange {
     createdById: string | null
     customerId: string | null
     primaryCustomerId: string | null
-    /** D661: el pedido en línea de la venta, si lo es (sólo lo que decide `saleBlockReason`). */
-    onlineOrder?: { requiresAcceptance: boolean; paymentMode: string } | null
+    /**
+     * D661: el pedido en línea de la venta, o `null` (sólo lo que decide `saleBlockReason`). Obligatorio (D3): sin él, quitar el
+     * `select` apagaría en silencio la regla de dinero de «Cambio».
+     */
+    onlineOrder: { requiresAcceptance: boolean; paymentMode: string } | null
   }
   lines: Array<{
     id: string

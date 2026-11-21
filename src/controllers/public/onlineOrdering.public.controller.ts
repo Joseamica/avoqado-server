@@ -39,6 +39,8 @@ function fail(res: Response, error: any, fallback: string) {
   return res.status(status).json({
     success: false,
     code: expose ? error?.code : undefined,
+    // D661 (D1): el 400 que antes daba el validador traía `message`; una tienda publicada que sólo lee ese campo lo sigue leyendo.
+    message: error?.conMensajeDelValidador === true ? error.message : undefined,
     error: expose ? error.message : fallback,
     details: expose ? error?.details : undefined,
     // Codex r4: decisión DURABLE sobre la llave del pedido (`final()` en order.service): sólo con ella la tienda suelta un 404.

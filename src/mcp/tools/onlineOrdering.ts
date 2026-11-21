@@ -361,15 +361,31 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_ordering_settings',
-    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas, cuándo consultó la bandeja un aparato por última vez, si la tienda está abierta ahora (y por qué no) y qué le falta para poder encenderla (domicilio, teléfono, aviso de privacidad publicado). hasSavedSettings indica si el negocio ya guardó sus ajustes alguna vez (false = siguen los de fábrica). También si acepta pago con tarjeta al pedir y si su cuenta de Stripe está lista para cobrar. cardOnlineNadie dice si, con «No, entran solos» (nadie acepta los pedidos), la clienta puede pagar con tarjeta al pedir: es un interruptor aparte, apagado de fábrica.',
+    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas, cuándo consultó la bandeja un aparato por última vez, si la tienda está abierta ahora (y por qué no) y qué le falta para poder encenderla (domicilio, teléfono, aviso de privacidad publicado). hasSavedSettings indica si el negocio ya guardó sus ajustes alguna vez (false = siguen los de fábrica). También si acepta pago con tarjeta al pedir y si su cuenta de Stripe está lista para cobrar. cardOnlineNadie dice si, con «No, entran solos» (nadie acepta los pedidos), la clienta puede pagar con tarjeta al pedir: es un interruptor aparte, apagado de fábrica. cardNadie dice si esa tarjeta se ofrece AHORA (offeredNow): sólo mientras una caja actualizada esté avisando los pedidos pagados en línea; lastAlertAt y fastAlertAt son la última vez que una caja avisó y la última que lo hizo a tiempo. Si está prendida y no se ofrece, trae un aviso en español.',
     { venueId: z.string().describe('Venue (debe estar en tu scope)') },
     async ({ venueId }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('orders:read', venueId)
       // Lo mismo que `GET /settings` del panel (un solo armador): los ajustes se leen una vez y el estado sale del mismo cálculo.
       // `card` (fase 2) sale aparte, explícito: no se cuela dentro de `ajustes`.
-      const { lastInboxPollAt, store, requirements, card, ...ajustes } = await settingsView(venueId)
-      return text({ ok: true, ajustes: { ...ajustes, ultimoSondeoDeBandeja: lastInboxPollAt }, store, requirements, card })
+      const { lastInboxPollAt, store, requirements, card, cardNadie, ...ajustes } = await settingsView(venueId)
+      return text({
+        ok: true,
+        ajustes: { ...ajustes, ultimoSondeoDeBandeja: lastInboxPollAt },
+        store,
+        requirements,
+        card,
+        // D661 (D2): prendida pero sin una caja que avise a tiempo, la tienda no ofrece la tarjeta; se dice en llano.
+        cardNadie: {
+          ...cardNadie,
+          ...(cardNadie.enabled && !cardNadie.offeredNow
+            ? {
+                aviso:
+                  'La tarjeta está prendida, pero ahora no se ofrece: ninguna caja está avisando los pedidos pagados en línea en este momento. Se vuelve a ofrecer en cuanto una caja actualizada (TPV o POS) esté abierta en la lista de pedidos.',
+              }
+            : {}),
+        },
+      })
     },
   )
 

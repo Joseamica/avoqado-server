@@ -121,8 +121,12 @@ const CHECKOUT_DESCRIPTION = 'Pedido en línea'
 const keyConflict = () =>
   final(new ConflictError('Esa llave ya se usó para otro pedido. Vuelve a armar tu pedido.', 'IDEMPOTENCY_KEY_CONFLICT'))
 const notAccepted = () => new BadRequestError('Este negocio no acepta pagar con tarjeta en línea.', 'CARD_PAYMENT_NOT_ACCEPTED')
-/** D661 (r1 #12): «Mi equipo» con tarjeta sigue pidiendo el teléfono, con el MISMO 400 (texto y sin código) que daba el esquema. */
-const faltaTelefono = () => new BadRequestError('Error de validación: Escribe tu teléfono')
+/**
+ * D661 (r1 #12): «Mi equipo» con tarjeta sigue pidiendo el teléfono, con el MISMO 400 (texto y sin código) que daba el esquema. D1: la
+ * marca pide al controlador público que la respuesta lleve también `message`, el campo que leía la tienda publicada en ese 400.
+ */
+const faltaTelefono = () =>
+  Object.assign(new BadRequestError('Error de validación: Escribe tu teléfono'), { conMensajeDelValidador: true as const })
 /** D661: en «Nadie» la tarjeta pide sesión; el código es el del pedido sin sesión de «Mi equipo», que la tienda ya conoce. */
 const sinSesionEnNadie = () => new UnauthorizedError('Entra a tu cuenta para pagar con tarjeta en línea.', 'PHONE_VERIFICATION_REQUIRED')
 /** D661 (r6 #6): el cupo de tarjeta de la sucursal está lleno. Nunca `ORDERING_*`: la tienda no se pausa y pagar en caja sigue. */

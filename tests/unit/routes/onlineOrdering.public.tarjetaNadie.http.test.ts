@@ -251,6 +251,17 @@ describe('D661 · pedir con tarjeta en «Nadie» por HTTP', () => {
     expect(cargos).toHaveLength(0)
   })
 
+  it('D661 · D1: el 400 de «Mi equipo» sin teléfono trae `message` (lo que leía la tienda publicada cuando lo daba el validador) y `error`, con el mismo texto, sin código', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(ajustes({ requiresAcceptance: true, acceptsCardOnline: true }) as any)
+    const r = await pedido()
+    expect(r.status).toBe(400)
+    expect(r.body).toEqual({
+      success: false,
+      message: 'Error de validación: Escribe tu teléfono',
+      error: 'Error de validación: Escribe tu teléfono',
+    })
+  })
+
   it('r6 #6: con el cupo de tarjeta de «Nadie» lleno (borradores y apartados) la tarjeta se frena, pero /info sigue OPEN y el folio para pagar en caja se crea; igual tras cambiar de modo, y «Mi equipo» conserva su saturación', async () => {
     const tarjetaFrenadaYCajaAbierta = async () => {
       const tarjeta = await pedido({ clienta: 'nueva' })

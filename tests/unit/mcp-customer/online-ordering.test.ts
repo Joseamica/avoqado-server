@@ -733,6 +733,33 @@ describe('online_ordering_settings', () => {
     expect(mockAccepting).toHaveBeenCalledWith('v1', expect.any(Date), AJUSTES)
     expect(mockRequirements).toHaveBeenCalledWith('v1')
   })
+
+  it('D661 · D2: cardNadie dice si la tarjeta de «No, entran solos» se ofrece ahora; prendida y sin caja que avise, lo dice en español y sin nombres internos', async () => {
+    const nadie = { ...AJUSTES, requiresAcceptance: false, cardOnlineNadie: true, acceptsCardOnline: false }
+    mockGetSettings.mockResolvedValue(nadie)
+    prismaMock.ecommerceMerchant.findMany.mockResolvedValue([
+      { id: 'em1', chargesEnabled: true, providerCredentials: { connectAccountId: 'acct_1' }, provider: { code: 'STRIPE_CONNECT' } },
+    ] as any)
+    // Ninguna caja recibió una respuesta rápida en los últimos 90 s.
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({
+      lastCardAlertPollAt: new Date(Date.now() - 60 * 60_000),
+      cardAlertFastPollAt: null,
+    } as any)
+    const sinCaja = parse(await call('online_ordering_settings', { venueId: 'v1' }))
+    expect(sinCaja.cardNadie).toMatchObject({ enabled: true, fastAlertAt: null, offeredNow: false })
+    expect(sinCaja.cardNadie.aviso).toMatch(/ninguna caja está avisando/)
+    expect(sinCaja.ajustes).not.toHaveProperty('cardNadie')
+
+    // Con una caja avisando a tiempo: se ofrece, sin aviso.
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({
+      lastCardAlertPollAt: new Date(Date.now() - 10_000),
+      cardAlertFastPollAt: new Date(Date.now() - 10_000),
+    } as any)
+    const conCaja = parse(await call('online_ordering_settings', { venueId: 'v1' }))
+    expect(conCaja.cardNadie).toMatchObject({ enabled: true, offeredNow: true })
+    expect(conCaja.cardNadie).not.toHaveProperty('aviso')
+    expect(descriptions.get('online_ordering_settings')).toMatch(/cardNadie/)
+  })
 })
 
 describe('online_ordering_configure', () => {

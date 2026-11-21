@@ -364,6 +364,38 @@ describe('panel: GET y PUT /settings (controlador real)', () => {
     expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledTimes(1)
   })
 
+  it('D661 · D2: GET trae el bloque nuevo cardNadie (¿la tarjeta de «No, entran solos» se ofrece ahora?); lo demás no cambia', async () => {
+    const rapido = new Date(NOW - 15_000)
+    const fuerte = {
+      id: 'em1',
+      chargesEnabled: true,
+      providerCredentials: { connectAccountId: 'acct_1' },
+      provider: { code: 'STRIPE_CONNECT' },
+    }
+    prismaMock.ecommerceMerchant.findMany.mockResolvedValue([fuerte] as any)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+      fila({ requiresAcceptance: false, cardOnlineNadie: true, lastCardAlertPollAt: rapido, cardAlertFastPollAt: rapido }) as any,
+    )
+    const r = await request(panel).get('/venues/v1/settings')
+    expect(r.status).toBe(200)
+    expect(r.body.data.cardNadie).toEqual({
+      enabled: true,
+      lastAlertAt: rapido.toISOString(),
+      fastAlertAt: rapido.toISOString(),
+      offeredNow: true,
+    })
+    // Sin campos sueltos nuevos: las horas de la caja viven sólo en el bloque.
+    expect(r.body.data).not.toHaveProperty('lastCardAlertPollAt')
+    expect(r.body.data).not.toHaveProperty('cardAlertFastPollAt')
+    expect(r.body.data).toMatchObject({ enabled: true, requiresAcceptance: false, cardOnlineNadie: true })
+
+    // La caja dejó de avisar a tiempo: prendida, pero ya no se ofrece.
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+      fila({ requiresAcceptance: false, cardOnlineNadie: true, lastCardAlertPollAt: rapido, cardAlertFastPollAt: null }) as any,
+    )
+    expect((await request(panel).get('/venues/v1/settings')).body.data.cardNadie).toMatchObject({ enabled: true, offeredNow: false })
+  })
+
   it('GET de una tienda abierta: OPEN sin motivo, sin pausa', async () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(fila() as any)
     const r = await request(panel).get('/venues/v1/settings')
@@ -426,8 +458,10 @@ describe('panel: GET y PUT /settings (controlador real)', () => {
     prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(fila({ manualPause: true }) as any)
     const r = await request(panel).put('/venues/v1/settings').send({ manualPause: true })
     expect(r.body.data.store).toEqual({ status: 'PAUSED', reason: 'MANUAL_PAUSE', pausedUntil: null, manualPause: true })
-    // Una lectura bajo el candado de `updateSettings`; la vista usa lo que acaba de escribir.
-    expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledTimes(1)
+    // Una lectura bajo el candado de `updateSettings`; la vista usa lo que acaba de escribir. D661 (D2): aparte, sólo los latidos de
+    // la caja que avisa (dos columnas, para `cardNadie`): los ajustes no se vuelven a leer.
+    const lecturas = (prismaMock.onlineOrderingSettings.findUnique.mock.calls as any[]).map(([a]) => a.select ?? 'COMPLETA')
+    expect(lecturas).toEqual(['COMPLETA', { lastCardAlertPollAt: true, cardAlertFastPollAt: true }])
   })
 
   it('S1: un PUT sin fila de ajustes previa (primer guardado) también responde la vista completa', async () => {

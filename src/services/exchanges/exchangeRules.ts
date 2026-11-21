@@ -72,7 +72,8 @@ export function saleBlockReason(sale: {
   status: string
   paymentStatus: string
   paymentSources: string[]
-  onlineOrder?: { requiresAcceptance: boolean; paymentMode: string } | null
+  // D661 (D3): obligatorio (`null` si la venta no es de la tienda en línea): sin él, quitar el `select` apagaría la regla en silencio.
+  onlineOrder: { requiresAcceptance: boolean; paymentMode: string } | null
 }): 'DELIVERY_PLATFORM' | 'ONLINE_CARD' | 'NOT_PAID' | null {
   if (DELIVERY_PLATFORM_ORDER_SOURCES.has(sale.source) || sale.paymentSources.includes('DELIVERY_PLATFORM')) return 'DELIVERY_PLATFORM'
   if (sale.onlineOrder?.requiresAcceptance === false && sale.onlineOrder.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE)

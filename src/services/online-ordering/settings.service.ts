@@ -49,12 +49,24 @@ export async function getSettings(venueId: string): Promise<OnlineOrderingSettin
   return (await getSettingsWithSaved(venueId)).settings
 }
 
-/** Igual que `getSettings` y además dice si la fila existe (R66: `saved` false = siguen los ajustes de fábrica), en UNA sola lectura. */
-export async function getSettingsWithSaved(venueId: string): Promise<{ settings: OnlineOrderingSettingsRead; saved: boolean }> {
+/** D661 (D2): los latidos de la caja que avisa los pedidos pagados en línea (Ruling 7), de la misma fila. */
+export interface CardAlertBeats {
+  lastCardAlertPollAt: Date | null
+  cardAlertFastPollAt: Date | null
+}
+
+/**
+ * Igual que `getSettings` y además dice si la fila existe (R66: `saved` false = siguen los ajustes de fábrica), en UNA sola lectura.
+ * D661 (D2): de esa misma lectura, los latidos de la caja que avisa (para el bloque `cardNadie` de la vista; no entran a los ajustes).
+ */
+export async function getSettingsWithSaved(
+  venueId: string,
+): Promise<{ settings: OnlineOrderingSettingsRead; saved: boolean; cardAlerts: CardAlertBeats }> {
   const row = await prisma.onlineOrderingSettings.findUnique({ where: { venueId } })
   return {
     settings: row ? rowToConfig(row) : { ...DEFAULT_CONFIG, lastInboxPollAt: null, lastToPayPollAt: null },
     saved: !!row,
+    cardAlerts: { lastCardAlertPollAt: row?.lastCardAlertPollAt ?? null, cardAlertFastPollAt: row?.cardAlertFastPollAt ?? null },
   }
 }
 
