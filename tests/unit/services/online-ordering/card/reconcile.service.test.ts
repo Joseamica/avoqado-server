@@ -184,7 +184,7 @@ describe('D661 · A3: la alerta de «confirmación atorada» no cuenta los tropi
     confirmCardAuthorization.mockRejectedValue(new Error('Stripe no contestó'))
 
     await expect(reconcileCardCharges(NOW, read => read())).resolves.toMatchObject({ scanned: 2, errors: 2 })
-    const escrituras = prismaMock.onlineOrderCharge.updateMany.mock.calls.map(([a]: any) => a)
+    const escrituras: any[] = prismaMock.onlineOrderCharge.updateMany.mock.calls.map(([a]: any) => a)
     const deVivo = escrituras.filter(e => e.where.id === 'vivo')
     expect(deVivo).toHaveLength(1) // sólo se toca para rotar; con 2 intentos previos, uno más ya habría alertado
     expect(deVivo[0].data).toEqual({ updatedAt: NOW })
