@@ -6,7 +6,7 @@ category: impresoras
 task: la-comanda-no-sale
 requiredPermissions: []
 sourceRepo: avoqado-android
-sourceRef: 843c15ae06bf68dd0d9c755525a9971e701052b7
+sourceRef: 9ffba05b58cda839dd74906ede1cca3847653a42
 keywords:
   - la comanda no sale
   - no salió la comanda
@@ -14,6 +14,9 @@ keywords:
   - reimprimir comanda
   - volver a imprimir
   - ya la canté
+  - esa estación no tiene impresora
+  - no tiene impresora pero tengo pantalla de cocina
+  - liberar tiempo sale no tiene impresora
 ---
 
 ## Antes de empezar
@@ -33,7 +36,8 @@ El aviso «No salió la comanda de: …» dice qué no salió. Ese aviso no canc
 - Si aparece «Reintentando la comanda», el POS la está volviendo a intentar solo: no la reimprimas mientras tanto.
 - *Pedidos* pide el permiso de ver pedidos: sin él, que reimprima la comanda alguien que lo tenga.
 - Si aparece «Esa estación no tiene impresora: revisa la configuración de impresoras.», no sale *Volver a imprimir*: esa estación necesita una impresora.
+- Con una estación que sólo tiene pantalla de cocina, desde la 2.25.55 ya no sale «Esa estación no tiene impresora…» al mandar una ronda ni al liberar un tiempo si hay internet: la cocina lo ve en su pantalla. Si la caja no tiene internet y la pantalla de cocina tampoco le contesta por el WiFi del local, sí sale: en la cuenta como «No salió la comanda de: …» (se queda cerca de un minuto) y al liberar, en *Servicio y entregas*, a los pocos segundos. Avisa a cocina; al volver la red se manda una sola vez.
 - Tocar fuera del aviso sólo lo esconde: no la da por resuelta.
-- Si el aviso trae *Volver a imprimir* y la app sigue abierta, esa comanda se vuelve a intentar sola, y puede repetir lo que ya salió: si la cocina ya tiene todo, toca *Ya la canté*. Sólo se guarda la última: una anterior, reimprímela desde *Pedidos* o desde la mesa.
+- Si el aviso trae *Volver a imprimir* y la app sigue abierta, esa comanda se vuelve a intentar sola, y puede repetir lo que ya salió: si la cocina ya tiene todo, toca *Ya la canté*. Se guardan todas las que no salieron, de la más vieja a la más nueva, durante 8 horas; después, reimprímela desde *Pedidos* o desde la mesa.
 - Si en una reimpresión salen productos que normalmente no van a cocina, no es falla de la impresora.
 - Si aparece «Estos productos no llevan comanda», esos productos no se imprimen en cocina: no es una falla.

@@ -1,8 +1,8 @@
 {
   "pagina": "windows/mesas/tiempos-cocina-y-liberar",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726",
-  "version": "2.25.53 + D17 (sin publicar)",
+  "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42",
+  "version": "2.25.55",
   "pasos": [
     {
       "paso": 1,
@@ -13,7 +13,7 @@
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/PreparationServiceSheet.kt",
-      "linea": 280,
+      "linea": 296,
       "cita": "label = { Text(\"En servicio\") }"
     },
     {
@@ -37,7 +37,7 @@
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt",
-      "linea": 239,
+      "linea": 296,
       "cita": "preparationRepository?.refreshCapabilities(it)"
     },
     {
@@ -49,13 +49,13 @@
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSOrderCard.kt",
-      "linea": 158,
+      "linea": 161,
       "cita": "listOf(com.avoqado.pos.kds.domain.PreparationAction.RELEASE, com.avoqado.pos.kds.domain.PreparationAction.START,"
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt",
-      "linea": 480,
+      "linea": 560,
       "cita": "repository.act(venueId, listOf(row), action, quantity, from, reason, withPaper = false, fromKitchen = true)"
     },
     {
@@ -73,19 +73,19 @@
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
-      "linea": 222,
+      "linea": 223,
       "cita": "const val RECIENTES = \"Recientes\""
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
-      "linea": 225,
+      "linea": 227,
       "cita": "const val DESHACER = \"Deshacer\""
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt",
-      "linea": 706,
+      "linea": 819,
       "cita": "kdsRepository.recall(id, terminadaEn)"
     },
     {
@@ -93,6 +93,18 @@
       "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KitchenPreparation.kt",
       "linea": 14,
       "cita": "DELIVER(\"Entregar\")"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 969,
+      "cita": "text = if (perProduct) \"Ver preparación y liberar\" else \"¡MARCHAR!\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSOrderCard.kt",
+      "linea": 218,
+      "cita": "if (order.preparationVersion == 0) PrimaryButton("
     }
   ],
   "permisos": [
@@ -118,7 +130,7 @@
     {
       "afirmacion": "Preparar, Marcar listo y Liberar se guardan en la tablet antes de la red (cola KDS_ITEM_PROGRESS)",
       "archivo": "app/src/main/java/com/avoqado/pos/kds/data/KitchenPreparationRepository.kt",
-      "linea": 370
+      "linea": 376
     },
     {
       "afirmacion": "La comanda sale de la pantalla con lo que la tablet guardó (proyección local)",
@@ -128,12 +140,22 @@
     {
       "afirmacion": "Recientes necesita internet",
       "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
-      "linea": 177
+      "linea": 178
     },
     {
       "afirmacion": "Con el interruptor apagado al subir, lo liberado sin red se rechaza (KITCHEN_RELEASE_DISABLED)",
       "archivo": "avoqado-server/src/services/kds/kitchenPreparation.service.ts",
       "linea": 95
+    },
+    {
+      "afirmacion": "Sin respuesta de la pantalla ni del servidor, la liberación espera el «sí» hasta un tope y luego, si la estación no tiene impresora, dice «Esa estación no tiene impresora…»; con el servidor al día y sólo estaciones de pantalla, sin papel ni aviso (D16)",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/data/PreparationDeliveryService.kt",
+      "linea": 350
+    },
+    {
+      "afirmacion": "El texto del aviso de una estación sin impresora",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ReintentoDeComanda.kt",
+      "linea": 167
     }
   ],
   "rutas": [],
