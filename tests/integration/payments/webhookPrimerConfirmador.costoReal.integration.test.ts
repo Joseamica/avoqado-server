@@ -2610,6 +2610,21 @@ describe('Codex R12 (pasada exhaustiva) · R12-15: el costo NEGATIVO de un reemb
     expect(Number(vt.netSettlementAmount)).toBeCloseTo(net, 6)
     expect(Number(vt.grossAmount)).toBeCloseTo(-100 * ratio, 6)
   }
+  /**
+   * D19 (20-nov-2026): el costo síncrono del dashboard corre en segundo plano (fire-and-forget) y proyecta en DOS escrituras
+   * sueltas — primero el Payment, DESPUÉS la VenueTransaction (`proyectarCostoDelReembolso`). Esperar sólo al Payment y leer la
+   * VenueTransaction una vez daba un rojo intermitente con la base cargada (Payment −$1, VenueTransaction todavía 0). Se espera a
+   * que las DOS proyecciones hayan aterrizado; qué valores llevan lo sigue midiendo `proyeccionDelReembolso`.
+   */
+  const esperarProyeccionDelReembolso = async (refundId: string, ms = 10_000) => {
+    const aterrizo = async () => {
+      const vt = await prisma.venueTransaction.findUnique({ where: { paymentId: refundId }, select: { feeAmount: true } })
+      return Number((await pago(refundId)).feeAmount) !== 0 && vt !== null && Number(vt.feeAmount) !== 0
+    }
+    if (!(await f.esperar(aterrizo, ms))) {
+      throw new Error(`a los ${ms} ms el costo síncrono del reembolso ${refundId} no había proyectado su Payment Y su VenueTransaction`)
+    }
+  }
 
   describe.each([
     [
@@ -2649,6 +2664,9 @@ describe('Codex R12 (pasada exhaustiva) · R12-15: el costo NEGATIVO de un reemb
       const original = await originalConvergido()
       const refundId = idDe(await reembolsar(original))
       expect(await f.esperar(async () => (await costoDe(refundId)) !== null, 4000)).toBe(true)
+      // D19: el worker toma las filas del Payment con NOWAIT; si el costo síncrono todavía escribe la del reembolso, contesta
+      // CONTENDIDO y la obligación no se cierra en esta corrida. Se espera a que el paso síncrono termine.
+      await esperarProyeccionDelReembolso(refundId)
       await correrEfectos()
       await unSoloCostoNegativo(original, refundId)
       // Las proyecciones del reembolso se pierden (una escritura vieja, un dato anterior a la regla); el costo negativo queda.
@@ -2671,7 +2689,7 @@ describe('Codex R12 (pasada exhaustiva) · R12-15: el costo NEGATIVO de un reemb
       const original = await originalConvergido()
       const refundId = idDe(await reembolsar(original, 4000))
       expect(await f.esperar(async () => (await costoDe(refundId)) !== null, 4000)).toBe(true)
-      expect(await f.esperar(async () => Number((await pago(refundId)).feeAmount) !== 0, 4000)).toBe(true)
+      await esperarProyeccionDelReembolso(refundId)
       await proyeccionDelReembolso(refundId, 0.4)
       await correrEfectos()
       await unSoloCostoNegativo(original, refundId, 0.4)
@@ -2682,6 +2700,8 @@ describe('Codex R12 (pasada exhaustiva) · R12-15: el costo NEGATIVO de un reemb
       const refundId = idDe(await reembolsar(original))
       // El dashboard crea el costo síncrono en segundo plano (fire-and-forget): se espera a que aterrice antes de medir.
       expect(await f.esperar(async () => (await costoDe(refundId)) !== null, 4000)).toBe(true)
+      // D19: y a que termine de proyectar (Payment y VenueTransaction); si no, el worker puede chocar con su NOWAIT.
+      await esperarProyeccionDelReembolso(refundId)
       await correrEfectos()
       await unSoloCostoNegativo(original, refundId)
     })

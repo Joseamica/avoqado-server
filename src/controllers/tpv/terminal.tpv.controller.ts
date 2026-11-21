@@ -469,6 +469,10 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       // 🔴 NO se le suma la «Foto de entrada» del negocio (VenueSettings.requireClockInPhoto, que manda en el POS): la TPV
       // devuelve TODOS sus ajustes al guardar uno, y un valor heredado se pegaba a la terminal o la apagaba (Codex r1 #1 y
       // r2 #1-#2, 15-nov). La terminal sigue con su propio ajuste, que se cambia en su configuración.
+      // 🔴 «Órdenes» es legacy (founder, 25-sep, 20-oct y 20-nov, D34: «para ordering se usa Mesas y Cobrar»). Se apaga
+      // SIEMPRE aquí, aunque la terminal la tenga guardada prendida, para que también la pierdan las TPV viejas. El campo
+      // viaja siempre: una TPV que no lo recibe lo toma como prendido (TpvSettingsDto `showOrderManagement ?: true`).
+      showOrderManagement: false,
     }
 
     // Serialized-inventory venues operate without shifts (SIM kiosks have no cash-drawer
