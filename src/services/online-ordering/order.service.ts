@@ -5,7 +5,6 @@ import {
   NotificationChannel,
   NotificationPriority,
   NotificationType,
-  OnlineOrderCardRefundStatus,
   OnlineOrderChargeStatus,
   OnlineOrderPaymentMode,
   OnlineOrderStatus,
@@ -13,7 +12,6 @@ import {
   OrderStatus,
   OrderType,
   OriginSystem,
-  PaymentMethod,
   PaymentStatus,
   Prisma,
   type OnlineOrderRejectReason,
@@ -50,6 +48,14 @@ import { quoteCart, toPublicQuote, type CartItemInput, type PricedLine, type Quo
 import { generateTrackingToken } from './trackingToken'
 import { CAPTURED_OUTSIDE, confirmCardAuthorization } from './card/confirm.service'
 import { chargeMerchant, cardOnlineAvailable } from './card/merchant'
+import {
+  DEVOLUCIONES_PUBLICAS,
+  PUBLIC_CARD_STATUS,
+  devolucionPublica,
+  type DevolucionPublica,
+  type PublicCardStatus,
+} from './card/estadoPublico'
+export type { DevolucionPublica, PublicCardStatus }
 import { getProvider } from '@/services/payments/provider-registry'
 import type { TxConReintento } from '@/utils/serializableRetry'
 import type { LogActionParams } from '@/services/dashboard/activity-log.service'
@@ -1016,18 +1022,6 @@ export type CardDraftTrackingStatus = 'AWAITING_PAYMENT' | 'PAYMENT_NOT_COMPLETE
 export const cardDraftTrackingStatus = (c: DraftCharge): CardDraftTrackingStatus =>
   c.status === OnlineOrderChargeStatus.PENDING_AUTH && !draftCapturedOutside(c) ? 'AWAITING_PAYMENT' : 'PAYMENT_NOT_COMPLETED'
 
-/**
- * Fase 2: lo que el comensal ve de su tarjeta. `CONFIRMING` = cobrando al aceptar. S4 (Codex plan r1 #3): `RELEASING` = la liberación
- * aún no termina (puede fallar o resultar cobrada a mano): nunca se dice «liberada» antes de tiempo.
- */
-export type PublicCardStatus = 'AUTHORIZED' | 'CONFIRMING' | 'CAPTURED' | 'RELEASING' | 'RELEASED'
-const PUBLIC_CARD_STATUS: Partial<Record<OnlineOrderChargeStatus, PublicCardStatus>> = {
-  AUTHORIZED: 'AUTHORIZED',
-  CAPTURING: 'CONFIRMING',
-  CAPTURED: 'CAPTURED',
-  RELEASING: 'RELEASING',
-  RELEASED: 'RELEASED',
-}
 /** S4: el borrador también dice la verdad de su tarjeta (p. ej. `CAPTURED` sin pedido). */
 const draftCardStatus = (c: DraftCharge): PublicCardStatus | null =>
   draftCapturedOutside(c) ? 'CAPTURED' : (PUBLIC_CARD_STATUS[c.status] ?? null)
@@ -1091,46 +1085,6 @@ export interface PublicTracking {
   refundedAt?: string | null
   /** D661 (Task 4): la devolución del pago con tarjeta, leída de sus filas reales; sin devolución, no viene. */
   refund?: DevolucionPublica
-}
-
-/**
- * D661 (Task 4): lo que la clienta ve de su devolución. `PENDING` = en camino; `DONE` = hecha; `REVERSED` = el banco la regresó y
- * el negocio todavía se la debe. `medio`: por dónde le llegó (o le llegará) el dinero.
- */
-export type DevolucionPublica = {
-  status: 'PENDING' | 'DONE' | 'REVERSED'
-  medio: 'TARJETA' | 'SALDO' | 'EFECTIVO' | 'TRANSFERENCIA'
-}
-const DEVOLUCION_PUBLICA: Partial<Record<OnlineOrderCardRefundStatus, DevolucionPublica['status']>> = {
-  REQUESTED: 'PENDING',
-  SENDING: 'PENDING',
-  PENDING: 'PENDING',
-  SUCCEEDED: 'DONE', // Stripe ya la devolvió; sólo falta su renglón del libro
-  RECORDED: 'DONE',
-  RESOLVED: 'DONE',
-  REVERSED: 'REVERSED',
-}
-type FilaDeDevolucion = { status: OnlineOrderCardRefundStatus; reversal?: { resolvedMethod: PaymentMethod | null } | null }
-/**
- * El medio que la fila REGISTRÓ, nunca deducido de `toStoreCredit`: un `RESOLVED` con reversa dice cómo la pagó el negocio (efectivo
- * o transferencia); uno sin reversa nació a saldo a favor (el único `RESOLVED` que no pasa por la reversa, Task 6). Las demás son a la
- * tarjeta (una de saldo nace `RESOLVED`).
- */
-const medioDe = (f: FilaDeDevolucion): DevolucionPublica['medio'] =>
-  f.status !== OnlineOrderCardRefundStatus.RESOLVED
-    ? 'TARJETA'
-    : f.reversal?.resolvedMethod === PaymentMethod.CASH
-      ? 'EFECTIVO'
-      : f.reversal?.resolvedMethod === PaymentMethod.BANK_TRANSFER
-        ? 'TRANSFERENCIA'
-        : 'SALDO'
-/** Con varias filas (de la más reciente a la más vieja): una en camino gana; si no, una revertida (se debe); si no, una hecha. */
-function devolucionPublica(filas: FilaDeDevolucion[]): DevolucionPublica | undefined {
-  for (const status of ['PENDING', 'REVERSED', 'DONE'] as const) {
-    const f = filas.find(x => DEVOLUCION_PUBLICA[x.status] === status)
-    if (f) return { status, medio: medioDe(f) }
-  }
-  return undefined
 }
 
 const VENUE_PUBLIC_SELECT = {
@@ -1311,18 +1265,8 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
       venueId: true,
       notPickedUpAt: true,
       refundedAt: true,
-      charge: {
-        select: {
-          status: true,
-          // D661 (Task 4): las devoluciones que movieron (o mueven) dinero; una real trae una o dos.
-          cardRefunds: {
-            where: { status: { notIn: [OnlineOrderCardRefundStatus.FAILED, OnlineOrderCardRefundStatus.CANCELED] } },
-            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-            take: 10,
-            select: { status: true, reversal: { select: { resolvedMethod: true } } },
-          },
-        },
-      },
+      // D661 (Task 4): la devolución, leída igual que en «Mi cuenta» (`card/estadoPublico.ts`).
+      charge: { select: { status: true, cardRefunds: DEVOLUCIONES_PUBLICAS } },
       order: {
         select: {
           orderNumber: true,
