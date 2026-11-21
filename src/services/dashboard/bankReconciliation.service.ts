@@ -467,7 +467,7 @@ export async function getStatementDetail(venueId: string, statementId: string, s
  */
 async function decidirLineasPorDecidir(
   venueId: string,
-  statement: { id: string; periodStart: Date | null; periodEnd: Date | null },
+  statement: { id: string; periodStart: Date | null; periodEnd: Date | null; lineCount: number },
   staffId: string | null,
 ): Promise<boolean> {
   if (!statement.periodStart || !statement.periodEnd) return false
@@ -483,6 +483,7 @@ async function decidirLineasPorDecidir(
     const lineas = await tx.bankStatementLine.findMany({
       where: { bankStatementId: statement.id, venueId },
       orderBy: { rowIndex: 'asc' },
+      take: statement.lineCount, // las líneas de UN estado de cuenta: tantas como se subieron
     })
     const porDecidir = lineas.filter(esPorDecidir)
     if (porDecidir.length === 0) return false
