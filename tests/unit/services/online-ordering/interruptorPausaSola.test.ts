@@ -69,7 +69,9 @@ describe('prenderPausaSola / apagarPausaSola', () => {
     raw().mockResolvedValue([])
     await expect(prenderPausaSola({ por: 'x', minutos: 20 })).rejects.toThrow('primero apágala')
     const { texto } = sql()
-    expect(texto).toMatch(/WHERE "InterruptorDePlataforma"\."desde" IS NULL\s+OR "InterruptorDePlataforma"\."desde" > \(clock_timestamp\(\)/)
+    expect(texto).toMatch(
+      /WHERE "InterruptorDePlataforma"\."desde" IS NULL\s+OR "InterruptorDePlataforma"\."desde" > \(clock_timestamp\(\)/,
+    )
     expect(prismaMock.interruptorDePlataforma.findUnique).not.toHaveBeenCalled()
   })
 

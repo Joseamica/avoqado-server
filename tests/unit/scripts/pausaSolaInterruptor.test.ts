@@ -80,7 +80,16 @@ describe('main', () => {
   })
 
   it('--base local con DATABASE_URL de Render no conecta ni escribe', async () => {
-    const argv = ['--apagar', '--por', 'founder', '--apply', '--confirm-host', 'dpg-abc.oregon-postgres.render.com', '--confirm-db', 'avoqado_prod']
+    const argv = [
+      '--apagar',
+      '--por',
+      'founder',
+      '--apply',
+      '--confirm-host',
+      'dpg-abc.oregon-postgres.render.com',
+      '--confirm-db',
+      'avoqado_prod',
+    ]
     await expect(main(argv, { DATABASE_URL: RENDER })).rejects.toThrow(/no es de esta máquina/)
     expect(prismaMock.interruptorDePlataforma.findUnique).not.toHaveBeenCalled()
     expect(prismaMock.interruptorDePlataforma.upsert).not.toHaveBeenCalled()
@@ -89,7 +98,9 @@ describe('main', () => {
   it('con host y base confirmados, apaga', async () => {
     const env: NodeJS.ProcessEnv = { DATABASE_URL: LOCAL }
     await main(['--apagar', '--por', 'founder', '--apply', '--confirm-host', 'localhost', '--confirm-db', 'av-db-25'], env)
-    expect(prismaMock.interruptorDePlataforma.upsert).toHaveBeenCalledWith(expect.objectContaining({ update: { desde: null, actualizadoPor: 'founder' } }))
+    expect(prismaMock.interruptorDePlataforma.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ update: { desde: null, actualizadoPor: 'founder' } }),
+    )
     expect(env.DATABASE_URL).toBe(LOCAL)
   })
 })
