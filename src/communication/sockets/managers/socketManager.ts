@@ -15,7 +15,6 @@ import { SocketEventType, AuthenticatedSocket, ISocketManager, BroadcastOptions,
 import { socketConfig } from '../config/socketConfig'
 import { socketAuthenticationMiddleware, socketRateLimitMiddleware } from '../middleware/authentication.middleware'
 import { RoomManagerService } from '../services/roomManager.service'
-import { avisoDeTiendaSinDatos, CuartosDeOtraSucursal } from '../services/cuartosDeOtraSucursal'
 import { BroadcastingService } from '../services/broadcasting.service'
 import logger from '../../../config/logger'
 import { v4 as uuidv4 } from 'uuid'
@@ -53,8 +52,6 @@ export class SocketManager implements ISocketManager {
   // Controllers
   private connectionController: ConnectionController
   private roomController: RoomController
-  /** D662 v5: el panel recibe los avisos de la tienda en línea de otra sucursal en la que la persona tiene permiso (verificado con el usuario). */
-  private cuartosDeOtraSucursal: CuartosDeOtraSucursal
   private businessEventController: BusinessEventController
   private observabilityController: ObservabilityController
 
@@ -65,7 +62,6 @@ export class SocketManager implements ISocketManager {
     // Initialize controllers
     this.connectionController = new ConnectionController(this.roomManager)
     this.roomController = new RoomController(this.roomManager)
-    this.cuartosDeOtraSucursal = new CuartosDeOtraSucursal(this.roomManager)
     this.businessEventController = new BusinessEventController(this.roomManager)
     this.observabilityController = new ObservabilityController(this.roomManager)
   }
@@ -274,9 +270,6 @@ export class SocketManager implements ISocketManager {
     onWithContext(socket, SocketEventType.LEAVE_ROOM, (payload, callback) => {
       this.roomController.handleLeaveRoom(socket, payload, callback)
     })
-
-    // D662 v5: `joinVenueRoom` / `leaveVenueRoom` del DASHBOARD (antes nadie los escuchaba).
-    this.cuartosDeOtraSucursal.registrar(socket)
 
     // Business events
     onWithContext(socket, SocketEventType.PAYMENT_INITIATED, (payload, callback) => {
@@ -675,22 +668,6 @@ export class SocketManager implements ISocketManager {
   }
 
   // Public broadcasting methods implementing ISocketManager interface
-
-  /**
-   * D662 v5: «algo cambió en la tienda en línea de [venueId], vuelve a leer» a los paneles que la miran DESDE OTRA sucursal (con permiso
-   * verificado; `cuartosDeOtraSucursal.ts`). Sin datos: lo que se lee después pasa por HTTP. Los de la sucursal del token ya reciben lo
-   * suyo por el cuarto general. Nunca lanza.
-   */
-  public avisarTiendaEnLineaAOtrasSucursales(venueId: string, now: Date = new Date()): void {
-    try {
-      const aviso = avisoDeTiendaSinDatos(venueId, now)
-      for (const socket of this.roomManager.getOnlineStoreChannelSockets(venueId)) {
-        socket.emit(SocketEventType.ONLINE_ORDERING_STORE_CHANGED, aviso)
-      }
-    } catch (error) {
-      logger.error('[Socket] aviso de la tienda a otras sucursales falló (no fatal)', { venueId, error })
-    }
-  }
 
   public broadcastToVenue(venueId: string, event: SocketEventType, payload: any, options?: BroadcastOptions): void {
     if (!this.broadcastingService) {

@@ -26,8 +26,6 @@ export function emitOnlineOrderUpdated(e: {
       eventType: 'updated',
       timestamp: e.now.toISOString(),
     })
-    // D662 v5: el panel que mira esta tienda desde otra sucursal sólo recibe «vuelve a leer», sin datos.
-    socketManager.avisarTiendaEnLineaAOtrasSucursales(e.venueId, e.now)
   } catch (error) {
     logger.error('[OnlineOrdering] socket emit falló (no fatal)', { orderId: e.orderId, error })
   }
@@ -40,7 +38,6 @@ export function emitOnlineOrderUpdated(e: {
 export function emitStoreChanged(venueId: string, now: Date = new Date()): void {
   try {
     socketManager.broadcastToVenue(venueId, SocketEventType.ONLINE_ORDERING_STORE_CHANGED, { venueId, timestamp: now.toISOString() })
-    socketManager.avisarTiendaEnLineaAOtrasSucursales(venueId, now)
   } catch (error) {
     logger.error('[OnlineOrdering] socket emit del estado de la tienda falló (no fatal)', { venueId, error })
   }

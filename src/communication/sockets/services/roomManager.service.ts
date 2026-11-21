@@ -23,13 +23,6 @@ export class RoomManagerService {
    * `disconnectBySession`.
    */
   private socketsBySession: Map<string, Set<string>> = new Map()
-  /**
-   * D662 v5 (tarjeta 62937a87, Codex p2v5-r1 #4/#5): el CANAL de avisos de la tienda en línea de OTRA sucursal (no la del token). NO es
-   * el cuarto general de la sucursal (`socketsByVenue`, que lleva facturas, logs y comandos de terminal): sólo recibe «algo cambió en la
-   * tienda de X, vuelve a leer», sin datos. Lo verifica `cuartosDeOtraSucursal.ts` con el usuario y su permiso.
-   */
-  private onlineStoreChannelSockets: Map<string, Set<string>> = new Map()
-  private onlineStoreChannelsBySocket: Map<string, Set<string>> = new Map()
 
   /**
    * Register a socket connection
@@ -95,9 +88,6 @@ export class RoomManagerService {
       this.removeFromSessionRoom(sessionId, socketId)
     }
 
-    // Canales de la tienda de otra sucursal (D662 v5): sale de todos al desconectarse.
-    for (const venue of Array.from(this.onlineStoreChannelsBySocket.get(socketId) ?? [])) this.quitarDelCanal(venue, socketId)
-
     // Remove from all table rooms
     this.removeFromAllTableRooms(socketId)
 
@@ -112,50 +102,6 @@ export class RoomManagerService {
       correlationId: socket.correlationId,
       remainingConnections: this.connectedSockets.size,
     })
-  }
-
-  /**
-   * D662 v5: agrega el socket al canal de avisos de la tienda de OTRA sucursal. Sólo lo llama `cuartosDeOtraSucursal.ts` DESPUÉS de
-   * verificar al usuario y su permiso. Nunca la del token (ya recibe todo por su cuarto) ni un socket que ya no está registrado.
-   */
-  public joinOnlineStoreChannel(socket: AuthenticatedSocket, venueId: string): boolean {
-    if (!socket.authContext || venueId === socket.authContext.venueId) return false
-    if (!this.connectedSockets.has(socket.id)) return false
-    let sockets = this.onlineStoreChannelSockets.get(venueId)
-    if (!sockets) this.onlineStoreChannelSockets.set(venueId, (sockets = new Set()))
-    sockets.add(socket.id)
-    let canales = this.onlineStoreChannelsBySocket.get(socket.id)
-    if (!canales) this.onlineStoreChannelsBySocket.set(socket.id, (canales = new Set()))
-    canales.add(venueId)
-    return true
-  }
-
-  /** D662 v5: sale del canal de la tienda de otra sucursal. */
-  public leaveOnlineStoreChannel(socket: AuthenticatedSocket, venueId: string): boolean {
-    if (!this.onlineStoreChannelsBySocket.get(socket.id)?.has(venueId)) return false
-    this.quitarDelCanal(venueId, socket.id)
-    return true
-  }
-
-  /** D662 v5: los canales de otra sucursal de un socket (para revalidarlos). */
-  public getOnlineStoreChannels(socketId: string): string[] {
-    return Array.from(this.onlineStoreChannelsBySocket.get(socketId) ?? [])
-  }
-
-  /** D662 v5: los sockets suscritos (desde otra sucursal) a los avisos de la tienda de [venueId]. */
-  public getOnlineStoreChannelSockets(venueId: string): AuthenticatedSocket[] {
-    return Array.from(this.onlineStoreChannelSockets.get(venueId) ?? [])
-      .map(id => this.connectedSockets.get(id))
-      .filter((socket): socket is AuthenticatedSocket => socket !== undefined)
-  }
-
-  private quitarDelCanal(venueId: string, socketId: string): void {
-    const sockets = this.onlineStoreChannelSockets.get(venueId)
-    sockets?.delete(socketId)
-    if (sockets && sockets.size === 0) this.onlineStoreChannelSockets.delete(venueId)
-    const canales = this.onlineStoreChannelsBySocket.get(socketId)
-    canales?.delete(venueId)
-    if (canales && canales.size === 0) this.onlineStoreChannelsBySocket.delete(socketId)
   }
 
   /**

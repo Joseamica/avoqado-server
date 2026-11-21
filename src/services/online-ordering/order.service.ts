@@ -560,8 +560,6 @@ export function emitOnlineOrderCreated(venueId: string, r: { orderId: string; or
       eventType: 'created',
       timestamp: now.toISOString(),
     })
-    // D662 v5: el panel que mira esta tienda desde otra sucursal sólo recibe «vuelve a leer», sin datos.
-    socketManager.avisarTiendaEnLineaAOtrasSucursales(venueId, now)
   } catch (error) {
     logger.error('[OnlineOrdering] socket emit falló (no fatal)', { orderId: r.orderId, error })
   }

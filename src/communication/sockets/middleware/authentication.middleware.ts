@@ -215,8 +215,6 @@ export const socketAuthenticationMiddleware = async (socket: AuthenticatedSocket
       // Ausente para tokens legacy sin `sid` — es lo que permite a
       // `SocketManager.disconnectBySession` encontrar los sockets de una sesión.
       ...(decoded.sid ? { sessionId: decoded.sid } : {}),
-      // D662 v5: una sesión de SUPLANTACIÓN (claim `act`) no se suscribe a otras sucursales (`cuartosDeOtraSucursal.ts`).
-      ...((decoded as { act?: unknown }).act ? { isImpersonating: true } : {}),
       // La IDENTIDAD de la terminal, firmada por el servidor en el login de la TPV
       // (`auth.tpv.service.ts` la estampa en el JWT). Es lo que permite entregar un comando
       // remoto SÓLO a su destinataria (`broadcastToTerminal`): lo que el cliente reclame en
