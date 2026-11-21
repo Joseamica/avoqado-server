@@ -76,6 +76,7 @@ import {
 import { cerrarDevueltosPendientes, sweepCardRefunds } from '@/services/online-ordering/card/refund-reconciler.service'
 import { cerrarComoDevueltoEnTx } from '@/services/online-ordering/card/devuelto'
 import * as devuelto from '@/services/online-ordering/card/devuelto'
+import { NO_LO_RECOGIO_PAPEL_MS } from '@/services/online-ordering/printClaim.service'
 import { operationHash } from '@/utils/operationHash'
 
 const D = (v: string) => new Prisma.Decimal(v)
@@ -1138,6 +1139,21 @@ describe('D661 (Task 5): devolver a la tarjeta un pedido de «Nadie»', () => {
       pedido = { ...PEDIDO, ...papel }
       await expect(pedir({ key: `llave-papel-${i}`, expected: null })).resolves.toMatchObject({ status: 'RECORDED' })
     }
+  })
+
+  it('D661 · D (Ruling 44): un reclamo VIVO frena la devolución aunque la ventana de 2 h del «No lo recogió» ya no admita reclamos nuevos; vencido, se devuelve como antes (sin reserva)', async () => {
+    // El corte fue hace 2 h + 1 s (la ventana ya no admite reclamos NUEVOS) y una caja ganó el suyo 10 s antes de que cerrara.
+    const corte = at(-NO_LO_RECOGIO_PAPEL_MS - 1000)
+    pedido = { ...PEDIDO, status: 'COMPLETED', completedAt: corte, notPickedUpAt: corte, printClaimedAt: at(-11_000) }
+    await expect(pedir()).rejects.toMatchObject({ statusCode: 409, code: 'PRINT_IN_FLIGHT' })
+    expect(store.size).toBe(0)
+    expect(refund).not.toHaveBeenCalled()
+    expect(pedido.refundRequestedAt).toBeNull()
+
+    // El reclamo venció sin confirmarse: ya no hay papel en vuelo; fuera de la ventana se devuelve sin reserva, como antes.
+    pedido = { ...pedido, printClaimedAt: at(-91_000) }
+    await expect(pedir({ key: 'llave-fuera-de-ventana', expected: null })).resolves.toMatchObject({ status: 'RECORDED' })
+    expect(pedido).toMatchObject({ refundRequestedAt: null, refundedAt: NOW })
   })
 
   it('MCP: el efecto esperado se revalida bajo el candado; si cambió, 409 y nada escrito', async () => {

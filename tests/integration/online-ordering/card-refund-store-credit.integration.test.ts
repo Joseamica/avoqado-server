@@ -21,7 +21,7 @@ import { listCardRefunds, refundCardOnlineOrder, type CardRefundDestino } from '
 import { sweepCardRefunds } from '@/services/online-ordering/card/refund-reconciler.service'
 import { cerrarComoDevueltoEnTx } from '@/services/online-ordering/card/devuelto'
 import { listFolios, syncPaidClosedFolios } from '@/services/online-ordering/folios.service'
-import { claimOnlineOrderPrint } from '@/services/online-ordering/printClaim.service'
+import { NO_LO_RECOGIO_PAPEL_MS, claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/online-ordering/printClaim.service'
 import { listInbox } from '@/services/online-ordering/inbox.service'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import { getTrackingByToken } from '@/services/online-ordering/order.service'
@@ -778,5 +778,34 @@ describe('D661 · tarea 6: devolver a saldo a favor un pedido «Nadie» (integra
     expect(oo.status).toBe('COMPLETED')
     expect(oo.refundedAt).not.toBeNull()
     expect(await porImprimir()).not.toContain(p.orderId)
+  })
+
+  // ── Ronda codex-r2 (20-nov) ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('D661 · D (Ruling 44): saldo de un «No lo recogió» con un reclamo VIVO ganado 10 s antes de cerrar la ventana de 2 h → 1 s después, 409 PRINT_IN_FLIGHT y no se abona nada; confirmado el papel, abona y cierra «Devuelto»', async () => {
+    const ana = await clienta()
+    const p = await cobrado(ana, telefono())
+    // El corte fue hace 2 h + 1 s (la ventana ya no admite reclamos NUEVOS) y una caja ganó el suyo 10 s antes de que cerrara.
+    const corte = new Date(Date.now() - NO_LO_RECOGIO_PAPEL_MS - 1000)
+    await prisma.onlineOrder.update({
+      where: { id: p.onlineOrderId },
+      data: { status: 'COMPLETED', completedAt: corte, notPickedUpAt: corte },
+    })
+    const reclamo = new Date(corte.getTime() + NO_LO_RECOGIO_PAPEL_MS - 10_000)
+    await expect(claimOnlineOrderPrint(venueId!, p.orderId, 'caja-1', reclamo)).resolves.toEqual({ claimed: true })
+
+    await expect(devolver(p.orderId, 'STORE_CREDIT')).rejects.toMatchObject({ statusCode: 409, code: 'PRINT_IN_FLIGHT' })
+    expect(await filasDe(p.chargeId)).toHaveLength(0)
+    expect(await renglonesDe(p.orderId)).toHaveLength(0)
+    expect(await movimientosDe(p.orderId)).toHaveLength(0)
+    expect(await sobresDe(ana)).toHaveLength(0)
+    expect(await efectosDe(p.orderId)).toBe(0)
+    expect(await enLinea(p.orderId)).toMatchObject({ refundRequestedAt: null, refundedAt: null })
+
+    // La caja confirma el papel: ya no hay comanda en vuelo; se abona y se cierra «Devuelto» en una sola transacción.
+    await expect(confirmOnlineOrderPrinted(venueId!, p.orderId, 'caja-1')).resolves.toEqual({ ok: true })
+    await expect(devolver(p.orderId, 'STORE_CREDIT')).resolves.toMatchObject({ status: 'RECORDED', cardRefundStatus: 'RESOLVED' })
+    expect((await enLinea(p.orderId)).refundedAt).not.toBeNull()
+    expect(await sobresDe(ana)).toHaveLength(1)
   })
 })

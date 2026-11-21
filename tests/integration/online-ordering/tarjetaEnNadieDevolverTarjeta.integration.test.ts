@@ -29,7 +29,8 @@ import { cerrarDevueltosPendientes } from '@/services/online-ordering/card/refun
 import { cerrarComoDevueltoEnTx } from '@/services/online-ordering/card/devuelto'
 import { cerrarFoliosDelDiaTerminado, listFolios, syncPaidClosedFolios } from '@/services/online-ordering/folios.service'
 import { getInboxOrder, listInbox } from '@/services/online-ordering/inbox.service'
-import { claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/online-ordering/printClaim.service'
+import { NO_LO_RECOGIO_PAPEL_MS, claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/online-ordering/printClaim.service'
+import { PRINT_CLAIM_TTL_MS } from '@/services/online-ordering/constants'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import { getTrackingByToken } from '@/services/online-ordering/order.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
@@ -1237,5 +1238,40 @@ describe('D661 · tarea 5: «Cancelar y devolver» a la tarjeta en «Nadie» (in
     estadoNuevo = 'PENDING'
     await expect(devolver(p.orderId)).resolves.toMatchObject({ status: 'PENDING' })
     expect(await enLinea(p.orderId)).toMatchObject({ status: 'COMPLETED', refundRequestedAt: null })
+  })
+
+  // ── Ronda codex-r2 (20-nov) ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('D661 · D (Ruling 44): un reclamo VIVO ganado 10 s antes de que cierre la ventana de 2 h frena la devolución a la tarjeta 1 s después de cerrarse (409 PRINT_IN_FLIGHT, nada escrito); confirmado o vencido el papel, se devuelve', async () => {
+    for (const salida of ['confirma', 'vence'] as const) {
+      const p = await noLoRecogio()
+      // El corte fue hace 2 h + 1 s: la ventana del papel ya no admite reclamos NUEVOS…
+      const corte = new Date(Date.now() - NO_LO_RECOGIO_PAPEL_MS - 1000)
+      await prisma.onlineOrder.update({ where: { id: p.onlineOrderId }, data: { notPickedUpAt: corte, completedAt: corte } })
+      // …pero una caja reclamó la comanda 10 s antes de que se cerrara: su reclamo vive todavía ~79 s.
+      const reclamo = new Date(corte.getTime() + NO_LO_RECOGIO_PAPEL_MS - 10_000)
+      await expect(claimOnlineOrderPrint(venueId!, p.orderId, 'caja-1', reclamo)).resolves.toEqual({ claimed: true })
+
+      await expect(devolver(p.orderId)).rejects.toMatchObject({ statusCode: 409, code: 'PRINT_IN_FLIGHT' })
+      expect({ salida, filas: await filasDe(p.chargeId) }).toEqual({ salida, filas: 0 })
+      expect(refundSpy).not.toHaveBeenCalled()
+      expect(await refundsOf(p.orderId)).toHaveLength(0)
+      expect(await enLinea(p.orderId)).toMatchObject({ refundRequestedAt: null, refundedAt: null })
+
+      if (salida === 'confirma') {
+        await expect(confirmOnlineOrderPrinted(venueId!, p.orderId, 'caja-1')).resolves.toEqual({ ok: true })
+      } else {
+        await prisma.onlineOrder.update({
+          where: { id: p.onlineOrderId },
+          data: { printClaimedAt: new Date(Date.now() - PRINT_CLAIM_TTL_MS - 1000) },
+        })
+      }
+      // Fuera de la ventana se devuelve como antes: sin reserva y cerrado «Devuelto».
+      await expect(devolver(p.orderId)).resolves.toMatchObject({ status: 'RECORDED' })
+      const oo = await enLinea(p.orderId)
+      expect({ salida, reserva: oo.refundRequestedAt }).toEqual({ salida, reserva: null })
+      expect(oo.refundedAt).not.toBeNull()
+      refundSpy.mockClear()
+    }
   })
 })

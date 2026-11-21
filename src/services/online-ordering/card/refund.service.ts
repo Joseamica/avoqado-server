@@ -897,7 +897,8 @@ type Decision =
  * 409; 3) cargo `CAPTURED` y el importe cabe en lo que queda por devolver del cobro de Stripe según el cálculo de siempre (cuenta todo
  * REFUND del libro, también un «Cambio» con saldo a favor) menos lo reservado por las filas sin renglón (ruling 2). En «Nadie»: 100 %
  * (`FULL_REFUND_ONLY`), el efecto que vio el MCP se revalida (`REFUND_EFFECT_CHANGED`) y, si el pedido está por entregar, se reserva
- * aquí mismo — con el papel de la comanda saliendo no (`PRINT_IN_FLIGHT`, Ruling 9). Candados: Order → Payment → OnlineOrder.
+ * aquí mismo — con el papel de la comanda saliendo no (`PRINT_IN_FLIGHT`, Ruling 9; también fuera de la ventana, Ruling 44). Candados:
+ * Order → Payment → OnlineOrder.
  * D661 (Task 6): el saldo a favor sólo es de «Nadie» (`REFUND_DESTINATION_NOT_AVAILABLE` en «Mi equipo») y pide la clienta del pago.
  */
 async function decidirDevolucionEnTx(tx: Prisma.TransactionClient, s: Solicitud): Promise<Decision> {
@@ -1005,12 +1006,14 @@ async function decidirDevolucionEnTx(tx: Prisma.TransactionClient, s: Solicitud)
     )
   }
   const reservadaEn = new Date()
+  // Ruling 9: con un reclamo de papel en vuelo no se devuelve (la comanda puede estar saliendo ahora). D661 (D, Ruling 44): en «Nadie»,
+  // a cualquier destino y aunque la regla del papel ya no admita reclamos NUEVOS: el fin de la ventana de 2 h de un «No lo recogió»
+  // sólo frena los nuevos; el que ganó justo antes sigue imprimiendo hasta 90 s.
+  if (nadie && papelEnVuelo(online, reservadaEn)) throw papelEnVueloError()
   // D661 (B3): si la regla del papel todavía admite su comanda (por entregar, o un «No lo recogió» dentro de su ventana), mientras se
   // devuelve tampoco debe salir: también se reserva, a cualquier destino (el saldo cierra en esta misma transacción con `refundedAt`).
   const pidePapel = nadie && comandaAdmitida(online, reservadaEn)
   if (reserva || pidePapel) {
-    // Ruling 9: con un reclamo de papel en vuelo no se reserva (la comanda puede estar saliendo ahora).
-    if (papelEnVuelo(online, reservadaEn)) throw papelEnVueloError()
     // La reserva ANTES de mover dinero, bajo este candado (el que también toma «Entregado»: su CAS no repite las marcas). El
     // reclamo de papel y el cierre del día NO toman el candado: el CAS repite sus condiciones y cada uno repite las suyas
     // (`refundRequestedAt: null`), así que de los dos gana uno solo.
