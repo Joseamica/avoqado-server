@@ -7719,7 +7719,13 @@ export async function cancelOrderInTransaction(
   /** Huella del reducer offline: corre DENTRO de la transacción de la cancelación (plan 2026-10-13-sync-retoma-por-llave). */
   dentroDeLaTx?: (tx: TxConReintento, cancelada: { orderId: string }) => Promise<void>,
   /** Lo que el panel exige además (`cancelarCuentaSinCobrar`): pagos registrados y «ya cancelada». El POS no lo pasa. */
-  opcionesDeGuardia?: OrderCancelGuardOptions,
+  opcionesDeGuardia?: OrderCancelGuardOptions & {
+    /**
+     * hz:e82938e1:D36 (Codex r3 #3): corre con la venta YA tomada y ANTES de cualquier escritura de la anulación (comandas, canjes,
+     * estado). Quien anula por una regla (la limpieza de ventas abandonadas) la relee aquí tal como está; si lanza, no se escribe nada.
+     */
+    comprobarBajoElCandado?: (tx: TxConReintento) => Promise<void>
+  },
 ) {
   logger.info(`📱 [ORDER.MOBILE] Cancelling order ${orderId} | venue=${venueId} | reason=${reason || 'none'}`)
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
@@ -7731,6 +7737,7 @@ export async function cancelOrderInTransaction(
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
   }
+  await opcionesDeGuardia?.comprobarBajoElCandado?.(tx)
   const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId: performedBy, reason })
   await assertOrderCancellableUnderLock(tx, { venueId, orderId }, opcionesDeGuardia)
   // 🔴 D2: una venta de vales queda como por la ruta de vales: sus vales vuelven a poder cobrarse (sin esperar por ellos).

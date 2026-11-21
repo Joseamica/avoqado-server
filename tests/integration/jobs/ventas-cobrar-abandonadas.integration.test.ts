@@ -10,8 +10,19 @@
  *   npx jest --selectProjects=integration --runInBand --runTestsByPath tests/integration/jobs/ventas-cobrar-abandonadas.integration.test.ts
  */
 import '../../__helpers__/integration-setup'
+import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
-import { CAMINO_LIMPIEZA_COBRAR, VentasCobrarAbandonadasJob } from '@/jobs/ventas-cobrar-abandonadas.job'
+import {
+  anularVentaDeCobrarAbandonada,
+  CAMINO_LIMPIEZA_COBRAR,
+  type Candidata,
+  VentasCobrarAbandonadasJob,
+} from '@/jobs/ventas-cobrar-abandonadas.job'
+import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
+
+// El cobro tardío de la cola (efectivo) registra su dinero de verdad; sólo se apagan la caja y la cola de mensajes, que no son de esta prueba.
+jest.mock('@/services/shared/cashDrawerPosting', () => ({ postCashSaleToDrawer: jest.fn().mockResolvedValue(undefined) }))
+jest.mock('@/communication/rabbitmq/publisher', () => ({ publishCommand: jest.fn() }))
 
 // Anula ventas reales: sólo corre en una base de prueba local y desechable.
 const url = new URL(process.env.TEST_DATABASE_URL ?? '')
@@ -27,10 +38,19 @@ const HACE_UNA_HORA = () => new Date(Date.now() - 60 * 60 * 1000)
 
 let organizationId: string
 let venueId: string
+let staffId: string
 
 async function venta(
   clave: string,
-  extra: Partial<{ customerId: string; createdAt: Date; updatedAt: Date; sinProductos: boolean; source: 'TPV' | 'KIOSK' }> = {},
+  extra: Partial<{
+    customerId: string
+    createdAt: Date
+    updatedAt: Date
+    sinProductos: boolean
+    source: 'TPV' | 'KIOSK'
+    externalId: string
+    reservationId: string
+  }> = {},
 ) {
   const creada = await prisma.order.create({
     data: {
@@ -41,6 +61,8 @@ async function venta(
       status: 'PENDING',
       paymentStatus: 'PENDING',
       customerId: extra.customerId ?? null,
+      externalId: extra.externalId ?? null,
+      reservationId: extra.reservationId ?? null,
       subtotal: 100,
       taxAmount: 0,
       total: 100,
@@ -62,6 +84,13 @@ const estado = async (orderId: string) =>
 
 const activo = () => new VentasCobrarAbandonadasJob({ modo: 'ACTIVO' })
 
+/** La candidata tal como la eligió la vuelta (versión incluida). */
+async function candidata(id: string): Promise<Candidata> {
+  const o = await prisma.order.findUniqueOrThrow({ where: { id }, select: { id: true, venueId: true, orderNumber: true, version: true } })
+  return o
+}
+const UMBRAL = () => new Date(Date.now() - 24 * 60 * 60 * 1000)
+
 beforeAll(async () => {
   const org = await prisma.organization.create({
     data: { name: 'Org D36 limpieza Cobrar', email: `d36-cobrar-${Date.now()}@test.com`, phone: '5550000000' },
@@ -81,6 +110,9 @@ beforeAll(async () => {
     },
   })
   venueId = venue.id
+  const staff = await prisma.staff.create({ data: { email: `d36-cobrar-${Date.now()}@test.com`, firstName: 'Cajera', lastName: 'D36' } })
+  staffId = staff.id
+  await prisma.staffVenue.create({ data: { venueId, staffId, role: 'CASHIER' } })
 })
 
 afterAll(async () => {
@@ -90,18 +122,21 @@ afterAll(async () => {
   await prisma.payment.deleteMany({ where: { venueId } })
   await prisma.orderItem.deleteMany({ where: { order: { venueId } } })
   await prisma.order.deleteMany({ where: { venueId } })
+  await prisma.reservation.deleteMany({ where: { venueId } })
   await prisma.customer.deleteMany({ where: { venueId } })
+  await prisma.staffVenue.deleteMany({ where: { venueId } })
+  if (staffId) await prisma.staff.deleteMany({ where: { id: staffId } })
   await prisma.venue.deleteMany({ where: { id: venueId } })
   await prisma.organization.deleteMany({ where: { id: organizationId } })
   await prisma.$disconnect()
 })
 
 describe('limpieza de ventas de Cobrar abandonadas (D36)', () => {
-  it('🔴 en ENSAYO no escribe NADA: la venta que cumple sigue pendiente y no hay bitácora', async () => {
+  it('🔴 en ENSAYO no escribe NADA: la venta que cumple sigue pendiente y no hay bitácora; su negocio cuenta exactamente 1', async () => {
     const id = await venta('ensayo')
     const r = await new VentasCobrarAbandonadasJob({ modo: 'ENSAYO' }).correrAhora()
 
-    expect(r.anularia).toBeGreaterThanOrEqual(1)
+    expect(r.negocios.find(n => n.venueId === venueId)).toEqual({ venueId, cuantas: 1 })
     expect(await estado(id)).toBe('PENDING')
     expect(await prisma.activityLog.count({ where: { entityId: id } })).toBe(0)
   })
@@ -160,10 +195,102 @@ describe('limpieza de ventas de Cobrar abandonadas (D36)', () => {
     expect(await estado(id)).toBe('PENDING')
   })
 
-  it('🔴 una de menos de 24 h NO se toca', async () => {
-    const id = await venta('reciente', { createdAt: HACE_UNA_HORA(), updatedAt: HACE_UNA_HORA() })
+  it('🔴 una creada hace menos de 24 h NO se toca, aunque nadie la haya tocado desde hace más', async () => {
+    const id = await venta('reciente', { createdAt: HACE_UNA_HORA(), updatedAt: HACE_DOS_DIAS() })
     await activo().correrAhora()
     expect(await estado(id)).toBe('PENDING')
+  })
+
+  it('🔴 una vieja que alguien tocó hace menos de 24 h NO se toca', async () => {
+    const id = await venta('tocada', { createdAt: HACE_DOS_DIAS(), updatedAt: HACE_UNA_HORA() })
+    await activo().correrAhora()
+    expect(await estado(id)).toBe('PENDING')
+  })
+
+  it('🔴 Codex r3 #4: una con una solicitud del POS RECHAZADA (la terminal estaba ocupada) tampoco se toca', async () => {
+    const id = await venta('pos-rechazada')
+    await prisma.terminalPaymentRequest.create({
+      data: {
+        requestId: `d36-${id}-${Math.random()}`,
+        venueId,
+        terminalId: `terminal-${id}`,
+        orderId: id,
+        amountCents: 10000,
+        expiresAt: new Date(Date.now() + 60_000),
+        status: 'FAILED',
+        failureCode: 'REJECTED_TERMINAL_BUSY',
+      },
+    })
+    await activo().correrAhora()
+    expect(await estado(id)).toBe('PENDING')
+  })
+
+  it('🔴 Codex r3 #2: sólo la llave de Cobrar; las de otros flujos (libreta de «Órdenes», tarjetas de regalo) y las de reserva se quedan', async () => {
+    const deCobrar = await venta('llave-cobrar', { externalId: randomUUID() })
+    const ordenes = await venta('ordenes', { externalId: `local_${randomUUID()}` })
+    const tarjetas = await venta('tarjetas', { externalId: `giftcard:${randomUUID()}` })
+    const reserva = await prisma.reservation.create({
+      data: {
+        venueId,
+        confirmationCode: `D36${Date.now()}`,
+        startsAt: HACE_DOS_DIAS(),
+        endsAt: HACE_DOS_DIAS(),
+        duration: 60,
+        blockedEndsAt: HACE_DOS_DIAS(),
+      },
+    })
+    const deReserva = await venta('reserva', { reservationId: reserva.id })
+    await activo().correrAhora()
+
+    expect(await estado(deCobrar)).toBe('CANCELLED')
+    expect(await estado(ordenes)).toBe('PENDING')
+    expect(await estado(tarjetas)).toBe('PENDING')
+    expect(await estado(deReserva)).toBe('PENDING')
+  })
+
+  it.each([
+    ['le guardan un nombre (cambia `updatedAt`, no la versión)', { customerName: 'Ana' }],
+    ['el panel la pasa a CONFIRMED', { status: 'CONFIRMED' as const }],
+  ])('🔴 Codex r3 #3: entre la elección y el candado %s ⇒ se queda, sin escribir nada', async (_caso, cambio) => {
+    const id = await venta('carrera')
+    const elegida = await candidata(id)
+    // Lo que otra caja o el panel hace en ese hueco: una edición normal (Prisma mueve `updatedAt`).
+    await prisma.order.update({ where: { id }, data: cambio })
+
+    expect(await anularVentaDeCobrarAbandonada(elegida, UMBRAL())).toBe('seQueda')
+    expect(await estado(id)).not.toBe('CANCELLED')
+    expect(await prisma.activityLog.count({ where: { entityId: id } })).toBe(0)
+  })
+
+  it('🔴 Codex r3 #1: el efectivo que la cola de una TPV vieja manda DESPUÉS de la limpieza reabre la venta con rastro', async () => {
+    const id = await venta('cobro-tardio')
+    await activo().correrAhora()
+    expect(await estado(id)).toBe('CANCELLED')
+
+    await recordOrderPayment(
+      venueId,
+      id,
+      {
+        venueId,
+        amount: 10000,
+        tip: 0,
+        status: 'COMPLETED',
+        method: 'CASH',
+        source: 'TPV',
+        splitType: 'FULLPAYMENT',
+        tpvId: 'd36-tpv-vieja',
+        staffId,
+        paidProductsId: [],
+        idempotencyKey: randomUUID(),
+        currency: 'MXN',
+        isInternational: false,
+      } as any,
+      staffId,
+    )
+
+    expect(await estado(id)).not.toBe('CANCELLED')
+    expect(await prisma.payment.count({ where: { orderId: id } })).toBe(1)
+    expect(await prisma.activityLog.count({ where: { entityId: id, action: 'ORDER_REOPENED_BY_CAPTURED_PAYMENT' } })).toBe(1)
   })
 
   it('una sin productos o que no es de la TPV (kiosco) NO se toca', async () => {
