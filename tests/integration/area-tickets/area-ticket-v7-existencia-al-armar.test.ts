@@ -364,4 +364,77 @@ describe('Vales V7 — D5: la existencia de lo suelto se revisa al armar la vent
       AreaTicketInventoryReservationStatus.CONSUMED,
     )
   })
+
+  it('🔴 Codex r3 #1: un apartado que redondeó a 0.000 al emitir nunca se liquida ⇒ el mismo rechazo AL ARMAR, sin orden', async () => {
+    // 0.1 g de sal con el insumo en kilos ⇒ 0.0001 kg, que la columna (3 decimales) guarda como 0.000. La liquidación no puede consumir
+    // ese apartado («Los lotes FIFO no cubren la reserva del vale.»): antes eso salía con la tarjeta ya cobrada; ahora, al armar.
+    const salId = (
+      await prisma.rawMaterial.create({
+        data: {
+          venueId,
+          name: `Sal ${suffix}`,
+          sku: `SAL-${suffix}`,
+          category: 'OTHER',
+          currentStock: new Prisma.Decimal('10.000'),
+          unit: Unit.KILOGRAM,
+          unitType: 'WEIGHT',
+          minimumStock: new Prisma.Decimal('0'),
+          reorderPoint: new Prisma.Decimal('0'),
+          costPerUnit: new Prisma.Decimal('5'),
+          avgCostPerUnit: new Prisma.Decimal('5'),
+        },
+      })
+    ).id
+    await createStockBatch(venueId, salId, { quantity: 10, unit: Unit.KILOGRAM, costPerUnit: 5, receivedDate: new Date() })
+    const category = await prisma.menuCategory.findFirstOrThrow({ where: { venueId } })
+    const salsaId = (
+      await prisma.product.create({
+        data: {
+          venueId,
+          categoryId: category.id,
+          sku: `SALSA-${suffix}`,
+          name: 'Salsa',
+          price: new Prisma.Decimal('10.00'),
+          taxRate: new Prisma.Decimal(0),
+          tags: [],
+          allergens: [],
+          trackInventory: true,
+          inventoryMethod: InventoryMethod.RECIPE,
+          unit: Unit.PIECE,
+        },
+      })
+    ).id
+    await prisma.recipe.create({
+      data: {
+        productId: salsaId,
+        portionYield: 1,
+        totalCost: new Prisma.Decimal('0.01'),
+        lines: { create: [{ rawMaterialId: salId, quantity: new Prisma.Decimal('0.100'), unit: Unit.GRAM, isOptional: false }] },
+      },
+    })
+    const { vale, caja } = await valeEnCaja('sal', salsaId)
+    expect(
+      (await prisma.areaTicketInventoryReservation.findFirstOrThrow({ where: { areaTicketId: vale.id } })).quantityBaseUnits.toFixed(3),
+    ).toBe('0.000')
+
+    await expect(
+      materializeAreaTicketCheckout(venueId, caja.id, {
+        idempotencyKey: `sal-armar-${suffix}`,
+        deviceUid: checkoutDeviceUid,
+        staffId,
+        source: 'AVOQADO_ANDROID',
+      }),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED',
+      message: 'Los lotes FIFO no cubren la reserva del vale.',
+    })
+    // Sin orden no hay cobro que mandar a la terminal.
+    expect(
+      await prisma.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: caja.id }, select: { status: true, orderId: true } }),
+    ).toEqual({
+      status: 'OPEN',
+      orderId: null,
+    })
+  })
 })
