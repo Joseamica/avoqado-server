@@ -540,7 +540,7 @@ describe('D661 · tarea 4: entrega, cierre del día, «No lo recogió» y el seg
 
   // ── «Entregado» ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-  it('entregar uno marcado «No lo recogió» → 409 con su estado', async () => {
+  it('entregar uno marcado «No lo recogió» → 409 con su estado y (D661, Ruling 71) su PROPIO código', async () => {
     const a = await cobrado()
     await deAyer(a.onlineOrderId)
     await corte()
@@ -548,13 +548,14 @@ describe('D661 · tarea 4: entrega, cierre del día, «No lo recogió» y el seg
     for (const namespace of ['m', 't'] as const) {
       const r = await entregarPorLaCaja(namespace, a.orderId)
       expect({ namespace, status: r.status }).toEqual({ namespace, status: 409 })
-      expect(r.body).toMatchObject({
+      // Una app vieja ya no lo lee como el segundo toque de «Entregado» (`ORDER_STATE_CHANGED` + COMPLETED).
+      expect(r.body).toEqual({
         success: false,
-        code: 'ORDER_STATE_CHANGED',
+        code: 'ORDER_CLOSED_NOT_DELIVERED',
         status: 'COMPLETED',
         notPickedUpAt: notPickedUpAt!.toISOString(),
+        error: 'Este pedido se cerró sin entregarse (se devolvió o no lo recogieron). No lo entregues.',
       })
-      expect(r.body.error).toContain('«No lo recogió»')
     }
     // Nada cambió: sigue «No lo recogió» con la hora del corte, sin otra bitácora.
     expect(await enLinea(a.orderId)).toMatchObject({ status: 'COMPLETED', notPickedUpAt, completedAt })

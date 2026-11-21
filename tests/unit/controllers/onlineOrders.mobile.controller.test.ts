@@ -244,48 +244,61 @@ describe('onlineOrders.mobile.controller', () => {
     expect(body.error).not.toMatch(/ya se pagó|No se cobró nada/)
   })
 
-  it('entregar uno marcado «No lo recogió» → 409 con su estado (mismo código de siempre y campos nuevos opcionales; nunca 200)', async () => {
+  it('D661 (Ruling 71): entregar uno CERRADO sin entregarse («No lo recogió», «Devuelto») → 409 con su PROPIO código, el estado y las marcas de siempre (una app vieja ya no lo lee como el segundo toque)', async () => {
     const CORTE = '2026-10-14T10:00:05.000Z'
-    ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValue({ outcome: 'STALE', status: 'COMPLETED', notPickedUpAt: CORTE })
-    const a = mock()
-    await ctrl.delivered(a.req, a.res, a.next)
-    expect(a.res.status).toHaveBeenCalledWith(409)
-    // Una app vieja lee `code` y `status` como hoy; una nueva pinta «No lo recogió» con `notPickedUpAt`.
-    expect(a.res.json).toHaveBeenCalledWith({
-      success: false,
-      code: 'ORDER_STATE_CHANGED',
-      status: 'COMPLETED',
-      notPickedUpAt: CORTE,
-      error: expect.stringContaining('«No lo recogió»'),
-    })
+    const DEVUELTO = '2026-10-14T18:20:00.000Z'
+    for (const marcas of [
+      { notPickedUpAt: CORTE }, // «No lo recogió» (el corte del día)
+      { refundRequestedAt: DEVUELTO, refundedAt: DEVUELTO }, // «Devuelto» desde la reserva (nunca se entregó)
+      { refundedAt: DEVUELTO },
+      { notPickedUpAt: CORTE, refundRequestedAt: DEVUELTO }, // «No lo recogió» que se está devolviendo
+    ]) {
+      ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValueOnce({ outcome: 'STALE', status: 'COMPLETED', ...marcas })
+      const m = mock()
+      await ctrl.delivered(m.req, m.res, m.next)
+      expect(m.res.status).toHaveBeenCalledWith(409)
+      expect(m.res.json).toHaveBeenCalledWith({
+        success: false,
+        code: 'ORDER_CLOSED_NOT_DELIVERED',
+        status: 'COMPLETED',
+        ...marcas,
+        error: 'Este pedido se cerró sin entregarse (se devolvió o no lo recogieron). No lo entregues.',
+      })
+    }
+  })
 
-    // «Devolviendo…» (reserva viva) y «Devuelto»: el mismo 409, con su marca y su texto.
-    ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValue({ outcome: 'STALE', status: 'READY', refundRequestedAt: CORTE })
+  it('D661 (Ruling 71): «Listo» sobre uno CERRADO sin entregarse → el mismo 409 ORDER_CLOSED_NOT_DELIVERED', async () => {
+    const HORA = '2026-10-14T18:00:00.000Z'
+    ;(markOnlineOrderReady as jest.Mock).mockResolvedValueOnce({ outcome: 'STALE', status: 'COMPLETED', refundedAt: HORA })
+    const m = mock()
+    await ctrl.ready(m.req, m.res, m.next)
+    expect(m.res.status).toHaveBeenCalledWith(409)
+    expect(m.res.json).toHaveBeenCalledWith({
+      success: false,
+      code: 'ORDER_CLOSED_NOT_DELIVERED',
+      status: 'COMPLETED',
+      refundedAt: HORA,
+      error: 'Este pedido se cerró sin entregarse (se devolvió o no lo recogieron). No lo entregues.',
+    })
+  })
+
+  it('D661 (Ruling 71): todo lo demás sigue con ORDER_STATE_CHANGED exactamente como hoy («Devolviendo…» de uno por entregar, sin marcas, un COMPLETED sin marcas)', async () => {
+    const CORTE = '2026-10-14T10:00:05.000Z'
+    // «Devolviendo…» (reserva viva) de uno que sigue por entregar: el 409 de siempre con su marca y su texto.
+    ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValueOnce({ outcome: 'STALE', status: 'READY', refundRequestedAt: CORTE })
     const b = mock()
     await ctrl.delivered(b.req, b.res, b.next)
     expect(b.res.status).toHaveBeenCalledWith(409)
-    expect(b.res.json).toHaveBeenCalledWith(
-      expect.objectContaining({
-        code: 'ORDER_STATE_CHANGED',
-        status: 'READY',
-        refundRequestedAt: CORTE,
-        error: expect.stringMatching(/devolviendo/),
-      }),
-    )
-    ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValue({ outcome: 'STALE', status: 'COMPLETED', refundedAt: CORTE })
-    const c = mock()
-    await ctrl.delivered(c.req, c.res, c.next)
-    expect(c.res.json).toHaveBeenCalledWith(
-      expect.objectContaining({
-        code: 'ORDER_STATE_CHANGED',
-        status: 'COMPLETED',
-        refundedAt: CORTE,
-        error: expect.stringMatching(/devolvió/),
-      }),
-    )
+    expect(b.res.json).toHaveBeenCalledWith({
+      success: false,
+      code: 'ORDER_STATE_CHANGED',
+      status: 'READY',
+      refundRequestedAt: CORTE,
+      error: 'Este pedido se está devolviendo: no se marca entregado. No se aplicó nada.',
+    })
 
     // Sin marca, el 409 de siempre, con las mismas llaves (regresión).
-    ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValue({ outcome: 'STALE', status: 'CANCELLED_BY_STAFF' })
+    ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValueOnce({ outcome: 'STALE', status: 'CANCELLED_BY_STAFF' })
     const d = mock()
     await ctrl.delivered(d.req, d.res, d.next)
     expect(d.res.json).toHaveBeenCalledWith({
@@ -294,6 +307,22 @@ describe('onlineOrders.mobile.controller', () => {
       status: 'CANCELLED_BY_STAFF',
       error: 'El pedido ya cambió de estado (otro aparato, el cliente, la caja o el tiempo). Actualiza la bandeja.',
     })
+
+    // Un COMPLETED SIN marcas (p. ej. «Listo» de uno ya entregado, o cancelar uno cerrado) es el 409 de siempre.
+    for (const [handler, fn] of [
+      [ctrl.ready, markOnlineOrderReady],
+      [ctrl.cancel, cancelOnlineOrderByStaff],
+    ] as const) {
+      ;(fn as jest.Mock).mockResolvedValueOnce({ outcome: 'STALE', status: 'COMPLETED' })
+      const m = mock()
+      await handler(m.req, m.res, m.next)
+      expect(m.res.json).toHaveBeenCalledWith({
+        success: false,
+        code: 'ORDER_STATE_CHANGED',
+        status: 'COMPLETED',
+        error: 'El pedido ya cambió de estado (otro aparato, el cliente, la caja o el tiempo). Actualiza la bandeja.',
+      })
+    }
   })
 
   it('D661 (Task 5): «Listo» sobre un pedido que se está devolviendo o ya se devolvió → el mismo 409 con su marca y un texto de «Listo»', async () => {

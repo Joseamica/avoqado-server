@@ -939,20 +939,31 @@ describe('D661 · tarea 5: «Cancelar y devolver» a la tarjeta en «Nadie» (in
     expect(await cierres(p.onlineOrderId)).toBe(1)
   })
 
-  it('«Entregado» sobre un pedido YA COMPLETED con refundedAt devuelve su estado, no éxito', async () => {
+  it('«Entregado» sobre un pedido YA COMPLETED con refundedAt devuelve su estado, no éxito: D661 (Ruling 71) con su PROPIO código', async () => {
     const p = await cobrado()
     await expect(devolver(p.orderId)).resolves.toMatchObject({ status: 'RECORDED' })
-    const { refundedAt } = await enLinea(p.orderId)
+    const { refundRequestedAt, refundedAt, completedAt } = await enLinea(p.orderId)
     await expect(markOnlineOrderDelivered({ venueId: venueId!, orderId: p.orderId, staffId: staffId! })).resolves.toEqual({
       outcome: 'STALE',
       status: 'COMPLETED',
       refundRequestedAt: expect.any(String),
       refundedAt: refundedAt!.toISOString(),
     })
+    // Por la ruta REAL de la caja: una app vieja ya no lo lee como el segundo toque de «Entregado» (eso es `ORDER_STATE_CHANGED` +
+    // COMPLETED); el estado y las marcas van como siempre.
     const r = await porLaCaja('delivered', p.orderId)
     expect(r.status).toBe(409)
-    expect(r.body).toMatchObject({ code: 'ORDER_STATE_CHANGED', status: 'COMPLETED', refundedAt: refundedAt!.toISOString() })
-    expect(r.body.error).toMatch(/ya se devolvió/)
+    expect(r.body).toEqual({
+      success: false,
+      code: 'ORDER_CLOSED_NOT_DELIVERED',
+      status: 'COMPLETED',
+      refundRequestedAt: refundRequestedAt!.toISOString(),
+      refundedAt: refundedAt!.toISOString(),
+      error: 'Este pedido se cerró sin entregarse (se devolvió o no lo recogieron). No lo entregues.',
+    })
+    // Nada se escribió: sigue «Devuelto» con sus horas, sin bitácora de entrega.
+    expect(await enLinea(p.orderId)).toMatchObject({ status: 'COMPLETED', refundRequestedAt, refundedAt, completedAt })
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDER_COLLECTED', entityId: p.onlineOrderId }))
   })
 
   it('los efectos de comisión de la devolución se encolan igual que hoy', async () => {

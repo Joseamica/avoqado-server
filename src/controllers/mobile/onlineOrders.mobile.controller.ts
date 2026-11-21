@@ -7,7 +7,7 @@
  * R1: ninguna transición recibe `now` desde aquí: la transición toma su reloj DESPUÉS del candado de la orden.
  */
 import type { NextFunction, Request, Response } from 'express'
-import type { OnlineOrderRejectReason } from '@prisma/client'
+import { OnlineOrderStatus, type OnlineOrderRejectReason } from '@prisma/client'
 import { evaluateRolePermission, resolveUserRoleForVenue } from '@/middlewares/checkPermission.middleware'
 import { ONLINE_ORDERS_TO_PAY_HEADER, ONLINE_ORDERS_TRAY_HEADER, TO_PAY_FAST_POLL_SECONDS } from '@/services/online-ordering/constants'
 import { CARD_ALERT_HEADER, touchCardAlertPoll } from '@/services/online-ordering/cardAlertPresence'
@@ -32,6 +32,9 @@ const staffOf = (req: Request): string | null => (req as any).authContext?.userI
 /** M-10: con tope de largo; termina guardado en `printClaimedBy`. */
 const deviceOf = (req: Request): string => (req.header('x-device-id') ?? '').trim().slice(0, 100)
 
+/** D661 (Ruling 71): el texto del pedido que se cerró sin entregarse. */
+const CERRADO_SIN_ENTREGAR = 'Este pedido se cerró sin entregarse (se devolvió o no lo recogieron). No lo entregues.'
+
 /** `accion`: lo que la caja pidió, para decir por qué no se aplicó («entregado» o, D661 Task 5, «listo»). */
 function reply(res: Response, r: TransitionResult, accion: 'entregado' | 'listo' = 'entregado') {
   switch (r.outcome) {
@@ -40,17 +43,22 @@ function reply(res: Response, r: TransitionResult, accion: 'entregado' | 'listo'
       return res.json({ success: true, data })
     }
     case 'STALE': {
-      // D661 (Task 4): al entregar, el estado real («No lo recogió», «Devolviendo…», «Devuelto») va en campos nuevos opcionales; el
-      // código y `status` son los de siempre, así una app vieja sigue leyendo este 409 como hoy.
+      // D661 (Task 4): al entregar o marcar «Listo», el estado real («No lo recogió», «Devolviendo…», «Devuelto») va en campos nuevos
+      // opcionales. D661 (Ruling 71): un POS o una TPV viejos leen `ORDER_STATE_CHANGED` + COMPLETED en «Entregado» como el segundo
+      // toque (éxito); un COMPLETED con cualquiera de esas marcas se cerró sin entregarse y lleva su PROPIO código, con el estado y las
+      // marcas de siempre. Todo lo demás (un COMPLETED sin marcas incluido), el 409 de siempre.
       const { outcome: _o, status, ...marcas } = r
+      const cerradoSinEntregar =
+        status === OnlineOrderStatus.COMPLETED && Boolean(marcas.notPickedUpAt || marcas.refundRequestedAt || marcas.refundedAt)
       return res.status(409).json({
         success: false,
-        code: 'ORDER_STATE_CHANGED',
+        code: cerradoSinEntregar ? 'ORDER_CLOSED_NOT_DELIVERED' : 'ORDER_STATE_CHANGED',
         status,
         ...marcas,
-        error:
-          mensajeNoSeEntrega(marcas, accion) ??
-          'El pedido ya cambió de estado (otro aparato, el cliente, la caja o el tiempo). Actualiza la bandeja.',
+        error: cerradoSinEntregar
+          ? CERRADO_SIN_ENTREGAR
+          : (mensajeNoSeEntrega(marcas, accion) ??
+            'El pedido ya cambió de estado (otro aparato, el cliente, la caja o el tiempo). Actualiza la bandeja.'),
       })
     }
     case 'PAYMENT_REQUIRED':
