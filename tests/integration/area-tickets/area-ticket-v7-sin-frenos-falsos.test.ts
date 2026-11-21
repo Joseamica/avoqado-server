@@ -154,7 +154,7 @@ describe('Vales V7 — D5: el freno al armar nunca es falso (si armar rechaza, l
   }
   const fijarExistencia = (productId: string, stock: string) =>
     prisma.inventory.update({ where: { productId }, data: { currentStock: new Prisma.Decimal(stock) } })
-  async function insumo(name: string, stock: string, enLotes: number): Promise<string> {
+  async function insumo(name: string, stock: string, enLotes: number, unit: Unit = Unit.GRAM): Promise<string> {
     const id = (
       await prisma.rawMaterial.create({
         data: {
@@ -163,7 +163,7 @@ describe('Vales V7 — D5: el freno al armar nunca es falso (si armar rechaza, l
           sku: `${name.toUpperCase()}-${suffix}`,
           category: 'OTHER',
           currentStock: new Prisma.Decimal(stock),
-          unit: Unit.GRAM,
+          unit,
           unitType: 'WEIGHT',
           minimumStock: new Prisma.Decimal('0'),
           reorderPoint: new Prisma.Decimal('0'),
@@ -172,8 +172,7 @@ describe('Vales V7 — D5: el freno al armar nunca es falso (si armar rechaza, l
         },
       })
     ).id
-    if (enLotes > 0)
-      await createStockBatch(venueId, id, { quantity: enLotes, unit: Unit.GRAM, costPerUnit: 0.05, receivedDate: new Date() })
+    if (enLotes > 0) await createStockBatch(venueId, id, { quantity: enLotes, unit, costPerUnit: 0.05, receivedDate: new Date() })
     return id
   }
   /** Deja los lotes ACTIVE de un insumo en `total` gramos (el primero lo lleva todo; el resto, en cero). */
@@ -503,6 +502,20 @@ describe('Vales V7 — D5: el freno al armar nunca es falso (si armar rechaza, l
         }
       },
     },
+    {
+      nombre: 'falta de verdad por 0.001',
+      preparar: async tag => {
+        const queso = await insumo(`Queso casi ${tag}`, '100', 100)
+        const quesadilla = await platillo(`Quesadilla casi ${tag}`, queso, '100')
+        return {
+          vales: [{ productId: jamonId, quantity: '1' }],
+          sueltos: [{ productId: quesadilla, quantity: 1 }],
+          malo: async () =>
+            void (await prisma.rawMaterial.update({ where: { id: queso }, data: { currentStock: new Prisma.Decimal('99.999') } })),
+          armar: libre(`Queso casi ${tag}`, '99.999', '100.000'),
+        }
+      },
+    },
     // ── En el límite: la liquidación acepta, así que armar NO puede frenar ──
     {
       nombre: 'justo: existencia y lotes exactos tras el apartado propio',
@@ -562,6 +575,41 @@ describe('Vales V7 — D5: el freno al armar nunca es falso (si armar rechaza, l
       if (rechaza(armar.obtenido)) expect(rechaza(liquidar.obtenido)).toBe(true)
       // Las filas de esta tabla no tienen residual: lo que la liquidación acepta, armar también lo aceptó.
       else expect(liquidar.obtenido).toEqual({ ok: true })
+    })
+  }
+
+  // Codex r5: 5, 11.125 y 40.574 g de harina llevada en onzas suman 2 oz o 2.0000000000000000001 oz según el orden de los renglones
+  // (decimales de 20 dígitos al convertir). Con 2 oz justas, armar NO frena en ningún orden: la diferencia es redondeo de la suma.
+  for (const [numero, gramos] of [
+    ['5', '11.125', '40.574'],
+    ['40.574', '11.125', '5'],
+  ].entries()) {
+    it(`redondeo del orden de la suma: 2 oz justas no frenan al armar (orden ${gramos.join(', ')})`, async () => {
+      const tag = `r5${numero}`
+      const harina = await insumo(`Harina ${tag}`, '2', 2, Unit.OUNCE)
+      const panes = [] as string[]
+      for (const [i, g] of gramos.entries()) panes.push(await platillo(`Pan ${tag} ${i}`, harina, g))
+      const vale = await emitir(tag, 0, [{ productId: jamonId, quantity: '1' }])
+      const caja = await createAreaTicketCheckout(venueId, {
+        idempotencyKey: `${tag}-caja-${suffix}`,
+        deviceUid: checkoutDeviceUid,
+        staffId,
+      })
+      await addTicketToCheckout(venueId, caja.id, vale.code, {
+        idempotencyKey: `${tag}-claim-${suffix}`,
+        deviceUid: checkoutDeviceUid,
+        staffId,
+      })
+      const armada = await resultado(
+        materializeAreaTicketCheckout(venueId, caja.id, {
+          idempotencyKey: `${tag}-armar-${suffix}`,
+          deviceUid: checkoutDeviceUid,
+          staffId,
+          source: 'AVOQADO_ANDROID',
+          normalItems: panes.map(productId => ({ productId, quantity: 1 })),
+        }),
+      )
+      expect(armada).toEqual({ ok: true })
     })
   }
 })

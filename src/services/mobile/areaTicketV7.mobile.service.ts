@@ -3787,13 +3787,9 @@ async function buildUnreservedAreaOrderInventoryDemands(
   tx: Prisma.TransactionClient,
   venueId: string,
   orderId: string,
-  // D5 (Codex r4 #2): sólo la revisión al armar lo pide, para que su primer aviso de catálogo sea estable. La liquidación no lo pasa:
-  // su lectura queda idéntica.
-  opciones: { ordenEstable?: boolean } = {},
 ): Promise<AggregatedAreaOrderInventoryDemand[]> {
   const items = await tx.orderItem.findMany({
     where: { orderId, order: { venueId } },
-    ...(opciones.ordenEstable ? { orderBy: { id: 'asc' as const } } : {}),
     select: {
       id: true,
       areaTicketLineId: true,
@@ -3981,6 +3977,13 @@ async function buildUnreservedAreaOrderInventoryDemands(
 
 /** Tope de apartados que la revisión al armar simula; con más, no frena (decide la liquidación, como antes de D5). */
 const TOPE_DE_APARTADOS_AL_ARMAR = 500
+/**
+ * Media unidad del último decimal que se guarda (las existencias y los apartados llevan 3). La revisión nunca es más estricta que la
+ * liquidación: una diferencia menor es redondeo del orden de la suma (Codex r5).
+ */
+const TOLERANCIA_DE_EXISTENCIA = new Prisma.Decimal('0.0005')
+/** ¿Falta de verdad? Sólo si `hay` queda corto por más que la tolerancia. */
+const faltaDeVerdad = (hay: Prisma.Decimal, pide: Prisma.Decimal.Value) => hay.add(TOLERANCIA_DE_EXISTENCIA).lessThan(pide)
 
 /**
  * 🔴 D5 (pizarrón hz:0555ee15:D5, 20-nov): freno de sólo lectura AL ARMAR la venta de vales, antes de mandar la tarjeta a la terminal
@@ -3999,7 +4002,7 @@ const TOPE_DE_APARTADOS_AL_ARMAR = 500
  * `FOR UPDATE` ni escrituras. Los textos son copia de los de la liquidación (la tabla compartida de pruebas los compara).
  */
 async function revisarInventarioAlArmar(tx: Prisma.TransactionClient, venueId: string, sessionId: string, orderId: string): Promise<void> {
-  const demands = await buildUnreservedAreaOrderInventoryDemands(tx, venueId, orderId, { ordenEstable: true })
+  const demands = await buildUnreservedAreaOrderInventoryDemands(tx, venueId, orderId)
   const apartados = await tx.areaTicketInventoryReservation.findMany({
     where: { venueId, areaTicket: { checkoutSessionId: sessionId }, status: AreaTicketInventoryReservationStatus.ACTIVE },
     orderBy: [{ inventoryKind: 'asc' }, { inventoryId: 'asc' }, { id: 'asc' }],
@@ -4043,11 +4046,12 @@ async function revisarInventarioAlArmar(tx: Prisma.TransactionClient, venueId: s
     const key = clave(apartado)
     const cantidad = new Prisma.Decimal(apartado.quantityBaseUnits)
     if (apartado.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) {
-      if (existencia.get(key)!.lessThan(cantidad)) {
+      if (faltaDeVerdad(existencia.get(key)!, cantidad)) {
         throw rechazo('AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'La existencia reservada ya no está disponible.')
       }
     } else {
-      if (cantidad.lessThanOrEqualTo(0) || lotes.get(key)!.lessThan(cantidad)) {
+      // Un apartado en 0.000 o menos la liquidación SIEMPRE lo rechaza (no hay qué consumir): ahí no aplica la tolerancia.
+      if (cantidad.lessThanOrEqualTo(0) || faltaDeVerdad(lotes.get(key)!, cantidad)) {
         throw rechazo('AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'Los lotes FIFO no cubren la reserva del vale.')
       }
       lotes.set(key, lotes.get(key)!.sub(cantidad))
@@ -4069,7 +4073,7 @@ async function revisarInventarioAlArmar(tx: Prisma.TransactionClient, venueId: s
       _sum: { quantityBaseUnits: true },
     })
     const libre = existencia.get(key)!.sub(new Prisma.Decimal(activos._sum.quantityBaseUnits ?? 0).sub(propio.get(key) ?? 0))
-    if (libre.lessThan(demand.quantityBaseUnits)) {
+    if (faltaDeVerdad(libre, demand.quantityBaseUnits)) {
       throw rechazo(
         'AREA_TICKET_INSUFFICIENT_STOCK',
         `No hay existencia libre suficiente de "${demand.label}". Disponible: ${quantity(libre)}; requerida: ${quantity(
@@ -4079,7 +4083,7 @@ async function revisarInventarioAlArmar(tx: Prisma.TransactionClient, venueId: s
     }
     if (demand.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) continue
     const enLotes = lotes.get(key)!
-    if (enLotes.lessThan(demand.quantityBaseUnits)) {
+    if (faltaDeVerdad(enLotes, demand.quantityBaseUnits)) {
       throw rechazo(
         'AREA_TICKET_INSUFFICIENT_STOCK',
         `Los lotes FIFO de "${demand.label}" no cubren la venta. Disponible: ${quantity(enLotes)}; requerida: ${quantity(
