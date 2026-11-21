@@ -517,7 +517,8 @@ describe('panel: menú en línea y pausa (validación y controladores reales)', 
     expect(sinAjustes.status).toBe(400)
     expect(sinAjustes.body.code).toBe('ONLINE_ORDERING_NOT_CONFIGURED')
 
-    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
+    // «Reanudar» es UNA instrucción SQL sobre la fila (Codex p2v5-r4 #4): la encontró.
+    ;(prismaMock.$executeRaw as jest.Mock).mockResolvedValue(1)
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ manualPause: false } as any)
     const ok = await request(panel).post('/venues/v1/pause').send({ minutes: null })
     expect(ok.status).toBe(200)
