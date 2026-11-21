@@ -169,14 +169,16 @@ async function otraConexionSostiene(pasos: (tx: Prisma.TransactionClient) => Pro
 const sinEsperarMasDe = <T>(ms: number, p: Promise<T>) =>
   Promise.race([p, new Promise<never>((_, j) => setTimeout(() => j(new Error(`esperó más de ${ms} ms`)), ms))])
 
-async function configBlumon(serialNumber: string) {
+async function configCuentas(serialNumber: string) {
   const response = { status: jest.fn(), json: jest.fn() }
   response.status.mockReturnValue(response)
   const next = jest.fn()
   await getTerminalConfig({ params: { serialNumber } } as unknown as Request, response as unknown as Response, next)
   expect(next).not.toHaveBeenCalled()
-  const cuentas = response.json.mock.calls[0][0].data.merchantAccounts as { id: string; providerCode: string }[]
-  return cuentas
+  return response.json.mock.calls[0][0].data.merchantAccounts as { id: string; providerCode: string }[]
+}
+async function configBlumon(serialNumber: string) {
+  return (await configCuentas(serialNumber))
     .filter(m => m.providerCode === 'BLUMON')
     .map(m => m.id)
     .sort()
@@ -246,7 +248,11 @@ describe('cambiarSdkPropioDeTerminal — prender', () => {
   ])('ficha con serie nula (%s) ⇒ 409 TERMINAL_SERIAL_MISMATCH antes de la elegibilidad, sin cambios', async (_caso, vista) => {
     // Nexgo y sin afiliaciones: si la elegibilidad corriera primero, el código sería NOT_ELIGIBLE.
     const t = await terminal({ serialNumber: null, brand: 'NEXGO' })
-    await expect(prender(t, vista)).rejects.toMatchObject({ statusCode: 409, code: SERIAL_MISMATCH })
+    await expect(prender(t, vista)).rejects.toMatchObject({
+      statusCode: 409,
+      code: SERIAL_MISMATCH,
+      message: 'La terminal no tiene serie guardada; corrígela en la ficha.',
+    })
     expect(await estado(t.id)).toBe(false)
     expect(await bitacoras(t.id)).toHaveLength(0)
   })
@@ -329,6 +335,47 @@ describe('cambiarSdkPropioDeTerminal — apagar', () => {
     expect(await bitacoras(t.id)).toHaveLength(0)
   })
 
+  it.each([true, false])('actor (staffId) inexistente (enabled=%s) ⇒ NotFoundError y nada cambia', async enabled => {
+    const t = await paxElegible()
+    if (!enabled) await prendidaAMano(t.id)
+    await expect(
+      cambiarSdkPropioDeTerminal({
+        terminalId: t.id,
+        enabled,
+        serieEsperada: t.serialNumber!,
+        staffId: 'cnoexistestaff00000000000',
+        procedencia: 'mcp',
+      }),
+    ).rejects.toMatchObject({ statusCode: 404 })
+    expect(await estado(t.id)).toBe(!enabled)
+    expect(await bitacoras(t.id)).toHaveLength(0)
+  })
+
+  it('si falla el alta de la bitácora, el interruptor se revierte con ella', async () => {
+    const t = await paxElegible()
+    const original = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>
+    const espia = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: (tx: any) => unknown, opciones?: unknown) =>
+      original(
+        (tx: any) =>
+          fn(
+            new Proxy(tx, {
+              get(objetivo, prop) {
+                if (prop === 'activityLog') return { create: () => Promise.reject(new Error('falló la bitácora')) }
+                return Reflect.get(objetivo, prop)
+              },
+            }),
+          ),
+        opciones,
+      )) as never)
+    try {
+      await expect(prender(t)).rejects.toThrow('falló la bitácora')
+    } finally {
+      espia.mockRestore()
+    }
+    expect(await estado(t.id)).toBe(false)
+    expect(await bitacoras(t.id)).toHaveLength(0)
+  })
+
   it.each([true, false])('terminal inexistente (enabled=%s) ⇒ NotFoundError', async enabled => {
     await expect(
       cambiarSdkPropioDeTerminal({
@@ -385,6 +432,12 @@ describe('el candado: FOR NO KEY UPDATE (Codex r1 #2)', () => {
     expect(candado).toHaveLength(1)
     expect(candado[0]).toMatch(/\bFOR\s+NO\s+KEY\s+UPDATE\b/)
     expect(consultas.some(c => /\bFOR\s+UPDATE\b/.test(c))).toBe(false)
+    // Codex b2a r1 #4: primero el actor (`Staff … FOR KEY SHARE`) y después la terminal, el mismo orden que la limpieza de una
+    // demo (Staff y luego Terminal); al revés, las dos podrían abrazarse.
+    const actor = consultas.findIndex(c => /"Staff"/.test(c))
+    expect(actor).toBeGreaterThanOrEqual(0)
+    expect(consultas[actor]).toMatch(/\bFOR\s+KEY\s+SHARE\b/)
+    expect(actor).toBeLessThan(consultas.findIndex(c => /"Terminal"/.test(c)))
     expect(actualizaciones).toEqual([{ where: { id: t.id }, data: { inHouseSdkEnabled: true } }])
   })
 
@@ -420,6 +473,45 @@ describe('el candado: FOR NO KEY UPDATE (Codex r1 #2)', () => {
 })
 
 describe('paridad con /config', () => {
+  it('el filtro marca/proveedor: una PAX con AngelPay (sólo Nexgo) y otro proveedor sin restricción de marca, sin Blumon ⇒ no elegible, y el conjunto completo es el de /config', async () => {
+    // En la tabla de compatibilidad sólo están BLUMON (PAX) y ANGELPAY (NEXGO): no hay OTRO proveedor atado a PAX. Lo más cercano
+    // y honesto es uno fuera de la tabla, que es compatible con cualquier marca (`isProviderCompatibleWithBrand` ⇒ true).
+    const otroProveedor = (
+      await prisma.paymentProvider.create({
+        data: { code: `PRUEBA${sufijo.toUpperCase()}`, name: 'Proveedor de prueba', type: 'PAYMENT_PROCESSOR', countryCode: ['MX'] },
+      })
+    ).id
+    proveedoresPropios.push(otroProveedor)
+    const angelpay = await afiliacion('ANGELPAY')
+    const otra = (
+      await prisma.merchantAccount.create({
+        data: { providerId: otroProveedor, externalMerchantId: `sdk-propio-${sufijo}-otro`, credentialsEncrypted: {}, active: true },
+      })
+    ).id
+    merchantIds.push(otra)
+    const t = await terminal({ assignedMerchantIds: [angelpay, otra] })
+
+    await expect(elegibilidadDelSdkPropio(prisma, t.id)).resolves.toEqual({ elegible: false, razon: SIN_BLUMON })
+    const fila = await prisma.terminal.findUniqueOrThrow({ where: { id: t.id } })
+    const deElegibilidad = (await afiliacionesQueEntregaConfig(prisma, fila)).map(m => m.id).sort()
+    // Sin el filtro, AngelPay se colaría aquí y no en /config.
+    expect(deElegibilidad).toEqual([otra])
+    expect(deElegibilidad).toEqual((await configCuentas(t.serialNumber!)).map(m => m.id).sort())
+  })
+
+  it('Blumon SÓLO en el tercer espacio de la configuración heredada ⇒ elegible', async () => {
+    await prisma.venuePaymentConfig.create({
+      data: {
+        venueId: venueHerenciaId,
+        primaryAccountId: await afiliacion('ANGELPAY'),
+        secondaryAccountId: await afiliacion('ANGELPAY'),
+        tertiaryAccountId: await afiliacion('BLUMON'),
+      },
+    })
+    const t = await terminal({ venueId: venueHerenciaId })
+    await expect(elegibilidadDelSdkPropio(prisma, t.id)).resolves.toEqual({ elegible: true })
+  })
+
   it('las afiliaciones de Blumon que acepta la elegibilidad son las que GET /tpv/terminals/:serial/config le entrega', async () => {
     const blumon = await afiliacion('BLUMON')
     const blumonInactiva = await afiliacion('BLUMON', false)

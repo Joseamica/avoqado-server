@@ -4,6 +4,10 @@
  * llaman). Ningún camino de dinero lee la columna todavía. El disparador de Postgres la apaga solo si cambia la identidad
  * física (serie, tipo o marca) o la terminal se muda de negocio (`venueId`); por eso este escritor nunca toca la identidad ni
  * el negocio en el mismo UPDATE.
+ *
+ * Orden de candados del escritor: primero la fila del ACTOR (`Staff … FOR KEY SHARE`), después la terminal
+ * (`Terminal … FOR NO KEY UPDATE`). La bitácora necesita la fila del actor (llave foránea), y la limpieza de una demo y el
+ * borrado de personal toman `Staff` y luego `Terminal`: con el orden contrario, las dos transacciones podrían abrazarse.
  */
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
@@ -38,6 +42,7 @@ export async function afiliacionesQueEntregaConfig(
   if (ids.length === 0) return []
   const cuentas = await tx.merchantAccount.findMany({
     where: { id: { in: ids }, active: true },
+    take: ids.length, // cada id es único: caben todas las coincidencias
     select: { id: true, provider: { select: { code: true } } },
   })
   return cuentas.filter(ma => isProviderCompatibleWithBrand(ma.provider?.code || 'BLUMON', terminal.brand))
@@ -84,6 +89,13 @@ export async function cambiarSdkPropioDeTerminal(entrada: {
   }
 
   return prisma.$transaction(async tx => {
+    // Primero el ACTOR (Codex b2a r1 #4): la bitácora necesita su fila (llave foránea `staffId`), y la limpieza de una demo y
+    // el borrado de personal toman `Staff` y después `Terminal`. Tomarlo aquí, antes de la terminal, deja un solo orden
+    // (Staff, luego Terminal) y nunca un abrazo. `FOR KEY SHARE` es lo mismo que tomaría la llave foránea: no frena a nadie
+    // que sólo edite la ficha de la persona.
+    const [actor] = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM "Staff" WHERE id = ${entrada.staffId} FOR KEY SHARE`
+    if (!actor) throw new NotFoundError('Usuario no encontrado')
+
     // FOR NO KEY UPDATE (Codex r1 #2): ordena a dos escritores y choca con los UPDATE de la ficha, pero NO con el
     // FOR KEY SHARE que toma Postgres al revisar la llave foránea `terminalId` del alta de una orden o un pago.
     const [fila] = await tx.$queryRaw<
