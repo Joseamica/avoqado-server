@@ -110,12 +110,13 @@ describe('acceptCardOnlineOrder', () => {
       where: { id: 'ch1', status: 'AUTHORIZED' },
       data: { status: 'CAPTURING', attempts: { increment: 1 } },
     })
-    expect(capture).toHaveBeenCalledWith(expect.objectContaining({ providerCredentials: { connectAccountId: 'acct_A' } }), {
-      paymentIntentId: 'pi_1',
-      amountCents: 25_000,
-      applicationFeeCents: 290,
-      idempotencyKey: 'online-order:ord1:capture',
-    })
+    // D661 · C (Ruling 52): la captura de quien abre o acepta va con 60 s y UN reintento del SDK: su peor caso (≈ 60 + 60 + 60 s)
+    // queda dentro de la gracia de 5 min de «Nadie».
+    expect(capture).toHaveBeenCalledWith(
+      expect.objectContaining({ providerCredentials: { connectAccountId: 'acct_A' } }),
+      { paymentIntentId: 'pi_1', amountCents: 25_000, applicationFeeCents: 290, idempotencyKey: 'online-order:ord1:capture' },
+      { timeoutMs: 60_000, maxNetworkRetries: 1 },
+    )
     const data = (prismaMock.payment.create.mock.calls[0][0] as any).data
     expect(data).toMatchObject({
       venueId: 'v1',
@@ -454,7 +455,7 @@ describe('D661 · A1: captureCharge revalida el límite de un reintento justo an
     expect(capture.mock.calls[0][1]).toMatchObject({ idempotencyKey: 'online-order:ord1:capture' })
   })
 
-  it('D661 · C (Ruling 43): el reintento con límite sale UNA vez (sin reintentos del SDK: uno suyo podría salir ya fuera de la gracia); la captura de la caja, como hoy', async () => {
+  it('D661 · C (Ruling 43): el reintento con límite sale UNA vez (sin reintentos del SDK: uno suyo podría salir ya fuera de la gracia); el de «Mi equipo», como hoy', async () => {
     capture.mockResolvedValue(succeeded())
     await captureCharge(capturing, 'ord1', { ...meta, captureBefore: Date.now() + 60_000 })
     expect(capture.mock.calls[0]).toEqual([
@@ -462,7 +463,8 @@ describe('D661 · A1: captureCharge revalida el límite de un reintento justo an
       { paymentIntentId: 'pi_1', amountCents: 25_000, applicationFeeCents: 290, idempotencyKey: 'online-order:ord1:capture' },
       { maxNetworkRetries: 0 },
     ])
-    // Sin límite (la caja que abre, «Mi equipo»): la misma llamada de siempre, sin opciones de más.
+    // Sin límite ni opciones (el reintento del conciliador de «Mi equipo»): la misma llamada de siempre. La caja que abre va con las
+    // suyas (Ruling 52, `acceptCardOnlineOrder`).
     await captureCharge(capturing, 'ord1', meta)
     expect(capture.mock.calls[1]).toHaveLength(2)
   })

@@ -146,7 +146,12 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
     case 'CAPTURE':
       // D661 (3A): la hora de lo que escribe la captura (`acceptedAt`, la marca de cocina) se lee al escribir, después de Stripe; sólo
       // las pruebas la fijan (`i.now`).
-      return captureCharge(plan.charge, i.orderId, { staffId: i.staffId, estimatedMinutes: minutes, now: i.now })
+      return captureCharge(plan.charge, i.orderId, {
+        staffId: i.staffId,
+        estimatedMinutes: minutes,
+        now: i.now,
+        limites: CAPTURA_DE_QUIEN_ABRE,
+      })
   }
 }
 
@@ -159,18 +164,24 @@ export class GraceEndedBeforeDispatch extends Error {}
  * Stripe. Límite del SDK: tras una conexión CERRADA en el primer envío todavía reenvía una vez, 0.5 s después (`opcionesDeLimite`).
  */
 const UN_SOLO_ENVIO: ProviderRequestLimits = { maxNetworkRetries: 0 }
+/**
+ * D661 (C, Ruling 52): la captura de quien abre o acepta el pedido (caja, panel o MCP): 60 s por intento y UN reintento del SDK. Su peor
+ * caso (≈ 60 s + hasta 60 s de `Retry-After` + 60 s) queda dentro de la gracia de 5 min de «Nadie»; con los valores del cliente (80 s
+ * por intento, dos reintentos y `Retry-After`) llegaba hasta ~360 s. Si no alcanza, la caja ve «Confirmando…» y el conciliador lo termina.
+ */
+const CAPTURA_DE_QUIEN_ABRE: ProviderRequestLimits = { timeoutMs: 60_000, maxNetworkRetries: 1 }
 
 /**
  * Cobra con Stripe (fuera de toda transacción) un cargo que ya está en `CAPTURING`, y termina según el desenlace. La usa también el
  * conciliador (tarea 7) para reintentar con la MISMA clave.
  * D661 (A1): `captureBefore` (ms) es el límite de un REINTENTO de «Nadie»: el conciliador lo decide bajo el candado, pero el commit o
- * una pausa pueden cruzarlo antes de llegar aquí, así que se revisa con el reloj real justo antes de la llamada. Sin él (la caja que
- * abre, «Mi equipo»), como siempre.
+ * una pausa pueden cruzarlo antes de llegar aquí, así que se revisa con el reloj real justo antes de la llamada. `limites`: los de quien
+ * abre (Ruling 52). Sin ninguno de los dos (el reintento de «Mi equipo»), como siempre.
  */
 export async function captureCharge(
   charge: OnlineOrderCharge,
   orderId: string,
-  meta: { staffId: string | null; estimatedMinutes: number; now?: Date; captureBefore?: number },
+  meta: { staffId: string | null; estimatedMinutes: number; now?: Date; captureBefore?: number; limites?: ProviderRequestLimits },
 ): Promise<TransitionResult> {
   const merchant = chargeMerchant(charge) // Codex r2 #3: la cuenta Stripe de la foto, nunca el comercio vivo
   const provider = getProvider(merchant)
@@ -184,8 +195,9 @@ export async function captureCharge(
     idempotencyKey: captureKey(orderId),
   }
   try {
-    // La caja que abre y «Mi equipo» (sin límite): la llamada de siempre, con los reintentos del SDK.
-    state = await (meta.captureBefore != null ? provider.capture(merchant, params, UN_SOLO_ENVIO) : provider.capture(merchant, params))
+    // El reintento de «Nadie», UN envío (Ruling 43); quien abre, sus límites (Ruling 52); el de «Mi equipo», la llamada de siempre.
+    const limites = meta.captureBefore != null ? UN_SOLO_ENVIO : meta.limites
+    state = await (limites ? provider.capture(merchant, params, limites) : provider.capture(merchant, params))
   } catch (error) {
     failure = error
     try {

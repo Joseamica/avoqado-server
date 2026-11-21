@@ -603,17 +603,20 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
       }),
     )
 
-    // Bajo el candado y con el reloj real: la gracia vence mientras otra transacción sostiene la orden. La pasada empezó dentro de la
-    // gracia, pero decide después del candado: ya no cobra.
+    // Bajo el candado y con el reloj real: la ventana del reintento (la gracia menos 90 s, Ruling 52) se cierra mientras otra
+    // transacción sostiene la orden. La pasada empezó dentro de ella, pero decide después del candado: ya no cobra.
     const cruza = await apartado()
     await muereAntesDeStripe(cruza)
     await prisma.onlineOrderCharge.update({ where: { id: cruza.chargeId }, data: { updatedAt: hace(2 * MIN) } })
     const orden = sostener(tx => lockExistingOrderForPayment(tx, { venueId: venueId!, orderId: cruza.orderId }), 4000)
     await orden.listo
-    // A7: la gracia termina 1.5 s después de tomar el candado (que dura 4 s), y la pasada tiene que llegar al candado antes (su última
-    // lectura de Stripe es justo antes de pedirlo): si la preparación tardara más, la prueba truena en vez de pasar sin probar nada.
+    // A7: la ventana se cierra 1.5 s después de tomar el candado (que dura 4 s), y la pasada tiene que llegar al candado antes (su
+    // última lectura de Stripe es justo antes de pedirlo): si la preparación tardara más, la prueba truena en vez de pasar sin probar nada.
     const finGracia = Date.now() + 1500
-    await prisma.onlineOrder.update({ where: { id: cruza.onlineOrderId }, data: { acceptDeadlineAt: new Date(finGracia - 5 * MIN) } })
+    await prisma.onlineOrder.update({
+      where: { id: cruza.onlineOrderId },
+      data: { acceptDeadlineAt: new Date(finGracia + 90_000 - 5 * MIN) },
+    })
     let llegoAlCandado = Infinity
     const leer = authSpy.getMockImplementation()!
     authSpy.mockImplementation(async (m: any, ref: any) => {
@@ -900,13 +903,16 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
 
   // ── Ola final (20-nov) ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
-  it('D661 · A1: la gracia vence entre la decisión de reintentar y la llamada a Stripe → no sale ninguna captura nueva y el pedido se cierra con lo que diga Stripe', async () => {
+  it('D661 · A1: la ventana del reintento vence entre la decisión de reintentar y la llamada a Stripe → no sale ninguna captura nueva y el pedido se cierra con lo que diga Stripe', async () => {
     const a = await apartado()
     await muereAntesDeStripe(a)
     await prisma.onlineOrderCharge.update({ where: { id: a.chargeId }, data: { updatedAt: hace(2 * MIN) } })
-    // La gracia termina en 1.5 s: la pasada decide «volver a cobrar» dentro de ella…
+    // La ventana del reintento (la gracia menos 90 s, Ruling 52) se cierra en 1.5 s: la pasada decide «volver a cobrar» dentro de ella…
     const finGracia = Date.now() + 1500
-    await prisma.onlineOrder.update({ where: { id: a.onlineOrderId }, data: { acceptDeadlineAt: new Date(finGracia - 5 * MIN) } })
+    await prisma.onlineOrder.update({
+      where: { id: a.onlineOrderId },
+      data: { acceptDeadlineAt: new Date(finGracia + 90_000 - 5 * MIN) },
+    })
     // …y el proceso se detiene DESPUÉS de decidir y ANTES de la llamada a Stripe (el commit o una pausa) hasta que la gracia pasó. La
     // segunda vez que se arma la cuenta de Stripe del cargo es la de la captura (la primera es la relectura del conciliador).
     const real = comercio.chargeMerchant
@@ -1137,13 +1143,13 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     })
   })
 
-  it('D661 · C (Ruling 43): el reintento del conciliador de una captura de «Nadie» sale UNA vez (sin reintentos del SDK); la captura de la caja y el reintento de «Mi equipo», como hoy', async () => {
+  it('D661 · C (Ruling 43): el reintento del conciliador de una captura de «Nadie» sale UNA vez (sin reintentos del SDK); el de «Mi equipo», como hoy; la caja que abre, 60 s y un reintento (Ruling 52)', async () => {
     for (const miEquipo of [false, true]) {
       const a = await apartado({ miEquipo })
       await muereAntesDeStripe(a, miEquipo)
       await pasada(a.chargeId)
       const [caja, reintento] = capturasA(a.pi)
-      expect({ miEquipo, caja: caja.length }).toEqual({ miEquipo, caja: 2 }) // la caja que abre: sin opciones de más
+      expect({ miEquipo, caja: caja[2] }).toEqual({ miEquipo, caja: { timeoutMs: 60_000, maxNetworkRetries: 1 } })
       expect({ miEquipo, reintento: reintento[2] }).toEqual({ miEquipo, reintento: miEquipo ? undefined : { maxNetworkRetries: 0 } })
       expect(reintento[1]).toEqual(caja[1]) // la MISMA clave y los mismos parámetros
       await cobradoUnaVez(a)
@@ -1163,5 +1169,62 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
         data: { chargeId: a.chargeId, outcome: 'STALE' },
       }),
     )
+  })
+
+  it('D661 · B (Ruling 51): la liberación dentro de la visita temprana también va acotada (la cancelación y su relectura); si se rinde, el cargo queda RELEASING y la siguiente pasada lo suelta con la MISMA llave', async () => {
+    // La clienta pagó tarde (Stripe autorizó hace 11 min y nadie avisó): la visita temprana lo descubre y libera la tarjeta.
+    const d = await borrador()
+    await prisma.onlineOrderCharge.update({ where: { id: d.chargeId }, data: { createdAt: hace(15 * MIN) } })
+    const pi = await pagar(d.chargeId, hace(11 * MIN))
+    // Stripe no contesta la cancelación: con su límite, el SDK se rinde al cumplirlo (y no la reenvía).
+    const soltar = voidSpy.getMockImplementation()!
+    voidSpy.mockImplementation(async (m: any, p: any, limite?: any) => {
+      if (p.paymentIntentId === pi && limite) {
+        throw Object.assign(new Error('Request aborted due to timeout being reached (10000ms)'), { type: 'StripeConnectionError' })
+      }
+      return soltar(m, p, limite)
+    })
+    authSpy.mockClear()
+    await reconcileCardCharges(new Date(), read => read())
+    const llave = `online-order-charge:${d.chargeId}:release`
+    expect(liberacionesA(pi).map(([, p, limite]) => [p.idempotencyKey, limite])).toEqual([[llave, LECTURA_TEMPRANA]])
+    const relecturas = authSpy.mock.calls.filter(([, ref]) => ref.paymentIntentId === pi)
+    expect(relecturas.map(([, , limite]) => limite)).toEqual([LECTURA_TEMPRANA])
+    expect(await cargo(d.chargeId)).toMatchObject({ status: 'RELEASING', onlineOrderId: null })
+    expect(pis.get(pi)).toBe('requires_capture')
+
+    // La siguiente pasada: la liberación de siempre (sin límite), con la MISMA llave; la tarjeta queda soltada una sola vez.
+    voidSpy.mockClear()
+    await pasada(d.chargeId)
+    expect(liberacionesA(pi)).toEqual([[expect.anything(), { paymentIntentId: pi, idempotencyKey: llave }]])
+    expect(await cargo(d.chargeId)).toMatchObject({ status: 'RELEASED', onlineOrderId: null })
+    expect(pis.get(pi)).toBe('canceled')
+    expect(await getTrackingByToken(d.trackingToken)).toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', paid: false })
+  })
+
+  it('D661 · C (Ruling 52): con menos de 90 s de gracia el conciliador ya no manda el reintento (un reenvío del SDK caería fuera): suelta la tarjeta como al pasar la gracia; con más, reintenta y cobra una vez', async () => {
+    // Quedan ~60 s de gracia (el plazo pasó hace 4 min): se suelta y se cierra con el desenlace de Stripe; ninguna captura nueva.
+    const tarde = await apartado()
+    await muereAntesDeStripe(tarde)
+    await plazoHace(tarde, 4 * MIN)
+    await pasada(tarde.chargeId)
+    expect(capturasA(tarde.pi)).toHaveLength(1) // sólo la de la caja
+    await cerradoSinCobrar(tarde)
+    expect(liberacionesA(tarde.pi)[0][1]).toEqual({ paymentIntentId: tarde.pi, idempotencyKey: `online-order:${tarde.orderId}:release` })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'ONLINE_ORDER_CARD_CAPTURE_FAILED',
+        entityId: tarde.onlineOrderId,
+        data: expect.objectContaining({ reason: 'RELEASED_AFTER_GRACE' }),
+      }),
+    )
+
+    // Quedan ~120 s (el plazo pasó hace 3 min): todavía se reintenta, con la misma llave, y cobra una vez.
+    const aTiempo = await apartado()
+    await muereAntesDeStripe(aTiempo)
+    await plazoHace(aTiempo, 3 * MIN)
+    await pasada(aTiempo.chargeId)
+    expect(capturasA(aTiempo.pi)).toHaveLength(2)
+    await cobradoUnaVez(aTiempo)
   })
 })
