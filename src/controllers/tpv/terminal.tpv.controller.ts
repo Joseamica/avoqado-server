@@ -13,6 +13,7 @@ import { orderAngelPayAccountsForTerminal, orderMerchantsBySlot } from '@/servic
 import { veredictoPuerta } from '@/services/tpv/command-credential.service'
 import prisma from '@/utils/prismaClient'
 import { sdkPropioEncendido } from '@/config/sdkPropio'
+import { sinLlaveReservada } from '@/lib/llaveReservadaSdkPropio'
 import logger from '../../config/logger'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
 
@@ -742,17 +743,14 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
     const {
       trackPromoterLocation: _ignoredFromDevice,
       cashReconciliationEnabled: _ignoredCashFlagFromDevice,
-      // SDK propio: llave RESERVADA (sólo viaja en la raíz de /config, desde la columna y el freno). El eco no se guarda.
-      inHouseSdkEnabled: _ignoredInHouseSdkFromDevice,
       ...deviceSettingsUpdate
-    } = settingsUpdate
+    } = sinLlaveReservada(settingsUpdate) // SDK propio: llave RESERVADA (sólo viaja en la raíz de /config). El eco no se guarda.
     const existingConfig = (terminal.config as any) || {}
     const {
       trackPromoterLocation: _ignoredFromStored,
       cashReconciliationEnabled: _ignoredCashFlagFromStored,
-      inHouseSdkEnabled: _ignoredInHouseSdkFromStored,
       ...storedSettings
-    } = existingConfig.settings || {}
+    } = sinLlaveReservada(existingConfig.settings || {})
     const currentSettings = { ...DEFAULT_TPV_SETTINGS, ...storedSettings }
     const newSettings: TpvSettings = { ...currentSettings, ...deviceSettingsUpdate }
 

@@ -12,6 +12,7 @@ import emailService from '../email.service'
 import { logAction } from './activity-log.service'
 import { extrasDeLaFicha, type ExtrasDeLaFicha } from './tpvDetailExtras'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
+import { configSinLlaveReservada, sinLlaveReservada } from '@/lib/llaveReservadaSdkPropio'
 
 /**
  * Aparatos claros, Paso 2: letrero opcional de la lista. Misma regla que `extrasDeLaFicha` (interruptor + plan).
@@ -347,7 +348,7 @@ export async function updateTpv(venueId: string, tpvId: string, updateData: Upda
   if (updateData.customerDisplayInverted !== undefined) data.customerDisplayInverted = updateData.customerDisplayInverted
   // Una marca como «Nexgo» deja a la terminal sin AngelPay en silencio: se guarda la forma canónica.
   if (updateData.brand !== undefined) data.brand = normalizeTerminalBrand(updateData.brand)
-  if (updateData.config !== undefined) data.config = parseTerminalConfig(updateData.config)
+  if (updateData.config !== undefined) data.config = configSinLlaveReservada(parseTerminalConfig(updateData.config))
   if (updateData.serialNumber !== undefined) {
     // El formulario reenvía la serie que ya tenía: ésa no se toca, ni siquiera para normalizarla, porque
     // la terminal se autentica con ella. Una serie NUEVA se normaliza igual que al crear la terminal.
@@ -421,7 +422,7 @@ export async function createTpv(venueId: string, payload: CreateTpvBody): Promis
       serialNumber: normalizedSerialNumber,
       type: terminalType,
       status: (status as any) || TerminalStatus.INACTIVE,
-      config: payload.config as any,
+      config: configSinLlaveReservada(payload.config) as any,
     },
   })
 
@@ -814,7 +815,7 @@ export async function getTpvSettings(
   // If config exists and has settings property, return it merged with defaults.
   // `inHouseSdkEnabled` es RESERVADA (SDK propio): la verdad es la columna; el eco de un aparato viejo en su JSON no se
   // devuelve. Este lector lo comparten el DASHBOARD, el SUPERADMIN y el POS móvil.
-  const { inHouseSdkEnabled: _llaveReservada, ...savedSettings } = (terminal.config as any)?.settings || {}
+  const savedSettings = sinLlaveReservada((terminal.config as any)?.settings || {})
   const existingOverrides = (terminal.configOverrides as Record<string, any>) || {}
   // Tri-state per-terminal override for promoter location tracking (absent = inherit venue flag).
   // Surfaced separately from TpvSettings so the dashboard editor can render the explicit
@@ -875,11 +876,13 @@ export async function updateTpvSettings(
     // 3. Build full merged settings
     const existingConfig = (terminal.config as any) || {}
     const existingSettings = existingConfig.settings || {}
-    const newSettings: TpvSettings = {
+    // La llave reservada del SDK propio no entra ni de lo guardado ni de lo que llega: sin ella aquí, tampoco va a las
+    // excepciones (se calculan de esto) ni a la respuesta.
+    const newSettings = sinLlaveReservada({
       ...DEFAULT_TPV_SETTINGS,
       ...existingSettings,
       ...restSettingsUpdate,
-    }
+    }) as TpvSettings
 
     // 4. Compute overrides: only fields that differ from org defaults
     const baseSettings = { ...DEFAULT_TPV_SETTINGS, ...orgDefaults }
@@ -985,11 +988,11 @@ export async function resetTerminalToDefaults(tpvId: string, scope: TerminalSett
   const existingSettings = existingConfig.settings || {}
 
   // Recompute from org defaults, preserving only kioskDefaultMerchantId
-  const resetSettings: TpvSettings = {
+  const resetSettings = sinLlaveReservada({
     ...DEFAULT_TPV_SETTINGS,
     ...orgDefaults,
     kioskDefaultMerchantId: existingSettings.kioskDefaultMerchantId ?? null,
-  }
+  }) as TpvSettings
 
   await updateScopedTerminal(prisma, tpvId, scope, {
     config: { ...existingConfig, settings: resetSettings },
@@ -1351,13 +1354,13 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
         // Cascade: existing base + venue update + per-terminal overrides
         const updatedConfig = {
           ...existingConfig,
-          settings: {
+          settings: sinLlaveReservada({
             ...existingSettings,
             ...settingsToMerge,
             ...overrides,
             // kioskDefaultMerchantId is always per-terminal
             kioskDefaultMerchantId: overrides.kioskDefaultMerchantId ?? existingSettings.kioskDefaultMerchantId ?? null,
-          },
+          }),
         }
 
         // Acotada al venue que escogió las terminales (como siempre). Con el candado ya no puede mudarse en medio; el

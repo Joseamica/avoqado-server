@@ -45,6 +45,7 @@ import { countUpdatedTerminals, scopedTerminalWhere } from '../shared/terminalSc
 import { SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION, SQL_VENDEDOR_DEL_MOVIMIENTO } from '../shared/vendedorDelMovimiento'
 import { computeTerminalMigration, migrationCommandWhere } from '../dashboard/terminals.superadmin.service'
 import { enmascararCorreo, enviarEnlaceDeRestablecimiento } from '../dashboard/enlaceDeRestablecimiento'
+import { sinLlaveReservada } from '@/lib/llaveReservadaSdkPropio'
 
 // Types for organization dashboard
 export interface OrgCategoryBreakdown {
@@ -3813,7 +3814,8 @@ class OrganizationDashboardService {
       where: { organizationId: orgId },
       select: { settings: true },
     })
-    return (config?.settings as Record<string, any>) || null
+    // SDK propio: una organización que ya guardó la llave reservada no la devuelve.
+    return config?.settings ? sinLlaveReservada(config.settings as Record<string, any>) : null
   }
 
   /**
@@ -3835,7 +3837,8 @@ class OrganizationDashboardService {
       select: { settings: true },
     })
     const existingSettings = (existing?.settings as Record<string, any>) || {}
-    const mergedSettings = { ...existingSettings, ...settings }
+    // SDK propio: la llave reservada no se guarda en la organización ni se reparte (ni de lo que llega ni de lo guardado).
+    const mergedSettings: Record<string, any> = sinLlaveReservada({ ...existingSettings, ...settings })
 
     // 2. Sync attendance-related fields: attendanceTracking → requireClockInPhoto + requireClockInToLogin
     if (settings.attendanceTracking !== undefined) {
@@ -3905,13 +3908,13 @@ class OrganizationDashboardService {
             // Cascade merge: org defaults → per-terminal overrides
             // Terminals with no overrides (null) get full org defaults
             // Terminals with overrides keep their customized fields
-            const pushSettings = {
+            const pushSettings = sinLlaveReservada({
               ...mergedSettings,
-              ...overrides,
+              ...overrides, // tampoco desde excepciones viejas
               // kioskDefaultMerchantId is always per-terminal (from overrides or existing)
               kioskDefaultMerchantId:
                 overrides.kioskDefaultMerchantId ?? (existingConfig.settings as Record<string, any>)?.kioskDefaultMerchantId ?? null,
-            }
+            })
 
             // Acotada a la organización que escogió las terminales. Una que pasó a otra organización a media
             // operación ya no es de ésta: cuenta cero y se omite (auditorías de Codex, 2026-09-16/17).
