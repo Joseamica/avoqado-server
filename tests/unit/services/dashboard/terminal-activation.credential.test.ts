@@ -1,5 +1,5 @@
 import prisma from '@/utils/prismaClient'
-import { activateTerminal } from '@/services/dashboard/terminal-activation.service'
+import { activateTerminal, generateActivationCode } from '@/services/dashboard/terminal-activation.service'
 import { createHash } from 'crypto'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -67,4 +67,16 @@ it('🔴 the INACTIVE → ACTIVE re-sync only writes if the row is still INACTIV
   expect(await activateTerminal('AVQD-123', 'ZZZ999')).toMatchObject({ terminalId: 't1' })
   expect(db.terminal.update).not.toHaveBeenCalled()
   expect(db.terminal.updateMany).toHaveBeenCalledWith({ where: { id: 't1', status: 'INACTIVE' }, data: { status: 'ACTIVE' } })
+})
+it('D32: el código de activación vence a los 7 días exactos, también cruzando el cambio de horario', async () => {
+  // Con setDate en America/Los_Angeles, cruzar el fin del horario de verano agregaba una hora.
+  jest.useFakeTimers({ now: new Date('2026-10-30T18:00:00.000Z'), doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
+  try {
+    db.terminal.update.mockResolvedValue({})
+    const r = await generateActivationCode('t1', 'staff-1')
+    expect(db.terminal.update.mock.calls[0][0].data.activationCodeExpiry.toISOString()).toBe('2026-11-06T18:00:00.000Z')
+    expect(r.expiresAt).toBe('2026-11-06T18:00:00.000Z')
+  } finally {
+    jest.useRealTimers()
+  }
 })
