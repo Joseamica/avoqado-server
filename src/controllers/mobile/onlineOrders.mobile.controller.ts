@@ -129,10 +129,22 @@ const makeToPay = (puedeLatir: boolean) => async (req: Request, res: Response, n
     const latido =
       puedeLatir && req.header(ONLINE_ORDERS_TO_PAY_HEADER) === '1' && (await canDo(req, venueId, 'payments:create').catch(() => false))
     if (latido) await touchToPayPoll(venueId).catch(() => false)
-    const avisa = puedeLatir && req.header(CARD_ALERT_HEADER) === '1' && (await canAnswerOrders(req, venueId).catch(() => false))
-    if (avisa) await touchCardAlertPoll(venueId, data.pollSeconds <= TO_PAY_FAST_POLL_SECONDS).catch(() => false)
+    // D661 (A, Ruling 41): la caja que avisa sólo se duerme (600 s) si su respuesta lenta quedó anotada: esa escritura apaga la marca
+    // rápida con la que la tienda ofrece la tarjeta. Si la base no dejó anotarla (ni leer si esta sesión puede abrir pedidos), se le
+    // contesta la cadencia rápida y sigue en 30 s hasta que se anote. Con una respuesta rápida un fallo no cambia nada (ya es 30).
+    const anotada =
+      !(puedeLatir && req.header(CARD_ALERT_HEADER) === '1') ||
+      (await canAnswerOrders(req, venueId)
+        .then(puede => (puede ? touchCardAlertPoll(venueId, data.pollSeconds <= TO_PAY_FAST_POLL_SECONDS) : false))
+        .then(
+          () => true,
+          () => false,
+        ))
     const state = await getAcceptingStatus(venueId).catch(() => null)
-    return res.json({ success: true, data: { ...data, store: state ? storeView(state) : null } })
+    return res.json({
+      success: true,
+      data: { ...data, ...(anotada ? {} : { pollSeconds: TO_PAY_FAST_POLL_SECONDS }), store: state ? storeView(state) : null },
+    })
   } catch (e) {
     return next(e)
   }

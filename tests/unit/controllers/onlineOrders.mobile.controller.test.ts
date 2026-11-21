@@ -615,4 +615,56 @@ describe('toPay · el latido de la caja que avisa (D661)', () => {
     expect(caja.next).not.toHaveBeenCalled()
     expect(caja.res.json).toHaveBeenCalledWith({ success: true, data: { ...RAPIDA, store: TIENDA_ABIERTA } })
   })
+
+  // D661 · A (Ruling 41): la caja que avisa sólo se duerme (600 s) si el servidor anotó su respuesta lenta, que es lo que apaga la
+  // marca rápida con la que la tienda ofrece la tarjeta. Si no se pudo anotar, sigue en 30 s hasta que se anote.
+  const LENTA = { ...FOLIOS, pollSeconds: 600 }
+
+  it('D661 · A (Ruling 41): respuesta LENTA y la escritura que apaga la marca rápida falla → la caja recibe la cadencia rápida (30 s); anotada bien, 600 como hoy', async () => {
+    ;(listFolios as jest.Mock).mockResolvedValue(LENTA)
+    ;(touchCardAlertPoll as jest.Mock).mockRejectedValueOnce(new Error('se cayó la base'))
+    const falla = mock({ headers: AMBAS })
+    await ctrl.toPay(falla.req, falla.res, falla.next)
+    expect(touchCardAlertPoll).toHaveBeenCalledWith('v1', false)
+    expect(falla.next).not.toHaveBeenCalled()
+    expect(falla.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, pollSeconds: 30, store: TIENDA_ABIERTA } })
+
+    const sana = mock({ headers: AMBAS })
+    await ctrl.toPay(sana.req, sana.res, sana.next)
+    expect(sana.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, store: TIENDA_ABIERTA } })
+  })
+
+  it('D661 · A (Ruling 41): respuesta RÁPIDA y la escritura falla → nada cambia (la marca queda vieja: la tarjeta se ofrece menos, nunca más)', async () => {
+    ;(touchCardAlertPoll as jest.Mock).mockRejectedValueOnce(new Error('se cayó la base'))
+    const caja = mock({ headers: AMBAS })
+    await ctrl.toPay(caja.req, caja.res, caja.next)
+    expect(touchCardAlertPoll).toHaveBeenCalledWith('v1', true)
+    expect(caja.res.json).toHaveBeenCalledWith({ success: true, data: { ...RAPIDA, store: TIENDA_ABIERTA } })
+  })
+
+  it('D661 · A (Ruling 41): respuesta LENTA y no se pudo leer si la caja puede abrir pedidos (falla la base al revisar su permiso) → tampoco se duerme: 30 s', async () => {
+    ;(listFolios as jest.Mock).mockResolvedValue(LENTA)
+    prismaMock.venueRolePermission.findUnique.mockRejectedValue(new Error('se cayó la base'))
+    const caja = mock({ headers: AMBAS })
+    await ctrl.toPay(caja.req, caja.res, caja.next)
+    expect(caja.next).not.toHaveBeenCalled()
+    expect(caja.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, pollSeconds: 30, store: TIENDA_ABIERTA } })
+
+    // Sin la cabecera (una caja vieja, que no avisa) o desde el panel, la misma falla no cambia su cadencia: no hay marca que cuidar.
+    const vieja = mock({ headers: { 'x-online-orders-to-pay': '1' } })
+    await ctrl.toPay(vieja.req, vieja.res, vieja.next)
+    expect(vieja.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, store: TIENDA_ABIERTA } })
+    const panel = mock({ headers: AMBAS })
+    await ctrl.toPayPanel(panel.req, panel.res, panel.next)
+    expect(panel.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, store: TIENDA_ABIERTA } })
+  })
+
+  it('D661 · A (Ruling 41): una caja que avisa pero NO puede abrir pedidos (sin orders:update, leído bien) no late y sigue con su cadencia', async () => {
+    ;(listFolios as jest.Mock).mockResolvedValue(LENTA)
+    prismaMock.staffVenue.findUnique.mockResolvedValue(enElNegocio('VIEWER') as any)
+    const caja = mock({ headers: AMBAS })
+    await ctrl.toPay(caja.req, caja.res, caja.next)
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
+    expect(caja.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, store: TIENDA_ABIERTA } })
+  })
 })

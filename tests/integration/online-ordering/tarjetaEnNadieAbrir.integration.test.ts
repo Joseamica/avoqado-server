@@ -1087,4 +1087,78 @@ describe('D661 · 3A y 3B: confirmar → apartado; abrir = cobrar; vencer y libe
     expect((await enLinea(vencido.orderId)).status).toBe('PENDING_ACCEPTANCE')
     await prisma.onlineOrderCharge.update({ where: { id: cobrando.charge.id }, data: { status: 'AUTHORIZED' } })
   })
+
+  // ── Ronda codex-r2 (20-nov) ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('D661 · A (Ruling 41): 30 → 600 con la base fallando SÓLO al apagar la marca rápida: la caja que avisa recibe 30 s (no se duerme) mientras la tienda puede ofrecer la tarjeta; anotada la lenta, 600', async () => {
+    __resetCardAlertPollDebounceForTests()
+    await sinNadaVivo()
+    await prisma.onlineOrderingSettings.update({
+      where: { venueId: venueId! },
+      data: { lastCardAlertPollAt: null, cardAlertFastPollAt: null },
+    })
+    const ajustes = () => prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })
+
+    // 1) La única caja recibe 30 s con la tienda en «Nadie»: la marca rápida queda puesta.
+    expect((await sondeo()).pollSeconds).toBe(30)
+    const marca = (await ajustes()).cardAlertFastPollAt
+    expect(marca).toEqual(expect.any(Date))
+    // 2) La tienda pasa a «Mi equipo» sin nada vivo; en el siguiente sondeo la base falla SÓLO en la escritura que apaga la marca.
+    await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { requiresAcceptance: true } })
+    const escribir = prisma.onlineOrderingSettings.updateMany.bind(prisma.onlineOrderingSettings)
+    const espia = jest.spyOn(prisma.onlineOrderingSettings, 'updateMany').mockImplementation((async (a: any) => {
+      if (a?.data?.cardAlertFastPollAt === null) throw new Error('se cayó la base al apagar la marca rápida')
+      return escribir(a)
+    }) as never)
+    let lenta: any
+    try {
+      lenta = await sondeo()
+    } finally {
+      espia.mockRestore()
+    }
+    // La lista sería «lenta», pero la caja sigue en 30 s: la marca rápida sigue viva y la tienda todavía puede ofrecer la tarjeta.
+    expect(lenta.pollSeconds).toBe(30)
+    expect((await ajustes()).cardAlertFastPollAt).toEqual(marca)
+    // 3) Vuelve a «Nadie» dentro de los 90 s: la tarjeta se ofrece y la caja la oye a tiempo (sondea cada 30 s).
+    await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { requiresAcceptance: false } })
+    const d = await borrador()
+    expect(d.trackingToken).toEqual(expect.any(String))
+    // 4) Sin borradores vivos y de nuevo en «Mi equipo», con la base sana: la lenta se anota, la marca se apaga y entonces sí 600.
+    await prisma.onlineOrderCharge.updateMany({ where: { venueId: venueId!, status: 'PENDING_AUTH' }, data: { status: 'ABANDONED' } })
+    await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { requiresAcceptance: true } })
+    expect((await sondeo()).pollSeconds).toBe(600)
+    expect((await ajustes()).cardAlertFastPollAt).toBeNull()
+    await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { requiresAcceptance: false } })
+  })
+
+  it('D661 · E (Ruling 40): sin la cabecera, la caja vieja que tenía el reclamo vencido lo repite (posibleRepetida:true); otra caja vieja, no; con la cabecera, como hoy', async () => {
+    await sinNadaVivo()
+    const a = await cobrado()
+    // Una caja actualizada SIN impresora avisó y abrió el pedido. La caja VIEJA con la única impresora (USB) gana el primer reclamo y
+    // pierde la respuesta antes de imprimir: su reclamo vence sin confirmarse.
+    await expect(claimOnlineOrderPrint(venueId!, a.orderId, 'caja-vieja-A')).resolves.toEqual({ claimed: true })
+    const vencido = new Date(Date.now() - 2 * MIN)
+    await prisma.onlineOrder.update({ where: { id: a.onlineOrderId }, data: { printClaimedAt: vencido } })
+
+    // Otra caja vieja (sin la cabecera) NO repite el reclamo de A: nada escrito (Codex ANDROID #3 sigue negado).
+    await expect(claimOnlineOrderPrint(venueId!, a.orderId, 'caja-vieja-B')).resolves.toEqual({ claimed: false })
+    expect(await enLinea(a.orderId)).toMatchObject({ printClaimedAt: vencido, printClaimedBy: 'caja-vieja-A', printedAt: null })
+
+    // La MISMA caja A, sin la cabecera, sí recupera su comanda: el pedido pagado no se queda sin papel.
+    await expect(claimOnlineOrderPrint(venueId!, a.orderId, 'caja-vieja-A')).resolves.toEqual({ claimed: true, posibleRepetida: true })
+    const suyo = await enLinea(a.orderId)
+    expect(suyo.printClaimedBy).toBe('caja-vieja-A')
+    expect(suyo.printClaimedAt!.getTime()).toBeGreaterThan(vencido.getTime())
+    // Mientras ese reclamo vive, nadie lo repite (tampoco ella misma).
+    await expect(claimOnlineOrderPrint(venueId!, a.orderId, 'caja-vieja-A')).resolves.toEqual({ claimed: false })
+
+    // Vence otra vez: una caja actualizada (con la cabecera) lo repite como hoy, y sólo ella confirma el papel.
+    await prisma.onlineOrder.update({ where: { id: a.onlineOrderId }, data: { printClaimedAt: vencido } })
+    await expect(claimOnlineOrderPrint(venueId!, a.orderId, 'caja-nueva', new Date(), true)).resolves.toEqual({
+      claimed: true,
+      posibleRepetida: true,
+    })
+    await expect(confirmOnlineOrderPrinted(venueId!, a.orderId, 'caja-vieja-A')).resolves.toEqual({ ok: false })
+    await expect(confirmOnlineOrderPrinted(venueId!, a.orderId, 'caja-nueva')).resolves.toEqual({ ok: true })
+  })
 })
