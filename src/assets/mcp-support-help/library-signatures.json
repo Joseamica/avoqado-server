@@ -7,8 +7,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "e70cf5e8f941d94c3e785333f14732fdc462199542ac1954ffa78925b4c90d95"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "825e6bb76ccd290af9c67b59463613a39b8016e86107fc43cced480be1d4c004"
     },
     "android/caja/abrir-y-cerrar-caja": {
       "entry": {
@@ -18,8 +18,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "6e15d46cb9db1e23b5f409c759a904687818718489881475f79068b671f1c3c1"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "7ce2677f451eb2bc0833cb3b604ba2309513f95e34467a70e111874447260002"
     },
     "android/caja/faltante-o-sobrante-del-corte": {
       "entry": {
@@ -29,8 +29,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "ce2742ea5f1af7f3529e52aa85f4080d0f31c12946b4f8cbef988f183d5df933"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "1f411c99a80ff81a3aa8958c5912cf80c640d0a99534d6b123f26f33c6a86835"
     },
     "android/caja/registrar-ingreso-de-efectivo": {
       "entry": {
@@ -40,8 +40,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "41dd69788e9ace8debb59f4d0947a8141de87473adc00e38f55cd1a5c885e721"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "66b6f143ab04e0ada60576023438733c028d9d41d6548dff9d7d8ef692ccaa7e"
     },
     "android/clientes/agregar-cliente-a-la-venta": {
       "entry": {
@@ -51,8 +51,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "7db72fd544d59fd4b6ef8f258bf5a49e907feefd6cc5e6aaa2a60d217e0fdf53"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "2cb38773d841589ec91e2cf4345f59e259f67c4abd4ea9a3226569dd6e7f45a3"
     },
     "android/clientes/crear-cliente": {
       "entry": {
@@ -62,8 +62,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "af56001833bcd8943074523c22ea90fed9b204641b83ad1aaebf0074b8ddbf02"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "a797f378259baa4984b7eee69771b168e1f9878d12679429f6d017d35cf62e95"
     },
     "android/clientes/editar-cliente": {
       "entry": {
@@ -74,8 +74,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "fa0dd5e75e9775d8bfd6fe9534cbf2a5cf5f3eb1beb6aabb97a7c52bc133b812"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "9b92e6df037922f450303172dba5d78b57dded6ec7dad2f85459a2efde656271"
     },
     "android/cobro/agregar-propina": {
       "entry": {
@@ -85,8 +85,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "edf96d6492ad2c6d17841fcce4bbb1c49ab99ea196aab8eaa90318879342ff26"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "1313d1570116dcfea6b1905af6e46003d97cf6226b64e3db026783f1aee1ed1e"
     },
     "android/cobro/cancelar-cobro-en-la-terminal": {
       "entry": {
@@ -96,8 +96,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "27a82f8b8958608a24366608c6abe001f3679ab96674921ecc943515ed4e8729"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "a8dd9c511d35d0a6dcea6fbf7fe8624cbc39979c079a841fa2f20f9a2fb26d6a"
     },
     "android/cobro/cobrar-con-terminal": {
       "entry": {
@@ -107,8 +107,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "2c802694178dafd7ac2250e0b27d7f9b976eba1f195ea0030bb9c6c2e48576e8"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "5a1f873339b5d9be8187742eb6b022376db22585c0ac3f6928f871df9c4993c9"
     },
     "android/cobro/cobrar-en-efectivo": {
       "entry": {
@@ -118,8 +118,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "158e33864e2fed0d66433ea1c4311d12a0d09799d9fc1620b0d8dbcb6bae396f"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "e6a1b309ef81da720613a13acf95cd1d90397b5df00b4d9cd8ebefbec353390e"
     },
     "android/cobro/cobrar-sin-internet": {
       "entry": {
@@ -129,8 +129,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "aa47b7d74f323e990ea27fafd959a214c257d01abe6de245f89e576a71dceb66"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "56cbc0dad32b032b75adbccea6f27305247f0b6e62dc76d3794f598ad86b0d2f"
     },
     "android/cobro/dar-descuento-o-cortesia": {
       "entry": {
@@ -138,8 +138,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "e852725d056d66b5f7b952d728b52767b717dd37995a7184b8bc2efccbf17c27"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "4660a14d7d1e0f35029acd5fea1b57c074cd2f1bd1737dc2d12e5f1749dd6723"
     },
     "android/cobro/dividir-la-cuenta": {
       "entry": {
@@ -149,8 +149,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "9d76f7b56a57763a0dfe17393d97d16f3b9315521429c618601070b36e7fffe0"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "d34f081154d0b8f8ab0df1e80e97662ac127bdfb45c156ad309c7b1b7059748d"
     },
     "android/impresoras/agregar-y-probar-impresora": {
       "entry": {
@@ -158,8 +158,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "71964821a8fead6aac240b0b61c79aa04dbdfbd0a56fb9afa1e1b6c12d850dce"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "02e4f7c3f120ab88d9484c8f7d351e7ea4305176257762de3785ccd112088c5d"
     },
     "android/impresoras/la-comanda-no-sale": {
       "entry": {
@@ -167,8 +167,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "b128934f5127d04490463c38b78cd7e9a459e0379e7e0cfa405e549a5ef312dd"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "8cdfeab13e6a4aa694fcf2265bb2112beef5a56d1954e3a3b18d2c939b5fe569"
     },
     "android/impresoras/pantalla-de-cocina-sin-internet": {
       "entry": {
@@ -178,8 +178,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "4d0309df36834a9be9f13d380d3ec5819e265d4c840a3deb560b3bbfa4ffae2f"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "4afa59305b8bfdb3b1e24b69313f2c5427f82599ec88033e42e3d78a5e503587"
     },
     "android/inventario/contar-existencia": {
       "entry": {
@@ -194,8 +194,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "b74cd05ffde1c526647fb6c553ef7995b93df4aadecaddddec6ffa90ecb7b30c"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "63c9b3d31529dce1c208ded7d0ccdde6b5fdeee598c008131438225c2eddc524"
     },
     "android/inventario/registrar-merma": {
       "entry": {
@@ -205,8 +205,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "6ba346b07a0520d13cb1efdac44203e71031999d7ce0ab2ee9221f3e9fd68842"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "8e6dd62c55e03aaf5e08482e64eae45aca6753cd955e546fc6a7fe189cd75ead"
     },
     "android/lealtad/ajustar-sellos": {
       "entry": {
@@ -220,8 +220,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "42c0d3bef263667f5fea74ef3111a441a542d7d7c96c2cce990fa3fed62fcf29"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "1d82926debe6e984d661ff2a2532c484ef8bc50674b64770e1673097517ed253"
     },
     "android/lealtad/sello-que-no-se-sumo": {
       "entry": {
@@ -231,8 +231,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "885b6398642c6773f7413c99f82ec2519b893f5237cf5021a17f432f5c38b77c"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "2edc8f8dae8218a79f4805192fc0befcbd10016a1d0bc806046b3579921fda90"
     },
     "android/mesas/abrir-mesa-y-ordenar": {
       "entry": {
@@ -246,8 +246,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "fbe70d73ddc2945bb8738e3d5d2efa0b13754b23a9fb4fb422d3bc360ad3b86f"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "829731f319d6a2e4cc9e1a896199c787fec260f3406e1da231e232d8a7caeb5a"
     },
     "android/mesas/mover-o-unir-cuentas": {
       "entry": {
@@ -259,8 +259,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "31d17fb364cd283c73049ca0247c410dce61527502056050b649bf1d4d05aa42"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "5f20b917a15738b49b4f0c866674d65c5ad50314bb493143a984c01e99dafe87"
     },
     "android/ordenes/agregar-productos-a-la-venta": {
       "entry": {
@@ -270,8 +270,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "6d54647c2dce12257892a73bcc830af676254eb6ba749534f30ecde1c751d014"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "c271a5d61bdba8d3b078feac9e37af83cd4c9748ee04edc8dfc6562b4aaa2b8f"
     },
     "android/ordenes/cambiar-o-quitar-articulos-del-carrito": {
       "entry": {
@@ -279,8 +279,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "af86da8634e5624daa81134d4347149b4e55c9df6dd2052bab14808c0c0562b2"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "08769bc4fcb5b34253315d10227503d721a76596335fb43a64581eca1748b0bc"
     },
     "android/personal/cambiar-de-usuario": {
       "entry": {
@@ -288,17 +288,17 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "0d52d42821f6c5eaf40f85fd104613ba72c1a167ae4d7e36119c58390ab8f84c"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "336df1579c4a26079d6c22d743455e12bb1e8ee8d9c9d3b3a4f5ac1972c847ae"
     },
     "android/personal/checar-entrada-y-salida": {
       "entry": {
-        "sha256": "4037a2d4222d6cb88a703d792c0f9bd0bfded1e1c33baac4bf773308c7ba0e93",
+        "sha256": "f5b565762bb942e46527809804ddc0756cc1192c5c49a3edac754abac39ddc6d",
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "bbe6a252ff523c28752e255f5ded0e7a44ae492c1a6f3d6a78ed0d34cee1964f"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "8a6be669546e5465c8cdeec95c493489244961a9e0baab333c3f54a70a80be0e"
     },
     "android/recibos/imprimir-y-reimprimir-recibo": {
       "entry": {
@@ -306,8 +306,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "9085c6777c7d183646f9527b5655022056dde14b23eb3d40c1410b8fc2a9c0f2"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "ef7dbc712e1abfef72df848c73335ef60ed9ff86bee592f193147b1e1818214b"
     },
     "android/reembolsos/hacer-cambio": {
       "entry": {
@@ -317,8 +317,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "14497c250f8ef2915027713c9d6207a96ffeedc2c6a2f7ef19a64228b5eb5786"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "9854bff25f1ef0d7276296bacbf62d6dad382132487712d08e2a46851ff0d543"
     },
     "android/reembolsos/reembolsar-venta": {
       "entry": {
@@ -328,8 +328,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "12bd19a3dc3c5c70638a38693d80b3661f07dd21637fb68876e569c0ecc8f61f"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "bbc692f4e2fd354c3f2b52de33eaef08e0e835d0f4261c70f191088000a3487f"
     },
     "android/reservas/atender-una-cita": {
       "entry": {
@@ -342,8 +342,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "813f14995fc06ec90fd2c0a1fae2df5e0af934dc195244c75f880a99b194832c"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "59c2259f53b0e187b7613fe4ac4f160f958584ac38c710146b063ece4972f2bf"
     },
     "android/reservas/cancelar-o-reagendar-cita": {
       "entry": {
@@ -355,8 +355,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "2f7c0704b17d9086ac95d7b1bd62b4769d97d37deec28bef082e0ac2b64f1b08"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "b85297ff7417543a5b91bc0e5e69d115af443661915dcfe0928e99485ed258bb"
     },
     "android/reservas/crear-cita": {
       "entry": {
@@ -371,8 +371,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "2edfd012a9087a37d0d960d455f416e35f83b853d3d88e44e6b47e042f216ecb"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "b349cd253631bf960b3aaab5bcb8d91316dee9b5885852686812028240ded955"
     },
     "android/reservas/lista-de-espera": {
       "entry": {
@@ -384,8 +384,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "bd2a183e94835775382e3c8065f629f5d7a352262235d6d290e944b7aa729948"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "1dc4fad93c293c43ea278d4063432516babfa34577d2e01fc48429affa8455ed"
     },
     "android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo": {
       "entry": {
@@ -393,8 +393,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "4c146473de8513cef2ef762ba8b88750da244cf5626c0840ed1ba5e38707f19c"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "d9fc65faf9bb83838494ee3413c7a1563bd934d08ff03de3c258309c7699764e"
     },
     "dashboard/caja/corregir-conteo-de-caja": {
       "entry": {
@@ -404,8 +404,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "6160577084e8e27d6cebe3d69d3f7921a05815adcc73c8baac17d3f6f6096cf3"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "f14efbeb0f91bf35dd2bad9ed1f02f6e697c607746230132f54053f38f86993d"
     },
     "dashboard/clientes/agregar-o-editar-cliente": {
       "entry": {
@@ -415,8 +415,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "dbf5669883781e7998abc34b88dd8e7c1a16d3afe2f5fe99ad70bc44f66bd699"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "a05231c6461a42505af769bdb125e9189ead5accc53d14711d54f80534683444"
     },
     "dashboard/clientes/configurar-lealtad": {
       "entry": {
@@ -428,8 +428,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "a7384f1763fd0f4c62b0725f6bb3a8334ed713661e5006a0cd64bd5e70d829ab"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "89a9f418321f9121069f446495ce005f83c1f5ce2c52ec4036b4973c7e696250"
     },
     "dashboard/clientes/configurar-promociones": {
       "entry": {
@@ -441,8 +441,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "cd12dbc8b30a7d89ef3faec55d24d6a6db19bfd20ae6f1648be9f102e1f1c50b"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "05e00c6e03bd9c11bd800eeffcef96154edaecb0fba8425189ec2eb3284acd2f"
     },
     "dashboard/clientes/configurar-puntos-de-lealtad": {
       "entry": {
@@ -455,8 +455,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "ddadf085a169b9aabcf2068c7f2ce99ddaa06b8a998d76f9eb6137761af557ac"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "c827431150cf31f19c51b169a6c1039f6ed6d26e95a4a26ac571840cead0704b"
     },
     "dashboard/clientes/configurar-tarjeta-de-sellos": {
       "entry": {
@@ -469,8 +469,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "b335dcd33562a3a937baf0441eec12ab596c82faf590d8cb9d08d19b0673f5c1"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "6c88a232d1fd0ac6d82ae3d3ded2037cdfbb328a8aba4a8b2cbe9933fd174c72"
     },
     "dashboard/clientes/crear-o-editar-grupo-de-clientes": {
       "entry": {
@@ -481,8 +481,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "6828f551fac0924c5e23d53de353f2a0c5482a69ad8d23d86df14375c4499b24"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "85932f55e98dc07bf81ff471873228cf1fbc8b4808124dbfacc6b28b3346af42"
     },
     "dashboard/clientes/gestionar-clientes": {
       "entry": {
@@ -492,8 +492,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "e8cc88e4174f79d4f3b01e16d67b5dda8f17f7ba7a57e2981cb16509f8260dba"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "aad922c5d65aa3b87147ab087c3bfde1ba4f36fed9820fe496966daf07986159"
     },
     "dashboard/clientes/revisar-resenas": {
       "entry": {
@@ -503,8 +503,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "1756b185c256fe0ee6efb38044ea1afa41a4ec6659c3416484a426349141d143"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "30d36d9bb16914460dfb6fa2a908d8728725e1933ee664a82d91b77981ec5d44"
     },
     "dashboard/clientes/ver-o-ajustar-puntos-de-un-cliente": {
       "entry": {
@@ -516,8 +516,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "e7f987923a72b8ed289f11f6fe1a6db418085f916f73dea76efe7fa72012458f"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "17832f257b08e68ad66cfd8771ae08abc1a3eedc6efb86f1daa8007df163bdad"
     },
     "dashboard/configuracion/asignar-permisos-roles": {
       "entry": {
@@ -527,8 +527,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "36c8f4e736d644e908c44c80600a1b6efbb58cd4e9479437c6cd4a730fb9ec1e"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "24ae7d0e3451b1507d25ca2b2c6ea3b68053f01d74515cfce8d167098e96a194"
     },
     "dashboard/configuracion/comprar-addons-suscripciones": {
       "entry": {
@@ -538,8 +538,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "bff6d80339c50a6bd068ed571807b35271dd388ba713b30347b7fa390002a443"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "30f889b34efcafcb48ce6689eba6c5b21c56b5491aa9dfc04b0377b1f15b346b"
     },
     "dashboard/configuracion/conectar-avoqado-con-claude-o-chatgpt": {
       "entry": {
@@ -547,8 +547,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "e9b55d62f12d615f44feb4e1bcd8498abc571d0181feb1db1f9d5ad998284a7e"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "2fc4714a1e93819d8fd4ece2e694c743c4eb056b6260e12205b18b402b7d150e"
     },
     "dashboard/configuracion/configurar-datos-local": {
       "entry": {
@@ -558,8 +558,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "8d3ddbc032284b287ff906b9dadd1a4cc1146d2b57a090d06f7f05593a7ae66b"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "7e6c7a0b90c8c60d1edadec1540d0d2a1226090251de1890d1038a1eba35f5f7"
     },
     "dashboard/configuracion/configurar-imagenes-contacto": {
       "entry": {
@@ -569,8 +569,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "abd07cb78ab81168347907f00face7c6486763a858c1624bdcfaf8cf9cb5d42e"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "51f75278ee31dc59977a0f48c5fcca73bbc8c6741e52102d4692009f2a18f93e"
     },
     "dashboard/configuracion/editar-venue-local": {
       "entry": {
@@ -580,8 +580,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "64730ec130f591131e1f8b3d3695ace3d2a9bd7f9f545e2102226dc7b31134de"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "9506af6591d9b77395ac078537890de3ea2a49ea5a8fba482fcc761ba4474afb"
     },
     "dashboard/configuracion/gestionar-notificaciones": {
       "entry": {
@@ -589,8 +589,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "0082255dd8c1b617c9a84dc7be32e0f23eaa0e20463c98a9085b86ecd7b622f2"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "2a519f421d318c5d604bca9249dd591080e24e1438f70d98b6270434d7b0874d"
     },
     "dashboard/configuracion/revisar-billing-detallado": {
       "entry": {
@@ -600,8 +600,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "284d9ec9fcedb0fbc65b4a17f7611575cf87b6212b8d8094c5abd1d86186b187"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "0a808af8d8e4259077ee6b411fc45f36f0fd982f570cd9d8a12d6d7855386b76"
     },
     "dashboard/cuentas-por-cobrar/liquidar-cuenta-por-cobrar": {
       "entry": {
@@ -612,8 +612,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "5acad864c404da9ef76c9a2c37b7d24603f0b4d364b85583fb6439fd7c0337db"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "27a2a82b4111d5cd96c69b65ba86eedf120017b44c65570ca5b9dd959ac0649b"
     },
     "dashboard/cuentas-por-cobrar/liquidar-saldo-de-cliente": {
       "entry": {
@@ -624,8 +624,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "c62d3ab67d409963b112f180d19fafdbe9171e754b02d74a464c828f7a333f18"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "34e29307f3edfbecfb1a258f17d803c57c99afa5afde88d7aea9e12170b827bc"
     },
     "dashboard/equipo/configurar-comisiones": {
       "entry": {
@@ -637,8 +637,8 @@
         "gateKind": "COMMISSIONS"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "a07c80315138f7018875b827d12004e79c2e097a6e84d99a4bd7602a5b0610e1"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "f5e18d0cec703016129bc856bccbc0e14b25797dd5072cd8affea65b0da61238"
     },
     "dashboard/equipo/editar-persona": {
       "entry": {
@@ -649,8 +649,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "e16e0d2b6cb07023924b758941c3d0de18bb9312cd7db6c9e6f732f338e48b6e"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "38aff21a44e814742c2b3ac0379a03448e119ba809c284d3ced5e17d65c5d3ec"
     },
     "dashboard/equipo/gestionar-miembros": {
       "entry": {
@@ -660,8 +660,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "ce6fbef4d4daca74145984dd5a595230dd7d992dcda25ffa949290c9653b797d"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "8d6b7f6947e7a030023db8aa2efb88ec6b351a0f719139fe6dd6554d222c3912"
     },
     "dashboard/equipo/gestionar-turnos": {
       "entry": {
@@ -671,8 +671,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "696527f240c1bafa615b957decb97b2678379aa4dc33b521cd6e582d7980932f"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "1710abc907da697df14b1a8e7f6183131538e9f128900688d462ba1a0243b731"
     },
     "dashboard/equipo/invitar-persona": {
       "entry": {
@@ -683,8 +683,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "b3ae4d6dcb280520834acf0e463a0f7e43d3f8ca8ded3673c5c33163d3e0ca4f"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "6c20ac27dea4d48c92355816c9bcd3128f0382c57bd91346fea19794062def46"
     },
     "dashboard/facturas/facturar-una-venta": {
       "entry": {
@@ -698,8 +698,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "ac73817b6e4d3142772809ff636e250ff69dfe753ae64e3c351382f3f88fe607"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "7d883d12d74207a2e1b7f114b64a9f7002c377f8304bf96cae6aeccf0bccb676"
     },
     "dashboard/facturas/reenviar-descargar-o-cancelar-factura": {
       "entry": {
@@ -711,8 +711,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "73e1dccf4f6116cc11557d8c9116bc22b597f28944c07a0e2455553792102513"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "49594fde2fc6642c0ca204c6c0600013230fc91ae4d9ff83391adf76af43dc41"
     },
     "dashboard/inicio/cambiar-contrasena": {
       "entry": {
@@ -720,8 +720,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "5bcac9fb201f10dd3094a036850e78e1c9c23e21c35187b06856c12645da9208"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "bf9c73e7fe12a8f64636640af9215a3d9c9636a83f6cd29dd0188453d854e35f"
     },
     "dashboard/inicio/cambiar-sucursal": {
       "entry": {
@@ -729,8 +729,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "26ab02a08b9b217b2121b8c518f5f7cce3fa784ce0699ffa0fce77e25a2f3e2d"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "e8b561b13ff38c402d3719a9eb27a9acbdf4f7837a15c6cccedc524c40d69349"
     },
     "dashboard/inicio/editar-perfil": {
       "entry": {
@@ -738,8 +738,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "5e40eff531a7269848a966e086181e72619b29f541a459242c996b115b62e431"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "060712dd2cc7cd2bb1d3439f1937ad0800e5e777c453fa71d432bab8c35e8d61"
     },
     "dashboard/inicio/entender-inicio-dashboard": {
       "entry": {
@@ -747,8 +747,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "21f63ffddfcd70363683a198cb35ef06968d244c72526ed4c2117bef0bf3f215"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "66b2bb95d322cf1a86ecf59eea6c9efa7247d5fa9b5392bf8e76c3e7849ca59a"
     },
     "dashboard/inicio/iniciar-sesion": {
       "entry": {
@@ -756,8 +756,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "b7c5382215fb06b6b4c6824994c486d4dee730422f50fe54b33144196381cb31"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "0acc78bac040bfd8fe8c74fef14ee85c939c51ced351a931d98eab5d93bbe1a8"
     },
     "dashboard/inventario/agregar-ingrediente": {
       "entry": {
@@ -770,8 +770,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "0cc7186127722815e601f098e0bf2eff79c4cf219a39a7b822391f3508cf9cbc"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "5aed78252f6309c515bc791d8794fd81de8c8af3765d77a088b81d5bf18dbded"
     },
     "dashboard/inventario/crear-orden-de-compra": {
       "entry": {
@@ -784,8 +784,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "2b2511d881a42798a745bd9585c5f3540fb4e5e6f2d64d8207cc9d67f271f4c0"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "5b2e842fcd311389e010024dcb180b2c2d461558c3494ccdaf9534533451f8cb"
     },
     "dashboard/inventario/crear-receta": {
       "entry": {
@@ -799,8 +799,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "eedb9df7ac2f9e649467eb53da9d972ceb6d381f430ac2e5cdf4e83075b1f170"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "4991ce8cc413c8bf0a7fd3dd4e42a468c729cd13d680cc45f85809bd2f7ec37e"
     },
     "dashboard/inventario/gestionar-inventario": {
       "entry": {
@@ -812,8 +812,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "dc3f2add5fcacf0f7ed2bc15c606e07ea24a00b5f32a096f46dacdcb1ee8eea5"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "7419027f65f18420bfdd579ba6c448438e26f8f2ea0d20aff9975ea8be7096a6"
     },
     "dashboard/inventario/gestionar-inventario-avanzado": {
       "entry": {
@@ -825,8 +825,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "3fc5f7b0c40c59b69e9259431795360439ef7c05a613ba93b3554147abf1168f"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "d407083e3c47cdae47d90e52a164603ee245244eb3a36e8a97e09ceef5a7c8c5"
     },
     "dashboard/inventario/por-que-una-receta-no-descuenta": {
       "entry": {
@@ -838,8 +838,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "513580d70aacaba2d8a714616e9016cc778ecff40d5e6a9239473034d1bc4945"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "ac32f01be0163f03bd8d007a2414e8be452b1ceb1095d590d6ee7a8035172815"
     },
     "dashboard/inventario/registrar-merma": {
       "entry": {
@@ -852,8 +852,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "366e264c110053d69786c26024e66f5fb1d9d14585670ff8b12c63ad43557740"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "283eac6ff2770b7e5484177bfc6c14f854e3ba11a45cfabeeb53b8aa828b7f1d"
     },
     "dashboard/inventario/ver-existencias-y-movimientos": {
       "entry": {
@@ -865,8 +865,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "1e02b0f32c224125f97b3be482b3f8c947cc8e03631ad9fc1e0f95a98fe51d93"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "4298f3a3ab4d0b8611cf4e0195e04a36ec7392016527811bf35a8f5dec40f557"
     },
     "dashboard/ligas-de-pago/cambiar-monto-de-liga-de-pago": {
       "entry": {
@@ -878,8 +878,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "2829f7d2629bcf7ce1a41d4f6efc2a539c1136c2d817c1230be917e5b66d43ce"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "65949816b6a09851a3242cc498af463a76ec922d6d7d4810fd5b1d9b9287dfa3"
     },
     "dashboard/ligas-de-pago/pausar-o-archivar-liga-de-pago": {
       "entry": {
@@ -891,8 +891,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "00377c8c4b0f0f9d04e7e8ed04a47163a2c8be9c51f3875781b2bd53fba29337"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "83677bbfd1b81c1cd7fa9f533d453796eda6217bb065dbaedfb188ec54c339aa"
     },
     "dashboard/menu/configurar-menu-avanzado": {
       "entry": {
@@ -902,8 +902,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "c2521b7a4508e31bd0471a81e0492a8a62f5c4b94916444d2bb6869f098bea86"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "8fa4e1106d6519d8b764454dbbdcde309c7251f5b8e4c6bc7f45efaae8aebca6"
     },
     "dashboard/menu/crear-o-editar-categoria": {
       "entry": {
@@ -913,8 +913,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "c019a547bc95e480aedcfb8a17d1827ce3c88e53ac1b55f444862f49c898689c"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "5ad97f903e315840fff5149abe4a63d928f118ebcba2f4a49b66a9e330e60b61"
     },
     "dashboard/menu/crear-o-editar-menu": {
       "entry": {
@@ -924,8 +924,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "9b8ee235b312ec6b9ef536bcfcd740f28bea4e54aa3a45280b6c69e23655b7f4"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "8976dddd8eb84158e5bd235198c1b29100eaf9f2cb51d2ab376e42dc3607d4da"
     },
     "dashboard/menu/crear-o-editar-paquete-de-creditos": {
       "entry": {
@@ -936,8 +936,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "7db257a022256bc1ffc3461f3a6013e5555a23f80b3f786bac69cee1128dc110"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "8fd8d5a1504ffa40d2029c7e2ecf89bc3dee7e7043ade5bd5e4d70865880f7b8"
     },
     "dashboard/menu/crear-o-editar-servicio": {
       "entry": {
@@ -947,8 +947,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "a4c22133300bc42a0f7613f3abde0ab9f787d6806cac086a0b8c1eaa2d9fa183"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "0a266585b72104f59fafd784cd2f235cc57441eeefb69b181d486f44ba52335c"
     },
     "dashboard/menu/crear-producto": {
       "entry": {
@@ -962,8 +962,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "26bf53bfcc83854c0196ef0a2dd032f622fdb1a8b1cc78b15c326ea6c29cadda"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "3b81b0841143c14cd9861d46b00978ac9abfd848335ece3e27df7614dc8d07b9"
     },
     "dashboard/menu/gestionar-productos": {
       "entry": {
@@ -973,8 +973,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "369efc36f748b7e5eef6aa04513f27ec4453e939f2e66f54b920149a3d8c91d4"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "25ce12b98d1faf1d34f67d76804b578a959af21b6762c89440e68da1057cce55"
     },
     "dashboard/pagos/enviar-recibo-por-correo": {
       "entry": {
@@ -984,8 +984,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "e1194ea9aaf66e2893fd2c2c59e0a4e4ecfdac838ee7a21a7c571fbbc10ccab2"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "37c537ff4abe107bbd3afbadc2e265c29e974f64c236e0431a895adc5803dc78"
     },
     "dashboard/pagos/registrar-pago-manual": {
       "entry": {
@@ -995,8 +995,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "b22db6445e77d0bd2389b1e61e7d76f90b5cfb97a41a9cb77811c622a790dbb3"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "930e7b60070e421819d76f175f82d0ce63ca9a797e8e8e084f0ae1c7b7eab153"
     },
     "dashboard/plan/cambiar-tarjeta-del-plan": {
       "entry": {
@@ -1008,8 +1008,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "47c3f2c3f094177bea5a3e5078e06439b2ab3d2e85cd68f9a6d4be06c14af277"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "385c57adc7b0bac1f92c0bc1666ed1157327560944696439753c53ea17c95d06"
     },
     "dashboard/plan/cancelar-o-reanudar-plan": {
       "entry": {
@@ -1021,8 +1021,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "8de46390cd0a3fcf2fed5ee8529f4d6187a4c5245d38efea8c66cc964017c6ee"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "e29d6681119dc5a70659fff807a1e00d1c095d812649c8baecc7eed49cd594df"
     },
     "dashboard/plan/contratar-un-plan": {
       "entry": {
@@ -1034,8 +1034,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "c0701157a9ddfb3814d2e18ed49a794b6cebb27a8c9c657f2791c6c4e53d5728"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "e06f482c01056783da74485409987369b9b0d1324677dbc31fd9b453bcba533e"
     },
     "dashboard/promociones/crear-o-editar-cupon": {
       "entry": {
@@ -1047,8 +1047,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "e13c367ca4e2992fbebc7dfed344dde39874b12cfd17f9752840c640d59cf005"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "008ae533408ce79da10cab0510e2776ba0cd50fe0911020e5af13f484b81b7b0"
     },
     "dashboard/reembolsos/reembolsar-un-pago": {
       "entry": {
@@ -1058,8 +1058,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "5e47fe86636e1a2870d5d66315f45133d7c38737fdbb0b94f836fa82fc9b747e"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "d6cd6ee68bc9b73ba764bc75da7369262b6913fb635af089cbf8faabe416d454"
     },
     "dashboard/reportes/comparar-inicio-y-resumen-de-ventas": {
       "entry": {
@@ -1067,8 +1067,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "ba3e81348abd496d323188a78a3f8c623e2f3d88a77fd7db20d4617deefb395f"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "20d948d258a95dd98bc06a728793eeeb5a2ba72bb7b3d32e993fdb5aa8bdb65b"
     },
     "dashboard/reportes/revisar-reportes-avanzados": {
       "entry": {
@@ -1078,8 +1078,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "6f6cbf9f4eeb230c5c1622e6884516101ccd9ad27520df833a9bfee6c37d0c14"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "af9f4905993424d85f5ecf57dd05b5497ec4542db11931a18498fdd4d97cf421"
     },
     "dashboard/reportes/revisar-reportes-ventas": {
       "entry": {
@@ -1089,8 +1089,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "4c7860b164528082c7e7271d5fb29d6dbc2a12efb9458ee4e43426382ecf3e6f"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "7ed07520ebfad467be6b0dd275f8e79f18dbab71e9e6767b52787082dbf0e82d"
     },
     "dashboard/reportes/ver-analitica": {
       "entry": {
@@ -1100,8 +1100,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "e50db10c40b8691f763e81903dd2b6aa43f2b2b28deeb32405d8c693aa54e393"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "5c1f8d9b00d55fe7c658ac1f97fea190abe83dcb6c02f8bd499df1fd1172c0dc"
     },
     "dashboard/reportes/ver-cuando-cae-el-dinero": {
       "entry": {
@@ -1113,8 +1113,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "09153b1f60f556fa59f9e2d3f5f203dbf4f618d55ca8bc3334fa4bdd4de1662b"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "e47555197dc6bf7626114b0c275731de59b94351cfe7abc4029df808a3f27b5e"
     },
     "dashboard/reportes/ver-reembolsos": {
       "entry": {
@@ -1126,8 +1126,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "3b17ed648001b13a08143929c012c89ee6168a53a7ed8a071e7dd43ad96435cc"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "70902e151e4ac95ad4a01ba7d34d6d88526b6d08988ab4fa1ee34e67733b4c95"
     },
     "dashboard/reportes/ver-saldo-disponible": {
       "entry": {
@@ -1139,8 +1139,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "d01a1e239960a56e478c5538c8a99f1e9f7aceca0871c29f945a4515357c5628"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "b2fd709cf9755fe68622a993f014c4f6af05bbd627f9c81377f9c3e482fc3565"
     },
     "dashboard/reservaciones/agregar-a-lista-de-espera": {
       "entry": {
@@ -1152,8 +1152,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "49306df706e1b7aa6de72a1a72a48d3f579a6f97f57805129d7ea5f6fc471f9f"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "4043e8f61034b7fba2d3543b1f936be54a57af06b62a15b29d4c9209bf72627a"
     },
     "dashboard/reservaciones/configurar-reservaciones-avanzadas": {
       "entry": {
@@ -1165,8 +1165,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "29e8eee24784f630a78a5769bff07efeb8a07630e46df753af471086f56898f2"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "28ee9945e7aebc5a845c905abb04a2f99510d0e602229d9b4503a6ec14c48eb1"
     },
     "dashboard/reservaciones/confirmar-o-cancelar-reservacion": {
       "entry": {
@@ -1178,8 +1178,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "25bddd8c1dfd5f991f137b8432911270479db27b8ca0b0bbd3092619b033fbe2"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "617220472074ce37836908afee211b96b86ba863e2232c5a6e284f680e526126"
     },
     "dashboard/reservaciones/crear-cita": {
       "entry": {
@@ -1192,8 +1192,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "fff3d67bafaa6403b21360177988e4d1132abb7d7589f0522a24d240ea34f368"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "6ef708a17a86814b3d5d9be69b37684ab9c2a2331507e510224df53cb64df56d"
     },
     "dashboard/reservaciones/gestionar-reservaciones": {
       "entry": {
@@ -1205,8 +1205,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "7fa02db1c6deaecafc538d6d84e4a489ca8dca01fe0b1390435683d71ee43189"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "d2abe4888d2c221ed2fa65d671d948bc4a3e8d0d2b29754986ad93495fe7e530"
     },
     "dashboard/reservaciones/por-que-no-salen-horarios-en-linea": {
       "entry": {
@@ -1218,8 +1218,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "15f7b22a0bf7ba0af36cb6a7603c382929b68c1124821754661c011b5883708c"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "4946fa83ea9ae38dc8b35e8aaba30056f8570f21660965b66405800b4bfdcae6"
     },
     "dashboard/tarjetas-de-regalo/ajustar-bloquear-o-reponer-tarjeta-de-regalo": {
       "entry": {
@@ -1230,8 +1230,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "73d38d3cc311f6944ba62630cd8c3f74225a7023296f695686fb8a14aa6d39e0"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "f80aaf5e8ddf952371e6a9fee91218b64e03a67bb59fab1055879cc15b6fd7fc"
     },
     "dashboard/terminales/gestionar-terminales": {
       "entry": {
@@ -1241,8 +1241,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "61c61113a94c9c47e3ff54d55d192f6a201d3d1bc703f50f8a90561637e6783a"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "b14722db524217b4fa0e67b320d79bcf85e364591799f14d0ce9e2109abb7414"
     },
     "dashboard/turnos/editar-o-eliminar-turno": {
       "entry": {
@@ -1252,8 +1252,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "4f290504d79db9d0f6b5d69d1f5b5919bbcc25a9597e03e6fa3b588b00d95c00"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "e7f2c4b0bd24e3a83bd7962291c2025b1336ec8829687e62cf6a5bba024479c5"
     },
     "dashboard/turnos/ver-turnos-de-caja": {
       "entry": {
@@ -1263,8 +1263,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "09703fb79bd6de1057eb833e2dba78f80ba41b33b8d165f4349daa97b6a515ad"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "468a149d5ddad0953912896ff0aab29dcde23093c7430b77dd559c1254407d16"
     },
     "dashboard/ventas/agotados-por-inventario-en-delivery": {
       "entry": {
@@ -1274,8 +1274,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "1040d11835c62778a7c8031ba4d5a4602e069e690353981b4cf037bde39e191d"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "9017cf81ca7a5c6b0cc97ef8cfced53f1991040782d74793a414d60d748fa700"
     },
     "dashboard/ventas/conectar-rappi": {
       "entry": {
@@ -1285,8 +1285,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "6debfd037c86749a6918d2eefa525c584befccb50866f1ff8a74c297ca807343"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "e6e100136cc2fd6630818df52101c7b533dbfef712f0c641ae67ab6779b7df43"
     },
     "dashboard/ventas/crear-liga-pago": {
       "entry": {
@@ -1296,8 +1296,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "bb258b84731321180abe0a3f77f54a1ad7d4e1be23b2697c0c68854e0e99b9e0"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "a643777e661bf8843c92ccfa148d1648b628937b516892844860e4b1bad8c9fd"
     },
     "dashboard/ventas/gestionar-cobros-avanzados": {
       "entry": {
@@ -1307,8 +1307,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "7dca1875eed9a657c4cfc30f72d5bdbee280e974a4f590812dbd375712e973d0"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "2c0a8bb5866733034f5b6ef2c38cf6e3c62655255913f86477c66446154f9293"
     },
     "dashboard/ventas/horario-margen-y-modo-de-aceptacion": {
       "entry": {
@@ -1318,8 +1318,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "a1d49fbf9a22fd9f8a00e31aaadb8c9a1eea16ef58ee81a97061b93ee5a3f9e4"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "e2a305628611352d05264b5e9513e3af04f8d59484a83ae325618809365cffdd"
     },
     "dashboard/ventas/problemas-con-pedidos-de-delivery": {
       "entry": {
@@ -1329,8 +1329,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "a5cb3c3f232983d6761cdfb3aae2898d856dfa4a4d7544d8be810501436fb9ee"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "e1f28aab0ed2de66d3b60b5db03008210e76c3c19c421946fccfbe088cea7d5d"
     },
     "dashboard/ventas/productos-en-delivery": {
       "entry": {
@@ -1340,8 +1340,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "8955d3c035202bd209008b55d1922e1ac9e30ef9a7792588c101c0d4529f40f0"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "72ca869d138da8b452917d900dc8cd02305b35bd36169f25ca881a198de807f4"
     },
     "dashboard/ventas/solicitar-activacion-uber-eats": {
       "entry": {
@@ -1351,8 +1351,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "c571617e11e58e5cfa9010f657da1574b2c2b22affabcd836bb05662436ba789"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "5b10c9677c8b074490baf61a983648bf3465c2852dccb6f9b61c5fb09d246146"
     },
     "dashboard/ventas/ver-pagos": {
       "entry": {
@@ -1362,8 +1362,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "967d0af8e7213506f38e265e7236436dfbfb7feb6c854c10f8d0056149c3cb32"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "530bd034f62ab220797de7462c4993cb42ebcc4b9c85e7a6dc28ef3acb35dcb2"
     },
     "dashboard/ventas/ver-pedidos": {
       "entry": {
@@ -1373,8 +1373,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "f9dc343a06ec1021afde0b76e1647236038df8b7986dc1fbd73d4fbe39e77f64"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "f3b4c79ecd6629dee49dcaf1e42279528c1b54349a8cec1c9d11684f18bb0386"
     },
     "general/facturacion-y-contabilidad": {
       "entry": {
@@ -1384,8 +1384,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "ee0b16d2647059be35b74d6b945a94ffd6c5d8f6ab8d28c09b142725abd3a3b2"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "a618d933a5571c18c93031b26ec4094474664099a626b0012079ab66dc7ec6b8"
     },
     "general/overview": {
       "entry": {
@@ -1393,17 +1393,17 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "422b980fec6429959e4123c8ab4675157cb7d6bf86936906f02549636b82bdb8"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "af3225047fb38333309c543831e3df689d2989677a13746125a29dd54090e177"
     },
     "tpv/asistencia/registrar-entrada-y-salida": {
       "entry": {
-        "sha256": "e01aaee8737027b568e964d66591ae01511c5d46d9e18716eedabe4dc52896ee",
+        "sha256": "32684b003ba6ffa83d5c678927c2588de87bb8c8b939bd8032de300beaa8cdff",
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "7bf432022707ef32f6cbf05280a7c1c45e5ace5010ed57a1b75194ea262ed2b7"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "89598a4a4262f8fcb2b26818205d3b9c347e5620cc27db2d3c7215221bae8753"
     },
     "tpv/ayuda/actualizar-la-app-pax": {
       "entry": {
@@ -1411,8 +1411,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "3df2d37f2d9f2513e2bc9f37e57476f64d421305449e9cd864b8b3cc2bb145a0"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "01d467b1540dec5f4e814154abd84fdf81e676efd37829d5b3bfc0ab36d58d36"
     },
     "tpv/ayuda/reiniciar-la-app": {
       "entry": {
@@ -1420,8 +1420,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "15b12951fa1c19beaa56f3184659921c235bbd708485ca4c947420d6a963d751"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "49b73d5257809f106e46c51928d15609a46b95c40b894271390ce82eb5a012d3"
     },
     "tpv/ayuda/reportar-un-problema": {
       "entry": {
@@ -1429,8 +1429,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "e37acb688933f9a721299bebc1277cce432c86d8c2f46843700ac3df9441691d"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "22272ac3e23b417dc1736432a6c9efcdd7d0a95117100c4e76149ed49358029f"
     },
     "tpv/ayuda/ver-version-de-la-app": {
       "entry": {
@@ -1438,8 +1438,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "fb42652b941480edf4e360860a0f54ed13be4462b6b63bb6fe09193f1e03267c"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "f5a8dabe6f31a4d16b8040bbbfe6f65fabbef499fd92a40e1d983c4181618dc5"
     },
     "tpv/caja/abrir-y-cerrar-caja": {
       "entry": {
@@ -1450,8 +1450,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "3475d042353bc26b91b3dce93d954aab6c428fe68ec06372a47185551d191429"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "1bbc3acb0a339bfe8723b87981d818a8a09773205d8a2f7ba5bb4c857cd95bf1"
     },
     "tpv/caja/abrir-y-cerrar-caja-anterior": {
       "entry": {
@@ -1462,8 +1462,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "8a159bfc847ab9cf128e6f3be1183789f6cf1a33c0e8bba4d0a1f5fede7dc8b1"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "0cdbf664fd45d420a9381885649cb9c4f4a3760a4d40d14805f58a84ac59bf78"
     },
     "tpv/cobro/agregar-propina": {
       "entry": {
@@ -1473,8 +1473,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "3f0ca316d63046be81da6e1e0d6fa72e1e1a3b54ec29e9bfab8e64a6fe7751d4"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "e5e051e520e22db376d3cb3af1c3dffa9b5a51d4d7ab5a70461ead405cfea508"
     },
     "tpv/cobro/cobrar-con-tarjeta-nexgo": {
       "entry": {
@@ -1484,8 +1484,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "5f5ecb2f70821f03f9e0c399f08016a4f33b8918193eb0299dcee29cfa7d363b"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "109ba2c9a951e67a898026b163d52b0d74e29bff85d71262ef46a82966bdcb55"
     },
     "tpv/cobro/cobrar-con-tarjeta-pax": {
       "entry": {
@@ -1495,8 +1495,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "a5901dd17050d1c78011074688eb7c496e59c38eb7d9bf379630c9b1d3319ebe"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "b74a588cdd083242a257b099cbddbfb9650208847a56b1f9e7e4756f6f28e0f7"
     },
     "tpv/cobro/cobrar-en-efectivo": {
       "entry": {
@@ -1506,8 +1506,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "fdceaf7d057ed546babb4f327f574c3b6e55a5f2af67b93c21bd87161cb0118c"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "a97b948c4cad7516981ee792cc254533059fe79b5411a576033447767d654e10"
     },
     "tpv/cobro/cobrar-sin-internet": {
       "entry": {
@@ -1517,8 +1517,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "d98af70a2659b57a8c187e62e34fb2dcba92c54f4c91a1ee7004bf4d824b010a"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "c73b476df8131d39eaa0d74de7334db97d8dc9a7608d29d321af5ccd97c9757b"
     },
     "tpv/cobro/no-sale-la-propina": {
       "entry": {
@@ -1528,8 +1528,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "c96ca761dcdeee251c3b67c74e7c900f1b6d53b82d98b6f5a860665c999f7ffb"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "ca6676c666dc39ddaf312589cb06071cb44ddf4299c0883fb138ff47c98d36c3"
     },
     "tpv/cobro/tarjeta-no-pasa-nexgo": {
       "entry": {
@@ -1539,8 +1539,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "c71e0dd03e071fc0ae42260a5504d823fd33e651f561e5d54f3ea406bac2d637"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "485152a9542c0a10b7ddb36eb37fd1e027c74397bb35e894490c44d17caa4753"
     },
     "tpv/configuracion/activar-la-terminal": {
       "entry": {
@@ -1548,8 +1548,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "a918ba6b4e5379fa40c73d4c00cc6e9c8e88536ee6169c9ec2ed9f66a29e9001"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "d5e0b0728f142ae5603f14592725f1f3a1dc2bb0ae3fb8476d5469e679109ae9"
     },
     "tpv/configuracion/actualizar-configuracion": {
       "entry": {
@@ -1559,8 +1559,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "f0b9f005fa0bd188eae08b4a130e915732e617f330396be8706423bc3eb8263c"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "b7361c900e70ee0c1abad62850f5b63e0fd04b61b94ab18ffde20bb6dfeb7e08"
     },
     "tpv/mensajes/leer-mensajes": {
       "entry": {
@@ -1568,8 +1568,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "c7665aa199d49ecfdcdcb698a19e4be9a08a278d986cf74ea89cbe30622d30c5"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "e5b7b88f394c2c3b3ebb3b26ec03b7102d11063960ab4f393de063e80da42e74"
     },
     "tpv/mesas/abrir-mesa-y-enviar-ronda": {
       "entry": {
@@ -1582,8 +1582,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "98bb2cac3f33f0b5e3520f583128c29dc8ed88fc78c0897473f89c2479863456"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "d0d3b73bf10b462b5418d7c5eec3354dea97b76ec78359e618ef3dd28c7e75a6"
     },
     "tpv/mesas/cancelar-cuenta": {
       "entry": {
@@ -1595,8 +1595,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "9d8ec12c9772f57b0a967975ef7ba3294dcf12ca18b32105f646619bbef57c93"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "f4e344527fe50331ebfcca1e9fd5fb353ae985c3fb813154a54910cc00c5da93"
     },
     "tpv/mesas/cobrar-cuenta-de-mesa": {
       "entry": {
@@ -1608,8 +1608,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "17160839651800a1aeb1314d7357e72845cba797fbf62921ee6d705cdc7dbc15"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "d6843178353b708552d05908b62286ec80584eb5047fc4ec8c63c675d74a4d7a"
     },
     "tpv/mesas/fusionar-cuentas": {
       "entry": {
@@ -1621,8 +1621,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "d1a54e9426a287d3152e08aea814d6ddd7ccb38a487ef39cea7bcdc7319f5da4"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "a2ddc0c265f6a53428ea6a3e9f362120431feb4cc6b6035160a3caaa21f62714"
     },
     "tpv/mesas/mover-mesa": {
       "entry": {
@@ -1634,8 +1634,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "da00aa0db0a64c881aeab55667806effebe86d3075ffa0d25620d3f190957bf7"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "41e046f6fc6d49ca70fdd36514a6b9a9d271fb105ca5dda5b7adbc435b38ed2d"
     },
     "tpv/mesas/reasignar-mesero": {
       "entry": {
@@ -1647,8 +1647,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "316ecd769cec89a811e8d86b4e30c26334d132107d53848232602df1f3135452"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "b2778f5d6c4a6333810c5f54ad149a515c421aacabe77c2b14f1c450789cf294"
     },
     "tpv/recibos/imprimir-y-reimprimir-recibo": {
       "entry": {
@@ -1658,8 +1658,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "6f9e5372eaecd2e07df397f6439138b244e8e6063f0600d6b4a7f8fa5ca5b79d"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "fbf06acf2d51bbcae0d6396b568f44c689e4e1a95ea9653021bc0273943215b3"
     },
     "tpv/recibos/no-imprime-pax": {
       "entry": {
@@ -1667,8 +1667,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "2efc256bd2bbaaf5d00df1c59789fe41d81fa8892edf17f9368d4d0d3c3f4bda"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "575a31520e5270b7dbc2134594ae6d7213b2c14b8043177433cdb0c66cb48aaf"
     },
     "tpv/reembolsos/reembolsar-cobro-nexgo": {
       "entry": {
@@ -1678,8 +1678,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "321adea9d1cfb6f1f89d870f35033a7f92e3818dfcaa57a77d9003b49148b543"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "385e83abe843e00a752f82b97803a13ee56443c42e0d5f4a8bf63a61e17a58d6"
     },
     "tpv/reportes/ver-reporte-del-dia": {
       "entry": {
@@ -1689,8 +1689,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "be669050333ae03cbe413d3c78773c1af6d92bcf49890de0757c86b9512fc59e"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "a3379ea587d16c859e4a6bfa51a7ba1e653ac66146367785c82b9972d71347f6"
     },
     "tpv/reportes/ver-reportes-de-otros-dias": {
       "entry": {
@@ -1700,8 +1700,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "1f6a8a3f425eafcafdc5305dd7e8e8d88f717b4258b250d69962318c655412ca"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "2a590718d875024fa2a1b1956a3a64f07f10cd1d756b79801500994661ef349b"
     },
     "tpv/sesion/entrar-y-cambiar-usuario": {
       "entry": {
@@ -1709,8 +1709,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "9411b07ca902cd1b255e27bcd1a8bd22e8a39e09639cd6823fbbb3a9ee19bfd7"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "faea1859c5481f3e074d5119f7fcc9ed0b21059342712c92ecf6b5444b7658f5"
     },
     "tpv/sesion/pin-incorrecto": {
       "entry": {
@@ -1718,8 +1718,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "d4f2f3c3148512c8f39c72d7c1a5b1fad3de0f860432628fc4a148486cb54293"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "911d5f9d624ad4a0a68d4dea031afab740dd7ee39e80d647c47c9c9ecb66e54b"
     },
     "tpv/ventas/vender-con-cobrar": {
       "entry": {
@@ -1727,8 +1727,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "bf43f35fdcec1d7fbbd8f35d206417faf1aa2b2f87c424d10650195e94f47fdd"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "d4dc774dada7ddcae483fe09ef90c03eb3758f55411650845487c36d5e2472f0"
     },
     "windows/ayuda/ver-version-de-la-app": {
       "entry": {
@@ -1736,8 +1736,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "f361410ce0ec87e39b220a8af36ba3b13d0e492b213713c4ccb3c85d379155b2"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "5a296670ddc3281eab1c93c799adea74cb60463036d0ea24ea9aa96e15236466"
     },
     "windows/caja/abrir-y-cerrar-caja": {
       "entry": {
@@ -1747,8 +1747,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "9f2884d3e254c4d56dfcb473b425b66ff102ed7ee560aca85e89d5ed0ae8fa29"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "2ce60666151e9db315fa39a1c47df95077c56ef53945cdb18ddad51be0f985e8"
     },
     "windows/caja/faltante-o-sobrante-del-corte": {
       "entry": {
@@ -1758,8 +1758,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "6be13e900d77cc92719c1ba0b4c876ba413c8f31ac735149a4dfe11696e5a61d"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "1f93b4d5fd5b4ec1d5577accf30c64f038803bcfd6a796e7f4c0a9b041b89c64"
     },
     "windows/caja/registrar-ingreso-de-efectivo": {
       "entry": {
@@ -1769,8 +1769,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "ad7d5a3109b0b3f777aefbf15f90ff8ae4439e96adc9a29c617bce9339a1f00f"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "4dd8c99a7d20422cf9223bf1d00f6f036a0bb5ae9789e2063570e5303337ee82"
     },
     "windows/clientes/agregar-cliente-a-la-venta": {
       "entry": {
@@ -1780,8 +1780,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "17998ec316b308374d59a732d292cb9d3bc03c72d65c8aeb5a0660ee933c789c"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "523d3c1ce195935723d0f451a33923f4fd23e8a58a7ae88759d41d8f93c90031"
     },
     "windows/clientes/crear-cliente": {
       "entry": {
@@ -1791,8 +1791,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "77ed2180de0330c50ca340e81ff3f23c3ea91a47324a90168420bad7f09e6cf5"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "1f97879f24cf0e91dede21f747a57cc9d9e6bd0d71a4872cd9c60e92e033e0d0"
     },
     "windows/clientes/editar-cliente": {
       "entry": {
@@ -1803,8 +1803,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "5cf3a376720889cc3273f15b3087bad9e0a3dd78b7d4a824417effc0a0decbf7"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "9c6b0f79f316b0ee664374bd047941a9f527f71f88e04661699cf02ef070b840"
     },
     "windows/cobro/agregar-propina": {
       "entry": {
@@ -1814,8 +1814,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "193bc9a4571a844d9c47bad1fe723a9f54b3bfaffa9c1146e50947851819eb5a"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "a44f0693bd488a427404bcaa57d4e48be22a9f9201de0de87aed98ad2d49c059"
     },
     "windows/cobro/cancelar-cobro-en-la-terminal": {
       "entry": {
@@ -1825,8 +1825,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "d9f0b639c77504fb8f03d9617cda79ac2dfb4e2e975fe8efc9fba58eb039bad1"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "cb27fcedf63548ddcfc238c296c58cb6272cc7fb18575aa74c8e4028b3e2a3bf"
     },
     "windows/cobro/cobrar-con-el-teclado": {
       "entry": {
@@ -1836,8 +1836,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "605514c734d223dbe2f96f7fe9158a6653a7b96cb5cefef36ad3fbc3c0ddb064"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "c67ff04f764a323b05a673bce51c8eb64d066f07705d518ef6a2d3a54db06fdf"
     },
     "windows/cobro/cobrar-con-terminal": {
       "entry": {
@@ -1847,8 +1847,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "92cea86f8365f3578d9e23d7ee50ee03cb754514dbf8b432157fe385f3f92c2c"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "813c8737b5bce76f3e0ba88486809450eb393883a459a654296763d244f4bbea"
     },
     "windows/cobro/cobrar-en-efectivo": {
       "entry": {
@@ -1858,8 +1858,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "4c470a49969472f79be5798fd0c70c8bd951413c7225749a9f81437a60d235cc"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "73deebf906096b6b1a88d85c452eeffa4e4f7b0794dd40ee429cca18b2e6633f"
     },
     "windows/cobro/dar-descuento-o-cortesia": {
       "entry": {
@@ -1867,8 +1867,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "19e9d3daa81f2992fbc03f24895c4720fade063591c4416324ce4faebf6023e1"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "7f67a0fe753cd31c56a043f14189ba5f9be8e93fb1cff0377b245eb4beb92dfd"
     },
     "windows/cobro/dividir-la-cuenta": {
       "entry": {
@@ -1878,8 +1878,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "d2361a11f59998142d0a6579d545c7fab16aa4c84055521fedb9122e28a9d957"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "f2d4183cb0e8049aef2ef53eb31cbce735b9fb71fc11a420bc62495635a7c794"
     },
     "windows/impresoras/agregar-y-probar-impresora": {
       "entry": {
@@ -1887,8 +1887,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "63406bd90b89adb544a38a36bb853d3fb74e5e32041ff38fac3b794e7ff2af11"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "f469372d923cf675e751020f9c5089a9b987418cb3d4bf4a2f12c7105b29baa9"
     },
     "windows/impresoras/la-comanda-no-sale": {
       "entry": {
@@ -1896,8 +1896,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "e26f087fe6c22b1a823194dac334feb459cf66257d1513e039eb83a29df5a63b"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "3b275d7f9461d40c8f371fff58b4f84415ed375b9bf6349a5c981f430a97e7f3"
     },
     "windows/impresoras/pantalla-de-cocina-sin-internet": {
       "entry": {
@@ -1907,8 +1907,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "3b5e1760e673821ef242eec5270acc5ef1c8f1e10b90867f2699959bf9c78d57"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "56be5204701a4dc677757ab917957986f83fdb2da50f9087eaab94e889044045"
     },
     "windows/inventario/contar-existencia": {
       "entry": {
@@ -1923,8 +1923,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "705ab6e145bd24e4d98a2ad9bcef1b61486582f6d137b9443af09d76daa880d3"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "02876c0b725487d71f406ab9443d61989242fa8987ca5ec61e4815eb717ad5a8"
     },
     "windows/inventario/registrar-merma": {
       "entry": {
@@ -1934,8 +1934,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "e880f538b769045b043bcf78ad064f777c0622df37572777221857e57f27ad75"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "3f8e2e8bc533aea722346b351b9e5b3009ac398dfd416c2c4dae7c2ed6eaf472"
     },
     "windows/lealtad/ajustar-sellos": {
       "entry": {
@@ -1949,8 +1949,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "f8a489b666e32a3a8fe6f8e2ed4f0fa97228d2142fe2f6f3148cbd6ae10f845f"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "117b00d6506ec0defb95c62b43ab8d8d73e126326d9ef13b96b2817e7d1ff38b"
     },
     "windows/lealtad/sello-que-no-se-sumo": {
       "entry": {
@@ -1960,8 +1960,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "16f869a68b548dc97a6ba8bcf3f6f61bbca05c01b96f6e02fab9d9a485012a85"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "13b8e33163e565cb005b0a2e33fe3e33681e05aebcf87c16490b7363edcfc7ad"
     },
     "windows/mesas/abrir-mesa-y-ordenar": {
       "entry": {
@@ -1973,8 +1973,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "17b15160d24bccd1f5853738ef13b7935e5687b33822d8aa4910fabc63146357"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "19bee8c04e18c52db37a2b36668c083354e25f6490532f678f7814269f5ca2e3"
     },
     "windows/mesas/mover-o-unir-cuentas": {
       "entry": {
@@ -1986,8 +1986,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "310b306f15f97f7d28a1aa54134f186098b5a7310387465aab6bcd6f5ea75295"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "6319ffa954785cc76ab56de0fb79d08e6a9abc6cc18adcdcf85d32826f796598"
     },
     "windows/ordenes/agregar-productos-a-la-venta": {
       "entry": {
@@ -1997,8 +1997,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "13b01e698f7e086119115c4a75f1811774bc25b94c61663ca3e581d1456667b9"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "d9382a018c56283e2a6b1221153a99c34c43143b984676181f0a9d7a4ff637c4"
     },
     "windows/ordenes/cambiar-o-quitar-articulos-del-carrito": {
       "entry": {
@@ -2006,8 +2006,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "f92a1616891a8c3f26bc47d0c8221f81c83d86d44227f3a7e479ebd89bf04d8c"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "b7d4988b1a3d8b6abe526e18127c94bf669727f9b327a025e645950eda4be831"
     },
     "windows/personal/cambiar-de-usuario": {
       "entry": {
@@ -2015,17 +2015,17 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "235b8016feec47c75b6fcb8dab6f791c169149a9688b5c06e7606b797cd86035"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "2c8bcba138221d50070fb7ba76f56920d006c6d80a9d12d997f4be32d737755d"
     },
     "windows/personal/checar-entrada-y-salida": {
       "entry": {
-        "sha256": "78fc9e35cdd63e74f314177ab93ef440f6cf2c17fd82ee0abbb961ebba9e3339",
+        "sha256": "4bd6ea1f12850938c044895e1b7464cd46541425a36f1f6f93e147e5b44eb5c7",
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "2e5a7dbf60b3f0268edd8ef05feba95b6b51a28583f85afaea5e019b6d214df0"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "5dbf176b21dee4021102e79a18ed6b15d2fb035d2bcde0acc611ff4a3e0c0916"
     },
     "windows/recibos/imprimir-y-reimprimir-recibo": {
       "entry": {
@@ -2033,8 +2033,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "84f12afeb83556ca898308ea5f814f966df0925a28e5857292f895fdd1caea92"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "37bccbbdbf279c9364af892ba2aa8634bc74857b6b27d260168cc7a97b641a04"
     },
     "windows/reembolsos/hacer-cambio": {
       "entry": {
@@ -2044,8 +2044,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "fe56f68f9a4dc388e228d1fc4a6b63b071f6080ecd54cc625c168032ad217467"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "e61255eb39b7fce945f7f4e3439d8a69314ef0b1a916e73b2151bd1bfb1f019f"
     },
     "windows/reembolsos/reembolsar-venta": {
       "entry": {
@@ -2055,8 +2055,8 @@
         ]
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "000d857d47d53ea64252edb0981c7b9b0019de6435be1a6374f695682e7335bf"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "cefe50a14ab864452fc94c3f21fda1d2260d2da54eb41385d87243d7b1a2af44"
     },
     "windows/reservas/atender-una-cita": {
       "entry": {
@@ -2068,8 +2068,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "0970ea0fb3aed5f9f951443fe7bb85f47b916f59e746ab76299add37ddced358"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "845400451a2c1c1dca2f252276f434b2dfce1a1a762d5f1f77c28a88cdc3068b"
     },
     "windows/reservas/cancelar-o-reagendar-cita": {
       "entry": {
@@ -2081,8 +2081,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "1b90f69172db8ee5d71947474c6920200afc0ff4b081667de603f6ab5e91f3ce"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "8f1be78c676513480423fc23f08cc72af23e27ecf032ffff6c67de69abeaed55"
     },
     "windows/reservas/crear-cita": {
       "entry": {
@@ -2096,8 +2096,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "1c8f3241087b0b42b8bc9f218ab62c0b1167b6c8ec8ce681be9a401bfee86000"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "26d5b83b6a17292e53dfd7f4811c73e3467c4eaf11907963391bd5d96322a57c"
     },
     "windows/reservas/lista-de-espera": {
       "entry": {
@@ -2109,8 +2109,8 @@
         "gateKind": "FEATURE"
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "9ac361622d82cd1a26824f55d8120fdc207882ea69eaf1a009be7585f6d8da40"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "149ea36d08eed5d14fbb99b5009bc881586b695f4abc171feb517957de31e15c"
     },
     "windows/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo": {
       "entry": {
@@ -2118,8 +2118,8 @@
         "requiredPermissions": []
       },
       "approvedBy": "Jose Antonio Amieva",
-      "approvedAt": "2026-11-20T23:45:31.791Z",
-      "approvedHash": "38ea833e5b9c15f97a626c3a5469386e13b9bbfafbf4d12787f752d318238a55"
+      "approvedAt": "2026-11-21T05:23:02.139Z",
+      "approvedHash": "da11f5c9ae883eb39ca77387ef2bae9e4160e12136e7c2c6d316f22e2c0aa6c4"
     }
   }
 }
