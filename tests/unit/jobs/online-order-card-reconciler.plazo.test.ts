@@ -78,8 +78,8 @@ const CARGO_NADIE = {
 
 type Fila = Record<string, any>
 let devolucion: Fila
-/** El cobro en duda que la pasada lee (ninguno al empezar). */
-let enDuda: Fila | null
+/** Los cobros en duda que la pasada lee, en su orden (ninguno al empezar). */
+let enDuda: Fila[]
 
 beforeEach(() => {
   jest.useFakeTimers({ now: NOW, doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
@@ -101,7 +101,7 @@ beforeEach(() => {
     createdAt: NOW,
     nextCheckAt: NOW,
   }
-  enDuda = null
+  enDuda = []
   let vencida = true // el recorrido la encuentra una vez; después, ya no le toca
   ;(prismaMock as any).onlineOrderCardRefund = {
     findMany: jest.fn(async (a: any) => {
@@ -118,11 +118,12 @@ beforeEach(() => {
   }
   prismaMock.onlineOrderCharge.findMany.mockReset()
   prismaMock.onlineOrderCharge.findMany.mockImplementation((async (a: any) =>
-    enDuda && a.where?.status === 'CAPTURING' ? [{ ...enDuda }] : []) as any)
+    a.where?.status === 'CAPTURING' ? enDuda.map(c => ({ ...c })) : []) as any)
   prismaMock.onlineOrderCharge.findUnique.mockReset()
   prismaMock.onlineOrderCharge.findUnique.mockImplementation((async (a: any) => {
     if (a.where.id === CARGO_DEVUELTO.id) return { ...CARGO_DEVUELTO }
-    if (a.where.id === enDuda?.id) return { status: 'CAPTURING', lastError: null, attempts: 0, stuckAlertedAt: null, inDoubtSince: null }
+    if (enDuda.some(c => c.id === a.where.id))
+      return { status: 'CAPTURING', lastError: null, attempts: 0, stuckAlertedAt: null, inDoubtSince: null }
     return null
   }) as any)
   prismaMock.onlineOrderCharge.updateMany.mockReset()
@@ -200,7 +201,7 @@ describe('D661 (ronda 2 de codex-r3, Ruling 73): una devolución colgada ya no r
     expect(devolucion).toMatchObject({ status: 'SENDING', stripeRefundId: null, lastError: expect.stringContaining('120000 ms') })
 
     // Tick 2: llega un cobro en duda. Con la bandera libre corre la pasada completa (no sólo la visita temprana) y lo termina.
-    enDuda = CARGO_EN_DUDA
+    enDuda = [CARGO_EN_DUDA]
     const tick2 = job.checkNow()
     await jest.advanceTimersByTimeAsync(5_000)
     const r2 = await tick2
@@ -230,7 +231,7 @@ describe('D661 (ronda 3 de codex-r3, Ruling 99): el recorrido de devoluciones nu
     const plazo = new Date(Date.now() - 30_000)
     const cierraElReintento = plazo.getTime() + 5 * MIN - 90_000
     prismaMock.onlineOrder.findFirst.mockResolvedValue({ acceptDeadlineAt: plazo, charge: { status: 'CAPTURING' } } as any)
-    enDuda = CARGO_NADIE
+    enDuda = [CARGO_NADIE]
     const tick2 = job.checkNow()
     await jest.advanceTimersByTimeAsync(1_000)
     const r2 = await tick2
@@ -251,26 +252,41 @@ describe('D661 (ronda 3 de codex-r3, Ruling 99): el recorrido de devoluciones nu
 })
 
 /**
- * D661 (ajuste final, Codex r4 · Ruling 110): el plazo de 120 s de la lectura de la pasada no puede tirar la ÚLTIMA oportunidad de cobrar un
- * «Nadie» que la caja abrió a tiempo. El servidor se reinició antes de mandar la captura; la pasada lo toma con 140 s para EMPEZAR el
- * reintento y Stripe tarda 125 s en contestar la lectura. Reloj controlado: Stripe contesta cada lectura de `pi_nadie` hasta `contestaDesde`.
+ * D661 (Codex r4 · Ruling 110, forma del Ruling 117): el plazo de 120 s de la lectura no puede tirar la ÚLTIMA oportunidad de cobrar un
+ * «Nadie» que la caja abrió a tiempo (el servidor se reinició antes de mandar la captura). La primera lectura sigue con 120 s; si se
+ * agota y todavía hay margen, se relee en la MISMA pasada con una petición NUEVA cuyo plazo es lo que falta hasta el límite del
+ * reintento, el límite más cercano primero. Reloj controlado; el Stripe de prueba decide cada petición: muerta (la conexión nunca
+ * termina su cuerpo), rápida o «contesta desde» cierto momento.
  */
-describe('D661 (ajuste final, Codex r4 · Ruling 110): la lectura de un «Nadie» en su ventana espera hasta el límite del reintento', () => {
+describe('D661 (Ruling 117): una lectura agotada de un «Nadie» se relee en la misma pasada, el límite más cercano primero', () => {
   const LIMITE_MS = 140_000 // desde NOW: el último instante para EMPEZAR el reintento de captura
+  type Conducta = 'muerta' | 'rapida' | { desde: number }
   let envios: Array<{ en: number; envio: string }>
-  let capturas: number[]
+  let capturas: Array<{ id: string; en: number }>
+  /** El plazo de cada pedido, para que su límite (plazo + 5 min de gracia − 90 s de margen) caiga a `limiteMs` de NOW. */
+  let plazos: Record<string, Date>
+  const conLimite = (orderId: string, limiteMs: number) => (plazos[orderId] = new Date(NOW.getTime() + limiteMs - 5 * MIN + 90_000))
+  const cargoNadie = (sufijo: string, hace: number): Fila => ({
+    ...CARGO_NADIE,
+    id: `ch_${sufijo}`,
+    paymentIntentId: `pi_${sufijo}`,
+    onlineOrder: { orderId: `ord_${sufijo}` },
+    updatedAt: new Date(NOW.getTime() - hace),
+  })
 
-  /** El adaptador real; la lectura de `pi_nadie` contesta (sigue apartada) hasta `contestaDesde`; la cancelación, en seguida. */
-  async function stripeLento(contestaDesde: number): Promise<void> {
+  /** El adaptador real; cada petición de lectura de un PaymentIntent sigue su conducta (la última se repite); la cancelación, en seguida. */
+  async function stripePorPeticion(conductas: Record<string, Conducta[]>): Promise<void> {
     envios = []
+    const vistas: Record<string, number> = {}
     const client = {
       getClientName: () => 'prueba-d661',
       makeRequest: async (...a: unknown[]) => {
         const [, , path, method] = a as [string, number, string, string]
         const ruta = path.split('?')[0]
         envios.push({ en: Date.now() - NOW.getTime(), envio: `${method} ${ruta}` })
+        const id = ruta.split('/')[3] ?? 'pi_cap' // /v1/payment_intents/<id>[/cancel]
         const pi = (estado: string) => ({
-          id: 'pi_nadie',
+          id,
           object: 'payment_intent',
           status: estado,
           amount: 25_000,
@@ -279,12 +295,21 @@ describe('D661 (ajuste final, Codex r4 · Ruling 110): la lectura de un «Nadie�
           application_fee_amount: 290,
           latest_charge: null,
         })
+        const lista = conductas[id]
+        const conducta: Conducta | undefined = lista?.[Math.min((vistas[id] = (vistas[id] ?? -1) + 1), lista.length - 1)]
         const cuerpo =
           method === 'POST'
             ? async () => pi('canceled')
-            : ruta.endsWith('/pi_nadie')
-              ? () => new Promise(r => setTimeout(() => r(pi('requires_capture')), Math.max(0, NOW.getTime() + contestaDesde - Date.now())))
-              : async () => ({ ...pi('succeeded'), id: 'pi_cap' })
+            : conducta === undefined
+              ? async () => pi('succeeded')
+              : conducta === 'muerta'
+                ? () => new Promise(() => {})
+                : conducta === 'rapida'
+                  ? async () => pi('requires_capture')
+                  : () =>
+                      new Promise(r =>
+                        setTimeout(() => r(pi('requires_capture')), Math.max(0, NOW.getTime() + conducta.desde - Date.now())),
+                      )
         return { getStatusCode: () => 200, getHeaders: () => ({}), getRawResponse: () => ({}), toJSON: cuerpo }
       },
     }
@@ -303,21 +328,22 @@ describe('D661 (ajuste final, Codex r4 · Ruling 110): la lectura de un «Nadie�
 
   beforeEach(() => {
     ;(prismaMock as any).onlineOrderCardRefund.findMany = jest.fn(async () => []) // sin devoluciones: sólo la pasada
-    // El plazo del pedido quedó de modo que el reintento se puede EMPEZAR hasta NOW + 140 s (plazo + 5 min de gracia − 90 s de margen).
-    prismaMock.onlineOrder.findFirst.mockResolvedValue({
-      acceptDeadlineAt: new Date(NOW.getTime() + LIMITE_MS - 5 * MIN + 90_000),
+    plazos = {}
+    conLimite('ord_nadie', LIMITE_MS)
+    prismaMock.onlineOrder.findFirst.mockImplementation((async (a: any) => ({
+      acceptDeadlineAt: plazos[a.where.orderId],
       charge: { status: 'CAPTURING' },
-    } as any)
-    enDuda = CARGO_NADIE
+    })) as any)
+    enDuda = [CARGO_NADIE]
     capturas = []
-    jest.mocked(captureCharge).mockImplementation((async () => {
-      capturas.push(Date.now() - NOW.getTime())
-      enDuda = null // cobrado: deja de estar en duda
+    jest.mocked(captureCharge).mockImplementation((async (charge: Fila) => {
+      capturas.push({ id: charge.id, en: Date.now() - NOW.getTime() })
+      enDuda = enDuda.filter(c => c.id !== charge.id) // cobrado: deja de estar en duda
     }) as any)
   })
 
-  it('Stripe contesta la lectura a los 125 s y el límite es a los 140 s: UNA captura (antes del límite), cero cancelaciones y nada mandado después del límite', async () => {
-    await stripeLento(125_000)
+  it('(c) Stripe contesta desde los 125 s y el límite es a los 140 s: la primera lectura se corta a los 120 s y la NUEVA cobra a los 125 s; cero cancelaciones, nada después del límite', async () => {
+    await stripePorPeticion({ pi_nadie: [{ desde: 125_000 }] })
     const job = nuevoJob()
     const tick1 = job.checkNow()
     await jest.advanceTimersByTimeAsync(125_000)
@@ -328,19 +354,20 @@ describe('D661 (ajuste final, Codex r4 · Ruling 110): la lectura de un «Nadie�
     await jest.advanceTimersByTimeAsync(1_000)
     await tick2
 
-    expect(capturas).toEqual([125_000])
-    expect(capturas[0]).toBeLessThan(LIMITE_MS)
+    expect(capturas).toEqual([{ id: 'ch_nadie', en: 125_000 }])
     expect(captureCharge).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'ch_nadie' }),
       'ord_nadie',
       expect.objectContaining({ captureBefore: NOW.getTime() + LIMITE_MS }),
     )
+    // Dos lecturas: la primera (cortada a los 120 s) y la nueva, que sale a los 120 s.
+    expect(envios.filter(e => e.envio === 'GET /v1/payment_intents/pi_nadie').map(e => e.en)).toEqual([0, 120_000])
     expect(envios.filter(e => e.envio.startsWith('POST'))).toEqual([]) // ninguna cancelación (la captura la manda captureCharge)
     expect(failCapture).not.toHaveBeenCalled()
   })
 
-  it('una lectura que no contesta antes del límite: nada se manda después del límite y la liberación ocurre como hoy (en la pasada siguiente, con Stripe ya contestando)', async () => {
-    await stripeLento(150_000)
+  it('(c) Stripe no contesta antes del límite: la pasada relee hasta el límite y se rinde sin mandar nada; la pasada siguiente suelta como hoy', async () => {
+    await stripePorPeticion({ pi_nadie: [{ desde: 150_000 }] })
     const job = nuevoJob()
     let termino = false
     const tick1 = job.checkNow().then(r => {
@@ -348,9 +375,9 @@ describe('D661 (ajuste final, Codex r4 · Ruling 110): la lectura de un «Nadie�
       return r
     })
     await jest.advanceTimersByTimeAsync(LIMITE_MS - 1)
-    expect(termino).toBe(false) // sigue esperando: todavía hay margen para empezar el reintento
+    expect(termino).toBe(false) // la nueva lectura sigue esperando: todavía hay margen para empezar el reintento
     await jest.advanceTimersByTimeAsync(1)
-    await expect(tick1).resolves.toMatchObject({ errors: 1 }) // se rindió en el límite, sin mandar nada
+    await expect(tick1).resolves.toMatchObject({ errors: 2 }) // la primera lectura (120 s) y la nueva (el límite), sin mandar nada
     expect(capturas).toEqual([])
 
     // La pasada siguiente, con Stripe ya contestando: pasó el límite → se suelta (como hoy), nunca se cobra.
@@ -364,5 +391,48 @@ describe('D661 (ajuste final, Codex r4 · Ruling 110): la lectura de un «Nadie�
     expect(posts.map(e => e.envio)).toEqual(['POST /v1/payment_intents/pi_nadie/cancel'])
     expect(posts[0].en).toBeGreaterThanOrEqual(LIMITE_MS)
     expect(failCapture).toHaveBeenCalledWith('ch_nadie', expect.objectContaining({ reason: 'RELEASED_AFTER_GRACE' }))
+  })
+
+  it('(a) A va primero con el límite lejos y su primera petición queda muerta; B tiene el límite cerca y Stripe le contesta en seguida: B se cobra antes de su límite y A en la relectura', async () => {
+    enDuda = [cargoNadie('a', 10 * MIN), cargoNadie('b', 5 * MIN)] // A antes que B (`updatedAt`)
+    conLimite('ord_a', 600_000)
+    conLimite('ord_b', 180_000)
+    await stripePorPeticion({ pi_a: ['muerta', 'rapida'], pi_b: ['rapida'] })
+    const job = nuevoJob()
+    const tick = job.checkNow()
+    await jest.advanceTimersByTimeAsync(121_000)
+    await tick
+
+    expect(capturas).toEqual([
+      { id: 'ch_b', en: 120_000 }, // detrás de la primera lectura de A (≤ 120 s), antes de su límite de 180 s
+      { id: 'ch_a', en: 120_000 }, // la relectura: una petición NUEVA
+    ])
+    expect(captureCharge).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'ch_b' }),
+      'ord_b',
+      expect.objectContaining({ captureBefore: NOW.getTime() + 180_000 }),
+    )
+    expect(captureCharge).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'ch_a' }),
+      'ord_a',
+      expect.objectContaining({ captureBefore: NOW.getTime() + 600_000 }),
+    )
+    expect(envios.filter(e => e.envio === 'GET /v1/payment_intents/pi_a').map(e => e.en)).toEqual([0, 120_000])
+    expect(envios.filter(e => e.envio.startsWith('POST'))).toEqual([])
+    expect(failCapture).not.toHaveBeenCalled()
+  })
+
+  it('(b) A solo, con 690 s de ventana: su primera petición queda muerta y una petición NUEVA contesta en seguida → A se cobra (no se gasta toda la ventana en la conexión muerta)', async () => {
+    enDuda = [cargoNadie('a', 10 * MIN)]
+    conLimite('ord_a', 690_000)
+    await stripePorPeticion({ pi_a: ['muerta', 'rapida'] })
+    const job = nuevoJob()
+    const tick = job.checkNow()
+    await jest.advanceTimersByTimeAsync(121_000)
+    await tick
+
+    expect(capturas).toEqual([{ id: 'ch_a', en: 120_000 }])
+    expect(envios.filter(e => e.envio === 'GET /v1/payment_intents/pi_a').map(e => e.en)).toEqual([0, 120_000])
+    expect(envios.filter(e => e.envio.startsWith('POST'))).toEqual([])
   })
 })

@@ -31,6 +31,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { getProvider } from '@/services/payments/provider-registry'
 import type { AuthorizationState, ProviderRequestLimits } from '@/services/payments/providers/provider.interface'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { PlazoAgotado } from '@/utils/conPlazo'
 import {
   ACCEPT_TIMEOUT_MINUTES,
   CARD_RECONCILE_BATCH,
@@ -243,17 +244,43 @@ async function captureRetryStep(
 /** El último instante en que se puede EMPEZAR el reintento de captura de un «Nadie»: su plazo + la gracia − el margen (r5 #1, C). */
 const limiteDelReintento = (acceptDeadlineAt: Date): number => acceptDeadlineAt.getTime() + NADIE_CAPTURE_GRACE_MS - NADIE_RETRY_MARGIN_MS
 
+/** D661 (Ruling 117): la LECTURA del PaymentIntent de un CAPTURING se agotó (su plazo; no la captura). Mismo mensaje que el plazo. */
+class LecturaAgotada extends Error {
+  constructor(causa: PlazoAgotado) {
+    super(causa.message)
+    this.name = 'LecturaAgotada'
+  }
+}
+
+/** El límite del reintento de un CAPTURING de «Nadie»; `null` si no es de «Nadie». Lee el plazo del pedido sin candado: sólo decide cuánto esperar. */
+async function limiteDeNadie(charge: Row): Promise<number | null> {
+  if (!cargoDeNadie(charge) || !charge.onlineOrder) return null
+  const pedido = await prisma.onlineOrder.findFirst({
+    where: { orderId: charge.onlineOrder.orderId, venueId: charge.venueId },
+    select: { acceptDeadlineAt: true },
+  })
+  return pedido ? limiteDelReintento(pedido.acceptDeadlineAt) : null
+}
+
 /**
- * D661 (Ruling 110, ajuste final de la ronda codex-r3): la lectura de un CAPTURING de «Nadie» espera hasta el límite de su reintento cuando
- * éste queda más lejos que el plazo de la pasada (120 s). Cortarla con margen todavía hacía que la pasada siguiente llegara después del
- * límite y soltara un apartado que la caja abrió a tiempo. Nunca se manda nada después del límite: lo decide `captureRetryStep` bajo el
- * candado, y `captureCharge` lo revisa otra vez justo antes de Stripe. Sin pedido (o «Mi equipo»), el plazo de siempre.
+ * D661 (Ruling 117, reemplaza la forma del 110): los CAPTURING de «Nadie» cuya lectura se agotó a los 120 s se releen en ESTA pasada,
+ * después del dinero en duda, el límite más cercano primero, cada uno con una petición NUEVA cuyo plazo es lo que le falta hasta su límite:
+ * una conexión muerta no se lleva toda su ventana y uno con el límite lejos no retiene a otro con el límite cerca. Nunca se manda nada
+ * después del límite (`captureRetryStep` bajo el candado; `captureCharge` lo revisa otra vez antes de Stripe).
+ * Límite declarado: si Stripe tarda ~125 s en CADA petición, una ventana de 140 s se pierde (la primera se corta a los 120 s y la nueva
+ * tiene 20 s); no se sigue esperando la original mientras corre la nueva.
  */
-async function plazoDeLaLectura(charge: Row, orderId: string): Promise<ProviderRequestLimits> {
-  if (!cargoDeNadie(charge)) return PLAZO_DE_LA_PASADA
-  const pedido = await prisma.onlineOrder.findFirst({ where: { orderId, venueId: charge.venueId }, select: { acceptDeadlineAt: true } })
-  const queda = pedido ? limiteDelReintento(pedido.acceptDeadlineAt) - Date.now() : 0
-  return queda > (PLAZO_DE_LA_PASADA.plazoMs ?? 0) ? { plazoMs: queda } : PLAZO_DE_LA_PASADA
+async function releerAgotadas(agotadas: Row[], now: Date, result: ReconcileResult): Promise<void> {
+  const conLimite: Array<{ charge: Row; limite: number }> = []
+  for (const charge of agotadas) {
+    const limite = await limiteDeNadie(charge)
+    if (limite != null) conLimite.push({ charge, limite })
+  }
+  conLimite.sort((a, b) => a.limite - b.limite || (a.charge.id < b.charge.id ? -1 : 1))
+  for (const { charge, limite } of conLimite) {
+    const queda = limite - Date.now()
+    if (queda > 0) await handle(charge, now, result, undefined, { plazoMs: queda })
+  }
 }
 
 /**
@@ -281,15 +308,17 @@ async function releaseCaptureAfterGrace(charge: Row, orderId: string, meta: { st
   else await failCapture(charge.id, { staffId: null, reason: 'RELEASED_AFTER_GRACE' }) // A4: no fue la tarjeta
 }
 
-async function processCapturing(charge: Row): Promise<void> {
+/** `lectura`: el plazo de la lectura del PaymentIntent (120 s; la relectura del Ruling 117, lo que falta hasta el límite). */
+async function processCapturing(charge: Row, lectura: ProviderRequestLimits = PLAZO_DE_LA_PASADA): Promise<void> {
   if (!charge.onlineOrder || !charge.paymentIntentId) throw new Error('cargo CAPTURING sin pedido o sin PaymentIntent')
   const orderId = charge.onlineOrder.orderId
   const merchant = chargeMerchant(charge)
-  const state = await getProvider(merchant).getAuthorization(
-    merchant,
-    { paymentIntentId: charge.paymentIntentId },
-    await plazoDeLaLectura(charge, orderId),
-  )
+  let state: AuthorizationState
+  try {
+    state = await getProvider(merchant).getAuthorization(merchant, { paymentIntentId: charge.paymentIntentId }, lectura)
+  } catch (error) {
+    throw error instanceof PlazoAgotado ? new LecturaAgotada(error) : error
+  }
   // 3C: sin hora fija: `capturedAt`, `acceptedAt` y el rechazo llevan la hora de la escritura, leída bajo el candado de la orden.
   const meta = { staffId: null, estimatedMinutes: await prepMinutes(charge.venueId) }
   if (state.piStatus === 'succeeded') await finishCapture(charge.id, state, meta)
@@ -318,7 +347,12 @@ async function processCapturing(charge: Row): Promise<void> {
  * `limites`: los de cada llamada a Stripe de un borrador de la visita temprana (Rulings 42, 51 y 73); en la pasada principal, sólo el
  * plazo duro (Ruling 73).
  */
-async function processOne(charge: Row, now: Date, limites: ProviderRequestLimits = PLAZO_DE_LA_PASADA): Promise<void> {
+async function processOne(
+  charge: Row,
+  now: Date,
+  limites: ProviderRequestLimits = PLAZO_DE_LA_PASADA,
+  lectura: ProviderRequestLimits = PLAZO_DE_LA_PASADA,
+): Promise<void> {
   switch (charge.status) {
     case S.PENDING_AUTH:
       if (!charge.checkoutSessionId && (await recoverCheckout(charge, now)) !== 'GOT') return
@@ -326,7 +360,7 @@ async function processOne(charge: Row, now: Date, limites: ProviderRequestLimits
       await confirmCardAuthorization(charge.id, undefined, limites)
       return
     case S.CAPTURING:
-      return processCapturing(charge)
+      return processCapturing(charge, lectura)
     case S.RELEASING:
       await releaseCharge(charge.id, limites)
       return
@@ -410,13 +444,21 @@ async function settle(charge: Row, now: Date, failure: string | null): Promise<O
 
 const emptyResult = (): ReconcileResult => ({ scanned: 0, finished: 0, released: 0, abandoned: 0, stuck: 0, errors: 0 })
 
-/** Un cargo, en su propio `try`: procesarlo, anotarlo y contarlo. */
-async function handle(charge: Row, now: Date, result: ReconcileResult, limites?: ProviderRequestLimits): Promise<void> {
+/** Un cargo, en su propio `try`: procesarlo, anotarlo y contarlo. Devuelve el error que atrapó (Ruling 117: la pasada relee las lecturas agotadas). */
+async function handle(
+  charge: Row,
+  now: Date,
+  result: ReconcileResult,
+  limites?: ProviderRequestLimits,
+  lectura?: ProviderRequestLimits,
+): Promise<unknown> {
   result.scanned += 1
   let failure: string | null = null
+  let atrapado: unknown
   try {
-    await processOne(charge, now, limites)
+    await processOne(charge, now, limites, lectura)
   } catch (error) {
+    atrapado = error
     failure = error instanceof Error ? error.message : String(error)
     result.errors += 1
     logger.error('[OnlineOrderCard] el conciliador no pudo con un cargo (sigue con los demás)', {
@@ -432,6 +474,7 @@ async function handle(charge: Row, now: Date, result: ReconcileResult, limites?:
   } catch (error) {
     logger.error('[OnlineOrderCard] el conciliador no pudo anotar un cargo', { chargeId: charge.id, error })
   }
+  return atrapado
 }
 
 // ponytail: candado en memoria (una sola instancia, como el `isRunning` del job); con 2 instancias, un advisory lock por visita.
@@ -466,7 +509,10 @@ export async function reconcileCardCharges(now: Date, readEntry: ReadCandidates)
   const result = emptyResult()
   const inicio = Date.now()
   const { inDoubt, rest } = await readCandidates(now, readEntry)
-  for (const charge of inDoubt) await handle(charge, now, result) // A2: el dinero en duda, primero
+  // A2: el dinero en duda, primero. Ruling 117: las lecturas agotadas de un «Nadie» todavía en su ventana se releen enseguida.
+  const agotadas: Row[] = []
+  for (const charge of inDoubt) if ((await handle(charge, now, result)) instanceof LecturaAgotada) agotadas.push(charge)
+  await releerAgotadas(agotadas, now, result)
   // D661 (B, Ruling 42): la visita temprana lee su lista al entrar al carril, con la hora de la pasada adelantada lo que ya tardó (en
   // producción, la hora real): un borrador que cumplió sus 2 min mientras se atendía el dinero en duda se visita en esta pasada. Addendum
   // r3: su página viva se mide desde `now` (el inicio), la misma hora con que se leyeron los vencidos.
