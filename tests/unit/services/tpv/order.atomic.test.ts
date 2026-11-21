@@ -1000,9 +1000,26 @@ describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la
     expect(globalDb.orderAction?.create).not.toHaveBeenCalled()
   })
 
-  /** Las lápidas de la cuenta: una anulación (`OrderAction` VOID) que nombra estas llaves. */
-  const conLapidas = (anuladas: string[]) =>
-    tx.orderAction.findMany.mockImplementation(async () => (anuladas.length ? [{ id: 'void-1', metadata: { externalIds: anuladas } }] : []))
+  /**
+   * Las lápidas del negocio: la lectura de `OrderAction` VOID (D29: una sola consulta en todo el negocio, con su índice) contesta
+   * cuáles de las llaves pedidas están anuladas. Las demás consultas crudas siguen como en `db()`.
+   */
+  // La lectura de lápidas llega como `Prisma.Sql` (`consultaDeLapidasDelNegocio`); las demás, como plantilla.
+  const textoDe = (q: any): string => (q?.raw ?? q?.strings ?? []).join('')
+  const valoresDe = ([q, ...resto]: any[]): any[] => q?.values ?? resto
+  const esLecturaDeLapidas = (q: any) => textoDe(q).includes('"OrderAction"')
+  const lecturasDeLapidas = () => tx.$queryRaw.mock.calls.filter(([q]: any[]) => esLecturaDeLapidas(q))
+  const conLapidas = (anuladas: string[]) => {
+    const deSiempre = tx.$queryRaw.getMockImplementation()
+    tx.$queryRaw.mockImplementation(async (q: any, ...values: any[]) =>
+      // Las anulaciones del negocio que nombran alguna llave pedida, con su arreglo (el cruce lo hace el servicio).
+      esLecturaDeLapidas(q)
+        ? anuladas.some(llave => valoresDe([q, ...values]).some(v => Array.isArray(v) && v.includes(llave)))
+          ? [{ llaves: [...anuladas, 'sync:otra-ronda:0'] }]
+          : []
+        : deSiempre(q, ...values),
+    )
+  }
 
   it('#1: el reenvío de la ronda NO vuelve a crear el renglón anulado (el resto, como réplica)', async () => {
     conLapidas(['sync:r:0'])
@@ -1018,14 +1035,13 @@ describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la
       1,
       true,
     )
-    // Codex r5 #7, r6 #3 y r8 #8: se recorren TODAS las anulaciones de la cuenta por páginas con cursor (no «las últimas N», ni una
-    // consulta por llave).
-    expect(tx.orderAction.findMany).toHaveBeenCalledWith({
-      where: { orderId: 'order', actionType: 'VOID' },
-      select: { id: true, metadata: true },
-      orderBy: { id: 'asc' },
-      take: 200,
-    })
+    // D29: UNA lectura en todo el negocio (no sólo en la cuenta), con las llaves de ronda pedidas; exacta (sin «las últimas N», Codex
+    // r5 #7 y r6 #3) y sin una consulta por llave (Codex r7 #1 y r8 #8).
+    expect(lecturasDeLapidas()).toHaveLength(1)
+    const valores = valoresDe(lecturasDeLapidas()[0])
+    expect(valores).toContain('venue')
+    expect(valores).toContainEqual(['sync:r:0', 'sync:r:1'])
+    expect(tx.orderAction.findMany).not.toHaveBeenCalled()
     expect(tx.orderItem.create).not.toHaveBeenCalled()
   })
 
@@ -1039,7 +1055,7 @@ describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la
       1,
       true,
     )
-    expect(tx.orderAction.findMany).not.toHaveBeenCalled()
+    expect(lecturasDeLapidas()).toHaveLength(0)
     expect(tx.orderItem.create).toHaveBeenCalledTimes(1)
   })
 
@@ -1052,16 +1068,16 @@ describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la
     expect(tx.orderItem.create.mock.calls.map((c: any[]) => c[0].data.externalId)).not.toContain('sync:r:200')
   })
 
-  it('Codex r8 #8: muchas anulaciones se leen por páginas con cursor hasta encontrar la llave', async () => {
-    const pagina1 = Array.from({ length: 200 }, (_, i) => ({
-      id: `v${String(i).padStart(3, '0')}`,
-      metadata: { externalIds: [`otra:${i}`] },
-    }))
-    tx.orderAction.findMany.mockResolvedValueOnce(pagina1).mockResolvedValueOnce([{ id: 'v200', metadata: { externalIds: ['sync:r:0'] } }])
+  it('D29: la lápida de OTRA cuenta del negocio también cuenta (otra caja separó el renglón y lo anuló ahí)', async () => {
+    // La lectura no filtra por la cuenta que recibe la ronda: sólo por el negocio (y su índice por llave).
+    conLapidas(['sync:r:0'])
     tx.orderItem.findMany.mockResolvedValueOnce([])
     await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 1, externalId: 'sync:r:0' }], 1, true)
-    expect(tx.orderAction.findMany).toHaveBeenCalledTimes(2)
-    expect(tx.orderAction.findMany.mock.calls[1][0]).toMatchObject({ cursor: { id: 'v199' }, skip: 1, take: 200 })
+    const [q] = lecturasDeLapidas()[0]
+    // Ni la cuenta ni un filtro por cuenta: sólo el negocio y las llaves, por el índice con la barrera OFFSET 0 (Codex r1 #3).
+    expect(textoDe(q)).not.toMatch(/"orderId"\s*=\s*$/m)
+    expect(textoDe(q)).toMatch(/OFFSET 0/)
+    expect(valoresDe(lecturasDeLapidas()[0])).not.toContain('order')
     expect(tx.orderItem.create).not.toHaveBeenCalled()
   })
 
@@ -1078,7 +1094,7 @@ describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la
       1,
       true,
     )
-    expect(tx.orderAction.findMany).toHaveBeenCalledTimes(1)
+    expect(lecturasDeLapidas()).toHaveLength(1)
     expect(tx.orderItem.create).toHaveBeenCalledTimes(2)
   })
 
