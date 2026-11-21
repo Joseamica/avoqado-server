@@ -132,7 +132,7 @@ export async function createDiscount(req: Request, res: Response) {
     }
 
     // D14: ANDROID e iOS no pasan por Zod; la regla de alcance y límites es la misma del panel.
-    const invalido = validarCambioDeDescuento(null, { scope, targetCategoryIds, maxTotalUses, maxUsesPerCustomer })
+    const invalido = validarCambioDeDescuento(null, { scope, targetCategoryIds, maxTotalUses, maxUsesPerCustomer, validFrom, validUntil })
     if (invalido) return res.status(400).json({ success: false, message: invalido })
 
     // Validate value based on type
@@ -275,7 +275,7 @@ export async function updateDiscount(req: Request, res: Response) {
       active,
     } = req.body
 
-    const cambio = { scope, targetCategoryIds, maxTotalUses, maxUsesPerCustomer }
+    const cambio = { scope, targetCategoryIds, maxTotalUses, maxUsesPerCustomer, validFrom, validUntil }
     const invalido = validarCambioDeDescuento(existing, cambio)
     if (invalido) return res.status(400).json({ success: false, message: invalido })
 

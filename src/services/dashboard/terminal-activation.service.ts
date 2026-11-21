@@ -60,7 +60,7 @@ export async function generateActivationCode(terminalId: string, staffId: string
 
   // Set expiry to 7 days from now
   const expiryDate = new Date()
-  expiryDate.setDate(expiryDate.getDate() + 7)
+  expiryDate.setUTCDate(expiryDate.getUTCDate() + 7)
 
   // Update terminal with activation code, under the same scope it was read with
   await writeScopedTerminal(

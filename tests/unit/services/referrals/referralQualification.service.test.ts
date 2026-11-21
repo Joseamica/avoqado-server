@@ -151,6 +151,32 @@ describe('emitTierRewards', () => {
     expect(result[0].couponCode?.code).toMatch(/^MINDFORM-TIER1-/)
   })
 
+  // D32: la vigencia del cupón son 90 × 24 h exactas, sin importar la zona horaria del proceso
+  // (con setDate en America/Los_Angeles, cruzar el fin del horario de verano agregaba una hora).
+  it('PERCENT_COUPON: validUntil = ahora + 90 días exactos, también cruzando el cambio de horario', async () => {
+    jest.useFakeTimers({ now: new Date('2026-10-30T18:00:00.000Z'), doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
+    try {
+      mockedPrisma.referralTierReward.findMany.mockResolvedValue([
+        { id: 'tr_1', rewardType: 'PERCENT_COUPON', rewardPercent: 15, rewardProductId: null, rewardQuantity: 1 },
+      ])
+      mockedPrisma.referralRewardGrant.createMany.mockResolvedValue({ count: 1 })
+      mockedPrisma.referralRewardGrant.findFirst.mockResolvedValue({ id: 'grant_1', tierRewardId: 'tr_1' })
+      mockedPrisma.discount.create.mockResolvedValue({ id: 'disc_1', value: 15 })
+      mockedPrisma.customerDiscount.create.mockResolvedValue({ id: 'cd_1' })
+      mockedPrisma.couponCode.create.mockResolvedValue({ id: 'cc_1', code: 'MINDFORM-TIER1-C123' })
+      mockedPrisma.referralRewardGrant.update.mockResolvedValue({ id: 'grant_1', status: 'ISSUED' })
+
+      await emitTierRewards(mockedPrisma, baseInput)
+
+      const esperado = '2027-01-28T18:00:00.000Z'
+      expect(mockedPrisma.discount.create.mock.calls[0][0].data.validUntil.toISOString()).toBe(esperado)
+      expect(mockedPrisma.customerDiscount.create.mock.calls[0][0].data.validUntil.toISOString()).toBe(esperado)
+      expect(mockedPrisma.couponCode.create.mock.calls[0][0].data.validUntil.toISOString()).toBe(esperado)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
   it('PERMANENT_DISCOUNT emits an isAutomatic Discount with no validUntil/usage caps', async () => {
     mockedPrisma.referralTierReward.findMany.mockResolvedValue([
       { id: 'tr_2', rewardType: 'PERMANENT_DISCOUNT', rewardPercent: 5, rewardProductId: null, rewardQuantity: 1 },

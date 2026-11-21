@@ -7,6 +7,7 @@ import {
   dondeEscribir,
   FORMA_INVALIDA,
   LIMITE_INVALIDO,
+  RANGO_AL_REVES,
   SIN_CATEGORIAS,
   validarCambioDeDescuento,
 } from '../../../../src/services/dashboard/reglasDeDescuento'
@@ -97,7 +98,75 @@ describe('validarCambioDeDescuento · familia B (límites de uso)', () => {
   })
 })
 
+describe('validarCambioDeDescuento · familia C (vigencia, D37)', () => {
+  const d = (iso: string) => new Date(iso)
+  const del18al20 = guardado({ validFrom: d('2026-12-18T06:00:00.000Z'), validUntil: d('2026-12-21T05:59:59.999Z') })
+
+  it('crear con «desde» después de «hasta»: no; igual, antes o con una sola fecha: sí', () => {
+    expect(validarCambioDeDescuento(null, { validFrom: d('2026-12-20T06:00:00Z'), validUntil: d('2026-12-13T05:59:59Z') })).toBe(
+      RANGO_AL_REVES,
+    )
+    expect(validarCambioDeDescuento(null, { validFrom: d('2026-12-01T06:00:00Z'), validUntil: d('2026-12-02T05:59:59Z') })).toBeNull()
+    expect(validarCambioDeDescuento(null, { validUntil: d('2026-12-02T05:59:59Z') })).toBeNull()
+    expect(validarCambioDeDescuento(null, {})).toBeNull()
+  })
+
+  it('🔴 Codex D37 r1 #3 y r2 #2: editar SÓLO una fecha mira el resultado con la otra guardada (dos encargados a la vez)', () => {
+    // A ya movió el inicio al 18; B, con su formulario viejo, adelanta el fin al 12 → quedaría del 18 al 12: no.
+    expect(validarCambioDeDescuento(del18al20, { validUntil: d('2026-12-13T05:59:59.999Z') })).toBe(RANGO_AL_REVES)
+    expect(validarCambioDeDescuento(del18al20, { validFrom: d('2026-12-25T06:00:00.000Z') })).toBe(RANGO_AL_REVES)
+    expect(validarCambioDeDescuento(del18al20, { validUntil: d('2026-12-30T05:59:59.999Z') })).toBeNull()
+  })
+
+  it('las apps mandan texto: se lee igual; vacío o null quita la fecha', () => {
+    expect(validarCambioDeDescuento(del18al20, { validUntil: '2026-12-12' })).toBe(RANGO_AL_REVES)
+    expect(validarCambioDeDescuento(del18al20, { validFrom: null, validUntil: '2026-12-12' })).toBeNull()
+    expect(validarCambioDeDescuento(del18al20, { validFrom: '', validUntil: '2026-12-12' })).toBeNull()
+  })
+
+  it('uno viejo que YA está al revés: editar otra cosa sí; mandarle fechas que lo dejan al revés, no', () => {
+    const alReves = guardado({ validFrom: d('2026-12-20T06:00:00Z'), validUntil: d('2026-12-13T05:59:59Z') })
+    expect(validarCambioDeDescuento(alReves, { maxTotalUses: 5 })).toBeNull()
+    expect(validarCambioDeDescuento(alReves, { validUntil: d('2026-12-14T05:59:59Z') })).toBe(RANGO_AL_REVES)
+    expect(validarCambioDeDescuento(alReves, { validUntil: d('2026-12-31T05:59:59Z') })).toBeNull()
+  })
+
+  it('🔴 Codex D37 r3 #2: se lee igual que lo guardan las apps: 0 quita la fecha y un número son milisegundos', () => {
+    // Antes del arreglo, `validUntil: 0` se leía como el año 2000 y daba 400; ahora es «sin fecha», como lo guarda el controlador.
+    expect(validarCambioDeDescuento(del18al20, { validUntil: 0 })).toBeNull()
+    // Un fin anterior al inicio mandado como número de ms: se rechaza (antes pasaba la regla y se guardaba).
+    expect(validarCambioDeDescuento(del18al20, { validUntil: new Date('2026-12-13T05:59:59.999Z').getTime() })).toBe(RANGO_AL_REVES)
+  })
+
+  it('«Duplicar» (crear desde una copia) uno al revés: no', () => {
+    const alReves = guardado({ validFrom: d('2026-12-20T06:00:00Z'), validUntil: d('2026-12-13T05:59:59Z') })
+    expect(validarCambioDeDescuento(null, alReves)).toBe(RANGO_AL_REVES)
+  })
+})
+
 describe('dondeEscribir · dos ediciones a la vez', () => {
+  it('🔴 Codex D37 r3 #1: si el cambio trae una fecha, se escribe sólo si las dos fechas siguen como se leyeron (dos guardados a la vez)', () => {
+    const leido = guardado({ validFrom: new Date('2026-12-10T06:00:00.000Z'), validUntil: new Date('2026-12-21T05:59:59.999Z') })
+    expect(dondeEscribir('k1', leido, { validUntil: new Date('2026-12-13T05:59:59.999Z') })).toEqual({
+      id: 'k1',
+      validFrom: new Date('2026-12-10T06:00:00.000Z'),
+      validUntil: new Date('2026-12-21T05:59:59.999Z'),
+    })
+    // Sin fechas ni regla en el cambio: sólo por id (no hay 409 falso).
+    expect(dondeEscribir('k1', leido, { active: false })).toEqual({ id: 'k1' })
+  })
+
+  it('🔴 Codex D37 r4 #2: guardar un límite o el alcance NO se condiciona a las fechas (otra persona que sólo movió una fecha no da 409)', () => {
+    const leido = guardado({ maxTotalUses: 3, validFrom: new Date('2026-12-10T06:00:00.000Z'), validUntil: null })
+    expect(dondeEscribir('d1', leido, { maxTotalUses: 5 })).toEqual({
+      id: 'd1',
+      scope: 'ORDER',
+      OR: [{ targetCategoryIds: { equals: [] } }, { targetCategoryIds: { equals: null } }],
+      maxTotalUses: 3,
+      maxUsesPerCustomer: null,
+    })
+  })
+
   const g = guardado({ scope: 'CATEGORY', targetCategoryIds: ['c1'], maxTotalUses: 3 })
 
   it('🔴 r5 #1 y r2 #3: si el cambio MANDA un campo de la regla (aunque sea igual), escribe sólo si siguen como se leyeron', () => {

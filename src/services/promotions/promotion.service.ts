@@ -91,6 +91,19 @@ export async function applyPromotionToOrder(
   }
 }
 
+/**
+ * Una cuenta pagada, reembolsada o cerrada no recibe combos. D34: también la usa la ronda cuando SALTA un combo que ya vive en otra
+ * cuenta; saltarlo no puede reabrir ni tocar una cuenta que el combo nuevo habría rechazado (Codex r1 #1).
+ */
+export function rechazarSiLaCuentaNoAceptaCombos(order: { paymentStatus: string; status: string }): void {
+  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'REFUNDED') {
+    throw new BadRequestError('A una cuenta ya pagada no se le pueden agregar promociones.')
+  }
+  if (order.status === 'COMPLETED' || order.status === 'CANCELLED' || order.status === 'DELETED') {
+    throw new BadRequestError('Esa cuenta ya está cerrada.')
+  }
+}
+
 async function applyPromotionInTransaction(
   tx: Prisma.TransactionClient,
   params: ApplyPromotionParams,
@@ -126,12 +139,7 @@ async function applyPromotionInTransaction(
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
   await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'promociones')
-  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'REFUNDED') {
-    throw new BadRequestError('A una cuenta ya pagada no se le pueden agregar promociones.')
-  }
-  if (order.status === 'COMPLETED' || order.status === 'CANCELLED' || order.status === 'DELETED') {
-    throw new BadRequestError('Esa cuenta ya está cerrada.')
-  }
+  rechazarSiLaCuentaNoAceptaCombos(order)
 
   const promotion = await tx.promotion.findFirst({
     where: { id: promotionId, venueId },
