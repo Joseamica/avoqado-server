@@ -231,7 +231,7 @@ describe('D661 (ronda 3 de codex-r3, Ruling 99): el recorrido de devoluciones nu
     const plazo = new Date(Date.now() - 30_000)
     const cierraElReintento = plazo.getTime() + 5 * MIN - 90_000
     prismaMock.onlineOrder.findFirst.mockResolvedValue({ acceptDeadlineAt: plazo, charge: { status: 'CAPTURING' } } as any)
-    enDuda = [CARGO_NADIE]
+    enDuda = [{ ...CARGO_NADIE, onlineOrder: { orderId: 'ord_nadie', acceptDeadlineAt: plazo } }] // como lo trae la lectura real
     const tick2 = job.checkNow()
     await jest.advanceTimersByTimeAsync(1_000)
     const r2 = await tick2
@@ -334,7 +334,7 @@ describe('D661 (Ruling 117): una lectura agotada de un «Nadie» se relee en la 
       acceptDeadlineAt: plazos[a.where.orderId],
       charge: { status: 'CAPTURING' },
     })) as any)
-    enDuda = [CARGO_NADIE]
+    enDuda = [cargoNadie('nadie', 5 * MIN)] // CARGO_NADIE con el plazo de su pedido, como lo trae la lectura real (Ruling 120)
     capturas = []
     jest.mocked(captureCharge).mockImplementation((async (charge: Fila) => {
       capturas.push({ id: charge.id, en: Date.now() - NOW.getTime() })
@@ -434,6 +434,8 @@ describe('D661 (Ruling 117): una lectura agotada de un «Nadie» se relee en la 
     expect(capturas).toEqual([{ id: 'ch_a', en: 120_000 }])
     expect(envios.filter(e => e.envio === 'GET /v1/payment_intents/pi_a').map(e => e.en)).toEqual([0, 120_000])
     expect(envios.filter(e => e.envio.startsWith('POST'))).toEqual([])
+    // Ruling 120: el límite de la relectura sale de la fila; el pedido sólo se lee bajo el candado (`captureRetryStep`), dentro del `try`.
+    expect(prismaMock.onlineOrder.findFirst).toHaveBeenCalledTimes(1)
   })
 
   it('Ruling 119: B tiene su límite a 90 s (dentro de los primeros 120 s de la pasada) y A, más viejo, el límite lejos y su primera petición muerta: el dinero en duda va por límite, así que B se cobra antes de su límite y A en la relectura', async () => {
@@ -452,6 +454,50 @@ describe('D661 (Ruling 117): una lectura agotada de un «Nadie» se relee en la 
     ])
     expect(capturas[0].en).toBeLessThan(90_000)
     expect(envios.filter(e => e.envio.startsWith('POST'))).toEqual([]) // B no se soltó
+    expect(failCapture).not.toHaveBeenCalled()
+  })
+
+  it('Ruling 120: E, de «Nadie», ya pasó su límite y su lectura cuelga; B tiene su límite a 90 s y Stripe le contesta en seguida: E va después de los vivos, así que B se cobra antes de su límite', async () => {
+    conLimite('ord_e', -60_000) // ya no tiene qué salvar: soltarlo puede tardar lectura + cancelación + relectura
+    conLimite('ord_b', 90_000)
+    enDuda = [cargoNadie('e', 10 * MIN), cargoNadie('b', 5 * MIN)]
+    await stripePorPeticion({ pi_e: ['muerta'], pi_b: ['rapida'] })
+    const job = nuevoJob()
+    const tick = job.checkNow()
+    await jest.advanceTimersByTimeAsync(121_000)
+    await tick
+
+    expect(capturas).toEqual([{ id: 'ch_b', en: 0 }])
+    expect(envios.filter(e => e.envio.startsWith('POST'))).toEqual([]) // B no se soltó
+    // E se lee después de B; su lectura se agota y no se relee (su límite ya pasó). La pasada siguiente lo suelta, como hoy.
+    expect(envios.filter(e => e.envio === 'GET /v1/payment_intents/pi_e').map(e => e.en)).toEqual([0])
+    expect(failCapture).not.toHaveBeenCalled()
+  })
+
+  it('Ruling 120: la lectura agotada de un «Mi equipo» no se relee (no tiene límite): una sola lectura, nada se manda y lo retoma la pasada siguiente', async () => {
+    enDuda = [{ ...CARGO_EN_DUDA, id: 'ch_eq', paymentIntentId: 'pi_eq', onlineOrder: { orderId: 'ord_eq' } }]
+    await stripePorPeticion({ pi_eq: ['muerta', 'rapida'] })
+    const job = nuevoJob()
+    const tick = job.checkNow()
+    await jest.advanceTimersByTimeAsync(121_000)
+    await expect(tick).resolves.toMatchObject({ errors: 1 })
+
+    expect(envios.filter(e => e.envio.includes('pi_eq')).map(e => e.en)).toEqual([0])
+    expect(capturas).toEqual([])
+    expect(failCapture).not.toHaveBeenCalled()
+  })
+
+  it('Ruling 120: un «Nadie» cuya lectura se agotó y cuyo límite pasó durante el ciclo (a los 100 s) no se relee: no se manda nada', async () => {
+    conLimite('ord_a', 100_000)
+    enDuda = [cargoNadie('a', 10 * MIN)]
+    await stripePorPeticion({ pi_a: ['muerta', 'rapida'] })
+    const job = nuevoJob()
+    const tick = job.checkNow()
+    await jest.advanceTimersByTimeAsync(121_000)
+    await expect(tick).resolves.toMatchObject({ errors: 1 })
+
+    expect(envios.filter(e => e.envio.includes('pi_a')).map(e => e.en)).toEqual([0]) // ni relectura ni cancelación
+    expect(capturas).toEqual([])
     expect(failCapture).not.toHaveBeenCalled()
   })
 })

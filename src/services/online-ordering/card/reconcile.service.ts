@@ -22,7 +22,8 @@
  * lectura, y la liberación con su relectura) espera a lo más `LIMITES_TEMPRANOS` y sin reintentos del SDK: cinco llamadas colgadas ya
  * no retienen el carril minutos. D661 (Ruling 73): TODA llamada a Stripe del conciliador lleva además nuestro plazo duro (la de la visita
  * temprana, 15 s; la del reintento de «Nadie», 45 s; las demás de la pasada, 120 s): una respuesta cuyo cuerpo nunca termina ya no
- * retiene el carril ni la pasada.
+ * retiene el carril ni la pasada. D661 (Ruling 117): la excepción es la relectura de un CAPTURING de «Nadie» cuya primera lectura se
+ * agotó: espera hasta el límite de su reintento, y mientras tanto la pasada no avanza.
  */
 import { OnlineOrderChargeStatus as S, OnlineOrderStatus, OrderStatus, Prisma, type OnlineOrderCharge } from '@prisma/client'
 import logger from '@/config/logger'
@@ -193,13 +194,18 @@ async function readCandidates(now: Date, readEntry: ReadCandidates): Promise<{ i
 /**
  * D661 (Ruling 119): los CAPTURING, el límite del reintento más cercano primero (los de «Nadie», con su pedido); «Mi equipo» y lo que no
  * tiene límite van después, en su orden de siempre. Así uno cuyo límite cae dentro de los primeros 120 s de la pasada no espera la primera
- * lectura de otro con el límite lejos. ponytail: el orden es en memoria sobre la página de 50 (la base la da por `updatedAt`): con más de 50
- * en duda a la vez, uno con el límite cerca puede quedar en la página siguiente; ordenar en SQL por ese límite si un día pasa.
+ * lectura de otro con el límite lejos. D661 (Ruling 120): un «Nadie» cuyo límite YA pasó también va después: no tiene qué salvar y
+ * soltarlo puede tardar lectura + cancelación + relectura (120 s cada una). ponytail: el orden es en memoria sobre la página de 50 (la base
+ * la da por `updatedAt`): con más de 50 en duda a la vez, uno con el límite cerca puede quedar en la página siguiente; ordenar en SQL por
+ * ese límite si un día pasa.
  */
 function porLimite(capturing: Row[]): Row[] {
-  const limite = (c: Row) =>
-    cargoDeNadie(c) && c.onlineOrder?.acceptDeadlineAt ? limiteDelReintento(c.onlineOrder.acceptDeadlineAt) : Infinity
-  return [...capturing].sort((a, b) => (limite(a) === limite(b) ? 0 : limite(a) - limite(b)))
+  const ahora = Date.now()
+  const clave = (c: Row) => {
+    const limite = limiteDeNadie(c)
+    return limite != null && limite > ahora ? limite : Infinity
+  }
+  return [...capturing].sort((a, b) => (clave(a) === clave(b) ? 0 : clave(a) - clave(b)))
 }
 
 /** `PENDING_AUTH` sin sesión guardada: la MISMA clave y los MISMOS parámetros del último intento. */
@@ -264,14 +270,12 @@ class LecturaAgotada extends Error {
   }
 }
 
-/** El límite del reintento de un CAPTURING de «Nadie»; `null` si no es de «Nadie». Lee el plazo del pedido sin candado: sólo decide cuánto esperar. */
-async function limiteDeNadie(charge: Row): Promise<number | null> {
-  if (!cargoDeNadie(charge) || !charge.onlineOrder) return null
-  const pedido = await prisma.onlineOrder.findFirst({
-    where: { orderId: charge.onlineOrder.orderId, venueId: charge.venueId },
-    select: { acceptDeadlineAt: true },
-  })
-  return pedido ? limiteDelReintento(pedido.acceptDeadlineAt) : null
+/**
+ * El límite del reintento de un CAPTURING de «Nadie», con el plazo que trajo su lectura (Ruling 120: sin otra consulta a la base, fuera del
+ * `try` de `handle`); `null` si no es de «Nadie». Sólo decide el orden y cuánto esperar: lo que se manda lo decide `captureRetryStep`.
+ */
+function limiteDeNadie(charge: Row): number | null {
+  return cargoDeNadie(charge) && charge.onlineOrder?.acceptDeadlineAt ? limiteDelReintento(charge.onlineOrder.acceptDeadlineAt) : null
 }
 
 /**
@@ -283,11 +287,10 @@ async function limiteDeNadie(charge: Row): Promise<number | null> {
  * tiene 20 s); no se sigue esperando la original mientras corre la nueva.
  */
 async function releerAgotadas(agotadas: Row[], now: Date, result: ReconcileResult): Promise<void> {
-  const conLimite: Array<{ charge: Row; limite: number }> = []
-  for (const charge of agotadas) {
-    const limite = await limiteDeNadie(charge)
-    if (limite != null) conLimite.push({ charge, limite })
-  }
+  const conLimite = agotadas.flatMap(charge => {
+    const limite = limiteDeNadie(charge)
+    return limite == null ? [] : [{ charge, limite }]
+  })
   conLimite.sort((a, b) => a.limite - b.limite || (a.charge.id < b.charge.id ? -1 : 1))
   for (const { charge, limite } of conLimite) {
     const queda = limite - Date.now()
