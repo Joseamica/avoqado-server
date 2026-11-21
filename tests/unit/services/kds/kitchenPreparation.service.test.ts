@@ -37,7 +37,13 @@ describe('persisted kitchen preparation', () => {
     expect(result.items[0]).toMatchObject({ id: 'line-a', preparationRevision: 1, preparation: { HELD: 1, PENDING: 1 } })
     expect(prismaMock.kdsOrderItem.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ id: 'line-a', preparationRevision: 0, kdsOrder: { venueId: 'venue-a', orderId: 'order-a' } }),
+        // D15: la escritura también exige que la fila no esté anulada (Codex r2 #1).
+        where: expect.objectContaining({
+          id: 'line-a',
+          preparationRevision: 0,
+          removedAt: null,
+          kdsOrder: { venueId: 'venue-a', orderId: 'order-a' },
+        }),
       }),
     )
     expect(prismaMock.activityLog.create).toHaveBeenCalledWith(

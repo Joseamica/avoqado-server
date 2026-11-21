@@ -242,7 +242,8 @@ export async function applyKitchenPreparation(
     })
     for (const { row, after } of updates) {
       const cas = await tx.kdsOrderItem.updateMany({
-        where: { id: row.id, preparationRevision: row.preparationRevision, kdsOrder: { venueId, orderId } },
+        // D15: `removedAt: null` también aquí (además de la guarda de arriba): lo anulado nunca vuelve a cocina.
+        where: { id: row.id, preparationRevision: row.preparationRevision, removedAt: null, kdsOrder: { venueId, orderId } },
         data: { preparation: after as Prisma.InputJsonValue, preparationRevision: { increment: 1 } },
       })
       if (cas.count !== 1) throw new ConflictError('Otro compañero cambió el producto. Revisa su estado.', 'PREPARATION_CONFLICT')

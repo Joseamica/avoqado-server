@@ -6,7 +6,8 @@
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { authorKitchenTickets } from '@/services/kds/kitchenTicketAuthoring.service'
+import { authorKitchenTickets, tomarCandadoDeComandas } from '@/services/kds/kitchenTicketAuthoring.service'
+import { aTiempo, aparcarLaSiguienteTransaccion, esperarBloqueado } from '../../__helpers__/candadosDePostgres'
 import { initialPreparation, parsePreparation, PREPARATION_VERSION } from '@/services/kds/kitchenPreparation'
 import { listKdsOrders } from '@/services/mobile/kds.mobile.service'
 import { splitOrderItems } from '@/services/mobile/order.mobile.service'
@@ -306,4 +307,58 @@ describe('comanda con tiempos (v1)', () => {
     expect(entregada.productName).toBe('ANULADO · Limonada')
     expect(entregada.preparationRevision).toBe(0)
   })
+})
+
+describe('candados y volumen (Codex r2)', () => {
+  it('#1 · la comanda TERMINADA de otra cuenta: anular espera su candado («Reabrir» la revive) y no marca antes', async () => {
+    const a = await cuenta([
+      [taco, 'Taco'],
+      [agua, 'Agua'],
+      [taco, 'Taco'],
+    ])
+    await authorKitchenTickets({ venueId, orderId: a.id, trigger: 'ROUND' })
+    const cabecera = (await filaDe(a.idDe(agua)))!.kdsOrder
+    await prisma.kdsOrder.update({ where: { id: cabecera.id }, data: { status: 'COMPLETED', completedAt: new Date() } })
+    const [, segundoTaco] = (
+      await prisma.orderItem.findMany({ where: { orderId: a.id, productId: taco }, orderBy: { sequence: 'asc' } })
+    ).map(i => i.id)
+    const { created: b } = await splitOrderItems(venueId, a.id, [a.idDe(agua), segundoTaco])
+
+    // Otra caja (p. ej. «Reabrir» desde «Servicio y entregas») tiene el candado de comandas de A y no ha terminado.
+    const aparcada = aparcarLaSiguienteTransaccion(prisma)
+    let anular: Promise<unknown> | undefined
+    try {
+      const otraCaja = prisma.$transaction(async tx => tomarCandadoDeComandas(tx, a.id))
+      const pid = await aTiempo(aparcada.pid, 10_000, 'la otra caja no tomó el candado')
+      anular = anularEnLaTpv(b.id, a.idDe(agua))
+      expect(await esperarBloqueado(prisma, { bloqueadoPor: [pid], consulta: /pg_advisory_xact_lock/ })).not.toBeNull()
+      expect((await filaDe(a.idDe(agua)))!.productName).toBe('Agua') // nada marcado todavía
+      aparcada.soltar()
+      await otraCaja
+      await aTiempo(anular, 15_000, 'la anulación no terminó')
+    } finally {
+      aparcada.soltar()
+      aparcada.restaurar()
+      await anular?.catch(() => undefined)
+    }
+    expect((await filaDe(a.idDe(agua)))!.productName).toBe('ANULADO · Agua')
+  })
+
+  it('#3 · anular más de 500 renglones de una vez los marca todos', async () => {
+    const total = 610
+    const c = await cuenta(Array.from({ length: total }, (_, i) => [taco, `Taco ${i}`] as [string, string]))
+    await authorKitchenTickets({ venueId, orderId: c.id, trigger: 'ROUND' })
+    const ids = (await prisma.orderItem.findMany({ where: { orderId: c.id }, orderBy: { sequence: 'asc' }, select: { id: true } })).map(
+      i => i.id,
+    )
+    const { version } = await prisma.order.findUniqueOrThrow({ where: { id: c.id }, select: { version: true } })
+
+    await voidItems(venueId, c.id, { itemIds: ids.slice(1), reason: 'Mesa equivocada', staffId, expectedVersion: version })
+
+    expect(await prisma.kdsOrderItem.count({ where: { orderItemId: { in: ids.slice(1) }, removedAt: null } })).toBe(0)
+    expect(
+      await prisma.kdsOrderItem.count({ where: { orderItemId: { in: ids.slice(1) }, productName: { startsWith: 'ANULADO · ' } } }),
+    ).toBe(total - 1)
+    expect((await filaDe(ids[0]))!.removedAt).toBeNull()
+  }, 60_000)
 })

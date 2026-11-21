@@ -534,6 +534,26 @@ export async function retirarComandasDeVentaAnulada(
   return { kdsOrderIds, kdsOrderItemIds }
 }
 
+/**
+ * D15: las cuentas dueñas de las comandas (de cualquier estado) que tienen filas de estos renglones, leídas SIN candado, para que
+ * quien anula las tome de entrada y en orden (comandas → orden), antes del candado de la orden. ponytail: 1,000 filas; las demás se
+ * toman a media transacción en `marcarRenglonesAnuladosEnComandas` (reentrante; un interbloqueo raro lo repite `withDeadlockRetry`).
+ */
+export async function cuentasDeComandasDeRenglones(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderItemIds: string[],
+): Promise<string[]> {
+  if (orderItemIds.length === 0) return []
+  const filas =
+    (await tx.kdsOrderItem.findMany({
+      where: { orderItemId: { in: orderItemIds }, removedAt: null, kdsOrder: { venueId } },
+      select: { kdsOrder: { select: { orderId: true } } },
+      take: 1000,
+    })) ?? []
+  return [...new Set(filas.map(f => f.kdsOrder.orderId))].filter((id): id is string => Boolean(id))
+}
+
 /** Lo que ve la pantalla de cocina delante de un renglón anulado en la caja (las pantallas viejas lo leen en el nombre). */
 export const PREFIJO_ANULADO = 'ANULADO · '
 
@@ -546,10 +566,9 @@ export const PREFIJO_ANULADO = 'ANULADO · '
  * comanda se recalcula con `recalculoDeComanda` (el anulado cuenta como terminado). Sin tiempos (v0) la comanda NO se termina sola
  * (Codex r1 #3–#5): se queda en el tablero con lo anulado tachado hasta que la cocina toque «Listo», como Loyverse («Tap on the
  * ticket header to mark it complete»). La cabecera estrena `updatedAt`: el archivo del día cuenta desde aquí (Codex r1 #7).
- * CALLER_LOCKED: dentro de la transacción de la anulación, que ya tomó los candados de `cuentasDeSusComandas(orderId)` antes que el
- * de la orden; aquí se piden (reentrantes) los de las cuentas dueñas de cada comanda NO terminada por si alguna cambió entre esa
- * lectura y el candado. La fila de una comanda terminada sólo recibe la marca, sin candado: nadie más escribe filas de comandas
- * terminadas (Codex r1 #6).
+ * CALLER_LOCKED: dentro de la transacción de la anulación, que ya tomó de entrada los candados de `cuentasDeSusComandas(orderId)` y
+ * de `cuentasDeComandasDeRenglones` antes que el de la orden (Codex r1 #6 y r2 #1: también los de comandas terminadas, porque
+ * «Reabrir» las revive); aquí se piden otra vez (reentrantes) por si alguna cambió de dueño entre esa lectura y el candado.
  */
 export async function marcarRenglonesAnuladosEnComandas(
   tx: Prisma.TransactionClient,
@@ -558,8 +577,7 @@ export async function marcarRenglonesAnuladosEnComandas(
   actor: { staffId?: string; reason?: string } = {},
 ): Promise<void> {
   if (orderItemIds.length === 0) return
-  // ponytail: 500 filas por anulación (renglones × estaciones); una anulación real son unos pocos renglones.
-  const leer = async () =>
+  const pagina = async (cursor?: string) =>
     (await tx.kdsOrderItem.findMany({
       where: { orderItemId: { in: orderItemIds }, removedAt: null, kdsOrder: { venueId } },
       select: {
@@ -573,13 +591,35 @@ export async function marcarRenglonesAnuladosEnComandas(
       },
       orderBy: { id: 'asc' },
       take: 500,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     })) ?? [] // ?? []: como `cuentasDeSusComandas`, los dobles de prueba de la transacción devuelven undefined
-  const vivas = (filas: Awaited<ReturnType<typeof leer>>) =>
-    [...new Set(filas.filter(f => f.kdsOrder.status !== 'COMPLETED').map(f => f.kdsOrder.orderId))]
-      .filter((id): id is string => Boolean(id))
+  // Todas las filas, por páginas (Codex r2 #3: la TPV anula más de 500 renglones de una vez).
+  const leer = async () => {
+    const todas: Awaited<ReturnType<typeof pagina>> = []
+    for (let cursor: string | undefined; ; ) {
+      const filas = await pagina(cursor)
+      todas.push(...filas)
+      if (filas.length < 500) return todas
+      cursor = filas[filas.length - 1].id
+    }
+  }
+  // El candado de la cuenta dueña de CADA comanda tocada, también terminada (Codex r2 #1). Quien llama ya los tomó de entrada; si
+  // alguna cambió de dueño mientras, se toma aquí y se vuelve a leer ya bajo candado.
+  const conCandado = new Set<string>()
+  let filas = await leer()
+  for (let vueltas = 0; ; vueltas++) {
+    const faltan = [...new Set(filas.map(f => f.kdsOrder.orderId))]
+      .filter((id): id is string => Boolean(id) && !conCandado.has(id as string))
       .sort()
-  for (const id of vivas(await leer())) await tomarCandadoDeComandas(tx, id)
-  const filas = await leer() // ya bajo candado
+    if (faltan.length === 0) break
+    if (vueltas >= 10)
+      throw new ConflictError('La comanda de cocina cambió mientras se anulaba. Vuelve a intentar.', 'KDS_ORDER_OWNER_CHANGED')
+    for (const id of faltan) {
+      await tomarCandadoDeComandas(tx, id)
+      conCandado.add(id)
+    }
+    filas = await leer()
+  }
   if (filas.length === 0) return
 
   const ahora = new Date()

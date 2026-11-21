@@ -9,7 +9,7 @@ featureCode: TABLE_SERVICE
 gateKind: FEATURE
 money: true
 sourceRepo: avoqado-android
-sourceRef: 00032d0950d77b7d9889edafbcbcd20839512f89
+sourceRef: d99f3a84785f1c1fab60f7d26cde23a52fed5cd5
 keywords:
   - cancelar un producto
   - quitar un producto que ya se mandó
@@ -46,6 +46,7 @@ Es para productos que ya están guardados en la cuenta de una mesa en *Mesas*: l
 - Si *Anular producto* sale en gris con «Es parte de una promoción y no se anula suelto…», ese producto es una pieza de un combo: dalo de cortesía o anula la cuenta completa.
 - Si *Anular producto* sale en gris con «Esta cuenta ya tiene pagos registrados…», o aparece «Esta cuenta ya está pagada…», la cuenta ya tiene un cobro: no se anula. Si hay que devolver dinero, alguien con permiso hace un *Reembolso*.
 - En la pantalla de cocina el producto anulado no desaparece: en unos segundos aparece con «ANULADO» delante (tachado en la versión nueva) y ya no cuenta como pendiente. En una comanda sencilla la cocina la quita con *Listo*; con tiempos, sale sola cuando lo demás está listo.
+- Con tiempos, si era lo último que faltaba de esa comanda, la comanda sale de la pantalla en segundos y la cocina quizá no alcance a ver «ANULADO»: si ya lo estaban preparando, avísales.
 - Si esa estación sale en papel (impresora), no sale papel de cancelación: avisa a cocina. Si el encabezado dice «Enviado a la cocina» pero la cocina no lo recibió, pudo guardarlo la terminal sin mandarlo: revisa con cocina.
 - Un producto que ya es cortesía no se abre al tocarlo.
 

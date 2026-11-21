@@ -84,6 +84,7 @@ import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
 import {
   armarComandasTrasCommit,
+  cuentasDeComandasDeRenglones,
   cuentasDeSusComandas,
   marcarRenglonesAnuladosEnComandas,
   retirarComandasDeVentaAnulada,
@@ -3384,7 +3385,13 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // El candado de comandas va PRIMERO (mismo orden que el armado: comandas → orden). Si esta anulación deja la cuenta
       // sin renglones, abajo retira sus comandas de la pantalla de cocina sin cruzarse con un armado en curso. D3 (hz:381780f0): con
       // los de sus cuentas ligadas, en orden, que el retiro pedía a media transacción (ciclo con unir esa cuenta a la vez).
-      for (const id of (await cuentasDeSusComandas(tx, venueId, orderId)).sort()) await tomarCandadoDeComandas(tx, id)
+      // D15 (Codex r2 #1): también los de las cuentas dueñas de CUALQUIER comanda de los renglones que se anulan (aunque esté
+      // terminada: «Reabrir» la puede revivir), de entrada y en orden: la marca de cocina las toca bajo su candado.
+      const cuentas = new Set([
+        ...(await cuentasDeSusComandas(tx, venueId, orderId)),
+        ...(await cuentasDeComandasDeRenglones(tx, venueId, input.itemIds)),
+      ])
+      for (const id of [...cuentas].sort()) await tomarCandadoDeComandas(tx, id)
       if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
