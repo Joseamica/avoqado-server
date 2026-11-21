@@ -22280,6 +22280,9 @@ model CrmWhatsappMessage {
 
   @@index([contactPhone, sentAt])
   @@index([phoneNumberId, sentAt])
+  // 🔴 ÍNDICE CUBRIENTE MANTENIDO A MANO — Prisma no tiene INCLUDE en `@@index`; vive sólo en la migración
+  // `20261120200000_crm_whatsapp_message_chat_cover_idx_concurrently`: ("contactPhone", "sentAt") INCLUDE ("receivedAt").
+  // Lo lee la lista de chats del CRM (`services/crm/whatsapp.service.ts`) como index-only scan. No lo quites.
 }
 
 enum OrigenDeLaHora {

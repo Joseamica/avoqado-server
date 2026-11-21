@@ -15,6 +15,15 @@ describe('redactUrlSecrets', () => {
     expect(r).toContain('code=%5Bredactado%5D')
   })
 
+  it('🔴 el WhatsApp de ventas: la consulta va entera (teléfono, búsqueda y cursor), con cualquier mayúscula', () => {
+    expect(redactUrlSecrets('/api/v1/crm/whatsapp/messages?phone=%2B525512345678&cursor=abc')).toBe(
+      '/api/v1/crm/whatsapp/messages?[redactado]',
+    )
+    expect(redactUrlSecrets('/api/v1/Crm/WhatsApp/chats?q=Ana&sinProspecto=true')).toBe('/api/v1/Crm/WhatsApp/chats?[redactado]')
+    // Las demás rutas del CRM siguen legibles.
+    expect(redactUrlSecrets('/api/v1/crm/accounts?q=Cafe')).toBe('/api/v1/crm/accounts?q=Cafe')
+  })
+
   it('🔴 redacta el `state`', () => {
     expect(redactUrlSecrets('/x?state=abc123.mac')).not.toContain('abc123.mac')
   })
