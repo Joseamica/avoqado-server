@@ -811,8 +811,10 @@ export async function getTpvSettings(
     throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada.`)
   }
 
-  // If config exists and has settings property, return it merged with defaults
-  const savedSettings = (terminal.config as any)?.settings || {}
+  // If config exists and has settings property, return it merged with defaults.
+  // `inHouseSdkEnabled` es RESERVADA (SDK propio): la verdad es la columna; el eco de un aparato viejo en su JSON no se
+  // devuelve. Este lector lo comparten el DASHBOARD, el SUPERADMIN y el POS móvil.
+  const { inHouseSdkEnabled: _llaveReservada, ...savedSettings } = (terminal.config as any)?.settings || {}
   const existingOverrides = (terminal.configOverrides as Record<string, any>) || {}
   // Tri-state per-terminal override for promoter location tracking (absent = inherit venue flag).
   // Surfaced separately from TpvSettings so the dashboard editor can render the explicit

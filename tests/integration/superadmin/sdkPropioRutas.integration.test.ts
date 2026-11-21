@@ -2,7 +2,7 @@
  * La ruta REST del apagador del SDK propio (fase 3, bloque 2a): `PUT …/superadmin/terminals/:terminalId/in-house-sdk`.
  * Lo que un mock no puede probar: el guardia de ROL en los DOS montajes (el legado `/dashboard/superadmin` sólo pide
  * `system:manage`, que se puede delegar), que quien firma la bitácora es la sesión y no el cuerpo, y que prender no cambia la
- * respuesta de `/settings`. Postgres real; series ficticias AVQD-99000002xx (otros archivos usan otros rangos).
+ * respuesta de `/settings` (ni aunque una ficha vieja traiga la llave en su JSON). Postgres real; series ficticias AVQD-99000002xx (otros archivos usan otros rangos).
  *
  * Correr (va a la nube con su base propia; nunca contra av-db-25):
  *   npx jest --selectProjects=integration --runTestsByPath tests/integration/superadmin/sdkPropioRutas.integration.test.ts --ci
@@ -254,6 +254,21 @@ describe('lo que ya existía', () => {
 
     const despues = await leer()
     expect(despues.status).toBe(200)
+    expect(despues.body).toEqual(antes.body)
+  })
+
+  it('GET /terminals/:terminalId/settings con inHouseSdkEnabled sembrado en el JSON de la ficha ⇒ no la devuelve', async () => {
+    const t = await pax()
+    const leer = () => request(app).get(`${NUEVO}/${t.id}/settings`).set('Authorization', `Bearer ${tokenSuperadmin}`)
+    const antes = await leer()
+    expect(antes.status).toBe(200)
+
+    // Lo que dejaría el eco de un aparato viejo en `config.settings`: se siembra directo, sin pasar por su PUT.
+    await prisma.terminal.update({ where: { id: t.id }, data: { config: { settings: { inHouseSdkEnabled: true } } } })
+
+    const despues = await leer()
+    expect(despues.status).toBe(200)
+    expect(despues.body.data).not.toHaveProperty('inHouseSdkEnabled')
     expect(despues.body).toEqual(antes.body)
   })
 })

@@ -742,12 +742,15 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
     const {
       trackPromoterLocation: _ignoredFromDevice,
       cashReconciliationEnabled: _ignoredCashFlagFromDevice,
+      // SDK propio: llave RESERVADA (sólo viaja en la raíz de /config, desde la columna y el freno). El eco no se guarda.
+      inHouseSdkEnabled: _ignoredInHouseSdkFromDevice,
       ...deviceSettingsUpdate
     } = settingsUpdate
     const existingConfig = (terminal.config as any) || {}
     const {
       trackPromoterLocation: _ignoredFromStored,
       cashReconciliationEnabled: _ignoredCashFlagFromStored,
+      inHouseSdkEnabled: _ignoredInHouseSdkFromStored,
       ...storedSettings
     } = existingConfig.settings || {}
     const currentSettings = { ...DEFAULT_TPV_SETTINGS, ...storedSettings }
@@ -764,6 +767,7 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
     // settings push would silently wipe a dashboard-set override.
     delete overrides.trackPromoterLocation
     delete overrides.cashReconciliationEnabled
+    delete overrides.inHouseSdkEnabled
     const prevOverrides = (terminal.configOverrides as Record<string, any>) || {}
     if (typeof prevOverrides.trackPromoterLocation === 'boolean') {
       overrides.trackPromoterLocation = prevOverrides.trackPromoterLocation
