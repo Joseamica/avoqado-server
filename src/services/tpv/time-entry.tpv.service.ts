@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import { assertAttendanceEnabled } from '../dashboard/attendanceGate'
 import { assertFotoNoPrivada } from '../dashboard/fotoDeEntrada'
 import { conCandadoDeEntrada } from './candadoDeEntrada'
+import { anotarSalidaQueNoSeUso, cerrarOlvidadasAntesDeChecar } from '../shared/salidaOlvidada'
 import { TimeEntryStatus } from '@prisma/client'
 import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
 
@@ -48,6 +49,8 @@ interface TimeEntriesQueryParams {
   status?: TimeEntryStatus
   limit?: number
   offset?: number
+  /** Sólo las «Salida olvidada · revisar» (D3): Asistencia del DASHBOARD las junta en «Por revisar». */
+  salidaOlvidada?: boolean
 }
 
 interface TimeSummaryParams {
@@ -108,6 +111,9 @@ export async function identifyByPin(venueId: string, pin: string) {
   if (!staffVenue) {
     throw new UnauthorizedError('PIN inválido')
   }
+
+  // «Salida olvidada»: un turno de un día ya terminado no se ofrece como «Checar salida».
+  await cerrarOlvidadasAntesDeChecar(staffVenue.staffId, 'IDENTIFICAR')
 
   // Find active time entry for this staff
   const activeEntry = await prisma.timeEntry.findFirst({
@@ -192,6 +198,9 @@ export async function clockIn(params: ClockInParams) {
     throw new UnauthorizedError('PIN inválido')
   }
 
+  // «Salida olvidada» (hz:f0a89d19:D3): un turno de un día ya terminado se cierra y la entrada nueva se crea.
+  await cerrarOlvidadasAntesDeChecar(staffId, 'ENTRADA')
+
   // Mismo candado que el POS: un solo «¿ya tiene entrada? → crearla» a la vez por persona (Codex r1 #4).
   const timeEntry = await conCandadoDeEntrada(venueId, staffId, async tx => {
     // Check if staff member is already clocked in
@@ -252,6 +261,9 @@ export async function clockOut(params: ClockOutParams) {
     throw new UnauthorizedError('PIN inválido')
   }
 
+  // «Salida olvidada»: el turno de un día ya terminado se cierra con su regla, no con la hora de hoy (los turnos de 267 h).
+  await cerrarOlvidadasAntesDeChecar(staffId, 'SALIDA')
+
   // Find active time entry
   const timeEntry = await prisma.timeEntry.findFirst({
     where: {
@@ -267,6 +279,9 @@ export async function clockOut(params: ClockOutParams) {
   })
 
   if (!timeEntry) {
+    // La regla la acababa de cerrar: la evidencia de esta salida se anota en esa checada y se dice qué pasó (Codex r1 #8).
+    const yaOlvidada = await anotarSalidaQueNoSeUso({ staffId, venueId, origen: 'PAX', checkOutPhotoUrl, depositPhotoUrl, skipReason })
+    if (yaOlvidada) throw new BadRequestError(yaOlvidada, 'SALIDA_OLVIDADA')
     throw new BadRequestError('El empleado no tiene entrada registrada')
   }
 
@@ -294,9 +309,10 @@ export async function clockOut(params: ClockOutParams) {
   const MAX_HOURS = 999.99
   const totalHours = Math.min(rawHours, MAX_HOURS)
 
-  // Update time entry with photo and GPS data
-  const updatedTimeEntry = await prisma.timeEntry.update({
-    where: { id: timeEntry.id },
+  // Update time entry with photo and GPS data. Condicional (Codex r2 #6): si el cierre automático («salida olvidada») la
+  // cerró mientras esta salida leía, no se pisa su cierre: la evidencia se anota en esa checada y se dice qué pasó.
+  const { count } = await prisma.timeEntry.updateMany({
+    where: { id: timeEntry.id, clockOutTime: null },
     data: {
       clockOutTime,
       totalHours,
@@ -309,6 +325,14 @@ export async function clockOut(params: ClockOutParams) {
       depositPhotoUrl: depositPhotoUrl || null, // Bank deposit voucher at clock-out
       checkoutSkipReason: skipReason || null, // Reason for skipping checkout photos
     },
+  })
+  if (count !== 1) {
+    const yaOlvidada = await anotarSalidaQueNoSeUso({ staffId, venueId, origen: 'PAX', checkOutPhotoUrl, depositPhotoUrl, skipReason })
+    throw new BadRequestError(yaOlvidada ?? 'El empleado no tiene entrada registrada', yaOlvidada ? 'SALIDA_OLVIDADA' : undefined)
+  }
+
+  return prisma.timeEntry.findUniqueOrThrow({
+    where: { id: timeEntry.id },
     include: {
       staff: {
         select: {
@@ -320,8 +344,6 @@ export async function clockOut(params: ClockOutParams) {
       breaks: true,
     },
   })
-
-  return updatedTimeEntry
 }
 
 /**
@@ -354,17 +376,17 @@ export async function startBreak(params: BreakParams) {
     throw new BadRequestError('Ya hay un descanso en progreso')
   }
 
-  // Create break and update time entry status
-  const [_newBreak, updatedTimeEntry] = await prisma.$transaction([
-    prisma.timeEntryBreak.create({
-      data: {
-        timeEntryId,
-        startTime: new Date(),
-      },
-    }),
-    prisma.timeEntry.update({
-      where: { id: timeEntryId },
+  // Condicional: si el cierre automático («salida olvidada» o la hora fija) la cerró entre la lectura y aquí, el descanso no
+  // la deja ON_BREAK con salida puesta (Codex r1 #9: el checador la veía abierta y nadie la volvía a cerrar).
+  const updatedTimeEntry = await prisma.$transaction(async tx => {
+    const { count } = await tx.timeEntry.updateMany({
+      where: { id: timeEntryId, status: TimeEntryStatus.CLOCKED_IN, clockOutTime: null },
       data: { status: TimeEntryStatus.ON_BREAK },
+    })
+    if (count !== 1) throw new BadRequestError('Registro no encontrado o no válido para descanso')
+    await tx.timeEntryBreak.create({ data: { timeEntryId, startTime: new Date() } })
+    return tx.timeEntry.findUniqueOrThrow({
+      where: { id: timeEntryId },
       include: {
         staff: {
           select: {
@@ -375,8 +397,8 @@ export async function startBreak(params: BreakParams) {
         },
         breaks: true,
       },
-    }),
-  ])
+    })
+  })
 
   return updatedTimeEntry
 }
@@ -447,9 +469,14 @@ export async function endBreak(params: BreakParams) {
  * entry appears in today's query so the UI can show the correct state.
  */
 export async function getTimeEntries(params: TimeEntriesQueryParams) {
-  const { venueId, staffId, startDate, endDate, status, limit = 50, offset = 0 } = params
+  const { venueId, staffId, startDate, endDate, status, limit = 50, offset = 0, salidaOlvidada } = params
+
+  // La PAX decide «Entrada» o «Salida» con ESTA lista (Codex r2 #9): un turno de un día ya terminado se cierra antes de
+  // contestarla, sin esperar al job.
+  if (staffId) await cerrarOlvidadasAntesDeChecar(staffId, 'IDENTIFICAR')
 
   const where: any = { venueId }
+  if (salidaOlvidada) where.salidaOlvidada = true
 
   if (staffId) {
     where.staffId = staffId

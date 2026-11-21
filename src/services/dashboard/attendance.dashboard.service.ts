@@ -38,6 +38,8 @@ export interface VenueTimeEntriesQuery {
   status?: TimeEntryStatus
   limit?: number
   offset?: number
+  /** Sólo las «Salida olvidada · revisar», de cualquier fecha (D3). */
+  salidaOlvidada?: boolean
 }
 
 /** Checadas del negocio. `getTimeEntries` ya filtra por venueId, así que basta con pasarlo. */

@@ -296,6 +296,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
           status: true,
           validationStatus: true,
           autoClockOut: true,
+          salidaOlvidada: true,
           staff: { select: { firstName: true, lastName: true } },
         },
         orderBy: { clockInTime: 'desc' },
@@ -314,6 +315,8 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
           breakMinutes: r.breakMinutes ?? 0,
           stillIn: r.clockOutTime === null,
           autoClosedBySystem: r.autoClockOut,
+          // «Salida olvidada · revisar»: no marcó salida y el sistema la cerró (con la salida de su horario o en 0 h).
+          forgottenClockOutNeedsReview: r.salidaOlvidada,
           review: r.validationStatus,
         })),
       })
