@@ -1425,6 +1425,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/wallet/redeemStampReward.service.ts#redeemStampReward': 1,
   // D36: «Cobrar» de la TPV retira la venta que se dejó antes de cobrar (cancelOrderInTransaction, ORDER_LOCK_WAIT_BUDGET).
   'src/services/tpv/ventaDeCobrarSinCobro.tpv.service.ts#anularVentaDeCobrarSinCobro': 1,
+  // D36 «A con ensayo»: la limpieza que anula ventas de Cobrar abandonadas por TPV viejas (cancelOrderInTransaction, mismo presupuesto).
+  'src/jobs/ventas-cobrar-abandonadas.job.ts#anularVentaDeCobrarAbandonada': 1,
   'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems': 1,
   'src/services/pos-sync/posSyncOrder.service.ts#processPosOrderEvent': 1,
   'src/services/tpv/payment.tpv.service.ts#updateOrderTotalsForStandalonePayment': 1,
