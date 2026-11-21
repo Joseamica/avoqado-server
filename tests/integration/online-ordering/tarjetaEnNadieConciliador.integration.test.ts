@@ -548,6 +548,14 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     // La siguiente pasada relee a Stripe: la soltó → se cierra con ese desenlace. Nunca se volvió a mandar la captura.
     await pasada(fuera.chargeId)
     await cerradoSinCobrar(fuera)
+    // M1 (ronda codex-r2): aunque la respuesta de la liberación se perdió, la bitácora conserva el motivo (sale del plazo, como al decidir).
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'ONLINE_ORDER_CARD_CAPTURE_FAILED',
+        entityId: fuera.onlineOrderId,
+        data: expect.objectContaining({ reason: 'RELEASED_AFTER_GRACE' }),
+      }),
+    )
     expect(capturasA(fuera.pi)).toHaveLength(1) // sólo la de la caja (que nunca llegó)
     expect(liberacionesA(fuera.pi)[0][1]).toEqual({ paymentIntentId: fuera.pi, idempotencyKey: `online-order:${fuera.orderId}:release` })
     expect(await getTrackingByToken(fuera.trackingToken)).toMatchObject({ status: 'REJECTED', paid: false })
@@ -1074,5 +1082,86 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     expect(capturasA(a.pi)).toHaveLength(0)
     expect(await cobros(a.orderId)).toHaveLength(0)
     expect(await getTrackingByToken(a.trackingToken)).toMatchObject({ status: 'CANCELLED_BY_CUSTOMER', paid: false })
+  })
+
+  // ── Ronda codex-r2 (20-nov) ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+  const LECTURA_TEMPRANA = { timeoutMs: 10_000, maxNetworkRetries: 0 }
+  /** Las lecturas de Stripe de la sesión de un borrador, con sus argumentos. */
+  const lecturasDe = async (chargeId: string) => {
+    const sesion = (await cargo(chargeId)).checkoutSessionId
+    return authSpy.mock.calls.filter(([, ref]) => ref.checkoutSessionId === sesion)
+  }
+
+  it('D661 · B (Ruling 42): la visita temprana acota cada lectura de Stripe (10 s, sin reintentos del SDK); un borrador vencido y el seguimiento de la clienta leen como hoy', async () => {
+    const temprano = await borrador()
+    await prisma.onlineOrderCharge.update({ where: { id: temprano.chargeId }, data: { createdAt: hace(3 * MIN) } })
+    const vencido = await borrador()
+    await prisma.onlineOrderCharge.update({ where: { id: vencido.chargeId }, data: { checkoutExpiresAt: hace(MIN) } })
+    authSpy.mockClear()
+
+    await reconcileCardCharges(new Date(), read => read())
+    expect((await lecturasDe(temprano.chargeId)).map(([, , limite]) => limite)).toEqual([LECTURA_TEMPRANA])
+    expect((await lecturasDe(vencido.chargeId)).map(llamada => llamada.length)).toEqual([2])
+
+    // La clienta que regresa a su seguimiento: la lectura de siempre, sin límite.
+    authSpy.mockClear()
+    await prisma.onlineOrderCharge.update({ where: { id: temprano.chargeId }, data: { updatedAt: hace(MIN) } })
+    await getTrackingByToken(temprano.trackingToken)
+    expect((await lecturasDe(temprano.chargeId)).map(llamada => llamada.length)).toEqual([2])
+  })
+
+  it('D661 · B (Ruling 42): la pasada lee la lista temprana al ENTRAR al carril: un borrador que cumple sus 2 min mientras la pasada atiende el dinero en duda se visita en esa misma pasada', async () => {
+    // El dinero en duda que la pasada atiende primero: su lectura de Stripe tarda 2 s.
+    const enDuda = await apartado()
+    await muereAntesDeStripe(enDuda)
+    const leer = authSpy.getMockImplementation()!
+    authSpy.mockImplementation(async (m: any, ref: any) => {
+      if (ref.paymentIntentId === enDuda.pi) await dormir(2000)
+      return leer(m, ref)
+    })
+    // La clienta pagó y nadie avisó; su borrador cumple sus 2 min 1.5 s DESPUÉS de que empieza la pasada.
+    const d = await borrador()
+    await pagar(d.chargeId, hace(MIN))
+    await prisma.onlineOrderCharge.update({ where: { id: d.chargeId }, data: { createdAt: new Date(Date.now() - 2 * MIN + 1500) } })
+    await prisma.onlineOrderCharge.update({ where: { id: enDuda.chargeId }, data: { updatedAt: hace(2 * MIN) } })
+
+    await reconcileCardCharges(new Date(), read => read())
+    await cobradoUnaVez(enDuda)
+    const c = await cargo(d.chargeId)
+    expect(c.status).toBe('AUTHORIZED')
+    // Nace el pedido abrible: la caja lo ve en su siguiente lectura.
+    expect(await prisma.onlineOrder.findUniqueOrThrow({ where: { id: c.onlineOrderId! } })).toMatchObject({
+      status: 'PENDING_ACCEPTANCE',
+      requiresAcceptance: false,
+    })
+  })
+
+  it('D661 · C (Ruling 43): el reintento del conciliador de una captura de «Nadie» sale UNA vez (sin reintentos del SDK); la captura de la caja y el reintento de «Mi equipo», como hoy', async () => {
+    for (const miEquipo of [false, true]) {
+      const a = await apartado({ miEquipo })
+      await muereAntesDeStripe(a, miEquipo)
+      await pasada(a.chargeId)
+      const [caja, reintento] = capturasA(a.pi)
+      expect({ miEquipo, caja: caja.length }).toEqual({ miEquipo, caja: 2 }) // la caja que abre: sin opciones de más
+      expect({ miEquipo, reintento: reintento[2] }).toEqual({ miEquipo, reintento: miEquipo ? undefined : { maxNetworkRetries: 0 } })
+      expect(reintento[1]).toEqual(caja[1]) // la MISMA clave y los mismos parámetros
+      await cobradoUnaVez(a)
+    }
+  })
+
+  it('M1 (ronda codex-r2): un cobro de «Nadie» todavía en su gracia que Stripe dice anulado (lo soltó alguien más) se cierra sin el motivo de la gracia', async () => {
+    const a = await apartado()
+    await muereAntesDeStripe(a)
+    pis.set(a.pi, 'canceled') // el negocio lo soltó en su Stripe; el plazo del apartado todavía no vence
+    await pasada(a.chargeId)
+    await cerradoSinCobrar(a)
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'ONLINE_ORDER_CARD_CAPTURE_FAILED',
+        entityId: a.onlineOrderId,
+        data: { chargeId: a.chargeId, outcome: 'STALE' },
+      }),
+    )
   })
 })

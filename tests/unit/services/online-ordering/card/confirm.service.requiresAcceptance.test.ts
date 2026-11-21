@@ -189,4 +189,18 @@ describe('confirmar un borrador de tarjeta: el modo y el plazo son los del borra
     expect(await confirmCardAuthorization('ch1', NOW)).toBe('CREATED')
     expect(escrito().acceptDeadlineAt).toEqual(new Date('2026-11-20T03:35:00.000Z'))
   })
+
+  it('D661 · B (Ruling 42): la lectura de Stripe lleva el límite de quien lo pide (la visita temprana); sin él, la de siempre (la clienta, el aviso)', async () => {
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(borrador(true) as any)
+    getAuthorization.mockResolvedValue({ sessionStatus: 'open', piStatus: null, paymentIntentId: null }) // todavía pagando
+    const LECTURA_TEMPRANA = { timeoutMs: 10_000, maxNetworkRetries: 0 }
+    expect(await confirmCardAuthorization('ch1', NOW, LECTURA_TEMPRANA)).toBe('NOT_YET')
+    expect(getAuthorization).toHaveBeenLastCalledWith(
+      expect.objectContaining({ providerCredentials: { connectAccountId: 'acct_1' } }),
+      { checkoutSessionId: 'cs_1' },
+      LECTURA_TEMPRANA,
+    )
+    expect(await confirmCardAuthorization('ch1', NOW)).toBe('NOT_YET')
+    expect(getAuthorization.mock.calls.at(-1)).toHaveLength(2)
+  })
 })

@@ -12,7 +12,7 @@ import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getProvider } from '@/services/payments/provider-registry'
-import type { AuthorizationState } from '@/services/payments/providers/provider.interface'
+import type { AuthorizationState, ProviderRequestLimits } from '@/services/payments/providers/provider.interface'
 import { fromStripeAmount, toStripeAmount } from '@/services/payments/providers/money'
 import type { HorarioSemanal } from '@/services/delivery-channels/core/deliveryHours.service'
 import { ACCEPT_TIMEOUT_MINUTES, cargoDeNadie } from '../constants'
@@ -182,8 +182,10 @@ async function cierreDelBorrador(charge: OnlineOrderCharge, request: CardDraftRe
 /**
  * Idempotente. `now` fija la hora sólo en las pruebas (3C: el conciliador ya no pasa la de su pasada); sin ella, la hora con que se
  * decide si el plazo de un apartado de «Nadie» ya pasó se lee DESPUÉS del candado de admisión.
+ * D661 (B, Ruling 42): `lectura` acota la lectura de Stripe; sólo la pasa la visita temprana del conciliador. La clienta que regresa,
+ * el aviso de Stripe y lo demás leen como siempre.
  */
-export async function confirmCardAuthorization(chargeId: string, now?: Date): Promise<ConfirmOutcome> {
+export async function confirmCardAuthorization(chargeId: string, now?: Date, lectura?: ProviderRequestLimits): Promise<ConfirmOutcome> {
   const reloj = () => now ?? new Date()
   const t = reloj() // la hora de esta confirmación, como siempre (la de «Mi equipo» y la bitácora del cargo)
   const charge = await prisma.onlineOrderCharge.findUnique({ where: { id: chargeId } })
@@ -194,7 +196,9 @@ export async function confirmCardAuthorization(chargeId: string, now?: Date): Pr
   if (!charge.checkoutSessionId) return 'NOT_YET'
 
   const merchant = chargeMerchant(charge)
-  const auth = await getProvider(merchant).getAuthorization(merchant, { checkoutSessionId: charge.checkoutSessionId })
+  const provider = getProvider(merchant)
+  const sesion = { checkoutSessionId: charge.checkoutSessionId }
+  const auth = await (lectura ? provider.getAuthorization(merchant, sesion, lectura) : provider.getAuthorization(merchant, sesion))
   if (auth.piStatus === 'succeeded') return capturedOutside(charge, auth, t)
 
   if (auth.piStatus === 'requires_capture' && auth.paymentIntentId) {

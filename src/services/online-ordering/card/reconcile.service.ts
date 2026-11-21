@@ -16,13 +16,15 @@
  * propio presupuesto (a lo más `NADIE_EARLY_CONCURRENCY` a la vez y nada nuevo después de `NADIE_EARLY_BUDGET_MS`; lo que no alcanza
  * espera al siguiente minuto, el menos reciente primero) y al final lo demás. Si la pasada sigue corriendo en el siguiente minuto, el job
  * corre sólo la visita temprana (`visitEarlyNadieDrafts`): una pasada lenta no deja vencer una autorización que llegó a tiempo.
+ * D661 (B, Ruling 42): la visita temprana lee su lista al EMPEZAR (también dentro de la pasada) y cada lectura suya de Stripe espera a lo
+ * más `LECTURA_TEMPRANA` y sin reintentos del SDK: cinco lecturas colgadas ya no retienen el carril minutos.
  */
 import { OnlineOrderChargeStatus as S, OnlineOrderStatus, OrderStatus, Prisma, type OnlineOrderCharge } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getProvider } from '@/services/payments/provider-registry'
-import type { AuthorizationState } from '@/services/payments/providers/provider.interface'
+import type { AuthorizationState, ProviderRequestLimits } from '@/services/payments/providers/provider.interface'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { CARD_RECONCILE_BATCH, CARD_STUCK_ALERT_MINUTES, NOT_CAPTURED_OUTSIDE, SIN_TELEFONO_NADIE, cargoDeNadie } from '../constants'
 import { prepMinutes } from '../transitions.service'
@@ -52,6 +54,12 @@ const NADIE_EARLY_VISIT_MS = 2 * 60_000
 const NADIE_EARLY_CONCURRENCY = 5
 /** …y desde cuándo ya no empieza otro: lo que falte espera al siguiente minuto. Con lecturas lentas de T s, la visita dura < este + T. */
 const NADIE_EARLY_BUDGET_MS = 30_000
+/**
+ * D661 (B, Ruling 42): cada lectura de Stripe de la visita temprana: 10 s y sin reintentos del SDK (el cliente del proveedor espera 80 s
+ * por intento y reintenta dos veces). La que no contesta espera a la siguiente visita (≤ 1 min). Ojo: tras una conexión cerrada en el
+ * primer envío el SDK todavía reenvía una vez (peor caso ~20.5 s por lectura).
+ */
+const LECTURA_TEMPRANA: ProviderRequestLimits = { timeoutMs: 10_000, maxNetworkRetries: 0 }
 /** Ruling 3: un `PENDING_AUTH` vencido cuya confirmación truena este número de pasadas necesita a una persona. */
 const CONFIRM_FAILURES_ALERT = 3
 /** Stripe guarda una clave idempotente 24 h; con 1 h de margen, después de 23 h su repetición ya no prueba nada. */
@@ -89,11 +97,13 @@ const earlyNadieWhere = (now: Date): Prisma.OnlineOrderChargeWhereInput => ({
   ...NOT_CAPTURED_OUTSIDE,
 })
 
-/** Cada grupo con su tope y su orden de siempre; D661 (A2): separados por cómo se procesan. */
-async function readCandidates(now: Date, readEntry: ReadCandidates): Promise<{ inDoubt: Row[]; early: Row[]; rest: Row[] }> {
-  const [expired, early, capturing, releasing, authorized] = await Promise.all([
+/**
+ * Cada grupo con su tope y su orden de siempre; D661 (A2): separados por cómo se procesan. D661 (B, Ruling 42): sin los tempranos: la
+ * visita temprana los lee al empezar (`earlyLane`).
+ */
+async function readCandidates(now: Date, readEntry: ReadCandidates): Promise<{ inDoubt: Row[]; rest: Row[] }> {
+  const [expired, capturing, releasing, authorized] = await Promise.all([
     page(readEntry, { status: S.PENDING_AUTH, checkoutExpiresAt: { lte: now }, ...NOT_CAPTURED_OUTSIDE }),
-    page(readEntry, earlyNadieWhere(now)),
     page(readEntry, { status: S.CAPTURING, updatedAt: { lte: new Date(now.getTime() - CAPTURE_IN_FLIGHT_MS) } }),
     page(readEntry, { status: S.RELEASING }),
     page(readEntry, {
@@ -106,7 +116,7 @@ async function readCandidates(now: Date, readEntry: ReadCandidates): Promise<{ i
       ],
     }),
   ])
-  return { inDoubt: [...capturing, ...releasing], early, rest: [...expired, ...authorized] }
+  return { inDoubt: [...capturing, ...releasing], rest: [...expired, ...authorized] }
 }
 
 /** `PENDING_AUTH` sin sesión guardada: la MISMA clave y los MISMOS parámetros del último intento. */
@@ -189,8 +199,12 @@ async function processCapturing(charge: Row): Promise<void> {
   // 3C: sin hora fija: `capturedAt`, `acceptedAt` y el rechazo llevan la hora de la escritura, leída bajo el candado de la orden.
   const meta = { staffId: null, estimatedMinutes: await prepMinutes(charge.venueId) }
   if (state.piStatus === 'succeeded') await finishCapture(charge.id, state, meta)
-  else if (state.piStatus === 'canceled' || state.piStatus === 'requires_payment_method') await failCapture(charge.id, { staffId: null })
-  else if (state.piStatus === 'requires_capture') {
+  else if (state.piStatus === 'canceled' || state.piStatus === 'requires_payment_method') {
+    // M1 (ronda codex-r2): un «Nadie» ya fuera de su gracia que Stripe dice anulado lo soltó Avoqado (una liberación cuya respuesta se
+    // perdió): se cierra con ese motivo, decidido con la MISMA regla que libera. Dentro de la gracia o en «Mi equipo», como hoy.
+    const trasLaGracia = state.piStatus === 'canceled' && (await captureRetryStep(charge, orderId)).step === 'RELEASE'
+    await failCapture(charge.id, { staffId: null, ...(trasLaGracia ? { reason: 'RELEASED_AFTER_GRACE' as const } : {}) })
+  } else if (state.piStatus === 'requires_capture') {
     const { step, graceEndsAt } = await captureRetryStep(charge, orderId)
     if (step === 'RELEASE') await releaseCaptureAfterGrace(charge, orderId, meta)
     else if (step === 'CAPTURE') {
@@ -205,12 +219,13 @@ async function processCapturing(charge: Row): Promise<void> {
   }
 }
 
-async function processOne(charge: Row, now: Date): Promise<void> {
+/** `lectura`: los límites de la lectura de Stripe de un borrador (sólo los pasa la visita temprana, Ruling 42). */
+async function processOne(charge: Row, now: Date, lectura?: ProviderRequestLimits): Promise<void> {
   switch (charge.status) {
     case S.PENDING_AUTH:
       if (!charge.checkoutSessionId && (await recoverCheckout(charge, now)) !== 'GOT') return
       // 3C: sin la hora de la pasada: el plazo de «Nadie» se comprueba bajo el candado de admisión con el reloj real.
-      await confirmCardAuthorization(charge.id)
+      await confirmCardAuthorization(charge.id, undefined, lectura)
       return
     case S.CAPTURING:
       return processCapturing(charge)
@@ -298,11 +313,11 @@ async function settle(charge: Row, now: Date, failure: string | null): Promise<O
 const emptyResult = (): ReconcileResult => ({ scanned: 0, finished: 0, released: 0, abandoned: 0, stuck: 0, errors: 0 })
 
 /** Un cargo, en su propio `try`: procesarlo, anotarlo y contarlo. */
-async function handle(charge: Row, now: Date, result: ReconcileResult): Promise<void> {
+async function handle(charge: Row, now: Date, result: ReconcileResult, lectura?: ProviderRequestLimits): Promise<void> {
   result.scanned += 1
   let failure: string | null = null
   try {
-    await processOne(charge, now)
+    await processOne(charge, now, lectura)
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error)
     result.errors += 1
@@ -327,17 +342,18 @@ let earlyLaneBusy = false
 /**
  * D661 (A2): la visita temprana, una a la vez en el proceso. Toma los borradores en su orden (el menos reciente primero) con
  * `NADIE_EARLY_CONCURRENCY` trabajadores y no empieza ninguno después de `NADIE_EARLY_BUDGET_MS`: los que no alcanzó no se tocan y
- * quedan primero para la siguiente.
+ * quedan primero para la siguiente. D661 (B, Ruling 42): lee su lista al EMPEZAR, con `reloj` (la hora a la que empieza), y cada
+ * lectura de Stripe va con `LECTURA_TEMPRANA`.
  */
-async function earlyLane(rows: () => Promise<Row[]>, now: Date, result: ReconcileResult): Promise<void> {
+async function earlyLane(readEntry: ReadCandidates, reloj: Date, result: ReconcileResult): Promise<void> {
   if (earlyLaneBusy) return
   earlyLaneBusy = true
   try {
-    const pending = await rows()
+    const pending = await page(readEntry, earlyNadieWhere(reloj))
     const stopAt = Date.now() + NADIE_EARLY_BUDGET_MS
     let next = 0
     const worker = async () => {
-      while (next < pending.length && Date.now() < stopAt) await handle(pending[next++], now, result)
+      while (next < pending.length && Date.now() < stopAt) await handle(pending[next++], reloj, result, LECTURA_TEMPRANA)
     }
     await Promise.all(Array.from({ length: NADIE_EARLY_CONCURRENCY }, worker))
   } finally {
@@ -347,9 +363,12 @@ async function earlyLane(rows: () => Promise<Row[]>, now: Date, result: Reconcil
 
 export async function reconcileCardCharges(now: Date, readEntry: ReadCandidates): Promise<ReconcileResult> {
   const result = emptyResult()
-  const { inDoubt, early, rest } = await readCandidates(now, readEntry)
+  const inicio = Date.now()
+  const { inDoubt, rest } = await readCandidates(now, readEntry)
   for (const charge of inDoubt) await handle(charge, now, result) // A2: el dinero en duda, primero
-  await earlyLane(async () => early, now, result)
+  // D661 (B, Ruling 42): la visita temprana lee su lista al entrar al carril, con la hora de la pasada adelantada lo que ya tardó (en
+  // producción, la hora real): un borrador que cumplió sus 2 min mientras se atendía el dinero en duda se visita en esta pasada.
+  await earlyLane(readEntry, new Date(now.getTime() + (Date.now() - inicio)), result)
   for (const charge of rest) await handle(charge, now, result)
   return result
 }
@@ -357,6 +376,6 @@ export async function reconcileCardCharges(now: Date, readEntry: ReadCandidates)
 /** D661 (A2): sólo la visita temprana; el job la corre en el minuto en que la pasada anterior todavía no termina. */
 export async function visitEarlyNadieDrafts(now: Date, readEntry: ReadCandidates): Promise<ReconcileResult> {
   const result = emptyResult()
-  await earlyLane(() => page(readEntry, earlyNadieWhere(now)), now, result)
+  await earlyLane(readEntry, now, result)
   return result
 }

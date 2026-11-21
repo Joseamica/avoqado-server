@@ -171,9 +171,69 @@ describe('D661 · A2: el dinero en duda primero, y la visita temprana con su pro
     expect(confirmCardAuthorization).toHaveBeenCalledTimes(1)
     soltar()
     await expect(primera).resolves.toMatchObject({ scanned: 1 })
-    // La visita sola no lee los demás grupos.
+    // La visita sola no lee los demás grupos. D661 (B, Ruling 42): la pasada lee la lista temprana al ENTRAR al carril; con el carril
+    // ocupado ni la lee: la única lectura es la de la primera visita.
     const leidos = (prismaMock.onlineOrderCharge.findMany.mock.calls as any[]).map(([a]) => grupoDe(a.where))
-    expect(leidos.filter(g => g === 'early')).toHaveLength(2) // la primera visita y la lectura de la pasada (que la salta)
+    expect(leidos.filter(g => g === 'early')).toHaveLength(1)
+  })
+})
+
+describe('D661 · B (Ruling 42): la visita temprana acota cada lectura de Stripe y lee su lista al empezar', () => {
+  const LECTURA_TEMPRANA = { timeoutMs: 10_000, maxNetworkRetries: 0 }
+  const llamadaDe = (id: string) => confirmCardAuthorization.mock.calls.find(([c]) => c === id)!
+
+  it('la visita temprana pasa a la lectura su límite (10 s, sin reintentos del SDK); un borrador vencido (lo demás de la pasada) se lee como hoy', async () => {
+    filas.early = [fila('temprano1', 'early')]
+    filas.expired = [fila('vencido1', 'expired')]
+    await reconcileCardCharges(NOW, read => read())
+    expect(llamadaDe('temprano1')[2]).toEqual(LECTURA_TEMPRANA)
+    expect(llamadaDe('vencido1')[2]).toBeUndefined()
+    // La visita sola (el minuto en que la pasada anterior sigue corriendo), igual.
+    confirmCardAuthorization.mockClear()
+    await visitEarlyNadieDrafts(NOW, read => read())
+    expect(llamadaDe('temprano1')[2]).toEqual(LECTURA_TEMPRANA)
+  })
+
+  it('la pasada lee la lista temprana al ENTRAR al carril: un borrador que se vuelve visitable mientras atiende el dinero en duda se visita en esa misma pasada', async () => {
+    filas.capturing = [fila('cobrando1', 'capturing')]
+    getAuthorization.mockImplementation(async (_m: unknown, ref: any) => {
+      eventos.push(`leer cobro ${ref.paymentIntentId}`)
+      // Mientras la pasada atiende el cobro en duda, un borrador cumple sus 2 min.
+      filas.early = [fila('recien', 'early')]
+      return { piStatus: 'succeeded', amountReceivedCents: 25_000 }
+    })
+    await expect(reconcileCardCharges(NOW, read => read())).resolves.toMatchObject({ scanned: 2, errors: 0 })
+    expect(eventos).toEqual(['leer cobro pi_cobrando1', 'anotar cobro cobrando1', 'leer borrador recien'])
+  })
+})
+
+describe('D661 · B (Ruling 42): diez lecturas colgadas hasta su límite no impiden visitar a tiempo un borrador sano', () => {
+  // Reloj de la prueba: las lecturas cuelgan de verdad (temporizadores) y corren a la vez, cinco por tanda, como en el carril.
+  beforeEach(() => {
+    dateSpy.mockRestore()
+    jest.useFakeTimers({ now: NOW, doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
+  })
+  afterEach(() => jest.useRealTimers())
+
+  it('con el reloj del carril, el borrador sano (el 11.º) se visita dentro del presupuesto más un límite de lectura', async () => {
+    filas.early = [...Array.from({ length: 10 }, (_, i) => fila(`colgado${i}`, 'early')), fila('sano', 'early')]
+    // Sin límite, una lectura colgada dura lo que el cliente de Stripe del proveedor: 80 s por intento y dos reintentos.
+    const SIN_LIMITE_MS = 3 * 80_000 + 1_500
+    let visitaDelSano: number | null = null
+    confirmCardAuthorization.mockImplementation(async (id: string, _now: unknown, limite?: { timeoutMs?: number }) => {
+      if (id === 'sano') {
+        visitaDelSano = Date.now() - NOW.getTime()
+        return 'NOT_YET'
+      }
+      await new Promise(r => setTimeout(r, limite?.timeoutMs ?? SIN_LIMITE_MS))
+      throw new Error('Stripe no contestó a tiempo')
+    })
+
+    const pasada = reconcileCardCharges(NOW, read => read())
+    await jest.advanceTimersByTimeAsync(5 * 60_000)
+    await expect(pasada).resolves.toMatchObject({ scanned: 11, errors: 10 })
+    expect(visitaDelSano).not.toBeNull()
+    expect(visitaDelSano!).toBeLessThanOrEqual(30_000 + 10_000)
   })
 })
 
