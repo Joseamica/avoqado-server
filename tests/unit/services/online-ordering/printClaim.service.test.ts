@@ -143,6 +143,17 @@ describe('claimOnlineOrderPrint', () => {
     expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
   })
 
+  it('D661 · E (Ruling 40): sin la cabecera, el repetido sólo se niega si el reclamo vencido es de OTRO aparato: el `NOT` lleva este aparato, así la caja que lo tenía recupera su comanda', async () => {
+    await expect(claimOnlineOrderPrint('v1', 'ord1', 'caja-vieja', NOW)).resolves.toEqual({ claimed: true })
+    const lectura = (prismaMock.onlineOrder.findFirst.mock.calls[0][0] as any).where
+    const cas = (prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).where
+    // Dentro del MISMO `where` de la lectura y del CAS (que ya fija `printClaimedAt`): nada se fija aparte.
+    const deOtraCaja = { ...D661, printClaimedAt: { not: null }, printClaimedBy: { not: 'caja-vieja' } }
+    expect(lectura.NOT).toEqual(deOtraCaja)
+    expect(cas.NOT).toEqual(deOtraCaja)
+    expect(Object.keys(cas).filter(k => k.startsWith('printClaimedBy'))).toEqual([])
+  })
+
   it('D661 · F1: con la cabecera (la caja marca «POSIBLE REPETIDA»), el repetido de «Nadie» se concede como hoy, con posibleRepetida:true', async () => {
     const vencido = new Date(LIMITE.getTime() - 1_000)
     prismaMock.onlineOrder.findFirst.mockResolvedValue({ printClaimedAt: vencido } as any)
