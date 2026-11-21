@@ -1026,7 +1026,8 @@ export interface AbonoDeSaldoAFavor {
  *
  * `exigirMismoTelefono` (D661, r1 #6 y r3 #6) lo pasa SÓLO la devolución de un pedido «Nadie»: el teléfono que manda es el que la
  * clienta verificó al pagar, nunca el de la ficha de hoy. El sobre que ya tiene debe ser de ese número (si pagó sin verificar, no se
- * puede saber: tampoco se abona) y el primero nace con él. Sin el parámetro (el «Cambio», el Reembolso del POS) todo sigue como hoy.
+ * puede saber: tampoco se abona) y el primero nace con él. D661 (Ruling 57): y ese número tiene que seguir siendo el de su ficha (si lo
+ * cambió, `STORE_CREDIT_PHONE_MISMATCH` también sin sobre). Sin el parámetro (el «Cambio», el Reembolso del POS) todo sigue como hoy.
  */
 export async function abonarSaldoAFavorEnTx(
   tx: TxConReintento,
@@ -1079,15 +1080,18 @@ export async function abonarSaldoAFavorEnTx(
     card.balance = vigente.balance
     card.status = vigente.status
   }
-  if (card && exigido !== undefined && (exigido === null || telefonoDeTarjeta(card.recipientPhone) !== exigido)) {
-    throw new GiftCardError(
+  const telefonoAjeno = () =>
+    new GiftCardError(
       'STORE_CREDIT_PHONE_MISMATCH',
       exigido === null
         ? `${s.nombreCliente} ya tiene saldo a favor aquí, pero pagó este pedido sin verificar su teléfono: no se puede comprobar que sea la misma persona. Puedes devolverlo a su tarjeta; no se aplicó nada.`
         : `El saldo a favor de ${s.nombreCliente} está ligado a otro teléfono que el que verificó al pagar este pedido: no se le abona. Puedes devolverlo a su tarjeta; no se aplicó nada.`,
       409,
     )
-  }
+  // D661 (Ruling 57): el número que verificó al pagar tiene que SEGUIR siendo el de su ficha: el saldo se gasta probando ese número, y si
+  // ya lo cambió (o su ficha ya no tiene uno) no lo podría usar. Vale con sobre o sin él; a su tarjeta sí se puede.
+  if (exigido != null && exigido !== s.telefonoCliente) throw telefonoAjeno()
+  if (card && exigido !== undefined && (exigido === null || telefonoDeTarjeta(card.recipientPhone) !== exigido)) throw telefonoAjeno()
   if (card?.status === 'BLOCKED') {
     throw new GiftCardError(
       'STORE_CREDIT_CARD_BLOCKED',

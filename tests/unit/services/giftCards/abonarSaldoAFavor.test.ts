@@ -449,10 +449,13 @@ describe('abonarSaldoAFavorEnTx', () => {
 })
 
 // D661 (Task 6, r1 #6 y r3 #6): sólo la devolución de un pedido «Nadie» pasa `exigirMismoTelefono`. Con él, el teléfono que manda es
-// el que la clienta VERIFICÓ al pagar (`request.telefonoVerificado`), nunca el de la ficha de hoy.
+// el que la clienta VERIFICÓ al pagar (`request.telefonoVerificado`). D661 (Ruling 57): y sólo si SIGUE siendo el de su ficha.
 describe('abonarSaldoAFavorEnTx con exigirMismoTelefono (D661)', () => {
   const VERIFICADO = '+525511112222'
   const nadie = (telefonoVerificado: string | null) => ({ tipo: 'REEMBOLSO' as const, exigirMismoTelefono: { telefonoVerificado } })
+  /** Su ficha de hoy (por omisión, `55 1234 5678` = TEL). */
+  const fichaCon = (phone: string | null) =>
+    prismaMock.customer.findFirst.mockResolvedValue({ firstName: 'Ana', lastName: 'López', phone } as any)
   const sinEscribir = () => {
     expect(prismaMock.giftCard.create).not.toHaveBeenCalled()
     expect(prismaMock.giftCard.updateMany).not.toHaveBeenCalled()
@@ -460,8 +463,9 @@ describe('abonarSaldoAFavorEnTx con exigirMismoTelefono (D661)', () => {
   }
 
   it('saldo: sobre con otro teléfono → STORE_CREDIT_PHONE_MISMATCH', async () => {
-    // El sobre vive en el número de la ficha (TEL); la clienta verificó otro al pagar.
+    // El sobre vive en el número de antes (TEL); su ficha y su pago ya son del nuevo.
     base({ sobreDeSaldo: sobre({ recipientPhone: TEL }) })
+    fichaCon('55 1111 2222')
     await expect(abonar(250, nadie(VERIFICADO))).rejects.toMatchObject({
       code: 'STORE_CREDIT_PHONE_MISMATCH',
       statusCode: 409,
@@ -480,18 +484,41 @@ describe('abonarSaldoAFavorEnTx con exigirMismoTelefono (D661)', () => {
     sinEscribir()
   })
 
-  it('el mismo teléfono verificado que el del sobre (escrito distinto) recarga el sobre como siempre', async () => {
+  it('el mismo teléfono verificado que el del sobre y el de su ficha (escritos distinto) recarga el sobre como siempre', async () => {
     base({ sobreDeSaldo: sobre({ recipientPhone: VERIFICADO, balance: D(100) }) })
-    // La ficha de hoy trae OTRO número: no importa, manda el verificado.
-    prismaMock.customer.findFirst.mockResolvedValue({ firstName: 'Ana', lastName: 'López', phone: '55 9999 0000' } as any)
+    fichaCon('55 1111 2222')
     const out = await abonar(250, nadie('52 55 1111 2222'))
     expect(out).toMatchObject({ giftCardId: 'gc-saldo', telefonoDelSobre: VERIFICADO, telefonoNoCoincide: false })
     expect(prismaMock.giftCard.updateMany.mock.calls[0][0].data).toEqual({ balance: { increment: D(250) } })
   })
 
-  it('saldo: primer sobre se crea con el teléfono verificado del pago, no con el de la ficha de hoy', async () => {
+  it('D661 · Ruling 57: verificó un número al pagar y su ficha de hoy dice otro (lo cambió en «Mi cuenta»): sin sobre → 409 STORE_CREDIT_PHONE_MISMATCH, nada escrito', async () => {
     base()
-    // La ficha de hoy trae TEL; la clienta pagó con VERIFICADO.
+    // La ficha de hoy trae TEL; la clienta pagó con VERIFICADO: un sobre con VERIFICADO no lo podría gastar.
+    await expect(abonar(250, nadie(VERIFICADO))).rejects.toMatchObject({
+      code: 'STORE_CREDIT_PHONE_MISMATCH',
+      statusCode: 409,
+      message: expect.stringMatching(/Ana López[\s\S]*otro teléfono[\s\S]*tarjeta/),
+    })
+    sinEscribir()
+  })
+
+  it('D661 · Ruling 57: con el sobre en el número verificado pero la ficha ya en otro, tampoco se abona', async () => {
+    base({ sobreDeSaldo: sobre({ recipientPhone: VERIFICADO }) })
+    await expect(abonar(250, nadie(VERIFICADO))).rejects.toMatchObject({ code: 'STORE_CREDIT_PHONE_MISMATCH', statusCode: 409 })
+    sinEscribir()
+  })
+
+  it('D661 · Ruling 57: una ficha que ya no tiene teléfono tampoco es «el mismo número»: 409 y nada escrito', async () => {
+    base()
+    fichaCon(null)
+    await expect(abonar(250, nadie(VERIFICADO))).rejects.toMatchObject({ code: 'STORE_CREDIT_PHONE_MISMATCH', statusCode: 409 })
+    sinEscribir()
+  })
+
+  it('saldo: primer sobre se crea con el teléfono verificado del pago, que sigue siendo el de su ficha', async () => {
+    base()
+    fichaCon('55 1111 2222') // = VERIFICADO, escrito distinto
     const out = await abonar(250, nadie(VERIFICADO))
     expect((prismaMock.giftCard.create.mock.calls[0][0].data as any).recipientPhone).toBe(VERIFICADO)
     expect(out).toMatchObject({ giftCardId: 'gc-nuevo', telefonoDelSobre: VERIFICADO, telefonoNoCoincide: false })

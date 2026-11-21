@@ -144,6 +144,8 @@ describe('D661 · tarea 6: devolver a saldo a favor un pedido «Nadie» (integra
     ).id
   /** Un pedido «Nadie» de esa clienta, pagado con tarjeta (`verificado`: el teléfono que su sesión probó) y abierto por una caja. */
   const cobrado = async (customerId: string, verificado: string | null) => {
+    // Su sesión probó ese número: es el de su ficha (si la ficha todavía no traía uno), como al entrar por WhatsApp.
+    if (verificado) await prisma.customer.updateMany({ where: { id: customerId, phone: null }, data: { phone: verificado } })
     const d = await createCardOnlineDraft(
       {
         venueId: venueId!,
@@ -368,7 +370,7 @@ describe('D661 · tarea 6: devolver a saldo a favor un pedido «Nadie» (integra
 
   it('saldo: abona el 100 %, no llama a refunds.create y cierra el pedido COMPLETED con refundedAt; no reaparece tras syncPaidClosedFolios', async () => {
     const verificado = telefono()
-    const ana = await clienta(telefono()) // su ficha de hoy trae OTRO número: no importa
+    const ana = await clienta(verificado.slice(3)) // D661 (Ruling 57): su ficha sigue con el número que verificó (escrito distinto)
     const p = await cobrado(ana, verificado)
 
     const r = await devolver(p.orderId, 'STORE_CREDIT')
@@ -554,7 +556,10 @@ describe('D661 · tarea 6: devolver a saldo a favor un pedido «Nadie» (integra
     const ana = await clienta()
     const primero = await cobrado(ana, telefono())
     await devolver(primero.orderId, 'STORE_CREDIT') // su sobre nace con el número que verificó ESA vez
-    const segundo = await cobrado(ana, telefono()) // y ahora pagó verificando OTRO
+    // Cambió de número en «Mi cuenta» y pagó verificando el nuevo: su ficha y su pago coinciden; el sobre, no.
+    const nuevo = telefono()
+    await prisma.customer.update({ where: { id: ana }, data: { phone: nuevo } })
+    const segundo = await cobrado(ana, nuevo)
     await expect(devolver(segundo.orderId, 'STORE_CREDIT')).rejects.toMatchObject({
       statusCode: 409,
       code: 'STORE_CREDIT_PHONE_MISMATCH',
@@ -573,21 +578,33 @@ describe('D661 · tarea 6: devolver a saldo a favor un pedido «Nadie» (integra
     await nadaEscrito(segundo, ana, 1)
   })
 
-  it('saldo: primer sobre se crea con el teléfono verificado del pago, no con el de la ficha de hoy', async () => {
+  it('saldo: el primer sobre nace con el teléfono verificado del pago, que sigue siendo el de su ficha (escrito distinto)', async () => {
     const verificado = telefono()
-    const ficha = telefono()
-    const ana = await clienta(ficha)
+    const ana = await clienta(verificado.slice(3))
     const p = await cobrado(ana, verificado)
     await devolver(p.orderId, 'STORE_CREDIT')
     const [sobre] = await sobresDe(ana)
     expect(sobre.recipientPhone).toBe(verificado)
-    expect(sobre.recipientPhone).not.toBe(ficha)
     // Y un segundo pedido verificado con el MISMO número recarga ese sobre (no abre otro).
     const segundo = await cobrado(ana, verificado)
     await devolver(segundo.orderId, 'STORE_CREDIT')
     const sobres = await sobresDe(ana)
     expect(sobres).toHaveLength(1)
     expect(sobres[0].balance.toFixed(2)).toBe('500.00')
+  })
+
+  it('D661 · Ruling 57: pagó verificando A y después cambió su número a B en «Mi cuenta»: el saldo a favor → 409 STORE_CREDIT_PHONE_MISMATCH y nada se escribe (tampoco un sobre); a su tarjeta, sí', async () => {
+    const a = telefono()
+    const ana = await clienta(a)
+    const p = await cobrado(ana, a)
+    await prisma.customer.update({ where: { id: ana }, data: { phone: telefono() } }) // perdió A y verificó B
+    await expect(devolver(p.orderId, 'STORE_CREDIT')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'STORE_CREDIT_PHONE_MISMATCH',
+      message: expect.stringMatching(/otro teléfono[\s\S]*tarjeta/),
+    })
+    await nadaEscrito(p, ana)
+    await expect(devolver(p.orderId, 'CARD')).resolves.toMatchObject({ status: 'RECORDED', cardRefundStatus: 'RECORDED' })
   })
 
   it('saldo: sin teléfono verificado y sin sobre → STORE_CREDIT_CUSTOMER_PHONE_REQUIRED', async () => {
