@@ -112,8 +112,9 @@ export async function cambiarSdkPropioDeTerminal(entrada: {
   return prisma.$transaction(async tx => {
     // Primero el ACTOR (Codex b2a r1 #4): la bitácora necesita su fila (llave foránea `staffId`), y la limpieza de una demo y
     // el borrado de personal toman `Staff` y después `Terminal`. Tomarlo aquí, antes de la terminal, deja un solo orden
-    // (Staff, luego Terminal) y nunca un abrazo. `FOR KEY SHARE` es lo mismo que tomaría la llave foránea: no frena a nadie
-    // que sólo edite la ficha de la persona.
+    // (Staff, luego Terminal) y nunca un abrazo. `FOR KEY SHARE` es lo mismo que tomaría la llave foránea: no choca con quien
+    // sólo edita la ficha de la persona (`FOR NO KEY UPDATE`), pero SÍ espera a un `FOR UPDATE` de `Staff` (la baja de personal,
+    // la liga de soporte) hasta que termine. Sólo espera: como el orden es el mismo, no hay abrazo.
     const [actor] = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM "Staff" WHERE id = ${entrada.staffId} FOR KEY SHARE`
     if (!actor) throw new NotFoundError('Usuario no encontrado')
 

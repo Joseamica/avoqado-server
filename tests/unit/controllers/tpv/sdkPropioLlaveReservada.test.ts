@@ -56,9 +56,8 @@ describe('PUT /tpv/terminals/:serial/settings (el aparato)', () => {
     const write = prismaMock.terminal.update.mock.calls[0][0].data
     expect(write.config.settings).not.toHaveProperty('inHouseSdkEnabled')
     expect(write.config.settings.showTipScreen).toBe(false)
-    if (write.configOverrides && typeof write.configOverrides === 'object') {
-      expect(write.configOverrides).not.toHaveProperty('inHouseSdkEnabled')
-    }
+    // Lo único distinto del default (`showTipScreen: true`) es la propina; la llave reservada no entra aunque ya estuviera.
+    expect(write.configOverrides).toEqual({ showTipScreen: false })
     expect(res.__body.data).not.toHaveProperty('inHouseSdkEnabled')
     expect(res.__body.data.showTipScreen).toBe(false)
   })
