@@ -1126,12 +1126,44 @@ export async function refundCardOnlineOrder(i: CardRefundRequest): Promise<CardR
 const NOTA_SALDO_A_FAVOR = 'Saldo a favor (pedido en línea)'
 
 /**
+ * D661 (C1): lo que queda por devolver del cobro con tarjeta de un pedido, en pesos, con el MISMO cálculo que exige la devolución
+ * (`bloquearCobroParaReembolso`: lo ya devuelto en el libro y lo apartado por devoluciones a la tarjeta todavía sin renglón). Lo usa
+ * la vista previa del MCP para no prometer lo que se rechazaría al confirmar. Una transacción corta que sólo lee (toma el candado
+ * del cobro un instante, como cualquier devolución). Sin cobro con tarjeta: 0.
+ */
+export async function porDevolverDeUnPedido(venueId: string, orderId: string): Promise<Prisma.Decimal> {
+  return prisma.$transaction(async tx => {
+    const charge = await tx.onlineOrderCharge.findFirst({
+      where: { venueId, onlineOrder: { is: { orderId, venueId } } },
+      select: { status: true, paymentIntentId: true },
+    })
+    if (charge?.status !== OnlineOrderChargeStatus.CAPTURED || !charge.paymentIntentId) return new Prisma.Decimal(0)
+    const payment = await tx.payment.findFirst({
+      where: { venueId, orderId, processorId: charge.paymentIntentId, type: PaymentType.REGULAR },
+      select: { id: true },
+    })
+    if (!payment) return new Prisma.Decimal(0)
+    const cobro = await bloquearCobroParaReembolso(tx, { venueId, paymentId: payment.id, expectedOrderId: orderId })
+    return new Prisma.Decimal(cobro.remainingBeforeCents).div(100)
+  }, ORDER_LOCK_WAIT_BUDGET)
+}
+
+/**
  * D661 (Task 6): devolver el 100 % de un pedido «Nadie» como saldo a favor en el negocio. Local y atómico: nada va a Stripe (el
  * negocio conserva el cobro) y en UNA transacción —la reserva si estaba por entregar, la fila `RESOLVED` con `toStoreCredit` (nunca
  * `REQUESTED`: el recorrido de Stripe no la toma), el renglón REFUND por `writeRefundInTx` (medio de sistema «Saldo a favor»: fuera
  * del cajón y del banco) con su abono al sobre de la clienta, sus efectos y el cierre «Devuelto»—. Si cualquier escritura falla, no
  * queda nada. Candados: «primer-sobre» primero (como exige `writeRefundInTx` con saldo a favor), después Order → Payment →
  * OnlineOrder (`decidirDevolucionEnTx`) → la clienta y su sobre (`prepararSobreDeSaldoAFavorEnTx`, dentro del núcleo).
+ *
+ * D661 (C4): va por el núcleo (`writeRefundInTx`), no por `issueRefund`, y se salta A PROPÓSITO tres cosas de `issueRefund`:
+ * - el gancho de tarjetas de regalo (`alRegistrarReembolsoEnTx`): el cobro de un pedido en línea es un cargo de Stripe, nunca un pago
+ *   con saldo, y la tienda en línea no vende tarjetas; el único sobre que se toca es el de la clienta, y lo abona aquí mismo el núcleo;
+ * - la obligación de costo negativo: Stripe no devolvió nada (el negocio conserva el cobro y su comisión), igual que `issueRefund`
+ *   la salta con saldo a favor;
+ * - el recibo digital de la devolución, que `issueRefund` genera después del commit: no lo pidió el plan; lo que la clienta recibe es
+ *   saldo en su sobre, y el seguimiento del pedido dice «Devuelto».
+ * Lo que sí hace igual: el sello y los puntos se revierten por los efectos durables encolados en esta transacción.
  */
 async function devolverASaldoAFavor(s: Solicitud): Promise<CardRefundResult> {
   const out = await withDeadlockRetry(
@@ -1156,6 +1188,9 @@ async function devolverASaldoAFavor(s: Solicitud): Promise<CardRefundResult> {
           feeRefundedCents: 0, // Stripe no devolvió nada: la comisión de la plataforma se queda
           recordedAt: d.ahora,
           nextCheckAt: NEVER_AGAIN,
+          // D661 (C3): la reversa del sello es un efecto que ya queda encolado en ESTA transacción (`enqueueRefundPaymentEffectsInTx`);
+          // sellada desde que nace, la rama de las selladas del recorrido de Stripe nunca la toma (ni con otra `nextCheckAt`).
+          stampReversedAt: d.ahora,
         },
         select: { id: true },
       })

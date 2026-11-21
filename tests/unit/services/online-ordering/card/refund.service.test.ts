@@ -75,6 +75,7 @@ import {
 } from '@/services/online-ordering/card/refund.service'
 import { cerrarDevueltosPendientes, sweepCardRefunds } from '@/services/online-ordering/card/refund-reconciler.service'
 import { cerrarComoDevueltoEnTx } from '@/services/online-ordering/card/devuelto'
+import * as devuelto from '@/services/online-ordering/card/devuelto'
 import { operationHash } from '@/utils/operationHash'
 
 const D = (v: string) => new Prisma.Decimal(v)
@@ -1173,6 +1174,42 @@ describe('D661 (Task 5): devolver a la tarjeta un pedido de «Nadie»', () => {
     cardRefund.findMany.mockImplementationOnce(async () => []) // las por cerrar
     await expect(sweepCardRefunds(at(2 * MIN), readEntry)).resolves.toMatchObject({ closed: 0 })
   })
+
+  it('D661 · C5: el barrido de cierres sólo mira el último mes y rota: un lote lleno que no se cierra no tapa a los de atrás', async () => {
+    const DIA = 24 * 60 * MIN
+    const consultas = () => (cardRefund.findMany.mock.calls as any[][]).map(c => c[0])
+    // 50 filas anotadas que no se pueden cerrar (aquí, sin pedido): el lote siguiente empieza DESPUÉS de la última.
+    const lote = Array.from({ length: 50 }, (_, i) => ({
+      venueId: 'v1',
+      staffId: null,
+      id: `cr${String(i).padStart(2, '0')}`,
+      createdAt: at(i * 1000),
+      charge: { onlineOrder: null },
+    }))
+    cardRefund.findMany.mockClear()
+    cardRefund.findMany.mockImplementationOnce(async () => lote as any)
+    await expect(cerrarDevueltosPendientes({ venueId: 'v1' }, NOW, readEntry)).resolves.toBe(0)
+    const primera = consultas()[0]
+    expect(primera.where.createdAt).toEqual({ gte: new Date(NOW.getTime() - 31 * DIA) })
+    expect(primera.where.OR).toBeUndefined()
+    expect(primera.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }])
+
+    cardRefund.findMany.mockImplementationOnce(async () => [])
+    await cerrarDevueltosPendientes({ venueId: 'v1' }, NOW, readEntry)
+    expect(consultas()[1].where.OR).toEqual([{ createdAt: { gt: at(49_000) } }, { createdAt: at(49_000), id: { gt: 'cr49' } }])
+    expect(consultas()[1].where.createdAt).toEqual({ gte: new Date(NOW.getTime() - 31 * DIA) })
+
+    // Una página corta cierra la vuelta: la siguiente empieza otra vez desde la más vieja del mes.
+    cardRefund.findMany.mockImplementationOnce(async () => [])
+    await cerrarDevueltosPendientes({ venueId: 'v1' }, NOW, readEntry)
+    expect(consultas()[2].where.OR).toBeUndefined()
+    // Cada alcance rota aparte (el recorrido de cada minuto no hereda la vuelta de una sucursal).
+    cardRefund.findMany.mockImplementationOnce(async () => lote as any)
+    await cerrarDevueltosPendientes({ venueId: 'v1' }, NOW, readEntry)
+    cardRefund.findMany.mockImplementationOnce(async () => [])
+    await cerrarDevueltosPendientes({}, NOW, readEntry)
+    expect(consultas()[4].where.OR).toBeUndefined()
+  })
 })
 
 // ── D661 (Task 6): devolver a saldo a favor (local, atómico) y la devolución hecha por fuera en Stripe (Ruling 28) ─────────────────
@@ -1363,6 +1400,26 @@ describe('D661 (Task 6): saldo a favor y devolución por fuera en Stripe', () =>
     expect(pedido).toMatchObject({ status: 'COMPLETED', refundRequestedAt: NOW, refundedAt: NOW, completedAt: NOW })
     expect(pasos.filter(p => p.que === 'bitacora' && p.arg.data.action === 'ONLINE_ORDER_CLOSED_AS_REFUNDED')).toHaveLength(1)
     expect(prepararMediosDeSaldoAFavor).toHaveBeenCalledWith('v1')
+  })
+
+  it('D661 · C4: si el cierre «Devuelto» compartido no cierra tras abonar ({ cerrado: false }), 409 ORDER_STATE_CHANGED DENTRO de la transacción del abono: nada queda abonado ni se anuncia', async () => {
+    const cierre = jest.spyOn(devuelto, 'cerrarComoDevueltoEnTx').mockImplementationOnce(async () => {
+      paso('cierre')
+      return { cerrado: false }
+    })
+    try {
+      await expect(aSaldo()).rejects.toMatchObject({ statusCode: 409, code: 'ORDER_STATE_CHANGED' })
+    } finally {
+      cierre.mockRestore()
+    }
+    // La fila, el renglón, el abono y el cierre fallido van en UNA transacción (la que truena y se revierte entera).
+    const deLaTx = pasos.filter(p => ['fila', 'renglon', 'abono', 'cierre'].includes(p.que))
+    expect(deLaTx.map(p => p.que)).toEqual(['fila', 'renglon', 'abono', 'cierre'])
+    expect(new Set(deLaTx.map(p => p.tx)).size).toBe(1)
+    expect(deLaTx[0].tx).toBeGreaterThan(0)
+    // Nada después del commit: ni la bitácora del saldo ni la de la devolución.
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDER_REFUNDED_TO_STORE_CREDIT' }))
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'REFUND_CREATED' }))
   })
 
   it('saldo a favor: la libreta recibe la clienta y el teléfono VERIFICADO del borrador (exigirMismoTelefono), el 100 % y el folio', async () => {

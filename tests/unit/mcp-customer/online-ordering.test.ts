@@ -1,4 +1,5 @@
 // tests/unit/mcp-customer/online-ordering.test.ts
+import { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { registerOnlineOrderingTools } from '../../../src/mcp/tools/onlineOrdering'
@@ -53,8 +54,10 @@ jest.mock('@/mcp/planGate', () => ({ planGateMessage: (...a: unknown[]) => mockP
 const mockListCardRefunds = jest.fn()
 const mockRefundCard = jest.fn()
 const mockResolveCardRefund = jest.fn()
+const mockPorDevolver = jest.fn()
 jest.mock('@/services/online-ordering/card/refund.service', () => ({
   listCardRefunds: (...a: unknown[]) => mockListCardRefunds(...(a as [])),
+  porDevolverDeUnPedido: (...a: unknown[]) => mockPorDevolver(...(a as [])),
   refundCardOnlineOrder: (...a: unknown[]) => mockRefundCard(...(a as [])),
   resolveReversedCardRefund: (...a: unknown[]) => mockResolveCardRefund(...(a as [])),
 }))
@@ -414,6 +417,24 @@ describe('online_order_respond', () => {
     expect(mockGetInboxOrder).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'ord1' })
     expect(mockCancel).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'ord1', staffId: 's1' })
     expect(r).toMatchObject({ ok: true, status: 'CANCELLED_BY_STAFF' })
+  })
+
+  it('D661 · C6: la vista previa de CANCELAR un apartado con tarjeta de «No, entran solos» dice que el dinero apartado se libera y no se le cobra; un folio de caja no lo dice', async () => {
+    mockGetInboxOrder.mockResolvedValue({
+      ...pending,
+      requiresAcceptance: false,
+      paymentMode: 'CARD_ONLINE',
+      paymentStatus: 'PENDING',
+      card: { status: 'AUTHORIZED', amount: 186 },
+    })
+    const r = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'CANCEL' }))
+    expect(r).toMatchObject({ ok: false, requiresConfirmation: true })
+    expect(r.preview.efecto).toContain('El dinero apartado en su tarjeta se libera: no se le cobra nada.')
+    expect(mockCancel).not.toHaveBeenCalled()
+
+    mockGetInboxOrder.mockResolvedValue({ ...pending, requiresAcceptance: false, paymentStatus: 'PENDING' })
+    const folio = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'CANCEL' }))
+    expect(folio.preview.efecto).not.toMatch(/tarjeta/)
   })
 
   it('T16: ACCEPT sobre un folio sin pagar responde en texto que se cobra antes de prepararlo y no ejecuta', async () => {
@@ -1087,6 +1108,40 @@ describe('devoluciones a la tarjeta de un pedido en línea', () => {
       replay: false,
     })
     mockResolveCardRefund.mockResolvedValue({ status: 'RESOLVED', replay: false })
+    mockPorDevolver.mockResolvedValue(new Prisma.Decimal('250.00'))
+  })
+
+  it('D661 · C1: la vista previa pide lo que el servicio va a exigir (lo que QUEDA por devolver, no lo cobrado) y avisa la comisión de Stripe', async () => {
+    // «Mi equipo»: ya se devolvieron $100 de $250; quedan $150.
+    mockPorDevolver.mockResolvedValue(new Prisma.Decimal('150.00'))
+    const args = { venueId: 'v1', orderId: 'ord1', reason: 'CANCELLED_ORDER' }
+    const demas = parse(await call('online_order_card_refund', { ...args, amount: 200 }))
+    expect(demas).toMatchObject({ ok: false, code: 'CARD_REFUND_EXCEEDS_REMAINING', remaining: 150 })
+    expect(demas.error).toContain('sólo quedan $150.00')
+    expect(demas.requiresConfirmation).toBeUndefined()
+    const cabe = parse(await call('online_order_card_refund', { ...args, amount: 150 }))
+    expect(cabe).toMatchObject({ ok: false, requiresConfirmation: true })
+    expect(cabe.preview.efecto).toContain('Con tarjeta, el negocio no recupera la comisión de Stripe de este cobro.')
+    expect(mockPorDevolver).toHaveBeenCalledWith('v1', 'ord1')
+
+    // «Nadie»: el total que se exige es lo que queda (no lo cobrado); con todo devuelto, no hay vista previa.
+    mockGetInboxOrder.mockResolvedValue({ ...cobrado, requiresAcceptance: false, status: 'COMPLETED' })
+    mockPorDevolver.mockResolvedValue(new Prisma.Decimal('0.00'))
+    const nada = parse(await call('online_order_card_refund', { ...args, amount: 250 }))
+    expect(nada).toMatchObject({ ok: false, code: 'CARD_REFUND_EXCEEDS_REMAINING', remaining: 0 })
+    mockPorDevolver.mockResolvedValue(new Prisma.Decimal('180.00'))
+    const parcial = parse(await call('online_order_card_refund', { ...args, amount: 100 }))
+    expect(parcial).toMatchObject({ ok: false, code: 'FULL_REFUND_ONLY', total: 180 })
+    const total = parse(await call('online_order_card_refund', { ...args, amount: 180 }))
+    expect(total).toMatchObject({ ok: false, requiresConfirmation: true, preview: { total: 180 } })
+    expect(total.preview.efecto).toContain('Con tarjeta, el negocio no recupera la comisión de Stripe de este cobro.')
+  })
+
+  it('D661 · C4: la descripción de online_order_card_refund dice que puede contestar 409 EXTERNAL_REFUND_DETECTED y 503 (sin nombres internos)', () => {
+    const d = descriptions.get('online_order_card_refund')!
+    expect(d).toMatch(/409 EXTERNAL_REFUND_DETECTED/)
+    expect(d).toMatch(/503/)
+    expect(d).not.toMatch(/prisma|OnlineOrderCardRefund|onlineOrderCharge/i)
   })
 
   it('online_order_card_refunds: lista con payments:read, montos en pesos (número)', async () => {

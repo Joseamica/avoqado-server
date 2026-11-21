@@ -670,7 +670,9 @@ describe('D661 · tarea 6: devolver a saldo a favor un pedido «Nadie» (integra
     const p = await cobrado(ana, telefono())
     const r = await devolver(p.orderId, 'STORE_CREDIT')
     const fila = (await filasDe(p.chargeId))[0]
-    expect(fila).toMatchObject({ id: r.cardRefundId, status: 'RESOLVED', toStoreCredit: true, stampReversedAt: null })
+    // C3: nace con la reversa del sello ya sellada (el efecto quedó encolado en su misma transacción): el barrido no tiene nada que hacer.
+    expect(fila).toMatchObject({ id: r.cardRefundId, status: 'RESOLVED', toStoreCredit: true, stampReversedAt: expect.any(Date) })
+    expect(fila.stampReversedAt).toEqual(fila.recordedAt)
     for (const dias of [0, 1, 31, 400]) {
       expect(await recorridoDeEstaSucursal(new Date(Date.now() + dias * 24 * 60 * MIN))).not.toContain(fila.id)
     }
@@ -678,6 +680,20 @@ describe('D661 · tarea 6: devolver a saldo a favor un pedido «Nadie» (integra
     expect(refundSpy).not.toHaveBeenCalled()
     // Ni una escritura: la fila sigue idéntica (sin lastError, sin nueva revisión, sin tocar).
     expect(await prisma.onlineOrderCardRefund.findUniqueOrThrow({ where: { id: fila.id } })).toEqual(fila)
+
+    // C3: aunque alguien le pusiera otra vez una revisión vencida, la rama de las selladas (REVERSED/RESOLVED sin sello) no la toma.
+    await prisma.onlineOrderCardRefund.update({ where: { id: fila.id }, data: { nextCheckAt: new Date(Date.now() - MIN) } })
+    expect(await recorridoDeEstaSucursal(new Date())).not.toContain(fila.id)
+    expect(refundSpy).not.toHaveBeenCalled()
+
+    // C4 (control positivo): una devolución a la TARJETA con su revisión vencida SÍ la toma el mismo recorrido.
+    const q = await cobrado(await clienta(), telefono())
+    const aTarjeta = await devolver(q.orderId, 'CARD')
+    await prisma.onlineOrderCardRefund.update({
+      where: { id: aTarjeta.cardRefundId },
+      data: { status: 'PENDING', nextCheckAt: new Date(Date.now() - MIN) },
+    })
+    expect(await recorridoDeEstaSucursal(new Date())).toContain(aTarjeta.cardRefundId)
   })
 
   it('cerrarComoDevueltoEnTx sobre un pedido reservado cuya devolución sigue pendiente no lo cierra', async () => {

@@ -15,6 +15,14 @@ import { DEVOLUCION_ANOTADA, ENTREGABLE, YA_ENTREGADO } from './devuelto'
 import { SWEPT_CARD_REFUND_STATUSES, advanceCardRefundForSweep, cerrarComoDevuelto } from './refund.service'
 
 const SEALED_STATUSES = [OnlineOrderCardRefundStatus.REVERSED, OnlineOrderCardRefundStatus.RESOLVED]
+/** D661 (C5): el barrido de cierres sólo mira las devoluciones del último mes (lo que pudo quedar sin cerrar). */
+const CIERRES_VENTANA_MS = 31 * 24 * 60 * 60_000
+/**
+ * D661 (C5): por dónde va la vuelta del barrido de cierres, por alcance: el lote siguiente empieza después del último leído, así 50
+ * cierres que fallan siempre no tapan a los de atrás; una página corta cierra la vuelta. ponytail: en memoria (una sola instancia);
+ * con dos, cada una rota por su lado y sólo repite lecturas.
+ */
+const vueltaDeCierres = new Map<string, { createdAt: Date; id: string }>()
 
 export interface CardRefundSweepResult {
   scanned: number
@@ -71,16 +79,21 @@ export async function sweepCardRefunds(now: Date, readEntry: ReadCandidates): Pr
  * la fila de devolución y no por el calendario de revisión de Stripe: una fila RESOLVED que el recorrido ya no visita (sello revertido,
  * `nextCheckAt` fuera) también cierra su pedido (r5 #4). Acotada (cada pedido sale de la lista al cerrarse) y sólo con lo que el cierre
  * puede cerrar, así nada se vuelve a tomar en cada pasada. `scope.venueId` acota a una sucursal (pruebas); el job la corre sin él.
+ * D661 (C5): sólo el último mes, y en vueltas (`vueltaDeCierres`): lo que no se pudo cerrar no se vuelve a leer hasta la vuelta siguiente.
  */
 export async function cerrarDevueltosPendientes(
   scope: { venueId?: string },
   now: Date,
   readEntry: ReadCandidates = read => read(),
 ): Promise<number> {
+  const alcance = scope.venueId ?? '*'
+  const desde = vueltaDeCierres.get(alcance)
   const filas = await readEntry(() =>
     prisma.onlineOrderCardRefund.findMany({
       where: {
         ...(scope.venueId !== undefined ? { venueId: scope.venueId } : {}),
+        createdAt: { gte: new Date(now.getTime() - CIERRES_VENTANA_MS) },
+        ...(desde ? { OR: [{ createdAt: { gt: desde.createdAt } }, { createdAt: desde.createdAt, id: { gt: desde.id } }] } : {}),
         status: { in: DEVOLUCION_ANOTADA },
         charge: {
           onlineOrder: {
@@ -93,9 +106,18 @@ export async function cerrarDevueltosPendientes(
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: CARD_RECONCILE_BATCH,
-      select: { venueId: true, staffId: true, charge: { select: { onlineOrder: { select: { orderId: true } } } } },
+      select: {
+        id: true,
+        createdAt: true,
+        venueId: true,
+        staffId: true,
+        charge: { select: { onlineOrder: { select: { orderId: true } } } },
+      },
     }),
   )
+  const ultima = filas.at(-1)
+  if (filas.length < CARD_RECONCILE_BATCH || !ultima) vueltaDeCierres.delete(alcance)
+  else vueltaDeCierres.set(alcance, { createdAt: ultima.createdAt, id: ultima.id })
   let cerrados = 0
   for (const fila of filas) {
     const orderId = fila.charge.onlineOrder?.orderId

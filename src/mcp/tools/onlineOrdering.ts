@@ -15,7 +15,12 @@ import { formatoPesos } from '@/services/giftCards/giftCardLimits'
 import { listFolios } from '@/services/online-ordering/folios.service'
 import { MENSAJE_ABRIR_DESDE_LA_CAJA, mensajeNoSeEntrega } from '@/services/online-ordering/card/guards'
 import { esVentaCerrada } from '@/services/shared/orderBalance'
-import { listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
+import {
+  listCardRefunds,
+  porDevolverDeUnPedido,
+  refundCardOnlineOrder,
+  resolveReversedCardRefund,
+} from '@/services/online-ordering/card/refund.service'
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
 import { getSettings, pauseOnlineOrdering, updateSettings } from '@/services/online-ordering/settings.service'
@@ -298,7 +303,10 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
                 ? ` Se cobra la tarjeta apartada${order.card ? ` ($${order.card.amount.toFixed(2)})` : ''}.`
                 : tarjeta && action === 'REJECT'
                   ? ' El dinero apartado en la tarjeta se libera.'
-                  : ''),
+                  : // D661 (C6): cancelar un apartado de «No, entran solos» suelta la tarjeta: la clienta no paga nada.
+                    tarjeta && action === 'CANCEL' && order.status === 'PENDING_ACCEPTANCE'
+                    ? ' El dinero apartado en su tarjeta se libera: no se le cobra nada.'
+                    : ''),
           },
           mensaje: 'Vuelve a llamar con confirm:true para aplicarlo.',
         })
@@ -528,7 +536,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_order_card_refund',
-    'Devuelve a la tarjeta del cliente (total o parcial) un pedido en línea que se cobró con tarjeta al pedir. El monto va en pesos (por ejemplo 120.50) y no puede pasar de lo que queda por devolver. Un pedido pagado con tarjeta en «No, entran solos» sólo se devuelve completo (la vista previa dice el total) y, si todavía no se entregaba, también se cierra como «Devuelto». Dos pasos: sin confirm:true sólo muestra la vista previa, un confirmationToken y expectedLatestRefundId (y expectedClosesAsRefunded cuando también lo cierra); para devolver, repite los mismos datos con confirm:true, ese confirmationToken (vale 10 minutos), ese expectedLatestRefundId y, si vino, ese expectedClosesAsRefunded. Repetir la confirmación con el mismo token no devuelve dos veces; si hubo otra devolución desde la vista previa contesta CARD_REFUND_STALE_VIEW, y si el pedido cambió (por ejemplo, ya se entregó) REFUND_EFFECT_CHANGED: hay que revisarlo y pedir otra vista previa. Pide permiso para reembolsar.',
+    'Devuelve a la tarjeta del cliente (total o parcial) un pedido en línea que se cobró con tarjeta al pedir. El monto va en pesos (por ejemplo 120.50) y no puede pasar de lo que queda por devolver. Un pedido pagado con tarjeta en «No, entran solos» sólo se devuelve completo (la vista previa dice el total) y, si todavía no se entregaba, también se cierra como «Devuelto». Dos pasos: sin confirm:true sólo muestra la vista previa, un confirmationToken y expectedLatestRefundId (y expectedClosesAsRefunded cuando también lo cierra); para devolver, repite los mismos datos con confirm:true, ese confirmationToken (vale 10 minutos), ese expectedLatestRefundId y, si vino, ese expectedClosesAsRefunded. Repetir la confirmación con el mismo token no devuelve dos veces; si hubo otra devolución desde la vista previa contesta CARD_REFUND_STALE_VIEW, y si el pedido cambió (por ejemplo, ya se entregó) REFUND_EFFECT_CHANGED: hay que revisarlo y pedir otra vista previa. Si el cobro ya se devolvió por fuera, directo en Stripe, contesta 409 EXTERNAL_REFUND_DETECTED y no devuelve nada (se termina desde Stripe); si en ese momento no se pudo revisar en Stripe, contesta 503 y se puede reintentar en un momento. Con tarjeta, el negocio no recupera la comisión de Stripe del cobro. Pide permiso para reembolsar.',
     {
       venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
       orderId: z.string().describe('Id del pedido (orderId de la lista de pedidos en línea)'),
@@ -566,8 +574,19 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
           return text({ ok: false, error: 'Este pedido no se cobró con tarjeta en línea; no hay nada que devolver a la tarjeta.' })
         }
         // D661 (Task 5): en «Nadie» sólo el total, y si todavía está por entregar también se cierra «Devuelto».
+        // D661 (C1): lo que el servicio va a exigir es lo que QUEDA por devolver del cobro (el mismo cálculo, bajo su candado), no lo
+        // cobrado: tras otra devolución, la vista previa ya no promete lo que se rechazaría al confirmar.
         const nadie = order.requiresAcceptance === false
-        const total = nadie ? (order.card.capturedAmount ?? order.card.amount) : null
+        const queda = await porDevolverDeUnPedido(venueId, orderId)
+        if (monto.gt(queda)) {
+          return text({
+            ok: false,
+            code: 'CARD_REFUND_EXCEEDS_REMAINING',
+            remaining: Number(queda.toFixed(2)),
+            error: `No se puede devolver $${monto.toFixed(2)}: de este pedido sólo quedan $${queda.toFixed(2)} por devolver. No se aplicó nada.`,
+          })
+        }
+        const total = nadie ? Number(queda.toFixed(2)) : null
         if (total != null && !monto.eq(new Prisma.Decimal(total))) {
           return text({
             ok: false,
@@ -595,7 +614,8 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
             nota,
             efecto:
               `Se devuelven $${monto.toFixed(2)} a la tarjeta del cliente.` +
-              (cierra ? ' También lo cierra como «Devuelto»: ya no se entrega ni se prepara.' : ''),
+              (cierra ? ' También lo cierra como «Devuelto»: ya no se entrega ni se prepara.' : '') +
+              ' Con tarjeta, el negocio no recupera la comisión de Stripe de este cobro.',
           },
           confirmationToken: issueConfirmation(scope, 'online_order_card_refund', {
             ...datos,

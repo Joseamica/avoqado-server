@@ -1117,6 +1117,11 @@
       "loops": 0,
       "reason": "D661 (Task 6, antes refundCardOnlineOrder): reentra la MISMA Order ya poseída y toma su Payment de Stripe (Order → Payment, el orden de issueRefund), antes del pedido en línea y de la fila de devolución; a saldo, también antes de la clienta y su sobre (writeRefundInTx → prepararSobreDeSaldoAFavorEnTx)."
     },
+    "src/services/online-ordering/card/refund.service.ts#porDevolverDeUnPedido#bloquearCobroParaReembolso": {
+      "count": 1,
+      "loops": 0,
+      "reason": "D661 (ola final, C1): la vista previa del MCP lee lo que queda por devolver con el MISMO cálculo que exige la devolución. Transacción corta de sólo lectura: toma la Order del pedido y su Payment de Stripe (Order → Payment, el orden de issueRefund y de decidirDevolucionEnTx) y nada más; no escribe ni toma sobres, turno ni filas de devolución."
+    },
     "src/services/online-ordering/card/refund.service.ts#devolverASaldoAFavor#tomarCandadoPrimerSobreSiHaceFaltaEnTx": {
       "count": 1,
       "loops": 0,

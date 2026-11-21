@@ -548,33 +548,88 @@ describe('D661 · tarea 5: «Cancelar y devolver» a la tarjeta en «Nadie» (in
     expect((await getTrackingByToken(p.trackingToken))?.refund).toEqual({ status: 'PENDING', medio: 'TARJETA' })
   })
 
-  it('carrera real: entregar vs reservar la devolución bajo el candado de la orden — gana una sola; nunca entregado y «Devolviendo…» a la vez', async () => {
-    estadoNuevo = 'PENDING' // la reserva sigue viva tras pedir: así se ve si convivió con una entrega
-    for (let i = 0; i < 6; i++) {
-      const p = await cobrado()
-      const [entrega, devolucion] = await Promise.allSettled([
-        markOnlineOrderDelivered({ venueId: venueId!, orderId: p.orderId, staffId: staffId! }),
-        devolver(p.orderId),
-      ])
-      expect(devolucion.status).toBe('fulfilled')
-      const oo = await enLinea(p.orderId)
-      expect({ i, entregadoYDevolviendo: oo.status === 'COMPLETED' && oo.refundRequestedAt !== null }).toEqual({
-        i,
-        entregadoYDevolviendo: false,
+  /**
+   * Detiene DENTRO de una transacción la primera escritura que cumpla `cuando`, ya hecha y sin confirmar (sostiene el candado de la
+   * orden), hasta `soltar()`. `entro` avisa cuando llegó. Envuelve toda transacción; sólo se detiene en esa escritura.
+   */
+  const detenerDentroDeLaTransaccion = (modelo: string, metodo: string, cuando: (args: any) => boolean) => {
+    const original = prisma.$transaction.bind(prisma) as any
+    let avisar!: () => void
+    const entro = new Promise<void>(r => (avisar = r))
+    let soltar!: () => void
+    const suelta = new Promise<void>(r => (soltar = r))
+    let detenida = false
+    const envolver = (tx: any) =>
+      new Proxy(tx, {
+        get: (cliente, k) => {
+          const valor = Reflect.get(cliente, k)
+          if (k !== modelo) return typeof valor === 'function' ? valor.bind(cliente) : valor
+          return new Proxy(valor, {
+            get: (delegado, m) => {
+              const f = Reflect.get(delegado, m)
+              if (m !== metodo) return typeof f === 'function' ? f.bind(delegado) : f
+              return async (args: any) => {
+                const r = await f.call(delegado, args)
+                if (!detenida && cuando(args)) {
+                  detenida = true
+                  avisar()
+                  await suelta
+                }
+                return r
+              }
+            },
+          })
+        },
       })
-      if (oo.status === 'COMPLETED') {
-        // Ganó la entrega: la devolución corrió después sobre un pedido ya entregado, sin reserva.
-        expect(entrega).toEqual({ status: 'fulfilled', value: { outcome: 'OK', status: 'COMPLETED' } })
-      } else {
-        // Ganó la reserva: la entrega contestó su estado real y no escribió nada.
-        expect(oo).toMatchObject({ status: 'ACCEPTED', completedAt: null })
-        expect(oo.refundRequestedAt).not.toBeNull()
-        expect(entrega).toMatchObject({
-          status: 'fulfilled',
-          value: { outcome: 'STALE', status: 'ACCEPTED', refundRequestedAt: expect.any(String) },
-        })
-      }
+    const espia = jest
+      .spyOn(prisma, '$transaction')
+      .mockImplementation(((cuerpo: any, opciones?: any) =>
+        typeof cuerpo === 'function' ? original((tx: any) => cuerpo(envolver(tx)), opciones) : original(cuerpo, opciones)) as any)
+    return { entro, soltar: () => soltar(), restaurar: () => espia.mockRestore() }
+  }
+
+  it('C2 · carrera real, gana la RESERVA: con la reserva escrita y sin confirmar, la entrega espera el candado y contesta «se está devolviendo» sin escribir nada', async () => {
+    estadoNuevo = 'PENDING' // la reserva sigue viva tras pedir
+    const p = await cobrado()
+    const pausa = detenerDentroDeLaTransaccion('onlineOrder', 'updateMany', a => a?.data?.refundRequestedAt instanceof Date)
+    let devolucion: ReturnType<typeof devolver>
+    let entrega: ReturnType<typeof markOnlineOrderDelivered>
+    try {
+      devolucion = devolver(p.orderId)
+      await pausa.entro
+      entrega = markOnlineOrderDelivered({ venueId: venueId!, orderId: p.orderId, staffId: staffId! })
+      await new Promise(r => setTimeout(r, 300)) // la entrega ya espera el candado de la orden
+      pausa.soltar()
+      await expect(devolucion).resolves.toMatchObject({ status: 'PENDING' })
+      await expect(entrega).resolves.toMatchObject({ outcome: 'STALE', status: 'ACCEPTED', refundRequestedAt: expect.any(String) })
+    } finally {
+      pausa.restaurar()
     }
+    const oo = await enLinea(p.orderId)
+    expect(oo).toMatchObject({ status: 'ACCEPTED', completedAt: null })
+    expect(oo.refundRequestedAt).not.toBeNull()
+  })
+
+  it('C2 · carrera real, gana la ENTREGA: con la entrega escrita y sin confirmar, la devolución espera el candado y corre sobre un pedido ya entregado, sin reserva', async () => {
+    estadoNuevo = 'PENDING'
+    const p = await cobrado()
+    const pausa = detenerDentroDeLaTransaccion('onlineOrder', 'updateMany', a => a?.data?.status === 'COMPLETED')
+    let devolucion: ReturnType<typeof devolver>
+    let entrega: ReturnType<typeof markOnlineOrderDelivered>
+    try {
+      entrega = markOnlineOrderDelivered({ venueId: venueId!, orderId: p.orderId, staffId: staffId! })
+      await pausa.entro
+      devolucion = devolver(p.orderId)
+      await new Promise(r => setTimeout(r, 300)) // la devolución ya espera el candado de la orden
+      pausa.soltar()
+      await expect(entrega).resolves.toEqual({ outcome: 'OK', status: 'COMPLETED' })
+      await expect(devolucion).resolves.toMatchObject({ status: 'PENDING' })
+    } finally {
+      pausa.restaurar()
+    }
+    const oo = await enLinea(p.orderId)
+    expect(oo.status).toBe('COMPLETED')
+    expect(oo.refundRequestedAt).toBeNull() // nunca entregado y «Devolviendo…» a la vez
   })
 
   // ── El cierre «Devuelto» ─────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1047,6 +1102,39 @@ describe('D661 · tarea 5: «Cancelar y devolver» a la tarjeta en «Nadie» (in
     expect(new Set(llaves).size).toBe(1)
     expect(await refundsOf(q.orderId)).toHaveLength(1)
     expect((await enLinea(q.orderId)).status).toBe('COMPLETED')
+  })
+
+  it('C7 · matriz: caída tras guardar la comisión y antes de escribir el renglón REFUND → la siguiente pasada deja UN renglón, la misma comisión y el pedido cerrado', async () => {
+    const p = await cobrado()
+    const corte = cortarDentroDeLaTransaccion(
+      'payment',
+      'create',
+      a => a?.data?.type === 'REFUND',
+      'el proceso murió tras guardar la comisión, antes del renglón REFUND',
+    )
+    let r: Awaited<ReturnType<typeof devolver>>
+    try {
+      r = await devolver(p.orderId)
+    } finally {
+      corte.restaurar()
+    }
+    expect(corte.cortado()).toBe(true)
+    expect(r).toMatchObject({ status: 'UNKNOWN', cardRefundStatus: 'SUCCEEDED' })
+    expect((await fila(r.cardRefundId)).feeRefundedCents).not.toBeNull() // la comisión ya quedó guardada
+    expect(await refundsOf(p.orderId)).toHaveLength(0)
+    expect((await enLinea(p.orderId)).refundRequestedAt).not.toBeNull() // sigue «Devolviendo…»: no se entrega
+    const comisionesLeidas = feeSpy.mock.calls.length
+
+    await expect(advanceCardRefundForSweep(r.cardRefundId, new Date())).resolves.toMatchObject({ status: 'RECORDED' })
+    expect(await refundsOf(p.orderId)).toHaveLength(1)
+    expect(feeSpy.mock.calls.length).toBe(comisionesLeidas) // la comisión no se vuelve a leer ni a calcular
+    const oo = await enLinea(p.orderId)
+    expect(oo.status).toBe('COMPLETED')
+    expect(oo.refundedAt).not.toBeNull()
+    expect(await cierres(p.onlineOrderId)).toBe(1)
+    // Otra pasada no duplica nada.
+    await advanceCardRefundForSweep(r.cardRefundId, new Date())
+    expect(await refundsOf(p.orderId)).toHaveLength(1)
   })
 
   it('matriz: caída tras el renglón REFUND y antes de RECORDED → un solo renglón, mismos efectos, cierre con refundedAt y sale de «Devolviendo…»', async () => {

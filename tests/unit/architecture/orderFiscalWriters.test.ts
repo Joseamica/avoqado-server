@@ -1512,6 +1512,9 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   // D661 (Task 6): la devolución a saldo a favor — «primer-sobre», la decisión compartida con la Order y, en la misma transacción,
   // el renglón con su abono y el cierre «Devuelto» (que reentra la misma Order) —, con el presupuesto único (withDeadlockRetry).
   'src/services/online-ordering/card/refund.service.ts#devolverASaldoAFavor': 1,
+  // D661 (ola final, C1): la vista previa del MCP lee lo que queda por devolver con el MISMO cálculo de la devolución
+  // (`bloquearCobroParaReembolso`: la Order y su Payment), en una transacción corta que no escribe, con el presupuesto único.
+  'src/services/online-ordering/card/refund.service.ts#porDevolverDeUnPedido': 1,
   // Tarjetas de regalo (B2): iniciar y liberar la cancelación de una venta toman la Order (abrirVentaDeTarjetasEnTx →
   // lockExistingOrderForPayment) y después sus sobres, con el presupuesto único.
   'src/services/giftCards/giftCardCancel.service.ts#iniciarCancelacionDeVenta': 1,
