@@ -21,7 +21,7 @@ import { cerrarFoliosDelDiaTerminado, listFolios } from '@/services/online-order
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import { getTrackingByToken } from '@/services/online-ordering/order.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
-import { acceptOnlineOrder } from '@/services/online-ordering/transitions.service'
+import { acceptOnlineOrder, cancelOnlineOrderByCustomer } from '@/services/online-ordering/transitions.service'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 
 // El guardia global rechaza `av-db-25` y hosts remotos; esta suite exige además una base desechable o la propia de la fase.
@@ -989,5 +989,90 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
       for (const s of [...lentas.keys()]) if (s.startsWith(`cs_otra_${RUN}_`)) lentas.delete(s)
       await prisma.onlineOrderCharge.updateMany({ where: { id: { in: ajenos } }, data: { status: 'ABANDONED' } })
     }
+  })
+
+  // ── Pruebas que faltaban (Codex, código r1) ─────────────────────────────────────────────────────────────────────────────────
+
+  /** Truena DENTRO de una transacción la primera escritura que cumpla `cortar` (el paso anterior ya se hizo, sin confirmar). */
+  const cortarDentroDeLaTransaccion = (modelo: string, metodo: string, cortar: (args: any) => boolean, porque: string) => {
+    const original = prisma.$transaction.bind(prisma) as any
+    let cortado = false
+    const envolver = (tx: any) =>
+      new Proxy(tx, {
+        get: (cliente, k) => {
+          const valor = Reflect.get(cliente, k)
+          if (k !== modelo) return typeof valor === 'function' ? valor.bind(cliente) : valor
+          return new Proxy(valor, {
+            get: (delegado, m) => {
+              const f = Reflect.get(delegado, m)
+              if (m !== metodo) return typeof f === 'function' ? f.bind(delegado) : f
+              return async (args: any) => {
+                if (!cortado && cortar(args)) {
+                  cortado = true
+                  throw new Error(porque)
+                }
+                return f.call(delegado, args)
+              }
+            },
+          })
+        },
+      })
+    const espia = jest
+      .spyOn(prisma, '$transaction')
+      .mockImplementation(((cuerpo: any, opciones?: any) =>
+        typeof cuerpo === 'function' ? original((tx: any) => cuerpo(envolver(tx)), opciones) : original(cuerpo, opciones)) as any)
+    return { restaurar: () => espia.mockRestore(), cortado: () => cortado }
+  }
+
+  it('D661 · E2: abortar dentro de la confirmación, con el cargo ya cambiado y antes de ligarle su pedido, revierte TODO; la siguiente confirmación lo crea una sola vez', async () => {
+    const d = await borrador()
+    await pagar(d.chargeId, hace(MIN))
+    const cuentasAntes = await prisma.order.count({ where: { venueId: venueId! } })
+    const corte = cortarDentroDeLaTransaccion(
+      'onlineOrderCharge',
+      'update',
+      a => a?.data?.onlineOrderId != null,
+      'el proceso murió antes de ligar el pedido al cargo',
+    )
+    try {
+      await expect(confirmCardAuthorization(d.chargeId)).rejects.toThrow('antes de ligar el pedido')
+    } finally {
+      corte.restaurar()
+    }
+    expect(corte.cortado()).toBe(true)
+    // Nada quedó: el cargo sigue esperando, sin pedido ni cuenta.
+    expect(await cargo(d.chargeId)).toMatchObject({ status: 'PENDING_AUTH', onlineOrderId: null, paymentIntentId: null })
+    expect(await prisma.onlineOrder.count({ where: { trackingToken: d.trackingToken } })).toBe(0)
+    expect(await prisma.order.count({ where: { venueId: venueId! } })).toBe(cuentasAntes)
+
+    await expect(confirmCardAuthorization(d.chargeId)).resolves.toBe('CREATED')
+    await expect(confirmCardAuthorization(d.chargeId)).resolves.toBe('ALREADY')
+    expect(await prisma.onlineOrder.count({ where: { trackingToken: d.trackingToken } })).toBe(1)
+    expect(await prisma.order.count({ where: { venueId: venueId! } })).toBe(cuentasAntes + 1)
+    expect((await cargo(d.chargeId)).status).toBe('AUTHORIZED')
+  })
+
+  it('D661 · E3: la clienta cancela su apartado y el proceso muere tras confirmar y antes de soltar la tarjeta en Stripe: la siguiente pasada la suelta y el seguimiento dice que no se cobró', async () => {
+    const a = await apartado()
+    // La cancelación confirma (pedido cancelado, cargo RELEASING) y la llamada a Stripe muere antes de llegar (y la relectura).
+    voidSpy.mockImplementationOnce(async () => {
+      throw murio()
+    })
+    authSpy.mockImplementationOnce(async () => {
+      throw murio()
+    })
+    await expect(cancelOnlineOrderByCustomer({ venueId: venueId!, trackingToken: a.trackingToken })).resolves.toMatchObject({
+      outcome: 'OK',
+    })
+    expect((await enLinea(a.orderId)).status).toBe('CANCELLED_BY_CUSTOMER')
+    expect((await cargo(a.chargeId)).status).toBe('RELEASING')
+    expect(pis.get(a.pi)).toBe('requires_capture') // Stripe nunca la soltó
+
+    await pasada()
+    expect((await cargo(a.chargeId)).status).toBe('RELEASED')
+    expect(pis.get(a.pi)).toBe('canceled')
+    expect(capturasA(a.pi)).toHaveLength(0)
+    expect(await cobros(a.orderId)).toHaveLength(0)
+    expect(await getTrackingByToken(a.trackingToken)).toMatchObject({ status: 'CANCELLED_BY_CUSTOMER', paid: false })
   })
 })

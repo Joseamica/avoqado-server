@@ -403,4 +403,47 @@ describe('D661 · tarjeta en «Nadie»: marca, tope por clienta y cupo de la suc
     await prisma.onlineOrderCharge.update({ where: { trackingToken: sinNada.trackingToken }, data: { status: 'PENDING_AUTH' } })
     await expect(listFolios({ venueId: venueId! })).resolves.toMatchObject({ showTile: false, pollSeconds: 30 })
   })
+
+  it('D661 · E1: se pierde la respuesta de Stripe al crear la página de pago de un borrador de «Nadie» (Stripe sí la creó): el reintento con la MISMA llave da el mismo borrador y la misma sesión', async () => {
+    const clienta = clientas[5]
+    const key = llave()
+    const pedir = () =>
+      createCardOnlineDraft(
+        {
+          venueId: venueId!,
+          venueSlug: `itest-nadie-${RUN}`,
+          idempotencyKey: key,
+          items: ITEMS(),
+          expectedTotal: '250.00',
+          customer: { name: 'Ana Nadie', email: 'ana@test.com' },
+          note: null,
+          whatsappConsent: false,
+          customerId: clienta,
+          verifiedPhone: null,
+        },
+        PUEDE_CREAR,
+      )
+    // Stripe crea la sesión con esa llave, pero su respuesta nunca llega.
+    spy.mockImplementationOnce(async (_m: any, p: any) => {
+      const id = `cs_itest_nadie_${RUN}_${sesiones.size + 1}`
+      sesiones.set(p.idempotencyKey, { id, url: `https://checkout.stripe.test/${id}`, expiresAt: p.expiresAt })
+      throw Object.assign(new Error('se perdió la respuesta'), { type: 'StripeConnectionError' })
+    })
+    await expect(pedir()).rejects.toMatchObject({ statusCode: 502, code: 'CARD_PROVIDER_UNAVAILABLE' })
+    const antes = await prisma.onlineOrderCharge.findFirstOrThrow({ where: { venueId: venueId!, idempotencyKey: key } })
+    expect(antes).toMatchObject({ status: 'PENDING_AUTH', checkoutSessionId: null, customerPhone: '' })
+
+    const r = await pedir()
+    expect(r).toMatchObject({ replay: true, trackingToken: antes.trackingToken })
+    const despues = await prisma.onlineOrderCharge.findFirstOrThrow({ where: { venueId: venueId!, idempotencyKey: key } })
+    expect(despues.id).toBe(antes.id)
+    expect(despues.checkoutSessionId).toBe(sesiones.get(spy.mock.calls[0][1].idempotencyKey)!.id)
+    expect(spy.mock.calls[1][1]).toEqual(spy.mock.calls[0][1]) // la MISMA llave y los mismos parámetros
+    expect(await prisma.onlineOrderCharge.count({ where: { venueId: venueId!, idempotencyKey: key } })).toBe(1)
+    expect(
+      await prisma.onlineOrderCharge.count({
+        where: { ...borradoresNadieWhere(venueId!), request: { path: ['customerId'], equals: clienta } },
+      }),
+    ).toBe(1)
+  })
 })
