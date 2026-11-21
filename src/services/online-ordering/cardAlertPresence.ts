@@ -26,9 +26,23 @@ export function __resetCardAlertPollDebounceForTests(): void {
  * La hora es SIEMPRE la del servidor. La base se toca a lo más cada 20 s por negocio (con sondeos de 30 s, cada uno escribe) y el
  * amortiguador se mueve SÓLO si de verdad se escribió una fila (R13); sin fila de ajustes no hay nada que actualizar (la crea antes
  * `touchToPayPoll`).
+ * D661 (B1): una respuesta LENTA apaga `cardAlertFastPollAt` en seguida, sin amortiguado: desde ese momento la caja ya no sondea en
+ * 30 s, así que la tienda deja de ofrecer la tarjeta hasta la siguiente respuesta rápida (que tampoco espera el amortiguado de antes).
+ * La escritura es condicional: con la marca ya apagada no toca nada.
  */
 export async function touchCardAlertPoll(venueId: string, rapida: boolean): Promise<boolean> {
   const now = new Date()
+  if (!rapida) {
+    const { count } = await prisma.onlineOrderingSettings.updateMany({
+      where: { venueId, cardAlertFastPollAt: { not: null } },
+      data: { cardAlertFastPollAt: null, lastCardAlertPollAt: now },
+    })
+    if (count > 0) {
+      lastWrite.set(venueId, now.getTime())
+      lastFastWrite.delete(venueId)
+      return true
+    }
+  }
   const ultima = (rapida ? lastFastWrite : lastWrite).get(venueId) ?? 0
   if (now.getTime() - ultima < CARD_ALERT_WRITE_DEBOUNCE_MS) return false
   const { count } = await prisma.onlineOrderingSettings.updateMany({

@@ -1080,4 +1080,74 @@ describe('D661 · tarea 5: «Cancelar y devolver» a la tarjeta en «Nadie» (in
     expect(oo.refundedAt).not.toBeNull()
     expect(await cierres(p.onlineOrderId)).toBe(1)
   })
+
+  // ── Ola final (20-nov) ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  /** Un pedido que el corte del día cerró «No lo recogió» hace un momento: cobrado en línea, sin su comanda impresa. */
+  const noLoRecogio = async () => {
+    const p = await cobrado()
+    await deAyer(p.onlineOrderId)
+    await expect(corte()).resolves.toBeGreaterThanOrEqual(1)
+    const oo = await enLinea(p.orderId)
+    expect(oo).toMatchObject({ status: 'COMPLETED', printedAt: null, refundRequestedAt: null, refundedAt: null })
+    expect(oo.notPickedUpAt).not.toBeNull()
+    return p
+  }
+  const porImprimir = async () => (await listFolios({ venueId: venueId! })).comandasPorImprimir.map(c => c.orderId)
+
+  it('D661 · B3: un «No lo recogió» con su comanda reclamada no se devuelve a la tarjeta (409 PRINT_IN_FLIGHT, nada escrito); con el papel confirmado, sí', async () => {
+    const p = await noLoRecogio()
+    expect(await porImprimir()).toContain(p.orderId) // la regla del papel todavía lo admite
+    await expect(claimOnlineOrderPrint(venueId!, p.orderId, 'caja-1')).resolves.toEqual({ claimed: true })
+    await expect(devolver(p.orderId)).rejects.toMatchObject({ statusCode: 409, code: 'PRINT_IN_FLIGHT' })
+    expect(await filasDe(p.chargeId)).toBe(0)
+    expect(refundSpy).not.toHaveBeenCalled()
+    expect(await enLinea(p.orderId)).toMatchObject({ refundRequestedAt: null, refundedAt: null })
+
+    await expect(confirmOnlineOrderPrinted(venueId!, p.orderId, 'caja-1')).resolves.toEqual({ ok: true })
+    await expect(devolver(p.orderId)).resolves.toMatchObject({ status: 'RECORDED' })
+    expect((await enLinea(p.orderId)).refundedAt).not.toBeNull()
+  })
+
+  it('D661 · B3: sin reclamo, la devolución a la tarjeta de un «No lo recogió» lo reserva: un reclamo en medio no sale; si Stripe no devuelve, vuelve a pedir su comanda y la cocina no se rearma', async () => {
+    const p = await noLoRecogio()
+    const cocinaAntes = (await cuenta(p.orderId)).kitchenPendingAt
+    estadoNuevo = 'PENDING'
+    const r = await devolver(p.orderId)
+    expect(r).toMatchObject({ status: 'PENDING', cardRefundStatus: 'PENDING' })
+    const reservado = await enLinea(p.orderId)
+    expect(reservado).toMatchObject({ status: 'COMPLETED', refundedAt: null })
+    expect(reservado.refundRequestedAt).not.toBeNull()
+    // Mientras se devuelve: ninguna caja lo reclama ni lo ve en la lista, y la bandeja lo dice.
+    await expect(claimOnlineOrderPrint(venueId!, p.orderId, 'caja-1')).resolves.toEqual({ claimed: false })
+    expect(await porImprimir()).not.toContain(p.orderId)
+    expect(await getInboxOrder({ venueId: venueId!, orderId: p.orderId })).toMatchObject({
+      status: 'COMPLETED',
+      needsPrint: false,
+      refundRequestedAt: reservado.refundRequestedAt!.toISOString(),
+    })
+
+    // Stripe no la devolvió: se quita la reserva y vuelve a pedir su comanda (sigue dentro de las 2 h del corte).
+    stripeDice(r.cardRefundId, 'FAILED')
+    await expect(advanceCardRefund(r.cardRefundId)).resolves.toBe('FAILED')
+    expect(await enLinea(p.orderId)).toMatchObject({ status: 'COMPLETED', refundRequestedAt: null, refundedAt: null })
+    expect(await porImprimir()).toContain(p.orderId)
+    expect((await cuenta(p.orderId)).kitchenPendingAt).toEqual(cocinaAntes)
+    // El aviso al negocio dice la verdad: el pedido sigue como «No lo recogió», no «vuelve a Por entregar».
+    const [, aviso] = (sendVenueNotification as jest.Mock).mock.calls.find(([, a]) => a.entityId === r.cardRefundId)!
+    expect(aviso.message).toContain('No lo recogió')
+    expect(aviso.message).not.toContain('Por entregar')
+    await expect(claimOnlineOrderPrint(venueId!, p.orderId, 'caja-2')).resolves.toEqual({ claimed: true })
+  })
+
+  it('D661 · B3: un «No lo recogió» ya fuera de la ventana del papel (o con el papel ya impreso) se devuelve como antes: sin reserva y cerrado «Devuelto»', async () => {
+    const p = await noLoRecogio()
+    await prisma.onlineOrder.update({
+      where: { id: p.onlineOrderId },
+      data: { notPickedUpAt: new Date(Date.now() - 3 * 60 * MIN) },
+    })
+    estadoNuevo = 'PENDING'
+    await expect(devolver(p.orderId)).resolves.toMatchObject({ status: 'PENDING' })
+    expect(await enLinea(p.orderId)).toMatchObject({ status: 'COMPLETED', refundRequestedAt: null })
+  })
 })

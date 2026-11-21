@@ -598,9 +598,14 @@ export async function listFolios(p: { venueId: string; section?: FolioSection; c
   }
   // D661 (3B): las dos listas de la caja que no dependen de la página. Lo apartado que una caja puede abrir (también mientras otra lo
   // cobra) y lo cobrado cuya comanda falta; las dos acotadas (lo apartado ya lo acota el cupo de tarjeta de la sucursal, 30).
+  // D661 (B4): un apartado que ya pasó su plazo deja de sonar en seguida (abrirlo contestaría 409; el trabajo de vencimiento lo cierra
+  // en su siguiente pasada); el que una caja está cobrando sigue en la lista, con `cobrando`, hasta su desenlace.
   const porAbrir = {
     ...apartadosNadieWhere(p.venueId),
-    charge: { is: { status: { in: [OnlineOrderChargeStatus.AUTHORIZED, OnlineOrderChargeStatus.CAPTURING] } } },
+    OR: [
+      { acceptDeadlineAt: { gt: now }, charge: { is: { status: OnlineOrderChargeStatus.AUTHORIZED } } },
+      { charge: { is: { status: OnlineOrderChargeStatus.CAPTURING } } },
+    ],
   }
   const porImprimir = comandasPorImprimirWhere(p.venueId, now)
   const page = (db: Prisma.TransactionClient, where: Prisma.OnlineOrderWhereInput, mine: FolioSection) =>

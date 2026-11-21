@@ -1010,4 +1010,72 @@ describe('D661 · 3A y 3B: confirmar → apartado; abrir = cobrar; vencer y libe
     await expect(confirmOnlineOrderPrinted(venueId!, a.orderId, 'caja-3')).resolves.toEqual({ ok: true })
     expect((await enLinea(a.orderId)).printClaimedBy).toBe('caja-3')
   })
+
+  // ── Ola final (20-nov) ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('D661 · B1: la caja que pasa de 30 s a 600 s ya no hace que la tienda ofrezca la tarjeta; si vuelve a «Nadie», la tarjeta espera la siguiente respuesta rápida', async () => {
+    __resetCardAlertPollDebounceForTests()
+    await sinNadaVivo()
+    await prisma.onlineOrderingSettings.update({
+      where: { venueId: venueId! },
+      data: { lastCardAlertPollAt: null, cardAlertFastPollAt: null },
+    })
+    const ajustes = () => prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })
+
+    // 1) La única caja recibe 30 s con la tienda en «Nadie».
+    expect((await sondeo()).pollSeconds).toBe(30)
+    expect((await ajustes()).cardAlertFastPollAt).toEqual(expect.any(Date))
+    // 2) La tienda pasa a «Mi equipo» sin nada vivo; segundos después la caja recibe 600 s: desde ahí duerme 10 min.
+    await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { requiresAcceptance: true } })
+    expect((await sondeo()).pollSeconds).toBe(600)
+    expect(await ajustes()).toMatchObject({ cardAlertFastPollAt: null, lastCardAlertPollAt: expect.any(Date) })
+    // 3) Vuelve a «Nadie» dentro de los 90 s de aquel sondeo rápido: sin caja que oiga a tiempo, no se aparta el dinero de nadie.
+    await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { requiresAcceptance: false } })
+    await expect(borrador()).rejects.toMatchObject({ code: 'CARD_PAYMENT_NOT_ACCEPTED' })
+    // 4) La siguiente respuesta rápida (sin esperar el amortiguado de la primera) vuelve a ofrecerla.
+    expect((await sondeo()).pollSeconds).toBe(30)
+    expect((await ajustes()).cardAlertFastPollAt).toEqual(expect.any(Date))
+    await expect(borrador()).resolves.toMatchObject({ trackingToken: expect.any(String) })
+  })
+
+  it('D661 · B2 (Ruling 31): un «No lo recogió» pide su comanda sólo 2 h tras el corte: dentro, la lista, el reclamo y needsPrint lo admiten; fuera, ninguno', async () => {
+    await sinNadaVivo()
+    const dentro = await cobrado()
+    const fuera = await cobrado()
+    for (const [p, hace] of [
+      [dentro, 2 * 60 * MIN - MIN],
+      [fuera, 2 * 60 * MIN + MIN],
+    ] as const) {
+      const corte = new Date(Date.now() - hace)
+      await prisma.onlineOrder.update({
+        where: { id: p.onlineOrderId },
+        data: { status: 'COMPLETED', completedAt: corte, notPickedUpAt: corte },
+      })
+    }
+    const lista = await comandas()
+    expect(lista).toContain(dentro.orderId)
+    expect(lista).not.toContain(fuera.orderId)
+    expect((await leerPedido('m', dentro.orderId)).body.data).toMatchObject({ needsPrint: true })
+    expect((await leerPedido('m', fuera.orderId)).body.data).toMatchObject({ needsPrint: false })
+    await expect(claimOnlineOrderPrint(venueId!, fuera.orderId, 'caja-1')).resolves.toEqual({ claimed: false })
+    await expect(claimOnlineOrderPrint(venueId!, dentro.orderId, 'caja-1')).resolves.toEqual({ claimed: true })
+  })
+
+  it('D661 · B4: un apartado cuyo plazo ya pasó deja de sonar en seguida, antes de que lo cierre el trabajo de vencimiento; el que una caja está cobrando sigue en la lista aunque su plazo pase', async () => {
+    await sinNadaVivo()
+    const vencido = await apartado()
+    const cobrando = await apartado()
+    const vigente = await apartado()
+    await prisma.onlineOrderCharge.update({ where: { id: cobrando.charge.id }, data: { status: 'CAPTURING' } })
+    await prisma.onlineOrder.updateMany({
+      where: { id: { in: [vencido.onlineOrderId, cobrando.onlineOrderId] } },
+      data: { acceptDeadlineAt: new Date(Date.now() - 1000) },
+    })
+    const caja = await listFolios({ venueId: venueId! })
+    expect(caja.tarjetasPorAbrir.map(t => t.orderId).sort()).toEqual([cobrando.orderId, vigente.orderId].sort())
+    expect(caja.tarjetasPorAbrir.find(t => t.orderId === cobrando.orderId)).toMatchObject({ cobrando: true })
+    // El vencido sigue PENDING_ACCEPTANCE hasta que pase el trabajo: no se cerró por leer la lista, sólo dejó de sonar.
+    expect((await enLinea(vencido.orderId)).status).toBe('PENDING_ACCEPTANCE')
+    await prisma.onlineOrderCharge.update({ where: { id: cobrando.charge.id }, data: { status: 'AUTHORIZED' } })
+  })
 })

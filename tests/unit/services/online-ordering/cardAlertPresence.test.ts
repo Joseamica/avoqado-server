@@ -16,10 +16,18 @@ const despues = (ms: number) => new Date(T0.getTime() + ms)
 /** El reloj del servidor (la función ya no recibe hora de quien llama). */
 const reloj = (d: Date) => jest.setSystemTime(d)
 
+/** La fila de ajustes en la base: `cardAlertFastPollAt` puesto o no (la escritura que lo apaga es condicional). */
+let marcaRapida: Date | null
 beforeEach(() => {
   jest.useFakeTimers({ now: T0, doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'] })
   __resetCardAlertPollDebounceForTests()
-  prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
+  marcaRapida = null
+  prismaMock.onlineOrderingSettings.updateMany.mockReset()
+  prismaMock.onlineOrderingSettings.updateMany.mockImplementation((async (a: any) => {
+    if (a.where.cardAlertFastPollAt && marcaRapida === null) return { count: 0 }
+    if ('cardAlertFastPollAt' in a.data) marcaRapida = a.data.cardAlertFastPollAt
+    return { count: 1 }
+  }) as any)
 })
 afterEach(() => jest.useRealTimers())
 
@@ -40,6 +48,9 @@ describe('touchCardAlertPoll (D661)', () => {
     reloj(despues(5_000))
     await expect(touchCardAlertPoll('v2', true)).resolves.toBe(true)
     expect(escrituras()).toEqual([
+      // B1: la lenta primero apaga la marca rápida si estuviera puesta (aquí no lo estaba: no escribió nada)…
+      { where: { venueId: 'v1', cardAlertFastPollAt: { not: null } }, data: { cardAlertFastPollAt: null, lastCardAlertPollAt: T0 } },
+      // …y escribe el latido de siempre.
       { where: { venueId: 'v1' }, data: { lastCardAlertPollAt: T0 } },
       { where: { venueId: 'v2' }, data: { lastCardAlertPollAt: despues(5_000), cardAlertFastPollAt: despues(5_000) } },
     ])
@@ -67,11 +78,31 @@ describe('touchCardAlertPoll (D661)', () => {
     await touchCardAlertPoll('v1', false)
     reloj(despues(1_000))
     await expect(touchCardAlertPoll('v1', true)).resolves.toBe(true)
-    expect(escrituras()[1].data).toEqual({ lastCardAlertPollAt: despues(1_000), cardAlertFastPollAt: despues(1_000) })
-    // Una lenta justo después de una rápida no hace falta: la rápida ya escribió las dos.
+    expect(escrituras().at(-1).data).toEqual({ lastCardAlertPollAt: despues(1_000), cardAlertFastPollAt: despues(1_000) })
+    expect(marcaRapida).toEqual(despues(1_000))
+  })
+
+  it('D661 · B1: una respuesta LENTA justo después de una rápida apaga la marca rápida EN SEGUIDA (el amortiguado no la retrasa): la caja ya duerme 10 min', async () => {
+    await touchCardAlertPoll('v1', true)
     reloj(despues(2_000))
+    await expect(touchCardAlertPoll('v1', false)).resolves.toBe(true)
+    expect(escrituras().at(-1)).toEqual({
+      where: { venueId: 'v1', cardAlertFastPollAt: { not: null } },
+      data: { cardAlertFastPollAt: null, lastCardAlertPollAt: despues(2_000) },
+    })
+    expect(marcaRapida).toBeNull()
+    // Otra lenta enseguida ya no tiene nada que apagar ni escribe el latido (amortiguado).
+    reloj(despues(3_000))
     await expect(touchCardAlertPoll('v1', false)).resolves.toBe(false)
-    expect(escrituras()).toHaveLength(2)
+  })
+
+  it('D661 · B1: la siguiente respuesta rápida tras apagarla escribe en seguida (el amortiguado de la rápida anterior no la frena)', async () => {
+    await touchCardAlertPoll('v1', true)
+    reloj(despues(2_000))
+    await touchCardAlertPoll('v1', false)
+    reloj(despues(4_000))
+    await expect(touchCardAlertPoll('v1', true)).resolves.toBe(true)
+    expect(marcaRapida).toEqual(despues(4_000))
   })
 
   it('cada negocio se amortigua aparte', async () => {

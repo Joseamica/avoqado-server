@@ -406,7 +406,8 @@ describe('D661 (3B): lo que lee la caja — tarjetasPorAbrir, comandasPorImprimi
       status: 'PENDING_ACCEPTANCE',
       requiresAcceptance: false,
       paymentMode: 'CARD_ONLINE',
-      charge: { is: { status: { in: ['AUTHORIZED', 'CAPTURING'] } } },
+      // D661 (B4): uno apartado sólo mientras su plazo no pasa; el que una caja está cobrando, hasta su desenlace.
+      OR: [{ acceptDeadlineAt: { gt: NOW }, charge: { is: { status: 'AUTHORIZED' } } }, { charge: { is: { status: 'CAPTURING' } } }],
     })
     expect(q.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }])
     expect(q.take).toBe(50)
@@ -434,7 +435,13 @@ describe('D661 (3B): lo que lee la caja — tarjetasPorAbrir, comandasPorImprimi
       {
         OR: [
           { status: { in: ['ACCEPTED', 'READY'] } },
-          { status: { in: ['COMPLETED'] }, paymentMode: 'CARD_ONLINE', requiresAcceptance: false, notPickedUpAt: { not: null } },
+          // D661 (B2, Ruling 31): un «No lo recogió» sólo durante las 2 h que siguen al corte.
+          {
+            status: { in: ['COMPLETED'] },
+            paymentMode: 'CARD_ONLINE',
+            requiresAcceptance: false,
+            notPickedUpAt: { gte: new Date(NOW.getTime() - 2 * 3_600_000) },
+          },
         ],
       },
       { OR: [{ printClaimedAt: null }, { printClaimedAt: { lt: new Date(NOW.getTime() - 90_000) } }] },

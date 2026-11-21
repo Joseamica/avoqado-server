@@ -1,7 +1,13 @@
 // tests/unit/services/online-ordering/printClaim.service.test.ts
 import { prismaMock } from '@tests/__helpers__/setup'
 import { PRINT_CLAIM_TTL_MS } from '@/services/online-ordering/constants'
-import { claimOnlineOrderPrint, confirmOnlineOrderPrinted, onlineOrderNeedsPrint } from '@/services/online-ordering/printClaim.service'
+import {
+  NO_LO_RECOGIO_PAPEL_MS,
+  claimOnlineOrderPrint,
+  comandaAdmitida,
+  confirmOnlineOrderPrinted,
+  onlineOrderNeedsPrint,
+} from '@/services/online-ordering/printClaim.service'
 
 const NOW = new Date('2026-10-14T18:30:00.000Z')
 const LIMITE = new Date(NOW.getTime() - PRINT_CLAIM_TTL_MS)
@@ -38,6 +44,27 @@ describe('onlineOrderNeedsPrint', () => {
     expect(onlineOrderNeedsPrint({ ...cerrado, status: 'ACCEPTED', notPickedUpAt: null } as any, NOW)).toBe(true)
   })
 
+  it('D661 · B2 (Ruling 31): un «No lo recogió» pide comanda sólo durante 2 h tras el corte; la mañana siguiente ya no sale', () => {
+    const cerrado = { status: 'COMPLETED', printedAt: null, printClaimedAt: null, ...D661 }
+    const hace = (ms: number) => new Date(NOW.getTime() - ms)
+    expect(NO_LO_RECOGIO_PAPEL_MS).toBe(2 * 3_600_000)
+    expect(onlineOrderNeedsPrint({ ...cerrado, notPickedUpAt: hace(5 * 60_000) } as any, NOW)).toBe(true) // abierto minutos antes del corte
+    expect(onlineOrderNeedsPrint({ ...cerrado, notPickedUpAt: hace(NO_LO_RECOGIO_PAPEL_MS) } as any, NOW)).toBe(true) // el borde, incluido
+    expect(onlineOrderNeedsPrint({ ...cerrado, notPickedUpAt: hace(NO_LO_RECOGIO_PAPEL_MS + 1) } as any, NOW)).toBe(false)
+    expect(onlineOrderNeedsPrint({ ...cerrado, notPickedUpAt: hace(8 * 3_600_000) } as any, NOW)).toBe(false) // a la mañana siguiente
+    // Lo aceptado o listo no tiene ventana (regresión).
+    expect(onlineOrderNeedsPrint({ ...cerrado, status: 'ACCEPTED', notPickedUpAt: null } as any, NOW)).toBe(true)
+  })
+
+  it('D661 · B3: comandaAdmitida es la misma regla sin el reclamo: con un reclamo vigente la comanda sigue admitida (se está imprimiendo) aunque nadie más la pueda reclamar', () => {
+    const vigente = new Date(NOW.getTime() - 10_000)
+    const cerrado = { status: 'COMPLETED', printedAt: null, ...D661, notPickedUpAt: new Date(NOW.getTime() - 60_000) }
+    expect(comandaAdmitida({ ...cerrado, printClaimedAt: vigente } as any, NOW)).toBe(true)
+    expect(onlineOrderNeedsPrint({ ...cerrado, printClaimedAt: vigente } as any, NOW)).toBe(false)
+    expect(comandaAdmitida({ ...cerrado, printClaimedAt: null, refundRequestedAt: NOW } as any, NOW)).toBe(false)
+    expect(comandaAdmitida({ ...cerrado, printClaimedAt: null, printedAt: NOW } as any, NOW)).toBe(false)
+  })
+
   it('D661 (Ruling 2): con la devolución reservada o hecha ya no se pide comanda', () => {
     for (const status of ['ACCEPTED', 'READY', 'COMPLETED']) {
       const base = { status, printedAt: null, printClaimedAt: null, ...D661 }
@@ -63,7 +90,13 @@ describe('claimOnlineOrderPrint', () => {
       expect(where.AND).toEqual(
         expect.arrayContaining([
           // D661 (Task 4): de lo COMPLETED, sólo lo que cerró el corte del día («No lo recogió»).
-          { OR: [{ status: { in: ['ACCEPTED', 'READY'] } }, { status: { in: ['COMPLETED'] }, ...D661, notPickedUpAt: { not: null } }] },
+          // B2 (Ruling 31): y sólo durante las 2 h que siguen al corte.
+          {
+            OR: [
+              { status: { in: ['ACCEPTED', 'READY'] } },
+              { status: { in: ['COMPLETED'] }, ...D661, notPickedUpAt: { gte: new Date(NOW.getTime() - 2 * 3_600_000) } },
+            ],
+          },
           { OR: [{ printClaimedAt: null }, { printClaimedAt: { lt: LIMITE } }] },
         ]),
       )

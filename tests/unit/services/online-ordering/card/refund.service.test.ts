@@ -1094,7 +1094,8 @@ describe('D661 (Task 5): devolver a la tarjeta un pedido de «Nadie»', () => {
         orderId: 'ord1',
         venueId: 'v1',
         requiresAcceptance: false,
-        status: { in: ['ACCEPTED', 'READY'] },
+        // D661 (B3): también la reserva de un «No lo recogió» (la pone el papel); su cocina no se rearma (abajo, sólo por entregar).
+        status: { in: ['ACCEPTED', 'READY', 'COMPLETED'] },
         refundRequestedAt: { not: null },
         refundedAt: null,
       })

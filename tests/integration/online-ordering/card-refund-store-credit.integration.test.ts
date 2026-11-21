@@ -21,6 +21,7 @@ import { listCardRefunds, refundCardOnlineOrder, type CardRefundDestino } from '
 import { sweepCardRefunds } from '@/services/online-ordering/card/refund-reconciler.service'
 import { cerrarComoDevueltoEnTx } from '@/services/online-ordering/card/devuelto'
 import { listFolios, syncPaidClosedFolios } from '@/services/online-ordering/folios.service'
+import { claimOnlineOrderPrint } from '@/services/online-ordering/printClaim.service'
 import { listInbox } from '@/services/online-ordering/inbox.service'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import { getTrackingByToken } from '@/services/online-ordering/order.service'
@@ -734,5 +735,32 @@ describe('D661 · tarea 6: devolver a saldo a favor un pedido «Nadie» (integra
       },
     })
     expect((await getTrackingByToken(p.trackingToken))?.refund).toEqual({ status: 'DONE', medio: 'TRANSFERENCIA' })
+  })
+
+  it('D661 · B3: saldo de un «No lo recogió» con su comanda reclamada → 409 PRINT_IN_FLIGHT y no se abona nada; sin reclamo vigente, abona y cierra «Devuelto» (ya no pide papel)', async () => {
+    const ana = await clienta()
+    const p = await cobrado(ana, telefono())
+    const corte = new Date()
+    await prisma.onlineOrder.update({
+      where: { id: p.onlineOrderId },
+      data: { status: 'COMPLETED', completedAt: corte, notPickedUpAt: corte },
+    })
+    const porImprimir = async () => (await listFolios(v())).comandasPorImprimir.map(c => c.orderId)
+    expect(await porImprimir()).toContain(p.orderId)
+    await expect(claimOnlineOrderPrint(venueId!, p.orderId, 'caja-1')).resolves.toEqual({ claimed: true })
+
+    await expect(devolver(p.orderId, 'STORE_CREDIT')).rejects.toMatchObject({ statusCode: 409, code: 'PRINT_IN_FLIGHT' })
+    expect(await filasDe(p.chargeId)).toHaveLength(0)
+    expect(await movimientosDe(p.orderId)).toHaveLength(0)
+    expect(await renglonesDe(p.orderId)).toHaveLength(0)
+    expect(await enLinea(p.orderId)).toMatchObject({ refundRequestedAt: null, refundedAt: null })
+
+    // El reclamo venció sin confirmarse (la caja murió): ya no hay papel en vuelo; se abona y se cierra en una sola transacción.
+    await prisma.onlineOrder.update({ where: { id: p.onlineOrderId }, data: { printClaimedAt: new Date(Date.now() - 2 * MIN) } })
+    await expect(devolver(p.orderId, 'STORE_CREDIT')).resolves.toMatchObject({ status: 'RECORDED', cardRefundStatus: 'RESOLVED' })
+    const oo = await enLinea(p.orderId)
+    expect(oo.status).toBe('COMPLETED')
+    expect(oo.refundedAt).not.toBeNull()
+    expect(await porImprimir()).not.toContain(p.orderId)
   })
 })

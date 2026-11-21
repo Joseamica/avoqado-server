@@ -62,9 +62,10 @@ import { prepararMediosDeSaldoAFavor, resolveStoreCreditTenderInTx, storeCreditA
 import { enqueueRefundPaymentEffectsInTx } from '@/services/tpv/paymentEffects.service'
 import { reverseStampForOrder } from '@/services/wallet/stampLedger.service'
 import { PRINT_CLAIM_TTL_MS } from '../constants'
+import { comandaAdmitida } from '../printClaim.service'
 import { emitOnlineOrderUpdated } from '../traySocket'
 import type { CardDraftRequest } from './draft.service'
-import { DEVOLUCION_ANOTADA, ENTREGABLE, cerrarComoDevueltoEnTx } from './devuelto'
+import { DEVOLUCION_ANOTADA, ENTREGABLE, YA_ENTREGADO, cerrarComoDevueltoEnTx } from './devuelto'
 import { chargeMerchant, isForeignStripeEvent } from './merchant'
 
 /** Los motivos que el panel puede escoger (el de las apps de reparto no aplica aquí). */
@@ -213,7 +214,10 @@ async function terminarSinDevolver(
       {
         type: 'PAYMENT_FAILED',
         title: 'No se pudo devolver un pedido a la tarjeta',
-        message: `El banco no aceptó la devolución de $${pesos(row.amountCents)} del pedido ${out.retirada.orderNumber}: no se devolvió nada. El pedido vuelve a «Por entregar»; si la clienta no lo quiere, devuélvelo otra vez.`,
+        // D661 (B3): un «No lo recogió» reservado por el papel sigue cerrado; sólo lo por entregar vuelve a «Por entregar».
+        message: YA_ENTREGADO.includes(out.retirada.status)
+          ? `El banco no aceptó la devolución de $${pesos(row.amountCents)} del pedido ${out.retirada.orderNumber}: no se devolvió nada. El pedido sigue como «No lo recogió»; si la clienta lo reclama, devuélvelo otra vez.`
+          : `El banco no aceptó la devolución de $${pesos(row.amountCents)} del pedido ${out.retirada.orderNumber}: no se devolvió nada. El pedido vuelve a «Por entregar»; si la clienta no lo quiere, devuélvelo otra vez.`,
         entityType: 'OnlineOrderCardRefund',
         entityId: row.id,
         priority: 'HIGH',
@@ -231,6 +235,8 @@ async function terminarSinDevolver(
  * En la transacción del desenlace: quita la reserva si es de ESTE intento (una sola devolución en curso por cargo: si otra del cargo
  * sigue viva o ya quedó anotada, la reserva no es suya). Vuelve a dejar escrita la marca de cocina (`kitchenPendingAt`): mientras la
  * reserva vivió no se armó comanda nueva y el barrido de cocina pudo rendirse (r6 #3); el armado sólo agrega lo que falte.
+ * D661 (B3): la reserva de un «No lo recogió» (la puso el papel) también se quita: vuelve a pedir su comanda si sigue en su ventana.
+ * Su cocina no se rearma: nadie lo va a recoger.
  */
 async function retirarReservaEnTx(
   tx: Prisma.TransactionClient,
@@ -252,14 +258,16 @@ async function retirarReservaEnTx(
       orderId: i.orderId,
       venueId: i.venueId,
       requiresAcceptance: false,
-      status: { in: ENTREGABLE },
+      status: { in: [...ENTREGABLE, ...YA_ENTREGADO] },
       refundRequestedAt: { not: null },
       refundedAt: null,
     },
     data: { refundRequestedAt: null },
   })
   if (retirada.count !== 1) return null
-  await tx.order.updateMany({ where: { id: i.orderId, venueId: i.venueId }, data: { kitchenPendingAt: i.now } })
+  if (ENTREGABLE.includes(pedido.status)) {
+    await tx.order.updateMany({ where: { id: i.orderId, venueId: i.venueId }, data: { kitchenPendingAt: i.now } })
+  }
   return { orderNumber: pedido.order.orderNumber, status: pedido.status }
 }
 
@@ -905,6 +913,9 @@ async function decidirDevolucionEnTx(tx: Prisma.TransactionClient, s: Solicitud)
       status: true,
       printClaimedAt: true,
       printedAt: true,
+      notPickedUpAt: true,
+      refundRequestedAt: true,
+      refundedAt: true,
       order: { select: { orderNumber: true } },
       charge: true,
     },
@@ -994,7 +1005,10 @@ async function decidirDevolucionEnTx(tx: Prisma.TransactionClient, s: Solicitud)
     )
   }
   const reservadaEn = new Date()
-  if (reserva) {
+  // D661 (B3): si la regla del papel todavía admite su comanda (por entregar, o un «No lo recogió» dentro de su ventana), mientras se
+  // devuelve tampoco debe salir: también se reserva, a cualquier destino (el saldo cierra en esta misma transacción con `refundedAt`).
+  const pidePapel = nadie && comandaAdmitida(online, reservadaEn)
+  if (reserva || pidePapel) {
     // Ruling 9: con un reclamo de papel en vuelo no se reserva (la comanda puede estar saliendo ahora).
     if (papelEnVuelo(online, reservadaEn)) throw papelEnVueloError()
     // La reserva ANTES de mover dinero, bajo este candado (el que también toma «Entregado»: su CAS no repite las marcas). El
@@ -1005,7 +1019,7 @@ async function decidirDevolucionEnTx(tx: Prisma.TransactionClient, s: Solicitud)
         id: online.id,
         requiresAcceptance: false,
         paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
-        status: { in: ENTREGABLE },
+        status: { in: reserva ? ENTREGABLE : YA_ENTREGADO },
         refundRequestedAt: null,
         refundedAt: null,
         OR: [
@@ -1029,7 +1043,7 @@ async function decidirDevolucionEnTx(tx: Prisma.TransactionClient, s: Solicitud)
     replay: false,
     charge,
     cobro,
-    reservado: reserva ? { orderNumber: online.order.orderNumber, status: online.status, at: reservadaEn } : null,
+    reservado: reserva || pidePapel ? { orderNumber: online.order.orderNumber, status: online.status, at: reservadaEn } : null,
     ahora: reservadaEn,
     saldo,
   }
