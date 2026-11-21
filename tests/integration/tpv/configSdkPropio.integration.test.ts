@@ -30,9 +30,10 @@ const JSON_DE_SIEMPRE = { settings: { showTipScreen: false, tipSuggestions: [10,
  * Las llaves de `data` que devuelve develop para una PAX (no NEXGO) con el plan resuelto, copiadas del `res.json({ data: … })`
  * de `getTerminalConfig` en la base de esta rama (merge-base 7b6bf7bee = origin/develop 2241f19ac en ese archivo):
  * terminal, merchantAccounts, tpvSettings, cashReconciliationEnabled, angelpayAuth (null fuera de NEXGO, viaja),
- * angelpayAccounts (undefined fuera de NEXGO: el JSON la omite) y `...(plan ? { plan } : {})`.
+ * angelpayAccounts (undefined fuera de NEXGO: el JSON la omite) y `...(plan ? { plan } : {})`. EN ESE ORDEN: la prueba compara
+ * el orden real, no las llaves ordenadas (Codex b2a r1 (a)).
  */
-const LLAVES_DE_DEVELOP = ['angelpayAuth', 'cashReconciliationEnabled', 'merchantAccounts', 'plan', 'terminal', 'tpvSettings']
+const LLAVES_DE_DEVELOP = ['terminal', 'merchantAccounts', 'tpvSettings', 'cashReconciliationEnabled', 'angelpayAuth', 'plan']
 
 let prisma: typeof import('@/utils/prismaClient').default
 let appModule: typeof import('@/app')
@@ -183,8 +184,8 @@ describe('GET /tpv/terminals/:serial/config — inHouseSdkEnabled (apagador + fr
     },
   )
 
-  it('las llaves de data con todo apagado son exactamente las de develop', async () => {
+  it('las llaves de data con todo apagado son exactamente las de develop, en su orden', async () => {
     const b = await base()
-    expect(Object.keys(b.data).sort()).toEqual(LLAVES_DE_DEVELOP)
+    expect(Object.keys(b.data)).toEqual(LLAVES_DE_DEVELOP)
   })
 })
