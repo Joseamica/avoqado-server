@@ -115,6 +115,53 @@ export function preparationTicketStatus(items: PreparationCounts[]): 'NEW' | 'PR
   return 'NEW'
 }
 
+/**
+ * D17 (founder, 20-nov-2026): la COCINA ya terminó su parte — nada retenido, pendiente ni preparando. Desde ese momento la comanda
+ * sale del tablero (aunque falte que la caja marque «Entregado») y entra a «Recientes». Sin productos no hay nada terminado.
+ */
+export function cocinaTermino(items: PreparationCounts[]): boolean {
+  return items.length > 0 && items.every(c => c.HELD + c.PENDING + c.PREPARING === 0)
+}
+
+/**
+ * Lo que se escribe en la comanda cada vez que cambian sus productos. El estado sale de `preparationTicketStatus` (igual que
+ * siempre: READY = falta entregar, y de eso viven «En servicio» de la caja y el cierre de pedidos de plataforma);
+ * `kitchenDoneAt` guarda la PRIMERA vez que la cocina terminó y se borra si vuelve a tener trabajo.
+ */
+export function recalculoDeComanda(
+  items: PreparationCounts[],
+  previa: { kitchenDoneAt: Date | null },
+  ahora: Date = new Date(),
+  /** La acción le dio trabajo NUEVO a la cocina (más pendiente o preparando que antes): una comanda archivada vuelve al tablero. */
+  nuevoTrabajo = false,
+): {
+  status: 'NEW' | 'PREPARING' | 'READY' | 'COMPLETED'
+  completedAt: Date | null
+  kitchenDoneAt: Date | null
+  archivedAt?: null
+} {
+  const status = preparationTicketStatus(items)
+  const terminoAhora = cocinaTermino(items) && previa.kitchenDoneAt == null
+  return {
+    status,
+    completedAt: status === 'COMPLETED' ? ahora : null,
+    kitchenDoneAt: cocinaTermino(items) ? (previa.kitchenDoneAt ?? ahora) : null,
+    // Codex r2 #2: la caja corrige un platillo de una comanda ya archivada (o «Deshacer» le gana al archivado): la cocina lo ve.
+    // Codex r8 #4: la cocina la termina justo después del archivado: entra a «Recientes» su hora (el job la vuelve a archivar).
+    ...(nuevoTrabajo || terminoAhora ? { archivedAt: null } : {}),
+  }
+}
+
+/** Unidades que la cocina tiene que hacer YA (pendiente o preparando). */
+export function trabajoDeCocina(c: PreparationCounts): number {
+  return c.PENDING + c.PREPARING
+}
+
+/** «Deshacer» desde Recientes (D17): lo Listo vuelve a Preparando. Lo entregado y lo cancelado no se mueven. */
+export function regresarListoAPreparando(before: PreparationCounts): PreparationCounts {
+  return { ...before, PREPARING: before.PREPARING + before.READY, READY: 0 }
+}
+
 /** Reuses the canonical permission catalog: KITCHEN has update, floor also has create, manager has cancel. */
 export function preparationPermissions(action: PreparationAction): string[] {
   if (action === 'RELEASE' || action === 'DELIVER' || action === 'URGENT' || action === 'CLEAR_URGENT')

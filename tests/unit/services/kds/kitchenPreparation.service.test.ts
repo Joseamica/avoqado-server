@@ -231,6 +231,15 @@ describe('persisted kitchen preparation', () => {
     })
     expect(prismaMock.kdsOrderItem.updateMany).not.toHaveBeenCalled()
   })
+  it('D17: la cocina libera SU estación de un producto de dos estaciones (Codex r5 #5); el interruptor se revisa en la operación', async () => {
+    prismaMock.kdsOrderItem.findMany.mockResolvedValue([line])
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ id: 'venue-a' }]).mockResolvedValueOnce([{ kitchenCanReleaseCourses: true }])
+    await expect(applyKitchenPreparation('venue-a', 'order-a', input, 'staff-k', undefined, true)).resolves.toBeDefined()
+    expect(prismaMock.kdsOrderItem.updateMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ data: expect.objectContaining({ liberadoDesdeLaCocina: true }) }) }),
+    )
+  })
   it('does not treat a legacy ticket as per-product preparation', async () => {
     prismaMock.kdsOrderItem.findMany.mockResolvedValue([
       { ...line, preparation: null, kdsOrder: { ...line.kdsOrder, preparationVersion: 0 } },

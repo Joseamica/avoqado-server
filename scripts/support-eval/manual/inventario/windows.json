@@ -1990,7 +1990,7 @@
       "nombre": "Liberar",
       "origen": "app/src/main/java/com/avoqado/pos/kds/domain/KitchenPreparation.kt:14",
       "quienLaVe": "«Servicio y entregas» siempre en Más (app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:759-761: «Liberar productos y confirmar la entrega · Pro»); cada acción pide sus permisos (`orders:update` y `orders:create`/`orders:cancel`, app/src/main/java/com/avoqado/pos/kds/domain/KitchenPreparation.kt:18-22).",
-      "paginas": []
+      "paginas": ["windows/mesas/tiempos-cocina-y-liberar"]
     },
     {
       "id": "accion:nav:MainTab.MORE.route/marcar-producto-listo",
@@ -1998,7 +1998,7 @@
       "nombre": "Marcar listo",
       "origen": "app/src/main/java/com/avoqado/pos/kds/domain/KitchenPreparation.kt:14",
       "quienLaVe": "«Servicio y entregas» siempre en Más (app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:759-761: «Liberar productos y confirmar la entrega · Pro»); cada acción pide sus permisos (`orders:update` y `orders:create`/`orders:cancel`, app/src/main/java/com/avoqado/pos/kds/domain/KitchenPreparation.kt:18-22).",
-      "paginas": []
+      "paginas": ["windows/mesas/tiempos-cocina-y-liberar"]
     },
     {
       "id": "accion:nav:MainTab.MORE.route/entregar-producto",
@@ -2006,7 +2006,7 @@
       "nombre": "Entregar",
       "origen": "app/src/main/java/com/avoqado/pos/kds/domain/KitchenPreparation.kt:14",
       "quienLaVe": "«Servicio y entregas» siempre en Más (app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:759-761: «Liberar productos y confirmar la entrega · Pro»); cada acción pide sus permisos (`orders:update` y `orders:create`/`orders:cancel`, app/src/main/java/com/avoqado/pos/kds/domain/KitchenPreparation.kt:18-22).",
-      "paginas": []
+      "paginas": ["windows/mesas/tiempos-cocina-y-liberar"]
     },
     {
       "id": "accion:nav:MainTab.MORE.route/enviar-urgente",

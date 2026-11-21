@@ -15,7 +15,7 @@ import { toKdsModifierLabels } from './kdsModifierLabels'
 import { estacionesDelNegocio } from './kitchenDisplayStations'
 import { nombreEnCocina } from './nombreEnCocina'
 import { origenDeLaDiferencia, planKitchenTickets, type KitchenLine } from './kitchenTicketPlanning'
-import { initialPreparation, parsePreparation, PREPARATION_VERSION, preparationTicketStatus } from './kitchenPreparation'
+import { initialPreparation, parsePreparation, PREPARATION_VERSION, recalculoDeComanda } from './kitchenPreparation'
 import { ConflictError } from '../../errors/AppError'
 import { parseServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 import { esRenglonDeVale } from '../shared/renglonDeVale'
@@ -526,7 +526,11 @@ export async function retirarComandasDeVentaAnulada(
     if (page.length < 100) break
     cursor = page[page.length - 1].id
   }
-  await tx.kdsOrder.updateMany({ where: tracked, data: { status: 'COMPLETED', completedAt: new Date() } })
+  const anuladaEn = new Date()
+  // D17 (Codex r8 #3): la comanda de una cuenta anulada entra a «Recientes» su hora, como entraba por `completedAt`; la que la
+  // cocina ya había terminado conserva SU hora (Codex r9 #2).
+  await tx.kdsOrder.updateMany({ where: { ...tracked, kitchenDoneAt: null }, data: { kitchenDoneAt: anuladaEn } })
+  await tx.kdsOrder.updateMany({ where: tracked, data: { status: 'COMPLETED', completedAt: anuladaEn } })
   return { kdsOrderIds, kdsOrderItemIds }
 }
 
@@ -628,6 +632,8 @@ export async function ponerComandasConSuCuenta(tx: Prisma.TransactionClient, ven
         customerName: true,
         customerContact: true,
         createdAt: true,
+        // D17 (Codex r4 C2): la parte que se muda a un folio nuevo conserva cuándo la cocina la terminó (no estrena «Recientes»).
+        kitchenDoneAt: true,
         _count: { select: { items: true } },
       },
       take: porComanda.size,
@@ -678,10 +684,13 @@ export async function ponerComandasConSuCuenta(tx: Prisma.TransactionClient, ven
   // origen y en la nueva, las dos bajo el candado de su cuenta.
   for (const id of conPreparacion) {
     const items = await tx.kdsOrderItem.findMany({ where: { kdsOrderId: id }, select: { quantity: true, preparation: true }, take: 5000 })
-    const status = preparationTicketStatus(items.map(i => parsePreparation(i.preparation, i.quantity)))
+    const previa = await tx.kdsOrder.findFirst({ where: { id, venueId }, select: { kitchenDoneAt: true } })
     await tx.kdsOrder.updateMany({
       where: { id, venueId, preparationVersion: PREPARATION_VERSION },
-      data: { status, completedAt: status === 'COMPLETED' ? new Date() : null },
+      data: recalculoDeComanda(
+        items.map(i => parsePreparation(i.preparation, i.quantity)),
+        { kitchenDoneAt: previa?.kitchenDoneAt ?? null },
+      ),
     })
   }
   return [...tocadas]

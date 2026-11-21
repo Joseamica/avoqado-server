@@ -81,6 +81,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   commission_payouts: 'read',
   comp_table_check: 'write',
   configure_auto_reorder: 'write',
+  configure_kitchen_release: 'write',
   configure_loyalty: 'write',
   configure_receipt_layout: 'write',
   configure_service_courses: 'write',
