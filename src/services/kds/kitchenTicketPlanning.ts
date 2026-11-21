@@ -6,6 +6,7 @@
  * prueba solo. La caja (Android/iOS) calcula el mismo folio antes de sincronizar: si esta función y la de la caja
  * no coinciden, la cocina ve comandas dobles. Spec: docs/superpowers/specs/2026-09-27-kds-etapa-3-design.md §1-§2.
  */
+import { createHash } from 'crypto'
 import { resolveStationId, type RoutingConfig } from '../printing/printRouting.engine'
 
 export interface KitchenLine {
@@ -56,7 +57,8 @@ export const KITCHEN_STALENESS_MS = 12 * 60 * 60 * 1000
  * Lo que acepta el receptor de marcas sin red (`KDS_TICKET_MARK`, «LISTO» o «salió en papel»): un folio que no cumple se
  * reconoce y se IGNORA. Todo folio que arme el servidor tiene que cumplirlo, o su LISTO sin red se pierde (Codex r3 #2).
  */
-export const FOLIO_VALIDO = /^(sale|round|order):\S{1,200}$/
+// D13 (Codex r1 #9): con holgura para el folio de un tiempo (`folioDelTiempo` agrega 15 por vuelta) sobre uno de 200.
+export const FOLIO_VALIDO = /^(sale|round|order):\S{1,300}$/
 
 /** Normal: sync:<roundKey>:<índice>; componente de combo: la misma llave + :g:<grupo>. */
 const LLAVE_DE_RONDA = /^sync:([^:]+):\d+(?::(?:\d+|g:[^:]+))?$/
@@ -80,6 +82,26 @@ export function originKeyFor(line: KitchenLine, order: KitchenOrderRef, stampedA
  */
 export function origenDeLaDiferencia(order: KitchenOrderRef, stampedAt: Date): string {
   return order.tableId ? `round:${order.id}:${stampedAt.getTime()}` : `order:${order.id}:mas:${stampedAt.getTime()}`
+}
+
+/**
+ * D13 (hz:0555ee15:D13): la etiqueta del tiempo de un platillo, la MISMA con que la caja parte la ronda en mensajes para la pantalla
+ * (`kitchenCourseLabel(snapshot, legacy)` de ANDROID): la foto congelada del tiempo y, si no hay (las cajas de antes de la 2.22.4 sólo
+ * mandan el texto, Codex r1 #1), el texto de `OrderItem.course`; sin tiempo o el Inmediato llamado «Inmediato» = `''`. Un LISTO sin
+ * red de comanda entera cubre tiempos. No lanza: una foto ilegible cuenta como «sin foto».
+ */
+export function tiempoDeCocina(serviceCourse: unknown, textoDelTiempo?: string | null): string {
+  const sc = serviceCourse as { kind?: unknown; label?: unknown } | null | undefined
+  if (!sc || typeof sc.label !== 'string') return textoDelTiempo ?? ''
+  return sc.kind === 'IMMEDIATE' && sc.label === 'Inmediato' ? '' : sc.label
+}
+
+/**
+ * D13: el folio de lo que un LISTO sin red de [sourceKey] no cubrió, por tiempo: `<folio>:t:<12 hex del SHA-256 de la etiqueta>`. La
+ * pantalla de ANDROID arma el MISMO para lo que le llega de ese tiempo por el WiFi (`folioDelTiempo` de `KdsReglas.kt`).
+ */
+export function folioDelTiempo(sourceKey: string, tiempo: string): string {
+  return `${sourceKey}:t:${createHash('sha256').update(tiempo, 'utf8').digest('hex').slice(0, 12)}`
 }
 
 export function planKitchenTickets(input: {

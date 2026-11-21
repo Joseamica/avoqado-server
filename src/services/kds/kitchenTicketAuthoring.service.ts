@@ -14,7 +14,7 @@ import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/p
 import { toKdsModifierLabels } from './kdsModifierLabels'
 import { estacionesDelNegocio } from './kitchenDisplayStations'
 import { nombreEnCocina } from './nombreEnCocina'
-import { origenDeLaDiferencia, planKitchenTickets, type KitchenLine } from './kitchenTicketPlanning'
+import { folioDelTiempo, origenDeLaDiferencia, planKitchenTickets, tiempoDeCocina, type KitchenLine } from './kitchenTicketPlanning'
 import { initialPreparation, parsePreparation, PREPARATION_VERSION, recalculoDeComanda } from './kitchenPreparation'
 import { ConflictError } from '../../errors/AppError'
 import { parseServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
@@ -329,6 +329,11 @@ export async function markKitchenTicket(a: {
   action: KitchenMarkAction
   label: string | null
   at: Date
+  /**
+   * D13 (hz:0555ee15:D13): los tiempos que vio la pantalla al marcar LISTO (`tiempoDeCocina`). Lo de los demás tiempos no se
+   * termina: sale a la comanda de su tiempo. Ausente o `null` (pantalla vieja): la comanda entera, como siempre.
+   */
+  courses?: string[] | null
 }): Promise<void> {
   const stationId = a.stationId
     ? ((await prisma.printStation.findFirst({ where: { id: a.stationId, venueId: a.venueId }, select: { id: true } }))?.id ?? null)
@@ -346,19 +351,134 @@ export async function markKitchenTicket(a: {
     ],
     skipDuplicates: true,
   })
-  if (a.action === 'BUMP') {
-    await prisma.kdsOrder.updateMany({
-      where: { venueId: a.venueId, sourceKey: a.sourceKey, preparationVersion: 0, status: { not: 'COMPLETED' } },
-      // A legacy whole-ticket BUMP cannot complete or deliver new product-level work.
-      data: { status: 'COMPLETED', completedAt: a.at },
-    })
-    return
-  }
+  if (a.action === 'BUMP') return terminarLoQueVioLaPantalla(a.venueId, a.sourceKey, a.courses ?? null, a.at)
   // «Salió en papel»: sólo si nadie la empezó en una pantalla. Lo que la cocina ya tomó no se esconde.
   await prisma.kdsOrder.updateMany({
     where: { venueId: a.venueId, sourceKey: a.sourceKey, preparationVersion: 0, status: 'NEW', fallbackPrintedAt: null },
     data: { fallbackPrintedAt: a.at },
   })
+}
+
+/**
+ * LISTO sin red (BUMP). Una comanda legada (v0) se termina entera; una con preparación por producto no se toca (no se termina ni se
+ * entrega trabajo por producto con un BUMP de comanda entera).
+ *
+ * D13 (hz:0555ee15:D13): con [vistos] (los tiempos que vio la pantalla), la pantalla marcó lo que le llegó por el WiFi y el servidor
+ * tiene la ronda entera (la caja manda un mensaje por tiempo al mismo folio). Se termina la comanda y sus renglones de los tiempos que
+ * la pantalla NO vio se mueven a la comanda del folio de su tiempo, nueva y a la vista (como el armado: lo nuevo nunca se esconde en
+ * una comanda que ya existía, hz:dcc49fe5:D1; mover renglones de comanda, como D25). `null` = todos los tiempos (pantalla vieja, o la
+ * comanda tal como la mandó el servidor). Y lo de los tiempos que vio y que otra marca ya había sacado a su comanda también se termina
+ * (Codex r1 #3: dos pantallas que marcaron tiempos distintos del mismo folio). Bajo el candado de comandas de su cuenta (el del armado
+ * y la anulación) y con CAS de estado: si otra pantalla ya la terminó en línea, no se parte. Repetir la marca no cambia nada.
+ */
+async function terminarLoQueVioLaPantalla(venueId: string, sourceKey: string, vistos: string[] | null, at: Date): Promise<void> {
+  await prisma.$transaction(async tx => {
+    const leida = await tx.kdsOrder.findUnique({ where: { venueId_sourceKey: { venueId, sourceKey } }, select: { orderId: true } })
+    // Sin venta no tiene platillos (una cabecera que nació de una marca nunca los recibe).
+    if (leida?.orderId) await tomarCandadoDeComandas(tx, leida.orderId)
+    const comanda = await tx.kdsOrder.findUnique({
+      where: { venueId_sourceKey: { venueId, sourceKey } },
+      select: { id: true, orderId: true, orderNumber: true, orderType: true, printStationId: true, preparationVersion: true, status: true },
+    })
+    if (!comanda || comanda.preparationVersion !== 0) return
+    // Otra caja la cambió de cuenta mientras se esperaba el candado: la cola reintenta (transitorio) con el de su cuenta nueva.
+    if (comanda.orderId !== (leida?.orderId ?? null))
+      throw new ConflictError('La comanda de cocina cambió de cuenta. Vuelve a intentar.', 'KDS_ORDER_OWNER_CHANGED')
+    if (comanda.status !== 'COMPLETED') await terminarYSacarLoQueNoVio(tx, { ...comanda, venueId }, sourceKey, vistos, at)
+    await tx.kdsOrder.updateMany({
+      where: {
+        venueId,
+        preparationVersion: 0,
+        status: { not: 'COMPLETED' },
+        sourceKey: vistos ? { in: vistos.map(t => folioDelTiempo(sourceKey, t)) } : { startsWith: `${sourceKey}:t:` },
+      },
+      data: { status: 'COMPLETED', completedAt: at },
+    })
+  }, ORDER_LOCK_WAIT_BUDGET)
+}
+
+async function terminarYSacarLoQueNoVio(
+  tx: Prisma.TransactionClient,
+  comanda: { id: string; venueId: string; orderId: string | null; orderNumber: string; orderType: string; printStationId: string | null },
+  sourceKey: string,
+  vistos: string[] | null,
+  at: Date,
+): Promise<void> {
+  const renglones = vistos
+    ? await tx.kdsOrderItem.findMany({
+        where: { kdsOrderId: comanda.id },
+        select: { id: true, serviceCourse: true, orderItemId: true },
+        orderBy: { id: 'asc' },
+        take: MAX_RENGLONES + 1,
+      })
+    : []
+  // En duda, a la vista: una comanda que no se puede leer entera no se termina (la marca se reconoce y la comanda sigue en el tablero).
+  if (renglones.length > MAX_RENGLONES) throw new ConflictError('La comanda es demasiado grande para partirla.', 'KDS_TICKET_TOO_LARGE')
+  // CAS: el LISTO en línea o el «Marcar todas» de otra pantalla no llevan este candado.
+  const terminada = await tx.kdsOrder.updateMany({
+    where: { id: comanda.id, status: { not: 'COMPLETED' } },
+    data: { status: 'COMPLETED', completedAt: at },
+  })
+  if (terminada.count !== 1 || !vistos) return
+  // Codex r1 #1: una caja de antes de la 2.22.4 sólo manda el texto del tiempo (`OrderItem.course`), sin foto.
+  const sinFoto = renglones.filter(r => r.serviceCourse == null && r.orderItemId).map(r => r.orderItemId as string)
+  const textos = new Map(
+    sinFoto.length
+      ? (await tx.orderItem.findMany({ where: { id: { in: sinFoto } }, select: { id: true, course: true }, take: sinFoto.length })).map(
+          o => [o.id, o.course],
+        )
+      : [],
+  )
+  const visto = new Set(vistos)
+  const porTiempo = new Map<string, string[]>()
+  for (const r of renglones) {
+    const tiempo = tiempoDeCocina(r.serviceCourse, r.orderItemId ? textos.get(r.orderItemId) : null)
+    if (!visto.has(tiempo)) porTiempo.set(tiempo, [...(porTiempo.get(tiempo) ?? []), r.id])
+  }
+  for (const [tiempo, ids] of porTiempo) {
+    const destino = await comandaDelTiempo(tx, comanda, sourceKey, tiempo)
+    await tx.kdsOrderItem.updateMany({ where: { id: { in: ids }, kdsOrderId: comanda.id }, data: { kdsOrderId: destino } })
+  }
+  if (porTiempo.size > 0)
+    logger.info('[KDS] LISTO sin red de una parte: lo de otros tiempos sigue a la vista', { venueId: comanda.venueId, sourceKey })
+}
+
+/**
+ * D13: la comanda abierta del folio de [tiempo] de esta cuenta, o una nueva. Una que ya existe terminada, de otra cuenta o con
+ * preparación por producto no recibe platillos (se escondería): se sigue con el folio del tiempo de ESE folio.
+ */
+async function comandaDelTiempo(
+  tx: Prisma.TransactionClient,
+  c: { venueId: string; orderId: string | null; orderNumber: string; orderType: string; printStationId: string | null },
+  desde: string,
+  tiempo: string,
+  vueltas = 0,
+): Promise<string> {
+  if (vueltas >= 5) throw new ConflictError('La comanda del tiempo ya existía.', 'KDS_FOLIO_CONFLICT')
+  const sourceKey = folioDelTiempo(desde, tiempo)
+  const [creada] = await tx.kdsOrder.createManyAndReturn({
+    data: [
+      {
+        venueId: c.venueId,
+        sourceKey,
+        printStationId: c.printStationId,
+        orderId: c.orderId,
+        orderNumber: c.orderNumber,
+        orderType: c.orderType,
+        status: 'NEW',
+        preparationVersion: 0,
+      },
+    ],
+    skipDuplicates: true,
+    select: { id: true },
+  })
+  if (creada) return creada.id
+  const existente = await tx.kdsOrder.findUniqueOrThrow({
+    where: { venueId_sourceKey: { venueId: c.venueId, sourceKey } },
+    select: { id: true, orderId: true, status: true, preparationVersion: true },
+  })
+  if (existente.orderId === c.orderId && existente.status !== 'COMPLETED' && existente.preparationVersion === 0) return existente.id
+  return comandaDelTiempo(tx, c, sourceKey, tiempo, vueltas + 1)
 }
 
 async function cabeceraPorFolio(

@@ -2191,6 +2191,17 @@ describe('KDS_TICKET_MARK — marcas de cocina hechas sin red (etapa 3 del KDS)'
     )
   })
 
+  it('D13 · el LISTO sin red lleva los tiempos que vio la pantalla; sin ellos o ilegibles va sin tiempos (como hoy)', async () => {
+    await marca({ sourceKey: 'round:rk-1:st-1', stationId: 'st-1', action: 'BUMP', courses: ['', 'Fuertes'] })
+    expect(markKitchenTicketMock).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'BUMP', courses: ['', 'Fuertes'] }))
+    await marca({ sourceKey: 'round:rk-1:st-1', stationId: 'st-1', action: 'BUMP' })
+    expect(markKitchenTicketMock).toHaveBeenLastCalledWith(expect.objectContaining({ courses: null }))
+    for (const ilegible of ['Fuertes', [1], Array.from({ length: 33 }, (_, i) => `t${i}`), ['x'.repeat(61)]]) {
+      await marca({ sourceKey: 'round:rk-1:st-1', stationId: 'st-1', action: 'BUMP', courses: ilegible })
+      expect(markKitchenTicketMock).toHaveBeenLastCalledWith(expect.objectContaining({ courses: null }))
+    }
+  })
+
   it('una marca ilegible se reconoce y se ignora: nunca cuarentena', async () => {
     const [ack] = await marca({ sourceKey: 'cualquier cosa', action: 'BORRAR' })
     expect(ack.status).toBe('ACKED')

@@ -752,6 +752,101 @@ describe('cantidad que sube en un renglón que ya está en la pantalla', () => {
   })
 })
 
+// D13 (hz:0555ee15:D13): la pantalla marcó LISTO sin red el tiempo que le llegó por el WiFi; el servidor tiene la ronda entera.
+describe('D13 · LISTO sin red de un tiempo no termina el tiempo que la pantalla no vio', () => {
+  const inmediato = { serviceCourse: { id: 'immediate', label: 'Inmediato', kind: 'IMMEDIATE' } }
+  const fuertes = { serviceCourse: { id: 'mains', label: 'Fuertes', kind: 'STANDARD' } }
+
+  /** Una venta con dos tiempos a Cocina: la sopa (Inmediato) y la arrachera (Fuertes). Armada: UNA comanda con las dos. */
+  async function armadaConDosTiempos() {
+    const v = await nuevaVenta({ items: { create: [renglon(taco, 'Sopa', 1, inmediato), renglon(taco, 'Arrachera', 1, fuertes)] } })
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+    const folioMesa = `sale:${v.externalId}:${cocina}`
+    const armada = await prisma.kdsOrder.findUniqueOrThrow({
+      where: { venueId_sourceKey: { venueId, sourceKey: folioMesa } },
+      include: { items: true },
+    })
+    expect(armada.items.map(i => i.productName).sort()).toEqual(['Arrachera', 'Sopa'])
+    return { v, folioMesa, folioFuertes: `${folioMesa}:t:2393677f0adf` }
+  }
+  const comanda = (sourceKey: string) =>
+    prisma.kdsOrder.findUnique({ where: { venueId_sourceKey: { venueId, sourceKey } }, include: { items: true } })
+  const listo = (sourceKey: string, courses?: string[] | null) =>
+    markKitchenTicket({ venueId, sourceKey, stationId: cocina, action: 'BUMP', label: null, at: new Date(), courses })
+
+  it('termina sólo lo que la pantalla vio; el tiempo nuevo sale en su propia comanda a la vista, y repetir no cambia nada', async () => {
+    const { v, folioMesa, folioFuertes } = await armadaConDosTiempos()
+
+    await listo(folioMesa, [''])
+    await listo(folioMesa, ['']) // la cola reintenta la misma marca
+
+    const terminada = await comanda(folioMesa)
+    expect([terminada!.status, terminada!.items.map(i => i.productName)]).toEqual(['COMPLETED', ['Sopa']])
+    const nueva = await comanda(folioFuertes)
+    expect([nueva!.status, nueva!.orderId, nueva!.printStationId, nueva!.preparationVersion, nueva!.items.map(i => i.productName)]).toEqual(
+      ['NEW', v.id, cocina, 0, ['Arrachera']],
+    )
+    expect(await prisma.kdsOrder.count({ where: { venueId, orderId: v.id } })).toBe(2)
+    // El armado ya no la repite: la arrachera sigue en una comanda (la cuenta de unidades por renglón no cambió).
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'SWEEP' })).ticketIds).toEqual([])
+    // Y su propio LISTO sin red la termina.
+    await listo(folioFuertes, ['Fuertes'])
+    expect((await comanda(folioFuertes))!.status).toBe('COMPLETED')
+  })
+
+  it('una pantalla vieja (marca sin tiempos) termina la comanda entera, como hoy', async () => {
+    const { folioMesa, folioFuertes } = await armadaConDosTiempos()
+    await listo(folioMesa, null)
+    const terminada = await comanda(folioMesa)
+    expect([terminada!.status, terminada!.items.map(i => i.productName).sort()]).toEqual(['COMPLETED', ['Arrachera', 'Sopa']])
+    expect(await comanda(folioFuertes)).toBeNull()
+  })
+
+  it('una marca que cubre todos los tiempos no parte nada', async () => {
+    const { folioMesa, folioFuertes } = await armadaConDosTiempos()
+    await listo(folioMesa, ['', 'Fuertes'])
+    expect((await comanda(folioMesa))!.items).toHaveLength(2)
+    expect(await comanda(folioFuertes)).toBeNull()
+  })
+
+  it('Codex r1 #1 · una caja de antes de la 2.22.4 (el tiempo sólo como texto) también se parte por su tiempo', async () => {
+    const v = await nuevaVenta({ items: { create: [renglon(taco, 'Sopa', 1), renglon(taco, 'Arrachera', 1, { course: 'Fuertes' })] } })
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+    const folioMesa = `sale:${v.externalId}:${cocina}`
+    await listo(folioMesa, [''])
+    expect((await comanda(folioMesa))!.items.map(i => i.productName)).toEqual(['Sopa'])
+    expect((await comanda(`${folioMesa}:t:2393677f0adf`))!.items.map(i => i.productName)).toEqual(['Arrachera'])
+  })
+
+  it('Codex r1 #3 · dos pantallas que marcaron tiempos distintos: las dos marcas terminan lo suyo, en cualquier orden', async () => {
+    for (const orden of [
+      ['', 'Fuertes'],
+      ['Fuertes', ''],
+    ]) {
+      const { folioMesa, folioFuertes } = await armadaConDosTiempos()
+      await listo(folioMesa, [orden[0]])
+      await listo(folioMesa, [orden[1]])
+      const derivada = orden[0] === '' ? folioFuertes : `${folioMesa}:t:e3b0c44298fc`
+      expect([(await comanda(folioMesa))!.status, (await comanda(derivada))!.status]).toEqual(['COMPLETED', 'COMPLETED'])
+    }
+  })
+
+  it('una marca sin tiempos sobre un folio ya partido termina también lo que se sacó (la pantalla vio la comanda entera)', async () => {
+    const { folioMesa, folioFuertes } = await armadaConDosTiempos()
+    await listo(folioMesa, [''])
+    await listo(folioMesa, null)
+    expect((await comanda(folioFuertes))!.status).toBe('COMPLETED')
+  })
+
+  it('una comanda que alguien ya terminó en línea no se parte', async () => {
+    const { folioMesa, folioFuertes } = await armadaConDosTiempos()
+    await prisma.kdsOrder.update({ where: { venueId_sourceKey: { venueId, sourceKey: folioMesa } }, data: { status: 'COMPLETED' } })
+    await listo(folioMesa, [''])
+    expect((await comanda(folioMesa))!.items).toHaveLength(2)
+    expect(await comanda(folioFuertes)).toBeNull()
+  })
+})
+
 // Estación «No lleva comanda» (plan 2026-11-10, Task 2). Va al final: crea su estación y no cambia a las de arriba.
 describe('estación «No lleva comanda»', () => {
   it('preparacion_v1_no_arma_kds_para_sin_comanda: con preparación por producto, lo de la tienda no arma comanda y la marca se limpia', async () => {

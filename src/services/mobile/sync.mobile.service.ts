@@ -48,6 +48,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { writeLegacyActivityAuditTx } from '../activityAudit.service'
 import { markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
 import { FOLIO_VALIDO } from '../kds/kitchenTicketPlanning'
+import { MAX_SERVICE_COURSE_LABEL, MAX_SERVICE_COURSES } from '../service-courses/serviceCourseContract'
 import { applyKitchenPreparation, preparationActionSchema, preparationCommandSchema } from '../kds/kitchenPreparation.service'
 import { preparationPermissions } from '../kds/kitchenPreparation'
 import { motivoDelDescuento } from '../shared/motivoDelDescuento'
@@ -2591,6 +2592,7 @@ async function applyKdsTicketMark(venueId: string, intent: SyncIntentInput): Pro
       action,
       label: typeof p.label === 'string' ? p.label : null,
       at: horaDeLaMarca(intent),
+      courses: tiemposDeLaMarca(p.courses),
     })
     return { id: intent.id, status: 'ACKED', result: { sourceKey, action } }
   } catch (error: any) {
@@ -2599,6 +2601,17 @@ async function applyKdsTicketMark(venueId: string, intent: SyncIntentInput): Pro
     logger.error(`[POS SYNC] KDS_TICKET_MARK no se aplicó (${errorCode}); se reconoce para no bloquear la cola (intent ${intent.id})`)
     return { id: intent.id, status: 'ACKED', result: { ignored: errorCode } }
   }
+}
+
+/**
+ * D13 (hz:0555ee15:D13): los tiempos que vio la pantalla al marcar LISTO (`courses`, etiquetas del papel; `''` = sin tiempo). Una
+ * lista que no cabe en el catálogo de tiempos o con algo que no es etiqueta se toma como ausente: la marca vale como la de una
+ * pantalla vieja (la comanda entera).
+ */
+function tiemposDeLaMarca(courses: unknown): string[] | null {
+  if (!Array.isArray(courses) || courses.length > MAX_SERVICE_COURSES) return null
+  if (!courses.every((t): t is string => typeof t === 'string' && t.length <= MAX_SERVICE_COURSE_LABEL)) return null
+  return [...new Set(courses)]
 }
 
 /** El reloj del aparato es informativo: se usa sólo si es razonable (no futuro, no más de 24 h atrás). */
