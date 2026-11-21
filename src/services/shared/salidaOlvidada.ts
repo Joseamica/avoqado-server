@@ -532,6 +532,10 @@ export async function anotarSalidaQueNoSeUso(params: {
   checkOutPhotoUrl?: string | null
   depositPhotoUrl?: string | null
   skipReason?: string | null
+  /** GPS de la salida que no se usó: en PlayTelecom es la prueba de que estuvo en su punto (FLAUTAS_C, 21-nov). */
+  latitude?: number | null
+  longitude?: number | null
+  accuracy?: number | null
   ahora?: Date
 }): Promise<string | null> {
   const ahora = params.ahora ?? new Date()
@@ -549,6 +553,7 @@ export async function anotarSalidaQueNoSeUso(params: {
       notes: true,
       checkOutPhotoUrl: true,
       depositPhotoUrl: true,
+      clockOutLatitude: true,
       venue: { select: { timezone: true } },
     },
     orderBy: { clockInTime: 'desc' },
@@ -563,6 +568,9 @@ export async function anotarSalidaQueNoSeUso(params: {
       ...(!e.checkOutPhotoUrl && params.checkOutPhotoUrl ? { checkOutPhotoUrl: params.checkOutPhotoUrl } : {}),
       ...(!e.depositPhotoUrl && params.depositPhotoUrl ? { depositPhotoUrl: params.depositPhotoUrl } : {}),
       ...(params.skipReason ? { checkoutSkipReason: params.skipReason } : {}),
+      ...(e.clockOutLatitude == null && params.latitude != null && params.longitude != null
+        ? { clockOutLatitude: params.latitude, clockOutLongitude: params.longitude, clockOutAccuracy: params.accuracy ?? null }
+        : {}),
     },
   })
   const dia = diaDeLaEntrada(e.clockInTime, e.venue.timezone)
@@ -576,7 +584,12 @@ export async function anotarSalidaQueNoSeUso(params: {
     action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
     entity: 'TimeEntry',
     entityId: e.id,
-    data: { origen: params.origen, salidaRecibida: ahora.toISOString(), cierreAutomatico: e.clockOutTime?.toISOString() ?? null },
+    data: {
+      origen: params.origen,
+      salidaRecibida: ahora.toISOString(),
+      cierreAutomatico: e.clockOutTime?.toISOString() ?? null,
+      gps: params.latitude != null && params.longitude != null ? { latitude: params.latitude, longitude: params.longitude } : null,
+    },
   })
   return `Tu entrada del ${dia} se cerró como salida olvidada y la revisa tu gerente (tu salida y tus fotos quedaron anotadas). Si vas a trabajar, marca tu entrada.`
 }

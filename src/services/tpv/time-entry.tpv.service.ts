@@ -280,7 +280,17 @@ export async function clockOut(params: ClockOutParams) {
 
   if (!timeEntry) {
     // La regla la acababa de cerrar: la evidencia de esta salida se anota en esa checada y se dice qué pasó (Codex r1 #8).
-    const yaOlvidada = await anotarSalidaQueNoSeUso({ staffId, venueId, origen: 'PAX', checkOutPhotoUrl, depositPhotoUrl, skipReason })
+    const yaOlvidada = await anotarSalidaQueNoSeUso({
+      staffId,
+      venueId,
+      origen: 'PAX',
+      checkOutPhotoUrl,
+      depositPhotoUrl,
+      skipReason,
+      latitude,
+      longitude,
+      accuracy,
+    })
     if (yaOlvidada) throw new BadRequestError(yaOlvidada, 'SALIDA_OLVIDADA')
     throw new BadRequestError('El empleado no tiene entrada registrada')
   }
@@ -327,7 +337,17 @@ export async function clockOut(params: ClockOutParams) {
     },
   })
   if (count !== 1) {
-    const yaOlvidada = await anotarSalidaQueNoSeUso({ staffId, venueId, origen: 'PAX', checkOutPhotoUrl, depositPhotoUrl, skipReason })
+    const yaOlvidada = await anotarSalidaQueNoSeUso({
+      staffId,
+      venueId,
+      origen: 'PAX',
+      checkOutPhotoUrl,
+      depositPhotoUrl,
+      skipReason,
+      latitude,
+      longitude,
+      accuracy,
+    })
     throw new BadRequestError(yaOlvidada ?? 'El empleado no tiene entrada registrada', yaOlvidada ? 'SALIDA_OLVIDADA' : undefined)
   }
 

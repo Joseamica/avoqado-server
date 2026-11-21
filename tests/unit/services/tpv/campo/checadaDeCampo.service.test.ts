@@ -661,11 +661,17 @@ describe('registrarSalidaDeCampo', () => {
   it('una entrada vieja abierta ya no se estira a 999.99 h: se cierra como salida olvidada y la salida de hoy se anota (D3)', async () => {
     const e = entrada({ clockInTime: new Date(t('17:00').getTime() - 60 * 24 * 60 * 60 * 1000) })
 
-    const r = await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id }, t('17:00'))
+    const r = await registrarSalidaDeCampo(
+      q,
+      { llave: LLAVE, timeEntryId: e.id, latitude: 19.43, longitude: -99.13, accuracy: 8 },
+      t('17:00'),
+    )
 
     expect(r).toMatchObject({ totalHours: 0, salidaNoUsada: true })
     expect(entradas[0]).toMatchObject({ salidaOlvidada: true, autoClockOut: true, totalHours: 0, llaveSalida: LLAVE })
     expect(entradas[0].notes).toContain('no se usó')
+    // FLAUTAS_C (21-nov): el GPS de la salida no usada no se tira (en PlayTelecom es la prueba de que estuvo en su punto).
+    expect(entradas[0]).toMatchObject({ clockOutLatitude: 19.43, clockOutLongitude: -99.13, clockOutAccuracy: 8 })
   })
 
   it('con la regla APAGADA en la sucursal, una entrada vieja se cierra como antes (tope 999.99)', async () => {
