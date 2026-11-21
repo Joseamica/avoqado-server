@@ -1020,7 +1020,8 @@ export interface AbonoDeSaldoAFavor {
 
 /**
  * Abona `monto` al sobre de saldo a favor de la clienta: lo crea ACTIVE con su ACTIVATE, o lo recarga con un ADJUST_INCREMENT
- * (`reason: OTHER`). No toma candados nuevos: usa los de `preparado`. Idempotente por `saldo-a-favor:<refundPaymentId>`. Todo rechazo
+ * (`reason: OTHER`). Usa los candados de `preparado`; con `exigirMismoTelefono` toma además la fila de su ficha (Ruling 75, abajo).
+ * Idempotente por `saldo-a-favor:<refundPaymentId>`. Todo rechazo
  * se lanza ANTES de escribir. El sobre nuevo nace «entregado» por WhatsApp (`SENT`) sin `ventaHuella` ni `deliveryOperationKey`:
  * la búsqueda y la prueba por teléfono sólo aceptan WHATSAPP, y la entrega nunca lo manda sola (sería un código al portador).
  *
@@ -1088,9 +1089,18 @@ export async function abonarSaldoAFavorEnTx(
         : `El saldo a favor de ${s.nombreCliente} está ligado a otro teléfono que el que verificó al pagar este pedido: no se le abona. Puedes devolverlo a su tarjeta; no se aplicó nada.`,
       409,
     )
+  // D661 (Ruling 75): el número de su ficha se relee bajo el MISMO candado de fila con que «Mi cuenta» lo cambia (`cambiarTelefonoEnTx`):
+  // un cambio que ganó mientras se preparaba ya se ve aquí, y uno que llega mientras se abona espera a que termine (y el abono queda en el
+  // número de ese momento). Sólo la devolución de «Nadie» (`exigirMismoTelefono`); el «Cambio» y el Reembolso del POS, como hoy.
+  let telefonoDeHoy = s.telefonoCliente
+  if (exigido !== undefined) {
+    await tx.$queryRaw`SELECT "id" FROM "Customer" WHERE "id" = ${s.customerId} AND "venueId" = ${s.venueId} FOR NO KEY UPDATE`
+    const ficha = await tx.customer.findFirst({ where: { id: s.customerId, venueId: s.venueId }, select: { phone: true } })
+    telefonoDeHoy = telefonoDeTarjeta(ficha?.phone)
+  }
   // D661 (Ruling 57): el número que verificó al pagar tiene que SEGUIR siendo el de su ficha: el saldo se gasta probando ese número, y si
   // ya lo cambió (o su ficha ya no tiene uno) no lo podría usar. Vale con sobre o sin él; a su tarjeta sí se puede.
-  if (exigido != null && exigido !== s.telefonoCliente) throw telefonoAjeno()
+  if (exigido != null && exigido !== telefonoDeHoy) throw telefonoAjeno()
   if (card && exigido !== undefined && (exigido === null || telefonoDeTarjeta(card.recipientPhone) !== exigido)) throw telefonoAjeno()
   if (card?.status === 'BLOCKED') {
     throw new GiftCardError(

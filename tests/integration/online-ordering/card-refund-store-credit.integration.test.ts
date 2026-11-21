@@ -28,6 +28,7 @@ import { getTrackingByToken } from '@/services/online-ordering/order.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
 import { acceptOnlineOrder, markOnlineOrderDelivered } from '@/services/online-ordering/transitions.service'
 import { TENDER_SEMANTICS_SELECT, paymentCountsAsDrawerCash } from '@/services/shared/tenderSemantics'
+import * as libreta from '@/services/giftCards/giftCardLedger'
 
 // El guardia global rechaza `av-db-25` y hosts remotos; esta suite exige además una base desechable o la propia de la fase.
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
@@ -605,6 +606,69 @@ describe('D661 · tarea 6: devolver a saldo a favor un pedido «Nadie» (integra
     })
     await nadaEscrito(p, ana)
     await expect(devolver(p.orderId, 'CARD')).resolves.toMatchObject({ status: 'RECORDED', cardRefundStatus: 'RECORDED' })
+  })
+
+  /** «Mi cuenta» confirma el número nuevo: el MISMO candado de fila y la misma escritura que `cambiarTelefonoEnTx`, en su transacción. */
+  const confirmarNumero = (customerId: string, phone: string) =>
+    prisma.$transaction(async t => {
+      await t.$queryRaw`SELECT "id" FROM "Customer" WHERE "id" = ${customerId} AND "venueId" = ${venueId!} FOR NO KEY UPDATE`
+      await t.customer.update({ where: { id: customerId }, data: { phone, versionDeSesion: { increment: 1 } } })
+    })
+  const numeroDe = async (customerId: string) => (await prisma.customer.findUniqueOrThrow({ where: { id: customerId } })).phone
+
+  it('D661 · Ruling 75: el abono ya leyó A y la clienta confirma B en «Mi cuenta» antes de que se escriba → 409 STORE_CREDIT_PHONE_MISMATCH y nada escrito; a su tarjeta, sí', async () => {
+    const a = telefono()
+    const b = telefono()
+    const ana = await clienta(a)
+    const p = await cobrado(ana, a)
+    const preparar = libreta.prepararSobreDeSaldoAFavorEnTx
+    const pausa = jest.spyOn(libreta, 'prepararSobreDeSaldoAFavorEnTx').mockImplementationOnce(async (tx, args) => {
+      const preparado = await preparar(tx, args) // la devolución a saldo ya leyó su ficha: A
+      await confirmarNumero(ana, b) // otra transacción, con la devolución abierta: «Mi cuenta» confirma B
+      return preparado
+    })
+    try {
+      await expect(devolver(p.orderId, 'STORE_CREDIT')).rejects.toMatchObject({ statusCode: 409, code: 'STORE_CREDIT_PHONE_MISMATCH' })
+    } finally {
+      pausa.mockRestore()
+    }
+    await nadaEscrito(p, ana)
+    expect(await numeroDe(ana)).toBe(b)
+    await expect(devolver(p.orderId, 'CARD')).resolves.toMatchObject({ status: 'RECORDED', cardRefundStatus: 'RECORDED' })
+  })
+
+  it('D661 · Ruling 75 (al revés): el abono toma la ficha primero → recarga al número de hoy (A) y la confirmación de B espera a que termine', async () => {
+    const a = telefono()
+    const b = telefono()
+    const ana = await clienta(a)
+    // Ya tiene su sobre en A. Así este abono RECARGA: crear un sobre nuevo ya bloquea su ficha (la llave foránea del sobre choca con el
+    // cambio de `phone`, que es parte de una llave única); recargar no tocaba la ficha.
+    await devolver((await cobrado(ana, a)).orderId, 'STORE_CREDIT')
+    const p = await cobrado(ana, a)
+    const abonar = libreta.abonarSaldoAFavorEnTx
+    let confirmacion: Promise<void> | null = null
+    let confirmada = false
+    const pausa = jest.spyOn(libreta, 'abonarSaldoAFavorEnTx').mockImplementationOnce(async (tx, args) => {
+      const abono = await abonar(tx, args) // ya tomó la ficha y abonó a A
+      confirmacion = confirmarNumero(ana, b).then(() => {
+        confirmada = true
+      })
+      await new Promise(r => setTimeout(r, 500))
+      // Mientras la devolución no termina, la confirmación espera la ficha: sigue A.
+      expect(confirmada).toBe(false)
+      return abono
+    })
+    try {
+      await expect(devolver(p.orderId, 'STORE_CREDIT')).resolves.toMatchObject({ status: 'RECORDED', cardRefundStatus: 'RESOLVED' })
+    } finally {
+      pausa.mockRestore()
+    }
+    await confirmacion
+    expect(await numeroDe(ana)).toBe(b)
+    const sobres = await sobresDe(ana)
+    expect(sobres).toHaveLength(1)
+    expect(sobres[0]).toMatchObject({ status: 'ACTIVE', recipientPhone: a })
+    expect(sobres[0].balance.toFixed(2)).toBe('500.00')
   })
 
   it('saldo: sin teléfono verificado y sin sobre → STORE_CREDIT_CUSTOMER_PHONE_REQUIRED', async () => {

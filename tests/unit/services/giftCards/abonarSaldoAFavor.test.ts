@@ -47,6 +47,8 @@ function base(p: { sobreDeSaldo?: LockedGiftCard | null } = {}) {
   prismaMock.$queryRaw.mockImplementation((async (strings: any) => {
     const sql = textoDe(strings)
     if (sql.includes('pg_advisory_xact_lock')) return [{ pg_advisory_xact_lock: '' }]
+    // D661 (Ruling 75): la ficha bajo el MISMO candado de fila con que «Mi cuenta» cambia el número.
+    if (sql.includes('FROM "Customer"') && sql.includes('FOR NO KEY UPDATE')) return [{ id: CLIENTA }]
     if (sql.includes('FOR UPDATE')) return p.sobreDeSaldo ? [p.sobreDeSaldo] : []
     if (sql.includes('FROM "GiftCard"')) return p.sobreDeSaldo ? [{ id: p.sobreDeSaldo.id }] : []
     throw new Error(`SQL inesperado: ${sql}`)
@@ -541,5 +543,40 @@ describe('abonarSaldoAFavorEnTx con exigirMismoTelefono (D661)', () => {
   it('sin el parámetro (el «Cambio» y el Reembolso del POS) todo sigue como hoy: otro número abona con su señal', async () => {
     base({ sobreDeSaldo: sobre({ recipientPhone: '+525598765478' }) })
     await expect(abonar(100)).resolves.toMatchObject({ telefonoNoCoincide: true })
+  })
+
+  /** El candado de la ficha (`FOR NO KEY UPDATE` sobre "Customer"), como lo toma `cambiarTelefonoEnTx` de «Mi cuenta». */
+  const candadoDeLaFicha = () =>
+    (prismaMock.$queryRaw.mock.calls as any[][]).findIndex(
+      ([s]) => textoDe(s).includes('FROM "Customer"') && textoDe(s).includes('FOR NO KEY UPDATE'),
+    )
+
+  it('D661 · Ruling 75: el abono toma la ficha con el MISMO candado que «Mi cuenta» y relee su número bajo él: si ya es otro (lo confirmó mientras se abonaba), 409 y nada escrito', async () => {
+    base()
+    // Al preparar, su ficha tenía el número verificado (escrito distinto); bajo el candado, ya es otro: lo cambió en «Mi cuenta».
+    prismaMock.customer.findFirst
+      .mockResolvedValueOnce({ firstName: 'Ana', lastName: 'López', phone: '55 1111 2222' } as any)
+      .mockResolvedValueOnce({ phone: '55 3333 4444' } as any)
+    await expect(abonar(250, nadie(VERIFICADO))).rejects.toMatchObject({ code: 'STORE_CREDIT_PHONE_MISMATCH', statusCode: 409 })
+    sinEscribir()
+    const candado = candadoDeLaFicha()
+    expect(candado).toBeGreaterThanOrEqual(0)
+    // El candado va ANTES de la relectura del número (la segunda lectura de la ficha, la de `abonar`).
+    expect(prismaMock.customer.findFirst).toHaveBeenCalledTimes(2)
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[candado]).toBeLessThan(prismaMock.customer.findFirst.mock.invocationCallOrder[1])
+    expect(prismaMock.customer.findFirst.mock.calls[1][0]).toMatchObject({ where: { id: CLIENTA, venueId: VENUE } })
+  })
+
+  it('D661 · Ruling 75: con el mismo número bajo el candado abona como hoy; sin el parámetro (Cambio, Reembolso del POS) no toma la ficha', async () => {
+    base()
+    fichaCon('55 1111 2222') // = VERIFICADO, escrito distinto
+    await expect(abonar(250, nadie(VERIFICADO))).resolves.toMatchObject({ giftCardId: 'gc-nuevo', telefonoDelSobre: VERIFICADO })
+    expect(candadoDeLaFicha()).toBeGreaterThanOrEqual(0)
+
+    jest.clearAllMocks()
+    base()
+    await expect(abonar(100)).resolves.toMatchObject({ giftCardId: 'gc-nuevo' })
+    expect(candadoDeLaFicha()).toBe(-1)
+    expect(prismaMock.customer.findFirst).toHaveBeenCalledTimes(1) // sólo la de preparar
   })
 })
