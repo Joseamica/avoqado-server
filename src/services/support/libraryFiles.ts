@@ -259,6 +259,49 @@ export const manifestApprovalHash = (m: {
     .update(JSON.stringify(canonical({ approvedAt: m.approvedAt, approvedBy: m.approvedBy, guides: m.guides, retired: m.retired })))
     .digest('hex')
 
+// ── Firma por guía (D22) ──────────────────────────────────────────────────────────────────────
+// La propuesta (library-approved.json) la escribe el generador; las firmas viven aparte, en library-signatures.json junto a
+// ella, y sólo las escribe `--firmar`. Así regenerar la propuesta nunca borra una firma, y una rama que la regenera con el
+// formato viejo (firma en null) no choca ni deja al bot sin guías.
+
+/** Una guía tal como se firmó: su entrada de la propuesta (sha256 + candados), quién, cuándo y el sello de las cuatro cosas. */
+export interface GuideApproval {
+  entry: Record<string, unknown>
+  approvedBy: string
+  approvedAt: string
+  approvedHash: string
+}
+export interface LibrarySignatures {
+  version: 1
+  guides: Record<string, GuideApproval>
+}
+export const SUPPORT_LIBRARY_SIGNATURES = path.join(SUPPORT_HELP_DIRECTORY, 'library-signatures.json')
+/** Las firmas van junto a su propuesta. */
+export const signaturesPathFor = (manifest: string) => path.join(path.dirname(manifest), 'library-signatures.json')
+/** El sello de una firma: sha256 del JSON canónico de id + entrada + quién + cuándo. Retocar cualquiera lo rompe. */
+export const approvalHash = (id: string, a: Pick<GuideApproval, 'entry' | 'approvedBy' | 'approvedAt'>): string =>
+  crypto
+    .createHash('sha256')
+    .update(JSON.stringify(canonical({ approvedAt: a.approvedAt, approvedBy: a.approvedBy, entry: a.entry, id })))
+    .digest('hex')
+export const sameEntry = (a: unknown, b: unknown) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b))
+/** Una firma vale si trae sus cuatro partes y su sello coincide (nadie la retocó a mano ni la movió de guía). */
+export function validApproval(id: string, a: unknown): a is GuideApproval {
+  const x = a as Partial<GuideApproval> | null
+  return (
+    !!x &&
+    typeof x === 'object' &&
+    !!x.entry &&
+    typeof x.entry === 'object' &&
+    !Array.isArray(x.entry) &&
+    typeof x.approvedBy === 'string' &&
+    !!x.approvedBy.trim() &&
+    typeof x.approvedAt === 'string' &&
+    !!x.approvedAt &&
+    x.approvedHash === approvalHash(id, x as GuideApproval)
+  )
+}
+
 /** Títulos que se repiten entre guías distintas (sin acentos, mayúsculas ni signos): la aclaración muestra cada opción por su título. */
 export function duplicateTitles(guides: { id: string; title: string }[]): string[][] {
   const byTitle = new Map<string, Set<string>>()

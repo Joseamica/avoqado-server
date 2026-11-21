@@ -5,8 +5,8 @@ import os from 'os'
 import path from 'path'
 import { loadSupportLibrary, matchesVersionRange, type HelpApp, type LibraryGuide } from '@/services/support/knowledge.service'
 import { normalizeAppVersion } from '@/services/support/deviceContext.service'
-import { readLibrarySources, SUPPORT_LIBRARY_MANIFEST } from '@/services/support/libraryFiles'
-import { buildManifest, signManifest, UNTESTED_LABELS } from '../../../../scripts/support-eval/aprobar-biblioteca'
+import { readLibrarySources, SUPPORT_LIBRARY_MANIFEST, SUPPORT_LIBRARY_SIGNATURES } from '@/services/support/libraryFiles'
+import { buildManifest, pendingChanges, signGuides, UNTESTED_LABELS } from '../../../../scripts/support-eval/aprobar-biblioteca'
 import {
   inventorySchema,
   readInventory,
@@ -227,13 +227,21 @@ describe('manual inventory (scripts/support-eval/manual)', () => {
     })
   })
 
-  it('the signed load is all or nothing: loadSupportLibrary() returns [] without approvedHash and exactly the allowDraft ids with it', () => {
+  it('the signed load goes guide by guide (D22): it serves exactly the allowDraft ids that are not pending of signature, plus signed ones leaving the list', () => {
     const manifest = JSON.parse(fs.readFileSync(SUPPORT_LIBRARY_MANIFEST, 'utf8'))
+    const signatures = JSON.parse(fs.readFileSync(SUPPORT_LIBRARY_SIGNATURES, 'utf8'))
     const ids = (guides: LibraryGuide[]) => [...new Set(guides.map(g => g.id))].sort()
-    expect(ids(loadSupportLibrary())).toEqual(manifest.approvedHash ? ids(loadSupportLibrary({ allowDraft: true })) : [])
+    const { changed, leaving } = pendingChanges(manifest, signatures)
+    const existing = new Set(readLibrarySources().map(s => s.id))
+    expect(ids(loadSupportLibrary())).toEqual(
+      [
+        ...ids(loadSupportLibrary({ allowDraft: true })).filter(id => !changed.includes(id)),
+        ...leaving.filter(id => existing.has(id)),
+      ].sort(),
+    )
   })
 
-  it('the signed load is all or nothing on a sample library: [] unsigned, exactly the allowDraft ids once signed', () => {
+  it('on a sample library: [] with an unsigned old-format list, exactly the allowDraft ids once signed guide by guide', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'support-signed-'))
     try {
       const dirs = { helpDir: path.join(root, 'help'), overviewDir: path.join(root, 'overviews'), manualDir: path.join(root, 'manual') }
@@ -259,8 +267,11 @@ describe('manual inventory (scripts/support-eval/manual)', () => {
       const draft = ids(loadSupportLibrary({ ...dirs, manifest, allowDraft: true }))
       expect(draft).toEqual(['dashboard/caja/ver-caja', 'tpv/caja/abrir-caja', 'tpv/caja/cobrar'])
       expect(loadSupportLibrary({ ...dirs, manifest })).toEqual([])
-      fs.writeFileSync(manifest, JSON.stringify(signManifest(unsigned, sources(), 'Fundador')))
+      const { signatures } = signGuides(unsigned, { version: 1, guides: {} }, sources(), 'Fundador')
+      fs.writeFileSync(path.join(root, 'library-signatures.json'), JSON.stringify(signatures))
       expect(ids(loadSupportLibrary({ ...dirs, manifest }))).toEqual(draft)
+      // La de dinero sin su prueba no se firmó ni carga.
+      expect(Object.keys(signatures.guides)).not.toContain('android/caja/cobrar')
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }
