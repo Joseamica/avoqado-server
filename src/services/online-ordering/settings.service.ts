@@ -286,23 +286,28 @@ export async function pauseOnlineOrdering(
   now: Date = new Date(),
 ): Promise<{ pausedUntil: string | null; manualPause: boolean }> {
   const pausedUntil = minutes === null ? null : new Date(now.getTime() + minutes * 60_000)
-  // D662 v5 (Codex p2v5-r2 #8): quitar la pausa temporal y subir el corte de la pausa sola van en UNA transacción: «Reanudar» nunca queda
-  // a medias (la temporal quitada y la sola todavía puesta).
-  await prisma.$transaction(async tx => {
-    const r = await tx.onlineOrderingSettings.updateMany({ where: { venueId }, data: { pausedUntil } })
-    if (r.count === 0) {
-      throw new BadRequestError('La tienda en línea de este negocio todavía no está configurada.', 'ONLINE_ORDERING_NOT_CONFIGURED')
-    }
-    // D662 parte 2 (v3): «Reanudar» también quita la pausa sola (la del piso y la de las apps viejas, que llaman igual): el corte sube a
-    // AHORA y desde aquí sólo cuentan los pedidos con hora límite posterior. Sólo sube. Pausar 15/30/60 no lo toca: al vencer, la tienda
+  const noConfigurada = () =>
+    new BadRequestError('La tienda en línea de este negocio todavía no está configurada.', 'ONLINE_ORDERING_NOT_CONFIGURED')
+  if (minutes !== null) {
+    // Pausar 15/30/60 es UNA escritura simple, como antes de la pausa sola (Codex p2v5-r3 #8): una transacción interactiva pediría su
+    // conexión con un tope de 2 s y, con el pool ocupado, fallaría antes de pausar. No toca `autoPauseResumedAt`: al vencer, la tienda
     // sigue pausada sola hasta «Reanudar».
-    if (minutes === null) {
+    const r = await prisma.onlineOrderingSettings.updateMany({ where: { venueId }, data: { pausedUntil } })
+    if (r.count === 0) throw noConfigurada()
+  } else {
+    // D662 v5 (Codex p2v5-r2 #8): «Reanudar» quita la pausa temporal y sube el corte de la pausa sola en UNA transacción: nunca queda a
+    // medias (la temporal quitada y la sola todavía puesta).
+    await prisma.$transaction(async tx => {
+      const r = await tx.onlineOrderingSettings.updateMany({ where: { venueId }, data: { pausedUntil } })
+      if (r.count === 0) throw noConfigurada()
+      // D662 parte 2 (v3): «Reanudar» también quita la pausa sola (la del piso y la de las apps viejas, que llaman igual): el corte sube
+      // a AHORA y desde aquí sólo cuentan los pedidos con hora límite posterior. Sólo sube.
       await tx.onlineOrderingSettings.updateMany({
         where: { venueId, OR: [{ autoPauseResumedAt: null }, { autoPauseResumedAt: { lt: now } }] },
         data: { autoPauseResumedAt: now },
       })
-    }
-  })
+    })
+  }
   const current = await prisma.onlineOrderingSettings.findUnique({ where: { venueId }, select: { manualPause: true } })
   void logAction({
     staffId: actorStaffId,

@@ -381,6 +381,28 @@ describe('settings.service', () => {
     }
   })
 
+  it('🔴 Codex p2v5-r3 #8: pausar 15/30/60 es UNA escritura simple, como en develop (sin transacción interactiva que pida otra conexión)', async () => {
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ manualPause: false } as any)
+    for (const m of [15, 30, 60] as const) await pauseOnlineOrdering('v1', m, 'staff1')
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledTimes(3)
+  })
+
+  it('🔴 Codex p2v5-r3 #8: sólo «Reanudar» (dos campos juntos) usa la transacción, con sus dos escrituras dentro', async () => {
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ manualPause: false } as any)
+    const escriturasDentro: number[] = []
+    ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (callback: any) => {
+      const r = await callback(prismaMock)
+      escriturasDentro.push(prismaMock.onlineOrderingSettings.updateMany.mock.calls.length)
+      return r
+    })
+    await pauseOnlineOrdering('v1', null, 'staff1')
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(escriturasDentro).toEqual([2])
+  })
+
   it('M-8: reanudar con la pausa del GERENTE puesta lo dice (`manualPause: true`): la tienda sigue frenada aunque `pausedUntil` sea null', async () => {
     prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ manualPause: true } as any)
