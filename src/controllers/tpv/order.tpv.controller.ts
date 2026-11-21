@@ -110,7 +110,8 @@ export async function createOrderWithItems(req: Request<{ venueId: string }, any
   try {
     const venueId = req.params.venueId
     const items = req.body.items
-    const needsCompAuthority = !!req.body.orderDiscountId || !!req.body.couponCode || items.some((item: any) => item.isCortesia === true || !!item.itemDiscountId)
+    const needsCompAuthority =
+      !!req.body.orderDiscountId || !!req.body.couponCode || items.some((item: any) => item.isCortesia === true || !!item.itemDiscountId)
     const canCompItems = needsCompAuthority && (tieneCortesiaAutorizada(req) || (await tienePermisoEnVenue(req, 'orders:comp')))
 
     // hz:e0b12f00:D1: si el descuento libre resulta dejar la cuenta en $0, el servicio lo dice y aquí se pide `orders:comp` (PIN).
@@ -134,6 +135,25 @@ export async function createOrderWithItems(req: Request<{ venueId: string }, any
       data: order,
       message: 'Order with items created successfully',
     })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /tpv/venues/:venueId/orders/:orderId/retirar-sin-cobro — hz:e82938e1:D36. La TPV regresó en «Cobrar» sin ningún intento de
+ * cobro: el servidor vuelve a comprobarlo todo bajo el candado y anula la venta (`anularVentaDeCobrarSinCobro`). 200
+ * `{ estado: 'RETIRADA' | 'YA_RETIRADA' }`; un 4xx dice por qué se queda como está (la terminal ya no reintenta).
+ * El staff y la terminal salen del token, nunca del cuerpo.
+ */
+export async function retirarVentaSinCobro(req: Request<{ venueId: string; orderId: string }>, res: Response, next: NextFunction) {
+  try {
+    const { anularVentaDeCobrarSinCobro } = await import('../../services/tpv/ventaDeCobrarSinCobro.tpv.service')
+    const resultado = await anularVentaDeCobrarSinCobro(req.params.venueId, req.params.orderId, {
+      staffId: req.authContext?.userId,
+      terminalSerial: req.authContext?.terminalSerialNumber,
+    })
+    res.status(200).json({ success: true, data: resultado })
   } catch (error) {
     next(error)
   }

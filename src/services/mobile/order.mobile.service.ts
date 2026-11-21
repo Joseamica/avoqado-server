@@ -7722,7 +7722,13 @@ export async function cancelOrderInTransaction(
   /** Huella del reducer offline: corre DENTRO de la transacción de la cancelación (plan 2026-10-13-sync-retoma-por-llave). */
   dentroDeLaTx?: (tx: TxConReintento, cancelada: { orderId: string }) => Promise<void>,
   /** Lo que el panel exige además (`cancelarCuentaSinCobrar`): pagos registrados y «ya cancelada». El POS no lo pasa. */
-  opcionesDeGuardia?: OrderCancelGuardOptions,
+  opcionesDeGuardia?: OrderCancelGuardOptions & {
+    /**
+     * hz:e82938e1:D36 (Codex r3 #3): corre con la venta YA tomada y ANTES de cualquier escritura de la anulación (comandas, canjes,
+     * estado). Quien anula por una regla (la limpieza de ventas abandonadas) la relee aquí tal como está; si lanza, no se escribe nada.
+     */
+    comprobarBajoElCandado?: (tx: TxConReintento) => Promise<void>
+  },
 ) {
   logger.info(`📱 [ORDER.MOBILE] Cancelling order ${orderId} | venue=${venueId} | reason=${reason || 'none'}`)
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
@@ -7734,6 +7740,7 @@ export async function cancelOrderInTransaction(
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
   }
+  await opcionesDeGuardia?.comprobarBajoElCandado?.(tx)
   const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId: performedBy, reason })
   await assertOrderCancellableUnderLock(tx, { venueId, orderId }, opcionesDeGuardia)
   // 🔴 D2: una venta de vales queda como por la ruta de vales: sus vales vuelven a poder cobrarse (sin esperar por ellos).
@@ -7787,6 +7794,11 @@ export async function publishCancelledOrder(
   reason?: string,
   /** Datos extra de la entrada de bitácora (la procedencia MCP de «Cancelar orden»); nunca pisan el motivo. */
   datosDeBitacora?: Record<string, unknown>,
+  /**
+   * hz:e82938e1:D36: quien ya escribió su `ORDER_CANCELLED` DENTRO de la transacción de la anulación (para que una caída entre el
+   * commit y esta publicación no deje una anulación sin bitácora) lo dice aquí y no se escribe otra entrada.
+   */
+  opciones: { bitacoraEnLaTx?: boolean } = {},
 ): Promise<void> {
   const { orderId, table } = result
   logger.info(`✅ [ORDER.MOBILE] Order ${orderId} cancelled`)
@@ -7814,15 +7826,17 @@ export async function publishCancelledOrder(
         })
     }
   }
-  const { logAction } = await import('../dashboard/activity-log.service')
-  void logAction({
-    action: 'ORDER_CANCELLED',
-    entity: 'Order',
-    entityId: orderId,
-    staffId,
-    venueId,
-    data: { ...datosDeBitacora, reason: reason ?? null },
-  })
+  if (!opciones.bitacoraEnLaTx) {
+    const { logAction } = await import('../dashboard/activity-log.service')
+    void logAction({
+      action: 'ORDER_CANCELLED',
+      entity: 'Order',
+      entityId: orderId,
+      staffId,
+      venueId,
+      data: { ...datosDeBitacora, reason: reason ?? null },
+    })
+  }
   // D2: los vales que la cancelación dejó libres, con su autor (después del commit, Codex r3 #1).
   const { auditarValesSoltados } = await import('./areaTicketV7.mobile.service')
   auditarValesSoltados({ venueId, orderId, staffId, soltados: result.valesSoltados })
