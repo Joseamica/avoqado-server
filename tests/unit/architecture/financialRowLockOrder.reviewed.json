@@ -1122,6 +1122,16 @@
       "loops": 0,
       "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes de la devolución, del Payment y de la caja; nunca bucle de Orders nuevas."
     },
+    "src/services/online-ordering/card/refund.service.ts#terminarSinDevolver#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "D661 (Task 5): una venta (la cuenta del pedido en línea) y su ascendencia, sola en su transacción, antes de la fila de devolución, del pedido en línea y de la marca de cocina de esa misma Order; no aparta Payment ni GiftCard; nunca bucle de Orders nuevas."
+    },
+    "src/services/online-ordering/card/devuelto.ts#cerrarComoDevueltoEnTx#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "D661 (Task 5): una venta (la cuenta del pedido en línea) y su ascendencia, antes del pedido en línea y de la marca de cocina de esa misma Order; no aparta Payment ni GiftCard. El barrido la llama una vez por pedido, cada una en su propia transacción (nunca varias Orders en una). Reentrar el candado en la misma transacción no espera."
+    },
     "src/services/online-ordering/card/refund.service.ts#resolveReversedCardRefund#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,

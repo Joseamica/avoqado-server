@@ -153,6 +153,10 @@ export const cardRefundSchema = z.object({
       .min(1, 'La última devolución que viste debe ser un id o null')
       .max(64, 'La última devolución que viste debe ser un id o null')
       .nullable(),
+    // D661: a dónde va el dinero; sin él, a la tarjeta (como siempre). Saldo a favor llega con la Task 6.
+    destino: z
+      .enum(['CARD', 'STORE_CREDIT'], { errorMap: () => ({ message: 'El destino de la devolución debe ser CARD o STORE_CREDIT' }) })
+      .optional(),
   }),
 })
 /** «Devolver por otro medio» de una devolución a la tarjeta que falló después (sólo efectivo o transferencia). */

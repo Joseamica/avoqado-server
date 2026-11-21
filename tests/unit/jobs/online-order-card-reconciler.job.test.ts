@@ -66,7 +66,8 @@ describe('online-order-card-reconciler.job', () => {
     // …ni al revés.
     h.sweepRefunds.mockRejectedValueOnce(new Error('Stripe no responde'))
     reconcile.mockResolvedValueOnce(EMPTY)
-    await expect(h.job.checkNow()).resolves.toEqual({ ...EMPTY, refunds: { scanned: 0, advanced: 0, alerted: 0, errors: 1 } })
+    // D661 (Task 5): el resultado del recorrido también cuenta los pedidos cerrados «Devuelto» (0 si no corrió).
+    await expect(h.job.checkNow()).resolves.toEqual({ ...EMPTY, refunds: { scanned: 0, advanced: 0, alerted: 0, errors: 1, closed: 0 } })
   })
 
   it('arranca y para el cron', () => {

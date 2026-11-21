@@ -124,7 +124,7 @@ function cardRefundIdempotencyKey(req: Request): string {
 export const refundCardHandler = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
-    const { amount, reason, note, expectedLatestRefundId } = req.body
+    const { amount, reason, note, expectedLatestRefundId, destino } = req.body
     const idempotencyKey = cardRefundIdempotencyKey(req)
     const data = await refundCardOnlineOrder({
       venueId,
@@ -135,6 +135,7 @@ export const refundCardHandler = async (req: Request, res: Response, next: NextF
       idempotencyKey,
       note: note ?? null,
       expectedLatestRefundId,
+      destino: destino ?? 'CARD',
     })
     return res.json({ success: true, data })
   } catch (e) {

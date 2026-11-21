@@ -90,7 +90,7 @@ export class OnlineOrderCardReconcilerJob {
         result.refunds = await this.dependencies.sweepRefunds(now, this.readEntry)
       } catch (error) {
         logger.error('Online-order card refund sweep failed', { error })
-        result.refunds = { scanned: 0, advanced: 0, alerted: 0, errors: 1 }
+        result.refunds = { scanned: 0, advanced: 0, alerted: 0, errors: 1, closed: 0 }
       }
       return result
     } finally {

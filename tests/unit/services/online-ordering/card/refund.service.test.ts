@@ -42,7 +42,9 @@ import {
   resolveReversedCardRefund,
   NEVER_AGAIN,
 } from '@/services/online-ordering/card/refund.service'
-import { sweepCardRefunds } from '@/services/online-ordering/card/refund-reconciler.service'
+import { cerrarDevueltosPendientes, sweepCardRefunds } from '@/services/online-ordering/card/refund-reconciler.service'
+import { cerrarComoDevueltoEnTx } from '@/services/online-ordering/card/devuelto'
+import { operationHash } from '@/utils/operationHash'
 
 const D = (v: string) => new Prisma.Decimal(v)
 const NOW = new Date('2026-10-29T18:00:00.000Z')
@@ -203,7 +205,16 @@ const stateOf = (status: string, o: Partial<{ refundId: string; amountCents: num
 })
 const created = (status: 'PENDING' | 'SUCCEEDED' | 'FAILED', refundId = 're_1') => ({ refundId, amount: 25_000, status })
 const pedir = (
-  o: Partial<{ amount: string; key: string; note: string | null; reason: string; orderId: string; expected: string | null }> = {},
+  o: Partial<{
+    amount: string
+    key: string
+    note: string | null
+    reason: string
+    orderId: string
+    expected: string | null
+    destino: 'CARD' | 'STORE_CREDIT'
+    efectoEsperado: { cierraComoDevuelto: boolean }
+  }> = {},
 ) =>
   refundCardOnlineOrder({
     venueId: 'v1',
@@ -215,6 +226,8 @@ const pedir = (
     note: o.note === undefined ? null : o.note,
     // Sin decir otra cosa, el operador vio la lista al día.
     expectedLatestRefundId: o.expected === undefined ? (masNuevas(rows())[0]?.id ?? null) : o.expected,
+    ...(o.destino ? { destino: o.destino } : {}),
+    ...(o.efectoEsperado ? { efectoEsperado: o.efectoEsperado } : {}),
   })
 
 // Sólo el reloj es falso (`new Date()` del servicio = NOW); los temporizadores siguen reales.
@@ -793,5 +806,338 @@ describe('handleStripeRefundEvent', () => {
     prismaMock.onlineOrderCharge.findUnique.mockResolvedValueOnce(null)
     await handleStripeRefundEvent(event({ id: 're_dep', payment_intent: 'pi_dep', metadata: { type: 'reservation_deposit_refund' } }))
     expect((prismaMock as any).moneyAnomaly.createMany).not.toHaveBeenCalled()
+  })
+})
+
+// ── D661 (Task 5): la llave y el destino ────────────────────────────────────────────────────────────────────────────────────────
+describe('D661 (Task 5): el destino entra a la huella sólo si es saldo a favor', () => {
+  it('un reintento de una fila escrita por el código base (CARD, sin destino en la huella) devuelve su resultado, no 409', async () => {
+    // La huella que escribía el código de antes: importe + motivo + nota, sin destino.
+    const previa = seed({
+      key: 'llave-del-codigo-base',
+      status: 'RECORDED',
+      stripeRefundId: 're_base',
+      refundPaymentId: 'pay-refund-base',
+      stampReversedAt: NOW,
+      requestHash: operationHash({ amountCents: 25_000, reason: 'CANCELLED_ORDER', note: null }),
+    })
+    for (const destino of [undefined, 'CARD'] as const) {
+      await expect(pedir({ key: 'llave-del-codigo-base', ...(destino ? { destino } : {}) })).resolves.toMatchObject({
+        cardRefundId: previa.id,
+        refundId: 'pay-refund-base',
+        replay: true,
+      })
+    }
+    expect(store.size).toBe(1)
+    expect(refund).not.toHaveBeenCalled()
+  })
+
+  it('misma llave con STORE_CREDIT → 409', async () => {
+    const primera = await pedir()
+    await expect(pedir({ destino: 'STORE_CREDIT' })).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_REUSED' })
+    expect(store.size).toBe(1)
+    expect(get(primera.cardRefundId).status).toBe('RECORDED')
+    expect(refund).toHaveBeenCalledTimes(1)
+  })
+
+  it('STORE_CREDIT con una llave nueva: 4xx «no disponible», nunca se trata como tarjeta (ni fila ni Stripe)', async () => {
+    await expect(pedir({ destino: 'STORE_CREDIT', key: 'llave-saldo-nueva' })).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'REFUND_DESTINATION_NOT_AVAILABLE',
+      message: expect.stringContaining('saldo a favor'),
+    })
+    expect(store.size).toBe(0)
+    expect(refund).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+// ── D661 (Task 5): «Cancelar y devolver» a la tarjeta en «Nadie»: 100 %, reserva antes de Stripe y cierre «Devuelto» ────────
+describe('D661 (Task 5): devolver a la tarjeta un pedido de «Nadie»', () => {
+  type Pedido = Row
+  const PEDIDO: Pedido = {
+    id: 'oo1',
+    orderId: 'ord1',
+    paymentMode: 'CARD_ONLINE',
+    requiresAcceptance: false,
+    status: 'ACCEPTED',
+    refundRequestedAt: null,
+    refundedAt: null,
+    completedAt: null,
+    printClaimedAt: null,
+    printedAt: null,
+    order: { orderNumber: 'W-1' },
+  }
+  let pedido: Pedido
+  /** El doble de la tabla, tomado UNA vez (antes de envolverlo para registrar en qué transacción escribe). */
+  const updateManyDeLaTabla = cardRefund.updateMany.getMockImplementation()!
+  /** Qué transacción hizo cada escritura (0 = ninguna): el retiro de la reserva va en la MISMA que el estado terminal (r5 #4). */
+  let tx = 0
+  let txAbierta = 0
+  const escrituras: Array<{ que: string; tx: number; arg: any }> = []
+  /** El pedido, en memoria: contesta el CAS como Postgres (estado, marcas y modo en el `where`). */
+  const cumple = (p: Pedido, where: Record<string, any>): boolean =>
+    Object.entries(where).every(([k, v]) => {
+      if (['orderId', 'venueId', 'charge'].includes(k)) return true // un solo pedido; la fila de devolución anotada la da la prueba
+      if (k === 'OR') return (v as Record<string, any>[]).some(sub => cumple(p, sub))
+      if (v && typeof v === 'object' && !(v instanceof Date)) {
+        if ('in' in v) return v.in.includes(p[k])
+        if ('not' in v) return p[k] !== v.not
+        if ('lt' in v) return p[k] != null && p[k] < v.lt
+      }
+      if (v === null) return p[k] == null
+      return p[k] === v
+    })
+
+  beforeEach(() => {
+    pedido = { ...PEDIDO }
+    tx = 0
+    txAbierta = 0
+    escrituras.length = 0
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => {
+      txAbierta = ++tx
+      try {
+        return await fn(prismaMock)
+      } finally {
+        txAbierta = 0
+      }
+    })
+    prismaMock.onlineOrder.findFirst.mockImplementation((async () => ({ ...pedido, charge: CHARGE })) as any)
+    prismaMock.onlineOrder.updateMany.mockImplementation((async (a: any) => {
+      escrituras.push({ que: 'onlineOrder', tx: txAbierta, arg: a })
+      if (!cumple(pedido, a.where)) return { count: 0 }
+      Object.assign(pedido, a.data)
+      return { count: 1 }
+    }) as any)
+    prismaMock.order.updateMany.mockImplementation((async (a: any) => {
+      escrituras.push({ que: 'order', tx: txAbierta, arg: a })
+      return { count: 1 }
+    }) as any)
+    prismaMock.activityLog.create.mockImplementation((async (a: any) => {
+      escrituras.push({ que: 'activityLog', tx: txAbierta, arg: a })
+      return { id: 'al1' }
+    }) as any)
+    prismaMock.onlineOrderCharge.findUnique.mockImplementation((async () => ({
+      ...CHARGE,
+      onlineOrder: { orderId: 'ord1', requiresAcceptance: pedido.requiresAcceptance },
+    })) as any)
+    cardRefund.updateMany.mockImplementation(async (a: any) => {
+      escrituras.push({ que: 'cardRefund', tx: txAbierta, arg: a })
+      return updateManyDeLaTabla(a)
+    })
+  })
+  // La tabla de devoluciones vuelve a su doble sin registro.
+  afterAll(() => cardRefund.updateMany.mockImplementation(updateManyDeLaTabla))
+  const cierres = () => escrituras.filter(e => e.que === 'activityLog' && e.arg.data.action === 'ONLINE_ORDER_CLOSED_AS_REFUNDED')
+
+  it('«Nadie»: parcial → 400 FULL_REFUND_ONLY; «Mi equipo» parcial sigue', async () => {
+    await expect(pedir({ amount: '125.00' })).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'FULL_REFUND_ONLY',
+      message: expect.stringContaining('$250.00'),
+    })
+    expect(store.size).toBe(0)
+    expect(refund).not.toHaveBeenCalled()
+    expect(pedido.refundRequestedAt).toBeNull()
+
+    // «Mi equipo»: la parcial pasa como hoy, sin reserva ni cierre.
+    pedido = { ...PEDIDO, requiresAcceptance: true }
+    await expect(pedir({ amount: '125.00', key: 'llave-mi-equipo' })).resolves.toMatchObject({ status: 'RECORDED' })
+    expect(pedido).toMatchObject({ status: 'ACCEPTED', refundRequestedAt: null, refundedAt: null })
+    expect(escrituras.filter(e => e.que === 'onlineOrder')).toHaveLength(0)
+    expect(cierres()).toHaveLength(0)
+  })
+
+  it('reserva antes de Stripe; con la reserva, entregar → 409 (la reserva va bajo el candado, en la transacción de la fila)', async () => {
+    let reservadaAlLlamarAStripe: unknown = 'no se llamó'
+    refund.mockImplementation(async () => {
+      reservadaAlLlamarAStripe = pedido.refundRequestedAt
+      return created('PENDING')
+    })
+    const r = await pedir()
+    expect(r).toMatchObject({ status: 'PENDING', cardRefundStatus: 'PENDING' })
+    expect(reservadaAlLlamarAStripe).toEqual(NOW)
+    const reserva = escrituras.find(e => e.que === 'onlineOrder' && e.arg.data.refundRequestedAt)!
+    expect(reserva.arg).toEqual({
+      where: {
+        id: 'oo1',
+        requiresAcceptance: false,
+        paymentMode: 'CARD_ONLINE',
+        status: { in: ['ACCEPTED', 'READY'] },
+        refundRequestedAt: null,
+        refundedAt: null,
+        // Ruling 9: el reclamo de papel no toma el candado de la orden; el CAS repite «sin papel en vuelo».
+        OR: [{ printClaimedAt: null }, { printedAt: { not: null } }, { printClaimedAt: { lt: at(-90_000) } }],
+      },
+      data: { refundRequestedAt: NOW },
+    })
+    // Bajo el candado de la orden y en la MISMA transacción que la fila.
+    expect(reserva.tx).toBeGreaterThan(0)
+    expect(cardRefund.create.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0])
+    expect((prismaMock.$queryRaw as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0],
+    )
+    // Mientras Stripe no devuelve, sigue «Devolviendo…» (no se cierra).
+    expect(pedido).toMatchObject({ status: 'ACCEPTED', refundRequestedAt: NOW, refundedAt: null })
+    expect(cierres()).toHaveLength(0)
+  })
+
+  it('RECORDED → pedido COMPLETED con refundedAt, la cocina pendiente se limpia y la bitácora del cierre queda una vez (en su transacción)', async () => {
+    const r = await pedir()
+    expect(r).toMatchObject({ status: 'RECORDED' })
+    expect(pedido).toMatchObject({ status: 'COMPLETED', completedAt: NOW, refundedAt: NOW, refundRequestedAt: NOW })
+    const cierre = escrituras.find(e => e.que === 'onlineOrder' && e.arg.data.status === 'COMPLETED')!
+    expect(cierre.arg.where).toMatchObject({
+      id: 'oo1',
+      requiresAcceptance: false,
+      paymentMode: 'CARD_ONLINE',
+      status: { in: ['ACCEPTED', 'READY'] },
+      refundRequestedAt: { not: null },
+      refundedAt: null,
+    })
+    expect(escrituras).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          que: 'order',
+          tx: cierre.tx,
+          arg: { where: { id: 'ord1', venueId: 'v1' }, data: { kitchenPendingAt: null } },
+        }),
+      ]),
+    )
+    expect(cierres()).toHaveLength(1)
+    expect(cierres()[0]).toMatchObject({
+      tx: cierre.tx,
+      arg: { data: { venueId: 'v1', entity: 'OnlineOrder', entityId: 'oo1', staffId: 'staff1' } },
+    })
+
+    // Otra pasada (o el barrido) no lo vuelve a cerrar ni repite la bitácora.
+    await advanceCardRefund(r.cardRefundId, at(HOUR))
+    expect(cierres()).toHaveLength(1)
+  })
+
+  it('cerrarComoDevueltoEnTx es idempotente: la segunda vez no escribe nada', async () => {
+    pedido = { ...PEDIDO, refundRequestedAt: NOW }
+    await expect(cerrarComoDevueltoEnTx(prismaMock as any, { venueId: 'v1', orderId: 'ord1', now: NOW })).resolves.toMatchObject({
+      cerrado: true,
+    })
+    await expect(cerrarComoDevueltoEnTx(prismaMock as any, { venueId: 'v1', orderId: 'ord1', now: at(MIN) })).resolves.toEqual({
+      cerrado: false,
+    })
+    expect(pedido.refundedAt).toEqual(NOW)
+    expect(cierres()).toHaveLength(1)
+    // Sin reserva un pedido entregable NO se cierra (nunca «Devuelto» sin que una devolución lo haya reservado).
+    pedido = { ...PEDIDO }
+    await expect(cerrarComoDevueltoEnTx(prismaMock as any, { venueId: 'v1', orderId: 'ord1', now: NOW })).resolves.toEqual({
+      cerrado: false,
+    })
+    expect(pedido.status).toBe('ACCEPTED')
+  })
+
+  it('devolver un pedido ya entregado: queda COMPLETED con refundedAt, sin reserva', async () => {
+    const ENTREGADO = new Date('2026-10-29T17:00:00.000Z')
+    pedido = { ...PEDIDO, status: 'COMPLETED', completedAt: ENTREGADO }
+    await expect(pedir()).resolves.toMatchObject({ status: 'RECORDED' })
+    expect(pedido).toMatchObject({ status: 'COMPLETED', completedAt: ENTREGADO, refundRequestedAt: null, refundedAt: NOW })
+    expect(escrituras.find(e => e.que === 'onlineOrder' && e.arg.data.refundRequestedAt)).toBeUndefined()
+    expect(cierres()).toHaveLength(1)
+  })
+
+  it.each(['FAILED', 'CANCELED'] as const)(
+    'FAILED → se quita la reserva, vuelve a entregable, con aviso (Stripe dice %s); el estado terminal y el retiro, en UNA transacción',
+    async desenlace => {
+      refund.mockResolvedValue(created('PENDING'))
+      const r = await pedir()
+      expect(pedido.refundRequestedAt).toEqual(NOW)
+      getRefund.mockResolvedValue(stateOf(desenlace, { failureReason: 'declined' }))
+      await expect(advanceCardRefund(r.cardRefundId, at(MIN))).resolves.toBe(desenlace)
+
+      expect(pedido).toMatchObject({ status: 'ACCEPTED', refundRequestedAt: null, refundedAt: null })
+      const terminal = escrituras.find(e => e.que === 'cardRefund' && e.arg.data.status === desenlace)!
+      const retiro = escrituras.find(
+        e => e.que === 'onlineOrder' && 'refundRequestedAt' in e.arg.data && e.arg.data.refundRequestedAt === null,
+      )!
+      expect(terminal.tx).toBeGreaterThan(0)
+      expect(retiro.tx).toBe(terminal.tx)
+      expect(retiro.arg.where).toMatchObject({
+        orderId: 'ord1',
+        venueId: 'v1',
+        requiresAcceptance: false,
+        status: { in: ['ACCEPTED', 'READY'] },
+        refundRequestedAt: { not: null },
+        refundedAt: null,
+      })
+      // Cocina retoma: la marca vuelve a quedar escrita en la misma transacción.
+      expect(escrituras).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            que: 'order',
+            tx: terminal.tx,
+            arg: { where: { id: 'ord1', venueId: 'v1' }, data: { kitchenPendingAt: at(MIN) } },
+          }),
+        ]),
+      )
+      expect(sendVenueNotification).toHaveBeenCalledWith(
+        'v1',
+        expect.objectContaining({ message: expect.stringContaining('W-1'), entityId: r.cardRefundId }),
+        expect.any(Array),
+      )
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'ONLINE_ORDER_CARD_REFUND_FAILED', entityId: r.cardRefundId }),
+      )
+      expect(cierres()).toHaveLength(0)
+    },
+  )
+
+  it('Ruling 9: con un reclamo de papel en vuelo no se reserva (409 PRINT_IN_FLIGHT); vencido o ya impreso, sí', async () => {
+    pedido = { ...PEDIDO, printClaimedAt: at(-30_000) }
+    await expect(pedir()).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PRINT_IN_FLIGHT',
+      message: 'Se está imprimiendo la comanda; intenta en un momento',
+    })
+    expect(store.size).toBe(0)
+    expect(pedido.refundRequestedAt).toBeNull()
+    expect(refund).not.toHaveBeenCalled()
+
+    for (const [i, papel] of [{ printClaimedAt: at(-91_000) }, { printClaimedAt: at(-30_000), printedAt: at(-10_000) }].entries()) {
+      store.clear()
+      pedido = { ...PEDIDO, ...papel }
+      await expect(pedir({ key: `llave-papel-${i}`, expected: null })).resolves.toMatchObject({ status: 'RECORDED' })
+    }
+  })
+
+  it('MCP: el efecto esperado se revalida bajo el candado; si cambió, 409 y nada escrito', async () => {
+    // La vista previa dijo «también lo cierra como Devuelto», pero ya se entregó.
+    pedido = { ...PEDIDO, status: 'COMPLETED', completedAt: NOW }
+    await expect(pedir({ efectoEsperado: { cierraComoDevuelto: true } })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'REFUND_EFFECT_CHANGED',
+      message: expect.stringContaining('vista previa nueva'),
+    })
+    // Y al revés: la vista previa no lo cerraba y ahora sí está por entregar.
+    pedido = { ...PEDIDO }
+    await expect(pedir({ efectoEsperado: { cierraComoDevuelto: false } })).rejects.toMatchObject({ code: 'REFUND_EFFECT_CHANGED' })
+    expect(store.size).toBe(0)
+    expect(refund).not.toHaveBeenCalled()
+    expect(pedido.refundRequestedAt).toBeNull()
+    // Igual que lo visto: pasa.
+    await expect(pedir({ efectoEsperado: { cierraComoDevuelto: true } })).resolves.toMatchObject({ status: 'RECORDED' })
+    expect(pedido.status).toBe('COMPLETED')
+  })
+
+  it('el barrido cierra lo que quedó anotado sin cerrar (RECORDED, REVERSED o RESOLVED) y no toca otra cosa', async () => {
+    pedido = { ...PEDIDO, refundRequestedAt: NOW }
+    const pendientes = jest.fn(async () => [{ venueId: 'v1', staffId: 'staff1', charge: { onlineOrder: { orderId: 'ord1' } } }])
+    cardRefund.findMany.mockImplementationOnce(pendientes as any)
+    await expect(cerrarDevueltosPendientes({ venueId: 'v1' }, at(MIN), readEntry)).resolves.toBe(1)
+    expect(pedido).toMatchObject({ status: 'COMPLETED', refundedAt: at(MIN) })
+    const consulta = (pendientes.mock.calls[0] as any[])[0]
+    expect(consulta.where.venueId).toBe('v1')
+    expect(consulta.where.status).toEqual({ in: ['RECORDED', 'REVERSED', 'RESOLVED'] })
+    expect(consulta.take).toBe(50)
+    // Lo mismo dentro del recorrido de cada minuto (sin sucursal).
+    cardRefund.findMany.mockImplementationOnce(async () => []) // las filas por revisar
+    cardRefund.findMany.mockImplementationOnce(async () => []) // las por cerrar
+    await expect(sweepCardRefunds(at(2 * MIN), readEntry)).resolves.toMatchObject({ closed: 0 })
   })
 })

@@ -12,11 +12,18 @@
  * (`RECORDED` → Stripe dice failed/canceled) se anota en `OnlineOrderCardRefundReversal` (sólo agregar) y el negocio lo resuelve
  * pagándole al cliente por otro medio (`resolveReversedCardRefund`). `advanceCardRefund` es el ÚNICO paso que habla con Stripe y
  * nunca corre con una transacción abierta (r4 #5). Siempre la cuenta Stripe de la foto del cargo (`chargeMerchant`).
+ *
+ * D661 (Task 5) — en «Nadie» (`requiresAcceptance === false`) se devuelve el 100 % o nada (`FULL_REFUND_ONLY`): bajo el candado de la
+ * orden, ANTES de hablar con Stripe, la devolución reserva el pedido por entregar (`refundRequestedAt`: ya no se entrega, no lo marca
+ * el cierre del día, no se arma comanda ni se reclama papel ni se marca «Listo»). Anotada, el pedido se cierra «Devuelto»
+ * (`cerrarComoDevueltoEnTx`); si el proceso muere antes, el barrido de cierres lo hace. Si Stripe no devuelve, el desenlace y el retiro
+ * de la reserva de ESE intento van en una sola transacción y la cocina retoma. «Mi equipo» sigue igual: parciales, sin reserva ni cierre.
  */
 import {
   OnlineOrderCardRefundStatus as R,
   OnlineOrderChargeStatus,
   OnlineOrderPaymentMode,
+  OnlineOrderStatus,
   PaymentType,
   Prisma,
   type OnlineOrderCardRefund,
@@ -34,6 +41,9 @@ import type { RefundState, VerifiedWebhookEvent } from '@/services/payments/prov
 import { postPayOutInTx } from '@/services/shared/cashDrawerPosting'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { reverseStampForOrder } from '@/services/wallet/stampLedger.service'
+import { PRINT_CLAIM_TTL_MS } from '../constants'
+import { emitOnlineOrderUpdated } from '../traySocket'
+import { DEVOLUCION_ANOTADA, ENTREGABLE, cerrarComoDevueltoEnTx } from './devuelto'
 import { chargeMerchant, isForeignStripeEvent } from './merchant'
 
 /** Los motivos que el panel puede escoger (el de las apps de reparto no aplica aquí). */
@@ -43,7 +53,7 @@ const NO_LEDGER_YET: R[] = [R.REQUESTED, R.SENDING, R.PENDING, R.SUCCEEDED]
 /** Lo que el recorrido vuelve a mirar. */
 export const SWEPT_CARD_REFUND_STATUSES: R[] = [...NO_LEDGER_YET, R.RECORDED]
 /** Ya con renglón: su comisión devuelta ya la contó Stripe. */
-const WITH_LEDGER: R[] = [R.RECORDED, R.REVERSED, R.RESOLVED]
+const WITH_LEDGER: R[] = DEVOLUCION_ANOTADA
 
 const MIN = 60_000
 const HOUR = 60 * MIN
@@ -96,38 +106,157 @@ type Cur = { row: Row; alerted: boolean }
 
 const load = (id: string) => prisma.onlineOrderCardRefund.findUnique({ where: { id } })
 
-/** El cargo de la fila con su pedido (la foto del comercio va en el cargo). */
+/** El cargo de la fila con su pedido (la foto del comercio va en el cargo) y si el pedido es de «Nadie» (D661). */
 async function chargeOf(row: Row) {
   const charge = await prisma.onlineOrderCharge.findUnique({
     where: { id: row.chargeId },
-    include: { onlineOrder: { select: { orderId: true } } },
+    include: { onlineOrder: { select: { orderId: true, requiresAcceptance: true } } },
   })
   if (!charge?.onlineOrder || !charge.paymentIntentId) throw new Error(`cargo ${row.chargeId} sin pedido o sin PaymentIntent`)
-  return { charge, orderId: charge.onlineOrder.orderId, paymentIntentId: charge.paymentIntentId, merchant: chargeMerchant(charge) }
+  return {
+    charge,
+    orderId: charge.onlineOrder.orderId,
+    nadie: charge.onlineOrder.requiresAcceptance === false,
+    paymentIntentId: charge.paymentIntentId,
+    merchant: chargeMerchant(charge),
+  }
 }
 
-/** CAS al estado siguiente; deja la bitácora de los desenlaces sin renglón. Relee la fila; `true` si ESTE llamador ganó el CAS. */
-async function moveTo(cur: Cur, to: R, data: Prisma.OnlineOrderCardRefundUpdateManyMutationInput = {}): Promise<boolean> {
+/**
+ * CAS al estado siguiente. Relee la fila; `true` si ESTE llamador ganó el CAS. Los desenlaces sin renglón (`FAILED`/`CANCELED`) van
+ * por `terminarSinDevolver` (con `now`: la hora en que la cocina retoma).
+ */
+async function moveTo(
+  cur: Cur,
+  to: R,
+  data: Prisma.OnlineOrderCardRefundUpdateManyMutationInput = {},
+  now: Date = new Date(),
+): Promise<boolean> {
+  if (to === R.FAILED || to === R.CANCELED) return terminarSinDevolver(cur, to, data, now)
   const from = cur.row.status
   const won = await prisma.onlineOrderCardRefund.updateMany({ where: { id: cur.row.id, status: from }, data: { ...data, status: to } })
-  if (won.count === 1 && (to === R.FAILED || to === R.CANCELED)) {
-    logger.warn('⚠️ [OnlineOrderCardRefund] Stripe no devolvió: ningún renglón', { cardRefundId: cur.row.id, status: to })
-    void logAction({
-      staffId: cur.row.staffId,
-      venueId: cur.row.venueId,
-      action: 'ONLINE_ORDER_CARD_REFUND_FAILED',
-      entity: 'OnlineOrderCardRefund',
-      entityId: cur.row.id,
-      data: {
-        status: to,
-        amount: pesos(cur.row.amountCents),
-        stripeRefundId: data.stripeRefundId ?? cur.row.stripeRefundId,
-        why: data.lastError,
-      },
-    })
-  }
   cur.row = (await load(cur.row.id))!
   return won.count === 1
+}
+
+/**
+ * Stripe no devolvió (`FAILED`/`CANCELED`, sólo con su evidencia). D661 (Task 5, r5 #4): el desenlace y, en «Nadie», el retiro de la
+ * reserva de ESTE intento van bajo el candado de la orden y en la MISMA transacción: si el proceso muere después, el pedido no se queda
+ * «Devolviendo…» para siempre. Con la reserva retirada vuelve a ser entregable y la cocina retoma. Fuera de la transacción: bitácora y,
+ * si había reserva, aviso al negocio.
+ */
+async function terminarSinDevolver(
+  cur: Cur,
+  to: R,
+  data: Prisma.OnlineOrderCardRefundUpdateManyMutationInput,
+  now: Date,
+): Promise<boolean> {
+  const { orderId } = await chargeOf(cur.row)
+  const row = cur.row
+  const out = await prisma.$transaction(async tx => {
+    if (!(await lockExistingOrderForPayment(tx, { venueId: row.venueId, orderId }))) {
+      throw new Error(`la orden ${orderId} ya no es de este negocio`)
+    }
+    const cas = await tx.onlineOrderCardRefund.updateMany({ where: { id: row.id, status: row.status }, data: { ...data, status: to } })
+    if (cas.count !== 1) return { won: false as const }
+    const retirada = await retirarReservaEnTx(tx, { venueId: row.venueId, orderId, chargeId: row.chargeId, cardRefundId: row.id, now })
+    return { won: true as const, retirada }
+  }, ORDER_LOCK_WAIT_BUDGET)
+  cur.row = (await load(row.id))!
+  if (!out.won) return false
+  logger.warn('⚠️ [OnlineOrderCardRefund] Stripe no devolvió: ningún renglón', { cardRefundId: row.id, status: to })
+  void logAction({
+    staffId: row.staffId,
+    venueId: row.venueId,
+    action: 'ONLINE_ORDER_CARD_REFUND_FAILED',
+    entity: 'OnlineOrderCardRefund',
+    entityId: row.id,
+    data: {
+      status: to,
+      amount: pesos(row.amountCents),
+      stripeRefundId: data.stripeRefundId ?? row.stripeRefundId,
+      why: data.lastError,
+      ...(out.retirada ? { reservaRetirada: true } : {}),
+    },
+  })
+  if (out.retirada) {
+    emitOnlineOrderUpdated({
+      venueId: row.venueId,
+      orderId,
+      orderNumber: out.retirada.orderNumber,
+      onlineStatus: out.retirada.status,
+      now,
+    })
+    void sendVenueNotification(
+      row.venueId,
+      {
+        type: 'PAYMENT_FAILED',
+        title: 'No se pudo devolver un pedido a la tarjeta',
+        message: `El banco no aceptó la devolución de $${pesos(row.amountCents)} del pedido ${out.retirada.orderNumber}: no se devolvió nada. El pedido vuelve a «Por entregar»; si la clienta no lo quiere, devuélvelo otra vez.`,
+        entityType: 'OnlineOrderCardRefund',
+        entityId: row.id,
+        priority: 'HIGH',
+        metadata: { orderId, cardRefundId: row.id },
+      },
+      ['OWNER', 'ADMIN', 'MANAGER'],
+    ).catch(error =>
+      logger.error('[OnlineOrderCardRefund] no se pudo avisar al negocio', { cardRefundId: row.id, error: errorText(error) }),
+    )
+  }
+  return true
+}
+
+/**
+ * En la transacción del desenlace: quita la reserva si es de ESTE intento (una sola devolución en curso por cargo: si otra del cargo
+ * sigue viva o ya quedó anotada, la reserva no es suya). Vuelve a dejar escrita la marca de cocina (`kitchenPendingAt`): mientras la
+ * reserva vivió no se armó comanda nueva y el barrido de cocina pudo rendirse (r6 #3); el armado sólo agrega lo que falte.
+ */
+async function retirarReservaEnTx(
+  tx: Prisma.TransactionClient,
+  i: { venueId: string; orderId: string; chargeId: string; cardRefundId: string; now: Date },
+): Promise<{ orderNumber: string; status: OnlineOrderStatus } | null> {
+  const pedido = await tx.onlineOrder.findFirst({
+    where: { orderId: i.orderId, venueId: i.venueId },
+    select: { id: true, status: true, requiresAcceptance: true, refundRequestedAt: true, order: { select: { orderNumber: true } } },
+  })
+  if (pedido?.requiresAcceptance !== false || !pedido.refundRequestedAt) return null
+  const otra = await tx.onlineOrderCardRefund.findFirst({
+    where: { chargeId: i.chargeId, id: { not: i.cardRefundId }, status: { in: [...NO_LEDGER_YET, ...WITH_LEDGER] } },
+    select: { id: true },
+  })
+  if (otra) return null
+  const retirada = await tx.onlineOrder.updateMany({
+    where: {
+      id: pedido.id,
+      orderId: i.orderId,
+      venueId: i.venueId,
+      requiresAcceptance: false,
+      status: { in: ENTREGABLE },
+      refundRequestedAt: { not: null },
+      refundedAt: null,
+    },
+    data: { refundRequestedAt: null },
+  })
+  if (retirada.count !== 1) return null
+  await tx.order.updateMany({ where: { id: i.orderId, venueId: i.venueId }, data: { kitchenPendingAt: i.now } })
+  return { orderNumber: pedido.order.orderNumber, status: pedido.status }
+}
+
+/**
+ * El cierre «Devuelto» en su propia transacción (con el presupuesto del candado de la orden) y, ya confirmado, el aviso a la bandeja.
+ * `true` si ESTA llamada lo cerró. Lo usan la devolución al anotarse y el barrido de cierres.
+ */
+export async function cerrarComoDevuelto(i: { venueId: string; orderId: string; now: Date; staffId: string | null }): Promise<boolean> {
+  const cierre = await prisma.$transaction(tx => cerrarComoDevueltoEnTx(tx, i), ORDER_LOCK_WAIT_BUDGET)
+  if (!cierre.cerrado) return false
+  emitOnlineOrderUpdated({
+    venueId: i.venueId,
+    orderId: i.orderId,
+    orderNumber: cierre.orderNumber,
+    onlineStatus: OnlineOrderStatus.COMPLETED,
+    now: i.now,
+  })
+  return true
 }
 
 /** La fila no cambió de estado: se mueve su próxima revisión (así una que no cambia no tapa a las de atrás). */
@@ -207,13 +336,13 @@ async function callStripeRefund(cur: Cur, now: Date): Promise<void> {
   } catch (error) {
     // Stripe rechazó la solicitud (p. ej. un cobro en disputa): la devolución no existe; nada se movió.
     if (stripeRejected(error)) {
-      await moveTo(cur, R.FAILED, { lastError: errorText(error) })
+      await moveTo(cur, R.FAILED, { lastError: errorText(error) }, now)
       return
     }
     throw error // respuesta perdida: queda SENDING (desconocido) y se busca por metadata
   }
   const to = STATUS_OF[result.status]
-  await moveTo(cur, to, { stripeRefundId: result.refundId, lastError: null, ...afterStripe(to, cur.row, now) })
+  await moveTo(cur, to, { stripeRefundId: result.refundId, lastError: null, ...afterStripe(to, cur.row, now) }, now)
 }
 
 /** `SENDING` sin id = desconocido: se busca en Stripe por `metadata.cardRefundId`; si no aparece, sigue SENDING (nunca FAILED por tiempo). */
@@ -222,7 +351,7 @@ async function findSent(cur: Cur, now: Date): Promise<void> {
   const found = (await getProvider(merchant).listRefunds(merchant, paymentIntentId)).find(r => r.metadata?.cardRefundId === cur.row.id)
   if (found) {
     const to = STATUS_OF[found.status]
-    await moveTo(cur, to, { stripeRefundId: found.refundId, lastError: null, ...afterStripe(to, cur.row, now) })
+    await moveTo(cur, to, { stripeRefundId: found.refundId, lastError: null, ...afterStripe(to, cur.row, now) }, now)
     return
   }
   // Ruling r1: Stripe confirmó (todas las páginas) que no la tiene y el último envío ya tiene más de 5 min → se re-envía con la
@@ -253,7 +382,7 @@ async function poll(cur: Cur, now: Date): Promise<void> {
   const state = await getProvider(merchant).getRefund(merchant, cur.row.stripeRefundId!)
   if (state.status === 'PENDING') return touch(cur, nextPendingCheck(cur.row.createdAt, now))
   const to = STATUS_OF[state.status]
-  await moveTo(cur, to, { lastError: state.failureReason, ...afterStripe(to, cur.row, now) })
+  await moveTo(cur, to, { lastError: state.failureReason, ...afterStripe(to, cur.row, now) }, now)
 }
 
 /**
@@ -263,7 +392,7 @@ async function poll(cur: Cur, now: Date): Promise<void> {
  * muere antes del CAS, la siguiente pasada recupera el MISMO renglón.
  */
 async function record(cur: Cur, now: Date): Promise<void> {
-  const { orderId, paymentIntentId, merchant } = await chargeOf(cur.row)
+  const { orderId, nadie, paymentIntentId, merchant } = await chargeOf(cur.row)
   if (cur.row.feeRefundedCents == null) {
     const total = await getProvider(merchant).getApplicationFeeRefundedCents(merchant, paymentIntentId)
     const prior = await prisma.onlineOrderCardRefund.aggregate({
@@ -328,6 +457,17 @@ async function record(cur: Cur, now: Date): Promise<void> {
         reason: cur.row.reason,
       },
     })
+    // D661 (Task 5): anotada, el pedido de «Nadie» se cierra «Devuelto». Si esto falla o el proceso muere aquí, el barrido de cierres
+    // lo cierra; mientras, la reserva impide entregarlo y que el cierre del día lo marque. Nunca tumba lo ya anotado.
+    if (nadie) {
+      await cerrarComoDevuelto({ venueId: cur.row.venueId, orderId, now, staffId: cur.row.staffId }).catch(error =>
+        logger.warn('⚠️ [OnlineOrderCardRefund] el pedido no se cerró «Devuelto»; el barrido lo cierra', {
+          cardRefundId: cur.row.id,
+          orderId,
+          error: errorText(error),
+        }),
+      )
+    }
   }
 }
 
@@ -560,7 +700,14 @@ export async function advanceCardRefundForSweep(id: string, now: Date) {
   return advance(id, now)
 }
 
+/** Ruling 9: un reclamo de papel vigente (sin confirmar y de menos de 90 s): la comanda puede estar saliendo. */
+const papelEnVuelo = (p: { printClaimedAt: Date | null; printedAt: Date | null }, now: Date) =>
+  p.printClaimedAt != null && p.printedAt == null && p.printClaimedAt.getTime() >= now.getTime() - PRINT_CLAIM_TTL_MS
+const papelEnVueloError = () => new ConflictError('Se está imprimiendo la comanda; intenta en un momento', 'PRINT_IN_FLIGHT')
+
 export type CardRefundOutcome = 'RECORDED' | 'PENDING' | 'FAILED' | 'UNKNOWN'
+/** D661: a dónde va el dinero. `CARD` (por omisión) a la tarjeta; `STORE_CREDIT`, saldo a favor (Task 6). */
+export type CardRefundDestino = 'CARD' | 'STORE_CREDIT'
 const OUTCOME_OF: Record<R, CardRefundOutcome> = {
   REQUESTED: 'UNKNOWN',
   SENDING: 'UNKNOWN',
@@ -579,6 +726,11 @@ const OUTCOME_OF: Record<R, CardRefundOutcome> = {
  * importe cabe en lo que queda por devolver del cobro de Stripe según el cálculo de siempre (cuenta todo REFUND del libro, también
  * un «Cambio» con saldo a favor) menos lo reservado por las filas sin renglón (ruling 2); 4) la fila `REQUESTED`. Commit y DESPUÉS
  * avanza (r4 #5). Si avanzar truena, la fila queda para el recorrido y se contesta `UNKNOWN`.
+ *
+ * D661 (Task 5): el destino entra a la huella SÓLO si es `STORE_CREDIT` (la repetición de una fila escrita antes de D661 sigue siendo
+ * repetición); `STORE_CREDIT` todavía no está disponible (4xx, nunca se trata como tarjeta). En «Nadie»: 100 % (`FULL_REFUND_ONLY`), el
+ * efecto que vio el MCP se revalida (`REFUND_EFFECT_CHANGED`) y, si el pedido está por entregar, se reserva aquí mismo — con el papel
+ * de la comanda saliendo no (`PRINT_IN_FLIGHT`, Ruling 9).
  */
 export async function refundCardOnlineOrder(i: {
   venueId: string
@@ -590,6 +742,10 @@ export async function refundCardOnlineOrder(i: {
   note?: string | null
   /** La última devolución que vio quien decide (`null`: ninguna). Se congela al ver la lista; nunca se relee para mandarla. */
   expectedLatestRefundId: string | null
+  /** D661: `CARD` por omisión. */
+  destino?: CardRefundDestino
+  /** D661 (MCP): lo que dijo la vista previa (el pedido se cierra «Devuelto»); se revalida bajo el candado. */
+  efectoEsperado?: { cierraComoDevuelto: boolean }
 }): Promise<{
   status: CardRefundOutcome
   cardRefundStatus: R
@@ -607,7 +763,8 @@ export async function refundCardOnlineOrder(i: {
   }
   const amountCents = toStripeAmount(amount)
   const note = i.note?.trim() || null
-  const requestHash = operationHash({ amountCents, reason: i.reason, note })
+  const destino: CardRefundDestino = i.destino ?? 'CARD'
+  const requestHash = operationHash({ amountCents, reason: i.reason, note, ...(destino === 'STORE_CREDIT' ? { destino } : {}) })
 
   const decided = await prisma.$transaction(async tx => {
     if (!(await lockExistingOrderForPayment(tx, { venueId: i.venueId, orderId: i.orderId }))) {
@@ -615,10 +772,19 @@ export async function refundCardOnlineOrder(i: {
     }
     const online = await tx.onlineOrder.findFirst({
       where: { orderId: i.orderId, venueId: i.venueId },
-      select: { paymentMode: true, charge: true },
+      select: {
+        id: true,
+        paymentMode: true,
+        requiresAcceptance: true,
+        status: true,
+        printClaimedAt: true,
+        printedAt: true,
+        order: { select: { orderNumber: true } },
+        charge: true,
+      },
     })
     const charge = online?.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE ? online.charge : null
-    if (!charge) throw new BadRequestError('Este pedido no se pagó con tarjeta en línea.', 'NOT_A_CARD_ONLINE_ORDER')
+    if (!online || !charge) throw new BadRequestError('Este pedido no se pagó con tarjeta en línea.', 'NOT_A_CARD_ONLINE_ORDER')
 
     const previa = await tx.onlineOrderCardRefund.findUnique({
       where: { chargeId_key: { chargeId: charge.id, key: i.idempotencyKey } },
@@ -627,7 +793,14 @@ export async function refundCardOnlineOrder(i: {
       if (previa.requestHash !== requestHash) {
         throw new ConflictError('La llave de idempotencia ya pertenece a otra devolución', 'IDEMPOTENCY_KEY_REUSED')
       }
-      return { id: previa.id, replay: true }
+      return { id: previa.id, replay: true, reservado: null }
+    }
+    // D661 (Task 5): devolver a saldo a favor llega con la Task 6; mientras, nunca se trata como tarjeta.
+    if (destino === 'STORE_CREDIT') {
+      throw new BadRequestError(
+        'Devolver a saldo a favor todavía no está disponible. No se aplicó nada.',
+        'REFUND_DESTINATION_NOT_AVAILABLE',
+      )
     }
     // La protección contra devolver dos veces (Codex panel r4): dos solicitudes con la misma vista no pueden pasar las dos, sin
     // importar el orden, la demora, las pestañas o las personas. Cuenta toda fila, también FAILED: el mismo orden que `listCardRefunds`.
@@ -664,6 +837,51 @@ export async function refundCardOnlineOrder(i: {
         'CARD_REFUND_EXCEEDS_REMAINING',
       )
     }
+    // D661 (Task 5): en «Nadie» la clienta recibe siempre el 100 %: lo que queda por devolver del cobro, completo.
+    const nadie = online.requiresAcceptance === false
+    if (nadie && amountCents < disponible) {
+      throw new BadRequestError(`Este pedido se devuelve completo: $${pesos(disponible)}. No se aplicó nada.`, 'FULL_REFUND_ONLY')
+    }
+    // Se reserva (y, anotada, se cierra «Devuelto» desde la reserva) el que todavía está por entregar.
+    const reserva = nadie && ENTREGABLE.includes(online.status)
+    if (i.efectoEsperado && i.efectoEsperado.cierraComoDevuelto !== reserva) {
+      throw new ConflictError(
+        'El pedido cambió desde la vista previa (se entregó, se cerró o ya no se puede entregar). Pide una vista previa nueva. No se aplicó nada.',
+        'REFUND_EFFECT_CHANGED',
+      )
+    }
+    const reservadaEn = new Date()
+    if (reserva) {
+      // Ruling 9: con un reclamo de papel en vuelo no se reserva (la comanda puede estar saliendo ahora).
+      if (papelEnVuelo(online, reservadaEn)) throw papelEnVueloError()
+      // La reserva ANTES de mover dinero, bajo este candado (el que también toma «Entregado»: su CAS no repite las marcas). El
+      // reclamo de papel y el cierre del día NO toman el candado: el CAS repite sus condiciones y cada uno repite las suyas
+      // (`refundRequestedAt: null`), así que de los dos gana uno solo.
+      const reservada = await tx.onlineOrder.updateMany({
+        where: {
+          id: online.id,
+          requiresAcceptance: false,
+          paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
+          status: { in: ENTREGABLE },
+          refundRequestedAt: null,
+          refundedAt: null,
+          OR: [
+            { printClaimedAt: null },
+            { printedAt: { not: null } },
+            { printClaimedAt: { lt: new Date(reservadaEn.getTime() - PRINT_CLAIM_TTL_MS) } },
+          ],
+        },
+        data: { refundRequestedAt: reservadaEn },
+      })
+      if (reservada.count !== 1) {
+        const ahora = await tx.onlineOrder.findFirst({ where: { id: online.id }, select: { printClaimedAt: true, printedAt: true } })
+        if (ahora && papelEnVuelo(ahora, reservadaEn)) throw papelEnVueloError()
+        throw new ConflictError(
+          'El pedido cambió mientras se reservaba la devolución (por ejemplo, lo cerró el fin del día). Vuelve a intentarlo; no se aplicó nada.',
+          'ORDER_STATE_CHANGED',
+        )
+      }
+    }
     const row = await tx.onlineOrderCardRefund.create({
       data: {
         venueId: i.venueId,
@@ -677,8 +895,23 @@ export async function refundCardOnlineOrder(i: {
       },
       select: { id: true },
     })
-    return { id: row.id, replay: false }
+    return {
+      id: row.id,
+      replay: false,
+      reservado: reserva ? { orderNumber: online.order.orderNumber, status: online.status, at: reservadaEn } : null,
+    }
   }, ORDER_LOCK_WAIT_BUDGET)
+
+  // D661: «Devolviendo…» se ve en la bandeja (después del commit).
+  if (decided.reservado) {
+    emitOnlineOrderUpdated({
+      venueId: i.venueId,
+      orderId: i.orderId,
+      orderNumber: decided.reservado.orderNumber,
+      onlineStatus: decided.reservado.status,
+      now: decided.reservado.at,
+    })
+  }
 
   try {
     await advanceCardRefund(decided.id)
