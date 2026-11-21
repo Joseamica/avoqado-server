@@ -101,6 +101,19 @@ export function transitionPreparation(
   return finishPriority({ ...before, [source]: before[source] - quantity, [destination]: before[destination] + quantity })
 }
 
+/**
+ * QA del conjunto (Flautas, 20-nov-2026): la caja y la cocina liberan el MISMO tiempo (o dos pantallas marcan listo lo mismo) casi a
+ * la vez. La segunda llega con la revisión vieja, pero lo que pide YA es cierto: no queda nada en el estado de origen y al menos
+ * `quantity` unidades ya pasaron por el de destino (sin contar lo cancelado). Entonces se responde éxito sin cambiar nada, como el
+ * resto del mercado con un reintento idempotente. Cualquier otro cambio en medio (una cancelación, una liberación parcial) sigue siendo
+ * conflicto. Sólo «Liberar» y «Marcar listo».
+ */
+export function accionYaCumplida(action: PreparationAction, c: PreparationCounts, quantity: number): boolean {
+  if (action === 'RELEASE') return c.HELD === 0 && c.PENDING + c.PREPARING + c.READY + c.DELIVERED >= quantity
+  if (action === 'READY') return c.PREPARING === 0 && c.READY + c.DELIVERED >= quantity
+  return false
+}
+
 /** A product is deliverable only when EVERY routed station has that many ready units. */
 export function deliverableQuantity(stations: PreparationCounts[]): number {
   return stations.length ? Math.min(...stations.map(c => c.READY)) : 0

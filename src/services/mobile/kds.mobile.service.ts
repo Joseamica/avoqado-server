@@ -649,6 +649,10 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
       course: item.serviceCourse?.label ?? null,
       preparation: item.preparation ?? null,
       preparationRevision: item.preparationRevision ?? 0,
+      // D15: anulado en la caja («ANULADO · ») o retirado por la plataforma («RETIRADO · »). La etiqueta ya viene en el nombre
+      // para las pantallas viejas; la nueva lo tacha. Sólo si lo hay: un renglón vivo sigue sin campos nuevos (contrato de las
+      // apps viejas, `kdsCapacidades.test.ts`); el reparto lo vuelve a poner con sus capacidades.
+      ...(item.removedAt ? { removedAt: item.removedAt instanceof Date ? item.removedAt.toISOString() : item.removedAt } : {}),
     })),
     /**
      * 🔴 ¿Falta que alguien acepte este pedido en la app de delivery?

@@ -180,6 +180,22 @@ describe('list_kitchen_tickets (etapa 3)', () => {
     expect(r.comandas[1]).toEqual(expect.objectContaining({ mesa: null, tiempos: [] }))
   })
 
+  it('D15: dice cuántos renglones de la comanda están anulados (siguen en la pantalla, marcados)', async () => {
+    mockListKds.mockResolvedValue([
+      {
+        id: 'k1',
+        orderNumber: 'A1',
+        status: 'NEW',
+        orderType: 'DINE_IN',
+        items: [{ productName: 'Taco' }, { productName: 'ANULADO · Agua', removedAt: '2026-11-20T18:00:00.000Z' }],
+        createdAt: '2026-11-20T17:59:00.000Z',
+      },
+    ])
+    mockCountKds.mockResolvedValue(1)
+    const r = parse(await cliente('list_kitchen_tickets', { venueId: 'v1' }))
+    expect(r.comandas[0]).toEqual(expect.objectContaining({ renglones: 2, renglonesAnulados: 1 }))
+  })
+
   it('un venue fuera de alcance se rechaza', async () => {
     await expect(cliente('list_kitchen_tickets', { venueId: 'ajeno' })).rejects.toThrow('ScopeError')
   })

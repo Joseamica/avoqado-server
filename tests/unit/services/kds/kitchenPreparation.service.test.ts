@@ -1,7 +1,7 @@
 import { prismaMock } from '../../../__helpers__/setup'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { applyKitchenPreparation, listKitchenPreparation, preparationCapabilities } from '@/services/kds/kitchenPreparation.service'
-import { initialPreparation } from '@/services/kds/kitchenPreparation'
+import { accionYaCumplida, initialPreparation } from '@/services/kds/kitchenPreparation'
 
 jest.mock('@/services/access/basePlan.service', () => ({ venueHasFeatureAccess: jest.fn() }))
 const line = {
@@ -37,12 +37,44 @@ describe('persisted kitchen preparation', () => {
     expect(result.items[0]).toMatchObject({ id: 'line-a', preparationRevision: 1, preparation: { HELD: 1, PENDING: 1 } })
     expect(prismaMock.kdsOrderItem.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ id: 'line-a', preparationRevision: 0, kdsOrder: { venueId: 'venue-a', orderId: 'order-a' } }),
+        // D15: la escritura también exige que la fila no esté anulada (Codex r2 #1).
+        where: expect.objectContaining({
+          id: 'line-a',
+          preparationRevision: 0,
+          removedAt: null,
+          kdsOrder: { venueId: 'venue-a', orderId: 'order-a' },
+        }),
       }),
     )
     expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ venueId: 'venue-a', staffId: 'staff-a', action: 'KITCHEN_RELEASE' }) }),
     )
+  })
+  it('D15: lo anulado en la caja no regresa a la cocina (ni «Reabrir» ni ninguna acción), y no se reintenta', async () => {
+    prismaMock.kdsOrderItem.findMany.mockResolvedValue([
+      {
+        ...line,
+        removedAt: new Date(),
+        productName: 'ANULADO · Agua',
+        preparation: { ...initialPreparation(2, 'STANDARD'), HELD: 0, CANCELLED: 2 },
+      },
+    ])
+    const reabrir = { action: 'REOPEN', reason: 'Se equivocó', items: [{ id: 'line-a', expectedRevision: 0, quantity: 1 }] }
+    await expect(applyKitchenPreparation('venue-a', 'order-a', reabrir, 'staff-a')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PREPARATION_ITEM_REMOVED',
+    })
+    expect(prismaMock.kdsOrderItem.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+  })
+  it('Codex r5 #5: si la base falla al leer la bitácora de una liberación repetida, el error sube (la cola lo reintenta), no es conflicto', async () => {
+    prismaMock.kdsOrderItem.findMany.mockResolvedValue([
+      { ...line, preparation: { ...initialPreparation(2, 'STANDARD'), HELD: 0, PENDING: 2 }, preparationRevision: 1 },
+    ])
+    prismaMock.activityLog.findFirst.mockRejectedValue(new Error('Connection terminated unexpectedly'))
+    const otraVez = { action: 'RELEASE', items: [{ id: 'line-a', expectedRevision: 0, quantity: 2 }] }
+    await expect(applyKitchenPreparation('venue-a', 'order-a', otraVez, 'staff-a')).rejects.toThrow('Connection terminated unexpectedly')
+    expect(prismaMock.kdsOrderItem.updateMany).not.toHaveBeenCalled()
   })
   it('checks Pro before entering a mutation transaction', async () => {
     ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
@@ -357,5 +389,31 @@ describe('persisted kitchen preparation', () => {
       code: 'PREPARATION_CONFLICT',
     })
     expect(prismaMock.kdsOrderItem.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('accionYaCumplida (QA del conjunto: dos aparatos piden lo mismo casi a la vez)', () => {
+  const c = (o: Partial<Record<'HELD' | 'PENDING' | 'PREPARING' | 'READY' | 'DELIVERED' | 'CANCELLED', number>>) => ({
+    HELD: 0,
+    PENDING: 0,
+    PREPARING: 0,
+    READY: 0,
+    DELIVERED: 0,
+    CANCELLED: 0,
+    ...o,
+  })
+  it('liberar: ya no queda nada retenido y lo pedido ya salió (aunque la cocina ya lo empezara)', () => {
+    expect(accionYaCumplida('RELEASE', c({ PENDING: 2 }), 2)).toBe(true)
+    expect(accionYaCumplida('RELEASE', c({ PREPARING: 1, READY: 1 }), 2)).toBe(true)
+  })
+  it('liberar: con algo retenido (liberación parcial) o cancelado en medio sigue siendo conflicto', () => {
+    expect(accionYaCumplida('RELEASE', c({ HELD: 1, PENDING: 1 }), 1)).toBe(false)
+    expect(accionYaCumplida('RELEASE', c({ CANCELLED: 2 }), 2)).toBe(false)
+  })
+  it('marcar listo: nada preparando y lo pedido ya está listo o entregado; otras acciones nunca', () => {
+    expect(accionYaCumplida('READY', c({ READY: 1, DELIVERED: 1 }), 2)).toBe(true)
+    expect(accionYaCumplida('READY', c({ PREPARING: 1, READY: 1 }), 1)).toBe(false)
+    expect(accionYaCumplida('START', c({ PREPARING: 2 }), 2)).toBe(false)
+    expect(accionYaCumplida('CANCEL', c({ CANCELLED: 2 }), 2)).toBe(false)
   })
 })
