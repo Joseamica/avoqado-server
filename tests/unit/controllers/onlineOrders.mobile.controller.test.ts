@@ -262,7 +262,7 @@ describe('onlineOrders.mobile.controller', () => {
         code: 'ORDER_CLOSED_NOT_DELIVERED',
         status: 'COMPLETED',
         ...marcas,
-        error: 'Este pedido se cerró sin entregarse (se devolvió o no lo recogieron). No lo entregues.',
+        error: 'Este pedido ya se cerró (se devolvió o no lo recogieron). No lo entregues.',
       })
     }
   })
@@ -278,7 +278,7 @@ describe('onlineOrders.mobile.controller', () => {
       code: 'ORDER_CLOSED_NOT_DELIVERED',
       status: 'COMPLETED',
       refundedAt: HORA,
-      error: 'Este pedido se cerró sin entregarse (se devolvió o no lo recogieron). No lo entregues.',
+      error: 'Este pedido ya se cerró (se devolvió o no lo recogieron). No lo entregues.',
     })
   })
 

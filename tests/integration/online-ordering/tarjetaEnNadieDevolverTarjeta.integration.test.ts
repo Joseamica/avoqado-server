@@ -959,7 +959,7 @@ describe('D661 · tarea 5: «Cancelar y devolver» a la tarjeta en «Nadie» (in
       status: 'COMPLETED',
       refundRequestedAt: refundRequestedAt!.toISOString(),
       refundedAt: refundedAt!.toISOString(),
-      error: 'Este pedido se cerró sin entregarse (se devolvió o no lo recogieron). No lo entregues.',
+      error: 'Este pedido ya se cerró (se devolvió o no lo recogieron). No lo entregues.',
     })
     // Nada se escribió: sigue «Devuelto» con sus horas, sin bitácora de entrega.
     expect(await enLinea(p.orderId)).toMatchObject({ status: 'COMPLETED', refundRequestedAt, refundedAt, completedAt })

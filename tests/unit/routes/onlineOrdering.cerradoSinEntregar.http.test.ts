@@ -57,7 +57,7 @@ const PUERTAS = {
   TPV: '/t/venues/v1/online-orders/ord1',
   PANEL: '/d/venues/v1/online-ordering/orders/ord1',
 } as const
-const CERRADO_SIN_ENTREGAR = 'Este pedido se cerró sin entregarse (se devolvió o no lo recogieron). No lo entregues.'
+const CERRADO_SIN_ENTREGAR = 'Este pedido ya se cerró (se devolvió o no lo recogieron). No lo entregues.'
 const HORA = '2026-11-20T23:59:00.000Z'
 
 beforeEach(() => {

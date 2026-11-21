@@ -554,7 +554,7 @@ describe('D661 · tarea 4: entrega, cierre del día, «No lo recogió» y el seg
         code: 'ORDER_CLOSED_NOT_DELIVERED',
         status: 'COMPLETED',
         notPickedUpAt: notPickedUpAt!.toISOString(),
-        error: 'Este pedido se cerró sin entregarse (se devolvió o no lo recogieron). No lo entregues.',
+        error: 'Este pedido ya se cerró (se devolvió o no lo recogieron). No lo entregues.',
       })
     }
     // Nada cambió: sigue «No lo recogió» con la hora del corte, sin otra bitácora.

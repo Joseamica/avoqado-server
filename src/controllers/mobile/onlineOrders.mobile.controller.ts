@@ -32,8 +32,11 @@ const staffOf = (req: Request): string | null => (req as any).authContext?.userI
 /** M-10: con tope de largo; termina guardado en `printClaimedBy`. */
 const deviceOf = (req: Request): string => (req.header('x-device-id') ?? '').trim().slice(0, 100)
 
-/** D661 (Ruling 71): el texto del pedido que se cerró sin entregarse. */
-const CERRADO_SIN_ENTREGAR = 'Este pedido se cerró sin entregarse (se devolvió o no lo recogieron). No lo entregues.'
+/**
+ * D661 (Ruling 71, texto de la ronda codex-r3): el pedido ya se cerró («No lo recogió», «Devolviendo…» o «Devuelto»). Neutro a propósito:
+ * uno que una persona entregó y se devolvió después también llega aquí, y «se cerró sin entregarse» no sería exacto.
+ */
+const CERRADO_SIN_ENTREGAR = 'Este pedido ya se cerró (se devolvió o no lo recogieron). No lo entregues.'
 
 /** `accion`: lo que la caja pidió, para decir por qué no se aplicó («entregado» o, D661 Task 5, «listo»). */
 function reply(res: Response, r: TransitionResult, accion: 'entregado' | 'listo' = 'entregado') {
@@ -45,8 +48,8 @@ function reply(res: Response, r: TransitionResult, accion: 'entregado' | 'listo'
     case 'STALE': {
       // D661 (Task 4): al entregar o marcar «Listo», el estado real («No lo recogió», «Devolviendo…», «Devuelto») va en campos nuevos
       // opcionales. D661 (Ruling 71): un POS o una TPV viejos leen `ORDER_STATE_CHANGED` + COMPLETED en «Entregado» como el segundo
-      // toque (éxito); un COMPLETED con cualquiera de esas marcas se cerró sin entregarse y lleva su PROPIO código, con el estado y las
-      // marcas de siempre. Todo lo demás (un COMPLETED sin marcas incluido), el 409 de siempre.
+      // toque (éxito); un COMPLETED con cualquiera de esas marcas ya se cerró y lleva su PROPIO código, con el estado y las marcas de
+      // siempre. Todo lo demás (un COMPLETED sin marcas incluido), el 409 de siempre.
       const { outcome: _o, status, ...marcas } = r
       const cerradoSinEntregar =
         status === OnlineOrderStatus.COMPLETED && Boolean(marcas.notPickedUpAt || marcas.refundRequestedAt || marcas.refundedAt)
