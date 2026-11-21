@@ -961,11 +961,17 @@ export interface SobrePreparado {
  * clienta a la vez dejarían dos sobres) y su sobre vivo bloqueado. Va DESPUÉS del cobro y ANTES de cualquier reclamo de turno
  * (hallazgo 2: el gasto con saldo bloquea el sobre antes del turno, `order.mobile.service.ts:5589`). Un `preparado` sirve para el
  * `abonarSaldoAFavorEnTx` de la MISMA transacción.
+ * D661 (Ruling 75, ronda 2 de codex-r3): `bloquearFicha` (sólo quien va a exigir el mismo teléfono: la devolución de «Nadie») toma
+ * PRIMERO la fila de su ficha, con el MISMO candado con que «Mi cuenta» cambia el número: el orden de la parte 2 es `Customer` (8) →
+ * asesor del saldo y `GiftCard` (9), y el número se lee ya bajo él.
  */
 export async function prepararSobreDeSaldoAFavorEnTx(
   tx: TxConReintento,
-  p: { venueId: string; customerId: string },
+  p: { venueId: string; customerId: string; bloquearFicha?: boolean },
 ): Promise<SobrePreparado> {
+  if (p.bloquearFicha) {
+    await tx.$queryRaw`SELECT "id" FROM "Customer" WHERE "id" = ${p.customerId} AND "venueId" = ${p.venueId} FOR NO KEY UPDATE`
+  }
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${'saldo-a-favor:' + p.venueId + ':' + p.customerId}))::text`
   const cliente = await tx.customer.findFirst({
     where: { id: p.customerId, venueId: p.venueId },
@@ -1090,8 +1096,9 @@ export async function abonarSaldoAFavorEnTx(
       409,
     )
   // D661 (Ruling 75): el número de su ficha se relee bajo el MISMO candado de fila con que «Mi cuenta» lo cambia (`cambiarTelefonoEnTx`):
-  // un cambio que ganó mientras se preparaba ya se ve aquí, y uno que llega mientras se abona espera a que termine (y el abono queda en el
-  // número de ese momento). Sólo la devolución de «Nadie» (`exigirMismoTelefono`); el «Cambio» y el Reembolso del POS, como hoy.
+  // un cambio que ganó antes ya se ve aquí, y uno que llega mientras se abona espera a que termine (y el abono queda en el número de ese
+  // momento). Sólo la devolución de «Nadie» (`exigirMismoTelefono`); el «Cambio» y el Reembolso del POS, como hoy. Ronda 2 de codex-r3:
+  // esa devolución ya tomó la ficha al preparar (`bloquearFicha`, en su orden); aquí se vuelve a tomar (misma transacción: no espera).
   let telefonoDeHoy = s.telefonoCliente
   if (exigido !== undefined) {
     await tx.$queryRaw`SELECT "id" FROM "Customer" WHERE "id" = ${s.customerId} AND "venueId" = ${s.venueId} FOR NO KEY UPDATE`

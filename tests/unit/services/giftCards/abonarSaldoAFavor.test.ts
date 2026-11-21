@@ -59,10 +59,12 @@ function base(p: { sobreDeSaldo?: LockedGiftCard | null } = {}) {
     .mockResolvedValue(p.sobreDeSaldo ? ({ balance: p.sobreDeSaldo.balance, status: p.sobreDeSaldo.status } as any) : null)
 }
 
-const preparar = () => prepararSobreDeSaldoAFavorEnTx(prismaMock, { venueId: VENUE, customerId: CLIENTA })
+const preparar = (bloquearFicha = false) =>
+  prepararSobreDeSaldoAFavorEnTx(prismaMock, { venueId: VENUE, customerId: CLIENTA, ...(bloquearFicha ? { bloquearFicha } : {}) })
+/** Como la devolución de «Nadie» (ronda 2 de codex-r3): quien exige el mismo teléfono prepara con la ficha ya bloqueada. */
 const abonar = async (monto: number, over: Partial<Parameters<typeof abonarSaldoAFavorEnTx>[1]> = {}) =>
   abonarSaldoAFavorEnTx(prismaMock, {
-    preparado: await preparar(),
+    preparado: await preparar(over.exigirMismoTelefono !== undefined),
     monto: D(monto),
     staffId: 'cajera-1',
     origen: { orderId: 'order-1', refundPaymentId: 'ref-1' },
@@ -551,8 +553,17 @@ describe('abonarSaldoAFavorEnTx con exigirMismoTelefono (D661)', () => {
       ([s]) => textoDe(s).includes('FROM "Customer"') && textoDe(s).includes('FOR NO KEY UPDATE'),
     )
 
+  /** El orden de la primera llamada a `$queryRaw` cuyo SQL cumple `es` (Infinity si no hubo). */
+  const ordenDe = (es: (sql: string) => boolean) => {
+    const i = (prismaMock.$queryRaw.mock.calls as any[][]).findIndex(([s]) => es(textoDe(s)))
+    return i < 0 ? Infinity : prismaMock.$queryRaw.mock.invocationCallOrder[i]
+  }
+  const asesor = (sql: string) => sql.includes('pg_advisory_xact_lock')
+  /** El FOR UPDATE del sobre (`lockGiftCardsForUpdate`). */
+  const candadoDelSobre = (sql: string) => sql.includes('FROM "GiftCard"') && sql.includes('FOR UPDATE')
+
   it('D661 · Ruling 75: el abono toma la ficha con el MISMO candado que «Mi cuenta» y relee su número bajo él: si ya es otro (lo confirmó mientras se abonaba), 409 y nada escrito', async () => {
-    base()
+    base({ sobreDeSaldo: sobre({ recipientPhone: VERIFICADO }) })
     // Al preparar, su ficha tenía el número verificado (escrito distinto); bajo el candado, ya es otro: lo cambió en «Mi cuenta».
     prismaMock.customer.findFirst
       .mockResolvedValueOnce({ firstName: 'Ana', lastName: 'López', phone: '55 1111 2222' } as any)
@@ -561,9 +572,16 @@ describe('abonarSaldoAFavorEnTx con exigirMismoTelefono (D661)', () => {
     sinEscribir()
     const candado = candadoDeLaFicha()
     expect(candado).toBeGreaterThanOrEqual(0)
-    // El candado va ANTES de la relectura del número (la segunda lectura de la ficha, la de `abonar`).
+    // Ronda 2 de codex-r3: el orden de la parte 2 es `Customer` (8) → asesor del saldo y `GiftCard` (9): la ficha se toma ANTES que el
+    // asesor de la clienta y que el FOR UPDATE de su sobre (los toma `preparar`), y antes de leer su número.
+    const ficha = prismaMock.$queryRaw.mock.invocationCallOrder[candado]
+    expect(ordenDe(candadoDelSobre)).toBeLessThan(Infinity) // hubo sobre: su candado se tomó
+    expect(ficha).toBeLessThan(ordenDe(asesor))
+    expect(ordenDe(asesor)).toBeLessThan(ordenDe(candadoDelSobre))
+    expect(ficha).toBeLessThan(prismaMock.customer.findFirst.mock.invocationCallOrder[0])
+    // Y la relectura del número de `abonar` sigue bajo él (la segunda lectura de la ficha).
     expect(prismaMock.customer.findFirst).toHaveBeenCalledTimes(2)
-    expect(prismaMock.$queryRaw.mock.invocationCallOrder[candado]).toBeLessThan(prismaMock.customer.findFirst.mock.invocationCallOrder[1])
+    expect(ficha).toBeLessThan(prismaMock.customer.findFirst.mock.invocationCallOrder[1])
     expect(prismaMock.customer.findFirst.mock.calls[1][0]).toMatchObject({ where: { id: CLIENTA, venueId: VENUE } })
   })
 

@@ -288,6 +288,10 @@
       "clase": "EN_TX",
       "etiqueta": "operarSobreDeGerenteEnTx"
     },
+    "src/services/giftCards/giftCardLedger.ts#prepararSobreDeSaldoAFavorEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "prepararSobreDeSaldoAFavorEnTx"
+    },
     "src/services/giftCards/giftCardLedger.ts#revertirCanjeEnTx": {
       "clase": "EN_TX",
       "etiqueta": "revertirCanjeEnTx"

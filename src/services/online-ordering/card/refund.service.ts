@@ -1250,6 +1250,8 @@ async function devolverASaldoAFavor(s: Solicitud): Promise<CardRefundResult> {
         aSaldoAFavor: {
           tender,
           customerId: clienta.customerId,
+          // Ronda 2 de codex-r3 (Ruling 75): exige el mismo teléfono, así que la ficha se toma ANTES del sobre (Customer → saldo y GiftCard).
+          bloquearFicha: true,
           abonar: (t, refundPaymentId, preparado, renglon) =>
             abonarSaldoAFavorEnTx(t, {
               preparado,

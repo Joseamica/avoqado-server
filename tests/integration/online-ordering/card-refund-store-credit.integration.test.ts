@@ -616,16 +616,17 @@ describe('D661 · tarea 6: devolver a saldo a favor un pedido «Nadie» (integra
     })
   const numeroDe = async (customerId: string) => (await prisma.customer.findUniqueOrThrow({ where: { id: customerId } })).phone
 
-  it('D661 · Ruling 75: el abono ya leyó A y la clienta confirma B en «Mi cuenta» antes de que se escriba → 409 STORE_CREDIT_PHONE_MISMATCH y nada escrito; a su tarjeta, sí', async () => {
+  it('D661 · Ruling 75: la clienta confirma B en «Mi cuenta» justo antes de que el abono tome su ficha → el abono lee B bajo el candado → 409 STORE_CREDIT_PHONE_MISMATCH y nada escrito; a su tarjeta, sí', async () => {
     const a = telefono()
     const b = telefono()
     const ana = await clienta(a)
     const p = await cobrado(ana, a)
     const preparar = libreta.prepararSobreDeSaldoAFavorEnTx
     const pausa = jest.spyOn(libreta, 'prepararSobreDeSaldoAFavorEnTx').mockImplementationOnce(async (tx, args) => {
-      const preparado = await preparar(tx, args) // la devolución a saldo ya leyó su ficha: A
-      await confirmarNumero(ana, b) // otra transacción, con la devolución abierta: «Mi cuenta» confirma B
-      return preparado
+      // La devolución ya bloqueó pedido, cobro y cargo, y todavía no toma la ficha: otra transacción («Mi cuenta») confirma B. Ronda 2
+      // de codex-r3: desde que la ficha se toma al preparar, «ya leyó A y después llega B» no puede pasar (B espera; prueba de abajo).
+      await confirmarNumero(ana, b)
+      return preparar(tx, args)
     })
     try {
       await expect(devolver(p.orderId, 'STORE_CREDIT')).rejects.toMatchObject({ statusCode: 409, code: 'STORE_CREDIT_PHONE_MISMATCH' })
@@ -635,6 +636,36 @@ describe('D661 · tarea 6: devolver a saldo a favor un pedido «Nadie» (integra
     await nadaEscrito(p, ana)
     expect(await numeroDe(ana)).toBe(b)
     await expect(devolver(p.orderId, 'CARD')).resolves.toMatchObject({ status: 'RECORDED', cardRefundStatus: 'RECORDED' })
+  })
+
+  it('D661 · Ruling 75 (ronda 2 de codex-r3): la ficha se toma AL PREPARAR, antes del sobre: una confirmación de B que llega justo después espera a que el abono termine y el sobre nuevo nace en A', async () => {
+    const a = telefono()
+    const b = telefono()
+    const ana = await clienta(a)
+    const p = await cobrado(ana, a)
+    const preparar = libreta.prepararSobreDeSaldoAFavorEnTx
+    let confirmacion: Promise<void> | null = null
+    let confirmada = false
+    const pausa = jest.spyOn(libreta, 'prepararSobreDeSaldoAFavorEnTx').mockImplementationOnce(async (tx, args) => {
+      const preparado = await preparar(tx, args) // ya tomó la ficha (y el asesor del saldo); su sobre todavía no existe
+      confirmacion = confirmarNumero(ana, b).then(() => {
+        confirmada = true
+      })
+      await new Promise(r => setTimeout(r, 500))
+      // Mientras la devolución no termina, «Mi cuenta» espera la ficha (antes, sin sobre todavía, nada la detenía).
+      expect(confirmada).toBe(false)
+      return preparado
+    })
+    try {
+      await expect(devolver(p.orderId, 'STORE_CREDIT')).resolves.toMatchObject({ status: 'RECORDED', cardRefundStatus: 'RESOLVED' })
+    } finally {
+      pausa.mockRestore()
+    }
+    await confirmacion
+    expect(await numeroDe(ana)).toBe(b)
+    const sobres = await sobresDe(ana)
+    expect(sobres).toHaveLength(1)
+    expect(sobres[0]).toMatchObject({ status: 'ACTIVE', recipientPhone: a })
   })
 
   it('D661 · Ruling 75 (al revés): el abono toma la ficha primero → recarga al número de hoy (A) y la confirmación de B espera a que termine', async () => {
