@@ -257,57 +257,33 @@ describe('quoteId', () => {
   })
 })
 
-describe('Codex servidor r7 #1 · la reserva que otra caja ya cobró no se cotiza (el cliente pagaría dos veces)', () => {
-  /** Las cuentas de la base. Viva = ni CANCELLED ni DELETED: el predicado del índice `Order_reservationId_alive_key`. */
-  let cuentas: Array<{ venueId: string; reservationId: string; status: string; paymentStatus: string }>
-  beforeEach(() => {
-    cuentas = []
-    prismaMock.order.findFirst.mockImplementation(async (a: any) => {
-      const w = a?.where ?? {}
-      if (!w.reservationId) return null
-      const viva = cuentas.find(
-        c => c.reservationId === w.reservationId && c.venueId === w.venueId && !(w.status?.notIn ?? []).includes(c.status),
-      )
-      return viva ? { paymentStatus: viva.paymentStatus } : null
-    })
-  })
+describe('Codex servidor r8 · recorte R6: una reserva o clase nunca se cotiza para la máquina, esté como esté su cuenta', () => {
   /** La cajera inscribió a la persona en la clase y el producto ($187.50) sigue en el carrito de WINDOWS, ligado a su reserva. */
   const CLASE = venta({ items: [{ productId: 'prod-clase', quantity: 1 }], reservationId: 'res-1' })
 
-  it('🔴 recepción registró la llegada y cobró los $187.50 con tarjeta → YA_PAGADA, sin quoteId: la PC nunca manda el paycash', async () => {
-    cuentas.push({ venueId: VENUE, reservationId: 'res-1', status: 'COMPLETED', paymentStatus: 'PAID' })
+  it.each([
+    ['todavía sin cuenta (recepción podría abrirla y cobrarla después: r8)', null],
+    ['ya cobrada en otra caja (antes YA_PAGADA)', { paymentStatus: 'PAID' }],
+    ['con su cuenta abierta en recepción (antes RESERVA_CON_CUENTA)', { paymentStatus: 'PENDING' }],
+  ])('🔴 %s → RESERVA, sin quoteId y sin preguntar nada a la base', async (_caso, cuenta) => {
+    prismaMock.order.findFirst.mockResolvedValue(cuenta as never)
     const q = await cotizar(CLASE)
-    expect(q).toMatchObject({ cobrableEnMaquina: false, motivo: 'YA_PAGADA', quoteId: null, totalCents: null })
-    expect(prismaMock.order.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { venueId: VENUE, reservationId: 'res-1', status: { notIn: ['CANCELLED', 'DELETED'] } } }),
-    )
+    expect(q).toMatchObject({ cobrableEnMaquina: false, motivo: 'RESERVA', quoteId: null, expiresAt: null, totalCents: null })
+    expect(prismaMock.order.findFirst).not.toHaveBeenCalled()
     esperarSinEscrituras()
   })
 
-  it('🔴 con un abono de otra caja (cuenta PARCIAL) tampoco: YA_PAGADA', async () => {
-    cuentas.push({ venueId: VENUE, reservationId: 'res-1', status: 'CONFIRMED', paymentStatus: 'PARTIAL' })
-    expect(await cotizar(CLASE)).toMatchObject({ cobrableEnMaquina: false, motivo: 'YA_PAGADA', quoteId: null })
+  it('va antes que cualquier otra regla: una reserva con descuento o demasiado grande también dice RESERVA', async () => {
+    expect(await cotizar(venta({ ...CLASE, discount: 500 }))).toMatchObject({ motivo: 'RESERVA' })
+    const grande = { ...CLASE, note: 'x'.repeat(TOPE_DEL_CARRITO_DE_LA_MAQUINA) }
+    expect(await cotizar(grande, { carrito: grande })).toMatchObject({ motivo: 'RESERVA' })
   })
 
-  it('🔴 recepción le abrió su cuenta al registrar la llegada, sin cobrar todavía → RESERVA_CON_CUENTA: la venta de la máquina chocaría con el índice y el dinero quedaría como incidencia', async () => {
-    cuentas.push({ venueId: VENUE, reservationId: 'res-1', status: 'CONFIRMED', paymentStatus: 'PENDING' })
-    expect(await cotizar(CLASE)).toMatchObject({ cobrableEnMaquina: false, motivo: 'RESERVA_CON_CUENTA', quoteId: null })
-  })
-
-  it('una cuenta cancelada de la reserva no estorba (el índice tampoco la cuenta): se cotizan los $187.50', async () => {
-    cuentas.push({ venueId: VENUE, reservationId: 'res-1', status: 'CANCELLED', paymentStatus: 'PENDING' })
-    const q = await cotizar(CLASE)
-    expect(q).toMatchObject({ cobrableEnMaquina: true, totalCents: 18750, saleCents: 18750 })
-    expect(q.quoteId).toEqual(expect.any(String))
-  })
-
-  it('la reserva todavía sin cuenta se cotiza igual que hoy', async () => {
-    expect(await cotizar(CLASE)).toMatchObject({ cobrableEnMaquina: true, totalCents: 18750 })
-  })
-
-  it('sin reserva ni se pregunta', async () => {
-    await cotizar(CARRITO_REDONDO)
-    expect(prismaMock.order.findFirst).not.toHaveBeenCalled()
+  it('el mismo producto sin reserva se cotiza igual que hoy ($187.50)', async () => {
+    expect(await cotizar(venta({ items: [{ productId: 'prod-clase', quantity: 1 }] }))).toMatchObject({
+      cobrableEnMaquina: true,
+      totalCents: 18750,
+    })
   })
 })
 

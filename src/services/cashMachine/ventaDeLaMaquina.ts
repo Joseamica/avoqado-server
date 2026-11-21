@@ -71,9 +71,11 @@ export const RECIBIDO_ATASCADO_MS = 10 * 60_000
  *  · `VENTA_RECHAZADA`: la venta ya no se arma (un producto borrado, el personal…; R5#1);
  *  · `PREMIO_PENDIENTE`: el carrito trae un premio de sellos (R5#4);
  *  · `LLAVE_OCUPADA`: la llave del folio ya es de otra cuenta u operación: repetirla nunca lo resuelve (r3 #6);
- *  · `REPARTO_DESCUADRADO`: el adeudo congelado no es la venta más la propina (F4): el comprobante es legible, la venta no se arma.
+ *  · `REPARTO_DESCUADRADO`: el adeudo congelado no es la venta más la propina (F4): el comprobante es legible, la venta no se arma;
+ *  · `RESERVA`: el carrito está ligado a una reserva o clase (recorte R6 de la 1a, Codex servidor r8): recepción puede cobrarla a la vez.
  */
 export type MotivoSinRegistro =
+  | 'RESERVA'
   | 'DESCUENTO'
   | 'PC_REVOCADA'
   | 'SIN_SALDAR'
@@ -311,9 +313,13 @@ export function pedidoConDescuento(p: CreateOrderInput): boolean {
   )
 }
 
-/** Por qué un PAGADO con este pedido no se vuelve venta, con la MISMA regla en cotización y venta (Codex r2 #11). */
+/**
+ * Por qué un PAGADO con este pedido no se vuelve venta, con la MISMA regla en cotización y venta (Codex r2 #11). R6 (Codex servidor r8):
+ * una reserva o clase nunca es venta de la máquina en la 1a; si una PC vieja o sin red la cobró, el dinero queda como incidencia.
+ */
 export function motivoSinVentaDelPedido(p: CreateOrderInput | undefined): MotivoSinRegistro | undefined {
   if (!p) return 'SIN_CARRITO'
+  if (p.reservationId) return 'RESERVA'
   if (p.stampRewardId) return 'PREMIO_PENDIENTE'
   return pedidoConDescuento(p) ? 'DESCUENTO' : undefined
 }

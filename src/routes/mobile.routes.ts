@@ -3725,9 +3725,9 @@ router.delete(
  * POST /api/v1/mobile/venues/:venueId/cash-machine/quote — el total del carrito ANTES del `paycash`, con la lógica de `POST /orders`
  * y sin escribir nada (R4-2). Body: el mismo de `POST /orders`. 200 { quoteId, expiresAt, totalCents, saleCents, tipCents,
  * discountCents, renglones, cobrableEnMaquina, motivo? }. Sin guardias de cortesía ni de aprobación: un carrito con descuento contesta
- * `motivo: 'DESCUENTO'` (la fase 1a no lo cobra en la máquina; decisión a del founder, Codex r1 #9). Codex servidor r7: una reserva que
- * ya se cobró o ya tiene su cuenta en otra caja → `YA_PAGADA` / `RESERVA_CON_CUENTA`; un carrito de más de 512 KiB → `CARRITO_MUY_GRANDE`
- * (su cierre y su duda leen hasta 4 MiB, `config/cuerpoJson.ts`).
+ * `motivo: 'DESCUENTO'` (la fase 1a no lo cobra en la máquina; decisión a del founder, Codex r1 #9). Recorte R6 (Codex servidor r8): un
+ * carrito ligado a una reserva o clase → `RESERVA`, antes que nada; un carrito de más de 512 KiB → `CARRITO_MUY_GRANDE` (su cierre y su
+ * duda leen hasta 4 MiB, `config/cuerpoJson.ts`).
  */
 router.post(
   '/venues/:venueId/cash-machine/quote',
