@@ -59,12 +59,36 @@ describe('StripeConnectProvider con el SDK real: los límites por petición (D66
     expect(capturas(t.envios)).toHaveLength(3)
   })
 
+  it('C (Ruling 52): la captura de la caja (60 s y un reintento) sale a lo más dos veces, cada una con su límite de 60 s, y su relectura también', async () => {
+    const t = transporte('POST', 'ETIMEDOUT')
+    await expect(
+      adaptador(t.client).capture(merchant as never, CAPTURA, { timeoutMs: 60_000, maxNetworkRetries: 1 }),
+    ).rejects.toMatchObject({ type: 'StripeConnectionError' })
+    expect(t.envios).toEqual([
+      { method: 'POST', path: expect.stringContaining('/v1/payment_intents/pi_1/capture'), timeout: 60_000 },
+      { method: 'POST', path: expect.stringContaining('/v1/payment_intents/pi_1/capture'), timeout: 60_000 },
+      { method: 'GET', path: expect.stringContaining('/v1/payment_intents/pi_1'), timeout: 60_000 },
+    ])
+  })
+
   it('límite del SDK (no del adaptador): una conexión CERRADA en el primer envío se reenvía una vez aunque maxNetworkRetries sea 0', async () => {
     const t = transporte('POST', 'ECONNRESET')
     await expect(adaptador(t.client).capture(merchant as never, CAPTURA, { maxNetworkRetries: 0 })).rejects.toMatchObject({
       type: 'StripeConnectionError',
     })
     expect(capturas(t.envios)).toHaveLength(2)
+  })
+
+  it('B (Ruling 51): una liberación acotada cuyo envío se pierde sale una vez con su límite de 10 s, y la relectura con que se recupera también', async () => {
+    const t = transporte('POST', 'ETIMEDOUT')
+    const params = { paymentIntentId: 'pi_1', idempotencyKey: 'online-order-charge:ch1:release' }
+    await expect(
+      adaptador(t.client).voidAuthorization(merchant as never, params, { timeoutMs: 10_000, maxNetworkRetries: 0 }),
+    ).rejects.toMatchObject({ type: 'StripeConnectionError' })
+    expect(t.envios).toEqual([
+      { method: 'POST', path: expect.stringContaining('/v1/payment_intents/pi_1/cancel'), timeout: 10_000 },
+      { method: 'GET', path: expect.stringContaining('/v1/payment_intents/pi_1'), timeout: 10_000 },
+    ])
   })
 
   it('B (Ruling 42): una lectura acotada que se pierde sale una vez y el transporte recibe su límite de 10 s', async () => {

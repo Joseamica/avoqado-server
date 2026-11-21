@@ -12,7 +12,7 @@ import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getProvider } from '@/services/payments/provider-registry'
-import type { AuthorizationState } from '@/services/payments/providers/provider.interface'
+import type { AuthorizationState, ProviderRequestLimits } from '@/services/payments/providers/provider.interface'
 import { fromStripeAmount } from '@/services/payments/providers/money'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { CAPTURED_OUTSIDE } from '../constants'
@@ -30,7 +30,11 @@ const LIVE_ONLINE: OnlineOrderStatus[] = [
   OnlineOrderStatus.COMPLETED,
 ]
 
-export async function releaseCharge(chargeId: string): Promise<'RELEASED' | 'STUCK' | 'CAPTURED_OUTSIDE'> {
+/**
+ * D661 (B, Ruling 51): `limites` (sólo la visita temprana del conciliador) acota la cancelación y su relectura; si Stripe no contesta a
+ * tiempo, el cargo se queda `RELEASING` y la siguiente pasada lo reintenta sin límite con la MISMA clave.
+ */
+export async function releaseCharge(chargeId: string, limites?: ProviderRequestLimits): Promise<'RELEASED' | 'STUCK' | 'CAPTURED_OUTSIDE'> {
   try {
     const charge = await prisma.onlineOrderCharge.findUnique({
       where: { id: chargeId },
@@ -45,7 +49,7 @@ export async function releaseCharge(chargeId: string): Promise<'RELEASED' | 'STU
       ? `online-order:${charge.onlineOrder.orderId}:release`
       : `online-order-charge:${charge.id}:release`
     // r2 R1: si Stripe dice que ya está cobrada, el negocio la cobró a mano (este cargo nunca intentó cobrar: no está CAPTURING).
-    const state = await voidOrReadOutcome(charge, idempotencyKey)
+    const state = await voidOrReadOutcome(charge, idempotencyKey, limites)
     if (state.piStatus === 'succeeded') {
       await recordCapturedOutsideOnRelease(charge, state)
       return 'CAPTURED_OUTSIDE'
@@ -80,21 +84,27 @@ export async function releaseCharge(chargeId: string): Promise<'RELEASED' | 'STU
  * desenlace: `canceled` (soltada) o `succeeded` (ya estaba cobrada). Si Stripe no lo sabe decir, lanza: queda en duda y quien llama
  * repite. Quién cobró lo decide quien llama por el estado de SU cargo (D661 3C: un `CAPTURING` es nuestra captura, nunca una externa).
  */
-export async function voidOrReadOutcome(charge: OnlineOrderCharge, idempotencyKey: string): Promise<AuthorizationState> {
+export async function voidOrReadOutcome(
+  charge: OnlineOrderCharge,
+  idempotencyKey: string,
+  limites?: ProviderRequestLimits,
+): Promise<AuthorizationState> {
   if (!charge.paymentIntentId) throw new Error('cargo sin PaymentIntent')
   const merchant = chargeMerchant(charge)
   const provider = getProvider(merchant)
+  const params = { paymentIntentId: charge.paymentIntentId, idempotencyKey }
+  const ref = { paymentIntentId: charge.paymentIntentId }
   let state: AuthorizationState | null = null
   let failure: unknown = null
   try {
-    state = await provider.voidAuthorization(merchant, { paymentIntentId: charge.paymentIntentId, idempotencyKey })
+    state = await (limites ? provider.voidAuthorization(merchant, params, limites) : provider.voidAuthorization(merchant, params))
   } catch (error) {
     failure = error
   }
   if (state?.piStatus === 'canceled') return state
   let now: AuthorizationState | null = null
   try {
-    now = await provider.getAuthorization(merchant, { paymentIntentId: charge.paymentIntentId })
+    now = await (limites ? provider.getAuthorization(merchant, ref, limites) : provider.getAuthorization(merchant, ref))
   } catch {
     now = null // sin respuesta: queda en duda (el error original)
   }

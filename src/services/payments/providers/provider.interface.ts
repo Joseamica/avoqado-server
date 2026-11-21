@@ -173,9 +173,10 @@ export interface CaptureParams {
 }
 
 /**
- * D661 (ronda codex-r2): límites de UNA petición al proveedor; sin ellos, los de su cliente. En Stripe son las opciones por petición del
- * SDK (`timeout` por intento, en ms, y `maxNetworkRetries`). Los usan la visita temprana del conciliador (B, Ruling 42) y el reintento
- * de una captura de «Nadie» (C, Ruling 43).
+ * D661 (ronda codex-r2): límites de las peticiones de UNA llamada al proveedor (también su relectura de recuperación); sin ellos, los de
+ * su cliente. En Stripe son las opciones por petición del SDK (`timeout` por intento, en ms, y `maxNetworkRetries`). Los usan la visita
+ * temprana del conciliador (B, Rulings 42 y 51: lecturas y liberaciones), el reintento de una captura de «Nadie» (C, Ruling 43) y la
+ * captura de quien abre (C, Ruling 52).
  */
 export interface ProviderRequestLimits {
   timeoutMs?: number
@@ -205,7 +206,11 @@ export interface IEcommerceProvider {
     limits?: ProviderRequestLimits,
   ): Promise<AuthorizationState>
   capture(merchant: EcommerceMerchantWithProvider, params: CaptureParams, limits?: ProviderRequestLimits): Promise<AuthorizationState>
-  voidAuthorization(merchant: EcommerceMerchantWithProvider, params: VoidParams): Promise<AuthorizationState>
+  voidAuthorization(
+    merchant: EcommerceMerchantWithProvider,
+    params: VoidParams,
+    limits?: ProviderRequestLimits,
+  ): Promise<AuthorizationState>
   /** S5: vence una página de pago abierta (el comensal la abandonó). El error del proveedor sale tal cual. */
   expireAuthorizationCheckout(merchant: EcommerceMerchantWithProvider, checkoutSessionId: string): Promise<void>
 

@@ -52,12 +52,13 @@ class TotalDistintoDelAutorizado extends Error {
  * solo liberador); si Stripe falla, el cargo queda `RELEASING` y el conciliador lo retoma.
  * S11 (R4): con un motivo de negocio (`precio`), se guarda en la bitácora del cargo en la MISMA transacción del CAS: la liberación
  * (`releaseCharge`, que limpia `lastError`) y la conciliación no lo tocan.
+ * D661 (B, Ruling 51): `limites` (los de quien confirma: la visita temprana) acota también la liberación y su relectura.
  */
 async function releaseLate(
   charge: OnlineOrderCharge,
   auth: AuthorizationState,
   why: string,
-  precio?: PrecioCambiado,
+  { precio, limites }: { precio?: PrecioCambiado; limites?: ProviderRequestLimits } = {},
 ): Promise<ConfirmOutcome> {
   const won = await prisma.$transaction(async tx => {
     const cas = await tx.onlineOrderCharge.updateMany({
@@ -100,7 +101,7 @@ async function releaseLate(
   }
   // r2 R1: la misma liberación que los demás caminos (misma clave del cargo, su bitácora y, si ya la cobraron a mano en Stripe,
   // el registro del cobro con su anomalía). Si Stripe no contesta, el cargo queda RELEASING para el conciliador y aquí se lanza.
-  const r = await releaseCharge(charge.id)
+  const r = await (limites ? releaseCharge(charge.id, limites) : releaseCharge(charge.id))
   if (r === 'STUCK') throw new Error('No se pudo liberar la tarjeta apartada; el conciliador la retoma')
   return r === 'CAPTURED_OUTSIDE' ? 'CAPTURED_OUTSIDE' : 'RELEASED_LATE'
 }
@@ -182,10 +183,11 @@ async function cierreDelBorrador(charge: OnlineOrderCharge, request: CardDraftRe
 /**
  * Idempotente. `now` fija la hora sólo en las pruebas (3C: el conciliador ya no pasa la de su pasada); sin ella, la hora con que se
  * decide si el plazo de un apartado de «Nadie» ya pasó se lee DESPUÉS del candado de admisión.
- * D661 (B, Ruling 42): `lectura` acota la lectura de Stripe; sólo la pasa la visita temprana del conciliador. La clienta que regresa,
- * el aviso de Stripe y lo demás leen como siempre.
+ * D661 (B, Rulings 42 y 51): `limites` acota TODA llamada a Stripe de esta confirmación (la lectura y, si no se vuelve pedido, la
+ * liberación con su relectura); sólo la pasa la visita temprana del conciliador. La clienta que regresa, el aviso de Stripe y lo demás,
+ * como siempre.
  */
-export async function confirmCardAuthorization(chargeId: string, now?: Date, lectura?: ProviderRequestLimits): Promise<ConfirmOutcome> {
+export async function confirmCardAuthorization(chargeId: string, now?: Date, limites?: ProviderRequestLimits): Promise<ConfirmOutcome> {
   const reloj = () => now ?? new Date()
   const t = reloj() // la hora de esta confirmación, como siempre (la de «Mi equipo» y la bitácora del cargo)
   const charge = await prisma.onlineOrderCharge.findUnique({ where: { id: chargeId } })
@@ -198,12 +200,12 @@ export async function confirmCardAuthorization(chargeId: string, now?: Date, lec
   const merchant = chargeMerchant(charge)
   const provider = getProvider(merchant)
   const sesion = { checkoutSessionId: charge.checkoutSessionId }
-  const auth = await (lectura ? provider.getAuthorization(merchant, sesion, lectura) : provider.getAuthorization(merchant, sesion))
+  const auth = await (limites ? provider.getAuthorization(merchant, sesion, limites) : provider.getAuthorization(merchant, sesion))
   if (auth.piStatus === 'succeeded') return capturedOutside(charge, auth, t)
 
   if (auth.piStatus === 'requires_capture' && auth.paymentIntentId) {
     if (auth.amountCapturableCents !== toStripeAmount(new Prisma.Decimal(charge.amount))) {
-      return releaseLate(charge, auth, 'AMOUNT_MISMATCH')
+      return releaseLate(charge, auth, 'AMOUNT_MISMATCH', { limites })
     }
     const request = charge.request as unknown as CardDraftRequest
     // S11: un borrador de antes no trae clienta (C9) y nace como hoy; con ella, el pedido nace con su elección canjeada.
@@ -282,23 +284,24 @@ export async function confirmCardAuthorization(chargeId: string, now?: Date, lec
       )
     } catch (error) {
       // D661 (Ruling 10): nada se creó y el cargo sigue PENDING_AUTH; se libera como cualquier apartado que no se vuelve pedido.
-      if (error instanceof AutorizacionTardia) return releaseLate(charge, auth, 'NADIE_DEADLINE_PASSED')
+      if (error instanceof AutorizacionTardia) return releaseLate(charge, auth, 'NADIE_DEADLINE_PASSED', { limites })
       // La llave ya tiene cuenta (no debería: la guarda de llaves de la tarea 4). Nada se creó: se libera la tarjeta.
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        return releaseLate(charge, auth, 'EXTERNAL_ID_TAKEN')
+        return releaseLate(charge, auth, 'EXTERNAL_ID_TAKEN', { limites })
       }
       // S11 (R2', R4'): no nace el pedido; se libera con el motivo y el precio nuevo, durables para el seguimiento.
       if (error instanceof TotalDistintoDelAutorizado) {
         return releaseLate(charge, auth, 'PRICE_CHANGED', {
-          motivo: 'PRICE_CHANGED',
-          cual: null,
-          totalEstricto: error.total,
-          descartados: [],
+          precio: { motivo: 'PRICE_CHANGED', cual: null, totalEstricto: error.total, descartados: [] },
+          limites,
         })
       }
       if (customerId && error instanceof AppError && error.code === BENEFIT_UNAVAILABLE) {
         const cual = (error.details as { cual?: BeneficioElegido } | undefined)?.cual ?? null
-        return releaseLate(charge, auth, 'BENEFIT_GONE', await precioSinElBeneficio(charge, request, customerId, cual))
+        return releaseLate(charge, auth, 'BENEFIT_GONE', {
+          precio: await precioSinElBeneficio(charge, request, customerId, cual),
+          limites,
+        })
       }
       throw error
     }

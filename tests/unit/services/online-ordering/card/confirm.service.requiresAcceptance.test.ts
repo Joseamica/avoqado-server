@@ -203,4 +203,20 @@ describe('confirmar un borrador de tarjeta: el modo y el plazo son los del borra
     expect(await confirmCardAuthorization('ch1', NOW)).toBe('NOT_YET')
     expect(getAuthorization.mock.calls.at(-1)).toHaveLength(2)
   })
+
+  it('D661 · B (Ruling 51): la liberación de un apartado que no se vuelve pedido lleva el MISMO límite de quien lo pide; sin él, la de siempre', async () => {
+    const LIMITE = { timeoutMs: 10_000, maxNetworkRetries: 0 }
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(borrador(true) as any)
+    getAuthorization.mockResolvedValue({ ...autorizada(new Date(NOW.getTime() - MIN)), amountCapturableCents: 100 }) // otro monto
+    ;(releaseCharge as jest.Mock).mockClear()
+    expect(await confirmCardAuthorization('ch1', NOW, LIMITE)).toBe('RELEASED_LATE')
+    expect(releaseCharge).toHaveBeenLastCalledWith('ch1', LIMITE)
+    // Plazo vencido (lo descubre bajo el candado): igual.
+    getAuthorization.mockResolvedValue(autorizada(new Date(NOW.getTime() - 11 * MIN)))
+    expect(await confirmCardAuthorization('ch1', NOW, LIMITE)).toBe('RELEASED_LATE')
+    expect(releaseCharge).toHaveBeenLastCalledWith('ch1', LIMITE)
+    // El aviso de Stripe o la clienta que regresa: la liberación de siempre.
+    expect(await confirmCardAuthorization('ch1', NOW)).toBe('RELEASED_LATE')
+    expect((releaseCharge as jest.Mock).mock.calls.at(-1)).toEqual(['ch1'])
+  })
 })

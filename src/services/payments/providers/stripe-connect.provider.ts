@@ -31,9 +31,10 @@ import {
 import { fromStripeAmount, getStripeChargeBoundsCents } from './money'
 
 /**
- * D661 (ronda codex-r2): los límites de una petición, como opciones por petición del SDK de Stripe. Sin límites no agrega nada (la
- * petición de siempre). Ojo (stripe-node `RequestSender._shouldRetry`): con `maxNetworkRetries: 0` el SDK todavía reenvía UNA vez si
- * el primer envío encuentra la conexión cerrada (ECONNRESET/EPIPE: un socket viejo); `stripe-connect.requestLimits.test.ts` lo fija.
+ * D661 (ronda codex-r2): los límites de una llamada, como opciones por petición del SDK de Stripe, en CADA petición que hace la llamada
+ * (también la relectura con que se recupera). Sin límites no agrega nada (la petición de siempre). Ojo (stripe-node
+ * `RequestSender._shouldRetry`): con `maxNetworkRetries: 0` el SDK todavía reenvía UNA vez si el primer envío encuentra la conexión
+ * cerrada (ECONNRESET/EPIPE: un socket viejo); `stripe-connect.requestLimits.test.ts` lo fija.
  */
 const opcionesDeLimite = (limits?: ProviderRequestLimits): Stripe.RequestOptions => ({
   ...(limits?.timeoutMs != null ? { timeout: limits.timeoutMs } : {}),
@@ -503,14 +504,22 @@ export class StripeConnectProvider implements IEcommerceProvider {
       )
       return this.toAuthorizationState(pi, null)
     } catch (error) {
-      return this.recoverIfAlready('succeeded', connectAccountId, params.paymentIntentId, error, {
-        amountCents: params.amountCents,
-        applicationFeeCents: params.applicationFeeCents,
-      })
+      return this.recoverIfAlready(
+        'succeeded',
+        connectAccountId,
+        params.paymentIntentId,
+        error,
+        { amountCents: params.amountCents, applicationFeeCents: params.applicationFeeCents },
+        limits,
+      )
     }
   }
 
-  async voidAuthorization(merchant: EcommerceMerchantWithProvider, params: VoidParams): Promise<AuthorizationState> {
+  async voidAuthorization(
+    merchant: EcommerceMerchantWithProvider,
+    params: VoidParams,
+    limits?: ProviderRequestLimits,
+  ): Promise<AuthorizationState> {
     const connectAccountId = this.requireConnectAccountId(merchant)
 
     if (!params.idempotencyKey) {
@@ -521,11 +530,11 @@ export class StripeConnectProvider implements IEcommerceProvider {
       const pi = await this.stripe.paymentIntents.cancel(
         params.paymentIntentId,
         { expand: ['latest_charge'] },
-        { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey },
+        { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey, ...opcionesDeLimite(limits) },
       )
       return this.toAuthorizationState(pi, null)
     } catch (error) {
-      return this.recoverIfAlready('canceled', connectAccountId, params.paymentIntentId, error)
+      return this.recoverIfAlready('canceled', connectAccountId, params.paymentIntentId, error, undefined, limits)
     }
   }
 
@@ -598,11 +607,12 @@ export class StripeConnectProvider implements IEcommerceProvider {
     paymentIntentId: string,
     originalError: unknown,
     expected?: { amountCents: number; applicationFeeCents: number },
+    limits?: ProviderRequestLimits,
   ): Promise<AuthorizationState> {
     if (!(originalError as { type?: string } | null)?.type?.startsWith('Stripe')) throw originalError
     let pi: Stripe.PaymentIntent
     try {
-      pi = await this.retrievePaymentIntent(connectAccountId, paymentIntentId)
+      pi = await this.retrievePaymentIntent(connectAccountId, paymentIntentId, limits)
     } catch {
       throw originalError
     }

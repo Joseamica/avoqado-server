@@ -289,6 +289,35 @@ describe('StripeConnectProvider — apartar, cobrar, liberar, leer', () => {
         { stripeAccount: 'acct_x', idempotencyKey: 'online-order:o1:capture' },
       )
     })
+
+    it('B (Ruling 51): una liberación acotada manda el límite a la cancelación y a la relectura con que se recupera; sin límite, como hoy', async () => {
+      const original = stripeError('rate_limit')
+      mockStripe.paymentIntents.cancel.mockRejectedValue(original)
+      mockStripe.paymentIntents.retrieve.mockResolvedValue(piBase) // sigue apartada: sale el error original
+      const params = { paymentIntentId: 'pi_1', idempotencyKey: 'online-order-charge:ch1:release' }
+      await expect(provider.voidAuthorization(merchant as any, params, LECTURA_ACOTADA)).rejects.toBe(original)
+      expect(mockStripe.paymentIntents.cancel).toHaveBeenLastCalledWith(
+        'pi_1',
+        { expand: ['latest_charge'] },
+        { stripeAccount: 'acct_x', idempotencyKey: 'online-order-charge:ch1:release', timeout: 10_000, maxNetworkRetries: 0 },
+      )
+      expect(mockStripe.paymentIntents.retrieve).toHaveBeenLastCalledWith(
+        'pi_1',
+        { expand: ['latest_charge'] },
+        { stripeAccount: 'acct_x', timeout: 10_000, maxNetworkRetries: 0 },
+      )
+      await expect(provider.voidAuthorization(merchant as any, params)).rejects.toBe(original)
+      expect(mockStripe.paymentIntents.cancel).toHaveBeenLastCalledWith(
+        'pi_1',
+        { expand: ['latest_charge'] },
+        { stripeAccount: 'acct_x', idempotencyKey: 'online-order-charge:ch1:release' },
+      )
+      expect(mockStripe.paymentIntents.retrieve).toHaveBeenLastCalledWith(
+        'pi_1',
+        { expand: ['latest_charge'] },
+        { stripeAccount: 'acct_x' },
+      )
+    })
   })
 
   describe('voidAuthorization', () => {
