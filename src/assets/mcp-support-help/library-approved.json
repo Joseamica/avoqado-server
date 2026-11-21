@@ -1,8 +1,8 @@
 {
   "version": 1,
   "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-20T23:45:31.791Z",
-  "approvedHash": "7b7a38af2eabf08f518a420496c04050167eb07d449ea1a1e24e24f4f2314c60",
+  "approvedAt": "2026-11-21T05:23:02.139Z",
+  "approvedHash": "874d5aa663dc986fda2ea1a6fb47d56de7963c358821b0268bc1a6d926588443",
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -166,7 +166,7 @@
       "requiredPermissions": []
     },
     "android/personal/checar-entrada-y-salida": {
-      "sha256": "4037a2d4222d6cb88a703d792c0f9bd0bfded1e1c33baac4bf773308c7ba0e93",
+      "sha256": "f5b565762bb942e46527809804ddc0756cc1192c5c49a3edac754abac39ddc6d",
       "requiredPermissions": []
     },
     "android/recibos/imprimir-y-reimprimir-recibo": {
@@ -801,7 +801,7 @@
       "requiredPermissions": []
     },
     "tpv/asistencia/registrar-entrada-y-salida": {
-      "sha256": "e01aaee8737027b568e964d66591ae01511c5d46d9e18716eedabe4dc52896ee",
+      "sha256": "32684b003ba6ffa83d5c678927c2588de87bb8c8b939bd8032de300beaa8cdff",
       "requiredPermissions": []
     },
     "tpv/ayuda/actualizar-la-app-pax": {
@@ -1138,7 +1138,7 @@
       "requiredPermissions": []
     },
     "windows/personal/checar-entrada-y-salida": {
-      "sha256": "78fc9e35cdd63e74f314177ab93ef440f6cf2c17fd82ee0abbb961ebba9e3339",
+      "sha256": "4bd6ea1f12850938c044895e1b7464cd46541425a36f1f6f93e147e5b44eb5c7",
       "requiredPermissions": []
     },
     "windows/recibos/imprimir-y-reimprimir-recibo": {

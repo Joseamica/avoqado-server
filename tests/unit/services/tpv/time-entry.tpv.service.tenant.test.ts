@@ -9,7 +9,14 @@
 
 jest.mock('@/utils/prismaClient', () => {
   const db: any = {
-    timeEntry: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findUniqueOrThrow: jest.fn() },
+    timeEntry: {
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      update: jest.fn(),
+      updateMany: jest.fn(),
+      findUniqueOrThrow: jest.fn(),
+      count: jest.fn(),
+    },
     timeEntryBreak: { create: jest.fn(), update: jest.fn() },
   }
   db.$transaction = jest.fn(async (ops: unknown) => (typeof ops === 'function' ? ops(db) : Promise.all(ops as Promise<unknown>[])))
@@ -22,7 +29,7 @@ jest.mock('@/config/logger', () => ({
 }))
 
 import prisma from '@/utils/prismaClient'
-import { endBreak, getStaffTimeSummary, startBreak } from '@/services/tpv/time-entry.tpv.service'
+import { endBreak, getStaffTimeSummary, getTimeEntries, startBreak } from '@/services/tpv/time-entry.tpv.service'
 
 const db = prisma as any
 
@@ -32,7 +39,8 @@ describe('startBreak / endBreak', () => {
   it('startBreak busca la checada acotada por venueId', async () => {
     db.timeEntry.findFirst.mockResolvedValue({ id: 'te-1', breaks: [] })
     db.timeEntryBreak.create.mockResolvedValue({ id: 'br-1' })
-    db.timeEntry.update.mockResolvedValue({ id: 'te-1', status: 'ON_BREAK' })
+    db.timeEntry.updateMany.mockResolvedValue({ count: 1 })
+    db.timeEntry.findUniqueOrThrow.mockResolvedValue({ id: 'te-1', status: 'ON_BREAK' })
 
     await startBreak({ timeEntryId: 'te-1', venueId: 'venue-A' })
 
@@ -47,6 +55,18 @@ describe('startBreak / endBreak', () => {
     await expect(startBreak({ timeEntryId: 'te-de-B', venueId: 'venue-A' })).rejects.toThrow(/no encontrado/i)
     expect(db.timeEntryBreak.create).not.toHaveBeenCalled()
     expect(db.timeEntry.update).not.toHaveBeenCalled()
+  })
+
+  it('D3 · si el cierre automático la cerró entre la lectura y la escritura, el descanso no la reabre (0 filas → error)', async () => {
+    db.timeEntry.findFirst.mockResolvedValue({ id: 'te-1', breaks: [] })
+    db.timeEntry.updateMany.mockResolvedValue({ count: 0 })
+
+    await expect(startBreak({ timeEntryId: 'te-1', venueId: 'venue-A' })).rejects.toThrow(/no válido para descanso/i)
+    expect(db.timeEntry.updateMany).toHaveBeenCalledWith({
+      where: { id: 'te-1', status: 'CLOCKED_IN', clockOutTime: null },
+      data: { status: 'ON_BREAK' },
+    })
+    expect(db.timeEntryBreak.create).not.toHaveBeenCalled()
   })
 
   it('endBreak también acota por venueId', async () => {
@@ -106,7 +126,8 @@ describe('startBreak / endBreak', () => {
   it('regresión: si el cliente SÍ manda staffId, se sigue respetando', async () => {
     db.timeEntry.findFirst.mockResolvedValue({ id: 'te-1', breaks: [] })
     db.timeEntryBreak.create.mockResolvedValue({ id: 'br-1' })
-    db.timeEntry.update.mockResolvedValue({ id: 'te-1', status: 'ON_BREAK' })
+    db.timeEntry.updateMany.mockResolvedValue({ count: 1 })
+    db.timeEntry.findUniqueOrThrow.mockResolvedValue({ id: 'te-1', status: 'ON_BREAK' })
 
     await startBreak({ timeEntryId: 'te-1', venueId: 'venue-A', staffId: 'staff-1' })
 
@@ -123,5 +144,25 @@ describe('getStaffTimeSummary', () => {
     expect(db.timeEntry.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ staffId: 'staff-1', venueId: 'venue-A' }) }),
     )
+  })
+})
+
+describe('getTimeEntries · «Por revisar» (D3)', () => {
+  it('con salidaOlvidada sólo pide las marcadas, del venue, sin filtro de fecha', async () => {
+    db.timeEntry.findMany.mockResolvedValue([])
+    db.timeEntry.count.mockResolvedValue(0)
+
+    await getTimeEntries({ venueId: 'venue-A', salidaOlvidada: true, limit: 50 })
+
+    expect(db.timeEntry.findMany.mock.calls[0][0].where).toEqual({ venueId: 'venue-A', salidaOlvidada: true })
+  })
+
+  it('regresión: sin el filtro no se agrega', async () => {
+    db.timeEntry.findMany.mockResolvedValue([])
+    db.timeEntry.count.mockResolvedValue(0)
+
+    await getTimeEntries({ venueId: 'venue-A' })
+
+    expect(db.timeEntry.findMany.mock.calls[0][0].where).toEqual({ venueId: 'venue-A' })
   })
 })
