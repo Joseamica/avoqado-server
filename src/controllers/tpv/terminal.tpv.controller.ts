@@ -12,6 +12,7 @@ import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { orderAngelPayAccountsForTerminal, orderMerchantsBySlot } from '@/services/tpv/angelpayPrimaryAccount'
 import { veredictoPuerta } from '@/services/tpv/command-credential.service'
 import prisma from '@/utils/prismaClient'
+import { sdkPropioEncendido } from '@/config/sdkPropio'
 import logger from '../../config/logger'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
 
@@ -141,7 +142,12 @@ function getTpvSettingsFromConfig(config: unknown): TpvSettings {
   // This server-owned entitlement must never be read from mutable terminal JSON. Older or
   // concurrent writers may have persisted it before the contract was hardened, so strip it
   // defensively instead of allowing the spread to leak it into `tpvSettings`.
-  const { cashReconciliationEnabled: _ignoredServerOwnedFlag, ...savedSettings } = (config as any)?.settings || {}
+  // `inHouseSdkEnabled` is reserved the same way: it only travels at the root of /config, from the column + the brake.
+  const {
+    cashReconciliationEnabled: _ignoredServerOwnedFlag,
+    inHouseSdkEnabled: _llaveReservada,
+    ...savedSettings
+  } = (config as any)?.settings || {}
   return {
     ...DEFAULT_TPV_SETTINGS,
     ...savedSettings,
@@ -634,6 +640,9 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
         // Server-owned effective gate (paid Feature AND explicit venue opt-in). Kept outside
         // mutable `tpvSettings` so a device settings echo can never grant itself access.
         cashReconciliationEnabled,
+        // SDK propio (fase 3): sólo con el apagador de ESTA terminal y el freno general; si no, la llave ni viaja (las TPV
+        // viejas ven lo de siempre). Nunca sale del JSON del aparato: getTpvSettingsFromConfig la quita.
+        ...(terminal.inHouseSdkEnabled && sdkPropioEncendido() ? { inHouseSdkEnabled: true } : {}),
         angelpayAuth, // Task 13 / spec §4.5 — optional single-account back-compat; null unless terminal is NEXGO with ACTIVE account
         // Multi-account (2026-05-18) — full list of ACTIVE AngelPay user accounts
         // for the venue. Always present (possibly empty []) when the terminal
