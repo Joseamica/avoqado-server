@@ -215,7 +215,7 @@ describe('VentasCobrarAbandonadasJob', () => {
       `o.type = 'TAKEOUT'`,
       `o."tableId" IS NULL`,
       `o."reservationId" IS NULL`,
-      `o."externalId" IS NULL OR o."externalId" ~*`,
+      `o."externalId" ~*`,
       `o.status = 'PENDING'`,
       `o."paymentStatus" = 'PENDING'`,
       `o."customerId" IS NULL`,
@@ -233,5 +233,7 @@ describe('VentasCobrarAbandonadasJob', () => {
     }
     // Ninguna solicitud del POS, ni siquiera la rechazada (Codex r3 #4): sin excepción de lápidas.
     expect(sql).not.toContain('REJECTED_')
+    // Sin llave NO es de Cobrar: la cuenta que nace al separar, cripto, una reserva (Codex r4 #1).
+    expect(sql).not.toContain('"externalId" IS NULL')
   })
 })

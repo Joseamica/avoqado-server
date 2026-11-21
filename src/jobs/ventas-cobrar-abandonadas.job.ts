@@ -19,9 +19,11 @@ import { ORDER_LOCK_WAIT_BUDGET } from '../services/shared/paymentShiftClaim'
  *
  * Qué anula (NUNCA borra: los renglones y la bitácora quedan como rastro), y sólo si TODO se cumple, otra vez bajo el candado y
  * ANTES de escribir nada:
- *  - venta de Cobrar: `source = TPV`, `type = TAKEOUT`, sin mesa, sin reserva, sin pedido en línea, y con la llave de Cobrar
- *    (`createOrderWithItems` de la TPV manda un UUID; las TPV más viejas, ninguna). Cualquier otra llave es de otro flujo y se queda:
- *    `local_…` (la libreta legacy de «Órdenes»), `giftcard:`, `exchange:`, `pay-later:` (Codex r3 #2);
+ *  - venta de Cobrar: `source = TPV`, `type = TAKEOUT`, sin mesa, sin reserva, sin pedido en línea, y con la llave de Cobrar: el
+ *    UUID que `CheckoutViewModel` manda a `createOrderWithItems` desde la TPV 2.8.2 (en campo, 2.10 o más). Sin llave o con otra
+ *    es de otro flujo y se queda: la cuenta que nace al SEPARAR una cuenta (sin llave), cripto (sin llave), una reserva, `local_…`
+ *    (la libreta legacy de «Órdenes»), `giftcard:`, `exchange:`, `pay-later:` (Codex r3 #2 y r4 #1; la pasada por los 29 creadores
+ *    de ventas está en el anexo de la promesa);
  *  - `PENDING` / `PENDING`, con productos;
  *  - SIN cliente (ni `customerId` ni `OrderCustomer`) y sin `payLater = true`: un «Pagar después» de la TPV siempre lleva cliente
  *    (`CheckoutViewModel.createPayLaterOrder` lo exige), así que una con cliente puede ser una cuenta abierta A PROPÓSITO;
@@ -57,7 +59,7 @@ const LOTE = 100
 /** ENSAYO: cuántos negocios van al log, uno por línea (los de más ventas); el total siempre es de todos. */
 const NEGOCIOS_EN_EL_LOG = 500
 
-/** La llave de Cobrar: `UUID.randomUUID()` de la TPV (`CheckoutViewModel`); las TPV más viejas no mandaban llave. */
+/** La llave de Cobrar: `UUID.randomUUID()` de la TPV (`CheckoutViewModel`, desde 2.8.2). Sin llave NO es de Cobrar (Codex r4 #1). */
 export const LLAVE_DE_COBRAR = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
 /**
@@ -66,7 +68,7 @@ export const LLAVE_DE_COBRAR = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}
  */
 const abandonadaDeCobrar = (umbral: Date): Prisma.Sql => Prisma.sql`
   o.source = 'TPV' AND o.type = 'TAKEOUT' AND o."tableId" IS NULL AND o."reservationId" IS NULL
-  AND (o."externalId" IS NULL OR o."externalId" ~* ${LLAVE_DE_COBRAR})
+  AND o."externalId" ~* ${LLAVE_DE_COBRAR}
   AND o.status = 'PENDING' AND o."paymentStatus" = 'PENDING'
   AND o."customerId" IS NULL
   AND NOT EXISTS (SELECT 1 FROM "OrderCustomer" oc WHERE oc."orderId" = o.id)

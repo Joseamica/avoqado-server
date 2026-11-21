@@ -48,7 +48,8 @@ async function venta(
     updatedAt: Date
     sinProductos: boolean
     source: 'TPV' | 'KIOSK'
-    externalId: string
+    /** Por omisión, la llave de Cobrar (UUID); `null` = sin llave. */
+    externalId: string | null
     reservationId: string
   }> = {},
 ) {
@@ -61,7 +62,7 @@ async function venta(
       status: 'PENDING',
       paymentStatus: 'PENDING',
       customerId: extra.customerId ?? null,
-      externalId: extra.externalId ?? null,
+      externalId: extra.externalId === undefined ? randomUUID() : extra.externalId,
       reservationId: extra.reservationId ?? null,
       subtotal: 100,
       taxAmount: 0,
@@ -240,26 +241,73 @@ describe('limpieza de ventas de Cobrar abandonadas (D36)', () => {
       },
     })
     const deReserva = await venta('reserva', { reservationId: reserva.id })
+    // Codex r4 #1: la cuenta que nace al SEPARAR una cuenta (ruta de la TPV) hereda «para llevar» y queda sin llave.
+    const separada = await venta('separada', { externalId: null })
     await activo().correrAhora()
 
     expect(await estado(deCobrar)).toBe('CANCELLED')
     expect(await estado(ordenes)).toBe('PENDING')
     expect(await estado(tarjetas)).toBe('PENDING')
     expect(await estado(deReserva)).toBe('PENDING')
+    expect(await estado(separada)).toBe('PENDING')
   })
 
   it.each([
-    ['le guardan un nombre (cambia `updatedAt`, no la versión)', { customerName: 'Ana' }],
-    ['el panel la pasa a CONFIRMED', { status: 'CONFIRMED' as const }],
-  ])('🔴 Codex r3 #3: entre la elección y el candado %s ⇒ se queda, sin escribir nada', async (_caso, cambio) => {
+    // Cada caso mueve UNA sola cosa: si se quitara esa comprobación bajo el candado, su caso se pondría rojo (Codex r4).
+    [
+      'le guardan un nombre (sólo cambia `updatedAt`)',
+      (id: string) => prisma.order.update({ where: { id }, data: { customerName: 'Ana' } }),
+    ],
+    [
+      'el panel la pasa a CONFIRMED (sólo cambia el estado)',
+      (id: string) => prisma.$executeRaw`UPDATE "Order" SET status = 'CONFIRMED' WHERE id = ${id}`,
+    ],
+    [
+      'le cambian un renglón (sólo cambia la versión)',
+      (id: string) => prisma.$executeRaw`UPDATE "Order" SET version = version + 1 WHERE id = ${id}`,
+    ],
+  ])('🔴 Codex r3 #3: entre la elección y el candado %s ⇒ se queda, sin escribir nada', async (_caso, cambiar) => {
     const id = await venta('carrera')
     const elegida = await candidata(id)
-    // Lo que otra caja o el panel hace en ese hueco: una edición normal (Prisma mueve `updatedAt`).
-    await prisma.order.update({ where: { id }, data: cambio })
+    // Lo que otra caja o el panel hace en ese hueco.
+    await cambiar(id)
 
     expect(await anularVentaDeCobrarAbandonada(elegida, UMBRAL())).toBe('seQueda')
     expect(await estado(id)).not.toBe('CANCELLED')
     expect(await prisma.activityLog.count({ where: { entityId: id } })).toBe(0)
+  })
+
+  it('🔴 Codex r3 #5: el total del ENSAYO, calculado por Postgres, es la suma de todos los negocios', async () => {
+    await venta('total-1')
+    await venta('total-2')
+    const r = await new VentasCobrarAbandonadasJob({ modo: 'ENSAYO' }).correrAhora()
+
+    expect(r.negocios.find(n => n.venueId === venueId)?.cuantas).toBe(2)
+    expect(r.anularia).toBe(r.negocios.reduce((suma, n) => suma + n.cuantas, 0))
+    // Que no se queden para las pruebas de abajo.
+    await activo().correrAhora()
+  })
+
+  it('🔴 Codex r4: con más de un lote de candidatas que se quedan, la 101 recibe turno en la vuelta siguiente', async () => {
+    const hace = (minutos: number) => new Date(Date.UTC(2025, 0, 1, 0, minutos))
+    const ids: string[] = []
+    for (let i = 0; i < 101; i++) ids.push(await venta(`lote-${i}`, { createdAt: hace(i), updatedAt: hace(i) }))
+    const vistas: string[] = []
+    const job = new VentasCobrarAbandonadasJob({
+      modo: 'ACTIVO',
+      anular: async c => {
+        vistas.push(c.id)
+        return 'seQueda'
+      },
+    })
+
+    await job.correrAhora()
+    expect(vistas).toHaveLength(100)
+    expect(vistas).not.toContain(ids[100])
+    await job.correrAhora()
+    expect(vistas).toContain(ids[100])
+    // Que no se queden para las pruebas de abajo.
+    await prisma.$executeRaw`UPDATE "Order" SET "updatedAt" = now() WHERE "venueId" = ${venueId} AND "orderNumber" LIKE 'D36-lote-%'`
   })
 
   it('🔴 Codex r3 #1: el efectivo que la cola de una TPV vieja manda DESPUÉS de la limpieza reabre la venta con rastro', async () => {
