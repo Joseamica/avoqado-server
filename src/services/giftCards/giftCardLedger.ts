@@ -10,7 +10,6 @@
  */
 import { Prisma, type PrismaClient, type GiftCardDeliveryChannel, type GiftCardReason, type GiftCardStatus } from '@prisma/client'
 import type { TxConReintento } from '@/utils/serializableRetry'
-import { addDays, addMonths } from 'date-fns'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { operationHash } from '@/utils/operationHash'
 import { recordGiftCardAnomaly } from './giftCardAnomaly'
@@ -29,6 +28,20 @@ import { TERMINOS_VIGENTES } from './giftCardTerms'
 
 const CERO = () => new Prisma.Decimal(0)
 const DIAS_DE_GRACIA_TRAS_REVERSO = 90
+const DIA_MS = 24 * 60 * 60 * 1000
+
+/**
+ * D30: `addMonths` de date-fns, pero en el calendario UTC (el de producción, que corre sin `TZ`). El de date-fns cuenta en
+ * la zona del PROCESO: en una Mac en Los Ángeles o CDMX la vigencia guardada se corría una hora o un día. Igual que
+ * date-fns, el 29–31 se recorta al último día del mes destino (29-feb + 12 meses = 28-feb).
+ */
+function sumarMesesUtc(fecha: Date, meses: number): Date {
+  const finDelMes = new Date(fecha)
+  finDelMes.setUTCMonth(fecha.getUTCMonth() + meses + 1, 0)
+  const r = new Date(finDelMes)
+  r.setUTCDate(Math.min(fecha.getUTCDate(), finDelMes.getUTCDate()))
+  return r
+}
 const LLAVE_DE_OPERACION = /^[A-Za-z0-9_:-]{8,128}$/
 
 export interface LockedGiftCard {
@@ -354,7 +367,7 @@ export async function activarSobresDeCuentaPagadaEnTx(
   const activated: string[] = []
   for (const card of bloqueados) {
     if (card.status !== 'PENDING' || card.venueId !== p.venueId) continue
-    const expiresAt = card.validityMonths ? addMonths(ahora, card.validityMonths) : null
+    const expiresAt = card.validityMonths ? sumarMesesUtc(ahora, card.validityMonths) : null
     const r = await tx.giftCard.updateMany({
       where: { id: card.id, venueId: p.venueId, status: 'PENDING' },
       data: { status: 'ACTIVE', balance: card.initialAmount, activatedAt: ahora, expiresAt },
@@ -575,7 +588,7 @@ export async function revertirCanjeEnTx(
   const resultado: Array<{ giftCardId: string; amount: Prisma.Decimal; balanceAfter: Prisma.Decimal }> = []
   for (const { canje, card, toma } of plan) {
     const vencida = card.expiresAt !== null && card.expiresAt.getTime() <= ahora.getTime()
-    const nuevaVigencia = vencida ? addDays(ahora, DIAS_DE_GRACIA_TRAS_REVERSO) : null
+    const nuevaVigencia = vencida ? new Date(ahora.getTime() + DIAS_DE_GRACIA_TRAS_REVERSO * DIA_MS) : null
     const r = await tx.giftCard.updateMany({
       where: { id: card.id, venueId: p.venueId },
       data: { balance: { increment: toma }, ...(nuevaVigencia ? { expiresAt: nuevaVigencia } : {}) },

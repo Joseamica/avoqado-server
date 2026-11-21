@@ -84,7 +84,9 @@ import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
 import {
   armarComandasTrasCommit,
+  cuentasDeComandasDeRenglones,
   cuentasDeSusComandas,
+  marcarRenglonesAnuladosEnComandas,
   retirarComandasDeVentaAnulada,
   tomarCandadoDeComandas,
 } from '../kds/kitchenTicketAuthoring.service'
@@ -657,42 +659,97 @@ function normalizeExternalId(externalId?: string | null): string | null {
  * y, al reintentar, encuentra el renglón por su llave: una sola ronda (spec 2026-09-27 §5).
  */
 /**
- * Las llaves de renglón de esta cuenta que una anulación dejó como lápida (`OrderAction` VOID, `metadata.externalIds`, escrita en la
- * misma transacción que la anulación). Sólo trabaja con llaves de RONDA (`sync:<ronda>:<n>`, decisión 1 de D7): las de Mostrador
- * (UUID) y otras etiquetas sí se repiten entre cuentas y no protegen nada aquí. Sólo devuelve las que se piden.
+ * Las llaves de renglón que una anulación dejó como lápida (`OrderAction` VOID, `metadata.externalIds`, escrita en la misma
+ * transacción que la anulación) en CUALQUIER cuenta del negocio. Sólo trabaja con llaves de RONDA (`sync:<ronda>:<n>`, decisión 1
+ * de D7): llevan la llave de su ronda y no se repiten entre cuentas; las de Mostrador (UUID) y otras etiquetas sí se repiten (cobro
+ * dividido) y no protegen nada aquí. Sólo devuelve las que se piden.
+ *
+ * D29 (hz:0555ee15:D29): en todo el negocio, no sólo en la cuenta que recibe la ronda. Separar o juntar cuentas mueve el renglón
+ * con su llave; si otra caja lo movió a la cuenta B y lo anuló ahí, la lápida vive en B y el reenvío de la ronda a A lo volvía a
+ * crear y a cobrar. Es la misma búsqueda por negocio que ya hace `rondaYaEnAlgunaCuenta` con los renglones vivos.
  */
-export async function llavesAnuladasDeLaCuenta(
-  tx: Pick<Prisma.TransactionClient, 'orderAction'>,
+export async function llavesAnuladasEnElNegocio(
+  tx: Pick<Prisma.TransactionClient, '$queryRaw'>,
+  venueId: string,
+  llaves: string[],
+): Promise<Set<string>> {
+  const pedidas = [...new Set(llaves.filter(esLlaveDeRonda))]
+  if (pedidas.length === 0) return new Set()
+  // Cada anulación encontrada trae su arreglo; se cruza aquí con las pedidas en tiempo lineal (Codex r2 #1 de D29: cruzarlas en la
+  // consulta, cada llave contra cada arreglo, crecía con el producto de los dos mientras la cuenta está bloqueada).
+  const buscadas = new Set(pedidas)
+  const anuladas = new Set<string>()
+  for (const { llaves: deLaAnulacion } of await tx.$queryRaw<{ llaves: unknown }[]>(consultaDeLapidasDelNegocio(venueId, pedidas))) {
+    if (!Array.isArray(deLaAnulacion)) continue
+    for (const llave of deLaAnulacion) if (typeof llave === 'string' && buscadas.has(llave)) anuladas.add(llave)
+  }
+  return anuladas
+}
+
+/**
+ * La lectura de `llavesAnuladasEnElNegocio`, aparte para que la prueba de capacidad lea el plan de ESTA consulta: las anulaciones del
+ * negocio que nombran ALGUNA de las llaves pedidas, con su arreglo de llaves.
+ * - Entra por el índice GIN PARCIAL `OrderAction_void_externalIds_idx` (`metadata -> 'externalIds'` de las VOID; migración
+ *   `20261121000000_…_concurrently`) con todas las llaves pedidas a la vez (`?|`). Una llave correlacionada por fila no se estima y,
+ *   en una tabla chica, el planificador prefería recorrer todas las VOID (medido en la prueba de capacidad).
+ * - El tipo va LITERAL, igual que el predicado del índice: con un parámetro Postgres no puede probar la implicación y no lo usaría.
+ * - `OFFSET 0` es la barrera: primero las anulaciones que nombran alguna llave (por el índice), luego su negocio. Sin ella el
+ *   planificador podía entrar por las cuentas del negocio y recorrer todas sus anulaciones.
+ * - Devuelve sólo las anulaciones que nombran una llave pedida (en la práctica, a lo más una por llave: una llave de ronda se anula
+ *   una vez); el cruce con las pedidas lo hace quien llama, lineal.
+ */
+export function consultaDeLapidasDelNegocio(venueId: string, pedidas: string[]): Prisma.Sql {
+  return Prisma.sql`
+    SELECT anulada.llaves
+    FROM (
+      SELECT oa."orderId", oa."metadata" -> 'externalIds' AS llaves
+      FROM "OrderAction" oa
+      WHERE oa."actionType" = 'VOID'
+        AND (oa."metadata" -> 'externalIds') ?| ${pedidas}::text[]
+      OFFSET 0
+    ) anulada
+    JOIN "Order" o ON o."id" = anulada."orderId"
+    WHERE o."venueId" = ${venueId}`
+}
+
+/**
+ * D29: las llaves de RONDA pedidas que viven en OTRA cuenta del negocio (otra caja separó o juntó ese renglón: mover conserva la
+ * llave). Las de Mostrador (UUID) no entran: se repiten entre cuentas a propósito (cobro dividido).
+ */
+export async function llavesEnOtraCuentaDelNegocio(
+  tx: Pick<Prisma.TransactionClient, '$queryRaw'>,
+  venueId: string,
   orderId: string,
   llaves: string[],
 ): Promise<Set<string>> {
-  const anuladas = new Set<string>()
-  const pedidas = new Set(llaves.filter(esLlaveDeRonda))
-  if (pedidas.size === 0) return anuladas
-  // Se recorren TODAS las anulaciones de la cuenta, por páginas de `PAGINA_DE_ANULACIONES` con cursor estable: la respuesta es exacta
-  // (sin «las últimas N», que dejaba fuera la que importa, Codex r5 #7 y r6 #3) y su costo depende de cuántas anulaciones tiene la
-  // cuenta (casi siempre 0: una lectura), no de cuántos renglones trae la ronda (Codex r7 #1 y r8 #8: una consulta por llave eran
-  // 1,001 para una ronda de 1,000). Se detiene en cuanto encontró todas las pedidas.
-  let cursor: string | undefined
-  for (;;) {
-    const pagina = await tx.orderAction.findMany({
-      where: { orderId, actionType: 'VOID' },
-      select: { id: true, metadata: true },
-      orderBy: { id: 'asc' },
-      take: PAGINA_DE_ANULACIONES,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-    })
-    for (const { metadata } of pagina) {
-      const ids = (metadata as { externalIds?: unknown } | null)?.externalIds
-      if (Array.isArray(ids)) for (const id of ids) if (typeof id === 'string' && pedidas.has(id)) anuladas.add(id)
-    }
-    if (anuladas.size === pedidas.size || pagina.length < PAGINA_DE_ANULACIONES) return anuladas
-    cursor = pagina[pagina.length - 1].id
-  }
+  const pedidas = [...new Set(llaves.filter(esLlaveDeRonda))]
+  if (pedidas.length === 0) return new Set()
+  const filas = await tx.$queryRaw<{ llave: string }[]>(consultaDeLlavesEnOtraCuenta(venueId, orderId, pedidas))
+  return new Set(filas.map(fila => fila.llave))
 }
 
-/** Anulaciones (`OrderAction` VOID) que se leen por página al buscar lápidas. */
-const PAGINA_DE_ANULACIONES = 200
+/**
+ * La lectura de `llavesEnOtraCuentaDelNegocio` (aparte para la prueba de capacidad). Por cada llave, un `EXISTS` que entra por el
+ * índice de `OrderItem.externalId` y se detiene en la primera copia del negocio (trabajo acotado por llave aunque una llave se repita
+ * en muchas cuentas, Codex r1 #3); a lo más una fila por llave. `OFFSET 0`: primero la llave por su índice, luego el negocio.
+ */
+export function consultaDeLlavesEnOtraCuenta(venueId: string, orderId: string, pedidas: string[]): Prisma.Sql {
+  return Prisma.sql`
+    SELECT k.llave
+    FROM unnest(${pedidas}::text[]) AS k(llave)
+    WHERE EXISTS (
+      SELECT 1
+      FROM (
+        SELECT oi."orderId"
+        FROM "OrderItem" oi
+        WHERE oi."externalId" = k.llave
+          AND oi."orderId" <> ${orderId}
+        OFFSET 0
+      ) copia
+      JOIN "Order" o ON o."id" = copia."orderId"
+      WHERE o."venueId" = ${venueId}
+    )`
+}
 
 export async function conLlaveDeRonda<T>(crear: () => Promise<T>): Promise<T> {
   try {
@@ -1918,17 +1975,32 @@ export async function addItemsToOrder(
             ).map(renglon => renglon.externalId)
           : [],
       )
+      // D29: un renglón de la ronda que otra caja SEPARÓ (o juntó) a otra cuenta del negocio ya está guardado ahí, con su llave: no
+      // se vuelve a crear en ésta. Misma regla que `rondaYaEnAlgunaCuenta` para la ronda tardía. Sólo en rondas y con llaves de ronda.
+      // Se lee ANTES que las lápidas: si la otra caja lo anula en este instante, una de las dos lecturas lo ve (borra y deja la lápida
+      // en la misma transacción).
+      const llavesEnOtraCuenta = asNewRound
+        ? await llavesEnOtraCuentaDelNegocio(
+            tx,
+            venueId,
+            order.id,
+            llavesDeRonda.filter(llave => !llavesGuardadas.has(llave)),
+          )
+        : new Set<string>()
       // «Anular producto» (Codex r1 #1): la llave de un renglón ANULADO no vuelve a crearse. El reenvío de una ronda (respuesta
       // perdida, cola sin red) o el carrito de la TPV deduplican por llave, y la fila anulada ya no existe: sin esto el producto
       // volvía a la cuenta y se cobraba. Se trata como réplica: ni se valida contra el catálogo de hoy ni se escribe.
       // Sólo las llaves de ronda (`sync:<ronda>:<n>`): la lápida no trabaja con etiquetas de Mostrador ni de otros caminos (decisión 1).
+      // D29: la lápida se busca en todo el negocio (otra caja pudo separar el renglón a otra cuenta y anularlo ahí).
       const llavesPedidas = normalizedItems.map(item => normalizeExternalId(item.externalId)).filter(esLlaveDeRonda)
-      const llavesAnuladas = llavesPedidas.length > 0 ? await llavesAnuladasDeLaCuenta(tx, order.id, llavesPedidas) : new Set<string>()
-      const esAnulada = (item: NormalizedAddOrderItemInput) => {
+      const llavesAnuladas = llavesPedidas.length > 0 ? await llavesAnuladasEnElNegocio(tx, venueId, llavesPedidas) : new Set<string>()
+      /** No se escribe aquí: se anuló (en cualquier cuenta) o vive en otra cuenta del negocio. */
+      const noSeEscribeAqui = (item: NormalizedAddOrderItemInput) => {
         const llave = normalizeExternalId(item.externalId)
-        return !!llave && llavesAnuladas.has(llave)
+        return !!llave && (llavesAnuladas.has(llave) || llavesEnOtraCuenta.has(llave))
       }
-      const esReplica = (item: NormalizedAddOrderItemInput) => llavesGuardadas.has(normalizeExternalId(item.externalId)) || esAnulada(item)
+      const esReplica = (item: NormalizedAddOrderItemInput) =>
+        llavesGuardadas.has(normalizeExternalId(item.externalId)) || noSeEscribeAqui(item)
 
       if (asNewRound) {
         for (const product of products) {
@@ -2400,8 +2472,10 @@ export async function addItemsToOrder(
       // En serie: una transacción es UNA conexión, y en serie el primer error corta la ronda sin dejar consultas en vuelo.
       const newOrderItems: Awaited<ReturnType<typeof escribirRenglon>>[] = []
       for (const item of normalizedItems) {
-        if (esAnulada(item)) {
-          logger.warn(`⏭️ [ADD ITEMS] Renglón anulado: su llave no se vuelve a crear (externalId=${normalizeExternalId(item.externalId)})`)
+        if (noSeEscribeAqui(item)) {
+          logger.warn(
+            `⏭️ [ADD ITEMS] Renglón anulado o en otra cuenta del negocio: su llave no se vuelve a crear (externalId=${normalizeExternalId(item.externalId)})`,
+          )
           continue
         }
         newOrderItems.push(await escribirRenglon(item))
@@ -3383,7 +3457,13 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // El candado de comandas va PRIMERO (mismo orden que el armado: comandas → orden). Si esta anulación deja la cuenta
       // sin renglones, abajo retira sus comandas de la pantalla de cocina sin cruzarse con un armado en curso. D3 (hz:381780f0): con
       // los de sus cuentas ligadas, en orden, que el retiro pedía a media transacción (ciclo con unir esa cuenta a la vez).
-      for (const id of (await cuentasDeSusComandas(tx, venueId, orderId)).sort()) await tomarCandadoDeComandas(tx, id)
+      // D15 (Codex r2 #1): también los de las cuentas dueñas de CUALQUIER comanda de los renglones que se anulan (aunque esté
+      // terminada: «Reabrir» la puede revivir), de entrada y en orden: la marca de cocina las toca bajo su candado.
+      const cuentas = new Set([
+        ...(await cuentasDeSusComandas(tx, venueId, orderId)),
+        ...(await cuentasDeComandasDeRenglones(tx, venueId, input.itemIds)),
+      ])
+      for (const id of [...cuentas].sort()) await tomarCandadoDeComandas(tx, id)
       if (!(await bloquearCuentaParaEditar(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
@@ -3501,8 +3581,10 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
           'AREA_TICKET_PARTIAL_VOID_NOT_ALLOWED',
         )
       }
-      // Anular TODO cancela la cuenta: la cocina deja de verla (el candado de comandas ya se tomó al inicio).
+      // Anular TODO cancela la cuenta: la cocina deja de verla (el candado de comandas ya se tomó al inicio). Anular una parte
+      // (D15, Flautas): la cocina ve lo anulado marcado «ANULADO · », ya no pendiente, y su comanda se recalcula.
       if (isVoidingAllItems) await retirarComandasDeVentaAnulada(tx, venueId, orderId)
+      else await marcarRenglonesAnuladosEnComandas(tx, venueId, input.itemIds, { staffId: autor, reason: input.reason })
 
       // 🔴 MONEY: el subtotal BAJA al anular, pero un descuento fijo NO. La resta escrita
       // a mano (`newSubtotal − discountAmount`, sin clamp) escribía un `Order.total` NEGATIVO que

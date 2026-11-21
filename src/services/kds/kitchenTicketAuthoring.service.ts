@@ -15,7 +15,7 @@ import { toKdsModifierLabels } from './kdsModifierLabels'
 import { estacionesDelNegocio } from './kitchenDisplayStations'
 import { nombreEnCocina } from './nombreEnCocina'
 import { origenDeLaDiferencia, planKitchenTickets, type KitchenLine } from './kitchenTicketPlanning'
-import { initialPreparation, parsePreparation, PREPARATION_VERSION, preparationTicketStatus } from './kitchenPreparation'
+import { initialPreparation, parsePreparation, PREPARATION_VERSION, recalculoDeComanda } from './kitchenPreparation'
 import { ConflictError } from '../../errors/AppError'
 import { parseServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 import { esRenglonDeVale } from '../shared/renglonDeVale'
@@ -544,8 +544,168 @@ export async function retirarComandasDeVentaAnulada(
     if (page.length < 100) break
     cursor = page[page.length - 1].id
   }
-  await tx.kdsOrder.updateMany({ where: tracked, data: { status: 'COMPLETED', completedAt: new Date() } })
+  const anuladaEn = new Date()
+  // D17 (Codex r8 #3): la comanda de una cuenta anulada entra a «Recientes» su hora, como entraba por `completedAt`; la que la
+  // cocina ya había terminado conserva SU hora (Codex r9 #2).
+  await tx.kdsOrder.updateMany({ where: { ...tracked, kitchenDoneAt: null }, data: { kitchenDoneAt: anuladaEn } })
+  await tx.kdsOrder.updateMany({ where: tracked, data: { status: 'COMPLETED', completedAt: anuladaEn } })
   return { kdsOrderIds, kdsOrderItemIds }
+}
+
+/**
+ * D15: las cuentas dueñas de las comandas (de cualquier estado) que tienen filas de estos renglones, leídas SIN candado, para que
+ * quien anula las tome de entrada y en orden (comandas → orden), antes del candado de la orden. ponytail: 1,000 filas; las demás se
+ * toman a media transacción en `marcarRenglonesAnuladosEnComandas` (reentrante; un interbloqueo raro lo repite `withDeadlockRetry`).
+ */
+export async function cuentasDeComandasDeRenglones(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderItemIds: string[],
+): Promise<string[]> {
+  if (orderItemIds.length === 0) return []
+  const filas =
+    (await tx.kdsOrderItem.findMany({
+      where: { orderItemId: { in: orderItemIds }, removedAt: null, kdsOrder: { venueId } },
+      select: { kdsOrder: { select: { orderId: true } } },
+      take: 1000,
+    })) ?? []
+  return [...new Set(filas.map(f => f.kdsOrder.orderId))].filter((id): id is string => Boolean(id))
+}
+
+/** Lo que ve la pantalla de cocina delante de un renglón anulado en la caja (las pantallas viejas lo leen en el nombre). */
+export const PREFIJO_ANULADO = 'ANULADO · '
+
+/**
+ * D15 (Flautas, 20-nov-2026): anular UNO o varios renglones ya enviados (no todos: eso es `retirarComandasDeVentaAnulada`) los
+ * deja en la pantalla de cocina MARCADOS, no pendientes ni borrados (Toast los tacha con «VOIDED», Loyverse en rojo, Simphony los
+ * pone «Done»). Cada fila de comanda de esos renglones, de la cuenta que sea (dividir y unir no mueven sus filas), recibe
+ * `removedAt` y «ANULADO · » delante del nombre, como el «RETIRADO · » de Uber; una fila que ya traía marca no se toca. Con tiempos
+ * (v1), lo que faltaba (retenido, pendiente, preparando o listo) pasa a «Cancelado» con su bitácora y lo entregado se queda; la
+ * comanda se recalcula con `recalculoDeComanda` (el anulado cuenta como terminado). Sin tiempos (v0) la comanda NO se termina sola
+ * (Codex r1 #3–#5): se queda en el tablero con lo anulado tachado hasta que la cocina toque «Listo», como Loyverse («Tap on the
+ * ticket header to mark it complete»). La cabecera estrena `updatedAt`: el archivo del día cuenta desde aquí (Codex r1 #7).
+ * CALLER_LOCKED: dentro de la transacción de la anulación, que ya tomó de entrada los candados de `cuentasDeSusComandas(orderId)` y
+ * de `cuentasDeComandasDeRenglones` antes que el de la orden (Codex r1 #6 y r2 #1: también los de comandas terminadas, porque
+ * «Reabrir» las revive); aquí se piden otra vez (reentrantes) por si alguna cambió de dueño entre esa lectura y el candado.
+ */
+export async function marcarRenglonesAnuladosEnComandas(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderItemIds: string[],
+  actor: { staffId?: string; reason?: string } = {},
+): Promise<void> {
+  if (orderItemIds.length === 0) return
+  const pagina = async (cursor?: string) =>
+    (await tx.kdsOrderItem.findMany({
+      where: { orderItemId: { in: orderItemIds }, removedAt: null, kdsOrder: { venueId } },
+      select: {
+        id: true,
+        kdsOrderId: true,
+        productName: true,
+        quantity: true,
+        preparation: true,
+        preparationRevision: true,
+        kdsOrder: { select: { orderId: true, status: true, preparationVersion: true } },
+      },
+      orderBy: { id: 'asc' },
+      take: 500,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    })) ?? [] // ?? []: como `cuentasDeSusComandas`, los dobles de prueba de la transacción devuelven undefined
+  // Todas las filas, por páginas (Codex r2 #3: la TPV anula más de 500 renglones de una vez).
+  const leer = async () => {
+    const todas: Awaited<ReturnType<typeof pagina>> = []
+    for (let cursor: string | undefined; ; ) {
+      const filas = await pagina(cursor)
+      todas.push(...filas)
+      if (filas.length < 500) return todas
+      cursor = filas[filas.length - 1].id
+    }
+  }
+  // El candado de la cuenta dueña de CADA comanda tocada, también terminada (Codex r2 #1). Quien llama ya los tomó de entrada; si
+  // alguna cambió de dueño mientras, se toma aquí y se vuelve a leer ya bajo candado.
+  const conCandado = new Set<string>()
+  let filas = await leer()
+  for (let vueltas = 0; ; vueltas++) {
+    const faltan = [...new Set(filas.map(f => f.kdsOrder.orderId))]
+      .filter((id): id is string => Boolean(id) && !conCandado.has(id as string))
+      .sort()
+    if (faltan.length === 0) break
+    if (vueltas >= 10)
+      throw new ConflictError('La comanda de cocina cambió mientras se anulaba. Vuelve a intentar.', 'KDS_ORDER_OWNER_CHANGED')
+    for (const id of faltan) {
+      await tomarCandadoDeComandas(tx, id)
+      conCandado.add(id)
+    }
+    filas = await leer()
+  }
+  if (filas.length === 0) return
+
+  const ahora = new Date()
+  const conTiempos = new Set<string>()
+  for (const f of filas) {
+    const marca = { removedAt: ahora, productName: `${PREFIJO_ANULADO}${f.productName}` }
+    const viva = f.kdsOrder.status !== 'COMPLETED'
+    // Un progreso ilegible no frena la anulación (es dinero): la fila se marca y su comanda se revisa como hoy.
+    const before =
+      f.kdsOrder.preparationVersion === PREPARATION_VERSION && viva && f.preparation != null
+        ? (() => {
+            try {
+              return parsePreparation(f.preparation, f.quantity)
+            } catch {
+              logger.warn('[KDS] progreso ilegible en un renglón anulado; sólo se marca', { venueId, kdsOrderItemId: f.id })
+              return null
+            }
+          })()
+        : null
+    if (before) {
+      const falta = before.HELD + before.PENDING + before.PREPARING + before.READY
+      if (falta > 0) {
+        const after = { ...before, HELD: 0, PENDING: 0, PREPARING: 0, READY: 0, CANCELLED: before.CANCELLED + falta }
+        const cas = await tx.kdsOrderItem.updateMany({
+          where: { id: f.id, removedAt: null, preparationRevision: f.preparationRevision },
+          data: { ...marca, preparation: after, preparationRevision: { increment: 1 } },
+        })
+        if (cas.count !== 1) throw new ConflictError('La preparación cambió. Vuelve a revisar la cuenta.', 'PREPARATION_CONFLICT')
+        await tx.activityLog.create({
+          data: {
+            venueId,
+            staffId: actor.staffId,
+            action: 'KITCHEN_ORDER_CANCEL',
+            entity: 'KdsOrderItem',
+            entityId: f.id,
+            data: {
+              orderId: f.kdsOrder.orderId,
+              reason: actor.reason ?? 'Producto anulado',
+              before,
+              after,
+              revision: f.preparationRevision + 1,
+            },
+          },
+        })
+        conTiempos.add(f.kdsOrderId)
+        continue
+      }
+    }
+    await tx.kdsOrderItem.updateMany({ where: { id: f.id, removedAt: null }, data: marca })
+  }
+  // Lo archivado no se toca (una comanda con un platillo de cuenta abierta nunca se archiva).
+  const tocadas = [...new Set(filas.map(f => f.kdsOrderId))]
+  await tx.kdsOrder.updateMany({ where: { id: { in: tocadas }, venueId, archivedAt: null }, data: { updatedAt: ahora } })
+
+  for (const id of conTiempos) {
+    const items = await tx.kdsOrderItem.findMany({ where: { kdsOrderId: id }, select: { quantity: true, preparation: true }, take: 5000 })
+    const previa = await tx.kdsOrder.findFirst({ where: { id, venueId }, select: { kitchenDoneAt: true } })
+    let counts: ReturnType<typeof parsePreparation>[]
+    try {
+      counts = items.map(i => parsePreparation(i.preparation, i.quantity))
+    } catch {
+      continue // otra fila ilegible: la comanda se queda como está (se revisa como hoy), la anulación sigue
+    }
+    await tx.kdsOrder.updateMany({
+      where: { id, venueId, preparationVersion: PREPARATION_VERSION, status: { not: 'COMPLETED' } },
+      data: recalculoDeComanda(counts, { kitchenDoneAt: previa?.kitchenDoneAt ?? null }, ahora),
+    })
+  }
 }
 
 /** Una página de las filas pendientes de comanda que tocan a `orderId` y no están con su cuenta: lo que mueve `ponerComandasConSuCuenta`. */
@@ -646,6 +806,8 @@ export async function ponerComandasConSuCuenta(tx: Prisma.TransactionClient, ven
         customerName: true,
         customerContact: true,
         createdAt: true,
+        // D17 (Codex r4 C2): la parte que se muda a un folio nuevo conserva cuándo la cocina la terminó (no estrena «Recientes»).
+        kitchenDoneAt: true,
         _count: { select: { items: true } },
       },
       take: porComanda.size,
@@ -696,10 +858,13 @@ export async function ponerComandasConSuCuenta(tx: Prisma.TransactionClient, ven
   // origen y en la nueva, las dos bajo el candado de su cuenta.
   for (const id of conPreparacion) {
     const items = await tx.kdsOrderItem.findMany({ where: { kdsOrderId: id }, select: { quantity: true, preparation: true }, take: 5000 })
-    const status = preparationTicketStatus(items.map(i => parsePreparation(i.preparation, i.quantity)))
+    const previa = await tx.kdsOrder.findFirst({ where: { id, venueId }, select: { kitchenDoneAt: true } })
     await tx.kdsOrder.updateMany({
       where: { id, venueId, preparationVersion: PREPARATION_VERSION },
-      data: { status, completedAt: status === 'COMPLETED' ? new Date() : null },
+      data: recalculoDeComanda(
+        items.map(i => parsePreparation(i.preparation, i.quantity)),
+        { kitchenDoneAt: previa?.kitchenDoneAt ?? null },
+      ),
     })
   }
   return [...tocadas]

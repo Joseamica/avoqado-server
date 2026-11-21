@@ -1239,6 +1239,10 @@ model VenueSettings {
   // null inherits the organization's complete service-course catalog.
   serviceCourses         Json?
   serviceCoursesRevision Int   @default(0)
+  /// «La cocina puede liberar tiempos desde su pantalla» (founder, 20-nov-2026; Flautas D17). Apagado de fábrica: liberar
+  /// sigue siendo de la caja (`orders:update` + `orders:create`). Prendido, el SERVIDOR acepta el RELEASE de quien sólo trae
+  /// `orders:update` (el rol de cocina). Se lee al REPRODUCIR cada intent, no al encolarlo.
+  kitchenCanReleaseCourses Boolean @default(false)
 
   // Operations
   autoCloseShifts           Boolean @default(false)
@@ -1321,6 +1325,11 @@ model VenueSettings {
   autoClockOutTime           String? // "HH:mm" format - e.g., "03:00" for 3 AM
   maxShiftDurationEnabled    Boolean @default(false) // Enable max shift duration enforcement
   maxShiftDurationHours      Int     @default(12) // Max hours before auto clock-out
+  /// «Salida olvidada» (hz:f0a89d19:D3, founder 20-nov: «A», como Toast/Square/Deputy): un turno sin salida se cierra solo al
+  /// terminar su día de negocio (corte de las 04:00 en la zona de la sucursal, nunca antes de 12 h) o al marcar la persona su
+  /// siguiente entrada; queda «Salida olvidada · revisar» con la salida de su horario o en 0 horas. PRENDIDO de fábrica, para
+  /// todos los negocios; el negocio lo apaga en Equipo → Asistencia. Un venue sin fila de ajustes cuenta como prendido.
+  salidaOlvidadaEnabled      Boolean @default(true)
 
   // Reviews
   autoReplyReviews    Boolean  @default(false)
@@ -4353,6 +4362,9 @@ model TimeEntry {
   // Auto clock-out tracking
   autoClockOut     Boolean @default(false) // Was this entry auto-closed by the system?
   autoClockOutNote String? // Reason for auto clock-out (e.g., "Hora de cierre: 03:00")
+  /// La cerró la regla de «salida olvidada»: el gerente la revisa en Asistencia. Se apaga al corregirla o al llegar la salida
+  /// real del MISMO día (celular sin red). Ver `src/services/shared/salidaOlvidada.ts`.
+  salidaOlvidada   Boolean @default(false)
 
   // Manager validation (approve/reject clock-in/out evidence)
   validationStatus TimeEntryValidation @default(PENDING)
@@ -5085,7 +5097,7 @@ model OrderAction {
 
   @@index([orderId])
   @@index([actionType])
-  @@index([createdAt])
+  @@index([createdAt]) // + GIN PARCIAL "OrderAction_void_externalIds_idx" (metadata -> 'externalIds') WHERE VOID: sólo en su migración (D29)
 }
 
 enum ActionType {
@@ -17390,12 +17402,23 @@ model KdsOrder {
   /// Salió en PAPEL DE RESPALDO porque la pantalla no contestó. Pegajoso: nunca vuelve a verse como activa.
   fallbackPrintedAt DateTime?
 
+  /// Preparación por producto (v1): cuándo la cocina terminó SU parte (nada retenido, pendiente ni preparando). Desde ahí
+  /// la comanda sale del tablero y entra a «Recientes» una hora; `status` sigue siendo READY hasta que la caja entregue
+  /// (founder, 20-nov-2026, D17). `null` mientras la cocina tenga trabajo, y otra vez al regresarla con «Deshacer».
+  kitchenDoneAt DateTime?
+  /// Se archivó sola al acabar su día del negocio con la cuenta ya cerrada (job `kds-archive-closed-day`). No se borra ni cambia
+  /// de estado: sólo deja la pantalla de cocina (la caja la sigue viendo en «Servicio y entregas» si falta entregar algo, y el
+  /// aviso de «listo» a las plataformas no la toma por archivada — Codex r1 #1 y #3). Queda en la bitácora.
+  archivedAt    DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   /// El folio (spec 2026-09-27 §1). Se construye CONCURRENTLY en su propia migración.
   @@unique([venueId, sourceKey])
   @@index([venueId, status])
+  /// El archivado del día (D17) busca en TODOS los negocios las comandas sin archivar más viejas. CONCURRENTLY, su propia migración.
+  @@index([archivedAt, status, createdAt])
   @@index([venueId, preparationVersion, status, id])
   /// Para "¿qué falta imprimir aquí?" sin recorrer la tabla entera.
   @@index([venueId, printedAt])
@@ -22283,6 +22306,9 @@ model CrmWhatsappMessage {
 
   @@index([contactPhone, sentAt])
   @@index([phoneNumberId, sentAt])
+  // 🔴 ÍNDICE CUBRIENTE MANTENIDO A MANO — Prisma no tiene INCLUDE en `@@index`; vive sólo en la migración
+  // `20261120200000_crm_whatsapp_message_chat_cover_idx_concurrently`: ("contactPhone", "sentAt") INCLUDE ("receivedAt").
+  // Lo lee la lista de chats del CRM (`services/crm/whatsapp.service.ts`) como index-only scan. No lo quites.
 }
 
 enum OrigenDeLaHora {

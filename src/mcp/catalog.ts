@@ -81,6 +81,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   commission_payouts: 'read',
   comp_table_check: 'write',
   configure_auto_reorder: 'write',
+  configure_kitchen_release: 'write',
   configure_loyalty: 'write',
   configure_receipt_layout: 'write',
   configure_service_courses: 'write',
@@ -123,6 +124,9 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   // Correo del CRM (fase 2): sólo lectura. Mandar una campaña o un correo NO es una herramienta: es masivo y no se deshace.
   crm_list_email_templates: 'read',
   crm_campaign_status: 'read',
+  // WhatsApp de ventas (fase 3): leer los chats, nunca mandar. Sólo el superadmin real, sólo el MCP libre.
+  crm_whatsapp_chats: 'read',
+  crm_whatsapp_thread: 'read',
   create_product: 'write',
   create_product_with_variants: 'write',
   create_products: 'write',

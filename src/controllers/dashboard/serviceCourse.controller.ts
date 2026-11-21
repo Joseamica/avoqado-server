@@ -19,6 +19,14 @@ export async function putVenue(req: Request, res: Response, next: NextFunction) 
   }
 }
 
+export async function putKitchenRelease(req: Request, res: Response, next: NextFunction) {
+  try {
+    res.json({ success: true, data: await courses.setKitchenRelease(req.params.venueId, req.body?.enabled, actorFor(req)) })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function getOrganization(req: Request, res: Response, next: NextFunction) {
   try {
     res.json({ success: true, data: await courses.getOrganizationServiceCourses(req.params.orgId) })

@@ -15,6 +15,9 @@ keywords:
   - checador
   - asistencia
   - reloj checador
+  - olvidé marcar mi salida
+  - no me deja checar entrada
+  - salida olvidada
 ---
 
 ## Antes de empezar
@@ -28,6 +31,7 @@ La tarjeta de asistencia sale arriba del inicio cuando el negocio pide registrar
 
 ## Problemas frecuentes
 
+- Si ayer (u otro día) no registraste tu salida, tu turno se cerró solo al terminar el día como «Salida olvidada» y lo revisa tu gerente en Asistencia: hoy registra tu entrada normal (paso 1). Si al tocar *Registrar Salida* te dice que tu entrada de otro día se cerró como salida olvidada, haz lo mismo.
 - Si aparece «Registra tu entrada» en los botones del inicio, el negocio pide registrar la entrada antes de trabajar: haz el paso 1.
 - Si la terminal pide una foto, toca *Tomar Foto*, toma la foto y toca *Confirmar y Continuar*.
 - Si no regresas al inicio y la pantalla muestra *ENTRADA* o *Volver*, la terminal no pudo confirmar tu entrada y puede que sí se haya guardado: con internet, regresa al inicio y mira la tarjeta de asistencia antes de intentarlo otra vez.

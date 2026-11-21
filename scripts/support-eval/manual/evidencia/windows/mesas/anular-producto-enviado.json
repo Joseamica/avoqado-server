@@ -1,13 +1,13 @@
 {
   "pagina": "windows/mesas/anular-producto-enviado",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b",
-  "version": "2.25.52",
+  "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42",
+  "version": "2.25.55",
   "pasos": [
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 199,
+      "linea": 200,
       "cita": "viewModel.startOrdering(t, onReady = onOpenTableOrder)"
     },
     {
@@ -19,7 +19,7 @@
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
-      "linea": 2042,
+      "linea": 2043,
       "cita": ".clickable(enabled = !item.isCortesia) { onSentItemTap(item) }"
     },
     {
@@ -31,31 +31,31 @@
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 1074,
+      "linea": 1079,
       "cita": "Text(\"Motivo\", fontWeight = FontWeight.SemiBold)"
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 999,
+      "linea": 1004,
       "cita": "\"El cliente cambió de parecer\","
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 1054,
+      "linea": 1059,
       "cita": "text = \"Anular producto\","
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 1699,
+      "linea": 1724,
       "cita": "showMessage(\"Producto anulado — $reason\")"
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 1069,
+      "linea": 1074,
       "cita": ") { Text(\"Dar de cortesía\") }"
     },
     {
@@ -88,45 +88,61 @@
     {
       "afirmacion": "Si la red se corta a media anulación, dice en gris que no se supo si se anuló",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 1706
+      "linea": 1731
     },
     {
       "afirmacion": "Sin red no se anula ni se encola: dice «Sin conexión — anular un producto enviado necesita internet…»",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 1692
+      "linea": 1717
     },
     {
       "afirmacion": "Sin internet, «Volver a imprimir pedido» no saca lo ya enviado y dice «Sin conexión: lo que ya se envió no se puede reimprimir porque otra caja pudo cambiarlo; se podrá al volver el internet.»",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 176
+      "linea": 188
     },
     {
       "afirmacion": "Si no se pudo leer la cuenta, lo ya enviado no sale y se muestra en gris (showSinRed)",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 2462
+      "linea": 2487
     },
     {
       "afirmacion": "Si la ronda se confirma mientras sale otra hoja, dice «Esta ronda se acaba de confirmar: vuelve a tocar «Volver a imprimir»…»",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 180
+      "linea": 192
     },
     {
       "afirmacion": "Con internet, una ronda de esta caja que el servidor aún no confirma no sale de lo guardado: dice «Una ronda de esta caja todavía no tiene confirmación del servidor: salió lo que la cuenta ya trae; lo demás sale al reimprimir cuando se confirme.»",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 184
+      "linea": 196
+    },
+    {
+      "afirmacion": "Si la pantalla de cocina está sin internet, sigue viendo el producto como pendiente hasta que vuelva su internet: la copia del servidor (con «ANULADO») gana por folio cuando la vuelve a leer",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
+      "linea": 156
     }
   ],
   "rutas": [
     {
       "ruta": "La cuenta de la mesa se abre al tocar la mesa ocupada en Mesas",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 199
+      "linea": 200
     }
   ],
   "aparato": {
     "estado": "NO PROBADO EN APARATO",
-    "fotos": [],
-    "filasCreadas": []
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/mesas/anular-producto-enviado/1-ronda-enviada.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/mesas/anular-producto-enviado/2-motivo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/mesas/anular-producto-enviado/3-anulando.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/mesas/anular-producto-enviado/4-producto-anulado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/mesas/anular-producto-enviado/5-unico-producto-en-gris.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/mesas/anular-producto-enviado/6-sin-red-no-supimos.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/mesas/anular-producto-enviado/7-pin-de-gerente.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/mesas/anular-producto-enviado/8-autorizado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/windows/mesas/anular-producto-enviado/9-cocina-anulado-tachado.png"
+    ],
+    "filasCreadas": [],
+    "nota": "Recorrido hecho el 2026-11-20 en el POS de WINDOWS del Alien (2.25.53-escritorio compilado en WSL de 0b11e3c9 = D7 + develop 8448fc66; y 2.25.54-escritorio de integra/cocina-conjunta abed24f3 como caja y pantalla de cocina): anular con motivo, único producto en gris, sin red «Sin conexión: no supimos si el producto se anuló…», mesero con PIN de gerente y «ANULADO» tachado en la pantalla de cocina. Queda NO PROBADO porque no se guardó el sha256 del paquete de WINDOWS que se instaló (la carpeta de salida se sobrescribió con la compilación siguiente); falta repetirlo con el paquete 2.25.55 y anotar su sha256."
   },
   "codex": {
     "lote": 11,

@@ -1,13 +1,13 @@
 {
   "pagina": "android/mesas/anular-producto-enviado",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b",
-  "version": "2.25.52",
+  "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42",
+  "version": "2.25.55",
   "pasos": [
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 199,
+      "linea": 200,
       "cita": "viewModel.startOrdering(t, onReady = onOpenTableOrder)"
     },
     {
@@ -19,7 +19,7 @@
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
-      "linea": 2042,
+      "linea": 2043,
       "cita": ".clickable(enabled = !item.isCortesia) { onSentItemTap(item) }"
     },
     {
@@ -31,31 +31,31 @@
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 1074,
+      "linea": 1079,
       "cita": "Text(\"Motivo\", fontWeight = FontWeight.SemiBold)"
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 999,
+      "linea": 1004,
       "cita": "\"El cliente cambió de parecer\","
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 1054,
+      "linea": 1059,
       "cita": "text = \"Anular producto\","
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 1699,
+      "linea": 1724,
       "cita": "showMessage(\"Producto anulado — $reason\")"
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 1069,
+      "linea": 1074,
       "cita": ") { Text(\"Dar de cortesía\") }"
     },
     {
@@ -88,45 +88,65 @@
     {
       "afirmacion": "Si la red se corta a media anulación, dice en gris que no se supo si se anuló",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 1706
+      "linea": 1731
     },
     {
       "afirmacion": "Sin red no se anula ni se encola: dice «Sin conexión — anular un producto enviado necesita internet…»",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 1692
+      "linea": 1717
     },
     {
       "afirmacion": "Sin internet, «Volver a imprimir pedido» no saca lo ya enviado y dice «Sin conexión: lo que ya se envió no se puede reimprimir porque otra caja pudo cambiarlo; se podrá al volver el internet.»",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 176
+      "linea": 188
     },
     {
       "afirmacion": "Si no se pudo leer la cuenta, lo ya enviado no sale y se muestra en gris (showSinRed)",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 2462
+      "linea": 2487
     },
     {
       "afirmacion": "Si la ronda se confirma mientras sale otra hoja, dice «Esta ronda se acaba de confirmar: vuelve a tocar «Volver a imprimir»…»",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 180
+      "linea": 192
     },
     {
       "afirmacion": "Con internet, una ronda de esta caja que el servidor aún no confirma no sale de lo guardado: dice «Una ronda de esta caja todavía no tiene confirmación del servidor: salió lo que la cuenta ya trae; lo demás sale al reimprimir cuando se confirme.»",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
-      "linea": 184
+      "linea": 196
+    },
+    {
+      "afirmacion": "Si la pantalla de cocina está sin internet, sigue viendo el producto como pendiente hasta que vuelva su internet: la copia del servidor (con «ANULADO») gana por folio cuando la vuelve a leer",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
+      "linea": 156
     }
   ],
   "rutas": [
     {
       "ruta": "La cuenta de la mesa se abre al tocar la mesa ocupada en Mesas",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
-      "linea": 199
+      "linea": 200
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "aparato": "SAMSUNG (tableta Android del laboratorio del Alien) como caja, con la D3 del mismo laboratorio como pantalla de cocina (estación Cocina)",
+    "version": "2.25.54-dev, copia de QA com.avoqado.pos.flautasqa compilada de integra/cocina-conjunta-v5 (51521a62), con el mismo app/src/main y desktop que develop 9ffba05b (la que sale como 2.25.55); contra el SERVIDOR de QA integra/servidor-cocina (a38bfd891, PR #556) en una copia de la base",
+    "apkSha256": "14430dfb903716125e56ba15d1aae0f17daa29e933bc5fb0c63e8befe605d0ec",
+    "fecha": "2026-11-21",
+    "fotos": [
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/mesas/anular-producto-enviado/1-ronda-enviada.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/mesas/anular-producto-enviado/2-motivo.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/mesas/anular-producto-enviado/3-motivo-elegido.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/mesas/anular-producto-enviado/4-producto-anulado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/mesas/anular-producto-enviado/5-cuenta-baja.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/mesas/anular-producto-enviado/6-cocina-anulado-tachado.png",
+      "docs/audit/2026-11-11-soporte-whatsapp-ampliar/jornada-aparatos/android/mesas/anular-producto-enviado/7-cocina-sale-al-terminar.png"
+    ],
+    "filasCreadas": [
+      "ITEM_VOIDED (motivo «El cliente cambió de parecer», $30) y KITCHEN_ORDER_CANCEL de la orden ORD-0000000000005 en la copia av-db-25-flautasqa, borrada al terminar"
+    ],
+    "nota": "Mesa M3 con Agua $20 + Café $30 enviados; tocar el Café abre «Elige el motivo…», «Anular producto» se activa al elegir el motivo; «Producto anulado — El cliente cambió de parecer» y «Pagar $20.00». En ~13 s la pantalla de cocina muestra «ANULADO 1x Café Americano» tachado, «1 · Cancelado», sin botones; al marcar listo el Agua la comanda sale sola. Gerente sin PIN. El PIN de gerente y el sin internet se vieron en WINDOWS (misma app)."
   },
   "codex": {
     "lote": 11,

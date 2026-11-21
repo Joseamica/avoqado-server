@@ -10,6 +10,7 @@ import {
   getOrganizationServiceCourses,
   putVenueServiceCourses,
   putOrganizationServiceCourses,
+  setKitchenRelease,
 } from '@/services/service-courses/serviceCourse.service'
 import { serviceCourseCatalogSchema, MAX_SERVICE_COURSES } from '@/services/service-courses/serviceCourseContract'
 import { listKitchenPreparation } from '@/services/kds/kitchenPreparation.service'
@@ -52,11 +53,39 @@ export function registerServiceCourseTools(server: McpServer, scope: McpScope) {
   }
   server.tool(
     'service_courses',
-    'Service courses (tiempos): effective ordered list, inheritance, revision and Pro access. Pass exactly one venueId or organizationId; organization list requires organization OWNER. Venue settings:read.',
+    'Service courses (tiempos): effective ordered list, inheritance, revision and Pro access. For a venue it also says kitchenCanRelease (whether the kitchen screen may release held courses). Pass exactly one venueId or organizationId; organization list requires organization OWNER. Venue settings:read.',
     target,
     async input => {
       await authorize(input)
       return text(input.venueId ? await getVenueServiceCourses(input.venueId) : await getOrganizationServiceCourses(input.organizationId!))
+    },
+  )
+  server.tool(
+    'configure_kitchen_release',
+    'Turn on/off «La cocina puede liberar tiempos desde su pantalla» for ONE venue: when on, kitchen staff can release a held course from the kitchen screen (the register still can). TWO STEPS: preview first, then confirm:true after user authorization. Pro/TABLE_SERVICE and settings:manage. Does not change payments or inventory.',
+    { venueId: z.string(), enabled: z.boolean(), confirm: z.boolean().optional() },
+    async input => {
+      guard.venueFilter(input.venueId)
+      guard.requirePermission('settings:manage', input.venueId)
+      const current = await getVenueServiceCourses(input.venueId)
+      if (!current.enabled) throw new ScopeError('Los tiempos de servicio requieren Pro o acceso a Mesas')
+      const label = (on: boolean) => (on ? 'La cocina puede liberar tiempos' : 'Sólo la caja libera tiempos')
+      if (!input.confirm)
+        return text({
+          requiresConfirmation: true,
+          venueName: current.venueName,
+          preview: `${label(current.kitchenCanRelease)} → ${label(input.enabled)}`,
+        })
+      const result = await setKitchenRelease(input.venueId, input.enabled, { staffId: scope.staffId, source: 'customer-mcp' })
+      await auditMcpWrite(scope, {
+        action: 'KITCHEN_RELEASE_MCP_CONFIRMED',
+        entity: 'VenueSettings',
+        entityId: input.venueId,
+        venueId: input.venueId,
+        organizationId: current.organizationId,
+        data: { before: current.kitchenCanRelease, after: input.enabled },
+      })
+      return text({ ok: true, venueName: result.venueName, kitchenCanRelease: result.kitchenCanRelease })
     },
   )
   server.tool(

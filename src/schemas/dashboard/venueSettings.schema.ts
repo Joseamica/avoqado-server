@@ -50,6 +50,8 @@ export const UpdateVenueSettingsSchema = z.object({
     attendanceLateAlertEnabled: z.boolean().optional(),
     // Turnos rotativos (fase 1 "como Sesame"): interruptor explícito por venue.
     rotatingShiftsEnabled: z.boolean().optional(),
+    // «Salida olvidada» (hz:f0a89d19:D3): prendida de fábrica; el negocio la apaga en Equipo → Asistencia.
+    salidaOlvidadaEnabled: z.boolean().optional(),
     cashReconciliationEnabled: z.boolean().optional(),
     requirePinLogin: z.boolean().optional(),
     // Propiedad de mesa (PRO): solo el mesero dueño modifica/cierra sus mesas;

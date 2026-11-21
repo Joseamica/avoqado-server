@@ -1,8 +1,8 @@
 {
   "version": 1,
   "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-20T23:45:31.791Z",
-  "approvedHash": "7b7a38af2eabf08f518a420496c04050167eb07d449ea1a1e24e24f4f2314c60",
+  "approvedAt": "2026-11-21T14:14:08.826Z",
+  "approvedHash": "4c999c8eadd2f85c95e131827a9a27327337709da541f12af8c9ac274e3afb32",
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -91,7 +91,7 @@
       "requiredPermissions": []
     },
     "android/impresoras/la-comanda-no-sale": {
-      "sha256": "96711a8277aea282ab50b53be4c0eec45004073e250287083251a5512ceafa9d",
+      "sha256": "02ff685a8d36712e75d26129f92f87582ec0cff25e95442b7c5839905a2dc808",
       "requiredPermissions": []
     },
     "android/impresoras/pantalla-de-cocina-sin-internet": {
@@ -143,10 +143,25 @@
       "featureCode": "TABLE_SERVICE",
       "gateKind": "FEATURE"
     },
+    "android/mesas/anular-producto-enviado": {
+      "sha256": "d709ff2a5500d9463ec73bc6c042ccc2575cb90f8537628dabdd11897bfab77d",
+      "requiredPermissions": [],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
     "android/mesas/mover-o-unir-cuentas": {
       "sha256": "89889d14504557cb01b7f4865f1e1ea3bcfa97fb360b33b49beca6f8966c9485",
       "requiredPermissions": [
         "tables:read"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
+    "android/mesas/tiempos-cocina-y-liberar": {
+      "sha256": "7c788ee78ae1f48d3af78b7f8404972307200ebe4f0a67c592c9ed70c79e8257",
+      "requiredPermissions": [
+        "orders:read",
+        "orders:update"
       ],
       "featureCode": "TABLE_SERVICE",
       "gateKind": "FEATURE"
@@ -158,7 +173,7 @@
       ]
     },
     "android/ordenes/cambiar-o-quitar-articulos-del-carrito": {
-      "sha256": "301832543a7b7d44878fd6a84cad2439de3163c7c4184c1dae6516623da039ef",
+      "sha256": "29bfe18b1cc68e1a3dfb78e8c7286ea9afbf73ab821c47ca46ed332f5951cbb6",
       "requiredPermissions": []
     },
     "android/personal/cambiar-de-usuario": {
@@ -166,7 +181,7 @@
       "requiredPermissions": []
     },
     "android/personal/checar-entrada-y-salida": {
-      "sha256": "4037a2d4222d6cb88a703d792c0f9bd0bfded1e1c33baac4bf773308c7ba0e93",
+      "sha256": "f5b565762bb942e46527809804ddc0756cc1192c5c49a3edac754abac39ddc6d",
       "requiredPermissions": []
     },
     "android/recibos/imprimir-y-reimprimir-recibo": {
@@ -801,7 +816,7 @@
       "requiredPermissions": []
     },
     "tpv/asistencia/registrar-entrada-y-salida": {
-      "sha256": "e01aaee8737027b568e964d66591ae01511c5d46d9e18716eedabe4dc52896ee",
+      "sha256": "32684b003ba6ffa83d5c678927c2588de87bb8c8b939bd8032de300beaa8cdff",
       "requiredPermissions": []
     },
     "tpv/ayuda/actualizar-la-app-pax": {
@@ -1065,7 +1080,7 @@
       "requiredPermissions": []
     },
     "windows/impresoras/la-comanda-no-sale": {
-      "sha256": "267ba4739f4f3bc71ab0e8c1081e0b5c8ace245f85874cb18a0392363d3ffb14",
+      "sha256": "9a1fd0ecf06117840070917a2e0dfce9c236e336c540017c87b76c6660580f17",
       "requiredPermissions": []
     },
     "windows/impresoras/pantalla-de-cocina-sin-internet": {
@@ -1123,6 +1138,15 @@
       "featureCode": "TABLE_SERVICE",
       "gateKind": "FEATURE"
     },
+    "windows/mesas/tiempos-cocina-y-liberar": {
+      "sha256": "b33e58341c970908ee36c70e9a507db91f07d682b35c40e2663ef1f86f29d627",
+      "requiredPermissions": [
+        "orders:read",
+        "orders:update"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
     "windows/ordenes/agregar-productos-a-la-venta": {
       "sha256": "6276f9a5e3f4745cbde2be969fc297ca1cd372a18a05a66cbccd464718c47247",
       "requiredPermissions": [
@@ -1130,7 +1154,7 @@
       ]
     },
     "windows/ordenes/cambiar-o-quitar-articulos-del-carrito": {
-      "sha256": "a5f2aa22887350a58530495403fec0edf91ab424b40fd7d4f0711c201b93a982",
+      "sha256": "70ba3e9e7e87a2a2fc329796ce8b58e846abd15c4323b0b51ae1eb626c6eeca9",
       "requiredPermissions": []
     },
     "windows/personal/cambiar-de-usuario": {
@@ -1138,7 +1162,7 @@
       "requiredPermissions": []
     },
     "windows/personal/checar-entrada-y-salida": {
-      "sha256": "78fc9e35cdd63e74f314177ab93ef440f6cf2c17fd82ee0abbb961ebba9e3339",
+      "sha256": "4bd6ea1f12850938c044895e1b7464cd46541425a36f1f6f93e147e5b44eb5c7",
       "requiredPermissions": []
     },
     "windows/recibos/imprimir-y-reimprimir-recibo": {

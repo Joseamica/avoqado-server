@@ -21,6 +21,8 @@ export const VenueTimeEntriesQuerySchema = z.object({
     status: z.nativeEnum(TimeEntryStatus).optional(),
     limit: z.coerce.number().int().min(1).max(200).optional(),
     offset: z.coerce.number().int().min(0).optional(),
+    // «Por revisar» (D3): sólo las «Salida olvidada · revisar», de cualquier fecha (el gerente llega a todas).
+    salidaOlvidada: z.enum(['true'], { errorMap: () => ({ message: 'salidaOlvidada sólo acepta «true»' }) }).optional(),
   }),
 })
 
@@ -179,5 +181,13 @@ export const PublishWorkShiftAssignmentsSchema = z.object({
     to: shiftIsoDate,
     /** Revisión de cada borrador que el gerente tiene enfrente (CAS todo-o-nada; 409 si alguno cambió). */
     drafts: z.array(z.object({ id: z.string().cuid(), updatedAt: z.string().datetime() })).max(600),
+  }),
+})
+
+/** PUT /venues/:venueId/time-entries/:timeEntryId/salida-olvidada — el gerente corrige una «Salida olvidada · revisar». */
+export const CorregirSalidaOlvidadaSchema = z.object({
+  params: z.object({ venueId: z.string().cuid(), timeEntryId: z.string().cuid() }),
+  body: z.object({
+    clockOutTime: z.string().datetime({ message: 'La hora de salida debe ser una fecha ISO', offset: true }),
   }),
 })

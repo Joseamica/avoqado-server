@@ -128,4 +128,7 @@ export const DATABASE_JOB_SCHEDULES = {
   // Liga por prenda: suelta los apartados vencidos (15 min) y cierra su intento en Stripe. Cada minuto en el segundo :57, libre en
   // todo el archivo (vecinos :56 gcal y :58 exportes). Entrada por el índice (status, expiresAt), tope de 100.
   paymentLinkHoldSweeper: '57 * * * * *',
+  // D17 (Flautas): archiva las comandas de un día del negocio terminado con la cuenta cerrada. Cada 15 min en los minutos 7, 22,
+  // 37 y 52 (lejos del :00 y de los */5 y */10) y en el segundo :09, libre en todo el archivo el 20-nov. Tope de 500 por pasada.
+  kdsArchiveClosedDay: '9 7,22,37,52 * * * *',
 } as const
