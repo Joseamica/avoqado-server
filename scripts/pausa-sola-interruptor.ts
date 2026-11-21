@@ -9,13 +9,16 @@
  *   npx tsx scripts/pausa-sola-interruptor.ts --ver [--base render]
  *   npx tsx scripts/pausa-sola-interruptor.ts --prender [--minutos 20] --por <quién> [--base render] --apply --confirm-db <identidad>
  *   npx tsx scripts/pausa-sola-interruptor.ts --apagar --por <quién> [--base render] --apply --confirm-db <identidad>
- * La identidad es lo que la BASE dice que es: `cluster:<system_identifier>/base:<current_database()>/esquema:<current_schema()>`.
+ * La identidad es lo que la BASE dice que es, en una sola cadena sin espacios:
+ *   `cluster:<system_identifier>/servidor:<dirección:puerto>/base:<current_database()>/esquema:<current_schema()>`
+ * El servidor es la dirección y el puerto que atienden ESTA conexión: distingue una copia física, que conserva el clúster (r7 #2).
  * 🔴 Contra producción (--base render) sólo con el «sí, en prod» del founder.
  *
- * Rediseño tras Codex p2v5-r6 (cuatro rondas de la misma familia: el destino deducido de la URL no era el que abría Prisma; rutas con
- * `/`, letras codificadas, `search_path`, `DATABASE_CONNECTION_LIMIT`, un túnel a localhost). La URL ya no se analiza para decidir nada:
- * `--base` sólo elige la variable (y `local` pide un host de esta máquina como primera barrera). Lo que se confirma es la identidad que
- * contesta Postgres en la MISMA transacción que escribe, después del candado y antes de escribir, y sólo en el esquema que lee la tienda.
+ * Rediseño tras Codex p2v5-r6 (cuatro rondas de la misma familia: el destino deducido de la URL no era el que abría Prisma; rutas
+ * con `/`, letras codificadas, `search_path`, `DATABASE_CONNECTION_LIMIT`, un túnel a localhost). La URL ya no decide nada: `--base`
+ * sólo elige la variable (y `local` pide un host de esta máquina, sin `?host=` ni `?hostaddr=`, como primera barrera). Lo que se
+ * confirma es la identidad que contesta Postgres en la MISMA transacción que escribe, después del candado y antes de escribir, y sólo
+ * en el esquema que lee la tienda.
  */
 import dotenv from 'dotenv'
 import type { Prisma } from '@prisma/client'
@@ -23,7 +26,7 @@ import type { Prisma } from '@prisma/client'
 /** Primera barrera de `--base local`, no la confirmación: un túnel puede traer otra base a localhost (eso lo ataja la identidad). */
 const HOSTS_DE_ESTA_MAQUINA = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
 
-export type IdentidadDeLaBase = { cluster: string; base: string; esquema: string | null }
+export type IdentidadDeLaBase = { cluster: string; servidor: string; base: string; esquema: string | null }
 type ConsultaCruda = Pick<Prisma.TransactionClient, '$queryRaw'>
 
 const leerValor = (argv: string[], bandera: string): string | undefined => {
@@ -40,12 +43,18 @@ export function elegirBase(argv: string[], env: NodeJS.ProcessEnv): string {
   if (!url) throw new Error(`--base ${base}: falta ${variable} en el entorno.`)
   if (base === 'local') {
     let host = ''
+    let otroHost = false
     try {
-      host = new URL(url).hostname
+      const u = new URL(url)
+      host = u.hostname
+      // Codex p2v5-r7 #3: con `?host=` (o `?hostaddr=`) Prisma conecta a ESE host aunque la dirección diga localhost.
+      otroHost = u.searchParams.has('host') || u.searchParams.has('hostaddr')
     } catch {
       // se reporta abajo, sin el valor
     }
-    if (!HOSTS_DE_ESTA_MAQUINA.has(host)) throw new Error('--base local: DATABASE_URL no apunta a esta máquina (su valor no se imprime).')
+    if (!HOSTS_DE_ESTA_MAQUINA.has(host) || otroHost) {
+      throw new Error('--base local: DATABASE_URL no apunta a esta máquina (su valor no se imprime).')
+    }
   }
   return url
 }
@@ -54,14 +63,17 @@ export function elegirBase(argv: string[], env: NodeJS.ProcessEnv): string {
 export async function leerIdentidad(db: ConsultaCruda): Promise<IdentidadDeLaBase> {
   const [fila] = await db.$queryRaw<IdentidadDeLaBase[]>`
     SELECT (SELECT system_identifier::text FROM pg_control_system()) AS cluster,
+           coalesce(host(inet_server_addr()), 'socket') || ':' || coalesce(inet_server_port()::text, '-') AS servidor,
            current_database() AS base,
            current_schema() AS esquema`
-  if (!fila?.cluster || !fila.base) throw new Error('La base no dijo quién es (clúster y nombre): no se escribe.')
+  if (!fila?.cluster || !fila.servidor || !fila.base)
+    throw new Error('La base no dijo quién es (clúster, servidor y nombre): no se escribe.')
   return fila
 }
 
 /** Una sola cadena, sin espacios (se copia tal cual en --confirm-db). */
-export const textoDeIdentidad = (i: IdentidadDeLaBase): string => `cluster:${i.cluster}/base:${i.base}/esquema:${i.esquema ?? '(ninguno)'}`
+export const textoDeIdentidad = (i: IdentidadDeLaBase): string =>
+  `cluster:${i.cluster}/servidor:${i.servidor}/base:${i.base}/esquema:${i.esquema ?? '(ninguno)'}`
 
 /** Lo que corre en la transacción que escribe: la base confirma quién es y que escribe en el esquema que lee la tienda. */
 export function exigirIdentidad(confirmacion: string | undefined, esquemaDeLaTienda: string) {

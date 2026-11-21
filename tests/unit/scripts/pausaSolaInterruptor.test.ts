@@ -10,8 +10,9 @@ import { elegirBase, exigirIdentidad, leerIdentidad, main, textoDeIdentidad } fr
 
 const LOCAL = 'postgresql://yo@localhost:5432/av-db-25-pruebas'
 const RENDER = 'postgresql://yo@dpg-d4abc123-a.oregon-postgres.render.com/avoqado_prod'
-const IDENTIDAD = { cluster: '7142610626013088922', base: 'av-db-25-pruebas', esquema: 'public' }
-const TEXTO = 'cluster:7142610626013088922/base:av-db-25-pruebas/esquema:public'
+const IDENTIDAD = { cluster: '7142610626013088922', servidor: '127.0.0.1:5432', base: 'av-db-25-pruebas', esquema: 'public' }
+const TEXTO = 'cluster:7142610626013088922/servidor:127.0.0.1:5432/base:av-db-25-pruebas/esquema:public'
+const SUYA = 'cluster:7142610626013088922/servidor:127.0.0.1:5432/base:av-db-25-pruebas/esquema:yo'
 
 const raw = () => prismaMock.$queryRaw as unknown as jest.Mock
 const textoSql = (llamada: unknown[]) => (llamada[0] as string[]).join('?')
@@ -24,16 +25,22 @@ const baseQueDice = (
     Promise.resolve(partes.join('?').includes('pg_control_system') ? (identidad ? [identidad] : []) : filasDelInsert),
   )
 const llamadasDe = (fragmento: string) => raw().mock.calls.filter(c => textoSql(c).includes(fragmento))
+/** Las escrituras del interruptor: el INSERT de «Prender» ($queryRaw) y el de «Apagar» ($executeRaw). */
+const escrituras = () =>
+  [...raw().mock.calls, ...(prismaMock.$executeRaw as unknown as jest.Mock).mock.calls].filter(c => textoSql(c).includes('INSERT INTO'))
 const ordenDe = (fragmento: string) => raw().mock.invocationCallOrder[raw().mock.calls.findIndex(c => textoSql(c).includes(fragmento))]
 
 describe('identidad de la base', () => {
-  it('se pregunta a Postgres (clúster, base y esquema) y se escribe como una sola cadena sin espacios', async () => {
+  it('se pregunta a Postgres (clúster, servidor, base y esquema) y se escribe como una sola cadena sin espacios', async () => {
     baseQueDice(IDENTIDAD)
     const identidad = await leerIdentidad(prismaMock as any)
     expect(identidad).toEqual(IDENTIDAD)
     expect(textoDeIdentidad(identidad)).toBe(TEXTO)
     const sql = textoSql(raw().mock.calls[0])
     expect(sql).toContain('system_identifier')
+    // Codex p2v5-r7 #2: una copia física conserva el clúster; la dirección y el puerto que atienden ESTA conexión la distinguen.
+    expect(sql).toContain("coalesce(host(inet_server_addr()), 'socket')")
+    expect(sql).toContain('inet_server_port()')
     expect(sql).toContain('current_database()')
     expect(sql).toContain('current_schema()')
   })
@@ -49,9 +56,10 @@ describe('identidad de la base', () => {
     await expect(exigirIdentidad(undefined, 'public')(prismaMock as any)).rejects.toThrow(TEXTO)
     await expect(exigirIdentidad(TEXTO.replace('pruebas', 'otra'), 'public')(prismaMock as any)).rejects.toThrow(/--confirm-db/)
     baseQueDice({ ...IDENTIDAD, esquema: 'yo' })
-    await expect(
-      exigirIdentidad('cluster:7142610626013088922/base:av-db-25-pruebas/esquema:yo', 'public')(prismaMock as any),
-    ).rejects.toThrow(/esquema «yo»/)
+    await expect(exigirIdentidad(SUYA, 'public')(prismaMock as any)).rejects.toThrow(/esquema «yo»/)
+    // 🔴 Codex p2v5-r7 #2: la misma base y el mismo clúster en OTRO servidor (una copia física) ya no coincide.
+    baseQueDice({ ...IDENTIDAD, servidor: '10.0.0.7:5433' })
+    await expect(exigirIdentidad(TEXTO, 'public')(prismaMock as any)).rejects.toThrow(/servidor:10\.0\.0\.7:5433/)
   })
 })
 
@@ -64,7 +72,13 @@ describe('elegirBase: sólo elige la variable (y local pide un host de esta máq
   })
 
   it('--base local con una URL que no es de esta máquina se niega sin imprimirla', () => {
-    for (const url of [RENDER, 'no-es-una-url']) {
+    // 🔴 Codex p2v5-r7 #3: `?host=` o `?hostaddr=` mandan a Prisma a otro lado aunque la dirección diga localhost.
+    for (const url of [
+      RENDER,
+      'no-es-una-url',
+      'postgresql://yo@localhost:5432/av-db-25?host=dpg-x.oregon-postgres.render.com',
+      'postgresql://yo@localhost:5432/av-db-25?hostaddr=10.0.0.7',
+    ]) {
       let mensaje = ''
       try {
         elegirBase(['--base', 'local'], { DATABASE_URL: url })
@@ -123,26 +137,24 @@ describe('main', () => {
     await expect(main(['--apagar', '--por', 'founder', '--apply', '--confirm-db', otra], { DATABASE_URL: LOCAL })).rejects.toThrow(
       /--confirm-db/,
     )
-    expect(llamadasDe('INSERT INTO')).toHaveLength(0)
-    expect(prismaMock.interruptorDePlataforma.upsert).not.toHaveBeenCalled()
+    expect(escrituras()).toHaveLength(0)
   })
 
   it('🔴 fuera del esquema que lee la tienda no escribe, aunque la confirmación coincida con lo que dice la base', async () => {
     baseQueDice({ ...IDENTIDAD, esquema: 'yo' })
-    const suya = 'cluster:7142610626013088922/base:av-db-25-pruebas/esquema:yo'
-    await expect(main(['--apagar', '--por', 'founder', '--apply', '--confirm-db', suya], { DATABASE_URL: LOCAL })).rejects.toThrow(
+    await expect(main(['--apagar', '--por', 'founder', '--apply', '--confirm-db', SUYA], { DATABASE_URL: LOCAL })).rejects.toThrow(
       /esquema «yo»/,
     )
-    expect(prismaMock.interruptorDePlataforma.upsert).not.toHaveBeenCalled()
+    expect(escrituras()).toHaveLength(0)
   })
 
   it('con la identidad correcta, apaga', async () => {
     baseQueDice(IDENTIDAD)
     const env: NodeJS.ProcessEnv = { DATABASE_URL: LOCAL }
     await main(['--apagar', '--por', 'founder', '--apply', '--confirm-db', TEXTO], env)
-    expect(prismaMock.interruptorDePlataforma.upsert).toHaveBeenCalledWith(
-      expect.objectContaining({ update: { desde: null, actualizadoPor: 'founder' } }),
-    )
+    const [apagado] = escrituras()
+    expect(textoSql(apagado)).toContain('INSERT INTO "public"."InterruptorDePlataforma"')
+    expect(apagado).toContain('founder')
     expect(env.DATABASE_URL).toBe(LOCAL)
   })
 })

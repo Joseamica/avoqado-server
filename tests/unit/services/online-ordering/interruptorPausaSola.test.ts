@@ -52,6 +52,18 @@ describe('pausaSolaDesde', () => {
 
 describe('prenderPausaSola / apagarPausaSola', () => {
   const raw = () => prismaMock.$queryRaw as unknown as jest.Mock
+  /** La escritura de «Apagar»: el `$executeRaw` que inserta (el otro `$executeRaw` es el candado). */
+  const escrituraDeApagar = () => {
+    const ejecutar = prismaMock.$executeRaw as unknown as jest.Mock
+    const i = ejecutar.mock.calls.findIndex(c => (c[0] as string[]).join('?').includes('INSERT INTO'))
+    return i < 0
+      ? null
+      : {
+          texto: (ejecutar.mock.calls[i][0] as string[]).join('?'),
+          valores: ejecutar.mock.calls[i].slice(1),
+          orden: ejecutar.mock.invocationCallOrder[i],
+        }
+  }
   const sql = () => {
     const [partes, ...valores] = raw().mock.calls[0]
     return { texto: (partes as string[]).join('?'), valores }
@@ -100,13 +112,14 @@ describe('prenderPausaSola / apagarPausaSola', () => {
     await prenderPausaSola({ por: 'founder' })
     await apagarPausaSola({ por: 'founder' })
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
-    expect(candado()).toHaveBeenCalledTimes(2)
-    const [enPrender, enApagar] = candado().mock.calls
+    // Prender: candado + INSERT ($queryRaw). Apagar: candado + INSERT ($executeRaw).
+    expect(candado()).toHaveBeenCalledTimes(3)
+    const [enPrender, enApagar] = candado().mock.calls.filter(c => (c[0] as string[]).join('?').includes('pg_advisory_xact_lock'))
     expect(textoDe(enPrender)).toContain('pg_advisory_xact_lock(hashtext(')
     expect(enPrender.slice(1)).toEqual(enApagar.slice(1))
     expect(enPrender.slice(1)).toEqual([`interruptor-de-plataforma:${CLAVE_PAUSA_SOLA}`])
     expect(candado().mock.invocationCallOrder[0]).toBeLessThan(raw().mock.invocationCallOrder[0])
-    expect(candado().mock.invocationCallOrder[1]).toBeLessThan(fila().upsert.mock.invocationCallOrder[0])
+    expect(candado().mock.invocationCallOrder[1]).toBeLessThan(escrituraDeApagar()!.orden)
   })
 
   it('🔴 Codex p2v5-r6 #2: el INSERT nombra la tabla con el esquema que lee la tienda (no el primero que encuentre `search_path`)', async () => {
@@ -126,15 +139,15 @@ describe('prenderPausaSola / apagarPausaSola', () => {
     expect(confirmar).toHaveBeenCalledWith(prismaMock)
     expect(candado().mock.invocationCallOrder[0]).toBeLessThan(confirmar.mock.invocationCallOrder[0])
     expect(confirmar.mock.invocationCallOrder[0]).toBeLessThan(raw().mock.invocationCallOrder[0])
-    expect(confirmar.mock.invocationCallOrder[1]).toBeLessThan(fila().upsert.mock.invocationCallOrder[0])
+    expect(confirmar.mock.invocationCallOrder[1]).toBeLessThan(escrituraDeApagar()!.orden)
 
     raw().mockClear()
-    fila().upsert.mockClear()
+    ;(prismaMock.$executeRaw as unknown as jest.Mock).mockClear()
     const niega = jest.fn().mockRejectedValue(new Error('otra base'))
     await expect(prenderPausaSola({ por: 'x', antesDeEscribir: niega })).rejects.toThrow('otra base')
     await expect(apagarPausaSola({ por: 'x', antesDeEscribir: niega })).rejects.toThrow('otra base')
     expect(raw()).not.toHaveBeenCalled()
-    expect(fila().upsert).not.toHaveBeenCalled()
+    expect(escrituraDeApagar()).toBeNull()
   })
 
   it('nunca con menos de 15 min (ni una hora pasada)', async () => {
@@ -144,8 +157,12 @@ describe('prenderPausaSola / apagarPausaSola', () => {
     expect(raw()).not.toHaveBeenCalled()
   })
 
-  it('apagar deja «desde» vacío', async () => {
+  it('🔴 Codex p2v5-r7 #1: apagar deja «desde» vacío con SQL que nombra el esquema de la tienda (no el de la URL de Prisma)', async () => {
     await apagarPausaSola({ por: 'founder' })
-    expect(fila().upsert).toHaveBeenCalledWith(expect.objectContaining({ update: { desde: null, actualizadoPor: 'founder' } }))
+    const escritura = escrituraDeApagar()
+    expect(escritura?.texto).toContain(`INSERT INTO "${ESQUEMA_DE_LA_TIENDA}"."InterruptorDePlataforma"`)
+    expect(escritura?.texto).toMatch(/ON CONFLICT \("clave"\) DO UPDATE\s+SET "desde" = NULL,/)
+    expect(escritura?.valores).toEqual(expect.arrayContaining([CLAVE_PAUSA_SOLA, 'founder']))
+    expect(fila().upsert).not.toHaveBeenCalled()
   })
 })

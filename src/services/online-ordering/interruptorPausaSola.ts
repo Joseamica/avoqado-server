@@ -24,8 +24,9 @@ import prisma from '@/utils/prismaClient'
  */
 export const CLAVE_PAUSA_SOLA = 'pausa-sola'
 /**
- * El esquema de Postgres donde vive la tabla que lee la tienda (Prisma sin `schema` en la URL ni `@@schema`: `public`). El INSERT crudo lo
- * nombra (Codex p2v5-r6 #2: sin él, Postgres usa el primer esquema de `search_path` que tenga la tabla) y el script se niega fuera de él.
+ * El esquema de Postgres donde vive la tabla que lee la tienda (Prisma sin `schema` en la URL ni `@@schema`: `public`). Las dos escrituras
+ * (SQL crudo) lo nombran (Codex p2v5-r6 #2 y r7 #1: sin él, Postgres usa `search_path` y Prisma el esquema de su URL) y el script se niega
+ * fuera de él.
  */
 export const ESQUEMA_DE_LA_TIENDA = 'public'
 /** Cada proceso recuerda lo leído a lo más esto: la hora se fija ≥ 15 min en el futuro, así que todos la ven antes de que llegue. */
@@ -99,7 +100,7 @@ export async function prenderPausaSola(p: { minutos?: number; por: string; antes
   if (!Number.isFinite(minutos) || minutos < MINUTOS_MINIMOS) {
     throw new Error(`La pausa sola se prende al menos ${MINUTOS_MINIMOS} minutos en el futuro (pediste ${minutos}).`)
   }
-  // El esquema va escrito tal cual (es `ESQUEMA_DE_LA_TIENDA`; un nombre no viaja como parámetro).
+  // El esquema va escrito tal cual en las dos escrituras (es `ESQUEMA_DE_LA_TIENDA`; un nombre no viaja como parámetro).
   const filas = await conCandado(
     p.antesDeEscribir,
     tx => tx.$queryRaw<Array<{ desde: Date }>>`
@@ -126,14 +127,18 @@ export async function prenderPausaSola(p: { minutos?: number; por: string; antes
   return desde
 }
 
-/** Apaga el interruptor (la tienda vuelve a portarse como antes de esta función en ≤ `CACHE_MS`). */
+/**
+ * Apaga el interruptor (la tienda vuelve a portarse como antes de esta función en ≤ `CACHE_MS`). SQL que nombra el esquema de la tienda,
+ * como «Prender» (Codex p2v5-r7 #1): con Prisma la tabla iría al esquema de SU URL, que puede no ser el que se confirmó.
+ */
 export async function apagarPausaSola(p: { por: string; antesDeEscribir?: AntesDeEscribir }): Promise<void> {
-  await conCandado(p.antesDeEscribir, tx =>
-    tx.interruptorDePlataforma.upsert({
-      where: { clave: CLAVE_PAUSA_SOLA },
-      create: { clave: CLAVE_PAUSA_SOLA, desde: null, actualizadoPor: p.por },
-      update: { desde: null, actualizadoPor: p.por },
-    }),
+  await conCandado(
+    p.antesDeEscribir,
+    tx => tx.$executeRaw`
+    INSERT INTO "public"."InterruptorDePlataforma" ("clave", "desde", "actualizadoPor", "updatedAt")
+    VALUES (${CLAVE_PAUSA_SOLA}, NULL, ${p.por}, (clock_timestamp() AT TIME ZONE 'UTC'))
+    ON CONFLICT ("clave") DO UPDATE
+      SET "desde" = NULL, "actualizadoPor" = EXCLUDED."actualizadoPor", "updatedAt" = (clock_timestamp() AT TIME ZONE 'UTC')`,
   )
   logger.info('[OnlineOrdering] pausa sola APAGADA', { por: p.por })
 }
