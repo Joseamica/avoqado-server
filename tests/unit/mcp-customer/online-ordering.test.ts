@@ -760,6 +760,42 @@ describe('online_ordering_settings', () => {
     expect(conCaja.cardNadie).not.toHaveProperty('aviso')
     expect(descriptions.get('online_ordering_settings')).toMatch(/cardNadie/)
   })
+
+  it('D661 · M2: con una caja avisando a tiempo, el aviso dice la causa de verdad: el modo en que alguien acepta, o Stripe que todavía no cobra; nunca culpa a la caja', async () => {
+    const stripeListo = [
+      { id: 'em1', chargesEnabled: true, providerCredentials: { connectAccountId: 'acct_1' }, provider: { code: 'STRIPE_CONNECT' } },
+    ]
+    // Una caja recibió una respuesta rápida hace 10 s.
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({
+      lastCardAlertPollAt: new Date(Date.now() - 10_000),
+      cardAlertFastPollAt: new Date(Date.now() - 10_000),
+    } as any)
+
+    // Prendida, pero la tienda está en el modo en que alguien acepta los pedidos: ahí esta tarjeta no aplica.
+    mockGetSettings.mockResolvedValue({ ...AJUSTES, requiresAcceptance: true, cardOnlineNadie: true, acceptsCardOnline: false })
+    prismaMock.ecommerceMerchant.findMany.mockResolvedValue(stripeListo as any)
+    const miEquipo = parse(await call('online_ordering_settings', { venueId: 'v1' }))
+    expect(miEquipo.cardNadie).toMatchObject({ enabled: true, offeredNow: false })
+    expect(miEquipo.cardNadie.aviso).toMatch(/alguien acepta los pedidos/)
+    expect(miEquipo.cardNadie.aviso).not.toMatch(/caja/)
+
+    // «No, entran solos» sin una cuenta de Stripe que pueda cobrar: la causa es Stripe.
+    mockGetSettings.mockResolvedValue({ ...AJUSTES, requiresAcceptance: false, cardOnlineNadie: true, acceptsCardOnline: false })
+    prismaMock.ecommerceMerchant.findMany.mockResolvedValue([])
+    const sinStripe = parse(await call('online_ordering_settings', { venueId: 'v1' }))
+    expect(sinStripe.cardNadie).toMatchObject({ enabled: true, offeredNow: false })
+    expect(sinStripe.cardNadie.aviso).toMatch(/Stripe/)
+    expect(sinStripe.cardNadie.aviso).not.toMatch(/caja/)
+
+    // Con Stripe listo y sin caja avisando a tiempo: ahí sí, la caja (el aviso de siempre).
+    prismaMock.ecommerceMerchant.findMany.mockResolvedValue(stripeListo as any)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({
+      lastCardAlertPollAt: new Date(Date.now() - 60 * 60_000),
+      cardAlertFastPollAt: null,
+    } as any)
+    const sinCaja = parse(await call('online_ordering_settings', { venueId: 'v1' }))
+    expect(sinCaja.cardNadie.aviso).toMatch(/ninguna caja está avisando/)
+  })
 })
 
 describe('online_ordering_configure', () => {

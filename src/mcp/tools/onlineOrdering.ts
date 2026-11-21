@@ -14,6 +14,7 @@ import { getInboxOrder, listInbox, type InboxOrder } from '@/services/online-ord
 import { formatoPesos } from '@/services/giftCards/giftCardLimits'
 import { listFolios } from '@/services/online-ordering/folios.service'
 import { MENSAJE_ABRIR_DESDE_LA_CAJA, mensajeNoSeEntrega } from '@/services/online-ordering/card/guards'
+import type { CardMerchantStatus } from '@/services/online-ordering/card/merchant'
 import { esVentaCerrada } from '@/services/shared/orderBalance'
 import {
   listCardRefunds,
@@ -145,6 +146,20 @@ const sino = (v: unknown) => (v ? 'sí' : 'no')
 const CARD_TOGGLE_LABEL = 'Aceptar pago con tarjeta'
 /** D661: el interruptor de la tarjeta en «No, entran solos» («Nadie»). */
 const CARD_NADIE_LABEL = 'Pagar con tarjeta al pedir con «No, entran solos»'
+
+/**
+ * D661 (D2, M2 de la ronda codex-r2): por qué la tarjeta de «No, entran solos», prendida, no se ofrece AHORA, con la causa de verdad y en
+ * el orden de la regla de la tarjeta: el modo de la tienda, la cuenta de Stripe y, al final, la caja que avisa.
+ */
+function avisoDeTarjetaNadie(requiresAcceptance: boolean | null | undefined, merchantStatus: CardMerchantStatus): string {
+  if (requiresAcceptance !== false) {
+    return 'La tarjeta de «No, entran solos» está prendida, pero ahora no se ofrece: la tienda está en el modo en que alguien acepta los pedidos, y ahí esta tarjeta no aplica (ese modo tiene su propio interruptor de pago con tarjeta). Se ofrece en cuanto la tienda vuelva a «No, entran solos».'
+  }
+  if (merchantStatus !== 'READY') {
+    return 'La tarjeta está prendida, pero ahora no se ofrece: la cuenta de Stripe del negocio todavía no puede cobrar. Conéctala o termina su alta en Ligas de pago.'
+  }
+  return 'La tarjeta está prendida, pero ahora no se ofrece: ninguna caja está avisando los pedidos pagados en línea en este momento. Se vuelve a ofrecer en cuanto una caja actualizada (TPV o POS) esté abierta en la lista de pedidos.'
+}
 
 /**
  * Pedidos en línea del negocio (la tienda web del restaurante). 🔴 Responder un pedido y pausar avisan al comensal o cambian
@@ -375,14 +390,11 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         store,
         requirements,
         card,
-        // D661 (D2): prendida pero sin una caja que avise a tiempo, la tienda no ofrece la tarjeta; se dice en llano.
+        // D661 (D2): prendida pero sin ofrecerse, la tienda lo dice en llano. M2 (ronda codex-r2): con la causa de verdad.
         cardNadie: {
           ...cardNadie,
           ...(cardNadie.enabled && !cardNadie.offeredNow
-            ? {
-                aviso:
-                  'La tarjeta está prendida, pero ahora no se ofrece: ninguna caja está avisando los pedidos pagados en línea en este momento. Se vuelve a ofrecer en cuanto una caja actualizada (TPV o POS) esté abierta en la lista de pedidos.',
-              }
+            ? { aviso: avisoDeTarjetaNadie(ajustes.requiresAcceptance, card.merchantStatus) }
             : {}),
         },
       })
