@@ -622,7 +622,7 @@ export class StripeConnectProvider implements IEcommerceProvider {
       const fee = charge?.application_fee
       if (!fee) return 0
       if (typeof fee === 'object') return fee.amount_refunded
-      return (await this.stripe.applicationFees.retrieve(fee)).amount_refunded
+      return (await this.stripe.applicationFees.retrieve(fee, {}, opcionesDeLimite(limits))).amount_refunded
     }
     return acotada(leer(), limits)
   }

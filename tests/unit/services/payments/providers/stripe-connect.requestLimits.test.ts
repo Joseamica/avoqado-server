@@ -179,6 +179,29 @@ describe('StripeConnectProvider con el SDK real: nuestro plazo duro (D661 · B, 
     expect(t.envios.map(e => e.timeout)).toEqual([80_000, 80_000])
   })
 
+  it('ronda 3 de codex-r3: la comisión devuelta lleva los límites de la llamada a SUS DOS lecturas (el cobro y, con la llave de la plataforma, la comisión)', async () => {
+    const envios: Array<{ method: string; path: string; timeout: number }> = []
+    const client = {
+      getClientName: () => 'prueba-d661',
+      makeRequest: async (...a: unknown[]) => {
+        const [, , path, method, , , , timeout] = a as [string, number, string, string, unknown, unknown, string, number]
+        envios.push({ method, path: path.split('?')[0], timeout })
+        const cuerpo = path.startsWith('/v1/application_fees/')
+          ? { id: 'fee_1', object: 'application_fee', amount_refunded: 290 }
+          : { id: 'pi_1', object: 'payment_intent', latest_charge: { id: 'ch_1', object: 'charge', application_fee: 'fee_1' } }
+        return { getStatusCode: () => 200, getHeaders: () => ({}), getRawResponse: () => ({}), toJSON: async () => cuerpo }
+      },
+    }
+    const a = adaptador(client)
+    const lectura = a.getApplicationFeeRefundedCents(merchant as never, 'pi_1', ACOTADA)
+    await jest.advanceTimersByTimeAsync(0)
+    await expect(lectura).resolves.toBe(290)
+    expect(envios).toEqual([
+      { method: 'GET', path: '/v1/payment_intents/pi_1', timeout: 10_000 },
+      { method: 'GET', path: '/v1/application_fees/fee_1', timeout: 10_000 },
+    ])
+  })
+
   it('ronda 2 de codex-r3: las llamadas del recorrido de devoluciones (crear la devolución, leerla, listarlas y la comisión devuelta) con SÓLO el plazo se rinden a los 120 s y la petición no cambia; sin plazo, el SDK sigue esperando', async () => {
     const t = transporteQueCuelga()
     const a = adaptador(t.client)
