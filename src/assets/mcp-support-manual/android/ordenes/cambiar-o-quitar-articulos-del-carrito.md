@@ -6,7 +6,7 @@ category: ordenes
 task: cambiar-o-quitar-articulos-del-carrito
 requiredPermissions: []
 sourceRepo: avoqado-android
-sourceRef: 8fe89cf59b8fce2b30eb49eb01db50e0fa819508
+sourceRef: 212f9cf4f150b7770cf6e753e5e2dbd78451948f
 keywords:
   - cambiar cantidad
   - quitar producto del carrito
