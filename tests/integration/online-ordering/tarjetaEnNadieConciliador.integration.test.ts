@@ -1265,4 +1265,30 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     expect(oo.acceptDeadlineAt.getTime()).toBeGreaterThan(Date.now())
     expect((await listFolios({ venueId: venueId! })).tarjetasPorAbrir.map(t => t.orderId)).toContain(oo.orderId)
   })
+
+  it('D661 · B (Ruling 74, ronda 2 de codex-r3): con Postgres real, un borrador joven cuyo cierre está a más de 10 min NO entra al grupo urgente (espera sus 2 min); uno con el cierre a 9 min, sí', async () => {
+    // Las demás pruebas del conciliador corren sin horario (`hours: DbNull`): aquí el filtro del cierre (texto en el JSON) contra la base real.
+    const lejos = await borrador()
+    const cerca = await borrador()
+    const ahora = Date.now()
+    for (const [d, enMs] of [
+      [lejos, 10 * MIN + 30_000],
+      [cerca, 9 * MIN],
+    ] as const) {
+      const request = (await cargo(d.chargeId)).request as Record<string, unknown>
+      await prisma.onlineOrderCharge.update({
+        where: { id: d.chargeId },
+        data: {
+          createdAt: new Date(ahora - 30_000), // 30 s: todavía sin sus 2 min
+          request: { ...request, cierreDeFranja: new Date(ahora + enMs).toISOString() } as Prisma.InputJsonValue,
+        },
+      })
+    }
+    authSpy.mockClear()
+    await reconcileCardCharges(new Date(), read => read())
+
+    const leidas = authSpy.mock.calls.map(c => c[1]?.checkoutSessionId).filter(Boolean)
+    expect(leidas).toContain((await cargo(cerca.chargeId)).checkoutSessionId)
+    expect(leidas).not.toContain((await cargo(lejos.chargeId)).checkoutSessionId)
+  })
 })
