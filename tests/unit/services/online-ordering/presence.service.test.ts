@@ -594,6 +594,24 @@ describe('D662 parte 2 (v4) · la pausa sola la decide UNA consulta exacta en Po
     })
   })
 
+  it('pestaña VIEJA del panel: con una pausa de 15/30/60 vigente manda SU fin (no la hora de la pausa sola)', async () => {
+    conVuelta(pausada(), { pausedUntil: min(10) })
+    const st = await getAcceptingStatus('v1', NOW)
+    expect(storeView(st, { pestanaVieja: true }).pausedUntil).toBe(min(10).toISOString())
+  })
+
+  it('🔴 full-testing: pestaña VIEJA con una pausa de 15/30/60 YA VENCIDA en la fila: manda la hora en que se pausó sola, no el fin viejo', async () => {
+    // La pausa temporal venció hace 5 min y su `pausedUntil` se quedó guardado; después la tienda se pausó sola. La pestaña vieja sólo
+    // sabe decir «Pausada hasta <pausedUntil>»: con el fin viejo diría una hora que ya pasó. Vencida = la misma regla y el mismo reloj
+    // de la lectura (`pausedUntil > ahora` es vigente).
+    conVuelta(pausada(), { pausedUntil: min(-5) })
+    const st = await getAcceptingStatus('v1', NOW)
+    expect(st).toMatchObject({ status: 'PAUSED', reason: 'MANUAL_PAUSE', autoPausedAt: min(-1).toISOString() })
+    expect(storeView(st, { pestanaVieja: true }).pausedUntil).toBe(min(-1).toISOString())
+    // El panel nuevo sigue recibiendo la fila tal cual (lee `autoPausedAt`).
+    expect(storeView(st).pausedUntil).toBe(min(-5).toISOString())
+  })
+
   it('gana sobre fuera de horario y sobre sin aparato: sólo «Reanudar» la abre', async () => {
     conVuelta(pausada(), { lastInboxPollAt: null })
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'PAUSED', reason: 'MANUAL_PAUSE' })

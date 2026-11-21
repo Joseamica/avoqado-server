@@ -82,7 +82,11 @@ export async function touchToPayPoll(venueId: string, now: Date = new Date()): P
  */
 export function storeView(state: AcceptingState, opts: { pestanaVieja?: boolean } = {}) {
   const autoPausedAt = state.autoPausedAt ?? null
-  const comoPausaConHora = opts.pestanaVieja === true && !!autoPausedAt && !state.config.manualPause && !state.config.pausedUntil
+  // Una pausa de 15/30/60 YA VENCIDA cuenta como ausente (su `pausedUntil` se queda en la fila): si no, la pestaña vieja diría «Pausada
+  // hasta <una hora que ya pasó>». Vencida con la misma regla y el mismo reloj con que se decidió el estado (`getAcceptingStatus`).
+  const ahora = state.leidoEn ?? new Date()
+  const pausaTemporalVigente = !!state.config.pausedUntil && new Date(state.config.pausedUntil) > ahora
+  const comoPausaConHora = opts.pestanaVieja === true && !!autoPausedAt && !state.config.manualPause && !pausaTemporalVigente
   return {
     status: state.status,
     reason: state.reason,
@@ -444,6 +448,7 @@ export async function getAcceptingStatus(
     autoPausedAt,
     versionDeAjustes,
     ajustesUsados: sinMarcaDeRelectura(settings),
+    leidoEn: now,
   })
 
   if (!config.enabled) return done('DISABLED', 'NOT_ENABLED')

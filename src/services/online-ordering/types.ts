@@ -30,6 +30,8 @@ export interface AcceptingState {
    * `version`, que la base sube bajo el candado de la fila: crece en el orden en que se confirman las escrituras.
    */
   versionDeAjustes?: number | null
+  /** El reloj con que se decidió este estado (p. ej., si la pausa de 15/30/60 sigue vigente). Interno: nunca se manda tal cual. */
+  leidoEn?: Date
   /**
    * D662 v5 (Codex p2v4-r5 #2): los ajustes COMPLETOS con los que se armó este estado (los releídos si la lectura esperó). Quien arma una
    * respuesta con interruptor, pausa temporal y versión los toma de aquí: una sola foto, nunca el encabezado de una versión y el formulario
