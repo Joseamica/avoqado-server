@@ -27,10 +27,13 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  if (!orgId || !venueId || !otroVenueId) return // la preparación falló: no hay nada propio que limpiar
-  await prisma.terminal.deleteMany({ where: { venueId: { in: [venueId, otroVenueId] } } })
-  await prisma.venue.deleteMany({ where: { id: { in: [venueId, otroVenueId] } } })
-  await prisma.organization.deleteMany({ where: { id: orgId } })
+  // Si la preparación falló a medias, se limpia lo que sí alcanzó a crearse (antes un id faltante dejaba la organización).
+  const venues = [venueId, otroVenueId].filter(Boolean)
+  if (venues.length) {
+    await prisma.terminal.deleteMany({ where: { venueId: { in: venues } } })
+    await prisma.venue.deleteMany({ where: { id: { in: venues } } })
+  }
+  if (orgId) await prisma.organization.deleteMany({ where: { id: orgId } })
 })
 
 async function terminalPrendida(serialNumber: string) {
