@@ -109,14 +109,21 @@ export const liveCardDraftsWhere = (venueId: string, now: Date) => ({
   // Columna NOT NULL: el `not` no se come filas nulas (el de una ruta JSON sí lo haría con todos los borradores viejos).
   customerPhone: { not: SIN_TELEFONO_NADIE },
 })
+/** `lastError` del cargo cuyo dinero ya cobró el negocio a mano en Stripe (C3 y r2 R1): lo resuelve una persona, nadie lo reintenta. */
+export const CAPTURED_OUTSIDE = 'CAPTURED_OUTSIDE'
+/** Para un `where`: el cargo NO está marcado `CAPTURED_OUTSIDE`. Con `OR`, porque `lastError` es opcional y un `not` solo se come los nulos. */
+export const NOT_CAPTURED_OUTSIDE = { OR: [{ lastError: null }, { lastError: { not: CAPTURED_OUTSIDE } }] }
 /**
  * D661 (r5, r6): borradores de tarjeta de «Nadie» todavía sin resolver. Sin reloj: al vencer su sesión pueden seguir `PENDING_AUTH`
  * aunque Stripe ya haya autorizado; su lugar lo libera el conciliador al resolverlo (confirmado o abandonado), no la hora.
+ * D661 (A6): el cobrado fuera de Avoqado sigue `PENDING_AUTH` a propósito (lo resuelve una persona): ya no ocupa el lugar de la
+ * clienta ni el de la sucursal, ni deja las cajas en sondeo rápido.
  */
 export const borradoresNadieWhere = (venueId: string) => ({
   venueId,
   status: OnlineOrderChargeStatus.PENDING_AUTH,
   customerPhone: SIN_TELEFONO_NADIE,
+  ...NOT_CAPTURED_OUTSIDE,
 })
 /** D661: pedidos con tarjeta de «Nadie» ya apartados que ninguna caja ha abierto; cobrados, liberados o rechazados dejan de ocupar. */
 export const apartadosNadieWhere = (venueId: string) => ({

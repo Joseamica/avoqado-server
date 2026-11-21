@@ -85,13 +85,19 @@ async function releaseLate(
     return cas
   })
   if (won.count === 0) return 'ALREADY'
-  logger.error('🚨 [OnlineOrderCard] tarjeta apartada que no se vuelve pedido: se libera', {
+  const detalle = {
     chargeId: charge.id,
     venueId: charge.venueId,
     why,
     amountCapturableCents: auth.amountCapturableCents,
     expectedCents: toStripeAmount(new Prisma.Decimal(charge.amount)),
-  })
+  }
+  // D661 (A5): en «Nadie» que la clienta termine de pagar después del plazo o del cierre es un desenlace esperado, no una anomalía.
+  if (why === 'NADIE_DEADLINE_PASSED') {
+    logger.warn('⚠️ [OnlineOrderCard] la tarjeta se apartó después de su plazo de «Nadie»: se libera sin pedido', detalle)
+  } else {
+    logger.error('🚨 [OnlineOrderCard] tarjeta apartada que no se vuelve pedido: se libera', detalle)
+  }
   // r2 R1: la misma liberación que los demás caminos (misma clave del cargo, su bitácora y, si ya la cobraron a mano en Stripe,
   // el registro del cobro con su anomalía). Si Stripe no contesta, el cargo queda RELEASING para el conciliador y aquí se lanza.
   const r = await releaseCharge(charge.id)

@@ -137,6 +137,26 @@ describe('confirmar un borrador de tarjeta: el modo y el plazo son los del borra
     expect(mockWrite).not.toHaveBeenCalled()
   })
 
+  it('D661 · A5: en «Nadie» liberar lo que llegó tarde es un desenlace esperado: logger.warn sin 🚨; otro motivo sigue siendo logger.error con 🚨', async () => {
+    ;(logger.warn as jest.Mock).mockClear()
+    ;(logger.error as jest.Mock).mockClear()
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(borrador(true) as any)
+    getAuthorization.mockResolvedValue(autorizada(new Date(NOW.getTime() - 11 * MIN)))
+    expect(await confirmCardAuthorization('ch1', NOW)).toBe('RELEASED_LATE')
+    expect(logger.error).not.toHaveBeenCalled()
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('después de su plazo'),
+      expect.objectContaining({ chargeId: 'ch1', why: 'NADIE_DEADLINE_PASSED' }),
+    )
+    expect((logger.warn as jest.Mock).mock.calls[0][0]).not.toContain('🚨')
+
+    // Un monto distinto al apartado sí es una anomalía.
+    ;(logger.error as jest.Mock).mockClear()
+    getAuthorization.mockResolvedValue({ ...autorizada(new Date(NOW.getTime() - MIN)), amountCapturableCents: 100 })
+    expect(await confirmCardAuthorization('ch1', NOW)).toBe('RELEASED_LATE')
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('🚨'), expect.objectContaining({ why: 'AMOUNT_MISMATCH' }))
+  })
+
   it('D661 (3C): sin la hora de autorización de Stripe, el plazo de «Nadie» cuenta desde la confirmación y queda un logger.warn con el cargo', async () => {
     ;(logger.warn as jest.Mock).mockClear()
     prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(borrador(true) as any)

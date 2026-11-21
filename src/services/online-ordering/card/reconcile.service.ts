@@ -9,9 +9,13 @@
  *     uno de «Nadie» pasada su gracia ya no se cobra: se suelta y se cierra con el desenlace de Stripe.
  *   - `RELEASING`: libera. Es el ÚNICO reintento de una liberación que nadie espera (3B: la lectura de la caja no la espera).
  *   - `AUTHORIZED` cuyo pedido ya se cerró por otro camino (rechazado, vencido, cancelado, la caja canceló la cuenta): libera.
- * Cada cargo va en su propio `try`, y TODO cargo leído se toca (`updatedAt`, CAS sobre su estado) para que la siguiente pasada
+ * Cada cargo va en su propio `try`, y TODO cargo procesado se toca (`updatedAt`, CAS sobre su estado) para que la siguiente pasada
  * alcance a los de atrás (ruling 4). Stripe siempre fuera de transacciones y con la foto del comercio del cargo.
  * D661 (3C): la hora de la pasada sólo ELIGE candidatos; lo que se decide bajo un candado y lo que se escribe usa el reloj real.
+ * D661 (A2): el orden de la pasada es el dinero en duda primero (`CAPTURING`, `RELEASING`), luego la visita temprana de «Nadie» con su
+ * propio presupuesto (a lo más `NADIE_EARLY_CONCURRENCY` a la vez y nada nuevo después de `NADIE_EARLY_BUDGET_MS`; lo que no alcanza
+ * espera al siguiente minuto, el menos reciente primero) y al final lo demás. Si la pasada sigue corriendo en el siguiente minuto, el job
+ * corre sólo la visita temprana (`visitEarlyNadieDrafts`): una pasada lenta no deja vencer una autorización que llegó a tiempo.
  */
 import { OnlineOrderChargeStatus as S, OnlineOrderStatus, OrderStatus, Prisma, type OnlineOrderCharge } from '@prisma/client'
 import logger from '@/config/logger'
@@ -20,11 +24,11 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { getProvider } from '@/services/payments/provider-registry'
 import type { AuthorizationState } from '@/services/payments/providers/provider.interface'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
-import { CARD_RECONCILE_BATCH, CARD_STUCK_ALERT_MINUTES, SIN_TELEFONO_NADIE, cargoDeNadie } from '../constants'
+import { CARD_RECONCILE_BATCH, CARD_STUCK_ALERT_MINUTES, NOT_CAPTURED_OUTSIDE, SIN_TELEFONO_NADIE, cargoDeNadie } from '../constants'
 import { prepMinutes } from '../transitions.service'
 import type { ReadCandidates } from '../types'
-import { captureCharge, failCapture, finishCapture } from './capture.service'
-import { CAPTURED_OUTSIDE, confirmCardAuthorization } from './confirm.service'
+import { GraceEndedBeforeDispatch, captureCharge, failCapture, finishCapture } from './capture.service'
+import { confirmCardAuthorization } from './confirm.service'
 import { checkoutParams, expiresAtRejected } from './draft.service'
 import { chargeMerchant } from './merchant'
 import { releaseCharge, voidOrReadOutcome } from './release.service'
@@ -44,6 +48,10 @@ const CAPTURE_IN_FLIGHT_MS = 60_000
 const NADIE_CAPTURE_GRACE_MS = 5 * 60_000
 /** D661 (Ruling 10): edad desde la que se visita un borrador de «Nadie» con su página viva (antes, la clienta apenas está pagando). */
 const NADIE_EARLY_VISIT_MS = 2 * 60_000
+/** D661 (A2): borradores de «Nadie» que la visita temprana lee a la vez (cada uno bajo sus propios candados; son independientes)… */
+const NADIE_EARLY_CONCURRENCY = 5
+/** …y desde cuándo ya no empieza otro: lo que falte espera al siguiente minuto. Con lecturas lentas de T s, la visita dura < este + T. */
+const NADIE_EARLY_BUDGET_MS = 30_000
 /** Ruling 3: un `PENDING_AUTH` vencido cuya confirmación truena este número de pasadas necesita a una persona. */
 const CONFIRM_FAILURES_ALERT = 3
 /** Stripe guarda una clave idempotente 24 h; con 1 h de margen, después de 23 h su repetición ya no prueba nada. */
@@ -64,29 +72,31 @@ type Row = OnlineOrderCharge & { onlineOrder: { orderId: string } | null }
 const order = [{ updatedAt: 'asc' as const }, { id: 'asc' as const }]
 const include = { onlineOrder: { select: { orderId: true } } }
 
-async function readCandidates(now: Date, readEntry: ReadCandidates): Promise<Row[]> {
-  const page = (where: Prisma.OnlineOrderChargeWhereInput) =>
-    readEntry(() => prisma.onlineOrderCharge.findMany({ where, include, orderBy: order, take: CARD_RECONCILE_BATCH }))
-  const groups = await Promise.all([
-    // Codex r1 C3: el borrador cobrado fuera de Avoqado ya no se reintenta (ni se abandona): lo resuelve una persona.
-    page({
-      status: S.PENDING_AUTH,
-      checkoutExpiresAt: { lte: now },
-      OR: [{ lastError: null }, { lastError: { not: CAPTURED_OUTSIDE } }],
-    }),
-    // Ruling 10: los de «Nadie» con la página viva (los vencidos ya entran arriba). Sin sesión guardada nadie pudo pagar todavía: no
-    // se visitan (así cada visita es UNA lectura de su sesión en Stripe).
-    page({
-      status: S.PENDING_AUTH,
-      customerPhone: SIN_TELEFONO_NADIE,
-      checkoutSessionId: { not: null },
-      checkoutExpiresAt: { gt: now },
-      createdAt: { lte: new Date(now.getTime() - NADIE_EARLY_VISIT_MS) },
-      OR: [{ lastError: null }, { lastError: { not: CAPTURED_OUTSIDE } }],
-    }),
-    page({ status: S.CAPTURING, updatedAt: { lte: new Date(now.getTime() - CAPTURE_IN_FLIGHT_MS) } }),
-    page({ status: S.RELEASING }),
-    page({
+const page = (readEntry: ReadCandidates, where: Prisma.OnlineOrderChargeWhereInput): Promise<Row[]> =>
+  readEntry(() => prisma.onlineOrderCharge.findMany({ where, include, orderBy: order, take: CARD_RECONCILE_BATCH }))
+
+/**
+ * Ruling 10: los de «Nadie» con la página viva (los vencidos van con lo demás). Sin sesión guardada nadie pudo pagar todavía: no se
+ * visitan (así cada visita es UNA lectura de su sesión en Stripe).
+ */
+const earlyNadieWhere = (now: Date): Prisma.OnlineOrderChargeWhereInput => ({
+  status: S.PENDING_AUTH,
+  customerPhone: SIN_TELEFONO_NADIE,
+  checkoutSessionId: { not: null },
+  checkoutExpiresAt: { gt: now },
+  createdAt: { lte: new Date(now.getTime() - NADIE_EARLY_VISIT_MS) },
+  // Codex r1 C3: el borrador cobrado fuera de Avoqado ya no se reintenta (ni se abandona): lo resuelve una persona.
+  ...NOT_CAPTURED_OUTSIDE,
+})
+
+/** Cada grupo con su tope y su orden de siempre; D661 (A2): separados por cómo se procesan. */
+async function readCandidates(now: Date, readEntry: ReadCandidates): Promise<{ inDoubt: Row[]; early: Row[]; rest: Row[] }> {
+  const [expired, early, capturing, releasing, authorized] = await Promise.all([
+    page(readEntry, { status: S.PENDING_AUTH, checkoutExpiresAt: { lte: now }, ...NOT_CAPTURED_OUTSIDE }),
+    page(readEntry, earlyNadieWhere(now)),
+    page(readEntry, { status: S.CAPTURING, updatedAt: { lte: new Date(now.getTime() - CAPTURE_IN_FLIGHT_MS) } }),
+    page(readEntry, { status: S.RELEASING }),
+    page(readEntry, {
       status: S.AUTHORIZED,
       OR: [
         { onlineOrderId: null },
@@ -96,7 +106,7 @@ async function readCandidates(now: Date, readEntry: ReadCandidates): Promise<Row
       ],
     }),
   ])
-  return groups.flat()
+  return { inDoubt: [...capturing, ...releasing], early, rest: [...expired, ...authorized] }
 }
 
 /** `PENDING_AUTH` sin sesión guardada: la MISMA clave y los MISMOS parámetros del último intento. */
@@ -129,18 +139,20 @@ async function recoverCheckout(charge: Row, now: Date): Promise<'GOT' | 'ABANDON
 /**
  * D661 (r5 #1): ¿se vuelve a mandar la captura? «Mi equipo», siempre, como hoy. «Nadie» (la marca del cargo), sólo hasta
  * `acceptDeadlineAt` + la gracia, decidido bajo el candado de la orden con el reloj real (la hora de la pasada puede ser vieja) y con
- * el cargo todavía `CAPTURING` (si otra escritura ya terminó el cobro, no hay nada que hacer).
+ * el cargo todavía `CAPTURING` (si otra escritura ya terminó el cobro, no hay nada que hacer). D661 (A1): con `CAPTURE` va el fin de la
+ * gracia, que `captureCharge` vuelve a revisar justo antes de Stripe (el commit o una pausa pueden cruzarlo).
  */
-async function captureRetryStep(charge: Row, orderId: string): Promise<'CAPTURE' | 'RELEASE' | 'NOTHING'> {
-  if (!cargoDeNadie(charge)) return 'CAPTURE'
+async function captureRetryStep(charge: Row, orderId: string): Promise<{ step: 'CAPTURE' | 'RELEASE' | 'NOTHING'; graceEndsAt?: number }> {
+  if (!cargoDeNadie(charge)) return { step: 'CAPTURE' }
   return prisma.$transaction(async tx => {
-    if (!(await lockExistingOrderForPayment(tx, { venueId: charge.venueId, orderId }))) return 'NOTHING'
+    if (!(await lockExistingOrderForPayment(tx, { venueId: charge.venueId, orderId }))) return { step: 'NOTHING' as const }
     const row = await tx.onlineOrder.findFirst({
       where: { orderId, venueId: charge.venueId },
       select: { acceptDeadlineAt: true, charge: { select: { status: true } } },
     })
-    if (!row || row.charge?.status !== S.CAPTURING) return 'NOTHING'
-    return Date.now() < row.acceptDeadlineAt.getTime() + NADIE_CAPTURE_GRACE_MS ? 'CAPTURE' : 'RELEASE'
+    if (!row || row.charge?.status !== S.CAPTURING) return { step: 'NOTHING' as const }
+    const graceEndsAt = row.acceptDeadlineAt.getTime() + NADIE_CAPTURE_GRACE_MS
+    return Date.now() < graceEndsAt ? { step: 'CAPTURE' as const, graceEndsAt } : { step: 'RELEASE' as const }
   }, ORDER_LOCK_WAIT_BUDGET)
 }
 
@@ -166,7 +178,7 @@ async function releaseCaptureAfterGrace(charge: Row, orderId: string, meta: { st
     return
   }
   if (state.piStatus === 'succeeded') await finishCapture(charge.id, state, meta)
-  else await failCapture(charge.id, { staffId: null })
+  else await failCapture(charge.id, { staffId: null, reason: 'RELEASED_AFTER_GRACE' }) // A4: no fue la tarjeta
 }
 
 async function processCapturing(charge: Row): Promise<void> {
@@ -179,9 +191,17 @@ async function processCapturing(charge: Row): Promise<void> {
   if (state.piStatus === 'succeeded') await finishCapture(charge.id, state, meta)
   else if (state.piStatus === 'canceled' || state.piStatus === 'requires_payment_method') await failCapture(charge.id, { staffId: null })
   else if (state.piStatus === 'requires_capture') {
-    const step = await captureRetryStep(charge, orderId)
-    if (step === 'CAPTURE') await captureCharge(charge, orderId, meta)
-    else if (step === 'RELEASE') await releaseCaptureAfterGrace(charge, orderId, meta)
+    const { step, graceEndsAt } = await captureRetryStep(charge, orderId)
+    if (step === 'RELEASE') await releaseCaptureAfterGrace(charge, orderId, meta)
+    else if (step === 'CAPTURE') {
+      try {
+        await captureCharge(charge, orderId, { ...meta, captureBefore: graceEndsAt })
+      } catch (error) {
+        // A1: la gracia venció entre la decisión y la llamada: no se mandó nada; se sigue el camino de liberar.
+        if (!(error instanceof GraceEndedBeforeDispatch)) throw error
+        await releaseCaptureAfterGrace(charge, orderId, meta)
+      }
+    }
   }
 }
 
@@ -254,7 +274,8 @@ async function settle(charge: Row, now: Date, failure: string | null): Promise<O
 
   // Sigue en el mismo estado: se toca para rotar el lote; en duda, se anota desde cuándo.
   const inDoubtSince = IN_DOUBT.has(charge.status) ? (after.inDoubtSince ?? now) : null
-  const countFailure = failure != null && charge.status === S.PENDING_AUTH
+  // D661 (A3): un borrador visitado antes de vencer su página sólo espera a la clienta: sus tropiezos con Stripe no cuentan para la alerta.
+  const countFailure = failure != null && charge.status === S.PENDING_AUTH && charge.checkoutExpiresAt <= now
   await prisma.onlineOrderCharge.updateMany({
     where: { id: charge.id, status: charge.status },
     data: {
@@ -274,30 +295,68 @@ async function settle(charge: Row, now: Date, failure: string | null): Promise<O
   return 'stuck'
 }
 
-export async function reconcileCardCharges(now: Date, readEntry: ReadCandidates): Promise<ReconcileResult> {
-  const result: ReconcileResult = { scanned: 0, finished: 0, released: 0, abandoned: 0, stuck: 0, errors: 0 }
-  const rows = await readCandidates(now, readEntry)
-  result.scanned = rows.length
-  for (const charge of rows) {
-    let failure: string | null = null
-    try {
-      await processOne(charge, now)
-    } catch (error) {
-      failure = error instanceof Error ? error.message : String(error)
-      result.errors += 1
-      logger.error('[OnlineOrderCard] el conciliador no pudo con un cargo (sigue con los demás)', {
-        chargeId: charge.id,
-        status: charge.status,
-        venueId: charge.venueId,
-        error: failure,
-      })
-    }
-    try {
-      const outcome = await settle(charge, now, failure)
-      if (failure == null) result[outcome] += 1
-    } catch (error) {
-      logger.error('[OnlineOrderCard] el conciliador no pudo anotar un cargo', { chargeId: charge.id, error })
-    }
+const emptyResult = (): ReconcileResult => ({ scanned: 0, finished: 0, released: 0, abandoned: 0, stuck: 0, errors: 0 })
+
+/** Un cargo, en su propio `try`: procesarlo, anotarlo y contarlo. */
+async function handle(charge: Row, now: Date, result: ReconcileResult): Promise<void> {
+  result.scanned += 1
+  let failure: string | null = null
+  try {
+    await processOne(charge, now)
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error)
+    result.errors += 1
+    logger.error('[OnlineOrderCard] el conciliador no pudo con un cargo (sigue con los demás)', {
+      chargeId: charge.id,
+      status: charge.status,
+      venueId: charge.venueId,
+      error: failure,
+    })
   }
+  try {
+    const outcome = await settle(charge, now, failure)
+    if (failure == null) result[outcome] += 1
+  } catch (error) {
+    logger.error('[OnlineOrderCard] el conciliador no pudo anotar un cargo', { chargeId: charge.id, error })
+  }
+}
+
+// ponytail: candado en memoria (una sola instancia, como el `isRunning` del job); con 2 instancias, un advisory lock por visita.
+let earlyLaneBusy = false
+
+/**
+ * D661 (A2): la visita temprana, una a la vez en el proceso. Toma los borradores en su orden (el menos reciente primero) con
+ * `NADIE_EARLY_CONCURRENCY` trabajadores y no empieza ninguno después de `NADIE_EARLY_BUDGET_MS`: los que no alcanzó no se tocan y
+ * quedan primero para la siguiente.
+ */
+async function earlyLane(rows: () => Promise<Row[]>, now: Date, result: ReconcileResult): Promise<void> {
+  if (earlyLaneBusy) return
+  earlyLaneBusy = true
+  try {
+    const pending = await rows()
+    const stopAt = Date.now() + NADIE_EARLY_BUDGET_MS
+    let next = 0
+    const worker = async () => {
+      while (next < pending.length && Date.now() < stopAt) await handle(pending[next++], now, result)
+    }
+    await Promise.all(Array.from({ length: NADIE_EARLY_CONCURRENCY }, worker))
+  } finally {
+    earlyLaneBusy = false
+  }
+}
+
+export async function reconcileCardCharges(now: Date, readEntry: ReadCandidates): Promise<ReconcileResult> {
+  const result = emptyResult()
+  const { inDoubt, early, rest } = await readCandidates(now, readEntry)
+  for (const charge of inDoubt) await handle(charge, now, result) // A2: el dinero en duda, primero
+  await earlyLane(async () => early, now, result)
+  for (const charge of rest) await handle(charge, now, result)
+  return result
+}
+
+/** D661 (A2): sólo la visita temprana; el job la corre en el minuto en que la pasada anterior todavía no termina. */
+export async function visitEarlyNadieDrafts(now: Date, readEntry: ReadCandidates): Promise<ReconcileResult> {
+  const result = emptyResult()
+  await earlyLane(() => page(readEntry, earlyNadieWhere(now)), now, result)
   return result
 }

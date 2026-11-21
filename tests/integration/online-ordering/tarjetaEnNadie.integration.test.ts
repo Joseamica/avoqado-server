@@ -9,6 +9,7 @@ import prisma from '@/utils/prismaClient'
 import { StripeConnectProvider } from '@/services/payments/providers/stripe-connect.provider'
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
 import { apartadosNadieWhere, borradoresNadieWhere, liveCardDraftsWhere, unpaidFoliosWhere } from '@/services/online-ordering/constants'
+import { listFolios } from '@/services/online-ordering/folios.service'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import { createOnlineOrder, toQuoteSnapshot, writeOnlineOrderInTx } from '@/services/online-ordering/order.service'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
@@ -366,5 +367,40 @@ describe('D661 · tarjeta en «Nadie»: marca, tope por clienta y cupo de la suc
     // El conciliador resuelve uno (nunca se autorizó): su lugar se libera.
     await prisma.onlineOrderCharge.update({ where: { trackingToken: suyos[0].trackingToken }, data: { status: 'ABANDONED' } })
     await expect(tarjeta(c)).resolves.toMatchObject({ status: 'AWAITING_PAYMENT', replay: false })
+  })
+
+  it('D661 · A6: un borrador cobrado fuera de Avoqado (sigue PENDING_AUTH a propósito) ya no ocupa el lugar de la clienta, el de la sucursal ni deja las cajas en sondeo rápido', async () => {
+    const c = clientas[3]
+    const suyos = [await tarjeta(c), await tarjeta(c), await tarjeta(c)]
+    await expect(tarjeta(c)).rejects.toMatchObject({ statusCode: 409, code: 'TOO_MANY_PENDING_ORDERS' })
+    await prisma.onlineOrderCharge.updateMany({
+      where: { venueId: venueId!, trackingToken: { in: suyos.map(s => s.trackingToken) } },
+      data: { lastError: 'CAPTURED_OUTSIDE' },
+    })
+    // Un borrador vivo con otro tropiezo anotado sí cuenta (el filtro no se come los `lastError` distintos ni los nulos).
+    const conTropiezo = await tarjeta(clientas[4])
+    await prisma.onlineOrderCharge.update({ where: { trackingToken: conTropiezo.trackingToken }, data: { lastError: 'timeout' } })
+    const sinNada = await tarjeta(clientas[4])
+
+    expect(await prisma.onlineOrderCharge.count({ where: borradoresNadieWhere(venueId!) })).toBe(2)
+    expect(
+      await prisma.onlineOrderCharge.count({ where: { ...borradoresNadieWhere(venueId!), trackingToken: sinNada.trackingToken } }),
+    ).toBe(1)
+    // Los tres de la clienta siguen PENDING_AUTH (lo resuelve una persona), pero ya no le cuentan: puede pedir otra vez.
+    expect(
+      await prisma.onlineOrderCharge.count({ where: { venueId: venueId!, status: 'PENDING_AUTH', lastError: 'CAPTURED_OUTSIDE' } }),
+    ).toBe(3)
+    await expect(tarjeta(c)).resolves.toMatchObject({ status: 'AWAITING_PAYMENT', replay: false })
+
+    // El sondeo rápido: con la tienda en «Mi equipo» y sin nada vivo, sólo un borrador cobrado fuera ya no la deja en 30 s.
+    await prisma.onlineOrderCharge.updateMany({
+      where: { venueId: venueId!, status: 'PENDING_AUTH', OR: [{ lastError: null }, { lastError: { not: 'CAPTURED_OUTSIDE' } }] },
+      data: { status: 'ABANDONED' },
+    })
+    await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { requiresAcceptance: true } })
+    await expect(listFolios({ venueId: venueId! })).resolves.toMatchObject({ showTile: false, pollSeconds: 600 })
+    // Un borrador sin resolver de verdad sí la deja en 30 s.
+    await prisma.onlineOrderCharge.update({ where: { trackingToken: sinNada.trackingToken }, data: { status: 'PENDING_AUTH' } })
+    await expect(listFolios({ venueId: venueId! })).resolves.toMatchObject({ showTile: false, pollSeconds: 30 })
   })
 })

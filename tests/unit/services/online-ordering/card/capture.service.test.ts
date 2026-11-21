@@ -33,10 +33,16 @@ jest.mock('@/services/online-ordering/transitions.service', () => ({
   announceAccepted: jest.fn(() => ({ outcome: 'OK', status: 'ACCEPTED', estimatedReadyAt: 'x' })),
 }))
 
+import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { releaseCharge } from '@/services/online-ordering/card/release.service'
-import { acceptCardOnlineOrder, failCapture } from '@/services/online-ordering/card/capture.service'
+import {
+  GraceEndedBeforeDispatch,
+  acceptCardOnlineOrder,
+  captureCharge,
+  failCapture,
+} from '@/services/online-ordering/card/capture.service'
 import {
   acceptWithoutCapture,
   casTransitionInTx,
@@ -397,5 +403,54 @@ describe('failCapture', () => {
     })
     prismaMock.onlineOrder.findFirst.mockResolvedValue({ status: 'ACCEPTED' } as any)
     await expect(failCapture('ch1', { staffId: null })).resolves.toEqual({ outcome: 'STALE', status: 'ACCEPTED' })
+  })
+
+  it('D661 · A4: Stripe no cobró (rechazo de la tarjeta): bitácora ONLINE_ORDER_CARD_CAPTURE_FAILED sin motivo, como hoy', async () => {
+    ;(logAction as jest.Mock).mockClear()
+    ;(logger.warn as jest.Mock).mockClear()
+    await failCapture('ch1', { staffId: null })
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Stripe no cobró la tarjeta'), expect.anything())
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'ONLINE_ORDER_CARD_CAPTURE_FAILED', data: { chargeId: 'ch1', outcome: 'STALE' } }),
+    )
+  })
+
+  it('D661 · A4: la liberación tras la gracia dice la verdad: la misma acción de bitácora con motivo RELEASED_AFTER_GRACE y un log que no culpa a la tarjeta', async () => {
+    ;(logAction as jest.Mock).mockClear()
+    ;(logger.warn as jest.Mock).mockClear()
+    await failCapture('ch1', { staffId: null, reason: 'RELEASED_AFTER_GRACE' })
+    const [mensaje] = (logger.warn as jest.Mock).mock.calls[0]
+    expect(mensaje).toContain('Avoqado soltó la tarjeta')
+    expect(mensaje).not.toContain('Stripe no cobró')
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'ONLINE_ORDER_CARD_CAPTURE_FAILED',
+        data: { chargeId: 'ch1', outcome: 'STALE', reason: 'RELEASED_AFTER_GRACE' },
+      }),
+    )
+  })
+})
+
+describe('D661 · A1: captureCharge revalida el límite de un reintento justo antes de Stripe', () => {
+  const capturing = { ...CHARGE, status: 'CAPTURING' } as any
+  const meta = { staffId: null, estimatedMinutes: 15 }
+
+  it('con el límite ya pasado no manda la captura: lanza GraceEndedBeforeDispatch y no escribe nada', async () => {
+    await expect(captureCharge(capturing, 'ord1', { ...meta, captureBefore: Date.now() - 1 })).rejects.toBeInstanceOf(
+      GraceEndedBeforeDispatch,
+    )
+    expect(capture).not.toHaveBeenCalled()
+    expect(getAuthorization).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrderCharge.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('dentro del límite, o sin límite («Mi equipo» y la primera apertura de la caja), cobra como hoy con la misma clave', async () => {
+    capture.mockResolvedValue(succeeded())
+    await expect(captureCharge(capturing, 'ord1', { ...meta, captureBefore: Date.now() + 60_000 })).resolves.toMatchObject({
+      outcome: 'OK',
+    })
+    await expect(captureCharge(capturing, 'ord1', meta)).resolves.toMatchObject({ outcome: 'OK' })
+    expect(capture).toHaveBeenCalledTimes(2)
+    expect(capture.mock.calls[0][1]).toMatchObject({ idempotencyKey: 'online-order:ord1:capture' })
   })
 })

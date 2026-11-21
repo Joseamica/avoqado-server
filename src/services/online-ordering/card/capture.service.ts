@@ -150,17 +150,24 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
   }
 }
 
+/** D661 (A1): el reintento de una captura de «Nadie» llegó a Stripe después de su gracia; no se mandó nada (el llamador libera). */
+export class GraceEndedBeforeDispatch extends Error {}
+
 /**
  * Cobra con Stripe (fuera de toda transacción) un cargo que ya está en `CAPTURING`, y termina según el desenlace. La usa también el
  * conciliador (tarea 7) para reintentar con la MISMA clave.
+ * D661 (A1): `captureBefore` (ms) es el límite de un REINTENTO de «Nadie»: el conciliador lo decide bajo el candado, pero el commit o
+ * una pausa pueden cruzarlo antes de llegar aquí, así que se revisa con el reloj real justo antes de la llamada. Sin él (la caja que
+ * abre, «Mi equipo»), como siempre.
  */
 export async function captureCharge(
   charge: OnlineOrderCharge,
   orderId: string,
-  meta: { staffId: string | null; estimatedMinutes: number; now?: Date },
+  meta: { staffId: string | null; estimatedMinutes: number; now?: Date; captureBefore?: number },
 ): Promise<TransitionResult> {
   const merchant = chargeMerchant(charge) // Codex r2 #3: la cuenta Stripe de la foto, nunca el comercio vivo
   const provider = getProvider(merchant)
+  if (meta.captureBefore != null && Date.now() >= meta.captureBefore) throw new GraceEndedBeforeDispatch()
   let state: AuthorizationState | null = null
   let failure: unknown = null
   try {
@@ -368,8 +375,13 @@ class ChargeNoLongerCapturing extends Error {}
 /**
  * Stripe no cobró (el PaymentIntent quedó cancelado o sin tarjeta): el cargo `CAPTURE_FAILED` y el pedido rechazado con
  * `PAYMENT_FAILED`, en la MISMA transacción. La usa también el conciliador (tarea 7).
+ * D661 (A4): `reason: 'RELEASED_AFTER_GRACE'` = no fue la tarjeta: Avoqado soltó el apartado porque el cobro no se completó a tiempo.
+ * Misma acción de bitácora (sin nombres nuevos); el motivo viaja en sus datos y el log dice la verdad.
  */
-export async function failCapture(chargeId: string, meta: { staffId: string | null; now?: Date }): Promise<TransitionResult> {
+export async function failCapture(
+  chargeId: string,
+  meta: { staffId: string | null; now?: Date; reason?: 'RELEASED_AFTER_GRACE' },
+): Promise<TransitionResult> {
   const charge = await prisma.onlineOrderCharge.findUnique({
     where: { id: chargeId },
     select: { venueId: true, onlineOrderId: true, onlineOrder: { select: { orderId: true } } },
@@ -406,7 +418,12 @@ export async function failCapture(chargeId: string, meta: { staffId: string | nu
   }
   // Si la cuenta no se pudo cancelar (la transición se revirtió entera), el cargo igual dice la verdad: no se cobró.
   await markFailed(prisma)
-  logger.warn('⚠️ [OnlineOrderCard] Stripe no cobró la tarjeta: pedido rechazado', { chargeId, outcome: result.outcome })
+  logger.warn(
+    meta.reason === 'RELEASED_AFTER_GRACE'
+      ? '⚠️ [OnlineOrderCard] el cobro no se completó a tiempo: Avoqado soltó la tarjeta apartada y el pedido se cerró sin cobrar'
+      : '⚠️ [OnlineOrderCard] Stripe no cobró la tarjeta: pedido rechazado',
+    { chargeId, outcome: result.outcome },
+  )
   if (charge) {
     void logAction({
       staffId: meta.staffId,
@@ -414,7 +431,7 @@ export async function failCapture(chargeId: string, meta: { staffId: string | nu
       action: 'ONLINE_ORDER_CARD_CAPTURE_FAILED',
       entity: charge.onlineOrderId ? 'OnlineOrder' : 'OnlineOrderCharge',
       entityId: charge.onlineOrderId ?? chargeId,
-      data: { chargeId, outcome: result.outcome },
+      data: { chargeId, outcome: result.outcome, ...(meta.reason ? { reason: meta.reason } : {}) },
     })
   }
   return result

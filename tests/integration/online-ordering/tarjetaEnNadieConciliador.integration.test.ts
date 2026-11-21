@@ -16,6 +16,7 @@ import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.ser
 import { confirmCardAuthorization } from '@/services/online-ordering/card/confirm.service'
 import { reconcileCardCharges } from '@/services/online-ordering/card/reconcile.service'
 import * as cobro from '@/services/online-ordering/card/capture.service'
+import * as comercio from '@/services/online-ordering/card/merchant'
 import { cerrarFoliosDelDiaTerminado, listFolios } from '@/services/online-ordering/folios.service'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import { getTrackingByToken } from '@/services/online-ordering/order.service'
@@ -66,6 +67,8 @@ const PUEDE_CREAR = { assertCanCreate: async () => {} }
 const NO_FINALES = ['PENDING_AUTH', 'AUTHORIZED', 'CAPTURING', 'RELEASING'] as const
 const hace = (ms: number) => new Date(Date.now() - ms)
 const dormir = (ms: number) => new Promise(r => setTimeout(r, ms))
+/** Detiene el proceso entero (síncrono): una pausa del proceso o un commit lento entre dos instrucciones. */
+const detenerProceso = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms))
 const hastaQue = async (listo: () => Promise<boolean>, ms = 5_000) => {
   const fin = Date.now() + ms
   while (!(await listo()) && Date.now() < fin) await dormir(25)
@@ -76,6 +79,9 @@ type EstadoPi = 'requires_capture' | 'succeeded' | 'canceled'
 describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () => {
   let orgId: string | undefined
   let venueId: string | undefined
+  /** A2: otra sucursal, sólo para tener borradores ajenos delante en la fila del conciliador. */
+  let otraVenueId: string | undefined
+  let merchantId: string
   let productId: string
   const clientas: string[] = []
   let turno = 0
@@ -90,6 +96,8 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
   const pis = new Map<string, EstadoPi>()
   /** La hora en que Stripe autorizó cada PaymentIntent (Ruling 10). */
   const autorizadoEn = new Map<string, Date>()
+  /** A2: sesiones cuya lectura en Stripe tarda (los borradores ajenos de delante). */
+  const lentas = new Map<string, number>()
   let piSeq = 0
   let checkoutSpy: jest.SpyInstance
   let authSpy: jest.SpyInstance
@@ -239,6 +247,9 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     return reconcileCardCharges(new Date(), read => read())
   }
   const capturasA = (pi: string) => captureSpy.mock.calls.filter(([, p]) => p.paymentIntentId === pi)
+  /** A7: lo que esta suite mandó a Stripe (el conciliador lee la base entera; lo ajeno no cuenta). */
+  const deLaSuite = (spy: jest.SpyInstance) =>
+    spy.mock.calls.filter(([, p]) => String(p.paymentIntentId ?? p.checkoutSessionId ?? '').includes(`_concil_${RUN}_`))
   const liberacionesA = (pi: string) => voidSpy.mock.calls.filter(([, p]) => p.paymentIntentId === pi)
   /** Sostiene un candado en otra transacción `ms` milisegundos; `listo` cuando ya lo tiene. */
   const sostener = (tomar: (tx: any) => Promise<unknown>, ms: number) => {
@@ -358,20 +369,27 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
       update: {},
       create: { code: 'STRIPE_CONNECT', name: 'Stripe Connect', type: 'PAYMENT_PROCESSOR', countryCode: ['MX'] },
     })
-    await prisma.ecommerceMerchant.create({
-      data: {
-        venueId,
-        businessName: 'ITEST Concil',
-        contactEmail: `itest-concil-merchant-${RUN}@test.com`,
-        publicKey: `pk_test_itest_concil_${RUN}`,
-        secretKeyHash: `itest-concil-hash-${RUN}`,
-        providerId: provider.id,
-        providerCredentials: { connectAccountId: 'acct_itest_concil' },
-        chargesEnabled: true,
-        platformFeeBps: 100,
-        sandboxMode: true,
-      },
-    })
+    merchantId = (
+      await prisma.ecommerceMerchant.create({
+        data: {
+          venueId,
+          businessName: 'ITEST Concil',
+          contactEmail: `itest-concil-merchant-${RUN}@test.com`,
+          publicKey: `pk_test_itest_concil_${RUN}`,
+          secretKeyHash: `itest-concil-hash-${RUN}`,
+          providerId: provider.id,
+          providerCredentials: { connectAccountId: 'acct_itest_concil' },
+          chargesEnabled: true,
+          platformFeeBps: 100,
+          sandboxMode: true,
+        },
+      })
+    ).id
+    otraVenueId = (
+      await prisma.venue.create({
+        data: { name: 'ITEST Concil Otra', slug: `itest-concil-otra-${RUN}`, organizationId: org.id, timezone: TZ },
+      })
+    ).id
     await updateSettings(venueId, { enabled: true, minOrderAmount: 0, defaultPrepMinutes: 15 }, null)
     clearPublicMenuCache()
     checkoutSpy = jest.spyOn(StripeConnectProvider.prototype, 'createAuthorizationCheckout')
@@ -390,9 +408,10 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
       return sesiones.get(p.idempotencyKey)!
     })
     authSpy.mockReset()
-    authSpy.mockImplementation(async (_m: any, ref: any) =>
-      ref.paymentIntentId ? leerPi(ref.paymentIntentId) : leerSesion(ref.checkoutSessionId),
-    )
+    authSpy.mockImplementation(async (_m: any, ref: any) => {
+      if (lentas.has(ref.checkoutSessionId)) await dormir(lentas.get(ref.checkoutSessionId)!)
+      return ref.paymentIntentId ? leerPi(ref.paymentIntentId) : leerSesion(ref.checkoutSessionId)
+    })
     // Stripe cobra lo apartado; un PaymentIntent ya soltado no se cobra.
     captureSpy.mockReset()
     captureSpy.mockImplementation(async (_m: any, p: any) => {
@@ -414,8 +433,12 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
       return leerPi(p.paymentIntentId)
     })
     ;(logAction as jest.Mock).mockClear()
-    // El conciliador lee TODOS los cargos de la base (la desechable de este proceso): lo de pruebas anteriores queda resuelto.
-    await prisma.onlineOrderCharge.updateMany({ where: { status: { in: [...NO_FINALES] } }, data: { status: 'ABANDONED' } })
+    // Lo de pruebas anteriores de ESTA suite queda resuelto. A7: sólo sus sucursales (otra suite puede estar usando la base); por eso
+    // las pruebas miden sus propias filas y sus propias llamadas a Stripe, nunca los totales de la pasada.
+    await prisma.onlineOrderCharge.updateMany({
+      where: { venueId: { in: [venueId!, otraVenueId!] }, status: { in: [...NO_FINALES] } },
+      data: { status: 'ABANDONED' },
+    })
     await prisma.onlineOrder.updateMany({ where: { venueId: venueId!, status: 'PENDING_ACCEPTANCE' }, data: { status: 'EXPIRED' } })
     const ahora = new Date()
     await prisma.onlineOrderingSettings.update({
@@ -448,7 +471,7 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     await prisma.inventoryPosting.deleteMany({ where: v })
     await prisma.venueTransaction.deleteMany({ where: v })
     await prisma.payment.deleteMany({ where: v })
-    await prisma.onlineOrderCharge.deleteMany({ where: v }) // antes del comercio (Restrict)
+    await prisma.onlineOrderCharge.deleteMany({ where: { venueId: { in: [venueId, otraVenueId ?? venueId] } } }) // antes del comercio
     await prisma.onlineOrder.deleteMany({ where: v })
     await prisma.stampReward.deleteMany({ where: v })
     await prisma.order.deleteMany({ where: v })
@@ -459,7 +482,7 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     await prisma.customer.deleteMany({ where: v })
     await prisma.onlineOrderingSettings.deleteMany({ where: v })
     await prisma.privacyNoticeVersion.deleteMany({ where: v })
-    await prisma.venue.deleteMany({ where: { id: venueId } })
+    await prisma.venue.deleteMany({ where: { id: { in: [venueId, otraVenueId ?? venueId] } } })
     if (orgId) await prisma.organization.deleteMany({ where: { id: orgId } })
   })
 
@@ -473,12 +496,14 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     await plazoHace(a, 60 * MIN)
 
     // Ruling 2: con menos de 60 s puede haber una captura en vuelo: no se toca.
-    await prisma.onlineOrderCharge.update({ where: { id: a.chargeId }, data: { updatedAt: hace(20_000) } })
+    const joven = hace(20_000)
+    await prisma.onlineOrderCharge.update({ where: { id: a.chargeId }, data: { updatedAt: joven } })
     authSpy.mockClear()
-    await expect(reconcileCardCharges(new Date(), read => read())).resolves.toMatchObject({ scanned: 0 })
-    expect(authSpy).not.toHaveBeenCalled()
+    await reconcileCardCharges(new Date(), read => read())
+    expect(authSpy.mock.calls.filter(([, ref]) => ref.paymentIntentId === a.pi)).toHaveLength(0)
+    expect(await cargo(a.chargeId)).toMatchObject({ status: 'CAPTURING', updatedAt: joven })
 
-    await expect(pasada(a.chargeId)).resolves.toMatchObject({ scanned: 1, finished: 1, errors: 0 })
+    await pasada(a.chargeId)
     const [primera, reintento] = capturasA(a.pi)
     expect(reintento[1]).toEqual(primera[1]) // la MISMA clave y los mismos parámetros
     expect(reintento[1].idempotencyKey).toBe(`online-order:${a.orderId}:capture`)
@@ -491,7 +516,7 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     const dentro = await apartado()
     await muereAntesDeStripe(dentro)
     await plazoHace(dentro, 2 * MIN)
-    await expect(pasada(dentro.chargeId)).resolves.toMatchObject({ scanned: 1, finished: 1 })
+    await pasada(dentro.chargeId)
     expect(capturasA(dentro.pi)).toHaveLength(2)
     await cobradoUnaVez(dentro)
 
@@ -533,7 +558,7 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
       const a = await apartado({ miEquipo })
       await muereDespuesDeQueStripeCobro(a, miEquipo)
       expect(await cobros(a.orderId)).toHaveLength(0)
-      await expect(pasada(a.chargeId)).resolves.toMatchObject({ scanned: 1, finished: 1, errors: 0 })
+      await pasada(a.chargeId)
       expect({ miEquipo, capturas: capturasA(a.pi).length }).toEqual({ miEquipo, capturas: 1 }) // no se vuelve a cobrar
       await cobradoUnaVez(a)
       // Una pasada más no duplica nada.
@@ -549,7 +574,7 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     const cobrada = await apartado()
     await muereDespuesDeQueStripeCobro(cobrada)
     await plazoHace(cobrada, 30 * MIN)
-    await expect(pasada(cobrada.chargeId)).resolves.toMatchObject({ finished: 1 })
+    await pasada(cobrada.chargeId)
     expect(liberacionesA(cobrada.pi)).toHaveLength(0)
     expect(capturasA(cobrada.pi)).toHaveLength(1)
     await cobradoUnaVez(cobrada)
@@ -558,21 +583,39 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     const apartada = await apartado()
     await muereAntesDeStripe(apartada)
     await plazoHace(apartada, 6 * MIN)
-    await expect(pasada(apartada.chargeId)).resolves.toMatchObject({ finished: 1 })
+    await pasada(apartada.chargeId)
     expect(capturasA(apartada.pi)).toHaveLength(1)
     await cerradoSinCobrar(apartada)
+    // A4: la bitácora no culpa a la tarjeta: fue Avoqado quien la soltó porque el cobro no se completó a tiempo.
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'ONLINE_ORDER_CARD_CAPTURE_FAILED',
+        entityId: apartada.onlineOrderId,
+        data: expect.objectContaining({ reason: 'RELEASED_AFTER_GRACE' }),
+      }),
+    )
 
     // Bajo el candado y con el reloj real: la gracia vence mientras otra transacción sostiene la orden. La pasada empezó dentro de la
     // gracia, pero decide después del candado: ya no cobra.
     const cruza = await apartado()
     await muereAntesDeStripe(cruza)
-    await prisma.onlineOrder.update({ where: { id: cruza.onlineOrderId }, data: { acceptDeadlineAt: hace(5 * MIN - 1500) } })
     await prisma.onlineOrderCharge.update({ where: { id: cruza.chargeId }, data: { updatedAt: hace(2 * MIN) } })
-    const orden = sostener(tx => lockExistingOrderForPayment(tx, { venueId: venueId!, orderId: cruza.orderId }), 2500)
+    const orden = sostener(tx => lockExistingOrderForPayment(tx, { venueId: venueId!, orderId: cruza.orderId }), 4000)
     await orden.listo
+    // A7: la gracia termina 1.5 s después de tomar el candado (que dura 4 s), y la pasada tiene que llegar al candado antes (su última
+    // lectura de Stripe es justo antes de pedirlo): si la preparación tardara más, la prueba truena en vez de pasar sin probar nada.
+    const finGracia = Date.now() + 1500
+    await prisma.onlineOrder.update({ where: { id: cruza.onlineOrderId }, data: { acceptDeadlineAt: new Date(finGracia - 5 * MIN) } })
+    let llegoAlCandado = Infinity
+    const leer = authSpy.getMockImplementation()!
+    authSpy.mockImplementation(async (m: any, ref: any) => {
+      if (ref.paymentIntentId === cruza.pi) llegoAlCandado = Date.now()
+      return leer(m, ref)
+    })
     const laPasada = reconcileCardCharges(new Date(), read => read())
     await orden.hecho
     await laPasada
+    expect(llegoAlCandado).toBeLessThan(finGracia)
     expect(capturasA(cruza.pi)).toHaveLength(1)
     await cerradoSinCobrar(cruza)
   })
@@ -614,7 +657,7 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     expect((await cargo(a.chargeId)).status).toBe('CAPTURING')
 
     // Tras reiniciar otra vez: Stripe dice que la soltó → el pedido se cierra y el premio regresa a la clienta.
-    await expect(pasada(a.chargeId)).resolves.toMatchObject({ scanned: 1, finished: 1, errors: 0 })
+    await pasada(a.chargeId)
     await cerradoSinCobrar(a)
     expect(await prisma.stampReward.findUniqueOrThrow({ where: { id: premioId } })).toMatchObject({
       status: 'PENDING',
@@ -679,7 +722,7 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
       expect({ corte, cargo: (await cargo(a.chargeId)).status }).toEqual({ corte, cargo: 'CAPTURING' })
 
       // Tras reiniciar: Stripe dice que cobró. Fue NUESTRA captura: se anota como cualquier cobro.
-      await expect(pasada(a.chargeId)).resolves.toMatchObject({ scanned: 1, finished: 1, errors: 0 })
+      await pasada(a.chargeId)
       await cobradoUnaVez(a)
       expect({ corte, capturas: capturasA(a.pi).length }).toEqual({ corte, capturas: 1 }) // ningún reintento cobró
 
@@ -730,12 +773,14 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     expect((await cargo(joven.chargeId)).status).toBe('PENDING_AUTH')
     expect((await cargo(miEquipo.chargeId)).status).toBe('PENDING_AUTH')
     // Una lectura de sesión por borrador visitado, y ninguna de los que no tocaba.
-    const sesionesLeidas = authSpy.mock.calls.map(([, ref]) => ref.checkoutSessionId).filter(Boolean)
+    const sesionesLeidas = deLaSuite(authSpy)
+      .map(([, ref]) => ref.checkoutSessionId)
+      .filter(Boolean)
     const sesionDe = async (id: string) => (await cargo(id)).checkoutSessionId
     expect(sesionesLeidas.sort()).toEqual(
       [await sesionDe(atiempo.chargeId), await sesionDe(tarde.chargeId), await sesionDe(sinPagar.chargeId)].sort(),
     )
-    expect(captureSpy).not.toHaveBeenCalled()
+    expect(deLaSuite(captureSpy)).toHaveLength(0)
   })
 
   // ── Traspasos de 3A y 3B ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -802,7 +847,7 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     expect(capturasA(a.pi)).toHaveLength(1)
 
     // El conciliador termina el cobro de la caja que cayó (dentro de su plazo); la segunda relee y ya lo ve «Por entregar».
-    await expect(pasada(a.chargeId)).resolves.toMatchObject({ finished: 1 })
+    await pasada(a.chargeId)
     await expect(abrir(a)).resolves.toEqual({ outcome: 'STALE', status: 'ACCEPTED' })
     const caja = await listFolios({ venueId: venueId! })
     expect(caja.toDeliver.map(f => f.orderId)).toContain(a.orderId)
@@ -829,7 +874,7 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     expect(pis.get(a.pi)).toBe('requires_capture')
 
     // La pasada del conciliador es el único reintento: la deja RELEASED.
-    await expect(reconcileCardCharges(new Date(), read => read())).resolves.toMatchObject({ scanned: 1, released: 1, errors: 0 })
+    await reconcileCardCharges(new Date(), read => read())
     expect((await cargo(a.chargeId)).status).toBe('RELEASED')
     expect(pis.get(a.pi)).toBe('canceled')
     expect(liberacionesA(a.pi)).toHaveLength(2)
@@ -842,6 +887,107 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
       (logAction as jest.Mock).mock.calls.filter(([p]) => p.action === 'ONLINE_ORDER_CARD_RELEASED' && p.entityId === a.onlineOrderId),
     ).toHaveLength(1)
     expect(await cobros(a.orderId)).toHaveLength(1) // sólo el otro cobro: la tarjeta nunca
-    expect(captureSpy).not.toHaveBeenCalled()
+    expect(capturasA(a.pi)).toHaveLength(0)
+  })
+
+  // ── Ola final (20-nov) ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('D661 · A1: la gracia vence entre la decisión de reintentar y la llamada a Stripe → no sale ninguna captura nueva y el pedido se cierra con lo que diga Stripe', async () => {
+    const a = await apartado()
+    await muereAntesDeStripe(a)
+    await prisma.onlineOrderCharge.update({ where: { id: a.chargeId }, data: { updatedAt: hace(2 * MIN) } })
+    // La gracia termina en 1.5 s: la pasada decide «volver a cobrar» dentro de ella…
+    const finGracia = Date.now() + 1500
+    await prisma.onlineOrder.update({ where: { id: a.onlineOrderId }, data: { acceptDeadlineAt: new Date(finGracia - 5 * MIN) } })
+    // …y el proceso se detiene DESPUÉS de decidir y ANTES de la llamada a Stripe (el commit o una pausa) hasta que la gracia pasó. La
+    // segunda vez que se arma la cuenta de Stripe del cargo es la de la captura (la primera es la relectura del conciliador).
+    const real = comercio.chargeMerchant
+    let llamadas = 0
+    let decidioDentro = false
+    const pausa = jest.spyOn(comercio, 'chargeMerchant').mockImplementation(c => {
+      if ((c as any).id === a.chargeId && ++llamadas === 2) {
+        decidioDentro = Date.now() < finGracia
+        detenerProceso(finGracia + 50 - Date.now())
+      }
+      return real(c)
+    })
+    try {
+      await reconcileCardCharges(new Date(), read => read())
+    } finally {
+      pausa.mockRestore()
+    }
+    expect(decidioDentro).toBe(true) // si no, la prueba no probó nada
+    expect(capturasA(a.pi)).toHaveLength(1) // sólo la de la caja: el reintento no salió
+    await cerradoSinCobrar(a)
+    expect(liberacionesA(a.pi)[0][1]).toEqual({ paymentIntentId: a.pi, idempotencyKey: `online-order:${a.orderId}:release` })
+  })
+
+  it('D661 · A2: un cobro en duda (CAPTURING) se termina antes de leer cualquier borrador temprano', async () => {
+    const a = await apartado()
+    await muereAntesDeStripe(a)
+    const temprano = await borrador()
+    await prisma.onlineOrderCharge.update({ where: { id: temprano.chargeId }, data: { createdAt: hace(3 * MIN) } })
+    const sesion = (await cargo(temprano.chargeId)).checkoutSessionId!
+    let cobroAlLeerElBorrador: string | null = null
+    const leer = authSpy.getMockImplementation()!
+    authSpy.mockImplementation(async (m: any, ref: any) => {
+      if (ref.checkoutSessionId === sesion && cobroAlLeerElBorrador === null) cobroAlLeerElBorrador = (await cargo(a.chargeId)).status
+      return leer(m, ref)
+    })
+    await pasada(a.chargeId)
+    expect(cobroAlLeerElBorrador).toBe('CAPTURED')
+    await cobradoUnaVez(a)
+    expect((await cargo(temprano.chargeId)).status).toBe('PENDING_AUTH') // también se visitó (sigue sin pagar)
+  })
+
+  it('D661 · A2: con borradores ajenos y lecturas lentas de Stripe delante, una autorización a tiempo (sin aviso ni pestaña) se vuelve pedido abrible con margen antes de su plazo', async () => {
+    // 12 borradores de «Nadie» de otra sucursal, delante en la fila (tocados hace más tiempo), cuya lectura en Stripe tarda 1 s cada una.
+    const ajenos: string[] = []
+    for (let i = 0; i < 12; i++) {
+      const sesion = `cs_otra_${RUN}_${seq}_${i}`
+      lentas.set(sesion, 1000)
+      ajenos.push(
+        (
+          await prisma.onlineOrderCharge.create({
+            data: {
+              venueId: otraVenueId!,
+              ecommerceMerchantId: merchantId,
+              idempotencyKey: `otra-${RUN}-${seq}-${i}`,
+              trackingToken: `otra${RUN}${seq}x${i}`.padEnd(32, 't'),
+              customerPhone: '',
+              request: { nadie: true },
+              requestHash: `otra-${i}`,
+              checkoutSessionId: sesion,
+              checkoutExpiresAt: new Date(Date.now() + 20 * MIN),
+              amount: 250,
+              platformFeeBps: 100,
+              applicationFeeCents: 250,
+              merchantSnapshot: { connectAccountId: 'acct_itest_concil', sandboxMode: true, providerCode: 'STRIPE_CONNECT' },
+              createdAt: hace(5 * MIN),
+              updatedAt: hace(20 * MIN - i * 1000),
+            },
+          })
+        ).id,
+      )
+    }
+    try {
+      // La clienta pagó hace 9 min 52 s y nadie avisó: su plazo vence en 8 s. En serie, los 12 de delante tardarían 12 s.
+      const d = await borrador()
+      await prisma.onlineOrderCharge.update({ where: { id: d.chargeId }, data: { createdAt: hace(11 * MIN) } })
+      await pagar(d.chargeId, hace(10 * MIN - 8000))
+
+      await reconcileCardCharges(new Date(), read => read())
+
+      const c = await cargo(d.chargeId)
+      expect(c.status).toBe('AUTHORIZED')
+      const oo = await prisma.onlineOrder.findUniqueOrThrow({ where: { id: c.onlineOrderId! } })
+      expect(oo).toMatchObject({ status: 'PENDING_ACCEPTANCE', requiresAcceptance: false })
+      expect(oo.acceptDeadlineAt.getTime()).toBeGreaterThan(Date.now()) // la caja todavía lo puede abrir
+      expect((await listFolios({ venueId: venueId! })).tarjetasPorAbrir.map(t => t.orderId)).toContain(oo.orderId)
+      await expect(abrir({ orderId: oo.orderId })).resolves.toMatchObject({ outcome: 'OK' })
+    } finally {
+      for (const s of [...lentas.keys()]) if (s.startsWith(`cs_otra_${RUN}_`)) lentas.delete(s)
+      await prisma.onlineOrderCharge.updateMany({ where: { id: { in: ajenos } }, data: { status: 'ABANDONED' } })
+    }
   })
 })

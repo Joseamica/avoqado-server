@@ -460,7 +460,13 @@ describe('D661 (3B): lo que lee la caja — tarjetasPorAbrir, comandasPorImprimi
     prismaMock.onlineOrderCharge.findFirst.mockResolvedValueOnce({ id: 'ch1' } as any)
     expect(await listFolios({ venueId: 'v1', now: NOW })).toMatchObject({ showTile: false, pollSeconds: 30 })
     expect(prismaMock.onlineOrderCharge.findFirst).toHaveBeenCalledWith({
-      where: { venueId: 'v1', status: 'PENDING_AUTH', customerPhone: '' },
+      // D661 (A6): sin los cobrados fuera de Avoqado (siguen PENDING_AUTH a propósito y ya no dejan la caja en 30 s).
+      where: {
+        venueId: 'v1',
+        status: 'PENDING_AUTH',
+        customerPhone: '',
+        OR: [{ lastError: null }, { lastError: { not: 'CAPTURED_OUTSIDE' } }],
+      },
       select: { id: true },
     })
     expect(await listFolios({ venueId: 'v1', now: NOW })).toMatchObject({ showTile: false, pollSeconds: 600 })

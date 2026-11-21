@@ -1,7 +1,7 @@
 import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
-import { reconcileCardCharges, type ReconcileResult } from '../services/online-ordering/card/reconcile.service'
+import { reconcileCardCharges, visitEarlyNadieDrafts, type ReconcileResult } from '../services/online-ordering/card/reconcile.service'
 import { sweepCardRefunds, type CardRefundSweepResult } from '../services/online-ordering/card/refund-reconciler.service'
 import type { ReadCandidates } from '../services/online-ordering/types'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -13,6 +13,8 @@ interface OnlineOrderCardReconcilerDependencies {
   cron?: CronHandle
   now: () => Date
   reconcile: (now: Date, readEntry: ReadCandidates) => Promise<ReconcileResult>
+  /** D661 (A2): la visita temprana de «Nadie» sola, para el minuto en que la pasada anterior todavía corre. */
+  visitEarly: (now: Date, readEntry: ReadCandidates) => Promise<ReconcileResult>
   /** T10: el recorrido de devoluciones a la tarjeta, en la misma pasada (después de los cargos). */
   sweepRefunds: (now: Date, readEntry: ReadCandidates) => Promise<CardRefundSweepResult>
   retryEntry: typeof retry
@@ -25,6 +27,7 @@ const EMPTY: ReconcileResult = { scanned: 0, finished: 0, released: 0, abandoned
 const defaults: OnlineOrderCardReconcilerDependencies = {
   now: () => new Date(),
   reconcile: reconcileCardCharges,
+  visitEarly: visitEarlyNadieDrafts,
   sweepRefunds: sweepCardRefunds,
   retryEntry: retry,
 }
@@ -73,7 +76,14 @@ export class OnlineOrderCardReconcilerJob {
   async checkNow(): Promise<PassResult> {
     if (this.isRunning) {
       logger.warn('[Online-order card reconciler] tick skipped — previous run still in progress')
-      return { ...EMPTY, skipped: true }
+      // D661 (A2): una pasada lenta no deja sin visitar los borradores de «Nadie» (su plazo es de 10 min): sólo esa visita, con su
+      // propio presupuesto (el servicio nunca corre dos a la vez).
+      try {
+        return { ...(await this.dependencies.visitEarly(this.dependencies.now(), this.readEntry)), skipped: true }
+      } catch (error) {
+        logger.error('Online-order card early visit failed', { error })
+        return { ...EMPTY, errors: 1, skipped: true }
+      }
     }
     this.isRunning = true
     try {

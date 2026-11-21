@@ -15,11 +15,12 @@ import { getProvider } from '@/services/payments/provider-registry'
 import type { AuthorizationState } from '@/services/payments/providers/provider.interface'
 import { fromStripeAmount } from '@/services/payments/providers/money'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { CAPTURED_OUTSIDE } from '../constants'
 import { cardPaymentData } from './capturedPayment'
 import { chargeMerchant } from './merchant'
 
 /** `lastError` del cargo cuyo dinero ya cobró el negocio a mano en Stripe (C3 y r2 R1: misma familia, misma anomalía). */
-export const CAPTURED_OUTSIDE = 'CAPTURED_OUTSIDE'
+export { CAPTURED_OUTSIDE }
 
 type ReleasableCharge = OnlineOrderCharge & { onlineOrder: { orderId: string } | null }
 const LIVE_ONLINE: OnlineOrderStatus[] = [
