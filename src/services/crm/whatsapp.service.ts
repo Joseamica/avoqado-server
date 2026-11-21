@@ -42,6 +42,7 @@ const clamp = (value: number | undefined, fallback: number, max: number) => Math
  * webhook writes `receivedAt` through Prisma, whose engine fills `@default(now())` with the process clock in UTC whatever
  * the database's time zone (measured 20-nov on a Postgres in America/Los_Angeles: 22:56 stored at 14:59 local). Same process,
  * same clock: a message stamped after the photo can never fall inside it (Codex r3 #2; r2 #1 read the column's SQL default).
+ * It is compared through `utcTs`, like every date bind of raw SQL (`rawSqlDateBindGuard`).
  */
 type Cursor = [string, Date, string]
 const HASTA_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}$/
@@ -134,7 +135,7 @@ export async function listChats(access: CrmAccess, filters: ChatFilters = {}) {
   const limit = clamp(filters.limit, CHATS_DEFAULT, CHATS_MAX)
   const after = decode(filters.cursor)
   const hasta = after?.[0] ?? fotoDeAhora()
-  const foto = Prisma.sql`m."receivedAt" <= ${hasta}::timestamp`
+  const foto = Prisma.sql`m."receivedAt" <= ${utcTs(new Date(`${hasta}Z`))}`
 
   const q = filters.q?.trim() || null
   const digits = q?.replace(/\D/g, '') ?? ''
@@ -253,7 +254,7 @@ export async function getThread(access: CrmAccess, query: ThreadQuery) {
   } else {
     quien = Prisma.sql`m."contactPhone" IN (${Prisma.join(formasDelTelefono(query.phone!))})`
   }
-  const foto = Prisma.sql`${quien} AND m."receivedAt" <= ${hasta}::timestamp`
+  const foto = Prisma.sql`${quien} AND m."receivedAt" <= ${utcTs(new Date(`${hasta}Z`))}`
   const antes = before ? Prisma.sql`AND (m."sentAt", m.id) < (${utcTs(before[1])}, ${before[2]})` : Prisma.empty
 
   const [found, [{ total }]] = await Promise.all([
