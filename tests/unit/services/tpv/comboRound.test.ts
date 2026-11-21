@@ -117,6 +117,18 @@ describe('table combo rounds use one locked fiscal transaction', () => {
     expect(tx.orderItem.create).not.toHaveBeenCalled()
     expect(tx.product.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: { in: [] } }) }))
   })
+  // D34: otra caja separó el combo a otra cuenta del negocio; el reenvío de la ronda no lo vuelve a aplicar aquí.
+  it('a combo whose instance already lives in another account of the venue is not applied again', async () => {
+    tx.$queryRaw.mockImplementation(async (consulta: any) =>
+      String(consulta?.sql ?? '').includes('"OrderPromotion"') ? [{ instancia: 'sale' }] : [{ id: 'order' }],
+    )
+    await addItemsToOrder('venue', 'order', [promo] as any, 1, true)
+    expect(applyPromotionToOrder).not.toHaveBeenCalled()
+    const consulta = tx.$queryRaw.mock.calls
+      .map((args: any[]) => args[0])
+      .find((c: any) => String(c?.sql ?? '').includes('"OrderPromotion"'))
+    expect(consulta.values).toEqual([['sale'], 'order', 'venue'])
+  })
   it('a stale check is rejected before creating a promotion', async () => {
     await expect(addItemsToOrder('venue', 'order', [promo] as any, 0, true)).rejects.toMatchObject({ code: 'VERSION_CONFLICT' })
     expect(applyPromotionToOrder).not.toHaveBeenCalled()
