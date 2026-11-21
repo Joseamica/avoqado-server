@@ -9,7 +9,12 @@
  */
 import { prismaMock } from '@tests/__helpers__/setup'
 import { CARD_ALERT_FAST_WINDOW_MS, CARD_ALERT_WRITE_DEBOUNCE_MS } from '@/services/online-ordering/constants'
-import { CARD_ALERT_HEADER, __resetCardAlertPollDebounceForTests, touchCardAlertPoll } from '@/services/online-ordering/cardAlertPresence'
+import {
+  CARD_ALERT_HEADER,
+  __resetCardAlertPollDebounceForTests,
+  apagarMarcaRapida,
+  touchCardAlertPoll,
+} from '@/services/online-ordering/cardAlertPresence'
 
 const T0 = new Date('2026-11-20T18:00:00.000Z')
 const despues = (ms: number) => new Date(T0.getTime() + ms)
@@ -126,5 +131,35 @@ describe('touchCardAlertPoll (D661)', () => {
     reloj(despues(1_000))
     await expect(touchCardAlertPoll('v1', true)).resolves.toBe(true)
     expect(escrituras()).toHaveLength(2)
+  })
+})
+
+/**
+ * D661 · A (Ruling 79): una respuesta LENTA de la ruta de las apps que no anota latido (sin la cabecera: WINDOWS sin foco, la TPV
+ * cobrando o bloqueada; o de una sesión que no abre pedidos) apaga igual la marca rápida, porque esa caja va a dormir 600 s. Sólo
+ * apaga: nunca anota que una caja que avisa sondeó.
+ */
+describe('apagarMarcaRapida (D661 · A, Ruling 79)', () => {
+  it('apaga SÓLO la marca rápida, con una escritura condicional, sin tocar lastCardAlertPollAt; con la marca ya apagada no escribe nada', async () => {
+    marcaRapida = T0
+    await apagarMarcaRapida('v1')
+    expect(escrituras()).toEqual([{ where: { venueId: 'v1', cardAlertFastPollAt: { not: null } }, data: { cardAlertFastPollAt: null } }])
+    expect(marcaRapida).toBeNull()
+    await apagarMarcaRapida('v1')
+    expect(marcaRapida).toBeNull()
+  })
+
+  it('la siguiente respuesta rápida tras apagarla escribe en seguida (como B1: el amortiguado de la rápida anterior no la frena)', async () => {
+    await touchCardAlertPoll('v1', true)
+    reloj(despues(2_000))
+    await apagarMarcaRapida('v1')
+    reloj(despues(4_000))
+    await expect(touchCardAlertPoll('v1', true)).resolves.toBe(true)
+    expect(marcaRapida).toEqual(despues(4_000))
+  })
+
+  it('si la base no deja apagarla, lanza: quien llama contesta la cadencia rápida (Ruling 41)', async () => {
+    prismaMock.onlineOrderingSettings.updateMany.mockRejectedValueOnce(new Error('se cayó la base'))
+    await expect(apagarMarcaRapida('v1')).rejects.toThrow('se cayó la base')
   })
 })

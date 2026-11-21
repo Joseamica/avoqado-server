@@ -15,6 +15,7 @@ import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
 import { StripeConnectProvider } from '@/services/payments/providers/stripe-connect.provider'
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
+import { cardOnlineAvailable } from '@/services/online-ordering/card/merchant'
 import { confirmCardAuthorization } from '@/services/online-ordering/card/confirm.service'
 import { releaseCharge } from '@/services/online-ordering/card/release.service'
 import { cerrarFoliosDelDiaTerminado, listFolios, syncPaidFolios } from '@/services/online-ordering/folios.service'
@@ -1160,6 +1161,73 @@ describe('D661 · 3A y 3B: confirmar → apartado; abrir = cobrar; vencer y libe
     // La caja vuelve a sondear con la tienda en «Nadie»: 30 s, la marca regresa y el borrador sí nace.
     expect((await sondeo()).pollSeconds).toBe(30)
     await expect(borrador()).resolves.toMatchObject({ status: 'AWAITING_PAYMENT', replay: false })
+  })
+
+  it('D661 · A (Ruling 79): la caja que avisó y después sondea SIN la cabecera (WINDOWS sin foco, la TPV cobrando) recibe 600 → la marca se apaga sin anotar latido: /info y el borrador (también su relectura del Ruling 72) ya no ofrecen la tarjeta; sin la cabecera y en 30 s, nada cambia; si no se pudo apagar, 30 s', async () => {
+    __resetCardAlertPollDebounceForTests()
+    await sinNadaVivo()
+    // Sin borradores vivos: con la tienda apagada la lista es «lenta» (un borrador de «Nadie» vivo la mantiene en 30 s).
+    await prisma.onlineOrderCharge.updateMany({ where: { venueId: venueId!, status: 'PENDING_AUTH' }, data: { status: 'ABANDONED' } })
+    const ajustes = () => prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })
+    /** Lo que contesta `/info` (`onlineOrdering.public.controller.ts`): el mismo predicado con los ajustes de hoy. */
+    const ofrece = async () => cardOnlineAvailable(await ajustes(), prisma, venueId!)
+    const tienda = (enabled: boolean) => prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { enabled } })
+    const SIN_CABECERA = { 'x-online-orders-to-pay': '1' } // la MISMA caja, en un momento en que no manda la de la caja que avisa
+
+    // 1) La caja avisa en 30 s: la marca queda puesta y la tienda ofrece la tarjeta.
+    expect((await sondeo()).pollSeconds).toBe(30)
+    const { cardAlertFastPollAt: marca, lastCardAlertPollAt: latido } = await ajustes()
+    expect(marca).toEqual(expect.any(Date))
+    expect(await ofrece()).toBe(true)
+
+    // 2) Sin la cabecera y con la tienda en «Nadie» (respuesta de 30 s): nada cambia.
+    expect((await sondeo(SIN_CABECERA)).pollSeconds).toBe(30)
+    expect(await ajustes()).toMatchObject({ cardAlertFastPollAt: marca, lastCardAlertPollAt: latido })
+    expect(await ofrece()).toBe(true)
+
+    // 3) Un borrador ya pasó su primera revisión. El dueño apaga la tienda, la caja sondea SIN la cabecera y recibe 600 (se duerme),
+    //    y el dueño la vuelve a prender dentro de los 90 s de la marca.
+    const cotizar = cotizacion.quoteCart
+    const pausa = jest.spyOn(cotizacion, 'quoteCart').mockImplementationOnce(async (...a: Parameters<typeof cotizacion.quoteCart>) => {
+      await tienda(false)
+      expect((await sondeo(SIN_CABECERA)).pollSeconds).toBe(600)
+      await tienda(true)
+      return cotizar(...a)
+    })
+    checkoutSpy.mockClear()
+    const antes = await prisma.onlineOrderCharge.count({ where: { venueId: venueId! } })
+    try {
+      await expect(borrador()).rejects.toMatchObject({ statusCode: 400, code: 'CARD_PAYMENT_NOT_ACCEPTED' })
+    } finally {
+      pausa.mockRestore()
+    }
+    expect(await prisma.onlineOrderCharge.count({ where: { venueId: venueId! } })).toBe(antes)
+    expect(checkoutSpy).not.toHaveBeenCalled()
+    // La marca se apagó SIN anotar que una caja que avisa sondeó; /info y la admisión ya no ofrecen la tarjeta.
+    expect(await ajustes()).toMatchObject({ cardAlertFastPollAt: null, lastCardAlertPollAt: latido })
+    expect(await ofrece()).toBe(false)
+    await expect(borrador()).rejects.toMatchObject({ code: 'CARD_PAYMENT_NOT_ACCEPTED' })
+
+    // 4) La caja vuelve a avisar en 30 s: la tarjeta regresa en seguida. Con la tienda apagada, la lenta SIN la cabecera cuya escritura
+    //    falla contesta 30 s y la marca sigue.
+    expect((await sondeo()).pollSeconds).toBe(30)
+    expect(await ofrece()).toBe(true)
+    const marca2 = (await ajustes()).cardAlertFastPollAt
+    await tienda(false)
+    const escribir = prisma.onlineOrderingSettings.updateMany.bind(prisma.onlineOrderingSettings)
+    const espia = jest.spyOn(prisma.onlineOrderingSettings, 'updateMany').mockImplementation((async (a: any) => {
+      if (a?.data?.cardAlertFastPollAt === null) throw new Error('se cayó la base al apagar la marca rápida')
+      return escribir(a)
+    }) as never)
+    let lenta: any
+    try {
+      lenta = await sondeo(SIN_CABECERA)
+    } finally {
+      espia.mockRestore()
+      await tienda(true)
+    }
+    expect(lenta.pollSeconds).toBe(30)
+    expect((await ajustes()).cardAlertFastPollAt).toEqual(marca2)
   })
 
   it('D661 · E (Ruling 40): sin la cabecera, la caja vieja que tenía el reclamo vencido lo repite (posibleRepetida:true); otra caja vieja, no; con la cabecera, como hoy', async () => {

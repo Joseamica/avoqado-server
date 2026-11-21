@@ -53,6 +53,8 @@ jest.mock('@/services/online-ordering/cardAlertPresence', () => ({
   __esModule: true,
   CARD_ALERT_HEADER: 'x-online-orders-card-alert',
   touchCardAlertPoll: jest.fn(),
+  // D661 (Ruling 79): «Por pagar» contestada lenta apaga la marca rápida aunque no traiga la cabecera.
+  apagarMarcaRapida: jest.fn(async () => undefined),
 }))
 
 import mobileRouter from '@/routes/mobile/onlineOrders.mobile.routes'

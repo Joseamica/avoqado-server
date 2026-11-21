@@ -10,7 +10,7 @@ import type { NextFunction, Request, Response } from 'express'
 import { OnlineOrderStatus, type OnlineOrderRejectReason } from '@prisma/client'
 import { evaluateRolePermission, resolveUserRoleForVenue } from '@/middlewares/checkPermission.middleware'
 import { ONLINE_ORDERS_TO_PAY_HEADER, ONLINE_ORDERS_TRAY_HEADER, TO_PAY_FAST_POLL_SECONDS } from '@/services/online-ordering/constants'
-import { CARD_ALERT_HEADER, touchCardAlertPoll } from '@/services/online-ordering/cardAlertPresence'
+import { CARD_ALERT_HEADER, apagarMarcaRapida, touchCardAlertPoll } from '@/services/online-ordering/cardAlertPresence'
 import { MENSAJE_ABRIR_DESDE_LA_CAJA, mensajeNoSeEntrega } from '@/services/online-ordering/card/guards'
 import { listInbox, type InboxFilter } from '@/services/online-ordering/inbox.service'
 import { listFolios, type FolioSection } from '@/services/online-ordering/folios.service'
@@ -143,14 +143,19 @@ const makeToPay = (puedeLatir: boolean) => async (req: Request, res: Response, n
     // D661 (A, Ruling 41): la caja que avisa sólo se duerme (600 s) si su respuesta lenta quedó anotada: esa escritura apaga la marca
     // rápida con la que la tienda ofrece la tarjeta. Si la base no dejó anotarla (ni leer si esta sesión puede abrir pedidos), se le
     // contesta la cadencia rápida y sigue en 30 s hasta que se anote. Con una respuesta rápida un fallo no cambia nada (ya es 30).
+    // D661 (A, Ruling 79): en la ruta de las apps una respuesta LENTA apaga la marca aunque no se anote latido (sin la cabecera: WINDOWS
+    // sin foco, la TPV cobrando o bloqueada; o una sesión que no abre pedidos): esa caja también se duerme. Sólo apaga; si no pudo, 30 s.
+    const rapida = data.pollSeconds <= TO_PAY_FAST_POLL_SECONDS
+    const anotar = async () => {
+      if (req.header(CARD_ALERT_HEADER) === '1' && (await canAnswerOrders(req, venueId))) await touchCardAlertPoll(venueId, rapida)
+      else if (!rapida) await apagarMarcaRapida(venueId)
+    }
     const anotada =
-      !(puedeLatir && req.header(CARD_ALERT_HEADER) === '1') ||
-      (await canAnswerOrders(req, venueId)
-        .then(puede => (puede ? touchCardAlertPoll(venueId, data.pollSeconds <= TO_PAY_FAST_POLL_SECONDS) : false))
-        .then(
-          () => true,
-          () => false,
-        ))
+      !puedeLatir ||
+      (await anotar().then(
+        () => true,
+        () => false,
+      ))
     const state = await getAcceptingStatus(venueId).catch(() => null)
     return res.json({
       success: true,

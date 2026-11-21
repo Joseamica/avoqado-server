@@ -54,3 +54,17 @@ export async function touchCardAlertPoll(venueId: string, rapida: boolean): Prom
   if (rapida) lastFastWrite.set(venueId, now.getTime())
   return true
 }
+
+/**
+ * D661 · A (Ruling 79): la ruta de las apps contestó LENTO a una consulta que no anota latido de caja que avisa (sin la cabecera:
+ * WINDOWS sin foco, la TPV cobrando o en su pantalla de bloqueo; o una sesión que no abre pedidos). Esa caja también se va a dormir
+ * 600 s, así que la marca rápida se apaga igual, sin anotar que una caja que avisa sondeó (`lastCardAlertPollAt` no se toca). Lanza si
+ * no pudo escribir: quien llama contesta entonces la cadencia rápida (Ruling 41).
+ */
+export async function apagarMarcaRapida(venueId: string): Promise<void> {
+  const { count } = await prisma.onlineOrderingSettings.updateMany({
+    where: { venueId, cardAlertFastPollAt: { not: null } },
+    data: { cardAlertFastPollAt: null },
+  })
+  if (count > 0) lastFastWrite.delete(venueId) // B1: la siguiente respuesta rápida la vuelve a poner en seguida
+}
