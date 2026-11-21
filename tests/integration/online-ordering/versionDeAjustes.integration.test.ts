@@ -89,6 +89,8 @@ describe('Pedidos en línea · versión de los ajustes y «Reanudar» (integrati
         const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
         pausa = pauseOnlineOrdering(venueId!, 15, null)
         await esperarBloqueadoPor(pid)
+        // Unos milisegundos después, para que la hora de Prisma de esta segunda escritura quede claramente DESPUÉS de la de la pausa.
+        await new Promise(resolve => setTimeout(resolve, 20))
         return tx.onlineOrderingSettings.update({
           where: { venueId: venueId! },
           data: { autoPauseResumedAt: new Date() },
