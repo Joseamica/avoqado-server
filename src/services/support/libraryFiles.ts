@@ -316,19 +316,41 @@ export function validApproval(id: string, a: unknown): a is GuideApproval {
   )
 }
 
-/** Formato de antes: la firma del manifiesto sigue valiendo (firmado y su approvedHash coincide con el conjunto). */
-export const legacySignatureValid = (m: {
-  approvedBy?: string | null
-  approvedAt?: string | null
-  approvedHash?: string | null
-  retired?: Record<string, string>
-  guides?: Record<string, unknown>
-}): boolean =>
-  !!m.approvedBy &&
-  !!m.approvedAt &&
-  !!m.guides &&
-  m.approvedHash ===
-    manifestApprovalHash({ approvedBy: m.approvedBy, approvedAt: m.approvedAt, retired: m.retired ?? {}, guides: m.guides })
+/** Una salida firmada vale si trae quién y cuándo y su sello coincide. */
+export function validExit(id: string, e: unknown): e is GuideExit {
+  const x = e as Partial<GuideExit> | null
+  return (
+    !!x &&
+    typeof x === 'object' &&
+    typeof x.approvedBy === 'string' &&
+    !!x.approvedBy.trim() &&
+    typeof x.approvedAt === 'string' &&
+    !!x.approvedAt &&
+    x.approvedHash === exitHash(id, x as GuideExit)
+  )
+}
+
+/**
+ * La decisión que vale para una guía, igual para el cargador y el generador:
+ * - `served`: su firma es válida y no la tapa una salida firmada;
+ * - `unsigned`: no tiene firma; `tampered`: su firma o su salida fueron retocadas (no valen, y una salida retocada tapa la
+ *   firma: retocar nunca revive una guía);
+ * - `exited`: tiene una salida firmada en la misma fecha o después que su firma (pasa al unir dos ramas: una firmó la
+ *   salida y la otra una firma anterior de la misma guía). Una firma posterior a la salida sí vale.
+ */
+export function signatureState(
+  id: string,
+  s: Pick<LibrarySignatures, 'guides' | 'exits'>,
+): { state: 'served'; approval: GuideApproval } | { state: 'unsigned' | 'tampered' | 'exited' } {
+  const approval = s.guides[id]
+  if (approval === undefined) return { state: 'unsigned' }
+  if (!validApproval(id, approval)) return { state: 'tampered' }
+  const exit = s.exits?.[id]
+  if (exit === undefined) return { state: 'served', approval }
+  if (!validExit(id, exit)) return { state: 'tampered' }
+  // Una fecha que no se puede leer cuenta como salida más nueva: nunca revive.
+  return Date.parse(exit.approvedAt) < Date.parse(approval.approvedAt) ? { state: 'served', approval } : { state: 'exited' }
+}
 
 const signaturesSchema = z.object({
   version: z.literal(1),

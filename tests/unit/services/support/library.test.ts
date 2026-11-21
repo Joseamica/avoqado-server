@@ -19,11 +19,11 @@ import {
   SUPPORT_LIBRARY_MANIFEST,
   SUPPORT_LIBRARY_SIGNATURES,
   validApproval,
+  validExit,
   type LibrarySignatures,
 } from '@/services/support/libraryFiles'
 import {
   buildManifest,
-  importLegacySignature,
   outsideLines,
   pendingChanges,
   signGuides,
@@ -332,6 +332,7 @@ describe('loadSupportLibrary', () => {
     const proposal = JSON.parse(fs.readFileSync(SUPPORT_LIBRARY_MANIFEST, 'utf8'))
     // Una firma retocada a mano se ve aquí, en CI, y no sólo como una guía que deja de contestar.
     for (const [id, approval] of Object.entries(signatures.guides)) expect([id, validApproval(id, approval)]).toEqual([id, true])
+    for (const [id, exit] of Object.entries(signatures.exits ?? {})) expect([id, validExit(id, exit)]).toEqual([id, true])
     const served = [...new Set(loadSupportLibrary().map(g => g.id))]
     expect(served.length).toBeGreaterThan(0)
     for (const id of served) expect(signatures.guides).toHaveProperty([id])
@@ -765,75 +766,64 @@ describe('internal manual pages (decision 6)', () => {
       expect(withSignaturesLock(() => 7, lock)).toBe(7)
     })
 
-    describe('r3: with a signatures file only it decides; an old-format signature is only imported, and only adds', () => {
-      const EDITED = 'dashboard/inicio/editar-perfil'
-      const signOn = (day: string, ids?: string[]) => {
-        const result = signGuides(regenerate(), readSignatures(), sourcesNow(), 'Fundador', ids, new Date(day))
+    describe('r4: the signatures file is the only authority; a signed exit beats an older signature of the same guide', () => {
+      const RETIRED = 'android/ventas/cobrar-en-efectivo'
+      const signOn = (day: string, ids?: string[], proposal = regenerate()) => {
+        const result = signGuides(proposal, readSignatures(), sourcesNow(), 'Fundador', ids, new Date(day))
         fs.writeFileSync(signaturesFile(), JSON.stringify(result.signatures))
         return result
       }
-      /** Una rama firmó con el generador de antes: su propuesta (con lo que haya en los archivos) sellada en la fecha `at`. */
-      const legacySignedProposal = (at: string) => {
-        writeManifest(buildManifest(readProposal(), sourcesNow()).guides, true, readProposal().retired, at)
-        return readProposal()
-      }
 
-      it('a newer old signature (a branch that signed with the old tool and was merged): its changed guide waits, the rest keeps answering; importing adds it', () => {
+      it('an old-format signature in the proposal is never read when the signatures file exists (and the generator does not import it)', () => {
         signOn('2026-11-20T12:00:00Z')
         const before = ids()
-        fs.appendFileSync(path.join(help, `${EDITED}.md`), ' ')
-        const legacy = legacySignedProposal('2026-11-21T05:23:02.139Z')
-        // La firma vieja no decide: sólo cuenta el archivo de firmas.
-        expect(ids()).toEqual(before.filter(id => id !== EDITED))
-        const result = importLegacySignature(legacy, readSignatures())!
-        expect(result.imported).toEqual([EDITED])
-        expect(result.signatures.guides[EDITED]).toMatchObject({ entry: legacy.guides[EDITED], approvedAt: '2026-11-21T05:23:02.139Z' })
-        expect(result.signatures.guides[ONE]).toEqual(readSignatures().guides[ONE])
-        fs.writeFileSync(signaturesFile(), JSON.stringify(result.signatures))
-        expect(ids()).toEqual(before)
-        expect(pendingChanges(regenerate(), result.signatures)).toEqual({ changed: [], leaving: [] })
+        fs.appendFileSync(path.join(help, 'dashboard/inicio/editar-perfil.md'), ' ')
+        // Una rama firmó con el generador de antes y se unió: su firma vieja (válida) no cuenta.
+        writeManifest(buildManifest(readProposal(), sourcesNow()).guides, true, {}, '2026-11-21T05:23:02.139Z')
+        expect(ids()).toEqual(before.filter(id => id !== 'dashboard/inicio/editar-perfil'))
+        // Regenerar no la importa: queda pendiente hasta --firmar.
+        const signaturesBefore = fs.readFileSync(signaturesFile(), 'utf8')
+        const proposal = regenerate()
+        expect(fs.readFileSync(signaturesFile(), 'utf8')).toBe(signaturesBefore)
+        expect(pendingChanges(proposal, readSignatures()).changed).toEqual(['dashboard/inicio/editar-perfil'])
+        // Una cabecera vieja rota tampoco cambia nada.
+        fs.writeFileSync(manifestFile, JSON.stringify({ ...readProposal(), approvedBy: 'x', approvedAt: '', approvedHash: 'roto' }))
+        expect(ids()).toEqual(before.filter(id => id !== 'dashboard/inicio/editar-perfil'))
       })
 
-      it('an older old signature never overwrites a newer per-guide signature of the same guide', () => {
-        const stale = (() => {
-          writeManifest(buildManifest(null, sourcesNow()).guides, true, {}, '2026-11-01T00:00:00.000Z')
-          return readProposal()
-        })()
-        fs.appendFileSync(path.join(help, `${EDITED}.md`), ' ')
-        signOn('2026-11-20T12:00:00Z')
-        const result = importLegacySignature(stale, readSignatures())!
-        expect(result.imported).toEqual([])
-        expect(result.signatures).toEqual(readSignatures())
-      })
-
-      it('it never removes a signature, and never revives a guide whose exit was signed', () => {
-        const RETIRED = 'android/ventas/cobrar-en-efectivo'
+      it('a signed exit merged from another branch beats an older signature of the same guide; a later signature beats the exit', () => {
         signOn('2026-11-20T12:00:00Z')
         const before = ids()
-        // Una firma vieja cuyo conjunto no trae ONE: importar no la quita.
-        writeManifest(
-          Object.fromEntries(Object.entries(regenerate().guides).filter(([id]) => id !== ONE)),
-          true,
-          {},
-          '2026-11-22T00:00:00.000Z',
+        const older = readSignatures()
+        // Rama A: retira la guía y firma su salida.
+        const exit = signOn(
+          '2026-11-21T00:00:00Z',
+          [RETIRED],
+          regenerate({ ...readProposal(), retired: { [RETIRED]: 'La cubre el manual' } }),
         )
-        const without = importLegacySignature(readProposal(), readSignatures())!
-        expect(without.signatures.guides).toHaveProperty([ONE])
-        // Se firma la salida de RETIRED.
-        regenerate({ ...readProposal(), retired: { [RETIRED]: 'La cubre el manual' } })
-        const exit = signGuides(readProposal(), readSignatures(), sourcesNow(), 'Fundador', [RETIRED], new Date('2026-11-21T00:00:00Z'))
-        fs.writeFileSync(signaturesFile(), JSON.stringify(exit.signatures))
-        expect(readSignatures().exits).toHaveProperty([RETIRED])
+        expect(exit.left).toEqual([RETIRED])
+        // Git une la salida de A con la firma anterior de la guía que trae otra rama: las dos claves conviven.
+        const merged = { ...exit.signatures, guides: { ...exit.signatures.guides, [RETIRED]: older.guides[RETIRED] } }
+        fs.writeFileSync(signaturesFile(), JSON.stringify(merged))
+        regenerate({ ...readProposal(), retired: {} })
         expect(ids()).toEqual(before.filter(id => id !== RETIRED))
-        // Una firma vieja más nueva que todavía la trae (de una rama que no la retiró) no la revive.
-        writeManifest(buildManifest(null, sourcesNow()).guides, true, {}, '2026-11-23T00:00:00.000Z')
-        const revived = importLegacySignature(readProposal(), readSignatures())!
-        expect(revived.imported).not.toContain(RETIRED)
-        expect(revived.signatures.guides).not.toHaveProperty([RETIRED])
-        // Si vuelve y el founder la firma por guía, su salida anotada se borra.
-        const back = signGuides(regenerate({ ...readProposal(), retired: {} }), readSignatures(), sourcesNow(), 'Fundador', [RETIRED])
+        excludedWith(RETIRED, 'exited')
+        // Generador y cargador dicen lo mismo: pendiente de firma (nueva o cambiada), no «servida».
+        expect(pendingChanges(readProposal(), merged)).toEqual({ changed: [RETIRED], leaving: [] })
+        // Una salida retocada a mano también la tapa (retocar nunca revive).
+        const forgedExit = { ...merged, exits: { [RETIRED]: { ...merged.exits![RETIRED], approvedAt: '2026-01-01T00:00:00.000Z' } } }
+        fs.writeFileSync(signaturesFile(), JSON.stringify(forgedExit))
+        expect(ids()).not.toContain(RETIRED)
+        excludedWith(RETIRED, 'tampered')
+        // Si el founder la vuelve a firmar, su firma es posterior a la salida y vuelve a servirse.
+        fs.writeFileSync(signaturesFile(), JSON.stringify(merged))
+        const back = signOn('2026-11-22T00:00:00Z', [RETIRED], readProposal())
         expect(back.signatures.exits ?? {}).not.toHaveProperty([RETIRED])
-        expect(back.signatures.guides).toHaveProperty([RETIRED])
+        expect(ids()).toEqual(before)
+        // Y una firma posterior que convive con una salida anterior (otra unión) también gana.
+        const laterSig = { ...back.signatures, exits: merged.exits }
+        fs.writeFileSync(signaturesFile(), JSON.stringify(laterSig))
+        expect(ids()).toEqual(before)
       })
     })
 
@@ -844,28 +834,6 @@ describe('internal manual pages (decision 6)', () => {
       expect(load()).toEqual([])
       expect(() => parseSignatures(wrong)).toThrow()
       expect(parseSignatures(JSON.stringify({ version: 1, guides: {} }))).toEqual({ version: 1, guides: {} })
-    })
-
-    it('(e) converting a valid old signature keeps every approval with its name and date and serves the same guides with the same hashes', () => {
-      const legacy = buildManifest(null, sourcesNow())
-      writeManifest(legacy.guides)
-      const old = readProposal()
-      const servedBefore = load().map(sourceRef)
-      const converted = importLegacySignature(old)!.signatures
-      expect(Object.keys(converted.guides).sort()).toEqual(Object.keys(old.guides).sort())
-      for (const [id, a] of Object.entries(converted.guides)) {
-        expect(a).toMatchObject({ entry: old.guides[id], approvedBy: 'Fundador', approvedAt: '2026-11-10T12:00:00.000Z' })
-        expect(validApproval(id, a)).toBe(true)
-      }
-      fs.writeFileSync(signaturesFile(), JSON.stringify(converted))
-      regenerate()
-      expect(readProposal()).toMatchObject({ approvedBy: null, approvedHash: null })
-      expect(load().map(sourceRef)).toEqual(servedBefore)
-      expect(pendingChanges(readProposal(), converted)).toEqual({ changed: [], leaving: [] })
-      // Una firma vieja que no vale (sin firmar o retocada) no se convierte.
-      expect(importLegacySignature({ ...old, approvedBy: null })).toBeNull()
-      expect(importLegacySignature({ ...old, retired: { [ONE]: 'a mano' } })).toBeNull()
-      expect(importLegacySignature(null)).toBeNull()
     })
   })
 })
