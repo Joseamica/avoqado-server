@@ -235,9 +235,25 @@ async function captureRetryStep(
       select: { acceptDeadlineAt: true, charge: { select: { status: true } } },
     })
     if (!row || row.charge?.status !== S.CAPTURING) return { step: 'NOTHING' as const }
-    const captureBefore = row.acceptDeadlineAt.getTime() + NADIE_CAPTURE_GRACE_MS - NADIE_RETRY_MARGIN_MS
+    const captureBefore = limiteDelReintento(row.acceptDeadlineAt)
     return Date.now() < captureBefore ? { step: 'CAPTURE' as const, captureBefore } : { step: 'RELEASE' as const }
   }, ORDER_LOCK_WAIT_BUDGET)
+}
+
+/** El último instante en que se puede EMPEZAR el reintento de captura de un «Nadie»: su plazo + la gracia − el margen (r5 #1, C). */
+const limiteDelReintento = (acceptDeadlineAt: Date): number => acceptDeadlineAt.getTime() + NADIE_CAPTURE_GRACE_MS - NADIE_RETRY_MARGIN_MS
+
+/**
+ * D661 (Ruling 110, ajuste final de la ronda codex-r3): la lectura de un CAPTURING de «Nadie» espera hasta el límite de su reintento cuando
+ * éste queda más lejos que el plazo de la pasada (120 s). Cortarla con margen todavía hacía que la pasada siguiente llegara después del
+ * límite y soltara un apartado que la caja abrió a tiempo. Nunca se manda nada después del límite: lo decide `captureRetryStep` bajo el
+ * candado, y `captureCharge` lo revisa otra vez justo antes de Stripe. Sin pedido (o «Mi equipo»), el plazo de siempre.
+ */
+async function plazoDeLaLectura(charge: Row, orderId: string): Promise<ProviderRequestLimits> {
+  if (!cargoDeNadie(charge)) return PLAZO_DE_LA_PASADA
+  const pedido = await prisma.onlineOrder.findFirst({ where: { orderId, venueId: charge.venueId }, select: { acceptDeadlineAt: true } })
+  const queda = pedido ? limiteDelReintento(pedido.acceptDeadlineAt) - Date.now() : 0
+  return queda > (PLAZO_DE_LA_PASADA.plazoMs ?? 0) ? { plazoMs: queda } : PLAZO_DE_LA_PASADA
 }
 
 /**
@@ -269,7 +285,11 @@ async function processCapturing(charge: Row): Promise<void> {
   if (!charge.onlineOrder || !charge.paymentIntentId) throw new Error('cargo CAPTURING sin pedido o sin PaymentIntent')
   const orderId = charge.onlineOrder.orderId
   const merchant = chargeMerchant(charge)
-  const state = await getProvider(merchant).getAuthorization(merchant, { paymentIntentId: charge.paymentIntentId }, PLAZO_DE_LA_PASADA)
+  const state = await getProvider(merchant).getAuthorization(
+    merchant,
+    { paymentIntentId: charge.paymentIntentId },
+    await plazoDeLaLectura(charge, orderId),
+  )
   // 3C: sin hora fija: `capturedAt`, `acceptedAt` y el rechazo llevan la hora de la escritura, leída bajo el candado de la orden.
   const meta = { staffId: null, estimatedMinutes: await prepMinutes(charge.venueId) }
   if (state.piStatus === 'succeeded') await finishCapture(charge.id, state, meta)

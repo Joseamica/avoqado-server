@@ -32,7 +32,7 @@ jest.mock('@/services/shared/paymentShiftClaim', () => ({
   lockExistingOrderForPayment: jest.fn(async () => true),
 }))
 
-import { captureCharge, finishCapture } from '@/services/online-ordering/card/capture.service'
+import { captureCharge, failCapture, finishCapture } from '@/services/online-ordering/card/capture.service'
 import { OnlineOrderCardReconcilerJob } from '@/jobs/online-order-card-reconciler.job'
 
 const NOW = new Date('2026-11-21T18:00:00.000Z')
@@ -247,5 +247,122 @@ describe('D661 (ronda 3 de codex-r3, Ruling 99): el recorrido de devoluciones nu
     // El recorrido colgado se rinde a su plazo y el tick 1 termina.
     await jest.advanceTimersByTimeAsync(60_000)
     await expect(tick1).resolves.toMatchObject({ refunds: { scanned: 1, errors: 1 } })
+  })
+})
+
+/**
+ * D661 (ajuste final, Codex r4 · Ruling 110): el plazo de 120 s de la lectura de la pasada no puede tirar la ÚLTIMA oportunidad de cobrar un
+ * «Nadie» que la caja abrió a tiempo. El servidor se reinició antes de mandar la captura; la pasada lo toma con 140 s para EMPEZAR el
+ * reintento y Stripe tarda 125 s en contestar la lectura. Reloj controlado: Stripe contesta cada lectura de `pi_nadie` hasta `contestaDesde`.
+ */
+describe('D661 (ajuste final, Codex r4 · Ruling 110): la lectura de un «Nadie» en su ventana espera hasta el límite del reintento', () => {
+  const LIMITE_MS = 140_000 // desde NOW: el último instante para EMPEZAR el reintento de captura
+  let envios: Array<{ en: number; envio: string }>
+  let capturas: number[]
+
+  /** El adaptador real; la lectura de `pi_nadie` contesta (sigue apartada) hasta `contestaDesde`; la cancelación, en seguida. */
+  async function stripeLento(contestaDesde: number): Promise<void> {
+    envios = []
+    const client = {
+      getClientName: () => 'prueba-d661',
+      makeRequest: async (...a: unknown[]) => {
+        const [, , path, method] = a as [string, number, string, string]
+        const ruta = path.split('?')[0]
+        envios.push({ en: Date.now() - NOW.getTime(), envio: `${method} ${ruta}` })
+        const pi = (estado: string) => ({
+          id: 'pi_nadie',
+          object: 'payment_intent',
+          status: estado,
+          amount: 25_000,
+          amount_received: 0,
+          amount_capturable: estado === 'requires_capture' ? 25_000 : 0,
+          application_fee_amount: 290,
+          latest_charge: null,
+        })
+        const cuerpo =
+          method === 'POST'
+            ? async () => pi('canceled')
+            : ruta.endsWith('/pi_nadie')
+              ? () => new Promise(r => setTimeout(() => r(pi('requires_capture')), Math.max(0, NOW.getTime() + contestaDesde - Date.now())))
+              : async () => ({ ...pi('succeeded'), id: 'pi_cap' })
+        return { getStatusCode: () => 200, getHeaders: () => ({}), getRawResponse: () => ({}), toJSON: cuerpo }
+      },
+    }
+    const real = new StripeConnectProvider('sk_test_x')
+    ;(real as unknown as { stripe: Stripe }).stripe = new Stripe('sk_test_x', { httpClient: client as never })
+    mockProveedor = real
+    const cuenta = {
+      id: 'em1',
+      providerCredentials: { connectAccountId: 'acct_1' },
+      sandboxMode: true,
+      provider: { code: 'STRIPE_CONNECT' },
+    }
+    await real.getAuthorization(cuenta, { paymentIntentId: 'pi_cap' }) // el User-Agent del SDK (`uname -a`), fuera del reloj de prueba
+    envios.length = 0
+  }
+
+  beforeEach(() => {
+    ;(prismaMock as any).onlineOrderCardRefund.findMany = jest.fn(async () => []) // sin devoluciones: sólo la pasada
+    // El plazo del pedido quedó de modo que el reintento se puede EMPEZAR hasta NOW + 140 s (plazo + 5 min de gracia − 90 s de margen).
+    prismaMock.onlineOrder.findFirst.mockResolvedValue({
+      acceptDeadlineAt: new Date(NOW.getTime() + LIMITE_MS - 5 * MIN + 90_000),
+      charge: { status: 'CAPTURING' },
+    } as any)
+    enDuda = CARGO_NADIE
+    capturas = []
+    jest.mocked(captureCharge).mockImplementation((async () => {
+      capturas.push(Date.now() - NOW.getTime())
+      enDuda = null // cobrado: deja de estar en duda
+    }) as any)
+  })
+
+  it('Stripe contesta la lectura a los 125 s y el límite es a los 140 s: UNA captura (antes del límite), cero cancelaciones y nada mandado después del límite', async () => {
+    await stripeLento(125_000)
+    const job = nuevoJob()
+    const tick1 = job.checkNow()
+    await jest.advanceTimersByTimeAsync(125_000)
+    await tick1
+    // Siguiente pasada, ya pasado el límite: no queda nada en duda.
+    await jest.advanceTimersByTimeAsync(55_000)
+    const tick2 = job.checkNow()
+    await jest.advanceTimersByTimeAsync(1_000)
+    await tick2
+
+    expect(capturas).toEqual([125_000])
+    expect(capturas[0]).toBeLessThan(LIMITE_MS)
+    expect(captureCharge).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'ch_nadie' }),
+      'ord_nadie',
+      expect.objectContaining({ captureBefore: NOW.getTime() + LIMITE_MS }),
+    )
+    expect(envios.filter(e => e.envio.startsWith('POST'))).toEqual([]) // ninguna cancelación (la captura la manda captureCharge)
+    expect(failCapture).not.toHaveBeenCalled()
+  })
+
+  it('una lectura que no contesta antes del límite: nada se manda después del límite y la liberación ocurre como hoy (en la pasada siguiente, con Stripe ya contestando)', async () => {
+    await stripeLento(150_000)
+    const job = nuevoJob()
+    let termino = false
+    const tick1 = job.checkNow().then(r => {
+      termino = true
+      return r
+    })
+    await jest.advanceTimersByTimeAsync(LIMITE_MS - 1)
+    expect(termino).toBe(false) // sigue esperando: todavía hay margen para empezar el reintento
+    await jest.advanceTimersByTimeAsync(1)
+    await expect(tick1).resolves.toMatchObject({ errors: 1 }) // se rindió en el límite, sin mandar nada
+    expect(capturas).toEqual([])
+
+    // La pasada siguiente, con Stripe ya contestando: pasó el límite → se suelta (como hoy), nunca se cobra.
+    await jest.advanceTimersByTimeAsync(40_000)
+    const tick2 = job.checkNow()
+    await jest.advanceTimersByTimeAsync(1_000)
+    await tick2
+    expect(capturas).toEqual([])
+    expect(captureCharge).not.toHaveBeenCalled()
+    const posts = envios.filter(e => e.envio.startsWith('POST'))
+    expect(posts.map(e => e.envio)).toEqual(['POST /v1/payment_intents/pi_nadie/cancel'])
+    expect(posts[0].en).toBeGreaterThanOrEqual(LIMITE_MS)
+    expect(failCapture).toHaveBeenCalledWith('ch_nadie', expect.objectContaining({ reason: 'RELEASED_AFTER_GRACE' }))
   })
 })
