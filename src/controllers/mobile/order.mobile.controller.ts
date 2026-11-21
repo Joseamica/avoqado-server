@@ -388,7 +388,7 @@ export async function autoridadDeLaVenta(
 ): Promise<
   Pick<
     orderMobileService.CreateOrderInput,
-    'canCompItems' | 'performedBy' | 'terminalSerialNumber' | 'descuentoConPermisoPropio' | 'aprobacionDelDescuento'
+    'canCompItems' | 'performedBy' | 'sesionStaffId' | 'terminalSerialNumber' | 'descuentoConPermisoPropio' | 'aprobacionDelDescuento'
   >
 > {
   const hasCortesias = venta.items.some(item => item.isCortesia === true)
@@ -414,6 +414,8 @@ export async function autoridadDeLaVenta(
     ...(aprobacionDelDescuento(req) ? { aprobacionDelDescuento: aprobacionDelDescuento(req) } : {}),
     // S6: la terminal que vende, del TOKEN (nunca del body): orden con su `terminalId` y fuente `TPV`.
     terminalSerialNumber: req.authContext?.terminalSerialNumber ?? null,
+    // D13: la sesión del TOKEN; una venta de la cola con un vendedor dado de baja queda a su nombre.
+    sesionStaffId: req.authContext?.userId,
   }
 }
 
@@ -639,6 +641,8 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       amount,
       tip: tip || 0,
       staffId: effectiveStaffId,
+      // D13: la sesión del token (nunca del cuerpo): con un vendedor dado de baja, el cobro de la cola queda a su nombre.
+      sesionStaffId: req.authContext?.userId,
       // 🛡️ Antes se descartaba: los clientes SIEMPRE la mandan y su cola offline
       // espera un 409-duplicado para marcar el pago como sincronizado.
       idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : undefined,
