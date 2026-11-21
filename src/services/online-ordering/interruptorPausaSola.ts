@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 
@@ -67,15 +68,31 @@ export function __resetInterruptorParaPruebas(): void {
  * antes de esperar: podría mover una hora que llegó durante la espera. Por lo mismo la rama UPDATE no copia `EXCLUDED."desde"` (se
  * calcula ANTES de esperar): recalcula «desde» con su propio reloj, así nunca queda a menos de [minutos] del momento en que se escribe.
  * Postgres evalúa el WHERE y el SET de `ON CONFLICT DO UPDATE` después de tomar el candado de la fila.
+ *
+ * Codex p2v5-r4 #2: con la fila VACÍA la instrucción entra por el INSERT, cuyos valores se calculan antes de esperar a otro que la esté
+ * insertando; si ése se revierte, éste insertaría con la hora de antes de esperar (< 15 min). Por eso prender y apagar toman primero el
+ * mismo candado de la base (`CANDADO_DEL_INTERRUPTOR`, en su transacción): al calcular la hora nadie más está escribiendo la fila.
  */
 export const MARGEN_PARA_MOVER_S = 10
+const CANDADO_DEL_INTERRUPTOR = `interruptor-de-plataforma:${CLAVE_PAUSA_SOLA}`
+// ponytail: sólo el script escribe esta tabla; un escritor nuevo que no tome el candado reabre el hueco del INSERT.
+const conCandado = <T>(trabajo: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
+  prisma.$transaction(
+    async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CANDADO_DEL_INTERRUPTOR}))`
+      return trabajo(tx)
+    },
+    // Lo corre una persona con el script (no hay prisa de pool): que espere conexión y candado sin el tope corto de 2 s.
+    { maxWait: 10_000, timeout: 30_000 },
+  )
 
 export async function prenderPausaSola(p: { minutos?: number; por: string }): Promise<Date> {
   const minutos = p.minutos ?? MINUTOS_MINIMOS
   if (!Number.isFinite(minutos) || minutos < MINUTOS_MINIMOS) {
     throw new Error(`La pausa sola se prende al menos ${MINUTOS_MINIMOS} minutos en el futuro (pediste ${minutos}).`)
   }
-  const filas = await prisma.$queryRaw<Array<{ desde: Date }>>`
+  const filas = await conCandado(
+    tx => tx.$queryRaw<Array<{ desde: Date }>>`
     INSERT INTO "InterruptorDePlataforma" ("clave", "desde", "actualizadoPor", "updatedAt")
     VALUES (
       ${CLAVE_PAUSA_SOLA},
@@ -89,7 +106,8 @@ export async function prenderPausaSola(p: { minutos?: number; por: string }): Pr
           "updatedAt" = (clock_timestamp() AT TIME ZONE 'UTC')
       WHERE "InterruptorDePlataforma"."desde" IS NULL
          OR "InterruptorDePlataforma"."desde" > (clock_timestamp() AT TIME ZONE 'UTC') + (${MARGEN_PARA_MOVER_S}::int * interval '1 second')
-    RETURNING "desde"`
+    RETURNING "desde"`,
+  )
   const desde = filas[0]?.desde
   if (!desde) {
     throw new Error('La pausa sola ya está prendida con una hora que ya llegó (o está por llegar). Para cambiar la hora, primero apágala.')
@@ -100,10 +118,12 @@ export async function prenderPausaSola(p: { minutos?: number; por: string }): Pr
 
 /** Apaga el interruptor (la tienda vuelve a portarse como antes de esta función en ≤ `CACHE_MS`). */
 export async function apagarPausaSola(p: { por: string }): Promise<void> {
-  await prisma.interruptorDePlataforma.upsert({
-    where: { clave: CLAVE_PAUSA_SOLA },
-    create: { clave: CLAVE_PAUSA_SOLA, desde: null, actualizadoPor: p.por },
-    update: { desde: null, actualizadoPor: p.por },
-  })
+  await conCandado(tx =>
+    tx.interruptorDePlataforma.upsert({
+      where: { clave: CLAVE_PAUSA_SOLA },
+      create: { clave: CLAVE_PAUSA_SOLA, desde: null, actualizadoPor: p.por },
+      update: { desde: null, actualizadoPor: p.por },
+    }),
+  )
   logger.info('[OnlineOrdering] pausa sola APAGADA', { por: p.por })
 }

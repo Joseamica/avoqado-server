@@ -90,6 +90,24 @@ describe('prenderPausaSola / apagarPausaSola', () => {
     expect(guardia).toMatch(/"desde" > \(clock_timestamp\(\) AT TIME ZONE 'UTC'\) \+/)
   })
 
+  it('🔴 Codex p2v5-r4 #2: prender y apagar toman el MISMO candado de la base ANTES de escribir, en su transacción', async () => {
+    // Con la fila vacía, la rama INSERT calcula su hora ANTES de esperar a otro que esté insertando: si ése se revierte, entraría con
+    // una hora vieja (< 15 min). Con el candado tomado primero, nadie más está escribiendo la fila al calcularla.
+    const candado = () => prismaMock.$executeRaw as unknown as jest.Mock
+    const textoDe = (llamada: unknown[]) => (llamada[0] as string[]).join('?')
+    raw().mockResolvedValue([{ desde: NOW }])
+    await prenderPausaSola({ por: 'founder' })
+    await apagarPausaSola({ por: 'founder' })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+    expect(candado()).toHaveBeenCalledTimes(2)
+    const [enPrender, enApagar] = candado().mock.calls
+    expect(textoDe(enPrender)).toContain('pg_advisory_xact_lock(hashtext(')
+    expect(enPrender.slice(1)).toEqual(enApagar.slice(1))
+    expect(enPrender.slice(1)).toEqual([`interruptor-de-plataforma:${CLAVE_PAUSA_SOLA}`])
+    expect(candado().mock.invocationCallOrder[0]).toBeLessThan(raw().mock.invocationCallOrder[0])
+    expect(candado().mock.invocationCallOrder[1]).toBeLessThan(fila().upsert.mock.invocationCallOrder[0])
+  })
+
   it('nunca con menos de 15 min (ni una hora pasada)', async () => {
     for (const minutos of [0, -5, 14.9, NaN]) {
       await expect(prenderPausaSola({ por: 'x', minutos })).rejects.toThrow('al menos 15 minutos')
