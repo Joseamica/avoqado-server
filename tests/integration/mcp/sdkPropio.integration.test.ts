@@ -18,6 +18,7 @@ const NOMBRE = 'set_terminal_in_house_sdk'
 const sufijo = randomUUID().slice(0, 8)
 let orgId: string | undefined
 let venueId: string | undefined
+let otroVenueId: string | undefined
 let staffId: string | undefined
 let blumonId: string
 let proveedorPropio: string | undefined
@@ -34,6 +35,8 @@ beforeAll(async () => {
     })
   ).id
   venueId = (await prisma.venue.create({ data: { organizationId: orgId, name: 'Negocio de prueba', slug: `sdk-mcp-${sufijo}` } })).id
+  otroVenueId = (await prisma.venue.create({ data: { organizationId: orgId, name: 'Negocio de prueba 2', slug: `sdk-mcp-2-${sufijo}` } }))
+    .id
   const existente = await prisma.paymentProvider.findUnique({ where: { code: 'BLUMON' } })
   blumonId =
     existente?.id ??
@@ -64,7 +67,7 @@ afterEach(async () => {
 afterAll(async () => {
   await mcp?.close()
   if (staffId) await prisma.staff.deleteMany({ where: { id: staffId } })
-  if (venueId) await prisma.venue.deleteMany({ where: { id: venueId } })
+  await prisma.venue.deleteMany({ where: { id: { in: [venueId, otroVenueId].filter((id): id is string => !!id) } } })
   if (orgId) await prisma.organization.deleteMany({ where: { id: orgId } })
   if (proveedorPropio) await prisma.paymentProvider.deleteMany({ where: { id: proveedorPropio } })
 })
@@ -106,6 +109,9 @@ describe('set_terminal_in_house_sdk por el catálogo real', () => {
       elegibilidad: { elegible: true },
     })
     expect(vista.confirmationArguments.expectedSerialNumber).toBe(t.serialNumber)
+    // R2-2: la confirmación también va atada al ESTADO que se vio (huella de negocio, aparato y ajuste).
+    expect(vista.expectedTerminalState).toEqual(expect.stringMatching(/^[0-9a-f]{16}$/))
+    expect(vista.confirmationArguments.expectedTerminalState).toBe(vista.expectedTerminalState)
     expect(resultado).toMatchObject({ ok: true, changed: true, enabled: true })
     expect(await columna(t.id)).toBe(true)
     // Quien firma es la conexión, y la procedencia la pone el servidor.
@@ -151,6 +157,61 @@ describe('set_terminal_in_house_sdk por el catálogo real', () => {
     expect(await columna(t.id)).toBe(false)
     expect(await asientos(t.id)).toHaveLength(0)
   })
+
+  const CAMBIO_DE_ESTADO = {
+    ok: false,
+    code: 'TERMINAL_STATE_MISMATCH',
+    error: 'La terminal cambió desde la vista previa (aparato, negocio o ajuste). Pide una vista previa nueva.',
+  }
+  const confirmar = (vista: Record<string, any>) =>
+    mcp.call(NOMBRE, { ...vista.confirmationArgs, confirmationToken: vista.confirmationToken })
+  const asientosEn = (id: string, venue: string) =>
+    prisma.activityLog.count({ where: { entity: 'Terminal', entityId: id, venueId: venue } })
+
+  it('R2-2 (el caso de Codex): vista previa con la terminal PRENDIDA en A → se muda a B (apagada y elegible) → confirmar ⇒ rechazo, sigue apagada', async () => {
+    const t = await pax()
+    await prisma.terminal.update({ where: { id: t.id }, data: { inHouseSdkEnabled: true } })
+    const vista = await mcp.call(NOMBRE, { terminalId: t.id, enabled: true })
+    expect(vista.message).toMatch(/confirmar no cambia nada/)
+    expect(vista.confirmationToken).toBeTruthy()
+
+    await prisma.terminal.update({ where: { id: t.id }, data: { venueId: otroVenueId! } }) // el disparador la apaga
+    expect(await columna(t.id)).toBe(false)
+    const resultado = await confirmar(vista)
+
+    expect(resultado).toEqual(CAMBIO_DE_ESTADO)
+    expect(await columna(t.id)).toBe(false)
+    expect(await asientosEn(t.id, otroVenueId!)).toBe(0)
+  })
+
+  it('R2-2: vista previa APAGADA en A → se muda a B (apagada y elegible) → confirmar ⇒ el mismo rechazo', async () => {
+    const t = await pax()
+    const vista = await mcp.call(NOMBRE, { terminalId: t.id, enabled: true })
+
+    await prisma.terminal.update({ where: { id: t.id }, data: { venueId: otroVenueId! } })
+    const resultado = await confirmar(vista)
+
+    expect(resultado).toEqual(CAMBIO_DE_ESTADO)
+    expect(await columna(t.id)).toBe(false)
+    expect(await asientosEn(t.id, otroVenueId!)).toBe(0)
+  })
+
+  it.each([
+    ['tipo', { type: TerminalType.TPV_IOS }],
+    ['marca', { brand: 'NEXGO' }],
+  ])(
+    'R2-2: vista previa apagada → cambia el/la %s de la ficha → confirmar ⇒ rechazo POR LA HUELLA (antes que la elegibilidad)',
+    async (_campo, cambio) => {
+      const t = await pax()
+      const vista = await mcp.call(NOMBRE, { terminalId: t.id, enabled: true })
+
+      await prisma.terminal.update({ where: { id: t.id }, data: cambio })
+      const resultado = await confirmar(vista)
+
+      expect(resultado).toEqual(CAMBIO_DE_ESTADO)
+      expect(await columna(t.id)).toBe(false)
+    },
+  )
 
   it('prender una ficha SIN serie guardada (mandando una serie en el paso 1) ⇒ rechazo en llano, sin pedir confirmación ni token', async () => {
     const t = await pax()

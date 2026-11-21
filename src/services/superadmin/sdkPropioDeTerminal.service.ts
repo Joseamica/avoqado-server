@@ -9,6 +9,7 @@
  * (`Terminal … FOR NO KEY UPDATE`). La bitácora necesita la fila del actor (llave foránea), y la limpieza de una demo y el
  * borrado de personal toman `Staff` y luego `Terminal`: con el orden contrario, las dos transacciones podrían abrazarse.
  */
+import { createHash } from 'crypto'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { ConflictError, NotFoundError } from '@/errors/AppError'
@@ -68,12 +69,32 @@ export async function elegibilidadDelSdkPropio(tx: Prisma.TransactionClient, ter
   return { elegible: true }
 }
 
+/**
+ * La huella del ESTADO de una terminal que una vista previa enseñó (ronda 2 · R2-2): exactamente lo que vigila el disparador
+ * (`venueId`, `serialNumber`, `type`, `brand`) más el propio ajuste (`inHouseSdkEnabled`). La confirmación del MCP se ata a esto y
+ * no a un campo suelto: si cualquiera cambió entre la vista previa y el «confirmar», no se prende. Con el ajuste dentro, una vista
+ * sacada con la terminal YA prendida nunca puede prender nada (para prender tiene que estar apagada, y esa huella dice «prendida»).
+ */
+export function huellaDeLaTerminal(t: {
+  venueId: string
+  serialNumber: string | null
+  type: string
+  brand: string | null
+  inHouseSdkEnabled: boolean
+}): string {
+  const estado = JSON.stringify([t.venueId, t.serialNumber, t.type, t.brand, t.inHouseSdkEnabled])
+  return createHash('sha256').update(estado).digest('hex').slice(0, 16)
+}
+
 export async function cambiarSdkPropioDeTerminal(entrada: {
   terminalId: string
   enabled: boolean
   /** Obligatoria al PRENDER: la serie que vio quien prende (la vista previa o la ficha), ya recortada de espacios. Se compara
    *  LITERAL con la serie guardada, bajo el candado. Al apagar no hace falta. */
   serieEsperada?: string
+  /** Opcional (sólo el MCP lo manda): `huellaDeLaTerminal` de lo que enseñó la vista previa. Al PRENDER, si viene, se compara bajo el
+   *  candado con la fila. La ruta REST no lo manda: su pantalla envía en el mismo clic lo que acaba de leer. */
+  estadoEsperado?: string
   staffId: string
   reason?: string | null
   procedencia: 'superadmin-rest' | 'mcp'
@@ -111,6 +132,13 @@ export async function cambiarSdkPropioDeTerminal(entrada: {
       }
       if (entrada.serieEsperada == null || entrada.serieEsperada !== fila.serialNumber) {
         throw new ConflictError('La serie de la terminal cambió desde que la viste. Vuelve a consultarla.', 'TERMINAL_SERIAL_MISMATCH')
+      }
+      // La huella sale de la MISMA fila leída bajo el candado (R2-2): negocio, aparato o ajuste distintos ⇒ no se prende.
+      if (entrada.estadoEsperado !== undefined && entrada.estadoEsperado !== huellaDeLaTerminal(fila)) {
+        throw new ConflictError(
+          'La terminal cambió desde la vista previa (aparato, negocio o ajuste). Pide una vista previa nueva.',
+          'TERMINAL_STATE_MISMATCH',
+        )
       }
       const elegibilidad = await elegibilidadDelSdkPropio(tx, terminalId)
       if (!elegibilidad.elegible) throw new ConflictError(elegibilidad.razon, 'TERMINAL_NOT_ELIGIBLE_FOR_IN_HOUSE_SDK')

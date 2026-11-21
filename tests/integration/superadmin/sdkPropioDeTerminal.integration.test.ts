@@ -17,6 +17,7 @@ import {
   afiliacionesQueEntregaConfig,
   cambiarSdkPropioDeTerminal,
   elegibilidadDelSdkPropio,
+  huellaDeLaTerminal,
 } from '@/services/superadmin/sdkPropioDeTerminal.service'
 
 // Lo mismo que simula la prueba vecina de /config (angelpayIdentity): fuera de la base, nada que ver con las afiliaciones.
@@ -272,6 +273,43 @@ describe('cambiarSdkPropioDeTerminal — prender', () => {
     await expect(prender(t)).rejects.toMatchObject({ statusCode: 409, code: NOT_ELIGIBLE, message: razon })
     expect(await estado(t.id)).toBe(false)
     expect(await bitacoras(t.id)).toHaveLength(0)
+  })
+
+  it('R2-2: estadoEsperado distinto de la huella de la fila ⇒ 409 TERMINAL_STATE_MISMATCH; la huella de la fila ⇒ prende; sin él (REST) ⇒ como antes', async () => {
+    const t = await paxElegible()
+    const huella = huellaDeLaTerminal(t)
+    expect(huella).toMatch(/^[0-9a-f]{16}$/)
+    // La huella cambia con cada cosa que vigila: negocio, serie, tipo, marca y el propio ajuste.
+    for (const cambio of [
+      { venueId: venueHerenciaId },
+      { serialNumber: 'AVQD-9900000196' },
+      { type: TerminalType.TPV_IOS },
+      { brand: 'NEXGO' },
+      { inHouseSdkEnabled: true },
+    ]) {
+      expect(huellaDeLaTerminal({ ...t, ...cambio })).not.toBe(huella)
+    }
+    const conEstado = (estadoEsperado: string) =>
+      cambiarSdkPropioDeTerminal({
+        terminalId: t.id,
+        enabled: true,
+        serieEsperada: t.serialNumber!,
+        estadoEsperado,
+        staffId: staffId!,
+        procedencia: 'mcp',
+      })
+
+    await expect(conEstado(huellaDeLaTerminal({ ...t, inHouseSdkEnabled: true }))).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'TERMINAL_STATE_MISMATCH',
+      message: 'La terminal cambió desde la vista previa (aparato, negocio o ajuste). Pide una vista previa nueva.',
+    })
+    expect(await estado(t.id)).toBe(false)
+    expect(await bitacoras(t.id)).toHaveLength(0)
+
+    await expect(conEstado(huella)).resolves.toEqual({ changed: true, enabled: true })
+    await apagar(t.id)
+    await expect(prender(t)).resolves.toEqual({ changed: true, enabled: true }) // sin estadoEsperado, como la ruta REST
   })
 
   it('el mismo valor dos veces ⇒ una sola bitácora (prender y apagar)', async () => {
