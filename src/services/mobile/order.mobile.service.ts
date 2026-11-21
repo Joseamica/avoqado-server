@@ -7354,8 +7354,6 @@ export async function venderLoQueCobroLaMaquina<T>(venueId: string, v: VentaQueC
   const prep = await prepararVentaDeMostrador(venueId, venta, llegada)
   const effectiveStaffId = await validateStaffVenue(v.procesadoPor, venueId)
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
-  const cocinaConPreparacion = await debeMarcarCocina(venueId, { hasPreparation: true })
-  const cocinaSinPreparacion = await debeMarcarCocina(venueId, {})
 
   const hecho = await withDeadlockRetry(
     async tx => {
@@ -7367,11 +7365,8 @@ export async function venderLoQueCobroLaMaquina<T>(venueId: string, v: VentaQueC
         throw new AppError('La máquina no cobra ventas con descuento.', 422, true, 'CASH_MACHINE_SALE_WITH_DISCOUNT')
       }
       const orderId = creada.order.id
-      const conPreparacion = await tx.orderItem.findFirst({
-        where: { orderId, order: { venueId }, serviceCourse: { path: ['preparationVersion'], equals: 1 } },
-        select: { id: true },
-      })
-      const marcarCocina = conPreparacion ? cocinaConPreparacion : cocinaSinPreparacion
+      // Recorte de la 1a (founder «a», 21-nov, R3): las ventas de la máquina no mandan comanda a cocina.
+      const marcarCocina = false
       const saldoCents = pesosToCents((await saldoDeLaCuentaNuevaEnTx(tx, venueId, orderId)).toNumber())
       // 🔴 Codex r2 #7: en CENTAVOS y antes de escribir el abono. La tolerancia del saldo (`orderBalance`) daba por pagada una cuenta de
       // $100.01 con $100.00: si a la mercancía le falta aunque sea un centavo, se revierte y quien llama guarda el 202 SIN_SALDAR.
