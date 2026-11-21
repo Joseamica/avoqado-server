@@ -57,7 +57,7 @@ export async function elegibilidadDelSdkPropio(tx: Prisma.TransactionClient, ter
   }
   const afiliaciones = await afiliacionesQueEntregaConfig(tx, terminal)
   if (!afiliaciones.some(ma => ma.provider.code === 'BLUMON')) {
-    return { elegible: false, razon: '/config no le entrega ninguna afiliación de Blumon' }
+    return { elegible: false, razon: 'No tiene una afiliación de Blumon activa que le llegue a la terminal' }
   }
   return { elegible: true }
 }

@@ -14,6 +14,7 @@ import {
   sendRemoteActivation as sendRemoteActivationService,
 } from '../../services/dashboard/terminals.superadmin.service'
 import { terminalPaymentService } from '../../services/terminal-payment.service'
+import { cambiarSdkPropioDeTerminal } from '../../services/superadmin/sdkPropioDeTerminal.service'
 
 /**
  * A6 · S6: support frees the TERMINAL (not the sale) stuck BUSY by an UNKNOWN POS→terminal charge — what the watchdog does
@@ -363,6 +364,28 @@ export const saveSettings = async (req: Request, res: Response, next: NextFuncti
     res.json({
       data: await tpvSettings.updateTpvSettings(terminal.id, req.body, { venueId: terminal.venueId, staffId: req.authContext!.userId }),
     })
+  } catch (error) {
+    next(error)
+  }
+}
+/**
+ * Apagador del SDK propio. Quien firma es la sesión y la procedencia la pone el servidor: el cuerpo (estricto) no las trae.
+ *
+ * @route PUT /api/v1/superadmin/terminals/:terminalId/in-house-sdk
+ * @body { enabled, serialNumber? (obligatoria al prender), reason? }
+ */
+export const cambiarSdkPropio = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { enabled, serialNumber, reason } = req.body as { enabled: boolean; serialNumber?: string; reason?: string }
+    const resultado = await cambiarSdkPropioDeTerminal({
+      terminalId: req.params.terminalId,
+      enabled,
+      serieEsperada: serialNumber,
+      staffId: req.authContext!.userId,
+      reason,
+      procedencia: 'superadmin-rest',
+    })
+    res.json({ data: { enabled: resultado.enabled, changed: resultado.changed } })
   } catch (error) {
     next(error)
   }

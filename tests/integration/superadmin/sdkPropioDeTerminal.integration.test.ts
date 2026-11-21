@@ -34,7 +34,7 @@ jest.mock('@/services/modules/module.service', () => ({
 
 const SERIAL_MISMATCH = 'TERMINAL_SERIAL_MISMATCH'
 const NOT_ELIGIBLE = 'TERMINAL_NOT_ELIGIBLE_FOR_IN_HOUSE_SDK'
-const SIN_BLUMON = '/config no le entrega ninguna afiliación de Blumon'
+const SIN_BLUMON = 'No tiene una afiliación de Blumon activa que le llegue a la terminal'
 const FORMATO = 'La serie no tiene el formato de una PAX'
 
 const sufijo = randomUUID().slice(0, 8)
