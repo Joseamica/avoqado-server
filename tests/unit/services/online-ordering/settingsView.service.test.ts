@@ -127,14 +127,16 @@ describe('D662 v5 (Codex p2v4-r5 #2): una sola foto por respuesta', () => {
       pausedUntil: '2026-11-20T18:15:00.000Z',
       manualPause: false,
       updatedAt: new Date('2026-11-20T18:00:00.000Z'),
+      version: 4,
     }
-    const nuevos = { ...viejos, enabled: false, pausedUntil: null, updatedAt: new Date('2026-11-20T18:00:05.000Z') }
+    // Codex p2v5-r4 #5: la versión es el entero que sube la base; la hora de Prisma puede venir MENOR en un guardado posterior.
+    const nuevos = { ...viejos, enabled: false, pausedUntil: null, updatedAt: new Date('2026-11-20T17:59:59.000Z'), version: 5 }
     ;(getSettings as jest.Mock).mockResolvedValue(viejos)
     ;(getAcceptingStatus as jest.Mock).mockResolvedValueOnce({
       status: 'DISABLED',
       reason: 'NOT_ENABLED',
       config: { enabled: false, pausedUntil: null, manualPause: false },
-      ajustesGuardadosEn: nuevos.updatedAt,
+      versionDeAjustes: nuevos.version,
       ajustesUsados: nuevos,
     })
     ;(storeView as jest.Mock).mockReturnValueOnce({ status: 'DISABLED' })
@@ -142,7 +144,8 @@ describe('D662 v5 (Codex p2v4-r5 #2): una sola foto por respuesta', () => {
     expect(v.store).toEqual({ status: 'DISABLED' })
     expect(v.enabled).toBe(false)
     expect(v.pausedUntil).toBeNull()
-    expect(v.storeVersion).toBe(nuevos.updatedAt.toISOString())
+    expect(v.storeVersion).toBe(5)
+    expect(v).not.toHaveProperty('version')
   })
 
   it('sin relectura usa los ajustes leídos (como hoy)', async () => {

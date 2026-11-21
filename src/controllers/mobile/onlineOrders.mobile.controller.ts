@@ -117,7 +117,7 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
         ...(panelNuevo
           ? {
               storeReadAt: leidoEn.toISOString(),
-              storeVersion: state?.ajustesGuardadosEn ? state.ajustesGuardadosEn.toISOString() : null,
+              storeVersion: state?.versionDeAjustes ?? null,
               storeNextDeadlineAt: siguiente ? siguiente.toISOString() : null,
             }
           : {}),

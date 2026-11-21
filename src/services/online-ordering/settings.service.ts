@@ -1,5 +1,6 @@
 import { Prisma, type OnlineOrderingSettings } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { utcTs } from '@/utils/sqlDates'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { normalizeLegacyActivityActor } from '@/lib/activityAuditActor'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -31,6 +32,8 @@ export type OnlineOrderingSettingsRead = OnlineOrderingConfig & {
   autoPauseResumedAt?: Date | null
   /** D662 v4: cuándo se guardó la fila (Prisma `@updatedAt`; Reanudar, pausar, ajustes y latidos la mueven). */
   updatedAt?: Date | null
+  /** D662 v5 (Codex p2v5-r4 #5): la versión de la fila; la sube la base en cada UPDATE, en el orden en que se confirman. */
+  version?: number | null
 }
 
 function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingSettingsRead {
@@ -48,6 +51,7 @@ function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingSettingsRead {
     lastToPayPollAt: row.lastToPayPollAt ?? null,
     autoPauseResumedAt: row.autoPauseResumedAt ?? null,
     updatedAt: row.updatedAt ?? null,
+    version: row.version ?? null,
   }
 }
 
@@ -295,18 +299,18 @@ export async function pauseOnlineOrdering(
     const r = await prisma.onlineOrderingSettings.updateMany({ where: { venueId }, data: { pausedUntil } })
     if (r.count === 0) throw noConfigurada()
   } else {
-    // D662 v5 (Codex p2v5-r2 #8): «Reanudar» quita la pausa temporal y sube el corte de la pausa sola en UNA transacción: nunca queda a
-    // medias (la temporal quitada y la sola todavía puesta).
-    await prisma.$transaction(async tx => {
-      const r = await tx.onlineOrderingSettings.updateMany({ where: { venueId }, data: { pausedUntil } })
-      if (r.count === 0) throw noConfigurada()
-      // D662 parte 2 (v3): «Reanudar» también quita la pausa sola (la del piso y la de las apps viejas, que llaman igual): el corte sube
-      // a AHORA y desde aquí sólo cuentan los pedidos con hora límite posterior. Sólo sube.
-      await tx.onlineOrderingSettings.updateMany({
-        where: { venueId, OR: [{ autoPauseResumedAt: null }, { autoPauseResumedAt: { lt: now } }] },
-        data: { autoPauseResumedAt: now },
-      })
-    })
+    // «Reanudar» quita la pausa temporal y sube el corte de la pausa sola en UNA instrucción sobre la MISMA fila (Codex p2v5-r2 #8 y
+    // p2v5-r4 #4): nunca queda a medias y, sin transacción interactiva (tope de 2 s para conseguir conexión), espera como cualquier
+    // escritura simple, igual que en develop. D662 parte 2 (v3): también quita la pausa sola (la del piso y la de las apps viejas, que
+    // llaman igual): el corte sube a AHORA y desde aquí sólo cuentan los pedidos con hora límite posterior. Sólo sube: `GREATEST` ignora
+    // el NULL de una fila sin corte propio. La versión (`version`) la sube la base, como en cualquier UPDATE.
+    const filas = await prisma.$executeRaw`
+      UPDATE "OnlineOrderingSettings"
+      SET "pausedUntil" = NULL,
+          "autoPauseResumedAt" = GREATEST("autoPauseResumedAt", ${utcTs(now)}),
+          "updatedAt" = ${utcTs(now)}
+      WHERE "venueId" = ${venueId}`
+    if (filas === 0) throw noConfigurada()
   }
   const current = await prisma.onlineOrderingSettings.findUnique({ where: { venueId }, select: { manualPause: true } })
   void logAction({

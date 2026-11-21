@@ -33,7 +33,7 @@ export async function settingsView(
   // apagó, pausó o reanudó mientras tanto), el interruptor, la pausa temporal, la tarjeta y la versión salen de ESOS mismos ajustes.
   const usados = (state.ajustesUsados as typeof settings | undefined) ?? settings
   // D662 parte 2: `autoPauseResumedAt` es interno de la pausa sola; lo que el panel ve es `store.autoPausedAt`.
-  const { lastInboxPollAt, lastToPayPollAt, autoPauseResumedAt: _reanudada, updatedAt: guardadoEn, ...config } = usados
+  const { lastInboxPollAt, lastToPayPollAt, autoPauseResumedAt: _reanudada, updatedAt: _guardadoEn, version, ...config } = usados
   return {
     ...config,
     lastInboxPollAt: lastInboxPollAt ? lastInboxPollAt.toISOString() : null,
@@ -46,11 +46,12 @@ export async function settingsView(
     /** Campo nuevo y opcional (D662): cuándo se leyó `store` (antes de leer nada). */
     storeReadAt: leidoEn.toISOString(),
     /**
-     * Campo nuevo y opcional (D662 v4, Codex p2v4-r2 #5): cuándo se guardaron los ajustes que se leyeron. El panel ordena sus lecturas
-     * por (esto, `storeReadAt`): la que leyó un ajuste más nuevo gana aunque haya entrado antes.
+     * Campo nuevo y opcional (D662 v4, Codex p2v4-r2 #5): la versión de los ajustes que se leyeron, un entero que la base sube en cada
+     * guardado en el orden en que se confirman (Codex p2v5-r4 #5). El panel ordena sus lecturas por (esto, `storeReadAt`): la que leyó
+     * una versión mayor gana aunque haya entrado antes.
      */
     // La versión de los ajustes que de verdad usó el estado (si los releyó tras esperar, la releída; Codex p2v4-r4 #5).
-    storeVersion: (state.ajustesGuardadosEn ?? guardadoEn)?.toISOString() ?? null,
+    storeVersion: state.versionDeAjustes ?? version ?? null,
     /** Campo nuevo y opcional (D662 v4): la hora límite más cercana de un pedido por aceptar; el panel vuelve a leer justo después. */
     storeNextDeadlineAt: siguiente ? siguiente.toISOString() : null,
     requirements,

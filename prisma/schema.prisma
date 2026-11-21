@@ -21485,6 +21485,10 @@ model OnlineOrderingSettings {
   /// max(esta hora, el interruptor `pausa-sola` de `InterruptorDePlataforma`). Sólo SUBE: la escriben «Reanudar» (`pauseOnlineOrdering(null)`, = ahora) y la
   /// propia lectura (`corteSeguro`, sin pausa). Encender, apagar, cambiar de modo y pausar 15/30/60 no la tocan. Null = sin corte propio.
   autoPauseResumedAt DateTime?
+  /// D662 parte 2 v5 (Codex p2v5-r4 #5): la versión de estos ajustes. La sube la BASE en cada UPDATE (trigger
+  /// `OnlineOrderingSettings_sube_version`, bajo el candado de la fila): crece en el orden en que se confirman las escrituras. El panel
+  /// ordena sus lecturas por ella (`storeVersion`). Nadie la escribe a mano.
+  version            Int       @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -117,8 +117,8 @@ export interface LecturaPausaSola {
   pausa: { at: Date; onlineOrderId: string } | null
   /** Hasta dónde puede subir el corte sin cambiar ninguna lectura futura, o `null` (hay pausa o no se sabe). */
   corteSeguro: Date | null
-  /** Si la lectura volvió a leer los ajustes tras esperar: cuándo se habían guardado (la versión que de verdad usó). */
-  ajustesReleidosEn?: Date | null
+  /** Si la lectura volvió a leer los ajustes tras esperar: su versión (`version`, la que de verdad usó). */
+  versionReleida?: number | null
 }
 
 interface VueltaPausaSola {
@@ -270,8 +270,8 @@ async function vueltaConfirmada(
   venueId: string,
   now: Date,
   corte: Date,
-): Promise<{ v: VueltaPausaSola; corte: Date; releido: Date | null }> {
-  let releido: Date | null = null
+): Promise<{ v: VueltaPausaSola; corte: Date; releido: number | null }> {
+  let releido: number | null = null
   let v = await vueltaPausaSola(venueId, now, corte)
   for (let intento = 0; intento < 3; intento++) {
     if (!v.pausaId || !v.pausaAt || !v.pausaDesde) return { v, corte, releido }
@@ -280,10 +280,10 @@ async function vueltaConfirmada(
     await esperarLoQueSeGuarda(venueId, v.pausaDesde, v.pausaAt)
     const fila = await prisma.onlineOrderingSettings.findUnique({
       where: { venueId },
-      select: { autoPauseResumedAt: true, updatedAt: true },
+      select: { autoPauseResumedAt: true, version: true },
     })
     // Codex p2v4-r3 #5: la respuesta lleva la versión de los ajustes que de verdad usó (la de esta relectura).
-    releido = fila?.updatedAt ?? null
+    releido = fila?.version ?? null
     const propio = fila?.autoPauseResumedAt ?? null
     if (propio && propio.getTime() > corte.getTime()) corte = propio
     const antes = v.pausaId
@@ -342,19 +342,19 @@ async function leerPausaSola(venueId: string, now: Date, corteGuardado: Date | n
   const inicio = new Date(desde.getTime() - 1)
   const base = corteGuardado && corteGuardado.getTime() > inicio.getTime() ? corteGuardado : inicio
   let corte = base
-  let ajustesReleidosEn: Date | null = null
+  let versionReleida: number | null = null
   for (;;) {
     const confirmada = await vueltaConfirmada(venueId, now, corte)
     const v = confirmada.v
     corte = confirmada.corte
-    if (confirmada.releido && (!ajustesReleidosEn || confirmada.releido > ajustesReleidosEn)) ajustesReleidosEn = confirmada.releido
-    if (v.pausaId && v.pausaAt) return { pausa: { at: v.pausaAt, onlineOrderId: v.pausaId }, corteSeguro: null, ajustesReleidosEn }
+    if (confirmada.releido !== null && (versionReleida === null || confirmada.releido > versionReleida)) versionReleida = confirmada.releido
+    if (v.pausaId && v.pausaAt) return { pausa: { at: v.pausaAt, onlineOrderId: v.pausaId }, corteSeguro: null, versionReleida }
     const completa = v.fallas < PAUSA_SOLA_TOPE
     const seguro = corteTrasVuelta(v, now, completa)
     const sube = seguro.getTime() > corte.getTime() ? seguro : null
     if (completa) {
       if (sube && sube.getTime() - base.getTime() >= avance) subirCorteSinEsperar(venueId, sube)
-      return { pausa: null, corteSeguro: seguro, ajustesReleidosEn }
+      return { pausa: null, corteSeguro: seguro, versionReleida }
     }
     if (!sube) {
       // No puede pasar (una vuelta llena retiene su última falla, posterior al corte); si pasara, no se queda en un ciclo.
@@ -426,13 +426,15 @@ export async function getAcceptingStatus(
     lastInboxPollAt,
     lastToPayPollAt,
     autoPauseResumedAt,
-    updatedAt,
+    updatedAt: _guardadoEn,
+    version,
     __releido: _releido,
     ...config
   } = settings as typeof settings & {
     __releido?: true
   }
-  const ajustesGuardadosEn = updatedAt ?? null
+  // Codex p2v5-r4 #5: la versión la sube la base bajo el candado de la fila (no la hora de Prisma, que se fija antes de esperarlo).
+  const versionDeAjustes = version ?? null
   const timezone = venue?.timezone || 'America/Mexico_City'
   let autoPausedAt: string | null = null
   const done = (status: AcceptingStatus, reason: AcceptingReason): AcceptingState => ({
@@ -440,7 +442,7 @@ export async function getAcceptingStatus(
     reason,
     config,
     autoPausedAt,
-    ajustesGuardadosEn: ajustesGuardadosEn ?? null,
+    versionDeAjustes,
     ajustesUsados: sinMarcaDeRelectura(settings),
   })
 
@@ -455,7 +457,8 @@ export async function getAcceptingStatus(
     pausaSola = lectura.pausa
     // Codex p2v4-r4 #5: si los ajustes cambiaron mientras la lectura esperaba (un «Reanudar», una pausa de 15 min quitada), se relee TODO
     // el estado con los ajustes nuevos: la respuesta nunca mezcla una versión con campos de otra. Una sola vez.
-    if (lectura.ajustesReleidosEn && (!ajustesGuardadosEn || lectura.ajustesReleidosEn > ajustesGuardadosEn) && !preloaded?.__releido) {
+    const releida = lectura.versionReleida ?? null
+    if (releida !== null && (versionDeAjustes === null || releida > versionDeAjustes) && !preloaded?.__releido) {
       return getAcceptingStatus(venueId, now, { ...(await getSettings(venueId)), __releido: true })
     }
   }
