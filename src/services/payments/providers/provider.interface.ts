@@ -172,6 +172,16 @@ export interface CaptureParams {
   idempotencyKey: string
 }
 
+/**
+ * D661 (ronda codex-r2): límites de UNA petición al proveedor; sin ellos, los de su cliente. En Stripe son las opciones por petición del
+ * SDK (`timeout` por intento, en ms, y `maxNetworkRetries`). Los usan la visita temprana del conciliador (B, Ruling 42) y el reintento
+ * de una captura de «Nadie» (C, Ruling 43).
+ */
+export interface ProviderRequestLimits {
+  timeoutMs?: number
+  maxNetworkRetries?: number
+}
+
 export interface VoidParams {
   paymentIntentId: string
   idempotencyKey: string
@@ -192,8 +202,9 @@ export interface IEcommerceProvider {
   getAuthorization(
     merchant: EcommerceMerchantWithProvider,
     ref: { checkoutSessionId: string } | { paymentIntentId: string },
+    limits?: ProviderRequestLimits,
   ): Promise<AuthorizationState>
-  capture(merchant: EcommerceMerchantWithProvider, params: CaptureParams): Promise<AuthorizationState>
+  capture(merchant: EcommerceMerchantWithProvider, params: CaptureParams, limits?: ProviderRequestLimits): Promise<AuthorizationState>
   voidAuthorization(merchant: EcommerceMerchantWithProvider, params: VoidParams): Promise<AuthorizationState>
   /** S5: vence una página de pago abierta (el comensal la abandonó). El error del proveedor sale tal cual. */
   expireAuthorizationCheckout(merchant: EcommerceMerchantWithProvider, checkoutSessionId: string): Promise<void>

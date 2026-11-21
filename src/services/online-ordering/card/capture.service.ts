@@ -24,7 +24,7 @@ import { activarSobresDeCuentaPagadaEnTx } from '@/services/giftCards/giftCardLe
 import { applySalePosting, createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { getProvider } from '@/services/payments/provider-registry'
-import type { AuthorizationState } from '@/services/payments/providers/provider.interface'
+import type { AuthorizationState, ProviderRequestLimits } from '@/services/payments/providers/provider.interface'
 import { fromStripeAmount, toStripeAmount } from '@/services/payments/providers/money'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import {
@@ -154,6 +154,13 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
 export class GraceEndedBeforeDispatch extends Error {}
 
 /**
+ * D661 (C, Ruling 43): el reintento con límite sale sin los reintentos de red del SDK: uno suyo, tras un envío que nunca llegó, podía
+ * salir ya fuera de la gracia y ser el primer cobro efectivo. Si se pierde la respuesta, la siguiente pasada lo resuelve leyendo
+ * Stripe. Límite del SDK: tras una conexión CERRADA en el primer envío todavía reenvía una vez, 0.5 s después (`opcionesDeLimite`).
+ */
+const UN_SOLO_ENVIO: ProviderRequestLimits = { maxNetworkRetries: 0 }
+
+/**
  * Cobra con Stripe (fuera de toda transacción) un cargo que ya está en `CAPTURING`, y termina según el desenlace. La usa también el
  * conciliador (tarea 7) para reintentar con la MISMA clave.
  * D661 (A1): `captureBefore` (ms) es el límite de un REINTENTO de «Nadie»: el conciliador lo decide bajo el candado, pero el commit o
@@ -170,13 +177,15 @@ export async function captureCharge(
   if (meta.captureBefore != null && Date.now() >= meta.captureBefore) throw new GraceEndedBeforeDispatch()
   let state: AuthorizationState | null = null
   let failure: unknown = null
+  const params = {
+    paymentIntentId: charge.paymentIntentId!,
+    amountCents: toStripeAmount(new Prisma.Decimal(charge.amount)),
+    applicationFeeCents: charge.applicationFeeCents, // Codex r1 #8: congelada en el borrador, nunca se recalcula
+    idempotencyKey: captureKey(orderId),
+  }
   try {
-    state = await provider.capture(merchant, {
-      paymentIntentId: charge.paymentIntentId!,
-      amountCents: toStripeAmount(new Prisma.Decimal(charge.amount)),
-      applicationFeeCents: charge.applicationFeeCents, // Codex r1 #8: congelada en el borrador, nunca se recalcula
-      idempotencyKey: captureKey(orderId),
-    })
+    // La caja que abre y «Mi equipo» (sin límite): la llamada de siempre, con los reintentos del SDK.
+    state = await (meta.captureBefore != null ? provider.capture(merchant, params, UN_SOLO_ENVIO) : provider.capture(merchant, params))
   } catch (error) {
     failure = error
     try {

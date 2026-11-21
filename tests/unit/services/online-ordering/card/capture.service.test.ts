@@ -453,4 +453,17 @@ describe('D661 · A1: captureCharge revalida el límite de un reintento justo an
     expect(capture).toHaveBeenCalledTimes(2)
     expect(capture.mock.calls[0][1]).toMatchObject({ idempotencyKey: 'online-order:ord1:capture' })
   })
+
+  it('D661 · C (Ruling 43): el reintento con límite sale UNA vez (sin reintentos del SDK: uno suyo podría salir ya fuera de la gracia); la captura de la caja, como hoy', async () => {
+    capture.mockResolvedValue(succeeded())
+    await captureCharge(capturing, 'ord1', { ...meta, captureBefore: Date.now() + 60_000 })
+    expect(capture.mock.calls[0]).toEqual([
+      expect.objectContaining({ providerCredentials: { connectAccountId: 'acct_A' } }),
+      { paymentIntentId: 'pi_1', amountCents: 25_000, applicationFeeCents: 290, idempotencyKey: 'online-order:ord1:capture' },
+      { maxNetworkRetries: 0 },
+    ])
+    // Sin límite (la caja que abre, «Mi equipo»): la misma llamada de siempre, sin opciones de más.
+    await captureCharge(capturing, 'ord1', meta)
+    expect(capture.mock.calls[1]).toHaveLength(2)
+  })
 })

@@ -18,6 +18,7 @@ import {
   OnboardingLink,
   OnboardingStatus,
   PaymentStatus,
+  ProviderRequestLimits,
   RefundParams,
   RefundResult,
   ChargeRefunds,
@@ -28,6 +29,16 @@ import {
   VoidParams,
 } from './provider.interface'
 import { fromStripeAmount, getStripeChargeBoundsCents } from './money'
+
+/**
+ * D661 (ronda codex-r2): los límites de una petición, como opciones por petición del SDK de Stripe. Sin límites no agrega nada (la
+ * petición de siempre). Ojo (stripe-node `RequestSender._shouldRetry`): con `maxNetworkRetries: 0` el SDK todavía reenvía UNA vez si
+ * el primer envío encuentra la conexión cerrada (ECONNRESET/EPIPE: un socket viejo); `stripe-connect.requestLimits.test.ts` lo fija.
+ */
+const opcionesDeLimite = (limits?: ProviderRequestLimits): Stripe.RequestOptions => ({
+  ...(limits?.timeoutMs != null ? { timeout: limits.timeoutMs } : {}),
+  ...(limits?.maxNetworkRetries != null ? { maxNetworkRetries: limits.maxNetworkRetries } : {}),
+})
 
 const PROVIDER_CODE = 'STRIPE_CONNECT'
 export const STRIPE_API_VERSION = '2026-02-25.clover'
@@ -446,6 +457,7 @@ export class StripeConnectProvider implements IEcommerceProvider {
   async getAuthorization(
     merchant: EcommerceMerchantWithProvider,
     ref: { checkoutSessionId: string } | { paymentIntentId: string },
+    limits?: ProviderRequestLimits,
   ): Promise<AuthorizationState> {
     const connectAccountId = this.requireConnectAccountId(merchant)
 
@@ -453,16 +465,20 @@ export class StripeConnectProvider implements IEcommerceProvider {
       const session = await this.stripe.checkout.sessions.retrieve(
         ref.checkoutSessionId,
         { expand: ['payment_intent.latest_charge'] },
-        { stripeAccount: connectAccountId },
+        { stripeAccount: connectAccountId, ...opcionesDeLimite(limits) },
       )
       const pi = typeof session.payment_intent === 'object' ? session.payment_intent : null
       return this.toAuthorizationState(pi, session.status ?? null)
     }
 
-    return this.toAuthorizationState(await this.retrievePaymentIntent(connectAccountId, ref.paymentIntentId), null)
+    return this.toAuthorizationState(await this.retrievePaymentIntent(connectAccountId, ref.paymentIntentId, limits), null)
   }
 
-  async capture(merchant: EcommerceMerchantWithProvider, params: CaptureParams): Promise<AuthorizationState> {
+  async capture(
+    merchant: EcommerceMerchantWithProvider,
+    params: CaptureParams,
+    limits?: ProviderRequestLimits,
+  ): Promise<AuthorizationState> {
     const connectAccountId = this.requireConnectAccountId(merchant)
 
     if (!params.idempotencyKey) {
@@ -483,7 +499,7 @@ export class StripeConnectProvider implements IEcommerceProvider {
       const pi = await this.stripe.paymentIntents.capture(
         params.paymentIntentId,
         { amount_to_capture: params.amountCents, application_fee_amount: params.applicationFeeCents, expand: ['latest_charge'] },
-        { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey },
+        { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey, ...opcionesDeLimite(limits) },
       )
       return this.toAuthorizationState(pi, null)
     } catch (error) {
@@ -597,8 +613,16 @@ export class StripeConnectProvider implements IEcommerceProvider {
     return this.toAuthorizationState(pi, null)
   }
 
-  private retrievePaymentIntent(connectAccountId: string, paymentIntentId: string): Promise<Stripe.PaymentIntent> {
-    return this.stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['latest_charge'] }, { stripeAccount: connectAccountId })
+  private retrievePaymentIntent(
+    connectAccountId: string,
+    paymentIntentId: string,
+    limits?: ProviderRequestLimits,
+  ): Promise<Stripe.PaymentIntent> {
+    return this.stripe.paymentIntents.retrieve(
+      paymentIntentId,
+      { expand: ['latest_charge'] },
+      { stripeAccount: connectAccountId, ...opcionesDeLimite(limits) },
+    )
   }
 
   private toAuthorizationState(pi: Stripe.PaymentIntent | null, sessionStatus: AuthorizationState['sessionStatus']): AuthorizationState {

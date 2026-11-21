@@ -251,6 +251,46 @@ describe('StripeConnectProvider — apartar, cobrar, liberar, leer', () => {
     })
   })
 
+  // D661 (ronda codex-r2): límites de UNA petición, por la opción por petición del SDK (`timeout`, `maxNetworkRetries`). Sin ellos, las
+  // opciones de siempre (las pruebas de arriba fijan esa forma exacta).
+  describe('límites por petición (D661 · B y C)', () => {
+    const LECTURA_ACOTADA = { timeoutMs: 10_000, maxNetworkRetries: 0 }
+
+    it('B (Ruling 42): una lectura acotada manda timeout y maxNetworkRetries al SDK, por sesión y por PaymentIntent', async () => {
+      mockStripe.checkout.sessions.retrieve.mockResolvedValue({ id: 'cs_1', status: 'open', payment_intent: null })
+      await provider.getAuthorization(merchant as any, { checkoutSessionId: 'cs_1' }, LECTURA_ACOTADA)
+      expect(mockStripe.checkout.sessions.retrieve).toHaveBeenCalledWith(
+        'cs_1',
+        { expand: ['payment_intent.latest_charge'] },
+        { stripeAccount: 'acct_x', timeout: 10_000, maxNetworkRetries: 0 },
+      )
+      mockStripe.paymentIntents.retrieve.mockResolvedValue(piBase)
+      await provider.getAuthorization(merchant as any, { paymentIntentId: 'pi_1' }, LECTURA_ACOTADA)
+      expect(mockStripe.paymentIntents.retrieve).toHaveBeenCalledWith(
+        'pi_1',
+        { expand: ['latest_charge'] },
+        { stripeAccount: 'acct_x', timeout: 10_000, maxNetworkRetries: 0 },
+      )
+    })
+
+    it('C (Ruling 43): una captura de UN solo envío manda maxNetworkRetries: 0 al SDK con su clave; sin límite, como hoy', async () => {
+      mockStripe.paymentIntents.capture.mockResolvedValue({ ...piBase, status: 'succeeded', amount_received: 25000, amount_capturable: 0 })
+      const params = { paymentIntentId: 'pi_1', amountCents: 25000, applicationFeeCents: 290, idempotencyKey: 'online-order:o1:capture' }
+      await provider.capture(merchant as any, params, { maxNetworkRetries: 0 })
+      expect(mockStripe.paymentIntents.capture).toHaveBeenLastCalledWith(
+        'pi_1',
+        { amount_to_capture: 25000, application_fee_amount: 290, expand: ['latest_charge'] },
+        { stripeAccount: 'acct_x', idempotencyKey: 'online-order:o1:capture', maxNetworkRetries: 0 },
+      )
+      await provider.capture(merchant as any, params)
+      expect(mockStripe.paymentIntents.capture).toHaveBeenLastCalledWith(
+        'pi_1',
+        { amount_to_capture: 25000, application_fee_amount: 290, expand: ['latest_charge'] },
+        { stripeAccount: 'acct_x', idempotencyKey: 'online-order:o1:capture' },
+      )
+    })
+  })
+
   describe('voidAuthorization', () => {
     const params = { paymentIntentId: 'pi_1', idempotencyKey: 'online-order:o1:void' }
 
