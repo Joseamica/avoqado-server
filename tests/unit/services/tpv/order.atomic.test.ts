@@ -1098,6 +1098,52 @@ describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la
     expect(tx.orderItem.create).toHaveBeenCalledTimes(2)
   })
 
+  /** D29: la lectura de renglones vivos en OTRA cuenta del negocio contesta estas llaves. */
+  const esLecturaDeOtraCuenta = (q: any) => textoDe(q).includes('"OrderItem"')
+  const conLlavesEnOtraCuenta = (llaves: string[]) => {
+    const deSiempre = tx.$queryRaw.getMockImplementation()
+    tx.$queryRaw.mockImplementation(async (q: any, ...values: any[]) =>
+      esLecturaDeOtraCuenta(q)
+        ? llaves.filter(llave => valoresDe([q, ...values]).some(v => Array.isArray(v) && v.includes(llave))).map(llave => ({ llave }))
+        : deSiempre(q, ...values),
+    )
+  }
+
+  it('D29: en una ronda, la llave que otra caja separó a OTRA cuenta del negocio no se vuelve a crear aquí', async () => {
+    conLlavesEnOtraCuenta(['sync:r:1'])
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    await addItemsToOrder(
+      'venue',
+      'order',
+      [
+        { productId: 'product', quantity: 1, externalId: 'sync:r:0' },
+        { productId: 'product', quantity: 1, externalId: 'sync:r:1' },
+      ],
+      1,
+      true,
+    )
+    const valores = valoresDe(tx.$queryRaw.mock.calls.find(([q]: any[]) => esLecturaDeOtraCuenta(q)))
+    // Excluye la cuenta que recibe la ronda y se acota al negocio.
+    expect(valores).toEqual(expect.arrayContaining([['sync:r:0', 'sync:r:1'], 'order', 'venue']))
+    expect(tx.orderItem.create).toHaveBeenCalledTimes(1)
+    expect(tx.orderItem.create.mock.calls[0][0].data.externalId).toBe('sync:r:0')
+  })
+
+  it('D29: el carrito de la TPV (no es ronda) y las llaves de Mostrador no consultan otras cuentas', async () => {
+    conLlavesEnOtraCuenta(['sync:r:0'])
+    await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 1, externalId: 'sync:r:0' }], 1, false)
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    await addItemsToOrder(
+      'venue',
+      'order',
+      [{ productId: 'product', quantity: 1, externalId: '3f1c6a52-0000-4000-8000-000000000001' }],
+      1,
+      true,
+    )
+    expect(tx.$queryRaw.mock.calls.filter(([q]: any[]) => esLecturaDeOtraCuenta(q))).toHaveLength(0)
+    expect(tx.orderItem.create).toHaveBeenCalledTimes(2)
+  })
+
   it('#1: una llave NUEVA en esa misma ronda sí se crea; la anulada no', async () => {
     conLapidas(['sync:r:0'])
     tx.orderItem.findMany.mockResolvedValueOnce([])

@@ -16,7 +16,13 @@ import prisma from '@/utils/prismaClient'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { payCashOrder, splitOrderItems } from '@/services/mobile/order.mobile.service'
 import { assignTable } from '@/services/tpv/table.tpv.service'
-import { addItemsToOrder, consultaDeLapidasDelNegocio, llavesAnuladasEnElNegocio, voidItems } from '@/services/tpv/order.tpv.service'
+import {
+  addItemsToOrder,
+  consultaDeLapidasDelNegocio,
+  consultaDeLlavesEnOtraCuenta,
+  llavesAnuladasEnElNegocio,
+  voidItems,
+} from '@/services/tpv/order.tpv.service'
 import { voidOrderItem } from '@/services/mobile/void-item.mobile.service'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: () => null } }))
@@ -164,6 +170,17 @@ describe('D29 · la lápida de una llave de ronda vale en todo el negocio', () =
     expect(await prisma.orderItem.count({ where: { externalId: `sync:${r}:0`, order: { venueId } } })).toBe(0)
   })
 
+  it('vecina: la otra caja SÓLO separó el agua a B (sin anular): el reenvío a A no la duplica', async () => {
+    const { a, b, r } = await rondaSeparadaPorLaOtraCaja()
+
+    const [ack] = await replay([reenvio(r, a, [{ productId: agua, n: 0 }])])
+
+    expect(ack.status).toBe('ACKED')
+    expect(await prisma.orderItem.count({ where: { externalId: `sync:${r}:0`, order: { venueId } } })).toBe(1)
+    expect(await fotoDe(a)).toMatchObject({ total: 25, renglones: 1 })
+    expect(await fotoDe(b)).toMatchObject({ total: 30, renglones: 2 })
+  })
+
   it('vecina: anulada en la MISMA cuenta A (como hoy), el reenvío no la revive', async () => {
     const t = (await prisma.table.create({ data: { venueId, number: randomUUID().slice(0, 6), capacity: 4, qrCode: randomUUID() } })).id
     const a = (await assignTable(venueId, t, mesera, 2)).order.id
@@ -264,5 +281,25 @@ describe('D29 · la lápida de una llave de ronda vale en todo el negocio', () =
     // La consulta EXACTA de `llavesAnuladasEnElNegocio` (Codex r1 #3): entra por el índice parcial con las llaves pedidas.
     const plan = await planSinRecorrerTablas(consultaDeLapidasDelNegocio(venueId, [`sync:${randomUUID()}:0`, `sync:${randomUUID()}:1`]))
     expect(plan.map(fila => fila['QUERY PLAN']).join('\n')).toContain('OrderAction_void_externalIds_idx')
+  })
+
+  it('capacidad: con miles de renglones con llave, la búsqueda de llaves en otra cuenta entra por el índice de la llave', async () => {
+    const t = (await prisma.table.create({ data: { venueId, number: randomUUID().slice(0, 6), capacity: 4, qrCode: randomUUID() } })).id
+    const a = (await assignTable(venueId, t, mesera, 2)).order.id
+    await prisma.orderItem.createMany({
+      data: Array.from({ length: 3000 }, (_, i) => ({
+        orderId: a,
+        productId: coca,
+        productName: 'Coca',
+        quantity: 1,
+        unitPrice: 25,
+        total: 25,
+        taxAmount: 0,
+        externalId: `sync:${randomUUID()}:${i % 4}`,
+      })),
+    })
+    await prisma.$executeRawUnsafe('ANALYZE "OrderItem"')
+    const plan = await planSinRecorrerTablas(consultaDeLlavesEnOtraCuenta(venueId, a, [`sync:${randomUUID()}:0`, `sync:${randomUUID()}:1`]))
+    expect(plan.map(fila => fila['QUERY PLAN']).join('\n')).toContain('OrderItem_externalId_idx')
   })
 })

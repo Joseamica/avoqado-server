@@ -710,6 +710,45 @@ export function consultaDeLapidasDelNegocio(venueId: string, pedidas: string[]):
     WHERE o."venueId" = ${venueId}`
 }
 
+/**
+ * D29: las llaves de RONDA pedidas que viven en OTRA cuenta del negocio (otra caja separó o juntó ese renglón: mover conserva la
+ * llave). Las de Mostrador (UUID) no entran: se repiten entre cuentas a propósito (cobro dividido).
+ */
+export async function llavesEnOtraCuentaDelNegocio(
+  tx: Pick<Prisma.TransactionClient, '$queryRaw'>,
+  venueId: string,
+  orderId: string,
+  llaves: string[],
+): Promise<Set<string>> {
+  const pedidas = [...new Set(llaves.filter(esLlaveDeRonda))]
+  if (pedidas.length === 0) return new Set()
+  const filas = await tx.$queryRaw<{ llave: string }[]>(consultaDeLlavesEnOtraCuenta(venueId, orderId, pedidas))
+  return new Set(filas.map(fila => fila.llave))
+}
+
+/**
+ * La lectura de `llavesEnOtraCuentaDelNegocio` (aparte para la prueba de capacidad). Por cada llave, un `EXISTS` que entra por el
+ * índice de `OrderItem.externalId` y se detiene en la primera copia del negocio (trabajo acotado por llave aunque una llave se repita
+ * en muchas cuentas, Codex r1 #3); a lo más una fila por llave. `OFFSET 0`: primero la llave por su índice, luego el negocio.
+ */
+export function consultaDeLlavesEnOtraCuenta(venueId: string, orderId: string, pedidas: string[]): Prisma.Sql {
+  return Prisma.sql`
+    SELECT k.llave
+    FROM unnest(${pedidas}::text[]) AS k(llave)
+    WHERE EXISTS (
+      SELECT 1
+      FROM (
+        SELECT oi."orderId"
+        FROM "OrderItem" oi
+        WHERE oi."externalId" = k.llave
+          AND oi."orderId" <> ${orderId}
+        OFFSET 0
+      ) copia
+      JOIN "Order" o ON o."id" = copia."orderId"
+      WHERE o."venueId" = ${venueId}
+    )`
+}
+
 export async function conLlaveDeRonda<T>(crear: () => Promise<T>): Promise<T> {
   try {
     return await crear()
@@ -1934,6 +1973,18 @@ export async function addItemsToOrder(
             ).map(renglon => renglon.externalId)
           : [],
       )
+      // D29: un renglón de la ronda que otra caja SEPARÓ (o juntó) a otra cuenta del negocio ya está guardado ahí, con su llave: no
+      // se vuelve a crear en ésta. Misma regla que `rondaYaEnAlgunaCuenta` para la ronda tardía. Sólo en rondas y con llaves de ronda.
+      // Se lee ANTES que las lápidas: si la otra caja lo anula en este instante, una de las dos lecturas lo ve (borra y deja la lápida
+      // en la misma transacción).
+      const llavesEnOtraCuenta = asNewRound
+        ? await llavesEnOtraCuentaDelNegocio(
+            tx,
+            venueId,
+            order.id,
+            llavesDeRonda.filter(llave => !llavesGuardadas.has(llave)),
+          )
+        : new Set<string>()
       // «Anular producto» (Codex r1 #1): la llave de un renglón ANULADO no vuelve a crearse. El reenvío de una ronda (respuesta
       // perdida, cola sin red) o el carrito de la TPV deduplican por llave, y la fila anulada ya no existe: sin esto el producto
       // volvía a la cuenta y se cobraba. Se trata como réplica: ni se valida contra el catálogo de hoy ni se escribe.
@@ -1941,11 +1992,13 @@ export async function addItemsToOrder(
       // D29: la lápida se busca en todo el negocio (otra caja pudo separar el renglón a otra cuenta y anularlo ahí).
       const llavesPedidas = normalizedItems.map(item => normalizeExternalId(item.externalId)).filter(esLlaveDeRonda)
       const llavesAnuladas = llavesPedidas.length > 0 ? await llavesAnuladasEnElNegocio(tx, venueId, llavesPedidas) : new Set<string>()
-      const esAnulada = (item: NormalizedAddOrderItemInput) => {
+      /** No se escribe aquí: se anuló (en cualquier cuenta) o vive en otra cuenta del negocio. */
+      const noSeEscribeAqui = (item: NormalizedAddOrderItemInput) => {
         const llave = normalizeExternalId(item.externalId)
-        return !!llave && llavesAnuladas.has(llave)
+        return !!llave && (llavesAnuladas.has(llave) || llavesEnOtraCuenta.has(llave))
       }
-      const esReplica = (item: NormalizedAddOrderItemInput) => llavesGuardadas.has(normalizeExternalId(item.externalId)) || esAnulada(item)
+      const esReplica = (item: NormalizedAddOrderItemInput) =>
+        llavesGuardadas.has(normalizeExternalId(item.externalId)) || noSeEscribeAqui(item)
 
       if (asNewRound) {
         for (const product of products) {
@@ -2417,8 +2470,10 @@ export async function addItemsToOrder(
       // En serie: una transacción es UNA conexión, y en serie el primer error corta la ronda sin dejar consultas en vuelo.
       const newOrderItems: Awaited<ReturnType<typeof escribirRenglon>>[] = []
       for (const item of normalizedItems) {
-        if (esAnulada(item)) {
-          logger.warn(`⏭️ [ADD ITEMS] Renglón anulado: su llave no se vuelve a crear (externalId=${normalizeExternalId(item.externalId)})`)
+        if (noSeEscribeAqui(item)) {
+          logger.warn(
+            `⏭️ [ADD ITEMS] Renglón anulado o en otra cuenta del negocio: su llave no se vuelve a crear (externalId=${normalizeExternalId(item.externalId)})`,
+          )
           continue
         }
         newOrderItems.push(await escribirRenglon(item))
