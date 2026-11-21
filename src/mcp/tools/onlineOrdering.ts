@@ -702,7 +702,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_order_card_refund_resolve',
-    'Devolver por otro medio: cuando una devolución a la tarjeta falló en el banco después de anotarse (estado REVERSED en online_order_card_refunds), registra que el negocio ya le devolvió ese dinero al cliente en efectivo (sale de la caja abierta) o por transferencia. Si el cobro ya tiene una devolución hecha directo en Stripe, por fuera de Avoqado, no registra nada y lo explica (no se paga dos veces). Dos pasos: sin confirm:true sólo muestra la vista previa. En efectivo pide el permiso de devolver en efectivo; por transferencia, el de reembolsar.',
+    'Devolver por otro medio: cuando una devolución a la tarjeta falló en el banco después de anotarse (estado REVERSED en online_order_card_refunds), registra que el negocio le devuelve ese dinero al cliente en efectivo (sale de la caja abierta) o por transferencia; se registra ANTES de entregarlo. Si el cobro ya tiene una devolución hecha directo en Stripe, por fuera de Avoqado, no registra nada y lo explica (no se paga dos veces). Dos pasos: sin confirm:true sólo muestra la vista previa. En efectivo pide el permiso de devolver en efectivo; por transferencia, el de reembolsar.',
     {
       venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
       orderId: z.string().describe('Id del pedido'),

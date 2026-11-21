@@ -808,15 +808,24 @@ const DEVOLUCION_VIVA_EN_STRIPE = new Set<RefundState['status']>(['PENDING', 'SU
  * `amount_refunded` descuenta una devolución que falló, y si la siguiera sumando cada devolución revertida se leería «por fuera».
  * `nuestras`: id de cada fila de este cargo → su `stripeRefundId` (null si aún no lo sabemos). Una devolución es nuestra si su metadata
  * nombra una fila Y es la que esa fila guardó (D668, Codex r1 #2: otra devolución con la metadata copiada de la fallida es de fuera).
+ * Una fila sin id todavía es dueña de UNA sola: si dos devoluciones distintas la nombran, ninguna cuenta como nuestra (Codex r2 #2;
+ * nuestros re-envíos usan la misma clave, así que Stripe nunca nos da dos).
  */
+const filaNombrada = (r: ChargeRefunds['refunds'][number]) =>
+  r.metadata?.type === 'online_order_refund' ? r.metadata.cardRefundId : undefined
 function devueltoPorFueraCents(estado: ChargeRefunds, nuestras: ReadonlyMap<string, string | null>): number {
+  const reclamos = new Map<string, Set<string>>()
+  for (const r of estado.refunds) {
+    const id = filaNombrada(r)
+    if (id !== undefined) reclamos.set(id, (reclamos.get(id) ?? new Set()).add(r.refundId))
+  }
   let ajenasVivas = 0
   let listadas = 0
   for (const r of estado.refunds) {
     listadas += r.amountCents
-    const id = r.metadata?.type === 'online_order_refund' ? r.metadata.cardRefundId : undefined
+    const id = filaNombrada(r)
     const guardada = id === undefined ? undefined : nuestras.get(id)
-    const nuestra = guardada !== undefined && (guardada === null || guardada === r.refundId)
+    const nuestra = guardada === r.refundId || (guardada === null && reclamos.get(id!)!.size === 1)
     if (DEVOLUCION_VIVA_EN_STRIPE.has(r.status) && !nuestra) ajenasVivas += r.amountCents
   }
   return ajenasVivas + Math.max(0, estado.amountRefundedCents - listadas)

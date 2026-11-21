@@ -1740,6 +1740,9 @@ describe('D661 (Task 6): saldo a favor y devolución por fuera en Stripe', () =>
     expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [nuestra('SUCCEEDED')] }, conId)).toBe(false)
     const copiada = { ...nuestra('SUCCEEDED'), refundId: 're_2' }
     expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [nuestra('FAILED'), copiada] }, conId)).toBe(true)
+    // Codex r2 #2: una fila sin id todavía (SENDING) es dueña de UNA sola; si dos distintas la nombran, ninguna es nuestra.
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [nuestra('PENDING')] }, nuestras)).toBe(false)
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 50_000, refunds: [nuestra('PENDING'), copiada] }, nuestras)).toBe(true)
   })
 
   it('repetir la misma llave de saldo no vuelve a leer Stripe, ni a abonar, ni a escribir', async () => {
