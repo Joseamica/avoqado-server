@@ -23,6 +23,16 @@ export interface AcceptingState {
   status: AcceptingStatus
   reason: AcceptingReason
   config: OnlineOrderingConfig
+  /** D662 parte 2: la tienda está pausada sola desde esta hora (ISO; la hora límite del 2.º pedido sin atender). Null = no. */
+  autoPausedAt?: string | null
+  /** D662 v4: cuándo se guardaron por última vez los ajustes que leyó (orden de las lecturas del panel; Codex p2v4-r2 #5). */
+  ajustesGuardadosEn?: Date | null
+  /**
+   * D662 v5 (Codex p2v4-r5 #2): los ajustes COMPLETOS con los que se armó este estado (los releídos si la lectura esperó). Quien arma una
+   * respuesta con interruptor, pausa temporal y versión los toma de aquí: una sola foto, nunca el encabezado de una versión y el formulario
+   * de otra. Es un objeto interno (lleva columnas de presencia): nunca se manda tal cual.
+   */
+  ajustesUsados?: Record<string, unknown> & { updatedAt?: Date | null }
 }
 
 /**

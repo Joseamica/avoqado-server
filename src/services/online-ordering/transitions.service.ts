@@ -139,6 +139,12 @@ export interface CasArgs {
   extraWhere?: (now: Date, hasMoney: boolean) => Prisma.OnlineOrderWhereInput
   /** Fase 2: sólo la captura misma, que termina su propia aceptación o rechazo, corre con el cargo en `CAPTURING`. */
   allowCapturing?: true
+  /**
+   * D662 parte 2 (v3): la transición la tocó una PERSONA. Si gana el CAS, guarda `staffAnsweredAt` con su `now`, en esta misma
+   * transacción y SÓLO si estaba vacío: la primera respuesta nunca se pisa (Codex p2-r2 #4: el segundo «Aceptar» de una cuenta que
+   * ya se pagó no mueve la hora del primero).
+   */
+  toquePersona?: true
 }
 
 /**
@@ -229,6 +235,9 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
   if (cas.count !== 1) {
     const current = await tx.onlineOrder.findFirst({ where: { id: row.id }, select: { status: true, acceptDeadlineAt: true } })
     return stale(current?.status ?? null, !!current && current.acceptDeadlineAt.getTime() <= now.getTime())
+  }
+  if (a.toquePersona) {
+    await tx.onlineOrder.updateMany({ where: { id: row.id, staffAnsweredAt: null }, data: { staffAnsweredAt: now } })
   }
 
   // 🔴 LEALTAD (hz:a8104ac8:D1): rechazar, vencer o cancelar el pedido anula su venta, y sus canjes vuelven al cliente como al
@@ -344,6 +353,19 @@ export interface AcceptInput {
   staffId: string | null
   estimatedMinutes?: number
   now?: Date
+  /**
+   * D662 parte 2: la aceptación la tocó una PERSONA (las puertas de la caja, del panel y del MCP). Su transición ganadora guarda
+   * `staffAnsweredAt` (la pausa sola la lee). Los caminos del sistema (conciliador, aviso de Stripe, folios) no la ponen.
+   */
+  porPersona?: true
+}
+
+/**
+ * D662 parte 2 (v3): después del commit de la respuesta de una persona, el corte de la pausa sola sube (sólo si no hay pausa). Nunca
+ * lanza ni se espera. Dinámico: la lectura de la tienda vive en `presence.service`, que no debe cargarse con esta máquina de estados.
+ */
+export function avanzarCorteTrasCommit(venueId: string): void {
+  void import('./presence.service').then(m => m.avanzarCortePausaSola(venueId)).catch(() => undefined)
 }
 
 export async function prepMinutes(venueId: string, estimatedMinutes?: number): Promise<number> {
@@ -392,6 +414,7 @@ export async function acceptWithoutCapture(i: AcceptInput): Promise<TransitionRe
       // el job no lo toca (R1) y queda en la bandeja para aceptarlo.
       extraWhere: (now, hasMoney) => (hasMoney ? {} : { acceptDeadlineAt: { gt: now } }),
       onlineData: now => ({ acceptedAt: now, estimatedReadyAt: new Date(now.getTime() + minutes * 60_000) }),
+      toquePersona: i.porPersona,
       // `kitchenPendingAt` es la marca que el barrido de comandas retoma si el armado de abajo falla; la pone la MISMA
       // escritura que confirma la orden (contrato de la columna).
       orderExtra: now => (marcarCocina ? { kitchenPendingAt: now } : {}),
@@ -414,6 +437,7 @@ export async function acceptWithoutCapture(i: AcceptInput): Promise<TransitionRe
     }
   }
   if (r.r !== 'OK') return settled(r)
+  if (i.porPersona) avanzarCorteTrasCommit(i.venueId)
   const aceptado = announceAccepted({ venueId: i.venueId, orderId: i.orderId, staffId: i.staffId, minutes, marcarCocina }, r)
   if (confirmado.cierre) {
     trasCerrarFolioEnCero({ venueId: i.venueId, orderId: i.orderId, staffId: i.staffId, marcarCocina, minutes }, confirmado.cierre)
@@ -464,6 +488,8 @@ export async function rejectOnlineOrder(i: {
   afterCas?: AfterCasInTx
   /** Después del commit: recibe lo que devolvió `afterCas` en el intento que confirmó. */
   alConfirmar?: (valor: unknown) => void
+  /** D662 parte 2: lo rechazó una PERSONA (caja, panel, TPV, MCP): su transición ganadora guarda `staffAnsweredAt` (una vez). */
+  porPersona?: true
 }): Promise<TransitionResult> {
   const r = await casTransition(
     {
@@ -473,11 +499,13 @@ export async function rejectOnlineOrder(i: {
       now: i.now,
       allowCapturing: i.allowCapturing,
       onlineData: now => ({ rejectedAt: now, rejectReason: i.reason, rejectNote: i.note ?? null }),
+      toquePersona: i.porPersona,
     },
     i.afterCas,
     i.alConfirmar,
   )
   if (r.r !== 'OK') return settled(r)
+  if (i.porPersona) avanzarCorteTrasCommit(i.venueId)
   if (r.releaseChargeId) await releaseCharge(r.releaseChargeId)
 
   emitOnlineOrderUpdated({
@@ -530,6 +558,9 @@ export async function expireOnlineOrder(i: { venueId: string; orderId: string; n
     entityId: r.onlineOrderId,
     data: { orderNumber: r.orderNumber },
   })
+  // D662 parte 2: si con este vencimiento la tienda quedó pausada sola, queda en la bitácora (sólo registro; nunca lanza). Dinámico:
+  // la lectura de la tienda vive en `presence.service`, que no debe cargarse con esta máquina de estados.
+  void import('./presence.service').then(m => m.registrarSiLaPausoSola(i.venueId, r.onlineOrderId)).catch(() => undefined)
   return { outcome: 'OK', status: OnlineOrderStatus.EXPIRED }
 }
 
