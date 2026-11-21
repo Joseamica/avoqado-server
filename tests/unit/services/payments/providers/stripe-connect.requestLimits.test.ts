@@ -45,12 +45,14 @@ function adaptador(client: unknown): StripeConnectProvider {
 const capturas = (envios: Array<{ method: string; path: string }>) => envios.filter(e => e.method === 'POST' && e.path.endsWith('/capture'))
 
 describe('StripeConnectProvider con el SDK real: los límites por petición (D661 · B y C)', () => {
-  it('C (Ruling 43): con maxNetworkRetries: 0, una captura cuyo envío se pierde sale UNA sola vez', async () => {
+  it('C (Ruling 43 y la enmienda del 52): el reintento del conciliador (40 s, sin reintentos) cuyo envío se pierde sale UNA sola vez, con su límite de 40 s', async () => {
     const t = transporte('POST', 'ETIMEDOUT')
-    await expect(adaptador(t.client).capture(merchant as never, CAPTURA, { maxNetworkRetries: 0 })).rejects.toMatchObject({
-      type: 'StripeConnectionError',
-    })
-    expect(capturas(t.envios)).toHaveLength(1)
+    await expect(
+      adaptador(t.client).capture(merchant as never, CAPTURA, { timeoutMs: 40_000, maxNetworkRetries: 0 }),
+    ).rejects.toMatchObject({ type: 'StripeConnectionError' })
+    expect(capturas(t.envios)).toEqual([
+      { method: 'POST', path: expect.stringContaining('/v1/payment_intents/pi_1/capture'), timeout: 40_000 },
+    ])
   })
 
   it('control: sin el límite, el MISMO envío perdido lo reenvía el SDK por su cuenta (dos reintentos más)', async () => {

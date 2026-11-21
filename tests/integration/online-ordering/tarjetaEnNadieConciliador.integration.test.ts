@@ -1150,7 +1150,10 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
       await pasada(a.chargeId)
       const [caja, reintento] = capturasA(a.pi)
       expect({ miEquipo, caja: caja[2] }).toEqual({ miEquipo, caja: { timeoutMs: 60_000, maxNetworkRetries: 1 } })
-      expect({ miEquipo, reintento: reintento[2] }).toEqual({ miEquipo, reintento: miEquipo ? undefined : { maxNetworkRetries: 0 } })
+      expect({ miEquipo, reintento: reintento[2] }).toEqual({
+        miEquipo,
+        reintento: miEquipo ? undefined : { timeoutMs: 40_000, maxNetworkRetries: 0 }, // Ruling 52 (enmienda)
+      })
       expect(reintento[1]).toEqual(caja[1]) // la MISMA clave y los mismos parámetros
       await cobradoUnaVez(a)
     }
