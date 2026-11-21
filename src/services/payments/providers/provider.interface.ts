@@ -181,6 +181,12 @@ export interface CaptureParams {
 export interface ProviderRequestLimits {
   timeoutMs?: number
   maxNetworkRetries?: number
+  /**
+   * D661 (Ruling 73): NUESTRO plazo duro de la llamada, en ms; el SDK no lo ve. Al cumplirse, la llamada se rechaza con `PlazoAgotado`
+   * aunque el SDK siga esperando un cuerpo que no llega (`conPlazo`). Lo pasa sólo el conciliador: su límite por petición + 5 s y, sin
+   * límite por petición, 120 s.
+   */
+  plazoMs?: number
 }
 
 export interface VoidParams {
@@ -199,7 +205,11 @@ export interface IEcommerceProvider {
   tokenizeCard(merchant: EcommerceMerchantWithProvider, params: TokenizeCardParams): Promise<TokenizeCardResult>
   authorizeCardPayment(merchant: EcommerceMerchantWithProvider, params: AuthorizeCardPaymentParams): Promise<AuthorizeCardPaymentResult>
 
-  createAuthorizationCheckout(merchant: EcommerceMerchantWithProvider, params: CreateAuthorizationCheckoutParams): Promise<CheckoutSession>
+  createAuthorizationCheckout(
+    merchant: EcommerceMerchantWithProvider,
+    params: CreateAuthorizationCheckoutParams,
+    limits?: ProviderRequestLimits,
+  ): Promise<CheckoutSession>
   getAuthorization(
     merchant: EcommerceMerchantWithProvider,
     ref: { checkoutSessionId: string } | { paymentIntentId: string },

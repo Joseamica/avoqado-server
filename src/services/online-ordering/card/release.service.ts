@@ -31,8 +31,8 @@ const LIVE_ONLINE: OnlineOrderStatus[] = [
 ]
 
 /**
- * D661 (B, Ruling 51): `limites` (sólo la visita temprana del conciliador) acota la cancelación y su relectura; si Stripe no contesta a
- * tiempo, el cargo se queda `RELEASING` y la siguiente pasada lo reintenta sin límite con la MISMA clave.
+ * D661 (B, Ruling 51): `limites` (sólo el conciliador) acota la cancelación y su relectura; si Stripe no contesta a tiempo, el cargo se
+ * queda `RELEASING` y la siguiente pasada lo reintenta con la MISMA clave (sin límite por petición; Ruling 73: con su plazo duro de 120 s).
  */
 export async function releaseCharge(chargeId: string, limites?: ProviderRequestLimits): Promise<'RELEASED' | 'STUCK' | 'CAPTURED_OUTSIDE'> {
   try {

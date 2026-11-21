@@ -6,9 +6,10 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 
 const getAuthorization = jest.fn()
+const createAuthorizationCheckout = jest.fn()
 jest.mock('@/services/payments/provider-registry', () => ({
   __esModule: true,
-  getProvider: jest.fn(() => ({ getAuthorization, createAuthorizationCheckout: jest.fn() })),
+  getProvider: jest.fn(() => ({ getAuthorization, createAuthorizationCheckout })),
 }))
 const confirmCardAuthorization = jest.fn()
 jest.mock('@/services/online-ordering/card/confirm.service', () => ({
@@ -38,6 +39,8 @@ jest.mock('@/services/online-ordering/transitions.service', () => ({ __esModule:
 jest.mock('@/services/dashboard/activity-log.service', () => ({ __esModule: true, logAction: jest.fn() }))
 
 import { reconcileCardCharges, visitEarlyNadieDrafts } from '@/services/online-ordering/card/reconcile.service'
+import { captureCharge } from '@/services/online-ordering/card/capture.service'
+import { releaseCharge } from '@/services/online-ordering/card/release.service'
 
 const MIN = 60_000
 const NOW = new Date('2026-11-20T18:00:00.000Z')
@@ -119,6 +122,10 @@ beforeEach(() => {
     eventos.push(`anotar cobro ${id}`)
     buscar(id).status = 'CAPTURED'
   })
+  createAuthorizationCheckout.mockReset()
+  createAuthorizationCheckout.mockResolvedValue({ id: 'cs_nueva', url: 'https://checkout.stripe.test/cs_nueva' })
+  ;(captureCharge as jest.Mock).mockReset()
+  ;(releaseCharge as jest.Mock).mockClear()
 })
 
 afterEach(() => dateSpy.mockRestore())
@@ -194,15 +201,16 @@ describe('D661 · A2: el dinero en duda primero, y la visita temprana con su pro
 })
 
 describe('D661 · B (Ruling 42): la visita temprana acota cada lectura de Stripe y lee su lista al empezar', () => {
-  const LECTURA_TEMPRANA = { timeoutMs: 10_000, maxNetworkRetries: 0 }
+  /** Ruling 73: y nuestro plazo duro, 10 + 5 s. */
+  const LECTURA_TEMPRANA = { timeoutMs: 10_000, maxNetworkRetries: 0, plazoMs: 15_000 }
   const llamadaDe = (id: string) => confirmCardAuthorization.mock.calls.find(([c]) => c === id)!
 
-  it('la visita temprana pasa a la lectura su límite (10 s, sin reintentos del SDK); un borrador vencido (lo demás de la pasada) se lee como hoy', async () => {
+  it('la visita temprana pasa a la lectura su límite (10 s, sin reintentos del SDK); un borrador vencido (lo demás de la pasada) se lee sin límite por petición, sólo con el plazo duro de la pasada (Ruling 73)', async () => {
     filas.early = [fila('temprano1', 'early')]
     filas.expired = [fila('vencido1', 'expired')]
     await reconcileCardCharges(NOW, read => read())
     expect(llamadaDe('temprano1')[2]).toEqual(LECTURA_TEMPRANA)
-    expect(llamadaDe('vencido1')[2]).toBeUndefined()
+    expect(llamadaDe('vencido1')[2]).toEqual({ plazoMs: 120_000 })
     // La visita sola (el minuto en que la pasada anterior sigue corriendo), igual.
     confirmCardAuthorization.mockClear()
     await visitEarlyNadieDrafts(NOW, read => read())
@@ -298,6 +306,32 @@ describe('D661 · B (Ruling 74): los borradores con su plazo cerca van primero, 
       { request: { path: ['cierreDeFranja'], gt: NOW.toISOString() } },
       { request: { path: ['cierreDeFranja'], lte: new Date(NOW.getTime() + 10 * MIN).toISOString() } },
     ])
+  })
+})
+
+describe('D661 · B (Ruling 73): la pasada principal lleva nuestro plazo duro de 120 s en cada llamada a Stripe', () => {
+  it('la lectura del cobro en duda, su reintento de «Mi equipo», las dos liberaciones y la sesión que se repite (sin límite por petición)', async () => {
+    const PLAZO = { plazoMs: 120_000 }
+    filas.capturing = [fila('cobrando1', 'capturing')] // «Mi equipo» (con teléfono): sin gracia, se reintenta
+    filas.releasing = [fila('soltando1', 'releasing')]
+    filas.authorized = [fila('suelto1', 'authorized')]
+    filas.expired = [{ ...fila('sinSesion', 'expired'), checkoutSessionId: null }]
+    getAuthorization.mockImplementation(async (_m: unknown, ref: any) => ({
+      piStatus: 'requires_capture',
+      paymentIntentId: ref.paymentIntentId,
+    }))
+
+    await reconcileCardCharges(NOW, read => read())
+    expect(getAuthorization).toHaveBeenCalledWith(expect.anything(), { paymentIntentId: 'pi_cobrando1' }, PLAZO)
+    expect(captureCharge).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'cobrando1' }),
+      'o_cobrando1',
+      expect.objectContaining({ limites: PLAZO }),
+    )
+    expect(releaseCharge).toHaveBeenCalledWith('soltando1', PLAZO)
+    expect(releaseCharge).toHaveBeenCalledWith('suelto1', PLAZO)
+    expect(createAuthorizationCheckout).toHaveBeenCalledWith(expect.anything(), undefined, PLAZO) // `checkoutParams` va doble aquí
+    expect(confirmCardAuthorization).toHaveBeenCalledWith('sinSesion', undefined, PLAZO)
   })
 })
 

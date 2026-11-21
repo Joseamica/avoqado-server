@@ -20,7 +20,9 @@
  * corre sólo la visita temprana (`visitEarlyNadieDrafts`): una pasada lenta no deja vencer una autorización que llegó a tiempo.
  * D661 (B, Rulings 42 y 51): la visita temprana lee su lista al EMPEZAR (también dentro de la pasada) y cada llamada suya a Stripe (la
  * lectura, y la liberación con su relectura) espera a lo más `LIMITES_TEMPRANOS` y sin reintentos del SDK: cinco llamadas colgadas ya
- * no retienen el carril minutos.
+ * no retienen el carril minutos. D661 (Ruling 73): TODA llamada a Stripe del conciliador lleva además nuestro plazo duro (la de la visita
+ * temprana, 15 s; la del reintento de «Nadie», 45 s; las demás de la pasada, 120 s): una respuesta cuyo cuerpo nunca termina ya no
+ * retiene el carril ni la pasada.
  */
 import { OnlineOrderChargeStatus as S, OnlineOrderStatus, OrderStatus, Prisma, type OnlineOrderCharge } from '@prisma/client'
 import logger from '@/config/logger'
@@ -76,9 +78,16 @@ const NADIE_EARLY_BUDGET_MS = 30_000
  * cancelación y su relectura): 10 s y sin reintentos del SDK (el cliente del proveedor espera 80 s por intento y reintenta dos veces).
  * La lectura que no contesta espera a la siguiente visita (≤ 1 min); la liberación que no contesta deja el cargo `RELEASING` para la
  * siguiente pasada, con la misma clave. Ojo: tras una conexión cerrada en el primer envío el SDK todavía reenvía una vez (peor caso
- * ~20.5 s por llamada).
+ * ~20.5 s por llamada). D661 (Ruling 73): y nuestro plazo duro, 10 + 5 s: una respuesta cuyo cuerpo nunca termina ya no retiene el carril
+ * (`earlyLaneBusy`); el cargo sigue en su estado y la siguiente visita repite con la misma clave.
  */
-const LIMITES_TEMPRANOS: ProviderRequestLimits = { timeoutMs: 10_000, maxNetworkRetries: 0 }
+const LIMITES_TEMPRANOS: ProviderRequestLimits = { timeoutMs: 10_000, maxNetworkRetries: 0, plazoMs: 15_000 }
+/**
+ * D661 (Ruling 73): lo que la pasada principal manda a Stripe sin límite por petición (lecturas, liberaciones con su relectura, la
+ * sesión que se repite, el reintento de «Mi equipo» con su relectura) lleva nuestro plazo duro de 120 s: ninguna llamada retiene la
+ * pasada (`isRunning` del job) para siempre. La petición al SDK no cambia (sin `timeout` ni `maxNetworkRetries`).
+ */
+const PLAZO_DE_LA_PASADA: ProviderRequestLimits = { plazoMs: 120_000 }
 /** Ruling 3: un `PENDING_AUTH` vencido cuya confirmación truena este número de pasadas necesita a una persona. */
 const CONFIRM_FAILURES_ALERT = 3
 /** Stripe guarda una clave idempotente 24 h; con 1 h de margen, después de 23 h su repetición ya no prueba nada. */
@@ -185,7 +194,7 @@ async function readCandidates(now: Date, readEntry: ReadCandidates): Promise<{ i
 async function recoverCheckout(charge: Row, now: Date): Promise<'GOT' | 'ABANDONED' | 'NEEDS_HUMAN'> {
   const merchant = chargeMerchant(charge)
   try {
-    const session = await getProvider(merchant).createAuthorizationCheckout(merchant, checkoutParams(charge))
+    const session = await getProvider(merchant).createAuthorizationCheckout(merchant, checkoutParams(charge), PLAZO_DE_LA_PASADA)
     await prisma.onlineOrderCharge.updateMany({
       where: { id: charge.id, status: S.PENDING_AUTH, checkoutSessionId: null },
       data: { checkoutSessionId: session.id, checkoutUrl: session.url },
@@ -242,7 +251,7 @@ async function captureRetryStep(
 async function releaseCaptureAfterGrace(charge: Row, orderId: string, meta: { staffId: null; estimatedMinutes: number }): Promise<void> {
   let state: AuthorizationState
   try {
-    state = await voidOrReadOutcome(charge, `online-order:${orderId}:release`)
+    state = await voidOrReadOutcome(charge, `online-order:${orderId}:release`, PLAZO_DE_LA_PASADA)
   } catch (error) {
     const why = error instanceof Error ? error.message : String(error)
     await prisma.onlineOrderCharge.updateMany({ where: { id: charge.id, status: S.CAPTURING }, data: { lastError: why.slice(0, 500) } })
@@ -261,7 +270,7 @@ async function processCapturing(charge: Row): Promise<void> {
   if (!charge.onlineOrder || !charge.paymentIntentId) throw new Error('cargo CAPTURING sin pedido o sin PaymentIntent')
   const orderId = charge.onlineOrder.orderId
   const merchant = chargeMerchant(charge)
-  const state = await getProvider(merchant).getAuthorization(merchant, { paymentIntentId: charge.paymentIntentId })
+  const state = await getProvider(merchant).getAuthorization(merchant, { paymentIntentId: charge.paymentIntentId }, PLAZO_DE_LA_PASADA)
   // 3C: sin hora fija: `capturedAt`, `acceptedAt` y el rechazo llevan la hora de la escritura, leída bajo el candado de la orden.
   const meta = { staffId: null, estimatedMinutes: await prepMinutes(charge.venueId) }
   if (state.piStatus === 'succeeded') await finishCapture(charge.id, state, meta)
@@ -275,7 +284,8 @@ async function processCapturing(charge: Row): Promise<void> {
     if (step === 'RELEASE') await releaseCaptureAfterGrace(charge, orderId, meta)
     else if (step === 'CAPTURE') {
       try {
-        await captureCharge(charge, orderId, { ...meta, captureBefore })
+        // Ruling 73: el de «Mi equipo» (sin `captureBefore`) con sólo el plazo duro; el de «Nadie», con `UN_SOLO_ENVIO` (su propio plazo).
+        await captureCharge(charge, orderId, { ...meta, captureBefore, limites: PLAZO_DE_LA_PASADA })
       } catch (error) {
         // A1: la gracia venció entre la decisión y la llamada: no se mandó nada; se sigue el camino de liberar.
         if (!(error instanceof GraceEndedBeforeDispatch)) throw error
@@ -285,8 +295,11 @@ async function processCapturing(charge: Row): Promise<void> {
   }
 }
 
-/** `limites`: los de cada llamada a Stripe de un borrador (sólo los pasa la visita temprana, Rulings 42 y 51). */
-async function processOne(charge: Row, now: Date, limites?: ProviderRequestLimits): Promise<void> {
+/**
+ * `limites`: los de cada llamada a Stripe de un borrador de la visita temprana (Rulings 42, 51 y 73); en la pasada principal, sólo el
+ * plazo duro (Ruling 73).
+ */
+async function processOne(charge: Row, now: Date, limites: ProviderRequestLimits = PLAZO_DE_LA_PASADA): Promise<void> {
   switch (charge.status) {
     case S.PENDING_AUTH:
       if (!charge.checkoutSessionId && (await recoverCheckout(charge, now)) !== 'GOT') return
@@ -296,14 +309,14 @@ async function processOne(charge: Row, now: Date, limites?: ProviderRequestLimit
     case S.CAPTURING:
       return processCapturing(charge)
     case S.RELEASING:
-      await releaseCharge(charge.id)
+      await releaseCharge(charge.id, limites)
       return
     case S.AUTHORIZED: {
       const won = await prisma.onlineOrderCharge.updateMany({
         where: { id: charge.id, status: S.AUTHORIZED },
         data: { status: S.RELEASING },
       })
-      if (won.count === 1) await releaseCharge(charge.id)
+      if (won.count === 1) await releaseCharge(charge.id, limites)
       return
     }
   }

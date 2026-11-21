@@ -465,10 +465,11 @@ describe('D661 · A1: captureCharge revalida el límite de un reintento justo an
     capture.mockResolvedValue(succeeded())
     await captureCharge(capturing, 'ord1', { ...meta, captureBefore: Date.now() + 60_000 })
     // Ruling 52 (enmienda): y con 40 s por intento: el envío y el reenvío del SDK tras una conexión cerrada caben en los 90 s de margen.
+    // Ruling 73: y nuestro plazo duro, 40 + 5 s (deja de esperar; el envío ya salió).
     expect(capture.mock.calls[0]).toEqual([
       expect.objectContaining({ providerCredentials: { connectAccountId: 'acct_A' } }),
       { paymentIntentId: 'pi_1', amountCents: 25_000, applicationFeeCents: 290, idempotencyKey: 'online-order:ord1:capture' },
-      { timeoutMs: 40_000, maxNetworkRetries: 0 },
+      { timeoutMs: 40_000, maxNetworkRetries: 0, plazoMs: 45_000 },
     ])
     // Sin límite ni opciones (el reintento del conciliador de «Mi equipo»): la misma llamada de siempre. La caja que abre va con las
     // suyas (Ruling 52, `acceptCardOnlineOrder`).

@@ -163,9 +163,10 @@ export class GraceEndedBeforeDispatch extends Error {}
  * salir ya fuera de la gracia y ser el primer cobro efectivo. Si se pierde la respuesta, la siguiente pasada lo resuelve leyendo
  * Stripe. Límite del SDK: tras una conexión CERRADA en el primer envío todavía reenvía una vez, 0.5 s después (`opcionesDeLimite`).
  * Ruling 52 (enmienda): y 40 s por intento: el envío (≤ 40 s) más ese reenvío (≤ 40 s) tienen efecto a lo más ~80.5 s después del
- * despacho, dentro de los 90 s de gracia que el conciliador deja por delante (`NADIE_RETRY_MARGIN_MS`).
+ * despacho, dentro de los 90 s de gracia que el conciliador deja por delante (`NADIE_RETRY_MARGIN_MS`). Ruling 73: y nuestro plazo duro,
+ * 40 + 5 s: el conciliador deja de esperar (el envío ya salió; lo que llegue, la siguiente pasada lo lee en Stripe).
  */
-const UN_SOLO_ENVIO: ProviderRequestLimits = { timeoutMs: 40_000, maxNetworkRetries: 0 }
+const UN_SOLO_ENVIO: ProviderRequestLimits = { timeoutMs: 40_000, maxNetworkRetries: 0, plazoMs: 45_000 }
 /**
  * D661 (C, Ruling 52): la captura de quien abre o acepta el pedido (caja, panel o MCP): 60 s por intento y UN reintento del SDK. Su peor
  * caso (≈ 60 s + hasta 60 s de `Retry-After` + 60 s) queda dentro de la gracia de 5 min de «Nadie»; con los valores del cliente (80 s

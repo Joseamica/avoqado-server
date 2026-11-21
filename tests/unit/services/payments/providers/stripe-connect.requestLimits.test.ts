@@ -7,6 +7,7 @@
  */
 import Stripe from 'stripe'
 import { StripeConnectProvider } from '@/services/payments/providers/stripe-connect.provider'
+import { PlazoAgotado } from '@/utils/conPlazo'
 
 const merchant = {
   id: 'em_1',
@@ -99,5 +100,82 @@ describe('StripeConnectProvider con el SDK real: los límites por petición (D66
       adaptador(t.client).getAuthorization(merchant as never, { checkoutSessionId: 'cs_1' }, { timeoutMs: 10_000, maxNetworkRetries: 0 }),
     ).rejects.toMatchObject({ type: 'StripeConnectionError' })
     expect(t.envios).toEqual([{ method: 'GET', path: expect.stringContaining('/v1/checkout/sessions/cs_1'), timeout: 10_000 }])
+  })
+})
+
+/**
+ * D661 (Ruling 73): Stripe manda las cabeceras y la conexión muere a medio cuerpo. stripe-node 19.1.0 ya resolvió la petición HTTP y su
+ * lector del cuerpo espera `end` sin manejar el cierre incompleto: aquí, un `toJSON` que nunca termina.
+ */
+function transporteQueCuelga() {
+  const envios: Array<{ method: string; path: string; timeout: number }> = []
+  const client = {
+    getClientName: () => 'prueba-d661',
+    makeRequest: async (...a: unknown[]) => {
+      const [, , path, method, , , , timeout] = a as [string, number, string, string, unknown, unknown, string, number]
+      envios.push({ method, path, timeout })
+      return { getStatusCode: () => 200, getHeaders: () => ({}), getRawResponse: () => ({}), toJSON: () => new Promise(() => {}) }
+    },
+  }
+  return { envios, client }
+}
+/** Lo que una promesa contestó hasta ahora, sin esperarla. */
+const desenlaceDe = (p: Promise<unknown>) => {
+  const d: { v: unknown } = { v: 'pendiente' }
+  p.then(
+    r => (d.v = r),
+    e => (d.v = e),
+  )
+  return d
+}
+/** Los límites de la visita temprana con su plazo (10 s + 5 s) y los de la pasada principal (sólo el plazo, 120 s). */
+const ACOTADA = { timeoutMs: 10_000, maxNetworkRetries: 0, plazoMs: 15_000 }
+const SOLO_PLAZO = { plazoMs: 120_000 }
+const SESION = {
+  amountCents: 25_000,
+  currency: 'MXN' as const,
+  description: 'Pedido en línea',
+  successUrl: 'https://pedidos.test/flautas/pedido/T?pago=1',
+  cancelUrl: 'https://pedidos.test/flautas/pedido/T?pago=cancelado',
+  expiresAt: new Date('2026-11-21T19:00:00.000Z'),
+  metadata: { type: 'online_order', chargeId: 'ch1', venueId: 'v1' },
+  idempotencyKey: 'online-order-charge:ch1:checkout:1',
+}
+
+describe('StripeConnectProvider con el SDK real: nuestro plazo duro (D661 · B, Ruling 73)', () => {
+  beforeEach(() => jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] }))
+  afterEach(() => jest.useRealTimers())
+
+  it('con plazo, la lectura, la cancelación y la captura cuyo cuerpo nunca termina se rinden a los 15 s con PlazoAgotado (sin relectura); sin plazo, el SDK sigue esperando', async () => {
+    const t = transporteQueCuelga()
+    const a = adaptador(t.client)
+    const lectura = desenlaceDe(a.getAuthorization(merchant as never, { checkoutSessionId: 'cs_1' }, ACOTADA))
+    const cancelacion = desenlaceDe(
+      a.voidAuthorization(merchant as never, { paymentIntentId: 'pi_1', idempotencyKey: 'online-order-charge:ch1:release' }, ACOTADA),
+    )
+    const captura = desenlaceDe(a.capture(merchant as never, CAPTURA, ACOTADA))
+    const sinPlazo = desenlaceDe(
+      a.getAuthorization(merchant as never, { checkoutSessionId: 'cs_2' }, { timeoutMs: 10_000, maxNetworkRetries: 0 }),
+    )
+    await jest.advanceTimersByTimeAsync(14_999)
+    for (const d of [lectura, cancelacion, captura]) expect(d.v).toBe('pendiente')
+    await jest.advanceTimersByTimeAsync(1)
+    for (const d of [lectura, cancelacion, captura]) expect(d.v).toBeInstanceOf(PlazoAgotado)
+    await jest.advanceTimersByTimeAsync(10 * 60_000)
+    expect(sinPlazo.v).toBe('pendiente') // el SDK solo no se rinde: el cuerpo nunca termina
+    // El plazo es nuestro: al SDK le llegan las opciones de siempre (10 s) y no sale nada más (ninguna relectura tras el plazo).
+    expect(t.envios.map(e => e.timeout)).toEqual([10_000, 10_000, 10_000, 10_000])
+  })
+
+  it('con SÓLO el plazo (la pasada principal) la petición no cambia (el transporte recibe los 80 s del cliente) y la llamada se rinde a los 120 s, también la sesión que se repite', async () => {
+    const t = transporteQueCuelga()
+    const a = adaptador(t.client)
+    const lectura = desenlaceDe(a.getAuthorization(merchant as never, { paymentIntentId: 'pi_1' }, SOLO_PLAZO))
+    const sesion = desenlaceDe(a.createAuthorizationCheckout(merchant as never, SESION, SOLO_PLAZO))
+    await jest.advanceTimersByTimeAsync(119_999)
+    for (const d of [lectura, sesion]) expect(d.v).toBe('pendiente')
+    await jest.advanceTimersByTimeAsync(1)
+    for (const d of [lectura, sesion]) expect(d.v).toBeInstanceOf(PlazoAgotado)
+    expect(t.envios.map(e => e.timeout)).toEqual([80_000, 80_000])
   })
 })

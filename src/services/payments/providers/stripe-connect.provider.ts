@@ -2,6 +2,7 @@ import Stripe from 'stripe'
 import axios, { AxiosInstance } from 'axios'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { conPlazo } from '@/utils/conPlazo'
 import { BadRequestError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { ProviderCapabilityError } from './not-implemented.error'
@@ -40,6 +41,13 @@ const opcionesDeLimite = (limits?: ProviderRequestLimits): Stripe.RequestOptions
   ...(limits?.timeoutMs != null ? { timeout: limits.timeoutMs } : {}),
   ...(limits?.maxNetworkRetries != null ? { maxNetworkRetries: limits.maxNetworkRetries } : {}),
 })
+
+/**
+ * D661 (Ruling 73): con `plazoMs`, la llamada al SDK no puede quedarse colgada para siempre (`conPlazo`: se rechaza con `PlazoAgotado`,
+ * que no es un error de Stripe, así que `recoverIfAlready` no relee: quien llama decide con su propia relectura). Sin él, como siempre.
+ */
+const acotada = <T>(llamada: Promise<T>, limits?: ProviderRequestLimits): Promise<T> =>
+  limits?.plazoMs != null ? conPlazo(llamada, limits.plazoMs) : llamada
 
 const PROVIDER_CODE = 'STRIPE_CONNECT'
 export const STRIPE_API_VERSION = '2026-02-25.clover'
@@ -402,6 +410,7 @@ export class StripeConnectProvider implements IEcommerceProvider {
   async createAuthorizationCheckout(
     merchant: EcommerceMerchantWithProvider,
     params: CreateAuthorizationCheckoutParams,
+    limits?: ProviderRequestLimits,
   ): Promise<CheckoutSession> {
     const connectAccountId = this.requireConnectAccountId(merchant)
 
@@ -416,32 +425,35 @@ export class StripeConnectProvider implements IEcommerceProvider {
 
     const metadata = Object.fromEntries(Object.entries(params.metadata).map(([key, value]) => [key, String(value)]))
 
-    const session = await this.stripe.checkout.sessions.create(
-      {
-        mode: 'payment',
-        payment_method_types: ['card'],
-        line_items: [
-          {
-            quantity: 1,
-            price_data: {
-              currency: params.currency.toLowerCase(),
-              unit_amount: params.amountCents,
-              product_data: { name: params.description },
+    const session = await acotada(
+      this.stripe.checkout.sessions.create(
+        {
+          mode: 'payment',
+          payment_method_types: ['card'],
+          line_items: [
+            {
+              quantity: 1,
+              price_data: {
+                currency: params.currency.toLowerCase(),
+                unit_amount: params.amountCents,
+                product_data: { name: params.description },
+              },
             },
+          ],
+          payment_intent_data: {
+            capture_method: 'manual',
+            metadata,
+            description: params.description,
           },
-        ],
-        payment_intent_data: {
-          capture_method: 'manual',
+          customer_email: params.customerEmail,
+          success_url: params.successUrl,
+          cancel_url: params.cancelUrl,
+          expires_at: Math.floor(params.expiresAt.getTime() / 1000),
           metadata,
-          description: params.description,
         },
-        customer_email: params.customerEmail,
-        success_url: params.successUrl,
-        cancel_url: params.cancelUrl,
-        expires_at: Math.floor(params.expiresAt.getTime() / 1000),
-        metadata,
-      },
-      { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey },
+        { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey, ...opcionesDeLimite(limits) },
+      ),
+      limits,
     )
 
     if (!session.url) {
@@ -463,10 +475,13 @@ export class StripeConnectProvider implements IEcommerceProvider {
     const connectAccountId = this.requireConnectAccountId(merchant)
 
     if ('checkoutSessionId' in ref) {
-      const session = await this.stripe.checkout.sessions.retrieve(
-        ref.checkoutSessionId,
-        { expand: ['payment_intent.latest_charge'] },
-        { stripeAccount: connectAccountId, ...opcionesDeLimite(limits) },
+      const session = await acotada(
+        this.stripe.checkout.sessions.retrieve(
+          ref.checkoutSessionId,
+          { expand: ['payment_intent.latest_charge'] },
+          { stripeAccount: connectAccountId, ...opcionesDeLimite(limits) },
+        ),
+        limits,
       )
       const pi = typeof session.payment_intent === 'object' ? session.payment_intent : null
       return this.toAuthorizationState(pi, session.status ?? null)
@@ -497,10 +512,13 @@ export class StripeConnectProvider implements IEcommerceProvider {
     }
 
     try {
-      const pi = await this.stripe.paymentIntents.capture(
-        params.paymentIntentId,
-        { amount_to_capture: params.amountCents, application_fee_amount: params.applicationFeeCents, expand: ['latest_charge'] },
-        { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey, ...opcionesDeLimite(limits) },
+      const pi = await acotada(
+        this.stripe.paymentIntents.capture(
+          params.paymentIntentId,
+          { amount_to_capture: params.amountCents, application_fee_amount: params.applicationFeeCents, expand: ['latest_charge'] },
+          { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey, ...opcionesDeLimite(limits) },
+        ),
+        limits,
       )
       return this.toAuthorizationState(pi, null)
     } catch (error) {
@@ -527,10 +545,13 @@ export class StripeConnectProvider implements IEcommerceProvider {
     }
 
     try {
-      const pi = await this.stripe.paymentIntents.cancel(
-        params.paymentIntentId,
-        { expand: ['latest_charge'] },
-        { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey, ...opcionesDeLimite(limits) },
+      const pi = await acotada(
+        this.stripe.paymentIntents.cancel(
+          params.paymentIntentId,
+          { expand: ['latest_charge'] },
+          { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey, ...opcionesDeLimite(limits) },
+        ),
+        limits,
       )
       return this.toAuthorizationState(pi, null)
     } catch (error) {
@@ -628,10 +649,13 @@ export class StripeConnectProvider implements IEcommerceProvider {
     paymentIntentId: string,
     limits?: ProviderRequestLimits,
   ): Promise<Stripe.PaymentIntent> {
-    return this.stripe.paymentIntents.retrieve(
-      paymentIntentId,
-      { expand: ['latest_charge'] },
-      { stripeAccount: connectAccountId, ...opcionesDeLimite(limits) },
+    return acotada(
+      this.stripe.paymentIntents.retrieve(
+        paymentIntentId,
+        { expand: ['latest_charge'] },
+        { stripeAccount: connectAccountId, ...opcionesDeLimite(limits) },
+      ),
+      limits,
     )
   }
 

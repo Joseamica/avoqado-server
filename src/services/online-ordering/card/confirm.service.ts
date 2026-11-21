@@ -184,8 +184,8 @@ async function cierreDelBorrador(charge: OnlineOrderCharge, request: CardDraftRe
  * Idempotente. `now` fija la hora sólo en las pruebas (3C: el conciliador ya no pasa la de su pasada); sin ella, la hora con que se
  * decide si el plazo de un apartado de «Nadie» ya pasó se lee DESPUÉS del candado de admisión.
  * D661 (B, Rulings 42 y 51): `limites` acota TODA llamada a Stripe de esta confirmación (la lectura y, si no se vuelve pedido, la
- * liberación con su relectura); sólo la pasa la visita temprana del conciliador. La clienta que regresa, el aviso de Stripe y lo demás,
- * como siempre.
+ * liberación con su relectura); sólo la pasa el conciliador (la visita temprana, sus límites; la pasada, sólo el plazo duro del Ruling 73).
+ * La clienta que regresa, el aviso de Stripe y lo demás, como siempre.
  */
 export async function confirmCardAuthorization(chargeId: string, now?: Date, limites?: ProviderRequestLimits): Promise<ConfirmOutcome> {
   const reloj = () => now ?? new Date()

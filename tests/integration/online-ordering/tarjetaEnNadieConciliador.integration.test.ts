@@ -1092,7 +1092,10 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
 
   // ── Ronda codex-r2 (20-nov) ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-  const LECTURA_TEMPRANA = { timeoutMs: 10_000, maxNetworkRetries: 0 }
+  /** Ruling 73 (ronda codex-r3): y nuestro plazo duro, 10 + 5 s. */
+  const LECTURA_TEMPRANA = { timeoutMs: 10_000, maxNetworkRetries: 0, plazoMs: 15_000 }
+  /** Ruling 73: lo que la pasada principal manda sin límite por petición lleva sólo nuestro plazo duro de 120 s. */
+  const PLAZO_DE_LA_PASADA = { plazoMs: 120_000 }
   /** Las lecturas de Stripe de la sesión de un borrador, con sus argumentos. */
   const lecturasDe = async (chargeId: string) => {
     const sesion = (await cargo(chargeId)).checkoutSessionId
@@ -1108,7 +1111,7 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
 
     await reconcileCardCharges(new Date(), read => read())
     expect((await lecturasDe(temprano.chargeId)).map(([, , limite]) => limite)).toEqual([LECTURA_TEMPRANA])
-    expect((await lecturasDe(vencido.chargeId)).map(llamada => llamada.length)).toEqual([2])
+    expect((await lecturasDe(vencido.chargeId)).map(([, , limite]) => limite)).toEqual([PLAZO_DE_LA_PASADA])
 
     // La clienta que regresa a su seguimiento: la lectura de siempre, sin límite.
     authSpy.mockClear()
@@ -1152,7 +1155,8 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
       expect({ miEquipo, caja: caja[2] }).toEqual({ miEquipo, caja: { timeoutMs: 60_000, maxNetworkRetries: 1 } })
       expect({ miEquipo, reintento: reintento[2] }).toEqual({
         miEquipo,
-        reintento: miEquipo ? undefined : { timeoutMs: 40_000, maxNetworkRetries: 0 }, // Ruling 52 (enmienda)
+        // Ruling 52 (enmienda) y Ruling 73: el de «Nadie», 40 s sin reintentos y el plazo duro de 45 s; el de «Mi equipo», sólo el plazo.
+        reintento: miEquipo ? { plazoMs: 120_000 } : { timeoutMs: 40_000, maxNetworkRetries: 0, plazoMs: 45_000 },
       })
       expect(reintento[1]).toEqual(caja[1]) // la MISMA clave y los mismos parámetros
       await cobradoUnaVez(a)
@@ -1182,7 +1186,8 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     // Stripe no contesta la cancelación: con su límite, el SDK se rinde al cumplirlo (y no la reenvía).
     const soltar = voidSpy.getMockImplementation()!
     voidSpy.mockImplementation(async (m: any, p: any, limite?: any) => {
-      if (p.paymentIntentId === pi && limite) {
+      // Sólo la de la visita temprana (con límite por petición); la de la pasada principal lleva únicamente el plazo duro (Ruling 73).
+      if (p.paymentIntentId === pi && limite?.timeoutMs) {
         throw Object.assign(new Error('Request aborted due to timeout being reached (10000ms)'), { type: 'StripeConnectionError' })
       }
       return soltar(m, p, limite)
@@ -1196,10 +1201,11 @@ describe('D661 · 3C: el conciliador y sus caídas (integration, real DB)', () =
     expect(await cargo(d.chargeId)).toMatchObject({ status: 'RELEASING', onlineOrderId: null })
     expect(pis.get(pi)).toBe('requires_capture')
 
-    // La siguiente pasada: la liberación de siempre (sin límite), con la MISMA llave; la tarjeta queda soltada una sola vez.
+    // La siguiente pasada: la liberación sin límite por petición (Ruling 73: sólo el plazo duro de la pasada), con la MISMA llave; la
+    // tarjeta queda soltada una sola vez.
     voidSpy.mockClear()
     await pasada(d.chargeId)
-    expect(liberacionesA(pi)).toEqual([[expect.anything(), { paymentIntentId: pi, idempotencyKey: llave }]])
+    expect(liberacionesA(pi)).toEqual([[expect.anything(), { paymentIntentId: pi, idempotencyKey: llave }, PLAZO_DE_LA_PASADA]])
     expect(await cargo(d.chargeId)).toMatchObject({ status: 'RELEASED', onlineOrderId: null })
     expect(pis.get(pi)).toBe('canceled')
     expect(await getTrackingByToken(d.trackingToken)).toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', paid: false })
