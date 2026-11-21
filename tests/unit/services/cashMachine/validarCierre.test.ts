@@ -47,9 +47,17 @@ describe('validarCierre', () => {
     expect(validarCierre(cierre({ dueCents: 11000, saleCents: 10000, tipCents: 1000, creditCents: 11000, changeDispensedCents: 0 }))).toBe(
       'OK',
     )
+  })
+
+  it('🔴 F4 (Codex servidor r4): el reparto venta/propina no es de la máquina: descuadrado con lo físico posible NO es imposible', () => {
+    // Lo decide quien arma la venta (202 REPARTO_DESCUADRADO): el comprobante es legible y se guarda.
     expect(validarCierre(cierre({ dueCents: 11000, saleCents: 10000, tipCents: 0, creditCents: 11000, changeDispensedCents: 0 }))).toBe(
-      'IMPOSIBLE',
+      'OK',
     )
+  })
+
+  it('importes que no caben en las columnas enteras (más de 2,147,483,647 centavos) son imposibles', () => {
+    expect(validarCierre(cierre({ creditCents: 2_147_483_648, changeDispensedCents: 0 }))).toBe('IMPOSIBLE')
   })
 
   it('PAGADO: el cambio no pasa de crédito − adeudo, y el crédito cubre el adeudo', () => {

@@ -21,7 +21,13 @@ import logger from '../../config/logger'
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { operationHash } from '../../utils/operationHash'
-import { isDeadlockError, isRetryableDbError, withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
+import {
+  isDeadlockError,
+  isModelLockTimeoutError,
+  isRetryableDbError,
+  withDeadlockRetry,
+  type TxConReintento,
+} from '../../utils/serializableRetry'
 import { logAction } from '../dashboard/activity-log.service'
 import { CuentaDeLaMaquinaYaExiste, venderLoQueCobroLaMaquina, type CreateOrderInput } from '../mobile/order.mobile.service'
 import { candadoDeLaLlave } from '../mobile/pagarDespuesLlave'
@@ -32,6 +38,7 @@ import {
   type DecisionDelFolio,
   type DecisionGuardada,
   type EstadoDelFolio,
+  type VinculoDelIntento,
 } from './decisionDelFolio'
 import { aparatoDe, exigirAparatoEmparejado } from './emparejamiento'
 
@@ -52,7 +59,8 @@ export type TipoDeIncidencia = 'CONFLICTO' | 'IMPOSIBLE' | 'NO_SE_PUDO_REGISTRAR
  *  · `SIN_CARRITO` / `CARRITO_ILEGIBLE`: el folio llegó sin carrito, o con uno que no se puede leer (r3 #1);
  *  · `VENTA_RECHAZADA`: la venta ya no se arma (un producto borrado, el personal…; R5#1);
  *  · `PREMIO_PENDIENTE`: el carrito trae un premio de sellos (R5#4);
- *  · `LLAVE_OCUPADA`: la llave del folio ya es de otra cuenta u operación: repetirla nunca lo resuelve (r3 #6).
+ *  · `LLAVE_OCUPADA`: la llave del folio ya es de otra cuenta u operación: repetirla nunca lo resuelve (r3 #6);
+ *  · `REPARTO_DESCUADRADO`: el adeudo congelado no es la venta más la propina (F4): el comprobante es legible, la venta no se arma.
  */
 export type MotivoSinRegistro =
   | 'DESCUENTO'
@@ -63,6 +71,7 @@ export type MotivoSinRegistro =
   | 'VENTA_RECHAZADA'
   | 'PREMIO_PENDIENTE'
   | 'LLAVE_OCUPADA'
+  | 'REPARTO_DESCUADRADO'
 
 /** Lo que la máquina dijo al cerrar, en CENTAVOS (así los manda la PC). */
 export interface CierreDeLaMaquina {
@@ -157,21 +166,26 @@ export interface EntradaDeLaMaquina {
   bindingId?: string | null
 }
 
+/** Centavos enteros ≥ 0 que caben en las columnas enteras del folio y del cierre. */
+export const centavosGuardables = (n: number) => Number.isSafeInteger(n) && n >= 0 && n <= 2_147_483_647
+
 /** Codex r1 #12 (decisión h): la máquina sólo cobra un adeudo mayor que $0 y múltiplo de $0.50. */
 export const adeudoCobrable = (dueCents: number): boolean => Number.isInteger(dueCents) && dueCents > 0 && dueCents % 50 === 0
 
 /**
  * R3#9, R5#5, R4-7 #6: ¿esta combinación de importes puede salir de la máquina? Cualquier otra cosa es 422 con incidencia.
- *  · todos enteros ≥ 0, `due = sale + tip` y el adeudo mayor que 0 y múltiplo de 50 centavos (Codex r1 #12);
+ *  · todos enteros ≥ 0 y el adeudo mayor que 0 y múltiplo de 50 centavos (Codex r1 #12);
  *  · `PAGADO`: `credit ≥ due` y `0 ≤ change ≤ credit − due`;
  *  · `CANCELADO` y `GUARDADO`: `credit < due`; `GUARDADO` no devuelve nada y `CANCELADO` no devuelve más de lo que entró; y el modo del
  *    `cancel` coincide (`'1'` / `'2'`): sin él, revisión (Codex r1 #12).
+ * F4 (Codex servidor r4): el reparto venta/propina NO es de la máquina (ella sólo conoce el adeudo). Un reparto descuadrado con lo
+ * físico posible es un comprobante legible: se guarda y la venta no se arma (`REPARTO_DESCUADRADO`), nunca un 400/422 sin rastro.
  */
 export function validarCierre(c: CierreDeLaMaquina): 'OK' | 'IMPOSIBLE' {
   if (!DESENLACES_DE_LA_MAQUINA.includes(c.outcome)) return 'IMPOSIBLE'
   const importes = [c.dueCents, c.saleCents, c.tipCents, c.creditCents, c.changeDispensedCents]
-  if (!importes.every(n => Number.isInteger(n) && n >= 0)) return 'IMPOSIBLE'
-  if (c.dueCents !== c.saleCents + c.tipCents || !adeudoCobrable(c.dueCents)) return 'IMPOSIBLE'
+  if (!importes.every(centavosGuardables)) return 'IMPOSIBLE'
+  if (!adeudoCobrable(c.dueCents)) return 'IMPOSIBLE'
   if (c.outcome === 'PAGADO') {
     return c.creditCents >= c.dueCents && c.changeDispensedCents <= c.creditCents - c.dueCents ? 'OK' : 'IMPOSIBLE'
   }
@@ -194,6 +208,12 @@ function horaDelCierre(c: CierreDeLaMaquina): Date | null {
   if (!c.occurredAtKnown || !c.occurredAt) return null
   const hora = new Date(c.occurredAt)
   return Number.isNaN(hora.getTime()) ? null : hora
+}
+
+/** F13: una hora ISO como instante UTC (`11:58-06:00` y `17:58Z` son la misma). Lo que no es hora se queda como llegó. */
+export const instante = (iso: string): string => {
+  const t = Date.parse(iso)
+  return Number.isNaN(t) ? iso : new Date(t).toISOString()
 }
 
 /**
@@ -292,16 +312,25 @@ export async function leerElFolio(db: Db, venueId: string, referenceCC: string):
   }
 }
 
-/** Algo que pasó y que reintentar SÍ puede resolver: interbloqueo o serialización agotados, candado ocupado, transacción vencida. */
+/**
+ * Algo de la BASE o de la red que reintentar SÍ puede resolver: interbloqueo o serialización agotados, candado ocupado, transacción
+ * vencida, conexión caída o sin lugar en el pool, un 503. F3 (Codex servidor r4): sólo esto es pasajero; lo demás no se arregla
+ * repitiendo y nunca deja un folio RECIBIDO para siempre.
+ */
 function esTransitorio(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code
   return (
     code === 'CASH_MACHINE_CLOSE_RETRY' ||
     isDeadlockError(error) ||
     isRetryableDbError(error) ||
+    isModelLockTimeoutError(error) ||
+    (typeof code === 'string' && /^P1\d{3}$/.test(code)) ||
+    code === 'P2024' ||
     code === 'P2028' ||
     code === 'P2034' ||
-    code === 'P1001'
+    error instanceof Prisma.PrismaClientInitializationError ||
+    error instanceof Prisma.PrismaClientRustPanicError ||
+    (error instanceof AppError && error.statusCode === 503)
   )
 }
 
@@ -417,30 +446,60 @@ export async function anotarEnBitacora(venueId: string, referenceCC: string, sta
   }
 }
 
-/** Importes que no puede dar la máquina (422): la observación y su incidencia IMPOSIBLE, bajo el candado. Devuelve su id. */
-export async function anotarImposible(
-  venueId: string,
-  referenceCC: string,
-  autor: { userId: string; deviceId: string | null },
-  observacion: Record<string, unknown>,
-): Promise<string> {
-  const r = await conElFolio(venueId, referenceCC, async (tx, l) => {
-    const huella = huellaDeLaObservacion({ que: 'IMPOSIBLE', ...observacion })
-    const repetida = await yaObservada(tx, venueId, referenceCC, huella)
-    const { nueva } = await observar(tx, venueId, referenceCC, huella, repetida, { que: 'IMPOSIBLE', ...observacion }, l.folio)
-    const anotadas: IncidenciaAnotada[] = []
-    const id = await anotar(tx, venueId, referenceCC, autor.deviceId, anotadas, 'IMPOSIBLE', observacion, nueva)
-    return { id, anotadas }
-  })
-  await anotarEnBitacora(venueId, referenceCC, autor.userId, r.anotadas)
-  return r.id
+/** Lo que el PRIMER mensaje de un folio congela (D2): carrito completo, su huella, dueño, emparejamiento, turno y reparto. */
+export interface LoQueSeCongela {
+  deviceId: string | null
+  bindingId: string | null
+  pedido: unknown
+  cartHash: string | null
+  saleShiftId: string | null
+  dueCents: number
+  saleCents: number
+  tipCents: number
 }
 
-/** r6-6: cuándo revocaron el emparejamiento FIJO del intento (`null` = vigente o desconocido). */
-export async function revocacionDelVinculo(tx: Db, venueId: string, bindingId: string | null): Promise<Date | null> {
+/**
+ * D2 y F12 (Codex servidor r4): el primer mensaje congela el folio AUNQUE su cierre sea imposible; lo que llegue después no sustituye
+ * carrito, clienta, turno ni reparto. Quien llama tiene el candado del folio. Con importes que ni siquiera son centavos enteros no hay
+ * reparto que guardar: no se congela (queda la observación y su incidencia IMPOSIBLE) y devuelve `null`.
+ */
+export async function congelarElFolio(
+  tx: Db,
+  venueId: string,
+  referenceCC: string,
+  c: LoQueSeCongela,
+  decision: DecisionGuardada | null = null,
+): Promise<CashMachineFolio | null> {
+  if (![c.dueCents, c.saleCents, c.tipCents].every(centavosGuardables)) return null
+  return tx.cashMachineFolio.create({
+    data: {
+      venueId,
+      referenceCC,
+      deviceId: c.deviceId,
+      bindingId: c.bindingId,
+      pedido: c.pedido != null ? (c.pedido as Prisma.InputJsonValue) : Prisma.JsonNull,
+      cartHash: c.cartHash,
+      saleShiftId: c.saleShiftId,
+      dueCents: c.dueCents,
+      saleCents: c.saleCents,
+      tipCents: c.tipCents,
+      ...(decision ? { decision: decision as unknown as Prisma.InputJsonValue } : {}),
+    },
+  })
+}
+
+/**
+ * r6-6, F7: el emparejamiento FIJO del intento, con cuándo nació y cuándo lo revocaron. Uno que ya no existe cuenta como revocado
+ * desde siempre (nunca se concede por un dato que falta).
+ */
+export async function vinculoDelIntento(tx: Db, venueId: string, bindingId: string | null): Promise<VinculoDelIntento | null> {
   if (!bindingId) return null
-  const v = await tx.cashMachineBinding.findFirst({ where: { id: bindingId, venueId }, select: { active: true, revokedAt: true } })
-  return !v || v.active ? null : (v.revokedAt ?? new Date(0))
+  const v = await tx.cashMachineBinding.findFirst({
+    where: { id: bindingId, venueId },
+    select: { active: true, createdAt: true, revokedAt: true },
+  })
+  if (!v) return { creadoEn: new Date(0), revocadoEn: new Date(0) }
+  return { creadoEn: v.createdAt, revocadoEn: v.active ? null : (v.revokedAt ?? new Date(0)) }
 }
 
 // ─── Las respuestas ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -547,10 +606,13 @@ export async function recibirCierreDeLaMaquina(
   entrada: CierreQueLlega,
   leerPedido: LectorDelPedido,
 ): Promise<ResultadoDeLaMaquina> {
-  const { referenceCC, cierre } = entrada
+  const { referenceCC } = entrada
   const deviceId = entrada.origen === 'PC' ? entrada.deviceId : null
-  const hora = horaDelCierre(cierre)
+  const hora = horaDelCierre(entrada.cierre)
+  // F13: la hora física como instante UTC desde aquí (la huella, la decisión guardada y el cierre la ven igual en cualquier zona).
+  const cierre: CierreDeLaMaquina = { ...entrada.cierre, occurredAt: hora?.toISOString() ?? null }
   const carritoRecibido = entrada.origen === 'PC' ? huellaDelCarritoCompleto(entrada.pedido) : null
+  const imposible = validarCierre(cierre) === 'IMPOSIBLE'
   const observacion: Record<string, unknown> = {
     que: 'CIERRE',
     origen: entrada.origen,
@@ -561,26 +623,17 @@ export async function recibirCierreDeLaMaquina(
     tipCents: cierre.tipCents,
     creditCents: cierre.creditCents,
     changeDispensedCents: cierre.changeDispensedCents,
-    occurredAt: hora?.toISOString() ?? null,
+    occurredAt: cierre.occurredAt,
     ...(entrada.origen === 'PC'
       ? { deviceId, bindingId: entrada.bindingId, saleShiftId: cierre.saleShiftId ?? null, cartHash: carritoRecibido }
       : { evidence: entrada.evidence }),
+    ...(imposible ? { imposible: true } : {}),
     userId: entrada.userId,
     recibidoEn: new Date().toISOString(),
   }
 
-  if (validarCierre(cierre) === 'IMPOSIBLE') {
-    const incidentId = await anotarImposible(venueId, referenceCC, { userId: entrada.userId, deviceId }, { cierre, ...observacion })
-    throw new AppError(
-      'Los importes de este cierre de la máquina no son posibles. Quedó registrado para que el gerente lo revise.',
-      422,
-      true,
-      'CASH_MACHINE_CLOSE_IMPOSSIBLE',
-      { incidentId },
-    )
-  }
-
-  // 1. RECIBIR: la evidencia (y el desenlace, si es el primero) bajo el candado del folio, antes de intentar la venta.
+  // 1. RECIBIR: la evidencia (y el desenlace, si es el primero) bajo el candado del folio, antes de intentar la venta. También lo
+  // imposible (F12): se guarda y congela el folio si es su primer mensaje, después de revisar la versión del gerente (F5).
   const r = await conElFolio(venueId, referenceCC, async (tx, l) => {
     const huella = huellaDeLaObservacion({ ...observacion, congelado: l.folio?.cartHash ?? carritoRecibido })
     const repetida = await yaObservada(tx, venueId, referenceCC, huella)
@@ -593,7 +646,8 @@ export async function recibirCierreDeLaMaquina(
             cierre,
             carritoRecibido,
             turnoRecibido: cierre.saleShiftId ?? null,
-            revocadaEn: await revocacionDelVinculo(tx, venueId, l.folio ? l.folio.bindingId : entrada.bindingId),
+            vinculo: await vinculoDelIntento(tx, venueId, l.folio ? l.folio.bindingId : entrada.bindingId),
+            imposible,
           })
         : decidirSobreElFolio(l.estado, {
             que: 'CIERRE',
@@ -601,13 +655,33 @@ export async function recibirCierreDeLaMaquina(
             cierre,
             versionVista: entrada.versionVista,
             repeticion: repetida,
+            imposible,
           })
     if (d.accion === 'VERSION') return { d, l, anotadas: [] as IncidenciaAnotada[], folio: l.folio }
     const observada = await observar(tx, venueId, referenceCC, huella, repetida, observacion, l.folio)
     const nueva = observada.nueva
     const anotadas: IncidenciaAnotada[] = []
     const dueño = l.folio?.deviceId ?? deviceId
+    const loDeLaPc = (): LoQueSeCongela | null =>
+      entrada.origen === 'PC'
+        ? {
+            deviceId,
+            bindingId: entrada.bindingId,
+            pedido: entrada.pedido,
+            cartHash: carritoRecibido,
+            saleShiftId: cierre.saleShiftId ?? null,
+            dueCents: cierre.dueCents,
+            saleCents: cierre.saleCents,
+            tipCents: cierre.tipCents,
+          }
+        : null
     let folio = observada.folio
+    if (d.accion === 'IMPOSIBLE') {
+      const congelar = loDeLaPc()
+      if (!folio && congelar) folio = await congelarElFolio(tx, venueId, referenceCC, congelar)
+      await anotar(tx, venueId, referenceCC, deviceId ?? dueño, anotadas, 'IMPOSIBLE', { cierre, ...observacion }, nueva)
+      return { d, l, anotadas, folio }
+    }
     if (d.accion === 'ACEPTAR') {
       const decision: DecisionGuardada = {
         // Los importes CONGELADOS (iguales a los del cierre: si no, la decisión fue CONFLICTO).
@@ -619,26 +693,13 @@ export async function recibirCierreDeLaMaquina(
         trasRevocar: d.trasRevocar,
         motivoSinVenta: d.motivoSinVenta,
       }
+      const congelar = loDeLaPc()
       folio = folio
         ? await tx.cashMachineFolio.update({
             where: { id: folio.id },
             data: { decision: decision as unknown as Prisma.InputJsonValue },
           })
-        : await tx.cashMachineFolio.create({
-            data: {
-              venueId,
-              referenceCC,
-              deviceId,
-              bindingId: entrada.origen === 'PC' ? entrada.bindingId : null,
-              pedido: entrada.origen === 'PC' && entrada.pedido != null ? (entrada.pedido as Prisma.InputJsonValue) : Prisma.JsonNull,
-              cartHash: carritoRecibido,
-              saleShiftId: cierre.saleShiftId ?? null,
-              dueCents: cierre.dueCents,
-              saleCents: cierre.saleCents,
-              tipCents: cierre.tipCents,
-              decision: decision as unknown as Prisma.InputJsonValue,
-            },
-          })
+        : congelar && (await congelarElFolio(tx, venueId, referenceCC, congelar, decision))
       if (d.trasRevocar) {
         await anotar(tx, venueId, referenceCC, dueño, anotadas, 'TRAS_REVOCAR', { ...observacion, registrable: !d.motivoSinVenta }, nueva)
       }
@@ -660,6 +721,15 @@ export async function recibirCierreDeLaMaquina(
       { version: r.l.folio?.version ?? 1 },
     )
   }
+  if (r.d.accion === 'IMPOSIBLE') {
+    throw new AppError(
+      'Los importes de este cierre de la máquina no son posibles. Quedó registrado para que el gerente lo revise.',
+      422,
+      true,
+      'CASH_MACHINE_CLOSE_IMPOSSIBLE',
+      { incidentId: r.anotadas.find(a => a.kind === 'IMPOSIBLE')?.id ?? null },
+    )
+  }
   if (r.d.accion === 'CONFLICTO') {
     const otraPc = r.d.motivo === 'OTRA_PC'
     throw new ConflictError(
@@ -674,7 +744,7 @@ export async function recibirCierreDeLaMaquina(
       },
     )
   }
-  // 2. TERMINAR desde lo congelado (o contestar lo que ya quedó).
+  // 2. TERMINAR desde lo congelado (o contestar lo que ya quedó). Nunca lanza: lo recibido ya está guardado (F8).
   return terminarElFolio(venueId, referenceCC, r.folio, r.l.cierre, leerPedido)
 }
 
@@ -689,22 +759,49 @@ class YaTerminado extends Error {}
 
 const esChoqueDeUnico = (error: unknown): boolean => error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'
 
-/** Un rechazo que repetir NUNCA resuelve (r3 #6): la venta ya no se arma, o la llave del folio es de otra operación. */
+/**
+ * Por qué la venta de lo congelado no se arma (r3 #6, F3): `null` = pasajero (la base, o un choque 409 que el reenvío vuelve a
+ * intentar); lo demás no se arregla repitiendo y deja el dinero sin venta con su motivo, nunca un folio RECIBIDO para siempre.
+ */
 function motivoPermanente(error: unknown): MotivoSinRegistro | null {
   if (error instanceof CuentaDeLaMaquinaYaExiste) return 'LLAVE_OCUPADA'
-  if (!(error instanceof AppError)) return null
-  if (error.statusCode === 409) return error.code === 'IDEMPOTENCY_KEY_REUSED' ? 'LLAVE_OCUPADA' : null
-  if (error.statusCode < 400 || error.statusCode >= 500) return null
-  if (error.code === 'CASH_MACHINE_SALE_WITH_DISCOUNT') return 'DESCUENTO'
-  if (error.code === 'CASH_MACHINE_SALE_NOT_SETTLED') return 'SIN_SALDAR'
+  if (esTransitorio(error)) return null
+  if (error instanceof AppError) {
+    if (error.statusCode === 409) return error.code === 'IDEMPOTENCY_KEY_REUSED' ? 'LLAVE_OCUPADA' : null
+    if (error.code === 'CASH_MACHINE_SALE_WITH_DISCOUNT') return 'DESCUENTO'
+    if (error.code === 'CASH_MACHINE_SALE_NOT_SETTLED') return 'SIN_SALDAR'
+  }
   return 'VENTA_RECHAZADA'
 }
 
 /**
  * TERMINAR el folio desde su desenlace congelado. Con su cierre ya escrito, contesta ése. Lo llaman la PC (cierre y duda) y el gerente;
  * un reenvío del mismo mensaje lo reanuda (r6-1).
+ *
+ * F8 (Codex servidor r4): NUNCA lanza. Quien llama ya guardó la evidencia y el desenlace en su primera transacción, así que cualquier
+ * falla de aquí en adelante contesta 202 RECIBIDO (jamás `CASH_MACHINE_CLOSE_RETRY`, que dice «no se escribió nada»). El reenvío del
+ * mismo mensaje la reanuda o, si otra petición ya lo terminó, contesta el TERMINADO guardado.
  */
 export async function terminarElFolio(
+  venueId: string,
+  referenceCC: string,
+  folio: CashMachineFolio | null,
+  cierreYaEscrito: CashMachineClose | null,
+  leerPedido: LectorDelPedido,
+): Promise<ResultadoDeLaMaquina> {
+  try {
+    return await terminar(venueId, referenceCC, folio, cierreYaEscrito, leerPedido)
+  } catch (error) {
+    logger.warn('[MAQUINA] el folio quedó RECIBIDO sin terminar; el reenvío lo reanuda', {
+      venueId,
+      referenceCC,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return recibido(referenceCC, folio)
+  }
+}
+
+async function terminar(
   venueId: string,
   referenceCC: string,
   folio: CashMachineFolio | null,
@@ -868,17 +965,20 @@ export async function terminarElFolio(
 
   // PAGADO: ¿se puede vender lo congelado?
   if (dec.motivoSinVenta) return sinVenta(dec.motivoSinVenta)
+  // F4: el reparto venta/propina congelado no cuadra con el adeudo: el dinero queda, la venta no se arma.
+  if (folio.dueCents !== folio.saleCents + folio.tipCents) return sinVenta('REPARTO_DESCUADRADO')
   if (folio.pedido == null) return sinVenta('SIN_CARRITO')
   let pedido: CreateOrderInput
   try {
     pedido = await leerPedido(folio.pedido, dec.vendedorPorOmision)
   } catch (error) {
-    // Un 4xx del lector: el carrito no se puede leer como venta (r3 #1). Otra cosa es transitoria: queda RECIBIDO.
-    if (error instanceof AppError && error.statusCode >= 400 && error.statusCode < 500) {
-      return sinVenta('CARRITO_ILEGIBLE', { detalle: error.message })
+    // F3: sólo la base es pasajera (RECIBIDO, el reenvío lo reanuda). Cualquier otro error al leer la copia congelada —un 4xx del
+    // lector, una línea nula, una cantidad rota— se repetiría igual cada vez: el carrito no se puede leer como venta (r3 #1).
+    if (esTransitorio(error)) {
+      logger.warn('[MAQUINA] no se pudo leer el carrito congelado; el folio queda RECIBIDO', { venueId, referenceCC })
+      return recibido(referenceCC, folio)
     }
-    logger.warn('[MAQUINA] no se pudo leer el carrito congelado; el folio queda RECIBIDO', { venueId, referenceCC })
-    return recibido(referenceCC, folio)
+    return sinVenta('CARRITO_ILEGIBLE', { detalle: error instanceof Error ? error.message : String(error) })
   }
   const motivoDelPedido = motivoSinVentaDelPedido(pedido)
   if (motivoDelPedido) return sinVenta(motivoDelPedido)
@@ -925,7 +1025,7 @@ export async function terminarElFolio(
       const codigo = error instanceof AppError ? error.code : undefined
       return sinVenta(motivo, { detalle: error instanceof Error ? error.message : String(error), ...(codigo ? { codigo } : {}) })
     }
-    // Transitorio (o desconocido): la evidencia y el desenlace ya están guardados; el reenvío lo reanuda (r6-1).
+    // Pasajero: la evidencia y el desenlace ya están guardados; el reenvío lo reanuda (r6-1).
     logger.warn('[MAQUINA] la venta del folio quedó RECIBIDA sin terminar', {
       venueId,
       referenceCC,

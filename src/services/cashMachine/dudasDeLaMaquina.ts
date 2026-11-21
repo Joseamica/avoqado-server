@@ -18,15 +18,17 @@ import {
   CASH_MACHINE_REF,
   adeudoCobrable,
   anotar,
+  centavosGuardables,
   anotarEnBitacora,
-  anotarImposible,
   conElFolio,
+  congelarElFolio,
   huellaDelCarritoCompleto,
+  instante,
   observar,
   recibirCierreDeLaMaquina,
   respuestaDelCierre,
-  revocacionDelVinculo,
   terminarElFolio,
+  vinculoDelIntento,
   yaObservada,
   type AutorDeLaMaquina,
   type DesenlaceDeLaMaquina,
@@ -119,36 +121,27 @@ export async function subirDudaDeLaMaquina(
     throw new BadRequestError('El folio de la máquina debe ser AQ seguido de 12 letras mayúsculas o números.')
   }
   const importes = { dueCents: entrada.dueCents, saleCents: entrada.saleCents, tipCents: entrada.tipCents }
-  if (!Object.values(importes).every(n => Number.isInteger(n) && n >= 0) || importes.dueCents !== importes.saleCents + importes.tipCents) {
-    throw new BadRequestError('El adeudo de la duda debe ser la venta más la propina, en centavos enteros.')
-  }
   const deviceId = await aparatoDe(venueId, autor.deviceUid)
   // La MISMA puerta que la venta: sólo una credencial de esta PC; el emparejamiento del intento (r6-6).
   const { bindingId } = await exigirAparatoEmparejado(venueId, deviceId, autor.credencial, entrada.bindingId ?? null)
   const carritoRecibido = huellaDelCarritoCompleto(entrada.pedido)
+  // Codex r1 #12 (decisión h): un adeudo de $0 o que no es múltiplo de $0.50 no lo cobra la máquina: 422 con incidencia. F4: el reparto
+  // venta/propina descuadrado NO es imposible (la máquina sólo conoce el adeudo): la duda se guarda ABIERTA con su evidencia.
+  const imposible = !adeudoCobrable(entrada.dueCents) || !Object.values(importes).every(centavosGuardables)
   const observacion: Record<string, unknown> = {
     que: 'DUDA',
     origen: 'PC',
     deviceId,
     bindingId,
     ...importes,
-    startedAt: entrada.startedAt,
+    // F13: la misma hora en otra zona es la MISMA evidencia.
+    startedAt: instante(entrada.startedAt),
     lastSeen: entrada.lastSeen ?? null,
     saleShiftId: entrada.saleShiftId ?? null,
     cartHash: carritoRecibido,
+    ...(imposible ? { imposible: true } : {}),
     userId: autor.userId,
     recibidoEn: new Date().toISOString(),
-  }
-  // Codex r1 #12 (decisión h): un adeudo de $0 o que no es múltiplo de $0.50 no lo cobra la máquina: 422 con incidencia.
-  if (!adeudoCobrable(entrada.dueCents)) {
-    const incidentId = await anotarImposible(venueId, referenceCC, { userId: autor.userId, deviceId }, observacion)
-    throw new AppError(
-      'El adeudo de esta duda no lo puede cobrar la máquina (debe ser mayor que $0 y múltiplo de $0.50). Quedó registrado para el gerente.',
-      422,
-      true,
-      'CASH_MACHINE_CLOSE_IMPOSSIBLE',
-      { incidentId },
-    )
   }
 
   const r = await conElFolio(venueId, referenceCC, async (tx, l) => {
@@ -160,7 +153,8 @@ export async function subirDudaDeLaMaquina(
       importes,
       carritoRecibido,
       turnoRecibido: entrada.saleShiftId ?? null,
-      revocadaEn: await revocacionDelVinculo(tx, venueId, l.folio ? l.folio.bindingId : bindingId),
+      vinculo: await vinculoDelIntento(tx, venueId, l.folio ? l.folio.bindingId : bindingId),
+      imposible,
     })
     const observada = await observar(tx, venueId, referenceCC, huella, repetida, observacion, l.folio)
     const nueva = observada.nueva
@@ -168,20 +162,27 @@ export async function subirDudaDeLaMaquina(
     let folio = observada.folio
     let dudaId = l.duda?.id ?? null
     let abrio = false
+    const loQueSeCongela = {
+      deviceId,
+      bindingId,
+      pedido: entrada.pedido,
+      cartHash: carritoRecibido,
+      saleShiftId: entrada.saleShiftId ?? null,
+      ...importes,
+    }
+    if (d.accion === 'IMPOSIBLE') {
+      // F12: aunque sea imposible, el primer mensaje congela el folio; lo que llegue después no lo sustituye.
+      if (!folio) folio = await congelarElFolio(tx, venueId, referenceCC, loQueSeCongela)
+      await anotar(tx, venueId, referenceCC, deviceId, anotadas, 'IMPOSIBLE', { duda: importes, ...observacion }, nueva)
+      return { d, l, anotadas, folio, dudaId, abrio }
+    }
     if (d.accion === 'ABRIR_DUDA') {
-      folio = await tx.cashMachineFolio.create({
-        data: {
-          venueId,
-          referenceCC,
-          deviceId,
-          bindingId,
-          pedido: entrada.pedido != null ? (entrada.pedido as Prisma.InputJsonValue) : Prisma.JsonNull,
-          cartHash: carritoRecibido,
-          saleShiftId: entrada.saleShiftId ?? null,
-          ...importes,
-        },
-      })
-      const guardada: DudaGuardada = { startedAt: entrada.startedAt, lastSeen: entrada.lastSeen ?? null, subidoPor: autor.userId }
+      folio = await congelarElFolio(tx, venueId, referenceCC, loQueSeCongela)
+      const guardada: DudaGuardada = {
+        startedAt: instante(entrada.startedAt),
+        lastSeen: entrada.lastSeen ?? null,
+        subidoPor: autor.userId,
+      }
       dudaId = (
         await tx.cashMachineIncident.create({
           data: {
@@ -205,10 +206,17 @@ export async function subirDudaDeLaMaquina(
         data: { payload: { ...previa, lastSeen: entrada.lastSeen ?? null } as Prisma.InputJsonValue },
       })
     }
-    if (d.accion === 'CONFLICTO' || (d.accion === 'SEGUIR' && d.discrepancia)) {
-      const motivo = d.accion === 'CONFLICTO' ? d.motivo : 'DISCREPANCIA'
-      await anotar(tx, venueId, referenceCC, deviceId, anotadas, 'CONFLICTO', { ...observacion, motivo }, nueva)
-    }
+    // F6: evidencia física NUEVA de un folio que ya tiene desenlace (los $50 que llegan después de un CANCELADO en $0) vuelve a
+    // revisión, sin tocar lo ya asentado.
+    const motivo =
+      d.accion === 'CONFLICTO'
+        ? d.motivo
+        : d.accion === 'SEGUIR' && d.discrepancia
+          ? 'DISCREPANCIA'
+          : d.accion === 'SEGUIR' && nueva && l.estado.folio?.decision
+            ? 'TRAS_RESOLVER'
+            : null
+    if (motivo) await anotar(tx, venueId, referenceCC, deviceId, anotadas, 'CONFLICTO', { ...observacion, motivo }, nueva)
     return { d, l, anotadas, folio, dudaId, abrio }
   })
   await anotarEnBitacora(venueId, referenceCC, autor.userId, r.anotadas)
@@ -221,6 +229,15 @@ export async function subirDudaDeLaMaquina(
       staffId: autor.userId,
       data: { referenceCC, deviceId, duePesos: entrada.dueCents / 100, startedAt: entrada.startedAt },
     })
+  }
+  if (r.d.accion === 'IMPOSIBLE') {
+    throw new AppError(
+      'El adeudo de esta duda no lo puede cobrar la máquina (debe ser mayor que $0 y múltiplo de $0.50). Quedó registrado para el gerente.',
+      422,
+      true,
+      'CASH_MACHINE_CLOSE_IMPOSSIBLE',
+      { incidentId: r.anotadas.find(a => a.kind === 'IMPOSIBLE')?.id ?? null },
+    )
   }
   if (r.d.accion === 'CONFLICTO') {
     throw new ConflictError(
@@ -292,38 +309,48 @@ export async function listarDudasDeLaMaquina(
     ...(q.kind ? { kind: q.kind } : {}),
     ...(folio ? { referenceCC: { contains: folio } } : {}),
   }
-  const [total, filas] = await Promise.all([
-    prisma.cashMachineIncident.count({ where }),
-    prisma.cashMachineIncident.findMany({
-      where: despues
-        ? { AND: [where, { OR: [{ createdAt: { lt: despues.createdAt } }, { createdAt: despues.createdAt, id: { lt: despues.id } }] }] }
-        : where,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      take: limite + 1,
-      select: {
-        id: true,
-        referenceCC: true,
-        kind: true,
-        status: true,
-        deviceId: true,
-        createdAt: true,
-        resolvedByStaffId: true,
-        resolvedAt: true,
-        payload: true,
-      },
-    }),
-  ])
+  // F5 (Codex servidor r4): la evidencia (la duda y su `lastSeen`) y la `version` del folio salen de la MISMA foto de Postgres
+  // (`RepeatableRead`, el mismo cliente de transacción). Con dos lecturas sueltas, los $50 que entraban entre ellas se entregaban como
+  // «$0, versión 2» y el gerente firmaba una versión que nunca vio.
+  const { total, filas, folios } = await prisma.$transaction(
+    async tx => {
+      const total = await tx.cashMachineIncident.count({ where })
+      const filas = await tx.cashMachineIncident.findMany({
+        where: despues
+          ? { AND: [where, { OR: [{ createdAt: { lt: despues.createdAt } }, { createdAt: despues.createdAt, id: { lt: despues.id } }] }] }
+          : where,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: limite + 1,
+        select: {
+          id: true,
+          referenceCC: true,
+          kind: true,
+          status: true,
+          deviceId: true,
+          createdAt: true,
+          resolvedByStaffId: true,
+          resolvedAt: true,
+          payload: true,
+        },
+      })
+      // Lo congelado de las dudas de ESTA página (a lo más `limite` folios): una consulta acotada.
+      const refsDeDudas = filas
+        .slice(0, limite)
+        .filter(f => f.kind === 'ESPERANDO')
+        .map(f => f.referenceCC)
+      const folios = refsDeDudas.length
+        ? await tx.cashMachineFolio.findMany({
+            where: { venueId, referenceCC: { in: refsDeDudas } },
+            select: { referenceCC: true, dueCents: true, saleCents: true, tipCents: true, pedido: true, saleShiftId: true, version: true },
+            take: refsDeDudas.length,
+          })
+        : []
+      return { total, filas, folios }
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  )
   const pagina = filas.slice(0, limite)
   const ultima = pagina[pagina.length - 1]
-  // Lo congelado de las dudas de ESTA página (a lo más `limite` folios): una consulta acotada.
-  const refsDeDudas = pagina.filter(f => f.kind === 'ESPERANDO').map(f => f.referenceCC)
-  const folios = refsDeDudas.length
-    ? await prisma.cashMachineFolio.findMany({
-        where: { venueId, referenceCC: { in: refsDeDudas } },
-        select: { referenceCC: true, dueCents: true, saleCents: true, tipCents: true, pedido: true, saleShiftId: true, version: true },
-        take: refsDeDudas.length,
-      })
-    : []
   const folioDe = new Map(folios.map(f => [f.referenceCC, f]))
   return {
     data: pagina.map(({ payload, ...fila }) => {

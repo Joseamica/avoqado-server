@@ -151,9 +151,10 @@ describe('subirDudaDeLaMaquina (la PC no sabe cómo terminó)', () => {
     expect(a.base.incidencias.map(i => i.kind).sort()).toEqual(['ESPERANDO', 'TRAS_REVOCAR'])
   })
 
-  it('un adeudo que no es venta + propina es 400 y no escribe', async () => {
-    await expect(subir({ dueCents: 20000 })).rejects.toMatchObject({ statusCode: 400 })
-    expect(a.base.observaciones).toEqual([])
+  it('🔴 F4: un adeudo que no es venta + propina ya no es 400: la duda se guarda ABIERTA con su evidencia', async () => {
+    expect(await subir({ dueCents: 20000 })).toMatchObject({ status: 'ABIERTO' })
+    expect(a.base.observaciones).toHaveLength(1)
+    expect(a.base.folios[0]).toMatchObject({ dueCents: 20000, saleCents: 18750, tipCents: 0 })
   })
 
   it('🔴 Codex r1 #12: una duda con adeudo de $187.35 o de $0 es 422 con su incidencia IMPOSIBLE, no una duda', async () => {
@@ -164,7 +165,8 @@ describe('subirDudaDeLaMaquina (la PC no sabe cómo terminó)', () => {
     })
     await expect(subir({ dueCents: 0, saleCents: 0 })).rejects.toMatchObject({ statusCode: 422 })
     expect(a.base.incidencias.map(i => i.kind)).toEqual(['IMPOSIBLE'])
-    expect(a.base.folios).toEqual([])
+    // F12: el primer mensaje congela el folio aunque sea imposible; el segundo no lo sustituye.
+    expect(a.base.folios).toEqual([expect.objectContaining({ dueCents: 18735, saleCents: 18735, decision: null })])
   })
 })
 

@@ -59,6 +59,24 @@ export interface Importes {
   tipCents: number
 }
 
+/** El emparejamiento con el que la PC empezó el intento (r6-6): cuándo nació y cuándo lo revocaron (`null` = sigue activo). */
+export interface VinculoDelIntento {
+  creadoEn: Date
+  revocadoEn: Date | null
+}
+
+/**
+ * F7 (Codex servidor r4): un emparejamiento vale para un cobro sólo si estaba ACTIVO a la hora física del cobro:
+ * `creadoEn ≤ hora < revocadoEn|∞`. Sin hora no hay con qué compararlo: vale sólo si nunca lo revocaron (lo desconocido cuenta como
+ * después de la revocación). Sin emparejamiento (el gerente declara) no hay nada que revisar.
+ */
+export function vigenteEn(v: VinculoDelIntento | null, hora: string | null): boolean {
+  if (!v) return true
+  if (hora === null) return v.revocadoEn === null
+  const t = new Date(hora)
+  return v.creadoEn <= t && (v.revocadoEn === null || t < v.revocadoEn)
+}
+
 export type PeticionSobreElFolio =
   | {
       que: 'CIERRE'
@@ -68,8 +86,10 @@ export type PeticionSobreElFolio =
       /** El carrito y el turno que mandó la PC: sólo para anotar la discrepancia, nunca sustituyen lo congelado. */
       carritoRecibido: string | null
       turnoRecibido: string | null
-      /** Cuándo revocaron el emparejamiento FIJO del intento (r6-6); `null` = vigente. */
-      revocadaEn: Date | null
+      /** El emparejamiento FIJO del intento (r6-6, F7). */
+      vinculo: VinculoDelIntento | null
+      /** `validarCierre` dijo IMPOSIBLE: la máquina no pudo dar estos importes. */
+      imposible?: boolean
     }
   | {
       que: 'CIERRE'
@@ -78,6 +98,7 @@ export type PeticionSobreElFolio =
       /** r6-4: la versión de la evidencia que vio el gerente, y si su declaración ya está en el historial (repetición exacta). */
       versionVista: number
       repeticion: boolean
+      imposible?: boolean
     }
   | {
       que: 'DUDA'
@@ -85,7 +106,9 @@ export type PeticionSobreElFolio =
       importes: Importes
       carritoRecibido: string | null
       turnoRecibido: string | null
-      revocadaEn: Date | null
+      vinculo: VinculoDelIntento | null
+      /** Un adeudo que la máquina no cobra (Codex r1 #12). */
+      imposible?: boolean
     }
   | { que: 'CONSULTA' }
 
@@ -98,6 +121,8 @@ export type DecisionDelFolio =
   | { accion: 'NO_EXISTE' }
   /** El gerente vio otra versión de la evidencia: no se escribe nada (r6-4). */
   | { accion: 'VERSION' }
+  /** F12: importes que la máquina no puede dar: se guarda la observación, se congela el folio si es el primer mensaje, y 422. */
+  | { accion: 'IMPOSIBLE' }
   /** Se guarda la evidencia y se contesta 409. */
   | { accion: 'CONFLICTO'; motivo: 'OTRA_PC' | 'OTRA_EVIDENCIA' }
   /** La primera duda del folio: congela y abre la duda. */
@@ -129,9 +154,11 @@ export function decidirSobreElFolio(estado: EstadoDelFolio, pet: PeticionSobreEl
   }
 
   // r6-4: el gerente resuelve con la evidencia que VIO; su repetición exacta (ya en el historial) no necesita volver a verla.
+  // F5: también ANTES de lo imposible (una declaración imposible con la versión vieja no agrega nada).
   if (pet.que === 'CIERRE' && pet.origen === 'GERENTE' && !pet.repeticion && pet.versionVista !== (folio?.version ?? 1)) {
     return { accion: 'VERSION' }
   }
+  if (pet.imposible) return { accion: 'IMPOSIBLE' }
   // D3: el folio es de la PC que lo subió primero; el gerente actúa sobre el de esa PC.
   const deviceId = pet.que === 'DUDA' || pet.origen === 'PC' ? pet.deviceId : null
   if (folio && (pet.que === 'DUDA' || pet.origen === 'PC') && folio.deviceId !== deviceId) {
@@ -146,7 +173,7 @@ export function decidirSobreElFolio(estado: EstadoDelFolio, pet: PeticionSobreEl
 
   if (pet.que === 'DUDA') {
     // r6-2: una duda nunca se vuelve desenlace; si el folio ya tiene uno, contesta ése.
-    if (!folio) return { accion: 'ABRIR_DUDA', trasRevocar: pet.revocadaEn !== null }
+    if (!folio) return { accion: 'ABRIR_DUDA', trasRevocar: !vigenteEn(pet.vinculo, null) }
     return { accion: 'SEGUIR', discrepancia: discrepanciaDeLoCongelado }
   }
 
@@ -157,15 +184,17 @@ export function decidirSobreElFolio(estado: EstadoDelFolio, pet: PeticionSobreEl
     return { accion: 'SEGUIR', discrepancia: discrepanciaDeLoCongelado || otraHora }
   }
 
-  // Este cierre es el desenlace. La PC revocada (r6-6, con su emparejamiento FIJO): lo cobrado antes de la revocación entra con su
-  // marca; un PAGADO posterior o sin hora deja el dinero sin venta. El gerente no está revocado: él declara.
-  const revocadaEn = pet.origen === 'PC' ? pet.revocadaEn : null
-  let motivoSinVenta: 'PC_REVOCADA' | null = null
-  if (revocadaEn && pet.cierre.outcome === 'PAGADO') {
-    const hora = horaDe(pet.cierre)
-    if (hora === null || new Date(hora) > revocadaEn) motivoSinVenta = 'PC_REVOCADA'
+  // Este cierre es el desenlace. Con su emparejamiento FIJO (r6-6, F7): lo cobrado mientras estaba activo entra (con su marca si ya
+  // lo revocaron); un PAGADO cobrado fuera de su vigencia —antes de que naciera, después de revocarlo o sin hora— deja el dinero sin
+  // venta. El gerente no está emparejado: él declara.
+  const vinculo = pet.origen === 'PC' ? pet.vinculo : null
+  const vigente = vigenteEn(vinculo, horaDe(pet.cierre))
+  return {
+    accion: 'ACEPTAR',
+    trasRevocar: !vigente || vinculo?.revocadoEn != null,
+    motivoSinVenta: !vigente && pet.cierre.outcome === 'PAGADO' ? 'PC_REVOCADA' : null,
+    discrepancia: discrepanciaDeLoCongelado,
   }
-  return { accion: 'ACEPTAR', trasRevocar: revocadaEn !== null, motivoSinVenta, discrepancia: discrepanciaDeLoCongelado }
 }
 
 /**

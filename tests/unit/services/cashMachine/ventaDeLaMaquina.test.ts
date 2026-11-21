@@ -192,19 +192,22 @@ describe('registrarVentaDeLaMaquina · imposibles (422)', () => {
     ],
     ['🔴 una cuenta de $0', { dueCents: 0, saleCents: 0, creditCents: 0, changeDispensedCents: 0 }],
     ['🔴 una cancelación sin el modo del cancel', { outcome: 'CANCELADO', creditCents: 5000, changeDispensedCents: 5000 }],
-  ] as const)('%s → 422 con su incidencia y su observación, sin folio ni pago', async (_nombre, over) => {
-    await expect(vender(over as Partial<CierreDeLaMaquina>)).rejects.toMatchObject({
-      statusCode: 422,
-      code: 'CASH_MACHINE_CLOSE_IMPOSSIBLE',
-      details: { incidentId: expect.any(String) },
-    })
-    expect(prismaMock.payment.create).not.toHaveBeenCalled()
-    expect(a.base.cierres).toEqual([])
-    expect(a.base.folios).toEqual([])
-    expect(a.base.incidencias.map(i => i.kind)).toEqual(['IMPOSIBLE'])
-    expect(a.base.observaciones).toHaveLength(1)
-    expect(acciones()).toContain('CASH_MACHINE_CLOSE_IMPOSSIBLE')
-  })
+  ] as const)(
+    '%s → 422 con su incidencia y su observación, sin desenlace ni pago (el folio queda congelado, F12)',
+    async (_nombre, over) => {
+      await expect(vender(over as Partial<CierreDeLaMaquina>)).rejects.toMatchObject({
+        statusCode: 422,
+        code: 'CASH_MACHINE_CLOSE_IMPOSSIBLE',
+        details: { incidentId: expect.any(String) },
+      })
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+      expect(a.base.cierres).toEqual([])
+      expect(a.base.folios).toEqual([expect.objectContaining({ deviceId: 'terminal-pc', decision: null })])
+      expect(a.base.incidencias.map(i => i.kind)).toEqual(['IMPOSIBLE'])
+      expect(a.base.observaciones).toHaveLength(1)
+      expect(acciones()).toContain('CASH_MACHINE_CLOSE_IMPOSSIBLE')
+    },
+  )
 })
 
 describe('registrarVentaDeLaMaquina · turno (el congelado del folio)', () => {

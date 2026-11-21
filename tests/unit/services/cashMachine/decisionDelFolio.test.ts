@@ -2,7 +2,7 @@
  * Máquina de efectivo 1a · matriz A (rediseño tras la ronda 3 de Codex: D1–D4 y codex-r6 1–6). UNA decisión pura,
  * `decidirSobreElFolio`: el primer mensaje congela el folio, el primer cierre comprobado es el desenlace, lo demás sólo se agrega. Con
  * una sola PC por negocio (D3) la matriz es más chica que la de r2: quién manda × lo que el folio ya tiene × importes × desenlace ×
- * carrito × revocación × versión del gerente.
+ * carrito × vigencia del emparejamiento (F7: activo a la hora del cobro) × versión del gerente × importes imposibles (F5, F12).
  *
  * La matriz enumera TODAS las combinaciones y las compara contra una tabla de reglas escrita a mano (la primera que coincide manda).
  * Además: cada regla decide al menos una combinación.
@@ -11,19 +11,23 @@ import {
   acumularEnLaIncidencia,
   decidirSobreElFolio,
   huellaDeLaObservacion,
+  vigenteEn,
   type DecisionDelFolio,
   type EstadoDelFolio,
   type PeticionSobreElFolio,
 } from '@/services/cashMachine/decisionDelFolio'
 import type { CierreDeLaMaquina } from '@/services/cashMachine/ventaDeLaMaquina'
 
+const CREADO_EN = new Date('2026-11-01T00:00:00.000Z')
 const REVOCADA_EN = new Date('2026-11-20T18:00:00.000Z')
+/** F7: la misma PC se volvió a emparejar a las 18:30; el cobro de las 17:59 no lo hizo ese emparejamiento. */
+const CREADO_DESPUES_EN = new Date('2026-11-20T18:30:00.000Z')
 const ANTES = '2026-11-20T17:59:00.000Z'
 const DESPUES = '2026-11-20T18:01:00.000Z'
 
 type Que = 'CIERRE_PC' | 'CIERRE_GERENTE' | 'DUDA'
 type Folio = 'NINGUNO' | 'SIN_DESENLACE' | 'DECIDIDO' | 'OTRA_PC'
-type Revocacion = 'VIGENTE' | 'REVOCADA_ANTES' | 'REVOCADA_DESPUES' | 'REVOCADA_SIN_HORA'
+type Revocacion = 'VIGENTE' | 'REVOCADA_ANTES' | 'REVOCADA_DESPUES' | 'REVOCADA_SIN_HORA' | 'CREADO_DESPUES'
 type Caso = {
   que: Que
   folio: Folio
@@ -32,6 +36,7 @@ type Caso = {
   carrito: 'IGUAL' | 'OTRO'
   revocacion: Revocacion
   version: 'VISTA' | 'VIEJA_REPETICION' | 'VIEJA_NUEVA'
+  imposible: boolean
 }
 
 const cierre = (over: Partial<CierreDeLaMaquina> = {}): CierreDeLaMaquina => ({
@@ -86,8 +91,14 @@ function peticionDe(c: Caso): PeticionSobreElFolio {
     occurredAt: hora,
     occurredAtKnown: hora !== null,
   })
-  const revocadaEn = c.revocacion === 'VIGENTE' ? null : REVOCADA_EN
+  const vinculo =
+    c.revocacion === 'VIGENTE'
+      ? { creadoEn: CREADO_EN, revocadoEn: null }
+      : c.revocacion === 'CREADO_DESPUES'
+        ? { creadoEn: CREADO_DESPUES_EN, revocadoEn: null }
+        : { creadoEn: CREADO_EN, revocadoEn: REVOCADA_EN }
   const carritoRecibido = c.carrito === 'IGUAL' ? 'carrito-1' : 'carrito-2'
+  const imposible = c.imposible
   if (c.que === 'CIERRE_GERENTE') {
     return {
       que: 'CIERRE',
@@ -95,15 +106,23 @@ function peticionDe(c: Caso): PeticionSobreElFolio {
       cierre: c1,
       versionVista: c.version === 'VISTA' ? (c.folio === 'NINGUNO' ? 1 : 3) : 2,
       repeticion: c.version === 'VIEJA_REPETICION',
+      imposible,
     }
   }
   if (c.que === 'DUDA') {
-    return { que: 'DUDA', deviceId: 'pc-A', importes, carritoRecibido, turnoRecibido: 'turno-A', revocadaEn }
+    return { que: 'DUDA', deviceId: 'pc-A', importes, carritoRecibido, turnoRecibido: 'turno-A', vinculo, imposible }
   }
-  return { que: 'CIERRE', origen: 'PC', deviceId: 'pc-A', cierre: c1, carritoRecibido, turnoRecibido: 'turno-A', revocadaEn }
+  return { que: 'CIERRE', origen: 'PC', deviceId: 'pc-A', cierre: c1, carritoRecibido, turnoRecibido: 'turno-A', vinculo, imposible }
 }
 
-const revocada = (c: Caso) => c.que !== 'CIERRE_GERENTE' && c.revocacion !== 'VIGENTE'
+/** Revocada HOY (la duda no tiene hora física con qué comparar: sólo esto la marca). */
+const revocadaAhora = (c: Caso) => c.que !== 'CIERRE_GERENTE' && c.revocacion.startsWith('REVOCADA')
+/** F7: el cobro de la PC cayó fuera de la vigencia de su emparejamiento (después de revocarlo, sin hora, o antes de que naciera). */
+const fueraDeVigencia = (c: Caso) =>
+  c.que === 'CIERRE_PC' &&
+  (c.revocacion === 'REVOCADA_DESPUES' || c.revocacion === 'REVOCADA_SIN_HORA' || c.revocacion === 'CREADO_DESPUES')
+/** La hora física del cierre no es la del desenlace guardado (ANTES). */
+const otraHora = (c: Caso) => c.revocacion === 'REVOCADA_DESPUES' || c.revocacion === 'REVOCADA_SIN_HORA'
 
 /** La tabla de reglas, en orden: la primera que coincide manda. */
 const REGLAS: Array<{ nombre: string; si: (c: Caso) => boolean; entonces: (c: Caso) => DecisionDelFolio }> = [
@@ -111,6 +130,11 @@ const REGLAS: Array<{ nombre: string; si: (c: Caso) => boolean; entonces: (c: Ca
     nombre: 'r6-4: el gerente con otra versión y una declaración nueva no escribe nada',
     si: c => c.que === 'CIERRE_GERENTE' && c.version === 'VIEJA_NUEVA',
     entonces: () => ({ accion: 'VERSION' }),
+  },
+  {
+    nombre: 'F5 y F12: importes imposibles (después de la versión del gerente, antes que todo lo demás)',
+    si: c => c.imposible,
+    entonces: () => ({ accion: 'IMPOSIBLE' }),
   },
   {
     nombre: 'D3: el folio de otra PC no se toca',
@@ -125,7 +149,7 @@ const REGLAS: Array<{ nombre: string; si: (c: Caso) => boolean; entonces: (c: Ca
   {
     nombre: 'la primera duda congela el folio',
     si: c => c.que === 'DUDA' && c.folio === 'NINGUNO',
-    entonces: c => ({ accion: 'ABRIR_DUDA', trasRevocar: revocada(c) }),
+    entonces: c => ({ accion: 'ABRIR_DUDA', trasRevocar: revocadaAhora(c) }),
   },
   {
     nombre: 'r6-2: una duda nunca es desenlace: el folio contesta lo que tiene (otro carrito se anota)',
@@ -140,18 +164,15 @@ const REGLAS: Array<{ nombre: string; si: (c: Caso) => boolean; entonces: (c: Ca
   {
     nombre: 'r6-1: el mismo desenlace contesta (y reanuda) lo que el folio tiene; la hora nueva o el otro carrito se anotan',
     si: c => c.folio === 'DECIDIDO',
-    entonces: c => ({
-      accion: 'SEGUIR',
-      discrepancia: (c.que === 'CIERRE_PC' && c.carrito === 'OTRO') || (c.revocacion !== 'VIGENTE' && c.revocacion !== 'REVOCADA_ANTES'),
-    }),
+    entonces: c => ({ accion: 'SEGUIR', discrepancia: (c.que === 'CIERRE_PC' && c.carrito === 'OTRO') || otraHora(c) }),
   },
   {
-    nombre: 'el primer cierre comprobado es el desenlace (con la marca de la PC revocada)',
+    nombre: 'el primer cierre comprobado es el desenlace (con la marca de la PC revocada; F7: fuera de vigencia no es venta)',
     si: () => true,
     entonces: c => ({
       accion: 'ACEPTAR',
-      trasRevocar: revocada(c),
-      motivoSinVenta: revocada(c) && c.revocacion !== 'REVOCADA_ANTES' ? 'PC_REVOCADA' : null,
+      trasRevocar: revocadaAhora(c) || fueraDeVigencia(c),
+      motivoSinVenta: fueraDeVigencia(c) ? 'PC_REVOCADA' : null,
       discrepancia: c.que === 'CIERRE_PC' && c.folio !== 'NINGUNO' && c.carrito === 'OTRO',
     }),
   },
@@ -163,9 +184,10 @@ for (const que of ['CIERRE_PC', 'CIERRE_GERENTE', 'DUDA'] as Que[])
     for (const importes of ['IGUALES', 'OTROS'] as const)
       for (const desenlace of ['IGUAL', 'OTRO'] as const)
         for (const carrito of ['IGUAL', 'OTRO'] as const)
-          for (const revocacion of ['VIGENTE', 'REVOCADA_ANTES', 'REVOCADA_DESPUES', 'REVOCADA_SIN_HORA'] as Revocacion[])
+          for (const revocacion of ['VIGENTE', 'REVOCADA_ANTES', 'REVOCADA_DESPUES', 'REVOCADA_SIN_HORA', 'CREADO_DESPUES'] as Revocacion[])
             for (const version of ['VISTA', 'VIEJA_REPETICION', 'VIEJA_NUEVA'] as const)
-              todos.push({ que, folio, importes, desenlace, carrito, revocacion, version })
+              for (const imposible of [false, true])
+                todos.push({ que, folio, importes, desenlace, carrito, revocacion, version, imposible })
 
 describe('matriz A · decidirSobreElFolio', () => {
   it(`enumera ${todos.length} combinaciones y cada una da lo que dice la tabla`, () => {
@@ -190,6 +212,21 @@ describe('matriz A · decidirSobreElFolio', () => {
     expect(decidirSobreElFolio(conDesenlace, { que: 'CONSULTA' })).toEqual({ accion: 'RECIBIDO' })
     expect(decidirSobreElFolio(sinDesenlace, { que: 'CONSULTA' })).toEqual({ accion: 'DUDA_ABIERTA' })
     expect(decidirSobreElFolio({ folio: null, terminado: false, duda: false }, { que: 'CONSULTA' })).toEqual({ accion: 'NO_EXISTE' })
+  })
+})
+
+describe('F7: vigenteEn — el emparejamiento sólo vale mientras estaba activo (creadoEn ≤ hora < revocadoEn)', () => {
+  const v = { creadoEn: CREADO_DESPUES_EN, revocadoEn: new Date('2026-11-20T20:00:00.000Z') }
+  it('los bordes: nace incluido, la revocación excluida', () => {
+    expect(vigenteEn(v, CREADO_DESPUES_EN.toISOString())).toBe(true)
+    expect(vigenteEn(v, '2026-11-20T19:59:59.999Z')).toBe(true)
+    expect(vigenteEn(v, '2026-11-20T20:00:00.000Z')).toBe(false)
+    expect(vigenteEn(v, '2026-11-20T18:29:59.999Z')).toBe(false)
+  })
+  it('sin hora: sólo si nunca lo revocaron; sin emparejamiento (el gerente) no hay nada que revisar', () => {
+    expect(vigenteEn(v, null)).toBe(false)
+    expect(vigenteEn({ creadoEn: CREADO_DESPUES_EN, revocadoEn: null }, null)).toBe(true)
+    expect(vigenteEn(null, null)).toBe(true)
   })
 })
 
