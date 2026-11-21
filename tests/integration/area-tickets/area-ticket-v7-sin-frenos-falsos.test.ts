@@ -19,7 +19,7 @@ import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
  * errores al escribir) es residual declarado en la promesa, no una fila de esta tabla.
  */
 type Resultado = { ok: true } | { code: string; message: string }
-type Linea = { productId: string; quantity: string }
+type Linea = { productId: string; quantity: string; modifierIds?: string[] }
 type Suelto = { productId: string; quantity: number; modifierIds?: string[] }
 type Escena = { ajenos?: Linea[]; vales: Linea[]; sueltos: Suelto[]; malo: () => Promise<void>; armar: Resultado }
 type Caso = { nombre: string; sinApartado?: boolean; preparar: (tag: string) => Promise<Escena> }
@@ -607,6 +607,69 @@ describe('Vales V7 — D5: el freno al armar nunca es falso (si armar rechaza, l
           staffId,
           source: 'AVOQADO_ANDROID',
           normalItems: panes.map(productId => ({ productId, quantity: 1 })),
+        }),
+      )
+      expect(armada).toEqual({ ok: true })
+    })
+  }
+
+  // Codex r6: un vale con extras de 5, 11.125 y 40.574 g de harina en onzas aparta 2 oz (su suma guardada); otro vale aparta 1 oz; un
+  // ajuste deja 2 oz. Según el orden de los extras la suma es 2 o 2.0000000000000000001 y queda una «demanda sin cubrir» de 1e-19 que
+  // se compararía contra −1 oz libre. Lo requerido se trunca a 3 decimales: armar NO frena en ningún orden.
+  for (const [numero, gramos] of [
+    ['5', '11.125', '40.574'],
+    ['11.125', '5', '40.574'],
+  ].entries()) {
+    it(`polvo de la suma con apartado ajeno: armar no frena (extras en orden ${gramos.join(', ')})`, async () => {
+      const tag = `r6${numero}`
+      const harina = await insumo(`Harina ${tag}`, '3', 3, Unit.OUNCE)
+      const base = await producto(`Base ${tag}`, InventoryMethod.QUANTITY, '100')
+      const grupo = await prisma.modifierGroup.create({ data: { venueId, name: `Extras ${tag}` } })
+      const extras = [] as string[]
+      for (const [k, g] of gramos.entries()) {
+        extras.push(
+          (
+            await prisma.modifier.create({
+              data: {
+                groupId: grupo.id,
+                name: `Harina ${tag} ${k}`,
+                price: 1,
+                rawMaterialId: harina,
+                quantityPerUnit: new Prisma.Decimal(g),
+                unit: Unit.GRAM,
+                inventoryMode: 'ADDITION',
+              },
+            })
+          ).id,
+        )
+      }
+      const panOnza = await platillo(`Pan onza ${tag}`, harina, '28.3495')
+      const vale = await emitir(tag, 0, [{ productId: base, quantity: '1', modifierIds: extras }])
+      await emitir(`${tag}-ajeno`, 0, [{ productId: panOnza, quantity: '1' }])
+      const apartados = await prisma.areaTicketInventoryReservation.findMany({
+        where: { venueId, inventoryId: harina },
+        orderBy: { quantityBaseUnits: 'desc' },
+        take: 5,
+      })
+      expect(apartados.map(a => a.quantityBaseUnits.toFixed(3))).toEqual(['2.000', '1.000'])
+      await prisma.rawMaterial.update({ where: { id: harina }, data: { currentStock: new Prisma.Decimal('2') } })
+      await fijarLotes(harina, '2')
+      const caja = await createAreaTicketCheckout(venueId, {
+        idempotencyKey: `${tag}-caja-${suffix}`,
+        deviceUid: checkoutDeviceUid,
+        staffId,
+      })
+      await addTicketToCheckout(venueId, caja.id, vale.code, {
+        idempotencyKey: `${tag}-claim-${suffix}`,
+        deviceUid: checkoutDeviceUid,
+        staffId,
+      })
+      const armada = await resultado(
+        materializeAreaTicketCheckout(venueId, caja.id, {
+          idempotencyKey: `${tag}-armar-${suffix}`,
+          deviceUid: checkoutDeviceUid,
+          staffId,
+          source: 'AVOQADO_ANDROID',
         }),
       )
       expect(armada).toEqual({ ok: true })

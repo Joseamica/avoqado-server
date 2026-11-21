@@ -3977,29 +3977,93 @@ async function buildUnreservedAreaOrderInventoryDemands(
 
 /** Tope de apartados que la revisión al armar simula; con más, no frena (decide la liquidación, como antes de D5). */
 const TOPE_DE_APARTADOS_AL_ARMAR = 500
-/**
- * Media unidad del último decimal que se guarda (las existencias y los apartados llevan 3). La revisión nunca es más estricta que la
- * liquidación: una diferencia menor es redondeo del orden de la suma (Codex r5).
- */
-const TOLERANCIA_DE_EXISTENCIA = new Prisma.Decimal('0.0005')
-/** ¿Falta de verdad? Sólo si `hay` queda corto por más que la tolerancia. */
-const faltaDeVerdad = (hay: Prisma.Decimal, pide: Prisma.Decimal.Value) => hay.add(TOLERANCIA_DE_EXISTENCIA).lessThan(pide)
+
+/** La revisión siempre pide igual o menos que la liquidación; el polvo del orden de la suma no frena (Codex r5 y r6). */
+function requeridoParaRevisar(cantidad: Prisma.Decimal.Value): Prisma.Decimal {
+  return new Prisma.Decimal(cantidad).toDecimalPlaces(3, Prisma.Decimal.ROUND_DOWN)
+}
+
+/** Lo que la revisión al armar lee de la base: sin dinero ni escrituras. Cantidades disponibles tal como están guardadas (3 decimales). */
+export interface FotoParaFrenar {
+  /** Lo que ningún vale apartó, por inventario (`buildUnreservedAreaOrderInventoryDemands`). */
+  demands: Array<{ inventoryKind: AreaTicketInventoryTarget; inventoryId: string; quantityBaseUnits: Prisma.Decimal; label: string }>
+  /** Los apartados ACTIVE de los vales de la sesión, en el orden en que la liquidación los consume (tipo, inventario, id). */
+  apartados: Array<{ inventoryKind: AreaTicketInventoryTarget; inventoryId: string; quantityBaseUnits: Prisma.Decimal.Value }>
+  /** Por `tipo:inventario`: la existencia guardada, la suma de lotes ACTIVE con saldo y la suma de TODOS los apartados ACTIVE. */
+  existencia: Map<string, Prisma.Decimal>
+  lotes: Map<string, Prisma.Decimal>
+  activos: Map<string, Prisma.Decimal>
+}
+
+const claveDeInventario = (t: { inventoryKind: AreaTicketInventoryTarget; inventoryId: string }) => `${t.inventoryKind}:${t.inventoryId}`
 
 /**
- * 🔴 D5 (pizarrón hz:0555ee15:D5, 20-nov): freno de sólo lectura AL ARMAR la venta de vales, antes de mandar la tarjeta a la terminal
- * o de recibir el efectivo. Si la liquidación de esta venta (`finalizeAreaTicketPaymentInTransaction`, rama de consumo) va a rechazar
- * por inventario, se dice ahora con su mismo 409; antes salía al liquidar, con la tarjeta ya cobrada (sesión en conciliación). Misma
- * regla de siempre (los vales exigen existencias para todo, 16-nov). La liquidación NO cambia y sigue siendo la que decide.
- *
- * Garantía (la que se audita): con la misma foto de inventario, esto NUNCA rechaza una venta que la liquidación aceptaría. Por eso
- * sólo frena donde la liquidación seguro rechaza, simulando su consumo en su orden:
- *   1. filas inexistentes (rechazo de `lockAreaOrderInventoryFootprint`);
- *   2. cada apartado ACTIVE de los vales de la sesión, uno por uno, como `consumeQuantityReservation` (existencia ≥ apartado) y
- *      `consumeRawMaterialReservation` (apartado > 0 y lotes ≥ apartado: un apartado que redondeó a 0.000 nunca se consume);
- *   3. lo que ningún vale apartó, como `consumeUnreservedAreaOrderInventory`: existencia libre (allá las ACTIVE que quedan son las
- *      ajenas) y, de un insumo, lotes ≥ demanda.
- * Lo que esto no ve sigue como hoy: cambios entre armar y liquidar, y errores al ESCRIBIR los movimientos (Codex r4 #1). Sin
- * `FOR UPDATE` ni escrituras. Los textos son copia de los de la liquidación (la tabla compartida de pruebas los compara).
+ * 🔴 D5 (pizarrón hz:0555ee15:D5): la decisión del freno al armar, pura (sin base). Garantía: con la misma foto, nunca frena una venta
+ * que la liquidación (`finalizeAreaTicketPaymentInTransaction`, consumo al saldar) aceptaría. Simula su consumo en su orden:
+ *   1. cada apartado de la sesión, uno por uno, como `consumeQuantityReservation` (existencia ≥ apartado) y
+ *      `consumeRawMaterialReservation` (apartado > 0 y lotes ≥ apartado: el apartado en 0.000 frena siempre);
+ *   2. lo no apartado, como `consumeUnreservedAreaOrderInventory`: existencia libre (allá las ACTIVE que quedan son las ajenas) y, de
+ *      un insumo, lotes. Lo requerido se trunca a 3 decimales (`requeridoParaRevisar`); si queda en 0, no se compara con nada.
+ * Devuelve el mismo 409 que daría la liquidación, o `null`.
+ */
+export function frenoAlArmar(foto: FotoParaFrenar): AppError | null {
+  const existencia = new Map(foto.existencia)
+  const lotes = new Map(foto.lotes)
+  const propio = new Map<string, Prisma.Decimal>()
+
+  for (const apartado of foto.apartados) {
+    const key = claveDeInventario(apartado)
+    const cantidad = new Prisma.Decimal(apartado.quantityBaseUnits)
+    const pide = requeridoParaRevisar(cantidad)
+    if (apartado.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) {
+      if (existencia.get(key)!.lessThan(pide)) {
+        return domainError(409, 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'La existencia reservada ya no está disponible.')
+      }
+    } else {
+      if (cantidad.lessThanOrEqualTo(0) || lotes.get(key)!.lessThan(pide)) {
+        return domainError(409, 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'Los lotes FIFO no cubren la reserva del vale.')
+      }
+      lotes.set(key, lotes.get(key)!.sub(cantidad))
+    }
+    existencia.set(key, existencia.get(key)!.sub(cantidad))
+    propio.set(key, (propio.get(key) ?? new Prisma.Decimal(0)).add(cantidad))
+  }
+
+  for (const demand of foto.demands) {
+    const key = claveDeInventario(demand)
+    const pide = requeridoParaRevisar(demand.quantityBaseUnits)
+    if (pide.lessThanOrEqualTo(0)) continue
+    const ajenos = (foto.activos.get(key) ?? new Prisma.Decimal(0)).sub(propio.get(key) ?? 0)
+    const libre = existencia.get(key)!.sub(ajenos)
+    if (libre.lessThan(pide)) {
+      return domainError(
+        409,
+        'AREA_TICKET_INSUFFICIENT_STOCK',
+        `No hay existencia libre suficiente de "${demand.label}". Disponible: ${quantity(libre)}; requerida: ${quantity(
+          demand.quantityBaseUnits,
+        )}.`,
+      )
+    }
+    if (demand.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) continue
+    const enLotes = lotes.get(key)!
+    if (enLotes.lessThan(pide)) {
+      return domainError(
+        409,
+        'AREA_TICKET_INSUFFICIENT_STOCK',
+        `Los lotes FIFO de "${demand.label}" no cubren la venta. Disponible: ${quantity(enLotes)}; requerida: ${quantity(
+          demand.quantityBaseUnits,
+        )}.`,
+      )
+    }
+  }
+  return null
+}
+
+/**
+ * 🔴 D5: freno de sólo lectura AL ARMAR la venta de vales, antes de mandar la tarjeta a la terminal o de recibir el efectivo. Lee la
+ * foto (sin `FOR UPDATE` ni escrituras) y decide con `frenoAlArmar`. Si la liquidación de esta venta va a rechazar por inventario, se
+ * dice ahora con su mismo 409; antes salía al liquidar, con la tarjeta ya cobrada (sesión en conciliación). La liquidación NO cambia.
+ * Lo que esto no ve sigue como hoy: cambios entre armar y liquidar y errores al ESCRIBIR los movimientos (Codex r4 #1).
  */
 async function revisarInventarioAlArmar(tx: Prisma.TransactionClient, venueId: string, sessionId: string, orderId: string): Promise<void> {
   const demands = await buildUnreservedAreaOrderInventoryDemands(tx, venueId, orderId)
@@ -4012,22 +4076,18 @@ async function revisarInventarioAlArmar(tx: Prisma.TransactionClient, venueId: s
   // ponytail: más de 500 apartados en una venta no se simulan (sin la lista completa, «lo ajeno» saldría de más y frenaría de más);
   // decide la liquidación, como antes de D5.
   if (apartados.length > TOPE_DE_APARTADOS_AL_ARMAR) return
-  const rechazo = (code: string, message: string) => domainError(409, code, message)
-  const clave = (t: { inventoryKind: AreaTicketInventoryTarget; inventoryId: string }) => `${t.inventoryKind}:${t.inventoryId}`
-  const existencia = new Map<string, Prisma.Decimal>()
-  const lotes = new Map<string, Prisma.Decimal>()
-  const propio = new Map<string, Prisma.Decimal>()
+  const foto: FotoParaFrenar = { demands, apartados, existencia: new Map(), lotes: new Map(), activos: new Map() }
 
-  // 1. Las filas, en el orden de `lockAreaOrderInventoryFootprint`.
-  for (const target of [...apartados, ...demands].sort((a, b) => clave(a).localeCompare(clave(b)))) {
-    const key = clave(target)
-    if (existencia.has(key)) continue
+  // Las filas, en el orden de `lockAreaOrderInventoryFootprint` (todas deben existir; su mismo rechazo).
+  for (const target of [...apartados, ...demands].sort((a, b) => claveDeInventario(a).localeCompare(claveDeInventario(b)))) {
+    const key = claveDeInventario(target)
+    if (foto.existencia.has(key)) continue
     const fila =
       target.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY
         ? await tx.inventory.findFirst({ where: { id: target.inventoryId, venueId }, select: { currentStock: true } })
         : await tx.rawMaterial.findFirst({ where: { id: target.inventoryId, venueId }, select: { currentStock: true } })
-    if (!fila) throw rechazo('AREA_TICKET_INVENTORY_MISSING', 'No se encontró uno de los inventarios de la orden.')
-    existencia.set(key, new Prisma.Decimal(fila.currentStock))
+    if (!fila) throw domainError(409, 'AREA_TICKET_INVENTORY_MISSING', 'No se encontró uno de los inventarios de la orden.')
+    foto.existencia.set(key, new Prisma.Decimal(fila.currentStock))
     if (target.inventoryKind === AreaTicketInventoryTarget.RAW_MATERIAL) {
       const [suma] = await tx.$queryRaw<Array<{ total: Prisma.Decimal | null }>>`
         SELECT SUM("remainingQuantity") AS total
@@ -4037,32 +4097,10 @@ async function revisarInventarioAlArmar(tx: Prisma.TransactionClient, venueId: s
           AND status = 'ACTIVE'
           AND "remainingQuantity" > 0
       `
-      lotes.set(key, new Prisma.Decimal(suma?.total ?? 0))
+      foto.lotes.set(key, new Prisma.Decimal(suma?.total ?? 0))
     }
   }
-
-  // 2. Los apartados de la sesión, uno por uno, como `consumeAreaTicketReservations`.
-  for (const apartado of apartados) {
-    const key = clave(apartado)
-    const cantidad = new Prisma.Decimal(apartado.quantityBaseUnits)
-    if (apartado.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) {
-      if (faltaDeVerdad(existencia.get(key)!, cantidad)) {
-        throw rechazo('AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'La existencia reservada ya no está disponible.')
-      }
-    } else {
-      // Un apartado en 0.000 o menos la liquidación SIEMPRE lo rechaza (no hay qué consumir): ahí no aplica la tolerancia.
-      if (cantidad.lessThanOrEqualTo(0) || faltaDeVerdad(lotes.get(key)!, cantidad)) {
-        throw rechazo('AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'Los lotes FIFO no cubren la reserva del vale.')
-      }
-      lotes.set(key, lotes.get(key)!.sub(cantidad))
-    }
-    existencia.set(key, existencia.get(key)!.sub(cantidad))
-    propio.set(key, (propio.get(key) ?? new Prisma.Decimal(0)).add(cantidad))
-  }
-
-  // 3. Lo no apartado, como `consumeUnreservedAreaOrderInventory` (allá los apartados propios ya se consumieron).
   for (const demand of demands) {
-    const key = clave(demand)
     const activos = await tx.areaTicketInventoryReservation.aggregate({
       where: {
         venueId,
@@ -4072,26 +4110,11 @@ async function revisarInventarioAlArmar(tx: Prisma.TransactionClient, venueId: s
       },
       _sum: { quantityBaseUnits: true },
     })
-    const libre = existencia.get(key)!.sub(new Prisma.Decimal(activos._sum.quantityBaseUnits ?? 0).sub(propio.get(key) ?? 0))
-    if (faltaDeVerdad(libre, demand.quantityBaseUnits)) {
-      throw rechazo(
-        'AREA_TICKET_INSUFFICIENT_STOCK',
-        `No hay existencia libre suficiente de "${demand.label}". Disponible: ${quantity(libre)}; requerida: ${quantity(
-          demand.quantityBaseUnits,
-        )}.`,
-      )
-    }
-    if (demand.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) continue
-    const enLotes = lotes.get(key)!
-    if (faltaDeVerdad(enLotes, demand.quantityBaseUnits)) {
-      throw rechazo(
-        'AREA_TICKET_INSUFFICIENT_STOCK',
-        `Los lotes FIFO de "${demand.label}" no cubren la venta. Disponible: ${quantity(enLotes)}; requerida: ${quantity(
-          demand.quantityBaseUnits,
-        )}.`,
-      )
-    }
+    foto.activos.set(claveDeInventario(demand), new Prisma.Decimal(activos._sum.quantityBaseUnits ?? 0))
   }
+
+  const freno = frenoAlArmar(foto)
+  if (freno) throw freno
 }
 
 /**
