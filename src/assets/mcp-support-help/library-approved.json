@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-21T05:23:02.139Z",
-  "approvedHash": "874d5aa663dc986fda2ea1a6fb47d56de7963c358821b0268bc1a6d926588443",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -158,7 +158,7 @@
       ]
     },
     "android/ordenes/cambiar-o-quitar-articulos-del-carrito": {
-      "sha256": "301832543a7b7d44878fd6a84cad2439de3163c7c4184c1dae6516623da039ef",
+      "sha256": "29bfe18b1cc68e1a3dfb78e8c7286ea9afbf73ab821c47ca46ed332f5951cbb6",
       "requiredPermissions": []
     },
     "android/personal/cambiar-de-usuario": {
@@ -1130,7 +1130,7 @@
       ]
     },
     "windows/ordenes/cambiar-o-quitar-articulos-del-carrito": {
-      "sha256": "a5f2aa22887350a58530495403fec0edf91ab424b40fd7d4f0711c201b93a982",
+      "sha256": "70ba3e9e7e87a2a2fc329796ce8b58e846abd15c4323b0b51ae1eb626c6eeca9",
       "requiredPermissions": []
     },
     "windows/personal/cambiar-de-usuario": {

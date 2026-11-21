@@ -100,7 +100,12 @@ describe('D5: repetir un vale con nota larga', () => {
  * naciera recortado, el carrito completo de la TPV con la nota original ya no lo reconocería ($100 → $200, Codex r3).
  */
 describe('D5 v5: materializar un vale con nota larga escribe el renglón con la nota completa', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    // hz:0555ee15:D5: armar la venta revisa la existencia de lo no apartado (lee los renglones y los apartados de la sesión); aquí no hay nada.
+    prismaMock.orderItem.findMany.mockResolvedValue([])
+    prismaMock.areaTicketInventoryReservation.findMany.mockResolvedValue([])
+  })
 
   it('🔴 la nota del OrderItem queda completa y el vale guardado no se reescribe', async () => {
     const now = new Date()
