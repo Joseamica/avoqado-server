@@ -12,7 +12,9 @@ import {
   canonical,
   compareVersions,
   duplicateTitles,
+  legacySignatureValid,
   manifestApprovalHash,
+  parseSignatures,
   products,
   readLibrarySources,
   sameEntry,
@@ -208,15 +210,14 @@ const entrySchema = z.object({
   activationKey: z.string().min(1).optional(),
 })
 
-const signaturesSchema = z.object({ version: z.literal(1), guides: z.record(z.string(), z.unknown()) })
-
 /**
  * Sólo carga lo aprobado (salvo `allowDraft`, que es del examen y lee sólo la propuesta), el sha256 del archivo y los
- * candados válidos. Con library-signatures.json junto a la propuesta (D22), cada guía va por su cuenta:
+ * candados válidos. Si la propuesta trae una firma del formato de antes que sigue valiendo, decide ella, como antes: sella
+ * todo el conjunto. Si no, con library-signatures.json junto a la propuesta (D22), cada guía va por su cuenta:
  * - sin firma o con la firma retocada (su sello no coincide): fuera;
  * - si la propuesta la trae distinta de como se firmó (archivo o candados): fuera, hasta que se firme;
  * - si la propuesta ya no la trae (retirada o quitada): sigue con su entrada firmada hasta que se firme su salida (R5-01).
- * Sin ese archivo decide el formato de antes: la firma del manifiesto sella todo el conjunto, todo o nada.
+ * Sin firma vieja válida ni ese archivo, no carga nada (como antes).
  * Lo que no cumple sale con un registro de su id, nunca de su texto. Dos títulos iguales entre guías distintas rompen la
  * carga: la aclaración se las muestra a la persona por su título.
  */
@@ -240,17 +241,17 @@ export function loadSupportLibrary(
   }
   let approvals: Record<string, unknown> | undefined
   const signaturesFile = options.signatures ?? signaturesPathFor(manifestFile)
-  if (!options.allowDraft && fs.existsSync(signaturesFile)) {
-    try {
-      approvals = signaturesSchema.parse(JSON.parse(fs.readFileSync(signaturesFile, 'utf8'))).guides
-    } catch {
-      logger.error('Support library signatures unreadable', { code: 'SUPPORT_LIBRARY_SIGNATURES_INVALID' })
-      return []
-    }
-  } else if (!options.allowDraft) {
-    if (!(manifest.approvedBy && manifest.approvedAt)) return []
-    // Formato viejo: quitar una entrada o retirar una guía después de firmar cambia lo firmado y no carga nada.
-    if (manifest.approvedHash !== manifestApprovalHash(manifest)) {
+  if (!options.allowDraft && !legacySignatureValid(manifest)) {
+    if (fs.existsSync(signaturesFile)) {
+      try {
+        approvals = parseSignatures(fs.readFileSync(signaturesFile, 'utf8')).guides
+      } catch {
+        logger.error('Support library signatures unreadable', { code: 'SUPPORT_LIBRARY_SIGNATURES_INVALID' })
+        return []
+      }
+    } else {
+      if (!(manifest.approvedBy && manifest.approvedAt)) return []
+      // Formato viejo: quitar una entrada o retirar una guía después de firmar cambia lo firmado y no carga nada.
       logger.error('Support library manifest tampered', { code: 'SUPPORT_LIBRARY_MANIFEST_TAMPERED' })
       return []
     }

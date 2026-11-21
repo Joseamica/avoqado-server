@@ -14,6 +14,7 @@ import {
 } from '@/services/support/knowledge.service'
 import {
   approvalHash,
+  parseSignatures,
   readLibrarySources,
   SUPPORT_LIBRARY_MANIFEST,
   SUPPORT_LIBRARY_SIGNATURES,
@@ -27,6 +28,7 @@ import {
   pendingChanges,
   signGuides,
   signableSources,
+  writeLibrary,
   type Manifest,
 } from '../../../../scripts/support-eval/aprobar-biblioteca'
 
@@ -689,6 +691,75 @@ describe('internal manual pages (decision 6)', () => {
       ;(logger.error as jest.Mock).mockClear()
       expect(load()).toEqual([])
       expect(logger.error).toHaveBeenCalledWith('Support library signatures unreadable', { code: 'SUPPORT_LIBRARY_SIGNATURES_INVALID' })
+    })
+
+    it('codex r1-1: signing only the replacement of a leaving guide with the same title is refused; signing both works', () => {
+      const RETIRED = 'android/ventas/cobrar-en-efectivo'
+      const first = signAll()
+      // Su reemplazo: una interna con el mismo título.
+      put(manual, 'android/caja/cobrar-en-efectivo.md', manualPage({ title: 'Cobrar en efectivo' }))
+      const proposal = regenerate({ ...first, retired: { [RETIRED]: 'La cubre el manual' } })
+      const REPLACEMENT = 'android/caja/cobrar-en-efectivo'
+      expect(pendingChanges(proposal, readSignatures())).toEqual({ changed: [REPLACEMENT], leaving: [RETIRED] })
+      expect(() => signGuides(proposal, readSignatures(), sourcesNow(), 'Fundador', [REPLACEMENT])).toThrow(/mismo título/)
+      // Sin firmar nada, sigue la retirada y el reemplazo espera: el bot no se queda vacío.
+      expect(ids()).toContain(RETIRED)
+      expect(ids()).not.toContain(REPLACEMENT)
+      const both = signGuides(proposal, readSignatures(), sourcesNow(), 'Fundador', [REPLACEMENT, RETIRED])
+      fs.writeFileSync(signaturesFile(), JSON.stringify(both.signatures))
+      expect(ids()).toContain(REPLACEMENT)
+      expect(ids()).not.toContain(RETIRED)
+    })
+
+    it('codex r1-2/4: writeLibrary writes the signatures before the proposal, and nothing if the signatures changed since they were read', () => {
+      signAll()
+      const files = { signatures: signaturesFile(), proposal: manifestFile }
+      const read = fs.readFileSync(files.signatures, 'utf8')
+      const proposalBefore = fs.readFileSync(manifestFile, 'utf8')
+      // Otra corrida firmó mientras tanto: no se pisa.
+      fs.writeFileSync(files.signatures, JSON.stringify({ ...readSignatures(), guides: {} }))
+      const changedMeanwhile = fs.readFileSync(files.signatures, 'utf8')
+      expect(() => writeLibrary({ signatures: readSignatures(), proposal: readProposal() }, read, files)).toThrow(/mientras tanto/)
+      expect(fs.readFileSync(files.signatures, 'utf8')).toBe(changedMeanwhile)
+      expect(fs.readFileSync(manifestFile, 'utf8')).toBe(proposalBefore)
+      // Si guardar las firmas falla, la propuesta (y su firma vieja) no se toca.
+      const broken = { signatures: path.join(root, 'no-existe', 'library-signatures.json'), proposal: manifestFile }
+      expect(() => writeLibrary({ signatures: readSignatures(), proposal: { ...readProposal(), guides: {} } }, null, broken)).toThrow()
+      expect(fs.readFileSync(manifestFile, 'utf8')).toBe(proposalBefore)
+    })
+
+    it('codex r1-3: a valid old signature in the proposal decides as before even with a signatures file; importing it applies exactly what it signed', () => {
+      signAll()
+      const stored = readSignatures()
+      // Una rama firmó con el generador viejo: cambió una guía y quitó otra, y firmó el conjunto.
+      fs.appendFileSync(path.join(help, 'dashboard/inicio/editar-perfil.md'), ' ')
+      fs.rmSync(path.join(help, 'android/ventas/cobrar-en-efectivo.md'))
+      writeManifest(buildManifest(readProposal(), sourcesNow()).guides)
+      const legacy = readProposal()
+      expect(ids()).toEqual([...new Set(load({ allowDraft: true }).map(g => g.id))])
+      expect(ids()).toContain('dashboard/inicio/editar-perfil')
+      const imported = importLegacySignature(legacy, stored)!
+      expect(Object.keys(imported.guides).sort()).toEqual(Object.keys(legacy.guides).sort())
+      // La que no cambió conserva su firma (y su fecha); la cambiada queda con la firma vieja.
+      expect(imported.guides[ONE]).toEqual(stored.guides[ONE])
+      expect(imported.guides['dashboard/inicio/editar-perfil']).toMatchObject({
+        entry: legacy.guides['dashboard/inicio/editar-perfil'],
+        approvedAt: '2026-11-10T12:00:00.000Z',
+      })
+      fs.writeFileSync(signaturesFile(), JSON.stringify(imported))
+      const servedLegacy = load().map(sourceRef)
+      regenerate()
+      expect(load().map(sourceRef)).toEqual(servedLegacy)
+      expect(pendingChanges(readProposal(), imported)).toEqual({ changed: [], leaving: [] })
+    })
+
+    it('codex r1-5: a signatures file the loader cannot read is not read by the generator either', () => {
+      signAll()
+      const wrong = JSON.stringify({ ...readSignatures(), version: 2 })
+      fs.writeFileSync(signaturesFile(), wrong)
+      expect(load()).toEqual([])
+      expect(() => parseSignatures(wrong)).toThrow()
+      expect(parseSignatures(JSON.stringify({ version: 1, guides: {} }))).toEqual({ version: 1, guides: {} })
     })
 
     it('(e) converting a valid old signature keeps every approval with its name and date and serves the same guides with the same hashes', () => {

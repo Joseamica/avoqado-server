@@ -3,6 +3,7 @@
 import crypto from 'crypto'
 import fs from 'fs'
 import path from 'path'
+import { z } from 'zod'
 import logger from '@/config/logger'
 import { normalize, parseFrontmatter } from '@/mcp/knowledge'
 import type { HelpApp } from './knowledge.service'
@@ -301,6 +302,24 @@ export function validApproval(id: string, a: unknown): a is GuideApproval {
     x.approvedHash === approvalHash(id, x as GuideApproval)
   )
 }
+
+/** Formato de antes: la firma del manifiesto sigue valiendo (firmado y su approvedHash coincide con el conjunto). */
+export const legacySignatureValid = (m: {
+  approvedBy?: string | null
+  approvedAt?: string | null
+  approvedHash?: string | null
+  retired?: Record<string, string>
+  guides?: Record<string, unknown>
+}): boolean =>
+  !!m.approvedBy &&
+  !!m.approvedAt &&
+  !!m.guides &&
+  m.approvedHash ===
+    manifestApprovalHash({ approvedBy: m.approvedBy, approvedAt: m.approvedAt, retired: m.retired ?? {}, guides: m.guides })
+
+const signaturesSchema = z.object({ version: z.literal(1), guides: z.record(z.string(), z.unknown()) })
+/** Lee library-signatures.json igual para el cargador y el generador; truena si no tiene la forma esperada. */
+export const parseSignatures = (text: string): LibrarySignatures => signaturesSchema.parse(JSON.parse(text)) as LibrarySignatures
 
 /** Títulos que se repiten entre guías distintas (sin acentos, mayúsculas ni signos): la aclaración muestra cada opción por su título. */
 export function duplicateTitles(guides: { id: string; title: string }[]): string[][] {

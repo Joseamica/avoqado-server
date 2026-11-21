@@ -5,8 +5,10 @@
  * (públicas y del manual interno), conserva los candados (y cualquier etiqueta) ya escritos de las públicas, copia los de las
  * internas de su frontmatter, quita las guías que ya no existen y las de `retired` (públicas que una interna cubre mejor;
  * `retired` se conserva). Su approvedBy/approvedAt/approvedHash quedan siempre en null: son del formato de antes y las ramas
- * viejas los escriben así. Nunca toca las firmas, salvo una vez: si todavía no hay `library-signatures.json` y la propuesta
- * anterior trae una firma vieja válida, la convierte (cada guía queda firmada con el mismo nombre y fecha).
+ * viejas los escriben así. Nunca borra una firma por regenerar. Si la propuesta anterior trae una firma vieja que sigue
+ * valiendo (p. ej. de una rama que firmó con el generador de antes), la pasa a `library-signatures.json` tal cual la firmó el
+ * founder: cada guía de ese conjunto con su nombre y fecha, y fuera las que ese conjunto ya no traía. Escribe primero las
+ * firmas y después la propuesta, y no escribe si otra corrida cambió las firmas mientras tanto.
  * Imprime lo pendiente de firma: `pendiente de firma (nueva o cambiada): <id>` y `pendiente de firma (sale de la lista): <id>`.
  * Con `--firmar "<nombre>" [ids…]`: firma en `library-signatures.json` lo pendiente (o sólo esos ids), únicamente si ningún
  * archivo cambió desde que se generó la propuesta, e imprime `firmada: <id>` y `salida firmada: <id>`.
@@ -24,7 +26,8 @@ import {
   SUPPORT_LIBRARY_SIGNATURES,
   approvalHash,
   duplicateTitles,
-  manifestApprovalHash,
+  legacySignatureValid,
+  parseSignatures,
   readLibrarySources,
   sameEntry,
   validApproval,
@@ -82,21 +85,27 @@ export function buildManifest(previous: unknown, sources: LibrarySource[]): Mani
   return { version: 1, approvedBy: null, approvedAt: null, approvedHash: null, retired, guides }
 }
 
+const sortedGuides = (guides: Record<string, GuideApproval>) =>
+  Object.fromEntries(Object.entries(guides).sort(([a], [b]) => (a < b ? -1 : 1)))
+
 /**
- * Una firma vieja (todo el conjunto) que sigue valiendo, convertida a firmas por guía con el mismo nombre y fecha; null si
- * no hay firma o no vale (sin approvedHash, o el conjunto cambió desde que se firmó).
+ * Una firma vieja (todo el conjunto) que sigue valiendo, pasada a firmas por guía tal como la dio el founder: cada guía del
+ * conjunto queda firmada (con la firma que ya tenía si es la misma entrada, o con el nombre y fecha de la vieja) y las que el
+ * conjunto ya no traía quedan sin firma (su salida ya la firmó). null si no hay firma vieja o no vale.
  */
-export function importLegacySignature(previous: unknown): LibrarySignatures | null {
+export function importLegacySignature(previous: unknown, stored: LibrarySignatures | null = null): LibrarySignatures | null {
   const prev = previous as Partial<Manifest> | null
-  if (!prev?.approvedBy || !prev.approvedAt || !prev.guides || typeof prev.guides !== 'object') return null
-  const sealed = { approvedBy: prev.approvedBy, approvedAt: prev.approvedAt, retired: prev.retired ?? {}, guides: prev.guides }
-  if (prev.approvedHash !== manifestApprovalHash(sealed)) return null
+  if (!prev || !legacySignatureValid(prev)) return null
   const guides: Record<string, GuideApproval> = {}
-  for (const [id, entry] of Object.entries(prev.guides)) {
-    const approval = { entry: entry as Record<string, unknown>, approvedBy: prev.approvedBy, approvedAt: prev.approvedAt }
-    guides[id] = { ...approval, approvedHash: approvalHash(id, approval) }
+  for (const [id, entry] of Object.entries(prev.guides!)) {
+    const kept = stored?.guides[id]
+    if (validApproval(id, kept) && sameEntry(kept.entry, entry)) guides[id] = kept
+    else {
+      const approval = { entry: entry as Record<string, unknown>, approvedBy: prev.approvedBy!, approvedAt: prev.approvedAt! }
+      guides[id] = { ...approval, approvedHash: approvalHash(id, approval) }
+    }
   }
-  return { version: 1, guides }
+  return { version: 1, guides: sortedGuides(guides) }
 }
 
 /** Lo que espera la firma: las guías de la propuesta sin firma válida o distintas de lo firmado, y las firmadas que ya no están. */
@@ -144,8 +153,39 @@ export function signGuides(
     const approval = { entry: manifest.guides[id] as Record<string, unknown>, approvedBy: by, approvedAt: now.toISOString() }
     guides[id] = { ...approval, approvedHash: approvalHash(id, approval) }
   }
-  const sorted = Object.fromEntries(Object.entries(guides).sort(([a], [b]) => (a < b ? -1 : 1)))
-  return { signatures: { version: 1, guides: sorted }, signed, left }
+  // Lo que el bot serviría con estas firmas: el cargador falla cerrado (biblioteca vacía) con dos títulos iguales. Pasa al
+  // firmar sólo el reemplazo de una guía que se retira con el mismo título: se firman juntos o no se firma.
+  const fileSha = digests(sources)
+  const served = sources.filter(
+    s =>
+      validApproval(s.id, guides[s.id]) &&
+      (!(s.id in manifest.guides) || sameEntry(manifest.guides[s.id], guides[s.id].entry)) &&
+      guides[s.id].entry.sha256 === fileSha.get(s.id),
+  )
+  const repeated = duplicateTitles(served)
+  if (repeated.length)
+    throw new Error(
+      `Firmar así deja guías con el mismo título y el bot se quedaría sin ninguna: ${repeated.map(ids => ids.join(' = ')).join('; ')}. Firma también la salida de la que se va.`,
+    )
+  return { signatures: { version: 1, guides: sortedGuides(guides) }, signed, left }
+}
+
+/**
+ * Escribe las firmas ANTES que la propuesta: si algo corta a la mitad, la firma vieja sigue en la propuesta y nada se pierde.
+ * `signaturesRead` es el texto de las firmas al empezar (null si no había): si otra corrida las cambió mientras tanto, no
+ * escribe nada (dos firmas a la vez se pisarían).
+ */
+export function writeLibrary(
+  out: { signatures?: LibrarySignatures; proposal?: Manifest },
+  signaturesRead: string | null,
+  files = { signatures: SUPPORT_LIBRARY_SIGNATURES, proposal: SUPPORT_LIBRARY_MANIFEST },
+) {
+  const now = fs.existsSync(files.signatures) ? fs.readFileSync(files.signatures, 'utf8') : null
+  // ponytail: comparar y escribir no es atómico; la ventana es de milisegundos y quien firma es una persona.
+  if (now !== signaturesRead) throw new Error('Otra corrida cambió library-signatures.json mientras tanto: vuelve a correr el comando.')
+  const json = (data: unknown) => `${JSON.stringify(data, null, 2)}\n`
+  if (out.signatures) fs.writeFileSync(files.signatures, json(out.signatures))
+  if (out.proposal) fs.writeFileSync(files.proposal, json(out.proposal))
 }
 
 /** Guías sin ningún candado (permisos, función de plan ni ajuste): responden igual a cualquiera. */
@@ -153,8 +193,6 @@ export const ungatedGuides = (manifest: Manifest) =>
   Object.entries(manifest.guides)
     .filter(([, e]) => !e.requiredPermissions.length && !e.featureCode && !e.gateKind && !e.activationKey)
     .map(([id]) => id)
-
-const write = (file: string, data: unknown) => fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`)
 
 function main() {
   const args = process.argv.slice(2)
@@ -164,29 +202,30 @@ function main() {
   const sources = readLibrarySources(undefined, undefined, undefined, (id, reason) => excluded.push({ id, reason }))
   const repeated = duplicateTitles(signableSources(sources, previous))
   if (repeated.length) throw new Error(`Títulos repetidos entre guías distintas: ${repeated.map(ids => ids.join(' = ')).join('; ')}`)
-  const stored: LibrarySignatures | null = fs.existsSync(SUPPORT_LIBRARY_SIGNATURES)
-    ? JSON.parse(fs.readFileSync(SUPPORT_LIBRARY_SIGNATURES, 'utf8'))
-    : null
-  const converted = stored ? null : importLegacySignature(previous)
-  let signatures: LibrarySignatures = stored ?? converted ?? { version: 1, guides: {} }
-  if (converted) console.log(`firma vieja convertida: ${Object.keys(converted.guides).length} guías firmadas por ${previous.approvedBy}`)
+  const signaturesRead = fs.existsSync(SUPPORT_LIBRARY_SIGNATURES) ? fs.readFileSync(SUPPORT_LIBRARY_SIGNATURES, 'utf8') : null
+  // Mismo lector que el cargador: si él no lo puede leer, aquí tampoco se sigue como si nada.
+  const stored = signaturesRead === null ? null : parseSignatures(signaturesRead)
+  const converted = importLegacySignature(previous, stored)
+  let signatures: LibrarySignatures = converted ?? stored ?? { version: 1, guides: {} }
+  if (converted && !sameEntry(converted, stored))
+    console.log(`firma vieja pasada a firmas por guía: ${Object.keys(converted.guides).length} guías firmadas por ${previous.approvedBy}`)
   let next: Manifest
   if (at >= 0) {
     if (!previous) throw new Error('No hay manifiesto que firmar: córrelo primero sin --firmar.')
     next = previous
     const result = signGuides(previous, signatures, sources, args[at + 1] ?? '', args.slice(at + 2))
     signatures = result.signatures
-    write(SUPPORT_LIBRARY_SIGNATURES, signatures)
+    writeLibrary({ signatures }, signaturesRead)
     for (const id of result.signed) console.log(`firmada: ${id}`)
     for (const id of result.left) console.log(`salida firmada: ${id}`)
   } else {
     next = buildManifest(previous, sources)
-    write(SUPPORT_LIBRARY_MANIFEST, next)
-    if (converted) write(SUPPORT_LIBRARY_SIGNATURES, converted)
+    writeLibrary({ signatures, proposal: next }, signaturesRead)
   }
   const pending = pendingChanges(next, signatures)
+  const valid = Object.entries(signatures.guides).filter(([id, a]) => validApproval(id, a)).length
   console.log(
-    `${Object.keys(next.guides).length} guías en la lista · ${Object.keys(signatures.guides).length} firmadas · ` +
+    `${Object.keys(next.guides).length} guías en la lista · ${valid} firmadas · ` +
       `${pending.changed.length + pending.leaving.length} pendientes de firma`,
   )
   for (const id of pending.changed) console.log(`pendiente de firma (nueva o cambiada): ${id}`)
