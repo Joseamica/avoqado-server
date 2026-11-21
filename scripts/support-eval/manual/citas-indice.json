@@ -41,8 +41,16 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "windows/impresoras/la-comanda-no-sale",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -215,6 +223,26 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/lan/RachaSinAcuse.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/lan/TransporteLan.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/local/PayloadCache.kt": [
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
@@ -245,12 +273,20 @@
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/network/ApiService.kt": [
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
         "pagina": "android/mesas/mover-o-unir-cuentas",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -263,8 +299,16 @@
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/network/ForbiddenInterceptor.kt": [
       {
+        "pagina": "android/mesas/anular-producto-enviado",
+        "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b"
+      },
+      {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/mesas/anular-producto-enviado",
+        "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/network/ServerErrorText.kt": [
@@ -319,6 +363,10 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "android/inventario/contar-existencia",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -363,6 +411,10 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "windows/inventario/contar-existencia",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
@@ -393,8 +445,16 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "windows/impresoras/la-comanda-no-sale",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/util/ConnectivityMonitor.kt": [
@@ -659,8 +719,16 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "windows/cobro/cobrar-sin-internet",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/designsystem/components/PlanGate.kt": [
@@ -689,6 +757,16 @@
       {
         "pagina": "windows/personal/cambiar-de-usuario",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/designsystem/theme/Color.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/giftcards/domain/EntradaDeTarjetas.kt": [
@@ -943,6 +1021,26 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/data/EstadoDePantallasDeCocina.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/data/KDSRepository.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/kds/data/KitchenPreparationRepository.kt": [
       {
         "pagina": "android/mesas/tiempos-cocina-y-liberar",
@@ -955,8 +1053,16 @@
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt": [
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "android/mesas/tiempos-cocina-y-liberar",
         "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/mesas/tiempos-cocina-y-liberar",
@@ -983,10 +1089,38 @@
         "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/presentation/KDSScreen.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/presentation/KDSSettingsSheet.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
       {
         "pagina": "android/mesas/tiempos-cocina-y-liberar",
         "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/mesas/tiempos-cocina-y-liberar",
@@ -1019,6 +1153,10 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "android/reservas/lista-de-espera",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -1045,6 +1183,10 @@
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -1641,6 +1783,10 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -1675,6 +1821,10 @@
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/lealtad/sello-que-no-se-sumo",
@@ -1719,6 +1869,10 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -1757,6 +1911,10 @@
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/lealtad/sello-que-no-se-sumo",
@@ -2377,8 +2535,16 @@
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/ComandaPrinter.kt": [
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "windows/impresoras/la-comanda-no-sale",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/ComandasPendientesStore.kt": [
@@ -2389,6 +2555,16 @@
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/EntregaPorWifi.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/PoliticaDeReintento.kt": [
@@ -2417,8 +2593,16 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "windows/impresoras/la-comanda-no-sale",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/ReplayDeComandasPendientes.kt": [
@@ -2465,6 +2649,16 @@
       {
         "pagina": "windows/impresoras/agregar-y-probar-impresora",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/routing/PrintRoutingMapper.kt": [
@@ -2899,6 +3093,10 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "android/inventario/registrar-merma",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -2969,6 +3167,10 @@
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/inventario/registrar-merma",
@@ -3181,6 +3383,10 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/mesas/anular-producto-enviado",
+        "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b"
+      },
+      {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
@@ -3191,6 +3397,10 @@
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/mesas/anular-producto-enviado",
+        "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt": [
@@ -3203,8 +3413,16 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "android/mesas/anular-producto-enviado",
+        "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b"
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
@@ -3215,8 +3433,16 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/mesas/anular-producto-enviado",
+        "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt": [
@@ -3225,12 +3451,20 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/mesas/anular-producto-enviado",
+        "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b"
+      },
+      {
         "pagina": "android/mesas/mover-o-unir-cuentas",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/mesas/anular-producto-enviado",
+        "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b"
       },
       {
         "pagina": "windows/mesas/mover-o-unir-cuentas",
@@ -3481,6 +3715,16 @@
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
+    "avoqado-android:avoqado-server/src/controllers/mobile/kds.mobile.controller.ts": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
     "avoqado-android:avoqado-server/src/controllers/mobile/onlineOrders.mobile.controller.ts": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
@@ -3687,6 +3931,10 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "android/inventario/contar-existencia",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -3705,6 +3953,10 @@
       {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "android/mesas/anular-producto-enviado",
+        "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b"
       },
       {
         "pagina": "android/mesas/mover-o-unir-cuentas",
@@ -3811,6 +4063,10 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "windows/inventario/contar-existencia",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
@@ -3829,6 +4085,10 @@
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/mesas/anular-producto-enviado",
+        "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b"
       },
       {
         "pagina": "windows/mesas/mover-o-unir-cuentas",
@@ -3909,6 +4169,16 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:avoqado-server/src/services/kds/kitchenDisplayStations.ts": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
     "avoqado-android:avoqado-server/src/services/kds/kitchenPreparation.service.ts": [
       {
         "pagina": "android/mesas/tiempos-cocina-y-liberar",
@@ -3919,10 +4189,28 @@
         "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
       }
     ],
+    "avoqado-android:avoqado-server/src/services/kds/pantallasVivas.ts": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
     "avoqado-android:avoqado-server/src/services/mobile/kds.mobile.service.ts": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
       {
         "pagina": "android/mesas/tiempos-cocina-y-liberar",
         "sourceRef": "94fe8b57ee9dcdb5cbd288bc299714150c411726"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/mesas/tiempos-cocina-y-liberar",
@@ -4421,6 +4709,12 @@
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      }
+    ],
+    "avoqado-android:desktop/pos/windows/LEEME-RED-LOCAL.txt": [
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/core/data/workers/PaymentSyncWorker.kt": [

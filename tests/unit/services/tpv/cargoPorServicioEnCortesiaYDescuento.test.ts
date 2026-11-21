@@ -66,6 +66,8 @@ jest.mock('@/utils/prismaClient', () => {
     // B2 (P2): `applyDiscount` crea su fila y sincroniza su reparto, que lee los renglones de la orden.
     orderItem: { update: jest.fn(), delete: jest.fn(), deleteMany: jest.fn(), findMany: jest.fn(async () => []) },
     orderAction: { create: jest.fn() },
+    // «Anular producto» (Codex r2 #7): `ITEM_VOIDED` va dentro de la transacción de la anulación.
+    activityLog: { create: jest.fn(async () => ({})) },
     orderDiscount: {
       findMany: jest.fn(async () => []),
       create: jest.fn(async () => ({})),

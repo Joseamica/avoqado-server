@@ -1,6 +1,8 @@
 import { bloquearCuentaParaEditar, rechazarSiCuentaAnuladaEnTx } from '../shared/cuentaCancelada'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import { cobradoQueCubreEnTx } from '@/services/shared/saldoReabiertoAlReembolsar'
+import { writeLegacyActivityAuditTx } from '@/services/activityAudit.service'
+import { esLlaveDeRonda } from '../mobile/llaveDeRonda'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { AreaTicketInventoryReservationStatus, Order, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
@@ -654,6 +656,44 @@ function normalizeExternalId(externalId?: string | null): string | null {
  * P2002: es un conflicto TRANSITORIO, no un rechazo de negocio. Como VERSION_CONFLICT la cola lo reintenta (RETRY)
  * y, al reintentar, encuentra el renglón por su llave: una sola ronda (spec 2026-09-27 §5).
  */
+/**
+ * Las llaves de renglón de esta cuenta que una anulación dejó como lápida (`OrderAction` VOID, `metadata.externalIds`, escrita en la
+ * misma transacción que la anulación). Sólo trabaja con llaves de RONDA (`sync:<ronda>:<n>`, decisión 1 de D7): las de Mostrador
+ * (UUID) y otras etiquetas sí se repiten entre cuentas y no protegen nada aquí. Sólo devuelve las que se piden.
+ */
+export async function llavesAnuladasDeLaCuenta(
+  tx: Pick<Prisma.TransactionClient, 'orderAction'>,
+  orderId: string,
+  llaves: string[],
+): Promise<Set<string>> {
+  const anuladas = new Set<string>()
+  const pedidas = new Set(llaves.filter(esLlaveDeRonda))
+  if (pedidas.size === 0) return anuladas
+  // Se recorren TODAS las anulaciones de la cuenta, por páginas de `PAGINA_DE_ANULACIONES` con cursor estable: la respuesta es exacta
+  // (sin «las últimas N», que dejaba fuera la que importa, Codex r5 #7 y r6 #3) y su costo depende de cuántas anulaciones tiene la
+  // cuenta (casi siempre 0: una lectura), no de cuántos renglones trae la ronda (Codex r7 #1 y r8 #8: una consulta por llave eran
+  // 1,001 para una ronda de 1,000). Se detiene en cuanto encontró todas las pedidas.
+  let cursor: string | undefined
+  for (;;) {
+    const pagina = await tx.orderAction.findMany({
+      where: { orderId, actionType: 'VOID' },
+      select: { id: true, metadata: true },
+      orderBy: { id: 'asc' },
+      take: PAGINA_DE_ANULACIONES,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    })
+    for (const { metadata } of pagina) {
+      const ids = (metadata as { externalIds?: unknown } | null)?.externalIds
+      if (Array.isArray(ids)) for (const id of ids) if (typeof id === 'string' && pedidas.has(id)) anuladas.add(id)
+    }
+    if (anuladas.size === pedidas.size || pagina.length < PAGINA_DE_ANULACIONES) return anuladas
+    cursor = pagina[pagina.length - 1].id
+  }
+}
+
+/** Anulaciones (`OrderAction` VOID) que se leen por página al buscar lápidas. */
+const PAGINA_DE_ANULACIONES = 200
+
 export async function conLlaveDeRonda<T>(crear: () => Promise<T>): Promise<T> {
   try {
     return await crear()
@@ -1878,7 +1918,17 @@ export async function addItemsToOrder(
             ).map(renglon => renglon.externalId)
           : [],
       )
-      const esReplica = (item: NormalizedAddOrderItemInput) => llavesGuardadas.has(normalizeExternalId(item.externalId))
+      // «Anular producto» (Codex r1 #1): la llave de un renglón ANULADO no vuelve a crearse. El reenvío de una ronda (respuesta
+      // perdida, cola sin red) o el carrito de la TPV deduplican por llave, y la fila anulada ya no existe: sin esto el producto
+      // volvía a la cuenta y se cobraba. Se trata como réplica: ni se valida contra el catálogo de hoy ni se escribe.
+      // Sólo las llaves de ronda (`sync:<ronda>:<n>`): la lápida no trabaja con etiquetas de Mostrador ni de otros caminos (decisión 1).
+      const llavesPedidas = normalizedItems.map(item => normalizeExternalId(item.externalId)).filter(esLlaveDeRonda)
+      const llavesAnuladas = llavesPedidas.length > 0 ? await llavesAnuladasDeLaCuenta(tx, order.id, llavesPedidas) : new Set<string>()
+      const esAnulada = (item: NormalizedAddOrderItemInput) => {
+        const llave = normalizeExternalId(item.externalId)
+        return !!llave && llavesAnuladas.has(llave)
+      }
+      const esReplica = (item: NormalizedAddOrderItemInput) => llavesGuardadas.has(normalizeExternalId(item.externalId)) || esAnulada(item)
 
       if (asNewRound) {
         for (const product of products) {
@@ -2349,7 +2399,13 @@ export async function addItemsToOrder(
 
       // En serie: una transacción es UNA conexión, y en serie el primer error corta la ronda sin dejar consultas en vuelo.
       const newOrderItems: Awaited<ReturnType<typeof escribirRenglon>>[] = []
-      for (const item of normalizedItems) newOrderItems.push(await escribirRenglon(item))
+      for (const item of normalizedItems) {
+        if (esAnulada(item)) {
+          logger.warn(`⏭️ [ADD ITEMS] Renglón anulado: su llave no se vuelve a crear (externalId=${normalizeExternalId(item.externalId)})`)
+          continue
+        }
+        newOrderItems.push(await escribirRenglon(item))
+      }
       if (createdPromotionIds.length > 0) {
         // The selected component count is bounded by this request's packages;
         // return every component rather than silently truncating a large combo.
@@ -3290,7 +3346,22 @@ interface VoidItemsInput {
    * vales soltados (D2) y los canjes que se devuelven. Sin él, como antes: el `staffId` del cuerpo (los vales soltados, sin autor).
    */
   actorId?: string
+  /**
+   * «Anular producto» desde la mesa del POS (Flautas, 20-nov): como la cortesía, nada con abonos (PARTIAL). La TPV no la pone y
+   * sigue anulando parcial sobre PARTIAL (con el tope de lo cobrado de abajo).
+   */
+  soloSinCobros?: boolean
+  /**
+   * «Anular producto» desde la mesa del POS: el último renglón no se anula. Anularlo cancela la cuenta, y este camino no suelta la
+   * mesa (sí `cancelOrder`): la mesa quedaría ocupada sin cuenta. Para eso está «Anular cuenta».
+   */
+  sinCancelarLaCuenta?: boolean
 }
+
+export const VOID_ITEM_HAS_PAYMENTS = 'ORDER_ITEM_VOID_HAS_PAYMENTS'
+export const VOID_ITEM_LAST_ITEM = 'ORDER_ITEM_VOID_LAST_ITEM'
+const MENSAJE_ANULAR_CON_PAGOS =
+  'Esta cuenta ya tiene pagos registrados y ya no se pueden anular sus productos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.'
 
 /**
  * Void (cancel) items from an order
@@ -3306,7 +3377,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
   const autor = input.actorId ?? input.staffId
 
   // R65 b: `valesSoltados` nace DENTRO de cada intento y sale en el retorno.
-  const { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, recorte, valesSoltados } = await withDeadlockRetry(
+  const { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, valesSoltados } = await withDeadlockRetry(
     async tx => {
       let valesSoltados: ValesSoltados | null = null
       // El candado de comandas va PRIMERO (mismo orden que el armado: comandas → orden). Si esta anulación deja la cuenta
@@ -3356,6 +3427,16 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       if (order.paymentStatus === 'PAID') {
         throw new BadRequestError(
           'Esta cuenta ya está pagada y ya no se pueden anular artículos. Si hay que devolver dinero, alguien con permiso lo hace con Reembolso en el POS o en el panel.',
+        )
+      }
+      if (input.soloSinCobros && order.paymentStatus === 'PARTIAL') {
+        throw new BadRequestError(MENSAJE_ANULAR_CON_PAGOS, VOID_ITEM_HAS_PAYMENTS)
+      }
+      // Antes de devolver canjes (abajo, al anular TODO): aquí no se cancela nada.
+      if (input.sinCancelarLaCuenta && order.items.every(item => input.itemIds.includes(item.id))) {
+        throw new BadRequestError(
+          'Es el único producto de la cuenta. Para quitarlo usa «Anular cuenta», o manda primero lo que lo reemplaza y luego anúlalo.',
+          VOID_ITEM_LAST_ITEM,
         )
       }
 
@@ -3543,6 +3624,10 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       const pagosRegistrados = await cobradoQueCubreEnTx(tx, { venueId, orderId })
       const pagadoPorPagos = pagosRegistrados.amount.plus(pagosRegistrados.tipAmount)
       const pagado = Prisma.Decimal.max(new Prisma.Decimal(order.paidAmount ?? 0), pagadoPorPagos).toDecimalPlaces(2)
+      // «Anular producto» (Codex r1 #6): una cuenta con un cobro registrado tampoco, aunque su cabecera diga PENDING (histórico).
+      if (input.soloSinCobros && pagado.greaterThan(0)) {
+        throw new BadRequestError(MENSAJE_ANULAR_CON_PAGOS, VOID_ITEM_HAS_PAYMENTS)
+      }
       const totalNuevo = new Prisma.Decimal(newTotal).toDecimalPlaces(2)
       if (totalNuevo.lessThan(pagado)) {
         throw new BadRequestError(
@@ -3627,6 +3712,41 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
           },
         })
         .catch(conflictoSiLaMovieron)
+      // La bitácora de la anulación y la LÁPIDA de sus llaves caen o persisten JUNTO con ella («Anular producto», Codex r1 #1 y
+      // #10). Fuera de la transacción, un fallo dejaba el producto fuera sin rastro; y sin `externalIds`, una ronda reenviada (se
+      // perdió su respuesta) lo volvía a crear: `addItemsToOrder` deduplica por la llave del renglón, que ya no existe.
+      await tx.orderAction.create({
+        data: {
+          orderId,
+          actionType: 'VOID',
+          performedById: autor,
+          reason: input.reason,
+          metadata: {
+            itemIds: input.itemIds,
+            externalIds: itemsToVoid.map(item => item.externalId).filter((llave): llave is string => !!llave),
+            voidAmount,
+            itemCount: itemsToVoid.length,
+            itemNames: itemsToVoid.map(item => item.productName || item.product?.name || ''),
+            sentToKitchen: itemsToVoid.some(item => item.sentToKitchenAt !== null),
+            voidedAllItems: isVoidingAllItems, // ⭐ Track if order was auto-closed
+          },
+        },
+      })
+      // Y la bitácora del dueño (lo que lee el DASHBOARD), también adentro (Codex r2 #7): sin anulación sin su `ITEM_VOIDED`.
+      await writeLegacyActivityAuditTx(tx, {
+        staffId: autor ?? null,
+        venueId,
+        action: 'ITEM_VOIDED',
+        entity: 'Order',
+        entityId: orderId,
+        data: {
+          itemIds: input.itemIds,
+          amount: Number(voidAmount),
+          reason: input.reason ?? undefined,
+          ...(recorte.retiradas.length > 0 ? { descuentosRetirados: recorte.retiradas } : {}),
+          ...vendedorSiNoEsLaSesion({ staffId: input.staffId, performedBy: input.actorId }),
+        } as Prisma.InputJsonValue,
+      })
       return { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, recorte, valesSoltados }
     },
     { etiqueta: 'voidItems', timeout: 15_000, maxWait: 5_000 },
@@ -3649,37 +3769,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
     }
   }
 
-  // Create audit trail
-  await prisma.orderAction.create({
-    data: {
-      orderId,
-      actionType: 'VOID',
-      performedById: autor,
-      reason: input.reason,
-      metadata: {
-        itemIds: input.itemIds,
-        voidAmount,
-        itemCount: itemsToVoid.length,
-        itemNames: itemsToVoid.map(item => item.productName || item.product?.name || ''),
-        sentToKitchen: itemsToVoid.some(item => item.sentToKitchenAt !== null),
-        voidedAllItems: isVoidingAllItems, // ⭐ Track if order was auto-closed
-      },
-    },
-  })
-  void logAction({
-    staffId: autor ?? null,
-    venueId,
-    action: 'ITEM_VOIDED',
-    entity: 'Order',
-    entityId: orderId,
-    data: {
-      itemIds: input.itemIds,
-      amount: Number(voidAmount),
-      reason: input.reason ?? undefined,
-      ...(recorte.retiradas.length > 0 ? { descuentosRetirados: recorte.retiradas } : {}),
-      ...vendedorSiNoEsLaSesion({ staffId: input.staffId, performedBy: input.actorId }),
-    },
-  })
+  // La `OrderAction` y el `ITEM_VOIDED` de la bitácora del dueño se escriben DENTRO de la transacción, arriba.
 
   logger.info(`✅ [ORDER SERVICE] Voided ${itemsToVoid.length} items | voided amount: $${voidAmount} | new total: $${newTotal}`)
 

@@ -94,6 +94,12 @@
       "sha256": "96711a8277aea282ab50b53be4c0eec45004073e250287083251a5512ceafa9d",
       "requiredPermissions": []
     },
+    "android/impresoras/pantalla-de-cocina-sin-internet": {
+      "sha256": "450304f69e120b1b2911e7ead88027bdb876975601a87a123738b2d25db29a2f",
+      "requiredPermissions": [],
+      "featureCode": "KITCHEN_DISPLAY",
+      "gateKind": "FEATURE"
+    },
     "android/inventario/contar-existencia": {
       "sha256": "12d4f7bc2e3d8d4698d399c2f8fb12ba960396db1f51c0cdfd531ecb5c8b0a3f",
       "requiredPermissions": [
@@ -1070,6 +1076,12 @@
     "windows/impresoras/la-comanda-no-sale": {
       "sha256": "267ba4739f4f3bc71ab0e8c1081e0b5c8ace245f85874cb18a0392363d3ffb14",
       "requiredPermissions": []
+    },
+    "windows/impresoras/pantalla-de-cocina-sin-internet": {
+      "sha256": "f6cbfb354d818240e69a9a3e8697c58391da649be352e1ae7b066ab2cd034034",
+      "requiredPermissions": [],
+      "featureCode": "KITCHEN_DISPLAY",
+      "gateKind": "FEATURE"
     },
     "windows/inventario/contar-existencia": {
       "sha256": "e8a0514755e479403b6a0e541424d6fd9f0a66183aa5491aaa323b55ad0e15b7",

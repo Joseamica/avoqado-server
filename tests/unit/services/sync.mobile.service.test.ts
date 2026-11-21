@@ -515,6 +515,33 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks[1]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-2', version: 8 } })
   })
 
+  // D7 «Anular producto», decisión 1 = A acotada (founder por delegación, 20-nov): en una ronda sólo vale `sync:<id del intent>:<n>`.
+  it('decisión 1 de D7: la llave de las apps pasa intacta; otra forma (espacios, propia, de otra ronda) se reemplaza por la de la ronda', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 7, status: 'PENDING' })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockResolvedValue({ version: 8, total: 150.0 })
+
+    await processIntents(
+      baseParams([
+        {
+          id: 'r-uno',
+          type: 'ADD_ITEMS',
+          payload: {
+            orderId: 'order-1',
+            items: [
+              { productId: 'p1', quantity: 1, externalId: 'sync:r-uno:0' },
+              { productId: 'p1', quantity: 1, externalId: ' cafe-1 ' },
+              { productId: 'p1', quantity: 1, externalId: 'sync:otra-ronda:2' },
+              { productId: 'p1', quantity: 1, externalId: '   ' },
+            ],
+          },
+        },
+      ]),
+    )
+
+    const enviados = (orderTpvService.addItemsToOrder as jest.Mock).mock.calls[0][2].map((it: any) => it.externalId)
+    expect(enviados).toEqual(['sync:r-uno:0', 'sync:r-uno:1', 'sync:r-uno:2', 'sync:r-uno:3'])
+  })
+
   it.each(['APPLY_DISCOUNT', 'ADD_ITEMS'])('%s pendiente sobre cuenta anulada queda REJECTED, nunca RETRY', async type => {
     const error = new BadRequestError('Esta cuenta está cancelada, abre una nueva.', 'ORDER_CANCELLED_NO_EDIT')
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 5, status: 'PENDING' })
