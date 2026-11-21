@@ -11,10 +11,18 @@ import crypto from 'crypto'
 
 import AppError from '../../errors/AppError'
 import { ACCESS_TOKEN_SECRET } from '../../config/env'
+import prisma from '../../utils/prismaClient'
 import { cotizarVentaDeMostrador, type CreateOrderInput } from '../mobile/order.mobile.service'
+import { ALIVE_ORDER_EXCLUDED_STATUSES } from '../reservation/createOrderFromReservation'
 import { huellaDelCarritoCompleto, motivoSinVentaDelPedido } from './ventaDeLaMaquina'
 
 export const VIGENCIA_DE_LA_COTIZACION_MS = 10 * 60_000
+
+/**
+ * Codex servidor r7 #2: el carrito más grande que se cotiza (bytes de su JSON). Su cierre y su duda leen hasta 4 MiB
+ * (`LIMITE_JSON_DE_LA_MAQUINA`, `config/cuerpoJson.ts`): un carrito de aquí cabe con su sobre aunque la PC lo escapara entero (×6).
+ */
+export const TOPE_DEL_CARRITO_DE_LA_MAQUINA = 512 * 1024
 
 /**
  * Por qué la máquina no cobra este carrito (la PC lo explica y ofrece tarjeta antes del `paycash`):
@@ -23,9 +31,22 @@ export const VIGENCIA_DE_LA_COTIZACION_MS = 10 * 60_000
  *  · `PREMIO_PENDIENTE`: un premio de sellos (R5#4; su texto es otro);
  *  · `SIN_IMPORTE`: la cuenta es de $0 (Codex r1 #12);
  *  · `CENTAVOS`: no es múltiplo de $0.50;
- *  · `PRODUCTO_NO_DISPONIBLE`: un producto o extra que ya no está.
+ *  · `PRODUCTO_NO_DISPONIBLE`: un producto o extra que ya no está;
+ *  · `YA_PAGADA`: la reserva del carrito ya se cobró (o se abonó) en otra caja (Codex servidor r7 #1): «Esta reserva ya se cobró en otra
+ *    caja»;
+ *  · `RESERVA_CON_CUENTA`: la reserva ya tiene su cuenta abierta en otra caja (recepción registró la llegada), sin cobrar: «Esta reserva
+ *    ya tiene su cuenta en otra caja: cóbrala ahí» (r7 #1);
+ *  · `CARRITO_MUY_GRANDE`: el carrito pasa de `TOPE_DEL_CARRITO_DE_LA_MAQUINA` y su cierre podría no caber (r7 #2).
  */
-export type MotivoSinMaquina = 'CENTAVOS' | 'PRODUCTO_NO_DISPONIBLE' | 'PREMIO_PENDIENTE' | 'DESCUENTO' | 'SIN_IMPORTE'
+export type MotivoSinMaquina =
+  | 'CENTAVOS'
+  | 'PRODUCTO_NO_DISPONIBLE'
+  | 'PREMIO_PENDIENTE'
+  | 'DESCUENTO'
+  | 'SIN_IMPORTE'
+  | 'YA_PAGADA'
+  | 'RESERVA_CON_CUENTA'
+  | 'CARRITO_MUY_GRANDE'
 
 export interface CotizacionDeLaMaquina {
   /** Sólo si se puede cobrar en la máquina. */
@@ -115,8 +136,24 @@ export async function cotizarParaLaMaquina(
   input: CreateOrderInput,
   opciones: { carrito: unknown },
 ): Promise<CotizacionDeLaMaquina> {
+  // r7 #2: lo que se cotiza tiene que caber en su cierre; si no, el 413 llegaría con el dinero ya dentro de la máquina.
+  if (Buffer.byteLength(JSON.stringify(opciones.carrito ?? null), 'utf8') > TOPE_DEL_CARRITO_DE_LA_MAQUINA) {
+    return sinCotizar('CARRITO_MUY_GRANDE')
+  }
   const sinMaquina = motivoSinVentaDelPedido(input)
   if (sinMaquina === 'PREMIO_PENDIENTE' || sinMaquina === 'DESCUENTO') return sinCotizar(sinMaquina)
+
+  // r7 #1: la reserva que ya tiene su cuenta viva (la cobró recepción, o le abrió la cuenta al registrar la llegada). La venta de la
+  // máquina chocaría con el índice de UNA cuenta viva por reserva (`Order_reservationId_alive_key`) y el dinero quedaría como
+  // incidencia: el cliente habría pagado dos veces. Se pregunta con el MISMO predicado del índice. Ese índice sigue siendo la última
+  // línea si la otra caja cobra mientras la máquina recibe el dinero.
+  if (input.reservationId) {
+    const cuenta = await prisma.order.findFirst({
+      where: { venueId, reservationId: input.reservationId, status: { notIn: ALIVE_ORDER_EXCLUDED_STATUSES } },
+      select: { paymentStatus: true },
+    })
+    if (cuenta) return sinCotizar(cuenta.paymentStatus === 'PENDING' ? 'RESERVA_CON_CUENTA' : 'YA_PAGADA')
+  }
 
   let venta: Awaited<ReturnType<typeof cotizarVentaDeMostrador>>
   try {

@@ -20,7 +20,7 @@ jest.mock('@/services/mobile/avisoDeVentaSinRed', () => ({
 }))
 
 import { Prisma } from '@prisma/client'
-import { cotizarParaLaMaquina, leerCotizacion } from '@/services/cashMachine/cotizacionDeLaMaquina'
+import { cotizarParaLaMaquina, leerCotizacion, TOPE_DEL_CARRITO_DE_LA_MAQUINA } from '@/services/cashMachine/cotizacionDeLaMaquina'
 import { createOrderWithItems, type CreateOrderInput } from '@/services/mobile/order.mobile.service'
 import { registrarVentaDeLaMaquinaSchema } from '@/schemas/mobile/cashMachine.schema'
 import { prismaMock } from '../../../__helpers__/setup'
@@ -45,6 +45,15 @@ const PRODUCTOS: Record<string, any> = {
     price: D(164),
     sku: 'QSO',
     soldByWeight: true,
+    categoryId: 'cat-1',
+  },
+  'prod-clase': {
+    id: 'prod-clase',
+    venueId: VENUE,
+    name: 'Clase de spinning',
+    price: D(187.5),
+    sku: 'CLS',
+    soldByWeight: false,
     categoryId: 'cat-1',
   },
 }
@@ -245,5 +254,98 @@ describe('quoteId', () => {
       },
     })
     expect(r.success).toBe(true)
+  })
+})
+
+describe('Codex servidor r7 #1 · la reserva que otra caja ya cobró no se cotiza (el cliente pagaría dos veces)', () => {
+  /** Las cuentas de la base. Viva = ni CANCELLED ni DELETED: el predicado del índice `Order_reservationId_alive_key`. */
+  let cuentas: Array<{ venueId: string; reservationId: string; status: string; paymentStatus: string }>
+  beforeEach(() => {
+    cuentas = []
+    prismaMock.order.findFirst.mockImplementation(async (a: any) => {
+      const w = a?.where ?? {}
+      if (!w.reservationId) return null
+      const viva = cuentas.find(
+        c => c.reservationId === w.reservationId && c.venueId === w.venueId && !(w.status?.notIn ?? []).includes(c.status),
+      )
+      return viva ? { paymentStatus: viva.paymentStatus } : null
+    })
+  })
+  /** La cajera inscribió a la persona en la clase y el producto ($187.50) sigue en el carrito de WINDOWS, ligado a su reserva. */
+  const CLASE = venta({ items: [{ productId: 'prod-clase', quantity: 1 }], reservationId: 'res-1' })
+
+  it('🔴 recepción registró la llegada y cobró los $187.50 con tarjeta → YA_PAGADA, sin quoteId: la PC nunca manda el paycash', async () => {
+    cuentas.push({ venueId: VENUE, reservationId: 'res-1', status: 'COMPLETED', paymentStatus: 'PAID' })
+    const q = await cotizar(CLASE)
+    expect(q).toMatchObject({ cobrableEnMaquina: false, motivo: 'YA_PAGADA', quoteId: null, totalCents: null })
+    expect(prismaMock.order.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { venueId: VENUE, reservationId: 'res-1', status: { notIn: ['CANCELLED', 'DELETED'] } } }),
+    )
+    esperarSinEscrituras()
+  })
+
+  it('🔴 con un abono de otra caja (cuenta PARCIAL) tampoco: YA_PAGADA', async () => {
+    cuentas.push({ venueId: VENUE, reservationId: 'res-1', status: 'CONFIRMED', paymentStatus: 'PARTIAL' })
+    expect(await cotizar(CLASE)).toMatchObject({ cobrableEnMaquina: false, motivo: 'YA_PAGADA', quoteId: null })
+  })
+
+  it('🔴 recepción le abrió su cuenta al registrar la llegada, sin cobrar todavía → RESERVA_CON_CUENTA: la venta de la máquina chocaría con el índice y el dinero quedaría como incidencia', async () => {
+    cuentas.push({ venueId: VENUE, reservationId: 'res-1', status: 'CONFIRMED', paymentStatus: 'PENDING' })
+    expect(await cotizar(CLASE)).toMatchObject({ cobrableEnMaquina: false, motivo: 'RESERVA_CON_CUENTA', quoteId: null })
+  })
+
+  it('una cuenta cancelada de la reserva no estorba (el índice tampoco la cuenta): se cotizan los $187.50', async () => {
+    cuentas.push({ venueId: VENUE, reservationId: 'res-1', status: 'CANCELLED', paymentStatus: 'PENDING' })
+    const q = await cotizar(CLASE)
+    expect(q).toMatchObject({ cobrableEnMaquina: true, totalCents: 18750, saleCents: 18750 })
+    expect(q.quoteId).toEqual(expect.any(String))
+  })
+
+  it('la reserva todavía sin cuenta se cotiza igual que hoy', async () => {
+    expect(await cotizar(CLASE)).toMatchObject({ cobrableEnMaquina: true, totalCents: 18750 })
+  })
+
+  it('sin reserva ni se pregunta', async () => {
+    await cotizar(CARRITO_REDONDO)
+    expect(prismaMock.order.findFirst).not.toHaveBeenCalled()
+  })
+})
+
+describe('Codex servidor r7 #2 · un carrito cotizable siempre cabe en su cierre', () => {
+  const bytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v), 'utf8')
+  /** El carrito de Codex: 3,404 renglones con notas válidas que suman 1,048,546 bytes (cabía en la cotización, su cierre no). */
+  function carritoDeCodex(): CreateOrderInput {
+    const items = Array.from({ length: 3404 }, () => ({ productId: 'prod-pan', quantity: 1, notes: 'sin cebolla, bien dorado'.repeat(10) }))
+    const c = venta({ items })
+    const falta = 1_048_546 - bytes(c)
+    items[0].notes += 'x'.repeat(falta)
+    return c
+  }
+  /** Dos panes ($91.00) con una nota que deja el carrito en `n` bytes exactos. */
+  function carritoDe(n: number): CreateOrderInput {
+    const c = venta({ items: [{ productId: 'prod-pan', quantity: 2, notes: '' }] })
+    c.items[0].notes = 'x'.repeat(n - bytes(c))
+    return c
+  }
+
+  it('🔴 el carrito de 3,404 renglones (1,048,546 bytes) → CARRITO_MUY_GRANDE, sin quoteId y sin leer el catálogo', async () => {
+    const c = carritoDeCodex()
+    expect(c.items).toHaveLength(3404)
+    expect(bytes(c)).toBe(1_048_546)
+    const q = await cotizar(c)
+    expect(q).toMatchObject({ cobrableEnMaquina: false, motivo: 'CARRITO_MUY_GRANDE', quoteId: null, totalCents: null })
+    expect(prismaMock.product.findMany).not.toHaveBeenCalled()
+    esperarSinEscrituras()
+  })
+
+  it('justo en el tope (512 KiB) sí se cotiza; un byte más, no', async () => {
+    expect(TOPE_DEL_CARRITO_DE_LA_MAQUINA).toBe(512 * 1024)
+    const enElTope = carritoDe(TOPE_DEL_CARRITO_DE_LA_MAQUINA)
+    expect(bytes(enElTope)).toBe(TOPE_DEL_CARRITO_DE_LA_MAQUINA)
+    expect(await cotizar(enElTope)).toMatchObject({ cobrableEnMaquina: true, totalCents: 9100 })
+    expect(await cotizar(carritoDe(TOPE_DEL_CARRITO_DE_LA_MAQUINA + 1))).toMatchObject({
+      cobrableEnMaquina: false,
+      motivo: 'CARRITO_MUY_GRANDE',
+    })
   })
 })
