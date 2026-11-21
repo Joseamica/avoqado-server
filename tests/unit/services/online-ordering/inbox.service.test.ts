@@ -22,6 +22,7 @@ import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { notifyOrderEvent } from '@/services/online-ordering/notifications.service'
 import { syncPaidClosedFolios, syncPaidFolios } from '@/services/online-ordering/folios.service'
 import { getInboxOrder, listInbox } from '@/services/online-ordering/inbox.service'
+import { DEVOLUCIONES_PUBLICAS, devolucionPublica } from '@/services/online-ordering/card/estadoPublico'
 
 const NOW = new Date('2026-10-14T18:30:00.000Z')
 const row = (id: string, status: string, o: Record<string, unknown> = {}) => ({
@@ -454,7 +455,15 @@ describe('fase 2: cardStatus en la bandeja', () => {
     await listInbox({ venueId: 'v1', now: NOW })
     const lista = prismaMock.onlineOrder.findMany.mock.calls.map((c: unknown[]) => c[0] as any).find((a: any) => !esSincronizacion(a))
     expect(lista.select.charge).toEqual({
-      select: { status: true, amount: true, capturedAmount: true, authorizedAt: true, capturedAt: true },
+      // D661 (Ruling 60): y sus devoluciones, con la MISMA lectura del seguimiento.
+      select: {
+        status: true,
+        amount: true,
+        capturedAmount: true,
+        authorizedAt: true,
+        capturedAt: true,
+        cardRefunds: DEVOLUCIONES_PUBLICAS,
+      },
     })
   })
 
@@ -497,13 +506,65 @@ describe('fase 2: cardStatus en la bandeja', () => {
         'notPickedUpAt',
         'refundRequestedAt',
         'refundedAt',
+        // D661 (Ruling 60): la devolución real (aditivo; null sin devolución).
+        'refund',
       ].sort(),
     )
-    expect(o).toMatchObject({ notPickedUpAt: null, refundRequestedAt: null, refundedAt: null })
+    expect(o).toMatchObject({ notPickedUpAt: null, refundRequestedAt: null, refundedAt: null, refund: null })
     expect(o.cardStatus).toBeNull()
     expect(o.rejectReason).toBeNull()
     expect(o.card).toBeNull()
     expect(o.paymentMode).toBe('PAY_AT_PICKUP')
+  })
+
+  it('D661 · Ruling 60: una página con devoluciones PENDING, RECORDED, REVERSED y RESOLVED dice cada una (la MISMA función del seguimiento)', async () => {
+    const conDevolucion = (id: string, filas: any[], o: Record<string, unknown> = {}) =>
+      row(id, 'COMPLETED', { paymentMode: 'CARD_ONLINE', charge: cargo('CAPTURED', { cardRefunds: filas }), ...o })
+    const pagina = [
+      conDevolucion('P', [{ status: 'PENDING', reversal: null }], { refundRequestedAt: NOW }),
+      conDevolucion('R', [{ status: 'RECORDED', reversal: null }], { refundedAt: NOW }),
+      // «Devuelto» (refundedAt), pero el banco la regresó: el negocio todavía se la debe.
+      conDevolucion('V', [{ status: 'REVERSED', reversal: { resolvedMethod: null } }], { refundedAt: NOW }),
+      conDevolucion('S', [{ status: 'RESOLVED', reversal: null }], { refundedAt: NOW }),
+      conDevolucion('E', [{ status: 'RESOLVED', reversal: { resolvedMethod: 'CASH' } }], { refundedAt: NOW }),
+      row('N', 'COMPLETED'), // al recoger: sin cargo
+    ]
+    prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => (esSincronizacion(a) ? [] : pagina)) as any)
+    const { orders } = await listInbox({ venueId: 'v1', filter: 'done', now: NOW })
+    expect(orders.map(o => [o.orderNumber, o.refund])).toEqual([
+      ['WP', { status: 'PENDING', medio: 'TARJETA' }],
+      ['WR', { status: 'DONE', medio: 'TARJETA' }],
+      ['WV', { status: 'REVERSED', medio: 'TARJETA' }],
+      ['WS', { status: 'DONE', medio: 'SALDO' }],
+      ['WE', { status: 'DONE', medio: 'EFECTIVO' }],
+      ['WN', null],
+    ])
+    pagina.forEach((f: any, i) => expect(orders[i].refund).toEqual(devolucionPublica(f.charge?.cardRefunds ?? []) ?? null))
+    // Lo de antes, igual.
+    expect(orders[2]).toMatchObject({ refundedAt: NOW.toISOString(), status: 'COMPLETED', paymentMode: 'CARD_ONLINE', total: 186 })
+
+    // El detalle del panel (y del MCP) lee igual.
+    prismaMock.onlineOrder.findFirst.mockResolvedValueOnce(pagina[2] as any)
+    expect((await getInboxOrder({ venueId: 'v1', orderId: 'ord-V', now: NOW }))?.refund).toEqual({ status: 'REVERSED', medio: 'TARJETA' })
+  })
+
+  it('D661 · Ruling 60: las devoluciones viajan en la MISMA lectura de la página: con 1 o con 50 pedidos, una sola consulta y ninguna por renglón', async () => {
+    for (const n of [1, 50]) {
+      prismaMock.onlineOrder.findMany.mockReset()
+      prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) =>
+        esSincronizacion(a)
+          ? []
+          : Array.from({ length: n }, (_, i) =>
+              row(`D${i}`, 'COMPLETED', { paymentMode: 'CARD_ONLINE', charge: cargo('CAPTURED', { cardRefunds: [] }) }),
+            )) as any)
+      prismaMock.onlineOrderCardRefund.findMany.mockClear()
+      const { orders } = await listInbox({ venueId: 'v1', filter: 'done', now: NOW })
+      expect(orders).toHaveLength(n)
+      const listas = prismaMock.onlineOrder.findMany.mock.calls.filter((c: any[]) => !esSincronizacion(c[0]))
+      expect(listas).toHaveLength(1)
+      expect((listas[0][0] as any).select.charge.select.cardRefunds).toEqual(DEVOLUCIONES_PUBLICAS)
+      expect(prismaMock.onlineOrderCardRefund.findMany).not.toHaveBeenCalled()
+    }
   })
 
   it('apps (2-nov): la bandeja dice POR QUÉ se rechazó (PAYMENT_FAILED = «No se pudo cobrar la tarjeta»), en el mismo select', async () => {

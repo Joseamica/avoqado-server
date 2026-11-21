@@ -103,6 +103,39 @@ beforeEach(() => {
 const listas = () => (prismaMock.onlineOrder.findMany.mock.calls as any[][]).map(c => c[0]).filter(esLista)
 
 describe('listFolios', () => {
+  it('D661 · Ruling 60: «Por entregar» dice la devolución real de cada pedido con la misma lectura de la página (ninguna consulta por renglón)', async () => {
+    const conDevolucion = (n: number, status: string, resolvedMethod: string | null = null) => ({
+      ...row(n, { status: 'ACCEPTED', paymentStatus: 'PAID', remaining: '0.00' }),
+      paymentMode: 'CARD_ONLINE',
+      charge: {
+        status: 'CAPTURED',
+        amount: new Prisma.Decimal('186.00'),
+        capturedAmount: new Prisma.Decimal('186.00'),
+        authorizedAt: NOW,
+        capturedAt: NOW,
+        cardRefunds: [{ status, reversal: status === 'RESOLVED' || status === 'REVERSED' ? { resolvedMethod } : null }],
+      },
+    })
+    POR_ENTREGAR = [
+      conDevolucion(1, 'PENDING'),
+      conDevolucion(2, 'RECORDED'),
+      conDevolucion(3, 'REVERSED'),
+      conDevolucion(4, 'RESOLVED', 'BANK_TRANSFER'),
+      row(5, { status: 'ACCEPTED', paymentStatus: 'PAID', remaining: '0.00' }),
+    ]
+    CONTEOS = { toPay: 0, toDeliver: 5 }
+    prismaMock.onlineOrderCardRefund.findMany.mockClear()
+    const r = await listFolios({ venueId: 'v1', section: 'toDeliver', now: NOW })
+    expect(r.toDeliver.map(o => [o.orderNumber, o.refund])).toEqual([
+      ['F-1', { status: 'PENDING', medio: 'TARJETA' }],
+      ['F-2', { status: 'DONE', medio: 'TARJETA' }],
+      ['F-3', { status: 'REVERSED', medio: 'TARJETA' }],
+      ['F-4', { status: 'DONE', medio: 'TRANSFERENCIA' }],
+      ['F-5', null],
+    ])
+    expect(prismaMock.onlineOrderCardRefund.findMany).not.toHaveBeenCalled()
+  })
+
   it('sin section trae la primera página de las dos, del más viejo al más nuevo, con remaining y counts exactos', async () => {
     POR_PAGAR = [row(1), row(2, { paymentStatus: 'PARTIAL', remaining: '66.00' })]
     POR_ENTREGAR = [row(3, { status: 'ACCEPTED', paymentStatus: 'PAID', remaining: '0.00' })]
