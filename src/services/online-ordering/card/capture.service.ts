@@ -196,14 +196,17 @@ export async function captureCharge(
     applicationFeeCents: charge.applicationFeeCents, // Codex r1 #8: congelada en el borrador, nunca se recalcula
     idempotencyKey: captureKey(orderId),
   }
+  // El reintento de «Nadie», UN envío (Ruling 43); quien abre, sus límites (Ruling 52); el de «Mi equipo», la llamada de siempre.
+  const limites = meta.captureBefore != null ? UN_SOLO_ENVIO : meta.limites
   try {
-    // El reintento de «Nadie», UN envío (Ruling 43); quien abre, sus límites (Ruling 52); el de «Mi equipo», la llamada de siempre.
-    const limites = meta.captureBefore != null ? UN_SOLO_ENVIO : meta.limites
     state = await (limites ? provider.capture(merchant, params, limites) : provider.capture(merchant, params))
   } catch (error) {
     failure = error
     try {
-      state = await provider.getAuthorization(merchant, { paymentIntentId: charge.paymentIntentId! })
+      // D661 (addendum r3): la relectura de rescate lleva los MISMOS límites que la captura que sigue: la caja ya no espera los ~241 s
+      // del cliente por una respuesta. Sin límites (el reintento de «Mi equipo»), la de siempre.
+      const ref = { paymentIntentId: charge.paymentIntentId! }
+      state = await (limites ? provider.getAuthorization(merchant, ref, limites) : provider.getAuthorization(merchant, ref))
     } catch {
       state = null // Stripe no contesta: queda en duda
     }

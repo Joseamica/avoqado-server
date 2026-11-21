@@ -235,7 +235,13 @@ describe('acceptCardOnlineOrder', () => {
     capture.mockRejectedValue(Object.assign(new Error('timeout'), { type: 'StripeConnectionError' }))
     getAuthorization.mockResolvedValue({ ...succeeded(), piStatus: 'requires_capture', amountReceivedCents: 0 })
     await expect(acceptCardOnlineOrder(base)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
-    expect(getAuthorization).toHaveBeenCalledWith(expect.anything(), { paymentIntentId: 'pi_1' })
+    // D661 (addendum r3): la relectura de rescate lleva los MISMOS límites que la captura de la caja (60 s y un reintento), no los del
+    // cliente (hasta ~241 s): la caja no espera minutos por la respuesta.
+    expect(getAuthorization).toHaveBeenCalledWith(
+      expect.anything(),
+      { paymentIntentId: 'pi_1' },
+      { timeoutMs: 60_000, maxNetworkRetries: 1 },
+    )
     expect(prismaMock.onlineOrderCharge.updateMany).toHaveBeenLastCalledWith({
       where: { id: 'ch1', status: 'CAPTURING' },
       data: { lastError: 'timeout' },
@@ -468,5 +474,20 @@ describe('D661 · A1: captureCharge revalida el límite de un reintento justo an
     // suyas (Ruling 52, `acceptCardOnlineOrder`).
     await captureCharge(capturing, 'ord1', meta)
     expect(capture.mock.calls[1]).toHaveLength(2)
+  })
+
+  it('D661 (addendum r3): si la captura truena, la relectura de rescate va con los MISMOS límites que la captura que sigue; sin límites, como hoy', async () => {
+    capture.mockRejectedValue(Object.assign(new Error('timeout'), { type: 'StripeConnectionError' }))
+    getAuthorization.mockResolvedValue({ ...succeeded(), piStatus: 'requires_capture', amountReceivedCents: 0 })
+    await expect(captureCharge(capturing, 'ord1', { ...meta, captureBefore: Date.now() + 60_000 })).resolves.toEqual({
+      outcome: 'CONFIRMING_PAYMENT',
+    })
+    expect(getAuthorization.mock.calls[0].slice(1)).toEqual([{ paymentIntentId: 'pi_1' }, capture.mock.calls[0][2]])
+    const caja = { timeoutMs: 60_000, maxNetworkRetries: 1 }
+    await captureCharge(capturing, 'ord1', { ...meta, limites: caja })
+    expect(getAuthorization.mock.calls[1].slice(1)).toEqual([{ paymentIntentId: 'pi_1' }, caja])
+    // El reintento de «Mi equipo» (sin límites): la relectura de siempre, con dos argumentos.
+    await captureCharge(capturing, 'ord1', meta)
+    expect(getAuthorization.mock.calls[2]).toHaveLength(2)
   })
 })
