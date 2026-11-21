@@ -175,6 +175,11 @@ export async function applyKitchenPreparation(
       }
       throw new ConflictError('Los productos de la selección cambiaron. Recarga la comanda.', 'PREPARATION_ITEMS_CHANGED')
     }
+    // D15 (Codex r1 #2): lo anulado en la caja no regresa a la cocina por ningún botón («Reabrir», «Liberar», «Preparar») ni por la
+    // cola: ya no está en la cuenta. Permanente (la cola lo rechaza visible, no lo reintenta).
+    if (selected.some(r => r.removedAt != null)) {
+      throw new ConflictError('Este producto se anuló en la caja: ya no se prepara.', 'PREPARATION_ITEM_REMOVED')
+    }
     if (selected.some(r => r.kdsOrder.preparationVersion !== PREPARATION_VERSION || r.preparation == null)) {
       throw new ConflictError(
         'Esta comanda usa el flujo anterior. Actualiza las apps antes de operar por producto.',
@@ -484,6 +489,8 @@ export async function listKitchenPreparation(
     orderPromotionId: r.orderPromotionId,
     preparation: r.preparation,
     preparationRevision: r.preparationRevision,
+    // D15: anulado en la caja (el nombre ya trae «ANULADO · »): la caja no ofrece acciones sobre él.
+    removedAt: r.removedAt?.toISOString() ?? null,
   }))
   return {
     version: PREPARATION_VERSION,

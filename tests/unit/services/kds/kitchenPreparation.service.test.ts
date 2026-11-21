@@ -44,6 +44,23 @@ describe('persisted kitchen preparation', () => {
       expect.objectContaining({ data: expect.objectContaining({ venueId: 'venue-a', staffId: 'staff-a', action: 'KITCHEN_RELEASE' }) }),
     )
   })
+  it('D15: lo anulado en la caja no regresa a la cocina (ni «Reabrir» ni ninguna acción), y no se reintenta', async () => {
+    prismaMock.kdsOrderItem.findMany.mockResolvedValue([
+      {
+        ...line,
+        removedAt: new Date(),
+        productName: 'ANULADO · Agua',
+        preparation: { ...initialPreparation(2, 'STANDARD'), HELD: 0, CANCELLED: 2 },
+      },
+    ])
+    const reabrir = { action: 'REOPEN', reason: 'Se equivocó', items: [{ id: 'line-a', expectedRevision: 0, quantity: 1 }] }
+    await expect(applyKitchenPreparation('venue-a', 'order-a', reabrir, 'staff-a')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PREPARATION_ITEM_REMOVED',
+    })
+    expect(prismaMock.kdsOrderItem.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+  })
   it('checks Pro before entering a mutation transaction', async () => {
     ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
     await expect(applyKitchenPreparation('venue-a', 'order-a', input, 'staff-a')).rejects.toMatchObject({ statusCode: 403 })

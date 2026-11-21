@@ -1,7 +1,7 @@
 {
   "pagina": "windows/mesas/anular-producto-enviado",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "df4cc2172fa35ef528c7cd65e90353e7c147db6b",
+  "sourceRef": "00032d0950d77b7d9889edafbcbcd20839512f89",
   "version": "2.25.52",
   "pasos": [
     {
@@ -114,6 +114,11 @@
       "afirmacion": "Con internet, una ronda de esta caja que el servidor aún no confirma no sale de lo guardado: dice «Una ronda de esta caja todavía no tiene confirmación del servidor: salió lo que la cuenta ya trae; lo demás sale al reimprimir cuando se confirme.»",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
       "linea": 184
+    },
+    {
+      "afirmacion": "Si la pantalla de cocina está sin internet, sigue viendo el producto como pendiente hasta que vuelva su internet: la copia del servidor (con «ANULADO») gana por folio cuando la vuelve a leer",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
+      "linea": 156
     }
   ],
   "rutas": [

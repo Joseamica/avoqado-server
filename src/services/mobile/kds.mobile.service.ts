@@ -649,6 +649,9 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
       course: item.serviceCourse?.label ?? null,
       preparation: item.preparation ?? null,
       preparationRevision: item.preparationRevision ?? 0,
+      // D15: anulado en la caja («ANULADO · ») o retirado por la plataforma («RETIRADO · »). La etiqueta ya viene en el nombre
+      // para las pantallas viejas; la nueva lo tacha.
+      removedAt: item.removedAt instanceof Date ? item.removedAt.toISOString() : (item.removedAt ?? null),
     })),
     /**
      * 🔴 ¿Falta que alguien acepte este pedido en la app de delivery?

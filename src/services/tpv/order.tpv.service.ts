@@ -85,6 +85,7 @@ import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitch
 import {
   armarComandasTrasCommit,
   cuentasDeSusComandas,
+  marcarRenglonesAnuladosEnComandas,
   retirarComandasDeVentaAnulada,
   tomarCandadoDeComandas,
 } from '../kds/kitchenTicketAuthoring.service'
@@ -3501,8 +3502,10 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
           'AREA_TICKET_PARTIAL_VOID_NOT_ALLOWED',
         )
       }
-      // Anular TODO cancela la cuenta: la cocina deja de verla (el candado de comandas ya se tomó al inicio).
+      // Anular TODO cancela la cuenta: la cocina deja de verla (el candado de comandas ya se tomó al inicio). Anular una parte
+      // (D15, Flautas): la cocina ve lo anulado marcado «ANULADO · », ya no pendiente, y su comanda se recalcula.
       if (isVoidingAllItems) await retirarComandasDeVentaAnulada(tx, venueId, orderId)
+      else await marcarRenglonesAnuladosEnComandas(tx, venueId, input.itemIds, { staffId: autor, reason: input.reason })
 
       // 🔴 MONEY: el subtotal BAJA al anular, pero un descuento fijo NO. La resta escrita
       // a mano (`newSubtotal − discountAmount`, sin clamp) escribía un `Order.total` NEGATIVO que

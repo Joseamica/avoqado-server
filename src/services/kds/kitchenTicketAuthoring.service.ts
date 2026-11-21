@@ -534,6 +534,122 @@ export async function retirarComandasDeVentaAnulada(
   return { kdsOrderIds, kdsOrderItemIds }
 }
 
+/** Lo que ve la pantalla de cocina delante de un renglón anulado en la caja (las pantallas viejas lo leen en el nombre). */
+export const PREFIJO_ANULADO = 'ANULADO · '
+
+/**
+ * D15 (Flautas, 20-nov-2026): anular UNO o varios renglones ya enviados (no todos: eso es `retirarComandasDeVentaAnulada`) los
+ * deja en la pantalla de cocina MARCADOS, no pendientes ni borrados (Toast los tacha con «VOIDED», Loyverse en rojo, Simphony los
+ * pone «Done»). Cada fila de comanda de esos renglones, de la cuenta que sea (dividir y unir no mueven sus filas), recibe
+ * `removedAt` y «ANULADO · » delante del nombre, como el «RETIRADO · » de Uber; una fila que ya traía marca no se toca. Con tiempos
+ * (v1), lo que faltaba (retenido, pendiente, preparando o listo) pasa a «Cancelado» con su bitácora y lo entregado se queda; la
+ * comanda se recalcula con `recalculoDeComanda` (el anulado cuenta como terminado). Sin tiempos (v0) la comanda NO se termina sola
+ * (Codex r1 #3–#5): se queda en el tablero con lo anulado tachado hasta que la cocina toque «Listo», como Loyverse («Tap on the
+ * ticket header to mark it complete»). La cabecera estrena `updatedAt`: el archivo del día cuenta desde aquí (Codex r1 #7).
+ * CALLER_LOCKED: dentro de la transacción de la anulación, que ya tomó los candados de `cuentasDeSusComandas(orderId)` antes que el
+ * de la orden; aquí se piden (reentrantes) los de las cuentas dueñas de cada comanda NO terminada por si alguna cambió entre esa
+ * lectura y el candado. La fila de una comanda terminada sólo recibe la marca, sin candado: nadie más escribe filas de comandas
+ * terminadas (Codex r1 #6).
+ */
+export async function marcarRenglonesAnuladosEnComandas(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderItemIds: string[],
+  actor: { staffId?: string; reason?: string } = {},
+): Promise<void> {
+  if (orderItemIds.length === 0) return
+  // ponytail: 500 filas por anulación (renglones × estaciones); una anulación real son unos pocos renglones.
+  const leer = async () =>
+    (await tx.kdsOrderItem.findMany({
+      where: { orderItemId: { in: orderItemIds }, removedAt: null, kdsOrder: { venueId } },
+      select: {
+        id: true,
+        kdsOrderId: true,
+        productName: true,
+        quantity: true,
+        preparation: true,
+        preparationRevision: true,
+        kdsOrder: { select: { orderId: true, status: true, preparationVersion: true } },
+      },
+      orderBy: { id: 'asc' },
+      take: 500,
+    })) ?? [] // ?? []: como `cuentasDeSusComandas`, los dobles de prueba de la transacción devuelven undefined
+  const vivas = (filas: Awaited<ReturnType<typeof leer>>) =>
+    [...new Set(filas.filter(f => f.kdsOrder.status !== 'COMPLETED').map(f => f.kdsOrder.orderId))]
+      .filter((id): id is string => Boolean(id))
+      .sort()
+  for (const id of vivas(await leer())) await tomarCandadoDeComandas(tx, id)
+  const filas = await leer() // ya bajo candado
+  if (filas.length === 0) return
+
+  const ahora = new Date()
+  const conTiempos = new Set<string>()
+  for (const f of filas) {
+    const marca = { removedAt: ahora, productName: `${PREFIJO_ANULADO}${f.productName}` }
+    const viva = f.kdsOrder.status !== 'COMPLETED'
+    // Un progreso ilegible no frena la anulación (es dinero): la fila se marca y su comanda se revisa como hoy.
+    const before =
+      f.kdsOrder.preparationVersion === PREPARATION_VERSION && viva && f.preparation != null
+        ? (() => {
+            try {
+              return parsePreparation(f.preparation, f.quantity)
+            } catch {
+              logger.warn('[KDS] progreso ilegible en un renglón anulado; sólo se marca', { venueId, kdsOrderItemId: f.id })
+              return null
+            }
+          })()
+        : null
+    if (before) {
+      const falta = before.HELD + before.PENDING + before.PREPARING + before.READY
+      if (falta > 0) {
+        const after = { ...before, HELD: 0, PENDING: 0, PREPARING: 0, READY: 0, CANCELLED: before.CANCELLED + falta }
+        const cas = await tx.kdsOrderItem.updateMany({
+          where: { id: f.id, removedAt: null, preparationRevision: f.preparationRevision },
+          data: { ...marca, preparation: after, preparationRevision: { increment: 1 } },
+        })
+        if (cas.count !== 1) throw new ConflictError('La preparación cambió. Vuelve a revisar la cuenta.', 'PREPARATION_CONFLICT')
+        await tx.activityLog.create({
+          data: {
+            venueId,
+            staffId: actor.staffId,
+            action: 'KITCHEN_ORDER_CANCEL',
+            entity: 'KdsOrderItem',
+            entityId: f.id,
+            data: {
+              orderId: f.kdsOrder.orderId,
+              reason: actor.reason ?? 'Producto anulado',
+              before,
+              after,
+              revision: f.preparationRevision + 1,
+            },
+          },
+        })
+        conTiempos.add(f.kdsOrderId)
+        continue
+      }
+    }
+    await tx.kdsOrderItem.updateMany({ where: { id: f.id, removedAt: null }, data: marca })
+  }
+  // Lo archivado no se toca (una comanda con un platillo de cuenta abierta nunca se archiva).
+  const tocadas = [...new Set(filas.map(f => f.kdsOrderId))]
+  await tx.kdsOrder.updateMany({ where: { id: { in: tocadas }, venueId, archivedAt: null }, data: { updatedAt: ahora } })
+
+  for (const id of conTiempos) {
+    const items = await tx.kdsOrderItem.findMany({ where: { kdsOrderId: id }, select: { quantity: true, preparation: true }, take: 5000 })
+    const previa = await tx.kdsOrder.findFirst({ where: { id, venueId }, select: { kitchenDoneAt: true } })
+    let counts: ReturnType<typeof parsePreparation>[]
+    try {
+      counts = items.map(i => parsePreparation(i.preparation, i.quantity))
+    } catch {
+      continue // otra fila ilegible: la comanda se queda como está (se revisa como hoy), la anulación sigue
+    }
+    await tx.kdsOrder.updateMany({
+      where: { id, venueId, preparationVersion: PREPARATION_VERSION, status: { not: 'COMPLETED' } },
+      data: recalculoDeComanda(counts, { kitchenDoneAt: previa?.kitchenDoneAt ?? null }, ahora),
+    })
+  }
+}
+
 /** Una página de las filas pendientes de comanda que tocan a `orderId` y no están con su cuenta: lo que mueve `ponerComandasConSuCuenta`. */
 function filasFueraDeSuCuenta(tx: Prisma.TransactionClient, venueId: string, orderId: string) {
   return tx.$queryRaw<Array<{ id: string; kdsOrderId: string; cabecera: string | null; dueno: string }>>`
