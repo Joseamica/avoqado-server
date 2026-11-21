@@ -2419,7 +2419,7 @@ describe('Revisión final · A: la tablet espera a la ventana y recibe su desenl
       requestId,
       status: 'failed',
       outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
-      errorMessage: expect.stringContaining('30 s'),
+      errorMessage: 'No se pudo confirmar con el banco. Si el cliente paga otra vez, mejor en efectivo.',
     })
     expect(esperas().has(requestId)).toBe(false)
     // Y el GET con el que la tablet confirma dice lo mismo.

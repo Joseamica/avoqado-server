@@ -2707,7 +2707,7 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
         code: 'ORDER_BALANCE_CHANGED',
         details: { requestId, remainingCents: 10000, expectedRemainingCents: 10000 },
       })
-      expect((primero as Error).message).toContain('falta $100.00')
+      expect((primero as Error).message).toContain('le faltan $100.00')
       expect(segundo).toMatchObject({
         statusCode: 412,
         code: 'ORDER_BALANCE_CHANGED',
@@ -2740,7 +2740,7 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
         code: 'ORDER_BALANCE_CHANGED',
         details: { requestId, remainingCents: 6000, expectedRemainingCents: 6000 },
       })
-      expect((r as Error).message).toContain('falta $60.00')
+      expect((r as Error).message).toContain('le faltan $60.00')
     })
 
     // La caja leyó $100; otra caja cobra $40 en efectivo; llega el envío con lo leído: el total viejo ya no cabe.
@@ -2764,7 +2764,7 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
         code: 'ORDER_BALANCE_CHANGED',
         details: { requestId, remainingCents: 6000, expectedRemainingCents: 10000 },
       })
-      expect((r as Error).message).toContain('falta $60.00')
+      expect((r as Error).message).toContain('le faltan $60.00')
     })
 
     // 20-nov (regla de D5): una parte que todavía cabe no es cobrar de más; pasa y la pantalla ofrece el resto al releer.
@@ -2803,7 +2803,7 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
         failureCode: 'REJECTED_ORDER_BALANCE_CHANGED',
         outcome: 'NOT_CHARGED',
         paymentId: null,
-        errorMessage: expect.stringContaining('falta $100.00'),
+        errorMessage: expect.stringContaining('le faltan $100.00'),
       })
     })
 
