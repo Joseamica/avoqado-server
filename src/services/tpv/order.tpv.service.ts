@@ -91,7 +91,7 @@ import {
   tomarCandadoDeComandas,
 } from '../kds/kitchenTicketAuthoring.service'
 import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
-import { applyPromotionToOrder, type PromotionSelection } from '../promotions/promotion.service'
+import { applyPromotionToOrder, rechazarSiLaCuentaNoAceptaCombos, type PromotionSelection } from '../promotions/promotion.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
 import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
@@ -744,6 +744,46 @@ export function consultaDeLlavesEnOtraCuenta(venueId: string, orderId: string, p
         FROM "OrderItem" oi
         WHERE oi."externalId" = k.llave
           AND oi."orderId" <> ${orderId}
+        OFFSET 0
+      ) copia
+      JOIN "Order" o ON o."id" = copia."orderId"
+      WHERE o."venueId" = ${venueId}
+    )`
+}
+
+/**
+ * D34: las INSTANCIAS de combo pedidas que viven en OTRA cuenta del negocio. Separar mueve la instancia (`OrderPromotion`) con sus
+ * renglones; juntar deja la instancia en la cuenta cancelada y lleva los renglones al destino. La instancia es el UUID de UNA venta
+ * del POS y no se repite entre cuentas (D7 ya se apoya en eso en `rondaYaEnAlgunaCuenta`). Misma regla que
+ * `llavesEnOtraCuentaDelNegocio` (D29) para los productos sueltos.
+ */
+export async function instanciasEnOtraCuentaDelNegocio(
+  tx: Pick<Prisma.TransactionClient, '$queryRaw'>,
+  venueId: string,
+  orderId: string,
+  instancias: string[],
+): Promise<Set<string>> {
+  const pedidas = [...new Set(instancias.filter(instancia => typeof instancia === 'string' && instancia.length > 0))]
+  if (pedidas.length === 0) return new Set()
+  const filas = await tx.$queryRaw<{ instancia: string }[]>(consultaDeInstanciasEnOtraCuenta(venueId, orderId, pedidas))
+  return new Set(filas.map(fila => fila.instancia))
+}
+
+/**
+ * La lectura de `instanciasEnOtraCuentaDelNegocio`, con la forma de `consultaDeLlavesEnOtraCuenta`: un `EXISTS` por instancia que
+ * entra por `OrderPromotion_instanceId_idx` y se detiene en la primera copia del negocio; a lo más una fila por instancia.
+ */
+export function consultaDeInstanciasEnOtraCuenta(venueId: string, orderId: string, pedidas: string[]): Prisma.Sql {
+  return Prisma.sql`
+    SELECT k.instancia
+    FROM unnest(${pedidas}::text[]) AS k(instancia)
+    WHERE EXISTS (
+      SELECT 1
+      FROM (
+        SELECT op."orderId"
+        FROM "OrderPromotion" op
+        WHERE op."instanceId" = k.instancia
+          AND op."orderId" <> ${orderId}
         OFFSET 0
       ) copia
       JOIN "Order" o ON o."id" = copia."orderId"
@@ -1946,8 +1986,25 @@ export async function addItemsToOrder(
       const marcarCocina = negocioConPantalla && Boolean(order.tableId)
 
       const createdPromotionIds: string[] = []
+      // D34: el combo de la ronda que otra caja SEPARÓ (o juntó) a otra cuenta del negocio ya está guardado ahí: no se vuelve a aplicar
+      // en ésta (se cobraría dos veces e iría otra vez a cocina). La instancia sólo se reconocía dentro de la cuenta. Se lee con la
+      // cuenta ya bloqueada: separar también la bloquea, así que esta lectura ve la instancia donde quedó.
+      const instanciasEnOtraCuenta = await instanciasEnOtraCuentaDelNegocio(
+        tx,
+        venueId,
+        orderId,
+        promotionItems.map(item => item.promotionRef!.promotionInstanceId),
+      )
       for (const item of promotionItems) {
         const ref = item.promotionRef!
+        if (instanciasEnOtraCuenta.has(ref.promotionInstanceId)) {
+          // La misma guarda de estado que habría aplicado el combo: una cuenta cerrada o pagada se rechaza como antes (sin reabrirla).
+          rechazarSiLaCuentaNoAceptaCombos(order)
+          logger.warn(
+            `⏭️ [ADD ITEMS] Combo en otra cuenta del negocio: su instancia no se vuelve a crear (instanceId=${ref.promotionInstanceId})`,
+          )
+          continue
+        }
         const applied = await applyPromotionToOrder(
           {
             venueId,
