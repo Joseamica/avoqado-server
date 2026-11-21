@@ -91,7 +91,7 @@ import {
   tomarCandadoDeComandas,
 } from '../kds/kitchenTicketAuthoring.service'
 import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
-import { applyPromotionToOrder, type PromotionSelection } from '../promotions/promotion.service'
+import { applyPromotionToOrder, rechazarSiLaCuentaNoAceptaCombos, type PromotionSelection } from '../promotions/promotion.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
 import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
@@ -1951,6 +1951,8 @@ export async function addItemsToOrder(
       for (const item of promotionItems) {
         const ref = item.promotionRef!
         if (instanciasEnOtraCuenta.has(ref.promotionInstanceId)) {
+          // La misma guarda de estado que habría aplicado el combo: una cuenta cerrada o pagada se rechaza como antes (sin reabrirla).
+          rechazarSiLaCuentaNoAceptaCombos(order)
           logger.warn(
             `⏭️ [ADD ITEMS] Combo en otra cuenta del negocio: su instancia no se vuelve a crear (instanceId=${ref.promotionInstanceId})`,
           )

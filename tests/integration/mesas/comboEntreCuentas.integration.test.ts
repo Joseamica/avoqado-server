@@ -176,6 +176,20 @@ describe('D34 · un combo que otra caja separó no se vuelve a crear con el reen
     expect(await fotoDe(a)).toMatchObject({ total: 115, porCobrar: 115, renglones: 3 })
   })
 
+  it('Codex r1 #1: A quedó CERRADA sin cobrar (cierre viejo del panel); el reenvío se rechaza como antes y NO reabre A', async () => {
+    const { a, b, r, instancia } = await comboSeparadoPorLaOtraCaja()
+    await prisma.order.update({ where: { id: a }, data: { status: 'COMPLETED', completedAt: new Date() } })
+    const versionAntes = await versionDe(a)
+
+    const [ack] = await replay([reenvio(r, a, instancia)])
+
+    expect(ack).toMatchObject({ status: 'REJECTED', message: 'Esa cuenta ya está cerrada.' })
+    expect(await fotoDe(a)).toMatchObject({ status: 'COMPLETED', total: 25, renglones: 1 })
+    expect(await versionDe(a)).toBe(versionAntes)
+    expect(await combosEnElNegocio(instancia)).toEqual({ instancias: 1, piezas: 2 })
+    expect(await fotoDe(b)).toMatchObject({ total: 90, renglones: 2 })
+  })
+
   it('regresión (D7): la caja 2 cobró A después; la ronda tardía reconoce el combo en B y no abre otra cuenta', async () => {
     const { t, a, r, instancia } = await comboSeparadoPorLaOtraCaja()
     await payCashOrder(venueId, a, { amount: 2500, tip: 0, staffId: caja, idempotencyKey: `caja-${a}` })
