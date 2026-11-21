@@ -585,6 +585,25 @@ describe('abonarSaldoAFavorEnTx con exigirMismoTelefono (D661)', () => {
     expect(prismaMock.customer.findFirst.mock.calls[1][0]).toMatchObject({ where: { id: CLIENTA, venueId: VENUE } })
   })
 
+  it('D661 · Ruling 75 (ronda 3 de codex-r3): exigir el mismo teléfono sin haber preparado con la ficha bloqueada se rechaza ANTES de tocar nada (el orden ya no depende de la costumbre del que llama)', async () => {
+    base({ sobreDeSaldo: sobre({ recipientPhone: VERIFICADO }) })
+    fichaCon('55 1111 2222')
+    const preparado = await preparar(false) // un llamador futuro que sólo pasa `exigirMismoTelefono`
+    jest.mocked(prismaMock.$queryRaw).mockClear()
+    await expect(
+      abonarSaldoAFavorEnTx(prismaMock, {
+        preparado,
+        monto: D(250),
+        staffId: 'cajera-1',
+        origen: { orderId: 'order-1', refundPaymentId: 'ref-1' },
+        folio: 'F-12',
+        ...nadie(VERIFICADO),
+      }),
+    ).rejects.toThrow(/bloquearFicha/)
+    sinEscribir()
+    expect(candadoDeLaFicha()).toBe(-1) // ni siquiera toma la ficha tarde (después del sobre)
+  })
+
   it('D661 · Ruling 75: con el mismo número bajo el candado abona como hoy; sin el parámetro (Cambio, Reembolso del POS) no toma la ficha', async () => {
     base()
     fichaCon('55 1111 2222') // = VERIFICADO, escrito distinto

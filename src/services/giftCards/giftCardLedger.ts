@@ -954,6 +954,8 @@ export interface SobrePreparado {
   /** El teléfono de la ficha en la forma de `recipientPhone` (`telefonoDeTarjeta`); `null` si no tiene o no se entiende. */
   telefonoCliente: string | null
   nombreCliente: string
+  /** D661 (Ruling 75, ronda 3 de codex-r3): se preparó con `bloquearFicha` (la ficha va ANTES del sobre). Lo exige `exigirMismoTelefono`. */
+  fichaBloqueada?: true
 }
 
 /**
@@ -993,6 +995,7 @@ export async function prepararSobreDeSaldoAFavorEnTx(
     sobre: card && (card.status === 'ACTIVE' || card.status === 'BLOCKED') ? card : null,
     telefonoCliente: telefonoDeTarjeta(cliente.phone),
     nombreCliente: `${cliente.firstName ?? ''} ${cliente.lastName ?? ''}`.trim() || 'Cliente',
+    ...(p.bloquearFicha ? { fichaBloqueada: true as const } : {}),
   }
 }
 
@@ -1050,6 +1053,11 @@ export async function abonarSaldoAFavorEnTx(
 ): Promise<AbonoDeSaldoAFavor> {
   const s = p.preparado
   const monto = p.monto
+  // D661 (Ruling 75, ronda 3 de codex-r3): exigir el mismo teléfono obliga a haber tomado la ficha ANTES del sobre (orden de la parte 2:
+  // `Customer` → asesor y `GiftCard`). Un error de programación, no de la clienta: se rechaza antes de tocar nada, nunca en silencio.
+  if (p.exigirMismoTelefono && !s.fichaBloqueada) {
+    throw new Error('abonarSaldoAFavorEnTx: exigirMismoTelefono pide preparar el sobre con bloquearFicha (la ficha va antes del sobre)')
+  }
   if (!monto.greaterThan(0) || monto.decimalPlaces() > 2) {
     throw new GiftCardError('GIFT_CARD_AMOUNT_OUT_OF_RANGE', 'El saldo a favor debe ser mayor a cero y con centavos exactos.', 422)
   }
