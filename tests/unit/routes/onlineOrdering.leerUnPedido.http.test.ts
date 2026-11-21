@@ -85,7 +85,8 @@ const cerradoPorElDia = {
   printClaimedAt: null,
   printedAt: null,
   // D661 (Task 4): el corte del día lo deja «No lo recogió»; sólo ése sigue pidiendo su comanda (uno entregado por una persona, no).
-  notPickedUpAt: new Date('2026-11-21T10:00:05.000Z'),
+  // Relativo al reloj real (la prueba no lo fija): su papel se admite 2 h tras el corte, y una fecha fija dejó de pasar a las 2 h.
+  notPickedUpAt: new Date(Date.now() - 5 * 60_000),
   refundRequestedAt: null,
   refundedAt: null,
   createdAt: new Date('2026-11-20T09:48:00.000Z'),
