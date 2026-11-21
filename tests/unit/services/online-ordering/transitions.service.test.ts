@@ -566,6 +566,23 @@ describe('markOnlineOrderReady', () => {
     expect(notifyOrderEvent).toHaveBeenCalledWith('ord1', 'READY')
   })
 
+  it('D661 (Task 5): con la devolución reservada o hecha no se marca «Listo»: STALE con la marca, nada escrito ni avisado', async () => {
+    const MARCA = new Date('2026-10-14T18:00:00.000Z')
+    for (const marca of ['refundRequestedAt', 'refundedAt'] as const) {
+      jest.clearAllMocks()
+      prismaMock.onlineOrder.findFirst.mockResolvedValue({
+        ...row({ status: 'ACCEPTED', requiresAcceptance: false, order: { status: 'CONFIRMED', paymentStatus: 'PAID' } }),
+        paymentMode: 'CARD_ONLINE',
+        [marca]: MARCA,
+      } as any)
+      await expect(markOnlineOrderReady(base)).resolves.toEqual({ outcome: 'STALE', status: 'ACCEPTED', [marca]: MARCA.toISOString() })
+      expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+      expect(notifyOrderEvent).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+    }
+  })
+
   it('una Order ya cobrada (COMPLETED) no regresa a abierta: sólo el pedido pasa a READY (R1)', async () => {
     prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ status: 'ACCEPTED', order: PAID }) as any)
     prismaMock.order.updateMany.mockResolvedValue({ count: 0 })

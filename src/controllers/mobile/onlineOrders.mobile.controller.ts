@@ -32,7 +32,8 @@ const staffOf = (req: Request): string | null => (req as any).authContext?.userI
 /** M-10: con tope de largo; termina guardado en `printClaimedBy`. */
 const deviceOf = (req: Request): string => (req.header('x-device-id') ?? '').trim().slice(0, 100)
 
-function reply(res: Response, r: TransitionResult) {
+/** `accion`: lo que la caja pidió, para decir por qué no se aplicó («entregado» o, D661 Task 5, «listo»). */
+function reply(res: Response, r: TransitionResult, accion: 'entregado' | 'listo' = 'entregado') {
   switch (r.outcome) {
     case 'OK': {
       const { outcome: _o, ...data } = r
@@ -48,7 +49,7 @@ function reply(res: Response, r: TransitionResult) {
         status,
         ...marcas,
         error:
-          mensajeNoSeEntrega(marcas) ??
+          mensajeNoSeEntrega(marcas, accion) ??
           'El pedido ya cambió de estado (otro aparato, el cliente, la caja o el tiempo). Actualiza la bandeja.',
       })
     }
@@ -201,7 +202,7 @@ export const reject = async (req: Request, res: Response, next: NextFunction) =>
 export const ready = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
-    return reply(res, await markOnlineOrderReady({ venueId, orderId, staffId: staffOf(req) }))
+    return reply(res, await markOnlineOrderReady({ venueId, orderId, staffId: staffOf(req) }), 'listo')
   } catch (e) {
     return next(e)
   }

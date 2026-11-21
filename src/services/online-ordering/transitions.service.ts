@@ -28,7 +28,7 @@ import type { Reloj } from './types'
 
 /**
  * D661 (Task 4): el estado real que «Entregado» no pisa: «No lo recogió» (`notPickedUpAt`, lo pone el corte del día), «Devolviendo…»
- * (`refundRequestedAt`) y «Devuelto» (`refundedAt`). Sólo viajan las puestas, y sólo en la respuesta de entregar.
+ * (`refundRequestedAt`) y «Devuelto» (`refundedAt`). Sólo viajan las puestas, y sólo en la respuesta de entregar y (Task 5) de «Listo».
  */
 type MarcasDeCierre<T> = { notPickedUpAt?: T; refundRequestedAt?: T; refundedAt?: T }
 type MarcasLeidas = MarcasDeCierre<Date | null>
@@ -199,7 +199,7 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
     now,
     status: current,
     deadlinePassed,
-    ...(a.kind === 'DELIVER' ? marcasDeCierre(marcas, d => d) : {}),
+    ...(a.kind === 'DELIVER' || a.kind === 'READY' ? marcasDeCierre(marcas, d => d) : {}),
   })
 
   // Fase 2: mientras el banco cobra la tarjeta, nada mueve el pedido (ni lo sincroniza con una cancelación de otra vía): el
@@ -237,9 +237,10 @@ export async function casTransitionInTx(tx: TxConReintento, a: CasArgs): Promise
     if (hasMoney && !venceSinCancelar) return { r: 'HAS_PAYMENTS' }
     if (await findLiveTerminalCharge(tx, { venueId: a.venueId, orderId: a.orderId })) return { r: 'HAS_PAYMENTS' }
   }
-  // D661 (Task 4): con la devolución reservada o hecha no se entrega: responde su estado real. Las escribe la devolución bajo ESTE
-  // candado de la orden, así que lo leído aquí vale hasta el CAS (el corte del día, que no lo toma, cambia el estado y el CAS lo ve).
-  if (a.kind === 'DELIVER' && (row.refundRequestedAt || row.refundedAt)) return stale(row.status)
+  // D661 (Task 4 y 5): con la devolución reservada o hecha no se entrega ni se marca «Listo»: responde su estado real. Las escribe la
+  // devolución bajo ESTE candado de la orden, así que lo leído aquí vale hasta el CAS (el corte del día, que no lo toma, cambia el
+  // estado y el CAS lo ve).
+  if ((a.kind === 'DELIVER' || a.kind === 'READY') && (row.refundRequestedAt || row.refundedAt)) return stale(row.status)
   // Se entrega cuando YA se cobró, leído bajo el candado (el cobro lo hace el flujo normal de caja). M-2: falla CERRADO: sólo
   // un modo ya cobrado de antemano (`PREPAID_MODES`: la tarjeta en línea, que se captura al aceptar) se libra de exigirlo.
   // D661 (Ruling 25): la excepción es sólo de «Mi equipo»; un pedido con tarjeta de «Nadie» pasa por la MISMA regla de los folios.

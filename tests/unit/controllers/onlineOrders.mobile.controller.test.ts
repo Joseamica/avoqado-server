@@ -296,6 +296,26 @@ describe('onlineOrders.mobile.controller', () => {
     })
   })
 
+  it('D661 (Task 5): «Listo» sobre un pedido que se está devolviendo o ya se devolvió → el mismo 409 con su marca y un texto de «Listo»', async () => {
+    const HORA = '2026-10-14T18:00:00.000Z'
+    for (const [marca, texto] of [
+      ['refundRequestedAt', /se está devolviendo: no se marca listo/],
+      ['refundedAt', /ya se devolvió \(«Devuelto»\): no se marca listo/],
+    ] as const) {
+      ;(markOnlineOrderReady as jest.Mock).mockResolvedValueOnce({ outcome: 'STALE', status: 'ACCEPTED', [marca]: HORA })
+      const a = mock()
+      await ctrl.ready(a.req, a.res, a.next)
+      expect(a.res.status).toHaveBeenCalledWith(409)
+      expect(a.res.json).toHaveBeenCalledWith({
+        success: false,
+        code: 'ORDER_STATE_CHANGED',
+        status: 'ACCEPTED',
+        [marca]: HORA,
+        error: expect.stringMatching(texto),
+      })
+    }
+  })
+
   it('A12: entregar lo que ya estaba entregado es 200 (idempotente), no un 409 «ya cambió»', async () => {
     ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValue({ outcome: 'OK', status: 'COMPLETED', unchanged: true })
     const { req, res, next } = mock()

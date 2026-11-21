@@ -22,12 +22,16 @@ export const MENSAJE_ABRIR_DESDE_LA_CAJA =
   'Este pedido es con tarjeta en línea: se abre desde la caja (TPV o POS actualizados). No se aplicó nada.'
 
 /**
- * D661 (Task 4): por qué «Entregado» no se aplica (la API y el MCP), según la marca más fuerte del pedido; `null` sin marcas.
+ * D661 (Task 4): por qué «Entregado» (o, Task 5, «Listo») no se aplica (la API y el MCP), según la marca más fuerte del pedido; `null`
+ * sin marcas.
  */
-export function mensajeNoSeEntrega(m: { notPickedUpAt?: string | null; refundRequestedAt?: string | null; refundedAt?: string | null }) {
-  if (m.refundedAt) return 'Este pedido ya se devolvió («Devuelto»): no se marca entregado. No se aplicó nada.'
-  if (m.refundRequestedAt) return 'Este pedido se está devolviendo: no se marca entregado. No se aplicó nada.'
-  if (m.notPickedUpAt) return 'Este pedido se cerró como «No lo recogió» al terminar el día: no se marca entregado. No se aplicó nada.'
+export function mensajeNoSeEntrega(
+  m: { notPickedUpAt?: string | null; refundRequestedAt?: string | null; refundedAt?: string | null },
+  accion: 'entregado' | 'listo' = 'entregado',
+) {
+  if (m.refundedAt) return `Este pedido ya se devolvió («Devuelto»): no se marca ${accion}. No se aplicó nada.`
+  if (m.refundRequestedAt) return `Este pedido se está devolviendo: no se marca ${accion}. No se aplicó nada.`
+  if (m.notPickedUpAt) return `Este pedido se cerró como «No lo recogió» al terminar el día: no se marca ${accion}. No se aplicó nada.`
   return null
 }
 
