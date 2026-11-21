@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": null,
-  "approvedAt": null,
-  "approvedHash": null,
+  "approvedBy": "Jose Antonio Amieva",
+  "approvedAt": "2026-11-20T23:45:31.791Z",
+  "approvedHash": "7b7a38af2eabf08f518a420496c04050167eb07d449ea1a1e24e24f4f2314c60",
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -93,6 +93,12 @@
     "android/impresoras/la-comanda-no-sale": {
       "sha256": "96711a8277aea282ab50b53be4c0eec45004073e250287083251a5512ceafa9d",
       "requiredPermissions": []
+    },
+    "android/impresoras/pantalla-de-cocina-sin-internet": {
+      "sha256": "450304f69e120b1b2911e7ead88027bdb876975601a87a123738b2d25db29a2f",
+      "requiredPermissions": [],
+      "featureCode": "KITCHEN_DISPLAY",
+      "gateKind": "FEATURE"
     },
     "android/inventario/contar-existencia": {
       "sha256": "12d4f7bc2e3d8d4698d399c2f8fb12ba960396db1f51c0cdfd531ecb5c8b0a3f",
@@ -508,7 +514,7 @@
       ]
     },
     "dashboard/menu/configurar-menu-avanzado": {
-      "sha256": "4ce6f2c5772a4c452899638278adf3120527a085add5fe24724a4d3ef25a8336",
+      "sha256": "8e3459f3bc3b8610705caa447b20defca39490c775a53af94b240803f0a13dec",
       "requiredPermissions": [
         "menu:update"
       ]
@@ -615,7 +621,7 @@
       ]
     },
     "dashboard/reportes/revisar-reportes-ventas": {
-      "sha256": "ec72e16bd32531da65b6c86d1867ba6feb3fae70d6158d4d38ef5aa6873cc5b6",
+      "sha256": "2a0b5c38961197cc223daf17c7a49e3e3e2847c2a489c9dee4f22cec5127911d",
       "requiredPermissions": [
         "reports:read"
       ]
@@ -1061,6 +1067,12 @@
     "windows/impresoras/la-comanda-no-sale": {
       "sha256": "267ba4739f4f3bc71ab0e8c1081e0b5c8ace245f85874cb18a0392363d3ffb14",
       "requiredPermissions": []
+    },
+    "windows/impresoras/pantalla-de-cocina-sin-internet": {
+      "sha256": "f6cbfb354d818240e69a9a3e8697c58391da649be352e1ae7b066ab2cd034034",
+      "requiredPermissions": [],
+      "featureCode": "KITCHEN_DISPLAY",
+      "gateKind": "FEATURE"
     },
     "windows/inventario/contar-existencia": {
       "sha256": "e8a0514755e479403b6a0e541424d6fd9f0a66183aa5491aaa323b55ad0e15b7",

@@ -565,3 +565,28 @@ describe('🔴 cargo por servicio PORCENTUAL: se recalcula sobre la base nueva',
     expect(totalGuardado()).toBe(80)
   })
 })
+
+describe('🔴 la base del cargo va a centavos ANTES del % (Codex r1 #11 de «Anular producto»)', () => {
+  it('25.02 + 25.33 sumados en Number (50.349999999999994) dan base 50.35 y 10 % = 5.04, no 5.03', async () => {
+    const { baseDeCargos, recalcularCargosPorServicio } = await import('../../../../src/services/shared/serviceCharges')
+    const suma = 25.02 + 25.33
+    expect(suma).not.toBe(50.35) // el residuo de Number que causaba el centavo
+    const base = baseDeCargos(suma, 0)
+    expect(base.toFixed(2)).toBe('50.35')
+    const update = jest.fn()
+    const db = {
+      orderServiceCharge: {
+        findMany: jest.fn(async () => [{ id: 'c1', type: 'PERCENTAGE', value: new Decimal(10), amount: new Decimal(0) }]),
+        update,
+      },
+    }
+    expect(await recalcularCargosPorServicio(db as any, 'o1', base)).toBe(5.04)
+    expect(update.mock.calls[0][0].data.amount.toFixed(2)).toBe('5.04')
+  })
+
+  it('una base ya en centavos no cambia, y una negativa sigue en 0', async () => {
+    const { baseDeCargos } = await import('../../../../src/services/shared/serviceCharges')
+    expect(baseDeCargos(new Decimal('100.00'), new Decimal('89.95')).toFixed(2)).toBe('10.05')
+    expect(baseDeCargos(10, 25).toFixed(2)).toBe('0.00')
+  })
+})

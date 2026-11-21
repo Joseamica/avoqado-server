@@ -293,6 +293,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   online_ordering_settings: 'read',
   online_orders_list: 'read',
   open_orders: 'read',
+  package_component_sales: 'read',
   org_confirmed_sales_report: 'read',
   org_insights: 'read',
   org_structure: 'read',
@@ -426,6 +427,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   shopify_unmatched_list: 'read',
   sim_custody: 'read',
   sim_pending_approvals: 'read',
+  void_table_check_item: 'write',
   split_table_check: 'write',
   split_table_check_by_seat: 'write',
   staff_attendance: 'read',
@@ -642,6 +644,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'resolvedModifierId',
             // Repetir la misma opción (`configure_modifier_repeat`, encargo a508f4): se confirma sobre el grupo que se VIO.
             'resolvedGroupId',
+            // «Anular producto» (`void_table_check_item`, Codex r1 #5): se anula exactamente el renglón que se VIO.
+            'resolvedOrderItemId',
           ]) {
             // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
             // no atar un `null` que el esquema de otra herramienta no acepta.

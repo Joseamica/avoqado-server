@@ -10,6 +10,7 @@ import type { ScreenStation } from './kitchenTicketPlanning'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { ForbiddenError } from '../../errors/AppError'
 import { esSinComanda } from '../printing/printConfig.service'
+import { anotarDuda, marcarPantallaViva, pantallaConocida, pantallasConectadas } from './pantallasVivas'
 
 type Db = Prisma.TransactionClient | typeof prisma
 
@@ -40,6 +41,75 @@ export async function venueTienePantallaDeCocina(venueId: string, db: Db = prism
     select: { id: true },
   })
   return estacion != null
+}
+
+/**
+ * D6 de Flautas (Codex r8 #1 y r9 #1): la pantalla de [stationId] acaba de leer su tablero. Una estación que ya tiene marca
+ * sólo la renueva (sin consulta). La primera vez (o tras 10 min sin leer) sólo entra si es una estación ACTIVA con pantalla de
+ * ESTE negocio: un id cualquiera no ocupa lugar ni desplaza a una pantalla real. No se espera ni lanza (r6 #6: no puede tumbar
+ * el tablero). Si la revisión falla NO se marca (nada sin comprobar entra al mapa) y se anota la duda: durante una ventana
+ * la lista sale con `completo` falso y la caja no da a nadie por desconectado (r7 #5).
+ */
+export function registrarLecturaDelTablero(venueId: string, stationId: string, db: Db = prisma): void {
+  if (pantallaConocida(venueId, stationId)) {
+    marcarPantallaViva(venueId, stationId)
+    return
+  }
+  db.printStation
+    .findFirst({ where: { id: stationId, venueId, active: true, hasKitchenDisplay: true }, select: { id: true } })
+    .then(estacion => {
+      if (estacion != null) marcarPantallaViva(venueId, stationId)
+    })
+    .catch(error => {
+      logger.warn('KDS: no se pudo revisar la estación de la pantalla; la lista de desconectadas queda en duda', {
+        venueId,
+        stationId,
+        error: String(error),
+      })
+      anotarDuda()
+    })
+}
+
+export interface PantallasDesconectadas {
+  /** `false` = el negocio no tiene ninguna pantalla de cocina efectiva (casilla Y plan): la caja pregunta más despacio. */
+  hayPantallas: boolean
+  /** Ids de las estaciones con pantalla efectiva HOY. La caja sólo calla el «No salió» de una estación que esté aquí. */
+  pantallas: string[]
+  /** `false` justo después de arrancar el servidor: todavía no se puede dar a ninguna por desconectada. */
+  completo: boolean
+  /** Estaciones activas con pantalla cuya pantalla no ha pedido su tablero en la ventana. Vacío si `completo` es `false`. */
+  desconectadas: Array<{ id: string; name: string }>
+}
+
+/**
+ * D6 de Flautas (20-nov, opción B simplificada tras Codex r7): qué pantallas de cocina NO están conectadas a internet, decidido
+ * SÓLO aquí. Las estaciones salen de la base (siempre al día, no de la copia de la caja) con la misma regla de «pantalla
+ * efectiva» que `buildPrintConfig` (activa, con la casilla, con comanda y con el plan); las vivas, de `pantallasVivas` (la
+ * última lectura de su tablero). La caja sólo enseña los nombres. Sólo lee; un negocio real tiene 1-5 estaciones.
+ */
+export async function pantallasDesconectadas(
+  venueId: string,
+  reloj: { ahora?: number; arranque?: number } = {},
+  db: Db = prisma,
+): Promise<PantallasDesconectadas> {
+  const filas = await db.printStation.findMany({
+    where: { venueId, active: true, hasKitchenDisplay: true },
+    select: { id: true, name: true, sendsComanda: true },
+    orderBy: [{ displayOrder: 'asc' }, { name: 'asc' }],
+    take: 100,
+  })
+  const conPantalla = filas.filter(f => !esSinComanda(f))
+  if (conPantalla.length === 0 || !(await venueHasFeatureAccess(venueId, 'KITCHEN_DISPLAY'))) {
+    return { hayPantallas: false, pantallas: [], completo: true, desconectadas: [] }
+  }
+  const { conectadas, completo } = pantallasConectadas(venueId, reloj.ahora, reloj.arranque)
+  const vivas = new Set(conectadas)
+  return {
+    hayPantallas: true,
+    pantallas: conPantalla.map(f => f.id),
+    completo,
+    desconectadas: completo ? conPantalla.filter(f => !vivas.has(f.id)).map(f => ({ id: f.id, name: f.name })) : [],
+  }
 }
 
 export interface EstacionesDelNegocio {

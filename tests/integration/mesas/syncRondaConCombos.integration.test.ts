@@ -337,32 +337,44 @@ describe('ronda de combos sin red: entera o nada', () => {
   // Codex r3 #1 (founder, opción A): la ronda sólo se da por guardada si están TODAS sus llaves (tal como quedan tras normalizar) y
   // todos sus combos. Una ronda vieja de varias transacciones dejó su combo y el producto K, y su alta de productos falló antes de L:
   // el reenvío tiene que completar L, sin duplicar K ni el combo.
-  it.each([
-    ['ronda vieja a medias (llaves de la cola)', (r: { id: string }) => [`sync:${r.id}:0`, `sync:${r.id}:1`]],
-    [
-      'llave del cliente repetida de otra ronda',
-      (_r: { id: string }) => ['k-cliente-' + randomUUID().slice(0, 6), 'l-cliente-' + randomUUID().slice(0, 6)],
-    ],
-  ] as const)('(8) %s: el combo y K ya estaban, falta L ⇒ el reenvío completa L sin duplicar nada', async (_caso, llaves) => {
+  // Decisión 1 de D7 (20-nov): una etiqueta propia del cliente (no `sync:<ronda>:<n>`) ya no se respeta en una ronda: se reemplaza por
+  // la de la ronda, así que el caso «llave del cliente repetida de otra ronda» dejó de existir (ver la prueba de abajo).
+  it.each([['ronda vieja a medias (llaves de la cola)', (r: { id: string }) => [`sync:${r.id}:0`, `sync:${r.id}:1`]]] as const)(
+    '(8) %s: el combo y K ya estaban, falta L ⇒ el reenvío completa L sin duplicar nada',
+    async (_caso, llaves) => {
+      const { orderId, localOrderId } = await cuentaDeMesa()
+      const a = randomUUID()
+      const r0 = ronda(localOrderId, [])
+      const [k, l] = llaves(r0)
+      const r = {
+        ...r0,
+        payload: { ...r0.payload, items: [combo(a), { productId, quantity: 1, externalId: k }, { productId, quantity: 1, externalId: l }] },
+      }
+      // Lo que dejó guardado el intento anterior: el combo (su transacción) y K (de otra ronda o de esta misma); L nunca llegó.
+      const { version } = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+      await addItemsToOrder(venueId, orderId, [combo(a), { productId, quantity: 1, externalId: k }] as any, version, true)
+
+      const [ack] = await processIntents(params([r]))
+
+      expect(ack).toMatchObject({ id: r.id, status: 'ACKED' })
+      expect(await combosDeLaRonda(orderId, [a])).toBe(1)
+      expect(await prisma.orderItem.count({ where: { orderId, externalId: k } })).toBe(1)
+      expect(await prisma.orderItem.count({ where: { orderId, externalId: l } })).toBe(1)
+      expect(Number((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).total)).toBe(290) // combo $90 + 2 × $100
+    },
+  )
+
+  it('(8b) decisión 1 de D7: una etiqueta propia del cliente se reemplaza por la de su ronda (y su reenvío ya no la reconoce: consecuencia aceptada)', async () => {
     const { orderId, localOrderId } = await cuentaDeMesa()
-    const a = randomUUID()
     const r0 = ronda(localOrderId, [])
-    const [k, l] = llaves(r0)
-    const r = {
-      ...r0,
-      payload: { ...r0.payload, items: [combo(a), { productId, quantity: 1, externalId: k }, { productId, quantity: 1, externalId: l }] },
-    }
-    // Lo que dejó guardado el intento anterior: el combo (su transacción) y K (de otra ronda o de esta misma); L nunca llegó.
-    const { version } = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
-    await addItemsToOrder(venueId, orderId, [combo(a), { productId, quantity: 1, externalId: k }] as any, version, true)
+    const k = 'k-cliente-' + randomUUID().slice(0, 6)
+    const r = { ...r0, payload: { ...r0.payload, items: [{ productId, quantity: 1, externalId: k }] } }
 
     const [ack] = await processIntents(params([r]))
 
     expect(ack).toMatchObject({ id: r.id, status: 'ACKED' })
-    expect(await combosDeLaRonda(orderId, [a])).toBe(1)
-    expect(await prisma.orderItem.count({ where: { orderId, externalId: k } })).toBe(1)
-    expect(await prisma.orderItem.count({ where: { orderId, externalId: l } })).toBe(1)
-    expect(Number((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).total)).toBe(290) // combo $90 + 2 × $100
+    expect(await prisma.orderItem.count({ where: { orderId, externalId: k } })).toBe(0)
+    expect(await prisma.orderItem.count({ where: { orderId, externalId: `sync:${r.id}:0` } })).toBe(1)
   })
 
   // Modificadores en combo: la ronda de mesa cobra el extra de una pieza encima del combo y el mismo intent no lo duplica.
