@@ -574,7 +574,7 @@ export async function resolveNoInstrument(
       requestId: requestId,
       status: 'failed',
       outcomeEvidence: 'OPERATOR_RECONCILED',
-      errorMessage: 'La terminal confirmó que no se presentó tarjeta. Se puede volver a cobrar.',
+      errorMessage: 'Se revisó y se marcó como no cobrado. Ya puedes cobrar esta cuenta.', // F1-textos (D5, fila 12b · F-D)
       operatorResolution: saved,
     }
     const cas = await tx.$executeRaw`

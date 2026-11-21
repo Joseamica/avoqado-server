@@ -171,7 +171,7 @@ describe('dos_gerentes_mismo_id_se_muestra_el_acuse_del_primero', () => {
     const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId } })
     const texto = (fila.resultJson as { errorMessage: string }).errorMessage
     expect(texto).not.toMatch(/cajero/i)
-    expect(texto).toMatch(/^Se declaró que este cobro no pasó\./)
+    expect(texto).toMatch(/ revisó y lo marcó como no cobrado\. Ya puedes cobrar esta cuenta\.$/)
     expect(texto).toContain(primera.staffId === gerente2.staffId ? 'Segunda Gerente' : 'Gerente Webhook')
   })
 })

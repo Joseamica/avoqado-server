@@ -2843,7 +2843,7 @@ describe('Revisión final · A: resolverEsperaDelPos despierta al POS SÓLO con 
       requestId: 'REQ-R-LIBERADA',
       status: 'failed',
       outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
-      errorMessage: 'No se confirmó el cobro en la ventana de 30 s. Se puede volver a cobrar.',
+      errorMessage: 'No se pudo confirmar con el banco. Si el cliente paga otra vez, mejor en efectivo.',
     }
     tpr().findFirst.mockResolvedValue(
       fila('REQ-R-LIBERADA', { status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW', resultJson: sobre }),
@@ -2861,7 +2861,7 @@ describe('Revisión final · A: resolverEsperaDelPos despierta al POS SÓLO con 
       requestId: 'REQ-R-DECLARADA',
       status: 'failed',
       outcomeEvidence: 'OPERATOR_RECONCILED',
-      errorMessage: 'La terminal confirmó que no se presentó tarjeta. Se puede volver a cobrar.',
+      errorMessage: 'Se revisó y se marcó como no cobrado. Ya puedes cobrar esta cuenta.',
     }
     tpr().findFirst.mockResolvedValue(
       fila('REQ-R-DECLARADA', { status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE', resultJson: sobre }),
@@ -2981,7 +2981,7 @@ describe('Revisión final · B: retenerSolicitudLiberadaPorAprobacion', () => {
       requestId: 'REQ-B',
       status: 'failed',
       outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
-      errorMessage: 'No se confirmó el cobro en la ventana de 30 s. Se puede volver a cobrar.',
+      errorMessage: 'No se pudo confirmar con el banco. Si el cliente paga otra vez, mejor en efectivo.',
       releasedAfterWindow: { windowMs: 30_000, releasedAt: liberadaEn, origen: 'TIMER' },
       terminalResult: { status: 'failed', errorMessage: 'SDK U100', outcomeEvidence: null },
     },
@@ -3412,7 +3412,7 @@ describe('TerminalPaymentService — hz:bdd815fd:D5: «Pedidos → Cobrar» mand
       code: 'ORDER_BALANCE_CHANGED',
       details: { requestId: 'REQ-D5-1', remainingCents: 7950, expectedRemainingCents: 8000 },
     })
-    expect(error.message).toMatch(/^La cuenta ORD-80 cambió mientras se cobraba: ahora falta \$79\.50\./)
+    expect(error.message).toBe('No se cobró la tarjeta: a la cuenta ORD-80 le faltan $79.50. Cobra esa cantidad.')
     expect(tpr().create).toHaveBeenCalledTimes(1)
     expect(tpr().create.mock.calls[0][0].data).toMatchObject({ status: 'FAILED', failureCode: 'REJECTED_ORDER_BALANCE_CHANGED' })
     expect(tpr().create.mock.calls[0][0].data.resultJson).toMatchObject({ httpStatus: 412, code: 'ORDER_BALANCE_CHANGED' })
@@ -3523,8 +3523,7 @@ describe('TerminalPaymentService — hz:bdd815fd:D5: «Pedidos → Cobrar» mand
   })
 
   it('la MISMA solicitud repetida tras el 412 de D5 reproduce el rechazo guardado, sin tocar la terminal', async () => {
-    const texto =
-      'La cuenta ORD-80 cambió mientras se cobraba: ahora falta $79.50. No se cobró la tarjeta. Sal del cobro y cobra el saldo pendiente.'
+    const texto = 'No se cobró la tarjeta: a la cuenta ORD-80 le faltan $79.50. Cobra esa cantidad.'
     const details = { requestId: 'REQ-D5-R', remainingCents: 7950, expectedRemainingCents: 8000 }
     tpr().findFirst.mockResolvedValueOnce({
       requestId: 'REQ-D5-R',
@@ -3645,7 +3644,7 @@ describe('TerminalPaymentService — hz:bdd815fd:D5: «Pedidos → Cobrar» mand
         code: 'ORDER_BALANCE_CHANGED',
         details: { requestId: 'REQ-F1-1', remainingCents: falta, expectedRemainingCents: visto },
       })
-      expect(error.message).toContain(`ahora falta $${(falta / 100).toFixed(2)}`)
+      expect(error.message).toContain(`le faltan $${(falta / 100).toFixed(2)}`)
       expect(tpr().create).toHaveBeenCalledTimes(1)
       expect(tpr().create.mock.calls[0][0].data).toMatchObject({ status: 'FAILED', failureCode: 'REJECTED_ORDER_BALANCE_CHANGED' })
       expect(tpr().create.mock.calls[0][0].data.resultJson).toMatchObject({ httpStatus: 412, code: 'ORDER_BALANCE_CHANGED' })

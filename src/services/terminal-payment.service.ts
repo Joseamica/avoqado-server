@@ -1430,7 +1430,7 @@ function errorDeLapida(row: { failureCode?: string | null; resultJson: Prisma.Js
       )
     case 'REJECTED_ORDER_BALANCE_CHANGED':
       return new AppError(
-        mensaje('La cuenta cambió mientras se cobraba. No se cobró la tarjeta. Sal del cobro y cobra el saldo pendiente.'),
+        mensaje('No se cobró la tarjeta: el importe no coincidía con lo que falta. Revisa la cuenta y cobra lo que falta.'),
         HTTP_COBRO_MAYOR_QUE_EL_SALDO,
         true,
         LA_CUENTA_CAMBIO,
@@ -2120,8 +2120,10 @@ class TerminalPaymentService {
             return rechazar(
               'REJECTED_ORDER_BALANCE_CHANGED',
               new AppError(
-                `La cuenta ${order.orderNumber ?? request.orderId} cambió mientras se cobraba: ahora falta $${(faltaCents / 100).toFixed(2)}. ` +
-                  'No se cobró la tarjeta. Sal del cobro y cobra el saldo pendiente.',
+                // F1-textos (catálogo D5, fila 13): muchas veces la cuenta NO cambió (el SERVIDOR corrigió el precio o la tablet
+                // redondeó distinto); sólo se dice lo cierto. El 412 de D53 (arriba) sí cambió y conserva su frase.
+                `No se cobró la tarjeta: a la cuenta ${order.orderNumber ?? request.orderId} le faltan $${(faltaCents / 100).toFixed(2)}. ` +
+                  'Cobra esa cantidad.',
                 HTTP_COBRO_MAYOR_QUE_EL_SALDO,
                 true,
                 LA_CUENTA_CAMBIO,
@@ -4813,7 +4815,7 @@ class TerminalPaymentService {
           requestId,
           status: 'failed',
           outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
-          errorMessage: 'No se confirmó el cobro en la ventana de 30 s. Se puede volver a cobrar.',
+          errorMessage: 'No se pudo confirmar con el banco. Si el cliente paga otra vez, mejor en efectivo.', // F1-textos (D5, fila 2 · F-B)
           releasedAfterWindow: { windowMs: UNPROVEN_NEGATIVE_WINDOW_MS, releasedAt: now.toISOString(), origen },
         }
         const r = await tx.$executeRaw`

@@ -67,7 +67,7 @@ const liberada = (extra: Record<string, unknown> = {}) => ({
     requestId: 'REQ-D',
     status: 'failed',
     outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
-    errorMessage: 'No se confirmó el cobro en la ventana de 30 s. Se puede volver a cobrar.',
+    errorMessage: 'No se pudo confirmar con el banco. Si el cliente paga otra vez, mejor en efectivo.',
     releasedAfterWindow: { windowMs: 30_000, releasedAt: liberadaEn, origen: 'TIMER' },
     terminalResult: { status: 'failed', errorMessage: 'SDK U100', outcomeEvidence: null },
   },

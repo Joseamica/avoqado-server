@@ -260,7 +260,10 @@ async function hayPagoDeLaSolicitud(
 async function textoDeLaDeclaracion(tx: Prisma.TransactionClient, staffId: string | null): Promise<string> {
   const persona = staffId ? await tx.staff.findUnique({ where: { id: staffId }, select: { firstName: true, lastName: true } }) : null
   const nombre = persona ? `${persona.firstName ?? ''} ${persona.lastName ?? ''}`.trim() : ''
-  return `Se declaró que este cobro no pasó.${nombre ? ` Lo firmó ${nombre}.` : ''} Se puede volver a cobrar.`
+  // F1-textos (catálogo D5, fila 12a · F-D): quién lo decidió y que la cuenta ya se puede cobrar.
+  return nombre
+    ? `${nombre} revisó y lo marcó como no cobrado. Ya puedes cobrar esta cuenta.`
+    : 'Se revisó y se marcó como no cobrado. Ya puedes cobrar esta cuenta.'
 }
 
 /**
