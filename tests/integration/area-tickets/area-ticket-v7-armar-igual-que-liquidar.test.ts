@@ -212,8 +212,9 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
     }
   }
 
-  async function correr(caso: Caso, lado: 'armar' | 'liquidar'): Promise<{ obtenido: Resultado; esperado: Resultado }> {
-    const tag = `${caso.nombre.replace(/[^a-z0-9]+/gi, '-').slice(0, 30)}-${lado}`
+  async function correr(caso: Caso, numero: number, lado: 'armar' | 'liquidar'): Promise<{ obtenido: Resultado; esperado: Resultado }> {
+    // Corto: las llaves de idempotencia llevan el tag y el sufijo, y el servidor acepta hasta 64 caracteres.
+    const tag = `c${numero}${lado === 'armar' ? 'a' : 'l'}`
     if (caso.sinApartado) {
       await prisma.venueAreaTicketSettings.update({
         where: { venueId },
@@ -413,10 +414,10 @@ describe('Vales V7 — D5: armar la venta y liquidarla contestan lo mismo (tabla
     },
   ]
 
-  for (const caso of casos) {
+  for (const [numero, caso] of casos.entries()) {
     for (const lado of ['liquidar', 'armar'] as const) {
       it(`${caso.nombre} · ${lado}`, async () => {
-        const { obtenido, esperado } = await correr(caso, lado)
+        const { obtenido, esperado } = await correr(caso, numero, lado)
         expect(obtenido).toEqual(esperado)
       })
     }
