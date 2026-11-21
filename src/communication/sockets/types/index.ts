@@ -75,6 +75,8 @@ export enum SocketEventType {
   // Business Events - Orders
   ORDER_CREATED = 'order_created',
   ORDER_UPDATED = 'order_updated',
+  /** D662 v4: cambió el estado de la tienda en línea (Reanudar, pausar, ajustes, se pausó sola): el panel vuelve a leerlo. */
+  ONLINE_ORDERING_STORE_CHANGED = 'online_ordering_store_changed',
   ORDER_STATUS_CHANGED = 'order_status_changed',
   ORDER_DELETED = 'order_deleted',
 

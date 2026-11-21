@@ -1,0 +1,101 @@
+import logger from '@/config/logger'
+import prisma from '@/utils/prismaClient'
+
+/**
+ * D662 parte 2 (v5, rediseño B, founder 20-nov): el INTERRUPTOR de la pausa sola, «pausa sola desde <hora>». Reemplaza al arranque
+ * automático (`ArranqueDeFuncion`, el sello y los 120 s), que no convergió en 5 rondas de Codex.
+ *
+ * Sin fila (o con `desde` vacío) la pausa sola no existe: la tienda se porta como antes de esta función. Con una hora, sólo cuentan los
+ * pedidos cuya hora límite es ≥ esa hora, y antes de ella tampoco hay pausa sola. La marca `staffAnsweredAt` se escribe SIEMPRE (con o
+ * sin interruptor): es lo que hace seguro prenderlo.
+ *
+ * Vive en la BASE y no en una variable de Render (Codex p2v5-r1 #1): una variable necesita redesplegar, y si ese despliegue falla Render
+ * sigue sirviendo con el servidor sin la variable, así que a la hora anunciada la pausa sola no existiría y luego aparecería de golpe. Con
+ * la fila, todos los servidores la ven a la vez (a lo más `CACHE_MS` después), sin redesplegar.
+ *
+ * 🔴 El paso al publicar (promesa v5, `docs/audit/2026-11-18-tienda-abierta-cualquier-pantalla/plan-p2-v5-interruptor.md`):
+ *   1. publicar el SERVIDOR (la migración crea la tabla vacía: apagado);
+ *   2. cuando Render diga «Live», esperar 2 minutos (el SERVIDOR anterior, que no pone la marca, ya se apagó);
+ *   3. correr `scripts/pausa-sola-interruptor.ts --prender` (pone «desde» = ahora + 15 min; nunca acepta una hora pasada ni cercana).
+ * Todo pedido que contestó el SERVIDOR anterior existía antes de apagarse y su hora límite es, a lo más, 10 min después
+ * (`ACCEPT_TIMEOUT_MINUTES`): con la hora del paso 3 ninguno cuenta. Si alguna vez se regresa a una versión anterior a ésta, al volver se
+ * apaga y se repite el paso 3.
+ */
+export const CLAVE_PAUSA_SOLA = 'pausa-sola'
+/** Cada proceso recuerda lo leído a lo más esto: la hora se fija ≥ 15 min en el futuro, así que todos la ven antes de que llegue. */
+export const CACHE_MS = 5_000
+/** Lo mínimo que «desde» puede quedar en el futuro al prenderlo (y lo que se usa por omisión). */
+export const MINUTOS_MINIMOS = 15
+
+let leido: { desde: Date | null; hasta: number } | null = null
+let enCurso: Promise<Date | null> | null = null
+
+/** La hora del interruptor, o `null` si está apagado. Lanza si la base falla (quien lee decide: la admisión no pasa). */
+export async function pausaSolaDesde(): Promise<Date | null> {
+  if (leido && Date.now() < leido.hasta) return leido.desde
+  if (!enCurso) {
+    enCurso = Promise.resolve()
+      .then(() => prisma.interruptorDePlataforma.findUnique({ where: { clave: CLAVE_PAUSA_SOLA }, select: { desde: true } }))
+      .then(fila => {
+        const desde = fila?.desde ?? null
+        leido = { desde, hasta: Date.now() + CACHE_MS }
+        return desde
+      })
+      .finally(() => {
+        enCurso = null
+      })
+  }
+  return enCurso
+}
+
+export function __resetInterruptorParaPruebas(): void {
+  leido = null
+  enCurso = null
+}
+
+/**
+ * Prende el interruptor: «desde» = ahora + [minutos] (≥ `MINUTOS_MINIMOS`). Nunca una hora pasada ni cercana: el redespliegue y los
+ * pedidos del SERVIDOR anterior necesitan ese margen, y una hora pasada pausaría de golpe por pedidos que vencieron antes de prenderlo.
+ * No mueve una hora que ya llegó o está por llegar (≤ `MARGEN_PARA_MOVER_S`): moverla perdería fallas ya contadas. Para cambiarla,
+ * primero se apaga.
+ *
+ * Codex p2v5-r2 #7: revisar y escribir son UNA sola instrucción, con el reloj de Postgres: no hay hueco entre «la vi futura» y «la
+ * cambié», ni dependencia del reloj de quien corre el script.
+ */
+export const MARGEN_PARA_MOVER_S = 10
+
+export async function prenderPausaSola(p: { minutos?: number; por: string }): Promise<Date> {
+  const minutos = p.minutos ?? MINUTOS_MINIMOS
+  if (!Number.isFinite(minutos) || minutos < MINUTOS_MINIMOS) {
+    throw new Error(`La pausa sola se prende al menos ${MINUTOS_MINIMOS} minutos en el futuro (pediste ${minutos}).`)
+  }
+  const filas = await prisma.$queryRaw<Array<{ desde: Date }>>`
+    INSERT INTO "InterruptorDePlataforma" ("clave", "desde", "actualizadoPor", "updatedAt")
+    VALUES (
+      ${CLAVE_PAUSA_SOLA},
+      (now() AT TIME ZONE 'UTC') + (${minutos}::double precision * interval '1 minute'),
+      ${p.por},
+      (now() AT TIME ZONE 'UTC')
+    )
+    ON CONFLICT ("clave") DO UPDATE
+      SET "desde" = EXCLUDED."desde", "actualizadoPor" = EXCLUDED."actualizadoPor", "updatedAt" = EXCLUDED."updatedAt"
+      WHERE "InterruptorDePlataforma"."desde" IS NULL
+         OR "InterruptorDePlataforma"."desde" > (now() AT TIME ZONE 'UTC') + (${MARGEN_PARA_MOVER_S}::int * interval '1 second')
+    RETURNING "desde"`
+  const desde = filas[0]?.desde
+  if (!desde) {
+    throw new Error('La pausa sola ya está prendida con una hora que ya llegó (o está por llegar). Para cambiar la hora, primero apágala.')
+  }
+  logger.info('[OnlineOrdering] pausa sola PRENDIDA', { desde: desde.toISOString(), por: p.por })
+  return desde
+}
+
+/** Apaga el interruptor (la tienda vuelve a portarse como antes de esta función en ≤ `CACHE_MS`). */
+export async function apagarPausaSola(p: { por: string }): Promise<void> {
+  await prisma.interruptorDePlataforma.upsert({
+    where: { clave: CLAVE_PAUSA_SOLA },
+    create: { clave: CLAVE_PAUSA_SOLA, desde: null, actualizadoPor: p.por },
+    update: { desde: null, actualizadoPor: p.por },
+  })
+  logger.info('[OnlineOrdering] pausa sola APAGADA', { por: p.por })
+}

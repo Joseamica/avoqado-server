@@ -199,7 +199,10 @@ export async function confirmCardAuthorization(chargeId: string, now: Date = new
             paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
             trackingToken: charge.trackingToken,
             requestHash: charge.requestHash,
-            acceptDeadlineAt: new Date(now.getTime() + ACCEPT_TIMEOUT_MINUTES * 60_000),
+            // D662 parte 2 (v3, Codex p2-r3 #1): la hora límite cuenta desde que el pedido de verdad nace (nunca antes que el reloj de
+            // esta escritura). El conciliador pasa la hora con la que EMPEZÓ su pasada; si la pasada se atrasa, un pedido no puede nacer
+            // con su hora límite ya cerca o en el pasado: eso rompería «la línea de tiempo sólo crece hacia adelante» de la pausa sola.
+            acceptDeadlineAt: new Date(Math.max(now.getTime(), Date.now()) + ACCEPT_TIMEOUT_MINUTES * 60_000),
             whatsappConsent: request.whatsappConsent,
             requiresAcceptance: true, // el borrador de tarjeta nació en «Mi equipo»
             channel: null,

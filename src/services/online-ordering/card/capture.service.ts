@@ -30,6 +30,7 @@ import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/
 import {
   acceptWithoutCapture,
   announceAccepted,
+  avanzarCorteTrasCommit,
   casTransitionInTx,
   expireOnlineOrder,
   prepMinutes,
@@ -121,6 +122,15 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
       data: { status: OnlineOrderChargeStatus.CAPTURING, attempts: { increment: 1 } },
     })
     if (won.count !== 1) return { do: 'ANSWER', result: { outcome: 'CONFIRMING_PAYMENT' } }
+    // D662 parte 2: una persona aceptó a tiempo (la hora límite se comprobó arriba, bajo el candado). Es SU toque: se guarda aquí y
+    // no al terminar la captura, que el conciliador puede cerrar mucho después con su propia hora. Una sola vez (`null` en el where):
+    // un segundo «Aceptar» de la misma cuenta (ya pagada a mano tras una captura fallida) no lo pisa (Codex p2-r2 #4).
+    if (i.porPersona) {
+      await tx.onlineOrder.updateMany({
+        where: { orderId: i.orderId, venueId: i.venueId, staffAnsweredAt: null },
+        data: { staffAnsweredAt: now },
+      })
+    }
     return { do: 'CAPTURE', charge, now }
   }, ORDER_LOCK_WAIT_BUDGET)
 
@@ -144,6 +154,8 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
       return expired
     }
     case 'CAPTURE':
+      // D662 parte 2 (v3): el toque de la persona ya quedó guardado; el corte de la pausa sola sube aunque Stripe tarde.
+      if (i.porPersona) avanzarCorteTrasCommit(i.venueId)
       return captureCharge(plan.charge, i.orderId, { staffId: i.staffId, estimatedMinutes: minutes, now: plan.now })
   }
 }

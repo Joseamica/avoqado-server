@@ -13,7 +13,9 @@ import { Prisma } from '@prisma/client'
 import {
   MOTIVO_BENEFICIO_REGRESADO,
   convertirBeneficiosEnCortesiaEnTx,
+  anulacionEsDePersona,
   sellarFolioAnuladoEnTx,
+  sellarToqueDePersonaAlAnularEnTx,
 } from '@/services/online-ordering/cortesiaDeFolio'
 import { devolverCanjesDeVentaAnuladaEnTx } from '@/services/shared/orderCancelGuard'
 import { importesDeLasFilas } from '@/services/shared/repartoDescuento'
@@ -119,6 +121,11 @@ function txSobre(e: Estado): TxConReintento {
       findFirst: jest.fn(async () => (e.folio ? { id: 'conline00000000000000001a' } : null)),
       // S9 (A0, B1): el sello de la anulación.
       updateMany: jest.fn(async ({ where }: any) => {
+        // D662 parte 2 (v3): el toque de la persona que anula (sólo «Mi equipo» por aceptar, sin pisar).
+        if ('staffAnsweredAt' in where) {
+          e.llamadas.push(`toque:${where.orderId}`)
+          return { count: 0 }
+        }
         e.llamadas.push(`sello:${where.orderId}`)
         return { count: e.folio ? 1 : 0 }
       }),
@@ -541,7 +548,7 @@ describe('devolverCanjesDeVentaAnuladaEnTx con S9', () => {
     const sinBeneficios = estado()
     await devolver(sinBeneficios)
     // D24: después del sello, la fila cuyo descuento se borró del catálogo suelta su marca (aquí no hay ninguna: `marca:0`).
-    expect(sinBeneficios.llamadas).toEqual([`sello:${ORDER}`, 'marca:0', 'leer'])
+    expect(sinBeneficios.llamadas).toEqual([`sello:${ORDER}`, `toque:${ORDER}`, 'marca:0', 'leer'])
   })
 
   it('S9: una cuenta que no es de folio no se sella', async () => {
@@ -560,5 +567,44 @@ describe('sellarFolioAnuladoEnTx (S9, A0 · U2)', () => {
       where: { orderId: ORDER, venueId: VENUE, requiresAcceptance: false, expiredAt: null, cancelledAt: null, rejectedAt: null },
       data: { cancelledAt: expect.any(Date) },
     })
+  })
+})
+
+describe('D662 parte 2 (v3) · anular la cuenta de un pedido de «Mi equipo» por aceptar ES contestarlo (pausa sola)', () => {
+  it('sellarToqueDePersonaAlAnularEnTx: sólo «Mi equipo», sólo por aceptar y sólo si estaba vacío (nunca pisa, nunca toca un rechazado)', async () => {
+    const updateMany = jest.fn(async () => ({ count: 1 }))
+    const ahora = new Date('2026-11-20T12:00:00.000Z')
+    await sellarToqueDePersonaAlAnularEnTx({ onlineOrder: { updateMany } } as any, { venueId: VENUE, orderId: ORDER }, ahora)
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { orderId: ORDER, venueId: VENUE, requiresAcceptance: true, status: 'PENDING_ACCEPTANCE', staffAnsweredAt: null },
+      data: { staffAnsweredAt: ahora },
+    })
+  })
+
+  it.each([
+    ['cancelOrder', true],
+    ['deleteOrder', true],
+    ['updateOrder', true],
+    ['voidItems', true],
+    ['cancelAreaTicketCheckout', true],
+    ['returnGiftBalance', true],
+    ['pedidoEnLinea:REJECT', false],
+    ['pedidoEnLinea:EXPIRE', false],
+    ['pedidoEnLinea:CUSTOMER_CANCEL', false],
+    ['abandonedOrdersCleanup', false],
+  ])('%s → ¿una persona? %s', (camino, esPersona) => {
+    expect(anulacionEsDePersona(camino)).toBe(esPersona)
+  })
+
+  it('el gancho lo escribe para una persona y no para el vencimiento ni el barrido de abandonadas', async () => {
+    for (const [camino, toca] of [
+      ['cancelOrder', true],
+      ['pedidoEnLinea:EXPIRE', false],
+      ['abandonedOrdersCleanup', false],
+    ] as const) {
+      const e = estado()
+      await devolverCanjesDeVentaAnuladaEnTx(txSobre(e), { venueId: VENUE, orderId: ORDER, staffId: STAFF, camino })
+      expect({ camino, toca: e.llamadas.includes(`toque:${ORDER}`) }).toEqual({ camino, toca })
+    }
   })
 })
