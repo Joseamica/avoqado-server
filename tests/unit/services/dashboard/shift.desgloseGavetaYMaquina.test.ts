@@ -220,3 +220,62 @@ describe('detalle del turno · Efectivo = Gaveta + Efectivo · máquina (R5 #11)
     expect(prismaMock.order.findMany).not.toHaveBeenCalled()
   })
 })
+
+describe('H8 (Codex servidor r5) · el conteo de la gaveta sale de la MISMA foto que el turno', () => {
+  const gaveta = (contado: number) => ({
+    id: 'caja-1',
+    venueId: 'venue-1',
+    shiftId: 'shift-1',
+    status: 'CLOSED',
+    deviceName: 'PC',
+    openedByName: 'Ana',
+    closedByName: 'Ana',
+    openedAt: new Date('2026-11-20T14:00:00.000Z'),
+    closedAt: new Date('2026-11-20T22:00:00.000Z'),
+    startingAmount: 0,
+    actualAmount: contado,
+    overShort: 0,
+    events: [],
+  })
+
+  it('🔴 un gerente corrige el conteo de $100 a $200 mientras se lee el detalle: turno y gaveta dicen $100 (la foto), nunca $100 y $200', async () => {
+    const enLaFoto: any = {
+      shift: { findFirst: jest.fn().mockResolvedValue({ ...turno([enLaGaveta]), endingCash: 100, cashDeclared: 100 }) },
+      order: { findMany: jest.fn().mockResolvedValue([]) },
+      payment: {
+        aggregate: jest.fn().mockResolvedValue(sumaDeLaMaquina(0, 0)),
+        groupBy: jest.fn().mockResolvedValue([grupo({}, 100, 10, 1)]),
+      },
+      cashDrawerSession: { findFirst: jest.fn().mockResolvedValue(gaveta(100)), findMany: jest.fn().mockResolvedValue([]) },
+    }
+    // Fuera de la foto ya quedó la corrección (turno y gaveta en $200, en la misma transacción).
+    prismaMock.cashDrawerSession.findFirst.mockResolvedValue(gaveta(200) as any)
+    prismaMock.$transaction.mockImplementationOnce(async (cb: any) => cb(enLaFoto))
+
+    const detalle = await getShiftById('venue-1', 'shift-1')
+
+    expect(detalle.cashDrawer).toMatchObject({ sessionId: 'caja-1', actualAmount: 100, linkedToShift: true })
+    expect(enLaFoto.cashDrawerSession.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { venueId: 'venue-1', shiftId: 'shift-1' } }),
+    )
+    expect(prismaMock.cashDrawerSession.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('si la lectura de la gaveta truena, el detalle sigue (campo aditivo) y no se puede corregir el conteo', async () => {
+    const enLaFoto: any = {
+      shift: { findFirst: jest.fn().mockResolvedValue(turno([enLaGaveta])) },
+      order: { findMany: jest.fn().mockResolvedValue([]) },
+      payment: {
+        aggregate: jest.fn().mockResolvedValue(sumaDeLaMaquina(0, 0)),
+        groupBy: jest.fn().mockResolvedValue([grupo({}, 100, 10, 1)]),
+      },
+      cashDrawerSession: { findFirst: jest.fn().mockRejectedValue(new Error('se cayó la consulta')), findMany: jest.fn() },
+    }
+    prismaMock.$transaction.mockImplementationOnce(async (cb: any) => cb(enLaFoto))
+
+    const detalle = await getShiftById('venue-1', 'shift-1')
+
+    expect(detalle.cashDrawer).toBeNull()
+    expect(detalle.countCorrection).toMatchObject({ allowed: false, blockedReason: null })
+  })
+})

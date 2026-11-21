@@ -228,13 +228,15 @@ export async function resolveShiftCashDrawer(
   endTime?: Date | null,
   incluirEsperado = false,
   shiftId?: string,
+  // H8 (Codex servidor r5): el detalle del turno lo lee con el cliente de SU foto (`RepeatableRead`), junto con el turno.
+  db: Pick<Prisma.TransactionClient, 'cashDrawerSession'> = prisma,
 ) {
   const include = { events: { orderBy: { createdAt: 'asc' as const } } }
 
   // Identidad durable: no compite con una fila legacy más nueva ni depende de que la ventana
   // histórica esté completa. `venueId` conserva el aislamiento aun cuando `shiftId` es único.
   const findLinkedSession = () =>
-    shiftId ? prisma.cashDrawerSession.findFirst({ where: { venueId, shiftId }, include }) : Promise.resolve(null)
+    shiftId ? db.cashDrawerSession.findFirst({ where: { venueId, shiftId }, include }) : Promise.resolve(null)
   let session = await findLinkedSession()
   if (!session && !startTime) {
     // Incluso sin ventana temporal, una liga puede haber aparecido después de la primera
@@ -256,7 +258,7 @@ export async function resolveShiftCashDrawer(
       where: Record<string, unknown>,
       stage: ShiftCashDrawerWindowStage,
     ): Promise<ShiftCashDrawerLegacySelection> => {
-      const candidates = await prisma.cashDrawerSession.findMany({
+      const candidates = await db.cashDrawerSession.findMany({
         where: { ...where, venueId, shiftId: null },
         select: { id: true },
         orderBy: [{ openedAt: 'desc' }, { id: 'desc' }],
@@ -285,7 +287,7 @@ export async function resolveShiftCashDrawer(
       throw new AmbiguousShiftCashDrawerError(legacySelection.stage)
     }
     if (!session && legacySelection.kind === 'ONE') {
-      session = await prisma.cashDrawerSession.findFirst({
+      session = await db.cashDrawerSession.findFirst({
         // Mantener ambos filtros es deliberado: si la fila se ligó a otro turno durante la
         // carrera, no podemos leer su libro. Pero tampoco es "ausencia": hubo una identidad
         // elegida y perderla vuelve desconocida la autoridad financiera de este turno.
@@ -474,7 +476,23 @@ export async function getShiftById(
       const desglose = buildPaymentBreakdown(leido.payments as any, efectivoPorLugar)
       // El respaldo del total (R3, Codex #5 del cierre) sólo se usa si los cobros cargados no suman ventas en un turno sin cerrar.
       const respaldo = leido.status !== 'CLOSED' && desglose.totalSales <= 0 ? await ventasDelTurnoSinTarjetas(venueId, leido.id, tx) : null
-      return { shift: leido, desglose, cobradas, respaldo }
+      // H8 (Codex servidor r5): la gaveta (su conteo y su diferencia) también sale de ESTA foto. La corrección de conteo escribe turno y
+      // gaveta juntos; leída aparte, la misma respuesta decía «contado $100» en el turno y «$200» en la gaveta. Va al FINAL y atrapada:
+      // el campo es aditivo (P2, Codex 27-ago) y lo leído antes ya no depende de cómo termine esta transacción de sólo lectura.
+      // `shiftId` acota al turno: sin él, el detalle puede PINTAR la gaveta de otro turno junto a un `cashDifference` que se firmó contra
+      // la propia — dos números para el mismo dinero.
+      let cashDrawer: Awaited<ReturnType<typeof resolveShiftCashDrawer>> = null
+      let cashDrawerReadFailed = false
+      try {
+        cashDrawer = await resolveShiftCashDrawer(venueId, leido.startTime ?? null, leido.endTime ?? null, incluirEsperado, shiftId, tx)
+      } catch (err) {
+        cashDrawerReadFailed = true
+        logger.warn('[CASH-DRAWER] No se pudo adjuntar el arqueo del cajón al detalle del turno', {
+          shiftId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+      return { shift: leido, desglose, cobradas, respaldo, cashDrawer, cashDrawerReadFailed }
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
   )
@@ -482,7 +500,7 @@ export async function getShiftById(
   if (!foto) {
     return null
   }
-  const { shift, desglose, cobradas, respaldo } = foto
+  const { shift, desglose, cobradas, respaldo, cashDrawer, cashDrawerReadFailed } = foto
 
   // Las órdenes del detalle son las cuentas COBRADAS en el turno, con la misma membresía que firma el cierre y que
   // enseña la lista (`readShiftPaymentsForClose` + `contarOrdenesCobradas`; no se importan porque shift.tpv.service
@@ -681,27 +699,6 @@ export async function getShiftById(
   const finalTotalSales =
     calculatedTotalSales > 0 ? calculatedTotalSales : shift.status === 'CLOSED' ? Number(shift.totalSales) : Number(respaldo ?? 0)
   const finalTotalTips = calculatedTotalTips > 0 ? calculatedTotalTips : Number(shift.totalTips)
-
-  // P2 (Codex 27-ago): el campo es ADITIVO — si su consulta truena, el endpoint viejo no puede volverse un 500.
-  let cashDrawer: Awaited<ReturnType<typeof resolveShiftCashDrawer>> = null
-  let cashDrawerReadFailed = false
-  try {
-    // `shiftId` acota al turno: sin él, el detalle puede PINTAR la gaveta de otro turno junto a un
-    // `cashDifference` que se firmó contra la propia — dos números para el mismo dinero.
-    cashDrawer = await resolveShiftCashDrawer(
-      venueId,
-      (shift as any).startTime ?? null,
-      (shift as any).endTime ?? null,
-      incluirEsperado,
-      shiftId,
-    )
-  } catch (err) {
-    cashDrawerReadFailed = true
-    logger.warn('[CASH-DRAWER] No se pudo adjuntar el arqueo del cajón al detalle del turno', {
-      shiftId,
-      error: err instanceof Error ? err.message : String(err),
-    })
-  }
 
   // Aditivos, como `cashDrawer`: si truenan, el detalle no se vuelve un 500. `TOO_MANY` sólo se muestra: la corrección la
   // rechaza con su propio CASH_COUNT_TOO_MANY, contando igual que aquí.
