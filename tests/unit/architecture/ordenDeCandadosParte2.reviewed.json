@@ -737,6 +737,10 @@
       "etiqueta": "cancelarCuentaSinCobrar",
       "cantidad": 1
     },
+    "src/services/tpv/ventaDeCobrarSinCobro.tpv.service.ts#anularVentaDeCobrarSinCobro": {
+      "etiqueta": "anularVentaDeCobrarSinCobro",
+      "cantidad": 1
+    },
     "src/services/dashboard/order.dashboard.service.ts#deleteOrder": {
       "etiqueta": "deleteOrder",
       "cantidad": 1,
