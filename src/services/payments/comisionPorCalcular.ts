@@ -38,7 +38,7 @@ const a2 = (v: unknown): string => new Prisma.Decimal(String(v ?? 0)).toDecimalP
 
 /** La misma regla que usan la póliza y la conciliación para «es una devolución»: tipo REFUND o importe negativo. */
 export const esDevolucionContable = (p: { type: PaymentType | null; amount: Prisma.Decimal | number | string }): boolean =>
-  p.type === PaymentType.REFUND || new Prisma.Decimal(String(p.amount)).isNegative()
+  p.type === PaymentType.REFUND || Number(p.amount) < 0
 
 /**
  * De estos pagos (del mismo negocio), los que tienen la comisión por calcular. Mapa vacío = ninguno, sin consultas si ninguno tiene
