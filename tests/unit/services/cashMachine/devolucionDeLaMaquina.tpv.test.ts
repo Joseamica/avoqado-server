@@ -20,7 +20,7 @@ import * as refundService from '@/services/tpv/refund.tpv.service'
 import { prismaMock } from '../../../__helpers__/setup'
 import * as destinoDelReembolso from '@/services/shared/destinoDelReembolso'
 import type { OrigenDelDinero } from '@/services/shared/destinoDelReembolso'
-import { MEDIOS, celda } from '../../../__helpers__/matrizDelReembolso'
+import { MATRIZ_DEL_SALDO, MEDIOS, celda } from '../../../__helpers__/matrizDelReembolso'
 
 const VENUE = 'venue-1'
 
@@ -155,7 +155,7 @@ describe('devolución de una venta de la máquina por la TPV', () => {
       statusCode: 403,
       code: 'REFUND_NEEDS_REFUND_TO_CASH',
     })
-    expect(espia).toHaveBeenCalledWith({ entrada: 'TPV', origen: 'MAQUINA', medio: undefined, esCreditoDeCambio: false })
+    expect(espia).toHaveBeenCalledWith({ entrada: 'TPV', origen: 'MAQUINA', medio: undefined, esCreditoDeCambio: false, esSaldo: false })
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
     espia.mockRestore()
   })
@@ -251,5 +251,43 @@ describe('🔴 D5 (r3 #12): la TPV escribe lo que dice la matriz, celda por celd
     await refundService.recordRefund(VENUE, cuerpo(16000) as any, 'staff-1', undefined, 'payments:refund')
     expect((prismaMock as any).payment.create.mock.calls[0][0].data).toMatchObject({ method: 'CASH', fundsFlow: 'CASH_DRAWER' })
     expect(eventosEnTx.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('🔴 H7 (Codex servidor r5): lo pagado con saldo en la TPV — la matriz y el escritor dicen lo mismo (no se admite)', () => {
+  const esperado = MATRIZ_DEL_SALDO.find(([e, m]) => e === 'TPV' && m === '—')![2]
+  const saldo = {
+    method: 'OTHER',
+    fundsFlow: 'EXTERNAL_RECORDED',
+    cashMachineRef: null,
+    tenderLabel: 'Saldo a favor',
+    tenderSatFormaPago: null,
+  }
+
+  it('la matriz lo manda al POS o al panel, en las 5 celdas', () => {
+    if (esperado.admitido) throw new Error('la matriz debía rechazarla')
+    expect(esperado.dondeIr).toEqual(['POS', 'PANEL'])
+    for (const [, , d] of MATRIZ_DEL_SALDO.filter(([e]) => e === 'TPV')) expect(d).toEqual(esperado)
+  })
+
+  it('saldo a favor: el escritor contesta el MISMO 400 de la matriz, antes de tocar nada', async () => {
+    if (esperado.admitido) throw new Error('la matriz debía rechazarla')
+    armar({ ...saldo, tenderType: { systemKind: 'STORE_CREDIT' } })
+    await expect(refundService.recordRefund(VENUE, cuerpo(16000) as any, 'staff-1', undefined, 'payments:refund')).rejects.toMatchObject({
+      statusCode: 400,
+      code: esperado.codigo,
+      message: esperado.mensaje,
+      details: { dondeIr: esperado.dondeIr },
+    })
+    expect(transacciones).toBe(0)
+  })
+
+  it('tarjeta de regalo: el escritor tampoco la admite (con su código de siempre, que conoce la terminal)', async () => {
+    armar({ ...saldo, tenderType: { systemKind: 'GIFT_CARD' } })
+    await expect(refundService.recordRefund(VENUE, cuerpo(16000) as any, 'staff-1', undefined, 'payments:refund')).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'GIFT_CARD_REFUND_TO_BALANCE_ONLY',
+    })
+    expect(transacciones).toBe(0)
   })
 })

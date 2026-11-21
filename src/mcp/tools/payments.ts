@@ -18,7 +18,7 @@ import { issueRefund, type RefundReason } from '@/services/dashboard/refund.dash
 import { exigirSoloSaldoFueraDelPos } from '@/services/storeCredit/storeCreditRefund.service'
 import { createManualPayment, MENSAJE_VENTA_YA_COBRADA } from '@/services/dashboard/manualPayment.service'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
-import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal } from '@/services/tpv/terminalRefundTarget'
+import { devolverConEfectivo, sePuedeEscogerComoDevolver } from '@/services/tpv/terminalRefundTarget'
 import { decidirDestinoDelReembolso, medioQueLlegaAlEscritor, origenDelDinero } from '@/services/shared/destinoDelReembolso'
 import { isGiftCardTenderKind } from '@/services/giftCards/giftCardTender'
 import { decidesMoney } from '@/services/payments/cardInternationality.service'
@@ -559,7 +559,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'issue_refund',
-    '🔴 CRITICAL. If the venue has «Sólo saldo a favor» on, returned goods and «other» are rejected with STORE_CREDIT_ONLY: those go through the POS. Refund a COMPLETED payment of a venue you can access — ONLY for CASH / non-card payments (the cash you hand back is recorded as a refund). CARD payments (credit/debit) are BLOCKED here: a Blumon/terminal card refund must be done PHYSICALLY on the terminal with the card present — it cannot be processed by API. Identify the payment by its id (from list_payments), give the amount in pesos (partial allowed; the service enforces the remaining refundable) and a reason. By DEFAULT this only PREVIEWS; call again with confirm:true to execute. This WRITES MONEY — requires payments:refund (refundMethod CASH, or refunding a cash-machine sale in cash, also requires payments:refund-to-cash).',
+    '🔴 CRITICAL. If the venue has «Sólo saldo a favor» on, returned goods and «other» are rejected with STORE_CREDIT_ONLY: those go through the POS. Refund a COMPLETED payment of a venue you can access — ONLY for CASH / non-card payments (the cash you hand back is recorded as a refund). CARD payments (credit/debit) are BLOCKED here: a Blumon/terminal card refund must be done PHYSICALLY on the terminal with the card present — it cannot be processed by API. Identify the payment by its id (from list_payments), give the amount in pesos (partial allowed; the service enforces the remaining refundable) and a reason. By DEFAULT this only PREVIEWS; call again with confirm:true to execute. This WRITES MONEY — requires payments:refund (handing out drawer cash for money that never entered the drawer — a cash-machine sale, or CASH for a non-cash payment — also requires payments:refund-to-cash).',
     {
       venueId: z.string().describe('Venue that owns the payment (must be in your scope)'),
       idempotencyKey: z
@@ -631,33 +631,40 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       // D5 (r6 caso 7): el permiso especial se pide DESPUÉS de la matriz y sólo si la operación se admite; lo que no se admite (lo pagado
       // con crédito de Cambio con «Efectivo» o transferencia) se contesta con a dónde ir, sin pedir un permiso que no serviría.
       // F10 (r4): lo pagado con saldo (tarjeta de regalo o saldo a favor) con un medio escogido tampoco pide ese permiso: no se admite.
+      // H7 (Codex servidor r5): con el cobro tal cual, lo admitido sale de las funciones de ruteo del escritor: una tarjeta de la
+      // terminal se contesta «a la TPV» y un medio que no se puede escoger, «por el mismo medio», ANTES de pedir el permiso especial
+      // (antes la cajera recibía primero el 403 de refund-to-cash). Y «Efectivo» sobre dinero que ya entró a la gaveta pide sólo
+      // payments:refund: el permiso especial es para sacar de la gaveta dinero que nunca entró ahí (la venta de la máquina).
       const { origen, esCreditoDeCambio, esSaldo } = await origenDelDinero(prisma, venueId, paymentId)
+      const cobroParaDevolver = { ...payment, tenderSystemKind: payment.tenderType?.systemKind ?? null }
       const destino = decidirDestinoDelReembolso({
         entrada: 'MCP',
         origen,
         medio: medioQueLlegaAlEscritor('MCP', refundMethod),
         esCreditoDeCambio,
         esSaldo,
+        cobro: cobroParaDevolver,
       })
+      // CARD refunds CANNOT be processed here. A Blumon/TPV card refund needs the physical card on the
+      // terminal; this path only RECORDS a bookkeeping refund (no money moves via API). Block it for the
+      // MCP so an AI never records a card "refund" that was never physically processed (the founder's rule:
+      // "blumon/tpv no hacemos reembolsos por API, solo poniendo la tarjeta físicamente").
+      if (!destino.admitido && destino.dondeIr.includes('TPV')) {
+        return text({
+          ok: false,
+          code: destino.codigo,
+          cardRefundNotSupported: true,
+          method: payment.method,
+          error: `Este pago es con TARJETA (${payment.method}). Los reembolsos de tarjeta NO se registran por aquí: el dinero se devuelve FÍSICAMENTE en la terminal, con alguien presente. Lo que SÍ puedes hacer es ABRIR esa devolución en la terminal con la herramienta 'refund_card_on_terminal' — deja la pantalla lista y una persona la confirma en el aparato; la TPV registra el reembolso sola cuando el dinero se mueve. Por el MCP solo puedes reembolsar directo pagos en EFECTIVO/transferencia.`,
+          dondeIr: destino.dondeIr,
+          useInstead: 'refund_card_on_terminal',
+        })
+      }
       if (!destino.admitido) return text({ ok: false, code: destino.codigo, error: destino.mensaje, dondeIr: destino.dondeIr })
       guard.requirePermission(destino.permisoRequerido, venueId)
       if (payment.status !== TransactionStatus.COMPLETED) {
         return text({ ok: false, error: `Solo se puede reembolsar un pago COMPLETED (este está ${payment.status}).` })
       }
-      // CARD refunds CANNOT be processed here. A Blumon/TPV card refund needs the physical card on the
-      // terminal; this path only RECORDS a bookkeeping refund (no money moves via API). Block it for the
-      // MCP so an AI never records a card "refund" that was never physically processed (the founder's rule:
-      // "blumon/tpv no hacemos reembolsos por API, solo poniendo la tarjeta físicamente").
-      if (seDevuelveEnTerminal(payment)) {
-        return text({
-          ok: false,
-          cardRefundNotSupported: true,
-          method: payment.method,
-          error: `Este pago es con TARJETA (${payment.method}). Los reembolsos de tarjeta NO se registran por aquí: el dinero se devuelve FÍSICAMENTE en la terminal, con alguien presente. Lo que SÍ puedes hacer es ABRIR esa devolución en la terminal con la herramienta 'refund_card_on_terminal' — deja la pantalla lista y una persona la confirma en el aparato; la TPV registra el reembolso sola cuando el dinero se mueve. Por el MCP solo puedes reembolsar directo pagos en EFECTIVO/transferencia.`,
-          useInstead: 'refund_card_on_terminal',
-        })
-      }
-      const cobroParaDevolver = { ...payment, tenderSystemKind: payment.tenderType?.systemKind ?? null }
       // Tarjetas de regalo (spec §5.5): lo pagado con saldo sólo regresa al saldo; con refundMethod ya lo contestó la matriz (F10).
       const esSaldoDeRegalo = isGiftCardTenderKind(cobroParaDevolver.tenderSystemKind)
       // Escoger con qué se devuelve sólo aplica a lo que no fue tarjeta ni liquida un procesador (misma regla del servicio).

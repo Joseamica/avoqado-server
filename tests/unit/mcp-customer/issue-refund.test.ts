@@ -197,9 +197,36 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
     expect(mockIssue).not.toHaveBeenCalled()
   })
 
-  it('🔴 refundMethod CASH sobre un efectivo del cajón sin payments:refund-to-cash ⇒ error de permiso (lo pide la matriz), sin reembolsar', async () => {
+  it('🔴 H7 (Codex servidor r5): «Efectivo» sobre un efectivo que SÍ entró a la gaveta es el mismo medio: basta payments:refund', async () => {
     mockPaymentFindFirst.mockResolvedValue({ ...completedPayment, fundsFlow: 'CASH_DRAWER', cashMachineRef: null })
+    mockIssue.mockResolvedValueOnce({ refundId: 'r-1', refundedAmount: 100 })
+    await call({ ...base, venueId: 'sin-efectivo', refundMethod: 'CASH', confirm: true })
+    expect(mockIssue).toHaveBeenCalledWith(expect.objectContaining({ permisoConcedido: 'payments:refund', refundMethod: 'CASH' }))
+    mockPaymentFindFirst.mockReset()
+  })
+
+  it('🔴 H7: «Efectivo» sobre una TRANSFERENCIA (dinero que nunca entró a la gaveta) sí pide payments:refund-to-cash', async () => {
+    mockPaymentFindFirst.mockResolvedValue({
+      ...completedPayment,
+      method: 'BANK_TRANSFER',
+      fundsFlow: 'EXTERNAL_RECORDED',
+      cashMachineRef: null,
+    })
     await expect(call({ ...base, venueId: 'sin-efectivo', refundMethod: 'CASH', confirm: true })).rejects.toThrow('payments:refund-to-cash')
+    expect(mockIssue).not.toHaveBeenCalled()
+    mockPaymentFindFirst.mockReset()
+  })
+
+  it('🔴 H7: la cajera pide devolver en efectivo un DÉBITO de la terminal: «a la TPV» desde la primera respuesta, nunca el 403 de refund-to-cash', async () => {
+    mockPaymentFindFirst.mockResolvedValue({ ...completedPayment, method: 'DEBIT_CARD', source: 'TPV', fundsFlow: 'AVOQADO_PROCESSED' })
+    const out = parse(await call({ ...base, venueId: 'sin-efectivo', refundMethod: 'CASH', confirm: true }))
+    expect(out).toMatchObject({
+      ok: false,
+      code: 'NO_ADMITIDO_EN_ESTA_ENTRADA',
+      cardRefundNotSupported: true,
+      dondeIr: ['TPV'],
+      useInstead: 'refund_card_on_terminal',
+    })
     expect(mockIssue).not.toHaveBeenCalled()
     mockPaymentFindFirst.mockReset()
   })

@@ -11,7 +11,7 @@ import {
   Prisma,
 } from '@prisma/client'
 import { cajaParaDevolverEnTx, postCashRefundToDrawer, salidaDelReembolsoEnTx } from '../shared/cashDrawerPosting'
-import { decidirDestinoDelReembolso, errorDeNoAdmitido, type PermisoDeReembolso } from '../shared/destinoDelReembolso'
+import { decidirDestinoDelReembolso, errorDeNoAdmitido, esTenderDeSaldo, type PermisoDeReembolso } from '../shared/destinoDelReembolso'
 import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import {
   ORDER_LOCK_WAIT_BUDGET,
@@ -406,11 +406,14 @@ export async function recordRefund(
   // D5 (Codex servidor r3 #12): LA decisión de destino, la misma que autorizó la ruta. La TPV nunca escoge medio (`medio` vacío) y no
   // admite lo pagado con crédito de un Cambio (400 con «POS o panel»; con crédito, la respuesta no depende del origen de su raíz, que
   // la terminal no resuelve). El folio de un cobro no cambia una vez escrito: la decisión vale también bajo el candado de abajo.
+  // H7 (Codex servidor r5): también lo pagado con saldo a favor (la tarjeta de regalo ya se rechazó arriba con su código): la terminal no
+  // regresa dinero a un saldo, como dice la matriz.
   const destino = decidirDestinoDelReembolso({
     entrada: 'TPV',
     origen: originalPayment.cashMachineRef ? 'MAQUINA' : 'ORDINARIO',
     medio: undefined,
     esCreditoDeCambio: isExchangeCreditTenderKind(originalPayment.tenderType?.systemKind),
+    esSaldo: esTenderDeSaldo(originalPayment.tenderType?.systemKind),
   })
   if (!destino.admitido) throw errorDeNoAdmitido(destino)
 

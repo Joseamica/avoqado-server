@@ -20,6 +20,12 @@
  * escritor—, así que escoger cualquier medio es «no admitido» ANTES de pedir permiso (antes la cajera recibía el 403 de
  * `refund-to-cash` para acabar en el rechazo del escritor). Y el MCP sólo recibe efectivo o transferencia: otro medio no se admite ahí.
  *
+ * H7 (Codex servidor r5): «¿lo admite esta entrada?» sale de las MISMAS funciones de ruteo que usan los escritores, con el cobro tal
+ * cual (`cobro`): el MCP no devuelve una tarjeta de la terminal (`seDevuelveEnTerminal`, su escritor manda a la TPV), escoger un medio
+ * donde el escritor no deja escoger no se admite (`devolverConEfectivo` + `sePuedeEscogerComoDevolver`), y en el MCP «Efectivo» sobre
+ * dinero que YA entró a la gaveta es el mismo medio: el permiso especial sólo cuando sale de la gaveta dinero que nunca entró a ella.
+ * La terminal no devuelve a un saldo (su escritor lo rechaza): esa fila de la matriz se corrigió para decirlo.
+ *
  * La matriz completa (origen × crédito de Cambio × entrada × medio) está en `tests/__helpers__/matrizDelReembolso.ts`.
  */
 import type { Prisma } from '@prisma/client'
@@ -27,6 +33,7 @@ import type { Prisma } from '@prisma/client'
 import { BadRequestError } from '../../errors/AppError'
 import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { isGiftCardTenderKind } from '../giftCards/giftCardPredicados'
+import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal, type CobroParaDevolver } from '../tpv/terminalRefundTarget'
 
 /** El tender de sistema de un SALDO: la tarjeta de regalo o el saldo a favor (lo que el escritor sólo devuelve a ese saldo). */
 export const esTenderDeSaldo = (systemKind: string | null | undefined): boolean =>
@@ -43,7 +50,7 @@ export type EntradaDelReembolso = 'POS' | 'PANEL' | 'TPV' | 'MCP'
 export type DestinoEfectivo = 'GAVETA' | 'EFECTIVO_ESCOGIDO' | 'TRANSFERENCIA' | 'SALDO_A_FAVOR' | 'MISMO_MEDIO'
 export type PermisoDeReembolso = 'payments:refund' | 'payments:refund-to-cash'
 /** A dónde mandar a quien pidió lo que esta entrada no admite: otra entrada, o el medio que sí se puede escoger. */
-export type DondeIr = 'POS' | 'PANEL' | 'MISMO_MEDIO' | 'SALDO_A_FAVOR'
+export type DondeIr = 'POS' | 'PANEL' | 'TPV' | 'MISMO_MEDIO' | 'SALDO_A_FAVOR'
 export interface DestinoDelReembolso {
   admitido: true
   destinoEfectivo: DestinoEfectivo
@@ -78,26 +85,50 @@ export function decidirDestinoDelReembolso(p: {
   esCreditoDeCambio: boolean
   /** Lo pagó un saldo (el tender de sistema de tarjeta de regalo o de saldo a favor): sólo regresa a ese saldo. */
   esSaldo?: boolean
+  /** H7: el cobro tal cual (lo que leen los escritores). Con él, lo admitido sale de SUS funciones de ruteo; sin él, como antes. */
+  cobro?: CobroParaDevolver | null
 }): DecisionDelReembolso {
   if (p.esSaldo && p.medio != null)
     return noAdmitido('Lo pagado con saldo (tarjeta de regalo o saldo a favor) sólo regresa a ese mismo saldo.', ['MISMO_MEDIO'])
+  // H7: la terminal nunca devuelve a un saldo (su escritor lo rechaza): se devuelve desde el POS o el panel.
+  if (p.esSaldo && p.entrada === 'TPV') return noAdmitido(MENSAJE_SALDO_EN_TPV, ['POS', 'PANEL'])
   if (p.entrada === 'MCP' && p.medio != null && p.medio !== 'CASH' && p.medio !== 'BANK_TRANSFER')
     return noAdmitido(
       'Por el MCP sólo se devuelve por el mismo medio, en efectivo o por transferencia; el saldo a favor se da desde el POS.',
       ['POS'],
     )
+  // H7: el MCP no devuelve un cobro con tarjeta de nuestra terminal: su escritor lo manda a la terminal, con la tarjeta presente.
+  if (p.entrada === 'MCP' && p.cobro && seDevuelveEnTerminal(p.cobro)) return noAdmitido(MENSAJE_TARJETA_EN_TPV, ['TPV'])
   // El crédito no acredita un reembolso del SDK: sólo el POS o el panel resuelven el origen de la cadena.
   if (p.esCreditoDeCambio && p.entrada === 'TPV')
     return noAdmitido('Lo pagado con crédito de cambio se devuelve desde el POS o el panel, por el medio de su origen.', ['POS', 'PANEL'])
   // Sale por el medio de su cobro RAÍZ (o a saldo a favor), nunca por uno escogido (spec 2026-10-20 §6.7).
   if (p.esCreditoDeCambio && (p.medio === 'CASH' || p.medio === 'BANK_TRANSFER'))
     return noAdmitido('Este cobro sólo se devuelve por el mismo medio con que se pagó.', ['MISMO_MEDIO', 'SALDO_A_FAVOR'])
+  // H7: escoger efectivo o transferencia donde el escritor no deja escoger (tarjeta, procesador, reparto): la MISMA regla que el escritor
+  // aplica después (`writeRefundInTx`, el MCP), contestada antes de pedir el permiso especial.
+  if (
+    p.cobro &&
+    (p.medio === 'CASH' || p.medio === 'BANK_TRANSFER') &&
+    devolverConEfectivo(p.cobro, p.medio) !== undefined &&
+    !sePuedeEscogerComoDevolver(p.cobro)
+  )
+    return noAdmitido('Este cobro sólo se devuelve por el mismo medio con que se pagó.', ['MISMO_MEDIO'])
   if (p.medio === 'STORE_CREDIT') return admitido('SALDO_A_FAVOR', 'payments:refund')
   if (p.medio === 'BANK_TRANSFER') return admitido('TRANSFERENCIA', 'payments:refund')
   if (p.origen !== 'ORDINARIO') return admitido('GAVETA', 'payments:refund-to-cash')
+  // H7 (r6-7): en el MCP, «Efectivo» sobre dinero que YA entró a la gaveta es el mismo medio (así lo normaliza el escritor): basta
+  // `payments:refund`. Las apps conservan su regla de 1-oct (escoger «Efectivo» pide su permiso).
+  if (p.medio === 'CASH' && p.entrada === 'MCP' && p.cobro && devolverConEfectivo(p.cobro, 'CASH') === undefined)
+    return admitido('MISMO_MEDIO', 'payments:refund')
   if (p.medio === 'CASH') return admitido('EFECTIVO_ESCOGIDO', 'payments:refund-to-cash')
   return admitido('MISMO_MEDIO', 'payments:refund')
 }
+
+export const MENSAJE_SALDO_EN_TPV =
+  'Lo pagado con saldo (tarjeta de regalo o saldo a favor) no se devuelve en la terminal: devuélvelo desde el POS o el panel y regresa a ese mismo saldo.'
+export const MENSAJE_TARJETA_EN_TPV =
+  'Los cobros con tarjeta de la terminal se devuelven en la terminal, con la tarjeta presente: ábrela con «refund_card_on_terminal».'
 
 const admitido = (destinoEfectivo: DestinoEfectivo, permisoRequerido: PermisoDeReembolso): DestinoDelReembolso => ({
   admitido: true,
@@ -125,17 +156,39 @@ export async function origenDelDinero(
   db: Pick<Prisma.TransactionClient, 'payment' | 'exchangeCreditLink'>,
   venueId: string | undefined,
   paymentId: unknown,
-): Promise<{ origen: OrigenDelDinero; esCreditoDeCambio: boolean; esSaldo?: true }> {
-  const ordinario = { origen: 'ORDINARIO' as const, esCreditoDeCambio: false }
-  if (!venueId || typeof paymentId !== 'string' || !paymentId) return ordinario
-  const cobro = await db.payment.findFirst({
+): Promise<{ origen: OrigenDelDinero; esCreditoDeCambio: boolean; esSaldo?: true; cobro?: CobroParaDevolver }> {
+  if (!venueId || typeof paymentId !== 'string' || !paymentId) return { origen: 'ORDINARIO', esCreditoDeCambio: false }
+  const fila = await db.payment.findFirst({
     where: { id: paymentId, venueId },
-    select: { cashMachineRef: true, tenderType: { select: { systemKind: true } } },
+    // H7: también lo que leen las funciones de ruteo de los escritores (el cobro de un id no cambia una vez escrito).
+    select: {
+      cashMachineRef: true,
+      tenderType: { select: { systemKind: true } },
+      method: true,
+      source: true,
+      externalSource: true,
+      tenderSatFormaPago: true,
+      fundsFlow: true,
+      tenderTypeId: true,
+      tenderCountsAsCash: true,
+    },
   })
-  if (!cobro) return ordinario
-  if (cobro.cashMachineRef) return { origen: 'MAQUINA', esCreditoDeCambio: false }
-  if (esTenderDeSaldo(cobro.tenderType?.systemKind)) return { ...ordinario, esSaldo: true }
-  if (!isExchangeCreditTenderKind(cobro.tenderType?.systemKind)) return ordinario
+  if (!fila) return { origen: 'ORDINARIO', esCreditoDeCambio: false }
+  const cobro: CobroParaDevolver = {
+    method: fila.method,
+    source: fila.source ?? null,
+    externalSource: fila.externalSource ?? null,
+    tenderSatFormaPago: fila.tenderSatFormaPago ?? null,
+    fundsFlow: fila.fundsFlow ?? null,
+    tenderTypeId: fila.tenderTypeId ?? null,
+    tenderCountsAsCash: fila.tenderCountsAsCash ?? null,
+    tenderSystemKind: fila.tenderType?.systemKind ?? null,
+    cashMachineRef: fila.cashMachineRef ?? null,
+  }
+  const ordinario = { origen: 'ORDINARIO' as const, esCreditoDeCambio: false, cobro }
+  if (fila.cashMachineRef) return { origen: 'MAQUINA', esCreditoDeCambio: false, cobro }
+  if (esTenderDeSaldo(fila.tenderType?.systemKind)) return { ...ordinario, esSaldo: true }
+  if (!isExchangeCreditTenderKind(fila.tenderType?.systemKind)) return ordinario
   const vinculo = await db.exchangeCreditLink.findFirst({
     where: { venueId, creditPaymentId: paymentId },
     select: { originPaymentId: true },
@@ -143,5 +196,5 @@ export async function origenDelDinero(
   const raiz = vinculo
     ? await db.payment.findFirst({ where: { id: vinculo.originPaymentId, venueId }, select: { cashMachineRef: true } })
     : null
-  return { origen: raiz?.cashMachineRef ? 'CADENA_DE_MAQUINA' : 'ORDINARIO', esCreditoDeCambio: true }
+  return { origen: raiz?.cashMachineRef ? 'CADENA_DE_MAQUINA' : 'ORDINARIO', esCreditoDeCambio: true, cobro }
 }

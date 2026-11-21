@@ -15,7 +15,15 @@ import {
   medioQueLlegaAlEscritor,
   origenDelDinero,
 } from '@/services/shared/destinoDelReembolso'
-import { MATRIZ_DEL_REEMBOLSO, MATRIZ_DEL_SALDO, MENSAJE_MISMO_MEDIO, medioDelCuerpo } from '../../../__helpers__/matrizDelReembolso'
+import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal } from '@/services/tpv/terminalRefundTarget'
+import {
+  COBROS_DE_RUTEO,
+  MATRIZ_DEL_REEMBOLSO,
+  MATRIZ_DEL_RUTEO,
+  MATRIZ_DEL_SALDO,
+  MENSAJE_MISMO_MEDIO,
+  medioDelCuerpo,
+} from '../../../__helpers__/matrizDelReembolso'
 
 describe('decidirDestinoDelReembolso · la matriz completa (familia B + D5)', () => {
   it('cubre TODAS las combinaciones, una vez cada una (3 orígenes × 2 × 4 entradas × 5 medios = 120)', () => {
@@ -45,6 +53,39 @@ describe('decidirDestinoDelReembolso · la matriz completa (familia B + D5)', ()
         esSaldo: true,
       }),
     ).toEqual(esperado)
+  })
+
+  it.each(MATRIZ_DEL_RUTEO)('🔴 H7 · con el cobro tal cual · %s · %s · medio %s', (cobro, entrada, declarado, esperado) => {
+    expect(
+      decidirDestinoDelReembolso({
+        entrada,
+        origen: 'ORDINARIO',
+        medio: medioQueLlegaAlEscritor(entrada, medioDelCuerpo(declarado)),
+        esCreditoDeCambio: false,
+        cobro: COBROS_DE_RUTEO[cobro],
+      }),
+    ).toEqual(esperado)
+  })
+
+  it('🔴 H7: lo admitido nunca lo rechaza la regla del escritor (mismas funciones de ruteo): ni «a la TPV» ni «por el mismo medio»', () => {
+    for (const [cobro, entrada, declarado, d] of MATRIZ_DEL_RUTEO) {
+      if (!d.admitido) continue
+      const c = COBROS_DE_RUTEO[cobro]
+      const medio = medioQueLlegaAlEscritor(entrada, medioDelCuerpo(declarado))
+      if (entrada === 'MCP') expect(seDevuelveEnTerminal(c)).toBe(false)
+      if (medio === 'CASH' || medio === 'BANK_TRANSFER') {
+        expect(devolverConEfectivo(c, medio) === undefined || sePuedeEscogerComoDevolver(c)).toBe(true)
+      }
+    }
+  })
+
+  it('🔴 H7: el MCP pide el permiso especial sólo cuando sale de la gaveta dinero que nunca entró a ella', () => {
+    const mcp = MATRIZ_DEL_RUTEO.filter(([, e]) => e === 'MCP')
+    for (const [cobro, , declarado, d] of mcp) {
+      if (!d.admitido) continue
+      const entro = cobro === 'EFECTIVO_DE_GAVETA'
+      expect(d.permisoRequerido === 'payments:refund-to-cash').toBe(declarado === 'CASH' && !entro)
+    }
   })
 
   it('F10: un medio nulo es «el mismo medio», también con saldo', () => {
@@ -90,7 +131,7 @@ describe('origenDelDinero · de dónde viene el dinero y si lo pagó un crédito
   })
 
   it('la venta directa de la máquina', async () => {
-    await expect(origenDelDinero(db({ p: { cashMachineRef: 'AQ0123456789AB' } }) as any, 'v1', 'p')).resolves.toEqual({
+    await expect(origenDelDinero(db({ p: { cashMachineRef: 'AQ0123456789AB' } }) as any, 'v1', 'p')).resolves.toMatchObject({
       origen: 'MAQUINA',
       esCreditoDeCambio: false,
     })
@@ -101,7 +142,10 @@ describe('origenDelDinero · de dónde viene el dinero y si lo pagó un crédito
       { credito: { cashMachineRef: null, tenderType: { systemKind: 'EXCHANGE_CREDIT' } }, raiz: { cashMachineRef: 'AQ0123456789AB' } },
       'raiz',
     )
-    await expect(origenDelDinero(d as any, 'v1', 'credito')).resolves.toEqual({ origen: 'CADENA_DE_MAQUINA', esCreditoDeCambio: true })
+    await expect(origenDelDinero(d as any, 'v1', 'credito')).resolves.toMatchObject({
+      origen: 'CADENA_DE_MAQUINA',
+      esCreditoDeCambio: true,
+    })
     expect(d.exchangeCreditLink.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: { venueId: 'v1', creditPaymentId: 'credito' } }),
     )
@@ -112,8 +156,8 @@ describe('origenDelDinero · de dónde viene el dinero y si lo pagó un crédito
       { credito: { cashMachineRef: null, tenderType: { systemKind: 'EXCHANGE_CREDIT' } }, raiz: { cashMachineRef: null } },
       'raiz',
     )
-    await expect(origenDelDinero(d as any, 'v1', 'credito')).resolves.toEqual({ origen: 'ORDINARIO', esCreditoDeCambio: true })
-    await expect(origenDelDinero(db({ p: { cashMachineRef: null } }) as any, 'v1', 'p')).resolves.toEqual({
+    await expect(origenDelDinero(d as any, 'v1', 'credito')).resolves.toMatchObject({ origen: 'ORDINARIO', esCreditoDeCambio: true })
+    await expect(origenDelDinero(db({ p: { cashMachineRef: null } }) as any, 'v1', 'p')).resolves.toMatchObject({
       origen: 'ORDINARIO',
       esCreditoDeCambio: false,
     })
@@ -124,7 +168,7 @@ describe('origenDelDinero · de dónde viene el dinero y si lo pagó un crédito
     async kind => {
       await expect(
         origenDelDinero(db({ p: { cashMachineRef: null, tenderType: { systemKind: kind } } }) as any, 'v1', 'p'),
-      ).resolves.toEqual({ origen: 'ORDINARIO', esCreditoDeCambio: false, esSaldo: true })
+      ).resolves.toMatchObject({ origen: 'ORDINARIO', esCreditoDeCambio: false, esSaldo: true })
     },
   )
 

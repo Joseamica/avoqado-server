@@ -16,6 +16,8 @@ export const MENSAJE_MISMO_MEDIO = 'Este cobro sólo se devuelve por el mismo me
 export const MENSAJE_MCP =
   'Por el MCP sólo se devuelve por el mismo medio, en efectivo o por transferencia; el saldo a favor se da desde el POS.'
 export const MENSAJE_SALDO = 'Lo pagado con saldo (tarjeta de regalo o saldo a favor) sólo regresa a ese mismo saldo.'
+export const MENSAJE_SALDO_EN_TPV =
+  'Lo pagado con saldo (tarjeta de regalo o saldo a favor) no se devuelve en la terminal: devuélvelo desde el POS o el panel y regresa a ese mismo saldo.'
 
 const GAVETA: DecisionDelReembolso = { admitido: true, destinoEfectivo: 'GAVETA', permisoRequerido: CAJA }
 const ESCOGIDO: DecisionDelReembolso = { admitido: true, destinoEfectivo: 'EFECTIVO_ESCOGIDO', permisoRequerido: CAJA }
@@ -93,14 +95,26 @@ export const MATRIZ_DEL_REEMBOLSO: Celda[] = RENGLONES.flatMap(([origen, credito
 )
 
 /**
+ * H7 (Codex servidor r5): la terminal NO devuelve a un saldo —su escritor lo rechaza (la tarjeta de regalo con su código propio)—, así
+ * que su fila dice «desde el POS o el panel». Se corrigió la matriz, no el escritor: que la terminal regresara dinero a un saldo sería un
+ * flujo nuevo, y el rechazo ya existía.
+ */
+const SALDO_NO_EN_TPV: DecisionDelReembolso = {
+  admitido: false,
+  codigo: 'NO_ADMITIDO_EN_ESTA_ENTRADA',
+  mensaje: MENSAJE_SALDO_EN_TPV,
+  dondeIr: ['POS', 'PANEL'],
+}
+
+/**
  * F10: lo pagado con SALDO (tarjeta de regalo o saldo a favor: nunca es de la máquina ni crédito de Cambio), entrada × medio. Sólo el
- * mismo medio se admite; el panel y la TPV no escogen, así que siempre lo es.
+ * mismo medio se admite; el panel no escoge, así que siempre lo es. H7: la TPV, nunca.
  */
 export const MATRIZ_DEL_SALDO: Array<[EntradaDelReembolso, MedioDeclarado, DecisionDelReembolso]> = (
   [
     ['POS', [MISMO, SOLO_AL_SALDO, SOLO_AL_SALDO, SOLO_AL_SALDO, SOLO_AL_SALDO]],
     ['PANEL', [MISMO, MISMO, MISMO, MISMO, MISMO]],
-    ['TPV', [MISMO, MISMO, MISMO, MISMO, MISMO]],
+    ['TPV', [SALDO_NO_EN_TPV, SALDO_NO_EN_TPV, SALDO_NO_EN_TPV, SALDO_NO_EN_TPV, SALDO_NO_EN_TPV]],
     ['MCP', [MISMO, SOLO_AL_SALDO, SOLO_AL_SALDO, SOLO_AL_SALDO, SOLO_AL_SALDO]],
   ] as Array<[EntradaDelReembolso, Cinco]>
 ).flatMap(([entrada, cinco]) =>
@@ -121,3 +135,83 @@ export function celda(
   if (!fila) throw new Error(`la matriz no tiene la celda ${origen}|${credito}|${entrada}|${medio}`)
   return fila[4]
 }
+
+/**
+ * H7 (Codex servidor r5): matriz B con el COBRO tal cual (lo que leen los escritores), para las entradas que escogen medio (POS y MCP)
+ * y la terminal. Una celda = cobro × entrada × medio declarado. Lo admitido sale de las funciones de ruteo de los escritores
+ * (`seDevuelveEnTerminal`, `devolverConEfectivo`, `sePuedeEscogerComoDevolver`); el MCP pide el permiso especial sólo cuando sale de la
+ * gaveta dinero que nunca entró a ella.
+ */
+export const COBROS_DE_RUTEO = {
+  EFECTIVO_DE_GAVETA: {
+    method: 'CASH',
+    source: 'POS',
+    externalSource: null,
+    tenderSatFormaPago: null,
+    fundsFlow: 'CASH_DRAWER',
+    tenderTypeId: null,
+    tenderCountsAsCash: null,
+  },
+  TRANSFERENCIA: {
+    method: 'BANK_TRANSFER',
+    source: 'POS',
+    externalSource: null,
+    tenderSatFormaPago: null,
+    fundsFlow: 'EXTERNAL_RECORDED',
+    tenderTypeId: null,
+    tenderCountsAsCash: null,
+  },
+  TARJETA_DE_LA_TERMINAL: {
+    method: 'DEBIT_CARD',
+    source: 'TPV',
+    externalSource: null,
+    tenderSatFormaPago: null,
+    fundsFlow: 'AVOQADO_PROCESSED',
+    tenderTypeId: null,
+    tenderCountsAsCash: null,
+  },
+  TARJETA_EXTERNA: {
+    method: 'CREDIT_CARD',
+    source: 'POS',
+    externalSource: null,
+    tenderSatFormaPago: null,
+    fundsFlow: 'EXTERNAL_RECORDED',
+    tenderTypeId: null,
+    tenderCountsAsCash: null,
+  },
+} as const
+export type CobroDeRuteo = keyof typeof COBROS_DE_RUTEO
+
+const A_LA_TPV: DecisionDelReembolso = {
+  admitido: false,
+  codigo: 'NO_ADMITIDO_EN_ESTA_ENTRADA',
+  mensaje:
+    'Los cobros con tarjeta de la terminal se devuelven en la terminal, con la tarjeta presente: ábrela con «refund_card_on_terminal».',
+  dondeIr: ['TPV'],
+}
+const SOLO_MISMO: DecisionDelReembolso = {
+  admitido: false,
+  codigo: 'NO_ADMITIDO_EN_ESTA_ENTRADA',
+  mensaje: MENSAJE_MISMO_MEDIO,
+  dondeIr: ['MISMO_MEDIO'],
+}
+
+/** [cobro, entrada, [—, CASH, BANK_TRANSFER, STORE_CREDIT, OTRO]] (cobros ordinarios: ni de la máquina ni de saldo ni de crédito). */
+export const MATRIZ_DEL_RUTEO: Array<[CobroDeRuteo, EntradaDelReembolso, MedioDeclarado, DecisionDelReembolso]> = (
+  [
+    ['EFECTIVO_DE_GAVETA', 'POS', [MISMO, ESCOGIDO, TRANSF, SALDO, MISMO]],
+    ['EFECTIVO_DE_GAVETA', 'MCP', [MISMO, MISMO, TRANSF, MCP_NO, MCP_NO]],
+    ['EFECTIVO_DE_GAVETA', 'TPV', [MISMO, MISMO, MISMO, MISMO, MISMO]],
+    ['TRANSFERENCIA', 'POS', [MISMO, ESCOGIDO, TRANSF, SALDO, MISMO]],
+    ['TRANSFERENCIA', 'MCP', [MISMO, ESCOGIDO, TRANSF, MCP_NO, MCP_NO]],
+    ['TRANSFERENCIA', 'TPV', [MISMO, MISMO, MISMO, MISMO, MISMO]],
+    ['TARJETA_DE_LA_TERMINAL', 'POS', [MISMO, SOLO_MISMO, SOLO_MISMO, SALDO, MISMO]],
+    ['TARJETA_DE_LA_TERMINAL', 'MCP', [A_LA_TPV, A_LA_TPV, A_LA_TPV, MCP_NO, MCP_NO]],
+    ['TARJETA_DE_LA_TERMINAL', 'TPV', [MISMO, MISMO, MISMO, MISMO, MISMO]],
+    ['TARJETA_EXTERNA', 'POS', [MISMO, SOLO_MISMO, SOLO_MISMO, SALDO, MISMO]],
+    ['TARJETA_EXTERNA', 'MCP', [MISMO, SOLO_MISMO, SOLO_MISMO, MCP_NO, MCP_NO]],
+    ['TARJETA_EXTERNA', 'TPV', [MISMO, MISMO, MISMO, MISMO, MISMO]],
+  ] as Array<[CobroDeRuteo, EntradaDelReembolso, Cinco]>
+).flatMap(([cobro, entrada, cinco]) =>
+  MEDIOS.map((medio, i): [CobroDeRuteo, EntradaDelReembolso, MedioDeclarado, DecisionDelReembolso] => [cobro, entrada, medio, cinco[i]]),
+)

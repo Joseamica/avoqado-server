@@ -45,16 +45,20 @@ export function permisoDeReembolsoSegunElCobro(opciones: { paymentIdDe: (req: Re
   return Object.assign(
     async (req: Request, res: Response, next: NextFunction) => {
       // Si la lectura falla se exige el permiso más alto: nunca se concede acceso por un fallo.
-      const { origen, esCreditoDeCambio, esSaldo } = await origenDelDinero(prisma, req.params?.venueId, opciones.paymentIdDe(req)).catch(
-        () => ({ origen: 'MAQUINA' as const, esCreditoDeCambio: false, esSaldo: undefined }),
-      )
+      const { origen, esCreditoDeCambio, esSaldo, cobro } = await origenDelDinero(
+        prisma,
+        req.params?.venueId,
+        opciones.paymentIdDe(req),
+      ).catch(() => ({ origen: 'MAQUINA' as const, esCreditoDeCambio: false, esSaldo: undefined, cobro: undefined }))
       const metodo = (req.body as { refundMethod?: unknown } | undefined)?.refundMethod
+      // H7: con el cobro tal cual, lo admitido sale de las funciones de ruteo de los escritores.
       const decision = decidirDestinoDelReembolso({
         entrada: opciones.entrada,
         origen,
         medio: medioQueLlegaAlEscritor(opciones.entrada, metodo),
         esCreditoDeCambio,
         esSaldo,
+        cobro,
       })
       if (!decision.admitido) {
         return revisarReembolso(req, res, (error?: unknown) => next(error ?? errorDeNoAdmitido(decision)))
