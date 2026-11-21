@@ -124,6 +124,35 @@ describe('claimOnlineOrderPrint', () => {
     prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 0 })
     await expect(claimOnlineOrderPrint('v1', 'ord1', 'dev3', NOW)).resolves.toEqual({ claimed: false })
   })
+
+  /** Lo que deja fuera a la caja que no marca «POSIBLE REPETIDA»: un pedido de «Nadie» que ya tuvo un reclamo. */
+  const REPETIDA_DE_NADIE = { NOT: { ...D661, printClaimedAt: { not: null } } }
+
+  it('D661 · F1 (Ruling 37): sin la cabecera, la lectura y el CAS dejan fuera el REPETIDO de un pedido de «Nadie» (su primer reclamo y «Mi equipo» siguen igual)', async () => {
+    await expect(claimOnlineOrderPrint('v1', 'ord1', 'dev1', NOW)).resolves.toEqual({ claimed: true })
+    const lectura = (prismaMock.onlineOrder.findFirst.mock.calls[0][0] as any).where
+    const cas = (prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).where
+    // Sólo excluye lo que es de «Nadie» Y ya tuvo reclamo: el primero (printClaimedAt null) y «Mi equipo» quedan dentro.
+    expect(lectura).toMatchObject(REPETIDA_DE_NADIE)
+    expect(cas).toMatchObject(REPETIDA_DE_NADIE)
+  })
+
+  it('D661 · F1: lo que la base deja fuera sin la cabecera → claimed:false y no se escribe nada (la forma que una app vieja ya entiende)', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(null)
+    await expect(claimOnlineOrderPrint('v1', 'ord1', 'dev-vieja', NOW)).resolves.toEqual({ claimed: false })
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('D661 · F1: con la cabecera (la caja marca «POSIBLE REPETIDA»), el repetido de «Nadie» se concede como hoy, con posibleRepetida:true', async () => {
+    const vencido = new Date(LIMITE.getTime() - 1_000)
+    prismaMock.onlineOrder.findFirst.mockResolvedValue({ printClaimedAt: vencido } as any)
+    await expect(claimOnlineOrderPrint('v1', 'ord1', 'dev2', NOW, true)).resolves.toEqual({ claimed: true, posibleRepetida: true })
+    const lectura = (prismaMock.onlineOrder.findFirst.mock.calls[0][0] as any).where
+    const cas = (prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).where
+    expect(lectura).not.toHaveProperty('NOT')
+    expect(cas).not.toHaveProperty('NOT')
+    expect(cas.printClaimedAt).toEqual(vencido)
+  })
 })
 
 describe('confirmOnlineOrderPrinted', () => {

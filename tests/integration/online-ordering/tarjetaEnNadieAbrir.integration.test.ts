@@ -1004,9 +1004,18 @@ describe('D661 · 3A y 3B: confirmar → apartado; abrir = cobrar; vencer y libe
     expect([x.claimed, y.claimed].sort()).toEqual([false, true])
     expect(x.posibleRepetida ?? y.posibleRepetida).toBeUndefined()
     // El que ganó no confirmó (se cayó la impresora o el aparato): su reclamo vence y vuelve a la lista.
-    await prisma.onlineOrder.update({ where: { id: a.onlineOrderId }, data: { printClaimedAt: new Date(Date.now() - 2 * MIN) } })
+    const vencido = new Date(Date.now() - 2 * MIN)
+    await prisma.onlineOrder.update({ where: { id: a.onlineOrderId }, data: { printClaimedAt: vencido } })
     expect(await comandas()).toContain(a.orderId)
-    await expect(claimOnlineOrderPrint(venueId!, a.orderId, 'caja-3')).resolves.toEqual({ claimed: true, posibleRepetida: true })
+    // D661 · F1 (Ruling 37): una caja con la app VIEJA (no manda la cabecera ni marca «POSIBLE REPETIDA») no lo reclama: nada escrito.
+    await expect(claimOnlineOrderPrint(venueId!, a.orderId, 'caja-vieja')).resolves.toEqual({ claimed: false })
+    expect(await enLinea(a.orderId)).toMatchObject({ printClaimedAt: vencido, printedAt: null })
+    expect((await enLinea(a.orderId)).printClaimedBy).not.toBe('caja-vieja')
+    // Una caja actualizada (x-online-orders-card-alert: 1) sí, marcada como posible repetida.
+    await expect(claimOnlineOrderPrint(venueId!, a.orderId, 'caja-3', new Date(), true)).resolves.toEqual({
+      claimed: true,
+      posibleRepetida: true,
+    })
     await expect(confirmOnlineOrderPrinted(venueId!, a.orderId, 'caja-3')).resolves.toEqual({ ok: true })
     expect((await enLinea(a.orderId)).printClaimedBy).toBe('caja-3')
   })

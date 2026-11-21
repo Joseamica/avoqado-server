@@ -189,3 +189,29 @@ describe('D661 (Ruling 14): la caja lee UN pedido por su propio camino', () => {
     expect(manejador(dashboardRouter, '/orders/:orderId')).toBe(panel.getOnlineOrderHandler)
   })
 })
+
+describe('D661 · F1 (Ruling 37): el reclamo REPETIDO de la comanda de «Nadie», por los dos caminos (POS y TPV)', () => {
+  // Un reclamo anterior que venció sin confirmarse. La lectura con `NOT` es la de una caja sin la cabecera: Postgres deja fuera el
+  // pedido de «Nadie» que ya tuvo reclamo (lo prueba contra la base `tarjetaEnNadieAbrir.integration.test.ts`).
+  const vencido = new Date(Date.now() - 10 * 60_000)
+  beforeEach(() => {
+    prismaMock.onlineOrder.findFirst.mockImplementation((async (a: any) => (a?.where?.NOT ? null : { printClaimedAt: vencido })) as any)
+    prismaMock.onlineOrder.updateMany.mockReset()
+    prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 1 })
+  })
+
+  for (const [caja, base] of Object.entries(CAMINOS)) {
+    it(`${caja}: sin x-online-orders-card-alert: 1 → claimed:false y nada escrito; con ella → claimed:true, posibleRepetida:true`, async () => {
+      const vieja = await request(app).post(`${base}/ord1/print/claim`).set('x-device-id', 'caja-vieja')
+      expect({ status: vieja.status, body: vieja.body }).toEqual({ status: 200, body: { success: true, data: { claimed: false } } })
+      expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+
+      const nueva = await request(app)
+        .post(`${base}/ord1/print/claim`)
+        .set('x-device-id', 'caja-nueva')
+        .set('x-online-orders-card-alert', '1')
+      expect(nueva.body).toEqual({ success: true, data: { claimed: true, posibleRepetida: true } })
+      expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledTimes(1)
+    })
+  }
+})

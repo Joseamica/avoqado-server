@@ -96,14 +96,23 @@ export const comandasPorImprimirWhere = (venueId: string, now: Date) => ({
  * «Yo la imprimo.» Lee el reclamo vigente y gana con un CAS sobre ESE valor: si otro aparato lo tomó entre la lectura y la escritura,
  * pierde. Ruling 9 («al menos una vez»): si gana sobre un reclamo anterior que venció sin confirmarse, ese papel pudo haber salido:
  * `posibleRepetida: true` para que la caja lo marque. No se le pregunta nada a la cajera.
+ * D661 (F1, Ruling 37): ese repetido de un pedido de «Nadie» sólo se concede a la caja que marca «POSIBLE REPETIDA»
+ * (`marcaRepetida`, la cabecera `x-online-orders-card-alert: 1`). Una app vieja sólo lee `claimed` e imprimiría un segundo papel sin
+ * la marca: para ella la lectura y el CAS lo dejan fuera y contesta `{ claimed: false }`. Su primer reclamo y «Mi equipo», igual.
  */
 export async function claimOnlineOrderPrint(
   venueId: string,
   orderId: string,
   deviceId: string,
   now: Date = new Date(),
+  marcaRepetida = false,
 ): Promise<{ claimed: boolean; posibleRepetida?: true }> {
-  const where = { orderId, venueId, ...comandaPendienteWhere(now) }
+  const where = {
+    orderId,
+    venueId,
+    ...comandaPendienteWhere(now),
+    ...(marcaRepetida ? {} : { NOT: { ...D661, printClaimedAt: { not: null } } }),
+  }
   const previo = await prisma.onlineOrder.findFirst({ where, select: { printClaimedAt: true } })
   if (!previo) return { claimed: false }
   const r = await prisma.onlineOrder.updateMany({

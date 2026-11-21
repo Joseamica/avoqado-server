@@ -367,15 +367,32 @@ describe('onlineOrders.mobile.controller', () => {
     ;(claimOnlineOrderPrint as jest.Mock).mockResolvedValue({ claimed: true })
     const ok = mock()
     await ctrl.printClaim(ok.req, ok.res, ok.next)
-    expect(claimOnlineOrderPrint).toHaveBeenCalledWith('v1', 'ord1', 'dev1')
+    expect(claimOnlineOrderPrint).toHaveBeenCalledWith('v1', 'ord1', 'dev1', expect.any(Date), false)
     expect(ok.res.json).toHaveBeenCalledWith({ success: true, data: { claimed: true } })
+  })
+
+  it('D661 · F1 (Ruling 37): el reclamo pasa si la caja marca «POSIBLE REPETIDA» (x-online-orders-card-alert: 1); otro valor o sin ella, no', async () => {
+    ;(claimOnlineOrderPrint as jest.Mock).mockResolvedValue({ claimed: true, posibleRepetida: true })
+    for (const [valor, marca] of [
+      ['1', true],
+      ['0', false],
+      ['true', false],
+    ] as const) {
+      ;(claimOnlineOrderPrint as jest.Mock).mockClear()
+      const { req, res, next } = mock({ headers: { 'x-online-orders-card-alert': valor } })
+      await ctrl.printClaim(req, res, next)
+      expect({ valor, args: (claimOnlineOrderPrint as jest.Mock).mock.calls[0] }).toEqual({
+        valor,
+        args: ['v1', 'ord1', 'dev1', expect.any(Date), marca],
+      })
+    }
   })
 
   it('M-10: un x-device-id larguísimo se recorta a 100 caracteres antes de guardarse como dueño del reclamo', async () => {
     ;(claimOnlineOrderPrint as jest.Mock).mockResolvedValue({ claimed: true })
     const { req, res, next } = mock({ headers: { 'x-device-id': `  ${'d'.repeat(5_000)}  ` } })
     await ctrl.printClaim(req, res, next)
-    expect(claimOnlineOrderPrint).toHaveBeenCalledWith('v1', 'ord1', 'd'.repeat(100))
+    expect(claimOnlineOrderPrint).toHaveBeenCalledWith('v1', 'ord1', 'd'.repeat(100), expect.any(Date), false)
   })
 
   it('el reclamo usa el `:orderId` de la ruta (Order.id, el `orderId` de la bandeja) como llave `OnlineOrder.orderId`, nunca el id del pedido en línea', async () => {

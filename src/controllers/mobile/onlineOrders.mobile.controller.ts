@@ -245,7 +245,9 @@ export const printClaim = async (req: Request, res: Response, next: NextFunction
     const deviceId = deviceOf(req)
     if (!deviceId) return needsDevice(res)
     const { venueId, orderId } = req.params
-    return res.json({ success: true, data: await claimOnlineOrderPrint(venueId, orderId, deviceId) })
+    // D661 (F1, Ruling 37): la caja que marca «POSIBLE REPETIDA» lo dice con la cabecera de los avisos de tarjeta.
+    const marcaRepetida = req.header(CARD_ALERT_HEADER) === '1'
+    return res.json({ success: true, data: await claimOnlineOrderPrint(venueId, orderId, deviceId, new Date(), marcaRepetida) })
   } catch (e) {
     return next(e)
   }
