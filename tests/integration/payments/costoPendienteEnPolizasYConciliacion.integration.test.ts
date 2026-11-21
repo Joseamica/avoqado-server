@@ -268,6 +268,8 @@ describe('D24 · conciliación bancaria con una devolución cuya comisión está
     originalname: 'estado.csv',
     mimetype: 'text/csv',
   })
+  /** Quien abre con `accounting:reconcile` (lo decide el controlador): la decisión se GUARDA. */
+  const conPermiso = () => ({ abiertoPor: f.staffId, puedeGuardar: true })
   const lineas = async (statementId: string) =>
     prisma.bankStatementLine.findMany({ where: { bankStatementId: statementId }, orderBy: { rowIndex: 'asc' } })
 
@@ -282,7 +284,7 @@ describe('D24 · conciliación bancaria con una devolución cuya comisión está
     }
 
     // Abrirlo mientras sigue pendiente: siguen por decidir, y la respuesta lo dice por línea.
-    const abierto = await getStatementDetail(f.venueId, subida.statementId, f.staffId)
+    const abierto = await getStatementDetail(f.venueId, subida.statementId, conPermiso())
     expect(abierto.matchedCount).toBe(0)
     expect(abierto.lines.map(l => l.costoPendiente)).toEqual([true, true])
     expect(abierto).toMatchObject({ pendientesDeCosto: 1, costoSinCalcular: 0 })
@@ -291,10 +293,29 @@ describe('D24 · conciliación bancaria con una devolución cuya comisión está
     expect(await correrEfectos()).toContain(true)
     expect(Number((await pago(refundId)).netAmount)).toBe(-39)
 
-    // Codex r1 #3: dos aperturas A LA VEZ — las dos enseñan lo decidido y se decide una sola vez.
+    // Opción C (FLAUTAS_C, 21-nov): quien sólo puede VER lo ve decidido al vuelo, pero no se escribe NADA.
+    const lector = await getStatementDetail(f.venueId, subida.statementId, { abiertoPor: f.staffId, puedeGuardar: false })
+    expect(lector.matchedCount).toBe(1)
+    expect(lector.lines.map(l => [l.matchStatus, l.matchedKey, l.costoPendiente, Number(l.matchScore)])).toEqual([
+      ['MATCHED', hoy(), false, 1],
+      ['UNMATCHED', null, false, 0],
+    ])
+    for (const l of await lineas(subida.statementId)) {
+      expect(l).toMatchObject({ matchStatus: 'UNMATCHED', matchScore: null, matchedKey: null })
+    }
+    expect(await prisma.bankStatement.findUnique({ where: { id: subida.statementId }, select: { matchedCount: true } })).toEqual({
+      matchedCount: 0,
+    })
+    expect(
+      await prisma.activityLog.count({
+        where: { venueId: f.venueId, entityId: subida.statementId, action: 'RECON_PENDING_LINES_DECIDED' },
+      }),
+    ).toBe(0)
+
+    // Codex r1 #3: dos aperturas A LA VEZ de quien sí puede conciliar — las dos enseñan lo decidido y se guarda una sola vez.
     const [decidido, alMismoTiempo] = await Promise.all([
-      getStatementDetail(f.venueId, subida.statementId, f.staffId),
-      getStatementDetail(f.venueId, subida.statementId, f.staffId),
+      getStatementDetail(f.venueId, subida.statementId, conPermiso()),
+      getStatementDetail(f.venueId, subida.statementId, conPermiso()),
     ])
     for (const vista of [decidido, alMismoTiempo]) {
       expect(vista.matchedCount).toBe(1)
@@ -308,16 +329,16 @@ describe('D24 · conciliación bancaria con una devolución cuya comisión está
     expect(await prisma.bankStatement.findUnique({ where: { id: subida.statementId }, select: { matchedCount: true } })).toEqual({
       matchedCount: 1,
     })
-    // La decide el sistema (es la misma sugerencia automática de la subida); la bitácora anota quién abrió.
+    // La guarda quien puede conciliar (es la misma sugerencia automática de la subida).
     const bitacora = await prisma.activityLog.findMany({
       where: { venueId: f.venueId, entityId: subida.statementId, action: 'RECON_PENDING_LINES_DECIDED' },
       select: { staffId: true, data: true },
       take: 5,
     })
-    expect(bitacora).toEqual([{ staffId: null, data: { decididas: 2, conciliadas: 1, automatico: true, abiertoPor: f.staffId } }])
+    expect(bitacora).toEqual([{ staffId: f.staffId, data: { decididas: 2, conciliadas: 1, automatico: true } }])
 
     // Abrirlo otra vez no cambia nada ni vuelve a registrar.
-    const otraVez = await getStatementDetail(f.venueId, subida.statementId, f.staffId)
+    const otraVez = await getStatementDetail(f.venueId, subida.statementId, conPermiso())
     expect(otraVez.matchedCount).toBe(1)
     expect(
       await prisma.activityLog.count({

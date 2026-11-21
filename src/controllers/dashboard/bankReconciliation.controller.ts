@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 
 import { BadRequestError } from '../../errors/AppError'
 import * as bankReconciliationService from '../../services/dashboard/bankReconciliation.service'
+import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
 
 /**
  * Controller — Conciliación bancaria (Feature PRO `BANK_RECONCILIATION`).
@@ -35,9 +36,15 @@ export async function listBankStatements(req: Request, res: Response, next: Next
 export async function getBankStatement(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, statementId } = req.params as { venueId: string; statementId: string }
-    // D24: abrirlo decide las líneas que esperaban la comisión de su día; queda a nombre de quien lo abrió.
-    const staffId = ((req as any).authContext?.userId as string | undefined) ?? null
-    res.status(200).json(await bankReconciliationService.getStatementDetail(venueId, statementId, staffId))
+    // D24 (opción C): abrirlo decide las líneas que esperaban la comisión de su día. Sólo las GUARDA quien puede conciliar y no está
+    // en el modo de soporte de sólo lectura (que deja pasar los GET); para los demás se calculan al vuelo, sin escribir.
+    const authContext = (req as any).authContext as { userId?: string; isImpersonating?: boolean } | undefined
+    const puedeGuardar = !authContext?.isImpersonating && (await tienePermisoEnVenue(req, 'accounting:reconcile'))
+    res
+      .status(200)
+      .json(
+        await bankReconciliationService.getStatementDetail(venueId, statementId, { abiertoPor: authContext?.userId ?? null, puedeGuardar }),
+      )
   } catch (error) {
     next(error)
   }

@@ -160,7 +160,9 @@ export function buildRefundLines(
 ): { lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[] } | null {
   const rG = Math.abs(toCents(p.amount))
   const rT = Math.abs(toCents(p.tipAmount))
-  const rF = Math.abs(toCents(p.feeAmount)) // normalmente 0: el procesador conserva la comisión
+  // 0 si el procesador se queda la comisión (Stripe, terminales externas); en un cobro que deposita Avoqado, la comisión
+  // revertida a prorrata (R13-5: costo negativo del reembolso).
+  const rF = Math.abs(toCents(p.feeAmount))
   // Plan 4b: la mezcla por tasa de la póliza, como tratamientos (cada parte con su tasa: la misma aritmética), para que
   // `ivaDeDevolucion` lea las dos formas del mapa congelado. Su respaldo usa la misma mezcla corregida de la venta.
   const { netCents, taxCents } = ivaDeDevolucion(p.id, rG, processorData, mezclaDesdeTasas(grossByRateFromOrder(p.order)))

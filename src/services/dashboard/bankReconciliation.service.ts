@@ -1,4 +1,4 @@
-import { OrderStatus, PaymentFundsFlow, PaymentMethod, PaymentType, TransactionStatus } from '@prisma/client'
+import { OrderStatus, PaymentFundsFlow, PaymentMethod, PaymentType, Prisma, TransactionStatus } from '@prisma/client'
 import Papa from 'papaparse'
 
 import prisma from '../../utils/prismaClient'
@@ -448,11 +448,18 @@ export async function listStatements(venueId: string) {
 
 /**
  * Detalle de un estado de cuenta + sus líneas. Aislado por tenant. D24: si la subida dejó líneas «por decidir» (un día de su
- * ventana tenía la comisión por calcular), aquí se deciden con los números de hoy; cada línea dice si sigue esperando
- * (`costoPendiente`) y, mientras alguna espere, el estado dice cuántos pagos la detienen (`pendientesDeCosto`) y cuántos tienen el
- * cálculo de la comisión detenido (`costoSinCalcular`: revisar).
+ * ventana tenía la comisión por calcular), aquí se deciden con los números de hoy:
+ *  · quien puede conciliar (`puedeGuardar`: `accounting:reconcile` y fuera del modo de soporte de sólo lectura) las GUARDA, bajo el
+ *    candado de la fila del estado y con su `ActivityLog`;
+ *  · quien sólo puede ver las ve decididas AL VUELO, sin escribir nada (decisión de FLAUTAS_C, 21-nov, opción C).
+ * Cada línea dice si sigue esperando (`costoPendiente`) y, mientras alguna espere, el estado dice cuántos pagos la detienen
+ * (`pendientesDeCosto`) y cuántos tienen el cálculo de la comisión detenido (`costoSinCalcular`: revisar).
  */
-export async function getStatementDetail(venueId: string, statementId: string, staffId: string | null = null) {
+export async function getStatementDetail(
+  venueId: string,
+  statementId: string,
+  opts: { abiertoPor?: string | null; puedeGuardar?: boolean } = {},
+) {
   const leer = () =>
     prisma.bankStatement.findFirst({
       where: { id: statementId, venueId },
@@ -461,9 +468,13 @@ export async function getStatementDetail(venueId: string, statementId: string, s
   let statement = await leer()
   if (!statement) throw new NotFoundError('Estado de cuenta no encontrado')
   let diasPendientes: DepositCandidate[] = []
+  let alVuelo = new Map<number, MatchResult>()
   if (statement.lines.some(esPorDecidir)) {
     try {
-      diasPendientes = await decidirLineasPorDecidir(venueId, statement, staffId)
+      const candidatos = await candidatosDelEstado(venueId, statement)
+      diasPendientes = candidatos.filter(c => (c.pendientesDeCosto ?? 0) > 0)
+      if (opts.puedeGuardar) await guardarLineasPorDecidir(venueId, statement, candidatos, opts.abiertoPor ?? null)
+      else alVuelo = decidirPorDecidir(statement.lines, candidatos)
     } catch (error) {
       // Abrir el estado de cuenta nunca falla por esto: se enseña lo guardado y la siguiente apertura lo intenta otra vez.
       logger.warn('[conciliación] No se pudieron decidir las líneas que esperaban su comisión; se muestra lo guardado', {
@@ -472,11 +483,18 @@ export async function getStatementDetail(venueId: string, statementId: string, s
         error: error instanceof Error ? error.message : String(error),
       })
     }
-    // Codex r1 #3: SIEMPRE se relee (también si otra apertura simultánea las decidió primero).
-    statement = await leer()
-    if (!statement) throw new NotFoundError('Estado de cuenta no encontrado')
+    if (opts.puedeGuardar) {
+      // Codex r1 #3: SIEMPRE se relee (también si otra apertura simultánea las decidió primero).
+      statement = await leer()
+      if (!statement) throw new NotFoundError('Estado de cuenta no encontrado')
+    }
   }
-  const lines = statement.lines.map(l => ({ ...l, costoPendiente: esPorDecidir(l) }))
+  const lines = statement.lines.map(l => {
+    const r = alVuelo.get(l.rowIndex)
+    const vista = r ? { ...l, matchStatus: r.matchStatus, matchScore: new Prisma.Decimal(r.matchScore), matchedKey: r.matchedKey } : l
+    return { ...vista, costoPendiente: esPorDecidir(vista) }
+  })
+  const conciliadasAlVuelo = [...alVuelo.values()].filter(r => r.matchStatus === 'MATCHED').length
   // Codex r2 #6: sólo cuentan los días que de verdad detienen a una línea que sigue esperando (los de su ventana), no todo el periodo.
   const esperando = lines.filter(l => l.costoPendiente)
   const detienen = diasPendientes.filter(c => esperando.some(l => daysBetween(c.date, l.postedDate) <= VENTANA_DE_DIAS))
@@ -487,29 +505,53 @@ export async function getStatementDetail(venueId: string, statementId: string, s
           costoSinCalcular: detienen.reduce((n, c) => n + (c.costoSinCalcular ?? 0), 0),
         }
       : {}
-  return { ...statement, lines, ...espera }
+  return { ...statement, matchedCount: statement.matchedCount + conciliadasAlVuelo, lines, ...espera }
 }
 
-/**
- * D24: «la siguiente corrida» de la conciliación. Recalcula los depósitos esperados del periodo y decide las líneas «por decidir»
- * contra los días que ya no esperan comisión (y que ninguna otra línea del estado ya concilió). Las que todavía dependen de un día
- * pendiente se quedan igual. Es el MISMO cálculo automático de la subida (una sugerencia: confirmarla sigue siendo de quien tiene
- * `accounting:reconcile`); por eso la bitácora la firma el sistema y anota quién abrió. Bajo el candado de la fila del estado: dos
- * aperturas a la vez no deciden dos veces. Devuelve los días del periodo que siguen esperando su comisión.
- */
-async function decidirLineasPorDecidir(
+/** D24: los depósitos esperados de HOY para el periodo del estado (el mismo cálculo que al subirlo). */
+async function candidatosDelEstado(
   venueId: string,
-  statement: { id: string; periodStart: Date | null; periodEnd: Date | null; lineCount: number },
-  abiertoPor: string | null,
+  statement: { periodStart: Date | null; periodEnd: Date | null },
 ): Promise<DepositCandidate[]> {
   if (!statement.periodStart || !statement.periodEnd) return []
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
-  const candidatos = await loadDepositCandidates(
+  return loadDepositCandidates(
     venueId,
     formatDay(statement.periodStart),
     formatDay(statement.periodEnd),
     venue?.timezone || 'America/Mexico_City',
   )
+}
+
+/**
+ * D24: la decisión de las líneas «por decidir» de un estado contra los depósitos de hoy, sin los días que otra línea del estado ya
+ * concilió. Pura. Devuelve sólo las que YA se pueden decidir (las que siguen dependiendo de un día pendiente no salen).
+ */
+function decidirPorDecidir(
+  lineas: Array<ParsedBankLine & { matchStatus: string; matchScore: unknown; matchedKey: string | null }>,
+  candidatos: DepositCandidate[],
+): Map<number, MatchResult> {
+  const porDecidir = lineas.filter(esPorDecidir)
+  if (porDecidir.length === 0) return new Map()
+  const usados = new Set(lineas.filter(l => l.matchStatus === 'MATCHED' || l.matchStatus === 'CONFIRMED').map(l => l.matchedKey))
+  const resultados = matchLines(
+    porDecidir,
+    candidatos.filter(c => !usados.has(c.key)),
+  )
+  return new Map(resultados.filter(r => !r.porDecidir).map(r => [r.rowIndex, r]))
+}
+
+/**
+ * D24: «la siguiente corrida» de la conciliación, guardada. Sólo la corre quien puede conciliar. Es el MISMO cálculo automático de la
+ * subida (una sugerencia: confirmarla es otro paso). Bajo el candado de la fila del estado y releyendo sus líneas: dos aperturas a la
+ * vez no deciden dos veces.
+ */
+async function guardarLineasPorDecidir(
+  venueId: string,
+  statement: { id: string; lineCount: number },
+  candidatos: DepositCandidate[],
+  abiertoPor: string | null,
+): Promise<void> {
   await prisma.$transaction(
     async tx => {
       await tx.$queryRaw`SELECT id FROM "BankStatement" WHERE id = ${statement.id} AND "venueId" = ${venueId} FOR UPDATE`
@@ -518,26 +560,17 @@ async function decidirLineasPorDecidir(
         orderBy: { rowIndex: 'asc' },
         take: statement.lineCount, // las líneas de UN estado de cuenta: tantas como se subieron
       })
-      const porDecidir = lineas.filter(esPorDecidir)
-      if (porDecidir.length === 0) return
-      const usados = new Set(lineas.filter(l => l.matchStatus === 'MATCHED' || l.matchStatus === 'CONFIRMED').map(l => l.matchedKey))
-      const resultados = matchLines(
-        porDecidir,
-        candidatos.filter(c => !usados.has(c.key)),
-      )
-      const idDe = new Map(porDecidir.map(l => [l.rowIndex, l.id]))
-      let decididas = 0
+      const decididas = decidirPorDecidir(lineas, candidatos)
+      if (decididas.size === 0) return
+      const idDe = new Map(lineas.map(l => [l.rowIndex, l.id]))
       let conciliadas = 0
-      for (const r of resultados) {
-        if (r.porDecidir) continue
+      for (const r of decididas.values()) {
         await tx.bankStatementLine.update({
           where: { id: idDe.get(r.rowIndex)! },
           data: { matchStatus: r.matchStatus, matchScore: r.matchScore, matchedKey: r.matchedKey },
         })
-        decididas++
         if (r.matchStatus === 'MATCHED') conciliadas++
       }
-      if (decididas === 0) return
       if (conciliadas > 0)
         await tx.bankStatement.update({ where: { id: statement.id }, data: { matchedCount: { increment: conciliadas } } })
       await tx.activityLog.create({
@@ -545,15 +578,14 @@ async function decidirLineasPorDecidir(
           action: 'RECON_PENDING_LINES_DECIDED',
           entity: 'BankStatement',
           entityId: statement.id,
-          staffId: null,
+          staffId: abiertoPor,
           venueId,
-          data: { decididas, conciliadas, automatico: true, abiertoPor },
+          data: { decididas: decididas.size, conciliadas, automatico: true },
         },
       })
     },
     { timeout: 15_000 },
   )
-  return candidatos.filter(c => (c.pendientesDeCosto ?? 0) > 0)
 }
 
 /** Confirma (acepta) la conciliación de líneas específicas. */
