@@ -468,6 +468,15 @@ describe('Codex R14-2 · el REEMBOLSO de un cobro del protocolo también está p
     expect(await f.esperar(async () => (await prisma.transactionCost.findUnique({ where: { paymentId: refundId } })) !== null, 4000)).toBe(
       true,
     )
+    // D19 (20-nov-2026): y a que termine de PROYECTAR (Payment y luego VenueTransaction, dos escrituras sueltas): el worker toma las
+    // filas del Payment con NOWAIT y, si el paso síncrono todavía escribe la del reembolso, contesta CONTENDIDO sin cerrar la obligación.
+    const proyectado = async () => {
+      const vt = await prisma.venueTransaction.findUnique({ where: { paymentId: refundId }, select: { feeAmount: true } })
+      return Number((await pago(refundId)).feeAmount) !== 0 && vt !== null && Number(vt.feeAmount) !== 0
+    }
+    if (!(await f.esperar(proyectado, 10_000))) {
+      throw new Error(`a los 10 s el costo síncrono del reembolso ${refundId} no había proyectado su Payment Y su VenueTransaction`)
+    }
     await correrEfectos()
     const par = await fotoDelPar(refundId, original.id)
     expect(par.reembolso).toMatchObject({ type: 'REFUND', originalPaymentId: original.id, fee: -3, net: -97, ventaFee: -3, ventaNet: -97 })
