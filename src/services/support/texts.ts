@@ -129,5 +129,6 @@ export const SUPPORT_LINK =
 export const SUPPORT_SENSITIVE =
   'Por privacidad omití tu texto y no lo enviaré al asistente. Para recuperar tu contraseña, abre https://dashboard.avoqado.io/auth/forgot-password. Para dudas sobre el PIN o acceso al negocio, consulta https://avoqado.io/help o escribe a hola@avoqado.io. Si tu duda es de un cobro u otra cosa, escríbela otra vez sin mencionar el NIP, el PIN, la clave ni el código. No compartas contraseñas, PIN, códigos, tarjetas ni secretos.'
 export const SUPPORT_SEND_RETRY_NOTICE = 'Este es el único reenvío que pediste. El primer mensaje pudo haber llegado.'
+// Founder (21-nov): a quien no reconoce, le dice cómo ligar su número. En producción, 80 de 339 personas activas tienen teléfono guardado.
 export const SUPPORT_UNREGISTERED =
-  'Hola, soy el asistente de ayuda de Avoqado. Por ahora este WhatsApp atiende a equipos de negocios registrados. Guías: https://avoqado.io/help · Soporte: hola@avoqado.io · ¿Te interesa Avoqado? Escríbenos: https://wa.me/525640070001'
+  'Hola, soy el asistente de ayuda de Avoqado. Todavía no reconozco este número. Si trabajas en un negocio que usa Avoqado, liga este WhatsApp a tu cuenta (toma 2 minutos): entra a https://dashboard.avoqado.io/support/whatsapp, escribe este número y luego el código que te llega por WhatsApp. Así te contesto según tu puesto y tus permisos. Mientras: guías en https://avoqado.io/help · Soporte: hola@avoqado.io · ¿Todavía no usas Avoqado? Escríbenos: https://wa.me/525640070001'
