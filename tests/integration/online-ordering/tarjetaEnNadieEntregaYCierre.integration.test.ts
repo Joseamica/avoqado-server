@@ -599,6 +599,19 @@ describe('D661 · tarea 4: entrega, cierre del día, «No lo recogió» y el seg
     await expect(claimOnlineOrderPrint(venueId!, noRecogido.orderId, 'caja-1')).resolves.toEqual({ claimed: true })
   })
 
+  it('D661 (ronda codex-r3): un «No lo recogió» que nació hace 25 h y sigue en sus 2 h de papel sale en comandasPorImprimir (la lista mira 48 h)', async () => {
+    // Nació justo después de un corte, lo cerró el corte del día siguiente y su papel todavía se admite: ~25 h después de nacer.
+    const a = await cobrado()
+    await deAyer(a.onlineOrderId)
+    await expect(corte()).resolves.toBe(1)
+    await prisma.onlineOrder.update({ where: { id: a.onlineOrderId }, data: { createdAt: new Date(Date.now() - 25 * 60 * MIN) } })
+    const { notPickedUpAt } = await enLinea(a.orderId)
+    expect(Date.now() - notPickedUpAt!.getTime()).toBeLessThan(2 * 60 * MIN) // dentro de sus 2 h de papel
+    // La caja vuelve a pedir su papel por esta lista cuando su guarda de 75 s le negó el reclamo: tiene que salir.
+    expect(await comandas()).toContain(a.orderId)
+    await expect(claimOnlineOrderPrint(venueId!, a.orderId, 'caja-1')).resolves.toEqual({ claimed: true })
+  })
+
   // ── «Cancelar folio» sobre un apartado (traspaso de 3A) ──────────────────────────────────────────────────────────────────────
 
   it('D661 (Task 4): «Cancelar folio» sobre un apartado lo libera, el seguimiento dice que no se cobró y nunca queda cobrado', async () => {

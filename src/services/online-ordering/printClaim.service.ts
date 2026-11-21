@@ -12,11 +12,12 @@ const CLOSED_BY_DAY_END: OnlineOrderStatus[] = [OnlineOrderStatus.COMPLETED]
 /** D661: pedido con tarjeta de «Nadie» (`CARD_ONLINE` sin aceptación). */
 const D661 = { paymentMode: OnlineOrderPaymentMode.CARD_ONLINE, requiresAcceptance: false } as const
 /**
- * D661 (Ruling 2): lo que `comandasPorImprimir` mira hacia atrás. Lo ya cobrado sale de «Por entregar» a lo más con el cierre del día,
- * así que basta para no perder la comanda de lo que se cobró justo antes del corte, y acota la lectura al índice `[venueId, createdAt]`.
- * ponytail: un pedido cuya comanda siga sin salir 24 h después ya no se lista (sigue reclamable); ampliar si una caja pasa días sin papel.
+ * D661 (Ruling 2): lo que `comandasPorImprimir` mira hacia atrás, acotado al índice `[venueId, createdAt]`. Un pedido nacido justo
+ * después de un corte lo cierra el corte siguiente y su papel de «No lo recogió» se admite 2 h más (~26 h desde que nació); las apps
+ * vuelven a pedir por esta lista el papel que su guarda de 75 s les negó (ronda codex-r3: con 24 h ese borde se perdía).
+ * ponytail: un pedido cuya comanda siga sin salir 48 h después ya no se lista (sigue reclamable); ampliar si una caja pasa días sin papel.
  */
-const VENTANA_DE_COMANDAS_MS = 24 * 3_600_000
+const VENTANA_DE_COMANDAS_MS = 48 * 3_600_000
 /**
  * D661 (B2, Ruling 31): un «No lo recogió» admite comanda sólo estas horas tras el corte. Conserva el borde para el que nació la regla
  * (lo abierto minutos antes del corte) sin que la comanda que nunca salió se imprima a la mañana siguiente para un pedido que nadie

@@ -462,7 +462,8 @@ describe('D661 (3B): lo que lee la caja — tarjetasPorAbrir, comandasPorImprimi
       printedAt: null,
       refundRequestedAt: null,
       refundedAt: null,
-      createdAt: { gte: new Date(NOW.getTime() - 24 * 3_600_000) },
+      // D661 (ronda codex-r3): 48 h: un pedido nacido justo después de un corte pide papel hasta ~26 h (el corte siguiente + 2 h).
+      createdAt: { gte: new Date(NOW.getTime() - 48 * 3_600_000) },
     })
     expect(q.where.AND).toEqual([
       {
