@@ -5,94 +5,86 @@
  *   1. publicar el SERVIDOR; 2. cuando Render diga «Live», esperar 2 minutos; 3. prenderlo con este script.
  * Prenderlo pone «desde» = ahora + 15 min (o más con --minutos): todos los servidores lo ven a la vez, sin redesplegar.
  *
- * Uso (sin --apply sólo dice qué haría):
+ * Uso (sin --apply sólo dice qué haría; --ver y la simulación imprimen la identidad que hay que confirmar):
  *   npx tsx scripts/pausa-sola-interruptor.ts --ver [--base render]
- *   npx tsx scripts/pausa-sola-interruptor.ts --prender [--minutos 20] --por <quién> [--base render] --apply --confirm-db <host:puerto/base/esquema>
- *   npx tsx scripts/pausa-sola-interruptor.ts --apagar --por <quién> [--base render] --apply --confirm-db <host:puerto/base/esquema>
+ *   npx tsx scripts/pausa-sola-interruptor.ts --prender [--minutos 20] --por <quién> [--base render] --apply --confirm-db <identidad>
+ *   npx tsx scripts/pausa-sola-interruptor.ts --apagar --por <quién> [--base render] --apply --confirm-db <identidad>
+ * La identidad es lo que la BASE dice que es: `cluster:<system_identifier>/base:<current_database()>/esquema:<current_schema()>`.
  * 🔴 Contra producción (--base render) sólo con el «sí, en prod» del founder.
  *
- * Codex p2v5-r3 #4 y p2v5-r4 #3: escribir pide confirmar el DESTINO completo, `--confirm-db host:puerto/base/esquema`, igual al de la URL
- * que se va a usar (dos bases pueden compartir host, puerto o nombre, y `?schema=` cambia de esquema). `--base local` (o sin --base)
- * usa la regla de `_solo-base-local.ts` (esta máquina, puerto 5432, base de desarrollo); `--base render` sólo acepta un host de Postgres
- * de Render. El destino se imprime ANTES de conectar.
+ * Rediseño tras Codex p2v5-r6 (cuatro rondas de la misma familia: el destino deducido de la URL no era el que abría Prisma; rutas con
+ * `/`, letras codificadas, `search_path`, `DATABASE_CONNECTION_LIMIT`, un túnel a localhost). La URL ya no se analiza para decidir nada:
+ * `--base` sólo elige la variable (y `local` pide un host de esta máquina como primera barrera). Lo que se confirma es la identidad que
+ * contesta Postgres en la MISMA transacción que escribe, después del candado y antes de escribir, y sólo en el esquema que lee la tienda.
  */
 import dotenv from 'dotenv'
-import { esBaseLocal } from './_solo-base-local'
+import type { Prisma } from '@prisma/client'
 
-/** El host externo de un Postgres de Render: `dpg-<id>.<región>-postgres.render.com`. */
-const HOST_DE_RENDER = /^dpg-[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9-]+-postgres\.render\.com$/
+/** Primera barrera de `--base local`, no la confirmación: un túnel puede traer otra base a localhost (eso lo ataja la identidad). */
+const HOSTS_DE_ESTA_MAQUINA = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
 
-export type DestinoDeLaBase = { url: string; destino: string }
+export type IdentidadDeLaBase = { cluster: string; base: string; esquema: string | null }
+type ConsultaCruda = Pick<Prisma.TransactionClient, '$queryRaw'>
 
 const leerValor = (argv: string[], bandera: string): string | undefined => {
   const i = argv.indexOf(bandera)
   return i >= 0 ? argv[i + 1] : undefined
 }
 
-/** `host:puerto/base/esquema` de una URL de Postgres; ningún error imprime la URL. */
-function destinoDeLaUrl(url: string, variable: string): { destino: string; host: string } {
-  let u: URL
-  try {
-    u = new URL(url)
-  } catch {
-    throw new Error(`${variable} no es una URL (su valor no se imprime).`)
-  }
-  if (u.protocol !== 'postgres:' && u.protocol !== 'postgresql:') throw new Error(`${variable} no es una URL postgres:// o postgresql://.`)
-  if (u.searchParams.has('host')) throw new Error(`${variable} trae «?host=», que manda la conexión a otro lado: no se usa.`)
-  // Codex p2v5-r5 #1: un parámetro repetido (p. ej. dos `schema`) lo leen distinto esta revisión (el primero) y Prisma (el último).
-  const claves = [...u.searchParams.keys()]
-  if (new Set(claves).size !== claves.length) throw new Error(`${variable} repite un parámetro de la URL: no se usa.`)
-  const baseDeDatos = decodeURIComponent(u.pathname.replace(/^\//, ''))
-  if (!u.hostname || !baseDeDatos) throw new Error(`${variable} no trae host y nombre de base (su valor no se imprime).`)
-  return { host: u.hostname, destino: `${u.hostname}:${u.port || '5432'}/${baseDeDatos}/${u.searchParams.get('schema') || 'public'}` }
-}
-
-/**
- * Codex p2v5-r5 #4: además de las bases de desarrollo de `_solo-base-local.ts`, una COPIA local de la de desarrollo
- * (`av-db-25-<tarea>`, la que se hace para probar sin tocar la compartida). Host, puerto y proveedor se revisan con la misma regla.
- */
-function esBaseLocalOCopia(url: string): { ok: boolean; motivo?: string } {
-  const corte = esBaseLocal(url)
-  if (corte.ok) return corte
-  const u = new URL(url)
-  if (!/^av-db-25-[a-z0-9_-]+$/i.test(decodeURIComponent(u.pathname.replace(/^\//, '')))) return corte
-  u.pathname = '/av-db-25'
-  return esBaseLocal(u.toString()).ok ? { ok: true } : corte
-}
-
-/** Elige la base ANTES de que exista el cliente de Prisma: `local` usa DATABASE_URL y `render`, RENDER_DATABASE_URL. */
-export function elegirBase(argv: string[], env: NodeJS.ProcessEnv): DestinoDeLaBase {
+/** Qué variable usar: `local` → DATABASE_URL (de esta máquina), `render` → RENDER_DATABASE_URL. Ninguna URL se imprime. */
+export function elegirBase(argv: string[], env: NodeJS.ProcessEnv): string {
   const base = leerValor(argv, '--base') ?? 'local'
   if (base !== 'local' && base !== 'render') throw new Error(`--base sólo acepta «render» o «local» (recibí «${base}»).`)
   const variable = base === 'render' ? 'RENDER_DATABASE_URL' : 'DATABASE_URL'
   const url = env[variable]
   if (!url) throw new Error(`--base ${base}: falta ${variable} en el entorno.`)
-  const { destino, host } = destinoDeLaUrl(url, variable)
   if (base === 'local') {
-    const corte = esBaseLocalOCopia(url)
-    if (!corte.ok) throw new Error(`--base local: ${corte.motivo}.`)
-  } else if (!HOST_DE_RENDER.test(host)) {
-    throw new Error(`--base render: «${host}» no es un Postgres de Render (dpg-….<región>-postgres.render.com).`)
+    let host = ''
+    try {
+      host = new URL(url).hostname
+    } catch {
+      // se reporta abajo, sin el valor
+    }
+    if (!HOSTS_DE_ESTA_MAQUINA.has(host)) throw new Error('--base local: DATABASE_URL no apunta a esta máquina (su valor no se imprime).')
   }
-  return { url, destino }
+  return url
 }
 
-/** Escribir pide confirmar exactamente el destino que se va a usar. */
-export function revisarConfirmacion(argv: string[], d: DestinoDeLaBase): void {
-  if (leerValor(argv, '--confirm-db') !== d.destino) {
-    throw new Error(`--confirm-db debe ser exactamente el destino de la base (${d.destino}).`)
+/** Quién es la base de ESTA conexión, según Postgres: el identificador del clúster (único por instalación), la base y el esquema. */
+export async function leerIdentidad(db: ConsultaCruda): Promise<IdentidadDeLaBase> {
+  const [fila] = await db.$queryRaw<IdentidadDeLaBase[]>`
+    SELECT (SELECT system_identifier::text FROM pg_control_system()) AS cluster,
+           current_database() AS base,
+           current_schema() AS esquema`
+  if (!fila?.cluster || !fila.base) throw new Error('La base no dijo quién es (clúster y nombre): no se escribe.')
+  return fila
+}
+
+/** Una sola cadena, sin espacios (se copia tal cual en --confirm-db). */
+export const textoDeIdentidad = (i: IdentidadDeLaBase): string => `cluster:${i.cluster}/base:${i.base}/esquema:${i.esquema ?? '(ninguno)'}`
+
+/** Lo que corre en la transacción que escribe: la base confirma quién es y que escribe en el esquema que lee la tienda. */
+export function exigirIdentidad(confirmacion: string | undefined, esquemaDeLaTienda: string) {
+  return async (tx: ConsultaCruda): Promise<void> => {
+    const identidad = await leerIdentidad(tx)
+    const texto = textoDeIdentidad(identidad)
+    if (identidad.esquema !== esquemaDeLaTienda) {
+      throw new Error(`Esta conexión trabaja en el esquema «${identidad.esquema}», no en «${esquemaDeLaTienda}» (el que lee la tienda).`)
+    }
+    if (confirmacion !== texto) throw new Error(`--confirm-db debe ser exactamente lo que contesta la base: ${texto}`)
   }
 }
 
 export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env): Promise<void> {
-  const destino = elegirBase(argv, env)
-  console.log(`Base: ${destino.destino}`)
-  // Después de elegir la base: el cliente de Prisma lee DATABASE_URL al crearse.
-  env.DATABASE_URL = destino.url
+  const url = elegirBase(argv, env)
+  // Antes de crear el cliente de Prisma: lo lee de DATABASE_URL al crearse.
+  env.DATABASE_URL = url
   const { default: prisma } = await import('../src/utils/prismaClient')
-  const { apagarPausaSola, CLAVE_PAUSA_SOLA, prenderPausaSola } = await import('../src/services/online-ordering/interruptorPausaSola')
+  const servicio = await import('../src/services/online-ordering/interruptorPausaSola')
   try {
-    const actual = await prisma.interruptorDePlataforma.findUnique({ where: { clave: CLAVE_PAUSA_SOLA } })
+    const identidad = textoDeIdentidad(await leerIdentidad(prisma))
+    console.log(`Base: ${identidad}`)
+    const actual = await prisma.interruptorDePlataforma.findUnique({ where: { clave: servicio.CLAVE_PAUSA_SOLA } })
     console.log(
       actual?.desde
         ? `Hoy: PRENDIDA desde ${actual.desde.toISOString()} (por ${actual.actualizadoPor ?? '¿?'}, ${actual.updatedAt.toISOString()})`
@@ -110,15 +102,16 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
 
     if (!argv.includes('--apply')) {
       console.log(prender ? `Haría: PRENDER desde ahora + ${minutos ?? 15} min.` : 'Haría: APAGAR.')
-      console.log(`Simulación: no se escribió nada (agrega --apply --confirm-db ${destino.destino}).`)
+      console.log(`Simulación: no se escribió nada (agrega --apply --confirm-db ${identidad}).`)
       return
     }
-    revisarConfirmacion(argv, destino)
+    // La confirmación se revisa contra lo que contesta la base DENTRO de la transacción que escribe (no contra lo de arriba).
+    const antesDeEscribir = exigirIdentidad(leerValor(argv, '--confirm-db'), servicio.ESQUEMA_DE_LA_TIENDA)
     if (prender) {
-      const desde = await prenderPausaSola({ por, minutos })
+      const desde = await servicio.prenderPausaSola({ por, minutos, antesDeEscribir })
       console.log(`✅ PRENDIDA: la pausa sola cuenta desde ${desde.toISOString()} (pedidos con hora límite desde esa hora).`)
     } else {
-      await apagarPausaSola({ por })
+      await servicio.apagarPausaSola({ por, antesDeEscribir })
       console.log('✅ APAGADA: en unos segundos la tienda se porta como antes de la pausa sola.')
     }
   } finally {

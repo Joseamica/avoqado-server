@@ -1,99 +1,78 @@
 /**
- * D662 v5 · el script del interruptor tiene que escribir en la base que el operador confirmó, y en ninguna otra.
- * - Codex p2v5-r3 #4: confirmaba sólo el host, y `--base local` heredaba una DATABASE_URL de Render.
- * - Codex p2v5-r4 #3: también pasaban otro PUERTO del mismo host, otro ESQUEMA (`?schema=`) y, con `--base render`, cualquier host
- *   remoto. Ahora se confirma el destino completo, `host:puerto/base/esquema`; `local` es la regla de `_solo-base-local.ts` y `render`
- *   sólo acepta un host de Postgres de Render.
+ * D662 v5 · el script del interruptor escribe en la base que el operador confirmó, y en ninguna otra.
+ *
+ * Rediseño tras Codex p2v5-r6 (cuatro rondas de la MISMA familia: el destino que se deducía de la URL no era el que abría Prisma; rutas
+ * con `/`, `%61`, `search_path`, `DATABASE_CONNECTION_LIMIT`, un túnel a localhost). Ya no se deduce nada de la URL: la confirmación es
+ * lo que la BASE dice que es (clúster, base y esquema), preguntado en la MISMA transacción que escribe, antes de escribir.
  */
 import { prismaMock } from '@tests/__helpers__/setup'
-import { elegirBase, main, revisarConfirmacion } from '../../../scripts/pausa-sola-interruptor'
+import { elegirBase, exigirIdentidad, leerIdentidad, main, textoDeIdentidad } from '../../../scripts/pausa-sola-interruptor'
 
-const LOCAL = 'postgresql://yo@localhost:5432/av-db-25'
+const LOCAL = 'postgresql://yo@localhost:5432/av-db-25-pruebas'
 const RENDER = 'postgresql://yo@dpg-d4abc123-a.oregon-postgres.render.com/avoqado_prod'
-const DESTINO_RENDER = 'dpg-d4abc123-a.oregon-postgres.render.com:5432/avoqado_prod/public'
+const IDENTIDAD = { cluster: '7142610626013088922', base: 'av-db-25-pruebas', esquema: 'public' }
+const TEXTO = 'cluster:7142610626013088922/base:av-db-25-pruebas/esquema:public'
 
-describe('elegirBase', () => {
-  it('sin --base es local: usa DATABASE_URL y dice el destino completo (host:puerto/base/esquema)', () => {
-    expect(elegirBase([], { DATABASE_URL: LOCAL })).toEqual({ url: LOCAL, destino: 'localhost:5432/av-db-25/public' })
-    expect(elegirBase(['--base', 'local'], { DATABASE_URL: 'postgres://yo@127.0.0.1/av-db-25?schema=otro' }).destino).toBe(
-      '127.0.0.1:5432/av-db-25/otro',
-    )
+const raw = () => prismaMock.$queryRaw as unknown as jest.Mock
+const textoSql = (llamada: unknown[]) => (llamada[0] as string[]).join('?')
+/** La base contesta su identidad a la consulta de identidad, y `filasDelInsert` al INSERT del interruptor. */
+const baseQueDice = (
+  identidad: Record<string, unknown> | null,
+  filasDelInsert: unknown[] = [{ desde: new Date('2026-11-21T19:00:00Z') }],
+) =>
+  raw().mockImplementation((partes: string[]) =>
+    Promise.resolve(partes.join('?').includes('pg_control_system') ? (identidad ? [identidad] : []) : filasDelInsert),
+  )
+const llamadasDe = (fragmento: string) => raw().mock.calls.filter(c => textoSql(c).includes(fragmento))
+const ordenDe = (fragmento: string) => raw().mock.invocationCallOrder[raw().mock.calls.findIndex(c => textoSql(c).includes(fragmento))]
+
+describe('identidad de la base', () => {
+  it('se pregunta a Postgres (clúster, base y esquema) y se escribe como una sola cadena sin espacios', async () => {
+    baseQueDice(IDENTIDAD)
+    const identidad = await leerIdentidad(prismaMock as any)
+    expect(identidad).toEqual(IDENTIDAD)
+    expect(textoDeIdentidad(identidad)).toBe(TEXTO)
+    const sql = textoSql(raw().mock.calls[0])
+    expect(sql).toContain('system_identifier')
+    expect(sql).toContain('current_database()')
+    expect(sql).toContain('current_schema()')
   })
 
-  it('🔴 --base local se NIEGA fuera de esta máquina, en otro puerto (túnel) o con una base que no es de desarrollo', () => {
-    expect(() => elegirBase([], { DATABASE_URL: RENDER })).toThrow(/--base local/)
-    expect(() => elegirBase(['--base', 'local'], { DATABASE_URL: 'postgresql://yo@localhost:5433/av-db-25' })).toThrow(/puerto/)
-    expect(() => elegirBase(['--base', 'local'], { DATABASE_URL: 'postgresql://yo@localhost:5432/avoqado_prod' })).toThrow(/desarrollo/)
+  it('si la base no dice quién es (p. ej. sin permiso para el clúster), no se sigue', async () => {
+    baseQueDice(null)
+    await expect(leerIdentidad(prismaMock as any)).rejects.toThrow(/no dijo quién es/)
   })
 
-  it('🔴 --base render usa RENDER_DATABASE_URL y sólo acepta un host de Postgres de Render', () => {
-    expect(elegirBase(['--base', 'render'], { DATABASE_URL: LOCAL, RENDER_DATABASE_URL: RENDER })).toEqual({
-      url: RENDER,
-      destino: DESTINO_RENDER,
-    })
-    for (const url of [
-      LOCAL,
-      'postgresql://yo@db.example.com:5432/avoqado_prod',
-      'postgresql://yo@dpg-abc.oregon-postgres.render.com.example.com/avoqado_prod',
-    ]) {
-      expect(() => elegirBase(['--base', 'render'], { RENDER_DATABASE_URL: url })).toThrow(/no es un Postgres de Render/)
-    }
-    expect(() => elegirBase(['--base', 'render'], { DATABASE_URL: RENDER })).toThrow(/falta RENDER_DATABASE_URL/)
-  })
-
-  it('🔴 sólo URLs de Postgres, y sin `?host=` (que manda la conexión a otro lado)', () => {
-    expect(() => elegirBase([], { DATABASE_URL: 'mysql://yo@localhost:5432/av-db-25' })).toThrow(/postgres/)
-    expect(() => elegirBase(['--base', 'render'], { RENDER_DATABASE_URL: `${RENDER}?host=/tmp` })).toThrow(/host=/)
-  })
-
-  it('🔴 un parámetro repetido (dos `schema`) se niega: esta revisión lee el primero y Prisma el último (Codex p2v5-r5 #1)', () => {
-    expect(() => elegirBase([], { DATABASE_URL: `${LOCAL}?schema=public&schema=otro` })).toThrow(/repite un parámetro/)
-    expect(() => elegirBase(['--base', 'render'], { RENDER_DATABASE_URL: `${RENDER}?schema=public&sslmode=require&schema=otro` })).toThrow(
-      /repite un parámetro/,
-    )
-  })
-
-  it('--base local acepta una COPIA local de la de desarrollo (av-db-25-<tarea>) con la misma regla de host y puerto (Codex p2v5-r5 #4)', () => {
-    expect(elegirBase([], { DATABASE_URL: 'postgresql://yo@localhost:5432/av-db-25-d662p2' }).destino).toBe(
-      'localhost:5432/av-db-25-d662p2/public',
-    )
-    expect(() => elegirBase([], { DATABASE_URL: 'postgresql://yo@localhost:5433/av-db-25-d662p2' })).toThrow(/puerto/)
-    expect(() => elegirBase([], { DATABASE_URL: 'postgresql://yo@db.example.com:5432/av-db-25-d662p2' })).toThrow(/--base local/)
-    expect(() => elegirBase([], { DATABASE_URL: 'postgresql://yo@localhost:5432/av-db-25x' })).toThrow(/desarrollo/)
-  })
-
-  it('otro --base, una URL sin base o inválida: error sin imprimir la URL', () => {
-    expect(() => elegirBase(['--base', 'prod'], { DATABASE_URL: LOCAL })).toThrow(/sólo acepta/)
-    for (const url of ['postgresql://yo@localhost:5432/', 'no-es-una-url']) {
-      let mensaje = ''
-      try {
-        elegirBase([], { DATABASE_URL: url })
-      } catch (e) {
-        mensaje = (e as Error).message
-      }
-      expect(mensaje).not.toBe('')
-      expect(mensaje).not.toContain(url)
-    }
+  it('🔴 exigirIdentidad compara contra lo que contestó la base, y se niega fuera del esquema que lee la tienda', async () => {
+    baseQueDice(IDENTIDAD)
+    await expect(exigirIdentidad(TEXTO, 'public')(prismaMock as any)).resolves.toBeUndefined()
+    await expect(exigirIdentidad(undefined, 'public')(prismaMock as any)).rejects.toThrow(TEXTO)
+    await expect(exigirIdentidad(TEXTO.replace('pruebas', 'otra'), 'public')(prismaMock as any)).rejects.toThrow(/--confirm-db/)
+    baseQueDice({ ...IDENTIDAD, esquema: 'yo' })
+    await expect(
+      exigirIdentidad('cluster:7142610626013088922/base:av-db-25-pruebas/esquema:yo', 'public')(prismaMock as any),
+    ).rejects.toThrow(/esquema «yo»/)
   })
 })
 
-describe('revisarConfirmacion', () => {
-  const destino = elegirBase(['--base', 'render'], { RENDER_DATABASE_URL: RENDER })
-
-  it('pide el destino completo exacto en --confirm-db', () => {
-    expect(() => revisarConfirmacion(['--confirm-db', DESTINO_RENDER], destino)).not.toThrow()
-    expect(() => revisarConfirmacion([], destino)).toThrow(/--confirm-db/)
-    expect(() => revisarConfirmacion(['--confirm-db', 'avoqado_prod'], destino)).toThrow(DESTINO_RENDER)
+describe('elegirBase: sólo elige la variable (y local pide un host de esta máquina como primera barrera)', () => {
+  it('local usa DATABASE_URL; render usa RENDER_DATABASE_URL sin analizar la URL', () => {
+    expect(elegirBase([], { DATABASE_URL: LOCAL })).toBe(LOCAL)
+    expect(elegirBase(['--base', 'render'], { DATABASE_URL: LOCAL, RENDER_DATABASE_URL: RENDER })).toBe(RENDER)
+    expect(() => elegirBase(['--base', 'render'], { DATABASE_URL: RENDER })).toThrow(/falta RENDER_DATABASE_URL/)
+    expect(() => elegirBase(['--base', 'prod'], { DATABASE_URL: LOCAL })).toThrow(/sólo acepta/)
   })
 
-  it('🔴 mismo host y base pero otro PUERTO u otro ESQUEMA: la confirmación de producción NO pasa', () => {
-    for (const otra of [
-      'postgresql://yo@dpg-d4abc123-a.oregon-postgres.render.com:5433/avoqado_prod',
-      `${RENDER}?schema=staging`,
-      'postgresql://yo@dpg-d4abc123-a.oregon-postgres.render.com/avoqado_staging',
-    ]) {
-      const copia = elegirBase(['--base', 'render'], { RENDER_DATABASE_URL: otra })
-      expect(() => revisarConfirmacion(['--confirm-db', DESTINO_RENDER], copia)).toThrow(/--confirm-db/)
+  it('--base local con una URL que no es de esta máquina se niega sin imprimirla', () => {
+    for (const url of [RENDER, 'no-es-una-url']) {
+      let mensaje = ''
+      try {
+        elegirBase(['--base', 'local'], { DATABASE_URL: url })
+      } catch (e) {
+        mensaje = (e as Error).message
+      }
+      expect(mensaje).toMatch(/--base local/)
+      expect(mensaje).not.toContain(url)
     }
   })
 })
@@ -105,26 +84,62 @@ describe('main', () => {
     prismaMock.interruptorDePlataforma.findUnique.mockResolvedValue(null)
   })
   afterEach(() => log.mockRestore())
+  const impreso = () => log.mock.calls.map(c => String(c[0])).join('\n')
 
-  it('imprime el destino ANTES de conectar, y con la URL de otra base NO escribe', async () => {
-    const argv = ['--prender', '--por', 'founder', '--apply', '--confirm-db', 'localhost:5432/av-db-25/public']
-    await expect(main(argv, { DATABASE_URL: 'postgresql://yo@localhost:5432/av-db-25-test' })).rejects.toThrow(/--confirm-db/)
-    expect(log.mock.calls[0][0]).toBe('Base: localhost:5432/av-db-25-test/public')
-    expect(log.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.interruptorDePlataforma.findUnique.mock.invocationCallOrder[0])
-    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+  it('--ver imprime la identidad que dice la base y no escribe', async () => {
+    baseQueDice(IDENTIDAD)
+    await main(['--ver'], { DATABASE_URL: LOCAL })
+    expect(impreso()).toContain(`Base: ${TEXTO}`)
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(llamadasDe('INSERT INTO')).toHaveLength(0)
+  })
+
+  it('sin --apply sólo dice qué haría y cómo confirmarlo con la identidad', async () => {
+    baseQueDice(IDENTIDAD)
+    await main(['--prender', '--por', 'founder'], { DATABASE_URL: LOCAL })
+    expect(impreso()).toContain(`--apply --confirm-db ${TEXTO}`)
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 --prender --apply con la identidad correcta: la confirma DENTRO de la transacción que escribe, después del candado y antes del INSERT', async () => {
+    baseQueDice(IDENTIDAD)
+    await main(['--prender', '--por', 'founder', '--apply', '--confirm-db', TEXTO], { DATABASE_URL: LOCAL })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    // Dos lecturas de identidad: la de mostrar y la de confirmar (ésta, dentro de la transacción).
+    const identidades = llamadasDe('pg_control_system')
+    expect(identidades).toHaveLength(2)
+    const ultimaIdentidad = raw().mock.invocationCallOrder[raw().mock.calls.lastIndexOf(identidades[1])]
+    expect(ultimaIdentidad).toBeLessThan(ordenDe('INSERT INTO'))
+    expect((prismaMock.$executeRaw as unknown as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(ultimaIdentidad)
+    expect(impreso()).toContain('PRENDIDA')
+  })
+
+  it('🔴 con una identidad equivocada NO escribe (ni prender ni apagar)', async () => {
+    baseQueDice(IDENTIDAD)
+    const otra = TEXTO.replace('7142610626013088922', '1111111111111111111')
+    await expect(main(['--prender', '--por', 'founder', '--apply', '--confirm-db', otra], { DATABASE_URL: LOCAL })).rejects.toThrow(
+      /--confirm-db/,
+    )
+    await expect(main(['--apagar', '--por', 'founder', '--apply', '--confirm-db', otra], { DATABASE_URL: LOCAL })).rejects.toThrow(
+      /--confirm-db/,
+    )
+    expect(llamadasDe('INSERT INTO')).toHaveLength(0)
     expect(prismaMock.interruptorDePlataforma.upsert).not.toHaveBeenCalled()
   })
 
-  it('--base local con DATABASE_URL de Render no conecta ni escribe', async () => {
-    const argv = ['--apagar', '--por', 'founder', '--apply', '--confirm-db', DESTINO_RENDER]
-    await expect(main(argv, { DATABASE_URL: RENDER })).rejects.toThrow(/--base local/)
-    expect(prismaMock.interruptorDePlataforma.findUnique).not.toHaveBeenCalled()
+  it('🔴 fuera del esquema que lee la tienda no escribe, aunque la confirmación coincida con lo que dice la base', async () => {
+    baseQueDice({ ...IDENTIDAD, esquema: 'yo' })
+    const suya = 'cluster:7142610626013088922/base:av-db-25-pruebas/esquema:yo'
+    await expect(main(['--apagar', '--por', 'founder', '--apply', '--confirm-db', suya], { DATABASE_URL: LOCAL })).rejects.toThrow(
+      /esquema «yo»/,
+    )
     expect(prismaMock.interruptorDePlataforma.upsert).not.toHaveBeenCalled()
   })
 
-  it('con el destino confirmado, apaga', async () => {
+  it('con la identidad correcta, apaga', async () => {
+    baseQueDice(IDENTIDAD)
     const env: NodeJS.ProcessEnv = { DATABASE_URL: LOCAL }
-    await main(['--apagar', '--por', 'founder', '--apply', '--confirm-db', 'localhost:5432/av-db-25/public'], env)
+    await main(['--apagar', '--por', 'founder', '--apply', '--confirm-db', TEXTO], env)
     expect(prismaMock.interruptorDePlataforma.upsert).toHaveBeenCalledWith(
       expect.objectContaining({ update: { desde: null, actualizadoPor: 'founder' } }),
     )

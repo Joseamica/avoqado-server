@@ -8,6 +8,7 @@ import {
   apagarPausaSola,
   CACHE_MS,
   CLAVE_PAUSA_SOLA,
+  ESQUEMA_DE_LA_TIENDA,
   pausaSolaDesde,
   prenderPausaSola,
 } from '@/services/online-ordering/interruptorPausaSola'
@@ -106,6 +107,34 @@ describe('prenderPausaSola / apagarPausaSola', () => {
     expect(enPrender.slice(1)).toEqual([`interruptor-de-plataforma:${CLAVE_PAUSA_SOLA}`])
     expect(candado().mock.invocationCallOrder[0]).toBeLessThan(raw().mock.invocationCallOrder[0])
     expect(candado().mock.invocationCallOrder[1]).toBeLessThan(fila().upsert.mock.invocationCallOrder[0])
+  })
+
+  it('🔴 Codex p2v5-r6 #2: el INSERT nombra la tabla con el esquema que lee la tienda (no el primero que encuentre `search_path`)', async () => {
+    raw().mockResolvedValue([{ desde: NOW }])
+    await prenderPausaSola({ por: 'founder' })
+    expect(sql().texto).toContain(`INSERT INTO "${ESQUEMA_DE_LA_TIENDA}"."InterruptorDePlataforma"`)
+    expect(ESQUEMA_DE_LA_TIENDA).toBe('public')
+  })
+
+  it('🔴 Codex p2v5-r6: `antesDeEscribir` corre en la MISMA transacción, después del candado y antes de escribir; si lanza, no se escribe', async () => {
+    const candado = () => prismaMock.$executeRaw as unknown as jest.Mock
+    const confirmar = jest.fn().mockResolvedValue(undefined)
+    raw().mockResolvedValue([{ desde: NOW }])
+    await prenderPausaSola({ por: 'founder', antesDeEscribir: confirmar })
+    await apagarPausaSola({ por: 'founder', antesDeEscribir: confirmar })
+    expect(confirmar).toHaveBeenCalledTimes(2)
+    expect(confirmar).toHaveBeenCalledWith(prismaMock)
+    expect(candado().mock.invocationCallOrder[0]).toBeLessThan(confirmar.mock.invocationCallOrder[0])
+    expect(confirmar.mock.invocationCallOrder[0]).toBeLessThan(raw().mock.invocationCallOrder[0])
+    expect(confirmar.mock.invocationCallOrder[1]).toBeLessThan(fila().upsert.mock.invocationCallOrder[0])
+
+    raw().mockClear()
+    fila().upsert.mockClear()
+    const niega = jest.fn().mockRejectedValue(new Error('otra base'))
+    await expect(prenderPausaSola({ por: 'x', antesDeEscribir: niega })).rejects.toThrow('otra base')
+    await expect(apagarPausaSola({ por: 'x', antesDeEscribir: niega })).rejects.toThrow('otra base')
+    expect(raw()).not.toHaveBeenCalled()
+    expect(fila().upsert).not.toHaveBeenCalled()
   })
 
   it('nunca con menos de 15 min (ni una hora pasada)', async () => {

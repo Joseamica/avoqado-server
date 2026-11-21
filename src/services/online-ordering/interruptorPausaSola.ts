@@ -23,6 +23,11 @@ import prisma from '@/utils/prismaClient'
  * apaga y se repite el paso 3.
  */
 export const CLAVE_PAUSA_SOLA = 'pausa-sola'
+/**
+ * El esquema de Postgres donde vive la tabla que lee la tienda (Prisma sin `schema` en la URL ni `@@schema`: `public`). El INSERT crudo lo
+ * nombra (Codex p2v5-r6 #2: sin él, Postgres usa el primer esquema de `search_path` que tenga la tabla) y el script se niega fuera de él.
+ */
+export const ESQUEMA_DE_LA_TIENDA = 'public'
 /** Cada proceso recuerda lo leído a lo más esto: la hora se fija ≥ 15 min en el futuro, así que todos la ven antes de que llegue. */
 export const CACHE_MS = 5_000
 /** Lo mínimo que «desde» puede quedar en el futuro al prenderlo (y lo que se usa por omisión). */
@@ -75,25 +80,30 @@ export function __resetInterruptorParaPruebas(): void {
  */
 export const MARGEN_PARA_MOVER_S = 10
 const CANDADO_DEL_INTERRUPTOR = `interruptor-de-plataforma:${CLAVE_PAUSA_SOLA}`
+/** Lo que corre en la transacción que escribe, después del candado y antes de escribir (el script confirma ahí la base; si lanza, no se escribe). */
+type AntesDeEscribir = (tx: Prisma.TransactionClient) => Promise<void>
 // ponytail: sólo el script escribe esta tabla; un escritor nuevo que no tome el candado reabre el hueco del INSERT.
-const conCandado = <T>(trabajo: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
+const conCandado = <T>(antesDeEscribir: AntesDeEscribir | undefined, trabajo: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
   prisma.$transaction(
     async tx => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CANDADO_DEL_INTERRUPTOR}))`
+      if (antesDeEscribir) await antesDeEscribir(tx)
       return trabajo(tx)
     },
     // Lo corre una persona con el script (no hay prisa de pool): que espere conexión y candado sin el tope corto de 2 s.
     { maxWait: 10_000, timeout: 30_000 },
   )
 
-export async function prenderPausaSola(p: { minutos?: number; por: string }): Promise<Date> {
+export async function prenderPausaSola(p: { minutos?: number; por: string; antesDeEscribir?: AntesDeEscribir }): Promise<Date> {
   const minutos = p.minutos ?? MINUTOS_MINIMOS
   if (!Number.isFinite(minutos) || minutos < MINUTOS_MINIMOS) {
     throw new Error(`La pausa sola se prende al menos ${MINUTOS_MINIMOS} minutos en el futuro (pediste ${minutos}).`)
   }
+  // El esquema va escrito tal cual (es `ESQUEMA_DE_LA_TIENDA`; un nombre no viaja como parámetro).
   const filas = await conCandado(
+    p.antesDeEscribir,
     tx => tx.$queryRaw<Array<{ desde: Date }>>`
-    INSERT INTO "InterruptorDePlataforma" ("clave", "desde", "actualizadoPor", "updatedAt")
+    INSERT INTO "public"."InterruptorDePlataforma" ("clave", "desde", "actualizadoPor", "updatedAt")
     VALUES (
       ${CLAVE_PAUSA_SOLA},
       (clock_timestamp() AT TIME ZONE 'UTC') + (${minutos}::double precision * interval '1 minute'),
@@ -117,8 +127,8 @@ export async function prenderPausaSola(p: { minutos?: number; por: string }): Pr
 }
 
 /** Apaga el interruptor (la tienda vuelve a portarse como antes de esta función en ≤ `CACHE_MS`). */
-export async function apagarPausaSola(p: { por: string }): Promise<void> {
-  await conCandado(tx =>
+export async function apagarPausaSola(p: { por: string; antesDeEscribir?: AntesDeEscribir }): Promise<void> {
+  await conCandado(p.antesDeEscribir, tx =>
     tx.interruptorDePlataforma.upsert({
       where: { clave: CLAVE_PAUSA_SOLA },
       create: { clave: CLAVE_PAUSA_SOLA, desde: null, actualizadoPor: p.por },
