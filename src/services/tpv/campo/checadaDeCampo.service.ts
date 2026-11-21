@@ -239,7 +239,9 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
           ? `Salida del celular de las ${enLaZona(hora, zonaDelTurno!)}: llegó después de que el gerente corrigió la salida y no se usó.`
           : `Salida del celular de las ${enLaZona(hora, zonaDelTurno!)}: llegó después del día del turno y no se usó. Revisa la hora real.`
         const { count } = await tx.timeEntry.updateMany({
-          where: { id: e.id, clockOutTime: e.clockOutTime, autoClockOut: e.autoClockOut, llaveSalida: null },
+          // `notes`: una salida tardía de la PAX o del POS pudo escribir en medio (su nota, su GPS); si cambió, se relee y no
+          // se pisa (FLAUTAS_C, revisión del delta 21-nov).
+          where: { id: e.id, clockOutTime: e.clockOutTime, autoClockOut: e.autoClockOut, llaveSalida: null, notes: e.notes },
           data: {
             llaveSalida: v.llave,
             clockOutRecibidaAt: ahora,

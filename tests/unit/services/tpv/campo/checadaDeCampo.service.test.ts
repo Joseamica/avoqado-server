@@ -912,6 +912,38 @@ describe('salida olvidada (D3)', () => {
     expect(entradas[0]).toMatchObject({ salidaOlvidada: false, autoClockOut: false, clockOutTime: t('18:00', 3) })
   })
 
+  // FLAUTAS_C (revisión del delta, 21-nov): la salida tardía de la PAX (TPV 2.16.0) escribe entre la lectura y la escritura
+  // del celular; el celular no debe pisar su GPS ni su nota (antes reemplazaba las dos).
+  it('una salida tardía de la PAX que escribe en medio no se pisa: el celular relee, conserva su GPS y suma su nota', async () => {
+    const e = entrada({
+      clockInTime: t('09:00', 3),
+      clockOutTime: t('03:00', 4),
+      status: 'CLOCKED_OUT',
+      totalHours: 18,
+      autoClockOut: true,
+      notes: null,
+      clockOutLatitude: null,
+    })
+    antesDeActualizar = () =>
+      Object.assign(entradas[0], {
+        notes: 'Salida de la PAX a las 12:57 09/11: llegó después del cierre de salida olvidada y no se usó.',
+        clockOutLatitude: 20.5,
+        clockOutLongitude: -100.1,
+        clockOutAccuracy: 5,
+      })
+
+    const r = await registrarSalidaDeCampo(
+      q,
+      { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('12:58', 9).toISOString(), latitude: 19.43, longitude: -99.13, accuracy: 8 },
+      t('12:58', 9),
+    )
+
+    expect(r).toMatchObject({ salidaNoUsada: true })
+    expect(entradas[0]).toMatchObject({ clockOutLatitude: 20.5, clockOutLongitude: -100.1, clockOutAccuracy: 5, llaveSalida: LLAVE })
+    expect(entradas[0].notes).toContain('Salida de la PAX')
+    expect(entradas[0].notes).toContain('Salida del celular')
+  })
+
   it('el turno de 267 h: una salida de OTRO día ya no estira un cierre automático; se anota con su foto y no cambia las horas', async () => {
     const e = entrada({
       clockInTime: t('09:00', 3),
