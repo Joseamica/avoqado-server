@@ -29,7 +29,7 @@
     },
     "src/services/cashMachine/ventaDeLaMaquina.ts#conElFolio": {
       "cuerpo": 2,
-      "motivo": "Máquina de efectivo (Codex servidor r2, familia A): abre withDeadlockRetry con el candado del folio, lee lo que el folio tiene y recibe el cuerpo por parámetro; cada entrada del folio (venta, duda, GET, resolución, revisión, repetición, carrera) decide ahí con decidirEscrituraDelFolio. Sólo base: incidencias, cierres de la máquina y su duda."
+      "motivo": "Máquina de efectivo (rediseño r3): abre withDeadlockRetry con el candado del folio, lee lo que el folio tiene y recibe el cuerpo por parámetro; cada entrada del folio (venta, duda, GET, resolución, revisión, repetición, carrera) decide ahí con decidirSobreElFolio. Sólo base: folio congelado, observaciones, incidencias, cierres de la máquina y su duda."
     }
   },
   "castsPermitidos": {

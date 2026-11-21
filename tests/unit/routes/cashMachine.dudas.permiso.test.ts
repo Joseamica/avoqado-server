@@ -113,7 +113,7 @@ const DUDA_BODY = {
   startedAt: '2026-11-20T17:58:00.000Z',
   lastSeen: [{ event: 'updateCredit' }],
 }
-const RESOLVER_BODY = { outcome: 'PAGADO', creditCents: 20000, changeDispensedCents: 1250, evidence: 'Pago Completado $187.50' }
+const RESOLVER_BODY = { outcome: 'PAGADO', creditCents: 20000, changeDispensedCents: 1250, evidence: 'Pago Completado $187.50', version: 3 }
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -144,13 +144,19 @@ describe('subir y consultar la duda (la PC)', () => {
       VENUE,
       { userId: 'u-sesion', deviceUid: 'uid-pc-1', credencial: 'secreta' },
       expect.objectContaining({ referenceCC: REF, dueCents: 18750, pedido: CARRITO }),
+      expect.any(Function),
     )
   })
 
-  it('un carrito vacío es 400 (la misma lectura que la venta) y no sube nada', async () => {
+  it('🔴 r6-2: un carrito vacío NO es 400: la duda sube igual (nunca se vuelve desenlace por eso)', async () => {
     const out = await correr(mobileRouter, DUDAS, 'post', StaffRole.CASHIER, { body: { ...DUDA_BODY, pedido: { items: [] } } })
-    expect(out.error).toMatchObject({ statusCode: 400 })
-    expect(mockSubir).not.toHaveBeenCalled()
+    expect(out.status).toBe(200)
+    expect(mockSubir).toHaveBeenCalledWith(
+      VENUE,
+      expect.anything(),
+      expect.objectContaining({ pedido: { items: [] } }),
+      expect.any(Function),
+    )
   })
 
   it('centavos con decimales son 400 en español', async () => {
@@ -197,9 +203,24 @@ describe.each([
       VENUE,
       'u-sesion',
       REF,
-      { outcome: 'PAGADO', creditCents: 20000, changeDispensedCents: 1250, occurredAt: undefined, evidence: 'Pago Completado $187.50' },
+      {
+        outcome: 'PAGADO',
+        creditCents: 20000,
+        changeDispensedCents: 1250,
+        occurredAt: undefined,
+        evidence: 'Pago Completado $187.50',
+        version: 3,
+      },
       expect.any(Function),
     )
+  })
+
+  it('🔴 r6-4: sin la versión que vio, 400 en español (no se resuelve a ciegas)', async () => {
+    const sinVersion: Partial<typeof RESOLVER_BODY> = { ...RESOLVER_BODY }
+    delete sinVersion.version
+    const out = await correr(router, RESOLVER, 'post', StaffRole.MANAGER, { body: sinVersion })
+    expect(out.error).toMatchObject({ statusCode: 400, message: expect.stringContaining('versión') })
+    expect(mockResolver).not.toHaveBeenCalled()
   })
 
   it('el 202 de una venta que ya no se arma sale tal cual', async () => {

@@ -10,7 +10,6 @@ import { snapshotDeLaMaquina } from '@/services/mobile/order.mobile.service'
 import {
   CASH_MACHINE_REF,
   deudaDelCierre,
-  huellaDelCierre,
   turnoDeLaMaquina,
   validarCierre,
   type CierreDeLaMaquina,
@@ -127,22 +126,7 @@ describe('deudaDelCierre', () => {
   })
 })
 
-describe('huellaDelCierre', () => {
-  const huella = (over: Partial<CierreDeLaMaquina> = {}, venueId = 'venue-1', ref = 'AQ0123456789AB') =>
-    huellaDelCierre(venueId, ref, cierre(over), 'MAQUINA')
-
-  it('la misma operación da la misma huella, sin importar la hora ni el turno que se reenvíen', () => {
-    expect(huella()).toBe(huella({ occurredAt: '2026-11-20T18:00:01.000Z', saleShiftId: 'shift-B' }))
-  })
-
-  it('otro crédito, otro desenlace, otro folio u otra sucursal: otra huella', () => {
-    expect(huella()).not.toBe(huella({ creditCents: 20050 }))
-    expect(huella()).not.toBe(huella({}, 'venue-2'))
-    expect(huella()).not.toBe(huella({}, 'venue-1', 'AQ0123456789AC'))
-    const iguales = { creditCents: 5000, changeDispensedCents: 0 }
-    expect(huella({ outcome: 'GUARDADO', ...iguales })).not.toBe(huella({ outcome: 'CANCELADO', ...iguales }))
-  })
-})
+// La huella de la operación (antes `huellaDelCierre`) es ahora la de la observación: `decisionDelFolio.test.ts` (r6-3).
 
 describe('snapshotDeLaMaquina', () => {
   const pago = { ...snapshotDeLaMaquina('AQ0123456789AB'), tenderTypeId: null }

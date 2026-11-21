@@ -54,23 +54,23 @@ const cierre = z
     path: ['occurredAt'],
   })
 
+/** r6-6: el emparejamiento con el que la PC empezó el cobro (el `bindingId` que le dio el alta). */
+const bindingId = z
+  .string({ invalid_type_error: 'El emparejamiento debe ser texto' })
+  .cuid('El identificador del emparejamiento no es válido')
+  .nullable()
+  .optional()
+
 export const registrarVentaDeLaMaquinaSchema = z.object({
   params: z.object({ venueId }),
-  body: z
-    .object({
-      referenceCC,
-      cierre,
-      // El mismo JSON de creación de cuenta que manda hoy la cola; lo valida `leerVentaDeMostrador`, como `POST /orders`.
-      pedido: z.record(z.unknown(), { invalid_type_error: 'El pedido debe ser un objeto' }).optional(),
-    })
-    .superRefine((b, ctx) => {
-      if (b.cierre.outcome === 'PAGADO' && !b.pedido) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['pedido'], message: 'Un cierre PAGADO lleva el pedido de la venta' })
-      }
-      if (b.cierre.outcome !== 'PAGADO' && b.pedido) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['pedido'], message: 'Sólo un cierre PAGADO lleva pedido' })
-      }
-    }),
+  body: z.object({
+    referenceCC,
+    cierre,
+    // Rediseño r3 (D1): el carrito tal cual (el JSON de `POST /orders`). Ausente o ilegible NO es 400: el comprobante se guarda primero y,
+    // si el carrito no se puede leer, el dinero queda sin venta (202) para el gerente.
+    pedido: z.unknown().optional(),
+    bindingId,
+  }),
 })
 
 export const consultarVentaDeLaMaquinaSchema = z.object({
@@ -116,8 +116,9 @@ export const subirDudaDeLaMaquinaSchema = z.object({
     dueCents: centavosEnteros('El adeudo'),
     saleCents: centavosEnteros('La venta'),
     tipCents: centavosEnteros('La propina'),
-    // El MISMO carrito que la venta; lo valida `leerVentaDeMostrador`, como `POST /orders`.
-    pedido: z.record(z.unknown(), { required_error: 'Falta el carrito de la venta', invalid_type_error: 'El pedido debe ser un objeto' }),
+    // El MISMO carrito que la venta. r6-2: uno ilegible no es 400; la duda se guarda y nunca se vuelve desenlace por eso.
+    pedido: z.unknown().optional(),
+    bindingId,
     startedAt: z
       .string({ required_error: 'Falta la hora en que empezó el cobro', invalid_type_error: 'La hora de inicio debe ser texto' })
       .datetime({ offset: true, message: 'La hora de inicio debe ser una fecha ISO' }),
@@ -184,6 +185,11 @@ export const resolverDudaDeLaMaquinaSchema = z.object({
       .enum(['1', '2'], { errorMap: () => ({ message: "El modo de cancelación debe ser '1' (devolvió) o '2' (guardó)" }) })
       .nullable()
       .optional(),
+    // r6-4: la versión de la evidencia que vio el gerente (la de la lista); si llegó otra, 409 y no se escribe nada.
+    version: z
+      .number({ required_error: 'Falta la versión del cobro en duda que viste', invalid_type_error: 'La versión debe ser un número' })
+      .int('La versión debe ser un número entero')
+      .positive('La versión debe ser mayor que cero'),
   }),
 })
 

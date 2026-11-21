@@ -1,7 +1,8 @@
 /**
- * Máquina de efectivo · Codex servidor r2 #11 (familia C): EL lector del carrito de la máquina (`leerCarritoDeLaMaquina`). La cotización,
- * la venta, la duda y la resolución del gerente lo usan todas, así que un carrito que la cotización excluye (premio de sellos pendiente)
- * también queda excluido al registrarlo o resolverlo.
+ * Máquina de efectivo · Codex servidor r2 #11 (familia C): EL lector del carrito de la máquina (`leerCarritoDeLaMaquina`). La cotización
+ * lo usa al cotizar y quien TERMINA un folio (la venta, la duda y la resolución del gerente) lo usa con el carrito congelado, así que un
+ * carrito que la cotización excluye (premio de sellos pendiente) también queda excluido al registrarlo o resolverlo. Rediseño r3 (D1):
+ * los controladores ya no leen el carrito antes de guardar la evidencia: le pasan al servicio el carrito tal cual y el lector.
  */
 const mockCotizar = jest.fn()
 const mockRegistrar = jest.fn()
@@ -23,7 +24,6 @@ jest.mock('@/services/cashMachine/dudasDeLaMaquina', () => ({
 
 import * as carrito from '@/controllers/mobile/carritoDeLaMaquina'
 import { cotizar, registrarVenta, resolverDuda, subirDuda } from '@/controllers/mobile/cashMachine.mobile.controller'
-import { huellaDelCarrito } from '@/services/cashMachine/ventaDeLaMaquina'
 
 const VENUE = 'cjld2cjxh0000qzrmn831i7rn'
 const CARRITO = { items: [{ name: 'Pastel', quantity: 1, unitPrice: 18750 }], orderType: 'TAKEOUT', source: 'AVOQADO_ANDROID' }
@@ -51,17 +51,6 @@ describe('leerCarritoDeLaMaquina', () => {
       conAutoridad: true,
     })
     expect(input.stampRewardId).toBe('premio-1')
-  })
-
-  it('devuelve la huella de los artículos', async () => {
-    const r = await carrito.leerCarritoDeLaMaquina(req(CARRITO), CARRITO, {
-      venueId: VENUE,
-      usuario: 'u1',
-      conPropinaDeOrden: false,
-      conAutoridad: false,
-    })
-    expect(r.huella).toBe(huellaDelCarrito(CARRITO))
-    expect(r.input.stampRewardId).toBeNull()
   })
 
   it('un carrito inválido es 400, como POST /orders', async () => {
@@ -100,27 +89,42 @@ describe('🔴 r2 #11: la cotización, la venta, la duda y la resolución leen e
     expect(mockCotizar.mock.calls[0][1]).toMatchObject({ stampRewardId: 'premio-1', isOfflineReplay: false })
   })
 
-  it('vender: el MISMO premio llega al registro (y el servicio contesta 202 PREMIO_PENDIENTE)', async () => {
+  it('🔴 vender: el carrito llega TAL CUAL al servicio, y el lector que le pasa conserva el MISMO premio (D1)', async () => {
     const next = jest.fn()
     await registrarVenta(req({ referenceCC: 'AQ0123456789AB', cierre: {}, pedido: CON_PREMIO }), res(), next)
     expect(next).not.toHaveBeenCalled()
-    expect(espia).toHaveBeenCalledWith(expect.anything(), CON_PREMIO, expect.objectContaining({ conPropinaDeOrden: false }))
-    expect(mockRegistrar.mock.calls[0][2].pedido).toMatchObject({ stampRewardId: 'premio-1' })
+    expect(espia).not.toHaveBeenCalled() // la evidencia se guarda ANTES de leer el carrito
+    expect(mockRegistrar.mock.calls[0][2].pedido).toBe(CON_PREMIO)
+    const leido = await mockRegistrar.mock.calls[0][3](CON_PREMIO, 'cajera')
+    expect(espia).toHaveBeenCalledWith(
+      expect.anything(),
+      CON_PREMIO,
+      expect.objectContaining({ conPropinaDeOrden: false, conAutoridad: true }),
+    )
+    expect(leido).toMatchObject({ stampRewardId: 'premio-1' })
   })
 
-  it('subir la duda valida el carrito con el mismo lector', async () => {
-    await subirDuda(req({ referenceCC: 'AQ0123456789AB', pedido: CON_PREMIO }), res(), jest.fn())
-    expect(espia).toHaveBeenCalledWith(expect.anything(), CON_PREMIO, expect.objectContaining({ conAutoridad: false }))
+  it('🔴 r6-2: subir la duda NO valida el carrito antes de guardarla (uno ilegible no es 400); el lector va al servicio', async () => {
+    const next = jest.fn()
+    await subirDuda(req({ referenceCC: 'AQ0123456789AB', pedido: {} }), res(), next)
+    expect(next).not.toHaveBeenCalled()
+    expect(espia).not.toHaveBeenCalled()
+    expect(mockSubirDuda.mock.calls[0][2].pedido).toEqual({})
+    expect(typeof mockSubirDuda.mock.calls[0][3]).toBe('function')
   })
 
   it('resolver: el gerente arma el carrito congelado con el mismo lector (el premio sigue ahí)', async () => {
     await resolverDuda(
-      req({ outcome: 'PAGADO', creditCents: 20000, changeDispensedCents: 1250, evidence: 'x' }, { referenceCC: 'AQ0123456789AB' }),
+      req(
+        { outcome: 'PAGADO', creditCents: 20000, changeDispensedCents: 1250, evidence: 'x', version: 1 },
+        { referenceCC: 'AQ0123456789AB' },
+      ),
       res(),
       jest.fn(),
     )
     expect(espia).toHaveBeenCalledWith(expect.anything(), CON_PREMIO, expect.objectContaining({ usuario: 'cajera', conAutoridad: true }))
     const armado = await espia.mock.results.at(-1)!.value
     expect(armado.input.stampRewardId).toBe('premio-1')
+    expect(mockResolver.mock.calls[0][3]).toMatchObject({ version: 1 })
   })
 })

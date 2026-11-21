@@ -149,6 +149,26 @@ describe('cash_machine_closes — MCP libre, sólo lectura, pesos', () => {
     expect(vistos.size).toBe(150)
   })
 
+  it('🔴 r3 #5: el folio que la máquina cobró y NO se registró sale en «con deuda» (su cierre cuenta una vez) con su motivo', async () => {
+    jest.mocked(prisma.cashMachineClose.findMany).mockResolvedValueOnce([
+      {
+        ...cierre(1),
+        outcome: 'PAGADO',
+        orderId: null,
+        paymentId: null,
+        appliedCents: 0,
+        owedCents: 5000,
+        owedKind: 'CAMBIO',
+        motivoSinRegistro: 'VENTA_RECHAZADA',
+      },
+    ] as never)
+    jest.mocked(prisma.cashMachineClose.count).mockResolvedValueOnce(1 as never)
+    const r = await call({ venueId, soloConDeuda: true })
+    expect(r.cierres).toEqual([
+      expect.objectContaining({ origenDeuda: 50, tipoDeDeuda: 'CAMBIO', ventaNoRegistrada: 'VENTA_RECHAZADA', paymentId: null }),
+    ])
+  })
+
   it('«con deuda»: sólo los que originaron deuda, con su nota', async () => {
     const r = await call({ venueId, soloConDeuda: true, limit: 3 })
     expect(r.cierres.every((c: any) => c.origenDeuda > 0)).toBe(true)
@@ -165,9 +185,15 @@ describe('cash_machine_closes — MCP libre, sólo lectura, pesos', () => {
         status: 'ABIERTO',
         createdAt: new Date('2026-11-20T18:00:00.000Z'),
         deviceId: 'terminal-pc',
-        payload: { dueCents: 18750, saleCents: 18000, tipCents: 750, startedAt: '2026-11-20T17:58:00.000Z', lastSeen: null },
+        payload: { startedAt: '2026-11-20T17:58:00.000Z', lastSeen: null, subidoPor: 'cajera' },
       },
     ] as never)
+    // Rediseño r3 (D2): los importes de la duda son los CONGELADOS de su folio.
+    jest
+      .mocked(prisma.cashMachineFolio.findMany)
+      .mockResolvedValue([
+        { referenceCC: 'AQ00000000DUDA', dueCents: 18750, saleCents: 18000, tipCents: 750, pedido: null, saleShiftId: null, version: 2 },
+      ] as never)
     const r = await call({ venueId, enDuda: true })
     const filtro = { venueId, status: 'ABIERTO' }
     expect(jest.mocked(prisma.cashMachineIncident.count).mock.calls[0][0]!.where).toEqual(filtro)
@@ -198,7 +224,7 @@ describe('cash_machine_closes — MCP libre, sólo lectura, pesos', () => {
         kind: 'ESPERANDO',
         status: 'ABIERTO',
         createdAt: new Date('2026-11-20T18:00:00.000Z'),
-        payload: { dueCents: 18750, saleCents: 18750, tipCents: 0, startedAt: 'x', lastSeen: { Due: 18750, credit: 20000 } },
+        payload: { startedAt: 'x', lastSeen: { Due: 18750, credit: 20000 }, subidoPor: 'cajera' },
       },
       {
         id: 'c00000000000000000000inc1',
@@ -217,7 +243,13 @@ describe('cash_machine_closes — MCP libre, sólo lectura, pesos', () => {
         },
       },
     ] as never)
+    jest
+      .mocked(prisma.cashMachineFolio.findMany)
+      .mockResolvedValue([
+        { referenceCC: 'AQ00000000DUD1', dueCents: 18750, saleCents: 18750, tipCents: 0, pedido: null, saleShiftId: null, version: 1 },
+      ] as never)
     const r = await call({ venueId, enDuda: true })
+    expect(r.dudas[0]).toMatchObject({ adeudo: 187.5, venta: 187.5, propina: 0 })
     expect(r.dudas[0].evidenciaCrudaDeLaPc).toBe('{"Due":18750,"credit":20000}')
     expect(r.dudas[0]).not.toHaveProperty('loUltimoQueVioLaPc')
     expect(r.nota).toMatch(/NO están en pesos/)

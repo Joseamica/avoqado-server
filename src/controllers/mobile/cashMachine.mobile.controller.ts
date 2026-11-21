@@ -11,7 +11,12 @@ import {
   subirDudaDeLaMaquina,
 } from '../../services/cashMachine/dudasDeLaMaquina'
 import { turnoDelNegocioAhora } from '../../services/shared/turnoDeCaja'
-import { consultarVentaDeLaMaquina, registrarVentaDeLaMaquina, type AutorDeLaMaquina } from '../../services/cashMachine/ventaDeLaMaquina'
+import {
+  consultarVentaDeLaMaquina,
+  registrarVentaDeLaMaquina,
+  type AutorDeLaMaquina,
+  type LectorDelPedido,
+} from '../../services/cashMachine/ventaDeLaMaquina'
 import { leerCarritoDeLaMaquina } from './carritoDeLaMaquina'
 
 /** La credencial del emparejamiento (R4-3): un encabezado, nunca el cuerpo. Recortada como los demás encabezados del aparato. */
@@ -30,18 +35,31 @@ function autorDe(req: Request): AutorDeLaMaquina {
 }
 
 /**
- * `POST /api/v1/mobile/venues/:venueId/cash-machine/sales` — una operación de la máquina de efectivo (R4-1). 200 con la evidencia
- * (también la repetición), 202 `{ incident: 'NO_SE_PUDO_REGISTRAR' }` si la venta ya no se puede armar, 409 y 422 con incidencia.
+ * Rediseño r3 (D1): el carrito congelado se lee DESPUÉS de guardar la evidencia, como `POST /orders` (EL lector de la máquina) y con la
+ * autoridad de la sesión de quien termina el folio. Un carrito ilegible ya no es un 400 que pierde el comprobante: es dinero sin venta.
+ */
+const lectorDelPedido =
+  (req: Request, venueId: string): LectorDelPedido =>
+  async (crudo, vendedorPorOmision) =>
+    (await leerCarritoDeLaMaquina(req, crudo, { venueId, usuario: vendedorPorOmision, conPropinaDeOrden: false, conAutoridad: true })).input
+
+/**
+ * `POST /api/v1/mobile/venues/:venueId/cash-machine/sales` — una operación de la máquina de efectivo (R4-1). Todo acuse trae `ack`
+ * (`RECIBIDO` | `TERMINADO`) y el `deviceId` dueño del folio: 200 TERMINADO con la venta o el cierre (también la repetición); 202
+ * TERMINADO `{ incident: 'NO_SE_PUDO_REGISTRAR', owedKind, owedCents }` si el dinero quedó sin venta; 202 RECIBIDO si la venta todavía
+ * no se termina (reenviar el MISMO mensaje la reanuda); 409 y 422 con incidencia; 409 `CASH_MACHINE_CLOSE_RETRY` sólo si nada se guardó.
  */
 export async function registrarVenta(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.params
     const autor = autorDe(req)
-    const { referenceCC, cierre, pedido } = req.body
-    const venta = pedido
-      ? (await leerCarritoDeLaMaquina(req, pedido, { venueId, usuario: autor.userId, conPropinaDeOrden: false, conAutoridad: true })).input
-      : undefined
-    const resultado = await registrarVentaDeLaMaquina(venueId, autor, { referenceCC, cierre, pedido: venta })
+    const { referenceCC, cierre, pedido, bindingId } = req.body
+    const resultado = await registrarVentaDeLaMaquina(
+      venueId,
+      autor,
+      { referenceCC, cierre, pedido, bindingId },
+      lectorDelPedido(req, venueId),
+    )
     res.status(resultado.status).json({ success: true, ...resultado.body })
   } catch (error) {
     next(error)
@@ -109,15 +127,14 @@ export async function cotizar(req: Request, res: Response, next: NextFunction) {
 
 /**
  * `POST /api/v1/mobile/venues/:venueId/cash-machine/doubts` (R4-4, R5#6) — `payments:create` y la PC emparejada. La PC no sabe cómo
- * terminó una operación: sube la duda con su carrito congelado. 200 `{ status: 'ABIERTO' }`, o la evidencia si el folio ya se cerró.
+ * terminó una operación: sube la duda con su carrito. 200 `{ status: 'ABIERTO', ack: 'RECIBIDO', deviceId, incidentId, version }`, o
+ * `{ status: 'RESUELTO', ack: 'TERMINADO', … }` con la evidencia si el folio ya se cerró.
  */
 export async function subirDuda(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.params
-    const autor = autorDe(req)
-    // El carrito se valida AHORA, con el MISMO lector que la venta: la resolución lo arma después tal cual.
-    await leerCarritoDeLaMaquina(req, req.body.pedido, { venueId, usuario: autor.userId, conPropinaDeOrden: false, conAutoridad: false })
-    res.status(200).json({ success: true, ...(await subirDudaDeLaMaquina(venueId, autor, req.body)) })
+    // r6-2: la duda se guarda aunque su carrito no se pueda leer; nunca se vuelve desenlace por eso.
+    res.status(200).json({ success: true, ...(await subirDudaDeLaMaquina(venueId, autorDe(req), req.body, lectorDelPedido(req, venueId))) })
   } catch (error) {
     next(error)
   }
@@ -154,20 +171,19 @@ export async function listarDudas(req: Request, res: Response, next: NextFunctio
 
 /**
  * `POST /api/v1/{mobile|dashboard}/venues/:venueId/cash-machine/doubts/:referenceCC/resolve` — `cash-machine:resolve`. El gerente es
- * el de la sesión (nunca del cuerpo); con `PAGADO` el carrito congelado se lee como `POST /orders` con su autoridad. Responde como la
- * venta: 200 con la evidencia, 202 si la venta ya no se arma, 409 y 422 con incidencia.
+ * el de la sesión (nunca del cuerpo) y manda la `version` que vio (r6-4: si llegó evidencia nueva, 409 `CASH_MACHINE_DOUBT_CHANGED`
+ * y no se escribe nada). Responde como la venta: 200/202 TERMINADO, 202 RECIBIDO, 409 y 422 con incidencia.
  */
 export async function resolverDuda(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, referenceCC } = req.params
-    const { outcome, creditCents, changeDispensedCents, occurredAt, evidence, cancelMode } = req.body
+    const { outcome, creditCents, changeDispensedCents, occurredAt, evidence, cancelMode, version } = req.body
     const resultado = await resolverDudaDeLaMaquina(
       venueId,
       req.authContext!.userId,
       referenceCC,
-      { outcome, creditCents, changeDispensedCents, occurredAt, evidence, cancelMode },
-      async (pedido, subidoPor) =>
-        (await leerCarritoDeLaMaquina(req, pedido, { venueId, usuario: subidoPor, conPropinaDeOrden: false, conAutoridad: true })).input,
+      { outcome, creditCents, changeDispensedCents, occurredAt, evidence, cancelMode, version },
+      lectorDelPedido(req, venueId),
     )
     res.status(resultado.status).json({ success: true, ...resultado.body })
   } catch (error) {

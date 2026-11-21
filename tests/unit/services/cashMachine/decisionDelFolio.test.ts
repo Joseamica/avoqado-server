@@ -1,252 +1,260 @@
 /**
- * Máquina de efectivo 1a · Codex servidor r2 (familia A: «quién puede escribir el desenlace de un folio»). Dos rondas parcharon esta
- * familia caso por caso y se volvió a romper (r2 #1, #4, #8, #9). Ahora hay UNA decisión pura, `decidirEscrituraDelFolio`, y cada
- * entrada (venta, duda, GET, resolución del gerente, revisión, repetición y la carrera P2002) la llama bajo el candado del folio.
+ * Máquina de efectivo 1a · matriz A (rediseño tras la ronda 3 de Codex: D1–D4 y codex-r6 1–6). UNA decisión pura,
+ * `decidirSobreElFolio`: el primer mensaje congela el folio, el primer cierre comprobado es el desenlace, lo demás sólo se agrega. Con
+ * una sola PC por negocio (D3) la matriz es más chica que la de r2: quién manda × lo que el folio ya tiene × importes × desenlace ×
+ * carrito × revocación × versión del gerente.
  *
- * La matriz enumera TODAS las combinaciones (quién escribe × desenlace × motivo × lo que el folio ya tiene × su duda × la evidencia) y
- * las compara contra una tabla de reglas escrita a mano (la primera que coincide manda). Además: cada regla se usa al menos una vez.
+ * La matriz enumera TODAS las combinaciones y las compara contra una tabla de reglas escrita a mano (la primera que coincide manda).
+ * Además: cada regla decide al menos una combinación.
  */
 import {
-  acumularEvento,
-  decidirEscrituraDelFolio,
+  acumularEnLaIncidencia,
+  decidirSobreElFolio,
+  huellaDeLaObservacion,
   type DecisionDelFolio,
   type EstadoDelFolio,
   type PeticionSobreElFolio,
-  type QuienEscribe,
 } from '@/services/cashMachine/decisionDelFolio'
+import type { CierreDeLaMaquina } from '@/services/cashMachine/ventaDeLaMaquina'
 
 const REVOCADA_EN = new Date('2026-11-20T18:00:00.000Z')
-const ANTES = new Date('2026-11-20T17:59:00.000Z')
-const DESPUES = new Date('2026-11-20T18:01:00.000Z')
+const ANTES = '2026-11-20T17:59:00.000Z'
+const DESPUES = '2026-11-20T18:01:00.000Z'
 
-type Quien = 'PC' | 'PC_REVOCADA_ANTES' | 'PC_REVOCADA_DESPUES' | 'PC_REVOCADA_SIN_HORA' | 'GERENTE'
-type Previo = 'NINGUNO' | 'CIERRE_PROPIO' | 'CIERRE_OTRA_PC' | 'SIN_REGISTRO_PROPIO' | 'SIN_REGISTRO_OTRA_PC'
-type Duda = 'NINGUNA' | 'PROPIA_ABIERTA' | 'PROPIA_CERRADA' | 'OTRA_PC'
-type Evidencia = 'IGUAL' | 'OTRO_IMPORTE' | 'OTRO_CARRITO'
+type Que = 'CIERRE_PC' | 'CIERRE_GERENTE' | 'DUDA'
+type Folio = 'NINGUNO' | 'SIN_DESENLACE' | 'DECIDIDO' | 'OTRA_PC'
+type Revocacion = 'VIGENTE' | 'REVOCADA_ANTES' | 'REVOCADA_DESPUES' | 'REVOCADA_SIN_HORA'
 type Caso = {
-  que: 'CIERRE' | 'DUDA' | 'CONSULTA'
-  quien: Quien
-  outcome: 'PAGADO' | 'CANCELADO'
-  motivo: 'NINGUNO' | 'DESCUENTO'
-  previo: Previo
-  duda: Duda
-  evidencia: Evidencia
+  que: Que
+  folio: Folio
+  importes: 'IGUALES' | 'OTROS'
+  desenlace: 'IGUAL' | 'OTRO'
+  carrito: 'IGUAL' | 'OTRO'
+  revocacion: Revocacion
+  version: 'VISTA' | 'VIEJA_REPETICION' | 'VIEJA_NUEVA'
 }
 
-const QUIENES: Quien[] = ['PC', 'PC_REVOCADA_ANTES', 'PC_REVOCADA_DESPUES', 'PC_REVOCADA_SIN_HORA', 'GERENTE']
-const PREVIOS: Previo[] = ['NINGUNO', 'CIERRE_PROPIO', 'CIERRE_OTRA_PC', 'SIN_REGISTRO_PROPIO', 'SIN_REGISTRO_OTRA_PC']
-const DUDAS: Duda[] = ['NINGUNA', 'PROPIA_ABIERTA', 'PROPIA_CERRADA', 'OTRA_PC']
-const EVIDENCIAS: Evidencia[] = ['IGUAL', 'OTRO_IMPORTE', 'OTRO_CARRITO']
-
-/** Lo guardado en el folio: la PC `pc-A` (o `pc-B`, otra PC), huella `h1`, carrito `c1`, $187.50 sin propina. */
-const guardado = (deviceId: string) => ({ deviceId, huella: 'h1', huellaDelCarrito: 'c1', dueCents: 18750, saleCents: 18750, tipCents: 0 })
+const cierre = (over: Partial<CierreDeLaMaquina> = {}): CierreDeLaMaquina => ({
+  outcome: 'PAGADO',
+  dueCents: 10000,
+  saleCents: 10000,
+  tipCents: 0,
+  creditCents: 15000,
+  changeDispensedCents: 5000,
+  occurredAtKnown: true,
+  occurredAt: ANTES,
+  ...over,
+})
 
 function estadoDe(c: Caso): EstadoDelFolio {
-  const previoDe = (p: Previo, tipo: 'CIERRE' | 'SIN_REGISTRO') =>
-    p === `${tipo}_PROPIO` ? guardado('pc-A') : p === `${tipo}_OTRA_PC` ? guardado('pc-B') : null
+  if (c.folio === 'NINGUNO') return { folio: null, terminado: false, duda: false }
   return {
-    cierre: previoDe(c.previo, 'CIERRE'),
-    sinRegistro: previoDe(c.previo, 'SIN_REGISTRO'),
-    duda:
-      c.duda === 'NINGUNA'
-        ? null
-        : { ...guardado(c.duda === 'OTRA_PC' ? 'pc-B' : 'pc-A'), huella: null, abierta: c.duda !== 'PROPIA_CERRADA' },
+    folio: {
+      deviceId: c.folio === 'OTRA_PC' ? 'pc-B' : 'pc-A',
+      cartHash: 'carrito-1',
+      saleShiftId: 'turno-A',
+      dueCents: 10000,
+      saleCents: 10000,
+      tipCents: 0,
+      version: 3,
+      decision:
+        c.folio === 'DECIDIDO'
+          ? {
+              cierre: cierre(),
+              resolvedBy: 'MAQUINA',
+              userId: 'cajera',
+              vendedorPorOmision: 'cajera',
+              evidence: null,
+              trasRevocar: false,
+              motivoSinVenta: null,
+            }
+          : null,
+    },
+    terminado: false,
+    duda: c.folio === 'SIN_DESENLACE',
   }
-}
-
-function quienDe(q: Quien): QuienEscribe {
-  if (q === 'GERENTE') return { tipo: 'GERENTE', deviceId: 'pc-A' }
-  return { tipo: 'PC', deviceId: 'pc-A', revocadaEn: q === 'PC' ? null : REVOCADA_EN }
 }
 
 function peticionDe(c: Caso): PeticionSobreElFolio {
-  const importes = c.evidencia === 'OTRO_IMPORTE' ? { dueCents: 20000, saleCents: 20000, tipCents: 0 } : guardado('pc-A')
-  // Un cierre sin pedido (CANCELADO) no lleva carrito: nada que comparar.
-  const carrito = c.que === 'CIERRE' && c.outcome === 'CANCELADO' ? null : c.evidencia === 'OTRO_CARRITO' ? 'c2' : 'c1'
-  const importesSolos = { dueCents: importes.dueCents, saleCents: importes.saleCents, tipCents: importes.tipCents }
-  if (c.que === 'CONSULTA') return { que: 'CONSULTA' }
-  if (c.que === 'DUDA') return { que: 'DUDA', quien: quienDe(c.quien), importes: importesSolos, huellaDelCarrito: carrito }
-  return {
-    que: 'CIERRE',
-    quien: quienDe(c.quien),
-    outcome: c.outcome,
-    horaDelComprobante: c.quien === 'PC_REVOCADA_ANTES' ? ANTES : c.quien === 'PC_REVOCADA_SIN_HORA' ? null : DESPUES,
-    evidencia: { huella: c.evidencia === 'OTRO_IMPORTE' ? 'h2' : 'h1', huellaDelCarrito: carrito },
-    importes: importesSolos,
-    ...(c.motivo === 'DESCUENTO' ? { motivoSinVenta: 'DESCUENTO' as const } : {}),
+  const importes =
+    c.importes === 'IGUALES' ? { dueCents: 10000, saleCents: 10000, tipCents: 0 } : { dueCents: 11000, saleCents: 10000, tipCents: 1000 }
+  const hora = c.revocacion === 'REVOCADA_DESPUES' ? DESPUES : c.revocacion === 'REVOCADA_SIN_HORA' ? null : ANTES
+  const c1 = cierre({
+    ...importes,
+    creditCents: c.desenlace === 'IGUAL' ? 15000 : 20000,
+    changeDispensedCents: c.desenlace === 'IGUAL' ? 5000 : 9000,
+    occurredAt: hora,
+    occurredAtKnown: hora !== null,
+  })
+  const revocadaEn = c.revocacion === 'VIGENTE' ? null : REVOCADA_EN
+  const carritoRecibido = c.carrito === 'IGUAL' ? 'carrito-1' : 'carrito-2'
+  if (c.que === 'CIERRE_GERENTE') {
+    return {
+      que: 'CIERRE',
+      origen: 'GERENTE',
+      cierre: c1,
+      versionVista: c.version === 'VISTA' ? (c.folio === 'NINGUNO' ? 1 : 3) : 2,
+      repeticion: c.version === 'VIEJA_REPETICION',
+    }
   }
+  if (c.que === 'DUDA') {
+    return { que: 'DUDA', deviceId: 'pc-A', importes, carritoRecibido, turnoRecibido: 'turno-A', revocadaEn }
+  }
+  return { que: 'CIERRE', origen: 'PC', deviceId: 'pc-A', cierre: c1, carritoRecibido, turnoRecibido: 'turno-A', revocadaEn }
 }
 
-type Regla = { cuando: Partial<{ [K in keyof Caso]: Caso[K] | Caso[K][] }>; esperado: DecisionDelFolio }
-const coincide = (c: Caso, r: Regla) =>
-  Object.entries(r.cuando).every(([k, v]) => (Array.isArray(v) ? v.includes(c[k as keyof Caso] as never) : c[k as keyof Caso] === v))
+const revocada = (c: Caso) => c.que !== 'CIERRE_GERENTE' && c.revocacion !== 'VIGENTE'
 
-const OTRA_PC = { accion: 'CONFLICTO', motivo: 'OTRA_PC' } as const
-const OTRA_EVIDENCIA = { accion: 'CONFLICTO', motivo: 'OTRA_EVIDENCIA' } as const
-const PROPIOS: Previo[] = ['CIERRE_PROPIO', 'SIN_REGISTRO_PROPIO']
-const AJENOS: Previo[] = ['CIERRE_OTRA_PC', 'SIN_REGISTRO_OTRA_PC']
-const DISTINTA: Evidencia[] = ['OTRO_IMPORTE', 'OTRO_CARRITO']
-const REVOCADAS: Quien[] = ['PC_REVOCADA_ANTES', 'PC_REVOCADA_DESPUES', 'PC_REVOCADA_SIN_HORA']
-
-/** La especificación: la primera regla que coincide manda. Las reglas de r2 llevan su número. */
-const REGLAS: Regla[] = [
-  // ── CIERRE (la PC sube su cierre, o el gerente resuelve la duda) ───────────────────────────────────────────────────────────
-  // Lo definitivo de OTRA PC nunca se toca ni se le contesta a ésta (r1 #4).
-  { cuando: { que: 'CIERRE', previo: AJENOS }, esperado: OTRA_PC },
-  // La repetición EXACTA de lo definitivo se permite, también a la PC revocada (decisión de r2).
-  { cuando: { que: 'CIERRE', previo: 'CIERRE_PROPIO', evidencia: 'IGUAL' }, esperado: { accion: 'REPETIR', de: 'CIERRE' } },
-  // Un cancelado no lleva carrito: con otro carrito sigue siendo la misma operación.
+/** La tabla de reglas, en orden: la primera que coincide manda. */
+const REGLAS: Array<{ nombre: string; si: (c: Caso) => boolean; entonces: (c: Caso) => DecisionDelFolio }> = [
   {
-    cuando: { que: 'CIERRE', previo: 'CIERRE_PROPIO', outcome: 'CANCELADO', evidencia: 'OTRO_CARRITO' },
-    esperado: { accion: 'REPETIR', de: 'CIERRE' },
-  },
-  { cuando: { que: 'CIERRE', previo: 'SIN_REGISTRO_PROPIO', evidencia: 'IGUAL' }, esperado: { accion: 'REPETIR', de: 'SIN_REGISTRO' } },
-  {
-    cuando: { que: 'CIERRE', previo: 'SIN_REGISTRO_PROPIO', outcome: 'CANCELADO', evidencia: 'OTRO_CARRITO' },
-    esperado: { accion: 'REPETIR', de: 'SIN_REGISTRO' },
-  },
-  // r2 #5: la misma PC con otro carrito u otros importes es OTRA operación (409 con su evidencia), nunca un 200.
-  { cuando: { que: 'CIERRE', previo: PROPIOS }, esperado: OTRA_EVIDENCIA },
-  // r2 #4: la duda es de OTRA PC: ni la venta ni un 202 la cierran.
-  { cuando: { que: 'CIERRE', duda: 'OTRA_PC' }, esperado: OTRA_PC },
-  { cuando: { que: 'CIERRE', duda: 'PROPIA_CERRADA' }, esperado: { accion: 'CONFLICTO', motivo: 'DUDA_CERRADA' } },
-  // r2 #5: con duda, el cierre usa SU carrito congelado y SU reparto venta/propina.
-  { cuando: { que: 'CIERRE', duda: 'PROPIA_ABIERTA', evidencia: 'OTRO_IMPORTE' }, esperado: OTRA_EVIDENCIA },
-  { cuando: { que: 'CIERRE', duda: 'PROPIA_ABIERTA', outcome: 'PAGADO', evidencia: 'OTRO_CARRITO' }, esperado: OTRA_EVIDENCIA },
-  // r2 #1: la PC revocada conserva `revokedAt` aunque exista su duda; el primer cierre mira la hora y queda TRAS_REVOCAR.
-  {
-    cuando: { que: 'CIERRE', quien: ['PC_REVOCADA_DESPUES', 'PC_REVOCADA_SIN_HORA'], outcome: 'PAGADO' },
-    esperado: { accion: 'SIN_REGISTRO', motivo: 'PC_REVOCADA', trasRevocar: true },
+    nombre: 'r6-4: el gerente con otra versión y una declaración nueva no escribe nada',
+    si: c => c.que === 'CIERRE_GERENTE' && c.version === 'VIEJA_NUEVA',
+    entonces: () => ({ accion: 'VERSION' }),
   },
   {
-    cuando: { que: 'CIERRE', quien: 'PC_REVOCADA_ANTES', outcome: 'PAGADO', motivo: 'DESCUENTO' },
-    esperado: { accion: 'SIN_REGISTRO', motivo: 'DESCUENTO', trasRevocar: true },
+    nombre: 'D3: el folio de otra PC no se toca',
+    si: c => c.que !== 'CIERRE_GERENTE' && c.folio === 'OTRA_PC',
+    entonces: () => ({ accion: 'CONFLICTO', motivo: 'OTRA_PC' }),
   },
-  { cuando: { que: 'CIERRE', quien: REVOCADAS }, esperado: { accion: 'REGISTRAR', trasRevocar: true } },
   {
-    cuando: { que: 'CIERRE', outcome: 'PAGADO', motivo: 'DESCUENTO' },
-    esperado: { accion: 'SIN_REGISTRO', motivo: 'DESCUENTO', trasRevocar: false },
+    nombre: 'D2: otros importes que los congelados son conflicto',
+    si: c => c.folio !== 'NINGUNO' && c.importes === 'OTROS',
+    entonces: () => ({ accion: 'CONFLICTO', motivo: 'OTRA_EVIDENCIA' }),
   },
-  { cuando: { que: 'CIERRE' }, esperado: { accion: 'REGISTRAR', trasRevocar: false } },
-
-  // ── DUDA (la PC no sabe cómo terminó) ─────────────────────────────────────────────────────────────────────────────────────
-  { cuando: { que: 'DUDA', duda: 'OTRA_PC' }, esperado: OTRA_PC },
-  { cuando: { que: 'DUDA', previo: AJENOS }, esperado: OTRA_PC },
-  // r1 #7: otra versión de la evidencia es 409 (y se guarda como CONFLICTO).
-  { cuando: { que: 'DUDA', duda: ['PROPIA_ABIERTA', 'PROPIA_CERRADA'], evidencia: DISTINTA }, esperado: OTRA_EVIDENCIA },
-  { cuando: { que: 'DUDA', previo: PROPIOS, evidencia: DISTINTA }, esperado: OTRA_EVIDENCIA },
-  { cuando: { que: 'DUDA', previo: 'CIERRE_PROPIO' }, esperado: { accion: 'REPETIR', de: 'CIERRE' } },
-  { cuando: { que: 'DUDA', previo: 'SIN_REGISTRO_PROPIO' }, esperado: { accion: 'REPETIR', de: 'SIN_REGISTRO' } },
-  { cuando: { que: 'DUDA', duda: 'PROPIA_ABIERTA' }, esperado: { accion: 'DUDA_ABIERTA' } },
-  { cuando: { que: 'DUDA', duda: 'PROPIA_CERRADA' }, esperado: { accion: 'CONFLICTO', motivo: 'DUDA_CERRADA' } },
-  // La PC revocada todavía ENTREGA su duda (evidencia, nunca autoridad): queda TRAS_REVOCAR.
-  { cuando: { que: 'DUDA', quien: REVOCADAS }, esperado: { accion: 'ABRIR_DUDA', trasRevocar: true } },
-  { cuando: { que: 'DUDA' }, esperado: { accion: 'ABRIR_DUDA', trasRevocar: false } },
-
-  // ── CONSULTA (GET del folio y de la duda: nunca escribe ni fabrica un desenlace, r1 #6) ───────────────────────────────────
-  { cuando: { que: 'CONSULTA', previo: ['CIERRE_PROPIO', 'CIERRE_OTRA_PC'] }, esperado: { accion: 'REPETIR', de: 'CIERRE' } },
   {
-    cuando: { que: 'CONSULTA', previo: ['SIN_REGISTRO_PROPIO', 'SIN_REGISTRO_OTRA_PC'] },
-    esperado: { accion: 'REPETIR', de: 'SIN_REGISTRO' },
+    nombre: 'la primera duda congela el folio',
+    si: c => c.que === 'DUDA' && c.folio === 'NINGUNO',
+    entonces: c => ({ accion: 'ABRIR_DUDA', trasRevocar: revocada(c) }),
   },
-  { cuando: { que: 'CONSULTA', duda: ['PROPIA_ABIERTA', 'PROPIA_CERRADA', 'OTRA_PC'] }, esperado: { accion: 'DUDA_ABIERTA' } },
-  { cuando: { que: 'CONSULTA' }, esperado: { accion: 'NO_EXISTE' } },
+  {
+    nombre: 'r6-2: una duda nunca es desenlace: el folio contesta lo que tiene (otro carrito se anota)',
+    si: c => c.que === 'DUDA',
+    entonces: c => ({ accion: 'SEGUIR', discrepancia: c.carrito === 'OTRO' }),
+  },
+  {
+    nombre: 'r6-3: otro desenlace físico después del desenlace es conflicto (nunca sustitución)',
+    si: c => c.folio === 'DECIDIDO' && c.desenlace === 'OTRO',
+    entonces: () => ({ accion: 'CONFLICTO', motivo: 'OTRA_EVIDENCIA' }),
+  },
+  {
+    nombre: 'r6-1: el mismo desenlace contesta (y reanuda) lo que el folio tiene; la hora nueva o el otro carrito se anotan',
+    si: c => c.folio === 'DECIDIDO',
+    entonces: c => ({
+      accion: 'SEGUIR',
+      discrepancia: (c.que === 'CIERRE_PC' && c.carrito === 'OTRO') || (c.revocacion !== 'VIGENTE' && c.revocacion !== 'REVOCADA_ANTES'),
+    }),
+  },
+  {
+    nombre: 'el primer cierre comprobado es el desenlace (con la marca de la PC revocada)',
+    si: () => true,
+    entonces: c => ({
+      accion: 'ACEPTAR',
+      trasRevocar: revocada(c),
+      motivoSinVenta: revocada(c) && c.revocacion !== 'REVOCADA_ANTES' ? 'PC_REVOCADA' : null,
+      discrepancia: c.que === 'CIERRE_PC' && c.folio !== 'NINGUNO' && c.carrito === 'OTRO',
+    }),
+  },
 ]
 
-function* casos(): Generator<Caso> {
-  for (const previo of PREVIOS)
-    for (const duda of DUDAS) {
-      for (const quien of QUIENES)
-        for (const outcome of ['PAGADO', 'CANCELADO'] as const)
-          for (const motivo of ['NINGUNO', 'DESCUENTO'] as const)
-            for (const evidencia of EVIDENCIAS) yield { que: 'CIERRE', quien, outcome, motivo, previo, duda, evidencia }
-      for (const quien of QUIENES.filter(q => q !== 'GERENTE'))
-        for (const evidencia of EVIDENCIAS) yield { que: 'DUDA', quien, outcome: 'PAGADO', motivo: 'NINGUNO', previo, duda, evidencia }
-      yield { que: 'CONSULTA', quien: 'PC', outcome: 'PAGADO', motivo: 'NINGUNO', previo, duda, evidencia: 'IGUAL' }
-    }
-}
+const todos: Caso[] = []
+for (const que of ['CIERRE_PC', 'CIERRE_GERENTE', 'DUDA'] as Que[])
+  for (const folio of ['NINGUNO', 'SIN_DESENLACE', 'DECIDIDO', 'OTRA_PC'] as Folio[])
+    for (const importes of ['IGUALES', 'OTROS'] as const)
+      for (const desenlace of ['IGUAL', 'OTRO'] as const)
+        for (const carrito of ['IGUAL', 'OTRO'] as const)
+          for (const revocacion of ['VIGENTE', 'REVOCADA_ANTES', 'REVOCADA_DESPUES', 'REVOCADA_SIN_HORA'] as Revocacion[])
+            for (const version of ['VISTA', 'VIEJA_REPETICION', 'VIEJA_NUEVA'] as const)
+              todos.push({ que, folio, importes, desenlace, carrito, revocacion, version })
 
-describe('decidirEscrituraDelFolio · la matriz completa (familia A)', () => {
-  const todos = [...casos()]
-  const usadas = new Set<number>()
-
+describe('matriz A · decidirSobreElFolio', () => {
   it(`enumera ${todos.length} combinaciones y cada una da lo que dice la tabla`, () => {
-    // 1200 cierres + 240 dudas + 20 consultas.
-    expect(todos).toHaveLength(1200 + 240 + 20)
-    const fallas: string[] = []
-    for (const c of todos) {
-      const i = REGLAS.findIndex(r => r.cuando.que === c.que && coincide(c, r))
-      expect(i).toBeGreaterThanOrEqual(0)
-      usadas.add(i)
-      const obtenido = decidirEscrituraDelFolio(estadoDe(c), peticionDe(c))
-      // Sin importar el orden de las llaves (objetos planos).
-      const canon = (o: object) => JSON.stringify(o, Object.keys(o).sort())
-      if (canon(obtenido) !== canon(REGLAS[i].esperado)) {
-        fallas.push(`${JSON.stringify(c)} → ${JSON.stringify(obtenido)} (esperado ${JSON.stringify(REGLAS[i].esperado)})`)
-      }
-    }
-    expect(fallas.slice(0, 10)).toEqual([])
+    const malas = todos
+      .map(c => {
+        const esperada = REGLAS.find(r => r.si(c))!.entonces(c)
+        return { c, esperada, real: decidirSobreElFolio(estadoDe(c), peticionDe(c)) }
+      })
+      .filter(x => JSON.stringify(x.esperada) !== JSON.stringify(x.real))
+    expect(malas.slice(0, 5)).toEqual([])
   })
 
   it('ninguna regla de la tabla sobra (cada una decide al menos una combinación)', () => {
-    for (const c of todos) usadas.add(REGLAS.findIndex(r => r.cuando.que === c.que && coincide(c, r)))
-    expect(REGLAS.map((_, i) => i).filter(i => !usadas.has(i))).toEqual([])
+    const usadas = new Set(todos.map(c => REGLAS.find(r => r.si(c))!.nombre))
+    expect(REGLAS.map(r => r.nombre).filter(n => !usadas.has(n))).toEqual([])
+  })
+
+  it('CONSULTA: TERMINADO > RECIBIDO > DUDA_ABIERTA > NO_EXISTE; nunca escribe ni fabrica un desenlace', () => {
+    const conDesenlace = estadoDe({ que: 'CIERRE_PC', folio: 'DECIDIDO' } as Caso)
+    const sinDesenlace = estadoDe({ que: 'DUDA', folio: 'SIN_DESENLACE' } as Caso)
+    expect(decidirSobreElFolio({ ...conDesenlace, terminado: true }, { que: 'CONSULTA' })).toEqual({ accion: 'TERMINADO' })
+    expect(decidirSobreElFolio(conDesenlace, { que: 'CONSULTA' })).toEqual({ accion: 'RECIBIDO' })
+    expect(decidirSobreElFolio(sinDesenlace, { que: 'CONSULTA' })).toEqual({ accion: 'DUDA_ABIERTA' })
+    expect(decidirSobreElFolio({ folio: null, terminado: false, duda: false }, { que: 'CONSULTA' })).toEqual({ accion: 'NO_EXISTE' })
   })
 })
 
-describe('decidirEscrituraDelFolio · revisión de una incidencia (r2 #8)', () => {
-  const vacio: EstadoDelFolio = { cierre: null, sinRegistro: null, duda: null }
-  const REVISIONES: Array<[string, 'ABIERTO' | 'RESUELTO', number, DecisionDelFolio]> = [
-    // [kind, status, versión que vio el gerente (la actual es 2), esperado]
-    ['ESPERANDO', 'ABIERTO', 2, { accion: 'NO_REVISABLE' }],
-    ['ESPERANDO', 'RESUELTO', 1, { accion: 'NO_REVISABLE' }],
-    ['IMPOSIBLE', 'ABIERTO', 2, { accion: 'REVISAR' }],
-    ['IMPOSIBLE', 'ABIERTO', 1, { accion: 'CONFLICTO', motivo: 'VERSION' }],
-    ['CONFLICTO', 'RESUELTO', 2, { accion: 'REPETIR', de: 'REVISION' }],
-    ['CONFLICTO', 'RESUELTO', 1, { accion: 'CONFLICTO', motivo: 'VERSION' }],
-    ['NO_SE_PUDO_REGISTRAR', 'ABIERTO', 2, { accion: 'REVISAR' }],
-    ['TRAS_REVOCAR', 'ABIERTO', 3, { accion: 'CONFLICTO', motivo: 'VERSION' }],
-  ]
-  it.each(REVISIONES)('%s %s vista v%i', (kind, status, versionVista, esperado) => {
-    expect(decidirEscrituraDelFolio(vacio, { que: 'REVISION', kind, status, versionVista, versionActual: 2 })).toEqual(esperado)
+describe('r6-3: la huella de una observación', () => {
+  const base = {
+    que: 'CIERRE',
+    origen: 'PC',
+    deviceId: 'pc-A',
+    bindingId: 'b1',
+    outcome: 'GUARDADO',
+    cancelMode: '2',
+    dueCents: 10000,
+    saleCents: 10000,
+    tipCents: 0,
+    creditCents: 5000,
+    changeDispensedCents: 0,
+    occurredAt: null,
+    saleShiftId: 'turno-A',
+    cartHash: 'c1',
+    congelado: 'c1',
+  }
+  it('🔴 GUARDADO y CANCELADO con las MISMAS cifras son observaciones distintas (desenlace y modo de cancelación)', () => {
+    expect(huellaDeLaObservacion(base)).not.toBe(huellaDeLaObservacion({ ...base, outcome: 'CANCELADO', cancelMode: '1' }))
   })
-})
-
-describe('acumularEvento · la evidencia de una incidencia (r2 #8)', () => {
-  const ev = (n: number, recibidoEn = `2026-11-20T18:0${n % 10}:00.000Z`) => ({ cierre: { creditCents: n }, recibidoEn })
-
-  it('la primera: versión 1, un evento, una entrega', () => {
-    const { payload, nueva } = acumularEvento(null, ev(1))
-    expect(nueva).toBe(true)
-    expect(payload).toMatchObject({ eventos: [ev(1)], veces: 1, version: 1, repetidas: 0 })
-  })
-
-  it('🔴 una repetición IDÉNTICA (sólo cambia la hora de llegada) no es evidencia nueva: cuenta la entrega, no sube la versión ni la reabre', () => {
-    const uno = acumularEvento(null, ev(1)).payload
-    const { payload, nueva } = acumularEvento(uno, ev(1, '2026-11-20T19:00:00.000Z'))
-    expect(nueva).toBe(false)
-    expect(payload).toMatchObject({ veces: 2, version: 1, repetidas: 1 })
-    expect((payload as any).eventos).toHaveLength(1)
-  })
-
-  it('🔴 después de 50 eventos se conservan el PRIMERO y el ÚLTIMO real (no el número 50)', () => {
-    let p: unknown = null
-    for (let n = 1; n <= 60; n++) p = acumularEvento(p, ev(n)).payload
-    const eventos = (p as any).eventos as Array<{ cierre: { creditCents: number } }>
-    expect(eventos).toHaveLength(50)
-    expect(eventos[0].cierre.creditCents).toBe(1)
-    expect(eventos[eventos.length - 1].cierre.creditCents).toBe(60)
-    expect(p).toMatchObject({ veces: 60, version: 60 })
-  })
-
-  it('🔴 la revisión previa se conserva cuando llega evidencia nueva (la incidencia se reabre con su historia)', () => {
-    const revisada = {
-      ...(acumularEvento(null, ev(1)).payload as object),
-      revision: { nota: 'visto', staffId: 'g' },
-      revisiones: [{ nota: 'visto' }],
+  it('🔴 entran el origen, el turno y el carrito recibidos, la hora física y lastSeen', () => {
+    const h = huellaDeLaObservacion(base)
+    for (const cambio of [
+      { origen: 'GERENTE' },
+      { saleShiftId: 'turno-B' },
+      { cartHash: 'c2' },
+      { congelado: 'c9' },
+      { occurredAt: '2026-11-20T18:00:00.000Z' },
+      { lastSeen: { credit: 5000 } },
+    ]) {
+      expect(huellaDeLaObservacion({ ...base, ...cambio })).not.toBe(h)
     }
-    const { payload, nueva } = acumularEvento(revisada, ev(2))
-    expect(nueva).toBe(true)
-    expect(payload).toMatchObject({ revision: { nota: 'visto' }, revisiones: [{ nota: 'visto' }], version: 2 })
+  })
+  it('no entran la hora de llegada ni quién de la sesión la mandó (dos gerentes que declaran lo mismo son una)', () => {
+    expect(huellaDeLaObservacion({ ...base, recibidoEn: 'x', userId: 'a' })).toBe(
+      huellaDeLaObservacion({ ...base, recibidoEn: 'y', userId: 'b' }),
+    )
+  })
+})
+
+describe('r6-3: la incidencia guarda la primera y la última entrega; la novedad la dice el historial', () => {
+  it('la primera: versión 1, un evento, una entrega', () => {
+    expect(acumularEnLaIncidencia(null, { a: 1 }, true)).toEqual({ eventos: [{ a: 1 }], veces: 1, repetidas: 0, version: 1 })
+  })
+  it('🔴 A–B–A: la tercera es retransmisión (ya está en el historial): cuenta, no sube la versión ni reabre', () => {
+    const a = acumularEnLaIncidencia(null, { a: 1 }, true)
+    const ab = acumularEnLaIncidencia(a, { b: 1 }, true)
+    const aba = acumularEnLaIncidencia(ab, { a: 1 }, false)
+    expect(aba).toMatchObject({ version: 2, veces: 3, repetidas: 1, eventos: [{ a: 1 }, { b: 1 }] })
+  })
+  it('🔴 sin tope: la observación 52 distinta sube a la versión 52 y es la última (r6-3: con 51 se perdía la penúltima)', () => {
+    let p: unknown = null
+    for (let i = 1; i <= 52; i++) p = acumularEnLaIncidencia(p, { i }, true)
+    expect(p).toMatchObject({ version: 52, veces: 52, eventos: [{ i: 1 }, { i: 52 }] })
+  })
+  it('la revisión previa se conserva cuando llega evidencia nueva', () => {
+    const revisada = { ...(acumularEnLaIncidencia(null, { a: 1 }, true) as object), revision: { nota: 'ok' }, revisiones: [{ nota: 'ok' }] }
+    expect(acumularEnLaIncidencia(revisada, { b: 1 }, true)).toMatchObject({
+      revision: { nota: 'ok' },
+      revisiones: [{ nota: 'ok' }],
+      version: 2,
+    })
   })
 })

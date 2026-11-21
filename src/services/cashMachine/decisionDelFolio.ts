@@ -1,44 +1,57 @@
 /**
- * Máquina de efectivo QuickPay Mini · fase 1a · Codex servidor r2, familia A: «¿quién puede escribir el desenlace de un folio?».
+ * Máquina de efectivo QuickPay Mini · fase 1a · «¿qué hace este mensaje con el folio?». Rediseño tras la ronda 3 de Codex sobre el
+ * código (plan `2026-11-20-maquina-de-efectivo-fase-1a.md`, D1–D4 y los ajustes de `codex-r6.md`).
  *
- * Dos rondas parcharon esta pregunta entrada por entrada y cada parche rompió otra (r2 #1, #4, #8, #9). Aquí vive la ÚNICA respuesta,
- * PURA (sin base): cada entrada lee lo que el folio ya tiene BAJO SU CANDADO (`leerEstadoDelFolio`), le pregunta a
- * `decidirEscrituraDelFolio` y hace lo que ésta dice. Las entradas: la venta y la duda de la PC, los dos GET, la resolución del gerente
- * (POS y panel), la revisión de una incidencia, la repetición y la carrera P2002. La matriz completa está en
+ * Antes cada mensaje (cierre, duda, reenvío, gerente) volvía a traer carrito, turno y evidencia, y el SERVIDOR los comparaba; cada
+ * comparación olvidada abría un hueco (r3 #2, #3, #9, #10). Ahora:
+ *  · El PRIMER mensaje del folio congela carrito, turno, reparto y dueño (`CashMachineFolio`). La venta se arma SIEMPRE de esa copia.
+ *  · El PRIMER cierre comprobado (de la PC o declarado por un gerente) es el desenlace (`decision`) y nunca se reemplaza.
+ *  · Lo demás sólo AGREGA observaciones (`CashMachineObservation`, una fila por huella): otro carrito, turno u hora es una discrepancia
+ *    que se anota para revisión, nunca una sustitución; otro desenlace o importes es un conflicto (409) con la evidencia guardada.
+ *  · Una duda nunca se vuelve desenlace (r6-2): sólo un cierre lo es.
+ *
+ * Aquí vive la regla, PURA (sin base). Quien escribe lee el folio BAJO SU CANDADO y hace lo que ésta dice. La matriz está en
  * `tests/unit/services/cashMachine/decisionDelFolio.test.ts`.
- *
- * Las reglas (founder y Codex r2):
- *  · Lo definitivo (el cierre o el «no se pudo registrar») de OTRA PC no se toca ni se le contesta: 409 con la evidencia guardada.
- *  · La repetición EXACTA de lo definitivo (misma huella y mismo carrito) se permite, también a la PC revocada.
- *  · La duda es de la PC que la subió: un cierre de otra PC —venta o 202— nunca la cierra.
- *  · Con duda, el cierre debe traer SUS importes (venta/propina) y SU carrito congelado; si no, 409.
- *  · La PC revocada conserva su `revokedAt` aunque sólo exista su duda: el primer cierre mira la hora del comprobante y queda
- *    TRAS_REVOCAR; un PAGADO posterior o sin hora no es venta (202 PC_REVOCADA). El gerente no está revocado: él declara.
- *  · La revisión confirma la versión de la evidencia que vio el gerente.
  */
 import { operationHash } from '../../utils/operationHash'
-import type { DesenlaceDeLaMaquina, MotivoSinRegistro } from './ventaDeLaMaquina'
+import type { CierreDeLaMaquina, QuienResolvio } from './ventaDeLaMaquina'
 
-/** Lo que el folio ya tiene guardado de una operación: de quién es y con qué evidencia. */
-export interface LoGuardadoDelFolio {
+/** El desenlace aceptado del folio (r6-1): se guarda en la primera transacción y se TERMINA (venta o cierre) después. */
+export interface DecisionGuardada {
+  /** El cierre comprobado, con los importes CONGELADOS del folio. */
+  cierre: CierreDeLaMaquina
+  resolvedBy: QuienResolvio
+  /** Quien procesa el cobro: la sesión de la PC (MAQUINA) o el gerente (GERENTE). */
+  userId: string
+  /** El vendedor por omisión del carrito congelado (la sesión de la PC que subió el folio). */
+  vendedorPorOmision: string
+  /** GERENTE: lo que leyó en la máquina. */
+  evidence: string | null
+  /** La PC estaba revocada al decidirse: lo anterior a su revocación entra con esta marca (TRAS_REVOCAR). */
+  trasRevocar: boolean
+  /** Un PAGADO de una PC revocada cobrado después de su revocación o sin hora: el dinero queda, no es venta. */
+  motivoSinVenta: 'PC_REVOCADA' | null
+}
+
+/** Lo que el folio congeló con su primer mensaje. */
+export interface FolioCongelado {
   deviceId: string | null
-  /** La huella del cierre (`huellaDelCierre`); una duda no tiene desenlace: `null`. */
-  huella: string | null
-  /** La huella de los artículos (`huellaDelCarrito`); un cierre sin pedido no tiene: `null`. */
-  huellaDelCarrito: string | null
+  cartHash: string | null
+  saleShiftId: string | null
   dueCents: number
   saleCents: number
   tipCents: number
+  version: number
+  decision: DecisionGuardada | null
 }
 
 export interface EstadoDelFolio {
-  cierre: LoGuardadoDelFolio | null
-  sinRegistro: LoGuardadoDelFolio | null
-  duda: (LoGuardadoDelFolio & { abierta: boolean }) | null
+  folio: FolioCongelado | null
+  /** Ya tiene su `CashMachineClose` (con venta, o sin ella y su motivo): el acuse es TERMINADO. */
+  terminado: boolean
+  /** Hay una duda (ESPERANDO) de este folio. */
+  duda: boolean
 }
-
-/** Quién escribe: la PC (con la fecha de su revocación, si la revocaron) o el gerente, que actúa sobre la duda de esa PC. */
-export type QuienEscribe = { tipo: 'PC'; deviceId: string | null; revocadaEn: Date | null } | { tipo: 'GERENTE'; deviceId: string | null }
 
 export interface Importes {
   dueCents: number
@@ -49,116 +62,138 @@ export interface Importes {
 export type PeticionSobreElFolio =
   | {
       que: 'CIERRE'
-      quien: QuienEscribe
-      outcome: DesenlaceDeLaMaquina
-      /** La hora del comprobante de la máquina; `null` = desconocida. */
-      horaDelComprobante: Date | null
-      evidencia: { huella: string; huellaDelCarrito: string | null }
-      importes: Importes
-      /** Un PAGADO que no puede ser venta aunque sus importes sean posibles (descuento, premio, venta rechazada…). */
-      motivoSinVenta?: MotivoSinRegistro
+      origen: 'PC'
+      deviceId: string | null
+      cierre: CierreDeLaMaquina
+      /** El carrito y el turno que mandó la PC: sólo para anotar la discrepancia, nunca sustituyen lo congelado. */
+      carritoRecibido: string | null
+      turnoRecibido: string | null
+      /** Cuándo revocaron el emparejamiento FIJO del intento (r6-6); `null` = vigente. */
+      revocadaEn: Date | null
     }
-  | { que: 'DUDA'; quien: QuienEscribe; importes: Importes; huellaDelCarrito: string | null }
+  | {
+      que: 'CIERRE'
+      origen: 'GERENTE'
+      cierre: CierreDeLaMaquina
+      /** r6-4: la versión de la evidencia que vio el gerente, y si su declaración ya está en el historial (repetición exacta). */
+      versionVista: number
+      repeticion: boolean
+    }
+  | {
+      que: 'DUDA'
+      deviceId: string | null
+      importes: Importes
+      carritoRecibido: string | null
+      turnoRecibido: string | null
+      revocadaEn: Date | null
+    }
   | { que: 'CONSULTA' }
-  | { que: 'REVISION'; kind: string; status: string; versionVista: number; versionActual: number }
 
 export type DecisionDelFolio =
-  | { accion: 'REGISTRAR'; trasRevocar: boolean }
-  | { accion: 'SIN_REGISTRO'; motivo: MotivoSinRegistro; trasRevocar: boolean }
-  | { accion: 'REPETIR'; de: 'CIERRE' | 'SIN_REGISTRO' | 'REVISION' }
-  | { accion: 'CONFLICTO'; motivo: 'OTRA_PC' | 'OTRA_EVIDENCIA' | 'DUDA_CERRADA' | 'VERSION' }
-  | { accion: 'ABRIR_DUDA'; trasRevocar: boolean }
+  /** CONSULTA: el folio ya tiene su cierre. */
+  | { accion: 'TERMINADO' }
+  /** CONSULTA: tiene desenlace, pero la venta todavía no se termina (el reenvío la reanuda). */
+  | { accion: 'RECIBIDO' }
   | { accion: 'DUDA_ABIERTA' }
   | { accion: 'NO_EXISTE' }
-  | { accion: 'REVISAR' }
-  | { accion: 'NO_REVISABLE' }
+  /** El gerente vio otra versión de la evidencia: no se escribe nada (r6-4). */
+  | { accion: 'VERSION' }
+  /** Se guarda la evidencia y se contesta 409. */
+  | { accion: 'CONFLICTO'; motivo: 'OTRA_PC' | 'OTRA_EVIDENCIA' }
+  /** La primera duda del folio: congela y abre la duda. */
+  | { accion: 'ABRIR_DUDA'; trasRevocar: boolean }
+  /** Este cierre es el desenlace del folio (congela si es el primer mensaje). */
+  | { accion: 'ACEPTAR'; trasRevocar: boolean; motivoSinVenta: 'PC_REVOCADA' | null; discrepancia: boolean }
+  /** El folio contesta lo que ya tiene (y se reanuda si está RECIBIDO); `discrepancia` = se anota para revisión. */
+  | { accion: 'SEGUIR'; discrepancia: boolean }
 
-/** Sin carrito de un lado (un cancelado, o una fila sin huella) no hay nada que comparar. */
-const carritosCompatibles = (a: string | null, b: string | null) => a == null || b == null || a === b
 const mismosImportes = (a: Importes, b: Importes) => a.dueCents === b.dueCents && a.saleCents === b.saleCents && a.tipCents === b.tipCents
-const mismaOperacion = (guardado: LoGuardadoDelFolio, importes: Importes, carrito: string | null) =>
-  mismosImportes(guardado, importes) && carritosCompatibles(guardado.huellaDelCarrito, carrito)
+const horaDe = (c: CierreDeLaMaquina): string | null => {
+  if (!c.occurredAtKnown || !c.occurredAt) return null
+  const t = new Date(c.occurredAt).getTime()
+  return Number.isNaN(t) ? null : new Date(t).toISOString()
+}
+/** Lo físico de un cierre (r6-3): GUARDADO y CANCELADO con las mismas cifras NO son lo mismo, ni dos modos de cancelación. */
+const mismoDesenlaceFisico = (a: CierreDeLaMaquina, b: CierreDeLaMaquina) =>
+  a.outcome === b.outcome &&
+  a.creditCents === b.creditCents &&
+  a.changeDispensedCents === b.changeDispensedCents &&
+  (a.cancelMode ?? null) === (b.cancelMode ?? null)
 
-export function decidirEscrituraDelFolio(estado: EstadoDelFolio, pet: PeticionSobreElFolio): DecisionDelFolio {
-  if (pet.que === 'REVISION') {
-    if (pet.kind === 'ESPERANDO') return { accion: 'NO_REVISABLE' }
-    if (pet.versionVista !== pet.versionActual) return { accion: 'CONFLICTO', motivo: 'VERSION' }
-    return pet.status === 'RESUELTO' ? { accion: 'REPETIR', de: 'REVISION' } : { accion: 'REVISAR' }
-  }
-
-  const definitivo = estado.cierre
-    ? { de: 'CIERRE' as const, fila: estado.cierre }
-    : estado.sinRegistro
-      ? { de: 'SIN_REGISTRO' as const, fila: estado.sinRegistro }
-      : null
-  const { duda } = estado
-
+export function decidirSobreElFolio(estado: EstadoDelFolio, pet: PeticionSobreElFolio): DecisionDelFolio {
+  const { folio } = estado
   if (pet.que === 'CONSULTA') {
-    if (definitivo) return { accion: 'REPETIR', de: definitivo.de }
-    // Una duda sin desenlace guardado sigue esperando (nunca se fabrica uno, r1 #6).
-    return duda ? { accion: 'DUDA_ABIERTA' } : { accion: 'NO_EXISTE' }
+    if (estado.terminado) return { accion: 'TERMINADO' }
+    if (folio?.decision) return { accion: 'RECIBIDO' }
+    return estado.duda ? { accion: 'DUDA_ABIERTA' } : { accion: 'NO_EXISTE' }
   }
 
-  const { deviceId } = pet.quien
-  const revocadaEn = pet.quien.tipo === 'PC' ? pet.quien.revocadaEn : null
+  // r6-4: el gerente resuelve con la evidencia que VIO; su repetición exacta (ya en el historial) no necesita volver a verla.
+  if (pet.que === 'CIERRE' && pet.origen === 'GERENTE' && !pet.repeticion && pet.versionVista !== (folio?.version ?? 1)) {
+    return { accion: 'VERSION' }
+  }
+  // D3: el folio es de la PC que lo subió primero; el gerente actúa sobre el de esa PC.
+  const deviceId = pet.que === 'DUDA' || pet.origen === 'PC' ? pet.deviceId : null
+  if (folio && (pet.que === 'DUDA' || pet.origen === 'PC') && folio.deviceId !== deviceId) {
+    return { accion: 'CONFLICTO', motivo: 'OTRA_PC' }
+  }
+  const importes = pet.que === 'DUDA' ? pet.importes : pet.cierre
+  if (folio && !mismosImportes(folio, importes)) return { accion: 'CONFLICTO', motivo: 'OTRA_EVIDENCIA' }
+  // D2: otro carrito o turno se anota; nunca sustituye lo congelado. El gerente no manda carrito ni turno.
+  const recibido = pet.que === 'DUDA' || pet.origen === 'PC' ? pet : null
+  const discrepanciaDeLoCongelado =
+    !!folio && !!recibido && (recibido.carritoRecibido !== folio.cartHash || recibido.turnoRecibido !== folio.saleShiftId)
 
   if (pet.que === 'DUDA') {
-    if (duda && duda.deviceId !== deviceId) return { accion: 'CONFLICTO', motivo: 'OTRA_PC' }
-    if (definitivo && definitivo.fila.deviceId !== deviceId) return { accion: 'CONFLICTO', motivo: 'OTRA_PC' }
-    // La evidencia de la PC es SU duda; sin ella, lo definitivo que ella misma guardó.
-    const suyo = duda ?? definitivo?.fila
-    if (suyo && !mismaOperacion(suyo, pet.importes, pet.huellaDelCarrito)) return { accion: 'CONFLICTO', motivo: 'OTRA_EVIDENCIA' }
-    if (definitivo) return { accion: 'REPETIR', de: definitivo.de }
-    if (duda) return duda.abierta ? { accion: 'DUDA_ABIERTA' } : { accion: 'CONFLICTO', motivo: 'DUDA_CERRADA' }
-    return { accion: 'ABRIR_DUDA', trasRevocar: revocadaEn !== null }
+    // r6-2: una duda nunca se vuelve desenlace; si el folio ya tiene uno, contesta ése.
+    if (!folio) return { accion: 'ABRIR_DUDA', trasRevocar: pet.revocadaEn !== null }
+    return { accion: 'SEGUIR', discrepancia: discrepanciaDeLoCongelado }
   }
 
-  // CIERRE: la PC sube su cierre, o el gerente resuelve la duda de esa PC.
-  if (definitivo) {
-    if (definitivo.fila.deviceId !== deviceId) return { accion: 'CONFLICTO', motivo: 'OTRA_PC' }
-    const igual =
-      definitivo.fila.huella === pet.evidencia.huella &&
-      carritosCompatibles(definitivo.fila.huellaDelCarrito, pet.evidencia.huellaDelCarrito)
-    return igual ? { accion: 'REPETIR', de: definitivo.de } : { accion: 'CONFLICTO', motivo: 'OTRA_EVIDENCIA' }
+  if (folio?.decision) {
+    if (!mismoDesenlaceFisico(folio.decision.cierre, pet.cierre)) return { accion: 'CONFLICTO', motivo: 'OTRA_EVIDENCIA' }
+    // r3 #10: la hora física que faltaba (o una distinta) se agrega a revisión, sin tocar lo ya asentado.
+    const otraHora = horaDe(folio.decision.cierre) !== horaDe(pet.cierre)
+    return { accion: 'SEGUIR', discrepancia: discrepanciaDeLoCongelado || otraHora }
   }
-  if (duda) {
-    if (duda.deviceId !== deviceId) return { accion: 'CONFLICTO', motivo: 'OTRA_PC' }
-    if (!duda.abierta) return { accion: 'CONFLICTO', motivo: 'DUDA_CERRADA' }
-    if (!mismaOperacion(duda, pet.importes, pet.evidencia.huellaDelCarrito)) return { accion: 'CONFLICTO', motivo: 'OTRA_EVIDENCIA' }
+
+  // Este cierre es el desenlace. La PC revocada (r6-6, con su emparejamiento FIJO): lo cobrado antes de la revocación entra con su
+  // marca; un PAGADO posterior o sin hora deja el dinero sin venta. El gerente no está revocado: él declara.
+  const revocadaEn = pet.origen === 'PC' ? pet.revocadaEn : null
+  let motivoSinVenta: 'PC_REVOCADA' | null = null
+  if (revocadaEn && pet.cierre.outcome === 'PAGADO') {
+    const hora = horaDe(pet.cierre)
+    if (hora === null || new Date(hora) > revocadaEn) motivoSinVenta = 'PC_REVOCADA'
   }
-  const trasRevocar = revocadaEn !== null
-  if (revocadaEn && pet.outcome === 'PAGADO') {
-    const antes = pet.horaDelComprobante !== null && pet.horaDelComprobante <= revocadaEn
-    if (!antes) return { accion: 'SIN_REGISTRO', motivo: 'PC_REVOCADA', trasRevocar }
-  }
-  if (pet.outcome === 'PAGADO' && pet.motivoSinVenta) return { accion: 'SIN_REGISTRO', motivo: pet.motivoSinVenta, trasRevocar }
-  return { accion: 'REGISTRAR', trasRevocar }
+  return { accion: 'ACEPTAR', trasRevocar: revocadaEn !== null, motivoSinVenta, discrepancia: discrepanciaDeLoCongelado }
 }
 
 /**
- * La evidencia de una incidencia que NO es duda (r2 #8): `eventos` guarda el PRIMERO y, con el tope lleno, reemplaza el último por el
- * más nuevo (el «último» siempre es el último real). Una entrega IDÉNTICA a la última (la PC reintenta el mismo 409; sólo cambia la hora
- * de llegada) no es evidencia nueva: cuenta en `veces` y `repetidas`, pero no sube `version` ni reabre la fila. Todo lo demás del
- * payload —la revisión y su historia— se conserva. Quien llama tiene el candado del folio (lee y escribe sin perder entregas).
+ * r6-3: la huella de una observación física. Entra todo lo que la distingue — qué fue (cierre, duda o importes imposibles), el origen
+ * (PC o gerente, con el aparato y el emparejamiento de la PC), el desenlace y su modo de cancelación, los importes, la hora física,
+ * `lastSeen`, el turno y el carrito recibidos y el carrito congelado —. Fuera: la hora de llegada y quién de la sesión lo mandó (dos
+ * gerentes que declaran lo mismo son UNA observación).
  */
-export const TOPE_DE_EVENTOS = 50
+export function huellaDeLaObservacion(observacion: Record<string, unknown>): string {
+  const { recibidoEn: _llegada, userId: _sesion, ...lo } = observacion
+  return operationHash(lo)
+}
 
-export function acumularEvento(previo: unknown, evento: Record<string, unknown>): { payload: Record<string, unknown>; nueva: boolean } {
-  const { recibidoEn: _hora, ...contenido } = evento
-  const ultimaHuella = operationHash(contenido)
-  if (!previo || typeof previo !== 'object') {
-    return { payload: { eventos: [evento], veces: 1, version: 1, repetidas: 0, ultimaHuella }, nueva: true }
-  }
+/**
+ * La evidencia de una incidencia que NO es duda. La historia completa vive en `CashMachineObservation`; aquí sólo la primera y la
+ * última entrega (lo que enseña la bandeja), cuántas veces llegó, cuántas fueron retransmisiones y la `version` que confirma la
+ * revisión. `nueva` lo dice la huella contra TODO el historial (no la última entrega): una retransmisión no sube la versión ni reabre.
+ */
+export function acumularEnLaIncidencia(previo: unknown, evento: Record<string, unknown>, nueva: boolean): Record<string, unknown> {
+  if (!previo || typeof previo !== 'object') return { eventos: [evento], veces: 1, repetidas: nueva ? 0 : 1, version: 1 }
   const p = previo as Record<string, unknown> & { eventos?: unknown; veces?: number; version?: number; repetidas?: number }
   const eventos = Array.isArray(p.eventos) ? (p.eventos as unknown[]) : []
-  const veces = (typeof p.veces === 'number' ? p.veces : eventos.length) + 1
-  if (p.ultimaHuella === ultimaHuella) {
-    return { payload: { ...p, veces, repetidas: (p.repetidas ?? 0) + 1 }, nueva: false }
-  }
-  const siguientes = eventos.length < TOPE_DE_EVENTOS ? [...eventos, evento] : [...eventos.slice(0, TOPE_DE_EVENTOS - 1), evento]
   return {
-    payload: { ...p, eventos: siguientes, veces, version: (p.version ?? 1) + 1, repetidas: p.repetidas ?? 0, ultimaHuella },
-    nueva: true,
+    ...p,
+    eventos: nueva ? [eventos[0] ?? evento, evento] : eventos,
+    veces: (typeof p.veces === 'number' ? p.veces : eventos.length) + 1,
+    repetidas: (p.repetidas ?? 0) + (nueva ? 0 : 1),
+    version: (p.version ?? 1) + (nueva ? 1 : 0),
   }
 }
 

@@ -11,9 +11,8 @@ import crypto from 'crypto'
 
 import AppError from '../../errors/AppError'
 import { ACCESS_TOKEN_SECRET } from '../../config/env'
-import { operationHash } from '../../utils/operationHash'
 import { cotizarVentaDeMostrador, type CreateOrderInput } from '../mobile/order.mobile.service'
-import { motivoSinVentaDelPedido } from './ventaDeLaMaquina'
+import { huellaDelCarritoCompleto, motivoSinVentaDelPedido } from './ventaDeLaMaquina'
 
 export const VIGENCIA_DE_LA_COTIZACION_MS = 10 * 60_000
 
@@ -135,7 +134,9 @@ export async function cotizarParaLaMaquina(
     aCentavos(venta.descuento) > 0 ? 'DESCUENTO' : totalCents <= 0 ? 'SIN_IMPORTE' : totalCents % 50 !== 0 ? 'CENTAVOS' : undefined
   const expiresAtMs = Date.now() + VIGENCIA_DE_LA_COTIZACION_MS
   return {
-    quoteId: motivo ? null : firmarCotizacion({ v: 1, ve: venueId, h: operationHash(opciones.carrito), t: totalCents, e: expiresAtMs }),
+    quoteId: motivo
+      ? null
+      : firmarCotizacion({ v: 1, ve: venueId, h: huellaDelCarritoCompleto(opciones.carrito) ?? '', t: totalCents, e: expiresAtMs }),
     expiresAt: motivo ? null : new Date(expiresAtMs).toISOString(),
     totalCents,
     saleCents,
