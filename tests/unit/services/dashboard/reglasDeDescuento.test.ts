@@ -7,6 +7,7 @@ import {
   dondeEscribir,
   FORMA_INVALIDA,
   LIMITE_INVALIDO,
+  RANGO_AL_REVES,
   SIN_CATEGORIAS,
   validarCambioDeDescuento,
 } from '../../../../src/services/dashboard/reglasDeDescuento'
@@ -94,6 +95,45 @@ describe('validarCambioDeDescuento · familia B (límites de uso)', () => {
     expect(validarCambioDeDescuento(null, { maxUses: 0 })).toBe(LIMITE_INVALIDO)
     expect(validarCambioDeDescuento(cupon, { maxUsesPerCustomer: -1 })).toBe(LIMITE_INVALIDO)
     expect(validarCambioDeDescuento({ maxUses: 0, maxUsesPerCustomer: null }, { maxUses: 0 })).toBeNull() // ANDROID reenvía el 0 viejo
+  })
+})
+
+describe('validarCambioDeDescuento · familia C (vigencia, D37)', () => {
+  const d = (iso: string) => new Date(iso)
+  const del18al20 = guardado({ validFrom: d('2026-12-18T06:00:00.000Z'), validUntil: d('2026-12-21T05:59:59.999Z') })
+
+  it('crear con «desde» después de «hasta»: no; igual, antes o con una sola fecha: sí', () => {
+    expect(validarCambioDeDescuento(null, { validFrom: d('2026-12-20T06:00:00Z'), validUntil: d('2026-12-13T05:59:59Z') })).toBe(
+      RANGO_AL_REVES,
+    )
+    expect(validarCambioDeDescuento(null, { validFrom: d('2026-12-01T06:00:00Z'), validUntil: d('2026-12-02T05:59:59Z') })).toBeNull()
+    expect(validarCambioDeDescuento(null, { validUntil: d('2026-12-02T05:59:59Z') })).toBeNull()
+    expect(validarCambioDeDescuento(null, {})).toBeNull()
+  })
+
+  it('🔴 Codex D37 r1 #3 y r2 #2: editar SÓLO una fecha mira el resultado con la otra guardada (dos encargados a la vez)', () => {
+    // A ya movió el inicio al 18; B, con su formulario viejo, adelanta el fin al 12 → quedaría del 18 al 12: no.
+    expect(validarCambioDeDescuento(del18al20, { validUntil: d('2026-12-13T05:59:59.999Z') })).toBe(RANGO_AL_REVES)
+    expect(validarCambioDeDescuento(del18al20, { validFrom: d('2026-12-25T06:00:00.000Z') })).toBe(RANGO_AL_REVES)
+    expect(validarCambioDeDescuento(del18al20, { validUntil: d('2026-12-30T05:59:59.999Z') })).toBeNull()
+  })
+
+  it('las apps mandan texto: se lee igual; vacío o null quita la fecha', () => {
+    expect(validarCambioDeDescuento(del18al20, { validUntil: '2026-12-12' })).toBe(RANGO_AL_REVES)
+    expect(validarCambioDeDescuento(del18al20, { validFrom: null, validUntil: '2026-12-12' })).toBeNull()
+    expect(validarCambioDeDescuento(del18al20, { validFrom: '', validUntil: '2026-12-12' })).toBeNull()
+  })
+
+  it('uno viejo que YA está al revés: editar otra cosa sí; mandarle fechas que lo dejan al revés, no', () => {
+    const alReves = guardado({ validFrom: d('2026-12-20T06:00:00Z'), validUntil: d('2026-12-13T05:59:59Z') })
+    expect(validarCambioDeDescuento(alReves, { maxTotalUses: 5 })).toBeNull()
+    expect(validarCambioDeDescuento(alReves, { validUntil: d('2026-12-14T05:59:59Z') })).toBe(RANGO_AL_REVES)
+    expect(validarCambioDeDescuento(alReves, { validUntil: d('2026-12-31T05:59:59Z') })).toBeNull()
+  })
+
+  it('«Duplicar» (crear desde una copia) uno al revés: no', () => {
+    const alReves = guardado({ validFrom: d('2026-12-20T06:00:00Z'), validUntil: d('2026-12-13T05:59:59Z') })
+    expect(validarCambioDeDescuento(null, alReves)).toBe(RANGO_AL_REVES)
   })
 })
 

@@ -6,6 +6,9 @@
  * Mira el RESULTADO (lo guardado + el cambio), no el cambio suelto. Crear y duplicar = sin guardado.
  * - Familia A: «Categorías» sin ninguna categoría no nace ni queda; uno viejo que YA está exactamente así se conserva.
  * - Familia B: cada límite de uso es null (sin límite) o un entero de 1 en adelante; un valor viejo idéntico se conserva.
+ * - Familia C (D37, 21-nov): «Válido desde» no queda después de «Válido hasta». El panel manda sólo la fecha que se cambió, así que
+ *   con la otra guardada (quizá por otra persona en medio) el resultado podía quedar al revés y el cupón nunca aplicaba. Uno viejo
+ *   que YA está así se conserva mientras no se le manden fechas.
  */
 import { DiscountScope } from '@prisma/client'
 
@@ -13,12 +16,24 @@ export const SIN_CATEGORIAS = 'Elige al menos una categoría para un descuento p
 export const LIMITE_INVALIDO = 'Los límites de uso van de 1 en adelante; déjalo vacío para que sea ilimitado'
 export const FORMA_INVALIDA = 'El alcance, las categorías o los límites de uso no tienen el formato correcto'
 export const CAMBIO_CRUZADO = 'Alguien más lo cambió mientras lo editabas; vuelve a abrirlo e inténtalo otra vez'
+export const RANGO_AL_REVES =
+  '«Válido desde» tiene que ser antes de «Válido hasta». Revisa las fechas (si alguien más las cambió, vuelve a abrirlo)'
 
 const LIMITES = ['maxTotalUses', 'maxUsesPerCustomer', 'maxUses'] as const
 const REGLA = ['scope', 'targetCategoryIds', ...LIMITES] as const
 const ALCANCES = new Set<unknown>(Object.values(DiscountScope))
 
-type Guardado = Partial<Record<(typeof REGLA)[number], unknown>>
+const FECHAS = ['validFrom', 'validUntil'] as const
+
+type Guardado = Partial<Record<(typeof REGLA)[number] | (typeof FECHAS)[number], unknown>>
+
+/** Un extremo de la vigencia en ms: Date (Zod), texto (apps) o null/'' (sin fecha). undefined = el cambio no lo trae. */
+const instante = (v: unknown): number | null | undefined => {
+  if (v === undefined) return undefined
+  if (v === null || v === '') return null
+  const ms = (v instanceof Date ? v : new Date(String(v))).getTime()
+  return Number.isNaN(ms) ? null : ms // lo ilegible lo rechaza su propia validación, no ésta
+}
 
 const sinCategorias = (scope: unknown, categorias: unknown) =>
   scope === 'CATEGORY' && (!Array.isArray(categorias) || categorias.length === 0)
@@ -41,6 +56,19 @@ export function validarCambioDeDescuento(guardado: Guardado | null, cambio: Reco
     if (valor === undefined || valor === null) continue
     if (guardado && guardado[campo] === valor) continue // un 0 viejo reenviado igual
     if (!(typeof valor === 'number' && Number.isInteger(valor) && valor >= 1)) return LIMITE_INVALIDO
+  }
+
+  // Familia C: el resultado (lo que trae el cambio y, si no, lo guardado). Crear y duplicar siempre; editar sólo si trae fechas.
+  // ponytail: sin protección de dos ediciones para las fechas (`dondeEscribir`): la ventana entre leer y escribir es de milisegundos
+  // y la que importa (un formulario abierto minutos) la cubre esta revisión del resultado.
+  if (!guardado || FECHAS.some(campo => cambio[campo] !== undefined)) {
+    const final = (campo: (typeof FECHAS)[number]) => {
+      const nuevo = instante(cambio[campo])
+      return nuevo !== undefined ? nuevo : (instante(guardado?.[campo] ?? null) ?? null)
+    }
+    const desde = final('validFrom')
+    const hasta = final('validUntil')
+    if (desde !== null && hasta !== null && desde > hasta) return RANGO_AL_REVES
   }
   return null
 }

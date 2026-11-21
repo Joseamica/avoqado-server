@@ -304,7 +304,12 @@ export async function createCouponCode(venueId: string, data: CreateCouponCodeRe
   if (!discount) {
     throw new NotFoundError('El descuento no existe')
   }
-  const invalido = validarCambioDeDescuento(null, { maxUses: data.maxUses, maxUsesPerCustomer: data.maxUsesPerCustomer })
+  const invalido = validarCambioDeDescuento(null, {
+    maxUses: data.maxUses,
+    maxUsesPerCustomer: data.maxUsesPerCustomer,
+    validFrom: data.validFrom,
+    validUntil: data.validUntil,
+  })
   if (invalido) throw new BadRequestError(invalido)
 
   // Normalize code to uppercase
@@ -391,7 +396,7 @@ export async function updateCouponCode(venueId: string, couponId: string, data: 
     throw new NotFoundError('El cupón no existe')
   }
   const cambio = { maxUses: data.maxUses, maxUsesPerCustomer: data.maxUsesPerCustomer }
-  const invalido = validarCambioDeDescuento(existing, cambio)
+  const invalido = validarCambioDeDescuento(existing, { ...cambio, validFrom: data.validFrom, validUntil: data.validUntil })
   if (invalido) throw new BadRequestError(invalido)
 
   // If updating code, normalize and check uniqueness
@@ -532,7 +537,12 @@ export async function bulkGenerateCouponCodes(venueId: string, data: BulkGenerat
   if (!discount) {
     throw new NotFoundError('El descuento no existe')
   }
-  const invalido = validarCambioDeDescuento(null, { maxUses: data.maxUsesPerCode, maxUsesPerCustomer: data.maxUsesPerCustomer })
+  const invalido = validarCambioDeDescuento(null, {
+    maxUses: data.maxUsesPerCode,
+    maxUsesPerCustomer: data.maxUsesPerCustomer,
+    validFrom: data.validFrom,
+    validUntil: data.validUntil,
+  })
   if (invalido) throw new BadRequestError(invalido)
 
   if (data.quantity < 1 || data.quantity > 1000) {
