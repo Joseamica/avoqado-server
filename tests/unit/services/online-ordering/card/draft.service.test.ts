@@ -1000,4 +1000,57 @@ describe('D661 · el borrador de tarjeta en «Nadie»: sesión, teléfono verifi
     await createCardOnlineDraft(input({ customerId: null, idempotencyKey: 'm'.repeat(32) }), PUEDE_CREAR)
     expect(creados()[2].request).not.toHaveProperty('cierreDeFranja')
   })
+
+  /** El texto de una llamada a `$queryRaw` (plantilla). */
+  const sqlDe = (llamada: any[]) => (Array.isArray(llamada[0]) ? llamada[0].join('?') : '')
+  const candadoDeAjustes = () =>
+    ((prismaMock.$queryRaw as jest.Mock).mock.calls as any[][]).findIndex(
+      l => sqlDe(l).includes('FROM "OnlineOrderingSettings"') && sqlDe(l).includes('FOR UPDATE'),
+    )
+
+  it('D661 · A (Ruling 72): la única caja recibe la respuesta lenta (apaga su marca rápida) MIENTRAS se cotiza → 400 CARD_PAYMENT_NOT_ACCEPTED y nada se escribe; la fila de ajustes se toma bajo candado ANTES de releer', async () => {
+    let marcaApagada = false
+    prismaMock.onlineOrderingSettings.findUnique.mockImplementation((async () => ({
+      ...NADIE(),
+      cardAlertFastPollAt: marcaApagada ? null : new Date(Date.now() - 30_000),
+    })) as any)
+    ;(quoteCart as jest.Mock).mockImplementationOnce(async () => {
+      marcaApagada = true // la revisión del POST ya pasó; la caja sondea, recibe 600 s y apaga su marca
+      return QUOTE_OK
+    })
+    await expect(createCardOnlineDraft(nadie(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 400, code: 'CARD_PAYMENT_NOT_ACCEPTED' })
+    expect(cargos).toHaveLength(0)
+    expect(createAuthorizationCheckout).not.toHaveBeenCalled()
+    // La fila que escribe el latido, bajo candado dentro de la transacción del borrador, y DESPUÉS la relectura (la 3.ª lectura de ajustes:
+    // las dos primeras son las de la revisión de siempre).
+    const candado = candadoDeAjustes()
+    expect(candado).toBeGreaterThanOrEqual(0)
+    const lecturas = prismaMock.onlineOrderingSettings.findUnique.mock.invocationCallOrder
+    expect(lecturas.length).toBeGreaterThanOrEqual(3)
+    expect((prismaMock.$queryRaw as jest.Mock).mock.invocationCallOrder[candado]).toBeLessThan(lecturas[2])
+    expect((prismaMock.$queryRaw as jest.Mock).mock.invocationCallOrder[candado]).toBeGreaterThan(lecturas[1])
+  })
+
+  it('D661 · A (Ruling 72): la tienda pasó a «Mi equipo» (con su tarjeta prendida) entre la revisión y la escritura → tampoco nace el borrador de «Nadie»', async () => {
+    let miEquipo = false
+    prismaMock.onlineOrderingSettings.findUnique.mockImplementation((async () => (miEquipo ? MI_EQUIPO : NADIE())) as any)
+    ;(quoteCart as jest.Mock).mockImplementationOnce(async () => {
+      miEquipo = true
+      return QUOTE_OK
+    })
+    await expect(createCardOnlineDraft(nadie(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 400, code: 'CARD_PAYMENT_NOT_ACCEPTED' })
+    expect(cargos).toHaveLength(0)
+    expect(createAuthorizationCheckout).not.toHaveBeenCalled()
+  })
+
+  it('D661 · A (Ruling 72): con la caja a tiempo todo el camino, nace como hoy (la relectura bajo candado sí pasa); «Mi equipo» no la toma', async () => {
+    await expect(createCardOnlineDraft(nadie(), PUEDE_CREAR)).resolves.toMatchObject({ status: 'AWAITING_PAYMENT', replay: false })
+    expect(candadoDeAjustes()).toBeGreaterThanOrEqual(0)
+    ;(prismaMock.$queryRaw as jest.Mock).mockClear()
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(MI_EQUIPO as any)
+    await expect(createCardOnlineDraft(input({ customerId: null, idempotencyKey: 'm'.repeat(32) }), PUEDE_CREAR)).resolves.toMatchObject({
+      replay: false,
+    })
+    expect(candadoDeAjustes()).toBe(-1)
+  })
 })

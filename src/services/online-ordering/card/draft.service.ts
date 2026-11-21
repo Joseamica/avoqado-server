@@ -447,6 +447,15 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
 
       await lockAdmission(tx, venueId)
       if (enNadie) {
+        // D661 (Ruling 72): entre la revisión y esta escritura la única caja pudo recibir la respuesta lenta (que apaga su marca rápida)
+        // o la tienda cambiar de modo. Bajo el candado de la fila que esos latidos escriben se repite la MISMA regla de `/info`: sigue en
+        // «Nadie», con su tarjeta prendida y una caja que avisa a tiempo; si no, el 400 de siempre y no se escribe nada.
+        await tx.$queryRaw`SELECT 1 FROM "OnlineOrderingSettings" WHERE "venueId" = ${venueId} FOR UPDATE`
+        const vigente = await tx.onlineOrderingSettings.findUnique({
+          where: { venueId },
+          select: { acceptsCardOnline: true, requiresAcceptance: true, cardOnlineNadie: true },
+        })
+        if (!vigente || vigente.requiresAcceptance !== false || !(await cardOnlineAvailable(vigente, tx, venueId))) throw notAccepted()
         await admitirTarjetaEnNadie(tx, venueId, clienta!) // con `enNadie`, la sesión ya se exigió al validar
       } else {
         // Topes de «Mi equipo»: pedidos por aceptar MÁS borradores con su sesión vigente. El teléfono ya se exigió al validar.

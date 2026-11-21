@@ -28,6 +28,7 @@ import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { listInbox } from '@/services/online-ordering/inbox.service'
 import { closesAt } from '@/services/online-ordering/hours'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
+import * as cotizacion from '@/services/online-ordering/quote.service'
 import { getTrackingByToken, lockAdmission } from '@/services/online-ordering/order.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
 import { acceptOnlineOrder, rejectOnlineOrder } from '@/services/online-ordering/transitions.service'
@@ -1129,6 +1130,36 @@ describe('D661 · 3A y 3B: confirmar → apartado; abrir = cobrar; vencer y libe
     expect((await sondeo()).pollSeconds).toBe(600)
     expect((await ajustes()).cardAlertFastPollAt).toBeNull()
     await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { requiresAcceptance: false } })
+  })
+
+  // ── Ronda codex-r3 (21-nov) ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('D661 · A (Ruling 72): la única caja recibe la respuesta lenta MIENTRAS se cotiza un borrador de «Nadie» → no nace (400 CARD_PAYMENT_NOT_ACCEPTED, nada escrito); con la caja otra vez a tiempo, sí', async () => {
+    __resetCardAlertPollDebounceForTests()
+    await sinNadaVivo()
+    const ajustes = () => prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })
+    expect((await sondeo()).pollSeconds).toBe(30) // la marca rápida, puesta: la tienda ofrece la tarjeta
+    const cotizar = cotizacion.quoteCart
+    const pausa = jest.spyOn(cotizacion, 'quoteCart').mockImplementationOnce(async (...a: Parameters<typeof cotizacion.quoteCart>) => {
+      // El POST ya pasó su revisión de la caja. Un momento en «Mi equipo»: la única caja sondea, recibe 600 s y apaga su marca rápida.
+      await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { requiresAcceptance: true } })
+      expect((await sondeo()).pollSeconds).toBe(600)
+      await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { requiresAcceptance: false } })
+      return cotizar(...a)
+    })
+    checkoutSpy.mockClear()
+    const antes = await prisma.onlineOrderCharge.count({ where: { venueId: venueId! } })
+    try {
+      await expect(borrador()).rejects.toMatchObject({ statusCode: 400, code: 'CARD_PAYMENT_NOT_ACCEPTED' })
+    } finally {
+      pausa.mockRestore()
+    }
+    expect(await prisma.onlineOrderCharge.count({ where: { venueId: venueId! } })).toBe(antes)
+    expect(checkoutSpy).not.toHaveBeenCalled()
+    expect((await ajustes()).cardAlertFastPollAt).toBeNull()
+    // La caja vuelve a sondear con la tienda en «Nadie»: 30 s, la marca regresa y el borrador sí nace.
+    expect((await sondeo()).pollSeconds).toBe(30)
+    await expect(borrador()).resolves.toMatchObject({ status: 'AWAITING_PAYMENT', replay: false })
   })
 
   it('D661 · E (Ruling 40): sin la cabecera, la caja vieja que tenía el reclamo vencido lo repite (posibleRepetida:true); otra caja vieja, no; con la cabecera, como hoy', async () => {
