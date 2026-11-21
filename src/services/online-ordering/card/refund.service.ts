@@ -802,31 +802,46 @@ type Solicitud = CardRefundRequest & { amountCents: number; note: string | null;
 const DEVOLUCION_VIVA_EN_STRIPE = new Set<RefundState['status']>(['PENDING', 'SUCCEEDED'])
 
 /**
- * D661 (Task 6, Ruling 28): ¿alguien devolvió este cargo por fuera de Avoqado (directo en Stripe)? Sí, si Stripe tiene una devolución
- * viva (hecha o pendiente) que no es de las filas de ESTE cargo, o si lo devuelto según el cargo pasa de lo que suman las nuestras.
+ * D661 (Task 6, Ruling 28): cuánto devolvió Stripe de este cargo por fuera de Avoqado (directo en Stripe), en centavos: sus
+ * devoluciones vivas (hechas o pendientes) que no son de las filas de ESTE cargo, más lo que `amount_refunded` traiga por encima de
+ * TODAS las listadas (la lista viene completa). D668: «todas», también las fallidas y canceladas: Stripe no documenta si
+ * `amount_refunded` descuenta una devolución que falló, y si la siguiera sumando cada devolución revertida se leería «por fuera».
  */
-export function hayDevolucionPorFuera(estado: ChargeRefunds, nuestras: ReadonlySet<string>): boolean {
-  let nuestrasCents = 0
+function devueltoPorFueraCents(estado: ChargeRefunds, nuestras: ReadonlySet<string>): number {
+  let ajenasVivas = 0
+  let listadas = 0
   for (const r of estado.refunds) {
-    if (!DEVOLUCION_VIVA_EN_STRIPE.has(r.status)) continue
-    if (r.metadata?.type !== 'online_order_refund' || !nuestras.has(r.metadata.cardRefundId)) return true
-    nuestrasCents += r.amountCents
+    listadas += r.amountCents
+    const nuestra = r.metadata?.type === 'online_order_refund' && nuestras.has(r.metadata.cardRefundId)
+    if (DEVOLUCION_VIVA_EN_STRIPE.has(r.status) && !nuestra) ajenasVivas += r.amountCents
   }
-  return estado.amountRefundedCents > nuestrasCents
+  return ajenasVivas + Math.max(0, estado.amountRefundedCents - listadas)
 }
+
+/** D661 (Task 6, Ruling 28): ¿alguien devolvió este cargo por fuera de Avoqado (directo en Stripe)? */
+export function hayDevolucionPorFuera(estado: ChargeRefunds, nuestras: ReadonlySet<string>): boolean {
+  return devueltoPorFueraCents(estado, nuestras) > 0
+}
+
+const MENSAJE_POR_FUERA =
+  'Este cobro ya tiene una devolución hecha fuera de Avoqado, directo en Stripe: termínala desde Stripe. Aquí no se devolvió ni se abonó nada.'
 
 /**
  * D661 (Task 6, Ruling 28): fuera de toda transacción, antes de devolver un pedido «Nadie» a cualquier destino, se lee el cargo en
  * Stripe. Con una devolución hecha por fuera → 409 y nada se reserva, abona ni manda. Si Stripe no contesta, falla cerrado con un error
- * que se puede reintentar: nunca se abona sobre una lectura que no contestó.
+ * que se puede reintentar: nunca se abona sobre una lectura que no contestó. D668: también antes de «Devolver por otro medio»
+ * (`mensaje` recibe lo devuelto por fuera, en pesos).
  */
-async function exigirSinDevolucionPorFuera(charge: {
-  id: string
-  venueId: string
-  paymentIntentId: string
-  ecommerceMerchantId: string
-  merchantSnapshot: Prisma.JsonValue
-}): Promise<void> {
+async function exigirSinDevolucionPorFuera(
+  charge: {
+    id: string
+    venueId: string
+    paymentIntentId: string
+    ecommerceMerchantId: string
+    merchantSnapshot: Prisma.JsonValue
+  },
+  mensaje: (porFuera: string) => string = () => MENSAJE_POR_FUERA,
+): Promise<void> {
   const merchant = chargeMerchant(charge)
   let estado: ChargeRefunds
   try {
@@ -846,16 +861,15 @@ async function exigirSinDevolucionPorFuera(charge: {
     select: { id: true },
     take: 50, // un cargo real trae un puñado; si no cupieran, alguna se leería «de fuera» y se frena (cerrado)
   })
-  if (!hayDevolucionPorFuera(estado, new Set(nuestras.map(r => r.id)))) return
+  const porFuera = devueltoPorFueraCents(estado, new Set(nuestras.map(r => r.id)))
+  if (!porFuera) return
   logger.error('🚨 [OnlineOrderCardRefund] el cargo ya tiene una devolución hecha fuera de Avoqado: no se devuelve otra vez', {
     chargeId: charge.id,
     venueId: charge.venueId,
     amountRefunded: pesos(estado.amountRefundedCents),
+    porFuera: pesos(porFuera),
   })
-  throw new ConflictError(
-    'Este cobro ya tiene una devolución hecha fuera de Avoqado, directo en Stripe: termínala desde Stripe. Aquí no se devolvió ni se abonó nada.',
-    'EXTERNAL_REFUND_DETECTED',
-  )
+  throw new ConflictError(mensaje(pesos(porFuera)), 'EXTERNAL_REFUND_DETECTED')
 }
 
 /**
@@ -1340,6 +1354,9 @@ async function devolverASaldoAFavor(s: Solicitud): Promise<CardRefundResult> {
  * «Devolver por otro medio» (decisión del founder «a»): sólo una devolución `REVERSED` con su reversa sin resolver; repetir es
  * idempotente por `cardRefundId`. En efectivo, la salida de caja va en la MISMA transacción (r5 #2): sin caja abierta, 409 y no se
  * resuelve nada. El REFUND de Stripe no se toca. Ningún otro camino devuelve en efectivo un cobro de tarjeta.
+ * D668: antes, fuera de la transacción, se le pregunta a Stripe (la misma lectura que Ruling 28): si el cargo ya tiene una devolución
+ * hecha por fuera de Avoqado, completa o parcial, no se paga ni se registra nada (409 `EXTERNAL_REFUND_DETECTED`; sin respuesta, 503).
+ * No se cierra sola: Avoqado no sabe si esa devolución es la de esta reversa. Una repetición no le pregunta a Stripe.
  */
 export async function resolveReversedCardRefund(i: {
   venueId: string
@@ -1352,18 +1369,31 @@ export async function resolveReversedCardRefund(i: {
   if (i.method !== 'CASH' && i.method !== 'BANK_TRANSFER') throw new BadRequestError('El método debe ser CASH o BANK_TRANSFER')
   const note = i.note?.trim() || null
   const now = new Date()
+  const filaDeLaDevolucion = { id: i.cardRefundId, venueId: i.venueId, charge: { onlineOrder: { orderId: i.orderId } } }
+  const previa = await prisma.onlineOrderCardRefund.findFirst({ where: filaDeLaDevolucion })
+  const preguntadoAStripe = previa?.status === R.REVERSED
+  if (previa && preguntadoAStripe) {
+    const { charge, paymentIntentId } = await chargeOf(previa)
+    await exigirSinDevolucionPorFuera(
+      { ...charge, paymentIntentId },
+      porFuera =>
+        `Este cobro ya tiene $${porFuera} devueltos directo en Stripe, por fuera de Avoqado: no pagues los $${pesos(previa.amountCents)} otra vez. Revisa en Stripe si al cliente ya le llegó. Aquí no se pagó ni se registró nada.`,
+    )
+  }
   const out = await prisma.$transaction(async tx => {
     if (!(await lockExistingOrderForPayment(tx, { venueId: i.venueId, orderId: i.orderId }))) {
       throw new NotFoundError('Pedido no encontrado')
     }
-    const row = await tx.onlineOrderCardRefund.findFirst({
-      where: { id: i.cardRefundId, venueId: i.venueId, charge: { onlineOrder: { orderId: i.orderId } } },
-    })
+    const row = await tx.onlineOrderCardRefund.findFirst({ where: filaDeLaDevolucion })
     if (!row) throw new NotFoundError('Devolución no encontrada')
     if (row.status === R.RESOLVED) return { replay: true, row }
     const reversa = await tx.onlineOrderCardRefundReversal.findUnique({ where: { cardRefundId: row.id } })
     if (row.status !== R.REVERSED || !reversa || reversa.resolvedAt) {
       throw new ConflictError('Esta devolución no está pendiente de pagarse por otro medio.', 'CARD_REFUND_NOT_REVERSED')
+    }
+    // D668: se volvió REVERSED después de la lectura de arriba, sin preguntarle a Stripe: no se paga a ciegas.
+    if (!preguntadoAStripe) {
+      throw new ConflictError('La devolución cambió mientras se resolvía. Intenta de nuevo.', 'CARD_REFUND_CHANGED')
     }
     const cashDrawerEventId =
       i.method === 'CASH'
