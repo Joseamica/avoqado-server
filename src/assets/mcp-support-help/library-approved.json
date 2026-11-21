@@ -95,7 +95,7 @@
       "requiredPermissions": []
     },
     "android/impresoras/pantalla-de-cocina-sin-internet": {
-      "sha256": "109993b3b0f06c8db83469bc81d2d9f242bd76daa3b046e416418826b3c1c893",
+      "sha256": "450304f69e120b1b2911e7ead88027bdb876975601a87a123738b2d25db29a2f",
       "requiredPermissions": [],
       "featureCode": "KITCHEN_DISPLAY",
       "gateKind": "FEATURE"
@@ -1078,7 +1078,7 @@
       "requiredPermissions": []
     },
     "windows/impresoras/pantalla-de-cocina-sin-internet": {
-      "sha256": "e6c236b95193f6cdfda65a655becf200bff6eda2d4c85c40fdf74f87ab52647d",
+      "sha256": "f6cbfb354d818240e69a9a3e8697c58391da649be352e1ae7b066ab2cd034034",
       "requiredPermissions": [],
       "featureCode": "KITCHEN_DISPLAY",
       "gateKind": "FEATURE"
