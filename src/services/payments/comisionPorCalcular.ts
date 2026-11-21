@@ -17,6 +17,8 @@
 import { PaymentType, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { proyectarComisionYNeto } from './proyeccionMonetaria'
+import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
+import { esMedioDeSaldoAFavor } from '../fiscal/fiscalScope'
 
 export type ComisionPorCalcular = 'PENDIENTE' | 'SIN_CALCULAR'
 
@@ -27,6 +29,7 @@ export interface PagoParaComision {
   feeAmount: Prisma.Decimal | number | string
   netAmount?: Prisma.Decimal | number | string | null
   processorData?: unknown
+  tenderType?: { systemKind: string | null } | null
 }
 
 const objeto = (v: unknown): Record<string, unknown> =>
@@ -46,6 +49,10 @@ export async function comisionesPorCalcular(venueId: string, pagos: PagoParaComi
   const originales = new Set<string>()
   for (const p of pagos) {
     if (esDevolucionContable(p)) {
+      // Codex r1 #2: el crédito de un cambio y la devolución a saldo a favor no regresaron por la tarjeta: nunca llevan costo
+      // negativo (la convergencia los excluye), así que su comisión 0 ya es la final aunque el cobro espere otra devolución.
+      const medio = p.tenderType?.systemKind
+      if (isExchangeCreditTenderKind(medio) || esMedioDeSaldoAFavor(medio)) continue
       const original = objeto(p.processorData).originalPaymentId
       if (typeof original === 'string' && original) {
         duenoDe.set(p.id, original)
@@ -68,7 +75,28 @@ export async function comisionesPorCalcular(venueId: string, pagos: PagoParaComi
     })
     for (const m of marcados) duenosConMarca.add(m.id)
   }
-  const candidatos = pagos.filter(p => duenosConMarca.has(duenoDe.get(p.id) ?? ''))
+  // Codex r1 #1: la marca de una devolución vive en OTRA fila (su cobro). Si la obligación convergió entre que se leyó la
+  // devolución y que se leyó la marca, la marca ya dice «false» pero lo que trae quien pregunta es la comisión provisional. Se
+  // relee la devolución DESPUÉS de la marca: si cambió, se deja para la siguiente corrida (ya con la comisión final).
+  const sinMarca = pagos.filter(p => {
+    const dueno = duenoDe.get(p.id)
+    return dueno !== undefined && dueno !== p.id && !duenosConMarca.has(dueno)
+  })
+  const cambiaron = new Set<string>()
+  if (sinMarca.length > 0) {
+    const porId = new Map(sinMarca.map(p => [p.id, p]))
+    const actuales = await prisma.payment.findMany({
+      where: { venueId, id: { in: [...porId.keys()] } },
+      select: { id: true, feeAmount: true, netAmount: true },
+      take: porId.size,
+      orderBy: { id: 'asc' },
+    })
+    for (const a of actuales) {
+      const leido = porId.get(a.id)!
+      if (a2(a.feeAmount) !== a2(leido.feeAmount) || a2(a.netAmount) !== a2(leido.netAmount)) cambiaron.add(a.id)
+    }
+  }
+  const candidatos = pagos.filter(p => cambiaron.has(p.id) || duenosConMarca.has(duenoDe.get(p.id) ?? ''))
   if (candidatos.length === 0) return new Map()
 
   const costos = await prisma.transactionCost.findMany({
@@ -79,6 +107,7 @@ export async function comisionesPorCalcular(venueId: string, pagos: PagoParaComi
   })
   const costoDe = new Map(costos.map(c => [c.paymentId, c]))
   const pendientes = candidatos.filter(p => {
+    if (cambiaron.has(p.id)) return true
     const costo = costoDe.get(p.id)
     if (!costo) return true
     const { fee, net } = proyectarComisionYNeto(costo.amount, costo.venueChargeAmount, costo.venueFixedFee)

@@ -692,7 +692,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           ? {
               aviso:
                 `${r.pendientesDeCosto} pago(s) con tarjeta todavía esperan que se calcule su comisión: no se postearon para no guardarlos sin ella. ` +
-                'Vuelve a generar en unos minutos y saldrán con la comisión real.' +
+                'Vuelve a generar en unos minutos y saldrán con la comisión real; no cierres el mes hasta que salgan.' +
                 (r.costoSinCalcular > 0
                   ? ` De esos, ${r.costoSinCalcular} tienen el cálculo de la comisión detenido: pide a soporte que lo revise.`
                   : ''),
@@ -1697,7 +1697,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         })),
         ...(statements.some(s => (s._count?.lines ?? 0) > 0)
           ? {
-              nota: 'Algunos depósitos esperan a que se calcule la comisión de un cobro de su día: todavía no se dicen «conciliados» ni «sin conciliar». Se deciden solos al abrir ese estado de cuenta en el panel cuando la comisión ya esté.',
+              nota: 'Algunos depósitos esperan a que se calcule la comisión de un cobro de su día: todavía no se dicen «conciliados» ni «sin conciliar». Se deciden solos al abrir ese estado de cuenta en el panel cuando la comisión ya esté; si siguen esperando después de unos minutos, pide a soporte que revise el cálculo de la comisión.',
             }
           : {}),
       })

@@ -285,26 +285,36 @@ describe('D24 · conciliación bancaria con una devolución cuya comisión está
     const abierto = await getStatementDetail(f.venueId, subida.statementId, f.staffId)
     expect(abierto.matchedCount).toBe(0)
     expect(abierto.lines.map(l => l.costoPendiente)).toEqual([true, true])
+    expect(abierto).toMatchObject({ pendientesDeCosto: 1, costoSinCalcular: 0 })
 
     // La comisión converge.
     expect(await correrEfectos()).toContain(true)
     expect(Number((await pago(refundId)).netAmount)).toBe(-39)
 
-    const decidido = await getStatementDetail(f.venueId, subida.statementId, f.staffId)
-    expect(decidido.matchedCount).toBe(1)
-    expect(decidido.lines.map(l => [l.matchStatus, l.matchedKey, l.costoPendiente])).toEqual([
-      ['MATCHED', hoy(), false],
-      ['UNMATCHED', null, false],
+    // Codex r1 #3: dos aperturas A LA VEZ — las dos enseñan lo decidido y se decide una sola vez.
+    const [decidido, alMismoTiempo] = await Promise.all([
+      getStatementDetail(f.venueId, subida.statementId, f.staffId),
+      getStatementDetail(f.venueId, subida.statementId, f.staffId),
     ])
-    expect(decidido.lines.map(l => Number(l.matchScore))).toEqual([1, 0])
+    for (const vista of [decidido, alMismoTiempo]) {
+      expect(vista.matchedCount).toBe(1)
+      expect(vista.lines.map(l => [l.matchStatus, l.matchedKey, l.costoPendiente])).toEqual([
+        ['MATCHED', hoy(), false],
+        ['UNMATCHED', null, false],
+      ])
+      expect(vista.lines.map(l => Number(l.matchScore))).toEqual([1, 0])
+      expect(vista).not.toHaveProperty('pendientesDeCosto')
+    }
     expect(await prisma.bankStatement.findUnique({ where: { id: subida.statementId }, select: { matchedCount: true } })).toEqual({
       matchedCount: 1,
     })
-    expect(
-      await prisma.activityLog.count({
-        where: { venueId: f.venueId, entityId: subida.statementId, action: 'RECON_PENDING_LINES_DECIDED' },
-      }),
-    ).toBe(1)
+    // La decide el sistema (es la misma sugerencia automática de la subida); la bitácora anota quién abrió.
+    const bitacora = await prisma.activityLog.findMany({
+      where: { venueId: f.venueId, entityId: subida.statementId, action: 'RECON_PENDING_LINES_DECIDED' },
+      select: { staffId: true, data: true },
+      take: 5,
+    })
+    expect(bitacora).toEqual([{ staffId: null, data: { decididas: 2, conciliadas: 1, automatico: true, abiertoPor: f.staffId } }])
 
     // Abrirlo otra vez no cambia nada ni vuelve a registrar.
     const otraVez = await getStatementDetail(f.venueId, subida.statementId, f.staffId)

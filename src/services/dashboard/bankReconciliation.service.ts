@@ -6,6 +6,7 @@ import { formatInVenueTimezone, venueEndOfDay, venueStartOfDay } from '../../uti
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { buildStoragePath, uploadFileToStorage } from '../storage.service'
 import { comisionesPorCalcular } from '../payments/comisionPorCalcular'
+import logger from '../../config/logger'
 
 /**
  * Bank Reconciliation (Conciliación bancaria con IA) — Slice 1 core.
@@ -216,6 +217,7 @@ export async function loadDepositCandidates(
       feeAmount: true,
       netAmount: true,
       processorData: true,
+      tenderType: { select: { systemKind: true } },
       createdAt: true,
       type: true,
       method: true,
@@ -445,7 +447,8 @@ export async function listStatements(venueId: string) {
 /**
  * Detalle de un estado de cuenta + sus líneas. Aislado por tenant. D24: si la subida dejó líneas «por decidir» (un día de su
  * ventana tenía la comisión por calcular), aquí se deciden con los números de hoy; cada línea dice si sigue esperando
- * (`costoPendiente`).
+ * (`costoPendiente`) y, mientras alguna espere, el estado dice cuántos pagos la detienen (`pendientesDeCosto`) y cuántos tienen el
+ * cálculo de la comisión detenido (`costoSinCalcular`: revisar).
  */
 export async function getStatementDetail(venueId: string, statementId: string, staffId: string | null = null) {
   const leer = () =>
@@ -455,22 +458,39 @@ export async function getStatementDetail(venueId: string, statementId: string, s
     })
   let statement = await leer()
   if (!statement) throw new NotFoundError('Estado de cuenta no encontrado')
-  if (statement.lines.some(esPorDecidir) && (await decidirLineasPorDecidir(venueId, statement, staffId))) statement = await leer()
-  if (!statement) throw new NotFoundError('Estado de cuenta no encontrado')
-  return { ...statement, lines: statement.lines.map(l => ({ ...l, costoPendiente: esPorDecidir(l) })) }
+  let espera: { pendientesDeCosto: number; costoSinCalcular: number } | null = null
+  if (statement.lines.some(esPorDecidir)) {
+    try {
+      espera = await decidirLineasPorDecidir(venueId, statement, staffId)
+    } catch (error) {
+      // Abrir el estado de cuenta nunca falla por esto: se enseña lo guardado y la siguiente apertura lo intenta otra vez.
+      logger.warn('[conciliación] No se pudieron decidir las líneas que esperaban su comisión; se muestra lo guardado', {
+        venueId,
+        statementId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+    // Codex r1 #3: SIEMPRE se relee (también si otra apertura simultánea las decidió primero).
+    statement = await leer()
+    if (!statement) throw new NotFoundError('Estado de cuenta no encontrado')
+  }
+  const lines = statement.lines.map(l => ({ ...l, costoPendiente: esPorDecidir(l) }))
+  return { ...statement, lines, ...(espera && lines.some(l => l.costoPendiente) ? espera : {}) }
 }
 
 /**
  * D24: «la siguiente corrida» de la conciliación. Recalcula los depósitos esperados del periodo y decide las líneas «por decidir»
  * contra los días que ya no esperan comisión (y que ninguna otra línea del estado ya concilió). Las que todavía dependen de un día
- * pendiente se quedan igual. Bajo el candado de la fila del estado: dos aperturas a la vez no deciden dos veces. Devuelve si cambió algo.
+ * pendiente se quedan igual. Es el MISMO cálculo automático de la subida (una sugerencia: confirmarla sigue siendo de quien tiene
+ * `accounting:reconcile`); por eso la bitácora la firma el sistema y anota quién abrió. Bajo el candado de la fila del estado: dos
+ * aperturas a la vez no deciden dos veces. Devuelve cuántos pagos del periodo siguen esperando su comisión.
  */
 async function decidirLineasPorDecidir(
   venueId: string,
   statement: { id: string; periodStart: Date | null; periodEnd: Date | null; lineCount: number },
-  staffId: string | null,
-): Promise<boolean> {
-  if (!statement.periodStart || !statement.periodEnd) return false
+  abiertoPor: string | null,
+): Promise<{ pendientesDeCosto: number; costoSinCalcular: number } | null> {
+  if (!statement.periodStart || !statement.periodEnd) return null
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const candidatos = await loadDepositCandidates(
     venueId,
@@ -478,46 +498,54 @@ async function decidirLineasPorDecidir(
     formatDay(statement.periodEnd),
     venue?.timezone || 'America/Mexico_City',
   )
-  return prisma.$transaction(async tx => {
-    await tx.$queryRaw`SELECT id FROM "BankStatement" WHERE id = ${statement.id} AND "venueId" = ${venueId} FOR UPDATE`
-    const lineas = await tx.bankStatementLine.findMany({
-      where: { bankStatementId: statement.id, venueId },
-      orderBy: { rowIndex: 'asc' },
-      take: statement.lineCount, // las líneas de UN estado de cuenta: tantas como se subieron
-    })
-    const porDecidir = lineas.filter(esPorDecidir)
-    if (porDecidir.length === 0) return false
-    const usados = new Set(lineas.filter(l => l.matchStatus === 'MATCHED' || l.matchStatus === 'CONFIRMED').map(l => l.matchedKey))
-    const resultados = matchLines(
-      porDecidir,
-      candidatos.filter(c => !usados.has(c.key)),
-    )
-    let decididas = 0
-    let conciliadas = 0
-    for (const r of resultados) {
-      if (r.porDecidir) continue
-      const linea = porDecidir.find(l => l.rowIndex === r.rowIndex)!
-      await tx.bankStatementLine.update({
-        where: { id: linea.id },
-        data: { matchStatus: r.matchStatus, matchScore: r.matchScore, matchedKey: r.matchedKey },
+  const espera = {
+    pendientesDeCosto: candidatos.reduce((n, c) => n + (c.pendientesDeCosto ?? 0), 0),
+    costoSinCalcular: candidatos.reduce((n, c) => n + (c.costoSinCalcular ?? 0), 0),
+  }
+  await prisma.$transaction(
+    async tx => {
+      await tx.$queryRaw`SELECT id FROM "BankStatement" WHERE id = ${statement.id} AND "venueId" = ${venueId} FOR UPDATE`
+      const lineas = await tx.bankStatementLine.findMany({
+        where: { bankStatementId: statement.id, venueId },
+        orderBy: { rowIndex: 'asc' },
+        take: statement.lineCount, // las líneas de UN estado de cuenta: tantas como se subieron
       })
-      decididas++
-      if (r.matchStatus === 'MATCHED') conciliadas++
-    }
-    if (decididas === 0) return false
-    if (conciliadas > 0) await tx.bankStatement.update({ where: { id: statement.id }, data: { matchedCount: { increment: conciliadas } } })
-    await tx.activityLog.create({
-      data: {
-        action: 'RECON_PENDING_LINES_DECIDED',
-        entity: 'BankStatement',
-        entityId: statement.id,
-        staffId,
-        venueId,
-        data: { decididas, conciliadas },
-      },
-    })
-    return true
-  })
+      const porDecidir = lineas.filter(esPorDecidir)
+      if (porDecidir.length === 0) return
+      const usados = new Set(lineas.filter(l => l.matchStatus === 'MATCHED' || l.matchStatus === 'CONFIRMED').map(l => l.matchedKey))
+      const resultados = matchLines(
+        porDecidir,
+        candidatos.filter(c => !usados.has(c.key)),
+      )
+      const idDe = new Map(porDecidir.map(l => [l.rowIndex, l.id]))
+      let decididas = 0
+      let conciliadas = 0
+      for (const r of resultados) {
+        if (r.porDecidir) continue
+        await tx.bankStatementLine.update({
+          where: { id: idDe.get(r.rowIndex)! },
+          data: { matchStatus: r.matchStatus, matchScore: r.matchScore, matchedKey: r.matchedKey },
+        })
+        decididas++
+        if (r.matchStatus === 'MATCHED') conciliadas++
+      }
+      if (decididas === 0) return
+      if (conciliadas > 0)
+        await tx.bankStatement.update({ where: { id: statement.id }, data: { matchedCount: { increment: conciliadas } } })
+      await tx.activityLog.create({
+        data: {
+          action: 'RECON_PENDING_LINES_DECIDED',
+          entity: 'BankStatement',
+          entityId: statement.id,
+          staffId: null,
+          venueId,
+          data: { decididas, conciliadas, automatico: true, abiertoPor },
+        },
+      })
+    },
+    { timeout: 15_000 },
+  )
+  return espera
 }
 
 /** Confirma (acepta) la conciliación de líneas específicas. */
