@@ -368,6 +368,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   CashMachineClose: 'Orders, KDS & Cash',
   CashMachineIncident: 'Orders, KDS & Cash',
   CashMachineBinding: 'Orders, KDS & Cash',
+  CashMachineFolio: 'Orders, KDS & Cash',
+  CashMachineObservation: 'Orders, KDS & Cash',
   MoneyAnomaly: 'Orders, KDS & Cash',
   DeliveryChannelLink: 'Orders, KDS & Cash',
   DeliveryOrderEvent: 'Orders, KDS & Cash',

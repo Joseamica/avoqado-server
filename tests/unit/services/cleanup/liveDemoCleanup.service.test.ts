@@ -575,6 +575,10 @@ describe('🔴 ninguna llave foránea bloqueante queda sin atender', () => {
       'cierre de la máquina de efectivo: la sección cash-machine está en APP_BLOQUEADAS de candadoDemo, así que un demo no empareja máquina ni sube cierres',
     CashMachineIncident:
       'incidencia de la máquina de efectivo: la sección cash-machine está en APP_BLOQUEADAS de candadoDemo, así que un demo no sube ventas, dudas ni cierres',
+    CashMachineFolio:
+      'folio congelado de la máquina de efectivo: la sección cash-machine está en APP_BLOQUEADAS de candadoDemo, así que un demo no sube ventas ni dudas',
+    CashMachineObservation:
+      'observación de la máquina de efectivo: la sección cash-machine está en APP_BLOQUEADAS de candadoDemo, así que un demo no sube ventas, dudas ni cierres',
     CrmTeam:
       'el equipo de ventas de Avoqado: ensureCrmTeamVenue lo crea una sola vez, en su propia organización interna (venue ACTIVE, nunca un demo); si una limpieza llegara a su venue, la llave RESTRICT la frena sin borrar nada',
     DocumentRequestVenueLink: 'solicitud de documentos (KYC): cerrada en un demo',

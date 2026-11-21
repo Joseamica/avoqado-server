@@ -203,6 +203,9 @@ const prismaMock: any = {
   cashMachineIncident: createMockModel(),
   // R4-3: qué PC (Terminal) controla qué máquina; la credencial sólo como hash.
   cashMachineBinding: createMockModel(),
+  // Rediseño r3: lo que congela el primer mensaje de un folio y cada observación física distinta.
+  cashMachineFolio: createMockModel(),
+  cashMachineObservation: createMockModel(),
   product: createMockModel(),
   productGroup: createMockModel(),
   productGroupOption: createMockModel(),

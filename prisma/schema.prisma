@@ -613,6 +613,8 @@ model Venue {
   cashMachineCloses    CashMachineClose[]
   cashMachineIncidents CashMachineIncident[]
   cashMachineBindings  CashMachineBinding[]
+  cashMachineFolios       CashMachineFolio[]
+  cashMachineObservations CashMachineObservation[]
 
   // ==========================================
   // INVENTORY TRANSFERS
@@ -17010,9 +17012,12 @@ model CashMachineClose {
   occurredAtKnown Boolean   @default(true)
   createdAt       DateTime  @default(now())
 
-  /// Codex r2 #5: la huella de los ARTÍCULOS del pedido de la venta (`huellaDelCarrito`). Una repetición o la carrera con otro carrito
-  /// por el mismo importe es otra operación (409). Null = un cierre sin pedido (CANCELADO, GUARDADO).
+  /// Rediseño r3 (D2): la huella del carrito COMPLETO congelado en `CashMachineFolio` (la misma de la cotización). Null = sin carrito.
   cartHash String? @db.VarChar(64)
+  /// Rediseño r3 (D1): por qué un PAGADO comprobado quedó SIN venta (el dinero está; la incidencia NO_SE_PUDO_REGISTRAR lo pone a
+  /// revisión). 'DESCUENTO' | 'PC_REVOCADA' | 'SIN_SALDAR' | 'SIN_CARRITO' | 'CARRITO_ILEGIBLE' | 'VENTA_RECHAZADA' | 'PREMIO_PENDIENTE' |
+  /// 'LLAVE_OCUPADA'. Null = la venta se registró (o no era PAGADO).
+  motivoSinRegistro String? @db.VarChar(24)
 
   @@unique([venueId, referenceCC])
   @@index([venueId, createdAt])
@@ -17045,11 +17050,11 @@ model CashMachineIncident {
   @@index([venueId, status, createdAt])
 }
 
-/// Qué PC (aparato del POS) controla qué máquina. Cada QuickPay tiene un solo emisor: habilitar otra PC para la misma IP
-/// revoca la anterior.
-/// 🔴 «Una sola activa por (venueId, machineIp)» la garantiza un índice único PARCIAL escrito a mano en la migración
-/// 20261120120000_maquina_de_efectivo_1a (`CashMachineBinding_venueId_machineIp_activa_key ... WHERE "active"`): Prisma no
-/// lo puede expresar.
+/// Qué PC (aparato del POS) controla la máquina del negocio. Rediseño r3 (D3, r6-5): en la 1a UNA sola PC habilitada por negocio;
+/// emparejar otra revoca la anterior en la misma transacción.
+/// 🔴 «Una sola activa por negocio» la garantiza un índice único PARCIAL escrito a mano en la migración
+/// 20261121120000_maquina_de_efectivo_rediseno_r3 (`CashMachineBinding_venueId_activa_key ... WHERE "active"`): Prisma no lo puede
+/// expresar.
 model CashMachineBinding {
   id               String    @id @default(cuid())
   venueId          String
@@ -17066,6 +17071,53 @@ model CashMachineBinding {
   revokedAt        DateTime?
 
   @@index([venueId, deviceId])
+}
+
+/// Rediseño r3 (D1, D2, r6-1, r6-3): lo que el PRIMER mensaje de un folio (duda o cierre) congela, una fila por folio. La venta se arma
+/// SIEMPRE desde esta copia; los mensajes posteriores sólo agregan observaciones (`CashMachineObservation`). Se escribe en la primera
+/// transacción, bajo el candado del folio, ANTES de intentar la venta: si el proceso cae, el reenvío la reanuda desde aquí.
+model CashMachineFolio {
+  id          String @id @default(cuid())
+  venueId     String
+  venue       Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  /// Folio de la máquina: `AQ` + 12 `[0-9A-Z]`.
+  referenceCC String @db.VarChar(32)
+  /// `Terminal.id` de la PC dueña del folio (la del primer mensaje). Todo acuse lo devuelve.
+  deviceId    String?
+  /// r6-6: el emparejamiento con el que la PC empezó el cobro; su vigencia decide lo que una PC revocada puede registrar.
+  bindingId   String?
+  /// El carrito tal cual llegó (el JSON de `POST /orders`, con cliente, premio y `catalogAt`). Null = llegó sin carrito.
+  pedido      Json?
+  /// La huella del carrito completo (`operationHash`, la misma de la cotización).
+  cartHash    String? @db.VarChar(64)
+  /// El turno A con el que la PC vendió.
+  saleShiftId String?
+  dueCents    Int
+  saleCents   Int
+  tipCents    Int
+  /// El primer cierre COMPROBADO (de la PC o declarado por un gerente): el desenlace que se termina. Nunca se reemplaza.
+  decision    Json?
+  /// Sube con cada observación NUEVA; el gerente resuelve con la que vio (r6-4).
+  version     Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([venueId, referenceCC])
+}
+
+/// Rediseño r3 (D2, r6-3): cada observación física DISTINTA de un folio, una fila. La huella cubre desenlace, modo de cancelación,
+/// origen (PC o gerente), turno y carrito recibidos, hora física, `lastSeen` e importes: la misma huella en cualquier punto del historial
+/// es una retransmisión (A–B–A no son tres novedades), sin tope que pierda evidencia.
+model CashMachineObservation {
+  id          String   @id @default(cuid())
+  venueId     String
+  venue       Venue    @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  referenceCC String   @db.VarChar(32)
+  fingerprint String   @db.VarChar(64)
+  payload     Json
+  createdAt   DateTime @default(now())
+
+  @@unique([venueId, referenceCC, fingerprint])
 }
 
 enum CashDrawerStatus {
