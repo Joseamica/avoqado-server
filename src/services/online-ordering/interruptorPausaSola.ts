@@ -61,6 +61,12 @@ export function __resetInterruptorParaPruebas(): void {
  *
  * Codex p2v5-r2 #7: revisar y escribir son UNA sola instrucción, con el reloj de Postgres: no hay hueco entre «la vi futura» y «la
  * cambié», ni dependencia del reloj de quien corre el script.
+ *
+ * Codex p2v5-r3 #2: ese reloj es `clock_timestamp()` (la hora REAL en que se evalúa), no `now()` (la hora en que EMPEZÓ la
+ * transacción). Si otra transacción tiene la fila, la instrucción espera su candado, y con `now()` el guardia decidiría con la hora de
+ * antes de esperar: podría mover una hora que llegó durante la espera. Por lo mismo la rama UPDATE no copia `EXCLUDED."desde"` (se
+ * calcula ANTES de esperar): recalcula «desde» con su propio reloj, así nunca queda a menos de [minutos] del momento en que se escribe.
+ * Postgres evalúa el WHERE y el SET de `ON CONFLICT DO UPDATE` después de tomar el candado de la fila.
  */
 export const MARGEN_PARA_MOVER_S = 10
 
@@ -73,14 +79,16 @@ export async function prenderPausaSola(p: { minutos?: number; por: string }): Pr
     INSERT INTO "InterruptorDePlataforma" ("clave", "desde", "actualizadoPor", "updatedAt")
     VALUES (
       ${CLAVE_PAUSA_SOLA},
-      (now() AT TIME ZONE 'UTC') + (${minutos}::double precision * interval '1 minute'),
+      (clock_timestamp() AT TIME ZONE 'UTC') + (${minutos}::double precision * interval '1 minute'),
       ${p.por},
-      (now() AT TIME ZONE 'UTC')
+      (clock_timestamp() AT TIME ZONE 'UTC')
     )
     ON CONFLICT ("clave") DO UPDATE
-      SET "desde" = EXCLUDED."desde", "actualizadoPor" = EXCLUDED."actualizadoPor", "updatedAt" = EXCLUDED."updatedAt"
+      SET "desde" = (clock_timestamp() AT TIME ZONE 'UTC') + (${minutos}::double precision * interval '1 minute'),
+          "actualizadoPor" = EXCLUDED."actualizadoPor",
+          "updatedAt" = (clock_timestamp() AT TIME ZONE 'UTC')
       WHERE "InterruptorDePlataforma"."desde" IS NULL
-         OR "InterruptorDePlataforma"."desde" > (now() AT TIME ZONE 'UTC') + (${MARGEN_PARA_MOVER_S}::int * interval '1 second')
+         OR "InterruptorDePlataforma"."desde" > (clock_timestamp() AT TIME ZONE 'UTC') + (${MARGEN_PARA_MOVER_S}::int * interval '1 second')
     RETURNING "desde"`
   const desde = filas[0]?.desde
   if (!desde) {
