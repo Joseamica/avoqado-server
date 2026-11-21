@@ -2,8 +2,8 @@
  * Máquina de efectivo 1a · «Cobros en duda» (R4-4): la cadena REAL de cada ruta con los permisos de fábrica (sólo la base va simulada).
  *  · subir la duda → `payments:create` (la PC; la puerta del emparejamiento la prueba el servicio).
  *  · consultarla → `payments:read` (la PC pregunta cada 60 s).
- *  · listar y resolver → `cash-machine:resolve`, en /mobile (POS del mostrador) y en /dashboard. El cajero no; el gerente sí, y el
- *    gerente sale de la SESIÓN aunque el cuerpo traiga otro.
+ *  · listar, resolver y revisar → `cash-machine:resolve`, SÓLO en /dashboard (recorte R2, 21-nov: el POS no tiene bandeja). El cajero
+ *    no; el gerente sí, y el gerente sale de la SESIÓN aunque el cuerpo traiga otro.
  * Molde: `mobile.cashMachine.permiso.test.ts`.
  */
 const mockStaffVenueFindUnique = jest.fn()
@@ -54,10 +54,9 @@ const VENUE = 'cjld2cjxh0000qzrmn831i7rn'
 const REF = 'AQ0123456789AB'
 type Metodo = 'get' | 'post'
 
-const cadena = (router: any, ruta: string, metodo: Metodo) => {
-  const capa = router.stack.find((l: any) => l.route?.path === ruta && l.route.methods[metodo])
-  return capa.route.stack.map((rl: any) => rl.handle) as any[]
-}
+const capaDe = (router: any, ruta: string, metodo: Metodo) =>
+  router.stack.find((l: any) => l.route?.path === ruta && l.route.methods[metodo])
+const cadena = (router: any, ruta: string, metodo: Metodo) => capaDe(router, ruta, metodo).route.stack.map((rl: any) => rl.handle) as any[]
 const permisosDe = (router: any, ruta: string, metodo: Metodo) =>
   cadena(router, ruta, metodo)
     .filter(x => typeof x.requiredPermission === 'string')
@@ -126,13 +125,18 @@ beforeEach(() => {
 })
 
 describe('permisos de cada ruta', () => {
-  it('subir → payments:create; consultar → payments:read; listar y resolver → cash-machine:resolve (también en el panel)', () => {
+  it('subir → payments:create; consultar → payments:read; listar, resolver y revisar → cash-machine:resolve en el panel', () => {
     expect(permisosDe(mobileRouter, DUDAS, 'post')).toEqual(['payments:create'])
     expect(permisosDe(mobileRouter, DUDA, 'get')).toEqual(['payments:read'])
-    expect(permisosDe(mobileRouter, DUDAS, 'get')).toEqual(['cash-machine:resolve'])
-    expect(permisosDe(mobileRouter, RESOLVER, 'post')).toEqual(['cash-machine:resolve'])
     expect(permisosDe(dashboardRouter, DUDAS, 'get')).toEqual(['cash-machine:resolve'])
     expect(permisosDe(dashboardRouter, RESOLVER, 'post')).toEqual(['cash-machine:resolve'])
+    expect(permisosDe(dashboardRouter, REVISAR, 'post')).toEqual(['cash-machine:resolve'])
+  })
+
+  it('🔴 recorte R2: el POS ya no lista, ni resuelve, ni revisa (esas rutas móviles no existen)', () => {
+    expect(capaDe(mobileRouter, DUDAS, 'get')).toBeUndefined()
+    expect(capaDe(mobileRouter, RESOLVER, 'post')).toBeUndefined()
+    expect(capaDe(mobileRouter, REVISAR, 'post')).toBeUndefined()
   })
 })
 
@@ -186,10 +190,7 @@ describe('subir y consultar la duda (la PC)', () => {
   })
 })
 
-describe.each([
-  ['POS del mostrador (/mobile)', mobileRouter],
-  ['DASHBOARD', dashboardRouter],
-])('listar y resolver · %s', (_n, router) => {
+describe.each([['DASHBOARD', dashboardRouter]])('listar y resolver · %s', (_n, router) => {
   it('🔴 el cajero recibe 403 y no lista ni resuelve', async () => {
     expect((await correr(router, DUDAS, 'get', StaffRole.CASHIER)).status).toBe(403)
     expect((await correr(router, RESOLVER, 'post', StaffRole.CASHIER, { body: RESOLVER_BODY })).status).toBe(403)
@@ -246,11 +247,8 @@ describe.each([
 })
 
 describe('Codex r1 #8 (decisión b): cash-machine:resolve sólo con la sesión del gerente', () => {
-  it.each([
-    ['POS', () => mobileRouter],
-    ['panel', () => dashboardRouter],
-  ])('🔴 %s · la cajera con un PIN de gerente válido NO resuelve: 403, el PIN no se gasta y el 403 no ofrece PIN', async (_n, router) => {
-    const out = await correr(router(), RESOLVER, 'post', StaffRole.CASHIER, {
+  it('🔴 la cajera con un PIN de gerente válido NO resuelve: 403, el PIN no se gasta y el 403 no ofrece PIN', async () => {
+    const out = await correr(dashboardRouter, RESOLVER, 'post', StaffRole.CASHIER, {
       body: RESOLVER_BODY,
       headers: { 'x-permission-override': 'pin-ok' },
     })
@@ -262,9 +260,9 @@ describe('Codex r1 #8 (decisión b): cash-machine:resolve sólo con la sesión d
   })
 
   it('🔴 tampoco lista ni revisa con el PIN', async () => {
-    const lista = await correr(mobileRouter, DUDAS, 'get', StaffRole.CASHIER, { headers: { 'x-permission-override': 'pin-ok' } })
+    const lista = await correr(dashboardRouter, DUDAS, 'get', StaffRole.CASHIER, { headers: { 'x-permission-override': 'pin-ok' } })
     expect(lista.status).toBe(403)
-    const revisa = await correr(mobileRouter, REVISAR, 'post', StaffRole.CASHIER, {
+    const revisa = await correr(dashboardRouter, REVISAR, 'post', StaffRole.CASHIER, {
       body: { note: 'x', version: 1 },
       headers: { 'x-permission-override': 'pin-ok' },
     })
@@ -274,11 +272,6 @@ describe('Codex r1 #8 (decisión b): cash-machine:resolve sólo con la sesión d
 })
 
 describe('Codex r1 #7: revisar una incidencia que no es duda', () => {
-  it('pide cash-machine:resolve en el POS y en el panel', () => {
-    expect(permisosDe(mobileRouter, REVISAR, 'post')).toEqual(['cash-machine:resolve'])
-    expect(permisosDe(dashboardRouter, REVISAR, 'post')).toEqual(['cash-machine:resolve'])
-  })
-
   it('🔴 el gerente la revisa con SU sesión y su nota', async () => {
     const out = await correr(dashboardRouter, REVISAR, 'post', StaffRole.MANAGER, {
       body: { note: '  La máquina devolvió todo  ', version: 2 },
@@ -289,19 +282,19 @@ describe('Codex r1 #7: revisar una incidencia que no es duda', () => {
   })
 
   it('🔴 Codex r2 #8: sin la versión que vio, 400 en español (no se revisa a ciegas)', async () => {
-    const out = await correr(mobileRouter, REVISAR, 'post', StaffRole.MANAGER, { body: { note: 'x' } })
+    const out = await correr(dashboardRouter, REVISAR, 'post', StaffRole.MANAGER, { body: { note: 'x' } })
     expect(out.error).toMatchObject({ statusCode: 400, message: expect.stringContaining('versión') })
     expect(mockRevisar).not.toHaveBeenCalled()
   })
 
   it('sin nota es 400 en español', async () => {
-    const out = await correr(mobileRouter, REVISAR, 'post', StaffRole.MANAGER, { body: {} })
+    const out = await correr(dashboardRouter, REVISAR, 'post', StaffRole.MANAGER, { body: {} })
     expect(out.error).toMatchObject({ statusCode: 400, message: expect.stringContaining('Escribe qué revisaste') })
     expect(mockRevisar).not.toHaveBeenCalled()
   })
 
   it('la lista filtra por tipo y folio (lo valida el esquema)', async () => {
-    const out = await correr(mobileRouter, DUDAS, 'get', StaffRole.MANAGER, { query: { kind: 'IMPOSIBLE', folio: 'AQ01' } })
+    const out = await correr(dashboardRouter, DUDAS, 'get', StaffRole.MANAGER, { query: { kind: 'IMPOSIBLE', folio: 'AQ01' } })
     expect(out.status).toBe(200)
     expect(mockListar).toHaveBeenCalledWith(VENUE, expect.objectContaining({ kind: 'IMPOSIBLE', folio: 'AQ01' }))
   })

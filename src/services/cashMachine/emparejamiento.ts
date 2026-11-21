@@ -6,7 +6,11 @@
  *    diccionario ni fuerza bruta que una sal o un hash lento detengan, y el hash directo deja buscarla por índice.
  *  · D3 y r6-5 (rediseño tras la ronda 3): en la 1a UNA sola PC habilitada por NEGOCIO. Emparejar otra PC revoca la anterior en la
  *    misma transacción, bajo UN candado con la clave del negocio, y el índice único PARCIAL `(venueId) WHERE active` lo respalda: dos
- *    altas simultáneas nunca dejan dos PCs. Lo que la anterior cobró sigue entrando por la regla de revocación (r6-6).
+ *    altas simultáneas nunca dejan dos PCs.
+ *  · Recorte R1 (founder «a», 21-nov): NO se cambia de PC (ni se apaga) con cobros a medias. Mientras el negocio tenga folios sin
+ *    terminar —dudas `ESPERANDO` o desenlaces RECIBIDOS (`POR_TERMINAR`)— emparejar y desemparejar contestan 409
+ *    `CASH_MACHINE_FOLIOS_PENDING`: primero se terminan en el panel. Por eso una credencial revocada nunca tiene nada a medias y
+ *    todo lo que mande después es incidencia con su dinero (`decisionDelFolio.ts`), sin vigencias por hora.
  *  · 🔴 La QuickPay acepta comandos locales de quien sea: al relevar una PC hay que desconectar la anterior de la máquina. La respuesta
  *    del alta dice qué PCs quedaron revocadas (`replaced`) para que el POS lo pida.
  *  · El aparato sale siempre del encabezado autenticado (`X-Device-ID` → `Terminal`), nunca del cuerpo. La credencial es lo que lo
@@ -21,6 +25,7 @@ import { withDeadlockRetry, type TxConReintento } from '../../utils/serializable
 import { logAction } from '../dashboard/activity-log.service'
 
 export const CASH_MACHINE_NOT_PAIRED = 'CASH_MACHINE_NOT_PAIRED'
+export const CASH_MACHINE_FOLIOS_PENDING = 'CASH_MACHINE_FOLIOS_PENDING'
 
 export const hashDeCredencial = (credencial: string): string => createHash('sha256').update(credencial).digest('hex')
 
@@ -53,13 +58,33 @@ async function candado(tx: TxConReintento, venueId: string): Promise<void> {
 
 type Revocada = { id: string; deviceId: string; machineIp: string }
 
-/** ponytail: 500 folios RECIBIDOS sin terminar en una sola PC es la base caída por horas; los que pasen los anota el siguiente relevo. */
-const PENDIENTES_POR_RELEVO = 500
+/** Cuántos folios nombra el 409 (el total va aparte). */
+const FOLIOS_EN_EL_AVISO = 20
 
 /**
- * Revoca las activas que cumplan `donde` en este negocio (a lo más una: índice único parcial por negocio). H5 (Codex servidor r5): en
- * la MISMA transacción, los folios RECIBIDOS de lo que se revoca (desenlace guardado, venta sin terminar) quedan en la bandeja del
- * gerente como `POR_TERMINAR`: si esa PC no vuelve, el gerente los termina desde lo congelado. Sin cron.
+ * Recorte R1: lo que el negocio tiene a medias —una duda `ESPERANDO` o un desenlace RECIBIDO (`POR_TERMINAR`, que nace en la MISMA
+ * transacción que el desenlace)— frena el relevo. Bajo el candado del negocio.
+ */
+async function exigirSinCobrosAMedias(tx: TxConReintento, venueId: string): Promise<void> {
+  const where = { venueId, status: 'ABIERTO', kind: { in: ['ESPERANDO', 'POR_TERMINAR'] } }
+  const count = await tx.cashMachineIncident.count({ where })
+  if (count === 0) return
+  const folios = await tx.cashMachineIncident.findMany({
+    where,
+    select: { referenceCC: true, kind: true },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: FOLIOS_EN_EL_AVISO,
+  })
+  throw new ConflictError(
+    'La máquina tiene cobros sin terminar. Termínalos en el panel («Cobros de la máquina») antes de cambiar o apagar la PC; los que la PC acaba de subir aparecen ahí en unos minutos.',
+    CASH_MACHINE_FOLIOS_PENDING,
+    { count, folios: folios.map(f => ({ referenceCC: f.referenceCC, kind: f.kind })) },
+  )
+}
+
+/**
+ * Revoca las activas que cumplan `donde` en este negocio (a lo más una: índice único parcial por negocio), sólo si nada quedó a medias.
+ * Sin una activa que revocar no hay a quién relevar: no frena (la PC que ya estaba revocada sí puede apagar su casilla).
  */
 async function revocarEnTx(tx: TxConReintento, venueId: string, donde: Prisma.CashMachineBindingWhereInput): Promise<Revocada[]> {
   const activas = await tx.cashMachineBinding.findMany({
@@ -68,30 +93,11 @@ async function revocarEnTx(tx: TxConReintento, venueId: string, donde: Prisma.Ca
     take: 10,
   })
   if (activas.length > 0) {
+    await exigirSinCobrosAMedias(tx, venueId)
     await tx.cashMachineBinding.updateMany({
       where: { venueId, id: { in: activas.map(a => a.id) } },
       data: { active: false, revokedAt: new Date() },
     })
-    // El índice parcial `CashMachineFolio_pendientes_idx` (venueId, bindingId) WHERE NOT terminado: sólo lo que falta.
-    const recibidos = await tx.cashMachineFolio.findMany({
-      where: { venueId, bindingId: { in: activas.map(a => a.id) }, terminado: false, decision: { not: Prisma.DbNull } },
-      select: { referenceCC: true, deviceId: true },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: PENDIENTES_POR_RELEVO,
-    })
-    if (recibidos.length > 0) {
-      await tx.cashMachineIncident.createMany({
-        data: recibidos.map(f => ({
-          venueId,
-          referenceCC: f.referenceCC,
-          kind: 'POR_TERMINAR',
-          status: 'ABIERTO',
-          payload: { motivo: 'PC_RELEVADA' },
-          deviceId: f.deviceId,
-        })),
-        skipDuplicates: true,
-      })
-    }
   }
   return activas
 }
@@ -169,31 +175,20 @@ export async function desemparejarAparato(venueId: string, autor: AutorDelEmpare
 
 /**
  * R4-3: sólo una credencial de ESTE mismo aparato (`deviceId` del encabezado) en este negocio registra un folio o sube una duda. Sin
- * credencial válida de este aparato, 403 `CASH_MACHINE_NOT_PAIRED`.
- *
- * Una credencial ya revocada todavía ENTREGA lo que la PC cobró sin red (decisión d, Codex r1 #5). r6-6: cada intento queda fijo a su
- * emparejamiento (`bindingId`, el que la PC guardó al empezar el cobro; sin él, el de su credencial), que debe ser de ESTE aparato. Su
- * vigencia la decide `decidirSobreElFolio` bajo el candado del folio (con el emparejamiento congelado en el folio).
+ * credencial válida de este aparato, 403 `CASH_MACHINE_NOT_PAIRED`. Una credencial ya revocada todavía ENTREGA lo que la PC cobró sin
+ * red (decisión d, Codex r1 #5), pero (recorte R1) nunca como venta: `revocada` lo decide bajo el candado del folio.
  */
 export async function exigirAparatoEmparejado(
   venueId: string,
   deviceId: string | null,
   credencial: string | null,
-  bindingId: string | null = null,
-): Promise<{ bindingId: string; bindingDeLaCredencial: string }> {
+): Promise<{ bindingId: string; revocada: boolean }> {
   if (deviceId && credencial) {
-    const porCredencial = await prisma.cashMachineBinding.findFirst({
+    const b = await prisma.cashMachineBinding.findFirst({
       where: { venueId, deviceId, credentialHash: hashDeCredencial(credencial) },
-      select: { id: true },
+      select: { id: true, active: true },
     })
-    // H6 (Codex servidor r5): también el emparejamiento de la credencial presentada: sin hora, el intento sólo vale si es el mismo.
-    if (porCredencial && (!bindingId || bindingId === porCredencial.id)) {
-      return { bindingId: porCredencial.id, bindingDeLaCredencial: porCredencial.id }
-    }
-    if (porCredencial && bindingId) {
-      const fijo = await prisma.cashMachineBinding.findFirst({ where: { id: bindingId, venueId, deviceId }, select: { id: true } })
-      if (fijo) return { bindingId: fijo.id, bindingDeLaCredencial: porCredencial.id }
-    }
+    if (b) return { bindingId: b.id, revocada: !b.active }
   }
   throw new ForbiddenError('Esta PC no está emparejada con la máquina de efectivo', CASH_MACHINE_NOT_PAIRED)
 }

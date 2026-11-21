@@ -17079,37 +17079,36 @@ model CashMachineBinding {
 /// SIEMPRE desde esta copia; los mensajes posteriores sólo agregan observaciones (`CashMachineObservation`). Se escribe en la primera
 /// transacción, bajo el candado del folio, ANTES de intentar la venta: si el proceso cae, el reenvío la reanuda desde aquí.
 model CashMachineFolio {
-  id          String @id @default(cuid())
-  venueId     String
-  venue       Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  id             String   @id @default(cuid())
+  venueId        String
+  venue          Venue    @relation(fields: [venueId], references: [id], onDelete: Restrict)
   /// Folio de la máquina: `AQ` + 12 `[0-9A-Z]`.
-  referenceCC String @db.VarChar(32)
+  referenceCC    String   @db.VarChar(32)
   /// `Terminal.id` de la PC dueña del folio (la del primer mensaje). Todo acuse lo devuelve.
-  deviceId    String?
-  /// r6-6: el emparejamiento con el que la PC empezó el cobro; su vigencia decide lo que una PC revocada puede registrar.
-  bindingId   String?
+  deviceId       String?
+  /// El emparejamiento de la credencial con la que la PC subió el primer mensaje (para auditar; ya no decide nada: recorte R1).
+  bindingId      String?
   /// El carrito tal cual llegó (el JSON de `POST /orders`, con cliente, premio y `catalogAt`). Null = llegó sin carrito.
-  pedido      Json?
+  pedido         Json?
   /// La huella del carrito completo (`operationHash`, la misma de la cotización).
-  cartHash    String? @db.VarChar(64)
+  cartHash       String?  @db.VarChar(64)
   /// El turno A con el que la PC vendió.
-  saleShiftId String?
+  saleShiftId    String?
   /// H3/H4 (Codex servidor r5): los importes TAL CUAL llegaron, aun con fracción de centavo o fuera del rango de un entero: el folio se
   /// congela siempre (con su carrito) y lo que no se puede cobrar o vender lo decide el servicio después. Venta y propina en null =
   /// no llegaron como números.
-  dueCents    Float
-  saleCents   Float?
-  tipCents    Float?
+  dueCents       Float
+  saleCents      Float?
+  tipCents       Float?
   /// El primer cierre COMPROBADO (de la PC o declarado por un gerente): el desenlace que se termina. Nunca se reemplaza.
-  decision    Json?
-  /// Sube con cada observación NUEVA; el gerente resuelve con la que vio (r6-4).
-  version     Int      @default(1)
-  /// H5 (Codex servidor r5): ya tiene su `CashMachineClose` (se escribe en la MISMA transacción). Desenlace sin terminar = RECIBIDO:
-  /// al revocar su emparejamiento va a la bandeja del gerente («pendiente de terminar»). El índice parcial de los que faltan está
-  /// escrito a mano en la migración 20261120120000_maquina_de_efectivo_1a (`CashMachineFolio_pendientes_idx ... WHERE NOT "terminado"`).
-  terminado   Boolean  @default(false)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  decision       Json?
+  /// Sube con cada observación NUEVA del folio (no con las de OTRA PC, r6 #4); el gerente resuelve con la que vio (r6-4).
+  version        Int      @default(1)
+  /// r6 #1: lo MÁS que la PC dueña dijo que entró, en cualquier mensaje del folio (centavos enteros). Nunca baja. La bandeja lo enseña y
+  /// el gerente no puede declarar menos.
+  maxCreditCents Int?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   @@unique([venueId, referenceCC])
 }

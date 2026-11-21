@@ -55,10 +55,7 @@ import {
   cotizarParaLaMaquinaSchema,
   desemparejarAparatoSchema,
   emparejarAparatoSchema,
-  listarDudasDeLaMaquinaSchema,
   registrarVentaDeLaMaquinaSchema,
-  resolverDudaDeLaMaquinaSchema,
-  revisarIncidenciaDeLaMaquinaSchema,
   subirDudaDeLaMaquinaSchema,
   turnoDelNegocioSchema,
 } from '../schemas/mobile/cashMachine.schema'
@@ -3704,7 +3701,8 @@ router.get(
 /**
  * POST /api/v1/mobile/venues/:venueId/cash-machine/binding — emparejar ESTA PC (la del `X-Device-ID`) con la máquina (R4-3, R5#3).
  * Body: { machineIp }. 201 { bindingId, credential }: la credencial sale una sola vez y viaja después en `X-Cash-Machine-Credential`.
- * Revoca a la PC anterior de esa máquina. Sólo una sesión con `cash-machine:configure` (R5#10).
+ * Revoca a la PC anterior de esa máquina. Sólo una sesión con `cash-machine:configure` (R5#10). Recorte R1: con cobros a medias
+ * (dudas o desenlaces sin terminar) 409 `CASH_MACHINE_FOLIOS_PENDING` `{ count, folios: [{ referenceCC, kind }] }`, sin revocar nada.
  */
 router.post(
   '/venues/:venueId/cash-machine/binding',
@@ -3714,7 +3712,7 @@ router.post(
   cashMachineMobileController.emparejar,
 )
 
-/** DELETE /api/v1/mobile/venues/:venueId/cash-machine/binding — esta PC deja de ser emisor de la máquina. 200 { revoked }. */
+/** DELETE /api/v1/mobile/venues/:venueId/cash-machine/binding — esta PC deja de ser emisor. 200 { revoked }; con cobros a medias, el mismo 409. */
 router.delete(
   '/venues/:venueId/cash-machine/binding',
   authenticateTokenMiddleware,
@@ -3740,6 +3738,7 @@ router.post(
 /**
  * POST /api/v1/mobile/venues/:venueId/cash-machine/doubts — «Cobros en duda» (R4-4, R5#6): la PC perdió el cierre y no sabe cómo
  * terminó. La MISMA puerta que la venta: `payments:create` y la PC emparejada (`X-Cash-Machine-Credential`). Idempotente por folio.
+ * La resuelve un gerente SÓLO en el panel (recorte R2).
  * Body: { referenceCC, dueCents, saleCents, tipCents, pedido, startedAt, lastSeen?, saleShiftId?, creditCents? }. 200 { status: 'ABIERTO' }
  * o la evidencia del cierre si el folio ya se resolvió. H3/H4 (Codex servidor r5): la ruta sólo exige el folio y el adeudo como número;
  * lo demás lo lee el servicio después de guardar la duda (nunca un 400 sin evidencia). H1: `creditCents` (opcional) = lo que vio entrar.
@@ -3752,15 +3751,6 @@ router.post(
   cashMachineMobileController.subirDuda,
 )
 
-/** GET /api/v1/mobile/venues/:venueId/cash-machine/doubts — la lista para el gerente (POS del mostrador). ?status&cursor&limit (≤ 100). */
-router.get(
-  '/venues/:venueId/cash-machine/doubts',
-  authenticateTokenMiddleware,
-  validateRequest(listarDudasDeLaMaquinaSchema),
-  checkPermission('cash-machine:resolve'),
-  cashMachineMobileController.listarDudas,
-)
-
 /** GET /api/v1/mobile/venues/:venueId/cash-machine/doubts/:referenceCC — la PC pregunta cada 60 s: { status: 'ABIERTO' } o la evidencia. */
 router.get(
   '/venues/:venueId/cash-machine/doubts/:referenceCC',
@@ -3770,30 +3760,8 @@ router.get(
   cashMachineMobileController.consultarDuda,
 )
 
-/**
- * POST /api/v1/mobile/venues/:venueId/cash-machine/doubts/:referenceCC/resolve — el gerente, con SU sesión (R4-4, R5#5, R5#8).
- * Body: { outcome, creditCents, changeDispensedCents, occurredAt?, evidence, cancelMode?, version }. Sin `occurredAt`, hora y turno por
- * conciliar. H5 (Codex servidor r5): un `POR_TERMINAR` (desenlace ya guardado) se termina sólo con `{ version }`.
- */
-router.post(
-  '/venues/:venueId/cash-machine/doubts/:referenceCC/resolve',
-  authenticateTokenMiddleware,
-  validateRequest(resolverDudaDeLaMaquinaSchema),
-  checkPermission('cash-machine:resolve'),
-  cashMachineMobileController.resolverDuda,
-)
-
-/**
- * POST /api/v1/mobile/venues/:venueId/cash-machine/incidents/:incidentId/review — el gerente, con SU sesión, da por revisada una
- * incidencia que no es duda (imposible, conflicto, «no se pudo registrar», PC revocada; Codex r1 #7). Body: { note }.
- */
-router.post(
-  '/venues/:venueId/cash-machine/incidents/:incidentId/review',
-  authenticateTokenMiddleware,
-  validateRequest(revisarIncidenciaDeLaMaquinaSchema),
-  checkPermission('cash-machine:resolve'),
-  cashMachineMobileController.revisarIncidencia,
-)
+// Recorte R2 (founder «a», 21-nov): listar, resolver y revisar los cobros de la máquina es SÓLO del panel (`dashboard.routes.ts`). La PC
+// sube su duda y la consulta; el POS no tiene bandeja.
 
 /**
  * GET /api/v1/mobile/venues/:venueId/shifts/business-current — el turno vivo del NEGOCIO para la PC de la máquina, que no tiene gaveta

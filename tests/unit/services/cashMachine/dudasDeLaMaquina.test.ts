@@ -345,34 +345,36 @@ describe('Codex r1 #4 y r2 #4: la duda es de la PC que la subió', () => {
   })
 })
 
-describe('Codex servidor r2 #1: la PC revocada conserva su revokedAt aunque exista SU duda', () => {
+describe('Codex servidor r2 #1 y recorte R1: la PC revocada con SU duda abierta', () => {
   beforeEach(async () => {
     await subir()
     a.base.vinculos[0].active = false
     a.base.vinculos[0].revokedAt = new Date('2026-11-20T18:30:00.000Z')
   })
 
-  it('🔴 cobrado DESPUÉS de la revocación (o sin hora): 202 PC_REVOCADA con TRAS_REVOCAR, sin venta; su duda se cierra', async () => {
-    const r = await registrarVentaDeLaMaquina(
-      VENUE,
-      PC,
-      { referenceCC: REF, cierre: cierre({ occurredAt: '2026-11-20T19:00:00.000Z' }), pedido: CARRITO },
-      lector,
-    )
-    expect(r).toMatchObject({ status: 202, body: { motivo: 'PC_REVOCADA' } })
-    expect(a.base.incidencias.map(i => i.kind).sort()).toEqual(['ESPERANDO', 'NO_SE_PUDO_REGISTRAR', 'TRAS_REVOCAR'])
-    expect(dudaGuardada()!.status).toBe('RESUELTO')
-  })
+  it.each([
+    ['antes de la revocación', '2026-11-20T18:00:00.000Z'],
+    ['después', '2026-11-20T19:00:00.000Z'],
+    ['sin hora', null],
+  ])(
+    '🔴 su cierre (%s) nunca es venta: 202 PC_REVOCADA con TRAS_REVOCAR; su duda se cierra y la repetición da lo mismo',
+    async (_n, occurredAt) => {
+      const entrada = { referenceCC: REF, cierre: cierre({ occurredAt, occurredAtKnown: occurredAt !== null }), pedido: CARRITO }
+      const r = await registrarVentaDeLaMaquina(VENUE, PC, entrada, lector)
+      expect(r).toMatchObject({ status: 202, body: { motivo: 'PC_REVOCADA' } })
+      await expect(registrarVentaDeLaMaquina(VENUE, PC, entrada, lector)).resolves.toEqual(r)
+      expect(
+        a.base.incidencias
+          .filter(i => i.kind !== 'POR_TERMINAR')
+          .map(i => i.kind)
+          .sort(),
+      ).toEqual(['ESPERANDO', 'NO_SE_PUDO_REGISTRAR', 'TRAS_REVOCAR'])
+      expect(dudaGuardada()!.status).toBe('RESUELTO')
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    },
+  )
 
-  it('🔴 cobrado ANTES de la revocación: se registra la venta y queda TRAS_REVOCAR; la repetición exacta da lo mismo', async () => {
-    const entrada = { referenceCC: REF, cierre: cierre({ occurredAt: '2026-11-20T18:00:00.000Z' }), pedido: CARRITO }
-    const r = await registrarVentaDeLaMaquina(VENUE, PC, entrada, lector)
-    expect(r.status).toBe(200)
-    await expect(registrarVentaDeLaMaquina(VENUE, PC, entrada, lector)).resolves.toEqual(r)
-    expect(a.base.incidencias.map(i => i.kind).sort()).toEqual(['ESPERANDO', 'TRAS_REVOCAR'])
-  })
-
-  it('el gerente no está revocado: él declara lo que ve en la máquina y la venta se registra', async () => {
+  it('el gerente no está revocado: él declara lo que ve en la máquina (en el panel) y la venta se registra', async () => {
     expect(await resolver({ occurredAt: '2026-11-20T19:00:00.000Z' })).toMatchObject({ status: 200, body: { resolvedBy: 'GERENTE' } })
   })
 })

@@ -3,7 +3,7 @@
  * en memoria, sobre el `prismaMock` de siempre. Una transacción que truena deshace lo que escribió en ESTAS tablas (como Postgres), así
  * que las pruebas ven lo que de verdad quedaría: la evidencia de la primera transacción sobrevive a la venta que se revierte.
  *
- * Sólo lo que usan los servicios de `src/services/cashMachine/`: igualdad, `in`, `contains`, `lt`, `not`, `AND`/`OR`, las llaves
+ * Sólo lo que usan los servicios de `src/services/cashMachine/`: igualdad, `in`, `contains`, `lt`, `gt`, `not`, `AND`/`OR`/`NOT`, las llaves
  * compuestas (`venueId_referenceCC`…), `increment`, `deleteMany` y `select` (se ignora: se devuelve la fila entera).
  */
 import { Prisma } from '@prisma/client'
@@ -31,6 +31,7 @@ function coincide(fila: Fila, where: Fila | undefined): boolean {
   return Object.entries(where).every(([k, v]) => {
     if (k === 'AND') return (v as Fila[]).every(w => coincide(fila, w))
     if (k === 'OR') return (v as Fila[]).some(w => coincide(fila, w))
+    if (k === 'NOT') return !coincide(fila, v as Fila)
     if (LLAVES[k]) return LLAVES[k].every(c => fila[c] === (v as Fila)[c])
     const enLaFila = fila[k]
     if (v !== null && typeof v === 'object' && !(v instanceof Date)) {
@@ -38,6 +39,7 @@ function coincide(fila: Fila, where: Fila | undefined): boolean {
       if ('in' in o) return (o.in as unknown[]).includes(enLaFila)
       if ('contains' in o) return typeof enLaFila === 'string' && enLaFila.includes(o.contains)
       if ('lt' in o) return enLaFila < o.lt
+      if ('gt' in o) return enLaFila > o.gt
       // `Prisma.DbNull` / `JsonNull` en un filtro valen null (como en Postgres).
       if ('not' in o) return valor(o.not) === null ? enLaFila != null : enLaFila !== o.not
       if ('equals' in o) return enLaFila === valor(o.equals)
@@ -142,7 +144,7 @@ export function instalarMaquinaEnMemoria(prismaMock: any): BaseDeLaMaquina {
   const estado = { base: { folios: [], observaciones: [], incidencias: [], cierres: [], vinculos: [] } as BaseDeLaMaquina }
   const base = () => estado.base
   const folio = [LLAVES.venueId_referenceCC]
-  modelo(prismaMock.cashMachineFolio, base, 'folios', 'folio', folio, { version: 1, decision: null, pedido: null, terminado: false })
+  modelo(prismaMock.cashMachineFolio, base, 'folios', 'folio', folio, { version: 1, decision: null, pedido: null, maxCreditCents: null })
   modelo(prismaMock.cashMachineObservation, base, 'observaciones', 'obs', [LLAVES.venueId_referenceCC_fingerprint])
   modelo(prismaMock.cashMachineIncident, base, 'incidencias', 'inc', [LLAVES.venueId_referenceCC_kind], {
     resolvedByStaffId: null,

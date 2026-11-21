@@ -4,6 +4,9 @@
  * (`CashMachineIncident` `ESPERANDO`), que congela el folio si es su primer mensaje (`CashMachineFolio`: carrito, turno, reparto,
  * dueño). Una duda NUNCA se vuelve desenlace (r6-2): sólo un cierre de la PC o lo que declara un GERENTE con SU sesión. La resolución
  * entra por la MISMA escritura que el cierre de la PC (`recibirCierreDeLaMaquina`), con la `version` que vio el gerente (r6-4).
+ *
+ * Recorte R2 (founder «a», 21-nov): las dudas se resuelven SÓLO desde el panel (`/dashboard/...`, también en el celular). La PC sube su
+ * duda y la consulta; las rutas móviles de listar, resolver y revisar ya no existen.
  */
 import { Prisma } from '@prisma/client'
 
@@ -17,8 +20,8 @@ import { aparatoDe, exigirAparatoEmparejado } from './emparejamiento'
 import {
   CASH_MACHINE_REF,
   adeudoCobrable,
+  RECIBIDO_ATASCADO_MS,
   anotar,
-  anotarEnLaDuda,
   centavosGuardables,
   anotarEnBitacora,
   conElFolio,
@@ -30,7 +33,6 @@ import {
   recibirCierreDeLaMaquina,
   respuestaDelCierre,
   terminarElFolio,
-  vinculoDelIntento,
   yaObservada,
   type AutorDeLaMaquina,
   type DesenlaceDeLaMaquina,
@@ -62,22 +64,21 @@ export interface DudaDeLaMaquina {
   /** H1 (Codex servidor r5, opcional): lo que la PC vio entrar, en centavos enteros. La bandeja enseña el MAYOR visto del folio. */
   creditCents?: unknown
   saleShiftId?: unknown
-  /** r6-6: el emparejamiento con el que la PC empezó este cobro. */
-  bindingId?: string | null
 }
 
-/** Lo que se guarda en la duda (lo demás vive congelado en el folio). */
+/** Lo que se guarda en la duda (lo demás vive congelado en el folio, también lo MÁS que vio entrar: `maxCreditCents`). */
 interface DudaGuardada {
   startedAt: string | null
-  /** H1: lo que vio la PC con el MAYOR crédito visto (o lo último, si nadie lo dijo en números). */
+  /** Lo último que vio la PC dueña (un reenvío tardío con menos crédito que el ya visto no lo tapa), cortado a 16 KB para la bandeja. */
   lastSeen: unknown
-  /** H1: lo que entró según la evidencia física más alta del folio (null = ninguna PC lo dijo en números). */
-  creditCents?: number | null
   /** El vendedor por omisión del carrito congelado. */
   subidoPor: string
 }
 
-/** ponytail: 16 KB de «lo último que vio la PC» bastan para que el gerente entienda; lo que sobra se corta (H4: nunca un 400). */
+/**
+ * ponytail: 16 KB de «lo último que vio la PC» bastan para que el gerente lo lea en la bandeja; lo que sobra se corta (H4: nunca un
+ * 400). La observación guarda el mensaje COMPLETO y su huella se calcula sobre él (r6 #9).
+ */
 const LAST_SEEN_MAX = 16_384
 function loUltimoQueVio(v: unknown): unknown {
   if (v === undefined || v === null) return null
@@ -112,7 +113,7 @@ export interface ResolucionDelGerente {
 
 const LIMITE_POR_OMISION = 50
 const LIMITE_MAXIMO = 100
-/** Lo que mueve dinero no se «da por revisado»: la duda se resuelve y el pendiente de terminar (H5) se termina. */
+/** Lo que mueve dinero no se «da por revisado»: la duda se resuelve y el pendiente de terminar se termina. */
 const SE_TERMINAN = new Set(['ESPERANDO', 'POR_TERMINAR'])
 
 const abierta = (
@@ -155,8 +156,8 @@ export async function subirDudaDeLaMaquina(
   const lastSeen = loUltimoQueVio(entrada.lastSeen)
   const credito = typeof entrada.creditCents === 'number' && centavosGuardables(entrada.creditCents) ? entrada.creditCents : null
   const deviceId = await aparatoDe(venueId, autor.deviceUid)
-  // La MISMA puerta que la venta: sólo una credencial de esta PC; el emparejamiento del intento (r6-6).
-  const { bindingId, bindingDeLaCredencial } = await exigirAparatoEmparejado(venueId, deviceId, autor.credencial, entrada.bindingId ?? null)
+  // La MISMA puerta que la venta: sólo una credencial de esta PC. Recorte R1: si ya la revocaron, la duda queda TRAS_REVOCAR.
+  const { bindingId, revocada } = await exigirAparatoEmparejado(venueId, deviceId, autor.credencial)
   const carritoRecibido = huellaDelCarritoCompleto(entrada.pedido)
   // Codex r1 #12 (decisión h): un adeudo de $0 o que no es múltiplo de $0.50 no lo cobra la máquina: 422 con incidencia. F4 y H4: el
   // reparto venta/propina descuadrado, con fracción de centavo o sin número NO es imposible (la máquina sólo conoce el adeudo): la duda se
@@ -170,9 +171,10 @@ export async function subirDudaDeLaMaquina(
     ...importes,
     // F13: la misma hora en otra zona es la MISMA evidencia.
     startedAt,
-    lastSeen,
+    // r6 #9: el mensaje y lo que vio entrar TAL CUAL llegaron (sin cortar ni descartar), para la huella y el historial.
+    lastSeen: entrada.lastSeen ?? null,
     saleShiftId,
-    ...(credito !== null ? { creditCents: credito } : {}),
+    creditCents: entrada.creditCents ?? null,
     cartHash: carritoRecibido,
     ...(imposible ? { imposible: true } : {}),
     userId: autor.userId,
@@ -188,15 +190,22 @@ export async function subirDudaDeLaMaquina(
       importes,
       carritoRecibido,
       turnoRecibido: saleShiftId,
-      vinculo: await vinculoDelIntento(tx, venueId, l.folio ? l.folio.bindingId : bindingId, bindingDeLaCredencial),
+      revocada,
       imposible,
     })
-    const observada = await observar(tx, venueId, referenceCC, huella, repetida, observacion, l.folio)
+    // r6 #4: lo de OTRA PC se guarda (y va a su conflicto), pero no toca el folio ni la duda de la dueña.
+    const otraPc = d.accion === 'CONFLICTO' && d.motivo === 'OTRA_PC'
+    const observada = await observar(tx, venueId, referenceCC, huella, repetida, observacion, l.folio, { subeVersion: !otraPc, credito })
     const nueva = observada.nueva
-    // H1 (Codex servidor r5): toda observación NUEVA de la PC actualiza lo que la bandeja enseña de la duda abierta —también la que es
-    // conflicto porque cambió el reparto—, en la misma transacción que sube la versión. Antes sólo lo hacía una que no era conflicto, y
-    // la bandeja entregaba «$0, versión 2» después de que la PC vio $50.
-    if (nueva) await anotarEnLaDuda(tx, l.duda, { creditCents: credito, lastSeen })
+    // H1 y r6 #1: lo MÁS que entró vive en el folio (`observar`); aquí sólo lo último que vio la PC dueña, salvo que diga MENOS de lo ya
+    // visto (un reenvío tardío). En la misma transacción que sube la versión.
+    const menos = credito !== null && credito < (l.folio?.maxCreditCents ?? -1)
+    if (nueva && !otraPc && !menos && entrada.lastSeen != null && l.duda?.status === 'ABIERTO') {
+      await tx.cashMachineIncident.update({
+        where: { id: l.duda.id },
+        data: { payload: { ...((l.duda.payload ?? {}) as object), lastSeen } as Prisma.InputJsonValue },
+      })
+    }
     const anotadas: IncidenciaAnotada[] = []
     let folio = observada.folio
     let dudaId = l.duda?.id ?? null
@@ -208,6 +217,7 @@ export async function subirDudaDeLaMaquina(
       cartHash: carritoRecibido,
       saleShiftId,
       ...importes,
+      maxCreditCents: credito,
     }
     if (d.accion === 'IMPOSIBLE') {
       // F12: aunque sea imposible, el primer mensaje congela el folio; lo que llegue después no lo sustituye.
@@ -218,7 +228,7 @@ export async function subirDudaDeLaMaquina(
     if (d.accion === 'ABRIR_DUDA') {
       // H2: sobre un folio que ya congeló un cierre imposible, la duda se abre sin volver a congelar (lo primero manda).
       if (!folio) folio = await congelarElFolio(tx, venueId, referenceCC, loQueSeCongela)
-      const guardada: DudaGuardada = { startedAt, lastSeen, creditCents: credito, subidoPor: autor.userId }
+      const guardada: DudaGuardada = { startedAt, lastSeen, subidoPor: autor.userId }
       dudaId = (
         await tx.cashMachineIncident.create({
           data: {
@@ -284,16 +294,18 @@ export async function subirDudaDeLaMaquina(
     )
   }
   // El folio ya tiene su cierre: contesta ése. Tiene desenlace sin terminar: el reenvío lo reanuda. Si no, sigue abierta.
+  // r6 #6: un ABIERTO siempre trae la incidencia que el GET encuentra: la duda o, sin duda, el «pendiente de terminar» del desenlace.
   if (r.l.cierre || r.l.estado.folio?.decision) {
     const t = await terminarElFolio(venueId, referenceCC, r.folio, r.l.cierre, leerPedido)
-    return comoDuda(referenceCC, t, r.folio, r.dudaId)
+    return comoDuda(referenceCC, t, r.folio, r.dudaId ?? r.l.porTerminar?.id ?? null)
   }
   return abierta(referenceCC, r.folio, r.dudaId)
 }
 
 /**
  * `GET /mobile/venues/:venueId/cash-machine/doubts/:referenceCC` — lo que la PC consulta cada 60 s (R5#6). Bajo el candado, nunca
- * escribe: RESUELTO con el acuse TERMINADO, o ABIERTO (con desenlace pendiente también: la PC reenvía su duda y eso lo reanuda).
+ * escribe: RESUELTO con el acuse TERMINADO, o ABIERTO con su duda o (r6 #6) con el desenlace RECIBIDO y su «pendiente de terminar»:
+ * lo que el POST contestó ABIERTO, el GET lo encuentra.
  */
 export async function consultarDudaDeLaMaquina(venueId: string, referenceCC: string): Promise<EstadoDeLaDuda> {
   const l = await conElFolio(venueId, referenceCC, async (_tx, lectura) => lectura)
@@ -306,8 +318,9 @@ export async function consultarDudaDeLaMaquina(venueId: string, referenceCC: str
       l.duda?.id ?? null,
     )
   }
-  if (!l.duda) throw new NotFoundError('Ese folio de la máquina no tiene una duda ni un cierre.', 'CASH_MACHINE_DOUBT_NOT_FOUND')
-  return abierta(referenceCC, l.folio, l.duda.id)
+  const incidentId = l.duda?.id ?? (d.accion === 'RECIBIDO' ? (l.porTerminar?.id ?? null) : null)
+  if (!incidentId) throw new NotFoundError('Ese folio de la máquina no tiene una duda ni un cierre.', 'CASH_MACHINE_DOUBT_NOT_FOUND')
+  return abierta(referenceCC, l.folio, incidentId)
 }
 
 /** Lo que el gerente revisa de las incidencias que NO son duda (Codex r1 #7): cuántas veces llegó y la primera y última evidencia. */
@@ -321,10 +334,11 @@ type EventosGuardados = {
 }
 
 /**
- * `GET …/cash-machine/doubts` (POS del mostrador y DASHBOARD): acotada, más nuevas primero, con el total y el cursor. Trae TODAS las
- * incidencias de la máquina, cada una con su `kind`. Una duda trae lo congelado de su folio (importes, carrito, turno), su `version` y
- * (H1) la evidencia física más alta: `creditCents` y `lastSeen`. Un `POR_TERMINAR` (H5) trae lo congelado, el desenlace ya
- * guardado (`outcome`, `creditCents`, `changeDispensedCents`, `occurredAt`) y la `version` con la que el gerente lo termina.
+ * `GET /dashboard/…/cash-machine/doubts` (el panel, recorte R2): acotada, más nuevas primero, con el total y el cursor. Trae TODAS las
+ * incidencias de la máquina, cada una con su `kind`. Una duda trae lo congelado de su folio (importes, carrito, turno), su `version`,
+ * `creditCents` = lo MÁS que la PC dueña vio entrar en cualquier mensaje del folio (r6 #1) y `lastSeen`. Un `POR_TERMINAR` trae lo
+ * congelado, el desenlace ya guardado (`outcome`, `creditCents`, `changeDispensedCents`, `occurredAt`) y la `version` con la que el
+ * gerente lo termina; entre las ABIERTAS sale cuando lleva `RECIBIDO_ATASCADO_MS` sin terminar (recorte R1), aunque su PC siga activa.
  */
 export async function listarDudasDeLaMaquina(
   venueId: string,
@@ -334,11 +348,14 @@ export async function listarDudasDeLaMaquina(
   const despues = q.cursor === undefined ? null : leerCursor(q.cursor)
   if (q.cursor !== undefined && !despues) throw new BadRequestError('El cursor no es válido.')
   const folio = q.folio?.trim().toUpperCase()
+  const status = q.status ?? 'ABIERTO'
   const where: Prisma.CashMachineIncidentWhereInput = {
     venueId,
-    status: q.status ?? 'ABIERTO',
+    status,
     ...(q.kind ? { kind: q.kind } : {}),
     ...(folio ? { referenceCC: { contains: folio } } : {}),
+    // Recorte R1: un RECIBIDO recién nacido lo termina su PC sola; a los 10 min ya es del gerente.
+    ...(status === 'ABIERTO' ? { NOT: { kind: 'POR_TERMINAR', createdAt: { gt: new Date(Date.now() - RECIBIDO_ATASCADO_MS) } } } : {}),
   }
   // F5 (Codex servidor r4): la evidencia (la duda y su `lastSeen`) y la `version` del folio salen de la MISMA foto de Postgres
   // (`RepeatableRead`, el mismo cliente de transacción). Con dos lecturas sueltas, los $50 que entraban entre ellas se entregaban como
@@ -385,6 +402,7 @@ export async function listarDudasDeLaMaquina(
               saleShiftId: true,
               version: true,
               decision: true,
+              maxCreditCents: true,
             },
             take: refsDeDudas.length,
           })
@@ -438,7 +456,7 @@ export async function listarDudasDeLaMaquina(
         tipCents: f?.tipCents ?? null,
         startedAt: d.startedAt ?? null,
         lastSeen: d.lastSeen ?? null,
-        creditCents: d.creditCents ?? null,
+        creditCents: f?.maxCreditCents ?? null,
         pedido: f?.pedido ?? null,
         saleShiftId: f?.saleShiftId ?? null,
         version: f?.version ?? 1,
@@ -525,8 +543,8 @@ export async function revisarIncidenciaDeLaMaquina(
  * por la MISMA escritura que el cierre de la PC (r6-2), con los importes congelados del folio y la `version` que vio (r6-4): primero se
  * guarda, después se lee el carrito congelado (con la autoridad de su sesión) y se termina.
  *
- * H5 (Codex servidor r5): un folio que YA tiene su desenlace guardado y no se terminó (RECIBIDO; en la bandeja como
- * `POR_TERMINAR` cuando relevaron su PC) se termina sólo con la `version`, sin teclear importes: desde lo congelado, con
+ * H5 y recorte R1: un folio que YA tiene su desenlace guardado y no se terminó (RECIBIDO; en la bandeja como `POR_TERMINAR` a
+ * los 10 min) se termina sólo con la `version`, sin teclear importes: desde lo congelado, con
  * exactamente un pago. La PC nueva sigue recibiendo 409 `OTRA_PC` por ese folio.
  */
 export async function resolverDudaDeLaMaquina(
@@ -608,12 +626,7 @@ async function terminarDesdeLoCongelado(
   })
   if (!l.folio?.decision) throw new NotFoundError('Ese folio de la máquina no tiene una duda.', 'CASH_MACHINE_DOUBT_NOT_FOUND')
   if (l.cierre) return respuestaDelCierre(prisma, l.cierre, l.folio.deviceId)
-  if (l.folio.version !== versionVista) {
-    throw new ConflictError(
-      'Llegó evidencia nueva de este cobro mientras lo resolvías. Vuelve a leerlo antes de resolverlo.',
-      'CASH_MACHINE_DOUBT_CHANGED',
-      { version: l.folio.version },
-    )
-  }
-  return terminarElFolio(venueId, referenceCC, l.folio, null, leerPedido, gerenteId)
+  // r6 #2: la `version` se vuelve a comparar bajo el candado, en la MISMA transacción que escribe el cierre (`terminarElFolio`): lo que
+  // entre entre esta lectura y la escritura deja 409 sin nada escrito.
+  return terminarElFolio(venueId, referenceCC, l.folio, null, leerPedido, { id: gerenteId, versionVista })
 }

@@ -27,9 +27,9 @@ export interface DecisionGuardada {
   vendedorPorOmision: string
   /** GERENTE: lo que leyó en la máquina. */
   evidence: string | null
-  /** La PC estaba revocada al decidirse: lo anterior a su revocación entra con esta marca (TRAS_REVOCAR). */
+  /** La PC estaba revocada al decidirse (TRAS_REVOCAR). */
   trasRevocar: boolean
-  /** Un PAGADO de una PC revocada cobrado después de su revocación o sin hora: el dinero queda, no es venta. */
+  /** Recorte R1 (21-nov): un PAGADO de una PC revocada nunca es venta; el dinero queda en su cierre y su incidencia. */
   motivoSinVenta: 'PC_REVOCADA' | null
 }
 
@@ -44,6 +44,8 @@ export interface FolioCongelado {
   tipCents: number | null
   version: number
   decision: DecisionGuardada | null
+  /** r6 #1: lo MÁS que la PC dueña vio entrar en CUALQUIER mensaje del folio (cierres y dudas, también los de antes de la duda). */
+  maxCreditCents: number | null
 }
 
 export interface EstadoDelFolio {
@@ -60,28 +62,6 @@ export interface Importes {
   tipCents: number | null
 }
 
-/** El emparejamiento con el que la PC empezó el intento (r6-6): cuándo nació y cuándo lo revocaron (`null` = sigue activo). */
-export interface VinculoDelIntento {
-  creadoEn: Date
-  revocadoEn: Date | null
-  /** H6 (Codex servidor r5): el intento va fijo al MISMO emparejamiento de la credencial que se presentó (no a otra alta de la PC). */
-  esElDeLaCredencial: boolean
-}
-
-/**
- * F7 (Codex servidor r4): un emparejamiento vale para un cobro sólo si estaba ACTIVO a la hora física del cobro:
- * `creadoEn ≤ hora < revocadoEn|∞`. Sin emparejamiento (el gerente declara) no hay nada que revisar.
- * H6 (Codex servidor r5): sin hora no hay con qué compararlo: vale SÓLO si el intento es del emparejamiento de la credencial que se
- * presentó y nunca lo revocaron. Dos altas distintas de la misma PC (credencial de una, intento de otra) no prueban nada sin hora: lo
- * desconocido cuenta como después de la revocación.
- */
-export function vigenteEn(v: VinculoDelIntento | null, hora: string | null): boolean {
-  if (!v) return true
-  if (hora === null) return v.revocadoEn === null && v.esElDeLaCredencial
-  const t = new Date(hora)
-  return v.creadoEn <= t && (v.revocadoEn === null || t < v.revocadoEn)
-}
-
 export type PeticionSobreElFolio =
   | {
       que: 'CIERRE'
@@ -91,8 +71,8 @@ export type PeticionSobreElFolio =
       /** El carrito y el turno que mandó la PC: sólo para anotar la discrepancia, nunca sustituyen lo congelado. */
       carritoRecibido: string | null
       turnoRecibido: string | null
-      /** El emparejamiento FIJO del intento (r6-6, F7). */
-      vinculo: VinculoDelIntento | null
+      /** Recorte R1: la credencial que presentó la PC ya está revocada. */
+      revocada: boolean
       /** `validarCierre` dijo IMPOSIBLE: la máquina no pudo dar estos importes. */
       imposible?: boolean
     }
@@ -111,7 +91,7 @@ export type PeticionSobreElFolio =
       importes: Importes
       carritoRecibido: string | null
       turnoRecibido: string | null
-      vinculo: VinculoDelIntento | null
+      revocada: boolean
       /** Un adeudo que la máquina no cobra (Codex r1 #12). */
       imposible?: boolean
     }
@@ -126,6 +106,8 @@ export type DecisionDelFolio =
   | { accion: 'NO_EXISTE' }
   /** El gerente vio otra versión de la evidencia: no se escribe nada (r6-4). */
   | { accion: 'VERSION' }
+  /** r6 #1: el gerente declara MENOS de lo que la máquina ya le contó a la PC dueña: no se escribe nada. */
+  | { accion: 'MENOS_DE_LO_VISTO'; creditCents: number }
   /** F12: importes que la máquina no puede dar: se guarda la observación, se congela el folio si es el primer mensaje, y 422. */
   | { accion: 'IMPOSIBLE' }
   /** Se guarda la evidencia y se contesta 409. */
@@ -160,8 +142,11 @@ export function decidirSobreElFolio(estado: EstadoDelFolio, pet: PeticionSobreEl
 
   // r6-4: el gerente resuelve con la evidencia que VIO; su repetición exacta (ya en el historial) no necesita volver a verla.
   // F5: también ANTES de lo imposible (una declaración imposible con la versión vieja no agrega nada).
-  if (pet.que === 'CIERRE' && pet.origen === 'GERENTE' && !pet.repeticion && pet.versionVista !== (folio?.version ?? 1)) {
-    return { accion: 'VERSION' }
+  if (pet.que === 'CIERRE' && pet.origen === 'GERENTE' && !pet.repeticion) {
+    if (pet.versionVista !== (folio?.version ?? 1)) return { accion: 'VERSION' }
+    // r6 #1: lo que entró nunca baja dentro de una operación; declarar menos de lo que la máquina ya contó registraría otro importe.
+    const visto = folio?.maxCreditCents ?? null
+    if (visto !== null && pet.cierre.creditCents < visto) return { accion: 'MENOS_DE_LO_VISTO', creditCents: visto }
   }
   if (pet.imposible) return { accion: 'IMPOSIBLE' }
   // D3: el folio es de la PC que lo subió primero; el gerente actúa sobre el de esa PC.
@@ -181,7 +166,7 @@ export function decidirSobreElFolio(estado: EstadoDelFolio, pet: PeticionSobreEl
     // H2 (Codex servidor r5): un folio congelado NO es una duda. El que congeló un cierre imposible (F12) no tiene desenlace ni duda:
     // la primera duda válida de su PC la abre sobre lo congelado, para que el gerente la vea y la resuelva.
     if (!folio || (!folio.decision && !estado.duda)) {
-      return { accion: 'ABRIR_DUDA', trasRevocar: !vigenteEn(pet.vinculo, null), discrepancia: discrepanciaDeLoCongelado }
+      return { accion: 'ABRIR_DUDA', trasRevocar: pet.revocada, discrepancia: discrepanciaDeLoCongelado }
     }
     return { accion: 'SEGUIR', discrepancia: discrepanciaDeLoCongelado }
   }
@@ -193,15 +178,14 @@ export function decidirSobreElFolio(estado: EstadoDelFolio, pet: PeticionSobreEl
     return { accion: 'SEGUIR', discrepancia: discrepanciaDeLoCongelado || otraHora }
   }
 
-  // Este cierre es el desenlace. Con su emparejamiento FIJO (r6-6, F7): lo cobrado mientras estaba activo entra (con su marca si ya
-  // lo revocaron); un PAGADO cobrado fuera de su vigencia —antes de que naciera, después de revocarlo o sin hora— deja el dinero sin
-  // venta. El gerente no está emparejado: él declara.
-  const vinculo = pet.origen === 'PC' ? pet.vinculo : null
-  const vigente = vigenteEn(vinculo, horaDe(pet.cierre))
+  // Este cierre es el desenlace. Recorte R1 (21-nov): una credencial revocada NUNCA registra venta, sin importar la hora — su PAGADO
+  // queda como dinero sin venta con su incidencia. Sin vigencias por hora ni por alta: el SERVIDOR no deja cambiar de PC con cobros a
+  // medias (`emparejamiento.ts`). El gerente no está emparejado: él declara.
+  const revocada = pet.origen === 'PC' && pet.revocada
   return {
     accion: 'ACEPTAR',
-    trasRevocar: !vigente || vinculo?.revocadoEn != null,
-    motivoSinVenta: !vigente && pet.cierre.outcome === 'PAGADO' ? 'PC_REVOCADA' : null,
+    trasRevocar: revocada,
+    motivoSinVenta: revocada && pet.cierre.outcome === 'PAGADO' ? 'PC_REVOCADA' : null,
     discrepancia: discrepanciaDeLoCongelado,
   }
 }

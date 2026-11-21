@@ -308,21 +308,23 @@ describe('registrarVentaDeLaMaquina · sólo la PC emparejada (R4-3, R5#2)', () 
     expect(a.base.incidencias).toEqual([])
   })
 
-  it('🔴 Codex r1 #5: folio NUEVO de la PC revocada cobrado ANTES de revocarla → venta con TRAS_REVOCAR; DESPUÉS o sin hora → 202 PC_REVOCADA', async () => {
-    a.base.vinculos[0].active = false
-    a.base.vinculos[0].revokedAt = new Date('2026-11-20T18:30:00.000Z')
-    expect(await vender({ occurredAt: '2026-11-20T18:00:00.000Z' })).toMatchObject({ status: 200 })
-    expect(a.base.incidencias.map(i => i.kind)).toEqual(['TRAS_REVOCAR'])
-    expect(acciones()).toContain('CASH_MACHINE_FOLIO_AFTER_UNPAIR')
-    for (const over of [{ occurredAt: '2026-11-20T19:00:00.000Z' }, { occurredAtKnown: false, occurredAt: null }]) {
+  it('🔴 recorte R1: un folio NUEVO de la PC revocada nunca es venta (antes, después, sin hora o sólo con la fecha): 202 PC_REVOCADA', async () => {
+    for (const over of [
+      { occurredAt: '2026-11-20T18:00:00.000Z' },
+      { occurredAt: '2026-11-20T19:00:00.000Z' },
+      { occurredAtKnown: false, occurredAt: null },
+      { occurredAt: '2026-11-20' },
+    ]) {
       jest.clearAllMocks()
       a = prepararArnes(prismaMock)
       a.base.vinculos[0].active = false
       a.base.vinculos[0].revokedAt = new Date('2026-11-20T18:30:00.000Z')
       const r = await vender(over)
-      expect(r).toMatchObject({ status: 202, body: { motivo: 'PC_REVOCADA', creditCents: 20000 } })
+      expect(r).toMatchObject({ status: 202, body: { ack: 'TERMINADO', motivo: 'PC_REVOCADA', creditCents: 20000 } })
       expect(prismaMock.order.create).not.toHaveBeenCalled()
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
       expect(a.base.incidencias.map(i => i.kind).sort()).toEqual(['NO_SE_PUDO_REGISTRAR', 'TRAS_REVOCAR'])
+      expect(acciones()).toContain('CASH_MACHINE_FOLIO_AFTER_UNPAIR')
     }
   })
 })

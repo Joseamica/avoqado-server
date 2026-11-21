@@ -86,7 +86,7 @@ CREATE TABLE "CashMachineFolio" (
     "tipCents" DOUBLE PRECISION,
     "decision" JSONB,
     "version" INTEGER NOT NULL DEFAULT 1,
-    "terminado" BOOLEAN NOT NULL DEFAULT false,
+    "maxCreditCents" INTEGER,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -147,8 +147,3 @@ ALTER TABLE "CashMachineObservation" ADD CONSTRAINT "CashMachineObservation_venu
 -- Rediseño r3 (D3, r6-5): UNA sola PC habilitada por negocio. Índice PARCIAL que Prisma no puede expresar (comentado en el modelo
 -- CashMachineBinding de schema.prisma). La tabla nace vacía en esta misma migración: no hay filas viejas que lo choquen (F2).
 CREATE UNIQUE INDEX "CashMachineBinding_venueId_activa_key" ON "CashMachineBinding"("venueId") WHERE "active";
-
--- H5 (Codex servidor r5): los folios que todavía no tienen su cierre (RECIBIDOS, dudas, primeros mensajes imposibles), por
--- emparejamiento. Al relevar una PC, los RECIBIDOS de su emparejamiento van a la bandeja del gerente («pendiente de terminar»). Índice
--- PARCIAL que Prisma no puede expresar (comentado en el modelo CashMachineFolio); la tabla nace vacía en esta misma migración.
-CREATE INDEX "CashMachineFolio_pendientes_idx" ON "CashMachineFolio"("venueId", "bindingId") WHERE NOT "terminado";

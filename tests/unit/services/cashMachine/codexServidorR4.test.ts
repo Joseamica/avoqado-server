@@ -29,7 +29,6 @@ jest.mock('@/services/shared/paymentShiftClaim', () => ({
   resolvePaymentShiftReconciliationEnabled: jest.fn().mockResolvedValue(false),
 }))
 
-import { createHash } from 'crypto'
 import { Prisma } from '@prisma/client'
 import { registrarVenta } from '@/controllers/mobile/cashMachine.mobile.controller'
 import {
@@ -70,8 +69,8 @@ const resolucion = (over: Partial<ResolucionDelGerente> = {}): ResolucionDelGere
   version: 1,
   ...over,
 })
-const vender = (c = cierre(), pedido: unknown = CARRITO, autor = PC, bindingId?: string) =>
-  registrarVentaDeLaMaquina(VENUE, autor, { referenceCC: REF, cierre: c, pedido, bindingId }, lector)
+const vender = (c = cierre(), pedido: unknown = CARRITO, autor = PC) =>
+  registrarVentaDeLaMaquina(VENUE, autor, { referenceCC: REF, cierre: c, pedido }, lector)
 const subir = (over: Partial<DudaDeLaMaquina> = {}) => subirDudaDeLaMaquina(VENUE, PC, duda(over), lector)
 const resolver = (over: Partial<ResolucionDelGerente> = {}) => resolverDudaDeLaMaquina(VENUE, GERENTE, REF, resolucion(over), lector)
 const traba = () => Object.assign(new Error('deadlock detected'), { code: 'P2010', meta: { code: '40P01' } })
@@ -231,42 +230,6 @@ describe('F6 · la evidencia física que llega después de resolver vuelve a rev
     await resolver({ outcome: 'CANCELADO', creditCents: 0, changeDispensedCents: 0, cancelMode: '1' })
     await subir({ lastSeen: { credit: 0 } })
     expect((await listarDudasDeLaMaquina(VENUE, { status: 'ABIERTO' })).data).toEqual([])
-  })
-})
-
-describe('F7 · un emparejamiento sólo vale para lo cobrado mientras estaba ACTIVO', () => {
-  /** b1 (la credencial de PC) la revocaron a las 18:00; la misma PC se volvió a emparejar a las 19:00 (b3). */
-  beforeEach(() => {
-    a.base.vinculos[0].active = false
-    a.base.vinculos[0].revokedAt = new Date('2026-11-20T18:00:00.000Z')
-    a.base.vinculos.push({
-      id: 'b3',
-      venueId: VENUE,
-      deviceId: 'terminal-pc',
-      machineIp: '192.168.1.50',
-      credentialHash: createHash('sha256').update('credencial-nueva').digest('hex'),
-      active: true,
-      revokedAt: null,
-      createdAt: new Date('2026-11-20T19:00:00.000Z'),
-    })
-  })
-
-  it('🔴 credencial de b1 e intento fijo en b3 para un cobro de las 18:30: b3 no existía; 202 PC_REVOCADA y TRAS_REVOCAR, no venta', async () => {
-    const r = await vender(cierre({ occurredAt: '2026-11-20T18:30:00.000Z' }), CARRITO, PC, 'b3')
-    expect(r).toMatchObject({ status: 202, body: { motivo: 'PC_REVOCADA' } })
-    expect(a.base.incidencias.map(i => i.kind).sort()).toEqual(['NO_SE_PUDO_REGISTRAR', 'TRAS_REVOCAR'])
-    expect(prismaMock.payment.create).not.toHaveBeenCalled()
-  })
-
-  it('🔴 con la credencial nueva y sin intento fijo (cuenta b3), lo de las 18:30 tampoco entra', async () => {
-    const r = await vender(cierre({ occurredAt: '2026-11-20T18:30:00.000Z' }), CARRITO, { ...PC, credencial: 'credencial-nueva' })
-    expect(r).toMatchObject({ status: 202, body: { motivo: 'PC_REVOCADA' } })
-  })
-
-  it('lo cobrado con b3 ya activo (19:30) sí es venta, sin marca', async () => {
-    const r = await vender(cierre({ occurredAt: '2026-11-20T19:30:00.000Z' }), CARRITO, { ...PC, credencial: 'credencial-nueva' }, 'b3')
-    expect(r).toMatchObject({ status: 200 })
-    expect(a.base.incidencias).toEqual([])
   })
 })
 

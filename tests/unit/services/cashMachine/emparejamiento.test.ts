@@ -1,8 +1,9 @@
 /**
  * Máquina de efectivo 1a (R4-3, R5#3): sólo la PC emparejada registra ventas de la máquina. Emparejar entrega UNA vez una
  * credencial aleatoria (la PC la guarda con DPAPI) y el servidor guarda sólo su hash. Rediseño r3 (D3, r6-5): UNA sola PC habilitada
- * por negocio, con un solo candado por negocio; emparejar otra PC (con cualquier IP) revoca la anterior. r6-6: cada intento queda fijo a
- * su emparejamiento. El aparato sale siempre del encabezado autenticado (`X-Device-ID` → `Terminal`), nunca del cuerpo.
+ * por negocio, con un solo candado por negocio; emparejar otra PC (con cualquier IP) revoca la anterior. Recorte R1 (21-nov): no se
+ * releva ni se apaga con cobros a medias (409 `CASH_MACHINE_FOLIOS_PENDING`), y la credencial revocada se reconoce como revocada (sin
+ * vigencias). El aparato sale siempre del encabezado autenticado (`X-Device-ID` → `Terminal`), nunca del cuerpo.
  */
 import { createHash } from 'crypto'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -18,6 +19,8 @@ const sqlDe = (a: any): string => (Array.isArray(a) ? a.join('?') : String(a?.sq
 const TERMINALES: Record<string, string> = { 'uid-pc-1': 'terminal-1', 'uid-pc-2': 'terminal-2' }
 let bindings: Fila[]
 let candados: string[]
+/** Las incidencias abiertas del negocio (lo que frena el relevo: ESPERANDO y POR_TERMINAR). */
+let incidencias: Fila[]
 
 function coincide(fila: Fila, where: Fila = {}): boolean {
   return Object.entries(where).every(([k, v]) => {
@@ -32,6 +35,7 @@ beforeEach(() => {
   jest.clearAllMocks()
   bindings = []
   candados = []
+  incidencias = []
   let n = 0
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
   prismaMock.$queryRaw.mockImplementation(async (plantilla: any, ...valores: unknown[]) => {
@@ -46,9 +50,10 @@ beforeEach(() => {
   prismaMock.terminal.findFirst.mockImplementation(async ({ where }: any) =>
     where.venueId === VENUE && TERMINALES[where.deviceUid] ? { id: TERMINALES[where.deviceUid] } : null,
   )
-  // H5: al revocar se buscan sus folios RECIBIDOS (aquí ninguno, salvo la prueba que los pone).
-  prismaMock.cashMachineFolio.findMany.mockResolvedValue([])
-  prismaMock.cashMachineIncident.createMany.mockResolvedValue({ count: 0 })
+  const aMedias = (where: Fila) =>
+    incidencias.filter(i => i.venueId === where.venueId && i.status === where.status && where.kind.in.includes(i.kind))
+  prismaMock.cashMachineIncident.count.mockImplementation(async ({ where }: any) => aMedias(where).length)
+  prismaMock.cashMachineIncident.findMany.mockImplementation(async ({ where, take }: any) => aMedias(where).slice(0, take))
   prismaMock.cashMachineBinding.findFirst.mockImplementation(async ({ where }: any) => bindings.find(b => coincide(b, where)) ?? null)
   prismaMock.cashMachineBinding.findMany.mockImplementation(async ({ where }: any) => bindings.filter(b => coincide(b, where)))
   prismaMock.cashMachineBinding.updateMany.mockImplementation(async ({ where, data }: any) => {
@@ -178,7 +183,7 @@ describe('exigirAparatoEmparejado (lo usa POST cash-machine/sales)', () => {
   it('la PC emparejada pasa con su credencial', async () => {
     const { credential } = await emparejarAparato(VENUE, autor('uid-pc-1'), '192.168.1.50')
     const r = await exigirAparatoEmparejado(VENUE, 'terminal-1', credential)
-    expect(r).toEqual({ bindingId: bindings[0].id, bindingDeLaCredencial: bindings[0].id })
+    expect(r).toEqual({ bindingId: bindings[0].id, revocada: false })
   })
 
   it('🔴 perfil restaurado: la MISMA credencial desde otra PC no sirve', async () => {
@@ -186,32 +191,51 @@ describe('exigirAparatoEmparejado (lo usa POST cash-machine/sales)', () => {
     await expect(exigirAparatoEmparejado(VENUE, 'terminal-2', credential)).rejects.toMatchObject(NO_EMPAREJADA)
   })
 
-  it('🔴 otra PC tomó la máquina: la anterior todavía ENTREGA lo suyo (su emparejamiento revocado decide bajo el candado del folio)', async () => {
+  it('🔴 otra PC tomó la máquina: la anterior todavía ENTREGA lo suyo, marcada como revocada (recorte R1: nunca venta)', async () => {
     const vieja = await emparejarAparato(VENUE, autor('uid-pc-1'), '192.168.1.50')
     const nueva = await emparejarAparato(VENUE, autor('uid-pc-2'), '192.168.1.50')
     await expect(exigirAparatoEmparejado(VENUE, 'terminal-1', vieja.credential)).resolves.toEqual({
       bindingId: vieja.bindingId,
-      bindingDeLaCredencial: vieja.bindingId,
+      revocada: true,
     })
     await expect(exigirAparatoEmparejado(VENUE, 'terminal-2', nueva.credential)).resolves.toEqual({
       bindingId: nueva.bindingId,
-      bindingDeLaCredencial: nueva.bindingId,
+      revocada: false,
     })
   })
+})
 
-  it('🔴 r6-6: el intento fijo a su emparejamiento ANTERIOR (b1) llega con la credencial NUEVA de la misma PC: cuenta b1, no la nueva', async () => {
-    const b1 = await emparejarAparato(VENUE, autor('uid-pc-1'), '192.168.1.50')
-    await emparejarAparato(VENUE, autor('uid-pc-2'), '192.168.1.50')
-    const b3 = await emparejarAparato(VENUE, autor('uid-pc-1'), '192.168.1.50')
-    await expect(exigirAparatoEmparejado(VENUE, 'terminal-1', b3.credential, b1.bindingId)).resolves.toEqual({
-      bindingId: b1.bindingId,
-      // H6: también la de la credencial presentada, para que un cierre sin hora no valga con dos altas distintas.
-      bindingDeLaCredencial: b3.bindingId,
+describe('🔴 recorte R1: no se cambia ni se apaga la PC con cobros a medias', () => {
+  const A_MEDIAS = (referenceCC: string, kind: string) => ({ venueId: VENUE, referenceCC, kind, status: 'ABIERTO' })
+
+  it.each([
+    ['una duda ESPERANDO', 'ESPERANDO'],
+    ['un desenlace RECIBIDO (POR_TERMINAR)', 'POR_TERMINAR'],
+  ])('con %s: emparejar otra PC es 409 CASH_MACHINE_FOLIOS_PENDING con los folios, y la PC sigue activa', async (_n, kind) => {
+    const primera = await emparejarAparato(VENUE, autor('uid-pc-1'), '192.168.1.50')
+    incidencias.push(A_MEDIAS('AQ0123456789AB', kind), { ...A_MEDIAS('AQ0000000000ZZ', 'IMPOSIBLE') })
+    await expect(emparejarAparato(VENUE, autor('uid-pc-2'), '192.168.1.50')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CASH_MACHINE_FOLIOS_PENDING',
+      message: expect.stringContaining('Termínalos en el panel'),
+      details: { count: 1, folios: [{ referenceCC: 'AQ0123456789AB', kind }] },
     })
-    // Un emparejamiento de OTRO aparato no se puede reclamar.
-    const deB = bindings.find(b => b.deviceId === 'terminal-2')!
-    await expect(exigirAparatoEmparejado(VENUE, 'terminal-1', b3.credential, deB.id)).rejects.toMatchObject(NO_EMPAREJADA)
-    // Sin credencial, nada.
-    await expect(exigirAparatoEmparejado(VENUE, 'terminal-1', null, b1.bindingId)).rejects.toMatchObject(NO_EMPAREJADA)
+    expect(bindings.filter(b => b.active).map(b => b.id)).toEqual([primera.bindingId])
+    // Desemparejar (apagar la casilla) tampoco: primero se terminan en el panel.
+    await expect(desemparejarAparato(VENUE, autor('uid-pc-1'))).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CASH_MACHINE_FOLIOS_PENDING',
+    })
+    expect(bindings.find(b => b.id === primera.bindingId)).toMatchObject({ active: true })
+  })
+
+  it('lo terminado (RESUELTO) o lo que no mueve dinero (IMPOSIBLE, CONFLICTO) no frena; tampoco a la PC que ya no tiene nada activo', async () => {
+    await emparejarAparato(VENUE, autor('uid-pc-1'), '192.168.1.50')
+    incidencias.push({ ...A_MEDIAS('AQ0123456789AB', 'ESPERANDO'), status: 'RESUELTO' }, A_MEDIAS('AQ0123456789AC', 'CONFLICTO'))
+    const segunda = await emparejarAparato(VENUE, autor('uid-pc-2'), '192.168.1.50')
+    expect(bindings.filter(b => b.active).map(b => b.id)).toEqual([segunda.bindingId])
+    incidencias.push(A_MEDIAS('AQ0123456789AD', 'ESPERANDO'))
+    // La PC 1 ya está revocada: apagar su casilla no revoca nada, así que no la frena lo que tenga la PC 2.
+    await expect(desemparejarAparato(VENUE, autor('uid-pc-1'))).resolves.toEqual({ revoked: false })
   })
 })

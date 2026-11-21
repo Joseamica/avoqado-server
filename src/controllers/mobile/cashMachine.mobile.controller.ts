@@ -53,13 +53,8 @@ export async function registrarVenta(req: Request, res: Response, next: NextFunc
   try {
     const { venueId } = req.params
     const autor = autorDe(req)
-    const { referenceCC, cierre, pedido, bindingId } = req.body
-    const resultado = await registrarVentaDeLaMaquina(
-      venueId,
-      autor,
-      { referenceCC, cierre, pedido, bindingId },
-      lectorDelPedido(req, venueId),
-    )
+    const { referenceCC, cierre, pedido } = req.body
+    const resultado = await registrarVentaDeLaMaquina(venueId, autor, { referenceCC, cierre, pedido }, lectorDelPedido(req, venueId))
     res.status(resultado.status).json({ success: true, ...resultado.body })
   } catch (error) {
     next(error)
@@ -151,7 +146,7 @@ export async function consultarDuda(req: Request, res: Response, next: NextFunct
 }
 
 /**
- * `GET /api/v1/{mobile|dashboard}/venues/:venueId/cash-machine/doubts` — `cash-machine:resolve`. Todas las incidencias de la máquina
+ * `GET /api/v1/dashboard/venues/:venueId/cash-machine/doubts` — `cash-machine:resolve` (recorte R2: sólo el panel). Todas las incidencias de la máquina
  * (cada una con su `kind`), acotada: `{ data, total, nextCursor }`. ?status&kind&folio&cursor&limit.
  */
 export async function listarDudas(req: Request, res: Response, next: NextFunction) {
@@ -170,7 +165,7 @@ export async function listarDudas(req: Request, res: Response, next: NextFunctio
 }
 
 /**
- * `POST /api/v1/{mobile|dashboard}/venues/:venueId/cash-machine/doubts/:referenceCC/resolve` — `cash-machine:resolve`. El gerente es
+ * `POST /api/v1/dashboard/venues/:venueId/cash-machine/doubts/:referenceCC/resolve` — `cash-machine:resolve` (recorte R2: sólo el panel). El gerente es
  * el de la sesión (nunca del cuerpo) y manda la `version` que vio (r6-4: si llegó evidencia nueva, 409 `CASH_MACHINE_DOUBT_CHANGED`
  * y no se escribe nada). Responde como la venta: 200/202 TERMINADO, 202 RECIBIDO, 409 y 422 con incidencia.
  */
@@ -192,7 +187,7 @@ export async function resolverDuda(req: Request, res: Response, next: NextFuncti
 }
 
 /**
- * `POST /api/v1/{mobile|dashboard}/venues/:venueId/cash-machine/incidents/:incidentId/review` — `cash-machine:resolve` (Codex r1 #7).
+ * `POST /api/v1/dashboard/venues/:venueId/cash-machine/incidents/:incidentId/review` — `cash-machine:resolve` (Codex r1 #7; sólo el panel).
  * El gerente da por revisada una incidencia que no es duda, con una nota y la `version` de la evidencia que vio (Codex r2 #8). El gerente
  * es el de la sesión.
  */

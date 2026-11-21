@@ -26,11 +26,10 @@ const centavos = (campo: string) =>
     .finite(`${campo} debe ser un número de centavos`)
 
 const cierre = z.object({
-  // Lo físico, legible: el desenlace como texto (si es PAGADO, CANCELADO o GUARDADO lo decide el servicio: lo demás es IMPOSIBLE, 422
-  // con incidencia) y los importes como números (enteros, positivos y posibles, también lo decide el servicio).
-  outcome: z
-    .string({ required_error: 'Falta el desenlace de la máquina', invalid_type_error: 'El desenlace de la máquina debe ser texto' })
-    .max(32, 'El desenlace de la máquina admite hasta 32 caracteres'),
+  // Lo físico, legible: los importes como números (enteros, positivos y posibles lo decide el servicio). r6 #8: el desenlace se acepta
+  // TAL CUAL (cualquier texto, de cualquier largo, o nada): si no es PAGADO, CANCELADO o GUARDADO, el servicio lo guarda como IMPOSIBLE
+  // (422 con incidencia y el dinero), nunca un 400 sin rastro.
+  outcome: z.unknown().optional(),
   dueCents: centavos('El adeudo'),
   creditCents: centavos('Lo que entró'),
   changeDispensedCents: centavos('El cambio entregado'),
@@ -43,13 +42,6 @@ const cierre = z.object({
   cancelMode: z.unknown().optional(),
 })
 
-/** r6-6: el emparejamiento con el que la PC empezó el cobro (el `bindingId` que le dio el alta). */
-const bindingId = z
-  .string({ invalid_type_error: 'El emparejamiento debe ser texto' })
-  .cuid('El identificador del emparejamiento no es válido')
-  .nullable()
-  .optional()
-
 export const registrarVentaDeLaMaquinaSchema = z.object({
   params: z.object({ venueId }),
   body: z.object({
@@ -58,7 +50,6 @@ export const registrarVentaDeLaMaquinaSchema = z.object({
     // Rediseño r3 (D1): el carrito tal cual (el JSON de `POST /orders`). Ausente o ilegible NO es 400: el comprobante se guarda primero y,
     // si el carrito no se puede leer, el dinero queda sin venta (202) para el gerente.
     pedido: z.unknown().optional(),
-    bindingId,
   }),
 })
 
@@ -108,7 +99,6 @@ export const subirDudaDeLaMaquinaSchema = z.object({
     tipCents: z.unknown().optional(),
     // El MISMO carrito que la venta. r6-2: uno ilegible no es 400; la duda se guarda y nunca se vuelve desenlace por eso.
     pedido: z.unknown().optional(),
-    bindingId,
     startedAt: z.unknown().optional(),
     lastSeen: z.unknown().optional(),
     creditCents: z.unknown().optional(),

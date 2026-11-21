@@ -72,8 +72,8 @@ const resolucion = (over: Partial<ResolucionDelGerente> = {}): ResolucionDelGere
   version: 1,
   ...over,
 })
-const vender = (c = cierre(), pedido: unknown = CARRITO, autor = PC, bindingId?: string) =>
-  registrarVentaDeLaMaquina(VENUE, autor, { referenceCC: REF, cierre: c, pedido, bindingId }, lector)
+const vender = (c = cierre(), pedido: unknown = CARRITO, autor = PC) =>
+  registrarVentaDeLaMaquina(VENUE, autor, { referenceCC: REF, cierre: c, pedido }, lector)
 const subir = (over: Partial<DudaDeLaMaquina> = {}, autor = PC) => subirDudaDeLaMaquina(VENUE, autor, duda(over), lector)
 const resolver = (over: Partial<ResolucionDelGerente> = {}, gerente = GERENTE) =>
   resolverDudaDeLaMaquina(VENUE, gerente, REF, resolucion(over), lector)
@@ -347,42 +347,6 @@ describe('r6-5 · una sola PC activa por negocio', () => {
       .map((c: any[]) => JSON.stringify(c[0]))
       .filter((s: string) => s.includes('cash-machine-binding'))
     expect(new Set(candados).size).toBe(1)
-  })
-})
-
-describe('r6-6 · cada intento queda fijo a su emparejamiento', () => {
-  /** A cobró con b1; la revocaron a las 18:00 (otra PC); después la volvieron a habilitar (b3) y su cola reenvía con la credencial nueva. */
-  beforeEach(() => {
-    a.base.vinculos[0].active = false
-    a.base.vinculos[0].revokedAt = new Date('2026-11-20T18:00:00.000Z')
-    a.base.vinculos.push({
-      id: 'b3',
-      venueId: VENUE,
-      deviceId: 'terminal-pc',
-      machineIp: '192.168.1.50',
-      credentialHash: require('crypto').createHash('sha256').update('credencial-nueva').digest('hex'),
-      active: true,
-      revokedAt: null,
-      createdAt: new Date('2026-11-20T19:00:00.000Z'),
-    })
-  })
-  const conLaNueva = { ...PC, credencial: 'credencial-nueva' }
-
-  it('🔴 cobrado DURANTE la revocación (18:05) con la credencial nueva y el intento fijo en b1: 202 PC_REVOCADA y TRAS_REVOCAR, no venta', async () => {
-    const r = await vender(cierre({ occurredAt: '2026-11-20T18:05:00.000Z' }), CARRITO, conLaNueva, 'b1')
-    expect(r).toMatchObject({ status: 202, body: { motivo: 'PC_REVOCADA' } })
-    expect(a.base.incidencias.map(i => i.kind).sort()).toEqual(['NO_SE_PUDO_REGISTRAR', 'TRAS_REVOCAR'])
-    expect(prismaMock.payment.create).not.toHaveBeenCalled()
-  })
-
-  it('cobrado ANTES de la revocación (17:55): la venta entra con su marca TRAS_REVOCAR', async () => {
-    const r = await vender(cierre({ occurredAt: '2026-11-20T17:55:00.000Z' }), CARRITO, conLaNueva, 'b1')
-    expect(r).toMatchObject({ status: 200 })
-    expect(a.base.incidencias.map(i => i.kind)).toEqual(['TRAS_REVOCAR'])
-  })
-
-  it('un emparejamiento que no es de este aparato: 403', async () => {
-    await expect(vender(cierre(), CARRITO, conLaNueva, 'bB')).rejects.toMatchObject({ statusCode: 403 })
   })
 })
 

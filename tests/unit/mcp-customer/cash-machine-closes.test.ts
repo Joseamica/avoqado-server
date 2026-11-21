@@ -195,7 +195,8 @@ describe('cash_machine_closes — MCP libre, sólo lectura, pesos', () => {
         { referenceCC: 'AQ00000000DUDA', dueCents: 18750, saleCents: 18000, tipCents: 750, pedido: null, saleShiftId: null, version: 2 },
       ] as never)
     const r = await call({ venueId, enDuda: true })
-    const filtro = { venueId, status: 'ABIERTO' }
+    // Recorte R1: un RECIBIDO recién nacido (POR_TERMINAR de menos de 10 min) todavía no es del gerente.
+    const filtro = { venueId, status: 'ABIERTO', NOT: { kind: 'POR_TERMINAR', createdAt: { gt: expect.any(Date) } } }
     expect(jest.mocked(prisma.cashMachineIncident.count).mock.calls[0][0]!.where).toEqual(filtro)
     expect(jest.mocked(prisma.cashMachineIncident.findMany).mock.calls[0][0]!.where).toEqual(filtro)
     expect(r).toMatchObject({
@@ -210,7 +211,12 @@ describe('cash_machine_closes — MCP libre, sólo lectura, pesos', () => {
     jest.mocked(prisma.cashMachineIncident.count).mockResolvedValue(1 as never)
     jest.mocked(prisma.cashMachineIncident.findMany).mockResolvedValue([] as never)
     await call({ venueId, enDuda: true, folio: 'aq00000000duda' })
-    const filtro = { venueId, status: 'ABIERTO', referenceCC: { contains: 'AQ00000000DUDA' } }
+    const filtro = {
+      venueId,
+      status: 'ABIERTO',
+      referenceCC: { contains: 'AQ00000000DUDA' },
+      NOT: { kind: 'POR_TERMINAR', createdAt: { gt: expect.any(Date) } },
+    }
     expect(jest.mocked(prisma.cashMachineIncident.count).mock.calls[0][0]!.where).toEqual(filtro)
     expect(jest.mocked(prisma.cashMachineIncident.findMany).mock.calls[0][0]!.where).toEqual(filtro)
   })
