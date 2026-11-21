@@ -475,7 +475,9 @@ describe('D661 (Ruling 117): una lectura agotada de un «Nadie» se relee en la 
   })
 
   it('Ruling 120: la lectura agotada de un «Mi equipo» no se relee (no tiene límite): una sola lectura, nada se manda y lo retoma la pasada siguiente', async () => {
-    enDuda = [{ ...CARGO_EN_DUDA, id: 'ch_eq', paymentIntentId: 'pi_eq', onlineOrder: { orderId: 'ord_eq' } }]
+    // Con un plazo vivo en su pedido: lo único que lo deja fuera de la relectura es ser de «Mi equipo».
+    const acceptDeadlineAt = conLimite('ord_eq', 600_000)
+    enDuda = [{ ...CARGO_EN_DUDA, id: 'ch_eq', paymentIntentId: 'pi_eq', onlineOrder: { orderId: 'ord_eq', acceptDeadlineAt } }]
     await stripePorPeticion({ pi_eq: ['muerta', 'rapida'] })
     const job = nuevoJob()
     const tick = job.checkNow()
