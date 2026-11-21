@@ -158,7 +158,7 @@
       ]
     },
     "android/ordenes/cambiar-o-quitar-articulos-del-carrito": {
-      "sha256": "599e0a192b08ddfba1861221c09d4a2865cdd7e944d1a046b6be0950d6b99067",
+      "sha256": "29bfe18b1cc68e1a3dfb78e8c7286ea9afbf73ab821c47ca46ed332f5951cbb6",
       "requiredPermissions": []
     },
     "android/personal/cambiar-de-usuario": {
@@ -166,7 +166,7 @@
       "requiredPermissions": []
     },
     "android/personal/checar-entrada-y-salida": {
-      "sha256": "4037a2d4222d6cb88a703d792c0f9bd0bfded1e1c33baac4bf773308c7ba0e93",
+      "sha256": "f5b565762bb942e46527809804ddc0756cc1192c5c49a3edac754abac39ddc6d",
       "requiredPermissions": []
     },
     "android/recibos/imprimir-y-reimprimir-recibo": {
@@ -801,7 +801,7 @@
       "requiredPermissions": []
     },
     "tpv/asistencia/registrar-entrada-y-salida": {
-      "sha256": "e01aaee8737027b568e964d66591ae01511c5d46d9e18716eedabe4dc52896ee",
+      "sha256": "32684b003ba6ffa83d5c678927c2588de87bb8c8b939bd8032de300beaa8cdff",
       "requiredPermissions": []
     },
     "tpv/ayuda/actualizar-la-app-pax": {
@@ -1130,7 +1130,7 @@
       ]
     },
     "windows/ordenes/cambiar-o-quitar-articulos-del-carrito": {
-      "sha256": "bbb7a1194eedc93ed792203afceaea34dfbf824d447a6f552f9766a144949c68",
+      "sha256": "70ba3e9e7e87a2a2fc329796ce8b58e846abd15c4323b0b51ae1eb626c6eeca9",
       "requiredPermissions": []
     },
     "windows/personal/cambiar-de-usuario": {
@@ -1138,7 +1138,7 @@
       "requiredPermissions": []
     },
     "windows/personal/checar-entrada-y-salida": {
-      "sha256": "78fc9e35cdd63e74f314177ab93ef440f6cf2c17fd82ee0abbb961ebba9e3339",
+      "sha256": "4bd6ea1f12850938c044895e1b7464cd46541425a36f1f6f93e147e5b44eb5c7",
       "requiredPermissions": []
     },
     "windows/recibos/imprimir-y-reimprimir-recibo": {

@@ -9,6 +9,7 @@ import * as ficha from '../../services/crm/ficha.service'
 import { applyHubspot, previewHubspot } from '../../services/crm/hubspotImport.service'
 import * as reports from '../../services/crm/reports.service'
 import { addTeamMember, listTeamMembers, listTeamOptions, removeTeamMember, updateTeamMember } from '../../services/crm/teamVenue.service'
+import * as whatsapp from '../../services/crm/whatsapp.service'
 import { DEFAULT_TIMEZONE, formatInVenueTimezone } from '../../utils/datetime'
 
 /**
@@ -305,4 +306,18 @@ export async function removeContact(req: Request, res: Response): Promise<void> 
 export async function listContacts(req: Request, res: Response): Promise<void> {
   const { cursor, limit } = req.query as { cursor?: string; limit?: number }
   res.json({ data: await accounts.listContacts(req.crmAccess!, req.params.id, { cursor, limit }) })
+}
+
+// WhatsApp de ventas (fase 3, «leer chats»): sólo lectura; el servicio deja pasar sólo al superadmin real.
+
+/** GET /api/v1/crm/whatsapp/chats */
+export async function listWhatsappChats(req: Request, res: Response): Promise<void> {
+  const { rows, total, nextCursor } = await whatsapp.listChats(req.crmAccess!, req.query as unknown as whatsapp.ChatFilters)
+  res.json({ data: rows, meta: { total, nextCursor } })
+}
+
+/** GET /api/v1/crm/whatsapp/messages */
+export async function getWhatsappThread(req: Request, res: Response): Promise<void> {
+  const { rows, total, nextCursor } = await whatsapp.getThread(req.crmAccess!, req.query as unknown as whatsapp.ThreadQuery)
+  res.json({ data: rows, meta: { total, nextCursor } })
 }

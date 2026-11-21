@@ -338,6 +338,7 @@ export const PANEL_PERMITIDAS: ReadonlySet<string> = new Set([
   'staff-documents',
   'stock',
   'tender-types',
+  'time-entries', // corregir una «salida olvidada» (D3): sólo toca la asistencia del propio demo
   'upsell-products',
   'upsell-rules',
   'upsell-surfaces',
