@@ -1,6 +1,8 @@
--- Máquina de efectivo (QuickPay Mini), fase 1a: plan docs/superpowers/plans/2026-11-20-maquina-de-efectivo-fase-1a.md (Task A1).
--- Sólo tablas y columnas nuevas; nada se quita ni se renombra. El índice de Payment va CONCURRENTLY en la migración siguiente
--- (20261120120001): Payment recibe escrituras en cada cobro y un CREATE INDEX normal las frenaría mientras se construye.
+-- Máquina de efectivo (QuickPay Mini), fase 1a: plan docs/superpowers/plans/2026-11-20-maquina-de-efectivo-fase-1a.md.
+-- UNA migración con el esquema final de la 1a (ronda 4 de Codex sobre el código, F1/F2): nada de la 1a salió de su rama, así que las
+-- intermedias (columna cartHash, rediseño r3) se aplastaron aquí. Sólo tablas y columnas nuevas; nada se quita ni se renombra.
+-- Los índices de Payment y de CashMachineClose.occurredAt van CONCURRENTLY, cada uno en su migración (20261120120001 y 20261120120003):
+-- Payment recibe escrituras en cada cobro y Prisma manda el archivo como un lote (CONCURRENTLY no cabe en una transacción implícita).
 
 -- AlterTable
 ALTER TABLE "Payment" ADD COLUMN     "cashMachineRef" VARCHAR(32);
@@ -31,8 +33,10 @@ CREATE TABLE "CashMachineClose" (
     "occurredAt" TIMESTAMP(3),
     "occurredAtKnown" BOOLEAN NOT NULL DEFAULT true,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "cartHash" VARCHAR(64),
+    "motivoSinRegistro" VARCHAR(24),
 
-CONSTRAINT "CashMachineClose_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "CashMachineClose_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -49,7 +53,7 @@ CREATE TABLE "CashMachineIncident" (
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
-CONSTRAINT "CashMachineIncident_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "CashMachineIncident_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -64,7 +68,40 @@ CREATE TABLE "CashMachineBinding" (
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "revokedAt" TIMESTAMP(3),
 
-CONSTRAINT "CashMachineBinding_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "CashMachineBinding_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "CashMachineFolio" (
+    "id" TEXT NOT NULL,
+    "venueId" TEXT NOT NULL,
+    "referenceCC" VARCHAR(32) NOT NULL,
+    "deviceId" TEXT,
+    "bindingId" TEXT,
+    "pedido" JSONB,
+    "cartHash" VARCHAR(64),
+    "saleShiftId" TEXT,
+    "dueCents" INTEGER NOT NULL,
+    "saleCents" INTEGER NOT NULL,
+    "tipCents" INTEGER NOT NULL,
+    "decision" JSONB,
+    "version" INTEGER NOT NULL DEFAULT 1,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "CashMachineFolio_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "CashMachineObservation" (
+    "id" TEXT NOT NULL,
+    "venueId" TEXT NOT NULL,
+    "referenceCC" VARCHAR(32) NOT NULL,
+    "fingerprint" VARCHAR(64) NOT NULL,
+    "payload" JSONB NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "CashMachineObservation_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateIndex
@@ -82,6 +119,12 @@ CREATE UNIQUE INDEX "CashMachineIncident_venueId_referenceCC_kind_key" ON "CashM
 -- CreateIndex
 CREATE INDEX "CashMachineBinding_venueId_deviceId_idx" ON "CashMachineBinding"("venueId", "deviceId");
 
+-- CreateIndex
+CREATE UNIQUE INDEX "CashMachineFolio_venueId_referenceCC_key" ON "CashMachineFolio"("venueId", "referenceCC");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "CashMachineObservation_venueId_referenceCC_fingerprint_key" ON "CashMachineObservation"("venueId", "referenceCC", "fingerprint");
+
 -- AddForeignKey
 ALTER TABLE "CashMachineClose" ADD CONSTRAINT "CashMachineClose_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
@@ -94,6 +137,12 @@ ALTER TABLE "CashMachineBinding" ADD CONSTRAINT "CashMachineBinding_venueId_fkey
 -- AddForeignKey
 ALTER TABLE "CashMachineBinding" ADD CONSTRAINT "CashMachineBinding_deviceId_fkey" FOREIGN KEY ("deviceId") REFERENCES "Terminal"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
--- Una sola PC activa por máquina (venueId + IP): habilitar otra PC revoca la anterior en la misma transacción.
--- Índice PARCIAL que Prisma no puede expresar (comentado en el modelo CashMachineBinding de schema.prisma).
-CREATE UNIQUE INDEX "CashMachineBinding_venueId_machineIp_activa_key" ON "CashMachineBinding"("venueId", "machineIp") WHERE "active";
+-- AddForeignKey
+ALTER TABLE "CashMachineFolio" ADD CONSTRAINT "CashMachineFolio_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "CashMachineObservation" ADD CONSTRAINT "CashMachineObservation_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- Rediseño r3 (D3, r6-5): UNA sola PC habilitada por negocio. Índice PARCIAL que Prisma no puede expresar (comentado en el modelo
+-- CashMachineBinding de schema.prisma). La tabla nace vacía en esta misma migración: no hay filas viejas que lo choquen (F2).
+CREATE UNIQUE INDEX "CashMachineBinding_venueId_activa_key" ON "CashMachineBinding"("venueId") WHERE "active";

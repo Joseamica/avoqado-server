@@ -17053,7 +17053,7 @@ model CashMachineIncident {
 /// Qué PC (aparato del POS) controla la máquina del negocio. Rediseño r3 (D3, r6-5): en la 1a UNA sola PC habilitada por negocio;
 /// emparejar otra revoca la anterior en la misma transacción.
 /// 🔴 «Una sola activa por negocio» la garantiza un índice único PARCIAL escrito a mano en la migración
-/// 20261121120000_maquina_de_efectivo_rediseno_r3 (`CashMachineBinding_venueId_activa_key ... WHERE "active"`): Prisma no lo puede
+/// 20261120120000_maquina_de_efectivo_1a (`CashMachineBinding_venueId_activa_key ... WHERE "active"`): Prisma no lo puede
 /// expresar.
 model CashMachineBinding {
   id               String    @id @default(cuid())
