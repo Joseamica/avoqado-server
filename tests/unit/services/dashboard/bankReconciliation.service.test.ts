@@ -111,9 +111,34 @@ describe('bankReconciliation — matchLines · D24: un día con la comisión por
     ])
   })
 
-  it('una línea que cuadra con OTRO día ya completo se decide como siempre', () => {
-    const r = matchLines([line(0, '2026-06-10', 5000)], [pendiente('2026-06-10', 1000), cand('2026-06-11', 5000)])
+  it('una línea que cuadra con un día completo MÁS CERCANO que cualquier día pendiente se decide como siempre', () => {
+    const r = matchLines([line(0, '2026-06-11', 5000)], [pendiente('2026-06-09', 1000), cand('2026-06-11', 5000)])
     expect(r).toEqual([{ rowIndex: 0, matchStatus: 'MATCHED', matchScore: 1, matchedKey: '2026-06-11' }])
+  })
+
+  it('pasada exhaustiva #2: el abono NO se pega al día vecino ya firme si un día pendiente está igual de cerca o más', () => {
+    // Abono de $97 del 21: el cobro del 20 sigue en $100 (espera su comisión de $3); el 19 ya tiene $97 firmes.
+    const masCerca = matchLines([line(0, '2026-06-21', 97_00)], [cand('2026-06-19', 97_00), pendiente('2026-06-20', 100_00)])
+    expect(masCerca).toEqual([{ rowIndex: 0, matchStatus: 'UNMATCHED', matchScore: 0, matchedKey: null, porDecidir: true }])
+    // Igual de cerca (mismo día que el vecino firme): tampoco se decide.
+    const igual = matchLines([line(0, '2026-06-10', 5000)], [pendiente('2026-06-10', 1000), cand('2026-06-10', 5000)])
+    expect(igual[0]).toMatchObject({ matchStatus: 'UNMATCHED', porDecidir: true })
+    // El día firme no se consume: otra línea que sí es suya lo sigue tomando.
+    const despues = matchLines(
+      [line(0, '2026-06-21', 97_00), line(1, '2026-06-19', 97_00)],
+      [cand('2026-06-19', 97_00), pendiente('2026-06-20', 100_00)],
+    )
+    expect(despues.map(x => [x.matchStatus, x.matchedKey, x.porDecidir ?? false])).toEqual([
+      ['UNMATCHED', null, true],
+      ['MATCHED', '2026-06-19', false],
+    ])
+  })
+
+  it('con tolerancia, un día firme que NO cuadra exacto no gana a un día pendiente de la ventana (su neto final podría ser exacto)', () => {
+    const r = matchLines([line(0, '2026-06-10', 10_000)], [cand('2026-06-10', 10_002), pendiente('2026-06-12', 1)], {
+      amountTolCents: 5,
+    })
+    expect(r[0]).toMatchObject({ matchStatus: 'UNMATCHED', porDecidir: true })
   })
 
   it('fuera de la ventana del día pendiente, «sin conciliar» como siempre; débitos y duplicados no cambian', () => {

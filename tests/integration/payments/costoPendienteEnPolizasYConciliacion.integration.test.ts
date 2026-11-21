@@ -347,6 +347,46 @@ describe('D24 · conciliación bancaria con una devolución cuya comisión está
     ).toBe(1)
   })
 
+  it('pasada exhaustiva #2: el abono de $97 NO se pega al día vecino ya firme mientras el día más cercano espera su comisión; con la comisión, se decide con su día', async () => {
+    const diaLocal = (atras: number) => formatInTimeZone(new Date(Date.now() - atras * 86_400_000), 'America/Mexico_City', 'yyyy-MM-dd')
+    const alMediodia = (ymd: string) => new Date(`${ymd}T18:00:00Z`) // mediodía en la Ciudad de México
+    // Antier: un cobro de $100 ya convergido ($97 firmes).
+    const antier = await originalConvergido()
+    await prisma.payment.update({ where: { id: antier.id }, data: { createdAt: alMediodia(diaLocal(2)) } })
+    // Ayer: otro cobro de $100 cuya comisión todavía no se puede calcular ($100 provisional).
+    const sinTarifa = jest
+      .spyOn(costoDeTransaccion, 'createTransactionCost')
+      .mockRejectedValue(new Error('COST_PENDING_AFFILIATION_PRICING_UNRESOLVED: prueba D24 #2'))
+    const ayer = await recordFastPayment(
+      f.venueId,
+      {
+        ...f.registroDeLaTerminal({ attemptId: randomUUID(), tarjeta: { cardBrand: 'VISA', maskedPan: '****1234', entryMode: 'CHIP' } }),
+        merchantAccountId: M2.id,
+      },
+      f.staffId,
+    )
+    expect(await asegurarCostoSincrono(ayer.id)).toBe('PENDIENTE')
+    await prisma.payment.update({ where: { id: ayer.id }, data: { createdAt: alMediodia(diaLocal(1)) } })
+
+    // Hoy llega al banco un abono de $97: es el de AYER (T+1), no el de antier.
+    const subida = await processBankStatement(f.venueId, f.staffId, {
+      buffer: Buffer.from(`fecha,descripcion,abono\n${hoy()},DEPOSITO TERMINAL,97.00\n`),
+      originalname: 'estado.csv',
+      mimetype: 'text/csv',
+    })
+    expect(subida).toMatchObject({ lineCount: 1, matchedCount: 0, pendientesDeCosto: 1, lineasPorDecidir: 1 })
+    const [linea] = await lineas(subida.statementId)
+    expect(linea).toMatchObject({ matchStatus: 'UNMATCHED', matchScore: null, matchedKey: null })
+
+    // La comisión de ayer se calcula ($3): al abrir con permiso, el abono se concilia con AYER.
+    sinTarifa.mockRestore()
+    expect(await asegurarCostoSincrono(ayer.id)).toBe('CUMPLIDA')
+    expect(Number((await pago(ayer.id)).netAmount)).toBe(97)
+    const decidido = await getStatementDetail(f.venueId, subida.statementId, conPermiso())
+    expect(decidido.matchedCount).toBe(1)
+    expect(decidido.lines.map(l => [l.matchStatus, l.matchedKey, l.costoPendiente])).toEqual([['MATCHED', diaLocal(1), false]])
+  })
+
   it('sin comisión pendiente, todo igual que antes: el depósito de $58 cuadra al subirlo y nada queda por decidir', async () => {
     await devolucionConComisionPendiente(reembolsoDashboard)
     expect(await correrEfectos()).toContain(true)

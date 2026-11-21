@@ -304,18 +304,25 @@ export function matchLines(
       )
 
     const best = cands[0]
-    if (best) {
+    // D24 (pasada exhaustiva #2): un día que espera su comisión dentro de la ventana podría ser el dueño de este abono si está igual
+    // de cerca o más que el día elegido (a igual importe gana el más cercano), o si el elegido no cuadra exacto (el neto final del
+    // pendiente podría hacerlo). Entonces no se le asigna al vecino: queda «por decidir» y no consume ningún día.
+    const pendienteCompite = pendientes.some(c => {
+      const dias = daysBetween(c.date, line.postedDate)
+      if (dias > dateWindow) return false
+      return !best || best.netCents !== line.amountCents || dias <= daysBetween(best.date, line.postedDate)
+    })
+    if (best && !pendienteCompite) {
       used.add(best.key)
       const score = best.netCents === line.amountCents ? 1 : 0.9
       results.push({ rowIndex: line.rowIndex, matchStatus: 'MATCHED', matchScore: score, matchedKey: best.key })
     } else {
-      const porDecidir = pendientes.some(c => daysBetween(c.date, line.postedDate) <= dateWindow)
       results.push({
         rowIndex: line.rowIndex,
         matchStatus: 'UNMATCHED',
         matchScore: 0,
         matchedKey: null,
-        ...(porDecidir ? { porDecidir: true as const } : {}),
+        ...(pendienteCompite ? { porDecidir: true as const } : {}),
       })
     }
   }
