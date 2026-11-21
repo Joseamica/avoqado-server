@@ -72,8 +72,8 @@ describe('listKdsOrders controller — total en X-Total-Count', () => {
 
     expect(res.setHeader).toHaveBeenCalledWith('X-Total-Count', '1')
     expect(logger.warn).not.toHaveBeenCalled()
-    expect(listMock).toHaveBeenCalledWith('venue-1', 'COMPLETED', undefined)
-    expect(countMock).toHaveBeenCalledWith('venue-1', 'COMPLETED', undefined)
+    expect(listMock).toHaveBeenCalledWith('venue-1', 'COMPLETED', undefined, undefined, false)
+    expect(countMock).toHaveBeenCalledWith('venue-1', 'COMPLETED', undefined, false)
   })
 
   it('con stationId, las dos consultas lo reciben (tablero de UNA estación)', async () => {
@@ -82,7 +82,7 @@ describe('listKdsOrders controller — total en X-Total-Count', () => {
 
     await llamar({ stationId: 'st-barra' })
 
-    expect(listMock).toHaveBeenCalledWith('venue-1', undefined, 'st-barra')
-    expect(countMock).toHaveBeenCalledWith('venue-1', undefined, 'st-barra')
+    expect(listMock).toHaveBeenCalledWith('venue-1', undefined, 'st-barra', undefined, false)
+    expect(countMock).toHaveBeenCalledWith('venue-1', undefined, 'st-barra', false)
   })
 })

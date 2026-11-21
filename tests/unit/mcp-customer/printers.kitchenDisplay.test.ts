@@ -155,7 +155,8 @@ describe('list_kitchen_tickets (etapa 3)', () => {
     ])
     mockCountKds.mockResolvedValue(7)
     const r = parse(await cliente('list_kitchen_tickets', { venueId: 'v1', stationId: 'st-1' }))
-    expect(mockListKds).toHaveBeenCalledWith('v1', undefined, 'st-1')
+    expect(mockListKds).toHaveBeenCalledWith('v1', undefined, 'st-1', undefined, true)
+    expect(mockCountKds).toHaveBeenCalledWith('v1', undefined, 'st-1', true)
     expect(r).toEqual(
       expect.objectContaining({ ok: true, total: 7, devueltas: 1, comandas: [expect.objectContaining({ id: 'k1', renglones: 2 })] }),
     )
@@ -205,7 +206,7 @@ describe('list_kitchen_tickets (etapa 3)', () => {
     mockCountKds.mockResolvedValue(0)
     const r = parse(await cliente('list_kitchen_tickets', { venueId: 'v1', status: 'BOGUS' }))
     expect(r.ok).toBe(true)
-    expect(mockListKds).toHaveBeenCalledWith('v1', 'BOGUS', undefined)
+    expect(mockListKds).toHaveBeenCalledWith('v1', 'BOGUS', undefined, undefined, true)
   })
 })
 

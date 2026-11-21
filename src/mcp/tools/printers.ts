@@ -252,7 +252,11 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
     async ({ venueId, stationId, status }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('orders:read', venueId)
-      const [comandas, total] = await Promise.all([listKdsOrders(venueId, status, stationId), countKdsOrders(venueId, status, stationId)])
+      // El tablero de D17 (como lo ve una pantalla nueva): sin lo que la cocina terminó ni lo archivado.
+      const [comandas, total] = await Promise.all([
+        listKdsOrders(venueId, status, stationId, undefined, true),
+        countKdsOrders(venueId, status, stationId, true),
+      ])
       return text({
         ok: true,
         total,

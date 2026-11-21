@@ -108,9 +108,9 @@ const anularEnLaTpv = async (orderId: string, itemId: string) => {
 const filaDe = (orderItemId: string) =>
   prisma.kdsOrderItem.findFirst({ where: { orderItemId, kdsOrder: { venueId } }, include: { kdsOrder: true } })
 
-/** Lo que lee la pantalla: la comanda del tablero que trae ese renglón. */
-async function enElTablero(orderItemId: string) {
-  const tablero = await listKdsOrders(venueId)
+/** Lo que lee la pantalla (nueva: pide `kitchenDoneVersion=1`): la comanda del tablero que trae ese renglón. */
+async function enElTablero(orderItemId: string, nueva = true) {
+  const tablero = await listKdsOrders(venueId, undefined, undefined, undefined, nueva)
   const comanda = tablero.find(c => c.items.some(i => i.orderItemId === orderItemId))
   return { comanda, renglon: comanda?.items.find(i => i.orderItemId === orderItemId) }
 }
@@ -281,6 +281,7 @@ describe('comanda con tiempos (v1)', () => {
     expect(despues.status).toBe('READY') // falta que la caja entregue el taco
     expect(despues.kitchenDoneAt).not.toBeNull()
     expect((await enElTablero(c.idDe(taco))).comanda).toBeUndefined()
+    expect((await enElTablero(c.idDe(taco), false)).comanda?.status).toBe('READY') // la pantalla vieja la sigue recibiendo
     const fila = (await filaDe(c.idDe(agua)))!
     const bitacora = await prisma.activityLog.findFirst({ where: { venueId, action: 'KITCHEN_ORDER_CANCEL', entityId: fila.id } })
     expect(bitacora?.data).toMatchObject({ before: { PREPARING: 1 }, after: { CANCELLED: 1 } })
