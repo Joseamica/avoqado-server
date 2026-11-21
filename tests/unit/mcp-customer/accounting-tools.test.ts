@@ -581,6 +581,49 @@ describe('generate_journal_entries (write) — gated CFDI + accounting:manage', 
     expect(out.planRequired).toBe(true)
     expect(mockGenerate).not.toHaveBeenCalled()
   })
+
+  it('D24: dice en llano cuántos pagos esperan su comisión (y cuáles tienen el cálculo detenido); sin pendientes, sin aviso', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    const base = { needsFiscalSetup: false, missingMappings: [], period: '2026-11', candidates: 4, alreadyPosted: 0, skipped: 0 }
+    mockGenerate.mockResolvedValue({ ...base, posted: 1, pendientesDeRevision: 0, pendientesDeCosto: 3, costoSinCalcular: 1 })
+    const out = parse(await call('generate_journal_entries', { venueId: 'v1', period: '2026-11' }))
+    expect(out).toMatchObject({ ok: true, polizasGeneradas: 1, esperanSuComision: 3, comisionSinCalcular: 1 })
+    expect(out.aviso).toContain('3 pago(s) con tarjeta todavía esperan que se calcule su comisión')
+    expect(out.aviso).toContain('1 tienen el cálculo de la comisión detenido')
+
+    mockGenerate.mockResolvedValue({ ...base, posted: 4, pendientesDeRevision: 0, pendientesDeCosto: 0, costoSinCalcular: 0 })
+    const limpio = parse(await call('generate_journal_entries', { venueId: 'v1', period: '2026-11' }))
+    expect(limpio).toMatchObject({ ok: true, polizasGeneradas: 4, esperanSuComision: 0, comisionSinCalcular: 0 })
+    expect(limpio.aviso).toBeUndefined()
+  })
+})
+
+describe('bank_reconciliation_summary — D24: depósitos que esperan la comisión de su día', () => {
+  const listStatements = jest.requireMock('@/services/dashboard/bankReconciliation.service').listStatements as jest.Mock
+  const estado = (id: string, porDecidir?: number) => ({
+    id,
+    fileName: `${id}.csv`,
+    status: 'PARSED',
+    periodStart: null,
+    periodEnd: null,
+    lineCount: 3,
+    matchedCount: 1,
+    createdAt: new Date('2026-11-20T12:00:00Z'),
+    ...(porDecidir === undefined ? {} : { _count: { lines: porDecidir } }),
+  })
+
+  it('cuenta por estado de cuenta las líneas por decidir y lo explica; sin ninguna, sin nota', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    listStatements.mockResolvedValue([estado('a', 2), estado('b', 0)])
+    const out = parse(await call('bank_reconciliation_summary', { venueId: 'v1' }))
+    expect(out.estadosDeCuenta.map((s: { esperanComision: number }) => s.esperanComision)).toEqual([2, 0])
+    expect(out.nota).toContain('esperan a que se calcule la comisión')
+
+    listStatements.mockResolvedValue([estado('c')])
+    const limpio = parse(await call('bank_reconciliation_summary', { venueId: 'v1' }))
+    expect(limpio.estadosDeCuenta[0]).toMatchObject({ conciliados: 1, esperanComision: 0 })
+    expect(limpio.nota).toBeUndefined()
+  })
 })
 
 describe('isr_provisional · tarjetas de regalo (B4 r1, fix 2): la diferencia con la base, sólo cuando la hay', () => {
