@@ -112,7 +112,13 @@ async function accion(orderId: string, itemId: string, action: string) {
   )
 }
 
-const enTablero = async (id: string) => (await listKdsOrders(venueId)).some(o => o.id === id)
+/** `nueva` = la pantalla pide `kitchenDoneVersion=1` (2.25.55+). La vieja recibe el tablero EXACTAMENTE como antes de D17. */
+const enTablero = async (id: string, nueva = true) =>
+  (await listKdsOrders(venueId, undefined, undefined, undefined, nueva)).some(o => o.id === id)
+const tableroCuadra = async (nueva: boolean) =>
+  expect(await countKdsOrders(venueId, undefined, undefined, nueva)).toBe(
+    (await listKdsOrders(venueId, undefined, undefined, undefined, nueva)).length,
+  )
 
 describe('D17 · sale del tablero cuando la cocina termina', () => {
   it('con un tiempo retenido se queda; con todo listo sale, la caja la sigue viendo y «Deshacer» la regresa', async () => {
@@ -127,7 +133,13 @@ describe('D17 · sale del tablero cuando la cocina termina', () => {
     await accion(order.id, pozole.id, 'START')
     await accion(order.id, pozole.id, 'READY')
     expect(await enTablero(k.id)).toBe(false)
-    expect(await countKdsOrders(venueId)).toBe((await listKdsOrders(venueId)).length)
+    await tableroCuadra(true)
+    // Apps viejas (ANDROID 2.25.32+, WINDOWS 2.25.39+, iOS 1.15.12): si dejara de llegarles, su copia del WiFi la resucitaría
+    // como «sólo local» (codex-apps-viejas.md #2). Le sigue llegando en READY, igual que antes de D17, y su total cuadra.
+    expect(await enTablero(k.id, false)).toBe(true)
+    await tableroCuadra(false)
+    const pagina = await listKdsOrders(venueId, undefined, undefined, { urgencyVersion: 1 }, false)
+    expect(pagina.some(o => o.id === k.id)).toBe(true)
     const guardada = await prisma.kdsOrder.findUniqueOrThrow({ where: { id: k.id } })
     expect(guardada.status).toBe('READY') // la caja la sigue viendo en «En servicio»
     expect(guardada.kitchenDoneAt).toBeInstanceOf(Date)
@@ -194,6 +206,10 @@ describe('D17 · archivado al cerrar el día del negocio', () => {
     expect(await enTablero(kCerrada.id)).toBe(false)
     expect(await enTablero(kAbierta.id)).toBe(true)
     expect(await enTablero(kDividida.id)).toBe(true)
+    await tableroCuadra(true)
+    // A la pantalla vieja no se le esconde lo archivado: un envío del WiFi que llegue después la resucitaría como «sólo local».
+    expect(await enTablero(kCerrada.id, false)).toBe(true)
+    await tableroCuadra(false)
     expect(await prisma.activityLog.count({ where: { venueId, action: 'KDS_ORDERS_ARCHIVED' } })).toBe(1)
 
     // Repetirlo no hace nada ni deja otra fila.

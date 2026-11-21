@@ -189,20 +189,29 @@ async function filtroDelTablero(venueId: string, statuses: KdsOrderStatus[], sta
 /**
  * El TABLERO (lo que la cocina tiene que hacer) = `filtroDelTablero` menos dos cosas (D17, founder 20-nov-2026):
  *  - la comanda con tiempos (v1) cuya cocina ya terminó: READY significa «la cocina acabó, falta que la caja entregue». Sale de
- *    la pantalla y entra a «Recientes»; la caja la sigue viendo en «Servicio y entregas» porque su estado NO cambia. Así también
- *    las tablets de cocina ya instaladas (2.25.52) dejan de verla con sólo desplegar el servidor.
+ *    la pantalla y entra a «Recientes»; la caja la sigue viendo en «Servicio y entregas» porque su estado NO cambia.
  *  - lo archivado al cerrar el día (`archivedAt`).
+ * 🔴 SÓLO a la pantalla que pide `kitchenDoneVersion>=1` (FLAUTAS_C, 21-nov; `codex-apps-viejas.md` #2). Las apps viejas (ANDROID
+ * 2.25.32+, WINDOWS 2.25.39+, iOS 1.15.12) guardan la copia de la comanda que llegó por WiFi hasta que el servidor se la devuelve
+ * (`retirarPendientes`), y la de tiempos nunca vence por edad: si el servidor dejara de mandarla, esa copia (o un envío del WiFi
+ * que llegue después) reaparecería como «sólo local». A ellas el tablero les llega EXACTAMENTE como antes de D17.
  * «Recientes» NO pasa por aquí: usa `filtroDelTablero` directo.
  */
-async function filtroDelTableroActivo(venueId: string, statuses: KdsOrderStatus[], stationId?: string): Promise<Prisma.KdsOrderWhereInput> {
+async function filtroDelTableroActivo(
+  venueId: string,
+  statuses: KdsOrderStatus[],
+  stationId: string | undefined,
+  pantallaNueva: boolean,
+): Promise<Prisma.KdsOrderWhereInput> {
   const base = await filtroDelTablero(venueId, statuses, stationId)
+  if (!pantallaNueva) return base
   const previas = Array.isArray(base.AND) ? base.AND : base.AND ? [base.AND] : []
   return { ...base, AND: [...previas, { archivedAt: null }, { NOT: { preparationVersion: 1, status: KdsStatus.READY } }] }
 }
 
 /** Cuántas comandas coinciden en total: lo que el tope deja fuera no se pierde en silencio. */
-export async function countKdsOrders(venueId: string, statusFilter?: string, stationId?: string): Promise<number> {
-  return prisma.kdsOrder.count({ where: await filtroDelTableroActivo(venueId, statusesDelFiltro(statusFilter), stationId) })
+export async function countKdsOrders(venueId: string, statusFilter?: string, stationId?: string, pantallaNueva = false): Promise<number> {
+  return prisma.kdsOrder.count({ where: await filtroDelTableroActivo(venueId, statusesDelFiltro(statusFilter), stationId, pantallaNueva) })
 }
 
 export interface KdsBoardPageOptions {
@@ -216,6 +225,8 @@ export async function listKdsOrders(
   statusFilter?: string,
   stationId?: string,
   page?: KdsBoardPageOptions,
+  /** La pantalla pide `kitchenDoneVersion>=1`: no recibe lo que la cocina terminó ni lo archivado (ver `filtroDelTableroActivo`). */
+  pantallaNueva = false,
 ): Promise<KdsOrderResponse[]> {
   const offset = page?.offset ?? 0
   const limit = page?.limit ?? KDS_LIST_MAX
@@ -225,7 +236,7 @@ export async function listKdsOrders(
   ) {
     throw new BadRequestError('La página de cocina debe tener entre 1 y 100 comandas y un desplazamiento válido')
   }
-  const base = await filtroDelTableroActivo(venueId, statusesDelFiltro(statusFilter), stationId)
+  const base = await filtroDelTableroActivo(venueId, statusesDelFiltro(statusFilter), stationId, pantallaNueva)
   let orders: Array<KdsOrder & { items: KdsOrderItem[] }>
   if (page?.urgencyVersion === 1) {
     const priority: Prisma.KdsOrderWhereInput = {
