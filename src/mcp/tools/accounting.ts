@@ -685,6 +685,19 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         omitidos: r.skipped,
         // Tarjetas de regalo (spec §7, fase 1): venta de tarjetas y cobros con saldo, sin póliza; el contador los registra a mano.
         pendientesDeRevision: r.pendientesDeRevision,
+        // D24: pagos con tarjeta cuya comisión todavía se calcula: no se postean hasta tenerla (la póliza quedaría sin comisión).
+        esperanSuComision: r.pendientesDeCosto,
+        comisionSinCalcular: r.costoSinCalcular,
+        ...(r.pendientesDeCosto > 0
+          ? {
+              aviso:
+                `${r.pendientesDeCosto} pago(s) con tarjeta todavía esperan que se calcule su comisión: no se postearon para no guardarlos sin ella. ` +
+                'Vuelve a generar en unos minutos y saldrán con la comisión real.' +
+                (r.costoSinCalcular > 0
+                  ? ` De esos, ${r.costoSinCalcular} tienen el cálculo de la comisión detenido: pide a soporte que lo revise.`
+                  : ''),
+            }
+          : {}),
         // Costo de ventas del periodo (inventario consumido → cuenta de costo de ventas), si hubo consumo.
         costoDeVentas: r.cogsCents != null ? pesos(r.cogsCents) : 0,
         nota: 'Idempotente: re-correr no duplica. Devoluciones y voids se postean como contracuenta (402.01). El costo de ventas se agrega una vez por periodo (conviene generar al cierre del mes). Las tarjetas de regalo (su venta y lo pagado con saldo) no generan póliza por ahora: quedan en pendientesDeRevision para que tu contador las registre a mano.',
@@ -1677,9 +1690,16 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           periodo: { desde: s.periodStart, hasta: s.periodEnd },
           movimientos: s.lineCount,
           conciliados: s.matchedCount,
+          // D24: depósitos que esperan la comisión de su día para decidirse (se deciden solos al abrir el estado de cuenta en el panel).
+          esperanComision: s._count?.lines ?? 0,
           estatus: s.status,
           subido: s.createdAt,
         })),
+        ...(statements.some(s => (s._count?.lines ?? 0) > 0)
+          ? {
+              nota: 'Algunos depósitos esperan a que se calcule la comisión de un cobro de su día: todavía no se dicen «conciliados» ni «sin conciliar». Se deciden solos al abrir ese estado de cuenta en el panel cuando la comisión ya esté.',
+            }
+          : {}),
       })
     },
   )

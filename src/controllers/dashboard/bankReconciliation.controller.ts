@@ -35,7 +35,9 @@ export async function listBankStatements(req: Request, res: Response, next: Next
 export async function getBankStatement(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, statementId } = req.params as { venueId: string; statementId: string }
-    res.status(200).json(await bankReconciliationService.getStatementDetail(venueId, statementId))
+    // D24: abrirlo decide las líneas que esperaban la comisión de su día; queda a nombre de quien lo abrió.
+    const staffId = ((req as any).authContext?.userId as string | undefined) ?? null
+    res.status(200).json(await bankReconciliationService.getStatementDetail(venueId, statementId, staffId))
   } catch (error) {
     next(error)
   }

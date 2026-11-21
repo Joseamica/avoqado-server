@@ -100,6 +100,41 @@ describe('bankReconciliation — matchLines (the moat)', () => {
   })
 })
 
+describe('bankReconciliation — matchLines · D24: un día con la comisión por calcular no se compara', () => {
+  const pendiente = (ymd: string, netCents: number): DepositCandidate => ({ ...cand(ymd, netCents), pendientesDeCosto: 1 })
+
+  it('ni con su neto provisional cuadra: la línea queda POR DECIDIR (no «sin conciliar») y el día no se consume', () => {
+    const r = matchLines([line(0, '2026-06-10', 57_00), line(1, '2026-06-11', 58_00)], [pendiente('2026-06-10', 57_00)])
+    expect(r).toEqual([
+      { rowIndex: 0, matchStatus: 'UNMATCHED', matchScore: 0, matchedKey: null, porDecidir: true },
+      { rowIndex: 1, matchStatus: 'UNMATCHED', matchScore: 0, matchedKey: null, porDecidir: true },
+    ])
+  })
+
+  it('una línea que cuadra con OTRO día ya completo se decide como siempre', () => {
+    const r = matchLines([line(0, '2026-06-10', 5000)], [pendiente('2026-06-10', 1000), cand('2026-06-11', 5000)])
+    expect(r).toEqual([{ rowIndex: 0, matchStatus: 'MATCHED', matchScore: 1, matchedKey: '2026-06-11' }])
+  })
+
+  it('fuera de la ventana del día pendiente, «sin conciliar» como siempre; débitos y duplicados no cambian', () => {
+    const r = matchLines(
+      [
+        line(0, '2026-06-20', 9999),
+        line(1, '2026-06-10', -5000, { direction: 'DEBIT' }),
+        line(2, '2026-06-10', 700, { reference: 'X' }),
+        line(3, '2026-06-10', 700, { reference: 'X' }),
+      ],
+      [pendiente('2026-06-10', 700)],
+    )
+    expect(r.map(x => [x.matchStatus, x.porDecidir ?? false])).toEqual([
+      ['UNMATCHED', false],
+      ['UNMATCHED', false],
+      ['UNMATCHED', true],
+      ['DUPLICATE', false],
+    ])
+  })
+})
+
 describe('bankReconciliation — loadDepositCandidates (pool + ventana)', () => {
   beforeEach(() => {
     jest.clearAllMocks()
