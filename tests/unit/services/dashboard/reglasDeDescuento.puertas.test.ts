@@ -277,6 +277,30 @@ describe('Vigencia al revés (D37) · cada puerta', () => {
     expect(prismaMock.discount.update).not.toHaveBeenCalled()
   })
 
+  it('🔴 Codex D37 r3 #1: panel y apps escriben la fecha sólo si las dos siguen como se leyeron; otro guardado en medio → 409', async () => {
+    prismaMock.couponCode.findFirst.mockResolvedValue(cupon())
+    prismaMock.couponCode.update.mockRejectedValue(p2025)
+    await expect(updateCouponCode('v1', 'k1', { validUntil: new Date('2026-12-30T05:59:59.999Z') } as any)).rejects.toMatchObject({
+      statusCode: 409,
+      message: CAMBIO_CRUZADO,
+    })
+    expect(prismaMock.couponCode.update.mock.calls[0][0].where).toEqual(expect.objectContaining(del18al20))
+
+    const r = respuesta()
+    await movilCupones.updateCoupon(pedido({ validUntil: '2026-12-30' }, { venueId: 'v1', couponId: 'k1' }), r)
+    expect(r.status).toHaveBeenCalledWith(409)
+    expect(prismaMock.couponCode.update.mock.calls[1][0].where).toEqual(expect.objectContaining(del18al20))
+  })
+
+  it('🔴 Codex D37 r3 #2: la app manda validUntil 0 para quitar el fin → se guarda sin fin, no 400', async () => {
+    prismaMock.couponCode.findFirst.mockResolvedValue(cupon())
+    prismaMock.couponCode.update.mockResolvedValue({ id: 'k1', code: 'PAN10', discount: { value: 10 } } as any)
+    const r = respuesta()
+    await movilCupones.updateCoupon(pedido({ validUntil: 0 }, { venueId: 'v1', couponId: 'k1' }), r)
+    expect(r.status).not.toHaveBeenCalledWith(400)
+    expect(prismaMock.couponCode.update.mock.calls[0][0].data).toEqual(expect.objectContaining({ validUntil: null }))
+  })
+
   it('«Duplicar» uno al revés → «No se puede duplicar»', async () => {
     prismaMock.discount.findFirst.mockResolvedValue(
       descuento({ validFrom: new Date('2026-12-20T06:00:00Z'), validUntil: new Date('2026-12-13T05:59:59Z') }),

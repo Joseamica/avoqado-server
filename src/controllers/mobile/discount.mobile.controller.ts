@@ -275,8 +275,8 @@ export async function updateDiscount(req: Request, res: Response) {
       active,
     } = req.body
 
-    const cambio = { scope, targetCategoryIds, maxTotalUses, maxUsesPerCustomer }
-    const invalido = validarCambioDeDescuento(existing, { ...cambio, validFrom, validUntil })
+    const cambio = { scope, targetCategoryIds, maxTotalUses, maxUsesPerCustomer, validFrom, validUntil }
+    const invalido = validarCambioDeDescuento(existing, cambio)
     if (invalido) return res.status(400).json({ success: false, message: invalido })
 
     // Validate value based on type if provided

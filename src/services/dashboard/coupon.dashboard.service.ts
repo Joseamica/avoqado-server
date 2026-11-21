@@ -395,8 +395,13 @@ export async function updateCouponCode(venueId: string, couponId: string, data: 
   if (!existing) {
     throw new NotFoundError('El cupón no existe')
   }
-  const cambio = { maxUses: data.maxUses, maxUsesPerCustomer: data.maxUsesPerCustomer }
-  const invalido = validarCambioDeDescuento(existing, { ...cambio, validFrom: data.validFrom, validUntil: data.validUntil })
+  const cambio = {
+    maxUses: data.maxUses,
+    maxUsesPerCustomer: data.maxUsesPerCustomer,
+    validFrom: data.validFrom,
+    validUntil: data.validUntil,
+  }
+  const invalido = validarCambioDeDescuento(existing, cambio)
   if (invalido) throw new BadRequestError(invalido)
 
   // If updating code, normalize and check uniqueness

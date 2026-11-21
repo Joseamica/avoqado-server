@@ -27,11 +27,14 @@ const FECHAS = ['validFrom', 'validUntil'] as const
 
 type Guardado = Partial<Record<(typeof REGLA)[number] | (typeof FECHAS)[number], unknown>>
 
-/** Un extremo de la vigencia en ms: Date (Zod), texto (apps) o null/'' (sin fecha). undefined = el cambio no lo trae. */
+/**
+ * Un extremo de la vigencia en ms, leído IGUAL que lo guardan las puertas (`valor ? new Date(valor) : null`): un falso (null, '', 0)
+ * es «sin fecha» y un número son ms (Codex D37 r3 #2). undefined = el cambio no lo trae.
+ */
 const instante = (v: unknown): number | null | undefined => {
   if (v === undefined) return undefined
-  if (v === null || v === '') return null
-  const ms = (v instanceof Date ? v : new Date(String(v))).getTime()
+  if (!v) return null
+  const ms = (v instanceof Date ? v : new Date(v as string | number)).getTime()
   return Number.isNaN(ms) ? null : ms // lo ilegible lo rechaza su propia validación, no ésta
 }
 
@@ -59,8 +62,7 @@ export function validarCambioDeDescuento(guardado: Guardado | null, cambio: Reco
   }
 
   // Familia C: el resultado (lo que trae el cambio y, si no, lo guardado). Crear y duplicar siempre; editar sólo si trae fechas.
-  // ponytail: sin protección de dos ediciones para las fechas (`dondeEscribir`): la ventana entre leer y escribir es de milisegundos
-  // y la que importa (un formulario abierto minutos) la cubre esta revisión del resultado.
+  // Dos guardados en el mismo instante que leyeron lo mismo los frena `dondeEscribir`, que también protege las fechas (r3 #1).
   if (!guardado || FECHAS.some(campo => cambio[campo] !== undefined)) {
     const final = (campo: (typeof FECHAS)[number]) => {
       const nuevo = instante(cambio[campo])
@@ -79,9 +81,11 @@ export function validarCambioDeDescuento(guardado: Guardado | null, cambio: Reco
  * No se usa `updatedAt`: cada venta sube `currentUses` y con él `updatedAt`, y daría un 409 falso.
  */
 export function dondeEscribir(id: string, guardado: Guardado, cambio: Record<string, unknown>) {
-  if (!REGLA.some(campo => cambio[campo] !== undefined)) return { id }
+  // D37 (Codex r3 #1): las fechas de la vigencia también: dos guardados a la vez no dejan «desde» después de «hasta».
+  const protegidos = [...REGLA, ...FECHAS]
+  if (!protegidos.some(campo => cambio[campo] !== undefined)) return { id }
   const where: Record<string, unknown> = { id }
-  for (const campo of REGLA) {
+  for (const campo of protegidos) {
     if (!(campo in guardado)) continue
     const valor = guardado[campo]
     if (campo !== 'targetCategoryIds') where[campo] = valor

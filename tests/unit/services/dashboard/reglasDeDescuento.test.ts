@@ -131,6 +131,13 @@ describe('validarCambioDeDescuento · familia C (vigencia, D37)', () => {
     expect(validarCambioDeDescuento(alReves, { validUntil: d('2026-12-31T05:59:59Z') })).toBeNull()
   })
 
+  it('🔴 Codex D37 r3 #2: se lee igual que lo guardan las apps: 0 quita la fecha y un número son milisegundos', () => {
+    // Antes del arreglo, `validUntil: 0` se leía como el año 2000 y daba 400; ahora es «sin fecha», como lo guarda el controlador.
+    expect(validarCambioDeDescuento(del18al20, { validUntil: 0 })).toBeNull()
+    // Un fin anterior al inicio mandado como número de ms: se rechaza (antes pasaba la regla y se guardaba).
+    expect(validarCambioDeDescuento(del18al20, { validUntil: new Date('2026-12-13T05:59:59.999Z').getTime() })).toBe(RANGO_AL_REVES)
+  })
+
   it('«Duplicar» (crear desde una copia) uno al revés: no', () => {
     const alReves = guardado({ validFrom: d('2026-12-20T06:00:00Z'), validUntil: d('2026-12-13T05:59:59Z') })
     expect(validarCambioDeDescuento(null, alReves)).toBe(RANGO_AL_REVES)
@@ -138,6 +145,21 @@ describe('validarCambioDeDescuento · familia C (vigencia, D37)', () => {
 })
 
 describe('dondeEscribir · dos ediciones a la vez', () => {
+  it('🔴 Codex D37 r3 #1: si el cambio trae una fecha, se escribe sólo si las dos fechas siguen como se leyeron (dos guardados a la vez)', () => {
+    const leido = guardado({ validFrom: new Date('2026-12-10T06:00:00.000Z'), validUntil: new Date('2026-12-21T05:59:59.999Z') })
+    expect(dondeEscribir('k1', leido, { validUntil: new Date('2026-12-13T05:59:59.999Z') })).toEqual({
+      id: 'k1',
+      scope: 'ORDER',
+      OR: [{ targetCategoryIds: { equals: [] } }, { targetCategoryIds: { equals: null } }],
+      maxTotalUses: null,
+      maxUsesPerCustomer: null,
+      validFrom: new Date('2026-12-10T06:00:00.000Z'),
+      validUntil: new Date('2026-12-21T05:59:59.999Z'),
+    })
+    // Sin fechas ni regla en el cambio: sólo por id (no hay 409 falso).
+    expect(dondeEscribir('k1', leido, { active: false })).toEqual({ id: 'k1' })
+  })
+
   const g = guardado({ scope: 'CATEGORY', targetCategoryIds: ['c1'], maxTotalUses: 3 })
 
   it('🔴 r5 #1 y r2 #3: si el cambio MANDA un campo de la regla (aunque sea igual), escribe sólo si siguen como se leyeron', () => {

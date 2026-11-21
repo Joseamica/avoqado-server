@@ -195,8 +195,8 @@ export async function updateCoupon(req: Request, res: Response) {
     }
 
     const { code, maxUses, maxUsesPerCustomer, minPurchaseAmount, validFrom, validUntil, active } = req.body
-    const cambio = { maxUses, maxUsesPerCustomer }
-    const invalido = validarCambioDeDescuento(existing, { ...cambio, validFrom, validUntil })
+    const cambio = { maxUses, maxUsesPerCustomer, validFrom, validUntil }
+    const invalido = validarCambioDeDescuento(existing, cambio)
     if (invalido) return res.status(400).json({ success: false, message: invalido })
 
     // If updating code, normalize and check uniqueness
