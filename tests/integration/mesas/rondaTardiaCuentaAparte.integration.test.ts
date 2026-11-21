@@ -15,6 +15,7 @@ import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { mergeOrders, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { assignTable, clearTable } from '@/services/tpv/table.tpv.service'
 import { addItemsToOrder } from '@/services/tpv/order.tpv.service'
+import { voidOrderItem } from '@/services/mobile/void-item.mobile.service'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: () => null } }))
 jest.setTimeout(60_000)
@@ -215,6 +216,85 @@ describe('D7 · ronda sin red que llega a una cuenta que otra caja ya cobró', (
     expect((ack.result as any).cuentaAparte).toBeUndefined()
     expect(await fotoDe(cobrada)).toMatchObject({ renglones: 1, total: 20, pagos: 1 })
     expect(await notasDe(cobrada)).toHaveLength(0)
+  })
+
+  /** La mesera manda Coca (con red) y luego el Agua en una ronda cuya respuesta pierde; la caja ANULA el agua («Anular producto»). */
+  async function aguaAnuladaPorLaCaja(): Promise<{ cobrada: string; r: ReturnType<typeof ronda> }> {
+    const t = await mesa()
+    const cobrada = (await assignTable(venueId, t, mesera, 2)).order.id
+    const v0 = await prisma.order.findUniqueOrThrow({ where: { id: cobrada }, select: { version: true } })
+    await addItemsToOrder(venueId, cobrada, [{ productId: coca, quantity: 1 }] as any, v0.version, true)
+    const r = ronda(cobrada)
+    const v1 = await prisma.order.findUniqueOrThrow({ where: { id: cobrada }, select: { version: true } })
+    await addItemsToOrder(venueId, cobrada, [{ productId: agua, quantity: 1, externalId: `sync:${r.id}:0` }] as any, v1.version, true)
+    const aguaId = (await prisma.orderItem.findFirstOrThrow({ where: { orderId: cobrada, externalId: `sync:${r.id}:0` } })).id
+    await voidOrderItem({ venueId, orderId: cobrada, itemId: aguaId, reason: 'El cliente cambió de parecer', actorId: caja })
+    return { cobrada, r }
+  }
+
+  it('«Anular producto» (Codex r1 #1): la cuenta sigue abierta y la ronda se reenvía: el agua anulada NO vuelve', async () => {
+    const { cobrada, r } = await aguaAnuladaPorLaCaja()
+
+    const [ack] = await replay([r])
+
+    expect(ack.status).toBe('ACKED')
+    expect(await prisma.orderItem.count({ where: { externalId: `sync:${r.id}:0` } })).toBe(0)
+    expect(await fotoDe(cobrada)).toMatchObject({ renglones: 1, total: 25 })
+  })
+
+  it('«Anular producto» (Codex r2 #1): la caja anuló el agua y cobró lo demás: la ronda reenviada NO abre una cuenta aparte', async () => {
+    const { cobrada, r } = await aguaAnuladaPorLaCaja()
+    await payCashOrder(venueId, cobrada, { amount: 2500, tip: 0, staffId: caja, idempotencyKey: `caja-${cobrada}` })
+
+    const [ack] = await replay([r])
+
+    expect(ack.status).toBe('ACKED')
+    expect((ack.result as any).cuentaAparte).toBeUndefined()
+    expect(await prisma.orderItem.count({ where: { externalId: `sync:${r.id}:0` } })).toBe(0)
+    expect(await fotoDe(cobrada)).toMatchObject({ renglones: 1, total: 25, pagos: 1 })
+    expect(await notasDe(cobrada)).toHaveLength(0)
+  })
+
+  it('Decisión 1 de D7 (Codex r6 #1 y r5 #5): una etiqueta ajena igual a la de OTRA mesa ya no se confunde: la ronda va a su cuenta aparte', async () => {
+    // Mesa A tiene un café con la etiqueta propia `cafe-<x>` (la guardó otro camino, p. ej. una integración).
+    const otra = await mesa()
+    const cuentaA = (await assignTable(venueId, otra, mesera, 2)).order.id
+    const etiqueta = `cafe-${randomUUID()}`
+    const vA = await prisma.order.findUniqueOrThrow({ where: { id: cuentaA }, select: { version: true } })
+    await addItemsToOrder(venueId, cuentaA, [{ productId: coca, quantity: 1, externalId: etiqueta }] as any, vA.version, true)
+    // Mesa B se cobró sin esa ronda; llega tarde por la cola con la MISMA etiqueta (con espacios).
+    const { t, cobrada } = await mesaCobradaPorLaCaja()
+    const r = { ...ronda(cobrada), payload: { orderId: cobrada, items: [{ productId: agua, quantity: 1, externalId: ` ${etiqueta} ` }] } }
+
+    const [ack] = await replay([r])
+
+    expect(ack.status).toBe('ACKED')
+    const aparte = String((ack.result as any).cuentaAparte?.orderId)
+    expect(aparte).not.toBe(cuentaA)
+    expect(aparte).not.toBe(cobrada)
+    expect(await fotoDe(aparte)).toMatchObject({ tableId: t, paymentStatus: 'PENDING', total: 20, renglones: 1 })
+    // El agua se guardó con la llave de SU ronda, no con la etiqueta ajena; el café de la mesa A no se tocó.
+    expect(await prisma.orderItem.findFirstOrThrow({ where: { orderId: aparte } })).toMatchObject({ externalId: `sync:${r.id}:0` })
+    expect(await fotoDe(cuentaA)).toMatchObject({ renglones: 1, total: 25 })
+  })
+
+  it('Codex r5 #6: una llave hecha sólo de espacios recibe la determinista; anulado ese producto, el reenvío NO lo recrea', async () => {
+    const t = await mesa()
+    const cuenta = (await assignTable(venueId, t, mesera, 2)).order.id
+    const v0 = await prisma.order.findUniqueOrThrow({ where: { id: cuenta }, select: { version: true } })
+    await addItemsToOrder(venueId, cuenta, [{ productId: coca, quantity: 1 }] as any, v0.version, true)
+    const r = { ...ronda(cuenta), payload: { orderId: cuenta, items: [{ productId: agua, quantity: 1, externalId: '   ' }] } }
+    // La primera aplicación de esa ronda (cuya respuesta se perdió) la guardó con la llave determinista que ahora le toca.
+    const v1 = await prisma.order.findUniqueOrThrow({ where: { id: cuenta }, select: { version: true } })
+    await addItemsToOrder(venueId, cuenta, [{ productId: agua, quantity: 1, externalId: `sync:${r.id}:0` }] as any, v1.version, true)
+    const agua1 = await prisma.orderItem.findFirstOrThrow({ where: { orderId: cuenta, externalId: `sync:${r.id}:0` } })
+    await voidOrderItem({ venueId, orderId: cuenta, itemId: agua1.id, reason: 'El cliente cambió de parecer', actorId: caja })
+
+    const [ack] = await replay([r])
+
+    expect(ack.status).toBe('ACKED')
+    expect(await prisma.orderItem.count({ where: { orderId: cuenta, productId: agua } })).toBe(0)
+    expect(await fotoDe(cuenta)).toMatchObject({ renglones: 1, total: 25 })
   })
 
   it('Codex r0 #1: la ronda ya estaba guardada y otra caja la SEPARÓ a otra cuenta antes de cobrar: no se duplica', async () => {
