@@ -78,6 +78,15 @@ export interface RefundState {
   failureReason: string | null
 }
 
+/**
+ * D661 (Task 6, Ruling 28): lo que Stripe dice HOY que ya se devolvió de un cargo: `amount_refunded` del cargo (con las pendientes) y
+ * todas sus devoluciones en cualquier estado, con su metadata. Centavos: sólo en la frontera.
+ */
+export interface ChargeRefunds {
+  amountRefundedCents: number
+  refunds: Array<RefundState & { metadata: Record<string, string> }>
+}
+
 export interface VerifiedWebhookEvent {
   id: string
   type: string
@@ -197,4 +206,6 @@ export interface IEcommerceProvider {
   ): Promise<Array<RefundState & { metadata: Record<string, string> }>>
   /** Lo que Stripe ya devolvió de la comisión de la plataforma de ese cobro (`application_fee.amount_refunded`); 0 si no hay comisión. */
   getApplicationFeeRefundedCents(merchant: EcommerceMerchantWithProvider, paymentIntentId: string): Promise<number>
+  /** D661: el cargo del PaymentIntent con lo ya devuelto y TODAS sus devoluciones (también las pendientes). El error sale tal cual. */
+  getChargeRefunds(merchant: EcommerceMerchantWithProvider, paymentIntentId: string): Promise<ChargeRefunds>
 }

@@ -20,6 +20,7 @@ import {
   PaymentStatus,
   RefundParams,
   RefundResult,
+  ChargeRefunds,
   RefundState,
   TokenizeCardParams,
   TokenizeCardResult,
@@ -556,6 +557,17 @@ export class StripeConnectProvider implements IEcommerceProvider {
     if (!fee) return 0
     if (typeof fee === 'object') return fee.amount_refunded
     return (await this.stripe.applicationFees.retrieve(fee)).amount_refunded
+  }
+
+  /**
+   * D661 (Task 6, Ruling 28): lo ya devuelto del cargo según Stripe — `amount_refunded` del cargo (`latest_charge`, que cuenta también
+   * las pendientes) y TODAS sus devoluciones en cualquier estado, con su metadata —, para saber si alguien devolvió por fuera de
+   * Avoqado antes de devolver otra vez. Un error de Stripe sale tal cual: quien llama falla cerrado, nunca lo lee como «sin devoluciones».
+   */
+  async getChargeRefunds(merchant: EcommerceMerchantWithProvider, paymentIntentId: string): Promise<ChargeRefunds> {
+    const pi = await this.retrievePaymentIntent(this.requireConnectAccountId(merchant), paymentIntentId)
+    const charge = typeof pi.latest_charge === 'object' ? pi.latest_charge : null
+    return { amountRefundedCents: charge?.amount_refunded ?? 0, refunds: await this.listRefunds(merchant, paymentIntentId) }
   }
 
   /**

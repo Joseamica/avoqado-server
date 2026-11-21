@@ -7,6 +7,7 @@ import { getStripeChargeBoundsCents } from '@/services/payments/providers/money'
 const mockStripe = {
   checkout: { sessions: { create: jest.fn(), retrieve: jest.fn(), expire: jest.fn() } },
   paymentIntents: { retrieve: jest.fn(), capture: jest.fn(), cancel: jest.fn() },
+  refunds: { list: jest.fn() },
 }
 
 jest.mock('stripe', () => jest.fn().mockImplementation(() => mockStripe))
@@ -344,6 +345,46 @@ describe('StripeConnectProvider — apartar, cobrar, liberar, leer', () => {
       await expect(other.capture({} as any, {} as any)).rejects.toBeInstanceOf(ProviderCapabilityError)
       await expect(other.voidAuthorization({} as any, {} as any)).rejects.toBeInstanceOf(ProviderCapabilityError)
       await expect(other.expireAuthorizationCheckout({} as any, 'cs_1')).rejects.toBeInstanceOf(ProviderCapabilityError)
+    })
+  })
+
+  // D661 (Task 6, Ruling 28): antes de devolver un pedido «Nadie» se lee el cargo en Stripe; cualquier devolución hecha por fuera frena.
+  describe('getChargeRefunds', () => {
+    it('lee el cargo (latest_charge) con amount_refunded y TODAS sus devoluciones, también las pendientes, de la cuenta conectada', async () => {
+      mockStripe.paymentIntents.retrieve.mockResolvedValue({
+        ...piBase,
+        latest_charge: { ...piBase.latest_charge, amount_refunded: 10_000 },
+      })
+      mockStripe.refunds.list.mockReturnValue({
+        autoPagingToArray: jest.fn().mockResolvedValue([
+          { id: 're_1', status: 'pending', amount: 6_000, failure_reason: null, metadata: {} },
+          { id: 're_2', status: 'succeeded', amount: 4_000, failure_reason: null, metadata: { cardRefundId: 'cr1' } },
+        ]),
+      })
+      await expect(provider.getChargeRefunds(merchant as any, 'pi_1')).resolves.toEqual({
+        amountRefundedCents: 10_000,
+        refunds: [
+          expect.objectContaining({ refundId: 're_1', status: 'PENDING', amountCents: 6_000, metadata: {} }),
+          expect.objectContaining({ refundId: 're_2', status: 'SUCCEEDED', amountCents: 4_000, metadata: { cardRefundId: 'cr1' } }),
+        ],
+      })
+      expect(mockStripe.paymentIntents.retrieve).toHaveBeenCalledWith('pi_1', { expand: ['latest_charge'] }, { stripeAccount: 'acct_x' })
+      expect(mockStripe.refunds.list).toHaveBeenCalledWith({ payment_intent: 'pi_1', limit: 100 }, { stripeAccount: 'acct_x' })
+    })
+
+    it('sin cargo todavía (nada cobrado) → 0 devuelto; un error de Stripe sale tal cual (nunca «sin devoluciones»)', async () => {
+      mockStripe.paymentIntents.retrieve.mockResolvedValueOnce({ ...piBase, latest_charge: null })
+      mockStripe.refunds.list.mockReturnValue({ autoPagingToArray: jest.fn().mockResolvedValue([]) })
+      await expect(provider.getChargeRefunds(merchant as any, 'pi_1')).resolves.toEqual({ amountRefundedCents: 0, refunds: [] })
+      mockStripe.paymentIntents.retrieve.mockRejectedValueOnce(stripeError('api_connection_error'))
+      await expect(provider.getChargeRefunds(merchant as any, 'pi_1')).rejects.toThrow('boom')
+    })
+
+    it.each([
+      ['BlumonProvider', new BlumonProvider()],
+      ['MercadoPagoProvider', new MercadoPagoProvider()],
+    ])('%s lanza ProviderCapabilityError', async (_n, other) => {
+      await expect(other.getChargeRefunds({} as any, 'pi_1')).rejects.toBeInstanceOf(ProviderCapabilityError)
     })
   })
 

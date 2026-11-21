@@ -1023,6 +1023,10 @@ export interface AbonoDeSaldoAFavor {
  * (`reason: OTHER`). No toma candados nuevos: usa los de `preparado`. Idempotente por `saldo-a-favor:<refundPaymentId>`. Todo rechazo
  * se lanza ANTES de escribir. El sobre nuevo nace «entregado» por WhatsApp (`SENT`) sin `ventaHuella` ni `deliveryOperationKey`:
  * la búsqueda y la prueba por teléfono sólo aceptan WHATSAPP, y la entrega nunca lo manda sola (sería un código al portador).
+ *
+ * `exigirMismoTelefono` (D661, r1 #6 y r3 #6) lo pasa SÓLO la devolución de un pedido «Nadie»: el teléfono que manda es el que la
+ * clienta verificó al pagar, nunca el de la ficha de hoy. El sobre que ya tiene debe ser de ese número (si pagó sin verificar, no se
+ * puede saber: tampoco se abona) y el primero nace con él. Sin el parámetro (el «Cambio», el Reembolso del POS) todo sigue como hoy.
  */
 export async function abonarSaldoAFavorEnTx(
   tx: TxConReintento,
@@ -1033,6 +1037,7 @@ export async function abonarSaldoAFavorEnTx(
     origen: { orderId: string; refundPaymentId: string }
     folio: string
     tipo: 'CAMBIO' | 'REEMBOLSO'
+    exigirMismoTelefono?: { telefonoVerificado: string | null }
   },
 ): Promise<AbonoDeSaldoAFavor> {
   const s = p.preparado
@@ -1041,9 +1046,11 @@ export async function abonarSaldoAFavorEnTx(
     throw new GiftCardError('GIFT_CARD_AMOUNT_OUT_OF_RANGE', 'El saldo a favor debe ser mayor a cero y con centavos exactos.', 422)
   }
   const operationKey = `saldo-a-favor:${p.origen.refundPaymentId}`
-  const telefonoDe = (card: LockedGiftCard | null) => card?.recipientPhone ?? s.telefonoCliente ?? ''
+  // Con `exigirMismoTelefono`, el número es el verificado (en la forma de `recipientPhone`) y la ficha no cuenta.
+  const exigido = p.exigirMismoTelefono ? telefonoDeTarjeta(p.exigirMismoTelefono.telefonoVerificado) : undefined
+  const telefonoDe = (card: LockedGiftCard | null) => card?.recipientPhone ?? (exigido !== undefined ? exigido : s.telefonoCliente) ?? ''
   const noCoincide = (card: LockedGiftCard | null) =>
-    s.telefonoCliente === null || (card !== null && telefonoDeTarjeta(card.recipientPhone) !== s.telefonoCliente)
+    exigido === undefined && (s.telefonoCliente === null || (card !== null && telefonoDeTarjeta(card.recipientPhone) !== s.telefonoCliente))
 
   const previa = await tx.giftCardActivity.findUnique({
     where: { venueId_operationKey: { venueId: s.venueId, operationKey } },
@@ -1071,6 +1078,15 @@ export async function abonarSaldoAFavorEnTx(
     if (!vigente) throw noEncontrada()
     card.balance = vigente.balance
     card.status = vigente.status
+  }
+  if (card && exigido !== undefined && (exigido === null || telefonoDeTarjeta(card.recipientPhone) !== exigido)) {
+    throw new GiftCardError(
+      'STORE_CREDIT_PHONE_MISMATCH',
+      exigido === null
+        ? `${s.nombreCliente} ya tiene saldo a favor aquí, pero pagó este pedido sin verificar su teléfono: no se puede comprobar que sea la misma persona. Puedes devolverlo a su tarjeta; no se aplicó nada.`
+        : `El saldo a favor de ${s.nombreCliente} está ligado a otro teléfono que el que verificó al pagar este pedido: no se le abona. Puedes devolverlo a su tarjeta; no se aplicó nada.`,
+      409,
+    )
   }
   if (card?.status === 'BLOCKED') {
     throw new GiftCardError(
@@ -1105,10 +1121,14 @@ export async function abonarSaldoAFavorEnTx(
     return { giftCardId: card.id, abonado: monto, saldoNuevo, telefonoDelSobre: telefonoDe(card), telefonoNoCoincide: noCoincide(card) }
   }
 
-  if (!s.telefonoCliente) {
+  // El primer sobre nace con el teléfono con que se gasta: el verificado al pagar (D661) o, si no, el de la ficha.
+  const telefonoNuevo = exigido !== undefined ? exigido : s.telefonoCliente
+  if (!telefonoNuevo) {
     throw new GiftCardError(
       'STORE_CREDIT_CUSTOMER_PHONE_REQUIRED',
-      `Para darle saldo a favor a ${s.nombreCliente} hace falta su teléfono: con él lo usa. Agrégalo a su ficha.`,
+      exigido !== undefined
+        ? `${s.nombreCliente} pagó este pedido sin un teléfono verificado y todavía no tiene saldo a favor aquí: no se le puede abrir uno. Puedes devolverlo a su tarjeta; no se aplicó nada.`
+        : `Para darle saldo a favor a ${s.nombreCliente} hace falta su teléfono: con él lo usa. Agrégalo a su ficha.`,
       400,
     )
   }
@@ -1137,7 +1157,7 @@ export async function abonarSaldoAFavorEnTx(
       termsVersion: ajustes?.termsVersion ?? TERMINOS_VIGENTES,
       customerId: s.customerId,
       recipientName: s.nombreCliente,
-      recipientPhone: s.telefonoCliente,
+      recipientPhone: telefonoNuevo,
       deliveryChannel: 'WHATSAPP',
       deliveryStatus: 'SENT',
       deliveredAt: null,
@@ -1155,7 +1175,7 @@ export async function abonarSaldoAFavorEnTx(
     venueId: s.venueId,
     codeHash,
     pageToken,
-    recipientPhone: s.telefonoCliente,
+    recipientPhone: telefonoNuevo,
     deliveryChannel: 'WHATSAPP',
     status: 'ACTIVE',
     balance: monto,
@@ -1165,7 +1185,7 @@ export async function abonarSaldoAFavorEnTx(
     validityMonths: null,
     customerId: s.customerId,
   }
-  return { giftCardId: creado.id, abonado: monto, saldoNuevo: monto, telefonoDelSobre: s.telefonoCliente, telefonoNoCoincide: false }
+  return { giftCardId: creado.id, abonado: monto, saldoNuevo: monto, telefonoDelSobre: telefonoNuevo, telefonoNoCoincide: false }
 }
 
 /** Lo que la bitácora y el panel enseñan de un teléfono: nunca completo (`enmascararDestino`). */
