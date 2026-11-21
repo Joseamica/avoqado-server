@@ -275,6 +275,8 @@ describe('limpieza de ventas de Cobrar abandonadas (D36)', () => {
     expect(await anularVentaDeCobrarAbandonada(elegida, UMBRAL())).toBe('seQueda')
     expect(await estado(id)).not.toBe('CANCELLED')
     expect(await prisma.activityLog.count({ where: { entityId: id } })).toBe(0)
+    // La de la versión sigue cumpliendo la regla al elegir (la versión se compara bajo el candado): que no cuente abajo.
+    await prisma.$executeRaw`UPDATE "Order" SET "updatedAt" = now() WHERE id = ${id}`
   })
 
   it('🔴 Codex r3 #5: el total del ENSAYO, calculado por Postgres, es la suma de todos los negocios', async () => {
