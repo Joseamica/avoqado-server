@@ -270,7 +270,7 @@ describe('D661 (Ruling 117): una lectura agotada de un «Nadie» se relee en la 
     ...CARGO_NADIE,
     id: `ch_${sufijo}`,
     paymentIntentId: `pi_${sufijo}`,
-    onlineOrder: { orderId: `ord_${sufijo}` },
+    onlineOrder: { orderId: `ord_${sufijo}`, acceptDeadlineAt: plazos[`ord_${sufijo}`] }, // como lo trae la lectura real (Ruling 119)
     updatedAt: new Date(NOW.getTime() - hace),
   })
 
@@ -394,9 +394,9 @@ describe('D661 (Ruling 117): una lectura agotada de un «Nadie» se relee en la 
   })
 
   it('(a) A va primero con el límite lejos y su primera petición queda muerta; B tiene el límite cerca y Stripe le contesta en seguida: B se cobra antes de su límite y A en la relectura', async () => {
-    enDuda = [cargoNadie('a', 10 * MIN), cargoNadie('b', 5 * MIN)] // A antes que B (`updatedAt`)
     conLimite('ord_a', 600_000)
     conLimite('ord_b', 180_000)
+    enDuda = [cargoNadie('a', 10 * MIN), cargoNadie('b', 5 * MIN)] // A antes que B (`updatedAt`)
     await stripePorPeticion({ pi_a: ['muerta', 'rapida'], pi_b: ['rapida'] })
     const job = nuevoJob()
     const tick = job.checkNow()
@@ -404,7 +404,7 @@ describe('D661 (Ruling 117): una lectura agotada de un «Nadie» se relee en la 
     await tick
 
     expect(capturas).toEqual([
-      { id: 'ch_b', en: 120_000 }, // detrás de la primera lectura de A (≤ 120 s), antes de su límite de 180 s
+      { id: 'ch_b', en: 0 }, // Ruling 119: va primero (su límite es el más cercano), sin esperar la lectura muerta de A
       { id: 'ch_a', en: 120_000 }, // la relectura: una petición NUEVA
     ])
     expect(captureCharge).toHaveBeenCalledWith(
@@ -423,8 +423,8 @@ describe('D661 (Ruling 117): una lectura agotada de un «Nadie» se relee en la 
   })
 
   it('(b) A solo, con 690 s de ventana: su primera petición queda muerta y una petición NUEVA contesta en seguida → A se cobra (no se gasta toda la ventana en la conexión muerta)', async () => {
-    enDuda = [cargoNadie('a', 10 * MIN)]
     conLimite('ord_a', 690_000)
+    enDuda = [cargoNadie('a', 10 * MIN)]
     await stripePorPeticion({ pi_a: ['muerta', 'rapida'] })
     const job = nuevoJob()
     const tick = job.checkNow()
@@ -434,5 +434,24 @@ describe('D661 (Ruling 117): una lectura agotada de un «Nadie» se relee en la 
     expect(capturas).toEqual([{ id: 'ch_a', en: 120_000 }])
     expect(envios.filter(e => e.envio === 'GET /v1/payment_intents/pi_a').map(e => e.en)).toEqual([0, 120_000])
     expect(envios.filter(e => e.envio.startsWith('POST'))).toEqual([])
+  })
+
+  it('Ruling 119: B tiene su límite a 90 s (dentro de los primeros 120 s de la pasada) y A, más viejo, el límite lejos y su primera petición muerta: el dinero en duda va por límite, así que B se cobra antes de su límite y A en la relectura', async () => {
+    conLimite('ord_a', 600_000)
+    conLimite('ord_b', 90_000)
+    enDuda = [cargoNadie('a', 10 * MIN), cargoNadie('b', 5 * MIN)] // por `updatedAt`, A iría primero
+    await stripePorPeticion({ pi_a: ['muerta', 'rapida'], pi_b: ['rapida'] })
+    const job = nuevoJob()
+    const tick = job.checkNow()
+    await jest.advanceTimersByTimeAsync(121_000)
+    await tick
+
+    expect(capturas).toEqual([
+      { id: 'ch_b', en: 0 },
+      { id: 'ch_a', en: 120_000 },
+    ])
+    expect(capturas[0].en).toBeLessThan(90_000)
+    expect(envios.filter(e => e.envio.startsWith('POST'))).toEqual([]) // B no se soltó
+    expect(failCapture).not.toHaveBeenCalled()
   })
 })

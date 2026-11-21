@@ -100,9 +100,9 @@ const LIVE_ONLINE: OnlineOrderStatus[] = [
   OnlineOrderStatus.COMPLETED,
 ]
 
-type Row = OnlineOrderCharge & { onlineOrder: { orderId: string } | null }
+type Row = OnlineOrderCharge & { onlineOrder: { orderId: string; acceptDeadlineAt: Date } | null }
 const order = [{ updatedAt: 'asc' as const }, { id: 'asc' as const }]
-const include = { onlineOrder: { select: { orderId: true } } }
+const include = { onlineOrder: { select: { orderId: true, acceptDeadlineAt: true } } }
 
 const page = (readEntry: ReadCandidates, where: Prisma.OnlineOrderChargeWhereInput): Promise<Row[]> =>
   readEntry(() => prisma.onlineOrderCharge.findMany({ where, include, orderBy: order, take: CARD_RECONCILE_BATCH }))
@@ -187,7 +187,19 @@ async function readCandidates(now: Date, readEntry: ReadCandidates): Promise<{ i
       ],
     }),
   ])
-  return { inDoubt: [...capturing, ...releasing], rest: [...expired, ...authorized] }
+  return { inDoubt: [...porLimite(capturing), ...releasing], rest: [...expired, ...authorized] }
+}
+
+/**
+ * D661 (Ruling 119): los CAPTURING, el límite del reintento más cercano primero (los de «Nadie», con su pedido); «Mi equipo» y lo que no
+ * tiene límite van después, en su orden de siempre. Así uno cuyo límite cae dentro de los primeros 120 s de la pasada no espera la primera
+ * lectura de otro con el límite lejos. ponytail: el orden es en memoria sobre la página de 50 (la base la da por `updatedAt`): con más de 50
+ * en duda a la vez, uno con el límite cerca puede quedar en la página siguiente; ordenar en SQL por ese límite si un día pasa.
+ */
+function porLimite(capturing: Row[]): Row[] {
+  const limite = (c: Row) =>
+    cargoDeNadie(c) && c.onlineOrder?.acceptDeadlineAt ? limiteDelReintento(c.onlineOrder.acceptDeadlineAt) : Infinity
+  return [...capturing].sort((a, b) => (limite(a) === limite(b) ? 0 : limite(a) - limite(b)))
 }
 
 /** `PENDING_AUTH` sin sesión guardada: la MISMA clave y los MISMOS parámetros del último intento. */
