@@ -77,6 +77,8 @@ const esPorDecidir = (l: { matchStatus: string; matchScore: unknown; direction: 
   l.matchStatus === 'UNMATCHED' && l.matchScore === null && l.direction === 'CREDIT'
 
 const toCents = (n: number | { toString(): string } | null | undefined): number => (n == null ? 0 : Math.round(Number(n) * 100))
+/** Días de ventana entre la venta y el abono del banco (T+1/T+2): la del matcher y la de «qué día detiene a esta línea». */
+const VENTANA_DE_DIAS = 2
 const daysBetween = (a: Date, b: Date): number => Math.abs(Math.round((a.getTime() - b.getTime()) / 86_400_000))
 const localNoon = (ymd: string): Date => new Date(`${ymd}T12:00:00`)
 
@@ -271,7 +273,7 @@ export function matchLines(
   opts?: { amountTolCents?: number; dateWindowDays?: number },
 ): MatchResult[] {
   const amountTol = opts?.amountTolCents ?? 0
-  const dateWindow = opts?.dateWindowDays ?? 2
+  const dateWindow = opts?.dateWindowDays ?? VENTANA_DE_DIAS
   // D24: un día con la comisión por calcular no se compara (su neto es provisional); sólo vuelve «por decidir» lo que no cuadró cerca.
   const pendientes = candidates.filter(c => (c.pendientesDeCosto ?? 0) > 0)
   const comparables = candidates.filter(c => !((c.pendientesDeCosto ?? 0) > 0))
@@ -458,10 +460,10 @@ export async function getStatementDetail(venueId: string, statementId: string, s
     })
   let statement = await leer()
   if (!statement) throw new NotFoundError('Estado de cuenta no encontrado')
-  let espera: { pendientesDeCosto: number; costoSinCalcular: number } | null = null
+  let diasPendientes: DepositCandidate[] = []
   if (statement.lines.some(esPorDecidir)) {
     try {
-      espera = await decidirLineasPorDecidir(venueId, statement, staffId)
+      diasPendientes = await decidirLineasPorDecidir(venueId, statement, staffId)
     } catch (error) {
       // Abrir el estado de cuenta nunca falla por esto: se enseña lo guardado y la siguiente apertura lo intenta otra vez.
       logger.warn('[conciliación] No se pudieron decidir las líneas que esperaban su comisión; se muestra lo guardado', {
@@ -475,7 +477,17 @@ export async function getStatementDetail(venueId: string, statementId: string, s
     if (!statement) throw new NotFoundError('Estado de cuenta no encontrado')
   }
   const lines = statement.lines.map(l => ({ ...l, costoPendiente: esPorDecidir(l) }))
-  return { ...statement, lines, ...(espera && lines.some(l => l.costoPendiente) ? espera : {}) }
+  // Codex r2 #6: sólo cuentan los días que de verdad detienen a una línea que sigue esperando (los de su ventana), no todo el periodo.
+  const esperando = lines.filter(l => l.costoPendiente)
+  const detienen = diasPendientes.filter(c => esperando.some(l => daysBetween(c.date, l.postedDate) <= VENTANA_DE_DIAS))
+  const espera =
+    detienen.length > 0
+      ? {
+          pendientesDeCosto: detienen.reduce((n, c) => n + (c.pendientesDeCosto ?? 0), 0),
+          costoSinCalcular: detienen.reduce((n, c) => n + (c.costoSinCalcular ?? 0), 0),
+        }
+      : {}
+  return { ...statement, lines, ...espera }
 }
 
 /**
@@ -483,14 +495,14 @@ export async function getStatementDetail(venueId: string, statementId: string, s
  * contra los días que ya no esperan comisión (y que ninguna otra línea del estado ya concilió). Las que todavía dependen de un día
  * pendiente se quedan igual. Es el MISMO cálculo automático de la subida (una sugerencia: confirmarla sigue siendo de quien tiene
  * `accounting:reconcile`); por eso la bitácora la firma el sistema y anota quién abrió. Bajo el candado de la fila del estado: dos
- * aperturas a la vez no deciden dos veces. Devuelve cuántos pagos del periodo siguen esperando su comisión.
+ * aperturas a la vez no deciden dos veces. Devuelve los días del periodo que siguen esperando su comisión.
  */
 async function decidirLineasPorDecidir(
   venueId: string,
   statement: { id: string; periodStart: Date | null; periodEnd: Date | null; lineCount: number },
   abiertoPor: string | null,
-): Promise<{ pendientesDeCosto: number; costoSinCalcular: number } | null> {
-  if (!statement.periodStart || !statement.periodEnd) return null
+): Promise<DepositCandidate[]> {
+  if (!statement.periodStart || !statement.periodEnd) return []
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const candidatos = await loadDepositCandidates(
     venueId,
@@ -498,10 +510,6 @@ async function decidirLineasPorDecidir(
     formatDay(statement.periodEnd),
     venue?.timezone || 'America/Mexico_City',
   )
-  const espera = {
-    pendientesDeCosto: candidatos.reduce((n, c) => n + (c.pendientesDeCosto ?? 0), 0),
-    costoSinCalcular: candidatos.reduce((n, c) => n + (c.costoSinCalcular ?? 0), 0),
-  }
   await prisma.$transaction(
     async tx => {
       await tx.$queryRaw`SELECT id FROM "BankStatement" WHERE id = ${statement.id} AND "venueId" = ${venueId} FOR UPDATE`
@@ -545,7 +553,7 @@ async function decidirLineasPorDecidir(
     },
     { timeout: 15_000 },
   )
-  return espera
+  return candidatos.filter(c => (c.pendientesDeCosto ?? 0) > 0)
 }
 
 /** Confirma (acepta) la conciliación de líneas específicas. */

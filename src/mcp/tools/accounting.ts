@@ -1697,7 +1697,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         })),
         ...(statements.some(s => (s._count?.lines ?? 0) > 0)
           ? {
-              nota: 'Algunos depósitos esperan a que se calcule la comisión de un cobro de su día: todavía no se dicen «conciliados» ni «sin conciliar». Se deciden solos al abrir ese estado de cuenta en el panel cuando la comisión ya esté; si siguen esperando después de unos minutos, pide a soporte que revise el cálculo de la comisión.',
+              nota: 'Algunos depósitos esperan a que se calcule la comisión de un cobro de su día: todavía no se dicen «conciliados» ni «sin conciliar». Ábrelo en el panel: ahí se deciden solos los que ya tienen su comisión y te dice cuántos cobros los detienen y si alguno necesita que soporte revise el cálculo.',
             }
           : {}),
       })
