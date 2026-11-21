@@ -266,6 +266,25 @@ describe('activarSobresDeCuentaPagadaEnTx', () => {
     })
   })
 
+  it('D30: la vigencia se cuenta en el calendario UTC (el de producción), no en la zona del proceso: 29-feb + 12 meses = 28-feb', async () => {
+    // 29-feb-2028 03:00 UTC es todavía 28-feb en América. Contando con la hora local, en Los Ángeles, CDMX o Tijuana salía
+    // el 1-mar-2029; en producción (UTC) siempre fue el 28-feb. Esta suite se corre con TZ=UTC, America/Los_Angeles,
+    // America/Mexico_City y America/Tijuana (la zona se fija ANTES de Jest: `process.env.TZ` dentro de la prueba no llega).
+    const ahora = new Date('2028-02-29T03:00:00.000Z')
+    jest.setSystemTime(ahora)
+    prismaMock.giftCard.findMany.mockResolvedValue([{ id: 'gc-1' }])
+    prismaMock.orderItem.findMany.mockResolvedValue([{ id: 'oi-1', giftCardId: 'gc-1', total: D(500) }])
+    cobradoYDevuelto(500)
+    prismaMock.$queryRaw.mockResolvedValue([pendiente('gc-1', 500, 12)])
+
+    await activarSobresDeCuentaPagadaEnTx(prismaMock, { venueId: VENUE, orderId: 'order-1', staffId: 'staff-1' })
+
+    expect(prismaMock.giftCard.updateMany).toHaveBeenCalledWith({
+      where: { id: 'gc-1', venueId: VENUE, status: 'PENDING' },
+      data: { status: 'ACTIVE', balance: D(500), activatedAt: ahora, expiresAt: new Date('2029-02-28T03:00:00.000Z') },
+    })
+  })
+
   it('si lo cobrado no cuadra con los sobres, NO activa y deja un MoneyAnomaly', async () => {
     prismaMock.giftCard.findMany.mockResolvedValue([{ id: 'gc-1' }])
     prismaMock.orderItem.findMany.mockResolvedValue([{ id: 'oi-1', giftCardId: 'gc-1', total: D(500) }])
@@ -544,6 +563,8 @@ describe('revertirCanjeEnTx', () => {
   })
 
   it('si el sobre ya venció, el saldo regresa y su vigencia se extiende 90 días desde hoy', async () => {
+    // D30: 90 días EXACTOS (90 × 24 h). Del 14-oct al 12-ene cruza el fin del horario de verano: contando con la hora local, en
+    // Los Ángeles o Tijuana salía 19:00 UTC en vez de 18:00. Esta suite se corre también con esas zonas (ver la de activación).
     prismaMock.giftCardActivity.findMany
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{ id: 'red-1', giftCardId: 'gc-1', amount: D(400), orderId: 'order-1' }])
