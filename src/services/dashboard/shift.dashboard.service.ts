@@ -451,18 +451,38 @@ export async function getShiftById(
   }
   // 🔴 Máquina de efectivo (D6, r6-8): los movimientos del turno y el desglose agregado de Efectivo salen de la MISMA foto de Postgres
   // (`RepeatableRead`, el mismo cliente de transacción). Antes un cobro que entraba entre las dos lecturas dejaba «Efectivo $100» con
-  // hijos «Gaveta $100 · máquina $150» (r3 #8). Los campos de la respuesta no cambian.
-  const { shift, efectivoPorLugar } = await prisma.$transaction(
+  // hijos «Gaveta $100 · máquina $150» (r3 #8). F11 (Codex servidor r4): también las cuentas de los cobros del turno y el total de
+  // respaldo de un turno sin cobros cargados: un turno vacío ya no dice «$150 vendidos» con cero pagos. Los campos no cambian.
+  const foto = await prisma.$transaction(
     async tx => {
       const leido = await leerElTurnoDelDetalle(tx, venueId, shiftId)
-      return { shift: leido, efectivoPorLugar: leido ? await efectivoPorLugarDelTurno(venueId, leido.id, tx) : null }
+      if (!leido) return null
+      const efectivoPorLugar = await efectivoPorLugarDelTurno(venueId, leido.id, tx)
+      // Las cuentas de los cobros estampados con el turno que la lectura del turno no trajo (una vez cada una).
+      const yaLeidas = new Set(leido.orders.map(order => order.id))
+      const faltantes = [...new Set(leido.payments.filter(p => p.type !== 'REFUND').map(p => p.orderId))].filter(id => !yaLeidas.has(id))
+      const cobradas = faltantes.length
+        ? await tx.order.findMany({
+            where: { venueId, id: { in: faltantes } },
+            select: ORDEN_DEL_DETALLE,
+            // ids únicos del turno: el tope es exacto y nunca recorta.
+            take: faltantes.length,
+          })
+        : []
+      // Toda la lógica del desglose vive en `buildPaymentBreakdown` (función pura, con tests): desglosa por método REAL —débito y
+      // crédito por separado— y calcula el porcentaje por marca contra la suma de tarjetas, no contra una cubeta 'CARD' que ya no existe.
+      const desglose = buildPaymentBreakdown(leido.payments as any, efectivoPorLugar)
+      // El respaldo del total (R3, Codex #5 del cierre) sólo se usa si los cobros cargados no suman ventas en un turno sin cerrar.
+      const respaldo = leido.status !== 'CLOSED' && desglose.totalSales <= 0 ? await ventasDelTurnoSinTarjetas(venueId, leido.id, tx) : null
+      return { shift: leido, desglose, cobradas, respaldo }
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
   )
 
-  if (!shift) {
+  if (!foto) {
     return null
   }
+  const { shift, desglose, cobradas, respaldo } = foto
 
   // Las órdenes del detalle son las cuentas COBRADAS en el turno, con la misma membresía que firma el cierre y que
   // enseña la lista (`readShiftPaymentsForClose` + `contarOrdenesCobradas`; no se importan porque shift.tpv.service
@@ -483,16 +503,7 @@ export async function getShiftById(
   }
   // Las cuentas de los cobros estampados con el turno, UNA vez cada una: una cuenta pagada en abonos no se trae N veces.
   const delTurno = [...new Set(shift.payments.filter(p => p.type !== 'REFUND').map(p => p.orderId))]
-  const faltantes = delTurno.filter(id => !leidas.has(id))
-  if (faltantes.length > 0) {
-    const cobradas = await prisma.order.findMany({
-      where: { venueId, id: { in: faltantes } },
-      select: ORDEN_DEL_DETALLE,
-      // ids únicos del turno: el tope es exacto y nunca recorta.
-      take: faltantes.length,
-    })
-    for (const order of cobradas) leidas.set(order.id, order)
-  }
+  for (const order of cobradas) leidas.set(order.id, order)
   for (const id of delTurno) {
     const order = leidas.get(id)
     if (order) ordersById.set(id, order)
@@ -503,18 +514,7 @@ export async function getShiftById(
   const now = new Date()
   const effectiveStatus = shift.endTime && shift.endTime < now ? 'CLOSED' : shift.status
 
-  // ============================================================
-  // Calculate Payment Method Breakdown
-  // ============================================================
-  // Toda la lógica vive en `buildPaymentBreakdown` (función pura, con tests): desglosa por
-  // método REAL —débito y crédito por separado— y calcula el porcentaje por marca contra la
-  // suma de tarjetas, no contra una cubeta 'CARD' que ya no existe.
-  const {
-    paymentMethodBreakdown,
-    cardBrandBreakdown,
-    totalSales: calculatedTotalSales,
-    totalTips: calculatedTotalTips,
-  } = buildPaymentBreakdown(shift.payments as any, efectivoPorLugar)
+  const { paymentMethodBreakdown, cardBrandBreakdown, totalSales: calculatedTotalSales, totalTips: calculatedTotalTips } = desglose
 
   // R3 (full-testing v2 #2): la cuenta de tarjetas de regalo no es una orden de VENTA del turno: no entra a las órdenes por
   // empleado, a la lista, a los productos vendidos, al conteo ni al ticket promedio. Su dinero sí (cobros, efectivo y caja).
@@ -679,11 +679,7 @@ export async function getShiftById(
   // Use calculated totals if they're more accurate than stored values. R3 (Codex #5 del cierre): el guardado de un turno SIN cerrar es
   // el acumulado en vivo, que cuenta las cargas de tarjetas; su respaldo es la agregación que ya las excluye.
   const finalTotalSales =
-    calculatedTotalSales > 0
-      ? calculatedTotalSales
-      : shift.status === 'CLOSED'
-        ? Number(shift.totalSales)
-        : Number(await ventasDelTurnoSinTarjetas(venueId, shift.id))
+    calculatedTotalSales > 0 ? calculatedTotalSales : shift.status === 'CLOSED' ? Number(shift.totalSales) : Number(respaldo ?? 0)
   const finalTotalTips = calculatedTotalTips > 0 ? calculatedTotalTips : Number(shift.totalTips)
 
   // P2 (Codex 27-ago): el campo es ADITIVO — si su consulta truena, el endpoint viejo no puede volverse un 500.

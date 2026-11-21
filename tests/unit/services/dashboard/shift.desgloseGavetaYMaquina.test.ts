@@ -171,6 +171,8 @@ describe('detalle del turno · Efectivo = Gaveta + Efectivo · máquina (R5 #11)
     // salía de la foto vieja y los hijos de la nueva y la pantalla decía «Efectivo $100 · Gaveta $100 · máquina $150».
     const enLaFoto: any = {
       shift: { findFirst: jest.fn().mockResolvedValue(turno([enLaGaveta])) },
+      // F11: las cuentas de los cobros del turno también se leen en la foto.
+      order: { findMany: jest.fn().mockResolvedValue([]) },
       payment: {
         aggregate: jest.fn().mockResolvedValue(sumaDeLaMaquina(0, 0)),
         groupBy: jest.fn().mockResolvedValue([grupo({}, 100, 10, 1)]),
@@ -194,5 +196,27 @@ describe('detalle del turno · Efectivo = Gaveta + Efectivo · máquina (R5 #11)
     expect(enLaFoto.payment.aggregate).toHaveBeenCalled()
     // Los campos que leen las apps viejas siguen ahí.
     expect(detalle).toEqual(expect.objectContaining({ paymentMethodBreakdown: expect.any(Array), cardBrandBreakdown: expect.any(Array) }))
+  })
+
+  it('🔴 F11 (Codex servidor r4): el total de respaldo de un turno abierto y vacío sale de la MISMA foto: nunca $150 con cero pagos', async () => {
+    // La foto ve el turno abierto sin cobros. Fuera de ella ya entró una venta de $150 de la máquina: antes el respaldo
+    // (`ventasDelTurnoSinTarjetas`) la leía con el cliente global y el detalle decía totalSales=150 con stats.totalPayments=0.
+    const abiertoYVacio = { ...turno([]), status: 'OPEN', endTime: null, totalSales: 0, totalTips: 0 }
+    const enLaFoto: any = {
+      shift: { findFirst: jest.fn().mockResolvedValue(abiertoYVacio) },
+      order: { findMany: jest.fn().mockResolvedValue([]) },
+      payment: {
+        aggregate: jest.fn().mockResolvedValue({ _sum: { amount: 0, tipAmount: 0 }, _count: { _all: 0 } }),
+        groupBy: jest.fn().mockResolvedValue([]),
+      },
+    }
+    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: 150, tipAmount: 0 }, _count: { _all: 1 } } as any)
+    prismaMock.$transaction.mockImplementationOnce(async (cb: any) => cb(enLaFoto))
+
+    const detalle = await getShiftById('venue-1', 'shift-1')
+
+    expect(detalle).toMatchObject({ totalSales: 0, payments: [], stats: expect.objectContaining({ totalPayments: 0 }) })
+    expect(prismaMock.payment.aggregate).not.toHaveBeenCalled()
+    expect(prismaMock.order.findMany).not.toHaveBeenCalled()
   })
 })
