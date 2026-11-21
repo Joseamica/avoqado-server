@@ -36,6 +36,7 @@ import {
   CARD_RECONCILE_BATCH,
   CARD_STUCK_ALERT_MINUTES,
   NOT_CAPTURED_OUTSIDE,
+  PLAZO_DE_LA_PASADA,
   SIN_TELEFONO_NADIE,
   cargoDeNadie,
 } from '../constants'
@@ -82,12 +83,6 @@ const NADIE_EARLY_BUDGET_MS = 30_000
  * (`earlyLaneBusy`); el cargo sigue en su estado y la siguiente visita repite con la misma clave.
  */
 const LIMITES_TEMPRANOS: ProviderRequestLimits = { timeoutMs: 10_000, maxNetworkRetries: 0, plazoMs: 15_000 }
-/**
- * D661 (Ruling 73): lo que la pasada principal manda a Stripe sin límite por petición (lecturas, liberaciones con su relectura, la
- * sesión que se repite, el reintento de «Mi equipo» con su relectura) lleva nuestro plazo duro de 120 s: ninguna llamada retiene la
- * pasada (`isRunning` del job) para siempre. La petición al SDK no cambia (sin `timeout` ni `maxNetworkRetries`).
- */
-const PLAZO_DE_LA_PASADA: ProviderRequestLimits = { plazoMs: 120_000 }
 /** Ruling 3: un `PENDING_AUTH` vencido cuya confirmación truena este número de pasadas necesita a una persona. */
 const CONFIRM_FAILURES_ALERT = 3
 /** Stripe guarda una clave idempotente 24 h; con 1 h de margen, después de 23 h su repetición ya no prueba nada. */

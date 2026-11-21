@@ -178,4 +178,32 @@ describe('StripeConnectProvider con el SDK real: nuestro plazo duro (D661 · B, 
     for (const d of [lectura, sesion]) expect(d.v).toBeInstanceOf(PlazoAgotado)
     expect(t.envios.map(e => e.timeout)).toEqual([80_000, 80_000])
   })
+
+  it('ronda 2 de codex-r3: las llamadas del recorrido de devoluciones (crear la devolución, leerla, listarlas y la comisión devuelta) con SÓLO el plazo se rinden a los 120 s y la petición no cambia; sin plazo, el SDK sigue esperando', async () => {
+    const t = transporteQueCuelga()
+    const a = adaptador(t.client)
+    const DEVOLUCION = {
+      paymentIntentId: 'pi_1',
+      amount: 25_000,
+      refundApplicationFee: true,
+      idempotencyKey: 'online-order:o1:refund:cr1',
+      metadata: { cardRefundId: 'cr1' },
+    }
+    const llamadas = [
+      desenlaceDe(a.refund(merchant as never, DEVOLUCION, SOLO_PLAZO)),
+      desenlaceDe(a.getRefund(merchant as never, 're_1', SOLO_PLAZO)),
+      desenlaceDe(a.listRefunds(merchant as never, 'pi_1', SOLO_PLAZO)),
+      desenlaceDe(a.getApplicationFeeRefundedCents(merchant as never, 'pi_1', SOLO_PLAZO)),
+    ]
+    const sinPlazo = desenlaceDe(a.getRefund(merchant as never, 're_2'))
+    await jest.advanceTimersByTimeAsync(119_999)
+    for (const d of llamadas) expect(d.v).toBe('pendiente')
+    await jest.advanceTimersByTimeAsync(1)
+    for (const d of llamadas) expect(d.v).toBeInstanceOf(PlazoAgotado)
+    await jest.advanceTimersByTimeAsync(10 * 60_000)
+    expect(sinPlazo.v).toBe('pendiente')
+    // El plazo es nuestro: cada petición sale como siempre (los 80 s del cliente), una sola vez: la devolución y cuatro lecturas.
+    expect(t.envios.filter(e => e.method === 'POST').map(e => [e.path, e.timeout])).toEqual([['/v1/refunds', 80_000]])
+    expect(t.envios.filter(e => e.method === 'GET').map(e => e.timeout)).toEqual([80_000, 80_000, 80_000, 80_000])
+  })
 })

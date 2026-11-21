@@ -7,6 +7,7 @@ import {
   type VenueType,
 } from '@prisma/client'
 import { FOLIO_PAID_STATUSES } from '@/services/shared/orderBalance'
+import type { ProviderRequestLimits } from '@/services/payments/providers/provider.interface'
 
 /** Estados del pedido en línea que todavía esperan algo del restaurante. */
 export const OPEN_ONLINE_STATUSES: OnlineOrderStatus[] = [
@@ -188,6 +189,12 @@ export const CARD_CHECKOUT_TTL_MINUTES = 30
 export const CARD_STUCK_ALERT_MINUTES = 15
 /** Fase 2: cargos por pasada del conciliador; lo que sobre lo toma la siguiente. */
 export const CARD_RECONCILE_BATCH = 50
+/**
+ * D661 (Ruling 73): lo que el job del conciliador manda a Stripe sin límite por petición — en la pasada principal (lecturas, liberaciones
+ * con su relectura, la sesión que se repite, el reintento de «Mi equipo») y en el recorrido de devoluciones (ronda 2 de codex-r3) — lleva
+ * nuestro plazo duro de 120 s: ninguna llamada retiene el `isRunning` del job para siempre. La petición al SDK no cambia.
+ */
+export const PLAZO_DE_LA_PASADA: ProviderRequestLimits = { plazoMs: 120_000 }
 
 /** Tienda híbrida (R37): giros para los que el panel SUGIERE «Nadie» (sobre `Venue.type`). Sólo sugiere; el servidor nunca lo elige solo. */
 export const NO_ONE_VENUE_TYPES: readonly VenueType[] = [

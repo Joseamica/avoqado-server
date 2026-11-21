@@ -53,7 +53,12 @@ import { abonarSaldoAFavorEnTx } from '@/services/giftCards/giftCardLedger'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 import { getProvider } from '@/services/payments/provider-registry'
 import { fromStripeAmount, toStripeAmount } from '@/services/payments/providers/money'
-import type { ChargeRefunds, RefundState, VerifiedWebhookEvent } from '@/services/payments/providers/provider.interface'
+import type {
+  ChargeRefunds,
+  ProviderRequestLimits,
+  RefundState,
+  VerifiedWebhookEvent,
+} from '@/services/payments/providers/provider.interface'
 import { postPayOutInTx } from '@/services/shared/cashDrawerPosting'
 import { ajustarRepartoAComponentesRestantes } from '@/services/shared/devueltoDeUnCobro'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
@@ -332,7 +337,7 @@ const STATUS_OF: Record<RefundState['status'], R> = {
 const afterStripe = (to: R, row: Row, now: Date) => ({ nextCheckAt: to === R.PENDING ? nextPendingCheck(row.createdAt, now) : now })
 
 /** `REQUESTED` → `SENDING` (sólo quien gana el CAS llama a Stripe) → lo que Stripe conteste. */
-async function send(cur: Cur, now: Date): Promise<void> {
+async function send(cur: Cur, now: Date, limites?: ProviderRequestLimits): Promise<void> {
   const won = await prisma.onlineOrderCardRefund.updateMany({
     where: { id: cur.row.id, status: R.REQUESTED },
     data: { status: R.SENDING, nextCheckAt: nextPendingCheck(cur.row.createdAt, now), lastSentAt: now },
@@ -342,26 +347,31 @@ async function send(cur: Cur, now: Date): Promise<void> {
     return
   }
   cur.row = { ...cur.row, status: R.SENDING, nextCheckAt: nextPendingCheck(cur.row.createdAt, now), lastSentAt: now }
-  await callStripeRefund(cur, now)
+  await callStripeRefund(cur, now, limites)
 }
 
-/** El envío a Stripe de una fila ya `SENDING`, con la MISMA clave siempre (Stripe repite o crea exactamente una). */
-async function callStripeRefund(cur: Cur, now: Date): Promise<void> {
+/**
+ * El envío a Stripe de una fila ya `SENDING`, con la MISMA clave siempre (Stripe repite o crea exactamente una). D661 (ronda 2 de
+ * codex-r3, Ruling 73): con `limites` (el recorrido), su plazo duro: si se cumple, la fila sigue `SENDING` y se busca/reenvía igual.
+ */
+async function callStripeRefund(cur: Cur, now: Date, limites?: ProviderRequestLimits): Promise<void> {
   const { orderId, paymentIntentId, merchant } = await chargeOf(cur.row)
   // Codex r3 #3: un cobro hecho a mano en Stripe no trae comisión de la plataforma; no se pide devolver una que no existe.
   const cobro = await prisma.payment.findFirst({
     where: { venueId: cur.row.venueId, orderId, processorId: paymentIntentId, type: PaymentType.REGULAR },
     select: { feeAmount: true },
   })
+  const params = {
+    paymentIntentId,
+    amount: cur.row.amountCents,
+    refundApplicationFee: !cobro?.feeAmount || new Prisma.Decimal(cobro.feeAmount).gt(0),
+    idempotencyKey: `online-order:${orderId}:refund:${cur.row.id}`,
+    metadata: { type: 'online_order_refund', cardRefundId: cur.row.id, orderId, venueId: cur.row.venueId },
+  }
+  const provider = getProvider(merchant)
   let result
   try {
-    result = await getProvider(merchant).refund(merchant, {
-      paymentIntentId,
-      amount: cur.row.amountCents,
-      refundApplicationFee: !cobro?.feeAmount || new Prisma.Decimal(cobro.feeAmount).gt(0),
-      idempotencyKey: `online-order:${orderId}:refund:${cur.row.id}`,
-      metadata: { type: 'online_order_refund', cardRefundId: cur.row.id, orderId, venueId: cur.row.venueId },
-    })
+    result = await (limites ? provider.refund(merchant, params, limites) : provider.refund(merchant, params))
   } catch (error) {
     // Stripe rechazó la solicitud (p. ej. un cobro en disputa): la devolución no existe; nada se movió.
     if (stripeRejected(error)) {
@@ -375,9 +385,13 @@ async function callStripeRefund(cur: Cur, now: Date): Promise<void> {
 }
 
 /** `SENDING` sin id = desconocido: se busca en Stripe por `metadata.cardRefundId`; si no aparece, sigue SENDING (nunca FAILED por tiempo). */
-async function findSent(cur: Cur, now: Date): Promise<void> {
+async function findSent(cur: Cur, now: Date, limites?: ProviderRequestLimits): Promise<void> {
   const { paymentIntentId, merchant } = await chargeOf(cur.row)
-  const found = (await getProvider(merchant).listRefunds(merchant, paymentIntentId)).find(r => r.metadata?.cardRefundId === cur.row.id)
+  const provider = getProvider(merchant)
+  const refunds = await (limites
+    ? provider.listRefunds(merchant, paymentIntentId, limites)
+    : provider.listRefunds(merchant, paymentIntentId))
+  const found = refunds.find(r => r.metadata?.cardRefundId === cur.row.id)
   if (found) {
     const to = STATUS_OF[found.status]
     await moveTo(cur, to, { stripeRefundId: found.refundId, lastError: null, ...afterStripe(to, cur.row, now) }, now)
@@ -394,7 +408,7 @@ async function findSent(cur: Cur, now: Date): Promise<void> {
     if (won.count === 1) {
       cur.row = { ...cur.row, lastSentAt: now, nextCheckAt: nextPendingCheck(cur.row.createdAt, now) }
       logger.warn('⚠️ [OnlineOrderCardRefund] Stripe no tiene la devolución: se re-envía con la misma clave', { cardRefundId: cur.row.id })
-      await callStripeRefund(cur, now)
+      await callStripeRefund(cur, now, limites)
       if (cur.row.status === R.SENDING) await maybeAlertStuck(cur, now, 'SENDING_RESENT')
       return
     }
@@ -406,9 +420,12 @@ async function findSent(cur: Cur, now: Date): Promise<void> {
 }
 
 /** `PENDING` → lo que diga Stripe. */
-async function poll(cur: Cur, now: Date): Promise<void> {
+async function poll(cur: Cur, now: Date, limites?: ProviderRequestLimits): Promise<void> {
   const { merchant } = await chargeOf(cur.row)
-  const state = await getProvider(merchant).getRefund(merchant, cur.row.stripeRefundId!)
+  const provider = getProvider(merchant)
+  const state = await (limites
+    ? provider.getRefund(merchant, cur.row.stripeRefundId!, limites)
+    : provider.getRefund(merchant, cur.row.stripeRefundId!))
   if (state.status === 'PENDING') return touch(cur, nextPendingCheck(cur.row.createdAt, now))
   const to = STATUS_OF[state.status]
   await moveTo(cur, to, { lastError: state.failureReason, ...afterStripe(to, cur.row, now) }, now)
@@ -420,10 +437,13 @@ async function poll(cur: Cur, now: Date): Promise<void> {
  * `issueRefund` (el envoltorio completo: sello, comisiones y referidos encolados; r5 #3) con la llave `oocr_<id>`: si el proceso
  * muere antes del CAS, la siguiente pasada recupera el MISMO renglón.
  */
-async function record(cur: Cur, now: Date): Promise<void> {
+async function record(cur: Cur, now: Date, limites?: ProviderRequestLimits): Promise<void> {
   const { orderId, nadie, paymentIntentId, merchant } = await chargeOf(cur.row)
   if (cur.row.feeRefundedCents == null) {
-    const total = await getProvider(merchant).getApplicationFeeRefundedCents(merchant, paymentIntentId)
+    const provider = getProvider(merchant)
+    const total = await (limites
+      ? provider.getApplicationFeeRefundedCents(merchant, paymentIntentId, limites)
+      : provider.getApplicationFeeRefundedCents(merchant, paymentIntentId))
     const prior = await prisma.onlineOrderCardRefund.aggregate({
       where: { chargeId: cur.row.chargeId, status: { in: WITH_LEDGER }, id: { not: cur.row.id } },
       _sum: { feeRefundedCents: true },
@@ -517,9 +537,12 @@ async function reverseStamp(cur: Cur, now: Date): Promise<void> {
 }
 
 /** `RECORDED` (revisión tardía): si Stripe dice failed o canceled (el negocio puede cancelarla desde su Stripe; r5 #1) → reversa. */
-async function reviewLate(cur: Cur, now: Date): Promise<void> {
+async function reviewLate(cur: Cur, now: Date, limites?: ProviderRequestLimits): Promise<void> {
   const { orderId, paymentIntentId, merchant } = await chargeOf(cur.row)
-  const state = await getProvider(merchant).getRefund(merchant, cur.row.stripeRefundId!)
+  const provider = getProvider(merchant)
+  const state = await (limites
+    ? provider.getRefund(merchant, cur.row.stripeRefundId!, limites)
+    : provider.getRefund(merchant, cur.row.stripeRefundId!))
   if (state.status !== 'FAILED' && state.status !== 'CANCELED') return touch(cur, nextLateCheck(ledgerBase(cur.row), now))
   await reverseRecordedRefund(cur, { orderId, paymentIntentId, failureReason: state.failureReason ?? state.status.toLowerCase() }, now)
 }
@@ -637,28 +660,29 @@ async function reverseRecordedRefund(cur: Cur, s: { orderId: string; paymentInte
 
 /**
  * El ÚNICO paso que habla con Stripe (la petición, el aviso de Stripe y el recorrido). Nunca con una transacción abierta. Cualquier
- * error no cambia el estado financiero: anota `lastError`, mueve `nextCheckAt` (r5 #4) y se re-lanza.
+ * error no cambia el estado financiero: anota `lastError`, mueve `nextCheckAt` (r5 #4) y se re-lanza. D661 (ronda 2 de codex-r3,
+ * Ruling 73): `limites` sólo los pasa el recorrido (corre bajo la bandera del job del conciliador): cada llamada a Stripe, con su plazo.
  */
-async function advance(id: string, now: Date): Promise<{ status: R; alerted: boolean }> {
+async function advance(id: string, now: Date, limites?: ProviderRequestLimits): Promise<{ status: R; alerted: boolean }> {
   const row = await load(id)
   if (!row) throw new NotFoundError('Devolución no encontrada')
   const cur: Cur = { row, alerted: false }
   try {
     switch (cur.row.status) {
       case R.REQUESTED:
-        await send(cur, now)
+        await send(cur, now, limites)
         break
       case R.SENDING:
-        await findSent(cur, now)
+        await findSent(cur, now, limites)
         break
       case R.PENDING:
-        await poll(cur, now)
+        await poll(cur, now, limites)
         break
       case R.SUCCEEDED:
         break
       case R.RECORDED:
         // Fix r1 M2: la revisión tardía PRIMERO; un sello que falla siempre nunca tapa la detección de un fallo de Stripe.
-        await reviewLate(cur, now)
+        await reviewLate(cur, now, limites)
         break
       case R.REVERSED:
       case R.RESOLVED:
@@ -667,7 +691,7 @@ async function advance(id: string, now: Date): Promise<{ status: R; alerted: boo
       default:
         return { status: cur.row.status, alerted: false } // FAILED, CANCELED: ya terminó
     }
-    if (cur.row.status === R.SUCCEEDED) await record(cur, now)
+    if (cur.row.status === R.SUCCEEDED) await record(cur, now, limites)
     if (WITH_LEDGER.includes(cur.row.status) && !cur.row.stampReversedAt) await reverseStamp(cur, now)
     return { status: cur.row.status, alerted: cur.alerted }
   } catch (error) {
@@ -724,9 +748,9 @@ export async function advanceCardRefund(id: string, now: Date = new Date()): Pro
   return (await advance(id, now)).status
 }
 
-/** Para el recorrido: además del estado, si esta pasada levantó la alerta. */
-export async function advanceCardRefundForSweep(id: string, now: Date) {
-  return advance(id, now)
+/** Para el recorrido: además del estado, si esta pasada levantó la alerta. Ronda 2 de codex-r3: con el plazo de la pasada. */
+export async function advanceCardRefundForSweep(id: string, now: Date, limites?: ProviderRequestLimits) {
+  return advance(id, now, limites)
 }
 
 /** Ruling 9: un reclamo de papel vigente (sin confirmar y de menos de 90 s): la comanda puede estar saliendo. */

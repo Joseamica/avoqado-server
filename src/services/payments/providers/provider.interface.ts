@@ -183,8 +183,8 @@ export interface ProviderRequestLimits {
   maxNetworkRetries?: number
   /**
    * D661 (Ruling 73): NUESTRO plazo duro de la llamada, en ms; el SDK no lo ve. Al cumplirse, la llamada se rechaza con `PlazoAgotado`
-   * aunque el SDK siga esperando un cuerpo que no llega (`conPlazo`). Lo pasa sólo el conciliador: su límite por petición + 5 s y, sin
-   * límite por petición, 120 s.
+   * aunque el SDK siga esperando un cuerpo que no llega (`conPlazo`). Lo pasa sólo el job del conciliador: su límite por petición + 5 s
+   * y, sin límite por petición, 120 s (la pasada y, ronda 2 de codex-r3, el recorrido de devoluciones).
    */
   plazoMs?: number
 }
@@ -199,7 +199,7 @@ export interface IEcommerceProvider {
   getOnboardingStatus(merchant: EcommerceMerchantWithProvider): Promise<OnboardingStatus>
   createCheckoutSession(merchant: EcommerceMerchantWithProvider, params: CreateCheckoutParams): Promise<CheckoutSession>
   getPaymentStatus(merchant: EcommerceMerchantWithProvider, sessionId: string): Promise<PaymentStatus>
-  refund(merchant: EcommerceMerchantWithProvider, params: RefundParams): Promise<RefundResult>
+  refund(merchant: EcommerceMerchantWithProvider, params: RefundParams, limits?: ProviderRequestLimits): Promise<RefundResult>
   verifyWebhookSignature(payload: string | Buffer, signature: string, endpoint: 'platform' | 'connect'): Promise<VerifiedWebhookEvent>
 
   tokenizeCard(merchant: EcommerceMerchantWithProvider, params: TokenizeCardParams): Promise<TokenizeCardResult>
@@ -224,14 +224,19 @@ export interface IEcommerceProvider {
   /** S5: vence una página de pago abierta (el comensal la abandonó). El error del proveedor sale tal cual. */
   expireAuthorizationCheckout(merchant: EcommerceMerchantWithProvider, checkoutSessionId: string): Promise<void>
 
-  getRefund(merchant: EcommerceMerchantWithProvider, refundId: string): Promise<RefundState>
+  getRefund(merchant: EcommerceMerchantWithProvider, refundId: string, limits?: ProviderRequestLimits): Promise<RefundState>
   /** Todas las devoluciones del PaymentIntent (todas las páginas, con tope), con su metadata. */
   listRefunds(
     merchant: EcommerceMerchantWithProvider,
     paymentIntentId: string,
+    limits?: ProviderRequestLimits,
   ): Promise<Array<RefundState & { metadata: Record<string, string> }>>
   /** Lo que Stripe ya devolvió de la comisión de la plataforma de ese cobro (`application_fee.amount_refunded`); 0 si no hay comisión. */
-  getApplicationFeeRefundedCents(merchant: EcommerceMerchantWithProvider, paymentIntentId: string): Promise<number>
+  getApplicationFeeRefundedCents(
+    merchant: EcommerceMerchantWithProvider,
+    paymentIntentId: string,
+    limits?: ProviderRequestLimits,
+  ): Promise<number>
   /** D661: el cargo del PaymentIntent con lo ya devuelto y TODAS sus devoluciones (también las pendientes). El error sale tal cual. */
   getChargeRefunds(merchant: EcommerceMerchantWithProvider, paymentIntentId: string): Promise<ChargeRefunds>
 }

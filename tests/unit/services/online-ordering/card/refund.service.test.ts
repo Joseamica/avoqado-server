@@ -78,6 +78,7 @@ import { cerrarComoDevueltoEnTx } from '@/services/online-ordering/card/devuelto
 import * as devuelto from '@/services/online-ordering/card/devuelto'
 import { NO_LO_RECOGIO_PAPEL_MS } from '@/services/online-ordering/printClaim.service'
 import { operationHash } from '@/utils/operationHash'
+import { PlazoAgotado } from '@/utils/conPlazo'
 
 const D = (v: string) => new Prisma.Decimal(v)
 const NOW = new Date('2026-10-29T18:00:00.000Z')
@@ -742,6 +743,56 @@ describe('sweepCardRefunds', () => {
     const second = await sweepCardRefunds(NOW, readEntry)
     expect(second).toMatchObject({ scanned: 1, advanced: 1, errors: 0 })
     expect(get(healthy.id).status).toBe('RECORDED')
+  })
+})
+
+/**
+ * D661 (ronda 2 de codex-r3, Ruling 73): el recorrido corre bajo el `isRunning` del job del conciliador; una llamada suya a Stripe
+ * cuyo cuerpo nunca termina retenía la bandera para siempre. Lleva el plazo de la pasada (120 s) en CADA llamada a Stripe.
+ */
+describe('D661 (ronda 2 de codex-r3, Ruling 73): el recorrido de devoluciones lleva el plazo de la pasada', () => {
+  const PLAZO = { plazoMs: 120_000 }
+
+  it('cada llamada a Stripe del recorrido (la devolución, su búsqueda, sus lecturas y la comisión devuelta) va con el plazo de 120 s; la petición del panel, sin él (como hoy)', async () => {
+    const nueva = seed({ status: 'REQUESTED' })
+    const sinId = seed({ status: 'SENDING' })
+    seed({ status: 'PENDING', stripeRefundId: 're_p' })
+    seed({ status: 'SUCCEEDED', stripeRefundId: 're_s' })
+    seed({ status: 'RECORDED', stripeRefundId: 're_r', recordedAt: at(-2 * HOUR), stampReversedAt: at(-2 * HOUR) })
+    listRefunds.mockResolvedValue([{ ...stateOf('SUCCEEDED', { refundId: 're_found' }), metadata: { cardRefundId: sinId.id } }])
+
+    await sweepCardRefunds(NOW, readEntry)
+    expect(refund.mock.calls.map(c => c[1].idempotencyKey)).toEqual([`online-order:ord1:refund:${nueva.id}`])
+    for (const llamada of [refund, listRefunds, getRefund, getApplicationFeeRefundedCents]) {
+      expect(llamada).toHaveBeenCalled()
+      for (const args of llamada.mock.calls) expect(args[2]).toEqual(PLAZO)
+    }
+    expect(getRefund.mock.calls.map(c => c[1]).sort()).toEqual(['re_p', 're_r'])
+
+    // La petición del panel (no corre bajo la bandera del job): la llamada de siempre, sin tercer argumento.
+    refund.mockClear()
+    const delPanel = seed({ status: 'REQUESTED' })
+    await advanceCardRefund(delPanel.id, NOW)
+    expect(refund).toHaveBeenCalledTimes(1)
+    expect(refund.mock.calls[0]).toHaveLength(2)
+  })
+
+  it('un plazo agotado al mandar la devolución la deja SENDING (en duda) con su error y su revisión movida; la siguiente pasada la busca y la reenvía con la MISMA llave', async () => {
+    const fila = seed({ status: 'REQUESTED' })
+    refund.mockRejectedValueOnce(new PlazoAgotado(120_000))
+    await expect(sweepCardRefunds(NOW, readEntry)).resolves.toMatchObject({ scanned: 1, errors: 1 })
+    expect(get(fila.id)).toMatchObject({ status: 'SENDING', stripeRefundId: null, lastError: new PlazoAgotado(120_000).message })
+    expect(get(fila.id).nextCheckAt.getTime()).toBeGreaterThan(NOW.getTime())
+
+    // Stripe no la tiene y el envío tiene más de 5 min: se reenvía con la MISMA llave (Stripe repite o crea exactamente una).
+    listRefunds.mockResolvedValue([])
+    await sweepCardRefunds(at(6 * MIN), readEntry)
+    expect(refund).toHaveBeenCalledTimes(2)
+    expect(refund.mock.calls.map(c => c[1].idempotencyKey)).toEqual([
+      `online-order:ord1:refund:${fila.id}`,
+      `online-order:ord1:refund:${fila.id}`,
+    ])
+    expect(get(fila.id).status).toBe('RECORDED')
   })
 })
 

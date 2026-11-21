@@ -344,24 +344,29 @@ export class StripeConnectProvider implements IEcommerceProvider {
     }
   }
 
-  async refund(merchant: EcommerceMerchantWithProvider, params: RefundParams): Promise<RefundResult> {
+  /** D661 (ronda 2 de codex-r3, Ruling 73): con `limits` (el recorrido de devoluciones), su plazo duro (`acotada`). */
+  async refund(merchant: EcommerceMerchantWithProvider, params: RefundParams, limits?: ProviderRequestLimits): Promise<RefundResult> {
     const connectAccountId = this.getCredentials(merchant).connectAccountId
     if (!connectAccountId) {
       throw new BadRequestError('La cuenta Stripe Connect no esta configurada para este negocio')
     }
 
-    const refund = await this.stripe.refunds.create(
-      {
-        payment_intent: params.paymentIntentId,
-        amount: params.amount,
-        refund_application_fee: params.refundApplicationFee,
-        reason: params.reason,
-        metadata: params.metadata,
-      },
-      {
-        stripeAccount: connectAccountId,
-        idempotencyKey: params.idempotencyKey,
-      },
+    const refund = await acotada(
+      this.stripe.refunds.create(
+        {
+          payment_intent: params.paymentIntentId,
+          amount: params.amount,
+          refund_application_fee: params.refundApplicationFee,
+          reason: params.reason,
+          metadata: params.metadata,
+        },
+        {
+          stripeAccount: connectAccountId,
+          idempotencyKey: params.idempotencyKey,
+          ...opcionesDeLimite(limits),
+        },
+      ),
+      limits,
     )
 
     return {
@@ -568,41 +573,58 @@ export class StripeConnectProvider implements IEcommerceProvider {
     await this.stripe.checkout.sessions.expire(checkoutSessionId, {}, { stripeAccount: connectAccountId })
   }
 
-  /** Fase 2 (T10): una devolución leída de la cuenta conectada (la del cargo). */
-  async getRefund(merchant: EcommerceMerchantWithProvider, refundId: string): Promise<RefundState> {
+  /** Fase 2 (T10): una devolución leída de la cuenta conectada (la del cargo). Ronda 2 de codex-r3: con `limits`, su plazo duro. */
+  async getRefund(merchant: EcommerceMerchantWithProvider, refundId: string, limits?: ProviderRequestLimits): Promise<RefundState> {
     const connectAccountId = this.requireConnectAccountId(merchant)
-    return toRefundState(await this.stripe.refunds.retrieve(refundId, {}, { stripeAccount: connectAccountId }))
+    return toRefundState(
+      await acotada(this.stripe.refunds.retrieve(refundId, {}, { stripeAccount: connectAccountId, ...opcionesDeLimite(limits) }), limits),
+    )
   }
 
-  /** Fase 2 (T10): todas las devoluciones del PaymentIntent, todas las páginas (tope 1000: un cobro real trae un puñado). */
+  /**
+   * Fase 2 (T10): todas las devoluciones del PaymentIntent, todas las páginas (tope 1000: un cobro real trae un puñado). Ronda 2 de
+   * codex-r3: con `limits`, su plazo duro cubre todas las páginas.
+   */
   async listRefunds(
     merchant: EcommerceMerchantWithProvider,
     paymentIntentId: string,
+    limits?: ProviderRequestLimits,
   ): Promise<Array<RefundState & { metadata: Record<string, string> }>> {
     const connectAccountId = this.requireConnectAccountId(merchant)
-    const refunds = await this.stripe.refunds
-      .list({ payment_intent: paymentIntentId, limit: 100 }, { stripeAccount: connectAccountId })
-      .autoPagingToArray({ limit: 1000 })
+    const refunds = await acotada(
+      this.stripe.refunds
+        .list({ payment_intent: paymentIntentId, limit: 100 }, { stripeAccount: connectAccountId, ...opcionesDeLimite(limits) })
+        .autoPagingToArray({ limit: 1000 }),
+      limits,
+    )
     return refunds.map(r => ({ ...toRefundState(r), metadata: (r.metadata ?? {}) as Record<string, string> }))
   }
 
   /**
    * Fase 2 (T10): lo que Stripe ya devolvió de la comisión de la plataforma de ese cobro (no se calcula: Stripe no documenta el
    * redondeo de la devolución proporcional). El cargo vive en la cuenta conectada; la comisión es de la plataforma: si la expansión
-   * no la trae como objeto, se lee con la llave de la plataforma.
+   * no la trae como objeto, se lee con la llave de la plataforma. Ronda 2 de codex-r3: con `limits`, su plazo duro cubre las dos
+   * lecturas.
    */
-  async getApplicationFeeRefundedCents(merchant: EcommerceMerchantWithProvider, paymentIntentId: string): Promise<number> {
+  async getApplicationFeeRefundedCents(
+    merchant: EcommerceMerchantWithProvider,
+    paymentIntentId: string,
+    limits?: ProviderRequestLimits,
+  ): Promise<number> {
     const connectAccountId = this.requireConnectAccountId(merchant)
-    const pi = await this.stripe.paymentIntents.retrieve(
-      paymentIntentId,
-      { expand: ['latest_charge.application_fee'] },
-      { stripeAccount: connectAccountId },
-    )
-    const charge = typeof pi.latest_charge === 'object' ? pi.latest_charge : null
-    const fee = charge?.application_fee
-    if (!fee) return 0
-    if (typeof fee === 'object') return fee.amount_refunded
-    return (await this.stripe.applicationFees.retrieve(fee)).amount_refunded
+    const leer = async () => {
+      const pi = await this.stripe.paymentIntents.retrieve(
+        paymentIntentId,
+        { expand: ['latest_charge.application_fee'] },
+        { stripeAccount: connectAccountId, ...opcionesDeLimite(limits) },
+      )
+      const charge = typeof pi.latest_charge === 'object' ? pi.latest_charge : null
+      const fee = charge?.application_fee
+      if (!fee) return 0
+      if (typeof fee === 'object') return fee.amount_refunded
+      return (await this.stripe.applicationFees.retrieve(fee)).amount_refunded
+    }
+    return acotada(leer(), limits)
   }
 
   /**

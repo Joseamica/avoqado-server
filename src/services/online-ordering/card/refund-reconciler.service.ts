@@ -8,7 +8,7 @@
  */
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
-import { CARD_RECONCILE_BATCH } from '../constants'
+import { CARD_RECONCILE_BATCH, PLAZO_DE_LA_PASADA } from '../constants'
 import type { ReadCandidates } from '../types'
 import { OnlineOrderCardRefundStatus, OnlineOrderPaymentMode } from '@prisma/client'
 import { DEVOLUCION_ANOTADA, ENTREGABLE, YA_ENTREGADO } from './devuelto'
@@ -50,7 +50,9 @@ export async function sweepCardRefunds(now: Date, readEntry: ReadCandidates): Pr
   result.scanned = due.length
   for (const row of due) {
     try {
-      const out = await advanceCardRefundForSweep(row.id, now)
+      // D661 (ronda 2 de codex-r3, Ruling 73): el recorrido corre bajo la bandera del job; cada llamada suya a Stripe, con el plazo de
+      // la pasada. Si se cumple, la fila sigue en su estado (con su error y su revisión movida) y la siguiente pasada repite con la MISMA llave.
+      const out = await advanceCardRefundForSweep(row.id, now, PLAZO_DE_LA_PASADA)
       if (out.status !== row.status) result.advanced += 1
       if (out.alerted) result.alerted += 1
     } catch (error) {
