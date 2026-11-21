@@ -1,7 +1,7 @@
 import { prismaMock } from '../../../__helpers__/setup'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { applyKitchenPreparation, listKitchenPreparation, preparationCapabilities } from '@/services/kds/kitchenPreparation.service'
-import { initialPreparation } from '@/services/kds/kitchenPreparation'
+import { accionYaCumplida, initialPreparation } from '@/services/kds/kitchenPreparation'
 
 jest.mock('@/services/access/basePlan.service', () => ({ venueHasFeatureAccess: jest.fn() }))
 const line = {
@@ -380,5 +380,31 @@ describe('persisted kitchen preparation', () => {
       code: 'PREPARATION_CONFLICT',
     })
     expect(prismaMock.kdsOrderItem.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('accionYaCumplida (QA del conjunto: dos aparatos piden lo mismo casi a la vez)', () => {
+  const c = (o: Partial<Record<'HELD' | 'PENDING' | 'PREPARING' | 'READY' | 'DELIVERED' | 'CANCELLED', number>>) => ({
+    HELD: 0,
+    PENDING: 0,
+    PREPARING: 0,
+    READY: 0,
+    DELIVERED: 0,
+    CANCELLED: 0,
+    ...o,
+  })
+  it('liberar: ya no queda nada retenido y lo pedido ya salió (aunque la cocina ya lo empezara)', () => {
+    expect(accionYaCumplida('RELEASE', c({ PENDING: 2 }), 2)).toBe(true)
+    expect(accionYaCumplida('RELEASE', c({ PREPARING: 1, READY: 1 }), 2)).toBe(true)
+  })
+  it('liberar: con algo retenido (liberación parcial) o cancelado en medio sigue siendo conflicto', () => {
+    expect(accionYaCumplida('RELEASE', c({ HELD: 1, PENDING: 1 }), 1)).toBe(false)
+    expect(accionYaCumplida('RELEASE', c({ CANCELLED: 2 }), 2)).toBe(false)
+  })
+  it('marcar listo: nada preparando y lo pedido ya está listo o entregado; otras acciones nunca', () => {
+    expect(accionYaCumplida('READY', c({ READY: 1, DELIVERED: 1 }), 2)).toBe(true)
+    expect(accionYaCumplida('READY', c({ PREPARING: 1, READY: 1 }), 1)).toBe(false)
+    expect(accionYaCumplida('START', c({ PREPARING: 2 }), 2)).toBe(false)
+    expect(accionYaCumplida('CANCEL', c({ CANCELLED: 2 }), 2)).toBe(false)
   })
 })

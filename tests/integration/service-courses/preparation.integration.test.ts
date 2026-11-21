@@ -139,6 +139,113 @@ test('concurrent release from the same revision has exactly one winner and one a
   expect(await prisma.activityLog.count({ where: { venueId, entityId: order.id, action: 'KITCHEN_RELEASE' } })).toBe(1)
 })
 
+// QA del conjunto (Flautas, 20-nov): la caja y la cocina liberan el MISMO tiempo con ~300 ms; el resultado es el que las dos querían.
+test('dos liberaciones del producto completo con la misma revisión: las dos responden bien, una sola liberación en la bitácora', async () => {
+  const { order, rows } = await fixture()
+  const command = { action: 'RELEASE', items: [{ id: rows[0].id, expectedRevision: 0, quantity: 2 }] }
+  const first = await applyKitchenPreparation(venueId, order.id, command, staffId)
+  const second = await applyKitchenPreparation(venueId, order.id, command, staffId)
+  const saved = await prisma.kdsOrderItem.findUniqueOrThrow({ where: { id: rows[0].id } })
+  expect(saved).toMatchObject({ preparationRevision: 1, preparation: { HELD: 0, PENDING: 2 } })
+  expect(second).toEqual(first) // mismo cuerpo que un éxito normal, con el estado actual
+  expect(await prisma.activityLog.count({ where: { venueId, entityId: order.id, action: 'KITCHEN_RELEASE' } })).toBe(1)
+})
+
+test('por la cola, la segunda liberación igual queda confirmada (ACK), no rechazada', async () => {
+  const { order, rows } = await fixture()
+  const intent = (deviceId: string) => ({
+    venueId,
+    staffId,
+    deviceId,
+    authorizeIntent: () => true,
+    intents: [
+      {
+        id: randomUUID(),
+        seq: 1,
+        type: 'KDS_ITEM_PROGRESS' as const,
+        staffId,
+        payload: { orderId: order.id, action: 'RELEASE', items: [{ id: rows[0].id, expectedRevision: 0, quantity: 2 }] },
+      },
+    ],
+  })
+  const caja = await processIntents(intent(`FULLTEST-caja-${randomUUID()}`))
+  const cocina = await processIntents(intent(`FULLTEST-cocina-${randomUUID()}`))
+  expect(caja[0].status).toBe('ACKED')
+  expect(cocina[0]).toMatchObject({ status: 'ACKED', result: { items: [{ id: rows[0].id, preparationRevision: 1 }] } })
+  expect(await prisma.activityLog.count({ where: { venueId, entityId: order.id, action: 'KITCHEN_RELEASE' } })).toBe(1)
+})
+
+test('«Marcar listo» repetido sobre lo que otro aparato ya marcó listo responde bien y no cambia nada', async () => {
+  const { order, rows, act } = await fixture()
+  await act('RELEASE', 2)
+  await act('START', 2)
+  const { preparationRevision } = await prisma.kdsOrderItem.findUniqueOrThrow({ where: { id: rows[0].id } })
+  const command = { action: 'READY', items: [{ id: rows[0].id, expectedRevision: preparationRevision, quantity: 2 }] }
+  await applyKitchenPreparation(venueId, order.id, command, staffId)
+  await expect(applyKitchenPreparation(venueId, order.id, command, staffId)).resolves.toMatchObject({
+    items: [{ id: rows[0].id, preparationRevision: preparationRevision + 1, preparation: { READY: 2 } }],
+  })
+  expect(await prisma.activityLog.count({ where: { venueId, entityId: order.id, action: 'KITCHEN_READY' } })).toBe(1)
+})
+
+test('un cambio distinto en medio sigue siendo conflicto: liberar con la revisión vieja algo que se canceló', async () => {
+  const { order, rows, act } = await fixture()
+  await act('CANCEL', 2, 'Se fue la mesa')
+  await expect(
+    applyKitchenPreparation(
+      venueId,
+      order.id,
+      { action: 'RELEASE', items: [{ id: rows[0].id, expectedRevision: 0, quantity: 2 }] },
+      staffId,
+    ),
+  ).rejects.toMatchObject({ statusCode: 409, code: 'PREPARATION_CONFLICT' })
+})
+
+test('Codex r4 #1: una porción ya liberada no tapa la cancelación de la otra (liberar con la revisión vieja sigue siendo conflicto)', async () => {
+  const { order, rows, act } = await fixture()
+  await act('RELEASE', 1) // HELD 1 · PENDING 1 (revisión 1)
+  const { preparationRevision } = await prisma.kdsOrderItem.findUniqueOrThrow({ where: { id: rows[0].id } })
+  await act('CANCEL', 1, 'Se fue la persona') // un gerente cancela la porción retenida (revisión 2)
+  await expect(
+    applyKitchenPreparation(
+      venueId,
+      order.id,
+      { action: 'RELEASE', items: [{ id: rows[0].id, expectedRevision: preparationRevision, quantity: 1 }] },
+      staffId,
+    ),
+  ).rejects.toMatchObject({ statusCode: 409, code: 'PREPARATION_CONFLICT' })
+})
+
+test('Codex r4 #3: si después de la liberación ya hubo otro avance (revisión +2), la liberación vieja sigue siendo conflicto', async () => {
+  const { order, rows, act } = await fixture()
+  await act('RELEASE', 2)
+  await act('START', 1)
+  await expect(
+    applyKitchenPreparation(
+      venueId,
+      order.id,
+      { action: 'RELEASE', items: [{ id: rows[0].id, expectedRevision: 0, quantity: 2 }] },
+      staffId,
+    ),
+  ).rejects.toMatchObject({ statusCode: 409, code: 'PREPARATION_CONFLICT' })
+})
+
+test('Codex r4 #4: «Marcar listo» con un origen inválido no se da por cumplido aunque ya esté listo', async () => {
+  const { order, rows, act } = await fixture()
+  await act('RELEASE', 2)
+  await act('START', 2)
+  const { preparationRevision } = await prisma.kdsOrderItem.findUniqueOrThrow({ where: { id: rows[0].id } })
+  await act('READY', 2)
+  await expect(
+    applyKitchenPreparation(
+      venueId,
+      order.id,
+      { action: 'READY', items: [{ id: rows[0].id, expectedRevision: preparationRevision, quantity: 2, from: 'PENDING' }] },
+      staffId,
+    ),
+  ).rejects.toMatchObject({ statusCode: 409, code: 'PREPARATION_CONFLICT' })
+})
+
 test('replaying the same durable action twice preserves one change and returns the original ACK', async () => {
   const { order, rows } = await fixture()
   const id = randomUUID()

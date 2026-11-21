@@ -7,7 +7,11 @@ import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { tomarCandadoDeComandas } from './kitchenTicketAuthoring.service'
 import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import {
+  accionYaCumplida,
   parsePreparation,
+  type PreparationAction,
+  type PreparationCounts,
+  type PreparationState,
   recalculoDeComanda,
   regresarListoAPreparando,
   trabajoDeCocina,
@@ -79,6 +83,53 @@ export async function laCocinaPuedeLiberar(venueId: string): Promise<boolean> {
 async function assertEnabled(venueId: string) {
   if (!(await venueHasFeatureAccess(venueId, 'KITCHEN_DISPLAY'))) {
     throw new ForbiddenError('El seguimiento de preparación requiere Pro y Pantalla de cocina.', 'FEATURE_ACCESS_REQUIRED')
+  }
+}
+
+/**
+ * QA del conjunto (Flautas, 20-nov-2026): la caja y la cocina liberan el MISMO tiempo (o dos pantallas marcan listo lo mismo) casi a
+ * la vez; la segunda llega con la revisión vieja. Es la MISMA petición, y se contesta como éxito sin cambiar nada, sólo si (Codex r4):
+ * - es «Liberar» o «Marcar listo» y lo pedido ya se cumple entero (`accionYaCumplida`: nada retenido, o nada preparando);
+ * - la revisión actual es justo la siguiente a la esperada (nadie más tocó la fila después; un ACK con otra revisión podía sacar otro
+ *   papel «LIBERAR» en la caja);
+ * - y esa revisión la escribió la MISMA acción, aplicada desde el mismo estado con la misma cantidad y el mismo origen (su bitácora):
+ *   así una cancelación en medio o una transición inválida siguen siendo conflicto.
+ * Cualquier otro caso es el conflicto de siempre.
+ */
+async function yaLaHizoOtroAparato(
+  tx: Prisma.TransactionClient,
+  a: {
+    venueId: string
+    orderId: string
+    row: { id: string; quantity: number; preparation: Prisma.JsonValue; preparationRevision: number }
+    action: PreparationAction
+    item: { quantity: number; expectedRevision: number; from?: PreparationState }
+  },
+): Promise<boolean> {
+  const { row, action, item } = a
+  if ((action !== 'RELEASE' && action !== 'READY') || row.preparationRevision !== item.expectedRevision + 1) return false
+  try {
+    if (!accionYaCumplida(action, parsePreparation(row.preparation, row.quantity), item.quantity)) return false
+    const bitacora = await tx.activityLog.findFirst({
+      where: {
+        venueId: a.venueId,
+        entity: 'KdsOrderItem',
+        entityId: a.orderId,
+        action: `KITCHEN_${action}`,
+        data: { path: ['items'], array_contains: [{ id: row.id, revision: row.preparationRevision }] },
+      },
+      select: { data: true },
+      orderBy: { createdAt: 'desc' },
+    })
+    const anterior = (
+      (bitacora?.data as { items?: Array<{ id: string; revision: number; before: PreparationCounts; after: PreparationCounts }> })?.items ??
+      []
+    ).find(i => i.id === row.id && i.revision === row.preparationRevision)
+    if (!anterior?.before || !anterior.after) return false
+    const misma = transitionPreparation(anterior.before, action, item.quantity, item.from)
+    return PREPARATION_STATES.every(s => misma[s] === anterior.after[s])
+  } catch {
+    return false // progreso ilegible o transición inválida: el conflicto de siempre
   }
 }
 
@@ -221,11 +272,18 @@ export async function applyKitchenPreparation(
     }
     // Validate the ENTIRE selection before the first write. Future rounds never enter this set.
     const urgencyRequestId = command.action === 'URGENT' ? (intentId ?? randomUUID()) : undefined
-    const updates = matches.map(([row], index) => {
+    // Las filas donde otro aparato ya hizo exactamente lo mismo (`accionYaCumplida`): no se escriben y se contestan como están.
+    const yaCumplidas: (typeof selected)[number][] = []
+    const updates: Array<{ row: (typeof selected)[number]; before: PreparationCounts; after: PreparationCounts }> = []
+    for (const [index, [row]] of matches.entries()) {
       const item = command.items[index]
       if (row.preparationRevision !== item.expectedRevision) {
         if (intentId && row.preparationRevision < item.expectedRevision) {
           throw new ConflictError('Una acción anterior de este producto todavía está por sincronizar.', 'PREPARATION_REVISION_PENDING')
+        }
+        if (await yaLaHizoOtroAparato(tx, { venueId, orderId, row, action: command.action, item })) {
+          yaCumplidas.push(row)
+          continue
         }
         throw new ConflictError('Otro compañero cambió este producto. Revisa su estado.', 'PREPARATION_CONFLICT', {
           id: row.id,
@@ -234,12 +292,12 @@ export async function applyKitchenPreparation(
         })
       }
       const before = parsePreparation(row.preparation, row.quantity)
-      return {
+      updates.push({
         row,
         before,
         after: transitionPreparation(before, command.action, item.quantity, item.from, command.reason, urgencyRequestId),
-      }
-    })
+      })
+    }
     for (const { row, after } of updates) {
       const cas = await tx.kdsOrderItem.updateMany({
         // D15: `removedAt: null` también aquí (además de la guarda de arriba): lo anulado nunca vuelve a cocina.
@@ -248,7 +306,8 @@ export async function applyKitchenPreparation(
       })
       if (cas.count !== 1) throw new ConflictError('Otro compañero cambió el producto. Revisa su estado.', 'PREPARATION_CONFLICT')
     }
-    const ticketIds = [...new Set(selected.map(r => r.kdsOrderId))]
+    // Sólo las comandas que de verdad cambiaron se recalculan y van a la bitácora.
+    const ticketIds = [...new Set(updates.map(u => u.row.kdsOrderId))]
     const current = await tx.kdsOrderItem.findMany({
       where: { kdsOrderId: { in: ticketIds }, kdsOrder: { venueId, orderId } },
       select: { id: true, kdsOrderId: true, quantity: true, preparation: true },
@@ -272,31 +331,36 @@ export async function applyKitchenPreparation(
         data: recalculoDeComanda(counts, { kitchenDoneAt: previa?.kitchenDoneAt ?? null }, new Date(), nuevoTrabajo),
       })
     }
-    await tx.activityLog.create({
-      data: {
-        venueId,
-        staffId,
-        action: `KITCHEN_${command.action}`,
-        entity: 'KdsOrderItem',
-        entityId: orderId,
+    if (updates.length > 0)
+      await tx.activityLog.create({
         data: {
-          orderId,
-          reason: command.reason ?? null,
-          ...(liberacionDeCocina ? { liberadoDesdeLaCocina: true } : {}),
-          items: updates.map(u => ({
-            id: u.row.id,
-            orderItemId: u.row.orderItemId,
-            stationId: u.row.kdsOrder.printStationId,
-            revision: u.row.preparationRevision + 1,
-            before: u.before,
-            after: u.after,
-          })),
+          venueId,
+          staffId,
+          action: `KITCHEN_${command.action}`,
+          entity: 'KdsOrderItem',
+          entityId: orderId,
+          data: {
+            orderId,
+            reason: command.reason ?? null,
+            ...(liberacionDeCocina ? { liberadoDesdeLaCocina: true } : {}),
+            items: updates.map(u => ({
+              id: u.row.id,
+              orderItemId: u.row.orderItemId,
+              stationId: u.row.kdsOrder.printStationId,
+              revision: u.row.preparationRevision + 1,
+              before: u.before,
+              after: u.after,
+            })),
+          },
         },
-      },
-    })
+      })
+    const hechas = new Map(updates.map(u => [u.row.id, { preparation: u.after, preparationRevision: u.row.preparationRevision + 1 }]))
+    for (const r of yaCumplidas)
+      hechas.set(r.id, { preparation: r.preparation as PreparationCounts, preparationRevision: r.preparationRevision })
+    // El mismo cuerpo que un éxito normal, en el orden pedido: lo que se cambió con su estado nuevo y lo ya cumplido como está.
     const result = {
       orderId,
-      items: updates.map(u => ({ id: u.row.id, preparation: u.after, preparationRevision: u.row.preparationRevision + 1 })),
+      items: matches.map(([row]) => ({ id: row.id, ...hechas.get(row.id)! })),
     }
     if (intentId) {
       // A lost response or a killed server after COMMIT must return the original outcome,
