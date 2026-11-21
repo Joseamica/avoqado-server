@@ -150,6 +150,10 @@ const plazoMasTemprano = (c: Row): number => {
 /**
  * Ruling 74: los urgentes, el plazo más temprano primero (y por id). ponytail: la base los da por `createdAt` y el orden por plazo es en
  * memoria: con más de 50 urgentes a la vez entran los 50 más viejos; si un día pasa, ordenar en SQL por LEAST(cierre, createdAt + 10 min).
+ * ponytail (ronda 2 de codex-r3): el grupo urgente NO rota: se relee y va primero en cada carril, y visitarlo no lo manda atrás (su orden
+ * es el plazo, no `updatedAt`). Techo: con más urgentes de los que un carril alcanza en su presupuesto (5 a la vez, 30 s; con Stripe lento,
+ * unos 10 por carril), los borradores de siempre esperan a que esos cierres pasen (a lo más 10 min). Arreglo: rotar dentro del grupo
+ * (urgentes por `updatedAt` en el mismo cubo de plazo) o reservar a los de siempre una parte de los trabajadores del carril.
  */
 const urgentes = async (readEntry: ReadCandidates, reloj: Date, inicio: Date): Promise<Row[]> =>
   (
