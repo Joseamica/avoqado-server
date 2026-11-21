@@ -46,6 +46,22 @@ describe('elegirBase', () => {
     expect(() => elegirBase(['--base', 'render'], { RENDER_DATABASE_URL: `${RENDER}?host=/tmp` })).toThrow(/host=/)
   })
 
+  it('🔴 un parámetro repetido (dos `schema`) se niega: esta revisión lee el primero y Prisma el último (Codex p2v5-r5 #1)', () => {
+    expect(() => elegirBase([], { DATABASE_URL: `${LOCAL}?schema=public&schema=otro` })).toThrow(/repite un parámetro/)
+    expect(() => elegirBase(['--base', 'render'], { RENDER_DATABASE_URL: `${RENDER}?schema=public&sslmode=require&schema=otro` })).toThrow(
+      /repite un parámetro/,
+    )
+  })
+
+  it('--base local acepta una COPIA local de la de desarrollo (av-db-25-<tarea>) con la misma regla de host y puerto (Codex p2v5-r5 #4)', () => {
+    expect(elegirBase([], { DATABASE_URL: 'postgresql://yo@localhost:5432/av-db-25-d662p2' }).destino).toBe(
+      'localhost:5432/av-db-25-d662p2/public',
+    )
+    expect(() => elegirBase([], { DATABASE_URL: 'postgresql://yo@localhost:5433/av-db-25-d662p2' })).toThrow(/puerto/)
+    expect(() => elegirBase([], { DATABASE_URL: 'postgresql://yo@db.example.com:5432/av-db-25-d662p2' })).toThrow(/--base local/)
+    expect(() => elegirBase([], { DATABASE_URL: 'postgresql://yo@localhost:5432/av-db-25x' })).toThrow(/desarrollo/)
+  })
+
   it('otro --base, una URL sin base o inválida: error sin imprimir la URL', () => {
     expect(() => elegirBase(['--base', 'prod'], { DATABASE_URL: LOCAL })).toThrow(/sólo acepta/)
     for (const url of ['postgresql://yo@localhost:5432/', 'no-es-una-url']) {

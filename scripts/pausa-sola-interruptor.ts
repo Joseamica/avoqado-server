@@ -39,9 +39,25 @@ function destinoDeLaUrl(url: string, variable: string): { destino: string; host:
   }
   if (u.protocol !== 'postgres:' && u.protocol !== 'postgresql:') throw new Error(`${variable} no es una URL postgres:// o postgresql://.`)
   if (u.searchParams.has('host')) throw new Error(`${variable} trae «?host=», que manda la conexión a otro lado: no se usa.`)
+  // Codex p2v5-r5 #1: un parámetro repetido (p. ej. dos `schema`) lo leen distinto esta revisión (el primero) y Prisma (el último).
+  const claves = [...u.searchParams.keys()]
+  if (new Set(claves).size !== claves.length) throw new Error(`${variable} repite un parámetro de la URL: no se usa.`)
   const baseDeDatos = decodeURIComponent(u.pathname.replace(/^\//, ''))
   if (!u.hostname || !baseDeDatos) throw new Error(`${variable} no trae host y nombre de base (su valor no se imprime).`)
   return { host: u.hostname, destino: `${u.hostname}:${u.port || '5432'}/${baseDeDatos}/${u.searchParams.get('schema') || 'public'}` }
+}
+
+/**
+ * Codex p2v5-r5 #4: además de las bases de desarrollo de `_solo-base-local.ts`, una COPIA local de la de desarrollo
+ * (`av-db-25-<tarea>`, la que se hace para probar sin tocar la compartida). Host, puerto y proveedor se revisan con la misma regla.
+ */
+function esBaseLocalOCopia(url: string): { ok: boolean; motivo?: string } {
+  const corte = esBaseLocal(url)
+  if (corte.ok) return corte
+  const u = new URL(url)
+  if (!/^av-db-25-[a-z0-9_-]+$/i.test(decodeURIComponent(u.pathname.replace(/^\//, '')))) return corte
+  u.pathname = '/av-db-25'
+  return esBaseLocal(u.toString()).ok ? { ok: true } : corte
 }
 
 /** Elige la base ANTES de que exista el cliente de Prisma: `local` usa DATABASE_URL y `render`, RENDER_DATABASE_URL. */
@@ -53,7 +69,7 @@ export function elegirBase(argv: string[], env: NodeJS.ProcessEnv): DestinoDeLaB
   if (!url) throw new Error(`--base ${base}: falta ${variable} en el entorno.`)
   const { destino, host } = destinoDeLaUrl(url, variable)
   if (base === 'local') {
-    const corte = esBaseLocal(url)
+    const corte = esBaseLocalOCopia(url)
     if (!corte.ok) throw new Error(`--base local: ${corte.motivo}.`)
   } else if (!HOST_DE_RENDER.test(host)) {
     throw new Error(`--base render: «${host}» no es un Postgres de Render (dpg-….<región>-postgres.render.com).`)
