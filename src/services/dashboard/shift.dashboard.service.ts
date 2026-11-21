@@ -369,20 +369,9 @@ const ORDEN_DEL_DETALLE = {
   },
 } satisfies Prisma.OrderSelect
 
-export async function getShiftById(
-  venueId: string,
-  shiftId: string,
-  incluirEsperado = false,
-  view: 'detail' | 'state' = 'detail',
-): Promise<any | null> {
-  // La terminal sólo necesita acreditar SU caja cerrada, sin cargar el corte completo.
-  if (view === 'state') {
-    return prisma.shift.findFirst({
-      where: { id: shiftId, venueId },
-      select: { id: true, venueId: true, status: true },
-    })
-  }
-  const shift = await prisma.shift.findFirst({
+/** El turno del detalle con sus cobros y órdenes, leído con el cliente que se le pase (la foto de `getShiftById`). */
+function leerElTurnoDelDetalle(db: Prisma.TransactionClient, venueId: string, shiftId: string) {
+  return db.shift.findFirst({
     where: {
       id: shiftId,
       venueId: venueId,
@@ -445,6 +434,31 @@ export async function getShiftById(
       },
     },
   })
+}
+
+export async function getShiftById(
+  venueId: string,
+  shiftId: string,
+  incluirEsperado = false,
+  view: 'detail' | 'state' = 'detail',
+): Promise<any | null> {
+  // La terminal sólo necesita acreditar SU caja cerrada, sin cargar el corte completo.
+  if (view === 'state') {
+    return prisma.shift.findFirst({
+      where: { id: shiftId, venueId },
+      select: { id: true, venueId: true, status: true },
+    })
+  }
+  // 🔴 Máquina de efectivo (D6, r6-8): los movimientos del turno y el desglose agregado de Efectivo salen de la MISMA foto de Postgres
+  // (`RepeatableRead`, el mismo cliente de transacción). Antes un cobro que entraba entre las dos lecturas dejaba «Efectivo $100» con
+  // hijos «Gaveta $100 · máquina $150» (r3 #8). Los campos de la respuesta no cambian.
+  const { shift, efectivoPorLugar } = await prisma.$transaction(
+    async tx => {
+      const leido = await leerElTurnoDelDetalle(tx, venueId, shiftId)
+      return { shift: leido, efectivoPorLugar: leido ? await efectivoPorLugarDelTurno(venueId, leido.id, tx) : null }
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  )
 
   if (!shift) {
     return null
@@ -500,7 +514,7 @@ export async function getShiftById(
     cardBrandBreakdown,
     totalSales: calculatedTotalSales,
     totalTips: calculatedTotalTips,
-  } = buildPaymentBreakdown(shift.payments as any, await efectivoPorLugarDelTurno(venueId, shift.id))
+  } = buildPaymentBreakdown(shift.payments as any, efectivoPorLugar)
 
   // R3 (full-testing v2 #2): la cuenta de tarjetas de regalo no es una orden de VENTA del turno: no entra a las órdenes por
   // empleado, a la lista, a los productos vendidos, al conteo ni al ticket promedio. Su dinero sí (cobros, efectivo y caja).
@@ -1162,15 +1176,19 @@ type TotalesDelLugar = { total: number; tips: number; count: number }
  * agrupadas de pocas filas, nunca recorrer los pagos cargados. `null` = el turno no tuvo ventas de la máquina y Efectivo responde como
  * hoy. Lo CASH que no es de ninguna de las dos conserva su etiqueta: los hijos siempre suman la cabecera (mismo filtro que la carga).
  */
-export async function efectivoPorLugarDelTurno(venueId: string, shiftId: string): Promise<Map<string, TotalesDelLugar> | null> {
+export async function efectivoPorLugarDelTurno(
+  venueId: string,
+  shiftId: string,
+  db: Pick<Prisma.TransactionClient, 'payment'> = prisma,
+): Promise<Map<string, TotalesDelLugar> | null> {
   const where = { venueId, shiftId, status: 'COMPLETED' as const, method: 'CASH' as const }
   const [maquina, resto] = await Promise.all([
-    prisma.payment.aggregate({
+    db.payment.aggregate({
       where: { ...where, cashMachineRef: { not: null } },
       _sum: { amount: true, tipAmount: true },
       _count: { _all: true },
     }),
-    prisma.payment.groupBy({
+    db.payment.groupBy({
       by: ['fundsFlow', 'tenderTypeId', 'tenderCountsAsCash', 'tenderLabel', 'externalSource'],
       where: { ...where, cashMachineRef: null },
       _sum: { amount: true, tipAmount: true },

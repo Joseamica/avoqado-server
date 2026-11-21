@@ -165,4 +165,34 @@ describe('detalle del turno · Efectivo = Gaveta + Efectivo · máquina (R5 #11)
     expect(efectivo).toMatchObject({ total: 100, tips: 10, count: 1 })
     expect('children' in efectivo).toBe(false)
   })
+
+  it('🔴 r3 #8 / D6 / r6-8: los movimientos y el desglose salen de la MISMA foto (RepeatableRead, el mismo cliente de transacción)', async () => {
+    // La foto ve sólo los $100 de la gaveta. Fuera de ella (el cliente global) ya entró la venta de $150 de la máquina: antes, la cabecera
+    // salía de la foto vieja y los hijos de la nueva y la pantalla decía «Efectivo $100 · Gaveta $100 · máquina $150».
+    const enLaFoto: any = {
+      shift: { findFirst: jest.fn().mockResolvedValue(turno([enLaGaveta])) },
+      payment: {
+        aggregate: jest.fn().mockResolvedValue(sumaDeLaMaquina(0, 0)),
+        groupBy: jest.fn().mockResolvedValue([grupo({}, 100, 10, 1)]),
+      },
+    }
+    prismaMock.shift.findFirst.mockResolvedValue(turno([enLaGaveta, enLaMaquina]) as any)
+    prismaMock.payment.aggregate.mockResolvedValue(sumaDeLaMaquina(150, 1) as any)
+    prismaMock.payment.groupBy.mockResolvedValue([grupo({}, 100, 10, 1)] as any)
+    prismaMock.$transaction.mockImplementationOnce(async (cb: any) => cb(enLaFoto))
+
+    const detalle = await getShiftById('venue-1', 'shift-1')
+
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ isolationLevel: 'RepeatableRead' }),
+    )
+    const efectivo = renglon(detalle, 'CASH')
+    expect(efectivo).toMatchObject({ total: 100, tips: 10, count: 1 })
+    expect('children' in efectivo).toBe(false)
+    expect(prismaMock.payment.aggregate).not.toHaveBeenCalled()
+    expect(enLaFoto.payment.aggregate).toHaveBeenCalled()
+    // Los campos que leen las apps viejas siguen ahí.
+    expect(detalle).toEqual(expect.objectContaining({ paymentMethodBreakdown: expect.any(Array), cardBrandBreakdown: expect.any(Array) }))
+  })
 })
