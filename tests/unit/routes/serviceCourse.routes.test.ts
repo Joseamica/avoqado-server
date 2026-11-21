@@ -9,6 +9,7 @@ jest.mock('@/services/service-courses/serviceCourse.service', () => ({
   putVenueServiceCourses: jest.fn(),
   getOrganizationServiceCourses: jest.fn(),
   putOrganizationServiceCourses: jest.fn(),
+  setKitchenRelease: jest.fn(),
 }))
 jest.mock('@/services/access/rolVigente', () => ({
   esSuperadminReal: jest.fn().mockResolvedValue(false),
@@ -105,5 +106,29 @@ describe('service course routes: canonical scope and permission boundaries', () 
         }),
       }),
     )
+  })
+  it('D17: el interruptor de la cocina pide settings:manage y el plan de los tiempos, y pasa el actor', async () => {
+    ;(courses.setKitchenRelease as jest.Mock).mockResolvedValue({ kitchenCanRelease: true })
+    const sinPermiso = await request(app)
+      .put('/venues/venue-a/service-courses/kitchen-release')
+      .set('x-test-user', 'staff')
+      .set('x-test-permissions', 'settings:read')
+      .send({ enabled: true })
+    expect(sinPermiso.status).toBe(403)
+    const free = await request(app)
+      .put('/venues/venue-a/service-courses/kitchen-release')
+      .set('x-test-user', 'staff')
+      .set('x-test-permissions', 'settings:manage')
+      .set('x-test-free', '1')
+      .send({ enabled: true })
+    expect(free.status).toBe(403)
+    expect(courses.setKitchenRelease).not.toHaveBeenCalled()
+    const ok = await request(app)
+      .put('/venues/venue-a/service-courses/kitchen-release')
+      .set('x-test-user', 'staff')
+      .set('x-test-permissions', 'settings:manage')
+      .send({ enabled: true })
+    expect(ok.status).toBe(200)
+    expect(courses.setKitchenRelease).toHaveBeenCalledWith('venue-a', true, expect.objectContaining({ staffId: 'staff' }))
   })
 })

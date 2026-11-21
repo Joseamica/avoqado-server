@@ -23,6 +23,7 @@ import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { esOrdenImportada, esPedidoDePlataforma, rechazarSiEsImportada } from '../shared/ordenImportada'
 import { esCuentaDeTarjetasEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
+import { baseDeCargos, importeDeCargo } from '../shared/serviceCharges'
 
 /** Resuelve StaffVenue.id: appliedById NO acepta un Staff.id (P2003). */
 async function resolveStaffVenueId(tx: Prisma.TransactionClient, venueId: string, staffId?: string): Promise<string | undefined> {
@@ -83,9 +84,9 @@ async function requireOpenOrder(tx: Prisma.TransactionClient, venueId: string, o
 }
 
 /** Monto de un cargo sobre la base (subtotal − descuentos) de la cuenta. */
-function computeAmount(type: 'PERCENTAGE' | 'FIXED_AMOUNT', value: number, base: number): number {
-  const raw = type === 'PERCENTAGE' ? (base * value) / 100 : value
-  return Math.round(raw * 100) / 100
+/** La fórmula compartida (`importeDeCargo`): el mismo número que después escribe el recálculo (Codex r4 #2). */
+function computeAmount(type: 'PERCENTAGE' | 'FIXED_AMOUNT', value: number, base: Prisma.Decimal | number): number {
+  return importeDeCargo(type, value, base).toNumber()
 }
 
 /** Aplica un cobro del catálogo a la cuenta abierta. */
@@ -109,7 +110,7 @@ export async function applyServiceChargeInTransaction(
   const already = await tx.orderServiceCharge.findFirst({ where: { orderId, serviceChargeId } })
   if (already) throw new BadRequestError('Ese cobro ya está aplicado a la cuenta')
 
-  const base = Math.max(0, Number(order.subtotal) - Number(order.discountAmount))
+  const base = baseDeCargos(order.subtotal, order.discountAmount)
   const amount = computeAmount(charge.type, Number(charge.value), base)
 
   const row = await tx.orderServiceCharge.create({
@@ -255,7 +256,7 @@ export async function syncAutomaticServiceChargesInTransaction(
     where: { venueId, active: true, autoApplyMinCovers: { not: null } },
   })
   const applied = await tx.orderServiceCharge.findMany({ where: { orderId } })
-  const base = Math.max(0, Number(order.subtotal) - Number(order.discountAmount))
+  const base = baseDeCargos(order.subtotal, order.discountAmount)
 
   let changed = false
 

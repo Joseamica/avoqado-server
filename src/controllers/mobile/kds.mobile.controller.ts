@@ -44,12 +44,15 @@ export const getKitchenPreparation = async (req: Request, res: Response, next: N
  *
  * @route GET /api/v1/mobile/venues/:venueId/kds/orders
  * @query status - Comma-separated status filter (default: NEW,PREPARING,READY)
+ * @query kitchenDoneVersion - `1` (pantallas nuevas): sin lo que la cocina terminó ni lo archivado; sin él, el tablero de siempre
  */
 export const listKdsOrders = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
     const { status, stationId } = req.query
     const estacion = typeof stationId === 'string' && stationId ? stationId : undefined
+    // Sólo la pantalla que lo pide deja de recibir lo terminado y lo archivado (D17); la vieja recibe el tablero de siempre.
+    const pantallaNueva = Number(req.query.kitchenDoneVersion) >= 1
 
     const page =
       req.query.urgencyVersion === '1'
@@ -61,9 +64,9 @@ export const listKdsOrders = async (req: Request, res: Response, next: NextFunct
         : undefined
     const [orders, total] = await Promise.all([
       page
-        ? kdsMobileService.listKdsOrders(venueId, status as string | undefined, estacion, page)
-        : kdsMobileService.listKdsOrders(venueId, status as string | undefined, estacion),
-      kdsMobileService.countKdsOrders(venueId, status as string | undefined, estacion),
+        ? kdsMobileService.listKdsOrders(venueId, status as string | undefined, estacion, page, pantallaNueva)
+        : kdsMobileService.listKdsOrders(venueId, status as string | undefined, estacion, undefined, pantallaNueva),
+      kdsMobileService.countKdsOrders(venueId, status as string | undefined, estacion, pantallaNueva),
     ])
     // D6 de Flautas (opción B): la pantalla de esta estación acaba de leer su tablero. Sólo con el tablero ya leído; no se
     // espera ni puede tumbar la respuesta. Lo que lee el vigilante de reparto (sin estación) no es una pantalla.
@@ -327,6 +330,7 @@ export const listRecentKdsOrders = async (req: Request, res: Response, next: Nex
     const data = await kdsMobileService.listRecentKdsOrders(
       req.params.venueId,
       typeof stationId === 'string' && stationId ? stationId : undefined,
+      req.query.kitchenDoneVersion === '1',
     )
     res.status(200).json({ success: true, data })
   } catch (error) {
@@ -341,7 +345,13 @@ export const listRecentKdsOrders = async (req: Request, res: Response, next: Nex
  */
 export const recallKdsOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const data = await kdsMobileService.recallKdsOrder(req.params.venueId, req.params.id)
+    const expectedDoneAt = typeof req.body?.expectedDoneAt === 'string' ? req.body.expectedDoneAt.slice(0, 40) : null
+    const data = await kdsMobileService.recallKdsOrder(
+      req.params.venueId,
+      req.params.id,
+      (req as any).authContext?.userId ?? null,
+      expectedDoneAt,
+    )
     res.status(200).json({ success: true, data })
   } catch (error) {
     logControllerError('kds recallKdsOrder', error)

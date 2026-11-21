@@ -1,10 +1,12 @@
-import { OrderStatus, PaymentFundsFlow, PaymentMethod, PaymentType, TransactionStatus } from '@prisma/client'
+import { OrderStatus, PaymentFundsFlow, PaymentMethod, PaymentType, Prisma, TransactionStatus } from '@prisma/client'
 import Papa from 'papaparse'
 
 import prisma from '../../utils/prismaClient'
 import { formatInVenueTimezone, venueEndOfDay, venueStartOfDay } from '../../utils/datetime'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { buildStoragePath, uploadFileToStorage } from '../storage.service'
+import { comisionesPorCalcular } from '../payments/comisionPorCalcular'
+import logger from '../../config/logger'
 
 /**
  * Bank Reconciliation (Conciliación bancaria con IA) — Slice 1 core.
@@ -43,6 +45,13 @@ export interface DepositCandidate {
   /** Depósito esperado = Σ netAmount de pagos electrónicos COMPLETED de ese día. */
   netCents: number
   paymentCount: number
+  /**
+   * D24: pagos del día con la comisión todavía por calcular. Su neto es PROVISIONAL (sin la comisión), así que el día no se compara
+   * contra el banco: ni cuadra ni deja de cuadrar hasta que la comisión llegue.
+   */
+  pendientesDeCosto?: number
+  /** D24: de esos, los que tienen el cálculo de la comisión agotado (DEAD_LETTER): hay que revisarlos. */
+  costoSinCalcular?: number
 }
 
 export interface MatchResult {
@@ -52,9 +61,24 @@ export interface MatchResult {
   matchScore: number
   /** El día-candidato que concilia esta línea, o null si no cuadró. */
   matchedKey: string | null
+  /**
+   * D24: no cuadró con ningún día completo, pero un día de su ventana tiene la comisión por calcular: no se puede decir que no cuadra.
+   * Se guarda «por decidir» (UNMATCHED sin calificación) y se decide al volver a abrir el estado de cuenta.
+   */
+  porDecidir?: true
 }
 
+/**
+ * D24: una línea «por decidir» se guarda UNMATCHED y SIN calificación (`matchScore` nulo). Una línea decidida siempre lleva su
+ * calificación (0 si no cuadró), así que la marca no choca con nada guardado antes.
+ */
+const LINEA_POR_DECIDIR = { matchStatus: 'UNMATCHED', matchScore: null, direction: 'CREDIT' } as const
+const esPorDecidir = (l: { matchStatus: string; matchScore: unknown; direction: string }): boolean =>
+  l.matchStatus === 'UNMATCHED' && l.matchScore === null && l.direction === 'CREDIT'
+
 const toCents = (n: number | { toString(): string } | null | undefined): number => (n == null ? 0 : Math.round(Number(n) * 100))
+/** Días de ventana entre la venta y el abono del banco (T+1/T+2): la del matcher y la de «qué día detiene a esta línea». */
+const VENTANA_DE_DIAS = 2
 const daysBetween = (a: Date, b: Date): number => Math.abs(Math.round((a.getTime() - b.getTime()) / 86_400_000))
 const localNoon = (ymd: string): Date => new Date(`${ymd}T12:00:00`)
 
@@ -189,10 +213,23 @@ export async function loadDepositCandidates(
       createdAt: { gte: from, lte: to },
       order: { status: { not: OrderStatus.CANCELLED } },
     },
-    select: { netAmount: true, createdAt: true, type: true, method: true, fundsFlow: true },
+    select: {
+      id: true,
+      amount: true,
+      feeAmount: true,
+      netAmount: true,
+      processorData: true,
+      tenderType: { select: { systemKind: true } },
+      createdAt: true,
+      type: true,
+      method: true,
+      fundsFlow: true,
+    },
   })
 
-  const byDay = new Map<string, { cents: number; count: number }>()
+  // D24: los que todavía esperan su comisión (su neto es provisional). Sólo pueden estar entre los que cuentan para el día.
+  const comisiones = await comisionesPorCalcular(venueId, payments)
+  const byDay = new Map<string, { cents: number; count: number; pendientes: number; sinCalcular: number }>()
   for (const p of payments) {
     // TEST = no es dinero real; ADJUSTMENT = no es un depósito (semántica ambigua → revisión manual).
     // Conservamos null (legacy = venta real), REGULAR, FAST y REFUND (neto de devoluciones).
@@ -203,13 +240,22 @@ export async function loadDepositCandidates(
     if (p.type === PaymentType.REFUND && p.method === PaymentMethod.BANK_TRANSFER && p.fundsFlow !== PaymentFundsFlow.AVOQADO_PROCESSED)
       continue
     const ymd = formatInVenueTimezone(p.createdAt, timezone, 'yyyy-MM-dd')
-    const e = byDay.get(ymd) ?? { cents: 0, count: 0 }
+    const e = byDay.get(ymd) ?? { cents: 0, count: 0, pendientes: 0, sinCalcular: 0 }
     e.cents += toCents(p.netAmount)
     e.count += 1
+    const comision = comisiones.get(p.id)
+    if (comision) e.pendientes += 1
+    if (comision === 'SIN_CALCULAR') e.sinCalcular += 1
     byDay.set(ymd, e)
   }
 
-  return [...byDay.entries()].map(([ymd, e]) => ({ key: ymd, date: localNoon(ymd), netCents: e.cents, paymentCount: e.count }))
+  return [...byDay.entries()].map(([ymd, e]) => ({
+    key: ymd,
+    date: localNoon(ymd),
+    netCents: e.cents,
+    paymentCount: e.count,
+    ...(e.pendientes > 0 ? { pendientesDeCosto: e.pendientes, costoSinCalcular: e.sinCalcular } : {}),
+  }))
 }
 
 /**
@@ -227,7 +273,10 @@ export function matchLines(
   opts?: { amountTolCents?: number; dateWindowDays?: number },
 ): MatchResult[] {
   const amountTol = opts?.amountTolCents ?? 0
-  const dateWindow = opts?.dateWindowDays ?? 2
+  const dateWindow = opts?.dateWindowDays ?? VENTANA_DE_DIAS
+  // D24: un día con la comisión por calcular no se compara (su neto es provisional); sólo vuelve «por decidir» lo que no cuadró cerca.
+  const pendientes = candidates.filter(c => (c.pendientesDeCosto ?? 0) > 0)
+  const comparables = candidates.filter(c => !((c.pendientesDeCosto ?? 0) > 0))
   const used = new Set<string>()
   const seen = new Set<string>()
   const results: MatchResult[] = []
@@ -244,7 +293,7 @@ export function matchLines(
     }
     seen.add(dupKey)
 
-    const cands = candidates
+    const cands = comparables
       .filter(
         c => !used.has(c.key) && Math.abs(c.netCents - line.amountCents) <= amountTol && daysBetween(c.date, line.postedDate) <= dateWindow,
       )
@@ -255,12 +304,26 @@ export function matchLines(
       )
 
     const best = cands[0]
-    if (best) {
+    // D24 (pasada exhaustiva #2): un día que espera su comisión dentro de la ventana podría ser el dueño de este abono si está igual
+    // de cerca o más que el día elegido (a igual importe gana el más cercano), o si el elegido no cuadra exacto (el neto final del
+    // pendiente podría hacerlo). Entonces no se le asigna al vecino: queda «por decidir» y no consume ningún día.
+    const pendienteCompite = pendientes.some(c => {
+      const dias = daysBetween(c.date, line.postedDate)
+      if (dias > dateWindow) return false
+      return !best || best.netCents !== line.amountCents || dias <= daysBetween(best.date, line.postedDate)
+    })
+    if (best && !pendienteCompite) {
       used.add(best.key)
       const score = best.netCents === line.amountCents ? 1 : 0.9
       results.push({ rowIndex: line.rowIndex, matchStatus: 'MATCHED', matchScore: score, matchedKey: best.key })
     } else {
-      results.push({ rowIndex: line.rowIndex, matchStatus: 'UNMATCHED', matchScore: 0, matchedKey: null })
+      results.push({
+        rowIndex: line.rowIndex,
+        matchStatus: 'UNMATCHED',
+        matchScore: 0,
+        matchedKey: null,
+        ...(pendienteCompite ? { porDecidir: true as const } : {}),
+      })
     }
   }
   return results
@@ -284,7 +347,17 @@ export async function processBankStatement(
   venueId: string,
   staffId: string,
   file: UploadedFile,
-): Promise<{ statementId: string; lineCount: number; matchedCount: number }> {
+): Promise<{
+  statementId: string
+  lineCount: number
+  matchedCount: number
+  /** D24: pagos del periodo con la comisión por calcular (sus días no se compararon). */
+  pendientesDeCosto: number
+  /** D24: de esos, los que tienen el cálculo de la comisión agotado: revisar. */
+  costoSinCalcular: number
+  /** D24: líneas que quedaron «por decidir»; se deciden solas al abrir el estado de cuenta cuando la comisión ya esté. */
+  lineasPorDecidir: number
+}> {
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true, timezone: true } })
   if (!venue) throw new NotFoundError(`Venue ${venueId} no encontrado`)
   const tz = venue.timezone || 'America/Mexico_City'
@@ -304,6 +377,9 @@ export async function processBankStatement(
   const results = matchLines(lines, candidates)
   const resultByRow = new Map(results.map(r => [r.rowIndex, r]))
   const matchedCount = results.filter(r => r.matchStatus === 'MATCHED').length
+  const pendientesDeCosto = candidates.reduce((n, c) => n + (c.pendientesDeCosto ?? 0), 0)
+  const costoSinCalcular = candidates.reduce((n, c) => n + (c.costoSinCalcular ?? 0), 0)
+  const lineasPorDecidir = results.filter(r => r.porDecidir).length
 
   const safeSlug = venue.slug || venueId
   const storagePath = buildStoragePath(`venues/${safeSlug}/bank-statements/${formatDay(periodEnd)}-${Date.now()}.csv`)
@@ -334,7 +410,8 @@ export async function processBankStatement(
             amountCents: l.amountCents,
             direction: l.direction,
             matchStatus: r?.matchStatus ?? 'UNMATCHED',
-            matchScore: r?.matchScore ?? null,
+            // D24: «por decidir» se guarda sin calificación (LINEA_POR_DECIDIR).
+            matchScore: r?.porDecidir ? null : (r?.matchScore ?? null),
             matchedKey: r?.matchedKey ?? null,
           }
         }),
@@ -349,11 +426,11 @@ export async function processBankStatement(
       entityId: statement.id,
       staffId,
       venueId,
-      data: { fileName: file.originalname, lineCount: lines.length, matchedCount },
+      data: { fileName: file.originalname, lineCount: lines.length, matchedCount, pendientesDeCosto, costoSinCalcular, lineasPorDecidir },
     },
   })
 
-  return { statementId: statement.id, lineCount: lines.length, matchedCount }
+  return { statementId: statement.id, lineCount: lines.length, matchedCount, pendientesDeCosto, costoSinCalcular, lineasPorDecidir }
 }
 
 /** Lista los estados de cuenta del venue (más reciente primero). */
@@ -370,18 +447,152 @@ export async function listStatements(venueId: string) {
       lineCount: true,
       matchedCount: true,
       createdAt: true,
+      // D24: líneas que esperan la comisión de su día para decidirse.
+      _count: { select: { lines: { where: LINEA_POR_DECIDIR } } },
     },
   })
 }
 
-/** Detalle de un estado de cuenta + sus líneas. Aislado por tenant. */
-export async function getStatementDetail(venueId: string, statementId: string) {
-  const statement = await prisma.bankStatement.findFirst({
-    where: { id: statementId, venueId },
-    include: { lines: { orderBy: { rowIndex: 'asc' } } },
-  })
+/**
+ * Detalle de un estado de cuenta + sus líneas. Aislado por tenant. D24: si la subida dejó líneas «por decidir» (un día de su
+ * ventana tenía la comisión por calcular), aquí se deciden con los números de hoy:
+ *  · quien puede conciliar (`puedeGuardar`: `accounting:reconcile` y fuera del modo de soporte de sólo lectura) las GUARDA, bajo el
+ *    candado de la fila del estado y con su `ActivityLog`;
+ *  · quien sólo puede ver las ve decididas AL VUELO, sin escribir nada (decisión de FLAUTAS_C, 21-nov, opción C).
+ * Cada línea dice si sigue esperando (`costoPendiente`) y, mientras alguna espere, el estado dice cuántos pagos la detienen
+ * (`pendientesDeCosto`) y cuántos tienen el cálculo de la comisión detenido (`costoSinCalcular`: revisar).
+ */
+export async function getStatementDetail(
+  venueId: string,
+  statementId: string,
+  opts: { abiertoPor?: string | null; puedeGuardar?: boolean } = {},
+) {
+  const leer = () =>
+    prisma.bankStatement.findFirst({
+      where: { id: statementId, venueId },
+      include: { lines: { orderBy: { rowIndex: 'asc' } } },
+    })
+  let statement = await leer()
   if (!statement) throw new NotFoundError('Estado de cuenta no encontrado')
-  return statement
+  let diasPendientes: DepositCandidate[] = []
+  let alVuelo = new Map<number, MatchResult>()
+  if (statement.lines.some(esPorDecidir)) {
+    try {
+      const candidatos = await candidatosDelEstado(venueId, statement)
+      diasPendientes = candidatos.filter(c => (c.pendientesDeCosto ?? 0) > 0)
+      if (opts.puedeGuardar) await guardarLineasPorDecidir(venueId, statement, candidatos, opts.abiertoPor ?? null)
+      else alVuelo = decidirPorDecidir(statement.lines, candidatos)
+    } catch (error) {
+      // Abrir el estado de cuenta nunca falla por esto: se enseña lo guardado y la siguiente apertura lo intenta otra vez.
+      logger.warn('[conciliación] No se pudieron decidir las líneas que esperaban su comisión; se muestra lo guardado', {
+        venueId,
+        statementId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+    if (opts.puedeGuardar) {
+      // Codex r1 #3: SIEMPRE se relee (también si otra apertura simultánea las decidió primero).
+      statement = await leer()
+      if (!statement) throw new NotFoundError('Estado de cuenta no encontrado')
+    }
+  }
+  const lines = statement.lines.map(l => {
+    const r = alVuelo.get(l.rowIndex)
+    const vista = r ? { ...l, matchStatus: r.matchStatus, matchScore: new Prisma.Decimal(r.matchScore), matchedKey: r.matchedKey } : l
+    return { ...vista, costoPendiente: esPorDecidir(vista) }
+  })
+  const conciliadasAlVuelo = [...alVuelo.values()].filter(r => r.matchStatus === 'MATCHED').length
+  // Codex r2 #6: sólo cuentan los días que de verdad detienen a una línea que sigue esperando (los de su ventana), no todo el periodo.
+  const esperando = lines.filter(l => l.costoPendiente)
+  const detienen = diasPendientes.filter(c => esperando.some(l => daysBetween(c.date, l.postedDate) <= VENTANA_DE_DIAS))
+  const espera =
+    detienen.length > 0
+      ? {
+          pendientesDeCosto: detienen.reduce((n, c) => n + (c.pendientesDeCosto ?? 0), 0),
+          costoSinCalcular: detienen.reduce((n, c) => n + (c.costoSinCalcular ?? 0), 0),
+        }
+      : {}
+  return { ...statement, matchedCount: statement.matchedCount + conciliadasAlVuelo, lines, ...espera }
+}
+
+/** D24: los depósitos esperados de HOY para el periodo del estado (el mismo cálculo que al subirlo). */
+async function candidatosDelEstado(
+  venueId: string,
+  statement: { periodStart: Date | null; periodEnd: Date | null },
+): Promise<DepositCandidate[]> {
+  if (!statement.periodStart || !statement.periodEnd) return []
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  return loadDepositCandidates(
+    venueId,
+    formatDay(statement.periodStart),
+    formatDay(statement.periodEnd),
+    venue?.timezone || 'America/Mexico_City',
+  )
+}
+
+/**
+ * D24: la decisión de las líneas «por decidir» de un estado contra los depósitos de hoy, sin los días que otra línea del estado ya
+ * concilió. Pura. Devuelve sólo las que YA se pueden decidir (las que siguen dependiendo de un día pendiente no salen).
+ */
+function decidirPorDecidir(
+  lineas: Array<ParsedBankLine & { matchStatus: string; matchScore: unknown; matchedKey: string | null }>,
+  candidatos: DepositCandidate[],
+): Map<number, MatchResult> {
+  const porDecidir = lineas.filter(esPorDecidir)
+  if (porDecidir.length === 0) return new Map()
+  const usados = new Set(lineas.filter(l => l.matchStatus === 'MATCHED' || l.matchStatus === 'CONFIRMED').map(l => l.matchedKey))
+  const resultados = matchLines(
+    porDecidir,
+    candidatos.filter(c => !usados.has(c.key)),
+  )
+  return new Map(resultados.filter(r => !r.porDecidir).map(r => [r.rowIndex, r]))
+}
+
+/**
+ * D24: «la siguiente corrida» de la conciliación, guardada. Sólo la corre quien puede conciliar. Es el MISMO cálculo automático de la
+ * subida (una sugerencia: confirmarla es otro paso). Bajo el candado de la fila del estado y releyendo sus líneas: dos aperturas a la
+ * vez no deciden dos veces.
+ */
+async function guardarLineasPorDecidir(
+  venueId: string,
+  statement: { id: string; lineCount: number },
+  candidatos: DepositCandidate[],
+  abiertoPor: string | null,
+): Promise<void> {
+  await prisma.$transaction(
+    async tx => {
+      await tx.$queryRaw`SELECT id FROM "BankStatement" WHERE id = ${statement.id} AND "venueId" = ${venueId} FOR UPDATE`
+      const lineas = await tx.bankStatementLine.findMany({
+        where: { bankStatementId: statement.id, venueId },
+        orderBy: { rowIndex: 'asc' },
+        take: statement.lineCount, // las líneas de UN estado de cuenta: tantas como se subieron
+      })
+      const decididas = decidirPorDecidir(lineas, candidatos)
+      if (decididas.size === 0) return
+      const idDe = new Map(lineas.map(l => [l.rowIndex, l.id]))
+      let conciliadas = 0
+      for (const r of decididas.values()) {
+        await tx.bankStatementLine.update({
+          where: { id: idDe.get(r.rowIndex)! },
+          data: { matchStatus: r.matchStatus, matchScore: r.matchScore, matchedKey: r.matchedKey },
+        })
+        if (r.matchStatus === 'MATCHED') conciliadas++
+      }
+      if (conciliadas > 0)
+        await tx.bankStatement.update({ where: { id: statement.id }, data: { matchedCount: { increment: conciliadas } } })
+      await tx.activityLog.create({
+        data: {
+          action: 'RECON_PENDING_LINES_DECIDED',
+          entity: 'BankStatement',
+          entityId: statement.id,
+          staffId: abiertoPor,
+          venueId,
+          data: { decididas: decididas.size, conciliadas, automatico: true },
+        },
+      })
+    },
+    { timeout: 15_000 },
+  )
 }
 
 /** Confirma (acepta) la conciliación de líneas específicas. */

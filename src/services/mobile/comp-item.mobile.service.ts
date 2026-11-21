@@ -25,6 +25,7 @@ import { impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { importesDeLasFilas } from '../shared/repartoDescuento'
+import { baseDeCargos, importeDeCargo } from '../shared/serviceCharges'
 import {
   RENGLON_PARA_REPARTO_SELECT,
   conservarDescuentoHistorico,
@@ -264,18 +265,22 @@ export async function recalculateOrderTotals(
 
   // Cobros por servicio: se calculan sobre la base YA descontada (lo que Square
   // hace) y SUMAN al total — es ingreso gravable del negocio, no propina.
-  const base = Math.max(0, newSubtotal - newDiscountAmount)
+  // La base y el % en `Prisma.Decimal`, con la MISMA regla que `baseDeCargos` + `recalcularCargosPorServicio`: la suma de
+  // renglones llega en `Number` (25.02 + 25.33 = 50.349999999999994) y su 10 % daba 5.03 aquí y 5.04 por el otro camino
+  // (Codex r3 #2 de «Anular producto»: quitar otro cargo bajaba el % un centavo sin cambiar la mercancía).
+  const baseDec = baseDeCargos(newSubtotal, newDiscountAmount)
   const serviceCharges = await db.orderServiceCharge.findMany({ where: { orderId } })
-  let newServiceChargeAmount = 0
+  let cargosDec = new Prisma.Decimal(0)
   for (const sc of serviceCharges) {
-    const amount = sc.type === 'PERCENTAGE' ? Math.round(((base * Number(sc.value)) / 100) * 100) / 100 : Number(sc.amount)
+    const amountDec = sc.type === 'PERCENTAGE' ? importeDeCargo(sc.type, sc.value, baseDec) : new Prisma.Decimal(sc.amount)
+    const amount = amountDec.toNumber()
     // Un % se re-calcula cuando cambia la cuenta; un monto fijo se respeta.
-    if (sc.type === 'PERCENTAGE' && amount !== Number(sc.amount)) {
+    if (sc.type === 'PERCENTAGE' && !amountDec.equals(sc.amount)) {
       await db.orderServiceCharge.update({ where: { id: sc.id }, data: { amount } })
     }
-    newServiceChargeAmount += amount
+    cargosDec = cargosDec.plus(amountDec)
   }
-  newServiceChargeAmount = Math.round(newServiceChargeAmount * 100) / 100
+  const newServiceChargeAmount = cargosDec.toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
 
   // A check can never owe a negative amount: a FIXED_AMOUNT discount bigger
   // than the subtotal (catalog discount or loyalty redemption on a shrinking
@@ -289,7 +294,12 @@ export async function recalculateOrderTotals(
     taxAmount: orden?.taxAmount,
     status: orden?.status,
   }).toNumber()
-  const newTotal = Math.round((base + impuestoAparte + newServiceChargeAmount + propinaYaCobrada) * 100) / 100
+  const newTotal = baseDec
+    .plus(impuestoAparte)
+    .plus(newServiceChargeAmount)
+    .plus(propinaYaCobrada)
+    .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+    .toNumber()
   const updated = await db.order.update({
     where: { id: orderId },
     data: {

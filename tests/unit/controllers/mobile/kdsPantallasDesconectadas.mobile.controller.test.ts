@@ -57,6 +57,16 @@ it('si el tablero no se pudo leer, la pantalla no cuenta como conectada', async 
   expect(mockRegistrar).not.toHaveBeenCalled()
 })
 
+it('sólo la pantalla que pide kitchenDoneVersion deja de recibir lo terminado y lo archivado (lista y total iguales)', async () => {
+  await listKdsOrders(req({ stationId: 'st_cocina', urgencyVersion: '1', kitchenDoneVersion: '1' }), res(), jest.fn())
+  expect(mockListar.mock.calls[0][4]).toBe(true)
+  expect(mockContar.mock.calls[0][3]).toBe(true)
+
+  await listKdsOrders(req({ stationId: 'st_cocina', urgencyVersion: '1' }), res(), jest.fn()) // app vieja
+  expect(mockListar.mock.calls[1][4]).toBe(false)
+  expect(mockContar.mock.calls[1][3]).toBe(false)
+})
+
 it('la caja lee las pantallas desconectadas de su negocio', async () => {
   const data = { hayPantallas: true, pantallas: ['st_cocina'], completo: true, desconectadas: [{ id: 'st_cocina', name: 'COCINA 1' }] }
   mockDesconectadas.mockResolvedValue(data)

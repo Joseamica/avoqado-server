@@ -53,6 +53,7 @@ import { preparationPermissions } from '../kds/kitchenPreparation'
 import { motivoDelDescuento } from '../shared/motivoDelDescuento'
 import { descuentoManualDeMesaSchema } from '../../schemas/mobile/manualOrderDiscount.mobile.schema'
 import { horaRealDelAparato, llegadaDeLaPeticion } from '../shared/horaRealDelAparato'
+import { esLlaveDeRonda, llavesDeLaRonda, rondaDeLaLlave, rondaSegura } from './llaveDeRonda'
 
 // ─── Contrato (espejo EXACTO por nombre en iOS/Android) ─────────────────────
 
@@ -330,6 +331,29 @@ export function requiredPermissionForIntent(type: string): string | null {
  * cortesía sin red es un flujo legítimo, y quitarlo dejaría al local sin poder
  * comp-ear durante un apagón.
  */
+/**
+ * D17 (founder, 20-nov-2026): «Liberar» DESDE LA COCINA — el RELEASE que la tablet marcó como de su pantalla (`origen: 'COCINA'`)
+ * o el de quien no trae `orders:create` (el rol de cocina) — sólo pide `orders:update`, y el interruptor «La cocina puede liberar
+ * tiempos desde su pantalla» se revisa DENTRO de la operación (`applyKitchenPreparation`, con la fila de ajustes bloqueada; apagado ⇒
+ * `KITCHEN_RELEASE_DISABLED`). Aquí no se lee la base (Codex r5 #7: una lectura fallida antes de la reserva dejaba la acción en
+ * revisión). Lo demás pide lo de siempre.
+ */
+export function permisosParaReproducir(
+  intent: SyncIntentInput,
+  authorize: (intent: SyncIntentInput, requiredPermission: string) => boolean,
+): string[] {
+  return liberacionDesdeLaCocina(intent, authorize) ? ['orders:update'] : requiredPermissionsForIntent(intent)
+}
+
+export function liberacionDesdeLaCocina(
+  intent: SyncIntentInput,
+  authorize: ((intent: SyncIntentInput, requiredPermission: string) => boolean) | undefined,
+): boolean {
+  if (intent.type !== 'KDS_ITEM_PROGRESS' || intent.payload?.action !== 'RELEASE') return false
+  // Codex r5 #4: un gerente que libera desde la pantalla de cocina también pasa por el interruptor.
+  return intent.payload?.origen === 'COCINA' || (authorize !== undefined && !authorize(intent, 'orders:create'))
+}
+
 export function requiredPermissionsForIntent(intent: SyncIntentInput): string[] {
   const base = requiredPermissionForIntent(intent.type)
   const permissions = base ? [base] : []
@@ -666,7 +690,7 @@ export async function processIntents(params: {
         message: 'La operación pertenece a otra sesión. Requiere revisión del gerente.',
       }
     } else {
-      const requiredPermissions = requiredPermissionsForIntent(intent)
+      const requiredPermissions = permisosParaReproducir(intent, authorizeIntent)
       const missingPermission = requiredPermissions.find(permission => !authorizeIntent(intent, permission))
       if (missingPermission) {
         ack = {
@@ -793,7 +817,7 @@ async function intentarRetomar(p: {
     (existing.seq ?? null) === (intent.seq ?? null) &&
     (!intent.staffId || intent.staffId === p.staffId)
   const sinPermiso = mismoDueño
-    ? requiredPermissionsForIntent(intent).find(permission => !p.authorizeIntent(intent, permission))
+    ? permisosParaReproducir(intent, p.authorizeIntent).find(permission => !p.authorizeIntent(intent, permission))
     : undefined
   if (!mismoDueño || sinPermiso) {
     // D20: antes de rechazar, ¿la huella ya prueba el cobro? Entonces el dinero está registrado y se contesta con él.
@@ -1048,7 +1072,11 @@ async function applyIntent(ctx: {
           }
         }
         const action = preparationActionSchema.safeParse(intent.payload.action)
-        if (orderId && action.success && action.data !== 'START' && action.data !== 'READY')
+        // D17: quien libera SÓLO porque el negocio dejó a la cocina liberar (no trae `orders:create`, el permiso de la caja)
+        // libera la mesa de cualquier mesero — para eso existe el interruptor (Codex r1 #5). El SERVIDOR lo vuelve a medir
+        // dentro de la operación, con los ajustes bloqueados.
+        const deCocina = liberacionDesdeLaCocina(intent, authorizeIntent)
+        if (orderId && action.success && action.data !== 'START' && action.data !== 'READY' && !deCocina)
           await assertOwnership(venueId, staffId, orderId)
         const result = await applyKitchenPreparation(
           venueId,
@@ -1060,6 +1088,7 @@ async function applyIntent(ctx: {
           },
           staffId,
           intent.id,
+          ...(deCocina ? [true as const] : []),
         )
         return { id: intent.id, status: 'ACKED', result }
       }
@@ -1463,19 +1492,20 @@ async function applyAddItems(
     // INTENT, igual que el resto (regla offline-first del repo).
     await assertPromotionsFeature(venueId)
   }
-  // 🛡️ Idempotencia de la RONDA: un externalId determinista por item
-  // (intent.id + índice) hace que un replay de este ADD_ITEMS actualice las
-  // MISMAS filas en vez de crear duplicados (addItemsToOrder ya deduplica por
-  // externalId: findFirst → UPDATE quantity=item.quantity, que es reemplazo).
-  // Sin esto, un reintento tras "efecto aplicado pero ack no persistido"
-  // duplicaba la ronda en cocina y en la cuenta. Solo se inyecta si el cliente
-  // no mandó uno propio.
-  const itemsWithKey = normales.map((it, idx) => (it.externalId ? it : { ...it, externalId: `sync:${intent.id}:${idx}` }))
+  // 🛡️ Idempotencia de la RONDA: cada renglón lleva la llave `sync:<id del intent>:<n>`, así el reenvío de este ADD_ITEMS actualiza las
+  // MISMAS filas en vez de duplicarlas (addItemsToOrder deduplica por externalId) y lo anulado no vuelve (la lápida es por llave).
+  // D7 «Anular producto», decisión 1 = A acotada (founder por delegación, 20-nov): en una ronda SÓLO vale esa forma, con la llave de
+  // ESTA ronda; cualquier otra (sin llave, vacía, con espacios, de un sistema externo o de otra ronda) se reemplaza por la que arma el
+  // servidor (`llavesDeLaRonda`). Las apps vivas ya mandan exactamente ésa: pasa intacta. Así una etiqueta ajena ya no puede confundir
+  // mesas al buscar la ronda o sus lápidas (Codex r5 #5, r6 #1-#3). Lo que llega sin llave se numera como siempre (productos entre
+  // productos; combos por su lugar en la ronda): un reenvío de antes del despliegue arma las mismas llaves.
+  const itemsWithKey = llavesDeLaRonda(normales, intent.id)
   // El combo viaja sólo con su referencia y el prefijo de sus componentes (`sync:<intent>:<índice>`, el que el aparato predice): su
   // precio y sus renglones los resuelve el server desde la promoción, y un campo suelto del carrito no lo vuelve un producto.
+  const ronda = rondaSegura(intent.id)
   const combos = conPromocion.map(item => ({
     promotionRef: item.promotionRef,
-    externalId: item.externalId && /^sync:[^:]+:\d+$/.test(item.externalId) ? item.externalId : `sync:${intent.id}:${items.indexOf(item)}`,
+    externalId: rondaDeLaLlave(item.externalId) === ronda ? item.externalId : `sync:${ronda}:${items.indexOf(item)}`,
   }))
 
   // Reenvío de una ronda con combos que YA está entera en la cuenta (la guardó la ruta con red, o un intento anterior que perdió su
@@ -1575,7 +1605,9 @@ const NOTA_RONDA_TARDIA = 'RONDA_TARDIA_EN_CUENTA_APARTE'
  * se repiten entre rondas. Las dos búsquedas usan índice (`OrderItem.externalId`, `OrderPromotion.instanceId`). Devuelve la cuenta.
  */
 async function rondaYaEnAlgunaCuenta(venueId: string, conPromocion: any[], normales: any[]): Promise<string | null> {
-  const llaves = [...new Set(normales.map(it => it.externalId).filter((k: unknown): k is string => typeof k === 'string' && k.length > 0))]
+  // Sólo las llaves de ESTA ronda (`sync:<id del intent>:<n>`, las armó `llavesDeLaRonda` a la entrada): nunca una etiqueta de
+  // Mostrador ni de otra ronda, que sí se repiten entre cuentas (decisión 1 de D7).
+  const llaves = [...new Set(llavesGuardadasDeLaRonda(normales))]
   if (llaves.length) {
     const renglon = await prisma.orderItem.findFirst({
       where: { externalId: { in: llaves }, order: { venueId } },
@@ -1598,6 +1630,11 @@ async function rondaYaEnAlgunaCuenta(venueId: string, conPromocion: any[], norma
     if (combo) return combo.orderId
   }
   return null
+}
+
+/** Las llaves de ronda (`sync:<ronda>:<n>`) de estos renglones. A la entrada del ADD_ITEMS ya todas lo son (`llavesDeLaRonda`). */
+function llavesGuardadasDeLaRonda(items: any[]): string[] {
+  return items.map(it => it.externalId).filter(esLlaveDeRonda)
 }
 
 /** La llave del aparato en la cadena. Sin aparato (petición a mano) se usa el mesero, que es lo más parecido. */
@@ -1626,6 +1663,14 @@ async function aplicarRondaTardia(p: {
   const yaEn = await rondaYaEnAlgunaCuenta(venueId, p.conPromocion, p.itemsWithKey)
   if (yaEn) {
     return { id: intent.id, status: 'ACKED', result: { ...pedida, ...(yaEn !== original.id ? { cuentaAparte: { orderId: yaEn } } : {}) } }
+  }
+  // «Anular producto» (Codex r2 #1): si una de sus llaves se ANULÓ, la ronda ya entró (se guarda entera en una transacción) y después
+  // la anularon: no se abre una cuenta aparte para volver a cobrar lo anulado. D29: en cualquier cuenta del negocio, no sólo en la
+  // cobrada (otra caja pudo separar el renglón a otra cuenta y anularlo ahí; sin esto nacía una cuenta aparte, vacía o con lo anulado).
+  const llaves = llavesGuardadasDeLaRonda(p.itemsWithKey)
+  if (llaves.length && (await orderTpvService.llavesAnuladasEnElNegocio(prisma, venueId, llaves)).size > 0) {
+    logger.info(`🪑 [POS SYNC] ADD_ITEMS ${intent.id}: la ronda ya estaba guardada y se anuló; no se abre cuenta aparte`)
+    return { id: intent.id, status: 'ACKED', result: pedida }
   }
   const aparte = await tableService.cuentaAparteParaRondaTardia({
     venueId,

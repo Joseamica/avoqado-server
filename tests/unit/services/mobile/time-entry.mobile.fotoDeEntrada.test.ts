@@ -26,6 +26,8 @@ beforeEach(() => {
     staff: { id: 'staff-1', firstName: 'Ana', lastName: 'López', email: 'a@x.mx', photoUrl: null },
   } as any)
   prismaMock.timeEntry.findFirst.mockResolvedValue(null)
+  // «Salida olvidada» (D3): sin turnos de días anteriores abiertos.
+  prismaMock.timeEntry.findMany.mockResolvedValue([])
   prismaMock.timeEntry.create.mockImplementation((async (args: any) => ({ id: 'te-1', ...args.data, staff: {} })) as any)
   ;(savePrivateFile as jest.Mock).mockResolvedValue({ path: RUTA })
 })

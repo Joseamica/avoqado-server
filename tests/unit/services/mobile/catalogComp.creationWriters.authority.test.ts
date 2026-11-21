@@ -287,6 +287,8 @@ describe('R1 — todos los escritores de creación que consumen Discount mutable
       return row
     })
     prismaMock.orderItem.findMany.mockImplementation(async () => rows)
+    // hz:0555ee15:D5: armar la venta de vales revisa la existencia (lee los apartados); aquí no hay.
+    prismaMock.areaTicketInventoryReservation.findMany.mockResolvedValue([])
     prismaMock.orderDiscount.create.mockImplementation(async ({ data }: any) => {
       const row = { id: nextId(), createdAt: new Date(), ...data }
       discounts.push(row)

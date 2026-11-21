@@ -101,6 +101,19 @@ export function transitionPreparation(
   return finishPriority({ ...before, [source]: before[source] - quantity, [destination]: before[destination] + quantity })
 }
 
+/**
+ * QA del conjunto (Flautas, 20-nov-2026): la caja y la cocina liberan el MISMO tiempo (o dos pantallas marcan listo lo mismo) casi a
+ * la vez. La segunda llega con la revisión vieja, pero lo que pide YA es cierto: no queda nada en el estado de origen y al menos
+ * `quantity` unidades ya pasaron por el de destino (sin contar lo cancelado). Entonces se responde éxito sin cambiar nada, como el
+ * resto del mercado con un reintento idempotente. Cualquier otro cambio en medio (una cancelación, una liberación parcial) sigue siendo
+ * conflicto. Sólo «Liberar» y «Marcar listo».
+ */
+export function accionYaCumplida(action: PreparationAction, c: PreparationCounts, quantity: number): boolean {
+  if (action === 'RELEASE') return c.HELD === 0 && c.PENDING + c.PREPARING + c.READY + c.DELIVERED >= quantity
+  if (action === 'READY') return c.PREPARING === 0 && c.READY + c.DELIVERED >= quantity
+  return false
+}
+
 /** A product is deliverable only when EVERY routed station has that many ready units. */
 export function deliverableQuantity(stations: PreparationCounts[]): number {
   return stations.length ? Math.min(...stations.map(c => c.READY)) : 0
@@ -113,6 +126,53 @@ export function preparationTicketStatus(items: PreparationCounts[]): 'NEW' | 'PR
   if (items.some(c => c.PREPARING > 0)) return 'PREPARING'
   if (items.every(c => c.HELD + c.PENDING === 0)) return 'READY'
   return 'NEW'
+}
+
+/**
+ * D17 (founder, 20-nov-2026): la COCINA ya terminó su parte — nada retenido, pendiente ni preparando. Desde ese momento la comanda
+ * sale del tablero (aunque falte que la caja marque «Entregado») y entra a «Recientes». Sin productos no hay nada terminado.
+ */
+export function cocinaTermino(items: PreparationCounts[]): boolean {
+  return items.length > 0 && items.every(c => c.HELD + c.PENDING + c.PREPARING === 0)
+}
+
+/**
+ * Lo que se escribe en la comanda cada vez que cambian sus productos. El estado sale de `preparationTicketStatus` (igual que
+ * siempre: READY = falta entregar, y de eso viven «En servicio» de la caja y el cierre de pedidos de plataforma);
+ * `kitchenDoneAt` guarda la PRIMERA vez que la cocina terminó y se borra si vuelve a tener trabajo.
+ */
+export function recalculoDeComanda(
+  items: PreparationCounts[],
+  previa: { kitchenDoneAt: Date | null },
+  ahora: Date = new Date(),
+  /** La acción le dio trabajo NUEVO a la cocina (más pendiente o preparando que antes): una comanda archivada vuelve al tablero. */
+  nuevoTrabajo = false,
+): {
+  status: 'NEW' | 'PREPARING' | 'READY' | 'COMPLETED'
+  completedAt: Date | null
+  kitchenDoneAt: Date | null
+  archivedAt?: null
+} {
+  const status = preparationTicketStatus(items)
+  const terminoAhora = cocinaTermino(items) && previa.kitchenDoneAt == null
+  return {
+    status,
+    completedAt: status === 'COMPLETED' ? ahora : null,
+    kitchenDoneAt: cocinaTermino(items) ? (previa.kitchenDoneAt ?? ahora) : null,
+    // Codex r2 #2: la caja corrige un platillo de una comanda ya archivada (o «Deshacer» le gana al archivado): la cocina lo ve.
+    // Codex r8 #4: la cocina la termina justo después del archivado: entra a «Recientes» su hora (el job la vuelve a archivar).
+    ...(nuevoTrabajo || terminoAhora ? { archivedAt: null } : {}),
+  }
+}
+
+/** Unidades que la cocina tiene que hacer YA (pendiente o preparando). */
+export function trabajoDeCocina(c: PreparationCounts): number {
+  return c.PENDING + c.PREPARING
+}
+
+/** «Deshacer» desde Recientes (D17): lo Listo vuelve a Preparando. Lo entregado y lo cancelado no se mueven. */
+export function regresarListoAPreparando(before: PreparationCounts): PreparationCounts {
+  return { ...before, PREPARING: before.PREPARING + before.READY, READY: 0 }
 }
 
 /** Reuses the canonical permission catalog: KITCHEN has update, floor also has create, manager has cancel. */

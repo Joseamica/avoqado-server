@@ -111,7 +111,10 @@ function db() {
     // B2c T4 (P5): la cortesía de la terminal crea su fila espejo con quien la otorga (StaffVenue) y el recorte puede retirar filas.
     staffVenue: { findFirst: jest.fn(async () => null) },
     orderServiceCharge: { findMany: jest.fn(async () => []), update: jest.fn() },
-    orderAction: { create: jest.fn(async () => ({})) },
+    // «Anular producto» (Codex r1 #1): la ronda lee las lápidas de lo anulado (`OrderAction` VOID con `externalIds`).
+    orderAction: { create: jest.fn(async () => ({})), findMany: jest.fn(async () => []) },
+    // Codex r2 #7: `ITEM_VOIDED` (bitácora del dueño) va dentro de la transacción de la anulación.
+    activityLog: { create: jest.fn(async () => ({})) },
     orderCustomer: { deleteMany: jest.fn(async () => ({ count: 0 })) },
     terminalPaymentRequest: { findFirst: jest.fn(async () => null) },
     payment: { aggregate: jest.fn(async () => ({ _sum: { amount: 0, tipAmount: 0 } })) },
@@ -930,5 +933,243 @@ describe('S9 (P2-5): anular TODOS los artículos de un folio es cancelarlo como 
   it('una cuenta que no es de folio: anular todos sigue como hoy', async () => {
     await voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1 })
     expect(tx.orderItem.deleteMany).toHaveBeenCalled()
+  })
+})
+
+describe('«Anular producto» desde la mesa del POS (Flautas, 20-nov): las dos guardas de la ruta móvil, bajo el candado', () => {
+  const dos = () => ({ ...order(), items: [line, { ...line, id: 'line-2' }] })
+
+  it('soloSinCobros: una cuenta con abonos (PARTIAL) no deja anular, aunque sea un renglón, y no toca nada', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...dos(), paymentStatus: 'PARTIAL' })
+    await expect(
+      voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1, soloSinCobros: true }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_ITEM_VOID_HAS_PAYMENTS' })
+    expect(tx.orderItem.deleteMany).not.toHaveBeenCalled()
+    expect(tx.order.update).not.toHaveBeenCalled()
+  })
+
+  it('sin la bandera, una anulación parcial sobre PARTIAL sigue como hoy (la TPV no cambia)', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...dos(), paymentStatus: 'PARTIAL' })
+    await voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1 })
+    expect(tx.orderItem.deleteMany).toHaveBeenCalled()
+  })
+
+  it('sinCancelarLaCuenta: el último renglón no se anula (cancelaría la cuenta sin soltar la mesa); antes de devolver canjes o borrar', async () => {
+    await expect(
+      voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1, sinCancelarLaCuenta: true }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_ITEM_VOID_LAST_ITEM' })
+    expect(tx.orderItem.deleteMany).not.toHaveBeenCalled()
+    expect(tx.order.update).not.toHaveBeenCalled()
+    expect(tx.orderDiscount.delete).not.toHaveBeenCalled()
+    expect(tx.kdsOrder.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('sinCancelarLaCuenta: con otro renglón en la cuenta, anula como siempre', async () => {
+    tx.order.findUnique.mockResolvedValue(dos())
+    await voidItems('venue', 'order', {
+      itemIds: ['line'],
+      reason: 'error',
+      staffId: 'staff',
+      expectedVersion: 1,
+      sinCancelarLaCuenta: true,
+    })
+    expect(tx.orderItem.deleteMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: { in: ['line'] } }) }),
+    )
+  })
+})
+
+describe('«Anular producto» (Codex r1 #1, #6 y #10): bitácora y lápida en la MISMA transacción; con cobros, nada', () => {
+  const dos = () => ({
+    ...order(),
+    items: [
+      { ...line, externalId: 'sync:r:0' },
+      { ...line, id: 'line-2', externalId: 'sync:r:1' },
+    ],
+  })
+
+  it('#10: voidItems escribe la OrderAction VOID dentro de la transacción, con las llaves que anuló', async () => {
+    tx.order.findUnique.mockResolvedValue(dos())
+    await voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1 })
+    expect(tx.orderAction.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        actionType: 'VOID',
+        metadata: expect.objectContaining({ itemIds: ['line'], externalIds: ['sync:r:0'] }),
+      }),
+    })
+    expect(globalDb.orderAction?.create).not.toHaveBeenCalled()
+  })
+
+  /**
+   * Las lápidas del negocio: la lectura de `OrderAction` VOID (D29: una sola consulta en todo el negocio, con su índice) contesta
+   * cuáles de las llaves pedidas están anuladas. Las demás consultas crudas siguen como en `db()`.
+   */
+  // La lectura de lápidas llega como `Prisma.Sql` (`consultaDeLapidasDelNegocio`); las demás, como plantilla.
+  const textoDe = (q: any): string => (q?.raw ?? q?.strings ?? []).join('')
+  const valoresDe = ([q, ...resto]: any[]): any[] => q?.values ?? resto
+  const esLecturaDeLapidas = (q: any) => textoDe(q).includes('"OrderAction"')
+  const lecturasDeLapidas = () => tx.$queryRaw.mock.calls.filter(([q]: any[]) => esLecturaDeLapidas(q))
+  const conLapidas = (anuladas: string[]) => {
+    const deSiempre = tx.$queryRaw.getMockImplementation()
+    tx.$queryRaw.mockImplementation(async (q: any, ...values: any[]) =>
+      // Las anulaciones del negocio que nombran alguna llave pedida, con su arreglo (el cruce lo hace el servicio).
+      esLecturaDeLapidas(q)
+        ? anuladas.some(llave => valoresDe([q, ...values]).some(v => Array.isArray(v) && v.includes(llave)))
+          ? [{ llaves: [...anuladas, 'sync:otra-ronda:0'] }]
+          : []
+        : deSiempre(q, ...values),
+    )
+  }
+
+  it('#1: el reenvío de la ronda NO vuelve a crear el renglón anulado (el resto, como réplica)', async () => {
+    conLapidas(['sync:r:0'])
+    tx.orderItem.findMany.mockResolvedValueOnce([{ externalId: 'sync:r:1' }])
+    tx.orderItem.findFirst.mockResolvedValueOnce({ ...line, id: 'line-2', externalId: 'sync:r:1' })
+    await addItemsToOrder(
+      'venue',
+      'order',
+      [
+        { productId: 'product', quantity: 1, externalId: 'sync:r:0' },
+        { productId: 'product', quantity: 1, externalId: 'sync:r:1' },
+      ],
+      1,
+      true,
+    )
+    // D29: UNA lectura en todo el negocio (no sólo en la cuenta), con las llaves de ronda pedidas; exacta (sin «las últimas N», Codex
+    // r5 #7 y r6 #3) y sin una consulta por llave (Codex r7 #1 y r8 #8).
+    expect(lecturasDeLapidas()).toHaveLength(1)
+    const valores = valoresDe(lecturasDeLapidas()[0])
+    expect(valores).toContain('venue')
+    expect(valores).toContainEqual(['sync:r:0', 'sync:r:1'])
+    expect(tx.orderAction.findMany).not.toHaveBeenCalled()
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+  })
+
+  it('decisión 1 de D7: la lápida sólo trabaja con llaves de ronda; una etiqueta de Mostrador (UUID) no se revisa', async () => {
+    conLapidas(['3f1c6a52-0000-4000-8000-000000000001'])
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    await addItemsToOrder(
+      'venue',
+      'order',
+      [{ productId: 'product', quantity: 1, externalId: '3f1c6a52-0000-4000-8000-000000000001' }],
+      1,
+      true,
+    )
+    expect(lecturasDeLapidas()).toHaveLength(0)
+    expect(tx.orderItem.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('Codex r7 #1: en una ronda de 201 renglones también la llave 201 se revisa contra su lápida (sin tope de llaves)', async () => {
+    conLapidas(['sync:r:200'])
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    const ronda = Array.from({ length: 201 }, (_, i) => ({ productId: 'product', quantity: 1, externalId: `sync:r:${i}` }))
+    await addItemsToOrder('venue', 'order', ronda, 1, true)
+    expect(tx.orderItem.create).toHaveBeenCalledTimes(200)
+    expect(tx.orderItem.create.mock.calls.map((c: any[]) => c[0].data.externalId)).not.toContain('sync:r:200')
+  })
+
+  it('D29: la lápida de OTRA cuenta del negocio también cuenta (otra caja separó el renglón y lo anuló ahí)', async () => {
+    // La lectura no filtra por la cuenta que recibe la ronda: sólo por el negocio (y su índice por llave).
+    conLapidas(['sync:r:0'])
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 1, externalId: 'sync:r:0' }], 1, true)
+    const [q] = lecturasDeLapidas()[0]
+    // Ni la cuenta ni un filtro por cuenta: sólo el negocio y las llaves, por el índice con la barrera OFFSET 0 (Codex r1 #3).
+    expect(textoDe(q)).not.toMatch(/"orderId"\s*=\s*$/m)
+    expect(textoDe(q)).toMatch(/OFFSET 0/)
+    expect(valoresDe(lecturasDeLapidas()[0])).not.toContain('order')
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+  })
+
+  it('decisión 1 de D7: sin anulaciones en la cuenta, una sola lectura (no una por renglón)', async () => {
+    conLapidas([])
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    await addItemsToOrder(
+      'venue',
+      'order',
+      [
+        { productId: 'product', quantity: 1, externalId: 'sync:r:0' },
+        { productId: 'product', quantity: 1, externalId: 'sync:r:1' },
+      ],
+      1,
+      true,
+    )
+    expect(lecturasDeLapidas()).toHaveLength(1)
+    expect(tx.orderItem.create).toHaveBeenCalledTimes(2)
+  })
+
+  /** D29: la lectura de renglones vivos en OTRA cuenta del negocio contesta estas llaves. */
+  const esLecturaDeOtraCuenta = (q: any) => textoDe(q).includes('"OrderItem"')
+  const conLlavesEnOtraCuenta = (llaves: string[]) => {
+    const deSiempre = tx.$queryRaw.getMockImplementation()
+    tx.$queryRaw.mockImplementation(async (q: any, ...values: any[]) =>
+      esLecturaDeOtraCuenta(q)
+        ? llaves.filter(llave => valoresDe([q, ...values]).some(v => Array.isArray(v) && v.includes(llave))).map(llave => ({ llave }))
+        : deSiempre(q, ...values),
+    )
+  }
+
+  it('D29: en una ronda, la llave que otra caja separó a OTRA cuenta del negocio no se vuelve a crear aquí', async () => {
+    conLlavesEnOtraCuenta(['sync:r:1'])
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    await addItemsToOrder(
+      'venue',
+      'order',
+      [
+        { productId: 'product', quantity: 1, externalId: 'sync:r:0' },
+        { productId: 'product', quantity: 1, externalId: 'sync:r:1' },
+      ],
+      1,
+      true,
+    )
+    const valores = valoresDe(tx.$queryRaw.mock.calls.find(([q]: any[]) => esLecturaDeOtraCuenta(q)))
+    // Excluye la cuenta que recibe la ronda y se acota al negocio.
+    expect(valores).toEqual(expect.arrayContaining([['sync:r:0', 'sync:r:1'], 'order', 'venue']))
+    expect(tx.orderItem.create).toHaveBeenCalledTimes(1)
+    expect(tx.orderItem.create.mock.calls[0][0].data.externalId).toBe('sync:r:0')
+  })
+
+  it('D29: el carrito de la TPV (no es ronda) y las llaves de Mostrador no consultan otras cuentas', async () => {
+    conLlavesEnOtraCuenta(['sync:r:0'])
+    await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 1, externalId: 'sync:r:0' }], 1, false)
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    await addItemsToOrder(
+      'venue',
+      'order',
+      [{ productId: 'product', quantity: 1, externalId: '3f1c6a52-0000-4000-8000-000000000001' }],
+      1,
+      true,
+    )
+    expect(tx.$queryRaw.mock.calls.filter(([q]: any[]) => esLecturaDeOtraCuenta(q))).toHaveLength(0)
+    expect(tx.orderItem.create).toHaveBeenCalledTimes(2)
+  })
+
+  it('#1: una llave NUEVA en esa misma ronda sí se crea; la anulada no', async () => {
+    conLapidas(['sync:r:0'])
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    await addItemsToOrder(
+      'venue',
+      'order',
+      [
+        { productId: 'product', quantity: 1, externalId: 'sync:r:0' },
+        { productId: 'product', quantity: 1, externalId: 'sync:r:2' },
+      ],
+      1,
+      true,
+    )
+    expect(tx.orderItem.create).toHaveBeenCalledTimes(1)
+    expect(tx.orderItem.create.mock.calls[0][0].data.externalId).toBe('sync:r:2')
+  })
+
+  it('#6: soloSinCobros también frena una cuenta PENDING con un cobro registrado (cabecera desfasada)', async () => {
+    tx.order.findUnique.mockResolvedValue(dos())
+    tx.payment.aggregate.mockImplementation(async ({ where }: any) =>
+      where?.type === 'REFUND' ? { _sum: {} } : { _sum: { amount: new Prisma.Decimal(20), tipAmount: new Prisma.Decimal(0) }, _count: 1 },
+    )
+    await expect(
+      voidItems('venue', 'order', { itemIds: ['line'], reason: 'error', staffId: 'staff', expectedVersion: 1, soloSinCobros: true }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'ORDER_ITEM_VOID_HAS_PAYMENTS' })
+    expect(tx.order.update).not.toHaveBeenCalled()
+    expect(tx.orderAction.create).not.toHaveBeenCalled()
   })
 })

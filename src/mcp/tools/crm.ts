@@ -57,6 +57,7 @@ import { addContact, removeContact, updateAccount, updateContact, type PersonaVi
 import { accountForTx } from '@/services/crm/inbound.service'
 import { getReports } from '@/services/crm/reports.service'
 import { addEvent } from '@/services/crm/timeline.service'
+import { getThread, listChats } from '@/services/crm/whatsapp.service'
 import { DEFAULT_TIMEZONE, formatInVenueTimezone, venueStartOfDay } from '@/utils/datetime'
 import { canonicalPhoneE164 } from '@/utils/phone'
 import prisma from '@/utils/prismaClient'
@@ -1060,6 +1061,89 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
         if (campaignId) return { ok: true, campana: campana(await getCampaign(campaignId)) }
         const { rows, nextCursor, total } = await listCampaigns({ cursor, limit, status })
         return { ok: true, total, hayMas: nextCursor !== null, siguiente: nextCursor, campanas: rows.map(campana) }
+      }),
+  )
+
+  // ── WhatsApp de ventas (fase 3, «leer chats»): sólo lectura, sólo el superadmin real (lo revisa el servicio) ────────────
+
+  const chatTexto = (tipo: string | null, texto: string | null) => texto ?? (tipo && tipo !== 'text' ? `(${tipo})` : null)
+
+  server.tool(
+    'crm_whatsapp_chats',
+    'Lista los chats del WhatsApp de ventas de Avoqado (+52 56 4007 0001): uno por teléfono, el más reciente primero, con ' +
+      'el último mensaje (quién lo mandó: ENTRA = el prospecto, SALE = el founder desde su celular), cuántos mensajes hay, el ' +
+      'nombre de perfil de WhatsApp y el negocio del CRM que tiene ese teléfono (null si todavía no es prospecto; otrosNegocios ' +
+      'dice cuántos negocios más lo tienen; telefonoValido=false es un número que el CRM no acepta para una persona). ' +
+      'sinProspecto=true trae sólo los que no son prospecto. q busca por dígitos del teléfono o por el nombre de perfil. De 50 ' +
+      'en 50 (hasta 100) con el total. Sólo hay chats desde el 20-nov-2026 (Meta no dio el historial). Sólo lectura: no manda ' +
+      'mensajes. Sólo el superadmin. ' +
+      SOLO,
+    {
+      sinProspecto: z.boolean().optional().describe('true = sólo los chats que todavía no son prospecto en el CRM'),
+      q: z.string().trim().max(100).optional().describe('Dígitos del teléfono (4 o más) o nombre de perfil'),
+      cursor: z.string().max(300).optional().describe('El «siguiente» de la página anterior'),
+      limit: pageLimit.optional().describe('Cuántos traer, de 1 a 100 (50 si no lo dices)'),
+    },
+    async ({ sinProspecto, q, cursor, limit }) =>
+      conLlave(scope, 'crm:ver', async access => {
+        const { rows, total, nextCursor } = await listChats(access, { sinProspecto, q, cursor, limit })
+        return {
+          ok: true,
+          total,
+          hayMas: nextCursor !== null,
+          siguiente: nextCursor,
+          chats: rows.map(chat => ({
+            telefono: chat.telefono,
+            telefonoValido: chat.telefonoValido,
+            nombre: chat.nombre,
+            mensajes: chat.mensajes,
+            ultimo: {
+              cuando: fecha(chat.ultimo.at),
+              quien: chat.ultimo.direccion,
+              texto: chatTexto(chat.ultimo.tipo, chat.ultimo.texto),
+            },
+            negocio: chat.negocio,
+            otrosNegocios: chat.otrosNegocios,
+          })),
+        }
+      }),
+  )
+
+  server.tool(
+    'crm_whatsapp_thread',
+    'Lee la conversación del WhatsApp de ventas de Avoqado con un teléfono, o con todas las personas de un negocio del CRM ' +
+      '(accountId). Los mensajes van del más viejo al más nuevo, 50 por página (hasta 200), empezando por los más recientes; ' +
+      'con siguiente trae los anteriores. Cada mensaje dice quien (ENTRA = el prospecto, SALE = el founder desde su celular), ' +
+      'origen (MENSAJE, ECO = lo mandó el founder desde la app, HISTORIAL), tipo y texto (una foto o un audio sale sólo como su ' +
+      'tipo, sin el archivo). Sólo hay mensajes desde el 20-nov-2026. Sólo lectura: no manda mensajes. Sólo el superadmin. ' +
+      SOLO,
+    {
+      phone: z.string().trim().max(30).optional().describe('Teléfono del chat, en cualquier formato; sin lada se toma de México'),
+      accountId: z
+        .string()
+        .cuid('El id del negocio no es válido')
+        .optional()
+        .describe('Un negocio del CRM: junta los chats de sus personas'),
+      cursor: z.string().max(300).optional().describe('El «siguiente» de la página anterior: trae mensajes más viejos'),
+      limit: z.number().int().min(1, 'El límite es de 1 a 200').max(200, 'El límite es de 1 a 200').optional(),
+    },
+    async ({ phone, accountId, cursor, limit }) =>
+      conLlave(scope, 'crm:ver', async access => {
+        const { rows, total, nextCursor } = await getThread(access, { phone, accountId, cursor, limit })
+        return {
+          ok: true,
+          total,
+          hayMasViejos: nextCursor !== null,
+          siguiente: nextCursor,
+          mensajes: rows.map(m => ({
+            cuando: fecha(m.sentAt),
+            telefono: m.contactPhone,
+            quien: m.direction,
+            origen: m.origin,
+            tipo: m.type,
+            texto: chatTexto(m.type, m.body),
+          })),
+        }
       }),
   )
 }

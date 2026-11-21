@@ -252,7 +252,11 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
     async ({ venueId, stationId, status }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('orders:read', venueId)
-      const [comandas, total] = await Promise.all([listKdsOrders(venueId, status, stationId), countKdsOrders(venueId, status, stationId)])
+      // El tablero de D17 (como lo ve una pantalla nueva): sin lo que la cocina terminó ni lo archivado.
+      const [comandas, total] = await Promise.all([
+        listKdsOrders(venueId, status, stationId, undefined, true),
+        countKdsOrders(venueId, status, stationId, true),
+      ])
       return text({
         ok: true,
         total,
@@ -264,6 +268,8 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
           tipo: c.orderType,
           mesa: c.tableNumber ?? null,
           renglones: c.items.length,
+          // D15: los anulados en la caja (y los retirados por la plataforma) siguen en la comanda, marcados; no son trabajo.
+          renglonesAnulados: c.items.filter(i => i.removedAt).length,
           tiempos: [...new Set(c.items.map(i => i.course).filter((t): t is string => Boolean(t)))],
           creada: c.createdAt,
         })),
