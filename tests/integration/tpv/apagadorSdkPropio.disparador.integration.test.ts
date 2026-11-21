@@ -1,7 +1,8 @@
 /**
  * Apagador del SDK propio (fase 3): el disparador de Postgres `Terminal_inHouseSdk_identity_trigger` lo pone en false si
- * cambia la identidad física de la terminal (serie, tipo o marca), para que el permiso nunca viaje a otro aparato.
- * Cualquier otro cambio (nombre, estado, latido, negocio) no lo toca. Postgres real; series ficticias.
+ * cambia la identidad física de la terminal (serie, tipo o marca) o la terminal se muda de negocio, para que el permiso nunca
+ * viaje a otro aparato ni a un negocio que nadie revisó. Cualquier otro cambio (nombre, estado, latido) no lo toca. Postgres
+ * real; series ficticias.
  *
  * Correr (va a la nube con su base propia; nunca contra av-db-25):
  *   npx jest --selectProjects=integration --runTestsByPath tests/integration/tpv/apagadorSdkPropio.disparador.integration.test.ts --ci
@@ -49,27 +50,29 @@ it.each([
   ['serialNumber', 'AVQD-9900000001', { serialNumber: 'AVQD-9900000002' }],
   ['type', 'AVQD-9900000003', { type: TerminalType.TPV_IOS }],
   ['brand', 'AVQD-9900000004', { brand: 'NEXGO' }],
+  ['venueId', 'AVQD-9900000010', 'otroVenue'],
 ])('prendida + cambia %s ⇒ queda en false', async (_campo, serie, cambio) => {
   const t = await terminalPrendida(serie)
   expect(t.inHouseSdkEnabled).toBe(true)
-  await prisma.terminal.update({ where: { id: t.id }, data: cambio })
+  // `otroVenueId` nace en beforeAll: no existe aún cuando it.each arma su tabla.
+  await prisma.terminal.update({ where: { id: t.id }, data: cambio === 'otroVenue' ? { venueId: otroVenueId } : cambio })
   expect(await leer(t.id)).toBe(false)
 })
 
-it('prendida + cambian nombre, estado, lastHeartbeat y venueId ⇒ sigue en true', async () => {
+it('prendida + cambian nombre, estado y lastHeartbeat ⇒ sigue en true', async () => {
   const t = await terminalPrendida('AVQD-9900000005')
   await prisma.terminal.update({
     where: { id: t.id },
-    data: { name: 'Caja renombrada', status: 'ACTIVE', lastHeartbeat: new Date(), venueId: otroVenueId },
+    data: { name: 'Caja renombrada', status: 'ACTIVE', lastHeartbeat: new Date() },
   })
   expect(await leer(t.id)).toBe(true)
 })
 
-it('prendida + update con la MISMA serie, tipo y marca ⇒ sigue en true', async () => {
+it('prendida + update con la MISMA serie, tipo, marca y negocio ⇒ sigue en true', async () => {
   const t = await terminalPrendida('AVQD-9900000006')
   await prisma.terminal.update({
     where: { id: t.id },
-    data: { serialNumber: 'AVQD-9900000006', type: TerminalType.TPV_ANDROID, brand: 'PAX' },
+    data: { serialNumber: 'AVQD-9900000006', type: TerminalType.TPV_ANDROID, brand: 'PAX', venueId },
   })
   expect(await leer(t.id)).toBe(true)
 })

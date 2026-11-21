@@ -2,7 +2,8 @@
  * Apagador del SDK propio (fase 3, bloque 2a): `Terminal.inHouseSdkEnabled` dice si una PAX cobra con nuestro motor.
  * `cambiarSdkPropioDeTerminal` es la ÚNICA función que lo escribe (la ruta REST del SUPERADMIN y la herramienta MCP la
  * llaman). Ningún camino de dinero lee la columna todavía. El disparador de Postgres la apaga solo si cambia la identidad
- * física (serie, tipo o marca); por eso este escritor nunca toca la identidad en el mismo UPDATE.
+ * física (serie, tipo o marca) o la terminal se muda de negocio (`venueId`); por eso este escritor nunca toca la identidad ni
+ * el negocio en el mismo UPDATE.
  */
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
