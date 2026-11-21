@@ -622,7 +622,9 @@ describe('Vales V7 — D5: el freno al armar nunca es falso (si armar rechaza, l
   ].entries()) {
     it(`polvo de la suma con apartado ajeno: armar no frena (extras en orden ${gramos.join(', ')})`, async () => {
       const tag = `r6${numero}`
-      const harina = await insumo(`Harina ${tag}`, '3', 3, Unit.OUNCE)
+      // Existencia de sobra para EMITIR los dos vales (la receta de 28.3495 g se guarda como 28.350 g = 1.0000176 oz); después, el
+      // ajuste deja la foto de r6: 2 oz en existencia y en lotes.
+      const harina = await insumo(`Harina ${tag}`, '5', 5, Unit.OUNCE)
       const base = await producto(`Base ${tag}`, InventoryMethod.QUANTITY, '100')
       const grupo = await prisma.modifierGroup.create({ data: { venueId, name: `Extras ${tag}` } })
       const extras = [] as string[]
