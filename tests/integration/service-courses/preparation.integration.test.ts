@@ -147,7 +147,9 @@ test('dos liberaciones del producto completo con la misma revisión: las dos res
   const second = await applyKitchenPreparation(venueId, order.id, command, staffId)
   const saved = await prisma.kdsOrderItem.findUniqueOrThrow({ where: { id: rows[0].id } })
   expect(saved).toMatchObject({ preparationRevision: 1, preparation: { HELD: 0, PENDING: 2 } })
-  expect(second).toEqual(first) // mismo cuerpo que un éxito normal, con el estado actual
+  // Mismo cuerpo que un éxito normal, con el estado actual, y `yaAplicada` para no volver a imprimir el papel (Codex r5 #4).
+  expect(second).toEqual({ ...first, items: first.items.map(i => ({ ...i, yaAplicada: true })) })
+  expect(first.items[0]).not.toHaveProperty('yaAplicada')
   expect(await prisma.activityLog.count({ where: { venueId, entityId: order.id, action: 'KITCHEN_RELEASE' } })).toBe(1)
 })
 

@@ -67,6 +67,15 @@ describe('persisted kitchen preparation', () => {
     expect(prismaMock.kdsOrderItem.updateMany).not.toHaveBeenCalled()
     expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
   })
+  it('Codex r5 #5: si la base falla al leer la bitácora de una liberación repetida, el error sube (la cola lo reintenta), no es conflicto', async () => {
+    prismaMock.kdsOrderItem.findMany.mockResolvedValue([
+      { ...line, preparation: { ...initialPreparation(2, 'STANDARD'), HELD: 0, PENDING: 2 }, preparationRevision: 1 },
+    ])
+    prismaMock.activityLog.findFirst.mockRejectedValue(new Error('Connection terminated unexpectedly'))
+    const otraVez = { action: 'RELEASE', items: [{ id: 'line-a', expectedRevision: 0, quantity: 2 }] }
+    await expect(applyKitchenPreparation('venue-a', 'order-a', otraVez, 'staff-a')).rejects.toThrow('Connection terminated unexpectedly')
+    expect(prismaMock.kdsOrderItem.updateMany).not.toHaveBeenCalled()
+  })
   it('checks Pro before entering a mutation transaction', async () => {
     ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
     await expect(applyKitchenPreparation('venue-a', 'order-a', input, 'staff-a')).rejects.toMatchObject({ statusCode: 403 })

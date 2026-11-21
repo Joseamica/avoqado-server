@@ -108,29 +108,34 @@ async function yaLaHizoOtroAparato(
 ): Promise<boolean> {
   const { row, action, item } = a
   if ((action !== 'RELEASE' && action !== 'READY') || row.preparationRevision !== item.expectedRevision + 1) return false
-  try {
-    if (!accionYaCumplida(action, parsePreparation(row.preparation, row.quantity), item.quantity)) return false
-    const bitacora = await tx.activityLog.findFirst({
-      where: {
-        venueId: a.venueId,
-        entity: 'KdsOrderItem',
-        entityId: a.orderId,
-        action: `KITCHEN_${action}`,
-        data: { path: ['items'], array_contains: [{ id: row.id, revision: row.preparationRevision }] },
-      },
-      select: { data: true },
-      orderBy: { createdAt: 'desc' },
-    })
-    const anterior = (
-      (bitacora?.data as { items?: Array<{ id: string; revision: number; before: PreparationCounts; after: PreparationCounts }> })?.items ??
-      []
-    ).find(i => i.id === row.id && i.revision === row.preparationRevision)
-    if (!anterior?.before || !anterior.after) return false
-    const misma = transitionPreparation(anterior.before, action, item.quantity, item.from)
-    return PREPARATION_STATES.every(s => misma[s] === anterior.after[s])
-  } catch {
-    return false // progreso ilegible o transición inválida: el conflicto de siempre
+  // Progreso ilegible o transición inválida: el conflicto de siempre. Un error de la base (desconexión) NO se atrapa: sube y la cola
+  // lo reintenta como cualquier error transitorio, en vez de volverse un rechazo definitivo (Codex r5 #5).
+  const sinError = <T>(f: () => T): T | null => {
+    try {
+      return f()
+    } catch {
+      return null
+    }
   }
+  if (!sinError(() => accionYaCumplida(action, parsePreparation(row.preparation, row.quantity), item.quantity))) return false
+  const bitacora = await tx.activityLog.findFirst({
+    where: {
+      venueId: a.venueId,
+      entity: 'KdsOrderItem',
+      entityId: a.orderId,
+      action: `KITCHEN_${action}`,
+      data: { path: ['items'], array_contains: [{ id: row.id, revision: row.preparationRevision }] },
+    },
+    select: { data: true },
+    orderBy: { createdAt: 'desc' },
+  })
+  const anterior = (
+    (bitacora?.data as { items?: Array<{ id: string; revision: number; before: PreparationCounts; after: PreparationCounts }> })?.items ??
+    []
+  ).find(i => i.id === row.id && i.revision === row.preparationRevision)
+  if (!anterior?.before || !anterior.after) return false
+  const misma = sinError(() => transitionPreparation(anterior.before, action, item.quantity, item.from))
+  return misma != null && PREPARATION_STATES.every(s => misma[s] === anterior.after[s])
 }
 
 /** Same reducer for every client. Exact selections, revision CAS, and audit are one atomic operation. */
@@ -354,9 +359,13 @@ export async function applyKitchenPreparation(
           },
         },
       })
-    const hechas = new Map(updates.map(u => [u.row.id, { preparation: u.after, preparationRevision: u.row.preparationRevision + 1 }]))
+    const hechas = new Map<string, { preparation: PreparationCounts; preparationRevision: number; yaAplicada?: true }>(
+      updates.map(u => [u.row.id, { preparation: u.after, preparationRevision: u.row.preparationRevision + 1 }]),
+    )
+    // `yaAplicada`: otro aparato ya lo había hecho (nada cambió). Campo nuevo y opcional: el cliente que imprime el papel «LIBERAR»
+    // puede no imprimirlo otra vez (Codex r5 #4; lo consume ANDROID en su servicio de entrega).
     for (const r of yaCumplidas)
-      hechas.set(r.id, { preparation: r.preparation as PreparationCounts, preparationRevision: r.preparationRevision })
+      hechas.set(r.id, { preparation: r.preparation as PreparationCounts, preparationRevision: r.preparationRevision, yaAplicada: true })
     // El mismo cuerpo que un éxito normal, en el orden pedido: lo que se cambió con su estado nuevo y lo ya cumplido como está.
     const result = {
       orderId,
