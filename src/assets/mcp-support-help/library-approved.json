@@ -158,7 +158,7 @@
       ]
     },
     "android/ordenes/cambiar-o-quitar-articulos-del-carrito": {
-      "sha256": "301832543a7b7d44878fd6a84cad2439de3163c7c4184c1dae6516623da039ef",
+      "sha256": "7c00791791e38ba52c2b1f44077382d4b747089e56130c58c1129194fc4af24d",
       "requiredPermissions": []
     },
     "android/personal/cambiar-de-usuario": {
@@ -1130,7 +1130,7 @@
       ]
     },
     "windows/ordenes/cambiar-o-quitar-articulos-del-carrito": {
-      "sha256": "a5f2aa22887350a58530495403fec0edf91ab424b40fd7d4f0711c201b93a982",
+      "sha256": "c05c061b1155b68d5274d940a025b963fe4f18fa4fe11348f7e62e59450e536c",
       "requiredPermissions": []
     },
     "windows/personal/cambiar-de-usuario": {

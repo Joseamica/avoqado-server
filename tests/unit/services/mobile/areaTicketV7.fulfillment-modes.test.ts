@@ -147,6 +147,9 @@ function primeMaterialization(snapshotMode: FulfillmentMode, currentMode: Fulfil
   })
   prismaMock.areaTicket.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.areaTicketCheckoutSession.updateMany.mockResolvedValue({ count: 1 })
+  // hz:0555ee15:D5: armar la venta revisa la existencia de lo no apartado (lee los renglones y los apartados de la sesión); aquí no hay nada.
+  prismaMock.orderItem.findMany.mockResolvedValue([])
+  prismaMock.areaTicketInventoryReservation.groupBy.mockResolvedValue([] as any)
   prismaMock.areaTicketCheckoutSession.findUniqueOrThrow.mockImplementation(async () => ({
     ...session,
     status: AreaTicketCheckoutStatus.MATERIALIZED,
