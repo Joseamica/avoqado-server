@@ -152,6 +152,35 @@ describe('set_terminal_in_house_sdk por el catálogo real', () => {
     expect(await asientos(t.id)).toHaveLength(0)
   })
 
+  it('prender una ficha SIN serie guardada (mandando una serie en el paso 1) ⇒ rechazo en llano, sin pedir confirmación ni token', async () => {
+    const t = await pax()
+    await prisma.terminal.update({ where: { id: t.id }, data: { serialNumber: null } })
+
+    const vista = await mcp.call(NOMBRE, { terminalId: t.id, enabled: true, expectedSerialNumber: 'AVQD-9900000398' })
+
+    expect(vista).toEqual({
+      ok: false,
+      code: 'TERMINAL_SERIAL_MISMATCH',
+      error: 'La terminal no tiene serie guardada; corrígela en la ficha.',
+    })
+    expect(await columna(t.id)).toBe(false)
+    expect(await asientos(t.id)).toHaveLength(0)
+  })
+
+  it('prender una ficha NO elegible ⇒ rechazo con la razón, sin pedir confirmación ni token', async () => {
+    const t = await pax()
+    await prisma.terminal.update({ where: { id: t.id }, data: { assignedMerchantIds: [] } })
+
+    const vista = await mcp.call(NOMBRE, { terminalId: t.id, enabled: true })
+
+    expect(vista).toEqual({
+      ok: false,
+      code: 'TERMINAL_NOT_ELIGIBLE_FOR_IN_HOUSE_SDK',
+      error: 'No tiene una afiliación de Blumon activa que le llegue a la terminal',
+    })
+    expect(await columna(t.id)).toBe(false)
+  })
+
   it('apagar por el catálogo ⇒ la vista previa no trae expectedSerialNumber y el paso 2 apaga; repetir dice «ya estaba así»', async () => {
     const t = await pax()
     await prisma.terminal.update({ where: { id: t.id }, data: { inHouseSdkEnabled: true } })

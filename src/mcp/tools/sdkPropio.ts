@@ -48,6 +48,18 @@ export function registerSdkPropioTools(server: McpServer, scope: McpScope): void
         })
         if (!terminal) return text({ ok: false, error: 'No encontré esa terminal.' })
         const elegibilidad = await elegibilidadDelSdkPropio(prisma, terminalId)
+        // Prender lo que no se puede prender ⇒ rechazo SIN `requiresConfirmation`: el catálogo no firma nada (Codex b2a r1 #2).
+        // Una vista sin serie no puede autorizar después a un aparato que nunca enseñó. Si ya está prendida, confirmar no
+        // cambia nada (el escritor no vuelve a revisar) y la vista previa de abajo lo dice.
+        if (enabled && !terminal.inHouseSdkEnabled) {
+          if (!terminal.serialNumber)
+            return text({
+              ok: false,
+              code: 'TERMINAL_SERIAL_MISMATCH',
+              error: 'La terminal no tiene serie guardada; corrígela en la ficha.',
+            })
+          if (!elegibilidad.elegible) return text({ ok: false, code: 'TERMINAL_NOT_ELIGIBLE_FOR_IN_HOUSE_SDK', error: elegibilidad.razon })
+        }
         // Sólo al prender, y sólo si hay serie: el catálogo la ata y el escritor la compara bajo el candado.
         const serie = enabled && terminal.serialNumber ? { expectedSerialNumber: terminal.serialNumber } : {}
         // Los argumentos del paso 2: lo que firma el catálogo (la entrada sin `confirm`, más la serie de arriba) + confirm:true.

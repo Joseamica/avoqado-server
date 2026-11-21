@@ -94,6 +94,9 @@ export async function cambiarSdkPropioDeTerminal(entrada: {
 
     if (enabled) {
       // Literal y antes de la elegibilidad (Codex r1 #1, r2 #1): una serie guardada nula siempre cae aquí.
+      if (fila.serialNumber == null) {
+        throw new ConflictError('La terminal no tiene serie guardada; corrígela en la ficha.', 'TERMINAL_SERIAL_MISMATCH')
+      }
       if (entrada.serieEsperada == null || entrada.serieEsperada !== fila.serialNumber) {
         throw new ConflictError('La serie de la terminal cambió desde que la viste. Vuelve a consultarla.', 'TERMINAL_SERIAL_MISMATCH')
       }
