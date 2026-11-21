@@ -21,6 +21,7 @@ import {
   porDevolverDeUnPedido,
   refundCardOnlineOrder,
   resolveReversedCardRefund,
+  revisarStripeAntesDeOtroMedio,
 } from '@/services/online-ordering/card/refund.service'
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
@@ -723,6 +724,13 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         if (!fila || fila.status !== 'REVERSED' || fila.reversal?.resolvedAt) {
           return text({ ok: false, error: 'Esta devolución no está pendiente de pagarse por otro medio.' })
         }
+        // D668: Stripe se revisa en la vista previa, ANTES de que alguien le dé el dinero al cliente (y otra vez al confirmar).
+        try {
+          await revisarStripeAntesDeOtroMedio({ venueId, orderId, cardRefundId: refundId })
+        } catch (err) {
+          if (!(err instanceof AppError)) throw err
+          return text({ ok: false, error: err.message, ...(err.code ? { code: err.code } : {}) })
+        }
         return text({
           ok: false,
           requiresConfirmation: true,
@@ -734,9 +742,9 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
             efecto:
               method === 'CASH'
                 ? `Salen $${fila.amount} en efectivo de la caja abierta para devolvérselos al cliente.`
-                : `Queda registrado que le devolviste $${fila.amount} al cliente por transferencia.`,
+                : `Queda registrado que le transfieres $${fila.amount} al cliente.`,
           },
-          mensaje: 'Confírmalo con la persona y vuelve a llamar con confirm:true.',
+          mensaje: 'Confírmalo con la persona y vuelve a llamar con confirm:true; que entregue el dinero después de registrarlo.',
         })
       }
 

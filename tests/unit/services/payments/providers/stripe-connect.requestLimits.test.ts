@@ -230,3 +230,20 @@ describe('StripeConnectProvider con el SDK real: nuestro plazo duro (D661 · B, 
     expect(t.envios.filter(e => e.method === 'GET').map(e => e.timeout)).toEqual([80_000, 80_000, 80_000, 80_000])
   })
 })
+
+describe('StripeConnectProvider.getChargeRefunds: la lista acotada (D668, Codex r1 #3)', () => {
+  const conLista = (n: number) => {
+    const p = new StripeConnectProvider('sk_test_x')
+    ;(p as unknown as { retrievePaymentIntent: () => Promise<unknown> }).retrievePaymentIntent = async () => ({
+      latest_charge: { amount_refunded: 0 },
+    })
+    const una = { refundId: 're_x', status: 'FAILED' as const, amountCents: 1, failureReason: null, metadata: {} }
+    jest.spyOn(p, 'listRefunds').mockResolvedValue(Array.from({ length: n }, () => una))
+    return p
+  }
+
+  it('con 999 devoluciones contesta; al llegar al tope de 1,000 (puede venir recortada) falla, y quien llama no devuelve a ciegas', async () => {
+    await expect(conLista(999).getChargeRefunds(merchant as never, 'pi_1')).resolves.toMatchObject({ amountRefundedCents: 0 })
+    await expect(conLista(1000).getChargeRefunds(merchant as never, 'pi_1')).rejects.toThrow('puede venir recortada')
+  })
+})
