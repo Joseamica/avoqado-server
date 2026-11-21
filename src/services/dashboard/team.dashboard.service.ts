@@ -567,7 +567,7 @@ export async function inviteTeamMember(
 
   // Create invitation
   const expiresAt = new Date()
-  expiresAt.setDate(expiresAt.getDate() + 7) // 7 days expiry
+  expiresAt.setUTCDate(expiresAt.getUTCDate() + 7) // 7 days expiry
 
   const invitation = await prisma.$transaction(async tx => {
     // Free-tier seat cap: block at SEND time. A full Free venue can't even create the email
@@ -1395,7 +1395,7 @@ export async function resendInvitation(venueId: string, invitationId: string, _i
 
   // Extend expiration date by 7 days
   const newExpirationDate = new Date()
-  newExpirationDate.setDate(newExpirationDate.getDate() + 7)
+  newExpirationDate.setUTCDate(newExpirationDate.getUTCDate() + 7)
 
   // Update invitation with new expiration date and attempt count
   await prisma.invitation.update({

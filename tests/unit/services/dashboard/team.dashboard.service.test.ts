@@ -21,6 +21,7 @@ import {
   getTeamMembers,
   updateTeamMember,
   inviteTeamMember,
+  resendInvitation,
   hardDeleteTeamMember,
   getDeactivationImpact,
 } from '@/services/dashboard/team.dashboard.service'
@@ -172,6 +173,46 @@ describe('inviteTeamMember — privilege-escalation guard', () => {
         callerRole: StaffRole.OWNER,
       }),
     ).rejects.toThrow(/SUPERADMIN/i)
+  })
+})
+
+// D32: la invitación vence 7 × 24 h después, sin importar la zona horaria del proceso
+// (con setDate en America/Los_Angeles, cruzar el fin del horario de verano agregaba una hora).
+describe('invitaciones — vencimiento a 7 días exactos (D32)', () => {
+  const ALTO = new Error('alto: ya se leyó la fecha')
+  beforeEach(() => {
+    jest.useFakeTimers({ now: new Date('2026-10-30T18:00:00.000Z'), doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
+  })
+  afterEach(() => jest.useRealTimers())
+
+  it('inviteTeamMember guarda expiresAt = ahora + 7 días, también cruzando el cambio de horario', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue({ id: VENUE_ID, slug: 'venue-1', name: 'Venue', organizationId: ORG_ID } as any)
+    prismaMock.staff.findUnique.mockImplementation((async ({ where }: any) =>
+      where.id ? { firstName: 'Ana', lastName: 'Dueña' } : { id: STAFF_ID, email: 'ya@negocio.mx' }) as any)
+    // Ya es miembro activo y se re-invita a todas las sucursales: no ocupa lugar nuevo, así que no pasa por el tope de lugares.
+    prismaMock.staffVenue.findUnique.mockResolvedValue({ id: TEAM_MEMBER_ID, active: true } as any)
+    prismaMock.invitation.findFirst.mockResolvedValue(null)
+    const crear = jest.fn().mockRejectedValue(ALTO)
+    prismaMock.$transaction.mockImplementationOnce((async (cb: any) => cb({ invitation: { create: crear } })) as any)
+
+    await expect(
+      inviteTeamMember(VENUE_ID, 'inviter', {
+        email: 'ya@negocio.mx',
+        firstName: 'A',
+        lastName: 'B',
+        role: StaffRole.ADMIN,
+        inviteToAllVenues: true,
+      }),
+    ).rejects.toBe(ALTO)
+    expect(crear.mock.calls[0][0].data.expiresAt.toISOString()).toBe('2026-11-06T18:00:00.000Z')
+  })
+
+  it('resendInvitation extiende expiresAt a ahora + 7 días, también cruzando el cambio de horario', async () => {
+    prismaMock.invitation.findFirst.mockResolvedValue({ id: 'inv-1', venueId: VENUE_ID, attemptCount: 0 } as any)
+    prismaMock.invitation.update.mockRejectedValueOnce(ALTO)
+
+    await expect(resendInvitation(VENUE_ID, 'inv-1', 'inviter')).rejects.toBe(ALTO)
+    expect((prismaMock.invitation.update.mock.calls[0][0] as any).data.expiresAt.toISOString()).toBe('2026-11-06T18:00:00.000Z')
   })
 })
 
