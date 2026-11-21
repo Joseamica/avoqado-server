@@ -16,6 +16,7 @@ import { CRM_KEYS } from '../lib/permissions'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { autenticacionOpcional } from '../middlewares/autenticacionOpcional.middleware'
 import { requireCrm } from '../middlewares/requireCrm.middleware'
+import { soloSuperadminReal } from '../middlewares/soloSuperadminReal.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { preserveContext } from '../observability/preserveContext'
 import { assertFormaNuevaDeLlaves } from '../services/crm/teamVenue.service'
@@ -70,6 +71,8 @@ import {
   updateStageSchema,
   updateTeamMemberSchema,
   updateTemplateSchema,
+  whatsappThreadSchema,
+  listWhatsappChatsSchema,
   winAccountSchema,
 } from '../schemas/crm.schema'
 
@@ -184,6 +187,14 @@ router.post('/accounts/:id/alta', editar, validateRequest(altaMotivoSchema), crm
 router.get('/clients/:organizationId/live', ver, validateRequest(hideClientSchema), crmController.getClientLive)
 router.get('/reports', ver, validateRequest(reportsSchema), crmController.getReports)
 router.get('/export.csv', exportar, validateRequest(exportAccountsSchema), crmController.exportAccountsCsv)
+
+// The sales WhatsApp, read only (phase 3, «leer chats»): only the real superadmin (founder, 20-nov: «Sólo yo»); the service
+// checks it again, so the screens and the MCP answer the same 403 to a seller.
+// `soloSuperadminReal` goes FIRST: a seller's first request would otherwise claim their key row on the way to the 403.
+// Then «Ver negocios», which the superadmin always holds: it fills `req.crmAccess` for the service, that checks again.
+const whatsapp = [soloSuperadminReal, ver]
+router.get('/whatsapp/chats', ...whatsapp, validateRequest(listWhatsappChatsSchema), crmController.listWhatsappChats)
+router.get('/whatsapp/messages', ...whatsapp, validateRequest(whatsappThreadSchema), crmController.getWhatsappThread)
 
 // Activities.
 router.post('/activities/:id/done', editar, validateRequest(completeActivitySchema), crmController.markActivityDone)
