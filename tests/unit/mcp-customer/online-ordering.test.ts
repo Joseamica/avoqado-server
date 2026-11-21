@@ -489,6 +489,30 @@ describe('online_order_respond', () => {
     expect(mockAudit).not.toHaveBeenCalled()
   })
 
+  it('D661 (Task 5): REJECT sobre un pedido con tarjeta de «No, entran solos» que ya se está devolviendo dice que ya se está devolviendo (no «usa la devolución»)', async () => {
+    for (const status of ['ACCEPTED', 'READY']) {
+      mockGetInboxOrder.mockResolvedValue({
+        ...pending,
+        status,
+        requiresAcceptance: false,
+        paymentMode: 'CARD_ONLINE',
+        paymentStatus: 'PAID',
+        card: { status: 'CAPTURED', amount: 186 },
+        refundRequestedAt: '2026-11-20T18:00:00.000Z',
+        refundedAt: null,
+      })
+      for (const confirm of [undefined, true]) {
+        const r = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'REJECT', reason: 'OTHER', confirm }))
+        expect(r).toMatchObject({ ok: false, status })
+        expect(r.error).toMatch(/ya se está devolviendo/)
+        expect(r.error).toMatch(/No se aplicó nada\.$/)
+        expect(r.error).not.toMatch(/usa la devolución|se libera sin cobrar/)
+      }
+    }
+    expect(mockReject).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
   it('D661 (3B, ronda 1): REJECT sobre un pedido con tarjeta de «No, entran solos» ya CERRADO (vencido o entregado) contesta lo de siempre para un pedido que ya no está por aceptar; no promete nada', async () => {
     for (const [status, paymentStatus] of [
       ['EXPIRED', 'PENDING'], // nadie lo abrió: se liberó sin cobrar
@@ -614,6 +638,31 @@ describe('online_order_respond', () => {
       status: 'COMPLETED',
       notPickedUpAt: CORTE,
       error: expect.stringContaining('«No lo recogió»'),
+    })
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('D661 (Task 5): «Listo» sobre un pedido que se está devolviendo o ya se devolvió devuelve su estado, no éxito', async () => {
+    const HORA = '2026-11-20T18:00:00.000Z'
+    const nadie = { ...pending, paymentMode: 'CARD_ONLINE', requiresAcceptance: false, notPickedUpAt: null, refundedAt: null }
+    mockGetInboxOrder.mockResolvedValue({ ...nadie, status: 'ACCEPTED', refundRequestedAt: HORA })
+    for (const confirm of [undefined, true]) {
+      expect(parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'READY', confirm }))).toEqual({
+        ok: false,
+        status: 'ACCEPTED',
+        refundRequestedAt: HORA,
+        error: expect.stringMatching(/se está devolviendo: no se marca listo/),
+      })
+    }
+    expect(mockReady).not.toHaveBeenCalled()
+    // La reserva ganó entre la vista previa y la confirmación: el servicio contesta su estado real.
+    mockGetInboxOrder.mockResolvedValue({ ...nadie, status: 'ACCEPTED', refundRequestedAt: null })
+    mockReady.mockResolvedValue({ outcome: 'STALE', status: 'ACCEPTED', refundRequestedAt: HORA })
+    expect(parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'READY', confirm: true }))).toEqual({
+      ok: false,
+      status: 'ACCEPTED',
+      refundRequestedAt: HORA,
+      error: expect.stringMatching(/se está devolviendo: no se marca listo/),
     })
     expect(mockAudit).not.toHaveBeenCalled()
   })
@@ -1114,6 +1163,64 @@ describe('devoluciones a la tarjeta de un pedido en línea', () => {
     const r = parse(await call('online_order_card_refund', { venueId: 'v1', orderId: 'ord1', amount: 50, reason: 'OTHER' }))
     expect(r).toMatchObject({ ok: false })
     expect(r.requiresConfirmation).toBeUndefined()
+  })
+
+  it('MCP: la vista previa de un pedido «Nadie» trae el total y dice «también lo cierra como Devuelto» sólo si está entregable; el efecto esperado viaja en la confirmación y se revalida bajo el candado: si cambió, 409 y pide una vista previa nueva; destino sólo CARD', async () => {
+    const nadie = { ...cobrado, requiresAcceptance: false, status: 'ACCEPTED' }
+    mockGetInboxOrder.mockResolvedValue(nadie)
+    const args = { venueId: 'v1', orderId: 'ord1', amount: 250, reason: 'CANCELLED_ORDER' }
+
+    // En «Nadie» sólo el total: un monto parcial no da vista previa, dice cuánto es.
+    const parcial = parse(await call('online_order_card_refund', { ...args, amount: 100 }))
+    expect(parcial).toMatchObject({ ok: false, code: 'FULL_REFUND_ONLY', total: 250 })
+    expect(parcial.error).toContain('$250.00')
+    expect(parcial.requiresConfirmation).toBeUndefined()
+
+    // Entregable: el total y «también lo cierra como Devuelto»; el efecto viaja en la respuesta y queda atado a la firma.
+    const previa = parse(await call('online_order_card_refund', args))
+    expect(previa).toMatchObject({ ok: false, requiresConfirmation: true, expectedClosesAsRefunded: true, preview: { total: 250 } })
+    expect(previa.preview.efecto).toContain('Se devuelven $250.00 a la tarjeta del cliente.')
+    expect(previa.preview.efecto).toContain('También lo cierra como «Devuelto»')
+    const confirmar = {
+      ...args,
+      expectedLatestRefundId: previa.expectedLatestRefundId,
+      confirm: true,
+      confirmationToken: previa.confirmationToken,
+    }
+    // Sin el efecto (o con otro) la confirmación no vale.
+    for (const efecto of [{}, { expectedClosesAsRefunded: false }]) {
+      expect(parse(await call('online_order_card_refund', { ...confirmar, ...efecto }))).toMatchObject({ ok: false })
+    }
+    expect(mockRefundCard).not.toHaveBeenCalled()
+    const ok = parse(await call('online_order_card_refund', { ...confirmar, expectedClosesAsRefunded: true }))
+    expect(ok).toMatchObject({ ok: true, cardRefundId: 'cr2' })
+    expect(mockRefundCard.mock.calls[0][0]).toMatchObject({ destino: 'CARD', efectoEsperado: { cierraComoDevuelto: true } })
+
+    // Bajo el candado cambió (se entregó entre la vista previa y la confirmación): 409 del servicio, que pide otra vista previa.
+    mockRefundCard.mockRejectedValueOnce(
+      new ConflictError('El pedido cambió desde la vista previa. Pide una vista previa nueva. No se aplicó nada.', 'REFUND_EFFECT_CHANGED'),
+    )
+    const cambio = parse(await call('online_order_card_refund', { ...confirmar, expectedClosesAsRefunded: true }))
+    expect(cambio).toMatchObject({ ok: false, code: 'REFUND_EFFECT_CHANGED' })
+    expect(cambio.error).toContain('vista previa nueva')
+
+    // Ya entregado: el total, sin «también lo cierra»; se confirma sin efecto y viaja como «no lo cierra».
+    mockGetInboxOrder.mockResolvedValue({ ...nadie, status: 'COMPLETED' })
+    const entregado = parse(await call('online_order_card_refund', args))
+    expect(entregado.preview).toMatchObject({ total: 250 })
+    expect(entregado.preview.efecto).not.toContain('Devuelto')
+    expect(entregado.expectedClosesAsRefunded).toBeUndefined()
+    mockRefundCard.mockClear()
+    await call('online_order_card_refund', {
+      ...args,
+      expectedLatestRefundId: entregado.expectedLatestRefundId,
+      confirm: true,
+      confirmationToken: entregado.confirmationToken,
+    })
+    expect(mockRefundCard.mock.calls[0][0]).toMatchObject({ destino: 'CARD', efectoEsperado: { cierraComoDevuelto: false } })
+
+    // Destino sólo tarjeta: la herramienta no tiene con qué pedir otro.
+    expect(Object.keys(shapes.get('online_order_card_refund')!)).not.toContain('destino')
   })
 
   it('online_order_card_refund_resolve: en efectivo exige payments:refund-to-cash; por transferencia, payments:refund; dos pasos', async () => {

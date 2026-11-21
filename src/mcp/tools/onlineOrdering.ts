@@ -74,6 +74,8 @@ const TARJETA_NO_SE_RECHAZA =
 /** D661 (3B, ronda 1): uno ya abierto (en preparación o listo) ya está pagado: no se rechaza y el dinero se regresa con su devolución. */
 const TARJETA_YA_PAGADA =
   'Este pedido ya está pagado y no se rechaza. Para regresarle el dinero a la clienta usa la devolución del pedido. No se aplicó nada.'
+/** D661 (Task 5): con la devolución ya en curso, el dinero ya va de regreso: no hay otra devolución que pedir. */
+const TARJETA_DEVOLVIENDOSE = 'Este pedido ya se está devolviendo a la clienta: no se rechaza. No se aplicó nada.'
 /** R46: un folio no se rechaza; se quita con CANCELAR. Nunca promete «no se le cobró nada» (§5: un efectivo sin red puede subir después). */
 const FOLIO_NO_SE_RECHAZA =
   'Este pedido se paga en caja y no se rechaza; no se aplicó nada. Para quitarlo usa CANCELAR (pide el permiso de cancelar cuentas sin cobro).'
@@ -87,16 +89,16 @@ const AJUSTES_RECHAZADOS = new Set([
 ])
 
 /** El texto del cobro (HAS_PAYMENTS) es el mismo de la API del restaurante (`onlineOrders.mobile.controller.ts`). */
-function fallo(r: Exclude<TransitionResult, { outcome: 'OK' }>) {
+function fallo(r: Exclude<TransitionResult, { outcome: 'OK' }>, accion: 'entregado' | 'listo' = 'entregado') {
   switch (r.outcome) {
     case 'STALE': {
-      // D661 (Task 4): al entregar, el estado real («No lo recogió», «Devolviendo…», «Devuelto»), nunca un éxito.
+      // D661 (Task 4 y 5): al entregar o marcar «Listo», el estado real («No lo recogió», «Devolviendo…», «Devuelto»), nunca un éxito.
       const { outcome: _o, status, ...marcas } = r
       return {
         ok: false,
         status,
         ...marcas,
-        error: mensajeNoSeEntrega(marcas) ?? 'El pedido ya cambió de estado; no se aplicó nada. Vuelve a consultar la bandeja.',
+        error: mensajeNoSeEntrega(marcas, accion) ?? 'El pedido ya cambió de estado; no se aplicó nada. Vuelve a consultar la bandeja.',
       }
     }
     case 'PAYMENT_REQUIRED':
@@ -215,8 +217,10 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       // activos el más viejo no aparecería).
       const order = await getInboxOrder({ venueId, orderId })
       if (!order) return text({ ok: false, error: 'Ese pedido no existe en este negocio.' })
-      // D661 (Task 4): «No lo recogió», «Devolviendo…» o «Devuelto» no se entregan: su estado real, antes de la vista previa.
-      const noSeEntrega = action === 'DELIVERED' ? mensajeNoSeEntrega(order) : null
+      // D661 (Task 4 y 5): «No lo recogió», «Devolviendo…» o «Devuelto» no se entregan ni se marcan «Listo»: su estado real, antes de
+      // la vista previa.
+      const noSeEntrega =
+        action === 'DELIVERED' || action === 'READY' ? mensajeNoSeEntrega(order, action === 'READY' ? 'listo' : 'entregado') : null
       if (noSeEntrega) {
         const { notPickedUpAt, refundRequestedAt, refundedAt } = order
         return text({
@@ -243,7 +247,9 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
           : order.status === 'PENDING_ACCEPTANCE'
             ? TARJETA_NO_SE_RECHAZA
             : order.status === 'ACCEPTED' || order.status === 'READY'
-              ? TARJETA_YA_PAGADA
+              ? order.refundRequestedAt
+                ? TARJETA_DEVOLVIENDOSE
+                : TARJETA_YA_PAGADA
               : null
       if (action === 'REJECT' && folio && noSeRechaza) return text({ ok: false, status: order.status, error: noSeRechaza })
       const vigente: string[] = pendingAction
@@ -322,7 +328,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       if (action === 'ACCEPT' && result.outcome === 'PAYMENT_REQUIRED') {
         return text({ ok: false, code: 'PAYMENT_REQUIRED', error: FOLIO_SIN_PAGAR })
       }
-      if (result.outcome !== 'OK') return text(fallo(result))
+      if (result.outcome !== 'OK') return text(fallo(result, action === 'READY' ? 'listo' : 'entregado'))
       // A12: ya estaba entregado (se entregó solo entre la vista previa y la confirmación): éxito sin otra bitácora.
       if (result.unchanged) {
         return text({
@@ -522,7 +528,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_order_card_refund',
-    'Devuelve a la tarjeta del cliente (total o parcial) un pedido en línea que se cobró con tarjeta al pedir. El monto va en pesos (por ejemplo 120.50) y no puede pasar de lo que queda por devolver. Dos pasos: sin confirm:true sólo muestra la vista previa, un confirmationToken y expectedLatestRefundId; para devolver, repite los mismos datos con confirm:true, ese confirmationToken (vale 10 minutos) y ese expectedLatestRefundId. Repetir la confirmación con el mismo token no devuelve dos veces; si hubo otra devolución desde la vista previa contesta CARD_REFUND_STALE_VIEW y hay que revisarla y pedir otra vista previa. Pide permiso para reembolsar.',
+    'Devuelve a la tarjeta del cliente (total o parcial) un pedido en línea que se cobró con tarjeta al pedir. El monto va en pesos (por ejemplo 120.50) y no puede pasar de lo que queda por devolver. Un pedido pagado con tarjeta en «No, entran solos» sólo se devuelve completo (la vista previa dice el total) y, si todavía no se entregaba, también se cierra como «Devuelto». Dos pasos: sin confirm:true sólo muestra la vista previa, un confirmationToken y expectedLatestRefundId (y expectedClosesAsRefunded cuando también lo cierra); para devolver, repite los mismos datos con confirm:true, ese confirmationToken (vale 10 minutos), ese expectedLatestRefundId y, si vino, ese expectedClosesAsRefunded. Repetir la confirmación con el mismo token no devuelve dos veces; si hubo otra devolución desde la vista previa contesta CARD_REFUND_STALE_VIEW, y si el pedido cambió (por ejemplo, ya se entregó) REFUND_EFFECT_CHANGED: hay que revisarlo y pedir otra vista previa. Pide permiso para reembolsar.',
     {
       venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
       orderId: z.string().describe('Id del pedido (orderId de la lista de pedidos en línea)'),
@@ -538,8 +544,14 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         .nullable()
         .optional()
         .describe('Al confirmar: el expectedLatestRefundId que dio la vista previa, tal cual (la última devolución que se vio)'),
+      expectedClosesAsRefunded: z
+        .boolean()
+        .optional()
+        .describe(
+          'Al confirmar: el expectedClosesAsRefunded que dio la vista previa, si lo dio (también cierra el pedido como «Devuelto»)',
+        ),
     },
-    async ({ venueId, orderId, amount, reason, note, confirm, confirmationToken, expectedLatestRefundId }) => {
+    async ({ venueId, orderId, amount, reason, note, confirm, confirmationToken, expectedLatestRefundId, expectedClosesAsRefunded }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('payments:refund', venueId)
       requireWriteScopeAlways(scope, 'payments:refund', 'devuelve dinero a la tarjeta del cliente')
@@ -553,32 +565,59 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         if (order.paymentMode !== 'CARD_ONLINE' || order.card?.status !== 'CAPTURED') {
           return text({ ok: false, error: 'Este pedido no se cobró con tarjeta en línea; no hay nada que devolver a la tarjeta.' })
         }
-        // Lo visto lo fija el servidor al hacer la vista previa y queda atado a la firma: confirmar no puede renovarlo.
+        // D661 (Task 5): en «Nadie» sólo el total, y si todavía está por entregar también se cierra «Devuelto».
+        const nadie = order.requiresAcceptance === false
+        const total = nadie ? (order.card.capturedAmount ?? order.card.amount) : null
+        if (total != null && !monto.eq(new Prisma.Decimal(total))) {
+          return text({
+            ok: false,
+            code: 'FULL_REFUND_ONLY',
+            total,
+            error: `Este pedido se devuelve completo: $${new Prisma.Decimal(total).toFixed(2)}. Pide la vista previa con ese monto; no se aplicó nada.`,
+          })
+        }
+        const cierra = nadie && (order.status === 'ACCEPTED' || order.status === 'READY')
+        // Lo visto lo fija el servidor al hacer la vista previa y queda atado a la firma: confirmar no puede renovarlo. El efecto,
+        // también: si al confirmar ya no es cierto (se entregó en medio), el servicio contesta 409 bajo el candado.
         const vista = (await listCardRefunds(venueId, orderId))[0]?.id ?? null
         return text({
           ok: false,
           requiresConfirmation: true,
           expectedLatestRefundId: vista,
+          ...(cierra ? { expectedClosesAsRefunded: true } : {}),
           preview: {
             pedido: order.orderNumber,
             cliente: order.customerName,
             cobrado: order.card.capturedAmount,
             devolver: Number(monto.toFixed(2)),
+            ...(total != null ? { total } : {}),
             motivo: reason,
             nota,
-            efecto: `Se devuelven $${monto.toFixed(2)} a la tarjeta del cliente.`,
+            efecto:
+              `Se devuelven $${monto.toFixed(2)} a la tarjeta del cliente.` +
+              (cierra ? ' También lo cierra como «Devuelto»: ya no se entrega ni se prepara.' : ''),
           },
-          confirmationToken: issueConfirmation(scope, 'online_order_card_refund', { ...datos, expectedLatestRefundId: vista }),
-          mensaje:
-            'Confírmalo con la persona y vuelve a llamar con los mismos datos, confirm:true, el confirmationToken y expectedLatestRefundId.',
+          confirmationToken: issueConfirmation(scope, 'online_order_card_refund', {
+            ...datos,
+            expectedLatestRefundId: vista,
+            ...(cierra ? { cierraComoDevuelto: true } : {}),
+          }),
+          mensaje: `Confírmalo con la persona y vuelve a llamar con los mismos datos, confirm:true, el confirmationToken y expectedLatestRefundId${cierra ? ' y expectedClosesAsRefunded' : ''}.`,
         })
       }
 
       const vista = expectedLatestRefundId ?? null
-      if (!validConfirmation(confirmationToken, scope, 'online_order_card_refund', { ...datos, expectedLatestRefundId: vista })) {
+      const cierra = expectedClosesAsRefunded === true
+      if (
+        !validConfirmation(confirmationToken, scope, 'online_order_card_refund', {
+          ...datos,
+          expectedLatestRefundId: vista,
+          ...(cierra ? { cierraComoDevuelto: true } : {}),
+        })
+      ) {
         return text({
           ok: false,
-          error: `La vista previa venció (dura ${CONFIRMATION_TTL / 60} minutos) o estos datos no son los que se vieron (pedido, monto, motivo, nota o expectedLatestRefundId). Pide una vista previa nueva y confírmala tal cual.`,
+          error: `La vista previa venció (dura ${CONFIRMATION_TTL / 60} minutos) o estos datos no son los que se vieron (pedido, monto, motivo, nota, expectedLatestRefundId o expectedClosesAsRefunded). Pide una vista previa nueva y confírmala tal cual.`,
         })
       }
       // La llave sale de la confirmación: repetir ESTA confirmación es la misma devolución; una vista previa nueva, otra.
@@ -593,13 +632,16 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
           idempotencyKey,
           note: nota,
           expectedLatestRefundId: vista,
+          // D661: el MCP sólo devuelve a la tarjeta, y el efecto que se vio se revalida bajo el candado de la orden.
+          destino: 'CARD',
+          efectoEsperado: { cierraComoDevuelto: cierra },
         })
         await auditMcpWrite(scope, {
           action: 'ONLINE_ORDER_CARD_REFUND_VIA_MCP',
           entity: 'OnlineOrderCardRefund',
           entityId: r.cardRefundId,
           venueId,
-          data: { orderId, amount: monto.toFixed(2), reason, note: nota, status: r.status, replay: r.replay },
+          data: { orderId, amount: monto.toFixed(2), reason, note: nota, status: r.status, replay: r.replay, cierraComoDevuelto: cierra },
         })
         return text({ ok: true, ...r })
       } catch (err) {
