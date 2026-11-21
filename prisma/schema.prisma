@@ -5097,7 +5097,7 @@ model OrderAction {
 
   @@index([orderId])
   @@index([actionType])
-  @@index([createdAt])
+  @@index([createdAt]) // + GIN PARCIAL "OrderAction_void_externalIds_idx" (metadata -> 'externalIds') WHERE VOID: sólo en su migración (D29)
 }
 
 enum ActionType {

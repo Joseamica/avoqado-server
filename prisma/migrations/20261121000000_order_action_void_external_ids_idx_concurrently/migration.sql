@@ -1,0 +1,14 @@
+-- D29 (hz:0555ee15:D29, Flautas): al recibir una ronda de Mesas, la lápida de un renglón anulado (`OrderAction` VOID con
+-- `metadata.externalIds`) se busca en TODO el negocio por su llave de ronda (`sync:<ronda>:<n>`), no sólo en la cuenta que recibe la
+-- ronda: otra caja pudo separar el renglón a otra cuenta y anularlo ahí. Índice GIN PARCIAL sobre las llaves de las anulaciones; el
+-- lector (`llavesAnuladasEnElNegocio`) escribe `"actionType" = 'VOID'` LITERAL para que Postgres pruebe la implicación y lo use.
+-- CONCURRENTLY: `OrderAction` recibe escrituras en cada cortesía, anulación y descuento, y un CREATE INDEX normal las frenaría
+-- mientras se construye. Una sola sentencia por archivo: Prisma manda el archivo como un lote, y PostgreSQL rechaza CONCURRENTLY
+-- dentro de la transacción implícita de un lote de varias sentencias. Si se interrumpe (p. ej. el lock_timeout de
+-- migrate:deploy:bounded), el índice queda INVÁLIDO e IF NOT EXISTS lo saltaría al reintentar: revisa pg_index.indisvalid, borra sólo
+-- esa copia con DROP INDEX CONCURRENTLY "OrderAction_void_externalIds_idx", marca la migración como revertida
+-- (prisma migrate resolve --rolled-back) y vuelve a desplegar. Sin el índice la búsqueda da lo mismo, sólo más lenta.
+-- fastupdate = off: sin «lista pendiente». Con ella, lo recién anulado espera ahí hasta el siguiente VACUUM y cada búsqueda la recorre
+-- entera; el planificador lo cobra y prefiere leer todas las VOID (medido en la prueba de capacidad). Se anula poco: escribir el
+-- índice en cada anulación cuesta menos que eso.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "OrderAction_void_externalIds_idx" ON "public"."OrderAction" USING GIN (("metadata" -> 'externalIds')) WITH (fastupdate = off) WHERE "actionType" = 'VOID';
