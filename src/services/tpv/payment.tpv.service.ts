@@ -5192,11 +5192,14 @@ export async function recordOrderPayment(
   const autofacturaAvailable = digitalReceipt ? await timing.time('autofactura', () => resolveAutofacturaAvailable(orderId)) : false
   timing.end(payment.id)
 
+  // El `payment` creado aquí trae su venta (`include: { order }`), pero su variable se declaró como `Payment` a secas.
+  const ordenDelPago = (payment as { order?: Record<string, unknown> | null }).order ?? null
+
   // Add digital receipt info to payment response
   return {
     ...payment,
     // D36 (founder «B»): el `order` de la copia del pago es de ANTES de cerrar; si este cobro reabrió la venta, lleva lo guardado.
-    ...(reapertura.ventaGuardada && payment.order ? { order: { ...payment.order, ...reapertura.ventaGuardada } } : {}),
+    ...(reapertura.ventaGuardada && ordenDelPago ? { order: { ...ordenDelPago, ...reapertura.ventaGuardada } } : {}),
     ...(areaTicketCheckoutState ? { areaTicketCheckoutState } : {}),
     // Aditivo y con spread condicional (mismo criterio que `areaTicketCheckoutState`):
     // la llave está AUSENTE cuando no hay nada que avisar, así que ninguna app vieja
