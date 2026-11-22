@@ -29,13 +29,22 @@ import { ORDER_LOCK_WAIT_BUDGET } from '../services/shared/paymentShiftClaim'
  *    (`CheckoutViewModel.createPayLaterOrder` lo exige), así que una con cliente puede ser una cuenta abierta A PROPÓSITO;
  *  - ningún `Payment` de ningún estado, ninguna asignación de pago y NINGUNA `TerminalPaymentRequest`, ni siquiera una rechazada
  *    (el POS intentó cobrarla: igual que el retiro de la TPV, se queda; Codex r3 #4);
+ *  - que anularla no devuelva nada que un cobro tardío pueda gastar dos veces (auditorías de Codex del 21-nov, antes de ACTIVO).
+ *    Anular suelta lo apartado y devuelve lo contado; si después llega el cobro, la venta se reabre con el beneficio puesto y nadie
+ *    lo vuelve a contar. Por eso se quedan, como hoy:
+ *      · las que tienen CUPÓN: su uso queda apartado y otra venta podría tomar el último;
+ *      · las que tienen un descuento con su uso CONTADO (`usoContado`, D24; p. ej. el que el POS le puso a la cuenta): anular lo
+ *        devuelve y el «primeros N» se pasaría;
+ *      · las que un REFERIDO usa como venta que lo califica: anular lo manda a VOID y el cobro tardío ya no lo califica;
  *  - creada Y tocada por última vez hace más de 24 h, y con la misma versión que al elegirla.
  *
  * La anulación es la de siempre (`cancelOrderInTransaction`: retira la comanda de la pantalla de cocina, suelta vales, devuelve
- * canjes y usos, y el cupón deja de estar apartado). La bitácora `ORDER_CANCELLED` (camino `LIMPIEZA_VENTA_COBRAR_ABANDONADA`, sin
- * persona) va DENTRO de la transacción. Un cobro que llegue después sobre la anulada (el efectivo que la cola de una TPV vieja manda
- * días después, la tarjeta aprobada que el aparato registra tarde) la reabre con rastro (`reabrirSiRecibeDinero`, prueba de
- * integración). Lo que el aparato nunca registra, el SERVIDOR no lo ve, anulada o no: igual que hoy (Codex r3 #1, declarado).
+ * canjes y usos). La bitácora `ORDER_CANCELLED` (camino `LIMPIEZA_VENTA_COBRAR_ABANDONADA`, sin persona) va DENTRO de la
+ * transacción. Un cobro que llegue después sobre la anulada (el efectivo que la cola de una TPV vieja manda días después, la tarjeta
+ * aprobada que el aparato registra tarde) la reabre con rastro (`reabrirSiRecibeDinero`, prueba de integración). Su comanda no sale,
+ * y es a propósito: la cocina descarta los renglones de más de 12 h (`KITCHEN_STALENESS_MS`) y tras 24 h el cliente ya se fue
+ * (promesa de D36, Codex r3 #1). Lo que el aparato nunca registra, el SERVIDOR no lo ve, anulada o no: igual que hoy (declarado).
+ * La lista legacy de «Órdenes» de las TPV viejas ya no ofrece una venta anulada para cobrarla (`getOrders`, 21-nov).
  *
  * 🔴 ENSAYO por omisión (`LIMPIEZA_VENTAS_COBRAR`): no escribe NADA, sólo deja una línea por negocio en el log
  * («[LIMPIEZA COBRAR · ENSAYO] anularía N …», con `venueName`). Pasar a `ACTIVO` es un cambio de configuración en producción que se
@@ -78,6 +87,8 @@ const abandonadaDeCobrar = (umbral: Date): Prisma.Sql => Prisma.sql`
   AND NOT EXISTS (SELECT 1 FROM "Payment" p WHERE p."orderId" = o.id)
   AND NOT EXISTS (SELECT 1 FROM "PaymentAllocation" pa WHERE pa."orderId" = o.id)
   AND NOT EXISTS (SELECT 1 FROM "TerminalPaymentRequest" r WHERE r."venueId" = o."venueId" AND r."orderId" = o.id)
+  AND NOT EXISTS (SELECT 1 FROM "OrderDiscount" d WHERE d."orderId" = o.id AND (d."couponCodeId" IS NOT NULL OR d."usoContado"))
+  AND NOT EXISTS (SELECT 1 FROM "Referral" rf WHERE rf."qualifyingOrderId" = o.id)
   AND o."createdAt" < ${utcTs(umbral)}
   AND o."updatedAt" < ${utcTs(umbral)}`
 

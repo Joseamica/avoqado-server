@@ -67,3 +67,17 @@ describe('getOrders de la TPV: folios por pagar (T11)', () => {
     )
   })
 })
+
+// hz:e82938e1:D36 (riesgo 2 de Codex, 21-nov-2026): anular deja `paymentStatus` en PENDING, y la lista legacy «Órdenes» de las TPV
+// viejas se guía por el estado del pago: la anulada salía en «Para Llevar sin Pagar» con el botón de cobrar. Ya no se lista.
+describe('getOrders de la TPV: cuentas anuladas (D36)', () => {
+  it.each([
+    ['por omisión', undefined],
+    ['con los de «pagar después»', { includePayLater: true }],
+    ['sólo «pagar después»', { onlyPayLater: true }],
+    ['con los del kiosco', { includeKiosk: true }],
+  ])('%s, no lista las anuladas ni las borradas, aunque su pago siga PENDING', async (_caso, opciones) => {
+    await getOrders('venue-1', undefined, opciones)
+    expect(filtro()).toMatchObject({ status: { notIn: ['CANCELLED', 'DELETED'] }, paymentStatus: { in: ['PENDING', 'PARTIAL'] } })
+  })
+})

@@ -19,6 +19,7 @@ import {
   VentasCobrarAbandonadasJob,
 } from '@/jobs/ventas-cobrar-abandonadas.job'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
+import { getOrders } from '@/services/tpv/order.tpv.service'
 
 // El cobro tardío de la cola (efectivo) registra su dinero de verdad; sólo se apagan la caja y la cola de mensajes, que no son de esta prueba.
 jest.mock('@/services/shared/cashDrawerPosting', () => ({ postCashSaleToDrawer: jest.fn().mockResolvedValue(undefined) }))
@@ -85,6 +86,27 @@ const estado = async (orderId: string) =>
 
 const activo = () => new VentasCobrarAbandonadasJob({ modo: 'ACTIVO' })
 
+/** El efectivo que la cola de una TPV vieja manda días después: $100, sin `cobroNuevo` (dinero ya capturado). */
+const efectivoDeLaCola = () =>
+  ({
+    venueId,
+    amount: 10000,
+    tip: 0,
+    status: 'COMPLETED',
+    method: 'CASH',
+    source: 'TPV',
+    splitType: 'FULLPAYMENT',
+    tpvId: 'd36-tpv-vieja',
+    staffId,
+    paidProductsId: [],
+    idempotencyKey: randomUUID(),
+    currency: 'MXN',
+    isInternational: false,
+  }) as any
+
+/** Lo que se toca al lado de la venta (comanda, cupón) puede mover `updatedAt`: se regresa a la fecha de la prueba. */
+const otraVezVieja = (id: string) => prisma.$executeRaw`UPDATE "Order" SET "updatedAt" = ${HACE_DOS_DIAS()} WHERE id = ${id}`
+
 /** La candidata tal como la eligió la vuelta (versión incluida). */
 async function candidata(id: string): Promise<Candidata> {
   const o = await prisma.order.findUniqueOrThrow({ where: { id }, select: { id: true, venueId: true, orderNumber: true, version: true } })
@@ -119,6 +141,10 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!venueId) return
   await prisma.activityLog.deleteMany({ where: { venueId } })
+  await prisma.referral.deleteMany({ where: { venueId } })
+  await prisma.orderDiscount.deleteMany({ where: { order: { venueId } } })
+  await prisma.couponCode.deleteMany({ where: { discount: { venueId } } })
+  await prisma.discount.deleteMany({ where: { venueId } })
   await prisma.terminalPaymentRequest.deleteMany({ where: { venueId } })
   await prisma.payment.deleteMany({ where: { venueId } })
   await prisma.orderItem.deleteMany({ where: { order: { venueId } } })
@@ -317,26 +343,7 @@ describe('limpieza de ventas de Cobrar abandonadas (D36)', () => {
     await activo().correrAhora()
     expect(await estado(id)).toBe('CANCELLED')
 
-    await recordOrderPayment(
-      venueId,
-      id,
-      {
-        venueId,
-        amount: 10000,
-        tip: 0,
-        status: 'COMPLETED',
-        method: 'CASH',
-        source: 'TPV',
-        splitType: 'FULLPAYMENT',
-        tpvId: 'd36-tpv-vieja',
-        staffId,
-        paidProductsId: [],
-        idempotencyKey: randomUUID(),
-        currency: 'MXN',
-        isInternational: false,
-      } as any,
-      staffId,
-    )
+    await recordOrderPayment(venueId, id, efectivoDeLaCola(), staffId)
 
     expect(await estado(id)).not.toBe('CANCELLED')
     expect(await prisma.payment.count({ where: { orderId: id } })).toBe(1)
@@ -349,5 +356,80 @@ describe('limpieza de ventas de Cobrar abandonadas (D36)', () => {
     await activo().correrAhora()
     expect(await estado(vacia)).toBe('PENDING')
     expect(await estado(kiosco)).toBe('PENDING')
+  })
+})
+
+/**
+ * Lo que una anulación devuelve y un cobro tardío ya no vuelve a contar (auditorías de Codex del 21-nov, antes de pasar a ACTIVO):
+ * esas ventas se quedan como están. Y la lista legacy de «Órdenes» de la TPV ya no ofrece una anulada.
+ */
+describe('limpieza de Cobrar: lo que no se puede gastar dos veces (21-nov)', () => {
+  async function descuento(id: string, fila: { cupon?: boolean; usoContado?: boolean }) {
+    const d = await prisma.discount.create({ data: { venueId, name: 'Descuento D36', type: 'FIXED_AMOUNT', value: 10, maxTotalUses: 1 } })
+    const cupon = fila.cupon
+      ? await prisma.couponCode.create({ data: { discountId: d.id, code: `D36${Date.now()}${Math.random()}`.slice(0, 30), maxUses: 1 } })
+      : null
+    await prisma.orderDiscount.create({
+      data: {
+        orderId: id,
+        discountId: d.id,
+        couponCodeId: cupon?.id ?? null,
+        usoContado: fila.usoContado ?? false,
+        type: 'FIXED_AMOUNT',
+        name: 'Descuento D36',
+        value: 10,
+        amount: 10,
+      },
+    })
+    await otraVezVieja(id)
+  }
+
+  it('🔴 una con CUPÓN no se toca: anularla soltaría su uso apartado y el cupón podría usarse dos veces', async () => {
+    const id = await venta('cupon')
+    await descuento(id, { cupon: true })
+
+    const ensayo = await new VentasCobrarAbandonadasJob({ modo: 'ENSAYO' }).correrAhora()
+    expect(ensayo.negocios.find(n => n.venueId === venueId)).toBeUndefined()
+    await activo().correrAhora()
+    expect(await estado(id)).toBe('PENDING')
+  })
+
+  it('🔴 una con un descuento cuyo uso ya se CONTÓ (el del POS) no se toca: anularla lo devolvería y el «primeros N» se pasaría', async () => {
+    const id = await venta('uso-contado')
+    await descuento(id, { usoContado: true })
+    await activo().correrAhora()
+    expect(await estado(id)).toBe('PENDING')
+  })
+
+  it('control: una con un descuento de catálogo SIN uso contado (el que pone la TPV al crearla) sí se anula', async () => {
+    const id = await venta('descuento-catalogo')
+    await descuento(id, {})
+    await activo().correrAhora()
+    expect(await estado(id)).toBe('CANCELLED')
+  })
+
+  it('🔴 una que un REFERIDO usa como venta que lo califica no se toca: anularla lo mandaría a VOID y el cobro tardío ya no lo califica', async () => {
+    const id = await venta('referido')
+    const [quienRefiere, referida] = await Promise.all([
+      prisma.customer.create({ data: { venueId } }),
+      prisma.customer.create({ data: { venueId } }),
+    ])
+    await prisma.referral.create({
+      data: { venueId, referrerCustomerId: quienRefiere.id, referredCustomerId: referida.id, qualifyingOrderId: id },
+    })
+    await otraVezVieja(id)
+    await activo().correrAhora()
+    expect(await estado(id)).toBe('PENDING')
+  })
+
+  it('🔴 la lista legacy de «Órdenes» de la TPV deja de ofrecer la venta anulada, aunque su pago siga PENDING', async () => {
+    const id = await venta('lista')
+    expect((await getOrders(venueId)).map(o => o.id)).toContain(id)
+    await activo().correrAhora()
+
+    const anulada = await prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true, paymentStatus: true } })
+    expect(anulada).toEqual({ status: 'CANCELLED', paymentStatus: 'PENDING' })
+    expect((await getOrders(venueId)).map(o => o.id)).not.toContain(id)
+    expect((await getOrders(venueId, undefined, { includePayLater: true })).map(o => o.id)).not.toContain(id)
   })
 })
