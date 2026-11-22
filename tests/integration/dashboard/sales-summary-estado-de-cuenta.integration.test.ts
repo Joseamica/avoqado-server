@@ -501,6 +501,9 @@ describe('un solo destino por cobro (tenderSemantics), leído con los cajones', 
     const enCalendario = (r.settlementCalendar ?? []).flatMap(x => x.byMerchant).filter(m => m.merchantAccountId === merchantA)
     expect(c(enCalendario.reduce((acc, m) => acc + m.netToReceive, 0))).toBe(40.92)
     expect(a?.unprojectedNet).toBe(0)
+    // El detalle por tipo de tarjeta trae la misma base (Codex r6 #2): crédito = los dos de $21 (lo demás de crédito no cobra comisión).
+    const credito = bucket(r.byPaymentMethodDetailed, 'CARD')?.subBuckets?.find(x => x.type === 'CREDIT')
+    expect([c(credito?.platformFees), credito?.platformFeesCents]).toEqual([1.07, 1.08])
   })
 
   it('el aplanador del exporte (lo usa la MCP) arma el estado del periodo («statement»): «Te queda» = suma de sus renglones', async () => {
