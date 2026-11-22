@@ -13,6 +13,7 @@ import {
 import { prismaMock } from '../../../__helpers__/setup'
 import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
+import { Prisma } from '@prisma/client'
 
 // Helper to create mock discount
 const createMockDiscount = (overrides: Record<string, any> = {}) => ({
@@ -902,6 +903,63 @@ describe('Coupon Dashboard Service', () => {
       expect(result.totalCoupons).toBe(0)
       expect(result.totalRedemptions).toBe(0)
       expect(result.averageSavings).toBe(0) // No division by zero
+    })
+  })
+
+  // ==========================================
+  // D38 (21-nov): dos peticiones a la vez con el mismo código
+  // ==========================================
+
+  // Las dos pasan la revisión «¿ya existe?» y la segunda choca con el índice único de `CouponCode.code` (P2002). Antes salía
+  // un 500 en inglés («Unique constraint failed on the fields: (`code`)») aunque el cupón sí se creó.
+  describe('D38 · el choque del código único sale con el mismo mensaje que la revisión previa', () => {
+    const choque = (target: unknown) =>
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed on the fields: (`code`)', {
+        code: 'P2002',
+        clientVersion: 'x',
+        meta: { target },
+      })
+
+    it('crear: el P2002 del código ⇒ BadRequestError «Ya existe un cupón con el código …»', async () => {
+      prismaMock.discount.findFirst.mockResolvedValue(createMockDiscount())
+      prismaMock.couponCode.findUnique.mockResolvedValue(null) // la otra petición todavía no escribía
+      prismaMock.couponCode.create.mockRejectedValue(choque(['code']))
+
+      const resultado = createCouponCode('venue-123', { discountId: 'discount-123', code: 'mayo10' })
+
+      await expect(resultado).rejects.toThrow(BadRequestError)
+      await expect(resultado).rejects.toThrow('Ya existe un cupón con el código "MAYO10"')
+    })
+
+    it('crear: un P2002 de OTRO índice no se disfraza de código repetido', async () => {
+      prismaMock.discount.findFirst.mockResolvedValue(createMockDiscount())
+      prismaMock.couponCode.findUnique.mockResolvedValue(null)
+      const otro = choque(['id'])
+      prismaMock.couponCode.create.mockRejectedValue(otro)
+
+      await expect(createCouponCode('venue-123', { discountId: 'discount-123', code: 'MAYO10' })).rejects.toBe(otro)
+    })
+
+    it('editar: el P2002 del código (por nombre de la restricción) ⇒ el mismo BadRequestError', async () => {
+      prismaMock.couponCode.findFirst.mockResolvedValue(createMockCoupon())
+      prismaMock.couponCode.findUnique.mockResolvedValue(null)
+      prismaMock.couponCode.update.mockRejectedValue(choque('CouponCode_code_key'))
+
+      const resultado = updateCouponCode('venue-123', 'coupon-123', { code: 'otro10' })
+
+      await expect(resultado).rejects.toThrow(BadRequestError)
+      await expect(resultado).rejects.toThrow('Ya existe un cupón con el código "OTRO10"')
+    })
+
+    it('lote: el P2002 del código ⇒ BadRequestError en español, no un 500', async () => {
+      prismaMock.discount.findFirst.mockResolvedValue(createMockDiscount())
+      prismaMock.couponCode.findUnique.mockResolvedValue(null)
+      prismaMock.couponCode.createMany.mockRejectedValue(choque(['code']))
+
+      const resultado = bulkGenerateCouponCodes('venue-123', { discountId: 'discount-123', quantity: 5 })
+
+      await expect(resultado).rejects.toThrow(BadRequestError)
+      await expect(resultado).rejects.toThrow('Otro cupón tomó uno de estos códigos al mismo tiempo. Vuelve a generar el lote.')
     })
   })
 })
