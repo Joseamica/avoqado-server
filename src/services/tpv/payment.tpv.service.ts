@@ -5659,16 +5659,18 @@ export async function recordFastPayment(
       })
       // D7: si el primer registro murió antes del aviso de tarjeta tardía, el reintento con la llave lo vuelve a revisar (una vez).
       // Si el primero entró sin edad (registro en vivo) y este reintento de la libreta sí la trae, cuenta la que trae (Codex r4 #2).
+      // Se lanza después de lo que la respuesta espera (Codex r5 #4).
+      const respuesta = {
+        ...((await consolidarRegistroRepetido(existingByKey, paymentData as RegistroEntrante, venueId, null)) ?? existingByKey),
+        digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]),
+        customerLink,
+      }
       void revisarTarjetaTardia(
         existingByKey,
         horaDelIntentoParaGuardar({ method: existingByKey.method, edadDelIntentoMs: paymentData.edadDelIntentoMs }, llegada)
           .intentoAbiertoEn,
       )
-      return {
-        ...((await consolidarRegistroRepetido(existingByKey, paymentData as RegistroEntrante, venueId, null)) ?? existingByKey),
-        digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]),
-        customerLink,
-      }
+      return respuesta
     }
   }
 
@@ -6323,11 +6325,17 @@ export async function recordFastPayment(
           // La carrera la ganó otra petición: su orden ya existe, así que el cliente se
           // rellena (nunca se reasigna) igual que en cualquier reintento idempotente.
           const winnerCustomerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(winner), effectiveCustomerId, customerActor)
-          return {
+          const respuesta = {
             ...((await consolidarRegistroRepetido(winner, paymentData as RegistroEntrante, venueId, null)) ?? winner),
             digitalReceipt: await ensureDigitalReceiptResponse(winner.id, winner.receipts[0]),
             customerLink: winnerCustomerLink,
           }
+          // D7 (Codex r5 #2): el reenvío de la libreta que pierde la carrera contra el registro en vivo también revisa el aviso.
+          void revisarTarjetaTardia(
+            winner,
+            horaDelIntentoParaGuardar({ method: winner.method, edadDelIntentoMs: paymentData.edadDelIntentoMs }, llegada).intentoAbiertoEn,
+          )
+          return respuesta
         }
 
         logger.error('🚨 [recordFastPayment] P2002 on idempotencyKey but winner not found — should be impossible', {

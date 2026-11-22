@@ -56,8 +56,12 @@ export type TarjetaGuardada = {
  * 🔴 Nunca rechaza ni demora: se llama con `void` después del commit, sin consultas de más en un cobro normal (sólo la tarjeta
  * tardía pregunta si ya avisó). Sin la edad del intento (TPV que no la manda) no hay aviso, como hoy. Con cuenta
  * (`recordOrderPayment`) no aplica: ahí la tarjeta tardía ya salta como sobrepago si pasa de la cuenta.
- * ponytail: si la bitácora falla justo al escribir (y la TPV ya no reintenta), el aviso se pierde; la evidencia queda en la tarjeta
- * (`processorData.intentoAbiertoEn`), igual que el rastro hermano `avisarEfectivoConTarjetaEnDuda`.
+ * 🟡 Es un aviso de MEJOR ESFUERZO, como su hermano `avisarEfectivoConTarjetaEnDuda` (founder «B»: el cobro manda, el aviso
+ * acompaña). Límites conocidos y aceptados tras cinco rondas de Codex (la familia no bajaba; se paró ahí, regla del método):
+ *  · si la bitácora falla justo al escribir y la TPV ya no reintenta, no hay aviso;
+ *  · si el registro en vivo entró sin edad y sólo un reintento la trae, el aviso sale pero la hora no se guarda en la tarjeta;
+ *  · cerca del minuto, el tiempo que tarda el reintento en llegar puede dejar una tarjeta de ~1 min sin aviso.
+ * El dinero nunca depende de esto: los dos Payment quedan y el dueño los ve en sus ventas.
  */
 export async function revisarTarjetaTardia(
   tarjeta: TarjetaGuardada,

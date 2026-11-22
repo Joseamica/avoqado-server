@@ -110,7 +110,8 @@ Invariantes de este lado, ya construidos y con prueba — no los debilites:
   **Pago rápido** no hay cuenta con qué chocar: toda tarjeta que llega aprobada ≥ 1 min después de su intento (la TPV manda
   `edadDelIntentoMs`, una duración con su propio reloj; se guarda `processorData.intentoAbiertoEn` en el reloj del servidor) deja
   UNA fila `LATE_CARD_RECORDED` para que el dueño revise si se cobró de otra forma (`avisoDeTarjetaTardia.ts`). A propósito NO se
-  empareja con un efectivo (Codex r1 y r2: siempre quedan huecos). Nunca bloquea.
+  empareja con un efectivo (Codex r1 y r2: siempre quedan huecos). Nunca bloquea. Es de MEJOR ESFUERZO: sus límites conocidos están
+  en la cabecera de `avisoDeTarjetaTardia.ts` (Codex r5).
 - 🔴 **La terminal también declara «no se cobró», y es la MISMA declaración** (botón del banner verde, founder, 3-nov: «A»):
   `POST /tpv/venues/:venueId/terminal-payment/requests/:requestId/uncharged-declaration`, con las puertas del POS y `reconcileUncharged`
   sin tocar. Lo único distinto: el origen (`source: 'TPV'`) y que no libera a secas (`UNCHARGED_STATEMENT_REQUIRED`, antes de la cubeta).
