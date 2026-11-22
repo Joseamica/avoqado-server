@@ -56,7 +56,7 @@ const router = Router()
 
 // All superadmin routes require authentication
 router.use(authenticateTokenMiddleware)
-// And must have system:manage permission
+// And must have system:manage permission (SUPERADMIN only en los permisos por default; se puede prestar, por eso el rol abajo)
 router.use(checkPermission('system:manage'))
 // 🔴 Y el ROL SUPERADMIN, leído de la base (`rolVigente`). `system:manage` es un PERMISO que se puede prestar (una fila de
 // `VenueRolePermission`, o copiada al duplicar un negocio): con él solo, una dueña entraba a todo este montaje de plataforma.

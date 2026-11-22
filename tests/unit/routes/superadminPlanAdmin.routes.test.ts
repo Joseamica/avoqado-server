@@ -33,6 +33,12 @@ jest.mock('@/middlewares/checkPermission.middleware', () => ({
   },
 }))
 
+// El montaje exige además el ROL, leído de la base (`rolVigente`, encargo fc9c53): aquí lo lee del contexto de la prueba.
+jest.mock('@/services/access/rolVigente', () => ({
+  ...jest.requireActual('@/services/access/rolVigente'),
+  rolVigente: async (sesion: any) => sesion?.role ?? null,
+}))
+
 // Mock the plan-admin service fns used by the controller (other superadmin service fns are
 // untouched — the router only invokes these three for the plan routes under test).
 jest.mock('@/services/dashboard/superadmin.service', () => {
