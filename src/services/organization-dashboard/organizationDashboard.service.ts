@@ -34,6 +34,7 @@ import { addCivilDays, firstInstantOfDay, venueDayKey } from '../../utils/venueD
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
+import { resolveEffectiveDeviceCapabilities } from '../device-capabilities.service'
 import {
   dondeHoraRealEntre,
   MARGEN_DE_LECTURA_ANTES_MS,
@@ -4119,6 +4120,8 @@ class OrganizationDashboardService {
       byType[g.type] = (byType[g.type] || 0) + count
     }
 
+    const capabilitiesNow = new Date()
+
     return {
       terminals: terminals.map(t => ({
         id: t.id,
@@ -4141,6 +4144,11 @@ class OrganizationDashboardService {
         // Es lo que ata una terminal a sus SESIONES, y por tanto lo que permite «sacar esta
         // tablet»: una PAX se identifica por serial, pero una tablet Android sólo por esto.
         deviceUid: (t as any).deviceUid ?? null,
+        // D672: el cajón y la barra de selección de Organización › Dispositivos deciden cada botón con esto, y sin ello
+        // fallan cerrado (nunca ofrecían Bloquear/Reiniciar/Mantenimiento). Misma resolución que el detalle
+        // (`getTerminalForOrg` → `toDeviceManagementDto`), calculada de columnas que esta consulta ya trae: sin consultas extra.
+        capabilities: resolveEffectiveDeviceCapabilities(t, { now: capabilitiesNow }),
+        selfRegistered: t.selfRegistered,
         venue: t.venue,
         migration: computeTerminalMigration(t.commandQueue?.[0], (t as any).lastActivationStatusCheckAt ?? null, t.commandSessionId),
       })),
