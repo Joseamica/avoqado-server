@@ -30,6 +30,10 @@ keywords:
   - no lo recogió
   - no me deja pagar en línea
   - me salió pendiente en el banco
+  - se pausó sola
+  - la tienda se pausó
+  - pedidos en línea en pausa
+  - pedidos sin aceptar
 ---
 
 ## Antes de empezar
@@ -52,6 +56,8 @@ Si el negocio eligió «No, entran solos» y prendió «Pagar en línea», la cl
 ## Problemas frecuentes
 
 - Si la tienda dice fuera de línea, no llegan pedidos o se cierra sola, revisa que el POS Windows esté abierto y sin minimizar, con internet y con la sesión de alguien que acepta pedidos. Basta un aparato a la vista: esta computadora, otra caja o la Bandeja del panel.
+- Si aparece «La tienda en línea se pausó sola: 2 pedidos seguidos no se aceptaron a tiempo. No llegan pedidos nuevos.» (o arriba «Pedidos en línea en pausa: 2 pedidos seguidos sin aceptar»), dos pedidos seguidos llegaron a su hora límite sin que nadie los aceptara ni rechazara a tiempo, y la tienda dejó de recibir pedidos. Sólo pasa con «Sí, alguien del personal lo acepta»: un pagado en línea que nadie abre no pausa la tienda. Toca *Reanudar* en esa misma pantalla para volver a recibirlos. Apagar y encender la tienda no la quita. En el panel se quita igual, con *Reanudar* en Pedidos en línea. En versiones anteriores del POS sólo dice que los pedidos están en pausa: toca *Pausar pedidos* y luego *Reanudar*.
+- Si aparece «Los pedidos siguen en pausa: la pausa de Configuración se quita en el panel (Pedidos en línea › Configuración).», la pausa la puso un gerente en el panel: se quita ahí.
 - Si aparece en el pedido «Con tarjeta: se cobra al aceptar», no lo cobres en la caja: ese pedido no muestra *Cobrar*.
 - Si aparece «Cobra el pedido antes de entregarlo.», ese pedido todavía no está pagado.
 - Si aparece «No se pudo cobrar la tarjeta» en un pedido, quedó rechazado porque su tarjeta no se pudo cobrar.

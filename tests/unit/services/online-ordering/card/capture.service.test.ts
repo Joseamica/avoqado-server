@@ -31,6 +31,7 @@ jest.mock('@/services/online-ordering/transitions.service', () => ({
   expireOnlineOrder: jest.fn(async () => ({ outcome: 'OK', status: 'EXPIRED' })),
   acceptWithoutCapture: jest.fn(async () => ({ outcome: 'OK', status: 'ACCEPTED' })),
   announceAccepted: jest.fn(() => ({ outcome: 'OK', status: 'ACCEPTED', estimatedReadyAt: 'x' })),
+  avanzarCorteTrasCommit: jest.fn(),
 }))
 
 import logger from '@/config/logger'
@@ -45,6 +46,7 @@ import {
 } from '@/services/online-ordering/card/capture.service'
 import {
   acceptWithoutCapture,
+  avanzarCorteTrasCommit,
   casTransitionInTx,
   expireOnlineOrder,
   rejectOnlineOrder,
@@ -490,5 +492,28 @@ describe('D661 · A1: captureCharge revalida el límite de un reintento justo an
     // El reintento de «Mi equipo» (sin límites): la relectura de siempre, con dos argumentos.
     await captureCharge(capturing, 'ord1', meta)
     expect(getAuthorization.mock.calls[2]).toHaveLength(2)
+  })
+})
+
+describe('D662 parte 2 (v3) · aceptar con tarjeta: el toque de la persona al pasar a «cobrando»', () => {
+  it('con porPersona escribe staffAnsweredAt (sólo si estaba vacío) en la tx de CAPTURING y avanza el corte tras el commit', async () => {
+    capture.mockResolvedValue(succeeded())
+    prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 1 })
+    await acceptCardOnlineOrder({ ...base, porPersona: true })
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledWith({
+      where: { orderId: 'ord1', venueId: 'v1', staffAnsweredAt: null },
+      data: { staffAnsweredAt: NOW },
+    })
+    expect(avanzarCorteTrasCommit).toHaveBeenCalledWith('v1')
+  })
+
+  it('sin porPersona (conciliador, sistema) no escribe ni avanza', async () => {
+    capture.mockResolvedValue(succeeded())
+    prismaMock.onlineOrder.updateMany.mockClear()
+    ;(avanzarCorteTrasCommit as jest.Mock).mockClear()
+    await acceptCardOnlineOrder(base)
+    const toques = (prismaMock.onlineOrder.updateMany.mock.calls as any[]).filter(c => 'staffAnsweredAt' in (c[0].data ?? {}))
+    expect(toques).toEqual([])
+    expect(avanzarCorteTrasCommit).not.toHaveBeenCalled()
   })
 })

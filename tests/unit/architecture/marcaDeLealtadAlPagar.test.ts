@@ -36,13 +36,16 @@ const CALLERS_EXTRA = {
     '7f1c56ed0daae0c337e928cf803e6b1619e853ceba2251517e95ddbf6198a0d8',
   // S11 (R6): la aceptación cierra en la MISMA transacción el pedido de «Mi equipo» que un beneficio dejó en $0 (afterCas →
   // cerrarFolioEnCeroEnTx, que nunca escribe loyaltyEligibleAt: ver EXENTAS); su orderExtra no cambió.
+  // D662 parte 2: aceptar y rechazar pasan `toquePersona` (guarda `staffAnsweredAt` del pedido en línea, nunca la cuenta ni la
+  // lealtad); su orderExtra no cambió.
   'services/online-ordering/transitions.service.ts#acceptWithoutCapture:casTransition':
-    'e2d031ded415fc2d4e603ac0bbf843659223fef5b1e2c3a4fe0eb82728dcf111',
+    '7757714c01b4400665f027821960c0eb2443478f8b18990ad7867751179f4673',
   // D661 (3A, revisado en 3C): sólo se agregó `...(porFalloDeCobro ? { porFalloDeCobro: true } : {})`, la bandera de la excepción
   // R46 (rechazar un apartado de tarjeta cuando lo pide el escritor del cargo). No es un orderExtra: el rechazo sigue sin orderExtra,
   // escribe sólo `status: CANCELLED` en la cuenta y, como toda cancelación, no corre si la cuenta ya tiene dinero (HAS_PAYMENTS).
+  // Unión con develop (22-nov): el rechazo lleva las dos banderas, la de D661 y el `toquePersona` de D662; ninguna es orderExtra.
   'services/online-ordering/transitions.service.ts#rejectOnlineOrder:casTransition':
-    'c168d301a8418846e9abffce6fc49b814b3d84fb967aa0d923584ab85b9e3b22',
+    '2e2bf2033c426537caded3e1b9dd8fa945dc15ab1c747fa5f700a17302e7c17f',
   'services/online-ordering/transitions.service.ts#expireOnlineOrder:casTransition':
     '43ec329eb5714ea1ddb13eb7cda9c41b603ce84286521cacb3b3b91dac3329ff',
   'services/online-ordering/transitions.service.ts#markOnlineOrderReady:casTransition':

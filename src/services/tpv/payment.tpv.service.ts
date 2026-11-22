@@ -425,6 +425,7 @@ import {
 import { aplicaCandadoDeEfectivo, cobroEnEfectivoSobreOrdenSaldada } from '../shared/cobroEnEfectivoDuplicado'
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
+import { anotarVendedorDeBajaEnTx, validarVendedor } from '../shared/vendedorDadoDeBaja'
 import { withDeadlockRetry, isRetryableDbError, type TxConReintento } from '../../utils/serializableRetry'
 import { loadOrderForCfdiFromDb, ventaConDevolucion } from '../fiscal/cfdi.service'
 import {
@@ -5667,9 +5668,14 @@ export async function recordFastPayment(
   const tipAmount = paymentData.tip / 100
 
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
-  const validatedStaffId = await t.time('validateStaffVenue', () =>
-    validateStaffVenue(relayProcessedByStaffId ?? paymentData.staffId, venueId, userId),
+  // D13 «C»: la venta rápida de la cola con un vendedor dado de baja queda a nombre de la sesión (`userId`), con nota en la transacción.
+  const vendedor = await t.time('validateStaffVenue', () =>
+    validarVendedor(relayProcessedByStaffId ?? paymentData.staffId, venueId, userId, {
+      sesion: userId,
+      deLaCola: paymentData.isOfflineReplay === true,
+    }),
   )
+  const validatedStaffId = vendedor.staffId
 
   t.mark('idempotenciaYChequeosPrevios')
 
@@ -6052,6 +6058,10 @@ export async function recordFastPayment(
             processedBy: { select: STAFF_PUBLIC_SELECT },
           },
         })
+
+        if (vendedor.deBaja) {
+          await anotarVendedorDeBajaEnTx(tx, venueId, vendedor.deBaja, { orderId: order.id, paymentId: newPayment.id, sesion: userId })
+        }
 
         if (shiftClaim) {
           await recordPendingPaymentShiftReconciliation(tx, {

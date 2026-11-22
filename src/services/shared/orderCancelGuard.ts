@@ -5,7 +5,12 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppE
 import { lockExistingOrderForPayment } from './paymentShiftClaim'
 import { instruccionesParaCancelarRappi } from '../delivery-channels/providers/rappi/rappi.cancellation'
 import { esCuentaDeFolioEnTx, findCardOnlineOrderInTx } from '../online-ordering/card/guards'
-import { convertirBeneficiosEnCortesiaEnTx, sellarFolioAnuladoEnTx } from '../online-ordering/cortesiaDeFolio'
+import {
+  anulacionEsDePersona,
+  convertirBeneficiosEnCortesiaEnTx,
+  sellarFolioAnuladoEnTx,
+  sellarToqueDePersonaAlAnularEnTx,
+} from '../online-ordering/cortesiaDeFolio'
 import { devolverUsosDeCuentaAnuladaEnTx, soltarMarcaDeFilasSinDescuentoEnTx } from './usoDelDescuento'
 import type { TxConReintento } from '@/utils/serializableRetry'
 
@@ -265,6 +270,8 @@ export async function devolverCanjesDeVentaAnuladaEnTx(
   if (await esCuentaDeFolioEnTx(tx, input)) {
     // S9 (v5, B1): el sello va ANTES de convertir y también sin beneficios: es lo que dice después «este folio se anuló».
     await sellarFolioAnuladoEnTx(tx, input)
+    // D662 parte 2 (v3): anular desde la caja, el panel o la TPV un pedido de «Mi equipo» por aceptar es contestarlo (pausa sola).
+    if (anulacionEsDePersona(input.camino)) await sellarToqueDePersonaAlAnularEnTx(tx, input)
     await soltarMarcaDeFilasSinDescuentoEnTx(tx, input.venueId, input.orderId)
     const r = await convertirBeneficiosEnCortesiaEnTx(tx, input)
     return { pointsRefunded: r.puntos, stampRewardsReturned: r.premios, filasQuitadas: r.filas, clientasConPremio: r.clientasConPremio }

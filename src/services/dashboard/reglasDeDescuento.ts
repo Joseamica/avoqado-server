@@ -6,6 +6,9 @@
  * Mira el RESULTADO (lo guardado + el cambio), no el cambio suelto. Crear y duplicar = sin guardado.
  * - Familia A: «Categorías» sin ninguna categoría no nace ni queda; uno viejo que YA está exactamente así se conserva.
  * - Familia B: cada límite de uso es null (sin límite) o un entero de 1 en adelante; un valor viejo idéntico se conserva.
+ * - Familia C (D37, 21-nov): «Válido desde» no queda después de «Válido hasta». El panel manda sólo la fecha que se cambió, así que
+ *   con la otra guardada (quizá por otra persona en medio) el resultado podía quedar al revés y el cupón nunca aplicaba. Uno viejo
+ *   que YA está así se conserva mientras no se le manden fechas.
  */
 import { DiscountScope } from '@prisma/client'
 
@@ -13,12 +16,27 @@ export const SIN_CATEGORIAS = 'Elige al menos una categoría para un descuento p
 export const LIMITE_INVALIDO = 'Los límites de uso van de 1 en adelante; déjalo vacío para que sea ilimitado'
 export const FORMA_INVALIDA = 'El alcance, las categorías o los límites de uso no tienen el formato correcto'
 export const CAMBIO_CRUZADO = 'Alguien más lo cambió mientras lo editabas; vuelve a abrirlo e inténtalo otra vez'
+export const RANGO_AL_REVES =
+  '«Válido desde» tiene que ser antes de «Válido hasta». Revisa las fechas (si alguien más las cambió, vuelve a abrirlo)'
 
 const LIMITES = ['maxTotalUses', 'maxUsesPerCustomer', 'maxUses'] as const
 const REGLA = ['scope', 'targetCategoryIds', ...LIMITES] as const
 const ALCANCES = new Set<unknown>(Object.values(DiscountScope))
 
-type Guardado = Partial<Record<(typeof REGLA)[number], unknown>>
+const FECHAS = ['validFrom', 'validUntil'] as const
+
+type Guardado = Partial<Record<(typeof REGLA)[number] | (typeof FECHAS)[number], unknown>>
+
+/**
+ * Un extremo de la vigencia en ms, leído IGUAL que lo guardan las puertas (`valor ? new Date(valor) : null`): un falso (null, '', 0)
+ * es «sin fecha» y un número son ms (Codex D37 r3 #2). undefined = el cambio no lo trae.
+ */
+const instante = (v: unknown): number | null | undefined => {
+  if (v === undefined) return undefined
+  if (!v) return null
+  const ms = (v instanceof Date ? v : new Date(v as string | number)).getTime()
+  return Number.isNaN(ms) ? null : ms // lo ilegible lo rechaza su propia validación, no ésta
+}
 
 const sinCategorias = (scope: unknown, categorias: unknown) =>
   scope === 'CATEGORY' && (!Array.isArray(categorias) || categorias.length === 0)
@@ -42,6 +60,18 @@ export function validarCambioDeDescuento(guardado: Guardado | null, cambio: Reco
     if (guardado && guardado[campo] === valor) continue // un 0 viejo reenviado igual
     if (!(typeof valor === 'number' && Number.isInteger(valor) && valor >= 1)) return LIMITE_INVALIDO
   }
+
+  // Familia C: el resultado (lo que trae el cambio y, si no, lo guardado). Crear y duplicar siempre; editar sólo si trae fechas.
+  // Dos guardados en el mismo instante que leyeron lo mismo los frena `dondeEscribir`, que también protege las fechas (r3 #1).
+  if (!guardado || FECHAS.some(campo => cambio[campo] !== undefined)) {
+    const final = (campo: (typeof FECHAS)[number]) => {
+      const nuevo = instante(cambio[campo])
+      return nuevo !== undefined ? nuevo : (instante(guardado?.[campo] ?? null) ?? null)
+    }
+    const desde = final('validFrom')
+    const hasta = final('validUntil')
+    if (desde !== null && hasta !== null && desde > hasta) return RANGO_AL_REVES
+  }
   return null
 }
 
@@ -51,15 +81,20 @@ export function validarCambioDeDescuento(guardado: Guardado | null, cambio: Reco
  * No se usa `updatedAt`: cada venta sube `currentUses` y con él `updatedAt`, y daría un 409 falso.
  */
 export function dondeEscribir(id: string, guardado: Guardado, cambio: Record<string, unknown>) {
-  if (!REGLA.some(campo => cambio[campo] !== undefined)) return { id }
   const where: Record<string, unknown> = { id }
-  for (const campo of REGLA) {
-    if (!(campo in guardado)) continue
-    const valor = guardado[campo]
-    if (campo !== 'targetCategoryIds') where[campo] = valor
-    else if (Array.isArray(valor) && valor.length > 0) where[campo] = { equals: valor }
-    // Una lista NULL en la base (p. ej. los descuentos de referidos) Prisma la lee como []: se aceptan las dos (Codex, diseño #1).
-    else where.OR = [{ targetCategoryIds: { equals: [] } }, { targetCategoryIds: { equals: null } }]
+  // Dos grupos, cada uno protegido SÓLO si el cambio lo trae: la regla (alcance, categorías, límites) y, aparte, las fechas de la
+  // vigencia (D37, Codex r3 #1: dos guardados a la vez no dejan «desde» después de «hasta»). Separados para que guardar un límite no
+  // choque con otra persona que sólo movió una fecha, ni al revés (r4 #2).
+  for (const grupo of [REGLA, FECHAS] as const) {
+    if (!grupo.some(campo => cambio[campo] !== undefined)) continue
+    for (const campo of grupo) {
+      if (!(campo in guardado)) continue
+      const valor = guardado[campo]
+      if (campo !== 'targetCategoryIds') where[campo] = valor
+      else if (Array.isArray(valor) && valor.length > 0) where[campo] = { equals: valor }
+      // Una lista NULL en la base (p. ej. los descuentos de referidos) Prisma la lee como []: se aceptan las dos (Codex, diseño #1).
+      else where.OR = [{ targetCategoryIds: { equals: [] } }, { targetCategoryIds: { equals: null } }]
+    }
   }
   return where as { id: string }
 }

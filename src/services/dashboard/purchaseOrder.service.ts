@@ -1104,7 +1104,7 @@ export async function receivePurchaseOrder(
     let expirationDate: Date | undefined
     if (orderItemRawMaterial.perishable && orderItemRawMaterial.shelfLifeDays) {
       expirationDate = new Date(data.receivedDate)
-      expirationDate.setDate(expirationDate.getDate() + orderItemRawMaterial.shelfLifeDays)
+      expirationDate.setUTCDate(expirationDate.getUTCDate() + orderItemRawMaterial.shelfLifeDays)
     }
 
     validatedItems.push({ receivedItem, orderItem, totalReceived, expirationDate })
@@ -1891,7 +1891,7 @@ export async function applyItemReceiveStatusInTx(
     let expirationDate: Date | undefined
     if (rawMaterial.perishable && rawMaterial.shelfLifeDays) {
       expirationDate = new Date(receivedDate)
-      expirationDate.setDate(expirationDate.getDate() + rawMaterial.shelfLifeDays)
+      expirationDate.setUTCDate(expirationDate.getUTCDate() + rawMaterial.shelfLifeDays)
     }
 
     const newBatch = await tx.stockBatch.create({

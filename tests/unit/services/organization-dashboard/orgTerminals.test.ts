@@ -1,5 +1,6 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 import { organizationDashboardService } from '@/services/organization-dashboard/organizationDashboard.service'
+import { resolveEffectiveDeviceCapabilities } from '@/services/device-capabilities.service'
 
 const orgId = 'org-1'
 
@@ -221,5 +222,97 @@ describe('OrganizationDashboardService - getOrgTerminals', () => {
 
     expect(prismaMock.$transaction).toHaveBeenCalled()
     expect(result.summary.latestVersion).toBe('2.1.0')
+  })
+
+  /**
+   * D672 (21-nov): el DASHBOARD de organización abre el cajón de una terminal con la fila de ESTA lista y la barra de
+   * selección también la usa. Sin `capabilities`, los dos fallan cerrado y nunca ofrecen Bloquear, Desbloquear, Reiniciar ni
+   * Mantenimiento. La fila debe traer la MISMA resolución que el detalle (`getTerminalForOrg` → `toDeviceManagementDto`), y
+   * `selfRegistered`, que el cajón también lee para decidir «Borrar».
+   */
+  describe('D672 · cada fila trae las capacidades del aparato, igual que el detalle', () => {
+    const nexgo = {
+      ...terminals[1],
+      id: 't4',
+      brand: 'NEXGO',
+      model: 'N86',
+      selfRegistered: false,
+    }
+    const tabletaSola = {
+      ...terminals[2],
+      id: 't5',
+      type: 'POS_ANDROID',
+      status: 'ACTIVE',
+      selfRegistered: true,
+      customerDisplayPresent: null,
+      customerDisplayInvertible: null,
+      displayModeProtocolVersion: null,
+      capabilitiesObservedAt: null,
+    }
+    const filas = [{ ...terminals[0], selfRegistered: false }, nexgo, terminals[2], tabletaSola]
+
+    beforeEach(() => {
+      prismaMock.venue.findMany.mockResolvedValue(venues)
+      prismaMock.$transaction
+        .mockResolvedValueOnce([filas, filas.length])
+        .mockResolvedValueOnce([[{ status: 'ACTIVE', type: 'TPV_ANDROID', _count: filas.length }], 1])
+    })
+
+    it('una TPV PAX ofrece Bloquear, Desbloquear, Reiniciar y Mantenimiento', async () => {
+      const result = await organizationDashboardService.getOrgTerminals(orgId)
+      const pax = result.terminals.find(t => t.id === 't1')!
+
+      expect(pax.capabilities).toBeDefined()
+      expect(pax.capabilities.supportedRemoteCommands).toEqual(
+        expect.arrayContaining(['LOCK', 'UNLOCK', 'RESTART', 'MAINTENANCE_MODE', 'EXIT_MAINTENANCE', 'FACTORY_RESET']),
+      )
+    })
+
+    it('cada fila es exactamente la resolución del detalle, por tipo y marca (Nexgo sin actualizar; impresora y tablet sin comandos)', async () => {
+      const result = await organizationDashboardService.getOrgTerminals(orgId)
+
+      for (const fila of filas) {
+        const enLista = result.terminals.find(t => t.id === fila.id)!
+        expect(enLista.capabilities).toEqual(resolveEffectiveDeviceCapabilities(fila as any))
+      }
+      const n86 = result.terminals.find(t => t.id === 't4')!
+      expect(n86.capabilities.supportedRemoteCommands).toContain('LOCK')
+      expect(n86.capabilities.supportedRemoteCommands).not.toContain('REQUEST_UPDATE')
+      expect(result.terminals.find(t => t.id === 't3')!.capabilities.supportedRemoteCommands).toEqual([])
+      expect(result.terminals.find(t => t.id === 't5')!.capabilities.supportedRemoteCommands).toEqual([])
+    })
+
+    it('trae selfRegistered, que el cajón usa para ofrecer «Borrar»', async () => {
+      const result = await organizationDashboardService.getOrgTerminals(orgId)
+
+      expect(result.terminals.find(t => t.id === 't1')!.selfRegistered).toBe(false)
+      expect(result.terminals.find(t => t.id === 't5')!.selfRegistered).toBe(true)
+    })
+
+    it('no agrega consultas: las capacidades salen de las columnas que la lista ya trae (sin N+1)', async () => {
+      await organizationDashboardService.getOrgTerminals(orgId)
+
+      // versionRows + la página (dentro del $transaction). Nada por fila.
+      expect(prismaMock.terminal.findMany).toHaveBeenCalledTimes(2)
+      expect(prismaMock.terminal.findUnique).not.toHaveBeenCalled()
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+    })
+
+    it('regresión: los campos de antes siguen iguales', async () => {
+      const result = await organizationDashboardService.getOrgTerminals(orgId)
+      const pax = result.terminals.find(t => t.id === 't1')!
+
+      expect(pax).toMatchObject({
+        id: 't1',
+        name: 'Terminal 1',
+        serialNumber: 'SN-001',
+        type: 'TPV_ANDROID',
+        status: 'ACTIVE',
+        healthScore: 92,
+        isLocked: false,
+        assignedMerchantIds: [],
+        venue: { id: 'v1', name: 'Store A', slug: 'store-a' },
+      })
+    })
   })
 })

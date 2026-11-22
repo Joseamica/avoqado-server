@@ -14,7 +14,10 @@ jest.mock('@/services/online-ordering/card/guards', () => ({
   assertCardOrderMoneyFrozenInTx: jest.fn(async () => undefined),
   avisarCobroDobleSobrePedidoConTarjeta: jest.fn(async () => undefined),
 }))
-jest.mock('@/services/promotions/promotion.service', () => ({ applyPromotionToOrder: jest.fn() }))
+jest.mock('@/services/promotions/promotion.service', () => ({
+  applyPromotionToOrder: jest.fn(),
+  rechazarSiLaCuentaNoAceptaCombos: jest.requireActual('@/services/promotions/promotion.service').rechazarSiLaCuentaNoAceptaCombos,
+}))
 jest.mock('@/services/access/basePlan.service', () => ({ venueHasFeatureAccess: jest.fn() }))
 jest.mock('@/services/kds/kitchenDisplayStations', () => ({
   ...jest.requireActual('@/services/kds/kitchenDisplayStations'),
@@ -116,6 +119,29 @@ describe('table combo rounds use one locked fiscal transaction', () => {
     await addItemsToOrder('venue', 'order', [promo] as any, 1, true)
     expect(tx.orderItem.create).not.toHaveBeenCalled()
     expect(tx.product.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: { in: [] } }) }))
+  })
+  // D34: otra caja separó el combo a otra cuenta del negocio; el reenvío de la ronda no lo vuelve a aplicar aquí.
+  it('a combo whose instance already lives in another account of the venue is not applied again', async () => {
+    tx.$queryRaw.mockImplementation(async (consulta: any) =>
+      String(consulta?.sql ?? '').includes('"OrderPromotion"') ? [{ instancia: 'sale' }] : [{ id: 'order' }],
+    )
+    await addItemsToOrder('venue', 'order', [promo] as any, 1, true)
+    expect(applyPromotionToOrder).not.toHaveBeenCalled()
+    const consulta = tx.$queryRaw.mock.calls
+      .map((args: any[]) => args[0])
+      .find((c: any) => String(c?.sql ?? '').includes('"OrderPromotion"'))
+    expect(consulta.values).toEqual([['sale'], 'order', 'venue'])
+  })
+  it('skipping that combo keeps the closed-account guard: a COMPLETED unpaid check is rejected, not reopened (Codex r1 #1)', async () => {
+    tx.$queryRaw.mockImplementation(async (consulta: any) =>
+      String(consulta?.sql ?? '').includes('"OrderPromotion"') ? [{ instancia: 'sale' }] : [{ id: 'order' }],
+    )
+    tx.order.findUnique.mockResolvedValue({ ...order, status: 'COMPLETED' })
+    await expect(addItemsToOrder('venue', 'order', [promo] as any, 1, true)).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'Esa cuenta ya está cerrada.',
+    })
+    expect(tx.order.updateMany).not.toHaveBeenCalled()
   })
   it('a stale check is rejected before creating a promotion', async () => {
     await expect(addItemsToOrder('venue', 'order', [promo] as any, 0, true)).rejects.toMatchObject({ code: 'VERSION_CONFLICT' })

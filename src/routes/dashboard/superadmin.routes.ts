@@ -11,9 +11,10 @@ import * as ecommerceMerchantsSuperadminController from '../../controllers/super
 import { validateRequest } from '../../middlewares/validation'
 
 import { z } from 'zod'
-import { VenueType, FeeType, TerminalType, EntityType, SettlementDayType } from '@prisma/client'
+import { VenueType, FeeType, TerminalType, EntityType, SettlementDayType, StaffRole } from '@prisma/client'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
+import { authorizeRole } from '@/middlewares/authorizeRole.middleware'
 
 // Import payment provider routes
 import paymentProviderRoutes from '../superadmin/paymentProvider.routes'
@@ -436,7 +437,8 @@ router.use('/push-notifications', pushNotificationsRoutes)
 router.use('/marketing', marketingRoutes)
 
 // Staff Management (CRUD + Org/Venue Assignment)
-router.use('/staff', staffRoutes)
+// 🔴 Exige el ROL, no sólo `system:manage` (delegable): con el permiso solo, quien lo tuviera se asignaba SUPERADMIN aquí.
+router.use('/staff', authorizeRole([StaffRole.SUPERADMIN]), staffRoutes)
 
 // Training / LMS Management
 router.use('/trainings', trainingRoutes)
