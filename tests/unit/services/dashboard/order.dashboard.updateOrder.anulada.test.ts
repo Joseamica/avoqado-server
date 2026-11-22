@@ -2,7 +2,7 @@ import { prismaMock as db } from '@tests/__helpers__/setup'
 import { updateOrder } from '@/services/dashboard/order.dashboard.service'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import { assertOrderCancellableUnderLock } from '@/services/shared/orderCancelGuard'
-import { retirarComandasDeVentaAnulada } from '@/services/kds/kitchenTicketAuthoring.service'
+import { retirarComandasDeVentaAnulada, tomarCandadoDeComandas } from '@/services/kds/kitchenTicketAuthoring.service'
 
 jest.mock('@/services/shared/tableOrderLock', () => ({ lockTableOrderScope: jest.fn(async () => ({})) }))
 jest.mock('@/services/shared/orderCancelGuard', () => ({
@@ -21,6 +21,7 @@ jest.mock('@/services/referrals/referralRefund.service', () => ({ onOrderCancell
 jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
   retirarComandasDeVentaAnulada: jest.fn(async () => ({ kdsOrderIds: [], kdsOrderItemIds: [] })),
   cuentasDeSusComandas: jest.fn(async () => ['order', 'cuenta-ligada']),
+  tomarCandadoDeComandas: jest.fn(async () => undefined),
 }))
 
 let row: any
@@ -142,10 +143,12 @@ describe('D40: anular por el PUT retira las comandas de la pantalla de cocina', 
       row.status = 'PENDING'
       await updateOrder('venue', 'order', { status } as any, { staffId: 'staff' } as any)
       expect(retirarComandasDeVentaAnulada).toHaveBeenCalledWith(db, 'venue', 'order', { staffId: 'staff' })
-      expect(lockTableOrderScope).toHaveBeenCalledWith(
-        db,
-        expect.objectContaining({ orderIds: ['order'], kdsOrderIds: ['order', 'cuenta-ligada'] }),
+      // Codex d40-r2 #1: los candados de comandas (todos, en orden) van ANTES de la foto y los candados de la mesa.
+      expect((tomarCandadoDeComandas as jest.Mock).mock.calls.map(c => c[1])).toEqual(['cuenta-ligada', 'order'])
+      expect((tomarCandadoDeComandas as jest.Mock).mock.invocationCallOrder[1]).toBeLessThan(
+        (lockTableOrderScope as jest.Mock).mock.invocationCallOrder[0],
       )
+      expect((lockTableOrderScope as jest.Mock).mock.calls[0][1]).not.toHaveProperty('kdsOrderIds')
       // Primero el retiro (toma el candado de comandas) y luego la revisión del dinero (toma el de la venta), como el DELETE.
       expect((retirarComandasDeVentaAnulada as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
         (assertOrderCancellableUnderLock as jest.Mock).mock.invocationCallOrder[0],
@@ -156,7 +159,7 @@ describe('D40: anular por el PUT retira las comandas de la pantalla de cocina', 
     row.status = 'PENDING'
     await updateOrder('venue', 'order', { status: 'CONFIRMED', customerName: 'Nombre' } as any)
     expect(retirarComandasDeVentaAnulada).not.toHaveBeenCalled()
-    expect((lockTableOrderScope as jest.Mock).mock.calls[0][1]).not.toHaveProperty('kdsOrderIds')
+    expect(tomarCandadoDeComandas).not.toHaveBeenCalled()
   })
   it('regresión: reenviar la anulación de una ya anulada no vuelve a retirar nada', async () => {
     row.status = 'CANCELLED'

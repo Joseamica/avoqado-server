@@ -146,6 +146,26 @@ describe('cancelAreaTicketCheckout — retira las comandas (hz:e82938e1:D40)', (
     expect(retirarComandasDeVentaAnulada).toHaveBeenCalledWith(prismaMock, 'v1', 'order-1', expect.anything())
   })
 
+  it('Codex d40-r2: el primer intento vio la sesión sin orden y cayó en 40P01 al retirar; el segundo ya la lee y toma sus candados primero', async () => {
+    preparar()
+    // loadCheckout (fuera) y la lectura del primer intento todavía no ven la orden; la relectura bajo candado ya sí.
+    ;(prismaMock as any).areaTicketCheckoutSession.findFirst
+      .mockResolvedValueOnce(sesion({ orderId: null }))
+      .mockResolvedValueOnce(sesion({ orderId: null }))
+    // En el primer intento el retiro pide el candado de comandas a media transacción y Postgres lo elige como víctima.
+    ;(retirarComandasDeVentaAnulada as jest.Mock).mockRejectedValueOnce(Object.assign(new Error('deadlock detected'), { code: '40P01' }))
+
+    await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: null } as any)
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+    expect(retirarComandasDeVentaAnulada).toHaveBeenCalledTimes(2)
+    // Sólo el segundo intento tomó los candados de comandas, y antes de su retiro.
+    expect((tomarCandadoDeComandas as jest.Mock).mock.calls.map(c => c[1])).toEqual(['cuenta-ligada', 'order-1'])
+    expect(ordenDe(tomarCandadoDeComandas, 0)).toBeGreaterThan(ordenDe(retirarComandasDeVentaAnulada, 0))
+    expect(ordenDe(tomarCandadoDeComandas, 1)).toBeLessThan(ordenDe(retirarComandasDeVentaAnulada, 1))
+    expect(prismaMock.order.updateMany).toHaveBeenCalledTimes(1)
+  })
+
   it('regresión: una sesión sin orden todavía (OPEN) no toca la cocina', async () => {
     preparar({ orderId: null })
     await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: null } as any)

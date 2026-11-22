@@ -46,7 +46,7 @@ import {
   rechazarSiCuentaAnuladaEnTx,
   rechazarCobroNuevoSobreCancelada,
 } from '../shared/cuentaCancelada'
-import { cuentasDeSusComandas, retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
+import { cuentasDeSusComandas, retirarComandasDeVentaAnulada, tomarCandadoDeComandas } from '../kds/kitchenTicketAuthoring.service'
 import { desactivarSobresPendientesDeCuentaEnTx } from '../giftCards/cuentaDeTarjetas'
 import { formatoPesos } from '../giftCards/giftCardLimits'
 import { CAMPOS_DE_LA_REGLA, estadoDeFacturaDeLaVenta, FACTURAS_QUE_CUENTAN_DE_LA_VENTA } from '../fiscal/facturaDeLaVenta'
@@ -634,15 +634,14 @@ export async function updateOrder(
     if (!topologyWrite && !(await bloquearCuentaParaEditar(client, { venueId, orderId }, 'ATRIBUCION')))
       throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
     // hz:e82938e1:D40: si la petición anula, los candados de las comandas de la cuenta (y de sus cuentas ligadas) van ANTES que el de la
-    // venta, como en `cancelOrderInTransaction`: es el orden del armado (comandas → venta) y el retiro de abajo los vuelve a pedir sin esperar.
+    // venta: es el orden del armado (comandas → venta) y el retiro de abajo los vuelve a pedir sin esperar. Se toman ANTES de la foto
+    // de la mesa (Codex d40-r2 #1): esperar a la cocina entre la foto y sus candados alargaba la ventana en la que otra cuenta de la
+    // mesa cambia y la anulación sale con 503.
     const pideAnular = status === 'CANCELLED' || status === 'DELETED'
+    if (topologyWrite && pideAnular)
+      for (const id of (await cuentasDeSusComandas(client, venueId, orderId)).sort()) await tomarCandadoDeComandas(client, id)
     if (topologyWrite)
-      await lockTableOrderScope(client, {
-        venueId,
-        orderIds: [orderId],
-        tableIds: tableId ? [tableId] : [],
-        ...(pideAnular && { kdsOrderIds: await cuentasDeSusComandas(client, venueId, orderId) }),
-      }).catch(error => {
+      await lockTableOrderScope(client, { venueId, orderIds: [orderId], tableIds: tableId ? [tableId] : [] }).catch(error => {
         if (error instanceof NotFoundError) {
           if (error.message === 'Venue not found' || error.message === 'Order not found') {
             throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
