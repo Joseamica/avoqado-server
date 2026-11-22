@@ -493,11 +493,13 @@ describe('Credit Pack Dashboard Service', () => {
       expect(mockStripeInstance.prices.update).toHaveBeenCalledWith('price_old', { active: false })
     })
 
-    it('should replace items when items array provided', async () => {
+    it('cambiar el producto: el renglón viejo sale (sus saldos vendidos sólo pierden el enlace) y entra el nuevo', async () => {
       const existing = createMockPack()
       prismaMock.creditPack.findFirst.mockResolvedValue(existing)
+      prismaMock.creditPack.findUnique.mockResolvedValue({ items: [{ id: 'item-old', productId: 'product-456', quantity: 10 }] })
 
       prismaMock.product.findMany.mockResolvedValue([{ id: 'product-789' }])
+      prismaMock.creditItemBalance.updateMany.mockResolvedValue({ count: 1 })
       prismaMock.creditPackItem.deleteMany.mockResolvedValue({ count: 1 })
       prismaMock.creditPackItem.create.mockResolvedValue(createMockPackItem({ productId: 'product-789', quantity: 20 }))
 
@@ -508,12 +510,13 @@ describe('Credit Pack Dashboard Service', () => {
         items: [{ productId: 'product-789', quantity: 20 }],
       })
 
-      // Should delete existing items
-      expect(prismaMock.creditPackItem.deleteMany).toHaveBeenCalledWith({
-        where: { creditPackId: 'pack-123' },
+      // Lo ya vendido conserva sus créditos: sólo se suelta el enlace al renglón que sale
+      expect(prismaMock.creditItemBalance.updateMany).toHaveBeenCalledWith({
+        where: { creditPackItemId: { in: ['item-old'] } },
+        data: { creditPackItemId: null },
       })
-
-      // Should create new items
+      // Sólo se borra el renglón que sale, nunca todos los del paquete
+      expect(prismaMock.creditPackItem.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['item-old'] } } })
       expect(prismaMock.creditPackItem.create).toHaveBeenCalledWith({
         data: {
           creditPackId: 'pack-123',
@@ -521,6 +524,32 @@ describe('Credit Pack Dashboard Service', () => {
           quantity: 20,
         },
       })
+    })
+
+    it('🔴 guardar con los MISMOS productos no borra ni crea renglones (un paquete vendido se puede editar)', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack())
+      prismaMock.creditPack.findUnique.mockResolvedValue({ items: [{ id: 'item-1', productId: 'product-456', quantity: 5 }] })
+      prismaMock.product.findMany.mockResolvedValue([{ id: 'product-456' }])
+      prismaMock.creditPack.update.mockResolvedValue(createMockPack())
+
+      await updateCreditPack('venue-123', 'pack-123', { name: '5 Sesiones', items: [{ productId: 'product-456', quantity: 5 }] })
+
+      expect(prismaMock.creditPackItem.deleteMany).not.toHaveBeenCalled()
+      expect(prismaMock.creditPackItem.create).not.toHaveBeenCalled()
+      expect(prismaMock.creditPackItem.update).not.toHaveBeenCalled()
+      expect(prismaMock.creditItemBalance.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('cambiar sólo la cantidad actualiza el renglón en su lugar', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack())
+      prismaMock.creditPack.findUnique.mockResolvedValue({ items: [{ id: 'item-1', productId: 'product-456', quantity: 5 }] })
+      prismaMock.product.findMany.mockResolvedValue([{ id: 'product-456' }])
+      prismaMock.creditPack.update.mockResolvedValue(createMockPack())
+
+      await updateCreditPack('venue-123', 'pack-123', { items: [{ productId: 'product-456', quantity: 8 }] })
+
+      expect(prismaMock.creditPackItem.update).toHaveBeenCalledWith({ where: { id: 'item-1' }, data: { quantity: 8 } })
+      expect(prismaMock.creditPackItem.deleteMany).not.toHaveBeenCalled()
     })
 
     it('should validate new items products exist', async () => {
