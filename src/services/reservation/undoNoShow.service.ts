@@ -26,6 +26,7 @@ import {
   type CheckInSource,
 } from './checkIn.service'
 import { ALIVE_ORDER_EXCLUDED_STATUSES } from './createOrderFromReservation'
+import { aplicarAlDeposito } from './depositoDeReserva'
 
 export const NO_SHOW_UNDO_NOT_APPLICABLE = 'NO_SHOW_UNDO_NOT_APPLICABLE'
 export const NO_SHOW_UNDO_PASS_BOOKING = 'NO_SHOW_UNDO_PASS_BOOKING'
@@ -304,10 +305,14 @@ export async function undoNoShow(tx: Prisma.TransactionClient, cmd: UndoNoShowCo
       checkedInByStaffId: metodo.checkedInByStaffId,
       statusLog,
       ...(plan.clearFee ? { noShowFeeAmount: null } : {}),
-      ...(plan.restoreDeposit ? { depositStatus: 'PAID' as const } : {}),
     },
   })
   if (cas.count === 0) throw new ConflictError('La reservacion cambio mientras se corregia', NO_SHOW_UNDO_NOT_APPLICABLE)
+  // D681: el depósito retenido vuelve a contar como pagado por su dueño, en la misma transacción.
+  if (plan.restoreDeposit) {
+    const d = await aplicarAlDeposito(tx, { reservationId, venueId }, { tipo: 'RESTAURADO' })
+    if (d.resultado === 'RECHAZADO') throw new ConflictError('La reservacion cambio mientras se corregia', NO_SHOW_UNDO_NOT_APPLICABLE)
+  }
 
   if (takes.length > 0) {
     // `CreditTransaction.createdById` apunta a StaffVenue; el kiosco no tiene.

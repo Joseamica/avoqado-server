@@ -2,6 +2,13 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import { Prisma } from '@prisma/client'
 import { ConflictError } from '@/errors/AppError'
 
+// D681: el depósito tiene UN dueño; aquí se prueba que «Sí llegó» se lo pida (RESTAURADO), no la tabla del dueño.
+jest.mock('@/services/reservation/depositoDeReserva', () => ({
+  __esModule: true,
+  aplicarAlDeposito: jest.fn(async () => ({ resultado: 'APLICADO' })),
+}))
+import { aplicarAlDeposito } from '@/services/reservation/depositoDeReserva'
+
 jest.mock('@/config/logger', () => ({
   __esModule: true,
   default: { error: jest.fn(), warn: jest.fn(), info: jest.fn(), debug: jest.fn() },
@@ -460,10 +467,11 @@ describe('D4 · undoNoShow', () => {
         status: 'CHECKED_IN',
         noShowAt: null,
         checkedInAt: NOW,
-        depositStatus: 'PAID',
         noShowFeeAmount: null,
       }),
     )
+    // El depósito retenido vuelve a pagado por su dueño, en la misma transacción.
+    expect(aplicarAlDeposito).toHaveBeenCalledWith(tx, { reservationId: 'res-1', venueId: 'venue-1' }, { tipo: 'RESTAURADO' })
     expect(data.statusLog.at(-1)).toEqual({
       status: 'CHECKED_IN',
       at: NOW.toISOString(),

@@ -341,6 +341,7 @@ export class StripeConnectProvider implements IEcommerceProvider {
       paidAt: session.payment_status === 'paid' ? new Date() : undefined,
       paymentIntentId: paymentIntent,
       amountPaid: fromStripeAmount(amountTotal).toNumber(),
+      checkoutUrl: session.status === 'open' ? (session.url ?? null) : null,
     }
   }
 

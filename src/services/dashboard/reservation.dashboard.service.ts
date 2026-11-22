@@ -1,5 +1,5 @@
 import crypto from 'crypto'
-import { Prisma, ReservationStatus, ReservationChannel } from '@prisma/client'
+import { DepositStatus, Prisma, ReservationStatus, ReservationChannel } from '@prisma/client'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
@@ -9,7 +9,7 @@ import { countAppointmentOccupancy, effectiveAppointmentPacing } from './reserva
 import { sendReservationRescheduleWhatsApp } from '../whatsapp.service'
 import emailService from '../email.service'
 import { getProvider } from '../payments/provider-registry'
-import type { EcommerceMerchantWithProvider } from '../payments/providers/provider.interface'
+import { aplicarAlDeposito, cerrarLigaAntesDeCancelar, depositoAlCrear } from '@/services/reservation/depositoDeReserva'
 import { checkExternalBusyBlock } from '../reservation/external-busy-block.service'
 import { resolveModifierSelections, type ResolvedModifierRow } from '@/services/reservation/resolveModifierSelections'
 import {
@@ -662,8 +662,7 @@ export async function createReservation(
           productIds: productIdsWasProvided ? bookedProductIds : [],
           assignedStaffId: effectiveAssignedStaffId,
           depositAmount,
-          depositStatus: depositStatus as any,
-          depositExpiresAt,
+          ...depositoAlCrear(depositStatus as DepositStatus | null, depositExpiresAt),
           idempotencyKey: depositAmount ? depositIdempotencyKey : undefined,
           createdById,
           confirmedAt: initialStatus === 'CONFIRMED' ? new Date() : null,
@@ -1216,6 +1215,10 @@ export async function cancelReservation(
     policyApplied: 'no-credits-used',
   }
   const creditPackService = await import('./creditPack.public.service')
+  // D681: primero se cierra la liga de Stripe (falla CERRADA: si no se puede, la reserva no se cancela y se contesta 503). Si
+  // resulta que ya se pagó, el pago se aplica antes y la cancelación sigue el camino de un depósito pagado.
+  const { sesionCerrada } = await cerrarLigaAntesDeCancelar(venueId, reservationId)
+  let depositoDespues: { depositStatus: DepositStatus | null } | null = null
   const updated = await transitionReservation(
     venueId,
     reservationId,
@@ -1242,104 +1245,24 @@ export async function cancelReservation(
         },
         tx,
       )
+      // D681: el depósito sin pagar se cierra en la MISMA transacción que la cancelación. Si mientras tanto apareció otra liga,
+      // no se cancela (se repite y esa liga también se cierra).
+      const d = await aplicarAlDeposito(tx, { reservationId: cancelada.id, venueId }, { tipo: 'CANCELADA', sesionCerrada })
+      if (d.resultado === 'RECHAZADO') throw new ConflictError('La reservación cambió mientras se cancelaba; intenta de nuevo.')
+      if (d.resultado === 'APLICADO') depositoDespues = { depositStatus: d.despues.depositStatus }
     },
   )
+  // La respuesta lleva el depósito como quedó (sin volver a leer: la cancelación ya se guardó).
+  if (depositoDespues) Object.assign(updated, depositoDespues)
 
-  // El depósito pasa por Stripe y no cabe en la transacción: la reserva YA se canceló, un fallo aquí no puede contestar que no.
+  // Un depósito PAGADO pasa por Stripe y no cabe en la transacción: la reserva YA se canceló, un fallo aquí no puede contestar que no.
   try {
     await handleReservationDepositCancellation(updated.id, venueId)
   } catch (err) {
     logger.error(`❌ [RESERVATION DEPOSIT] Failed for reservation ${updated.confirmationCode}`, err)
   }
 
-  // D681: la respuesta lleva el depósito como quedó DESPUÉS de atenderlo (vencido, devuelto…), no la copia de antes.
-  const deposito = await prisma.reservation.findFirst({
-    where: { id: updated.id, venueId },
-    select: { depositStatus: true, depositRefundedAt: true, refundStatus: true },
-  })
-  if (deposito) {
-    Object.assign(updated, {
-      depositStatus: deposito.depositStatus,
-      depositRefundedAt: deposito.depositRefundedAt,
-      refundStatus: deposito.refundStatus,
-    })
-  }
   return Object.assign(updated, refundResult)
-}
-
-/**
- * D681: una reserva CANCELADA con el depósito sin pagar. Primero se le pide a Stripe cerrar la sesión para que su liga deje de
- * cobrar; cerrada (o si nunca hubo sesión), el depósito queda EXPIRED. Si Stripe no contesta (o la sesión ya se pagó), el
- * depósito se QUEDA en PENDING a propósito: así la conciliación la sigue consultando y decide Stripe. La reserva cancelada
- * nunca revive por un pago (el aviso lo deja como anomalía de dinero).
- */
-async function anularDepositoSinPagar(
-  reservation: { id: string; confirmationCode: string; checkoutSessionId: string | null; ecommerceMerchantId: string | null },
-  venueId: string,
-): Promise<void> {
-  if (reservation.checkoutSessionId) {
-    // La sesión vive en la cuenta conectada que la creó (la que quedó fijada en la reserva).
-    const merchant = reservation.ecommerceMerchantId
-      ? await prisma.ecommerceMerchant.findFirst({
-          where: { id: reservation.ecommerceMerchantId, venueId, provider: { code: 'STRIPE_CONNECT' } },
-          include: { provider: true },
-        })
-      : null
-    if (!merchant) {
-      logger.warn(`⚠️ [RESERVATION DEPOSIT] ${reservation.confirmationCode}: sin cuenta para cerrar su sesión; la decide la conciliación`)
-      return
-    }
-    try {
-      await getProvider(merchant).expireAuthorizationCheckout(merchant, reservation.checkoutSessionId)
-    } catch (error) {
-      logger.warn(
-        `⚠️ [RESERVATION DEPOSIT] No se pudo cerrar la sesión de Stripe de ${reservation.confirmationCode}; la decide la conciliación`,
-        error,
-      )
-      return
-    }
-  }
-  await prisma.reservation.updateMany({
-    where: { id: reservation.id, venueId, status: 'CANCELLED', depositStatus: 'PENDING' },
-    data: { depositStatus: 'EXPIRED' },
-  })
-}
-
-/**
- * D681: guarda en la reserva la sesión de Stripe recién creada (y su vencimiento, el que contestó Stripe) SÓLO si la reserva
- * sigue esperando ese pago. Si mientras se creaba la liga la cancelaron (o ya se pagó), la liga se cierra en Stripe y no se
- * entrega: así nunca queda una liga cobrando sobre una reserva cancelada.
- */
-export async function guardarSesionDePago(args: {
-  reservationId: string
-  venueId: string
-  merchant: EcommerceMerchantWithProvider
-  session: { id: string; expiresAt: Date }
-}): Promise<void> {
-  const { reservationId, venueId, merchant, session } = args
-  const { count } = await prisma.reservation.updateMany({
-    where: {
-      id: reservationId,
-      venueId,
-      status: { not: 'CANCELLED' },
-      depositStatus: { notIn: ['PAID', 'REFUNDED', 'FORFEITED', 'DISPUTED'] },
-    },
-    data: {
-      checkoutSessionId: session.id,
-      ecommerceMerchantId: merchant.id,
-      depositExpiresAt: session.expiresAt,
-      depositStatus: 'PENDING',
-    },
-  })
-  if (count === 1) return
-
-  try {
-    await getProvider(merchant).expireAuthorizationCheckout(merchant, session.id)
-  } catch (error) {
-    // Nadie tiene esta liga (no se entrega) y vence sola al llegar su hora.
-    logger.warn(`⚠️ [RESERVATION DEPOSIT] No se pudo cerrar la sesión ${session.id} de la reserva ${reservationId}`, error)
-  }
-  throw new ConflictError('Esta reservación ya no está esperando el pago (se canceló o cambió). No se hizo ningún cargo.')
 }
 
 /** `sinRetener`: lo canceló el negocio, no la clienta (una clase entera), así que nunca se queda con su depósito. */
@@ -1358,13 +1281,8 @@ export async function handleReservationDepositCancellation(
       depositProcessorRef: true,
       refundStatus: true,
       ecommerceMerchantId: true,
-      checkoutSessionId: true,
     },
   })
-  if (reservation?.depositStatus === 'PENDING') {
-    await anularDepositoSinPagar(reservation, venueId)
-    return
-  }
   if (
     !reservation ||
     reservation.depositStatus !== 'PAID' ||
@@ -1380,10 +1298,7 @@ export async function handleReservationDepositCancellation(
   const shouldForfeit = !opciones.sinRetener && settings.cancellation.forfeitDeposit && hoursUntilStart < minHoursBeforeStart
 
   if (shouldForfeit) {
-    await prisma.reservation.update({
-      where: { id: reservation.id },
-      data: { depositStatus: 'FORFEITED' },
-    })
+    await aplicarAlDeposito(prisma, { reservationId: reservation.id, venueId }, { tipo: 'RETENIDO', por: 'CANCELLED' })
     logger.info(`💰 [RESERVATION DEPOSIT] Forfeited deposit for ${reservation.confirmationCode}`)
     return
   }
@@ -1458,19 +1373,15 @@ export async function handleReservationDepositCancellation(
       },
     })
 
-    await prisma.reservation.update({
-      where: { id: reservation.id },
-      data: {
-        refundStatus: refund.status,
-        refundProcessorRef: refund.refundId,
-        refundFailedReason: null,
-        ...(refund.status === 'SUCCEEDED'
-          ? {
-              depositStatus: 'REFUNDED',
-              depositRefundedAt: new Date(),
-            }
-          : {}),
-      },
+    // El resultado de la devolución y el depósito devuelto, juntos (el depósito, por su dueño).
+    await prisma.$transaction(async tx => {
+      await tx.reservation.update({
+        where: { id: reservation.id },
+        data: { refundStatus: refund.status, refundProcessorRef: refund.refundId, refundFailedReason: null },
+      })
+      if (refund.status === 'SUCCEEDED') {
+        await aplicarAlDeposito(tx, { reservationId: reservation.id, venueId }, { tipo: 'DEVUELTO', devueltoEn: new Date() })
+      }
     })
   } catch (error: any) {
     await prisma.reservation.update({
@@ -1520,11 +1431,8 @@ export async function handleNoShowDepositForfeit(reservationId: string, venueId:
     if (!settings.cancellation.forfeitDeposit) return
 
     // Conditional: a correction («sí llegó») may have landed after the NO_SHOW commit; then nothing to forfeit.
-    const { count } = await prisma.reservation.updateMany({
-      where: { id: reservation.id, venueId, status: 'NO_SHOW', depositStatus: 'PAID' },
-      data: { depositStatus: 'FORFEITED' },
-    })
-    if (count === 0) {
+    const retenido = await aplicarAlDeposito(prisma, { reservationId: reservation.id, venueId }, { tipo: 'RETENIDO', por: 'NO_SHOW' })
+    if (retenido.resultado !== 'APLICADO') {
       logger.info(
         `💰 [RESERVATION NO-SHOW] ${reservation.confirmationCode} is no longer a no-show with a paid deposit — nothing to forfeit`,
       )

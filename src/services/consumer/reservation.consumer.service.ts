@@ -1,4 +1,4 @@
-import { CreditPurchaseStatus, Prisma, ReservationChannel, ReservationStatus, VenueStatus } from '@prisma/client'
+import { CreditPurchaseStatus, DepositStatus, Prisma, ReservationChannel, ReservationStatus, VenueStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import * as reservationService from '@/services/dashboard/reservation.dashboard.service'
@@ -12,6 +12,14 @@ import { activateCustomerAccount, assertCustomerCanCreateReservation } from '@/s
 import { withDeadlockRetry, withSerializableRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { fastFailLiveHold } from '@/services/reservation/appointmentSlotHold.service'
 import { normalizeBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
+import {
+  aplicarAlDeposito,
+  cuentaDeLaReserva,
+  decidirTransicion,
+  registrarLiga,
+  textoDeRechazo,
+  vencimientoDeLigaNueva,
+} from '@/services/reservation/depositoDeReserva'
 
 type ConsumerReservationInput = {
   startsAt?: Date
@@ -98,6 +106,9 @@ async function createReservationDepositCheckout(
     guestEmail: string | null
     depositAmount: any
     depositExpiresAt: Date | null
+    status: ReservationStatus
+    depositStatus: DepositStatus | null
+    checkoutSessionId: string | null
     idempotencyKey?: string | null
   },
   idempotencyKey?: string,
@@ -119,10 +130,16 @@ async function createReservationDepositCheckout(
   const vatRateBps = await getVatRateBps()
   const applicationFeeAmount = calculateApplicationFeeWithVAT(stripeAmount, stripeMerchant.platformFeeBps, vatRateBps)
   const provider = getProvider(stripeMerchant)
-  const expiresAt =
-    reservation.depositExpiresAt && reservation.depositExpiresAt > new Date()
-      ? reservation.depositExpiresAt
-      : new Date(Date.now() + 30 * 60_000)
+  // D681: la liga nueva nunca alarga un apartado más allá de su vencimiento original, y su dueño decide si la reserva la acepta
+  // ANTES de crearla en Stripe (después lo vuelve a decidir con CAS al guardarla).
+  const expiresAt = vencimientoDeLigaNueva(reservation)
+  if (!expiresAt) throw new ConflictError(textoDeRechazo('APARTADO_VENCIDO'))
+  const previa = decidirTransicion(
+    reservation,
+    { tipo: 'LIGA_CREADA', sesionId: '(nueva)', venceEn: expiresAt, merchantId: stripeMerchant.id },
+    new Date(),
+  )
+  if (previa.tipo === 'RECHAZO') throw new ConflictError(textoDeRechazo(previa.motivo))
   const session = await provider.createCheckoutSession(stripeMerchant, {
     amount: stripeAmount,
     currency: 'mxn',
@@ -147,7 +164,7 @@ async function createReservationDepositCheckout(
   // Pin the connected account that processed this charge so refunds and reconciliation route through the same merchant
   // later (Stripe requires it). D681: sólo si la reserva sigue esperando el pago; si la cancelaron mientras tanto, la liga se
   // cierra y no se entrega.
-  await reservationService.guardarSesionDePago({ reservationId: reservation.id, venueId: venue.id, merchant: stripeMerchant, session })
+  await registrarLiga({ reservationId: reservation.id, venueId: venue.id, merchant: stripeMerchant, session })
 
   return {
     checkoutUrl: session.url,
@@ -446,6 +463,8 @@ export async function createDepositCheckoutForConsumer(consumerId: string, venue
       depositAmount: true,
       depositStatus: true,
       depositExpiresAt: true,
+      checkoutSessionId: true,
+      ecommerceMerchantId: true,
     },
   })
 
@@ -465,7 +484,62 @@ export async function createDepositCheckoutForConsumer(consumerId: string, venue
     throw new BadRequestError('El deposito de esta reserva no se puede pagar desde la app')
   }
 
-  return createReservationDepositCheckout(venue, reservation, `reservation:${reservation.id}:deposit:retry:${Date.now()}`)
+  // D681: antes de abrir otra liga se le pregunta a Stripe por la que ya tiene. Abierta: se reusa (nunca dos ligas cobrando el
+  // mismo depósito). Pagada: se aplica el pago. Vencida: el apartado vence con ella («Tu apartado venció»); una reserva ya
+  // confirmada («paga al llegar») sí puede abrir otra.
+  if (reservation.checkoutSessionId && reservation.depositStatus === 'PENDING') {
+    const sesionId = reservation.checkoutSessionId
+    const merchant = await cuentaDeLaReserva(venue.id, reservation.ecommerceMerchantId)
+    if (!merchant) throw new BadRequestError('Este negocio aun no tiene pagos en linea configurados')
+    const anterior = await getProvider(merchant).getPaymentStatus(merchant, sesionId)
+    if (anterior.status === 'PAID') {
+      await aplicarAlDeposito(
+        prisma,
+        { reservationId: reservation.id, venueId: venue.id },
+        {
+          tipo: 'PAGADO',
+          paymentIntentId: anterior.paymentIntentId ?? null,
+          pagadoEn: anterior.paidAt,
+          eventoId: `consumer-retry:${sesionId}:paid`,
+        },
+      )
+      throw new BadRequestError('El deposito de esta reserva ya fue pagado')
+    }
+    if (anterior.status === 'EXPIRED') {
+      const vencido = await aplicarAlDeposito(
+        prisma,
+        { reservationId: reservation.id, venueId: venue.id },
+        { tipo: 'VENCIDO', sesionId, motivo: 'Stripe Checkout session expired' },
+      )
+      if (vencido.resultado === 'APLICADO' && vencido.despues.status === 'CANCELLED') {
+        throw new ConflictError(textoDeRechazo('APARTADO_VENCIDO'))
+      }
+    } else if (anterior.checkoutUrl) {
+      return {
+        checkoutUrl: anterior.checkoutUrl,
+        reservationId: reservation.id,
+        confirmationCode: reservation.confirmationCode,
+        depositAmount: Number(reservation.depositAmount),
+      }
+    } else {
+      throw new ConflictError(textoDeRechazo('LIGA_ABIERTA'))
+    }
+  }
+
+  const actual = await prisma.reservation.findFirstOrThrow({
+    where: { id: reservation.id, venueId: venue.id },
+    select: {
+      id: true,
+      confirmationCode: true,
+      guestEmail: true,
+      depositAmount: true,
+      depositExpiresAt: true,
+      status: true,
+      depositStatus: true,
+      checkoutSessionId: true,
+    },
+  })
+  return createReservationDepositCheckout(venue, actual, `reservation:${reservation.id}:deposit:retry:${Date.now()}`)
 }
 
 export async function finalizeDepositCheckoutForConsumer(consumerId: string, sessionId: string) {
@@ -508,40 +582,18 @@ export async function finalizeDepositCheckoutForConsumer(consumerId: string, ses
   const paymentStatus = await provider.getPaymentStatus(stripeMerchant, sessionId)
 
   if (paymentStatus.status === 'PAID' && reservation.depositStatus !== 'PAID') {
-    // D681: misma regla que el aviso de Stripe. Sólo se confirma si la reserva NO se canceló mientras tanto (CAS); una
-    // cancelada nunca revive (su lugar ya se soltó): el cobro queda como anomalía de dinero para devolverlo.
-    await prisma.$transaction(async tx => {
-      const { count } = await tx.reservation.updateMany({
-        where: { id: reservation.id, depositStatus: { not: 'PAID' }, status: { not: ReservationStatus.CANCELLED } },
-        data: {
-          status: ReservationStatus.CONFIRMED,
-          confirmedAt: new Date(),
-          depositStatus: 'PAID',
-          depositPaidAt: paymentStatus.paidAt ?? new Date(),
-          depositProcessorRef: paymentStatus.paymentIntentId,
-        },
-      })
-      if (count === 1) return
-      const current = await tx.reservation.findUnique({ where: { id: reservation.id }, select: { status: true, depositStatus: true } })
-      if (!current || current.depositStatus === 'PAID') return
-      await tx.moneyAnomaly.createMany({
-        data: [
-          {
-            category: 'PAID_AFTER_DIVERGENT_STATE',
-            reservationId: reservation.id,
-            stripeEventId: `consumer-finalize:${sessionId}`,
-            expectedState: { depositStatus: 'PENDING' },
-            observedState: { status: current.status, depositStatus: current.depositStatus },
-          },
-        ],
-        skipDuplicates: true,
-      })
-      logger.error('🚨 [STRIPE CONNECT] Money anomaly detected', {
-        category: 'PAID_AFTER_DIVERGENT_STATE',
-        reservationId: reservation.id,
-        checkoutSessionId: sessionId,
-      })
-    })
+    // D681: el pago pasa por el dueño del depósito, igual que el aviso de Stripe: confirma una reserva que esperaba el pago, a
+    // quien ya llegó sólo le marca pagado y a una cancelada nunca la revive (deja anomalía de dinero, una vez).
+    await aplicarAlDeposito(
+      prisma,
+      { reservationId: reservation.id, venueId: reservation.venueId },
+      {
+        tipo: 'PAGADO',
+        paymentIntentId: paymentStatus.paymentIntentId ?? null,
+        pagadoEn: paymentStatus.paidAt,
+        eventoId: `consumer-finalize:${sessionId}`,
+      },
+    )
   }
 
   const latest = await prisma.reservation.findUnique({

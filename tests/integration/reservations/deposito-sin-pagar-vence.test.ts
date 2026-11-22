@@ -18,9 +18,11 @@ import '../../__helpers__/integration-setup'
 const mockSessionsCreate = jest.fn()
 const mockSessionsExpire = jest.fn()
 const mockSessionsRetrieve = jest.fn()
+const mockRefundsCreate = jest.fn()
 jest.mock('stripe', () =>
   jest.fn().mockImplementation(() => ({
     checkout: { sessions: { create: mockSessionsCreate, expire: mockSessionsExpire, retrieve: mockSessionsRetrieve } },
+    refunds: { create: mockRefundsCreate },
     webhooks: { constructEvent: jest.fn() },
     products: { create: jest.fn() },
     prices: { create: jest.fn() },
@@ -38,13 +40,20 @@ import app from '@/app'
 import prisma from '@/utils/prismaClient'
 import { reservationDepositReconciliationJob } from '@/jobs/reservation-deposit-reconciliation.job'
 import { processStripeConnectWebhookEvent } from '@/services/payments/reservation-deposit-webhook.service'
-import { finalizeDepositCheckoutForConsumer } from '@/services/consumer/reservation.consumer.service'
+import { createDepositCheckoutForConsumer, finalizeDepositCheckoutForConsumer } from '@/services/consumer/reservation.consumer.service'
+import { cancelReservation } from '@/services/dashboard/reservation.dashboard.service'
+import { registrarLiga } from '@/services/reservation/depositoDeReserva'
 
 const P = '/api/v1/public'
 const RUN = Date.now()
 const CONNECT_ACCOUNT = `acct_itest_d681_${RUN}`
 
-type SesionStripe = { status: 'open' | 'complete' | 'expired'; payment_status: 'paid' | 'unpaid'; payment_intent?: string }
+type SesionStripe = {
+  status: 'open' | 'complete' | 'expired'
+  payment_status: 'paid' | 'unpaid'
+  payment_intent?: string
+  url?: string
+}
 
 describe('D681 — la reserva sin pagar vence y suelta su lugar (integration, real DB)', () => {
   let orgId: string | undefined
@@ -132,8 +141,17 @@ describe('D681 — la reserva sin pagar vence y suelta su lugar (integration, re
     mockSessionsExpire.mockResolvedValue({ status: 'expired' })
     mockSessionsRetrieve.mockImplementation(async (id: string) => {
       const e = estadoEnStripe.get(id) ?? { status: 'open', payment_status: 'unpaid' }
-      return { id, status: e.status, payment_status: e.payment_status, payment_intent: e.payment_intent ?? null, amount_total: 32500 }
+      return {
+        id,
+        status: e.status,
+        payment_status: e.payment_status,
+        payment_intent: e.payment_intent ?? null,
+        amount_total: 32500,
+        url: e.status === 'open' ? (e.url ?? `https://checkout.stripe.test/c/pay/${id}`) : null,
+      }
     })
+    mockRefundsCreate.mockReset()
+    mockRefundsCreate.mockResolvedValue({ id: `re_d681_${RUN}`, status: 'succeeded', amount: 32500, failure_reason: null })
   })
 
   afterAll(async () => {
@@ -368,25 +386,44 @@ describe('D681 — la reserva sin pagar vence y suelta su lugar (integration, re
     expect(anomalia?.category).toBe('PAID_AFTER_DIVERGENT_STATE')
   })
 
-  it('🔴 #2 si cerrar la liga en Stripe falla al cancelar, la conciliación la sigue viendo y la cierra sin cambiar quién canceló', async () => {
+  it('🔴 r2 #1 si Stripe no deja cerrar la liga, NO se cancela: 503 claro y la reserva sigue igual (falla cerrada)', async () => {
     const clase = await nuevaClase(10)
     const res = await reservar(clase.id, 'Olga')
     expect(res.status).toBe(201)
-    mockSessionsExpire.mockRejectedValueOnce(new Error('Stripe no contesta'))
+    mockSessionsExpire.mockRejectedValue(new Error('Stripe no contesta'))
+    mockSessionsRetrieve.mockRejectedValueOnce(new Error('Stripe no contesta'))
+
+    const cancel = await cancelar(res.body.cancelSecret)
+    expect(cancel.status).toBe(503)
+    expect(cancel.body.message ?? cancel.body.error).toContain('No pudimos cerrar el pago en línea; intenta de nuevo en un momento')
+    const fila = await filaPorSecreto(res.body.cancelSecret)
+    expect(fila).toMatchObject({ status: 'PENDING', depositStatus: 'PENDING' })
+
+    // Stripe vuelve: la misma cancelación ya pasa.
+    mockSessionsExpire.mockResolvedValue({ status: 'expired' })
+    const otra = await cancelar(res.body.cancelSecret)
+    expect(otra.status).toBe(200)
+    expect(await filaPorSecreto(res.body.cancelSecret)).toMatchObject({
+      status: 'CANCELLED',
+      depositStatus: 'EXPIRED',
+      cancelledBy: 'CUSTOMER',
+    })
+  })
+
+  it('🔴 r2 #1 si la liga ya se había pagado al cancelar: se aplica el pago y se cancela como pagada (se devuelve)', async () => {
+    const clase = await nuevaClase(10)
+    const res = await reservar(clase.id, 'Pili')
+    expect(res.status).toBe(201)
+    const fila = await filaPorSecreto(res.body.cancelSecret)
+    mockSessionsExpire.mockRejectedValueOnce(new Error('This Checkout Session is already complete'))
+    estadoEnStripe.set(fila.checkoutSessionId!, { status: 'complete', payment_status: 'paid', payment_intent: `pi_d681_${RUN}_pili` })
 
     const cancel = await cancelar(res.body.cancelSecret)
     expect(cancel.status).toBe(200)
-    const fila = await filaPorSecreto(res.body.cancelSecret)
-    expect(fila.status).toBe('CANCELLED')
-    expect(fila.depositStatus).toBe('PENDING') // a propósito: así la conciliación la sigue consultando
-
-    estadoEnStripe.set(fila.checkoutSessionId!, { status: 'expired', payment_status: 'unpaid' })
-    await reservationDepositReconciliationJob.reconcileNow()
-
     const despues = await filaPorSecreto(res.body.cancelSecret)
     expect(despues.status).toBe('CANCELLED')
-    expect(despues.depositStatus).toBe('EXPIRED')
-    expect(despues.cancelledBy).toBe('CUSTOMER')
+    expect(despues.depositStatus).toBe('REFUNDED')
+    expect(await prisma.moneyAnomaly.count({ where: { reservationId: fila.id } })).toBe(0)
   })
 
   it('🔴 #2 si la cancelan mientras Stripe crea la liga: la liga se cierra y NO se entrega', async () => {
@@ -404,6 +441,7 @@ describe('D681 — la reserva sin pagar vence y suelta su lugar (integration, re
     const res = await reservar(clase.id, 'Paty')
 
     expect(res.status).toBe(409)
+    expect(res.body.message ?? res.body.error).toContain('Esta reservación ya se canceló')
     expect(res.body.checkoutUrl).toBeUndefined()
     expect(mockSessionsExpire).toHaveBeenCalledWith(`cs_itest_d681_${RUN}_carrera`, {}, { stripeAccount: CONNECT_ACCOUNT })
     const fila = await prisma.reservation.findFirstOrThrow({
@@ -464,6 +502,251 @@ describe('D681 — la reserva sin pagar vence y suelta su lugar (integration, re
   it('🔴 #6 el job revisa las ligas al menos cada 5 minutos (un lugar abandonado no queda apartado una hora)', () => {
     const [a, b] = new CronTime(reservationDepositReconciliationJob['CRON_PATTERN'], 'America/Mexico_City').sendAt(2)
     expect(b.toMillis() - a.toMillis()).toBeLessThanOrEqual(5 * 60_000)
+  })
+
+  // ---- Ronda 2 de Codex ----
+
+  let cuenta = 0
+  /** Una reserva con su liga abierta, escrita directo (como la deja el alta): para las pruebas que no necesitan la ruta. */
+  async function reservaConLiga(
+    o: { status?: any; depositStatus?: any; conLiga?: boolean; customerId?: string; venceEnMin?: number } = {},
+  ) {
+    cuenta += 1
+    const merchant = await prisma.ecommerceMerchant.findFirstOrThrow({ where: { venueId: venue!.id } })
+    const startsAt = new Date(Date.now() + 3 * 24 * 3_600_000)
+    return prisma.reservation.create({
+      data: {
+        venueId: venue!.id,
+        confirmationCode: `D681-${RUN}-${cuenta}`,
+        status: o.status ?? 'PENDING',
+        startsAt,
+        endsAt: new Date(startsAt.getTime() + 50 * 60_000),
+        blockedEndsAt: new Date(startsAt.getTime() + 50 * 60_000),
+        duration: 50,
+        guestName: `Prueba ${cuenta}`,
+        guestPhone: '5512345678',
+        customerId: o.customerId,
+        depositAmount: new Prisma.Decimal(325),
+        depositStatus: o.depositStatus === undefined ? 'PENDING' : o.depositStatus,
+        depositExpiresAt: o.conLiga === false && o.depositStatus === null ? null : new Date(Date.now() + (o.venceEnMin ?? 20) * 60_000),
+        checkoutSessionId: o.conLiga === false ? null : `cs_d681_${RUN}_r${cuenta}`,
+        ecommerceMerchantId: merchant.id,
+      },
+      select: { id: true, cancelSecret: true, checkoutSessionId: true, confirmationCode: true },
+    })
+  }
+  const leer = (id: string) =>
+    prisma.reservation.findUniqueOrThrow({
+      where: { id },
+      select: { status: true, depositStatus: true, checkoutSessionId: true, cancelledBy: true },
+    })
+  const avisoPagado = (sesion: string, sufijo: string) =>
+    processStripeConnectWebhookEvent({
+      id: `evt_itest_d681_${RUN}_${sufijo}`,
+      type: 'checkout.session.completed',
+      account: CONNECT_ACCOUNT,
+      livemode: false,
+      data: { id: sesion, payment_status: 'paid', payment_intent: `pi_d681_${RUN}_${sufijo}` },
+    })
+  const avisoVencido = (sesion: string, sufijo: string) =>
+    processStripeConnectWebhookEvent({
+      id: `evt_itest_d681_${RUN}_${sufijo}`,
+      type: 'checkout.session.expired',
+      account: CONNECT_ACCOUNT,
+      livemode: false,
+      data: { id: sesion },
+    })
+
+  it('🔴 r2 #2 un pago tardío no regresa a quien ya llegó (sigue CHECKED_IN, sólo queda pagado)', async () => {
+    const r = await reservaConLiga()
+    await prisma.reservation.update({ where: { id: r.id }, data: { status: 'CHECKED_IN', checkedInAt: new Date() } })
+
+    await avisoPagado(r.checkoutSessionId!, 'llego')
+
+    expect(await leer(r.id)).toMatchObject({ status: 'CHECKED_IN', depositStatus: 'PAID' })
+  })
+
+  it('🔴 r2 #3 la consulta a Stripe recorre TODAS las ligas pendientes, de la más vieja a la más nueva, sin saltarse ninguna', async () => {
+    const ids: string[] = []
+    for (let i = 0; i < 105; i++) ids.push((await reservaConLiga()).id)
+    const filas = await prisma.reservation.findMany({ where: { id: { in: ids } }, select: { checkoutSessionId: true }, take: 200 })
+    for (const f of filas) estadoEnStripe.set(f.checkoutSessionId!, { status: 'expired', payment_status: 'unpaid' })
+
+    await reservationDepositReconciliationJob.reconcileNow()
+
+    const quedan = await prisma.reservation.count({ where: { id: { in: ids }, depositStatus: 'PENDING' } })
+    expect(quedan).toBe(0)
+  }, 120_000)
+
+  it('🔴 r2 #4 «pagar de nuevo» con la liga anterior ya vencida: el apartado vence y contesta «Tu apartado venció» (no abre otra)', async () => {
+    const customer = await prisma.customer.create({ data: { venueId: venue!.id, email: `r24-${RUN}@test.com`, consumerId } })
+    const r = await reservaConLiga({ customerId: customer.id })
+    estadoEnStripe.set(r.checkoutSessionId!, { status: 'expired', payment_status: 'unpaid' })
+
+    await expect(createDepositCheckoutForConsumer(consumerId!, venue!.slug, r.cancelSecret)).rejects.toMatchObject({
+      statusCode: 409,
+      message: 'Tu apartado venció. Reserva de nuevo.',
+    })
+    expect(mockSessionsCreate).not.toHaveBeenCalled()
+    expect(await leer(r.id)).toMatchObject({ status: 'CANCELLED', depositStatus: 'EXPIRED' })
+  })
+
+  it('🔴 r2 #4 «pagar de nuevo» con la liga anterior abierta: reusa ESA liga (nunca dos ligas para el mismo depósito)', async () => {
+    const customer = await prisma.customer.create({ data: { venueId: venue!.id, email: `r24b-${RUN}@test.com`, consumerId } })
+    const r = await reservaConLiga({ customerId: customer.id })
+    estadoEnStripe.set(r.checkoutSessionId!, { status: 'open', payment_status: 'unpaid', url: 'https://checkout.stripe.test/la-misma' })
+
+    const pago = await createDepositCheckoutForConsumer(consumerId!, venue!.slug, r.cancelSecret)
+
+    expect(pago.checkoutUrl).toBe('https://checkout.stripe.test/la-misma')
+    expect(mockSessionsCreate).not.toHaveBeenCalled()
+    expect((await leer(r.id)).checkoutSessionId).toBe(r.checkoutSessionId)
+  })
+
+  it('🔴 r2 #5 una reserva «paga al llegar» (depósito vacío) sí puede abrir su liga desde la app', async () => {
+    const customer = await prisma.customer.create({ data: { venueId: venue!.id, email: `r25-${RUN}@test.com`, consumerId } })
+    const r = await reservaConLiga({ status: 'CONFIRMED', depositStatus: null, conLiga: false, customerId: customer.id })
+
+    const pago = await createDepositCheckoutForConsumer(consumerId!, venue!.slug, r.cancelSecret)
+
+    expect(pago.checkoutUrl).toEqual(expect.stringContaining('checkout.stripe.test'))
+    expect(await leer(r.id)).toMatchObject({
+      status: 'CONFIRMED',
+      depositStatus: 'PENDING',
+      checkoutSessionId: expect.stringContaining('cs_itest_d681_'),
+    })
+  })
+
+  describe('todos contra todos: dos escritores a la vez sobre la misma reserva', () => {
+    /** Ninguna combinación imposible, y todo pago que no pudo aplicarse quedó como anomalía. */
+    async function estadoValido(id: string, huboPago: boolean) {
+      const f = await leer(id)
+      const anomalias = await prisma.moneyAnomaly.count({ where: { reservationId: id } })
+      const combinacion = `${f.status}/${f.depositStatus}`
+      expect([
+        'PENDING/PENDING',
+        'CONFIRMED/PAID',
+        'CHECKED_IN/PAID',
+        'CANCELLED/EXPIRED',
+        'CANCELLED/REFUNDED',
+        'CANCELLED/FORFEITED',
+        'CANCELLED/PAID', // devolución en curso
+      ]).toContain(combinacion)
+      // Un pago que llegó y no se quedó en la reserva siempre deja rastro.
+      if (huboPago && !['PAID', 'REFUNDED', 'FORFEITED'].includes(f.depositStatus ?? '')) expect(anomalias).toBeGreaterThan(0)
+      return combinacion
+    }
+    const aLaVez = (...fns: Array<() => Promise<unknown>>) => Promise.allSettled(fns.map(f => f()))
+    const VUELTAS = 4
+
+    it('cancelar contra el aviso de pagado', async () => {
+      for (let i = 0; i < VUELTAS; i++) {
+        const r = await reservaConLiga()
+        await aLaVez(
+          () => cancelReservation(venue!.id, r.id, 'CUSTOMER'),
+          () => avisoPagado(r.checkoutSessionId!, `cp${i}`),
+        )
+        const c = await estadoValido(r.id, true)
+        expect(c).not.toBe('PENDING/PENDING')
+      }
+    })
+
+    it('aviso de pagado contra aviso de vencida', async () => {
+      for (let i = 0; i < VUELTAS; i++) {
+        const r = await reservaConLiga()
+        await aLaVez(
+          () => avisoPagado(r.checkoutSessionId!, `pv${i}`),
+          () => avisoVencido(r.checkoutSessionId!, `vp${i}`),
+        )
+        expect(['CONFIRMED/PAID', 'CANCELLED/EXPIRED']).toContain(await estadoValido(r.id, true))
+      }
+    })
+
+    it('aviso de pagado contra el regreso de la app (los dos dicen «pagado»): una sola confirmación, sin anomalía', async () => {
+      for (let i = 0; i < VUELTAS; i++) {
+        const customer = await prisma.customer.create({ data: { venueId: venue!.id, email: `tt-${RUN}-${i}@test.com`, consumerId } })
+        const r = await reservaConLiga({ customerId: customer.id })
+        estadoEnStripe.set(r.checkoutSessionId!, { status: 'complete', payment_status: 'paid', payment_intent: `pi_d681_${RUN}_app${i}` })
+        await aLaVez(
+          () => avisoPagado(r.checkoutSessionId!, `pa${i}`),
+          () => finalizeDepositCheckoutForConsumer(consumerId!, r.checkoutSessionId!),
+        )
+        expect(await estadoValido(r.id, true)).toBe('CONFIRMED/PAID')
+        expect(await prisma.moneyAnomaly.count({ where: { reservationId: r.id } })).toBe(0)
+      }
+    })
+
+    it('aviso de pagado contra la llegada: termina CHECKED_IN y pagado', async () => {
+      for (let i = 0; i < VUELTAS; i++) {
+        const r = await reservaConLiga()
+        await aLaVez(
+          () => avisoPagado(r.checkoutSessionId!, `ll${i}`),
+          () =>
+            prisma.reservation.updateMany({
+              where: { id: r.id, status: { in: ['PENDING', 'CONFIRMED'] } },
+              data: { status: 'CHECKED_IN', checkedInAt: new Date() },
+            }),
+        )
+        expect(await estadoValido(r.id, true)).toBe('CHECKED_IN/PAID')
+      }
+    })
+
+    it('cancelar contra el aviso de vencida', async () => {
+      for (let i = 0; i < VUELTAS; i++) {
+        const r = await reservaConLiga()
+        await aLaVez(
+          () => cancelReservation(venue!.id, r.id, 'CUSTOMER'),
+          () => avisoVencido(r.checkoutSessionId!, `cv${i}`),
+        )
+        expect(await estadoValido(r.id, false)).toBe('CANCELLED/EXPIRED')
+      }
+    })
+
+    it('barrido por reloj contra crear la liga (apartado sin liga ya vencido)', async () => {
+      for (let i = 0; i < VUELTAS; i++) {
+        const r = await reservaConLiga({ conLiga: false, venceEnMin: -1 })
+        const merchant = await prisma.ecommerceMerchant.findFirstOrThrow({ where: { venueId: venue!.id }, include: { provider: true } })
+        await aLaVez(
+          () => reservationDepositReconciliationJob['expirePastDueReservations'](),
+          () =>
+            registrarLiga({
+              reservationId: r.id,
+              venueId: venue!.id,
+              merchant,
+              session: { id: `cs_d681_${RUN}_tarde${i}`, expiresAt: new Date(Date.now() + 31 * 60_000) },
+            }),
+        )
+        expect(await estadoValido(r.id, false)).toBe('CANCELLED/EXPIRED')
+      }
+    })
+
+    it('cancelar contra «pagar de nuevo» (crear otra liga): nunca queda una liga viva sobre una cancelada', async () => {
+      for (let i = 0; i < VUELTAS; i++) {
+        const r = await reservaConLiga({ conLiga: false })
+        const merchant = await prisma.ecommerceMerchant.findFirstOrThrow({ where: { venueId: venue!.id }, include: { provider: true } })
+        await aLaVez(
+          () => cancelReservation(venue!.id, r.id, 'CUSTOMER'),
+          () =>
+            registrarLiga({
+              reservationId: r.id,
+              venueId: venue!.id,
+              merchant,
+              session: { id: `cs_d681_${RUN}_otra${i}`, expiresAt: new Date(Date.now() + 19 * 60_000) },
+            }),
+        )
+        const f = await leer(r.id)
+        const c = await estadoValido(r.id, false)
+        // O se canceló (y si la liga nueva alcanzó a guardarse, se cerró en Stripe), o la liga quedó y la cancelación no pasó.
+        if (c === 'CANCELLED/EXPIRED') {
+          if (f.checkoutSessionId)
+            expect(mockSessionsExpire).toHaveBeenCalledWith(f.checkoutSessionId, {}, { stripeAccount: CONNECT_ACCOUNT })
+        } else expect(c).toBe('PENDING/PENDING')
+        // La liga nueva que no quedó guardada tampoco sigue viva.
+        if (f.checkoutSessionId !== `cs_d681_${RUN}_otra${i}`) {
+          expect(mockSessionsExpire).toHaveBeenCalledWith(`cs_d681_${RUN}_otra${i}`, {}, { stripeAccount: CONNECT_ACCOUNT })
+        }
+      }
+    })
   })
 
   // ---- Regresión: lo que ya funcionaba sigue igual ----

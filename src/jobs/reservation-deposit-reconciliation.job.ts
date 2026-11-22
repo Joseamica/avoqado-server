@@ -5,11 +5,22 @@ import { getProvider } from '../services/payments/provider-registry'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '../services/payments/providers/money'
 import { getVatRateBps } from '../services/superadmin/platformSettings.service'
 import { processStripeConnectWebhookEvent } from '../services/payments/reservation-deposit-webhook.service'
+import { aplicarAlDeposito, cuentaDeLaReserva, registrarLiga } from '../services/reservation/depositoDeReserva'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
 
 /** La liga de Stripe más larga posible (24 h): una reserva sin fecha ni liga más vieja que esto ya no tiene cómo pagarse. */
 const MAX_PAYMENT_WINDOW_MS = 24 * 3_600_000
+/** Filas por página: el recorrido sigue página tras página, de la más vieja a la más nueva, hasta acabar o hasta su tope. */
+const PAGINA = 100
+/** Tope de tiempo de una pasada: menos que la cadencia (5 min) para que una pasada no se encime con la siguiente. */
+const TOPE_DE_PASADA_MS = 4 * 60_000
+
+/** La última fila vista de una página (orden: más vieja primero, desempate por id). */
+type Despues = { createdAt: Date; id: string } | undefined
+function despuesDe(d: Despues) {
+  return d ? { OR: [{ createdAt: { gt: d.createdAt } }, { createdAt: d.createdAt, id: { gt: d.id } }] } : {}
+}
 
 export class ReservationDepositReconciliationJob {
   private job: CronJob | null = null
@@ -17,6 +28,9 @@ export class ReservationDepositReconciliationJob {
   // sin pagar suelta su lugar a lo más 5 min después (antes, hasta una hora), sin adivinar por reloj si se pagó.
   private readonly CRON_PATTERN = '2-59/5 * * * *'
   private readonly ORPHAN_THRESHOLD_MINUTES = 5
+  // ponytail: candado en memoria (una sola instancia, ver .claude/rules/una-sola-instancia.md). Con dos, cada una recorre;
+  // los avisos repetidos ya son idempotentes (ProcessedStripeEvent) y el dueño del depósito escribe con CAS.
+  private enCurso = false
 
   constructor() {
     this.job = scheduleJob(
@@ -44,110 +58,133 @@ export class ReservationDepositReconciliationJob {
   }
 
   private async reconcile(): Promise<void> {
+    if (this.enCurso) return
+    this.enCurso = true
+    const hasta = Date.now() + TOPE_DE_PASADA_MS
     try {
-      await this.expirePastDueReservations()
-      await this.reconcileCheckoutSessions()
+      await this.expirePastDueReservations(hasta)
+      await this.reconcileCheckoutSessions(hasta)
       await this.recoverOrphanCheckoutSessions()
     } catch (error) {
       logger.error('❌ [RESERVATION DEPOSIT RECONCILIATION] Job failed', error)
+    } finally {
+      this.enCurso = false
     }
   }
 
   /**
    * D681: el reloj sólo decide cuando Stripe NUNCA creó la liga (sin sesión no hay forma de haber pagado). Una reserva con
    * sesión la decide Stripe (el aviso `checkout.session.expired` o `reconcileCheckoutSessions`): quien pagó a tiempo con el
-   * aviso retrasado no pierde su lugar. Y sólo se cancela una reserva que sigue PENDING: si el negocio ya la confirmó o ya
-   * llegó, nunca se cancela sola. Las filas viejas sin fecha se juzgan por su `createdAt` más la liga más larga posible.
+   * aviso retrasado no pierde su lugar. Cada vencida pasa por el dueño del depósito, que sólo cancela una reserva que sigue
+   * PENDING. Las filas viejas sin fecha se juzgan por su `createdAt` más la liga más larga posible.
    */
-  private async expirePastDueReservations(): Promise<void> {
-    // Idempotent updateMany (the WHERE excludes already-EXPIRED rows), so retrying a
-    // transient DB connection blip (P1001 during the cron stampede) is safe. See .claude/rules/cron-jobs.md
+  private async expirePastDueReservations(hasta = Date.now() + TOPE_DE_PASADA_MS): Promise<void> {
     const now = new Date()
-    const expired = await retry(
-      () =>
-        prisma.reservation.updateMany({
-          where: {
-            depositStatus: 'PENDING',
-            status: 'PENDING',
-            checkoutSessionId: null,
-            OR: [
-              { depositExpiresAt: { lt: now } },
-              { depositExpiresAt: null, createdAt: { lt: new Date(now.getTime() - MAX_PAYMENT_WINDOW_MS) } },
-            ],
-          },
-          data: {
-            status: 'CANCELLED',
-            cancelledAt: new Date(),
-            cancelledBy: 'SYSTEM',
-            cancellationReason: 'Reservation deposit payment window expired',
-            depositStatus: 'EXPIRED',
-          },
-        }),
-      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'deposit-reconciliation.expirePastDue' },
-    )
+    let despues: Despues = undefined
+    let vencidas = 0
+    while (Date.now() < hasta) {
+      // Entry read only (idempotent) — retried on a connection blip. See .claude/rules/cron-jobs.md
+      const pagina = await retry(
+        () =>
+          prisma.reservation.findMany({
+            where: {
+              depositStatus: 'PENDING',
+              status: 'PENDING',
+              checkoutSessionId: null,
+              AND: [
+                {
+                  OR: [
+                    { depositExpiresAt: { lt: now } },
+                    { depositExpiresAt: null, createdAt: { lt: new Date(now.getTime() - MAX_PAYMENT_WINDOW_MS) } },
+                  ],
+                },
+                despuesDe(despues),
+              ],
+            },
+            select: { id: true, venueId: true, createdAt: true },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+            take: PAGINA,
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'deposit-reconciliation.expirePastDue' },
+      )
+      for (const r of pagina) {
+        const v = await aplicarAlDeposito(
+          prisma,
+          { reservationId: r.id, venueId: r.venueId },
+          { tipo: 'VENCIDO', sesionId: null, motivo: 'Reservation deposit payment window expired' },
+        )
+        if (v.resultado === 'APLICADO') vencidas++
+      }
+      if (pagina.length < PAGINA) break
+      despues = pagina[pagina.length - 1]
+    }
 
-    if (expired.count > 0) {
-      logger.warn(`⏱️ [RESERVATION DEPOSIT RECONCILIATION] Expired ${expired.count} unpaid deposit reservation(s)`)
+    if (vencidas > 0) {
+      logger.warn(`⏱️ [RESERVATION DEPOSIT RECONCILIATION] Expired ${vencidas} unpaid deposit reservation(s)`)
     }
   }
 
-  private async reconcileCheckoutSessions(): Promise<void> {
-    // Entry read only — the Stripe polling loop below is NOT retried. See .claude/rules/cron-jobs.md
-    const pending = await retry(
-      () =>
-        prisma.reservation.findMany({
-          where: {
-            depositStatus: 'PENDING',
-            checkoutSessionId: { not: null },
-          },
-          include: {
-            venue: { select: { id: true, slug: true } },
-          },
-          take: 100,
-        }),
-      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'deposit-reconciliation.findPending' },
-    )
+  /**
+   * D681: le pregunta a Stripe por TODAS las ligas pendientes, de la más vieja a la más nueva, página tras página, hasta acabar
+   * o hasta el tope de la pasada (la siguiente vuelve a empezar por las más viejas). Antes tomaba 100 sin orden y podía saltarse
+   * una liga varias pasadas seguidas.
+   */
+  private async reconcileCheckoutSessions(hasta = Date.now() + TOPE_DE_PASADA_MS): Promise<void> {
+    let despues: Despues = undefined
+    while (Date.now() < hasta) {
+      // Entry read only — the Stripe polling loop below is NOT retried. See .claude/rules/cron-jobs.md
+      const pagina = await retry(
+        () =>
+          prisma.reservation.findMany({
+            where: { depositStatus: 'PENDING', checkoutSessionId: { not: null }, ...despuesDe(despues) },
+            select: { id: true, venueId: true, checkoutSessionId: true, ecommerceMerchantId: true, createdAt: true },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+            take: PAGINA,
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'deposit-reconciliation.findPending' },
+      )
 
-    for (const reservation of pending) {
-      // Poll Stripe through the SAME connected account that minted the
-      // session — falling back to "latest active" here would query a
-      // different account and return PENDING forever for venues that
-      // swapped Stripe accounts.
-      const merchant = await this.resolveMerchantForReservation(reservation.venueId, reservation.ecommerceMerchantId)
-      if (!merchant || !reservation.checkoutSessionId) continue
+      for (const reservation of pagina) {
+        if (Date.now() >= hasta) return
+        // Poll Stripe through the SAME connected account that minted the session.
+        const merchant = await cuentaDeLaReserva(reservation.venueId, reservation.ecommerceMerchantId)
+        if (!merchant || !reservation.checkoutSessionId) continue
 
-      try {
-        const provider = getProvider(merchant)
-        const status = await provider.getPaymentStatus(merchant, reservation.checkoutSessionId)
+        try {
+          const provider = getProvider(merchant)
+          const status = await provider.getPaymentStatus(merchant, reservation.checkoutSessionId)
 
-        if (status.status === 'PAID') {
-          await processStripeConnectWebhookEvent({
-            id: `reconciliation:${reservation.checkoutSessionId}:paid`,
-            type: 'checkout.session.completed',
-            account: merchant.providerMerchantId ?? undefined,
-            livemode: false,
-            data: {
-              id: reservation.checkoutSessionId,
-              payment_status: 'paid',
-              payment_intent: status.paymentIntentId,
-            },
-          })
-        } else if (status.status === 'EXPIRED') {
-          await processStripeConnectWebhookEvent({
-            id: `reconciliation:${reservation.checkoutSessionId}:expired`,
-            type: 'checkout.session.expired',
-            account: merchant.providerMerchantId ?? undefined,
-            livemode: false,
-            data: { id: reservation.checkoutSessionId },
+          if (status.status === 'PAID') {
+            await processStripeConnectWebhookEvent({
+              id: `reconciliation:${reservation.checkoutSessionId}:paid`,
+              type: 'checkout.session.completed',
+              account: merchant.providerMerchantId ?? undefined,
+              livemode: false,
+              data: {
+                id: reservation.checkoutSessionId,
+                payment_status: 'paid',
+                payment_intent: status.paymentIntentId,
+              },
+            })
+          } else if (status.status === 'EXPIRED') {
+            await processStripeConnectWebhookEvent({
+              id: `reconciliation:${reservation.checkoutSessionId}:expired`,
+              type: 'checkout.session.expired',
+              account: merchant.providerMerchantId ?? undefined,
+              livemode: false,
+              data: { id: reservation.checkoutSessionId },
+            })
+          }
+        } catch (error) {
+          logger.error('❌ [RESERVATION DEPOSIT RECONCILIATION] Failed to reconcile session', {
+            reservationId: reservation.id,
+            checkoutSessionId: reservation.checkoutSessionId,
+            error,
           })
         }
-      } catch (error) {
-        logger.error('❌ [RESERVATION DEPOSIT RECONCILIATION] Failed to reconcile session', {
-          reservationId: reservation.id,
-          checkoutSessionId: reservation.checkoutSessionId,
-          error,
-        })
       }
+      if (pagina.length < PAGINA) return
+      despues = pagina[pagina.length - 1]
     }
   }
 
@@ -168,6 +205,7 @@ export class ReservationDepositReconciliationJob {
           include: {
             venue: { select: { id: true, name: true, slug: true } },
           },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
           take: 50,
         }),
       { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'deposit-reconciliation.findOrphans' },
@@ -178,7 +216,7 @@ export class ReservationDepositReconciliationJob {
       // mint failed before stamping). Use the pinned one when present;
       // otherwise fall back to "latest active" — and the stamp below will
       // pin it going forward.
-      const merchant = await this.resolveMerchantForReservation(reservation.venueId, reservation.ecommerceMerchantId)
+      const merchant = await cuentaDeLaReserva(reservation.venueId, reservation.ecommerceMerchantId)
       if (!merchant || !reservation.depositAmount || !reservation.depositExpiresAt || !reservation.idempotencyKey) continue
 
       try {
@@ -209,10 +247,8 @@ export class ReservationDepositReconciliationJob {
           paymentMethodTypes: ['card'],
         })
 
-        await prisma.reservation.updateMany({
-          where: { id: reservation.id, checkoutSessionId: null },
-          data: { checkoutSessionId: session.id, ecommerceMerchantId: merchant.id },
-        })
+        // D681: la liga se guarda por el dueño del depósito; si la reserva ya no la acepta, se cierra y no se usa.
+        await registrarLiga({ reservationId: reservation.id, venueId: reservation.venueId, merchant, session })
       } catch (error) {
         logger.error('❌ [RESERVATION DEPOSIT RECONCILIATION] Failed to recover orphan checkout session', {
           reservationId: reservation.id,
@@ -220,35 +256,6 @@ export class ReservationDepositReconciliationJob {
         })
       }
     }
-  }
-
-  /**
-   * Pick the EcommerceMerchant that should process this reservation's charge
-   * operations. When the reservation has a pinned merchant from checkout-mint
-   * time we use it — refunds and status polls MUST hit the same connected
-   * account. Falls back to "newest active" only for legacy/orphan rows that
-   * predate the pin.
-   */
-  private async resolveMerchantForReservation(venueId: string, pinnedMerchantId: string | null) {
-    if (pinnedMerchantId) {
-      const pinned = await prisma.ecommerceMerchant.findFirst({
-        where: { id: pinnedMerchantId, provider: { code: 'STRIPE_CONNECT' } },
-        include: { provider: true },
-      })
-      if (pinned) return pinned
-      logger.warn(
-        `⚠️ [RESERVATION DEPOSIT RECONCILIATION] Pinned merchant ${pinnedMerchantId} not found; falling back to latest active for venue ${venueId}`,
-      )
-    }
-    return prisma.ecommerceMerchant.findFirst({
-      where: {
-        venueId,
-        active: true,
-        provider: { code: 'STRIPE_CONNECT', active: true },
-      },
-      include: { provider: true },
-      orderBy: { createdAt: 'desc' },
-    })
   }
 }
 

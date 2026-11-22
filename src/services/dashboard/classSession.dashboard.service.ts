@@ -24,6 +24,7 @@ import { assertOrganizationStaffAvailability } from './appointmentStaffAssignmen
 import { enqueuePassSessionSync } from '@/services/aggregators/core/sessionSync.service'
 import { passesForSessions } from '@/services/aggregators/passCapacity.service'
 import { cancelReservation, handleReservationDepositCancellation } from './reservation.dashboard.service'
+import { aplicarAlDeposito, cerrarLigaAntesDeCancelar } from '@/services/reservation/depositoDeReserva'
 import { PROVIDER_LABEL, type Provider } from '@/services/aggregators/core/types'
 
 // ==========================================
@@ -647,6 +648,16 @@ export async function cancelClassSession(venueId: string, sessionId: string, act
   if (session.status === 'CANCELLED') throw new ConflictError('La sesión ya está cancelada')
 
   const { refundCreditsForReservation } = await import('./creditPack.public.service')
+  // D681: antes de cancelar, se cierran en Stripe las ligas de pago abiertas de esta clase. Falla CERRADA: si una no se puede
+  // cerrar, la clase no se cancela (503) y se puede repetir. Una que ya se pagó se aplica como pagada y se devuelve abajo.
+  const conLiga = await prisma.reservation.findMany({
+    where: { venueId, classSessionId: sessionId, status: { in: ['PENDING', 'CONFIRMED'] }, depositStatus: 'PENDING' },
+    select: { id: true },
+    take: 500, // ponytail: tope de una clase; una clase con más de 500 ligas abiertas pide paginar
+  })
+  const sesionesCerradas = new Map<string, string | null>()
+  for (const r of conLiga) sesionesCerradas.set(r.id, (await cerrarLigaAntesDeCancelar(venueId, r.id)).sesionCerrada)
+
   const { cancelled, pushRowIds, conDeposito } = await prisma.$transaction(
     async tx => {
       // Reclamar la transición (spec fase 3 §7.2): sólo UNA solicitud pasa la clase a CANCELLED y su instante es el que queda.
@@ -672,6 +683,19 @@ export async function cancelClassSession(venueId: string, sessionId: string, act
         },
         select: { id: true, depositStatus: true },
       })
+
+      // El depósito sin pagar se cierra en esta misma transacción, por su dueño. Si apareció otra liga mientras tanto, no se
+      // cancela la clase (se repite y esa liga también se cierra).
+      for (const reserva of canceladas) {
+        if (reserva.depositStatus !== 'PENDING') continue
+        const d = await aplicarAlDeposito(
+          tx,
+          { reservationId: reserva.id, venueId },
+          { tipo: 'CANCELADA', sesionCerrada: sesionesCerradas.get(reserva.id) ?? null },
+        )
+        if (d.resultado === 'RECHAZADO')
+          throw new ConflictError('Una reservación de la clase cambió mientras se cancelaba; intenta de nuevo.')
+      }
 
       // Canceló el negocio, no la clienta: cada quien recupera su clase aunque la política diga otra cosa, y dentro de esta
       // transacción, para que un fallo deje la clase sin cancelar y se pueda reintentar (D14, 2-nov-2026).
@@ -729,12 +753,7 @@ export async function cancelClassSession(venueId: string, sessionId: string, act
         data: { cancelledAt: now.toISOString(), creditsRefunded },
       })
 
-      // D681: también las de depósito SIN pagar, para cerrar su liga de Stripe (si no, un pago tardío la revivía).
-      return {
-        cancelled,
-        pushRowIds,
-        conDeposito: canceladas.filter(r => r.depositStatus === 'PAID' || r.depositStatus === 'PENDING'),
-      }
+      return { cancelled, pushRowIds, conDeposito: canceladas.filter(r => r.depositStatus === 'PAID') }
     },
     { timeout: 30_000 },
   )

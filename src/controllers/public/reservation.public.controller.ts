@@ -36,6 +36,7 @@ import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { buildReservationBookingCapabilities } from '@/services/reservation/publicReservationCapabilities'
 import { buildReservationCheckoutReturnUrls } from '@/services/reservation/reservationReturnUrl'
 import { lockClassSession, sumOccupiedSeats } from '@/services/reservation/classBooking.service'
+import { depositoAlCrear, registrarLiga } from '@/services/reservation/depositoDeReserva'
 import { enqueuePassSessionSync } from '@/services/aggregators/core/sessionSync.service'
 
 // ==========================================
@@ -1000,7 +1001,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
         // Pin the EcommerceMerchant alongside the session id so refunds and
         // reconciliation always route through the same connected account.
         // D681: y el vencimiento que contestó Stripe, sólo si la reserva sigue esperando el pago (si no, la liga se cierra).
-        await reservationService.guardarSesionDePago({
+        await registrarLiga({
           reservationId: reservation.id,
           venueId: venue.id,
           merchant: stripeMerchant,
@@ -1318,7 +1319,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
       // Pin the EcommerceMerchant alongside the session id so refunds and
       // reconciliation always route through the same connected account.
       // D681: con el vencimiento que contestó Stripe, y sólo si la reserva sigue esperando el pago (si no, la liga se cierra).
-      await reservationService.guardarSesionDePago({ reservationId: reservation.id, venueId: venue.id, merchant: stripeMerchant, session })
+      await registrarLiga({ reservationId: reservation.id, venueId: venue.id, merchant: stripeMerchant, session })
       checkoutUrl = session.url
     }
 
@@ -2115,10 +2116,12 @@ async function createClassReservation(
           spotIds: requestedSpotIds,
           specialRequests: mergedSpecialRequests,
           depositAmount: upfrontAmount,
-          depositStatus: requiresUpfrontCash ? 'PENDING' : null,
-          // D681: el lugar se aparta con fecha de vencimiento desde que nace. Si la sesión de Stripe no se llega a crear, el
-          // job la cancela al vencer; si se crea, este valor se reemplaza por el que contestó Stripe.
-          depositExpiresAt: requiresUpfrontCash ? new Date(Date.now() + CLASS_UPFRONT_PAYMENT_WINDOW_MS) : null,
+          // D681: el lugar se aparta con fecha de vencimiento desde que nace (si la liga de Stripe no se llega a crear, el job la
+          // vence); al crearse la liga, su dueño la reemplaza por la que contestó Stripe.
+          ...depositoAlCrear(
+            requiresUpfrontCash ? 'PENDING' : null,
+            requiresUpfrontCash ? new Date(Date.now() + CLASS_UPFRONT_PAYMENT_WINDOW_MS) : null,
+          ),
           confirmedAt: requiresUpfrontCash ? null : autoConfirm ? new Date() : null,
           statusLog: [
             {

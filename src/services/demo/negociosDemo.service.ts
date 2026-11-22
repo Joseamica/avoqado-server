@@ -37,6 +37,7 @@ import bcrypt from 'bcryptjs'
 
 import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
+import { depositoAlCrear } from '@/services/reservation/depositoDeReserva'
 import logger from '@/config/logger'
 import { deleteVenueDataTx, DELETION_TIMEOUT_MS } from '@/services/cleanup/liveDemoCleanup.service'
 import { conNegocio, DOMINIO_DEMO, olvidarNegocioDemo } from './candadoDemo'
@@ -935,7 +936,7 @@ async function seedReservation(
       createdById: staffId,
       // No-show deposit: requested but unpaid (demo shows "depósito no-show").
       depositAmount: new Prisma.Decimal(100),
-      depositStatus: DepositStatus.PENDING,
+      ...depositoAlCrear(DepositStatus.PENDING),
       specialRequests: 'Recordatorio por WhatsApp 24h antes. Política de depósito por no-show.',
       confirmedAt: new Date(),
     },
