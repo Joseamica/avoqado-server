@@ -1,5 +1,5 @@
 /**
- * El montaje LEGADO `/api/v1/dashboard/superadmin/staff/…` exige el ROL SUPERADMIN, no sólo el permiso `system:manage`
+ * El montaje LEGADO `/api/v1/dashboard/superadmin/…` (todo, desde el encargo fc9c53; antes sólo `/staff`) exige el ROL SUPERADMIN, no sólo el permiso `system:manage`
  * (que se puede delegar). Sin el guardia de rol, una dueña con ese permiso otorgado podía asignarse `SUPERADMIN` por
  * `PATCH …/staff/:staffId/venues/:venueId` y con eso pasar cualquier guardia de rol (p. ej. el del apagador del SDK propio).
  * Postgres real; series ficticias AVQD-99000005xx (otros archivos usan otros rangos).
@@ -96,10 +96,6 @@ const asignarRol = (staffId: string, role: string, token: string) =>
 
 describe('montaje legado /dashboard/superadmin/staff', () => {
   it('un OWNER con system:manage otorgado no puede asignarse SUPERADMIN ⇒ 403 del guardia de ROL; su rol no cambia', async () => {
-    // El permiso otorgado sí la deja pasar el guardia del montaje legado: una ruta hermana sin guardia de rol le contesta.
-    const ficha = await request(app).get(`${LEGADO}/terminals/${terminalId}`).set('Authorization', `Bearer ${tokenDueno}`)
-    expect(ficha.status).toBe(200)
-
     const respuesta = await asignarRol(duenoId!, 'SUPERADMIN', tokenDueno)
 
     // Quien dijo que no es `authorizeRole`, no `checkPermission` (que diría «Permission 'system:manage' required»).
@@ -118,5 +114,55 @@ describe('montaje legado /dashboard/superadmin/staff', () => {
 
     expect(respuesta.status).toBe(200)
     expect(await rol(meseraId!)).toBe('MANAGER')
+  })
+})
+
+// Encargo fc9c53: el guardia de ROL cubre TODO el montaje legado, no sólo `/staff`. Antes, la dueña con `system:manage`
+// prestado leía terminales, negocios y ajustes de plataforma, y cambiaba el estado de cualquier negocio.
+describe('montaje legado /dashboard/superadmin completo', () => {
+  const ROL = { error: 'Forbidden', message: 'Acceso denegado. Se requiere uno de los siguientes roles: SUPERADMIN.' }
+  const como = (token: string) => ({ Authorization: `Bearer ${token}` })
+
+  it.each([
+    ['GET', () => `${LEGADO}/terminals/${terminalId}`],
+    ['GET', () => `${LEGADO}/venues/list`],
+    ['GET', () => `${LEGADO}/venues/${venueId}`],
+    ['GET', () => `${LEGADO}/platform-settings`],
+    ['GET', () => `${LEGADO}/revenue/metrics`],
+  ])('un OWNER con system:manage otorgado recibe 403 del guardia de ROL en %s %s', async (_metodo, ruta) => {
+    const respuesta = await request(app).get(ruta()).set(como(tokenDueno))
+    expect(respuesta.status).toBe(403)
+    expect(respuesta.body).toEqual(ROL)
+  })
+
+  it('un OWNER con system:manage otorgado no puede cambiar el estado de un negocio ⇒ 403 y el estado no cambia', async () => {
+    const antes = (await prisma.venue.findUniqueOrThrow({ where: { id: venueId! }, select: { status: true } })).status
+    const respuesta = await request(app)
+      .patch(`${LEGADO}/venues/${venueId}/status`)
+      .set(como(tokenDueno))
+      .send({ status: 'SUSPENDED', reason: 'prueba del guardia de rol' })
+    expect(respuesta.status).toBe(403)
+    expect(respuesta.body).toEqual(ROL)
+    expect((await prisma.venue.findUniqueOrThrow({ where: { id: venueId! }, select: { status: true } })).status).toBe(antes)
+  })
+
+  it('un OWNER SIN system:manage sigue frenado por el guardia de PERMISO (no cambia lo de antes)', async () => {
+    await prisma.venueRolePermission.deleteMany({ where: { venueId, role: 'OWNER' } })
+    try {
+      const respuesta = await request(app).get(`${LEGADO}/terminals/${terminalId}`).set(como(tokenDueno))
+      expect(respuesta.status).toBe(403)
+      expect(respuesta.body).not.toEqual(ROL)
+    } finally {
+      await prisma.venueRolePermission.create({
+        data: { venueId: venueId!, role: 'OWNER', permissions: ['system:manage'], modifiedBy: superadminId! },
+      })
+    }
+  })
+
+  it('un SUPERADMIN sigue leyendo la ficha de la terminal y la lista de negocios', async () => {
+    const ficha = await request(app).get(`${LEGADO}/terminals/${terminalId}`).set(como(tokenSuperadmin))
+    expect(ficha.status).toBe(200)
+    const lista = await request(app).get(`${LEGADO}/venues/list`).set(como(tokenSuperadmin))
+    expect(lista.status).toBe(200)
   })
 })
