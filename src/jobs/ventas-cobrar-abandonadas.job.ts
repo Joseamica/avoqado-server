@@ -29,14 +29,23 @@ import { ORDER_LOCK_WAIT_BUDGET } from '../services/shared/paymentShiftClaim'
  *    (`CheckoutViewModel.createPayLaterOrder` lo exige), así que una con cliente puede ser una cuenta abierta A PROPÓSITO;
  *  - ningún `Payment` de ningún estado, ninguna asignación de pago y NINGUNA `TerminalPaymentRequest`, ni siquiera una rechazada
  *    (el POS intentó cobrarla: igual que el retiro de la TPV, se queda; Codex r3 #4);
- *  - que anularla no devuelva nada que un cobro tardío pueda gastar dos veces (auditorías de Codex del 21-nov, antes de ACTIVO).
- *    Anular suelta lo apartado y devuelve lo contado; si después llega el cobro, la venta se reabre con el beneficio puesto y nadie
- *    lo vuelve a contar. Por eso se quedan, como hoy:
- *      · las que tienen CUPÓN: su uso queda apartado y otra venta podría tomar el último;
- *      · las que tienen un descuento con su uso CONTADO (`usoContado`, D24; p. ej. el que el POS le puso a la cuenta): anular lo
- *        devuelve y el «primeros N» se pasaría;
- *      · las que un REFERIDO usa como venta que lo califica: anular lo manda a VOID y el cobro tardío ya no lo califica;
+ *  - SIN NINGÚN DESCUENTO y sin REFERIDO: que anularla no devuelva nada que un cobro tardío deje a medias o cuente dos veces
+ *    (auditorías de Codex del 21-nov antes de ACTIVO; tras dos rondas con la misma familia, la pasada completa de abajo).
  *  - creada Y tocada por última vez hace más de 24 h, y con la misma versión que al elegirla.
+ *
+ * 🔴 Lo que una anulación devuelve, y por qué la limpieza no se cruza con ninguno (pasada completa, 21-nov). Si después llega el cobro
+ * tardío, la venta se reabre (`reabrirSiRecibeDinero`) y NADIE vuelve a contar lo que la anulación devolvió:
+ *   | efecto de anular (`cancelOrderInTransaction` + `publishCancelledOrder`) | cómo queda fuera                               |
+ *   | comandas retiradas de la pantalla de cocina                            | a propósito: la cocina descarta > 12 h          |
+ *   | uso de un descuento con tope (`usoContado`, D24)                       | sin ningún descuento                            |
+ *   | canje de puntos o premio de sellos (se devuelve y se BORRA la fila)    | sin ningún descuento (si no, deuda que no hubo) |
+ *   | apartado del cupón (cuenta sólo ventas vivas)                          | sin ningún descuento                            |
+ *   | referidos a VOID (`onOrderCancelled`, después del commit)              | sin referido bajo el candado + `sinReferidos`   |
+ *   | vales V7 que se sueltan                                                | nacen CONFIRMED y sin la llave de Cobrar        |
+ *   | sobres de tarjetas de regalo desactivados                              | su venta lleva la llave `giftcard:`             |
+ *   | mesa que se libera · folio de la tienda (sello y cortesía)             | sin mesa · sin pedido en línea                  |
+ *   | pases de Wallet de clientas con premio                                 | sólo nacen de un canje: sin ningún descuento    |
+ *   Un efecto NUEVO de anular entra a esta tabla antes de activar la limpieza en otro lado.
  *
  * La anulación es la de siempre (`cancelOrderInTransaction`: retira la comanda de la pantalla de cocina, suelta vales, devuelve
  * canjes y usos). La bitácora `ORDER_CANCELLED` (camino `LIMPIEZA_VENTA_COBRAR_ABANDONADA`, sin persona) va DENTRO de la
@@ -44,7 +53,9 @@ import { ORDER_LOCK_WAIT_BUDGET } from '../services/shared/paymentShiftClaim'
  * aprobada que el aparato registra tarde) la reabre con rastro (`reabrirSiRecibeDinero`, prueba de integración). Su comanda no sale,
  * y es a propósito: la cocina descarta los renglones de más de 12 h (`KITCHEN_STALENESS_MS`) y tras 24 h el cliente ya se fue
  * (promesa de D36, Codex r3 #1). Lo que el aparato nunca registra, el SERVIDOR no lo ve, anulada o no: igual que hoy (declarado).
- * La lista legacy de «Órdenes» de las TPV viejas ya no ofrece una venta anulada para cobrarla (`getOrders`, 21-nov).
+ * La lista legacy de «Órdenes» de las TPV viejas ya no ofrece una venta anulada para cobrarla (`getOrders`, 21-nov). Una TPV vieja que
+ * todavía la tenga abierta en pantalla puede cobrarla en vivo (Codex r2 #3): el dinero se registra y la venta se reabre con rastro, lo
+ * mismo que pasaría sin la limpieza (la venta seguía abierta), y como no lleva descuentos ni referidos, nada se cuenta dos veces.
  *
  * 🔴 ENSAYO por omisión (`LIMPIEZA_VENTAS_COBRAR`): no escribe NADA, sólo deja una línea por negocio en el log
  * («[LIMPIEZA COBRAR · ENSAYO] anularía N …», con `venueName`). Pasar a `ACTIVO` es un cambio de configuración en producción que se
@@ -87,7 +98,7 @@ const abandonadaDeCobrar = (umbral: Date): Prisma.Sql => Prisma.sql`
   AND NOT EXISTS (SELECT 1 FROM "Payment" p WHERE p."orderId" = o.id)
   AND NOT EXISTS (SELECT 1 FROM "PaymentAllocation" pa WHERE pa."orderId" = o.id)
   AND NOT EXISTS (SELECT 1 FROM "TerminalPaymentRequest" r WHERE r."venueId" = o."venueId" AND r."orderId" = o.id)
-  AND NOT EXISTS (SELECT 1 FROM "OrderDiscount" d WHERE d."orderId" = o.id AND (d."couponCodeId" IS NOT NULL OR d."usoContado"))
+  AND NOT EXISTS (SELECT 1 FROM "OrderDiscount" d WHERE d."orderId" = o.id)
   AND NOT EXISTS (SELECT 1 FROM "Referral" rf WHERE rf."qualifyingOrderId" = o.id)
   AND o."createdAt" < ${utcTs(umbral)}
   AND o."updatedAt" < ${utcTs(umbral)}`
@@ -187,7 +198,8 @@ export async function anularVentaDeCobrarAbandonada(c: Candidata, umbral: Date):
     throw error
   }
   // La bitácora ya quedó en la transacción: aquí sólo los avisos de cualquier anulación (sockets, referidos, vales, pases).
-  await publishCancelledOrder(c.venueId, result, undefined, MOTIVO_LIMPIEZA_COBRAR, undefined, { bitacoraEnLaTx: true })
+  // `sinReferidos`: bajo el candado la venta no tenía referidos; uno capturado en el instante después se queda para el cobro tardío.
+  await publishCancelledOrder(c.venueId, result, undefined, MOTIVO_LIMPIEZA_COBRAR, undefined, { bitacoraEnLaTx: true, sinReferidos: true })
   return 'anulada'
 }
 
