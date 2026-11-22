@@ -7786,7 +7786,10 @@ export async function cancelOrderInTransaction(
   const canjes = await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: performedBy, camino: 'cancelOrder' })
   const removed = await tx.order.update({
     where: { id: orderId },
-    data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelada: ${reason}` } : {}) },
+    // hz:e82938e1:D38: la anulación ya retiró las comandas (arriba); la marca de «por mandar a cocina» se va con ella. Si se quedaba y el
+    // dinero ya capturado reabría la cuenta antes del barrido (cada minuto), el barrido armaba la comanda de una cancelada reabierta, y
+    // la regla S1 dice que no vuelve a la cocina. Un folio de la tienda que revive la vuelve a poner él (`revivirFolioSaldadoEnTx`).
+    data: { status: 'CANCELLED', kitchenPendingAt: null, ...(reason ? { specialRequests: `Cancelada: ${reason}` } : {}) },
     select: { tableId: true },
   })
   // Spec § 5.1.8: una cuenta de tarjetas cancelada ANTES de cobrarse deja sus sobres DEACTIVATED sin activarse.
