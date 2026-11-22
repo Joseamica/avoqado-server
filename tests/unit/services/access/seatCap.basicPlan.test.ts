@@ -330,6 +330,16 @@ describe('🔴 el barrido recorre TODAS las páginas en la misma corrida (revisi
 })
 
 describe('volver a cubrir', () => {
+  it('D19 (Codex r1 #1): alguien que el dueño ya reactivó con el switch (activo, con la marca del tope) no se lleva un lugar al recuperar', async () => {
+    team(2, 7)
+    // sv_08 era el apagado más reciente; el dueño lo prendió a mano y conserva la marca del tope.
+    Object.assign(seats.find(s => s.id === 'sv_08')!, { active: true })
+    grants = [covering(5)]
+    expect(await restoreBasicSeats(VENUE)).toBe(2)
+    expect(activeCount()).toBe(5)
+    expect(seats.filter(s => s.active).map(s => s.id)).toEqual(['sv_00', 'sv_01', 'sv_06', 'sv_07', 'sv_08'])
+  })
+
   it('con seatCap:5 y 7 apagados, recuperar regresa sólo 5, del más reciente al más viejo', async () => {
     team(2, 7)
     grants = [covering(5)]

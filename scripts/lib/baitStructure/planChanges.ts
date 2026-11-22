@@ -102,13 +102,19 @@ type SnapshotAssignment = ProdSnapshot['assignments'][number]
  * donde la persona estuvo activa más recientemente. Tupla [tier, timestamp]: una asignación
  * ACTIVA hoy siempre le gana a cualquier asignación ya terminada (tier 1 vs 0), sin importar
  * fechas — está pasando AHORA. Entre dos activas, gana el `startDate` más nuevo (la que tomó más
- * recientemente); entre dos inactivas, gana el `endDate` más nuevo (la que dejó más recientemente).
+ * recientemente); entre dos inactivas, gana el `endDate` más nuevo (la que dejó más recientemente) y, si las
+ * dejó a la vez (una baja de toda la organización sella la misma fecha, D19), el `startDate` más nuevo.
  * Sin fecha (snapshots de prueba que no la mandan) cae a epoch, para no reventar.
  */
-function scoreRecency(a: SnapshotAssignment): [number, number] {
+function scoreRecency(a: SnapshotAssignment): [number, number, number] {
   const EPOCH = new Date(0)
-  if (a.active) return [1, (a.startDate ?? EPOCH).getTime()]
-  return [0, (a.endDate ?? a.startDate ?? EPOCH).getTime()]
+  const inicio = (a.startDate ?? EPOCH).getTime()
+  if (a.active) return [1, inicio, inicio]
+  return [0, (a.endDate ?? a.startDate ?? EPOCH).getTime(), inicio]
+}
+const compararRecencia = (a: SnapshotAssignment, b: SnapshotAssignment): number => {
+  const [x, y] = [scoreRecency(a), scoreRecency(b)]
+  return y[0] - x[0] || y[1] - x[1] || y[2] - x[2]
 }
 
 type PinLookup = { status: 'FOUND'; pin: string; fromVenueName: string } | { status: 'NONE' } | { status: 'AMBIGUOUS' }
@@ -126,19 +132,11 @@ function findMostRecentPin(staffId: string, excludeVenueId: string, snapshot: Pr
   )
   if (candidates.length === 0) return { status: 'NONE' }
 
-  const sorted = [...candidates].sort((a, b) => {
-    const [aTier, aTime] = scoreRecency(a)
-    const [bTier, bTime] = scoreRecency(b)
-    return aTier !== bTier ? bTier - aTier : bTime - aTime
-  })
+  const sorted = [...candidates].sort(compararRecencia)
 
   const [top, second] = sorted
-  if (second) {
-    const [topTier, topTime] = scoreRecency(top)
-    const [secondTier, secondTime] = scoreRecency(second)
-    if (topTier === secondTier && topTime === secondTime && top.pin !== second.pin) {
-      return { status: 'AMBIGUOUS' }
-    }
+  if (second && compararRecencia(top, second) === 0 && top.pin !== second.pin) {
+    return { status: 'AMBIGUOUS' }
   }
 
   const venue = snapshot.venues.find(v => v.id === top.venueId)

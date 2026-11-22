@@ -421,8 +421,9 @@ export async function reactivateSeatCapDeactivatedUpTo(venueId: string, cap: num
     ])
     const room = cap - active - pending
     if (room <= 0) return []
+    // `active: false`: quien el dueño ya prendió a mano conserva la marca, y desde D19 sin fecha (NULL va primero en desc).
     const back = await tx.staffVenue.findMany({
-      where: { venueId, deactivatedBySeatCap: true },
+      where: { venueId, deactivatedBySeatCap: true, active: false },
       orderBy: [{ endDate: 'desc' }, { id: 'asc' }],
       take: room,
       select: { id: true },

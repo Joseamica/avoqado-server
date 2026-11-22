@@ -490,6 +490,18 @@ describe('planPinForNewAssignment — función pura de herencia de PIN', () => {
     expect(planPinForNewAssignment('promo', 'v1', snapshot)).toEqual({ status: 'SIN_PIN', reason: 'AMBIGUO' })
   })
 
+  it('D19 (Codex r1 #4): dos bajas con la MISMA fecha (botón de la organización) desempatan por la que se tomó más recientemente', () => {
+    const baja = new Date('2026-11-21T18:00:00.000Z')
+    const snapshot = snapshotConPin({
+      venues: [...SNAPSHOT.venues, { id: 'v3', name: 'BAE OTRA (7777)', status: 'ACTIVE' }],
+      assignments: [
+        { staffId: 'promo', venueId: 'v2', role: 'WAITER', active: false, pin: '1111', startDate: new Date('2025-01-01'), endDate: baja },
+        { staffId: 'promo', venueId: 'v3', role: 'WAITER', active: false, pin: '2222', startDate: new Date('2026-01-01'), endDate: baja },
+      ],
+    })
+    expect(planPinForNewAssignment('promo', 'v1', snapshot)).toEqual({ status: 'INHERIT', pin: '2222', fromVenueName: 'BAE OTRA (7777)' })
+  })
+
   it('varias filas con el MISMO pin no son ambiguas: no importa cuántas, hereda ese único valor', () => {
     const snapshot = snapshotConPin({
       venues: [...SNAPSHOT.venues, { id: 'v3', name: 'BAE OTRA (7777)', status: 'ACTIVE' }],

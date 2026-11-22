@@ -83,6 +83,27 @@ it('cualquier escritor: updateMany (botón de la organización), upsert (volver 
   expect((await fila()).endDate!.getTime()).toBe(propia.getTime())
 })
 
+it('una baja nunca queda sin fecha: ni mandando `endDate: null` sobre una fila activa con fecha vieja (Codex r1 #5)', async () => {
+  await prisma.staffVenue.update({ where: { id: svBea }, data: { endDate: new Date('2026-05-23T18:54:01.999Z') } }) // como la fila viva de prod
+  const antes = Date.now()
+  await prisma.staffVenue.update({ where: { id: svBea }, data: { active: false, endDate: null } })
+  esAhora((await fila()).endDate, antes)
+})
+
+it('dentro de una transacción larga, la fecha es la de la baja y no la de cuando abrió la transacción (Codex r1 #6)', async () => {
+  let antes = 0
+  await prisma.$transaction(
+    async tx => {
+      await tx.staffVenue.findUniqueOrThrow({ where: { id: svBea } })
+      await new Promise(r => setTimeout(r, 2500))
+      antes = Date.now()
+      await tx.staffVenue.update({ where: { id: svBea }, data: { active: false } })
+    },
+    { timeout: 10_000 },
+  )
+  esAhora((await fila()).endDate, antes)
+})
+
 it('la asistencia sigue mostrando los días que trabajó quien se dio de baja con el switch', async () => {
   const zona = 'America/Mexico_City'
   const hoy = DateTime.now().setZone(zona).startOf('day')
