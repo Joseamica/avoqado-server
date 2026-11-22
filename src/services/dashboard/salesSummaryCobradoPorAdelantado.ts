@@ -1,0 +1,77 @@
+/**
+ * Lo cobrado por adelantado que NO es venta del Resumen de ventas (carril G, hz:fefa11b6:D5, 22-nov-2026).
+ *
+ * Dos entradas de dinero no crean `Order` ni `Payment`, así que el reporte no las veía en ningún lado:
+ * - el paquete de clases comprado en línea (`fulfillPurchase`, webhook de Stripe Connect): única que llena `stripeCheckoutSessionId`.
+ *   El paquete vendido en la caja pasa por una cuenta (`fulfillCreditPacksForOrder`, `sellPackInPerson`) y ya está en ventas;
+ * - el depósito de una reserva (`Reservation.depositAmount`, cobrado por Stripe): sólo marca `depositStatus = PAID` y `depositPaidAt`.
+ *
+ * ¿Es venta el día que se compra o cuando se usa? ¿El depósito es venta o anticipo? Lo decide el founder (promesa del carril G).
+ * Mientras, como «Tarjetas de regalo cargadas» y como el «Deferred» de Square y Toast: renglones informativos aparte, por la fecha en
+ * que se cobraron, FUERA de ventas y de «Neto cobrado».
+ *
+ * - Paquetes: por `purchasedAt`, la hora en que Avoqado recibió la confirmación del pago (el aviso de Stripe llega segundos después;
+ *   si tarda, puede caer al día siguiente: no se guarda la hora del cargo, Codex r1 #8). Todos los estados: el «reembolsado» del
+ *   panel sólo marca, no regresa dinero (`creditPack.dashboard.service`), y no guarda cuándo.
+ * - Depósitos: lo cobrado en el rango (`depositPaidAt`) menos lo devuelto en el rango (`REFUNDED` + `depositRefundedAt`), con el
+ *   conteo de los cobrados. Uno perdido por no-show (`FORFEITED`) o en disputa conserva su cobro. Sin `depositPaidAt` no hay fecha
+ *   de cobro y no se cuenta.
+ */
+import prisma from '@/utils/prismaClient'
+import { utcTs } from '@/utils/sqlDates'
+
+export interface PrepaidOutsideSales {
+  packagesSoldOnline: number
+  packagesSoldOnlineCount: number
+  /** Cobrado en el rango menos lo devuelto en el rango (neto). */
+  reservationDeposits: number
+  /** Cuántos depósitos se cobraron en el rango. */
+  reservationDepositsCount: number
+  /** Lo devuelto en el rango (de depósitos de cualquier día): con él, un cobro y su devolución del mismo día no desaparecen ($0 neto). */
+  reservationDepositsRefunded: number
+}
+
+const round2 = (n: number) => Math.round(n * 100) / 100
+
+export async function computePrepaidOutsideSales(
+  venueId: string,
+  start: Date,
+  end: Date,
+  db: Pick<typeof prisma, '$queryRaw'> = prisma,
+): Promise<PrepaidOutsideSales> {
+  const [paquetes, depositos] = await Promise.all([
+    db.$queryRaw<Array<{ importe: string; cuantos: number }>>`
+      SELECT COALESCE(SUM("amountPaid"), 0)::text AS importe, COUNT(*)::int AS cuantos
+      FROM "CreditPackPurchase"
+      WHERE "venueId" = ${venueId}
+        AND "stripeCheckoutSessionId" IS NOT NULL
+        AND "purchasedAt" >= ${utcTs(start)}
+        AND "purchasedAt" <= ${utcTs(end)}
+    `,
+    // El filtro por `depositStatus` (sólo los que alguna vez se cobraron) deja que Postgres use su índice: casi ninguna reserva lleva
+    // depósito, así que no recorre las reservas del negocio.
+    db.$queryRaw<Array<{ cobrado: string; cuantos: number; devuelto: string }>>`
+      SELECT
+        COALESCE(SUM("depositAmount") FILTER (WHERE "depositPaidAt" >= ${utcTs(start)} AND "depositPaidAt" <= ${utcTs(end)}), 0)::text AS cobrado,
+        (COUNT(*) FILTER (WHERE "depositPaidAt" >= ${utcTs(start)} AND "depositPaidAt" <= ${utcTs(end)}))::int AS cuantos,
+        COALESCE(SUM("depositAmount") FILTER (
+          WHERE "depositStatus" = 'REFUNDED' AND "depositRefundedAt" >= ${utcTs(start)} AND "depositRefundedAt" <= ${utcTs(end)}
+        ), 0)::text AS devuelto
+      FROM "Reservation"
+      WHERE "venueId" = ${venueId}
+        AND "depositStatus" IN ('PAID', 'REFUNDED', 'FORFEITED', 'DISPUTED')
+        AND "depositAmount" IS NOT NULL
+        AND (
+          ("depositPaidAt" >= ${utcTs(start)} AND "depositPaidAt" <= ${utcTs(end)})
+          OR ("depositRefundedAt" >= ${utcTs(start)} AND "depositRefundedAt" <= ${utcTs(end)})
+        )
+    `,
+  ])
+  return {
+    packagesSoldOnline: round2(Number(paquetes[0]?.importe ?? 0)),
+    packagesSoldOnlineCount: Number(paquetes[0]?.cuantos ?? 0),
+    reservationDeposits: round2(Number(depositos[0]?.cobrado ?? 0) - Number(depositos[0]?.devuelto ?? 0)),
+    reservationDepositsCount: Number(depositos[0]?.cuantos ?? 0),
+    reservationDepositsRefunded: round2(Number(depositos[0]?.devuelto ?? 0)),
+  }
+}

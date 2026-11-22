@@ -73,6 +73,13 @@ import {
   sqlLoQueFaltaCobrar,
 } from '@/services/dashboard/salesSummaryPoblacion'
 import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraReal, sqlRangoHoraRealSql } from '@/services/shared/horaRealDelAparato'
+import {
+  computeSalesByChannel,
+  type SalesBreakdownRow,
+  type SalesChannel,
+  type SalesOrderType,
+} from '@/services/dashboard/salesSummaryCanales'
+import { computePrepaidOutsideSales } from '@/services/dashboard/salesSummaryCobradoPorAdelantado'
 
 // ============================================================
 // Types
@@ -126,6 +133,17 @@ export interface SalesSummaryMetrics {
    * tarjetas VENDIDAS: lo gastado de un saldo a favor es venta normal (S8b).
    */
   paidWithGiftCardBalance?: number
+  // Carril G · D5 — aditivos; sólo con `includePrepaid` y en la vista de ventas. Cobrado por adelantado que NO es venta (no está en
+  // grossSales ni en totalCollected), como las tarjetas de regalo cargadas: `salesSummaryCobradoPorAdelantado.ts`.
+  /** Paquetes de clases comprados en línea, por la fecha de su compra. */
+  packagesSoldOnline?: number
+  packagesSoldOnlineCount?: number
+  /** Depósitos de reservas cobrados en el rango menos los devueltos en el rango (neto). */
+  reservationDeposits?: number
+  /** Cuántos depósitos se cobraron en el rango. */
+  reservationDepositsCount?: number
+  /** Lo devuelto de depósitos en el rango. */
+  reservationDepositsRefunded?: number
 }
 
 export interface PaymentMethodBreakdown {
@@ -359,6 +377,14 @@ export interface SalesSummaryResponse {
   statementDestinations?: StatementDestinations
   settlementCalendar?: SettlementCalendarDay[] // additive; present only when includeSettlementProjection=true
   giftCardBalanceBreakdown?: GiftCardBalanceBreakdown // aditivo (tarjetas de regalo); con groupBy=paymentMethod y sin filtro
+  /**
+   * Carril G · D4 — aditivos; sólo con `includeChannelBreakdown` (Pro) y en la vista de ventas. La cabecera repartida por canal
+   * (por dónde entró) y por tipo de pedido (cómo se entregó): cada tabla suma la cabecera al centavo.
+   */
+  byChannel?: SalesBreakdownRow<SalesChannel>[]
+  byOrderType?: SalesBreakdownRow<SalesOrderType>[]
+  /** El controlador lo pone cuando se pidió el desglose por canal y el plan del negocio no lo incluye (la pantalla pinta el candado). */
+  channelBreakdownLocked?: true
   filtered: boolean
   /**
    * Additive; present ONLY when the MindForm legacy QR bridge could not answer (legacy DB down,
@@ -403,6 +429,10 @@ export interface SalesSummaryFilters {
   includeSettlementProjection?: boolean // additive opt-in; adds settlementCalendar + per-merchant estimatedSettlement
   /** La B (C1): no corre el agregado de CommissionCalculation y `staffCommissions` sale 0. Sin la opción, el panel no cambia. */
   skipStaffCommissions?: boolean
+  /** Carril G · D4: `byChannel` y `byOrderType` (el controlador sólo la deja pasar con ADVANCED_REPORTS). */
+  includeChannelBreakdown?: boolean
+  /** Carril G · D5: paquetes vendidos en línea y depósitos de reservas en `summary` (renglones que no son venta). */
+  includePrepaid?: boolean
 }
 
 /** Round money to cents — keeps API/MCP payloads free of float-accumulation noise. */
@@ -1607,6 +1637,12 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     summary.paidWithGiftCardBalance = round2(tarjetas.balancePaid - tarjetas.balanceReversals)
   }
 
+  // Carril G · D5: paquetes en línea y depósitos de reservas, aparte de las ventas (no crean cuenta ni cobro). Como las tarjetas
+  // cargadas, sólo en la vista de ventas: en la de movimientos la cabecera son cobros de un método o comercio, y éstos no lo son.
+  if (filters.includePrepaid && !vistaDeMovimientos) {
+    Object.assign(summary, await computePrepaidOutsideSales(venueId, parsedStartDate, parsedEndDate))
+  }
+
   // ============================================================
   // Payment Method Breakdown (if requested)
   // ============================================================
@@ -2086,6 +2122,12 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     }
   }
 
+  // Carril G · D4: la cabecera repartida por canal y por tipo de pedido (misma población, cada tabla suma la cabecera).
+  const canales =
+    filters.includeChannelBreakdown && !vistaDeMovimientos
+      ? await computeSalesByChannel(venueId, parsedStartDate, parsedEndDate, { cabecera: summary, legacy: legacyAggregate })
+      : null
+
   // Sin importes (la B lo lee también, caso 23): sólo cuántos cobros y de qué reporte.
   logger.info('Sales summary calculated', {
     venueId,
@@ -2110,6 +2152,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     ...(statementDestinations ? { statementDestinations } : {}),
     settlementCalendar,
     ...(giftCardBalanceBreakdown ? { giftCardBalanceBreakdown } : {}),
+    ...(canales ? { byChannel: canales.byChannel, byOrderType: canales.byOrderType } : {}),
     // D9.1: true en la vista de movimientos (método o comercio) — las métricas de orden vienen en null.
     filtered: vistaDeMovimientos,
     ...(legacyUnavailable ? { legacyUnavailable: true as const } : {}),
