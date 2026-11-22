@@ -523,15 +523,16 @@ async function record(cur: Cur, now: Date, limites?: ProviderRequestLimits): Pro
 }
 
 /** El sello no confía en `issueRefund` (su repetición regresa antes del sello y su llamada no es durable; Codex r6). */
-async function reverseStamp(cur: Cur, now: Date): Promise<void> {
+async function reverseStamp(cur: Cur, now: Date, siguiente?: Date): Promise<void> {
   const { orderId } = await chargeOf(cur.row)
   await reverseStampForOrder(cur.row.venueId, orderId)
-  // También en REVERSED/RESOLVED: la venta sigue devuelta. Ésas ya no se revisan después.
+  // También en REVERSED/RESOLVED: la venta sigue devuelta. Ésas ya no se revisan después (D670: salvo una cerrada «en Stripe», que
+  // trae su `siguiente` revisión; con NEVER_AGAIN un reinicio justo aquí la sacaba del recorrido, Codex r2 #4).
   await prisma.onlineOrderCardRefund.updateMany({
     where: { id: cur.row.id, status: cur.row.status, stampReversedAt: null },
     data: {
       stampReversedAt: now,
-      nextCheckAt: cur.row.status === R.RECORDED ? nextLateCheck(ledgerBase(cur.row), now) : NEVER_AGAIN,
+      nextCheckAt: siguiente ?? (cur.row.status === R.RECORDED ? nextLateCheck(ledgerBase(cur.row), now) : NEVER_AGAIN),
       lastError: null,
     },
   })
@@ -935,7 +936,10 @@ async function leerDevolucionesPorFuera(
   }
 }
 
-async function exigirSinDevolucionPorFuera(charge: CargoEnStripe): Promise<void> {
+async function exigirSinDevolucionPorFuera(
+  charge: CargoEnStripe,
+  mensaje: (porFuera: string) => string = () => MENSAJE_POR_FUERA,
+): Promise<void> {
   const { estado, porFueraCents: porFuera } = await leerDevolucionesPorFuera(charge)
   if (!porFuera) return
   logger.error('🚨 [OnlineOrderCardRefund] el cargo ya tiene una devolución hecha fuera de Avoqado: no se devuelve otra vez', {
@@ -944,7 +948,7 @@ async function exigirSinDevolucionPorFuera(charge: CargoEnStripe): Promise<void>
     amountRefunded: pesos(estado.amountRefundedCents),
     porFuera: pesos(porFuera),
   })
-  throw new ConflictError(MENSAJE_POR_FUERA, 'EXTERNAL_REFUND_DETECTED')
+  throw new ConflictError(mensaje(pesos(porFuera)), 'EXTERNAL_REFUND_DETECTED')
 }
 
 /**
@@ -1455,53 +1459,49 @@ const usadoEnStripe = async (db: Prisma.TransactionClient, i: CerradasDelCargo) 
   (await db.onlineOrderCardRefundReversal.aggregate({ where: cerradasEnStripe(i), _sum: { amountCents: true } }))._sum.amountCents ?? 0
 
 /**
- * D668: el 409 de «Devolver por otro medio» cuando el cargo trae devoluciones por fuera. D670 (Codex r1 #3): lo devuelto por fuera que ya
- * cerró otra reversa del cargo con «Ya se devolvió en Stripe» es de ésa y no frena (si no, una reversa reabierta se quedaba sin salida).
- */
-function exigirPorFueraYaUsado(porFueraCents: number, usadoCents: number, montoCents: number, chargeId: string): void {
-  const libre = porFueraCents - usadoCents
-  if (libre <= 0) return
-  logger.error('🚨 [OnlineOrderCardRefund] el cargo ya tiene una devolución hecha fuera de Avoqado: no se paga otra vez', {
-    chargeId,
-    porFuera: pesos(porFueraCents),
-    yaUsado: pesos(usadoCents),
-  })
-  throw new ConflictError(
-    `Este cobro ya tiene $${pesos(libre)} devueltos directo en Stripe, por fuera de Avoqado: no le des los $${pesos(montoCents)} otra vez. Revisa en Stripe si al cliente ya le llegó; si ya le llegó, usa «Ya se devolvió en Stripe». Aquí no se pagó ni se registró nada.`,
-    'EXTERNAL_REFUND_DETECTED',
-  )
-}
-
-/**
  * D668: lo que se le pregunta a Stripe ANTES de pagarle otra vez al cliente por otro medio, fuera de toda transacción. Sólo si la
- * devolución está `REVERSED`: con una devolución hecha por fuera de Avoqado (que no cerró ya otra reversa, D670) → 409
- * `EXTERNAL_REFUND_DETECTED`; sin respuesta → 503. Devuelve lo devuelto por fuera (centavos), o `null` si no está `REVERSED` (bajo el
- * candado, una `REVERSED` que no se preguntó no se paga).
+ * devolución está `REVERSED`: con una devolución hecha por fuera de Avoqado → 409 `EXTERNAL_REFUND_DETECTED`; sin respuesta → 503.
+ * `true` si se le preguntó (bajo el candado, una `REVERSED` que no se preguntó no se paga). La usan la resolución y la vista previa del MCP.
+ * D670 (Codex r2 #1): cualquier devolución viva de fuera frena, también la que ya cerró otra reversa con «Ya se devolvió en Stripe»:
+ * restarla obligaba a saber de qué reversa es cada devolución de Stripe, y con una lectura vieja la caja volvía a pagar.
  */
-async function porFueraAntesDeOtroMedio(i: { venueId: string; orderId: string; cardRefundId: string }): Promise<number | null> {
-  const fila = await prisma.onlineOrderCardRefund.findFirst({ where: filaDeOtroMedio(i) })
-  if (fila?.status !== R.REVERSED) return null
-  const { charge, paymentIntentId } = await chargeOf(fila)
-  const { porFueraCents } = await leerDevolucionesPorFuera({ ...charge, paymentIntentId })
-  if (porFueraCents > 0) {
-    const usado = await usadoEnStripe(prisma, { venueId: fila.venueId, chargeId: fila.chargeId })
-    exigirPorFueraYaUsado(porFueraCents, usado, fila.amountCents, fila.chargeId)
-  }
-  return porFueraCents
-}
-/** D668: la revisión de arriba para la vista previa del MCP: `true` si se le preguntó a Stripe. */
 export async function revisarStripeAntesDeOtroMedio(i: { venueId: string; orderId: string; cardRefundId: string }): Promise<boolean> {
-  return (await porFueraAntesDeOtroMedio(i)) !== null
+  const fila = await prisma.onlineOrderCardRefund.findFirst({ where: filaDeOtroMedio(i) })
+  if (fila?.status !== R.REVERSED) return false
+  const { charge, paymentIntentId } = await chargeOf(fila)
+  await exigirSinDevolucionPorFuera(
+    { ...charge, paymentIntentId },
+    porFuera =>
+      `Este cobro ya tiene $${porFuera} devueltos directo en Stripe, por fuera de Avoqado: no le des los $${pesos(fila.amountCents)} otra vez. Revisa en Stripe si al cliente ya le llegó; si ya le llegó, usa «Ya se devolvió en Stripe». Aquí no se pagó ni se registró nada.`,
+  )
+  return true
 }
 
 /** D670: lo que Stripe ya devolvió por fuera de Avoqado (sólo lo `SUCCEEDED` cuenta) y lo que sigue pendiente, en centavos. */
-type Cobertura = { hechasCents: number; pendientesCents: number; stripeRefundIds: string[] }
-const coberturaDe = (deFuera: DevolucionDeStripe[]): Cobertura => {
+type Cobertura = { hechasCents: number; pendientesCents: number; stripeRefundIds: string[]; leidaEn: Date }
+const coberturaDe = (deFuera: DevolucionDeStripe[], leidaEn: Date = new Date()): Cobertura => {
   const hechas = deFuera.filter(r => r.status === 'SUCCEEDED')
   return {
     hechasCents: sumaCents(hechas),
     pendientesCents: sumaCents(deFuera.filter(r => r.status === 'PENDING')),
     stripeRefundIds: hechas.map(r => r.refundId),
+    leidaEn,
+  }
+}
+/**
+ * D670 (Codex r2 #2): una devolución de Avoqado de este cargo que salió sin que sepamos su id (respuesta perdida) no se distingue de una
+ * de fuera si alguien le borra la metadata: mientras exista, «Ya se devolvió en Stripe» espera (no se cierra una deuda con dinero propio).
+ */
+async function exigirSinDevolucionNuestraEnCamino(db: Prisma.TransactionClient, fila: { venueId: string; chargeId: string; id: string }) {
+  const enCamino = await db.onlineOrderCardRefund.findFirst({
+    where: { venueId: fila.venueId, chargeId: fila.chargeId, id: { not: fila.id }, status: { in: NO_LEDGER_YET }, stripeRefundId: null },
+    select: { id: true },
+  })
+  if (enCamino) {
+    throw new ConflictError(
+      'Hay otra devolución de Avoqado de este cobro todavía en camino: espera a que termine y vuelve a intentarlo. Aquí no se registró nada.',
+      'CARD_REFUND_IN_FLIGHT',
+    )
   }
 }
 
@@ -1545,8 +1545,12 @@ function exigirCobertura(montoCents: number, c: Cobertura, usadoCents: number): 
 export async function revisarCoberturaEnStripe(i: { venueId: string; orderId: string; cardRefundId: string }): Promise<Cobertura | null> {
   const fila = await prisma.onlineOrderCardRefund.findFirst({ where: filaDeOtroMedio(i) })
   if (fila?.status !== R.REVERSED) return null
+  await exigirSinDevolucionNuestraEnCamino(prisma, fila)
   const { charge, paymentIntentId } = await chargeOf(fila)
-  const c = coberturaDe((await leerDevolucionesPorFuera({ ...charge, paymentIntentId })).deFuera)
+  const { deFuera } = await leerDevolucionesPorFuera({ ...charge, paymentIntentId })
+  // La hora del cierre es la de esta lectura, no la de la petición: una reapertura sólo juzga cierres con lecturas más viejas que la
+  // suya (Codex r2 #3).
+  const c = coberturaDe(deFuera, new Date())
   exigirCobertura(fila.amountCents, c, await usadoEnStripe(prisma, { venueId: fila.venueId, chargeId: fila.chargeId, sinLa: fila.id }))
   return c
 }
@@ -1579,14 +1583,12 @@ export async function resolveReversedCardRefund(i: {
   const filaDeLaDevolucion = filaDeOtroMedio(i)
   let preguntadoAStripe: boolean
   let cobertura: Cobertura | null = null
-  let porFuera: number | null = null
   try {
     if (i.method === 'STRIPE') {
       cobertura = await revisarCoberturaEnStripe(i)
       preguntadoAStripe = cobertura !== null
     } else {
-      porFuera = await porFueraAntesDeOtroMedio(i)
-      preguntadoAStripe = porFuera !== null
+      preguntadoAStripe = await revisarStripeAntesDeOtroMedio(i)
     }
   } catch (error) {
     // Codex r1 #5: otra solicitud la resolvió mientras se le preguntaba a Stripe; eso es una repetición, no «no se aplicó nada».
@@ -1609,11 +1611,10 @@ export async function resolveReversedCardRefund(i: {
     if (!preguntadoAStripe) {
       throw new ConflictError('La devolución cambió mientras se resolvía. Intenta de nuevo.', 'CARD_REFUND_CHANGED')
     }
-    // D670: lo ya usado por otras reversas del cargo pudo cambiar entre la revisión y este candado.
-    if (cobertura || porFuera) {
-      const usado = await usadoEnStripe(tx, { venueId: row.venueId, chargeId: row.chargeId, sinLa: row.id })
-      if (cobertura) exigirCobertura(row.amountCents, cobertura, usado)
-      else if (porFuera) exigirPorFueraYaUsado(porFuera, usado, row.amountCents, row.chargeId)
+    // D670: lo ya usado por otras reversas del cargo, y una devolución nuestra sin id, pudieron cambiar antes de este candado.
+    if (cobertura) {
+      await exigirSinDevolucionNuestraEnCamino(tx, row)
+      exigirCobertura(row.amountCents, cobertura, await usadoEnStripe(tx, { venueId: row.venueId, chargeId: row.chargeId, sinLa: row.id }))
     }
     const cashDrawerEventId =
       i.method === 'CASH'
@@ -1636,7 +1637,7 @@ export async function resolveReversedCardRefund(i: {
       data: {
         resolvedMethod: i.method === 'STRIPE' ? CERRADA_EN_STRIPE : i.method,
         resolvedByStaffId: i.staffId,
-        resolvedAt: now,
+        resolvedAt: cobertura?.leidaEn ?? now,
         resolvedNote: note,
         cashDrawerEventId,
       },
@@ -1706,10 +1707,23 @@ async function reabrirLoQueStripeYaNoCubre(charge: CargoEnStripe & { orderId: st
     })
     if (movidas.count !== reabiertas.count) throw new Error(`las reversas del cargo ${charge.id} cambiaron mientras se reabrían`)
     const pedido = await tx.order.findFirst({ where: { id: charge.orderId, venueId: charge.venueId }, select: { orderNumber: true } })
+    // Codex r2 #6: lo que vigila el dinero queda en la MISMA transacción que la reapertura (la bitácora y el aviso son de después).
+    await tx.moneyAnomaly.createMany({
+      data: [
+        {
+          category: 'ONLINE_ORDER_CARD_REFUND_REOPENED',
+          stripeEventId: `oocr:REOPENED:${charge.id}:${antes.hasta!.toISOString()}`,
+          expectedState: { venueId: charge.venueId, orderId: charge.orderId, chargeId: charge.id, cerradoEnStripe: pesos(usadoAhora) },
+          observedState: { devueltoEnStripe: pesos(hechasCents), reabiertas: filas.map(f => f.cardRefundId) },
+        },
+      ],
+      skipDuplicates: true,
+    })
     return { filas, total: reabiertas.count, usadoAhora, orderNumber: pedido?.orderNumber ?? null }
   }, ORDER_LOCK_WAIT_BUDGET)
   if (!out) return 0
   const deuda = pesos(out.usadoAhora)
+  const faltante = pesos(out.usadoAhora - hechasCents)
   logger.error('🚨 [OnlineOrderCardRefund] lo devuelto directo en Stripe ya no alcanza: las reversas vuelven a quedar pendientes', {
     chargeId: charge.id,
     venueId: charge.venueId,
@@ -1733,7 +1747,8 @@ async function reabrirLoQueStripeYaNoCubre(charge: CargoEnStripe & { orderId: st
     {
       type: 'PAYMENT_FAILED',
       title: 'Falló la devolución hecha en Stripe',
-      message: `La devolución que se hizo directo en Stripe${out.orderNumber ? ` del pedido ${out.orderNumber}` : ''} falló en el banco: se le vuelve a deber $${deuda} a la clienta. Devuélvelo por otro medio desde el pedido.`,
+      // Codex r2 #7: el faltante, no la suma de lo reabierto (lo que Stripe siga cubriendo se vuelve a cerrar con un clic).
+      message: `Una devolución hecha directo en Stripe${out.orderNumber ? ` del pedido ${out.orderNumber}` : ''} falló en el banco: se le vuelve a deber $${faltante} a la clienta. En el pedido, lo que Stripe siga cubriendo ciérralo otra vez con «Ya se devolvió en Stripe»; lo demás devuélvelo en Stripe.`,
       entityType: 'OnlineOrderCardRefund',
       entityId: out.filas[0]?.cardRefundId ?? charge.id,
       priority: 'HIGH',
@@ -1767,21 +1782,24 @@ async function revisarCierresEnStripeDelCargo(chargeId: string, limites?: Provid
  * reintenta cada 15 min mientras dure esa ventana (contada desde el cierre, no desde el renglón).
  */
 async function revisarCierreEnStripe(cur: Cur, resolvedAt: Date, now: Date, limites?: ProviderRequestLimits) {
+  const siguiente = nextLateCheck(resolvedAt, now)
   try {
-    if (!cur.row.stampReversedAt) await reverseStamp(cur, now)
+    // Codex r2 #4: primero Stripe (el dinero) y después el sello, ya con su siguiente revisión (nunca NEVER_AGAIN antes de tiempo).
     await revisarCierresEnStripeDelCargo(cur.row.chargeId, limites)
+    cur.row = (await load(cur.row.id))!
+    if (cur.row.status !== R.RESOLVED) return { status: cur.row.status, alerted: false }
+    if (!cur.row.stampReversedAt) await reverseStamp(cur, now, siguiente)
+    else await touch(cur, siguiente)
   } catch (error) {
     const vence = resolvedAt.getTime() + LATE_CHECKS_MS[LATE_CHECKS_MS.length - 1] + LATE_GRACE_MS
+    const nextCheckAt = now.getTime() >= vence ? NEVER_AGAIN : new Date(now.getTime() + FAST_WINDOW_MS)
+    const lastError = errorText(error)
     await prisma.onlineOrderCardRefund
-      .updateMany({
-        where: { id: cur.row.id, status: R.RESOLVED },
-        data: { lastError: errorText(error), nextCheckAt: now.getTime() >= vence ? NEVER_AGAIN : new Date(now.getTime() + FAST_WINDOW_MS) },
-      })
+      .updateMany({ where: { id: cur.row.id, status: R.RESOLVED }, data: { lastError, nextCheckAt } })
       .catch(() => undefined)
+    if (nextCheckAt === NEVER_AGAIN && !cur.row.stampReversedAt) await alertStampGivenUp(cur, lastError).catch(() => undefined)
     throw error
   }
-  cur.row = (await load(cur.row.id))!
-  if (cur.row.status === R.RESOLVED) await touch(cur, nextLateCheck(resolvedAt, now))
   return { status: cur.row.status, alerted: false }
 }
 
@@ -1848,8 +1866,19 @@ export async function handleStripeRefundEvent(event: VerifiedWebhookEvent): Prom
     // Codex r1 C2: de otra cuenta o de otro modo no se avanza nada; `advanceCardRefund` relee Stripe con los ids de la FILA.
     if (await isForeignStripeEvent(event, row.charge)) return
     await advanceCardRefund(row.id)
-    // D670 (Codex r1 #2): una de fuera con la metadata copiada de otra fila también puede tumbar un cierre «en Stripe».
+    // D670 (Codex r1 #2): una de fuera con la metadata copiada de otra fila también puede tumbar un cierre «en Stripe»; y si la copió de
+    // otro pedido, el cargo de su payment_intent también se revisa (Codex r2 #5).
     await revisarCierresEnStripeDelCargo(row.charge.id)
+    const pi = typeof refund.payment_intent === 'string' ? refund.payment_intent : (refund.payment_intent?.id ?? null)
+    const delAviso = pi
+      ? await prisma.onlineOrderCharge.findUnique({
+          where: { paymentIntentId: pi },
+          select: { id: true, venueId: true, merchantSnapshot: true },
+        })
+      : null
+    if (delAviso && delAviso.id !== row.charge.id && !(await isForeignStripeEvent(event, delAviso))) {
+      await revisarCierresEnStripeDelCargo(delAviso.id)
+    }
     return
   }
   const paymentIntentId = typeof refund.payment_intent === 'string' ? refund.payment_intent : (refund.payment_intent?.id ?? null)

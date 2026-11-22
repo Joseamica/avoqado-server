@@ -1369,7 +1369,10 @@ describe('handleStripeRefundEvent', () => {
     expect(get(id).status).toBe('REVERSED')
   })
 
-  it('D670 (r1 #3): lo de fuera que ya cerró otra reversa del cargo no frena el efectivo de una reabierta', async () => {
+  // D670 (Codex r2 #1): restar lo «ya usado» dejaba que la caja pagara otra vez con una lectura vieja. Se vuelve al D668 estricto:
+  // cualquier devolución viva de fuera frena el efectivo, también la que ya cerró otra reversa (límite declarado: esa deuda se cierra en
+  // Stripe o con soporte).
+  it('D670 (r2 #1): una de fuera viva frena el efectivo aunque ya haya cerrado otra reversa del cargo', async () => {
     const a = await cerrada('STRIPE')
     const b = seed({ status: 'REVERSED', amountCents: 25_000, stripeRefundId: 're_b', stampReversedAt: NOW, nextCheckAt: NEVER_AGAIN })
     reversals.push({
@@ -1388,16 +1391,34 @@ describe('handleStripeRefundEvent', () => {
       failureReason: null,
       metadata: { type: 'online_order_refund', cardRefundId: b.id },
     }
-    // La de fuera ($250) ya cerró a; b se debe completa: el efectivo de b sí sale.
     getChargeRefunds.mockResolvedValue({ amountRefundedCents: 25_000, refunds: [fallida(a), deB, deFuera('SUCCEEDED')] })
-    const efectivoB = () =>
-      resolveReversedCardRefund({ venueId: 'v1', orderId: 'ord1', cardRefundId: b.id, method: 'CASH', staffId: 'staff2' })
-    await expect(efectivoB()).resolves.toEqual({ status: 'RESOLVED', replay: false })
-    expect(drawerEvents).toHaveLength(1)
+    const err = await resolveReversedCardRefund({
+      venueId: 'v1',
+      orderId: 'ord1',
+      cardRefundId: b.id,
+      method: 'CASH',
+      staffId: 'staff2',
+    }).catch((e: Error) => e)
+    expect(err).toMatchObject({ statusCode: 409, code: 'EXTERNAL_REFUND_DETECTED' })
+    expect((err as Error).message).toContain('$250.00 devueltos directo en Stripe')
+    expect(drawerEvents).toHaveLength(0)
     expect(get(a).status).toBe('RESOLVED')
   })
 
-  it('D670 (r1 #3): con otra de fuera LIBRE (que no cerró nada), el efectivo sigue frenado y dice sólo lo libre', async () => {
+  it('D670 (r2 #2): con una devolución nuestra del cargo en camino y sin id, «Ya se devolvió en Stripe» espera', async () => {
+    const r = await pedir()
+    getRefund.mockResolvedValue(stateOf('FAILED'))
+    await advanceCardRefund(r.cardRefundId, at(HOUR))
+    seed({ status: 'SENDING', amountCents: 25_000, stripeRefundId: null, nextCheckAt: NOW })
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 25_000, refunds: [fallida(r.cardRefundId), deFuera('SUCCEEDED')] })
+    await expect(
+      resolveReversedCardRefund({ venueId: 'v1', orderId: 'ord1', cardRefundId: r.cardRefundId, method: 'STRIPE', staffId: 'staff2' }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CARD_REFUND_IN_FLIGHT' })
+    expect(get(r.cardRefundId).status).toBe('REVERSED')
+    expect(getChargeRefunds).not.toHaveBeenCalled()
+  })
+
+  it('D670 (r2 #3): un cierre cuya lectura terminó DESPUÉS de la de un aviso no lo juzga ese aviso, aunque la petición empezara antes', async () => {
     const a = await cerrada('STRIPE')
     const b = seed({ status: 'REVERSED', amountCents: 25_000, stripeRefundId: 're_b', stampReversedAt: NOW, nextCheckAt: NEVER_AGAIN })
     reversals.push({
@@ -1409,18 +1430,103 @@ describe('handleStripeRefundEvent', () => {
       resolvedAt: null,
       resolvedMethod: null,
     })
-    const libre = { ...deFuera('SUCCEEDED'), refundId: 're_libre', amountCents: 5_000 }
-    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 30_000, refunds: [fallida(a), deFuera('SUCCEEDED'), libre] })
-    const err = await resolveReversedCardRefund({
+    const vieja = { amountRefundedCents: 0, refunds: [fallida(a), deFuera('FAILED')] }
+    const nueva = {
+      amountRefundedCents: 50_000,
+      refunds: [fallida(a), deFuera('FAILED'), { ...deFuera('SUCCEEDED'), refundId: 're_grande', amountCents: 50_000 }],
+    }
+    let soltar!: () => void
+    const puerta = new Promise<void>(r => (soltar = r))
+    let aviso!: Promise<void>
+    // b empieza a las NOW; mientras Stripe le contesta, el aviso lee (vieja, a NOW+1 min) y su candado espera; la lectura de b termina
+    // a NOW+2 min con la de fuera nueva y b se cierra. Luego el aviso toma el candado.
+    getChargeRefunds.mockImplementationOnce(async () => {
+      jest.setSystemTime(at(MIN))
+      getChargeRefunds.mockResolvedValueOnce(vieja)
+      ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => {
+        await puerta
+        return fn(prismaMock)
+      })
+      aviso = avisoDeFuera()
+      for (let k = 0; k < 10; k++) await new Promise(r => setTimeout(r, 0))
+      jest.setSystemTime(at(2 * MIN))
+      return nueva
+    })
+    await expect(
+      resolveReversedCardRefund({ venueId: 'v1', orderId: 'ord1', cardRefundId: b.id, method: 'STRIPE', staffId: 'staff2' }),
+    ).resolves.toEqual({ status: 'RESOLVED', replay: false })
+    soltar()
+    await aviso
+    expect(get(b.id).status).toBe('RESOLVED') // su lectura (más nueva) manda; el recorrido la vuelve a mirar
+    expect(get(a).status).toBe('REVERSED')
+  })
+
+  it('D670 (r2 #4): el recorrido consulta Stripe ANTES del sello: con el sello trabado, la deuda igual se reabre', async () => {
+    const id = await cerrada('STRIPE')
+    store.get(id)!.stampReversedAt = null
+    ;(reverseStampForOrder as jest.Mock).mockRejectedValue(new Error('sello trabado'))
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 0, refunds: [fallida(id), deFuera('FAILED')] })
+    await sweepCardRefunds(at(MIN), readEntry)
+    expect(get(id).status).toBe('REVERSED')
+  })
+
+  it('D670 (r2 #4): con el sello pendiente y Stripe al día, el sello queda con la siguiente revisión (no NEVER_AGAIN)', async () => {
+    const id = await cerrada('STRIPE')
+    store.get(id)!.stampReversedAt = null
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 25_000, refunds: [fallida(id), deFuera('SUCCEEDED')] })
+    await sweepCardRefunds(at(MIN), readEntry)
+    expect(get(id)).toMatchObject({ status: 'RESOLVED', stampReversedAt: at(MIN), nextCheckAt: at(HOUR) })
+  })
+
+  it('D670 (r2 #5): una de fuera con la metadata copiada de OTRO pedido revisa también el cargo de su payment_intent', async () => {
+    const id = await cerrada('STRIPE')
+    const otro = { ...CHARGE, id: 'ch2', paymentIntentId: 'pi_2', onlineOrder: { orderId: 'ord2' } }
+    prismaMock.onlineOrderCharge.findUnique.mockImplementation((async ({ where }: any) =>
+      where?.id === 'ch2' || where?.paymentIntentId === 'pi_2' ? otro : { ...CHARGE, onlineOrder: { orderId: 'ord1' } }) as any)
+    const deOtro = seed({ chargeId: 'ch2', status: 'RECORDED', stripeRefundId: 're_otro', stampReversedAt: NOW, nextCheckAt: at(DAY) })
+    cardRefund.findUnique.mockImplementationOnce(async () => ({ ...get(deOtro.id), charge: otro }))
+    getRefund.mockResolvedValue(stateOf('SUCCEEDED', { refundId: 're_otro' })) // la devolución de ese otro pedido sigue bien
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 0, refunds: [fallida(id), deFuera('FAILED')] })
+    await handleStripeRefundEvent(
+      event({
+        id: 're_a_mano',
+        payment_intent: 'pi_1',
+        status: 'failed',
+        metadata: { type: 'online_order_refund', cardRefundId: deOtro.id },
+      }),
+    )
+    expect(get(id).status).toBe('REVERSED')
+  })
+
+  it('D670 (r2 #6, #7): la reapertura deja su anomalía en la transacción y el aviso dice el FALTANTE, no la suma reabierta', async () => {
+    const a = await cerrada('STRIPE')
+    const b = seed({ status: 'RESOLVED', amountCents: 25_000, stripeRefundId: 're_b', stampReversedAt: NOW, nextCheckAt: at(HOUR) })
+    reversals.push({
+      id: 'rv2',
       venueId: 'v1',
-      orderId: 'ord1',
       cardRefundId: b.id,
-      method: 'CASH',
-      staffId: 'staff2',
-    }).catch((e: Error) => e)
-    expect(err).toMatchObject({ statusCode: 409, code: 'EXTERNAL_REFUND_DETECTED' })
-    expect((err as Error).message).toContain('$50.00 devueltos directo en Stripe')
-    expect(drawerEvents).toHaveLength(0)
+      stripeRefundId: 're_b',
+      amountCents: 25_000,
+      resolvedAt: NOW,
+      resolvedMethod: 'CREDIT_CARD',
+    })
+    // Dos de fuera de $250 cerraron a y b; falla una: faltan $250 (no $500).
+    getChargeRefunds.mockResolvedValue({
+      amountRefundedCents: 25_000,
+      refunds: [fallida(a), deFuera('FAILED'), { ...deFuera('SUCCEEDED'), refundId: 're_a_mano_2' }],
+    })
+    jest.setSystemTime(at(MIN))
+    await avisoDeFuera()
+    expect(get(a).status).toBe('REVERSED')
+    expect(get(b.id).status).toBe('REVERSED')
+    expect((prismaMock as any).moneyAnomaly.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: [expect.objectContaining({ category: 'ONLINE_ORDER_CARD_REFUND_REOPENED' })] }),
+    )
+    expect(sendVenueNotification).toHaveBeenCalledWith(
+      'v1',
+      expect.objectContaining({ message: expect.stringContaining('se le vuelve a deber $250.00') }),
+      expect.anything(),
+    )
   })
 
   it('D670 (r1 #5): la reapertura no tiene tope: 101 cerradas «en Stripe» y la cobertura baja → las 101 se reabren', async () => {
