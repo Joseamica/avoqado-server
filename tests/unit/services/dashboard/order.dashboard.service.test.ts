@@ -208,6 +208,20 @@ describe('order.dashboard.service — deleteOrder guard de pagos', () => {
     expect(prismaMock.order.update).toHaveBeenCalled()
   })
 
+  // hz:e82938e1:D39: como `cancelOrderInTransaction` (D38). El DELETE retira las comandas; si dejaba la marca de «por mandar a cocina»
+  // (la de una ronda) y el dinero ya capturado reabría la cuenta antes del barrido (cada minuto), el barrido armaba la comanda de una
+  // cancelada reabierta (regla S1: no vuelve a la cocina).
+  it('🔴 D39: el DELETE limpia la marca de «por mandar a cocina» en la misma escritura que la anula', async () => {
+    arrange({ id: 'order-1', paymentStatus: 'PENDING' }, 0)
+
+    await deleteOrder('venue-1', 'order-1')
+
+    expect(prismaMock.order.update).toHaveBeenCalledWith({
+      where: { id: 'order-1' },
+      data: { status: 'CANCELLED', kitchenPendingAt: null, version: { increment: 1 } },
+    })
+  })
+
   it('un cobro de terminal vivo sobre la orden la bloquea con el 409 del contrato y no escribe', async () => {
     arrange({ id: 'order-1', paymentStatus: 'PENDING' }, 0)
     prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue({ requestId: 'REQ-VIVO' } as any)
