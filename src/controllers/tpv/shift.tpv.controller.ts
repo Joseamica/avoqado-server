@@ -168,6 +168,16 @@ export async function getCurrentShift(req: Request, res: Response, next: NextFun
   }
 }
 
+/** D24: cuál caja del negocio está abierta, sin cifras (`getShiftIdentity`). `known` ya viene validado como cuid. */
+export async function getShiftIdentity(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const known = typeof req.query.known === 'string' ? req.query.known : undefined
+    res.status(200).json(await shiftTpvService.getShiftIdentity(req.params.venueId, known))
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function getShifts(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const orgId = req.authContext?.orgId // 1. Extract from req (Controller)

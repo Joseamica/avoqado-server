@@ -207,6 +207,35 @@ export async function getCurrentShift(venueId: string, _orgId?: string, _posName
   }
 }
 
+/**
+ * D24 (Testarudo, 22-nov-2026): CUÁL caja del negocio está abierta, sin cifras. La terminal la necesita para pasarse sola a la
+ * caja de hoy cuando la suya se cerró en otro aparato, aunque quien esté dentro sea de Cocina (sin `shifts:read`): la ruta pide
+ * el permiso de cobrar. Por eso aquí no hay ventas, propinas, órdenes ni efectivo esperado; el fondo sí, porque es lo que la
+ * terminal guarda de su caja y ya lo ve quien la abre. Elige la abierta igual que [getCurrentShift].
+ * `knownShiftId` dice cómo está una caja que la terminal ya conoce (como el `view=state` del panel), sólo de ESTA sucursal.
+ */
+export async function getShiftIdentity(venueId: string, knownShiftId?: string) {
+  const abierta = await prisma.shift.findFirst({
+    where: { venueId, endTime: null },
+    orderBy: { startTime: 'desc' },
+    select: {
+      id: true,
+      venueId: true,
+      status: true,
+      startTime: true,
+      staffId: true,
+      startingCash: true,
+      cashDrawerSession: { select: { id: true } },
+    },
+  })
+  const known = knownShiftId
+    ? await prisma.shift.findFirst({ where: { id: knownShiftId, venueId }, select: { id: true, venueId: true, status: true } })
+    : null
+  if (!abierta) return { shift: null, known }
+  const { cashDrawerSession, ...identidad } = abierta
+  return { shift: { ...identidad, cashDrawerSessionId: cashDrawerSession?.id ?? null }, known }
+}
+
 /** Un instante legible, o `null` si el dato falta o no se puede leer. Nunca lanza. */
 function instanteDe(valor: unknown): number | null {
   if (valor === null || valor === undefined) return null

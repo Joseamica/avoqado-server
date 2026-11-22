@@ -83,6 +83,16 @@ export const shiftQuerySchema = z.object({
   }),
 })
 
+/** D24: GET /tpv/venues/:venueId/shift/identity?known=<shiftId>. */
+export const shiftIdentityQuerySchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+  }),
+  query: z.object({
+    known: z.string().cuid({ message: 'La caja conocida debe ser un CUID válido.' }).optional(),
+  }),
+})
+
 export const shiftsQuerySchema = z.object({
   params: z.object({
     venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),

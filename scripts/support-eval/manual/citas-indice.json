@@ -5146,7 +5146,7 @@
       },
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "18685818f1b0b1059d1f4b34e00710c451db4341"
       },
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja-anterior",
@@ -5236,7 +5236,7 @@
       },
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "18685818f1b0b1059d1f4b34e00710c451db4341"
       },
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja-anterior",
@@ -5960,7 +5960,7 @@
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt": [
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "18685818f1b0b1059d1f4b34e00710c451db4341"
       },
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja-anterior",
@@ -5970,7 +5970,7 @@
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/CajaLocalPresentation.kt": [
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "18685818f1b0b1059d1f4b34e00710c451db4341"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/CloseBlockedByRefundsContent.kt": [
@@ -5982,13 +5982,13 @@
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/LocalCajaContent.kt": [
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "18685818f1b0b1059d1f4b34e00710c451db4341"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt": [
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "18685818f1b0b1059d1f4b34e00710c451db4341"
       },
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja-anterior",
@@ -5998,7 +5998,7 @@
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftScreen.kt": [
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "18685818f1b0b1059d1f4b34e00710c451db4341"
       },
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja-anterior",
@@ -6254,7 +6254,7 @@
     "avoqado-tpv:avoqado-server/src/routes/tpv.routes.ts": [
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "18685818f1b0b1059d1f4b34e00710c451db4341"
       },
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja-anterior",

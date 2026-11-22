@@ -108,6 +108,7 @@ import {
   sendReceiptParamsSchema,
   sendWhatsAppReceiptBodySchema,
   serialNumberParamSchema,
+  shiftIdentityQuerySchema,
   shiftQuerySchema,
   shiftsQuerySchema,
   shiftsSummaryQuerySchema,
@@ -1289,6 +1290,37 @@ router.get(
   checkPermission('shifts:read'),
   validateRequest(shiftQuerySchema),
   shiftController.getCurrentShift,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/shift/identity:
+ *   get:
+ *     tags:
+ *       - TPV - Shifts
+ *     summary: Which business shift is open, without figures
+ *     description: |
+ *       D24 (Testarudo, 22-nov-2026). Lo que la terminal necesita para pasarse sola a la caja abierta del negocio cuando la
+ *       suya se cerró en otro aparato, aunque quien esté dentro no tenga `shifts:read` (Cocina): basta el permiso de cobrar.
+ *       Sin ventas, propinas, órdenes ni efectivo esperado. `known` dice cómo está una caja que la terminal ya conoce, sólo si
+ *       es de esta sucursal. GET /shift no cambia.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *       - { name: known, in: query, required: false, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: "{ shift: { id, venueId, status, startTime, staffId, startingCash, cashDrawerSessionId } | null, known: { id, venueId, status } | null }"
+ *       403:
+ *         description: Sin permiso de cobrar o sin acceso a la sucursal
+ */
+router.get(
+  '/venues/:venueId/shift/identity',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  validateRequest(shiftIdentityQuerySchema),
+  shiftController.getShiftIdentity,
 )
 
 /**
