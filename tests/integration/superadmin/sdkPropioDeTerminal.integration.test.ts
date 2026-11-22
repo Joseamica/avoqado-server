@@ -277,9 +277,10 @@ describe('cambiarSdkPropioDeTerminal — prender', () => {
 
   it('R2-2: estadoEsperado distinto de la huella de la fila ⇒ 409 TERMINAL_STATE_MISMATCH; la huella de la fila ⇒ prende; sin él (REST) ⇒ como antes', async () => {
     const t = await paxElegible()
-    const huella = huellaDeLaTerminal(t)
+    const huella = huellaDeLaTerminal(t, 0)
     expect(huella).toMatch(/^[0-9a-f]{16}$/)
-    // La huella cambia con cada cosa que vigila: negocio, serie, tipo, marca y el propio ajuste.
+    // La huella cambia con cada cosa que vigila: negocio, serie, tipo, marca, el propio ajuste y (ronda 3) cuántas veces se cambió.
+    expect(huellaDeLaTerminal(t, 2)).not.toBe(huella)
     for (const cambio of [
       { venueId: venueHerenciaId },
       { serialNumber: 'AVQD-9900000196' },
@@ -287,7 +288,7 @@ describe('cambiarSdkPropioDeTerminal — prender', () => {
       { brand: 'NEXGO' },
       { inHouseSdkEnabled: true },
     ]) {
-      expect(huellaDeLaTerminal({ ...t, ...cambio })).not.toBe(huella)
+      expect(huellaDeLaTerminal({ ...t, ...cambio }, 0)).not.toBe(huella)
     }
     const conEstado = (estadoEsperado: string) =>
       cambiarSdkPropioDeTerminal({
@@ -299,7 +300,7 @@ describe('cambiarSdkPropioDeTerminal — prender', () => {
         procedencia: 'mcp',
       })
 
-    await expect(conEstado(huellaDeLaTerminal({ ...t, inHouseSdkEnabled: true }))).rejects.toMatchObject({
+    await expect(conEstado(huellaDeLaTerminal({ ...t, inHouseSdkEnabled: true }, 0))).rejects.toMatchObject({
       statusCode: 409,
       code: 'TERMINAL_STATE_MISMATCH',
       message: 'La terminal cambió desde la vista previa (aparato, negocio o ajuste). Pide una vista previa nueva.',

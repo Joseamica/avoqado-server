@@ -75,15 +75,21 @@ export async function elegibilidadDelSdkPropio(tx: Prisma.TransactionClient, ter
  * no a un campo suelto: si cualquiera cambió entre la vista previa y el «confirmar», no se prende. Con el ajuste dentro, una vista
  * sacada con la terminal YA prendida nunca puede prender nada (para prender tiene que estar apagada, y esa huella dice «prendida»).
  */
-export function huellaDeLaTerminal(t: {
-  venueId: string
-  serialNumber: string | null
-  type: string
-  brand: string | null
-  inHouseSdkEnabled: boolean
-}): string {
-  const estado = JSON.stringify([t.venueId, t.serialNumber, t.type, t.brand, t.inHouseSdkEnabled])
+export function huellaDeLaTerminal(
+  t: { venueId: string; serialNumber: string | null; type: string; brand: string | null; inHouseSdkEnabled: boolean },
+  /** `contarCambiosDelApagador` (ronda 3): con él, prender y apagar en medio (A-B-A) también invalida la confirmación. */
+  cambiosDelApagador: number,
+): string {
+  const estado = JSON.stringify([t.venueId, t.serialNumber, t.type, t.brand, t.inHouseSdkEnabled, cambiosDelApagador])
   return createHash('sha256').update(estado).digest('hex').slice(0, 16)
+}
+
+const ACCIONES_DEL_APAGADOR = ['TERMINAL_IN_HOUSE_SDK_ENABLED', 'TERMINAL_IN_HOUSE_SDK_DISABLED']
+
+/** Cuántas veces se ha cambiado el apagador de ESTA terminal: sus asientos, que se escriben en la misma transacción que cada
+ *  cambio, así que el número sólo crece. La vista previa lo cuenta suelto; el escritor, bajo el candado de la terminal. */
+export function contarCambiosDelApagador(cliente: Prisma.TransactionClient, terminalId: string): Promise<number> {
+  return cliente.activityLog.count({ where: { entity: 'Terminal', entityId: terminalId, action: { in: ACCIONES_DEL_APAGADOR } } })
 }
 
 export async function cambiarSdkPropioDeTerminal(entrada: {
@@ -135,7 +141,11 @@ export async function cambiarSdkPropioDeTerminal(entrada: {
         throw new ConflictError('La serie de la terminal cambió desde que la viste. Vuelve a consultarla.', 'TERMINAL_SERIAL_MISMATCH')
       }
       // La huella sale de la MISMA fila leída bajo el candado (R2-2): negocio, aparato o ajuste distintos ⇒ no se prende.
-      if (entrada.estadoEsperado !== undefined && entrada.estadoEsperado !== huellaDeLaTerminal(fila)) {
+      // Ronda 3: la cuenta de cambios del apagador se lee aquí, bajo el candado, y sólo si hay huella que comparar.
+      if (
+        entrada.estadoEsperado !== undefined &&
+        entrada.estadoEsperado !== huellaDeLaTerminal(fila, await contarCambiosDelApagador(tx, terminalId))
+      ) {
         throw new ConflictError(
           'La terminal cambió desde la vista previa (aparato, negocio o ajuste). Pide una vista previa nueva.',
           'TERMINAL_STATE_MISMATCH',

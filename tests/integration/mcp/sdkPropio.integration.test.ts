@@ -12,6 +12,7 @@ import { TerminalType } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '@/mcp/scope'
 import { registerSdkPropioTools } from '@/mcp/tools/sdkPropio'
+import { cambiarSdkPropioDeTerminal } from '@/services/superadmin/sdkPropioDeTerminal.service'
 import { conectarPorElCatalogo, pasoUnoYDos } from '../../__helpers__/mcp-por-el-catalogo'
 
 const NOMBRE = 'set_terminal_in_house_sdk'
@@ -182,6 +183,22 @@ describe('set_terminal_in_house_sdk por el catálogo real', () => {
     expect(resultado).toEqual(CAMBIO_DE_ESTADO)
     expect(await columna(t.id)).toBe(false)
     expect(await asientosEn(t.id, otroVenueId!)).toBe(0)
+  })
+
+  it('ronda 3 (A-B-A): vista previa apagada → otro SUPERADMIN la prende y la apaga → confirmar ⇒ rechazo, sigue apagada, sin asiento nuevo', async () => {
+    const t = await pax()
+    const vista = await mcp.call(NOMBRE, { terminalId: t.id, enabled: true })
+    const otro = { terminalId: t.id, staffId: staffId!, procedencia: 'superadmin-rest' as const }
+    await cambiarSdkPropioDeTerminal({ ...otro, enabled: true, serieEsperada: t.serialNumber! })
+    await cambiarSdkPropioDeTerminal({ ...otro, enabled: false })
+    expect(await columna(t.id)).toBe(false) // negocio, serie, tipo, marca y ajuste: igual que en la vista previa
+    expect(await asientos(t.id)).toHaveLength(2)
+
+    const resultado = await confirmar(vista)
+
+    expect(resultado).toEqual(CAMBIO_DE_ESTADO)
+    expect(await columna(t.id)).toBe(false)
+    expect(await asientos(t.id)).toHaveLength(2)
   })
 
   it('R2-2: vista previa APAGADA en A → se muda a B (apagada y elegible) → confirmar ⇒ el mismo rechazo', async () => {

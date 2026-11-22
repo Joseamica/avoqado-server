@@ -13,7 +13,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import AppError from '@/errors/AppError'
-import { cambiarSdkPropioDeTerminal, elegibilidadDelSdkPropio, huellaDeLaTerminal } from '@/services/superadmin/sdkPropioDeTerminal.service'
+import {
+  cambiarSdkPropioDeTerminal,
+  contarCambiosDelApagador,
+  elegibilidadDelSdkPropio,
+  huellaDeLaTerminal,
+} from '@/services/superadmin/sdkPropioDeTerminal.service'
 import { mcpProvenance } from '../audit'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { text } from '../respond'
@@ -78,7 +83,10 @@ export function registerSdkPropioTools(server: McpServer, scope: McpScope): void
         // las compara bajo el candado.
         const serie =
           enabled && terminal.serialNumber
-            ? { expectedSerialNumber: terminal.serialNumber, expectedTerminalState: huellaDeLaTerminal(terminal) }
+            ? {
+                expectedSerialNumber: terminal.serialNumber,
+                expectedTerminalState: huellaDeLaTerminal(terminal, await contarCambiosDelApagador(prisma, terminalId)),
+              }
             : {}
         // Los argumentos del paso 2: lo que firma el catálogo (la entrada sin `confirm`, más la serie de arriba) + confirm:true.
         const { confirm: _confirm, ...entrada } = { ...args, ...serie }
