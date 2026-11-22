@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-22T20:54:01.093Z",
-  "approvedHash": "3e4478ff812c539e751be0975fe55f95ccd74084d0be7ced9f23078b9c3027c6",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -694,7 +694,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/reservaciones/configurar-reservaciones-avanzadas": {
-      "sha256": "c8843e494cd630227a54eebc1d50dd9c15aaa5577bc0f653820889c65c8973b6",
+      "sha256": "088a8afb1d386a86ebc6e59e2c95dcaafa6ddcef69ac5d9b5826efbc2f920fae",
       "requiredPermissions": [
         "reservations:update"
       ],
