@@ -57,9 +57,10 @@ import { ORDER_LOCK_WAIT_BUDGET } from '../services/shared/paymentShiftClaim'
  * todavía la tenga abierta en pantalla puede cobrarla en vivo (Codex r2 #3): el dinero se registra y la venta se reabre con rastro, lo
  * mismo que pasaría sin la limpieza (la venta seguía abierta), y como no lleva descuentos ni referidos, nada se cuenta dos veces.
  *
- * 🔴 El interruptor es `LIMPIEZA_VENTAS_COBRAR`. Sin valor, en PRODUCCIÓN anula (`ACTIVO`): el founder dio su «sí, en prod» el 22-nov
- * («A»: que nazca prendida en el código, sin tocar Render), después de ver el ENSAYO con este código (68 ventas en 2 negocios). Sin
- * valor fuera de producción, `ENSAYO`: los servidores locales comparten la base av-db-25 y no deben anular ventas de prueba ajenas.
+ * 🔴 El interruptor es `LIMPIEZA_VENTAS_COBRAR`. Sin valor, en el SERVIDOR real anula (`ACTIVO`): el founder dio su «sí, en prod» el
+ * 22-nov («A»: que nazca prendida en el código, sin tocar Render), después de ver el ENSAYO con este código. «Real» = `NODE_ENV=production`
+ * Y el servicio de Render `avoqado-server` (`modoDeLaLimpiezaDeCobrar`). Sin valor en cualquier otro servidor (local, Fly, Docker,
+ * staging), `ENSAYO`: los servidores locales comparten la base av-db-25 y no deben anular ventas de prueba ajenas.
  * `ENSAYO` no escribe NADA, sólo deja una línea por negocio en el log («[LIMPIEZA COBRAR · ENSAYO] anularía N …», con `venueName`).
  * `APAGADO` no lee ni escribe. En Render, la variable queda como freno de emergencia: `ENSAYO` o `APAGADO` la detienen.
  */
@@ -69,17 +70,26 @@ export const CAMINO_LIMPIEZA_COBRAR = 'LIMPIEZA_VENTA_COBRAR_ABANDONADA'
 export const MOTIVO_LIMPIEZA_COBRAR = 'Venta de Cobrar abandonada antes de cobrar, sin cliente ni cobro (limpieza tras 24 h)'
 export const VARIABLE_DEL_MODO = 'LIMPIEZA_VENTAS_COBRAR'
 
+/** El servicio de Render del SERVIDOR real (producción). Render pone su nombre en `RENDER_SERVICE_NAME` (`src/config/env.ts`). */
+export const SERVICIO_DE_PRODUCCION = 'avoqado-server'
+
 /**
- * Un valor escrito manda (ACTIVO, ENSAYO o APAGADO, sin importar mayúsculas ni espacios). Sin valor: ACTIVO sólo en producción
- * (founder, 22-nov), ENSAYO en cualquier otro entorno. Cualquier otro texto (una errata) es ENSAYO: un error de dedo nunca anula.
+ * Un valor escrito manda (ACTIVO, ENSAYO o APAGADO, sin importar mayúsculas ni espacios). Sin valor, ACTIVO sólo en el SERVIDOR real
+ * (founder, 22-nov): `NODE_ENV=production` Y el servicio de Render `avoqado-server`. Codex d36-activo r1 #1: Fly staging/demo, Docker
+ * Compose o un arranque local también dicen «production» y no deben anular, así que el nombre del servicio es la segunda llave. En
+ * cualquier otro servidor, ENSAYO. Cualquier otro texto (una errata) es ENSAYO: un error de dedo nunca anula. Si renombran el servicio,
+ * vuelve a ENSAYO (falla del lado seguro, visible en la línea de arranque).
  */
 export function modoDeLaLimpiezaDeCobrar(
   valor: string | undefined = process.env[VARIABLE_DEL_MODO],
-  entorno: string | undefined = process.env.NODE_ENV,
+  servidor: { entorno?: string; servicio?: string } = {
+    entorno: process.env.NODE_ENV,
+    servicio: process.env.RENDER_SERVICE_NAME,
+  },
 ): ModoDeLaLimpieza {
   const v = (valor ?? '').trim().toUpperCase()
   if (v === 'ACTIVO' || v === 'APAGADO' || v === 'ENSAYO') return v
-  if (v === '') return entorno === 'production' ? 'ACTIVO' : 'ENSAYO'
+  if (v === '') return servidor.entorno === 'production' && servidor.servicio === SERVICIO_DE_PRODUCCION ? 'ACTIVO' : 'ENSAYO'
   return 'ENSAYO'
 }
 
@@ -242,7 +252,11 @@ export class VentasCobrarAbandonadasJob {
   start(): void {
     if (!this.job) return
     this.job.start()
-    logger.info(`🧹 Limpieza de ventas de Cobrar abandonadas: cada hora, modo ${this.modo()} (${VARIABLE_DEL_MODO})`)
+    // De dónde salió el modo, para comprobarlo en el log sin abrir la configuración: la variable escrita o el valor por omisión.
+    const escrita = (process.env[VARIABLE_DEL_MODO] ?? '').trim() !== ''
+    logger.info(
+      `🧹 Limpieza de ventas de Cobrar abandonadas: cada hora, modo ${this.modo()} (${escrita ? `${VARIABLE_DEL_MODO} escrita` : `por omisión en ${process.env.RENDER_SERVICE_NAME ?? 'un servidor sin nombre de Render'}`})`,
+    )
   }
 
   stop(): void {

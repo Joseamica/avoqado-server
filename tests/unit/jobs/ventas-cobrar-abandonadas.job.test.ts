@@ -28,24 +28,31 @@ const sqlCompleto = (llamada: unknown[]) =>
   llamada.map(p => (Array.isArray(p) ? p.join(' ') : p && typeof p === 'object' && 'sql' in (p as any) ? (p as any).sql : '')).join(' ')
 
 describe('modoDeLaLimpiezaDeCobrar — el interruptor', () => {
-  // Founder, 22-nov («A»): en PRODUCCIÓN nace prendida (ACTIVO) sin tocar Render; la variable queda como freno de emergencia.
-  // Fuera de producción (los servidores locales comparten la base av-db-25) sigue en ENSAYO: nunca anula ventas de prueba ajenas.
+  // Founder, 22-nov («sí, en prod» y «A»): sin valor, nace prendida (ACTIVO) SÓLO en el servidor real: NODE_ENV=production Y el
+  // servicio de Render «avoqado-server». Codex d36-activo r1 #1: Fly staging/demo, Docker Compose y un arranque local con
+  // NODE_ENV=production también dicen «production», y no deben anular. El servidor se pasa EXPLÍCITO (objeto): un `undefined` como
+  // argumento heredaría el NODE_ENV=test de Jest (Codex r1 #2).
+  const real = { entorno: 'production', servicio: 'avoqado-server' }
   it.each([
-    [undefined, 'production', 'ACTIVO'],
-    ['', 'production', 'ACTIVO'],
-    ['   ', 'production', 'ACTIVO'],
-    [undefined, 'development', 'ENSAYO'],
-    [undefined, 'test', 'ENSAYO'],
-    [undefined, undefined, 'ENSAYO'],
-    ['ensayo', 'production', 'ENSAYO'],
-    ['ENSAYO', 'production', 'ENSAYO'],
-    ['APAGADO', 'production', 'APAGADO'],
-    ['cualquier cosa', 'production', 'ENSAYO'],
-    ['ACTIVO', 'development', 'ACTIVO'],
-    [' activo ', 'production', 'ACTIVO'],
-    ['APAGADO', 'development', 'APAGADO'],
-  ])('valor %j en %j ⇒ %s (vacía: ACTIVO sólo en producción; un valor escrito manda; una errata, ENSAYO)', (valor, entorno, modo) => {
-    expect(modoDeLaLimpiezaDeCobrar(valor as string | undefined, entorno as string | undefined)).toBe(modo)
+    [undefined, real, 'ACTIVO'],
+    ['', real, 'ACTIVO'],
+    ['   ', real, 'ACTIVO'],
+    [undefined, { entorno: 'production' }, 'ENSAYO'], // Fly, Docker Compose, `NODE_ENV=production npm start`
+    [undefined, { entorno: 'production', servicio: 'avoqado-server-staging' }, 'ENSAYO'],
+    [undefined, { entorno: 'production', servicio: 'avoqado-server-cm35' }, 'ENSAYO'],
+    [undefined, { entorno: 'staging', servicio: 'avoqado-server' }, 'ENSAYO'],
+    [undefined, { entorno: 'development' }, 'ENSAYO'],
+    [undefined, { entorno: 'test' }, 'ENSAYO'],
+    [undefined, {}, 'ENSAYO'],
+    ['ensayo', real, 'ENSAYO'],
+    ['ENSAYO', real, 'ENSAYO'],
+    ['APAGADO', real, 'APAGADO'],
+    ['cualquier cosa', real, 'ENSAYO'],
+    ['ACTIVO', { entorno: 'development' }, 'ACTIVO'],
+    [' activo ', real, 'ACTIVO'],
+    ['APAGADO', {}, 'APAGADO'],
+  ])('valor %j en %j ⇒ %s', (valor, servidor, modo) => {
+    expect(modoDeLaLimpiezaDeCobrar(valor as string | undefined, servidor as { entorno?: string; servicio?: string })).toBe(modo)
   })
 })
 
