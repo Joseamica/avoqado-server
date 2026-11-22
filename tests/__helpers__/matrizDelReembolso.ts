@@ -49,6 +49,15 @@ const SOLO_AL_SALDO: DecisionDelReembolso = {
   dondeIr: ['MISMO_MEDIO'],
 }
 
+/** Revisión de apps viejas (22-nov): a saldo a favor, el código de siempre del escritor (422 STORE_CREDIT_NOT_ALLOWED), con a dónde ir. */
+const SALDO_A_SALDO: DecisionDelReembolso = {
+  admitido: false,
+  codigo: 'STORE_CREDIT_NOT_ALLOWED',
+  estado: 422,
+  mensaje: MENSAJE_SALDO,
+  dondeIr: ['MISMO_MEDIO'],
+}
+
 /** Los medios declarados en el cuerpo, en el orden de las columnas: '—' = vacío, 'OTRO' = un valor desconocido. */
 export const MEDIOS = ['—', 'CASH', 'BANK_TRANSFER', 'STORE_CREDIT', 'OTRO'] as const
 export type MedioDeclarado = (typeof MEDIOS)[number]
@@ -112,10 +121,10 @@ const SALDO_NO_EN_TPV: DecisionDelReembolso = {
  */
 export const MATRIZ_DEL_SALDO: Array<[EntradaDelReembolso, MedioDeclarado, DecisionDelReembolso]> = (
   [
-    ['POS', [MISMO, SOLO_AL_SALDO, SOLO_AL_SALDO, SOLO_AL_SALDO, SOLO_AL_SALDO]],
+    ['POS', [MISMO, SOLO_AL_SALDO, SOLO_AL_SALDO, SALDO_A_SALDO, SOLO_AL_SALDO]],
     ['PANEL', [MISMO, MISMO, MISMO, MISMO, MISMO]],
     ['TPV', [SALDO_NO_EN_TPV, SALDO_NO_EN_TPV, SALDO_NO_EN_TPV, SALDO_NO_EN_TPV, SALDO_NO_EN_TPV]],
-    ['MCP', [MISMO, SOLO_AL_SALDO, SOLO_AL_SALDO, SOLO_AL_SALDO, SOLO_AL_SALDO]],
+    ['MCP', [MISMO, SOLO_AL_SALDO, SOLO_AL_SALDO, SALDO_A_SALDO, SOLO_AL_SALDO]],
   ] as Array<[EntradaDelReembolso, Cinco]>
 ).flatMap(([entrada, cinco]) =>
   MEDIOS.map((medio, i): [EntradaDelReembolso, MedioDeclarado, DecisionDelReembolso] => [entrada, medio, cinco[i]]),
