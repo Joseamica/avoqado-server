@@ -291,6 +291,20 @@ export async function getCouponCodeById(venueId: string, couponId: string) {
 }
 
 /**
+ * D38 (21-nov): dos peticiones a la vez (un doble clic) pasan las dos la revisión de «¿ya existe el código?» y la segunda
+ * choca con el índice único de `CouponCode.code` (P2002). Sin esto salía un 500 en inglés aunque el cupón sí se creó.
+ * Sólo ese índice: Prisma lo reporta como columnas o como el nombre de la restricción; cualquier otro P2002 sigue su camino.
+ */
+function chocoElCodigo(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') return false
+  const target = (error.meta as { target?: unknown } | undefined)?.target
+  const partes = Array.isArray(target) ? target.map(String) : typeof target === 'string' ? [target] : []
+  return partes.some(t => t === 'code' || t === 'CouponCode_code_key')
+}
+
+const codigoRepetido = (code: string) => new BadRequestError(`Ya existe un cupón con el código "${code}"`)
+
+/**
  * Create a new coupon code
  *
  * @param venueId - Venue ID (multi-tenant filter)
@@ -320,7 +334,7 @@ export async function createCouponCode(venueId: string, data: CreateCouponCodeRe
     where: { code: normalizedCode },
   })
   if (existingCode) {
-    throw new BadRequestError(`Ya existe un cupón con el código "${normalizedCode}"`)
+    throw codigoRepetido(normalizedCode)
   }
 
   // Validate code format
@@ -357,7 +371,9 @@ export async function createCouponCode(venueId: string, data: CreateCouponCodeRe
         },
       }),
     { etiqueta: 'createCouponCode' },
-  )
+  ).catch(error => {
+    throw chocoElCodigo(error) ? codigoRepetido(normalizedCode) : error
+  })
 
   logger.info(`🎫 Coupon code created: ${normalizedCode} for discount ${discount.name}`)
 
@@ -424,7 +440,7 @@ export async function updateCouponCode(venueId: string, couponId: string, data: 
         where: { code: normalizedCode },
       })
       if (existingCode) {
-        throw new BadRequestError(`Ya existe un cupón con el código "${normalizedCode}"`)
+        throw codigoRepetido(normalizedCode)
       }
     }
   }
@@ -455,6 +471,7 @@ export async function updateCouponCode(venueId: string, couponId: string, data: 
       }),
     { etiqueta: 'updateCouponCode' },
   ).catch(error => {
+    if (normalizedCode !== undefined && chocoElCodigo(error)) throw codigoRepetido(normalizedCode)
     throw esCambioCruzado(error) ? new ConflictError(CAMBIO_CRUZADO) : error
   })
 
@@ -597,7 +614,11 @@ export async function bulkGenerateCouponCodes(venueId: string, data: BulkGenerat
         })),
       }),
     { etiqueta: 'bulkGenerateCouponCodes' },
-  )
+  ).catch(error => {
+    throw chocoElCodigo(error)
+      ? new BadRequestError('Otro cupón tomó uno de estos códigos al mismo tiempo. Vuelve a generar el lote.')
+      : error
+  })
 
   logger.info(`🎫 Bulk generated ${coupons.count} coupon codes for discount ${discount.name}`)
 
