@@ -156,6 +156,15 @@ describe('export_sales_summary — plan gating', () => {
     expect(out.rows[0]).not.toHaveProperty('venue')
   })
 
+  it('Codex D13 r3 #6 · con más periodos que el tope, avisa sin etiquetarlos uno por uno', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockGetSalesSummary.mockResolvedValue({ summary: {}, byPeriod: Array.from({ length: 1001 }, (_, i) => ({ period: `p${i}` })) })
+    const out = parse(await call('export_sales_summary', { venueId: 'v1', sections: 'byPeriod', reportType: 'hours' }))
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/1,001/)
+    expect(mockFlatten).not.toHaveBeenCalled()
+  })
+
   it('summary mode returns flattened rows for an entitled venue', async () => {
     mockPlanGate.mockResolvedValue(null) // ADVANCED_REPORTS granted
     mockGetSalesSummary.mockResolvedValue({ summary: { grossSales: 100, transactionCount: 3 }, byPaymentMethod: [] })

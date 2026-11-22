@@ -56,8 +56,7 @@ export const VENTAS_DETALLADAS_COLUMNAS: ExportColumnDef<FilaVentaDetallada>[] =
 ]
 
 /** El 400 que ve la persona si pide el detallado con el filtro del QR anterior (sus cobros no se guardan uno por uno). */
-export const MENSAJE_QR_ANTERIOR_SIN_DETALLE =
-  'Los cobros del QR anterior no se pueden exportar uno por uno: exporta el resumen o quita el filtro de método de pago.'
+export const MENSAJE_QR_ANTERIOR_SIN_DETALLE = 'Los cobros del QR anterior no se pueden exportar uno por uno: sólo salen en el resumen.'
 
 const METODOS: PaymentMethodFilter[] = ['CASH', 'CARD', 'QR_LEGACY', 'OTHER']
 const TARJETAS: CardTypeFilter[] = ['CREDIT', 'DEBIT', 'AMEX', 'INTERNATIONAL']
