@@ -632,10 +632,14 @@ export class StripeConnectProvider implements IEcommerceProvider {
    * las pendientes) y TODAS sus devoluciones en cualquier estado, con su metadata —, para saber si alguien devolvió por fuera de
    * Avoqado antes de devolver otra vez. Un error de Stripe sale tal cual: quien llama falla cerrado, nunca lo lee como «sin devoluciones».
    */
-  async getChargeRefunds(merchant: EcommerceMerchantWithProvider, paymentIntentId: string): Promise<ChargeRefunds> {
-    const pi = await this.retrievePaymentIntent(this.requireConnectAccountId(merchant), paymentIntentId)
+  async getChargeRefunds(
+    merchant: EcommerceMerchantWithProvider,
+    paymentIntentId: string,
+    limits?: ProviderRequestLimits,
+  ): Promise<ChargeRefunds> {
+    const pi = await this.retrievePaymentIntent(this.requireConnectAccountId(merchant), paymentIntentId, limits)
     const charge = typeof pi.latest_charge === 'object' ? pi.latest_charge : null
-    const refunds = await this.listRefunds(merchant, paymentIntentId)
+    const refunds = await this.listRefunds(merchant, paymentIntentId, limits)
     // D668 (Codex r1 #3): `listRefunds` se corta en 1,000 sin avisar; una lista que llega al tope no prueba nada y quien llama falla cerrado.
     if (refunds.length >= 1000)
       throw new Error(`Stripe trae ${refunds.length} devoluciones de ${paymentIntentId}: la lista puede venir recortada`)

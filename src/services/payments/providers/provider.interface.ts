@@ -238,5 +238,5 @@ export interface IEcommerceProvider {
     limits?: ProviderRequestLimits,
   ): Promise<number>
   /** D661: el cargo del PaymentIntent con lo ya devuelto y TODAS sus devoluciones (también las pendientes). El error sale tal cual. */
-  getChargeRefunds(merchant: EcommerceMerchantWithProvider, paymentIntentId: string): Promise<ChargeRefunds>
+  getChargeRefunds(merchant: EcommerceMerchantWithProvider, paymentIntentId: string, limits?: ProviderRequestLimits): Promise<ChargeRefunds>
 }

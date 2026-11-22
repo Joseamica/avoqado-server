@@ -12,7 +12,7 @@ import { CARD_RECONCILE_BATCH, PLAZO_DE_LA_PASADA } from '../constants'
 import type { ReadCandidates } from '../types'
 import { OnlineOrderCardRefundStatus, OnlineOrderPaymentMode } from '@prisma/client'
 import { DEVOLUCION_ANOTADA, ENTREGABLE, YA_ENTREGADO } from './devuelto'
-import { SWEPT_CARD_REFUND_STATUSES, advanceCardRefundForSweep, cerrarComoDevuelto } from './refund.service'
+import { CERRADAS_EN_STRIPE_POR_REVISAR, SWEPT_CARD_REFUND_STATUSES, advanceCardRefundForSweep, cerrarComoDevuelto } from './refund.service'
 
 const SEALED_STATUSES = [OnlineOrderCardRefundStatus.REVERSED, OnlineOrderCardRefundStatus.RESOLVED]
 /** D661 (C5): el barrido de cierres sólo mira las devoluciones del último mes (lo que pudo quedar sin cerrar). */
@@ -40,7 +40,12 @@ export async function sweepCardRefunds(now: Date, readEntry: ReadCandidates): Pr
       where: {
         nextCheckAt: { lte: now },
         // Las que ya no se revisan (REVERSED/RESOLVED) sólo vuelven si les falta la reversa del sello (fix r1 M2).
-        OR: [{ status: { in: SWEPT_CARD_REFUND_STATUSES } }, { status: { in: SEALED_STATUSES }, stampReversedAt: null }],
+        // D670: y las cerradas con «Ya se devolvió en Stripe», en su calendario (la de fuera puede fallar después).
+        OR: [
+          { status: { in: SWEPT_CARD_REFUND_STATUSES } },
+          { status: { in: SEALED_STATUSES }, stampReversedAt: null },
+          CERRADAS_EN_STRIPE_POR_REVISAR,
+        ],
       },
       orderBy: [{ nextCheckAt: 'asc' }, { id: 'asc' }],
       take: CARD_RECONCILE_BATCH,

@@ -110,6 +110,11 @@ const matches = (row: Row, where: Record<string, any> = {}): boolean =>
     if (k === 'OR') return (v as Record<string, any>[]).some(sub => matches(row, sub))
     // El filtro por relación (`charge: { onlineOrder: { orderId } }`): en este doble el único cargo es ch1, del pedido ord1.
     if (k === 'charge') return row.chargeId === 'ch1' && v?.onlineOrder?.orderId === 'ord1'
+    // D670: la reversa de la devolución (`reversal: { is: { … } }`).
+    if (k === 'reversal') {
+      const rv = reversals.find(x => x.cardRefundId === row.id)
+      return !!rv && matchesReversal(rv, v.is)
+    }
     if (v && typeof v === 'object' && !(v instanceof Date)) {
       if ('in' in v) return v.in.includes(row[k])
       if ('lte' in v) return row[k] <= v.lte
@@ -181,7 +186,12 @@ const cardRefund = {
 const matchesReversal = (r: Row, { cardRefund: porDevolucion, resolvedAt, ...where }: Record<string, any> = {}): boolean =>
   matches(r, where) &&
   (porDevolucion === undefined || store.get(r.cardRefundId)?.chargeId === porDevolucion.is.chargeId) &&
-  (resolvedAt === undefined || (resolvedAt?.not === null ? r.resolvedAt != null : matches(r, { resolvedAt })))
+  (resolvedAt === undefined ||
+    (resolvedAt?.not === null
+      ? r.resolvedAt != null
+      : resolvedAt?.lte
+        ? r.resolvedAt != null && r.resolvedAt.getTime() <= resolvedAt.lte.getTime()
+        : matches(r, { resolvedAt })))
 const reversal = {
   create: jest.fn(async ({ data }: any) => {
     const row = { id: `rv${reversals.length + 1}`, resolvedAt: null, resolvedMethod: null, ...data }
@@ -1055,6 +1065,17 @@ describe('resolveReversedCardRefund', () => {
     nadaCerrado(id)
   })
 
+  it('D670 (r1 #6): con una parcial de fuera EN TRÁMITE que no alcanza, no sugiere efectivo y dice cuánto faltaría aunque termine', async () => {
+    const id = await reversed()
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 5_000, refunds: [laQueFallo(id), aMano(5_000, 'PENDING')] })
+    const err = await resolver(id, 'STRIPE').catch((e: Error) => e)
+    expect(err).toMatchObject({ statusCode: 409, code: 'EXTERNAL_REFUND_NOT_COVERED' })
+    expect((err as Error).message).toContain('$50.00 todavía en trámite')
+    expect((err as Error).message).toContain('aunque termine lo que está en trámite, faltan $200.00')
+    expect((err as Error).message).not.toMatch(/efectivo|transferencia/)
+    nadaCerrado(id)
+  })
+
   it('D670: sin devoluciones por fuera (sólo la nuestra que falló y lo de más que Stripe sume) no se cierra', async () => {
     const id = await reversed()
     getChargeRefunds.mockResolvedValue({ amountRefundedCents: 25_000, refunds: [laQueFallo(id)] })
@@ -1270,6 +1291,156 @@ describe('handleStripeRefundEvent', () => {
     getChargeRefunds.mockRejectedValue(new Error('stripe caído'))
     await expect(avisoDeFuera()).rejects.toThrow()
     expect(get(id).status).toBe('RESOLVED')
+  })
+
+  // ── D670 · Codex r1 ──
+  it('D670 (r1 #1, #4): sin aviso de Stripe, el recorrido revisa la cerrada enseguida y la reabre si la de fuera ya falló', async () => {
+    const id = await cerrada('STRIPE')
+    expect(get(id).nextCheckAt).toEqual(NOW) // el cierre la deja para la siguiente pasada
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 0, refunds: [fallida(id), deFuera('FAILED')] })
+    await sweepCardRefunds(at(MIN), readEntry)
+    expect(get(id).status).toBe('REVERSED')
+    expect(reversals[0].resolvedAt).toBeNull()
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDER_CARD_REFUND_REOPENED', entityId: id }))
+  })
+
+  it('D670 (r1 #4): si sigue cubierta, el recorrido la deja cerrada y la vuelve a mirar a 1 h, 1, 3, 7 y 30 días del cierre', async () => {
+    const id = await cerrada('STRIPE')
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 25_000, refunds: [fallida(id), deFuera('SUCCEEDED')] })
+    await sweepCardRefunds(at(MIN), readEntry)
+    expect(get(id).status).toBe('RESOLVED')
+    expect(get(id).nextCheckAt).toEqual(at(HOUR))
+    await sweepCardRefunds(at(HOUR), readEntry)
+    expect(get(id).nextCheckAt).toEqual(at(DAY))
+    await sweepCardRefunds(at(31 * DAY), readEntry)
+    expect(get(id).nextCheckAt).toEqual(NEVER_AGAIN)
+    expect(getChargeRefunds).toHaveBeenCalledTimes(3)
+  })
+
+  it('D670 (r1 #1): un aviso que leyó Stripe ANTES de otro cierre no reabre ese cierre (lo revisa su propia lectura)', async () => {
+    const a = await cerrada('STRIPE')
+    const b = seed({ status: 'REVERSED', amountCents: 25_000, stripeRefundId: 're_b', stampReversedAt: NOW, nextCheckAt: NEVER_AGAIN })
+    reversals.push({
+      id: 'rv2',
+      venueId: 'v1',
+      cardRefundId: b.id,
+      stripeRefundId: 're_b',
+      amountCents: 25_000,
+      resolvedAt: null,
+      resolvedMethod: null,
+    })
+    // La primera de fuera falló. El aviso lee Stripe y ve el faltante; mientras tanto (un minuto después) llega otra de fuera de $500 y b
+    // se cierra con ella, con su propia lectura. El aviso no debe juzgar a b con su lectura vieja (a sí: con ésa no alcanza).
+    const grande = { ...deFuera('SUCCEEDED'), refundId: 're_a_mano_2', amountCents: 50_000 }
+    getChargeRefunds.mockImplementationOnce(async () => {
+      jest.setSystemTime(at(MIN))
+      getChargeRefunds.mockResolvedValueOnce({ amountRefundedCents: 50_000, refunds: [fallida(a), deFuera('FAILED'), grande] })
+      await expect(
+        resolveReversedCardRefund({ venueId: 'v1', orderId: 'ord1', cardRefundId: b.id, method: 'STRIPE', staffId: 'staff2' }),
+      ).resolves.toEqual({ status: 'RESOLVED', replay: false })
+      return { amountRefundedCents: 0, refunds: [fallida(a), deFuera('FAILED')] }
+    })
+    await avisoDeFuera()
+    expect(get(b.id).status).toBe('RESOLVED')
+    expect(get(a).status).toBe('REVERSED') // la juzgó su lectura (vieja): se vuelve a cerrar con un clic
+  })
+
+  it('D670 (r1 #2): una devolución NUESTRA a la que le borraron la metadata sigue siendo nuestra (por su id guardado)', async () => {
+    const r = await pedir()
+    getRefund.mockResolvedValue(stateOf('FAILED'))
+    await advanceCardRefund(r.cardRefundId, at(HOUR))
+    seed({ status: 'RECORDED', amountCents: 25_000, stripeRefundId: 're_nuestra', stampReversedAt: NOW, nextCheckAt: NEVER_AGAIN })
+    const sinMetadata = { ...deFuera('SUCCEEDED'), refundId: 're_nuestra' }
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 25_000, refunds: [fallida(r.cardRefundId), sinMetadata] })
+    const resolver = (method: 'STRIPE' | 'CASH') =>
+      resolveReversedCardRefund({ venueId: 'v1', orderId: 'ord1', cardRefundId: r.cardRefundId, method, staffId: 'staff2' })
+    await expect(resolver('STRIPE')).rejects.toMatchObject({ code: 'EXTERNAL_REFUND_NOT_COVERED' })
+    // …y por eso tampoco frena el efectivo (no es de fuera).
+    await expect(resolver('CASH')).resolves.toEqual({ status: 'RESOLVED', replay: false })
+    expect(drawerEvents).toHaveLength(1)
+  })
+
+  it('D670 (r1 #2): un aviso con la metadata copiada de una fila (otro id) también revisa los cierres «en Stripe» del cargo', async () => {
+    const id = await cerrada('STRIPE')
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 0, refunds: [fallida(id), deFuera('FAILED')] })
+    await handleStripeRefundEvent(
+      event({ id: 're_a_mano', status: 'failed', metadata: { type: 'online_order_refund', cardRefundId: id } }, 'refund.failed'),
+    )
+    expect(get(id).status).toBe('REVERSED')
+  })
+
+  it('D670 (r1 #3): lo de fuera que ya cerró otra reversa del cargo no frena el efectivo de una reabierta', async () => {
+    const a = await cerrada('STRIPE')
+    const b = seed({ status: 'REVERSED', amountCents: 25_000, stripeRefundId: 're_b', stampReversedAt: NOW, nextCheckAt: NEVER_AGAIN })
+    reversals.push({
+      id: 'rv2',
+      venueId: 'v1',
+      cardRefundId: b.id,
+      stripeRefundId: 're_b',
+      amountCents: 25_000,
+      resolvedAt: null,
+      resolvedMethod: null,
+    })
+    const deB = {
+      refundId: 're_b',
+      status: 'FAILED' as const,
+      amountCents: 25_000,
+      failureReason: null,
+      metadata: { type: 'online_order_refund', cardRefundId: b.id },
+    }
+    // La de fuera ($250) ya cerró a; b se debe completa: el efectivo de b sí sale.
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 25_000, refunds: [fallida(a), deB, deFuera('SUCCEEDED')] })
+    const efectivoB = () =>
+      resolveReversedCardRefund({ venueId: 'v1', orderId: 'ord1', cardRefundId: b.id, method: 'CASH', staffId: 'staff2' })
+    await expect(efectivoB()).resolves.toEqual({ status: 'RESOLVED', replay: false })
+    expect(drawerEvents).toHaveLength(1)
+    expect(get(a).status).toBe('RESOLVED')
+  })
+
+  it('D670 (r1 #3): con otra de fuera LIBRE (que no cerró nada), el efectivo sigue frenado y dice sólo lo libre', async () => {
+    const a = await cerrada('STRIPE')
+    const b = seed({ status: 'REVERSED', amountCents: 25_000, stripeRefundId: 're_b', stampReversedAt: NOW, nextCheckAt: NEVER_AGAIN })
+    reversals.push({
+      id: 'rv2',
+      venueId: 'v1',
+      cardRefundId: b.id,
+      stripeRefundId: 're_b',
+      amountCents: 25_000,
+      resolvedAt: null,
+      resolvedMethod: null,
+    })
+    const libre = { ...deFuera('SUCCEEDED'), refundId: 're_libre', amountCents: 5_000 }
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 30_000, refunds: [fallida(a), deFuera('SUCCEEDED'), libre] })
+    const err = await resolveReversedCardRefund({
+      venueId: 'v1',
+      orderId: 'ord1',
+      cardRefundId: b.id,
+      method: 'CASH',
+      staffId: 'staff2',
+    }).catch((e: Error) => e)
+    expect(err).toMatchObject({ statusCode: 409, code: 'EXTERNAL_REFUND_DETECTED' })
+    expect((err as Error).message).toContain('$50.00 devueltos directo en Stripe')
+    expect(drawerEvents).toHaveLength(0)
+  })
+
+  it('D670 (r1 #5): la reapertura no tiene tope: 101 cerradas «en Stripe» y la cobertura baja → las 101 se reabren', async () => {
+    for (let k = 0; k < 101; k++) {
+      const f = seed({ status: 'RESOLVED', amountCents: 100, stripeRefundId: `re_p${k}`, stampReversedAt: NOW, nextCheckAt: NEVER_AGAIN })
+      reversals.push({
+        id: `rvp${k}`,
+        venueId: 'v1',
+        cardRefundId: f.id,
+        stripeRefundId: `re_p${k}`,
+        amountCents: 100,
+        resolvedAt: NOW,
+        resolvedMethod: 'CREDIT_CARD',
+      })
+    }
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 10_000, refunds: [{ ...deFuera('SUCCEEDED'), amountCents: 10_000 }] })
+    jest.setSystemTime(at(MIN))
+    await avisoDeFuera()
+    expect(rows().filter(r => r.status === 'REVERSED')).toHaveLength(101)
+    expect(reversals.filter(r => r.resolvedAt === null)).toHaveLength(101)
   })
 })
 
