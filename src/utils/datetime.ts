@@ -455,6 +455,49 @@ export function formatInVenueTimezone(
   return formatInTimeZone(date, timezone, formatString)
 }
 
+/** One Intl formatter per zone (a handful of zones in all): `formatInTimeZone` builds one per call, ~40 µs a row. */
+const relojes = new Map<string, Intl.DateTimeFormat>()
+function relojDe(timezone: string): Intl.DateTimeFormat {
+  let reloj = relojes.get(timezone)
+  if (!reloj) {
+    reloj = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+      timeZoneName: 'longOffset',
+    })
+    relojes.set(timezone, reloj)
+  }
+  return reloj
+}
+
+/**
+ * The venue's wall clock at `instante`, in parts («2026», «11», «21», «20», «30», «00», «-06:00»). For exports that write one date
+ * per row (D13): a cached formatter per zone, so 20,000 rows don't hold the event loop. A zone that is not valid IANA («GMT-6»)
+ * falls back to `DEFAULT_TIMEZONE` instead of throwing.
+ */
+export function relojDelNegocio(
+  instante: Date,
+  timezone: string | null | undefined,
+): { anio: string; mes: string; dia: string; hora: string; minuto: string; segundo: string; desfase: string } {
+  let reloj: Intl.DateTimeFormat
+  try {
+    reloj = relojDe(timezone || DEFAULT_TIMEZONE)
+  } catch {
+    reloj = relojDe(DEFAULT_TIMEZONE)
+  }
+  const p: Record<string, string> = {}
+  for (const { type, value } of reloj.formatToParts(instante)) p[type] = value
+  // longOffset: «GMT-06:00», or «GMT» at offset zero.
+  const desfase = p.timeZoneName === 'GMT' ? '+00:00' : (p.timeZoneName ?? '').replace('GMT', '')
+  return { anio: p.year, mes: p.month, dia: p.day, hora: p.hour, minuto: p.minute, segundo: p.second, desfase }
+}
+
 /**
  * Validate if a string is a valid IANA timezone
  *

@@ -62,7 +62,7 @@ import { sqlImpuestoQueSeCobraAparte } from '@/services/shared/orderBalance'
 import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '@/services/shared/tenderSemantics'
 import { proyectarComisionYNeto } from '@/services/payments/proyeccionMonetaria'
 import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraReal, sqlRangoHoraRealSql } from '@/services/shared/horaRealDelAparato'
-import { formatInVenueTimezone, zonaValida } from '@/utils/datetime'
+import { relojDelNegocio } from '@/utils/datetime'
 
 // ============================================================
 // Types
@@ -2024,13 +2024,6 @@ const DIAS_DE_LA_SEMANA: Record<string, string> = {
   friday: 'Viernes',
   saturday: 'Sábado',
 }
-const FORMATO_DEL_PERIODO: Partial<Record<ReportType, string>> = {
-  hours: 'yyyy-MM-dd HH:mm',
-  days: 'yyyy-MM-dd',
-  weeks: "'Semana del' yyyy-MM-dd",
-  months: 'yyyy-MM',
-}
-
 /**
  * D13.2 (Codex r2 #6): the period label of the export, sortable and with its year, on the venue clock. The screen's
  * («21 nov, 10:00 a.m.») repeated between years. An hour the clock goes through twice (fall back) carries its offset. `vistas`
@@ -2038,12 +2031,19 @@ const FORMATO_DEL_PERIODO: Partial<Record<ReportType, string>> = {
  */
 function etiquetaDelPeriodoEnElArchivo(period: string, reportType: ReportType, timezone: string, vistas: Set<string>): string {
   if (reportType === 'dailySum') return DIAS_DE_LA_SEMANA[period] ?? period
-  const formato = FORMATO_DEL_PERIODO[reportType]
   const instante = new Date(period)
-  if (!formato || Number.isNaN(instante.getTime())) return period // hourlySum («09:00») and anything unexpected
-  const zona = zonaValida(timezone)
-  let etiqueta = formatInVenueTimezone(instante, zona, formato)
-  if (vistas.has(etiqueta)) etiqueta = `${etiqueta} (UTC${formatInVenueTimezone(instante, zona, 'xxx')})`
+  if (!['hours', 'days', 'weeks', 'months'].includes(reportType) || Number.isNaN(instante.getTime())) return period // hourlySum («09:00»)
+  const h = relojDelNegocio(instante, timezone)
+  const dia = `${h.anio}-${h.mes}-${h.dia}`
+  let etiqueta =
+    reportType === 'hours'
+      ? `${dia} ${h.hora}:${h.minuto}`
+      : reportType === 'days'
+        ? dia
+        : reportType === 'weeks'
+          ? `Semana del ${dia}`
+          : `${h.anio}-${h.mes}`
+  if (vistas.has(etiqueta)) etiqueta = `${etiqueta} (UTC${h.desfase})`
   vistas.add(etiqueta)
   return etiqueta
 }

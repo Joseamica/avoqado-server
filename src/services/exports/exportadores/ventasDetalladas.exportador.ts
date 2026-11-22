@@ -9,7 +9,7 @@ import {
   type PaymentMethodFilter,
   type SalesSummaryExportFilters,
 } from '@/services/dashboard/sales-summary.dashboard.service'
-import { formatInVenueTimezone, zonaValida } from '@/utils/datetime'
+import { relojDelNegocio } from '@/utils/datetime'
 import { construirWhereKeyset, fecha, lista, sinFuncion, str } from './comun'
 import type { Exportador } from './types'
 
@@ -21,8 +21,11 @@ export type FilaVentaDetallada = Awaited<ReturnType<typeof fetchSalesSummaryDeta
  */
 export function fechaDelCobro(r: Pick<FilaVentaDetallada, 'createdAt' | 'clientCreatedAt' | 'venue'>): string {
   const real = r.clientCreatedAt ?? r.createdAt
-  // `zonaValida`: una zona guardada fuera de IANA («GMT-6», alta vieja) haría lanzar `RangeError` y tumbaría el archivo entero.
-  return real ? formatInVenueTimezone(real, zonaValida(r.venue?.timezone)) : ''
+  if (!real) return ''
+  // `relojDelNegocio`: un formateador por zona (20,000 filas no retienen el hilo) y una zona fuera de IANA («GMT-6») cae a CDMX en
+  // vez de lanzar `RangeError` y tumbar el archivo entero (Codex D13 r2 #1, r4).
+  const h = relojDelNegocio(real, r.venue?.timezone)
+  return `${h.anio}-${h.mes}-${h.dia} ${h.hora}:${h.minuto}:${h.segundo}`
 }
 
 // Mismo registro de columnas que el GET viejo (sales-summary.dashboard.controller.ts); ahora vive aquí y el controller lo importa.

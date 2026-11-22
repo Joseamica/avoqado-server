@@ -3,7 +3,8 @@ import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { DateTime } from 'luxon'
 import prisma from '@/utils/prismaClient'
-import { venueStartOfDay, venueEndOfDay, zonaValida } from '@/utils/datetime'
+import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
+import { zonaDelCalculo } from '@/utils/sanitizeTimezone'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -878,7 +879,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       if (reportGate) return text({ ok: false, planRequired: true, error: reportGate })
 
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
-      const tz = zonaValida(venue?.timezone) // Codex D13 r3 #8: «GMT-6» guardado no tumba el rango
+      const tz = zonaDelCalculo(venue?.timezone) // Codex D13 r3 #8, r4: «GMT-6» o «GMT» guardados no tumban el rango ni los periodos
       const start = venueStartOfDay(tz, fromDate ? new Date(`${fromDate}T12:00:00`) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))
       const end = venueEndOfDay(tz, toDate ? new Date(`${toDate}T12:00:00`) : undefined)
       const range = { startDate: start.toISOString(), endDate: end.toISOString() }
@@ -930,12 +931,12 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       })
       // D13.2: hours over a long range can be thousands of rows; never cut them silently, say so (same cap as the dashboard PDF),
       // before labelling every period (Codex r3 #6).
-      const demasiadas = (filas: number) =>
+      const demasiadas = (filas: number, alMenos = false) =>
         text({
           ok: false,
-          error: `El resumen tendría ${filas.toLocaleString('es-MX')} filas (máximo ${EXPORT_PDF_ROW_CAP.toLocaleString('es-MX')}). Usa un rango más corto o un desglose más grande (days, weeks o months).`,
+          error: `El resumen tendría ${alMenos ? 'más de ' : ''}${filas.toLocaleString('es-MX')} filas (máximo ${EXPORT_PDF_ROW_CAP.toLocaleString('es-MX')}). Usa un rango más corto o un desglose más grande (days, weeks o months).`,
         })
-      if ((report.byPeriod?.length ?? 0) > EXPORT_PDF_ROW_CAP) return demasiadas(report.byPeriod!.length)
+      if ((report.byPeriod?.length ?? 0) > EXPORT_PDF_ROW_CAP) return demasiadas(report.byPeriod!.length, true)
       const { rows } = flattenSalesSummaryForExport(report, requested, tz)
       if (rows.length > EXPORT_PDF_ROW_CAP) return demasiadas(rows.length)
       return text({

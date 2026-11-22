@@ -30,7 +30,7 @@ import {
   type ExportColumnDef,
 } from '@/services/dashboard/export.helpers'
 import { BadRequestError } from '@/errors/AppError'
-import { zonaValida } from '@/utils/datetime'
+import { zonaDelCalculo } from '@/utils/sanitizeTimezone'
 import { decidirCarril, MENSAJE_GET_VIEJO_GRANDE } from '@/services/exports/exportPolicy'
 import { MENSAJE_QR_ANTERIOR_SIN_DETALLE, VENTAS_DETALLADAS_COLUMNAS } from '@/services/exports/exportadores/ventasDetalladas.exportador'
 import { AVISO_PUENTE_QR_CAIDO, MINDFORM_NEW_VENUE_ID } from '@/services/legacy/qrPayments.legacy.service'
@@ -346,7 +346,7 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
       endDate,
       groupBy: 'paymentMethod',
       reportType: periodo,
-      timezone: zonaValida(venue?.timezone), // Codex D13 r3 #1: «GMT-6» guardado no tumba «Por periodo»,
+      timezone: zonaDelCalculo(venue?.timezone), // Codex D13 r3 #1, r4: «GMT-6» o «GMT» guardados no tumban «Por periodo»,
       merchantAccountId: typeof merchantAccountId === 'string' ? merchantAccountId : undefined,
       paymentMethod: typeof paymentMethod === 'string' ? (paymentMethod as PaymentMethodFilter) : undefined,
       cardType: typeof cardType === 'string' ? (cardType as CardTypeFilter) : undefined,
@@ -356,13 +356,13 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
 
     // D13.2 (Codex r1 #6, r3 #6): «Por horas» over a long range can pass the format's cap; say so before labelling every period or
     // building a huge file here.
-    const demasiadas = (filas: number) =>
+    const demasiadas = (filas: number, alMenos = false) =>
       res.status(413).json({
         success: false,
-        message: `El archivo tendría ${filas.toLocaleString('es-MX')} filas y el máximo en ${format === 'pdf' ? 'PDF' : 'CSV o Excel'} es ${cap.toLocaleString('es-MX')}. Elige un periodo más corto o un desglose más grande (días, semanas o meses).`,
+        message: `El archivo tendría ${alMenos ? 'más de ' : ''}${filas.toLocaleString('es-MX')} filas y el máximo en ${format === 'pdf' ? 'PDF' : 'CSV o Excel'} es ${cap.toLocaleString('es-MX')}. Elige un periodo más corto o un desglose más grande (días, semanas o meses).`,
       })
     if ((report.byPeriod?.length ?? 0) > cap) {
-      demasiadas(report.byPeriod!.length)
+      demasiadas(report.byPeriod!.length, true) // sólo los periodos: con las otras secciones son más
       return
     }
     const { rows } = flattenSalesSummaryForExport(report, sections, filters.timezone)

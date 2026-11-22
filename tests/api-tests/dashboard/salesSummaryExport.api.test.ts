@@ -403,18 +403,23 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
       .get(exportUrl(`mode=summary&format=pdf&sections=byPeriod&reportType=hours&${RANGE}`))
       .set(authHeader('OWNER'))
     expect(res.status).toBe(413)
-    expect(res.body.message).toMatch(/máximo en PDF es 1,000/)
+    // Sólo cuenta los periodos (sin etiquetarlos): con las otras secciones serían más, por eso «más de».
+    expect(res.body.message).toMatch(/más de 1,001 filas y el máximo en PDF es 1,000/)
   })
 
   it('Codex D13 r3 #1 · una zona guardada fuera de IANA («GMT-6») no tumba «Por periodo»: va la de CDMX', async () => {
     mockVenueHasFeatureAccess.mockResolvedValue(true)
-    prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'GMT-6' })
     mockGetSalesSummary.mockResolvedValue(makeFakeReport())
-    const res = await request(app)
-      .get(exportUrl(`mode=summary&format=csv&sections=byPeriod&${RANGE}`))
-      .set(authHeader('OWNER'))
-    expect(res.status).toBe(200)
-    expect((mockGetSalesSummary.mock.calls[0][1] as { timezone: string }).timezone).toBe('America/Mexico_City')
+    // «GMT» lo acepta Intl pero no el cálculo en SQL (Codex r4): también cae a CDMX.
+    for (const zona of ['GMT-6', 'GMT']) {
+      mockGetSalesSummary.mockClear()
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: zona })
+      const res = await request(app)
+        .get(exportUrl(`mode=summary&format=csv&sections=byPeriod&${RANGE}`))
+        .set(authHeader('OWNER'))
+      expect(res.status).toBe(200)
+      expect((mockGetSalesSummary.mock.calls[0][1] as { timezone: string }).timezone).toBe('America/Mexico_City')
+    }
   })
 
   it('un reportType que no existe ⇒ 400', async () => {
