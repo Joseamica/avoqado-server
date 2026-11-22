@@ -61,7 +61,12 @@ import { buildItemDiscountRow, calculateDiscountCents } from '../shared/discount
 import { comoJson, nuevoRepartoDirigido } from '../shared/repartoDescuento'
 import { motivoDelDescuento, type MotivoDeDescuento } from '../shared/motivoDelDescuento'
 import { externalRouteBlockers } from './areaTicketExternalCodes'
-import { cuentasDeSusComandas, retirarComandasDeVentaAnulada, tomarCandadoDeComandas } from '../kds/kitchenTicketAuthoring.service'
+import {
+  apartarActorDeLaAnulacion,
+  cuentasDeSusComandas,
+  retirarComandasDeVentaAnulada,
+  tomarCandadoDeComandas,
+} from '../kds/kitchenTicketAuthoring.service'
 import {
   buildOrderItemsData,
   CreateOrderItemInput,
@@ -2390,6 +2395,8 @@ export async function cancelAreaTicketCheckout(venueId: string, sessionId: strin
         // se lee sin candado DENTRO de cada intento (Codex d40-r1 #1: leída antes, el reintento de un 40P01 repetía la lectura vieja).
         // Si se materializó entre esta lectura y el candado de la sesión, el retiro toma su candado a media transacción; un bloqueo
         // mutuo con otra cancelación de la misma sesión lo repite `withDeadlockRetry`, y el intento nuevo ya la lee.
+        // Codex d40-r4 #1: el cajero se aparta primero (antes que la cocina y la sesión); si ya no existe, se cancela sin actor.
+        const actor = await apartarActorDeLaAnulacion(tx, staffId)
         // Codex d40-r3 #2: una venta ya cancelada (otra llave, o el reintento) no pide los candados: sale abajo sin tocar la cocina.
         const previa = await tx.areaTicketCheckoutSession.findFirst({
           where: { id: sessionId, venueId },
@@ -2420,12 +2427,17 @@ export async function cancelAreaTicketCheckout(venueId: string, sessionId: strin
           // hz:e82938e1:D40: la cocina deja de ver la venta cancelada. Los renglones de vale no van a cocina, pero un producto suelto
           // que el POS le agregó sí: su comanda pendiente se quedaba en la pantalla. Si la revisión de abajo la rechaza, todo se revierte.
           await retirarComandasDeVentaAnulada(tx, venueId, fresh.orderId, {
-            staffId: staffId ?? undefined,
+            staffId: actor,
             reason: 'Venta de vales cancelada',
           })
           await assertOrderCancellableUnderLock(tx, { venueId, orderId: fresh.orderId })
           // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
-          await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId: fresh.orderId, staffId, camino: 'cancelAreaTicketCheckout' })
+          await devolverCanjesDeVentaAnuladaEnTx(tx, {
+            venueId,
+            orderId: fresh.orderId,
+            staffId: actor,
+            camino: 'cancelAreaTicketCheckout',
+          })
           const cancelacion = await tx.order.updateMany({
             where: { id: fresh.orderId, venueId, paymentStatus: 'PENDING' },
             // hz:e82938e1:D39 (como D38 en `cancelOrderInTransaction`): la marca de «por mandar a cocina» se va con la anulación. Si se

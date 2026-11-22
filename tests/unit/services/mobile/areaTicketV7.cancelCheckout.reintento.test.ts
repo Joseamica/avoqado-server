@@ -18,11 +18,16 @@ jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
   retirarComandasDeVentaAnulada: jest.fn(async () => ({ kdsOrderIds: [], kdsOrderItemIds: [] })),
   cuentasDeSusComandas: jest.fn(async () => ['order-1', 'cuenta-ligada']),
   tomarCandadoDeComandas: jest.fn(async () => undefined),
+  apartarActorDeLaAnulacion: jest.fn(async (_tx: unknown, staffId?: string | null) => staffId ?? undefined),
 }))
 
 import { cancelAreaTicketCheckout } from '@/services/mobile/areaTicketV7.mobile.service'
 import { assertOrderCancellableUnderLock } from '@/services/shared/orderCancelGuard'
-import { retirarComandasDeVentaAnulada, tomarCandadoDeComandas } from '@/services/kds/kitchenTicketAuthoring.service'
+import {
+  apartarActorDeLaAnulacion,
+  retirarComandasDeVentaAnulada,
+  tomarCandadoDeComandas,
+} from '@/services/kds/kitchenTicketAuthoring.service'
 
 const sesion = (over: Record<string, unknown> = {}) => ({
   id: 'ses-1',
@@ -170,6 +175,16 @@ describe('cancelAreaTicketCheckout — retira las comandas (hz:e82938e1:D40)', (
     expect(candadosDeSesion).toHaveLength(2)
     expect(ordenDe(tomarCandadoDeComandas, 1)).toBeLessThan(candadosDeSesion[1])
     expect(prismaMock.order.updateMany).toHaveBeenCalledTimes(1)
+  })
+
+  it('Codex d40-r4 #1: el cajero se aparta ANTES que los candados de cocina; si ya no existe, el retiro va sin actor', async () => {
+    preparar()
+    ;(prismaMock as any).staffVenue.findFirst.mockResolvedValue({ staffId: 'cajero', staff: { id: 'cajero' } })
+    ;(apartarActorDeLaAnulacion as jest.Mock).mockResolvedValueOnce(undefined)
+    await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: 'cajero' } as any)
+    expect((apartarActorDeLaAnulacion as jest.Mock).mock.calls[0][0]).toBe(prismaMock)
+    expect(ordenDe(apartarActorDeLaAnulacion)).toBeLessThan(ordenDe(tomarCandadoDeComandas))
+    expect(retirarComandasDeVentaAnulada).toHaveBeenCalledWith(prismaMock, 'v1', 'order-1', expect.objectContaining({ staffId: undefined }))
   })
 
   it('regresión: una sesión sin orden todavía (OPEN) no toca la cocina', async () => {

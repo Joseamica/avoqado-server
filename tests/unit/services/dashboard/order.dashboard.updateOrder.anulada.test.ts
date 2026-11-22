@@ -2,7 +2,12 @@ import { prismaMock as db } from '@tests/__helpers__/setup'
 import { updateOrder } from '@/services/dashboard/order.dashboard.service'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import { assertOrderCancellableUnderLock } from '@/services/shared/orderCancelGuard'
-import { retirarComandasDeVentaAnulada, tomarCandadoDeComandas } from '@/services/kds/kitchenTicketAuthoring.service'
+import {
+  apartarActorDeLaAnulacion,
+  retirarComandasDeVentaAnulada,
+  tomarCandadoDeComandas,
+} from '@/services/kds/kitchenTicketAuthoring.service'
+import { devolverCanjesDeVentaAnuladaEnTx } from '@/services/shared/orderCancelGuard'
 import { NotFoundError } from '@/errors/AppError'
 
 jest.mock('@/services/shared/tableOrderLock', () => ({ lockTableOrderScope: jest.fn(async () => ({})) }))
@@ -23,6 +28,7 @@ jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
   retirarComandasDeVentaAnulada: jest.fn(async () => ({ kdsOrderIds: [], kdsOrderItemIds: [] })),
   cuentasDeSusComandas: jest.fn(async () => ['order', 'cuenta-ligada']),
   tomarCandadoDeComandas: jest.fn(async () => undefined),
+  apartarActorDeLaAnulacion: jest.fn(async (_tx: unknown, staffId?: string | null) => staffId ?? undefined),
 }))
 
 let row: any
@@ -176,5 +182,43 @@ describe('D40: anular por el PUT retira las comandas de la pantalla de cocina', 
     expect(db.order.findFirst.mock.calls[0][0]).toMatchObject({ where: { id: 'ajena', venueId: 'venue' } })
     expect(tomarCandadoDeComandas).not.toHaveBeenCalled()
     expect(retirarComandasDeVentaAnulada).not.toHaveBeenCalled()
+  })
+})
+
+// Codex d40-r4: los cruces raros que quedaban (founder: «b», pulirlos antes de unir).
+describe('D40 · cruces de la ronda 4', () => {
+  it('#1: al anular, el actor se aparta ANTES que los candados de cocina, y el retiro y los canjes van con él', async () => {
+    row.status = 'PENDING'
+    await updateOrder('venue', 'order', { status: 'CANCELLED' } as any, { staffId: 'staff' } as any)
+    expect(apartarActorDeLaAnulacion).toHaveBeenCalledWith(db, 'staff')
+    expect((apartarActorDeLaAnulacion as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      (tomarCandadoDeComandas as jest.Mock).mock.invocationCallOrder[0],
+    )
+    expect(retirarComandasDeVentaAnulada).toHaveBeenCalledWith(db, 'venue', 'order', { staffId: 'staff' })
+    expect((devolverCanjesDeVentaAnuladaEnTx as jest.Mock).mock.calls[0][1]).toMatchObject({ staffId: 'staff' })
+  })
+  it('#1: si el actor ya no existe (lo borraron), la anulación sigue sin actor en la bitácora', async () => {
+    row.status = 'PENDING'
+    ;(apartarActorDeLaAnulacion as jest.Mock).mockResolvedValueOnce(undefined)
+    await expect(updateOrder('venue', 'order', { status: 'CANCELLED' } as any, { staffId: 'borrado' } as any)).resolves.toMatchObject({
+      status: 'CANCELLED',
+    })
+    expect(retirarComandasDeVentaAnulada).toHaveBeenCalledWith(db, 'venue', 'order', { staffId: undefined })
+    expect((devolverCanjesDeVentaAnuladaEnTx as jest.Mock).mock.calls[0][1]).toMatchObject({ staffId: undefined })
+  })
+  it('regresión: editar sin anular no aparta al actor', async () => {
+    row.status = 'PENDING'
+    await updateOrder('venue', 'order', { customerName: 'Nombre' }, { staffId: 'staff' } as any)
+    expect(apartarActorDeLaAnulacion).not.toHaveBeenCalled()
+  })
+  it('#3: anular con una mesa que ya no existe sale con 404 sin esperar a la cocina', async () => {
+    row.status = 'PENDING'
+    db.table.findFirst.mockResolvedValue(null)
+    ;(lockTableOrderScope as jest.Mock).mockRejectedValueOnce(new NotFoundError('Table not found or does not belong to this venue'))
+    await expect(updateOrder('venue', 'order', { status: 'CANCELLED', tableId: 'mesa-borrada' } as any)).rejects.toMatchObject({
+      statusCode: 404,
+    })
+    expect(db.table.findFirst.mock.calls[0][0]).toMatchObject({ where: { id: 'mesa-borrada', venueId: 'venue' } })
+    expect(tomarCandadoDeComandas).not.toHaveBeenCalled()
   })
 })

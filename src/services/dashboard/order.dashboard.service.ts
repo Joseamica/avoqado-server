@@ -46,7 +46,12 @@ import {
   rechazarSiCuentaAnuladaEnTx,
   rechazarCobroNuevoSobreCancelada,
 } from '../shared/cuentaCancelada'
-import { cuentasDeSusComandas, retirarComandasDeVentaAnulada, tomarCandadoDeComandas } from '../kds/kitchenTicketAuthoring.service'
+import {
+  apartarActorDeLaAnulacion,
+  cuentasDeSusComandas,
+  retirarComandasDeVentaAnulada,
+  tomarCandadoDeComandas,
+} from '../kds/kitchenTicketAuthoring.service'
 import { desactivarSobresPendientesDeCuentaEnTx } from '../giftCards/cuentaDeTarjetas'
 import { formatoPesos } from '../giftCards/giftCardLimits'
 import { CAMPOS_DE_LA_REGLA, estadoDeFacturaDeLaVenta, FACTURAS_QUE_CUENTAN_DE_LA_VENTA } from '../fiscal/facturaDeLaVenta'
@@ -641,9 +646,13 @@ export async function updateOrder(
     // de su cocina (#1, 404 de abajo), y una ya anulada tampoco (#2: el reenvío idéntico, o el rechazo, no espera a la cocina). Si
     // cambia entre esta lectura y la de bajo candado, el retiro toma su candado a media transacción (rara vez; lo repite el 40P01).
     const pideAnular = status === 'CANCELLED' || status === 'DELETED'
+    // Codex d40-r4 #1: quien anula se aparta primero (antes que la cocina y la cuenta); si ya no existe, se anula sin actor.
+    const actor = pideAnular ? await apartarActorDeLaAnulacion(client, opciones.staffId) : opciones.staffId
     const previa =
       topologyWrite && pideAnular ? await client.order.findFirst({ where: { id: orderId, venueId }, select: { status: true } }) : null
-    if (previa && previa.status !== 'CANCELLED' && previa.status !== 'DELETED')
+    // Codex d40-r4 #3: una mesa que no existe sale con 404 abajo, sin esperar antes a la cocina.
+    const mesaExiste = !tableId || Boolean(await client.table.findFirst({ where: { id: tableId, venueId }, select: { id: true } }))
+    if (previa && previa.status !== 'CANCELLED' && previa.status !== 'DELETED' && mesaExiste)
       for (const id of (await cuentasDeSusComandas(client, venueId, orderId)).sort()) await tomarCandadoDeComandas(client, id)
     if (topologyWrite)
       await lockTableOrderScope(client, { venueId, orderIds: [orderId], tableIds: tableId ? [tableId] : [] }).catch(error => {
@@ -820,7 +829,7 @@ export async function updateOrder(
       // hz:e82938e1:D40: como el DELETE, `cancelOrderInTransaction` y «Regresar saldo y cancelar»: la cocina deja de ver la cuenta anulada.
       // Antes este PUT anulaba la cuenta y su comanda pendiente se quedaba en la pantalla de cocina. Si la revisión de abajo la rechaza (con
       // dinero), la transacción entera se revierte y las comandas vuelven a estar como estaban.
-      await retirarComandasDeVentaAnulada(client, venueId, orderId, { staffId: opciones.staffId })
+      await retirarComandasDeVentaAnulada(client, venueId, orderId, { staffId: actor })
       await assertOrderCancellableUnderLock(
         client,
         { venueId, orderId },
@@ -835,7 +844,7 @@ export async function updateOrder(
       const { soltarValesAlCancelarLaVenta } = await import('@/services/mobile/areaTicketV7.mobile.service')
       valesSoltados = await soltarValesAlCancelarLaVenta(client, { venueId, orderId })
       // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
-      await devolverCanjesDeVentaAnuladaEnTx(client, { venueId, orderId, staffId: opciones.staffId, camino: 'updateOrder' })
+      await devolverCanjesDeVentaAnuladaEnTx(client, { venueId, orderId, staffId: actor, camino: 'updateOrder' })
     }
     const updatedOrder = await escribir(client)
     // Spec § 5.1.8: cancelar una cuenta de tarjetas sin cobrar desactiva sus sobres PENDING en la misma transacción.

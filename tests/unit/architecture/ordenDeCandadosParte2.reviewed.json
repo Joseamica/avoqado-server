@@ -764,6 +764,11 @@
       "cantidad": 1,
       "nota": "Siempre por withDeadlockRetry, también sin cambio de mesa, estado ni cliente (update recibe TxConReintento)."
     },
+    "src/services/dashboard/printStation.dashboard.service.ts#deleteStation": {
+      "etiqueta": "deleteStation",
+      "cantidad": 1,
+      "nota": "hz:e82938e1:D40 (Codex d40-r4 #2): el SET NULL de la estación se cruza con el folio de cocina que copia esa estación al anular una cuenta separada; el cuerpo sólo borra (logAction va después del commit)."
+    },
     "src/services/dashboard/paymentLink.service.ts#completeCharge": {
       "etiqueta": "completeCharge",
       "cantidad": 1,
