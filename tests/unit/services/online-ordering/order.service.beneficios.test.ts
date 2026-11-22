@@ -857,3 +857,62 @@ describe("S11 · el seguimiento del borrador liberado dice por qué y el precio 
     expect(await getTrackingByToken('T'.repeat(32))).not.toHaveProperty('precioNuevo')
   })
 })
+
+describe('D661 (3A): el seguimiento de un borrador de tarjeta dice el modo del BORRADOR', () => {
+  const borrador = (o: { status: string; customerPhone: string; updatedAt?: Date }) => ({
+    id: 'ch1',
+    status: o.status,
+    lastError: null,
+    updatedAt: o.updatedAt ?? new Date(), // reciente: el seguimiento no le pregunta a Stripe
+    customerPhone: o.customerPhone,
+    request: { quote: { subtotal: '100', total: '100', lines: [] } },
+    amount: D('100.00'),
+    checkoutExpiresAt: NOW,
+    createdAt: NOW,
+    venueId: 'v1',
+    venue: {
+      name: 'Café',
+      slug: 'cafe',
+      timezone: 'America/Mexico_City',
+      address: null,
+      city: null,
+      state: null,
+      zipCode: null,
+      phone: null,
+    },
+  })
+
+  beforeEach(() => {
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(null)
+    prismaMock.activityLog.findFirst.mockResolvedValue(null)
+  })
+
+  it('un borrador de «Nadie» antes de confirmar dice requiresAcceptance false; el de «Mi equipo», true', async () => {
+    const { getTrackingByToken } = await import('@/services/online-ordering/order.service')
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(borrador({ status: 'PENDING_AUTH', customerPhone: '' }) as any)
+    expect(await getTrackingByToken('T'.repeat(32))).toMatchObject({ status: 'AWAITING_PAYMENT', requiresAcceptance: false })
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(borrador({ status: 'PENDING_AUTH', customerPhone: PHONE }) as any)
+    expect(await getTrackingByToken('T'.repeat(32))).toMatchObject({ status: 'AWAITING_PAYMENT', requiresAcceptance: true })
+  })
+
+  it('D661 · matriz (Ruling 10): la autorización tardía liberada sin pedido se sigue como «no se completó el pago»: liberándose (RELEASING) y luego liberada (RELEASED), siempre de «Nadie»', async () => {
+    const { getTrackingByToken } = await import('@/services/online-ordering/order.service')
+    // Cortado después de decidir liberar y antes (o sin respuesta) de Stripe: el cargo queda RELEASING.
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(borrador({ status: 'RELEASING', customerPhone: '' }) as any)
+    expect(await getTrackingByToken('T'.repeat(32))).toMatchObject({
+      status: 'PAYMENT_NOT_COMPLETED',
+      cardStatus: 'RELEASING',
+      paid: false,
+      orderNumber: '',
+      requiresAcceptance: false,
+    })
+    // Stripe confirmó la cancelación: RELEASED («no se te cobró»).
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(borrador({ status: 'RELEASED', customerPhone: '' }) as any)
+    expect(await getTrackingByToken('T'.repeat(32))).toMatchObject({
+      status: 'PAYMENT_NOT_COMPLETED',
+      cardStatus: 'RELEASED',
+      paid: false,
+      requiresAcceptance: false,
+    })
+  })
+})

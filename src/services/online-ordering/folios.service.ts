@@ -1,4 +1,4 @@
-import { OnlineOrderStatus, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
+import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, OnlineOrderStatus, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { bloquearDescuentosEnOrdenEnTx } from '@/services/dashboard/discountEngine.service'
@@ -15,11 +15,24 @@ import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { utcTs } from '@/utils/sqlDates'
 import { announceCancelledElsewhere, cerrarCanceladasReleyendo } from './cancelledOrderSync'
-import { EXPIRY_BATCH_SIZE, INBOX_PAGE_SIZE, OPEN_ORDER_STATUSES, SYNC_BATCH_SIZE, foliosPorPagarWhere } from './constants'
+import { releaseCharge } from './card/release.service'
+import {
+  D661_CAJA_LIST_CAP,
+  EXPIRY_BATCH_SIZE,
+  INBOX_PAGE_SIZE,
+  OPEN_ORDER_STATUSES,
+  SYNC_BATCH_SIZE,
+  TO_PAY_FAST_POLL_SECONDS,
+  TO_PAY_SLOW_POLL_SECONDS,
+  apartadosNadieWhere,
+  borradoresNadieWhere,
+  foliosPorPagarWhere,
+} from './constants'
 // Ciclo a propósito: `inbox.service` usa las sincronizaciones de aquí y esta lista usa su forma; todo se usa al llamar, nunca al cargar.
 import { INBOX_SELECT, fromActiveCursor, toActiveCursor, toInboxOrder } from './inbox.service'
 import { getSettings } from './settings.service'
 import { notifyOrderEvent } from './notifications.service'
+import { comandasPorImprimirWhere } from './printClaim.service'
 import { announceAccepted, casTransitionInTx, prepMinutes, settled, type CasResult, type TransitionResult } from './transitions.service'
 import { emitOnlineOrderUpdated } from './traySocket'
 import type { ReadCandidates, Reloj } from './types'
@@ -212,6 +225,10 @@ export async function prepararFolioPagado(i: {
     if (r.r === 'STALE' && r.cancelledElsewhere) announceCancelledElsewhere(r.cancelledElsewhere, r.now)
     return settled(r)
   }
+  // D661 (3A, fix 1): un apartado de tarjeta cuya cuenta se pagó por otro camino se aceptó soltando su tarjeta (RELEASING en la misma
+  // transacción): aquí la liberación de siempre con el banco. 3B: sin esperarla, porque esto corre dentro de las lecturas de la caja
+  // y de la bandeja; nunca lanza y, si Stripe no contesta, el conciliador libera todo RELEASING.
+  if (r.releaseChargeId) void releaseCharge(r.releaseChargeId)
   // Con OK la cuenta quedó marcada (en su escritura o aparte): se arma aquí, también cuando la cuenta no se escribió.
   const result = announceAccepted({ venueId: i.venueId, orderId: i.orderId, staffId: i.staffId, minutes, marcarCocina: false }, r)
   if (marcarCocina) void armarComandasTrasCommit(i.venueId, i.orderId, 'ROUND')
@@ -361,6 +378,12 @@ export async function syncPaidClosedFolios(
  * a la lista después de ese instante (`acceptedAt <= ahora`; la regla del día ya lo excluye salvo que la hora local retroceda en el
  * corte). El CAS repite `acceptedAt`, así la decisión vale hasta la escritura (el reloj sólo avanza), y `completedAt` es la hora de
  * la escritura.
+ * D661 (Task 4): un pedido con tarjeta de «Nadie» (`CARD_ONLINE`) no se entregó: queda «No lo recogió» (`COMPLETED` +
+ * `notPickedUpAt`). Con la devolución reservada o hecha no se toca (lo excluye la lectura y lo repite el CAS: una reserva que gane
+ * entre la lectura y la escritura hace perder el CAS). Su bitácora `ONLINE_ORDER_NOT_PICKED_UP` va en la MISMA transacción que el
+ * CAS: si el proceso muere entre los dos no queda ninguno y la siguiente pasada lo cierra con su única fila. Un folio pagado en caja
+ * sigue como hoy. Ruling 24: «No lo recogió» sólo si se cobró EN LÍNEA (su cargo `CAPTURED`, también repetido en el CAS); uno cuyo
+ * dinero entró por otro camino (la tarjeta se soltó al pasar a «Por entregar», arreglo 1 de 3A) se cierra como un folio de caja.
  */
 export async function cerrarFoliosDelDiaTerminado(
   scope: { venueId?: string },
@@ -370,14 +393,26 @@ export async function cerrarFoliosDelDiaTerminado(
   const rows = await readCandidates(() => {
     const ahora = reloj() // R52: el día se decide al leer, también en cada reintento de la lectura
     return prisma.$queryRaw<
-      Array<{ id: string; orderId: string; venueId: string; status: OnlineOrderStatus; acceptedAt: Date; orderNumber: string }>
+      Array<{
+        id: string
+        orderId: string
+        venueId: string
+        status: OnlineOrderStatus
+        paymentMode: OnlineOrderPaymentMode
+        chargeStatus: OnlineOrderChargeStatus | null
+        acceptedAt: Date
+        orderNumber: string
+      }>
     >`
-      SELECT oo.id, oo."orderId", oo."venueId", oo.status::text AS status, oo."acceptedAt", o."orderNumber"
+      SELECT oo.id, oo."orderId", oo."venueId", oo.status::text AS status, oo."paymentMode"::text AS "paymentMode",
+        c.status::text AS "chargeStatus", oo."acceptedAt", o."orderNumber"
       FROM "OnlineOrder" oo
       JOIN "Order" o ON o.id = oo."orderId"
+      LEFT JOIN "OnlineOrderCharge" c ON c."onlineOrderId" = oo.id
       WHERE oo."requiresAcceptance" = false
         AND oo.status IN ('ACCEPTED', 'READY')
         AND o.status NOT IN ('CANCELLED', 'DELETED')
+        AND NOT (oo."paymentMode" = 'CARD_ONLINE' AND (oo."refundRequestedAt" IS NOT NULL OR oo."refundedAt" IS NOT NULL))
         ${scope.venueId !== undefined ? Prisma.sql`AND oo."venueId" = ${scope.venueId}` : Prisma.empty}
         AND oo."acceptedAt" <= ${utcTs(ahora)}
         AND ${Prisma.raw(seAcaboElDiaDelNegocioDeSql('oo."acceptedAt"', 'oo."venueId"', instanteUtcSql(ahora)))}
@@ -388,11 +423,36 @@ export async function cerrarFoliosDelDiaTerminado(
   for (const row of rows) {
     try {
       const completedAt = reloj() // R52: la hora de la escritura
-      const cas = await prisma.onlineOrder.updateMany({
-        where: { id: row.id, status: row.status, requiresAcceptance: false, acceptedAt: row.acceptedAt, order: CUENTA_VIVA },
-        data: { status: OnlineOrderStatus.COMPLETED, completedAt },
+      const noLoRecogio = row.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE && row.chargeStatus === OnlineOrderChargeStatus.CAPTURED
+      const cerrado = await prisma.$transaction(async tx => {
+        const cas = await tx.onlineOrder.updateMany({
+          where: {
+            id: row.id,
+            status: row.status,
+            requiresAcceptance: false,
+            acceptedAt: row.acceptedAt,
+            order: CUENTA_VIVA,
+            ...(noLoRecogio
+              ? { refundRequestedAt: null, refundedAt: null, charge: { is: { status: OnlineOrderChargeStatus.CAPTURED } } }
+              : {}),
+          },
+          data: { status: OnlineOrderStatus.COMPLETED, completedAt, ...(noLoRecogio ? { notPickedUpAt: completedAt } : {}) },
+        })
+        if (cas.count === 1 && noLoRecogio) {
+          await tx.activityLog.create({
+            data: {
+              venueId: row.venueId,
+              staffId: null,
+              action: 'ONLINE_ORDER_NOT_PICKED_UP',
+              entity: 'OnlineOrder',
+              entityId: row.id,
+              data: { orderNumber: row.orderNumber, automatic: 'END_OF_DAY' },
+            },
+          })
+        }
+        return cas.count === 1
       })
-      if (cas.count !== 1) continue
+      if (!cerrado) continue
       won += 1
       emitOnlineOrderUpdated({
         venueId: row.venueId,
@@ -401,6 +461,8 @@ export async function cerrarFoliosDelDiaTerminado(
         onlineStatus: OnlineOrderStatus.COMPLETED,
         now: completedAt,
       })
+      // «No lo recogió» ya dejó su bitácora en la transacción; nunca se dice «Entregado» de lo que no se entregó.
+      if (noLoRecogio) continue
       void logAction({
         staffId: null,
         venueId: row.venueId,
@@ -417,7 +479,8 @@ export async function cerrarFoliosDelDiaTerminado(
       })
     }
   }
-  if (won > 0) logger.info('[OnlineOrdering] folios entregados al terminar el día del negocio', { ...scope, count: won })
+  if (won > 0)
+    logger.info('[OnlineOrdering] folios cerrados al terminar el día del negocio («Entregado» o «No lo recogió»)', { ...scope, count: won })
   return won
 }
 
@@ -479,6 +542,23 @@ export const leerFoliosConAbonoDevuelto = (now: Date, despues: CursorDeVencer | 
 
 export type FolioSection = 'toPay' | 'toDeliver'
 
+/** D661 (3B): un pedido con tarjeta de «Nadie» apartado que suena en la caja hasta que una caja lo abre (= lo cobra). */
+export interface TarjetaPorAbrir {
+  orderId: string
+  orderNumber: string
+  customerName: string
+  /** Ruling 13: el total en PESOS, con el mismo tipo y formato que los montos de los folios de la misma respuesta. */
+  total: number
+  createdAt: string
+  /** `true` = una caja ya lo está cobrando (cargo `CAPTURING`): espera, no lo abras otra vez. */
+  cobrando: boolean
+}
+/** D661 (Ruling 2): un pedido ya cobrado cuya comanda falta; la caja lee el pedido completo y lo imprime con el reclamo de siempre. */
+export interface ComandaPorImprimir {
+  orderId: string
+  orderNumber: string
+}
+
 /**
  * Tienda híbrida (T12): la lista de la caja (TPV, POS y panel). «Por pagar» = folios sin saldar (`foliosPorPagarWhere`, R42) y «Por
  * entregar» = folios pagados que nadie ha entregado (`ACCEPTED` o `READY`, cada uno con su `status`), del más viejo al más nuevo. Cada sección es una página de
@@ -516,6 +596,18 @@ export async function listFolios(p: { venueId: string; section?: FolioSection; c
     requiresAcceptance: false,
     status: { in: [OnlineOrderStatus.ACCEPTED, OnlineOrderStatus.READY] },
   }
+  // D661 (3B): las dos listas de la caja que no dependen de la página. Lo apartado que una caja puede abrir (también mientras otra lo
+  // cobra) y lo cobrado cuya comanda falta; las dos acotadas (lo apartado ya lo acota el cupo de tarjeta de la sucursal, 30).
+  // D661 (B4): un apartado que ya pasó su plazo deja de sonar en seguida (abrirlo contestaría 409; el trabajo de vencimiento lo cierra
+  // en su siguiente pasada); el que una caja está cobrando sigue en la lista, con `cobrando`, hasta su desenlace.
+  const porAbrir = {
+    ...apartadosNadieWhere(p.venueId),
+    OR: [
+      { acceptDeadlineAt: { gt: now }, charge: { is: { status: OnlineOrderChargeStatus.AUTHORIZED } } },
+      { charge: { is: { status: OnlineOrderChargeStatus.CAPTURING } } },
+    ],
+  }
+  const porImprimir = comandasPorImprimirWhere(p.venueId, now)
   const page = (db: Prisma.TransactionClient, where: Prisma.OnlineOrderWhereInput, mine: FolioSection) =>
     p.section && p.section !== mine
       ? Promise.resolve([] as Awaited<ReturnType<typeof prisma.onlineOrder.findMany<{ select: typeof INBOX_SELECT }>>>)
@@ -531,13 +623,34 @@ export async function listFolios(p: { venueId: string; section?: FolioSection; c
           select: INBOX_SELECT,
         })
   // T18g (Codex fase 2 r4): las páginas y los conteos salen de UNA misma foto (sólo lectura, RepeatableRead): un folio que nace entre
-  // lecturas ya no puede salir en la lista con los conteos en 0. Las mismas 4 consultas acotadas de antes; los ajustes van aparte.
-  const [[payRows, deliverRows, toPayCount, toDeliverCount], settings] = await Promise.all([
+  // lecturas ya no puede salir en la lista con los conteos en 0. D661 (3B): las dos listas de la caja, en la MISMA foto: un apartado
+  // que se acaba de abrir sale en «Por entregar» o en `tarjetasPorAbrir`, nunca en las dos ni en ninguna. Los ajustes van aparte.
+  const orden = [{ createdAt: 'asc' as const }, { id: 'asc' as const }]
+  const [[payRows, deliverRows, toPayCount, toDeliverCount, abrirRows, imprimirRows], settings] = await Promise.all([
     prisma.$transaction(
       async tx => {
         const pay = await page(tx, porPagar, 'toPay')
         const deliver = await page(tx, porEntregar, 'toDeliver')
-        return [pay, deliver, await tx.onlineOrder.count({ where: porPagar }), await tx.onlineOrder.count({ where: porEntregar })] as const
+        const toPayN = await tx.onlineOrder.count({ where: porPagar })
+        const toDeliverN = await tx.onlineOrder.count({ where: porEntregar })
+        const abrir = await tx.onlineOrder.findMany({
+          where: porAbrir,
+          orderBy: orden,
+          take: D661_CAJA_LIST_CAP,
+          select: {
+            orderId: true,
+            createdAt: true,
+            charge: { select: { status: true } },
+            order: { select: { orderNumber: true, customerName: true, total: true } },
+          },
+        })
+        const imprimir = await tx.onlineOrder.findMany({
+          where: porImprimir,
+          orderBy: orden,
+          take: D661_CAJA_LIST_CAP,
+          select: { orderId: true, order: { select: { orderNumber: true } } },
+        })
+        return [pay, deliver, toPayN, toDeliverN, abrir, imprimir] as const
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 10_000, maxWait: 5_000 },
     ),
@@ -548,18 +661,40 @@ export async function listFolios(p: { venueId: string; section?: FolioSection; c
   const toDeliver = deliverRows.slice(0, INBOX_PAGE_SIZE)
   const enabled = settings.enabled
   const requiresAcceptance = settings.requiresAcceptance
-  // El mosaico sigue mientras haya folios vivos aunque se cambie a «Mi equipo» o se apague la tienda: se cobran o vencen.
-  // Defensivo: una lista con folios siempre enciende el mosaico, aunque los conteos digan otra cosa.
-  const showTile = (enabled && !requiresAcceptance) || toPayCount + toDeliverCount > 0 || toPay.length + toDeliver.length > 0
+  // El mosaico sigue mientras haya folios vivos aunque se cambie a «Mi equipo» o se apague la tienda: se cobran o vencen. D661: y
+  // mientras haya un apartado por abrir. Defensivo: una lista con folios siempre enciende el mosaico, aunque los conteos digan otra cosa.
+  const showTile =
+    (enabled && requiresAcceptance === false) ||
+    toPayCount + toDeliverCount > 0 ||
+    toPay.length + toDeliver.length > 0 ||
+    abrirRows.length > 0
+  // D661 (r5 #3, Ruling 7): un borrador de «Nadie» sin resolver todavía puede volverse un apartado: la caja sigue en 30 s aunque la
+  // tienda haya cambiado de modo o se haya apagado. Con la tienda encendida en «Nadie» ya es 30 s (y la tarjeta sólo se ofrece ahí):
+  // la consulta sólo corre cuando haría falta.
+  const rapida =
+    showTile || (await prisma.onlineOrderCharge.findFirst({ where: borradoresNadieWhere(p.venueId), select: { id: true } })) !== null
   return {
     serverTime: now.toISOString(),
     enabled,
     requiresAcceptance,
     showTile,
-    pollSeconds: showTile ? 30 : 600,
+    pollSeconds: rapida ? TO_PAY_FAST_POLL_SECONDS : TO_PAY_SLOW_POLL_SECONDS,
     counts: { toPay: toPayCount, toDeliver: toDeliverCount },
     toPay: toPay.map(r => toInboxOrder(r, now)),
     toDeliver: toDeliver.map(r => toInboxOrder(r, now)),
+    /** D661 (3B): lo apartado que una caja actualizada abre (= cobra); nunca en `toPay`. Opcional para las apps viejas. */
+    tarjetasPorAbrir: abrirRows.map(
+      (r): TarjetaPorAbrir => ({
+        orderId: r.orderId,
+        orderNumber: r.order.orderNumber,
+        customerName: r.order.customerName ?? '',
+        total: Number(new Prisma.Decimal(r.order.total).toFixed(2)),
+        createdAt: r.createdAt.toISOString(),
+        cobrando: r.charge?.status === OnlineOrderChargeStatus.CAPTURING,
+      }),
+    ),
+    /** D661 (Ruling 2): lo cobrado cuya comanda falta, aunque el cierre del día ya lo haya sacado de «Por entregar». */
+    comandasPorImprimir: imprimirRows.map((r): ComandaPorImprimir => ({ orderId: r.orderId, orderNumber: r.order.orderNumber })),
     nextCursors: {
       toPay: payRows.length > INBOX_PAGE_SIZE ? toActiveCursor(toPay[toPay.length - 1]) : null,
       toDeliver: deliverRows.length > INBOX_PAGE_SIZE ? toActiveCursor(toDeliver[toDeliver.length - 1]) : null,

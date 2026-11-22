@@ -31,6 +31,28 @@ const sesion = (over: Record<string, unknown> = {}) => ({
   ...over,
 })
 
+describe('cancelAreaTicketCheckout — la marca de cocina (hz:e82938e1:D39)', () => {
+  // Como `cancelOrderInTransaction` (D38): si la anulación dejaba la marca de «por mandar a cocina» (la de una ronda) y el dinero ya
+  // capturado la reabría antes del barrido (cada minuto), el barrido armaba la comanda de una cancelada reabierta (regla S1: no vuelve).
+  it('🔴 D39: cancelar la venta de vales limpia la marca en la misma escritura que anula su orden', async () => {
+    ;(prismaMock as any).terminal.findFirst.mockResolvedValue({ id: 'term-1', canCheckoutAreaTickets: true })
+    ;(prismaMock as any).areaTicketCheckoutSession.findFirst.mockResolvedValue(sesion())
+    ;(prismaMock as any).staffVenue.findFirst.mockResolvedValue(null)
+    prismaMock.$queryRaw.mockResolvedValue([] as any)
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+    ;(prismaMock as any).areaTicketCheckoutSession.findUniqueOrThrow.mockResolvedValue(sesion({ status: 'CANCELLED' }))
+    ;(prismaMock as any).areaTicket.updateMany.mockResolvedValue({ count: 0 })
+    ;(prismaMock as any).areaTicketCheckoutSession.update.mockResolvedValue({})
+
+    await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: null } as any)
+
+    expect(prismaMock.order.updateMany).toHaveBeenCalledWith({
+      where: { id: 'order-1', venueId: 'v1', paymentStatus: 'PENDING' },
+      data: { status: 'CANCELLED', kitchenPendingAt: null, version: { increment: 1 } },
+    })
+  })
+})
+
 describe('cancelAreaTicketCheckout — la red por traba (40P01)', () => {
   it('[repetirNoDuplica:cancelAreaTicketCheckout] el aviso de «orden cancelada» no sale si sólo el intento ABORTADO la canceló', async () => {
     ;(prismaMock as any).terminal.findFirst.mockResolvedValue({ id: 'term-1', canCheckoutAreaTickets: true })

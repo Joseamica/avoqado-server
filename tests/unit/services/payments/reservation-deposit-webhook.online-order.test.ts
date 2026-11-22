@@ -102,6 +102,27 @@ describe('avisos de Stripe de un pedido en línea con tarjeta', () => {
     expect(logAction).not.toHaveBeenCalled()
   })
 
+  it('D661 (3A): payment_intent.canceled sobre un apartado AUTHORIZED con pedido pide el rechazo PAYMENT_FAILED como escritor del cargo (porFalloDeCobro) y sella RELEASED en esa misma transacción (afterCas)', async () => {
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(cargo('AUTHORIZED', { onlineOrder: { orderId: 'o1' } }) as any)
+    await processStripeConnectWebhookEvent(event('payment_intent.canceled', { id: 'pi_1', metadata: META }))
+    expect(mockRejectOnlineOrder).toHaveBeenCalledWith(
+      expect.objectContaining({
+        venueId: 'v1',
+        orderId: 'o1',
+        reason: 'PAYMENT_FAILED',
+        porFalloDeCobro: true,
+        afterCas: expect.any(Function),
+      }),
+    )
+    // El gancho es el sello del cargo: AUTHORIZED|RELEASING → RELEASED, en la transacción del rechazo.
+    prismaMock.onlineOrderCharge.updateMany.mockClear()
+    await mockRejectOnlineOrder.mock.calls[0][0].afterCas(prismaMock, {})
+    expect(prismaMock.onlineOrderCharge.updateMany).toHaveBeenCalledWith({
+      where: { id: 'ch1', status: { in: ['AUTHORIZED', 'RELEASING'] } },
+      data: { status: 'RELEASED', releasedAt: expect.any(Date) },
+    })
+  })
+
   it('payment_intent.canceled sobre un borrador no lo abandona a ciegas: relee la sesión propia (confirmar)', async () => {
     await processStripeConnectWebhookEvent(event('payment_intent.canceled', { id: 'pi_x', metadata: META }))
     expect(confirmCardAuthorization).toHaveBeenCalledWith('ch1')

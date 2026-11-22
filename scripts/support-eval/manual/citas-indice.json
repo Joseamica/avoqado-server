@@ -246,7 +246,7 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/local/PayloadCache.kt": [
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/local/SecureStorage.kt": [
@@ -380,7 +380,7 @@
       },
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "android/reembolsos/hacer-cambio",
@@ -428,7 +428,7 @@
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/reembolsos/hacer-cambio",
@@ -1286,7 +1286,7 @@
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "android/personal/cambiar-de-usuario",
@@ -1382,7 +1382,7 @@
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/personal/cambiar-de-usuario",
@@ -1513,70 +1513,120 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
-    "avoqado-android:app/src/main/java/com/avoqado/pos/onlineorders/data/OnlineOrdersRepository.kt": [
+    "avoqado-android:app/src/main/java/com/avoqado/pos/onlineorders/data/ImpresionDePedidoEnLinea.kt": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/onlineorders/data/OnlineOrdersRepository.kt": [
+      {
+        "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      },
+      {
+        "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/onlineorders/data/VentanaALaVista.kt": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/onlineorders/data/VigilanteDePedidosEnLinea.kt": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/onlineorders/presentation/BannerDePagadosEnLinea.kt": [
+      {
+        "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      },
+      {
+        "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/onlineorders/presentation/BannerDePedidoEnLinea.kt": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/onlineorders/presentation/FolioPorPagarCard.kt": [
+      {
+        "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      },
+      {
+        "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/onlineorders/presentation/FoliosPorPagar.kt": [
+      {
+        "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      },
+      {
+        "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrderCard.kt": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrdersScreen.kt": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/onlineorders/presentation/OnlineOrdersViewModel.kt": [
+      {
+        "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      },
+      {
+        "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/onlineorders/presentation/TextosPedidosEnLinea.kt": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt": [
@@ -2196,7 +2246,7 @@
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "android/reservas/crear-cita",
@@ -2204,7 +2254,7 @@
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/reservas/crear-cita",
@@ -2302,7 +2352,7 @@
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
@@ -2314,7 +2364,7 @@
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/cart/OrderDiscountSheet.kt": [
@@ -2358,7 +2408,7 @@
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
@@ -2398,7 +2448,7 @@
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
@@ -2426,21 +2476,21 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/MenuDelAparato.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/ModifierGroupSection.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt": [
@@ -2454,7 +2504,7 @@
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
@@ -2470,7 +2520,7 @@
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
@@ -2480,61 +2530,61 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/TextosMenuDelAparato.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/WeightCapturePanel.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/variantes/HojaDeVariantes.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/variantes/TextosVariantes.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/variantes/TileDeFamilia.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/search/SearchOverlayView.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/upsell/UpsellCashierStrip.kt": [
@@ -3142,7 +3192,7 @@
       },
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "android/personal/cambiar-de-usuario",
@@ -3218,7 +3268,7 @@
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/personal/cambiar-de-usuario",
@@ -3748,11 +3798,11 @@
     "avoqado-android:avoqado-booking-widget/src/order/i18n/es.json": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:avoqado-server/src/controllers/mobile/kds.mobile.controller.ts": [
@@ -3768,20 +3818,16 @@
     "avoqado-android:avoqado-server/src/controllers/mobile/onlineOrders.mobile.controller.ts": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:avoqado-server/src/lib/permissions.ts": [
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
-      },
-      {
-        "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
@@ -3793,22 +3839,8 @@
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
-        "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
-      },
-      {
         "pagina": "windows/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
-      }
-    ],
-    "avoqado-android:avoqado-server/src/middlewares/checkPermission.middleware.ts": [
-      {
-        "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
-      },
-      {
-        "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
     "avoqado-android:avoqado-server/src/middlewares/cortesiaPidePermiso.middleware.ts": [
@@ -3824,11 +3856,11 @@
     "avoqado-android:avoqado-server/src/middlewares/requirePublicVenueFeatureStrict.middleware.ts": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:avoqado-server/src/routes/dashboard.routes.ts": [
@@ -3863,6 +3895,16 @@
       {
         "pagina": "windows/reservas/lista-de-espera",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      }
+    ],
+    "avoqado-android:avoqado-server/src/routes/dashboard/onlineOrdering.dashboard.routes.ts": [
+      {
+        "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      },
+      {
+        "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:avoqado-server/src/routes/dashboard/reservation.routes.ts": [
@@ -4008,7 +4050,7 @@
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "android/personal/cambiar-de-usuario",
@@ -4140,7 +4182,7 @@
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/personal/cambiar-de-usuario",
@@ -4174,11 +4216,11 @@
     "avoqado-android:avoqado-server/src/routes/mobile/onlineOrders.mobile.routes.ts": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:avoqado-server/src/services/dashboard/customer.dashboard.service.ts": [
@@ -4275,34 +4317,54 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
-    "avoqado-android:avoqado-server/src/services/online-ordering/card/capture.service.ts": [
+    "avoqado-android:avoqado-server/src/services/online-ordering/card/confirm.service.ts": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      }
+    ],
+    "avoqado-android:avoqado-server/src/services/online-ordering/card/guards.ts": [
+      {
+        "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      },
+      {
+        "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      }
+    ],
+    "avoqado-android:avoqado-server/src/services/online-ordering/card/merchant.ts": [
+      {
+        "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      },
+      {
+        "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:avoqado-server/src/services/online-ordering/constants.ts": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
-    "avoqado-android:avoqado-server/src/services/online-ordering/presence.service.ts": [
+    "avoqado-android:avoqado-server/src/services/online-ordering/folios.service.ts": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:avoqado-server/src/services/shared/cuentaConVales.ts": [
@@ -4376,11 +4438,11 @@
     "avoqado-android:avoqado-web-dashboard/src/locales/es/onlineOrdering.json": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
     "avoqado-android:avoqado-web-dashboard/src/locales/es/serviceCourses.json": [
@@ -4574,7 +4636,7 @@
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/reservas/atender-una-cita",
@@ -4648,7 +4710,7 @@
     "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/Arranque.kt": [
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/reservas/atender-una-cita",
@@ -4706,7 +4768,7 @@
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
         "pagina": "windows/reembolsos/hacer-cambio",
@@ -4722,7 +4784,7 @@
     "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/pos/presentation/scanner/BarcodeScannerView.kt": [
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo",
@@ -4748,7 +4810,7 @@
     "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/scale/UsbSerialScaleManager.kt": [
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:desktop/pos/windows/LEEME-RED-LOCAL.txt": [
@@ -4905,6 +4967,10 @@
         "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      },
+      {
         "pagina": "tpv/reembolsos/reembolsar-cobro-nexgo",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       },
@@ -4925,6 +4991,12 @@
       {
         "pagina": "tpv/cobro/declarar-no-se-cobro-desde-el-aviso",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      }
+    ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/RecuadroPorPagar.kt": [
+      {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt": [
@@ -5005,6 +5077,10 @@
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       },
       {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      },
+      {
         "pagina": "tpv/recibos/imprimir-y-reimprimir-recibo",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       },
@@ -5044,6 +5120,10 @@
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/core/printer/PrinterManager.kt": [
+      {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      },
       {
         "pagina": "tpv/recibos/no-imprime-pax",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
@@ -5163,6 +5243,36 @@
       {
         "pagina": "tpv/mensajes/leer-mensajes",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      }
+    ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/data/Timbre.kt": [
+      {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      }
+    ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/data/VigiaDeFolios.kt": [
+      {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      }
+    ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/domain/Folio.kt": [
+      {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      }
+    ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarScreen.kt": [
+      {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      }
+    ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt": [
+      {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/BlumonAttemptResolver.kt": [
@@ -5911,6 +6021,12 @@
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
+    "avoqado-tpv:avoqado-server/src/routes/dashboard/onlineOrdering.dashboard.routes.ts": [
+      {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      }
+    ],
     "avoqado-tpv:avoqado-server/src/routes/dashboard/organizationConfig.routes.ts": [
       {
         "pagina": "tpv/sesion/pin-incorrecto",
@@ -5987,6 +6103,12 @@
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
+    "avoqado-tpv:avoqado-server/src/routes/tpv/onlineOrders.tpv.routes.ts": [
+      {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      }
+    ],
     "avoqado-tpv:avoqado-server/src/services/dashboard/commission/commission-utils.ts": [
       {
         "pagina": "tpv/mesas/reasignar-mesero",
@@ -6017,6 +6139,24 @@
       {
         "pagina": "tpv/mesas/reasignar-mesero",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      }
+    ],
+    "avoqado-tpv:avoqado-server/src/services/online-ordering/card/confirm.service.ts": [
+      {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      }
+    ],
+    "avoqado-tpv:avoqado-server/src/services/online-ordering/card/merchant.ts": [
+      {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      }
+    ],
+    "avoqado-tpv:avoqado-server/src/services/online-ordering/constants.ts": [
+      {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
       }
     ],
     "avoqado-tpv:avoqado-server/src/services/shared/cuentaConVales.ts": [
@@ -6063,6 +6203,28 @@
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
+    "avoqado-tpv:avoqado-web-dashboard/src/locales/es/onlineOrdering.json": [
+      {
+        "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+        "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-android/app/src/main/java/com/avoqado/pos/onlineorders/data/VigilanteDePedidosEnLinea.kt": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-booking-widget/src/order/i18n/es.json": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      },
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
     "avoqado-web-dashboard:avoqado-server/src/controllers/dashboard/financialConnection.controller.ts": [
       {
         "pagina": "dashboard/bancos/enviar-spei",
@@ -6079,6 +6241,12 @@
       {
         "pagina": "dashboard/turnos/editar-o-eliminar-turno",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-server/src/controllers/mobile/onlineOrders.mobile.controller.ts": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/controllers/public/reservation.public.controller.ts": [
@@ -6307,6 +6475,16 @@
       {
         "pagina": "dashboard/pagos/registrar-pago-manual",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-server/src/routes/dashboard/onlineOrdering.dashboard.routes.ts": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      },
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/routes/dashboard/paymentLink.routes.ts": [
@@ -6543,10 +6721,50 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       }
     ],
+    "avoqado-web-dashboard:avoqado-server/src/services/online-ordering/card/confirm.service.ts": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
     "avoqado-web-dashboard:avoqado-server/src/services/online-ordering/card/guards.ts": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      },
       {
         "pagina": "dashboard/reembolsos/reembolsar-un-pago",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-server/src/services/online-ordering/card/merchant.ts": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-server/src/services/online-ordering/card/refund.service.ts": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-server/src/services/online-ordering/constants.ts": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-server/src/services/online-ordering/folios.service.ts": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-server/src/services/online-ordering/settings.service.ts": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/shared/customerSearch.ts": [
@@ -6583,6 +6801,18 @@
       {
         "pagina": "dashboard/plan/cancelar-o-reanudar-plan",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-tpv/app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/data/VigiaDeFolios.kt": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-tpv/app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
       }
     ],
     "avoqado-web-dashboard:src/api.ts": [
@@ -7147,10 +7377,24 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       }
     ],
+    "avoqado-web-dashboard:src/locales/es/onlineOrdering.json": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      },
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
     "avoqado-web-dashboard:src/locales/es/payment.json": [
       {
         "pagina": "dashboard/pagos/enviar-recibo-por-correo",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      },
+      {
+        "pagina": "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
       },
       {
         "pagina": "dashboard/reembolsos/reembolsar-un-pago",
@@ -7333,6 +7577,14 @@
       {
         "pagina": "dashboard/pagos/registrar-pago-manual",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      },
+      {
+        "pagina": "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      },
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
       },
       {
         "pagina": "dashboard/plan/cambiar-tarjeta-del-plan",
@@ -7747,6 +7999,48 @@
       {
         "pagina": "dashboard/menu/crear-o-editar-servicio",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      }
+    ],
+    "avoqado-web-dashboard:src/pages/OnlineOrdering/OnlineOrderingPage.tsx": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
+    "avoqado-web-dashboard:src/pages/OnlineOrdering/components/CardRefundSheet.tsx": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
+    "avoqado-web-dashboard:src/pages/OnlineOrdering/components/FolioSections.tsx": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
+    "avoqado-web-dashboard:src/pages/OnlineOrdering/components/InboxTab.tsx": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
+    "avoqado-web-dashboard:src/pages/OnlineOrdering/components/OrderCard.tsx": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
+    "avoqado-web-dashboard:src/pages/OnlineOrdering/components/SettingsTab.tsx": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
+      }
+    ],
+    "avoqado-web-dashboard:src/pages/Order/OrderDrawerContent.tsx": [
+      {
+        "pagina": "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea",
+        "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
       }
     ],
     "avoqado-web-dashboard:src/pages/Payment/IssueRefundSheet.tsx": [

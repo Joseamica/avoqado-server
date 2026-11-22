@@ -2409,7 +2409,10 @@ export async function cancelAreaTicketCheckout(venueId: string, sessionId: strin
           await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId: fresh.orderId, staffId, camino: 'cancelAreaTicketCheckout' })
           const cancelacion = await tx.order.updateMany({
             where: { id: fresh.orderId, venueId, paymentStatus: 'PENDING' },
-            data: { status: 'CANCELLED', version: { increment: 1 } },
+            // hz:e82938e1:D39 (como D38 en `cancelOrderInTransaction`): la marca de «por mandar a cocina» se va con la anulación. Si se
+            // quedaba y el dinero ya capturado reabría la cuenta antes del barrido (cada minuto), el barrido armaba la comanda de una
+            // cancelada reabierta (regla S1: no vuelve a la cocina).
+            data: { status: 'CANCELLED', kitchenPendingAt: null, version: { increment: 1 } },
           })
           if (cancelacion.count > 0) ordenCancelada = fresh.orderId
         }

@@ -7,6 +7,7 @@ import {
   type VenueType,
 } from '@prisma/client'
 import { FOLIO_PAID_STATUSES } from '@/services/shared/orderBalance'
+import type { ProviderRequestLimits } from '@/services/payments/providers/provider.interface'
 
 /** Estados del pedido en línea que todavía esperan algo del restaurante. */
 export const OPEN_ONLINE_STATUSES: OnlineOrderStatus[] = [
@@ -32,6 +33,18 @@ export const PRESENCE_WINDOW_MS = 120_000
 export const FOLIO_PRESENCE_WINDOW_MS = 15 * 60_000
 /** La escritura del latido se amortigua: el sondeo es cada ~10 s, la base se toca cada 30 s. */
 export const PRESENCE_WRITE_DEBOUNCE_MS = 30_000
+/** Cadencia que la lista de la caja (to-pay) le pide a cada caja: rápida mientras haya algo que atender, larga si no. */
+export const TO_PAY_FAST_POLL_SECONDS = 30
+export const TO_PAY_SLOW_POLL_SECONDS = 600
+/**
+ * D661 (Ruling 7): en «Nadie» la tarjeta sólo se ofrece si una caja capaz de avisar recibió una respuesta RÁPIDA de to-pay en este
+ * plazo (tres sondeos de 30 s). Una caja en espera larga (600 s) no avisaría a tiempo.
+ */
+export const CARD_ALERT_FAST_WINDOW_MS = 90_000
+/** D661 (Ruling 7): el latido de la caja que avisa se escribe a lo más cada 20 s: con sondeos de 30 s cada uno escribe y no parpadea. */
+export const CARD_ALERT_WRITE_DEBOUNCE_MS = 20_000
+/** D661 (3B): tope de `tarjetasPorAbrir` y de `comandasPorImprimir` de la lista de la caja (independientes de la página). */
+export const D661_CAJA_LIST_CAP = 50
 /** R13: la app a la vista manda esta cabecera con `1` (D662: el POS en cualquier pantalla, no sólo la bandeja); es «hay alguien». */
 export const ONLINE_ORDERS_TRAY_HEADER = 'x-online-orders-tray'
 /** Tienda híbrida: la TPV y el POS que pueden cobrar folios mandan esta cabecera con `1` (las rutas que la leen son de T12). */
@@ -74,13 +87,51 @@ export const OPEN_ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'
  */
 export const PREPAID_MODES: readonly OnlineOrderPaymentMode[] = [OnlineOrderPaymentMode.CARD_ONLINE]
 /**
- * Fase 2: los borradores de tarjeta con su sesión de pago vigente. Cuentan para los topes (por teléfono y por negocio) y para la
- * saturación de la tienda, junto con los pedidos por aceptar; uno vencido ya no cuenta.
+ * D661 (r1 #12): un borrador de tarjeta de «Nadie» guarda `customerPhone` vacío. Su tope es por clienta (`request.customerId`), no
+ * por número: hay clientas sin teléfono y, con el mismo '' para todas, cuatro de ellas chocarían en el tope de tres. Su teléfono
+ * probado viaja en `request.telefonoVerificado`. «Mi equipo» siempre lleva teléfono, así que '' sólo puede ser de «Nadie».
+ */
+export const SIN_TELEFONO_NADIE = ''
+/**
+ * D661: ¿este cargo (borrador o apartado) nació en «Nadie»? La ÚNICA lectura del modo de un cargo: la misma marca de la columna que
+ * usan sus filtros (`borradoresNadieWhere`, `liveCardDraftsWhere`). Quien necesite el modo de un borrador lo pregunta aquí, nunca
+ * re-deriva `request.nadie` ni el modo de hoy de la tienda.
+ */
+export const cargoDeNadie = (charge: { customerPhone: string }): boolean => charge.customerPhone === SIN_TELEFONO_NADIE
+/**
+ * Fase 2: los borradores de tarjeta de «Mi equipo» con su sesión de pago vigente. Cuentan para los topes (por teléfono y por negocio)
+ * y para la saturación de la tienda, junto con los pedidos por aceptar; uno vencido ya no cuenta. D661 (r6 #6): los de «Nadie» no
+ * entran: tienen su propio cupo (`borradoresNadieWhere`) y llenarlo no pausa la tienda ni frena pagar en caja.
  */
 export const liveCardDraftsWhere = (venueId: string, now: Date) => ({
   venueId,
   status: OnlineOrderChargeStatus.PENDING_AUTH,
   checkoutExpiresAt: { gt: now },
+  // Columna NOT NULL: el `not` no se come filas nulas (el de una ruta JSON sí lo haría con todos los borradores viejos).
+  customerPhone: { not: SIN_TELEFONO_NADIE },
+})
+/** `lastError` del cargo cuyo dinero ya cobró el negocio a mano en Stripe (C3 y r2 R1): lo resuelve una persona, nadie lo reintenta. */
+export const CAPTURED_OUTSIDE = 'CAPTURED_OUTSIDE'
+/** Para un `where`: el cargo NO está marcado `CAPTURED_OUTSIDE`. Con `OR`, porque `lastError` es opcional y un `not` solo se come los nulos. */
+export const NOT_CAPTURED_OUTSIDE = { OR: [{ lastError: null }, { lastError: { not: CAPTURED_OUTSIDE } }] }
+/**
+ * D661 (r5, r6): borradores de tarjeta de «Nadie» todavía sin resolver. Sin reloj: al vencer su sesión pueden seguir `PENDING_AUTH`
+ * aunque Stripe ya haya autorizado; su lugar lo libera el conciliador al resolverlo (confirmado o abandonado), no la hora.
+ * D661 (A6): el cobrado fuera de Avoqado sigue `PENDING_AUTH` a propósito (lo resuelve una persona): ya no ocupa el lugar de la
+ * clienta ni el de la sucursal, ni deja las cajas en sondeo rápido.
+ */
+export const borradoresNadieWhere = (venueId: string) => ({
+  venueId,
+  status: OnlineOrderChargeStatus.PENDING_AUTH,
+  customerPhone: SIN_TELEFONO_NADIE,
+  ...NOT_CAPTURED_OUTSIDE,
+})
+/** D661: pedidos con tarjeta de «Nadie» ya apartados que ninguna caja ha abierto; cobrados, liberados o rechazados dejan de ocupar. */
+export const apartadosNadieWhere = (venueId: string) => ({
+  venueId,
+  status: OnlineOrderStatus.PENDING_ACCEPTANCE,
+  requiresAcceptance: false,
+  paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
 })
 /** Tienda híbrida: lo que de verdad espera a «Mi equipo» (saturación y topes). Los folios (`requiresAcceptance:false`) no cuentan. */
 export const awaitingAcceptanceWhere = (venueId: string) => ({
@@ -88,22 +139,28 @@ export const awaitingAcceptanceWhere = (venueId: string) => ({
   status: OnlineOrderStatus.PENDING_ACCEPTANCE,
   requiresAcceptance: true,
 })
-/** Tienda híbrida (R18): folios sin un peso pagado; los usará el tope de folios (T7) y T12. Un folio con abono no ocupa lugar. */
+/**
+ * Tienda híbrida (R18): folios sin un peso pagado; los usará el tope de folios (T7) y T12. Un folio con abono no ocupa lugar.
+ * D661 (r4): un apartado de tarjeta no es un folio por cobrar en caja: ocupa su propio cupo (`apartadosNadieWhere`), nunca éste.
+ */
 export const unpaidFoliosWhere = (venueId: string) => ({
   venueId,
   status: OnlineOrderStatus.PENDING_ACCEPTANCE,
   requiresAcceptance: false,
+  paymentMode: { not: OnlineOrderPaymentMode.CARD_ONLINE },
   order: { paymentStatus: PaymentStatus.PENDING },
 })
 /**
  * Tienda híbrida (R42, T12): la lista «Por pagar» y `counts.toPay`. Un folio vivo sin saldar: con abono (PARTIAL) también (R41; se
  * cobra desde esta lista, con «Falta $X»), pero nunca uno cuya cuenta se canceló (R16) o ya quedó saldada (la sincronización lo pasa
  * a «Por entregar»). NO es `unpaidFoliosWhere`, que sólo mide el tope de folios sin un peso.
+ * D661 (3B): un apartado con tarjeta se ABRE (sale en `tarjetasPorAbrir`), no se cobra en caja: nunca sale aquí ni en su conteo.
  */
 export const foliosPorPagarWhere = (venueId: string) => ({
   venueId,
   status: OnlineOrderStatus.PENDING_ACCEPTANCE,
   requiresAcceptance: false,
+  paymentMode: { not: OnlineOrderPaymentMode.CARD_ONLINE },
   order: {
     status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] },
     paymentStatus: { notIn: FOLIO_PAID_STATUSES }, // R24: una sola definición de «cobrada»
@@ -132,6 +189,12 @@ export const CARD_CHECKOUT_TTL_MINUTES = 30
 export const CARD_STUCK_ALERT_MINUTES = 15
 /** Fase 2: cargos por pasada del conciliador; lo que sobre lo toma la siguiente. */
 export const CARD_RECONCILE_BATCH = 50
+/**
+ * D661 (Ruling 73): lo que el job del conciliador manda a Stripe sin límite por petición — en la pasada principal (lecturas, liberaciones
+ * con su relectura, la sesión que se repite, el reintento de «Mi equipo») y en el recorrido de devoluciones (ronda 2 de codex-r3) — lleva
+ * nuestro plazo duro de 120 s: ninguna llamada retiene el `isRunning` del job para siempre. La petición al SDK no cambia.
+ */
+export const PLAZO_DE_LA_PASADA: ProviderRequestLimits = { plazoMs: 120_000 }
 
 /** Tienda híbrida (R37): giros para los que el panel SUGIERE «Nadie» (sobre `Venue.type`). Sólo sugiere; el servidor nunca lo elige solo. */
 export const NO_ONE_VENUE_TYPES: readonly VenueType[] = [

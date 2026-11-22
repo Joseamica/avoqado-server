@@ -187,6 +187,7 @@ import {
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
 import { consultarCocina, debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
+import { notasDeLasPartes } from '../kds/kdsModifierLabels'
 import {
   armarComandasTrasCommit,
   cuentasDeSusComandas,
@@ -244,6 +245,11 @@ export interface CreateOrderItemInput {
   quantity: number
   notes?: string | null
   modifierIds?: string[]
+  /**
+   * D40: la nota de cada parte del renglón, `{ modifierId: nota }` (todas las veces de esa opción llevan la misma). Opcional: las
+   * apps viejas no la mandan y lo que no cuadre se ignora (`notasDeLasPartes`), nunca un 400.
+   */
+  modifierNotes?: Record<string, unknown> | null
   /** Item/category-scoped Discount row id, mirroring TPV's `itemDiscountId`
    *  (order.tpv.service.ts). Validated the same way: must exist, belong to
    *  this venue, and be currently active/within its validity window. */
@@ -449,6 +455,8 @@ export interface CreatedOrderResponse {
       id: string
       name: string
       price: number
+      /** D40: la nota de esta parte; sólo viene si la tiene. */
+      notes?: string
     }>
   }>
   /** Promociones vendidas en esta orden — el POS las usa para agrupar sus
@@ -496,6 +504,8 @@ function flattenOrderModifiers(order: any): any {
             name: om.modifier?.name || om.name,
             // Lo COBRADO (guardado en la línea), no el precio vivo del extra: pudo cambiar, o cobrarse el que vio el cliente.
             price: Number(om.price ?? om.modifier?.price ?? 0),
+            // D40: la nota de esta parte, sólo si la tiene (sin nota la respuesta queda idéntica a la de antes).
+            ...(om.notes ? { notes: om.notes } : {}),
           })) || [],
       })) || [],
   }
@@ -608,6 +618,8 @@ export interface OrderDetailResponse {
       id: string
       name: string
       price: number
+      /** D40: la nota de esta parte; sólo viene si la tiene. */
+      notes?: string
     }>
     /** TABLE_SERVICE: course/tiempo and send time — the check panel groups sent
      *  items by course and labels each group "Enviado a la cocina a las HH:MM"
@@ -1364,6 +1376,7 @@ export async function buildOrderItemsData(
       throw new BadRequestError('Identificador de producto inválido')
     const product = products.find(p => p.id === item.productId)!
     const itemModifierIds = item.modifierIds || []
+    const notasDelRenglon = notasDeLasPartes(item.modifierNotes, itemModifierIds)
 
     // Calculate modifier total — cada extra a su precio decidido (el que vio el cliente, si se respetó).
     const precioDelExtra = (modifierId: string) => precioDeExtra[k].get(modifierId) ?? modifiers.find(m => m.id === modifierId)?.price
@@ -1508,6 +1521,8 @@ export async function buildOrderItemsData(
             name: modifier.name,
             quantity: 1,
             price: precioDelExtra(modifierId)!,
+            // D40: la nota de esta parte (la misma en cada vez que se eligió); sin nota la fila queda como siempre.
+            ...(notasDelRenglon.has(modifierId) ? { notes: notasDelRenglon.get(modifierId) } : {}),
           }
         }),
       },
@@ -7399,7 +7414,10 @@ export async function returnGiftBalanceAndCancelOrder(
 
       const cancelada = await tx.order.update({
         where: { id: orderId, venueId },
-        data: { status: 'CANCELLED', version: { increment: 1 } },
+        // hz:e82938e1:D39 (como D38 en `cancelOrderInTransaction`): las comandas ya se retiraron (arriba); la marca de «por mandar a
+        // cocina» se va con la anulación. Si se quedaba y el dinero ya capturado reabría la cuenta antes del barrido (cada minuto), el
+        // barrido armaba la comanda de una cancelada reabierta, y la regla S1 dice que no vuelve a la cocina.
+        data: { status: 'CANCELLED', kitchenPendingAt: null, version: { increment: 1 } },
         select: { tableId: true },
       })
       const boundTable = scope.tables.find(table => table.currentOrderId === orderId)
@@ -7786,7 +7804,10 @@ export async function cancelOrderInTransaction(
   const canjes = await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: performedBy, camino: 'cancelOrder' })
   const removed = await tx.order.update({
     where: { id: orderId },
-    data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelada: ${reason}` } : {}) },
+    // hz:e82938e1:D38: la anulación ya retiró las comandas (arriba); la marca de «por mandar a cocina» se va con ella. Si se quedaba y el
+    // dinero ya capturado reabría la cuenta antes del barrido (cada minuto), el barrido armaba la comanda de una cancelada reabierta, y
+    // la regla S1 dice que no vuelve a la cocina. Un folio de la tienda que revive la vuelve a poner él (`revivirFolioSaldadoEnTx`).
+    data: { status: 'CANCELLED', kitchenPendingAt: null, ...(reason ? { specialRequests: `Cancelada: ${reason}` } : {}) },
     select: { tableId: true },
   })
   // Spec § 5.1.8: una cuenta de tarjetas cancelada ANTES de cobrarse deja sus sobres DEACTIVATED sin activarse.
@@ -7833,12 +7854,22 @@ export async function publishCancelledOrder(
    * hz:e82938e1:D36: quien ya escribió su `ORDER_CANCELLED` DENTRO de la transacción de la anulación (para que una caída entre el
    * commit y esta publicación no deje una anulación sin bitácora) lo dice aquí y no se escribe otra entrada.
    */
-  opciones: { bitacoraEnLaTx?: boolean } = {},
+  opciones: {
+    bitacoraEnLaTx?: boolean
+    /**
+     * hz:e82938e1:D36 (Codex r2 #2): la limpieza de ventas de Cobrar ya comprobó BAJO EL CANDADO que la venta no tenía referidos ni
+     * cobros. Un referido capturado en el instante después de anularla (la captura no se frena con una venta anulada) se queda PENDING,
+     * para que un cobro tardío lo califique; mandarlo a VOID aquí lo perdía.
+     */
+    sinReferidos?: boolean
+  } = {},
 ): Promise<void> {
   const { orderId, table } = result
   logger.info(`✅ [ORDER.MOBILE] Order ${orderId} cancelled`)
-  const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
-  await onOrderCancelled({ orderId, venueId })
+  if (!opciones.sinReferidos) {
+    const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
+    await onOrderCancelled({ orderId, venueId })
+  }
   const broadcastingService = socketManager.getBroadcastingService()
   if (result.hadBoundTable && table) {
     logger.info(

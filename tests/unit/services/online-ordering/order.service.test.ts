@@ -1,6 +1,7 @@
 // tests/unit/services/online-ordering/order.service.test.ts
 import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { contar } from '@tests/__helpers__/baseEnMemoria'
 import AppError, { ForbiddenError, ServiceUnavailableError, UnauthorizedError } from '@/errors/AppError'
 
 jest.mock('@/services/online-ordering/presence.service', () => ({ __esModule: true, getAcceptingStatus: jest.fn() }))
@@ -602,8 +603,9 @@ describe('createOnlineOrder', () => {
     prismaMock.onlineOrder.count.mockResolvedValueOnce(0).mockResolvedValueOnce(20)
     prismaMock.onlineOrderCharge.count.mockResolvedValueOnce(0).mockResolvedValueOnce(10)
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'ORDERING_PAUSED' })
+    // D661 (r6 #6): los borradores de «Nadie» no cuentan aquí (tienen su propio cupo).
     expect(prismaMock.onlineOrderCharge.count).toHaveBeenLastCalledWith({
-      where: { venueId: 'v1', status: 'PENDING_AUTH', checkoutExpiresAt: { gt: NOW } },
+      where: { venueId: 'v1', status: 'PENDING_AUTH', checkoutExpiresAt: { gt: NOW }, customerPhone: { not: '' } },
     })
   })
 
@@ -1307,10 +1309,12 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
       venueId: 'v1',
       status: 'PENDING_ACCEPTANCE',
       requiresAcceptance: false,
+      paymentMode: { not: 'CARD_ONLINE' }, // D661 (r4): un apartado de tarjeta no es folio de caja
       order: { paymentStatus: 'PENDING' },
     })
+    // Ningún conteo por UN teléfono (el de la saturación sólo excluye los borradores de «Nadie», D661).
     expect(prismaMock.onlineOrderCharge.count).not.toHaveBeenCalledWith({
-      where: expect.objectContaining({ customerPhone: expect.anything() }),
+      where: expect.objectContaining({ customerPhone: expect.any(String) }),
     })
   })
 
@@ -1668,6 +1672,26 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
       await expect(createOnlineOrder(anon({ idempotencyKey: 'n'.repeat(32) }), PUEDE_CREAR)).resolves.toMatchObject({ replay: false })
     })
 
+    it('un apartado de tarjeta NO ocupa el cupo de folios sin pagar (constants.ts:76, order.service.ts:576): una clienta que paga en caja no recibe «demasiados folios» por apartados', async () => {
+      // 59 folios de caja sin pagar y un apartado de tarjeta de «Nadie», que también es `requiresAcceptance:false` y sin un peso.
+      const folio = {
+        venueId: 'v1',
+        status: 'PENDING_ACCEPTANCE',
+        requiresAcceptance: false,
+        paymentMode: 'PAY_AT_PICKUP',
+        order: { paymentStatus: 'PENDING' },
+      }
+      const filas: any[] = [...Array.from({ length: LLENO - 1 }, () => ({ ...folio })), { ...folio, paymentMode: 'CARD_ONLINE' }]
+      prismaMock.onlineOrder.count.mockImplementation(contar(filas) as any)
+      await expect(createOnlineOrder(anon(), PUEDE_CREAR)).resolves.toMatchObject({ replay: false })
+      expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+      // El folio 60 de caja sí lo llena.
+      filas.push({ ...folio })
+      await expect(createOnlineOrder(anon({ idempotencyKey: 'n'.repeat(32) }), PUEDE_CREAR)).rejects.toMatchObject({
+        code: 'TOO_MANY_UNPAID_FOLIOS',
+      })
+    })
+
     it('el tope se cuenta bajo el candado del negocio y sólo para folios: «Mi equipo» con 60 folios vivos no lo ve', async () => {
       foliosSinPagar(LLENO)
       ;(getAcceptingStatus as jest.Mock).mockResolvedValue(MI_EQUIPO)
@@ -1915,6 +1939,85 @@ describe('getTrackingByToken', () => {
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ canCancel: false })
     prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie({}, 'PAID'))
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ canCancel: false })
+  })
+
+  it('el seguimiento trae notPickedUpAt, canCancel y el estado real de la devolución (pendiente, hecha o revertida)', async () => {
+    const CORTE = new Date('2026-11-07T10:00:05.000Z')
+    const DEVUELTO = new Date('2026-11-07T18:00:00.000Z')
+    const nadie = (over: Record<string, any>, cardRefunds: any[] = []) =>
+      folioNadie(
+        {
+          paymentMode: 'CARD_ONLINE',
+          status: 'COMPLETED',
+          charge: { status: 'CAPTURED', cardRefunds },
+          notPickedUpAt: null,
+          refundedAt: null,
+          ...over,
+        },
+        'PAID',
+      )
+    const leer = async (o: any) => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(o)
+      return (await getTrackingByToken('T'.repeat(32)))!
+    }
+
+    // «No lo recogió», sin devolución: la marca, nunca cancelable y sin `refund`.
+    const noRecogido = await leer(nadie({ notPickedUpAt: CORTE }))
+    expect(noRecogido).toMatchObject({ status: 'COMPLETED', notPickedUpAt: CORTE.toISOString(), refundedAt: null, canCancel: false })
+    expect(noRecogido).not.toHaveProperty('refund')
+    // Un apartado de «Nadie» tampoco se cancela desde el celular (antes: true mientras estaba AUTHORIZED).
+    const apartado = { status: 'PENDING_ACCEPTANCE', charge: { status: 'AUTHORIZED', cardRefunds: [] } }
+    expect(await leer({ ...nadie(apartado), order: { ...nadie(apartado).order, paymentStatus: 'PENDING' } })).toMatchObject({
+      canCancel: false,
+    })
+
+    // El estado real de la devolución, leído de sus filas (la más reciente primero); medio TARJETA mientras sea a la tarjeta.
+    for (const [status, publico] of [
+      ['REQUESTED', 'PENDING'],
+      ['SENDING', 'PENDING'],
+      ['PENDING', 'PENDING'],
+      ['SUCCEEDED', 'DONE'],
+      ['RECORDED', 'DONE'],
+      ['REVERSED', 'REVERSED'],
+    ] as const) {
+      const t = await leer(nadie({ refundedAt: DEVUELTO }, [{ status, reversal: null }]))
+      expect({ status, refund: t.refund, refundedAt: t.refundedAt }).toEqual({
+        status,
+        refund: { status: publico, medio: 'TARJETA' },
+        refundedAt: DEVUELTO.toISOString(),
+      })
+    }
+    // Un RESOLVED dice el medio que registró: la reversa pagada en efectivo o transferencia; sin reversa, nació a saldo a favor.
+    // Nunca se deduce del booleano `toStoreCredit` (aquí miente a propósito).
+    for (const [reversal, medio] of [
+      [{ resolvedMethod: 'CASH' }, 'EFECTIVO'],
+      [{ resolvedMethod: 'BANK_TRANSFER' }, 'TRANSFERENCIA'],
+      [null, 'SALDO'],
+    ] as const) {
+      const t = await leer(nadie({}, [{ status: 'RESOLVED', toStoreCredit: reversal !== null, reversal }]))
+      expect({ medio, refund: t.refund }).toEqual({ medio, refund: { status: 'DONE', medio } })
+    }
+    // Varias filas: una pendiente gana; si no, una revertida (se le debe a la clienta) gana sobre una hecha.
+    expect((await leer(nadie({}, [{ status: 'PENDING' }, { status: 'RECORDED' }]))).refund).toEqual({ status: 'PENDING', medio: 'TARJETA' })
+    expect((await leer(nadie({}, [{ status: 'RECORDED' }, { status: 'REVERSED', reversal: null }]))).refund).toEqual({
+      status: 'REVERSED',
+      medio: 'TARJETA',
+    })
+
+    // La lectura: una sola consulta, con las filas de devolución acotadas y sin las fallidas o canceladas (no movieron dinero).
+    const sel = (prismaMock.onlineOrder.findUnique.mock.calls.at(-1)![0] as any).select
+    expect(sel).toMatchObject({ notPickedUpAt: true, refundedAt: true })
+    expect(sel.charge.select.cardRefunds).toEqual({
+      where: { status: { notIn: ['FAILED', 'CANCELED'] } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: 10,
+      select: { status: true, reversal: { select: { resolvedMethod: true } } },
+    })
+
+    // Regresión: «Mi equipo» con la tarjeta apartada sigue cancelable, y pagar al recoger no trae `refund`.
+    const miEquipo = folioNadie({ requiresAcceptance: true, paymentMode: 'CARD_ONLINE', charge: { status: 'AUTHORIZED', cardRefunds: [] } })
+    expect(await leer(miEquipo)).toMatchObject({ canCancel: true, notPickedUpAt: null, refundedAt: null })
+    expect(await leer(folioNadie())).not.toHaveProperty('refund')
   })
 
   it('T15 (fija lo de hoy): un folio pagado trae paid true, su folio y sus renglones', async () => {

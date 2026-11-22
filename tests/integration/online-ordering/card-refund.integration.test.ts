@@ -30,6 +30,7 @@ import { getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.se
 import { getAvailableBalance, getSettlementTimeline } from '@/services/dashboard/availableBalance.dashboard.service'
 import { bucketKey, getEarningsSummary, getEarningsTimeSeries } from '@/services/superadmin/earnings.service'
 import type { TxConReintento } from '@/utils/serializableRetry'
+import { operationHash } from '@/utils/operationHash'
 
 /** `logAction` está simulado en toda la integración (integration-setup): se cuentan sus llamadas. */
 const logged = (action: string, entityId: string) =>
@@ -94,6 +95,8 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
   let getRefundSpy: jest.SpyInstance
   let listRefundsSpy: jest.SpyInstance
   let feeSpy: jest.SpyInstance
+  /** D668: la lectura del cargo antes de «Devolver por otro medio» (sin esta espía iría al Stripe real). */
+  let chargeRefundsSpy: jest.SpyInstance
   /** Stripe con su idempotencia: la misma clave devuelve la misma devolución. La comisión devuelta, proporcional por PI. */
   const stripeRefunds = new Map<string, { refundId: string; amount: number; status: 'PENDING' | 'SUCCEEDED' | 'FAILED' }>()
   const feeRefunded = new Map<string, number>()
@@ -144,7 +147,10 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     const payment = await prisma.payment.findFirstOrThrow({ where: { orderId: oo.orderId, type: 'REGULAR' } })
     return { orderId: oo.orderId, charge, paymentId: payment.id }
   }
-  const pedir = async (orderId: string, o: Partial<{ amount: string; key: string; note: string; expected: string | null }> = {}) =>
+  const pedir = async (
+    orderId: string,
+    o: Partial<{ amount: string; key: string; note: string; expected: string | null; destino: 'CARD' | 'STORE_CREDIT' }> = {},
+  ) =>
     refundCardOnlineOrder({
       venueId: venueId!,
       orderId,
@@ -155,6 +161,7 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
       note: o.note ?? null,
       // Sin decir otra cosa, el operador vio la lista al día.
       expectedLatestRefundId: o.expected === undefined ? ((await listCardRefunds(venueId!, orderId))[0]?.id ?? null) : o.expected,
+      ...(o.destino ? { destino: o.destino } : {}),
     })
   const refundsOf = (orderId: string) =>
     prisma.payment.findMany({ where: { orderId, type: 'REFUND' }, include: { transaction: true }, orderBy: { createdAt: 'asc' }, take: 10 })
@@ -260,6 +267,7 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     getRefundSpy = jest.spyOn(StripeConnectProvider.prototype, 'getRefund')
     listRefundsSpy = jest.spyOn(StripeConnectProvider.prototype, 'listRefunds')
     feeSpy = jest.spyOn(StripeConnectProvider.prototype, 'getApplicationFeeRefundedCents')
+    chargeRefundsSpy = jest.spyOn(StripeConnectProvider.prototype, 'getChargeRefunds')
   })
 
   beforeEach(() => {
@@ -289,10 +297,12 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     listRefundsSpy.mockResolvedValue([])
     feeSpy.mockReset()
     feeSpy.mockImplementation(async (_m: any, pi: string) => feeRefunded.get(pi) ?? 0)
+    chargeRefundsSpy.mockReset()
+    chargeRefundsSpy.mockResolvedValue({ amountRefundedCents: 0, refunds: [] })
   })
 
   afterAll(async () => {
-    for (const s of [sessionSpy, authSpy, captureSpy, refundSpy, getRefundSpy, listRefundsSpy, feeSpy]) s?.mockRestore()
+    for (const s of [sessionSpy, authSpy, captureSpy, refundSpy, getRefundSpy, listRefundsSpy, feeSpy, chargeRefundsSpy]) s?.mockRestore()
     // Limpieza acotada: sin venueId NO se borra nada.
     if (!venueId) return
     const v = { venueId }
@@ -498,6 +508,52 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     refundSpy.mockClear()
     await expect(pedir(orderId, { amount: '1.00' })).rejects.toMatchObject({ statusCode: 400 })
     expect(refundSpy).not.toHaveBeenCalled()
+  })
+
+  it('D661 (Task 5) vecinos: dos devoluciones parciales seguidas en «Mi equipo», repitiendo la primera con su llave anterior al cambio → dos renglones en total, sin reserva D661 ni cierre del pedido', async () => {
+    const { orderId } = await capturedOrder()
+    const llaveA = nextKey('vecino-a')
+    const a = await pedir(orderId, { amount: '100.00', key: llaveA })
+    expect(a).toMatchObject({ status: 'RECORDED', replay: false })
+    // La huella de la primera es la del código anterior a D661: importe + motivo + nota, sin destino.
+    expect((await prisma.onlineOrderCardRefund.findUniqueOrThrow({ where: { id: a.cardRefundId } })).requestHash).toBe(
+      operationHash({ amountCents: 10_000, reason: 'CANCELLED_ORDER', note: null }),
+    )
+    await expect(pedir(orderId, { amount: '100.00' })).resolves.toMatchObject({ status: 'RECORDED', replay: false })
+    // Repetir la primera con su llave (y con la vista de entonces, que ya no es la última): su resultado, no otra devolución.
+    await expect(pedir(orderId, { amount: '100.00', key: llaveA, expected: null })).resolves.toMatchObject({
+      cardRefundId: a.cardRefundId,
+      replay: true,
+    })
+    expect(await refundsOf(orderId)).toHaveLength(2)
+    const oo = await prisma.onlineOrder.findFirstOrThrow({ where: { orderId } })
+    expect(oo).toMatchObject({ requiresAcceptance: true, status: 'ACCEPTED', refundRequestedAt: null, refundedAt: null })
+    expect(await prisma.activityLog.count({ where: { venueId, action: 'ONLINE_ORDER_CLOSED_AS_REFUNDED', entityId: oo.id } })).toBe(0)
+  })
+
+  it('D661 (Task 5): un reintento de una fila escrita por el código base (CARD, sin destino en la huella) devuelve su resultado, no 409; misma llave con STORE_CREDIT → 409', async () => {
+    const { orderId } = await capturedOrder()
+    const key = nextKey('base')
+    const primera = await pedir(orderId, { key })
+    for (const destino of [undefined, 'CARD'] as const) {
+      await expect(pedir(orderId, { key, ...(destino ? { destino } : {}) })).resolves.toMatchObject({
+        cardRefundId: primera.cardRefundId,
+        status: 'RECORDED',
+        replay: true,
+      })
+    }
+    await expect(pedir(orderId, { key, destino: 'STORE_CREDIT' })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    })
+    // Una llave nueva a saldo a favor todavía no está disponible: nunca se trata como tarjeta.
+    refundSpy.mockClear()
+    await expect(pedir(orderId, { amount: '1.00', destino: 'STORE_CREDIT' })).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'REFUND_DESTINATION_NOT_AVAILABLE',
+    })
+    expect(refundSpy).not.toHaveBeenCalled()
+    expect(await refundsOf(orderId)).toHaveLength(1)
   })
 
   it('ruling 2: un «Cambio» de $100 en saldo a favor ya contra el cobro de Stripe → $250 a la tarjeta es 400 sin Stripe; $150 sí', async () => {
@@ -834,6 +890,42 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     expect(events[0].amount.toFixed(2)).toBe('250.00')
     const rev = await prisma.onlineOrderCardRefundReversal.findUniqueOrThrow({ where: { cardRefundId: r.cardRefundId } })
     expect(rev).toMatchObject({ resolvedMethod: 'CASH', resolvedByStaffId: staffId, cashDrawerEventId: events[0].id })
+    await prisma.cashDrawerSession.update({ where: { id: session.id }, data: { status: 'CLOSED', closedAt: new Date() } })
+  })
+
+  it('D668: ya devuelta a mano en Stripe tras la reversa → con caja abierta, 409 y ningún PAY_OUT; sin ella viva, paga como hoy', async () => {
+    const { orderId } = await capturedOrder()
+    const r = await pedir(orderId)
+    getRefundSpy.mockResolvedValue({ refundId: 'x', status: 'FAILED', amountCents: 25_000, failureReason: null })
+    await expect(advanceCardRefund(r.cardRefundId)).resolves.toBe('REVERSED')
+    const session = await prisma.cashDrawerSession.create({
+      data: {
+        venueId: venueId!,
+        openedByStaffId: staffId,
+        openedByName: 'Gerente',
+        startingAmount: new Prisma.Decimal(500),
+        status: 'OPEN',
+      },
+    })
+    const resolver = () =>
+      resolveReversedCardRefund({ venueId: venueId!, orderId, cardRefundId: r.cardRefundId, method: 'CASH', staffId, note: null })
+    const payouts = () => prisma.cashDrawerEvent.count({ where: { venueId, localId: `oocr-payout:${r.cardRefundId}` } })
+
+    chargeRefundsSpy.mockResolvedValue({
+      amountRefundedCents: 25_000,
+      refunds: [{ refundId: `re_a_mano_${RUN}`, status: 'SUCCEEDED', amountCents: 25_000, failureReason: null, metadata: {} }],
+    })
+    await expect(resolver()).rejects.toMatchObject({ statusCode: 409, code: 'EXTERNAL_REFUND_DETECTED' })
+    expect(await payouts()).toBe(0)
+    expect((await prisma.onlineOrderCardRefund.findUniqueOrThrow({ where: { id: r.cardRefundId } })).status).toBe('REVERSED')
+    expect(
+      (await prisma.onlineOrderCardRefundReversal.findUniqueOrThrow({ where: { cardRefundId: r.cardRefundId } })).resolvedAt,
+    ).toBeNull()
+
+    // La de Stripe también falló (ya no está viva): no hay devolución por fuera y se paga como hoy.
+    chargeRefundsSpy.mockResolvedValue({ amountRefundedCents: 0, refunds: [] })
+    await expect(resolver()).resolves.toEqual({ status: 'RESOLVED', replay: false })
+    expect(await payouts()).toBe(1)
     await prisma.cashDrawerSession.update({ where: { id: session.id }, data: { status: 'CLOSED', closedAt: new Date() } })
   })
 })

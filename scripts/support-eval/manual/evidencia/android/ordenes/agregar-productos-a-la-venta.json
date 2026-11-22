@@ -1,7 +1,7 @@
 {
   "pagina": "android/ordenes/agregar-productos-a-la-venta",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7",
+  "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e",
   "version": "2.25.42",
   "pasos": [
     {
@@ -13,68 +13,92 @@
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 116,
+      "linea": 118,
       "cita": "PRODUCTS(\"Todos los productos\"),"
     },
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2451,
+      "linea": 2725,
       "cita": "else -> cartViewModel.addProduct(product)"
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2932,
+      "linea": 3213,
       "cita": "text = \"Buscar\","
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/search/SearchOverlayView.kt",
-      "linea": 98,
+      "linea": 139,
       "cita": "placeholder = \"Buscar productos...\","
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/search/SearchOverlayView.kt",
-      "linea": 152,
-      "cita": "onClick = { onProductTap(resultado.producto) },"
+      "linea": 87,
+      "cita": "is ResultadoDeBusqueda.DeProducto -> onProductTap(resultado.producto)"
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2974,
+      "linea": 3255,
       "cita": "contentDescription = \"Escanear código de barras\","
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 731,
+      "linea": 794,
       "cita": "onBarcodeScan = { showBarcodeScanner = true },"
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2450,
+      "linea": 2724,
       "cita": "product.hasModifiers -> onSelectForDetail(product)"
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ModifierGroupSection.kt",
-      "linea": 58,
+      "linea": 89,
       "cita": "text = \"Requerido $selectedCount/$requiredCount\","
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
-      "linea": 581,
+      "linea": 709,
       "cita": "text = \"Agregar al carrito\","
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
-      "linea": 583,
+      "linea": 711,
       "cita": "enabled = canAddToCart,"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ModifierGroupSection.kt",
+      "linea": 176,
+      "cita": "text = nota?.let { \"Nota: $it\" } ?: \"+ Nota\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
+      "linea": 380,
+      "cita": "title = \"Nota de ${opcion.name}\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
+      "linea": 938,
+      "cita": "text = \"Guardar nota\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
+      "linea": 858,
+      "cita": "actionLabel = if (text.isNotEmpty()) \"Eliminar\" else null,"
     },
     {
       "paso": 5,
@@ -91,37 +115,37 @@
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/variantes/HojaDeVariantes.kt",
-      "linea": 147,
+      "linea": 150,
       "cita": "text = elegida?.let { TextosVariantes.agregarCon(it.displayPrice) } ?: TextosVariantes.AGREGAR,"
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2449,
+      "linea": 2723,
       "cita": "product.soldByWeight -> onSelectForWeight(product)"
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/WeightCapturePanel.kt",
-      "linea": 239,
+      "linea": 244,
       "cita": "placeholder = \"Peso (kg)\","
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/WeightCapturePanel.kt",
-      "linea": 233,
+      "linea": 238,
       "cita": "Text(\"Capturar manualmente\")"
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/WeightCapturePanel.kt",
-      "linea": 221,
+      "linea": 226,
       "cita": "if (scaleConfigured && !manualMode) {"
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/WeightCapturePanel.kt",
-      "linea": 316,
+      "linea": 329,
       "cita": "text = if (totalCents != null) \"Agregar • ${money(totalCents)}\" else \"Agregar\","
     }
   ],

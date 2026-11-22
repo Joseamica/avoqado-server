@@ -1021,6 +1021,19 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'sets the kitchenPendingAt marker of a folio paid before it closed, under the order lock its caller (syncPaidClosedFolios) took',
     markers: ['data: { kitchenPendingAt: a.ahora }'],
   },
+  // D661 (Task 5): la devolución a la tarjeta de un pedido de «Nadie» sólo toca la marca de cocina de su cuenta (nunca dinero ni
+  // renglones): al retirar la reserva de un intento fallido la vuelve a poner (la cocina retoma) y al cerrar «Devuelto» la limpia.
+  // Las dos, bajo el candado de la orden que toman en su misma transacción.
+  'src/services/online-ordering/card/refund.service.ts#retirarReservaEnTx': {
+    class: 'METADATA',
+    why: 'sets the kitchenPendingAt marker again when a failed refund releases its reservation, under the order lock of terminarSinDevolver',
+    markers: ['data: { kitchenPendingAt: i.now }'],
+  },
+  'src/services/online-ordering/card/devuelto.ts#cerrarComoDevueltoEnTx': {
+    class: 'METADATA',
+    why: 'clears the kitchenPendingAt marker of an order closed as «Devuelto», under the order lock it takes in the same transaction',
+    markers: ['data: { kitchenPendingAt: null }'],
+  },
   'src/services/mobile/areaTicket.mobile.service.ts#claimAreaTicket': { class: 'METADATA', why: 'claim fields under a CAS' },
   'src/services/tpv/payment.tpv.service.ts#recordOrderPayment': {
     class: 'METADATA',
@@ -1491,6 +1504,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   // (bloquearCuentaParaEditar) y el $0 de «Nadie» pasa a «Por entregar» (casTransitionInTx), con el presupuesto único.
   'src/services/online-ordering/order.service.ts#createOnlineOrder': 1,
   'src/services/online-ordering/card/confirm.service.ts#confirmCardAuthorization': 1,
+  // D661 (3C): decide con el reloj real, bajo el candado de la cuenta, si un cobro en duda de «Nadie» se vuelve a mandar.
+  'src/services/online-ordering/card/reconcile.service.ts#captureRetryStep': 1,
   // Fase 2 (T6): la transacción corta que pasa el cargo a CAPTURING y la que registra el cobro y acepta, cada una con la Order.
   'src/services/online-ordering/card/capture.service.ts#acceptCardOnlineOrder': 1,
   'src/services/online-ordering/card/capture.service.ts#finishCapture': 1,
@@ -1500,6 +1515,15 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/online-ordering/card/refund.service.ts#refundCardOnlineOrder': 1,
   'src/services/online-ordering/card/refund.service.ts#reverseRecordedRefund': 1,
   'src/services/online-ordering/card/refund.service.ts#resolveReversedCardRefund': 1,
+  // D661 (Task 5): el desenlace sin devolución con el retiro de su reserva, y el cierre «Devuelto», cada uno con la Order.
+  'src/services/online-ordering/card/refund.service.ts#terminarSinDevolver': 1,
+  'src/services/online-ordering/card/refund.service.ts#cerrarComoDevuelto': 1,
+  // D661 (Task 6): la devolución a saldo a favor — «primer-sobre», la decisión compartida con la Order y, en la misma transacción,
+  // el renglón con su abono y el cierre «Devuelto» (que reentra la misma Order) —, con el presupuesto único (withDeadlockRetry).
+  'src/services/online-ordering/card/refund.service.ts#devolverASaldoAFavor': 1,
+  // D661 (ola final, C1): la vista previa del MCP lee lo que queda por devolver con el MISMO cálculo de la devolución
+  // (`bloquearCobroParaReembolso`: la Order y su Payment), en una transacción corta que no escribe, con el presupuesto único.
+  'src/services/online-ordering/card/refund.service.ts#porDevolverDeUnPedido': 1,
   // Tarjetas de regalo (B2): iniciar y liberar la cancelación de una venta toman la Order (abrirVentaDeTarjetasEnTx →
   // lockExistingOrderForPayment) y después sus sobres, con el presupuesto único.
   'src/services/giftCards/giftCardCancel.service.ts#iniciarCancelacionDeVenta': 1,

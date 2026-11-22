@@ -159,3 +159,47 @@ describe('GET /info en «Nadie» (T8)', () => {
     expect((await call()).requiresAcceptance).toBe(true)
   })
 })
+
+describe('GET /info en «Nadie» con su propio interruptor (D661)', () => {
+  const nadie = { requiresAcceptance: false, acceptsCardOnline: false, cardOnlineNadie: true }
+
+  it('con el interruptor, una caja capaz que recibió una respuesta rápida hace 30 s y Stripe listo: anuncia cardOnline true', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state(nadie))
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ cardAlertFastPollAt: new Date(Date.now() - 30_000) } as any)
+    comercio(true)
+    expect((await call()).paymentModes).toEqual({ payAtPickup: true, cardOnline: true })
+  })
+
+  it('Ruling 7: si ninguna caja capaz recibió una respuesta rápida en 90 s (aunque una lenta haya sondeado hace 1 min): cardOnline false (la tienda sigue con pagar en caja)', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state(nadie))
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({
+      cardAlertFastPollAt: new Date(Date.now() - 91_000),
+      lastCardAlertPollAt: new Date(Date.now() - 60_000),
+    } as any)
+    comercio(true)
+    const d = await call()
+    expect(d.paymentModes).toEqual({ payAtPickup: true, cardOnline: false })
+    expect(d.status).toBe('OPEN')
+  })
+})
+
+describe('GET /info: ¿el negocio puede dar saldo a favor? (D661)', () => {
+  const LLAVE = 'ab'.repeat(32)
+  const antes = { code: process.env.GIFT_CARD_CODE_KEY, hmac: process.env.GIFT_CARD_HMAC_KEY }
+  const restaurar = (k: 'GIFT_CARD_CODE_KEY' | 'GIFT_CARD_HMAC_KEY', v: string | undefined) =>
+    v === undefined ? delete process.env[k] : (process.env[k] = v)
+  afterEach(() => {
+    restaurar('GIFT_CARD_CODE_KEY', antes.code)
+    restaurar('GIFT_CARD_HMAC_KEY', antes.hmac)
+  })
+
+  it('info trae storeCredit', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state({}))
+    process.env.GIFT_CARD_CODE_KEY = LLAVE
+    process.env.GIFT_CARD_HMAC_KEY = LLAVE
+    expect((await call()).storeCredit).toBe(true)
+    // Sin las llaves del servidor no se puede crear ningún sobre: la tienda no promete saldo a favor.
+    delete process.env.GIFT_CARD_HMAC_KEY
+    expect((await call()).storeCredit).toBe(false)
+  })
+})

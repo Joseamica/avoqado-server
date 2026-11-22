@@ -1,8 +1,17 @@
 import { getAcceptingStatus, proximaHoraLimite, storeView } from './presence.service'
 import prisma from '@/utils/prismaClient'
-import { cardMerchantStatus } from './card/merchant'
-import { getSettings, getSettingsWithSaved, storeRequirements } from './settings.service'
+import { cardMerchantStatus, cardOnlineAvailable } from './card/merchant'
+import { getSettings, getSettingsWithSaved, storeRequirements, type CardAlertBeats } from './settings.service'
 import { NO_ONE_VENUE_TYPES } from './constants'
+
+/** D661 (D2): los latidos de la caja que avisa, cuando quien llama no los trae (el PUT). Una lectura chica de dos columnas. */
+async function readCardAlertBeats(venueId: string): Promise<CardAlertBeats> {
+  const row = await prisma.onlineOrderingSettings.findUnique({
+    where: { venueId },
+    select: { lastCardAlertPollAt: true, cardAlertFastPollAt: true },
+  })
+  return { lastCardAlertPollAt: row?.lastCardAlertPollAt ?? null, cardAlertFastPollAt: row?.cardAlertFastPollAt ?? null }
+}
 
 /**
  * La vista de ajustes de la tienda en línea: ajustes + estado de la tienda (el mismo cálculo que `/info`) + qué falta para
@@ -21,17 +30,30 @@ export async function settingsView(
   // toda respuesta con hora posterior a un cambio guardado ya lo trae (su lectura fue después). El panel se queda con la más nueva.
   const leidoEn = new Date()
   // R66: con `preloaded` (lo que acaba de escribir el PUT) siempre hay fila; si no, la misma lectura dice si existe.
-  const { settings, saved } = preloaded ? { settings: preloaded, saved: true } : await getSettingsWithSaved(venueId)
-  const [state, requirements, merchantStatus, venue, siguiente] = await Promise.all([
+  const read = preloaded ? null : await getSettingsWithSaved(venueId)
+  const settings = preloaded ?? read!.settings
+  const saved = preloaded ? true : read!.saved
+  const [state, requirements, merchantStatus, venue, siguiente, beats, offeredAtRead] = await Promise.all([
     getAcceptingStatus(venueId, leidoEn, settings),
     storeRequirements(venueId),
     cardMerchantStatus(prisma, venueId),
     prisma.venue.findUnique({ where: { id: venueId }, select: { type: true } }),
     proximaHoraLimite(venueId, leidoEn).catch(() => null),
+    read?.cardAlerts ?? readCardAlertBeats(venueId),
+    // D661 (D2): la MISMA regla de `/info` y del borrador (una sola definición), sólo en «Nadie».
+    settings.requiresAcceptance === false ? cardOnlineAvailable(settings, prisma, venueId) : Promise.resolve(false),
   ])
   // D662 v5 (Codex p2v4-r5 #2): UNA sola foto por respuesta. Si el estado se armó con ajustes releídos (la lectura esperó y alguien
   // apagó, pausó o reanudó mientras tanto), el interruptor, la pausa temporal, la tarjeta y la versión salen de ESOS mismos ajustes.
   const usados = (state.ajustesUsados as typeof settings | undefined) ?? settings
+  // D661 + D662 v5 (una sola foto): la tarjeta de «Nadie» sale de los MISMOS ajustes que el estado. La relectura de la pausa sola sólo
+  // pasa en «Mi equipo»; si mientras esperaba el negocio cambió de modo o su tarjeta de «Nadie», se vuelve a medir con esos ajustes.
+  const offeredNow =
+    usados.requiresAcceptance === settings.requiresAcceptance && usados.cardOnlineNadie === settings.cardOnlineNadie
+      ? offeredAtRead
+      : usados.requiresAcceptance === false
+        ? await cardOnlineAvailable(usados, prisma, venueId)
+        : false
   // D662 parte 2: `autoPauseResumedAt` es interno de la pausa sola; lo que el panel ve es `store.autoPausedAt`.
   const { lastInboxPollAt, lastToPayPollAt, autoPauseResumedAt: _reanudada, updatedAt: _guardadoEn, version, ...config } = usados
   return {
@@ -57,5 +79,13 @@ export async function settingsView(
     requirements,
     // Fase 2: el switch y el estado de la cuenta Stripe (el panel explica por qué no se puede prender).
     card: { enabled: !!usados.acceptsCardOnline, merchantStatus },
+    // D661 (D2, nuevo y opcional): ¿la tarjeta de «No, entran solos» se ofrece AHORA? Sólo si una caja capaz recibió una respuesta
+    // rápida en los últimos 90 s (Ruling 7); prendida y sin esa caja, la tienda no la ofrece.
+    cardNadie: {
+      enabled: usados.cardOnlineNadie === true,
+      lastAlertAt: beats.lastCardAlertPollAt?.toISOString() ?? null,
+      fastAlertAt: beats.cardAlertFastPollAt?.toISOString() ?? null,
+      offeredNow,
+    },
   }
 }

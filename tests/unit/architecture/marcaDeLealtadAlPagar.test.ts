@@ -25,8 +25,11 @@ const ORDER_EXTRA = {
     'bdbc94690bb1489b7c3a76c3b240d30163fc5d609107533683394ab0b7d746fd',
 }
 const CALLERS_EXTRA = {
+  // D661 (3A, revisado en 3C): sólo cambió `now: meta.now` → `now: escritura` (la hora leída bajo el candado de la orden, antes de
+  // escribir). Es la hora con que la transición escribe acceptedAt y la marca de cocina; su orderExtra es el mismo cuerpo revisado
+  // (sólo kitchenPendingAt) y el PAID con loyaltyEligibleAt lo sigue poniendo el `order.update` de finishCapture antes de esta llamada.
   'services/online-ordering/card/capture.service.ts#finishCapture:casTransitionInTx':
-    '02c982331f52c1f8c6eefd9f5dd2742c45681962c25d8914f95af0d2d1377b5c',
+    '7c7e9ba5716ae3bf5ff15ab28ed818569c2c448cd705fd224f9b3a3f52f401da',
   'services/online-ordering/folios.service.ts#prepararFolioPagadoEnTx:casTransitionInTx':
     'e949dbd631f6397166abd46c236f261f76d09d73170e1b697e276bce27a054ed',
   'services/online-ordering/transitions.service.ts#casTransition:casTransitionInTx':
@@ -37,8 +40,12 @@ const CALLERS_EXTRA = {
   // lealtad); su orderExtra no cambió.
   'services/online-ordering/transitions.service.ts#acceptWithoutCapture:casTransition':
     '7757714c01b4400665f027821960c0eb2443478f8b18990ad7867751179f4673',
+  // D661 (3A, revisado en 3C): sólo se agregó `...(porFalloDeCobro ? { porFalloDeCobro: true } : {})`, la bandera de la excepción
+  // R46 (rechazar un apartado de tarjeta cuando lo pide el escritor del cargo). No es un orderExtra: el rechazo sigue sin orderExtra,
+  // escribe sólo `status: CANCELLED` en la cuenta y, como toda cancelación, no corre si la cuenta ya tiene dinero (HAS_PAYMENTS).
+  // Unión con develop (22-nov): el rechazo lleva las dos banderas, la de D661 y el `toquePersona` de D662; ninguna es orderExtra.
   'services/online-ordering/transitions.service.ts#rejectOnlineOrder:casTransition':
-    '75b866c46818a2a3f975ed0e1370d6d6402e1e57eb16ad0a8afe7c6f35ca17d0',
+    '2e2bf2033c426537caded3e1b9dd8fa945dc15ab1c747fa5f700a17302e7c17f',
   'services/online-ordering/transitions.service.ts#expireOnlineOrder:casTransition':
     '43ec329eb5714ea1ddb13eb7cda9c41b603ce84286521cacb3b3b91dac3329ff',
   'services/online-ordering/transitions.service.ts#markOnlineOrderReady:casTransition':

@@ -167,7 +167,7 @@
       "gateKind": "FEATURE"
     },
     "android/ordenes/agregar-productos-a-la-venta": {
-      "sha256": "e131e5b35fbeffaa10f275182d6a73b8c6341c295149f049bb5cf2f4c128ae11",
+      "sha256": "cc7c38f74a80b21cbf2ad0701cbbbc88761df560eabf2fb235cebb5fa6cca0c2",
       "requiredPermissions": [
         "menu:read"
       ]
@@ -587,6 +587,20 @@
         "payment:create-manual"
       ]
     },
+    "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea": {
+      "sha256": "87c4e326bfd268ec3c9a4d85293b57e93acdb27b01d9a80044b1bfae15414189",
+      "requiredPermissions": [
+        "payments:refund"
+      ]
+    },
+    "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos": {
+      "sha256": "78314ecd75f56e3b910a95aa317c0b7cc1eba86c840c934b633fe87a73430c22",
+      "requiredPermissions": [
+        "online-orders:manage"
+      ],
+      "featureCode": "ONLINE_ORDERING",
+      "gateKind": "FEATURE"
+    },
     "dashboard/plan/cambiar-tarjeta-del-plan": {
       "sha256": "df61878d21967bd9391d3d520e96b930ee53cc79360eb363a5fbc45dd22be78a",
       "requiredPermissions": [
@@ -954,6 +968,12 @@
       "featureCode": "TABLE_SERVICE",
       "gateKind": "FEATURE"
     },
+    "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea": {
+      "sha256": "92f96096647f337153ae346677f97627ce94d5dff048ef4311e5d1a2ceb375ff",
+      "requiredPermissions": [
+        "orders:update"
+      ]
+    },
     "tpv/recibos/imprimir-y-reimprimir-recibo": {
       "sha256": "570746088c124ca146349d21ef0ee57692c90714e1dc94703d98f4fb8f746d0a",
       "requiredPermissions": [
@@ -1148,7 +1168,7 @@
       "gateKind": "FEATURE"
     },
     "windows/ordenes/agregar-productos-a-la-venta": {
-      "sha256": "6276f9a5e3f4745cbde2be969fc297ca1cd372a18a05a66cbccd464718c47247",
+      "sha256": "9875c67a2655faa4e28f594d79cc8a2de2342a7dbf992620bd89044c00a6fc58",
       "requiredPermissions": [
         "menu:read"
       ]

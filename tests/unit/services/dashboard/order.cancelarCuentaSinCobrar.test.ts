@@ -75,7 +75,7 @@ describe('cancelarCuentaSinCobrar — el panel cancela una cuenta sin cobrar', (
   it('cancela una cuenta de mostrador sin pagos: el motivo y el autor van a la bitácora y las notas no se tocan', async () => {
     await cancelarCuentaSinCobrar(VENUE, ORDER, 'La abrí por error', 'staff-1')
 
-    expect(prismaMock.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'CANCELLED' } }))
+    expect(prismaMock.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'CANCELLED', kitchenPendingAt: null } }))
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'ORDER_CANCELLED',

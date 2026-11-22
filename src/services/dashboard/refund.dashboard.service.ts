@@ -702,7 +702,8 @@ interface WriteRefundBase {
    * `abonar` corre en ESTA transacción tras escribir la fila (h1): si lanza, no queda nada. Nunca abre la obligación de costo negativo
    * (el banco no devolvió). Excluyente con `moneyAs` y `devolverCon`.
    */
-  aSaldoAFavor?: { tender: RefundMoneySemantics; customerId: string; abonar: AbonarSaldoAFavor }
+  /** `bloquearFicha` (D661, ronda 2 de codex-r3): la devolución de «Nadie», que exige el mismo teléfono, toma la ficha antes del sobre. */
+  aSaldoAFavor?: { tender: RefundMoneySemantics; customerId: string; abonar: AbonarSaldoAFavor; bloquearFicha?: true }
 }
 
 /**
@@ -824,7 +825,11 @@ export async function writeRefundInTx(
   // Saldo a favor (Codex plan r1, hallazgo 2): el sobre de la clienta se aparta DESPUÉS del cobro y ANTES del turno, como el gasto con
   // saldo (`order.mobile.service.ts`): Order → Payments → clienta + sobre → Shift.
   const sobre = input.aSaldoAFavor
-    ? await prepararSobreDeSaldoAFavorEnTx(tx, { venueId: input.venueId, customerId: input.aSaldoAFavor.customerId })
+    ? await prepararSobreDeSaldoAFavorEnTx(tx, {
+        venueId: input.venueId,
+        customerId: input.aSaldoAFavor.customerId,
+        ...(input.aSaldoAFavor.bloquearFicha ? { bloquearFicha: true } : {}),
+      })
     : null
   const provenance = input.provenance ?? 'MANUAL'
   const sinClasificar = input.shift === 'CLAIM_LIVE' && unclassifiedPriorRefundCents > 0

@@ -1156,7 +1156,17 @@ describe('cancelOrder — guard against live terminal charges', () => {
   it('cancelling WITHOUT a reason leaves the customer notes untouched (it used to overwrite them with the order status)', async () => {
     prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
     await cancelOrder('venue-1', 'order-1')
-    expect(prismaMock.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'CANCELLED' } }))
+    expect(prismaMock.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'CANCELLED', kitchenPendingAt: null } }))
+  })
+
+  // hz:e82938e1:D38: la anulación ya retiró las comandas; si dejaba la marca de «por mandar a cocina» y el dinero ya capturado
+  // reabría la cuenta antes del barrido (cada minuto), el barrido armaba la comanda de una cancelada reabierta (la regla S1 dice que no).
+  it('🔴 D38: anular limpia la marca de «por mandar a cocina», con motivo o sin él', async () => {
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
+    await cancelOrder('venue-1', 'order-1', 'cliente se fue', 'staff-1')
+    expect(prismaMock.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'CANCELLED', kitchenPendingAt: null }) }),
+    )
   })
 
   it('regression: still rejects cancelling a PAID order before ever consulting the terminal guard', async () => {
@@ -1462,7 +1472,7 @@ describe('cancelOrder — libera la mesa aunque la cuenta sea el último hijo de
 
     await cancelOrder('venue-1', CHILD)
 
-    expect(prismaMock.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'CANCELLED' } }))
+    expect(prismaMock.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'CANCELLED', kitchenPendingAt: null } }))
     expect(prismaMock.table.update).not.toHaveBeenCalled()
   })
 

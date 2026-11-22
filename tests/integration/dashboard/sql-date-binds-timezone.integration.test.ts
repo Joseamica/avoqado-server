@@ -34,7 +34,7 @@ import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { SharedQueryService } from '@/services/dashboard/shared-query.service'
 import { getSalesByItem } from '@/services/dashboard/sales-by-item.dashboard.service'
-import { computeMerchantAccountBreakdown, getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.service'
+import { getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.service'
 import { getPromotionSales } from '@/services/dashboard/promotion-sales.dashboard.service'
 import { getHistoricalSummaries, HistoricalGrouping } from '@/services/tpv/historical-reports.service'
 import { getCostVarianceReport, getPMIXReport } from '@/services/dashboard/report.service'
@@ -386,9 +386,10 @@ describe('Sales summary — the period bars sum to the headline and sit on the r
     expect(r.byPeriod?.find(p => p.period === '20:00')?.metrics.grossSales).toBe(200)
   })
 
-  it('computeMerchantAccountBreakdown: 2 transactions, 250 collected', async () => {
-    const rows = await computeMerchantAccountBreakdown(venueId, FROM, TO)
-    expect(rows).toEqual([expect.objectContaining({ merchantAccountId, collectedOnCard: 250, transactionCount: 2 })])
+  it('per-merchant breakdown: 2 transactions, 250 collected', async () => {
+    // Carril C (21-nov-2026): the per-merchant sums come from the same read as the buckets (`includeMerchantBreakdown`).
+    const r = await getSalesSummary(venueId, { ...base, groupBy: 'paymentMethod', includeMerchantBreakdown: true })
+    expect(r.byMerchantAccount).toEqual([expect.objectContaining({ merchantAccountId, collectedOnCard: 250, transactionCount: 2 })])
   })
 })
 
