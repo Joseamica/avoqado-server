@@ -67,6 +67,32 @@ describe('flattenSalesSummaryForExport', () => {
     const { rows } = svc.flattenSalesSummaryForExport(report, ['totals', 'paymentMethods'])
     expect(rows.some(r => r.section === 'aviso')).toBe(false)
   })
+
+  // Carril B (21-nov, D2/D6/D1): el archivo y el MCP dicen los renglones nuevos de la pantalla, con su leyenda, sólo si no son 0.
+  it('cargos por servicio, «Sin cobrar» (con cuántas cuentas) y comisiones de terceros salen como renglones propios', () => {
+    const conTodo = {
+      ...report,
+      summary: { ...report.summary, serviceCosts: 15.5, unpaidSales: 695, unpaidOrders: 3, tenderCommissions: 27 },
+    }
+    const { rows } = svc.flattenSalesSummaryForExport(conTodo, ['totals'])
+    const fila = (label: string) => rows.find(r => r.label === label)
+    expect(fila('Cargos por servicio (incluidos en ventas brutas)')).toMatchObject({ amount: 15.5, count: null })
+    expect(fila('Sin cobrar: cuentas abiertas (no es venta)')).toMatchObject({ amount: 695, count: 3 })
+    expect(fila('Comisiones de terceros (Rappi, Uber Eats, tipos de pago)')).toMatchObject({ amount: -27 })
+    // En el orden de la pantalla: los cargos bajo las ventas brutas, la comisión de terceros bajo la de plataforma.
+    const orden = rows.map(r => r.label)
+    expect(orden.indexOf('Cargos por servicio (incluidos en ventas brutas)')).toBe(orden.indexOf('Ventas brutas') + 1)
+    expect(orden.indexOf('Comisiones de terceros (Rappi, Uber Eats, tipos de pago)')).toBe(orden.indexOf('Comisiones de plataforma') + 1)
+  })
+
+  it('en cero o nulos (vista de movimientos, servidor viejo) no salen', () => {
+    const { rows } = svc.flattenSalesSummaryForExport(
+      { ...report, summary: { ...report.summary, serviceCosts: null, unpaidSales: null, unpaidOrders: null, tenderCommissions: 0 } },
+      ['totals'],
+    )
+    expect(rows.some(r => /Cargos por servicio|Sin cobrar|terceros/.test(r.label))).toBe(false)
+    expect(svc.flattenSalesSummaryForExport(report, ['totals']).rows.some(r => /Cargos|Sin cobrar|terceros/.test(r.label))).toBe(false)
+  })
 })
 
 describe('detailed rows where-clause + cap', () => {
