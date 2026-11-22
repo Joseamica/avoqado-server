@@ -435,7 +435,7 @@ export async function updateEcommerceMerchant(merchantId: string, data: UpdateEc
     })
 
     if (duplicate) {
-      throw new BadRequestError(`Channel "${data.channelName}" already exists for this venue`)
+      throw new BadRequestError(`Ya existe un canal con el nombre "${data.channelName}" en este venue. Usa un nombre diferente.`)
     }
   }
 
