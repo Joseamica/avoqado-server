@@ -450,8 +450,10 @@ describe('lo que sigue después de cancelar', () => {
 
   // hz:e82938e1:D39: la cuenta tenía una ronda por mandar a cocina (su marca) cuando se regresó el saldo. Antes la marca sobrevivía a la
   // anulación y, si el dinero ya capturado reabría la cuenta antes del barrido (cada minuto), el barrido la armaba: la regla S1 dice que
-  // una cancelada reabierta no vuelve a la cocina. El barrido sólo lee cuentas con la marca puesta.
-  it('🔴 D39: la marca de «por mandar a cocina» se va con la anulación y el dinero que revive la venta no la vuelve a poner', async () => {
+  // una cancelada reabierta no vuelve a la cocina. El barrido sólo lee cuentas con la marca puesta. Lo que prueba la segunda mitad es que,
+  // revivida por dinero, la cuenta sigue SIN marca (sin D39 conservaría la de la ronda). El cobro no la salda, así que no pasa por la guarda
+  // del cobro que salda una reabierta (`!reabiertaDeCancelada`): ésa la prueba folios.integration.test.ts («el que reabre no marca»).
+  it('🔴 D39: la marca de «por mandar a cocina» se va con la anulación y la venta que revive el dinero sigue sin marca', async () => {
     const c = await cliente()
     const orderId = await cuenta(c)
     const t = await tarjeta(1000)
