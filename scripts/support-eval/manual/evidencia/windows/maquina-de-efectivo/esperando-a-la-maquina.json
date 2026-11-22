@@ -1,0 +1,174 @@
+{
+  "pagina": "windows/maquina-de-efectivo/esperando-a-la-maquina",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d",
+  "version": "rama feat/maquina-de-efectivo-1a en e7d51ad0 (árbol 2.25.56, sin publicar; sale en 2.25.57 o después)",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 143,
+      "cita": "Titulo(TEXTO_ESPERANDO_AL_PANEL)"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 144,
+      "cita": "Nota(\"La máquina no confirmó cómo terminó este cobro. No lo cobres otra vez.\")"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 48,
+      "cita": "const val TEXTO_ESPERANDO_AL_PANEL = \"Esperando a la máquina: un gerente lo resuelve en el panel\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 144,
+      "cita": "Nota(\"La máquina no confirmó cómo terminó este cobro. No lo cobres otra vez.\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 496,
+      "cita": "suspend fun intentoDeLaVenta(llaveDeVenta: String): CobroEnMaquinaEntity? = dao.intentoDeLaVenta(llaveDeVenta)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 518,
+      "cita": "suspend fun ventaBloqueada(llaveDeVenta: String): Boolean = apartada(llaveDeVenta) || dao.bloqueanLaVenta(llaveDeVenta) > 0"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 3176,
+      "cita": "viewModelScope.launch { if (!caja.ventaBloqueadaEnDisco()) accion() }"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 147,
+      "cita": "OutlinedButton(onClick = onSalir) { Text(\"Salir\") }"
+    },
+    {
+      "paso": 4,
+      "archivo": "avoqado-web-dashboard/src/components/Sidebar/app-sidebar.tsx",
+      "linea": 518,
+      "cita": "url: 'cash-machine-doubts',"
+    },
+    {
+      "paso": 4,
+      "archivo": "avoqado-web-dashboard/src/routes/venueRoutes.tsx",
+      "linea": 250,
+      "cita": "path: 'cash-machine-doubts',"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/SubidaDeLaMaquina.kt",
+      "linea": 53,
+      "cita": "* - **Dudas** (`ESPERANDO`) → `POST …/doubts` con el carrito congelado; después se consultan cada 60 s hasta que el"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 157,
+      "cita": "Titulo(if (d == Desenlace.CANCELADO) \"El gerente lo resolvió en el panel: la máquina devolvió el dinero\" else \"El gerente lo resolvió en el panel: la máquina guardó el dinero\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 159,
+      "cita": "PrimaryButton(text = \"Listo\", onClick = caja::listo, fullWidth = true)"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3770
+    },
+    {
+      "permiso": "cash-machine:resolve",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 9019
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "La duda sube con su carrito congelado y se consulta cada 60 s hasta que el gerente decide en el panel",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/SubidaDeLaMaquina.kt",
+      "linea": 53
+    },
+    {
+      "afirmacion": "Sin red no se marca nada: se reintenta",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/SubidaDeLaMaquina.kt",
+      "linea": 55
+    },
+    {
+      "afirmacion": "Acuse perdido: a los 3 s, duda; nunca se libera por ver la máquina libre",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/CobroConMaquina.kt",
+      "linea": 283
+    },
+    {
+      "afirmacion": "Sin la propiedad del cobro en la conexión actual (PC apagada o sin red con la máquina) no sale ningún cancel: el dinero sólo se enseña",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/CobroConMaquina.kt",
+      "linea": 194
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "«Esta venta ya tiene un cobro en la máquina…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 43
+    },
+    {
+      "ruta": "«Esta venta espera a la máquina: un gerente la resuelve en el panel»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 44
+    },
+    {
+      "ruta": "Incidencia: «No se cobró la venta…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 152
+    },
+    {
+      "ruta": "«Revisar en el panel · Folio …»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 84
+    },
+    {
+      "ruta": "«El servidor respondió otros importes…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/SubidaDeLaMaquina.kt",
+      "linea": 32
+    },
+    {
+      "ruta": "«Esta PC no está emparejada con la máquina…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/SubidaDeLaMaquina.kt",
+      "linea": 31
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado) contra el simulador QuickPay Mini V1.2 en la Mac (Tailscale)",
+    "version": "2.25.54-escritorio (89b76a79) en el recorrido; la página cita e7d51ad0 (árbol 2.25.56, sin publicar)",
+    "fecha": "2026-11-21",
+    "fotos": [
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c08b.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c08f.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c09e.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c10d.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c10e.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/d03-dudas.jpg"
+    ],
+    "filasCreadas": ["Folios AQMWRBH9C3CSKR, AQMWRBVJT2BFB9 y AQMWRBN39O5AZC (Mindform de la siembra, base av-db-25-maquina, desechable)"],
+    "nota": "Recorrido real del 21-nov-2026 (docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a.md) en el POS de WINDOWS del Alienware contra el simulador V1.2 de APS: rama feat/maquina-de-efectivo-1a en 89b76a79 («Versión 2.25.54-escritorio»). Casos 8 (acuse perdido: «Esperando a la máquina… No lo cobres otra vez» y volver a cobrar lleva a la misma pantalla), 9 (POS cerrado a media venta: la duda sube sola al reabrir) y 10 (red cortada en el cierre; resuelto en el panel, la PC se entera sola en 23 s): PASS. No se marca PROBADO porque el paquete de ese recorrido se reescribió el 22-nov (~11:00 UTC, ~/maquina1a/salida del Alien) y su huella se perdió; además b34dc2a3 (E1) cambió después del recorrido «Te debemos» en la pantalla de éxito, «Registrando la venta…» y el título «Cobro cancelado». Lo sella el full-testing sobre e7d51ad0 (paquete avoqado-pos-windows-prueba.zip, sha256 27f16df63688e261b0e457e1c0dae8cea38c110ff09acc6d8e27f51a1f1d9246): al pasar, estado PROBADO con esa huella, su fecha y sus fotos, y deviceTested en la página."
+  },
+  "codex": {
+    "lote": 12,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -1,0 +1,187 @@
+{
+  "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d",
+  "version": "rama feat/maquina-de-efectivo-1a en e7d51ad0 (árbol 2.25.56, sin publicar; sale en 2.25.57 o después)",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 167,
+      "cita": "Text(\"Lo que la máquina les debe a clientes\", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/receiptlayout/ReceiptLayoutInterpreter.kt",
+      "linea": 37,
+      "cita": "(input.sale.reprint?.let { row(L.REIMPRESION, ReceiptFormat.dateTime(it.printedAt, input.sale.timezone)) } ?: emptyList()) +"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/receiptlayout/ReceiptLayoutInterpreter.kt",
+      "linea": 49,
+      "cita": "T.wrap(\"Te debemos ${ReceiptFormat.money(debe)} de cambio: pasa a caja a cobrarlo · Folio ${T.force(m.referenceCC)}\", width)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 702,
+      "cita": "label = \"Caja\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 1058,
+      "cita": "text = \"Egreso\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/PayInOutSheet.kt",
+      "linea": 52,
+      "cita": "val title = if (isPayIn) \"Registrar ingreso\" else \"Registrar egreso\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/PayInOutSheet.kt",
+      "linea": 105,
+      "cita": "label = { Text(\"Monto ($)\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/PayInOutSheet.kt",
+      "linea": 119,
+      "cita": "label = { Text(if (isPayIn) \"Nota (opcional)\" else \"Concepto\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/PayInOutSheet.kt",
+      "linea": 157,
+      "cita": "text = if (ocupado) \"Registrando…\" else \"Confirmar\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 391,
+      "cita": "title = \"Autorizar retiro\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 168,
+      "cita": "Nota(\"Se paga con un retiro de caja, con el folio en la nota.\")"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "cash-drawer:pay-out",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3367
+    },
+    {
+      "permiso": "cash-drawer:pay-out",
+      "archivo": "avoqado-server/src/lib/permissions.ts",
+      "linea": 1042
+    },
+    {
+      "permiso": "cash-drawer:pay-out",
+      "archivo": "avoqado-server/src/lib/permissions.ts",
+      "linea": 1232
+    },
+    {
+      "permiso": "cash-drawer:pay-out",
+      "archivo": "avoqado-server/src/lib/permissions.ts",
+      "linea": 1388
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Con permiso: «Retiro registrado. Se subirá al servidor cuando vuelva la conexión.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerViewModel.kt",
+      "linea": 825
+    },
+    {
+      "afirmacion": "Con PIN de gerente y sin red: RETIRO_SIN_RED",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerViewModel.kt",
+      "linea": 821
+    },
+    {
+      "afirmacion": "El PIN de gerente necesita red",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/domain/AccesoAlRetiro.kt",
+      "linea": 10
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Caja sólo para cajero, gerente, administrador y dueño",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 329
+    },
+    {
+      "ruta": "El concepto es obligatorio",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerViewModel.kt",
+      "linea": 443
+    },
+    {
+      "ruta": "«Sólo un gerente puede retirar efectivo…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerViewModel.kt",
+      "linea": 823
+    },
+    {
+      "ruta": "La lista de deudas sólo trae PAGADO y CANCELADO (un GUARDADO no sale)",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/CobroEnMaquinaEntity.kt",
+      "linea": 467
+    },
+    {
+      "ruta": "Comprobante de diferencia o de la máquina",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 200
+    },
+    {
+      "ruta": "Botón «Imprimir comprobante»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 181
+    },
+    {
+      "ruta": "«Ver más (N)»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 188
+    },
+    {
+      "ruta": "«Movimientos» de la caja (cada egreso con su concepto)",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 1118
+    },
+    {
+      "ruta": "«Revisar en el panel»",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/receiptlayout/ReceiptLayoutModels.kt",
+      "linea": 234
+    },
+    {
+      "ruta": "«Se canceló el cobro» sin monto (GUARDADO)",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 168
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado) contra el simulador QuickPay Mini V1.2 en la Mac (Tailscale)",
+    "version": "2.25.54-escritorio (89b76a79) en el recorrido; la página cita e7d51ad0 (árbol 2.25.56, sin publicar)",
+    "fecha": "2026-11-21",
+    "fotos": [
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c03c.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c03f.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c03g.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c05e.jpg"
+    ],
+    "filasCreadas": [
+      "CashDrawerEvent PAY_OUT 220.00 «Te debemos folio AQMWRB0JOMZWAE» en el turno cmwrarrae000lwa48dz6kul26 (base av-db-25-maquina, desechable)"
+    ],
+    "nota": "Recorrido real del 21-nov-2026 (docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a.md) en el POS de WINDOWS del Alienware contra el simulador V1.2 de APS: rama feat/maquina-de-efectivo-1a en 89b76a79 («Versión 2.25.54-escritorio»). Caso 3 (la máquina sin cambio: debe $220) y 3b: Caja › Egreso $220 con concepto «Te debemos folio AQMWRB0JOMZWAE» → PAY_OUT 220.00 con esa nota; Ajustes › Máquina listó «Folio AQMWRB0JOMZWAE · $220.00 · Imprimir comprobante». Caso 5b: «Te debemos $100.00: pasa a caja a cobrarlo · Folio …». Sin impresora: el papel no se vio. No se marca PROBADO porque el paquete de ese recorrido se reescribió el 22-nov (~11:00 UTC, ~/maquina1a/salida del Alien) y su huella se perdió; además b34dc2a3 (E1) cambió después del recorrido «Te debemos» en la pantalla de éxito, «Registrando la venta…» y el título «Cobro cancelado». Lo sella el full-testing sobre e7d51ad0 (paquete avoqado-pos-windows-prueba.zip, sha256 27f16df63688e261b0e457e1c0dae8cea38c110ff09acc6d8e27f51a1f1d9246): al pasar, estado PROBADO con esa huella, su fecha y sus fotos, y deviceTested en la página."
+  },
+  "codex": {
+    "lote": 12,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

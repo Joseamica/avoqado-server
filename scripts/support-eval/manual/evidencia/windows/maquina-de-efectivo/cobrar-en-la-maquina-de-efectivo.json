@@ -1,0 +1,301 @@
+{
+  "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d",
+  "version": "rama feat/maquina-de-efectivo-1a en e7d51ad0 (árbol 2.25.56, sin publicar; sale en 2.25.57 o después)",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 29,
+      "cita": "label = \"Cobrar\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 474,
+      "cita": "text = primaryActionLabel ?: \"Cobrar ${cartState.totalDisplay}\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/upsell/UpsellCashierStrip.kt",
+      "linea": 133,
+      "cita": "text = \"¿Algo más?\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/RatingScreen.kt",
+      "linea": 91,
+      "cita": "text = \"¿Cómo fue tu experiencia?\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/TipSelectionScreen.kt",
+      "linea": 391,
+      "cita": "text = \"Sin propina\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 241,
+      "cita": "com.avoqado.pos.maquina.ui.FilaEfectivoEnLaMaquina("
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 56,
+      "cita": "\"Efectivo en la máquina\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 105,
+      "cita": "Titulo(\"Preparando la máquina…\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 109,
+      "cita": "Titulo(\"Paga en la máquina\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 199,
+      "cita": "Monto(\"Por pagar\", dueCents)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 201,
+      "cita": "Text(\"Recibido: ${formatMoneyFromCents(creditCents)}\", style = MaterialTheme.typography.titleLarge)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 204,
+      "cita": "if (falta > 0) \"Falta: ${formatMoneyFromCents(falta)}\" else \"Tu cambio: ${formatMoneyFromCents(-falta)}\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 114,
+      "cita": "OutlinedButton(onClick = caja::cancelarPorElCliente) { Text(\"Cancelar y devolverme mi dinero\") }"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 169,
+      "cita": "Desenlace.CANCELADO -> if (c.changeDispensedCents > 0) \"Cobro cancelado: recoge tu dinero\" else \"Cobro cancelado\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 311,
+      "cita": "text = \"Cambio: ${formatMoney(changeCents / 100.0)}\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 317,
+      "cita": "avisoDeLaMaquina?.let {"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 73,
+      "cita": "\"Te debemos ${com.avoqado.pos.core.util.formatMoneyFromCents(cents.toInt())} de cambio: pasa a caja a cobrarlo · Folio $referenceCC\""
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 199,
+      "cita": "text = \"Venta nueva\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3706
+    },
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3754
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin respuesta de la cotización se cobra el total local (el excedente cubre un precio que baje)",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 588
+    },
+    {
+      "afirmacion": "Sin cotización con red el ticket dice «Precio por confirmar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/CajaConMaquina.kt",
+      "linea": 45
+    },
+    {
+      "afirmacion": "Texto «Precio por confirmar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/receiptlayout/ReceiptLayoutModels.kt",
+      "linea": 231
+    },
+    {
+      "afirmacion": "«Se sincronizará cuando haya conexión»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 245
+    },
+    {
+      "afirmacion": "Con red: «Registrando la venta…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 247
+    },
+    {
+      "afirmacion": "«Venta sincronizada»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentResultScreen.kt",
+      "linea": 249
+    },
+    {
+      "afirmacion": "La tabla cobros_en_maquina ES la cola: sube al arrancar, al volver la red y cada 60 s",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/SubidaDeLaMaquina.kt",
+      "linea": 57
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "En la PC con máquina sólo salen la máquina y la tarjeta",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 110
+    },
+    {
+      "ruta": "F5 (efectivo a mano) apagado con la máquina",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt",
+      "linea": 137
+    },
+    {
+      "ruta": "«La máquina no responde»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 41
+    },
+    {
+      "ruta": "«La máquina está ocupada»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 42
+    },
+    {
+      "ruta": "R6: venta nueva y completa",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 45
+    },
+    {
+      "ruta": "R6: venta restaurada",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 56
+    },
+    {
+      "ruta": "R6: reservas y clases",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 61
+    },
+    {
+      "ruta": "R6: la venta ya mandó tarjeta",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 66
+    },
+    {
+      "ruta": "Orden de las razones",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 113
+    },
+    {
+      "ruta": "Centavos: el total debe ser múltiplo de $0.50",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ReglasDeLaMaquina.kt",
+      "linea": 4
+    },
+    {
+      "ruta": "«La máquina no da centavos: paga con tarjeta»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 33
+    },
+    {
+      "ruta": "Descuento",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 34
+    },
+    {
+      "ruta": "Premio de lealtad",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 35
+    },
+    {
+      "ruta": "Poco cambio: avisa y deja seguir",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 40
+    },
+    {
+      "ruta": "120 s sin dinero nuevo",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/CobroConMaquina.kt",
+      "linea": 525
+    },
+    {
+      "ruta": "30 s de «¿Sigues ahí?»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/CobroConMaquina.kt",
+      "linea": 526
+    },
+    {
+      "ruta": "El abandono siempre guarda el dinero (cancel 2)",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/CobroConMaquina.kt",
+      "linea": 455
+    },
+    {
+      "ruta": "Botón «¿Sigues ahí? Toca para continuar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 121
+    },
+    {
+      "ruta": "«Se canceló el cobro» (GUARDADO, sin monto)",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 168
+    },
+    {
+      "ruta": "«Hay N tickets sin imprimir»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 69
+    },
+    {
+      "ruta": "Botón «Imprimir»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 86
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado) contra el simulador QuickPay Mini V1.2 en la Mac (Tailscale)",
+    "version": "2.25.54-escritorio (89b76a79) en el recorrido; la página cita e7d51ad0 (árbol 2.25.56, sin publicar)",
+    "fecha": "2026-11-21",
+    "fotos": [
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c01b.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c02g.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c03c.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c04c.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c05d.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c06a.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c06b.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c07b.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c11j.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c13f.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/rb7.jpg"
+    ],
+    "filasCreadas": [
+      "Folios AQMWRAU7CZPRGQ, AQMWRAX70W3SQB, AQMWRB7HK9R2PS, AQMWRBAEMJ9RYV, AQMWRC23GGSKGJ y AQMWRC7O9MEIQM con sus órdenes y pagos (Mindform de la siembra, base av-db-25-maquina, desechable)"
+    ],
+    "nota": "Recorrido real del 21-nov-2026 (docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a.md) en el POS de WINDOWS del Alienware contra el simulador V1.2 de APS: rama feat/maquina-de-efectivo-1a en 89b76a79 («Versión 2.25.54-escritorio»). Casos 1 (cambio), 2 (exacto con propina), 4 (centavos), 5 (cancelar y devolver), 6 (¿Sigues ahí? y cancel 2), 7 (ocupada), 11 (sin internet), 13 (precio que bajó) y R-b (restaurada): PASS. Caso 3: el «Te debemos» no salía en la pantalla de éxito (FAIL, arreglado después en b34dc2a3). R-a (tarjeta) y R-c (reserva): NO PROBADO. No se marca PROBADO porque el paquete de ese recorrido se reescribió el 22-nov (~11:00 UTC, ~/maquina1a/salida del Alien) y su huella se perdió; además b34dc2a3 (E1) cambió después del recorrido «Te debemos» en la pantalla de éxito, «Registrando la venta…» y el título «Cobro cancelado». Lo sella el full-testing sobre e7d51ad0 (paquete avoqado-pos-windows-prueba.zip, sha256 27f16df63688e261b0e457e1c0dae8cea38c110ff09acc6d8e27f51a1f1d9246): al pasar, estado PROBADO con esa huella, su fecha y sus fotos, y deviceTested en la página."
+  },
+  "codex": {
+    "lote": 12,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

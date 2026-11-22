@@ -115,6 +115,12 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/cashdrawer/domain/AccesoAlRetiro.kt": [
+      {
+        "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt": [
       {
         "pagina": "android/caja/abrir-y-cerrar-caja",
@@ -139,6 +145,10 @@
       {
         "pagina": "windows/caja/registrar-ingreso-de-efectivo",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerViewModel.kt": [
@@ -165,6 +175,10 @@
       {
         "pagina": "windows/caja/registrar-ingreso-de-efectivo",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CloseDrawerSheet.kt": [
@@ -221,6 +235,10 @@
       {
         "pagina": "windows/caja/registrar-ingreso-de-efectivo",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/lan/RachaSinAcuse.kt": [
@@ -425,6 +443,14 @@
       {
         "pagina": "windows/lealtad/ajustar-sellos",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
@@ -1177,6 +1203,102 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/maquina/AjustesDeLaMaquina.kt": [
+      {
+        "pagina": "windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/maquina/CajaConMaquina.kt": [
+      {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/maquina/CobroConMaquina.kt": [
+      {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/esperando-a-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/maquina/CobroEnMaquinaEntity.kt": [
+      {
+        "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt": [
+      {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/esperando-a-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/maquina/ReglasDeLaMaquina.kt": [
+      {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/maquina/SubidaDeLaMaquina.kt": [
+      {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/esperando-a-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt": [
+      {
+        "pagina": "windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoViewModel.kt": [
+      {
+        "pagina": "windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt": [
+      {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/esperando-a-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt": [
       {
         "pagina": "android/cobro/cancelar-cobro-en-la-terminal",
@@ -1371,6 +1493,10 @@
       {
         "pagina": "windows/lealtad/ajustar-sellos",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -1951,6 +2077,10 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
+        "pagina": "windows/maquina-de-efectivo/esperando-a-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
@@ -2007,6 +2137,10 @@
       {
         "pagina": "windows/cobro/dividir-la-cuenta",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       },
       {
         "pagina": "windows/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo",
@@ -2075,6 +2209,10 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
         "pagina": "windows/recibos/imprimir-y-reimprimir-recibo",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
@@ -2107,6 +2245,10 @@
       {
         "pagina": "windows/cobro/cobrar-en-efectivo",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/payment/presentation/SplitPaymentSheet.kt": [
@@ -2161,6 +2303,10 @@
       {
         "pagina": "windows/cobro/cobrar-en-efectivo",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/payment/presentation/WaitingForCustomerScreen.kt": [
@@ -2285,6 +2431,10 @@
       {
         "pagina": "windows/cobro/dividir-la-cuenta",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
@@ -2561,6 +2711,10 @@
       {
         "pagina": "windows/cobro/cobrar-en-efectivo",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/ComandaPrinter.kt": [
@@ -2687,6 +2841,22 @@
       {
         "pagina": "windows/impresoras/agregar-y-probar-impresora",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/printing/receiptlayout/ReceiptLayoutInterpreter.kt": [
+      {
+        "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/printing/receiptlayout/ReceiptLayoutModels.kt": [
+      {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt": [
@@ -3211,6 +3381,14 @@
       {
         "pagina": "windows/lealtad/ajustar-sellos",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       },
       {
         "pagina": "windows/mesas/tiempos-cocina-y-liberar",
@@ -3793,6 +3971,14 @@
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
+        "pagina": "windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
@@ -3847,6 +4033,10 @@
       {
         "pagina": "android/reservas/lista-de-espera",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/esperando-a-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       },
       {
         "pagina": "windows/reservas/atender-una-cita",
@@ -4123,6 +4313,22 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
+        "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/esperando-a-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
+        "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      },
+      {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
@@ -4373,6 +4579,12 @@
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
+    "avoqado-android:avoqado-web-dashboard/src/components/Sidebar/app-sidebar.tsx": [
+      {
+        "pagina": "windows/maquina-de-efectivo/esperando-a-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
+      }
+    ],
     "avoqado-android:avoqado-web-dashboard/src/locales/es/onlineOrdering.json": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
@@ -4401,6 +4613,12 @@
       {
         "pagina": "windows/mesas/tiempos-cocina-y-liberar",
         "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
+    "avoqado-android:avoqado-web-dashboard/src/routes/venueRoutes.tsx": [
+      {
+        "pagina": "windows/maquina-de-efectivo/esperando-a-la-maquina",
+        "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       }
     ],
     "avoqado-android:desktop/plataforma/src/main/java/android/app/Activity.java": [
