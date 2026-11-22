@@ -21,6 +21,7 @@ import {
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import { getOrders } from '@/services/tpv/order.tpv.service'
 import { onOrderCancelled } from '@/services/referrals/referralRefund.service'
+import { socketManager } from '@/communication/sockets/managers/socketManager'
 
 // El cobro tardío de la cola (efectivo) registra su dinero de verdad; sólo se apagan la caja y la cola de mensajes, que no son de esta prueba.
 jest.mock('@/services/shared/cashDrawerPosting', () => ({ postCashSaleToDrawer: jest.fn().mockResolvedValue(undefined) }))
@@ -350,7 +351,8 @@ describe('limpieza de ventas de Cobrar abandonadas (D36)', () => {
     await activo().correrAhora()
     expect(await estado(id)).toBe('CANCELLED')
 
-    await recordOrderPayment(venueId, id, efectivoDeLaCola(), staffId)
+    const avisos = jest.spyOn(socketManager, 'broadcastToVenue')
+    const respuesta: any = await recordOrderPayment(venueId, id, efectivoDeLaCola(), staffId)
 
     expect(await estado(id)).not.toBe('CANCELLED')
     expect(await prisma.payment.count({ where: { orderId: id } })).toBe(1)
@@ -359,6 +361,11 @@ describe('limpieza de ventas de Cobrar abandonadas (D36)', () => {
     const cobrada = await prisma.order.findUniqueOrThrow({ where: { id }, select: { paymentStatus: true, remainingBalance: true } })
     expect(cobrada.paymentStatus).toBe('PAID')
     expect(cobrada.remainingBalance.toNumber()).toBe(0)
+    // Codex r3: la respuesta del cobro y el aviso en vivo dicen lo que quedó guardado, no la copia anulada que se leyó antes de cobrar.
+    expect(respuesta.order).toMatchObject({ status: 'COMPLETED', paymentStatus: 'PAID' })
+    const avisosDeLaVenta = avisos.mock.calls.filter(([, evento, datos]: any[]) => evento === 'order_updated' && datos?.orderId === id)
+    expect(avisosDeLaVenta.map(([, , datos]: any[]) => datos.status)).toEqual(['COMPLETED'])
+    avisos.mockRestore()
   })
 
   it('una sin productos o que no es de la TPV (kiosco) NO se toca', async () => {

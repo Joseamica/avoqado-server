@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks'
-import { Payment, PaymentMethod, SplitType, OrderSource, PaymentSource, Prisma, type DigitalReceipt } from '@prisma/client'
+import { Payment, PaymentMethod, SplitType, OrderSource, PaymentSource, Prisma, type DigitalReceipt, type Order } from '@prisma/client'
 import logger from '../../config/logger'
 import { finalizeCouponsForOrder } from '../shared/cuponDeLaVenta'
 import { cobradoQueCubreEnTx } from '../shared/saldoReabiertoAlReembolsar'
@@ -4825,6 +4825,11 @@ export async function recordOrderPayment(
     // Don't fail the payment if receipt generation fails
   }
 
+  // hz:e82938e1:D36 (Codex r3): la venta estaba ANULADA al leerla (la limpieza de Cobrar, una persona) y este dinero ya capturado la
+  // reabre. `activeOrder` y el `order` que trae el pago son la copia de ANTES de cobrar: el aviso en vivo y la respuesta decían
+  // «CANCELLED» de una venta que quedó pagada. En ese caso se avisa y se responde con lo que quedó guardado (abajo). Los demás cobros, igual.
+  const eraAnulada = claseDeEstado(activeOrder.status) === 'CANCELADA'
+
   // 🔌 REAL-TIME: Emit socket events based on payment status
   try {
     const paymentPayload = {
@@ -4888,15 +4893,17 @@ export async function recordOrderPayment(
       })
     }
 
-    // Emit order updated event to venue room
-    socketManager.broadcastToVenue(activeOrder.venueId, SocketEventType.ORDER_UPDATED, {
-      orderId: activeOrder.id,
-      orderNumber: activeOrder.orderNumber,
-      venueId: activeOrder.venueId,
-      status: activeOrder.status,
-      paymentStatus: activeOrder.paymentStatus,
-      timestamp: new Date().toISOString(),
-    })
+    // Emit order updated event to venue room (la de una venta anulada sale al final, con su estado guardado)
+    if (!eraAnulada) {
+      socketManager.broadcastToVenue(activeOrder.venueId, SocketEventType.ORDER_UPDATED, {
+        orderId: activeOrder.id,
+        orderNumber: activeOrder.orderNumber,
+        venueId: activeOrder.venueId,
+        status: activeOrder.status,
+        paymentStatus: activeOrder.paymentStatus,
+        timestamp: new Date().toISOString(),
+      })
+    }
 
     logger.info('Socket events emitted successfully', {
       paymentId: payment.id,
@@ -5177,9 +5184,48 @@ export async function recordOrderPayment(
   const autofacturaAvailable = digitalReceipt ? await timing.time('autofactura', () => resolveAutofacturaAvailable(orderId)) : false
   timing.end(payment.id)
 
+  // D36 (Codex r3): la venta que llegó anulada se relee ya cobrada; se avisa y se responde con eso. Nunca tumba el cobro (ya entró).
+  let ordenAlFinal: Pick<
+    Order,
+    'status' | 'paymentStatus' | 'paidAmount' | 'remainingBalance' | 'total' | 'tipAmount' | 'completedAt'
+  > | null = null
+  if (eraAnulada) {
+    try {
+      ordenAlFinal = await prisma.order.findFirst({
+        where: { id: activeOrder.id, venueId: activeOrder.venueId },
+        select: {
+          status: true,
+          paymentStatus: true,
+          paidAmount: true,
+          remainingBalance: true,
+          total: true,
+          tipAmount: true,
+          completedAt: true,
+        },
+      })
+      if (ordenAlFinal) {
+        socketManager.broadcastToVenue(activeOrder.venueId, SocketEventType.ORDER_UPDATED, {
+          orderId: activeOrder.id,
+          orderNumber: activeOrder.orderNumber,
+          venueId: activeOrder.venueId,
+          status: ordenAlFinal.status,
+          paymentStatus: ordenAlFinal.paymentStatus,
+          timestamp: new Date().toISOString(),
+        })
+      }
+    } catch (error) {
+      logger.error('No se pudo releer la venta reabierta para avisar su estado (el cobro ya quedó)', {
+        paymentId: payment.id,
+        orderId: activeOrder.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
   // Add digital receipt info to payment response
   return {
     ...payment,
+    ...(ordenAlFinal && payment.order ? { order: { ...payment.order, ...ordenAlFinal } } : {}),
     ...(areaTicketCheckoutState ? { areaTicketCheckoutState } : {}),
     // Aditivo y con spread condicional (mismo criterio que `areaTicketCheckoutState`):
     // la llave está AUSENTE cuando no hay nada que avisar, así que ninguna app vieja
