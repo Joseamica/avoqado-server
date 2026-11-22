@@ -8,6 +8,7 @@ import {
   type DestinoDelReembolso,
   type EntradaDelReembolso,
 } from '../services/shared/destinoDelReembolso'
+import { ServiceUnavailableError } from '../errors/AppError'
 import prisma from '../utils/prismaClient'
 import { checkPermission } from './checkPermission.middleware'
 
@@ -44,12 +45,18 @@ export const permisoConcedidoDe = (req: Request) => (req as ConDestinoDelReembol
 export function permisoDeReembolsoSegunElCobro(opciones: { paymentIdDe: (req: Request) => unknown; entrada: EntradaDelReembolso }) {
   return Object.assign(
     async (req: Request, res: Response, next: NextFunction) => {
-      // Si la lectura falla se exige el permiso más alto: nunca se concede acceso por un fallo.
-      const { origen, esCreditoDeCambio, esSaldo, cobro } = await origenDelDinero(
-        prisma,
-        req.params?.venueId,
-        opciones.paymentIdDe(req),
-      ).catch(() => ({ origen: 'MAQUINA' as const, esCreditoDeCambio: false, esSaldo: undefined, cobro: undefined }))
+      // Si la lectura falla NO se adivina el origen: 503 reintentable (revisión de apps viejas, 22-nov). Suponer «máquina» pedía
+      // `payments:refund-to-cash` y a una cajera con `payments:refund` le daba un 403 falso, también en la TPV después de que el banco ya
+      // devolvió. Nunca se concede acceso por un fallo: la petición no pasa, sólo se pide repetirla.
+      let leido: Awaited<ReturnType<typeof origenDelDinero>>
+      try {
+        leido = await origenDelDinero(prisma, req.params?.venueId, opciones.paymentIdDe(req))
+      } catch {
+        return next(
+          new ServiceUnavailableError('No se pudo revisar el cobro. Intenta de nuevo en un momento.', 'REFUND_ORIGIN_UNAVAILABLE'),
+        )
+      }
+      const { origen, esCreditoDeCambio, esSaldo, cobro } = leido
       const metodo = (req.body as { refundMethod?: unknown } | undefined)?.refundMethod
       // H7: con el cobro tal cual, lo admitido sale de las funciones de ruteo de los escritores.
       const decision = decidirDestinoDelReembolso({

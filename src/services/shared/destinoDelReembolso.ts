@@ -30,10 +30,16 @@
  */
 import type { Prisma } from '@prisma/client'
 
-import { BadRequestError } from '../../errors/AppError'
+import AppError, { BadRequestError } from '../../errors/AppError'
 import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { isGiftCardTenderKind } from '../giftCards/giftCardPredicados'
-import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal, type CobroParaDevolver } from '../tpv/terminalRefundTarget'
+import {
+  devolverConEfectivo,
+  sePuedeEscogerComoDevolver,
+  seDevuelveEnTerminal,
+  sinSaldoAFavorPorque,
+  type CobroParaDevolver,
+} from '../tpv/terminalRefundTarget'
 
 /** El tender de sistema de un SALDO: la tarjeta de regalo o el saldo a favor (lo que el escritor sólo devuelve a ese saldo). */
 export const esTenderDeSaldo = (systemKind: string | null | undefined): boolean =>
@@ -58,9 +64,12 @@ export interface DestinoDelReembolso {
 }
 export interface ReembolsoNoAdmitido {
   admitido: false
-  codigo: 'NO_ADMITIDO_EN_ESTA_ENTRADA'
+  /** `STORE_CREDIT_NOT_ALLOWED` (422) sólo para saldo a favor sobre lo pagado con saldo: es lo que ya contestaba el escritor y lo que
+   * las apps viejas (ANDROID/WINDOWS 2.25.32, iOS 1.15.12) reconocen para borrar el pendiente (revisión de apps viejas, 22-nov). */
+  codigo: 'NO_ADMITIDO_EN_ESTA_ENTRADA' | 'STORE_CREDIT_NOT_ALLOWED'
   mensaje: string
   dondeIr: DondeIr[]
+  estado?: 422
 }
 export type DecisionDelReembolso = DestinoDelReembolso | ReembolsoNoAdmitido
 
@@ -88,8 +97,17 @@ export function decidirDestinoDelReembolso(p: {
   /** H7: el cobro tal cual (lo que leen los escritores). Con él, lo admitido sale de SUS funciones de ruteo; sin él, como antes. */
   cobro?: CobroParaDevolver | null
 }): DecisionDelReembolso {
-  if (p.esSaldo && p.medio != null)
-    return noAdmitido('Lo pagado con saldo (tarjeta de regalo o saldo a favor) sólo regresa a ese mismo saldo.', ['MISMO_MEDIO'])
+  // Revisión de apps viejas (22-nov): a saldo a favor se contesta con el código de siempre del escritor (422 STORE_CREDIT_NOT_ALLOWED),
+  // con el mismo motivo; sólo cambia que ahora sale antes y trae `dondeIr`.
+  if (p.esSaldo && p.medio === 'STORE_CREDIT')
+    return {
+      admitido: false,
+      codigo: 'STORE_CREDIT_NOT_ALLOWED',
+      estado: 422,
+      mensaje: (p.cobro && sinSaldoAFavorPorque(p.cobro)) || MENSAJE_SALDO_AL_MISMO_SALDO,
+      dondeIr: ['MISMO_MEDIO'],
+    }
+  if (p.esSaldo && p.medio != null) return noAdmitido(MENSAJE_SALDO_AL_MISMO_SALDO, ['MISMO_MEDIO'])
   // H7: la terminal nunca devuelve a un saldo (su escritor lo rechaza): se devuelve desde el POS o el panel.
   if (p.esSaldo && p.entrada === 'TPV') return noAdmitido(MENSAJE_SALDO_EN_TPV, ['POS', 'PANEL'])
   if (p.entrada === 'MCP' && p.medio != null && p.medio !== 'CASH' && p.medio !== 'BANK_TRANSFER')
@@ -125,6 +143,8 @@ export function decidirDestinoDelReembolso(p: {
   return admitido('MISMO_MEDIO', 'payments:refund')
 }
 
+const MENSAJE_SALDO_AL_MISMO_SALDO = 'Lo pagado con saldo (tarjeta de regalo o saldo a favor) sólo regresa a ese mismo saldo.'
+
 export const MENSAJE_SALDO_EN_TPV =
   'Lo pagado con saldo (tarjeta de regalo o saldo a favor) no se devuelve en la terminal: devuélvelo desde el POS o el panel y regresa a ese mismo saldo.'
 export const MENSAJE_TARJETA_EN_TPV =
@@ -143,7 +163,8 @@ const noAdmitido = (mensaje: string, dondeIr: DondeIr[]): ReembolsoNoAdmitido =>
 })
 
 /** El rechazo de lo no admitido, igual en la autorización y en cada escritor: 400 con `details.dondeIr`. */
-export function errorDeNoAdmitido(d: ReembolsoNoAdmitido): BadRequestError {
+export function errorDeNoAdmitido(d: ReembolsoNoAdmitido): AppError {
+  if (d.estado === 422) return new AppError(d.mensaje, 422, true, d.codigo, { dondeIr: d.dondeIr })
   return new BadRequestError(d.mensaje, d.codigo, { dondeIr: d.dondeIr })
 }
 

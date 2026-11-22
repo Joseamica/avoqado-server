@@ -175,10 +175,14 @@ describe('Codex r1 #14 (decisión c): devolver en efectivo una venta de la máqu
     expect(await correr(StaffRole.MANAGER, { amount: 5000, refundMethod: 'CASH' })).toEqual({ next: true })
   })
 
-  it('🔴 POS · si no se puede leer el cobro, se exige el permiso más alto (nunca se concede por el fallo)', async () => {
+  it('🔴 POS · si no se puede leer el cobro: 503 reintentable, nunca un 403 por adivinar el origen ni acceso concedido', async () => {
+    // Revisión de apps viejas (22-nov): suponer «máquina» le daba a una cajera con payments:refund un 403 falso de refund-to-cash.
     mockPaymentFindFirst.mockRejectedValue(new Error('db caída'))
     const out = await correr(StaffRole.CASHIER, { amount: 5000 })
-    expect(out.json).toMatchObject({ required: 'payments:refund-to-cash' })
+    expect(out.next).toBe(false)
+    expect(out.status).toBeUndefined()
+    expect(out.error).toMatchObject({ statusCode: 503, code: 'REFUND_ORIGIN_UNAVAILABLE' })
+    expect(mockConsumeOverride).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -411,6 +415,25 @@ describe('🔴 F10 (Codex servidor r4): lo pagado con saldo no pide refund-to-ca
     mockPaymentFindFirst.mockResolvedValue({ cashMachineRef: null, tenderType: { systemKind: 'GIFT_CARD' } })
     expect(await correr(StaffRole.CASHIER, { amount: 5000 })).toEqual({ next: true })
   })
+
+  it.each([
+    ['GIFT_CARD', 'Lo pagado con tarjeta de regalo regresa a su misma tarjeta.'],
+    ['STORE_CREDIT', 'Esto ya es un saldo a favor.'],
+  ])(
+    '🔴 saldo a favor sobre lo pagado con saldo (%s) ⇒ 422 STORE_CREDIT_NOT_ALLOWED de siempre (las apps viejas lo reconocen), con a dónde ir',
+    async (kind, mensaje) => {
+      mockPaymentFindFirst.mockResolvedValue({ cashMachineRef: null, tenderType: { systemKind: kind } })
+      const out = await correr(StaffRole.CASHIER, { amount: 5000, refundMethod: 'STORE_CREDIT', customerId: 'c1' })
+      expect(out.status).toBeUndefined()
+      expect(out.error).toMatchObject({
+        statusCode: 422,
+        code: 'STORE_CREDIT_NOT_ALLOWED',
+        message: mensaje,
+        details: { dondeIr: ['MISMO_MEDIO'] },
+      })
+      expect(mockConsumeOverride).not.toHaveBeenCalled()
+    },
+  )
 })
 
 describe('🔴 r3 #4: un reembolso guardado ANTES de esta rama recupera su acuse con la misma llave', () => {

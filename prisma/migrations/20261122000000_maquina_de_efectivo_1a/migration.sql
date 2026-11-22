@@ -1,11 +1,10 @@
 -- Máquina de efectivo (QuickPay Mini), fase 1a: plan docs/superpowers/plans/2026-11-20-maquina-de-efectivo-fase-1a.md.
 -- UNA migración con el esquema final de la 1a (ronda 4 de Codex sobre el código, F1/F2): nada de la 1a salió de su rama, así que las
 -- intermedias (columna cartHash, rediseño r3) se aplastaron aquí. Sólo tablas y columnas nuevas; nada se quita ni se renombra.
--- Los índices de Payment y de CashMachineClose.occurredAt van CONCURRENTLY, cada uno en su migración (20261120120001 y 20261120120003):
+-- Los índices de Payment y de CashMachineClose.occurredAt van CONCURRENTLY, cada uno en su migración (20261122000001 y 20261122000003):
 -- Payment recibe escrituras en cada cobro y Prisma manda el archivo como un lote (CONCURRENTLY no cabe en una transacción implícita).
-
--- AlterTable
-ALTER TABLE "Payment" ADD COLUMN     "cashMachineRef" VARCHAR(32);
+-- La columna `Payment.cashMachineRef` va SOLA en 20261121235959_payment_cash_machine_ref (revisión de apps viejas antes de publicar,
+-- 22-nov): aquí las FK piden candados de Venue y Terminal, y en el mismo lote Payment quedaba con su candado exclusivo mientras esperaba.
 
 -- CreateTable
 CREATE TABLE "CashMachineClose" (
