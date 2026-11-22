@@ -20,6 +20,11 @@ jest.mock('@/mcp/guard', () => ({
     requirePermission: (...a: unknown[]) => mockRequirePermission(...a),
   }),
 }))
+const mockRangoBloqueado = jest.fn().mockResolvedValue(false)
+jest.mock('@/services/dashboard/salesSummaryPlanRange', () => ({
+  RESPUESTA_RANGO_FUERA_DEL_PLAN: { message: 'El histórico de ventas requiere el plan Pro.' },
+  rangoBloqueadoPorPlan: (...a: unknown[]) => mockRangoBloqueado(...a),
+}))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: { venue: { findUnique: jest.fn().mockResolvedValue({ timezone: 'America/Mexico_City' }) } },
@@ -156,4 +161,16 @@ it('🔴 Codex r4 #2 · el superadmin de la plataforma no pasa por el candado (i
   expect(out.headline).toMatchObject({ netSales: 10 })
   // Las demás comprobaciones siguen: la sucursal y `reports:read`.
   expect(mockRequirePermission).toHaveBeenCalledWith('reports:read', 'v1')
+})
+
+it('🔴 Codex r5 #1 · el superadmin en un negocio Gratis recibe «hoy», pero el histórico tiene el mismo candado de rango que el panel', async () => {
+  const handlers3 = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+  registerSalesByChannelTools(
+    { tool: (...a: unknown[]) => handlers3.set(a[0] as string, a[a.length - 1] as never) } as never,
+    { ...scope, isSuperAdmin: true } as McpScope,
+  )
+  mockRangoBloqueado.mockResolvedValueOnce(true)
+  const out = parse(await handlers3.get('sales_by_channel')!({ venueId: 'v1', fromDate: '2026-11-01', toDate: '2026-11-07' }, {}))
+  expect(out).toMatchObject({ ok: false, planRequired: true })
+  expect(mockGetSalesSummary).not.toHaveBeenCalled()
 })

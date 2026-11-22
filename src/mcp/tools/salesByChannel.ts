@@ -9,6 +9,7 @@ import { planGateMessage } from '../planGate'
 import { getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.service'
 import type { SalesBreakdownRow } from '@/services/dashboard/salesSummaryCanales'
 import { AVISO_PUENTE_QR_CAIDO } from '@/services/legacy/qrPayments.legacy.service'
+import { RESPUESTA_RANGO_FUERA_DEL_PLAN, rangoBloqueadoPorPlan } from '@/services/dashboard/salesSummaryPlanRange'
 
 /** El nombre que ve el dueño en el panel (Reportes › Resumen de ventas › Ventas por canal). */
 export const NOMBRE_DEL_CANAL: Record<string, string> = {
@@ -86,6 +87,11 @@ export function registerSalesByChannelTools(server: McpServer, scope: McpScope) 
       const tz = venue?.timezone || 'America/Mexico_City'
       const window = rangoDelNegocio(tz, fromDate, toDate)
       if ('error' in window) return text({ ok: false, error: window.error })
+      // El superadmin pasa el candado del desglose, pero no el del rango, igual que en el panel (la ruta del reporte aplica el rango
+      // a todos antes del controlador): en un negocio Gratis sólo «hoy» (Codex r5 #1).
+      if (scope.isSuperAdmin && (await rangoBloqueadoPorPlan(venueId, window.startDate, window.endDate))) {
+        return text({ ok: false, planRequired: true, error: RESPUESTA_RANGO_FUERA_DEL_PLAN.message })
+      }
 
       const report = await getSalesSummary(venueId, {
         ...window,
