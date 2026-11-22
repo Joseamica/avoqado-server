@@ -83,6 +83,8 @@ export const inboxSchema = z.object({
       status: z.enum(['pending', 'active', 'done', 'all'], { errorMap: () => ({ message: 'Filtro inválido' }) }).optional(),
       // A8: los activos se paginan por llave estable; sin cursor la bandeja responde igual que antes.
       cursor: activeCursor.optional(),
+      // D662 v4: el panel nuevo avisa que entiende la pausa sola (si no, recibe la forma de la pestaña vieja).
+      pausaSola: z.literal('1', { errorMap: () => ({ message: 'pausaSola inválido' }) }).optional(),
     })
     .refine(q => q.cursor === undefined || q.status === 'active', {
       message: 'El cursor sólo sirve para los pedidos activos (status=active)',

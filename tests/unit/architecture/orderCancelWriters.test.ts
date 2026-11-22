@@ -92,7 +92,8 @@ const INVENTARIO: Record<string, Clase> = {
   // Fusión: candado de LAS DOS órdenes en una sentencia + cobro vivo del ORIGEN.
   'services/mobile/order.mobile.service.ts#mergeOrdersInTransaction': {
     clase: 'PROTEGIDA',
-    marcadores: ['lockTableOrderScope(', 'assertNoLiveTerminalCharge'],
+    // D662 parte 2 (v3): juntar cancela la cuenta origen sin pasar por el gancho de canjes: el toque de la persona va aparte.
+    marcadores: ['lockTableOrderScope(', 'assertNoLiveTerminalCharge', 'sellarToqueDePersonaAlAnularEnTx('],
     sinCuentaDeFolio: {
       motivo:
         'Juntar no anula beneficios: un folio no se junta (R53, assertNotFolioInTx) y una cuenta origen con cualquier descuento o recompensa se rechaza antes de cancelarla, así que nunca cancela una cuenta con beneficios que devolver.',
