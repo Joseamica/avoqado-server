@@ -49,7 +49,7 @@ import { copiaQueCuadra } from '../shared/lineasDelTicket'
 import { importePorPesoDeLaPeticionCents } from '../shared/importePorPeso'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
 import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx, assertNotFolioInTx } from '../online-ordering/card/guards'
-import { despertarPasesTrasCommit } from '../online-ordering/cortesiaDeFolio'
+import { despertarPasesTrasCommit, sellarToqueDePersonaAlAnularEnTx } from '../online-ordering/cortesiaDeFolio'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
@@ -3969,6 +3969,9 @@ export async function mergeOrdersInTransaction(
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: targetOrderId })
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: sourceOrderId })
   await assertNotFolioInTx(tx, { venueId, orderIds: [targetOrderId, sourceOrderId] })
+  // D662 parte 2 (v3): juntar cancela la cuenta origen; si era un pedido de «Mi equipo» por aceptar, una persona lo contestó (no pasa
+  // por `devolverCanjesDeVentaAnuladaEnTx`). Si la fusión falla, la transacción revierte también esto.
+  await sellarToqueDePersonaAlAnularEnTx(tx, { venueId, orderId: sourceOrderId })
   // R14-1: lo que dice si un lado es cuenta con vales (su sesión, o un renglón de vale de una cuenta ya dividida antes).
   const valesDeLaCuenta = {
     areaTicketCheckoutSession: { select: { id: true } },

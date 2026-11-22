@@ -33,10 +33,12 @@ const CALLERS_EXTRA = {
     '7f1c56ed0daae0c337e928cf803e6b1619e853ceba2251517e95ddbf6198a0d8',
   // S11 (R6): la aceptación cierra en la MISMA transacción el pedido de «Mi equipo» que un beneficio dejó en $0 (afterCas →
   // cerrarFolioEnCeroEnTx, que nunca escribe loyaltyEligibleAt: ver EXENTAS); su orderExtra no cambió.
+  // D662 parte 2: aceptar y rechazar pasan `toquePersona` (guarda `staffAnsweredAt` del pedido en línea, nunca la cuenta ni la
+  // lealtad); su orderExtra no cambió.
   'services/online-ordering/transitions.service.ts#acceptWithoutCapture:casTransition':
-    'e2d031ded415fc2d4e603ac0bbf843659223fef5b1e2c3a4fe0eb82728dcf111',
+    '7757714c01b4400665f027821960c0eb2443478f8b18990ad7867751179f4673',
   'services/online-ordering/transitions.service.ts#rejectOnlineOrder:casTransition':
-    'df0ca08ed26053dd6507de5a955c096c6a76bfd5e799e3eb3a3207b4b8199d03',
+    '75b866c46818a2a3f975ed0e1370d6d6402e1e57eb16ad0a8afe7c6f35ca17d0',
   'services/online-ordering/transitions.service.ts#expireOnlineOrder:casTransition':
     '43ec329eb5714ea1ddb13eb7cda9c41b603ce84286521cacb3b3b91dac3329ff',
   'services/online-ordering/transitions.service.ts#markOnlineOrderReady:casTransition':

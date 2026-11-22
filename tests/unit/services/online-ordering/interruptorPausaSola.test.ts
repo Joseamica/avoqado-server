@@ -1,0 +1,168 @@
+/**
+ * D662 v5 (rediseño B): el interruptor «pausa sola desde <hora>» vive en la base (Codex p2v5-r1 #1). Nunca se prende con una hora pasada
+ * ni cercana, no se mueve una hora que ya llegó, y cada proceso lo recuerda pocos segundos.
+ */
+import { prismaMock } from '@tests/__helpers__/setup'
+import {
+  __resetInterruptorParaPruebas,
+  apagarPausaSola,
+  CACHE_MS,
+  CLAVE_PAUSA_SOLA,
+  ESQUEMA_DE_LA_TIENDA,
+  pausaSolaDesde,
+  prenderPausaSola,
+} from '@/services/online-ordering/interruptorPausaSola'
+
+const NOW = new Date('2026-11-21T18:00:00.000Z')
+const fila = () => prismaMock.interruptorDePlataforma
+
+beforeEach(() => __resetInterruptorParaPruebas())
+
+describe('pausaSolaDesde', () => {
+  it('sin fila o con «desde» vacío: apagado (null)', async () => {
+    fila().findUnique.mockResolvedValue(null)
+    await expect(pausaSolaDesde()).resolves.toBeNull()
+    __resetInterruptorParaPruebas()
+    fila().findUnique.mockResolvedValue({ desde: null } as any)
+    await expect(pausaSolaDesde()).resolves.toBeNull()
+  })
+
+  it('lee la fila de `pausa-sola` y la recuerda a lo más CACHE_MS (una sola consulta para lecturas seguidas)', async () => {
+    jest.useFakeTimers({ now: NOW })
+    try {
+      fila().findUnique.mockResolvedValue({ desde: NOW } as any)
+      await expect(Promise.all([pausaSolaDesde(), pausaSolaDesde()])).resolves.toEqual([NOW, NOW])
+      await pausaSolaDesde()
+      expect(fila().findUnique).toHaveBeenCalledTimes(1)
+      expect(fila().findUnique).toHaveBeenCalledWith({ where: { clave: CLAVE_PAUSA_SOLA }, select: { desde: true } })
+      jest.setSystemTime(NOW.getTime() + CACHE_MS + 1)
+      fila().findUnique.mockResolvedValue({ desde: null } as any)
+      await expect(pausaSolaDesde()).resolves.toBeNull()
+      expect(fila().findUnique).toHaveBeenCalledTimes(2)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('si la base falla, LANZA (la lectura de la tienda falla; nunca contesta «apagado» por no poder leer)', async () => {
+    fila().findUnique.mockRejectedValue(new Error('db'))
+    await expect(pausaSolaDesde()).rejects.toThrow('db')
+  })
+})
+
+describe('prenderPausaSola / apagarPausaSola', () => {
+  const raw = () => prismaMock.$queryRaw as unknown as jest.Mock
+  /** La escritura de «Apagar»: el `$executeRaw` que inserta (el otro `$executeRaw` es el candado). */
+  const escrituraDeApagar = () => {
+    const ejecutar = prismaMock.$executeRaw as unknown as jest.Mock
+    const i = ejecutar.mock.calls.findIndex(c => (c[0] as string[]).join('?').includes('INSERT INTO'))
+    return i < 0
+      ? null
+      : {
+          texto: (ejecutar.mock.calls[i][0] as string[]).join('?'),
+          valores: ejecutar.mock.calls[i].slice(1),
+          orden: ejecutar.mock.invocationCallOrder[i],
+        }
+  }
+  const sql = () => {
+    const [partes, ...valores] = raw().mock.calls[0]
+    return { texto: (partes as string[]).join('?'), valores }
+  }
+
+  it('prende en UNA instrucción con el reloj de Postgres: «desde» = ahora + 15 min por omisión, y anota quién', async () => {
+    raw().mockResolvedValue([{ desde: NOW }])
+    await expect(prenderPausaSola({ por: 'founder' })).resolves.toEqual(NOW)
+    const { texto, valores } = sql()
+    expect(texto).toContain('ON CONFLICT ("clave") DO UPDATE')
+    expect(texto).toContain('clock_timestamp() AT TIME ZONE')
+    expect(valores).toEqual(expect.arrayContaining([CLAVE_PAUSA_SOLA, 15, 'founder']))
+  })
+
+  it('🔴 Codex p2v5-r2 #7: la condición «no mover una hora que ya llegó» va DENTRO de la misma instrucción (sin hueco revisar→escribir)', async () => {
+    raw().mockResolvedValue([])
+    await expect(prenderPausaSola({ por: 'x', minutos: 20 })).rejects.toThrow('primero apágala')
+    const { texto } = sql()
+    expect(texto).toMatch(
+      /WHERE "InterruptorDePlataforma"\."desde" IS NULL\s+OR "InterruptorDePlataforma"\."desde" > \(clock_timestamp\(\)/,
+    )
+    expect(prismaMock.interruptorDePlataforma.findUnique).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex p2v5-r3 #2: el guardia y el nuevo «desde» usan la hora REAL al escribir (clock_timestamp), no la del inicio (now())', async () => {
+    // Si la instrucción espera el candado de la fila, `now()` se queda en la hora en que empezó: el guardia podría aprobar mover una hora
+    // que ya llegó durante la espera, y el nuevo «desde» quedaría a menos de 15 min del guardado. `EXCLUDED` también se calcula ANTES de
+    // la espera, así que la rama UPDATE recalcula «desde» con su propio reloj.
+    raw().mockResolvedValue([{ desde: NOW }])
+    await prenderPausaSola({ por: 'founder', minutos: 20 })
+    const { texto } = sql()
+    expect(texto).not.toMatch(/\bnow\(\)/)
+    expect(texto).not.toContain('EXCLUDED."desde"')
+    const [, actualizacion] = texto.split('DO UPDATE')
+    const [set, guardia] = actualizacion.split('WHERE')
+    expect(set).toMatch(/"desde" = \(clock_timestamp\(\) AT TIME ZONE 'UTC'\) \+/)
+    expect(guardia).toMatch(/"desde" > \(clock_timestamp\(\) AT TIME ZONE 'UTC'\) \+/)
+  })
+
+  it('🔴 Codex p2v5-r4 #2: prender y apagar toman el MISMO candado de la base ANTES de escribir, en su transacción', async () => {
+    // Con la fila vacía, la rama INSERT calcula su hora ANTES de esperar a otro que esté insertando: si ése se revierte, entraría con
+    // una hora vieja (< 15 min). Con el candado tomado primero, nadie más está escribiendo la fila al calcularla.
+    const candado = () => prismaMock.$executeRaw as unknown as jest.Mock
+    const textoDe = (llamada: unknown[]) => (llamada[0] as string[]).join('?')
+    raw().mockResolvedValue([{ desde: NOW }])
+    await prenderPausaSola({ por: 'founder' })
+    await apagarPausaSola({ por: 'founder' })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+    // Prender: candado + INSERT ($queryRaw). Apagar: candado + INSERT ($executeRaw).
+    expect(candado()).toHaveBeenCalledTimes(3)
+    const [enPrender, enApagar] = candado().mock.calls.filter(c => (c[0] as string[]).join('?').includes('pg_advisory_xact_lock'))
+    expect(textoDe(enPrender)).toContain('pg_advisory_xact_lock(hashtext(')
+    expect(enPrender.slice(1)).toEqual(enApagar.slice(1))
+    expect(enPrender.slice(1)).toEqual([`interruptor-de-plataforma:${CLAVE_PAUSA_SOLA}`])
+    expect(candado().mock.invocationCallOrder[0]).toBeLessThan(raw().mock.invocationCallOrder[0])
+    expect(candado().mock.invocationCallOrder[1]).toBeLessThan(escrituraDeApagar()!.orden)
+  })
+
+  it('🔴 Codex p2v5-r6 #2: el INSERT nombra la tabla con el esquema que lee la tienda (no el primero que encuentre `search_path`)', async () => {
+    raw().mockResolvedValue([{ desde: NOW }])
+    await prenderPausaSola({ por: 'founder' })
+    expect(sql().texto).toContain(`INSERT INTO "${ESQUEMA_DE_LA_TIENDA}"."InterruptorDePlataforma"`)
+    expect(ESQUEMA_DE_LA_TIENDA).toBe('public')
+  })
+
+  it('🔴 Codex p2v5-r6: `antesDeEscribir` corre en la MISMA transacción, después del candado y antes de escribir; si lanza, no se escribe', async () => {
+    const candado = () => prismaMock.$executeRaw as unknown as jest.Mock
+    const confirmar = jest.fn().mockResolvedValue(undefined)
+    raw().mockResolvedValue([{ desde: NOW }])
+    await prenderPausaSola({ por: 'founder', antesDeEscribir: confirmar })
+    await apagarPausaSola({ por: 'founder', antesDeEscribir: confirmar })
+    expect(confirmar).toHaveBeenCalledTimes(2)
+    expect(confirmar).toHaveBeenCalledWith(prismaMock)
+    expect(candado().mock.invocationCallOrder[0]).toBeLessThan(confirmar.mock.invocationCallOrder[0])
+    expect(confirmar.mock.invocationCallOrder[0]).toBeLessThan(raw().mock.invocationCallOrder[0])
+    expect(confirmar.mock.invocationCallOrder[1]).toBeLessThan(escrituraDeApagar()!.orden)
+
+    raw().mockClear()
+    ;(prismaMock.$executeRaw as unknown as jest.Mock).mockClear()
+    const niega = jest.fn().mockRejectedValue(new Error('otra base'))
+    await expect(prenderPausaSola({ por: 'x', antesDeEscribir: niega })).rejects.toThrow('otra base')
+    await expect(apagarPausaSola({ por: 'x', antesDeEscribir: niega })).rejects.toThrow('otra base')
+    expect(raw()).not.toHaveBeenCalled()
+    expect(escrituraDeApagar()).toBeNull()
+  })
+
+  it('nunca con menos de 15 min (ni una hora pasada)', async () => {
+    for (const minutos of [0, -5, 14.9, NaN]) {
+      await expect(prenderPausaSola({ por: 'x', minutos })).rejects.toThrow('al menos 15 minutos')
+    }
+    expect(raw()).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex p2v5-r7 #1: apagar deja «desde» vacío con SQL que nombra el esquema de la tienda (no el de la URL de Prisma)', async () => {
+    await apagarPausaSola({ por: 'founder' })
+    const escritura = escrituraDeApagar()
+    expect(escritura?.texto).toContain(`INSERT INTO "${ESQUEMA_DE_LA_TIENDA}"."InterruptorDePlataforma"`)
+    expect(escritura?.texto).toMatch(/ON CONFLICT \("clave"\) DO UPDATE\s+SET "desde" = NULL,/)
+    expect(escritura?.valores).toEqual(expect.arrayContaining([CLAVE_PAUSA_SOLA, 'founder']))
+    expect(fila().upsert).not.toHaveBeenCalled()
+  })
+})

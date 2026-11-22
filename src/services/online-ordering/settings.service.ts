@@ -1,5 +1,6 @@
 import { Prisma, type OnlineOrderingSettings } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { utcTs } from '@/utils/sqlDates'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { normalizeLegacyActivityActor } from '@/lib/activityAuditActor'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -8,6 +9,7 @@ import { isValidOrderingHours } from './hours'
 import { findCardMerchant } from './card/merchant'
 import { FOLIO_DEVICE_WINDOW_MS } from './constants'
 import type { FloorPauseMinutes, OnlineOrderingConfig, OnlineOrderingSettingsPatch } from './types'
+import { emitStoreChanged } from './traySocket'
 
 export const DEFAULT_CONFIG: OnlineOrderingConfig = {
   enabled: false,
@@ -23,7 +25,16 @@ export const DEFAULT_CONFIG: OnlineOrderingConfig = {
   requiresAcceptance: true,
 }
 
-export type OnlineOrderingSettingsRead = OnlineOrderingConfig & { lastInboxPollAt: Date | null; lastToPayPollAt: Date | null }
+export type OnlineOrderingSettingsRead = OnlineOrderingConfig & {
+  lastInboxPollAt: Date | null
+  lastToPayPollAt: Date | null
+  /** D662 parte 2: último «Reanudar» (o paso a «Mi equipo»): la pausa sola sólo cuenta pedidos con hora límite posterior. */
+  autoPauseResumedAt?: Date | null
+  /** D662 v4: cuándo se guardó la fila (Prisma `@updatedAt`; Reanudar, pausar, ajustes y latidos la mueven). */
+  updatedAt?: Date | null
+  /** D662 v5 (Codex p2v5-r4 #5): la versión de la fila; la sube la base en cada UPDATE, en el orden en que se confirman. */
+  version?: number | null
+}
 
 function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingSettingsRead {
   return {
@@ -38,6 +49,9 @@ function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingSettingsRead {
     requiresAcceptance: row.requiresAcceptance,
     lastInboxPollAt: row.lastInboxPollAt ?? null,
     lastToPayPollAt: row.lastToPayPollAt ?? null,
+    autoPauseResumedAt: row.autoPauseResumedAt ?? null,
+    updatedAt: row.updatedAt ?? null,
+    version: row.version ?? null,
   }
 }
 
@@ -201,7 +215,13 @@ export async function updateSettings(
 
     const row = await tx.onlineOrderingSettings.upsert({
       where: { venueId },
-      create: { ...(data as Prisma.OnlineOrderingSettingsUncheckedCreateInput), venueId, ...(preloadHours ? { hours: preloadHours } : {}) },
+      // D662 parte 2: una fila nueva nace con el corte de la pausa sola puesto (sin la gracia del despliegue; Codex p2-r5 #2).
+      create: {
+        ...(data as Prisma.OnlineOrderingSettingsUncheckedCreateInput),
+        venueId,
+        autoPauseResumedAt: new Date(),
+        ...(preloadHours ? { hours: preloadHours } : {}),
+      },
       update: data,
     })
     const bitacora = {
@@ -253,6 +273,7 @@ export async function updateSettings(
     })
   }
 
+  emitStoreChanged(venueId)
   return rowToConfig(row)
 }
 
@@ -269,9 +290,27 @@ export async function pauseOnlineOrdering(
   now: Date = new Date(),
 ): Promise<{ pausedUntil: string | null; manualPause: boolean }> {
   const pausedUntil = minutes === null ? null : new Date(now.getTime() + minutes * 60_000)
-  const r = await prisma.onlineOrderingSettings.updateMany({ where: { venueId }, data: { pausedUntil } })
-  if (r.count === 0) {
-    throw new BadRequestError('La tienda en línea de este negocio todavía no está configurada.', 'ONLINE_ORDERING_NOT_CONFIGURED')
+  const noConfigurada = () =>
+    new BadRequestError('La tienda en línea de este negocio todavía no está configurada.', 'ONLINE_ORDERING_NOT_CONFIGURED')
+  if (minutes !== null) {
+    // Pausar 15/30/60 es UNA escritura simple, como antes de la pausa sola (Codex p2v5-r3 #8): una transacción interactiva pediría su
+    // conexión con un tope de 2 s y, con el pool ocupado, fallaría antes de pausar. No toca `autoPauseResumedAt`: al vencer, la tienda
+    // sigue pausada sola hasta «Reanudar».
+    const r = await prisma.onlineOrderingSettings.updateMany({ where: { venueId }, data: { pausedUntil } })
+    if (r.count === 0) throw noConfigurada()
+  } else {
+    // «Reanudar» quita la pausa temporal y sube el corte de la pausa sola en UNA instrucción sobre la MISMA fila (Codex p2v5-r2 #8 y
+    // p2v5-r4 #4): nunca queda a medias y, sin transacción interactiva (tope de 2 s para conseguir conexión), espera como cualquier
+    // escritura simple, igual que en develop. D662 parte 2 (v3): también quita la pausa sola (la del piso y la de las apps viejas, que
+    // llaman igual): el corte sube a AHORA y desde aquí sólo cuentan los pedidos con hora límite posterior. Sólo sube: `GREATEST` ignora
+    // el NULL de una fila sin corte propio. La versión (`version`) la sube la base, como en cualquier UPDATE.
+    const filas = await prisma.$executeRaw`
+      UPDATE "OnlineOrderingSettings"
+      SET "pausedUntil" = NULL,
+          "autoPauseResumedAt" = GREATEST("autoPauseResumedAt", ${utcTs(now)}),
+          "updatedAt" = ${utcTs(now)}
+      WHERE "venueId" = ${venueId}`
+    if (filas === 0) throw noConfigurada()
   }
   const current = await prisma.onlineOrderingSettings.findUnique({ where: { venueId }, select: { manualPause: true } })
   void logAction({
@@ -282,5 +321,6 @@ export async function pauseOnlineOrdering(
     entityId: venueId,
     data: { minutes, pausedUntil: pausedUntil ? pausedUntil.toISOString() : null },
   })
+  emitStoreChanged(venueId)
   return { pausedUntil: pausedUntil ? pausedUntil.toISOString() : null, manualPause: current?.manualPause ?? false }
 }
