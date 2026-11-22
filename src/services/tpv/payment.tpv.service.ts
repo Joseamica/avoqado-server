@@ -3990,14 +3990,11 @@ export async function recordOrderPayment(
   /**
    * hz:e82938e1:D36 (founder «B», 21-nov). Sólo si ESTE cobro reabrió una venta anulada en el cierre transaccional: la venta tal como
    * quedó, leída bajo el candado. Sin consultas extra (no puede fallar aparte) y sin mover el aviso. Las cuentas con vales y las
-   * integradas de SoftRestaurant cierran en otro paso y avisan como hoy. Un holder y no un `let`: TS no ve asignaciones en closures.
+   * integradas de SoftRestaurant cierran en otro paso y avisan como hoy. Es la fila COMPLETA (Codex r6 #3: con sólo unos campos, el
+   * `order` del 201 mezclaba los de antes y después del cierre, p. ej. `splitType` y `servedById`). Un holder y no un `let`: TS no ve
+   * asignaciones en closures.
    */
-  const reapertura = {
-    ventaGuardada: null as Pick<
-      Order,
-      'status' | 'paymentStatus' | 'paidAmount' | 'remainingBalance' | 'total' | 'tipAmount' | 'completedAt'
-    > | null,
-  }
+  const reapertura = { ventaGuardada: null as Order | null }
   let suppressExchangeSaleEffects = false
   let isExchangeSale = false
   // Faltante de inventario detectado con el cobro YA registrado. Viaja como aviso
@@ -4504,15 +4501,7 @@ export async function recordOrderPayment(
           const paidOrder = await tx.order.findUniqueOrThrow({ where: { id: activeOrder.id, venueId } })
           // D36 (founder «B»): la venta ya cerrada, leída bajo el candado. Si ESTE cobro la reabrió, el aviso y el acuse dicen esto.
           if (committedStandaloneSettlement?.reabiertaDeCancelada) {
-            reapertura.ventaGuardada = {
-              status: paidOrder.status,
-              paymentStatus: paidOrder.paymentStatus,
-              paidAmount: paidOrder.paidAmount,
-              remainingBalance: paidOrder.remainingBalance,
-              total: paidOrder.total,
-              tipAmount: paidOrder.tipAmount,
-              completedAt: paidOrder.completedAt,
-            }
+            reapertura.ventaGuardada = paidOrder
           }
           let expectsSettlement = paidOrder.paymentStatus === 'PAID'
           if (!suppressExchangeSaleEffects && !expectsSettlement && !committedStandaloneSettlement) {

@@ -390,6 +390,9 @@ describe('limpieza de ventas de Cobrar abandonadas (D36)', () => {
     expect(guardada.remainingBalance.toNumber()).toBe(60)
     expect(respuesta.order).toMatchObject({ status: 'PENDING', paymentStatus: 'PARTIAL' })
     expect(Number(respuesta.order.remainingBalance)).toBe(60)
+    // Codex r6 #3: el `order` del acuse es la fila guardada completa, no una mezcla de antes y después del cierre.
+    const fila = await prisma.order.findUniqueOrThrow({ where: { id }, select: { splitType: true, servedById: true } })
+    expect({ splitType: respuesta.order.splitType, servedById: respuesta.order.servedById }).toEqual(fila)
     const avisosDeLaVenta = avisos.mock.calls.filter(([, evento, datos]: any[]) => evento === 'order_updated' && datos?.orderId === id)
     expect(avisosDeLaVenta.map(([, , datos]: any[]) => [datos.status, datos.paymentStatus])).toEqual([['PENDING', 'PARTIAL']])
     avisos.mockRestore()

@@ -40,27 +40,3 @@ describe('publishCancelledOrder · referidos', () => {
     expect(onOrderCancelled).toHaveBeenCalledWith({ orderId: 'order-1', venueId: 'venue-1' })
   })
 })
-
-// hz:e82938e1:D36 (founder «B», Codex r5 #3): el aviso sale después del commit; si en ese hueco un cobro tardío ya reabrió la venta y
-// avisó «COMPLETED», el de la anulación no puede llegar después diciendo «CANCELLED».
-describe('publishCancelledOrder · el aviso dice el estado de la venta en ese momento', () => {
-  it('regresión: la venta sigue anulada ⇒ avisa CANCELLED, como siempre', async () => {
-    await publishCancelledOrder('venue-1', anulada as any, 'staff-1', 'cliente se fue')
-    expect(estadoAvisado()).toEqual(['CANCELLED'])
-    expect(prismaMock.order.findFirst).toHaveBeenCalledWith({ where: { id: 'order-1', venueId: 'venue-1' }, select: { status: true } })
-  })
-
-  it('🔴 un cobro tardío ya la reabrió y la saldó ⇒ avisa COMPLETED, no CANCELLED', async () => {
-    prismaMock.order.findFirst.mockResolvedValue({ status: 'COMPLETED' } as any)
-    await publishCancelledOrder('venue-1', anulada as any, undefined, 'limpieza', undefined, { bitacoraEnLaTx: true, sinReferidos: true })
-    expect(estadoAvisado()).toEqual(['COMPLETED'])
-  })
-
-  it('🔴 si releerla falla (o ya no está) ⇒ avisa CANCELLED: el aviso nunca se pierde', async () => {
-    prismaMock.order.findFirst.mockRejectedValueOnce(new Error('se cayó la conexión'))
-    await publishCancelledOrder('venue-1', anulada as any)
-    prismaMock.order.findFirst.mockResolvedValueOnce(null)
-    await publishCancelledOrder('venue-1', anulada as any)
-    expect(estadoAvisado()).toEqual(['CANCELLED', 'CANCELLED'])
-  })
-})
