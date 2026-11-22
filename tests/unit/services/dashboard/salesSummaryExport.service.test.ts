@@ -8,6 +8,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
 }))
 import prisma from '../../../../src/utils/prismaClient'
 import * as svc from '../../../../src/services/dashboard/sales-summary.dashboard.service'
+import { NOT_DRAWER_CASH_WHERE } from '../../../../src/services/shared/tenderSemantics'
 
 const paymentCount = (prisma as any).payment.count as jest.Mock
 const paymentFindMany = (prisma as any).payment.findMany as jest.Mock
@@ -133,10 +134,12 @@ describe('detailed rows where-clause + cap', () => {
       },
       1000,
     )
-    const where = paymentFindMany.mock.calls[0][0].where
+    // D9.1 (Codex r2 #6): con comercio, el filtro va en un AND con «no es efectivo del cajón».
+    const [where, sinEfectivo] = paymentFindMany.mock.calls[0][0].where.AND
     expect(where.processedById).toEqual({ in: ['staff-1', 'staff-2'] })
     expect(where.shiftId).toBe('shift-9')
     expect(where.merchantAccountId).toBe('ma-7')
+    expect(sinEfectivo).toBe(NOT_DRAWER_CASH_WHERE)
   })
 
   it('omits staff/shift/merchant from the WHERE when not provided', async () => {
