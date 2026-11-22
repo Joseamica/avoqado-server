@@ -19,6 +19,7 @@ import { Prisma, PrinterConnectionType } from '@prisma/client'
 import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { logAction } from './activity-log.service'
 import { leerSoloVale, type SoloVale } from './routingSoloVale'
 import { assertNoGroupedProducts } from '../product-variants/groupOwnedFields'
@@ -342,10 +343,15 @@ export async function deleteStation(venueId: string, stationId: string, performe
   // FK SetNull en MenuCategory/Product/ProductGroup/OrderItem/PrintJob.printStationId. Codex #4: el negocio primero, como el
   // motor de variantes (cerco → padre → variantes): sin él, el SET NULL esperaba al padre bloqueado mientras la variante
   // nueva, por su FK, esperaba a esta estación: deadlock.
-  await prisma.$transaction(async tx => {
-    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR SHARE`
-    await tx.printStation.delete({ where: { id: stationId } })
-  })
+  // hz:e82938e1:D40 (Codex d40-r4 #2): anular una cuenta separada crea un folio de cocina que copia esta estación mientras el SET NULL
+  // de aquí espera esa comanda: Postgres corta una de las dos (40P01). La anulación ya se repite sola; el borrado también.
+  await withDeadlockRetry(
+    async tx => {
+      await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR SHARE`
+      await tx.printStation.delete({ where: { id: stationId } })
+    },
+    { etiqueta: 'deleteStation' },
+  )
   void logAction({
     staffId: performedBy ?? null,
     venueId,
