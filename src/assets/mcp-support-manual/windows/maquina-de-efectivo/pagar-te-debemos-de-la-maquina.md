@@ -7,7 +7,7 @@ task: pagar-te-debemos-de-la-maquina
 requiredPermissions:
   - cash-drawer:pay-out
 money: true
-versionMin: 2.25.57
+versionMin: 2.25.58
 sourceRepo: avoqado-android
 sourceRef: e7d51ad0634df24ba3522a7364884567fd82009d
 deviceTested: 2026-11-22

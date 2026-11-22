@@ -7,7 +7,7 @@ task: cobrar-en-la-maquina-de-efectivo
 requiredPermissions:
   - payments:create
 money: true
-versionMin: 2.25.57
+versionMin: 2.25.58
 sourceRepo: avoqado-android
 sourceRef: e7d51ad0634df24ba3522a7364884567fd82009d
 deviceTested: 2026-11-22
