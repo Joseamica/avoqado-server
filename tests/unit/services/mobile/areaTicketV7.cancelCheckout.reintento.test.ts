@@ -12,8 +12,17 @@ jest.mock('@/services/shared/orderCancelGuard', () => ({
   avisarOrdenCancelada: (...a: unknown[]) => mockAvisar(...a),
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
+// hz:e82938e1:D40: el retiro de comandas y sus candados (los prueba su propia suite y la integración).
+jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
+  ...jest.requireActual('@/services/kds/kitchenTicketAuthoring.service'),
+  retirarComandasDeVentaAnulada: jest.fn(async () => ({ kdsOrderIds: [], kdsOrderItemIds: [] })),
+  cuentasDeSusComandas: jest.fn(async () => ['order-1', 'cuenta-ligada']),
+  tomarCandadoDeComandas: jest.fn(async () => undefined),
+}))
 
 import { cancelAreaTicketCheckout } from '@/services/mobile/areaTicketV7.mobile.service'
+import { assertOrderCancellableUnderLock } from '@/services/shared/orderCancelGuard'
+import { retirarComandasDeVentaAnulada, tomarCandadoDeComandas } from '@/services/kds/kitchenTicketAuthoring.service'
 
 const sesion = (over: Record<string, unknown> = {}) => ({
   id: 'ses-1',
@@ -82,5 +91,56 @@ describe('cancelAreaTicketCheckout — la red por traba (40P01)', () => {
     } finally {
       prismaMock.$transaction.mockImplementation(((cb: any) => cb(prismaMock)) as any)
     }
+  })
+})
+
+// hz:e82938e1:D40: cancelar la venta de vales anulaba su orden pero NO retiraba sus comandas (el DELETE, `cancelOrderInTransaction` y
+// «Regresar saldo y cancelar» sí). Los renglones de vale no van a cocina, pero un producto suelto agregado desde el POS sí: su comanda
+// pendiente seguía en la pantalla de cocina. Los candados de comandas van ANTES que la sesión (el orden del armado: comandas → venta).
+describe('cancelAreaTicketCheckout — retira las comandas (hz:e82938e1:D40)', () => {
+  const preparar = (over: Record<string, unknown> = {}) => {
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation((async (cb: any) => cb(prismaMock)) as any)
+    ;(prismaMock as any).terminal.findFirst.mockResolvedValue({ id: 'term-1', canCheckoutAreaTickets: true })
+    ;(prismaMock as any).areaTicketCheckoutSession.findFirst.mockResolvedValue(sesion(over))
+    ;(prismaMock as any).staffVenue.findFirst.mockResolvedValue(null)
+    prismaMock.$queryRaw.mockResolvedValue([] as any)
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+    ;(prismaMock as any).areaTicketCheckoutSession.findUniqueOrThrow.mockResolvedValue(sesion({ ...over, status: 'CANCELLED' }))
+    ;(prismaMock as any).areaTicket.updateMany.mockResolvedValue({ count: 0 })
+    ;(prismaMock as any).areaTicketCheckoutSession.update.mockResolvedValue({})
+  }
+  const ordenDe = (fn: unknown, i = 0) => (fn as jest.Mock).mock.invocationCallOrder[i]
+
+  it('🔴 cancelar la venta de vales retira sus comandas: candados de comandas antes que la sesión, retiro antes del candado de la orden', async () => {
+    preparar()
+    await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: null } as any)
+
+    expect((tomarCandadoDeComandas as jest.Mock).mock.calls.map(c => c[1])).toEqual(['cuenta-ligada', 'order-1'])
+    const candadoDeSesion = prismaMock.$queryRaw.mock.calls.findIndex(c =>
+      String((c[0] as any).join('?')).includes('"AreaTicketCheckoutSession"'),
+    )
+    expect(candadoDeSesion).toBeGreaterThanOrEqual(0)
+    expect(ordenDe(tomarCandadoDeComandas)).toBeLessThan(prismaMock.$queryRaw.mock.invocationCallOrder[candadoDeSesion])
+    expect(retirarComandasDeVentaAnulada).toHaveBeenCalledWith(
+      prismaMock,
+      'v1',
+      'order-1',
+      expect.objectContaining({ reason: expect.any(String) }),
+    )
+    expect(ordenDe(retirarComandasDeVentaAnulada)).toBeLessThan(ordenDe(assertOrderCancellableUnderLock))
+  })
+
+  it('regresión: una sesión sin orden todavía (OPEN) no toca la cocina', async () => {
+    preparar({ orderId: null })
+    await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: null } as any)
+    expect(tomarCandadoDeComandas).not.toHaveBeenCalled()
+    expect(retirarComandasDeVentaAnulada).not.toHaveBeenCalled()
+  })
+
+  it('regresión: repetir la MISMA cancelación (misma llave) no vuelve a retirar nada', async () => {
+    preparar({ status: 'CANCELLED', cancelIdempotencyKey: 'k1' })
+    await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: null } as any)
+    expect(retirarComandasDeVentaAnulada).not.toHaveBeenCalled()
   })
 })

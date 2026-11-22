@@ -8,7 +8,8 @@ import { buildPrintConfig, routingConfigFrom } from '@/services/printing/printCo
 import { estacionesDelNegocio } from '@/services/kds/kitchenDisplayStations'
 import { authorKitchenTickets, markKitchenTicket } from '@/services/kds/kitchenTicketAuthoring.service'
 import { cancelOrder } from '@/services/mobile/order.mobile.service'
-import { deleteOrder } from '@/services/dashboard/order.dashboard.service'
+import { deleteOrder, updateOrder } from '@/services/dashboard/order.dashboard.service'
+import { cancelAreaTicketCheckout } from '@/services/mobile/areaTicketV7.mobile.service'
 import { addItemsToOrder } from '@/services/tpv/order.tpv.service'
 
 const SUF = `kdsarmado-${Date.now()}`
@@ -54,6 +55,9 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!orgId) return
   await prisma.kdsOrder.deleteMany({ where: { venueId } })
+  // hz:e82938e1:D40: la sesión de vales restringe contra su orden y su terminal; la bitácora no tiene llave al negocio.
+  await prisma.areaTicketCheckoutSession.deleteMany({ where: { venueId } })
+  await prisma.activityLog.deleteMany({ where: { venueId } })
   await prisma.order.deleteMany({ where: { venueId } })
   await prisma.table.deleteMany({ where: { venueId } })
   // Cadena del vale de área (V7): AreaTicket restringe contra FulfillmentArea y Terminal, así que se borra
@@ -287,6 +291,9 @@ describe('authorKitchenTickets', () => {
   it.each([
     ['anular desde la app', (orderId: string) => cancelOrder(venueId, orderId, 'Mesa equivocada')],
     ['borrar desde el dashboard', (orderId: string) => deleteOrder(venueId, orderId)],
+    // hz:e82938e1:D40: el PUT del panel anulaba la cuenta y dejaba su comanda pendiente en la pantalla de cocina.
+    ['anular desde el panel (editar a «cancelada»)', (orderId: string) => updateOrder(venueId, orderId, { status: 'CANCELLED' } as never)],
+    ['anular desde el panel (editar a «eliminada»)', (orderId: string) => updateOrder(venueId, orderId, { status: 'DELETED' } as never)],
   ])('%s retira de la pantalla de cocina sus comandas pendientes (Codex 3.6)', async (_como, anular) => {
     const o = await prisma.order.create({
       data: {
@@ -302,6 +309,53 @@ describe('authorKitchenTickets', () => {
     expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'ROUND' })).ticketIds).toHaveLength(1)
 
     await anular(o.id)
+    expect(await comandasDe(o.id)).toHaveLength(0)
+  })
+
+  // hz:e82938e1:D40: cancelar la venta de vales anulaba su orden y dejaba en la pantalla la comanda del producto SUELTO que el POS le
+  // agregó (los renglones de vale no van a cocina). Ahora se retira como en las demás anulaciones.
+  it('cancelar la venta de vales retira de la pantalla la comanda de su producto suelto', async () => {
+    const deviceUid = `d40-uid-${Math.random().toString(36).slice(2, 8)}`
+    const terminal = await prisma.terminal.create({
+      data: {
+        venueId,
+        name: `Caja de vales ${SUF}`,
+        serialNumber: `d40-${Math.random().toString(36).slice(2, 10)}`,
+        type: 'TPV_ANDROID',
+        deviceUid,
+        canCheckoutAreaTickets: true,
+      } as never,
+      select: { id: true },
+    })
+    const o = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `VALES-${Math.random().toString(36).slice(2, 8)}-${SUF}`,
+        type: 'TAKEOUT',
+        subtotal: 50,
+        taxAmount: 0,
+        total: 50,
+        remainingBalance: 50,
+        items: { create: [renglon(taco, 'Taco', 1, { sentToKitchenAt: new Date(), externalId: `sync:rk-vales-${Math.random()}:0` })] },
+      },
+      select: { id: true },
+    })
+    const sesion = await prisma.areaTicketCheckoutSession.create({
+      data: {
+        venueId,
+        terminalId: terminal.id,
+        idempotencyKey: `d40-${Math.random()}`,
+        expiresAt: new Date(Date.now() + 3_600_000),
+        orderId: o.id,
+        status: 'MATERIALIZED',
+      } as never,
+      select: { id: true },
+    })
+    expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'ROUND' })).ticketIds).toHaveLength(1)
+
+    await cancelAreaTicketCheckout(venueId, sesion.id, { idempotencyKey: `d40-cancel-${Math.random()}`, deviceUid } as never)
+
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: o.id } })).status).toBe('CANCELLED')
     expect(await comandasDe(o.id)).toHaveLength(0)
   })
 

@@ -46,7 +46,7 @@ import {
   rechazarSiCuentaAnuladaEnTx,
   rechazarCobroNuevoSobreCancelada,
 } from '../shared/cuentaCancelada'
-import { retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
+import { cuentasDeSusComandas, retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
 import { desactivarSobresPendientesDeCuentaEnTx } from '../giftCards/cuentaDeTarjetas'
 import { formatoPesos } from '../giftCards/giftCardLimits'
 import { CAMPOS_DE_LA_REGLA, estadoDeFacturaDeLaVenta, FACTURAS_QUE_CUENTAN_DE_LA_VENTA } from '../fiscal/facturaDeLaVenta'
@@ -633,8 +633,16 @@ export async function updateOrder(
     // toda edición de metadatos toma primero el modo débil de la liga, sin ampliar el conjunto topológico.
     if (!topologyWrite && !(await bloquearCuentaParaEditar(client, { venueId, orderId }, 'ATRIBUCION')))
       throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
+    // hz:e82938e1:D40: si la petición anula, los candados de las comandas de la cuenta (y de sus cuentas ligadas) van ANTES que el de la
+    // venta, como en `cancelOrderInTransaction`: es el orden del armado (comandas → venta) y el retiro de abajo los vuelve a pedir sin esperar.
+    const pideAnular = status === 'CANCELLED' || status === 'DELETED'
     if (topologyWrite)
-      await lockTableOrderScope(client, { venueId, orderIds: [orderId], tableIds: tableId ? [tableId] : [] }).catch(error => {
+      await lockTableOrderScope(client, {
+        venueId,
+        orderIds: [orderId],
+        tableIds: tableId ? [tableId] : [],
+        ...(pideAnular && { kdsOrderIds: await cuentasDeSusComandas(client, venueId, orderId) }),
+      }).catch(error => {
         if (error instanceof NotFoundError) {
           if (error.message === 'Venue not found' || error.message === 'Order not found') {
             throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
@@ -805,6 +813,10 @@ export async function updateOrder(
         },
       })
     if (cancelando) {
+      // hz:e82938e1:D40: como el DELETE, `cancelOrderInTransaction` y «Regresar saldo y cancelar»: la cocina deja de ver la cuenta anulada.
+      // Antes este PUT anulaba la cuenta y su comanda pendiente se quedaba en la pantalla de cocina. Si la revisión de abajo la rechaza (con
+      // dinero), la transacción entera se revierte y las comandas vuelven a estar como estaban.
+      await retirarComandasDeVentaAnulada(client, venueId, orderId, { staffId: opciones.staffId })
       await assertOrderCancellableUnderLock(
         client,
         { venueId, orderId },

@@ -61,6 +61,7 @@ import { buildItemDiscountRow, calculateDiscountCents } from '../shared/discount
 import { comoJson, nuevoRepartoDirigido } from '../shared/repartoDescuento'
 import { motivoDelDescuento, type MotivoDeDescuento } from '../shared/motivoDelDescuento'
 import { externalRouteBlockers } from './areaTicketExternalCodes'
+import { cuentasDeSusComandas, retirarComandasDeVentaAnulada, tomarCandadoDeComandas } from '../kds/kitchenTicketAuthoring.service'
 import {
   buildOrderItemsData,
   CreateOrderItemInput,
@@ -2384,6 +2385,11 @@ export async function cancelAreaTicketCheckout(venueId: string, sessionId: strin
     async tx => {
       let ordenCancelada: string | null = null
       const cancelled = await (async () => {
+        // hz:e82938e1:D40: los candados de las comandas de su orden (y de sus cuentas ligadas) van PRIMERO, en orden, como en
+        // `cancelOrderInTransaction`: es el orden del armado (comandas → venta), y nadie que tenga la sesión espera una comanda. La orden
+        // se lee de la sesión sin candado; si se materializó mientras tanto, el retiro de abajo toma su candado ahí (no tiene comandas).
+        if (session.orderId)
+          for (const id of (await cuentasDeSusComandas(tx, venueId, session.orderId)).sort()) await tomarCandadoDeComandas(tx, id)
         await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${sessionId} AND "venueId" = ${venueId} FOR UPDATE`
         const fresh = await tx.areaTicketCheckoutSession.findFirst({
           where: { id: sessionId, venueId },
@@ -2404,6 +2410,12 @@ export async function cancelAreaTicketCheckout(venueId: string, sessionId: strin
         // ORDER BY id → Order. Ya con el candado: relectura, sin dinero y sin cobro de terminal vivo (409 del contrato).
         await tx.$queryRaw`SELECT id FROM "AreaTicket" WHERE "venueId" = ${venueId} AND "checkoutSessionId" = ${fresh.id} ORDER BY id FOR UPDATE`
         if (fresh.orderId) {
+          // hz:e82938e1:D40: la cocina deja de ver la venta cancelada. Los renglones de vale no van a cocina, pero un producto suelto
+          // que el POS le agregó sí: su comanda pendiente se quedaba en la pantalla. Si la revisión de abajo la rechaza, todo se revierte.
+          await retirarComandasDeVentaAnulada(tx, venueId, fresh.orderId, {
+            staffId: staffId ?? undefined,
+            reason: 'Venta de vales cancelada',
+          })
           await assertOrderCancellableUnderLock(tx, { venueId, orderId: fresh.orderId })
           // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
           await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId: fresh.orderId, staffId, camino: 'cancelAreaTicketCheckout' })
