@@ -142,3 +142,18 @@ it('🔴 los paquetes en otra moneda salen aparte y nunca se suman a los pesos (
   expect(out.collectedInAdvanceNotSales.packagesSoldOnline).toEqual({ amount: 1200, count: 1, currency: 'MXN' })
   expect(out.collectedInAdvanceNotSales.packagesSoldOnlineOtherCurrencies).toEqual([{ currency: 'USD', amount: 100, count: 1 }])
 })
+
+it('🔴 Codex r4 #2 · el superadmin de la plataforma no pasa por el candado (igual que en el panel)', async () => {
+  const handlers2 = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+  registerSalesByChannelTools(
+    { tool: (...a: unknown[]) => handlers2.set(a[0] as string, a[a.length - 1] as never) } as never,
+    { ...scope, isSuperAdmin: true } as McpScope,
+  )
+  mockPlanGate.mockResolvedValue('Las ventas por canal no está incluido en el plan actual de este local (requiere ADVANCED_REPORTS).')
+  mockGetSalesSummary.mockResolvedValue({ summary: { netSales: 10 }, byChannel: [], byOrderType: [] })
+  const out = parse(await handlers2.get('sales_by_channel')!({ venueId: 'v1' }, {}))
+  expect(mockPlanGate).not.toHaveBeenCalled()
+  expect(out.headline).toMatchObject({ netSales: 10 })
+  // Las demás comprobaciones siguen: la sucursal y `reports:read`.
+  expect(mockRequirePermission).toHaveBeenCalledWith('reports:read', 'v1')
+})

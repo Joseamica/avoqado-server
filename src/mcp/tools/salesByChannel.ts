@@ -78,7 +78,8 @@ export function registerSalesByChannelTools(server: McpServer, scope: McpScope) 
     async ({ venueId, fromDate, toDate }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('reports:read', venueId) // the same as the dashboard Sales Summary
-      const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Las ventas por canal')
+      // El superadmin de la plataforma no pasa por el candado, igual que en el panel (el controlador del reporte; Codex r4 #2).
+      const gate = scope.isSuperAdmin ? null : await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Las ventas por canal')
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
