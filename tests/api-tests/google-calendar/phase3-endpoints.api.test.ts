@@ -44,6 +44,13 @@ jest.mock('@/middlewares/checkPermission.middleware', () => ({
     }
     return next()
   },
+  // Las rutas de la máquina de efectivo (mobile.routes.ts) usan checkAnyPermission al cargar el app: sin él, el módulo truena.
+  checkAnyPermission: (perms: string[]) => (req: any, res: any, next: any) => {
+    if (!permissionGate.shouldAllow || perms.every(p => permissionGate.deniedFor.has(p))) {
+      return res.status(403).json({ error: 'Forbidden', message: `One of [${perms.join(', ')}] required` })
+    }
+    return next()
+  },
 }))
 
 // Access service used by the connection-detail handler in google-calendar.controller.ts.

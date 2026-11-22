@@ -230,6 +230,21 @@ describe('issueRefund a saldo a favor', () => {
     expect(r.abono!.abonado.toFixed(2)).toBe('200.00')
   })
 
+  it('máquina de efectivo (A6): su venta devuelta a saldo no choca con «efectivo del cajón» ni toca la caja', async () => {
+    conCobro({
+      fundsFlow: 'EXTERNAL_RECORDED',
+      tenderCountsAsCash: false,
+      tenderLabel: 'Efectivo · máquina',
+      tenderSatFormaPago: '01',
+      cashMachineRef: 'AQ0000000000AB',
+    })
+    const r = await reembolsar()
+
+    expect(r).toMatchObject({ refundId: REFUND, amount: 200 })
+    expect(filaCreada()).toMatchObject({ method: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED', tenderTypeId: SC_TENDER })
+    expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
+  })
+
   it('la fila guarda originalMethod CASH y el medio STORE_CREDIT', async () => {
     conCobro()
     await reembolsar()

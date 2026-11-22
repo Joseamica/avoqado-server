@@ -3,6 +3,7 @@
  * usan la TPV (`getCurrentShift`), el panel (detalle, lista y resumen de turnos) y `list_shifts` del MCP sin que el panel importe el
  * servicio de turnos de la TPV, que ya importa el del panel.
  */
+import type { Prisma } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import prisma from '@/utils/prismaClient'
 import { WHERE_ORDEN_DE_TARJETAS } from '@/services/giftCards/giftCardMarks'
@@ -20,8 +21,12 @@ import { WHERE_ORDEN_DE_TARJETAS } from '@/services/giftCards/giftCardMarks'
  * el 15-oct), y el SQL que genera es `NOT (EXISTS(renglón con tarjeta) AND la orden existe)`: un cobro cuya orden no se pudiera
  * unir seguiría contando, nunca se pierde en silencio (memoria «predicado-not-en-sql-con-columnas-null-excluye-en-silencio»).
  */
-export async function ventasDelTurnoSinTarjetas(venueId: string, shiftId: string): Promise<Decimal> {
-  const ventasDelTurno = await prisma.payment.aggregate({
+export async function ventasDelTurnoSinTarjetas(
+  venueId: string,
+  shiftId: string,
+  db: Pick<Prisma.TransactionClient, 'payment'> = prisma,
+): Promise<Decimal> {
+  const ventasDelTurno = await db.payment.aggregate({
     where: {
       venueId,
       shiftId,

@@ -198,6 +198,14 @@ const prismaMock: any = {
   // servicio, con un `Cannot read properties of undefined`.
   cashDrawerSession: createMockModel(),
   cashDrawerEvent: createMockModel(),
+  // Máquina de efectivo (fase 1a): el cierre por folio y sus incidencias durables.
+  cashMachineClose: createMockModel(),
+  cashMachineIncident: createMockModel(),
+  // R4-3: qué PC (Terminal) controla qué máquina; la credencial sólo como hash.
+  cashMachineBinding: createMockModel(),
+  // Rediseño r3: lo que congela el primer mensaje de un folio y cada observación física distinta.
+  cashMachineFolio: createMockModel(),
+  cashMachineObservation: createMockModel(),
   product: createMockModel(),
   productGroup: createMockModel(),
   productGroupOption: createMockModel(),

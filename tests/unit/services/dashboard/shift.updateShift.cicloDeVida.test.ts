@@ -66,6 +66,8 @@ function mundo(over: Record<string, unknown> = {}) {
   // `shift.updateShift.cashDifference.test.ts`).
   prismaMock.cashDrawerSession.findFirst.mockResolvedValue(null)
   prismaMock.cashDrawerSession.findMany.mockResolvedValue([])
+  // Sin gaveta manda la fórmula del turno, que resta lo cobrado fuera del cajón (máquina de efectivo A5): aquí, nada.
+  prismaMock.payment.groupBy.mockResolvedValue([])
   prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' })
   return turno
 }

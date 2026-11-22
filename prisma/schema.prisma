@@ -609,6 +609,13 @@ model Venue {
   // ==========================================
   cashDrawerSessions CashDrawerSession[]
 
+  // Máquina de efectivo (QuickPay Mini)
+  cashMachineCloses    CashMachineClose[]
+  cashMachineIncidents CashMachineIncident[]
+  cashMachineBindings  CashMachineBinding[]
+  cashMachineFolios       CashMachineFolio[]
+  cashMachineObservations CashMachineObservation[]
+
   // ==========================================
   // INVENTORY TRANSFERS
   // ==========================================
@@ -5281,8 +5288,11 @@ model Payment {
   /// La hora en que el APARATO hizo este cobro sin internet (cola), acotada a (llegada − 24 h, llegada). SÓLO para reportes
   /// («hora real ?? createdAt»), como `client_created_at` de Square. `createdAt` sigue siendo la llegada (dinero). Null = en línea (D93).
   clientCreatedAt DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  /// Folio (`referenceCC`, `AQ` + 12 `[0-9A-Z]`) del cobro en la máquina de efectivo QuickPay Mini que hizo este pago.
+  /// Null = no lo cobró la máquina. Su cierre vive en `CashMachineClose` (mismo `venueId` + `referenceCC`).
+  cashMachineRef  String?   @db.VarChar(32)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   // 🛡️ Idempotency guarantee: prevents duplicate payment recording from concurrent
   // retries (TOCTOU race fixed — incident: Testarudo Cafe 2026-04-08, 5 duplicates
@@ -5310,6 +5320,7 @@ model Payment {
   @@index([venueId, externalSource])
   @@index([ecommerceMerchantId])
   @@index([venueId, tenderTypeId])
+  @@index([venueId, cashMachineRef])
 }
 
 /// Venue-defined tender type ("Uber Eats", "Vale de despensa"): a reporting/settlement
@@ -6263,6 +6274,9 @@ model Terminal {
   areaTicketExternalSettlements AreaTicketExternalSettlement[] @relation("AreaTicketExternalSettlementTerminal")
 
   reviews Review[] // ✅ LÍNEA AGREGADA
+
+  /// Máquinas de efectivo que este aparato (la PC de WINDOWS) controla.
+  cashMachineBindings CashMachineBinding[]
 
   promoterLocationPings PromoterLocationPing[] // device-centric geolocation pings
 
@@ -16977,6 +16991,170 @@ model CashDrawerEvent {
 
   @@unique([venueId, localId])
   @@index([sessionId])
+}
+
+// ==========================================
+// MÁQUINA DE EFECTIVO (QuickPay Mini, fase 1a)
+// ==========================================
+// Sin enums de Prisma a propósito: los valores se validan con zod (plan 2026-11-20, «Esquema»).
+// Importes en CENTAVOS (`…Cents`) porque así los manda la máquina; `Payment.amount` sigue en pesos.
+
+/// Un cierre de la máquina (pagado, cancelado o dinero guardado). Una fila por folio: se guarda una sola vez.
+model CashMachineClose {
+  id          String @id @default(cuid())
+  venueId     String
+  venue       Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  /// Folio de la máquina: `AQ` + 12 `[0-9A-Z]`. La llave del pago es `"maquina-" + referenceCC`.
+  referenceCC String @db.VarChar(32)
+  /// 'PAGADO' | 'CANCELADO' | 'GUARDADO'. Sólo 'PAGADO' crea un pago.
+  outcome     String @db.VarChar(16)
+  /// 'MAQUINA' | 'GERENTE'. Quién decidió el desenlace, aparte del desenlace.
+  resolvedBy  String @db.VarChar(16)
+
+  /// El gerente (sale del token, nunca del body) cuando `resolvedBy = 'GERENTE'`.
+  resolvedByStaffId String?
+  /// Lo que el gerente leyó en la máquina al resolver.
+  evidence          String?
+
+  dueCents             Int
+  /// H3/H4 (Codex servidor r5): null = el reparto venta/propina que llegó no eran centavos enteros (el dinero queda sin venta,
+  /// `REPARTO_DESCUADRADO`; lo que llegó tal cual está en el folio y en su observación).
+  saleCents            Int?
+  tipCents             Int?
+  creditCents          Int
+  changeDispensedCents Int
+  appliedCents         Int
+  excedenteCents       Int     @default(0)
+  owedCents            Int
+  /// 'CAMBIO' | 'GUARDADO' | 'NO_DEVUELTO' | 'EXCEDENTE'. Null = no se le debe nada al cliente.
+  owedKind             String? @db.VarChar(16)
+
+  orderId     String?
+  paymentId   String?
+  /// Turno congelado de la venta.
+  saleShiftId String?
+  /// 'EN_TURNO' | 'TURNO_CERRADO' | 'POR_CONCILIAR'.
+  shiftStatus String? @db.VarChar(24)
+  /// `Terminal.id` de la PC que subió el cierre.
+  deviceId    String?
+
+  /// Hora física del cierre (la del comprobante de la máquina). Null o `occurredAtKnown = false` = «hora y turno por conciliar».
+  occurredAt      DateTime?
+  occurredAtKnown Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+
+  /// Rediseño r3 (D2): la huella del carrito COMPLETO congelado en `CashMachineFolio` (la misma de la cotización). Null = sin carrito.
+  cartHash String? @db.VarChar(64)
+  /// Rediseño r3 (D1): por qué un PAGADO comprobado quedó SIN venta (el dinero está; la incidencia NO_SE_PUDO_REGISTRAR lo pone a
+  /// revisión). 'DESCUENTO' | 'PC_REVOCADA' | 'SIN_SALDAR' | 'SIN_CARRITO' | 'CARRITO_ILEGIBLE' | 'VENTA_RECHAZADA' | 'PREMIO_PENDIENTE' |
+  /// 'LLAVE_OCUPADA'. Null = la venta se registró (o no era PAGADO).
+  motivoSinRegistro String? @db.VarChar(24)
+
+  @@unique([venueId, referenceCC])
+  @@index([venueId, createdAt])
+  /// Codex r2 #13: el MCP `cash_machine_closes` filtra y cuenta por la hora del comprobante (la venta del domingo subida el lunes).
+  @@index([venueId, occurredAt])
+}
+
+/// Incidencias durables de la máquina (contradicción, imposible, en duda, o no se pudo registrar). Se escriben en su propia
+/// transacción para que nunca se pierdan.
+model CashMachineIncident {
+  id          String  @id @default(cuid())
+  venueId     String
+  venue       Venue   @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  referenceCC String  @db.VarChar(32)
+  /// 'CONFLICTO' | 'IMPOSIBLE' | 'ESPERANDO' | 'NO_SE_PUDO_REGISTRAR' | 'TRAS_REVOCAR' (folio nuevo de una PC revocada, a revisión).
+  kind        String  @db.VarChar(24)
+  /// 'ABIERTO' | 'RESUELTO'.
+  status      String  @default("ABIERTO") @db.VarChar(16)
+  /// Lo que se sabe (folio, Due, venta, carrito congelado, lo último que vio la PC, el mensaje contradictorio…).
+  payload     Json
+  /// `Terminal.id` de la PC que la subió.
+  deviceId    String?
+
+  resolvedByStaffId String?
+  resolvedAt        DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([venueId, referenceCC, kind])
+  @@index([venueId, status, createdAt])
+}
+
+/// Qué PC (aparato del POS) controla la máquina del negocio. Rediseño r3 (D3, r6-5): en la 1a UNA sola PC habilitada por negocio;
+/// emparejar otra revoca la anterior en la misma transacción.
+/// 🔴 «Una sola activa por negocio» la garantiza un índice único PARCIAL escrito a mano en la migración
+/// 20261120120000_maquina_de_efectivo_1a (`CashMachineBinding_venueId_activa_key ... WHERE "active"`): Prisma no lo puede
+/// expresar.
+model CashMachineBinding {
+  id               String    @id @default(cuid())
+  venueId          String
+  venue            Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  /// `Terminal.id` del aparato del POS (el registro de `list_devices`, ligado a `X-Device-ID` por `[venueId, deviceUid]`).
+  deviceId         String
+  device           Terminal  @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  machineIp        String    @db.VarChar(64)
+  /// Hash de la credencial que el SERVIDOR entregó al habilitar la PC. Nunca la credencial en claro.
+  credentialHash   String
+  active           Boolean   @default(true)
+  enabledByStaffId String
+  createdAt        DateTime  @default(now())
+  revokedAt        DateTime?
+
+  @@index([venueId, deviceId])
+}
+
+/// Rediseño r3 (D1, D2, r6-1, r6-3): lo que el PRIMER mensaje de un folio (duda o cierre) congela, una fila por folio. La venta se arma
+/// SIEMPRE desde esta copia; los mensajes posteriores sólo agregan observaciones (`CashMachineObservation`). Se escribe en la primera
+/// transacción, bajo el candado del folio, ANTES de intentar la venta: si el proceso cae, el reenvío la reanuda desde aquí.
+model CashMachineFolio {
+  id             String   @id @default(cuid())
+  venueId        String
+  venue          Venue    @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  /// Folio de la máquina: `AQ` + 12 `[0-9A-Z]`.
+  referenceCC    String   @db.VarChar(32)
+  /// `Terminal.id` de la PC dueña del folio (la del primer mensaje). Todo acuse lo devuelve.
+  deviceId       String?
+  /// El emparejamiento de la credencial con la que la PC subió el primer mensaje (para auditar; ya no decide nada: recorte R1).
+  bindingId      String?
+  /// El carrito tal cual llegó (el JSON de `POST /orders`, con cliente, premio y `catalogAt`). Null = llegó sin carrito.
+  pedido         Json?
+  /// La huella del carrito completo (`operationHash`, la misma de la cotización).
+  cartHash       String?  @db.VarChar(64)
+  /// El turno A con el que la PC vendió.
+  saleShiftId    String?
+  /// H3/H4 (Codex servidor r5): los importes TAL CUAL llegaron, aun con fracción de centavo o fuera del rango de un entero: el folio se
+  /// congela siempre (con su carrito) y lo que no se puede cobrar o vender lo decide el servicio después. Venta y propina en null =
+  /// no llegaron como números.
+  dueCents       Float
+  saleCents      Float?
+  tipCents       Float?
+  /// El primer cierre COMPROBADO (de la PC o declarado por un gerente): el desenlace que se termina. Nunca se reemplaza.
+  decision       Json?
+  /// Sube con cada observación NUEVA del folio (no con las de OTRA PC, r6 #4); el gerente resuelve con la que vio (r6-4).
+  version        Int      @default(1)
+  /// r6 #1: lo MÁS que la PC dueña dijo que entró, en cualquier mensaje del folio (centavos enteros). Nunca baja. La bandeja lo enseña y
+  /// el gerente no puede declarar menos.
+  maxCreditCents Int?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([venueId, referenceCC])
+}
+
+/// Rediseño r3 (D2, r6-3): cada observación física DISTINTA de un folio, una fila. La huella cubre desenlace, modo de cancelación,
+/// origen (PC o gerente), turno y carrito recibidos, hora física, `lastSeen` e importes: la misma huella en cualquier punto del historial
+/// es una retransmisión (A–B–A no son tres novedades), sin tope que pierda evidencia.
+model CashMachineObservation {
+  id          String   @id @default(cuid())
+  venueId     String
+  venue       Venue    @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  referenceCC String   @db.VarChar(32)
+  fingerprint String   @db.VarChar(64)
+  payload     Json
+  createdAt   DateTime @default(now())
+
+  @@unique([venueId, referenceCC, fingerprint])
 }
 
 enum CashDrawerStatus {

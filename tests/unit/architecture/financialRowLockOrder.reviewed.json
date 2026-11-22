@@ -1172,10 +1172,10 @@
       "loops": 0,
       "reason": "Saldo a favor (S8a, panel): su propia transacción, que sólo aparta UN sobre (GiftCard) por id, sin Order ni Payment antes ni después: no forma ciclo con los cobros (Order → sobre)."
     },
-    "src/services/mobile/order.mobile.service.ts#montoDeLaVentaNuevaEnTx#lockExistingOrderForPayment": {
+    "src/services/mobile/order.mobile.service.ts#saldoDeLaCuentaNuevaEnTx#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
-      "reason": "Tarjetas 1b (pay-new-order): la Order nació en ESTA transacción (privada hasta el commit); se aparta antes que cualquier sobre o Payment y el núcleo la reentra (mismo conjunto)."
+      "reason": "Tarjetas 1b (pay-new-order, vía montoDeLaVentaNuevaEnTx) y máquina de efectivo (venderLoQueCobroLaMaquina): la Order nació en ESTA transacción (privada hasta el commit); se aparta antes que cualquier sobre o Payment y el núcleo la reentra (mismo conjunto)."
     },
     "src/services/giftCards/giftCardDelivery.service.ts#entregarTarjetas#cerrarAtoradas": {
       "count": 1,

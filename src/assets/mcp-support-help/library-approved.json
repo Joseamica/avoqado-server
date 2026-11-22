@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-22T11:01:54.112Z",
-  "approvedHash": "41b5b27636dc6fe9ef8c5c3b2907d1c22b46952ae20d1bb2dfb48d92d2ac1be3",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -801,6 +801,10 @@
       "featureCode": "DELIVERY_CHANNELS",
       "gateKind": "FEATURE"
     },
+    "dashboard/ventas/resolver-cobros-de-la-maquina-en-duda": {
+      "sha256": "5fcb1de5651e073e536e2228c349033426969cd7db5164104b9e9acbd1339afd",
+      "requiredPermissions": []
+    },
     "dashboard/ventas/solicitar-activacion-uber-eats": {
       "sha256": "e40f5151fd9c415777f88ae1607e67a93a29d25549eb2d4c1b86ca6bb3b7720f",
       "requiredPermissions": [],
@@ -1141,6 +1145,30 @@
       "requiredPermissions": [],
       "featureCode": "LOYALTY_PROGRAM",
       "gateKind": "FEATURE"
+    },
+    "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo": {
+      "sha256": "d4d8d7fdd4a47f4fe181ce13ca65659970387a9282664ba861378196364317f0",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo": {
+      "sha256": "8f650e593af6d2086daae26f3b865e613a118b192addad0f7ae9e51b00fc036a",
+      "requiredPermissions": [
+        "cash-machine:configure"
+      ]
+    },
+    "windows/maquina-de-efectivo/esperando-a-la-maquina": {
+      "sha256": "0c305dc58925b6e560c71cda813da4aed0311aa0bf50878c4c1fced3a9788c45",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina": {
+      "sha256": "8254f717bf902d29fab26453d53ea7f9427fc218c910faed89e4c662b77ad715",
+      "requiredPermissions": [
+        "cash-drawer:pay-out"
+      ]
     },
     "windows/mesas/abrir-mesa-y-ordenar": {
       "sha256": "48d8b65988206ac760d90993e5e32c1614b3bca812ed4d6bab16673d6bc3e72c",
