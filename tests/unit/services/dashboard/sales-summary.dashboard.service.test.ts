@@ -38,7 +38,10 @@ import {
   buildMerchantAccountBreakdown,
   computeSettlementProjection,
   destinationOf,
+  flattenSalesSummaryForExport,
+  WHERE_COBRO_DE_TERMINAL_DE_AVOQADO,
   type PaymentMethodFilter,
+  type SalesSummaryResponse,
   type CardTypeFilter,
 } from '@/services/dashboard/sales-summary.dashboard.service'
 import { prismaMock } from '@tests/__helpers__/setup'
@@ -880,6 +883,9 @@ describe('destinationOf', () => {
   it('un cobro con comercio de terminal es de la terminal', () => {
     expect(g({ method: 'CREDIT_CARD', hasMerchant: true })).toBe('terminal')
   })
+  it('lo que sólo se registra no es de la terminal aunque herede la afiliación (devolución por transferencia)', () => {
+    expect(g({ method: 'BANK_TRANSFER', fundsFlow: 'EXTERNAL_RECORDED', hasMerchant: true })).toBe('other')
+  })
   it('efectivo, y lo que la autoridad pone en el cajón, es del cajón — aunque traiga comercio', () => {
     expect(g({ method: 'CASH' })).toBe('drawer')
     expect(g({ method: 'OTHER', fundsFlow: 'CASH_DRAWER' })).toBe('drawer')
@@ -901,5 +907,103 @@ describe('destinationOf', () => {
     expect(g({ method: 'DEBIT_CARD' })).toBe('other')
     expect(g({ method: 'CREDIT_CARD' })).toBe('other')
     expect(g({ method: 'BANK_TRANSFER' })).toBe('other')
+  })
+})
+
+/**
+ * La proyección elige sus cobros con `WHERE_COBRO_DE_TERMINAL_DE_AVOQADO`; el estado de cuenta, con `destinationOf`. Si se
+ * separan, «Por comercio» y «Sin fecha estimada» hablan de cobros distintos. Se evalúa el `where` en JS con la semántica de SQL
+ * (una comparación con NULL no es verdadera) sobre todas las combinaciones que lo deciden.
+ */
+describe('WHERE_COBRO_DE_TERMINAL_DE_AVOQADO ↔ destinationOf', () => {
+  type Fila = {
+    method: string
+    fundsFlow: string | null
+    tenderCountsAsCash: boolean | null
+    tenderTypeId: string | null
+    merchantAccountId: string | null
+  }
+  // SQL de tres valores: true / false / null (desconocido).
+  function evalua(where: unknown, f: Fila): boolean | null {
+    const w = where as Record<string, unknown>
+    const partes: Array<boolean | null> = []
+    for (const [k, v] of Object.entries(w)) {
+      if (k === 'OR') {
+        const r = (v as unknown[]).map(x => evalua(x, f))
+        partes.push(r.some(x => x === true) ? true : r.every(x => x === false) ? false : null)
+      } else if (k === 'AND') {
+        const r = (v as unknown[]).map(x => evalua(x, f))
+        partes.push(r.some(x => x === false) ? false : r.every(x => x === true) ? true : null)
+      } else if (k === 'NOT') {
+        const r = evalua(v, f)
+        partes.push(r === null ? null : !r)
+      } else {
+        const col = (f as unknown as Record<string, unknown>)[k]
+        if (v === null) partes.push(col === null)
+        else if (typeof v === 'object' && v !== null && 'not' in (v as object)) {
+          const n = (v as { not: unknown }).not
+          partes.push(n === null ? col !== null : col === null ? null : col !== n)
+        } else partes.push(col === null ? null : col === v)
+      }
+    }
+    return partes.some(x => x === false) ? false : partes.every(x => x === true) ? true : null
+  }
+
+  it('selecciona exactamente los cobros cuyo destino es la terminal', () => {
+    let casos = 0
+    for (const method of ['CASH', 'CREDIT_CARD', 'DEBIT_CARD', 'OTHER', 'BANK_TRANSFER', 'DIGITAL_WALLET'])
+      for (const fundsFlow of [null, 'AVOQADO_PROCESSED', 'CASH_DRAWER', 'EXTERNAL_RECORDED'])
+        for (const tenderCountsAsCash of [null, true, false])
+          for (const tenderTypeId of [null, 'tipo'])
+            for (const merchantAccountId of [null, 'ma']) {
+              const fila = { method, fundsFlow, tenderCountsAsCash, tenderTypeId, merchantAccountId }
+              const esperado =
+                destinationOf({
+                  method,
+                  fundsFlow,
+                  tenderCountsAsCash,
+                  hasTender: !!tenderTypeId,
+                  hasMerchant: !!merchantAccountId,
+                  enLinea: false,
+                }) === 'terminal'
+              expect([fila, evalua(WHERE_COBRO_DE_TERMINAL_DE_AVOQADO, fila) === true]).toEqual([fila, esperado])
+              casos++
+            }
+    expect(casos).toBe(288)
+  })
+})
+
+describe('flattenSalesSummaryForExport — sección «statement» (estado del periodo)', () => {
+  it('saca el estado de cuenta de los destinos y «Te queda» es la suma de sus renglones', () => {
+    const d = (o: Partial<Record<string, number>>) => ({
+      collected: 0,
+      refunds: 0,
+      refundCount: 0,
+      platformFee: 0,
+      netToReceive: 0,
+      transactionCount: 0,
+      ...o,
+    })
+    const report = {
+      summary: {},
+      statementDestinations: {
+        drawer: d({ collected: 100, netToReceive: 100, transactionCount: 1 }),
+        terminal: d({ collected: -30, refunds: 30, refundCount: 1, platformFee: -0.9, netToReceive: -29.1, transactionCount: 1 }),
+        online: d({ collected: 200, platformFee: 6, netToReceive: 194, transactionCount: 1 }),
+        other: d({ collected: 100, netToReceive: 100, transactionCount: 1 }),
+        tenderCommissions: 30,
+      },
+    } as unknown as SalesSummaryResponse
+    const { rows } = flattenSalesSummaryForExport(report, ['statement'])
+    expect(rows.map(r => [r.label, r.amount, r.count])).toEqual([
+      ['Cobraste', 400, 3],
+      ['Devoluciones', -30, 1],
+      ['Comisiones de Avoqado', -5.1, null],
+      ['Comisión de plataformas y tipos de pago', -30, null],
+      ['Te queda', 334.9, null],
+      ['Ya en tu mano (efectivo)', 100, null],
+      ['Llega a tu banco', 164.9, null],
+      ['Otros métodos', 100, null],
+    ])
   })
 })

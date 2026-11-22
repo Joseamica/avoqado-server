@@ -60,6 +60,7 @@ import {
 import { montoSaldoAFavorSql, sqlNoEsDelMedioSaldoAFavor } from '@/services/storeCredit/saldoAFavorEnLectores'
 import { sqlImpuestoQueSeCobraAparte } from '@/services/shared/orderBalance'
 import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '@/services/shared/tenderSemantics'
+import { proyectarComisionYNeto } from '@/services/payments/proyeccionMonetaria'
 import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraReal, sqlRangoHoraRealSql } from '@/services/shared/horaRealDelAparato'
 
 // ============================================================
@@ -243,7 +244,7 @@ export interface StatementDestinations {
 export type StatementDestinationKey = 'drawer' | 'terminal' | 'online' | 'other'
 
 /**
- * El destino de un grupo de cobros (carril C). Orden: cajón → comercio de terminal → en línea que deposita Avoqado → otros. Sin
+ * El destino de un grupo de cobros (carril C). Orden: cajón → (sólo se registra → otros) → comercio de terminal → en línea → otros. Sin
  * comercio ni sello en línea nada va al banco: el respaldo viejo de `paymentIsAvoqadoSettled` da por «depositable» todo lo que no
  * es efectivo (su falsedad conocida, documentada ahí), y así se colaban tarjetas de SoftRestaurant, de prueba y de otra terminal.
  */
@@ -262,9 +263,30 @@ export function destinationOf(g: {
     tenderCountsAsCash: g.tenderCountsAsCash,
   }
   if (paymentCountsAsDrawerCash(pago)) return 'drawer'
+  // Lo que Avoqado sólo REGISTRA no llega al banco aunque traiga comercio (una devolución por transferencia hereda la afiliación
+  // del cobro original, Codex r3 #5).
+  if (!paymentIsAvoqadoSettled(pago)) return 'other'
   if (g.hasMerchant) return 'terminal'
-  if (g.enLinea && paymentIsAvoqadoSettled(pago)) return 'online'
+  if (g.enLinea) return 'online'
   return 'other'
+}
+
+/**
+ * La población de `terminal` (`destinationOf`) como `where` de Prisma, para la proyección: tiene comercio, NO está en el cajón y
+ * la deposita Avoqado. Escrita sin `NOT` sobre columnas que pueden ser NULL (un `NOT (x = v)` con x NULL descarta la fila). La
+ * paridad con `destinationOf` la cuida `sales-summary.dashboard.service.test.ts`.
+ */
+export const WHERE_COBRO_DE_TERMINAL_DE_AVOQADO: Prisma.PaymentWhereInput = {
+  merchantAccountId: { not: null },
+  OR: [
+    { fundsFlow: 'AVOQADO_PROCESSED' },
+    {
+      fundsFlow: null,
+      method: { not: 'CASH' },
+      OR: [{ tenderCountsAsCash: null }, { tenderCountsAsCash: false }],
+      NOT: { tenderTypeId: { not: null }, method: 'OTHER' },
+    },
+  ],
 }
 
 // Entrega 2 — settlement projection ("¿cuándo cae el dinero?").
@@ -722,11 +744,13 @@ export async function computeSettlementProjection(
   // Los mismos cobros que «Por comercio» (hora real y, si hay, sólo el comercio filtrado, D9.2). La fecha de
   // depósito se sigue calculando con `createdAt`. Los que no tienen costo también se leen: no entran al calendario (como antes),
   // pero su neto se cuenta como «sin fecha estimada» en vez de deducirlo restando dos sumas distintas (Codex r1 del carril C, #6).
+  // Sólo cobros de terminal que deposita Avoqado (`destinationOf` = terminal): un efectivo con comercio está en el cajón y una
+  // devolución por transferencia sólo se registra (Codex r3 #2 y #5).
   const paymentWhere = dondeHoraRealEntre(
     {
       venueId,
       status: 'COMPLETED' as const,
-      merchantAccountId: merchantAccountId ? merchantAccountId : { not: null },
+      AND: [WHERE_COBRO_DE_TERMINAL_DE_AVOQADO, ...(merchantAccountId ? [{ merchantAccountId }] : [])],
     },
     startDate,
     endDate,
@@ -796,7 +820,8 @@ export async function computeSettlementProjection(
       if (!projection) {
         // No cost or no matching rule → can't project honestly; out of the calendar, counted as «sin fecha estimada».
         const tc = p.transactionCost
-        const neto = Number(p.amount) + Number(p.tipAmount ?? 0) - (tc ? Number(tc.venueChargeAmount) + Number(tc.venueFixedFee ?? 0) : 0)
+        const bruto = Number(p.amount) + Number(p.tipAmount ?? 0)
+        const neto = tc ? proyectarComisionYNeto(bruto, tc.venueChargeAmount, tc.venueFixedFee).net : bruto
         unprojectedByMerchant.set(merchantId, (unprojectedByMerchant.get(merchantId) ?? 0) + neto)
         continue
       }
@@ -1600,6 +1625,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
             amount: string
             tips: string
             fees: string
+            feesCents: string
             chargedAmount: string
             chargedCount: number
             refundAmount: string
@@ -1620,6 +1646,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
                COALESCE(SUM(p."amount"), 0)::text AS "amount",
                COALESCE(SUM(p."tipAmount"), 0)::text AS "tips",
                COALESCE(SUM(${Prisma.raw(SQL_COMISION_DEL_COBRO)}), 0)::text AS "fees",
+               COALESCE(SUM(ROUND((${Prisma.raw(SQL_COMISION_DEL_COBRO)})::numeric, 2)), 0)::text AS "feesCents",
                COALESCE(SUM(p."amount" + p."tipAmount") FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND'), 0)::text AS "chargedAmount",
                (COUNT(*) FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND'))::int AS "chargedCount",
                COALESCE(-SUM(p."amount" + p."tipAmount") FILTER (WHERE p."type" = 'REFUND'), 0)::text AS "refundAmount",
@@ -1706,10 +1733,13 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         s.chargedCount += chargedCount
       }
 
+      // El estado de cuenta usa la comisión redondeada POR COBRO, como la liquidación (`proyectarComisionYNeto`): así banco, «Por
+      // comercio» y el calendario no se separan un centavo (Codex r3 #4). `platformFees` del cajón sigue siendo la suma cruda.
+      const feeCents = Number(row.feesCents)
       const destino = destinationOf({ ...row, enLinea: !!row.enLinea, hasMerchant: row.merchantAccountId != null })
       const d = destinos[destino]
       d.collected += amt + tip
-      d.platformFee += fee
+      d.platformFee += feeCents
       d.refunds += refunded
       d.refundCount += count - chargedCount
       d.transactionCount += count
@@ -1723,7 +1753,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           refundCount: 0,
         }
         m.collected += amt + tip
-        m.fee += fee
+        m.fee += feeCents
         m.txns += count
         m.refunds += refunded
         m.refundCount += count - chargedCount
@@ -1915,7 +1945,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
 // ============================================================
 
 /** Section ids the summary export can include. */
-export type SalesSummaryExportSection = 'totals' | 'paymentMethods' | 'cardTypes' | 'merchantAccounts' | 'byPeriod'
+export type SalesSummaryExportSection = 'totals' | 'paymentMethods' | 'cardTypes' | 'merchantAccounts' | 'byPeriod' | 'statement'
 
 /** One flattened row for the summary-mode export (rendered by encodeExport columns). */
 export interface SalesSummaryExportRow {
@@ -2059,6 +2089,40 @@ export function flattenSalesSummaryForExport(
         percentage: null,
       })
     }
+  }
+  // Carril C: el «Estado del periodo» (dinero, no ventas) para el archivo y la MCP del exporte. Sale con `includeMerchantBreakdown`.
+  const destinos = report.statementDestinations
+  if (want.has('statement') && destinos) {
+    const lista = [destinos.drawer, destinos.terminal, destinos.online, destinos.other]
+    const suma = (pick: (d: MoneyDestination) => number) => round2(lista.reduce((acc, d) => acc + pick(d), 0))
+    const fila = (label: string, amount: number, count: number | null = null): SalesSummaryExportRow => ({
+      section: 'statement',
+      label,
+      count,
+      amount: round2x(amount),
+      percentage: null,
+    })
+    const teQueda = suma(d => d.netToReceive) - destinos.tenderCommissions
+    rows.push(
+      fila(
+        'Cobraste',
+        suma(d => d.collected + d.refunds),
+        suma(d => d.transactionCount - d.refundCount),
+      ),
+    )
+    rows.push(
+      fila(
+        'Devoluciones',
+        -suma(d => d.refunds),
+        suma(d => d.refundCount),
+      ),
+    )
+    rows.push(fila('Comisiones de Avoqado', -suma(d => d.platformFee)))
+    rows.push(fila('Comisión de plataformas y tipos de pago', -destinos.tenderCommissions))
+    rows.push(fila('Te queda', teQueda))
+    rows.push(fila('Ya en tu mano (efectivo)', destinos.drawer.netToReceive))
+    rows.push(fila('Llega a tu banco', destinos.terminal.netToReceive + destinos.online.netToReceive))
+    rows.push(fila('Otros métodos', destinos.other.netToReceive))
   }
   if (want.has('byPeriod') && report.byPeriod) {
     for (const p of report.byPeriod) {

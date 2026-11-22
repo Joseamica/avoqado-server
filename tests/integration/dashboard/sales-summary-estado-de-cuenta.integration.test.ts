@@ -166,12 +166,22 @@ const base = (extra: Record<string, unknown> = {}) => ({
 const bucket = (rows: PaymentMethodDetailedBreakdown[] | undefined, key: string) => rows?.find(b => b.bucket === key)
 const c = (n: number | undefined) => (n === undefined ? undefined : Math.round(n * 100) / 100)
 
-/** Σ destinos (netos) − comisión de terceros = Σ cajones (movimiento) − comisiones − comisión de terceros, al centavo. */
+/**
+ * Cada cobro cae en UN destino, leído con los cajones: lo cobrado y la comisión de terceros se reparten EXACTOS entre destinos; la
+ * comisión de Avoqado de los destinos va redondeada por cobro (como la liquidación), así que difiere de la suma cruda de los
+ * cajones sólo por esos redondeos (menos de medio centavo por cobro).
+ */
 function expectIdentity(r: Awaited<ReturnType<typeof getSalesSummary>>) {
   const d = r.statementDestinations!
-  const destinos = d.terminal.netToReceive + d.drawer.netToReceive + d.online.netToReceive + d.other.netToReceive
-  const cajones = (r.byPaymentMethodDetailed ?? []).reduce((s, b) => s + b.amount - b.platformFees - (b.tenderCommissions ?? 0), 0)
-  expect(c(destinos - d.tenderCommissions)).toBe(c(cajones))
+  const lista = [d.terminal, d.drawer, d.online, d.other]
+  const cajones = r.byPaymentMethodDetailed ?? []
+  expect(c(lista.reduce((s, x) => s + x.collected, 0))).toBe(c(cajones.reduce((s, b) => s + b.amount, 0)))
+  expect(c(d.tenderCommissions)).toBe(c(cajones.reduce((s, b) => s + (b.tenderCommissions ?? 0), 0)))
+  const filas = cajones.reduce((s, b) => s + b.count, 0)
+  expect(Math.abs(lista.reduce((s, x) => s + x.platformFee, 0) - cajones.reduce((s, b) => s + b.platformFees, 0))).toBeLessThanOrEqual(
+    0.005 * filas + 1e-9,
+  )
+  for (const x of lista) expect(c(x.netToReceive)).toBe(c(x.collected - x.platformFee))
 }
 
 let merchantA: string
@@ -284,6 +294,18 @@ beforeAll(async () => {
     orderId: liga.orderId,
     processorData: { originalPaymentId: liga.paymentId },
   })
+  // Devolución por transferencia de una venta con afiliación: sólo se registra → otros, nunca «Se descuenta de tu banco» (Codex r3 #5).
+  await seed({
+    venue: venues.dest,
+    method: 'BANK_TRANSFER',
+    amount: -30,
+    type: 'REFUND',
+    merchant: merchantB,
+    fundsFlow: 'EXTERNAL_RECORDED',
+  })
+  // Dos cobros de $21 en el MISMO comercio con $0.5355 de comisión cada uno: la liquidación redondea por cobro ($0.54 + $0.54).
+  await seed({ venue: venues.dest, method: 'CREDIT_CARD', amount: 21, merchant: merchantA, fee: 0.5355 })
+  await seed({ venue: venues.dest, method: 'CREDIT_CARD', amount: 21, merchant: merchantA, fee: 0.5355 })
   // SPEI en línea bien sellado ($200, comisión $2): con el filtro «Otros» el exporte sí debe traerlo (Codex r2 #6).
   await seed({ venue: venues.dest, method: 'BANK_TRANSFER', amount: 200, ecommerce: true, fundsFlow: 'AVOQADO_PROCESSED', feeAmount: 2 })
   // Transferencia vieja sin `fundsFlow`: la autoridad la daría por «depositable» (falsedad conocida) → se queda en otros.
@@ -434,13 +456,14 @@ describe('un solo destino por cobro (tenderSemantics), leído con los cajones', 
     // En línea: OXXO viejo (120 − 4) + liga Blumon (100 − 30 devueltos) + SPEI (200 − 2).
     expect(d.online).toEqual(expect.objectContaining({ collected: 390, refunds: 30, refundCount: 1, platformFee: 6, netToReceive: 384 }))
     expect(c(d.drawer.collected)).toBe(225) // vale 80 + vale viejo 20 + Rappi 100 entero + efectivo con comercio 25
-    expect(c(d.other.collected)).toBe(130) // tarjeta sin comercio 60 + transferencia vieja 70
-    expect(c(d.terminal.collected)).toBe(90)
+    expect(c(d.other.collected)).toBe(100) // tarjeta sin comercio 60 + transferencia vieja 70 − devolución por transferencia 30
+    expect(c(d.terminal.collected)).toBe(132) // B 90 + A 21 + 21
     expect(c(d.tenderCommissions)).toBe(30)
     // El cajón de EFECTIVO por método sí trae el OXXO (método CASH): la barra es por método; el destino, por dinero.
     expect(c(bucket(r.byPaymentMethodDetailed, 'CASH')!.chargedAmount)).toBe(245)
     // «Por comercio» es la misma lectura: sólo la terminal, sin el efectivo que traía comercio.
-    expect(r.byMerchantAccount?.map(m => [m.merchantAccountId, c(m.netToReceive)])).toEqual([[merchantB, 90]])
+    const filas = Object.fromEntries((r.byMerchantAccount ?? []).map(m => [m.merchantAccountId, c(m.netToReceive)]))
+    expect(filas).toEqual({ [merchantB]: 90, [merchantA]: 40.92 })
     expectIdentity(r)
   })
 
@@ -463,5 +486,26 @@ describe('un solo destino por cobro (tenderSemantics), leído con los cajones', 
     const r = await getSalesSummary(venues.dest, { ...base(), paymentMethod: 'OTHER' })
     const { rows } = flattenSalesSummaryForExport(r, ['merchantAccounts'])
     expect(rows).toEqual([expect.objectContaining({ label: 'Cobros en línea', count: 1, amount: 198 })])
+  })
+
+  it('banco, «Por comercio» y el calendario redondean la comisión igual: por cobro (Codex r3 #4)', async () => {
+    const r = await getSalesSummary(venues.dest, base())
+    const a = r.byMerchantAccount?.find(m => m.merchantAccountId === merchantA)
+    expect([a?.collectedOnCard, a?.platformFee, a?.netToReceive]).toEqual([42, 1.08, 40.92])
+    const enCalendario = (r.settlementCalendar ?? []).flatMap(x => x.byMerchant).filter(m => m.merchantAccountId === merchantA)
+    expect(c(enCalendario.reduce((acc, m) => acc + m.netToReceive, 0))).toBe(40.92)
+    expect(a?.unprojectedNet).toBe(0)
+  })
+
+  it('la MCP / el archivo pueden pedir el estado del periodo («statement»): «Te queda» = suma de sus renglones', async () => {
+    const r = await getSalesSummary(venues.dest, base())
+    const { rows } = flattenSalesSummaryForExport(r, ['statement'])
+    const v = Object.fromEntries(rows.map(x => [x.label, x.amount]))
+    expect(
+      c(v['Ya en tu mano (efectivo)']! + v['Llega a tu banco']! + v['Otros métodos']! + v['Comisión de plataformas y tipos de pago']!),
+    ).toBe(v['Te queda'])
+    expect(c(v['Cobraste']! + v['Devoluciones']! + v['Comisiones de Avoqado']! + v['Comisión de plataformas y tipos de pago']!)).toBe(
+      v['Te queda'],
+    )
   })
 })
