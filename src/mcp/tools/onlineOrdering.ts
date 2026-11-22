@@ -21,6 +21,7 @@ import {
   porDevolverDeUnPedido,
   refundCardOnlineOrder,
   resolveReversedCardRefund,
+  revisarStripeAntesDeOtroMedio,
 } from '@/services/online-ordering/card/refund.service'
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
@@ -701,7 +702,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_order_card_refund_resolve',
-    'Devolver por otro medio: cuando una devolución a la tarjeta falló en el banco después de anotarse (estado REVERSED en online_order_card_refunds), registra que el negocio ya le devolvió ese dinero al cliente en efectivo (sale de la caja abierta) o por transferencia. Dos pasos: sin confirm:true sólo muestra la vista previa. En efectivo pide el permiso de devolver en efectivo; por transferencia, el de reembolsar.',
+    'Devolver por otro medio: cuando una devolución a la tarjeta falló en el banco después de anotarse (estado REVERSED en online_order_card_refunds), registra que el negocio le devuelve ese dinero al cliente en efectivo (sale de la caja abierta) o por transferencia; se registra ANTES de entregarlo. Si el cobro ya tiene una devolución hecha directo en Stripe, por fuera de Avoqado, no registra nada y lo explica (no se paga dos veces). Dos pasos: sin confirm:true sólo muestra la vista previa. En efectivo pide el permiso de devolver en efectivo; por transferencia, el de reembolsar.',
     {
       venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
       orderId: z.string().describe('Id del pedido'),
@@ -723,6 +724,13 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         if (!fila || fila.status !== 'REVERSED' || fila.reversal?.resolvedAt) {
           return text({ ok: false, error: 'Esta devolución no está pendiente de pagarse por otro medio.' })
         }
+        // D668: Stripe se revisa en la vista previa, ANTES de que alguien le dé el dinero al cliente (y otra vez al confirmar).
+        try {
+          await revisarStripeAntesDeOtroMedio({ venueId, orderId, cardRefundId: refundId })
+        } catch (err) {
+          if (!(err instanceof AppError)) throw err
+          return text({ ok: false, error: err.message, ...(err.code ? { code: err.code } : {}) })
+        }
         return text({
           ok: false,
           requiresConfirmation: true,
@@ -734,9 +742,9 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
             efecto:
               method === 'CASH'
                 ? `Salen $${fila.amount} en efectivo de la caja abierta para devolvérselos al cliente.`
-                : `Queda registrado que le devolviste $${fila.amount} al cliente por transferencia.`,
+                : `Queda registrado que le transfieres $${fila.amount} al cliente.`,
           },
-          mensaje: 'Confírmalo con la persona y vuelve a llamar con confirm:true.',
+          mensaje: 'Confírmalo con la persona y vuelve a llamar con confirm:true; que entregue el dinero después de registrarlo.',
         })
       }
 

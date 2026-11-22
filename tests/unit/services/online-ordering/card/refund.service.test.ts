@@ -854,6 +854,127 @@ describe('resolveReversedCardRefund', () => {
     const r = await pedir()
     await expect(resolver(r.cardRefundId, 'BANK_TRANSFER')).rejects.toMatchObject({ statusCode: 409, code: 'CARD_REFUND_NOT_REVERSED' })
   })
+
+  // ── D668: antes de pagarle otra vez al cliente se le pregunta a Stripe (fuera de la transacción) ──
+  const aMano = (amountCents: number, status: 'SUCCEEDED' | 'PENDING' = 'SUCCEEDED') => ({
+    refundId: 're_a_mano',
+    status,
+    amountCents,
+    failureReason: null,
+    metadata: {} as Record<string, string>,
+  })
+  const laQueFallo = (cardRefundId: string) => ({
+    refundId: 're_1',
+    status: 'FAILED' as const,
+    amountCents: 25_000,
+    failureReason: 'expired_or_canceled_card',
+    metadata: { type: 'online_order_refund', cardRefundId } as Record<string, string>,
+  })
+  const nadaPagado = (id: string) => {
+    expect(drawerEvents).toHaveLength(0)
+    expect(get(id).status).toBe('REVERSED')
+    expect(reversals[0].resolvedAt).toBeNull()
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDER_CARD_REFUND_RESOLVED' }))
+  }
+
+  it('D668: ya devuelta a mano en Stripe → en efectivo, 409 EXTERNAL_REFUND_DETECTED: ni PAY_OUT ni RESOLVED', async () => {
+    const id = await reversed()
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 25_000, refunds: [laQueFallo(id), aMano(25_000)] })
+    await expect(resolver(id, 'CASH')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'EXTERNAL_REFUND_DETECTED',
+      message: expect.stringContaining('$250.00 devueltos directo en Stripe'),
+    })
+    nadaPagado(id)
+  })
+
+  it('D668: por transferencia frena igual, también con la devolución de Stripe aún pendiente', async () => {
+    const id = await reversed()
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 25_000, refunds: [laQueFallo(id), aMano(25_000, 'PENDING')] })
+    await expect(resolver(id, 'BANK_TRANSFER')).rejects.toMatchObject({ statusCode: 409, code: 'EXTERNAL_REFUND_DETECTED' })
+    nadaPagado(id)
+  })
+
+  it('D668: una devolución por fuera PARCIAL también frena (Avoqado no sabe si es de ésta) y el texto dice cuánto', async () => {
+    const id = await reversed()
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 5_000, refunds: [laQueFallo(id), aMano(5_000)] })
+    const err = await resolver(id, 'CASH').catch((e: Error) => e)
+    expect(err).toMatchObject({ statusCode: 409, code: 'EXTERNAL_REFUND_DETECTED' })
+    expect((err as Error).message).toContain('$50.00 devueltos directo en Stripe')
+    expect((err as Error).message).toContain('no le des los $250.00 otra vez')
+    nadaPagado(id)
+  })
+
+  it('D668: sin devolución por fuera paga como hoy, también si Stripe sigue sumando la devolución que falló', async () => {
+    const id = await reversed()
+    // Stripe no documenta si `amount_refunded` descuenta una devolución fallida: con o sin descontarla, no es «por fuera».
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 25_000, refunds: [laQueFallo(id)] })
+    await expect(resolver(id, 'CASH')).resolves.toEqual({ status: 'RESOLVED', replay: false })
+    expect(drawerEvents).toHaveLength(1)
+    // Stripe se lee ANTES y FUERA de la transacción que paga.
+    const tx = (prismaMock.$transaction as jest.Mock).mock.invocationCallOrder
+    expect(getChargeRefunds).toHaveBeenCalledTimes(1)
+    expect(getChargeRefunds.mock.invocationCallOrder[0]).toBeLessThan(tx[tx.length - 1])
+  })
+
+  it('D668: si Stripe no contesta → 503 y no se paga; repetir una ya resuelta no le pregunta a Stripe', async () => {
+    const id = await reversed()
+    getChargeRefunds.mockRejectedValue(new Error('stripe caído'))
+    await expect(resolver(id, 'CASH')).rejects.toMatchObject({ statusCode: 503, code: 'STRIPE_REFUND_CHECK_UNAVAILABLE' })
+    nadaPagado(id)
+
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 0, refunds: [] })
+    await expect(resolver(id, 'CASH')).resolves.toEqual({ status: 'RESOLVED', replay: false })
+    getChargeRefunds.mockClear()
+    getChargeRefunds.mockRejectedValue(new Error('stripe caído'))
+    await expect(resolver(id, 'CASH')).resolves.toEqual({ status: 'RESOLVED', replay: true })
+    expect(getChargeRefunds).not.toHaveBeenCalled()
+    expect(drawerEvents).toHaveLength(1)
+  })
+
+  it('D668 (Codex r1 #4): con más de 50 parciales propios vivos en el cargo, ninguno se lee «de fuera»: paga como hoy', async () => {
+    const id = await reversed()
+    const parciales = Array.from({ length: 51 }, (_, k) =>
+      seed({ status: 'RECORDED', amountCents: 100, stripeRefundId: `re_p${k}`, stampReversedAt: NOW, nextCheckAt: NEVER_AGAIN }),
+    )
+    getChargeRefunds.mockResolvedValue({
+      amountRefundedCents: 5_100,
+      refunds: [
+        laQueFallo(id),
+        ...parciales.map(p => ({
+          refundId: p.stripeRefundId,
+          status: 'SUCCEEDED' as const,
+          amountCents: 100,
+          failureReason: null,
+          metadata: { type: 'online_order_refund', cardRefundId: p.id } as Record<string, string>,
+        })),
+      ],
+    })
+    await expect(resolver(id, 'CASH')).resolves.toEqual({ status: 'RESOLVED', replay: false })
+    expect(drawerEvents).toHaveLength(1)
+  })
+
+  it('D668 (Codex r1 #5): si otra solicitud la resolvió mientras Stripe no contestaba → replay, no «no se aplicó nada»', async () => {
+    const id = await reversed()
+    // Mientras ESTA solicitud espera a Stripe, la otra pregunta, gana y paga; luego a ésta Stripe no le contesta.
+    getChargeRefunds.mockImplementationOnce(async () => {
+      getChargeRefunds.mockResolvedValueOnce({ amountRefundedCents: 0, refunds: [] })
+      await expect(resolver(id, 'CASH')).resolves.toEqual({ status: 'RESOLVED', replay: false })
+      throw new Error('stripe caído')
+    })
+    await expect(resolver(id, 'CASH')).resolves.toEqual({ status: 'RESOLVED', replay: true })
+    expect(drawerEvents).toHaveLength(1)
+  })
+
+  it('D668: si se volvió REVERSED entre la lectura y el candado (sin preguntar a Stripe) → 409 CARD_REFUND_CHANGED, sin pagar', async () => {
+    const id = await reversed()
+    getChargeRefunds.mockResolvedValue({ amountRefundedCents: 25_000, refunds: [laQueFallo(id), aMano(25_000)] })
+    // La lectura de antes del candado la vio todavía anotada (RECORDED): no hubo por qué preguntar a Stripe.
+    cardRefund.findFirst.mockImplementationOnce(async () => ({ ...get(id), status: 'RECORDED' }))
+    await expect(resolver(id, 'CASH')).rejects.toMatchObject({ statusCode: 409, code: 'CARD_REFUND_CHANGED' })
+    expect(getChargeRefunds).not.toHaveBeenCalled()
+    nadaPagado(id)
+  })
 })
 
 describe('handleStripeRefundEvent', () => {
@@ -1598,7 +1719,8 @@ describe('D661 (Task 6): saldo a favor y devolución por fuera en Stripe', () =>
       metadata: { type: 'online_order_refund', cardRefundId } as Record<string, string>,
     })
     const ajena = (status: Estado) => ({ ...stateOf(status, { refundId: 're_x' }), status, metadata: {} as Record<string, string> })
-    const nuestras = new Set(['cr001'])
+    // D668: id de la fila → su `stripeRefundId` (null: todavía no lo sabemos).
+    const nuestras = new Map<string, string | null>([['cr001', null]])
     expect(hayDevolucionPorFuera({ amountRefundedCents: 0, refunds: [] }, nuestras)).toBe(false)
     expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [nuestra('PENDING')] }, nuestras)).toBe(false)
     expect(
@@ -1610,6 +1732,17 @@ describe('D661 (Task 6): saldo a favor y devolución por fuera en Stripe', () =>
     expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [nuestra('SUCCEEDED', 'cr-de-otro')] }, nuestras)).toBe(true)
     // Más devuelto en Stripe que lo que suman las nuestras vivas: por fuera.
     expect(hayDevolucionPorFuera({ amountRefundedCents: 26_000, refunds: [nuestra('SUCCEEDED')] }, nuestras)).toBe(true)
+    // D668: Stripe no documenta si `amount_refunded` descuenta una devolución que falló; si la sigue sumando, no es «por fuera».
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [nuestra('FAILED')] }, nuestras)).toBe(false)
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 30_000, refunds: [nuestra('FAILED')] }, nuestras)).toBe(true)
+    // D668 (Codex r1 #2): otra devolución con la metadata copiada de la fila, pero no la que la fila guardó (re_1): es de fuera.
+    const conId = new Map<string, string | null>([['cr001', 're_1']])
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [nuestra('SUCCEEDED')] }, conId)).toBe(false)
+    const copiada = { ...nuestra('SUCCEEDED'), refundId: 're_2' }
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [nuestra('FAILED'), copiada] }, conId)).toBe(true)
+    // Codex r2 #2: una fila sin id todavía (SENDING) es dueña de UNA sola; si dos distintas la nombran, ninguna es nuestra.
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [nuestra('PENDING')] }, nuestras)).toBe(false)
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 50_000, refunds: [nuestra('PENDING'), copiada] }, nuestras)).toBe(true)
   })
 
   it('repetir la misma llave de saldo no vuelve a leer Stripe, ni a abonar, ni a escribir', async () => {

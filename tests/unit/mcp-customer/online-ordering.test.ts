@@ -54,12 +54,14 @@ jest.mock('@/mcp/planGate', () => ({ planGateMessage: (...a: unknown[]) => mockP
 const mockListCardRefunds = jest.fn()
 const mockRefundCard = jest.fn()
 const mockResolveCardRefund = jest.fn()
+const mockRevisarStripe = jest.fn(async () => true)
 const mockPorDevolver = jest.fn()
 jest.mock('@/services/online-ordering/card/refund.service', () => ({
   listCardRefunds: (...a: unknown[]) => mockListCardRefunds(...(a as [])),
   porDevolverDeUnPedido: (...a: unknown[]) => mockPorDevolver(...(a as [])),
   refundCardOnlineOrder: (...a: unknown[]) => mockRefundCard(...(a as [])),
   resolveReversedCardRefund: (...a: unknown[]) => mockResolveCardRefund(...(a as [])),
+  revisarStripeAntesDeOtroMedio: (...a: unknown[]) => mockRevisarStripe(...(a as [])),
 }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
 jest.mock('@/services/online-ordering/inbox.service', () => ({
@@ -1377,6 +1379,25 @@ describe('devoluciones a la tarjeta de un pedido en línea', () => {
     await call('online_order_card_refund_resolve', { venueId: 'v1', orderId: 'ord1', refundId: 'cr1', method: 'BANK_TRANSFER' })
     expect(mockRequirePermission).toHaveBeenCalledWith('payments:refund', 'v1')
     expect(mockRequirePermission).not.toHaveBeenCalledWith('payments:refund-to-cash', 'v1')
+  })
+
+  it('D668: online_order_card_refund_resolve revisa Stripe en la vista previa: con una devolución por fuera no ofrece confirmar', async () => {
+    mockListCardRefunds.mockResolvedValue([revertida])
+    mockRevisarStripe.mockRejectedValueOnce(
+      new ConflictError('Este cobro ya tiene $100.00 devueltos directo en Stripe…', 'EXTERNAL_REFUND_DETECTED'),
+    )
+    const prev = parse(await call('online_order_card_refund_resolve', { venueId: 'v1', orderId: 'ord1', refundId: 'cr1', method: 'CASH' }))
+    expect(mockRevisarStripe).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'ord1', cardRefundId: 'cr1' })
+    expect(prev).toMatchObject({ ok: false, code: 'EXTERNAL_REFUND_DETECTED', error: expect.stringContaining('directo en Stripe') })
+    expect(prev.requiresConfirmation).toBeUndefined()
+    expect(mockResolveCardRefund).not.toHaveBeenCalled()
+
+    // Sin devolución por fuera, la transferencia se anota ANTES de hacerla (texto en futuro).
+    const transf = parse(
+      await call('online_order_card_refund_resolve', { venueId: 'v1', orderId: 'ord1', refundId: 'cr1', method: 'BANK_TRANSFER' }),
+    )
+    expect(transf).toMatchObject({ ok: false, requiresConfirmation: true })
+    expect(transf.preview.efecto).toBe('Queda registrado que le transfieres $100.00 al cliente.')
   })
 
   it('online_order_card_refund_resolve sobre una devolución que no falló → no ofrece resolver', async () => {

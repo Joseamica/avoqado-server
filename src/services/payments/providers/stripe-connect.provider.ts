@@ -635,7 +635,11 @@ export class StripeConnectProvider implements IEcommerceProvider {
   async getChargeRefunds(merchant: EcommerceMerchantWithProvider, paymentIntentId: string): Promise<ChargeRefunds> {
     const pi = await this.retrievePaymentIntent(this.requireConnectAccountId(merchant), paymentIntentId)
     const charge = typeof pi.latest_charge === 'object' ? pi.latest_charge : null
-    return { amountRefundedCents: charge?.amount_refunded ?? 0, refunds: await this.listRefunds(merchant, paymentIntentId) }
+    const refunds = await this.listRefunds(merchant, paymentIntentId)
+    // D668 (Codex r1 #3): `listRefunds` se corta en 1,000 sin avisar; una lista que llega al tope no prueba nada y quien llama falla cerrado.
+    if (refunds.length >= 1000)
+      throw new Error(`Stripe trae ${refunds.length} devoluciones de ${paymentIntentId}: la lista puede venir recortada`)
+    return { amountRefundedCents: charge?.amount_refunded ?? 0, refunds }
   }
 
   /**

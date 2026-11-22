@@ -95,6 +95,8 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
   let getRefundSpy: jest.SpyInstance
   let listRefundsSpy: jest.SpyInstance
   let feeSpy: jest.SpyInstance
+  /** D668: la lectura del cargo antes de «Devolver por otro medio» (sin esta espía iría al Stripe real). */
+  let chargeRefundsSpy: jest.SpyInstance
   /** Stripe con su idempotencia: la misma clave devuelve la misma devolución. La comisión devuelta, proporcional por PI. */
   const stripeRefunds = new Map<string, { refundId: string; amount: number; status: 'PENDING' | 'SUCCEEDED' | 'FAILED' }>()
   const feeRefunded = new Map<string, number>()
@@ -265,6 +267,7 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     getRefundSpy = jest.spyOn(StripeConnectProvider.prototype, 'getRefund')
     listRefundsSpy = jest.spyOn(StripeConnectProvider.prototype, 'listRefunds')
     feeSpy = jest.spyOn(StripeConnectProvider.prototype, 'getApplicationFeeRefundedCents')
+    chargeRefundsSpy = jest.spyOn(StripeConnectProvider.prototype, 'getChargeRefunds')
   })
 
   beforeEach(() => {
@@ -294,10 +297,12 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     listRefundsSpy.mockResolvedValue([])
     feeSpy.mockReset()
     feeSpy.mockImplementation(async (_m: any, pi: string) => feeRefunded.get(pi) ?? 0)
+    chargeRefundsSpy.mockReset()
+    chargeRefundsSpy.mockResolvedValue({ amountRefundedCents: 0, refunds: [] })
   })
 
   afterAll(async () => {
-    for (const s of [sessionSpy, authSpy, captureSpy, refundSpy, getRefundSpy, listRefundsSpy, feeSpy]) s?.mockRestore()
+    for (const s of [sessionSpy, authSpy, captureSpy, refundSpy, getRefundSpy, listRefundsSpy, feeSpy, chargeRefundsSpy]) s?.mockRestore()
     // Limpieza acotada: sin venueId NO se borra nada.
     if (!venueId) return
     const v = { venueId }
@@ -885,6 +890,42 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     expect(events[0].amount.toFixed(2)).toBe('250.00')
     const rev = await prisma.onlineOrderCardRefundReversal.findUniqueOrThrow({ where: { cardRefundId: r.cardRefundId } })
     expect(rev).toMatchObject({ resolvedMethod: 'CASH', resolvedByStaffId: staffId, cashDrawerEventId: events[0].id })
+    await prisma.cashDrawerSession.update({ where: { id: session.id }, data: { status: 'CLOSED', closedAt: new Date() } })
+  })
+
+  it('D668: ya devuelta a mano en Stripe tras la reversa → con caja abierta, 409 y ningún PAY_OUT; sin ella viva, paga como hoy', async () => {
+    const { orderId } = await capturedOrder()
+    const r = await pedir(orderId)
+    getRefundSpy.mockResolvedValue({ refundId: 'x', status: 'FAILED', amountCents: 25_000, failureReason: null })
+    await expect(advanceCardRefund(r.cardRefundId)).resolves.toBe('REVERSED')
+    const session = await prisma.cashDrawerSession.create({
+      data: {
+        venueId: venueId!,
+        openedByStaffId: staffId,
+        openedByName: 'Gerente',
+        startingAmount: new Prisma.Decimal(500),
+        status: 'OPEN',
+      },
+    })
+    const resolver = () =>
+      resolveReversedCardRefund({ venueId: venueId!, orderId, cardRefundId: r.cardRefundId, method: 'CASH', staffId, note: null })
+    const payouts = () => prisma.cashDrawerEvent.count({ where: { venueId, localId: `oocr-payout:${r.cardRefundId}` } })
+
+    chargeRefundsSpy.mockResolvedValue({
+      amountRefundedCents: 25_000,
+      refunds: [{ refundId: `re_a_mano_${RUN}`, status: 'SUCCEEDED', amountCents: 25_000, failureReason: null, metadata: {} }],
+    })
+    await expect(resolver()).rejects.toMatchObject({ statusCode: 409, code: 'EXTERNAL_REFUND_DETECTED' })
+    expect(await payouts()).toBe(0)
+    expect((await prisma.onlineOrderCardRefund.findUniqueOrThrow({ where: { id: r.cardRefundId } })).status).toBe('REVERSED')
+    expect(
+      (await prisma.onlineOrderCardRefundReversal.findUniqueOrThrow({ where: { cardRefundId: r.cardRefundId } })).resolvedAt,
+    ).toBeNull()
+
+    // La de Stripe también falló (ya no está viva): no hay devolución por fuera y se paga como hoy.
+    chargeRefundsSpy.mockResolvedValue({ amountRefundedCents: 0, refunds: [] })
+    await expect(resolver()).resolves.toEqual({ status: 'RESOLVED', replay: false })
+    expect(await payouts()).toBe(1)
     await prisma.cashDrawerSession.update({ where: { id: session.id }, data: { status: 'CLOSED', closedAt: new Date() } })
   })
 })
