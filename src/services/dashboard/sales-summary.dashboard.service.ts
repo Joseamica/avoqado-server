@@ -1079,11 +1079,32 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       }
     }
 
+    // Carril C: con el desglose pedido (exporte / MCP), el estado del periodo de ese filtro también: todo es «otros» (esos cobros
+    // no tienen comercio ni los deposita Avoqado). Sin esto, `sections=statement` salía vacío con dinero encontrado (Codex r4 #4).
+    const vacio = (): MoneyDestination => ({
+      collected: 0,
+      refunds: 0,
+      refundCount: 0,
+      platformFee: 0,
+      netToReceive: 0,
+      transactionCount: 0,
+    })
+    const legado = round2(amount + tips)
+    const estadoLegado: StatementDestinations | undefined = filters.includeMerchantBreakdown
+      ? {
+          drawer: vacio(),
+          terminal: vacio(),
+          online: vacio(),
+          other: { ...vacio(), collected: legado, netToReceive: legado, transactionCount: legacyCount },
+          tenderCommissions: 0,
+        }
+      : undefined
     return {
       dateRange: { startDate: parsedStartDate, endDate: parsedEndDate },
       reportType,
       summary,
       byPeriod,
+      ...(estadoLegado ? { byMerchantAccount: [], statementDestinations: estadoLegado } : {}),
       filtered: true,
       ...(legacyUnavailable ? { legacyUnavailable: true as const } : {}),
     }
@@ -1791,7 +1812,14 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     if (wantsBuckets) {
       // Grand total = sum of bucket amounts (already tips-inclusive), the same
       // denominator basis byPaymentMethod uses, so percentages are trustworthy.
-      const grandTotal = Array.from(buckets.values()).reduce((s, b) => s + b.amount, 0)
+      // Carril C: la lectura agrupa ahora también por destino y comercio, así que un cajón suma MÁS grupos en JS; sin este
+      // redondeo, 100 + 100.33 salía 200.32999999999998 y un porcentaje cambiaba de 77.1 % a 77.0 % (Codex r4 #3). Las
+      // columnas de dinero tienen a lo más 4 decimales (la comisión), así que a 4 decimales la suma vuelve a ser exacta.
+      const exacto = (n: number) => Math.round(n * 1e4) / 1e4
+      for (const acc of [...buckets.values(), ...subBuckets.values()]) {
+        for (const k of Object.keys(acc) as Array<keyof Acc>) acc[k] = exacto(acc[k])
+      }
+      const grandTotal = exacto(Array.from(buckets.values()).reduce((s, b) => s + b.amount, 0))
       const pct = (part: number, whole: number): number => (whole > 0 ? Number(((part / whole) * 100).toFixed(1)) : 0)
 
       const bucketOrder: BreakdownBucket[] = ['CARD', 'CASH', 'OTHER', 'QR_LEGACY']

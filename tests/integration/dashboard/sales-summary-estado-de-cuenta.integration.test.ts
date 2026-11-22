@@ -32,12 +32,13 @@ const suffix = `edc-${Date.now()}`
 let orgId: string
 let providerId: string
 let aggregatorId: string
-const venues: Record<'online' | 'refund' | 'merchant' | 'tender' | 'dest', string> = {
+const venues: Record<'online' | 'refund' | 'merchant' | 'tender' | 'dest' | 'pct', string> = {
   online: '',
   refund: '',
   merchant: '',
   tender: '',
   dest: '',
+  pct: '',
 }
 const merchants: string[] = []
 let ecommerceId: string
@@ -306,6 +307,10 @@ beforeAll(async () => {
   // Dos cobros de $21 en el MISMO comercio con $0.5355 de comisión cada uno: la liquidación redondea por cobro ($0.54 + $0.54).
   await seed({ venue: venues.dest, method: 'CREDIT_CARD', amount: 21, merchant: merchantA, fee: 0.5355 })
   await seed({ venue: venues.dest, method: 'CREDIT_CARD', amount: 21, merchant: merchantA, fee: 0.5355 })
+  // Porcentajes exactos aunque la lectura agrupe por comercio (Codex r4 #3): crédito 100 (A) + 100.33 (B), débito 59.67.
+  await seed({ venue: venues.pct, method: 'CREDIT_CARD', amount: 100, merchant: merchantA })
+  await seed({ venue: venues.pct, method: 'CREDIT_CARD', amount: 100.33, merchant: merchantB })
+  await seed({ venue: venues.pct, method: 'DEBIT_CARD', amount: 59.67, merchant: merchantA })
   // SPEI en línea bien sellado ($200, comisión $2): con el filtro «Otros» el exporte sí debe traerlo (Codex r2 #6).
   await seed({ venue: venues.dest, method: 'BANK_TRANSFER', amount: 200, ecommerce: true, fundsFlow: 'AVOQADO_PROCESSED', feeAmount: 2 })
   // Transferencia vieja sin `fundsFlow`: la autoridad la daría por «depositable» (falsedad conocida) → se queda en otros.
@@ -471,9 +476,10 @@ describe('un solo destino por cobro (tenderSemantics), leído con los cajones', 
     const r = await getSalesSummary(venues.dest, base())
     const b = r.byMerchantAccount?.find(m => m.merchantAccountId === merchantB)
     expect(b?.unprojectedNet).toBe(90)
-    expect((r.settlementCalendar ?? []).flatMap(x => x.byMerchant)).toEqual([])
+    // B no tiene ningún cobro en el calendario (sin costo); A sí (sus dos cobros de $21).
+    expect((r.settlementCalendar ?? []).flatMap(x => x.byMerchant).map(m => m.merchantAccountId)).toEqual([merchantA])
     const { rows } = flattenSalesSummaryForExport(r, ['merchantAccounts'])
-    expect(rows.map(x => x.label)).toEqual(['Comercio B', 'Cobros en línea'])
+    expect(rows.map(x => x.label)).toEqual(['Comercio B', 'Comercio A', 'Cobros en línea'])
   })
 
   it('el exporte con filtro «Efectivo» no lista comercios de tarjeta', async () => {
@@ -497,7 +503,7 @@ describe('un solo destino por cobro (tenderSemantics), leído con los cajones', 
     expect(a?.unprojectedNet).toBe(0)
   })
 
-  it('la MCP / el archivo pueden pedir el estado del periodo («statement»): «Te queda» = suma de sus renglones', async () => {
+  it('el aplanador del exporte (lo usa la MCP) arma el estado del periodo («statement»): «Te queda» = suma de sus renglones', async () => {
     const r = await getSalesSummary(venues.dest, base())
     const { rows } = flattenSalesSummaryForExport(r, ['statement'])
     const v = Object.fromEntries(rows.map(x => [x.label, x.amount]))
@@ -507,5 +513,16 @@ describe('un solo destino por cobro (tenderSemantics), leído con los cajones', 
     expect(c(v['Cobraste']! + v['Devoluciones']! + v['Comisiones de Avoqado']! + v['Comisión de plataformas y tipos de pago']!)).toBe(
       v['Te queda'],
     )
+  })
+})
+
+describe('el contrato de siempre de byPaymentMethodDetailed no cambia con la lectura nueva', () => {
+  it('sumas y porcentajes exactos aunque un tipo de tarjeta venga de dos comercios', async () => {
+    const r = await getSalesSummary(venues.pct, base())
+    const card = bucket(r.byPaymentMethodDetailed, 'CARD')!
+    const credito = card.subBuckets?.find(x => x.type === 'CREDIT')
+    expect(credito?.amount).toBe(200.33)
+    expect(credito?.percentage).toBe(77.1)
+    expect(card.amount).toBe(260)
   })
 })
