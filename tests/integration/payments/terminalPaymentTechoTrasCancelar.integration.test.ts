@@ -6,13 +6,15 @@
  * viva y la propiedad quedó en memoria (el «residuo aceptado» de `RemotePaymentInbox.respuestaEnProceso`). El SERVIDOR retuvo la
  * RANURA todo ese tiempo (17 cobros nuevos rebotaron con `REJECTED_TERMINAL_BUSY`) y vetó el «no se cobró» de la cajera (409).
  *
- * La promesa (`docs/audit/2026-11-22-terminal-sigue-cobrando/promesa-servidor.md` del workspace): 5 min después del PRIMER cancel
- * (o del último intento que abrió la terminal), con la terminal todavía contestando ACTIVE y sin ninguna señal de dinero, el vigía
- * suelta la RANURA (`TIMED_OUT/AUTO_RELEASED`, asiento propio). La VENTA queda en duda y cercada; la persona ya puede declarar.
- * Nunca se escribe «no se cobró» por tiempo, y un `Payment` tardío concilia la soltada con 🚨.
+ * La promesa (`docs/audit/2026-11-22-terminal-sigue-cobrando/promesa-servidor.md` del workspace), con la prioridad del founder
+ * («que no se congele la terminal»): DOS relojes desde el PRIMER cancel.
+ *  · RANURA, 30 s: con la terminal todavía contestando ACTIVE, sin intento abierto en 150 s y sin señal de dinero, el vigía la suelta
+ *    (`TIMED_OUT/AUTO_RELEASED`, asiento propio). La terminal es el juez de su lector (su admisión rechaza la venta nueva si cobra).
+ *  · VENTA, 150 s: el veto de la declaración de una persona se levanta. Nunca «no se cobró» por tiempo; un `Payment` tardío
+ *    concilia la soltada con 🚨.
  *
- * El reloj: la base sella `cancelRequestedAt` y `probeActiveAt` con su `NOW()`. Para simular «pasaron 5 min» se corre el sello del
- * cancel hacia atrás (`cancelHace`) y la terminal vuelve a contestar ACTIVE (fresca), como hace en la calle cada 30 s.
+ * El reloj: la base sella `cancelRequestedAt` y `probeActiveAt` con su `NOW()`. Para simular el paso del tiempo se corre el sello
+ * del cancel hacia atrás (`cancelHace`) y la terminal vuelve a contestar ACTIVE (fresca), como hace en la calle cada 30 s.
  */
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
@@ -25,7 +27,7 @@ import { TerminalPaymentWatchdogJob } from '@/jobs/terminal-payment-watchdog.job
 import { TerminalBusyError } from '@/errors/AppError'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
-import { _olvidarTodoParaPruebas } from '@/services/tpv/avisosNoGuardados'
+import { _olvidarTodoParaPruebas, registrarAvisoNoGuardado } from '@/services/tpv/avisosNoGuardados'
 import { crearFixture, exigirBaseDesechable, exigir, type Fixture } from './webhookCheckpoint.fixture'
 
 jest.mock('@/communication/sockets/managers/socketManager', () => {
@@ -39,7 +41,9 @@ jest.mock('@/communication/sockets/terminal-registry', () => ({
 jest.mock('@/services/alerts/opsAlert.service', () => ({ sendOpsAlert: jest.fn() }))
 
 const svc = terminalPaymentService as any
-const TECHO_MS = 5 * 60_000
+/** La RANURA: 30 s desde el primer cancel. La VENTA (el veto de la persona) y la ventana de un intento: 150 s. */
+const TECHO_MS = 30_000
+const VENTA_MS = 150_000
 /** El asiento de este techo: la RANURA se soltó; la venta sigue pendiente de confirmar. */
 const SOLTADA_POR_EL_TECHO = 'TERMINAL_PAYMENT_SLOT_RELEASED_CANCEL_CEILING'
 /** Lo que contestaron la PAX 2.16.0 y la Nexgo 2.20.0 del incidente: «sigo cobrando», sin cerrar. */
@@ -92,6 +96,18 @@ const ventaCercada = (orderId: string) => terminalPaymentService.hasChargeBlocki
 const vigia = () => new TerminalPaymentWatchdogJob().run()
 const asientos = (entityId: string) =>
   prisma.activityLog.findMany({ where: { venueId: f.venueId, action: SOLTADA_POR_EL_TECHO, entityId } })
+/** El rechazo del banco por el MISMO núcleo que la declaración (lo que hace `reconcileBankDeclined`, sin tragarse el código). */
+const rechazoDelBanco = (requestId: string, attemptId: string) =>
+  reconcileUncharged(
+    { venueId: f.venueId, requestId, actorStaffId: null, source: 'WEBHOOK' },
+    {
+      requestId,
+      resolutionId: randomUUID(),
+      statement: 'BANK_DECLINED',
+      statementVersion: 1,
+      bank: { origen: 'ANGELPAY', eventLogId: `evento-${randomUUID().slice(0, 8)}`, attemptId },
+    },
+  )
 const declarar = (requestId: string) =>
   reconcileUncharged(
     { venueId: f.venueId, requestId, actorStaffId: f.staffId, source: 'MOBILE' },
@@ -111,13 +127,16 @@ const intentoHace = async (requestId: string, ms: number) => {
   })
   return attemptId
 }
-/** La entrega DURABLE de una TPV 2.16.0 / 2.20.0: anuncia la capacidad de ejecución v1 (la que veta la declaración hoy). */
-const entrega = () => ({
+/**
+ * La entrega DURABLE de una TPV 2.16.0 / 2.20.0: anuncia la capacidad de ejecución v1 (la que veta la declaración hoy). Con
+ * `executionVersion: null`, la de una TPV 2.12.5 / 2.13.x (sin la capacidad).
+ */
+const entrega = (executionVersion: number | null = 1) => ({
   protocol: 'DURABLE',
   ackVersion: 1,
   cancelDispositionVersion: 2,
   probeVersion: 1,
-  executionVersion: 1,
+  ...(executionVersion === null ? {} : { executionVersion }),
   socketId: SOCKET,
   at: new Date().toISOString(),
   replay: false,
@@ -140,14 +159,14 @@ const seEntrego = (requestId: string) =>
  * El incidente hasta la duda, por las rutas reales: la solicitud llegó a la terminal, la tablet cancela, la terminal contesta
  * «sigo» a la disposición del cancel, el vigía la deja UNKNOWN a los 30 s y la sonda sigue diciendo «sigo».
  */
-async function incidente() {
+async function incidente(over: { acknowledgedAt?: Date | null; executionVersion?: number | null } = {}) {
   const venta = await f.nuevaVenta(100)
   const solicitud = await f.solicitud({
     orderId: venta.id,
     status: 'SENT',
-    acknowledgedAt: new Date(),
+    acknowledgedAt: 'acknowledgedAt' in over ? over.acknowledgedAt : new Date(),
     lastDeliveredAt: new Date(),
-    deliveryProvenance: { deliveries: [entrega()] },
+    deliveryProvenance: { deliveries: [entrega(over.executionVersion === undefined ? 1 : over.executionVersion)] },
   })
   const { requestId } = solicitud
   const cancel = await terminalPaymentService.cancelPayment(f.serial, requestId, 'Cancelado desde el POS', f.venueId)
@@ -159,15 +178,16 @@ async function incidente() {
   return { requestId, venta }
 }
 
-/** Ya pasó el techo: el cancel fue hace 5 min y 1 s, y la terminal acaba de volver a decir «sigo». */
-async function pasaElTecho(requestId: string) {
-  await cancelHace(requestId, TECHO_MS + 1_000)
+/** Ya pasó el techo de la RANURA (o el de la VENTA): el cancel fue hace 31 s (o 151 s) y la terminal acaba de volver a decir «sigo». */
+async function pasaElTecho(requestId: string, ms = TECHO_MS + 1_000) {
+  await cancelHace(requestId, ms)
   await sigoCobrando(requestId)
 }
+const pasaElTechoDeLaVenta = (requestId: string) => pasaElTecho(requestId, VENTA_MS + 1_000)
 
-describe('D26 · tras el cancel del POS, «sigo cobrando» sin dinero no retiene la RANURA más allá del techo', () => {
+describe('D26 · RANURA: 30 s después del cancel del POS, «sigo cobrando» sin intento reciente ni dinero no la retiene', () => {
   it.each(['heredado', 'estricto'] as const)(
-    '%s: el incidente — a los 5 min la ranura se suelta (TIMED_OUT/AUTO_RELEASED, un asiento), la OTRA venta entra y la MISMA rebota',
+    '%s: el incidente — a los 30 s la ranura se suelta (TIMED_OUT/AUTO_RELEASED, un asiento), la OTRA venta entra y la MISMA rebota',
     async regimen => {
       if (regimen === 'estricto') {
         await prisma.venue.update({
@@ -202,7 +222,7 @@ describe('D26 · tras el cancel del POS, «sigo cobrando» sin dinero no retiene
       await vigia()
       const [asiento] = await asientos(r.id)
       expect(await asientos(r.id)).toHaveLength(1)
-      expect(asiento.data).toMatchObject({ requestId, orderId: venta.id, techoMs: TECHO_MS })
+      expect(asiento.data).toMatchObject({ requestId, orderId: venta.id, techoMs: TECHO_MS, ventanaDeEjecucionMs: VENTA_MS })
 
       // El cobro del siguiente cliente (otra venta) se ENTREGA a la terminal: la admisión ya no la ve ocupada.
       const otra = await f.nuevaVenta(100)
@@ -217,9 +237,9 @@ describe('D26 · tras el cancel del POS, «sigo cobrando» sin dinero no retiene
     },
   )
 
-  it('antes del techo no se suelta nada', async () => {
+  it('antes de los 30 s no se suelta nada', async () => {
     const { requestId } = await incidente()
-    await cancelHace(requestId, TECHO_MS - 15_000)
+    await cancelHace(requestId, TECHO_MS - 10_000)
     await sigoCobrando(requestId)
     await vigia()
     expect(await fila(requestId)).toMatchObject({ status: 'UNKNOWN' })
@@ -247,28 +267,25 @@ describe('D26 · tras el cancel del POS, «sigo cobrando» sin dinero no retiene
 
   it('una terminal que dejó de contestar (último «sigo» hace más de 2 min) no entra: le queda el reloj de 20 min', async () => {
     const { requestId } = await incidente()
-    await cancelHace(requestId, TECHO_MS + 60_000)
+    await cancelHace(requestId, VENTA_MS + 60_000)
     await activaHace(requestId, 3 * 60_000)
     await vigia()
     expect(await fila(requestId)).toMatchObject({ status: 'UNKNOWN' })
     expect(await ocupada()).toBe(true)
   })
 
-  it('un intento que la terminal abre DESPUÉS del cancel es ejecución real: el reloj cuenta desde él', async () => {
+  it('un intento abierto en los últimos 150 s es ejecución real: retiene la ranura y el veto; pasado eso, se suelta', async () => {
     const { requestId } = await incidente()
-    await cancelHace(requestId, TECHO_MS + 60_000)
-    await intentoHace(requestId, 60_000) // el mesero volvió a pasar la tarjeta hace 1 min
+    await cancelHace(requestId, VENTA_MS + 60_000)
+    await intentoHace(requestId, 60_000) // la Nexgo abrió un intento hace 1 min
     await sigoCobrando(requestId)
     await vigia()
     expect(await fila(requestId)).toMatchObject({ status: 'UNKNOWN' })
     expect(await ocupada()).toBe(true)
-    // …y la persona tampoco puede declarar: con ejecución real el veto queda como hoy.
-    await expect(declarar(requestId)).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
 
-    // 5 min después de ESE intento, sin nada más, ya se suelta.
     await prisma.terminalPaymentAttemptLink.updateMany({
       where: { requestId },
-      data: { createdAt: new Date(Date.now() - TECHO_MS - 1_000) },
+      data: { createdAt: new Date(Date.now() - VENTA_MS - 1_000) },
     })
     await vigia()
     expect(await fila(requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
@@ -276,7 +293,7 @@ describe('D26 · tras el cancel del POS, «sigo cobrando» sin dinero no retiene
 
   it('el aviso APROBADO del banco de un intento ligado retiene: el techo no suelta con dinero a la vista', async () => {
     const { requestId } = await incidente()
-    const attemptId = await intentoHace(requestId, TECHO_MS + 120_000) // abierto ANTES del cancel
+    const attemptId = await intentoHace(requestId, 10 * 60_000) // abierto ANTES del cancel
     await prisma.providerEventLog.create({
       data: {
         provider: 'PAYMENT_PROCESSOR',
@@ -295,6 +312,16 @@ describe('D26 · tras el cancel del POS, «sigo cobrando» sin dinero no retiene
     expect(await asientos(r.id)).toHaveLength(0)
   })
 
+  it('Codex r1 #4: un APROBADO firmado que el receptor no pudo guardar (sólo en memoria) retiene la ranura y el veto', async () => {
+    const { requestId } = await incidente()
+    const attemptId = await intentoHace(requestId, 10 * 60_000)
+    registrarAvisoNoGuardado({ merchantAccountId: f.merchantId, attemptId, posibleDinero: true })
+    await pasaElTechoDeLaVenta(requestId)
+    await vigia()
+    expect(await fila(requestId)).toMatchObject({ status: 'UNKNOWN' })
+    expect(await ocupada()).toBe(true)
+  })
+
   it('un Payment ya registrado se concilia en vez de soltar', async () => {
     const { requestId, venta } = await incidente()
     await pasaElTecho(requestId)
@@ -304,12 +331,16 @@ describe('D26 · tras el cancel del POS, «sigo cobrando» sin dinero no retiene
     expect(await asientos((await fila(requestId)).id)).toHaveLength(0)
   })
 
-  it('un Payment que llega DESPUÉS de soltar concilia la venta a COMPLETED y grita 🚨', async () => {
+  it('un Payment que llega DESPUÉS de soltar concilia la venta a COMPLETED y grita 🚨 — también pasados los 30 min del barrido', async () => {
     const { requestId, venta } = await incidente()
     await pasaElTecho(requestId)
     await vigia()
-    expect(await fila(requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
+    const soltada = await fila(requestId)
+    expect(soltada).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
 
+    // Codex r1 #3: la cola de la terminal registra 40 min después; el barrido de las soltadas sigue 3 h desde el cancel.
+    await prisma.$executeRaw`UPDATE "TerminalPaymentRequest" SET "updatedAt" = (NOW() AT TIME ZONE 'UTC') - interval '40 minutes',
+      "cancelRequestedAt" = (NOW() AT TIME ZONE 'UTC') - interval '41 minutes' WHERE "id" = ${soltada.id}`
     const pago = await pagoDeLaSolicitud(requestId, venta.id)
     await vigia()
     expect(await fila(requestId)).toMatchObject({ status: 'COMPLETED', paymentId: pago.id })
@@ -320,19 +351,40 @@ describe('D26 · tras el cancel del POS, «sigo cobrando» sin dinero no retiene
   })
 })
 
-describe('D26 · la persona puede declarar «no se cobró» una vez que el techo soltó la ranura', () => {
-  it('tras el techo, la declaración ya no se veta por el «sigo» de la TPV v1; queda FAILED/OPERATOR_RECONCILED_NO_CHARGE', async () => {
+describe('D26 · VENTA: la persona puede declarar «no se cobró» 150 s después del cancel, con la ranura ya suelta', () => {
+  it('a los 30 s la ranura se suelta pero el veto sigue; a los 150 s la persona ya declara (FAILED/OPERATOR_RECONCILED_NO_CHARGE)', async () => {
     const { requestId, venta } = await incidente()
     // Hoy (el incidente): con la ranura apartada, la declaración rebota.
     await expect(declarar(requestId)).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
 
     await pasaElTecho(requestId)
     await vigia()
-    // La terminal sigue diciendo «sigo» después de soltar: no cambia nada.
-    await sigoCobrando(requestId)
+    expect(await ocupada()).toBe(false)
+    // Ranura suelta a los 30 s, pero la VENTA conserva su veto hasta los 150 s.
+    await expect(declarar(requestId)).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
+
+    await pasaElTechoDeLaVenta(requestId) // la terminal sigue diciendo «sigo» después de soltar: no cambia nada
     await expect(declarar(requestId)).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
     expect(await fila(requestId)).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' })
     expect(await ventaCercada(venta.id)).toBe(false)
+  })
+
+  it('Codex r1 #7: con el ACK perdido, el «sigo» posterior al cancel prueba que la terminal la recibió y la persona declara', async () => {
+    const { requestId } = await incidente({ acknowledgedAt: null })
+    await pasaElTecho(requestId)
+    await vigia()
+    await pasaElTechoDeLaVenta(requestId)
+    await expect(declarar(requestId)).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+
+  it('un intento abierto en los últimos 150 s conserva el veto de la persona aunque la ranura ya esté suelta', async () => {
+    const { requestId } = await incidente()
+    const attemptId = await intentoHace(requestId, VENTA_MS + 30_000)
+    await pasaElTechoDeLaVenta(requestId)
+    await vigia()
+    expect(await fila(requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
+    await prisma.terminalPaymentAttemptLink.updateMany({ where: { attemptId }, data: { createdAt: new Date(Date.now() - 60_000) } })
+    await expect(declarar(requestId)).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
   })
 
   it('una ranura soltada SIN cancel del POS (el reloj de 20 min) conserva el veto de la TPV v1, como hoy', async () => {
@@ -348,6 +400,32 @@ describe('D26 · la persona puede declarar «no se cobró» una vez que el techo
     })
     await sigoCobrando(requestId)
     await expect(declarar(requestId)).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
+  })
+
+  it('Codex r1 #2: el rechazo del BANCO sobre una TPV sin la capacidad (2.12.5) sigue vetado por el «sigo» posterior al cancel', async () => {
+    const { requestId } = await incidente({ executionVersion: null })
+    const attemptId = await intentoHace(requestId, 10 * 60_000)
+    await pasaElTechoDeLaVenta(requestId)
+    await vigia()
+    expect(await fila(requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
+    await expect(rechazoDelBanco(requestId, attemptId)).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
+    expect(await fila(requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
+  })
+
+  it('control: sin cancel del POS, el rechazo del banco sobre esa TPV con la ranura suelta pasa como hoy (no cambia)', async () => {
+    const venta = await f.nuevaVenta(100)
+    const { requestId } = await f.solicitud({
+      orderId: venta.id,
+      status: 'TIMED_OUT',
+      failureCode: 'AUTO_RELEASED',
+      acknowledgedAt: new Date(),
+      lastDeliveredAt: new Date(),
+      expiresAt: new Date(Date.now() - 60 * 60_000),
+      deliveryProvenance: { deliveries: [entrega(null)] },
+    })
+    const attemptId = await intentoHace(requestId, 10 * 60_000)
+    await sigoCobrando(requestId)
+    await expect(rechazoDelBanco(requestId, attemptId)).resolves.toMatchObject({ kind: 'BANK_DECLINED' })
   })
 })
 
