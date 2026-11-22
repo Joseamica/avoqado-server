@@ -8,7 +8,7 @@ requiredPermissions:
   - menu:read
 versionMin: 2.25.4
 sourceRepo: avoqado-android
-sourceRef: 843c15ae06bf68dd0d9c755525a9971e701052b7
+sourceRef: 9b6b04105532c39e5e721772090ec66092242c3e
 keywords:
   - agregar producto
   - tomar la orden
