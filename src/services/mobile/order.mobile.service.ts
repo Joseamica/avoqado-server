@@ -7399,7 +7399,10 @@ export async function returnGiftBalanceAndCancelOrder(
 
       const cancelada = await tx.order.update({
         where: { id: orderId, venueId },
-        data: { status: 'CANCELLED', version: { increment: 1 } },
+        // hz:e82938e1:D39 (como D38 en `cancelOrderInTransaction`): las comandas ya se retiraron (arriba); la marca de «por mandar a
+        // cocina» se va con la anulación. Si se quedaba y el dinero ya capturado reabría la cuenta antes del barrido (cada minuto), el
+        // barrido armaba la comanda de una cancelada reabierta, y la regla S1 dice que no vuelve a la cocina.
+        data: { status: 'CANCELLED', kitchenPendingAt: null, version: { increment: 1 } },
         select: { tableId: true },
       })
       const boundTable = scope.tables.find(table => table.currentOrderId === orderId)

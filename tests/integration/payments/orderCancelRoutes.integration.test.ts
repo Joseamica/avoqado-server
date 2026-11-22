@@ -348,7 +348,7 @@ async function escenarioRutaRetiene(orderId: string, ejecutar: () => Promise<unk
 }
 
 const estado = async (id: string) =>
-  prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true, paymentStatus: true, version: true } })
+  prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true, paymentStatus: true, version: true, kitchenPendingAt: true } })
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 describe('DELETE del dashboard (deleteOrder)', () => {
@@ -758,6 +758,38 @@ describe('Checkout de vales (cancelAreaTicketCheckout)', () => {
     await cancelar()
     expect((await estado(orden.id)).status).toBe('CANCELLED')
     expect((await prisma.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: sesion.id } })).status).toBe('CANCELLED')
+  })
+
+  it('🔴 D39: cancelar la venta de vales limpia la marca de «por mandar a cocina» de su orden', async () => {
+    const { orden, cancelar } = await sesionDeVales()
+    await prisma.order.update({ where: { id: orden.id }, data: { kitchenPendingAt: new Date() } })
+    await cancelar()
+    expect(await estado(orden.id)).toMatchObject({ status: 'CANCELLED', kitchenPendingAt: null })
+  })
+})
+
+// hz:e82938e1:D39: como `cancelOrderInTransaction` (D38). Una cuenta con una ronda por mandar a cocina (su marca) que se anula por el
+// panel: antes la marca sobrevivía y, si el dinero ya capturado reabría la cuenta antes del barrido (cada minuto), el barrido la armaba
+// (regla S1: una cancelada reabierta no vuelve a la cocina). Sólo la anulación la limpia: otra edición la deja como estaba.
+describe('D39: anular por el panel limpia la marca de «por mandar a cocina»', () => {
+  const marcada = () => nuevaOrden({ kitchenPendingAt: new Date() })
+
+  it('🔴 DELETE (deleteOrder)', async () => {
+    const orden = await marcada()
+    await deleteOrder(venueId, orden.id)
+    expect(await estado(orden.id)).toMatchObject({ status: 'CANCELLED', kitchenPendingAt: null })
+  })
+
+  it.each(['CANCELLED', 'DELETED'])('🔴 PUT con status %s (updateOrder)', async status => {
+    const orden = await marcada()
+    await updateOrder(venueId, orden.id, { status } as any)
+    expect(await estado(orden.id)).toMatchObject({ status, kitchenPendingAt: null })
+  })
+
+  it('control: un PUT que no anula deja la marca de la ronda como estaba', async () => {
+    const orden = await marcada()
+    await updateOrder(venueId, orden.id, { customerName: 'Ana' } as any)
+    expect((await estado(orden.id)).kitchenPendingAt).toEqual(orden.kitchenPendingAt)
   })
 })
 

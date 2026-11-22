@@ -102,3 +102,26 @@ describe('R9: panel protege todas las ramas de edición de una cuenta anulada', 
     await expect(updateOrder('venue', 'order', { customerName: 'Otro' })).rejects.toMatchObject({ statusCode: 404 })
   })
 })
+
+// hz:e82938e1:D39: como `cancelOrderInTransaction` (D38). Si anular por el PUT dejaba la marca de «por mandar a cocina» (la de una ronda)
+// y el dinero ya capturado reabría la cuenta antes del barrido (cada minuto), el barrido armaba la comanda de una cancelada reabierta
+// (regla S1: no vuelve a la cocina). Sólo la ANULACIÓN la limpia: cualquier otra edición deja la marca de la ronda como estaba.
+describe('D39: anular por el PUT limpia la marca de «por mandar a cocina»', () => {
+  it.each(['CANCELLED', 'DELETED'])('🔴 pasar una viva a %s limpia la marca en la misma escritura que la anula', async status => {
+    row.status = 'PENDING'
+    await updateOrder('venue', 'order', { status } as any)
+    expect(db.order.update).toHaveBeenCalledTimes(1)
+    expect(db.order.update.mock.calls[0][0].data).toMatchObject({ status, kitchenPendingAt: null })
+  })
+  it('editar una viva sin anularla no toca la marca (la ronda que espera a la cocina sigue esperando)', async () => {
+    row.status = 'PENDING'
+    await updateOrder('venue', 'order', { customerName: 'Nombre' })
+    expect(db.order.update).toHaveBeenCalledTimes(1)
+    expect(db.order.update.mock.calls[0][0].data).not.toHaveProperty('kitchenPendingAt')
+  })
+  it('reenviar la MISMA anulación no vuelve a escribir la marca', async () => {
+    row.status = 'CANCELLED'
+    await updateOrder('venue', 'order', { status: 'CANCELLED' } as any)
+    expect(db.order.update.mock.calls[0][0].data).not.toHaveProperty('kitchenPendingAt')
+  })
+})

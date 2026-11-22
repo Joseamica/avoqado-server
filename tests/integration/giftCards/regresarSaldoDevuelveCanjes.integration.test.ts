@@ -448,6 +448,47 @@ describe('lo que sigue después de cancelar', () => {
     expect(await bitacoras(orderId)).toBe(1)
   })
 
+  // hz:e82938e1:D39: la cuenta tenía una ronda por mandar a cocina (su marca) cuando se regresó el saldo. Antes la marca sobrevivía a la
+  // anulación y, si el dinero ya capturado reabría la cuenta antes del barrido (cada minuto), el barrido la armaba: la regla S1 dice que
+  // una cancelada reabierta no vuelve a la cocina. El barrido sólo lee cuentas con la marca puesta.
+  it('🔴 D39: la marca de «por mandar a cocina» se va con la anulación y el dinero que revive la venta no la vuelve a poner', async () => {
+    const c = await cliente()
+    const orderId = await cuenta(c)
+    const t = await tarjeta(1000)
+    await abonar(orderId, t.codigo, 200)
+    await prisma.order.update({ where: { id: orderId }, data: { kitchenPendingAt: new Date() } }) // la ronda que esperaba a la cocina
+    await regresar(orderId, folio('k'))
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ status: 'CANCELLED', kitchenPendingAt: null })
+
+    await recordOrderPayment(
+      venueId,
+      orderId,
+      {
+        venueId,
+        amount: 77000,
+        tip: 0,
+        status: 'COMPLETED',
+        method: 'CREDIT_CARD',
+        source: 'TPV',
+        splitType: 'FULLPAYMENT',
+        tpvId: venueId,
+        staffId,
+        paidProductsId: [],
+        idempotencyKey: randomUUID(),
+        currency: 'MXN',
+        isInternational: false,
+        authorizationNumber: 'TEST-AUTH-ONLY',
+        referenceNumber: randomUUID(),
+        typeOfCard: 'CREDIT',
+      } as never,
+      staffId,
+    )
+
+    const v = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    expect(v.status).not.toBe('CANCELLED') // el dinero la revivió
+    expect(v.kitchenPendingAt).toBeNull() // y el barrido no tiene nada que armar
+  })
+
   it('«quitar el descuento» después de cancelar no devuelve otra vez', async () => {
     const c = await cliente(10_000)
     const orderId = await cuenta(c)
