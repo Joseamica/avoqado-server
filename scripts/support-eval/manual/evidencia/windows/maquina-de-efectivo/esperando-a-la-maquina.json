@@ -151,20 +151,19 @@
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado) contra el simulador QuickPay Mini V1.2 en la Mac (Tailscale)",
-    "version": "2.25.54-escritorio (89b76a79) en el recorrido; la página cita e7d51ad0 (árbol 2.25.56, sin publicar)",
-    "fecha": "2026-11-21",
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado) contra el simulador QuickPay Mini V1.2 en la Mac (Tailscale) y el SERVIDOR de prueba del 3021 (6cacfa9a6, copia av-db-25-maquina)",
+    "version": "e7d51ad0 (árbol versionName 2.25.56, sin publicar): paquete de prueba avoqado-pos-windows-prueba.zip armado en el WSL del Alien con :pos:empaquetarWindows (3 min 25 s) el 22-nov a las 11:00:06 UTC; su sha256 se midió a las ~11:03 UTC, antes de los casos, y el paquete se borró en la limpieza del full-testing",
+    "apkSha256": "27f16df63688e261b0e457e1c0dae8cea38c110ff09acc6d8e27f51a1f1d9246",
+    "fecha": "2026-11-22",
     "fotos": [
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c08b.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c08f.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c09e.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c10d.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c10e.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/d03-dudas.jpg"
+      "docs/audit/2026-11-17-maquina-de-efectivo/full-testing/fotos/c10a.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/full-testing/fotos/c10c.jpg"
     ],
-    "filasCreadas": ["Folios AQMWRBH9C3CSKR, AQMWRBVJT2BFB9 y AQMWRBN39O5AZC (Mindform de la siembra, base av-db-25-maquina, desechable)"],
-    "nota": "Recorrido real del 21-nov-2026 (docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a.md) en el POS de WINDOWS del Alienware contra el simulador V1.2 de APS: rama feat/maquina-de-efectivo-1a en 89b76a79 («Versión 2.25.54-escritorio»). Casos 8 (acuse perdido: «Esperando a la máquina… No lo cobres otra vez» y volver a cobrar lleva a la misma pantalla), 9 (POS cerrado a media venta: la duda sube sola al reabrir) y 10 (red cortada en el cierre; resuelto en el panel, la PC se entera sola en 23 s): PASS. No se marca PROBADO porque el paquete de ese recorrido se reescribió el 22-nov (~11:00 UTC, ~/maquina1a/salida del Alien) y su huella se perdió; además b34dc2a3 (E1) cambió después del recorrido «Te debemos» en la pantalla de éxito, «Registrando la venta…» y el título «Cobro cancelado». Lo sella el full-testing sobre e7d51ad0 (paquete avoqado-pos-windows-prueba.zip, sha256 27f16df63688e261b0e457e1c0dae8cea38c110ff09acc6d8e27f51a1f1d9246): al pasar, estado PROBADO con esa huella, su fecha y sus fotos, y deviceTested en la página."
+    "filasCreadas": [
+      "Folio AQMWRRNE2TRZXU (caso 10, resuelto en el panel, PAGADO GERENTE) y la duda del caso 9 (POS cerrado a media venta, resuelta en el DASHBOARD) (copia av-db-25-maquina)"
+    ],
+    "nota": "Full-testing v2 del 22-nov-2026 (docs/audit/2026-11-17-maquina-de-efectivo/full-testing/report.md), T0 2026-11-22 10:57:19 UTC, sobre e7d51ad0 (incluye b34dc2a3). Casos 10 («Esperando a la máquina: un gerente lo resuelve en el panel · No lo cobres otra vez»; resuelto en el panel, la PC se enteró sola en ~1 min y enseñó «Revisar en el panel · Folio …») y 9 (la PC subió la duda sola al reabrir y el DASHBOARD la resolvió): PASS."
   },
   "codex": {
     "lote": 12,

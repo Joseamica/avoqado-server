@@ -271,27 +271,21 @@
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado) contra el simulador QuickPay Mini V1.2 en la Mac (Tailscale)",
-    "version": "2.25.54-escritorio (89b76a79) en el recorrido; la página cita e7d51ad0 (árbol 2.25.56, sin publicar)",
-    "fecha": "2026-11-21",
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado) contra el simulador QuickPay Mini V1.2 en la Mac (Tailscale) y el SERVIDOR de prueba del 3021 (6cacfa9a6, copia av-db-25-maquina)",
+    "version": "e7d51ad0 (árbol versionName 2.25.56, sin publicar): paquete de prueba avoqado-pos-windows-prueba.zip armado en el WSL del Alien con :pos:empaquetarWindows (3 min 25 s) el 22-nov a las 11:00:06 UTC; su sha256 se midió a las ~11:03 UTC, antes de los casos, y el paquete se borró en la limpieza del full-testing",
+    "apkSha256": "27f16df63688e261b0e457e1c0dae8cea38c110ff09acc6d8e27f51a1f1d9246",
+    "fecha": "2026-11-22",
     "fotos": [
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c01b.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c02g.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c03c.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c04c.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c05d.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c06a.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c06b.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c07b.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c11j.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c13f.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/rb7.jpg"
+      "docs/audit/2026-11-17-maquina-de-efectivo/full-testing/fotos/c01c.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/full-testing/fotos/c03c.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/full-testing/fotos/c07b.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/full-testing/fotos/c11h.jpg"
     ],
     "filasCreadas": [
-      "Folios AQMWRAU7CZPRGQ, AQMWRAX70W3SQB, AQMWRB7HK9R2PS, AQMWRBAEMJ9RYV, AQMWRC23GGSKGJ y AQMWRC7O9MEIQM con sus órdenes y pagos (Mindform de la siembra, base av-db-25-maquina, desechable)"
+      "Folios AQMWRQM0FIVT29 (caso 1), AQMWRQPKKSB3H2 (red lenta), AQMWRQSAL16Z14 (caso 3) y AQMWRR7DSDQFV9 (caso 11) con su orden y un pago cada uno; el GUARDADO del caso 6 sin orden ni pago (copia av-db-25-maquina, turno A cmwrql21l000fwaosdef1j1dw)"
     ],
-    "nota": "Recorrido real del 21-nov-2026 (docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a.md) en el POS de WINDOWS del Alienware contra el simulador V1.2 de APS: rama feat/maquina-de-efectivo-1a en 89b76a79 («Versión 2.25.54-escritorio»). Casos 1 (cambio), 2 (exacto con propina), 4 (centavos), 5 (cancelar y devolver), 6 (¿Sigues ahí? y cancel 2), 7 (ocupada), 11 (sin internet), 13 (precio que bajó) y R-b (restaurada): PASS. Caso 3: el «Te debemos» no salía en la pantalla de éxito (FAIL, arreglado después en b34dc2a3). R-a (tarjeta) y R-c (reserva): NO PROBADO. No se marca PROBADO porque el paquete de ese recorrido se reescribió el 22-nov (~11:00 UTC, ~/maquina1a/salida del Alien) y su huella se perdió; además b34dc2a3 (E1) cambió después del recorrido «Te debemos» en la pantalla de éxito, «Registrando la venta…» y el título «Cobro cancelado». Lo sella el full-testing sobre e7d51ad0 (paquete avoqado-pos-windows-prueba.zip, sha256 27f16df63688e261b0e457e1c0dae8cea38c110ff09acc6d8e27f51a1f1d9246): al pasar, estado PROBADO con esa huella, su fecha y sus fotos, y deviceTested en la página."
+    "nota": "Full-testing v2 del 22-nov-2026 (docs/audit/2026-11-17-maquina-de-efectivo/full-testing/report.md), T0 2026-11-22 10:57:19 UTC, sobre e7d51ad0 (incluye b34dc2a3). Casos 1 (cobro con cambio: «Cambio: $220.00 · Venta sincronizada»), red lenta («Registrando la venta…» y luego «Venta sincronizada»), 3 («Te debemos $220.00 de cambio: pasa a caja a cobrarlo · Folio …» en la pantalla), 5b («Cobro cancelado»), 6 («¿Sigues ahí? Toca para continuar» a los 120 s y «Se canceló el cobro» sin monto), doble clic (1 quote, 1 paycash) y 11 (sin internet: «Se sincronizará cuando haya conexión» y subió sola en 15 s): PASS. NO PROBADO: venta que intentó tarjeta y reserva (cubiertas por PaymentFlowViewModelMaquinaTest y MaquinaDeEfectivoTest) y el papel (sin impresora). Centavos, ocupada y restaurada se vieron en el recorrido del 21-nov (89b76a79, casos 4, 7 y R-b)."
   },
   "codex": {
     "lote": 12,

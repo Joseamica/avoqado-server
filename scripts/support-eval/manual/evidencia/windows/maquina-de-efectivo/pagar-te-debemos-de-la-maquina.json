@@ -164,20 +164,21 @@
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado) contra el simulador QuickPay Mini V1.2 en la Mac (Tailscale)",
-    "version": "2.25.54-escritorio (89b76a79) en el recorrido; la página cita e7d51ad0 (árbol 2.25.56, sin publicar)",
-    "fecha": "2026-11-21",
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado) contra el simulador QuickPay Mini V1.2 en la Mac (Tailscale) y el SERVIDOR de prueba del 3021 (6cacfa9a6, copia av-db-25-maquina)",
+    "version": "e7d51ad0 (árbol versionName 2.25.56, sin publicar): paquete de prueba avoqado-pos-windows-prueba.zip armado en el WSL del Alien con :pos:empaquetarWindows (3 min 25 s) el 22-nov a las 11:00:06 UTC; su sha256 se midió a las ~11:03 UTC, antes de los casos, y el paquete se borró en la limpieza del full-testing",
+    "apkSha256": "27f16df63688e261b0e457e1c0dae8cea38c110ff09acc6d8e27f51a1f1d9246",
+    "fecha": "2026-11-22",
     "fotos": [
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c03c.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c03f.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c03g.jpg",
-      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c05e.jpg"
+      "docs/audit/2026-11-17-maquina-de-efectivo/full-testing/fotos/c03c.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/full-testing/fotos/c05c.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/full-testing/fotos/c09c.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/c03f.jpg"
     ],
     "filasCreadas": [
-      "CashDrawerEvent PAY_OUT 220.00 «Te debemos folio AQMWRB0JOMZWAE» en el turno cmwrarrae000lwa48dz6kul26 (base av-db-25-maquina, desechable)"
+      "Deudas AQMWRQSAL16Z14 $220 (CAMBIO) y AQMWRQUQABUP5S $100 (NO_DEVUELTO); PAY_OUT 280.00 de la devolución del caso 15 en el turno A (copia av-db-25-maquina)"
     ],
-    "nota": "Recorrido real del 21-nov-2026 (docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a.md) en el POS de WINDOWS del Alienware contra el simulador V1.2 de APS: rama feat/maquina-de-efectivo-1a en 89b76a79 («Versión 2.25.54-escritorio»). Caso 3 (la máquina sin cambio: debe $220) y 3b: Caja › Egreso $220 con concepto «Te debemos folio AQMWRB0JOMZWAE» → PAY_OUT 220.00 con esa nota; Ajustes › Máquina listó «Folio AQMWRB0JOMZWAE · $220.00 · Imprimir comprobante». Caso 5b: «Te debemos $100.00: pasa a caja a cobrarlo · Folio …». Sin impresora: el papel no se vio. No se marca PROBADO porque el paquete de ese recorrido se reescribió el 22-nov (~11:00 UTC, ~/maquina1a/salida del Alien) y su huella se perdió; además b34dc2a3 (E1) cambió después del recorrido «Te debemos» en la pantalla de éxito, «Registrando la venta…» y el título «Cobro cancelado». Lo sella el full-testing sobre e7d51ad0 (paquete avoqado-pos-windows-prueba.zip, sha256 27f16df63688e261b0e457e1c0dae8cea38c110ff09acc6d8e27f51a1f1d9246): al pasar, estado PROBADO con esa huella, su fecha y sus fotos, y deviceTested en la página."
+    "nota": "Full-testing v2 del 22-nov-2026 (docs/audit/2026-11-17-maquina-de-efectivo/full-testing/report.md), T0 2026-11-22 10:57:19 UTC, sobre e7d51ad0 (incluye b34dc2a3). Casos 3 («Te debemos $220.00 de cambio…» con folio), 5b («Te debemos $100.00: pasa a caja a cobrarlo · Folio …») y «Lo que la máquina les debe a clientes» en Ajustes con los dos folios (c09c): PASS; 15: el retiro sale del cajón una sola vez. Los pasos 2-4 (Caja › Egreso con «Te debemos folio …» en Concepto) se vieron en el recorrido del 21-nov (89b76a79, caso 3b, foto recorrido-1a/fotos/c03f.jpg: PAY_OUT 220.00 con esa nota); cashdrawer/ y settings/MoreMenuScreen.kt no cambian entre 89b76a79 y e7d51ad0 (git diff vacío). Sin impresora: el papel no se vio."
   },
   "codex": {
     "lote": 12,

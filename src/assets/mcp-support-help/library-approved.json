@@ -1128,10 +1128,28 @@
       "featureCode": "LOYALTY_PROGRAM",
       "gateKind": "FEATURE"
     },
+    "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo": {
+      "sha256": "d4d8d7fdd4a47f4fe181ce13ca65659970387a9282664ba861378196364317f0",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
     "windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo": {
       "sha256": "8f650e593af6d2086daae26f3b865e613a118b192addad0f7ae9e51b00fc036a",
       "requiredPermissions": [
         "cash-machine:configure"
+      ]
+    },
+    "windows/maquina-de-efectivo/esperando-a-la-maquina": {
+      "sha256": "0c305dc58925b6e560c71cda813da4aed0311aa0bf50878c4c1fced3a9788c45",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina": {
+      "sha256": "8254f717bf902d29fab26453d53ea7f9427fc218c910faed89e4c662b77ad715",
+      "requiredPermissions": [
+        "cash-drawer:pay-out"
       ]
     },
     "windows/mesas/abrir-mesa-y-ordenar": {
