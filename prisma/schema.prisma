@@ -7067,7 +7067,8 @@ model EcommerceMerchant {
   // Basic info (can be inherited from Venue or customized per channel)
   businessName String // "Mi Tienda Online SA"
   rfc          String? // Tax ID (optional initially)
-  contactEmail String  @unique
+  // NO único (D677, 22-nov-2026): cada sucursal tiene su canal y su cuenta de Stripe, y la dueña usa el mismo correo en todas.
+  contactEmail String
   contactPhone String?
   website      String?
 
