@@ -126,7 +126,14 @@ describe('D661 · abrir (= cobrar) un apartado de «Nadie»: sólo desde una caj
       expect({ ruta, status: r.status }).toEqual({ ruta, status: 200 })
     }
     expect(mockCapturar).toHaveBeenCalledTimes(3)
-    expect(mockCapturar).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'ord1', staffId: 'staff1', estimatedMinutes: undefined })
+    // D662 parte 2: aceptar «Mi equipo» lo toca una persona (la pausa sola lo cuenta como respuesta).
+    expect(mockCapturar).toHaveBeenCalledWith({
+      venueId: 'v1',
+      orderId: 'ord1',
+      staffId: 'staff1',
+      estimatedMinutes: undefined,
+      porPersona: true,
+    })
   })
 
   it('una apertura D661 no se registra como «el personal contestó» de «Mi equipo», aunque el negocio haya cambiado de modo entre pagar y abrir', async () => {
@@ -138,8 +145,9 @@ describe('D661 · abrir (= cobrar) un apartado de «Nadie»: sólo desde una caj
     expect((await request(app).post(MOVIL).send({})).body.code).toBe('OPEN_FROM_CAJA')
     // La caja lo abre.
     expect((await request(app).post(TPV).send(ABRIR)).status).toBe(200)
-    // Hoy no existe ningún registro de «el personal contestó» ni contador de pausa (D662 parte 2 no está en la base): abrir no escribe
-    // nada en los ajustes de la tienda (ni latidos, ni pausas), ni consulta el modo de hoy.
+    // D662 parte 2 ya está en la base: abrir no lleva la marca de «el personal contestó» (la captura no la recibe), no escribe nada
+    // en los ajustes de la tienda (ni latidos, ni pausas) ni consulta el modo de hoy.
+    expect(mockCapturar).toHaveBeenLastCalledWith(expect.not.objectContaining({ porPersona: true }))
     for (const escribir of ['update', 'updateMany', 'upsert', 'create'] as const) {
       expect(prismaMock.onlineOrderingSettings[escribir]).not.toHaveBeenCalled()
     }

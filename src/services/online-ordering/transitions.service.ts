@@ -428,17 +428,16 @@ export async function acceptOnlineOrder(i: AcceptInput): Promise<TransitionResul
   })
   if (card > 0) {
     // D661: el modo es el del pedido (se copió del borrador al confirmar). Un apartado de «Nadie» no se «acepta»: lo abre una caja.
-    if (
-      i.abrirPagadoEnLinea !== true &&
+    const nadie =
       (await prisma.onlineOrder.count({
         where: { orderId: i.orderId, venueId: i.venueId, paymentMode: OnlineOrderPaymentMode.CARD_ONLINE, requiresAcceptance: false },
       })) > 0
-    ) {
-      return { outcome: 'OPEN_FROM_CAJA' }
-    }
+    if (nadie && i.abrirPagadoEnLinea !== true) return { outcome: 'OPEN_FROM_CAJA' }
     // Dinámico: el módulo de la captura importa esta máquina de estados.
     const { acceptCardOnlineOrder } = await import('./card/capture.service')
-    return acceptCardOnlineOrder(i)
+    // D661 + D662: abrir un apartado de «Nadie» no es «el personal contestó»: esa marca y la pausa sola son sólo de «Mi equipo».
+    const { porPersona: _toque, ...sinToque } = i
+    return acceptCardOnlineOrder(nadie ? sinToque : i)
   }
   // Tienda híbrida (decisión 18): aceptar un folio es pasarlo a «Por entregar» por el único camino (`prepararFolioPagado`).
   const folio = await prisma.onlineOrder.count({ where: { orderId: i.orderId, venueId: i.venueId, requiresAcceptance: false } })

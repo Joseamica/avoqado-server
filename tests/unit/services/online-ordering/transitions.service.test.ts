@@ -1051,6 +1051,16 @@ describe('D661 (3A): un apartado de tarjeta de «Nadie» se abre (= se cobra) s�
     expect(acceptCardOnlineOrder).toHaveBeenCalledWith({ ...base, abrirPagadoEnLinea: true })
   })
 
+  it('D661 + D662: abrir un apartado de «Nadie» no lleva la marca de persona a la captura; aceptar «Mi equipo» con tarjeta sí', async () => {
+    pedidoQue({ tarjeta: true, nadie: true })
+    await acceptOnlineOrder({ ...base, abrirPagadoEnLinea: true, porPersona: true })
+    expect((acceptCardOnlineOrder as jest.Mock).mock.calls[0][0]).not.toHaveProperty('porPersona')
+    ;(acceptCardOnlineOrder as jest.Mock).mockClear()
+    pedidoQue({ tarjeta: true, nadie: false })
+    await acceptOnlineOrder({ ...base, porPersona: true })
+    expect(acceptCardOnlineOrder).toHaveBeenCalledWith({ ...base, porPersona: true })
+  })
+
   it('«Mi equipo» con tarjeta y los folios de caja aceptan sin el campo, como hoy', async () => {
     pedidoQue({ tarjeta: true, nadie: false })
     await expect(acceptOnlineOrder(base)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
