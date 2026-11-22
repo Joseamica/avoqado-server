@@ -7,7 +7,7 @@ task: emparejar-la-maquina-de-efectivo
 requiredPermissions:
   - cash-machine:configure
 money: false
-versionMin: 2.25.57
+versionMin: 2.25.58
 sourceRepo: avoqado-android
 sourceRef: e7d51ad0634df24ba3522a7364884567fd82009d
 keywords:
