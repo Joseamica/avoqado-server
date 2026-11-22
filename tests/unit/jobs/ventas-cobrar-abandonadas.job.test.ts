@@ -1,7 +1,7 @@
 /**
  * hz:e82938e1:D36, decisión del founder «A con ensayo» (20-nov): la limpieza del SERVIDOR que, tras 24 h, ANULA (nunca borra) las
- * ventas de Cobrar abandonadas que dejaron las TPV viejas — y las 106 que ya existen. Por omisión corre en ENSAYO: no escribe NADA,
- * sólo deja en el log, por negocio, cuántas anularía. Sólo con `LIMPIEZA_VENTAS_COBRAR=ACTIVO` (decisión del founder) anula.
+ * ventas de Cobrar abandonadas que dejaron las TPV viejas — y las 106 que ya existen. ENSAYO no escribe NADA, sólo deja en el log,
+ * por negocio, cuántas anularía. Sin `LIMPIEZA_VENTAS_COBRAR`, en producción anula (founder, 22-nov: «sí, en prod» y «A»).
  * La regla contra Postgres real: tests/integration/jobs/ventas-cobrar-abandonadas.integration.test.ts.
  */
 jest.mock('@/communication/sockets', () => ({
@@ -28,16 +28,38 @@ const sqlCompleto = (llamada: unknown[]) =>
   llamada.map(p => (Array.isArray(p) ? p.join(' ') : p && typeof p === 'object' && 'sql' in (p as any) ? (p as any).sql : '')).join(' ')
 
 describe('modoDeLaLimpiezaDeCobrar — el interruptor', () => {
+  // Founder, 22-nov («sí, en prod» y «A»): sin valor, nace prendida (ACTIVO) SÓLO en el servidor real: NODE_ENV=production Y el
+  // servicio de Render «avoqado-server». Codex d36-activo r1 #1: Fly staging/demo, Docker Compose y un arranque local con
+  // NODE_ENV=production también dicen «production», y no deben anular. El servidor se pasa EXPLÍCITO (objeto): un `undefined` como
+  // argumento heredaría el NODE_ENV=test de Jest (Codex r1 #2).
+  const real = { entorno: 'production', servicio: 'avoqado-server' }
+  // Codex d36-activo r2 (ajeno): una fila con `undefined` toma la variable del entorno; si quien corre la prueba la tiene puesta, la
+  // prueba fallaría sin razón. Se quita mientras corre y se regresa al terminar.
+  const variableDeQuienCorre = process.env.LIMPIEZA_VENTAS_COBRAR
+  beforeAll(() => delete process.env.LIMPIEZA_VENTAS_COBRAR)
+  afterAll(() => {
+    if (variableDeQuienCorre !== undefined) process.env.LIMPIEZA_VENTAS_COBRAR = variableDeQuienCorre
+  })
   it.each([
-    [undefined, 'ENSAYO'],
-    ['', 'ENSAYO'],
-    ['ensayo', 'ENSAYO'],
-    ['cualquier cosa', 'ENSAYO'],
-    ['ACTIVO', 'ACTIVO'],
-    [' activo ', 'ACTIVO'],
-    ['APAGADO', 'APAGADO'],
-  ])('%j ⇒ %s (por omisión, y ante la duda, ENSAYO: nunca anula sin que alguien lo pida)', (valor, modo) => {
-    expect(modoDeLaLimpiezaDeCobrar(valor as string | undefined)).toBe(modo)
+    [undefined, real, 'ACTIVO'],
+    ['', real, 'ACTIVO'],
+    ['   ', real, 'ACTIVO'],
+    [undefined, { entorno: 'production' }, 'ENSAYO'], // Fly, Docker Compose, `NODE_ENV=production npm start`
+    [undefined, { entorno: 'production', servicio: 'avoqado-server-staging' }, 'ENSAYO'],
+    [undefined, { entorno: 'production', servicio: 'avoqado-server-cm35' }, 'ENSAYO'],
+    [undefined, { entorno: 'staging', servicio: 'avoqado-server' }, 'ENSAYO'],
+    [undefined, { entorno: 'development' }, 'ENSAYO'],
+    [undefined, { entorno: 'test' }, 'ENSAYO'],
+    [undefined, {}, 'ENSAYO'],
+    ['ensayo', real, 'ENSAYO'],
+    ['ENSAYO', real, 'ENSAYO'],
+    ['APAGADO', real, 'APAGADO'],
+    ['cualquier cosa', real, 'ENSAYO'],
+    ['ACTIVO', { entorno: 'development' }, 'ACTIVO'],
+    [' activo ', real, 'ACTIVO'],
+    ['APAGADO', {}, 'APAGADO'],
+  ])('valor %j en %j ⇒ %s', (valor, servidor, modo) => {
+    expect(modoDeLaLimpiezaDeCobrar(valor as string | undefined, servidor as { entorno?: string; servicio?: string })).toBe(modo)
   })
 })
 
