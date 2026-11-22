@@ -729,7 +729,12 @@ export async function cancelClassSession(venueId: string, sessionId: string, act
         data: { cancelledAt: now.toISOString(), creditsRefunded },
       })
 
-      return { cancelled, pushRowIds, conDeposito: canceladas.filter(r => r.depositStatus === 'PAID') }
+      // D681: también las de depósito SIN pagar, para cerrar su liga de Stripe (si no, un pago tardío la revivía).
+      return {
+        cancelled,
+        pushRowIds,
+        conDeposito: canceladas.filter(r => r.depositStatus === 'PAID' || r.depositStatus === 'PENDING'),
+      }
     },
     { timeout: 30_000 },
   )

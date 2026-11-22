@@ -239,17 +239,19 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
       // email after the tx commits. updateMany doesn't return rows; the
       // findFirst+update pair keeps the original idempotency semantics
       // (no-op when depositStatus has already advanced past PENDING).
+      // D681: una reserva CANCELADA nunca revive por un pago (su lugar ya se soltó): cae abajo como anomalía de dinero.
       const target = await tx.reservation.findFirst({
         where: {
           checkoutSessionId: session.id,
           depositStatus: 'PENDING',
+          status: { not: ReservationStatus.CANCELLED },
         },
         select: { id: true },
       })
 
       const updated = target
         ? await tx.reservation.updateMany({
-            where: { id: target.id, depositStatus: 'PENDING' },
+            where: { id: target.id, depositStatus: 'PENDING', status: { not: ReservationStatus.CANCELLED } },
             data: {
               status: ReservationStatus.CONFIRMED,
               confirmedAt: new Date(),

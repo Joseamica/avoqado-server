@@ -204,6 +204,9 @@ async function resolveVenueBySlug(venueSlug: string) {
 /** Venue default used when a service carries no duration of its own. */
 export const FALLBACK_SERVICE_DURATION_MIN = 60
 
+/** Cuánto se aparta el lugar de una clase con pago por adelantado mientras la clienta paga (el mínimo de Stripe Checkout). */
+const CLASS_UPFRONT_PAYMENT_WINDOW_MS = 30 * 60_000
+
 type DurationBearingService = { id: string; duration: number | null; durationMinutes: number | null }
 
 /**
@@ -980,7 +983,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
           applicationFeeAmount,
           successUrl,
           cancelUrl,
-          expiresAt: new Date(Date.now() + 30 * 60_000),
+          expiresAt: new Date(Date.now() + CLASS_UPFRONT_PAYMENT_WINDOW_MS),
           customerEmail: reservation.guestEmail ?? undefined,
           metadata: {
             type: 'class_reservation',
@@ -996,9 +999,10 @@ export async function createReservation(req: Request, res: Response, next: NextF
 
         // Pin the EcommerceMerchant alongside the session id so refunds and
         // reconciliation always route through the same connected account.
+        // D681: y el vencimiento que contestó Stripe. Sin él, el job que suelta los lugares vencidos no veía esta reserva.
         await prisma.reservation.update({
           where: { id: reservation.id },
-          data: { checkoutSessionId: session.id, ecommerceMerchantId: stripeMerchant.id },
+          data: { checkoutSessionId: session.id, ecommerceMerchantId: stripeMerchant.id, depositExpiresAt: session.expiresAt },
         })
         checkoutUrl = session.url
       }
@@ -1313,7 +1317,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
       // reconciliation always route through the same connected account.
       reservation = await prisma.reservation.update({
         where: { id: reservation.id },
-        data: { checkoutSessionId: session.id, ecommerceMerchantId: stripeMerchant.id },
+        // D681: el vencimiento guardado es el que contestó Stripe, el mismo de su liga.
+        data: { checkoutSessionId: session.id, ecommerceMerchantId: stripeMerchant.id, depositExpiresAt: session.expiresAt },
         include: {
           customer: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
           table: { select: { id: true, number: true, capacity: true } },
@@ -1521,6 +1526,8 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
       specialRequests: reservation.specialRequests,
       depositAmount: reservation.depositAmount,
       depositStatus: reservation.depositStatus,
+      // D681 (aditivo): hasta cuándo queda apartado el lugar mientras el pago por adelantado sigue pendiente.
+      depositExpiresAt: reservation.depositExpiresAt,
       cancellation: (() => {
         // `allowed` is the FULL decision (toggle + status + time window), not just
         // the venue toggle — so every frontend that reads it (widget, consumer app)
@@ -2116,6 +2123,9 @@ async function createClassReservation(
           specialRequests: mergedSpecialRequests,
           depositAmount: upfrontAmount,
           depositStatus: requiresUpfrontCash ? 'PENDING' : null,
+          // D681: el lugar se aparta con fecha de vencimiento desde que nace. Si la sesión de Stripe no se llega a crear, el
+          // job la cancela al vencer; si se crea, este valor se reemplaza por el que contestó Stripe.
+          depositExpiresAt: requiresUpfrontCash ? new Date(Date.now() + CLASS_UPFRONT_PAYMENT_WINDOW_MS) : null,
           confirmedAt: requiresUpfrontCash ? null : autoConfirm ? new Date() : null,
           statusLog: [
             {

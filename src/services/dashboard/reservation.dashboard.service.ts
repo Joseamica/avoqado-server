@@ -1254,6 +1254,35 @@ export async function cancelReservation(
   return Object.assign(updated, refundResult)
 }
 
+/**
+ * D681: una reserva CANCELADA con el depósito sin pagar. Ese depósito ya no se cobra: queda EXPIRED (así ni el aviso de pago
+ * de Stripe ni el job de conciliación la reviven) y se le pide a Stripe cerrar la sesión para que su liga deje de cobrar.
+ * Si Stripe no contesta, basta la marca: un pago que llegue después queda como anomalía de dinero, no como reserva viva.
+ */
+async function anularDepositoSinPagar(
+  reservation: { id: string; confirmationCode: string; checkoutSessionId: string | null; ecommerceMerchantId: string | null },
+  venueId: string,
+): Promise<void> {
+  const { count } = await prisma.reservation.updateMany({
+    where: { id: reservation.id, venueId, status: 'CANCELLED', depositStatus: 'PENDING' },
+    data: { depositStatus: 'EXPIRED' },
+  })
+  if (count === 0 || !reservation.checkoutSessionId || !reservation.ecommerceMerchantId) return
+
+  // La sesión vive en la cuenta conectada que la creó (la que quedó fijada en la reserva).
+  const merchant = await prisma.ecommerceMerchant.findFirst({
+    where: { id: reservation.ecommerceMerchantId, venueId, provider: { code: 'STRIPE_CONNECT' } },
+    include: { provider: true },
+  })
+  if (!merchant) return
+  try {
+    await getProvider(merchant).expireAuthorizationCheckout(merchant, reservation.checkoutSessionId)
+  } catch (error) {
+    // Una sesión ya vencida o pagada no se puede cerrar: la marca EXPIRED ya protege la reserva.
+    logger.warn(`⚠️ [RESERVATION DEPOSIT] No se pudo cerrar la sesión de Stripe de ${reservation.confirmationCode}`, error)
+  }
+}
+
 /** `sinRetener`: lo canceló el negocio, no la clienta (una clase entera), así que nunca se queda con su depósito. */
 export async function handleReservationDepositCancellation(
   reservationId: string,
@@ -1270,8 +1299,13 @@ export async function handleReservationDepositCancellation(
       depositProcessorRef: true,
       refundStatus: true,
       ecommerceMerchantId: true,
+      checkoutSessionId: true,
     },
   })
+  if (reservation?.depositStatus === 'PENDING') {
+    await anularDepositoSinPagar(reservation, venueId)
+    return
+  }
   if (
     !reservation ||
     reservation.depositStatus !== 'PAID' ||
