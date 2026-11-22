@@ -903,7 +903,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         const rows = guard.redact(rawRows).map(r => {
           const copy: Record<string, unknown> = { ...(r as Record<string, unknown>), fecha: fechaDelCobro(r) } // D13.3: hora real del negocio
           delete copy.processorData
-          delete copy.venue
+          delete copy.zona
           return copy
         })
         return text({ venueId, mode: 'detailed', window: range, timezone: tz, total, returned: rows.length, rows })

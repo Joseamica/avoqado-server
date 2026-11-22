@@ -148,12 +148,12 @@ describe('export_sales_summary — plan gating', () => {
         amount: 50,
         createdAt: new Date('2026-11-12T06:10:00.000Z'),
         clientCreatedAt: new Date('2026-11-12T05:50:00.000Z'),
-        venue: { timezone: 'America/Mexico_City' },
+        zona: 'America/Mexico_City',
       },
     ])
     const out = parse(await call('export_sales_summary', { venueId: 'v1', mode: 'detailed' }))
     expect(out.rows[0].fecha).toBe('2026-11-11 23:50:00')
-    expect(out.rows[0]).not.toHaveProperty('venue')
+    expect(out.rows[0]).not.toHaveProperty('zona')
   })
 
   it('Codex D13 r3 #6 · con más periodos que el tope, avisa sin etiquetarlos uno por uno', async () => {

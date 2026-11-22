@@ -90,25 +90,23 @@ describe('exportador ventas-detalladas', () => {
   it('🔴 D13.3 · «Fecha» es la hora real en la zona del negocio, no UTC', () => {
     const fecha = (fila: object) => VENTAS_DETALLADAS_COLUMNAS.find(c => c.id === 'createdAt')!.value(fila as never)
     // Cobro en línea de las 20:30 del 21 (CDMX) = 02:30 UTC del 22.
-    expect(
-      fecha({ createdAt: new Date('2026-11-22T02:30:00.000Z'), clientCreatedAt: null, venue: { timezone: 'America/Mexico_City' } }),
-    ).toBe('2026-11-21 20:30:00')
+    expect(fecha({ createdAt: new Date('2026-11-22T02:30:00.000Z'), clientCreatedAt: null, zona: 'America/Mexico_City' })).toBe(
+      '2026-11-21 20:30:00',
+    )
     // Venta sin red de las 23:50 del 11 que subió a las 00:10 del 12: sale con la hora del aparato.
     expect(
       fecha({
         createdAt: new Date('2026-11-12T06:10:00.000Z'),
         clientCreatedAt: new Date('2026-11-12T05:50:00.000Z'),
-        venue: { timezone: 'America/Mexico_City' },
+        zona: 'America/Mexico_City',
       }),
     ).toBe('2026-11-11 23:50:00')
     // Otra zona: Tijuana va una hora antes que CDMX en noviembre (UTC−8).
-    expect(fecha({ createdAt: new Date('2026-11-22T02:30:00.000Z'), clientCreatedAt: null, venue: { timezone: 'America/Tijuana' } })).toBe(
+    expect(fecha({ createdAt: new Date('2026-11-22T02:30:00.000Z'), clientCreatedAt: null, zona: 'America/Tijuana' })).toBe(
       '2026-11-21 18:30:00',
     )
     // Codex D13 r2 #1: una zona guardada fuera de IANA («GMT-6») no tumba el archivo: va la del negocio por default (CDMX).
-    expect(fecha({ createdAt: new Date('2026-11-22T02:30:00.000Z'), clientCreatedAt: null, venue: { timezone: 'GMT-6' } })).toBe(
-      '2026-11-21 20:30:00',
-    )
+    expect(fecha({ createdAt: new Date('2026-11-22T02:30:00.000Z'), clientCreatedAt: null, zona: 'GMT-6' })).toBe('2026-11-21 20:30:00')
   })
 
   // Codex D13 r1 #7: con las 13 columnas iguales, la fecha local (≈65 pt a 7 pt de letra) no cabía en 51.8 pt y se cortaba con «…».

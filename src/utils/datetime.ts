@@ -495,8 +495,10 @@ export function relojDelNegocio(
   instante: Date,
   timezone: string | null | undefined,
 ): { anio: string; mes: string; dia: string; hora: string; minuto: string; segundo: string; desfase: string } {
+  // Una zona IANA cabe en 64 caracteres: un texto más largo no entra al caché como llave (Codex r6), va el default.
+  const zona = timezone && timezone.length <= 64 ? timezone : DEFAULT_TIMEZONE
   const p: Record<string, string> = {}
-  for (const { type, value } of relojDe(timezone || DEFAULT_TIMEZONE).formatToParts(instante)) p[type] = value
+  for (const { type, value } of relojDe(zona).formatToParts(instante)) p[type] = value
   // longOffset: «GMT-06:00», or «GMT» at offset zero.
   const desfase = p.timeZoneName === 'GMT' ? '+00:00' : (p.timeZoneName ?? '').replace('GMT', '')
   return { anio: p.year, mes: p.month, dia: p.day, hora: p.hour, minuto: p.minute, segundo: p.second, desfase }

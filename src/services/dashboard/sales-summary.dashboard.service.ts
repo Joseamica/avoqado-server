@@ -63,6 +63,7 @@ import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '@/services/s
 import { proyectarComisionYNeto } from '@/services/payments/proyeccionMonetaria'
 import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraReal, sqlRangoHoraRealSql } from '@/services/shared/horaRealDelAparato'
 import { relojDelNegocio } from '@/utils/datetime'
+import { zonaDelCalculo } from '@/utils/sanitizeTimezone'
 
 // ============================================================
 // Types
@@ -2247,9 +2248,8 @@ export async function countSalesSummaryDetailRows(venueId: string, filters: Sale
 export const SALES_SUMMARY_DETAIL_SELECT = {
   id: true,
   createdAt: true,
-  // D13.3: «Fecha» is the real time (device time of an offline sale, else arrival) in the venue's timezone.
+  // D13.3: «Fecha» is the real time (device time of an offline sale, else arrival) in the venue's timezone (`conZona`).
   clientCreatedAt: true,
-  venue: { select: { timezone: true } },
   method: true,
   cardBrand: true,
   maskedPan: true,
@@ -2263,13 +2263,26 @@ export const SALES_SUMMARY_DETAIL_SELECT = {
   merchantAccount: { select: { displayName: true, externalMerchantId: true } },
 } satisfies Prisma.PaymentSelect
 
+/**
+ * D13.3 (Codex r6): each row carries the zone the whole export uses — read ONCE per call and normalized with the same rule as the
+ * calculation (`zonaDelCalculo`), never the raw text repeated in every row.
+ */
+async function conZona<T>(venueId: string, filas: Promise<T[]>): Promise<Array<T & { zona: string }>> {
+  const [lista, venue] = await Promise.all([filas, prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })])
+  const zona = zonaDelCalculo(venue?.timezone)
+  return lista.map(f => ({ ...f, zona }))
+}
+
 export async function fetchSalesSummaryDetailRows(venueId: string, filters: SalesSummaryExportFilters, limit: number) {
-  return prisma.payment.findMany({
-    where: buildSalesSummaryDetailWhere(venueId, filters),
-    select: SALES_SUMMARY_DETAIL_SELECT,
-    orderBy: { createdAt: 'desc' },
-    take: limit,
-  })
+  return conZona(
+    venueId,
+    prisma.payment.findMany({
+      where: buildSalesSummaryDetailWhere(venueId, filters),
+      select: SALES_SUMMARY_DETAIL_SELECT,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    }),
+  )
 }
 
 /** Página por keyset (createdAt desc, id desc) para exportes en segundo plano. `corte` deja fuera lo que entró después de pedirlo. */
@@ -2280,12 +2293,15 @@ export async function fetchSalesSummaryDetailPage(
   keyset: Prisma.PaymentWhereInput,
   limit: number,
 ) {
-  return prisma.payment.findMany({
-    where: { AND: [buildSalesSummaryDetailWhere(venueId, filters), { createdAt: { lte: corte } }, keyset] },
-    select: SALES_SUMMARY_DETAIL_SELECT,
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    take: limit,
-  })
+  return conZona(
+    venueId,
+    prisma.payment.findMany({
+      where: { AND: [buildSalesSummaryDetailWhere(venueId, filters), { createdAt: { lte: corte } }, keyset] },
+      select: SALES_SUMMARY_DETAIL_SELECT,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit,
+    }),
+  )
 }
 
 export async function countSalesSummaryDetailRowsHasta(venueId: string, filters: SalesSummaryExportFilters, corte: Date): Promise<number> {

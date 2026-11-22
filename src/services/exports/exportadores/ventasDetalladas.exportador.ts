@@ -19,12 +19,11 @@ export type FilaVentaDetallada = Awaited<ReturnType<typeof fetchSalesSummaryDeta
  * D13.3: la hora REAL del cobro (la del aparato si se cobró sin red, si no la de llegada), en la zona del negocio y legible
  * («2026-11-21 20:30:00»). Antes salía `toISOString()`: una venta de las 20:30 se leía como las 02:30 del día siguiente.
  */
-export function fechaDelCobro(r: Pick<FilaVentaDetallada, 'createdAt' | 'clientCreatedAt' | 'venue'>): string {
+export function fechaDelCobro(r: Pick<FilaVentaDetallada, 'createdAt' | 'clientCreatedAt' | 'zona'>): string {
   const real = r.clientCreatedAt ?? r.createdAt
   if (!real) return ''
-  // `relojDelNegocio`: un formateador por zona (20,000 filas no retienen el hilo) y una zona fuera de IANA («GMT-6») cae a CDMX en
-  // vez de lanzar `RangeError` y tumbar el archivo entero (Codex D13 r2 #1, r4).
-  const h = relojDelNegocio(real, r.venue?.timezone)
+  // `zona` ya viene normalizada una vez por página (`conZona`): la misma del cálculo, y nunca una que lance `RangeError`.
+  const h = relojDelNegocio(real, r.zona)
   return `${h.anio}-${h.mes}-${h.dia} ${h.hora}:${h.minuto}:${h.segundo}`
 }
 

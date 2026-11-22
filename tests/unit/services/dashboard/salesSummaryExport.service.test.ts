@@ -4,7 +4,7 @@
  */
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
-  default: { payment: { count: jest.fn(), findMany: jest.fn() } },
+  default: { payment: { count: jest.fn(), findMany: jest.fn() }, venue: { findUnique: jest.fn() } },
 }))
 import prisma from '../../../../src/utils/prismaClient'
 import * as svc from '../../../../src/services/dashboard/sales-summary.dashboard.service'
@@ -12,6 +12,7 @@ import { dondeHoraRealEntre } from '../../../../src/services/shared/horaRealDelA
 
 const paymentCount = (prisma as any).payment.count as jest.Mock
 const paymentFindMany = (prisma as any).payment.findMany as jest.Mock
+const venueFindUnique = (prisma as any).venue.findUnique as jest.Mock
 
 beforeEach(() => jest.clearAllMocks())
 
@@ -177,9 +178,24 @@ describe('detailed rows where-clause + cap', () => {
     expect(arg.take).toBe(1000)
     expect(arg.orderBy).toEqual({ createdAt: 'desc' })
     expect(filtrosDe(arg.where).status).toBe('COMPLETED')
-    // D13.3: la columna «Fecha» necesita la hora del aparato y la zona del negocio.
+    // D13.3: la columna «Fecha» necesita la hora del aparato; la zona NO se lee por fila (Codex r6: un texto largo se repetía).
     expect(arg.select.clientCreatedAt).toBe(true)
-    expect(arg.select.venue).toEqual({ select: { timezone: true } })
+    expect(arg.select.venue).toBeUndefined()
+  })
+
+  it('🔴 D13.3 · cada fila lleva la zona del negocio leída UNA vez y normalizada como el cálculo («GMT» → UTC, «GMT-6» → CDMX)', async () => {
+    paymentFindMany.mockResolvedValue([{ id: 'p1' }, { id: 'p2' }])
+    for (const [guardada, zona] of [
+      ['America/Tijuana', 'America/Tijuana'],
+      ['GMT', 'UTC'],
+      ['GMT-6', 'America/Mexico_City'],
+      [null, 'America/Mexico_City'],
+    ]) {
+      venueFindUnique.mockReset().mockResolvedValue({ timezone: guardada })
+      const filas = await svc.fetchSalesSummaryDetailRows('v1', { startDate: '2026-06-01', endDate: '2026-06-07' }, 10)
+      expect(filas.map(f => f.zona)).toEqual([zona, zona])
+      expect(venueFindUnique).toHaveBeenCalledTimes(1)
+    }
   })
 
   it('threads staff (processedById) + shift (shiftId) + merchant into the WHERE when provided', async () => {

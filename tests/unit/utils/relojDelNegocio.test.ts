@@ -31,6 +31,8 @@ describe('relojDelNegocio', () => {
     expect(relojDelNegocio(new Date('2026-11-22T02:30:00.000Z'), 'UTC')).toMatchObject({ dia: '22', hora: '02', desfase: '+00:00' })
     expect(relojDelNegocio(new Date('2026-11-22T02:30:00.000Z'), 'GMT-6')).toMatchObject({ dia: '21', hora: '20' })
     expect(relojDelNegocio(new Date('2026-11-22T02:30:00.000Z'), null)).toMatchObject({ dia: '21', hora: '20' })
+    // Codex r6: un texto largo (no es una zona) no se guarda como llave del caché: va el default.
+    expect(relojDelNegocio(new Date('2026-11-22T02:30:00.000Z'), 'x'.repeat(100_000))).toMatchObject({ dia: '21', hora: '20' })
   })
 
   it('20,000 filas no retienen el hilo (un formateador por zona), tampoco con una zona inválida (Codex r5)', () => {
