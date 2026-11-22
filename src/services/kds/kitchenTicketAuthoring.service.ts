@@ -100,17 +100,12 @@ export async function authorKitchenTickets(params: {
       select: {
         status: true,
         loyaltySaleAt: true,
-        kitchenPendingAt: true,
         onlineOrder: {
           select: { requiresAcceptance: true, createdAt: true, expiredAt: true, cancelledAt: true, cancelledBy: true, rejectedAt: true },
         },
       },
     })
     if (!vigente || vigente.status === 'CANCELLED' || vigente.status === 'DELETED') return [] as string[]
-    // hz:e82938e1:D38 (Codex d38 r1): el barrido sólo atiende marcas. Si bajo el candado ya no está, la atendió el armado de después
-    // del commit o se fue con una anulación, y el dinero ya capturado pudo reabrir la cuenta entre que el barrido la escogió y este
-    // candado: una cancelada reabierta por dinero no vuelve a la cocina (S1). Los demás disparos traen su marca en su propia escritura.
-    if (trigger === 'SWEEP' && vigente.kitchenPendingAt == null) return [] as string[]
     // 🔴 S9 v5 (B4, D3 «en duda, manda»): un folio «Nadie» que se anuló alguna vez (el sello de A0) sólo NO se arma si ningún renglón se
     // creó ni se modificó desde T − 5 s (T = la menor de sus fechas de cierre): es dinero tardío sobre lo que ya existía al anular. Si la
     // cajera tocó algo (agregó, subió una cantidad, una cortesía), se arma exactamente como hoy, aunque repita lo viejo (deuda E, BASE).

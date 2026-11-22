@@ -56,8 +56,6 @@ function base(o: { folio?: Folio; status?: string; tocado?: boolean; horaDelCobr
     select?.onlineOrder
       ? {
           status: o.status ?? 'COMPLETED',
-          // hz:e82938e1:D38: el barrido sólo arma con la marca puesta bajo el candado; estos casos la traen.
-          kitchenPendingAt: T,
           ...(o.horaDelCobro !== undefined ? { loyaltySaleAt: o.horaDelCobro } : {}),
           onlineOrder: folio
             ? {
@@ -186,7 +184,7 @@ describe('authorKitchenTickets · folio sellado (S9 v5, U7)', () => {
     })
   })
 
-  it('la relectura bajo el candado trae la hora del cobro, la creación del folio y la marca (una consulta, sin otra lectura)', async () => {
+  it('la relectura bajo el candado trae la hora del cobro y la creación del folio (una consulta, sin otra lectura)', async () => {
     prismaMock.orderItem.findFirst.mockReset()
     base()
     await authorKitchenTickets({ venueId: VENUE, orderId: ORDER, trigger: 'SWEEP' })
@@ -194,7 +192,6 @@ describe('authorKitchenTickets · folio sellado (S9 v5, U7)', () => {
     expect(relectura.select).toEqual({
       status: true,
       loyaltySaleAt: true,
-      kitchenPendingAt: true,
       onlineOrder: {
         select: { requiresAcceptance: true, createdAt: true, expiredAt: true, cancelledAt: true, cancelledBy: true, rejectedAt: true },
       },
