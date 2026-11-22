@@ -694,7 +694,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/reservaciones/configurar-reservaciones-avanzadas": {
-      "sha256": "3bf4bc70ed1a45bf1b4a35b960b2d1fd019dc2ebaad4e60fe91b8fb20efb7a74",
+      "sha256": "088a8afb1d386a86ebc6e59e2c95dcaafa6ddcef69ac5d9b5826efbc2f920fae",
       "requiredPermissions": [
         "reservations:update"
       ],
