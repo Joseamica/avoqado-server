@@ -457,14 +457,21 @@ export async function tomarCandadoDeComandas(tx: Prisma.TransactionClient, order
 }
 
 /**
- * hz:e82938e1:D40 (Codex d40-r4 #1): el actor de una anulación se aparta (`FOR KEY SHARE`) al INICIO de la transacción, antes que
- * los candados de cocina y que la cuenta. El retiro escribe la bitácora con su `staffId`, y esa llave foránea esperaba a un borrado
- * físico del mismo empleado, que a su vez esperaba la cuenta o la sesión que la anulación ya tenía: bloqueo mutuo. Apartado primero,
- * los dos se forman. `FOR KEY SHARE` sólo choca con borrarlo, no con editarlo. Si ya no existe, devuelve `undefined` y la anulación
- * sigue sin actor en la bitácora: nunca se revierte por eso.
+ * hz:e82938e1:D40 (Codex d40-r4 #1 y r5): el actor de una anulación se aparta (`FOR KEY SHARE`) al INICIO de la transacción, antes
+ * que los candados de cocina y que la cuenta. El retiro escribe la bitácora con su `staffId`, y esa llave foránea esperaba a un
+ * borrado físico del mismo empleado, que a su vez esperaba la cuenta o la sesión que la anulación ya tenía: bloqueo mutuo. Primero
+ * la SUCURSAL y luego el empleado (r5): es el orden de la limpieza de demos (sucursal → empleado), y el borrado de personal
+ * (empleado → cuentas) no toca la sucursal; con el empleado primero, la anulación y la limpieza de un demo se esperaban al revés.
+ * `FOR KEY SHARE` sólo choca con borrar, no con editar. Si el empleado ya no existe, devuelve `undefined` y la anulación sigue sin
+ * actor en la bitácora: nunca se revierte por eso.
  */
-export async function apartarActorDeLaAnulacion(tx: Prisma.TransactionClient, staffId?: string | null): Promise<string | undefined> {
+export async function apartarActorDeLaAnulacion(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  staffId?: string | null,
+): Promise<string | undefined> {
   if (!staffId) return undefined
+  await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR KEY SHARE`
   const filas = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Staff" WHERE id = ${staffId} FOR KEY SHARE`
   return filas.length > 0 ? staffId : undefined
 }

@@ -18,7 +18,7 @@ jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
   retirarComandasDeVentaAnulada: jest.fn(async () => ({ kdsOrderIds: [], kdsOrderItemIds: [] })),
   cuentasDeSusComandas: jest.fn(async () => ['order-1', 'cuenta-ligada']),
   tomarCandadoDeComandas: jest.fn(async () => undefined),
-  apartarActorDeLaAnulacion: jest.fn(async (_tx: unknown, staffId?: string | null) => staffId ?? undefined),
+  apartarActorDeLaAnulacion: jest.fn(async (_tx: unknown, _venueId: string, staffId?: string | null) => staffId ?? undefined),
 }))
 
 import { cancelAreaTicketCheckout } from '@/services/mobile/areaTicketV7.mobile.service'
@@ -182,7 +182,7 @@ describe('cancelAreaTicketCheckout — retira las comandas (hz:e82938e1:D40)', (
     ;(prismaMock as any).staffVenue.findFirst.mockResolvedValue({ staffId: 'cajero', staff: { id: 'cajero' } })
     ;(apartarActorDeLaAnulacion as jest.Mock).mockResolvedValueOnce(undefined)
     await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: 'cajero' } as any)
-    expect((apartarActorDeLaAnulacion as jest.Mock).mock.calls[0][0]).toBe(prismaMock)
+    expect((apartarActorDeLaAnulacion as jest.Mock).mock.calls[0].slice(0, 2)).toEqual([prismaMock, 'v1'])
     expect(ordenDe(apartarActorDeLaAnulacion)).toBeLessThan(ordenDe(tomarCandadoDeComandas))
     expect(retirarComandasDeVentaAnulada).toHaveBeenCalledWith(prismaMock, 'v1', 'order-1', expect.objectContaining({ staffId: undefined }))
   })

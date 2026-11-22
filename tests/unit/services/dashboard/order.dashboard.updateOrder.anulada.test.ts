@@ -28,7 +28,7 @@ jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
   retirarComandasDeVentaAnulada: jest.fn(async () => ({ kdsOrderIds: [], kdsOrderItemIds: [] })),
   cuentasDeSusComandas: jest.fn(async () => ['order', 'cuenta-ligada']),
   tomarCandadoDeComandas: jest.fn(async () => undefined),
-  apartarActorDeLaAnulacion: jest.fn(async (_tx: unknown, staffId?: string | null) => staffId ?? undefined),
+  apartarActorDeLaAnulacion: jest.fn(async (_tx: unknown, _venueId: string, staffId?: string | null) => staffId ?? undefined),
 }))
 
 let row: any
@@ -190,7 +190,7 @@ describe('D40 · cruces de la ronda 4', () => {
   it('#1: al anular, el actor se aparta ANTES que los candados de cocina, y el retiro y los canjes van con él', async () => {
     row.status = 'PENDING'
     await updateOrder('venue', 'order', { status: 'CANCELLED' } as any, { staffId: 'staff' } as any)
-    expect(apartarActorDeLaAnulacion).toHaveBeenCalledWith(db, 'staff')
+    expect(apartarActorDeLaAnulacion).toHaveBeenCalledWith(db, 'venue', 'staff')
     expect((apartarActorDeLaAnulacion as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
       (tomarCandadoDeComandas as jest.Mock).mock.invocationCallOrder[0],
     )

@@ -2396,7 +2396,7 @@ export async function cancelAreaTicketCheckout(venueId: string, sessionId: strin
         // Si se materializó entre esta lectura y el candado de la sesión, el retiro toma su candado a media transacción; un bloqueo
         // mutuo con otra cancelación de la misma sesión lo repite `withDeadlockRetry`, y el intento nuevo ya la lee.
         // Codex d40-r4 #1: el cajero se aparta primero (antes que la cocina y la sesión); si ya no existe, se cancela sin actor.
-        const actor = await apartarActorDeLaAnulacion(tx, staffId)
+        const actor = await apartarActorDeLaAnulacion(tx, venueId, staffId)
         // Codex d40-r3 #2: una venta ya cancelada (otra llave, o el reintento) no pide los candados: sale abajo sin tocar la cocina.
         const previa = await tx.areaTicketCheckoutSession.findFirst({
           where: { id: sessionId, venueId },

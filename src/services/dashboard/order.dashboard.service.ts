@@ -647,7 +647,7 @@ export async function updateOrder(
     // cambia entre esta lectura y la de bajo candado, el retiro toma su candado a media transacción (rara vez; lo repite el 40P01).
     const pideAnular = status === 'CANCELLED' || status === 'DELETED'
     // Codex d40-r4 #1: quien anula se aparta primero (antes que la cocina y la cuenta); si ya no existe, se anula sin actor.
-    const actor = pideAnular ? await apartarActorDeLaAnulacion(client, opciones.staffId) : opciones.staffId
+    const actor = pideAnular ? await apartarActorDeLaAnulacion(client, venueId, opciones.staffId) : opciones.staffId
     const previa =
       topologyWrite && pideAnular ? await client.order.findFirst({ where: { id: orderId, venueId }, select: { status: true } }) : null
     // Codex d40-r4 #3: una mesa que no existe sale con 404 abajo, sin esperar antes a la cocina.
