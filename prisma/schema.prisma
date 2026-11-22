@@ -5075,6 +5075,10 @@ model OrderItemModifier {
   quantity Int     @default(1)
   price    Decimal @db.Decimal(10, 2)
 
+  /// D40 (Flautas Coyoacán, como Fudo): la observación de ESTA parte del paquete («sin cebolla» sólo al Consomé). La manda el POS
+  /// en `modifierNotes` y sale en la comanda debajo de su parte. null = sin nota (apps viejas y todo lo de antes).
+  notes String?
+
   @@index([orderItemId])
 }
 

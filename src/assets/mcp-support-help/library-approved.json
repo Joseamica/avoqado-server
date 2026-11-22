@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-21T14:14:08.826Z",
-  "approvedHash": "4c999c8eadd2f85c95e131827a9a27327337709da541f12af8c9ac274e3afb32",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -167,7 +167,7 @@
       "gateKind": "FEATURE"
     },
     "android/ordenes/agregar-productos-a-la-venta": {
-      "sha256": "e131e5b35fbeffaa10f275182d6a73b8c6341c295149f049bb5cf2f4c128ae11",
+      "sha256": "cc7c38f74a80b21cbf2ad0701cbbbc88761df560eabf2fb235cebb5fa6cca0c2",
       "requiredPermissions": [
         "menu:read"
       ]
@@ -1148,7 +1148,7 @@
       "gateKind": "FEATURE"
     },
     "windows/ordenes/agregar-productos-a-la-venta": {
-      "sha256": "6276f9a5e3f4745cbde2be969fc297ca1cd372a18a05a66cbccd464718c47247",
+      "sha256": "9875c67a2655faa4e28f594d79cc8a2de2342a7dbf992620bd89044c00a6fc58",
       "requiredPermissions": [
         "menu:read"
       ]

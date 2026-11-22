@@ -82,6 +82,7 @@ import {
 } from '../shared/ligaDeClienteEnVenta'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
+import { notasDeLasPartes } from '../kds/kdsModifierLabels'
 import {
   armarComandasTrasCommit,
   cuentasDeComandasDeRenglones,
@@ -133,6 +134,8 @@ function flattenOrderModifiers(order: any): any {
             type: om.modifier?.type || om.type,
             required: om.modifier?.required || om.required,
             displayOrder: om.modifier?.displayOrder || om.displayOrder,
+            // D40: la nota de esta parte, sólo si la tiene (sin nota la respuesta queda idéntica a la de antes).
+            ...(om.notes ? { notes: om.notes } : {}),
           })) || [],
       })) || [],
   }
@@ -616,6 +619,8 @@ interface AddOrderItemInput {
   quantity: number
   notes?: string | null
   modifierIds?: string[] // Array of modifier IDs to add to the order item
+  /** D40: la nota de cada parte, `{ modifierId: nota }`. Opcional; lo que no cuadre se ignora (`notasDeLasPartes`), nunca un 400. */
+  modifierNotes?: Record<string, unknown> | null
   externalId?: string | null
   /** TABLE_SERVICE course/tiempo ("Aperitivos"...). Null = prepare immediately. */
   course?: string | null
@@ -824,10 +829,13 @@ export function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrde
     const serviceCourse = parseServiceCourseSnapshot(item.serviceCourse)
     const normalizedCourse = serviceCourse ? legacyCourseForSnapshot(serviceCourse) : item.course?.trim() || null
     // Custom-amount lines never merge with catalog lines (distinct key space).
+    // D40: la nota de cada parte. Dos renglones iguales salvo por ella son DOS renglones (no se suman); sin notas la llave no cambia.
+    const notasDeLasPartesDelRenglon = notasDeLasPartes(item.modifierNotes, normalizedModifiers)
     const keyBase = item.productId
       ? buildAddItemKey(item.productId, normalizedModifiers, normalizedNotes, normalizedExternalId)
       : `custom:${item.customName ?? ''}:${item.customUnitPriceCents ?? 0}:${normalizedNotes ?? ''}`
     let key = keyBase + `|c:${normalizedCourse ?? ''}`
+    if (notasDeLasPartesDelRenglon.size > 0) key += `|mn:${JSON.stringify([...notasDeLasPartesDelRenglon].sort())}`
     if (serviceCourse) key += `|sc:${JSON.stringify(serviceCourse)}`
     // D9 (venta por peso): each weighing is its own line — weighted lines get a
     // per-index key so two weighings of the same product NEVER merge here.
@@ -848,6 +856,7 @@ export function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrde
         quantity: item.quantity,
         notes: normalizedNotes,
         modifierIds: normalizedModifiers,
+        ...(notasDeLasPartesDelRenglon.size > 0 ? { modifierNotes: Object.fromEntries(notasDeLasPartesDelRenglon) } : {}),
         externalId: normalizedExternalId,
         course: normalizedCourse,
         ...(serviceCourse ? { serviceCourse } : {}),
@@ -2228,6 +2237,7 @@ export async function addItemsToOrder(
 
         // Calculate modifier total
         const itemModifiers = item.modifierIds || []
+        const notasDelRenglon = notasDeLasPartes(item.modifierNotes, itemModifiers)
         const modifierTotal = itemModifiers.reduce((sum, modifierId) => {
           const modifier = modifiers.find(m => m.id === modifierId)
           return sum + (modifier ? Number(modifier.price) : 0)
@@ -2413,6 +2423,8 @@ export async function addItemsToOrder(
                       name: modifier.name,
                       quantity: 1,
                       price: modifier.price,
+                      // D40: la nota de esta parte; sin nota la fila queda como siempre.
+                      ...(notasDelRenglon.has(modifierId) ? { notes: notasDelRenglon.get(modifierId) } : {}),
                     }
                   }),
                 },
@@ -2438,8 +2450,9 @@ export async function addItemsToOrder(
           return createdItem
         }
 
-        // Sort modifier IDs for consistent comparison
-        const sortedNewModifiers = [...itemModifiers].sort()
+        // Sort modifier IDs for consistent comparison. D40: cada parte con su nota — iguales salvo por la nota NO se juntan.
+        const parteConNota = (modifierId: string | null, nota: string | null | undefined) => `${modifierId ?? ''}\u0000${nota ?? ''}`
+        const sortedNewModifiers = itemModifiers.map(id => parteConNota(id, notasDelRenglon.get(id))).sort()
 
         // More precise check: query existing items with their modifiers and match by notes + modifiers
         const existingItemsWithModifiers = await tx.orderItem.findMany({
@@ -2462,7 +2475,7 @@ export async function addItemsToOrder(
             ? undefined
             : existingItemsWithModifiers.find(existing => {
                 if (existing.isCortesia) return false
-                const existingModifierIds = existing.modifiers.map(m => m.modifierId).sort()
+                const existingModifierIds = existing.modifiers.map(m => parteConNota(m.modifierId, m.notes)).sort()
                 const notesMatch = normalizeNotes(existing.notes) === normalizedNotes
                 // TABLE_SERVICE: lines in different courses never merge.
                 const courseMatch = (existing.course ?? null) === (item.course ?? null)
@@ -2549,6 +2562,8 @@ export async function addItemsToOrder(
                   name: modifier.name,
                   quantity: 1,
                   price: modifier.price,
+                  // D40: la nota de esta parte; sin nota la fila queda como siempre.
+                  ...(notasDelRenglon.has(modifierId) ? { notes: notasDelRenglon.get(modifierId) } : {}),
                 }
               }),
             },

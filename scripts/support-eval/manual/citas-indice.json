@@ -246,7 +246,7 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/local/PayloadCache.kt": [
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/local/SecureStorage.kt": [
@@ -1286,7 +1286,7 @@
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "android/personal/cambiar-de-usuario",
@@ -1382,7 +1382,7 @@
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/personal/cambiar-de-usuario",
@@ -2196,7 +2196,7 @@
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "android/reservas/crear-cita",
@@ -2204,7 +2204,7 @@
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/reservas/crear-cita",
@@ -2302,7 +2302,7 @@
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
@@ -2314,7 +2314,7 @@
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/cart/OrderDiscountSheet.kt": [
@@ -2358,7 +2358,7 @@
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
@@ -2398,7 +2398,7 @@
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
@@ -2426,21 +2426,21 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/MenuDelAparato.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/ModifierGroupSection.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt": [
@@ -2454,7 +2454,7 @@
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
@@ -2470,7 +2470,7 @@
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
@@ -2480,61 +2480,61 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/TextosMenuDelAparato.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/WeightCapturePanel.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/variantes/HojaDeVariantes.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/variantes/TextosVariantes.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/variantes/TileDeFamilia.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/search/SearchOverlayView.kt": [
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/upsell/UpsellCashierStrip.kt": [
@@ -4008,7 +4008,7 @@
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "android/personal/cambiar-de-usuario",
@@ -4140,7 +4140,7 @@
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/personal/cambiar-de-usuario",
@@ -4574,7 +4574,7 @@
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/reservas/atender-una-cita",
@@ -4722,7 +4722,7 @@
     "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/pos/presentation/scanner/BarcodeScannerView.kt": [
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
         "pagina": "windows/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo",
@@ -4748,7 +4748,7 @@
     "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/scale/UsbSerialScaleManager.kt": [
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       }
     ],
     "avoqado-android:desktop/pos/windows/LEEME-RED-LOCAL.txt": [
