@@ -163,6 +163,7 @@ import {
   VenueTimeEntriesQuerySchema,
   AttendanceReportSchema,
   ApproveOvertimeSchema,
+  CorregirSalidaOlvidadaSchema,
   PayrollSummarySchema,
   WorkScheduleParamsSchema,
   ReplaceWorkScheduleSchema,
@@ -635,6 +636,7 @@ router.use('/impersonation', impersonationRoutes)
  *         name: { type: string }
  *         price: { type: number, format: float }
  *         active: { type: boolean }
+ *         maxQuantity: { type: integer, minimum: 1, nullable: true, description: 'Veces que se puede elegir en un grupo que deja repetir' }
  *     ModifierGroup:
  *       type: object
  *       properties:
@@ -644,6 +646,7 @@ router.use('/impersonation', impersonationRoutes)
  *         description: { type: string, nullable: true }
  *         required: { type: boolean }
  *         allowMultiple: { type: boolean }
+ *         allowRepeat: { type: boolean, description: 'La misma opción se puede elegir varias veces' }
  *         minSelections: { type: integer, minimum: 0 }
  *         maxSelections: { type: integer, minimum: 1, nullable: true }
  *         displayOrder: { type: integer, minimum: 0 }
@@ -8612,6 +8615,16 @@ router.put(
   checkPermission('attendance:manage'),
   validateRequest(ApproveOvertimeSchema),
   attendanceController.approveOvertime,
+)
+
+// «Salida olvidada · revisar» (hz:f0a89d19:D3): el gerente pone la salida real de un turno que el sistema cerró solo.
+// `attendance:manage` (nunca lo tienen los roles de piso); nadie corrige la suya (lo revisa el servicio).
+router.put(
+  '/venues/:venueId/time-entries/:timeEntryId/salida-olvidada',
+  authenticateTokenMiddleware,
+  checkPermission('attendance:manage'),
+  validateRequest(CorregirSalidaOlvidadaSchema),
+  attendanceController.corregirSalidaOlvidada,
 )
 
 router.get(

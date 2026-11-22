@@ -30,3 +30,15 @@ export function emitOnlineOrderUpdated(e: {
     logger.error('[OnlineOrdering] socket emit falló (no fatal)', { orderId: e.orderId, error })
   }
 }
+
+/**
+ * D662 v4 (hueco 5): el estado de la tienda cambió (Reanudar, pausar 15/30/60, ajustes, o se pausó sola). Sólo avisa: el panel vuelve a
+ * leer el estado y se queda con la lectura más nueva (`storeReadAt`). Siempre DESPUÉS del commit. Nunca lanza.
+ */
+export function emitStoreChanged(venueId: string, now: Date = new Date()): void {
+  try {
+    socketManager.broadcastToVenue(venueId, SocketEventType.ONLINE_ORDERING_STORE_CHANGED, { venueId, timestamp: now.toISOString() })
+  } catch (error) {
+    logger.error('[OnlineOrdering] socket emit del estado de la tienda falló (no fatal)', { venueId, error })
+  }
+}

@@ -81,6 +81,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   commission_payouts: 'read',
   comp_table_check: 'write',
   configure_auto_reorder: 'write',
+  configure_kitchen_release: 'write',
   configure_loyalty: 'write',
   configure_receipt_layout: 'write',
   configure_service_courses: 'write',
@@ -101,6 +102,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   create_loyalty_promotion: 'write',
   create_modifier_group: 'write',
   link_modifier_to_menu_item: 'write',
+  configure_modifier_repeat: 'write',
   create_payment_link: 'write',
   create_customer_payment_link: 'write',
   add_customer_to_payment_link: 'write',
@@ -122,6 +124,9 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   // Correo del CRM (fase 2): sólo lectura. Mandar una campaña o un correo NO es una herramienta: es masivo y no se deshace.
   crm_list_email_templates: 'read',
   crm_campaign_status: 'read',
+  // WhatsApp de ventas (fase 3): leer los chats, nunca mandar. Sólo el superadmin real, sólo el MCP libre.
+  crm_whatsapp_chats: 'read',
+  crm_whatsapp_thread: 'read',
   create_product: 'write',
   create_product_with_variants: 'write',
   create_products: 'write',
@@ -293,6 +298,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   online_ordering_settings: 'read',
   online_orders_list: 'read',
   open_orders: 'read',
+  package_component_sales: 'read',
   org_confirmed_sales_report: 'read',
   org_insights: 'read',
   org_structure: 'read',
@@ -411,6 +417,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   set_stock_by_code: 'write',
   set_table_check_details: 'write',
   set_table_status: 'write',
+  set_terminal_in_house_sdk: 'write',
   set_terminal_payment_strict_mode: 'write',
   settlement_calendar: 'read',
   settlement_deposits_report: 'read',
@@ -426,6 +433,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   shopify_unmatched_list: 'read',
   sim_custody: 'read',
   sim_pending_approvals: 'read',
+  void_table_check_item: 'write',
   split_table_check: 'write',
   split_table_check_by_seat: 'write',
   staff_attendance: 'read',
@@ -640,6 +648,14 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'expectedCorrectionCount',
             // Extra ligado a un platillo (`link_modifier_to_menu_item`, encargo 27771e): se confirma sobre el extra que se VIO.
             'resolvedModifierId',
+            // Repetir la misma opción (`configure_modifier_repeat`, encargo a508f4): se confirma sobre el grupo que se VIO.
+            'resolvedGroupId',
+            // «Anular producto» (`void_table_check_item`, Codex r1 #5): se anula exactamente el renglón que se VIO.
+            'resolvedOrderItemId',
+            // Apagador del SDK propio (`set_terminal_in_house_sdk`): se prende la terminal con la serie que se VIO; si cambió, 409.
+            'expectedSerialNumber',
+            // …y al ESTADO que se VIO (negocio, serie, tipo, marca y el ajuste, R2-2): si cambió cualquiera, 409.
+            'expectedTerminalState',
           ]) {
             // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
             // no atar un `null` que el esquema de otra herramienta no acepta.

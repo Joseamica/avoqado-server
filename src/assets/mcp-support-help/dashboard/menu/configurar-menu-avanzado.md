@@ -24,6 +24,10 @@ keywords:
   - no sale el extra al vender
   - el precio con el extra no cuadra
   - paquetes de crédito
+  - este extra es un platillo del menú
+  - ligar un extra a un platillo
+  - no puedo ligar el extra al platillo
+  - el extra no descuenta inventario
 ---
 
 ## Antes de empezar
@@ -41,6 +45,12 @@ Antes de editar, identifica qué producto o menú será afectado. Un modificador
 5. Valida nombre, precio, disponibilidad y dónde se mostrará cada servicio.
 6. Abre **Menú > Paquetes de crédito** si el local vende créditos o consumo anticipado.
 7. Prueba el flujo de venta después de guardar cambios relevantes.
+
+## Un extra que es un platillo del menú
+
+En la ficha de un extra, **Este extra es un platillo del menú** lo liga a un platillo (por ejemplo, la opción «Papa» del paquete con la «Flauta de papa»). Si el platillo lleva inventario, cada venta del extra lo descuenta (sus piezas o su receta). Si no lleva inventario, el extra no descuenta nada y la liga sólo sirve para contarlo. En los dos casos, sus unidades salen en **Reportes > Ventas por artículo**, columna **Dentro de paquete**, y no como venta suelta del platillo.
+
+Ligar un extra es de los planes Pro y Premium; quitar la liga siempre se puede. Para que el extra descuente inventario, el platillo tiene que llevar inventario (plan Premium). Un platillo que se vende por kilo no se puede ligar.
 
 ## Problemas frecuentes
 

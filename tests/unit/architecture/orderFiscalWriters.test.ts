@@ -799,14 +799,6 @@ const WRITERS: Record<string, Writer> = {
     residual:
       'with soltarMarca runs only inside devolverCanjesDeVentaAnuladaEnTx, under the Order lock of the cancelling writer (orderCancelWriters, PROTEGIDA); without it (the empty-order sweep) it writes no OrderDiscount row',
   },
-  // hz:e82938e1:D26: la cuenta anulada que revive por dinero ya capturado vuelve a gastar el uso de las filas que lo devolvieron.
-  'src/services/shared/usoDelDescuento.ts#volverAGastarUsosDeCuentaRevividaEnTx': {
-    class: 'EXCLUDED',
-    reason:
-      'only flips the bookkeeping flags usoContado/usoDevueltoAlAnular of account discount rows (and raises Discount.currentUses): amount, taxReduction and reparto are untouched, so the documentary capture reads the same totals',
-    residual:
-      'runs only through volverAGastarUsosAlRevivirEnTx, right after reabrirSiRecibeDinero revived the order, under the Order lock of the money writer (registrarAbonoEnTx, settleStandalonePaymentInTx, updateOrderTotalsForStandalonePayment, createManualPayment)',
-  },
   // D24 (Codex r1 #4a, r2 #5): la cuenta que se anula suelta la marca de las filas cuyo descuento ya no está en el catálogo.
   'src/services/shared/usoDelDescuento.ts#soltarMarcaDeFilasSinDescuentoEnTx': {
     class: 'EXCLUDED',
@@ -1114,6 +1106,11 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'contract confirmation: one CAS UPDATE of contratoDePrecio (orderContratoDePrecioWriters), no money or lines',
   },
   'src/services/tpv/order.tpv.service.ts#createOrder': { class: 'PRIVATE_CREATION', why: 'new empty order', markers: NEW_ORDER },
+  'src/services/tpv/order.tpv.service.ts#marcarComoPagarDespuesSiSigueAbierta': {
+    class: 'METADATA',
+    why: 'D36: an open, unpaid TPV order recovered by its key is marked «Pagar después» (payLater only, conditional updateMany)',
+    markers: ['data: { payLater: true }'],
+  },
   'src/services/online-ordering/order.service.ts#crearCuentaDelPedidoEnTx': {
     class: 'PRIVATE_CREATION',
     why: 'online order (S10: split out of writeOnlineOrderInTx): new Order, lines and modifiers in the admission transaction or the quote simulation',
@@ -1426,6 +1423,10 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/promotions/promotion.service.ts#removePromotionFromOrder': 1,
   'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrder': 1,
   'src/services/wallet/redeemStampReward.service.ts#redeemStampReward': 1,
+  // D36: «Cobrar» de la TPV retira la venta que se dejó antes de cobrar (cancelOrderInTransaction, ORDER_LOCK_WAIT_BUDGET).
+  'src/services/tpv/ventaDeCobrarSinCobro.tpv.service.ts#anularVentaDeCobrarSinCobro': 1,
+  // D36 «A con ensayo»: la limpieza que anula ventas de Cobrar abandonadas por TPV viejas (cancelOrderInTransaction, mismo presupuesto).
+  'src/jobs/ventas-cobrar-abandonadas.job.ts#anularVentaDeCobrarAbandonada': 1,
   'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems': 1,
   'src/services/pos-sync/posSyncOrder.service.ts#processPosOrderEvent': 1,
   'src/services/tpv/payment.tpv.service.ts#updateOrderTotalsForStandalonePayment': 1,

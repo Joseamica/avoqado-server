@@ -515,6 +515,33 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks[1]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-2', version: 8 } })
   })
 
+  // D7 «Anular producto», decisión 1 = A acotada (founder por delegación, 20-nov): en una ronda sólo vale `sync:<id del intent>:<n>`.
+  it('decisión 1 de D7: la llave de las apps pasa intacta; otra forma (espacios, propia, de otra ronda) se reemplaza por la de la ronda', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 7, status: 'PENDING' })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockResolvedValue({ version: 8, total: 150.0 })
+
+    await processIntents(
+      baseParams([
+        {
+          id: 'r-uno',
+          type: 'ADD_ITEMS',
+          payload: {
+            orderId: 'order-1',
+            items: [
+              { productId: 'p1', quantity: 1, externalId: 'sync:r-uno:0' },
+              { productId: 'p1', quantity: 1, externalId: ' cafe-1 ' },
+              { productId: 'p1', quantity: 1, externalId: 'sync:otra-ronda:2' },
+              { productId: 'p1', quantity: 1, externalId: '   ' },
+            ],
+          },
+        },
+      ]),
+    )
+
+    const enviados = (orderTpvService.addItemsToOrder as jest.Mock).mock.calls[0][2].map((it: any) => it.externalId)
+    expect(enviados).toEqual(['sync:r-uno:0', 'sync:r-uno:1', 'sync:r-uno:2', 'sync:r-uno:3'])
+  })
+
   it.each(['APPLY_DISCOUNT', 'ADD_ITEMS'])('%s pendiente sobre cuenta anulada queda REJECTED, nunca RETRY', async type => {
     const error = new BadRequestError('Esta cuenta está cancelada, abre una nueva.', 'ORDER_CANCELLED_NO_EDIT')
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 5, status: 'PENDING' })
@@ -2283,6 +2310,55 @@ describe('preparation replay and financial FIFO', () => {
     })
     expect(preparation).toHaveBeenCalledWith(VENUE, 'order-1', expect.anything(), STAFF, intent.id)
   })
+  // D17 (founder, 20-nov): «La cocina puede liberar tiempos desde su pantalla». La cocina (sin orders:create) libera la mesa de
+  // cualquier mesero; el SERVIDOR lo vuelve a medir dentro de la operación (7º argumento). Apagado: se rechaza como siempre.
+  describe('D17 · liberar desde la cocina', () => {
+    const release = (id: string) => ({
+      ...progress(id, 1),
+      createdAtLocal: 1_700_000_000_000,
+      payload: { orderId: 'order-1', action: 'RELEASE', items: [{ id: 'line-1', quantity: 1, expectedRevision: 0 }] },
+    })
+    const cocina = () => ({
+      ...baseParams([release('rel-1')]),
+      authorizeIntent: jest.fn((_intent: any, permission: string) => permission === 'orders:update'),
+    })
+    beforeEach(() => {
+      ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
+        tableId: 't1',
+        servedById: 'staff-otro',
+        servedBy: { firstName: 'Juan', lastName: 'Pérez' },
+      })
+    })
+
+    it('la cocina libera la mesa de otro mesero; el interruptor lo revisa la operación (7º argumento)', async () => {
+      const [ack] = await processIntents(cocina())
+      expect(ack.status).toBe('ACKED')
+      expect(preparation).toHaveBeenCalledWith(VENUE, 'order-1', expect.anything(), STAFF, 'rel-1', true)
+    })
+
+    it('apagado: la operación lo rechaza y queda visible (KITCHEN_RELEASE_DISABLED), sin reintento eterno', async () => {
+      preparation.mockRejectedValue(
+        Object.assign(new Error('Este negocio ya no deja liberar tiempos desde la cocina.'), { code: 'KITCHEN_RELEASE_DISABLED' }),
+      )
+      const [ack] = await processIntents(cocina())
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'KITCHEN_RELEASE_DISABLED' })
+    })
+
+    it('un gerente desde la pantalla de cocina (marca COCINA) también pasa por el interruptor', async () => {
+      const desdeLaCocina = { ...release('rel-3'), payload: { ...release('rel-3').payload, origen: 'COCINA' } }
+      const [ack] = await processIntents(baseParams([desdeLaCocina]))
+      expect(ack.status).toBe('ACKED')
+      expect(preparation).toHaveBeenCalledWith(VENUE, 'order-1', expect.anything(), STAFF, 'rel-3', true)
+    })
+
+    it('la caja (con orders:create) sigue con la propiedad de mesa de siempre', async () => {
+      const [ack] = await processIntents(baseParams([release('rel-2')]))
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+      expect(preparation).not.toHaveBeenCalled()
+    })
+  })
+
   it.each([
     { action: 'START', items: [{ id: 'canonical-line', quantity: 1, expectedRevision: 0 }] },
     { action: 'START', items: [{ externalId: 'e1', sourceKey: 'round:r1:s1', quantity: 0, expectedRevision: 0 }] },

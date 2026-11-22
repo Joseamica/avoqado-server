@@ -127,6 +127,15 @@ jobs:
       - name: 🏗️ Build application
         run: npm run build
 
+      # Render ya no cabe con tsc (20-nov: OOM a 8 GiB) y `npm run build` traduce archivo por archivo. Aquí, con la memoria del
+      # runner, se compila también con tsc y se comparan: si difieren (const enum entre archivos, alias o `.js` hacia fuera del
+      # include), el deploy no sale (Codex r1 de #533).
+      - name: 🧬 El build de producción sale igual que tsc
+        run: |
+          NODE_OPTIONS='--max-old-space-size=8192' npx tsc -p tsconfig.build.json --outDir /tmp/dist-tsc
+          node scripts/build-sin-tipos.cjs tsconfig.build.json /tmp/dist-sin-tipos
+          node scripts/build-sin-tipos.cjs --comparar /tmp/dist-tsc /tmp/dist-sin-tipos
+
       - name: 🏪 Run integration tests
         timeout-minutes: 35
         # 4 procesos en vez de 1 (24 → ~8 min, mismas pruebas; medido el 14-oct). Cada proceso usa su propia copia de la

@@ -42,8 +42,8 @@
       "motivo": "La misma llamada interna, en la sobrecarga con reintentarInterbloqueo."
     },
     "src/services/tpv/payment.tpv.service.ts#recordOrderPayment": {
-      "cantidad": 2,
-      "motivo": "La única excepción (R63 b): no se envuelve porque su cuerpo tiene efectos fuera de la base (bitácora y correo a operaciones) y repetirlo los repetiría. El cast va EN EL ARGUMENTO de la llamada, `settleStandalonePaymentInTx(tx as TxConReintento, …)` (Ruling 21). Si alguna vez es la víctima de una traba, la terminal reenvía el cobro con su llave. El segundo (hz:e82938e1:D26, Codex r2 #1 y r3): `apartarDescuentosQueVolveriaAGastarEnTx(tx as TxConReintento, …)`, recién tomada la cuenta, aparta las filas Discount que el cierre de una cuenta anulada que revive va a volver a gastar, ANTES del turno (Order → Discount → … → Shift, el orden de la anulación): así esta transacción sin reintento no toma Discount ya con el turno.",
+      "cantidad": 1,
+      "motivo": "La única excepción (R63 b): no se envuelve porque su cuerpo tiene efectos fuera de la base (bitácora y correo a operaciones) y repetirlo los repetiría. El cast va EN EL ARGUMENTO de la llamada, `settleStandalonePaymentInTx(tx as TxConReintento, …)` (Ruling 21). Si alguna vez es la víctima de una traba, la terminal reenvía el cobro con su llave.",
       "efectos": [
         {
           "archivo": "src/services/tpv/registroRepetido.ts",
@@ -211,10 +211,6 @@
     "src/services/dashboard/discountEngine.service.ts#bloquearDescuentosEnOrdenEnTx": {
       "clase": "EN_TX",
       "etiqueta": "bloquearDescuentosEnOrdenEnTx"
-    },
-    "src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder": {
-      "clase": "EN_TX",
-      "etiqueta": "removeDiscountFromOrder"
     },
     "src/services/dashboard/loyalty.dashboard.service.ts#acreditarPuntosTrasElSello": {
       "clase": "EN_TX",
@@ -438,10 +434,6 @@
     "src/services/shared/usoDelDescuento.ts#tomarFilas": {
       "clase": "EN_TX",
       "etiqueta": "tomarFilas"
-    },
-    "src/services/shared/usoDelDescuento.ts#volverAGastarUsosDeCuentaRevividaEnTx": {
-      "clase": "EN_TX",
-      "etiqueta": "volverAGastarUsosDeCuentaRevividaEnTx"
     },
     "src/services/superadmin/staffDeletion.service.ts#deleteOrRetainStaffWithH1ProvenanceTx": {
       "clase": "EN_TX",
@@ -755,6 +747,14 @@
     },
     "src/services/dashboard/order.dashboard.service.ts#cancelarCuentaSinCobrar": {
       "etiqueta": "cancelarCuentaSinCobrar",
+      "cantidad": 1
+    },
+    "src/services/tpv/ventaDeCobrarSinCobro.tpv.service.ts#anularVentaDeCobrarSinCobro": {
+      "etiqueta": "anularVentaDeCobrarSinCobro",
+      "cantidad": 1
+    },
+    "src/jobs/ventas-cobrar-abandonadas.job.ts#anularVentaDeCobrarAbandonada": {
+      "etiqueta": "anularVentaDeCobrarAbandonada",
       "cantidad": 1
     },
     "src/services/dashboard/order.dashboard.service.ts#deleteOrder": {

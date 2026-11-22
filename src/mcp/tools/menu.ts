@@ -5,7 +5,14 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { updateProduct, createProduct, getProduct } from '@/services/dashboard/product.dashboard.service'
-import { createMenuCategory, createModifierGroup, updateModifier } from '@/services/dashboard/menu.dashboard.service'
+import {
+  createMenuCategory,
+  createModifierGroup,
+  LIGA_DE_EXTRA_PLAN,
+  LIGA_QUE_DESCUENTA_PLAN,
+  updateModifier,
+  updateModifierGroup,
+} from '@/services/dashboard/menu.dashboard.service'
 import { MODIFIER_SKU_FORMAT_MESSAGE, MODIFIER_SKU_MAX, SKU_REGEX } from '@/schemas/dashboard/menu.schema'
 import { auditMcpWrite } from '../audit'
 import { planGateMessage } from '../planGate'
@@ -732,7 +739,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'link_modifier_to_menu_item',
-    'Link a modifier / option (e.g. the "Papas" extra) to an EXISTING menu item (e.g. "Papas a la francesa") so that, every time the extra is sold, the stock or the full recipe of that menu item goes down — like Fudo "opcionales" and Toast "modifier from item". The linked item does NOT count as a sale of that item; the extra keeps its own price. Use unlink:true to remove the link. Linking needs the Premium plan (inventory) and a menu item that tracks inventory (by pieces or by recipe) and is not sold by weight; unlinking is always allowed. It changes how inventory moves, so by DEFAULT it only PREVIEWS (current → new); call again with confirm:true. This WRITES — requires menu:update. Ambiguous names return the candidates.',
+    'Link a modifier / option (e.g. the "Papas" extra) to an EXISTING menu item (e.g. "Papas a la francesa") so that, every time the extra is sold, the stock or the full recipe of that menu item goes down — like Fudo "opcionales" and Toast "modifier from item". The linked item does NOT count as a regular sale of that item: its units show apart, in the sales-by-item report column "Dentro de paquete" (and in package_component_sales); the extra keeps its own price. If the menu item tracks no inventory, the link only counts those units. Use unlink:true to remove the link. Linking needs the Pro or Premium plan (the same as the sales-by-item report) and a menu item not sold by weight; deducting inventory also needs the menu item to track inventory (Premium). Unlinking is always allowed. It changes how inventory moves, so by DEFAULT it only PREVIEWS (current → new); call again with confirm:true. This WRITES — requires menu:update. Ambiguous names return the candidates.',
     {
       venueId: z.string().describe('Venue that owns the extra (must be in your scope)'),
       modifierName: z.string().min(1).describe('Name of the extra / option, or part of it, e.g. "Papas"'),
@@ -759,8 +766,8 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       guard.requirePermission('menu:update', venueId) // write gate (per-venue role)
       if (!unlink && !menuItemName)
         return text({ ok: false, needsInput: true, question: '¿A qué platillo del menú quieres ligar este extra?' })
-      if (!unlink) {
-        const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'Ligar un extra a un platillo del menú')
+      if (!unlink && LIGA_DE_EXTRA_PLAN) {
+        const gate = await planGateMessage(venueId, LIGA_DE_EXTRA_PLAN.feature, 'Ligar un extra a un platillo del menú')
         if (gate) return text({ ok: false, planRequired: true, error: gate })
       }
 
@@ -794,7 +801,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
         })
       const modifier = modifiers[0]
 
-      let product: { id: string; name: string } | null = null
+      let product: { id: string; name: string; deducts: boolean } | null = null
       if (!unlink) {
         const products = await matchProductsByName({ venueId: { in: [venueId] } }, menuItemName!, confirm ? resolvedProductId : undefined)
         if (products.length === 0) return text({ ok: false, error: `No hay un platillo que se llame "${menuItemName}" en ese negocio.` })
@@ -805,14 +812,38 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
             error: `"${menuItemName}" coincide con varios platillos: sé más específico.`,
             matches: products.map(p => p.name),
           })
-        product = { id: products[0].id, name: products[0].name }
+        // Sin inventario también se liga (founder «B», 20-nov): ahí no descuenta y sólo cuenta en «Dentro de paquete».
+        const inv = await prisma.product.findFirst({
+          where: { id: products[0].id, venueId },
+          select: { trackInventory: true, inventoryMethod: true, soldByWeight: true, recipe: { select: { id: true } } },
+        })
+        // Por kilo no se liga: se dice en la vista previa, no después de confirmar (Codex r1 #14).
+        if (inv?.soldByWeight)
+          return text({
+            ok: false,
+            error: `«${products[0].name}» se vende por kilo: un extra no puede descontarlo. Elige un platillo que se venda por pieza.`,
+          })
+        const deducts = !!inv?.trackInventory && !!(inv.inventoryMethod ?? inv.recipe)
+        // Que DESCUENTE sigue siendo Premium (Codex r1 #1): un platillo con inventario pide además ese plan.
+        if (deducts) {
+          const gate = await planGateMessage(
+            venueId,
+            LIGA_QUE_DESCUENTA_PLAN.feature,
+            `Que el extra descuente el inventario de «${products[0].name}»`,
+          )
+          if (gate) return text({ ok: false, planRequired: true, error: gate })
+        }
+        product = { id: products[0].id, name: products[0].name, deducts }
       }
 
+      // `deducts` va en la huella: si entre la vista previa y la confirmación le prenden o apagan el inventario al platillo, el efecto
+      // cambia (contar ↔ descontar) y la confirmación vieja ya no vale (Codex r1 #14).
       const fingerprint = operationHash({
         modifierId: modifier.id,
         linkedProductId: modifier.linkedProductId,
         rawMaterialId: modifier.rawMaterialId,
         target: product?.id ?? null,
+        deducts: product?.deducts ?? null,
       })
       if (
         confirm &&
@@ -829,7 +860,11 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
         : modifier.rawMaterialId
           ? 'descuenta un insumo'
           : 'no descuenta inventario'
-      const to = product ? `descuenta «${product.name}»` : 'no descuenta inventario'
+      const to = product
+        ? product.deducts
+          ? `descuenta «${product.name}»`
+          : `cuenta como «${product.name}» (sin inventario: no descuenta)`
+        : 'no descuenta inventario'
       if (!confirm) {
         return text({
           ok: false,
@@ -839,12 +874,24 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           expectedSourceFingerprint: fingerprint,
           change: { item: `${modifier.group.name} › ${modifier.name}`, label: 'Inventario del extra', from, to },
           message: product
-            ? `Cada vez que se venda «${modifier.name}» bajará 1 porción de «${product.name}» (sus piezas o su receta). No contará como venta de «${product.name}». Confirma con el operador y vuelve a llamar con confirm:true.`
+            ? `${
+                product.deducts
+                  ? `Cada vez que se venda «${modifier.name}» bajará 1 porción de «${product.name}» (sus piezas o su receta).`
+                  : `«${product.name}» no lleva inventario: el extra no descontará nada.`
+              } No contará como venta suelta de «${product.name}»: sus unidades salen aparte en Ventas por artículo, columna «Dentro de paquete». Confirma con el operador y vuelve a llamar con confirm:true.`
             : `«${modifier.name}» dejará de descontar el inventario de ${modifier.linkedProduct ? `«${modifier.linkedProduct.name}»` : 'su platillo'}. Confirma con el operador y vuelve a llamar con confirm:true.`,
         })
       }
       try {
-        await updateModifier(venueId, modifier.groupId, modifier.id, { linkedProductId: product?.id ?? null })
+        // El servicio vuelve a leer el platillo y NO guarda si su efecto ya no es el que se confirmó (Codex r3 #7): la escritura queda
+        // atada a lo que el operador vio, sin una segunda lectura aparte.
+        await updateModifier(
+          venueId,
+          modifier.groupId,
+          modifier.id,
+          { linkedProductId: product?.id ?? null },
+          product ? { linkedDeducts: product.deducts } : undefined,
+        )
         await auditMcpWrite(scope, {
           action: 'MODIFIER_LINKED_PRODUCT_SET',
           entity: 'Modifier',
@@ -852,7 +899,175 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           venueId,
           data: { modifier: modifier.name, from: modifier.linkedProductId, to: product?.id ?? null },
         })
-        return text({ ok: true, extra: modifier.name, deductsMenuItem: product?.name ?? null })
+        return text({
+          ok: true,
+          extra: modifier.name,
+          deductsMenuItem: product?.name ?? null,
+          ...(product ? { deductsInventory: product.deducts } : {}),
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'configure_modifier_repeat',
+    'See or change whether an option group lets the customer pick THE SAME option more than once (e.g. "Flautas (elige 3)": 2 of Cochinita + 1 of Papa), like Square "multiple quantities of a modifier" and Fudo\'s per-option "max". Each pick counts toward the group\'s min/max and is charged at the option\'s price each time. Optionally cap how many times ONE option can be picked (maxTimes; null = up to the group max). Without allowRepeat/optionLimits it only READS the current setting. Changing it changes what the cashier can sell, so by DEFAULT it only PREVIEWS (current → new); call again with confirm:true. Applies on the Android and Windows POS updated with this change; the iPad POS still offers each option once. All plans. This WRITES — requires menu:update. Ambiguous names return the candidates.',
+    {
+      venueId: z.string().describe('Venue that owns the group (must be in your scope)'),
+      groupName: z.string().min(1).describe('Name of the option group, or part of it, e.g. "Flautas"'),
+      allowRepeat: z.boolean().optional().describe('true = the same option can be picked several times; false = each option once'),
+      optionLimits: z
+        .array(
+          z.object({
+            optionName: z.string().min(1).describe('Name of the option, or part of it, e.g. "Cochinita"'),
+            maxTimes: z
+              .number()
+              .int()
+              .min(1)
+              .max(99)
+              .nullable()
+              .describe('Most times this option can be picked; null = up to the group max'),
+          }),
+        )
+        .max(50)
+        .optional()
+        .describe('Per-option caps, e.g. [{optionName:"Queso", maxTimes:1}]'),
+      resolvedGroupId: z.string().optional().describe('Exact id returned by the preview'),
+      expectedSourceFingerprint: z.string().optional().describe('Exact fingerprint returned by the preview'),
+      confirm: z.boolean().optional().describe('Must be true to apply; without it you get a preview'),
+    },
+    async ({ venueId, groupName, allowRepeat, optionLimits, resolvedGroupId, expectedSourceFingerprint, confirm }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const quiereCambiar = allowRepeat !== undefined || (optionLimits?.length ?? 0) > 0
+      if (quiereCambiar)
+        guard.requirePermission('menu:update', venueId) // write gate (per-venue role)
+      else guard.requirePermission('menu:read', venueId)
+
+      const groups = await prisma.modifierGroup.findMany({
+        where: {
+          venueId,
+          active: true,
+          ...(confirm && resolvedGroupId ? { id: resolvedGroupId } : { name: { contains: groupName, mode: 'insensitive' as const } }),
+        },
+        select: {
+          id: true,
+          name: true,
+          allowMultiple: true,
+          allowRepeat: true,
+          minSelections: true,
+          maxSelections: true,
+          modifiers: {
+            where: { active: true },
+            select: { id: true, name: true, maxQuantity: true },
+            orderBy: [{ name: 'asc' }, { id: 'asc' }],
+            take: 200,
+          },
+        },
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        take: 10,
+      })
+      if (groups.length === 0)
+        return text({ ok: false, error: `No hay un grupo de opciones activo que se llame "${groupName}" en ese negocio.` })
+      if (groups.length > 1)
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${groupName}" coincide con varios grupos: dime el nombre exacto.`,
+          matches: groups.map(g => g.name),
+        })
+      const group = groups[0]
+      const estado = {
+        group: group.name,
+        allowsSeveral: group.allowMultiple,
+        allowRepeat: group.allowRepeat,
+        min: group.minSelections,
+        max: group.maxSelections,
+        options: group.modifiers.map(m => ({ name: m.name, maxTimes: m.maxQuantity })),
+      }
+      if (!quiereCambiar) return text({ ok: true, ...estado })
+
+      // Cada tope por opción se resuelve a UNA opción del grupo: ambiguo o inexistente ⇒ se pregunta, nunca se adivina.
+      const topes: { id: string; name: string; from: number | null; to: number | null }[] = []
+      for (const limite of optionLimits ?? []) {
+        const exactas = group.modifiers.filter(m => m.name.toLowerCase() === limite.optionName.toLowerCase())
+        const candidatas = exactas.length
+          ? exactas
+          : group.modifiers.filter(m => m.name.toLowerCase().includes(limite.optionName.toLowerCase()))
+        if (candidatas.length === 0)
+          return text({ ok: false, error: `«${group.name}» no tiene una opción que se llame "${limite.optionName}".` })
+        if (candidatas.length > 1)
+          return text({
+            ok: false,
+            ambiguous: true,
+            error: `"${limite.optionName}" coincide con varias opciones de «${group.name}»: dime el nombre exacto.`,
+            matches: candidatas.map(m => m.name),
+          })
+        topes.push({ id: candidatas[0].id, name: candidatas[0].name, from: candidatas[0].maxQuantity, to: limite.maxTimes })
+      }
+      const repetirFinal = allowRepeat ?? group.allowRepeat
+      if (repetirFinal && !group.allowMultiple)
+        return text({
+          ok: false,
+          needsInput: true,
+          question: `«${group.name}» deja elegir una sola opción. Para repetir, primero súbele el máximo a más de 1 (por ejemplo, «elige 3»).`,
+        })
+
+      const fingerprint = operationHash({
+        groupId: group.id,
+        allowRepeat: group.allowRepeat,
+        allowMultiple: group.allowMultiple,
+        options: group.modifiers.map(m => [m.id, m.maxQuantity]),
+        target: { allowRepeat: repetirFinal, topes: topes.map(t => [t.id, t.to]) },
+      })
+      if (confirm && (resolvedGroupId !== group.id || expectedSourceFingerprint !== fingerprint)) {
+        return text({
+          ok: false,
+          needsInput: true,
+          question: 'El grupo cambió o falta la vista previa. Vuelve a consultar y confirma el cambio actualizado.',
+        })
+      }
+      const veces = (n: number | null) => (n == null ? 'hasta el máximo del grupo' : `hasta ${n} ${n === 1 ? 'vez' : 'veces'}`)
+      const changes = [
+        ...(allowRepeat !== undefined && allowRepeat !== group.allowRepeat
+          ? [
+              {
+                item: group.name,
+                label: 'Repetir la misma opción',
+                from: group.allowRepeat ? 'sí' : 'no',
+                to: allowRepeat ? 'sí' : 'no',
+              },
+            ]
+          : []),
+        ...topes
+          .filter(t => t.from !== t.to)
+          .map(t => ({ item: `${group.name} › ${t.name}`, label: 'Veces que se puede elegir', from: veces(t.from), to: veces(t.to) })),
+      ]
+      if (changes.length === 0) return text({ ok: true, unchanged: true, ...estado })
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          resolvedGroupId: group.id,
+          expectedSourceFingerprint: fingerprint,
+          changes,
+          message: repetirFinal
+            ? `En «${group.name}» la caja podrá elegir la misma opción varias veces; cada vez cuenta para el mínimo y el máximo del grupo y se cobra a su precio. Confirma con el operador y vuelve a llamar con confirm:true.`
+            : `En «${group.name}» cada opción se podrá elegir una sola vez. Confirma con el operador y vuelve a llamar con confirm:true.`,
+        })
+      }
+      try {
+        if (allowRepeat !== undefined && allowRepeat !== group.allowRepeat) await updateModifierGroup(venueId, group.id, { allowRepeat })
+        for (const t of topes.filter(x => x.from !== x.to)) await updateModifier(venueId, group.id, t.id, { maxQuantity: t.to })
+        await auditMcpWrite(scope, {
+          action: 'MODIFIER_GROUP_REPEAT_SET',
+          entity: 'ModifierGroup',
+          entityId: group.id,
+          venueId,
+          data: { group: group.name, changes },
+        })
+        return text({ ok: true, group: group.name, allowRepeat: repetirFinal, changes })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

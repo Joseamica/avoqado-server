@@ -1,0 +1,172 @@
+{
+  "pagina": "android/mesas/tiempos-cocina-y-liberar",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42",
+  "version": "2.25.55",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 759,
+      "cita": "label = \"Servicio y entregas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/PreparationServiceSheet.kt",
+      "linea": 296,
+      "cita": "label = { Text(\"En servicio\") }"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KitchenPreparation.kt",
+      "linea": 14,
+      "cita": "RELEASE(\"Liberar\")"
+    },
+    {
+      "paso": 2,
+      "archivo": "avoqado-web-dashboard/src/pages/Settings/ServiceCourses.tsx",
+      "linea": 458,
+      "cita": "id=\"kitchen-release\""
+    },
+    {
+      "paso": 2,
+      "archivo": "avoqado-web-dashboard/src/locales/es/serviceCourses.json",
+      "linea": 68,
+      "cita": "\"kitchenReleaseLabel\": \"La cocina puede liberar tiempos desde su pantalla\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt",
+      "linea": 296,
+      "cita": "preparationRepository?.refreshCapabilities(it)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 766,
+      "cita": "label = \"Pantalla de cocina\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSOrderCard.kt",
+      "linea": 161,
+      "cita": "listOf(com.avoqado.pos.kds.domain.PreparationAction.RELEASE, com.avoqado.pos.kds.domain.PreparationAction.START,"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt",
+      "linea": 560,
+      "cita": "repository.act(venueId, listOf(row), action, quantity, from, reason, withPaper = false, fromKitchen = true)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
+      "linea": 99,
+      "cita": "fun terminadaEnCocina(comanda: KDSOrder): Boolean ="
+    },
+    {
+      "paso": 4,
+      "archivo": "avoqado-server/src/services/mobile/kds.mobile.service.ts",
+      "linea": 200,
+      "cita": "{ NOT: { preparationVersion: 1, status: KdsStatus.READY } }"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
+      "linea": 223,
+      "cita": "const val RECIENTES = \"Recientes\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
+      "linea": 227,
+      "cita": "const val DESHACER = \"Deshacer\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt",
+      "linea": 819,
+      "cita": "kdsRepository.recall(id, terminadaEn)"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KitchenPreparation.kt",
+      "linea": 14,
+      "cita": "DELIVER(\"Entregar\")"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 969,
+      "cita": "text = if (perProduct) \"Ver preparación y liberar\" else \"¡MARCHAR!\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSOrderCard.kt",
+      "linea": 218,
+      "cita": "if (order.preparationVersion == 0) PrimaryButton("
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "orders:update",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/data/KitchenPreparationRepository.kt",
+      "linea": 115
+    },
+    {
+      "permiso": "orders:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 4142
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "avoqado-server/src/routes/dashboard/serviceCourse.routes.ts",
+      "linea": 24
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Preparar, Marcar listo y Liberar se guardan en la tablet antes de la red (cola KDS_ITEM_PROGRESS)",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/data/KitchenPreparationRepository.kt",
+      "linea": 376
+    },
+    {
+      "afirmacion": "La comanda sale de la pantalla con lo que la tablet guardó (proyección local)",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
+      "linea": 107
+    },
+    {
+      "afirmacion": "Recientes necesita internet",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
+      "linea": 178
+    },
+    {
+      "afirmacion": "Con el interruptor apagado al subir, lo liberado sin red se rechaza (KITCHEN_RELEASE_DISABLED)",
+      "archivo": "avoqado-server/src/services/kds/kitchenPreparation.service.ts",
+      "linea": 95
+    },
+    {
+      "afirmacion": "Sin respuesta de la pantalla ni del servidor, la liberación espera el «sí» hasta un tope y luego, si la estación no tiene impresora, dice «Esa estación no tiene impresora…»; con el servidor al día y sólo estaciones de pantalla, sin papel ni aviso (D16)",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/data/PreparationDeliveryService.kt",
+      "linea": 350
+    },
+    {
+      "afirmacion": "El texto del aviso de una estación sin impresora",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ReintentoDeComanda.kt",
+      "linea": 167
+    }
+  ],
+  "rutas": [],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 1,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

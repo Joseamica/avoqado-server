@@ -20,7 +20,10 @@ const requireStaff = (req: Request): string => {
 /** 1b: además de los ajustes, el estado de la tienda (el mismo cálculo que `/info`) y qué falta para poder encenderla (R18). */
 export const getSettingsHandler = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    return res.json({ success: true, data: await settingsView(req.params.venueId) })
+    return res.json({
+      success: true,
+      data: await settingsView(req.params.venueId, undefined, { pestanaVieja: req.query.pausaSola !== '1' }),
+    })
   } catch (e) {
     return next(e)
   }
@@ -31,7 +34,7 @@ export const updateSettingsHandler = async (req: Request, res: Response, next: N
   try {
     const { venueId } = req.params
     const saved = await updateSettings(venueId, req.body, staffOf(req))
-    return res.json({ success: true, data: await settingsView(venueId, saved) })
+    return res.json({ success: true, data: await settingsView(venueId, saved, { pestanaVieja: req.query.pausaSola !== '1' }) })
   } catch (e) {
     return next(e)
   }

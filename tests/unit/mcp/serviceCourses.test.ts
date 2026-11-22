@@ -9,6 +9,7 @@ jest.mock('@/services/service-courses/serviceCourse.service', () => ({
   getOrganizationServiceCourses: jest.fn(),
   putVenueServiceCourses: jest.fn(),
   putOrganizationServiceCourses: jest.fn(),
+  setKitchenRelease: jest.fn(),
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 const scope = (over: Partial<McpScope> = {}): McpScope => ({
@@ -72,6 +73,29 @@ describe('customer MCP service courses', () => {
     expect(response.content[0].text).toContain('requiresConfirmation')
     expect(courses.putVenueServiceCourses).not.toHaveBeenCalled()
     expect(courses.putOrganizationServiceCourses).not.toHaveBeenCalled()
+  })
+  it('D17: «La cocina puede liberar» primero enseña el cambio y sólo con confirm lo guarda, con el actor del MCP', async () => {
+    ;(courses.getVenueServiceCourses as jest.Mock).mockResolvedValue({
+      organizationId: 'org-a',
+      venueName: 'Flautas',
+      enabled: true,
+      kitchenCanRelease: false,
+    })
+    ;(courses.setKitchenRelease as jest.Mock).mockResolvedValue({ venueName: 'Flautas', kitchenCanRelease: true })
+    const preview = await handlers().configure_kitchen_release({ venueId: 'venue-a', enabled: true })
+    expect(preview.content[0].text).toContain('requiresConfirmation')
+    expect(preview.content[0].text).toContain('Sólo la caja libera tiempos → La cocina puede liberar tiempos')
+    expect(courses.setKitchenRelease).not.toHaveBeenCalled()
+    await handlers().configure_kitchen_release({ venueId: 'venue-a', enabled: true, confirm: true })
+    expect(courses.setKitchenRelease).toHaveBeenCalledWith('venue-a', true, { staffId: 'staff', source: 'customer-mcp' })
+  })
+  it('D17: el interruptor no se toca fuera del alcance ni sin Pro', async () => {
+    await expect(handlers().configure_kitchen_release({ venueId: 'foreign', enabled: true, confirm: true })).rejects.toThrow(
+      /not in your scope/,
+    )
+    ;(courses.getVenueServiceCourses as jest.Mock).mockResolvedValue({ organizationId: 'org-a', enabled: false, kitchenCanRelease: false })
+    await expect(handlers().configure_kitchen_release({ venueId: 'venue-a', enabled: true, confirm: true })).rejects.toThrow(/Pro/)
+    expect(courses.setKitchenRelease).not.toHaveBeenCalled()
   })
   it('confirmed save passes revision, target and authenticated actor to the same dashboard service', async () => {
     await handlers().configure_service_courses({

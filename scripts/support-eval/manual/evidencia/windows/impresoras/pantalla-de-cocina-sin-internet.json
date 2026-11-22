@@ -1,0 +1,510 @@
+{
+  "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6",
+  "version": "2.25.52",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt",
+      "linea": 186,
+      "cita": "1 -> \"La pantalla de cocina de ${nombres.single()} no está conectada a internet\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt",
+      "linea": 187,
+      "cita": "else -> \"Las pantallas de cocina de ${lista(nombres)} no están conectadas a internet\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/data/EstadoDePantallasDeCocina.kt",
+      "linea": 116,
+      "cita": "val nombres = if (data.completo) data.desconectadas.map { it.name }.filter { it.isNotBlank() } else emptyList()"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 532,
+      "cita": "avisoDePantallas = avisoDePantallas,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 766,
+      "cita": "label = \"Pantalla de cocina\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 762,
+      "cita": "if (viewModel.canAccessKDS && visible(PreferenciasDelMenu.PANTALLA_DE_COCINA)) {"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 338,
+      "cita": "get() = hasVenuePermission(\"orders:update\", fallbackRoles = KDS_RESPALDO)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
+      "linea": 190,
+      "cita": "const val ELEGIR_TITULO = \"¿Qué estación es esta pantalla?\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSScreen.kt",
+      "linea": 440,
+      "cita": "text = TextosDeCocina.ELEGIR_TITULO,"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt",
+      "linea": 288,
+      "cita": "val lectura = kdsRepository.fetchBoardPage(tablero.estacion.id, requestedOffset)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSScreen.kt",
+      "linea": 103,
+      "cita": "owner.repeatOnLifecycle(Lifecycle.State.STARTED) { mientrasSeVe() }"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt",
+      "linea": 215,
+      "cita": "delay(10_000)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt",
+      "linea": 283,
+      "cita": "val tablero = _vista.value as? VistaDeCocina.Tablero ?: return"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
+      "linea": 182,
+      "cita": "const val SIN_CONEXION = \"Sin conexión: la pantalla se pone al día cuando vuelva la red\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
+      "linea": 184,
+      "cita": "const val SIN_INTERNET_CON_WIFI = \"Sin internet: recibiendo por el WiFi del local\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSScreen.kt",
+      "linea": 184,
+      "cita": "if (sinConexion) BannerSinConexion(texto = if (recibiendoPorWifi) TextosDeCocina.SIN_INTERNET_CON_WIFI else TextosDeCocina.SIN_CONEXION)"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/data/EstadoDePantallasDeCocina.kt",
+      "linea": 84,
+      "cita": "_sinInternet.value = revision?.nombres.orEmpty()"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/data/EstadoDePantallasDeCocina.kt",
+      "linea": 129,
+      "cita": "const val INTERVALO_MS = 20_000L"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "orders:update",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 338
+    },
+    {
+      "permiso": "orders:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 4157
+    },
+    {
+      "permiso": "orders:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/network/ApiService.kt",
+      "linea": 253
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "KITCHEN_DISPLAY",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt",
+      "linea": 275
+    },
+    {
+      "featureCode": "KITCHEN_DISPLAY",
+      "archivo": "avoqado-server/src/services/kds/kitchenDisplayStations.ts",
+      "linea": 102
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red la franja de pantallas no se dice: la banda cae al texto sin red",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/ConnectivityBanner.kt",
+      "linea": 98
+    },
+    {
+      "afirmacion": "Sin red arriba sale «Sin conexión — las ventas se guardan en el dispositivo»",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/ConnectivityBanner.kt",
+      "linea": 106
+    },
+    {
+      "afirmacion": "…o «Sin conexión — N por sincronizar (todo se guarda aquí)»",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/ConnectivityBanner.kt",
+      "linea": 104
+    },
+    {
+      "afirmacion": "Sin red = sin conexión o sin alcanzar al servidor",
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/AppState.kt",
+      "linea": 414
+    },
+    {
+      "afirmacion": "Sin red el sondeo no contesta: «no se sabe» y la lista queda vacía",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/data/EstadoDePantallasDeCocina.kt",
+      "linea": 122
+    },
+    {
+      "afirmacion": "Si aparece «Las comandas de … salen en papel si la pantalla no contesta»: estaciones sólo pantalla",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt",
+      "linea": 157
+    },
+    {
+      "afirmacion": "Ese aviso va pegado a «Sin conexión — …» con « · » (o la racha en su lugar)",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/ConnectivityBanner.kt",
+      "linea": 108
+    },
+    {
+      "afirmacion": "Sólo pantalla sin acuse por el WiFi: papel de respaldo, con o sin internet",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt",
+      "linea": 55
+    },
+    {
+      "afirmacion": "Venta encolada sin red: servidorLaTiene es false",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 6130
+    },
+    {
+      "afirmacion": "Ronda encolada sin red: servidorLaTiene = false",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1524
+    },
+    {
+      "afirmacion": "Sin servidorLaTiene == true el aviso por orden no se calla",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/printing/ComandaDispatcher.kt",
+      "linea": 507
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: la franja es naranja (el color Warning)",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/ConnectivityBanner.kt",
+      "linea": 61
+    },
+    {
+      "ruta": "Antes: Warning es naranja (FF9500)",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/theme/Color.kt",
+      "linea": 46
+    },
+    {
+      "ruta": "Antes: la franja va arriba, en la barra superior (tablet)",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 526
+    },
+    {
+      "ruta": "Antes: la franja va arriba, en la barra superior (teléfono)",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 833
+    },
+    {
+      "ruta": "Antes: la franja sale con red si hay aviso de pantallas",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/ConnectivityBanner.kt",
+      "linea": 51
+    },
+    {
+      "ruta": "Antes: con red va junto al aviso de la caja, separados por « · »",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/ConnectivityBanner.kt",
+      "linea": 96
+    },
+    {
+      "ruta": "Antes: con red va junto al aviso del WiFi, separados por « · »",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/ConnectivityBanner.kt",
+      "linea": 97
+    },
+    {
+      "ruta": "Antes: el texto sale de lo que dice el SERVIDOR",
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/AppState.kt",
+      "linea": 407
+    },
+    {
+      "ruta": "Antes: el sondeo arranca con la sesión y sigue a la sucursal",
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/AppState.kt",
+      "linea": 205
+    },
+    {
+      "ruta": "Antes: la ruta que sondea la caja",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/network/ApiService.kt",
+      "linea": 253
+    },
+    {
+      "ruta": "Antes: la ruta en el SERVIDOR",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 4154
+    },
+    {
+      "ruta": "Antes: conectada = leyó su tablero hace 90 s o menos",
+      "archivo": "avoqado-server/src/services/kds/pantallasVivas.ts",
+      "linea": 15
+    },
+    {
+      "ruta": "Antes: sólo estaciones activas con pantalla de cocina",
+      "archivo": "avoqado-server/src/services/kds/kitchenDisplayStations.ts",
+      "linea": 96
+    },
+    {
+      "ruta": "Antes: recién arrancado el servidor no da a ninguna por desconectada",
+      "archivo": "avoqado-server/src/services/kds/kitchenDisplayStations.ts",
+      "linea": 111
+    },
+    {
+      "ruta": "Antes: la caja pregunta cada 20 s (con pantallas)",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/data/EstadoDePantallasDeCocina.kt",
+      "linea": 129
+    },
+    {
+      "ruta": "Antes: sin pantallas pregunta cada 5 min",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/data/EstadoDePantallasDeCocina.kt",
+      "linea": 131
+    },
+    {
+      "ruta": "Antes: tras un error espera 1 min",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/data/EstadoDePantallasDeCocina.kt",
+      "linea": 133
+    },
+    {
+      "ruta": "Paso 1: la franja no promete entrega",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt",
+      "linea": 181
+    },
+    {
+      "ruta": "Paso 3: el SERVIDOR marca viva la estación del tablero que se leyó",
+      "archivo": "avoqado-server/src/controllers/mobile/kds.mobile.controller.ts",
+      "linea": 70
+    },
+    {
+      "ruta": "Paso 4: el tablero pide sus comandas con su estación",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/data/KDSRepository.kt",
+      "linea": 103
+    },
+    {
+      "ruta": "Problema: el tablero dice arriba el nombre de su estación",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSScreen.kt",
+      "linea": 662
+    },
+    {
+      "ruta": "Problema: el engrane del tablero",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSScreen.kt",
+      "linea": 671
+    },
+    {
+      "ruta": "Problema: «Cambiar de estación» en la hoja del engrane",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/presentation/KDSSettingsSheet.kt",
+      "linea": 88
+    },
+    {
+      "ruta": "Problema: el texto «Cambiar de estación»",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt",
+      "linea": 203
+    },
+    {
+      "ruta": "Si aparece «La pantalla de … no se alcanza por el WiFi»",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt",
+      "linea": 172
+    },
+    {
+      "ruta": "Si aparece «Las pantallas de … no se alcanzan por el WiFi»",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt",
+      "linea": 174
+    },
+    {
+      "ruta": "Si aparece: la racha sólo nombra estaciones activas con pantalla",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt",
+      "linea": 169
+    },
+    {
+      "ruta": "Si aparece: sale a las 3 entregas seguidas sin acuse",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/lan/RachaSinAcuse.kt",
+      "linea": 12
+    },
+    {
+      "ruta": "Si aparece: un acuse de esa estación la limpia",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/lan/RachaSinAcuse.kt",
+      "linea": 21
+    },
+    {
+      "ruta": "Si aparece: cada entrega por el WiFi cuenta para la racha",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/EntregaPorWifi.kt",
+      "linea": 62
+    },
+    {
+      "ruta": "Si aparece: la caja y la pantalla se buscan en la red del local (anuncio NSD)",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/lan/TransporteLan.kt",
+      "linea": 39
+    },
+    {
+      "ruta": "Problema: el papel de respaldo usa la impresora de la estación default",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ComandaPrinter.kt",
+      "linea": 84
+    },
+    {
+      "ruta": "Problema: si no, la de cocina de esta caja",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ComandaPrinter.kt",
+      "linea": 231
+    },
+    {
+      "ruta": "Problema: y sólo el respaldo cae a la de recibos de la caja",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ComandaPrinter.kt",
+      "linea": 234
+    },
+    {
+      "ruta": "Problema: encabezado «RESPALDO · … · pantalla sin conexión»",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt",
+      "linea": 113
+    },
+    {
+      "ruta": "Problema: lo que salió en papel de respaldo se marca",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/printing/ComandaDispatcher.kt",
+      "linea": 473
+    },
+    {
+      "ruta": "Problema: no siempre se marca (papel de un tiempo compartido)",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/printing/ComandaDispatcher.kt",
+      "linea": 599
+    },
+    {
+      "ruta": "Problema: el tablero del SERVIDOR no trae lo marcado como papel de respaldo",
+      "archivo": "avoqado-server/src/services/mobile/kds.mobile.service.ts",
+      "linea": 158
+    },
+    {
+      "ruta": "Problema: el aviso por orden en el cobro, «No salió la comanda de: …»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt",
+      "linea": 745
+    },
+    {
+      "ruta": "Problema: el aviso por orden en la mesa",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 687
+    },
+    {
+      "ruta": "Problema: se calla sólo con la venta en el servidor y todo lo saltado de estaciones sólo pantalla",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/printing/ComandaDispatcher.kt",
+      "linea": 507
+    },
+    {
+      "ruta": "Problema: …que el SERVIDOR confirmó como pantalla en el último sondeo",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/printing/ComandaDispatcher.kt",
+      "linea": 509
+    },
+    {
+      "ruta": "Problema: sin respuesta del servidor no se calla",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/data/EstadoDePantallasDeCocina.kt",
+      "linea": 67
+    },
+    {
+      "ruta": "Problema: sólo si ninguna impresora tronó",
+      "archivo": "app/src/main/java/com/avoqado/pos/printing/data/ReintentoDeComanda.kt",
+      "linea": 278
+    },
+    {
+      "ruta": "Problema: el cobro no calla con un abono",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 6333
+    },
+    {
+      "ruta": "Problema: abono = queda saldo por cobrar",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 6135
+    },
+    {
+      "ruta": "Problema: la mesa calla la ronda que llegó en línea",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1614
+    },
+    {
+      "ruta": "Problema: la ronda en línea va con servidorLaTiene = true",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1251
+    },
+    {
+      "ruta": "Problema: sin orders:read el sondeo es de fondo (no abre diálogo) y queda en «no se sabe»",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/network/ApiService.kt",
+      "linea": 252
+    },
+    {
+      "ruta": "Problema: un error del sondeo sólo se anota",
+      "archivo": "app/src/main/java/com/avoqado/pos/kds/data/EstadoDePantallasDeCocina.kt",
+      "linea": 113
+    },
+    {
+      "ruta": "Problema (ZIP): desde la Microsoft Store no hay que hacer nada",
+      "archivo": "desktop/pos/windows/LEEME-RED-LOCAL.txt",
+      "linea": 8
+    },
+    {
+      "ruta": "Problema (ZIP): la pregunta del firewall al iniciar sesión",
+      "archivo": "desktop/pos/windows/LEEME-RED-LOCAL.txt",
+      "linea": 11
+    },
+    {
+      "ruta": "Problema (ZIP): es de «OpenJDK Platform binary»",
+      "archivo": "desktop/pos/windows/LEEME-RED-LOCAL.txt",
+      "linea": 12
+    },
+    {
+      "ruta": "Problema (ZIP): marcar «Redes privadas» y «Redes públicas»",
+      "archivo": "desktop/pos/windows/LEEME-RED-LOCAL.txt",
+      "linea": 13
+    },
+    {
+      "ruta": "Problema (ZIP): «Permitir acceso»",
+      "archivo": "desktop/pos/windows/LEEME-RED-LOCAL.txt",
+      "linea": 15
+    },
+    {
+      "ruta": "Problema (ZIP): con «Cancelar» Windows lo bloquea",
+      "archivo": "desktop/pos/windows/LEEME-RED-LOCAL.txt",
+      "linea": 17
+    },
+    {
+      "ruta": "Problema (ZIP): el arreglo en el Panel de control",
+      "archivo": "desktop/pos/windows/LEEME-RED-LOCAL.txt",
+      "linea": 18
+    },
+    {
+      "ruta": "Problema (ZIP): «javaw» de la carpeta de Avoqado, Privada y Pública",
+      "archivo": "desktop/pos/windows/LEEME-RED-LOCAL.txt",
+      "linea": 19
+    },
+    {
+      "ruta": "Problema (ZIP): el ZIP es el de Iniciar.bat",
+      "archivo": "desktop/pos/windows/LEEME-RED-LOCAL.txt",
+      "linea": 10
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": [],
+    "nota": "Página nueva de la franja de D6 de Flautas (20-nov-2026), escrita desde el código; falta su recorrido en aparato."
+  },
+  "codex": {
+    "lote": 11,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

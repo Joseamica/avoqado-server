@@ -421,11 +421,11 @@ import {
   renovarRecuperacionDeFolioEnTx,
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
-import { apartarDescuentosQueVolveriaAGastarEnTx } from '../shared/usoDelDescuento'
 // El candado del toque repetido en «Efectivo». La regla vive AHÍ, pura y probada aparte.
 import { aplicaCandadoDeEfectivo, cobroEnEfectivoSobreOrdenSaldada } from '../shared/cobroEnEfectivoDuplicado'
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
+import { anotarVendedorDeBajaEnTx, validarVendedor } from '../shared/vendedorDadoDeBaja'
 import { withDeadlockRetry, isRetryableDbError, type TxConReintento } from '../../utils/serializableRetry'
 import { loadOrderForCfdiFromDb, ventaConDevolucion } from '../fiscal/cfdi.service'
 import {
@@ -4045,17 +4045,6 @@ export async function recordOrderPayment(
             'PAYMENT_ORDER_AUTHORITY_UNAVAILABLE',
           )
         }
-        // 🔴 hz:e82938e1:D26 (Codex r2 #1, r3): si esta cuenta está anulada y el cobro la revive, su cierre vuelve a gastar los usos que la
-        // anulación devolvió. Esas filas `Discount` se APARTAN aquí, recién tomada la cuenta y antes del turno: Order → Discount → … →
-        // Shift, el orden de la anulación. Esta transacción no se reintenta (excepción R63 b): sin esto tomaba Discount ya con el turno y
-        // podía trabarse con una anulación que espera ese turno. Sólo si ya venía anulada (una cuenta viva no tiene filas marcadas, y así
-        // ningún cobro normal paga la consulta) y sólo con dinero capturado (COMPLETED es lo único que llega al cierre que gasta; Codex r4
-        // #3). Residuo declarado (Codex r4 #1-#2): una anulación que entra entre la lectura de arriba y este candado, o la venta de $0 de la
-        // TPV (que ya tomaba Shift → Discount, `order.tpv.service.ts`), pueden trabarse con este cierre; la víctima es esta transacción y,
-        // como en toda traba de este cuerpo (R63 b), la terminal reenvía el cobro con su llave. Nada queda a medias: se revierte entero.
-        if (paymentStatusSnapshot === 'COMPLETED' && claseDeEstado(activeOrder.status) === 'CANCELADA') {
-          await apartarDescuentosQueVolveriaAGastarEnTx(tx as TxConReintento, venueId, activeOrder.id)
-        }
 
         await tx.$executeRawUnsafe('SAVEPOINT exchange_sale_policy')
         try {
@@ -5679,9 +5668,14 @@ export async function recordFastPayment(
   const tipAmount = paymentData.tip / 100
 
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
-  const validatedStaffId = await t.time('validateStaffVenue', () =>
-    validateStaffVenue(relayProcessedByStaffId ?? paymentData.staffId, venueId, userId),
+  // D13 «C»: la venta rápida de la cola con un vendedor dado de baja queda a nombre de la sesión (`userId`), con nota en la transacción.
+  const vendedor = await t.time('validateStaffVenue', () =>
+    validarVendedor(relayProcessedByStaffId ?? paymentData.staffId, venueId, userId, {
+      sesion: userId,
+      deLaCola: paymentData.isOfflineReplay === true,
+    }),
   )
+  const validatedStaffId = vendedor.staffId
 
   t.mark('idempotenciaYChequeosPrevios')
 
@@ -6064,6 +6058,10 @@ export async function recordFastPayment(
             processedBy: { select: STAFF_PUBLIC_SELECT },
           },
         })
+
+        if (vendedor.deBaja) {
+          await anotarVendedorDeBajaEnTx(tx, venueId, vendedor.deBaja, { orderId: order.id, paymentId: newPayment.id, sesion: userId })
+        }
 
         if (shiftClaim) {
           await recordPendingPaymentShiftReconciliation(tx, {

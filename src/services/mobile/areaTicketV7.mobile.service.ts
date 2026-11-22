@@ -641,7 +641,9 @@ function issueIntentFromInput(lines: AreaTicketLineInput[]) {
     quantity: quantity(normalized[index].quantity),
     weightKg: normalized[index].weightQuantity == null ? null : quantity(normalized[index].weightQuantity),
     notes: line.notes ?? null,
-    modifierIds: [...new Set(line.modifierIds ?? [])].sort(),
+    // Con repetidos (grupo que deja repetir, encargo a508f4): [X] y [X, X] son vales distintos. Un `Set` los igualaba y el
+    // reintento con la misma llave devolvía el vale viejo con un extra de menos.
+    modifierIds: [...(line.modifierIds ?? [])].sort(),
     discountId: line.discountId ?? null,
   }))
 }
@@ -653,13 +655,11 @@ function issueIntentFromTicket(ticket: any) {
     quantity: quantity(line.quantity),
     weightKg: line.weightKg == null ? null : quantity(line.weightKg),
     notes: line.notes ?? null,
-    modifierIds: [
-      ...new Set(
-        (Array.isArray(line.modifiersSnapshot) ? line.modifiersSnapshot : [])
-          .map((modifier: any) => modifier?.modifierId)
-          .filter((modifierId: unknown): modifierId is string => typeof modifierId === 'string'),
-      ),
-    ].sort(),
+    // Un renglón de la foto por vez elegida: los repetidos se conservan, igual que en la entrada.
+    modifierIds: (Array.isArray(line.modifiersSnapshot) ? line.modifiersSnapshot : [])
+      .map((modifier: any) => modifier?.modifierId)
+      .filter((modifierId: unknown): modifierId is string => typeof modifierId === 'string')
+      .sort(),
     discountId: line.appliedDiscountId ?? null,
   }))
 }
@@ -827,9 +827,14 @@ export async function buildReservationSpecs(
   ])
   const rawById = new Map(rawsDeFoto.map(r => [r.id, r]))
   const ligadoById = new Map(ligadosDeFoto.map(p => [p.id, p]))
+  // Una entrada por VEZ elegida (encargo a508f4): con «2 de Cochinita» se apartan dos porciones, como consume el cobro (un renglón
+  // por vez). Antes se recorría el catálogo (una fila por extra) y se apartaba una sola.
   const extrasDeLaLinea = (lineIndex: number) =>
-    modifiers
-      .filter(candidate => (inputs[lineIndex].modifierIds ?? []).includes(candidate.id))
+    (inputs[lineIndex].modifierIds ?? [])
+      .flatMap(id => {
+        const modifier = modifiers.find(candidate => candidate.id === id)
+        return modifier ? [modifier] : []
+      })
       .map(modifier => {
         const foto = snapshots[lineIndex]?.modifiersSnapshot?.find(m => m.modifierId === modifier.id)?.inventario
         if (!foto) return modifier
@@ -1011,7 +1016,10 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
     )
   } catch (error) {
     if (!esRechazoPorTopeEnVales(error)) throw error
-    const ganador = await prisma.areaTicket.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey } }, include: ticketInclude })
+    const ganador = await prisma.areaTicket.findUnique({
+      where: { venueId_idempotencyKey: { venueId, idempotencyKey } },
+      include: ticketInclude,
+    })
     if (!ganador) throw error
     assertIssueIdempotencyMatch(ganador, input.lines)
     return mapTicket(ganador)
@@ -2046,16 +2054,15 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
   }
   const construidoSueltos = normalItems.length > 0 ? await sueltos() : null
   if (construidoSueltos && 'orderId' in construidoSueltos) return mapCheckout(construidoSueltos)
-  const normalBuild =
-    construidoSueltos
-      ? construidoSueltos
-      : {
-          itemsData: [] as any[],
-          subtotal: 0,
-          itemDiscountTotal: 0,
-          discounts: [] as Array<{ id: string; [key: string]: any }>,
-          motivosPorRenglon: undefined,
-        }
+  const normalBuild = construidoSueltos
+    ? construidoSueltos
+    : {
+        itemsData: [] as any[],
+        subtotal: 0,
+        itemDiscountTotal: 0,
+        discounts: [] as Array<{ id: string; [key: string]: any }>,
+        motivosPorRenglon: undefined,
+      }
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
   // Tarjeta na24531d: el catálogo que nombra la fila espejo de cada renglón de vale con descuento (fuera de la transacción).
   const descuentosDeValesDeLaSesion = await descuentosDeLosVales(venueId, session.tickets)
@@ -2183,6 +2190,10 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
               }),
             )
           }
+          // 🔴 D5: antes de mandar la tarjeta a la terminal (o de recibir el efectivo), un freno de sólo lectura: si la liquidación de esta
+          // venta va a rechazar por inventario, se dice ahora con su mismo 409 y todo se revierte (ni orden ni renglones; la sesión sigue
+          // abierta con sus vales). La liquidación no cambia.
+          await revisarInventarioAlArmar(tx, venueId, fresh.id, order.id)
           // 🔴 Tarjeta na24531d: cada renglón con descuento gana su fila ESPEJO MARCADA en ESTA transacción, como el vale viejo y
           // Mostrador; sin ella el descuento no salía en «Descuentos» ni en las estadísticas. Un reintento deshace las filas con todo lo
           // demás y una sesión ya cobrada sale arriba sin escribir: nunca nacen dos. Los usos del descuento no se tocan (fase 1).
@@ -3856,18 +3867,20 @@ async function buildUnreservedAreaOrderInventoryDemands(
       }
       for (const recipeLine of item.product.recipe.lines) {
         if (recipeLine.isOptional) continue
-        const substitution =
+        // Cada SUSTITUCIÓN elegida del grupo ligado consume lo suyo (encargo a508f4, Codex r2 #1), igual que la venta normal
+        // (`deductStockForRecipe`) y la reserva al emitir. Antes sólo contaba la primera y la segunda opción quedaba sin descontar.
+        const substitutions =
           recipeLine.isVariable && recipeLine.linkedModifierGroupId
-            ? item.modifiers.find(
+            ? item.modifiers.filter(
                 candidate =>
                   candidate.modifier?.groupId === recipeLine.linkedModifierGroupId &&
                   candidate.modifier.inventoryMode === 'SUBSTITUTION' &&
                   candidate.modifier.rawMaterialId &&
                   candidate.modifier.quantityPerUnit,
               )
-            : undefined
-        if (substitution?.modifier) {
-          consumedSubstitutionModifierIds.add(substitution.modifier.id)
+            : []
+        if (substitutions.length > 0) {
+          for (const substitution of substitutions) consumedSubstitutionModifierIds.add(substitution.modifier!.id)
           continue
         }
         const perSale = convertUnit(recipeLine.quantity, recipeLine.unit, recipeLine.rawMaterial.unit)
@@ -3960,6 +3973,148 @@ async function buildUnreservedAreaOrderInventoryDemands(
     }
   }
   return [...byTarget.values()].sort((a, b) => `${a.inventoryKind}:${a.inventoryId}`.localeCompare(`${b.inventoryKind}:${b.inventoryId}`))
+}
+
+/** Tope de apartados que la revisión al armar simula; con más, no frena (decide la liquidación, como antes de D5). */
+const TOPE_DE_APARTADOS_AL_ARMAR = 500
+
+/** La revisión siempre pide igual o menos que la liquidación; el polvo del orden de la suma no frena (Codex r5 y r6). */
+function requeridoParaRevisar(cantidad: Prisma.Decimal.Value): Prisma.Decimal {
+  return new Prisma.Decimal(cantidad).toDecimalPlaces(3, Prisma.Decimal.ROUND_DOWN)
+}
+
+/** Lo que la revisión al armar lee de la base: sin dinero ni escrituras. Cantidades disponibles tal como están guardadas (3 decimales). */
+export interface FotoParaFrenar {
+  /** Lo que ningún vale apartó, por inventario (`buildUnreservedAreaOrderInventoryDemands`). */
+  demands: Array<{ inventoryKind: AreaTicketInventoryTarget; inventoryId: string; quantityBaseUnits: Prisma.Decimal; label: string }>
+  /** Los apartados ACTIVE de los vales de la sesión, en el orden en que la liquidación los consume (tipo, inventario, id). */
+  apartados: Array<{ inventoryKind: AreaTicketInventoryTarget; inventoryId: string; quantityBaseUnits: Prisma.Decimal.Value }>
+  /** Por `tipo:inventario`: la existencia guardada, la suma de lotes ACTIVE con saldo y la suma de TODOS los apartados ACTIVE. */
+  existencia: Map<string, Prisma.Decimal>
+  lotes: Map<string, Prisma.Decimal>
+  activos: Map<string, Prisma.Decimal>
+}
+
+const claveDeInventario = (t: { inventoryKind: AreaTicketInventoryTarget; inventoryId: string }) => `${t.inventoryKind}:${t.inventoryId}`
+
+/**
+ * 🔴 D5 (pizarrón hz:0555ee15:D5): la decisión del freno al armar, pura (sin base). Garantía: con la misma foto, nunca frena una venta
+ * que la liquidación (`finalizeAreaTicketPaymentInTransaction`, consumo al saldar) aceptaría. Simula su consumo en su orden:
+ *   1. cada apartado de la sesión, uno por uno, como `consumeQuantityReservation` (existencia ≥ apartado) y
+ *      `consumeRawMaterialReservation` (apartado > 0 y lotes ≥ apartado: el apartado en 0.000 frena siempre);
+ *   2. lo no apartado, como `consumeUnreservedAreaOrderInventory`: existencia libre (allá las ACTIVE que quedan son las ajenas) y, de
+ *      un insumo, lotes. Lo requerido se trunca a 3 decimales (`requeridoParaRevisar`); si queda en 0, no se compara con nada.
+ * Devuelve el mismo 409 que daría la liquidación, o `null`.
+ */
+export function frenoAlArmar(foto: FotoParaFrenar): AppError | null {
+  const existencia = new Map(foto.existencia)
+  const lotes = new Map(foto.lotes)
+  const propio = new Map<string, Prisma.Decimal>()
+
+  for (const apartado of foto.apartados) {
+    const key = claveDeInventario(apartado)
+    const cantidad = new Prisma.Decimal(apartado.quantityBaseUnits)
+    const pide = requeridoParaRevisar(cantidad)
+    if (apartado.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) {
+      if (existencia.get(key)!.lessThan(pide)) {
+        return domainError(409, 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'La existencia reservada ya no está disponible.')
+      }
+    } else {
+      if (cantidad.lessThanOrEqualTo(0) || lotes.get(key)!.lessThan(pide)) {
+        return domainError(409, 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'Los lotes FIFO no cubren la reserva del vale.')
+      }
+      lotes.set(key, lotes.get(key)!.sub(cantidad))
+    }
+    existencia.set(key, existencia.get(key)!.sub(cantidad))
+    propio.set(key, (propio.get(key) ?? new Prisma.Decimal(0)).add(cantidad))
+  }
+
+  for (const demand of foto.demands) {
+    const key = claveDeInventario(demand)
+    const pide = requeridoParaRevisar(demand.quantityBaseUnits)
+    if (pide.lessThanOrEqualTo(0)) continue
+    const ajenos = (foto.activos.get(key) ?? new Prisma.Decimal(0)).sub(propio.get(key) ?? 0)
+    const libre = existencia.get(key)!.sub(ajenos)
+    if (libre.lessThan(pide)) {
+      return domainError(
+        409,
+        'AREA_TICKET_INSUFFICIENT_STOCK',
+        `No hay existencia libre suficiente de "${demand.label}". Disponible: ${quantity(libre)}; requerida: ${quantity(
+          demand.quantityBaseUnits,
+        )}.`,
+      )
+    }
+    if (demand.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) continue
+    const enLotes = lotes.get(key)!
+    if (enLotes.lessThan(pide)) {
+      return domainError(
+        409,
+        'AREA_TICKET_INSUFFICIENT_STOCK',
+        `Los lotes FIFO de "${demand.label}" no cubren la venta. Disponible: ${quantity(enLotes)}; requerida: ${quantity(
+          demand.quantityBaseUnits,
+        )}.`,
+      )
+    }
+  }
+  return null
+}
+
+/**
+ * 🔴 D5: freno de sólo lectura AL ARMAR la venta de vales, antes de mandar la tarjeta a la terminal o de recibir el efectivo. Lee la
+ * foto (sin `FOR UPDATE` ni escrituras) y decide con `frenoAlArmar`. Si la liquidación de esta venta va a rechazar por inventario, se
+ * dice ahora con su mismo 409; antes salía al liquidar, con la tarjeta ya cobrada (sesión en conciliación). La liquidación NO cambia.
+ * Lo que esto no ve sigue como hoy: cambios entre armar y liquidar y errores al ESCRIBIR los movimientos (Codex r4 #1).
+ */
+async function revisarInventarioAlArmar(tx: Prisma.TransactionClient, venueId: string, sessionId: string, orderId: string): Promise<void> {
+  const demands = await buildUnreservedAreaOrderInventoryDemands(tx, venueId, orderId)
+  const apartados = await tx.areaTicketInventoryReservation.findMany({
+    where: { venueId, areaTicket: { checkoutSessionId: sessionId }, status: AreaTicketInventoryReservationStatus.ACTIVE },
+    orderBy: [{ inventoryKind: 'asc' }, { inventoryId: 'asc' }, { id: 'asc' }],
+    select: { inventoryKind: true, inventoryId: true, quantityBaseUnits: true },
+    take: TOPE_DE_APARTADOS_AL_ARMAR + 1,
+  })
+  // ponytail: más de 500 apartados en una venta no se simulan (sin la lista completa, «lo ajeno» saldría de más y frenaría de más);
+  // decide la liquidación, como antes de D5.
+  if (apartados.length > TOPE_DE_APARTADOS_AL_ARMAR) return
+  const foto: FotoParaFrenar = { demands, apartados, existencia: new Map(), lotes: new Map(), activos: new Map() }
+
+  // Las filas, en el orden de `lockAreaOrderInventoryFootprint` (todas deben existir; su mismo rechazo).
+  for (const target of [...apartados, ...demands].sort((a, b) => claveDeInventario(a).localeCompare(claveDeInventario(b)))) {
+    const key = claveDeInventario(target)
+    if (foto.existencia.has(key)) continue
+    const fila =
+      target.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY
+        ? await tx.inventory.findFirst({ where: { id: target.inventoryId, venueId }, select: { currentStock: true } })
+        : await tx.rawMaterial.findFirst({ where: { id: target.inventoryId, venueId }, select: { currentStock: true } })
+    if (!fila) throw domainError(409, 'AREA_TICKET_INVENTORY_MISSING', 'No se encontró uno de los inventarios de la orden.')
+    foto.existencia.set(key, new Prisma.Decimal(fila.currentStock))
+    if (target.inventoryKind === AreaTicketInventoryTarget.RAW_MATERIAL) {
+      const [suma] = await tx.$queryRaw<Array<{ total: Prisma.Decimal | null }>>`
+        SELECT SUM("remainingQuantity") AS total
+        FROM "StockBatch"
+        WHERE "venueId" = ${venueId}
+          AND "rawMaterialId" = ${target.inventoryId}
+          AND status = 'ACTIVE'
+          AND "remainingQuantity" > 0
+      `
+      foto.lotes.set(key, new Prisma.Decimal(suma?.total ?? 0))
+    }
+  }
+  for (const demand of demands) {
+    const activos = await tx.areaTicketInventoryReservation.aggregate({
+      where: {
+        venueId,
+        inventoryKind: demand.inventoryKind,
+        inventoryId: demand.inventoryId,
+        status: AreaTicketInventoryReservationStatus.ACTIVE,
+      },
+      _sum: { quantityBaseUnits: true },
+    })
+    foto.activos.set(claveDeInventario(demand), new Prisma.Decimal(activos._sum.quantityBaseUnits ?? 0))
+  }
+
+  const freno = frenoAlArmar(foto)
+  if (freno) throw freno
 }
 
 /**

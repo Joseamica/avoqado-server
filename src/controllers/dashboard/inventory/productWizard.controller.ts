@@ -20,15 +20,24 @@ export async function shouldUseInventory(req: Request, res: Response, next: Next
     // El acceso EFECTIVO que dejó `verifyAccess` en la ruta (marca blanca y suplantación ya resueltas): la opción de piezas sólo se ofrece a
     // quien puede guardarla sin Premium, con los mismos permisos que pide el alta (Codex r11 #2).
     const acceso = (req as any).access as UserAccess | undefined
-    const puedeGuardarPiezasSinPremium = acceso
-      ? hasPermission(acceso, 'inventory:update') &&
-        hasPermission(acceso, 'menu:create') &&
-        canAccessFeature(acceso, 'AVOQADO_MENU').allowed &&
-        canAccessFeature(acceso, 'AVOQADO_INVENTORY').allowed
-      : undefined
+    // Encargo 27fd34 (Codex r13 #2 de na1d52b5): una sesión de soporte «ver como» es SIEMPRE de sólo lectura (`impersonationGuard`
+    // rechaza todo lo que no sea lectura); los permisos del rol simulado no la dejan guardar.
+    const esDeSoloLectura = (req as any).authContext?.isImpersonating === true
+    // Encargo 27fd34 (Codex r1 #2): lo que pide el alta CON inventario en cualquier plan (`inventory:update` con la función de marca
+    // blanca, `permisoEfectivoSiLlevaInventario`). Con Premium basta; sin Premium, además el del alta normal.
+    const puedeGuardarConInventario = esDeSoloLectura
+      ? false
+      : acceso
+        ? hasPermission(acceso, 'inventory:update') && canAccessFeature(acceso, 'AVOQADO_INVENTORY').allowed
+        : undefined
+    const puedeGuardarPiezasSinPremium =
+      puedeGuardarConInventario === undefined
+        ? undefined
+        : puedeGuardarConInventario && hasPermission(acceso!, 'menu:create') && canAccessFeature(acceso!, 'AVOQADO_MENU').allowed
     const recommendations = await productInventoryService.shouldProductUseInventory(venueId, {
       quienPreguntaEsSuperadmin,
       puedeGuardarPiezasSinPremium,
+      puedeGuardarConInventario,
     })
 
     res.json({

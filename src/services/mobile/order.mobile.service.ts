@@ -35,6 +35,7 @@ import { withDeadlockRetry, type TxConReintento } from '../../utils/serializable
 import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
 import { assertCustomerAttributionUnderLock } from '../shared/ligaDeClienteEnVenta'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
+import { anotarVendedorDeBajaEnTx, validarVendedor, type VendedorDeBaja } from '../shared/vendedorDadoDeBaja'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
 import {
   resolveTenderForCharge,
@@ -48,7 +49,7 @@ import { copiaQueCuadra } from '../shared/lineasDelTicket'
 import { importePorPesoDeLaPeticionCents } from '../shared/importePorPeso'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
 import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx, assertNotFolioInTx } from '../online-ordering/card/guards'
-import { despertarPasesTrasCommit } from '../online-ordering/cortesiaDeFolio'
+import { despertarPasesTrasCommit, sellarToqueDePersonaAlAnularEnTx } from '../online-ordering/cortesiaDeFolio'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
@@ -298,6 +299,8 @@ export interface CreateOrderInput {
   /** Server-owned: permiso y actor de la sesión, nunca del body ni del vendedor elegido. */
   canCompItems?: boolean
   performedBy?: string
+  /** D13 (server-owned): la sesión del token. Una venta de la cola con un vendedor dado de baja queda a su nombre. */
+  sesionStaffId?: string
   /** hz:e0b12f00:D2 (server-owned): la membresía de quien autorizó el descuento de cuenta que regala (el gerente del PIN o quien llama). */
   regaloAutorizadoPor?: string
   /**
@@ -1617,6 +1620,8 @@ export interface PreparacionDeVenta {
   enLaCola: boolean
   externalId: string | null
   validatedStaffId: string | undefined
+  /** D13: el vendedor que mandó el aparato estaba dado de baja y la venta quedó a nombre de la sesión (deja nota). */
+  vendedorDeBaja: VendedorDeBaja | null
   terminalId: string | null
   fuente: NonNullable<CreateOrderInput['source']>
   itemsNormales: CreateOrderItemInput[]
@@ -1727,7 +1732,10 @@ export async function prepararVentaDeMostrador(
 
   await assertVenueSalesEnabled(venueId)
 
-  const validatedStaffId = await validateStaffVenue(input.staffId, venueId)
+  // D13 «C»: la venta de la cola con un vendedor dado de baja queda a nombre de la sesión (nota en `crearVentaDeMostradorEnTx`).
+  // Una venta nueva en vivo, como hoy: 400.
+  const vendedor = await validarVendedor(input.staffId, venueId, undefined, { sesion: input.sesionStaffId, deLaCola: enLaCola })
+  const validatedStaffId = vendedor.staffId
   const terminalId = await terminalDelToken(venueId, input.terminalSerialNumber)
   const fuente = terminalId ? 'TPV' : input.source || 'AVOQADO_IOS'
 
@@ -1813,6 +1821,7 @@ export async function prepararVentaDeMostrador(
     enLaCola,
     externalId: normalizeExternalId(input.externalId),
     validatedStaffId,
+    vendedorDeBaja: vendedor.deBaja,
     terminalId,
     fuente,
     itemsNormales,
@@ -2193,6 +2202,9 @@ export async function crearVentaDeMostradorEnTx(
     },
     include: createdOrderInclude,
   })
+  if (prep.vendedorDeBaja) {
+    await anotarVendedorDeBajaEnTx(tx, venueId, prep.vendedorDeBaja, { orderId: createdOrder.id, sesion: input.sesionStaffId })
+  }
 
   // Write OrderDiscount audit rows for item discounts — mirrors TPV
   // (order.tpv.service.ts) so dashboard discount-breakdown reporting,
@@ -2660,7 +2672,8 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     venueId,
     order.id,
     input.stampRewardId,
-    input.staffId,
+    // D13: con el vendedor de baja, el canje va a nombre de quien quedó la venta (la sesión).
+    prep.vendedorDeBaja ? prep.validatedStaffId : input.staffId,
     input.stampRewardExpectedDiscount,
   )
 
@@ -4050,6 +4063,9 @@ export async function mergeOrdersInTransaction(
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: targetOrderId })
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: sourceOrderId })
   await assertNotFolioInTx(tx, { venueId, orderIds: [targetOrderId, sourceOrderId] })
+  // D662 parte 2 (v3): juntar cancela la cuenta origen; si era un pedido de «Mi equipo» por aceptar, una persona lo contestó (no pasa
+  // por `devolverCanjesDeVentaAnuladaEnTx`). Si la fusión falla, la transacción revierte también esto.
+  await sellarToqueDePersonaAlAnularEnTx(tx, { venueId, orderId: sourceOrderId })
   // R14-1: lo que dice si un lado es cuenta con vales (su sesión, o un renglón de vale de una cuenta ya dividida antes).
   const valesDeLaCuenta = {
     areaTicketCheckoutSession: { select: { id: true } },
@@ -4438,6 +4454,11 @@ export interface CashPaymentInput {
   amount: number // cents
   tip?: number // cents
   staffId?: string
+  /**
+   * D13 (server-owned): la sesión del token. Con un vendedor dado de baja, el cobro de una cuenta suya queda a su nombre y el de
+   * la cola a nombre de esta sesión. Sin ella (reducer, D20), como hoy.
+   */
+  sesionStaffId?: string
   // 🛡️ Idempotencia (patrón Stripe/Square/Toast): UUID generado UNA vez por
   // intento de cobro en el cliente y reenviado en CADA reintento. Sin esto, un
   // pago PARCIAL/dividido re-encolado offline crea un SEGUNDO Payment (doble
@@ -5734,6 +5755,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       // Lealtad: el cliente heredado es el respaldo cuando no hay OrderCustomer.
       customerId: true,
       customer: { select: { id: true, firstName: true, lastName: true } },
+      // D13: la cuenta ya está guardada a nombre del vendedor que manda el aparato.
+      servedById: true,
+      createdById: true,
     },
   })
 
@@ -5912,12 +5936,26 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // 🔴 R8: el personal se valida aquí (fuera de la transacción: no pide otra conexión con los candados tomados), pero su RECHAZO
   // espera a la llave bajo el candado. Un reintento simultáneo que no vio el cobro de su llave en la consulta rápida no recibe 400
   // porque desactivaron al cajero entre los dos: el punto de la llave lo devuelve. Sin llave, se rechaza aquí como siempre.
+  // D13 «C»: un vendedor dado de baja ya no rechaza si la cuenta está guardada a su nombre (queda suyo) o si el cobro viene de la cola
+  // (queda de la sesión); la nota va en la transacción del cobro. Lo demás, como hoy.
   let rechazoDelPersonal: BadRequestError | null = null
-  const effectiveStaffId = await validateStaffVenue(input.staffId, venueId).catch(error => {
+  const vendedor = await validarVendedor(input.staffId, venueId, undefined, {
+    sesion: input.sesionStaffId,
+    deLaCola: input.isOfflineReplay === true,
+    laCuentaEsSuya: !!input.staffId && (order.servedById === input.staffId || order.createdById === input.staffId),
+  }).catch(error => {
     if (!(input.idempotencyKey && error instanceof BadRequestError)) throw error
     rechazoDelPersonal = error
-    return undefined
+    return { staffId: undefined, deBaja: null }
   })
+  const effectiveStaffId = vendedor.staffId
+  const vendedorDeBaja = vendedor.deBaja
+  const dentroDeLaTx: CashPaymentInput['dentroDeLaTx'] = vendedorDeBaja
+    ? async (tx, cobro) => {
+        await input.dentroDeLaTx?.(tx, cobro)
+        await anotarVendedorDeBajaEnTx(tx, venueId, vendedorDeBaja, { ...cobro, sesion: input.sesionStaffId })
+      }
+    : input.dentroDeLaTx
   // El gate se resuelve una sola vez y FUERA de la transacción monetaria: una
   // caída de settings jamás revierte un Payment real.
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
@@ -5995,7 +6033,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
               ...(input.llegada ? { llegada: input.llegada } : {}),
               externalSource: input.externalSource,
               tender: tenderRef,
-              dentroDeLaTx: input.dentroDeLaTx,
+              dentroDeLaTx,
               colaConDefectoH1: input.colaConDefectoH1,
               propiedadDeMesa: input.propiedadDeMesa,
               shiftIdDeLaVenta: input.shiftIdDeLaVenta,
@@ -8013,7 +8051,13 @@ export async function cancelOrderInTransaction(
   /** Huella del reducer offline: corre DENTRO de la transacción de la cancelación (plan 2026-10-13-sync-retoma-por-llave). */
   dentroDeLaTx?: (tx: TxConReintento, cancelada: { orderId: string }) => Promise<void>,
   /** Lo que el panel exige además (`cancelarCuentaSinCobrar`): pagos registrados y «ya cancelada». El POS no lo pasa. */
-  opcionesDeGuardia?: OrderCancelGuardOptions,
+  opcionesDeGuardia?: OrderCancelGuardOptions & {
+    /**
+     * hz:e82938e1:D36 (Codex r3 #3): corre con la venta YA tomada y ANTES de cualquier escritura de la anulación (comandas, canjes,
+     * estado). Quien anula por una regla (la limpieza de ventas abandonadas) la relee aquí tal como está; si lanza, no se escribe nada.
+     */
+    comprobarBajoElCandado?: (tx: TxConReintento) => Promise<void>
+  },
 ) {
   logger.info(`📱 [ORDER.MOBILE] Cancelling order ${orderId} | venue=${venueId} | reason=${reason || 'none'}`)
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
@@ -8025,6 +8069,7 @@ export async function cancelOrderInTransaction(
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
   }
+  await opcionesDeGuardia?.comprobarBajoElCandado?.(tx)
   const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId: performedBy, reason })
   await assertOrderCancellableUnderLock(tx, { venueId, orderId }, opcionesDeGuardia)
   // 🔴 D2: una venta de vales queda como por la ruta de vales: sus vales vuelven a poder cobrarse (sin esperar por ellos).
@@ -8078,6 +8123,11 @@ export async function publishCancelledOrder(
   reason?: string,
   /** Datos extra de la entrada de bitácora (la procedencia MCP de «Cancelar orden»); nunca pisan el motivo. */
   datosDeBitacora?: Record<string, unknown>,
+  /**
+   * hz:e82938e1:D36: quien ya escribió su `ORDER_CANCELLED` DENTRO de la transacción de la anulación (para que una caída entre el
+   * commit y esta publicación no deje una anulación sin bitácora) lo dice aquí y no se escribe otra entrada.
+   */
+  opciones: { bitacoraEnLaTx?: boolean } = {},
 ): Promise<void> {
   const { orderId, table } = result
   logger.info(`✅ [ORDER.MOBILE] Order ${orderId} cancelled`)
@@ -8105,15 +8155,17 @@ export async function publishCancelledOrder(
         })
     }
   }
-  const { logAction } = await import('../dashboard/activity-log.service')
-  void logAction({
-    action: 'ORDER_CANCELLED',
-    entity: 'Order',
-    entityId: orderId,
-    staffId,
-    venueId,
-    data: { ...datosDeBitacora, reason: reason ?? null },
-  })
+  if (!opciones.bitacoraEnLaTx) {
+    const { logAction } = await import('../dashboard/activity-log.service')
+    void logAction({
+      action: 'ORDER_CANCELLED',
+      entity: 'Order',
+      entityId: orderId,
+      staffId,
+      venueId,
+      data: { ...datosDeBitacora, reason: reason ?? null },
+    })
+  }
   // D2: los vales que la cancelación dejó libres, con su autor (después del commit, Codex r3 #1).
   const { auditarValesSoltados } = await import('./areaTicketV7.mobile.service')
   auditarValesSoltados({ venueId, orderId, staffId, soltados: result.valesSoltados })

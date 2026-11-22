@@ -3,6 +3,7 @@ import { hasPermission as roleHasPermission } from '@/lib/permissions'
 import { createGuard } from '@/mcp/guard'
 import { StaffRole } from '@prisma/client'
 import { registerProductTools } from '@/mcp/tools/products'
+import { registerPackageComponentSalesTools } from '@/mcp/tools/packageComponentSales'
 import { registerSeatTools } from '@/mcp/tools/seats'
 import { registerOverviewTools } from '@/mcp/tools/overview'
 import type { McpScope } from '@/mcp/scope'
@@ -20,6 +21,7 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     venue: { findUnique: jest.fn().mockResolvedValue({ name: 'Centro', timezone: 'America/Mexico_City' }) },
     product: { findMany: jest.fn().mockResolvedValue([]) },
+    $queryRawUnsafe: jest.fn().mockResolvedValue([]),
     payment: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: 10, tipAmount: 0 }, _count: { _all: 1 } }) },
     order: { aggregate: jest.fn().mockResolvedValue({ _sum: { remainingBalance: 0 }, _count: { _all: 0 } }) },
     inventory: {
@@ -49,6 +51,7 @@ function tools(permissions: string[]) {
   const handlers = new Map<string, (args: Record<string, unknown>) => Promise<any>>()
   const server = { tool: (...args: unknown[]) => handlers.set(args[0] as string, args.at(-1) as never) } as never
   registerProductTools(server, scope)
+  registerPackageComponentSalesTools(server, scope)
   registerSeatTools(server, scope)
   registerOverviewTools(server, scope)
   return (name: string, args = {}) => handlers.get(name)!({ venueId: 'v1', name: 'Sopa', ...args })
@@ -58,6 +61,7 @@ beforeEach(() => jest.clearAllMocks())
 
 it.each([
   ['product_sales', 'reports:read'],
+  ['package_component_sales', 'reports:read'],
   ['get_venue_downgrade_preview', 'billing:subscriptions:read'],
   ['get_venue_seat_status', 'teams:read'],
 ])('%s exige el mismo permiso del dashboard y lo evalúa por sucursal', async (name, permission) => {

@@ -11,7 +11,7 @@ gateKind: FEATURE
 money: true
 versionMin: 2.13.2
 sourceRepo: avoqado-tpv
-sourceRef: 031f14db2969606125a4a04c9f8f30bdd402a660
+sourceRef: 4c92a98fab1256782524e72748f44bfe99e2052d
 deviceTested: 2026-11-18
 keywords:
   - cobrar mesa
@@ -20,6 +20,9 @@ keywords:
   - partes iguales
   - pagar por separado
   - cuenta de la mesa
+  - no me deja quitar el descuento
+  - quitar en gris
+  - rebaja fija
 ---
 
 ## Antes de empezar
@@ -42,6 +45,7 @@ En la cuenta de la mesa, *Pagar* sale cuando ya se envió algo a cocina, y se pr
 - *Por artículo* sólo se cobra con tarjeta: el botón de efectivo dice *Efectivo no disponible*.
 - Si la mesa la atiende otro mesero y el negocio sólo deja cambiar su cuenta a quien la atiende, *Pagar* sólo sale a quien tiene permiso para cobrar cualquier mesa.
 - En la Nexgo, si la división no es *Cuenta completa*, sale «División no disponible en este equipo — cobra el total o usa efectivo».
+- Si un descuento dice «Fija: viene del cobro de vales» y su botón de quitar (−) sale en gris, al tocar el renglón aparece «Rebaja fija»: «Esta rebaja quedó fija al cobrar los vales y no se quita desde la caja. Si hay que cambiarla, avisa a un encargado.». Toca *Entendido*: esa rebaja no se quita desde la terminal. En versiones anteriores a la 2.22.1, el botón se ve activo y al tocarlo sale «Este descuento quedó fijo al cobrar los vales y no se quita desde la caja…».
 
 ## Sin internet
 

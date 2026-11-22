@@ -15,6 +15,16 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/areatickets/presentation/AreaTicketOperationsViewModel.kt": [
+      {
+        "pagina": "android/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/auth/data/AuthRepository.kt": [
       {
         "pagina": "android/personal/cambiar-de-usuario",
@@ -28,11 +38,19 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/auth/presentation/AppState.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -205,6 +223,26 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/lan/RachaSinAcuse.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/lan/TransporteLan.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/local/PayloadCache.kt": [
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
@@ -235,12 +273,20 @@
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/network/ApiService.kt": [
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
         "pagina": "android/mesas/mover-o-unir-cuentas",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -253,14 +299,22 @@
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/network/ForbiddenInterceptor.kt": [
       {
+        "pagina": "android/mesas/anular-producto-enviado",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/mesas/anular-producto-enviado",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/network/ServerErrorText.kt": [
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/data/sync/SyncOutbox.kt": [
@@ -284,7 +338,7 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/domain/PermissionLabels.kt": [
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt": [
@@ -307,6 +361,10 @@
       {
         "pagina": "android/clientes/crear-cliente",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "android/inventario/contar-existencia",
@@ -353,6 +411,10 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "windows/inventario/contar-existencia",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
@@ -380,11 +442,19 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/domain/printing/ComandaDispatcher.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/core/util/ConnectivityMonitor.kt": [
@@ -649,8 +719,16 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "windows/cobro/cobrar-sin-internet",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/designsystem/components/PlanGate.kt": [
@@ -679,6 +757,16 @@
       {
         "pagina": "windows/personal/cambiar-de-usuario",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/designsystem/theme/Color.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/giftcards/domain/EntradaDeTarjetas.kt": [
@@ -933,6 +1021,152 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/data/EstadoDePantallasDeCocina.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/data/KDSRepository.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/data/KitchenPreparationRepository.kt": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/data/PreparationDeliveryService.kt": [
+      {
+        "pagina": "android/impresoras/la-comanda-no-sale",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/impresoras/la-comanda-no-sale",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/domain/KdsReglas.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "android/mesas/anular-producto-enviado",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/mesas/anular-producto-enviado",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/domain/KitchenPreparation.kt": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/presentation/KDSOrderCard.kt": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/presentation/KDSScreen.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/la-comanda-no-sale",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/presentation/KDSSettingsSheet.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/presentation/KDSViewModel.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/kds/presentation/PreparationServiceSheet.kt": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/loyalty/domain/SelloDeLaVenta.kt": [
       {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
@@ -947,6 +1181,10 @@
       {
         "pagina": "android/cobro/cancelar-cobro-en-la-terminal",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "android/reservas/lista-de-espera",
@@ -974,7 +1212,11 @@
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -982,7 +1224,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/reservas/lista-de-espera",
@@ -1340,21 +1582,21 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/orders/presentation/OrdersViewModel.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/payment/data/CancelacionDeCobroCoordinator.kt": [
@@ -1406,7 +1648,7 @@
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/lealtad/sello-que-no-se-sumo",
@@ -1484,7 +1726,7 @@
       },
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/cobro/cobrar-en-efectivo",
@@ -1568,7 +1810,11 @@
       },
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
@@ -1604,7 +1850,11 @@
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/lealtad/sello-que-no-se-sumo",
@@ -1642,11 +1892,15 @@
       },
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
@@ -1654,7 +1908,7 @@
       },
       {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo",
@@ -1686,7 +1940,11 @@
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/lealtad/sello-que-no-se-sumo",
@@ -1694,7 +1952,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo",
@@ -1986,7 +2244,7 @@
       },
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "android/cobro/dividir-la-cuenta",
@@ -1994,7 +2252,7 @@
       },
       {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/clientes/agregar-cliente-a-la-venta",
@@ -2022,7 +2280,7 @@
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/cobro/dividir-la-cuenta",
@@ -2030,13 +2288,13 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt": [
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "android/cobro/dividir-la-cuenta",
@@ -2048,7 +2306,7 @@
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/cobro/dividir-la-cuenta",
@@ -2062,11 +2320,11 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/cart/OrderDiscountSheet.kt": [
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt": [
@@ -2088,7 +2346,7 @@
       },
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "android/cobro/dividir-la-cuenta",
@@ -2096,7 +2354,7 @@
       },
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
@@ -2104,7 +2362,7 @@
       },
       {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/clientes/agregar-cliente-a-la-venta",
@@ -2128,7 +2386,7 @@
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/cobro/dividir-la-cuenta",
@@ -2136,7 +2394,7 @@
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
@@ -2144,13 +2402,13 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt": [
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo",
@@ -2158,7 +2416,7 @@
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo",
@@ -2188,7 +2446,7 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt": [
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
@@ -2200,11 +2458,11 @@
       },
       {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -2216,7 +2474,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/TextosMenuDelAparato.kt": [
@@ -2307,28 +2565,46 @@
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/ComandaPrinter.kt": [
       {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/ComandasPendientesStore.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/EntregaPorWifi.kt": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/PoliticaDeReintento.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/PrinterService.kt": [
@@ -2344,21 +2620,37 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/ReintentoDeComanda.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/ReplayDeComandasPendientes.kt": [
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/printing/data/model/PrinterModels.kt": [
@@ -2397,10 +2689,14 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
-    "avoqado-android:app/src/main/java/com/avoqado/pos/printing/routing/PrintRoutingMapper.kt": [
+    "avoqado-android:app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt": [
       {
-        "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/reservations/data/ReservationActionsRetrier.kt": [
@@ -2826,7 +3122,11 @@
       },
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "android/inventario/registrar-merma",
@@ -2835,6 +3135,10 @@
       {
         "pagina": "android/lealtad/ajustar-sellos",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
@@ -2894,7 +3198,11 @@
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/inventario/registrar-merma",
@@ -2903,6 +3211,10 @@
       {
         "pagina": "windows/lealtad/ajustar-sellos",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
@@ -3079,40 +3391,98 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/tables/presentation/RebajaFija.kt": [
+      {
+        "pagina": "android/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt": [
       {
+        "pagina": "android/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/mesas/anular-producto-enviado",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/mesas/anular-producto-enviado",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt": [
       {
+        "pagina": "android/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/mesas/anular-producto-enviado",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/mesas/anular-producto-enviado",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt": [
@@ -3121,12 +3491,20 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/mesas/anular-producto-enviado",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
         "pagina": "android/mesas/mover-o-unir-cuentas",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/mesas/anular-producto-enviado",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "windows/mesas/mover-o-unir-cuentas",
@@ -3377,6 +3755,16 @@
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
+    "avoqado-android:avoqado-server/src/controllers/mobile/kds.mobile.controller.ts": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
     "avoqado-android:avoqado-server/src/controllers/mobile/onlineOrders.mobile.controller.ts": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
@@ -3390,7 +3778,7 @@
     "avoqado-android:avoqado-server/src/lib/permissions.ts": [
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
@@ -3402,7 +3790,7 @@
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
@@ -3426,11 +3814,11 @@
     "avoqado-android:avoqado-server/src/middlewares/cortesiaPidePermiso.middleware.ts": [
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
     "avoqado-android:avoqado-server/src/middlewares/requirePublicVenueFeatureStrict.middleware.ts": [
@@ -3511,6 +3899,16 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:avoqado-server/src/routes/dashboard/serviceCourse.routes.ts": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
     "avoqado-android:avoqado-server/src/routes/mobile.routes.ts": [
       {
         "pagina": "android/caja/abrir-y-cerrar-caja",
@@ -3562,7 +3960,7 @@
       },
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "android/cobro/dividir-la-cuenta",
@@ -3570,7 +3968,11 @@
       },
       {
         "pagina": "android/impresoras/la-comanda-no-sale",
-        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "android/inventario/contar-existencia",
@@ -3593,8 +3995,16 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/mesas/anular-producto-enviado",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
         "pagina": "android/mesas/mover-o-unir-cuentas",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
@@ -3682,7 +4092,7 @@
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/cobro/dividir-la-cuenta",
@@ -3690,7 +4100,11 @@
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
         "pagina": "windows/inventario/contar-existencia",
@@ -3713,8 +4127,16 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
+        "pagina": "windows/mesas/anular-producto-enviado",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
         "pagina": "windows/mesas/mover-o-unir-cuentas",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
@@ -3787,10 +4209,66 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:avoqado-server/src/services/kds/kitchenDisplayStations.ts": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
+    "avoqado-android:avoqado-server/src/services/kds/kitchenPreparation.service.ts": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
+    "avoqado-android:avoqado-server/src/services/kds/pantallasVivas.ts": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
+    "avoqado-android:avoqado-server/src/services/mobile/kds.mobile.service.ts": [
+      {
+        "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
     "avoqado-android:avoqado-server/src/services/mobile/order.mobile.service.ts": [
+      {
+        "pagina": "android/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
       {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "windows/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/lealtad/sello-que-no-se-sumo",
@@ -3827,6 +4305,44 @@
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
+    "avoqado-android:avoqado-server/src/services/shared/cuentaConVales.ts": [
+      {
+        "pagina": "android/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      }
+    ],
+    "avoqado-android:avoqado-server/src/services/shared/descuentoConTopeEnVales.ts": [
+      {
+        "pagina": "android/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      }
+    ],
+    "avoqado-android:avoqado-server/src/services/shared/discount.service.ts": [
+      {
+        "pagina": "android/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      }
+    ],
     "avoqado-android:avoqado-server/src/services/shared/loyaltyOnLateCustomer.ts": [
       {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
@@ -3837,6 +4353,26 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:avoqado-server/src/services/shared/orderCancelGuard.ts": [
+      {
+        "pagina": "android/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      }
+    ],
+    "avoqado-android:avoqado-server/src/services/shared/usoDelDescuento.ts": [
+      {
+        "pagina": "android/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/cobro/dar-descuento-o-cortesia",
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      }
+    ],
     "avoqado-android:avoqado-web-dashboard/src/locales/es/onlineOrdering.json": [
       {
         "pagina": "android/pedidos-en-linea/atender-pedidos-en-linea",
@@ -3845,6 +4381,26 @@
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      }
+    ],
+    "avoqado-android:avoqado-web-dashboard/src/locales/es/serviceCourses.json": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
+    "avoqado-android:avoqado-web-dashboard/src/pages/Settings/ServiceCourses.tsx": [
+      {
+        "pagina": "android/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/mesas/tiempos-cocina-y-liberar",
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       }
     ],
     "avoqado-android:desktop/plataforma/src/main/java/android/app/Activity.java": [
@@ -3980,7 +4536,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
     "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/core/di/DatabaseModule.kt": [
@@ -4074,7 +4630,7 @@
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -4082,7 +4638,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/reembolsos/hacer-cambio",
@@ -4146,7 +4702,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
@@ -4186,13 +4742,19 @@
       },
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
-        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+        "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       }
     ],
     "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/scale/UsbSerialScaleManager.kt": [
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      }
+    ],
+    "avoqado-android:desktop/pos/windows/LEEME-RED-LOCAL.txt": [
+      {
+        "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
+        "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/core/data/workers/PaymentSyncWorker.kt": [
@@ -4340,7 +4902,7 @@
       },
       {
         "pagina": "tpv/mesas/cobrar-cuenta-de-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
         "pagina": "tpv/reembolsos/reembolsar-cobro-nexgo",
@@ -4428,7 +4990,7 @@
       },
       {
         "pagina": "tpv/mesas/cobrar-cuenta-de-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
         "pagina": "tpv/mesas/fusionar-cuentas",
@@ -4794,7 +5356,7 @@
       },
       {
         "pagina": "tpv/mesas/cobrar-cuenta-de-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
         "pagina": "tpv/recibos/imprimir-y-reimprimir-recibo",
@@ -5138,7 +5700,7 @@
       },
       {
         "pagina": "tpv/mesas/cobrar-cuenta-de-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
         "pagina": "tpv/mesas/mover-mesa",
@@ -5184,13 +5746,13 @@
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt": [
       {
         "pagina": "tpv/mesas/cobrar-cuenta-de-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt": [
       {
         "pagina": "tpv/mesas/cobrar-cuenta-de-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableMenuScreen.kt": [
@@ -5216,7 +5778,7 @@
       },
       {
         "pagina": "tpv/mesas/cobrar-cuenta-de-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
         "pagina": "tpv/mesas/fusionar-cuentas",
@@ -5274,13 +5836,13 @@
       },
       {
         "pagina": "tpv/mesas/cobrar-cuenta-de-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TablesViewModel.kt": [
       {
         "pagina": "tpv/mesas/cobrar-cuenta-de-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/timeclock/data/repository/TimeEntryRepositoryImpl.kt": [
@@ -5402,7 +5964,7 @@
       },
       {
         "pagina": "tpv/mesas/cobrar-cuenta-de-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
         "pagina": "tpv/mesas/fusionar-cuentas",
@@ -5446,7 +6008,7 @@
     "avoqado-tpv:avoqado-server/src/services/mobile/sync.mobile.service.ts": [
       {
         "pagina": "tpv/mesas/cobrar-cuenta-de-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
         "pagina": "tpv/mesas/mover-mesa",
@@ -5455,6 +6017,12 @@
       {
         "pagina": "tpv/mesas/reasignar-mesero",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      }
+    ],
+    "avoqado-tpv:avoqado-server/src/services/shared/cuentaConVales.ts": [
+      {
+        "pagina": "tpv/mesas/cobrar-cuenta-de-mesa",
+        "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       }
     ],
     "avoqado-tpv:avoqado-server/src/services/terminal-payment.service.ts": [
@@ -5648,7 +6216,7 @@
       },
       {
         "pagina": "dashboard/promociones/crear-o-editar-cupon",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
       },
       {
         "pagina": "dashboard/reembolsos/reembolsar-un-pago",
@@ -5794,7 +6362,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/coupon.dashboard.service.ts": [
       {
         "pagina": "dashboard/promociones/crear-o-editar-cupon",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/customer.dashboard.service.ts": [
@@ -5981,10 +6549,22 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       }
     ],
+    "avoqado-web-dashboard:avoqado-server/src/services/shared/descuentoConTopeEnVales.ts": [
+      {
+        "pagina": "dashboard/promociones/crear-o-editar-cupon",
+        "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
+      }
+    ],
     "avoqado-web-dashboard:avoqado-server/src/services/shared/inventoryWasteRead.service.ts": [
       {
         "pagina": "dashboard/inventario/registrar-merma",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-server/src/services/shared/usoDelDescuento.ts": [
+      {
+        "pagina": "dashboard/promociones/crear-o-editar-cupon",
+        "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/stripe.service.ts": [
@@ -6050,7 +6630,7 @@
       },
       {
         "pagina": "dashboard/promociones/crear-o-editar-cupon",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
       },
       {
         "pagina": "dashboard/reembolsos/reembolsar-un-pago",
@@ -6208,7 +6788,7 @@
       },
       {
         "pagina": "dashboard/promociones/crear-o-editar-cupon",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
       },
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
@@ -6584,7 +7164,7 @@
     "avoqado-web-dashboard:src/locales/es/promotions.json": [
       {
         "pagina": "dashboard/promociones/crear-o-editar-cupon",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
       }
     ],
     "avoqado-web-dashboard:src/locales/es/purchaseOrders.json": [
@@ -6762,7 +7342,7 @@
       },
       {
         "pagina": "dashboard/promociones/crear-o-editar-cupon",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
       },
       {
         "pagina": "dashboard/reembolsos/reembolsar-un-pago",
@@ -7212,19 +7792,25 @@
     "avoqado-web-dashboard:src/pages/Promotions/CouponForm.tsx": [
       {
         "pagina": "dashboard/promociones/crear-o-editar-cupon",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
       }
     ],
     "avoqado-web-dashboard:src/pages/Promotions/Coupons.tsx": [
       {
         "pagina": "dashboard/promociones/crear-o-editar-cupon",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
+      }
+    ],
+    "avoqado-web-dashboard:src/pages/Promotions/Discounts.tsx": [
+      {
+        "pagina": "dashboard/promociones/crear-o-editar-cupon",
+        "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
       }
     ],
     "avoqado-web-dashboard:src/pages/Promotions/components/CreateDiscountDialog.tsx": [
       {
         "pagina": "dashboard/promociones/crear-o-editar-cupon",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
       }
     ],
     "avoqado-web-dashboard:src/pages/Reports/PayLaterAging.tsx": [
@@ -7596,7 +8182,7 @@
       },
       {
         "pagina": "dashboard/promociones/crear-o-editar-cupon",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
       },
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",

@@ -62,6 +62,7 @@ import { registerDeliveryActivationTools } from './tools/deliveryActivation'
 import { registerDeliveryCourierTools } from './tools/deliveryCourier'
 import { registerDeliveryLineActionTools } from './tools/deliveryLineActions'
 import { registerProductTools } from './tools/products'
+import { registerPackageComponentSalesTools } from './tools/packageComponentSales'
 import { registerProductVariantTools } from './tools/productVariants'
 import { registerDeviceMenuTools } from './tools/deviceMenus'
 import { registerTrendTools } from './tools/trends'
@@ -86,6 +87,7 @@ import { registerDocumentRequestTools } from './tools/documentRequests'
 import { registerCrmTools } from './tools/crm'
 import { registerPlatformChargeTools } from './tools/platformCharges'
 import { registerPosAppVersionTools } from './tools/posAppVersions'
+import { registerSdkPropioTools } from './tools/sdkPropio'
 import { registerLaunchCampaignTools } from './tools/launchCampaigns'
 import { registerMerchantRoutingTools } from './tools/merchantRouting'
 import { registerPassIntegrationTools } from './tools/passIntegrations'
@@ -175,6 +177,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerDeliveryCourierTools(server, scope)
   registerDeliveryLineActionTools(server, scope)
   registerProductTools(server, scope)
+  registerPackageComponentSalesTools(server, scope) // «Dentro de paquete»: sólo /mcp libre (no está en src/mcp/directory/catalog.ts)
   registerProductVariantTools(server, scope) // free mode only: not in the certified directory
   registerDeviceMenuTools(server, scope) // free mode only: not in the certified directory
   registerTrendTools(server, scope)
@@ -200,6 +203,8 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   // «Por cobrar» (lo que los clientes le deben a Avoqado): lectura, sólo para Avoqado y sólo en el MCP libre (no está en el directorio).
   if (scope.isSuperAdmin) registerPlatformChargeTools(server, scope)
   if (scope.isSuperAdmin) registerPosAppVersionTools(server, scope)
+  // Apagador del SDK propio por terminal: sólo Avoqado y sólo en el MCP libre (no está en el directorio).
+  if (scope.isSuperAdmin) registerSdkPropioTools(server, scope)
   registerMerchantRoutingTools(server, scope)
   registerPassIntegrationTools(server, scope)
   registerShopifyTools(server, scope)

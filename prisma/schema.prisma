@@ -1246,6 +1246,10 @@ model VenueSettings {
   // null inherits the organization's complete service-course catalog.
   serviceCourses         Json?
   serviceCoursesRevision Int   @default(0)
+  /// «La cocina puede liberar tiempos desde su pantalla» (founder, 20-nov-2026; Flautas D17). Apagado de fábrica: liberar
+  /// sigue siendo de la caja (`orders:update` + `orders:create`). Prendido, el SERVIDOR acepta el RELEASE de quien sólo trae
+  /// `orders:update` (el rol de cocina). Se lee al REPRODUCIR cada intent, no al encolarlo.
+  kitchenCanReleaseCourses Boolean @default(false)
 
   // Operations
   autoCloseShifts           Boolean @default(false)
@@ -1328,6 +1332,11 @@ model VenueSettings {
   autoClockOutTime           String? // "HH:mm" format - e.g., "03:00" for 3 AM
   maxShiftDurationEnabled    Boolean @default(false) // Enable max shift duration enforcement
   maxShiftDurationHours      Int     @default(12) // Max hours before auto clock-out
+  /// «Salida olvidada» (hz:f0a89d19:D3, founder 20-nov: «A», como Toast/Square/Deputy): un turno sin salida se cierra solo al
+  /// terminar su día de negocio (corte de las 04:00 en la zona de la sucursal, nunca antes de 12 h) o al marcar la persona su
+  /// siguiente entrada; queda «Salida olvidada · revisar» con la salida de su horario o en 0 horas. PRENDIDO de fábrica, para
+  /// todos los negocios; el negocio lo apaga en Equipo → Asistencia. Un venue sin fila de ajustes cuenta como prendido.
+  salidaOlvidadaEnabled      Boolean @default(true)
 
   // Reviews
   autoReplyReviews    Boolean  @default(false)
@@ -4360,6 +4369,9 @@ model TimeEntry {
   // Auto clock-out tracking
   autoClockOut     Boolean @default(false) // Was this entry auto-closed by the system?
   autoClockOutNote String? // Reason for auto clock-out (e.g., "Hora de cierre: 03:00")
+  /// La cerró la regla de «salida olvidada»: el gerente la revisa en Asistencia. Se apaga al corregirla o al llegar la salida
+  /// real del MISMO día (celular sin red). Ver `src/services/shared/salidaOlvidada.ts`.
+  salidaOlvidada   Boolean @default(false)
 
   // Manager validation (approve/reject clock-in/out evidence)
   validationStatus TimeEntryValidation @default(PENDING)
@@ -4957,6 +4969,11 @@ model ModifierGroup {
   allowMultiple Boolean @default(false)
   minSelections Int     @default(0)
   maxSelections Int?
+  /// La misma opción se puede elegir varias veces («2 de Cochinita + 1 de Papa»), como Square «Allow multiple quantities» y el
+  /// «max» por opción de Fudo (Flautas Coyoacán, encargo a508f4, 19-nov-2026). Sólo cuenta con `allowMultiple`: cada vez es una
+  /// selección más para el mínimo y el máximo del grupo. La venta lleva el `modifierId` repetido (un renglón por vez, cada uno
+  /// a su precio), igual que siempre. false = cada opción una sola vez, como hasta hoy. Todos los planes.
+  allowRepeat   Boolean @default(false)
 
   // Display
   displayOrder Int     @default(0)
@@ -4994,6 +5011,11 @@ model Modifier {
   /// «Agrega sabor» = P000622). Mismo formato que Product.sku.
   sku   String?
 
+  /// Cuántas veces se puede elegir ESTA opción en un grupo que deja repetir (`ModifierGroup.allowRepeat`), como el «max.» por opción
+  /// de Fudo y el «¿se puede elegir más de una vez?» por opción de Toast (encargo a508f4). null = hasta el máximo del grupo.
+  /// En un grupo sin repetir no cuenta: ahí cada opción va una vez.
+  maxQuantity Int?
+
   // Additional minutes this modifier adds to the booked service when selected.
   // Multiplied by the picked quantity in resolveModifierSelections. Null = no
   // duration impact (price-only modifier — the original behavior).
@@ -5009,9 +5031,9 @@ model Modifier {
   cost            Decimal?              @db.Decimal(10, 4) // Auto-calculated: rawMaterial.avgCostPerUnit × quantityPerUnit
 
   /// Extra que ES un platillo del menú (como Fudo «opcionales = productos» y Toast «New Modifier from Existing Item»; founder,
-  /// 16-nov-2026, encargo 27771e): al venderse descuenta 1 porción de ese platillo por selección (sus piezas o su receta completa,
-  /// por el mismo vale de inventario del cobro) y NO cuenta como venta de ese platillo. Excluye a `rawMaterialId`: un extra descuenta
-  /// un insumo o un platillo, no los dos. Premium (INVENTORY_TRACKING) al ponerlo; quitarlo siempre se puede.
+  /// 16-nov-2026, encargo 27771e): al venderse descuenta 1 porción del platillo por selección (piezas o receta; sin inventario no
+  /// descuenta) y NO es venta suelta suya: sale en «Ventas por artículo» › «Dentro de paquete» (founder «B», 20-nov). Excluye a
+  /// `rawMaterialId`. El plan al ponerlo: `LIGA_DE_EXTRA_PLAN` (menu.dashboard.service.ts); quitarlo siempre se puede.
   linkedProductId String?
   linkedProduct   Product?              @relation("ModifierLinkedProduct", fields: [linkedProductId], references: [id], onDelete: SetNull)
 
@@ -5082,7 +5104,7 @@ model OrderAction {
 
   @@index([orderId])
   @@index([actionType])
-  @@index([createdAt])
+  @@index([createdAt]) // + GIN PARCIAL "OrderAction_void_externalIds_idx" (metadata -> 'externalIds') WHERE VOID: sólo en su migración (D29)
 }
 
 enum ActionType {
@@ -6261,11 +6283,14 @@ model Terminal {
 
   // 🆕 Remote Command System (2025-11-30)
   // Device lock state for remote lock/unlock commands
-  isLocked    Boolean   @default(false)
-  lockReason  String? // Why terminal was locked (e.g., "security", "maintenance")
-  lockMessage String? // Message to display on lock screen
-  lockedAt    DateTime?
-  lockedBy    String? // StaffId who locked
+  isLocked          Boolean   @default(false)
+  // SDK propio de cobro (fase 3): la escribe SÓLO cambiarSdkPropioDeTerminal; ningún camino de dinero la lee. Un disparador
+  // la pone en false si cambian serialNumber, type o brand (migración …_terminal_in_house_sdk).
+  inHouseSdkEnabled Boolean   @default(false)
+  lockReason        String? // Why terminal was locked (e.g., "security", "maintenance")
+  lockMessage       String? // Message to display on lock screen
+  lockedAt          DateTime?
+  lockedBy          String? // StaffId who locked
 
   // Location tracking for geofencing
   lastLatitude   Float?
@@ -17558,12 +17583,23 @@ model KdsOrder {
   /// Salió en PAPEL DE RESPALDO porque la pantalla no contestó. Pegajoso: nunca vuelve a verse como activa.
   fallbackPrintedAt DateTime?
 
+  /// Preparación por producto (v1): cuándo la cocina terminó SU parte (nada retenido, pendiente ni preparando). Desde ahí
+  /// la comanda sale del tablero y entra a «Recientes» una hora; `status` sigue siendo READY hasta que la caja entregue
+  /// (founder, 20-nov-2026, D17). `null` mientras la cocina tenga trabajo, y otra vez al regresarla con «Deshacer».
+  kitchenDoneAt DateTime?
+  /// Se archivó sola al acabar su día del negocio con la cuenta ya cerrada (job `kds-archive-closed-day`). No se borra ni cambia
+  /// de estado: sólo deja la pantalla de cocina (la caja la sigue viendo en «Servicio y entregas» si falta entregar algo, y el
+  /// aviso de «listo» a las plataformas no la toma por archivada — Codex r1 #1 y #3). Queda en la bitácora.
+  archivedAt    DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   /// El folio (spec 2026-09-27 §1). Se construye CONCURRENTLY en su propia migración.
   @@unique([venueId, sourceKey])
   @@index([venueId, status])
+  /// El archivado del día (D17) busca en TODOS los negocios las comandas sin archivar más viejas. CONCURRENTLY, su propia migración.
+  @@index([archivedAt, status, createdAt])
   @@index([venueId, preparationVersion, status, id])
   /// Para "¿qué falta imprimir aquí?" sin recorrer la tabla entera.
   @@index([venueId, printedAt])
@@ -21588,6 +21624,17 @@ enum OnlineOrderChargeStatus {
   ABANDONED // el comensal nunca autorizó
 }
 
+/// D662 parte 2 (v5, rediseño B, founder 20-nov): interruptores de PLATAFORMA con hora, uno por clave. `pausa-sola`: la tienda en línea
+/// se pausa sola sólo desde `desde` (cuentan las horas límite ≥ esa hora). Sin fila o con `desde` vacío, apagado. Vive en la base (no en
+/// una variable de Render) para que TODOS los servidores lo vean a la vez sin redesplegar (Codex p2v5-r1 #1). Lo escribe una persona con
+/// `scripts/pausa-sola-interruptor.ts` (nunca con una hora pasada); lo lee `interruptorPausaSola.ts`.
+model InterruptorDePlataforma {
+  clave          String    @id
+  desde          DateTime?
+  actualizadoPor String?
+  updatedAt      DateTime  @updatedAt
+}
+
 /// Ajustes de la tienda en línea de un negocio (1:1 con Venue). Sólo aceptación manual en la v1 (decisión F1).
 model OnlineOrderingSettings {
   id      String @id @default(cuid())
@@ -21615,6 +21662,14 @@ model OnlineOrderingSettings {
   requiresAcceptance Boolean   @default(true)
   /// Último sondeo de la lista «por cobrar» (pedidos sin aceptación que esperan pago en la barra): latido de presencia.
   lastToPayPollAt    DateTime?
+  /// D662 parte 2 (v4): el corte propio de la pausa sola. Sólo cuentan los pedidos cuya hora límite fue DESPUÉS de
+  /// max(esta hora, el interruptor `pausa-sola` de `InterruptorDePlataforma`). Sólo SUBE: la escriben «Reanudar» (`pauseOnlineOrdering(null)`, = ahora) y la
+  /// propia lectura (`corteSeguro`, sin pausa). Encender, apagar, cambiar de modo y pausar 15/30/60 no la tocan. Null = sin corte propio.
+  autoPauseResumedAt DateTime?
+  /// D662 parte 2 v5 (Codex p2v5-r4 #5): la versión de estos ajustes. La sube la BASE en cada UPDATE (trigger
+  /// `OnlineOrderingSettings_sube_version`, bajo el candado de la fila): crece en el orden en que se confirman las escrituras. El panel
+  /// ordena sus lecturas por ella (`storeVersion`). Nadie la escribe a mano.
+  version            Int       @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -21655,6 +21710,11 @@ model OnlineOrder {
 
   whatsappConsent Boolean @default(false)
 
+  /// D662 parte 2 (v3): la PRIMERA vez que una persona contestó este pedido de «Mi equipo»: aceptar o rechazar (caja, panel, TPV,
+  /// MCP; con tarjeta, el paso a `CAPTURING`) o anular su cuenta mientras seguía por aceptar. Se escribe en la misma transacción de esa
+  /// acción y nunca se pisa (`null` en el where). La pausa sola la lee: con esta hora a más tardar en su hora límite «se atendió».
+  staffAnsweredAt  DateTime?
+
   /// Tienda híbrida: `true` = este pedido pasó (o pasa) por aceptación manual. Las filas viejas quedan en `true`.
   requiresAcceptance Boolean @default(true)
   /// Por dónde llegó el pedido: `'QR'` o `'LINK'`. Nulo en los pedidos anteriores a la tienda híbrida.
@@ -21676,6 +21736,11 @@ model OnlineOrder {
   /// El job de vencimiento barre TODOS los negocios: sin venueId al frente, este índice evita el barrido completo.
   @@index([status, acceptDeadlineAt])
   @@index([venueId, requiresAcceptance, status])
+  /// D662 parte 2 (v3): la pausa sola lee los pedidos de «Mi equipo» de un negocio desde el corte, por hora límite e `id`
+  /// (migración CONCURRENTLY 20261120120001).
+  @@index([venueId, requiresAcceptance, acceptDeadlineAt, id])
+  /// D662 parte 2 (v3): ¿una persona contestó a tiempo algún pedido entre dos vencimientos? (migración CONCURRENTLY 20261120120002).
+  @@index([venueId, staffAnsweredAt])
   /// Tienda híbrida (T9, R4): `syncPaidClosedFolios` barre los folios cerrados de los últimos 7 días en TODOS los negocios.
   @@index([requiresAcceptance, status, updatedAt])
 }
@@ -22433,6 +22498,9 @@ model CrmWhatsappMessage {
 
   @@index([contactPhone, sentAt])
   @@index([phoneNumberId, sentAt])
+  // 🔴 ÍNDICE CUBRIENTE MANTENIDO A MANO — Prisma no tiene INCLUDE en `@@index`; vive sólo en la migración
+  // `20261120200000_crm_whatsapp_message_chat_cover_idx_concurrently`: ("contactPhone", "sentAt") INCLUDE ("receivedAt").
+  // Lo lee la lista de chats del CRM (`services/crm/whatsapp.service.ts`) como index-only scan. No lo quites.
 }
 
 enum OrigenDeLaHora {

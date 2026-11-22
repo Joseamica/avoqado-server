@@ -177,6 +177,9 @@ describe('Vales V7: cada descuento del cobro deja su fila espejo marcada (na2453
   beforeEach(() => {
     jest.clearAllMocks()
     ordenCreada = undefined
+    // hz:0555ee15:D5: armar la venta revisa la existencia de lo no apartado (lee los renglones y los apartados de la sesión); aquí no hay nada.
+    prismaMock.orderItem.findMany.mockResolvedValue([])
+    prismaMock.areaTicketInventoryReservation.findMany.mockResolvedValue([])
   })
 
   it('🔴 un renglón del vale con 10 % ⇒ su fila espejo MARCADA, a nombre de quien emitió el vale', async () => {

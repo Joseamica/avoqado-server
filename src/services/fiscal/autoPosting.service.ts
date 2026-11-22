@@ -17,6 +17,7 @@ import logger from '../../config/logger'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT } from '../exchanges/exchangeMarks'
+import { comisionesPorCalcular } from '../payments/comisionPorCalcular'
 
 /**
  * Motor de POSTEO AUTOMÁTICO de pólizas (Capa B, slice 2). Genera asientos de doble partida
@@ -74,6 +75,13 @@ export interface GenerateResult {
    * `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`.
    */
   pendientesDeRevision: number
+  /**
+   * D24: cobros y devoluciones con tarjeta cuya comisión todavía se está calculando. No se postean (la póliza quedaría con comisión 0
+   * para siempre: su llave no se rehace); la siguiente corrida los toma ya con la comisión real.
+   */
+  pendientesDeCosto: number
+  /** D24: de `pendientesDeCosto`, los que tienen el cálculo de la comisión agotado (DEAD_LETTER): no se resuelven solos, hay que revisarlos. */
+  costoSinCalcular: number
   /** Costo de ventas del periodo posteado, en centavos (solo cuando se pasa `period` y hubo consumo). */
   cogsCents?: number
 }
@@ -85,6 +93,9 @@ interface PaymentRow {
   amount: Prisma.Decimal
   tipAmount: Prisma.Decimal
   feeAmount: Prisma.Decimal
+  /** D24: para saber si la comisión ya es la definitiva (`comisionesPorCalcular`). */
+  netAmount?: Prisma.Decimal | null
+  processorData?: unknown
   method: PaymentMethod
   type: PaymentType | null
   createdAt: Date
@@ -149,7 +160,9 @@ export function buildRefundLines(
 ): { lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[] } | null {
   const rG = Math.abs(toCents(p.amount))
   const rT = Math.abs(toCents(p.tipAmount))
-  const rF = Math.abs(toCents(p.feeAmount)) // normalmente 0: el procesador conserva la comisión
+  // 0 si el procesador se queda la comisión (Stripe, terminales externas); en un cobro que deposita Avoqado, la comisión
+  // revertida a prorrata (R13-5: costo negativo del reembolso).
+  const rF = Math.abs(toCents(p.feeAmount))
   // Plan 4b: la mezcla por tasa de la póliza, como tratamientos (cada parte con su tasa: la misma aritmética), para que
   // `ivaDeDevolucion` lea las dos formas del mapa congelado. Su respaldo usa la misma mezcla corregida de la venta.
   const { netCents, taxCents } = ivaDeDevolucion(p.id, rG, processorData, mezclaDesdeTasas(grossByRateFromOrder(p.order)))
@@ -239,6 +252,8 @@ export async function generatePoliciesForVenue(
     alreadyPosted: 0,
     skipped: 0,
     pendientesDeRevision: 0,
+    pendientesDeCosto: 0,
+    costoSinCalcular: 0,
   }
 
   const scope = await resolveScopeOrNull(venueId)
@@ -296,6 +311,8 @@ export async function generatePoliciesForVenue(
         amount: true,
         tipAmount: true,
         feeAmount: true,
+        netAmount: true,
+        processorData: true,
         method: true,
         type: true,
         createdAt: true,
@@ -339,6 +356,7 @@ export async function generatePoliciesForVenue(
       eligible.filter(p => (toCents(p.amount) < 0 || p.type === PaymentType.REFUND) && !existing.has(`refund:${p.id}:v1`)).map(p => p.id),
     )
 
+    const porPostear: Array<{ p: PaymentRow; isRefund: boolean; key: string }> = []
     for (const p of eligible) {
       // Tarjetas de regalo (spec §7, fase 1): ni la venta de una tarjeta ni lo pagado con saldo se postean; el motor los trataría como
       // venta con entrada a banco. Se cuentan y el contador los ve en «pendientes de revisión contable».
@@ -361,6 +379,22 @@ export async function generatePoliciesForVenue(
       const key = isRefund ? `refund:${p.id}:v1` : `pay:${p.id}:v1`
       if (existing.has(key)) {
         base.alreadyPosted++
+        continue
+      }
+      porPostear.push({ p, isRefund, key })
+    }
+
+    // D24: la comisión de un cobro o devolución con tarjeta puede seguir calculándose (costo diferido, costo negativo del reembolso).
+    // Una póliza con la provisional (comisión 0) quedaría fija; se salta, se cuenta y la siguiente corrida la toma ya calculada.
+    const comisiones = await comisionesPorCalcular(
+      venueId,
+      porPostear.map(({ p }) => p),
+    )
+    for (const { p, isRefund, key } of porPostear) {
+      const comision = comisiones.get(p.id)
+      if (comision) {
+        base.pendientesDeCosto++
+        if (comision === 'SIN_CALCULAR') base.costoSinCalcular++
         continue
       }
       const built = isRefund ? buildRefundLines(p, acct, processorDataDeAjustes.get(p.id)) : buildSaleLines(p, acct)

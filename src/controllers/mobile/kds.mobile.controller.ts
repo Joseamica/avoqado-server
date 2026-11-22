@@ -12,6 +12,7 @@ import * as kdsMobileService from '../../services/mobile/kds.mobile.service'
 import { reportOutOfStock, retryOutOfStock, type ResultadoRetiro } from '../../services/mobile/kdsOutOfStock.mobile.service'
 import { OPERACION_EN_CURSO } from './deliveryOrder.mobile.controller'
 import { listKitchenPreparation, preparationCapabilities } from '../../services/kds/kitchenPreparation.service'
+import { pantallasDesconectadas, registrarLecturaDelTablero } from '../../services/kds/kitchenDisplayStations'
 
 export const getPreparationCapabilities = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -43,12 +44,15 @@ export const getKitchenPreparation = async (req: Request, res: Response, next: N
  *
  * @route GET /api/v1/mobile/venues/:venueId/kds/orders
  * @query status - Comma-separated status filter (default: NEW,PREPARING,READY)
+ * @query kitchenDoneVersion - `1` (pantallas nuevas): sin lo que la cocina terminó ni lo archivado; sin él, el tablero de siempre
  */
 export const listKdsOrders = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
     const { status, stationId } = req.query
     const estacion = typeof stationId === 'string' && stationId ? stationId : undefined
+    // Sólo la pantalla que lo pide deja de recibir lo terminado y lo archivado (D17); la vieja recibe el tablero de siempre.
+    const pantallaNueva = Number(req.query.kitchenDoneVersion) >= 1
 
     const page =
       req.query.urgencyVersion === '1'
@@ -60,10 +64,13 @@ export const listKdsOrders = async (req: Request, res: Response, next: NextFunct
         : undefined
     const [orders, total] = await Promise.all([
       page
-        ? kdsMobileService.listKdsOrders(venueId, status as string | undefined, estacion, page)
-        : kdsMobileService.listKdsOrders(venueId, status as string | undefined, estacion),
-      kdsMobileService.countKdsOrders(venueId, status as string | undefined, estacion),
+        ? kdsMobileService.listKdsOrders(venueId, status as string | undefined, estacion, page, pantallaNueva)
+        : kdsMobileService.listKdsOrders(venueId, status as string | undefined, estacion, undefined, pantallaNueva),
+      kdsMobileService.countKdsOrders(venueId, status as string | undefined, estacion, pantallaNueva),
     ])
+    // D6 de Flautas (opción B): la pantalla de esta estación acaba de leer su tablero. Sólo con el tablero ya leído; no se
+    // espera ni puede tumbar la respuesta. Lo que lee el vigilante de reparto (sin estación) no es una pantalla.
+    if (estacion) registrarLecturaDelTablero(venueId, estacion)
 
     // El total va en un encabezado y no en el cuerpo: las apps de la calle leen `data` como
     // arreglo y no deben cambiar. Si el tope recortó, queda dicho en el log (por negocio).
@@ -323,6 +330,7 @@ export const listRecentKdsOrders = async (req: Request, res: Response, next: Nex
     const data = await kdsMobileService.listRecentKdsOrders(
       req.params.venueId,
       typeof stationId === 'string' && stationId ? stationId : undefined,
+      req.query.kitchenDoneVersion === '1',
     )
     res.status(200).json({ success: true, data })
   } catch (error) {
@@ -337,11 +345,33 @@ export const listRecentKdsOrders = async (req: Request, res: Response, next: Nex
  */
 export const recallKdsOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const data = await kdsMobileService.recallKdsOrder(req.params.venueId, req.params.id)
+    const expectedDoneAt = typeof req.body?.expectedDoneAt === 'string' ? req.body.expectedDoneAt.slice(0, 40) : null
+    const data = await kdsMobileService.recallKdsOrder(
+      req.params.venueId,
+      req.params.id,
+      (req as any).authContext?.userId ?? null,
+      expectedDoneAt,
+    )
     res.status(200).json({ success: true, data })
   } catch (error) {
     logControllerError('kds recallKdsOrder', error)
     next(error)
+  }
+}
+
+/**
+ * D6 de Flautas (opción B): las pantallas de cocina del negocio que NO están conectadas a internet (no han pedido su tablero
+ * en 90 s). La caja lo enseña en una franja fija en vez de avisar «No salió la comanda» orden por orden.
+ * @route GET /api/v1/mobile/venues/:venueId/kds/pantallas-desconectadas
+ */
+export const listarPantallasDesconectadas = async (req: Request, res: Response) => {
+  try {
+    res.status(200).json({ success: true, data: await pantallasDesconectadas(req.params.venueId) })
+  } catch (error) {
+    // Codex r8 #2: nunca 5xx. La caja toma un 5xx como «servidor caído» y pondría «Sin conexión» por un sondeo de fondo que
+    // falló. Se contesta «no se sabe» (sin `pantallas` y `completo` falso): la caja no afirma nada y vuelve a preguntar.
+    logControllerError('kds listarPantallasDesconectadas', error)
+    res.status(200).json({ success: true, data: { hayPantallas: true, completo: false, desconectadas: [] } })
   }
 }
 

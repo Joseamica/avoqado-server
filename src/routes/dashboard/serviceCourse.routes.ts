@@ -16,6 +16,14 @@ router.put(
   checkFeatureAccess('TABLE_SERVICE'),
   controller.putVenue,
 )
+// D17: «La cocina puede liberar tiempos desde su pantalla». Mismo candado que guardar los tiempos.
+router.put(
+  '/venues/:venueId/service-courses/kitchen-release',
+  authenticateTokenMiddleware,
+  checkPermission('settings:manage'),
+  checkFeatureAccess('TABLE_SERVICE'),
+  controller.putKitchenRelease,
+)
 // StaffOrganization OWNER is authoritative, never a branch's venue OWNER.
 router.get(
   '/organizations/:orgId/service-courses',

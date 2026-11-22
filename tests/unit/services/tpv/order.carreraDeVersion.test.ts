@@ -37,6 +37,8 @@ jest.mock('@/utils/prismaClient', () => {
     // B2 (P2): `applyDiscount` crea su fila y sincroniza su reparto, que lee los renglones de la orden.
     orderItem: { update: jest.fn(), delete: jest.fn(), deleteMany: jest.fn(), findMany: jest.fn(async () => []) },
     orderAction: { create: jest.fn() },
+    // «Anular producto» (Codex r2 #7): `ITEM_VOIDED` va dentro de la transacción de la anulación.
+    activityLog: { create: jest.fn(async () => ({})) },
     orderDiscount: { findMany: jest.fn(async () => []), create: jest.fn(async () => ({})), update: jest.fn(), delete: jest.fn() },
     orderServiceCharge: { findMany: jest.fn(), update: jest.fn() },
     orderCustomer: { deleteMany: jest.fn() },
@@ -45,6 +47,8 @@ jest.mock('@/utils/prismaClient', () => {
     staffVenue: { findFirst: jest.fn(async () => null) },
     // Diseño §C.6: voidItems toma el candado de la orden y consulta el cobro de terminal vivo DENTRO de la tx.
     $queryRaw: jest.fn(async () => [{ id: 'order-cas' }]),
+    // D15: anular una parte busca las filas de comanda de lo anulado (aquí ninguna: no hay pantalla de cocina).
+    kdsOrderItem: { findMany: jest.fn(async () => []) },
     terminalPaymentRequest: { findFirst: jest.fn(async () => null) },
     // Auditoría Fable 11-sep (P2-8): voidItems relee lo cobrado (Payment registrados) bajo el candado.
     payment: { aggregate: jest.fn(async () => ({ _sum: { amount: null, tipAmount: null } })) },

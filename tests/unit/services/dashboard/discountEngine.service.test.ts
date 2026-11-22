@@ -1524,11 +1524,12 @@ describe('Discount Engine Service', () => {
 
       expect(result.success).toBe(true)
       expect(result.amount).toBe(10)
-      expect(prismaMock.discount.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: { currentUses: { decrement: 1 } },
-        }),
-      )
+      // hz:e82938e1:D31 (nae1cfa6 #1): devuelve el uso sin bajar nunca de 0 (antes un `decrement` sin piso podía dejar −1).
+      expect(prismaMock.discount.updateMany).toHaveBeenCalledWith({
+        where: { id: 'd1', venueId: 'venue-123', currentUses: { gt: 0 } },
+        data: { currentUses: { decrement: 1 } },
+      })
+      expect(prismaMock.discount.update).not.toHaveBeenCalledWith(expect.objectContaining({ data: { currentUses: { decrement: 1 } } }))
     })
 
     /**

@@ -577,14 +577,12 @@ describe('D1: anular todo en la terminal devuelve los canjes a nombre de la sesi
     expect(await prisma.orderAction.findMany({ where: { orderId, actionType: 'VOID' }, select: { performedById: true } })).toEqual([
       { performedById: sesion() },
     ])
-    // `logAction` está simulado en esta suite: se revisa lo que recibe, no la fila de ActivityLog.
-    expect(logAction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        action: 'ITEM_VOIDED',
-        entityId: orderId,
-        staffId: sesion(),
-        data: expect.objectContaining({ vendedorSegunElAparato: staffId }),
-      }),
-    )
+    // «Anular producto» (Codex r2 #7): `ITEM_VOIDED` se escribe DENTRO de la transacción de la anulación (no por `logAction`, que
+    // aquí está simulado): se revisa la fila real de ActivityLog.
+    const anulado = await prisma.activityLog.findMany({
+      where: { venueId, entityId: orderId, action: 'ITEM_VOIDED' },
+      select: { staffId: true, data: true },
+    })
+    expect(anulado).toEqual([{ staffId: sesion(), data: expect.objectContaining({ vendedorSegunElAparato: staffId }) }])
   })
 })

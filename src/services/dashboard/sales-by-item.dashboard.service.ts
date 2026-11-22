@@ -12,6 +12,7 @@
  * - discounts: Sum of discountAmount + la parte de cada renglón en los descuentos de cuenta (lineOrderDiscountSql)
  * - netSales: grossSales - discounts
  * - refunds: From refunded orders (tracked separately)
+ * - unitsInsidePackages / totalUnits: unidades vendidas como extra ligado al platillo (founder «B», 20-nov; sólo por producto)
  */
 
 import logger from '@/config/logger'
@@ -45,6 +46,11 @@ export interface SalesByItemFilters {
   productId?: string
   channel?: string
   paymentMethod?: string
+  /**
+   * «Dentro de paquete» (founder «B», 20-nov). Por omisión sí (con `groupBy = 'none'`). `/mobile` lo apaga: las apps de hoy reciben
+   * exactamente lo de siempre, sin renglones ni campos nuevos y sin el candado de plan de los reportes avanzados (Codex r1 #5).
+   */
+  incluirDentroDePaquete?: boolean
 }
 
 export interface ItemSalesMetrics {
@@ -85,6 +91,15 @@ export interface ItemSalesMetrics {
    */
   productGroupId?: string | null
   productGroupName?: string | null
+  /**
+   * «Dentro de paquete» (founder «B», 20-nov-2026, Flautas): unidades de este platillo que se vendieron como EXTRA ligado a él
+   * (`Modifier.linkedProductId`, p. ej. la flauta de papa dentro del paquete) = Σ renglón.quantity × extra.quantity. Aparte de
+   * `unitsSold` (que no cambia) y sin dinero: el precio del extra va en el producto principal. Lee la liga ACTUAL del extra
+   * (retroactiva). Sólo con `groupBy = 'none'`; ahí viene en todos los renglones (0 si no hay).
+   */
+  unitsInsidePackages?: number
+  /** `unitsSold + unitsInsidePackages`. Sólo con `groupBy = 'none'`. */
+  totalUnits?: number
 }
 
 export interface TimePeriodItemMetrics {
@@ -124,7 +139,24 @@ export interface SalesByItemResponse {
     grossSales: number
     discounts: number
     netSales: number
+    /** Sólo con `groupBy = 'none'` (ver `ItemSalesMetrics.unitsInsidePackages`). */
+    unitsInsidePackages?: number
+    totalUnits?: number
   }
+}
+
+/**
+ * Las órdenes y renglones que cuentan en este reporte: UNA definición para artículos, promociones, «Dentro de paquete» y barras,
+ * para que ninguna consulta cuente órdenes distintas. Usa `o` (Order) y `oi` (OrderItem), y los parámetros $1 venue, $2/$3 rango.
+ */
+function ordenesDelReporte(hourFilterClause: string): string {
+  return `o."venueId" = $1
+      AND ${sqlRangoHoraReal('o', utcTsParam(2), utcTsParam(3))}
+      AND o.status NOT IN ('CANCELLED')
+      AND o."paymentStatus" NOT IN ('REFUNDED')
+      AND oi."removedAt" IS NULL
+      AND ${sqlOrdenSinTarjetasTexto('o.id')}
+      ${hourFilterClause}`
 }
 
 // ============================================================
@@ -143,6 +175,7 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
     timezone: rawTimezone = 'America/Mexico_City',
     startHour,
     endHour,
+    incluirDentroDePaquete = true,
   } = filters
 
   // SECURITY: Sanitize timezone to prevent SQL injection
@@ -212,13 +245,7 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
     LEFT JOIN "ProductGroup" pg ON pg.id = p."productGroupId" AND pg."venueId" = o."venueId"
     ${paymentJoin}
     ${terminalJoin}
-    WHERE o."venueId" = $1
-      AND ${sqlRangoHoraReal('o', utcTsParam(2), utcTsParam(3))}
-      AND o.status NOT IN ('CANCELLED')
-      AND o."paymentStatus" NOT IN ('REFUNDED')
-      AND oi."removedAt" IS NULL
-      AND ${sqlOrdenSinTarjetasTexto('o.id')}
-      ${hourFilterClause}
+    WHERE ${ordenesDelReporte(hourFilterClause)}
     GROUP BY ${groupByFields}
     ORDER BY ${orderByField} DESC
   `
@@ -247,8 +274,14 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
   // ============================================================
   // Sólo tiene sentido en el desglose por PRODUCTO: en un agrupado por canal o
   // método de pago, "dentro de «Combo X»" no le pertenece a ningún renglón.
-  const promotionAttribution =
-    groupBy === 'none' ? await getPromotionAttribution(venueId, parsedStartDate, parsedEndDate, hourFilterClause) : new Map()
+  // «Dentro de paquete» (founder «B», 20-nov): igual que la promoción, sólo le pertenece a un renglón de PRODUCTO.
+  const [promotionAttribution, insidePackages] =
+    groupBy === 'none'
+      ? await Promise.all([
+          getPromotionAttribution(venueId, parsedStartDate, parsedEndDate, hourFilterClause),
+          incluirDentroDePaquete ? getUnitsInsidePackages(venueId, parsedStartDate, parsedEndDate, hourFilterClause) : null,
+        ])
+      : [new Map<string, Array<{ name: string; unitsSold: number; netSales: number }>>(), null]
 
   // Transform results based on groupBy
   const items: ItemSalesMetrics[] = itemSalesResults.map(row => {
@@ -295,11 +328,48 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
     }
   })
 
+  if (insidePackages) {
+    // Cada platillo recibe lo de paquete UNA vez, en un renglón ELEGIDO sin depender del orden del SQL (Codex r1 #12): si lo
+    // renombraron tiene varios renglones; gana el que lleva su nombre de HOY, si no el de más unidades, y al empate el nombre.
+    const destino = new Map<string, ItemSalesMetrics>()
+    for (const item of items) {
+      const dentro = item.productId ? insidePackages.get(item.productId) : undefined
+      if (!dentro) continue
+      const actual = destino.get(item.productId!)
+      if (!actual || renglonPreferido(item, actual, dentro.productName)) destino.set(item.productId!, item)
+    }
+    for (const item of items) {
+      const dentro = item.productId && destino.get(item.productId) === item ? insidePackages.get(item.productId) : undefined
+      item.unitsInsidePackages = dentro?.units ?? 0
+      item.totalUnits = item.unitsSold + item.unitsInsidePackages
+    }
+    // Un platillo que sólo se vendió dentro de paquetes entra como renglón nuevo, con 0 sueltas y $0.
+    for (const [productId, d] of insidePackages) {
+      if (destino.has(productId)) continue
+      items.push({
+        productId,
+        productName: d.productName,
+        productSku: d.productSku,
+        categoryName: d.categoryName,
+        productGroupId: d.productGroupId,
+        productGroupName: d.productGroupName,
+        unit: 'c/u',
+        itemsSold: 0,
+        unitsSold: 0,
+        grossSales: 0,
+        discounts: 0,
+        netSales: 0,
+        unitsInsidePackages: d.units,
+        totalUnits: d.units,
+      })
+    }
+  }
+
   // ============================================================
   // Calculate Totals
   // ============================================================
 
-  const totals = items.reduce(
+  const totals: SalesByItemResponse['totals'] = items.reduce(
     (acc, item) => ({
       itemsSold: acc.itemsSold + item.itemsSold,
       unitsSold: acc.unitsSold + item.unitsSold,
@@ -309,6 +379,10 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
     }),
     { itemsSold: 0, unitsSold: 0, grossSales: 0, discounts: 0, netSales: 0 },
   )
+  if (insidePackages) {
+    totals.unitsInsidePackages = items.reduce((acc, item) => acc + (item.unitsInsidePackages ?? 0), 0)
+    totals.totalUnits = totals.unitsSold + totals.unitsInsidePackages
+  }
 
   // ============================================================
   // Time-Period Breakdown (for charts)
@@ -383,13 +457,7 @@ async function getPromotionAttribution(
     INNER JOIN "OrderPromotion" op ON op.id = oi."orderPromotionId"
     LEFT JOIN "Promotion" pr ON pr.id = op."promotionId"
     LEFT JOIN "Product" p ON p.id = oi."productId"
-    WHERE o."venueId" = $1
-      AND ${sqlRangoHoraReal('o', utcTsParam(2), utcTsParam(3))}
-      AND o.status NOT IN ('CANCELLED')
-      AND o."paymentStatus" NOT IN ('REFUNDED')
-      AND oi."removedAt" IS NULL
-      AND ${sqlOrdenSinTarjetasTexto('o.id')}
-      ${hourFilterClause}
+    WHERE ${ordenesDelReporte(hourFilterClause)}
     GROUP BY oi."productId", COALESCE(oi."productName", p.name, 'Sin descripción'),
              COALESCE(NULLIF(op."snapshotJson"->>'name', ''), pr.name, 'Promoción')
     ORDER BY net_sales DESC
@@ -420,6 +488,103 @@ async function getPromotionAttribution(
     byProduct.set(key, list)
   }
   return byProduct
+}
+
+// ============================================================
+// Helper: «Dentro de paquete» (founder «B», 20-nov-2026)
+// ============================================================
+
+/**
+ * ¿`a` es mejor renglón que `b` para llevar lo de paquete de su platillo? Su nombre de hoy, luego más unidades, y al empate un orden
+ * fijo por nombre, SKU y categoría vendidos: lo que separa dos renglones del mismo platillo en la consulta principal (Codex r2 #4: un
+ * SKU cambiado deja dos renglones con el mismo nombre y las mismas unidades).
+ */
+function renglonPreferido(a: ItemSalesMetrics, b: ItemSalesMetrics, nombreDeHoy: string): boolean {
+  const aHoy = a.productName === nombreDeHoy
+  const bHoy = b.productName === nombreDeHoy
+  if (aHoy !== bHoy) return aHoy
+  if (a.unitsSold !== b.unitsSold) return a.unitsSold > b.unitsSold
+  const llave = (r: ItemSalesMetrics) => [r.productName, r.productSku ?? '', r.categoryName ?? '']
+  const [la, lb] = [llave(a), llave(b)]
+  for (let i = 0; i < la.length; i++) if (la[i] !== lb[i]) return la[i] < lb[i]
+  // Mismo nombre, SKU y categoría a la vista (p. ej. una venta de delivery sin categoría guardada junto a una de la TPV, Codex r3 #4):
+  // decide lo que sí se ve distinto en la fila. Si hasta eso empata, las dos filas se ven idénticas y da igual cuál lo lleve.
+  if (a.grossSales !== b.grossSales) return a.grossSales > b.grossSales
+  if (a.discounts !== b.discounts) return a.discounts < b.discounts
+  return a.itemsSold > b.itemsSold
+}
+
+/**
+ * Unidades de cada platillo vendidas como EXTRA ligado a él (`Modifier.linkedProductId`): Σ renglón.quantity × extra.quantity, con
+ * los MISMOS filtros de órdenes que las unidades sueltas (`ordenesDelReporte`). Sólo unidades: no lee ni un precio. La liga que
+ * cuenta es la ACTUAL del extra (el renglón vendido no la copia), así que ligar o desligar hoy mueve el pasado: aceptado.
+ * El platillo ligado tiene que ser del mismo negocio. Una consulta agregada: a lo más un renglón por platillo del negocio, igual que la
+ * consulta principal del reporte, y SIN `LIMIT` (un tope recortaría renglones y totales sin salida para el usuario, Codex r1 #6).
+ * La lee también la herramienta MCP `package_component_sales`, para que el asistente y la pantalla den el mismo número.
+ */
+export async function getUnitsInsidePackages(
+  venueId: string,
+  startDate: Date,
+  endDate: Date,
+  hourFilterClause: string,
+): Promise<
+  Map<
+    string,
+    {
+      units: number
+      productName: string
+      productSku: string | null
+      categoryName: string | null
+      productGroupId: string | null
+      productGroupName: string | null
+    }
+  >
+> {
+  const query = `
+    SELECT
+      lp.id as "productId",
+      lp.name as product_name,
+      lp.sku as product_sku,
+      COALESCE(mc.name, 'Sin categorizar') as category_name,
+      lp."productGroupId" as product_group_id,
+      pg.name as product_group_name,
+      SUM(oi.quantity * oim.quantity)::integer as units_inside
+    FROM "OrderItemModifier" oim
+    INNER JOIN "OrderItem" oi ON oi.id = oim."orderItemId"
+    INNER JOIN "Order" o ON o.id = oi."orderId"
+    INNER JOIN "Modifier" m ON m.id = oim."modifierId"
+    INNER JOIN "Product" lp ON lp.id = m."linkedProductId" AND lp."venueId" = o."venueId"
+    LEFT JOIN "MenuCategory" mc ON mc.id = lp."categoryId"
+    LEFT JOIN "ProductGroup" pg ON pg.id = lp."productGroupId" AND pg."venueId" = o."venueId"
+    WHERE ${ordenesDelReporte(hourFilterClause)}
+      AND m."linkedProductId" IS NOT NULL
+    GROUP BY lp.id, lp.name, lp.sku, mc.name, lp."productGroupId", pg.name
+    ORDER BY units_inside DESC, lp.id
+  `
+  const rows = await prisma.$queryRawUnsafe<
+    Array<{
+      productId: string
+      product_name: string
+      product_sku: string | null
+      category_name: string | null
+      product_group_id: string | null
+      product_group_name: string | null
+      units_inside: number
+    }>
+  >(query, venueId, startDate, endDate)
+  return new Map(
+    rows.map(r => [
+      r.productId,
+      {
+        units: Number(r.units_inside ?? 0),
+        productName: r.product_name,
+        productSku: r.product_sku ?? null,
+        categoryName: r.category_name ?? null,
+        productGroupId: r.product_group_id ?? null,
+        productGroupName: r.product_group_name ?? null,
+      },
+    ]),
+  )
 }
 
 // ============================================================
@@ -506,13 +671,7 @@ async function calculateTimePeriodItemMetrics(
       COUNT(oi.id)::integer as items_sold
     FROM "OrderItem" oi
     INNER JOIN "Order" o ON o.id = oi."orderId"
-    WHERE o."venueId" = $1
-      AND ${sqlRangoHoraReal('o', utcTsParam(2), utcTsParam(3))}
-      AND o.status NOT IN ('CANCELLED')
-      AND o."paymentStatus" NOT IN ('REFUNDED')
-      AND oi."removedAt" IS NULL
-      AND ${sqlOrdenSinTarjetasTexto('o.id')}
-      ${hourFilterClause}
+    WHERE ${ordenesDelReporte(hourFilterClause)}
     GROUP BY ${groupByExpression}
     ORDER BY ${orderByExpression}
   `

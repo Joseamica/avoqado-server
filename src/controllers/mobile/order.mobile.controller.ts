@@ -33,6 +33,7 @@ import { parseCourtesyReviewPublicInput, toCourtesyReviewPublicReply } from '@/s
 import { avisarBeneficiosCortesiaPendiente } from '@/services/mobile/cortesia-pendiente-notice.mobile.service'
 import { esTpvQueTruncaElDescuento } from '../../services/shared/descuentoDeTpvVieja'
 import { motivoDelDescuento } from '../../services/shared/motivoDelDescuento'
+import { llaveDeRondaEnLinea, llavesDeLaRonda } from '../../services/mobile/llaveDeRonda'
 
 /** La ruta ya validó shape/permiso; identidad y contexto siempre vienen de la sesión autenticada. */
 export async function reviewPendingCourtesy(req: Request, res: Response, next: NextFunction) {
@@ -387,7 +388,7 @@ export async function autoridadDeLaVenta(
 ): Promise<
   Pick<
     orderMobileService.CreateOrderInput,
-    'canCompItems' | 'performedBy' | 'terminalSerialNumber' | 'descuentoConPermisoPropio' | 'aprobacionDelDescuento'
+    'canCompItems' | 'performedBy' | 'sesionStaffId' | 'terminalSerialNumber' | 'descuentoConPermisoPropio' | 'aprobacionDelDescuento'
   >
 > {
   const hasCortesias = venta.items.some(item => item.isCortesia === true)
@@ -413,6 +414,8 @@ export async function autoridadDeLaVenta(
     ...(aprobacionDelDescuento(req) ? { aprobacionDelDescuento: aprobacionDelDescuento(req) } : {}),
     // S6: la terminal que vende, del TOKEN (nunca del body): orden con su `terminalId` y fuente `TPV`.
     terminalSerialNumber: req.authContext?.terminalSerialNumber ?? null,
+    // D13: la sesión del TOKEN; una venta de la cola con un vendedor dado de baja queda a su nombre.
+    sesionStaffId: req.authContext?.userId,
   }
 }
 
@@ -638,6 +641,8 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       amount,
       tip: tip || 0,
       staffId: effectiveStaffId,
+      // D13: la sesión del token (nunca del cuerpo): con un vendedor dado de baja, el cobro de la cola queda a su nombre.
+      sesionStaffId: req.authContext?.userId,
       // 🛡️ Antes se descartaba: los clientes SIEMPRE la mandan y su cola offline
       // espera un 409-duplicado para marcar el pago como sincronizado.
       idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : undefined,
@@ -771,8 +776,10 @@ export const addItemsToOrder = async (req: Request, res: Response, next: NextFun
       return res.status(400).json({ success: false, message: 'version (número) es requerida para concurrencia optimista' })
     }
 
-    // Mesas mandan RONDAS (deltas): cada Enviar crea sus propias filas (modelo Square).
-    const updatedOrder = await orderTpvService.addItemsToOrder(venueId, orderId, items, version, true)
+    // Mesas mandan RONDAS (deltas): cada Enviar crea sus propias filas (modelo Square). Cada renglón con la llave de su ronda
+    // (`sync:<ronda>:<n>`, decisión 1 de D7): las apps ya la mandan, la misma que su reenvío por la cola; otra forma se reemplaza.
+    const conLlave = llavesDeLaRonda(items, llaveDeRondaEnLinea(items))
+    const updatedOrder = await orderTpvService.addItemsToOrder(venueId, orderId, conLlave, version, true)
 
     // Cobros automáticos por comensales: al crecer el subtotal la regla puede
     // empezar a aplicar (el recompute del TPV ya refresca los % existentes).
@@ -864,6 +871,23 @@ export const compOrderItem = async (req: Request, res: Response, next: NextFunct
       void logAction({ action: 'ORDER_ITEM_COMPED', entity: 'OrderItem', entityId: itemId, staffId, venueId, data: auditData })
     }
     return sendHttpOperationReply(res, operation, reply)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * «Anular producto» (Flautas, 20-nov): quita UN renglón de la cuenta de mesa, aunque ya esté en cocina. Firma la sesión.
+ * @route POST /api/v1/mobile/venues/:venueId/orders/:orderId/items/:itemId/void
+ */
+export const voidOrderItem = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId, itemId } = req.params
+    const actorId = (req as any).authContext?.userId as string | undefined
+    if (!actorId) throw new UnauthorizedError('Autenticación requerida')
+    const { voidOrderItem: anular } = await import('../../services/mobile/void-item.mobile.service')
+    const data = await anular({ venueId, orderId, itemId, reason: req.body.reason, actorId, expectedVersion: req.body.expectedVersion })
+    return res.json({ success: true, data })
   } catch (error) {
     next(error)
   }

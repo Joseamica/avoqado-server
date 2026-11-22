@@ -15,8 +15,6 @@ import { FOLIO_PAID_STATUSES, claseDeEstado, estadoAlRecibirDinero, impuestoQueS
 import { lockExistingOrderForPayment } from './paymentShiftClaim'
 import { bloquearVentaParaLiga } from './ligaDeClienteEnVenta'
 import { MOTIVO_BENEFICIO_REGRESADO, sellarFolioAnuladoEnTx } from '@/services/online-ordering/cortesiaDeFolio'
-import type { TxConReintento } from '@/utils/serializableRetry'
-import { volverAGastarUsosDeCuentaRevividaEnTx } from './usoDelDescuento'
 
 /** El texto del founder (3-oct). El código es el de la solicitud a la terminal (`terminal-payment.service.ts:1737`): las apps ya lo conocen. */
 export const MENSAJE_CUENTA_CANCELADA = 'Esta cuenta está cancelada, abre una nueva.'
@@ -224,13 +222,10 @@ const LO_QUE_LEE_LA_CONCILIACION = {
  * llama, y deja rastro: cambia un resultado firmado. Devuelve el estado con el que quien llama calcula y guarda. CALLER_LOCKED.
  * La bitácora va con el `tx` a propósito (preflight R-6): auditoría atómica de un resultado firmado, no `logAction`.
  * Pedidos en línea 1c (S1): si la cuenta es de un pedido web, también lo concilia, con el MISMO `tx` (`conciliarPedidoEnLinea`).
- * El retorno no cambia (Codex plan r1 #13: la TPV usa el retorno como estado).
- * 🔴 hz:e82938e1:D26: al revivir, las filas que devolvieron su uso al anular (D24) lo vuelven a gastar en esta misma transacción
- * (`volverAGastarUsosAlRevivirEnTx`): por eso pide el `tx` con reintento por trabas (escribe `Discount`). Orden de candados: Order →
- * Discount → … → Shift, el de la anulación; la TPV aparta sus filas `Discount` antes de su turno (Codex D26 r1 #1, r2 #1, r3 #1-#2).
+ * La firma y el retorno no cambian (Codex plan r1 #13: la TPV usa el retorno como estado).
  */
 export async function reabrirSiRecibeDinero(
-  tx: TxConReintento,
+  tx: Pick<Prisma.TransactionClient, 'order' | 'activityLog' | 'onlineOrder' | 'staffVenue' | 'notification'>,
   a: {
     venueId: string
     orderId: string
@@ -278,46 +273,8 @@ export async function reabrirSiRecibeDinero(
     orderId: a.orderId,
     ...datos,
   })
-  // D26: Order (ya tomada por quien llama) → Discount, antes del turno en el POS; la TPV ya apartó estas filas antes del suyo
-  // (`apartarDescuentosQueVolveriaAGastarEnTx`), así que aquí no espera ninguna nueva.
-  await volverAGastarUsosAlRevivirEnTx(tx, a)
   if (reabierta?.onlineOrder) await conciliarPedidoEnLinea(tx, a, estado, reabierta)
   return estado
-}
-
-/**
- * 🔴 hz:e82938e1:D26 (encargo 2f1901): la cuenta que `reabrirSiRecibeDinero` acaba de sacar de CANCELADA vuelve a gastar los usos que su
- * anulación devolvió (D24), en la transacción del dinero, y deja `ORDER_REOPENED_DISCOUNT_USES_RESPENT` si gastó alguno. La marca se
- * suelta en la misma escritura: llamarla otra vez no gasta nada.
- */
-async function volverAGastarUsosAlRevivirEnTx(
-  tx: TxConReintento,
-  a: { venueId: string; orderId: string; canal: string; paymentId?: string | null; staffId?: string | null },
-): Promise<number> {
-  const gastados = await volverAGastarUsosDeCuentaRevividaEnTx(tx, {
-    venueId: a.venueId,
-    orderId: a.orderId,
-    canal: a.canal,
-    quien: a.staffId ?? null,
-  })
-  if (gastados.usos === 0) return 0
-  await tx.activityLog.create({
-    data: {
-      action: 'ORDER_REOPENED_DISCOUNT_USES_RESPENT',
-      entity: 'Order',
-      entityId: a.orderId,
-      venueId: a.venueId,
-      staffId: a.staffId ?? null,
-      data: { canal: a.canal, paymentId: a.paymentId ?? null, usosGastados: gastados.usos, porDescuento: gastados.porDescuento },
-    },
-  })
-  logger.info('🏷️ [Cobro capturado] la cuenta revivida volvió a gastar los usos de su descuento de cuenta', {
-    venueId: a.venueId,
-    orderId: a.orderId,
-    canal: a.canal,
-    ...gastados,
-  })
-  return gastados.usos
 }
 
 /**

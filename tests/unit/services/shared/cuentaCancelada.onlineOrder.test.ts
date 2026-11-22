@@ -150,8 +150,6 @@ function nuevaBase(
 /** La transacción: lee y escribe sobre `b` y lleva la cuenta de cada llamada (que todo pase por ESTE objeto). */
 function txSobre(b: Base) {
   return {
-    // D26: la reapertura busca las filas que devolvieron su uso al anular (D24); en estos folios no hay ninguna.
-    orderDiscount: { findMany: jest.fn(async () => []) },
     order: {
       // S9 v5: la nota lee número, estado y la cortesía de la cuenta.
       findFirst: jest.fn(async () => ({

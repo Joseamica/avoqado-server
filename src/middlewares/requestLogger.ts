@@ -38,6 +38,9 @@ export function redactUrlSecrets(url: string): string {
   if (i === -1) return redactPathSecrets(url, '[redactado]')
 
   const ruta = redactPathSecrets(url.slice(0, i), '[redactado]')
+  // El WhatsApp de ventas: su query trae teléfonos, nombres que se buscan y cursores con el teléfono. Va entero (Codex r1 #9).
+  // En minúsculas: Express rutea `/Crm/` igual.
+  if (ruta.toLowerCase().startsWith('/api/v1/crm/whatsapp')) return `${ruta}?[redactado]`
   const query = url.slice(i + 1)
 
   try {

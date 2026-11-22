@@ -85,7 +85,7 @@ export async function createCoupon(req: Request, res: Response) {
       return res.status(400).json({ success: false, message: 'discountId es requerido' })
     }
     // D14: ANDROID manda los usos tal como se escriben (0 incluido); la regla es la misma del panel.
-    const invalido = validarCambioDeDescuento(null, { maxUses, maxUsesPerCustomer })
+    const invalido = validarCambioDeDescuento(null, { maxUses, maxUsesPerCustomer, validFrom, validUntil })
     if (invalido) return res.status(400).json({ success: false, message: invalido })
     if (!code || !code.trim()) {
       return res.status(400).json({ success: false, message: 'code es requerido' })
@@ -195,7 +195,7 @@ export async function updateCoupon(req: Request, res: Response) {
     }
 
     const { code, maxUses, maxUsesPerCustomer, minPurchaseAmount, validFrom, validUntil, active } = req.body
-    const cambio = { maxUses, maxUsesPerCustomer }
+    const cambio = { maxUses, maxUsesPerCustomer, validFrom, validUntil }
     const invalido = validarCambioDeDescuento(existing, cambio)
     if (invalido) return res.status(400).json({ success: false, message: invalido })
 

@@ -103,6 +103,7 @@ import { attachCustomerToLatestPaymentSchema, attachCustomerToPaymentSchema } fr
 import { cashPaymentByKeyParamsSchema } from '../schemas/mobile/paymentByKey.mobile.schema'
 import { transactionCustomerSchema } from '../schemas/mobile/transactionCustomer.mobile.schema'
 import { manualOrderDiscountSchema } from '../schemas/mobile/manualOrderDiscount.mobile.schema'
+import { voidOrderItemSchema } from '../schemas/mobile/voidOrderItem.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaRoleSchema } from '../schemas/mobile/areaTicketRole.schema'
 import { areaComandaSchema } from '../schemas/mobile/areaComanda.schema'
@@ -3640,6 +3641,23 @@ router.post(
 )
 
 /**
+ * POST /api/v1/mobile/venues/:venueId/orders/:orderId/items/:itemId/void
+ * «Anular producto» (Flautas, 20-nov): el renglón sale de la cuenta, aunque ya esté en cocina. Body: { reason, expectedVersion? }.
+ * Los candados de la cortesía de renglón con `orders:void` (sin él, el PIN de gerente del 403 `overridable`). La forma antes que
+ * el permiso: un cuerpo inválido no le pide el PIN al gerente para después decir 400. Sin recibos HTTP (las apps no los mandan).
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/items/:itemId/void',
+  authenticateTokenMiddleware,
+  httpOperationGuard(false),
+  checkFeatureAccess('TABLE_SERVICE'),
+  validateRequest(voidOrderItemSchema),
+  checkPermission('orders:void'),
+  checkTableOwnership('order'),
+  orderMobileController.voidOrderItem,
+)
+
+/**
  * GET /api/v1/mobile/venues/:venueId/end-of-day
  * "Cierre del día": the day's sales by tender + blockers (open checks, open
  * cash drawers, clocked-in staff). Read-only aggregator.
@@ -4254,6 +4272,18 @@ router.get(
   requireVenueMembership,
   checkPermission('orders:read'),
   kdsMobileController.listRecentKdsOrders,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/kds/pantallas-desconectadas
+ * D6 de Flautas (opción B): qué pantallas de cocina del negocio no han pedido su tablero en 90 s. Sólo lee.
+ */
+router.get(
+  '/venues/:venueId/kds/pantallas-desconectadas',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  kdsMobileController.listarPantallasDesconectadas,
 )
 
 /**

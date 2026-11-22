@@ -12,6 +12,8 @@ import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { orderAngelPayAccountsForTerminal, orderMerchantsBySlot } from '@/services/tpv/angelpayPrimaryAccount'
 import { veredictoPuerta } from '@/services/tpv/command-credential.service'
 import prisma from '@/utils/prismaClient'
+import { sdkPropioEncendido } from '@/config/sdkPropio'
+import { sinLlaveReservada } from '@/lib/llaveReservadaSdkPropio'
 import logger from '../../config/logger'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
 
@@ -141,7 +143,12 @@ function getTpvSettingsFromConfig(config: unknown): TpvSettings {
   // This server-owned entitlement must never be read from mutable terminal JSON. Older or
   // concurrent writers may have persisted it before the contract was hardened, so strip it
   // defensively instead of allowing the spread to leak it into `tpvSettings`.
-  const { cashReconciliationEnabled: _ignoredServerOwnedFlag, ...savedSettings } = (config as any)?.settings || {}
+  // `inHouseSdkEnabled` is reserved the same way: it only travels at the root of /config, from the column + the brake.
+  const {
+    cashReconciliationEnabled: _ignoredServerOwnedFlag,
+    inHouseSdkEnabled: _llaveReservada,
+    ...savedSettings
+  } = (config as any)?.settings || {}
   return {
     ...DEFAULT_TPV_SETTINGS,
     ...savedSettings,
@@ -469,6 +476,10 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       // 🔴 NO se le suma la «Foto de entrada» del negocio (VenueSettings.requireClockInPhoto, que manda en el POS): la TPV
       // devuelve TODOS sus ajustes al guardar uno, y un valor heredado se pegaba a la terminal o la apagaba (Codex r1 #1 y
       // r2 #1-#2, 15-nov). La terminal sigue con su propio ajuste, que se cambia en su configuración.
+      // 🔴 «Órdenes» es legacy (founder, 25-sep, 20-oct y 20-nov, D34: «para ordering se usa Mesas y Cobrar»). Se apaga
+      // SIEMPRE aquí, aunque la terminal la tenga guardada prendida, para que también la pierdan las TPV viejas. El campo
+      // viaja siempre: una TPV que no lo recibe lo toma como prendido (TpvSettingsDto `showOrderManagement ?: true`).
+      showOrderManagement: false,
     }
 
     // Serialized-inventory venues operate without shifts (SIM kiosks have no cash-drawer
@@ -630,6 +641,9 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
         // Server-owned effective gate (paid Feature AND explicit venue opt-in). Kept outside
         // mutable `tpvSettings` so a device settings echo can never grant itself access.
         cashReconciliationEnabled,
+        // SDK propio (fase 3): sólo con el apagador de ESTA terminal y el freno general; si no, la llave ni viaja (las TPV
+        // viejas ven lo de siempre). Nunca sale del JSON del aparato: getTpvSettingsFromConfig la quita.
+        ...(terminal.inHouseSdkEnabled && sdkPropioEncendido() ? { inHouseSdkEnabled: true } : {}),
         angelpayAuth, // Task 13 / spec §4.5 — optional single-account back-compat; null unless terminal is NEXGO with ACTIVE account
         // Multi-account (2026-05-18) — full list of ACTIVE AngelPay user accounts
         // for the venue. Always present (possibly empty []) when the terminal
@@ -730,13 +744,13 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
       trackPromoterLocation: _ignoredFromDevice,
       cashReconciliationEnabled: _ignoredCashFlagFromDevice,
       ...deviceSettingsUpdate
-    } = settingsUpdate
+    } = sinLlaveReservada(settingsUpdate) // SDK propio: llave RESERVADA (sólo viaja en la raíz de /config). El eco no se guarda.
     const existingConfig = (terminal.config as any) || {}
     const {
       trackPromoterLocation: _ignoredFromStored,
       cashReconciliationEnabled: _ignoredCashFlagFromStored,
       ...storedSettings
-    } = existingConfig.settings || {}
+    } = sinLlaveReservada(existingConfig.settings || {})
     const currentSettings = { ...DEFAULT_TPV_SETTINGS, ...storedSettings }
     const newSettings: TpvSettings = { ...currentSettings, ...deviceSettingsUpdate }
 
@@ -767,7 +781,8 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
           where: { id: terminal.id, venueId: sessionVenueId },
           data: {
             config: { ...existingConfig, settings: newSettings },
-            configOverrides: Object.keys(overrides).length > 0 ? overrides : Prisma.JsonNull,
+            // Una COPIA propia sin la llave reservada: `delete` no quita una propiedad heredada (`__proto__` en el cuerpo).
+            configOverrides: Object.keys(overrides).length > 0 ? sinLlaveReservada(overrides) : Prisma.JsonNull,
             updatedAt: new Date(),
           },
         })

@@ -29,6 +29,7 @@ import { planRenewalReminderJob } from './jobs/plan-renewal-reminder.job'
 import { planWinbackJob } from './jobs/plan-winback.job'
 import { settlementDetectionJob } from './jobs/settlement-detection.job'
 import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
+import { ventasCobrarAbandonadasJob } from './jobs/ventas-cobrar-abandonadas.job'
 import { batchExpirationJob } from './jobs/batch-expiration.job'
 import { tpvOrderExpiryJob } from './jobs/tpv-order-expiry.job'
 import { blumonWebhookReconciliationJob } from './jobs/blumon-webhook-reconciliation.job'
@@ -107,6 +108,7 @@ import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { planAccessReconciliationJob } from './jobs/plan-access-reconciliation.job'
 import { altasAMedioPagoJob } from './jobs/altas-a-medio-pago.job'
 import { paidOrderReconcilerJob } from './jobs/paid-order-reconciler.job'
+import { kdsArchiveClosedDayJob } from './jobs/kds-archive-closed-day.job'
 import { cashClosePairReconcilerJob } from './jobs/cash-close-pair-reconciler.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
@@ -222,6 +224,7 @@ const gracefulShutdown = async (signal: string) => {
       documentRequestsJob.stop()
       altasAMedioPagoJob.stop()
       paidOrderReconcilerJob.stop()
+      kdsArchiveClosedDayJob.stop()
       cashClosePairReconcilerJob.stop()
 
       // Stop subscription cancellation job
@@ -241,6 +244,8 @@ const gracefulShutdown = async (signal: string) => {
       // Stop abandoned orders cleanup job
       logger.info('Stopping abandoned orders cleanup job...')
       abandonedOrdersCleanupJob.stop()
+      // hz:e82938e1:D36: limpieza de ventas de Cobrar abandonadas (ENSAYO por omisión)
+      ventasCobrarAbandonadasJob.stop()
 
       // Stop FIFO batch expiration job
       logger.info('Stopping batch expiration job...')
@@ -608,6 +613,8 @@ const startApplication = async (retries = 3) => {
       documentRequestsJob.start()
       altasAMedioPagoJob.start()
       paidOrderReconcilerJob.start()
+      // D17: lo viejo de la pantalla de cocina se archiva al cerrar el día (cuenta ya cerrada).
+      kdsArchiveClosedDayJob.start()
       // Completa el cierre unificado que murió entre sus dos commits: sin él, un turno sin su
       // gaveta acaba firmando dos arqueos, y una gaveta sin su turno sigue tragando efectivo.
       cashClosePairReconcilerJob.start()
@@ -626,6 +633,10 @@ const startApplication = async (retries = 3) => {
 
       // Start abandoned orders cleanup job
       abandonedOrdersCleanupJob.start()
+
+      // hz:e82938e1:D36: ventas de Cobrar abandonadas por las TPV viejas (sin cliente ni cobro, 24 h). ENSAYO por omisión: sólo
+      // registra en el log qué anularía; LIMPIEZA_VENTAS_COBRAR=ACTIVO (con el «sí» del founder) anula.
+      ventasCobrarAbandonadasJob.start()
 
       // Start FIFO batch expiration job (daily — expires batches past
       // expirationDate, deducts remaining stock, logs SPOILAGE movements)

@@ -109,6 +109,23 @@ describe('updatePurchaseOrderItemStatus — robust state machine', () => {
   // FORWARD TRANSITIONS
   // ────────────────────────────────────────────────────────────────────────
   describe('Forward: PENDING → RECEIVED', () => {
+    // D32: la caducidad del lote son shelfLifeDays × 24 h desde la recepción, sin importar la zona horaria del proceso
+    // (con setDate en America/Los_Angeles, cruzar el fin del horario de verano agregaba una hora).
+    it('lote perecedero: expirationDate = recepción + shelfLifeDays exactos, también cruzando el cambio de horario', async () => {
+      const item = makeItem()
+      item.rawMaterial = { ...item.rawMaterial, perishable: true, shelfLifeDays: 7 } as any
+      mockedPrisma.purchaseOrderItem.findFirst.mockResolvedValue(item)
+
+      await updatePurchaseOrderItemStatus(VENUE_ID, PO_ID, ITEM_ID, {
+        receiveStatus: PurchaseOrderItemStatus.RECEIVED,
+        quantityReceived: 4,
+        receivedDate: '2026-10-30T18:00:00.000Z',
+      } as any)
+
+      const batchData = mockedPrisma.stockBatch.create.mock.calls[0][0].data
+      expect(batchData.expirationDate.toISOString()).toBe('2026-11-06T18:00:00.000Z')
+    })
+
     it('creates a StockBatch, increments currentStock and writes a PURCHASE movement', async () => {
       mockedPrisma.purchaseOrderItem.findFirst.mockResolvedValue(makeItem())
 

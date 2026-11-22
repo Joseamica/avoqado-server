@@ -341,6 +341,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   Exchange: 'Orders, KDS & Cash',
   ExchangeCreditLink: 'Orders, KDS & Cash',
   OrderItem: 'Orders, KDS & Cash',
+  InterruptorDePlataforma: 'Orders, KDS & Cash',
   OnlineOrderingSettings: 'Orders, KDS & Cash',
   OnlineOrder: 'Orders, KDS & Cash',
   OnlineOrderCharge: 'Orders, KDS & Cash',
