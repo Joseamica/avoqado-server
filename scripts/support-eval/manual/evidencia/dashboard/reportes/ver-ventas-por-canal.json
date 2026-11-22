@@ -1,0 +1,192 @@
+{
+  "pagina": "dashboard/reportes/ver-ventas-por-canal",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "621e5b1e66204e026df61416f7d93df2e7415540",
+  "version": "develop (rama fix/resumen-ventas-canales, sin publicar)",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 898,
+      "cita": "title: t('sidebar:reportsMenu.salesSummary'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 116,
+      "cita": "\"salesSummary\": \"Resumen de Ventas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 2223,
+      "cita": "<SalesByChannelSection"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Reports/components/SalesByChannelSection.tsx",
+      "linea": 65,
+      "cita": "<h3 className=\"text-sm font-medium\">{t('salesSummary.channels.title')}</h3>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 895,
+      "cita": "\"title\": \"Ventas por canal\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reports/components/SalesByChannelSection.tsx",
+      "linea": 127,
+      "cita": "{t('salesSummary.channels.tabs.channel')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 898,
+      "cita": "\"channel\": \"Por canal\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 919,
+      "cita": "\"COUNTER\": \"Mostrador\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 920,
+      "cita": "\"TABLES\": \"Mesas\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 928,
+      "cita": "\"RAPPI\": \"Rappi\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 908,
+      "cita": "\"totalCollected\": \"Neto cobrado\""
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reports/components/SalesByChannelSection.tsx",
+      "linea": 130,
+      "cita": "{t('salesSummary.channels.tabs.orderType')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 899,
+      "cita": "\"orderType\": \"Por tipo de pedido\""
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 941,
+      "cita": "\"QUICK_PAYMENT\": \"Cobro de un monto\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reports/components/SalesByChannelSection.tsx",
+      "linea": 251,
+      "cita": "<div>{t('salesSummary.channels.total')}</div>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 910,
+      "cita": "\"total\": \"Total\","
+    },
+    {
+      "paso": 4,
+      "archivo": "avoqado-server/src/services/dashboard/salesSummaryCanales.ts",
+      "linea": 1,
+      "cita": "Ventas por canal y por tipo de pedido del Resumen de ventas"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 2174,
+      "cita": "label={t('salesSummary.rows.packagesSoldOnline')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 2192,
+      "cita": "label={t('salesSummary.rows.reservationDeposits')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 613,
+      "cita": "\"packagesSoldOnline\": \"Paquetes vendidos en línea\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 614,
+      "cita": "\"reservationDeposits\": \"Depósitos de reservas\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "reports:read",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 901
+    },
+    {
+      "permiso": "reports:read",
+      "archivo": "avoqado-server/src/routes/dashboard/reports.routes.ts",
+      "linea": 107
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "ADVANCED_REPORTS",
+      "archivo": "src/pages/Reports/components/SalesByChannelSection.tsx",
+      "linea": 80
+    },
+    {
+      "featureCode": "ADVANCED_REPORTS",
+      "archivo": "avoqado-server/src/controllers/dashboard/sales-summary.dashboard.controller.ts",
+      "linea": 140
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Antes: con un filtro de método o comercio no hay desglose por canal",
+      "archivo": "src/pages/Reports/components/SalesByChannelSection.tsx",
+      "linea": 108
+    },
+    {
+      "ruta": "Antes: sin el plan, el candado del servidor",
+      "archivo": "src/pages/Reports/components/SalesByChannelSection.tsx",
+      "linea": 94
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [
+      "docs/audit/2026-11-21-resumen-de-ventas/canales/capturas/G1b-ventas-por-canal.png",
+      "docs/audit/2026-11-21-resumen-de-ventas/canales/capturas/G1c-por-tipo-de-pedido.png",
+      "docs/audit/2026-11-21-resumen-de-ventas/canales/capturas/G7-paquetes-y-depositos.png",
+      "docs/audit/2026-11-21-resumen-de-ventas/canales/capturas/G4b-ventas-por-canal-gratis.png"
+    ],
+    "filasCreadas": [],
+    "nota": "Pasada con Playwright y datos SIMULADOS (sin servidor real), el 22-nov: la pantalla, celular, plan Gratis y los renglones de anticipos. Falta la pasada contra el servidor local."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}
