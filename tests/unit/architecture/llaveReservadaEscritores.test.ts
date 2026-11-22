@@ -3,7 +3,15 @@
  * `src/lib/llaveReservadaSdkPropio.ts`, que quita la llave reservada `inHouseSdkEnabled`. Recuento TEXTUAL: cada llamada
  * `.terminal.(create|createMany|update|updateMany|upsert)(…)` cuyo argumento nombra `config` o `configOverrides`, más cada
  * `data.config… =`. Un sitio nuevo cambia el recuento y esta prueba truena: pásalo por `sinLlaveReservada` /
- * `configSinLlaveReservada` y súmalo aquí. Límite conocido: no ve SQL crudo ni `prisma['terminal']` (hoy no hay ninguno).
+ * `configSinLlaveReservada` y súmalo aquí.
+ *
+ * Límites reales (lo que esta guardia NO ve; quien escriba ahí revisa a mano):
+ * - SQL crudo y `prisma['terminal']` (hoy no hay ninguno);
+ * - un `data` pasado como variable (`update({ where, data })` sin la palabra `config` dentro de la llamada);
+ * - un llamador NUEVO de `updateScopedTerminal` en `tpv.dashboard.service.ts` (cuenta su única llamada, no a quien la usa);
+ * - escrituras anidadas (`venue.update({ data: { terminals: { update: … } } })`) y una llamada partida entre `.terminal` y su
+ *   método en dos líneas;
+ * - que cada SITIO use el filtro: sólo comprueba que cada ARCHIVO del inventario lo importa.
  */
 import fs from 'fs'
 import path from 'path'

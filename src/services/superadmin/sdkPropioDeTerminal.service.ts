@@ -120,7 +120,8 @@ export async function cambiarSdkPropioDeTerminal(entrada: {
     // el borrado de personal toman `Staff` y después `Terminal`. Tomarlo aquí, antes de la terminal, deja un solo orden
     // (Staff, luego Terminal) y nunca un abrazo. `FOR KEY SHARE` es lo mismo que tomaría la llave foránea: no choca con quien
     // sólo edita la ficha de la persona (`FOR NO KEY UPDATE`), pero SÍ espera a un `FOR UPDATE` de `Staff` (la baja de personal,
-    // la liga de soporte) hasta que termine. Sólo espera: como el orden es el mismo, no hay abrazo.
+    // la liga de soporte) y a un `UPDATE` que cambie una columna de `Staff` con índice único (p. ej. el correo), hasta que
+    // terminen. Sólo espera: como el orden es el mismo, no hay abrazo.
     const [actor] = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM "Staff" WHERE id = ${entrada.staffId} FOR KEY SHARE`
     if (!actor) throw new NotFoundError('Usuario no encontrado')
 

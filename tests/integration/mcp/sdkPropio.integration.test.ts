@@ -12,7 +12,7 @@ import { TerminalType } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '@/mcp/scope'
 import { registerSdkPropioTools } from '@/mcp/tools/sdkPropio'
-import { cambiarSdkPropioDeTerminal } from '@/services/superadmin/sdkPropioDeTerminal.service'
+import { cambiarSdkPropioDeTerminal, elegibilidadDelSdkPropio } from '@/services/superadmin/sdkPropioDeTerminal.service'
 import { conectarPorElCatalogo, pasoUnoYDos } from '../../__helpers__/mcp-por-el-catalogo'
 
 const NOMBRE = 'set_terminal_in_house_sdk'
@@ -178,6 +178,8 @@ describe('set_terminal_in_house_sdk por el catálogo real', () => {
 
     await prisma.terminal.update({ where: { id: t.id }, data: { venueId: otroVenueId! } }) // el disparador la apaga
     expect(await columna(t.id)).toBe(false)
+    // La precondición del caso: en B la terminal SÍ es elegible (si no, el rechazo podría venir de la elegibilidad).
+    await expect(elegibilidadDelSdkPropio(prisma, t.id)).resolves.toEqual({ elegible: true })
     const resultado = await confirmar(vista)
 
     expect(resultado).toEqual(CAMBIO_DE_ESTADO)
