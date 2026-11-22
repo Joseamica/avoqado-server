@@ -12,9 +12,11 @@ import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getProvider } from '@/services/payments/provider-registry'
-import type { AuthorizationState } from '@/services/payments/providers/provider.interface'
+import type { AuthorizationState, ProviderRequestLimits } from '@/services/payments/providers/provider.interface'
 import { fromStripeAmount, toStripeAmount } from '@/services/payments/providers/money'
-import { ACCEPT_TIMEOUT_MINUTES } from '../constants'
+import type { HorarioSemanal } from '@/services/delivery-channels/core/deliveryHours.service'
+import { ACCEPT_TIMEOUT_MINUTES, cargoDeNadie } from '../constants'
+import { closesAt } from '../hours'
 import { emitOnlineOrderCreated, fromQuoteSnapshot, lockAdmission, pickOrderNumber, writeOnlineOrderInTx } from '../order.service'
 import { BENEFIT_UNAVAILABLE, simularBeneficios, type BeneficioElegido } from '../beneficios.service'
 import { despertarPasesTrasCommit } from '../cortesiaDeFolio'
@@ -50,12 +52,13 @@ class TotalDistintoDelAutorizado extends Error {
  * solo liberador); si Stripe falla, el cargo queda `RELEASING` y el conciliador lo retoma.
  * S11 (R4): con un motivo de negocio (`precio`), se guarda en la bitácora del cargo en la MISMA transacción del CAS: la liberación
  * (`releaseCharge`, que limpia `lastError`) y la conciliación no lo tocan.
+ * D661 (B, Ruling 51): `limites` (los de quien confirma: la visita temprana) acota también la liberación y su relectura.
  */
 async function releaseLate(
   charge: OnlineOrderCharge,
   auth: AuthorizationState,
   why: string,
-  precio?: PrecioCambiado,
+  { precio, limites }: { precio?: PrecioCambiado; limites?: ProviderRequestLimits } = {},
 ): Promise<ConfirmOutcome> {
   const won = await prisma.$transaction(async tx => {
     const cas = await tx.onlineOrderCharge.updateMany({
@@ -83,16 +86,22 @@ async function releaseLate(
     return cas
   })
   if (won.count === 0) return 'ALREADY'
-  logger.error('🚨 [OnlineOrderCard] tarjeta apartada que no se vuelve pedido: se libera', {
+  const detalle = {
     chargeId: charge.id,
     venueId: charge.venueId,
     why,
     amountCapturableCents: auth.amountCapturableCents,
     expectedCents: toStripeAmount(new Prisma.Decimal(charge.amount)),
-  })
+  }
+  // D661 (A5): en «Nadie» que la clienta termine de pagar después del plazo o del cierre es un desenlace esperado, no una anomalía.
+  if (why === 'NADIE_DEADLINE_PASSED') {
+    logger.warn('⚠️ [OnlineOrderCard] la tarjeta se apartó después de su plazo de «Nadie»: se libera sin pedido', detalle)
+  } else {
+    logger.error('🚨 [OnlineOrderCard] tarjeta apartada que no se vuelve pedido: se libera', detalle)
+  }
   // r2 R1: la misma liberación que los demás caminos (misma clave del cargo, su bitácora y, si ya la cobraron a mano en Stripe,
   // el registro del cobro con su anomalía). Si Stripe no contesta, el cargo queda RELEASING para el conciliador y aquí se lanza.
-  const r = await releaseCharge(charge.id)
+  const r = await (limites ? releaseCharge(charge.id, limites) : releaseCharge(charge.id))
   if (r === 'STUCK') throw new Error('No se pudo liberar la tarjeta apartada; el conciliador la retoma')
   return r === 'CAPTURED_OUTSIDE' ? 'CAPTURED_OUTSIDE' : 'RELEASED_LATE'
 }
@@ -151,7 +160,36 @@ async function capturedOutside(charge: OnlineOrderCharge, auth: AuthorizationSta
   return 'CAPTURED_OUTSIDE'
 }
 
-export async function confirmCardAuthorization(chargeId: string, now: Date = new Date()): Promise<ConfirmOutcome> {
+/** D661 (Ruling 10): Stripe autorizó, pero el plazo del apartado ya había pasado cuando Avoqado lo supo: se libera sin pedido. */
+class AutorizacionTardia extends Error {
+  constructor() {
+    super('la autorización llegó después del plazo del apartado')
+  }
+}
+
+/**
+ * D661 (Ruling 10): el cierre de la franja en que empezó el borrador. Lo guarda el borrador (`null` = sin horario); uno de antes del
+ * campo lo deriva del horario de HOY a la hora en que nació (el horario pudo cambiar: mejor esfuerzo). Sin cierre, sin tope de franja.
+ */
+async function cierreDelBorrador(charge: OnlineOrderCharge, request: CardDraftRequest): Promise<Date | null> {
+  if (request.cierreDeFranja !== undefined) return request.cierreDeFranja ? new Date(request.cierreDeFranja) : null
+  const [settings, venue] = await Promise.all([
+    prisma.onlineOrderingSettings.findUnique({ where: { venueId: charge.venueId }, select: { hours: true } }),
+    prisma.venue.findUnique({ where: { id: charge.venueId }, select: { timezone: true } }),
+  ])
+  return closesAt((settings?.hours ?? null) as unknown as HorarioSemanal | null, charge.createdAt, venue?.timezone || 'America/Mexico_City')
+}
+
+/**
+ * Idempotente. `now` fija la hora sólo en las pruebas (3C: el conciliador ya no pasa la de su pasada); sin ella, la hora con que se
+ * decide si el plazo de un apartado de «Nadie» ya pasó se lee DESPUÉS del candado de admisión.
+ * D661 (B, Rulings 42 y 51): `limites` acota TODA llamada a Stripe de esta confirmación (la lectura y, si no se vuelve pedido, la
+ * liberación con su relectura); sólo la pasa el conciliador (la visita temprana, sus límites; la pasada, sólo el plazo duro del Ruling 73).
+ * La clienta que regresa, el aviso de Stripe y lo demás, como siempre.
+ */
+export async function confirmCardAuthorization(chargeId: string, now?: Date, limites?: ProviderRequestLimits): Promise<ConfirmOutcome> {
+  const reloj = () => now ?? new Date()
+  const t = reloj() // la hora de esta confirmación, como siempre (la de «Mi equipo» y la bitácora del cargo)
   const charge = await prisma.onlineOrderCharge.findUnique({ where: { id: chargeId } })
   if (!charge || charge.status !== OnlineOrderChargeStatus.PENDING_AUTH) return 'ALREADY'
   // Ya se vio cobrada fuera de Avoqado: no hay nada más que preguntarle a Stripe (lo resuelve una persona).
@@ -160,27 +198,52 @@ export async function confirmCardAuthorization(chargeId: string, now: Date = new
   if (!charge.checkoutSessionId) return 'NOT_YET'
 
   const merchant = chargeMerchant(charge)
-  const auth = await getProvider(merchant).getAuthorization(merchant, { checkoutSessionId: charge.checkoutSessionId })
-  if (auth.piStatus === 'succeeded') return capturedOutside(charge, auth, now)
+  const provider = getProvider(merchant)
+  const sesion = { checkoutSessionId: charge.checkoutSessionId }
+  const auth = await (limites ? provider.getAuthorization(merchant, sesion, limites) : provider.getAuthorization(merchant, sesion))
+  if (auth.piStatus === 'succeeded') return capturedOutside(charge, auth, t)
 
   if (auth.piStatus === 'requires_capture' && auth.paymentIntentId) {
     if (auth.amountCapturableCents !== toStripeAmount(new Prisma.Decimal(charge.amount))) {
-      return releaseLate(charge, auth, 'AMOUNT_MISMATCH')
+      return releaseLate(charge, auth, 'AMOUNT_MISMATCH', { limites })
     }
     const request = charge.request as unknown as CardDraftRequest
     // S11: un borrador de antes no trae clienta (C9) y nace como hoy; con ella, el pedido nace con su elección canjeada.
     const customerId = request.customerId ?? null
+    // D661: el modo es el del borrador (su marca), nunca el de hoy de la tienda.
+    const nadie = cargoDeNadie(charge)
+    // «Mi equipo»: 10 min desde que se confirma, como siempre. «Nadie» (Ruling 10): min(Stripe autorizó + 10 min, cierre de la franja
+    // del borrador).
+    const diezMin = (desde: Date) => new Date(desde.getTime() + ACCEPT_TIMEOUT_MINUTES * 60_000)
+    let acceptDeadlineAt = diezMin(t)
+    if (nadie) {
+      // 3C: sin la hora de Stripe (el adaptador siempre la trae del cargo; faltarla es un defecto), la de esta confirmación. Lo más que
+      // se alarga es lo que Avoqado tardó en enterarse (aviso: segundos; el conciliador visita cada minuto desde los 2 min del borrador),
+      // y el cierre de la franja la sigue topando. Contar desde la hora más temprana que hay (la del borrador, hasta 30 min antes)
+      // liberaría pedidos pagados a tiempo.
+      if (!auth.authorizedAt) {
+        logger.warn('⚠️ [OnlineOrderCard] Stripe no trajo la hora de autorización: el plazo de «Nadie» cuenta desde la confirmación', {
+          chargeId: charge.id,
+          venueId: charge.venueId,
+        })
+      }
+      const cierre = await cierreDelBorrador(charge, request)
+      const porStripe = diezMin(auth.authorizedAt ?? t)
+      acceptDeadlineAt = cierre && cierre < porStripe ? cierre : porStripe
+    }
     let created: { orderId: string; onlineOrderId: string; orderNumber: string; premio: boolean } | null
     try {
       created = await withDeadlockRetry(
         async tx => {
           await lockAdmission(tx, charge.venueId)
+          // Ruling 10: bajo el candado y con la hora de ESTE momento: lo que se supo después del plazo no nace abrible.
+          if (nadie && acceptDeadlineAt.getTime() <= reloj().getTime()) throw new AutorizacionTardia()
           const won = await tx.onlineOrderCharge.updateMany({
             where: { id: charge.id, status: OnlineOrderChargeStatus.PENDING_AUTH },
             data: {
               status: OnlineOrderChargeStatus.AUTHORIZED,
               paymentIntentId: auth.paymentIntentId,
-              authorizedAt: now,
+              authorizedAt: t,
               captureBefore: auth.captureBefore,
               lastError: null,
               stuckAlertedAt: null, // sale de PENDING_AUTH: la alerta del conciliador empieza de cero
@@ -199,12 +262,14 @@ export async function confirmCardAuthorization(chargeId: string, now: Date = new
             paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
             trackingToken: charge.trackingToken,
             requestHash: charge.requestHash,
-            // D662 parte 2 (v3, Codex p2-r3 #1): la hora límite cuenta desde que el pedido de verdad nace (nunca antes que el reloj de
-            // esta escritura). El conciliador pasa la hora con la que EMPEZÓ su pasada; si la pasada se atrasa, un pedido no puede nacer
-            // con su hora límite ya cerca o en el pasado: eso rompería «la línea de tiempo sólo crece hacia adelante» de la pausa sola.
-            acceptDeadlineAt: new Date(Math.max(now.getTime(), Date.now()) + ACCEPT_TIMEOUT_MINUTES * 60_000),
+            // «Nadie»: el plazo del Ruling 10 (Stripe + 10 min, topado por el cierre). «Mi equipo» — D662 parte 2 (v3, Codex p2-r3 #1): la
+            // hora límite cuenta desde que el pedido de verdad nace (nunca antes que el reloj de esta escritura): si la lectura de Stripe
+            // se atrasó, un pedido no puede nacer con su hora límite ya cerca o en el pasado; eso rompería «la línea de tiempo sólo crece
+            // hacia adelante» de la pausa sola (que sólo cuenta «Mi equipo»).
+            acceptDeadlineAt: nadie ? acceptDeadlineAt : diezMin(new Date(Math.max(t.getTime(), reloj().getTime()))),
             whatsappConsent: request.whatsappConsent,
-            requiresAcceptance: true, // el borrador de tarjeta nació en «Mi equipo»
+            // D661: «Nadie» nace sin aceptación (lo abre una caja); «Mi equipo», por aceptar, como siempre.
+            requiresAcceptance: !nadie,
             channel: null,
             beneficios: customerId ? { customerId, eleccion: request.beneficios ?? null } : null,
           })
@@ -222,22 +287,25 @@ export async function confirmCardAuthorization(chargeId: string, now: Date = new
         { etiqueta: 'confirmCardAuthorization', ...ORDER_LOCK_WAIT_BUDGET },
       )
     } catch (error) {
+      // D661 (Ruling 10): nada se creó y el cargo sigue PENDING_AUTH; se libera como cualquier apartado que no se vuelve pedido.
+      if (error instanceof AutorizacionTardia) return releaseLate(charge, auth, 'NADIE_DEADLINE_PASSED', { limites })
       // La llave ya tiene cuenta (no debería: la guarda de llaves de la tarea 4). Nada se creó: se libera la tarjeta.
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        return releaseLate(charge, auth, 'EXTERNAL_ID_TAKEN')
+        return releaseLate(charge, auth, 'EXTERNAL_ID_TAKEN', { limites })
       }
       // S11 (R2', R4'): no nace el pedido; se libera con el motivo y el precio nuevo, durables para el seguimiento.
       if (error instanceof TotalDistintoDelAutorizado) {
         return releaseLate(charge, auth, 'PRICE_CHANGED', {
-          motivo: 'PRICE_CHANGED',
-          cual: null,
-          totalEstricto: error.total,
-          descartados: [],
+          precio: { motivo: 'PRICE_CHANGED', cual: null, totalEstricto: error.total, descartados: [] },
+          limites,
         })
       }
       if (customerId && error instanceof AppError && error.code === BENEFIT_UNAVAILABLE) {
         const cual = (error.details as { cual?: BeneficioElegido } | undefined)?.cual ?? null
-        return releaseLate(charge, auth, 'BENEFIT_GONE', await precioSinElBeneficio(charge, request, customerId, cual))
+        return releaseLate(charge, auth, 'BENEFIT_GONE', {
+          precio: await precioSinElBeneficio(charge, request, customerId, cual),
+          limites,
+        })
       }
       throw error
     }
@@ -247,7 +315,7 @@ export async function confirmCardAuthorization(chargeId: string, now: Date = new
     emitOnlineOrderCreated(
       charge.venueId,
       { orderId: created.orderId, orderNumber: created.orderNumber, externalId: request.externalId },
-      now,
+      t,
     )
     void logAction({
       venueId: charge.venueId,

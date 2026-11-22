@@ -719,6 +719,8 @@ async function handleOnlineOrderStripeEvent(event: VerifiedWebhookEvent, chargeI
           orderId: charge.onlineOrder.orderId,
           staffId: null,
           reason: OnlineOrderRejectReason.PAYMENT_FAILED,
+          // D661 (R46): el escritor del cargo; así también se cierra un apartado de «Nadie» (sin aceptación), como en «Mi equipo».
+          porFalloDeCobro: true,
           afterCas: markReleased,
           alConfirmar: valor => {
             if (valor === true) released = true

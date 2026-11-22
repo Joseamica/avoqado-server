@@ -48,3 +48,4 @@ export type LineBlockReason =
   | 'NOT_PAID'
   | 'NOTHING_LEFT_TO_REFUND'
   | 'SERIALIZED_ITEM'
+  | 'ONLINE_CARD'

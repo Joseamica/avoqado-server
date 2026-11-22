@@ -19,10 +19,18 @@ import {
   VentasCobrarAbandonadasJob,
 } from '@/jobs/ventas-cobrar-abandonadas.job'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
+import { getOrders } from '@/services/tpv/order.tpv.service'
+import { onOrderCancelled } from '@/services/referrals/referralRefund.service'
+import { socketManager } from '@/communication/sockets/managers/socketManager'
 
 // El cobro tardío de la cola (efectivo) registra su dinero de verdad; sólo se apagan la caja y la cola de mensajes, que no son de esta prueba.
 jest.mock('@/services/shared/cashDrawerPosting', () => ({ postCashSaleToDrawer: jest.fn().mockResolvedValue(undefined) }))
 jest.mock('@/communication/rabbitmq/publisher', () => ({ publishCommand: jest.fn() }))
+// Codex r2 #2: la limpieza ya no manda referidos a VOID después de anular. El efecto real corre igual; sólo se mira si se llamó.
+jest.mock('@/services/referrals/referralRefund.service', () => {
+  const real = jest.requireActual('@/services/referrals/referralRefund.service')
+  return { ...real, onOrderCancelled: jest.fn(real.onOrderCancelled) }
+})
 
 // Anula ventas reales: sólo corre en una base de prueba local y desechable.
 const url = new URL(process.env.TEST_DATABASE_URL ?? '')
@@ -85,6 +93,27 @@ const estado = async (orderId: string) =>
 
 const activo = () => new VentasCobrarAbandonadasJob({ modo: 'ACTIVO' })
 
+/** El efectivo que la cola de una TPV vieja manda días después: $100, sin `cobroNuevo` (dinero ya capturado). */
+const efectivoDeLaCola = () =>
+  ({
+    venueId,
+    amount: 10000,
+    tip: 0,
+    status: 'COMPLETED',
+    method: 'CASH',
+    source: 'TPV',
+    splitType: 'FULLPAYMENT',
+    tpvId: 'd36-tpv-vieja',
+    staffId,
+    paidProductsId: [],
+    idempotencyKey: randomUUID(),
+    currency: 'MXN',
+    isInternational: false,
+  }) as any
+
+/** Lo que se toca al lado de la venta (comanda, cupón) puede mover `updatedAt`: se regresa a la fecha de la prueba. */
+const otraVezVieja = (id: string) => prisma.$executeRaw`UPDATE "Order" SET "updatedAt" = ${HACE_DOS_DIAS()} WHERE id = ${id}`
+
 /** La candidata tal como la eligió la vuelta (versión incluida). */
 async function candidata(id: string): Promise<Candidata> {
   const o = await prisma.order.findUniqueOrThrow({ where: { id }, select: { id: true, venueId: true, orderNumber: true, version: true } })
@@ -119,6 +148,11 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!venueId) return
   await prisma.activityLog.deleteMany({ where: { venueId } })
+  await prisma.referral.deleteMany({ where: { venueId } })
+  await prisma.orderCustomer.deleteMany({ where: { order: { venueId } } })
+  await prisma.orderDiscount.deleteMany({ where: { order: { venueId } } })
+  await prisma.couponCode.deleteMany({ where: { discount: { venueId } } })
+  await prisma.discount.deleteMany({ where: { venueId } })
   await prisma.terminalPaymentRequest.deleteMany({ where: { venueId } })
   await prisma.payment.deleteMany({ where: { venueId } })
   await prisma.orderItem.deleteMany({ where: { order: { venueId } } })
@@ -317,30 +351,51 @@ describe('limpieza de ventas de Cobrar abandonadas (D36)', () => {
     await activo().correrAhora()
     expect(await estado(id)).toBe('CANCELLED')
 
-    await recordOrderPayment(
-      venueId,
-      id,
-      {
-        venueId,
-        amount: 10000,
-        tip: 0,
-        status: 'COMPLETED',
-        method: 'CASH',
-        source: 'TPV',
-        splitType: 'FULLPAYMENT',
-        tpvId: 'd36-tpv-vieja',
-        staffId,
-        paidProductsId: [],
-        idempotencyKey: randomUUID(),
-        currency: 'MXN',
-        isInternational: false,
-      } as any,
-      staffId,
-    )
+    const avisos = jest.spyOn(socketManager, 'broadcastToVenue')
+    const respuesta: any = await recordOrderPayment(venueId, id, efectivoDeLaCola(), staffId)
 
     expect(await estado(id)).not.toBe('CANCELLED')
     expect(await prisma.payment.count({ where: { orderId: id } })).toBe(1)
     expect(await prisma.activityLog.count({ where: { entityId: id, action: 'ORDER_REOPENED_BY_CAPTURED_PAYMENT' } })).toBe(1)
+    // Codex r2 #4: no basta con que entre el pago; la venta reabierta queda PAGADA, sin saldo de más ni de menos.
+    const cobrada = await prisma.order.findUniqueOrThrow({ where: { id }, select: { paymentStatus: true, remainingBalance: true } })
+    expect(cobrada.paymentStatus).toBe('PAID')
+    expect(cobrada.remainingBalance.toNumber()).toBe(0)
+    // Codex r3: la respuesta del cobro y el aviso en vivo dicen lo que quedó guardado, no la copia anulada que se leyó antes de cobrar.
+    expect(respuesta.order).toMatchObject({ status: 'COMPLETED', paymentStatus: 'PAID' })
+    const avisosDeLaVenta = avisos.mock.calls.filter(([, evento, datos]: any[]) => evento === 'order_updated' && datos?.orderId === id)
+    // Uno solo, en el lugar de siempre, con lo que el cierre guardó bajo el candado (founder «B»).
+    expect(avisosDeLaVenta.map(([, , datos]: any[]) => [datos.status, datos.paymentStatus])).toEqual([['COMPLETED', 'PAID']])
+    avisos.mockRestore()
+  })
+
+  it('🔴 founder «B»: un ABONO tardío sobre la venta anulada la reabre debiendo, y el acuse y el aviso dicen PENDING/PARTIAL con su saldo', async () => {
+    const id = await venta('abono-tardio')
+    await activo().correrAhora()
+    expect(await estado(id)).toBe('CANCELLED')
+
+    const avisos = jest.spyOn(socketManager, 'broadcastToVenue')
+    const respuesta: any = await recordOrderPayment(
+      venueId,
+      id,
+      { ...efectivoDeLaCola(), amount: 4000, splitType: 'CUSTOMAMOUNT' },
+      staffId,
+    )
+
+    const guardada = await prisma.order.findUniqueOrThrow({
+      where: { id },
+      select: { status: true, paymentStatus: true, remainingBalance: true },
+    })
+    expect(guardada).toMatchObject({ status: 'PENDING', paymentStatus: 'PARTIAL' })
+    expect(guardada.remainingBalance.toNumber()).toBe(60)
+    expect(respuesta.order).toMatchObject({ status: 'PENDING', paymentStatus: 'PARTIAL' })
+    expect(Number(respuesta.order.remainingBalance)).toBe(60)
+    // Codex r6 #3: el `order` del acuse es la fila guardada completa, no una mezcla de antes y después del cierre.
+    const fila = await prisma.order.findUniqueOrThrow({ where: { id }, select: { splitType: true, servedById: true } })
+    expect({ splitType: respuesta.order.splitType, servedById: respuesta.order.servedById }).toEqual(fila)
+    const avisosDeLaVenta = avisos.mock.calls.filter(([, evento, datos]: any[]) => evento === 'order_updated' && datos?.orderId === id)
+    expect(avisosDeLaVenta.map(([, , datos]: any[]) => [datos.status, datos.paymentStatus])).toEqual([['PENDING', 'PARTIAL']])
+    avisos.mockRestore()
   })
 
   it('una sin productos o que no es de la TPV (kiosco) NO se toca', async () => {
@@ -349,5 +404,91 @@ describe('limpieza de ventas de Cobrar abandonadas (D36)', () => {
     await activo().correrAhora()
     expect(await estado(vacia)).toBe('PENDING')
     expect(await estado(kiosco)).toBe('PENDING')
+  })
+})
+
+/**
+ * Lo que una anulación devuelve y un cobro tardío ya no vuelve a contar (auditorías de Codex del 21-nov, antes de pasar a ACTIVO):
+ * esas ventas se quedan como están. Y la lista legacy de «Órdenes» de la TPV ya no ofrece una anulada.
+ */
+describe('limpieza de Cobrar: lo que no se puede gastar dos veces (21-nov)', () => {
+  async function descuento(id: string, fila: { cupon?: boolean; usoContado?: boolean }) {
+    const d = await prisma.discount.create({ data: { venueId, name: 'Descuento D36', type: 'FIXED_AMOUNT', value: 10, maxTotalUses: 1 } })
+    const cupon = fila.cupon
+      ? await prisma.couponCode.create({ data: { discountId: d.id, code: `D36${Date.now()}${Math.random()}`.slice(0, 30), maxUses: 1 } })
+      : null
+    await prisma.orderDiscount.create({
+      data: {
+        orderId: id,
+        discountId: d.id,
+        couponCodeId: cupon?.id ?? null,
+        usoContado: fila.usoContado ?? false,
+        type: 'FIXED_AMOUNT',
+        name: 'Descuento D36',
+        value: 10,
+        amount: 10,
+      },
+    })
+    await otraVezVieja(id)
+  }
+
+  it.each([
+    ['un CUPÓN (su uso queda apartado; otra venta podría tomar el último)', { cupon: true }],
+    ['un descuento con su uso CONTADO (D24, el del POS; el «primeros N» se pasaría)', { usoContado: true }],
+    ['un descuento de catálogo (el que pone la TPV al crearla) o un canje (se borraría y quedaría una deuda que no hubo)', {}],
+  ])('🔴 una con %s no se toca: sólo se anulan carritos sin ningún descuento', async (_caso, fila) => {
+    const id = await venta('descuento')
+    await descuento(id, fila)
+
+    const ensayo = await new VentasCobrarAbandonadasJob({ modo: 'ENSAYO' }).correrAhora()
+    expect(ensayo.negocios.find(n => n.venueId === venueId)).toBeUndefined()
+    await activo().correrAhora()
+    expect(await estado(id)).toBe('PENDING')
+  })
+
+  it('🔴 una que un REFERIDO usa como venta que lo califica no se toca: anularla lo mandaría a VOID y el cobro tardío ya no lo califica', async () => {
+    const id = await venta('referido')
+    const [quienRefiere, referida] = await Promise.all([
+      prisma.customer.create({ data: { venueId } }),
+      prisma.customer.create({ data: { venueId } }),
+    ])
+    await prisma.referral.create({
+      data: { venueId, referrerCustomerId: quienRefiere.id, referredCustomerId: referida.id, qualifyingOrderId: id },
+    })
+    await otraVezVieja(id)
+    await activo().correrAhora()
+    expect(await estado(id)).toBe('PENDING')
+  })
+
+  it('🔴 Codex r2 #2: al anular, la limpieza ya no manda referidos a VOID (uno capturado en el instante después queda para el cobro)', async () => {
+    const id = await venta('sin-referidos')
+    ;(onOrderCancelled as jest.Mock).mockClear()
+    await activo().correrAhora()
+    expect(await estado(id)).toBe('CANCELLED')
+    expect(onOrderCancelled).not.toHaveBeenCalledWith(expect.objectContaining({ orderId: id }))
+  })
+
+  it('🔴 la lista legacy de «Órdenes» de la TPV deja de ofrecer la venta anulada, aunque su pago siga PENDING', async () => {
+    const id = await venta('lista')
+    expect((await getOrders(venueId)).map(o => o.id)).toContain(id)
+    await activo().correrAhora()
+
+    const anulada = await prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true, paymentStatus: true } })
+    expect(anulada).toEqual({ status: 'CANCELLED', paymentStatus: 'PENDING' })
+    expect((await getOrders(venueId)).map(o => o.id)).not.toContain(id)
+    expect((await getOrders(venueId, undefined, { includePayLater: true })).map(o => o.id)).not.toContain(id)
+  })
+
+  it('🔴 la lista tampoco ofrece una BORRADA ni un «Pagar después» anulado, aunque su pago siga PENDING', async () => {
+    const borrada = await venta('borrada')
+    await prisma.$executeRaw`UPDATE "Order" SET status = 'DELETED' WHERE id = ${borrada}`
+    const cliente = await prisma.customer.create({ data: { venueId } })
+    const fiado = await venta('fiado-anulado')
+    await prisma.orderCustomer.create({ data: { orderId: fiado, customerId: cliente.id } })
+    expect((await getOrders(venueId, undefined, { onlyPayLater: true })).map(o => o.id)).toContain(fiado)
+    await prisma.$executeRaw`UPDATE "Order" SET status = 'CANCELLED' WHERE id = ${fiado}`
+
+    expect((await getOrders(venueId)).map(o => o.id)).not.toContain(borrada)
+    expect((await getOrders(venueId, undefined, { onlyPayLater: true })).map(o => o.id)).not.toContain(fiado)
   })
 })

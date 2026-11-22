@@ -13,8 +13,16 @@ import { planGateMessage } from '../planGate'
 import { getInboxOrder, listInbox, type InboxOrder } from '@/services/online-ordering/inbox.service'
 import { formatoPesos } from '@/services/giftCards/giftCardLimits'
 import { listFolios } from '@/services/online-ordering/folios.service'
+import { MENSAJE_ABRIR_DESDE_LA_CAJA, mensajeNoSeEntrega } from '@/services/online-ordering/card/guards'
+import type { CardMerchantStatus } from '@/services/online-ordering/card/merchant'
 import { esVentaCerrada } from '@/services/shared/orderBalance'
-import { listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
+import {
+  listCardRefunds,
+  porDevolverDeUnPedido,
+  refundCardOnlineOrder,
+  resolveReversedCardRefund,
+  revisarStripeAntesDeOtroMedio,
+} from '@/services/online-ordering/card/refund.service'
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
 import { getSettings, pauseOnlineOrdering, updateSettings } from '@/services/online-ordering/settings.service'
@@ -67,17 +75,39 @@ const AUDIT: Record<Action, string> = {
 
 /** El mismo texto de la API (`accept` del controlador móvil): un folio no se prepara sin pago. */
 const FOLIO_SIN_PAGAR = 'Este pedido se cobra antes de prepararlo'
+/** D661 (3B): un apartado con tarjeta tampoco se rechaza, pero no «se paga en caja»: se abre desde ahí o se libera solo sin cobrar. */
+const TARJETA_NO_SE_RECHAZA =
+  'Un pedido con tarjeta en línea no se rechaza: se abre desde la caja (TPV o POS actualizados) y, si nadie lo abre a tiempo, se libera sin cobrar. No se aplicó nada.'
+/** D661 (3B, ronda 1): uno ya abierto (en preparación o listo) ya está pagado: no se rechaza y el dinero se regresa con su devolución. */
+const TARJETA_YA_PAGADA =
+  'Este pedido ya está pagado y no se rechaza. Para regresarle el dinero a la clienta usa la devolución del pedido. No se aplicó nada.'
+/** D661 (Task 5): con la devolución ya en curso, el dinero ya va de regreso: no hay otra devolución que pedir. */
+const TARJETA_DEVOLVIENDOSE = 'Este pedido ya se está devolviendo a la clienta: no se rechaza. No se aplicó nada.'
 /** R46: un folio no se rechaza; se quita con CANCELAR. Nunca promete «no se le cobró nada» (§5: un efectivo sin red puede subir después). */
 const FOLIO_NO_SE_RECHAZA =
   'Este pedido se paga en caja y no se rechaza; no se aplicó nada. Para quitarlo usa CANCELAR (pide el permiso de cancelar cuentas sin cobro).'
 /** Rechazos del servicio al guardar los ajustes que se dicen en texto, sin error (nada se escribió). */
-const AJUSTES_RECHAZADOS = new Set(['NO_PAYMENT_MODE', 'PAY_AT_PICKUP_REQUIRED', 'HOURS_REQUIRED', 'NO_FOLIO_DEVICE'])
+const AJUSTES_RECHAZADOS = new Set([
+  'NO_PAYMENT_MODE',
+  'PAY_AT_PICKUP_REQUIRED',
+  'HOURS_REQUIRED',
+  'NO_FOLIO_DEVICE',
+  'NO_CARD_ALERT_DEVICE',
+])
 
 /** El texto del cobro (HAS_PAYMENTS) es el mismo de la API del restaurante (`onlineOrders.mobile.controller.ts`). */
-function fallo(r: Exclude<TransitionResult, { outcome: 'OK' }>) {
+function fallo(r: Exclude<TransitionResult, { outcome: 'OK' }>, accion: 'entregado' | 'listo' = 'entregado') {
   switch (r.outcome) {
-    case 'STALE':
-      return { ok: false, status: r.status, error: 'El pedido ya cambió de estado; no se aplicó nada. Vuelve a consultar la bandeja.' }
+    case 'STALE': {
+      // D661 (Task 4 y 5): al entregar o marcar «Listo», el estado real («No lo recogió», «Devolviendo…», «Devuelto»), nunca un éxito.
+      const { outcome: _o, status, ...marcas } = r
+      return {
+        ok: false,
+        status,
+        ...marcas,
+        error: mensajeNoSeEntrega(marcas, accion) ?? 'El pedido ya cambió de estado; no se aplicó nada. Vuelve a consultar la bandeja.',
+      }
+    }
     case 'PAYMENT_REQUIRED':
       return { ok: false, code: 'PAYMENT_REQUIRED', error: 'Cobra el pedido antes de marcarlo entregado.' }
     case 'HAS_PAYMENTS':
@@ -115,6 +145,22 @@ const conCuenta = (o: InboxOrder) => ({ ...o, cuenta: lineaDeLaCuenta(o) })
 /** Fase 2: el switch del pago con tarjeta se muestra como lo dice el panel: «Aceptar pago con tarjeta: no → sí». */
 const sino = (v: unknown) => (v ? 'sí' : 'no')
 const CARD_TOGGLE_LABEL = 'Aceptar pago con tarjeta'
+/** D661: el interruptor de la tarjeta en «No, entran solos» («Nadie»). */
+const CARD_NADIE_LABEL = 'Pagar con tarjeta al pedir con «No, entran solos»'
+
+/**
+ * D661 (D2, M2 de la ronda codex-r2): por qué la tarjeta de «No, entran solos», prendida, no se ofrece AHORA, con la causa de verdad y en
+ * el orden de la regla de la tarjeta: el modo de la tienda, la cuenta de Stripe y, al final, la caja que avisa.
+ */
+function avisoDeTarjetaNadie(requiresAcceptance: boolean | null | undefined, merchantStatus: CardMerchantStatus): string {
+  if (requiresAcceptance !== false) {
+    return 'La tarjeta de «No, entran solos» está prendida, pero ahora no se ofrece: la tienda está en el modo en que alguien acepta los pedidos, y ahí esta tarjeta no aplica (ese modo tiene su propio interruptor de pago con tarjeta). Se ofrece en cuanto la tienda vuelva a «No, entran solos».'
+  }
+  if (merchantStatus !== 'READY') {
+    return 'La tarjeta está prendida, pero ahora no se ofrece: la cuenta de Stripe del negocio todavía no puede cobrar. Conéctala o termina su alta en Ligas de pago.'
+  }
+  return 'La tarjeta está prendida, pero ahora no se ofrece: ninguna caja está avisando los pedidos pagados en línea en este momento. Se vuelve a ofrecer en cuanto una caja actualizada (TPV o POS) esté abierta en la lista de pedidos.'
+}
 
 /**
  * Pedidos en línea del negocio (la tienda web del restaurante). 🔴 Responder un pedido y pausar avisan al comensal o cambian
@@ -126,7 +172,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_orders_list',
-    'Pedidos en línea del negocio (los que el comensal hace desde la página del restaurante): por aceptar, en preparación, listos y los de las últimas 24 horas. Muestra cliente, platillos, total en pesos y si ya se cobró. Cada pedido dice en «cuenta» de quién es (sólo el nombre de pila y la inicial) y qué beneficios trae, por ejemplo «Con cuenta: Ana L. · Premio −$45.00», o «Sin cuenta». Los que el comensal pagó con tarjeta al pedir traen el cobro (estado, monto apartado y monto cobrado, en pesos). Con status=to_pay salen los pedidos de pedir y pagar en caja que aún no se cobran, y con to_deliver los ya cobrados por entregar (cada uno por páginas con cursor).',
+    'Pedidos en línea del negocio (los que el comensal hace desde la página del restaurante): por aceptar, en preparación, listos y los de las últimas 24 horas. Muestra cliente, platillos, total en pesos y si ya se cobró. Cada pedido dice en «cuenta» de quién es (sólo el nombre de pila y la inicial) y qué beneficios trae, por ejemplo «Con cuenta: Ana L. · Premio −$45.00», o «Sin cuenta». Los que el comensal pagó con tarjeta al pedir traen el cobro (estado, monto apartado y monto cobrado, en pesos). Con status=to_pay salen los pedidos de pedir y pagar en caja que aún no se cobran, y con to_deliver los ya cobrados por entregar (cada uno por páginas con cursor); los dos traen también los pagados con tarjeta en «No, entran solos» que esperan que una caja los abra (se cobran al abrirlos). Cada pedido dice además desde cuándo quedó «No lo recogió» (pagado con tarjeta en «No, entran solos» y sin entregar al terminar el día), «Devolviendo…» o «Devuelto».',
     {
       venueId: z.string().describe('Venue a consultar (debe estar en tu scope)'),
       status: z
@@ -192,6 +238,21 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       // activos el más viejo no aparecería).
       const order = await getInboxOrder({ venueId, orderId })
       if (!order) return text({ ok: false, error: 'Ese pedido no existe en este negocio.' })
+      // D661 (Task 4 y 5): «No lo recogió», «Devolviendo…» o «Devuelto» no se entregan ni se marcan «Listo»: su estado real, antes de
+      // la vista previa.
+      const noSeEntrega =
+        action === 'DELIVERED' || action === 'READY' ? mensajeNoSeEntrega(order, action === 'READY' ? 'listo' : 'entregado') : null
+      if (noSeEntrega) {
+        const { notPickedUpAt, refundRequestedAt, refundedAt } = order
+        return text({
+          ok: false,
+          status: order.status,
+          ...(notPickedUpAt ? { notPickedUpAt } : {}),
+          ...(refundRequestedAt ? { refundRequestedAt } : {}),
+          ...(refundedAt ? { refundedAt } : {}),
+          error: noSeEntrega,
+        })
+      }
       // A12: entregar lo que ya está entregado es éxito; no se ejecuta ni se audita nada.
       if (action === 'DELIVERED' && order.status === 'COMPLETED') {
         return text({ ok: true, status: order.status, estimatedReadyAt: null, sinCambios: true, mensaje: 'El pedido ya estaba entregado.' })
@@ -200,7 +261,18 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       // T13: un folio por pagar («Nadie» acepta) también se puede cancelar; uno de «Mi equipo» por aceptar se rechaza, no se cancela.
       const folio = order.requiresAcceptance === false
       // R46: el servicio también responde STALE (la API del POS y del panel), aquí se dice antes de la vista previa.
-      if (action === 'REJECT' && folio) return text({ ok: false, status: order.status, error: FOLIO_NO_SE_RECHAZA })
+      // D661: el texto de un pedido con tarjeta, según su estado (siempre verdad): apartado, ya pagado o, si ya se cerró, lo de siempre.
+      const noSeRechaza =
+        order.paymentMode !== 'CARD_ONLINE'
+          ? FOLIO_NO_SE_RECHAZA
+          : order.status === 'PENDING_ACCEPTANCE'
+            ? TARJETA_NO_SE_RECHAZA
+            : order.status === 'ACCEPTED' || order.status === 'READY'
+              ? order.refundRequestedAt
+                ? TARJETA_DEVOLVIENDOSE
+                : TARJETA_YA_PAGADA
+              : null
+      if (action === 'REJECT' && folio && noSeRechaza) return text({ ok: false, status: order.status, error: noSeRechaza })
       const vigente: string[] = pendingAction
         ? ['PENDING_ACCEPTANCE']
         : action === 'CANCEL' && folio
@@ -216,11 +288,14 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         })
       }
 
+      const tarjeta = order.paymentMode === 'CARD_ONLINE'
+      // D661: la misma regla que el servicio (`OPEN_FROM_CAJA`), dicha antes de la vista previa: aquí no se promete un cobro. El MCP
+      // no lo abre: se abre (y así se cobra) sólo desde la caja.
+      if (action === 'ACCEPT' && folio && tarjeta) return text({ ok: false, code: 'OPEN_FROM_CAJA', error: MENSAJE_ABRIR_DESDE_LA_CAJA })
       if (action === 'ACCEPT' && folio && !esVentaCerrada(order.paymentStatus)) {
         return text({ ok: false, code: 'PAYMENT_REQUIRED', error: FOLIO_SIN_PAGAR })
       }
 
-      const tarjeta = order.paymentMode === 'CARD_ONLINE'
       if (!confirm) {
         // M-13: la vista previa dice lo que se le va a avisar al comensal: los minutos al aceptar, el motivo al rechazar.
         const minutos = action === 'ACCEPT' ? (estimatedMinutes ?? (await getSettings(venueId)).defaultPrepMinutes) : null
@@ -244,7 +319,10 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
                 ? ` Se cobra la tarjeta apartada${order.card ? ` ($${order.card.amount.toFixed(2)})` : ''}.`
                 : tarjeta && action === 'REJECT'
                   ? ' El dinero apartado en la tarjeta se libera.'
-                  : ''),
+                  : // D661 (C6): cancelar un apartado de «No, entran solos» suelta la tarjeta: la clienta no paga nada.
+                    tarjeta && action === 'CANCEL' && order.status === 'PENDING_ACCEPTANCE'
+                    ? ' El dinero apartado en su tarjeta se libera: no se le cobra nada.'
+                    : ''),
           },
           mensaje: 'Vuelve a llamar con confirm:true para aplicarlo.',
         })
@@ -274,7 +352,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       if (action === 'ACCEPT' && result.outcome === 'PAYMENT_REQUIRED') {
         return text({ ok: false, code: 'PAYMENT_REQUIRED', error: FOLIO_SIN_PAGAR })
       }
-      if (result.outcome !== 'OK') return text(fallo(result))
+      if (result.outcome !== 'OK') return text(fallo(result, action === 'READY' ? 'listo' : 'entregado'))
       // A12: ya estaba entregado (se entregó solo entre la vista previa y la confirmación): éxito sin otra bitácora.
       if (result.unchanged) {
         return text({
@@ -299,15 +377,28 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_ordering_settings',
-    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas (store.autoPausedAt: la tienda se pausó sola porque 2 pedidos seguidos llegaron a su hora límite sin que nadie los aceptara o rechazara; sólo reanudar la abre), cuándo consultó un aparato por última vez, si la tienda está abierta ahora (y por qué no) y qué le falta para poder encenderla (domicilio, teléfono, aviso de privacidad publicado). hasSavedSettings indica si el negocio ya guardó sus ajustes alguna vez (false = siguen los de fábrica). También si acepta pago con tarjeta al pedir y si su cuenta de Stripe está lista para cobrar.',
+    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas (store.autoPausedAt: la tienda se pausó sola porque 2 pedidos seguidos llegaron a su hora límite sin que nadie los aceptara o rechazara; sólo reanudar la abre), cuándo consultó un aparato por última vez, si la tienda está abierta ahora (y por qué no) y qué le falta para poder encenderla (domicilio, teléfono, aviso de privacidad publicado). hasSavedSettings indica si el negocio ya guardó sus ajustes alguna vez (false = siguen los de fábrica). También si acepta pago con tarjeta al pedir y si su cuenta de Stripe está lista para cobrar. cardOnlineNadie dice si, con «No, entran solos» (nadie acepta los pedidos), la clienta puede pagar con tarjeta al pedir: es un interruptor aparte, apagado de fábrica. cardNadie dice si esa tarjeta se ofrece AHORA (offeredNow): sólo mientras una caja actualizada esté avisando los pedidos pagados en línea; lastAlertAt y fastAlertAt son la última vez que una caja avisó y la última que lo hizo a tiempo. Si está prendida y no se ofrece, trae un aviso en español.',
     { venueId: z.string().describe('Venue (debe estar en tu scope)') },
     async ({ venueId }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('orders:read', venueId)
       // Lo mismo que `GET /settings` del panel (un solo armador): los ajustes se leen una vez y el estado sale del mismo cálculo.
       // `card` (fase 2) sale aparte, explícito: no se cuela dentro de `ajustes`.
-      const { lastInboxPollAt, store, requirements, card, ...ajustes } = await settingsView(venueId)
-      return text({ ok: true, ajustes: { ...ajustes, ultimoSondeoDeBandeja: lastInboxPollAt }, store, requirements, card })
+      const { lastInboxPollAt, store, requirements, card, cardNadie, ...ajustes } = await settingsView(venueId)
+      return text({
+        ok: true,
+        ajustes: { ...ajustes, ultimoSondeoDeBandeja: lastInboxPollAt },
+        store,
+        requirements,
+        card,
+        // D661 (D2): prendida pero sin ofrecerse, la tienda lo dice en llano. M2 (ronda codex-r2): con la causa de verdad.
+        cardNadie: {
+          ...cardNadie,
+          ...(cardNadie.enabled && !cardNadie.offeredNow
+            ? { aviso: avisoDeTarjetaNadie(ajustes.requiresAcceptance, card.merchantStatus) }
+            : {}),
+        },
+      })
     },
   )
 
@@ -334,7 +425,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_ordering_configure',
-    'Cambia la tienda en línea del negocio: encendido, horario, pedido mínimo en pesos, minutos de preparación, pausa del gerente, aceptar pago con tarjeta al pedir (acceptsCardOnline; viene prendido y la tienda lo ofrece sólo con la cuenta de Stripe conectada y lista) y qué platillos se ofrecen en línea. Muestra «de → a» y exige confirm:true.',
+    'Cambia la tienda en línea del negocio: encendido, horario, pedido mínimo en pesos, minutos de preparación, pausa del gerente, aceptar pago con tarjeta al pedir (acceptsCardOnline; viene prendido y la tienda lo ofrece sólo con la cuenta de Stripe conectada y lista), pagar con tarjeta al pedir con «No, entran solos» (cardOnlineNadie; viene apagado y prenderlo exige una terminal o un POS actualizado que avise los pedidos pagados) y qué platillos se ofrecen en línea. Muestra «de → a» y exige confirm:true.',
     {
       venueId: z.string().describe('Venue (debe estar en tu scope)'),
       changes: settingsPatchBody.optional().describe('Ajustes a cambiar, con las mismas reglas que el panel'),
@@ -367,6 +458,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
           de: actual[campo],
           a,
           ...(campo === 'acceptsCardOnline' ? { resumen: `${CARD_TOGGLE_LABEL}: ${sino(actual[campo])} → ${sino(a)}` } : {}),
+          ...(campo === 'cardOnlineNadie' ? { resumen: `${CARD_NADIE_LABEL}: ${sino(actual[campo])} → ${sino(a)}` } : {}),
         }))
       if (diff.length === 0 && !availability) return text({ ok: true, sinCambios: true, ajustes: current })
 
@@ -452,7 +544,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_order_card_refunds',
-    'Devoluciones a la tarjeta de un pedido en línea pagado con tarjeta al pedir, sólo lectura: monto en pesos, motivo, estado (REQUESTED, SENDING, PENDING, SUCCEEDED o RECORDED = devuelta y anotada; FAILED o CANCELED = el banco no la hizo; REVERSED = falló después de anotarla y falta devolver por otro medio; RESOLVED = ya se devolvió por otro medio) y, si falló después, el motivo y cómo se resolvió.',
+    'Devoluciones de un pedido en línea pagado con tarjeta al pedir, sólo lectura: monto en pesos, motivo, estado (REQUESTED, SENDING, PENDING, SUCCEEDED o RECORDED = devuelta a la tarjeta y anotada; FAILED o CANCELED = el banco no la hizo; REVERSED = falló después de anotarla y falta devolver por otro medio; RESOLVED = ya se devolvió por otro medio) y, si falló después, el motivo y cómo se resolvió. Con toStoreCredit: true la devolución no fue a la tarjeta: se le dio al cliente como saldo a favor en el negocio (nace RESOLVED, sin reversa). Esta herramienta sólo lee; devolver a saldo a favor se hace desde el panel.',
     {
       venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
       orderId: z.string().describe('Id del pedido (orderId de la lista de pedidos en línea)'),
@@ -473,7 +565,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_order_card_refund',
-    'Devuelve a la tarjeta del cliente (total o parcial) un pedido en línea que se cobró con tarjeta al pedir. El monto va en pesos (por ejemplo 120.50) y no puede pasar de lo que queda por devolver. Dos pasos: sin confirm:true sólo muestra la vista previa, un confirmationToken y expectedLatestRefundId; para devolver, repite los mismos datos con confirm:true, ese confirmationToken (vale 10 minutos) y ese expectedLatestRefundId. Repetir la confirmación con el mismo token no devuelve dos veces; si hubo otra devolución desde la vista previa contesta CARD_REFUND_STALE_VIEW y hay que revisarla y pedir otra vista previa. Pide permiso para reembolsar.',
+    'Devuelve a la tarjeta del cliente (total o parcial) un pedido en línea que se cobró con tarjeta al pedir. El monto va en pesos (por ejemplo 120.50) y no puede pasar de lo que queda por devolver. Un pedido pagado con tarjeta en «No, entran solos» sólo se devuelve completo (la vista previa dice el total) y, si todavía no se entregaba, también se cierra como «Devuelto». Dos pasos: sin confirm:true sólo muestra la vista previa, un confirmationToken y expectedLatestRefundId (y expectedClosesAsRefunded cuando también lo cierra); para devolver, repite los mismos datos con confirm:true, ese confirmationToken (vale 10 minutos), ese expectedLatestRefundId y, si vino, ese expectedClosesAsRefunded. Repetir la confirmación con el mismo token no devuelve dos veces; si hubo otra devolución desde la vista previa contesta CARD_REFUND_STALE_VIEW, y si el pedido cambió (por ejemplo, ya se entregó) REFUND_EFFECT_CHANGED: hay que revisarlo y pedir otra vista previa. Si el cobro ya se devolvió por fuera, directo en Stripe, contesta 409 EXTERNAL_REFUND_DETECTED y no devuelve nada (se termina desde Stripe); si en ese momento no se pudo revisar en Stripe, contesta 503 y se puede reintentar en un momento. Con tarjeta, el negocio no recupera la comisión de Stripe del cobro. Pide permiso para reembolsar.',
     {
       venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
       orderId: z.string().describe('Id del pedido (orderId de la lista de pedidos en línea)'),
@@ -489,8 +581,14 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         .nullable()
         .optional()
         .describe('Al confirmar: el expectedLatestRefundId que dio la vista previa, tal cual (la última devolución que se vio)'),
+      expectedClosesAsRefunded: z
+        .boolean()
+        .optional()
+        .describe(
+          'Al confirmar: el expectedClosesAsRefunded que dio la vista previa, si lo dio (también cierra el pedido como «Devuelto»)',
+        ),
     },
-    async ({ venueId, orderId, amount, reason, note, confirm, confirmationToken, expectedLatestRefundId }) => {
+    async ({ venueId, orderId, amount, reason, note, confirm, confirmationToken, expectedLatestRefundId, expectedClosesAsRefunded }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('payments:refund', venueId)
       requireWriteScopeAlways(scope, 'payments:refund', 'devuelve dinero a la tarjeta del cliente')
@@ -504,32 +602,71 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         if (order.paymentMode !== 'CARD_ONLINE' || order.card?.status !== 'CAPTURED') {
           return text({ ok: false, error: 'Este pedido no se cobró con tarjeta en línea; no hay nada que devolver a la tarjeta.' })
         }
-        // Lo visto lo fija el servidor al hacer la vista previa y queda atado a la firma: confirmar no puede renovarlo.
+        // D661 (Task 5): en «Nadie» sólo el total, y si todavía está por entregar también se cierra «Devuelto».
+        // D661 (C1): lo que el servicio va a exigir es lo que QUEDA por devolver del cobro (el mismo cálculo, bajo su candado), no lo
+        // cobrado: tras otra devolución, la vista previa ya no promete lo que se rechazaría al confirmar.
+        const nadie = order.requiresAcceptance === false
+        const queda = await porDevolverDeUnPedido(venueId, orderId)
+        if (monto.gt(queda)) {
+          return text({
+            ok: false,
+            code: 'CARD_REFUND_EXCEEDS_REMAINING',
+            remaining: Number(queda.toFixed(2)),
+            error: `No se puede devolver $${monto.toFixed(2)}: de este pedido sólo quedan $${queda.toFixed(2)} por devolver. No se aplicó nada.`,
+          })
+        }
+        const total = nadie ? Number(queda.toFixed(2)) : null
+        if (total != null && !monto.eq(new Prisma.Decimal(total))) {
+          return text({
+            ok: false,
+            code: 'FULL_REFUND_ONLY',
+            total,
+            error: `Este pedido se devuelve completo: $${new Prisma.Decimal(total).toFixed(2)}. Pide la vista previa con ese monto; no se aplicó nada.`,
+          })
+        }
+        const cierra = nadie && (order.status === 'ACCEPTED' || order.status === 'READY')
+        // Lo visto lo fija el servidor al hacer la vista previa y queda atado a la firma: confirmar no puede renovarlo. El efecto,
+        // también: si al confirmar ya no es cierto (se entregó en medio), el servicio contesta 409 bajo el candado.
         const vista = (await listCardRefunds(venueId, orderId))[0]?.id ?? null
         return text({
           ok: false,
           requiresConfirmation: true,
           expectedLatestRefundId: vista,
+          ...(cierra ? { expectedClosesAsRefunded: true } : {}),
           preview: {
             pedido: order.orderNumber,
             cliente: order.customerName,
             cobrado: order.card.capturedAmount,
             devolver: Number(monto.toFixed(2)),
+            ...(total != null ? { total } : {}),
             motivo: reason,
             nota,
-            efecto: `Se devuelven $${monto.toFixed(2)} a la tarjeta del cliente.`,
+            efecto:
+              `Se devuelven $${monto.toFixed(2)} a la tarjeta del cliente.` +
+              (cierra ? ' También lo cierra como «Devuelto»: ya no se entrega ni se prepara.' : '') +
+              ' Con tarjeta, el negocio no recupera la comisión de Stripe de este cobro.',
           },
-          confirmationToken: issueConfirmation(scope, 'online_order_card_refund', { ...datos, expectedLatestRefundId: vista }),
-          mensaje:
-            'Confírmalo con la persona y vuelve a llamar con los mismos datos, confirm:true, el confirmationToken y expectedLatestRefundId.',
+          confirmationToken: issueConfirmation(scope, 'online_order_card_refund', {
+            ...datos,
+            expectedLatestRefundId: vista,
+            ...(cierra ? { cierraComoDevuelto: true } : {}),
+          }),
+          mensaje: `Confírmalo con la persona y vuelve a llamar con los mismos datos, confirm:true, el confirmationToken y expectedLatestRefundId${cierra ? ' y expectedClosesAsRefunded' : ''}.`,
         })
       }
 
       const vista = expectedLatestRefundId ?? null
-      if (!validConfirmation(confirmationToken, scope, 'online_order_card_refund', { ...datos, expectedLatestRefundId: vista })) {
+      const cierra = expectedClosesAsRefunded === true
+      if (
+        !validConfirmation(confirmationToken, scope, 'online_order_card_refund', {
+          ...datos,
+          expectedLatestRefundId: vista,
+          ...(cierra ? { cierraComoDevuelto: true } : {}),
+        })
+      ) {
         return text({
           ok: false,
-          error: `La vista previa venció (dura ${CONFIRMATION_TTL / 60} minutos) o estos datos no son los que se vieron (pedido, monto, motivo, nota o expectedLatestRefundId). Pide una vista previa nueva y confírmala tal cual.`,
+          error: `La vista previa venció (dura ${CONFIRMATION_TTL / 60} minutos) o estos datos no son los que se vieron (pedido, monto, motivo, nota, expectedLatestRefundId o expectedClosesAsRefunded). Pide una vista previa nueva y confírmala tal cual.`,
         })
       }
       // La llave sale de la confirmación: repetir ESTA confirmación es la misma devolución; una vista previa nueva, otra.
@@ -544,13 +681,16 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
           idempotencyKey,
           note: nota,
           expectedLatestRefundId: vista,
+          // D661: el MCP sólo devuelve a la tarjeta, y el efecto que se vio se revalida bajo el candado de la orden.
+          destino: 'CARD',
+          efectoEsperado: { cierraComoDevuelto: cierra },
         })
         await auditMcpWrite(scope, {
           action: 'ONLINE_ORDER_CARD_REFUND_VIA_MCP',
           entity: 'OnlineOrderCardRefund',
           entityId: r.cardRefundId,
           venueId,
-          data: { orderId, amount: monto.toFixed(2), reason, note: nota, status: r.status, replay: r.replay },
+          data: { orderId, amount: monto.toFixed(2), reason, note: nota, status: r.status, replay: r.replay, cierraComoDevuelto: cierra },
         })
         return text({ ok: true, ...r })
       } catch (err) {
@@ -562,7 +702,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_order_card_refund_resolve',
-    'Devolver por otro medio: cuando una devolución a la tarjeta falló en el banco después de anotarse (estado REVERSED en online_order_card_refunds), registra que el negocio ya le devolvió ese dinero al cliente en efectivo (sale de la caja abierta) o por transferencia. Dos pasos: sin confirm:true sólo muestra la vista previa. En efectivo pide el permiso de devolver en efectivo; por transferencia, el de reembolsar.',
+    'Devolver por otro medio: cuando una devolución a la tarjeta falló en el banco después de anotarse (estado REVERSED en online_order_card_refunds), registra que el negocio le devuelve ese dinero al cliente en efectivo (sale de la caja abierta) o por transferencia; se registra ANTES de entregarlo. Si el cobro ya tiene una devolución hecha directo en Stripe, por fuera de Avoqado, no registra nada y lo explica (no se paga dos veces). Dos pasos: sin confirm:true sólo muestra la vista previa. En efectivo pide el permiso de devolver en efectivo; por transferencia, el de reembolsar.',
     {
       venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
       orderId: z.string().describe('Id del pedido'),
@@ -584,6 +724,13 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         if (!fila || fila.status !== 'REVERSED' || fila.reversal?.resolvedAt) {
           return text({ ok: false, error: 'Esta devolución no está pendiente de pagarse por otro medio.' })
         }
+        // D668: Stripe se revisa en la vista previa, ANTES de que alguien le dé el dinero al cliente (y otra vez al confirmar).
+        try {
+          await revisarStripeAntesDeOtroMedio({ venueId, orderId, cardRefundId: refundId })
+        } catch (err) {
+          if (!(err instanceof AppError)) throw err
+          return text({ ok: false, error: err.message, ...(err.code ? { code: err.code } : {}) })
+        }
         return text({
           ok: false,
           requiresConfirmation: true,
@@ -595,9 +742,9 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
             efecto:
               method === 'CASH'
                 ? `Salen $${fila.amount} en efectivo de la caja abierta para devolvérselos al cliente.`
-                : `Queda registrado que le devolviste $${fila.amount} al cliente por transferencia.`,
+                : `Queda registrado que le transfieres $${fila.amount} al cliente.`,
           },
-          mensaje: 'Confírmalo con la persona y vuelve a llamar con confirm:true.',
+          mensaje: 'Confírmalo con la persona y vuelve a llamar con confirm:true; que entregue el dinero después de registrarlo.',
         })
       }
 

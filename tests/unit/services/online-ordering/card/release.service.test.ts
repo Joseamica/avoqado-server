@@ -65,6 +65,18 @@ describe('releaseCharge', () => {
     })
   })
 
+  it('D661 · B (Ruling 51): con el límite de quien libera (la visita temprana), la cancelación y su relectura lo llevan; sin él, como hoy', async () => {
+    const LIMITE = { timeoutMs: 10_000, maxNetworkRetries: 0 }
+    voidAuthorization.mockRejectedValue(new Error('Stripe no contestó a tiempo'))
+    await expect(releaseCharge('ch1', LIMITE)).resolves.toBe('STUCK') // queda RELEASING: la siguiente pasada la reintenta
+    const params = { paymentIntentId: 'pi_1', idempotencyKey: 'online-order:ord1:release' }
+    expect(voidAuthorization).toHaveBeenLastCalledWith(expect.anything(), params, LIMITE)
+    expect(getAuthorization).toHaveBeenLastCalledWith(expect.anything(), { paymentIntentId: 'pi_1' }, LIMITE)
+    await expect(releaseCharge('ch1')).resolves.toBe('STUCK')
+    expect(voidAuthorization.mock.calls.at(-1)).toHaveLength(2)
+    expect(getAuthorization.mock.calls.at(-1)).toHaveLength(2)
+  })
+
   it('ya RELEASED (el aviso de Stripe llegó antes) → RELEASED sin llamar a Stripe', async () => {
     prismaMock.onlineOrderCharge.findUnique.mockResolvedValue({ ...CHARGE, status: 'RELEASED' } as any)
     await expect(releaseCharge('ch1')).resolves.toBe('RELEASED')

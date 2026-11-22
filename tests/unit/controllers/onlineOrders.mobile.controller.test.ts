@@ -12,6 +12,12 @@ jest.mock('@/services/online-ordering/presence.service', () => ({
   storeView: jest.requireActual('@/services/online-ordering/presence.service').storeView,
 }))
 jest.mock('@/services/online-ordering/folios.service', () => ({ __esModule: true, listFolios: jest.fn() }))
+jest.mock('@/services/online-ordering/cardAlertPresence', () => ({
+  __esModule: true,
+  CARD_ALERT_HEADER: 'x-online-orders-card-alert',
+  touchCardAlertPoll: jest.fn(),
+  apagarMarcaRapida: jest.fn(),
+}))
 jest.mock('@/services/online-ordering/settings.service', () => ({ __esModule: true, pauseOnlineOrdering: jest.fn() }))
 jest.mock('@/services/online-ordering/transitions.service', () => ({
   __esModule: true,
@@ -39,6 +45,7 @@ import {
   rejectOnlineOrder,
 } from '@/services/online-ordering/transitions.service'
 import { claimOnlineOrderPrint } from '@/services/online-ordering/printClaim.service'
+import { apagarMarcaRapida, touchCardAlertPoll } from '@/services/online-ordering/cardAlertPresence'
 import * as ctrl from '@/controllers/mobile/onlineOrders.mobile.controller'
 import mobileRouter from '@/routes/mobile/onlineOrders.mobile.routes'
 
@@ -68,6 +75,8 @@ beforeEach(() => {
   ;(listInbox as jest.Mock).mockResolvedValue(LISTA)
   ;(touchInboxPoll as jest.Mock).mockResolvedValue(true)
   ;(touchToPayPoll as jest.Mock).mockResolvedValue(true)
+  ;(touchCardAlertPoll as jest.Mock).mockResolvedValue(true)
+  ;(apagarMarcaRapida as jest.Mock).mockResolvedValue(undefined)
   ;(listFolios as jest.Mock).mockResolvedValue(FOLIOS)
   ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ status: 'OPEN', reason: null, config: { pausedUntil: null, manualPause: false } })
   // Por defecto: una cajera activa (CASHIER tiene `orders:update`) sin permisos personalizados del negocio.
@@ -235,6 +244,119 @@ describe('onlineOrders.mobile.controller', () => {
     })
   })
 
+  it('D661 (3B): el 409 OPEN_FROM_CAJA es verdad con la tarjeta sólo apartada y con un pedido que otra caja ya cobró: «No se aplicó nada», nunca «ya se pagó» ni «No se cobró nada»', async () => {
+    ;(acceptOnlineOrder as jest.Mock).mockResolvedValue({ outcome: 'OPEN_FROM_CAJA' })
+    const { req, res, next } = mock()
+    await ctrl.accept(req, res, next)
+    expect(res.status).toHaveBeenCalledWith(409)
+    const body = res.json.mock.calls[0][0]
+    expect(body).toMatchObject({ success: false, code: 'OPEN_FROM_CAJA' })
+    expect(body.error).toMatch(/se abre desde la caja/)
+    expect(body.error).toMatch(/No se aplicó nada\./)
+    expect(body.error).not.toMatch(/ya se pagó|No se cobró nada/)
+  })
+
+  it('D661 (Ruling 71): entregar uno CERRADO sin entregarse («No lo recogió», «Devuelto») → 409 con su PROPIO código, el estado y las marcas de siempre (una app vieja ya no lo lee como el segundo toque)', async () => {
+    const CORTE = '2026-10-14T10:00:05.000Z'
+    const DEVUELTO = '2026-10-14T18:20:00.000Z'
+    for (const marcas of [
+      { notPickedUpAt: CORTE }, // «No lo recogió» (el corte del día)
+      { refundRequestedAt: DEVUELTO, refundedAt: DEVUELTO }, // «Devuelto» desde la reserva (nunca se entregó)
+      { refundedAt: DEVUELTO },
+      { notPickedUpAt: CORTE, refundRequestedAt: DEVUELTO }, // «No lo recogió» que se está devolviendo
+    ]) {
+      ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValueOnce({ outcome: 'STALE', status: 'COMPLETED', ...marcas })
+      const m = mock()
+      await ctrl.delivered(m.req, m.res, m.next)
+      expect(m.res.status).toHaveBeenCalledWith(409)
+      expect(m.res.json).toHaveBeenCalledWith({
+        success: false,
+        code: 'ORDER_CLOSED_NOT_DELIVERED',
+        status: 'COMPLETED',
+        ...marcas,
+        error: 'Este pedido ya se cerró (se devolvió o no lo recogieron). No lo entregues.',
+      })
+    }
+  })
+
+  it('D661 (Ruling 71): «Listo» sobre uno CERRADO sin entregarse → el mismo 409 ORDER_CLOSED_NOT_DELIVERED', async () => {
+    const HORA = '2026-10-14T18:00:00.000Z'
+    ;(markOnlineOrderReady as jest.Mock).mockResolvedValueOnce({ outcome: 'STALE', status: 'COMPLETED', refundedAt: HORA })
+    const m = mock()
+    await ctrl.ready(m.req, m.res, m.next)
+    expect(m.res.status).toHaveBeenCalledWith(409)
+    expect(m.res.json).toHaveBeenCalledWith({
+      success: false,
+      code: 'ORDER_CLOSED_NOT_DELIVERED',
+      status: 'COMPLETED',
+      refundedAt: HORA,
+      error: 'Este pedido ya se cerró (se devolvió o no lo recogieron). No lo entregues.',
+    })
+  })
+
+  it('D661 (Ruling 71): todo lo demás sigue con ORDER_STATE_CHANGED exactamente como hoy («Devolviendo…» de uno por entregar, sin marcas, un COMPLETED sin marcas)', async () => {
+    const CORTE = '2026-10-14T10:00:05.000Z'
+    // «Devolviendo…» (reserva viva) de uno que sigue por entregar: el 409 de siempre con su marca y su texto.
+    ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValueOnce({ outcome: 'STALE', status: 'READY', refundRequestedAt: CORTE })
+    const b = mock()
+    await ctrl.delivered(b.req, b.res, b.next)
+    expect(b.res.status).toHaveBeenCalledWith(409)
+    expect(b.res.json).toHaveBeenCalledWith({
+      success: false,
+      code: 'ORDER_STATE_CHANGED',
+      status: 'READY',
+      refundRequestedAt: CORTE,
+      error: 'Este pedido se está devolviendo: no se marca entregado. No se aplicó nada.',
+    })
+
+    // Sin marca, el 409 de siempre, con las mismas llaves (regresión).
+    ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValueOnce({ outcome: 'STALE', status: 'CANCELLED_BY_STAFF' })
+    const d = mock()
+    await ctrl.delivered(d.req, d.res, d.next)
+    expect(d.res.json).toHaveBeenCalledWith({
+      success: false,
+      code: 'ORDER_STATE_CHANGED',
+      status: 'CANCELLED_BY_STAFF',
+      error: 'El pedido ya cambió de estado (otro aparato, el cliente, la caja o el tiempo). Actualiza la bandeja.',
+    })
+
+    // Un COMPLETED SIN marcas (p. ej. «Listo» de uno ya entregado, o cancelar uno cerrado) es el 409 de siempre.
+    for (const [handler, fn] of [
+      [ctrl.ready, markOnlineOrderReady],
+      [ctrl.cancel, cancelOnlineOrderByStaff],
+    ] as const) {
+      ;(fn as jest.Mock).mockResolvedValueOnce({ outcome: 'STALE', status: 'COMPLETED' })
+      const m = mock()
+      await handler(m.req, m.res, m.next)
+      expect(m.res.json).toHaveBeenCalledWith({
+        success: false,
+        code: 'ORDER_STATE_CHANGED',
+        status: 'COMPLETED',
+        error: 'El pedido ya cambió de estado (otro aparato, el cliente, la caja o el tiempo). Actualiza la bandeja.',
+      })
+    }
+  })
+
+  it('D661 (Task 5): «Listo» sobre un pedido que se está devolviendo o ya se devolvió → el mismo 409 con su marca y un texto de «Listo»', async () => {
+    const HORA = '2026-10-14T18:00:00.000Z'
+    for (const [marca, texto] of [
+      ['refundRequestedAt', /se está devolviendo: no se marca listo/],
+      ['refundedAt', /ya se devolvió \(«Devuelto»\): no se marca listo/],
+    ] as const) {
+      ;(markOnlineOrderReady as jest.Mock).mockResolvedValueOnce({ outcome: 'STALE', status: 'ACCEPTED', [marca]: HORA })
+      const a = mock()
+      await ctrl.ready(a.req, a.res, a.next)
+      expect(a.res.status).toHaveBeenCalledWith(409)
+      expect(a.res.json).toHaveBeenCalledWith({
+        success: false,
+        code: 'ORDER_STATE_CHANGED',
+        status: 'ACCEPTED',
+        [marca]: HORA,
+        error: expect.stringMatching(texto),
+      })
+    }
+  })
+
   it('A12: entregar lo que ya estaba entregado es 200 (idempotente), no un 409 «ya cambió»', async () => {
     ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValue({ outcome: 'OK', status: 'COMPLETED', unchanged: true })
     const { req, res, next } = mock()
@@ -293,20 +415,39 @@ describe('onlineOrders.mobile.controller', () => {
     ;(claimOnlineOrderPrint as jest.Mock).mockResolvedValue({ claimed: true })
     const ok = mock()
     await ctrl.printClaim(ok.req, ok.res, ok.next)
-    expect(claimOnlineOrderPrint).toHaveBeenCalledWith('v1', 'ord1', 'dev1')
+    expect(claimOnlineOrderPrint).toHaveBeenCalledWith('v1', 'ord1', 'dev1', expect.any(Date), false)
     expect(ok.res.json).toHaveBeenCalledWith({ success: true, data: { claimed: true } })
+  })
+
+  it('D661 · F1 (Ruling 37): el reclamo pasa si la caja marca «POSIBLE REPETIDA» (x-online-orders-card-alert: 1); otro valor o sin ella, no', async () => {
+    ;(claimOnlineOrderPrint as jest.Mock).mockResolvedValue({ claimed: true, posibleRepetida: true })
+    for (const [valor, marca] of [
+      ['1', true],
+      ['0', false],
+      ['true', false],
+    ] as const) {
+      ;(claimOnlineOrderPrint as jest.Mock).mockClear()
+      const { req, res, next } = mock({ headers: { 'x-online-orders-card-alert': valor } })
+      await ctrl.printClaim(req, res, next)
+      expect({ valor, args: (claimOnlineOrderPrint as jest.Mock).mock.calls[0] }).toEqual({
+        valor,
+        args: ['v1', 'ord1', 'dev1', expect.any(Date), marca],
+      })
+    }
   })
 
   it('M-10: un x-device-id larguísimo se recorta a 100 caracteres antes de guardarse como dueño del reclamo', async () => {
     ;(claimOnlineOrderPrint as jest.Mock).mockResolvedValue({ claimed: true })
     const { req, res, next } = mock({ headers: { 'x-device-id': `  ${'d'.repeat(5_000)}  ` } })
     await ctrl.printClaim(req, res, next)
-    expect(claimOnlineOrderPrint).toHaveBeenCalledWith('v1', 'ord1', 'd'.repeat(100))
+    expect(claimOnlineOrderPrint).toHaveBeenCalledWith('v1', 'ord1', 'd'.repeat(100), expect.any(Date), false)
   })
 
   it('el reclamo usa el `:orderId` de la ruta (Order.id, el `orderId` de la bandeja) como llave `OnlineOrder.orderId`, nunca el id del pedido en línea', async () => {
     const real = jest.requireActual('@/services/online-ordering/printClaim.service')
     ;(claimOnlineOrderPrint as jest.Mock).mockImplementationOnce(real.claimOnlineOrderPrint)
+    // Ruling 9: el reclamo lee primero el reclamo vigente y hace su CAS sobre él.
+    prismaMock.onlineOrder.findFirst.mockResolvedValueOnce({ printClaimedAt: null } as any)
     prismaMock.onlineOrder.updateMany.mockResolvedValueOnce({ count: 1 })
     const { req, res, next } = mock()
     await ctrl.printClaim(req, res, next)
@@ -442,5 +583,183 @@ describe('toPay (tienda híbrida T12)', () => {
     expect(listFolios).toHaveBeenCalledWith({ venueId: 'v1', section: 'toDeliver', cursor: 'c' })
     expect(next).not.toHaveBeenCalled()
     expect(res.json).toHaveBeenCalled()
+  })
+})
+
+/**
+ * D661 (r4 #4, Ruling 7): la caja ACTUALIZADA que sabe avisar los pedidos pagados en línea manda `x-online-orders-card-alert: 1`. Su
+ * latido sólo cuenta de quien puede ABRIR (= cobrar) esos pedidos: `orders:update`. Dice además si la respuesta que recibió fue
+ * RÁPIDA (`pollSeconds` <= 30): sólo así la tienda ofrece la tarjeta en «Nadie».
+ */
+describe('toPay · el latido de la caja que avisa (D661)', () => {
+  const RAPIDA = { ...FOLIOS, pollSeconds: 30 }
+  const AMBAS = { 'x-online-orders-to-pay': '1', 'x-online-orders-card-alert': '1' }
+  beforeEach(() => (listFolios as jest.Mock).mockResolvedValue(RAPIDA))
+
+  it('con la cabecera y permiso orders:update (el que abre) se escribe lastCardAlertPollAt; sin ella o sin ese permiso, no', async () => {
+    // Una cajera (orders:update) con la cabecera: late.
+    const con = mock({ headers: AMBAS })
+    await ctrl.toPay(con.req, con.res, con.next)
+    expect(touchCardAlertPoll).toHaveBeenCalledTimes(1)
+    expect(touchCardAlertPoll).toHaveBeenCalledWith('v1', true)
+    // Sin la cabecera (una caja vieja, que no sabe avisar): no late, aunque sí late «por cobrar».
+    ;(touchCardAlertPoll as jest.Mock).mockClear()
+    const vieja = mock({ headers: { 'x-online-orders-to-pay': '1' } })
+    await ctrl.toPay(vieja.req, vieja.res, vieja.next)
+    expect(touchToPayPoll).toHaveBeenCalled()
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
+    // Con la cabecera pero sin orders:update (puede cobrar en caja, no abrir un pedido pagado en línea): no late la de tarjeta.
+    prismaMock.staffVenue.findUnique.mockResolvedValue(enElNegocio('VIEWER') as any)
+    prismaMock.venueRolePermission.findUnique.mockResolvedValue({ permissions: ['payments:create'], deniedPermissions: [] } as any)
+    ;(touchToPayPoll as jest.Mock).mockClear()
+    const sinAbrir = mock({ headers: AMBAS })
+    await ctrl.toPay(sinAbrir.req, sinAbrir.res, sinAbrir.next)
+    expect(touchToPayPoll).toHaveBeenCalledWith('v1')
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
+    // Suplantando (sólo lectura): tampoco.
+    prismaMock.staffVenue.findUnique.mockResolvedValue(enElNegocio('CASHIER') as any)
+    prismaMock.venueRolePermission.findUnique.mockResolvedValue(null)
+    const suplanta = mock({ headers: AMBAS })
+    suplanta.req.authContext.isImpersonating = true
+    await ctrl.toPay(suplanta.req, suplanta.res, suplanta.next)
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
+    // Ruling 79: todas fueron respuestas RÁPIDAS: ninguna apaga la marca.
+    expect(apagarMarcaRapida).not.toHaveBeenCalled()
+  })
+
+  it('Ruling 7: el latido dice si la respuesta fue RÁPIDA (pollSeconds <= 30); con la espera larga (600) es lento', async () => {
+    const rapida = mock({ headers: AMBAS })
+    await ctrl.toPay(rapida.req, rapida.res, rapida.next)
+    ;(listFolios as jest.Mock).mockResolvedValue({ ...FOLIOS, pollSeconds: 600 })
+    const lenta = mock({ headers: AMBAS })
+    await ctrl.toPay(lenta.req, lenta.res, lenta.next)
+    expect((touchCardAlertPoll as jest.Mock).mock.calls).toEqual([
+      ['v1', true],
+      ['v1', false],
+    ])
+    // Lo que la caja recibe es lo que se midió.
+    expect(lenta.res.json).toHaveBeenCalledWith({ success: true, data: expect.objectContaining({ pollSeconds: 600 }) })
+  })
+
+  it('Ruling 7: primero el latido de folios (crea la fila de ajustes), después el de la caja que avisa (sólo la actualiza); ninguno sin listar bien', async () => {
+    const { req, res, next } = mock({ headers: AMBAS })
+    await ctrl.toPay(req, res, next)
+    const orden = (f: unknown) => (f as jest.Mock).mock.invocationCallOrder[0]
+    expect(orden(listFolios)).toBeLessThan(orden(touchToPayPoll))
+    expect(orden(touchToPayPoll)).toBeLessThan(orden(touchCardAlertPoll))
+    ;(touchCardAlertPoll as jest.Mock).mockClear()
+    ;(listFolios as jest.Mock).mockRejectedValue(new Error('db'))
+    const rota = mock({ headers: AMBAS })
+    await ctrl.toPay(rota.req, rota.res, rota.next)
+    expect(rota.next).toHaveBeenCalledWith(expect.any(Error))
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
+  })
+
+  it('el panel nunca late como caja que avisa, aunque mande la cabecera; un fallo del latido no le cuesta la lista a la caja', async () => {
+    const panel = mock({ headers: AMBAS })
+    await ctrl.toPayPanel(panel.req, panel.res, panel.next)
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
+    ;(touchCardAlertPoll as jest.Mock).mockRejectedValue(new Error('db'))
+    const caja = mock({ headers: AMBAS })
+    await ctrl.toPay(caja.req, caja.res, caja.next)
+    expect(caja.next).not.toHaveBeenCalled()
+    expect(caja.res.json).toHaveBeenCalledWith({ success: true, data: { ...RAPIDA, store: TIENDA_ABIERTA } })
+  })
+
+  // D661 · A (Ruling 41): la caja que avisa sólo se duerme (600 s) si el servidor anotó su respuesta lenta, que es lo que apaga la
+  // marca rápida con la que la tienda ofrece la tarjeta. Si no se pudo anotar, sigue en 30 s hasta que se anote.
+  const LENTA = { ...FOLIOS, pollSeconds: 600 }
+
+  it('D661 · A (Ruling 41): respuesta LENTA y la escritura que apaga la marca rápida falla → la caja recibe la cadencia rápida (30 s); anotada bien, 600 como hoy', async () => {
+    ;(listFolios as jest.Mock).mockResolvedValue(LENTA)
+    ;(touchCardAlertPoll as jest.Mock).mockRejectedValueOnce(new Error('se cayó la base'))
+    const falla = mock({ headers: AMBAS })
+    await ctrl.toPay(falla.req, falla.res, falla.next)
+    expect(touchCardAlertPoll).toHaveBeenCalledWith('v1', false)
+    expect(falla.next).not.toHaveBeenCalled()
+    expect(falla.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, pollSeconds: 30, store: TIENDA_ABIERTA } })
+
+    const sana = mock({ headers: AMBAS })
+    await ctrl.toPay(sana.req, sana.res, sana.next)
+    expect(sana.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, store: TIENDA_ABIERTA } })
+  })
+
+  it('D661 · A (Ruling 41): respuesta RÁPIDA y la escritura falla → nada cambia (la marca queda vieja: la tarjeta se ofrece menos, nunca más)', async () => {
+    ;(touchCardAlertPoll as jest.Mock).mockRejectedValueOnce(new Error('se cayó la base'))
+    const caja = mock({ headers: AMBAS })
+    await ctrl.toPay(caja.req, caja.res, caja.next)
+    expect(touchCardAlertPoll).toHaveBeenCalledWith('v1', true)
+    expect(caja.res.json).toHaveBeenCalledWith({ success: true, data: { ...RAPIDA, store: TIENDA_ABIERTA } })
+  })
+
+  it('D661 · A (Ruling 41): respuesta LENTA y no se pudo leer si la caja puede abrir pedidos (falla la base al revisar su permiso) → tampoco se duerme: 30 s', async () => {
+    ;(listFolios as jest.Mock).mockResolvedValue(LENTA)
+    prismaMock.venueRolePermission.findUnique.mockRejectedValue(new Error('se cayó la base'))
+    const caja = mock({ headers: AMBAS })
+    await ctrl.toPay(caja.req, caja.res, caja.next)
+    expect(caja.next).not.toHaveBeenCalled()
+    expect(caja.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, pollSeconds: 30, store: TIENDA_ABIERTA } })
+
+    expect(apagarMarcaRapida).not.toHaveBeenCalled()
+
+    // Sin la cabecera la misma falla no cambia su cadencia: no lee ese permiso. Ruling 79: como la respuesta es lenta, apaga la marca
+    // (sin anotar latido) y, apagada, se duerme. Desde el panel, nada.
+    const vieja = mock({ headers: { 'x-online-orders-to-pay': '1' } })
+    await ctrl.toPay(vieja.req, vieja.res, vieja.next)
+    expect(apagarMarcaRapida).toHaveBeenCalledWith('v1')
+    expect(vieja.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, store: TIENDA_ABIERTA } })
+    const panel = mock({ headers: AMBAS })
+    await ctrl.toPayPanel(panel.req, panel.res, panel.next)
+    expect(panel.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, store: TIENDA_ABIERTA } })
+    expect(apagarMarcaRapida).toHaveBeenCalledTimes(1)
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
+  })
+
+  it('D661 · A (Ruling 41 y 79): una caja que avisa pero NO puede abrir pedidos (sin orders:update, leído bien) no anota latido; con respuesta lenta sólo apaga la marca y sigue con su cadencia', async () => {
+    ;(listFolios as jest.Mock).mockResolvedValue(LENTA)
+    prismaMock.staffVenue.findUnique.mockResolvedValue(enElNegocio('VIEWER') as any)
+    const caja = mock({ headers: AMBAS })
+    await ctrl.toPay(caja.req, caja.res, caja.next)
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
+    expect(apagarMarcaRapida).toHaveBeenCalledWith('v1')
+    expect(caja.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, store: TIENDA_ABIERTA } })
+  })
+
+  // D661 · A (Ruling 79): una caja que avisó y después sondea SIN la cabecera (WINDOWS sin foco, Ruling 48; la TPV cobrando o en su
+  // pantalla de bloqueo, Ruling 68) también se duerme 600 s si la respuesta es lenta: la marca rápida se apaga igual, sin anotar latido.
+  it('D661 · A (Ruling 79): sin la cabecera y respuesta LENTA → apaga la marca (sin anotar latido) y se duerme (600)', async () => {
+    ;(listFolios as jest.Mock).mockResolvedValue(LENTA)
+    const caja = mock({ headers: { 'x-online-orders-to-pay': '1' } })
+    await ctrl.toPay(caja.req, caja.res, caja.next)
+    expect(apagarMarcaRapida).toHaveBeenCalledTimes(1)
+    expect(apagarMarcaRapida).toHaveBeenCalledWith('v1')
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
+    expect(caja.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, store: TIENDA_ABIERTA } })
+    // Una sesión sin permiso alguno de abrir (suplantando, de sólo lectura) apaga igual: la cadencia es del negocio, no de la sesión.
+    const suplanta = mock({ headers: { 'x-online-orders-to-pay': '1' } })
+    suplanta.req.authContext.isImpersonating = true
+    await ctrl.toPay(suplanta.req, suplanta.res, suplanta.next)
+    expect(apagarMarcaRapida).toHaveBeenCalledTimes(2)
+  })
+
+  it('D661 · A (Ruling 79): sin la cabecera, respuesta LENTA y la marca no se pudo apagar → 30 s, como el Ruling 41', async () => {
+    ;(listFolios as jest.Mock).mockResolvedValue(LENTA)
+    ;(apagarMarcaRapida as jest.Mock).mockRejectedValueOnce(new Error('se cayó la base'))
+    const caja = mock({ headers: { 'x-online-orders-to-pay': '1' } })
+    await ctrl.toPay(caja.req, caja.res, caja.next)
+    expect(caja.next).not.toHaveBeenCalled()
+    expect(caja.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, pollSeconds: 30, store: TIENDA_ABIERTA } })
+  })
+
+  it('D661 · A (Ruling 79): sin la cabecera y respuesta RÁPIDA, nada cambia; el panel, ni con respuesta lenta', async () => {
+    const rapida = mock({ headers: { 'x-online-orders-to-pay': '1' } })
+    await ctrl.toPay(rapida.req, rapida.res, rapida.next)
+    expect(rapida.res.json).toHaveBeenCalledWith({ success: true, data: { ...RAPIDA, store: TIENDA_ABIERTA } })
+    ;(listFolios as jest.Mock).mockResolvedValue(LENTA)
+    const panel = mock({ headers: { 'x-online-orders-to-pay': '1' } })
+    await ctrl.toPayPanel(panel.req, panel.res, panel.next)
+    expect(panel.res.json).toHaveBeenCalledWith({ success: true, data: { ...LENTA, store: TIENDA_ABIERTA } })
+    expect(apagarMarcaRapida).not.toHaveBeenCalled()
+    expect(touchCardAlertPoll).not.toHaveBeenCalled()
   })
 })

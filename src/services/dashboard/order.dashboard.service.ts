@@ -785,6 +785,10 @@ export async function updateOrder(
           ...(status === 'COMPLETED' && { completedAt: new Date() }),
           // Los escritores con CAS de versión se enteran de que la orden se canceló.
           ...(cancelando && { version: { increment: 1 } }),
+          // hz:e82938e1:D39 (como D38 en `cancelOrderInTransaction`): la marca de «por mandar a cocina» se va con la anulación. Si se
+          // quedaba y el dinero ya capturado reabría la cuenta antes del barrido (cada minuto), el barrido armaba la comanda de una
+          // cancelada reabierta (regla S1: no vuelve a la cocina). Sólo al ANULAR: otra edición deja la marca de la ronda como estaba.
+          ...(cancelando && { kitchenPendingAt: null }),
         },
         include: {
           items: {
@@ -901,7 +905,9 @@ export async function deleteOrder(venueId: string, orderId: string, performedBy?
       const cancelada = await tx.order.update({
         where: { id: orderId },
         // La versión sube para que los escritores con CAS (anular, descontar) se enteren de la cancelación.
-        data: { status: 'CANCELLED', version: { increment: 1 } },
+        // hz:e82938e1:D39 (como D38): las comandas ya se retiraron (arriba) y la marca de «por mandar a cocina» se va con la anulación;
+        // si se quedaba y el dinero ya capturado reabría la cuenta antes del barrido, el barrido la armaba (regla S1: no vuelve).
+        data: { status: 'CANCELLED', kitchenPendingAt: null, version: { increment: 1 } },
       })
       // Spec § 5.1.8: los sobres PENDING de una cuenta de tarjetas sin cobrar quedan DEACTIVATED.
       await desactivarSobresPendientesDeCuentaEnTx(tx, { venueId, orderId, staffId: null })

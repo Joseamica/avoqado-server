@@ -109,6 +109,17 @@ describe('returnGiftBalanceAndCancelOrder', () => {
     expect(revertirMock).toHaveBeenCalledTimes(2)
   })
 
+  // hz:e82938e1:D39: como `cancelOrderInTransaction` (D38). La cuenta retira sus comandas; si dejaba la marca de «por mandar a cocina»
+  // (la de una ronda) y el dinero ya capturado la reabría antes del barrido (cada minuto), el barrido armaba la comanda de una
+  // cancelada reabierta (la regla S1 dice que no vuelve a la cocina).
+  it('🔴 D39: regresar el saldo y cancelar limpia la marca de «por mandar a cocina» en la misma escritura que la anula', async () => {
+    await returnGiftBalanceAndCancelOrder('venue-1', 'order-1', { staffId: 'staff-1', operationKey: LLAVE })
+
+    expect(prismaMock.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'CANCELLED', kitchenPendingAt: null }) }),
+    )
+  })
+
   it('r1 (F9): no escribe la bitácora de tarjetas (su dueño es C3)', async () => {
     await returnGiftBalanceAndCancelOrder('venue-1', 'order-1', { staffId: 'staff-1', operationKey: LLAVE })
     expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'GIFT_CARD_BALANCE_RETURNED_ORDER_CANCELLED' }))
@@ -207,7 +218,10 @@ describe('returnGiftBalanceAndCancelOrder — rulings del coordinador', () => {
     // Y la cuenta se cancela igual. Como la primera devolución ESCRITA es :0 (no la del primer cobro), un reintento de esta
     // operación la encuentra y responde `replay: true`.
     expect(prismaMock.order.update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'order-1', venueId: 'venue-1' }, data: { status: 'CANCELLED', version: { increment: 1 } } }),
+      expect.objectContaining({
+        where: { id: 'order-1', venueId: 'venue-1' },
+        data: { status: 'CANCELLED', kitchenPendingAt: null, version: { increment: 1 } },
+      }),
     )
   })
 

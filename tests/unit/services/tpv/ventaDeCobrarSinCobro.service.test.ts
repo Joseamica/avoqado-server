@@ -96,7 +96,7 @@ describe('anularVentaDeCobrarSinCobro — «atrás» en Cobrar antes de cobrar',
   it('anula una venta de Cobrar limpia, con UNA entrada de bitácora que dice el camino, la terminal y el motivo', async () => {
     await expect(anularVentaDeCobrarSinCobro(VENUE, ORDER, QUIEN, AHORA)).resolves.toEqual({ estado: 'RETIRADA' })
 
-    expect(prismaMock.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'CANCELLED' } }))
+    expect(prismaMock.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'CANCELLED', kitchenPendingAt: null } }))
     // Codex r1 #7: la entrada va DENTRO de la transacción (una caída tras el commit no deja una anulación sin bitácora), y es UNA.
     expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
     expect(prismaMock.activityLog.create).toHaveBeenCalledWith({

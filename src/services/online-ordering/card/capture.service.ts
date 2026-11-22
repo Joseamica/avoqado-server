@@ -24,7 +24,7 @@ import { activarSobresDeCuentaPagadaEnTx } from '@/services/giftCards/giftCardLe
 import { applySalePosting, createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { getProvider } from '@/services/payments/provider-registry'
-import type { AuthorizationState } from '@/services/payments/providers/provider.interface'
+import type { AuthorizationState, ProviderRequestLimits } from '@/services/payments/providers/provider.interface'
 import { fromStripeAmount, toStripeAmount } from '@/services/payments/providers/money'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import {
@@ -48,7 +48,7 @@ type Plan =
   | { do: 'ACCEPT_WITHOUT_CAPTURE'; releaseChargeId?: string }
   | { do: 'REJECT_PAYMENT_FAILED'; releaseChargeId?: string }
   | { do: 'EXPIRE'; now: Date }
-  | { do: 'CAPTURE'; charge: OnlineOrderCharge; now: Date }
+  | { do: 'CAPTURE'; charge: OnlineOrderCharge }
 
 const rejectedForPayment = async (i: AcceptInput): Promise<TransitionResult> => {
   const r = await rejectOnlineOrder({ ...i, reason: OnlineOrderRejectReason.PAYMENT_FAILED })
@@ -131,7 +131,7 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
         data: { staffAnsweredAt: now },
       })
     }
-    return { do: 'CAPTURE', charge, now }
+    return { do: 'CAPTURE', charge }
   }, ORDER_LOCK_WAIT_BUDGET)
 
   switch (plan.do) {
@@ -156,34 +156,70 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
     case 'CAPTURE':
       // D662 parte 2 (v3): el toque de la persona ya quedó guardado; el corte de la pausa sola sube aunque Stripe tarde.
       if (i.porPersona) avanzarCorteTrasCommit(i.venueId)
-      return captureCharge(plan.charge, i.orderId, { staffId: i.staffId, estimatedMinutes: minutes, now: plan.now })
+      // D661 (3A): la hora de lo que escribe la captura (`acceptedAt`, la marca de cocina) se lee al escribir, después de Stripe; sólo
+      // las pruebas la fijan (`i.now`).
+      return captureCharge(plan.charge, i.orderId, {
+        staffId: i.staffId,
+        estimatedMinutes: minutes,
+        now: i.now,
+        limites: CAPTURA_DE_QUIEN_ABRE,
+      })
   }
 }
+
+/** D661 (A1): el reintento de una captura de «Nadie» llegó a Stripe después de su gracia; no se mandó nada (el llamador libera). */
+export class GraceEndedBeforeDispatch extends Error {}
+
+/**
+ * D661 (C, Ruling 43): el reintento con límite sale sin los reintentos de red del SDK: uno suyo, tras un envío que nunca llegó, podía
+ * salir ya fuera de la gracia y ser el primer cobro efectivo. Si se pierde la respuesta, la siguiente pasada lo resuelve leyendo
+ * Stripe. Límite del SDK: tras una conexión CERRADA en el primer envío todavía reenvía una vez, 0.5 s después (`opcionesDeLimite`).
+ * Ruling 52 (enmienda): y 40 s por intento: el envío (≤ 40 s) más ese reenvío (≤ 40 s) tienen efecto a lo más ~80.5 s después del
+ * despacho, dentro de los 90 s de gracia que el conciliador deja por delante (`NADIE_RETRY_MARGIN_MS`). Ruling 73: y nuestro plazo duro,
+ * 40 + 5 s: el conciliador deja de esperar (el envío ya salió; lo que llegue, la siguiente pasada lo lee en Stripe).
+ */
+const UN_SOLO_ENVIO: ProviderRequestLimits = { timeoutMs: 40_000, maxNetworkRetries: 0, plazoMs: 45_000 }
+/**
+ * D661 (C, Ruling 52): la captura de quien abre o acepta el pedido (caja, panel o MCP): 60 s por intento y UN reintento del SDK. Su peor
+ * caso (≈ 60 s + hasta 60 s de `Retry-After` + 60 s) queda dentro de la gracia de 5 min de «Nadie»; con los valores del cliente (80 s
+ * por intento, dos reintentos y `Retry-After`) llegaba hasta ~360 s. Si no alcanza, la caja ve «Confirmando…» y el conciliador lo termina.
+ */
+const CAPTURA_DE_QUIEN_ABRE: ProviderRequestLimits = { timeoutMs: 60_000, maxNetworkRetries: 1 }
 
 /**
  * Cobra con Stripe (fuera de toda transacción) un cargo que ya está en `CAPTURING`, y termina según el desenlace. La usa también el
  * conciliador (tarea 7) para reintentar con la MISMA clave.
+ * D661 (A1): `captureBefore` (ms) es el límite de un REINTENTO de «Nadie»: el conciliador lo decide bajo el candado, pero el commit o
+ * una pausa pueden cruzarlo antes de llegar aquí, así que se revisa con el reloj real justo antes de la llamada. `limites`: los de quien
+ * abre (Ruling 52). Sin ninguno de los dos (el reintento de «Mi equipo»), como siempre.
  */
 export async function captureCharge(
   charge: OnlineOrderCharge,
   orderId: string,
-  meta: { staffId: string | null; estimatedMinutes: number; now: Date },
+  meta: { staffId: string | null; estimatedMinutes: number; now?: Date; captureBefore?: number; limites?: ProviderRequestLimits },
 ): Promise<TransitionResult> {
   const merchant = chargeMerchant(charge) // Codex r2 #3: la cuenta Stripe de la foto, nunca el comercio vivo
   const provider = getProvider(merchant)
+  if (meta.captureBefore != null && Date.now() >= meta.captureBefore) throw new GraceEndedBeforeDispatch()
   let state: AuthorizationState | null = null
   let failure: unknown = null
+  const params = {
+    paymentIntentId: charge.paymentIntentId!,
+    amountCents: toStripeAmount(new Prisma.Decimal(charge.amount)),
+    applicationFeeCents: charge.applicationFeeCents, // Codex r1 #8: congelada en el borrador, nunca se recalcula
+    idempotencyKey: captureKey(orderId),
+  }
+  // El reintento de «Nadie», UN envío (Ruling 43); quien abre, sus límites (Ruling 52); el de «Mi equipo», la llamada de siempre.
+  const limites = meta.captureBefore != null ? UN_SOLO_ENVIO : meta.limites
   try {
-    state = await provider.capture(merchant, {
-      paymentIntentId: charge.paymentIntentId!,
-      amountCents: toStripeAmount(new Prisma.Decimal(charge.amount)),
-      applicationFeeCents: charge.applicationFeeCents, // Codex r1 #8: congelada en el borrador, nunca se recalcula
-      idempotencyKey: captureKey(orderId),
-    })
+    state = await (limites ? provider.capture(merchant, params, limites) : provider.capture(merchant, params))
   } catch (error) {
     failure = error
     try {
-      state = await provider.getAuthorization(merchant, { paymentIntentId: charge.paymentIntentId! })
+      // D661 (addendum r3): la relectura de rescate lleva los MISMOS límites que la captura que sigue: la caja ya no espera los ~241 s
+      // del cliente por una respuesta. Sin límites (el reintento de «Mi equipo»), la de siempre.
+      const ref = { paymentIntentId: charge.paymentIntentId! }
+      state = await (limites ? provider.getAuthorization(merchant, ref, limites) : provider.getAuthorization(merchant, ref))
     } catch {
       state = null // Stripe no contesta: queda en duda
     }
@@ -220,7 +256,7 @@ class CaptureNotAccepted extends Error {}
 export async function finishCapture(
   chargeId: string,
   state: AuthorizationState,
-  meta: { staffId: string | null; estimatedMinutes: number; now: Date },
+  meta: { staffId: string | null; estimatedMinutes: number; now?: Date },
 ): Promise<TransitionResult> {
   const charge = await prisma.onlineOrderCharge.findUnique({
     where: { id: chargeId },
@@ -256,9 +292,11 @@ export async function finishCapture(
     done = await withDeadlockRetry(
       async tx => {
         if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new CaptureNotAccepted('ORDER_NOT_FOUND')
+        // D661 (3A): la hora de la escritura, ya con el candado (`meta.now` sólo la fijan las pruebas; 3C: el conciliador tampoco).
+        const escritura = meta.now ?? new Date()
         const won = await tx.onlineOrderCharge.updateMany({
           where: { id: chargeId, status: OnlineOrderChargeStatus.CAPTURING },
-          data: { status: OnlineOrderChargeStatus.CAPTURED, capturedAt: meta.now, capturedAmount, lastError: null },
+          data: { status: OnlineOrderChargeStatus.CAPTURED, capturedAt: escritura, capturedAmount, lastError: null },
         })
         if (won.count !== 1) return null // alguien ya terminó este cobro
 
@@ -302,7 +340,7 @@ export async function finishCapture(
           kind: 'ACCEPT',
           venueId,
           orderId,
-          now: meta.now,
+          now: escritura,
           allowCapturing: true,
           onlineData: now => ({ acceptedAt: now, estimatedReadyAt: new Date(now.getTime() + minutes * 60_000) }),
           orderExtra: now => (marcarCocina ? { kitchenPendingAt: now } : {}),
@@ -376,8 +414,13 @@ class ChargeNoLongerCapturing extends Error {}
 /**
  * Stripe no cobró (el PaymentIntent quedó cancelado o sin tarjeta): el cargo `CAPTURE_FAILED` y el pedido rechazado con
  * `PAYMENT_FAILED`, en la MISMA transacción. La usa también el conciliador (tarea 7).
+ * D661 (A4): `reason: 'RELEASED_AFTER_GRACE'` = no fue la tarjeta: Avoqado soltó el apartado porque el cobro no se completó a tiempo.
+ * Misma acción de bitácora (sin nombres nuevos); el motivo viaja en sus datos y el log dice la verdad.
  */
-export async function failCapture(chargeId: string, meta: { staffId: string | null; now?: Date }): Promise<TransitionResult> {
+export async function failCapture(
+  chargeId: string,
+  meta: { staffId: string | null; now?: Date; reason?: 'RELEASED_AFTER_GRACE' },
+): Promise<TransitionResult> {
   const charge = await prisma.onlineOrderCharge.findUnique({
     where: { id: chargeId },
     select: { venueId: true, onlineOrderId: true, onlineOrder: { select: { orderId: true } } },
@@ -398,6 +441,8 @@ export async function failCapture(chargeId: string, meta: { staffId: string | nu
         reason: OnlineOrderRejectReason.PAYMENT_FAILED,
         now: meta.now,
         allowCapturing: true,
+        // D661 (R46): el escritor del cargo es el único que rechaza un apartado de «Nadie»; sella el cargo en esta misma transacción.
+        porFalloDeCobro: true,
         afterCas: async (tx, cas) => {
           const failed = await markFailed(tx)
           if (cas.r === 'OK' && failed.count !== 1) throw new ChargeNoLongerCapturing()
@@ -412,7 +457,12 @@ export async function failCapture(chargeId: string, meta: { staffId: string | nu
   }
   // Si la cuenta no se pudo cancelar (la transición se revirtió entera), el cargo igual dice la verdad: no se cobró.
   await markFailed(prisma)
-  logger.warn('⚠️ [OnlineOrderCard] Stripe no cobró la tarjeta: pedido rechazado', { chargeId, outcome: result.outcome })
+  logger.warn(
+    meta.reason === 'RELEASED_AFTER_GRACE'
+      ? '⚠️ [OnlineOrderCard] el cobro no se completó a tiempo: Avoqado soltó la tarjeta apartada y el pedido se cerró sin cobrar'
+      : '⚠️ [OnlineOrderCard] Stripe no cobró la tarjeta: pedido rechazado',
+    { chargeId, outcome: result.outcome },
+  )
   if (charge) {
     void logAction({
       staffId: meta.staffId,
@@ -420,7 +470,7 @@ export async function failCapture(chargeId: string, meta: { staffId: string | nu
       action: 'ONLINE_ORDER_CARD_CAPTURE_FAILED',
       entity: charge.onlineOrderId ? 'OnlineOrder' : 'OnlineOrderCharge',
       entityId: charge.onlineOrderId ?? chargeId,
-      data: { chargeId, outcome: result.outcome },
+      data: { chargeId, outcome: result.outcome, ...(meta.reason ? { reason: meta.reason } : {}) },
     })
   }
   return result

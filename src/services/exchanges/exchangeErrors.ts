@@ -16,6 +16,7 @@ export type ExchangeErrorCode =
   | 'EXCHANGE_CHARGE_EXISTS'
   | 'EXCHANGE_ALREADY_SETTLED'
   | 'EXCHANGE_RETRY_CONFLICT'
+  | 'EXCHANGE_NOT_FOR_ONLINE_CARD'
 
 export class ExchangeError extends AppError {
   constructor(code: ExchangeErrorCode, message: string, status: 400 | 409 | 422, details?: Record<string, unknown>) {
@@ -37,6 +38,10 @@ export function itemNotReturnable(reason: LineBlockReason, orderItemId: string |
     NOT_PAID: 'Esta venta no está cobrada.',
     NOTHING_LEFT_TO_REFUND: 'De esta venta ya no queda dinero por devolver para estos artículos.',
     SERIALIZED_ITEM: 'Los artículos con número de serie no se cambian.',
+    ONLINE_CARD:
+      'Este pedido se pagó con tarjeta en línea y no admite Cambio. Para regresarle su dinero a la clienta, usa la devolución del pedido.',
   }
+  // D661: el dinero de un pedido «Nadie» pagado con tarjeta en línea sólo regresa por la devolución del pedido; no es un renglón: 409.
+  if (reason === 'ONLINE_CARD') throw new ExchangeError('EXCHANGE_NOT_FOR_ONLINE_CARD', messages[reason], 409, { orderItemId, reason })
   throw new ExchangeError('EXCHANGE_ITEM_NOT_RETURNABLE', messages[reason], 422, { orderItemId, reason })
 }

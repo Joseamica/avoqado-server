@@ -20,6 +20,7 @@ import {
 import { respuestaDeEntrada, tapar } from '@/services/public/sesionDeCliente.service'
 import { authenticateCustomer, authenticateOrderingCustomerOptional, type CustomerAuthContext } from '@/middlewares/customerAuth.middleware'
 import { toActiveCursor } from '@/services/online-ordering/inbox.service'
+import { devolucionPublica } from '@/services/online-ordering/card/estadoPublico'
 
 const VENUE = 'cvenue000000000000000000a'
 const ELLA = 'cficha00000000000000000a1'
@@ -94,6 +95,8 @@ function armar(config: Record<string, unknown> | null = null) {
   prismaMock.loyaltyConfig.findUnique.mockReset().mockResolvedValue(config as any)
   prismaMock.stampReward.findFirst.mockReset().mockResolvedValue(null)
   prismaMock.venue.findUnique.mockReset().mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
+  // D661 (Ruling 55): la tarjeta de los pedidos de la página; por omisión, ninguno pagó en línea.
+  prismaMock.onlineOrder.findMany.mockReset().mockResolvedValue([])
   prismaMock.$transaction.mockClear()
 }
 
@@ -148,6 +151,13 @@ describe('S13 · paginación con tope del servidor', () => {
       total: 125.5,
       trackingToken: 'tok0',
       creadoEl: todas[0].createdAt.toISOString(),
+      // D661 (Ruling 55): campos nuevos (un widget viejo los ignora); un pedido sin pago en línea los trae vacíos.
+      pagoEnLinea: false,
+      tarjeta: null,
+      notPickedUpAt: null,
+      refundRequestedAt: null,
+      refundedAt: null,
+      refund: null,
     })
     expect(r.pedidos.items[1].pagado).toBe(false)
 
@@ -171,6 +181,88 @@ describe('S13 · paginación con tope del servidor', () => {
     // Sólo sus pedidos: parte de su `Order` en esta sucursal y busca su `OnlineOrder` por `orderId`.
     expect(texto(pagina)).toContain('o."customerId" =')
     expect(valores(pagina)).toEqual(expect.arrayContaining([ELLA, VENUE]))
+  })
+
+  it('D661 · Ruling 55: cada pedido dice su tarjeta y su devolución, con el MISMO mapeo del seguimiento', async () => {
+    const t = (min: number) => new Date(base + min * 60_000)
+    const filas = pedidos(10)
+    crudas({ pedidos: [filas], totalPedidos: 10 })
+    const devoluciones: Record<number, any[]> = {
+      7: [{ status: 'REQUESTED', reversal: null }], // en camino a la tarjeta
+      8: [{ status: 'RESOLVED', reversal: null }], // a saldo a favor
+      9: [
+        { status: 'REVERSED', reversal: { resolvedMethod: null } }, // el banco la regresó: se le debe
+        { status: 'RECORDED', reversal: null },
+      ],
+    }
+    const cargo = [
+      'PAGO_AL_RECOGER',
+      'AUTHORIZED',
+      'CAPTURING',
+      'CAPTURED',
+      'RELEASING',
+      'RELEASED',
+      'CAPTURE_FAILED',
+      'CAPTURED',
+      'CAPTURED',
+      'CAPTURED',
+    ]
+    prismaMock.onlineOrder.findMany.mockResolvedValue(
+      filas.map((f, i) => ({
+        id: f.id,
+        paymentMode: i === 0 ? 'PAY_AT_PICKUP' : 'CARD_ONLINE',
+        notPickedUpAt: i === 7 ? t(1) : null,
+        refundRequestedAt: i === 7 ? t(2) : null,
+        refundedAt: i === 8 ? t(3) : null,
+        charge: i === 0 ? null : { status: cargo[i], cardRefunds: devoluciones[i] ?? [] },
+      })) as any,
+    )
+    const r = await listarMisPedidos(VENUE, ELLA, {})
+    expect(r.items.map(p => [p.pagoEnLinea, p.tarjeta])).toEqual([
+      [false, null],
+      [true, 'APARTADA'],
+      [true, 'APARTADA'], // cobrando al abrir: todavía apartada
+      [true, 'COBRADA'],
+      [true, 'LIBERANDO'],
+      [true, 'LIBERADA'],
+      [true, null], // el cobro falló: el seguimiento tampoco dice nada de la tarjeta
+      [true, 'COBRADA'],
+      [true, 'COBRADA'],
+      [true, 'COBRADA'],
+    ])
+    expect(r.items[0]).toMatchObject({ refund: null, notPickedUpAt: null, refundRequestedAt: null, refundedAt: null })
+    expect(r.items[7]).toMatchObject({
+      notPickedUpAt: t(1).toISOString(),
+      refundRequestedAt: t(2).toISOString(),
+      refundedAt: null,
+      refund: { status: 'PENDING', medio: 'TARJETA' },
+    })
+    expect(r.items[8]).toMatchObject({ refundedAt: t(3).toISOString(), refund: { status: 'DONE', medio: 'SALDO' } })
+    expect(r.items[9].refund).toEqual({ status: 'REVERSED', medio: 'TARJETA' })
+    // La función es la del seguimiento (una sola definición).
+    for (const [i, filasDeDevolucion] of Object.entries(devoluciones)) {
+      expect(r.items[Number(i)].refund).toEqual(devolucionPublica(filasDeDevolucion))
+    }
+    // Lo de antes, igual.
+    expect(r.items[3]).toMatchObject({ folio: 'F-3', estado: 'COMPLETED', pagado: false, total: 125.5, trackingToken: 'tok3' })
+  })
+
+  it('D661 · Ruling 55: UNA lectura de las tarjetas por página, acotada a sus pedidos y con su sucursal; sin pedidos, ninguna', async () => {
+    for (const n of [1, 20]) {
+      const filas = pedidos(n)
+      crudas({ pedidos: [filas], totalPedidos: n })
+      prismaMock.onlineOrder.findMany.mockClear()
+      await listarMisPedidos(VENUE, ELLA, {})
+      expect(prismaMock.onlineOrder.findMany).toHaveBeenCalledTimes(1)
+      const [a] = prismaMock.onlineOrder.findMany.mock.calls[0] as any[]
+      expect(a.where).toEqual({ id: { in: filas.map(f => f.id) }, venueId: VENUE })
+      expect(a.take).toBe(n)
+      expect(hechas()).toHaveLength(2) // la página y su total, como hoy
+    }
+    crudas({ pedidos: [[]], totalPedidos: 0 })
+    prismaMock.onlineOrder.findMany.mockClear()
+    await listarMisPedidos(VENUE, ELLA, {})
+    expect(prismaMock.onlineOrder.findMany).not.toHaveBeenCalled()
   })
 
   it.each(['basura', '2026-11-10T18:00:00.000Z', '2026-13-45T99:99:99.999Z_cid'])('cursor mal formado %p ⇒ 400 en español', async c => {

@@ -16,6 +16,7 @@ const REFUNDS = { scanned: 1, advanced: 1, alerted: 0, errors: 0 }
 function harness(
   reconcile = jest.fn().mockResolvedValue({ ...EMPTY, scanned: 2, finished: 1, released: 1 }),
   sweepRefunds = jest.fn().mockResolvedValue(REFUNDS),
+  visitEarly = jest.fn().mockResolvedValue(EMPTY),
 ) {
   const cron = { start: jest.fn(), stop: jest.fn() }
   const retryEntry = jest.fn(async (op: () => Promise<unknown>) => op())
@@ -23,10 +24,11 @@ function harness(
     cron: cron as never,
     now: () => NOW,
     reconcile,
+    visitEarly,
     sweepRefunds,
     retryEntry: retryEntry as never,
   })
-  return { job, cron, reconcile, sweepRefunds, retryEntry }
+  return { job, cron, reconcile, sweepRefunds, visitEarly, retryEntry }
 }
 
 describe('online-order-card-reconciler.job', () => {
@@ -57,7 +59,12 @@ describe('online-order-card-reconciler.job', () => {
     const reconcile = jest.fn().mockReturnValueOnce(new Promise(r => (release = r)))
     const h = harness(reconcile)
     const first = h.job.checkNow()
-    await expect(h.job.checkNow()).resolves.toEqual({ ...EMPTY, skipped: true })
+    // D661 (A2): el tick encimado no repite la pasada; sólo corre la visita temprana de «Nadie». D661 (Ruling 99): el recorrido de
+    // devoluciones tiene su PROPIA bandera: corre aunque la pasada anterior siga.
+    await expect(h.job.checkNow()).resolves.toEqual({ ...EMPTY, skipped: true, refunds: REFUNDS })
+    expect(h.reconcile).toHaveBeenCalledTimes(1)
+    expect(h.sweepRefunds).toHaveBeenCalledTimes(1)
+    expect(h.visitEarly).toHaveBeenCalledWith(NOW, h.reconcile.mock.calls[0][1])
     release(EMPTY)
     await first
     reconcile.mockRejectedValueOnce(new Error('la base se cayó'))
@@ -66,7 +73,51 @@ describe('online-order-card-reconciler.job', () => {
     // …ni al revés.
     h.sweepRefunds.mockRejectedValueOnce(new Error('Stripe no responde'))
     reconcile.mockResolvedValueOnce(EMPTY)
-    await expect(h.job.checkNow()).resolves.toEqual({ ...EMPTY, refunds: { scanned: 0, advanced: 0, alerted: 0, errors: 1 } })
+    // D661 (Task 5): el resultado del recorrido también cuenta los pedidos cerrados «Devuelto» (0 si no corrió).
+    await expect(h.job.checkNow()).resolves.toEqual({ ...EMPTY, refunds: { scanned: 0, advanced: 0, alerted: 0, errors: 1, closed: 0 } })
+  })
+
+  it('D661 · A2: con la pasada atorada, cada tick encimado visita los borradores de «Nadie» y cuenta lo que hizo; si la visita truena, el job sigue', async () => {
+    let release!: (v: unknown) => void
+    const h = harness(jest.fn().mockReturnValueOnce(new Promise(r => (release = r))))
+    const first = h.job.checkNow()
+    h.visitEarly.mockResolvedValueOnce({ ...EMPTY, scanned: 3, finished: 1 })
+    await expect(h.job.checkNow()).resolves.toEqual({ ...EMPTY, scanned: 3, finished: 1, skipped: true, refunds: REFUNDS })
+    h.visitEarly.mockRejectedValueOnce(new Error('la base se cayó'))
+    await expect(h.job.checkNow()).resolves.toEqual({ ...EMPTY, errors: 1, skipped: true, refunds: REFUNDS })
+    expect(h.visitEarly).toHaveBeenCalledTimes(2)
+    release(EMPTY)
+    await first
+    // Una pasada normal no la llama aparte: va dentro de la pasada.
+    await h.job.checkNow()
+    expect(h.visitEarly).toHaveBeenCalledTimes(2)
+  })
+
+  it('D661 · Ruling 99: un recorrido de devoluciones colgado sólo se retiene a sí mismo: la pasada del siguiente tick corre completa y a tiempo; el recorrido se salta hasta que el colgado termine', async () => {
+    let soltarRecorrido!: (v: unknown) => void
+    const sweepRefunds = jest
+      .fn()
+      .mockReturnValueOnce(new Promise(r => (soltarRecorrido = r)))
+      .mockResolvedValue(REFUNDS)
+    const h = harness(undefined, sweepRefunds)
+    const first = h.job.checkNow() // su pasada termina; su recorrido se queda colgado
+    await new Promise(r => setImmediate(r))
+    expect(h.reconcile).toHaveBeenCalledTimes(1)
+    expect(sweepRefunds).toHaveBeenCalledTimes(1)
+
+    // El siguiente tick: la pasada completa (no la visita sola) y sin esperar al recorrido colgado; el suyo se salta.
+    const second = await h.job.checkNow()
+    expect(second).toEqual({ ...EMPTY, scanned: 2, finished: 1, released: 1 })
+    expect(second.skipped).toBeUndefined()
+    expect(h.reconcile).toHaveBeenCalledTimes(2)
+    expect(h.visitEarly).not.toHaveBeenCalled()
+    expect(sweepRefunds).toHaveBeenCalledTimes(1)
+
+    // Cuando el colgado termina, el recorrido vuelve a correr.
+    soltarRecorrido(REFUNDS)
+    await first
+    await expect(h.job.checkNow()).resolves.toMatchObject({ refunds: REFUNDS })
+    expect(sweepRefunds).toHaveBeenCalledTimes(2)
   })
 
   it('arranca y para el cron', () => {

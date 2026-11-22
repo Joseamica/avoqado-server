@@ -1102,25 +1102,50 @@
       "loops": 0,
       "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes del cargo de tarjeta y del Payment; nunca bucle de Orders nuevas."
     },
+    "src/services/online-ordering/card/reconcile.service.ts#captureRetryStep#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "D661 (3C): la cuenta de UN pedido en línea, sola en su transacción (no aparta nada antes ni después: sólo lee el plazo y el estado del cargo) para decidir con el reloj real si un cobro en duda de «Nadie» se vuelve a mandar; nunca bucle de Orders nuevas."
+    },
     "src/services/online-ordering/card/release.service.ts#recordCapturedOutsideOnRelease#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
       "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes del cargo de tarjeta y del Payment del cobro hecho a mano; nunca bucle de Orders nuevas."
     },
-    "src/services/online-ordering/card/refund.service.ts#refundCardOnlineOrder#lockExistingOrderForPayment": {
+    "src/services/online-ordering/card/refund.service.ts#decidirDevolucionEnTx#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
-      "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes de la devolución, del Payment y de la caja; nunca bucle de Orders nuevas."
+      "reason": "D661 (Task 6, antes refundCardOnlineOrder): la decisión que comparten los dos destinos de la devolución de un pedido en línea. Una venta (la cuenta del pedido) y su ascendencia, antes del Payment, del pedido en línea (la reserva) y de la fila de devolución; nunca bucle de Orders nuevas. A la tarjeta es el primer candado; a saldo a favor va después de «primer-sobre» (devolverASaldoAFavor), como issueRefund con saldo."
     },
-    "src/services/online-ordering/card/refund.service.ts#refundCardOnlineOrder#bloquearCobroParaReembolso": {
+    "src/services/online-ordering/card/refund.service.ts#decidirDevolucionEnTx#bloquearCobroParaReembolso": {
       "count": 1,
       "loops": 0,
-      "reason": "Reentra la MISMA Order ya poseída y toma su Payment de Stripe (Order → Payment, el orden de issueRefund)."
+      "reason": "D661 (Task 6, antes refundCardOnlineOrder): reentra la MISMA Order ya poseída y toma su Payment de Stripe (Order → Payment, el orden de issueRefund), antes del pedido en línea y de la fila de devolución; a saldo, también antes de la clienta y su sobre (writeRefundInTx → prepararSobreDeSaldoAFavorEnTx)."
+    },
+    "src/services/online-ordering/card/refund.service.ts#porDevolverDeUnPedido#bloquearCobroParaReembolso": {
+      "count": 1,
+      "loops": 0,
+      "reason": "D661 (ola final, C1): la vista previa del MCP lee lo que queda por devolver con el MISMO cálculo que exige la devolución. Transacción corta de sólo lectura: toma la Order del pedido y su Payment de Stripe (Order → Payment, el orden de issueRefund y de decidirDevolucionEnTx) y nada más; no escribe ni toma sobres, turno ni filas de devolución."
+    },
+    "src/services/online-ordering/card/refund.service.ts#devolverASaldoAFavor#tomarCandadoPrimerSobreSiHaceFaltaEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "D661 (Task 6): la PRIMERA sentencia de la transacción de la devolución a saldo a favor de un pedido «Nadie», antes de Orders, Payments, pedido en línea, sobres y turno («primer-sobre» → filas → turno), como issueRefund con saldo (S3) y el Cambio (S5). La devolución a la tarjeta del mismo pedido no lo toma y empieza por la Order: no hay cruce (una espera la Order de la otra). Nadie toma una Order y después «primer-sobre» (sólo la devolución sin venta, también primero)."
     },
     "src/services/online-ordering/card/refund.service.ts#reverseRecordedRefund#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
       "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes de la devolución, del Payment y de la caja; nunca bucle de Orders nuevas."
+    },
+    "src/services/online-ordering/card/refund.service.ts#terminarSinDevolver#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "D661 (Task 5): una venta (la cuenta del pedido en línea) y su ascendencia, sola en su transacción, antes de la fila de devolución, del pedido en línea y de la marca de cocina de esa misma Order; no aparta Payment ni GiftCard; nunca bucle de Orders nuevas."
+    },
+    "src/services/online-ordering/card/devuelto.ts#cerrarComoDevueltoEnTx#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "D661 (Task 5): una venta (la cuenta del pedido en línea) y su ascendencia, antes del pedido en línea y de la marca de cocina de esa misma Order; no aparta Payment ni GiftCard. El barrido la llama una vez por pedido, cada una en su propia transacción (nunca varias Orders en una). Reentrar el candado en la misma transacción no espera."
     },
     "src/services/online-ordering/card/refund.service.ts#resolveReversedCardRefund#lockExistingOrderForPayment": {
       "count": 1,

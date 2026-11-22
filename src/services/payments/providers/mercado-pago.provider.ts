@@ -47,6 +47,7 @@ import type {
   PaymentStatus,
   RefundParams,
   RefundResult,
+  ChargeRefunds,
   RefundState,
   TokenizeCardParams,
   TokenizeCardResult,
@@ -304,5 +305,9 @@ export class MercadoPagoProvider implements IEcommerceProvider {
 
   async getApplicationFeeRefundedCents(_merchant: EcommerceMerchantWithProvider, _paymentIntentId: string): Promise<number> {
     throw new ProviderCapabilityError(PROVIDER_CODE, 'getApplicationFeeRefundedCents')
+  }
+
+  async getChargeRefunds(_merchant: EcommerceMerchantWithProvider, _paymentIntentId: string): Promise<ChargeRefunds> {
+    throw new ProviderCapabilityError(PROVIDER_CODE, 'getChargeRefunds')
   }
 }

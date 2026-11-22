@@ -5082,6 +5082,10 @@ model OrderItemModifier {
   quantity Int     @default(1)
   price    Decimal @db.Decimal(10, 2)
 
+  /// D40 (Flautas Coyoacán, como Fudo): la observación de ESTA parte del paquete («sin cebolla» sólo al Consomé). La manda el POS
+  /// en `modifierNotes` y sale en la comanda debajo de su parte. null = sin nota (apps viejas y todo lo de antes).
+  notes String?
+
   @@index([orderItemId])
 }
 
@@ -21662,6 +21666,15 @@ model OnlineOrderingSettings {
   requiresAcceptance Boolean   @default(true)
   /// Último sondeo de la lista «por cobrar» (pedidos sin aceptación que esperan pago en la barra): latido de presencia.
   lastToPayPollAt    DateTime?
+  /// D661: pagar con tarjeta al pedir en «Nadie» (apartar al pagar, cobrar cuando una caja abre el pedido). Su PROPIO consentimiento,
+  /// apagado de fábrica: pasar de «Mi equipo» a «Nadie» nunca hereda `acceptsCardOnline`.
+  cardOnlineNadie     Boolean   @default(false)
+  /// D661: último sondeo de una caja actualizada capaz de avisar los pedidos pagados en línea (cabecera
+  /// `x-online-orders-card-alert: 1` y permiso `orders:update`), rápido o lento. Sólo decide si se puede PRENDER `cardOnlineNadie` (7 días).
+  lastCardAlertPollAt DateTime?
+  /// D661 (Ruling 7): última vez que esa caja capaz recibió una respuesta de to-pay RÁPIDA (`pollSeconds` <= 30). En «Nadie» la tarjeta
+  /// sólo se ofrece si es de los últimos 90 s: una caja en espera larga (600 s) no cuenta como capaz de avisar a tiempo.
+  cardAlertFastPollAt DateTime?
   /// D662 parte 2 (v4): el corte propio de la pausa sola. Sólo cuentan los pedidos cuya hora límite fue DESPUÉS de
   /// max(esta hora, el interruptor `pausa-sola` de `InterruptorDePlataforma`). Sólo SUBE: la escriben «Reanudar» (`pauseOnlineOrdering(null)`, = ahora) y la
   /// propia lectura (`corteSeguro`, sin pausa). Encender, apagar, cambiar de modo y pausar 15/30/60 no la tocan. Null = sin corte propio.
@@ -21727,6 +21740,13 @@ model OnlineOrder {
   printClaimedAt DateTime?
   printClaimedBy String?
   printedAt      DateTime?
+
+  /// D661: el cierre del día lo dio por «No lo recogió» (pagado con tarjeta en «Nadie» y nunca entregado).
+  notPickedUpAt     DateTime?
+  /// D661: reserva «Devolviendo…», puesta bajo el candado de la orden ANTES de mover dinero: mientras exista no se entrega.
+  refundRequestedAt DateTime?
+  /// D661: cerrado como «Devuelto» (`COMPLETED` + esta hora): devuelto el 100 %, nada lo revive.
+  refundedAt        DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -21855,6 +21875,8 @@ model OnlineOrderCardRefund {
   lastSentAt       DateTime?
   /// Cuándo nació el renglón del libro: de aquí se cuenta la revisión tardía (1 h … 30 días).
   recordedAt       DateTime?
+  /// D661: la devolución fue a saldo a favor en el negocio, no a la tarjeta. Nace `RESOLVED` y el barrido de Stripe nunca la toma.
+  toStoreCredit    Boolean                     @default(false)
 
   reversal OnlineOrderCardRefundReversal?
 

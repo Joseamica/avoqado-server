@@ -13,6 +13,7 @@ import { ACTIVE_CURSOR_PATTERN, INBOX_PAGE_SIZE, MAX_CART_LINES } from './consta
 import { syncPaidClosedFolios, syncPaidFolios } from './folios.service'
 import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from './paidPickupSync'
 import { onlineOrderNeedsPrint } from './printClaim.service'
+import { DEVOLUCIONES_PUBLICAS, devolucionPublica, type DevolucionPublica } from './card/estadoPublico'
 import {
   BENEFICIOS_SELECT,
   CLIENTA_SELECT,
@@ -68,6 +69,19 @@ export interface InboxOrder {
   beneficios?: Array<{ nombre: string; monto: number }>
   /** S14 (R1): cuántas filas de descuento tiene la cuenta; si pasa de `beneficios.length`, se dice «y N más». */
   beneficiosTotal?: number
+  /**
+   * D661 (Task 4), ISO o `null`; opcionales para las apps viejas. `notPickedUpAt`: el cierre del día lo dio por «No lo recogió»
+   * (pagado con tarjeta en «Nadie» y nunca entregado). `refundRequestedAt`: «Devolviendo…» (no se entrega). `refundedAt`: «Devuelto».
+   */
+  notPickedUpAt?: string | null
+  refundRequestedAt?: string | null
+  refundedAt?: string | null
+  /**
+   * D661 (Ruling 60): la devolución del pago con tarjeta, leída de sus filas reales con la MISMA función del seguimiento y de «Mi cuenta»
+   * (`devolucionPublica`): `PENDING` en camino, `DONE` hecha, `REVERSED` el banco la regresó (se debe aunque haya `refundedAt`); `medio`
+   * por dónde llegó. `null` sin devolución; opcional para las apps viejas.
+   */
+  refund?: DevolucionPublica | null
   needsPrint: boolean
   items: Array<{
     productId: string | null
@@ -104,9 +118,24 @@ export const INBOX_SELECT = {
   estimatedReadyAt: true,
   printClaimedAt: true,
   printedAt: true,
+  // D661 (Ruling 2): con la devolución reservada o hecha ya no se pide comanda (`needsPrint`). Task 4: y lo COMPLETED sólo la pide si
+  // lo cerró el corte (`notPickedUpAt`); las tres marcas viajan en la respuesta.
+  notPickedUpAt: true,
+  refundRequestedAt: true,
+  refundedAt: true,
   createdAt: true,
-  // Fase 2: el cargo con tarjeta (1:1), en el mismo select: sin consulta extra por renglón.
-  charge: { select: { status: true, amount: true, capturedAmount: true, authorizedAt: true, capturedAt: true } },
+  // Fase 2: el cargo con tarjeta (1:1), en el mismo select: sin consulta extra por renglón. D661 (Ruling 60): y sus devoluciones con la
+  // MISMA lectura del seguimiento (una consulta más por página, no por renglón; ≤ 10 por cargo).
+  charge: {
+    select: {
+      status: true,
+      amount: true,
+      capturedAmount: true,
+      authorizedAt: true,
+      capturedAt: true,
+      cardRefunds: DEVOLUCIONES_PUBLICAS,
+    },
+  },
   order: {
     select: {
       id: true,
@@ -182,7 +211,11 @@ export function toInboxOrder(r: Row, now: Date): InboxOrder {
     paidAt: horaDelPago(r.order, r.createdAt),
     cliente: clientaDeLaCuenta(r.order),
     ...beneficiosDeLaCuenta(r.order),
-    needsPrint: onlineOrderNeedsPrint({ status: r.status, printedAt: r.printedAt, printClaimedAt: r.printClaimedAt }, now),
+    notPickedUpAt: r.notPickedUpAt?.toISOString() ?? null,
+    refundRequestedAt: r.refundRequestedAt?.toISOString() ?? null,
+    refundedAt: r.refundedAt?.toISOString() ?? null,
+    refund: devolucionPublica(r.charge?.cardRefunds ?? []) ?? null,
+    needsPrint: onlineOrderNeedsPrint(r, now),
     items: r.order.items.map(i => ({
       productId: i.productId ?? null,
       categoryId: i.product?.categoryId ?? null,

@@ -21,6 +21,8 @@ const ORDER_SELECT = {
   createdById: true,
   customerId: true,
   orderCustomers: { where: { isPrimary: true }, take: 1, select: { customerId: true } },
+  // D661: la regla «Cambio no aplica a un pedido «Nadie» pagado en línea» (`saleBlockReason`) se lee con la venta, bajo su candado.
+  onlineOrder: { select: { requiresAcceptance: true, paymentMode: true } },
 } as const
 const LINE_INCLUDE = {
   serializedItem: { select: { id: true } },

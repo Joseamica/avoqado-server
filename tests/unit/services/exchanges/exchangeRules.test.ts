@@ -18,6 +18,7 @@ import {
   type PayoutMode,
   type PayoutModes,
 } from '../../../../src/services/exchanges/exchangeRules'
+import type { SaleForExchange } from '../../../../src/services/exchanges/exchange.service'
 
 describe('effectiveExchangeCapacity', () => {
   it.each([
@@ -116,6 +117,7 @@ describe('saleBlockReason', () => {
     status: 'COMPLETED',
     paymentStatus: 'PAID',
     paymentSources: ['POS'],
+    onlineOrder: null,
     ...over,
   })
 
@@ -136,6 +138,34 @@ describe('saleBlockReason', () => {
   it('a paid sale has no sale-level block, even if already refunded: its lines decide', () => {
     expect(saleBlockReason(sale())).toBeNull()
     expect(saleBlockReason(sale({ paymentStatus: 'REFUNDED' }))).toBeNull()
+  })
+
+  // D661 tarea 7: el dinero de un pedido «Nadie» pagado con tarjeta en línea sólo regresa por la devolución del pedido.
+  it('D661: la venta de un pedido «Nadie» CARD_ONLINE → ONLINE_CARD, cobrada o no', () => {
+    const nadieConTarjeta = { requiresAcceptance: false, paymentMode: 'CARD_ONLINE' }
+    expect(saleBlockReason(sale({ source: 'WEB', onlineOrder: nadieConTarjeta }))).toBe('ONLINE_CARD')
+    expect(saleBlockReason(sale({ source: 'WEB', onlineOrder: nadieConTarjeta, paymentStatus: 'PENDING' }))).toBe('ONLINE_CARD')
+  })
+
+  it('D661: un pedido «Mi equipo» con tarjeta y un folio «Nadie» pagado en caja siguen como hoy', () => {
+    expect(saleBlockReason(sale({ source: 'WEB', onlineOrder: { requiresAcceptance: true, paymentMode: 'CARD_ONLINE' } }))).toBeNull()
+    expect(saleBlockReason(sale({ source: 'WEB', onlineOrder: { requiresAcceptance: false, paymentMode: 'PAY_AT_PICKUP' } }))).toBeNull()
+    expect(saleBlockReason(sale({ onlineOrder: null }))).toBeNull()
+  })
+
+  it('D661 · D3: onlineOrder es obligatorio (null si la venta no es de la tienda en línea): sin él no compila', () => {
+    // Lo vigila `npm run typecheck`: si el campo volviera a ser opcional, la directiva sobraría y el typecheck truena. Así, quitar el
+    // `select` del pedido en línea al leer la venta ya no apaga la regla de dinero sin avisar.
+    // @ts-expect-error — falta `onlineOrder`
+    const sinElCampo: Parameters<typeof saleBlockReason>[0] = {
+      source: 'POS',
+      status: 'COMPLETED',
+      paymentStatus: 'PAID',
+      paymentSources: [],
+    }
+    // @ts-expect-error — falta `onlineOrder`
+    const ordenSinElCampo: Pick<SaleForExchange['order'], 'onlineOrder'> = {}
+    expect([sinElCampo.source, ordenSinElCampo]).toEqual(['POS', {}])
   })
 })
 

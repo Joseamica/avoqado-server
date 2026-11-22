@@ -12,6 +12,7 @@ import { abandonCardPayment, createOnlineOrder, getTrackingByToken } from '@/ser
 import { clientaDeLaSesion } from '@/services/online-ordering/clientaDeLaSesion'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
 import { cardOnlineAvailable } from '@/services/online-ordering/card/merchant'
+import { storeCreditAvailable } from '@/services/storeCredit/storeCreditTender'
 import { cuentaConBeneficios } from '@/services/online-ordering/cuentaConBeneficios'
 import { buildVenueContact } from '@/services/online-ordering/settings.service'
 import { toPublicQuote } from '@/services/online-ordering/quote.service'
@@ -38,6 +39,8 @@ function fail(res: Response, error: any, fallback: string) {
   return res.status(status).json({
     success: false,
     code: expose ? error?.code : undefined,
+    // D661 (D1): el 400 que antes daba el validador traía `message`; una tienda publicada que sólo lee ese campo lo sigue leyendo.
+    message: error?.conMensajeDelValidador === true ? error.message : undefined,
     error: expose ? error.message : fallback,
     details: expose ? error?.details : undefined,
     // Codex r4: decisión DURABLE sobre la llave del pedido (`final()` en order.service): sólo con ella la tienda suelta un 404.
@@ -113,6 +116,9 @@ export async function getInfo(req: Request, res: Response) {
         requiresAcceptance: state.config.requiresAcceptance !== false,
         closesAt: closesAt(state.config.hours, new Date(), row?.timezone || 'America/Mexico_City')?.toISOString() ?? null,
         paymentModes: { payAtPickup: state.config.acceptsPayAtPickup, cardOnline },
+        // D661 (aditivo): ¿el negocio puede devolver como saldo a favor? Con él (y una cuenta con teléfono) la tienda avisa antes de
+        // pagar «si cancelas o no recoges, te queda como saldo a favor»; sin él, «el negocio decide cómo devolverte».
+        storeCredit: storeCreditAvailable(),
         minOrderAmount: state.config.minOrderAmount,
         estimatedPrepMinutes: state.config.defaultPrepMinutes,
         acceptTimeoutMinutes: ACCEPT_TIMEOUT_MINUTES,
@@ -190,11 +196,13 @@ export async function postOrder(req: Request, res: Response) {
           idempotencyKey: key,
           items: body.items,
           expectedTotal: body.expectedTotal,
-          // R7: con tarjeta el esquema exige el teléfono. R29: el borrador de tarjeta no guarda canal.
-          customer: { name: body.customer.name, phone: body.customer.phone as string, email: body.customer.email ?? null },
+          // D661 (r1 #12): el teléfono lo decide el servicio según el modo («Mi equipo» lo exige; «Nadie» usa el de la sesión).
+          // R29: el borrador de tarjeta no guarda canal.
+          customer: { name: body.customer.name, phone: body.customer.phone ?? null, email: body.customer.email ?? null },
           note: body.note ?? null,
           whatsappConsent: body.whatsappConsent === true,
-          // S11: la clienta cuenta si su teléfono probado es el del pedido (lo decide el servicio); con ella, sus beneficios.
+          // S11: en «Mi equipo» la clienta cuenta si su teléfono probado es el del pedido; en «Nadie» (D661) es la de la sesión, que
+          // la tarjeta exige. Lo decide el servicio; con ella, sus beneficios.
           customerId: clientaDeLaSesion(auth),
           verifiedPhone: auth?.verifiedPhone ?? null,
           beneficios: body.beneficios ?? null,

@@ -83,6 +83,8 @@ export const listMenuProductsHandler = async (req: Request, res: Response, next:
 /**
  * S3 (clientes, Codex plan r1 #2): UN pedido en línea por el id de su cuenta, con la forma de la bandeja. El detalle de la cuenta del
  * panel lo usa para «Devolver a la tarjeta» después de que la bandeja (24 h) ya no lo muestra. 404 si no es pedido en línea.
+ * D661 (Ruling 14): el MISMO manejador lee el pedido para la caja (`GET /mobile|tpv/…/online-orders/:orderId`): así imprime la comanda
+ * de `comandasPorImprimir` de un pedido que el cierre del día ya sacó de «Por entregar». Sólo lee: no late ni tiene candado de plan.
  */
 export const getOnlineOrderHandler = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -125,7 +127,7 @@ function cardRefundIdempotencyKey(req: Request): string {
 export const refundCardHandler = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
-    const { amount, reason, note, expectedLatestRefundId } = req.body
+    const { amount, reason, note, expectedLatestRefundId, destino } = req.body
     const idempotencyKey = cardRefundIdempotencyKey(req)
     const data = await refundCardOnlineOrder({
       venueId,
@@ -136,6 +138,7 @@ export const refundCardHandler = async (req: Request, res: Response, next: NextF
       idempotencyKey,
       note: note ?? null,
       expectedLatestRefundId,
+      destino: destino ?? 'CARD',
     })
     return res.json({ success: true, data })
   } catch (e) {

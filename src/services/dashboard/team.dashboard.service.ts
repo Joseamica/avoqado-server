@@ -962,7 +962,7 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
     }
   }
 
-  // Update staff venue
+  // Update staff venue. `endDate` lo sella la base al apagar `active` y lo limpia al reactivar (trigger `StaffVenue_sella_baja`, D19).
   const updatedStaffVenue = await prisma.staffVenue
     .update({
       where: { id: teamMemberId, ...(updates.expectedState ? { venueId, ...updates.expectedState } : {}) },

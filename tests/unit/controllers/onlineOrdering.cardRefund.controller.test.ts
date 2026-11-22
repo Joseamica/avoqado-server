@@ -111,3 +111,40 @@ describe('POST …/card-refund: llave y monto', () => {
     expect(mockRefund).not.toHaveBeenCalled()
   })
 })
+
+describe('POST …/card-refund: el destino (D661, Task 5)', () => {
+  it('sin destino llega como tarjeta (CARD); CARD y STORE_CREDIT llegan tal cual', async () => {
+    await request(app).post(URL_).set('Idempotency-Key', KEY).send(body())
+    expect(mockRefund.mock.calls[0][0].destino).toBe('CARD')
+    for (const destino of ['CARD', 'STORE_CREDIT']) {
+      mockRefund.mockClear()
+      const r = await request(app).post(URL_).set('Idempotency-Key', KEY).send(body({ destino }))
+      expect(r.status).toBe(200)
+      expect(mockRefund.mock.calls[0][0].destino).toBe(destino)
+    }
+  })
+
+  it('un destino desconocido → 400 en español sin llamar al servicio', async () => {
+    const r = await request(app)
+      .post(URL_)
+      .set('Idempotency-Key', KEY)
+      .send(body({ destino: 'CASH' }))
+    expect(r.status).toBe(400)
+    expect(r.body.message).toContain('El destino de la devolución')
+    expect(mockRefund).not.toHaveBeenCalled()
+  })
+
+  it('el 400 FULL_REFUND_ONLY y el 409 PRINT_IN_FLIGHT del servicio llegan con su código y su texto', async () => {
+    const { BadRequestError, ConflictError } = jest.requireActual('@/errors/AppError')
+    mockRefund.mockRejectedValueOnce(
+      new BadRequestError('Este pedido se devuelve completo: $250.00. No se aplicó nada.', 'FULL_REFUND_ONLY'),
+    )
+    const a = await request(app).post(URL_).set('Idempotency-Key', KEY).send(body())
+    expect(a.status).toBe(400)
+    expect(a.body).toMatchObject({ code: 'FULL_REFUND_ONLY', message: expect.stringContaining('$250.00') })
+    mockRefund.mockRejectedValueOnce(new ConflictError('Se está imprimiendo la comanda; intenta en un momento', 'PRINT_IN_FLIGHT'))
+    const b = await request(app).post(URL_).set('Idempotency-Key', KEY).send(body())
+    expect(b.status).toBe(409)
+    expect(b.body).toMatchObject({ code: 'PRINT_IN_FLIGHT', message: 'Se está imprimiendo la comanda; intenta en un momento' })
+  })
+})

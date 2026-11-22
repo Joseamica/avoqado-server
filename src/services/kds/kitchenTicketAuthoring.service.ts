@@ -101,11 +101,29 @@ export async function authorKitchenTickets(params: {
         status: true,
         loyaltySaleAt: true,
         onlineOrder: {
-          select: { requiresAcceptance: true, createdAt: true, expiredAt: true, cancelledAt: true, cancelledBy: true, rejectedAt: true },
+          select: {
+            requiresAcceptance: true,
+            createdAt: true,
+            expiredAt: true,
+            cancelledAt: true,
+            cancelledBy: true,
+            rejectedAt: true,
+            refundRequestedAt: true,
+            refundedAt: true,
+          },
         },
       },
     })
     if (!vigente || vigente.status === 'CANCELLED' || vigente.status === 'DELETED') return [] as string[]
+    // D661 (Task 5): con la devolución reservada («Devolviendo…») o hecha («Devuelto») no se arma comanda NUEVA; la marca se limpia con
+    // la guarda de siempre. Si la devolución falla, la transacción que retira la reserva vuelve a dejar la marca y la cocina retoma.
+    if (vigente.onlineOrder?.refundRequestedAt || vigente.onlineOrder?.refundedAt) {
+      await tx.order.updateMany({
+        where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } },
+        data: { kitchenPendingAt: null },
+      })
+      return [] as string[]
+    }
     // 🔴 S9 v5 (B4, D3 «en duda, manda»): un folio «Nadie» que se anuló alguna vez (el sello de A0) sólo NO se arma si ningún renglón se
     // creó ni se modificó desde T − 5 s (T = la menor de sus fechas de cierre): es dinero tardío sobre lo que ya existía al anular. Si la
     // cajera tocó algo (agregó, subió una cantidad, una cortesía), se arma exactamente como hoy, aunque repita lo viejo (deuda E, BASE).
@@ -159,7 +177,7 @@ export async function authorKitchenTickets(params: {
           weightQuantity: true,
           weightUnit: true,
           product: { select: { name: true, categoryId: true, printStationId: true, category: { select: { printStationId: true } } } },
-          modifiers: { select: { name: true, quantity: true, modifier: { select: { name: true } } } },
+          modifiers: { select: { name: true, quantity: true, notes: true, modifier: { select: { name: true } } } },
         },
         orderBy: [{ sequence: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
         ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
@@ -204,7 +222,8 @@ export async function authorKitchenTickets(params: {
         // Codex 3.6 (S6): la venta por peso lleva `quantity = 1`; sin el peso la cocina no sabe cuánto servir.
         productName: nombreEnCocina(r.productName ?? r.product?.name ?? 'Producto', r.weightQuantity, r.weightUnit),
         quantity: r.quantity,
-        modifiers: toKdsModifierLabels(r.modifiers.map(m => ({ name: m.name ?? m.modifier?.name ?? null, quantity: m.quantity }))),
+        // D40: con la nota de cada parte, debajo de su parte en la cocina.
+        modifiers: toKdsModifierLabels(r.modifiers.map(m => ({ name: m.name ?? m.modifier?.name ?? null, quantity: m.quantity, notes: m.notes }))),
         notes: r.notes,
         externalId: r.externalId,
         sentToKitchenAt: r.sentToKitchenAt,

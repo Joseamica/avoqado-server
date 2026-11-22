@@ -61,6 +61,8 @@ export type GiftCardErrorCode =
   // el gerente (una petición vieja que llega tarde no regresa el teléfono anterior).
   | 'STORE_CREDIT_PHONE_NOT_ALLOWED'
   | 'STORE_CREDIT_PHONE_OUTDATED'
+  // D661 (Task 6): la devolución a saldo de un pedido «Nadie» exige que el sobre sea del teléfono que la clienta VERIFICÓ al pagar.
+  | 'STORE_CREDIT_PHONE_MISMATCH'
 
 export class GiftCardError extends AppError {
   constructor(code: GiftCardErrorCode, mensaje: string, status: 400 | 403 | 404 | 409 | 422 | 429, extra?: Record<string, unknown>) {

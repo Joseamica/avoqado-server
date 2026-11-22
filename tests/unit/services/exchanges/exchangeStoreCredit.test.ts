@@ -591,6 +591,121 @@ describe('prepareExchangeInTx (S10, I1): lo que cambia entre el envío y el reen
     })
   })
 
+  /**
+   * D661 tarea 7: el dinero de un pedido «Nadie» pagado con tarjeta en línea sólo regresa por la devolución del pedido (100 %, a la
+   * tarjeta o como saldo a favor). La regla se vuelve a leer con la venta cargada DESPUÉS del candado de la orden.
+   */
+  describe('D661: «Cambio» no aplica a un pedido «Nadie» pagado en línea', () => {
+    const espias: jest.SpyInstance[] = []
+    const ventaConPedido = (onlineOrder: { requiresAcceptance: boolean; paymentMode: string } | null) =>
+      jest.spyOn(exchangeSale, 'loadSaleForExchange').mockResolvedValue({
+        order: {
+          id: 'order-1',
+          orderNumber: 'W-1',
+          status: 'COMPLETED',
+          paymentStatus: 'PAID',
+          source: 'WEB',
+          type: 'TAKEOUT',
+          onlineOrder,
+        },
+        lines: [
+          {
+            id: 'item-1',
+            productId: 'prod-viejo',
+            productName: 'Playera M',
+            quantity: 1,
+            orderPromotionId: null,
+            giftCardId: null,
+            serialized: false,
+            product: { type: 'REGULAR', soldByWeight: false, priceCents: 50000, deletedAt: null, productGroupId: null },
+          },
+        ],
+        charged: { atribuible: true, motivo: null, renglones: [], cobradoCents: new Map([['item-1', 50000]]) },
+        returnedByLine: new Map(),
+        chainByPaymentId: new Map(),
+        catalogProducts: new Map([
+          [
+            'prod-1',
+            {
+              id: 'prod-1',
+              name: 'Playera S',
+              deletedAt: null,
+              active: true,
+              type: 'REGULAR',
+              soldByWeight: false,
+              productGroupId: null,
+              price: new Prisma.Decimal(300),
+            },
+          ],
+        ]),
+        payments: [
+          {
+            id: 'pay-1',
+            createdAt: new Date('2026-11-20T17:00:00Z'),
+            amountCents: 50000,
+            tipCents: 0,
+            processorData: {},
+            refunds: [],
+            money: tarjetaDeTerminal,
+            rootPaymentId: 'pay-1',
+            rootMoney: tarjetaDeTerminal,
+          },
+        ],
+      } as never)
+    let candado: jest.SpyInstance
+    beforeEach(() => {
+      ;(tx as any).venueSettings = { findUnique: jest.fn(async () => ({ storeCreditOnly: false })) }
+      candado = jest.spyOn(paymentShiftClaim, 'lockExistingOrderForPayment').mockResolvedValue(true as never)
+      espias.push(
+        candado,
+        jest.spyOn(accountingAt, 'exchangeAccountingAt').mockResolvedValue(new Date('2026-11-20T18:00:00Z')),
+        jest.spyOn(precios, 'resolverPreciosDeLineas').mockResolvedValue([{ unitPriceCents: 30000 }] as never),
+      )
+    })
+    afterEach(() => espias.splice(0).forEach(s => s.mockRestore()))
+    const enEfectivo = () => cuerpo({ method: 'CASH', customerId: undefined })
+    /** Pasa la regla: lo prueba llegar al reparto, que aquí se detiene. */
+    const llegaAlReparto = async () => {
+      espias.push(
+        jest.spyOn(exchangeRulesModule, 'allocateAcrossPayments').mockImplementationOnce(() => {
+          throw new Error('ALTO_DESPUES_DE_LA_REGLA')
+        }),
+      )
+      await expect(preparar(enEfectivo())).rejects.toThrow('ALTO_DESPUES_DE_LA_REGLA')
+    }
+
+    it('Cambio sobre la venta de un pedido «Nadie» CARD_ONLINE → 409 EXCHANGE_NOT_FOR_ONLINE_CARD con texto para la caja', async () => {
+      const carga = ventaConPedido({ requiresAcceptance: false, paymentMode: 'CARD_ONLINE' })
+      espias.push(carga)
+      const error = await preparar(enEfectivo()).catch(e => e)
+      expect(error).toBeInstanceOf(ExchangeError)
+      expect(error).toMatchObject({
+        statusCode: 409,
+        code: 'EXCHANGE_NOT_FOR_ONLINE_CARD',
+        message:
+          'Este pedido se pagó con tarjeta en línea y no admite Cambio. Para regresarle su dinero a la clienta, usa la devolución del pedido.',
+        details: { orderItemId: null, reason: 'ONLINE_CARD' },
+      })
+      // Bajo el candado: la venta se lee DESPUÉS de tomar el candado de la orden.
+      expect(candado.mock.invocationCallOrder[0]).toBeLessThan(carga.mock.invocationCallOrder[0])
+    })
+
+    it('una venta normal sigue pudiendo cambiarse', async () => {
+      espias.push(ventaConPedido(null))
+      await llegaAlReparto()
+    })
+
+    it('un pedido «Mi equipo» con tarjeta sigue pudiendo cambiarse, como hoy', async () => {
+      espias.push(ventaConPedido({ requiresAcceptance: true, paymentMode: 'CARD_ONLINE' }))
+      await llegaAlReparto()
+    })
+
+    it('un folio «Nadie» pagado en caja sigue pudiendo cambiarse, como hoy', async () => {
+      espias.push(ventaConPedido({ requiresAcceptance: false, paymentMode: 'PAY_AT_PICKUP' }))
+      await llegaAlReparto()
+    })
+  })
+
   it('con la sucursal sin ventas → VENUE_SALES_DISABLED (403), leído con la transacción', async () => {
     tx.venue.findUnique.mockResolvedValue({
       id: 'v1',

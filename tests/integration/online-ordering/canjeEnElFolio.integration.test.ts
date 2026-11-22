@@ -60,6 +60,8 @@ jest.setTimeout(120_000)
 const RUN = cuid()
 const PESOS = (v: Prisma.Decimal | number | string) => new Prisma.Decimal(v).toFixed(2)
 const PUEDE = { assertCanCreate: async () => {} }
+/** D661 (Ruling 52): los límites de la captura de quien acepta o abre el pedido. */
+const CAPTURA_DE_QUIEN_ACEPTA = { timeoutMs: 60_000, maxNetworkRetries: 1 }
 /** Codex r5: la comprobación del plan que no se pudo hacer (el 503 reintentable de `requirePublicVenueFeatureStrict`). */
 const PLAN_503 = {
   assertCanCreate: async () => {
@@ -655,7 +657,8 @@ describe("S11 · tarjeta: el borrador autoriza su total estricto y el folio nace
     await expect(acceptOnlineOrder({ venueId: equipo.venueId, orderId: pedido.orderId, staffId: null })).resolves.toMatchObject({
       outcome: 'OK',
     })
-    expect(captureSpy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ amountCents: 9000 }))
+    // D661 (Ruling 52): quien acepta captura con 60 s por intento y un reintento del SDK.
+    expect(captureSpy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ amountCents: 9000 }), CAPTURA_DE_QUIEN_ACEPTA)
   })
 
   it("R2'': S10 degradado + automático de $10: el borrador ⇒ PRICE_CHANGED con totalEstricto 90; K2 con 90 ⇒ autoriza, confirma, acepta y captura $90", async () => {
@@ -676,7 +679,7 @@ describe("S11 · tarjeta: el borrador autoriza su total estricto y el folio nace
     await expect(acceptOnlineOrder({ venueId: equipo.venueId, orderId: pedido.orderId, staffId: null })).resolves.toMatchObject({
       outcome: 'OK',
     })
-    expect(captureSpy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ amountCents: 9000 }))
+    expect(captureSpy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ amountCents: 9000 }), CAPTURA_DE_QUIEN_ACEPTA)
   })
 
   it("R2''': sin lugar en el semáforo (tope 0) el borrador con sesión responde 503 reintentable, sin decisión bajo la llave ni Checkout", async () => {

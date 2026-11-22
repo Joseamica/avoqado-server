@@ -300,6 +300,10 @@
       "clase": "EN_TX",
       "etiqueta": "operarSobreDeGerenteEnTx"
     },
+    "src/services/giftCards/giftCardLedger.ts#prepararSobreDeSaldoAFavorEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "prepararSobreDeSaldoAFavorEnTx"
+    },
     "src/services/giftCards/giftCardLedger.ts#revertirCanjeEnTx": {
       "clase": "EN_TX",
       "etiqueta": "revertirCanjeEnTx"
@@ -1010,6 +1014,11 @@
     "src/services/online-ordering/card/confirm.service.ts#confirmCardAuthorization": {
       "etiqueta": "confirmCardAuthorization",
       "cantidad": 1
+    },
+    "src/services/online-ordering/card/refund.service.ts#devolverASaldoAFavor": {
+      "etiqueta": "devolverASaldoAFavor",
+      "cantidad": 1,
+      "nota": "D661 (Task 6): la devolución a saldo a favor de un pedido «Nadie» escribe el sobre (GiftCard) dentro de su withDeadlockRetry, como issueRefund con saldo. Lo de afuera (aviso a la bandeja y bitácoras) sale de su retorno, después del commit."
     },
     "src/services/online-ordering/folios.service.ts#prepararFolioPagado": {
       "etiqueta": "prepararFolioPagado",
