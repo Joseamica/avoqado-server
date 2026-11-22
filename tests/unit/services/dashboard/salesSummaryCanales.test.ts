@@ -236,6 +236,45 @@ describe('computeSalesByChannel', () => {
     expect(r.cuadra).toBe(false)
   })
 
+  it('🔴 Codex r3 #1 · una comisión real de $0.01 que llegó entre lecturas no se reparte como redondeo (no se le acredita a otro canal)', async () => {
+    const cobros = [
+      {
+        source: 'TPV',
+        mesa: true,
+        tipo: null,
+        por_tipo: 1,
+        propinas: '0',
+        cobros: 1,
+        comision: '0.0100',
+        terceros: '0',
+        devuelto: '0',
+        reabierto: '0',
+        devoluciones: 0,
+        devoluciones_de_abono: 0,
+      },
+      {
+        source: 'TPV',
+        mesa: false,
+        tipo: null,
+        por_tipo: 1,
+        propinas: '0',
+        cobros: 1,
+        comision: '0',
+        terceros: '0',
+        devuelto: '0',
+        reabierto: '0',
+        devoluciones: 0,
+        devoluciones_de_abono: 0,
+      },
+    ]
+    const db = { $queryRawUnsafe: jest.fn().mockResolvedValueOnce([]).mockResolvedValueOnce(cobros) }
+    const r = await computeSalesByChannel('v', new Date(), new Date(), { db: db as never, cabecera: { platformFees: 0 } })
+    const comision = Object.fromEntries(r.byChannel.map(f => [f.key, f.platformFees]))
+    // Antes: Mesas $0.01 y Mostrador −$0.01 con `cuadra: true`. Ahora cada uno lo suyo y el aviso.
+    expect(comision).toEqual({ TABLES: 0.01, COUNTER: 0 })
+    expect(r.cuadra).toBe(false)
+  })
+
   it('🔴 Codex r2 #1 · un cobro que entró entre las lecturas cambia el conteo: no cuadra', async () => {
     const cobros = [
       {

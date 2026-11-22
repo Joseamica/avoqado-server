@@ -131,10 +131,10 @@ type Crudo = Record<CampoDeDinero, number> & { orderCount: number | null; transa
 export type CabeceraDeCanales = Partial<Record<CampoDeDinero, number | null>> & { transactionCount?: number; refundCount?: number }
 
 /**
- * Los importes que llevan más de dos decimales por cobro (la comisión de Avoqado es de 4): ahí, y sólo ahí, la tabla y la cabecera
- * pueden diferir $0.01 por redondeo. En los demás (todos de dos decimales) cualquier diferencia es real (Codex r2 #1).
+ * ¿La tabla y la cabecera leyeron lo mismo? Se comparan los importes CRUDOS a 4 decimales (la comisión de Avoqado es de 4 por cobro),
+ * antes de redondear: así una comisión real de $0.01 que llegó entre las dos lecturas no pasa por redondeo (Codex r3 #1; r2 #1).
  */
-const CON_DECIMALES_DE_MAS: ReadonlySet<CampoDeDinero> = new Set(['platformFees', 'totalCollected'])
+const mismoImporte = (a: number, b: number) => Math.round(a * 1e4) === Math.round(b * 1e4)
 
 const vacio = (): Crudo => ({
   grossSales: 0,
@@ -189,16 +189,15 @@ function cerrar<K extends string>(grupos: Map<K, Crudo>, cabecera: CabeceraDeCan
   const descuadres: string[] = []
   for (const campo of CAMPOS_DE_DINERO) {
     const valores = crudos.map(c => c[campo])
-    const propio = centavos(valores.reduce((s, v) => s + v, 0))
+    const crudo = valores.reduce((s, v) => s + v, 0)
     // El objetivo es la cifra que enseña la cabecera (Codex r1 #4: su resta en `Number` puede redondear $0.01 distinto), pero sólo
-    // si la diferencia es de redondeo: $0.01 en un importe de 4 decimales, nada en los de 2. Si no, NO se esconde repartiéndola: es
-    // que la cabecera y la tabla leyeron cosas distintas (una venta que entró entre las dos lecturas, Codex r2 #1).
+    // si las dos leyeron el mismo importe. Si no, NO se esconde repartiéndolo: la cabecera y la tabla leyeron cosas distintas (una
+    // venta o un costo que entró entre las dos lecturas, Codex r2 #1 y r3 #1) y cada renglón dice lo suyo.
     const deLaCabecera = cabecera[campo]
-    let objetivo = propio
+    let objetivo = centavos(crudo)
     if (typeof deLaCabecera === 'number') {
-      const suyo = centavos(deLaCabecera)
-      if (Math.abs(suyo - propio) <= (CON_DECIMALES_DE_MAS.has(campo) ? 1 : 0)) objetivo = suyo
-      else descuadres.push(`${campo}: cabecera ${suyo / 100}, tabla ${propio / 100}`)
+      if (mismoImporte(deLaCabecera, crudo)) objetivo = centavos(deLaCabecera)
+      else descuadres.push(`${campo}: cabecera ${deLaCabecera}, tabla ${crudo}`)
     }
     redondeados.set(campo, repartirCentavos(valores, objetivo, llaves))
   }

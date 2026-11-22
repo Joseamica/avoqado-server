@@ -72,7 +72,7 @@ export function registerSalesByChannelTools(server: McpServer, scope: McpScope) 
     'Sales of a venue you can access split by channel (where the sale came in: counter, tables, self-service kiosk, customer QR, online store, online payments, payment links, phone, recorded in the dashboard, Rappi, Uber Eats, DiDi Food, other delivery apps) and by order type (in the venue, takeout, delivery, pickup, direct record, amount-only charge), over a date range (venue-local days; default today and the 6 previous days, like the dashboard). Same numbers as the dashboard Sales Summary: each table adds up to its headline to the cent (gross sales, discounts, refunds, net sales, tips, Avoqado fees, third-party fees, net collected, transactions, refunds count; orders per row). Money in pesos. Also returns what was collected in advance and is NOT a sale (class packages bought online, in pesos and any other currency listed apart; reservation deposits net of refunds). Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
     {
       venueId: z.string().describe('Venue to analyze (must be in your scope)'),
-      fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
+      fromDate: z.string().optional().describe('Start date YYYY-MM-DD, venue-local (default: 6 days before today, so 7 days with today)'),
       toDate: z.string().optional().describe('End date YYYY-MM-DD (default: today)'),
     },
     async ({ venueId, fromDate, toDate }) => {
