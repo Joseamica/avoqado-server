@@ -934,7 +934,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       const demasiadas = (filas: number, alMenos = false) =>
         text({
           ok: false,
-          error: `El resumen tendría ${alMenos ? 'más de ' : ''}${filas.toLocaleString('es-MX')} filas (máximo ${EXPORT_PDF_ROW_CAP.toLocaleString('es-MX')}). Usa un rango más corto o un desglose más grande (days, weeks o months).`,
+          error: `El resumen tendría ${alMenos ? 'al menos ' : ''}${filas.toLocaleString('es-MX')} filas (máximo ${EXPORT_PDF_ROW_CAP.toLocaleString('es-MX')}). Usa un rango más corto o un desglose más grande (days, weeks o months).`,
         })
       if ((report.byPeriod?.length ?? 0) > EXPORT_PDF_ROW_CAP) return demasiadas(report.byPeriod!.length, true)
       const { rows } = flattenSalesSummaryForExport(report, requested, tz)

@@ -359,7 +359,7 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
     const demasiadas = (filas: number, alMenos = false) =>
       res.status(413).json({
         success: false,
-        message: `El archivo tendría ${alMenos ? 'más de ' : ''}${filas.toLocaleString('es-MX')} filas y el máximo en ${format === 'pdf' ? 'PDF' : 'CSV o Excel'} es ${cap.toLocaleString('es-MX')}. Elige un periodo más corto o un desglose más grande (días, semanas o meses).`,
+        message: `El archivo tendría ${alMenos ? 'al menos ' : ''}${filas.toLocaleString('es-MX')} filas y el máximo en ${format === 'pdf' ? 'PDF' : 'CSV o Excel'} es ${cap.toLocaleString('es-MX')}. Elige un periodo más corto o un desglose más grande (días, semanas o meses).`,
       })
     if ((report.byPeriod?.length ?? 0) > cap) {
       demasiadas(report.byPeriod!.length, true) // sólo los periodos: con las otras secciones son más

@@ -33,18 +33,20 @@ describe('relojDelNegocio', () => {
     expect(relojDelNegocio(new Date('2026-11-22T02:30:00.000Z'), null)).toMatchObject({ dia: '21', hora: '20' })
   })
 
-  it('20,000 filas no retienen el hilo (un formateador por zona)', () => {
+  it('20,000 filas no retienen el hilo (un formateador por zona), tampoco con una zona inválida (Codex r5)', () => {
     const t0 = Date.now()
-    for (let i = 0; i < 20_000; i++) relojDelNegocio(new Date(1_790_000_000_000 + i * 60_000), 'America/Mexico_City')
+    for (let i = 0; i < 20_000; i++) relojDelNegocio(new Date(1_790_000_000_000 + i * 60_000), i % 2 ? 'America/Mexico_City' : 'GMT-6')
     // Con `formatInTimeZone` por fila eran ~880 ms en la Mac (Codex r4); ahora ~80 ms. Holgura para una máquina cargada.
     expect(Date.now() - t0).toBeLessThan(500)
   })
 })
 
 describe('zonaDelCalculo', () => {
-  it('deja pasar una zona IANA y cambia por CDMX lo que el cálculo en SQL rechaza («GMT», «GMT-6», vacío)', () => {
+  it('deja pasar una zona IANA; un nombre que Intl conoce va a su forma canónica; lo demás, a CDMX', () => {
     expect(zonaDelCalculo('America/Tijuana')).toBe('America/Tijuana')
     expect(zonaDelCalculo('UTC')).toBe('UTC')
-    for (const mala of ['GMT', 'GMT-6', '', null, undefined]) expect(zonaDelCalculo(mala)).toBe('America/Mexico_City')
+    // Codex r5: «GMT» es la misma hora que «UTC»; mandarla a CDMX corría seis horas el día de la MCP.
+    expect(zonaDelCalculo('GMT')).toBe('UTC')
+    for (const mala of ['GMT-6', 'Foo/Bar', '', null, undefined]) expect(zonaDelCalculo(mala)).toBe('America/Mexico_City')
   })
 })

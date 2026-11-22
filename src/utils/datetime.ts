@@ -455,22 +455,32 @@ export function formatInVenueTimezone(
   return formatInTimeZone(date, timezone, formatString)
 }
 
-/** One Intl formatter per zone (a handful of zones in all): `formatInTimeZone` builds one per call, ~40 µs a row. */
+/**
+ * One Intl formatter per zone string (a handful in all): `formatInTimeZone` builds one per call, ~40 µs a row. An invalid zone
+ * caches the default one under its own name (no retry per row). Capped: venue zones are user input (case variants…).
+ */
 const relojes = new Map<string, Intl.DateTimeFormat>()
+const nuevoReloj = (timeZone: string) =>
+  new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+    timeZoneName: 'longOffset',
+  })
 function relojDe(timezone: string): Intl.DateTimeFormat {
   let reloj = relojes.get(timezone)
   if (!reloj) {
-    reloj = new Intl.DateTimeFormat('en-CA', {
-      timeZone: timezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hourCycle: 'h23',
-      timeZoneName: 'longOffset',
-    })
+    try {
+      reloj = nuevoReloj(timezone)
+    } catch {
+      reloj = nuevoReloj(DEFAULT_TIMEZONE)
+    }
+    if (relojes.size >= 200) relojes.clear() // ponytail: a full clear is enough for a cache of a few zones
     relojes.set(timezone, reloj)
   }
   return reloj
@@ -485,14 +495,8 @@ export function relojDelNegocio(
   instante: Date,
   timezone: string | null | undefined,
 ): { anio: string; mes: string; dia: string; hora: string; minuto: string; segundo: string; desfase: string } {
-  let reloj: Intl.DateTimeFormat
-  try {
-    reloj = relojDe(timezone || DEFAULT_TIMEZONE)
-  } catch {
-    reloj = relojDe(DEFAULT_TIMEZONE)
-  }
   const p: Record<string, string> = {}
-  for (const { type, value } of reloj.formatToParts(instante)) p[type] = value
+  for (const { type, value } of relojDe(timezone || DEFAULT_TIMEZONE).formatToParts(instante)) p[type] = value
   // longOffset: «GMT-06:00», or «GMT» at offset zero.
   const desfase = p.timeZoneName === 'GMT' ? '+00:00' : (p.timeZoneName ?? '').replace('GMT', '')
   return { anio: p.year, mes: p.month, dia: p.day, hora: p.hour, minuto: p.minute, segundo: p.second, desfase }
