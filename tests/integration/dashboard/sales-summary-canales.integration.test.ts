@@ -253,6 +253,35 @@ beforeAll(async () => {
   })
   // TPV · PAGO RÁPIDO: $75 tecleados (la terminal guarda TAKEOUT): mostrador, y no es «para llevar».
   await cuenta({ venueId: tienda, source: 'TPV', type: 'TAKEOUT', subtotal: 75, pagos: [{ amount: 75, type: 'FAST' }] })
+  // Codex r2 #4 · un cobro cripto (FAST) sobre una cuenta de mesa CON productos: sigue siendo de la mesa y «en el local».
+  const mesaCripto = await cuenta({
+    venueId: tienda,
+    source: 'TPV',
+    tableId: mesa,
+    subtotal: 50,
+    pagos: [{ amount: 50, method: 'OTHER', type: 'FAST' }],
+  })
+  await prisma.orderItem.create({ data: { orderId: mesaCripto, productName: 'Café', quantity: 1, unitPrice: 50, taxAmount: 0, total: 50 } })
+  // Codex r2 #3 · pedido de la tienda híbrida que llegó por el QR del negocio (WEB + pedido en línea por QR): va con el QR.
+  const pedidoPorQr = await cuenta({
+    venueId: tienda,
+    source: 'WEB',
+    type: 'PICKUP',
+    subtotal: 60,
+    pagos: [{ amount: 60, method: 'CREDIT_CARD', onlineFee: 2.1, fundsFlow: 'AVOQADO_PROCESSED' }],
+  })
+  await prisma.onlineOrder.create({
+    data: {
+      venueId: tienda,
+      orderId: pedidoPorQr,
+      paymentMode: 'PAY_AT_PICKUP',
+      requiresAcceptance: false,
+      status: 'COMPLETED',
+      channel: 'QR',
+      trackingToken: `qr-${suffix}`.padEnd(32, 'q'),
+      acceptDeadlineAt: INSIDE,
+    },
+  })
   // Liga de pago sin productos: $300, comisión $9.
   await cuenta({
     venueId: tienda,
@@ -356,6 +385,12 @@ beforeAll(async () => {
   await compra({ stripeCheckoutSessionId: `cs_hoy2_${suffix}`, amountPaid: 800, status: 'REFUNDED' })
   await compra({ stripeCheckoutSessionId: `cs_ayer_${suffix}`, purchasedAt: AYER })
   await compra({})
+  // Codex r2 #5 · un paquete en dólares: aparte, nunca sumado a los pesos.
+  const enDolares = await prisma.creditPack.create({
+    data: { venueId: estudio, name: 'Pack USD', price: 100, currency: 'USD' },
+    select: { id: true },
+  })
+  await compra({ creditPackId: enDolares.id, amountPaid: 100, stripeCheckoutSessionId: `cs_usd_${suffix}` })
   let r = 0
   const reserva = (data: Partial<Prisma.ReservationUncheckedCreateInput>) => {
     r += 1
@@ -415,6 +450,8 @@ describe('D4 · ventas por canal y por tipo de pedido', () => {
     const r = await resumen(tienda, { includeChannelBreakdown: true })
     expect(r.byChannel).toBeDefined()
     expect(r.byOrderType).toBeDefined()
+    // Leídas sin ventas de por medio: las tablas y la cabecera cuadran y la respuesta no trae el aviso.
+    expect(r.channelBreakdownOutOfSync).toBeUndefined()
     const s = r.summary
     for (const filas of [r.byChannel!, r.byOrderType!] as unknown as Fila[][]) {
       expect(suma(filas, 'grossSales')).toBe(cents(s.grossSales))
@@ -429,11 +466,12 @@ describe('D4 · ventas por canal y por tipo de pedido', () => {
       expect(filas.reduce((n, f) => n + Number(f.refundCount), 0)).toBe(s.refundCount)
     }
     // La cabecera que se reparte (que no sea una suma de ceros): (100+50+60+35+75) + (200+15+90) + 80 + 116 + 40 + 300 + 250 + 120.
-    expect(cents(s.grossSales)).toBe(153100)
-    expect(cents(s.netSales)).toBe(142100)
-    expect(s.transactionCount).toBe(13)
-    // 5.1234 + 2.0049 + 0.0051 + 4.5 + 1.4 + 9 = 22.0334 (el abono de la mesa abierta, $1.25, no entra).
-    expect(cents(s.platformFees)).toBe(2203)
+    // + 50 de la mesa pagada con cripto + 60 del pedido por QR.
+    expect(cents(s.grossSales)).toBe(164100)
+    expect(cents(s.netSales)).toBe(153100)
+    expect(s.transactionCount).toBe(15)
+    // 5.1234 + 2.0049 + 0.0051 + 4.5 + 1.4 + 2.1 + 9 = 24.1334 (el abono de la mesa abierta, $1.25, no entra).
+    expect(cents(s.platformFees)).toBe(2413)
   })
 
   it('cada canal tiene lo suyo: mostrador, mesas (también la venta sin red), QR, tienda, checkout, liga, Rappi y el panel', async () => {
@@ -451,8 +489,10 @@ describe('D4 · ventas por canal y por tipo de pedido', () => {
       orderCount: 4,
     })
     // Mesas: (200 − 20 + 15) + 90 de la venta sin red; el abono de la mesa abierta no entra.
-    expect(fila(c, 'TABLES')).toMatchObject({ grossSales: 305, discounts: 20, netSales: 285, tips: 20, transactionCount: 2, orderCount: 2 })
-    expect(fila(c, 'QR')).toMatchObject({ netSales: 80, transactionCount: 1 })
+    // + la mesa de $50 pagada con cripto.
+    expect(fila(c, 'TABLES')).toMatchObject({ grossSales: 355, discounts: 20, netSales: 335, tips: 20, transactionCount: 3, orderCount: 3 })
+    // El QR del cliente ($80) y el pedido de la tienda que llegó por el QR del negocio ($60).
+    expect(fila(c, 'QR')).toMatchObject({ netSales: 140, transactionCount: 2, orderCount: 2 })
     expect(fila(c, 'ONLINE_STORE')).toMatchObject({ grossSales: 116, netSales: 116, platformFees: 4.5, totalCollected: 111.5 })
     expect(fila(c, 'WEB_CHECKOUT')).toMatchObject({ netSales: 40, platformFees: 1.4, totalCollected: 38.6 })
     expect(fila(c, 'PAYMENT_LINK')).toMatchObject({ netSales: 300, platformFees: 9, totalCollected: 291 })
@@ -475,11 +515,11 @@ describe('D4 · ventas por canal y por tipo de pedido', () => {
     // Sólo el pedido para llevar de verdad: el pago rápido y el checkout (TAKEOUT con un cobro FAST) van a «Cobro de un monto».
     expect(fila(t, 'TAKEOUT')).toMatchObject({ netSales: 50 })
     expect(fila(t, 'QUICK_PAYMENT')).toMatchObject({ netSales: 115, transactionCount: 2 })
-    expect(fila(t, 'PICKUP')).toMatchObject({ netSales: 116 })
+    expect(fila(t, 'PICKUP')).toMatchObject({ netSales: 176 })
     expect(fila(t, 'DELIVERY')).toMatchObject({ netSales: 225 })
     expect(fila(t, 'MANUAL_ENTRY')).toMatchObject({ netSales: 420 })
-    // 100 + (95 − 35) + (215 − 20) + 90 + 80 − 30 de la devolución de ayer.
-    expect(fila(t, 'DINE_IN')).toMatchObject({ netSales: 495 })
+    // 100 + (95 − 35) + (215 − 20) + 90 + 80 + 50 de la mesa pagada con cripto − 30 de la devolución de ayer.
+    expect(fila(t, 'DINE_IN')).toMatchObject({ netSales: 545 })
   })
 
   it('sin la opción, o con un filtro de método o de comercio, la respuesta no trae las tablas', async () => {
@@ -496,6 +536,8 @@ describe('D5 · paquetes en línea y depósitos de reservas', () => {
     // Paquetes en línea de hoy: $1,200 + $800 (el «reembolsado» del panel no regresó dinero). El de ayer y el de caja, fuera.
     expect(con.summary.packagesSoldOnline).toBe(2000)
     expect(con.summary.packagesSoldOnlineCount).toBe(2)
+    expect(con.summary.packagesSoldOnlineOtherCurrencies).toEqual([{ currency: 'USD', amount: 100, count: 1 }])
+    expect(con.summary.reservationDepositsRefunded).toBe(230)
     // Depósitos cobrados hoy: 200 + 150 + 100 = 450, menos lo devuelto hoy: 150 + 80 ⇒ 220; tres cobrados.
     expect(con.summary.reservationDeposits).toBe(220)
     expect(con.summary.reservationDepositsCount).toBe(3)

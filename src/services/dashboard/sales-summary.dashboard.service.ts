@@ -144,6 +144,8 @@ export interface SalesSummaryMetrics {
   reservationDepositsCount?: number
   /** Lo devuelto de depósitos en el rango. */
   reservationDepositsRefunded?: number
+  /** Paquetes en línea cobrados en otra moneda (no se suman a los pesos de arriba). */
+  packagesSoldOnlineOtherCurrencies?: Array<{ currency: string; amount: number; count: number }>
 }
 
 export interface PaymentMethodBreakdown {
@@ -385,6 +387,11 @@ export interface SalesSummaryResponse {
   byOrderType?: SalesBreakdownRow<SalesOrderType>[]
   /** El controlador lo pone cuando se pidió el desglose por canal y el plan del negocio no lo incluye (la pantalla pinta el candado). */
   channelBreakdownLocked?: true
+  /**
+   * Las tablas por canal se leyeron un instante después de la cabecera y alguna cifra ya no es la misma (entró una venta entre las
+   * dos lecturas). Se dice en vez de esconderlo; se arregla al recargar. Lo cierra la foto única del reporte (D17 del carril B2).
+   */
+  channelBreakdownOutOfSync?: true
   filtered: boolean
   /**
    * Additive; present ONLY when the MindForm legacy QR bridge could not answer (legacy DB down,
@@ -2153,6 +2160,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     settlementCalendar,
     ...(giftCardBalanceBreakdown ? { giftCardBalanceBreakdown } : {}),
     ...(canales ? { byChannel: canales.byChannel, byOrderType: canales.byOrderType } : {}),
+    ...(canales && !canales.cuadra ? { channelBreakdownOutOfSync: true as const } : {}),
     // D9.1: true en la vista de movimientos (método o comercio) — las métricas de orden vienen en null.
     filtered: vistaDeMovimientos,
     ...(legacyUnavailable ? { legacyUnavailable: true as const } : {}),

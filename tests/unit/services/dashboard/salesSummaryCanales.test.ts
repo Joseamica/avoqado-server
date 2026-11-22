@@ -21,8 +21,11 @@ describe('canalDeLaCuenta', () => {
   it('los demás canales no dependen de la mesa, y una fuente desconocida no se pierde', () => {
     expect(canalDeLaCuenta('QR', true)).toBe('QR')
     // `WEB` es la tienda sólo con su pedido en línea; sin él es el checkout de un monto (Codex r1 #7).
-    expect(canalDeLaCuenta('WEB', false, true)).toBe('ONLINE_STORE')
+    expect(canalDeLaCuenta('WEB', false, 'TIENDA')).toBe('ONLINE_STORE')
+    expect(canalDeLaCuenta('WEB', false, 'LINK')).toBe('ONLINE_STORE')
     expect(canalDeLaCuenta('WEB', false)).toBe('WEB_CHECKOUT')
+    // El pedido de la tienda híbrida que llegó por el QR del negocio va con el QR (Codex r2 #3).
+    expect(canalDeLaCuenta('WEB', false, 'QR')).toBe('QR')
     expect(canalDeLaCuenta('PAYMENT_LINK', false)).toBe('PAYMENT_LINK')
     expect(canalDeLaCuenta('DASHBOARD_MANUAL', false)).toBe('DASHBOARD')
     expect(canalDeLaCuenta('RAPPI', false)).toBe('RAPPI')
@@ -52,6 +55,21 @@ describe('repartirCentavos', () => {
 
   it('importes de dos decimales quedan tal cual, también los negativos', () => {
     expect(repartirCentavos([180, -30, 0.1], 15010)).toEqual([18000, -3000, 10])
+  })
+
+  it('🔴 Codex r2 #2 · un empate lo decide la llave del renglón, no el orden en que contestó la base', () => {
+    expect(repartirCentavos([0.005, 0.005], 1, ['RAPPI', 'COUNTER'])).toEqual([0, 1])
+    expect(repartirCentavos([0.005, 0.005], 1, ['COUNTER', 'RAPPI'])).toEqual([1, 0])
+  })
+})
+
+describe('centavosComoSeVen (el redondeo del formateador de la pantalla)', () => {
+  it('🔴 Codex r2 #2 · $1.0050 se ve $1.01 (toFixed daba 1.00) y 5.984999… se ve $5.98 (Math.round daba 599)', () => {
+    expect(centavosComoSeVen(1.005)).toBe(101)
+    expect(centavosComoSeVen(-1.005)).toBe(-101)
+    expect(centavosComoSeVen(6.3 - 0.315)).toBe(598)
+    expect(centavosComoSeVen(-(6.3 - 0.315))).toBe(-598)
+    expect(centavosComoSeVen(0)).toBe(0)
   })
 })
 
@@ -139,11 +157,14 @@ describe('computeSalesByChannel', () => {
     }
     expect(r.byChannel).toEqual([{ key: 'TABLES', tenderCommissions: 0, ...esperado }])
     expect(r.byOrderType).toEqual([{ key: 'DINE_IN', tenderCommissions: 0, ...esperado }])
+    expect(r.cuadra).toBe(true)
   })
 
   it('🔴 cada columna se reparte hasta la cifra de la cabecera (su resta en Number redondea distinto), sin esconder un descuadre real', async () => {
-    const cobros = (comision: string) => [
-      {
+    // Los dos conjuntos, como los devuelve la base (canal y tipo): cada tabla se compara con la cabecera.
+    const dosConjuntos = <T extends object>(f: T) => [f, { ...f, source: null, mesa: null, tipo: 'DINE_IN', por_tipo: 0 }]
+    const cobros = (comision: string) =>
+      dosConjuntos({
         source: 'TPV',
         mesa: false,
         tipo: null,
@@ -156,30 +177,87 @@ describe('computeSalesByChannel', () => {
         reabierto: '0',
         devoluciones: 0,
         devoluciones_de_abono: 0,
-      },
-    ]
+      })
+    const cuentas = dosConjuntos({
+      source: 'TPV',
+      mesa: false,
+      tipo: null,
+      por_tipo: 1,
+      bruto: '6.30',
+      descuentos: '0',
+      promo_centavos: '0',
+      cortesias: '0',
+      cuentas: 1,
+    })
+    // $6.30 − $0.3150: la cabecera enseña $5.98 (5.984999…); el decimal exacto redondearía a $5.99.
+    let db = { $queryRawUnsafe: jest.fn().mockResolvedValueOnce(cuentas).mockResolvedValueOnce(cobros('0.3150')) }
+    let r = await computeSalesByChannel('v', new Date(), new Date(), { db: db as never, cabecera: { totalCollected: 6.3 - 0.315 } })
+    expect(r.byChannel[0].totalCollected).toBe(5.98)
+    // Si la cabecera dice otra cosa que no es redondeo, la tabla dice lo suyo (y lo avisa en el log): no reparte un descuadre.
+    expect(r.cuadra).toBe(true)
+    db = { $queryRawUnsafe: jest.fn().mockResolvedValueOnce(cuentas).mockResolvedValueOnce(cobros('0.3150')) }
+    r = await computeSalesByChannel('v', new Date(), new Date(), { db: db as never, cabecera: { totalCollected: 10 } })
+    expect(r.byChannel[0].totalCollected).toBe(5.98)
+    expect(r.cuadra).toBe(false)
+  })
+
+  it('🔴 Codex r2 #1 · en un importe de dos decimales, $0.01 de diferencia es una venta que entró entre lecturas: no se reparte y no cuadra', async () => {
     const cuentas = [
       {
         source: 'TPV',
         mesa: false,
         tipo: null,
         por_tipo: 1,
-        bruto: '6.30',
+        bruto: '100',
+        descuentos: '0',
+        promo_centavos: '0',
+        cortesias: '0',
+        cuentas: 1,
+      },
+      {
+        source: 'RAPPI',
+        mesa: false,
+        tipo: null,
+        por_tipo: 1,
+        bruto: '0.01',
         descuentos: '0',
         promo_centavos: '0',
         cortesias: '0',
         cuentas: 1,
       },
     ]
-    // $6.30 − $0.3150: la cabecera enseña $5.98 (5.984999…); el decimal exacto redondearía a $5.99.
-    let db = { $queryRawUnsafe: jest.fn().mockResolvedValueOnce(cuentas).mockResolvedValueOnce(cobros('0.3150')) }
-    let r = await computeSalesByChannel('v', new Date(), new Date(), { db: db as never, cabecera: { totalCollected: 6.3 - 0.315 } })
-    expect(r.byChannel[0].totalCollected).toBe(5.98)
-    // Si la cabecera dice otra cosa que no es redondeo, la tabla dice lo suyo (y lo avisa en el log): no reparte un descuadre.
-    db = { $queryRawUnsafe: jest.fn().mockResolvedValueOnce(cuentas).mockResolvedValueOnce(cobros('0.3150')) }
-    r = await computeSalesByChannel('v', new Date(), new Date(), { db: db as never, cabecera: { totalCollected: 10 } })
-    expect(r.byChannel[0].totalCollected).toBe(5.98)
-    expect(centavosComoSeVen(6.3 - 0.315)).toBe(598)
-    expect(centavosComoSeVen(-(6.3 - 0.315))).toBe(-598)
+    const db = { $queryRawUnsafe: jest.fn().mockResolvedValueOnce(cuentas).mockResolvedValueOnce([]) }
+    const r = await computeSalesByChannel('v', new Date(), new Date(), { db: db as never, cabecera: { grossSales: 100 } })
+    // Antes: $99.99 y $0.01 (el centavo de más se le quitaba al mostrador). Ahora cada renglón dice lo suyo y la respuesta lo avisa.
+    expect(r.byChannel.map(f => [f.key, f.grossSales])).toEqual([
+      ['COUNTER', 100],
+      ['RAPPI', 0.01],
+    ])
+    expect(r.cuadra).toBe(false)
+  })
+
+  it('🔴 Codex r2 #1 · un cobro que entró entre las lecturas cambia el conteo: no cuadra', async () => {
+    const cobros = [
+      {
+        source: 'TPV',
+        mesa: false,
+        tipo: null,
+        por_tipo: 1,
+        propinas: '0',
+        cobros: 2,
+        comision: '0',
+        terceros: '0',
+        devuelto: '0',
+        reabierto: '0',
+        devoluciones: 0,
+        devoluciones_de_abono: 0,
+      },
+    ]
+    const db = { $queryRawUnsafe: jest.fn().mockResolvedValueOnce([]).mockResolvedValueOnce(cobros) }
+    const r = await computeSalesByChannel('v', new Date(), new Date(), {
+      db: db as never,
+      cabecera: { transactionCount: 1, refundCount: 0 },
+    })
+    expect(r.cuadra).toBe(false)
   })
 })

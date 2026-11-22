@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { DateTime } from 'luxon'
 import prisma from '@/utils/prismaClient'
-import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -44,6 +44,24 @@ const conNombre = (filas: SalesBreakdownRow[] | undefined, nombres: Record<strin
   (filas ?? []).map(f => ({ ...f, label: nombres[f.key] ?? f.key }))
 
 /**
+ * El rango en días del negocio, igual que el panel: sin fechas, hoy y los seis días anteriores (`getLast7Days` del DASHBOARD; Codex r2
+ * #7). Una fecha que no existe (2026-02-30) o al revés se rechaza en vez de moverse sola.
+ */
+export function rangoDelNegocio(
+  tz: string,
+  fromDate?: string,
+  toDate?: string,
+): { startDate: string; endDate: string } | { error: string } {
+  const dia = (s: string) => DateTime.fromFormat(s, 'yyyy-MM-dd', { zone: tz })
+  const hoy = DateTime.now().setZone(tz)
+  const desde = fromDate ? dia(fromDate) : hoy.minus({ days: 6 })
+  const hasta = toDate ? dia(toDate) : hoy
+  if (!desde.isValid || !hasta.isValid) return { error: 'Las fechas van como AAAA-MM-DD y tienen que existir (por ejemplo 2026-11-01).' }
+  if (desde.startOf('day') > hasta.startOf('day')) return { error: 'La fecha de inicio va antes que la de fin.' }
+  return { startDate: desde.startOf('day').toUTC().toISO()!, endDate: hasta.endOf('day').toUTC().toISO()! }
+}
+
+/**
  * Carril G (hz:fefa11b6:D4 y D5): las ventas del Resumen de ventas repartidas por canal y por tipo de pedido, y lo cobrado por
  * adelantado que no es venta. Mismo permiso (`reports:read`) y mismo candado de plan (ADVANCED_REPORTS) que la pantalla.
  */
@@ -51,7 +69,7 @@ export function registerSalesByChannelTools(server: McpServer, scope: McpScope) 
   const guard = createGuard(scope)
   server.tool(
     'sales_by_channel',
-    'Sales of a venue you can access split by channel (where the sale came in: counter, tables, self-service kiosk, customer QR, online store, online payments, payment links, phone, recorded in the dashboard, Rappi, Uber Eats, DiDi Food, other delivery apps) and by order type (in the venue, takeout, delivery, pickup, direct record, amount-only charge), over a date range (default last 7 days, venue-local dates). Same numbers as the dashboard Sales Summary: each table adds up to its headline to the cent (gross sales, discounts, refunds, net sales, tips, Avoqado fees, third-party fees, net collected, transactions, refunds count; orders per row). Money in pesos. Also returns what was collected in advance and is NOT a sale (class packages bought online, reservation deposits net of refunds). Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
+    'Sales of a venue you can access split by channel (where the sale came in: counter, tables, self-service kiosk, customer QR, online store, online payments, payment links, phone, recorded in the dashboard, Rappi, Uber Eats, DiDi Food, other delivery apps) and by order type (in the venue, takeout, delivery, pickup, direct record, amount-only charge), over a date range (venue-local days; default today and the 6 previous days, like the dashboard). Same numbers as the dashboard Sales Summary: each table adds up to its headline to the cent (gross sales, discounts, refunds, net sales, tips, Avoqado fees, third-party fees, net collected, transactions, refunds count; orders per row). Money in pesos. Also returns what was collected in advance and is NOT a sale (class packages bought online, in pesos and any other currency listed apart; reservation deposits net of refunds). Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
     {
       venueId: z.string().describe('Venue to analyze (must be in your scope)'),
       fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
@@ -65,9 +83,8 @@ export function registerSalesByChannelTools(server: McpServer, scope: McpScope) 
 
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
       const tz = venue?.timezone || 'America/Mexico_City'
-      const start = venueStartOfDay(tz, fromDate ? new Date(`${fromDate}T12:00:00`) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))
-      const end = venueEndOfDay(tz, toDate ? new Date(`${toDate}T12:00:00`) : undefined)
-      const window = { startDate: start.toISOString(), endDate: end.toISOString() }
+      const window = rangoDelNegocio(tz, fromDate, toDate)
+      if ('error' in window) return text({ ok: false, error: window.error })
 
       const report = await getSalesSummary(venueId, {
         ...window,
@@ -84,6 +101,13 @@ export function registerSalesByChannelTools(server: McpServer, scope: McpScope) 
         timezone: tz,
         // D15: con el puente de cobros QR viejos caído (sólo Mindform), lo de esa fuente puede estar incompleto.
         ...(report.legacyUnavailable ? { legacyUnavailable: true as const, aviso: AVISO_PUENTE_QR_CAIDO } : {}),
+        // Las tablas se leyeron un instante después de la cabecera y alguna cifra cambió (entró una venta): hay que volver a preguntar.
+        ...(report.channelBreakdownOutOfSync
+          ? {
+              outOfSync: true as const,
+              avisoDeLectura: 'A sale came in while reading: the tables may not add up to the headline. Ask again.',
+            }
+          : {}),
         headline: {
           grossSales: s.grossSales,
           discounts: s.discounts,
@@ -94,12 +118,17 @@ export function registerSalesByChannelTools(server: McpServer, scope: McpScope) 
           tenderCommissions: s.tenderCommissions ?? 0,
           totalCollected: s.totalCollected,
           transactionCount: s.transactionCount,
+          refundCount: s.refundCount ?? 0,
         },
         byChannel: conNombre(report.byChannel, NOMBRE_DEL_CANAL),
         byOrderType: conNombre(report.byOrderType, NOMBRE_DEL_TIPO),
         collectedInAdvanceNotSales: {
-          note: 'Not in sales nor in net collected, like gift cards loaded.',
-          packagesSoldOnline: { amount: s.packagesSoldOnline ?? 0, count: s.packagesSoldOnlineCount ?? 0 },
+          note: 'Not in sales nor in net collected, like gift cards loaded. Dated when Avoqado got the payment confirmation (usually seconds after the charge).',
+          packagesSoldOnline: { amount: s.packagesSoldOnline ?? 0, count: s.packagesSoldOnlineCount ?? 0, currency: 'MXN' },
+          // Paquetes cobrados en otra moneda: aparte, nunca sumados a los pesos.
+          ...(s.packagesSoldOnlineOtherCurrencies?.length
+            ? { packagesSoldOnlineOtherCurrencies: s.packagesSoldOnlineOtherCurrencies }
+            : {}),
           reservationDeposits: {
             amount: s.reservationDeposits ?? 0,
             count: s.reservationDepositsCount ?? 0,

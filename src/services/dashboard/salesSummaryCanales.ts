@@ -68,6 +68,8 @@ export interface SalesBreakdownRow<K extends string = string> {
 export interface SalesByChannel {
   byChannel: SalesBreakdownRow<SalesChannel>[]
   byOrderType: SalesBreakdownRow<SalesOrderType>[]
+  /** `false` si alguna cifra de las tablas no es la de la cabecera más allá del redondeo (se leyeron en momentos distintos). */
+  cuadra: boolean
 }
 
 /** Lo que el puente de cobros QR viejos (sólo Mindform) sumó a la cabecera: venta, propina y cobros, sin cuenta. */
@@ -93,16 +95,20 @@ const CANAL_DE_FUENTE: Record<string, SalesChannel> = {
 }
 
 /**
- * `Order.source` (+ ¿tenía mesa? + ¿es un pedido de la tienda?) ⇒ canal. `WEB` es la tienda en línea sólo si la cuenta tiene su
- * pedido en línea; si no, es el checkout de un monto (Codex r1 #7). Una fuente que no conocemos va a «Otro»: nunca sale de la suma.
+ * `Order.source` (+ ¿tenía mesa? + ¿por dónde llegó su pedido en línea?) ⇒ canal. `WEB` es la tienda en línea sólo si la cuenta tiene
+ * su pedido en línea; si no, es el checkout de un monto (Codex r1 #7). El pedido de la tienda híbrida que llegó por el QR del negocio
+ * (`OnlineOrder.channel = 'QR'`) va con el QR del cliente (Codex r2 #3). `pedidoEnLinea`: `null` sin pedido en línea; si lo hay, su
+ * `channel` (`'QR'`, `'LINK'`) o `'TIENDA'` en los anteriores a la tienda híbrida. Una fuente que no conocemos va a «Otro canal»:
+ * nunca sale de la suma.
  */
-export function canalDeLaCuenta(source: string, tieneMesa: boolean, esDeLaTienda = false): SalesChannel {
+export function canalDeLaCuenta(source: string, tieneMesa: boolean, pedidoEnLinea: string | null = null): SalesChannel {
   if (FUENTES_DEL_LOCAL.has(source)) return tieneMesa ? 'TABLES' : 'COUNTER'
-  if (source === 'WEB') return esDeLaTienda ? 'ONLINE_STORE' : 'WEB_CHECKOUT'
+  if (source === 'WEB') return pedidoEnLinea === 'QR' ? 'QR' : pedidoEnLinea ? 'ONLINE_STORE' : 'WEB_CHECKOUT'
   return CANAL_DE_FUENTE[source] ?? 'OTHER'
 }
 
 const TIPOS: ReadonlySet<string> = new Set(['DINE_IN', 'TAKEOUT', 'DELIVERY', 'PICKUP', 'MANUAL_ENTRY'])
+/** `esCobroDeUnMonto`: la cuenta tiene un cobro `FAST` y ningún renglón (pago rápido, checkout, cripto sin cuenta; Codex r2 #4). */
 export function tipoDeLaCuenta(type: string, esCobroDeUnMonto = false): SalesOrderType {
   if (esCobroDeUnMonto) return 'QUICK_PAYMENT'
   return TIPOS.has(type) ? (type as SalesOrderType) : 'OTHER'
@@ -121,8 +127,14 @@ const CAMPOS_DE_DINERO = [
 type CampoDeDinero = (typeof CAMPOS_DE_DINERO)[number]
 type Crudo = Record<CampoDeDinero, number> & { orderCount: number | null; transactionCount: number; refundCount: number }
 
-/** Lo que dice la cabecera de cada importe (`summary` de `getSalesSummary`): cada tabla se reparte hasta esa cifra. */
-export type CabeceraDeCanales = Partial<Record<CampoDeDinero, number | null>>
+/** Lo que dice la cabecera (`summary` de `getSalesSummary`): cada tabla se reparte hasta sus importes y se compara con sus conteos. */
+export type CabeceraDeCanales = Partial<Record<CampoDeDinero, number | null>> & { transactionCount?: number; refundCount?: number }
+
+/**
+ * Los importes que llevan más de dos decimales por cobro (la comisión de Avoqado es de 4): ahí, y sólo ahí, la tabla y la cabecera
+ * pueden diferir $0.01 por redondeo. En los demás (todos de dos decimales) cualquier diferencia es real (Codex r2 #1).
+ */
+const CON_DECIMALES_DE_MAS: ReadonlySet<CampoDeDinero> = new Set(['platformFees', 'totalCollected'])
 
 const vacio = (): Crudo => ({
   grossSales: 0,
@@ -141,13 +153,16 @@ const vacio = (): Crudo => ({
 /**
  * Reparte `total` (en centavos) entre los importes crudos por «mayor residuo»: cada renglón queda redondeado y Σ renglones = el total.
  * Sin esto, la comisión de Avoqado (4 decimales por cobro) daba $0.01 de diferencia entre la tabla y la cabecera con dos canales de
- * $0.005. Empates: el renglón que va primero. Exportada para probarla sola.
+ * $0.005. Los importes se llevan a 4 decimales antes (el ruido de `Number` no decide). Empates: por la llave del renglón, no por el
+ * orden en que contestó la base (Codex r2 #2). Exportada para probarla sola.
  */
-export function repartirCentavos(crudos: number[], totalEnCentavos: number): number[] {
-  const escalados = crudos.map(v => v * 100)
-  const pisos = escalados.map(v => Math.floor(v + 1e-9))
+export function repartirCentavos(crudos: number[], totalEnCentavos: number, llaves: string[] = crudos.map((_, i) => String(i))): number[] {
+  const escalados = crudos.map(v => Math.round(v * 1e6) / 1e4)
+  const pisos = escalados.map(v => Math.floor(v))
   let faltan = totalEnCentavos - pisos.reduce((s, v) => s + v, 0)
-  const orden = escalados.map((v, i) => ({ i, resto: v - pisos[i] })).sort((a, b) => b.resto - a.resto || a.i - b.i)
+  const orden = escalados
+    .map((v, i) => ({ i, resto: Math.round((v - pisos[i]) * 1e4) }))
+    .sort((a, b) => b.resto - a.resto || (llaves[a.i] < llaves[b.i] ? -1 : llaves[a.i] > llaves[b.i] ? 1 : 0))
   const out = [...pisos]
   // Normalmente 0 ≤ faltan < renglones (sólo redondeo). Más que eso lo detiene `cerrar` antes de llegar aquí.
   for (let k = 0; faltan !== 0 && orden.length > 0; k = (k + 1) % orden.length) {
@@ -159,32 +174,41 @@ export function repartirCentavos(crudos: number[], totalEnCentavos: number): num
 }
 
 /**
- * Centavos de un importe COMO LOS ENSEÑA LA PANTALLA: el formateador redondea el valor exacto del número, no `n * 100` (Codex r1 #4:
- * $6.30 − $0.3150 es 5.984999… y se ve $5.98, pero `Math.round(598.5)` da 599). `toFixed` redondea igual que `Intl` en positivos;
- * el signo va aparte para que un negativo redondee como su valor absoluto.
+ * Centavos de un importe COMO LOS ENSEÑA LA PANTALLA, con el mismo `Intl` que su formateador (`toLocaleString`): redondea la forma
+ * decimal más corta del número a la mitad hacia afuera. Ni `Math.round(n * 100)` (Codex r1 #4: 5.984999… se ve $5.98 y da 599) ni
+ * `toFixed` (Codex r2 #2: 1.005 se ve $1.01 y `toFixed` da 1.00) lo hacen igual.
  */
-export const centavosComoSeVen = (n: number): number => Math.sign(n) * Math.round(Number(Math.abs(n).toFixed(2)) * 100)
+const DOS_DECIMALES = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2, useGrouping: false })
+export const centavosComoSeVen = (n: number): number => Math.round(Number(DOS_DECIMALES.format(n)) * 100)
 const centavos = centavosComoSeVen
 
 function cerrar<K extends string>(grupos: Map<K, Crudo>, cabecera: CabeceraDeCanales, ctx: { venueId: string; tabla: string }) {
   const llaves = [...grupos.keys()]
   const crudos = llaves.map(k => grupos.get(k)!)
   const redondeados = new Map<CampoDeDinero, number[]>()
+  const descuadres: string[] = []
   for (const campo of CAMPOS_DE_DINERO) {
     const valores = crudos.map(c => c[campo])
     const propio = centavos(valores.reduce((s, v) => s + v, 0))
-    // El objetivo es la cifra que enseña la cabecera (Codex r1 #4: su resta en `Number` puede redondear $0.01 distinto). Si difiere
-    // más que el redondeo de los renglones, NO se esconde la diferencia repartiéndola: es que las poblaciones ya no son las mismas.
+    // El objetivo es la cifra que enseña la cabecera (Codex r1 #4: su resta en `Number` puede redondear $0.01 distinto), pero sólo
+    // si la diferencia es de redondeo: $0.01 en un importe de 4 decimales, nada en los de 2. Si no, NO se esconde repartiéndola: es
+    // que la cabecera y la tabla leyeron cosas distintas (una venta que entró entre las dos lecturas, Codex r2 #1).
     const deLaCabecera = cabecera[campo]
     let objetivo = propio
     if (typeof deLaCabecera === 'number') {
       const suyo = centavos(deLaCabecera)
-      if (Math.abs(suyo - propio) <= 1) objetivo = suyo
-      else logger.error('[canales] no cuadra con la cabecera', { ...ctx, campo, cabecera: suyo / 100, tabla: propio / 100 })
+      if (Math.abs(suyo - propio) <= (CON_DECIMALES_DE_MAS.has(campo) ? 1 : 0)) objetivo = suyo
+      else descuadres.push(`${campo}: cabecera ${suyo / 100}, tabla ${propio / 100}`)
     }
-    redondeados.set(campo, repartirCentavos(valores, objetivo))
+    redondeados.set(campo, repartirCentavos(valores, objetivo, llaves))
   }
-  return llaves
+  for (const conteo of ['transactionCount', 'refundCount'] as const) {
+    const propio = crudos.reduce((s, c) => s + c[conteo], 0)
+    if (typeof cabecera[conteo] === 'number' && cabecera[conteo] !== propio)
+      descuadres.push(`${conteo}: cabecera ${cabecera[conteo]}, tabla ${propio}`)
+  }
+  if (descuadres.length > 0) logger.error('[canales] no cuadra con la cabecera', { ...ctx, descuadres })
+  const filas = llaves
     .map((key, i) => {
       const fila = { key } as SalesBreakdownRow<K>
       for (const campo of CAMPOS_DE_DINERO) fila[campo] = redondeados.get(campo)![i] / 100
@@ -195,12 +219,13 @@ function cerrar<K extends string>(grupos: Map<K, Crudo>, cabecera: CabeceraDeCan
     })
     .filter(f => CAMPOS_DE_DINERO.some(c => f[c] !== 0) || (f.orderCount ?? 0) + f.transactionCount + f.refundCount > 0)
     .sort((a, b) => b.netSales - a.netSales || a.key.localeCompare(b.key))
+  return { filas, cuadra: descuadres.length === 0 }
 }
 
 type Marcas = {
   source: string | null
   mesa: boolean | null
-  tienda: boolean | null
+  en_linea: string | null
   tipo: string | null
   monto: boolean | null
   por_tipo: number
@@ -220,16 +245,21 @@ type FilaDeCobros = Marcas & {
 /** La comisión de UN cobro: la misma `SQL_COMISION_DEL_COBRO` de la cabecera (costo 1:1, o la del cobro en línea de Avoqado). */
 const SQL_COMISION_DEL_COBRO = `CASE WHEN tc."id" IS NOT NULL THEN COALESCE(tc."venueChargeAmount", 0) + COALESCE(tc."venueFixedFee", 0) WHEN p."fundsFlow" = 'AVOQADO_PROCESSED' OR p."ecommerceMerchantId" IS NOT NULL THEN COALESCE(p."feeAmount", 0) ELSE 0 END`
 
-/** Las marcas de una cuenta `o` que deciden su canal y su tipo: mesa, pedido de la tienda y cobro de un monto (`FAST`). */
+/**
+ * Las marcas de una cuenta `o` que deciden su canal y su tipo: la mesa; por dónde llegó su pedido en línea (sólo en `WEB`; `'TIENDA'`
+ * en los pedidos anteriores a la tienda híbrida); y si es el cobro de un monto: un cobro `FAST` y ningún renglón (un cobro cripto
+ * `FAST` sobre una mesa con productos sigue siendo de la mesa, Codex r2 #4).
+ */
 const marcasDe = (o: string) => `
   CROSS JOIN LATERAL (
     SELECT (${o}."tableId" IS NOT NULL) AS mesa,
-           (${o}.source = 'WEB' AND EXISTS (SELECT 1 FROM "OnlineOrder" oo WHERE oo."orderId" = ${o}.id)) AS tienda,
-           EXISTS (SELECT 1 FROM "Payment" pf WHERE pf."orderId" = ${o}.id AND pf.type = 'FAST') AS monto
+           (CASE WHEN ${o}.source = 'WEB' THEN (SELECT COALESCE(oo.channel, 'TIENDA') FROM "OnlineOrder" oo WHERE oo."orderId" = ${o}.id) END) AS en_linea,
+           (EXISTS (SELECT 1 FROM "Payment" pf WHERE pf."orderId" = ${o}.id AND pf.type = 'FAST')
+             AND NOT EXISTS (SELECT 1 FROM "OrderItem" oi WHERE oi."orderId" = ${o}.id)) AS monto
   ) marca`
-const AGRUPAR = (o: string) => `GROUP BY GROUPING SETS ((${o}.source, marca.mesa, marca.tienda), (${o}.type, marca.monto))`
+const AGRUPAR = (o: string) => `GROUP BY GROUPING SETS ((${o}.source, marca.mesa, marca.en_linea), (${o}.type, marca.monto))`
 const COLUMNAS_DE_MARCA = (o: string) =>
-  `${o}.source::text AS source, marca.mesa, marca.tienda, ${o}.type::text AS tipo, marca.monto, GROUPING(${o}.type)::int AS por_tipo`
+  `${o}.source::text AS source, marca.mesa, marca.en_linea, ${o}.type::text AS tipo, marca.monto, GROUPING(${o}.type)::int AS por_tipo`
 
 /**
  * El desglose por canal y por tipo de pedido del rango, en la vista de ventas.
@@ -300,6 +330,8 @@ export async function computeSalesByChannel(
       ) devolucion
       WHERE p."venueId" = $1
         AND ${sqlRangoHoraReal('p', utcTsParam(2), utcTsParam(3))}
+        -- Sólo los cobros que alguna métrica cuenta (Codex r2 #12): así las marcas no se calculan para intentos que no aportan nada.
+        AND (p.status = 'COMPLETED' OR tc."id" IS NOT NULL OR p.type = 'REFUND')
       ${AGRUPAR('o')}
       `,
       venueId,
@@ -315,7 +347,7 @@ export async function computeSalesByChannel(
     const m = (Number(f.por_tipo) === 1 ? porCanal : porTipo) as Map<string, Crudo>
     const llave =
       Number(f.por_tipo) === 1
-        ? canalDeLaCuenta(f.source ?? '', f.mesa === true, f.tienda === true)
+        ? canalDeLaCuenta(f.source ?? '', f.mesa === true, f.en_linea)
         : tipoDeLaCuenta(f.tipo ?? '', f.monto === true)
     let acc = m.get(llave)
     if (!acc) {
@@ -364,8 +396,7 @@ export async function computeSalesByChannel(
   }
 
   const cabecera = opts.cabecera ?? {}
-  return {
-    byChannel: cerrar(porCanal, cabecera, { venueId, tabla: 'canal' }),
-    byOrderType: cerrar(porTipo, cabecera, { venueId, tabla: 'tipo' }),
-  }
+  const canal = cerrar(porCanal, cabecera, { venueId, tabla: 'canal' })
+  const tipo = cerrar(porTipo, cabecera, { venueId, tabla: 'tipo' })
+  return { byChannel: canal.filas, byOrderType: tipo.filas, cuadra: canal.cuadra && tipo.cuadra }
 }
