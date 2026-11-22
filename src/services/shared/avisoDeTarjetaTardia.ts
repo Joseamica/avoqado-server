@@ -59,11 +59,15 @@ export type TarjetaGuardada = {
  * ponytail: si la bitácora falla justo al escribir (y la TPV ya no reintenta), el aviso se pierde; la evidencia queda en la tarjeta
  * (`processorData.intentoAbiertoEn`), igual que el rastro hermano `avisarEfectivoConTarjetaEnDuda`.
  */
-export async function revisarTarjetaTardia(tarjeta: TarjetaGuardada): Promise<void> {
+export async function revisarTarjetaTardia(
+  tarjeta: TarjetaGuardada,
+  /** La hora del intento que trae un reintento con la llave, si la guardada no la tiene (epoch ms del servidor). */
+  intentoEntrante?: number,
+): Promise<void> {
   try {
     if (tarjeta.status !== 'COMPLETED' || !esTarjeta(tarjeta.method)) return
     const pd = tarjeta.processorData && typeof tarjeta.processorData === 'object' ? (tarjeta.processorData as Record<string, unknown>) : {}
-    const intento = leerHoraDelIntento(pd.intentoAbiertoEn, tarjeta.createdAt)
+    const intento = leerHoraDelIntento(pd.intentoAbiertoEn ?? intentoEntrante, tarjeta.createdAt)
     if (!intento || tarjeta.createdAt.getTime() - intento.getTime() < TARDIA_DESDE_MS) return
     const { id: paymentId, venueId } = tarjeta
     const datos = {

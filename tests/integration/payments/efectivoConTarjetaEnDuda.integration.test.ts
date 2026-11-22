@@ -620,6 +620,22 @@ describe('D7 · la tarjeta ya cobrada que llega tarde nunca se pierde', () => {
     expect(renglon.id).toBeTruthy()
   })
 
+  it('cuenta «pago completo» con un abono parcial (sigue abierta): la tarjeta por producto sigue como hoy (400)', async () => {
+    const venta = await f.nuevaVenta(100)
+    await efectivoDeLaTerminal(venta.id, randomUUID(), { amount: 6000 })
+    expect(await orden(venta.id)).toMatchObject({ splitType: 'FULLPAYMENT' })
+    expect((await orden(venta.id)).paymentStatus).not.toBe('PAID')
+    await expect(
+      recordOrderPayment(
+        f.venueId,
+        venta.id,
+        { ...f.registroDeLaTerminal({ attemptId: randomUUID() }), splitType: 'PERPRODUCT', amount: 4000 },
+        f.staffId,
+      ),
+    ).rejects.toThrow(/Cannot use PERPRODUCT/)
+    expect(await cobros(venta.id)).toHaveLength(1)
+  })
+
   it('reintentar la misma tarjeta tardía con su llave no crea otro cobro', async () => {
     const venta = await f.nuevaVenta(100)
     await efectivoDeLaTerminal(venta.id)
@@ -713,6 +729,20 @@ describe('D7 · la tarjeta ya cobrada que llega tarde nunca se pierde', () => {
       expect(otra.id).toBe(tarjeta.id)
       expect(await f.esperar(async () => (await tardias(tarjeta.id)).length > 0)).toBe(true)
       await recordFastPayment(f.venueId, { ...registro }, f.staffId)
+      await darleTiempoAlRastro()
+      expect(await tardias(tarjeta.id)).toHaveLength(1)
+    })
+
+    it('el primer registro entró en vivo sin edad y la libreta lo reenvía con su llave trayendo la edad: UN aviso', async () => {
+      const registro = f.registroDeLaTerminal({ attemptId: randomUUID() })
+      const tarjeta = await recordFastPayment(f.venueId, registro, f.staffId)
+      await darleTiempoAlRastro()
+      expect(await tardias(tarjeta.id)).toEqual([])
+
+      const otra = await recordFastPayment(f.venueId, { ...registro, edadDelIntentoMs: 5 * 60_000 }, f.staffId)
+
+      expect(otra.id).toBe(tarjeta.id)
+      expect(await f.esperar(async () => (await tardias(tarjeta.id)).length > 0)).toBe(true)
       await darleTiempoAlRastro()
       expect(await tardias(tarjeta.id)).toHaveLength(1)
     })

@@ -88,6 +88,16 @@ describe('revisarTarjetaTardia', () => {
     expect(escribir).not.toHaveBeenCalled()
   })
 
+  it('la guardada no tiene la hora y el reintento con la llave sí la trae ⇒ cuenta la del reintento; la guardada manda si hay las dos', async () => {
+    await revisarTarjetaTardia({ ...TARJETA, processorData: { cardBrand: 'VISA' } }, INTENTO)
+    expect(escribir).toHaveBeenCalledTimes(1)
+    expect(escribir.mock.calls[0][0].data.data.attemptStartedAt).toBe(new Date(INTENTO).toISOString())
+
+    escribir.mockClear()
+    await revisarTarjetaTardia(TARJETA, LLEGADA.getTime() - 5_000)
+    expect(escribir.mock.calls[0][0].data.data.attemptStartedAt).toBe(new Date(INTENTO).toISOString())
+  })
+
   it('nunca lanza: ni con la consulta rota ni con la bitácora rota', async () => {
     buscarRastro.mockRejectedValueOnce(new Error('base caída'))
     await expect(revisarTarjetaTardia(TARJETA)).resolves.toBeUndefined()

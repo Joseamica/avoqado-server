@@ -3946,13 +3946,14 @@ export async function recordOrderPayment(
     if (
       !allowedMethods.includes(paymentData.splitType) &&
       activeOrder.splitType === 'FULLPAYMENT' &&
+      activeOrder.paymentStatus === 'PAID' &&
       tarjetaYaCobradaPorElBanco(paymentData)
     ) {
       // 🔴 D7 (encargo a25cd7): la tarjeta ya la aprobó el banco. Si la cuenta se CERRÓ como «pago completo» mientras el registro
       // llegaba (la cajera la cobró en efectivo y después llega el «Aprobado» de «partes iguales» o «por producto»), un 400 aquí deja
       // dinero cobrado SIN Payment y la terminal reintenta para siempre. Se registra igual, como la tarjeta sobre una cuenta pagada
-      // o cancelada (`dineroCapturado`), y si pasa de la cuenta salta el aviso de sobrepago de siempre. Sólo «pago completo»: un
-      // cruce entre dos divisiones a medias (cuenta abierta) sigue como hoy (Codex r3: ahí reasignar productos no tiene arreglo chico).
+      // o cancelada (`dineroCapturado`), y si pasa de la cuenta salta el aviso de sobrepago de siempre. Sólo «pago completo» YA PAGADA:
+      // una cuenta abierta (también una `FULLPAYMENT` con un abono parcial, que el POS deja así; Codex r4 #1) sigue como hoy.
       logger.warn('⚠️ [recordOrderPayment] Tarjeta ya cobrada con otra forma de dividir: se registra igual', {
         venueId,
         orderId,
@@ -5657,7 +5658,12 @@ export async function recordFastPayment(
         terminalSerial: paymentData.authenticatedTerminalSerial ?? null,
       })
       // D7: si el primer registro murió antes del aviso de tarjeta tardía, el reintento con la llave lo vuelve a revisar (una vez).
-      void revisarTarjetaTardia(existingByKey)
+      // Si el primero entró sin edad (registro en vivo) y este reintento de la libreta sí la trae, cuenta la que trae (Codex r4 #2).
+      void revisarTarjetaTardia(
+        existingByKey,
+        horaDelIntentoParaGuardar({ method: existingByKey.method, edadDelIntentoMs: paymentData.edadDelIntentoMs }, llegada)
+          .intentoAbiertoEn,
+      )
       return {
         ...((await consolidarRegistroRepetido(existingByKey, paymentData as RegistroEntrante, venueId, null)) ?? existingByKey),
         digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]),
@@ -6551,10 +6557,6 @@ export async function recordFastPayment(
   t.mark('transaccionSocketsYComisiones')
   logger.info('Fast payment recorded successfully', { paymentId: payment.id, amount: totalAmount })
 
-  // D7 (encargo a25cd7): la tarjeta que llega aprobada TARDE avisa al dueño (pudo cobrarse de otra forma mientras tanto). Después del
-  // commit y sin esperarlo: nunca toca el cobro; un cobro normal no hace ninguna consulta de más.
-  void revisarTarjetaTardia(payment)
-
   // 🪝 Backfill any Blumon webhook that arrived BEFORE this Payment was recorded.
   // Fire-and-forget — never block the API response on reconciliation. The cron
   // worker (`BlumonWebhookReconciliationJob`) is the safety net if this fails.
@@ -6597,6 +6599,11 @@ export async function recordFastPayment(
   const autofacturaAvailable = digitalReceipt ? await timing.time('autofactura', () => resolveAutofacturaAvailable(fastOrder?.id)) : false
   t.end({ paymentId: payment.id })
   timing.end(payment.id)
+
+  // D7 (encargo a25cd7): la tarjeta que llega aprobada TARDE avisa al dueño (pudo cobrarse de otra forma mientras tanto). Después del
+  // commit, sin esperarlo y DESPUÉS de lo que la respuesta sí espera (Codex r4 #3): nunca toca ni demora el cobro; un cobro normal no
+  // hace ninguna consulta de más.
+  void revisarTarjetaTardia(payment)
 
   return {
     ...payment,
