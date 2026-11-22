@@ -57,9 +57,11 @@ import { ORDER_LOCK_WAIT_BUDGET } from '../services/shared/paymentShiftClaim'
  * todavía la tenga abierta en pantalla puede cobrarla en vivo (Codex r2 #3): el dinero se registra y la venta se reabre con rastro, lo
  * mismo que pasaría sin la limpieza (la venta seguía abierta), y como no lleva descuentos ni referidos, nada se cuenta dos veces.
  *
- * 🔴 ENSAYO por omisión (`LIMPIEZA_VENTAS_COBRAR`): no escribe NADA, sólo deja una línea por negocio en el log
- * («[LIMPIEZA COBRAR · ENSAYO] anularía N …», con `venueName`). Pasar a `ACTIVO` es un cambio de configuración en producción que se
- * hace sólo con el «sí» del founder. `APAGADO` no lee ni escribe.
+ * 🔴 El interruptor es `LIMPIEZA_VENTAS_COBRAR`. Sin valor, en PRODUCCIÓN anula (`ACTIVO`): el founder dio su «sí, en prod» el 22-nov
+ * («A»: que nazca prendida en el código, sin tocar Render), después de ver el ENSAYO con este código (68 ventas en 2 negocios). Sin
+ * valor fuera de producción, `ENSAYO`: los servidores locales comparten la base av-db-25 y no deben anular ventas de prueba ajenas.
+ * `ENSAYO` no escribe NADA, sólo deja una línea por negocio en el log («[LIMPIEZA COBRAR · ENSAYO] anularía N …», con `venueName`).
+ * `APAGADO` no lee ni escribe. En Render, la variable queda como freno de emergencia: `ENSAYO` o `APAGADO` la detienen.
  */
 
 export type ModoDeLaLimpieza = 'ENSAYO' | 'ACTIVO' | 'APAGADO'
@@ -67,10 +69,18 @@ export const CAMINO_LIMPIEZA_COBRAR = 'LIMPIEZA_VENTA_COBRAR_ABANDONADA'
 export const MOTIVO_LIMPIEZA_COBRAR = 'Venta de Cobrar abandonada antes de cobrar, sin cliente ni cobro (limpieza tras 24 h)'
 export const VARIABLE_DEL_MODO = 'LIMPIEZA_VENTAS_COBRAR'
 
-/** Por omisión, y ante cualquier valor que no sea exactamente ACTIVO o APAGADO, ENSAYO: nunca anula sin que alguien lo pida. */
-export function modoDeLaLimpiezaDeCobrar(valor: string | undefined = process.env[VARIABLE_DEL_MODO]): ModoDeLaLimpieza {
+/**
+ * Un valor escrito manda (ACTIVO, ENSAYO o APAGADO, sin importar mayúsculas ni espacios). Sin valor: ACTIVO sólo en producción
+ * (founder, 22-nov), ENSAYO en cualquier otro entorno. Cualquier otro texto (una errata) es ENSAYO: un error de dedo nunca anula.
+ */
+export function modoDeLaLimpiezaDeCobrar(
+  valor: string | undefined = process.env[VARIABLE_DEL_MODO],
+  entorno: string | undefined = process.env.NODE_ENV,
+): ModoDeLaLimpieza {
   const v = (valor ?? '').trim().toUpperCase()
-  return v === 'ACTIVO' || v === 'APAGADO' ? v : 'ENSAYO'
+  if (v === 'ACTIVO' || v === 'APAGADO' || v === 'ENSAYO') return v
+  if (v === '') return entorno === 'production' ? 'ACTIVO' : 'ENSAYO'
+  return 'ENSAYO'
 }
 
 const PLAZO_HORAS = 24

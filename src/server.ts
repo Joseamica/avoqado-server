@@ -634,8 +634,8 @@ const startApplication = async (retries = 3) => {
       // Start abandoned orders cleanup job
       abandonedOrdersCleanupJob.start()
 
-      // hz:e82938e1:D36: ventas de Cobrar abandonadas por las TPV viejas (sin cliente ni cobro, 24 h). ENSAYO por omisión: sólo
-      // registra en el log qué anularía; LIMPIEZA_VENTAS_COBRAR=ACTIVO (con el «sí» del founder) anula.
+      // hz:e82938e1:D36: ventas de Cobrar abandonadas por las TPV viejas (sin cliente ni cobro, 24 h). En producción anula por
+      // omisión (founder, 22-nov); fuera de producción sólo registra qué anularía. LIMPIEZA_VENTAS_COBRAR=ENSAYO o APAGADO la frena.
       ventasCobrarAbandonadasJob.start()
 
       // Start FIFO batch expiration job (daily — expires batches past

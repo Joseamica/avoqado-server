@@ -1,7 +1,7 @@
 /**
  * hz:e82938e1:D36, decisión del founder «A con ensayo» (20-nov): la limpieza del SERVIDOR que, tras 24 h, ANULA (nunca borra) las
- * ventas de Cobrar abandonadas que dejaron las TPV viejas — y las 106 que ya existen. Por omisión corre en ENSAYO: no escribe NADA,
- * sólo deja en el log, por negocio, cuántas anularía. Sólo con `LIMPIEZA_VENTAS_COBRAR=ACTIVO` (decisión del founder) anula.
+ * ventas de Cobrar abandonadas que dejaron las TPV viejas — y las 106 que ya existen. ENSAYO no escribe NADA, sólo deja en el log,
+ * por negocio, cuántas anularía. Sin `LIMPIEZA_VENTAS_COBRAR`, en producción anula (founder, 22-nov: «sí, en prod» y «A»).
  * La regla contra Postgres real: tests/integration/jobs/ventas-cobrar-abandonadas.integration.test.ts.
  */
 jest.mock('@/communication/sockets', () => ({
@@ -28,16 +28,24 @@ const sqlCompleto = (llamada: unknown[]) =>
   llamada.map(p => (Array.isArray(p) ? p.join(' ') : p && typeof p === 'object' && 'sql' in (p as any) ? (p as any).sql : '')).join(' ')
 
 describe('modoDeLaLimpiezaDeCobrar — el interruptor', () => {
+  // Founder, 22-nov («A»): en PRODUCCIÓN nace prendida (ACTIVO) sin tocar Render; la variable queda como freno de emergencia.
+  // Fuera de producción (los servidores locales comparten la base av-db-25) sigue en ENSAYO: nunca anula ventas de prueba ajenas.
   it.each([
-    [undefined, 'ENSAYO'],
-    ['', 'ENSAYO'],
-    ['ensayo', 'ENSAYO'],
-    ['cualquier cosa', 'ENSAYO'],
-    ['ACTIVO', 'ACTIVO'],
-    [' activo ', 'ACTIVO'],
-    ['APAGADO', 'APAGADO'],
-  ])('%j ⇒ %s (por omisión, y ante la duda, ENSAYO: nunca anula sin que alguien lo pida)', (valor, modo) => {
-    expect(modoDeLaLimpiezaDeCobrar(valor as string | undefined)).toBe(modo)
+    [undefined, 'production', 'ACTIVO'],
+    ['', 'production', 'ACTIVO'],
+    ['   ', 'production', 'ACTIVO'],
+    [undefined, 'development', 'ENSAYO'],
+    [undefined, 'test', 'ENSAYO'],
+    [undefined, undefined, 'ENSAYO'],
+    ['ensayo', 'production', 'ENSAYO'],
+    ['ENSAYO', 'production', 'ENSAYO'],
+    ['APAGADO', 'production', 'APAGADO'],
+    ['cualquier cosa', 'production', 'ENSAYO'],
+    ['ACTIVO', 'development', 'ACTIVO'],
+    [' activo ', 'production', 'ACTIVO'],
+    ['APAGADO', 'development', 'APAGADO'],
+  ])('valor %j en %j ⇒ %s (vacía: ACTIVO sólo en producción; un valor escrito manda; una errata, ENSAYO)', (valor, entorno, modo) => {
+    expect(modoDeLaLimpiezaDeCobrar(valor as string | undefined, entorno as string | undefined)).toBe(modo)
   })
 })
 
