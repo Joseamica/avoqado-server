@@ -905,7 +905,8 @@ export async function updateTpvSettings(
     // 5. Save full merged config.settings (TPV Android compat) + configOverrides (diff only)
     await updateScopedTerminal(tx, tpvId, scope, {
       config: { ...existingConfig, settings: newSettings },
-      configOverrides: Object.keys(overrides).length > 0 ? overrides : Prisma.JsonNull,
+      // Una COPIA propia: una llave colada como propiedad heredada (`__proto__` en el cuerpo) no llega a Prisma.
+      configOverrides: Object.keys(overrides).length > 0 ? sinLlaveReservada(overrides) : Prisma.JsonNull,
     })
 
     return { venueId: terminal.venueId, newSettings, overrides }
@@ -1349,7 +1350,7 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
       for (const terminal of terminals) {
         const existingConfig = (terminal.config as any) || {}
         const existingSettings = existingConfig.settings || {}
-        const overrides = (terminal.configOverrides as Record<string, any>) || {}
+        const overrides = sinLlaveReservada((terminal.configOverrides as Record<string, any>) || {})
 
         // Cascade: existing base + venue update + per-terminal overrides
         const updatedConfig = {

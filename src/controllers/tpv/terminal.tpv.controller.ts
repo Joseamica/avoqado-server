@@ -765,7 +765,6 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
     // settings push would silently wipe a dashboard-set override.
     delete overrides.trackPromoterLocation
     delete overrides.cashReconciliationEnabled
-    delete overrides.inHouseSdkEnabled
     const prevOverrides = (terminal.configOverrides as Record<string, any>) || {}
     if (typeof prevOverrides.trackPromoterLocation === 'boolean') {
       overrides.trackPromoterLocation = prevOverrides.trackPromoterLocation
@@ -782,7 +781,8 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
           where: { id: terminal.id, venueId: sessionVenueId },
           data: {
             config: { ...existingConfig, settings: newSettings },
-            configOverrides: Object.keys(overrides).length > 0 ? overrides : Prisma.JsonNull,
+            // Una COPIA propia sin la llave reservada: `delete` no quita una propiedad heredada (`__proto__` en el cuerpo).
+            configOverrides: Object.keys(overrides).length > 0 ? sinLlaveReservada(overrides) : Prisma.JsonNull,
             updatedAt: new Date(),
           },
         })

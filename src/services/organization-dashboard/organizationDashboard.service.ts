@@ -3606,7 +3606,8 @@ class OrganizationDashboardService {
       where: { organizationId: orgId },
     })
     const existingSettings = (existing?.settings as Record<string, any>) || {}
-    const settingsSync: Record<string, any> = { ...existingSettings }
+    // SDK propio: la llave reservada que ya estuviera en los ajustes de la organización no se conserva ni se devuelve.
+    const settingsSync: Record<string, any> = sinLlaveReservada({ ...existingSettings })
 
     if (data.attendanceTracking !== undefined) {
       settingsSync.attendanceTracking = data.attendanceTracking
@@ -3903,7 +3904,7 @@ class OrganizationDashboardService {
           const batch = terminals.slice(i, i + BATCH_SIZE)
           const updates = batch.map(terminal => {
             const existingConfig = (terminal.config as Record<string, any>) || {}
-            const overrides = (terminal.configOverrides as Record<string, any>) || {}
+            const overrides = sinLlaveReservada((terminal.configOverrides as Record<string, any>) || {})
 
             // Cascade merge: org defaults → per-terminal overrides
             // Terminals with no overrides (null) get full org defaults

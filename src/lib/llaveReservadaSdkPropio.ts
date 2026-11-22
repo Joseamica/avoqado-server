@@ -12,10 +12,14 @@ export function sinLlaveReservada<T extends Record<string, any>>(ajustes: T): Om
   return resto
 }
 
-/** Un `Terminal.config` completo (lo que manda el formulario o el alta): quita la llave de su `settings`, si lo trae. */
+/** Sólo un objeto JSON común (`{…}`): ni `null`, ni un arreglo, ni `Prisma.JsonNull` (que es una instancia de clase). */
+const esObjetoPlano = (v: unknown): v is Record<string, any> =>
+  v !== null && typeof v === 'object' && [Object.prototype, null].includes(Object.getPrototypeOf(v))
+
+/** Un `Terminal.config` completo (lo que manda el formulario o el alta): quita la llave de la RAÍZ y de su `settings`. Lo que no
+ *  es un objeto JSON común regresa tal cual. */
 export function configSinLlaveReservada<T>(config: T): T {
-  if (config === null || typeof config !== 'object' || Array.isArray(config)) return config
-  const { settings } = config as Record<string, any>
-  if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) return config
-  return { ...config, settings: sinLlaveReservada(settings) }
+  if (!esObjetoPlano(config)) return config
+  const raiz: Record<string, any> = sinLlaveReservada(config)
+  return (esObjetoPlano(raiz.settings) ? { ...raiz, settings: sinLlaveReservada(raiz.settings) } : raiz) as T
 }

@@ -6,9 +6,11 @@
  */
 import type { NextFunction, Request, Response } from 'express'
 
+import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { updateTpvSettings } from '@/controllers/tpv/terminal.tpv.controller'
-import { getTpvSettings } from '@/services/dashboard/tpv.dashboard.service'
+import { getTpvSettings, updateTpvSettings as guardarAjustes } from '@/services/dashboard/tpv.dashboard.service'
+import { configSinLlaveReservada } from '@/lib/llaveReservadaSdkPropio'
 
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
@@ -75,5 +77,70 @@ describe('getTpvSettings (el lector compartido del DASHBOARD, el SUPERADMIN y el
     expect(ajustes).not.toHaveProperty('inHouseSdkEnabled')
     expect(ajustes.showTipScreen).toBe(false)
     expect(ajustes.trackPromoterLocationOverride).toBeNull()
+  })
+})
+
+/** Un cuerpo JSON con `__proto__`: la llave llegaría como propiedad HEREDADA de las excepciones calculadas (Codex r3, S4-c). */
+const conProto = () => JSON.parse('{"showTipScreen": false, "__proto__": {"inHouseSdkEnabled": true}}')
+
+describe('ronda 3 · las excepciones (configOverrides) se escriben como copia propia, sin la llave ni heredada', () => {
+  it('PUT del aparato con `__proto__` en el cuerpo', async () => {
+    prismaMock.terminal.findFirst.mockResolvedValue({
+      id: 'terminal-sdk-3',
+      venueId,
+      config: { settings: { showTipScreen: true } },
+      configOverrides: null,
+      venue: { organizationId: null },
+    })
+    prismaMock.terminal.update.mockResolvedValue({})
+    const res = makeRes()
+    await updateTpvSettings(
+      { params: { serialNumber }, body: conProto(), authContext: { userId: 'staff-1', venueId, role: 'MANAGER' } } as unknown as Request,
+      res,
+      jest.fn() as NextFunction,
+    )
+    const write = prismaMock.terminal.update.mock.calls[0][0].data
+    expect(write.configOverrides).not.toHaveProperty('inHouseSdkEnabled')
+    expect(write.configOverrides.showTipScreen).toBe(false)
+  })
+
+  it('updateTpvSettings del servicio (DASHBOARD, SUPERADMIN y POS móvil) con `__proto__` en el cuerpo', async () => {
+    const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 't1', venueId }]),
+      terminal: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({ venueId, config: { settings: {} }, configOverrides: null, venue: { organizationId: null } }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      organizationAttendanceConfig: { findUnique: jest.fn().mockResolvedValue(null) },
+    }
+    prismaMock.$transaction.mockImplementation((cb: any) => cb(tx))
+
+    await guardarAjustes('t1', conProto(), { venueId })
+
+    const write = tx.terminal.update.mock.calls[0][0].data
+    expect(write.configOverrides).not.toHaveProperty('inHouseSdkEnabled')
+    expect(write.configOverrides.showTipScreen).toBe(false)
+  })
+})
+
+describe('ronda 3 · configSinLlaveReservada', () => {
+  it('quita la llave de la RAÍZ y de settings, y deja todo lo demás', () => {
+    expect(
+      configSinLlaveReservada({ inHouseSdkEnabled: true, otra: 1, settings: { inHouseSdkEnabled: true, showTipScreen: false } }),
+    ).toEqual({
+      otra: 1,
+      settings: { showTipScreen: false },
+    })
+  })
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['un arreglo', [1, 2]],
+    ['Prisma.JsonNull', Prisma.JsonNull],
+  ])('con %s regresa lo mismo que recibió', (_caso, config) => {
+    expect(configSinLlaveReservada(config)).toBe(config)
   })
 })

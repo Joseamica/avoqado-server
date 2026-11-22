@@ -160,6 +160,41 @@ describe('los escritores del JSON de ajustes nunca guardan ni devuelven inHouseS
     expect(g.columna).toBe(true)
   })
 
+  it('ronda 3 · upsertOrgAttendanceConfig (asistencia de la organización): la que ya estaba guardada no se conserva ni se devuelve', async () => {
+    await ajustesDeLaOrganizacionConEco()
+
+    const respuesta = await organizationDashboardService.upsertOrgAttendanceConfig(orgId!, { enableCashPayments: false })
+
+    expect(respuesta.settings).not.toHaveProperty(LLAVE)
+    const org = await prisma.organizationAttendanceConfig.findUniqueOrThrow({ where: { organizationId: orgId! } })
+    expect(org.settings).not.toHaveProperty(LLAVE)
+    expect(org.settings).toMatchObject({ showReviewScreen: false, enableCashPayments: false })
+  })
+
+  it('ronda 3 · createTpv y updateTpv: la llave en la RAÍZ de config tampoco se guarda', async () => {
+    const creada = await createTpv(venueId!, { name: 'Caja raíz', config: { [LLAVE]: true, settings: { showTipScreen: false } } })
+    expect(creada.config).not.toHaveProperty(LLAVE)
+    expect((await prisma.terminal.findUniqueOrThrow({ where: { id: creada.id } })).config).not.toHaveProperty(LLAVE)
+
+    const editada = await updateTpv(venueId!, creada.id, { config: { [LLAVE]: true, settings: {} } } as never)
+    expect(editada.config).not.toHaveProperty(LLAVE)
+    expect((await prisma.terminal.findUniqueOrThrow({ where: { id: creada.id } })).config).not.toHaveProperty(LLAVE)
+  })
+
+  it('ronda 3 · updateTpvSettings con `__proto__` en el cuerpo: la llave no llega a configOverrides', async () => {
+    const t = await terminalConEco()
+    const cuerpo = JSON.parse(`{"showTipScreen": false, "__proto__": {"${LLAVE}": true}}`)
+
+    await updateTpvSettings(t.id, cuerpo, { venueId: venueId! })
+
+    const fila = await prisma.terminal.findUniqueOrThrow({
+      where: { id: t.id },
+      select: { configOverrides: true, inHouseSdkEnabled: true },
+    })
+    expect(JSON.stringify(fila.configOverrides)).not.toContain(`"${LLAVE}"`)
+    expect(fila.inHouseSdkEnabled).toBe(true)
+  })
+
   it('getOrgTpvDefaults: una organización que ya la tenía guardada no la devuelve', async () => {
     await ajustesDeLaOrganizacionConEco()
 
