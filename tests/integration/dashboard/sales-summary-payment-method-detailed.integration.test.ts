@@ -201,7 +201,7 @@ async function oldAlgorithm(vId: string, merchantAccountId?: string): Promise<Pa
  * additive fields of the statement (carril C, 21-nov-2026) are left out of the comparison; they are pinned by
  * `sales-summary-estado-de-cuenta.integration.test.ts`.
  */
-const CAMPOS_NUEVOS = new Set(['chargedAmount', 'chargedCount', 'tenderCommissions', 'cancelledOrderRefunds'])
+const CAMPOS_NUEVOS = new Set(['chargedAmount', 'chargedCount', 'tenderCommissions', 'cancelledOrderRefunds', 'platformFeesCents'])
 const cents = (rows: PaymentMethodDetailedBreakdown[] | undefined) =>
   JSON.parse(JSON.stringify(rows ?? null), (k, v) =>
     CAMPOS_NUEVOS.has(k) ? undefined : typeof v === 'number' ? Math.round(v * 100) / 100 : v,

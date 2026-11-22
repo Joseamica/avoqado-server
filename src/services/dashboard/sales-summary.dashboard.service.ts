@@ -135,6 +135,8 @@ export interface PaymentMethodDetailedBreakdown {
     platformFees: number
     chargedAmount?: number
     chargedCount?: number
+    /** Aditivo (carril C): la comisión redondeada por cobro, como el estado de cuenta y la liquidación. */
+    platformFeesCents?: number
   }>
 }
 
@@ -735,6 +737,8 @@ export async function computeSettlementProjection(
   endDate: Date,
   venueTimezone: string,
   merchantAccountId?: string,
+  /** Carril C: también lee los cobros sin costo para contarlos como «sin fecha». Sólo el estado de cuenta lo pide (la MCP no). */
+  contarSinFecha = false,
 ): Promise<{
   calendar: SettlementCalendarDay[]
   nextByMerchant: Map<string, { nextDate: string | null; settlementDays: number | null }>
@@ -750,7 +754,12 @@ export async function computeSettlementProjection(
     {
       venueId,
       status: 'COMPLETED' as const,
-      AND: [WHERE_COBRO_DE_TERMINAL_DE_AVOQADO, ...(merchantAccountId ? [{ merchantAccountId }] : [])],
+      AND: [
+        WHERE_COBRO_DE_TERMINAL_DE_AVOQADO,
+        ...(merchantAccountId ? [{ merchantAccountId }] : []),
+        // Sin costo no hay fecha: sólo se leen si alguien va a contar ese dinero como «sin fecha» (Codex r5 #5).
+        ...(contarSinFecha ? [] : [{ transactionCost: { isNot: null } }]),
+      ],
     },
     startDate,
     endDate,
@@ -1095,7 +1104,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           drawer: vacio(),
           terminal: vacio(),
           online: vacio(),
-          other: { ...vacio(), collected: legado, netToReceive: legado, transactionCount: legacyCount },
+          // Con un comercio elegido, nada: esos cobros no tienen comercio (como en la ruta normal; Codex r5 #1).
+          other: merchantAccountId ? vacio() : { ...vacio(), collected: legado, netToReceive: legado, transactionCount: legacyCount },
           tenderCommissions: 0,
         }
       : undefined
@@ -1595,6 +1605,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       chargedCount: number
       tenderCommissions: number
       cancelledOrderRefunds: number
+      platformFeesCents: number
     }
     const newAcc = (): Acc => ({
       amount: 0,
@@ -1606,6 +1617,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       chargedCount: 0,
       tenderCommissions: 0,
       cancelledOrderRefunds: 0,
+      platformFeesCents: 0,
     })
     const buckets = new Map<BreakdownBucket, Acc>()
     const subBuckets = new Map<CardSubBucket, Acc>()
@@ -1752,6 +1764,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         s.platformFees += fee
         s.chargedAmount += charged
         s.chargedCount += chargedCount
+        s.platformFeesCents += Number(row.feesCents)
       }
 
       // El estado de cuenta usa la comisión redondeada POR COBRO, como la liquidación (`proyectarComisionYNeto`): así banco, «Por
@@ -1858,6 +1871,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
                   platformFees: s.platformFees,
                   chargedAmount: s.chargedAmount,
                   chargedCount: s.chargedCount,
+                  platformFeesCents: s.platformFeesCents,
                 }
               })
             if (subs.length > 0) entry.subBuckets = subs
@@ -1928,7 +1942,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // there (a filtered view can't honestly answer "¿dónde está tu dinero?"), so
   // computing the full-card projection would be wasted work and a confusing payload.
   if (filters.includeSettlementProjection && !paymentMethod) {
-    const projection = await computeSettlementProjection(venueId, parsedStartDate, parsedEndDate, timezone, merchantAccountId)
+    const projection = await computeSettlementProjection(venueId, parsedStartDate, parsedEndDate, timezone, merchantAccountId, true)
     settlementCalendar = projection.calendar
     if (byMerchantAccount) {
       byMerchantAccount = byMerchantAccount.map(m => ({
