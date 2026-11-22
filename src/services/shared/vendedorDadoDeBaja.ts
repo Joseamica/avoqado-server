@@ -4,7 +4,7 @@
  *   · la cuenta YA estaba guardada a su nombre (la venta a medias de WINDOWS) ⇒ su cobro queda a nombre del vendedor, sin plazo;
  *   · la venta viene de la cola sin red ⇒ queda a nombre de la SESIÓN que la sube (Q110, 20-oct: «a nombre de quien lo termina»).
  * Fingir «vengo de la cola» sólo pone la venta a nombre de la propia sesión. Una venta NUEVA en vivo sigue con el 400 de hoy.
- * No depende de `StaffVenue.endDate` (el switch de Equipo no la sella: D19). Promesa: docs/audit/2026-11-21-vendedor-dado-de-baja.
+ * No depende de `StaffVenue.endDate` (desde D19 la base la sella en toda baja, pero esta regla no la necesita). Promesa: docs/audit/2026-11-21-vendedor-dado-de-baja.
  */
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
