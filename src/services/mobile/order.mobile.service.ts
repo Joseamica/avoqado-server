@@ -7817,6 +7817,25 @@ export async function cancelOrderInTransaction(
   }
 }
 
+/**
+ * hz:e82938e1:D36 (founder «B», Codex r5 #3). El aviso de una anulación sale DESPUÉS del commit (y, salvo la limpieza de Cobrar, después
+ * de esperar a los referidos). En ese hueco, el dinero ya capturado de una TPV puede reabrir la venta y avisar «COMPLETED»; si este
+ * aviso dijera «CANCELLED» fijo, llegaría el último y las pantallas la verían anulada estando pagada. Se avisa el estado de la venta
+ * en ese momento: normalmente CANCELLED, como siempre. Si leerlo falla, CANCELLED, como siempre: el aviso nunca se pierde.
+ */
+async function estadoAlAvisarLaAnulacion(venueId: string, orderId: string): Promise<string> {
+  try {
+    const venta = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { status: true } })
+    return venta?.status ?? 'CANCELLED'
+  } catch (error) {
+    logger.warn('[ORDER.MOBILE] no se pudo releer la venta anulada para su aviso; sale CANCELLED como siempre', {
+      orderId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return 'CANCELLED'
+  }
+}
+
 export async function publishCancelledOrder(
   venueId: string,
   // `valesSoltados` es opcional: «Regresar saldo y cancelar» publica una cuenta de tarjetas, que nunca trae vales (Codex r4 #1).
@@ -7888,7 +7907,10 @@ export async function publishCancelledOrder(
   // S9: el pase de Wallet de cada clienta con premio regresado (si no, lo manda el barrido con la fila de la bandeja).
   despertarPasesTrasCommit(venueId, result.clientasConPremio)
   if (broadcastingService) {
-    broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, { orderId, status: 'CANCELLED' })
+    broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, {
+      orderId,
+      status: await estadoAlAvisarLaAnulacion(venueId, orderId),
+    })
     // Preserve the original bound-pointer notification DTO; no fresh DB reconstruction.
     if (result.hadBoundTable && table)
       broadcastingService.broadcastToVenue(venueId, SocketEventType.TABLE_STATUS_CHANGE, {
