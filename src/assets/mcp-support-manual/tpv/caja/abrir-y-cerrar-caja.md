@@ -10,7 +10,7 @@ requiredPermissions:
 money: true
 versionMin: 2.16.0
 sourceRepo: avoqado-tpv
-sourceRef: 51bce133d794f89d567338f4ca6edd01d862381f
+sourceRef: 18685818f1b0b1059d1f4b34e00710c451db4341
 deviceTested: 2026-11-18
 keywords:
   - abrir caja

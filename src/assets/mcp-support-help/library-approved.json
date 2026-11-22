@@ -854,7 +854,7 @@
       "requiredPermissions": []
     },
     "tpv/caja/abrir-y-cerrar-caja": {
-      "sha256": "3a2cac218270f5437e448ac146710044c2bbfb6e9ded59e3a2952d62df145964",
+      "sha256": "2fa30138e7472ac448555dc290c7766ce944c557fd066c6b792ffa498ae8d6bf",
       "requiredPermissions": [
         "tpv-shifts:create",
         "tpv-shifts:close"

@@ -1,7 +1,7 @@
 {
   "pagina": "tpv/caja/abrir-y-cerrar-caja",
   "sourceRepo": "avoqado-tpv",
-  "sourceRef": "51bce133d794f89d567338f4ca6edd01d862381f",
+  "sourceRef": "18685818f1b0b1059d1f4b34e00710c451db4341",
   "version": "2.22.4",
   "pasos": [
     {
@@ -97,7 +97,7 @@
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt",
-      "linea": 157,
+      "linea": 154,
       "cita": "return Result.Success(proyectar(row))"
     },
     {
@@ -141,7 +141,7 @@
     {
       "afirmacion": "Abrir y cerrar se guardan primero en la terminal y la sincronización los envía después",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt",
-      "linea": 294
+      "linea": 289
     }
   ],
   "rutas": [
@@ -158,7 +158,7 @@
     {
       "ruta": "El cierre local no trae totales (financialTotalsKnown = false)",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt",
-      "linea": 1373
+      "linea": 1374
     },
     {
       "ruta": "Problema: «Caja pendiente de revisión»",
