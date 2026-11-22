@@ -35,8 +35,9 @@ import {
   legacyAdmission,
   legacyMatchesFilter,
   bucketOf,
-  computeMerchantAccountBreakdown,
+  buildMerchantAccountBreakdown,
   computeSettlementProjection,
+  destinationOf,
   type PaymentMethodFilter,
   type CardTypeFilter,
 } from '@/services/dashboard/sales-summary.dashboard.service'
@@ -473,20 +474,14 @@ describe.skip('getSalesSummary (integration — needs a seeded Postgres, deferre
 })
 
 // ---------------------------------------------------------------------------
-// computeMerchantAccountBreakdown — focused, mock-friendly (touches prisma via
-// $queryRaw + merchantAccount.findMany, both mocked). Unlike getSalesSummary,
-// this helper IS unit-testable under the mocked-Prisma harness.
+// buildMerchantAccountBreakdown — the per-merchant sums come from getSalesSummary's single read (carril C, 21-nov-2026);
+// this helper only adds names and rules (merchantAccount / settlementConfiguration findMany, both mocked).
 // ---------------------------------------------------------------------------
-describe('computeMerchantAccountBreakdown', () => {
-  const VENUE = 'venue-amaena'
-  const START = new Date('2026-05-01T00:00:00.000Z')
-  const END = new Date('2026-05-31T23:59:59.999Z')
+describe('buildMerchantAccountBreakdown', () => {
+  const sums = (rows: Array<{ merchantAccountId: string; collected: number; fee: number; txns: number }>) =>
+    rows.map(r => ({ ...r, refunds: 0, refundCount: 0 }))
 
   it('groups card payments by merchant, computes net = collected - fee, sorted by collected desc', async () => {
-    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([
-      { merchantAccountId: 'ma-A', collected: 1823, fee: 65.6, txns: 5 },
-      { merchantAccountId: 'ma-ext', collected: 13827, fee: 497.7, txns: 17 },
-    ])
     ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([
       {
         id: 'ma-A',
@@ -506,7 +501,12 @@ describe('computeMerchantAccountBreakdown', () => {
       },
     ])
 
-    const result = await computeMerchantAccountBreakdown(VENUE, START, END)
+    const result = await buildMerchantAccountBreakdown(
+      sums([
+        { merchantAccountId: 'ma-A', collected: 1823, fee: 65.6, txns: 5 },
+        { merchantAccountId: 'ma-ext', collected: 13827, fee: 497.7, txns: 17 },
+      ]),
+    )
 
     expect(result).toHaveLength(2)
     // sorted by collectedOnCard desc → Externo first
@@ -525,14 +525,12 @@ describe('computeMerchantAccountBreakdown', () => {
   })
 
   it('returns [] when there are no card payments (and skips the label query)', async () => {
-    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
-    const result = await computeMerchantAccountBreakdown(VENUE, START, END)
+    const result = await buildMerchantAccountBreakdown(sums([]))
     expect(result).toEqual([])
     expect(prismaMock.merchantAccount.findMany).not.toHaveBeenCalled()
   })
 
   it('falls back to alias, then a generic label, when displayName is missing', async () => {
-    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([{ merchantAccountId: 'ma-x', collected: 100, fee: 4, txns: 1 }])
     ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([
       {
         id: 'ma-x',
@@ -543,15 +541,11 @@ describe('computeMerchantAccountBreakdown', () => {
         provider: { name: 'AngelPay (Nexgo)' },
       },
     ])
-    const result = await computeMerchantAccountBreakdown(VENUE, START, END)
+    const result = await buildMerchantAccountBreakdown(sums([{ merchantAccountId: 'ma-x', collected: 100, fee: 4, txns: 1 }]))
     expect(result[0].displayName).toBe('Cuenta vieja')
   })
 
   it('attaches active settlementRules per merchant, and omits the field when none exist', async () => {
-    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([
-      { merchantAccountId: 'ma-ruled', collected: 1000, fee: 40, txns: 3 },
-      { merchantAccountId: 'ma-bare', collected: 500, fee: 20, txns: 2 },
-    ])
     ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([
       {
         id: 'ma-ruled',
@@ -576,7 +570,12 @@ describe('computeMerchantAccountBreakdown', () => {
       { merchantAccountId: 'ma-ruled', cardType: 'AMEX', settlementDays: 3 },
     ])
 
-    const result = await computeMerchantAccountBreakdown(VENUE, START, END)
+    const result = await buildMerchantAccountBreakdown(
+      sums([
+        { merchantAccountId: 'ma-ruled', collected: 1000, fee: 40, txns: 3 },
+        { merchantAccountId: 'ma-bare', collected: 500, fee: 20, txns: 2 },
+      ]),
+    )
     const ruled = result.find(r => r.merchantAccountId === 'ma-ruled')!
     const bare = result.find(r => r.merchantAccountId === 'ma-bare')!
 
@@ -860,5 +859,47 @@ describe('computeSettlementProjection — páginas de 500 con cursor', () => {
     const { calendar } = await computeSettlementProjection(VENUE, START_P, END_P, TZ_P)
     expect(prismaMock.payment.findMany).toHaveBeenCalledTimes(1)
     expect(calendar[0].byMerchant[0].transactionCount).toBe(2)
+  })
+})
+
+/**
+ * Carril C (21-nov-2026): el destino de cada cobro del estado de cuenta lo decide la autoridad (`tenderSemantics`), UNO por cobro.
+ */
+describe('destinationOf', () => {
+  const g = (over: Partial<Parameters<typeof destinationOf>[0]>) =>
+    destinationOf({
+      method: 'CASH',
+      fundsFlow: null,
+      tenderCountsAsCash: null,
+      hasTender: false,
+      hasMerchant: false,
+      enLinea: false,
+      ...over,
+    })
+
+  it('un cobro con comercio de terminal es de la terminal', () => {
+    expect(g({ method: 'CREDIT_CARD', hasMerchant: true })).toBe('terminal')
+  })
+  it('efectivo, y lo que la autoridad pone en el cajón, es del cajón — aunque traiga comercio', () => {
+    expect(g({ method: 'CASH' })).toBe('drawer')
+    expect(g({ method: 'OTHER', fundsFlow: 'CASH_DRAWER' })).toBe('drawer')
+    expect(g({ method: 'OTHER', hasTender: true, tenderCountsAsCash: true })).toBe('drawer')
+    expect(g({ method: 'CASH', hasMerchant: true })).toBe('drawer')
+  })
+  it('un OXXO viejo guardado como CASH pero procesado por Avoqado es en línea, no del cajón', () => {
+    expect(g({ method: 'CASH', fundsFlow: 'AVOQADO_PROCESSED', enLinea: true })).toBe('online')
+  })
+  it('lo en línea que sólo se registra no es dinero que llega al banco', () => {
+    expect(g({ method: 'CREDIT_CARD', fundsFlow: 'EXTERNAL_RECORDED', enLinea: true })).toBe('other')
+  })
+  it('lo que sólo se registra (Rappi/Uber, tarjeta de otra terminal, tipo de pago propio) va a otros', () => {
+    expect(g({ method: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED' })).toBe('other')
+    expect(g({ method: 'CREDIT_CARD', fundsFlow: 'EXTERNAL_RECORDED' })).toBe('other')
+    expect(g({ method: 'OTHER', hasTender: true })).toBe('other')
+  })
+  it('sin comercio ni sello en línea nada va al banco (SoftRestaurant, pruebas, TPV sin afiliación, transferencia vieja)', () => {
+    expect(g({ method: 'DEBIT_CARD' })).toBe('other')
+    expect(g({ method: 'CREDIT_CARD' })).toBe('other')
+    expect(g({ method: 'BANK_TRANSFER' })).toBe('other')
   })
 })

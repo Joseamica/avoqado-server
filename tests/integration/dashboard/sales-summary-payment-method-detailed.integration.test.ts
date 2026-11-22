@@ -196,9 +196,16 @@ async function oldAlgorithm(vId: string, merchantAccountId?: string): Promise<Pa
     })
 }
 
-/** Money compared to the cent: the old JS float sums carry 1e-13 noise the SQL sums do not. */
+/**
+ * Money compared to the cent: the old JS float sums carry 1e-13 noise the SQL sums do not. The oracle is the OLD contract, so the
+ * additive fields of the statement (carril C, 21-nov-2026) are left out of the comparison; they are pinned by
+ * `sales-summary-estado-de-cuenta.integration.test.ts`.
+ */
+const CAMPOS_NUEVOS = new Set(['chargedAmount', 'chargedCount', 'tenderCommissions', 'cancelledOrderRefunds'])
 const cents = (rows: PaymentMethodDetailedBreakdown[] | undefined) =>
-  JSON.parse(JSON.stringify(rows ?? null), (_k, v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v))
+  JSON.parse(JSON.stringify(rows ?? null), (k, v) =>
+    CAMPOS_NUEVOS.has(k) ? undefined : typeof v === 'number' ? Math.round(v * 100) / 100 : v,
+  )
 
 beforeAll(async () => {
   const org = await prisma.organization.create({
