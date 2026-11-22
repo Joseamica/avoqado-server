@@ -105,9 +105,11 @@ Invariantes de este lado, ya construidos y con prueba — no los debilites:
   (`tests/integration/payments/efectivoConTarjetaEnDuda.integration.test.ts`).
   🔴 **La tarjeta ya cobrada nunca se rechaza por la forma de dividir** (D7, encargo a25cd7, 22-nov): si la cuenta cerró en efectivo
   como `FULLPAYMENT` y llega tarde una tarjeta de `EQUALPARTS`/`PERPRODUCT`, `recordOrderPayment` la registra igual
-  (`tarjetaYaCobradaPorElBanco`) y salta el sobrepago; el efectivo y lo no completado siguen con el 400. En **Pago rápido** no hay
-  cuenta con qué chocar: la tarjeta tardía (la TPV manda `capturadoEnAparato`, la hora del intento) con efectivo del mismo importe
-  de esa terminal en medio deja `LATE_CARD_AFTER_CASH` (`avisoDeTarjetaTardiaConEfectivo.ts`). Nunca bloquea.
+  (`tarjetaYaCobradaPorElBanco`), con la forma de la cuenta y sin reparto por producto, y salta el sobrepago; el efectivo y lo no
+  completado siguen con el 400. En **Pago rápido** no hay cuenta con qué chocar: toda tarjeta que llega aprobada ≥ 1 min después de
+  su intento (la TPV manda `capturadoEnAparato`, guardado en `processorData`) deja `LATE_CARD_RECORDED` para que el dueño revise si
+  se cobró de otra forma (`avisoDeTarjetaTardia.ts`). A propósito NO se empareja con un efectivo (dos rondas de Codex: siempre
+  quedan huecos). Nunca bloquea.
 - 🔴 **La terminal también declara «no se cobró», y es la MISMA declaración** (botón del banner verde, founder, 3-nov: «A»):
   `POST /tpv/venues/:venueId/terminal-payment/requests/:requestId/uncharged-declaration`, con las puertas del POS y `reconcileUncharged`
   sin tocar. Lo único distinto: el origen (`source: 'TPV'`) y que no libera a secas (`UNCHARGED_STATEMENT_REQUIRED`, antes de la cubeta).

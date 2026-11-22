@@ -204,7 +204,7 @@ export const recordPaymentBodySchema = z.object({
         .nullish()
         .catch(undefined),
       // D7 (encargo a25cd7): epoch ms del aparato al ABRIR el intento de tarjeta; lo manda la recuperación de la libreta de la TPV
-      // (el «Aprobado» que se registra tarde). Sólo decide el aviso de Pago rápido `LATE_CARD_AFTER_CASH`. Sin declararlo,
+      // (el «Aprobado» que se registra tarde). Sólo decide el aviso de Pago rápido `LATE_CARD_RECORDED`. Sin declararlo,
       // `validateRequest` lo borraría. El dinero ya se cobró: un valor ilegible se descarta (no hay aviso), nunca un 400.
       capturadoEnAparato: z
         .union([z.number(), z.string().max(20, { message: 'La hora del intento es demasiado larga.' })])
