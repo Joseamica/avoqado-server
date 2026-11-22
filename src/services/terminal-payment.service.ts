@@ -62,6 +62,7 @@ import { resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
 import { exigirQueNoRijaSoloSaldoEnTerminal } from './storeCredit/soloSaldoEnTerminal'
 import { marcarDevolucionEnTerminal } from './storeCredit/terminalRefundMarker'
 import { esRappiEnEfectivo, MENSAJE_RAPPI_SOLO_EFECTIVO } from './shared/rappiEfectivoGuard'
+import { SIGUE_CONTESTANDO_MS, TECHO_TRAS_CANCELAR_MS, techoCumplidoSql, TOPE_DEL_BARRIDO_DEL_TECHO } from './tpv/techoDeEjecucionViva'
 import { computeOrderBalance } from './shared/orderBalance'
 import { isCardOnlineOrderInTx, MENSAJE_PAGADO_CON_TARJETA, ONLINE_ORDER_PAID_BY_CARD } from './online-ordering/card/guards'
 import { exigirCancelacionParaDevolverEnTerminal } from './giftCards/giftCardCancel.service'
@@ -6929,6 +6930,7 @@ class TerminalPaymentService {
             ? { cancelIntent: 'ALREADY_FINAL', cancelEmitted: false, payment: proyectarEstado(fila) }
             : { cancelIntent: 'NOT_FOUND', cancelEmitted: false, payment: null }
         }
+        await this.sellarPrimerCancel(requestId, venueId)
       } catch (err) {
         logger.error(`❌ [TerminalPayment] cancel row update failed`, {
           requestId,
@@ -8408,6 +8410,175 @@ class TerminalPaymentService {
       timestamp: new Date().toISOString(),
     })
     return true
+  }
+
+  /* ── D26 (22-nov) · el TECHO a «sigo cobrando» tras el cancel del POS (`./tpv/techoDeEjecucionViva.ts`). ── */
+
+  private techoCursor: { createdAt: Date; id: string } | null = null
+
+  /**
+   * El origen del techo: cuándo pidió el POS cancelar por PRIMERA vez. Una sola escritura (los cancels repetidos no lo mueven) y sin
+   * tocar `updatedAt`. Nunca tumba el cancel: si no se puede sellar, esa fila simplemente no tiene techo (el reloj de 20 min sigue).
+   */
+  private async sellarPrimerCancel(requestId: string, venueId: string): Promise<void> {
+    try {
+      await prisma.$executeRaw`
+        UPDATE "TerminalPaymentRequest" SET "cancelRequestedAt" = (NOW() AT TIME ZONE 'UTC')
+        WHERE "requestId" = ${requestId} AND "venueId" = ${venueId} AND "cancelRequestedAt" IS NULL`
+    } catch (err) {
+      logger.warn('⚠️ [TerminalPayment] could not stamp the first cancel — this request keeps the 20-min clock only', {
+        requestId,
+        venueId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  /**
+   * D26 · suelta la RANURA (nunca la venta) de una solicitud que el POS canceló hace ≥ 5 min y cuya terminal sigue contestando «sigo
+   * cobrando» sin ningún intento nuevo ni señal de dinero: el residuo de la TPV 2.16.0/2.20.0 que trabó Testarudo el 22-nov. Escribe
+   * lo MISMO que el reloj de 20 min y S2 (`TIMED_OUT / AUTO_RELEASED`, que las apps publicadas ya leen como «terminal libre, venta en
+   * duda»), con su asiento `TERMINAL_PAYMENT_SLOT_RELEASED_CANCEL_CEILING` en la misma transacción. Nunca «no se cobró».
+   *  · Un Payment ya registrado se concilia antes de soltar (como S2): nada se suelta encima de dinero.
+   *  · Bajo el candado de la solicitud y el de cada intento ligado (el orden de la ventana): un vínculo o un aviso del banco que se
+   *    publique mientras se decide espera, y uno ya publicado lo ve el CAS, que lleva el MISMO predicado del techo y los MISMOS vetos
+   *    de dinero que la ventana (`sinVetoDeDineroSql`, la afirmación de la terminal).
+   * Lo llama el vigía (`liberarPorTechoTrasCancelar`); idempotente por CAS.
+   */
+  async soltarRanuraPorTechoTrasCancelar(
+    fila: Pick<FilaDeCobroRemoto, 'requestId' | 'venueId'>,
+    now: Date = new Date(),
+  ): Promise<'RELEASED' | 'RECONCILED' | 'NOT_ELIGIBLE'> {
+    const { requestId, venueId } = fila
+    const techo = techoCumplidoSql(new Date(now.getTime() - TECHO_TRAS_CANCELAR_MS), new Date(now.getTime() - SIGUE_CONTESTANDO_MS))
+    const [elegible] = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT "id" FROM "TerminalPaymentRequest" WHERE "requestId" = ${requestId} AND "venueId" = ${venueId} AND ${techo}`
+    if (!elegible) return 'NOT_ELIGIBLE'
+    const row = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
+    if (!row) return 'NOT_ELIGIBLE'
+
+    const pago = await this.findReconcilablePayment(row)
+    if (pago && (await this.conciliarUnknownConSuPago(row, pago.id))) {
+      await this.resolverEsperaDelPos(requestId, venueId).catch(err =>
+        logger.warn('⚠️ [TerminalPayment] Could not answer the POS after reconciling before the cancel-ceiling release', {
+          requestId,
+          venueId,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      )
+      return 'RECONCILED'
+    }
+
+    let soltada: boolean
+    try {
+      soltada = await prisma.$transaction(async tx => {
+        await candadoDeSolicitud(tx, requestId)
+        const attemptIds = (await tx.terminalPaymentAttemptLink.findMany({ where: { requestId, venueId }, select: { attemptId: true } }))
+          .map(l => llaveDeIntento(l.attemptId))
+          .filter((a): a is string => Boolean(a))
+          .sort()
+        for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)
+        const n = await tx.$executeRaw`
+          UPDATE "TerminalPaymentRequest"
+          SET "status" = 'TIMED_OUT', "failureCode" = 'AUTO_RELEASED', "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+          WHERE "id" = ${row.id} AND ${techo}
+            AND ${SIN_AFIRMACION_DE_LA_TERMINAL_SQL}
+            AND ${sinVetoDeDineroSql({ requestId, venueId, attemptIds, terminalId: row.terminalId })}`
+        if (n === 0) return false // un resultado, un intento, dinero o el otro disparo llegaron antes: su escritura gana
+        await tx.activityLog.create({
+          data: {
+            action: 'TERMINAL_PAYMENT_SLOT_RELEASED_CANCEL_CEILING',
+            entity: 'TerminalPaymentRequest',
+            entityId: row.id,
+            venueId,
+            data: {
+              requestId,
+              terminalId: row.terminalId,
+              orderId: row.orderId,
+              amountCents: row.amountCents,
+              tipCents: row.tipCents,
+              priorStatus: row.status,
+              priorFailureCode: row.failureCode,
+              cancelRequestedAt: row.cancelRequestedAt?.toISOString() ?? null,
+              probeActiveAt: row.probeActiveAt?.toISOString() ?? null,
+              techoMs: TECHO_TRAS_CANCELAR_MS,
+              reason:
+                'El punto de venta canceló este cobro y la terminal siguió diciendo que cobraba, sin intento nuevo ni señal de dinero: ' +
+                'se soltó la terminal. Esa venta sigue pendiente de confirmar.',
+            },
+          },
+        })
+        return true
+      }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
+    } catch (err) {
+      // 55P03 (un candado ocupado) o base caída: esta pasada no decide; la siguiente (30 s) sí.
+      logger.warn('⏱️ [TerminalPayment] cancel-ceiling slot release deferred — lock busy or db error', {
+        requestId,
+        venueId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return 'NOT_ELIGIBLE'
+    }
+    if (!soltada) {
+      logger.info('🔎 [TerminalPayment] cancel-ceiling slot release not applied — the row changed or money evidence holds it', {
+        requestId,
+        venueId,
+      })
+      return 'NOT_ELIGIBLE'
+    }
+
+    this.contestarRanuraLibreAlPos(requestId, venueId)
+    logger.warn(
+      '🔓 [TerminalPayment] Terminal slot released: the POS cancelled and the terminal kept saying it was charging — the sale still needs confirmation',
+      {
+        requestId,
+        venueId,
+        terminalId: row.terminalId,
+        orderId: row.orderId,
+        amountCents: row.amountCents,
+        cancelRequestedAt: row.cancelRequestedAt?.toISOString() ?? null,
+      },
+    )
+    return 'RELEASED'
+  }
+
+  /** D26: la pasada del vigía, acotada y con cursor propio (el patrón de `liberarTrasCierreDeEjecucion`). */
+  async liberarPorTechoTrasCancelar(now: Date = new Date()): Promise<{ released: number; reconciled: number; scanned: number }> {
+    const cursor = this.techoCursor
+    const keyset = cursor
+      ? Prisma.sql`AND ("createdAt" > ${utcTs(cursor.createdAt)} OR ("createdAt" = ${utcTs(cursor.createdAt)} AND "id" > ${cursor.id}))`
+      : Prisma.empty
+    const techo = techoCumplidoSql(new Date(now.getTime() - TECHO_TRAS_CANCELAR_MS), new Date(now.getTime() - SIGUE_CONTESTANDO_MS))
+    const filas = await retry(
+      () =>
+        prisma.$queryRaw<{ id: string; requestId: string; venueId: string; createdAt: Date }[]>`
+          SELECT "id", "requestId", "venueId", "createdAt" FROM "TerminalPaymentRequest"
+          WHERE ${techo} ${keyset}
+          ORDER BY "createdAt" ASC, "id" ASC
+          LIMIT ${TOPE_DEL_BARRIDO_DEL_TECHO}`,
+      { retries: 3, shouldRetry: shouldRetryDbConnectionError, context: 'terminal-payment-watchdog:findCancelCeiling' },
+    )
+    const last = filas[filas.length - 1]
+    this.techoCursor = filas.length === TOPE_DEL_BARRIDO_DEL_TECHO && last ? { createdAt: last.createdAt, id: last.id } : null
+    let released = 0
+    let reconciled = 0
+    for (const f of filas) {
+      // Una fila que truena no corta el barrido de las demás («nada congela»).
+      try {
+        const r = await this.soltarRanuraPorTechoTrasCancelar(f, now)
+        if (r === 'RELEASED') released += 1
+        if (r === 'RECONCILED') reconciled += 1
+      } catch (err) {
+        logger.error('❌ [Terminal-payment watchdog] cancel-ceiling slot release failed for one request — the sweep goes on', {
+          requestId: f.requestId,
+          venueId: f.venueId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+    if (released > 0 || reconciled > 0)
+      logger.info('⏱️ [Terminal-payment watchdog] cancel-ceiling slot release sweep', { released, reconciled, scanned: filas.length })
+    return { released, reconciled, scanned: filas.length }
   }
 
   /**

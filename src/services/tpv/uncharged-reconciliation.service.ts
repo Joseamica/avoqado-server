@@ -36,6 +36,7 @@ import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANS
 import { contradiccionDeProcedenciaSql, sinVetoDeDineroSql } from './evidenciaPositivaSql'
 import { sondaReportoActiva, sondaVetaLaDeclaracion } from './sondaActiva'
 import logger from '../../config/logger'
+import { elTechoLevantaElVeto } from './techoDeEjecucionViva'
 
 export const RECONCILE_UNCHARGED_PERMISSION = 'payments:reconcile-uncharged'
 
@@ -601,7 +602,15 @@ export async function reconcileUncharged(
       (!porElBanco && (await sondaNoLaEncontroTrasEntregarla(tx, row.id, identity.venueId)))
     if (!constaQueSalio) throw new UnchargedReconciliationError('TERMINAL_NEVER_ANSWERED')
 
-    if (sondaVetaLaDeclaracion(row, ranuraYaSuelta(row))) throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
+    // D26 (22-nov, Testarudo): una vez soltada la ranura, el «sigo cobrando» de la terminal ya no veta a la PERSONA si el POS canceló
+    // y ese «sigo» cumplió el techo sin intento nuevo (`elTechoLevantaElVeto`): es el residuo de la TPV 2.16.0/2.20.0, que contesta
+    // «viva» con la pantalla del cobro muerta. Sólo la persona (no el rechazo del banco) y sólo la condición del veto: los vetos de
+    // dinero, el permiso y el PIN siguen igual. Un Payment tardío concilia con 🚨.
+    if (
+      sondaVetaLaDeclaracion(row, ranuraYaSuelta(row)) &&
+      !(!porElBanco && ranuraYaSuelta(row) && (await elTechoLevantaElVeto(tx, row, new Date())))
+    )
+      throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
 
     const sobre =
       row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)

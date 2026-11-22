@@ -67,6 +67,12 @@ Invariantes de este lado, ya construidos y con prueba — no los debilites:
     `TERMINAL_PAYMENT_SLOT_RELEASED_WEBHOOK_NOT_PROVEN` con el resultado por cuenta y su `motivo`. Medido en prod el 21-oct:
     Testarudo sigue automático; una terminal con una cuenta inactiva asignada pasa al toque del cajero hasta que soporte la
     desasigne. Residuo sin arreglo barato (una cuenta DESASIGNADA poco antes del cobro): `docs/audit/deuda-encontrada.md`.
+  - **D26, el techo tras el cancel del POS** (`soltarRanuraPorTechoTrasCancelar`, `src/services/tpv/techoDeEjecucionViva.ts`,
+    22-nov, Testarudo): la TPV 2.16.0/2.20.0 contesta «sigo cobrando» (ACTIVE viva) aunque la pantalla del cobro haya muerto
+    con la app viva, igual que en un cobro real. 5 min después del PRIMER cancel (`cancelRequestedAt`) o del último intento
+    abierto, con un ACTIVE posterior al cancel de hace ≤ 2 min, sin `executionClosedAt` (eso es S2), sin Payment (se concilia) y
+    pasando los vetos de dinero en el CAS, el vigía suelta la ranura (asiento `TERMINAL_PAYMENT_SLOT_RELEASED_CANCEL_CEILING`).
+    Mismo `TIMED_OUT/AUTO_RELEASED` a propósito: las apps publicadas sólo reconocen ese código como «terminal libre».
 - **El cierre por REST exige procedencia acreditada.** La selección actual del serial es:
   `Payment.terminal.serialNumber`, después el serial autenticado aportado por el llamador
   (`capturedBySerial`, del JWT) y finalmente `processorData.deviceSerialNumber`. Si falta la identidad
@@ -98,6 +104,9 @@ Invariantes de este lado, ya construidos y con prueba — no los debilites:
   cerrar esa venta. `sondaVetaLaDeclaracion` (`src/services/tpv/sondaActiva.ts`): con `AUTO_RELEASED`/`MANUAL_RELEASE`, sólo veta quien
   anunció `executionVersion >= 1` en su entrega (`deliveryProvenance`); la declaración deja `terminalReportabaActiva: true` en la bitácora.
   Con la ranura suelta, `proyectarEstado` manda `cancelDisposition=null` (`fueSoltadaPorPolitica`): «El cobro sigue activo» ya no sale.
+  **D26 (22-nov):** con la ranura suelta, tampoco veta a la PERSONA el ACTIVE de una TPV con `executionVersion >= 1` si el POS canceló
+  y ese ACTIVE cumplió el techo sin intento nuevo (`elTechoLevantaElVeto`): es el residuo que trabó a Testarudo. El banco
+  (`BANK_DECLINED`) y una ranura soltada sin cancel del POS siguen vetados como antes.
 - 🔴 **El EFECTIVO sobre una venta con la tarjeta en duda se deja cobrar y sólo se avisa** (founder, 2-nov, D10 → «B»; medido en
   prod, 90 días: 0 casos en 8,098 cobros). «No se inicia otro cobro» de arriba es de la TERMINAL: no le pongas una guarda al efectivo.
   Después del commit queda `CASH_WITH_CARD_IN_DOUBT` (`avisarEfectivoConTarjetaEnDuda`, sin esperarlo: nunca tumba ni demora el cobro).
