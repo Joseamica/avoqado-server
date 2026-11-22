@@ -3010,10 +3010,11 @@ interface PaymentCreationData {
   /** Epoch ms del aparato al cobrar la venta de su cola; sólo cuenta con `isOfflineReplay === true` (`horaDeLaVentaDeLaCola`). */
   createdAtLocal?: number | string | null
   /**
-   * D7 (encargo a25cd7): epoch ms del aparato al ABRIR el intento de tarjeta. Sólo lo manda la recuperación de la libreta de la TPV
-   * (el «Aprobado» que se registra tarde). No cambia el cobro: sólo decide el aviso `LATE_CARD_RECORDED` de Pago rápido.
+   * D7 (encargo a25cd7): cuántos ms pasaron, medidos con el reloj del aparato, desde que se ABRIÓ el intento de tarjeta hasta este
+   * envío. Una DURACIÓN, no una hora: un reloj del aparato adelantado o atrasado no la cambia (Codex r3). Sólo la manda la
+   * recuperación de la libreta de la TPV. No cambia el cobro: sólo decide el aviso `LATE_CARD_RECORDED` de Pago rápido.
    */
-  capturadoEnAparato?: number | string | null
+  edadDelIntentoMs?: number | null
   // Detalle del cobro declarado a mano ("Tarjeta (terminal externa)"). Sólo aplica a
   // métodos que NO pasaron por Avoqado; en efectivo va null. iOS manda null explícito.
   externalSource?: string | null
@@ -3942,11 +3943,16 @@ export async function recordOrderPayment(
 
     const allowedMethods = allowedTransitions[activeOrder.splitType] || []
 
-    if (!allowedMethods.includes(paymentData.splitType) && tarjetaYaCobradaPorElBanco(paymentData)) {
-      // 🔴 D7 (encargo a25cd7): la tarjeta ya la aprobó el banco. Si la cuenta cambió de forma de dividir mientras el registro
-      // llegaba (la cajera la cerró en efectivo como «pago completo» y después llega el «Aprobado» de «partes iguales»), un 400
-      // aquí deja dinero cobrado SIN Payment y la terminal reintenta para siempre. Se registra igual, como la tarjeta sobre una
-      // cuenta pagada o cancelada (`dineroCapturado`), y si pasa de la cuenta salta el aviso de sobrepago de siempre.
+    if (
+      !allowedMethods.includes(paymentData.splitType) &&
+      activeOrder.splitType === 'FULLPAYMENT' &&
+      tarjetaYaCobradaPorElBanco(paymentData)
+    ) {
+      // 🔴 D7 (encargo a25cd7): la tarjeta ya la aprobó el banco. Si la cuenta se CERRÓ como «pago completo» mientras el registro
+      // llegaba (la cajera la cobró en efectivo y después llega el «Aprobado» de «partes iguales» o «por producto»), un 400 aquí deja
+      // dinero cobrado SIN Payment y la terminal reintenta para siempre. Se registra igual, como la tarjeta sobre una cuenta pagada
+      // o cancelada (`dineroCapturado`), y si pasa de la cuenta salta el aviso de sobrepago de siempre. Sólo «pago completo»: un
+      // cruce entre dos divisiones a medias (cuenta abierta) sigue como hoy (Codex r3: ahí reasignar productos no tiene arreglo chico).
       logger.warn('⚠️ [recordOrderPayment] Tarjeta ya cobrada con otra forma de dividir: se registra igual', {
         venueId,
         orderId,
@@ -4376,7 +4382,9 @@ export async function recordOrderPayment(
             feeAmount: 0, // TODO: Calculate based on amount and percentage
             netAmount: totalAmount + tipAmount, // For now, net amount = total
             posRawData: {
-              splitType: paymentData.splitType,
+              // D7: la forma con la que se guardó; si la terminal mandó otra (tarjeta ya cobrada sobre «pago completo»), va aparte.
+              splitType: divisionDelCobro,
+              ...(sinRepartoPorProducto && { splitTypeDeLaTerminal: paymentData.splitType }),
               staffId: validatedStaffId, // identidad efectiva validada (POS en relay; TPV en cobro directo)
               source: fuenteDelPago(paymentData.source, { registroExterno: classicMethod !== 'CASH' }),
               paidProductsId: paymentData.paidProductsId || [],
@@ -6038,7 +6046,7 @@ export async function recordFastPayment(
               authorizationNumber: paymentData.authorizationNumber,
               referenceNumber: paymentData.referenceNumber,
               // D7: la hora del intento de una tarjeta que la TPV registró tarde (sólo tarjeta, legible); la lee el aviso de tarjeta tardía.
-              ...horaDelIntentoParaGuardar({ method: paymentData.method, capturadoEnAparato: paymentData.capturadoEnAparato }, llegada),
+              ...horaDelIntentoParaGuardar({ method: paymentData.method, edadDelIntentoMs: paymentData.edadDelIntentoMs }, llegada),
               isInternational: paymentData.isInternational,
               ...(paymentData.isInternationalFromTerminal !== undefined
                 ? { isInternationalFromTerminal: paymentData.isInternationalFromTerminal }

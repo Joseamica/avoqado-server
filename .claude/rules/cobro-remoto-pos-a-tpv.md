@@ -103,13 +103,14 @@ Invariantes de este lado, ya construidos y con prueba — no los debilites:
   Después del commit queda `CASH_WITH_CARD_IN_DOUBT` (`avisarEfectivoConTarjetaEnDuda`, sin esperarlo: nunca tumba ni demora el cobro).
   Si la tarjeta resulta aprobada (REST o webhook), su `Payment` se registra y grita 🚨 [Sobrepago] con `SOBREPAGO_DETECTADO`
   (`tests/integration/payments/efectivoConTarjetaEnDuda.integration.test.ts`).
-  🔴 **La tarjeta ya cobrada nunca se rechaza por la forma de dividir** (D7, encargo a25cd7, 22-nov): si la cuenta cerró en efectivo
-  como `FULLPAYMENT` y llega tarde una tarjeta de `EQUALPARTS`/`PERPRODUCT`, `recordOrderPayment` la registra igual
-  (`tarjetaYaCobradaPorElBanco`), con la forma de la cuenta y sin reparto por producto, y salta el sobrepago; el efectivo y lo no
-  completado siguen con el 400. En **Pago rápido** no hay cuenta con qué chocar: toda tarjeta que llega aprobada ≥ 1 min después de
-  su intento (la TPV manda `capturadoEnAparato`, guardado en `processorData`) deja `LATE_CARD_RECORDED` para que el dueño revise si
-  se cobró de otra forma (`avisoDeTarjetaTardia.ts`). A propósito NO se empareja con un efectivo (dos rondas de Codex: siempre
-  quedan huecos). Nunca bloquea.
+  🔴 **La tarjeta ya cobrada no se rechaza porque la cuenta se cerró como «pago completo»** (D7, encargo a25cd7, 22-nov): si la
+  cuenta quedó `FULLPAYMENT` (p. ej. en efectivo) y llega tarde una tarjeta COMPLETED de otra forma, `recordOrderPayment` la
+  registra (`tarjetaYaCobradaPorElBanco`) con la forma de la cuenta, sin reparto por producto (la de la terminal va en
+  `posRawData.splitTypeDeLaTerminal`), y salta el sobrepago. Un cruce entre divisiones de una cuenta ABIERTA sigue con el 400. En
+  **Pago rápido** no hay cuenta con qué chocar: toda tarjeta que llega aprobada ≥ 1 min después de su intento (la TPV manda
+  `edadDelIntentoMs`, una duración con su propio reloj; se guarda `processorData.intentoAbiertoEn` en el reloj del servidor) deja
+  UNA fila `LATE_CARD_RECORDED` para que el dueño revise si se cobró de otra forma (`avisoDeTarjetaTardia.ts`). A propósito NO se
+  empareja con un efectivo (Codex r1 y r2: siempre quedan huecos). Nunca bloquea.
 - 🔴 **La terminal también declara «no se cobró», y es la MISMA declaración** (botón del banner verde, founder, 3-nov: «A»):
   `POST /tpv/venues/:venueId/terminal-payment/requests/:requestId/uncharged-declaration`, con las puertas del POS y `reconcileUncharged`
   sin tocar. Lo único distinto: el origen (`source: 'TPV'`) y que no libera a secas (`UNCHARGED_STATEMENT_REQUIRED`, antes de la cubeta).
