@@ -213,6 +213,11 @@ export const recordPaymentBodySchema = z.object({
         .union([z.number(), z.string().max(20, { message: 'La hora de la venta es demasiado larga.' })])
         .nullish()
         .catch(undefined),
+      // D7 (encargo a25cd7): cuántos ms pasaron, con el reloj del aparato, desde que se abrió el intento de tarjeta; lo manda la
+      // recuperación de la libreta de la TPV (el «Aprobado» que se registra tarde). Sólo decide el aviso de Pago rápido
+      // `LATE_CARD_RECORDED`. Sin declararlo, `validateRequest` lo borraría. El dinero ya se cobró: un valor ilegible se descarta
+      // (no hay aviso), nunca un 400.
+      edadDelIntentoMs: z.number().int().nonnegative().max(31_536_000_000).nullish().catch(undefined),
       // Detalle legible del cobro declarado a mano ("Tarjeta (terminal externa)").
       // nullable() NO es cosmético: iOS manda `externalSource: null` explícito en los
       // cobros normales, así que exigir string|undefined rechazaría cada cobro en
