@@ -6273,11 +6273,14 @@ model Terminal {
 
   // 🆕 Remote Command System (2025-11-30)
   // Device lock state for remote lock/unlock commands
-  isLocked    Boolean   @default(false)
-  lockReason  String? // Why terminal was locked (e.g., "security", "maintenance")
-  lockMessage String? // Message to display on lock screen
-  lockedAt    DateTime?
-  lockedBy    String? // StaffId who locked
+  isLocked          Boolean   @default(false)
+  // SDK propio de cobro (fase 3): la escribe SÓLO cambiarSdkPropioDeTerminal; ningún camino de dinero la lee. Un disparador
+  // la pone en false si cambian serialNumber, type o brand (migración …_terminal_in_house_sdk).
+  inHouseSdkEnabled Boolean   @default(false)
+  lockReason        String? // Why terminal was locked (e.g., "security", "maintenance")
+  lockMessage       String? // Message to display on lock screen
+  lockedAt          DateTime?
+  lockedBy          String? // StaffId who locked
 
   // Location tracking for geofencing
   lastLatitude   Float?

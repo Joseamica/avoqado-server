@@ -34,6 +34,7 @@ import { addCivilDays, firstInstantOfDay, venueDayKey } from '../../utils/venueD
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
+import { resolveEffectiveDeviceCapabilities } from '../device-capabilities.service'
 import {
   dondeHoraRealEntre,
   MARGEN_DE_LECTURA_ANTES_MS,
@@ -45,6 +46,7 @@ import { countUpdatedTerminals, scopedTerminalWhere } from '../shared/terminalSc
 import { SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION, SQL_VENDEDOR_DEL_MOVIMIENTO } from '../shared/vendedorDelMovimiento'
 import { computeTerminalMigration, migrationCommandWhere } from '../dashboard/terminals.superadmin.service'
 import { enmascararCorreo, enviarEnlaceDeRestablecimiento } from '../dashboard/enlaceDeRestablecimiento'
+import { sinLlaveReservada } from '@/lib/llaveReservadaSdkPropio'
 
 // Types for organization dashboard
 export interface OrgCategoryBreakdown {
@@ -3605,7 +3607,8 @@ class OrganizationDashboardService {
       where: { organizationId: orgId },
     })
     const existingSettings = (existing?.settings as Record<string, any>) || {}
-    const settingsSync: Record<string, any> = { ...existingSettings }
+    // SDK propio: la llave reservada que ya estuviera en los ajustes de la organización no se conserva ni se devuelve.
+    const settingsSync: Record<string, any> = sinLlaveReservada({ ...existingSettings })
 
     if (data.attendanceTracking !== undefined) {
       settingsSync.attendanceTracking = data.attendanceTracking
@@ -3813,7 +3816,8 @@ class OrganizationDashboardService {
       where: { organizationId: orgId },
       select: { settings: true },
     })
-    return (config?.settings as Record<string, any>) || null
+    // SDK propio: una organización que ya guardó la llave reservada no la devuelve.
+    return config?.settings ? sinLlaveReservada(config.settings as Record<string, any>) : null
   }
 
   /**
@@ -3835,7 +3839,8 @@ class OrganizationDashboardService {
       select: { settings: true },
     })
     const existingSettings = (existing?.settings as Record<string, any>) || {}
-    const mergedSettings = { ...existingSettings, ...settings }
+    // SDK propio: la llave reservada no se guarda en la organización ni se reparte (ni de lo que llega ni de lo guardado).
+    const mergedSettings: Record<string, any> = sinLlaveReservada({ ...existingSettings, ...settings })
 
     // 2. Sync attendance-related fields: attendanceTracking → requireClockInPhoto + requireClockInToLogin
     if (settings.attendanceTracking !== undefined) {
@@ -3900,18 +3905,18 @@ class OrganizationDashboardService {
           const batch = terminals.slice(i, i + BATCH_SIZE)
           const updates = batch.map(terminal => {
             const existingConfig = (terminal.config as Record<string, any>) || {}
-            const overrides = (terminal.configOverrides as Record<string, any>) || {}
+            const overrides = sinLlaveReservada((terminal.configOverrides as Record<string, any>) || {})
 
             // Cascade merge: org defaults → per-terminal overrides
             // Terminals with no overrides (null) get full org defaults
             // Terminals with overrides keep their customized fields
-            const pushSettings = {
+            const pushSettings = sinLlaveReservada({
               ...mergedSettings,
-              ...overrides,
+              ...overrides, // tampoco desde excepciones viejas
               // kioskDefaultMerchantId is always per-terminal (from overrides or existing)
               kioskDefaultMerchantId:
                 overrides.kioskDefaultMerchantId ?? (existingConfig.settings as Record<string, any>)?.kioskDefaultMerchantId ?? null,
-            }
+            })
 
             // Acotada a la organización que escogió las terminales. Una que pasó a otra organización a media
             // operación ya no es de ésta: cuenta cero y se omite (auditorías de Codex, 2026-09-16/17).
@@ -4119,6 +4124,8 @@ class OrganizationDashboardService {
       byType[g.type] = (byType[g.type] || 0) + count
     }
 
+    const capabilitiesNow = new Date()
+
     return {
       terminals: terminals.map(t => ({
         id: t.id,
@@ -4141,6 +4148,11 @@ class OrganizationDashboardService {
         // Es lo que ata una terminal a sus SESIONES, y por tanto lo que permite «sacar esta
         // tablet»: una PAX se identifica por serial, pero una tablet Android sólo por esto.
         deviceUid: (t as any).deviceUid ?? null,
+        // D672: el cajón y la barra de selección de Organización › Dispositivos deciden cada botón con esto, y sin ello
+        // fallan cerrado (nunca ofrecían Bloquear/Reiniciar/Mantenimiento). Misma resolución que el detalle
+        // (`getTerminalForOrg` → `toDeviceManagementDto`), calculada de columnas que esta consulta ya trae: sin consultas extra.
+        capabilities: resolveEffectiveDeviceCapabilities(t, { now: capabilitiesNow }),
+        selfRegistered: t.selfRegistered,
         venue: t.venue,
         migration: computeTerminalMigration(t.commandQueue?.[0], (t as any).lastActivationStatusCheckAt ?? null, t.commandSessionId),
       })),

@@ -1,6 +1,7 @@
 import { terminalSettingsBody } from './terminal-settings.schema'
-import { TerminalStatus, TpvCommandType } from '@prisma/client'
+import { StaffRole, TerminalStatus, TpvCommandType } from '@prisma/client'
 import { Router } from 'express'
+import { authorizeRole } from '../../middlewares/authorizeRole.middleware'
 import * as terminalController from '../../controllers/dashboard/terminals.superadmin.controller'
 import * as migrationController from '../../controllers/dashboard/terminal-migration.controller'
 import {
@@ -176,6 +177,30 @@ router.put(
   '/:terminalId/settings',
   validateRequest(terminalIdSchema.extend({ body: terminalSettingsBody })),
   terminalController.saveSettings,
+)
+/**
+ * PUT /:terminalId/in-house-sdk — prende o apaga el SDK propio de UNA terminal (fase 3, bloque 2a).
+ * El rol se exige AQUÍ: el montaje legado `/api/v1/dashboard/superadmin` sólo pide `system:manage`, que se puede delegar.
+ */
+router.put(
+  '/:terminalId/in-house-sdk',
+  authorizeRole([StaffRole.SUPERADMIN]),
+  validateRequest(
+    terminalIdSchema.extend({
+      body: z
+        .object({
+          enabled: z.boolean({ invalid_type_error: 'Debe ser verdadero o falso' }),
+          serialNumber: z.string().trim().min(1).max(64).optional(),
+          reason: z.string().trim().min(3, 'Escribe por qué (mínimo 3 letras)').max(300).optional(),
+        })
+        .strict()
+        .refine(b => !b.enabled || !!b.serialNumber, {
+          message: 'Para prender, manda la serie que ves en la ficha',
+          path: ['serialNumber'],
+        }),
+    }),
+  ),
+  terminalController.cambiarSdkPropio,
 )
 
 router.get('/', validateRequest(terminalQuerySchema), terminalController.getAllTerminals)

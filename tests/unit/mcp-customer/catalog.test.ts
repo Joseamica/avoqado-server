@@ -180,6 +180,7 @@ const NUNCA_EN_DIRECTORIO = [
   'sell_credit_pack',
   'set_merchant_routing_rule',
   'set_terminal_payment_strict_mode',
+  'set_terminal_in_house_sdk',
   // identificadores oficiales, CFDI y nómina
   'accounting_iva_cashflow',
   'accounts_payable',

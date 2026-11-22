@@ -99,3 +99,13 @@ test('affiliation venue tools are registered only in the free superadmin catalog
     for (const [, pattern] of FORBIDDEN) expect(admin.find(t => t.name === name)!.desc).not.toMatch(pattern)
   }
 })
+
+test('set_terminal_in_house_sdk (apagador del SDK propio) sólo aparece para un SUPERADMIN, en el catálogo libre', () => {
+  const name = 'set_terminal_in_house_sdk'
+  const admin = catalogFor({ isSuperAdmin: true })
+  expect(admin.some(t => t.name === name)).toBe(true)
+  expect(catalogFor({ isSuperAdmin: false }).some(t => t.name === name)).toBe(false)
+  expect(catalogFor({ isSuperAdmin: undefined }).some(t => t.name === name)).toBe(false)
+  expect(DIRECTORY_TOOLS.has(name)).toBe(false)
+  for (const [, pattern] of FORBIDDEN) expect(admin.find(t => t.name === name)!.desc).not.toMatch(pattern)
+})
