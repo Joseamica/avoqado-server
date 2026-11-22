@@ -662,7 +662,7 @@
       ]
     },
     "dashboard/reportes/ver-cuando-cae-el-dinero": {
-      "sha256": "086e666dc561454df7bbbeb3cc80c64dc725cc0fbeeed40ac8f365eaede482f9",
+      "sha256": "38829c5a68d486f9b3861c605cda85207b58609d529e23723f24d2d29692f22d",
       "requiredPermissions": [
         "settlements:read"
       ],

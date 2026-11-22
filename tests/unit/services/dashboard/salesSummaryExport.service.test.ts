@@ -81,7 +81,9 @@ describe('detailed rows where-clause + cap', () => {
     const where = paymentCount.mock.calls[0][0].where
     expect(where.venueId).toBe('v1')
     expect(where.status).toBe('COMPLETED')
-    expect(where.method).toBe('CASH') // from buildPaymentWhereFilter('CASH')
+    // from buildPaymentWhereFilter('CASH'): el método, y (carril C2, D12) sólo dinero — sin medios de sistema ni cortesías de $0
+    expect(where.AND[0]).toEqual({ method: 'CASH' })
+    expect(JSON.stringify(where.AND[1])).toContain('FREE_CART')
     expect(where.createdAt.gte).toBeInstanceOf(Date)
   })
 

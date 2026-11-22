@@ -68,18 +68,48 @@ const NOT_AMEX_BRAND = {
 // buildPaymentWhereFilter — Prisma where fragment
 // ============================================================
 
+/**
+ * Carril C2 (D12): todo filtro de método va junto con «no es un medio de sistema» (saldo de regalo, saldo a favor, crédito de un
+ * cambio). `soloMetodo` comprueba esa segunda parte y devuelve la del método, que es lo que estas pruebas fijan desde antes.
+ */
+const NO_ES_MEDIO_DE_SISTEMA = {
+  AND: [
+    {
+      OR: [
+        { tenderTypeId: null },
+        { tenderType: { is: { systemKind: null } } },
+        { tenderType: { is: { systemKind: { notIn: ['GIFT_CARD', 'STORE_CREDIT', 'EXCHANGE_CREDIT'] } } } },
+      ],
+    },
+    {
+      OR: [
+        { processorData: { equals: Prisma.DbNull } },
+        { processorData: { path: ['type'], equals: Prisma.AnyNull } },
+        { NOT: { processorData: { path: ['type'], equals: 'FREE_CART' } } },
+      ],
+    },
+  ],
+}
+function soloMetodo(where: Prisma.PaymentWhereInput): unknown {
+  if (Object.keys(where).length === 0) return where
+  const and = (where as { AND: unknown[] }).AND
+  expect(and).toHaveLength(2)
+  expect(and[1]).toEqual(NO_ES_MEDIO_DE_SISTEMA)
+  return and[0]
+}
+
 describe('buildPaymentWhereFilter', () => {
   it('returns an empty object when no payment method is given (no narrowing)', () => {
-    expect(buildPaymentWhereFilter(undefined)).toEqual({})
-    expect(buildPaymentWhereFilter(undefined, 'CREDIT')).toEqual({})
+    expect(soloMetodo(buildPaymentWhereFilter(undefined))).toEqual({})
+    expect(soloMetodo(buildPaymentWhereFilter(undefined, 'CREDIT'))).toEqual({})
   })
 
   it('maps CASH to a single-method equality', () => {
-    expect(buildPaymentWhereFilter('CASH')).toEqual({ method: 'CASH' })
+    expect(soloMetodo(buildPaymentWhereFilter('CASH'))).toEqual({ method: 'CASH' })
   })
 
   it('maps OTHER to the non-card / non-cash method set', () => {
-    expect(buildPaymentWhereFilter('OTHER')).toEqual({
+    expect(soloMetodo(buildPaymentWhereFilter('OTHER'))).toEqual({
       method: { in: ['DIGITAL_WALLET', 'BANK_TRANSFER', 'CRYPTOCURRENCY', 'OTHER'] },
     })
   })
@@ -89,20 +119,20 @@ describe('buildPaymentWhereFilter', () => {
   })
 
   it('maps CARD without a card type to both card methods', () => {
-    expect(buildPaymentWhereFilter('CARD')).toEqual({
+    expect(soloMetodo(buildPaymentWhereFilter('CARD'))).toEqual({
       method: { in: ['CREDIT_CARD', 'DEBIT_CARD'] },
     })
   })
 
   it('maps CARD + INTERNATIONAL to card methods + isInternational JSON path', () => {
-    expect(buildPaymentWhereFilter('CARD', 'INTERNATIONAL')).toEqual({
+    expect(soloMetodo(buildPaymentWhereFilter('CARD', 'INTERNATIONAL'))).toEqual({
       method: { in: ['CREDIT_CARD', 'DEBIT_CARD'] },
       processorData: { path: ['isInternational'], equals: true },
     })
   })
 
   it('maps CARD + AMEX to AMEX brand, card methods, and NULL-safe NOT-international', () => {
-    expect(buildPaymentWhereFilter('CARD', 'AMEX')).toEqual({
+    expect(soloMetodo(buildPaymentWhereFilter('CARD', 'AMEX'))).toEqual({
       method: { in: ['CREDIT_CARD', 'DEBIT_CARD'] },
       cardBrand: 'AMERICAN_EXPRESS',
       AND: [NOT_INTERNATIONAL],
@@ -110,14 +140,14 @@ describe('buildPaymentWhereFilter', () => {
   })
 
   it('maps CARD + CREDIT to CREDIT_CARD with NULL-safe AMEX + international exclusions', () => {
-    expect(buildPaymentWhereFilter('CARD', 'CREDIT')).toEqual({
+    expect(soloMetodo(buildPaymentWhereFilter('CARD', 'CREDIT'))).toEqual({
       method: 'CREDIT_CARD',
       AND: [NOT_AMEX_BRAND, NOT_INTERNATIONAL],
     })
   })
 
   it('maps CARD + DEBIT to DEBIT_CARD with NULL-safe AMEX + international exclusions', () => {
-    expect(buildPaymentWhereFilter('CARD', 'DEBIT')).toEqual({
+    expect(soloMetodo(buildPaymentWhereFilter('CARD', 'DEBIT'))).toEqual({
       method: 'DEBIT_CARD',
       AND: [NOT_AMEX_BRAND, NOT_INTERNATIONAL],
     })
@@ -127,6 +157,27 @@ describe('buildPaymentWhereFilter', () => {
 // ============================================================
 // buildPaymentSqlClause — raw-SQL twin of the Prisma fragment
 // ============================================================
+
+describe('buildPaymentSqlClause · medios de sistema (D12)', () => {
+  it('las comisiones del personal piden el filtro sin la exclusión (una venta con saldo sí genera comisión)', () => {
+    expect(buildPaymentSqlClause('OTHER', undefined, '', { incluirMediosDeSistema: true })).not.toContain('ms_t')
+    expect(buildPaymentWhereFilter('CASH', undefined, { incluirMediosDeSistema: true })).toEqual({ method: 'CASH' })
+  })
+
+  it('el cierre de un carrito de $0 por cortesía (FREE_CART) no es dinero', () => {
+    expect(buildPaymentSqlClause('OTHER', undefined, 'p')).toContain(`AND (p."processorData" ->> 'type') IS DISTINCT FROM 'FREE_CART'`)
+  })
+
+  it('todo filtro de método excluye saldo de regalo, saldo a favor y crédito de cambio, con el alias que le pasen', () => {
+    for (const [m, ct] of [['CASH'], ['OTHER'], ['CARD'], ['CARD', 'AMEX']] as Array<[PaymentMethodFilter, CardTypeFilter?]>) {
+      expect(buildPaymentSqlClause(m, ct, 'p')).toContain(
+        `NOT EXISTS (SELECT 1 FROM "VenueTenderType" ms_t WHERE ms_t."venueId" = p."venueId" AND ms_t.id = p."tenderTypeId" AND ms_t."systemKind" IN ('GIFT_CARD', 'STORE_CREDIT', 'EXCHANGE_CREDIT'))`,
+      )
+      expect(buildPaymentSqlClause(m, ct)).toContain(`ms_t."venueId" = "Payment"."venueId"`)
+    }
+    expect(buildPaymentSqlClause(undefined, undefined, 'p')).toBe('')
+  })
+})
 
 describe('buildPaymentSqlClause', () => {
   it('returns an empty string when no payment method is given', () => {
@@ -244,7 +295,8 @@ describe('buildPaymentWhereFilter <-> buildPaymentSqlClause parity', () => {
   })
 
   it.each(combos)('agree on constraining the international flag for (%s, %s)', (pm, ct) => {
-    const where = buildPaymentWhereFilter(pm, ct)
+    // Sólo la parte del método: la de «es dinero» mira `processorData.type` (FREE_CART) en los dos lados.
+    const where = soloMetodo(buildPaymentWhereFilter(pm, ct))
     const clause = buildPaymentSqlClause(pm, ct)
     expect(keyAppears(where, 'processorData')).toBe(clause.includes('isInternational'))
   })
@@ -279,7 +331,7 @@ describe('buildPaymentWhereFilter NULL-safety (regression)', () => {
   })
 
   it('INTERNATIONAL stays a positive match (no NULL hazard)', () => {
-    expect(buildPaymentWhereFilter('CARD', 'INTERNATIONAL')).toEqual({
+    expect(soloMetodo(buildPaymentWhereFilter('CARD', 'INTERNATIONAL'))).toEqual({
       method: { in: ['CREDIT_CARD', 'DEBIT_CARD'] },
       processorData: { path: ['isInternational'], equals: true },
     })
@@ -699,6 +751,39 @@ describe('computeSettlementProjection', () => {
     expect(nextByMerchant.has('ma-noconf')).toBe(false)
   })
 
+  it('D17: una devolución se fecha el día en que se registró (se liquida al registrarse), sin regla ni depósito futuro', async () => {
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([
+      {
+        amount: 1000,
+        tipAmount: 0,
+        createdAt: new Date('2026-06-04T15:00:00.000Z'), // jueves → su depósito cae el viernes 06-05
+        type: 'REGULAR',
+        merchantAccountId: 'ma-A',
+        transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 30, venueFixedFee: 0 },
+      },
+      {
+        amount: -300,
+        tipAmount: 0,
+        createdAt: new Date('2026-06-04T20:00:00.000Z'), // la devolución del mismo jueves: ese jueves, no el viernes
+        type: 'REFUND',
+        merchantAccountId: 'ma-A',
+        transactionCost: { transactionType: 'CREDIT', venueChargeAmount: -9, venueFixedFee: 0 },
+      },
+    ])
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([
+      { merchantAccountId: 'ma-A', cardType: 'CREDIT', ...baseConfig },
+    ])
+    ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([{ id: 'ma-A', displayName: 'A', alias: null }])
+
+    const { calendar, nextByMerchant } = await computeSettlementProjection(VENUE, START, END, TZ)
+    expect(calendar.map(d => [d.date, d.totalNet])).toEqual([
+      ['2026-06-04', -291],
+      ['2026-06-05', 970],
+    ])
+    // La devolución no trae regla: el comercio sigue con la de su cobro.
+    expect(nextByMerchant.get('ma-A')?.settlementDays).toBe(1)
+  })
+
   it('returns an empty projection when there are no card payments', async () => {
     ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([])
     const { calendar, nextByMerchant } = await computeSettlementProjection(VENUE, START, END, TZ)
@@ -1004,6 +1089,61 @@ describe('flattenSalesSummaryForExport — sección «statement» (estado del pe
       ['Ya en tu mano (efectivo)', 100, null],
       ['Llega a tu banco', 164.9, null],
       ['Otros métodos', 100, null],
+    ])
+  })
+
+  it('carril C2: «Otros métodos» por tipo y lo movido en otra moneda (sin convertir) salen en el estado y en los comercios', () => {
+    const d = (o: Partial<Record<string, number>>) => ({
+      collected: 0,
+      refunds: 0,
+      refundCount: 0,
+      platformFee: 0,
+      netToReceive: 0,
+      transactionCount: 0,
+      ...o,
+    })
+    const report = {
+      summary: {},
+      byMerchantAccount: [],
+      statementDestinations: {
+        drawer: d({}),
+        terminal: d({}),
+        online: d({}),
+        other: d({ collected: 150, netToReceive: 150, transactionCount: 2 }),
+        tenderCommissions: 30,
+        otherByType: [
+          {
+            key: 't-uber',
+            label: 'Uber Eats',
+            method: 'OTHER',
+            ...d({ collected: 100, netToReceive: 100, transactionCount: 1 }),
+            tenderCommissions: 30,
+          },
+          {
+            key: 'BANK_TRANSFER',
+            label: null,
+            method: 'BANK_TRANSFER',
+            ...d({ collected: 50, netToReceive: 50, transactionCount: 1 }),
+            tenderCommissions: 0,
+          },
+        ],
+        foreignCurrency: [{ currency: 'USD', net: 80, transactionCount: 1, refundCount: 1 }],
+      },
+    } as unknown as SalesSummaryResponse
+    const { rows } = flattenSalesSummaryForExport(report, ['merchantAccounts', 'statement'])
+    const usd = 'Movimientos en línea en USD (neto, sin convertir: no se suman a los pesos)'
+    // La cantidad cuenta cobros y devoluciones (1 + 1).
+    expect(rows.filter(r => r.section === 'merchantAccounts').map(r => [r.label, r.amount, r.count])).toEqual([[usd, 80, 2]])
+    expect(
+      rows
+        .filter(r => r.section === 'statement')
+        .slice(-4)
+        .map(r => [r.label, r.amount, r.count]),
+    ).toEqual([
+      ['Otros métodos · Uber Eats', 100, 1],
+      ['Otros métodos · Uber Eats · comisión de la plataforma', -30, null],
+      ['Otros métodos · Transferencia', 50, 1],
+      [usd, 80, 2],
     ])
   })
 })

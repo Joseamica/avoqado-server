@@ -12,6 +12,7 @@
  */
 
 import { PaymentMethod, SettlementDayType, TransactionCardType } from '@prisma/client'
+import { paymentIsAvoqadoSettled, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
 import { proyectarComisionYNeto } from '../payments/proyeccionMonetaria'
 import { aPesos, centavosDeUnCobro, nuevaSuma, sumar, type SumaDeDinero } from '../payments/sumaExactaDeDinero'
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
@@ -23,6 +24,13 @@ export interface ProjectablePayment {
   amount: number | { toString(): string }
   tipAmount: number | { toString(): string } | null
   createdAt: Date
+  /**
+   * Carril C2 (22-nov-2026, D17): con `REFUND` la devolución se fecha el día en que se registró —su VenueTransaction nace
+   * SETTLED (`refund.tpv`, `refund.dashboard`, `refund.mobile`) y así la lee «Saldo disponible»—, aunque su costo no haya
+   * llegado. Quien llama lo pasa SÓLO para una devolución que liquida Avoqado (`paymentIsAvoqadoSettled`): una por
+   * transferencia no sale del banco. Quien no lo pasa sigue como antes (superadmin, reporte de liquidaciones).
+   */
+  type?: string | null
   merchantAccountId: string
   transactionCost: {
     transactionType: TransactionCardType
@@ -82,6 +90,11 @@ export function projectPaymentSettlement(
   venueTimezone: string,
 ): ProjectedSettlement | null {
   const tc = p.transactionCost
+  if (p.type === 'REFUND') {
+    const gross = Number(p.amount) + Number(p.tipAmount ?? 0)
+    const { fee: commission, net } = tc ? proyectarComisionYNeto(gross, tc.venueChargeAmount, tc.venueFixedFee) : { fee: 0, net: gross }
+    return { settlementDateKey: formatInTimeZone(p.createdAt, venueTimezone, 'yyyy-MM-dd'), gross, commission, net, settlementDays: 0 }
+  }
   if (!tc) return null
 
   const config = encontrarReglaActiva(p.merchantAccountId, tc.transactionType, p.createdAt, configs)
@@ -266,6 +279,8 @@ export async function getSettlementsLandingInWeek(
         amount: true,
         tipAmount: true,
         createdAt: true,
+        type: true,
+        ...TENDER_SEMANTICS_SELECT,
         merchantAccountId: true,
         transactionCost: { select: { transactionType: true, venueChargeAmount: true, venueFixedFee: true } },
         merchantAccount: { select: { displayName: true, alias: true, provider: { select: { name: true } } } },
@@ -284,12 +299,17 @@ export async function getSettlementsLandingInWeek(
 
     for (const p of pagina) {
       const merchantId = p.merchantAccountId
-      if (!merchantId || !p.transactionCost) continue
+      // Una devolución que liquida Avoqado cae el día en que se registró, con o sin su costo (D17, igual que el estado del
+      // periodo). Una que no (por transferencia, que guardó la afiliación) sigue como antes: con costo y por su regla (Codex r2 y
+      // r3 del carril C2).
+      const devolucionDeAvoqado = p.type === 'REFUND' && paymentIsAvoqadoSettled(p)
+      if (!merchantId || (!p.transactionCost && !devolucionDeAvoqado)) continue
       const projected = projectPaymentSettlement(
         {
           amount: p.amount,
           tipAmount: p.tipAmount,
           createdAt: p.createdAt,
+          type: devolucionDeAvoqado ? 'REFUND' : null,
           merchantAccountId: merchantId,
           transactionCost: p.transactionCost,
         },
@@ -303,8 +323,8 @@ export async function getSettlementsLandingInWeek(
       const centavos = centavosDeUnCobro({
         amount: p.amount,
         tipAmount: p.tipAmount,
-        venueChargeAmount: p.transactionCost.venueChargeAmount,
-        venueFixedFee: p.transactionCost.venueFixedFee,
+        venueChargeAmount: p.transactionCost?.venueChargeAmount ?? 0,
+        venueFixedFee: p.transactionCost?.venueFixedFee ?? 0,
       })
 
       if (!dayMap.has(key)) dayMap.set(key, { total: nuevaSuma(), byMerchant: new Map(), byCardType: new Map() })
@@ -318,7 +338,7 @@ export async function getSettlementsLandingInWeek(
         })
       }
       sumar(day.byMerchant.get(merchantId)!, centavos)
-      const ct = p.transactionCost.transactionType
+      const ct = p.transactionCost?.transactionType ?? TransactionCardType.OTHER
       if (!day.byCardType.has(ct)) day.byCardType.set(ct, nuevaSuma())
       sumar(day.byCardType.get(ct)!, centavos)
     }

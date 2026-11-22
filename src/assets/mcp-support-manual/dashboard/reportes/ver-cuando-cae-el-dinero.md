@@ -17,6 +17,8 @@ keywords:
   - depósito
   - liquidación
   - saldo disponible
+  - me descontaron una devolución
+  - día en negativo
 ---
 
 ## Antes de empezar
@@ -34,6 +36,7 @@ keywords:
 ## Problemas frecuentes
 
 - El efectivo no sale en *Cuándo cae (semana)*: ya está en tu mano. Lo ves en la pestaña *Efectivo*.
+- Una devolución a tarjeta se descuenta el día en que la hiciste, no el día del depósito: por eso ese día de *Cuándo cae (semana)* puede salir más bajo o en negativo.
 - *Tu próximo depósito* sólo cuenta cobros con tarjeta que procesó Avoqado: una venta con la terminal de otro banco o por transferencia no sale ahí.
 - Las *Comisiones Estimadas* del simulador son un porcentaje aproximado, no tu tarifa; la comisión de tus cobros sale en la columna *Comisiones* de *Desglose por Tipo de Tarjeta*, en pantalla ancha.
 - Si el simulador dice «No se encontró configuración de liquidación para este tipo de tarjeta…», no hay reglas de depósito cargadas para ese tipo de tarjeta o para el negocio.

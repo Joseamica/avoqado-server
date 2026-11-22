@@ -11,6 +11,8 @@
  * funciones del panel, `calculateSettlementDate` y `formatInTimeZone`), todos caen ahí. Si no, o si una de las dos zonas cambia de
  * horario entre el cobro y el depósito, el grupo no se puede repartir y la B no da la cifra (UNEVEN_GROUP): nunca una cifra que no sea
  * la del panel. Un grupo que cae entero fuera de la semana se deja fuera, como el panel deja fuera sus cobros.
+ * Una DEVOLUCIÓN que liquida Avoqado no sigue la regla: cae el día de la sucursal en que se registró, con o sin su costo (carril C2,
+ * D17; la misma regla que la semana del panel). Va en sus propios grupos (`configId` nulo), uno por día de la sucursal.
  * El dinero: la base suma importe + propina y la comisión redondeada a 2 decimales por cobro (`ROUND`, la mitad lejos del cero, como
  * `proyectarComisionYNeto`); aquí se pasa a centavos exactos y se suma con `sumaExactaDeDinero` (Task P1), como el panel. Una suma que
  * no se lee (no es un número finito) lanza: la B nunca dice $0 por algo que no pudo leer (C6 r1).
@@ -29,7 +31,8 @@ import { utcTs } from '@/utils/sqlDates'
 import type { ActiveConfig } from './settlementCalendar.dashboard.service'
 
 export interface SettlementGroup {
-  configId: string
+  /** Nulo: un grupo de devoluciones (cae el día en que se registró, sin regla). */
+  configId: string | null
   gross: string // decimal exacto de la base: SUM(amount + tipAmount)
   commission: string // decimal exacto de la base: SUM(ROUND(venueChargeAmount + venueFixedFee, 2))
   count: number
@@ -44,6 +47,15 @@ export type SettlementWeekByGroups =
 const LOOKBACK_MS = 21 * 24 * 60 * 60 * 1000
 
 /**
+ * Una devolución que liquida Avoqado (`paymentIsAvoqadoSettled` en SQL, sin NULL: `method <> 'CASH'` ya está en el WHERE). Ésas caen
+ * el día en que se registraron (D17); las demás —por transferencia, que guardaron la afiliación— siguen por su costo y su regla.
+ */
+const SQL_DEVOLUCION_DE_AVOQADO = Prisma.raw(
+  `(p."type" IS NOT DISTINCT FROM 'REFUND' AND CASE WHEN p."fundsFlow" IS NOT NULL THEN p."fundsFlow" = 'AVOQADO_PROCESSED' ELSE NOT (p."tenderTypeId" IS NOT NULL AND p."method" = 'OTHER') END)`,
+)
+const SQL_NO_ES_DEVOLUCION_DE_AVOQADO = Prisma.raw(`NOT ${SQL_DEVOLUCION_DE_AVOQADO.sql}`)
+
+/**
  * La consulta agrupada. Exportada para que la prueba lea su plan (`EXPLAIN`) sobre exactamente lo mismo. `limit` es el tope de
  * renglones que pide quien llama (el tope de grupos + 1, para saber si se pasó).
  */
@@ -52,6 +64,7 @@ export function settlementGroupsSql(venueId: string, weekStart: Date, weekEnd: D
   // La hora del cobro en la zona del corte de SU regla, con minutos: «después del corte» compara horas y minutos, como isAfterCutoff
   const cutoffClock = Prisma.sql`((p."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE r."cutoffTimezone")`
   return Prisma.sql`
+    SELECT * FROM (
     SELECT r."id" AS "configId",
            SUM(p."amount" + p."tipAmount")::text AS "gross",
            SUM(ROUND(tc."venueChargeAmount" + tc."venueFixedFee", 2))::text AS "commission",
@@ -76,10 +89,30 @@ export function settlementGroupsSql(venueId: string, weekStart: Date, weekEnd: D
       AND p."method" <> 'CASH'
       AND p."createdAt" >= ${utcTs(from)}
       AND p."createdAt" <= ${utcTs(weekEnd)}
+      AND ${SQL_NO_ES_DEVOLUCION_DE_AVOQADO}
     GROUP BY r."id",
              (${cutoffClock})::date,
              date_trunc('minute', ${cutoffClock})::time > r."cutoffTime"::time,
              ((p."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE ${venueTimezone})::date
+    UNION ALL
+    -- Las devoluciones: el día de la sucursal en que se registraron, con su costo si ya llegó (si no, comisión 0), sin regla.
+    SELECT NULL AS "configId",
+           SUM(p."amount" + p."tipAmount")::text AS "gross",
+           SUM(COALESCE(ROUND(tc."venueChargeAmount" + tc."venueFixedFee", 2), 0))::text AS "commission",
+           COUNT(*)::int AS "count",
+           MIN(p."createdAt") AS "first",
+           MAX(p."createdAt") AS "last"
+    FROM "Payment" p
+    LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p."id"
+    WHERE p."venueId" = ${venueId}
+      AND p."status" = 'COMPLETED'
+      AND p."merchantAccountId" IS NOT NULL
+      AND p."method" <> 'CASH'
+      AND p."createdAt" >= ${utcTs(from)}
+      AND p."createdAt" <= ${utcTs(weekEnd)}
+      AND ${SQL_DEVOLUCION_DE_AVOQADO}
+    GROUP BY ((p."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE ${venueTimezone})::date
+    ) grupos
     LIMIT ${limit}
   `
 }
@@ -97,6 +130,19 @@ export function foldSettlementGroups(
   const byDay = new Map<string, SumaDeDinero>()
   const total = nuevaSuma()
   for (const group of groups) {
+    if (group.configId === null) {
+      // Devoluciones de UN día de la sucursal: caen ese día (D17).
+      const day = formatInTimeZone(group.first, venueTimezone, 'yyyy-MM-dd')
+      if (day < startKey || day > endKey) continue
+      const gross = aCentavosEstricto(group.gross)
+      const commission = aCentavosEstricto(group.commission)
+      const amounts = { gross, commission, net: gross - commission, count: group.count }
+      const suma = byDay.get(day) ?? nuevaSuma()
+      sumar(suma, amounts)
+      byDay.set(day, suma)
+      sumar(total, amounts)
+      continue
+    }
     const rule = configs.find(c => c.id === group.configId)
     if (!rule) throw new Error('Settlement week: the rule of a group was not loaded')
     const land = (at: Date) => {
@@ -153,7 +199,7 @@ export async function getSettlementWeekByGroups(
       await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeoutMs}`)
       const groups = await tx.$queryRaw<SettlementGroup[]>(settlementGroupsSql(venueId, weekStart, weekEnd, venueTimezone, maxGroups + 1))
       if (groups.length > maxGroups) return null
-      const ids = [...new Set(groups.map(g => g.configId))]
+      const ids = [...new Set(groups.map(g => g.configId).filter((id): id is string => id !== null))]
       const configs = ids.length
         ? await tx.settlementConfiguration.findMany({ where: { id: { in: ids } }, select: RULE_SELECT, take: maxGroups })
         : []
