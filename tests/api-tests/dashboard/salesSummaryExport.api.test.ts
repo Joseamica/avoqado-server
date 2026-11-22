@@ -333,6 +333,125 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
     expect(res.text).not.toMatch(/merchantAccounts/)
   })
 
+  // ── D13 (carril E): el archivo trae lo que se marcó y lo que se ve ──
+  const filtrosDelReporte = () => mockGetSalesSummary.mock.calls[0][1] as { reportType: string; includeMerchantBreakdown?: boolean }
+
+  it('🔴 D13.2 · «Por periodo» pide el desglose del tipo de informe que se ve (reportType)', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    mockGetSalesSummary.mockResolvedValue({
+      ...makeFakeReport(),
+      byPeriod: [
+        { period: '2026-06-01', periodLabel: '1 jun', metrics: { ...makeFakeReport().summary, totalCollected: 120, transactionCount: 3 } },
+      ],
+    })
+    const res = await request(app)
+      .get(exportUrl(`mode=summary&format=csv&sections=byPeriod&reportType=hours&${RANGE}`))
+      .set(authHeader('OWNER'))
+    expect(res.status).toBe(200)
+    expect(filtrosDelReporte().reportType).toBe('hours')
+    expect(res.text).toContain('1 jun')
+  })
+
+  it('🔴 D13.2 · «Por periodo» sin tipo de informe (o con «Resumen») va por día — un DASHBOARD viejo también recibe filas', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    mockGetSalesSummary.mockResolvedValue(makeFakeReport())
+    await request(app)
+      .get(exportUrl(`mode=summary&format=csv&sections=totals,byPeriod&${RANGE}`))
+      .set(authHeader('OWNER'))
+    expect(filtrosDelReporte().reportType).toBe('days')
+    mockGetSalesSummary.mockClear()
+    await request(app)
+      .get(exportUrl(`mode=summary&format=csv&sections=byPeriod&reportType=summary&${RANGE}`))
+      .set(authHeader('OWNER'))
+    expect(filtrosDelReporte().reportType).toBe('days')
+  })
+
+  it('sin «Por periodo» no calcula periodos aunque llegue un reportType', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    mockGetSalesSummary.mockResolvedValue(makeFakeReport())
+    await request(app)
+      .get(exportUrl(`mode=summary&format=csv&sections=totals&reportType=hours&${RANGE}`))
+      .set(authHeader('OWNER'))
+    expect(filtrosDelReporte().reportType).toBe('summary')
+  })
+
+  it('🔒 «Por periodo» en un negocio sin ADVANCED_REPORTS no calcula periodos (su pantalla tampoco los enseña)', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(false)
+    mockGetSalesSummary.mockResolvedValue(makeFakeReport())
+    const res = await request(app)
+      .get(exportUrl(`mode=summary&format=csv&sections=byPeriod&reportType=hours&${todayRange()}`))
+      .set(authHeader('OWNER'))
+    expect(res.status).toBe(200)
+    expect(filtrosDelReporte().reportType).toBe('summary')
+  })
+
+  it('«Por horas» que pasa el tope del formato ⇒ 413 en español, sin armar el archivo', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    const horas = Array.from({ length: 1001 }, (_, i) => ({
+      period: `h${i}`,
+      periodLabel: `h${i}`,
+      metrics: { ...makeFakeReport().summary },
+    }))
+    mockGetSalesSummary.mockResolvedValue({ ...makeFakeReport(), byPeriod: horas })
+    const res = await request(app)
+      .get(exportUrl(`mode=summary&format=pdf&sections=byPeriod&reportType=hours&${RANGE}`))
+      .set(authHeader('OWNER'))
+    expect(res.status).toBe(413)
+    expect(res.body.message).toMatch(/máximo en PDF es 1,000/)
+  })
+
+  it('un reportType que no existe ⇒ 400', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    const res = await request(app)
+      .get(exportUrl(`mode=summary&format=csv&sections=byPeriod&reportType=years&${RANGE}`))
+      .set(authHeader('OWNER'))
+    expect(res.status).toBe(400)
+    expect(mockGetSalesSummary).not.toHaveBeenCalled()
+  })
+
+  it('🔴 D13.5 · pedir secciones y que ninguna sea válida ⇒ 400 en español, no un archivo con Totales y Métodos', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    for (const qs of ['sections=', 'sections=nada']) {
+      const res = await request(app)
+        .get(exportUrl(`mode=summary&format=csv&${qs}&${RANGE}`))
+        .set(authHeader('OWNER'))
+      expect(res.status).toBe(400)
+      expect(res.body.message).toMatch(/al menos una sección/)
+    }
+    expect(mockGetSalesSummary).not.toHaveBeenCalled()
+  })
+
+  it('sin el parámetro `sections` sigue el default de siempre (Totales y Métodos de pago)', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    mockGetSalesSummary.mockResolvedValue(makeFakeReport())
+    const res = await request(app)
+      .get(exportUrl(`mode=summary&format=csv&${RANGE}`))
+      .set(authHeader('OWNER'))
+    expect(res.status).toBe(200)
+    expect(res.text).toContain('Ventas brutas')
+    expect(res.text).toContain('CARD')
+  })
+
+  it('🔴 D13.6 · la sección «statement» se acepta y pide el estado de cuenta (compuerta Pro)', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    mockGetSalesSummary.mockResolvedValue(makeFakeReport())
+    const res = await request(app)
+      .get(exportUrl(`mode=summary&format=csv&sections=statement&${RANGE}`))
+      .set(authHeader('OWNER'))
+    expect(res.status).toBe(200)
+    expect(filtrosDelReporte().includeMerchantBreakdown).toBe(true)
+  })
+
+  it('«statement» en un negocio sin ADVANCED_REPORTS no pide el estado de cuenta (sin fuga Pro)', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(false)
+    mockGetSalesSummary.mockResolvedValue(makeFakeReport())
+    const res = await request(app)
+      .get(exportUrl(`mode=summary&format=csv&sections=statement&${todayRange()}`))
+      .set(authHeader('OWNER'))
+    expect(res.status).toBe(200)
+    expect(filtrosDelReporte().includeMerchantBreakdown).toBe(false)
+  })
+
   // Positive twin: an entitled venue (ADVANCED_REPORTS=true) keeps includeMerchantBreakdown:true.
   it('summary mode keeps includeMerchantBreakdown for an ENTITLED venue', async () => {
     mockVenueHasFeatureAccess.mockResolvedValue(true)

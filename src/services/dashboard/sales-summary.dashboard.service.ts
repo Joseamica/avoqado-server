@@ -2048,7 +2048,10 @@ export function flattenSalesSummaryForExport(
     rows.push(t('Impuestos', s.taxes))
     rows.push(t('Propinas', s.tips))
     rows.push(t('Comisiones de plataforma', -s.platformFees))
+    // D13.4: like the screen (staff commissions, then total collected, then net profit).
+    rows.push(t('Comisiones a empleados', -s.staffCommissions))
     rows.push(t('Total cobrado', s.totalCollected))
+    rows.push(t('Ganancia neta', s.netProfit))
     // Tarjetas de regalo (spec §7): fuera de las ventas, cada una con su leyenda.
     if (s.giftCardLoads !== undefined) {
       rows.push(t('Tarjetas de regalo cargadas (no es venta)', s.giftCardLoads, s.giftCardLoadsCount ?? null))
@@ -2180,19 +2183,22 @@ export function flattenSalesSummaryForExport(
   return { rows }
 }
 
-/** Shared WHERE used by both count + fetch for detailed-mode rows (honors the active filter). */
+/**
+ * Shared WHERE used by both count + fetch for detailed-mode rows (honors the active filter).
+ * D13.3: by the payment's REAL time, like the screen (`enElRango` in getSalesSummary): an offline sale of 23:50 uploaded at 00:10
+ * belongs to its own day, not to the next one. `dondeHoraRealEntre` wraps in an AND, so the card-type OR/AND keys never collide.
+ */
 export function buildSalesSummaryDetailWhere(venueId: string, filters: SalesSummaryExportFilters): Prisma.PaymentWhereInput {
   const paymentWhereFilter = buildPaymentWhereFilter(filters.paymentMethod, filters.cardType)
   const where: Prisma.PaymentWhereInput = {
     venueId,
     status: 'COMPLETED',
-    createdAt: { gte: new Date(filters.startDate), lte: new Date(filters.endDate) },
     ...(filters.merchantAccountId ? { merchantAccountId: filters.merchantAccountId } : {}),
     ...(filters.staffIds && filters.staffIds.length > 0 ? { processedById: { in: filters.staffIds } } : {}),
     ...(filters.shiftId ? { shiftId: filters.shiftId } : {}),
     ...paymentWhereFilter,
   }
-  return where
+  return dondeHoraRealEntre(where, new Date(filters.startDate), new Date(filters.endDate))
 }
 
 /** Pre-flight count for detailed-mode export (caller compares against the row cap before fetching). */
@@ -2204,6 +2210,9 @@ export async function countSalesSummaryDetailRows(venueId: string, filters: Sale
 export const SALES_SUMMARY_DETAIL_SELECT = {
   id: true,
   createdAt: true,
+  // D13.3: «Fecha» is the real time (device time of an offline sale, else arrival) in the venue's timezone.
+  clientCreatedAt: true,
+  venue: { select: { timezone: true } },
   method: true,
   cardBrand: true,
   maskedPan: true,

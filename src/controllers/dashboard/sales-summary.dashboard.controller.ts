@@ -31,7 +31,7 @@ import {
 } from '@/services/dashboard/export.helpers'
 import { BadRequestError } from '@/errors/AppError'
 import { decidirCarril, MENSAJE_GET_VIEJO_GRANDE } from '@/services/exports/exportPolicy'
-import { VENTAS_DETALLADAS_COLUMNAS } from '@/services/exports/exportadores/ventasDetalladas.exportador'
+import { MENSAJE_QR_ANTERIOR_SIN_DETALLE, VENTAS_DETALLADAS_COLUMNAS } from '@/services/exports/exportadores/ventasDetalladas.exportador'
 import { AVISO_PUENTE_QR_CAIDO, MINDFORM_NEW_VENUE_ID } from '@/services/legacy/qrPayments.legacy.service'
 import { resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
@@ -170,7 +170,9 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
  * - mode: 'summary' (default) | 'detailed'
  * - format: 'csv' (default) | 'xlsx' | 'pdf'
  * - startDate / endDate: ISO date strings (required)
- * - sections: comma list (summary mode) — totals,paymentMethods,cardTypes,merchantAccounts,byPeriod
+ * - sections: comma list (summary mode) — totals,paymentMethods,cardTypes,merchantAccounts,byPeriod,statement. Sent but with no
+ *   valid section ⇒ 400; absent ⇒ totals,paymentMethods.
+ * - reportType (summary mode, with byPeriod): the screen's report type; absent or 'summary' ⇒ 'days'
  * - columns: comma list (detailed mode) — column ids from the registry below
  * - paymentMethod / cardType / merchantAccountId: filter passthrough (both modes)
  * - staffId (single) | staffIds (comma list) / shiftId: DETAILED MODE ONLY
@@ -221,11 +223,7 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
       // buildPaymentWhereFilter('QR_LEGACY'), which THROWS → unhandled 500. Reject it
       // here (before building filters) so the caller gets a clear 400 instead. Summary
       // mode is unaffected: getSalesSummary short-circuits QR_LEGACY against the legacy DB.
-      if (paymentMethod === 'QR_LEGACY') {
-        throw new BadRequestError(
-          'QR_LEGACY detailed export is not available; legacy QR transactions are not stored per-payment. Use mode=summary.',
-        )
-      }
+      if (paymentMethod === 'QR_LEGACY') throw new BadRequestError(MENSAJE_QR_ANTERIOR_SIN_DETALLE)
 
       const allowed = (await esSuperadminDeLaSesion(req.authContext)) || (await venueHasFeatureAccess(venueId, 'TRANSACTION_EXPORT'))
       if (!allowed) {
@@ -296,11 +294,29 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
     // for period labels + the getSalesSummary tz arg). Detailed mode does not use it.
     const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
 
-    const validSections: SalesSummaryExportSection[] = ['totals', 'paymentMethods', 'cardTypes', 'merchantAccounts', 'byPeriod']
+    const validSections: SalesSummaryExportSection[] = [
+      'totals',
+      'paymentMethods',
+      'cardTypes',
+      'merchantAccounts',
+      'byPeriod',
+      'statement',
+    ]
     const requestedSections = parseColumnsParam(req.query.sections).filter(s =>
       validSections.includes(s as SalesSummaryExportSection),
     ) as SalesSummaryExportSection[]
+    // D13.5: asked for sections and none is valid (nothing ticked) ⇒ say so; never a file the user did not ask for. Without the
+    // param at all, the historical default stays (other callers).
+    if (req.query.sections !== undefined && requestedSections.length === 0) {
+      throw new BadRequestError('Elige al menos una sección para exportar')
+    }
     const sections: SalesSummaryExportSection[] = requestedSections.length > 0 ? requestedSections : ['totals', 'paymentMethods']
+
+    const { reportType } = req.query
+    const validReportTypes: ReportType[] = ['summary', 'hours', 'days', 'weeks', 'months', 'hourlySum', 'dailySum']
+    if (reportType !== undefined && !validReportTypes.includes(reportType as ReportType)) {
+      throw new BadRequestError(`Tipo de informe no válido. Debe ser uno de: ${validReportTypes.join(', ')}`)
+    }
 
     // 🔴 TIER GATE (mirrors salesSummaryReport lines 116-130, decision Jose 2026-06-10):
     // the merchant-reconciliation block (byMerchantAccount) rides ADVANCED_REPORTS (PRO tier).
@@ -310,16 +326,25 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
     // reconciliation data into non-entitled venues. When dropped, getSalesSummary omits
     // byMerchantAccount, so the flattener silently produces no 'merchantAccounts' rows
     // (mirrors the report's additive "silently drop the flag" behavior — no 403 in summary mode).
-    const wantsMerchantBreakdown = sections.includes('merchantAccounts')
-    const reconciliationAllowed =
-      wantsMerchantBreakdown &&
+    // D13.6: the period statement («Estado del periodo») rides the same flag and the same PRO gate. D13.2 (Codex r1 #3): so do the
+    // periods — a Free venue's screen never shows them, so its file does not either.
+    const wantsMerchantBreakdown = sections.includes('merchantAccounts') || sections.includes('statement')
+    const wantsPeriods = sections.includes('byPeriod')
+    const proAllowed =
+      (wantsMerchantBreakdown || wantsPeriods) &&
       ((await esSuperadminDeLaSesion(req.authContext)) || (await venueHasFeatureAccess(venueId, 'ADVANCED_REPORTS')))
+    const reconciliationAllowed = wantsMerchantBreakdown && proAllowed
+
+    // D13.2: «Por periodo» brings the breakdown of the report type on screen; without one (or with «Resumen») it goes by day, so an
+    // old DASHBOARD that never sent it also gets rows. Periods are only computed when the section is asked for.
+    const periodo: ReportType =
+      wantsPeriods && proAllowed ? (reportType && reportType !== 'summary' ? (reportType as ReportType) : 'days') : 'summary'
 
     const filters: SalesSummaryFilters = {
       startDate,
       endDate,
       groupBy: 'paymentMethod',
-      reportType: 'summary',
+      reportType: periodo,
       timezone: venue?.timezone || 'America/Mexico_City',
       merchantAccountId: typeof merchantAccountId === 'string' ? merchantAccountId : undefined,
       paymentMethod: typeof paymentMethod === 'string' ? (paymentMethod as PaymentMethodFilter) : undefined,
@@ -329,6 +354,14 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
     const report = await getSalesSummary(venueId, filters)
 
     const { rows } = flattenSalesSummaryForExport(report, sections)
+    // D13.2 (Codex r1 #6): «Por horas» over a long range can pass the format's cap; say so instead of building a huge file here.
+    if (rows.length > cap) {
+      res.status(413).json({
+        success: false,
+        message: `El archivo tendría ${rows.length.toLocaleString('es-MX')} filas y el máximo en ${format === 'pdf' ? 'PDF' : 'CSV o Excel'} es ${cap.toLocaleString('es-MX')}. Elige un periodo más corto o un desglose más grande (días, semanas o meses).`,
+      })
+      return
+    }
     type Row = SalesSummaryExportRow
 
     const allColumns: ExportColumnDef<Row>[] = [

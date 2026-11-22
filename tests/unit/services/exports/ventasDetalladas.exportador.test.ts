@@ -9,6 +9,7 @@ import { rangoBloqueadoPorPlan, PLAN_LIMIT_RANGE_CODE } from '@/services/dashboa
 import { construirWhereKeyset } from '@/services/exports/exportadores/comun'
 import { ventasDetalladas, VENTAS_DETALLADAS_COLUMNAS } from '@/services/exports/exportadores/ventasDetalladas.exportador'
 import { obtenerExportador } from '@/services/exports/exportadores/registry'
+import PDFDocument from 'pdfkit'
 
 const ctx = { venueId: 'v1', staffId: 's1', esSuperadmin: false }
 const filtros = { startDate: '2026-10-01T06:00:00.000Z', endDate: '2026-11-01T05:59:59.999Z' }
@@ -84,11 +85,42 @@ describe('exportador ventas-detalladas', () => {
     expect(col('last4')).toBe('1234')
     expect(col('international')).toBe('Sí')
   })
+  // D13.3: «Fecha» salía en UTC crudo («…T02:30:00.000Z» del día siguiente). Va la hora REAL, en la zona del negocio y legible.
+  // Correr con TZ=UTC (como Render): la hora sale de la zona del negocio, nunca de la del proceso.
+  it('🔴 D13.3 · «Fecha» es la hora real en la zona del negocio, no UTC', () => {
+    const fecha = (fila: object) => VENTAS_DETALLADAS_COLUMNAS.find(c => c.id === 'createdAt')!.value(fila as never)
+    // Cobro en línea de las 20:30 del 21 (CDMX) = 02:30 UTC del 22.
+    expect(
+      fecha({ createdAt: new Date('2026-11-22T02:30:00.000Z'), clientCreatedAt: null, venue: { timezone: 'America/Mexico_City' } }),
+    ).toBe('2026-11-21 20:30:00')
+    // Venta sin red de las 23:50 del 11 que subió a las 00:10 del 12: sale con la hora del aparato.
+    expect(
+      fecha({
+        createdAt: new Date('2026-11-12T06:10:00.000Z'),
+        clientCreatedAt: new Date('2026-11-12T05:50:00.000Z'),
+        venue: { timezone: 'America/Mexico_City' },
+      }),
+    ).toBe('2026-11-11 23:50:00')
+    // Otra zona: Tijuana va una hora antes que CDMX en noviembre (UTC−8).
+    expect(fecha({ createdAt: new Date('2026-11-22T02:30:00.000Z'), clientCreatedAt: null, venue: { timezone: 'America/Tijuana' } })).toBe(
+      '2026-11-21 18:30:00',
+    )
+  })
+
+  // Codex D13 r1 #7: con las 13 columnas iguales, la fecha local (≈65 pt a 7 pt de letra) no cabía en 51.8 pt y se cortaba con «…».
+  it('en el PDF de 13 columnas la fecha completa cabe en su celda (mismo reparto que encodePdf)', () => {
+    const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 32 })
+    const ancho = doc.page.width - 64
+    const pesos = VENTAS_DETALLADAS_COLUMNAS.map(c => c.pdfAncho ?? 1)
+    const celda = (ancho * pesos[0]) / pesos.reduce((a, p) => a + p, 0) - 8
+    expect(doc.fontSize(7).widthOfString('2026-11-21 20:30:00')).toBeLessThanOrEqual(celda)
+  })
+
   it('parsearFiltros exige fechas, valida el método y acepta su propia salida', () => {
     expect(() => ventasDetalladas.parsearFiltros({})).toThrow(/startDate/)
     expect(() => ventasDetalladas.parsearFiltros({ ...filtros, endDate: 'y' })).toThrow(/La fecha de fin no es válida/)
     expect(() => ventasDetalladas.parsearFiltros({ ...filtros, paymentMethod: 'BITCOIN' })).toThrow(/paymentMethod/)
-    expect(() => ventasDetalladas.parsearFiltros({ ...filtros, paymentMethod: 'QR_LEGACY' })).toThrow(/QR_LEGACY/)
+    expect(() => ventasDetalladas.parsearFiltros({ ...filtros, paymentMethod: 'QR_LEGACY' })).toThrow(/QR anterior/)
     const una = ventasDetalladas.parsearFiltros({ ...filtros, staffIds: 'a,b', shiftId: ' t1 ' })
     expect(una).toMatchObject({ staffIds: ['a', 'b'], shiftId: 't1' })
     expect(ventasDetalladas.parsearFiltros(una)).toEqual(una)
