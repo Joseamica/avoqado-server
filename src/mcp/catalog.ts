@@ -416,6 +416,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   set_stock_by_code: 'write',
   set_table_check_details: 'write',
   set_table_status: 'write',
+  set_terminal_in_house_sdk: 'write',
   set_terminal_payment_strict_mode: 'write',
   settlement_calendar: 'read',
   settlement_deposits_report: 'read',
@@ -650,6 +651,10 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'resolvedGroupId',
             // «Anular producto» (`void_table_check_item`, Codex r1 #5): se anula exactamente el renglón que se VIO.
             'resolvedOrderItemId',
+            // Apagador del SDK propio (`set_terminal_in_house_sdk`): se prende la terminal con la serie que se VIO; si cambió, 409.
+            'expectedSerialNumber',
+            // …y al ESTADO que se VIO (negocio, serie, tipo, marca y el ajuste, R2-2): si cambió cualquiera, 409.
+            'expectedTerminalState',
           ]) {
             // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
             // no atar un `null` que el esquema de otra herramienta no acepta.
