@@ -1,0 +1,454 @@
+{
+  "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91",
+  "version": "2.22.2",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 222,
+      "cita": "const val VER = \"Ver\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 338,
+      "cita": "if (aviso.llevaAPorPagar) TextButton(onClick = onVer) { Text(TextosPorPagar.VER) }"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 917,
+      "cita": "label = \"Pedidos por pagar\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 922,
+      "cita": "onClick = onNavigateToFolios"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 188,
+      "cita": "const val SECCION_PAGADOS_EN_LINEA = \"Pagados en línea · ábrelo para cobrar\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarScreen.kt",
+      "linea": 247,
+      "cita": "item { Encabezado(TextosPorPagar.SECCION_PAGADOS_EN_LINEA) }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 190,
+      "cita": "const val ABRIR_Y_COBRAR = \"Abrir y cobrar\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 900,
+      "cita": "else -> BotonDeAbrir(true, TextosPorPagar.ABRIR_Y_COBRAR)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarScreen.kt",
+      "linea": 383,
+      "cita": ") { Text(boton.texto, fontWeight = FontWeight.Bold) }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 189,
+      "cita": "const val PAGADO_EN_LINEA_AYUDA = \"Pagó con tarjeta en línea: se cobra al abrirlo y sale su comanda.\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarScreen.kt",
+      "linea": 248,
+      "cita": "item { TextoDeSeccion(TextosPorPagar.PAGADO_EN_LINEA_AYUDA) }"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 197,
+      "cita": "fun abiertoEnPorEntregar(folio: String) = \"El pedido $folio ya está en «Por entregar».\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 603,
+      "cita": "base.copy(abiertosAqui = l.abiertosAqui + vigente.orderId, toast = TextosPorPagar.abiertoEnPorEntregar(vigente.folio))"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/data/VigiaDeFolios.kt",
+      "linea": 153,
+      "cita": "if (tarjetasQueAvisan(_estado.value, reloj()).isNotEmpty()) sonar()"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/data/VigiaDeFolios.kt",
+      "linea": 59,
+      "cita": "* Ruling 68): así la tienda sólo ofrece la tarjeta mientras una caja pueda sonar y enseñarla. La comanda de lo ya cobrado sale de aquí"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 60,
+      "cita": "const val BUSCAR = \"Folio o nombre\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarScreen.kt",
+      "linea": 738,
+      "cita": "placeholder = { Text(TextosPorPagar.BUSCAR) },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 62,
+      "cita": "const val POR_ENTREGAR = \"Por entregar\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarScreen.kt",
+      "linea": 273,
+      "cita": "item { Encabezado(\"${TextosPorPagar.POR_ENTREGAR} · ${ui.numeroPorEntregar}\") }"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 82,
+      "cita": "const val LISTO = \"Listo\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarScreen.kt",
+      "linea": 429,
+      "cita": ") { Text(TextosPorPagar.LISTO, fontWeight = FontWeight.Bold) }"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 83,
+      "cita": "const val ENTREGADO = \"Entregado\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarScreen.kt",
+      "linea": 435,
+      "cita": ") { Text(TextosPorPagar.ENTREGADO, fontWeight = FontWeight.Bold) }"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "orders:read",
+      "archivo": "avoqado-server/src/routes/tpv/onlineOrders.tpv.routes.ts",
+      "linea": 20
+    },
+    {
+      "permiso": "orders:update",
+      "archivo": "avoqado-server/src/routes/tpv/onlineOrders.tpv.routes.ts",
+      "linea": 23
+    },
+    {
+      "permiso": "orders:update",
+      "archivo": "avoqado-server/src/routes/tpv/onlineOrders.tpv.routes.ts",
+      "linea": 24
+    },
+    {
+      "permiso": "orders:update",
+      "archivo": "avoqado-server/src/routes/tpv/onlineOrders.tpv.routes.ts",
+      "linea": 25
+    },
+    {
+      "permiso": "orders:update",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 401
+    },
+    {
+      "permiso": "orders:update",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 895
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Si la lista ya estaba abierta, el botón dice «Abrir y cobrar necesita conexión»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 193
+    },
+    {
+      "afirmacion": "Sin red el botón se apaga y nunca se encola",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 899
+    },
+    {
+      "afirmacion": "Con una lista vieja la terminal no suena",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/data/VigiaDeFolios.kt",
+      "linea": 147
+    },
+    {
+      "afirmacion": "Abierta ya sin red: el aviso de «Pedidos por pagar · Sin conexión: …» (W1)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 70
+    },
+    {
+      "afirmacion": "…«Si ya pagó en línea, no lo cobres: ábrelo cuando vuelva la conexión.»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 73
+    },
+    {
+      "afirmacion": "…se pinta en la lista",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarScreen.kt",
+      "linea": 770
+    },
+    {
+      "afirmacion": "Si la conexión se cae al tocarlo: «Sin conexión: no se pudo confirmar…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 202
+    },
+    {
+      "afirmacion": "Si nadie lo abre en 10 min se libera",
+      "archivo": "avoqado-server/src/services/online-ordering/card/confirm.service.ts",
+      "linea": 217
+    },
+    {
+      "afirmacion": "Sin caja con red la tienda deja de ofrecer la tarjeta",
+      "archivo": "avoqado-server/src/services/online-ordering/card/merchant.ts",
+      "linea": 64
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: el ajuste «No, entran solos»",
+      "archivo": "avoqado-web-dashboard/src/locales/es/onlineOrdering.json",
+      "linea": 127
+    },
+    {
+      "ruta": "Antes: el interruptor «Pagar en línea»",
+      "archivo": "avoqado-web-dashboard/src/locales/es/onlineOrdering.json",
+      "linea": 146
+    },
+    {
+      "ruta": "Antes: 10 minutos",
+      "archivo": "avoqado-server/src/services/online-ordering/constants.ts",
+      "linea": 23
+    },
+    {
+      "ruta": "Antes: o antes, si cierra la tienda",
+      "archivo": "avoqado-server/src/services/online-ordering/card/confirm.service.ts",
+      "linea": 174
+    },
+    {
+      "ruta": "Antes: suena cada 4 s",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/data/VigiaDeFolios.kt",
+      "linea": 587
+    },
+    {
+      "ruta": "Antes: con el volumen de notificaciones",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/data/Timbre.kt",
+      "linea": 19
+    },
+    {
+      "ruta": "Antes: la banda «Pedido pagado en línea · ábrelo para cobrar»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 219
+    },
+    {
+      "ruta": "Antes: con varios, «… (2 por abrir)»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 220
+    },
+    {
+      "ruta": "Antes: el recuadro dice «1 pagado en línea»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 221
+    },
+    {
+      "ruta": "Antes: el recuadro lo pinta",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/RecuadroPorPagar.kt",
+      "linea": 52
+    },
+    {
+      "ruta": "Antes: en medio de un cobro con tarjeta la banda no sale",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 308
+    },
+    {
+      "ruta": "Antes: …pero sigue sonando (el timbre no mira la pantalla)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/data/VigiaDeFolios.kt",
+      "linea": 147
+    },
+    {
+      "ruta": "Antes: sin orders:update, «Pide a quien pueda atender pedidos que lo abra.»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarScreen.kt",
+      "linea": 376
+    },
+    {
+      "ruta": "Antes: «Registra tu entrada para abrir el pedido pagado»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 226
+    },
+    {
+      "ruta": "Antes: «Abre tu turno para abrir el pedido pagado»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 224
+    },
+    {
+      "ruta": "Antes: la banda sin entrada o sin turno sólo informa",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/RecuadroPorPagar.kt",
+      "linea": 98
+    },
+    {
+      "ruta": "Problema: «Cobrándose en otra caja…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 898
+    },
+    {
+      "ruta": "Problema: «Este pedido ya se abrió» con *Ver en «Por entregar»*",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 205
+    },
+    {
+      "ruta": "Problema: elige el aviso según dónde quedó",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 621
+    },
+    {
+      "ruta": "Problema: «Este pedido ya se cerró»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 210
+    },
+    {
+      "ruta": "Problema: «Ese pedido ya no está disponible» · «Se liberó sin cobrarse o venció. No se cobró nada.»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 211
+    },
+    {
+      "ruta": "Problema: «Confirmando el pago con el banco. Espera unos segundos.»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 606
+    },
+    {
+      "ruta": "Problema: «No se pudo confirmar»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 215
+    },
+    {
+      "ruta": "Problema: «No se abrió el pedido» con el texto del servidor",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 212
+    },
+    {
+      "ruta": "Problema: la comanda no salió en esta terminal",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 228
+    },
+    {
+      "ruta": "Problema: varias comandas",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 229
+    },
+    {
+      "ruta": "Problema: «Entendido»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "linea": 354
+    },
+    {
+      "ruta": "Problema: «*** POSIBLE REPETIDA ***»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/printer/PrinterManager.kt",
+      "linea": 1718
+    },
+    {
+      "ruta": "Problema: «revisa si ya salió»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/printer/PrinterManager.kt",
+      "linea": 1719
+    },
+    {
+      "ruta": "Problema: «Devolviendo…»",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/domain/Folio.kt",
+      "linea": 96
+    },
+    {
+      "ruta": "Problema: con marca no salen Listo ni Entregado",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 888
+    },
+    {
+      "ruta": "Problema: «Por entregar» = ACCEPTED + READY (lo cerrado sale de la lista)",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 903
+    },
+    {
+      "ruta": "Problema: devolver es del panel, la terminal no devuelve estos pedidos",
+      "archivo": "avoqado-server/src/routes/dashboard/onlineOrdering.dashboard.routes.ts",
+      "linea": 70
+    },
+    {
+      "ruta": "Problema: la tienda sólo ofrece la tarjeta con una caja que avisa y Stripe que cobra",
+      "archivo": "avoqado-server/src/services/online-ordering/card/merchant.ts",
+      "linea": 55
+    },
+    {
+      "ruta": "Problema: la caja sólo avisa con la app al frente y el aviso a la vista",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/data/VigiaDeFolios.kt",
+      "linea": 378
+    },
+    {
+      "ruta": "Problema: el panel dice si hoy se ofrece",
+      "archivo": "avoqado-web-dashboard/src/locales/es/onlineOrdering.json",
+      "linea": 148
+    },
+    {
+      "ruta": "Problema: sin abrir a tiempo se libera la tarjeta apartada",
+      "archivo": "avoqado-server/src/services/online-ordering/card/confirm.service.ts",
+      "linea": 105
+    },
+    {
+      "ruta": "Problema: si no suena, el volumen de notificaciones",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/data/Timbre.kt",
+      "linea": 19
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "PAX A910S del laboratorio del Alien (serial 2841548417, terminal AVQD-2841548417 de Avoqado Full)",
+    "version": "2.22.2-sandbox (135), copia de QA com.jaac.avoqado_tpv.sandbox.d661ft compilada en 6362df11 (ronda 1; f659760e, el sourceRef, sólo cambia el aviso sin red de «Pedidos por pagar», W1), contra el SERVIDOR de D661 en el 3005 (50c6526da). La ronda 2 usó com.jaac.avoqado_tpv.sandbox.d661r2, árbol combinado main 8fd64309 + D661 f659760e + D665 + D666 (APK sha256 1716ece39e36bdc2e5cd04cb4ce7d062363274e70dbde311c5601a62c5488631).",
+    "apkSha256": "369db50b9748ee015c1d6377406bdacff66ee044f440feab3d6ecad043f64f5f",
+    "fecha": "2026-11-21",
+    "fotos": [
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/tpv-01-inicio-cajera.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/tpv-02-banda-pagado-en-linea.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/tpv-03-pagados-en-linea-lista.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/tpv-04-abriendo.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/tpv-05-abierto.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/tpv-06-listo.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/tpv-07-entregado.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/tpv-11-c7-sin-red-lista.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/tpv-12-c7-sin-red-pedidos.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/tpv-13-c7-vuelve-red.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/tpv-14-c7-sin-red-en-la-lista.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/tpv-15-c7-abierto-tras-volver-red.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/tpv-20-c8-dos-cajas.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/tpv-21-c8-resultado.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/E-02-inicio-con-pagado.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/E-03-banda-pagado.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/E-04-inicio-sin-red.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/E-05-por-pagar-sin-red.png"
+    ],
+    "filasCreadas": [
+      "Todo en bases desechables (av-db-25-d661-ft y av-db-25-d661-r2), borradas al terminar; de av-db-25 sólo se leyó. Ronda 1: W8ZKG abierto en esta terminal, cargo CAPTURED, 1 Payment de $45 (comisión 0.52 = application_fee 52), comanda impresa una vez (printClaimedBy AVQD-2841548417), *Listo* y *Entregado*. Cuadre al centavo en full-testing/report.md."
+    ],
+    "nota": "Recorrido real (ronda 1, 21-nov): banda con *Ver* y recuadro «1 pagado en línea», sonido cada 4 s (logcat AudioTrack); *Abrir y cobrar* → «El pedido W8ZKG ya está en «Por entregar».», dos toques = 1 POST; *Listo* y *Entregado* (pasos 1–4). Dos cajas: la TPV recibió 409 «Este pedido ya se abrió» con *Ver en «Por entregar»* (caso 8). Sin red con la lista abierta: «Abrir y cobrar necesita conexión», apagado, y el sonido para a los ~15 s; al volver la red suena y se abre (caso 7). Ronda 2: abierto ya sin red, «Pedidos por pagar · Sin conexión: …» completo (E-05). NO se vieron en la terminal: «(2 por abrir)», la banda de entrada o turno, «POSIBLE REPETIDA», «la comanda no salió en esta terminal», «Cobrándose en otra caja…», el texto de permiso, «Confirmando el pago con el banco…» (sólo por API) ni la Nexgo (la N86 estaba desconectada). «Devuelto» y «No lo recogió» nunca salen en «Por entregar»: lo cerrado sale de la lista, como dice la guía."
+  },
+  "codex": {
+    "lote": 12,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

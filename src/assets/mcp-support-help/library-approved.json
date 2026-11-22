@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-21T14:14:08.826Z",
-  "approvedHash": "4c999c8eadd2f85c95e131827a9a27327337709da541f12af8c9ac274e3afb32",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -175,6 +175,12 @@
     "android/ordenes/cambiar-o-quitar-articulos-del-carrito": {
       "sha256": "29bfe18b1cc68e1a3dfb78e8c7286ea9afbf73ab821c47ca46ed332f5951cbb6",
       "requiredPermissions": []
+    },
+    "android/pedidos-en-linea/atender-pedidos-en-linea": {
+      "sha256": "1289b487e4aab1ffb2f84473b62eae2bbf111f895d238b6a75136c89f74226f8",
+      "requiredPermissions": [
+        "orders:read"
+      ]
     },
     "android/personal/cambiar-de-usuario": {
       "sha256": "18f31fab17d3f205b28b5bd573f945a981149b10515fba7d7eb07210bbce272e",
@@ -587,6 +593,20 @@
         "payment:create-manual"
       ]
     },
+    "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea": {
+      "sha256": "87c4e326bfd268ec3c9a4d85293b57e93acdb27b01d9a80044b1bfae15414189",
+      "requiredPermissions": [
+        "payments:refund"
+      ]
+    },
+    "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos": {
+      "sha256": "78314ecd75f56e3b910a95aa317c0b7cc1eba86c840c934b633fe87a73430c22",
+      "requiredPermissions": [
+        "online-orders:manage"
+      ],
+      "featureCode": "ONLINE_ORDERING",
+      "gateKind": "FEATURE"
+    },
     "dashboard/plan/cambiar-tarjeta-del-plan": {
       "sha256": "df61878d21967bd9391d3d520e96b930ee53cc79360eb363a5fbc45dd22be78a",
       "requiredPermissions": [
@@ -953,6 +973,12 @@
       ],
       "featureCode": "TABLE_SERVICE",
       "gateKind": "FEATURE"
+    },
+    "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea": {
+      "sha256": "92f96096647f337153ae346677f97627ce94d5dff048ef4311e5d1a2ceb375ff",
+      "requiredPermissions": [
+        "orders:update"
+      ]
     },
     "tpv/recibos/imprimir-y-reimprimir-recibo": {
       "sha256": "570746088c124ca146349d21ef0ee57692c90714e1dc94703d98f4fb8f746d0a",
