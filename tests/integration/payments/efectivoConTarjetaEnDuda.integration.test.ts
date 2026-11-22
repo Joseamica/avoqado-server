@@ -580,6 +580,11 @@ describe('D7 · la tarjeta ya cobrada que llega tarde nunca se pierde', () => {
       )
       expect(lista).toHaveLength(2)
       expect(await orden(venta.id)).toMatchObject({ splitType: 'FULLPAYMENT', paymentStatus: 'PAID' })
+      // Se guarda con la forma de la cuenta (no cambia lo que leen la TPV y el POS) y sin repartir por producto; la que mandó la
+      // terminal queda como evidencia.
+      const guardada = exigir(prisma.payment.findUnique({ where: { id: tarjeta.id }, include: { allocations: true } }))
+      expect(await guardada).toMatchObject({ splitType: 'FULLPAYMENT', posRawData: expect.objectContaining({ splitType }) })
+      expect((await guardada).allocations.every(a => a.orderItemId === null)).toBe(true)
       expect(await f.esperar(async () => (await sobrepagos(venta.id)).length > 0)).toBe(true)
       expect((await sobrepagos(venta.id))[0].data).toMatchObject({ overpaidBy: 100, wasAlreadyPaid: true, paymentId: tarjeta.id })
     },
@@ -655,6 +660,48 @@ describe('D7 · la tarjeta ya cobrada que llega tarde nunca se pierde', () => {
         expect(await tardias(t.id)).toEqual([])
       }
       expect(gritos('🚨 [Tarjeta tardía]')).toEqual([])
+    })
+
+    it('al revés: la tarjeta tardía llega primero y el efectivo sube DESPUÉS de su cola (hora del aparato en medio): UN rastro', async () => {
+      const intento = Date.now() - 5 * 60_000
+      const tarjeta = await tarjetaRapida({ capturadoEnAparato: intento })
+      await darleTiempoAlRastro()
+      expect(await tardias(tarjeta.id)).toEqual([])
+
+      const efectivo = await recordFastPayment(
+        f.venueId,
+        {
+          ...f.registroDeLaTerminal({ attemptId: randomUUID(), sinMerchant: true }),
+          method: 'CASH',
+          authorizationNumber: undefined,
+          isOfflineReplay: true,
+          createdAtLocal: intento + 2 * 60_000,
+        },
+        f.staffId,
+      )
+
+      expect(await f.esperar(async () => (await tardias(tarjeta.id)).length > 0)).toBe(true)
+      await darleTiempoAlRastro()
+      const lista = await tardias(tarjeta.id)
+      expect(lista).toHaveLength(1)
+      expect(lista[0].data).toMatchObject({ paymentId: tarjeta.id, cashPaymentIds: [efectivo.id] })
+    })
+
+    it('si el servidor murió antes del rastro, el reintento de la TPV con su llave lo deja (y no lo repite)', async () => {
+      const intento = Date.now() - 5 * 60_000
+      await efectivoRapido()
+      const attemptId = randomUUID()
+      const registro = { ...f.registroDeLaTerminal({ attemptId }), capturadoEnAparato: intento }
+      const tarjeta = await recordFastPayment(f.venueId, registro, f.staffId)
+      expect(await f.esperar(async () => (await tardias(tarjeta.id)).length > 0)).toBe(true)
+      await prisma.activityLog.deleteMany({ where: { venueId: f.venueId, action: 'LATE_CARD_AFTER_CASH' } }) // «murió antes»
+
+      const otra = await recordFastPayment(f.venueId, { ...registro }, f.staffId)
+      expect(otra.id).toBe(tarjeta.id)
+      expect(await f.esperar(async () => (await tardias(tarjeta.id)).length > 0)).toBe(true)
+      await recordFastPayment(f.venueId, { ...registro }, f.staffId)
+      await darleTiempoAlRastro()
+      expect(await tardias(tarjeta.id)).toHaveLength(1)
     })
 
     it('una hora ilegible no tumba el cobro', async () => {

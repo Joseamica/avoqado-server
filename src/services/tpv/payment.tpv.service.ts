@@ -421,7 +421,11 @@ import {
   renovarRecuperacionDeFolioEnTx,
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
-import { avisarTarjetaTardiaConEfectivo } from '../shared/avisoDeTarjetaTardiaConEfectivo'
+import {
+  horaDelIntentoParaGuardar,
+  revisarEfectivoContraTarjetasTardias,
+  revisarTarjetaTardia,
+} from '../shared/avisoDeTarjetaTardiaConEfectivo'
 // El candado del toque repetido en «Efectivo». La regla vive AHÍ, pura y probada aparte.
 import { aplicaCandadoDeEfectivo, cobroEnEfectivoSobreOrdenSaldada } from '../shared/cobroEnEfectivoDuplicado'
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
@@ -3925,6 +3929,10 @@ export async function recordOrderPayment(
     throw new NotFoundError(`Order ${orderId} not found in venue ${venueId}`, 'ORDER_NOT_FOUND')
   }
 
+  // D7: la forma de dividir con la que se GUARDA este cobro. Sólo cambia cuando una tarjeta ya cobrada llega con otra forma que la
+  // cuenta (abajo): entonces queda con la de la cuenta y sin repartir por producto, para no marcar como pagado un producto ni cambiar la
+  // forma que leen la TPV y el POS (`lastSplitType`). La forma que mandó la terminal queda en `posRawData.splitType`.
+  let divisionDelCobro = paymentData.splitType
   // Validate splitType business logic
   if (activeOrder.splitType && activeOrder.splitType !== paymentData.splitType) {
     // Define allowed transitions based on business rules
@@ -3949,6 +3957,7 @@ export async function recordOrderPayment(
         paymentSplitType: paymentData.splitType,
         idempotencyKey: paymentData.idempotencyKey ?? null,
       })
+      divisionDelCobro = activeOrder.splitType
     } else if (!allowedMethods.includes(paymentData.splitType)) {
       throw new BadRequestError(
         `Order has splitType ${activeOrder.splitType}. Cannot use ${paymentData.splitType}. Allowed methods: ${allowedMethods.join(', ')}`,
@@ -4300,7 +4309,7 @@ export async function recordOrderPayment(
             // guarda cuando el dinero NO pasó por Avoqado.
             externalSource: classicMethod === 'CASH' ? null : paymentData.externalSource?.trim()?.slice(0, 50) || null,
             status: paymentStatusSnapshot as any, // Direct enum mapping since frontend sends correct values
-            splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
+            splitType: divisionDelCobro as SplitType, // D7: la de la cuenta si una tarjeta ya cobrada llegó con otra
             source: fuenteDelPago(paymentData.source, { registroExterno: classicMethod !== 'CASH' }),
             processor: 'TBD',
             // Snapshot de MERCHANT_ROUTING_RULES (por qué la TPV mostró/eligió este merchant)
@@ -4474,7 +4483,7 @@ export async function recordOrderPayment(
         }
 
         // Handle split payment allocations based on splitType
-        if (paymentData.splitType === 'PERPRODUCT' && paymentData.paidProductsId.length > 0) {
+        if (divisionDelCobro === 'PERPRODUCT' && paymentData.paidProductsId.length > 0) {
           // Create allocations for specific products
           const orderItems = activeOrder.items.filter((item: any) => paymentData.paidProductsId.includes(item.id))
 
@@ -5641,6 +5650,8 @@ export async function recordFastPayment(
         montoPesos: existingByKey.amount,
         terminalSerial: paymentData.authenticatedTerminalSerial ?? null,
       })
+      // D7: si el primer registro murió antes de su aviso de tarjeta tardía, el reintento con la llave lo vuelve a revisar (una vez).
+      void revisarTarjetaTardia(existingByKey)
       return {
         ...((await consolidarRegistroRepetido(existingByKey, paymentData as RegistroEntrante, venueId, null)) ?? existingByKey),
         digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]),
@@ -6028,6 +6039,8 @@ export async function recordFastPayment(
               currency: paymentData.currency,
               authorizationNumber: paymentData.authorizationNumber,
               referenceNumber: paymentData.referenceNumber,
+              // D7: la hora del intento de una tarjeta que la TPV registró tarde (sólo tarjeta, legible); la leen las revisiones del aviso.
+              ...horaDelIntentoParaGuardar({ method: paymentData.method, capturadoEnAparato: paymentData.capturadoEnAparato }, llegada),
               isInternational: paymentData.isInternational,
               ...(paymentData.isInternationalFromTerminal !== undefined
                 ? { isInternationalFromTerminal: paymentData.isInternationalFromTerminal }
@@ -6532,19 +6545,10 @@ export async function recordFastPayment(
   t.mark('transaccionSocketsYComisiones')
   logger.info('Fast payment recorded successfully', { paymentId: payment.id, amount: totalAmount })
 
-  // D7 (encargo a25cd7): una tarjeta tardía con efectivo en medio deja rastro. Después del commit y sin esperarlo: nunca toca el cobro.
-  void avisarTarjetaTardiaConEfectivo({
-    id: payment.id,
-    venueId,
-    orderId: payment.orderId,
-    terminalId: payment.terminalId,
-    method: payment.method,
-    status: payment.status,
-    amount: payment.amount,
-    processedById: payment.processedById,
-    horaDelIntento: paymentData.capturadoEnAparato,
-    llegada,
-  })
+  // D7 (encargo a25cd7): una tarjeta tardía con efectivo en medio deja rastro, llegue primero la tarjeta o el efectivo. Después del
+  // commit y sin esperarlo: nunca toca el cobro. Cada una se descarta sola si no le toca (tarjeta tardía / efectivo con terminal).
+  void revisarTarjetaTardia(payment)
+  void revisarEfectivoContraTarjetasTardias(payment)
 
   // 🪝 Backfill any Blumon webhook that arrived BEFORE this Payment was recorded.
   // Fire-and-forget — never block the API response on reconciliation. The cron
