@@ -163,11 +163,24 @@ describe('cancelAreaTicketCheckout — retira las comandas (hz:e82938e1:D40)', (
     expect((tomarCandadoDeComandas as jest.Mock).mock.calls.map(c => c[1])).toEqual(['cuenta-ligada', 'order-1'])
     expect(ordenDe(tomarCandadoDeComandas, 0)).toBeGreaterThan(ordenDe(retirarComandasDeVentaAnulada, 0))
     expect(ordenDe(tomarCandadoDeComandas, 1)).toBeLessThan(ordenDe(retirarComandasDeVentaAnulada, 1))
+    // Codex d40-r3: y antes del candado de la sesión del SEGUNDO intento.
+    const candadosDeSesion = prismaMock.$queryRaw.mock.calls.flatMap((c: unknown[], i: number) =>
+      String((c[0] as any).join('?')).includes('"AreaTicketCheckoutSession"') ? [prismaMock.$queryRaw.mock.invocationCallOrder[i]] : [],
+    )
+    expect(candadosDeSesion).toHaveLength(2)
+    expect(ordenDe(tomarCandadoDeComandas, 1)).toBeLessThan(candadosDeSesion[1])
     expect(prismaMock.order.updateMany).toHaveBeenCalledTimes(1)
   })
 
   it('regresión: una sesión sin orden todavía (OPEN) no toca la cocina', async () => {
     preparar({ orderId: null })
+    await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: null } as any)
+    expect(tomarCandadoDeComandas).not.toHaveBeenCalled()
+    expect(retirarComandasDeVentaAnulada).not.toHaveBeenCalled()
+  })
+
+  it('Codex d40-r3 #2: cancelar otra vez una venta ya cancelada (otra llave) no espera a la cocina ni retira nada', async () => {
+    preparar({ status: 'CANCELLED', cancelIdempotencyKey: 'otra' })
     await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: null } as any)
     expect(tomarCandadoDeComandas).not.toHaveBeenCalled()
     expect(retirarComandasDeVentaAnulada).not.toHaveBeenCalled()

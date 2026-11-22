@@ -3,6 +3,7 @@ import { updateOrder } from '@/services/dashboard/order.dashboard.service'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import { assertOrderCancellableUnderLock } from '@/services/shared/orderCancelGuard'
 import { retirarComandasDeVentaAnulada, tomarCandadoDeComandas } from '@/services/kds/kitchenTicketAuthoring.service'
+import { NotFoundError } from '@/errors/AppError'
 
 jest.mock('@/services/shared/tableOrderLock', () => ({ lockTableOrderScope: jest.fn(async () => ({})) }))
 jest.mock('@/services/shared/orderCancelGuard', () => ({
@@ -161,9 +162,19 @@ describe('D40: anular por el PUT retira las comandas de la pantalla de cocina', 
     expect(retirarComandasDeVentaAnulada).not.toHaveBeenCalled()
     expect(tomarCandadoDeComandas).not.toHaveBeenCalled()
   })
-  it('regresión: reenviar la anulación de una ya anulada no vuelve a retirar nada', async () => {
+  it('Codex d40-r3 #2: reenviar la anulación de una ya anulada no retira nada NI espera a la cocina', async () => {
     row.status = 'CANCELLED'
     await updateOrder('venue', 'order', { status: 'CANCELLED' } as any)
+    expect(retirarComandasDeVentaAnulada).not.toHaveBeenCalled()
+    expect(tomarCandadoDeComandas).not.toHaveBeenCalled()
+  })
+  it('Codex d40-r3 #1: una cuenta de otra sucursal sale con 404 sin pedir el candado de su cocina', async () => {
+    // La lectura previa va acotada al negocio de la petición: la cuenta ajena no aparece.
+    db.order.findFirst.mockResolvedValueOnce(null)
+    ;(lockTableOrderScope as jest.Mock).mockRejectedValueOnce(new NotFoundError('Order not found'))
+    await expect(updateOrder('venue', 'ajena', { status: 'CANCELLED' } as any)).rejects.toMatchObject({ statusCode: 404 })
+    expect(db.order.findFirst.mock.calls[0][0]).toMatchObject({ where: { id: 'ajena', venueId: 'venue' } })
+    expect(tomarCandadoDeComandas).not.toHaveBeenCalled()
     expect(retirarComandasDeVentaAnulada).not.toHaveBeenCalled()
   })
 })

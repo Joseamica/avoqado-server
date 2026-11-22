@@ -637,8 +637,13 @@ export async function updateOrder(
     // venta: es el orden del armado (comandas → venta) y el retiro de abajo los vuelve a pedir sin esperar. Se toman ANTES de la foto
     // de la mesa (Codex d40-r2 #1): esperar a la cocina entre la foto y sus candados alargaba la ventana en la que otra cuenta de la
     // mesa cambia y la anulación sale con 503.
+    // Codex d40-r3: la cuenta se lee antes, sin candado y ACOTADA a este negocio: una cuenta de otra sucursal no pide el candado
+    // de su cocina (#1, 404 de abajo), y una ya anulada tampoco (#2: el reenvío idéntico, o el rechazo, no espera a la cocina). Si
+    // cambia entre esta lectura y la de bajo candado, el retiro toma su candado a media transacción (rara vez; lo repite el 40P01).
     const pideAnular = status === 'CANCELLED' || status === 'DELETED'
-    if (topologyWrite && pideAnular)
+    const previa =
+      topologyWrite && pideAnular ? await client.order.findFirst({ where: { id: orderId, venueId }, select: { status: true } }) : null
+    if (previa && previa.status !== 'CANCELLED' && previa.status !== 'DELETED')
       for (const id of (await cuentasDeSusComandas(client, venueId, orderId)).sort()) await tomarCandadoDeComandas(client, id)
     if (topologyWrite)
       await lockTableOrderScope(client, { venueId, orderIds: [orderId], tableIds: tableId ? [tableId] : [] }).catch(error => {
