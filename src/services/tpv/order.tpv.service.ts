@@ -162,6 +162,10 @@ export async function getOrders(
     paymentStatus: {
       in: ['PENDING', 'PARTIAL'], // Equivalent to legacy 'OPEN' status
     },
+    // 🔴 hz:e82938e1:D36 (riesgo 2 de Codex, 21-nov-2026): anular deja `paymentStatus` como estaba (PENDING), así que una cuenta
+    // anulada —por la limpieza de Cobrar, por el «atrás» de la TPV o por una persona— seguía en «Para Llevar sin Pagar» de las TPV
+    // viejas con el botón de cobrar. Una anulada ya no es una cuenta abierta: no se ofrece.
+    status: { notIn: ['CANCELLED', 'DELETED'] },
     // Rappi 2b: un pedido de plataforma con efectivo por cobrar se cobra en «Pedidos en línea» del POS, que reparte lo recibido
     // (terceros → propina → venta). Esta lista legacy no tiene ese reparto, así que no lo ofrece.
     thirdPartyCashDue: null,

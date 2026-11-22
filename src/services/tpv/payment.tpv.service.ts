@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks'
-import { Payment, PaymentMethod, SplitType, OrderSource, PaymentSource, Prisma, type DigitalReceipt } from '@prisma/client'
+import { Payment, PaymentMethod, SplitType, OrderSource, PaymentSource, Prisma, type DigitalReceipt, type Order } from '@prisma/client'
 import logger from '../../config/logger'
 import { finalizeCouponsForOrder } from '../shared/cuponDeLaVenta'
 import { cobradoQueCubreEnTx } from '../shared/saldoReabiertoAlReembolsar'
@@ -3987,6 +3987,14 @@ export async function recordOrderPayment(
   let lockedAreaCheckout: { sessionId: string; attemptId: string } | null = null
   let areaTicketCheckoutState: string | null = null
   let committedStandaloneSettlement: CommittedStandaloneSettlement | undefined
+  /**
+   * hz:e82938e1:D36 (founder «B», 21-nov). Sólo si ESTE cobro reabrió una venta anulada en el cierre transaccional: la venta tal como
+   * quedó, leída bajo el candado. Sin consultas extra (no puede fallar aparte) y sin mover el aviso. Las cuentas con vales y las
+   * integradas de SoftRestaurant cierran en otro paso y avisan como hoy. Es la fila COMPLETA (Codex r6 #3: con sólo unos campos, el
+   * `order` del 201 mezclaba los de antes y después del cierre, p. ej. `splitType` y `servedById`). Un holder y no un `let`: TS no ve
+   * asignaciones en closures.
+   */
+  const reapertura = { ventaGuardada: null as Order | null }
   let suppressExchangeSaleEffects = false
   let isExchangeSale = false
   // Faltante de inventario detectado con el cobro YA registrado. Viaja como aviso
@@ -4491,6 +4499,10 @@ export async function recordOrderPayment(
 
         if (newPayment.status === 'COMPLETED') {
           const paidOrder = await tx.order.findUniqueOrThrow({ where: { id: activeOrder.id, venueId } })
+          // D36 (founder «B»): la venta ya cerrada, leída bajo el candado. Si ESTE cobro la reabrió, el aviso y el acuse dicen esto.
+          if (committedStandaloneSettlement?.reabiertaDeCancelada) {
+            reapertura.ventaGuardada = paidOrder
+          }
           let expectsSettlement = paidOrder.paymentStatus === 'PAID'
           if (!suppressExchangeSaleEffects && !expectsSettlement && !committedStandaloneSettlement) {
             // SR and area-ticket flows retain their settlement owner. Freeze the
@@ -4888,13 +4900,16 @@ export async function recordOrderPayment(
       })
     }
 
-    // Emit order updated event to venue room
+    // Emit order updated event to venue room. hz:e82938e1:D36 (founder «B», Codex r3-r5): si ESTE cobro reabrió una venta anulada (la
+    // limpieza de Cobrar, una persona, o la limpieza que ganó entre la primera lectura y el candado), el aviso lleva lo que el cierre
+    // guardó bajo el candado, no la copia anulada de antes de cobrar. Sale en el mismo lugar de siempre (nunca se pierde por moverlo).
+    const estadoParaAvisar = reapertura.ventaGuardada ?? activeOrder
     socketManager.broadcastToVenue(activeOrder.venueId, SocketEventType.ORDER_UPDATED, {
       orderId: activeOrder.id,
       orderNumber: activeOrder.orderNumber,
       venueId: activeOrder.venueId,
-      status: activeOrder.status,
-      paymentStatus: activeOrder.paymentStatus,
+      status: estadoParaAvisar.status,
+      paymentStatus: estadoParaAvisar.paymentStatus,
       timestamp: new Date().toISOString(),
     })
 
@@ -5177,9 +5192,14 @@ export async function recordOrderPayment(
   const autofacturaAvailable = digitalReceipt ? await timing.time('autofactura', () => resolveAutofacturaAvailable(orderId)) : false
   timing.end(payment.id)
 
+  // El `payment` creado aquí trae su venta (`include: { order }`), pero su variable se declaró como `Payment` a secas.
+  const ordenDelPago = (payment as { order?: Record<string, unknown> | null }).order ?? null
+
   // Add digital receipt info to payment response
   return {
     ...payment,
+    // D36 (founder «B»): el `order` de la copia del pago es de ANTES de cerrar; si este cobro reabrió la venta, lleva lo guardado.
+    ...(reapertura.ventaGuardada && ordenDelPago ? { order: { ...ordenDelPago, ...reapertura.ventaGuardada } } : {}),
     ...(areaTicketCheckoutState ? { areaTicketCheckoutState } : {}),
     // Aditivo y con spread condicional (mismo criterio que `areaTicketCheckoutState`):
     // la llave está AUSENTE cuando no hay nada que avisar, así que ninguna app vieja

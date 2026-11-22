@@ -7854,12 +7854,22 @@ export async function publishCancelledOrder(
    * hz:e82938e1:D36: quien ya escribió su `ORDER_CANCELLED` DENTRO de la transacción de la anulación (para que una caída entre el
    * commit y esta publicación no deje una anulación sin bitácora) lo dice aquí y no se escribe otra entrada.
    */
-  opciones: { bitacoraEnLaTx?: boolean } = {},
+  opciones: {
+    bitacoraEnLaTx?: boolean
+    /**
+     * hz:e82938e1:D36 (Codex r2 #2): la limpieza de ventas de Cobrar ya comprobó BAJO EL CANDADO que la venta no tenía referidos ni
+     * cobros. Un referido capturado en el instante después de anularla (la captura no se frena con una venta anulada) se queda PENDING,
+     * para que un cobro tardío lo califique; mandarlo a VOID aquí lo perdía.
+     */
+    sinReferidos?: boolean
+  } = {},
 ): Promise<void> {
   const { orderId, table } = result
   logger.info(`✅ [ORDER.MOBILE] Order ${orderId} cancelled`)
-  const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
-  await onOrderCancelled({ orderId, venueId })
+  if (!opciones.sinReferidos) {
+    const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
+    await onOrderCancelled({ orderId, venueId })
+  }
   const broadcastingService = socketManager.getBroadcastingService()
   if (result.hadBoundTable && table) {
     logger.info(
