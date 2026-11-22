@@ -29,9 +29,24 @@ describe('D40 · la nota de cada parte en la comanda', () => {
     ])
   })
 
-  it('P1 un nombre con salto de línea no se confunde con una nota (Codex r1 #5)', () => {
-    expect(toKdsModifierLabels([{ name: 'Consomé\nNota: sin cebolla', quantity: 1 }])).toEqual(['Consomé Nota: sin cebolla'])
+  it('P1 sin nota el nombre queda byte a byte (Codex r2 #2); un nombre con «⏎Nota: » es el riesgo cosmético aceptado', () => {
     expect(toKdsModifierLabels([{ name: 'Consomé (Nota: sin cebolla)', quantity: 1 }])).toEqual(['Consomé (Nota: sin cebolla)'])
+    // Riesgo aceptado (decisión A): igual a una nota de verdad. Sólo cambia cómo se ve.
+    expect(toKdsModifierLabels([{ name: 'Consomé\nNota: sin cebolla', quantity: 1 }])).toEqual(
+      toKdsModifierLabels([{ name: 'Consomé', quantity: 1, notes: 'sin cebolla' }]),
+    )
+  })
+
+  it('P1 la nota se limpia con la MISMA lista de caracteres que el POS (Codex r2 #7)', () => {
+    // Vectores compartidos con NotaDelExtraTest.kt (ANDROID/WINDOWS): deben dar lo mismo en los dos lados.
+    expect(limpiarNotaDelExtra('sin\u2028cebolla')).toBe('sin cebolla')
+    expect(limpiarNotaDelExtra('sin\u0085cebolla')).toBe('sin cebolla')
+    expect(limpiarNotaDelExtra('\uFEFF sin\u00A0\u3000cebolla \u200A')).toBe('sin cebolla')
+    expect(limpiarNotaDelExtra('sin\u200Bcebolla')).toBe('sin\u200Bcebolla') // el espacio de ancho cero no es espacio en ninguno de los dos
+  })
+
+  it('P1 la etiqueta guardada en la comanda se lee tal cual (el lector vuelve a pasar los textos por el normalizador)', () => {
+    expect(toKdsModifierLabels(['Consomé\nNota: sin cebolla', 'Agua'])).toEqual(['Consomé\nNota: sin cebolla', 'Agua'])
   })
 
   it('P1 sin nota la etiqueta es idéntica a la de antes', () => {
