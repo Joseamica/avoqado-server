@@ -20,6 +20,10 @@ keywords:
   - dos de la misma
   - no me deja poner dos iguales
   - opciones del producto
+  - nota a una opción
+  - sin cebolla solo al consomé
+  - observación por parte del paquete
+  - nota del modificador
   - producto nuevo no aparece
   - precio no se actualiza
   - menú del aparato
@@ -36,6 +40,7 @@ Se hace en *Cobrar*. Los productos se cargan con el permiso de ver el menú; sin
 3. Para leer su código de barras, toca el botón *Escanear código de barras*.
 4. Si el producto tiene opciones, elígelas y toca *Agregar al carrito*; los grupos que dicen *Requerido* no se pueden dejar vacíos.
    Si un grupo trae *−* y *+* en cada opción, la misma opción se puede elegir varias veces (por ejemplo, 2 de cochinita y 1 de papa): toca *+* las veces que la quieras y *−* para quitar una. Cada vez cuenta para el *Requerido* y se cobra a su precio; el *+* se apaga al llegar al máximo del grupo o al tope de esa opción.
+   Para una indicación de una sola parte (por ejemplo, «sin cebolla» sólo al consomé del paquete), toca *+ Nota* debajo de esa opción ya elegida, escríbela y toca *Guardar nota*. Sale en la cocina y en la comanda debajo de esa parte; si la opción va varias veces, la nota es para todas. Para cambiarla, toca la nota; *Eliminar* la quita. Para todo el producto usa *Nota del artículo*.
 5. Si el producto dice cuántas variantes tiene, tócalo, elige una opción de cada grupo y toca *Agregar al carrito*.
 6. Si se vende por peso, ponlo en la báscula o escribe el *Peso (kg)* (con báscula, toca antes *Capturar manualmente*), y toca *Agregar*.
 

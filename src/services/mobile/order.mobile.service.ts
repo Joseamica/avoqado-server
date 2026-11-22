@@ -187,6 +187,7 @@ import {
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
 import { consultarCocina, debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
+import { notasDeLasPartes } from '../kds/kdsModifierLabels'
 import {
   armarComandasTrasCommit,
   cuentasDeSusComandas,
@@ -244,6 +245,11 @@ export interface CreateOrderItemInput {
   quantity: number
   notes?: string | null
   modifierIds?: string[]
+  /**
+   * D40: la nota de cada parte del renglón, `{ modifierId: nota }` (todas las veces de esa opción llevan la misma). Opcional: las
+   * apps viejas no la mandan y lo que no cuadre se ignora (`notasDeLasPartes`), nunca un 400.
+   */
+  modifierNotes?: Record<string, unknown> | null
   /** Item/category-scoped Discount row id, mirroring TPV's `itemDiscountId`
    *  (order.tpv.service.ts). Validated the same way: must exist, belong to
    *  this venue, and be currently active/within its validity window. */
@@ -449,6 +455,8 @@ export interface CreatedOrderResponse {
       id: string
       name: string
       price: number
+      /** D40: la nota de esta parte; sólo viene si la tiene. */
+      notes?: string
     }>
   }>
   /** Promociones vendidas en esta orden — el POS las usa para agrupar sus
@@ -496,6 +504,8 @@ function flattenOrderModifiers(order: any): any {
             name: om.modifier?.name || om.name,
             // Lo COBRADO (guardado en la línea), no el precio vivo del extra: pudo cambiar, o cobrarse el que vio el cliente.
             price: Number(om.price ?? om.modifier?.price ?? 0),
+            // D40: la nota de esta parte, sólo si la tiene (sin nota la respuesta queda idéntica a la de antes).
+            ...(om.notes ? { notes: om.notes } : {}),
           })) || [],
       })) || [],
   }
@@ -608,6 +618,8 @@ export interface OrderDetailResponse {
       id: string
       name: string
       price: number
+      /** D40: la nota de esta parte; sólo viene si la tiene. */
+      notes?: string
     }>
     /** TABLE_SERVICE: course/tiempo and send time — the check panel groups sent
      *  items by course and labels each group "Enviado a la cocina a las HH:MM"
@@ -1364,6 +1376,7 @@ export async function buildOrderItemsData(
       throw new BadRequestError('Identificador de producto inválido')
     const product = products.find(p => p.id === item.productId)!
     const itemModifierIds = item.modifierIds || []
+    const notasDelRenglon = notasDeLasPartes(item.modifierNotes, itemModifierIds)
 
     // Calculate modifier total — cada extra a su precio decidido (el que vio el cliente, si se respetó).
     const precioDelExtra = (modifierId: string) => precioDeExtra[k].get(modifierId) ?? modifiers.find(m => m.id === modifierId)?.price
@@ -1508,6 +1521,8 @@ export async function buildOrderItemsData(
             name: modifier.name,
             quantity: 1,
             price: precioDelExtra(modifierId)!,
+            // D40: la nota de esta parte (la misma en cada vez que se eligió); sin nota la fila queda como siempre.
+            ...(notasDelRenglon.has(modifierId) ? { notes: notasDelRenglon.get(modifierId) } : {}),
           }
         }),
       },

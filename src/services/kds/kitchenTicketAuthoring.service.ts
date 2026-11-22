@@ -159,7 +159,7 @@ export async function authorKitchenTickets(params: {
           weightQuantity: true,
           weightUnit: true,
           product: { select: { name: true, categoryId: true, printStationId: true, category: { select: { printStationId: true } } } },
-          modifiers: { select: { name: true, quantity: true, modifier: { select: { name: true } } } },
+          modifiers: { select: { name: true, quantity: true, notes: true, modifier: { select: { name: true } } } },
         },
         orderBy: [{ sequence: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
         ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
@@ -204,7 +204,8 @@ export async function authorKitchenTickets(params: {
         // Codex 3.6 (S6): la venta por peso lleva `quantity = 1`; sin el peso la cocina no sabe cuánto servir.
         productName: nombreEnCocina(r.productName ?? r.product?.name ?? 'Producto', r.weightQuantity, r.weightUnit),
         quantity: r.quantity,
-        modifiers: toKdsModifierLabels(r.modifiers.map(m => ({ name: m.name ?? m.modifier?.name ?? null, quantity: m.quantity }))),
+        // D40: con la nota de cada parte, debajo de su parte en la cocina.
+        modifiers: toKdsModifierLabels(r.modifiers.map(m => ({ name: m.name ?? m.modifier?.name ?? null, quantity: m.quantity, notes: m.notes }))),
         notes: r.notes,
         externalId: r.externalId,
         sentToKitchenAt: r.sentToKitchenAt,
