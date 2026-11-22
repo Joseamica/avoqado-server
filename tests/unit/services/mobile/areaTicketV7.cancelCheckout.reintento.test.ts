@@ -194,9 +194,18 @@ describe('cancelAreaTicketCheckout — retira las comandas (hz:e82938e1:D40)', (
     expect(retirarComandasDeVentaAnulada).not.toHaveBeenCalled()
   })
 
+  it('Codex d40-r6: una sesión vacía (sin venta) no aparta al cajero ni espera a la sucursal, como antes de D40', async () => {
+    preparar({ orderId: null })
+    ;(prismaMock as any).staffVenue.findFirst.mockResolvedValue({ staffId: 'cajero', staff: { id: 'cajero' } })
+    await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: 'cajero' } as any)
+    expect(apartarActorDeLaAnulacion).not.toHaveBeenCalled()
+  })
+
   it('Codex d40-r3 #2: cancelar otra vez una venta ya cancelada (otra llave) no espera a la cocina ni retira nada', async () => {
     preparar({ status: 'CANCELLED', cancelIdempotencyKey: 'otra' })
-    await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: null } as any)
+    ;(prismaMock as any).staffVenue.findFirst.mockResolvedValue({ staffId: 'cajero', staff: { id: 'cajero' } })
+    await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: 'cajero' } as any)
+    expect(apartarActorDeLaAnulacion).not.toHaveBeenCalled()
     expect(tomarCandadoDeComandas).not.toHaveBeenCalled()
     expect(retirarComandasDeVentaAnulada).not.toHaveBeenCalled()
   })

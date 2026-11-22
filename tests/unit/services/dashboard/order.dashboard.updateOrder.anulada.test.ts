@@ -170,15 +170,20 @@ describe('D40: anular por el PUT retira las comandas de la pantalla de cocina', 
   })
   it('Codex d40-r3 #2: reenviar la anulación de una ya anulada no retira nada NI espera a la cocina', async () => {
     row.status = 'CANCELLED'
-    await updateOrder('venue', 'order', { status: 'CANCELLED' } as any)
+    await updateOrder('venue', 'order', { status: 'CANCELLED' } as any, { staffId: 'staff' } as any)
     expect(retirarComandasDeVentaAnulada).not.toHaveBeenCalled()
     expect(tomarCandadoDeComandas).not.toHaveBeenCalled()
+    // Codex d40-r6: tampoco aparta a quien anula (no hay nada que retirar).
+    expect(apartarActorDeLaAnulacion).not.toHaveBeenCalled()
   })
   it('Codex d40-r3 #1: una cuenta de otra sucursal sale con 404 sin pedir el candado de su cocina', async () => {
     // La lectura previa va acotada al negocio de la petición: la cuenta ajena no aparece.
     db.order.findFirst.mockResolvedValueOnce(null)
     ;(lockTableOrderScope as jest.Mock).mockRejectedValueOnce(new NotFoundError('Order not found'))
-    await expect(updateOrder('venue', 'ajena', { status: 'CANCELLED' } as any)).rejects.toMatchObject({ statusCode: 404 })
+    await expect(updateOrder('venue', 'ajena', { status: 'CANCELLED' } as any, { staffId: 'staff' } as any)).rejects.toMatchObject({
+      statusCode: 404,
+    })
+    expect(apartarActorDeLaAnulacion).not.toHaveBeenCalled()
     expect(db.order.findFirst.mock.calls[0][0]).toMatchObject({ where: { id: 'ajena', venueId: 'venue' } })
     expect(tomarCandadoDeComandas).not.toHaveBeenCalled()
     expect(retirarComandasDeVentaAnulada).not.toHaveBeenCalled()
