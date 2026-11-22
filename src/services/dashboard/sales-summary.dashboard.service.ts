@@ -62,6 +62,7 @@ import { sqlImpuestoQueSeCobraAparte } from '@/services/shared/orderBalance'
 import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '@/services/shared/tenderSemantics'
 import { proyectarComisionYNeto } from '@/services/payments/proyeccionMonetaria'
 import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraReal, sqlRangoHoraRealSql } from '@/services/shared/horaRealDelAparato'
+import { formatInVenueTimezone, zonaValida } from '@/utils/datetime'
 
 // ============================================================
 // Types
@@ -2014,6 +2015,39 @@ export interface SalesSummaryExportFilters {
 
 const round2x = (n: number | null | undefined): number | null => (n == null ? null : Math.round(n * 100) / 100)
 
+const DIAS_DE_LA_SEMANA: Record<string, string> = {
+  sunday: 'Domingo',
+  monday: 'Lunes',
+  tuesday: 'Martes',
+  wednesday: 'Miércoles',
+  thursday: 'Jueves',
+  friday: 'Viernes',
+  saturday: 'Sábado',
+}
+const FORMATO_DEL_PERIODO: Partial<Record<ReportType, string>> = {
+  hours: 'yyyy-MM-dd HH:mm',
+  days: 'yyyy-MM-dd',
+  weeks: "'Semana del' yyyy-MM-dd",
+  months: 'yyyy-MM',
+}
+
+/**
+ * D13.2 (Codex r2 #6): the period label of the export, sortable and with its year, on the venue clock. The screen's
+ * («21 nov, 10:00 a.m.») repeated between years. An hour the clock goes through twice (fall back) carries its offset. `vistas`
+ * collects the labels already written in this file.
+ */
+function etiquetaDelPeriodoEnElArchivo(period: string, reportType: ReportType, timezone: string, vistas: Set<string>): string {
+  if (reportType === 'dailySum') return DIAS_DE_LA_SEMANA[period] ?? period
+  const formato = FORMATO_DEL_PERIODO[reportType]
+  const instante = new Date(period)
+  if (!formato || Number.isNaN(instante.getTime())) return period // hourlySum («09:00») and anything unexpected
+  const zona = zonaValida(timezone)
+  let etiqueta = formatInVenueTimezone(instante, zona, formato)
+  if (vistas.has(etiqueta)) etiqueta = `${etiqueta} (UTC${formatInVenueTimezone(instante, zona, 'xxx')})`
+  vistas.add(etiqueta)
+  return etiqueta
+}
+
 /**
  * Flatten an already-computed SalesSummaryResponse into labeled rows, one per requested section.
  * Order-derived totals can be null under a payment-method filter — preserved as null (the
@@ -2022,6 +2056,8 @@ const round2x = (n: number | null | undefined): number | null => (n == null ? nu
 export function flattenSalesSummaryForExport(
   report: SalesSummaryResponse,
   sections: SalesSummaryExportSection[],
+  /** The venue's timezone: with it, «Por periodo» rows carry a year-bearing local label (Codex D13 r2 #6). */
+  timezone?: string,
 ): { rows: SalesSummaryExportRow[] } {
   const want = new Set(sections)
   const rows: SalesSummaryExportRow[] = []
@@ -2170,10 +2206,11 @@ export function flattenSalesSummaryForExport(
     rows.push(fila('Otros métodos', destinos.other.netToReceive))
   }
   if (want.has('byPeriod') && report.byPeriod) {
+    const vistas = new Set<string>()
     for (const p of report.byPeriod) {
       rows.push({
         section: 'byPeriod',
-        label: p.periodLabel || p.period,
+        label: timezone ? etiquetaDelPeriodoEnElArchivo(p.period, report.reportType, timezone, vistas) : p.periodLabel || p.period,
         count: p.metrics.transactionCount,
         amount: round2x(p.metrics.totalCollected),
         percentage: null,

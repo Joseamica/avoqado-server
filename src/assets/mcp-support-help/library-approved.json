@@ -650,7 +650,7 @@
       ]
     },
     "dashboard/reportes/revisar-reportes-ventas": {
-      "sha256": "3d68becf999bbb3ad5ba30c4a8827e20d2350c37ace4d47808543e1807c9f28f",
+      "sha256": "06697070c5cb87b73f4dbb6a3dfb9f109a81533662111e3e1349e094ae3604d9",
       "requiredPermissions": [
         "reports:read"
       ]

@@ -61,6 +61,57 @@ describe('flattenSalesSummaryForExport', () => {
     expect(orden.indexOf('Ganancia neta')).toBe(orden.indexOf('Total cobrado') + 1)
   })
 
+  // Codex D13 r2 #6: la etiqueta de pantalla («21 nov, 10:00 a.m.») no trae el año y se repetía entre 2025 y 2026.
+  describe('«Por periodo»: etiqueta con año, en la hora del negocio', () => {
+    const periodo = (period: string, periodLabel: string, totalCollected: number) => ({
+      period,
+      periodLabel,
+      metrics: { ...report.summary, totalCollected, transactionCount: 1 },
+    })
+    const conPeriodos = (reportType: svc.ReportType, byPeriod: ReturnType<typeof periodo>[]) => ({ ...report, reportType, byPeriod })
+
+    it('🔴 por horas: dos años distintos no se confunden', () => {
+      const { rows } = svc.flattenSalesSummaryForExport(
+        conPeriodos('hours', [
+          periodo('2025-11-21T16:00:00.000Z', '21 nov, 10:00 a.m.', 100),
+          periodo('2026-11-21T16:00:00.000Z', '21 nov, 10:00 a.m.', 200),
+        ]),
+        ['byPeriod'],
+        'America/Mexico_City',
+      )
+      expect(rows.map(r => [r.label, r.amount])).toEqual([
+        ['2025-11-21 10:00', 100],
+        ['2026-11-21 10:00', 200],
+      ])
+    })
+
+    it('por día, semana y mes, en la zona del negocio (las 20:00 del 21 no pasan al 22)', () => {
+      const una = (t: svc.ReportType, iso: string) =>
+        svc.flattenSalesSummaryForExport(conPeriodos(t, [periodo(iso, 'x', 1)]), ['byPeriod'], 'America/Mexico_City').rows[0].label
+      expect(una('days', '2026-11-21T06:00:00.000Z')).toBe('2026-11-21')
+      expect(una('weeks', '2026-11-16T06:00:00.000Z')).toBe('Semana del 2026-11-16')
+      expect(una('months', '2026-11-01T06:00:00.000Z')).toBe('2026-11')
+      expect(una('hourlySum', '09:00')).toBe('09:00')
+      expect(una('dailySum', 'monday')).toBe('Lunes')
+    })
+
+    it('la hora que se repite al atrasar el reloj (Tijuana, 1-nov): la segunda vez sale con su desfase', () => {
+      const { rows } = svc.flattenSalesSummaryForExport(
+        conPeriodos('hours', [periodo('2026-11-01T08:00:00.000Z', 'a', 1), periodo('2026-11-01T09:00:00.000Z', 'b', 2)]),
+        ['byPeriod'],
+        'America/Tijuana',
+      )
+      expect(rows.map(r => r.label)).toEqual(['2026-11-01 01:00', '2026-11-01 01:00 (UTC-08:00)'])
+    })
+
+    it('sin zona (llamadas viejas) deja la etiqueta de siempre', () => {
+      const { rows } = svc.flattenSalesSummaryForExport(conPeriodos('days', [periodo('2026-11-21T06:00:00.000Z', 'sáb, 21 nov', 1)]), [
+        'byPeriod',
+      ])
+      expect(rows[0].label).toBe('sáb, 21 nov')
+    })
+  })
+
   it('omits sections the user did not request', () => {
     const { rows } = svc.flattenSalesSummaryForExport(report, ['totals'])
     expect(rows.some(r => r.section === 'paymentMethods')).toBe(false)

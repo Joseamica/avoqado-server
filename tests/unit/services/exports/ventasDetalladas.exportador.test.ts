@@ -105,6 +105,10 @@ describe('exportador ventas-detalladas', () => {
     expect(fecha({ createdAt: new Date('2026-11-22T02:30:00.000Z'), clientCreatedAt: null, venue: { timezone: 'America/Tijuana' } })).toBe(
       '2026-11-21 18:30:00',
     )
+    // Codex D13 r2 #1: una zona guardada fuera de IANA («GMT-6») no tumba el archivo: va la del negocio por default (CDMX).
+    expect(fecha({ createdAt: new Date('2026-11-22T02:30:00.000Z'), clientCreatedAt: null, venue: { timezone: 'GMT-6' } })).toBe(
+      '2026-11-21 20:30:00',
+    )
   })
 
   // Codex D13 r1 #7: con las 13 columnas iguales, la fecha local (≈65 pt a 7 pt de letra) no cabía en 51.8 pt y se cortaba con «…».

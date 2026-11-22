@@ -340,8 +340,14 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
     mockVenueHasFeatureAccess.mockResolvedValue(true)
     mockGetSalesSummary.mockResolvedValue({
       ...makeFakeReport(),
+      reportType: 'hours',
+      // Las 20:00 del 1 de junio en CDMX = 02:00 UTC del 2: el archivo la escribe en la hora del negocio, con año (Codex r2 #6).
       byPeriod: [
-        { period: '2026-06-01', periodLabel: '1 jun', metrics: { ...makeFakeReport().summary, totalCollected: 120, transactionCount: 3 } },
+        {
+          period: '2026-06-02T02:00:00.000Z',
+          periodLabel: '1 jun, 08:00 p.m.',
+          metrics: { ...makeFakeReport().summary, totalCollected: 120, transactionCount: 3 },
+        },
       ],
     })
     const res = await request(app)
@@ -349,7 +355,7 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
       .set(authHeader('OWNER'))
     expect(res.status).toBe(200)
     expect(filtrosDelReporte().reportType).toBe('hours')
-    expect(res.text).toContain('1 jun')
+    expect(res.text).toContain('2026-06-01 20:00')
   })
 
   it('🔴 D13.2 · «Por periodo» sin tipo de informe (o con «Resumen») va por día — un DASHBOARD viejo también recibe filas', async () => {

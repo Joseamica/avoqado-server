@@ -928,7 +928,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         merchantAccountId,
         includeMerchantBreakdown: true,
       })
-      const { rows } = flattenSalesSummaryForExport(report, requested)
+      const { rows } = flattenSalesSummaryForExport(report, requested, tz)
       // D13.2: hours over a long range can be thousands of rows; never cut them silently, say so (same cap as the dashboard PDF).
       if (rows.length > EXPORT_PDF_ROW_CAP) {
         return text({

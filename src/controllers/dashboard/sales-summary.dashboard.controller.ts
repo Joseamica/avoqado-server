@@ -353,7 +353,7 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
     }
     const report = await getSalesSummary(venueId, filters)
 
-    const { rows } = flattenSalesSummaryForExport(report, sections)
+    const { rows } = flattenSalesSummaryForExport(report, sections, filters.timezone)
     // D13.2 (Codex r1 #6): «Por horas» over a long range can pass the format's cap; say so instead of building a huge file here.
     if (rows.length > cap) {
       res.status(413).json({
