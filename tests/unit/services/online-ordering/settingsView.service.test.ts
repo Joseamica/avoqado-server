@@ -4,6 +4,7 @@ jest.mock('@/services/online-ordering/presence.service', () => ({
   __esModule: true,
   getAcceptingStatus: jest.fn(async () => ({ status: 'OPEN', reason: null, config: {} })),
   storeView: jest.fn(() => ({ status: 'OPEN' })),
+  proximaHoraLimite: jest.fn(async () => null),
 }))
 jest.mock('@/services/online-ordering/settings.service', () => ({
   __esModule: true,
@@ -177,5 +178,63 @@ describe('D661 · D2: cardNadie dice si la tarjeta de «No, entran solos» se of
       offeredNow: true,
     })
     expect(getSettingsWithSaved).not.toHaveBeenCalled()
+  })
+})
+
+describe('D662 v5 (Codex p2v4-r5 #2): una sola foto por respuesta', () => {
+  beforeEach(() => prismaMock.ecommerceMerchant.findMany.mockResolvedValue([]))
+
+  it('si el estado se armó con ajustes releídos (alguien apagó o quitó la pausa mientras esperaba), TODA la respuesta sale de ésos', async () => {
+    const { getAcceptingStatus, storeView } = jest.requireMock('@/services/online-ordering/presence.service')
+    const viejos = {
+      ...SETTINGS,
+      enabled: true,
+      pausedUntil: '2026-11-20T18:15:00.000Z',
+      manualPause: false,
+      updatedAt: new Date('2026-11-20T18:00:00.000Z'),
+      version: 4,
+    }
+    // Codex p2v5-r4 #5: la versión es el entero que sube la base; la hora de Prisma puede venir MENOR en un guardado posterior.
+    const nuevos = { ...viejos, enabled: false, pausedUntil: null, updatedAt: new Date('2026-11-20T17:59:59.000Z'), version: 5 }
+    ;(getSettings as jest.Mock).mockResolvedValue(viejos)
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValueOnce({
+      status: 'DISABLED',
+      reason: 'NOT_ENABLED',
+      config: { enabled: false, pausedUntil: null, manualPause: false },
+      versionDeAjustes: nuevos.version,
+      ajustesUsados: nuevos,
+    })
+    ;(storeView as jest.Mock).mockReturnValueOnce({ status: 'DISABLED' })
+    const v = await settingsView('v1')
+    expect(v.store).toEqual({ status: 'DISABLED' })
+    expect(v.enabled).toBe(false)
+    expect(v.pausedUntil).toBeNull()
+    expect(v.storeVersion).toBe(5)
+    expect(v).not.toHaveProperty('version')
+  })
+
+  it('sin relectura usa los ajustes leídos (como hoy)', async () => {
+    const v = await settingsView('v1')
+    expect(v.enabled).toBe(true)
+    expect(v.card.enabled).toBe(true)
+  })
+
+  it('D661 + D662: si la relectura ya está en «Nadie» con su tarjeta prendida, cardNadie sale de ésos (offeredNow se vuelve a medir)', async () => {
+    const { getAcceptingStatus } = jest.requireMock('@/services/online-ordering/presence.service')
+    const RAPIDO = new Date(Date.now() - 20_000)
+    const nuevos = { ...SETTINGS, requiresAcceptance: false, cardOnlineNadie: true, version: 6 }
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValueOnce({
+      status: 'OPEN',
+      reason: null,
+      config: {},
+      versionDeAjustes: 6,
+      ajustesUsados: nuevos,
+    })
+    prismaMock.ecommerceMerchant.findMany.mockResolvedValue([M()] as any)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ cardAlertFastPollAt: RAPIDO } as any)
+    const v = await settingsView('v1')
+    // Lo leído era «Mi equipo» (offeredNow false); la respuesta sale toda de la relectura.
+    expect(v.cardNadie).toMatchObject({ enabled: true, offeredNow: true })
+    expect(v.requiresAcceptance).toBe(false)
   })
 })

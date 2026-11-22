@@ -952,6 +952,23 @@ describe('Loyalty Dashboard Service', () => {
   })
 
   describe('expireOldPoints', () => {
+    // D32: el corte son N × 24 h hacia atrás, sin importar la zona horaria del proceso
+    // (con setDate en America/Los_Angeles, cruzar el fin del horario de verano movía el corte una hora).
+    it('el corte de vencimiento es ahora − pointsExpireDays exactos, también cruzando el cambio de horario', async () => {
+      jest.useFakeTimers({ now: new Date('2026-11-03T18:00:00.000Z'), doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
+      try {
+        prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig({ pointsExpireDays: 7 }) as any)
+        prismaMock.loyaltyTransaction.findMany.mockResolvedValue([])
+
+        await expireOldPoints('venue-123')
+
+        const where = prismaMock.loyaltyTransaction.findMany.mock.calls[0][0]!.where as any
+        expect(where.createdAt.lt.toISOString()).toBe('2026-10-27T18:00:00.000Z')
+      } finally {
+        jest.useRealTimers()
+      }
+    })
+
     it('should expire old points and update customer balances', async () => {
       const mockConfig = createMockLoyaltyConfig({ pointsExpireDays: 365 })
       const oldDate = new Date()

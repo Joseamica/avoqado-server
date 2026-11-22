@@ -1051,6 +1051,16 @@ describe('D661 (3A): un apartado de tarjeta de «Nadie» se abre (= se cobra) s�
     expect(acceptCardOnlineOrder).toHaveBeenCalledWith({ ...base, abrirPagadoEnLinea: true })
   })
 
+  it('D661 + D662: abrir un apartado de «Nadie» no lleva la marca de persona a la captura; aceptar «Mi equipo» con tarjeta sí', async () => {
+    pedidoQue({ tarjeta: true, nadie: true })
+    await acceptOnlineOrder({ ...base, abrirPagadoEnLinea: true, porPersona: true })
+    expect((acceptCardOnlineOrder as jest.Mock).mock.calls[0][0]).not.toHaveProperty('porPersona')
+    ;(acceptCardOnlineOrder as jest.Mock).mockClear()
+    pedidoQue({ tarjeta: true, nadie: false })
+    await acceptOnlineOrder({ ...base, porPersona: true })
+    expect(acceptCardOnlineOrder).toHaveBeenCalledWith({ ...base, porPersona: true })
+  })
+
   it('«Mi equipo» con tarjeta y los folios de caja aceptan sin el campo, como hoy', async () => {
     pedidoQue({ tarjeta: true, nadie: false })
     await expect(acceptOnlineOrder(base)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
@@ -1061,5 +1071,52 @@ describe('D661 (3A): un apartado de tarjeta de «Nadie» se abre (= se cobra) s�
     prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ requiresAcceptance: false }) as any)
     await expect(acceptOnlineOrder(base)).resolves.toEqual({ outcome: 'PAYMENT_REQUIRED' })
     expect(acceptCardOnlineOrder).not.toHaveBeenCalled()
+  })
+})
+
+describe('D662 parte 2 (v3) · staffAnsweredAt: el toque de una PERSONA, una sola vez, en la transacción del CAS ganador', () => {
+  const toques = () =>
+    (prismaMock.onlineOrder.updateMany.mock.calls as any[]).map(c => c[0]).filter(a => 'staffAnsweredAt' in (a.data ?? {}))
+
+  it('aceptar con la marca porPersona escribe staffAnsweredAt = el now del CAS, sólo si estaba vacío (nunca se pisa)', async () => {
+    await acceptOnlineOrder({ ...base, porPersona: true })
+    const cas = prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any
+    expect(cas.data).toEqual(expect.objectContaining({ status: 'ACCEPTED', acceptedAt: NOW }))
+    expect(cas.data).not.toHaveProperty('staffAnsweredAt')
+    expect(toques()).toEqual([{ where: { id: expect.any(String), staffAnsweredAt: null }, data: { staffAnsweredAt: NOW } }])
+  })
+
+  it('aceptar SIN la marca (caminos del sistema) no escribe staffAnsweredAt', async () => {
+    await acceptOnlineOrder(base)
+    expect(toques()).toEqual([])
+  })
+
+  it('rechazar con la marca escribe staffAnsweredAt (sin pisar); sin ella (aviso de Stripe, captura fallida del sistema) no', async () => {
+    await rejectOnlineOrder({ ...base, reason: 'OUT_OF_ITEMS', porPersona: true })
+    expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).data).toEqual(
+      expect.objectContaining({ status: 'REJECTED', rejectedAt: NOW }),
+    )
+    expect(toques()).toEqual([{ where: { id: expect.any(String), staffAnsweredAt: null }, data: { staffAnsweredAt: NOW } }])
+    prismaMock.onlineOrder.updateMany.mockClear()
+    await rejectOnlineOrder({ ...base, reason: 'PAYMENT_FAILED' })
+    expect(toques()).toEqual([])
+  })
+
+  it('si el CAS pierde (otro actor ganó), no se escribe staffAnsweredAt', async () => {
+    prismaMock.onlineOrder.updateMany.mockResolvedValueOnce({ count: 0 })
+    prismaMock.onlineOrder.findFirst
+      .mockResolvedValueOnce(row() as any)
+      .mockResolvedValueOnce({ status: 'ACCEPTED', acceptDeadlineAt: NOW } as any)
+    await acceptOnlineOrder({ ...base, porPersona: true })
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledTimes(1)
+    expect(toques()).toEqual([])
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('vencer nunca escribe staffAnsweredAt', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ acceptDeadlineAt: new Date(NOW.getTime() - 1) }) as any)
+    await expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })
+    expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).data).toEqual({ status: 'EXPIRED', expiredAt: NOW })
+    expect(toques()).toEqual([])
   })
 })

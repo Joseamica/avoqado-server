@@ -8305,6 +8305,22 @@
       "origen": "src/pages/Reservations/CreateReservation.tsx:590",
       "quienLaVe": "Quien abre Crear › Cita (reservations:create, src/pages/Reservations/Reservations.tsx:274); sale en el buscador de servicios (CreateReservation.tsx:589-590) y, sin servicios, como botón (:555-557). Abre el formulario de servicios (CreateReservation.tsx:929); el alta del producto pide inventory:update en el servidor (avoqado-server src/routes/dashboard/inventory.routes.ts:1389).",
       "paginas": []
+    },
+    {
+      "id": "extra:online-ordering/pagar-en-linea-entran-solos",
+      "tipo": "accion",
+      "nombre": "Pagar en línea (con «No, entran solos»)",
+      "origen": "src/pages/OnlineOrdering/components/SettingsTab.tsx:770",
+      "quienLaVe": "Pestaña «Configuración» de *Ventas* › *Pedidos en línea* con «No, entran solos» elegido: plan ONLINE_ORDERING y permiso online-orders:manage (src/pages/OnlineOrdering/OnlineOrderingPage.tsx:77; avoqado-server src/routes/dashboard/onlineOrdering.dashboard.routes.ts:30); por omisión MANAGER, ADMIN y OWNER. Es otro interruptor que el «Tarjeta en línea» de «Mi equipo» (SettingsTab.tsx:769-789). Las líneas son del commit f4e3180b42107eeb9e66a62174fa76fa21ffe9ad (D661, PR #392, 21-nov-2026), posterior a la ref de este inventario.",
+      "paginas": ["dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos"]
+    },
+    {
+      "id": "extra:online-ordering/cancelar-y-devolver-pagado-en-linea",
+      "tipo": "accion",
+      "nombre": "Cancelar y devolver / Devolver (pedido de «No, entran solos» pagado con tarjeta)",
+      "origen": "src/pages/OnlineOrdering/components/CardRefundSheet.tsx:168",
+      "quienLaVe": "Permiso payments:refund (CardRefundSheet.tsx:194; avoqado-server src/routes/dashboard/onlineOrdering.dashboard.routes.ts:70); por omisión CASHIER, MANAGER, ADMIN y OWNER. Sale en «Por entregar» de la Bandeja (src/pages/OnlineOrdering/components/FolioSections.tsx:317), en «Últimas 24 horas» (InboxTab.tsx:450) y en el pedido de *Ventas* › *Pedidos* (src/pages/Order/OrderDrawerContent.tsx:179). *Efectivo de la caja* pide además payments:refund-to-cash (CardRefundSheet.tsx:569). Las líneas son del commit f4e3180b42107eeb9e66a62174fa76fa21ffe9ad (D661, PR #392, 21-nov-2026), posterior a la ref de este inventario.",
+      "paginas": ["dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea"]
     }
   ]
 }

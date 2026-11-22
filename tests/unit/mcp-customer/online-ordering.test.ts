@@ -97,6 +97,7 @@ jest.mock('@/services/online-ordering/presence.service', () => ({
   getAcceptingStatus: (...a: unknown[]) => mockAccepting(...(a as [])),
   // Ronda 1: el armado del estado es el REAL (el mismo del panel y la bandeja).
   storeView: jest.requireActual('@/services/online-ordering/presence.service').storeView,
+  proximaHoraLimite: jest.fn().mockResolvedValue(null),
 }))
 
 type Handler = (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>
@@ -350,7 +351,7 @@ describe('online_order_respond', () => {
       await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'ACCEPT', estimatedMinutes: 20, confirm: true }),
     )
     expect(mockRequirePermission).toHaveBeenCalledWith('orders:update', 'v1')
-    expect(mockAccept).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'ord1', staffId: 's1', estimatedMinutes: 20 })
+    expect(mockAccept).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'ord1', staffId: 's1', estimatedMinutes: 20, porPersona: true })
     expect(r).toMatchObject({ ok: true, status: 'ACCEPTED' })
     expect(mockAudit).toHaveBeenCalledWith(scope, expect.objectContaining({ action: 'ONLINE_ORDER_ACCEPTED_VIA_MCP', venueId: 'v1' }))
     // M-13: la entidad es el pedido en línea, así que su id es el del pedido en línea (no el de la cuenta).
@@ -729,7 +730,7 @@ describe('online_ordering_settings', () => {
 
   it('ronda 1 (MCP en sync con el panel): trae el estado de la tienda y qué falta para encenderla, leyendo los ajustes UNA vez', async () => {
     const r = parse(await call('online_ordering_settings', { venueId: 'v1' }))
-    expect(r.store).toEqual({ status: 'OFFLINE', reason: 'NO_DEVICE', pausedUntil: null, manualPause: false })
+    expect(r.store).toEqual({ status: 'OFFLINE', reason: 'NO_DEVICE', pausedUntil: null, manualPause: false, autoPausedAt: null })
     expect(r.requirements).toEqual({ address: true, phone: false, privacyNotice: true })
     expect(mockGetSettings).toHaveBeenCalledTimes(1)
     expect(mockAccepting).toHaveBeenCalledWith('v1', expect.any(Date), AJUSTES)

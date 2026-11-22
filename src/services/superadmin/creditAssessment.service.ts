@@ -1226,7 +1226,7 @@ export async function createCreditOffer(
   const estimatedTermDays = dailyRepayment > 0 ? Math.round(totalRepayment / dailyRepayment) : 365
 
   const expiresAt = new Date()
-  expiresAt.setDate(expiresAt.getDate() + (data.expiresInDays || 30))
+  expiresAt.setUTCDate(expiresAt.getUTCDate() + (data.expiresInDays || 30))
 
   const offer = await prisma.creditOffer.create({
     data: {

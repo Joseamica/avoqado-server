@@ -15,7 +15,13 @@ import { MENSAJE_ABRIR_DESDE_LA_CAJA, mensajeNoSeEntrega } from '@/services/onli
 import { listInbox, type InboxFilter } from '@/services/online-ordering/inbox.service'
 import { listFolios, type FolioSection } from '@/services/online-ordering/folios.service'
 import { listDeliveryCashPending } from '@/services/delivery-channels/core/deliveryCashPending.service'
-import { getAcceptingStatus, storeView, touchInboxPoll, touchToPayPoll } from '@/services/online-ordering/presence.service'
+import {
+  getAcceptingStatus,
+  proximaHoraLimite,
+  storeView,
+  touchInboxPoll,
+  touchToPayPoll,
+} from '@/services/online-ordering/presence.service'
 import { pauseOnlineOrdering } from '@/services/online-ordering/settings.service'
 import {
   acceptOnlineOrder,
@@ -116,9 +122,30 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
     const latido = req.header(ONLINE_ORDERS_TRAY_HEADER) === '1' && (await canAnswerOrders(req, venueId).catch(() => false))
     if (latido) await touchInboxPoll(venueId).catch(() => false)
     // R13: el restaurante ve si su tienda está abierta, pausada, fuera de horario o sin aparato; 1b: y hasta cuándo, o si la
-    // pausa es la del gerente (`manualPause`, que no se va sola).
-    const state = await getAcceptingStatus(venueId).catch(() => null)
-    return res.json({ success: true, data: { ...data, store: state ? storeView(state) : null } })
+    // pausa es la del gerente (`manualPause`, que no se va sola). D662 v4: el panel nuevo avisa `?pausaSola=1` (sin cabecera nueva: el
+    // CORS no la deja pasar); con él recibe cuándo se leyó el estado (antes de leer) y la próxima hora límite; sin él, la forma de la
+    // pestaña vieja (`storeView`).
+    const panelNuevo = req.query.pausaSola === '1'
+    const leidoEn = new Date()
+    const [state, siguiente] = await Promise.all([
+      getAcceptingStatus(venueId, leidoEn).catch(() => null),
+      panelNuevo ? proximaHoraLimite(venueId, leidoEn).catch(() => null) : Promise.resolve(null),
+    ])
+    const store = state ? storeView(state, { pestanaVieja: !panelNuevo }) : null
+    return res.json({
+      success: true,
+      data: {
+        ...data,
+        store,
+        ...(panelNuevo
+          ? {
+              storeReadAt: leidoEn.toISOString(),
+              storeVersion: state?.versionDeAjustes ?? null,
+              storeNextDeadlineAt: siguiente ? siguiente.toISOString() : null,
+            }
+          : {}),
+      },
+    })
   } catch (e) {
     return next(e)
   }
@@ -193,11 +220,13 @@ const makeAccept = (desdeCaja: boolean) => async (req: Request, res: Response, n
     const { venueId, orderId } = req.params
     const estimatedMinutes = typeof req.body?.estimatedMinutes === 'number' ? req.body.estimatedMinutes : undefined
     const abrir = desdeCaja && req.body?.abrirPagadoEnLinea === true
+    // D662 parte 2: esta puerta es una persona (caja o panel): su toque cuenta para la pausa sola.
     const r = await acceptOnlineOrder({
       venueId,
       orderId,
       staffId: staffOf(req),
       estimatedMinutes,
+      porPersona: true,
       ...(abrir ? { abrirPagadoEnLinea: true as const } : {}),
     })
     // Aceptar sólo puede exigir pago en un folio (QR o liga): se cobra antes de prepararlo.
@@ -221,7 +250,7 @@ export const reject = async (req: Request, res: Response, next: NextFunction) =>
     const reason = req.body.reason as OnlineOrderRejectReason
     // Una nota de puros espacios no es nota: se guarda `null`, no `""`.
     const note = typeof req.body.note === 'string' ? req.body.note.trim() || null : null
-    return reply(res, await rejectOnlineOrder({ venueId, orderId, staffId: staffOf(req), reason, note }))
+    return reply(res, await rejectOnlineOrder({ venueId, orderId, staffId: staffOf(req), reason, note, porPersona: true }))
   } catch (e) {
     return next(e)
   }

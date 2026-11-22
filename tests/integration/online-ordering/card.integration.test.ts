@@ -561,7 +561,10 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
       // Codex r1 C1: se cobra en el momento (tarjeta), nunca es fiado aunque después se le ligue un cliente.
       expect(order.payLater).toBe(false)
       expect(order.onlineOrder).toMatchObject({ paymentMode: 'CARD_ONLINE', status: 'PENDING_ACCEPTANCE', trackingToken: c.trackingToken })
-      expect(order.onlineOrder!.acceptDeadlineAt.getTime()).toBe(now.getTime() + 10 * MIN)
+      // D662 parte 2 (Codex p2-r3 #1): la hora límite cuenta desde el reloj al crear el pedido, nunca antes que la hora recibida.
+      const plazo = order.onlineOrder!.acceptDeadlineAt.getTime()
+      expect(plazo).toBeGreaterThanOrEqual(now.getTime() + 10 * MIN)
+      expect(plazo).toBeLessThanOrEqual(Date.now() + 10 * MIN)
       expect(await chargeOf(key)).toMatchObject({
         status: 'AUTHORIZED',
         paymentIntentId: auth.paymentIntentId,

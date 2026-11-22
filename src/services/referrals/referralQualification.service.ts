@@ -108,7 +108,7 @@ async function mintPercentCoupon(
   const prefix = await resolveCodePrefix(tx, input.venueId, input.config)
   const customerShort = input.customer.id.slice(-6).toUpperCase()
   const validUntil = new Date()
-  validUntil.setDate(validUntil.getDate() + input.config.rewardCouponExpiryDays)
+  validUntil.setUTCDate(validUntil.getUTCDate() + input.config.rewardCouponExpiryDays)
   const referrerName = [input.customer.firstName, input.customer.lastName].filter(Boolean).join(' ') || 'customer'
   const percent = tierReward.rewardPercent != null ? new Prisma.Decimal(tierReward.rewardPercent) : new Prisma.Decimal(0)
 

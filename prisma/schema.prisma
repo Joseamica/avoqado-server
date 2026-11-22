@@ -5075,6 +5075,10 @@ model OrderItemModifier {
   quantity Int     @default(1)
   price    Decimal @db.Decimal(10, 2)
 
+  /// D40 (Flautas Coyoacán, como Fudo): la observación de ESTA parte del paquete («sin cebolla» sólo al Consomé). La manda el POS
+  /// en `modifierNotes` y sale en la comanda debajo de su parte. null = sin nota (apps viejas y todo lo de antes).
+  notes String?
+
   @@index([orderItemId])
 }
 
@@ -6269,11 +6273,14 @@ model Terminal {
 
   // 🆕 Remote Command System (2025-11-30)
   // Device lock state for remote lock/unlock commands
-  isLocked    Boolean   @default(false)
-  lockReason  String? // Why terminal was locked (e.g., "security", "maintenance")
-  lockMessage String? // Message to display on lock screen
-  lockedAt    DateTime?
-  lockedBy    String? // StaffId who locked
+  isLocked          Boolean   @default(false)
+  // SDK propio de cobro (fase 3): la escribe SÓLO cambiarSdkPropioDeTerminal; ningún camino de dinero la lee. Un disparador
+  // la pone en false si cambian serialNumber, type o brand (migración …_terminal_in_house_sdk).
+  inHouseSdkEnabled Boolean   @default(false)
+  lockReason        String? // Why terminal was locked (e.g., "security", "maintenance")
+  lockMessage       String? // Message to display on lock screen
+  lockedAt          DateTime?
+  lockedBy          String? // StaffId who locked
 
   // Location tracking for geofencing
   lastLatitude   Float?
@@ -21443,6 +21450,17 @@ enum OnlineOrderChargeStatus {
   ABANDONED // el comensal nunca autorizó
 }
 
+/// D662 parte 2 (v5, rediseño B, founder 20-nov): interruptores de PLATAFORMA con hora, uno por clave. `pausa-sola`: la tienda en línea
+/// se pausa sola sólo desde `desde` (cuentan las horas límite ≥ esa hora). Sin fila o con `desde` vacío, apagado. Vive en la base (no en
+/// una variable de Render) para que TODOS los servidores lo vean a la vez sin redesplegar (Codex p2v5-r1 #1). Lo escribe una persona con
+/// `scripts/pausa-sola-interruptor.ts` (nunca con una hora pasada); lo lee `interruptorPausaSola.ts`.
+model InterruptorDePlataforma {
+  clave          String    @id
+  desde          DateTime?
+  actualizadoPor String?
+  updatedAt      DateTime  @updatedAt
+}
+
 /// Ajustes de la tienda en línea de un negocio (1:1 con Venue). Sólo aceptación manual en la v1 (decisión F1).
 model OnlineOrderingSettings {
   id      String @id @default(cuid())
@@ -21479,6 +21497,14 @@ model OnlineOrderingSettings {
   /// D661 (Ruling 7): última vez que esa caja capaz recibió una respuesta de to-pay RÁPIDA (`pollSeconds` <= 30). En «Nadie» la tarjeta
   /// sólo se ofrece si es de los últimos 90 s: una caja en espera larga (600 s) no cuenta como capaz de avisar a tiempo.
   cardAlertFastPollAt DateTime?
+  /// D662 parte 2 (v4): el corte propio de la pausa sola. Sólo cuentan los pedidos cuya hora límite fue DESPUÉS de
+  /// max(esta hora, el interruptor `pausa-sola` de `InterruptorDePlataforma`). Sólo SUBE: la escriben «Reanudar» (`pauseOnlineOrdering(null)`, = ahora) y la
+  /// propia lectura (`corteSeguro`, sin pausa). Encender, apagar, cambiar de modo y pausar 15/30/60 no la tocan. Null = sin corte propio.
+  autoPauseResumedAt DateTime?
+  /// D662 parte 2 v5 (Codex p2v5-r4 #5): la versión de estos ajustes. La sube la BASE en cada UPDATE (trigger
+  /// `OnlineOrderingSettings_sube_version`, bajo el candado de la fila): crece en el orden en que se confirman las escrituras. El panel
+  /// ordena sus lecturas por ella (`storeVersion`). Nadie la escribe a mano.
+  version            Int       @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -21519,6 +21545,11 @@ model OnlineOrder {
 
   whatsappConsent Boolean @default(false)
 
+  /// D662 parte 2 (v3): la PRIMERA vez que una persona contestó este pedido de «Mi equipo»: aceptar o rechazar (caja, panel, TPV,
+  /// MCP; con tarjeta, el paso a `CAPTURING`) o anular su cuenta mientras seguía por aceptar. Se escribe en la misma transacción de esa
+  /// acción y nunca se pisa (`null` en el where). La pausa sola la lee: con esta hora a más tardar en su hora límite «se atendió».
+  staffAnsweredAt  DateTime?
+
   /// Tienda híbrida: `true` = este pedido pasó (o pasa) por aceptación manual. Las filas viejas quedan en `true`.
   requiresAcceptance Boolean @default(true)
   /// Por dónde llegó el pedido: `'QR'` o `'LINK'`. Nulo en los pedidos anteriores a la tienda híbrida.
@@ -21547,6 +21578,11 @@ model OnlineOrder {
   /// El job de vencimiento barre TODOS los negocios: sin venueId al frente, este índice evita el barrido completo.
   @@index([status, acceptDeadlineAt])
   @@index([venueId, requiresAcceptance, status])
+  /// D662 parte 2 (v3): la pausa sola lee los pedidos de «Mi equipo» de un negocio desde el corte, por hora límite e `id`
+  /// (migración CONCURRENTLY 20261120120001).
+  @@index([venueId, requiresAcceptance, acceptDeadlineAt, id])
+  /// D662 parte 2 (v3): ¿una persona contestó a tiempo algún pedido entre dos vencimientos? (migración CONCURRENTLY 20261120120002).
+  @@index([venueId, staffAnsweredAt])
   /// Tienda híbrida (T9, R4): `syncPaidClosedFolios` barre los folios cerrados de los últimos 7 días en TODOS los negocios.
   @@index([requiresAcceptance, status, updatedAt])
 }

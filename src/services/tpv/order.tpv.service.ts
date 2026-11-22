@@ -82,6 +82,7 @@ import {
 } from '../shared/ligaDeClienteEnVenta'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { debeMarcarCocina, assertPreparationAuthoringAccess } from '../kds/kitchenDisplayStations'
+import { notasDeLasPartes } from '../kds/kdsModifierLabels'
 import {
   armarComandasTrasCommit,
   cuentasDeComandasDeRenglones,
@@ -91,7 +92,7 @@ import {
   tomarCandadoDeComandas,
 } from '../kds/kitchenTicketAuthoring.service'
 import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
-import { applyPromotionToOrder, type PromotionSelection } from '../promotions/promotion.service'
+import { applyPromotionToOrder, rechazarSiLaCuentaNoAceptaCombos, type PromotionSelection } from '../promotions/promotion.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
 import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
@@ -133,6 +134,8 @@ function flattenOrderModifiers(order: any): any {
             type: om.modifier?.type || om.type,
             required: om.modifier?.required || om.required,
             displayOrder: om.modifier?.displayOrder || om.displayOrder,
+            // D40: la nota de esta parte, sólo si la tiene (sin nota la respuesta queda idéntica a la de antes).
+            ...(om.notes ? { notes: om.notes } : {}),
           })) || [],
       })) || [],
   }
@@ -616,6 +619,8 @@ interface AddOrderItemInput {
   quantity: number
   notes?: string | null
   modifierIds?: string[] // Array of modifier IDs to add to the order item
+  /** D40: la nota de cada parte, `{ modifierId: nota }`. Opcional; lo que no cuadre se ignora (`notasDeLasPartes`), nunca un 400. */
+  modifierNotes?: Record<string, unknown> | null
   externalId?: string | null
   /** TABLE_SERVICE course/tiempo ("Aperitivos"...). Null = prepare immediately. */
   course?: string | null
@@ -751,6 +756,46 @@ export function consultaDeLlavesEnOtraCuenta(venueId: string, orderId: string, p
     )`
 }
 
+/**
+ * D34: las INSTANCIAS de combo pedidas que viven en OTRA cuenta del negocio. Separar mueve la instancia (`OrderPromotion`) con sus
+ * renglones; juntar deja la instancia en la cuenta cancelada y lleva los renglones al destino. La instancia es el UUID de UNA venta
+ * del POS y no se repite entre cuentas (D7 ya se apoya en eso en `rondaYaEnAlgunaCuenta`). Misma regla que
+ * `llavesEnOtraCuentaDelNegocio` (D29) para los productos sueltos.
+ */
+export async function instanciasEnOtraCuentaDelNegocio(
+  tx: Pick<Prisma.TransactionClient, '$queryRaw'>,
+  venueId: string,
+  orderId: string,
+  instancias: string[],
+): Promise<Set<string>> {
+  const pedidas = [...new Set(instancias.filter(instancia => typeof instancia === 'string' && instancia.length > 0))]
+  if (pedidas.length === 0) return new Set()
+  const filas = await tx.$queryRaw<{ instancia: string }[]>(consultaDeInstanciasEnOtraCuenta(venueId, orderId, pedidas))
+  return new Set(filas.map(fila => fila.instancia))
+}
+
+/**
+ * La lectura de `instanciasEnOtraCuentaDelNegocio`, con la forma de `consultaDeLlavesEnOtraCuenta`: un `EXISTS` por instancia que
+ * entra por `OrderPromotion_instanceId_idx` y se detiene en la primera copia del negocio; a lo más una fila por instancia.
+ */
+export function consultaDeInstanciasEnOtraCuenta(venueId: string, orderId: string, pedidas: string[]): Prisma.Sql {
+  return Prisma.sql`
+    SELECT k.instancia
+    FROM unnest(${pedidas}::text[]) AS k(instancia)
+    WHERE EXISTS (
+      SELECT 1
+      FROM (
+        SELECT op."orderId"
+        FROM "OrderPromotion" op
+        WHERE op."instanceId" = k.instancia
+          AND op."orderId" <> ${orderId}
+        OFFSET 0
+      ) copia
+      JOIN "Order" o ON o."id" = copia."orderId"
+      WHERE o."venueId" = ${venueId}
+    )`
+}
+
 export async function conLlaveDeRonda<T>(crear: () => Promise<T>): Promise<T> {
   try {
     return await crear()
@@ -784,10 +829,13 @@ export function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrde
     const serviceCourse = parseServiceCourseSnapshot(item.serviceCourse)
     const normalizedCourse = serviceCourse ? legacyCourseForSnapshot(serviceCourse) : item.course?.trim() || null
     // Custom-amount lines never merge with catalog lines (distinct key space).
+    // D40: la nota de cada parte. Dos renglones iguales salvo por ella son DOS renglones (no se suman); sin notas la llave no cambia.
+    const notasDeLasPartesDelRenglon = notasDeLasPartes(item.modifierNotes, normalizedModifiers)
     const keyBase = item.productId
       ? buildAddItemKey(item.productId, normalizedModifiers, normalizedNotes, normalizedExternalId)
       : `custom:${item.customName ?? ''}:${item.customUnitPriceCents ?? 0}:${normalizedNotes ?? ''}`
     let key = keyBase + `|c:${normalizedCourse ?? ''}`
+    if (notasDeLasPartesDelRenglon.size > 0) key += `|mn:${JSON.stringify([...notasDeLasPartesDelRenglon].sort())}`
     if (serviceCourse) key += `|sc:${JSON.stringify(serviceCourse)}`
     // D9 (venta por peso): each weighing is its own line — weighted lines get a
     // per-index key so two weighings of the same product NEVER merge here.
@@ -808,6 +856,7 @@ export function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrde
         quantity: item.quantity,
         notes: normalizedNotes,
         modifierIds: normalizedModifiers,
+        ...(notasDeLasPartesDelRenglon.size > 0 ? { modifierNotes: Object.fromEntries(notasDeLasPartesDelRenglon) } : {}),
         externalId: normalizedExternalId,
         course: normalizedCourse,
         ...(serviceCourse ? { serviceCourse } : {}),
@@ -868,6 +917,11 @@ type TpvCreateOrderWithItemsInput = {
    *  createOrderWithItems del mobile. Crítico en free-cart ($0): sin esto un
    *  retry creaba segunda orden Y segunda deducción de inventario. */
   externalId?: string | null
+  /**
+   * hz:e82938e1:D36: la intención que declara «Cobrar» de la TPV nueva (`porCobrar.ts`): false = para cobrarse en el momento,
+   * true = «Pagar después». Sin el campo (TPV vieja) queda `null`, como hoy.
+   */
+  payLater?: boolean | null
 }
 
 type PreparedCheckoutLine = {
@@ -1161,6 +1215,39 @@ const descuentoDeCatalogoCambio = (nombre: string) =>
 const pideAprobacionSinAprobador = (discount: { requiresApproval?: boolean | null; type: string }) =>
   discount.requiresApproval === true && discount.type !== 'COMP'
 
+/**
+ * D36: el reintento con la misma llave que ahora pide «Pagar después» deja la venta como fiado, sólo si sigue abierta y sin ningún
+ * cobro (ni pago ni asignación). Si no quedó como fiado abierto (ya se cobró, se anuló, o la tocó un cobro), NUNCA contesta éxito:
+ * la terminal diría «guardada como Pagar después» de una venta que no lo es (Codex D36 r2 #2).
+ */
+async function marcarComoPagarDespuesSiSigueAbierta(venueId: string, orderId: string): Promise<void> {
+  const marcada = await prisma.order.updateMany({
+    where: {
+      id: orderId,
+      venueId,
+      payLater: false,
+      status: 'PENDING',
+      paymentStatus: 'PENDING',
+      payments: { none: {} },
+      paymentAllocations: { none: {} },
+    },
+    data: { payLater: true },
+  })
+  if (marcada.count > 0)
+    logger.info('🧾 [WITH ITEMS] la venta recuperada por su llave queda como «Pagar después» (D36)', { venueId, orderId })
+  const ahora = await prisma.order.findFirst({
+    where: { id: orderId, venueId },
+    select: { payLater: true, status: true, paymentStatus: true },
+  })
+  const esFiadoAbierto = ahora?.payLater === true && ahora.status === 'PENDING' && ahora.paymentStatus === 'PENDING'
+  if (!esFiadoAbierto) {
+    throw new ConflictError(
+      'Esta venta ya se había mandado a cobrar y no se puede dejar para pagar después. Revisa la venta antes de volver a intentarlo.',
+      'VENTA_NO_ES_PAGAR_DESPUES',
+    )
+  }
+}
+
 export async function createOrderWithItems(
   venueId: string,
   input: TpvCreateOrderWithItemsInput,
@@ -1180,6 +1267,11 @@ export async function createOrderWithItems(
     })
     if (existingOrder) {
       logger.warn(`🔄 [WITH ITEMS] Duplicate createOrderWithItems detected (externalId=${externalId}) — returning existing order`)
+      // hz:e82938e1:D36 (Codex r1 #3): «Cobrar» perdió la respuesta (la venta SÍ se creó, `payLater=false`) y la cajera mandó el mismo
+      // carrito a «Pagar después» con la misma llave: se recupera esa venta y la intención más nueva, explícita, gana — si sigue
+      // abierta y sin cobrar. Una sola sentencia condicional: nada se cruza con un cobro o una anulación. Al revés (un fiado que
+      // después se cobra) no se toca: se cobra y deja de deber.
+      if (input.payLater === true) await marcarComoPagarDespuesSiSigueAbierta(venueId, existingOrder.id)
       // 🔴 MISMA forma que el camino normal (items/modifiers/pagos aplanados):
       // devolver solo los escalares de Order rompía a la TPV que lee los items
       // de la respuesta — un retry tras perder la respuesta cambiaba el shape.
@@ -1428,6 +1520,8 @@ export async function createOrderWithItems(
       })
       if (winner) {
         logger.warn(`🔄 [WITH ITEMS] Carrera idempotente (P2002, externalId=${externalId}) — devuelvo la orden ganadora ${winner.id}`)
+        // D36 (Codex r2 #2): la ganadora pudo ser la de «Cobrar» (`payLater=false`); un «Pagar después» perdedor la marca o falla.
+        if (input.payLater === true) await marcarComoPagarDespuesSiSigueAbierta(venueId, winner.id)
         return buildCreateOrderResponse(winner.id)
       }
     }
@@ -1494,6 +1588,8 @@ export async function createOrderWithItems(
             servedById: input.staffId,
             createdById: input.staffId,
             terminalId: resolvedTerminalId,
+            // D36: la intención de la venta (sólo la TPV nueva la manda); sin ella, `null` como hoy.
+            payLater: typeof input.payLater === 'boolean' ? input.payLater : null,
             // 🔴 La orden nace en el turno de caja abierto AHORA: se toma en el mostrador, con
             // el cajero enfrente. Para una orden pendiente se reusa el `currentShift`; para el
             // carrito gratis se usa el id que GANÓ el CAS de arriba, que es el mismo que se estampa
@@ -1899,8 +1995,25 @@ export async function addItemsToOrder(
       const marcarCocina = negocioConPantalla && Boolean(order.tableId)
 
       const createdPromotionIds: string[] = []
+      // D34: el combo de la ronda que otra caja SEPARÓ (o juntó) a otra cuenta del negocio ya está guardado ahí: no se vuelve a aplicar
+      // en ésta (se cobraría dos veces e iría otra vez a cocina). La instancia sólo se reconocía dentro de la cuenta. Se lee con la
+      // cuenta ya bloqueada: separar también la bloquea, así que esta lectura ve la instancia donde quedó.
+      const instanciasEnOtraCuenta = await instanciasEnOtraCuentaDelNegocio(
+        tx,
+        venueId,
+        orderId,
+        promotionItems.map(item => item.promotionRef!.promotionInstanceId),
+      )
       for (const item of promotionItems) {
         const ref = item.promotionRef!
+        if (instanciasEnOtraCuenta.has(ref.promotionInstanceId)) {
+          // La misma guarda de estado que habría aplicado el combo: una cuenta cerrada o pagada se rechaza como antes (sin reabrirla).
+          rechazarSiLaCuentaNoAceptaCombos(order)
+          logger.warn(
+            `⏭️ [ADD ITEMS] Combo en otra cuenta del negocio: su instancia no se vuelve a crear (instanceId=${ref.promotionInstanceId})`,
+          )
+          continue
+        }
         const applied = await applyPromotionToOrder(
           {
             venueId,
@@ -2124,6 +2237,7 @@ export async function addItemsToOrder(
 
         // Calculate modifier total
         const itemModifiers = item.modifierIds || []
+        const notasDelRenglon = notasDeLasPartes(item.modifierNotes, itemModifiers)
         const modifierTotal = itemModifiers.reduce((sum, modifierId) => {
           const modifier = modifiers.find(m => m.id === modifierId)
           return sum + (modifier ? Number(modifier.price) : 0)
@@ -2309,6 +2423,8 @@ export async function addItemsToOrder(
                       name: modifier.name,
                       quantity: 1,
                       price: modifier.price,
+                      // D40: la nota de esta parte; sin nota la fila queda como siempre.
+                      ...(notasDelRenglon.has(modifierId) ? { notes: notasDelRenglon.get(modifierId) } : {}),
                     }
                   }),
                 },
@@ -2334,8 +2450,9 @@ export async function addItemsToOrder(
           return createdItem
         }
 
-        // Sort modifier IDs for consistent comparison
-        const sortedNewModifiers = [...itemModifiers].sort()
+        // Sort modifier IDs for consistent comparison. D40: cada parte con su nota — iguales salvo por la nota NO se juntan.
+        const parteConNota = (modifierId: string | null, nota: string | null | undefined) => `${modifierId ?? ''}\u0000${nota ?? ''}`
+        const sortedNewModifiers = itemModifiers.map(id => parteConNota(id, notasDelRenglon.get(id))).sort()
 
         // More precise check: query existing items with their modifiers and match by notes + modifiers
         const existingItemsWithModifiers = await tx.orderItem.findMany({
@@ -2358,7 +2475,7 @@ export async function addItemsToOrder(
             ? undefined
             : existingItemsWithModifiers.find(existing => {
                 if (existing.isCortesia) return false
-                const existingModifierIds = existing.modifiers.map(m => m.modifierId).sort()
+                const existingModifierIds = existing.modifiers.map(m => parteConNota(m.modifierId, m.notes)).sort()
                 const notesMatch = normalizeNotes(existing.notes) === normalizedNotes
                 // TABLE_SERVICE: lines in different courses never merge.
                 const courseMatch = (existing.course ?? null) === (item.course ?? null)
@@ -2445,6 +2562,8 @@ export async function addItemsToOrder(
                   name: modifier.name,
                   quantity: 1,
                   price: modifier.price,
+                  // D40: la nota de esta parte; sin nota la fila queda como siempre.
+                  ...(notasDelRenglon.has(modifierId) ? { notes: notasDelRenglon.get(modifierId) } : {}),
                 }
               }),
             },

@@ -117,6 +117,26 @@ describe('receivePurchaseOrder — lotes dentro de la transacción', () => {
     expect(movement.data.batchId).toBe('batch-1')
   })
 
+  // D32: la caducidad del lote son shelfLifeDays × 24 h desde la recepción, sin importar la zona horaria del proceso
+  // (con setDate en America/Los_Angeles, cruzar el fin del horario de verano agregaba una hora).
+  it('lote perecedero: expirationDate = recepción + shelfLifeDays exactos, también cruzando el cambio de horario', async () => {
+    const perecedero = { ...mockRawMaterial(), perishable: true, shelfLifeDays: 7 }
+    const orden = mockOrder()
+    orden.items[0].rawMaterial = perecedero as any
+    prismaMock.purchaseOrder.findFirst.mockResolvedValue(orden)
+    prismaMock.rawMaterial.update.mockResolvedValue({ ...perecedero, currentStock: new Decimal(150) })
+
+    await receivePurchaseOrder(
+      VENUE_ID,
+      PO_ID,
+      { receivedDate: '2026-10-30T18:00:00.000Z', items: [{ purchaseOrderItemId: 'poi-1', quantityReceived: 50 }] } as any,
+      STAFF_ID,
+    )
+
+    const datos = (createStockBatch as jest.Mock).mock.calls[0][2]
+    expect(datos.expirationDate.toISOString()).toBe('2026-11-06T18:00:00.000Z')
+  })
+
   it('el saldo se escribe con { increment }, nunca como valor absoluto', async () => {
     prismaMock.rawMaterial.update.mockResolvedValue({ ...mockRawMaterial(), currentStock: new Decimal(150) })
 

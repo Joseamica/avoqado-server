@@ -902,7 +902,7 @@ export async function expireOldPoints(venueId: string): Promise<{ customersAffec
   }
 
   const expirationDate = new Date()
-  expirationDate.setDate(expirationDate.getDate() - config.pointsExpireDays)
+  expirationDate.setUTCDate(expirationDate.getUTCDate() - config.pointsExpireDays)
 
   // Find all EARN transactions older than expiration date
   const oldTransactions = await prisma.loyaltyTransaction.findMany({

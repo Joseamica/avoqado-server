@@ -105,6 +105,8 @@ export async function getInfo(req: Request, res: Response) {
           state.status === 'PAUSED' &&
           state.reason === 'MANUAL_PAUSE' &&
           !state.config.manualPause &&
+          // D662 parte 2: pausada sola no termina con la hora (sólo con «Reanudar»): no se anuncia «volvemos a las HH:MM».
+          !state.autoPausedAt &&
           state.config.pausedUntil &&
           new Date(state.config.pausedUntil) > new Date()
             ? state.config.pausedUntil

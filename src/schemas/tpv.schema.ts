@@ -577,6 +577,9 @@ export const createOrderWithItemsSchema = z.object({
         .max(255, { message: 'externalId no puede exceder 255 caracteres.' })
         .optional()
         .nullable(),
+      // hz:e82938e1:D36. ADITIVO: «Cobrar» de la TPV nueva dice si la venta es para cobrarse en el momento (false) o un «Pagar
+      // después» (true). Una TPV vieja no lo manda y la venta queda como hoy (`payLater` nulo, `porCobrar.ts`).
+      payLater: z.boolean({ invalid_type_error: 'payLater debe ser verdadero o falso.' }).optional(),
     })
     .refine(data => !(data.couponCode && data.orderDiscountId), {
       message: 'Una venta no puede llevar cupón y descuento de catálogo a la vez.',
@@ -590,6 +593,14 @@ export const createOrderWithItemsSchema = z.object({
       message: 'La propina se agrega en el flujo de pago, no al crear la orden.',
       path: ['tip'],
     }),
+})
+
+/** hz:e82938e1:D36: retirar la venta de Cobrar que nunca se intentó cobrar. Sin cuerpo: el staff y la terminal salen del token. */
+export const retirarVentaSinCobroSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    orderId: z.string().cuid({ message: 'El ID del pedido debe ser un CUID válido.' }),
+  }),
 })
 
 export const removeOrderItemSchema = z.object({

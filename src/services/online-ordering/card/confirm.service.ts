@@ -262,7 +262,11 @@ export async function confirmCardAuthorization(chargeId: string, now?: Date, lim
             paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
             trackingToken: charge.trackingToken,
             requestHash: charge.requestHash,
-            acceptDeadlineAt,
+            // «Nadie»: el plazo del Ruling 10 (Stripe + 10 min, topado por el cierre). «Mi equipo» — D662 parte 2 (v3, Codex p2-r3 #1): la
+            // hora límite cuenta desde que el pedido de verdad nace (nunca antes que el reloj de esta escritura): si la lectura de Stripe
+            // se atrasó, un pedido no puede nacer con su hora límite ya cerca o en el pasado; eso rompería «la línea de tiempo sólo crece
+            // hacia adelante» de la pausa sola (que sólo cuenta «Mi equipo»).
+            acceptDeadlineAt: nadie ? acceptDeadlineAt : diezMin(new Date(Math.max(t.getTime(), reloj().getTime()))),
             whatsappConsent: request.whatsappConsent,
             // D661: «Nadie» nace sin aceptación (lo abre una caja); «Mi equipo», por aceptar, como siempre.
             requiresAcceptance: !nadie,

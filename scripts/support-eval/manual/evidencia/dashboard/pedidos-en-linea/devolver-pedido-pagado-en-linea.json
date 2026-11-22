@@ -1,0 +1,507 @@
+{
+  "pagina": "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad",
+  "version": "feat/d661-tarjeta-en-nadie (PR #392)",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 57,
+      "cita": "\"onlineOrdering\": \"Pedidos en línea\""
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 8,
+      "cita": "\"tray\": \"Bandeja\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 389,
+      "cita": "\"toDeliver\": \"Por entregar\""
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 353,
+      "cita": "\"cancelAndRefund\": \"Cancelar y devolver\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/OnlineOrdering/components/FolioSections.tsx",
+      "linea": 317,
+      "cita": "{section === 'toDeliver' && canRefund && <CardRefundButton venueId={venueId} order={order} />}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 48,
+      "cita": "\"orders\": \"Pedidos\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 352,
+      "cita": "\"open\": \"Devolver\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/OnlineOrdering/components/CardRefundSheet.tsx",
+      "linea": 170,
+      "cita": "? 'cardRefund.nadie.open'"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Order/OrderDrawerContent.tsx",
+      "linea": 179,
+      "cita": "<OrderCardRefund venueId={venueId} orderId={order.id} source={order.source} />"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 220,
+      "cita": "\"done\": \"Últimas 24 horas\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/OnlineOrdering/components/InboxTab.tsx",
+      "linea": 450,
+      "cita": "{canRefund && <CardRefundButton venueId={venueId} order={order} />}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 354,
+      "cita": "\"title\": \"Devolver el pago · folio {{folio}}\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 357,
+      "cita": "\"amount\": \"Se devuelve completo: {{amount}}\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/OnlineOrdering/components/CardRefundSheet.tsx",
+      "linea": 622,
+      "cita": "? t('cardRefund.nadie.amount', { amount: Currency(hint / 100) })"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 356,
+      "cita": "\"kitchen\": \"Si ya se está preparando, avísale a cocina.\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/OnlineOrdering/components/CardRefundSheet.tsx",
+      "linea": 504,
+      "cita": "{nadie && order.status !== 'COMPLETED' && <span className=\"block\">{t('cardRefund.nadie.kitchen')}</span>}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 365,
+      "cita": "\"title\": \"¿A dónde se devuelve?\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 366,
+      "cita": "\"storeCredit\": \"Saldo a favor en {{negocio}}\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 367,
+      "cita": "\"card\": \"A su tarjeta\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/OnlineOrdering/components/CardRefundSheet.tsx",
+      "linea": 642,
+      "cita": "{t('cardRefund.destino.storeCredit', { negocio })}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/OnlineOrdering/components/CardRefundSheet.tsx",
+      "linea": 653,
+      "cita": "{t('cardRefund.destino.card')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 326,
+      "cita": "\"reason\": \"Motivo\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 790,
+      "cita": "\"RETURNED_GOODS\": \"Productos devueltos\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 791,
+      "cita": "\"ACCIDENTAL_CHARGE\": \"Cargo accidental\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 792,
+      "cita": "\"CANCELLED_ORDER\": \"Pedido cancelado\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 793,
+      "cita": "\"FRAUDULENT_CHARGE\": \"Cargo fraudulento\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 240,
+      "cita": "\"OTHER\": \"Otro\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/OnlineOrdering/components/CardRefundSheet.tsx",
+      "linea": 701,
+      "cita": "{tPay(`refund.reasons.${r}`)}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 327,
+      "cita": "\"note\": \"Nota (opcional)\","
+    },
+    {
+      "paso": 6,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 361,
+      "cita": "\"submitCard\": \"Devolver {{amount}} a la tarjeta\","
+    },
+    {
+      "paso": 6,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 362,
+      "cita": "\"submitStoreCredit\": \"Devolver {{amount}} como saldo a favor\""
+    },
+    {
+      "paso": 6,
+      "archivo": "src/pages/OnlineOrdering/components/CardRefundSheet.tsx",
+      "linea": 742,
+      "cita": "? 'cardRefund.nadie.submitStoreCredit'"
+    },
+    {
+      "paso": 6,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 349,
+      "cita": "\"storeCredit\": \"Devuelto como saldo a favor\""
+    },
+    {
+      "paso": 6,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 342,
+      "cita": "\"done\": \"Devuelto a la tarjeta\","
+    },
+    {
+      "paso": 6,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 262,
+      "cita": "\"refunding\": \"Devolviendo…\","
+    },
+    {
+      "paso": 6,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 259,
+      "cita": "\"refunded\": \"Devuelto\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:refund",
+      "archivo": "avoqado-server/src/routes/dashboard/onlineOrdering.dashboard.routes.ts",
+      "linea": 70
+    },
+    {
+      "permiso": "payments:refund",
+      "archivo": "src/pages/OnlineOrdering/components/CardRefundSheet.tsx",
+      "linea": 194
+    },
+    {
+      "permiso": "payments:refund-to-cash",
+      "archivo": "avoqado-server/src/routes/dashboard/onlineOrdering.dashboard.routes.ts",
+      "linea": 77
+    },
+    {
+      "permiso": "payments:refund-to-cash",
+      "archivo": "src/pages/OnlineOrdering/components/CardRefundSheet.tsx",
+      "linea": 569
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "El panel necesita internet; si se corta, «No hubo respuesta. Vuelve a intentarlo: no se devuelve dos veces.»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 330
+    },
+    {
+      "afirmacion": "*Reintentar* con lo mismo",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 338
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: necesita permiso para reembolsar",
+      "archivo": "src/pages/OnlineOrdering/components/CardRefundSheet.tsx",
+      "linea": 159
+    },
+    {
+      "ruta": "Antes: sólo un pedido ya cobrado tiene algo que devolver",
+      "archivo": "src/pages/OnlineOrdering/components/CardRefundSheet.tsx",
+      "linea": 197
+    },
+    {
+      "ruta": "Antes: la clienta no lo puede cancelar desde su celular",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 199
+    },
+    {
+      "ruta": "Antes: se devuelve completo, nunca una parte (FULL_REFUND_ONLY)",
+      "archivo": "avoqado-server/src/services/online-ordering/card/refund.service.ts",
+      "linea": 1020
+    },
+    {
+      "ruta": "Antes: «Lo usa al pagar en caja en <tu negocio>; nunca se cambia por efectivo.»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 368
+    },
+    {
+      "ruta": "Antes: «Con tarjeta, el negocio no recupera la comisión de Stripe de este cobro.»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 369
+    },
+    {
+      "ruta": "Antes: en Transacciones, «Devuelve este pago desde Pedidos en línea…»",
+      "archivo": "avoqado-server/src/services/online-ordering/card/guards.ts",
+      "linea": 138
+    },
+    {
+      "ruta": "Antes: la terminal y el POS no devuelven (sólo el panel tiene la ruta)",
+      "archivo": "avoqado-server/src/routes/dashboard/onlineOrdering.dashboard.routes.ts",
+      "linea": 70
+    },
+    {
+      "ruta": "Problema: «No lo recogió» al terminar el día, cobrado",
+      "archivo": "avoqado-server/src/services/online-ordering/folios.service.ts",
+      "linea": 446
+    },
+    {
+      "ruta": "Problema: «Stripe está procesando la devolución»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 344
+    },
+    {
+      "ruta": "Problema: «Enviando a Stripe…»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 343
+    },
+    {
+      "ruta": "Problema: «La devolución está en proceso; revisa en un momento»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 348
+    },
+    {
+      "ruta": "Problema: «No hubo respuesta…»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 330
+    },
+    {
+      "ruta": "Problema: «La respuesta no fue definitiva…»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 331
+    },
+    {
+      "ruta": "Problema: «Hubo otra devolución de este pedido…»",
+      "archivo": "avoqado-server/src/services/online-ordering/card/refund.service.ts",
+      "linea": 993
+    },
+    {
+      "ruta": "Problema: «Hay una devolución nueva en la lista…»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 320
+    },
+    {
+      "ruta": "Problema: «Ya hay una devolución en curso de este pedido…»",
+      "archivo": "avoqado-server/src/services/online-ordering/card/refund.service.ts",
+      "linea": 1000
+    },
+    {
+      "ruta": "Problema: «Devoluciones de este pedido»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 316
+    },
+    {
+      "ruta": "Problema: «Se está imprimiendo la comanda; intenta en un momento»",
+      "archivo": "avoqado-server/src/services/online-ordering/card/refund.service.ts",
+      "linea": 759
+    },
+    {
+      "ruta": "Problema: «El saldo a favor no está activo…»",
+      "archivo": "avoqado-server/src/services/online-ordering/card/refund.service.ts",
+      "linea": 891
+    },
+    {
+      "ruta": "Problema: «Este pedido no tiene una clienta con cuenta…»",
+      "archivo": "avoqado-server/src/services/online-ordering/card/refund.service.ts",
+      "linea": 974
+    },
+    {
+      "ruta": "Problema: «Este cobro ya tiene una devolución hecha fuera de Avoqado…»",
+      "archivo": "avoqado-server/src/services/online-ordering/card/refund.service.ts",
+      "linea": 856
+    },
+    {
+      "ruta": "Problema: «No pudimos revisar en Stripe…»",
+      "archivo": "avoqado-server/src/services/online-ordering/card/refund.service.ts",
+      "linea": 840
+    },
+    {
+      "ruta": "Problema: «El banco no hizo la devolución; no se anotó nada»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 345
+    },
+    {
+      "ruta": "Problema: «El banco regresó la devolución: se le debe a la clienta»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 263
+    },
+    {
+      "ruta": "Problema: «La devolución falló después: devuélvelo por otro medio»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 346
+    },
+    {
+      "ruta": "Problema: «Devolver por otro medio:» con *Efectivo de la caja* y *Transferencia*",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 373
+    },
+    {
+      "ruta": "Problema: *Efectivo de la caja*",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 374
+    },
+    {
+      "ruta": "Problema: *Transferencia*",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 375
+    },
+    {
+      "ruta": "Problema: «Antes de darle el dinero: …»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 376
+    },
+    {
+      "ruta": "Problema: «Antes de transferir: …»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 377
+    },
+    {
+      "ruta": "Problema: *Sí, registrar* / *Todavía no*",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 378
+    },
+    {
+      "ruta": "Problema: *Todavía no*",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 379
+    },
+    {
+      "ruta": "Problema: «Registrado: ahora sí, dale $… al cliente»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 380
+    },
+    {
+      "ruta": "Problema: «Registrado: ahora sí, transfiérele $… al cliente»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 381
+    },
+    {
+      "ruta": "Problema: «Ya estaba registrada: …»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 382
+    },
+    {
+      "ruta": "Problema: el 409 de la devolución externa al pagar por otro medio (D668: SERVIDOR fix/d668-efectivo-tras-reversa 0b01c3394, todavía no en esta rama)",
+      "archivo": "avoqado-server/src/services/online-ordering/card/refund.service.ts",
+      "linea": 1393
+    },
+    {
+      "ruta": "Problema: «Ya no queda nada por devolver.»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 358
+    },
+    {
+      "ruta": "Problema: en «Mi equipo» el botón es *Devolver a la tarjeta*",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 313
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3005: SERVIDOR feat/d661-tarjeta-en-nadie (50c6526da en la ronda 1, 0b01c3394 en la ronda 2) con bases desechables av-db-25-d661-ft y av-db-25-d661-r2, DASHBOARD en el 8080 (ad725421 y 6540e22e), WIDGET en pedidos.localhost:5875 (f529b6f y 4d82021) y Stripe de prueba con stripe listen",
+    "fecha": "2026-11-21",
+    "fotos": [
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c3-d-hoja.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c3-d-hoja-lista.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c3-d-devolviendo.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c3-d-devuelto.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c3-w-seguimiento-devuelto-saldo.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c4-d-pedido.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c4-d-hoja.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c4-d-hoja-lista.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c4-d-devolviendo.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c4-d-devuelto.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c3-w-seguimiento-devuelto-tarjeta.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c5-d-bandeja.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c5-d-pedido.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c5-d-hoja.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/A-01-hoja.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/A-04-tras-doble-clic.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/A-05-tarjeta-elegida.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/A-06-devolviendo.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/A-07-devuelto.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/B-02-pedido-hoja.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/B-03-bandeja-24h.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/C-01-hoja-tarjeta.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/C-02-devuelto.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/C3-409-01-hoja.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/C3-409-02-confirmacion.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/C3-409-04-resultado.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/C5-01-hoja.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/C5-02-confirmacion.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/C5-04-resultado.png"
+    ],
+    "filasCreadas": [
+      "Todo en bases desechables (av-db-25-d661-ft y av-db-25-d661-r2), borradas al terminar; de av-db-25 sólo se leyó. Ronda 1: WPDRN a saldo a favor (pago −$30 OTHER y GiftCard de $30), W8ZKG a la tarjeta (re_3UeKkCBDF0XCcHsh1g5Lq2W4 por 4500, comisión 52 de vuelta), WEBN2 (el doble clic de D1). Ronda 2: WN466 y W6KN9 a la tarjeta (2500 cada uno); W4JP5, WA537 y WRQQU devueltos en efectivo tras la reversa (1 PAY_OUT de $25 cada uno); WK59W con la devolución externa (409, 0 PAY_OUT). Cuadre al centavo en report.md y report-ronda-2.md."
+    ],
+    "nota": "Recorrido real con Playwright (21-nov): *Cancelar y devolver* desde «Por entregar» a saldo a favor y a la tarjeta (casos 3 y 4), *Devolver* de un «No lo recogió» desde el pedido (caso 5), saldo a favor inactivo con doble clic (A: un solo POST, sin elegir destino solo), «Ya no queda nada por devolver.» (B), reversa del banco y *Efectivo de la caja* con «Antes de darle el dinero…» · *Sí, registrar* · «Registrado: ahora sí, dale $25.00 al cliente», y el 409 de la devolución hecha directo en Stripe (C, en «Mi equipo»). El doble clic de *Sí, registrar* se arregló después en f4e3180b (el sourceRef). NO se vieron en el navegador: «Devuelto como saldo a favor» en el panel (la clienta sí vio «Devuelto · Te devolvieron tu pago como saldo a favor»), el aviso de Transacciones, *Transferencia*, «Stripe está procesando…», «La respuesta no fue definitiva…», «Hubo otra devolución…», «Se está imprimiendo la comanda…», «No pudimos revisar en Stripe…» ni la clienta sin cuenta."
+  },
+  "codex": {
+    "lote": 12,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

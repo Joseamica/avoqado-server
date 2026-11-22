@@ -803,7 +803,7 @@ export async function processTeamInvites(
 
       // Create invitation
       const expiresAt = new Date()
-      expiresAt.setDate(expiresAt.getDate() + 7) // 7 days expiry
+      expiresAt.setUTCDate(expiresAt.getUTCDate() + 7) // 7 days expiry
 
       const invitation = await prisma.invitation.create({
         data: {

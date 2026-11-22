@@ -209,6 +209,11 @@
       "count": 1,
       "loops": 0,
       "reason": "Una sola Order, FOR KEY SHARE (lo que su llave foránea pediría al escribir la reversa), ANTES del cliente: el mismo orden que el reembolso y earnPoints. Quien la repite en bucle (quitarDevolucionesDelCambioEnTx) vuelve a la MISMA Order."
+    },
+    "src/services/online-ordering/presence.service.ts#esperarLoQueSeGuarda": {
+      "count": 1,
+      "loops": 0,
+      "reason": "D662 v4: lectura de la pausa sola. Toma en modo COMPARTIDO y SIN FILA (FOR SHARE NOWAIT) las Orders de los pedidos por aceptar sin marca, en una transacción que no toma nada más ni espera a nadie: si una está tomada falla con 55P03, suelta todo y reintenta. Sin fila no puede formar abrazo mortal ni adelantarse a otro escritor; sólo lo espera. Prueba contra Postgres en lifecycle.integration.test.ts («una aceptación a tiempo que todavía se guarda»)."
     }
   },
   "callers": {
@@ -1371,6 +1376,11 @@
       "count": 1,
       "loops": 0,
       "reason": "Tienda híbrida S13 («Guardar en mi cuenta»): UN sobre en su propia transacción. Antes sólo la ficha de la clienta FOR SHARE (rango 8 de la parte 2, R1); sin Order, Payment ni turno antes ni después: no forma ciclo con los cobros (Order → sobre). Los cruces con el cobro con saldo, con S9 y con un escritor GiftCard → Customer están probados en guardarTarjeta.integration.test.ts (el último con un 40P01 real que withDeadlockRetry repite)."
+    },
+    "src/services/online-ordering/presence.service.ts#vueltaConfirmada#esperarLoQueSeGuarda": {
+      "count": 1,
+      "loops": 1,
+      "reason": "D662 v4: hasta 3 confirmaciones de una pausa reciente; cada vuelta abre y cierra su propia transacción de lectura (FOR SHARE NOWAIT) y no retiene candados entre vueltas."
     }
   }
 }
