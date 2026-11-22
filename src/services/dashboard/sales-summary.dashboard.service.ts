@@ -62,8 +62,7 @@ import { sqlImpuestoQueSeCobraAparte } from '@/services/shared/orderBalance'
 import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '@/services/shared/tenderSemantics'
 import { proyectarComisionYNeto } from '@/services/payments/proyeccionMonetaria'
 import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraReal, sqlRangoHoraRealSql } from '@/services/shared/horaRealDelAparato'
-import { relojDelNegocio } from '@/utils/datetime'
-import { zonaDelCalculo } from '@/utils/sanitizeTimezone'
+import { relojDelNegocio, zonaValida } from '@/utils/datetime'
 
 // ============================================================
 // Types
@@ -2264,12 +2263,14 @@ export const SALES_SUMMARY_DETAIL_SELECT = {
 } satisfies Prisma.PaymentSelect
 
 /**
- * D13.3 (Codex r6): each row carries the zone the whole export uses — read ONCE per call and normalized with the same rule as the
- * calculation (`zonaDelCalculo`), never the raw text repeated in every row.
+ * D13.3 (Codex r6, r7): each row carries the venue's zone, read ONCE per call (never the raw text repeated in every row), as the
+ * DASHBOARD reads it to build the range the file was asked for: any zone Intl knows («+05:30», «GMT»); anything else (or a text
+ * longer than a zone name) is America/Mexico_City.
  */
 async function conZona<T>(venueId: string, filas: Promise<T[]>): Promise<Array<T & { zona: string }>> {
   const [lista, venue] = await Promise.all([filas, prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })])
-  const zona = zonaDelCalculo(venue?.timezone)
+  const guardada = venue?.timezone
+  const zona = guardada && guardada.length <= 64 ? zonaValida(guardada) : 'America/Mexico_City'
   return lista.map(f => ({ ...f, zona }))
 }
 

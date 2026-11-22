@@ -901,7 +901,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         // cover (auth/reference numbers, operation ids), so drop it explicitly. Same redaction policy
         // the platform applies everywhere card data could leave the building.
         const rows = guard.redact(rawRows).map(r => {
-          const copy: Record<string, unknown> = { ...(r as Record<string, unknown>), fecha: fechaDelCobro(r) } // D13.3: hora real del negocio
+          const copy: Record<string, unknown> = { ...(r as Record<string, unknown>), fecha: fechaDelCobro({ ...r, zona: tz }) } // D13.3: hora real, en la MISMA zona del rango de esta respuesta
           delete copy.processorData
           delete copy.zona
           return copy

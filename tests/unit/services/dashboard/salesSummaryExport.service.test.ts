@@ -183,12 +183,13 @@ describe('detailed rows where-clause + cap', () => {
     expect(arg.select.venue).toBeUndefined()
   })
 
-  it('🔴 D13.3 · cada fila lleva la zona del negocio leída UNA vez y normalizada como el cálculo («GMT» → UTC, «GMT-6» → CDMX)', async () => {
+  it('🔴 D13.3 · cada fila lleva la zona del negocio leída UNA vez, como la lee el DASHBOARD para armar el rango', async () => {
     paymentFindMany.mockResolvedValue([{ id: 'p1' }, { id: 'p2' }])
     for (const [guardada, zona] of [
       ['America/Tijuana', 'America/Tijuana'],
-      ['GMT', 'UTC'],
+      ['+05:30', '+05:30'], // Codex r7: la pantalla arma el día en +05:30; la «Fecha» también
       ['GMT-6', 'America/Mexico_City'],
+      ['x'.repeat(1000), 'America/Mexico_City'],
       [null, 'America/Mexico_City'],
     ]) {
       venueFindUnique.mockReset().mockResolvedValue({ timezone: guardada })
