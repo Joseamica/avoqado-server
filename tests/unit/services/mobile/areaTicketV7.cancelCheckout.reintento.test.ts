@@ -117,7 +117,7 @@ describe('cancelAreaTicketCheckout — retira las comandas (hz:e82938e1:D40)', (
     await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: null } as any)
 
     expect((tomarCandadoDeComandas as jest.Mock).mock.calls.map(c => c[1])).toEqual(['cuenta-ligada', 'order-1'])
-    const candadoDeSesion = prismaMock.$queryRaw.mock.calls.findIndex(c =>
+    const candadoDeSesion = prismaMock.$queryRaw.mock.calls.findIndex((c: unknown[]) =>
       String((c[0] as any).join('?')).includes('"AreaTicketCheckoutSession"'),
     )
     expect(candadoDeSesion).toBeGreaterThanOrEqual(0)
