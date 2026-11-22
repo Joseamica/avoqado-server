@@ -421,6 +421,7 @@ import {
   renovarRecuperacionDeFolioEnTx,
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
+import { avisarTarjetaTardiaConEfectivo } from '../shared/avisoDeTarjetaTardiaConEfectivo'
 // El candado del toque repetido en «Efectivo». La regla vive AHÍ, pura y probada aparte.
 import { aplicaCandadoDeEfectivo, cobroEnEfectivoSobreOrdenSaldada } from '../shared/cobroEnEfectivoDuplicado'
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
@@ -2969,6 +2970,14 @@ function avisoDeVentaApartada(
  * Límite aceptado (Codex r1 #1, controlador 12-nov): una cuenta pagada en dos partes que cruza la medianoche, cuya parte sin red
  * sube DESPUÉS de la parte en línea, queda con la hora local de la parte sin red (el día anterior). Raro y sólo fecha la lealtad.
  */
+/**
+ * D7 (encargo a25cd7): ¿este registro es una tarjeta que el banco YA aprobó? Lo que la terminal registra con tarjeta llega
+ * después del cargo: rechazarlo no devuelve el dinero, sólo lo deja sin Payment. El efectivo y lo no completado no entran.
+ */
+export function tarjetaYaCobradaPorElBanco(paymentData: Pick<PaymentCreationData, 'method' | 'status'>): boolean {
+  return paymentData.status === 'COMPLETED' && (paymentData.method === 'CREDIT_CARD' || paymentData.method === 'DEBIT_CARD')
+}
+
 function horaDeLaVentaDeLaCola(paymentData: PaymentCreationData, llegada: Date): Date | undefined {
   if (paymentData.isOfflineReplay !== true || paymentData.createdAtLocal == null) return undefined
   return horaDeLaVenta(paymentData, llegada)
@@ -3000,6 +3009,11 @@ interface PaymentCreationData {
   cashDrawerSessionId?: string | null
   /** Epoch ms del aparato al cobrar la venta de su cola; sólo cuenta con `isOfflineReplay === true` (`horaDeLaVentaDeLaCola`). */
   createdAtLocal?: number | string | null
+  /**
+   * D7 (encargo a25cd7): epoch ms del aparato al ABRIR el intento de tarjeta. Sólo lo manda la recuperación de la libreta de la TPV
+   * (el «Aprobado» que se registra tarde). No cambia el cobro: sólo decide el aviso `LATE_CARD_AFTER_CASH` de Pago rápido.
+   */
+  capturadoEnAparato?: number | string | null
   // Detalle del cobro declarado a mano ("Tarjeta (terminal externa)"). Sólo aplica a
   // métodos que NO pasaron por Avoqado; en efectivo va null. iOS manda null explícito.
   externalSource?: string | null
@@ -3923,7 +3937,19 @@ export async function recordOrderPayment(
 
     const allowedMethods = allowedTransitions[activeOrder.splitType] || []
 
-    if (!allowedMethods.includes(paymentData.splitType)) {
+    if (!allowedMethods.includes(paymentData.splitType) && tarjetaYaCobradaPorElBanco(paymentData)) {
+      // 🔴 D7 (encargo a25cd7): la tarjeta ya la aprobó el banco. Si la cuenta cambió de forma de dividir mientras el registro
+      // llegaba (la cajera la cerró en efectivo como «pago completo» y después llega el «Aprobado» de «partes iguales»), un 400
+      // aquí deja dinero cobrado SIN Payment y la terminal reintenta para siempre. Se registra igual, como la tarjeta sobre una
+      // cuenta pagada o cancelada (`dineroCapturado`), y si pasa de la cuenta salta el aviso de sobrepago de siempre.
+      logger.warn('⚠️ [recordOrderPayment] Tarjeta ya cobrada con otra forma de dividir: se registra igual', {
+        venueId,
+        orderId,
+        orderSplitType: activeOrder.splitType,
+        paymentSplitType: paymentData.splitType,
+        idempotencyKey: paymentData.idempotencyKey ?? null,
+      })
+    } else if (!allowedMethods.includes(paymentData.splitType)) {
       throw new BadRequestError(
         `Order has splitType ${activeOrder.splitType}. Cannot use ${paymentData.splitType}. Allowed methods: ${allowedMethods.join(', ')}`,
       )
@@ -6505,6 +6531,20 @@ export async function recordFastPayment(
 
   t.mark('transaccionSocketsYComisiones')
   logger.info('Fast payment recorded successfully', { paymentId: payment.id, amount: totalAmount })
+
+  // D7 (encargo a25cd7): una tarjeta tardía con efectivo en medio deja rastro. Después del commit y sin esperarlo: nunca toca el cobro.
+  void avisarTarjetaTardiaConEfectivo({
+    id: payment.id,
+    venueId,
+    orderId: payment.orderId,
+    terminalId: payment.terminalId,
+    method: payment.method,
+    status: payment.status,
+    amount: payment.amount,
+    processedById: payment.processedById,
+    horaDelIntento: paymentData.capturadoEnAparato,
+    llegada,
+  })
 
   // 🪝 Backfill any Blumon webhook that arrived BEFORE this Payment was recorded.
   // Fire-and-forget — never block the API response on reconciliation. The cron
