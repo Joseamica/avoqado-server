@@ -54,6 +54,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!orgId) return
+  // Codex d40-r1 (AJENO): si el alta del negocio falló, `venueId` no existe y cada `deleteMany({ where: { venueId } })` borraría filas de
+  // otras pruebas. Sólo se va la organización.
+  if (!venueId) return void (await prisma.organization.deleteMany({ where: { id: orgId } }))
   await prisma.kdsOrder.deleteMany({ where: { venueId } })
   // hz:e82938e1:D40: la sesión de vales restringe contra su orden y su terminal; la bitácora no tiene llave al negocio.
   await prisma.areaTicketCheckoutSession.deleteMany({ where: { venueId } })

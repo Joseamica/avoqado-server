@@ -2387,9 +2387,13 @@ export async function cancelAreaTicketCheckout(venueId: string, sessionId: strin
       const cancelled = await (async () => {
         // hz:e82938e1:D40: los candados de las comandas de su orden (y de sus cuentas ligadas) van PRIMERO, en orden, como en
         // `cancelOrderInTransaction`: es el orden del armado (comandas → venta), y nadie que tenga la sesión espera una comanda. La orden
-        // se lee de la sesión sin candado; si se materializó mientras tanto, el retiro de abajo toma su candado ahí (no tiene comandas).
-        if (session.orderId)
-          for (const id of (await cuentasDeSusComandas(tx, venueId, session.orderId)).sort()) await tomarCandadoDeComandas(tx, id)
+        // se lee sin candado DENTRO de cada intento (Codex d40-r1 #1: leída antes, el reintento de un 40P01 repetía la lectura vieja).
+        // Si se materializó entre esta lectura y el candado de la sesión, el retiro toma su candado a media transacción; un bloqueo
+        // mutuo con otra cancelación de la misma sesión lo repite `withDeadlockRetry`, y el intento nuevo ya la lee.
+        const ordenPrevia = (await tx.areaTicketCheckoutSession.findFirst({ where: { id: sessionId, venueId }, select: { orderId: true } }))
+          ?.orderId
+        if (ordenPrevia)
+          for (const id of (await cuentasDeSusComandas(tx, venueId, ordenPrevia)).sort()) await tomarCandadoDeComandas(tx, id)
         await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${sessionId} AND "venueId" = ${venueId} FOR UPDATE`
         const fresh = await tx.areaTicketCheckoutSession.findFirst({
           where: { id: sessionId, venueId },

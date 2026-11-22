@@ -121,7 +121,8 @@ describe('cancelAreaTicketCheckout — retira las comandas (hz:e82938e1:D40)', (
       String((c[0] as any).join('?')).includes('"AreaTicketCheckoutSession"'),
     )
     expect(candadoDeSesion).toBeGreaterThanOrEqual(0)
-    expect(ordenDe(tomarCandadoDeComandas)).toBeLessThan(prismaMock.$queryRaw.mock.invocationCallOrder[candadoDeSesion])
+    // TODOS los candados de comandas (no sólo el primero) van antes que el de la sesión.
+    expect(ordenDe(tomarCandadoDeComandas, 1)).toBeLessThan(prismaMock.$queryRaw.mock.invocationCallOrder[candadoDeSesion])
     expect(retirarComandasDeVentaAnulada).toHaveBeenCalledWith(
       prismaMock,
       'v1',
@@ -129,6 +130,20 @@ describe('cancelAreaTicketCheckout — retira las comandas (hz:e82938e1:D40)', (
       expect.objectContaining({ reason: expect.any(String) }),
     )
     expect(ordenDe(retirarComandasDeVentaAnulada)).toBeLessThan(ordenDe(assertOrderCancellableUnderLock))
+  })
+
+  it('Codex d40-r1 #1: la orden se lee DENTRO del intento: si se materializó después de la primera lectura, igual se toman sus candados antes que la sesión', async () => {
+    preparar()
+    // La lectura de fuera (loadCheckout) todavía no ve la orden; la de dentro de la transacción ya sí.
+    ;(prismaMock as any).areaTicketCheckoutSession.findFirst.mockResolvedValueOnce(sesion({ orderId: null }))
+    await cancelAreaTicketCheckout('v1', 'ses-1', { idempotencyKey: 'k1', deviceUid: 'dev-1', staffId: null } as any)
+
+    const candadoDeSesion = prismaMock.$queryRaw.mock.calls.findIndex((c: unknown[]) =>
+      String((c[0] as any).join('?')).includes('"AreaTicketCheckoutSession"'),
+    )
+    expect((tomarCandadoDeComandas as jest.Mock).mock.calls.map(c => c[1])).toEqual(['cuenta-ligada', 'order-1'])
+    expect(ordenDe(tomarCandadoDeComandas, 1)).toBeLessThan(prismaMock.$queryRaw.mock.invocationCallOrder[candadoDeSesion])
+    expect(retirarComandasDeVentaAnulada).toHaveBeenCalledWith(prismaMock, 'v1', 'order-1', expect.anything())
   })
 
   it('regresión: una sesión sin orden todavía (OPEN) no toca la cocina', async () => {
