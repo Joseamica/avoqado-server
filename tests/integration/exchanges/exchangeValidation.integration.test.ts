@@ -396,3 +396,32 @@ describe('exchange validation RF3/RF4', () => {
     await expect(createExchange(s.input(s.body({ originalPaymentId: refund.refundPaymentId })))).rejects.toMatchObject({ statusCode: 404 })
   })
 })
+
+describe('D661 · D4: «Cambio» contra Postgres de una venta de la tienda en línea pagada con tarjeta en «No, entran solos»', () => {
+  it('el escritor del cambio lee el pedido en línea de la venta: «Nadie» con tarjeta → 409 EXCHANGE_NOT_FOR_ONLINE_CARD sin escribir nada; con «Mi equipo» la misma venta se cambia como siempre', async () => {
+    const s = await seed()
+    const pedido = await prisma.onlineOrder.create({
+      data: {
+        venueId: s.venueId,
+        orderId: s.order.id,
+        paymentMode: 'CARD_ONLINE',
+        requiresAcceptance: false,
+        status: 'COMPLETED',
+        trackingToken: `d4-${s.order.id}`.padEnd(32, 't'),
+        acceptDeadlineAt: new Date(),
+      },
+    })
+    const before = await counts(s)
+    await expect(createExchange(s.input())).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'EXCHANGE_NOT_FOR_ONLINE_CARD',
+      details: { reason: 'ONLINE_CARD' },
+    })
+    expect(await counts(s)).toEqual(before)
+
+    // La regla es sólo de «Nadie» con tarjeta: el mismo pedido de «Mi equipo» (o una venta sin pedido en línea) se cambia.
+    await prisma.onlineOrder.update({ where: { id: pedido.id }, data: { requiresAcceptance: true } })
+    const { exchange } = await createExchange(s.input())
+    expect(exchange.status).toBe('COMPLETED')
+  })
+})

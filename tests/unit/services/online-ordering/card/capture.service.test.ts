@@ -34,9 +34,16 @@ jest.mock('@/services/online-ordering/transitions.service', () => ({
   avanzarCorteTrasCommit: jest.fn(),
 }))
 
+import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { releaseCharge } from '@/services/online-ordering/card/release.service'
-import { acceptCardOnlineOrder, failCapture } from '@/services/online-ordering/card/capture.service'
+import {
+  GraceEndedBeforeDispatch,
+  acceptCardOnlineOrder,
+  captureCharge,
+  failCapture,
+} from '@/services/online-ordering/card/capture.service'
 import {
   acceptWithoutCapture,
   avanzarCorteTrasCommit,
@@ -105,12 +112,13 @@ describe('acceptCardOnlineOrder', () => {
       where: { id: 'ch1', status: 'AUTHORIZED' },
       data: { status: 'CAPTURING', attempts: { increment: 1 } },
     })
-    expect(capture).toHaveBeenCalledWith(expect.objectContaining({ providerCredentials: { connectAccountId: 'acct_A' } }), {
-      paymentIntentId: 'pi_1',
-      amountCents: 25_000,
-      applicationFeeCents: 290,
-      idempotencyKey: 'online-order:ord1:capture',
-    })
+    // D661 · C (Ruling 52): la captura de quien abre o acepta va con 60 s y UN reintento del SDK: su peor caso (≈ 60 + 60 + 60 s)
+    // queda dentro de la gracia de 5 min de «Nadie».
+    expect(capture).toHaveBeenCalledWith(
+      expect.objectContaining({ providerCredentials: { connectAccountId: 'acct_A' } }),
+      { paymentIntentId: 'pi_1', amountCents: 25_000, applicationFeeCents: 290, idempotencyKey: 'online-order:ord1:capture' },
+      { timeoutMs: 60_000, maxNetworkRetries: 1 },
+    )
     const data = (prismaMock.payment.create.mock.calls[0][0] as any).data
     expect(data).toMatchObject({
       venueId: 'v1',
@@ -229,7 +237,13 @@ describe('acceptCardOnlineOrder', () => {
     capture.mockRejectedValue(Object.assign(new Error('timeout'), { type: 'StripeConnectionError' }))
     getAuthorization.mockResolvedValue({ ...succeeded(), piStatus: 'requires_capture', amountReceivedCents: 0 })
     await expect(acceptCardOnlineOrder(base)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
-    expect(getAuthorization).toHaveBeenCalledWith(expect.anything(), { paymentIntentId: 'pi_1' })
+    // D661 (addendum r3): la relectura de rescate lleva los MISMOS límites que la captura de la caja (60 s y un reintento), no los del
+    // cliente (hasta ~241 s): la caja no espera minutos por la respuesta.
+    expect(getAuthorization).toHaveBeenCalledWith(
+      expect.anything(),
+      { paymentIntentId: 'pi_1' },
+      { timeoutMs: 60_000, maxNetworkRetries: 1 },
+    )
     expect(prismaMock.onlineOrderCharge.updateMany).toHaveBeenLastCalledWith({
       where: { id: 'ch1', status: 'CAPTURING' },
       data: { lastError: 'timeout' },
@@ -355,6 +369,40 @@ describe('fix r1', () => {
   })
 })
 
+describe('D661 (3A): abrir un apartado = cobrarlo', () => {
+  it('acceptedAt y kitchenPendingAt son la hora en que la captura ESCRIBE el pedido (bajo el candado, después de Stripe), no la de antes de cobrar', async () => {
+    ;(debeMarcarCocina as jest.Mock).mockResolvedValueOnce(true)
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ acceptDeadlineAt: new Date(Date.now() + 300_000) }) as any)
+    let cobrado = 0
+    capture.mockImplementation(async () => {
+      await new Promise(r => setTimeout(r, 25)) // Stripe tarda
+      cobrado = Date.now()
+      return succeeded()
+    })
+    // Sin `now` (como en la API): el reloj real.
+    await expect(acceptCardOnlineOrder({ venueId: 'v1', orderId: 'ord1', staffId: 'staff1' })).resolves.toMatchObject({ outcome: 'OK' })
+    const args = (casTransitionInTx as jest.Mock).mock.calls[0][1]
+    expect(args.now.getTime()).toBeGreaterThanOrEqual(cobrado)
+    expect(args.onlineData(args.now)).toMatchObject({ acceptedAt: args.now })
+    expect(args.orderExtra(args.now)).toEqual({ kitchenPendingAt: args.now })
+    const sello = prismaMock.onlineOrderCharge.updateMany.mock.calls.find(([a]: any) => a.data.status === 'CAPTURED')![0] as any
+    expect(sello.data.capturedAt.getTime()).toBeGreaterThanOrEqual(cobrado)
+  })
+
+  it('el cobro fallido pide el rechazo como escritor del cargo (porFalloDeCobro) y sella CAPTURE_FAILED en ESA transacción (afterCas)', async () => {
+    capture.mockRejectedValue(Object.assign(new Error('canceled'), { type: 'StripeInvalidRequestError' }))
+    getAuthorization.mockResolvedValue({ ...succeeded(), piStatus: 'canceled', amountReceivedCents: 0 })
+    await expect(acceptCardOnlineOrder(base)).resolves.toEqual({ outcome: 'STALE', status: 'REJECTED' })
+    const args = (rejectOnlineOrder as jest.Mock).mock.calls[0][0]
+    expect(args).toMatchObject({ reason: 'PAYMENT_FAILED', allowCapturing: true, porFalloDeCobro: true, afterCas: expect.any(Function) })
+    // Los demás rechazos de la captura (sin cargo apartado, total distinto) no son el escritor del cobro: R46 los sigue frenando.
+    ;(rejectOnlineOrder as jest.Mock).mockClear()
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ charge: { status: 'RELEASED' } }) as any)
+    await acceptCardOnlineOrder(base)
+    expect((rejectOnlineOrder as jest.Mock).mock.calls[0][0]).not.toHaveProperty('porFalloDeCobro')
+  })
+})
+
 describe('failCapture', () => {
   it('si el cargo ya no está CAPTURING cuando la transición rechazó, se revierte: no se rechaza un pedido cobrado', async () => {
     ;(rejectOnlineOrder as jest.Mock).mockImplementationOnce(async (i: any) => {
@@ -364,6 +412,86 @@ describe('failCapture', () => {
     })
     prismaMock.onlineOrder.findFirst.mockResolvedValue({ status: 'ACCEPTED' } as any)
     await expect(failCapture('ch1', { staffId: null })).resolves.toEqual({ outcome: 'STALE', status: 'ACCEPTED' })
+  })
+
+  it('D661 · A4: Stripe no cobró (rechazo de la tarjeta): bitácora ONLINE_ORDER_CARD_CAPTURE_FAILED sin motivo, como hoy', async () => {
+    ;(logAction as jest.Mock).mockClear()
+    ;(logger.warn as jest.Mock).mockClear()
+    await failCapture('ch1', { staffId: null })
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Stripe no cobró la tarjeta'), expect.anything())
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'ONLINE_ORDER_CARD_CAPTURE_FAILED', data: { chargeId: 'ch1', outcome: 'STALE' } }),
+    )
+  })
+
+  it('D661 · A4: la liberación tras la gracia dice la verdad: la misma acción de bitácora con motivo RELEASED_AFTER_GRACE y un log que no culpa a la tarjeta', async () => {
+    ;(logAction as jest.Mock).mockClear()
+    ;(logger.warn as jest.Mock).mockClear()
+    await failCapture('ch1', { staffId: null, reason: 'RELEASED_AFTER_GRACE' })
+    const [mensaje] = (logger.warn as jest.Mock).mock.calls[0]
+    expect(mensaje).toContain('Avoqado soltó la tarjeta')
+    expect(mensaje).not.toContain('Stripe no cobró')
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'ONLINE_ORDER_CARD_CAPTURE_FAILED',
+        data: { chargeId: 'ch1', outcome: 'STALE', reason: 'RELEASED_AFTER_GRACE' },
+      }),
+    )
+  })
+})
+
+describe('D661 · A1: captureCharge revalida el límite de un reintento justo antes de Stripe', () => {
+  const capturing = { ...CHARGE, status: 'CAPTURING' } as any
+  const meta = { staffId: null, estimatedMinutes: 15 }
+
+  it('con el límite ya pasado no manda la captura: lanza GraceEndedBeforeDispatch y no escribe nada', async () => {
+    await expect(captureCharge(capturing, 'ord1', { ...meta, captureBefore: Date.now() - 1 })).rejects.toBeInstanceOf(
+      GraceEndedBeforeDispatch,
+    )
+    expect(capture).not.toHaveBeenCalled()
+    expect(getAuthorization).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrderCharge.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('dentro del límite, o sin límite («Mi equipo» y la primera apertura de la caja), cobra como hoy con la misma clave', async () => {
+    capture.mockResolvedValue(succeeded())
+    await expect(captureCharge(capturing, 'ord1', { ...meta, captureBefore: Date.now() + 60_000 })).resolves.toMatchObject({
+      outcome: 'OK',
+    })
+    await expect(captureCharge(capturing, 'ord1', meta)).resolves.toMatchObject({ outcome: 'OK' })
+    expect(capture).toHaveBeenCalledTimes(2)
+    expect(capture.mock.calls[0][1]).toMatchObject({ idempotencyKey: 'online-order:ord1:capture' })
+  })
+
+  it('D661 · C (Ruling 43): el reintento con límite sale UNA vez (sin reintentos del SDK: uno suyo podría salir ya fuera de la gracia); el de «Mi equipo», como hoy', async () => {
+    capture.mockResolvedValue(succeeded())
+    await captureCharge(capturing, 'ord1', { ...meta, captureBefore: Date.now() + 60_000 })
+    // Ruling 52 (enmienda): y con 40 s por intento: el envío y el reenvío del SDK tras una conexión cerrada caben en los 90 s de margen.
+    // Ruling 73: y nuestro plazo duro, 40 + 5 s (deja de esperar; el envío ya salió).
+    expect(capture.mock.calls[0]).toEqual([
+      expect.objectContaining({ providerCredentials: { connectAccountId: 'acct_A' } }),
+      { paymentIntentId: 'pi_1', amountCents: 25_000, applicationFeeCents: 290, idempotencyKey: 'online-order:ord1:capture' },
+      { timeoutMs: 40_000, maxNetworkRetries: 0, plazoMs: 45_000 },
+    ])
+    // Sin límite ni opciones (el reintento del conciliador de «Mi equipo»): la misma llamada de siempre. La caja que abre va con las
+    // suyas (Ruling 52, `acceptCardOnlineOrder`).
+    await captureCharge(capturing, 'ord1', meta)
+    expect(capture.mock.calls[1]).toHaveLength(2)
+  })
+
+  it('D661 (addendum r3): si la captura truena, la relectura de rescate va con los MISMOS límites que la captura que sigue; sin límites, como hoy', async () => {
+    capture.mockRejectedValue(Object.assign(new Error('timeout'), { type: 'StripeConnectionError' }))
+    getAuthorization.mockResolvedValue({ ...succeeded(), piStatus: 'requires_capture', amountReceivedCents: 0 })
+    await expect(captureCharge(capturing, 'ord1', { ...meta, captureBefore: Date.now() + 60_000 })).resolves.toEqual({
+      outcome: 'CONFIRMING_PAYMENT',
+    })
+    expect(getAuthorization.mock.calls[0].slice(1)).toEqual([{ paymentIntentId: 'pi_1' }, capture.mock.calls[0][2]])
+    const caja = { timeoutMs: 60_000, maxNetworkRetries: 1 }
+    await captureCharge(capturing, 'ord1', { ...meta, limites: caja })
+    expect(getAuthorization.mock.calls[1].slice(1)).toEqual([{ paymentIntentId: 'pi_1' }, caja])
+    // El reintento de «Mi equipo» (sin límites): la relectura de siempre, con dos argumentos.
+    await captureCharge(capturing, 'ord1', meta)
+    expect(getAuthorization.mock.calls[2]).toHaveLength(2)
   })
 })
 

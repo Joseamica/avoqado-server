@@ -12,14 +12,41 @@ const refund = jest.fn()
 const getRefund = jest.fn()
 const listRefunds = jest.fn()
 const getApplicationFeeRefundedCents = jest.fn()
+const getChargeRefunds = jest.fn()
 jest.mock('@/services/payments/provider-registry', () => ({
   __esModule: true,
-  getProvider: jest.fn(() => ({ refund, getRefund, listRefunds, getApplicationFeeRefundedCents })),
+  getProvider: jest.fn(() => ({ refund, getRefund, listRefunds, getApplicationFeeRefundedCents, getChargeRefunds })),
 }))
 jest.mock('@/services/dashboard/refund.dashboard.service', () => ({
   __esModule: true,
   issueRefund: jest.fn(),
   bloquearCobroParaReembolso: jest.fn(),
+  writeRefundInTx: jest.fn(),
+}))
+// D661 (Task 6): lo que el saldo a favor usa de afuera, espiado (la libreta y el núcleo del reembolso tienen sus propias pruebas).
+jest.mock('@/services/storeCredit/storeCreditTender', () => ({
+  __esModule: true,
+  storeCreditAvailable: jest.fn(() => true),
+  prepararMediosDeSaldoAFavor: jest.fn(async () => undefined),
+  resolveStoreCreditTenderInTx: jest.fn(async () => ({
+    tenderTypeId: 'tt-saldo',
+    tenderRevision: 1,
+    method: 'OTHER',
+    tenderLabel: 'Saldo a favor',
+    tenderCountsAsCash: false,
+    tenderCaptureTip: false,
+    tenderSatFormaPago: '17',
+    tenderCommissionPercent: null,
+    fundsFlow: 'EXTERNAL_RECORDED',
+  })),
+}))
+jest.mock('@/services/giftCards/giftCardLedger', () => ({
+  __esModule: true,
+  abonarSaldoAFavorEnTx: jest.fn(),
+}))
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  __esModule: true,
+  enqueueRefundPaymentEffectsInTx: jest.fn(async () => undefined),
 }))
 jest.mock('@/services/wallet/stampLedger.service', () => ({
   __esModule: true,
@@ -32,17 +59,26 @@ jest.mock('@/services/dashboard/notification.dashboard.service', () => ({
 
 import { logAction } from '@/services/dashboard/activity-log.service'
 import logger from '@/config/logger'
-import { bloquearCobroParaReembolso, issueRefund } from '@/services/dashboard/refund.dashboard.service'
+import { bloquearCobroParaReembolso, issueRefund, writeRefundInTx } from '@/services/dashboard/refund.dashboard.service'
+import { prepararMediosDeSaldoAFavor, storeCreditAvailable } from '@/services/storeCredit/storeCreditTender'
+import { abonarSaldoAFavorEnTx } from '@/services/giftCards/giftCardLedger'
+import { enqueueRefundPaymentEffectsInTx } from '@/services/tpv/paymentEffects.service'
 import { sendVenueNotification } from '@/services/dashboard/notification.dashboard.service'
 import { reverseStampForOrder } from '@/services/wallet/stampLedger.service'
 import {
   advanceCardRefund,
   handleStripeRefundEvent,
+  hayDevolucionPorFuera,
   refundCardOnlineOrder,
   resolveReversedCardRefund,
   NEVER_AGAIN,
 } from '@/services/online-ordering/card/refund.service'
-import { sweepCardRefunds } from '@/services/online-ordering/card/refund-reconciler.service'
+import { cerrarDevueltosPendientes, sweepCardRefunds } from '@/services/online-ordering/card/refund-reconciler.service'
+import { cerrarComoDevueltoEnTx } from '@/services/online-ordering/card/devuelto'
+import * as devuelto from '@/services/online-ordering/card/devuelto'
+import { NO_LO_RECOGIO_PAPEL_MS } from '@/services/online-ordering/printClaim.service'
+import { operationHash } from '@/utils/operationHash'
+import { PlazoAgotado } from '@/utils/conPlazo'
 
 const D = (v: string) => new Prisma.Decimal(v)
 const NOW = new Date('2026-10-29T18:00:00.000Z')
@@ -203,7 +239,16 @@ const stateOf = (status: string, o: Partial<{ refundId: string; amountCents: num
 })
 const created = (status: 'PENDING' | 'SUCCEEDED' | 'FAILED', refundId = 're_1') => ({ refundId, amount: 25_000, status })
 const pedir = (
-  o: Partial<{ amount: string; key: string; note: string | null; reason: string; orderId: string; expected: string | null }> = {},
+  o: Partial<{
+    amount: string
+    key: string
+    note: string | null
+    reason: string
+    orderId: string
+    expected: string | null
+    destino: 'CARD' | 'STORE_CREDIT'
+    efectoEsperado: { cierraComoDevuelto: boolean }
+  }> = {},
 ) =>
   refundCardOnlineOrder({
     venueId: 'v1',
@@ -215,6 +260,8 @@ const pedir = (
     note: o.note === undefined ? null : o.note,
     // Sin decir otra cosa, el operador vio la lista al día.
     expectedLatestRefundId: o.expected === undefined ? (masNuevas(rows())[0]?.id ?? null) : o.expected,
+    ...(o.destino ? { destino: o.destino } : {}),
+    ...(o.efectoEsperado ? { efectoEsperado: o.efectoEsperado } : {}),
   })
 
 // Sólo el reloj es falso (`new Date()` del servicio = NOW); los temporizadores siguen reales.
@@ -279,6 +326,7 @@ beforeEach(() => {
   getRefund.mockResolvedValue(stateOf('SUCCEEDED'))
   listRefunds.mockResolvedValue([])
   getApplicationFeeRefundedCents.mockResolvedValue(290)
+  getChargeRefunds.mockResolvedValue({ amountRefundedCents: 0, refunds: [] })
 })
 
 describe('la vista del operador: sólo pasa si lo último que vio sigue siendo lo último (Codex panel r4)', () => {
@@ -698,6 +746,56 @@ describe('sweepCardRefunds', () => {
   })
 })
 
+/**
+ * D661 (ronda 2 de codex-r3, Ruling 73): el recorrido corre bajo el `isRunning` del job del conciliador; una llamada suya a Stripe
+ * cuyo cuerpo nunca termina retenía la bandera para siempre. Lleva el plazo de la pasada (120 s) en CADA llamada a Stripe.
+ */
+describe('D661 (ronda 2 de codex-r3, Ruling 73): el recorrido de devoluciones lleva el plazo de la pasada', () => {
+  const PLAZO = { plazoMs: 120_000 }
+
+  it('cada llamada a Stripe del recorrido (la devolución, su búsqueda, sus lecturas y la comisión devuelta) va con el plazo de 120 s; la petición del panel, sin él (como hoy)', async () => {
+    const nueva = seed({ status: 'REQUESTED' })
+    const sinId = seed({ status: 'SENDING' })
+    seed({ status: 'PENDING', stripeRefundId: 're_p' })
+    seed({ status: 'SUCCEEDED', stripeRefundId: 're_s' })
+    seed({ status: 'RECORDED', stripeRefundId: 're_r', recordedAt: at(-2 * HOUR), stampReversedAt: at(-2 * HOUR) })
+    listRefunds.mockResolvedValue([{ ...stateOf('SUCCEEDED', { refundId: 're_found' }), metadata: { cardRefundId: sinId.id } }])
+
+    await sweepCardRefunds(NOW, readEntry)
+    expect(refund.mock.calls.map(c => c[1].idempotencyKey)).toEqual([`online-order:ord1:refund:${nueva.id}`])
+    for (const llamada of [refund, listRefunds, getRefund, getApplicationFeeRefundedCents]) {
+      expect(llamada).toHaveBeenCalled()
+      for (const args of llamada.mock.calls) expect(args[2]).toEqual(PLAZO)
+    }
+    expect(getRefund.mock.calls.map(c => c[1]).sort()).toEqual(['re_p', 're_r'])
+
+    // La petición del panel (no corre bajo la bandera del job): la llamada de siempre, sin tercer argumento.
+    refund.mockClear()
+    const delPanel = seed({ status: 'REQUESTED' })
+    await advanceCardRefund(delPanel.id, NOW)
+    expect(refund).toHaveBeenCalledTimes(1)
+    expect(refund.mock.calls[0]).toHaveLength(2)
+  })
+
+  it('un plazo agotado al mandar la devolución la deja SENDING (en duda) con su error y su revisión movida; la siguiente pasada la busca y la reenvía con la MISMA llave', async () => {
+    const fila = seed({ status: 'REQUESTED' })
+    refund.mockRejectedValueOnce(new PlazoAgotado(120_000))
+    await expect(sweepCardRefunds(NOW, readEntry)).resolves.toMatchObject({ scanned: 1, errors: 1 })
+    expect(get(fila.id)).toMatchObject({ status: 'SENDING', stripeRefundId: null, lastError: new PlazoAgotado(120_000).message })
+    expect(get(fila.id).nextCheckAt.getTime()).toBeGreaterThan(NOW.getTime())
+
+    // Stripe no la tiene y el envío tiene más de 5 min: se reenvía con la MISMA llave (Stripe repite o crea exactamente una).
+    listRefunds.mockResolvedValue([])
+    await sweepCardRefunds(at(6 * MIN), readEntry)
+    expect(refund).toHaveBeenCalledTimes(2)
+    expect(refund.mock.calls.map(c => c[1].idempotencyKey)).toEqual([
+      `online-order:ord1:refund:${fila.id}`,
+      `online-order:ord1:refund:${fila.id}`,
+    ])
+    expect(get(fila.id).status).toBe('RECORDED')
+  })
+})
+
 describe('resolveReversedCardRefund', () => {
   const reversed = async () => {
     const r = await pedir()
@@ -793,5 +891,739 @@ describe('handleStripeRefundEvent', () => {
     prismaMock.onlineOrderCharge.findUnique.mockResolvedValueOnce(null)
     await handleStripeRefundEvent(event({ id: 're_dep', payment_intent: 'pi_dep', metadata: { type: 'reservation_deposit_refund' } }))
     expect((prismaMock as any).moneyAnomaly.createMany).not.toHaveBeenCalled()
+  })
+})
+
+// ── D661 (Task 5): la llave y el destino ────────────────────────────────────────────────────────────────────────────────────────
+describe('D661 (Task 5): el destino entra a la huella sólo si es saldo a favor', () => {
+  it('un reintento de una fila escrita por el código base (CARD, sin destino en la huella) devuelve su resultado, no 409', async () => {
+    // La huella que escribía el código de antes: importe + motivo + nota, sin destino.
+    const previa = seed({
+      key: 'llave-del-codigo-base',
+      status: 'RECORDED',
+      stripeRefundId: 're_base',
+      refundPaymentId: 'pay-refund-base',
+      stampReversedAt: NOW,
+      requestHash: operationHash({ amountCents: 25_000, reason: 'CANCELLED_ORDER', note: null }),
+    })
+    for (const destino of [undefined, 'CARD'] as const) {
+      await expect(pedir({ key: 'llave-del-codigo-base', ...(destino ? { destino } : {}) })).resolves.toMatchObject({
+        cardRefundId: previa.id,
+        refundId: 'pay-refund-base',
+        replay: true,
+      })
+    }
+    expect(store.size).toBe(1)
+    expect(refund).not.toHaveBeenCalled()
+  })
+
+  it('misma llave con STORE_CREDIT → 409', async () => {
+    const primera = await pedir()
+    await expect(pedir({ destino: 'STORE_CREDIT' })).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_REUSED' })
+    expect(store.size).toBe(1)
+    expect(get(primera.cardRefundId).status).toBe('RECORDED')
+    expect(refund).toHaveBeenCalledTimes(1)
+  })
+
+  it('STORE_CREDIT con una llave nueva: 4xx «no disponible», nunca se trata como tarjeta (ni fila ni Stripe)', async () => {
+    await expect(pedir({ destino: 'STORE_CREDIT', key: 'llave-saldo-nueva' })).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'REFUND_DESTINATION_NOT_AVAILABLE',
+      message: expect.stringContaining('saldo a favor'),
+    })
+    expect(store.size).toBe(0)
+    expect(refund).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+// ── D661 (Task 5): «Cancelar y devolver» a la tarjeta en «Nadie»: 100 %, reserva antes de Stripe y cierre «Devuelto» ────────
+describe('D661 (Task 5): devolver a la tarjeta un pedido de «Nadie»', () => {
+  type Pedido = Row
+  const PEDIDO: Pedido = {
+    id: 'oo1',
+    orderId: 'ord1',
+    paymentMode: 'CARD_ONLINE',
+    requiresAcceptance: false,
+    status: 'ACCEPTED',
+    refundRequestedAt: null,
+    refundedAt: null,
+    completedAt: null,
+    printClaimedAt: null,
+    printedAt: null,
+    order: { orderNumber: 'W-1' },
+  }
+  let pedido: Pedido
+  /** El doble de la tabla, tomado UNA vez (antes de envolverlo para registrar en qué transacción escribe). */
+  const updateManyDeLaTabla = cardRefund.updateMany.getMockImplementation()!
+  /** Qué transacción hizo cada escritura (0 = ninguna): el retiro de la reserva va en la MISMA que el estado terminal (r5 #4). */
+  let tx = 0
+  let txAbierta = 0
+  const escrituras: Array<{ que: string; tx: number; arg: any }> = []
+  /** El pedido, en memoria: contesta el CAS como Postgres (estado, marcas y modo en el `where`). */
+  const cumple = (p: Pedido, where: Record<string, any>): boolean =>
+    Object.entries(where).every(([k, v]) => {
+      if (['orderId', 'venueId', 'charge'].includes(k)) return true // un solo pedido; la fila de devolución anotada la da la prueba
+      if (k === 'OR') return (v as Record<string, any>[]).some(sub => cumple(p, sub))
+      if (v && typeof v === 'object' && !(v instanceof Date)) {
+        if ('in' in v) return v.in.includes(p[k])
+        if ('not' in v) return p[k] !== v.not
+        if ('lt' in v) return p[k] != null && p[k] < v.lt
+      }
+      if (v === null) return p[k] == null
+      return p[k] === v
+    })
+
+  beforeEach(() => {
+    pedido = { ...PEDIDO }
+    tx = 0
+    txAbierta = 0
+    escrituras.length = 0
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => {
+      txAbierta = ++tx
+      try {
+        return await fn(prismaMock)
+      } finally {
+        txAbierta = 0
+      }
+    })
+    prismaMock.onlineOrder.findFirst.mockImplementation((async () => ({ ...pedido, charge: CHARGE })) as any)
+    prismaMock.onlineOrder.updateMany.mockImplementation((async (a: any) => {
+      escrituras.push({ que: 'onlineOrder', tx: txAbierta, arg: a })
+      if (!cumple(pedido, a.where)) return { count: 0 }
+      Object.assign(pedido, a.data)
+      return { count: 1 }
+    }) as any)
+    prismaMock.order.updateMany.mockImplementation((async (a: any) => {
+      escrituras.push({ que: 'order', tx: txAbierta, arg: a })
+      return { count: 1 }
+    }) as any)
+    prismaMock.activityLog.create.mockImplementation((async (a: any) => {
+      escrituras.push({ que: 'activityLog', tx: txAbierta, arg: a })
+      return { id: 'al1' }
+    }) as any)
+    prismaMock.onlineOrderCharge.findUnique.mockImplementation((async () => ({
+      ...CHARGE,
+      onlineOrder: { orderId: 'ord1', requiresAcceptance: pedido.requiresAcceptance },
+    })) as any)
+    cardRefund.updateMany.mockImplementation(async (a: any) => {
+      escrituras.push({ que: 'cardRefund', tx: txAbierta, arg: a })
+      return updateManyDeLaTabla(a)
+    })
+  })
+  // La tabla de devoluciones vuelve a su doble sin registro.
+  afterAll(() => cardRefund.updateMany.mockImplementation(updateManyDeLaTabla))
+  const cierres = () => escrituras.filter(e => e.que === 'activityLog' && e.arg.data.action === 'ONLINE_ORDER_CLOSED_AS_REFUNDED')
+
+  it('«Nadie»: parcial → 400 FULL_REFUND_ONLY; «Mi equipo» parcial sigue', async () => {
+    await expect(pedir({ amount: '125.00' })).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'FULL_REFUND_ONLY',
+      message: expect.stringContaining('$250.00'),
+    })
+    expect(store.size).toBe(0)
+    expect(refund).not.toHaveBeenCalled()
+    expect(pedido.refundRequestedAt).toBeNull()
+
+    // «Mi equipo»: la parcial pasa como hoy, sin reserva ni cierre.
+    pedido = { ...PEDIDO, requiresAcceptance: true }
+    await expect(pedir({ amount: '125.00', key: 'llave-mi-equipo' })).resolves.toMatchObject({ status: 'RECORDED' })
+    expect(pedido).toMatchObject({ status: 'ACCEPTED', refundRequestedAt: null, refundedAt: null })
+    expect(escrituras.filter(e => e.que === 'onlineOrder')).toHaveLength(0)
+    expect(cierres()).toHaveLength(0)
+  })
+
+  it('reserva antes de Stripe; con la reserva, entregar → 409 (la reserva va bajo el candado, en la transacción de la fila)', async () => {
+    let reservadaAlLlamarAStripe: unknown = 'no se llamó'
+    refund.mockImplementation(async () => {
+      reservadaAlLlamarAStripe = pedido.refundRequestedAt
+      return created('PENDING')
+    })
+    const r = await pedir()
+    expect(r).toMatchObject({ status: 'PENDING', cardRefundStatus: 'PENDING' })
+    expect(reservadaAlLlamarAStripe).toEqual(NOW)
+    const reserva = escrituras.find(e => e.que === 'onlineOrder' && e.arg.data.refundRequestedAt)!
+    expect(reserva.arg).toEqual({
+      where: {
+        id: 'oo1',
+        requiresAcceptance: false,
+        paymentMode: 'CARD_ONLINE',
+        status: { in: ['ACCEPTED', 'READY'] },
+        refundRequestedAt: null,
+        refundedAt: null,
+        // Ruling 9: el reclamo de papel no toma el candado de la orden; el CAS repite «sin papel en vuelo».
+        OR: [{ printClaimedAt: null }, { printedAt: { not: null } }, { printClaimedAt: { lt: at(-90_000) } }],
+      },
+      data: { refundRequestedAt: NOW },
+    })
+    // Bajo el candado de la orden y en la MISMA transacción que la fila.
+    expect(reserva.tx).toBeGreaterThan(0)
+    expect(cardRefund.create.mock.invocationCallOrder[0]).toBeGreaterThan(prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0])
+    expect((prismaMock.$queryRaw as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0],
+    )
+    // Mientras Stripe no devuelve, sigue «Devolviendo…» (no se cierra).
+    expect(pedido).toMatchObject({ status: 'ACCEPTED', refundRequestedAt: NOW, refundedAt: null })
+    expect(cierres()).toHaveLength(0)
+  })
+
+  it('RECORDED → pedido COMPLETED con refundedAt, la cocina pendiente se limpia y la bitácora del cierre queda una vez (en su transacción)', async () => {
+    const r = await pedir()
+    expect(r).toMatchObject({ status: 'RECORDED' })
+    expect(pedido).toMatchObject({ status: 'COMPLETED', completedAt: NOW, refundedAt: NOW, refundRequestedAt: NOW })
+    const cierre = escrituras.find(e => e.que === 'onlineOrder' && e.arg.data.status === 'COMPLETED')!
+    expect(cierre.arg.where).toMatchObject({
+      id: 'oo1',
+      requiresAcceptance: false,
+      paymentMode: 'CARD_ONLINE',
+      status: { in: ['ACCEPTED', 'READY'] },
+      refundRequestedAt: { not: null },
+      refundedAt: null,
+    })
+    expect(escrituras).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          que: 'order',
+          tx: cierre.tx,
+          arg: { where: { id: 'ord1', venueId: 'v1' }, data: { kitchenPendingAt: null } },
+        }),
+      ]),
+    )
+    expect(cierres()).toHaveLength(1)
+    expect(cierres()[0]).toMatchObject({
+      tx: cierre.tx,
+      arg: { data: { venueId: 'v1', entity: 'OnlineOrder', entityId: 'oo1', staffId: 'staff1' } },
+    })
+
+    // Otra pasada (o el barrido) no lo vuelve a cerrar ni repite la bitácora.
+    await advanceCardRefund(r.cardRefundId, at(HOUR))
+    expect(cierres()).toHaveLength(1)
+  })
+
+  it('cerrarComoDevueltoEnTx es idempotente: la segunda vez no escribe nada', async () => {
+    pedido = { ...PEDIDO, refundRequestedAt: NOW }
+    await expect(cerrarComoDevueltoEnTx(prismaMock as any, { venueId: 'v1', orderId: 'ord1', now: NOW })).resolves.toMatchObject({
+      cerrado: true,
+    })
+    await expect(cerrarComoDevueltoEnTx(prismaMock as any, { venueId: 'v1', orderId: 'ord1', now: at(MIN) })).resolves.toEqual({
+      cerrado: false,
+    })
+    expect(pedido.refundedAt).toEqual(NOW)
+    expect(cierres()).toHaveLength(1)
+    // Sin reserva un pedido entregable NO se cierra (nunca «Devuelto» sin que una devolución lo haya reservado).
+    pedido = { ...PEDIDO }
+    await expect(cerrarComoDevueltoEnTx(prismaMock as any, { venueId: 'v1', orderId: 'ord1', now: NOW })).resolves.toEqual({
+      cerrado: false,
+    })
+    expect(pedido.status).toBe('ACCEPTED')
+  })
+
+  it('devolver un pedido ya entregado: queda COMPLETED con refundedAt, sin reserva', async () => {
+    const ENTREGADO = new Date('2026-10-29T17:00:00.000Z')
+    pedido = { ...PEDIDO, status: 'COMPLETED', completedAt: ENTREGADO }
+    await expect(pedir()).resolves.toMatchObject({ status: 'RECORDED' })
+    expect(pedido).toMatchObject({ status: 'COMPLETED', completedAt: ENTREGADO, refundRequestedAt: null, refundedAt: NOW })
+    expect(escrituras.find(e => e.que === 'onlineOrder' && e.arg.data.refundRequestedAt)).toBeUndefined()
+    expect(cierres()).toHaveLength(1)
+  })
+
+  it.each(['FAILED', 'CANCELED'] as const)(
+    'FAILED → se quita la reserva, vuelve a entregable, con aviso (Stripe dice %s); el estado terminal y el retiro, en UNA transacción',
+    async desenlace => {
+      refund.mockResolvedValue(created('PENDING'))
+      const r = await pedir()
+      expect(pedido.refundRequestedAt).toEqual(NOW)
+      getRefund.mockResolvedValue(stateOf(desenlace, { failureReason: 'declined' }))
+      await expect(advanceCardRefund(r.cardRefundId, at(MIN))).resolves.toBe(desenlace)
+
+      expect(pedido).toMatchObject({ status: 'ACCEPTED', refundRequestedAt: null, refundedAt: null })
+      const terminal = escrituras.find(e => e.que === 'cardRefund' && e.arg.data.status === desenlace)!
+      const retiro = escrituras.find(
+        e => e.que === 'onlineOrder' && 'refundRequestedAt' in e.arg.data && e.arg.data.refundRequestedAt === null,
+      )!
+      expect(terminal.tx).toBeGreaterThan(0)
+      expect(retiro.tx).toBe(terminal.tx)
+      expect(retiro.arg.where).toMatchObject({
+        orderId: 'ord1',
+        venueId: 'v1',
+        requiresAcceptance: false,
+        // D661 (B3): también la reserva de un «No lo recogió» (la pone el papel); su cocina no se rearma (abajo, sólo por entregar).
+        status: { in: ['ACCEPTED', 'READY', 'COMPLETED'] },
+        refundRequestedAt: { not: null },
+        refundedAt: null,
+      })
+      // Cocina retoma: la marca vuelve a quedar escrita en la misma transacción.
+      expect(escrituras).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            que: 'order',
+            tx: terminal.tx,
+            arg: { where: { id: 'ord1', venueId: 'v1' }, data: { kitchenPendingAt: at(MIN) } },
+          }),
+        ]),
+      )
+      expect(sendVenueNotification).toHaveBeenCalledWith(
+        'v1',
+        expect.objectContaining({ message: expect.stringContaining('W-1'), entityId: r.cardRefundId }),
+        expect.any(Array),
+      )
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'ONLINE_ORDER_CARD_REFUND_FAILED', entityId: r.cardRefundId }),
+      )
+      expect(cierres()).toHaveLength(0)
+    },
+  )
+
+  it('Ruling 9: con un reclamo de papel en vuelo no se reserva (409 PRINT_IN_FLIGHT); vencido o ya impreso, sí', async () => {
+    pedido = { ...PEDIDO, printClaimedAt: at(-30_000) }
+    await expect(pedir()).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PRINT_IN_FLIGHT',
+      message: 'Se está imprimiendo la comanda; intenta en un momento',
+    })
+    expect(store.size).toBe(0)
+    expect(pedido.refundRequestedAt).toBeNull()
+    expect(refund).not.toHaveBeenCalled()
+
+    for (const [i, papel] of [{ printClaimedAt: at(-91_000) }, { printClaimedAt: at(-30_000), printedAt: at(-10_000) }].entries()) {
+      store.clear()
+      pedido = { ...PEDIDO, ...papel }
+      await expect(pedir({ key: `llave-papel-${i}`, expected: null })).resolves.toMatchObject({ status: 'RECORDED' })
+    }
+  })
+
+  it('D661 · D (Ruling 44): un reclamo VIVO frena la devolución aunque la ventana de 2 h del «No lo recogió» ya no admita reclamos nuevos; vencido, se devuelve como antes (sin reserva)', async () => {
+    // El corte fue hace 2 h + 1 s (la ventana ya no admite reclamos NUEVOS) y una caja ganó el suyo 10 s antes de que cerrara.
+    const corte = at(-NO_LO_RECOGIO_PAPEL_MS - 1000)
+    pedido = { ...PEDIDO, status: 'COMPLETED', completedAt: corte, notPickedUpAt: corte, printClaimedAt: at(-11_000) }
+    await expect(pedir()).rejects.toMatchObject({ statusCode: 409, code: 'PRINT_IN_FLIGHT' })
+    expect(store.size).toBe(0)
+    expect(refund).not.toHaveBeenCalled()
+    expect(pedido.refundRequestedAt).toBeNull()
+
+    // El reclamo venció sin confirmarse: ya no hay papel en vuelo; fuera de la ventana se devuelve sin reserva, como antes.
+    pedido = { ...pedido, printClaimedAt: at(-91_000) }
+    await expect(pedir({ key: 'llave-fuera-de-ventana', expected: null })).resolves.toMatchObject({ status: 'RECORDED' })
+    expect(pedido).toMatchObject({ refundRequestedAt: null, refundedAt: NOW })
+  })
+
+  it('MCP: el efecto esperado se revalida bajo el candado; si cambió, 409 y nada escrito', async () => {
+    // La vista previa dijo «también lo cierra como Devuelto», pero ya se entregó.
+    pedido = { ...PEDIDO, status: 'COMPLETED', completedAt: NOW }
+    await expect(pedir({ efectoEsperado: { cierraComoDevuelto: true } })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'REFUND_EFFECT_CHANGED',
+      message: expect.stringContaining('vista previa nueva'),
+    })
+    // Y al revés: la vista previa no lo cerraba y ahora sí está por entregar.
+    pedido = { ...PEDIDO }
+    await expect(pedir({ efectoEsperado: { cierraComoDevuelto: false } })).rejects.toMatchObject({ code: 'REFUND_EFFECT_CHANGED' })
+    expect(store.size).toBe(0)
+    expect(refund).not.toHaveBeenCalled()
+    expect(pedido.refundRequestedAt).toBeNull()
+    // Igual que lo visto: pasa.
+    await expect(pedir({ efectoEsperado: { cierraComoDevuelto: true } })).resolves.toMatchObject({ status: 'RECORDED' })
+    expect(pedido.status).toBe('COMPLETED')
+  })
+
+  it('el barrido cierra lo que quedó anotado sin cerrar (RECORDED, REVERSED o RESOLVED) y no toca otra cosa', async () => {
+    pedido = { ...PEDIDO, refundRequestedAt: NOW }
+    const pendientes = jest.fn(async () => [{ venueId: 'v1', staffId: 'staff1', charge: { onlineOrder: { orderId: 'ord1' } } }])
+    cardRefund.findMany.mockImplementationOnce(pendientes as any)
+    await expect(cerrarDevueltosPendientes({ venueId: 'v1' }, at(MIN), readEntry)).resolves.toBe(1)
+    expect(pedido).toMatchObject({ status: 'COMPLETED', refundedAt: at(MIN) })
+    const consulta = (pendientes.mock.calls[0] as any[])[0]
+    expect(consulta.where.venueId).toBe('v1')
+    expect(consulta.where.status).toEqual({ in: ['RECORDED', 'REVERSED', 'RESOLVED'] })
+    expect(consulta.take).toBe(50)
+    // Lo mismo dentro del recorrido de cada minuto (sin sucursal).
+    cardRefund.findMany.mockImplementationOnce(async () => []) // las filas por revisar
+    cardRefund.findMany.mockImplementationOnce(async () => []) // las por cerrar
+    await expect(sweepCardRefunds(at(2 * MIN), readEntry)).resolves.toMatchObject({ closed: 0 })
+  })
+
+  it('D661 · C5: el barrido de cierres sólo mira el último mes y rota: un lote lleno que no se cierra no tapa a los de atrás', async () => {
+    const DIA = 24 * 60 * MIN
+    const consultas = () => (cardRefund.findMany.mock.calls as any[][]).map(c => c[0])
+    // 50 filas anotadas que no se pueden cerrar (aquí, sin pedido): el lote siguiente empieza DESPUÉS de la última.
+    const lote = Array.from({ length: 50 }, (_, i) => ({
+      venueId: 'v1',
+      staffId: null,
+      id: `cr${String(i).padStart(2, '0')}`,
+      createdAt: at(i * 1000),
+      charge: { onlineOrder: null },
+    }))
+    cardRefund.findMany.mockClear()
+    cardRefund.findMany.mockImplementationOnce(async () => lote as any)
+    await expect(cerrarDevueltosPendientes({ venueId: 'v1' }, NOW, readEntry)).resolves.toBe(0)
+    const primera = consultas()[0]
+    expect(primera.where.createdAt).toEqual({ gte: new Date(NOW.getTime() - 31 * DIA) })
+    expect(primera.where.OR).toBeUndefined()
+    expect(primera.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }])
+
+    cardRefund.findMany.mockImplementationOnce(async () => [])
+    await cerrarDevueltosPendientes({ venueId: 'v1' }, NOW, readEntry)
+    expect(consultas()[1].where.OR).toEqual([{ createdAt: { gt: at(49_000) } }, { createdAt: at(49_000), id: { gt: 'cr49' } }])
+    expect(consultas()[1].where.createdAt).toEqual({ gte: new Date(NOW.getTime() - 31 * DIA) })
+
+    // Una página corta cierra la vuelta: la siguiente empieza otra vez desde la más vieja del mes.
+    cardRefund.findMany.mockImplementationOnce(async () => [])
+    await cerrarDevueltosPendientes({ venueId: 'v1' }, NOW, readEntry)
+    expect(consultas()[2].where.OR).toBeUndefined()
+    // Cada alcance rota aparte (el recorrido de cada minuto no hereda la vuelta de una sucursal).
+    cardRefund.findMany.mockImplementationOnce(async () => lote as any)
+    await cerrarDevueltosPendientes({ venueId: 'v1' }, NOW, readEntry)
+    cardRefund.findMany.mockImplementationOnce(async () => [])
+    await cerrarDevueltosPendientes({}, NOW, readEntry)
+    expect(consultas()[4].where.OR).toBeUndefined()
+  })
+})
+
+// ── D661 (Task 6): devolver a saldo a favor (local, atómico) y la devolución hecha por fuera en Stripe (Ruling 28) ─────────────────
+describe('D661 (Task 6): saldo a favor y devolución por fuera en Stripe', () => {
+  const VERIFICADO = '+525511112222'
+  const CARGO_NADIE = {
+    ...CHARGE,
+    request: { customerId: 'cus1', telefonoVerificado: VERIFICADO, nadie: true },
+    onlineOrder: { requiresAcceptance: false },
+  }
+  const PEDIDO = {
+    id: 'oo1',
+    orderId: 'ord1',
+    paymentMode: 'CARD_ONLINE',
+    requiresAcceptance: false,
+    status: 'ACCEPTED',
+    refundRequestedAt: null,
+    refundedAt: null,
+    completedAt: null,
+    printClaimedAt: null,
+    printedAt: null,
+    order: { orderNumber: 'W-1' },
+  }
+  let pedido: Row
+  let cargo: Row
+  /** Qué escribió cada paso y en qué transacción (0 = ninguna). */
+  let tx = 0
+  let txAbierta = 0
+  const pasos: Array<{ que: string; tx: number; arg?: any }> = []
+  const paso = (que: string, arg?: any) => pasos.push({ que, tx: txAbierta, arg })
+  const updateManyDeLaTabla = cardRefund.updateMany.getMockImplementation()!
+  const createDeLaTabla = cardRefund.create.getMockImplementation()!
+  const cumple = (p: Row, where: Record<string, any>): boolean =>
+    Object.entries(where).every(([k, v]) => {
+      if (['orderId', 'venueId', 'charge'].includes(k)) return true
+      if (k === 'OR') return (v as Record<string, any>[]).some(sub => cumple(p, sub))
+      if (v && typeof v === 'object' && !(v instanceof Date)) {
+        if ('in' in v) return v.in.includes(p[k])
+        if ('not' in v) return p[k] !== v.not
+        if ('lt' in v) return p[k] != null && p[k] < v.lt
+      }
+      if (v === null) return p[k] == null
+      return p[k] === v
+    })
+  const aSaldo = (o: Parameters<typeof pedir>[0] = {}) => pedir({ destino: 'STORE_CREDIT', key: 'llave-saldo-1', ...o })
+  const nada = () => {
+    expect(store.size).toBe(0)
+    expect(refund).not.toHaveBeenCalled()
+    expect(writeRefundInTx).not.toHaveBeenCalled()
+    expect(abonarSaldoAFavorEnTx).not.toHaveBeenCalled()
+    expect(pedido.refundRequestedAt).toBeNull()
+    expect(pedido.refundedAt).toBeNull()
+  }
+
+  beforeEach(() => {
+    pedido = { ...PEDIDO }
+    cargo = { ...CARGO_NADIE }
+    tx = 0
+    txAbierta = 0
+    pasos.length = 0
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => {
+      txAbierta = ++tx
+      try {
+        return await fn(prismaMock)
+      } finally {
+        txAbierta = 0
+      }
+    })
+    ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (q: any, ...valores: any[]) => {
+      const sql = Array.isArray(q) ? q.join('?') : Array.isArray(q?.strings) ? q.strings.join('?') : String(q)
+      if (sql.includes('pg_advisory_xact_lock')) paso(`candado:${String(valores[0]).split(':')[0]}`)
+      else paso('candado:orden')
+      return [{ id: 'ord1' }]
+    })
+    prismaMock.giftCard.findFirst.mockResolvedValue(null) // la sucursal todavía no tiene sobres: se toma «primer-sobre»
+    prismaMock.onlineOrderCharge.findFirst.mockImplementation((async () => cargo) as any)
+    prismaMock.onlineOrder.findFirst.mockImplementation((async () => ({ ...pedido, charge: cargo })) as any)
+    prismaMock.onlineOrder.updateMany.mockImplementation((async (a: any) => {
+      paso('pedido', a)
+      if (!cumple(pedido, a.where)) return { count: 0 }
+      Object.assign(pedido, a.data)
+      return { count: 1 }
+    }) as any)
+    prismaMock.order.updateMany.mockImplementation((async (a: any) => (paso('cuenta', a), { count: 1 })) as any)
+    prismaMock.activityLog.create.mockImplementation((async (a: any) => (paso('bitacora', a), { id: 'al1' })) as any)
+    ;(bloquearCobroParaReembolso as jest.Mock).mockImplementation(async () => {
+      paso('cobro')
+      return {
+        original: { id: 'pay1', orderId: 'ord1', amount: '250.00', tipAmount: '0.00' },
+        refundedSalesCents: 0,
+        refundedTipsCents: 0,
+        unclassifiedPriorRefundCents: 0,
+        remainingBeforeCents: 25_000,
+      }
+    })
+    cardRefund.create.mockImplementation(async (a: any) => (paso('fila', a), createDeLaTabla(a)))
+    cardRefund.updateMany.mockImplementation(async (a: any) => (paso('fila:update', a), updateManyDeLaTabla(a)))
+    ;(cardRefund as any).update = jest.fn(async ({ where, data }: any) => {
+      paso('fila:update', { where, data })
+      Object.assign(store.get(where.id)!, data)
+      return { ...store.get(where.id)! }
+    })
+    ;(writeRefundInTx as jest.Mock).mockImplementation(async (t: any, input: any) => {
+      paso('renglon', input)
+      // El núcleo real llama al abono en SU transacción, tras escribir la fila REFUND.
+      const abono = await input.aSaldoAFavor.abonar(
+        t,
+        'pay-refund-saldo',
+        { venueId: 'v1', customerId: 'cus1' },
+        { orderId: 'ord1', montoCents: 25_000 },
+      )
+      return { refundPaymentId: 'pay-refund-saldo', replay: false, abono }
+    })
+    ;(abonarSaldoAFavorEnTx as jest.Mock).mockImplementation(async (_t: any, p: any) => {
+      paso('abono', p)
+      return { giftCardId: 'gc1', abonado: p.monto, saldoNuevo: p.monto, telefonoDelSobre: VERIFICADO, telefonoNoCoincide: false }
+    })
+    ;(enqueueRefundPaymentEffectsInTx as jest.Mock).mockImplementation(async (...a: any[]) => paso('efectos', a))
+    ;(storeCreditAvailable as jest.Mock).mockReturnValue(true)
+  })
+  afterAll(() => {
+    cardRefund.updateMany.mockImplementation(updateManyDeLaTabla)
+    cardRefund.create.mockImplementation(createDeLaTabla)
+    prismaMock.onlineOrderCharge.findFirst.mockReset()
+    prismaMock.giftCard.findFirst.mockReset()
+  })
+
+  it('saldo a favor: en UNA transacción — primer-sobre, orden, cobro, reserva, fila RESOLVED, renglón REFUND con el abono, efectos y cierre; Stripe no devuelve nada', async () => {
+    const r = await aSaldo()
+    expect(r).toMatchObject({ status: 'RECORDED', cardRefundStatus: 'RESOLVED', refundId: 'pay-refund-saldo', replay: false })
+    expect(refund).not.toHaveBeenCalled()
+    expect(getRefund).not.toHaveBeenCalled()
+
+    // El orden de los candados y de las escrituras (primer-sobre ANTES de la orden, como writeRefundInTx exige).
+    const enLaTx = pasos.filter(p => p.tx > 0)
+    expect(new Set(enLaTx.map(p => p.tx)).size).toBe(1)
+    const orden = enLaTx.map(p => p.que)
+    const primero = (que: string) => orden.indexOf(que)
+    expect(primero('candado:primer-sobre')).toBe(0)
+    for (const [antes, despues] of [
+      ['candado:primer-sobre', 'candado:orden'],
+      ['candado:orden', 'cobro'],
+      ['cobro', 'pedido'],
+      ['pedido', 'fila'],
+      ['fila', 'renglon'],
+      ['renglon', 'abono'],
+      ['abono', 'efectos'],
+      ['efectos', 'bitacora'],
+    ])
+      expect({ antes, despues, ok: primero(antes) > -1 && primero(antes) < primero(despues) }).toMatchObject({ ok: true })
+
+    // La fila nace RESOLVED a saldo (nunca REQUESTED), fuera del recorrido de Stripe, y queda ligada a su renglón.
+    const fila = rows()[0]
+    expect(pasos.find(p => p.que === 'fila')!.arg.data).toMatchObject({
+      status: 'RESOLVED',
+      toStoreCredit: true,
+      amountCents: 25_000,
+      feeRefundedCents: 0,
+      recordedAt: NOW,
+      nextCheckAt: NEVER_AGAIN,
+    })
+    expect(fila).toMatchObject({ status: 'RESOLVED', toStoreCredit: true, refundPaymentId: 'pay-refund-saldo', stripeRefundId: null })
+    // El renglón: el núcleo con la transacción, el cobro ya bloqueado, a saldo con el medio de sistema y sin turno vivo.
+    expect(pasos.find(p => p.que === 'renglon')!.arg).toMatchObject({
+      originalPaymentId: 'pay1',
+      venueId: 'v1',
+      salesRefundCents: 25_000,
+      tipRefundCents: 0,
+      refundedItems: [],
+      reason: 'CANCELLED_ORDER',
+      staffId: 'staff1',
+      idempotencyKey: `oocr_${fila.id}`,
+      tenderCommission: 'NONE',
+      shift: 'INHERIT_ORIGINAL',
+      provenance: 'MANUAL',
+      aSaldoAFavor: {
+        customerId: 'cus1',
+        tender: expect.objectContaining({
+          tenderTypeId: 'tt-saldo',
+          merchantAccountId: null,
+          source: 'OTHER',
+          fundsFlow: 'EXTERNAL_RECORDED',
+        }),
+      },
+    })
+    expect(enqueueRefundPaymentEffectsInTx).toHaveBeenCalledWith(prismaMock, 'pay-refund-saldo', 'pay1')
+    // El cierre «Devuelto», en la MISMA transacción.
+    expect(pedido).toMatchObject({ status: 'COMPLETED', refundRequestedAt: NOW, refundedAt: NOW, completedAt: NOW })
+    expect(pasos.filter(p => p.que === 'bitacora' && p.arg.data.action === 'ONLINE_ORDER_CLOSED_AS_REFUNDED')).toHaveLength(1)
+    expect(prepararMediosDeSaldoAFavor).toHaveBeenCalledWith('v1')
+  })
+
+  it('D661 · C4: si el cierre «Devuelto» compartido no cierra tras abonar ({ cerrado: false }), 409 ORDER_STATE_CHANGED DENTRO de la transacción del abono: nada queda abonado ni se anuncia', async () => {
+    const cierre = jest.spyOn(devuelto, 'cerrarComoDevueltoEnTx').mockImplementationOnce(async () => {
+      paso('cierre')
+      return { cerrado: false }
+    })
+    try {
+      await expect(aSaldo()).rejects.toMatchObject({ statusCode: 409, code: 'ORDER_STATE_CHANGED' })
+    } finally {
+      cierre.mockRestore()
+    }
+    // La fila, el renglón, el abono y el cierre fallido van en UNA transacción (la que truena y se revierte entera).
+    const deLaTx = pasos.filter(p => ['fila', 'renglon', 'abono', 'cierre'].includes(p.que))
+    expect(deLaTx.map(p => p.que)).toEqual(['fila', 'renglon', 'abono', 'cierre'])
+    expect(new Set(deLaTx.map(p => p.tx)).size).toBe(1)
+    expect(deLaTx[0].tx).toBeGreaterThan(0)
+    // Nada después del commit: ni la bitácora del saldo ni la de la devolución.
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDER_REFUNDED_TO_STORE_CREDIT' }))
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'REFUND_CREATED' }))
+  })
+
+  it('saldo a favor: la libreta recibe la clienta y el teléfono VERIFICADO del borrador (exigirMismoTelefono), el 100 % y el folio', async () => {
+    await aSaldo()
+    expect(abonarSaldoAFavorEnTx).toHaveBeenCalledTimes(1)
+    expect((abonarSaldoAFavorEnTx as jest.Mock).mock.calls[0][1]).toMatchObject({
+      monto: D('250'),
+      staffId: 'staff1',
+      origen: { orderId: 'ord1', refundPaymentId: 'pay-refund-saldo' },
+      folio: 'W-1',
+      tipo: 'REEMBOLSO',
+      exigirMismoTelefono: { telefonoVerificado: VERIFICADO },
+    })
+    // Sin teléfono verificado se pasa null (la libreta decide: sin sobre no abre uno, con sobre no lo reconoce).
+    store.clear()
+    pedido = { ...PEDIDO }
+    cargo = { ...CARGO_NADIE, request: { customerId: 'cus1', nadie: true } }
+    await aSaldo({ key: 'llave-saldo-2', expected: null })
+    expect((abonarSaldoAFavorEnTx as jest.Mock).mock.calls[1][1].exigirMismoTelefono).toEqual({ telefonoVerificado: null })
+  })
+
+  it('saldo a favor sin clienta en el borrador → 400 STORE_CREDIT_CUSTOMER_REQUIRED y nada escrito', async () => {
+    cargo = { ...CARGO_NADIE, request: { nadie: true } }
+    await expect(aSaldo()).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'STORE_CREDIT_CUSTOMER_REQUIRED',
+      message: expect.stringContaining('tarjeta'),
+    })
+    nada()
+  })
+
+  it('saldo a favor sin las llaves del servidor (lo mismo que /info.storeCredit) → 422 STORE_CREDIT_UNAVAILABLE, sin leer Stripe ni escribir', async () => {
+    ;(storeCreditAvailable as jest.Mock).mockReturnValue(false)
+    await expect(aSaldo()).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'STORE_CREDIT_UNAVAILABLE',
+      message: expect.stringContaining('tarjeta'),
+    })
+    expect(getChargeRefunds).not.toHaveBeenCalled()
+    expect(prepararMediosDeSaldoAFavor).not.toHaveBeenCalled()
+    nada()
+  })
+
+  it('saldo a favor en «Mi equipo» → 400 REFUND_DESTINATION_NOT_AVAILABLE (sólo tarjeta), sin leer Stripe ni escribir', async () => {
+    pedido = { ...PEDIDO, requiresAcceptance: true }
+    cargo = { ...CARGO_NADIE, onlineOrder: { requiresAcceptance: true } }
+    await expect(aSaldo()).rejects.toMatchObject({ statusCode: 400, code: 'REFUND_DESTINATION_NOT_AVAILABLE' })
+    expect(getChargeRefunds).not.toHaveBeenCalled()
+    nada()
+  })
+
+  it('«Mi equipo» con tarjeta no lee Stripe antes de devolver (sin cambio)', async () => {
+    pedido = { ...PEDIDO, requiresAcceptance: true }
+    cargo = { ...CARGO_NADIE, onlineOrder: { requiresAcceptance: true } }
+    await expect(pedir({ amount: '125.00', key: 'llave-mi-equipo' })).resolves.toMatchObject({ status: 'RECORDED' })
+    expect(getChargeRefunds).not.toHaveBeenCalled()
+  })
+
+  // Ruling 28: cualquier devolución por fuera de Avoqado (hecha o pendiente, total o parcial) frena los DOS destinos.
+  const POR_FUERA = {
+    '100 % hecha por fuera': { amountRefundedCents: 25_000, refunds: [stateOf('SUCCEEDED', { refundId: 're_fuera' })] },
+    'parcial pendiente por fuera': {
+      amountRefundedCents: 5_000,
+      refunds: [stateOf('PENDING', { refundId: 're_fuera', amountCents: 5_000 })],
+    },
+    // Stripe dice que algo ya se devolvió aunque la lista no la traiga: también frena.
+    'sólo amount_refunded': { amountRefundedCents: 1_000, refunds: [] },
+  }
+  it.each(
+    (['STORE_CREDIT', 'CARD'] as const).flatMap(destino =>
+      Object.entries(POR_FUERA).map(([caso, estado]) => [destino, caso, estado] as const),
+    ),
+  )(
+    'Ruling 28 · %s con %s → 409 EXTERNAL_REFUND_DETECTED: nada se reserva, nada se abona, nada se manda a Stripe',
+    async (destino, _caso, estado) => {
+      getChargeRefunds.mockResolvedValue({ ...estado, refunds: estado.refunds.map(r => ({ ...r, metadata: {} })) })
+      await expect(pedir({ destino, key: `llave-fuera-${destino}` })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'EXTERNAL_REFUND_DETECTED',
+        message: expect.stringMatching(/fuera de Avoqado[\s\S]*Stripe/),
+      })
+      expect(getChargeRefunds).toHaveBeenCalledWith(
+        expect.objectContaining({ providerCredentials: { connectAccountId: 'acct_A' } }),
+        'pi_1',
+      )
+      expect(prepararMediosDeSaldoAFavor).not.toHaveBeenCalled()
+      expect(pasos.filter(p => p.tx > 0)).toEqual([])
+      nada()
+    },
+  )
+
+  it('Ruling 28: si la lectura de Stripe falla → 503 STRIPE_REFUND_CHECK_UNAVAILABLE («intenta de nuevo»), nunca se abona ni se devuelve', async () => {
+    getChargeRefunds.mockRejectedValue(Object.assign(new Error('socket hang up'), { type: 'StripeConnectionError' }))
+    for (const destino of ['STORE_CREDIT', 'CARD'] as const) {
+      await expect(pedir({ destino, key: `llave-caida-${destino}` })).rejects.toMatchObject({
+        statusCode: 503,
+        code: 'STRIPE_REFUND_CHECK_UNAVAILABLE',
+        message: expect.stringContaining('Intenta de nuevo'),
+      })
+    }
+    nada()
+  })
+
+  it('hayDevolucionPorFuera: las nuestras (de las filas de este cargo) no cuentan; una ajena viva sí; fallidas o canceladas no', () => {
+    type Estado = 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'CANCELED'
+    const nuestra = (status: Estado, cardRefundId = 'cr001') => ({
+      ...stateOf(status),
+      status,
+      metadata: { type: 'online_order_refund', cardRefundId } as Record<string, string>,
+    })
+    const ajena = (status: Estado) => ({ ...stateOf(status, { refundId: 're_x' }), status, metadata: {} as Record<string, string> })
+    const nuestras = new Set(['cr001'])
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 0, refunds: [] }, nuestras)).toBe(false)
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [nuestra('PENDING')] }, nuestras)).toBe(false)
+    expect(
+      hayDevolucionPorFuera({ amountRefundedCents: 0, refunds: [nuestra('FAILED'), ajena('CANCELED'), ajena('FAILED')] }, nuestras),
+    ).toBe(false)
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [ajena('SUCCEEDED')] }, nuestras)).toBe(true)
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 0, refunds: [ajena('PENDING')] }, nuestras)).toBe(true)
+    // Con nuestra metadata pero de una fila que NO es de este cargo: no es nuestra.
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 25_000, refunds: [nuestra('SUCCEEDED', 'cr-de-otro')] }, nuestras)).toBe(true)
+    // Más devuelto en Stripe que lo que suman las nuestras vivas: por fuera.
+    expect(hayDevolucionPorFuera({ amountRefundedCents: 26_000, refunds: [nuestra('SUCCEEDED')] }, nuestras)).toBe(true)
+  })
+
+  it('repetir la misma llave de saldo no vuelve a leer Stripe, ni a abonar, ni a escribir', async () => {
+    const r = await aSaldo()
+    getChargeRefunds.mockClear()
+    ;(abonarSaldoAFavorEnTx as jest.Mock).mockClear()
+    ;(writeRefundInTx as jest.Mock).mockClear()
+    const otra = await aSaldo()
+    expect(otra).toMatchObject({ cardRefundId: r.cardRefundId, refundId: 'pay-refund-saldo', cardRefundStatus: 'RESOLVED', replay: true })
+    expect(getChargeRefunds).not.toHaveBeenCalled()
+    expect(writeRefundInTx).not.toHaveBeenCalled()
+    expect(abonarSaldoAFavorEnTx).not.toHaveBeenCalled()
+    expect(store.size).toBe(1)
+    // Y la misma llave a la tarjeta es otra solicitud: 409.
+    await expect(pedir({ key: 'llave-saldo-1' })).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_REUSED' })
   })
 })

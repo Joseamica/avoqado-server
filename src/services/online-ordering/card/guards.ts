@@ -14,6 +14,26 @@ export const ONLINE_ORDER_PAID_BY_CARD = 'ONLINE_ORDER_PAID_BY_CARD' as const
 export const MENSAJE_PAGADO_CON_TARJETA = 'Este pedido ya se pagó con tarjeta en línea. No lo cobres en caja.'
 
 export const cardOnlineOrderError = (details?: unknown) => new ConflictError(MENSAJE_PAGADO_CON_TARJETA, ONLINE_ORDER_PAID_BY_CARD, details)
+/**
+ * D661: `OPEN_FROM_CAJA` (la API y el MCP). Verdad en los dos casos que lo reciben: la tarjeta sólo apartada y el pedido que otra caja
+ * ya cobró. Nunca «ya se pagó» ni «no se cobró nada».
+ */
+export const MENSAJE_ABRIR_DESDE_LA_CAJA =
+  'Este pedido es con tarjeta en línea: se abre desde la caja (TPV o POS actualizados). No se aplicó nada.'
+
+/**
+ * D661 (Task 4): por qué «Entregado» (o, Task 5, «Listo») no se aplica (la API y el MCP), según la marca más fuerte del pedido; `null`
+ * sin marcas.
+ */
+export function mensajeNoSeEntrega(
+  m: { notPickedUpAt?: string | null; refundRequestedAt?: string | null; refundedAt?: string | null },
+  accion: 'entregado' | 'listo' = 'entregado',
+) {
+  if (m.refundedAt) return `Este pedido ya se devolvió («Devuelto»): no se marca ${accion}. No se aplicó nada.`
+  if (m.refundRequestedAt) return `Este pedido se está devolviendo: no se marca ${accion}. No se aplicó nada.`
+  if (m.notPickedUpAt) return `Este pedido se cerró como «No lo recogió» al terminar el día: no se marca ${accion}. No se aplicó nada.`
+  return null
+}
 
 /** El pedido en línea con tarjeta de esta cuenta y el estado de su cargo, o `null` (no es pedido en línea o paga al recoger). */
 export async function findCardOnlineOrderInTx(db: Db, i: { venueId: string; orderId: string }) {

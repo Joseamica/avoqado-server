@@ -193,9 +193,38 @@ describe('authorKitchenTickets · folio sellado (S9 v5, U7)', () => {
       status: true,
       loyaltySaleAt: true,
       onlineOrder: {
-        select: { requiresAcceptance: true, createdAt: true, expiredAt: true, cancelledAt: true, cancelledBy: true, rejectedAt: true },
+        select: {
+          requiresAcceptance: true,
+          createdAt: true,
+          expiredAt: true,
+          cancelledAt: true,
+          cancelledBy: true,
+          rejectedAt: true,
+          // D661 (Task 5): la devolución reservada o hecha frena el armado nuevo.
+          refundRequestedAt: true,
+          refundedAt: true,
+        },
       },
     })
+  })
+
+  it('D661 (Task 5): con la devolución reservada o hecha no se arma comanda NUEVA; la marca se limpia (si la devolución falla, su retiro la vuelve a poner)', async () => {
+    for (const marca of ['refundRequestedAt', 'refundedAt']) {
+      prismaMock.orderItem.findFirst.mockReset()
+      prismaMock.order.updateMany.mockClear()
+      prismaMock.kdsOrderItem.createMany.mockClear()
+      ;(planKitchenTickets as jest.Mock).mockClear()
+      // Un pedido con tarjeta de «Nadie» cobrado y por entregar (nunca anulado), con la comanda de pantalla sin armar.
+      base({ folio: { requiresAcceptance: false, [marca]: T } as Folio, status: 'CONFIRMED' })
+      await expect(authorKitchenTickets({ venueId: VENUE, orderId: ORDER, trigger: 'SWEEP' })).resolves.toEqual({ ticketIds: [] })
+      expect(planKitchenTickets).not.toHaveBeenCalled()
+      expect(prismaMock.kdsOrderItem.createMany).not.toHaveBeenCalled()
+      expect(tocadoLeido()).toBeUndefined()
+      expect(prismaMock.order.updateMany).toHaveBeenCalledWith({
+        where: { id: ORDER, venueId: VENUE, kitchenPendingAt: { lte: expect.any(Date) } },
+        data: { kitchenPendingAt: null },
+      })
+    }
   })
 
   it('cuenta cancelada: como hoy (nada que cocinar, sin preguntar por renglones)', async () => {

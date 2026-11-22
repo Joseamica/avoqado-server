@@ -974,7 +974,12 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     const c = await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })
     expect(c.status).toBe('CAPTURING')
     expect(c.lastError).toBeTruthy()
-    expect(authSpy).toHaveBeenLastCalledWith(expect.anything(), { paymentIntentId: charge.paymentIntentId })
+    // D661 (addendum r3): la relectura de rescate, con los MISMOS límites que la captura de quien acepta (60 s y un reintento).
+    expect(authSpy).toHaveBeenLastCalledWith(
+      expect.anything(),
+      { paymentIntentId: charge.paymentIntentId },
+      { timeoutMs: 60_000, maxNetworkRetries: 1 },
+    )
 
     await expect(reject(orderId)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
     const late = new Date(Date.now() + 60 * MIN)

@@ -11,11 +11,11 @@ describe('createOrderSchema (público)', () => {
     expect(createOrderSchema.safeParse(pedido({}, { name: 'María' })).success).toBe(true)
   })
 
-  it('con tarjeta en línea el teléfono sigue siendo OBLIGATORIO (R7)', () => {
-    const r = createOrderSchema.safeParse(pedido({ paymentMode: 'CARD_ONLINE' }, { name: 'María' }))
-    expect(r.success).toBe(false)
-    if (!r.success) expect(r.error.issues[0]).toMatchObject({ path: ['body', 'customer', 'phone'], message: 'Escribe tu teléfono' })
+  it('D661 (r1 #12): con tarjeta en línea el teléfono también es OPCIONAL en el esquema; «Mi equipo» lo exige en el servicio y «Nadie» usa el de la sesión', () => {
+    expect(createOrderSchema.safeParse(pedido({ paymentMode: 'CARD_ONLINE' }, { name: 'María' })).success).toBe(true)
     expect(createOrderSchema.safeParse(pedido({ paymentMode: 'CARD_ONLINE' })).success).toBe(true)
+    // Un teléfono que sí viene se sigue validando también con tarjeta.
+    expect(createOrderSchema.safeParse(pedido({ paymentMode: 'CARD_ONLINE' }, { name: 'María', phone: '123' })).success).toBe(false)
   })
 
   it('un teléfono que sí viene se sigue validando', () => {

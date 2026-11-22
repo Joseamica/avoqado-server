@@ -193,6 +193,27 @@ describe('el Cambio con saldo a favor · Postgres real', () => {
     expect(await escrito(s)).toEqual(antes)
   })
 
+  // D661 (Task 6): la regla del teléfono verificado (`exigirMismoTelefono`) es SÓLO de la devolución de un pedido «Nadie». El Cambio
+  // sigue como hoy: abona al sobre de la clienta aunque su ficha ya traiga otro número, y lo señala.
+  it('un «Cambio» a saldo con número distinto sigue abonando con su señal de discrepancia, como hoy', async () => {
+    const s = await seed({ card: true, quantity: 2 })
+    const primero = await createExchange(s.input(cambioMasBarato(s, {})))
+    expect(primero.exchange.settlement.storeCredit).toMatchObject({ amountCents: 20000, newBalanceCents: 20000, phoneMismatch: false })
+    const [sobre] = await prisma.giftCard.findMany({ where: { venueId: s.venueId, customerId: s.customer.id }, take: 5 })
+
+    // La clienta cambió de número en su ficha: el segundo Cambio abona al MISMO sobre (con su teléfono de siempre) y lo señala.
+    await prisma.customer.update({
+      where: { id: s.customer.id },
+      data: { phone: `55${String(Date.now() % 100_000_000).padStart(8, '1')}` },
+    })
+    const segundo = await createExchange(s.input(cambioMasBarato(s, {})))
+    expect(segundo.exchange.settlement.storeCredit).toMatchObject({ amountCents: 20000, newBalanceCents: 40000, phoneMismatch: true })
+    const sobres = await prisma.giftCard.findMany({ where: { venueId: s.venueId, customerId: s.customer.id }, take: 5 })
+    expect(sobres).toHaveLength(1)
+    expect(sobres[0]).toMatchObject({ id: sobre.id, recipientPhone: sobre.recipientPhone })
+    expect(sobres[0].balance.toFixed(2)).toBe('400.00')
+  })
+
   describe('«Sólo saldo a favor» prendido', () => {
     it('sin pieza con Defecto, efectivo no (400 STORE_CREDIT_ONLY, sin escribir); con Defecto, sí; y saldo a favor siempre', async () => {
       const s = await seed({ quantity: 3 })

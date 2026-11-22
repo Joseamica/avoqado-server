@@ -54,6 +54,8 @@ jest.mock('@/controllers/mobile/onlineOrders.mobile.controller', () => {
     toPayPanel: respond,
     deliveryCash: respond,
     accept: respond,
+    // D661: el panel acepta con su propio manejador (nunca abre un pedido pagado con tarjeta en «Nadie»).
+    acceptPanel: respond,
     reject: respond,
     ready: respond,
     delivered: respond,
@@ -171,13 +173,29 @@ describe('API del restaurante: permiso, candado de plan y esquema por ruta', () 
 
   it('T12 (R21): la TPV NO monta bandeja, rechazar, pausar ni efectivo de plataformas', async () => {
     for (const [metodo, path] of [
-      ['get', 'inbox'],
-      ['get', 'delivery-cash'],
       ['post', 'pause'],
       ['post', 'ord1/reject'],
     ] as const) {
       expect((await request(app)[metodo](`${T}/${path}`)).status).toBe(404)
     }
+    // D661 (Ruling 14): en la TPV, `GET inbox` y `GET delivery-cash` ya no son 404 de ruta: caen en la lectura de UN pedido (con esa
+    // «cuenta» no hay pedido en línea: 404 «no es un pedido en línea», `onlineOrdering.leerUnPedido.http.test.ts`), nunca en la bandeja
+    // ni en el efectivo de plataformas.
+    for (const path of ['inbox', 'delivery-cash']) {
+      const r = await request(app).get(`${T}/${path}`)
+      expect({ path, ...r.body }).toEqual({ path, perms: ['orders:read'], plans: [], schemas: ['orderActionSchema'] })
+    }
+  })
+
+  it('D661 (Ruling 14): POS y TPV leen UN pedido con orders:read y orderActionSchema, sin candado de plan, DESPUÉS de sus GET literales', async () => {
+    const esperado = { perms: ['orders:read'], plans: [], schemas: ['orderActionSchema'] }
+    expect((await request(app).get(`${M}/ord1`)).body).toEqual(esperado)
+    expect((await request(app).get(`${T}/ord1`)).body).toEqual(esperado)
+    // Las literales del POS siguen con su esquema (no se leen como un pedido).
+    expect((await request(app).get(`${M}/inbox`)).body.schemas).toEqual(['inboxSchema'])
+    expect((await request(app).get(`${M}/delivery-cash`)).body.schemas).toEqual(['deliveryCashSchema'])
+    expect((await request(app).get(`${M}/to-pay`)).body.schemas).toEqual(['toPaySchema'])
+    expect((await request(app).get(`${T}/to-pay`)).body.schemas).toEqual(['toPaySchema'])
   })
 
   it('PUT /settings exige online-orders:manage y el plan', async () => {
@@ -352,6 +370,38 @@ describe('panel: GET y PUT /settings (controlador real)', () => {
     expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledTimes(1)
   })
 
+  it('D661 · D2: GET trae el bloque nuevo cardNadie (¿la tarjeta de «No, entran solos» se ofrece ahora?); lo demás no cambia', async () => {
+    const rapido = new Date(NOW - 15_000)
+    const fuerte = {
+      id: 'em1',
+      chargesEnabled: true,
+      providerCredentials: { connectAccountId: 'acct_1' },
+      provider: { code: 'STRIPE_CONNECT' },
+    }
+    prismaMock.ecommerceMerchant.findMany.mockResolvedValue([fuerte] as any)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+      fila({ requiresAcceptance: false, cardOnlineNadie: true, lastCardAlertPollAt: rapido, cardAlertFastPollAt: rapido }) as any,
+    )
+    const r = await request(panel).get('/venues/v1/settings')
+    expect(r.status).toBe(200)
+    expect(r.body.data.cardNadie).toEqual({
+      enabled: true,
+      lastAlertAt: rapido.toISOString(),
+      fastAlertAt: rapido.toISOString(),
+      offeredNow: true,
+    })
+    // Sin campos sueltos nuevos: las horas de la caja viven sólo en el bloque.
+    expect(r.body.data).not.toHaveProperty('lastCardAlertPollAt')
+    expect(r.body.data).not.toHaveProperty('cardAlertFastPollAt')
+    expect(r.body.data).toMatchObject({ enabled: true, requiresAcceptance: false, cardOnlineNadie: true })
+
+    // La caja dejó de avisar a tiempo: prendida, pero ya no se ofrece.
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+      fila({ requiresAcceptance: false, cardOnlineNadie: true, lastCardAlertPollAt: rapido, cardAlertFastPollAt: null }) as any,
+    )
+    expect((await request(panel).get('/venues/v1/settings')).body.data.cardNadie).toMatchObject({ enabled: true, offeredNow: false })
+  })
+
   it('GET de una tienda abierta: OPEN sin motivo, sin pausa', async () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(fila() as any)
     const r = await request(panel).get('/venues/v1/settings')
@@ -420,8 +470,10 @@ describe('panel: GET y PUT /settings (controlador real)', () => {
       manualPause: true,
       autoPausedAt: null,
     })
-    // Una lectura bajo el candado de `updateSettings`; la vista usa lo que acaba de escribir.
-    expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledTimes(1)
+    // Una lectura bajo el candado de `updateSettings`; la vista usa lo que acaba de escribir. D661 (D2): aparte, sólo los latidos de
+    // la caja que avisa (dos columnas, para `cardNadie`): los ajustes no se vuelven a leer.
+    const lecturas = (prismaMock.onlineOrderingSettings.findUnique.mock.calls as any[]).map(([a]) => a.select ?? 'COMPLETA')
+    expect(lecturas).toEqual(['COMPLETA', { lastCardAlertPollAt: true, cardAlertFastPollAt: true }])
   })
 
   it('S1: un PUT sin fila de ajustes previa (primer guardado) también responde la vista completa', async () => {

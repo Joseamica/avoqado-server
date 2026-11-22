@@ -7,7 +7,7 @@
  */
 import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, Prisma, type OnlineOrderCharge } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import AppError, { BadRequestError, ConflictError } from '@/errors/AppError'
+import AppError, { BadRequestError, ConflictError, UnauthorizedError } from '@/errors/AppError'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { getProvider } from '@/services/payments/provider-registry'
 import {
@@ -22,13 +22,18 @@ import {
   CARD_CHECKOUT_TTL_MINUTES,
   MAX_PENDING_PER_PHONE,
   MAX_PENDING_PER_VENUE,
+  SIN_TELEFONO_NADIE,
+  apartadosNadieWhere,
   awaitingAcceptanceWhere,
+  borradoresNadieWhere,
   liveCardDraftsWhere,
 } from '../constants'
+import { closesAt } from '../hours'
 import { storefrontBase } from '../notifications.service'
 import {
   TX_OPTIONS,
   cardDraftTrackingStatus,
+  decisionDePrecio,
   eleccionNormalizada,
   final,
   guardarDecisionDePrecio,
@@ -55,12 +60,17 @@ export interface CreateCardDraftInput {
   idempotencyKey: string
   items: CartItemInput[]
   expectedTotal: string
-  customer: { name: string; phone: string; email?: string | null }
+  /** D661 (r1 #12): el teléfono es opcional; «Mi equipo» lo exige aquí (400 como hoy) y «Nadie» usa el de la sesión. */
+  customer: { name: string; phone?: string | null; email?: string | null }
   note?: string | null
   whatsappConsent?: boolean
   now?: Date
-  /** S11: la clienta de la sesión (`clientaDeLaSesion`); cuenta sólo si su teléfono probado es el del pedido, como en «Mi equipo». */
+  /**
+   * S11: la clienta de la sesión (`clientaDeLaSesion`). En «Mi equipo» cuenta sólo si su teléfono probado es el del pedido; en «Nadie»
+   * (D661) es LA clienta del borrador y sin ella no hay tarjeta.
+   */
   customerId?: string | null
+  /** El teléfono que probó la sesión (OTP de WhatsApp). */
   verifiedPhone?: string | null
   /** S11 (P2-4): lo que eligió usar; sin sesión es `PRICE_CHANGED` (`SIN_SESION`). */
   beneficios?: EleccionDeBeneficios | null
@@ -78,7 +88,8 @@ export interface CardDraftResult {
 /** Lo que el borrador guarda en `request`: con esto la tarea 5 arma la cuenta y la sesión se repite con los mismos datos. */
 export interface CardDraftRequest {
   quote: ReturnType<typeof toQuoteSnapshot>
-  customer: { name: string; phone: string; email: string | null }
+  /** En «Nadie» (D661) el teléfono es el que probó la sesión, o `null`: uno tecleado sin probar no se guarda (como el folio). */
+  customer: { name: string; phone: string | null; email: string | null }
   note: string | null
   whatsappConsent: boolean
   externalId: string
@@ -87,6 +98,15 @@ export interface CardDraftRequest {
   /** S11: la clienta y su elección; al confirmar, el pedido nace con ellas (un borrador de antes no las trae: nace como hoy). */
   customerId?: string | null
   beneficios?: EleccionDeBeneficios | null
+  /** D661: nació en «Nadie» (siempre con la clienta de la sesión en `customerId`). Sin el campo, es de «Mi equipo». */
+  nadie?: true
+  /** D661: el teléfono que la sesión probó al pagar, canónico; ausente si la sesión no probó ninguno. Lo usa el saldo a favor. */
+  telefonoVerificado?: string
+  /**
+   * D661 (Ruling 10): el cierre (ISO) de la franja del horario en que empezó el borrador; topa el plazo del apartado. `null` = sin
+   * horario, sin tope de franja. Ausente = borrador de antes del campo: la confirmación lo deriva del horario.
+   */
+  cierreDeFranja?: string | null
 }
 
 /** Codex r2 #4: 5 min de margen sobre los 30 que Stripe exige como mínimo para `expires_at`. */
@@ -94,11 +114,48 @@ const CHECKOUT_EXPIRES_MINUTES = CARD_CHECKOUT_TTL_MINUTES + 5
 const expiresFrom = (now: Date) => new Date(now.getTime() + CHECKOUT_EXPIRES_MINUTES * 60_000)
 /** La huella de la tarjeta no lleva cliente (no hay OTP): se marca `'card'` para que nunca empate con la de pagar al recoger. */
 const CARD_CUSTOMER = 'card'
+/** D661: la huella de «Nadie» lleva a la clienta de la sesión con su propio prefijo: nunca empata con una de «Mi equipo». */
+const CARD_NADIE_CUSTOMER = 'card-nadie'
 const CHECKOUT_DESCRIPTION = 'Pedido en línea'
 
 const keyConflict = () =>
   final(new ConflictError('Esa llave ya se usó para otro pedido. Vuelve a armar tu pedido.', 'IDEMPOTENCY_KEY_CONFLICT'))
 const notAccepted = () => new BadRequestError('Este negocio no acepta pagar con tarjeta en línea.', 'CARD_PAYMENT_NOT_ACCEPTED')
+/**
+ * D661 (r1 #12): «Mi equipo» con tarjeta sigue pidiendo el teléfono, con el MISMO 400 (texto y sin código) que daba el esquema. D1: la
+ * marca pide al controlador público que la respuesta lleve también `message`, el campo que leía la tienda publicada en ese 400.
+ */
+const faltaTelefono = () =>
+  Object.assign(new BadRequestError('Error de validación: Escribe tu teléfono'), { conMensajeDelValidador: true as const })
+/** D661: en «Nadie» la tarjeta pide sesión; el código es el del pedido sin sesión de «Mi equipo», que la tienda ya conoce. */
+const sinSesionEnNadie = () => new UnauthorizedError('Entra a tu cuenta para pagar con tarjeta en línea.', 'PHONE_VERIFICATION_REQUIRED')
+/** D661 (r6 #6): el cupo de tarjeta de la sucursal está lleno. Nunca `ORDERING_*`: la tienda no se pausa y pagar en caja sigue. */
+const tarjetaLlena = () =>
+  new ConflictError(
+    'Por ahora hay muchos pagos con tarjeta esperando. Puedes pedir para pagar en caja o intentar en unos minutos.',
+    'CARD_ONLINE_QUEUE_FULL',
+  )
+const telefonoCanonico = (t: string) => canonicalPhoneE164(t) ?? `+${t.replace(/\D/g, '')}`
+
+/**
+ * D661 (r1 #12, r2 #12, r3 #12, r5, r6 #6): los topes de la tarjeta en «Nadie», bajo el candado de admisión. Cuentan lo de tarjeta de
+ * «Nadie» que aún no se resuelve: borradores `PENDING_AUTH` (aunque su página ya venció: Stripe pudo autorizar; los libera el
+ * conciliador) y apartados que ninguna caja ha abierto. Por clienta (no por número: hay clientas sin teléfono) y por sucursal. Los
+ * folios de caja no cuentan aquí, y este cupo no cuenta en el de ellos ni en la saturación de la tienda.
+ */
+async function admitirTarjetaEnNadie(tx: Prisma.TransactionClient, venueId: string, clienta: string): Promise<void> {
+  const deLaClienta =
+    (await tx.onlineOrderCharge.count({
+      where: { ...borradoresNadieWhere(venueId), request: { path: ['customerId'], equals: clienta } },
+    })) + (await tx.onlineOrder.count({ where: { ...apartadosNadieWhere(venueId), order: { customerId: clienta } } }))
+  if (deLaClienta >= MAX_PENDING_PER_PHONE) {
+    throw new ConflictError('Ya tienes pedidos esperando respuesta en este negocio.', 'TOO_MANY_PENDING_ORDERS')
+  }
+  const enLaSucursal =
+    (await tx.onlineOrderCharge.count({ where: borradoresNadieWhere(venueId) })) +
+    (await tx.onlineOrder.count({ where: apartadosNadieWhere(venueId) }))
+  if (enLaSucursal >= MAX_PENDING_PER_VENUE) throw tarjetaLlena()
+}
 /** S11 (R2'', R2'''): sin lugar para simular o con la base saturada: reintentable, nunca un precio inventado ni una decisión bajo la llave. */
 const beneficiosOcupados = () =>
   new AppError('No pudimos calcular tus beneficios. Intenta de nuevo en un momento.', 503, true, 'BENEFITS_CALCULATION_UNAVAILABLE')
@@ -192,23 +249,37 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
   const now = input.now ?? new Date()
   const { venueId, idempotencyKey } = input
   const externalId = `web:${idempotencyKey}`
-  // R23: la forma canónica de la casa; si no la entiende, «+» y sólo dígitos (igual que pagar al recoger).
-  const phone = canonicalPhoneE164(input.customer.phone) ?? `+${input.customer.phone.replace(/\D/g, '')}`
+  // R23: la forma canónica de la casa; si no la entiende, «+» y sólo dígitos (igual que pagar al recoger). D661: puede no venir.
+  const phone = input.customer.phone ? telefonoCanonico(input.customer.phone) : null
   const expectedTotal = new Prisma.Decimal(input.expectedTotal)
-  // S11: la tarjeta es de «Mi equipo»: la clienta cuenta sólo si su teléfono probado es el del pedido (sin sesión, como hoy: sin ficha).
+  // S11, «Mi equipo»: la clienta cuenta sólo si su teléfono probado es el del pedido (sin sesión, como hoy: sin ficha).
   const customerId =
     input.customerId && input.verifiedPhone && phonesMatch(input.verifiedPhone, input.customer.phone) ? input.customerId : null
+  // D661, «Nadie»: la clienta es la de la sesión (cualquier contacto probado) y su teléfono, sólo el que la sesión probó.
+  const clientaDeLaSesion = input.customerId ?? null
+  const telefonoVerificado = input.verifiedPhone ? telefonoCanonico(input.verifiedPhone) : null
   const eleccion = eleccionNormalizada(input.beneficios)
-  const requestHash = onlineOrderRequestHash({
-    venueId,
-    customerId: customerId ? `${CARD_CUSTOMER}:${customerId}` : CARD_CUSTOMER,
-    paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
-    expectedTotal,
-    items: input.items,
-    customerName: input.customer.name,
-    customerPhone: phone,
-    beneficios: eleccion,
-  })
+  const huella = (cliente: string, telefono: string) =>
+    onlineOrderRequestHash({
+      venueId,
+      customerId: cliente,
+      paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
+      expectedTotal,
+      items: input.items,
+      customerName: input.customer.name,
+      customerPhone: telefono,
+      beneficios: eleccion,
+    })
+  // La huella de «Mi equipo» es la de hoy, byte por byte (una repetición de un borrador de antes sigue empatando).
+  const requestHash = huella(customerId ? `${CARD_CUSTOMER}:${customerId}` : CARD_CUSTOMER, phone ?? '')
+  // D661 (3A): la de «Nadie» no lleva el teléfono: la clienta de la sesión ya fija quién es, y con él un reintento con la misma llave
+  // tras verificar su teléfono recibía un 409 final en vez de SU borrador.
+  const requestHashNadie = clientaDeLaSesion ? huella(`${CARD_NADIE_CUSTOMER}:${clientaDeLaSesion}`, SIN_TELEFONO_NADIE) : null
+  /**
+   * r4 (Codex): la misma solicitud leída como cada modo. La llave se resuelve ANTES de leer el modo de la tienda (que pudo cambiar
+   * desde el envío original): un borrador con la huella de cualquiera de las dos lecturas es SU borrador.
+   */
+  const huellas = requestHashNadie ? [requestHash, requestHashNadie] : [requestHash]
 
   // Codex r4 #8: ANTES de cualquier validación que pueda cambiar (tienda, switch, plan, comercio, precios, monto), una llave que ya
   // tiene borrador es una repetición: va directo a su camino (la huella se compara bajo el candado).
@@ -219,6 +290,12 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
     merchant: NonNullable<Awaited<ReturnType<typeof findCardMerchant>>> & { connectAccountId: string }
     applicationFeeCents: number
   } | null = null
+  /** D661: el modo con que se validó («Nadie» = `true`). Decide la clienta, la huella, los topes y lo que guarda el borrador. */
+  let enNadie = false
+  /** D661 (Ruling 10): el cierre de la franja en que empieza un borrador de «Nadie»; `null` = sin horario. */
+  let cierreDeFranja: string | null = null
+  const clientaDelModo = () => (enNadie ? clientaDeLaSesion : customerId)
+  const huellaDelModo = () => (enNadie && requestHashNadie ? requestHashNadie : requestHash)
   /** S11 (R1'): un `PRICE_CHANGED` previo al borrador se decide (y se guarda) bajo la llave, como LA decisión de esa llave. */
   let rechazoDePrecio: AppError | null = null
   /**
@@ -229,17 +306,35 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
     await lockKey(tx, venueId, externalId)
     const existing = await findCharge(tx, venueId, idempotencyKey)
     if (existing) {
-      if (existing.requestHash !== requestHash) throw keyConflict()
+      if (!huellas.includes(existing.requestHash)) throw keyConflict()
       return existing
     }
     if (await tx.order.findUnique({ where: { venueId_externalId: { venueId, externalId } }, select: { id: true } })) throw keyConflict()
-    await leerDecisionDePrecio(tx, venueId, idempotencyKey, requestHash)
+    await leerDecisionDePrecio(tx, venueId, idempotencyKey, await huellaDeLaDecisionDePrecio(tx))
     return null
+  }
+  /** La decisión de precio se guardó con la huella del modo en que se tomó: es de ESTA solicitud si es la de cualquiera de sus lecturas. */
+  const huellaDeLaDecisionDePrecio = async (tx: Prisma.TransactionClient): Promise<string> => {
+    if (huellas.length === 1) return requestHash
+    const fila = await tx.idempotencyRequest.findUnique({
+      where: { organizationId_actorStaffId_endpoint_idempotencyKey: decisionDePrecio(venueId, idempotencyKey) },
+      select: { requestHash: true },
+    })
+    return fila && huellas.includes(fila.requestHash) ? fila.requestHash : requestHash
   }
   // S11 (R1', Codex r4 #1 y r5): lo ya decidido va PRIMERO, en una transacción corta: antes de la tienda, el plan, el comercio y el
   // semáforo de la simulación (cualquiera puede salir con un 503 o haber cambiado). Una repetición se salta las validaciones.
   if (!(await prisma.$transaction(tx => decisionDeLaLlave(tx), TX_OPTIONS))) {
     try {
+      // El switch se lee directo de la fila (unas columnas, sin armar los ajustes completos en este camino caliente).
+      const settings = await prisma.onlineOrderingSettings.findUnique({
+        where: { venueId },
+        select: { acceptsCardOnline: true, requiresAcceptance: true, cardOnlineNadie: true },
+      })
+      // «Nadie» sólo con `=== false` (como `getAcceptingStatus`): un ajuste sin el campo es «Mi equipo».
+      enNadie = settings?.requiresAcceptance === false
+      // «Mi equipo»: el teléfono primero, como cuando lo exigía el esquema (r1 #12).
+      if (!enNadie && !phone) throw faltaTelefono()
       await opts.assertCanCreate()
       const state = await getAcceptingStatus(venueId, now)
       if (state.status !== 'OPEN') {
@@ -248,16 +343,16 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
           reason: state.reason,
         })
       }
-      // El switch se lee directo de la fila (una columna, sin armar los ajustes completos en este camino caliente).
-      const settings = await prisma.onlineOrderingSettings.findUnique({
-        where: { venueId },
-        select: { acceptsCardOnline: true, requiresAcceptance: true },
-      })
-      // T8: en «Nadie» no hay tarjeta (se paga en caja): el mismo código que el pedido cuando el modo no sirve.
-      if (settings?.requiresAcceptance === false) {
-        throw new BadRequestError('Este negocio no acepta pagar con tarjeta en línea.', 'PAYMENT_MODE_NOT_ACCEPTED')
-      }
+      // La MISMA regla que `paymentModes.cardOnline` de GET /info (en «Nadie», su propio interruptor y una caja que avise).
       if (!settings || !(await cardOnlineAvailable(settings, prisma, venueId))) throw notAccepted()
+      // D661: en «Nadie» la tarjeta es de la clienta de la sesión (su tope, su saldo a favor). Sin sesión, a entrar; nada se crea.
+      if (enNadie && !clientaDeLaSesion) throw sinSesionEnNadie()
+      // D661 (Ruling 10): con el MISMO horario con que la tienda se vio abierta, en la zona del negocio (como el plazo del folio, R23).
+      if (enNadie && state.config.hours) {
+        const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+        cierreDeFranja = closesAt(state.config.hours, now, venue?.timezone || 'America/Mexico_City')?.toISOString() ?? null
+      }
+      const clienta = clientaDelModo()
       const merchant = await findCardMerchant(prisma, venueId)
       const connectAccountId = (merchant?.providerCredentials as { connectAccountId?: unknown } | null)?.connectAccountId
       if (!merchant || typeof connectAccountId !== 'string' || !connectAccountId) throw notAccepted()
@@ -269,12 +364,12 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
         })
       }
       let amount = quote.total
-      if (customerId) {
+      if (clienta) {
         // R2'' (S11): con sesión, el total que se autoriza es el ESTRICTO de la MISMA cadena, simulado y deshecho (R9), con su lugar
         // del semáforo de S10 (R2''') y sin su degradación. Termina antes de abrir la transacción del borrador.
         let sim: Awaited<ReturnType<typeof simularBeneficios>>
         try {
-          sim = await simularBeneficios(venueId, quote, customerId, eleccion ?? {})
+          sim = await simularBeneficios(venueId, quote, clienta, eleccion ?? {})
         } catch (error) {
           if (cedeLaSimulacion(error)) throw beneficiosOcupados()
           throw error
@@ -336,42 +431,66 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
       const existing = await decisionDeLaLlave(tx)
       if (existing) return { charge: existing, replay: true }
       if (rechazoDePrecio) {
-        return { rechazo: await guardarDecisionDePrecio(tx, { venueId, idempotencyKey, requestHash, error: rechazoDePrecio, now }) }
+        return {
+          rechazo: await guardarDecisionDePrecio(tx, {
+            venueId,
+            idempotencyKey,
+            requestHash: huellaDelModo(),
+            error: rechazoDePrecio,
+            now,
+          }),
+        }
       }
       const f = fresh
       if (!f) throw new Error('Borrador de tarjeta sin validar y sin repetición') // inalcanzable: no se borran borradores
+      const clienta = clientaDelModo()
 
       await lockAdmission(tx, venueId)
-      // Topes: pedidos por aceptar MÁS borradores con su sesión vigente.
-      const liveDrafts = liveCardDraftsWhere(venueId, now)
-      const byPhone =
-        (await tx.onlineOrder.count({ where: { ...awaitingAcceptanceWhere(venueId), order: { customerPhone: phone } } })) +
-        (await tx.onlineOrderCharge.count({ where: { ...liveDrafts, customerPhone: phone } }))
-      if (byPhone >= MAX_PENDING_PER_PHONE) {
-        throw new ConflictError('Ya tienes pedidos esperando respuesta en este negocio.', 'TOO_MANY_PENDING_ORDERS')
-      }
-      const inVenue =
-        (await tx.onlineOrder.count({ where: awaitingAcceptanceWhere(venueId) })) +
-        (await tx.onlineOrderCharge.count({ where: liveDrafts }))
-      if (inVenue >= MAX_PENDING_PER_VENUE) {
-        throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_PAUSED', {
-          status: 'PAUSED',
-          reason: 'TOO_BUSY',
+      if (enNadie) {
+        // D661 (Ruling 72): entre la revisión y esta escritura la única caja pudo recibir la respuesta lenta (que apaga su marca rápida)
+        // o la tienda cambiar de modo. Bajo el candado de la fila que esos latidos escriben se repite la MISMA regla de `/info`: sigue en
+        // «Nadie», con su tarjeta prendida y una caja que avisa a tiempo; si no, el 400 de siempre y no se escribe nada.
+        await tx.$queryRaw`SELECT 1 FROM "OnlineOrderingSettings" WHERE "venueId" = ${venueId} FOR UPDATE`
+        const vigente = await tx.onlineOrderingSettings.findUnique({
+          where: { venueId },
+          select: { acceptsCardOnline: true, requiresAcceptance: true, cardOnlineNadie: true },
         })
+        if (!vigente || vigente.requiresAcceptance !== false || !(await cardOnlineAvailable(vigente, tx, venueId))) throw notAccepted()
+        await admitirTarjetaEnNadie(tx, venueId, clienta!) // con `enNadie`, la sesión ya se exigió al validar
+      } else {
+        // Topes de «Mi equipo»: pedidos por aceptar MÁS borradores con su sesión vigente. El teléfono ya se exigió al validar.
+        const liveDrafts = liveCardDraftsWhere(venueId, now)
+        const byPhone =
+          (await tx.onlineOrder.count({ where: { ...awaitingAcceptanceWhere(venueId), order: { customerPhone: phone } } })) +
+          (await tx.onlineOrderCharge.count({ where: { ...liveDrafts, customerPhone: phone! } }))
+        if (byPhone >= MAX_PENDING_PER_PHONE) {
+          throw new ConflictError('Ya tienes pedidos esperando respuesta en este negocio.', 'TOO_MANY_PENDING_ORDERS')
+        }
+        const inVenue =
+          (await tx.onlineOrder.count({ where: awaitingAcceptanceWhere(venueId) })) +
+          (await tx.onlineOrderCharge.count({ where: liveDrafts }))
+        if (inVenue >= MAX_PENDING_PER_VENUE) {
+          throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_PAUSED', {
+            status: 'PAUSED',
+            reason: 'TOO_BUSY',
+          })
+        }
       }
 
       const trackingToken = generateTrackingToken()
       const trackUrl = `${storefrontBase()}/${encodeURIComponent(input.venueSlug)}/pedido/${encodeURIComponent(trackingToken)}`
       const request: CardDraftRequest = {
         quote: toQuoteSnapshot(f.quote),
-        customer: { name: input.customer.name, phone, email: input.customer.email ?? null },
+        // D661: en «Nadie» el teléfono de la cuenta es sólo el que probó la sesión (uno tecleado sin probar no se guarda, como el folio).
+        customer: { name: input.customer.name, phone: enNadie ? telefonoVerificado : phone, email: input.customer.email ?? null },
         note: input.note?.trim() ? input.note.trim() : null,
         whatsappConsent: input.whatsappConsent === true,
         externalId,
         successUrl: `${trackUrl}?pago=1`,
         cancelUrl: `${trackUrl}?pago=cancelado`,
-        customerId,
-        beneficios: customerId ? eleccion : null,
+        customerId: clienta,
+        beneficios: clienta ? eleccion : null,
+        ...(enNadie ? { nadie: true as const, cierreDeFranja, ...(telefonoVerificado ? { telefonoVerificado } : {}) } : {}),
       }
       const merchantSnapshot: MerchantSnapshot = {
         connectAccountId: f.merchant.connectAccountId,
@@ -385,9 +504,10 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
           ecommerceMerchantId: f.merchant.id,
           idempotencyKey,
           trackingToken,
-          customerPhone: phone,
+          // D661: el de «Nadie» va vacío: su tope es por clienta (`SIN_TELEFONO_NADIE`), su teléfono probado viaja en `request`.
+          customerPhone: enNadie ? SIN_TELEFONO_NADIE : phone!,
           request: request as unknown as Prisma.InputJsonValue,
-          requestHash,
+          requestHash: huellaDelModo(),
           checkoutExpiresAt: expiresFrom(now),
           amount: f.amount,
           platformFeeBps: f.merchant.platformFeeBps,

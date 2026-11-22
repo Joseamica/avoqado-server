@@ -10,7 +10,7 @@
 
 import bcrypt from 'bcryptjs'
 import { formatInTimeZone } from 'date-fns-tz'
-import { CreditPurchaseStatus, Prisma, StampRewardStatus } from '@prisma/client'
+import { CreditPurchaseStatus, OnlineOrderPaymentMode, Prisma, StampRewardStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
@@ -22,6 +22,13 @@ import { decryptGiftCardCode, formatGiftCardCode } from '@/services/giftCards/gi
 import { esSobreDeSaldoAFavorSql } from '@/services/giftCards/giftCardLedger'
 import { revalidarSesionEnTx } from '@/services/giftCards/giftCardClaim.service'
 import { fromActiveCursor, toActiveCursor } from '@/services/online-ordering/inbox.service'
+import {
+  DEVOLUCIONES_PUBLICAS,
+  PUBLIC_CARD_STATUS,
+  devolucionPublica,
+  type DevolucionPublica,
+  type PublicCardStatus,
+} from '@/services/online-ordering/card/estadoPublico'
 import { esVentaCerrada } from '@/services/shared/orderBalance'
 import { generateCustomerSession, type ContactoProbado } from '@/jwt.service'
 import { normalizarTelefonoMx, phonesMatch } from '@/utils/phone'
@@ -418,6 +425,16 @@ export function sqlDeTotalDePedidos(venueId: string, customerId: string): Prisma
     WHERE o."customerId" = ${customerId} AND o."venueId" = ${venueId}`
 }
 
+/** D661 (Ruling 55): la tarjeta de un pedido pagado en línea, como la ve la clienta (de `PUBLIC_CARD_STATUS`, el mismo del seguimiento). */
+export type TarjetaDeMiPedido = 'APARTADA' | 'COBRADA' | 'LIBERANDO' | 'LIBERADA'
+const TARJETA_DE_MI_PEDIDO = {
+  AUTHORIZED: 'APARTADA',
+  CONFIRMING: 'APARTADA', // cobrando al abrir: todavía no se cobró
+  CAPTURED: 'COBRADA',
+  RELEASING: 'LIBERANDO',
+  RELEASED: 'LIBERADA',
+} as const satisfies Record<PublicCardStatus, TarjetaDeMiPedido>
+
 export interface MiPedido {
   folio: string
   estado: string
@@ -425,6 +442,35 @@ export interface MiPedido {
   total: number
   trackingToken: string
   creadoEl: string
+  /**
+   * D661 (Ruling 55), campos nuevos y opcionales (un widget viejo los ignora): si se pagó con tarjeta en línea («Mi equipo» o «Nadie»),
+   * el estado de esa tarjeta, las horas de «No lo recogió», de la devolución pedida y de «Devuelto» (ISO o `null`), y la devolución con
+   * el MISMO mapeo del seguimiento (`devolucionPublica`).
+   */
+  pagoEnLinea?: boolean
+  tarjeta?: TarjetaDeMiPedido | null
+  notPickedUpAt?: string | null
+  refundRequestedAt?: string | null
+  refundedAt?: string | null
+  refund?: DevolucionPublica | null
+}
+
+/** D661 (Ruling 55): lo del pago en línea de los pedidos de UNA página, en una sola lectura (sin N+1; la página ya está acotada). */
+async function tarjetasDeLaPagina(venueId: string, ids: string[]) {
+  if (ids.length === 0) return new Map<string, never>()
+  const filas = await prisma.onlineOrder.findMany({
+    where: { id: { in: ids }, venueId },
+    take: ids.length,
+    select: {
+      id: true,
+      paymentMode: true,
+      notPickedUpAt: true,
+      refundRequestedAt: true,
+      refundedAt: true,
+      charge: { select: { status: true, cardRefunds: DEVOLUCIONES_PUBLICAS } },
+    },
+  })
+  return new Map(filas.map(f => [f.id, f]))
 }
 
 /** GET /venues/:venueSlug/customer/orders?cursor=&limit= — y la primera página del portal. */
@@ -446,15 +492,29 @@ export async function listarMisPedidos(venueId: string, customerId: string, pedi
     prisma.$queryRaw<Array<{ total: number }>>(sqlDeTotalDePedidos(venueId, customerId)),
   ])
   const { pagina, nextCursor } = cortar(filas, tamano)
+  const enLinea = await tarjetasDeLaPagina(
+    venueId,
+    pagina.map(f => f.id),
+  )
   return {
-    items: pagina.map(f => ({
-      folio: f.orderNumber,
-      estado: f.status,
-      pagado: esVentaCerrada(f.paymentStatus),
-      total: pesos(f.total),
-      trackingToken: f.trackingToken,
-      creadoEl: f.createdAt.toISOString(),
-    })),
+    items: pagina.map(f => {
+      const o = enLinea.get(f.id)
+      const estado = o?.charge ? PUBLIC_CARD_STATUS[o.charge.status] : undefined
+      return {
+        folio: f.orderNumber,
+        estado: f.status,
+        pagado: esVentaCerrada(f.paymentStatus),
+        total: pesos(f.total),
+        trackingToken: f.trackingToken,
+        creadoEl: f.createdAt.toISOString(),
+        pagoEnLinea: o?.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE,
+        tarjeta: estado ? TARJETA_DE_MI_PEDIDO[estado] : null,
+        notPickedUpAt: o?.notPickedUpAt?.toISOString() ?? null,
+        refundRequestedAt: o?.refundRequestedAt?.toISOString() ?? null,
+        refundedAt: o?.refundedAt?.toISOString() ?? null,
+        refund: devolucionPublica(o?.charge?.cardRefunds ?? []) ?? null,
+      }
+    }),
     total: cuenta?.total ?? 0,
     nextCursor,
   }

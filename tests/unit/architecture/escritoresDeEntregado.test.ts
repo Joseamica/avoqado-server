@@ -1,7 +1,8 @@
 /**
  * Tienda híbrida T9b (decisión 18, R28): «Entregado» (`OnlineOrder.COMPLETED`) de un folio (`requiresAcceptance = false`) lo escribe
- * SÓLO una persona (`DELIVER` de `casTransitionInTx`) o el fin del día del negocio (`cerrarFoliosDelDiaTerminado`). Los cierres
- * automáticos de «Mi equipo» (`paidPickupSync`, la rama de `conciliarPedidoEnLinea`) filtran `requiresAcceptance: true` EN SU `where`.
+ * SÓLO una persona (`DELIVER` de `casTransitionInTx`), el fin del día del negocio (`cerrarFoliosDelDiaTerminado`) o (D661, Task 5) el
+ * cierre «Devuelto» de un pedido con tarjeta de «Nadie» (`cerrarComoDevueltoEnTx`). Los cierres automáticos de «Mi equipo»
+ * (`paidPickupSync`, la rama de `conciliarPedidoEnLinea`) filtran `requiresAcceptance: true` EN SU `where`.
  *
  * Inventario cerrado: lee `src/` y falla si aparece otra escritura de `COMPLETED` sobre un pedido en línea, o si una de las
  * permitidas pierde su filtro. Una escritura nueva se agrega aquí A PROPÓSITO, con su razón.
@@ -65,6 +66,14 @@ const PERMITIDAS: Record<string, { veces: number; filtro: RegExp }> = {
   'services/online-ordering/transitions.service.ts': { veces: 1, filtro: /DELIVER: \{/ },
   // El fin del día del negocio: sólo folios.
   'services/online-ordering/folios.service.ts': { veces: 1, filtro: /requiresAcceptance: false/ },
+  // D661 (Task 5): el cierre «Devuelto» (diseño aprobado por el founder: `COMPLETED` + `refundedAt`, sin cancelar nada; lo comparten
+  // los dos destinos de la devolución). Sólo un pedido con tarjeta de «Nadie» con su devolución RESERVADA (y anotada en el libro, que
+  // también repite el `where`): las tres condiciones deben verse en el `where` de la escritura.
+  'services/online-ordering/card/devuelto.ts': {
+    veces: 1,
+    filtro:
+      /^(?=[\s\S]*requiresAcceptance: false)(?=[\s\S]*paymentMode: OnlineOrderPaymentMode\.CARD_ONLINE)(?=[\s\S]*refundRequestedAt: \{ not: null \})/,
+  },
   // «Mi equipo»: nunca un folio.
   'services/online-ordering/paidPickupSync.ts': { veces: 1, filtro: /requiresAcceptance: true/ },
   'services/shared/cuentaCancelada.ts': { veces: 1, filtro: /requiresAcceptance: true/ },

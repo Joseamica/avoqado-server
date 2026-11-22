@@ -78,6 +78,15 @@ export interface RefundState {
   failureReason: string | null
 }
 
+/**
+ * D661 (Task 6, Ruling 28): lo que Stripe dice HOY que ya se devolvió de un cargo: `amount_refunded` del cargo (con las pendientes) y
+ * todas sus devoluciones en cualquier estado, con su metadata. Centavos: sólo en la frontera.
+ */
+export interface ChargeRefunds {
+  amountRefundedCents: number
+  refunds: Array<RefundState & { metadata: Record<string, string> }>
+}
+
 export interface VerifiedWebhookEvent {
   id: string
   type: string
@@ -152,6 +161,8 @@ export interface AuthorizationState {
   /** Codex r3 #3: la comisión de la plataforma que Stripe SÍ cobró (`application_fee_amount`); 0 si el cobro no la trae (p. ej. el
    *  dueño capturó a mano en su Stripe). Opcional: un lector que no la sabe deja la congelada del cargo. */
   applicationFeeCents?: number
+  /** D661 (Ruling 10): la hora en que el PROVEEDOR autorizó (el cargo apartado), nunca la de Avoqado; ausente si no la trae. */
+  authorizedAt?: Date
 }
 
 export interface CaptureParams {
@@ -159,6 +170,23 @@ export interface CaptureParams {
   amountCents: number
   applicationFeeCents: number
   idempotencyKey: string
+}
+
+/**
+ * D661 (ronda codex-r2): límites de las peticiones de UNA llamada al proveedor (también su relectura de recuperación); sin ellos, los de
+ * su cliente. En Stripe son las opciones por petición del SDK (`timeout` por intento, en ms, y `maxNetworkRetries`). Los usan la visita
+ * temprana del conciliador (B, Rulings 42 y 51: lecturas y liberaciones), el reintento de una captura de «Nadie» (C, Ruling 43) y la
+ * captura de quien abre (C, Ruling 52).
+ */
+export interface ProviderRequestLimits {
+  timeoutMs?: number
+  maxNetworkRetries?: number
+  /**
+   * D661 (Ruling 73): NUESTRO plazo duro de la llamada, en ms; el SDK no lo ve. Al cumplirse, la llamada se rechaza con `PlazoAgotado`
+   * aunque el SDK siga esperando un cuerpo que no llega (`conPlazo`). Lo pasa sólo el job del conciliador: su límite por petición + 5 s
+   * y, sin límite por petición, 120 s (la pasada y, ronda 2 de codex-r3, el recorrido de devoluciones).
+   */
+  plazoMs?: number
 }
 
 export interface VoidParams {
@@ -171,28 +199,44 @@ export interface IEcommerceProvider {
   getOnboardingStatus(merchant: EcommerceMerchantWithProvider): Promise<OnboardingStatus>
   createCheckoutSession(merchant: EcommerceMerchantWithProvider, params: CreateCheckoutParams): Promise<CheckoutSession>
   getPaymentStatus(merchant: EcommerceMerchantWithProvider, sessionId: string): Promise<PaymentStatus>
-  refund(merchant: EcommerceMerchantWithProvider, params: RefundParams): Promise<RefundResult>
+  refund(merchant: EcommerceMerchantWithProvider, params: RefundParams, limits?: ProviderRequestLimits): Promise<RefundResult>
   verifyWebhookSignature(payload: string | Buffer, signature: string, endpoint: 'platform' | 'connect'): Promise<VerifiedWebhookEvent>
 
   tokenizeCard(merchant: EcommerceMerchantWithProvider, params: TokenizeCardParams): Promise<TokenizeCardResult>
   authorizeCardPayment(merchant: EcommerceMerchantWithProvider, params: AuthorizeCardPaymentParams): Promise<AuthorizeCardPaymentResult>
 
-  createAuthorizationCheckout(merchant: EcommerceMerchantWithProvider, params: CreateAuthorizationCheckoutParams): Promise<CheckoutSession>
+  createAuthorizationCheckout(
+    merchant: EcommerceMerchantWithProvider,
+    params: CreateAuthorizationCheckoutParams,
+    limits?: ProviderRequestLimits,
+  ): Promise<CheckoutSession>
   getAuthorization(
     merchant: EcommerceMerchantWithProvider,
     ref: { checkoutSessionId: string } | { paymentIntentId: string },
+    limits?: ProviderRequestLimits,
   ): Promise<AuthorizationState>
-  capture(merchant: EcommerceMerchantWithProvider, params: CaptureParams): Promise<AuthorizationState>
-  voidAuthorization(merchant: EcommerceMerchantWithProvider, params: VoidParams): Promise<AuthorizationState>
+  capture(merchant: EcommerceMerchantWithProvider, params: CaptureParams, limits?: ProviderRequestLimits): Promise<AuthorizationState>
+  voidAuthorization(
+    merchant: EcommerceMerchantWithProvider,
+    params: VoidParams,
+    limits?: ProviderRequestLimits,
+  ): Promise<AuthorizationState>
   /** S5: vence una página de pago abierta (el comensal la abandonó). El error del proveedor sale tal cual. */
   expireAuthorizationCheckout(merchant: EcommerceMerchantWithProvider, checkoutSessionId: string): Promise<void>
 
-  getRefund(merchant: EcommerceMerchantWithProvider, refundId: string): Promise<RefundState>
+  getRefund(merchant: EcommerceMerchantWithProvider, refundId: string, limits?: ProviderRequestLimits): Promise<RefundState>
   /** Todas las devoluciones del PaymentIntent (todas las páginas, con tope), con su metadata. */
   listRefunds(
     merchant: EcommerceMerchantWithProvider,
     paymentIntentId: string,
+    limits?: ProviderRequestLimits,
   ): Promise<Array<RefundState & { metadata: Record<string, string> }>>
   /** Lo que Stripe ya devolvió de la comisión de la plataforma de ese cobro (`application_fee.amount_refunded`); 0 si no hay comisión. */
-  getApplicationFeeRefundedCents(merchant: EcommerceMerchantWithProvider, paymentIntentId: string): Promise<number>
+  getApplicationFeeRefundedCents(
+    merchant: EcommerceMerchantWithProvider,
+    paymentIntentId: string,
+    limits?: ProviderRequestLimits,
+  ): Promise<number>
+  /** D661: el cargo del PaymentIntent con lo ya devuelto y TODAS sus devoluciones (también las pendientes). El error sale tal cual. */
+  getChargeRefunds(merchant: EcommerceMerchantWithProvider, paymentIntentId: string): Promise<ChargeRefunds>
 }

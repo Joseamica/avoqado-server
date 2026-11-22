@@ -1992,6 +1992,18 @@
         "razon": "a-la-medida",
         "detalle": "Módulo campo/ (Task 8, Paso 4): la app de campo para promotores, que venden SIMs desde su celular en vez de la PAX (docs/proyectos/app-de-campo-para-promotores-celular-en-vez-de-pax.md del workspace). En v2.16.0 su única pantalla es el inicio de sesión (campo/src/main/java/com/jaac/avoqado_campo/auth/LoginScreen.kt:15; MainActivity.kt:22 la muestra hasta entrar y después sólo «Dentro. Venue: …», :24)."
       }
+    },
+    {
+      "id": "extra:pagados-en-linea-abrir-y-cobrar",
+      "tipo": "accion",
+      "nombre": "Abrir y cobrar (Pagados en línea · ábrelo para cobrar)",
+      "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarScreen.kt:383",
+      "quienLaVe": "En «Pedidos por pagar» (recuadro del inicio, app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt:913-917, o *Ver* en la banda «Pedido pagado en línea · ábrelo para cobrar», core/presentation/navigation/AppNavigation.kt:316), sección «Pagados en línea · ábrelo para cobrar» (PorPagarScreen.kt:247), sólo con `orders:update` (features/onlineorders/presentation/PorPagarViewModel.kt:401 y 894-900; avoqado-server src/routes/tpv/onlineOrders.tpv.routes.ts:23). Las líneas son del commit f659760ee224d71b54f4abf3d2ede18d73f7cc91 (D661, rama feat/d661-tarjeta-en-nadie, 21-nov-2026), posterior a la ref de este inventario: no existe en las versiones vivas de la cabecera y su página lleva versionMin. El extractor no la ve: es una acción dentro de una pantalla.",
+      "equipos": [
+        "PAX",
+        "NEXGO"
+      ],
+      "paginas": ["tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea"]
     }
   ]
 }

@@ -34,6 +34,7 @@ import {
   MAX_UNPAID_FOLIOS_PER_VENUE,
   OPEN_ORDER_STATUSES,
   awaitingAcceptanceWhere,
+  cargoDeNadie,
   liveCardDraftsWhere,
   unpaidFoliosWhere,
 } from './constants'
@@ -47,6 +48,14 @@ import { quoteCart, toPublicQuote, type CartItemInput, type PricedLine, type Quo
 import { generateTrackingToken } from './trackingToken'
 import { CAPTURED_OUTSIDE, confirmCardAuthorization } from './card/confirm.service'
 import { chargeMerchant, cardOnlineAvailable } from './card/merchant'
+import {
+  DEVOLUCIONES_PUBLICAS,
+  PUBLIC_CARD_STATUS,
+  devolucionPublica,
+  type DevolucionPublica,
+  type PublicCardStatus,
+} from './card/estadoPublico'
+export type { DevolucionPublica, PublicCardStatus }
 import { getProvider } from '@/services/payments/provider-registry'
 import type { TxConReintento } from '@/utils/serializableRetry'
 import type { LogActionParams } from '@/services/dashboard/activity-log.service'
@@ -1020,18 +1029,6 @@ export type CardDraftTrackingStatus = 'AWAITING_PAYMENT' | 'PAYMENT_NOT_COMPLETE
 export const cardDraftTrackingStatus = (c: DraftCharge): CardDraftTrackingStatus =>
   c.status === OnlineOrderChargeStatus.PENDING_AUTH && !draftCapturedOutside(c) ? 'AWAITING_PAYMENT' : 'PAYMENT_NOT_COMPLETED'
 
-/**
- * Fase 2: lo que el comensal ve de su tarjeta. `CONFIRMING` = cobrando al aceptar. S4 (Codex plan r1 #3): `RELEASING` = la liberación
- * aún no termina (puede fallar o resultar cobrada a mano): nunca se dice «liberada» antes de tiempo.
- */
-export type PublicCardStatus = 'AUTHORIZED' | 'CONFIRMING' | 'CAPTURED' | 'RELEASING' | 'RELEASED'
-const PUBLIC_CARD_STATUS: Partial<Record<OnlineOrderChargeStatus, PublicCardStatus>> = {
-  AUTHORIZED: 'AUTHORIZED',
-  CAPTURING: 'CONFIRMING',
-  CAPTURED: 'CAPTURED',
-  RELEASING: 'RELEASING',
-  RELEASED: 'RELEASED',
-}
 /** S4: el borrador también dice la verdad de su tarjeta (p. ej. `CAPTURED` sin pedido). */
 const draftCardStatus = (c: DraftCharge): PublicCardStatus | null =>
   draftCapturedOutside(c) ? 'CAPTURED' : (PUBLIC_CARD_STATUS[c.status] ?? null)
@@ -1089,6 +1086,12 @@ export interface PublicTracking {
   beneficioRegresado?: boolean
   /** S14 (P2-8): lo que sumó con esta cuenta ya pagada (sello y puntos), sólo con clienta y la función prendida; `null` si nada. */
   lealtad?: LealtadDeLaCuenta | null
+  /** D661 (Task 4): ISO de cuando el cierre del día lo dio por «No lo recogió» (pagado con tarjeta en «Nadie», sin entregar); o `null`. */
+  notPickedUpAt?: string | null
+  /** D661 (Task 4): ISO de cuando se cerró como «Devuelto» (devuelto el 100 %); o `null`. */
+  refundedAt?: string | null
+  /** D661 (Task 4): la devolución del pago con tarjeta, leída de sus filas reales; sin devolución, no viene. */
+  refund?: DevolucionPublica
 }
 
 const VENUE_PUBLIC_SELECT = {
@@ -1189,6 +1192,7 @@ async function draftTracking(token: string): Promise<PublicTracking | null> {
       amount: true,
       checkoutExpiresAt: true,
       createdAt: true,
+      customerPhone: true,
       venueId: true,
       venue: { select: VENUE_PUBLIC_SELECT },
     },
@@ -1219,7 +1223,7 @@ async function draftTracking(token: string): Promise<PublicTracking | null> {
     rejectReason: null,
     createdAt: c.createdAt.toISOString(),
     canCancel: false,
-    requiresAcceptance: true, // el borrador de tarjeta es de «Mi equipo»
+    requiresAcceptance: !cargoDeNadie(c), // D661: el modo del borrador, no el de hoy de la tienda
     channel: null,
     ...(precioNuevo ? { precioNuevo } : {}),
   }
@@ -1266,7 +1270,10 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
       rejectReason: true,
       createdAt: true,
       venueId: true,
-      charge: { select: { status: true } },
+      notPickedUpAt: true,
+      refundedAt: true,
+      // D661 (Task 4): la devolución, leída igual que en «Mi cuenta» (`card/estadoPublico.ts`).
+      charge: { select: { status: true, cardRefunds: DEVOLUCIONES_PUBLICAS } },
       order: {
         select: {
           orderNumber: true,
@@ -1309,6 +1316,8 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
     beneficioRegresado(row.orderId, row.order),
     paid ? lealtadDeLaCuenta({ venueId: row.venueId, orderId: row.orderId, customerId: clientaIdDeLaCuenta(row.order) }) : null,
   ])
+  const tarjeta = row.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE
+  const refund = devolucionPublica(row.charge?.cardRefunds ?? [])
   return {
     orderNumber: row.order.orderNumber,
     status: row.status,
@@ -1338,14 +1347,15 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
     rejectReason: row.rejectReason ?? null,
     createdAt: row.createdAt.toISOString(),
     // R1: con dinero encima el comensal ya no cancela desde aquí (respondería HAS_PAYMENTS). Fase 2: con tarjeta, sólo apartada.
-    canCancel:
-      row.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE
-        ? pending && row.charge?.status === OnlineOrderChargeStatus.AUTHORIZED
-        : pending,
+    // D661 (Task 4): en «Nadie» la clienta nunca cancela su pedido con tarjeta; lo abre una caja o se libera solo.
+    canCancel: tarjeta ? row.requiresAcceptance !== false && pending && row.charge?.status === OnlineOrderChargeStatus.AUTHORIZED : pending,
     requiresAcceptance: row.requiresAcceptance,
     channel: (row.channel as 'QR' | 'LINK' | null) ?? null,
     ...beneficiosDeLaCuenta(row.order),
     beneficioRegresado: regresado,
     lealtad,
+    notPickedUpAt: row.notPickedUpAt?.toISOString() ?? null,
+    refundedAt: row.refundedAt?.toISOString() ?? null,
+    ...(refund ? { refund } : {}),
   }
 }

@@ -1,0 +1,401 @@
+{
+  "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad",
+  "version": "feat/d661-tarjeta-en-nadie (PR #392)",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 47,
+      "cita": "\"title\": \"Ventas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 57,
+      "cita": "\"onlineOrdering\": \"Pedidos en línea\""
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 10,
+      "cita": "\"settings\": \"Configuración\""
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 120,
+      "cita": "\"title\": \"¿Alguien tiene que aceptar cada pedido?\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 127,
+      "cita": "\"label\": \"No, entran solos\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/OnlineOrdering/components/SettingsTab.tsx",
+      "linea": 663,
+      "cita": "{t(`settings.confirm.${k}.label`)}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 146,
+      "cita": "\"cardNoOneLabel\": \"Pagar en línea\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/OnlineOrdering/components/SettingsTab.tsx",
+      "linea": 770,
+      "cita": "<Label htmlFor=\"oo-card\">{t(noOne ? 'settings.confirm.cardNoOneLabel' : 'settings.cardOnline')}</Label>"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 147,
+      "cita": "\"cardNoOne\": \"La clienta paga con tarjeta al pedir: su dinero se aparta y se cobra cuando una caja abre su pedido. Si nadie lo abre en 10 minutos, se libera y no se le cobra.\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/OnlineOrdering/components/SettingsTab.tsx",
+      "linea": 816,
+      "cita": "? t('settings.confirm.cardNoOne')"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 26,
+      "cita": "\"save\": \"Guardar\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/OnlineOrdering/components/SettingsTab.tsx",
+      "linea": 555,
+      "cita": "{t('settings.save')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 13,
+      "cita": "\"saved\": \"Configuración guardada\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/OnlineOrdering/components/SettingsTab.tsx",
+      "linea": 366,
+      "cita": "toast({ title: t('settings.saved') })"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 148,
+      "cita": "\"cardNoOneOffered\": \"Ahora tus clientes ven «Pagar ahora».\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/OnlineOrdering/components/SettingsTab.tsx",
+      "linea": 849,
+      "cita": "{t(store?.status === 'OPEN' ? 'settings.confirm.cardNoOneOffered' : 'settings.confirm.cardNoOneStore.other')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "avoqado-server/src/services/online-ordering/card/merchant.ts",
+      "linea": 64,
+      "cita": "const avisaATiempo = !!caja?.cardAlertFastPollAt && Date.now() - caja.cardAlertFastPollAt.getTime() <= CARD_ALERT_FAST_WINDOW_MS"
+    },
+    {
+      "paso": 5,
+      "archivo": "avoqado-server/src/services/online-ordering/constants.ts",
+      "linea": 43,
+      "cita": "export const CARD_ALERT_FAST_WINDOW_MS = 90_000"
+    },
+    {
+      "paso": 5,
+      "archivo": "avoqado-tpv/app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/data/VigiaDeFolios.kt",
+      "linea": 378,
+      "cita": "// Ruling 45 · 68: «esta caja suena y enseña los pagados en línea» sólo con la app al frente y el aviso a la vista de la cajera"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "online-orders:manage",
+      "archivo": "avoqado-server/src/routes/dashboard/onlineOrdering.dashboard.routes.ts",
+      "linea": 30
+    },
+    {
+      "permiso": "online-orders:manage",
+      "archivo": "src/pages/OnlineOrdering/OnlineOrderingPage.tsx",
+      "linea": 20
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "ONLINE_ORDERING",
+      "archivo": "avoqado-server/src/routes/dashboard/onlineOrdering.dashboard.routes.ts",
+      "linea": 27
+    },
+    {
+      "featureCode": "ONLINE_ORDERING",
+      "archivo": "src/pages/OnlineOrdering/OnlineOrderingPage.tsx",
+      "linea": 71
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Si las cajas se quedan sin internet, la tienda deja de ofrecer «Pagar ahora» en poco más de un minuto (90 s)",
+      "archivo": "avoqado-server/src/services/online-ordering/constants.ts",
+      "linea": 43
+    },
+    {
+      "afirmacion": "Un pedido ya pagado no se abre sin red (la caja lo dice en el botón)",
+      "archivo": "avoqado-tpv/app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/presentation/PorPagarViewModel.kt",
+      "linea": 193
+    },
+    {
+      "afirmacion": "Si la red no vuelve antes de los 10 min, se libera y no se cobra",
+      "archivo": "avoqado-server/src/services/online-ordering/card/confirm.service.ts",
+      "linea": 217
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: viene apagado y no copia «Sí, alguien del personal lo acepta» (otro interruptor)",
+      "archivo": "src/pages/OnlineOrdering/components/SettingsTab.tsx",
+      "linea": 769
+    },
+    {
+      "ruta": "Antes: el panel no abre ni cobra estos pedidos (OPEN_FROM_CAJA)",
+      "archivo": "avoqado-server/src/controllers/mobile/onlineOrders.mobile.controller.ts",
+      "linea": 189
+    },
+    {
+      "ruta": "Antes: 10 minutos",
+      "archivo": "avoqado-server/src/services/online-ordering/constants.ts",
+      "linea": 23
+    },
+    {
+      "ruta": "Antes: o antes, si cierra la tienda",
+      "archivo": "avoqado-server/src/services/online-ordering/card/confirm.service.ts",
+      "linea": 174
+    },
+    {
+      "ruta": "Antes: sin Stripe, «Para cobrar con tarjeta en línea, date de alta en Stripe.»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 74
+    },
+    {
+      "ruta": "Antes: «Tu cuenta de Stripe todavía no puede cobrar.»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 75
+    },
+    {
+      "ruta": "Antes: el interruptor en gris sin Stripe",
+      "archivo": "src/pages/OnlineOrdering/components/SettingsTab.tsx",
+      "linea": 784
+    },
+    {
+      "ruta": "Antes: *Conectar Stripe* / *Revisar Stripe*",
+      "archivo": "src/pages/OnlineOrdering/components/SettingsTab.tsx",
+      "linea": 823
+    },
+    {
+      "ruta": "Antes: una caja que avisó en los últimos 7 días (NO_CARD_ALERT_DEVICE)",
+      "archivo": "avoqado-server/src/services/online-ordering/settings.service.ts",
+      "linea": 198
+    },
+    {
+      "ruta": "Antes: 7 días",
+      "archivo": "avoqado-server/src/services/online-ordering/constants.ts",
+      "linea": 225
+    },
+    {
+      "ruta": "Clienta: «¿Cómo quieres pagar?»",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 180
+    },
+    {
+      "ruta": "Clienta: *Pagar ahora con tarjeta*",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 181
+    },
+    {
+      "ruta": "Clienta: *Pagar en caja*",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 183
+    },
+    {
+      "ruta": "Clienta: «Se cobra a tu tarjeta cuando <tu negocio> abra tu pedido…»",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 199
+    },
+    {
+      "ruta": "Clienta: «Avisando a <tu negocio>… se te cobra cuando abra tu pedido.»",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 319
+    },
+    {
+      "ruta": "Clienta: «¡Pagado! Lo están preparando»",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 349
+    },
+    {
+      "ruta": "Clienta: «Pasa por él con tu nombre o tu folio.»",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 327
+    },
+    {
+      "ruta": "Clienta: «<tu negocio> no pudo atender tu pedido. No se te cobró.»",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 320
+    },
+    {
+      "ruta": "Clienta: «Si viste un cargo, tu banco lo liberará en unos días.»",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 331
+    },
+    {
+      "ruta": "Clienta: «No lo recogiste»",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 322
+    },
+    {
+      "ruta": "Clienta: «Si quieres que te devuelvan tu pago, habla con <tu negocio>.»",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 329
+    },
+    {
+      "ruta": "Problema: «Actualiza la terminal o el POS para que avise los pedidos pagados» y no se guarda",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 157
+    },
+    {
+      "ruta": "Problema: el aviso al guardar sin caja",
+      "archivo": "src/pages/OnlineOrdering/components/SettingsTab.tsx",
+      "linea": 395
+    },
+    {
+      "ruta": "Problema: «Ahora no se ofrece: ninguna caja está avisando…»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 149
+    },
+    {
+      "ruta": "Problema: «Una caja avisó por última vez: …»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 150
+    },
+    {
+      "ruta": "Problema: un POS Windows minimizado o tapado no cuenta",
+      "archivo": "avoqado-android/app/src/main/java/com/avoqado/pos/onlineorders/data/VigilanteDePedidosEnLinea.kt",
+      "linea": 429
+    },
+    {
+      "ruta": "Problema: «… la tienda está apagada.»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 152
+    },
+    {
+      "ruta": "Problema: «… está cerrada por horario.»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 153
+    },
+    {
+      "ruta": "Problema: «… está en pausa.»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 154
+    },
+    {
+      "ruta": "Problema: «Pagar en línea no está disponible ahora. Puedes pagar en caja.»",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 232
+    },
+    {
+      "ruta": "Problema: «Ahora hay muchos pagos en línea…» (tope de la sucursal)",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 233
+    },
+    {
+      "ruta": "Problema: «Ya tienes pagos con tarjeta sin terminar…» (tope de la clienta)",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 234
+    },
+    {
+      "ruta": "Problema: «Este monto no se puede pagar con tarjeta en línea. Paga en caja.»",
+      "archivo": "avoqado-booking-widget/src/order/i18n/es.json",
+      "linea": 235
+    },
+    {
+      "ruta": "Problema: topes 3 por clienta y 30 por sucursal",
+      "archivo": "avoqado-server/src/services/online-ordering/constants.ts",
+      "linea": 52
+    },
+    {
+      "ruta": "Problema: en la Bandeja, «Venció sin respuesta»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 254
+    },
+    {
+      "ruta": "Problema: «No se cobró la tarjeta» / «Liberando la tarjeta…»",
+      "archivo": "src/pages/OnlineOrdering/components/OrderCard.tsx",
+      "linea": 26
+    },
+    {
+      "ruta": "Problema: «Últimas 24 horas»",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 220
+    },
+    {
+      "ruta": "Problema: lo ya pagado sigue sonando en las cajas al apagar o cambiar de modo",
+      "archivo": "src/locales/es/onlineOrdering.json",
+      "linea": 161
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "http://localhost:3005: SERVIDOR feat/d661-tarjeta-en-nadie (50c6526da en la ronda 1, 0b01c3394 en la ronda 2) con bases desechables av-db-25-d661-ft y av-db-25-d661-r2, DASHBOARD en el 8080 (ad725421 y 6540e22e), WIDGET en pedidos.localhost:5875 (f529b6f y 4d82021) y Stripe de prueba con stripe listen",
+    "fecha": "2026-11-21",
+    "fotos": [
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/d1-01-configuracion-inicial.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/d2-01-nadie-elegido.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/d3-01-horario.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/d3-02-guardado.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/d4-01-pagar-en-linea-prendido-sin-guardar.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/d4-02-guardando.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/d4-03-resultado.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/d6-01-pagar-en-linea-prendido-sin-guardar.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/d6-02-guardando.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/d6-03-resultado.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/d7-bandeja.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/cG-modo-nadie-antes.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/cG-modo-nadie-despues.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/cA-w-detalles.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/cA-w-seguimiento-apartado.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/cA-w-seguimiento-liberado.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/cB-w-seguimiento-cobrado.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/cB-w-seguimiento-entregado.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/c5-w-no-lo-recogiste.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas/w5-sin-cuenta-tras-pedir.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/cfg-01-pagar-en-linea-prendido-sin-guardar.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/cfg-03-resultado.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/D-cfg-tarjeta-prendida.png",
+      "docs/audit/2026-11-18-tarjeta-en-nadie/full-testing/capturas-r2/I-01-config-pagar-en-linea.png"
+    ],
+    "filasCreadas": [
+      "Todo en bases desechables (av-db-25-d661-ft y av-db-25-d661-r2), borradas al terminar; de av-db-25 sólo se leyó. «Avoqado Full» en «No, entran solos» con «Pagar en línea» y la cuenta conectada de prueba acct_1TSIYaBDF0XCcHsh. Pedidos de la clienta: WAF37, W8ZKG, WEBN2, WPDRN, WN2UH, WSJVQ, WKWGM cobrados; WGSTH, W4HWN y H liberados sin cobrar (PaymentIntent canceled). Cuadre al centavo en full-testing/report.md."
+    ],
+    "nota": "Recorrido real con Playwright (ronda 1 e I de la ronda 2, 21-nov): elegir «No, entran solos», prender *Pagar en línea*, *Guardar* con «Configuración guardada» y «Ahora tus clientes ven «Pagar ahora».»; la clienta paga, ve «Avisando a…», «¡Pagado! Lo están preparando», «No se te cobró» al vencer y «No lo recogiste»; en la Bandeja «Venció sin respuesta» y «No se cobró la tarjeta». Sin cuenta, *Pedir* lleva a «Entra a tu cuenta». La ronda 2 confirmó la configuración palabra por palabra. El DASHBOARD probado (ad725421 / 6540e22e) difiere del sourceRef f4e3180b sólo en la hoja de devolver. NO se vieron: «Liberando la tarjeta…», los tres topes de la clienta («muchos pagos», «sin terminar», «este monto»), «Pagar en línea no está disponible ahora…» ni el gris sin Stripe (la cuenta de prueba sí cobraba); salen del código."
+  },
+  "codex": {
+    "lote": 12,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

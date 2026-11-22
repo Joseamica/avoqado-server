@@ -7,6 +7,7 @@ import { getStripeChargeBoundsCents } from '@/services/payments/providers/money'
 const mockStripe = {
   checkout: { sessions: { create: jest.fn(), retrieve: jest.fn(), expire: jest.fn() } },
   paymentIntents: { retrieve: jest.fn(), capture: jest.fn(), cancel: jest.fn() },
+  refunds: { list: jest.fn() },
 }
 
 jest.mock('stripe', () => jest.fn().mockImplementation(() => mockStripe))
@@ -141,6 +142,23 @@ describe('StripeConnectProvider — apartar, cobrar, liberar, leer', () => {
       mockStripe.paymentIntents.retrieve.mockResolvedValueOnce({ ...piBase, status: 'succeeded', application_fee_amount: null })
       expect((await provider.getAuthorization(merchant as any, { paymentIntentId: 'pi_1' })).applicationFeeCents).toBe(0)
     })
+
+    it('D661 (Ruling 10): authorizedAt es la hora en que Stripe autorizó (el cargo apartado: latest_charge.created), por sesión y por PaymentIntent; sin cargo no la inventa', async () => {
+      const conHora = { ...piBase, latest_charge: { ...piBase.latest_charge, created: 1730000100 } }
+      mockStripe.checkout.sessions.retrieve.mockResolvedValueOnce({ id: 'cs_1', status: 'complete', payment_intent: conHora })
+      expect((await provider.getAuthorization(merchant as any, { checkoutSessionId: 'cs_1' })).authorizedAt).toEqual(
+        new Date(1730000100 * 1000),
+      )
+      mockStripe.paymentIntents.retrieve.mockResolvedValueOnce(conHora)
+      expect((await provider.getAuthorization(merchant as any, { paymentIntentId: 'pi_1' })).authorizedAt).toEqual(
+        new Date(1730000100 * 1000),
+      )
+      // Sin cargo expandido (sesión abierta, o un objeto sin hora): ausente, nunca el reloj de Avoqado.
+      mockStripe.checkout.sessions.retrieve.mockResolvedValueOnce({ id: 'cs_1', status: 'open', payment_intent: null })
+      expect(await provider.getAuthorization(merchant as any, { checkoutSessionId: 'cs_1' })).not.toHaveProperty('authorizedAt')
+      mockStripe.paymentIntents.retrieve.mockResolvedValueOnce(piBase)
+      expect(await provider.getAuthorization(merchant as any, { paymentIntentId: 'pi_1' })).not.toHaveProperty('authorizedAt')
+    })
   })
 
   describe('capture', () => {
@@ -230,6 +248,75 @@ describe('StripeConnectProvider — apartar, cobrar, liberar, leer', () => {
     it('rechaza comisión mayor al monto', async () => {
       await expect(provider.capture(merchant as any, { ...params, applicationFeeCents: 25001 })).rejects.toBeInstanceOf(BadRequestError)
       expect(mockStripe.paymentIntents.capture).not.toHaveBeenCalled()
+    })
+  })
+
+  // D661 (ronda codex-r2): límites de UNA petición, por la opción por petición del SDK (`timeout`, `maxNetworkRetries`). Sin ellos, las
+  // opciones de siempre (las pruebas de arriba fijan esa forma exacta).
+  describe('límites por petición (D661 · B y C)', () => {
+    const LECTURA_ACOTADA = { timeoutMs: 10_000, maxNetworkRetries: 0 }
+
+    it('B (Ruling 42): una lectura acotada manda timeout y maxNetworkRetries al SDK, por sesión y por PaymentIntent', async () => {
+      mockStripe.checkout.sessions.retrieve.mockResolvedValue({ id: 'cs_1', status: 'open', payment_intent: null })
+      await provider.getAuthorization(merchant as any, { checkoutSessionId: 'cs_1' }, LECTURA_ACOTADA)
+      expect(mockStripe.checkout.sessions.retrieve).toHaveBeenCalledWith(
+        'cs_1',
+        { expand: ['payment_intent.latest_charge'] },
+        { stripeAccount: 'acct_x', timeout: 10_000, maxNetworkRetries: 0 },
+      )
+      mockStripe.paymentIntents.retrieve.mockResolvedValue(piBase)
+      await provider.getAuthorization(merchant as any, { paymentIntentId: 'pi_1' }, LECTURA_ACOTADA)
+      expect(mockStripe.paymentIntents.retrieve).toHaveBeenCalledWith(
+        'pi_1',
+        { expand: ['latest_charge'] },
+        { stripeAccount: 'acct_x', timeout: 10_000, maxNetworkRetries: 0 },
+      )
+    })
+
+    it('C (Ruling 43): una captura de UN solo envío manda maxNetworkRetries: 0 al SDK con su clave; sin límite, como hoy', async () => {
+      mockStripe.paymentIntents.capture.mockResolvedValue({ ...piBase, status: 'succeeded', amount_received: 25000, amount_capturable: 0 })
+      const params = { paymentIntentId: 'pi_1', amountCents: 25000, applicationFeeCents: 290, idempotencyKey: 'online-order:o1:capture' }
+      await provider.capture(merchant as any, params, { maxNetworkRetries: 0 })
+      expect(mockStripe.paymentIntents.capture).toHaveBeenLastCalledWith(
+        'pi_1',
+        { amount_to_capture: 25000, application_fee_amount: 290, expand: ['latest_charge'] },
+        { stripeAccount: 'acct_x', idempotencyKey: 'online-order:o1:capture', maxNetworkRetries: 0 },
+      )
+      await provider.capture(merchant as any, params)
+      expect(mockStripe.paymentIntents.capture).toHaveBeenLastCalledWith(
+        'pi_1',
+        { amount_to_capture: 25000, application_fee_amount: 290, expand: ['latest_charge'] },
+        { stripeAccount: 'acct_x', idempotencyKey: 'online-order:o1:capture' },
+      )
+    })
+
+    it('B (Ruling 51): una liberación acotada manda el límite a la cancelación y a la relectura con que se recupera; sin límite, como hoy', async () => {
+      const original = stripeError('rate_limit')
+      mockStripe.paymentIntents.cancel.mockRejectedValue(original)
+      mockStripe.paymentIntents.retrieve.mockResolvedValue(piBase) // sigue apartada: sale el error original
+      const params = { paymentIntentId: 'pi_1', idempotencyKey: 'online-order-charge:ch1:release' }
+      await expect(provider.voidAuthorization(merchant as any, params, LECTURA_ACOTADA)).rejects.toBe(original)
+      expect(mockStripe.paymentIntents.cancel).toHaveBeenLastCalledWith(
+        'pi_1',
+        { expand: ['latest_charge'] },
+        { stripeAccount: 'acct_x', idempotencyKey: 'online-order-charge:ch1:release', timeout: 10_000, maxNetworkRetries: 0 },
+      )
+      expect(mockStripe.paymentIntents.retrieve).toHaveBeenLastCalledWith(
+        'pi_1',
+        { expand: ['latest_charge'] },
+        { stripeAccount: 'acct_x', timeout: 10_000, maxNetworkRetries: 0 },
+      )
+      await expect(provider.voidAuthorization(merchant as any, params)).rejects.toBe(original)
+      expect(mockStripe.paymentIntents.cancel).toHaveBeenLastCalledWith(
+        'pi_1',
+        { expand: ['latest_charge'] },
+        { stripeAccount: 'acct_x', idempotencyKey: 'online-order-charge:ch1:release' },
+      )
+      expect(mockStripe.paymentIntents.retrieve).toHaveBeenLastCalledWith(
+        'pi_1',
+        { expand: ['latest_charge'] },
+        { stripeAccount: 'acct_x' },
+      )
     })
   })
 
@@ -327,6 +414,46 @@ describe('StripeConnectProvider — apartar, cobrar, liberar, leer', () => {
       await expect(other.capture({} as any, {} as any)).rejects.toBeInstanceOf(ProviderCapabilityError)
       await expect(other.voidAuthorization({} as any, {} as any)).rejects.toBeInstanceOf(ProviderCapabilityError)
       await expect(other.expireAuthorizationCheckout({} as any, 'cs_1')).rejects.toBeInstanceOf(ProviderCapabilityError)
+    })
+  })
+
+  // D661 (Task 6, Ruling 28): antes de devolver un pedido «Nadie» se lee el cargo en Stripe; cualquier devolución hecha por fuera frena.
+  describe('getChargeRefunds', () => {
+    it('lee el cargo (latest_charge) con amount_refunded y TODAS sus devoluciones, también las pendientes, de la cuenta conectada', async () => {
+      mockStripe.paymentIntents.retrieve.mockResolvedValue({
+        ...piBase,
+        latest_charge: { ...piBase.latest_charge, amount_refunded: 10_000 },
+      })
+      mockStripe.refunds.list.mockReturnValue({
+        autoPagingToArray: jest.fn().mockResolvedValue([
+          { id: 're_1', status: 'pending', amount: 6_000, failure_reason: null, metadata: {} },
+          { id: 're_2', status: 'succeeded', amount: 4_000, failure_reason: null, metadata: { cardRefundId: 'cr1' } },
+        ]),
+      })
+      await expect(provider.getChargeRefunds(merchant as any, 'pi_1')).resolves.toEqual({
+        amountRefundedCents: 10_000,
+        refunds: [
+          expect.objectContaining({ refundId: 're_1', status: 'PENDING', amountCents: 6_000, metadata: {} }),
+          expect.objectContaining({ refundId: 're_2', status: 'SUCCEEDED', amountCents: 4_000, metadata: { cardRefundId: 'cr1' } }),
+        ],
+      })
+      expect(mockStripe.paymentIntents.retrieve).toHaveBeenCalledWith('pi_1', { expand: ['latest_charge'] }, { stripeAccount: 'acct_x' })
+      expect(mockStripe.refunds.list).toHaveBeenCalledWith({ payment_intent: 'pi_1', limit: 100 }, { stripeAccount: 'acct_x' })
+    })
+
+    it('sin cargo todavía (nada cobrado) → 0 devuelto; un error de Stripe sale tal cual (nunca «sin devoluciones»)', async () => {
+      mockStripe.paymentIntents.retrieve.mockResolvedValueOnce({ ...piBase, latest_charge: null })
+      mockStripe.refunds.list.mockReturnValue({ autoPagingToArray: jest.fn().mockResolvedValue([]) })
+      await expect(provider.getChargeRefunds(merchant as any, 'pi_1')).resolves.toEqual({ amountRefundedCents: 0, refunds: [] })
+      mockStripe.paymentIntents.retrieve.mockRejectedValueOnce(stripeError('api_connection_error'))
+      await expect(provider.getChargeRefunds(merchant as any, 'pi_1')).rejects.toThrow('boom')
+    })
+
+    it.each([
+      ['BlumonProvider', new BlumonProvider()],
+      ['MercadoPagoProvider', new MercadoPagoProvider()],
+    ])('%s lanza ProviderCapabilityError', async (_n, other) => {
+      await expect(other.getChargeRefunds({} as any, 'pi_1')).rejects.toBeInstanceOf(ProviderCapabilityError)
     })
   })
 

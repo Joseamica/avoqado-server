@@ -7,9 +7,11 @@
  * R1: ninguna transición recibe `now` desde aquí: la transición toma su reloj DESPUÉS del candado de la orden.
  */
 import type { NextFunction, Request, Response } from 'express'
-import type { OnlineOrderRejectReason } from '@prisma/client'
+import { OnlineOrderStatus, type OnlineOrderRejectReason } from '@prisma/client'
 import { evaluateRolePermission, resolveUserRoleForVenue } from '@/middlewares/checkPermission.middleware'
-import { ONLINE_ORDERS_TO_PAY_HEADER, ONLINE_ORDERS_TRAY_HEADER } from '@/services/online-ordering/constants'
+import { ONLINE_ORDERS_TO_PAY_HEADER, ONLINE_ORDERS_TRAY_HEADER, TO_PAY_FAST_POLL_SECONDS } from '@/services/online-ordering/constants'
+import { CARD_ALERT_HEADER, apagarMarcaRapida, touchCardAlertPoll } from '@/services/online-ordering/cardAlertPresence'
+import { MENSAJE_ABRIR_DESDE_LA_CAJA, mensajeNoSeEntrega } from '@/services/online-ordering/card/guards'
 import { listInbox, type InboxFilter } from '@/services/online-ordering/inbox.service'
 import { listFolios, type FolioSection } from '@/services/online-ordering/folios.service'
 import { listDeliveryCashPending } from '@/services/delivery-channels/core/deliveryCashPending.service'
@@ -36,19 +38,38 @@ const staffOf = (req: Request): string | null => (req as any).authContext?.userI
 /** M-10: con tope de largo; termina guardado en `printClaimedBy`. */
 const deviceOf = (req: Request): string => (req.header('x-device-id') ?? '').trim().slice(0, 100)
 
-function reply(res: Response, r: TransitionResult) {
+/**
+ * D661 (Ruling 71, texto de la ronda codex-r3): el pedido ya se cerró («No lo recogió», «Devolviendo…» o «Devuelto»). Neutro a propósito:
+ * uno que una persona entregó y se devolvió después también llega aquí, y «se cerró sin entregarse» no sería exacto.
+ */
+const CERRADO_SIN_ENTREGAR = 'Este pedido ya se cerró (se devolvió o no lo recogieron). No lo entregues.'
+
+/** `accion`: lo que la caja pidió, para decir por qué no se aplicó («entregado» o, D661 Task 5, «listo»). */
+function reply(res: Response, r: TransitionResult, accion: 'entregado' | 'listo' = 'entregado') {
   switch (r.outcome) {
     case 'OK': {
       const { outcome: _o, ...data } = r
       return res.json({ success: true, data })
     }
-    case 'STALE':
+    case 'STALE': {
+      // D661 (Task 4): al entregar o marcar «Listo», el estado real («No lo recogió», «Devolviendo…», «Devuelto») va en campos nuevos
+      // opcionales. D661 (Ruling 71): un POS o una TPV viejos leen `ORDER_STATE_CHANGED` + COMPLETED en «Entregado» como el segundo
+      // toque (éxito); un COMPLETED con cualquiera de esas marcas ya se cerró y lleva su PROPIO código, con el estado y las marcas de
+      // siempre. Todo lo demás (un COMPLETED sin marcas incluido), el 409 de siempre.
+      const { outcome: _o, status, ...marcas } = r
+      const cerradoSinEntregar =
+        status === OnlineOrderStatus.COMPLETED && Boolean(marcas.notPickedUpAt || marcas.refundRequestedAt || marcas.refundedAt)
       return res.status(409).json({
         success: false,
-        code: 'ORDER_STATE_CHANGED',
-        status: r.status,
-        error: 'El pedido ya cambió de estado (otro aparato, el cliente, la caja o el tiempo). Actualiza la bandeja.',
+        code: cerradoSinEntregar ? 'ORDER_CLOSED_NOT_DELIVERED' : 'ORDER_STATE_CHANGED',
+        status,
+        ...marcas,
+        error: cerradoSinEntregar
+          ? CERRADO_SIN_ENTREGAR
+          : (mensajeNoSeEntrega(marcas, accion) ??
+            'El pedido ya cambió de estado (otro aparato, el cliente, la caja o el tiempo). Actualiza la bandeja.'),
       })
+    }
     case 'PAYMENT_REQUIRED':
       return res.status(409).json({ success: false, code: 'PAYMENT_REQUIRED', error: 'Cobra el pedido antes de entregarlo.' })
     case 'HAS_PAYMENTS':
@@ -66,6 +87,8 @@ function reply(res: Response, r: TransitionResult) {
         code: 'ONLINE_ORDER_CONFIRMING_PAYMENT',
         error: 'Confirmando el pago con el banco. Espera unos segundos.',
       })
+    case 'OPEN_FROM_CAJA':
+      return res.status(409).json({ success: false, code: 'OPEN_FROM_CAJA', error: MENSAJE_ABRIR_DESDE_LA_CAJA })
     default:
       // Un resultado que este mapa no conoce es un error del servidor (500), nunca un «no existe» que engañe a la caja.
       throw new Error(`Resultado de transición desconocido: ${String((r as { outcome?: unknown }).outcome)}`)
@@ -131,6 +154,9 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
 /**
  * Tienda híbrida (T12): «Por pagar» y «Por entregar». El latido (`x-online-orders-to-pay: 1`) dice a la tienda que hay una caja viva y
  * sólo cuenta de quien puede COBRAR (`payments:create`, no suplantando); sin la cabecera no late, y el panel nunca la manda.
+ * D661 (r4 #4, Ruling 7): la caja actualizada que sabe avisar los pedidos pagados en línea manda además `x-online-orders-card-alert: 1`;
+ * su latido sólo cuenta de quien puede ABRIRLOS (`orders:update`) y dice si la respuesta que recibe es RÁPIDA. Va DESPUÉS del de
+ * folios, que es el que crea la fila de ajustes (éste sólo la actualiza).
  */
 const makeToPay = (puedeLatir: boolean) => async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -141,8 +167,27 @@ const makeToPay = (puedeLatir: boolean) => async (req: Request, res: Response, n
     const latido =
       puedeLatir && req.header(ONLINE_ORDERS_TO_PAY_HEADER) === '1' && (await canDo(req, venueId, 'payments:create').catch(() => false))
     if (latido) await touchToPayPoll(venueId).catch(() => false)
+    // D661 (A, Ruling 41): la caja que avisa sólo se duerme (600 s) si su respuesta lenta quedó anotada: esa escritura apaga la marca
+    // rápida con la que la tienda ofrece la tarjeta. Si la base no dejó anotarla (ni leer si esta sesión puede abrir pedidos), se le
+    // contesta la cadencia rápida y sigue en 30 s hasta que se anote. Con una respuesta rápida un fallo no cambia nada (ya es 30).
+    // D661 (A, Ruling 79): en la ruta de las apps una respuesta LENTA apaga la marca aunque no se anote latido (sin la cabecera: WINDOWS
+    // sin foco, la TPV cobrando o bloqueada; o una sesión que no abre pedidos): esa caja también se duerme. Sólo apaga; si no pudo, 30 s.
+    const rapida = data.pollSeconds <= TO_PAY_FAST_POLL_SECONDS
+    const anotar = async () => {
+      if (req.header(CARD_ALERT_HEADER) === '1' && (await canAnswerOrders(req, venueId))) await touchCardAlertPoll(venueId, rapida)
+      else if (!rapida) await apagarMarcaRapida(venueId)
+    }
+    const anotada =
+      !puedeLatir ||
+      (await anotar().then(
+        () => true,
+        () => false,
+      ))
     const state = await getAcceptingStatus(venueId).catch(() => null)
-    return res.json({ success: true, data: { ...data, store: state ? storeView(state) : null } })
+    return res.json({
+      success: true,
+      data: { ...data, ...(anotada ? {} : { pollSeconds: TO_PAY_FAST_POLL_SECONDS }), store: state ? storeView(state) : null },
+    })
   } catch (e) {
     return next(e)
   }
@@ -166,12 +211,24 @@ export const deliveryCash = async (req: Request, res: Response, next: NextFuncti
   }
 }
 
-export const accept = async (req: Request, res: Response, next: NextFunction) => {
+/**
+ * D661: abrir un pedido pagado con tarjeta en «Nadie» lo COBRA, y sólo lo hace una caja actualizada: por sus rutas (`desdeCaja`) y con
+ * `{ abrirPagadoEnLinea: true }`. El panel nunca abre (aunque mande el campo); una app vieja (sin el campo) recibe 409 OPEN_FROM_CAJA.
+ */
+const makeAccept = (desdeCaja: boolean) => async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
     const estimatedMinutes = typeof req.body?.estimatedMinutes === 'number' ? req.body.estimatedMinutes : undefined
+    const abrir = desdeCaja && req.body?.abrirPagadoEnLinea === true
     // D662 parte 2: esta puerta es una persona (caja o panel): su toque cuenta para la pausa sola.
-    const r = await acceptOnlineOrder({ venueId, orderId, staffId: staffOf(req), estimatedMinutes, porPersona: true })
+    const r = await acceptOnlineOrder({
+      venueId,
+      orderId,
+      staffId: staffOf(req),
+      estimatedMinutes,
+      porPersona: true,
+      ...(abrir ? { abrirPagadoEnLinea: true as const } : {}),
+    })
     // Aceptar sólo puede exigir pago en un folio (QR o liga): se cobra antes de prepararlo.
     if (r.outcome === 'PAYMENT_REQUIRED') {
       return res.status(409).json({ success: false, code: 'PAYMENT_REQUIRED', error: 'Este pedido se cobra antes de prepararlo' })
@@ -181,6 +238,11 @@ export const accept = async (req: Request, res: Response, next: NextFunction) =>
     return next(e)
   }
 }
+
+/** Apps (TPV y POS): aceptar, y abrir un pedido pagado con tarjeta en «Nadie». */
+export const accept = makeAccept(true)
+/** Panel: la MISMA aceptación, pero nunca abre (cobra) un pedido pagado con tarjeta en «Nadie». */
+export const acceptPanel = makeAccept(false)
 
 export const reject = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -197,7 +259,7 @@ export const reject = async (req: Request, res: Response, next: NextFunction) =>
 export const ready = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
-    return reply(res, await markOnlineOrderReady({ venueId, orderId, staffId: staffOf(req) }))
+    return reply(res, await markOnlineOrderReady({ venueId, orderId, staffId: staffOf(req) }), 'listo')
   } catch (e) {
     return next(e)
   }
@@ -240,7 +302,9 @@ export const printClaim = async (req: Request, res: Response, next: NextFunction
     const deviceId = deviceOf(req)
     if (!deviceId) return needsDevice(res)
     const { venueId, orderId } = req.params
-    return res.json({ success: true, data: await claimOnlineOrderPrint(venueId, orderId, deviceId) })
+    // D661 (F1, Ruling 37): la caja que marca «POSIBLE REPETIDA» lo dice con la cabecera de los avisos de tarjeta.
+    const marcaRepetida = req.header(CARD_ALERT_HEADER) === '1'
+    return res.json({ success: true, data: await claimOnlineOrderPrint(venueId, orderId, deviceId, new Date(), marcaRepetida) })
   } catch (e) {
     return next(e)
   }
