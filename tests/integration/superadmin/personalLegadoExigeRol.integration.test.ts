@@ -159,6 +159,19 @@ describe('montaje legado /dashboard/superadmin completo', () => {
     }
   })
 
+  it('un OWNER con el comodín *:* guardado (caso medido en producción) recibe 403 aquí y sigue entrando a lo de su negocio', async () => {
+    await prisma.venueRolePermission.updateMany({ where: { venueId, role: 'OWNER' }, data: { permissions: ['*:*'] } })
+    try {
+      const legado = await request(app).get(`${LEGADO}/terminals/${terminalId}`).set(como(tokenDueno))
+      expect(legado.status).toBe(403)
+      expect(legado.body).toEqual(ROL)
+      const suNegocio = await request(app).get(`/api/v1/dashboard/venues/${venueId}`).set(como(tokenDueno))
+      expect(suNegocio.status).toBe(200)
+    } finally {
+      await prisma.venueRolePermission.updateMany({ where: { venueId, role: 'OWNER' }, data: { permissions: ['system:manage'] } })
+    }
+  })
+
   it('un SUPERADMIN sigue leyendo la ficha de la terminal y la lista de negocios', async () => {
     const ficha = await request(app).get(`${LEGADO}/terminals/${terminalId}`).set(como(tokenSuperadmin))
     expect(ficha.status).toBe(200)
