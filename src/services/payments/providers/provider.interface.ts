@@ -53,6 +53,8 @@ export interface PaymentStatus {
   paymentIntentId?: string
   amountPaid?: number
   applicationFeeAmount?: number
+  /** D681: la liga de pago, mientras siga abierta (para reusarla en vez de abrir otra). */
+  checkoutUrl?: string | null
 }
 
 export interface RefundParams {

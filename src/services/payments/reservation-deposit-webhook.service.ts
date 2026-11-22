@@ -10,6 +10,7 @@ import { confirmCardAuthorization } from '@/services/online-ordering/card/confir
 import { handleStripeRefundEvent } from '@/services/online-ordering/card/refund.service'
 import { chargeMerchant, isForeignStripeEvent } from '@/services/online-ordering/card/merchant'
 import { getProvider } from '@/services/payments/provider-registry'
+import { aplicarAlDeposito } from '@/services/reservation/depositoDeReserva'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import emailService from '@/services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '@/services/whatsapp.service'
@@ -235,59 +236,18 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
         },
       })
 
-      // Capture the row id BEFORE updating so we can fire the confirmation
-      // email after the tx commits. updateMany doesn't return rows; the
-      // findFirst+update pair keeps the original idempotency semantics
-      // (no-op when depositStatus has already advanced past PENDING).
-      const target = await tx.reservation.findFirst({
-        where: {
-          checkoutSessionId: session.id,
-          depositStatus: 'PENDING',
-        },
-        select: { id: true },
-      })
-
-      const updated = target
-        ? await tx.reservation.updateMany({
-            where: { id: target.id, depositStatus: 'PENDING' },
-            data: {
-              status: ReservationStatus.CONFIRMED,
-              confirmedAt: new Date(),
-              depositStatus: 'PAID',
-              depositPaidAt: new Date(),
-              depositProcessorRef: paymentIntentId,
-            },
-          })
-        : { count: 0 }
-
-      if (updated.count === 1) {
-        justConfirmedReservationId = target!.id
-        return
-      }
-
-      const current = await tx.reservation.findFirst({
-        where: { checkoutSessionId: session.id },
-        select: { id: true, status: true, depositStatus: true },
-      })
-
-      if (!current) {
+      // D681: el depósito tiene UN dueño (`aplicarAlDeposito`). Una reserva que esperaba el pago se confirma; a quien ya llegó
+      // o ya terminó sólo se le marca pagado; a una cancelada o vencida nunca la revive: deja anomalía de dinero (una vez).
+      const r = await aplicarAlDeposito(tx, { checkoutSessionId: session.id }, { tipo: 'PAGADO', paymentIntentId, eventoId: event.id })
+      if (r.resultado === 'NO_EXISTE') {
         logger.warn('⚠️ [STRIPE CONNECT] Checkout completed for unknown reservation session', {
           eventId: event.id,
           sessionId: session.id,
         })
         return
       }
-
-      if (current.depositStatus === 'PAID') return
-
-      await recordMoneyAnomaly({
-        tx,
-        category: 'PAID_AFTER_DIVERGENT_STATE',
-        reservationId: current.id,
-        stripeEventId: event.id,
-        expectedState: { depositStatus: 'PENDING' },
-        observedState: { status: current.status, depositStatus: current.depositStatus },
-      })
+      // La confirmación (correo y WhatsApp) sólo cuando el pago CONFIRMÓ la reserva.
+      if (r.resultado === 'APLICADO' && r.antes.status === ReservationStatus.PENDING) justConfirmedReservationId = r.antes.id
     })
   } catch (error: any) {
     if (error?.code === 'P2002') {
@@ -431,26 +391,15 @@ async function processCheckoutExpired(event: VerifiedWebhookEvent) {
         },
       })
 
-      const updated = await tx.reservation.updateMany({
-        where: {
-          checkoutSessionId: session.id,
-          depositStatus: 'PENDING',
-        },
-        data: {
-          status: ReservationStatus.CANCELLED,
-          cancelledAt: new Date(),
-          cancelledBy: 'SYSTEM',
-          cancellationReason: 'Stripe Checkout session expired',
-          depositStatus: 'EXPIRED',
-        },
-      })
-
-      if (updated.count === 1) return
-
-      const current = await tx.reservation.findFirst({
-        where: { checkoutSessionId: session.id },
-        select: { id: true, status: true, depositStatus: true },
-      })
+      // D681: el depósito tiene UN dueño. La liga vencida cancela sólo una reserva que seguía esperando ESE pago; si ya estaba
+      // confirmada, llegó o se canceló, sólo cierra el depósito (nunca cancela ni cambia quién canceló).
+      const r = await aplicarAlDeposito(
+        tx,
+        { checkoutSessionId: session.id },
+        { tipo: 'VENCIDO', sesionId: session.id, motivo: 'Stripe Checkout session expired' },
+      )
+      if (r.resultado !== 'IGUAL') return
+      const current = r.antes
 
       if (!current || current.depositStatus === 'EXPIRED' || current.depositStatus === 'PAID') return
 

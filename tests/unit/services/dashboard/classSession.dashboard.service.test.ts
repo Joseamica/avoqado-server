@@ -42,6 +42,7 @@ import { cancelReservation } from '@/services/dashboard/reservation.dashboard.se
 import { assertOrganizationStaffAvailability, lockAppointmentVenue } from '@/services/dashboard/appointmentStaffAssignment.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import * as passCapacity from '@/services/aggregators/passCapacity.service'
+import * as depositoDeReserva from '@/services/reservation/depositoDeReserva'
 
 // ---- Constants ----
 
@@ -152,6 +153,10 @@ describe('ClassSession Dashboard Service', () => {
     publishMock.mockReset().mockResolvedValue(undefined)
     logActionMock.mockReset()
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+    // D681: el depósito tiene UN dueño (su tabla se prueba aparte): aquí no hay ligas abiertas ni depósito que mover.
+    prismaMock.reservation.findMany.mockResolvedValue([])
+    jest.spyOn(depositoDeReserva, 'cerrarLigaAntesDeCancelar').mockResolvedValue({ sesionCerrada: null })
+    jest.spyOn(depositoDeReserva, 'aplicarAlDeposito').mockResolvedValue({ resultado: 'NO_EXISTE' })
     prismaMock.reservationSettings.findUnique.mockResolvedValue({
       googleCalendarPushEnabled: false,
       googleCalendarDualWrite: false,

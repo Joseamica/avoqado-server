@@ -36,6 +36,7 @@ import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { buildReservationBookingCapabilities } from '@/services/reservation/publicReservationCapabilities'
 import { buildReservationCheckoutReturnUrls } from '@/services/reservation/reservationReturnUrl'
 import { lockClassSession, sumOccupiedSeats } from '@/services/reservation/classBooking.service'
+import { depositoAlCrear, registrarLiga } from '@/services/reservation/depositoDeReserva'
 import { enqueuePassSessionSync } from '@/services/aggregators/core/sessionSync.service'
 
 // ==========================================
@@ -203,6 +204,9 @@ async function resolveVenueBySlug(venueSlug: string) {
 
 /** Venue default used when a service carries no duration of its own. */
 export const FALLBACK_SERVICE_DURATION_MIN = 60
+
+/** Cuánto se aparta el lugar de una clase con pago por adelantado mientras la clienta paga (el mínimo de Stripe Checkout). */
+const CLASS_UPFRONT_PAYMENT_WINDOW_MS = 30 * 60_000
 
 type DurationBearingService = { id: string; duration: number | null; durationMinutes: number | null }
 
@@ -980,7 +984,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
           applicationFeeAmount,
           successUrl,
           cancelUrl,
-          expiresAt: new Date(Date.now() + 30 * 60_000),
+          expiresAt: new Date(Date.now() + CLASS_UPFRONT_PAYMENT_WINDOW_MS),
           customerEmail: reservation.guestEmail ?? undefined,
           metadata: {
             type: 'class_reservation',
@@ -996,9 +1000,12 @@ export async function createReservation(req: Request, res: Response, next: NextF
 
         // Pin the EcommerceMerchant alongside the session id so refunds and
         // reconciliation always route through the same connected account.
-        await prisma.reservation.update({
-          where: { id: reservation.id },
-          data: { checkoutSessionId: session.id, ecommerceMerchantId: stripeMerchant.id },
+        // D681: y el vencimiento que contestó Stripe, sólo si la reserva sigue esperando el pago (si no, la liga se cierra).
+        await registrarLiga({
+          reservationId: reservation.id,
+          venueId: venue.id,
+          merchant: stripeMerchant,
+          session,
         })
         checkoutUrl = session.url
       }
@@ -1311,16 +1318,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
 
       // Pin the EcommerceMerchant alongside the session id so refunds and
       // reconciliation always route through the same connected account.
-      reservation = await prisma.reservation.update({
-        where: { id: reservation.id },
-        data: { checkoutSessionId: session.id, ecommerceMerchantId: stripeMerchant.id },
-        include: {
-          customer: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
-          table: { select: { id: true, number: true, capacity: true } },
-          product: { select: { id: true, name: true, price: true } },
-          assignedStaff: { select: { id: true, firstName: true, lastName: true } },
-        },
-      })
+      // D681: con el vencimiento que contestó Stripe, y sólo si la reserva sigue esperando el pago (si no, la liga se cierra).
+      await registrarLiga({ reservationId: reservation.id, venueId: venue.id, merchant: stripeMerchant, session })
       checkoutUrl = session.url
     }
 
@@ -1521,6 +1520,8 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
       specialRequests: reservation.specialRequests,
       depositAmount: reservation.depositAmount,
       depositStatus: reservation.depositStatus,
+      // D681 (aditivo): hasta cuándo queda apartado el lugar mientras el pago por adelantado sigue pendiente.
+      depositExpiresAt: reservation.depositExpiresAt,
       cancellation: (() => {
         // `allowed` is the FULL decision (toggle + status + time window), not just
         // the venue toggle — so every frontend that reads it (widget, consumer app)
@@ -2115,7 +2116,12 @@ async function createClassReservation(
           spotIds: requestedSpotIds,
           specialRequests: mergedSpecialRequests,
           depositAmount: upfrontAmount,
-          depositStatus: requiresUpfrontCash ? 'PENDING' : null,
+          // D681: el lugar se aparta con fecha de vencimiento desde que nace (si la liga de Stripe no se llega a crear, el job la
+          // vence); al crearse la liga, su dueño la reemplaza por la que contestó Stripe.
+          ...depositoAlCrear(
+            requiresUpfrontCash ? 'PENDING' : null,
+            requiresUpfrontCash ? new Date(Date.now() + CLASS_UPFRONT_PAYMENT_WINDOW_MS) : null,
+          ),
           confirmedAt: requiresUpfrontCash ? null : autoConfirm ? new Date() : null,
           statusLog: [
             {

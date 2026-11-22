@@ -34,6 +34,7 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
+import * as depositoDeReserva from '@/services/reservation/depositoDeReserva'
 
 // ---- Helpers ----
 
@@ -159,6 +160,9 @@ describe('Reservation Dashboard Service', () => {
     jest.restoreAllMocks()
     jest.resetAllMocks()
     jest.spyOn(reservationSettingsService, 'getReservationSettings').mockResolvedValue(makeReservationSettings())
+    // D681: el depósito tiene UN dueño (su tabla se prueba aparte); aquí, sin liga que cerrar y sin depósito que mover.
+    jest.spyOn(depositoDeReserva, 'cerrarLigaAntesDeCancelar').mockResolvedValue({ sesionCerrada: null })
+    jest.spyOn(depositoDeReserva, 'aplicarAlDeposito').mockResolvedValue({ resultado: 'NO_EXISTE' })
     // resetAllMocks borra el default del setup: sin conexiones de pases, el gancho de sincronización no escribe nada.
     prismaMock.aggregatorConnection.findMany.mockResolvedValue([])
     // Cancelar devuelve el paquete dentro de su transacción: sin canjes, no hay nada que devolver.
@@ -3834,31 +3838,28 @@ describe('handleNoShowDepositForfeit (Escenario A — no-show keeps the deposit)
     // getReservationSettings reads reservationSettings.findUnique; a row with
     // forfeitDeposit:true maps to cancellation.forfeitDeposit = true.
     prismaMock.reservationSettings.findUnique.mockResolvedValue({ venueId: VENUE_ID, forfeitDeposit: true } as any)
-    prismaMock.reservation.updateMany.mockResolvedValue({ count: 1 } as any)
+    const dueno = jest.spyOn(depositoDeReserva, 'aplicarAlDeposito').mockResolvedValue({ resultado: 'APLICADO' } as any)
 
     await handleNoShowDepositForfeit('res-1', VENUE_ID)
 
-    // Condicionada: sólo retiene si la reserva SIGUE en NO_SHOW con el depósito pagado (D4, Task 0).
-    expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith({
-      where: { id: 'res-1', venueId: VENUE_ID, status: 'NO_SHOW', depositStatus: 'PAID' },
-      data: { depositStatus: 'FORFEITED' },
-    })
+    // Condicionada: sólo retiene si la reserva SIGUE en NO_SHOW con el depósito pagado (D4, Task 0) — lo decide su dueño (D681).
+    expect(dueno).toHaveBeenCalledWith(prismaMock, { reservationId: 'res-1', venueId: VENUE_ID }, { tipo: 'RETENIDO', por: 'NO_SHOW' })
     expect(prismaMock.reservation.update).not.toHaveBeenCalled()
   })
 
   it('no retiene el depósito si la reserva ya no está en NO_SHOW (la corrigieron a CHECKED_IN antes)', async () => {
     prismaMock.reservation.findFirst.mockResolvedValue({ id: 'res-1', confirmationCode: 'RES-ABC', depositStatus: 'PAID' })
     prismaMock.reservationSettings.findUnique.mockResolvedValue({ venueId: VENUE_ID, forfeitDeposit: true } as any)
-    // La reserva ya es CHECKED_IN: la condición no encuentra fila.
-    prismaMock.reservation.updateMany.mockResolvedValue({ count: 0 } as any)
+    // La reserva ya es CHECKED_IN: el dueño del depósito no la retiene.
+    const dueno = jest
+      .spyOn(depositoDeReserva, 'aplicarAlDeposito')
+      .mockResolvedValue({ resultado: 'RECHAZADO', motivo: 'NO_APLICA' } as any)
     const info = jest.spyOn(logger, 'info')
     const error = jest.spyOn(logger, 'error')
 
     await expect(handleNoShowDepositForfeit('res-1', VENUE_ID)).resolves.toBeUndefined()
 
-    expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ status: 'NO_SHOW', depositStatus: 'PAID' }) }),
-    )
+    expect(dueno).toHaveBeenCalledWith(prismaMock, { reservationId: 'res-1', venueId: VENUE_ID }, { tipo: 'RETENIDO', por: 'NO_SHOW' })
     expect(prismaMock.reservation.update).not.toHaveBeenCalled()
     expect(error).not.toHaveBeenCalled()
     expect(info).not.toHaveBeenCalledWith(expect.stringContaining('Forfeited deposit'))

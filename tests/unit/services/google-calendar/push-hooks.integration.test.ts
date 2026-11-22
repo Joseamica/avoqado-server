@@ -35,6 +35,7 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...a
 import * as reservationService from '@/services/dashboard/reservation.dashboard.service'
 import * as reservationSettingsService from '@/services/dashboard/reservationSettings.service'
 import * as classSessionService from '@/services/dashboard/classSession.dashboard.service'
+import * as depositoDeReserva from '@/services/reservation/depositoDeReserva'
 import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
 
 const publishMock = publishPushNotification as jest.MockedFunction<typeof publishPushNotification>
@@ -145,6 +146,10 @@ describe('Phase 2 push hooks integration', () => {
     prismaMock.staffVenue.findMany.mockReset().mockResolvedValue([{ venueId: VENUE_ID }])
     prismaMock.productModifierGroup.findMany.mockResolvedValue([])
     prismaMock.reservation.findFirst.mockReset().mockResolvedValue(null)
+    // D681: el depósito tiene UN dueño (su tabla se prueba aparte): aquí no hay ligas abiertas ni depósito que mover.
+    prismaMock.reservation.findMany.mockResolvedValue([])
+    jest.spyOn(depositoDeReserva, 'cerrarLigaAntesDeCancelar').mockResolvedValue({ sesionCerrada: null })
+    jest.spyOn(depositoDeReserva, 'aplicarAlDeposito').mockResolvedValue({ resultado: 'NO_EXISTE' })
     prismaMock.classSession.findFirst.mockReset().mockResolvedValue(null)
     prismaMock.slotHold.findFirst.mockReset().mockResolvedValue(null)
     prismaMock.externalBusyBlock.findFirst.mockReset().mockResolvedValue(null)
