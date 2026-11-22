@@ -33,6 +33,13 @@ describe('modoDeLaLimpiezaDeCobrar — el interruptor', () => {
   // NODE_ENV=production también dicen «production», y no deben anular. El servidor se pasa EXPLÍCITO (objeto): un `undefined` como
   // argumento heredaría el NODE_ENV=test de Jest (Codex r1 #2).
   const real = { entorno: 'production', servicio: 'avoqado-server' }
+  // Codex d36-activo r2 (ajeno): una fila con `undefined` toma la variable del entorno; si quien corre la prueba la tiene puesta, la
+  // prueba fallaría sin razón. Se quita mientras corre y se regresa al terminar.
+  const variableDeQuienCorre = process.env.LIMPIEZA_VENTAS_COBRAR
+  beforeAll(() => delete process.env.LIMPIEZA_VENTAS_COBRAR)
+  afterAll(() => {
+    if (variableDeQuienCorre !== undefined) process.env.LIMPIEZA_VENTAS_COBRAR = variableDeQuienCorre
+  })
   it.each([
     [undefined, real, 'ACTIVO'],
     ['', real, 'ACTIVO'],
