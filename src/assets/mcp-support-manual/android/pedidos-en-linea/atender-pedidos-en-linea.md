@@ -10,7 +10,6 @@ money: true
 versionMin: 2.25.13
 sourceRepo: avoqado-android
 sourceRef: a4e7d854341cdef73bf94ff109a9b54e0f029bf9
-deviceTested: 2026-11-21
 keywords:
   - pedidos en línea
   - tienda en línea

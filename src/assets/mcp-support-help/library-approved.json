@@ -176,12 +176,6 @@
       "sha256": "29bfe18b1cc68e1a3dfb78e8c7286ea9afbf73ab821c47ca46ed332f5951cbb6",
       "requiredPermissions": []
     },
-    "android/pedidos-en-linea/atender-pedidos-en-linea": {
-      "sha256": "1289b487e4aab1ffb2f84473b62eae2bbf111f895d238b6a75136c89f74226f8",
-      "requiredPermissions": [
-        "orders:read"
-      ]
-    },
     "android/personal/cambiar-de-usuario": {
       "sha256": "18f31fab17d3f205b28b5bd573f945a981149b10515fba7d7eb07210bbce272e",
       "requiredPermissions": []
