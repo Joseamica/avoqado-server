@@ -39,12 +39,21 @@ describe('getSalesSummary — la hora real de lo vendido sin internet (D93)', ()
   })
 
   it('las cifras de arriba filtran órdenes y cobros por la hora real (el where envuelto en AND)', async () => {
-    await getSalesSummary('venue-1', { startDate: FROM, endDate: TO, timezone: TZ })
+    // Vista de movimientos (filtro de método): las propinas siguen en Prisma con el where envuelto en AND.
+    await getSalesSummary('venue-1', { startDate: FROM, endDate: TO, timezone: TZ, paymentMethod: 'CASH' })
     const propinas = (prismaMock as any).payment.aggregate.mock.calls
       .map((c: unknown[]) => c[0] as any)
       .find((a: any) => a._sum?.tipAmount && !a._count)
     expect(propinas.where.AND[1].OR[0]).toEqual({ clientCreatedAt: { gte: new Date(FROM), lte: new Date(TO) } })
     expect(propinas.where.AND[1].OR[1]).toEqual({ clientCreatedAt: null, createdAt: { gte: new Date(FROM), lte: new Date(TO) } })
+    // Vista de ventas (carril B, 21-nov): propinas y transacciones salen de SQL (sin los abonos de cuentas abiertas), por la hora real.
+    jest.clearAllMocks()
+    sinMovimientos()
+    await getSalesSummary('venue-1', { startDate: FROM, endDate: TO, timezone: TZ })
+    const cobros = (prismaMock as any).$queryRawUnsafe.mock.calls
+      .map((c: unknown[]) => String(c[0]))
+      .find((sql: string) => sql.includes('AS tips'))
+    expect(cobros).toContain('COALESCE(p."clientCreatedAt", p."createdAt")')
     // Las ventas brutas (SQL) también: COALESCE de la hora del aparato y la llegada.
     const brutas = (prismaMock as any).$queryRawUnsafe.mock.calls
       .map((c: unknown[]) => String(c[0]))
