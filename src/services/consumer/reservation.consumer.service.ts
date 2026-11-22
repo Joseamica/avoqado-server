@@ -144,18 +144,10 @@ async function createReservationDepositCheckout(
     paymentMethodTypes: ['card'],
   })
 
-  await prisma.reservation.update({
-    where: { id: reservation.id },
-    data: {
-      checkoutSessionId: session.id,
-      depositStatus: 'PENDING',
-      depositExpiresAt: session.expiresAt,
-      // Pin the connected account that processed this charge so refunds
-      // and reconciliation route through the same merchant later. Required
-      // by Stripe (refunds must originate from the capturing account).
-      ecommerceMerchantId: stripeMerchant.id,
-    },
-  })
+  // Pin the connected account that processed this charge so refunds and reconciliation route through the same merchant
+  // later (Stripe requires it). D681: sólo si la reserva sigue esperando el pago; si la cancelaron mientras tanto, la liga se
+  // cierra y no se entrega.
+  await reservationService.guardarSesionDePago({ reservationId: reservation.id, venueId: venue.id, merchant: stripeMerchant, session })
 
   return {
     checkoutUrl: session.url,
@@ -516,15 +508,39 @@ export async function finalizeDepositCheckoutForConsumer(consumerId: string, ses
   const paymentStatus = await provider.getPaymentStatus(stripeMerchant, sessionId)
 
   if (paymentStatus.status === 'PAID' && reservation.depositStatus !== 'PAID') {
-    await prisma.reservation.update({
-      where: { id: reservation.id },
-      data: {
-        status: ReservationStatus.CONFIRMED,
-        confirmedAt: new Date(),
-        depositStatus: 'PAID',
-        depositPaidAt: paymentStatus.paidAt ?? new Date(),
-        depositProcessorRef: paymentStatus.paymentIntentId,
-      },
+    // D681: misma regla que el aviso de Stripe. Sólo se confirma si la reserva NO se canceló mientras tanto (CAS); una
+    // cancelada nunca revive (su lugar ya se soltó): el cobro queda como anomalía de dinero para devolverlo.
+    await prisma.$transaction(async tx => {
+      const { count } = await tx.reservation.updateMany({
+        where: { id: reservation.id, depositStatus: { not: 'PAID' }, status: { not: ReservationStatus.CANCELLED } },
+        data: {
+          status: ReservationStatus.CONFIRMED,
+          confirmedAt: new Date(),
+          depositStatus: 'PAID',
+          depositPaidAt: paymentStatus.paidAt ?? new Date(),
+          depositProcessorRef: paymentStatus.paymentIntentId,
+        },
+      })
+      if (count === 1) return
+      const current = await tx.reservation.findUnique({ where: { id: reservation.id }, select: { status: true, depositStatus: true } })
+      if (!current || current.depositStatus === 'PAID') return
+      await tx.moneyAnomaly.createMany({
+        data: [
+          {
+            category: 'PAID_AFTER_DIVERGENT_STATE',
+            reservationId: reservation.id,
+            stripeEventId: `consumer-finalize:${sessionId}`,
+            expectedState: { depositStatus: 'PENDING' },
+            observedState: { status: current.status, depositStatus: current.depositStatus },
+          },
+        ],
+        skipDuplicates: true,
+      })
+      logger.error('🚨 [STRIPE CONNECT] Money anomaly detected', {
+        category: 'PAID_AFTER_DIVERGENT_STATE',
+        reservationId: reservation.id,
+        checkoutSessionId: sessionId,
+      })
     })
   }
 

@@ -433,10 +433,12 @@ async function processCheckoutExpired(event: VerifiedWebhookEvent) {
         },
       })
 
+      // D681: la liga vencida sólo cancela una reserva que sigue PENDING (esperando ese pago).
       const updated = await tx.reservation.updateMany({
         where: {
           checkoutSessionId: session.id,
           depositStatus: 'PENDING',
+          status: ReservationStatus.PENDING,
         },
         data: {
           status: ReservationStatus.CANCELLED,
@@ -448,6 +450,15 @@ async function processCheckoutExpired(event: VerifiedWebhookEvent) {
       })
 
       if (updated.count === 1) return
+
+      // Si el negocio ya la confirmó, ya llegó, ya terminó o ya estaba cancelada (por la clienta o el negocio), sólo se cierra
+      // el depósito: nunca se cancela sola ni se le cambia quién la canceló.
+      const soloDeposito = await tx.reservation.updateMany({
+        where: { checkoutSessionId: session.id, depositStatus: 'PENDING' },
+        data: { depositStatus: 'EXPIRED' },
+      })
+
+      if (soloDeposito.count === 1) return
 
       const current = await tx.reservation.findFirst({
         where: { checkoutSessionId: session.id },

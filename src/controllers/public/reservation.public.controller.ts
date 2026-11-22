@@ -999,10 +999,12 @@ export async function createReservation(req: Request, res: Response, next: NextF
 
         // Pin the EcommerceMerchant alongside the session id so refunds and
         // reconciliation always route through the same connected account.
-        // D681: y el vencimiento que contestó Stripe. Sin él, el job que suelta los lugares vencidos no veía esta reserva.
-        await prisma.reservation.update({
-          where: { id: reservation.id },
-          data: { checkoutSessionId: session.id, ecommerceMerchantId: stripeMerchant.id, depositExpiresAt: session.expiresAt },
+        // D681: y el vencimiento que contestó Stripe, sólo si la reserva sigue esperando el pago (si no, la liga se cierra).
+        await reservationService.guardarSesionDePago({
+          reservationId: reservation.id,
+          venueId: venue.id,
+          merchant: stripeMerchant,
+          session,
         })
         checkoutUrl = session.url
       }
@@ -1315,17 +1317,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
 
       // Pin the EcommerceMerchant alongside the session id so refunds and
       // reconciliation always route through the same connected account.
-      reservation = await prisma.reservation.update({
-        where: { id: reservation.id },
-        // D681: el vencimiento guardado es el que contestó Stripe, el mismo de su liga.
-        data: { checkoutSessionId: session.id, ecommerceMerchantId: stripeMerchant.id, depositExpiresAt: session.expiresAt },
-        include: {
-          customer: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
-          table: { select: { id: true, number: true, capacity: true } },
-          product: { select: { id: true, name: true, price: true } },
-          assignedStaff: { select: { id: true, firstName: true, lastName: true } },
-        },
-      })
+      // D681: con el vencimiento que contestó Stripe, y sólo si la reserva sigue esperando el pago (si no, la liga se cierra).
+      await reservationService.guardarSesionDePago({ reservationId: reservation.id, venueId: venue.id, merchant: stripeMerchant, session })
       checkoutUrl = session.url
     }
 

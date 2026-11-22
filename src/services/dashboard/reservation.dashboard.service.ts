@@ -9,6 +9,7 @@ import { countAppointmentOccupancy, effectiveAppointmentPacing } from './reserva
 import { sendReservationRescheduleWhatsApp } from '../whatsapp.service'
 import emailService from '../email.service'
 import { getProvider } from '../payments/provider-registry'
+import type { EcommerceMerchantWithProvider } from '../payments/providers/provider.interface'
 import { checkExternalBusyBlock } from '../reservation/external-busy-block.service'
 import { resolveModifierSelections, type ResolvedModifierRow } from '@/services/reservation/resolveModifierSelections'
 import {
@@ -1251,36 +1252,94 @@ export async function cancelReservation(
     logger.error(`❌ [RESERVATION DEPOSIT] Failed for reservation ${updated.confirmationCode}`, err)
   }
 
+  // D681: la respuesta lleva el depósito como quedó DESPUÉS de atenderlo (vencido, devuelto…), no la copia de antes.
+  const deposito = await prisma.reservation.findFirst({
+    where: { id: updated.id, venueId },
+    select: { depositStatus: true, depositRefundedAt: true, refundStatus: true },
+  })
+  if (deposito) {
+    Object.assign(updated, {
+      depositStatus: deposito.depositStatus,
+      depositRefundedAt: deposito.depositRefundedAt,
+      refundStatus: deposito.refundStatus,
+    })
+  }
   return Object.assign(updated, refundResult)
 }
 
 /**
- * D681: una reserva CANCELADA con el depósito sin pagar. Ese depósito ya no se cobra: queda EXPIRED (así ni el aviso de pago
- * de Stripe ni el job de conciliación la reviven) y se le pide a Stripe cerrar la sesión para que su liga deje de cobrar.
- * Si Stripe no contesta, basta la marca: un pago que llegue después queda como anomalía de dinero, no como reserva viva.
+ * D681: una reserva CANCELADA con el depósito sin pagar. Primero se le pide a Stripe cerrar la sesión para que su liga deje de
+ * cobrar; cerrada (o si nunca hubo sesión), el depósito queda EXPIRED. Si Stripe no contesta (o la sesión ya se pagó), el
+ * depósito se QUEDA en PENDING a propósito: así la conciliación la sigue consultando y decide Stripe. La reserva cancelada
+ * nunca revive por un pago (el aviso lo deja como anomalía de dinero).
  */
 async function anularDepositoSinPagar(
   reservation: { id: string; confirmationCode: string; checkoutSessionId: string | null; ecommerceMerchantId: string | null },
   venueId: string,
 ): Promise<void> {
-  const { count } = await prisma.reservation.updateMany({
+  if (reservation.checkoutSessionId) {
+    // La sesión vive en la cuenta conectada que la creó (la que quedó fijada en la reserva).
+    const merchant = reservation.ecommerceMerchantId
+      ? await prisma.ecommerceMerchant.findFirst({
+          where: { id: reservation.ecommerceMerchantId, venueId, provider: { code: 'STRIPE_CONNECT' } },
+          include: { provider: true },
+        })
+      : null
+    if (!merchant) {
+      logger.warn(`⚠️ [RESERVATION DEPOSIT] ${reservation.confirmationCode}: sin cuenta para cerrar su sesión; la decide la conciliación`)
+      return
+    }
+    try {
+      await getProvider(merchant).expireAuthorizationCheckout(merchant, reservation.checkoutSessionId)
+    } catch (error) {
+      logger.warn(
+        `⚠️ [RESERVATION DEPOSIT] No se pudo cerrar la sesión de Stripe de ${reservation.confirmationCode}; la decide la conciliación`,
+        error,
+      )
+      return
+    }
+  }
+  await prisma.reservation.updateMany({
     where: { id: reservation.id, venueId, status: 'CANCELLED', depositStatus: 'PENDING' },
     data: { depositStatus: 'EXPIRED' },
   })
-  if (count === 0 || !reservation.checkoutSessionId || !reservation.ecommerceMerchantId) return
+}
 
-  // La sesión vive en la cuenta conectada que la creó (la que quedó fijada en la reserva).
-  const merchant = await prisma.ecommerceMerchant.findFirst({
-    where: { id: reservation.ecommerceMerchantId, venueId, provider: { code: 'STRIPE_CONNECT' } },
-    include: { provider: true },
+/**
+ * D681: guarda en la reserva la sesión de Stripe recién creada (y su vencimiento, el que contestó Stripe) SÓLO si la reserva
+ * sigue esperando ese pago. Si mientras se creaba la liga la cancelaron (o ya se pagó), la liga se cierra en Stripe y no se
+ * entrega: así nunca queda una liga cobrando sobre una reserva cancelada.
+ */
+export async function guardarSesionDePago(args: {
+  reservationId: string
+  venueId: string
+  merchant: EcommerceMerchantWithProvider
+  session: { id: string; expiresAt: Date }
+}): Promise<void> {
+  const { reservationId, venueId, merchant, session } = args
+  const { count } = await prisma.reservation.updateMany({
+    where: {
+      id: reservationId,
+      venueId,
+      status: { not: 'CANCELLED' },
+      depositStatus: { notIn: ['PAID', 'REFUNDED', 'FORFEITED', 'DISPUTED'] },
+    },
+    data: {
+      checkoutSessionId: session.id,
+      ecommerceMerchantId: merchant.id,
+      depositExpiresAt: session.expiresAt,
+      depositStatus: 'PENDING',
+    },
   })
-  if (!merchant) return
+  if (count === 1) return
+
   try {
-    await getProvider(merchant).expireAuthorizationCheckout(merchant, reservation.checkoutSessionId)
+    await getProvider(merchant).expireAuthorizationCheckout(merchant, session.id)
   } catch (error) {
-    // Una sesión ya vencida o pagada no se puede cerrar: la marca EXPIRED ya protege la reserva.
-    logger.warn(`⚠️ [RESERVATION DEPOSIT] No se pudo cerrar la sesión de Stripe de ${reservation.confirmationCode}`, error)
+    // Nadie tiene esta liga (no se entrega) y vence sola al llegar su hora.
+    logger.warn(`⚠️ [RESERVATION DEPOSIT] No se pudo cerrar la sesión ${session.id} de la reserva ${reservationId}`, error)
   }
+  throw new ConflictError('Esta reservación ya no está esperando el pago (se canceló o cambió). No se hizo ningún cargo.')
 }
 
 /** `sinRetener`: lo canceló el negocio, no la clienta (una clase entera), así que nunca se queda con su depósito. */

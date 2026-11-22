@@ -8,9 +8,14 @@ import { processStripeConnectWebhookEvent } from '../services/payments/reservati
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
 
+/** La liga de Stripe más larga posible (24 h): una reserva sin fecha ni liga más vieja que esto ya no tiene cómo pagarse. */
+const MAX_PAYMENT_WINDOW_MS = 24 * 3_600_000
+
 export class ReservationDepositReconciliationJob {
   private job: CronJob | null = null
-  private readonly CRON_PATTERN = '0 * * * *'
+  // D681: cada 5 min (minuto 2, 7, 12…: fuera de la estampida de las :00). Si el aviso de Stripe se pierde, una liga vencida
+  // sin pagar suelta su lugar a lo más 5 min después (antes, hasta una hora), sin adivinar por reloj si se pagó.
+  private readonly CRON_PATTERN = '2-59/5 * * * *'
   private readonly ORPHAN_THRESHOLD_MINUTES = 5
 
   constructor() {
@@ -26,7 +31,7 @@ export class ReservationDepositReconciliationJob {
 
   start(): void {
     this.job?.start()
-    logger.info('💳 Reservation Deposit Reconciliation Job started - running hourly')
+    logger.info('💳 Reservation Deposit Reconciliation Job started - running every 5 minutes')
   }
 
   stop(): void {
@@ -48,15 +53,27 @@ export class ReservationDepositReconciliationJob {
     }
   }
 
+  /**
+   * D681: el reloj sólo decide cuando Stripe NUNCA creó la liga (sin sesión no hay forma de haber pagado). Una reserva con
+   * sesión la decide Stripe (el aviso `checkout.session.expired` o `reconcileCheckoutSessions`): quien pagó a tiempo con el
+   * aviso retrasado no pierde su lugar. Y sólo se cancela una reserva que sigue PENDING: si el negocio ya la confirmó o ya
+   * llegó, nunca se cancela sola. Las filas viejas sin fecha se juzgan por su `createdAt` más la liga más larga posible.
+   */
   private async expirePastDueReservations(): Promise<void> {
     // Idempotent updateMany (the WHERE excludes already-EXPIRED rows), so retrying a
     // transient DB connection blip (P1001 during the cron stampede) is safe. See .claude/rules/cron-jobs.md
+    const now = new Date()
     const expired = await retry(
       () =>
         prisma.reservation.updateMany({
           where: {
             depositStatus: 'PENDING',
-            depositExpiresAt: { lt: new Date() },
+            status: 'PENDING',
+            checkoutSessionId: null,
+            OR: [
+              { depositExpiresAt: { lt: now } },
+              { depositExpiresAt: null, createdAt: { lt: new Date(now.getTime() - MAX_PAYMENT_WINDOW_MS) } },
+            ],
           },
           data: {
             status: 'CANCELLED',
