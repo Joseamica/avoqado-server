@@ -21685,7 +21685,7 @@ model OnlineOrderCardRefundReversal {
   failureReason  String?
   detectedAt     DateTime
 
-  /// Sólo `CASH` | `BANK_TRANSFER`.
+  /// `CASH` | `BANK_TRANSFER` | `CREDIT_CARD` (D670: «Ya se devolvió en Stripe», sin mover dinero).
   resolvedMethod    PaymentMethod?
   resolvedByStaffId String?
   resolvedAt        DateTime?

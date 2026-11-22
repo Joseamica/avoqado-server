@@ -928,4 +928,84 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     expect(await payouts()).toBe(1)
     await prisma.cashDrawerSession.update({ where: { id: session.id }, data: { status: 'CLOSED', closedAt: new Date() } })
   })
+
+  it('D670: «Ya se devolvió en Stripe» → parcial no; cubierta sí, sin PAY_OUT ni pago; si la de Stripe falla después, vuelve a deberse', async () => {
+    const { orderId } = await capturedOrder()
+    const r = await pedir(orderId)
+    const row = await prisma.onlineOrderCardRefund.findUniqueOrThrow({ where: { id: r.cardRefundId } })
+    const { paymentIntentId } = await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: row.chargeId } })
+    getRefundSpy.mockResolvedValue({ refundId: row.stripeRefundId, status: 'FAILED', amountCents: 25_000, failureReason: null })
+    await expect(advanceCardRefund(r.cardRefundId)).resolves.toBe('REVERSED')
+    const session = await prisma.cashDrawerSession.create({
+      data: {
+        venueId: venueId!,
+        openedByStaffId: staffId,
+        openedByName: 'Gerente',
+        startingAmount: new Prisma.Decimal(500),
+        status: 'OPEN',
+      },
+    })
+    const payouts = () => prisma.cashDrawerEvent.count({ where: { venueId, localId: `oocr-payout:${r.cardRefundId}` } })
+    const pagos = () => prisma.payment.count({ where: { orderId } })
+    const pagosAntes = await pagos()
+    const cerrar = () =>
+      resolveReversedCardRefund({ venueId: venueId!, orderId, cardRefundId: r.cardRefundId, method: 'STRIPE', staffId, note: null })
+    const nuestra = {
+      refundId: row.stripeRefundId!,
+      status: 'FAILED' as const,
+      amountCents: 25_000,
+      failureReason: 'expired_or_canceled_card',
+      metadata: { type: 'online_order_refund', cardRefundId: row.id },
+    }
+    const deFuera = (status: 'SUCCEEDED' | 'FAILED', amountCents = 25_000) => ({
+      refundId: `re_fuera_${RUN}`,
+      status,
+      amountCents,
+      failureReason: null,
+      metadata: {},
+    })
+
+    // Parcial: no se cierra y dice cuánto falta.
+    chargeRefundsSpy.mockResolvedValue({ amountRefundedCents: 10_000, refunds: [nuestra, deFuera('SUCCEEDED', 10_000)] })
+    await expect(cerrar()).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'EXTERNAL_REFUND_NOT_COVERED',
+      message: expect.stringContaining('faltan $150.00'),
+    })
+    expect((await prisma.onlineOrderCardRefund.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('REVERSED')
+
+    // Cubierta: RESOLVED con su método propio, sin PAY_OUT ni otro pago; el panel y el MCP la ven como STRIPE.
+    chargeRefundsSpy.mockResolvedValue({ amountRefundedCents: 25_000, refunds: [nuestra, deFuera('SUCCEEDED')] })
+    await expect(cerrar()).resolves.toEqual({ status: 'RESOLVED', replay: false })
+    await expect(cerrar()).resolves.toEqual({ status: 'RESOLVED', replay: true })
+    expect(await payouts()).toBe(0)
+    expect(await pagos()).toBe(pagosAntes)
+    const rev = await prisma.onlineOrderCardRefundReversal.findUniqueOrThrow({ where: { cardRefundId: row.id } })
+    expect(rev).toMatchObject({ resolvedMethod: 'CREDIT_CARD', resolvedByStaffId: staffId, cashDrawerEventId: null })
+    expect((await listCardRefunds(venueId!, orderId)).find(x => x.id === row.id)?.reversal?.resolvedMethod).toBe('STRIPE')
+    expect(logged('ONLINE_ORDER_CARD_REFUND_RESOLVED_IN_STRIPE', row.id)).toBe(1)
+
+    // La de Stripe falla después: el aviso (endpoint Connect) relee el cargo y la reversa vuelve a deberse.
+    chargeRefundsSpy.mockResolvedValue({ amountRefundedCents: 0, refunds: [nuestra, deFuera('FAILED')] })
+    await processStripeConnectWebhookEvent({
+      id: `evt_itest_cr_${RUN}_d670`,
+      type: 'refund.failed',
+      account: 'acct_itest_A',
+      livemode: false,
+      data: { id: `re_fuera_${RUN}`, object: 'refund', payment_intent: paymentIntentId, status: 'failed', metadata: {} },
+    })
+    expect((await prisma.onlineOrderCardRefund.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('REVERSED')
+    expect(await prisma.onlineOrderCardRefundReversal.findUniqueOrThrow({ where: { cardRefundId: row.id } })).toMatchObject({
+      resolvedAt: null,
+      resolvedMethod: null,
+    })
+    expect(logged('ONLINE_ORDER_CARD_REFUND_REOPENED', row.id)).toBe(1)
+
+    // Otra vez pendiente: se puede pagar por otro medio (una de fuera fallida no frena).
+    await expect(
+      resolveReversedCardRefund({ venueId: venueId!, orderId, cardRefundId: row.id, method: 'CASH', staffId, note: null }),
+    ).resolves.toEqual({ status: 'RESOLVED', replay: false })
+    expect(await payouts()).toBe(1)
+    await prisma.cashDrawerSession.update({ where: { id: session.id }, data: { status: 'CLOSED', closedAt: new Date() } })
+  })
 })

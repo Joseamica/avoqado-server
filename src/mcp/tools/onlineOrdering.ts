@@ -21,6 +21,7 @@ import {
   porDevolverDeUnPedido,
   refundCardOnlineOrder,
   resolveReversedCardRefund,
+  revisarCoberturaEnStripe,
   revisarStripeAntesDeOtroMedio,
 } from '@/services/online-ordering/card/refund.service'
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
@@ -544,7 +545,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_order_card_refunds',
-    'Devoluciones de un pedido en línea pagado con tarjeta al pedir, sólo lectura: monto en pesos, motivo, estado (REQUESTED, SENDING, PENDING, SUCCEEDED o RECORDED = devuelta a la tarjeta y anotada; FAILED o CANCELED = el banco no la hizo; REVERSED = falló después de anotarla y falta devolver por otro medio; RESOLVED = ya se devolvió por otro medio) y, si falló después, el motivo y cómo se resolvió. Con toStoreCredit: true la devolución no fue a la tarjeta: se le dio al cliente como saldo a favor en el negocio (nace RESOLVED, sin reversa). Esta herramienta sólo lee; devolver a saldo a favor se hace desde el panel.',
+    'Devoluciones de un pedido en línea pagado con tarjeta al pedir, sólo lectura: monto en pesos, motivo, estado (REQUESTED, SENDING, PENDING, SUCCEEDED o RECORDED = devuelta a la tarjeta y anotada; FAILED o CANCELED = el banco no la hizo; REVERSED = falló después de anotarla y falta devolver por otro medio; RESOLVED = ya se devolvió por otro medio) y, si falló después, el motivo y cómo se resolvió (CASH = efectivo, BANK_TRANSFER = transferencia, STRIPE = ya se le había devuelto directo en Stripe). Con toStoreCredit: true la devolución no fue a la tarjeta: se le dio al cliente como saldo a favor en el negocio (nace RESOLVED, sin reversa). Esta herramienta sólo lee; devolver a saldo a favor se hace desde el panel.',
     {
       venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
       orderId: z.string().describe('Id del pedido (orderId de la lista de pedidos en línea)'),
@@ -702,12 +703,14 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_order_card_refund_resolve',
-    'Devolver por otro medio: cuando una devolución a la tarjeta falló en el banco después de anotarse (estado REVERSED en online_order_card_refunds), registra que el negocio le devuelve ese dinero al cliente en efectivo (sale de la caja abierta) o por transferencia; se registra ANTES de entregarlo. Si el cobro ya tiene una devolución hecha directo en Stripe, por fuera de Avoqado, no registra nada y lo explica (no se paga dos veces). Dos pasos: sin confirm:true sólo muestra la vista previa. En efectivo pide el permiso de devolver en efectivo; por transferencia, el de reembolsar.',
+    'Devolver por otro medio: cuando una devolución a la tarjeta falló en el banco después de anotarse (estado REVERSED en online_order_card_refunds), registra que el negocio le devuelve ese dinero al cliente en efectivo (sale de la caja abierta) o por transferencia; se registra ANTES de entregarlo. Si el cobro ya tiene una devolución hecha directo en Stripe, por fuera de Avoqado, no registra efectivo ni transferencia y lo explica (no se paga dos veces). Si al cliente ya se le devolvió directo en Stripe, method STRIPE la da por pagada sin mover dinero, sólo si Stripe confirma que lo devuelto por fuera ya está hecho y alcanza el monto (si falta o sigue pendiente, lo dice y no registra nada; si esa devolución de Stripe falla después, vuelve a quedar pendiente sola). Dos pasos: sin confirm:true sólo muestra la vista previa. En efectivo pide el permiso de devolver en efectivo; por transferencia o STRIPE, el de reembolsar.',
     {
       venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
       orderId: z.string().describe('Id del pedido'),
       refundId: z.string().describe('Id de la devolución (de online_order_card_refunds)'),
-      method: z.enum(['CASH', 'BANK_TRANSFER']).describe('CASH = efectivo de la caja abierta · BANK_TRANSFER = transferencia'),
+      method: z
+        .enum(['CASH', 'BANK_TRANSFER', 'STRIPE'])
+        .describe('CASH = efectivo de la caja abierta · BANK_TRANSFER = transferencia · STRIPE = ya se le devolvió directo en Stripe'),
       note: z.string().trim().max(200).optional().describe('Nota para la bitácora'),
       confirm: z.boolean().optional().describe('true para registrarlo de verdad'),
     },
@@ -725,8 +728,10 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
           return text({ ok: false, error: 'Esta devolución no está pendiente de pagarse por otro medio.' })
         }
         // D668: Stripe se revisa en la vista previa, ANTES de que alguien le dé el dinero al cliente (y otra vez al confirmar).
+        // D670: con STRIPE, que lo devuelto por fuera ya esté hecho y alcance (otra vez al confirmar, bajo el candado).
         try {
-          await revisarStripeAntesDeOtroMedio({ venueId, orderId, cardRefundId: refundId })
+          const revisar = method === 'STRIPE' ? revisarCoberturaEnStripe : revisarStripeAntesDeOtroMedio
+          await revisar({ venueId, orderId, cardRefundId: refundId })
         } catch (err) {
           if (!(err instanceof AppError)) throw err
           return text({ ok: false, error: err.message, ...(err.code ? { code: err.code } : {}) })
@@ -742,9 +747,14 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
             efecto:
               method === 'CASH'
                 ? `Salen $${fila.amount} en efectivo de la caja abierta para devolvérselos al cliente.`
-                : `Queda registrado que le transfieres $${fila.amount} al cliente.`,
+                : method === 'STRIPE'
+                  ? `Los $${fila.amount} se dan por devueltos directo en Stripe: no sale dinero de la caja ni se registra otro pago. No se los des otra vez.`
+                  : `Queda registrado que le transfieres $${fila.amount} al cliente.`,
           },
-          mensaje: 'Confírmalo con la persona y vuelve a llamar con confirm:true; que entregue el dinero después de registrarlo.',
+          mensaje:
+            method === 'STRIPE'
+              ? 'Confirma con la persona que al cliente ya le llegó la devolución hecha en Stripe y vuelve a llamar con confirm:true.'
+              : 'Confírmalo con la persona y vuelve a llamar con confirm:true; que entregue el dinero después de registrarlo.',
         })
       }
 

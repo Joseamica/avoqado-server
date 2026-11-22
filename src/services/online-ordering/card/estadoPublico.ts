@@ -40,10 +40,10 @@ type FilaDeDevolucion = { status: OnlineOrderCardRefundStatus; reversal?: { reso
 /**
  * El medio que la fila REGISTRÓ, nunca deducido de `toStoreCredit`: un `RESOLVED` con reversa dice cómo la pagó el negocio (efectivo
  * o transferencia); uno sin reversa nació a saldo a favor (el único `RESOLVED` que no pasa por la reversa, Task 6). Las demás son a la
- * tarjeta (una de saldo nace `RESOLVED`).
+ * tarjeta (una de saldo nace `RESOLVED`). D670: «Ya se devolvió en Stripe» (`CREDIT_CARD`) le llegó a su tarjeta.
  */
 const medioDe = (f: FilaDeDevolucion): DevolucionPublica['medio'] =>
-  f.status !== OnlineOrderCardRefundStatus.RESOLVED
+  f.status !== OnlineOrderCardRefundStatus.RESOLVED || f.reversal?.resolvedMethod === PaymentMethod.CREDIT_CARD
     ? 'TARJETA'
     : f.reversal?.resolvedMethod === PaymentMethod.CASH
       ? 'EFECTIVO'

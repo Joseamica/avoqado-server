@@ -55,6 +55,7 @@ const mockListCardRefunds = jest.fn()
 const mockRefundCard = jest.fn()
 const mockResolveCardRefund = jest.fn()
 const mockRevisarStripe = jest.fn(async () => true)
+const mockRevisarCobertura = jest.fn(async () => ({ hechasCents: 10_000, pendientesCents: 0, stripeRefundIds: ['re_fuera'] }))
 const mockPorDevolver = jest.fn()
 jest.mock('@/services/online-ordering/card/refund.service', () => ({
   listCardRefunds: (...a: unknown[]) => mockListCardRefunds(...(a as [])),
@@ -62,6 +63,7 @@ jest.mock('@/services/online-ordering/card/refund.service', () => ({
   refundCardOnlineOrder: (...a: unknown[]) => mockRefundCard(...(a as [])),
   resolveReversedCardRefund: (...a: unknown[]) => mockResolveCardRefund(...(a as [])),
   revisarStripeAntesDeOtroMedio: (...a: unknown[]) => mockRevisarStripe(...(a as [])),
+  revisarCoberturaEnStripe: (...a: unknown[]) => mockRevisarCobertura(...(a as [])),
 }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
 jest.mock('@/services/online-ordering/inbox.service', () => ({
@@ -1397,6 +1399,41 @@ describe('devoluciones a la tarjeta de un pedido en línea', () => {
     )
     expect(transf).toMatchObject({ ok: false, requiresConfirmation: true })
     expect(transf.preview.efecto).toBe('Queda registrado que le transfieres $100.00 al cliente.')
+  })
+
+  it('D670: «Ya se devolvió en Stripe» (STRIPE): pide payments:refund, la vista previa revisa la cobertura y nada sale de la caja', async () => {
+    mockListCardRefunds.mockResolvedValue([revertida])
+    const args = { venueId: 'v1', orderId: 'ord1', refundId: 'cr1', method: 'STRIPE' }
+    const prev = parse(await call('online_order_card_refund_resolve', args))
+    expect(mockRequirePermission).toHaveBeenCalledWith('payments:refund', 'v1')
+    expect(mockRequirePermission).not.toHaveBeenCalledWith('payments:refund-to-cash', 'v1')
+    expect(mockRevisarCobertura).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'ord1', cardRefundId: 'cr1' })
+    expect(mockRevisarStripe).not.toHaveBeenCalled()
+    expect(prev).toMatchObject({ ok: false, requiresConfirmation: true })
+    expect(prev.preview.efecto).toContain('$100.00')
+    expect(prev.preview.efecto).toContain('no sale dinero de la caja')
+    expect(mockResolveCardRefund).not.toHaveBeenCalled()
+
+    const r = parse(await call('online_order_card_refund_resolve', { ...args, confirm: true }))
+    expect(r).toMatchObject({ ok: true, status: 'RESOLVED' })
+    expect(mockResolveCardRefund).toHaveBeenCalledWith(expect.objectContaining({ cardRefundId: 'cr1', method: 'STRIPE' }))
+    expect(mockAudit).toHaveBeenCalledWith(
+      scope,
+      expect.objectContaining({ action: 'ONLINE_ORDER_CARD_REFUND_RESOLVED_VIA_MCP', data: expect.objectContaining({ method: 'STRIPE' }) }),
+    )
+  })
+
+  it('D670: con cobertura parcial la vista previa no ofrece confirmar y dice cuánto falta', async () => {
+    mockListCardRefunds.mockResolvedValue([revertida])
+    mockRevisarCobertura.mockRejectedValueOnce(
+      new ConflictError('En Stripe sólo hay $50.00 devueltos por fuera de Avoqado: faltan $50.00…', 'EXTERNAL_REFUND_NOT_COVERED'),
+    )
+    const prev = parse(
+      await call('online_order_card_refund_resolve', { venueId: 'v1', orderId: 'ord1', refundId: 'cr1', method: 'STRIPE' }),
+    )
+    expect(prev).toMatchObject({ ok: false, code: 'EXTERNAL_REFUND_NOT_COVERED', error: expect.stringContaining('faltan $50.00') })
+    expect(prev.requiresConfirmation).toBeUndefined()
+    expect(mockResolveCardRefund).not.toHaveBeenCalled()
   })
 
   it('online_order_card_refund_resolve sobre una devolución que no falló → no ofrece resolver', async () => {

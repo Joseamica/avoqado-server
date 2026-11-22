@@ -1147,6 +1147,11 @@
       "loops": 0,
       "reason": "Una venta antes de la CashDrawerSession abierta (postPayOutInTx); el cierre de caja y createEventUnderSessionLock sólo toman la sesión, nunca una Order."
     },
+    "src/services/online-ordering/card/refund.service.ts#reabrirLoQueStripeYaNoCubre#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "D670: una venta (la del cargo cuya devolución de fuera falló) en su propia transacción, antes de sus filas de devolución y reversa; no aparta Payment, GiftCard ni sesión de caja. El aviso de Stripe la llama una vez por cargo."
+    },
     "src/services/online-ordering/card/refund.service.ts#reviewLate#reverseRecordedRefund": {
       "count": 1,
       "loops": 0,

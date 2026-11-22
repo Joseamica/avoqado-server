@@ -10,7 +10,8 @@
  * Stripe es la fuente de verdad: se le pregunta, nunca se adivina (un aviso sólo dispara una relectura). El renglón REFUND del libro
  * nace sólo con `succeeded`, por `issueRefund` (llave `oocr_<id>`, para conservar sus efectos), y nunca se edita. Un fallo tardío
  * (`RECORDED` → Stripe dice failed/canceled) se anota en `OnlineOrderCardRefundReversal` (sólo agregar) y el negocio lo resuelve
- * pagándole al cliente por otro medio (`resolveReversedCardRefund`). `advanceCardRefund` es el ÚNICO paso que habla con Stripe y
+ * pagándole al cliente por otro medio (`resolveReversedCardRefund`; D670: o «Ya se devolvió en Stripe», con evidencia de Stripe, y si esa
+ * devolución de Stripe falla después, la reversa vuelve de `RESOLVED` a `REVERSED`, el único paso hacia atrás). `advanceCardRefund` es el ÚNICO paso que habla con Stripe y
  * nunca corre con una transacción abierta (r4 #5). Siempre la cuenta Stripe de la foto del cargo (`chargeMerchant`).
  *
  * D661 (Task 5) — en «Nadie» (`requiresAcceptance === false`) se devuelve el 100 % o nada (`FULL_REFUND_ONLY`): bajo el candado de la
@@ -29,6 +30,7 @@ import {
   OnlineOrderChargeStatus,
   OnlineOrderPaymentMode,
   OnlineOrderStatus,
+  PaymentMethod,
   PaymentSource,
   PaymentType,
   Prisma,
@@ -813,22 +815,24 @@ const DEVOLUCION_VIVA_EN_STRIPE = new Set<RefundState['status']>(['PENDING', 'SU
  */
 const filaNombrada = (r: ChargeRefunds['refunds'][number]) =>
   r.metadata?.type === 'online_order_refund' ? r.metadata.cardRefundId : undefined
-function devueltoPorFueraCents(estado: ChargeRefunds, nuestras: ReadonlyMap<string, string | null>): number {
+type DevolucionDeStripe = ChargeRefunds['refunds'][number]
+/** Las devoluciones de Stripe de este cargo que no son de ninguna fila nuestra, en cualquier estado (D670 las usa también). */
+function devolucionesDeFuera(estado: ChargeRefunds, nuestras: ReadonlyMap<string, string | null>): DevolucionDeStripe[] {
   const reclamos = new Map<string, Set<string>>()
   for (const r of estado.refunds) {
     const id = filaNombrada(r)
     if (id !== undefined) reclamos.set(id, (reclamos.get(id) ?? new Set()).add(r.refundId))
   }
-  let ajenasVivas = 0
-  let listadas = 0
-  for (const r of estado.refunds) {
-    listadas += r.amountCents
+  return estado.refunds.filter(r => {
     const id = filaNombrada(r)
     const guardada = id === undefined ? undefined : nuestras.get(id)
-    const nuestra = guardada === r.refundId || (guardada === null && reclamos.get(id!)!.size === 1)
-    if (DEVOLUCION_VIVA_EN_STRIPE.has(r.status) && !nuestra) ajenasVivas += r.amountCents
-  }
-  return ajenasVivas + Math.max(0, estado.amountRefundedCents - listadas)
+    return !(guardada === r.refundId || (guardada === null && reclamos.get(id!)!.size === 1))
+  })
+}
+const sumaCents = (xs: Array<{ amountCents: number }>) => xs.reduce((s, x) => s + x.amountCents, 0)
+function devueltoPorFueraCents(estado: ChargeRefunds, nuestras: ReadonlyMap<string, string | null>): number {
+  const ajenasVivas = sumaCents(devolucionesDeFuera(estado, nuestras).filter(r => DEVOLUCION_VIVA_EN_STRIPE.has(r.status)))
+  return ajenasVivas + Math.max(0, estado.amountRefundedCents - sumaCents(estado.refunds))
 }
 
 /** D661 (Task 6, Ruling 28): ¿alguien devolvió este cargo por fuera de Avoqado (directo en Stripe)? */
@@ -845,16 +849,23 @@ const MENSAJE_POR_FUERA =
  * que se puede reintentar: nunca se abona sobre una lectura que no contestó. D668: también antes de «Devolver por otro medio»
  * (`mensaje` recibe lo devuelto por fuera, en pesos).
  */
-async function exigirSinDevolucionPorFuera(
-  charge: {
-    id: string
-    venueId: string
-    paymentIntentId: string
-    ecommerceMerchantId: string
-    merchantSnapshot: Prisma.JsonValue
-  },
-  mensaje: (porFuera: string) => string = () => MENSAJE_POR_FUERA,
-): Promise<void> {
+type CargoEnStripe = {
+  id: string
+  venueId: string
+  paymentIntentId: string
+  ecommerceMerchantId: string
+  merchantSnapshot: Prisma.JsonValue
+}
+
+/**
+ * Lo que Stripe dice HOY de las devoluciones de este cargo, fuera de toda transacción: las de fuera de Avoqado y lo devuelto por fuera
+ * que frena (Ruling 28 / D668). Si Stripe no contesta, falla cerrado con un 503 que se puede reintentar.
+ */
+async function leerDevolucionesPorFuera(charge: CargoEnStripe): Promise<{
+  estado: ChargeRefunds
+  deFuera: DevolucionDeStripe[]
+  porFueraCents: number
+}> {
   const merchant = chargeMerchant(charge)
   let estado: ChargeRefunds
   try {
@@ -876,14 +887,22 @@ async function exigirSinDevolucionPorFuera(
       estado.refunds.flatMap(r => (r.metadata?.type === 'online_order_refund' && r.metadata.cardRefundId ? [r.metadata.cardRefundId] : [])),
     ),
   ]
-  const nuestras = nombradas.length
+  const filas = nombradas.length
     ? await prisma.onlineOrderCardRefund.findMany({
         where: { venueId: charge.venueId, chargeId: charge.id, id: { in: nombradas } },
         select: { id: true, stripeRefundId: true },
         take: nombradas.length,
       })
     : []
-  const porFuera = devueltoPorFueraCents(estado, new Map(nuestras.map(r => [r.id, r.stripeRefundId])))
+  const nuestras = new Map(filas.map(r => [r.id, r.stripeRefundId]))
+  return { estado, deFuera: devolucionesDeFuera(estado, nuestras), porFueraCents: devueltoPorFueraCents(estado, nuestras) }
+}
+
+async function exigirSinDevolucionPorFuera(
+  charge: CargoEnStripe,
+  mensaje: (porFuera: string) => string = () => MENSAJE_POR_FUERA,
+): Promise<void> {
+  const { estado, porFueraCents: porFuera } = await leerDevolucionesPorFuera(charge)
   if (!porFuera) return
   logger.error('🚨 [OnlineOrderCardRefund] el cargo ya tiene una devolución hecha fuera de Avoqado: no se devuelve otra vez', {
     chargeId: charge.id,
@@ -1390,9 +1409,76 @@ export async function revisarStripeAntesDeOtroMedio(i: { venueId: string; orderI
   await exigirSinDevolucionPorFuera(
     { ...charge, paymentIntentId },
     porFuera =>
-      `Este cobro ya tiene $${porFuera} devueltos directo en Stripe, por fuera de Avoqado: no le des los $${pesos(fila.amountCents)} otra vez. Revisa en Stripe si al cliente ya le llegó. Aquí no se pagó ni se registró nada.`,
+      `Este cobro ya tiene $${porFuera} devueltos directo en Stripe, por fuera de Avoqado: no le des los $${pesos(fila.amountCents)} otra vez. Revisa en Stripe si al cliente ya le llegó; si ya le llegó, usa «Ya se devolvió en Stripe». Aquí no se pagó ni se registró nada.`,
   )
   return true
+}
+
+/** D670: en la reversa, «Ya se devolvió en Stripe» queda como `CREDIT_CARD` (se le devolvió a su tarjeta); hacia afuera, `STRIPE`. */
+const CERRADA_EN_STRIPE = PaymentMethod.CREDIT_CARD
+/** D670: lo que Stripe ya devolvió por fuera de Avoqado (sólo lo `SUCCEEDED` cuenta) y lo que sigue pendiente, en centavos. */
+type Cobertura = { hechasCents: number; pendientesCents: number; stripeRefundIds: string[] }
+const coberturaDe = (deFuera: DevolucionDeStripe[]): Cobertura => {
+  const hechas = deFuera.filter(r => r.status === 'SUCCEEDED')
+  return {
+    hechasCents: sumaCents(hechas),
+    pendientesCents: sumaCents(deFuera.filter(r => r.status === 'PENDING')),
+    stripeRefundIds: hechas.map(r => r.refundId),
+  }
+}
+/** D670: las reversas de ESTE cargo ya cerradas con «Ya se devolvió en Stripe» (salvo `sinLa`). */
+const cerradasEnStripe = (i: { venueId: string; chargeId: string; sinLa?: string }) => ({
+  venueId: i.venueId,
+  resolvedMethod: CERRADA_EN_STRIPE,
+  resolvedAt: { not: null },
+  cardRefund: { is: { chargeId: i.chargeId } },
+  ...(i.sinLa ? { cardRefundId: { not: i.sinLa } } : {}),
+})
+const usadoEnStripe = async (db: Prisma.TransactionClient, fila: { id: string; venueId: string; chargeId: string }) =>
+  (
+    await db.onlineOrderCardRefundReversal.aggregate({
+      where: cerradasEnStripe({ venueId: fila.venueId, chargeId: fila.chargeId, sinLa: fila.id }),
+      _sum: { amountCents: true },
+    })
+  )._sum.amountCents ?? 0
+
+/**
+ * D670: ¿alcanza lo devuelto por fuera de Avoqado, ya HECHO en Stripe y sin usar por otra reversa del cargo, para dar por pagados los
+ * `montoCents` de esta? Si no: con lo pendiente alcanzaría → 409 «espera»; si no → 409 con lo que falta. Nunca se paga la diferencia.
+ */
+function exigirCobertura(montoCents: number, c: Cobertura, usadoCents: number): void {
+  const libres = c.hechasCents - usadoCents
+  if (libres >= montoCents) return
+  const nada = ' Aquí no se registró nada.'
+  if (Math.max(0, libres) + c.pendientesCents >= montoCents) {
+    throw new ConflictError(
+      `La devolución hecha directo en Stripe todavía no termina: cuando Stripe la marque como hecha, vuelve a intentarlo.${nada}`,
+      'EXTERNAL_REFUND_PENDING',
+    )
+  }
+  const falta = `faltan $${pesos(montoCents - Math.max(0, libres))} para los $${pesos(montoCents)} de esta devolución.`
+  throw new ConflictError(
+    c.hechasCents === 0
+      ? `Este cobro no tiene devoluciones hechas directo en Stripe: no se puede dar por devuelto así. Devuélvelo en efectivo o por transferencia.${nada}`
+      : usadoCents > 0
+        ? `En Stripe hay $${pesos(c.hechasCents)} devueltos por fuera de Avoqado y $${pesos(usadoCents)} ya cerraron otra devolución de este cobro: ${falta}${nada}`
+        : `En Stripe sólo hay $${pesos(c.hechasCents)} devueltos por fuera de Avoqado: ${falta}${nada}`,
+    'EXTERNAL_REFUND_NOT_COVERED',
+  )
+}
+
+/**
+ * D670: la revisión de «Ya se devolvió en Stripe», fuera de toda transacción (la resolución y la vista previa del MCP). Sólo si la
+ * devolución está `REVERSED`; `null` si no (bajo el candado, una `REVERSED` sin revisar no se cierra). 409 si no alcanza; 503 si Stripe
+ * no contesta.
+ */
+export async function revisarCoberturaEnStripe(i: { venueId: string; orderId: string; cardRefundId: string }): Promise<Cobertura | null> {
+  const fila = await prisma.onlineOrderCardRefund.findFirst({ where: filaDeOtroMedio(i) })
+  if (fila?.status !== R.REVERSED) return null
+  const { charge, paymentIntentId } = await chargeOf(fila)
+  const c = coberturaDe((await leerDevolucionesPorFuera({ ...charge, paymentIntentId })).deFuera)
+  exigirCobertura(fila.amountCents, c, await usadoEnStripe(prisma, fila))
+  return c
 }
 
 /**
@@ -1402,22 +1488,32 @@ export async function revisarStripeAntesDeOtroMedio(i: { venueId: string; orderI
  * D668: antes, fuera de la transacción, se le pregunta a Stripe (la misma lectura que Ruling 28): si el cargo ya tiene una devolución
  * hecha por fuera de Avoqado, completa o parcial, no se paga ni se registra nada (409 `EXTERNAL_REFUND_DETECTED`; sin respuesta, 503).
  * No se cierra sola: Avoqado no sabe si esa devolución es la de esta reversa. Una repetición no le pregunta a Stripe.
+ * D670: `STRIPE` = «Ya se devolvió en Stripe»: la persona lo afirma y Stripe lo comprueba (lo HECHO por fuera, sin usar por otra reversa
+ * del cargo, alcanza el monto; la cuenta de lo usado se repite bajo el candado). Sin `PAY_OUT`, sin otro pago, sin mover dinero.
  */
 export async function resolveReversedCardRefund(i: {
   venueId: string
   orderId: string
   cardRefundId: string
-  method: 'CASH' | 'BANK_TRANSFER'
+  method: 'CASH' | 'BANK_TRANSFER' | 'STRIPE'
   staffId: string
   note?: string | null
 }): Promise<{ status: 'RESOLVED'; replay: boolean }> {
-  if (i.method !== 'CASH' && i.method !== 'BANK_TRANSFER') throw new BadRequestError('El método debe ser CASH o BANK_TRANSFER')
+  if (i.method !== 'CASH' && i.method !== 'BANK_TRANSFER' && i.method !== 'STRIPE') {
+    throw new BadRequestError('El método debe ser CASH, BANK_TRANSFER o STRIPE')
+  }
   const note = i.note?.trim() || null
   const now = new Date()
   const filaDeLaDevolucion = filaDeOtroMedio(i)
   let preguntadoAStripe: boolean
+  let cobertura: Cobertura | null = null
   try {
-    preguntadoAStripe = await revisarStripeAntesDeOtroMedio(i)
+    if (i.method === 'STRIPE') {
+      cobertura = await revisarCoberturaEnStripe(i)
+      preguntadoAStripe = cobertura !== null
+    } else {
+      preguntadoAStripe = await revisarStripeAntesDeOtroMedio(i)
+    }
   } catch (error) {
     // Codex r1 #5: otra solicitud la resolvió mientras se le preguntaba a Stripe; eso es una repetición, no «no se aplicó nada».
     const ahora = await prisma.onlineOrderCardRefund.findFirst({ where: filaDeLaDevolucion, select: { status: true } })
@@ -1439,6 +1535,8 @@ export async function resolveReversedCardRefund(i: {
     if (!preguntadoAStripe) {
       throw new ConflictError('La devolución cambió mientras se resolvía. Intenta de nuevo.', 'CARD_REFUND_CHANGED')
     }
+    // D670: otra reversa del cargo pudo cerrarse con la misma devolución de fuera entre la revisión y este candado.
+    if (cobertura) exigirCobertura(row.amountCents, cobertura, await usadoEnStripe(tx, row))
     const cashDrawerEventId =
       i.method === 'CASH'
         ? await postPayOutInTx(tx, {
@@ -1453,7 +1551,13 @@ export async function resolveReversedCardRefund(i: {
     const moved = await tx.onlineOrderCardRefund.updateMany({ where: { id: row.id, status: R.REVERSED }, data: { status: R.RESOLVED } })
     const resolved = await tx.onlineOrderCardRefundReversal.updateMany({
       where: { cardRefundId: row.id, resolvedAt: null },
-      data: { resolvedMethod: i.method, resolvedByStaffId: i.staffId, resolvedAt: now, resolvedNote: note, cashDrawerEventId },
+      data: {
+        resolvedMethod: i.method === 'STRIPE' ? CERRADA_EN_STRIPE : i.method,
+        resolvedByStaffId: i.staffId,
+        resolvedAt: now,
+        resolvedNote: note,
+        cashDrawerEventId,
+      },
     })
     // Bajo el candado de la orden nadie más resuelve; si aun así cambió, se revierte todo (también la salida de caja).
     if (moved.count !== 1 || resolved.count !== 1)
@@ -1465,7 +1569,7 @@ export async function resolveReversedCardRefund(i: {
     void logAction({
       staffId: i.staffId,
       venueId: i.venueId,
-      action: 'ONLINE_ORDER_CARD_REFUND_RESOLVED',
+      action: i.method === 'STRIPE' ? 'ONLINE_ORDER_CARD_REFUND_RESOLVED_IN_STRIPE' : 'ONLINE_ORDER_CARD_REFUND_RESOLVED',
       entity: 'OnlineOrderCardRefund',
       entityId: i.cardRefundId,
       data: {
@@ -1474,10 +1578,80 @@ export async function resolveReversedCardRefund(i: {
         amount: pesos(out.row.amountCents),
         note,
         cashDrawerEventId: 'cashDrawerEventId' in out ? out.cashDrawerEventId : null,
+        ...(cobertura ? { devueltoEnStripe: pesos(cobertura.hechasCents), stripeRefundIds: cobertura.stripeRefundIds } : {}),
       },
     })
   }
   return { status: 'RESOLVED', replay: out.replay }
+}
+
+/**
+ * D670: Stripe puede tumbar después una devolución `succeeded` (hasta 30 días, `refund.failed`), y la de fuera va a la MISMA tarjeta
+ * cuya devolución ya falló. Con cada aviso de una devolución de fuera se relee el cargo: si lo HECHO por fuera ya no alcanza lo cerrado
+ * con «Ya se devolvió en Stripe», esas reversas del cargo vuelven a `REVERSED` (todas: las que sigan cubiertas se cierran otra vez con un
+ * clic), con bitácora, 🚨 y aviso al negocio. Sin cerradas así no se lee nada. Si Stripe no contesta, truena (el aviso se reintenta).
+ */
+async function reabrirLoQueStripeYaNoCubre(charge: CargoEnStripe & { orderId: string; orderNumber: string | null }): Promise<void> {
+  const cerradas = cerradasEnStripe({ venueId: charge.venueId, chargeId: charge.id })
+  const usado =
+    (await prisma.onlineOrderCardRefundReversal.aggregate({ where: cerradas, _sum: { amountCents: true } }))._sum.amountCents ?? 0
+  if (!usado) return
+  const { hechasCents } = coberturaDe((await leerDevolucionesPorFuera(charge)).deFuera)
+  if (hechasCents >= usado) return
+  const reabiertas = await prisma.$transaction(async tx => {
+    if (!(await lockExistingOrderForPayment(tx, { venueId: charge.venueId, orderId: charge.orderId }))) return []
+    // ponytail: un cargo trae a lo más un puñado de reversas; tope de 100.
+    const filas = await tx.onlineOrderCardRefundReversal.findMany({
+      where: cerradas,
+      select: { cardRefundId: true, amountCents: true },
+      take: 100,
+    })
+    if (sumaCents(filas) <= hechasCents) return []
+    for (const f of filas) {
+      const moved = await tx.onlineOrderCardRefund.updateMany({
+        where: { id: f.cardRefundId, venueId: charge.venueId, status: R.RESOLVED },
+        data: { status: R.REVERSED },
+      })
+      const reabierta = await tx.onlineOrderCardRefundReversal.updateMany({
+        where: { cardRefundId: f.cardRefundId, resolvedMethod: CERRADA_EN_STRIPE },
+        data: { resolvedMethod: null, resolvedAt: null, resolvedByStaffId: null, resolvedNote: null },
+      })
+      if (moved.count !== 1 || reabierta.count !== 1) throw new Error(`la devolución ${f.cardRefundId} cambió mientras se reabría`)
+    }
+    return filas
+  }, ORDER_LOCK_WAIT_BUDGET)
+  for (const f of reabiertas) {
+    const amount = pesos(f.amountCents)
+    logger.error('🚨 [OnlineOrderCardRefund] la devolución hecha directo en Stripe falló: la reversa vuelve a quedar pendiente', {
+      cardRefundId: f.cardRefundId,
+      venueId: charge.venueId,
+      orderId: charge.orderId,
+      amount,
+    })
+    void logAction({
+      staffId: null,
+      venueId: charge.venueId,
+      action: 'ONLINE_ORDER_CARD_REFUND_REOPENED',
+      entity: 'OnlineOrderCardRefund',
+      entityId: f.cardRefundId,
+      data: { orderId: charge.orderId, amount, devueltoEnStripe: pesos(hechasCents), cerradoEnStripe: pesos(usado) },
+    })
+    void sendVenueNotification(
+      charge.venueId,
+      {
+        type: 'PAYMENT_FAILED',
+        title: 'Falló la devolución hecha en Stripe',
+        message: `La devolución de $${amount}${charge.orderNumber ? ` del pedido ${charge.orderNumber}` : ''} que se hizo directo en Stripe falló en el banco: se le vuelve a deber a la clienta. Devuélvelo por otro medio desde el pedido.`,
+        entityType: 'OnlineOrderCardRefund',
+        entityId: f.cardRefundId,
+        priority: 'HIGH',
+        metadata: { orderId: charge.orderId, cardRefundId: f.cardRefundId },
+      },
+      ['OWNER', 'ADMIN', 'MANAGER'],
+    ).catch(error =>
+      logger.error('[OnlineOrderCardRefund] no se pudo avisar al negocio', { cardRefundId: f.cardRefundId, error: errorText(error) }),
+    )
+  }
 }
 
 /** Las devoluciones a la tarjeta de un pedido (para el panel y el MCP), la más reciente primero; un pedido real trae un puñado. */
@@ -1505,7 +1679,8 @@ export async function listCardRefunds(venueId: string, orderId: string) {
       ? {
           failureReason: r.reversal.failureReason,
           detectedAt: r.reversal.detectedAt.toISOString(),
-          resolvedMethod: r.reversal.resolvedMethod,
+          // D670: «Ya se devolvió en Stripe» se guarda como CREDIT_CARD; hacia afuera es `STRIPE`, el mismo valor con el que se pide.
+          resolvedMethod: r.reversal.resolvedMethod === CERRADA_EN_STRIPE ? ('STRIPE' as const) : r.reversal.resolvedMethod,
           resolvedAt: r.reversal.resolvedAt?.toISOString() ?? null,
           resolvedNote: r.reversal.resolvedNote,
         }
@@ -1548,7 +1723,15 @@ export async function handleStripeRefundEvent(event: VerifiedWebhookEvent): Prom
   if (!paymentIntentId) return
   const charge = await prisma.onlineOrderCharge.findUnique({
     where: { paymentIntentId },
-    select: { id: true, venueId: true, onlineOrderId: true, merchantSnapshot: true },
+    select: {
+      id: true,
+      venueId: true,
+      onlineOrderId: true,
+      merchantSnapshot: true,
+      paymentIntentId: true,
+      ecommerceMerchantId: true,
+      onlineOrder: { select: { orderId: true, order: { select: { orderNumber: true } } } },
+    },
   })
   if (!charge) return
   if (await isForeignStripeEvent(event, charge)) return
@@ -1576,6 +1759,15 @@ export async function handleStripeRefundEvent(event: VerifiedWebhookEvent): Prom
       venueId: charge.venueId,
       chargeId: charge.id,
       refundId: refund.id,
+    })
+  }
+  // D670: si con devoluciones de fuera se cerró alguna reversa de este cargo, se relee Stripe (el aviso no se cree).
+  if (charge.onlineOrder && charge.paymentIntentId) {
+    await reabrirLoQueStripeYaNoCubre({
+      ...charge,
+      paymentIntentId: charge.paymentIntentId,
+      orderId: charge.onlineOrder.orderId,
+      orderNumber: charge.onlineOrder.order?.orderNumber ?? null,
     })
   }
 }

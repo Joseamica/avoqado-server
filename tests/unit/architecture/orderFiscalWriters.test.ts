@@ -1506,6 +1506,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/online-ordering/card/refund.service.ts#refundCardOnlineOrder': 1,
   'src/services/online-ordering/card/refund.service.ts#reverseRecordedRefund': 1,
   'src/services/online-ordering/card/refund.service.ts#resolveReversedCardRefund': 1,
+  // D670: la reapertura de lo cerrado «Ya se devolvió en Stripe» cuando la devolución de Stripe falla después, con la Order.
+  'src/services/online-ordering/card/refund.service.ts#reabrirLoQueStripeYaNoCubre': 1,
   // D661 (Task 5): el desenlace sin devolución con el retiro de su reserva, y el cierre «Devuelto», cada uno con la Order.
   'src/services/online-ordering/card/refund.service.ts#terminarSinDevolver': 1,
   'src/services/online-ordering/card/refund.service.ts#cerrarComoDevuelto': 1,

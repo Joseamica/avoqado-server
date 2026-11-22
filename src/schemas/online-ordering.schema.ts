@@ -163,7 +163,10 @@ export const cardRefundSchema = z.object({
 export const cardRefundResolveSchema = z.object({
   params: orderParams.extend({ refundId: z.string().min(1, 'Devolución inválida') }),
   body: z.object({
-    method: z.enum(['CASH', 'BANK_TRANSFER'], { errorMap: () => ({ message: 'El método debe ser efectivo o transferencia' }) }),
+    // D670: `STRIPE` = «Ya se devolvió en Stripe» (el servidor lo comprueba en Stripe; no sale dinero).
+    method: z.enum(['CASH', 'BANK_TRANSFER', 'STRIPE'], {
+      errorMap: () => ({ message: 'El método debe ser efectivo, transferencia o «Ya se devolvió en Stripe»' }),
+    }),
     note: z.string().trim().max(200, 'La nota admite hasta 200 caracteres').optional(),
   }),
 })
