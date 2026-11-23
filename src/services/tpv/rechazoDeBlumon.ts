@@ -22,7 +22,7 @@
  *     importe y terminal después del rechazo. Founder (22-nov, «A todo automático»): la cuenta libre pronto; un aprobado posterior
  *     gana: su `Payment` concilia la venta a COMPLETED y grita 🚨 (detección y aviso, no un veto de más).
  *
- * Lo disparan: el receptor al anotar, el cancel del POS, el sello del cese (A3) y el vigía cada 30 s (la red).
+ * Lo disparan: el receptor al anotar, la respuesta de la terminal al cancel del POS, el sello del cese (A3) y el vigía (la red).
  */
 import { Prisma, TerminalPaymentRequestStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
@@ -36,7 +36,9 @@ const HORA_DEL_BANCO = /^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}:\d{2}$/
 const IMPORTE = /^\d{1,9}(\.\d{1,2})?$/
 /** Cuánto mira atrás el vigía (un rechazo anotado se cierra en segundos; lo que pase de un día lo resuelve una persona). */
 const VENTANA_DEL_BARRIDO_MS = 24 * 60 * 60_000
-const TOPE_DEL_BARRIDO = 50
+const TOPE_DEL_BARRIDO = 20
+/** Codex r1 #4: el barrido corre dentro del vigía de 30 s; si los candados están ocupados, no lo retrasa más de esto. */
+const PRESUPUESTO_DEL_BARRIDO_MS = 5_000
 /** Estados en los que el cierre puede aplicar (el núcleo revalida todo bajo candado). */
 const ESTADOS_CERRABLES: TerminalPaymentRequestStatus[] = [
   TerminalPaymentRequestStatus.CANCEL_REQUESTED,
@@ -81,6 +83,10 @@ export async function anotarRechazoDeBlumon(input: {
       -- (entrega, tarjeta, autorización: 7 s en el incidente) y la hora del banco nunca va adelantada (medido: 0.6–2.1 s atrás).
       AND (to_timestamp(${hora}, 'DD/MM/YYYY HH24:MI:SS')::timestamp AT TIME ZONE v."timezone") AT TIME ZONE 'UTC'
           > date_trunc('second', r."createdAt")
+      -- Codex r1 #1: y nunca en el futuro. La hora local repetida del cambio de horario (Tijuana) se lee una hora después; medido,
+      -- la hora del banco llega 0.6–2.1 s ANTES que el aviso, así que una hora posterior a la recepción no es de esta venta.
+      AND (to_timestamp(${hora}, 'DD/MM/YYYY HH24:MI:SS')::timestamp AT TIME ZONE v."timezone") AT TIME ZONE 'UTC'
+          <= (NOW() AT TIME ZONE 'UTC') + interval '2 seconds'
     RETURNING r."requestId", r."venueId"`
   return filas[0] ?? null
 }
@@ -106,11 +112,14 @@ export function aprobadoTrasElRechazoSql(fila: Prisma.Sql): Prisma.Sql {
  * ¿El rechazo anotado ya cierra la venta? Lo decide el núcleo (`reconcileUncharged`, rama BLUMON) dentro de su transacción.
  *  · la anotación es ESE aviso (nadie más escribe la columna);
  *  · la terminal no anuncia intentos (`attemptIds` del núcleo; la PAX no los anuncia);
- *  · ya no se espera otro intento de la TABLET: el POS canceló ese cobro, o la terminal certificó el cese sin un «sigo» posterior.
+ *  · ya no se espera otro intento de la TABLET: el POS canceló ese cobro (y la terminal ya recibió el cancel o pasó su gracia), o la
+ *    terminal certificó el cese sin un «sigo» posterior.
  * El aviso APROBADO posterior va aparte (`aprobadoTrasElRechazoSql`), en la lectura y en el CAS.
  */
 export function elRechazoDeBlumonCierra(
   row: {
+    status: TerminalPaymentRequestStatus
+    cancelDisposition?: string | null
     bankDeclineEventLogId?: string | null
     cancelRequestedAt?: Date | null
     executionClosedAt?: Date | null
@@ -122,7 +131,11 @@ export function elRechazoDeBlumonCierra(
   attemptIds: readonly string[],
 ): boolean {
   if (!eventLogId || row.bankDeclineEventLogId !== eventLogId || attemptIds.length > 0) return false
-  return Boolean(row.cancelRequestedAt) || (Boolean(row.executionClosedAt) && !sondaReportoActiva(row))
+  // Codex r1 #2: con la fila todavía en `CANCEL_REQUESTED`, sólo si la terminal YA recibió el cancel (contestó «sigo»). Si no lo
+  // recibió (sin red), se conserva la gracia en la que el SERVIDOR se lo reenvía al reconectar; después de la gracia cierra el vigía.
+  const laTabletLoSolto =
+    Boolean(row.cancelRequestedAt) && (row.status !== TerminalPaymentRequestStatus.CANCEL_REQUESTED || row.cancelDisposition === 'ACTIVE')
+  return laTabletLoSolto || (Boolean(row.executionClosedAt) && !sondaReportoActiva(row))
 }
 
 /**
@@ -166,7 +179,7 @@ export async function cerrarVentaPorRechazoDeBlumon(fila: { requestId: string; v
 
 /**
  * La red durable (vigía, cada 30 s): solicitudes con un rechazo anotado que ya podrían cerrarse y no se cerraron (un candado ocupado,
- * un reinicio entre el disparo y el cierre). Acotada a un día y a 50 por pasada.
+ * un reinicio entre el disparo y el cierre). Acotada a un día, a 20 filas y a 5 s por pasada.
  * ponytail: sin cursor; si alguna vez hay más de 50 vetadas a la vez (aprobado posterior), poner un cursor como el del techo.
  */
 export async function barrerRechazosDeBlumon(ahora: Date = new Date()): Promise<{ cerradas: number; revisadas: number }> {
@@ -176,11 +189,18 @@ export async function barrerRechazosDeBlumon(ahora: Date = new Date()): Promise<
       AND "createdAt" >= ${utcTs(new Date(ahora.getTime() - VENTANA_DEL_BARRIDO_MS))}
       AND "bankDeclineEventLogId" IS NOT NULL AND "paymentId" IS NULL
       AND ("cancelRequestedAt" IS NOT NULL OR "executionClosedAt" IS NOT NULL)
+      AND ("status" <> 'CANCEL_REQUESTED' OR "cancelDisposition" = 'ACTIVE')
       AND NOT EXISTS (SELECT 1 FROM "TerminalPaymentAttemptLink" l WHERE l."requestId" = "TerminalPaymentRequest"."requestId")
       AND NOT ${aprobadoTrasElRechazoSql(Prisma.raw('"TerminalPaymentRequest"'))}
     ORDER BY "createdAt" ASC, "id" ASC
     LIMIT ${TOPE_DEL_BARRIDO}`
+  const inicio = Date.now()
   let cerradas = 0
-  for (const f of filas) if (await cerrarVentaPorRechazoDeBlumon(f)) cerradas += 1
-  return { cerradas, revisadas: filas.length }
+  let revisadas = 0
+  for (const f of filas) {
+    if (Date.now() - inicio > PRESUPUESTO_DEL_BARRIDO_MS) break // el resto, en la siguiente pasada
+    revisadas += 1
+    if (await cerrarVentaPorRechazoDeBlumon(f)) cerradas += 1
+  }
+  return { cerradas, revisadas }
 }

@@ -81,9 +81,12 @@ Invariantes de este lado, ya construidos y con prueba — no los debilites:
     solicitud que en ese instante ocupa la ranura de esa terminal exacta, ya entregada, con el importe EXACTO (monto + propina) y la
     hora del banco estrictamente posterior al segundo de su creación (un UPDATE; medido 60 d: 0 en la solicitud equivocada). La venta
     se cierra `FAILED/BANK_DECLINED` por `reconcileBankDeclined({origen:'BLUMON'})` —el mismo núcleo, candados y CAS— cuando la tablet
-    ya soltó ese cobro (`cancelRequestedAt`) o la terminal certificó el cese, sin intentos anunciados y sin un aviso APROBADO del mismo
-    importe y terminal posterior al rechazo; desde `CANCEL_REQUESTED` también. Nunca en el instante del aviso (la PAX ofrece
-    «Reintentar»). Lo disparan el aviso, el cancel del POS, el sello del cese y el vigía. Un aprobado que llegue después gana: su
+    ya soltó ese cobro (`cancelRequestedAt`; desde `CANCEL_REQUESTED` sólo si la terminal ya contestó «sigo» al cancel, para no perder
+    el reenvío del cancel a una PAX sin red) o la terminal certificó el cese, sin intentos anunciados y sin un aviso APROBADO del mismo
+    importe y terminal posterior al rechazo. La hora del banco tampoco puede ser posterior a la recepción (hora repetida del cambio de
+    horario). Nunca en el instante del aviso (la PAX ofrece «Reintentar»). Lo disparan el aviso, la respuesta de la terminal al
+    cancel, el sello del cese y el vigía (acotado a 5 s por pasada); el rescate del long-poll del vigía también contesta un
+    `BANK_DECLINED` cuyo aviso al POS se perdió. Un aprobado que llegue después gana: su
     Payment concilia a COMPLETED con 🚨 (founder, «A todo automático»: detección y aviso, no vetos de más). No se anota: un aviso con
     la ranura ya suelta, de serial virtual o sin `dateTransaction`; ahí sigue la regla de antes.
 - **El cierre por REST exige procedencia acreditada.** La selección actual del serial es:

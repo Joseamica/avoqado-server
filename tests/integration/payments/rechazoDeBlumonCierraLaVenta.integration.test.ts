@@ -96,6 +96,14 @@ const declarar = (requestId: string) =>
     { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
   )
 
+/** La tablet cancela y la PAX (2.16.0) contesta «sigo» al cancel: ya lo recibió. */
+async function cancelarYSigo(requestId: string) {
+  const cancel = await terminalPaymentService.cancelPayment(f.serial, requestId, 'Cancelado desde el POS', f.venueId)
+  expect(cancel.cancelIntent).toBe('RECORDED')
+  expect(await svc.handleCancelDispositionFromSocket({ requestId, ...VIVA }, tpv())).toBe(true)
+  return cancel
+}
+
 /** `dd/MM/yyyy HH:mm:ss` en la hora de México: el formato de `dateTransaction` de Blumon. */
 function horaDelBanco(d: Date): string {
   const p = Object.fromEntries(
@@ -195,6 +203,8 @@ describe('D26 · el rechazo de Blumon se ANOTA en la solicitud que ocupa la ranu
     ['hora del banco anterior a la solicitud', () => aviso({ dateTransaction: horaDelBanco(new Date(Date.now() - 60_000)) })],
     ['una devolución rechazada', () => aviso({ operationType: 'DEVOLUCION' })],
     ['sin hora del banco', () => aviso({ dateTransaction: undefined })],
+    // Codex r1 #1: la hora repetida del cambio de horario se lee una hora DESPUÉS; una hora del banco posterior a la recepción no es suya.
+    ['hora del banco en el futuro', () => aviso({ dateTransaction: horaDelBanco(new Date(Date.now() + 60 * 60_000)) })],
   ])('no se anota: %s', async (_caso, hacer) => {
     const { requestId } = await cobroEnLaTerminal()
     await processBlumonPaymentWebhook(hacer())
@@ -254,15 +264,17 @@ describe('D26 · el rechazo de Blumon se ANOTA en la solicitud que ocupa la ranu
 })
 
 describe('D26 · la venta se cierra SOLA como «rechazada por el banco» cuando la tablet ya soltó el cobro o la terminal certificó el cese', () => {
-  it('el incidente: aviso del rechazo y luego el cancel del POS ⇒ BANK_DECLINED al instante, cuenta y terminal libres', async () => {
+  it('el incidente: aviso del rechazo, cancel del POS y la PAX contesta «sigo» ⇒ BANK_DECLINED al instante, cuenta y terminal libres', async () => {
     const { requestId, venta } = await cobroEnLaTerminal()
     const aviso1 = await processBlumonPaymentWebhook(aviso())
     expect(await ventaCercada(venta.id)).toBe(true) // antes del cancel: la PAX puede estar en «Reintentar»
 
     const cancel = await terminalPaymentService.cancelPayment(f.serial, requestId, 'Cancelado desde el POS', f.venueId)
     expect(cancel.cancelIntent).toBe('RECORDED')
-    // El POS lo sabe en la MISMA respuesta del cancel (hoy: «confirma el resultado en la terminal» y 25 min de espera).
-    expect(cancel.payment).toMatchObject({ status: 'FAILED', failureCode: 'BANK_DECLINED', outcome: 'NOT_CHARGED' })
+    // Codex r1 #2: el cancel todavía no cierra (si la PAX no lo recibió, el SERVIDOR se lo reenvía al reconectar)…
+    expect(cancel.payment).toMatchObject({ status: 'CANCEL_REQUESTED', outcome: 'UNRESOLVED' })
+    // …la PAX lo recibe y contesta «sigo» (09:25:24 en el incidente) ⇒ BANK_DECLINED ahí mismo (hoy: 25 min y una persona).
+    expect(await svc.handleCancelDispositionFromSocket({ requestId, ...VIVA }, tpv())).toBe(true)
     const r = await fila(requestId)
     expect(r).toMatchObject({ status: 'FAILED', failureCode: 'BANK_DECLINED', paymentId: null })
     expect(desenlaceCanonico(r)).toMatchObject({ outcome: 'NOT_CHARGED', outcomeEvidence: 'PROCESSOR_DECLINED', evidenceClass: 'SERVER' })
@@ -276,7 +288,7 @@ describe('D26 · la venta se cierra SOLA como «rechazada por el banco» cuando 
     expect(asientos).toHaveLength(1)
     expect(asientos[0].data).toMatchObject({ origen: 'BLUMON', eventLogId: aviso1.eventLogId, requestId })
 
-    // La PAX contesta «sigo» al cancel y el vigía pasa: nada cambia, un solo asiento; la persona ya no tiene nada que declarar.
+    // La PAX repite «sigo» y el vigía pasa: nada cambia, un solo asiento; la persona ya no tiene nada que declarar.
     expect(await svc.handleCancelDispositionFromSocket({ requestId, ...VIVA }, tpv())).toBe(true)
     await vigia()
     expect(await fila(requestId)).toMatchObject({ status: 'FAILED', failureCode: 'BANK_DECLINED' })
@@ -291,6 +303,44 @@ describe('D26 · la venta se cierra SOLA como «rechazada por el banco» cuando 
     expect(await fila(requestId)).toMatchObject({ status: 'CANCEL_REQUESTED', cancelDisposition: 'ACTIVE' })
     await processBlumonPaymentWebhook(aviso())
     expect(await fila(requestId)).toMatchObject({ status: 'FAILED', failureCode: 'BANK_DECLINED' })
+  })
+
+  it('Codex r1 #2: la PAX sin red al cancelar no recibe el cancel ⇒ se conserva la gracia (CANCEL_REQUESTED) y luego cierra el vigía', async () => {
+    const { requestId } = await cobroEnLaTerminal()
+    await processBlumonPaymentWebhook(aviso())
+    await terminalPaymentService.cancelPayment(f.serial, requestId, 'Cancelado desde el POS', f.venueId)
+    await vigia()
+    expect(await fila(requestId)).toMatchObject({ status: 'CANCEL_REQUESTED', cancelDisposition: null })
+    // Pasa la gracia del cancel sin respuesta: el vigía la deja UNKNOWN y la red la cierra.
+    await terminalPaymentService.reconcileStaleRequests(new Date(Date.now() + 31_000))
+    expect(await fila(requestId)).toMatchObject({ status: 'UNKNOWN' })
+    await vigia()
+    expect(await fila(requestId)).toMatchObject({ status: 'FAILED', failureCode: 'BANK_DECLINED' })
+  })
+
+  it('Codex r1 #3: un POS que sigue esperando el cobro recibe el rechazo del banco por el rescate del vigía aunque se perdiera el aviso', async () => {
+    const { requestId } = await cobroEnLaTerminal()
+    await prisma.terminalPaymentRequest.update({
+      where: { requestId },
+      data: {
+        status: 'FAILED',
+        failureCode: 'BANK_DECLINED',
+        resultJson: { requestId, status: 'failed', outcomeEvidence: 'BANK_DECLINED' },
+      },
+    })
+    const resolve = jest.fn()
+    svc.pendingPayments.set(requestId, {
+      resolve,
+      reject: jest.fn(),
+      timeout: setTimeout(() => undefined, 60_000),
+      requestId,
+      terminalId: f.llaveTerminal,
+      venueId: f.venueId,
+      createdAt: new Date(),
+    })
+    expect(await terminalPaymentService.resolvePendingFromDurableState()).toMatchObject({ resolved: 1 })
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ requestId, status: 'failed' }))
+    expect(svc.pendingPayments.has(requestId)).toBe(false)
   })
 
   it('la red del vigía: un rechazo anotado con el cobro ya cancelado que no se cerró (candado ocupado, reinicio) se cierra en la pasada', async () => {
@@ -342,7 +392,7 @@ describe('D26 · la venta se cierra SOLA como «rechazada por el banco» cuando 
       },
     })
     await processBlumonPaymentWebhook(aviso())
-    await terminalPaymentService.cancelPayment(f.serial, requestId, 'Cancelado desde el POS', f.venueId)
+    await cancelarYSigo(requestId)
     await vigia()
     expect((await fila(requestId)).status).not.toBe('FAILED')
   })
@@ -353,7 +403,7 @@ describe('D26 · el dinero gana: un aprobado después del rechazo (el «Reintent
     const { requestId, venta } = await cobroEnLaTerminal()
     await processBlumonPaymentWebhook(aviso())
     const pago = await pagoDeLaSolicitud(requestId, venta.id)
-    await terminalPaymentService.cancelPayment(f.serial, requestId, 'Cancelado desde el POS', f.venueId)
+    await cancelarYSigo(requestId)
     expect((await fila(requestId)).status).not.toBe('FAILED')
     await terminalPaymentService.reconcileStaleRequests(new Date(Date.now() + 31_000))
     await vigia()
@@ -365,7 +415,7 @@ describe('D26 · el dinero gana: un aprobado después del rechazo (el «Reintent
     await processBlumonPaymentWebhook(aviso())
     const ok = await processBlumonPaymentWebhook(aprobado())
     expect(ok.paymentId).toBeUndefined()
-    await terminalPaymentService.cancelPayment(f.serial, requestId, 'Cancelado desde el POS', f.venueId)
+    await cancelarYSigo(requestId)
     await vigia()
     const r = await fila(requestId)
     expect(r.status).not.toBe('FAILED')
@@ -376,14 +426,14 @@ describe('D26 · el dinero gana: un aprobado después del rechazo (el «Reintent
     const { requestId } = await cobroEnLaTerminal()
     await processBlumonPaymentWebhook(aviso())
     await processBlumonPaymentWebhook(aprobado({ amount: '99.00' }))
-    await terminalPaymentService.cancelPayment(f.serial, requestId, 'Cancelado desde el POS', f.venueId)
+    await cancelarYSigo(requestId)
     expect(await fila(requestId)).toMatchObject({ status: 'FAILED', failureCode: 'BANK_DECLINED' })
   })
 
   it('Payment que llega DESPUÉS del cierre ⇒ concilia a COMPLETED y grita 🚨', async () => {
     const { requestId, venta } = await cobroEnLaTerminal()
     await processBlumonPaymentWebhook(aviso())
-    await terminalPaymentService.cancelPayment(f.serial, requestId, 'Cancelado desde el POS', f.venueId)
+    await cancelarYSigo(requestId)
     expect(await fila(requestId)).toMatchObject({ status: 'FAILED', failureCode: 'BANK_DECLINED' })
     const pago = await pagoDeLaSolicitud(requestId, venta.id)
     await vigia()

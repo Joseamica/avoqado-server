@@ -613,7 +613,12 @@ export async function reconcileUncharged(
     // D26 · Blumon (22-nov): el rechazo que Blumon avisó y el receptor anotó en ESTA fila (`tpv/rechazoDeBlumon.ts`) cierra la venta
     // cuando la tablet ya soltó ese cobro (cancel del POS) o la terminal certificó el cese, sin intentos anunciados. Es lo único que
     // cambia para el banco: su «sigo» deja de vetar (el «Reintentar» que llegue a aprobar gana después: su Payment concilia con 🚨).
-    const porBlumon = porElBanco && declaration.bank?.origen === 'BLUMON'
+    // La rama nueva sólo aplica a la fila que el receptor anotó con ESE aviso; cualquier otra llamada del banco sigue la regla del vínculo.
+    const porBlumon =
+      porElBanco &&
+      declaration.bank?.origen === 'BLUMON' &&
+      Boolean(row.bankDeclineEventLogId) &&
+      row.bankDeclineEventLogId === declaration.bank.eventLogId
     const cierraPorBlumon = porBlumon && elRechazoDeBlumonCierra(row, declaration.bank?.eventLogId, attemptIds)
 
     if (sondaVetaLaDeclaracion(row, ranuraYaSuelta(row)) && !techoDeLaVenta && !cierraPorBlumon)
@@ -678,8 +683,8 @@ export async function reconcileUncharged(
 
     // 🔴 P1 de Codex: lista EXPLÍCITA de estados. `SENT` y `CANCEL_REQUESTED` también son UNRESOLVED y son
     // cobros que pueden seguir corriendo: declarar sobre ellos es el camino del cobro doble.
-    // D26 · Blumon: también desde `CANCEL_REQUESTED` (el cancel del POS acaba de llegar y la terminal todavía no contesta): el banco
-    // ya contestó y la tablet soltó el cobro; esperar la gracia del cancel sólo deja la cuenta cercada 30 s más.
+    // D26 · Blumon: también desde `CANCEL_REQUESTED` cuando la terminal YA recibió el cancel y contestó «sigo» (`elRechazoDeBlumonCierra`):
+    // el banco ya contestó y la tablet soltó el cobro; esperar la gracia del cancel sólo dejaría la cuenta cercada 30 s más.
     if (!ESTADOS_DECLARABLES.has(row.status) && !(cierraPorBlumon && row.status === 'CANCEL_REQUESTED'))
       throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
     const { desenlaceCanonico } = await import('../terminal-payment.service')

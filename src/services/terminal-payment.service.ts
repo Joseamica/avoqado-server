@@ -6954,10 +6954,6 @@ class TerminalPaymentService {
         throw err
       }
 
-      // D26 · Blumon: si el banco ya rechazó este cobro (aviso anotado), la tablet acaba de soltarlo: la venta se cierra
-      // `BANK_DECLINED` ya, y el POS que espera recibe ese desenlace (no el «confirma en la terminal» de abajo). Nunca lanza.
-      await cerrarVentaPorRechazoDeBlumon({ requestId, venueId })
-
       // Resolve the long-poll so the POS UI unblocks (existing behavior).
       const pending = this.pendingPayments.get(requestId)
       if (pending) {
@@ -7584,8 +7580,11 @@ class TerminalPaymentService {
         ...(await prisma.terminalPaymentRequest.findMany({
           where: {
             requestId: { in: lote.map(p => p.requestId) },
-            status: TerminalPaymentRequestStatus.COMPLETED,
-            paymentId: { not: null },
+            // D26 (Codex r1 #3): también el rechazo del banco (AngelPay o Blumon) cuyo aviso a la espera se perdió tras el commit.
+            OR: [
+              { status: TerminalPaymentRequestStatus.COMPLETED, paymentId: { not: null } },
+              { status: TerminalPaymentRequestStatus.FAILED, failureCode: 'BANK_DECLINED' },
+            ],
           },
           take: lote.length,
           select: seleccion,
@@ -7596,7 +7595,7 @@ class TerminalPaymentService {
     for (const row of rows) {
       const pending = this.pendingPayments.get(row.requestId)
       if (!pending || pending.venueId !== row.venueId) continue
-      if (desenlaceCanonico(row).outcome !== 'CHARGED') continue
+      if (desenlaceCanonico(row).outcome === 'UNRESOLVED') continue
       clearTimeout(pending.timeout)
       this.pendingPayments.delete(row.requestId)
       pending.resolve(resultFromRow(row))
@@ -7959,6 +7958,10 @@ class TerminalPaymentService {
     }
     if (this.ejecucionCerradaAcreditada(event, terminal)) {
       await this.marcarEjecucionCerrada({ ...row, requestId: event.requestId }, terminal, 'CANCEL_DISPOSITION')
+    } else if (event.disposition === 'ACTIVE' && updated.count > 0) {
+      // D26 · Blumon: la terminal ya recibió el cancel del POS y sigue diciendo «sigo». Si el banco ya rechazó este cobro (aviso
+      // anotado), la venta se cierra `BANK_DECLINED` ahora: la tablet lo soltó y el banco contestó. Nunca lanza.
+      await cerrarVentaPorRechazoDeBlumon({ requestId: event.requestId, venueId: terminal.venueId })
     }
     return true
   }

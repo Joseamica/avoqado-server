@@ -18,10 +18,13 @@ jest.mock('@/services/terminal-payment.service', () => ({
   },
 }))
 jest.mock('@/observability/jobContext', () => ({ scheduleJob: jest.fn(() => ({ start: jest.fn(), stop: jest.fn() })) }))
+// D26 · Blumon (22-nov): la red del cierre por el rechazo que avisó Blumon, después del techo.
+jest.mock('@/services/tpv/rechazoDeBlumon', () => ({ barrerRechazosDeBlumon: jest.fn().mockResolvedValue({ cerradas: 0, revisadas: 0 }) }))
 
 import logger from '@/config/logger'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { TerminalPaymentWatchdogJob } from '@/jobs/terminal-payment-watchdog.job'
+import { barrerRechazosDeBlumon } from '@/services/tpv/rechazoDeBlumon'
 
 const s = terminalPaymentService as unknown as Record<string, jest.Mock>
 
@@ -44,6 +47,8 @@ describe('S5 · el vigía recupera el long-poll desde la fila en cada tick', () 
       s.liberarTrasCierreDeEjecucion,
       // D26: el cese certificado (S2) gana; el techo va después.
       s.liberarPorTechoTrasCancelar,
+      // D26 · Blumon: el cierre por el rechazo del banco, al final (su barrido está acotado a 5 s).
+      barrerRechazosDeBlumon as jest.Mock,
     ].map(m => m.mock.invocationCallOrder[0])
     expect(orden).toEqual([...orden].sort((a, b) => a - b))
   })
