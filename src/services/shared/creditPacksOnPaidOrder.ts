@@ -27,7 +27,8 @@ export type CreditPackSnapshot = {
   price: string
   currency: string
   validityDays: number | null
-  items: { productId: string; quantity: number }[]
+  /** `unlimited` (D679): sólo en un renglón Ilimitado. Una foto vieja sin el campo es lo que se vendió entonces: normal. */
+  items: { productId: string; quantity: number; unlimited?: boolean }[]
 }
 
 export const CreditPackSnapshotSchema: z.ZodType<CreditPackSnapshot> = z.object({
@@ -38,7 +39,7 @@ export const CreditPackSnapshotSchema: z.ZodType<CreditPackSnapshot> = z.object(
   currency: z.string().min(1),
   validityDays: z.number().int().positive().nullable(),
   items: z
-    .array(z.object({ productId: z.string().min(1), quantity: z.number().int().min(1) }))
+    .array(z.object({ productId: z.string().min(1), quantity: z.number().int().min(1), unlimited: z.boolean().optional() }))
     .min(1, 'La foto del paquete no trae productos')
     .refine(items => new Set(items.map(i => i.productId)).size === items.length, 'Producto repetido en la foto del paquete'),
 })
@@ -50,7 +51,7 @@ export function buildCreditPackSnapshot(pack: {
   price: Prisma.Decimal
   currency: string
   validityDays: number | null
-  items: { productId: string; quantity: number }[]
+  items: { productId: string; quantity: number; unlimited?: boolean }[]
 }): CreditPackSnapshot {
   const foto: CreditPackSnapshot = {
     v: 1,
@@ -59,7 +60,8 @@ export function buildCreditPackSnapshot(pack: {
     price: pack.price.toFixed(2),
     currency: pack.currency,
     validityDays: pack.validityDays,
-    items: pack.items.map(i => ({ productId: i.productId, quantity: i.quantity })),
+    // D679 (W6): la marca viaja con lo vendido. Un paquete normal sale igual que antes (sin la llave).
+    items: pack.items.map(i => ({ productId: i.productId, quantity: i.quantity, ...(i.unlimited ? { unlimited: true } : {}) })),
   }
   // Antes de cobrar, no después: una foto que no se podría entregar no se vende (igual que `sellPackInPerson` con un
   // paquete sin artículos).
@@ -225,7 +227,7 @@ export async function fulfillCreditPacksForOrder(
         active: true,
         validityDays: f.validityDays,
         maxPerCustomer: null,
-        items: f.items.map(i => ({ id: null, productId: i.productId, quantity: i.quantity })),
+        items: f.items.map(i => ({ id: null, productId: i.productId, quantity: i.quantity, unlimited: i.unlimited === true })),
       },
       venueId: order.venueId,
       customerId,

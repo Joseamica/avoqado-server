@@ -1777,4 +1777,201 @@ describe('Credit Pack Dashboard Service', () => {
       })
     })
   })
+
+  // ==========================================
+  // D679 · paquete Ilimitado: la marca sólo sale del renglón (Inventario 2, W1–W5)
+  // ==========================================
+
+  describe('D679 · paquete Ilimitado: alta y edición', () => {
+    const ILIMITADO = { id: 'item-ili', productId: 'prod-lagree', quantity: 99999, unlimited: true }
+    const productos = (...ids: string[]) => prismaMock.product.findMany.mockResolvedValue(ids.map(id => ({ id })))
+    const conPaquete = (items: Array<Record<string, unknown>>, validityDays: number | null = 30) => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack({ validityDays }))
+      prismaMock.creditPack.findUnique.mockResolvedValue({ validityDays, items })
+      prismaMock.creditPack.update.mockResolvedValue(createMockPack())
+    }
+    const nadaCambio = () => {
+      expect(prismaMock.creditPackItem.create).not.toHaveBeenCalled()
+      expect(prismaMock.creditPackItem.update).not.toHaveBeenCalled()
+      expect(prismaMock.creditPackItem.deleteMany).not.toHaveBeenCalled()
+      expect(prismaMock.creditPack.update).not.toHaveBeenCalled()
+    }
+
+    describe('alta (W1)', () => {
+      // `null` = sin vigencia (un `undefined` explícito tomaría el default de 30).
+      const alta = (items: Array<Record<string, unknown>>, validityDays: number | null = 30) =>
+        createCreditPack('venue-123', { name: 'Ilimitado', price: 2500, validityDays: validityDays ?? undefined, items: items as any })
+      const itemsCreados = () => prismaMock.creditPack.create.mock.calls[0][0].data.items.create
+
+      it('crea un Ilimitado sin cantidad: quantity 99999 y unlimited true', async () => {
+        productos('prod-lagree')
+        prismaMock.creditPack.create.mockResolvedValue(createMockPack())
+        await alta([{ productId: 'prod-lagree', unlimited: true }])
+        expect(itemsCreados()).toEqual([{ productId: 'prod-lagree', quantity: 99999, unlimited: true }])
+      })
+
+      it('aunque llegue otra cantidad, el renglón Ilimitado guarda 99999', async () => {
+        productos('prod-lagree')
+        prismaMock.creditPack.create.mockResolvedValue(createMockPack())
+        await alta([{ productId: 'prod-lagree', quantity: 10, unlimited: true }])
+        expect(itemsCreados()).toEqual([{ productId: 'prod-lagree', quantity: 99999, unlimited: true }])
+      })
+
+      it('alta sin la llave con 99999 es normal', async () => {
+        productos('prod-lagree')
+        prismaMock.creditPack.create.mockResolvedValue(createMockPack())
+        await alta([{ productId: 'prod-lagree', quantity: 99999 }], null)
+        expect(itemsCreados()).toEqual([{ productId: 'prod-lagree', quantity: 99999 }])
+      })
+
+      it('rechaza un Ilimitado sin vigencia, antes de crear nada (ni en Stripe)', async () => {
+        productos('prod-lagree')
+        mockStripeInstance.products.create.mockClear()
+        await expect(alta([{ productId: 'prod-lagree', unlimited: true }], null)).rejects.toMatchObject({
+          statusCode: 400,
+          code: 'CREDIT_UNLIMITED_NEEDS_VALIDITY',
+          message: 'Un paquete Ilimitado necesita días de vigencia.',
+        })
+        expect(prismaMock.creditPack.create).not.toHaveBeenCalled()
+        expect(mockStripeInstance.products.create).not.toHaveBeenCalled()
+      })
+
+      it('renglón normal sin cantidad → 400 «La cantidad debe ser mayor a 0»', async () => {
+        productos('prod-lagree')
+        await expect(alta([{ productId: 'prod-lagree' }])).rejects.toMatchObject({
+          statusCode: 400,
+          message: 'La cantidad debe ser mayor a 0',
+        })
+        expect(prismaMock.creditPack.create).not.toHaveBeenCalled()
+      })
+    })
+
+    describe('edición (W2–W5)', () => {
+      it('toma el candado del paquete antes de leer sus renglones', async () => {
+        conPaquete([ILIMITADO])
+        await updateCreditPack('venue-123', 'pack-123', { name: 'Otro nombre' })
+        expect(prismaMock.$queryRaw).toHaveBeenCalled()
+        expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.creditPack.findUnique.mock.invocationCallOrder[0])
+      })
+
+      it('rechaza quitar la vigencia de un paquete con un Ilimitado', async () => {
+        conPaquete([ILIMITADO])
+        await expect(updateCreditPack('venue-123', 'pack-123', { validityDays: null })).rejects.toMatchObject({
+          code: 'CREDIT_UNLIMITED_NEEDS_VALIDITY',
+        })
+        nadaCambio()
+      })
+
+      it('editor viejo reenvía el mismo producto con 99999 sin la llave: sigue Ilimitado (nada que escribir)', async () => {
+        conPaquete([ILIMITADO])
+        productos('prod-lagree')
+        await updateCreditPack('venue-123', 'pack-123', { items: [{ productId: 'prod-lagree', quantity: 99999 }] as any })
+        expect(prismaMock.creditPackItem.update).not.toHaveBeenCalled()
+        expect(prismaMock.creditPackItem.create).not.toHaveBeenCalled()
+      })
+
+      it('editor viejo escribe 10 en el renglón Ilimitado: sigue Ilimitado con 99999', async () => {
+        conPaquete([ILIMITADO])
+        productos('prod-lagree')
+        await updateCreditPack('venue-123', 'pack-123', { items: [{ productId: 'prod-lagree', quantity: 10 }] as any })
+        expect(prismaMock.creditPackItem.update).not.toHaveBeenCalled()
+      })
+
+      it('renglón nuevo de 99999 sin la llave es normal', async () => {
+        conPaquete([{ id: 'item-a', productId: 'prod-a', quantity: 5, unlimited: false }], null)
+        productos('prod-a', 'prod-b')
+        await updateCreditPack('venue-123', 'pack-123', {
+          items: [
+            { productId: 'prod-a', quantity: 5 },
+            { productId: 'prod-b', quantity: 99999 },
+          ] as any,
+        })
+        expect(prismaMock.creditPackItem.create).toHaveBeenCalledWith({
+          data: { creditPackId: 'pack-123', productId: 'prod-b', quantity: 99999 },
+        })
+      })
+
+      it('renglón nuevo con unlimited:true es Ilimitado', async () => {
+        conPaquete([{ id: 'item-a', productId: 'prod-a', quantity: 5, unlimited: false }])
+        productos('prod-a', 'prod-b')
+        await updateCreditPack('venue-123', 'pack-123', {
+          items: [
+            { productId: 'prod-a', quantity: 5, unlimited: false },
+            { productId: 'prod-b', unlimited: true },
+          ] as any,
+        })
+        expect(prismaMock.creditPackItem.create).toHaveBeenCalledWith({
+          data: { creditPackId: 'pack-123', productId: 'prod-b', quantity: 99999, unlimited: true },
+        })
+      })
+
+      it('el panel nuevo vuelve Ilimitado un renglón que ya existía, y lo regresa a normal con su cantidad', async () => {
+        conPaquete([{ id: 'item-a', productId: 'prod-a', quantity: 5, unlimited: false }])
+        productos('prod-a')
+        await updateCreditPack('venue-123', 'pack-123', { items: [{ productId: 'prod-a', unlimited: true }] as any })
+        expect(prismaMock.creditPackItem.update).toHaveBeenCalledWith({
+          where: { id: 'item-a' },
+          data: { quantity: 99999, unlimited: true },
+        })
+
+        jest.clearAllMocks()
+        conPaquete([{ id: 'item-a', productId: 'prod-a', quantity: 99999, unlimited: true }])
+        productos('prod-a')
+        await updateCreditPack('venue-123', 'pack-123', { items: [{ productId: 'prod-a', quantity: 10, unlimited: false }] as any })
+        expect(prismaMock.creditPackItem.update).toHaveBeenCalledWith({ where: { id: 'item-a' }, data: { quantity: 10, unlimited: false } })
+      })
+
+      it('volverlo Ilimitado sin vigencia se rechaza; con la vigencia en la misma petición pasa', async () => {
+        conPaquete([{ id: 'item-a', productId: 'prod-a', quantity: 5, unlimited: false }], null)
+        productos('prod-a')
+        await expect(
+          updateCreditPack('venue-123', 'pack-123', { items: [{ productId: 'prod-a', unlimited: true }] as any }),
+        ).rejects.toMatchObject({ code: 'CREDIT_UNLIMITED_NEEDS_VALIDITY' })
+        nadaCambio()
+
+        conPaquete([{ id: 'item-a', productId: 'prod-a', quantity: 5, unlimited: false }], null)
+        productos('prod-a')
+        await updateCreditPack('venue-123', 'pack-123', { validityDays: 30, items: [{ productId: 'prod-a', unlimited: true }] as any })
+        expect(prismaMock.creditPackItem.update).toHaveBeenCalledWith({
+          where: { id: 'item-a' },
+          data: { quantity: 99999, unlimited: true },
+        })
+      })
+
+      it('editor viejo cambia el producto del renglón Ilimitado → CREDIT_UNLIMITED_EDIT_IN_PANEL y nada cambia', async () => {
+        conPaquete([ILIMITADO])
+        productos('prod-otro')
+        await expect(
+          updateCreditPack('venue-123', 'pack-123', { items: [{ productId: 'prod-otro', quantity: 99999 }] as any }),
+        ).rejects.toMatchObject({
+          statusCode: 400,
+          code: 'CREDIT_UNLIMITED_EDIT_IN_PANEL',
+          message: 'Este paquete tiene un renglón Ilimitado: cambia sus productos desde el panel actualizado.',
+        })
+        nadaCambio()
+      })
+
+      it('en un paquete mixto, cambia el producto del renglón NORMAL → mismo rechazo', async () => {
+        conPaquete([ILIMITADO, { id: 'item-shake', productId: 'prod-shake', quantity: 2, unlimited: false }])
+        productos('prod-lagree', 'prod-jugo')
+        await expect(
+          updateCreditPack('venue-123', 'pack-123', {
+            items: [
+              { productId: 'prod-lagree', quantity: 99999 },
+              { productId: 'prod-jugo', quantity: 2 },
+            ] as any,
+          }),
+        ).rejects.toMatchObject({ code: 'CREDIT_UNLIMITED_EDIT_IN_PANEL' })
+        nadaCambio()
+      })
+
+      it('editor viejo vuelve a guardar un paquete NORMAL de 99999 sin vigencia: sigue normal y guarda', async () => {
+        conPaquete([{ id: 'item-a', productId: 'prod-a', quantity: 99999, unlimited: false }], null)
+        productos('prod-a')
+        await updateCreditPack('venue-123', 'pack-123', { name: 'Mucho', items: [{ productId: 'prod-a', quantity: 99999 }] as any })
+        expect(prismaMock.creditPack.update).toHaveBeenCalled()
+        expect(prismaMock.creditPackItem.update).not.toHaveBeenCalled()
+      })
+    })
+  })
 })

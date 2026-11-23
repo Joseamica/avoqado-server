@@ -140,7 +140,8 @@ export async function lookupCustomerCredits(
       ...p,
       itemBalances: p.itemBalances.map(b => ({
         ...b,
-        sufficient: seats != null ? b.remainingQuantity >= seats : true,
+        // D679 (N2): un Ilimitado es personal, cubre 1 lugar; su 99,999 no cuenta como «alcanza para 2».
+        sufficient: seats == null ? true : b.unlimited ? seats <= 1 : b.remainingQuantity >= seats,
       })),
     }))
     .filter(p => (productId || productIds ? p.itemBalances.length > 0 : true))
@@ -545,6 +546,8 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
             productId: item.productId,
             originalQuantity: item.quantity,
             remainingQuantity: item.quantity,
+            // D679 (W9): la marca del renglón del paquete al entregar.
+            ...(item.unlimited ? { unlimited: true } : {}),
           },
         })
 
@@ -622,6 +625,8 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
       const itemNameById = new Map(itemProducts.map(p => [p.id, p.name]))
       const itemLines = pack.items.map(it => {
         const name = it.productId ? (itemNameById.get(it.productId) ?? 'Servicio') : 'Servicio'
+        // D679 (N3): nunca «99999 sesiones».
+        if (it.unlimited) return `Ilimitado de ${name}`
         return `${it.quantity} ${it.quantity === 1 ? 'sesión' : 'sesiones'} de ${name}`
       })
       const customerName = (customer as { firstName?: string | null }).firstName || (customer as { name?: string | null }).name || 'Cliente'
