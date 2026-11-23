@@ -404,3 +404,96 @@ describe('R3-11 · el primer cancel se sella con el reloj del SERVIDOR (el mismo
     expect(Math.abs(sello.getTime() - delServidor.getTime())).toBeLessThan(5_000)
   })
 })
+
+/**
+ * La TABLA de la familia 1 (Codex S1 r3): cada señal de que el banco o la terminal ya dijeron que sí × cada escritor de un negativo.
+ * En ninguna celda queda un desenlace negativo ni la cuenta libre (salvo que la cierre su propio cobro, que no es negativo).
+ */
+describe('Familia 1 · señal × escritor de negativo: el aprobado manda en todas las celdas', () => {
+  type Senal = 'aviso aprobado guardado' | 'claimedSuccess' | 'Payment sin ligar' | 'marcador de retención'
+  type Escritor =
+    | 'cerrarSinRespuesta'
+    | 'reconcileBankDeclined'
+    | 'cerrarConNegativo acreditado'
+    | 'cerrarConNegativo degradado + 10 s'
+    | 'cancel ACCEPTED'
+  const SENALES: Senal[] = ['aviso aprobado guardado', 'claimedSuccess', 'Payment sin ligar', 'marcador de retención']
+  const ESTADO_DEL_ESCRITOR: Record<Escritor, Record<string, unknown>> = {
+    cerrarSinRespuesta: { status: 'UNKNOWN', noResponseAt: new Date(Date.now() - 60_000) },
+    reconcileBankDeclined: { status: 'UNKNOWN', noResponseAt: new Date() },
+    'cerrarConNegativo acreditado': { status: 'SENT' },
+    'cerrarConNegativo degradado + 10 s': { status: 'SENT' },
+    'cancel ACCEPTED': { status: 'CANCEL_REQUESTED', cancelRequestedAt: new Date() },
+  }
+  const ESCRITORES = Object.keys(ESTADO_DEL_ESCRITOR) as Escritor[]
+  const CELDAS = SENALES.flatMap(senal => ESCRITORES.map(escritor => [senal, escritor] as const))
+
+  const escribirNegativo = async (escritor: Escritor, requestId: string, attemptId: string) => {
+    switch (escritor) {
+      case 'cerrarSinRespuesta':
+        return terminalPaymentService.cerrarSinRespuesta(requestId, f.venueId, enDiezS())
+      case 'reconcileBankDeclined': {
+        const evento = await rechazoGuardado(attemptId)
+        return reconcileBankDeclined({ venueId: f.venueId, requestId, origen: 'ANGELPAY', evidencia: { eventLogId: evento.id, attemptId } })
+      }
+      case 'cerrarConNegativo acreditado':
+        return svc.handlePaymentResultFromSocket(
+          { requestId, status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED', errorMessage: 'Declinada' },
+          tpv(),
+        )
+      case 'cerrarConNegativo degradado + 10 s':
+        await svc.handlePaymentResultFromSocket({ requestId, status: 'failed', errorMessage: 'U101' }, tpv())
+        return terminalPaymentService.cerrarSinRespuesta(requestId, f.venueId, enDiezS())
+      case 'cancel ACCEPTED':
+        return svc.handleCancelDispositionFromSocket({ requestId, disposition: 'ACCEPTED' }, tpv())
+    }
+  }
+
+  it.each(CELDAS)('%s × %s', async (senal, escritor) => {
+    const venta = await f.nuevaVenta(100)
+    const estado =
+      senal === 'marcador de retención'
+        ? { status: 'TIMED_OUT', failureCode: 'BANK_APPROVED_AWAITING_PAYMENT' }
+        : ESTADO_DEL_ESCRITOR[escritor]
+    const s = await f.solicitud({
+      orderId: venta.id,
+      acknowledgedAt: new Date(),
+      ...estado,
+      ...(senal === 'claimedSuccess' ? { resultJson: { status: 'timeout', claimedSuccess: { status: 'success' } } } : {}),
+    })
+    const a = await intento(s.requestId)
+    if (senal === 'aviso aprobado guardado' || senal === 'marcador de retención')
+      await prisma.providerEventLog.create({
+        data: {
+          provider: 'PAYMENT_PROCESSOR',
+          type: 'send_transaction',
+          eventId: `angelpay-${f.nuevoEventId()}`,
+          venueId: f.venueId,
+          attemptId: a,
+          payload: f.eventoAngelPay(a),
+        } as any,
+      })
+    if (senal === 'Payment sin ligar')
+      await prisma.payment.create({
+        data: {
+          venueId: f.venueId,
+          orderId: venta.id,
+          amount: 100,
+          tipAmount: 0,
+          method: 'CREDIT_CARD',
+          status: 'COMPLETED',
+          feePercentage: 0,
+          feeAmount: 0,
+          netAmount: 100,
+          terminalPaymentRequestId: s.requestId,
+        } as any,
+      })
+
+    await escribirNegativo(escritor, s.requestId, a)
+
+    const r = await fila(s.requestId)
+    expect(NEGATIVOS).not.toContain(r.status)
+    const cobrada = r.status === 'COMPLETED' && !!r.paymentId
+    if (!cobrada) expect(await cercada(venta.id)).toBe(true)
+  })
+})
