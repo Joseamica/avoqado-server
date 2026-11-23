@@ -36,9 +36,7 @@ const HORA_DEL_BANCO = /^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}:\d{2}$/
 const IMPORTE = /^\d{1,9}(\.\d{1,2})?$/
 /** Cuánto mira atrás el vigía (un rechazo anotado se cierra en segundos; lo que pase de un día lo resuelve una persona). */
 const VENTANA_DEL_BARRIDO_MS = 24 * 60 * 60_000
-const TOPE_DEL_BARRIDO = 20
-/** Codex r1 #4: el barrido corre dentro del vigía de 30 s; si los candados están ocupados, no lo retrasa más de esto. */
-const PRESUPUESTO_DEL_BARRIDO_MS = 5_000
+const TOPE_DEL_BARRIDO = 50
 /** Estados en los que el cierre puede aplicar (el núcleo revalida todo bajo candado). */
 const ESTADOS_CERRABLES: TerminalPaymentRequestStatus[] = [
   TerminalPaymentRequestStatus.CANCEL_REQUESTED,
@@ -78,15 +76,13 @@ export async function anotarRechazoDeBlumon(input: {
       AND r."bankDeclineEventLogId" IS NULL
       AND (r."acknowledgedAt" IS NOT NULL OR r."lastDeliveredAt" IS NOT NULL)
       AND r."amountCents" + r."tipCents" = ${centavos}
+      -- ⚠️ Límite (Codex r1 #1; su arreglo «no posterior a la recepción» se revirtió por la regla de parada, r2 #1): en la hora local
+      -- repetida del cambio de horario (Tijuana) la hora del banco se lee una hora después y puede pasar esta guarda.
       -- Codex r0 #2: ESTRICTAMENTE después del segundo en que se creó (la hora del banco viene truncada al segundo). Un rechazo de la
       -- solicitud anterior del mismo importe que cae en ese mismo segundo no se le cuelga a ésta; el suyo propio tarda segundos
       -- (entrega, tarjeta, autorización: 7 s en el incidente) y la hora del banco nunca va adelantada (medido: 0.6–2.1 s atrás).
       AND (to_timestamp(${hora}, 'DD/MM/YYYY HH24:MI:SS')::timestamp AT TIME ZONE v."timezone") AT TIME ZONE 'UTC'
           > date_trunc('second', r."createdAt")
-      -- Codex r1 #1: y nunca en el futuro. La hora local repetida del cambio de horario (Tijuana) se lee una hora después; medido,
-      -- la hora del banco llega 0.6–2.1 s ANTES que el aviso, así que una hora posterior a la recepción no es de esta venta.
-      AND (to_timestamp(${hora}, 'DD/MM/YYYY HH24:MI:SS')::timestamp AT TIME ZONE v."timezone") AT TIME ZONE 'UTC'
-          <= (NOW() AT TIME ZONE 'UTC') + interval '2 seconds'
     RETURNING r."requestId", r."venueId"`
   return filas[0] ?? null
 }
@@ -179,8 +175,10 @@ export async function cerrarVentaPorRechazoDeBlumon(fila: { requestId: string; v
 
 /**
  * La red durable (vigía, cada 30 s): solicitudes con un rechazo anotado que ya podrían cerrarse y no se cerraron (un candado ocupado,
- * un reinicio entre el disparo y el cierre). Acotada a un día, a 20 filas y a 5 s por pasada.
- * ponytail: sin cursor; si alguna vez hay más de 50 vetadas a la vez (aprobado posterior), poner un cursor como el del techo.
+ * un reinicio entre el disparo y el cierre). Acotada a un día y a 50 filas por pasada.
+ * ponytail: sin cursor ni tope de tiempo. Si hay más de 50 vetadas a la vez (aprobado posterior), poner un cursor como el del techo.
+ * ⚠️ Límite (Codex r1 #4, arreglo revertido por la regla de parada: su tope de 5 s dejaba atrás otras filas, r2 #4): cada fila
+ * puede esperar un candado ocupado, en serie, dentro del vigía de 30 s.
  */
 export async function barrerRechazosDeBlumon(ahora: Date = new Date()): Promise<{ cerradas: number; revisadas: number }> {
   const filas = await prisma.$queryRaw<{ requestId: string; venueId: string }[]>`
@@ -194,13 +192,7 @@ export async function barrerRechazosDeBlumon(ahora: Date = new Date()): Promise<
       AND NOT ${aprobadoTrasElRechazoSql(Prisma.raw('"TerminalPaymentRequest"'))}
     ORDER BY "createdAt" ASC, "id" ASC
     LIMIT ${TOPE_DEL_BARRIDO}`
-  const inicio = Date.now()
   let cerradas = 0
-  let revisadas = 0
-  for (const f of filas) {
-    if (Date.now() - inicio > PRESUPUESTO_DEL_BARRIDO_MS) break // el resto, en la siguiente pasada
-    revisadas += 1
-    if (await cerrarVentaPorRechazoDeBlumon(f)) cerradas += 1
-  }
-  return { cerradas, revisadas }
+  for (const f of filas) if (await cerrarVentaPorRechazoDeBlumon(f)) cerradas += 1
+  return { cerradas, revisadas: filas.length }
 }

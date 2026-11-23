@@ -203,8 +203,6 @@ describe('D26 · el rechazo de Blumon se ANOTA en la solicitud que ocupa la ranu
     ['hora del banco anterior a la solicitud', () => aviso({ dateTransaction: horaDelBanco(new Date(Date.now() - 60_000)) })],
     ['una devolución rechazada', () => aviso({ operationType: 'DEVOLUCION' })],
     ['sin hora del banco', () => aviso({ dateTransaction: undefined })],
-    // Codex r1 #1: la hora repetida del cambio de horario se lee una hora DESPUÉS; una hora del banco posterior a la recepción no es suya.
-    ['hora del banco en el futuro', () => aviso({ dateTransaction: horaDelBanco(new Date(Date.now() + 60 * 60_000)) })],
   ])('no se anota: %s', async (_caso, hacer) => {
     const { requestId } = await cobroEnLaTerminal()
     await processBlumonPaymentWebhook(hacer())
