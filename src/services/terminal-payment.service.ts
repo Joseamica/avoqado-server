@@ -7961,7 +7961,6 @@ class TerminalPaymentService {
         return true
       }
       logger.info('🔎 [TerminalPayment] Probe: terminal still executing the attempt — reservation kept', { requestId })
-      this.activasTrasPregunta.add(requestId)
       // 18-sep: la respuesta ACTIVE deja CONSTANCIA DURABLE. Es lo que consulta la declaración del cajero
       // («revisé la terminal y no se cobró») para no escribir encima de un cobro que sigue corriendo: antes
       // esto sólo iba al log y el veto del diseño no tenía dato que mirar. Contabilidad, no desenlace — por
@@ -8452,14 +8451,15 @@ class TerminalPaymentService {
 
   /** requestId → temporizador en proceso del cierre a los 10 s (la RAPIDEZ; el vigía y el GET son la red tras un reinicio). */
   private cierresSinRespuesta = new Map<string, NodeJS.Timeout>()
-  /** requestId → cuándo el vigía le preguntó a la terminal por esa solicitud SENT sin final (memoria del proceso a propósito). */
-  private preguntasSinFinal = new Map<string, number>()
   /**
-   * Codex S1 r2 (R2-7): las solicitudes cuya terminal contestó ACTIVE a la sonda DESPUÉS de la última pregunta del vigía. En memoria y
-   * sin comparar relojes (el sello `probeActiveAt` es de la base y la pregunta del servidor: un desfase de > 5 s cortaba un cobro vivo).
+   * requestId → cuándo el vigía le preguntó a la terminal por esa solicitud SENT sin final y qué `probeActiveAt` tenía la fila al
+   * preguntar. Codex S1 r3 (R3-9): «contestó ACTIVE» = el sello guardado CAMBIÓ desde entonces (base contra base, sin relojes).
    */
-  private activasTrasPregunta = new Set<string>()
-  /** requestId → la primera pasada del vigía que vio a su terminal SIN conexión (tras un reinicio las terminales tardan en volver). */
+  private preguntasSinFinal = new Map<string, { at: number; probeActiveAt: number | null }>()
+  /**
+   * terminal (llave) → la primera pasada del vigía que la vio SIN conexión (tras un reinicio las terminales tardan en volver). Se
+   * borra cuando la terminal reconecta a este proceso (`alConectarseLaTerminal`, R3-9): una segunda caída empieza de cero.
+   */
   private sinConexionVista = new Map<string, number>()
   /** terminal normalizada → temporizador de «se desconectó con un cobro en vuelo y no volvió en 10 s». */
   private desconexiones = new Map<string, NodeJS.Timeout>()
@@ -8480,6 +8480,7 @@ class TerminalPaymentService {
       ahora?: Date
       respetarActiveHasta?: Date
       soloDesdeSent?: boolean
+      probeActiveAtLeido?: Date | null
     } = {},
   ): Promise<boolean> {
     const entro = await entrarSinRespuesta(prisma, {
@@ -8491,6 +8492,7 @@ class TerminalPaymentService {
       ahora: opciones.ahora,
       respetarActiveHasta: opciones.respetarActiveHasta,
       soloDesdeSent: opciones.soloDesdeSent,
+      probeActiveAtLeido: opciones.probeActiveAtLeido,
     })
     if (!entro) return false
     logger.warn('⏳ [TerminalPayment] Sin respuesta: se espera el aviso del banco a lo más 10 s y luego queda «no cobrado»', {
@@ -8881,46 +8883,52 @@ class TerminalPaymentService {
     )
     let entradas = 0
     let preguntas = 0
-    // R2-7 (b): sólo desde SENT y SIN `ahora` (el reloj de los 10 s empieza al escribir, no al empezar la pasada).
-    const entrar = async (f: (typeof filas)[number], causa: CausaSinRespuesta) => {
-      this.preguntasSinFinal.delete(f.requestId)
-      this.activasTrasPregunta.delete(f.requestId)
-      this.sinConexionVista.delete(f.requestId)
-      if (await this.entrarSinRespuestaYProgramar(f.requestId, f.venueId, causa, { terminalId: f.terminalId, emitirCancel: true, soloDesdeSent: true }))
+    // R2-7 (b): sólo desde SENT y SIN `ahora` (el reloj de los 10 s empieza al escribir, no al empezar la pasada). R3-9: por falta de
+    // ACTIVE, además, sólo si `probeActiveAt` sigue siendo el que esta pasada leyó (un ACTIVE que se selle antes del UPDATE gana).
+    const entrar = async (f: (typeof filas)[number], causa: CausaSinRespuesta, probeActiveAtLeido?: Date | null) => {
+      if (
+        await this.entrarSinRespuestaYProgramar(f.requestId, f.venueId, causa, {
+          terminalId: f.terminalId,
+          emitirCancel: true,
+          soloDesdeSent: true,
+          ...(probeActiveAtLeido !== undefined ? { probeActiveAtLeido } : {}),
+        })
+      ) {
+        this.preguntasSinFinal.delete(f.requestId)
         entradas += 1
+      }
     }
     for (const f of filas) {
       try {
         const entry = terminalRegistry.getTerminal(f.terminalId)
         if (!entry?.socketId || entry.venueId !== f.venueId) {
           // R2-7 (c): la primera pasada que la ve fuera sólo lo anota; entra si ≥ 10 s después sigue fuera.
-          const vista = this.sinConexionVista.get(f.requestId)
-          if (vista === undefined) this.sinConexionVista.set(f.requestId, now.getTime())
+          const vista = this.sinConexionVista.get(f.terminalId)
+          if (vista === undefined) this.sinConexionVista.set(f.terminalId, now.getTime())
           else if (now.getTime() - vista >= sinRespuestaMs()) await entrar(f, 'TERMINAL_GONE')
           continue
         }
-        this.sinConexionVista.delete(f.requestId)
+        this.sinConexionVista.delete(f.terminalId)
         if ((f.acknowledgedAt?.getTime() ?? 0) + TOPE_DE_UNA_LLAMADA_AL_SDK_MS <= now.getTime()) {
           await entrar(f, 'NO_RESPONSE')
           continue
         }
         if (!entry.identityVerified || (entry.terminalPaymentProbeVersion ?? 0) < 1) continue
         const preguntada = this.preguntasSinFinal.get(f.requestId)
-        const contestoActiva = preguntada !== undefined && this.activasTrasPregunta.has(f.requestId)
-        if (preguntada !== undefined && now.getTime() - preguntada >= 20_000 && !contestoActiva) {
-          // R2-7 (b): un ACTIVE que llegó mientras se decidía gana.
-          if (!this.activasTrasPregunta.has(f.requestId)) await entrar(f, 'NO_RESPONSE')
+        const selloLeido = f.probeActiveAt?.getTime() ?? null
+        const contestoActiva = preguntada !== undefined && selloLeido !== preguntada.probeActiveAt
+        if (preguntada !== undefined && now.getTime() - preguntada.at >= 20_000 && !contestoActiva) {
+          await entrar(f, 'NO_RESPONSE', f.probeActiveAt ?? null)
           continue
         }
         if (preguntada === undefined || contestoActiva) {
-          this.activasTrasPregunta.delete(f.requestId)
           const socket = socketManager.getServer()?.sockets.sockets.get(entry.socketId)
           socket?.timeout(PAYMENT_DELIVERY_ACK_TIMEOUT_MS).emit(
             'terminal:payment_probe',
             { requestId: f.requestId, terminalId: f.terminalId, venueId: f.venueId, amountCents: f.amountCents, tipCents: f.tipCents, timestamp: now.toISOString() },
             () => undefined,
           )
-          this.preguntasSinFinal.set(f.requestId, now.getTime())
+          this.preguntasSinFinal.set(f.requestId, { at: now.getTime(), probeActiveAt: selloLeido })
           preguntas += 1
         }
       } catch (err) {
@@ -8930,12 +8938,8 @@ class TerminalPaymentService {
         })
       }
     }
-    for (const [requestId, at] of this.preguntasSinFinal)
-      if (now.getTime() - at > 10 * 60_000) {
-        this.preguntasSinFinal.delete(requestId)
-        this.activasTrasPregunta.delete(requestId)
-      }
-    for (const [requestId, at] of this.sinConexionVista) if (now.getTime() - at > 10 * 60_000) this.sinConexionVista.delete(requestId)
+    for (const [requestId, p] of this.preguntasSinFinal) if (now.getTime() - p.at > 10 * 60_000) this.preguntasSinFinal.delete(requestId)
+    for (const [terminal, at] of this.sinConexionVista) if (now.getTime() - at > 10 * 60_000) this.sinConexionVista.delete(terminal)
     return { entradas, preguntas }
   }
 
@@ -8944,6 +8948,11 @@ class TerminalPaymentService {
    * respuesta» (`TERMINAL_GONE`). Si vuelve, la sonda y la reentrega de la reconexión siguen como siempre y su resultado gana.
    * La red durable (reinicio en medio) es `preguntarPorSolicitudesSinFinal` y el vencimiento de 5 min.
    */
+  /** La terminal (re)conectó a ESTE proceso: su observación de «sin conexión» del vigía se borra (R3-9). */
+  alConectarseLaTerminal(terminalId: string): void {
+    this.sinConexionVista.delete(normalizeTerminalId(terminalId))
+  }
+
   alDesconectarseLaTerminal(terminalId: string, venueId: string): void {
     const llave = normalizeTerminalId(terminalId)
     const previo = this.desconexiones.get(llave)

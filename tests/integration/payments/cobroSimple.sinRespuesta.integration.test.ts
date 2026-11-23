@@ -99,7 +99,6 @@ afterEach(async () => {
     p.resolve({ requestId: id, status: 'timeout' })
   }
   svc.preguntasSinFinal.clear()
-  svc.activasTrasPregunta?.clear()
   svc.sinConexionVista?.clear()
   delete process.env.TERMINAL_PAYMENT_SIN_RESPUESTA_MS
   await prisma.notification.deleteMany({ where: { venueId: f.venueId } })
@@ -582,5 +581,34 @@ describe('Codex S1 r2', () => {
     expect(await fila(s.requestId)).toMatchObject({ status: 'SENT' })
     expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date(ahora.getTime() + 31_000))).toMatchObject({ entradas: 1 })
     expect(await fila(s.requestId)).toMatchObject({ status: 'UNKNOWN', resultJson: expect.objectContaining({ noChargeCause: 'TERMINAL_GONE' }) })
+  })
+
+  it('R3-9 · un ACTIVE que alcanza a sellarse entre la decisión del vigía y su UPDATE gana: el CAS exige el sello que leyó', async () => {
+    const s = await f.solicitud({ acknowledgedAt: hace(61_000) })
+    const ahora = new Date()
+    await terminalPaymentService.preguntarPorSolicitudesSinFinal(ahora)
+    const original = svc.entrarSinRespuestaYProgramar.bind(svc)
+    const espia = jest.spyOn(svc, 'entrarSinRespuestaYProgramar').mockImplementationOnce(async (...args: unknown[]) => {
+      await svc.handleProbeResultFromSocket({ requestId: s.requestId, disposition: 'ACTIVE', executionAlive: true }, tpv())
+      return original(...args)
+    })
+    try {
+      expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date(ahora.getTime() + 30_000))).toMatchObject({ entradas: 0 })
+      expect(await fila(s.requestId)).toMatchObject({ status: 'SENT', noResponseAt: null })
+    } finally {
+      espia.mockRestore()
+    }
+  })
+
+  it('R3-9 · la terminal vuelve entre dos pasadas y cae otra vez: la segunda caída empieza de cero (no hereda el reloj de la primera)', async () => {
+    const s = await f.solicitud({ acknowledgedAt: hace(61_000) })
+    const ahora = new Date()
+    conectada = false
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(ahora)).toMatchObject({ entradas: 0 })
+    terminalPaymentService.alConectarseLaTerminal(f.serial)
+    // …y vuelve a perder el socket un segundo antes de la siguiente pasada.
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date(ahora.getTime() + 11_000))).toMatchObject({ entradas: 0 })
+    expect(await fila(s.requestId)).toMatchObject({ status: 'SENT' })
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date(ahora.getTime() + 22_000))).toMatchObject({ entradas: 1 })
   })
 })

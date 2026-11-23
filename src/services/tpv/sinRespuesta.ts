@@ -8,7 +8,7 @@
  * temporizador, el cierre) vive en `terminal-payment.service.ts`. Diseño: `docs/audit/2026-11-22-cobro-simple/diseno.md` §3.
  */
 import { Prisma } from '@prisma/client'
-import { utcTs } from '../../utils/sqlDates'
+import { utcTs, utcTsOrNull } from '../../utils/sqlDates'
 
 /** Lo que espera el SERVIDOR el aviso del banco tras quedarse sin respuesta. */
 export const SIN_RESPUESTA_MS = 10_000
@@ -64,6 +64,8 @@ export async function entrarSinRespuesta(
     respetarActiveHasta?: Date
     /** Codex S1 r2 (R2-7): sólo desde `SENT` (el barrido de las acusadas sin final: un cancel del POS en medio no entra por ahí). */
     soloDesdeSent?: boolean
+    /** Codex S1 r3 (R3-9): sólo si `probeActiveAt` sigue siendo éste (un ACTIVE sellado después de la lectura gana). */
+    probeActiveAtLeido?: Date | null
   },
 ): Promise<boolean> {
   const sobre = {
@@ -86,6 +88,7 @@ export async function entrarSinRespuesta(
           ? Prisma.sql`"status" = 'SENT'`
           : Prisma.sql`("status" IN ('PENDING', 'SENT', 'CANCEL_REQUESTED') OR ("status" = 'UNKNOWN' AND "noResponseAt" IS NULL))`
       }
+      ${input.probeActiveAtLeido !== undefined ? Prisma.sql`AND "probeActiveAt" IS NOT DISTINCT FROM ${utcTsOrNull(input.probeActiveAtLeido)}` : Prisma.empty}
       ${
         input.respetarActiveHasta
           ? Prisma.sql`AND NOT ("status" = 'CANCEL_REQUESTED' AND "cancelDisposition" IS NOT DISTINCT FROM 'ACTIVE'
