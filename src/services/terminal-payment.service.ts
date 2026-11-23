@@ -1171,7 +1171,9 @@ function liberadaSinCobroReversible(row: { status: TerminalPaymentRequestStatus;
 const LLAVES_DE_LA_AFIRMACION = ['paymentId', 'authorizationCode', 'transactionId', 'reference', 'readMode', 'approved'] as const
 function claimedSuccessDe(result: TerminalPaymentResult): Record<string, unknown> {
   const crudo = result as unknown as Record<string, unknown>
-  const afirmacion: Record<string, unknown> = {}
+  // Codex S1 r2 (R2-1): el `success` mismo ES la afirmación. Una Nexgo que encola su registro lo manda sin ids; sin esta llave la
+  // afirmación quedaba vacía, no se persistía y a los 10 s la venta salía «no cobrada» después de que la terminal dijo que sí.
+  const afirmacion: Record<string, unknown> = { status: 'success' }
   for (const llave of LLAVES_DE_LA_AFIRMACION) if (crudo[llave] !== undefined) afirmacion[llave] = crudo[llave]
   return afirmacion
 }

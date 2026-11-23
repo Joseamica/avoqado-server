@@ -445,3 +445,32 @@ describe('Codex S1 r1 · el cancel sin respuesta y el «sigo cobrando»', () => 
     expect(await terminalPaymentService.getPaymentStatus(s.requestId, f.venueId)).toMatchObject(NO_COBRADO)
   })
 })
+
+describe('Codex S1 r2', () => {
+  /** Otro cobro de la MISMA cuenta (en la misma terminal): si la cuenta está cercada, 409 con `scope: ORDER`. */
+  const otroCobroDeLaCuenta = (orderId: string) =>
+    terminalPaymentService.sendPaymentToTerminal({
+      terminalId: f.serial,
+      venueId: f.venueId,
+      amountCents: 10000,
+      orderId,
+      requestedBy: f.staffId,
+      requestId: randomUUID(),
+    })
+
+  it('R2-1 · la Nexgo manda `success` sin paymentId ni transactionId y su registro todavía no llega: a los 10 s NO queda «no cobrada», la cuenta sigue cercada y el Payment la cierra COMPLETED con UN Payment', async () => {
+    const venta = await f.nuevaVenta(100)
+    const s = await f.solicitud({ orderId: venta.id, acknowledgedAt: new Date() })
+    const attemptId = await intento(s.requestId)
+    await svc.handlePaymentResultFromSocket({ requestId: s.requestId, status: 'success' }, tpv())
+    expect(await fila(s.requestId)).toMatchObject({ status: 'UNKNOWN', paymentId: null })
+    expect(await terminalPaymentService.cerrarSinRespuesta(s.requestId, f.venueId, enDiezS())).toBe('APROBADO_POR_REGISTRAR')
+    await terminalPaymentService.cerrarSinRespuestaVencidas(enDiezS())
+    expect(await fila(s.requestId)).toMatchObject({ status: 'UNKNOWN', paymentId: null })
+    expect(await cercada(venta.id)).toBe(true)
+    await expect(otroCobroDeLaCuenta(venta.id)).rejects.toMatchObject({ details: expect.objectContaining({ scope: 'ORDER' }) })
+    const pago = await recordOrderPayment(f.venueId, venta.id, f.registroDeLaTerminal({ attemptId, requestId: s.requestId }), f.staffId)
+    expect(await fila(s.requestId)).toMatchObject({ status: 'COMPLETED', paymentId: pago.id })
+    expect(await prisma.payment.count({ where: { venueId: f.venueId, orderId: venta.id } })).toBe(1)
+  })
+})
