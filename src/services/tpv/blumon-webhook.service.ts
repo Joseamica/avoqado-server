@@ -21,6 +21,7 @@ import prisma from '../../utils/prismaClient'
 import { Prisma, ProviderType, EventStatus } from '@prisma/client'
 import logger from '../../config/logger'
 import { isVenueOperational } from '@/lib/venueStatus.constants'
+import { anotarRechazoDeBlumon, cerrarVentaPorRechazoDeBlumon } from './rechazoDeBlumon'
 
 /**
  * Helper function for async delay
@@ -490,23 +491,30 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
         select: { id: true },
       })
 
-      // 🔴 Blumon NO libera solo, y es una decisión medida, no prudencia genérica (21-sep-2026).
+      // 🔴 D26 (22-nov-2026) cambia la decisión del 21-sep: el rechazo de Blumon SÍ cierra la venta de la tablet, con una
+      // correlación mucho más estrecha que la que se midió entonces (`./rechazoDeBlumon.ts`).
       //
-      // Blumon no devuelve nuestra llave: manda `reference`, un timestamp de SU terminal. La única correlación
-      // posible sería la ranura + el importe, y eso se midió contra producción: **149 de 1211 transacciones
-      // (12,3 %) tienen otra del MISMO importe en la MISMA terminal dentro de 15 minutos**. Uno de cada ocho.
-      // Atribuir automáticamente con esa tasa es el camino al cobro doble — exactamente lo que la cerca existe
-      // para impedir. (Codex gpt-6-astra lo señaló como P1: «el índice garantiza exclusividad ACTUAL, no
-      // pertenencia histórica del webhook».)
+      // El 21-sep se midió «emparejar por importe en 15 minutos»: 149 de 1211 transacciones (12,3 %) tenían otra del mismo
+      // importe en la misma terminal en esa ventana, y por eso el rechazo sólo quedaba como evidencia para que una persona lo
+      // confirmara. Testarudo (22-nov) mostró el costo: el aviso llegó 1 s después del rechazo, la terminal siguió diciendo «sigo
+      // cobrando» 25 min y la venta esperó a una persona. Ahora se anota SÓLO en la solicitud que en ESTE instante ocupa la ranura
+      // de esta terminal exacta, ya entregada, con el importe exacto y con la hora del banco posterior a su creación (medido, 60 d:
+      // 0 rechazos en la solicitud equivocada). Y la venta se cierra `BANK_DECLINED` sólo cuando la tablet ya soltó ese cobro o la
+      // terminal certificó el cese — nunca aquí, en el instante del aviso: la PAX ofrece «Reintentar».
       //
-      // 🔑 Lo que sí sabe el cajero y el servidor no: CUÁL de esos cobros es el suyo. Por eso aquí el rechazo se
-      // queda como EVIDENCIA consultable (`ProviderEventLog` ya lo guarda con su terminal, importe y hora), y el
-      // POS la ofrece para que una persona confirme con un toque. La evidencia del banco convierte su declaración
-      // de «te creo» en «confirma lo que el banco ya dijo».
-      //
-      // Y de paso desaparecen otros dos P1 que eran de este carril: una DEVOLUCIÓN o CANCELACIÓN rechazada ya no
-      // puede leerse como venta rechazada (que es al revés: el cargo sigue vigente), y un webhook falsificado —
-      // Blumon no firma, sólo lista de IPs — ya no mueve estado financiero por sí solo.
+      // Siguen en pie: una DEVOLUCIÓN o CANCELACIÓN rechazada no se lee como venta rechazada (sólo `VENTA` se anota), y un aviso
+      // falso —Blumon no firma, sólo lista de IP— sólo puede cerrar la venta que ya ocupa esa terminal con ese importe, en el
+      // mismo punto en que hoy podría declararla una persona; un Payment real que llegue después la concilia con 🚨.
+      try {
+        const anotada = await anotarRechazoDeBlumon({ eventLogId: event.id, terminal, payload })
+        if (anotada) await cerrarVentaPorRechazoDeBlumon(anotada)
+      } catch (err) {
+        logger.warn('⚠️ [Blumon webhook] No se pudo anotar el rechazo en el cobro de la tablet — queda guardado como siempre', {
+          correlationId,
+          eventLogId: event.id,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
       return {
         success: true,
         action: 'NOT_APPROVED',

@@ -76,6 +76,16 @@ Invariantes de este lado, ya construidos y con prueba — no los debilites:
     `puertaDelDinero` en el CAS, el vigía suelta la ranura (asiento `TERMINAL_PAYMENT_SLOT_RELEASED_CANCEL_CEILING`). Mismo
     `TIMED_OUT/AUTO_RELEASED` a propósito: las apps publicadas sólo reconocen ese código como «terminal libre». Las soltadas con
     cancel se barren 3 h desde el cancel para conciliar un Payment tardío.
+  - **D26 · el RECHAZO que avisa Blumon cierra la VENTA** (`src/services/tpv/rechazoDeBlumon.ts`, 22-nov, Testarudo; cambia la
+    decisión del 21-sep de no usarlo). El receptor ANOTA el aviso `NOT_APPROVED` de una `VENTA` (`bankDeclineEventLogId`) en la
+    solicitud que en ese instante ocupa la ranura de esa terminal exacta, ya entregada, con el importe EXACTO (monto + propina) y la
+    hora del banco estrictamente posterior al segundo de su creación (un UPDATE; medido 60 d: 0 en la solicitud equivocada). La venta
+    se cierra `FAILED/BANK_DECLINED` por `reconcileBankDeclined({origen:'BLUMON'})` —el mismo núcleo, candados y CAS— cuando la tablet
+    ya soltó ese cobro (`cancelRequestedAt`) o la terminal certificó el cese, sin intentos anunciados y sin un aviso APROBADO del mismo
+    importe y terminal posterior al rechazo; desde `CANCEL_REQUESTED` también. Nunca en el instante del aviso (la PAX ofrece
+    «Reintentar»). Lo disparan el aviso, el cancel del POS, el sello del cese y el vigía. Un aprobado que llegue después gana: su
+    Payment concilia a COMPLETED con 🚨 (founder, «A todo automático»: detección y aviso, no vetos de más). No se anota: un aviso con
+    la ranura ya suelta, de serial virtual o sin `dateTransaction`; ahí sigue la regla de antes.
 - **El cierre por REST exige procedencia acreditada.** La selección actual del serial es:
   `Payment.terminal.serialNumber`, después el serial autenticado aportado por el llamador
   (`capturedBySerial`, del JWT) y finalmente `processorData.deviceSerialNumber`. Si falta la identidad

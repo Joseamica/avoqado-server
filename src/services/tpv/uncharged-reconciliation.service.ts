@@ -37,6 +37,7 @@ import { contradiccionDeProcedenciaSql, sinVetoDeDineroSql } from './evidenciaPo
 import { sondaReportoActiva, sondaVetaLaDeclaracion } from './sondaActiva'
 import logger from '../../config/logger'
 import { elTechoLevantaElVeto } from './techoDeEjecucionViva'
+import { aprobadoTrasElRechazoSql, elRechazoDeBlumonCierra } from './rechazoDeBlumon'
 
 export const RECONCILE_UNCHARGED_PERMISSION = 'payments:reconcile-uncharged'
 
@@ -609,7 +610,13 @@ export async function reconcileUncharged(
       (!porElBanco && (await sondaNoLaEncontroTrasEntregarla(tx, row.id, identity.venueId)))
     if (!constaQueSalio) throw new UnchargedReconciliationError('TERMINAL_NEVER_ANSWERED')
 
-    if (sondaVetaLaDeclaracion(row, ranuraYaSuelta(row)) && !techoDeLaVenta)
+    // D26 · Blumon (22-nov): el rechazo que Blumon avisó y el receptor anotó en ESTA fila (`tpv/rechazoDeBlumon.ts`) cierra la venta
+    // cuando la tablet ya soltó ese cobro (cancel del POS) o la terminal certificó el cese, sin intentos anunciados. Es lo único que
+    // cambia para el banco: su «sigo» deja de vetar (el «Reintentar» que llegue a aprobar gana después: su Payment concilia con 🚨).
+    const porBlumon = porElBanco && declaration.bank?.origen === 'BLUMON'
+    const cierraPorBlumon = porBlumon && elRechazoDeBlumonCierra(row, declaration.bank?.eventLogId, attemptIds)
+
+    if (sondaVetaLaDeclaracion(row, ranuraYaSuelta(row)) && !techoDeLaVenta && !cierraPorBlumon)
       throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
 
     const sobre =
@@ -652,7 +659,15 @@ export async function reconcileUncharged(
     // rastro. Cerrarlo de raíz es que la TPV no pueda cobrar sin anunciar — trabajo de terminal, días de
     // viaje. Mientras tanto el riesgo exige las TRES cosas a la vez: reintento, sin anunciar, y justo en la
     // ventana en que llega el rechazo del primero.
-    if (porElBanco) {
+    if (porBlumon) {
+      // Blumon no devuelve nuestra llave de intento: su correlación es la anotación (la ranura), y su regla es `cierraPorBlumon`.
+      if (!cierraPorBlumon) throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
+      // El rechazo ya no es la última palabra del banco: llegó un APROBADO del mismo importe y terminal después (el «Reintentar»).
+      const [aprobado] = await tx.$queryRaw<{ hay: boolean }[]>`
+        SELECT ${aprobadoTrasElRechazoSql(Prisma.raw('"TerminalPaymentRequest"'))} AS "hay"
+        FROM "TerminalPaymentRequest" WHERE "id" = ${row.id}`
+      if (aprobado?.hay) throw new UnchargedReconciliationError('POSITIVE_EVIDENCE_EXISTS')
+    } else if (porElBanco) {
       const elDelRechazo = declaration.bank?.attemptId ? llaveDeIntento(declaration.bank.attemptId) : null
       // 🔴 Sin NINGÚN vínculo tampoco se libera. Codex (5ª pasada): «el array vacío sí pasa `some()`» —
       // llamar directamente sin vínculos liberaba, y la seguridad dependía de que el llamador exigiera uno
@@ -663,7 +678,10 @@ export async function reconcileUncharged(
 
     // 🔴 P1 de Codex: lista EXPLÍCITA de estados. `SENT` y `CANCEL_REQUESTED` también son UNRESOLVED y son
     // cobros que pueden seguir corriendo: declarar sobre ellos es el camino del cobro doble.
-    if (!ESTADOS_DECLARABLES.has(row.status)) throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
+    // D26 · Blumon: también desde `CANCEL_REQUESTED` (el cancel del POS acaba de llegar y la terminal todavía no contesta): el banco
+    // ya contestó y la tablet soltó el cobro; esperar la gracia del cancel sólo deja la cuenta cercada 30 s más.
+    if (!ESTADOS_DECLARABLES.has(row.status) && !(cierraPorBlumon && row.status === 'CANCEL_REQUESTED'))
+      throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
     const { desenlaceCanonico } = await import('../terminal-payment.service')
     if (desenlaceCanonico(row).outcome !== 'UNRESOLVED') throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
 
@@ -720,7 +738,8 @@ export async function reconcileUncharged(
           "operatorReconciliation" = ${JSON.stringify(saved)}::jsonb,
           "updatedAt" = (NOW() AT TIME ZONE 'UTC')
       WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL
-        AND ${sinVetoDeDineroSql({ requestId: declaration.requestId, venueId: identity.venueId, attemptIds, terminalId: row.terminalId })}`
+        AND ${sinVetoDeDineroSql({ requestId: declaration.requestId, venueId: identity.venueId, attemptIds, terminalId: row.terminalId })}
+        AND ${porBlumon ? Prisma.sql`"bankDeclineEventLogId" = ${row.bankDeclineEventLogId} AND NOT ${aprobadoTrasElRechazoSql(Prisma.raw('"TerminalPaymentRequest"'))}` : Prisma.sql`TRUE`}`
     if (cas !== 1) throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
 
     // Asiento DENTRO de la transacción: una declaración = un asiento.
@@ -778,7 +797,7 @@ export async function reconcileUncharged(
  *
  *  | | cajero (`reconcileUncharged`) | banco (esto) |
  *  |---|---|---|
- *  | evidencia | una persona miró la pantalla | el webhook del procesador (AngelPay lo FIRMA; Blumon no, por eso Blumon no libera) |
+ *  | evidencia | una persona miró la pantalla | el webhook del procesador (AngelPay lo FIRMA y trae nuestra llave; Blumon no firma ni la trae: desde D26 se correlaciona por la ranura y cierra sólo cuando la tablet soltó el cobro o la terminal certificó el cese, `rechazoDeBlumon.ts`) |
  *  | permiso | `payments:reconcile-uncharged` | ninguno: no hay actor humano |
  *  | ¿exige que la terminal contestara? | **sí** (`constaQueSalio`) | **también sí**: al entrar por el núcleo se hereda. ⚠️ P2 abierto de Codex — con el ACK perdido un rechazo legítimo queda sin liberar, y **la declaración del cajero TAMPOCO lo salva: comparte la misma guarda**. Se deja a propósito: relajarla toca el camino que ya está en producción |
  *  | lanza | sí (`UnchargedReconciliationError`) | **nunca**: un webhook que lanza provoca reintentos del procesador. Devuelve `{closed:false, reason}` |
@@ -790,9 +809,10 @@ export async function reconcileUncharged(
  * llave) y no basta con el estado: es lo que dejó a Blumon fuera de la liberación automática.
  *
  * @param requestId la solicitud a cerrar. **La correlación la resuelve el llamador**, y no es igual en los dos:
- *   AngelPay devuelve NUESTRA llave (`integratorReference` → `findAttemptLink`). **Blumon NO llega aquí**: no
- *   manda nuestra llave, y su rechazo sólo guarda evidencia para que la confirme el cajero (medido: el 12,3 %
- *   de sus transacciones tienen otra del mismo importe en la misma terminal dentro de 15 min).
+ *   AngelPay devuelve NUESTRA llave (`integratorReference` → `findAttemptLink`). Blumon no la manda: hasta el 22-nov su rechazo
+ *   sólo guardaba evidencia (el 21-sep se midió que «mismo importe en 15 min» falla 1 de cada 8). Desde D26 el receptor lo ANOTA en
+ *   la solicitud que ocupa la ranura de esa terminal con el importe exacto (`anotarRechazoDeBlumon`) y aquí entra con
+ *   `origen: 'BLUMON'`: su regla es `elRechazoDeBlumonCierra` + ningún aviso APROBADO posterior, no la del vínculo de intento.
  */
 
 /**

@@ -63,6 +63,7 @@ import { exigirQueNoRijaSoloSaldoEnTerminal } from './storeCredit/soloSaldoEnTer
 import { marcarDevolucionEnTerminal } from './storeCredit/terminalRefundMarker'
 import { esRappiEnEfectivo, MENSAJE_RAPPI_SOLO_EFECTIVO } from './shared/rappiEfectivoGuard'
 import { TECHO_DE_LA_RANURA_MS, techoCumplidoSql, TOPE_DEL_BARRIDO_DEL_TECHO, VENTANA_DE_EJECUCION_MS } from './tpv/techoDeEjecucionViva'
+import { cerrarVentaPorRechazoDeBlumon } from './tpv/rechazoDeBlumon'
 import { computeOrderBalance } from './shared/orderBalance'
 import { isCardOnlineOrderInTx, MENSAJE_PAGADO_CON_TARJETA, ONLINE_ORDER_PAID_BY_CARD } from './online-ordering/card/guards'
 import { exigirCancelacionParaDevolverEnTerminal } from './giftCards/giftCardCancel.service'
@@ -6953,6 +6954,10 @@ class TerminalPaymentService {
         throw err
       }
 
+      // D26 · Blumon: si el banco ya rechazó este cobro (aviso anotado), la tablet acaba de soltarlo: la venta se cierra
+      // `BANK_DECLINED` ya, y el POS que espera recibe ese desenlace (no el «confirma en la terminal» de abajo). Nunca lanza.
+      await cerrarVentaPorRechazoDeBlumon({ requestId, venueId })
+
       // Resolve the long-poll so the POS UI unblocks (existing behavior).
       const pending = this.pendingPayments.get(requestId)
       if (pending) {
@@ -7907,7 +7912,11 @@ class TerminalPaymentService {
       status: despues,
       primera,
     })
-    if (primera) this.programarLiberacionTrasCierre(row.requestId, terminal.venueId)
+    if (primera) {
+      this.programarLiberacionTrasCierre(row.requestId, terminal.venueId)
+      // D26 · Blumon: con el cese certificado, un rechazo del banco ya anotado cierra la venta ahora (no espera S2 ni al vigía).
+      await cerrarVentaPorRechazoDeBlumon({ requestId: row.requestId, venueId: terminal.venueId })
+    }
     return primera
   }
 
