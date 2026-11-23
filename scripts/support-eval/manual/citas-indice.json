@@ -5367,6 +5367,12 @@
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/BandejaServerRecovery.kt": [
+      {
+        "pagina": "tpv/cobro/terminal-ocupada",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      }
+    ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/activation/presentation/ActivationScreen.kt": [
       {
         "pagina": "tpv/configuracion/activar-la-terminal",
