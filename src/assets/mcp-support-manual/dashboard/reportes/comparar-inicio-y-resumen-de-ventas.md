@@ -28,7 +28,7 @@ Para *Inicio* necesitas permiso para ver el inicio y las analíticas; para *Repo
 
 1. En *Inicio*, *Ventas netas* suma lo que se cobró en el periodo, sin propinas, en el día del cobro. Los reembolsos no se restan ahí.
 2. En *Reportes* › *Resumen de Ventas*, *Ventas brutas* suma las cuentas ya cobradas (artículos y *Cargos por servicio*) el día en que se abrieron. *Ventas netas* les resta *Descuentos* y *Devoluciones*.
-3. Las cuentas abiertas o pagadas a medias no son venta: salen abajo, en *Aparte: no entra en «Neto cobrado»*, en el renglón *Sin cobrar*, con cuántas son y lo que todavía deben sin propina. Si no ves el renglón, toca *Métricas*, marca *Sin cobrar* y toca *Aplicar*.
+3. Las cuentas abiertas o pagadas a medias no son venta: van abajo, en *Aparte*, como *Sin cobrar*, con cuántas son y lo que deben sin propina. Si no sale, toca *Métricas*, marca *Sin cobrar* y *Aplicar*.
 4. El número grande, *Neto cobrado*, es *Ventas netas* más propinas, menos *Comisiones de plataforma* y *Comisiones de terceros* (Rappi, Uber Eats, DiDi o un tipo de pago con comisión).
 
 ## Problemas frecuentes
