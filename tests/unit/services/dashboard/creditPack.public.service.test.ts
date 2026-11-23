@@ -655,6 +655,36 @@ describe('CreditPack Public Service', () => {
       ...overrides,
     })
 
+    it('si el panel quitó un producto mientras se pagaba, ese saldo se entrega SIN enlace al renglón (no truena con P2003)', async () => {
+      mockStripeCheckoutRetrieve.mockResolvedValue(createMockStripeSession())
+      prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack())
+      prismaMock.customer.findUnique.mockResolvedValue(createMockCustomer())
+      prismaMock.creditPackPurchase.create.mockResolvedValue(createMockPurchase({ stripeCheckoutSessionId: checkoutSessionId }))
+      prismaMock.creditItemBalance.create.mockResolvedValue(createMockBalance({ id: 'bal' }))
+      prismaMock.creditTransaction.create.mockResolvedValue({})
+      prismaMock.customer.update.mockResolvedValue(createMockCustomer())
+      // Dentro de la transacción de la entrega ya sólo existe el renglón de Yoga.
+      prismaMock.creditPackItem.findMany.mockResolvedValueOnce([{ id: 'item-1' }])
+
+      await fulfillPurchase(checkoutSessionId)
+
+      expect(prismaMock.creditPackItem.findMany).toHaveBeenCalledWith({
+        where: { id: { in: ['item-1', 'item-2'] } },
+        select: { id: true },
+        take: 2,
+      })
+      const enlaces = prismaMock.creditItemBalance.create.mock.calls.map((c: any) => [
+        c[0].data.productId,
+        c[0].data.creditPackItemId,
+        c[0].data.originalQuantity,
+      ])
+      expect(enlaces).toEqual([
+        ['prod-yoga', 'item-1', 10],
+        ['prod-shake', null, 2],
+      ])
+    })
+
     it('should create purchase, item balances, and PURCHASE transactions', async () => {
       const session = createMockStripeSession()
       const pack = createMockPack()
@@ -664,6 +694,7 @@ describe('CreditPack Public Service', () => {
       mockStripeCheckoutRetrieve.mockResolvedValue(session)
       prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null) // Not yet processed
       prismaMock.creditPack.findFirst.mockResolvedValue(pack)
+      prismaMock.creditPackItem.findMany.mockResolvedValueOnce([{ id: 'item-1' }, { id: 'item-2' }])
       prismaMock.customer.findUnique.mockResolvedValue(customer) // findOrCreateCustomer uses findUnique
       prismaMock.creditPackPurchase.create.mockResolvedValue(newPurchase)
       prismaMock.creditItemBalance.create.mockResolvedValueOnce(createMockBalance({ id: 'bal-1', productId: 'prod-yoga' }))

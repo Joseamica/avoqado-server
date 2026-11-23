@@ -80,3 +80,19 @@ export async function vigenciaAlEntregar(
   if (!vigente) throw errorIlimitado('CREDIT_UNLIMITED_NEEDS_VALIDITY')
   return vigente
 }
+
+/**
+ * Los renglones del paquete que siguen existiendo AHORA, dentro de la transacción de la entrega. La venta lee el paquete antes de
+ * abrirla: si en ese instante el panel le quitó un producto, su renglón ya no está y ligar el saldo a él tronaba con `P2003`
+ * (cobrado y sin créditos). Lo vendido se entrega igual, sin ese enlace, como la entrega desde la copia firmada.
+ */
+export async function renglonesVivos(
+  tx: {
+    creditPackItem: { findMany: (a: { where: { id: { in: string[] } }; select: { id: true }; take: number }) => Promise<{ id: string }[]> }
+  },
+  items: { id: string | null }[],
+): Promise<Set<string>> {
+  const ids = items.flatMap(item => (item.id ? [item.id] : []))
+  if (ids.length === 0) return new Set()
+  return new Set((await tx.creditPackItem.findMany({ where: { id: { in: ids } }, select: { id: true }, take: ids.length })).map(i => i.id))
+}

@@ -20,6 +20,8 @@ function makeTx(vigenciaVigente: number | null) {
     creditPack: { findUnique: jest.fn().mockResolvedValue({ validityDays: vigenciaVigente }) },
     creditPackPurchase: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'purchase-1' }) },
     creditItemBalance: { create: jest.fn().mockResolvedValue({ id: 'bal-1' }) },
+    // `renglonesVivos`: qué renglones del paquete siguen existiendo al entregar (aquí no importa el enlace).
+    creditPackItem: { findMany: jest.fn().mockResolvedValue([]) },
     creditTransaction: { create: jest.fn().mockResolvedValue({}) },
     customer: { update: jest.fn().mockResolvedValue({}) },
   }

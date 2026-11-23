@@ -23,7 +23,7 @@ import emailService from '@/services/email.service'
 import { resolveChargeableStripeMerchant } from '@/services/payments/ecommerceCapability'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
 import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
-import { UNLIMITED_LATE_CANCEL_MARK, vigenciaAlEntregar } from '@/services/credits/ilimitado'
+import { UNLIMITED_LATE_CANCEL_MARK, renglonesVivos, vigenciaAlEntregar } from '@/services/credits/ilimitado'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -548,11 +548,12 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
       })
 
       // Create item balances and transactions
+      const vivos = await renglonesVivos(tx, pack.items)
       for (const item of pack.items) {
         const balance = await tx.creditItemBalance.create({
           data: {
             creditPackPurchaseId: newPurchase.id,
-            creditPackItemId: item.id,
+            creditPackItemId: vivos.has(item.id) ? item.id : null,
             productId: item.productId,
             originalQuantity: item.quantity,
             remainingQuantity: item.quantity,
