@@ -21,7 +21,7 @@ import {
   TransactionStatus,
 } from '@prisma/client'
 import logger from '../../config/logger'
-import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
 import { restockOrderItems } from './inventoryRestock.service'
@@ -32,6 +32,7 @@ import { logAction } from './activity-log.service'
 import { fijarSaldoReabiertoEnTx, subirVersionDeValesTrasCommit, type SaldoReabierto } from '@/services/shared/saldoReabiertoAlReembolsar'
 import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, type DevolverEnDinero } from '../tpv/terminalRefundTarget'
+import { decidirDestinoDelReembolso, errorDeNoAdmitido, type PermisoDeReembolso } from '../shared/destinoDelReembolso'
 import { assertCardRefundGoesThroughOnlineOrders } from '../online-ordering/card/guards'
 import { GiftCardError } from '../giftCards/giftCardErrors'
 import {
@@ -41,7 +42,7 @@ import {
   bloquearSobresDelReembolsoEnTx,
 } from '../giftCards/giftCardCancel.service'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
-import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
+import { cajaParaDevolverEnTx, postCashRefundToDrawer, salidaDelReembolsoEnTx } from '../shared/cashDrawerPosting'
 import { reverseStampForOrder } from '../wallet/stampLedger.service'
 import { parteDeUnidades as getUnitRefundCents } from '../shared/parteDeUnidades'
 import { NO_SE_PUEDE_POR_ARTICULOS, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
@@ -97,12 +98,25 @@ const REFUND_REASON_LABEL_ES: Record<RefundReason, string> = {
   DELIVERY_ITEM_REMOVED: 'Artículo retirado por la app de reparto',
 }
 
+/**
+ * D5 (Codex servidor r3 #12): la entrada con que decide este núcleo. Lo llaman el POS, el panel, el MCP y el Cambio, nunca la TPV (que
+ * tiene su escritor, `refund.tpv.service.ts`); fuera de la TPV la entrada no cambia la decisión, porque `medio` ya es lo que de verdad
+ * llega aquí.
+ */
+const ENTRADA_DEL_NUCLEO = 'PANEL' as const
+
 export interface RefundItemInput {
   orderItemId: string
   quantity?: number // defaults to full original quantity
 }
 
 export interface IssueRefundInput {
+  /**
+   * Máquina de efectivo (Codex r2, familia B): el permiso que concedió la autorización de ESTA entrada (`permisoDeReembolsoSegunElCobro`
+   * o el MCP). Si el escritor va a sacar billetes de la gaveta y el concedido no es `payments:refund-to-cash`, 403 y no se escribe nada.
+   * Ausente (las llamadas internas): sin esa comprobación.
+   */
+  permisoConcedido?: PermisoDeReembolso
   idempotencyKey?: string
   venueId: string
   paymentId: string
@@ -239,6 +253,8 @@ interface LockedPaymentRow {
   tenderSatFormaPago: string | null
   /** % de comisión CONGELADO en el cobro: el núcleo lo usa para revertirla en proporción. */
   tenderCommissionPercent: Prisma.Decimal | null
+  /** Máquina de efectivo (A6): el folio de la QuickPay. Con él, devolver en efectivo sale del cajón (`devuelveEfectivoDeLaMaquina`). */
+  cashMachineRef?: string | null
 }
 
 interface RefundPaymentRow {
@@ -296,6 +312,8 @@ interface RefundTransactionResult {
   /** Tarjetas de regalo (B1 r1): este reembolso dejó en $0 una venta de tarjetas sin pagar y la canceló en la misma tx. */
   cuentaDeTarjetasCancelada: boolean
   abono?: AbonoDeSaldoAFavor
+  /** Máquina de efectivo (A6): el `PAY_OUT` ya se escribió en la transacción, en la caja que autorizó la devolución. */
+  salidaDeCajaEnTx?: true
 }
 
 function toCents(value: unknown): number {
@@ -479,7 +497,8 @@ export async function bloquearCobroParaReembolso(
       "tenderLabel",
       "tenderCaptureTip",
       "tenderSatFormaPago",
-      "tenderCommissionPercent"
+      "tenderCommissionPercent",
+      "cashMachineRef"
     FROM "Payment"
     WHERE id = ${input.paymentId}
       AND "venueId" = ${input.venueId}
@@ -622,6 +641,11 @@ export interface RefundMoneySemantics {
   tenderCountsAsCash: boolean | null
   tenderCaptureTip: boolean | null
   tenderSatFormaPago: string | null
+  /**
+   * Máquina de efectivo (Codex r1 #2): lo que sale del dinero de una raíz cobrada en la QuickPay se entrega en billetes de la GAVETA.
+   * Con esta marca el núcleo pide la caja abierta y escribe su `PAY_OUT` en la misma transacción, como la devolución directa.
+   */
+  salidaDeGaveta?: true
 }
 
 /**
@@ -650,6 +674,8 @@ function camposDeSemanticaDada(m: RefundMoneySemantics) {
  * `issueRefund` lo llama con los defaults de siempre (`NONE` · `CLAIM_LIVE` · `MANUAL`).
  */
 interface WriteRefundBase {
+  /** Lo que concedió la autorización de la entrada (`IssueRefundInput.permisoConcedido`). */
+  permisoConcedido?: PermisoDeReembolso
   /** Fecha contable de una operación compuesta; ausente conserva el reloj del reembolso ordinario. */
   createdAt?: Date
   originalPaymentId: string
@@ -733,7 +759,14 @@ export type WriteRefundInput = WriteRefundBase &
 export async function writeRefundInTx(
   tx: TxConReintento,
   input: WriteRefundInput,
-): Promise<{ refundPaymentId: string; replay: boolean; abono?: AbonoDeSaldoAFavor; saldoReabierto?: SaldoReabierto }> {
+): Promise<{
+  refundPaymentId: string
+  replay: boolean
+  abono?: AbonoDeSaldoAFavor
+  saldoReabierto?: SaldoReabierto
+  /** Máquina de efectivo (A6): el `PAY_OUT` ya quedó en esta transacción; el enganche post-commit no lo repite. */
+  salidaDeCajaEnTx?: true
+}> {
   // El replay va PRIMERO, antes de validar saldo o cantidades: un reintento de algo que ya se
   // devolvió no puede morir en la validación (spec [N-11]).
   if (input.idempotencyKey) {
@@ -799,6 +832,25 @@ export async function writeRefundInTx(
   if ((devolverCon || input.aSaldoAFavor) && isGiftCardTenderKind(original.tenderSystemKind)) {
     throw new GiftCardError('GIFT_CARD_REFUND_TO_BALANCE_ONLY', MENSAJE_SALDO_SOLO_A_SALDO, 400)
   }
+  // 🔴 Máquina de efectivo (A6, R4-7 #4): devolver en efectivo una venta de la máquina saca billetes de la GAVETA, aunque la venta nunca
+  // entró ahí. Con una semántica dada (el crédito de un cambio, la cadena, el saldo a favor) el dinero no sale de la caja; Codex r1 #2:
+  // también lo que sale del dinero de una raíz de la máquina (`moneyAs.salidaDeGaveta`, la cadena de un cambio).
+  // Codex r2 (familia B) y D5 (r3 #12): el destino, y si este escritor lo admite, lo decide `decidirDestinoDelReembolso`, la MISMA
+  // función que autorizó la entrada: lo pagado con crédito de un Cambio con «Efectivo» o transferencia escogidos se rechaza con el
+  // mismo 400 y a dónde ir que contestó la autorización.
+  const destino = decidirDestinoDelReembolso({
+    entrada: ENTRADA_DEL_NUCLEO,
+    origen: input.moneyAs
+      ? input.moneyAs.salidaDeGaveta === true
+        ? 'CADENA_DE_MAQUINA'
+        : 'ORDINARIO'
+      : original.cashMachineRef
+        ? 'MAQUINA'
+        : 'ORDINARIO',
+    medio: input.aSaldoAFavor ? 'STORE_CREDIT' : input.devolverCon,
+    esCreditoDeCambio: isExchangeCreditTenderKind(original.tenderSystemKind),
+  })
+  if (!destino.admitido) throw errorDeNoAdmitido(destino)
   if (devolverCon && !sePuedeEscogerComoDevolver(original)) {
     throw new BadRequestError('Este cobro sólo se devuelve por el mismo medio con que se pagó.')
   }
@@ -848,6 +900,17 @@ export async function writeRefundInTx(
   // contra la `CashDrawerSession` abierta del venue, que no depende del `Shift`.
   const salesRefundPesos = centsToDecimal(input.salesRefundCents)
   const tipRefundPesos = centsToDecimal(input.tipRefundCents)
+  // La caja abierta de la GAVETA (`destino`, decidido arriba) se bloquea AQUÍ, antes del turno (el mismo orden que el cierre de caja:
+  // caja → turno); sin ella, 409 y no se confirma nada. Con el permiso que concedió la entrada, el escritor nunca saca de la gaveta lo que
+  // se autorizó como otra cosa.
+  const sacaDeLaGaveta = destino.destinoEfectivo === 'GAVETA'
+  if (sacaDeLaGaveta && input.permisoConcedido && input.permisoConcedido !== destino.permisoRequerido) {
+    throw new ForbiddenError(
+      'Devolver en efectivo una venta de la máquina saca billetes de la caja: necesita el permiso de devolver en efectivo.',
+      'REFUND_NEEDS_REFUND_TO_CASH',
+    )
+  }
+  const cajaQueAutoriza = sacaDeLaGaveta ? await cajaParaDevolverEnTx(tx, input.venueId) : null
   const shiftClaim = await claimShiftForRefund(tx, {
     venueId: input.venueId,
     salesRefundPesos,
@@ -1020,6 +1083,19 @@ export async function writeRefundInTx(
     },
   })
 
+  // … y su `PAY_OUT`, en ESA caja y en esta misma transacción: no hay reembolso confirmado sin su salida de caja.
+  if (cajaQueAutoriza) {
+    await salidaDelReembolsoEnTx(tx, {
+      venueId: input.venueId,
+      sessionId: cajaQueAutoriza,
+      refundPaymentId: refundPayment.id,
+      amount: centsToDecimal(refundCents),
+      staffId: input.staffId,
+      orderId: original.orderId,
+      reason: REFUND_REASON_LABEL_ES[input.reason] ?? input.reason,
+    })
+  }
+
   if (shiftClaim.pendingReason) {
     // Se lee aquí, con `tx`, y no se recibe del llamador: el guardia AST de turnos exige que el gate
     // de la conciliación salga de una llamada canónica a `resolvePaymentShiftReconciliationEnabled`.
@@ -1128,6 +1204,7 @@ export async function writeRefundInTx(
     replay: false,
     ...(abono ? { abono } : {}),
     ...(saldoReabierto?.reabre ? { saldoReabierto } : {}),
+    ...(cajaQueAutoriza ? { salidaDeCajaEnTx: true as const } : {}),
   }
 }
 
@@ -1138,8 +1215,15 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   // Saldo a favor (spec §5.5, Codex r2 h1): la huella NO lleva a la cajera. Si la app muere tras el commit y reenvía OTRA cajera con la
   // misma llave, se reconoce el reembolso original (que conserva a quien lo hizo) en vez de responder IDEMPOTENCY_KEY_REUSED. Fuera del
   // saldo a favor sigue como siempre. `abonar` (una función) no entra al JSON; `customerId` sí: otra clienta no es repetición.
+  // 🔴 D5 (Codex servidor r3 #4): tampoco `permisoConcedido`. Lo añade la autorización (no es la operación): con él en la huella, una
+  // devolución guardada antes de que existiera perdía su acuse al reintentarse (409 en vez del reembolso ya hecho).
   const requestHash = input.idempotencyKey
-    ? operationHash({ ...input, idempotencyKey: undefined, ...(input.aSaldoAFavor ? { staffId: undefined } : {}) })
+    ? operationHash({
+        ...input,
+        idempotencyKey: undefined,
+        permisoConcedido: undefined,
+        ...(input.aSaldoAFavor ? { staffId: undefined } : {}),
+      })
     : null
   const existingAttempt = async (db: Pick<Prisma.TransactionClient, 'payment'>): Promise<IssueRefundResult | null> => {
     if (!input.idempotencyKey) return null
@@ -1251,12 +1335,25 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
           payment: { orderId: originalOrder.orderId, processorId: originalOrder.processorId ?? null },
         })
         const esCreditoDeCambio = isExchangeCreditTenderKind(cobro.original.tenderSystemKind)
-        if (esCreditoDeCambio && input.refundMethod)
-          throw new BadRequestError('Este cobro sólo se devuelve por el mismo medio con que se pagó.')
         // Saldo a favor: lo devuelto se abona al sobre, así que una raíz en tarjeta bancaria ya no bloquea (sí la de tarjeta de regalo).
         const chain = esCreditoDeCambio
           ? await chainRefundSemanticsInTx(tx, input.venueId, cobro.original.id, input.aSaldoAFavor ? 'STORE_CREDIT' : undefined)
           : null
+        // D5 (Codex servidor r3 #12): lo que esta entrada no admite se contesta con LA decisión que usó la autorización (mismo 400, mismo
+        // código y a dónde ir), con el medio tal como llegó y antes de cualquier otro rechazo de la cadena. Lo admitido lo decide el
+        // escritor (`writeRefundInTx`) con su propia llamada.
+        const decision = decidirDestinoDelReembolso({
+          entrada: ENTRADA_DEL_NUCLEO,
+          origen:
+            chain?.kind === 'INHERIT' && chain.money.salidaDeGaveta === true
+              ? 'CADENA_DE_MAQUINA'
+              : cobro.original.cashMachineRef
+                ? 'MAQUINA'
+                : 'ORDINARIO',
+          medio: input.aSaldoAFavor ? 'STORE_CREDIT' : input.refundMethod,
+          esCreditoDeCambio,
+        })
+        if (!decision.admitido) throw errorDeNoAdmitido(decision)
         if (chain?.kind === 'BLOCKED') throw chain.error
         // También la raíz va ANTES del turno: el reverso de comisión la vuelve a tomar al congelarse.
         if (chain?.kind === 'INHERIT') {
@@ -1564,7 +1661,8 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         // El tramo que ESCRIBE —turno, fila REFUND, acumulado del original, VenueTransaction y
         // obligación de costo— es el núcleo compartido con el ajuste de reparto. El dashboard lo
         // llama con los defaults de siempre: no revierte la comisión del TIPO DE PAGO, reclama el turno vivo, MANUAL.
-        const { refundPaymentId, replay, abono, saldoReabierto } = await writeRefundInTx(tx, {
+        const { refundPaymentId, replay, abono, saldoReabierto, salidaDeCajaEnTx } = await writeRefundInTx(tx, {
+          ...(input.permisoConcedido ? { permisoConcedido: input.permisoConcedido } : {}),
           originalPaymentId: original.id,
           venueId: input.venueId,
           salesRefundCents,
@@ -1586,7 +1684,8 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
           provenance: 'MANUAL',
           bloqueado: cobro,
           ...(input.platformFeeRefundCents !== undefined ? { platformFeeRefundCents: input.platformFeeRefundCents } : {}),
-          devolverCon: devolverConEfectivo(original, input.refundMethod),
+          // Con saldo a favor el destino ya está dicho: la venta de la máquina «sin escoger» no se vuelve efectivo del cajón.
+          devolverCon: saldo ? undefined : devolverConEfectivo(original, input.refundMethod),
           ...(saldo ? { aSaldoAFavor: saldo } : {}),
           // Con saldo a favor, la cadena sólo da la raíz (el origen fiscal); el dinero no sale con la semántica de la raíz.
           ...(chain
@@ -1662,6 +1761,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
                   },
           cuentaDeTarjetasCancelada: tarjetas.cuentaCancelada,
           ...(abono ? { abono } : {}),
+          ...(salidaDeCajaEnTx ? { salidaDeCajaEnTx } : {}),
         }
       },
       { etiqueta: 'issueRefund', ...ORDER_LOCK_WAIT_BUDGET },
@@ -1722,18 +1822,21 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   // (`IssueRefundSheet.kt`) tras un reembolso, el cajón restaría DOS veces — la llave
   // del cliente es un UUID local y no colisiona con la nuestra. Ese parche se retira
   // en el mismo trabajo; iOS hace lo propio con su escritura local.
+  //
+  // La devolución de una venta de la máquina ya dejó su `PAY_OUT` en la transacción (`salidaDeCajaEnTx`): aquí no se repite.
   try {
-    await postCashRefundToDrawer({
-      venueId: input.venueId,
-      refundPaymentId: result.refundPaymentId,
-      ...result.refundTender,
-      // El efectivo que sale es el TOTAL devuelto (venta + propina): el split
-      // interno es contable, el cajón sólo ve billetes.
-      amount: centsToNumber(result.refundAmountCents),
-      staffId: input.staffId ?? null,
-      orderId: result.originalOrderId,
-      reason: REFUND_REASON_LABEL_ES[input.reason] ?? input.reason,
-    })
+    if (!result.salidaDeCajaEnTx)
+      await postCashRefundToDrawer({
+        venueId: input.venueId,
+        refundPaymentId: result.refundPaymentId,
+        ...result.refundTender,
+        // El efectivo que sale es el TOTAL devuelto (venta + propina): el split
+        // interno es contable, el cajón sólo ve billetes.
+        amount: centsToNumber(result.refundAmountCents),
+        staffId: input.staffId ?? null,
+        orderId: result.originalOrderId,
+        reason: REFUND_REASON_LABEL_ES[input.reason] ?? input.reason,
+      })
   } catch (err) {
     logger.error('[REFUND.DASHBOARD] Cash drawer posting failed (refund unaffected)', {
       refundPaymentId: result.refundPaymentId,

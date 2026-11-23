@@ -156,14 +156,24 @@ describe('toda orden nueva decide explícitamente si cae en el turno de caja', (
     // PROPÓSITO, misma regla: la orden sólo cae en el vivo si es el de la venta.
     'mobile/order.mobile.service.ts':
       /const ventaDeLaCola = await ventaDeLaColaEnTx\(tx, venueId, \{\s*shiftIdDeLaVenta: input\.shiftIdDeLaVenta,[\s\S]*?\}\)\n\s*const turnoDeLaOrden = await turnoDeLaOrdenQueNace\(tx, venueId, ventaDeLaCola, turnoVivo\)\n[\s\S]*?await tx\.order\.create\(\{[\s\S]*?shiftId: turnoDeLaOrden\?\.id \?\? null/,
+    // Máquina de efectivo (R4-7 #8, Codex r1 #11): el turno de la PC sólo pasa si la hora del comprobante cae entre su inicio y su fin; si
+    // no, por conciliar (nunca el vivo). La orden nace con `venderLoQueCobroLaMaquina` → `createOrderWithItems`/`turnoDeLaOrdenQueNace`.
+    'cashMachine/ventaDeLaMaquina.ts': new RegExp(
+      [
+        String.raw`if \(!c\.saleShiftId \|\| !hora \|\| !turnoA \|\| hora < turnoA\.startTime \|\| \(turnoA\.endTime && hora > turnoA\.endTime\)\) \{\s*`,
+        String.raw`return \{ expectedShiftId: null, porConciliar: true, shiftStatus: 'POR_CONCILIAR' \}`,
+        String.raw`[\s\S]*?turno: \{ shiftIdDeLaVenta: turno\.expectedShiftId, porConciliar: turno\.porConciliar \}`,
+      ].join(''),
+    ),
     // `recordFastPayment`: la orden toma el turno que GANÓ el claim, y el claim recibe el de la venta (lo clasifica
     // `paymentShiftClaim.callers.guard.test.ts`). `recordOrderPayment` no crea orden: la suya ya existe.
     'tpv/payment.tpv.service.ts': /const order = await tx\.order\.create\(\{[\s\S]*?shiftId: shiftClaim\?\.shiftId \?\? null/,
     // El claim compara y sólo QUITA: si el de la venta (validado) no es el vivo OPEN, devuelve `shiftId: null` antes de tocar totales.
     // y la orden que nace en el replay (S3): con el turno de la venta que no es el vivo, sin turno (`turnoDeLaOrdenQueNace`). Codex
     // r7 código #1: el turno de una caja ya validada no se pone en duda (si lo borraron a media subida, la orden nace sin turno).
+    // Máquina de efectivo (Codex r1 #11): el turno que validó el servidor tampoco se pone en duda.
     'shared/paymentShiftClaim.ts':
-      /if \(!pedido \|\| pedido === turnoVivo\?\.id\) return turnoVivo\n(?:\s*\/\/[^\n]*\n)*\s*if \(venta\.cajaCapturada\) return null\n\s*return \(await esTurnoDelNegocio\(tx, venueId, pedido\)\) \? null : turnoVivo[\s\S]*if \(turnoDeLaVenta && turnoDeLaVenta !== vivoOpenId\) \{\s*return \{\s*shiftId: null,[\s\S]*?pendingReason: 'SALE_SHIFT_CLOSED'[\s\S]*?\n\s*\}\n\n\s*if \(!candidate\)/,
+      /if \(!pedido \|\| pedido === turnoVivo\?\.id\) return turnoVivo\n(?:\s*\/\/[^\n]*\n)*\s*if \(venta\.cajaCapturada \|\| venta\.turnoDelServidor\) return null\n\s*return \(await esTurnoDelNegocio\(tx, venueId, pedido\)\) \? null : turnoVivo[\s\S]*if \(turnoDeLaVenta && turnoDeLaVenta !== vivoOpenId\) \{\s*return \{\s*shiftId: null,[\s\S]*?pendingReason: 'SALE_SHIFT_CLOSED'[\s\S]*?\n\s*\}\n\n\s*if \(!candidate\)/,
   }
 
   it('cada servicio que lee shiftIdDeLaVenta está clasificado, y su orden lo respeta', () => {

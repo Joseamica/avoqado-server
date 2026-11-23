@@ -1,4 +1,4 @@
-import { PaymentFundsFlow, type Prisma, type ExchangeCreditLink } from '@prisma/client'
+import { PaymentFundsFlow, PaymentMethod, type Prisma, type ExchangeCreditLink } from '@prisma/client'
 import type { RefundMoneySemantics } from '../dashboard/refund.dashboard.service'
 import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
 import { seDevuelveEnTerminal } from '../tpv/terminalRefundTarget'
@@ -44,6 +44,27 @@ export function resolveChainRefund(
         422,
         processorRoot ? { reason: 'PROCESSOR_ROOT' } : undefined,
       ),
+    }
+  // 🔴 Máquina de efectivo (Codex r1 #2): la raíz cobrada en la QuickPay nunca dejó billetes en la gaveta, pero lo que se le devuelve al
+  // cliente sí sale de ahí. La cadena no hereda «efectivo fuera del cajón»: es efectivo DE LA GAVETA, con su caja y su `PAY_OUT`.
+  if (root.cashMachineRef)
+    return {
+      kind: 'INHERIT',
+      rootPaymentId: root.id,
+      exchangeId: link.exchangeId,
+      money: {
+        method: PaymentMethod.CASH,
+        fundsFlow: PaymentFundsFlow.CASH_DRAWER,
+        merchantAccountId: null,
+        source: root.source,
+        tenderTypeId: null,
+        tenderRevision: null,
+        tenderLabel: null,
+        tenderCountsAsCash: null,
+        tenderCaptureTip: null,
+        tenderSatFormaPago: null,
+        salidaDeGaveta: true,
+      },
     }
   return {
     kind: 'INHERIT',

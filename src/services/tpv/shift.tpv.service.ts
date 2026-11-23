@@ -9,6 +9,7 @@ import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import socketManager from '../../communication/sockets'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
+import { efectivoFisicoDeCobros } from '../shared/efectivoFisico'
 import { isCashReconciliationEnabled } from '../access/cashReconciliationAccess.service'
 import { getUserAccess, hasPermission as hasEffectivePermission } from '../access/access.service'
 import {
@@ -204,6 +205,35 @@ export async function getCurrentShift(venueId: string, _orgId?: string, _posName
     totalOtherPayments: totalOtherPayments,
     totalProductsSold: totalProductsSold,
   }
+}
+
+/**
+ * D24 (Testarudo, 22-nov-2026): CUÁL caja del negocio está abierta, sin cifras. La terminal la necesita para pasarse sola a la
+ * caja de hoy cuando la suya se cerró en otro aparato, aunque quien esté dentro sea de Cocina (sin `shifts:read`): la ruta pide
+ * el permiso de cobrar. Por eso aquí no hay ventas, propinas, órdenes ni efectivo esperado; el fondo sí, porque es lo que la
+ * terminal guarda de su caja y ya lo ve quien la abre. Elige la abierta igual que [getCurrentShift].
+ * `knownShiftId` dice cómo está una caja que la terminal ya conoce (como el `view=state` del panel), sólo de ESTA sucursal.
+ */
+export async function getShiftIdentity(venueId: string, knownShiftId?: string) {
+  const abierta = await prisma.shift.findFirst({
+    where: { venueId, endTime: null },
+    orderBy: { startTime: 'desc' },
+    select: {
+      id: true,
+      venueId: true,
+      status: true,
+      startTime: true,
+      staffId: true,
+      startingCash: true,
+      cashDrawerSession: { select: { id: true } },
+    },
+  })
+  const known = knownShiftId
+    ? await prisma.shift.findFirst({ where: { id: knownShiftId, venueId }, select: { id: true, venueId: true, status: true } })
+    : null
+  if (!abierta) return { shift: null, known }
+  const { cashDrawerSession, ...identidad } = abierta
+  return { shift: { ...identidad, cashDrawerSessionId: cashDrawerSession?.id ?? null }, known }
 }
 
 /** Un instante legible, o `null` si el dato falta o no se puede leer. Nunca lanza. */
@@ -1971,7 +2001,10 @@ export interface ShiftPaymentTotals {
  * `method === 'CASH'` sino `paymentCountsAsDrawerCash` (la autoridad de `tenderSemantics`).
  */
 export function aggregateShiftPayments(payments: ShiftPaymentForTotals[]): ShiftPaymentTotals {
-  let totalCashPayments = new Decimal(0)
+  // Las VENTAS en efectivo (`totalCashPayments`) y la propina en efectivo (`totalCashTips`, ver abajo) salen del mismo ayudante con
+  // el que el cierre, el cierre viejo y la edición del corte calculan lo que hay en el cajón: una sola definición (máquina de
+  // efectivo A5). La venta de la máquina SÍ es venta en efectivo; lo que no está en el cajón lo decide `efectivoFisicoDeCobros`.
+  const { ventasEnEfectivo: totalCashPayments, propinasEnEfectivo: totalCashTips } = efectivoFisicoDeCobros(payments)
   let totalCardPayments = new Decimal(0)
   let totalVoucherPayments = new Decimal(0)
   let totalOtherPayments = new Decimal(0)
@@ -1990,8 +2023,8 @@ export function aggregateShiftPayments(payments: ShiftPaymentForTotals[]): Shift
   // `cashCloseout.dashboard.service.ts`, que sí las sumaba). El dueño cuenta, ve el
   // desglose en el ticket y reparte DESPUÉS: por eso no hace falta registrar un egreso.
   //
-  // La propina de TARJETA no entra aquí: ese dinero llega por el depósito del banco.
-  let totalCashTips = new Decimal(0)
+  // La propina de TARJETA no entra a `totalCashTips`: ese dinero llega por el depósito del banco.
+
   // Dinero que SÍ está en el cajón sin ser venta en efectivo: tender personalizado con
   // countsAsPhysicalCash (vale de despensa, method=OTHER). Entra al efectivo esperado
   // pero NUNCA a `totalCashPayments` (que es la cifra de VENTAS en efectivo — ver arriba).
@@ -2016,8 +2049,7 @@ export function aggregateShiftPayments(payments: ShiftPaymentForTotals[]): Shift
 
     switch (payment.method) {
       case 'CASH':
-        totalCashPayments = totalCashPayments.add(amount)
-        totalCashTips = totalCashTips.add(tipAmount)
+        // `totalCashPayments` y `totalCashTips` ya los sumó `efectivoFisicoDeCobros` (arriba).
         break
       case 'CREDIT_CARD':
       case 'DEBIT_CARD':
@@ -2289,7 +2321,11 @@ async function closeShiftUsingRequest(
     // efectivo + tenders que cuentan como efectivo físico (vales). Es la cifra del
     // arqueo, distinta de `totalCashPayments` (ventas) que alimenta los reportes.
     // Ver los comentarios donde se acumulan `totalCashTips` y `totalDrawerExtra`.
-    const cashInDrawer = totalCashPayments.add(totalCashTips).add(totalDrawerExtra)
+    // 🔴 Máquina de efectivo (A5): de lo cobrado en efectivo sólo cuenta lo que está EN EL CAJÓN (`alCajon`); lo que cobró la
+    // máquina es venta en efectivo pero el billete se quedó allá. Sin cobros de la máquina, `alCajon` = ventas + propinas en
+    // efectivo, como siempre. `ventasAlCajon` es lo mismo sin propina, para el respaldo del cierre viejo.
+    const { alCajon, ventasAlCajon } = efectivoFisicoDeCobros(shiftPayments)
+    const cashInDrawer = alCajon.add(totalDrawerExtra)
 
     // 🔴 EL ESPERADO SALE DE LA GAVETA, no de un fondo congelado en la apertura (Task 5).
     //
@@ -2352,7 +2388,7 @@ async function closeShiftUsingRequest(
       }
     } else if (request.source === 'LEGACY' && request.legacyCloseData) {
       const legacyCash = new Decimal(request.legacyCloseData.cashDeclared ?? 0)
-      endingCash = request.legacyCloseData.cashDeclared ? new Decimal(shift.startingCash || 0).add(legacyCash) : totalCashPayments
+      endingCash = request.legacyCloseData.cashDeclared ? new Decimal(shift.startingCash || 0).add(legacyCash) : ventasAlCajon
       cashDeclared = request.legacyCloseData.cashDeclared ? legacyCash : null
       // Preserve the active Desktop/legacy database contract: declarations remain stored and
       // continue driving endingCash, but H0.6 does not retrofit a reconciliation difference.
@@ -2416,8 +2452,7 @@ async function closeShiftUsingRequest(
     }
     if (legacy) {
       auditData.declaredCash = moneyString(new Decimal(legacy.cashDeclared ?? 0))
-      auditData.cashDiscrepancy =
-        legacy.cashDeclared != null ? new Decimal(legacy.cashDeclared).sub(totalCashPayments).toNumber() : undefined
+      auditData.cashDiscrepancy = legacy.cashDeclared != null ? new Decimal(legacy.cashDeclared).sub(ventasAlCajon).toNumber() : undefined
     }
 
     const reconciliation: CashReconciliationResult = { outcome }

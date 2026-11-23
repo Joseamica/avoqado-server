@@ -89,6 +89,9 @@ export class TerminalPaymentWatchdogJob {
       // long-poll (revisión A4, I-1): recorre hasta 200 filas en serie y no puede retrasar a un POS que ya tiene su respuesta en la
       // base. Corre aunque el rescate truene.
       await paso('execution-closed release sweep', () => terminalPaymentService.liberarTrasCierreDeEjecucion())
+      // D26 (22-nov): el techo a «sigo cobrando» — 5 min después del cancel del POS, con la terminal todavía diciendo que cobra y
+      // sin intento nuevo ni señal de dinero, se suelta la RANURA (nunca la venta). Después de S2: el cese certificado gana.
+      await paso('cancel-ceiling release sweep', () => terminalPaymentService.liberarPorTechoTrasCancelar())
       await paso('approved without references alert recovery', () => recuperarAvisosAprobadosSinReferencias())
     } finally {
       this.isRunning = false

@@ -10,7 +10,7 @@ requiredPermissions:
 money: true
 versionMin: 2.16.0
 sourceRepo: avoqado-tpv
-sourceRef: 031f14db2969606125a4a04c9f8f30bdd402a660
+sourceRef: 18685818f1b0b1059d1f4b34e00710c451db4341
 deviceTested: 2026-11-18
 keywords:
   - abrir caja
@@ -19,11 +19,16 @@ keywords:
   - corte de caja
   - arqueo
   - fondo de caja
+  - no puedo abrir la caja
+  - caja cerrada en otro aparato
+  - pin de gerente para abrir caja
 ---
 
 ## Antes de empezar
 
 El botón *Turnos de caja* sale en el inicio sólo si el negocio usa turnos de caja.
+
+La caja la abren y la cierran los puestos de mesero, cajero, gerente, administrador y dueño (el negocio puede cambiarlo en los permisos de cada puesto). Cocina, hostess y consulta no la abren.
 
 ## Pasos
 
@@ -38,6 +43,10 @@ El botón *Turnos de caja* sale en el inicio sólo si el negocio usa turnos de c
 
 - «Caja pendiente de revisión»: toca *Revisar registros pendientes*.
 - «Cierre guardado en este aparato» con «Pendiente de confirmación. No es un corte definitivo.»: el cierre todavía no se confirma; toca *Listo*.
+- «Tu puesto no puede abrir la caja: un cajero, gerente o el dueño pondrá su PIN» (app 2.22.4 o más nueva): toca *Abrir caja* (o *Abrir nueva caja*), escribe el *Efectivo Inicial* y toca *Abrir caja*; luego alguien que sí pueda abrirla escribe su PIN en «PIN de un gerente» y toca *Autorizar*. El PIN necesita internet.
+- «Tu puesto no puede abrir la caja. Pide a un cajero, gerente o al dueño que entre y la abra»: el negocio tiene apagado el PIN de gerente. Que esa persona entre con su usuario, abra la caja y salga.
+- En versiones anteriores a la 2.22.4, sin permiso el botón sale en gris con «No tienes permiso para abrir la caja»: que entre alguien que sí pueda abrirla.
+- «Caja cerrada o cerrándose en otro aparato»: la caja se cerró en otra terminal, en la tablet o en el panel. Si el negocio ya abrió otra, la terminal la usa sola en cuanto se conecta (desde la 2.22.4, también si quien entró es de Cocina). Si no hay otra abierta, toca *Abrir nueva caja*.
 
 ## Sin internet
 

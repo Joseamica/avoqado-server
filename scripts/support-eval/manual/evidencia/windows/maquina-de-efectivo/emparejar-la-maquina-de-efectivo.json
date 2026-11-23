@@ -1,0 +1,226 @@
+{
+  "pagina": "windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d",
+  "version": "rama feat/maquina-de-efectivo-1a en e7d51ad0 (árbol 2.25.56, sin publicar; sale en 2.25.57 o después)",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 399,
+      "cita": "val canConfigureCashMachine: Boolean"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 787,
+      "cita": "label = \"Ajustes\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 2000,
+      "cita": "title = \"Este aparato\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 2024,
+      "cita": "label = \"Máquina de efectivo\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 125,
+      "cita": "placeholder = \"IP de la máquina, por ejemplo 192.168.1.50\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 137,
+      "cita": ") { Text(\"Probar conexión\") }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 140,
+      "cita": "PruebaDeConexion.CONECTADA -> Nota(\"Conectada\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 146,
+      "cita": "text = \"Emparejar esta PC con la máquina\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoViewModel.kt",
+      "linea": 168,
+      "cita": "refrescar(aviso = aviso ?: reemplazo, listo = \"¡Máquina emparejada!\".takeIf { aviso == null })"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 113,
+      "cita": "estado.emparejada -> \"Emparejada con ${estado.ipGuardada}\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt",
+      "linea": 458,
+      "cita": "fun activa(): Boolean = prefs.activaEn(secureStorage.venueId) && runCatching { boveda.leer() }.getOrNull() != null"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt",
+      "linea": 56,
+      "cita": "\"Efectivo en la máquina\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 154,
+      "cita": "Text(\"Desemparejar\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoViewModel.kt",
+      "linea": 185,
+      "cita": "refrescar(aviso = aviso, listo = \"Máquina desemparejada\".takeIf { aviso == null })"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "cash-machine:configure",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3729
+    },
+    {
+      "permiso": "cash-machine:configure",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3738
+    },
+    {
+      "permiso": "cash-machine:configure",
+      "archivo": "avoqado-server/src/lib/permissions.ts",
+      "linea": 1043
+    },
+    {
+      "permiso": "cash-machine:configure",
+      "archivo": "avoqado-server/src/lib/permissions.ts",
+      "linea": 1233
+    },
+    {
+      "permiso": "cash-machine:configure",
+      "archivo": "avoqado-server/src/lib/permissions.ts",
+      "linea": 1389
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Emparejar sin red: «Se necesita internet para emparejar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/AjustesDeLaMaquina.kt",
+      "linea": 31
+    },
+    {
+      "afirmacion": "Desemparejar sin red: «Se necesita internet para desemparejar»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/AjustesDeLaMaquina.kt",
+      "linea": 32
+    },
+    {
+      "afirmacion": "La hoja lo dice: «Emparejar y desemparejar necesitan internet.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 157
+    },
+    {
+      "afirmacion": "El emparejamiento es ONLINE-ONLY a propósito: nada se encola",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/AjustesDeLaMaquina.kt",
+      "linea": 155
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Sin el permiso la fila sale en gris con TEXTO_SIN_PERMISO",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 2025
+    },
+    {
+      "ruta": "TEXTO_SIN_PERMISO",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/AjustesDeLaMaquina.kt",
+      "linea": 30
+    },
+    {
+      "ruta": "La fila sólo existe en WINDOWS (esEscritorio)",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 2028
+    },
+    {
+      "ruta": "«No responde: revisa que esté prendida y en la misma red que esta PC»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 141
+    },
+    {
+      "ruta": "Recorte R1: 409 con cobros a medias al emparejar otra PC",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/AjustesDeLaMaquina.kt",
+      "linea": 34
+    },
+    {
+      "ruta": "Recorte R1: el SERVIDOR exige terminar los folios a medias",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3722
+    },
+    {
+      "ruta": "Con cobros sin subir o en duda la IP y Desemparejar se bloquean",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoViewModel.kt",
+      "linea": 71
+    },
+    {
+      "ruta": "TEXTO_PENDIENTES_DE_LA_MAQUINA",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/AjustesDeLaMaquina.kt",
+      "linea": 28
+    },
+    {
+      "ruta": "«Se dio de baja la PC anterior (…): desconéctala de la máquina»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/AjustesDeLaMaquina.kt",
+      "linea": 152
+    },
+    {
+      "ruta": "«Esta PC perdió su credencial…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 114
+    },
+    {
+      "ruta": "«Esta PC está emparejada con <sucursal>»",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 112
+    },
+    {
+      "ruta": "Sólo una PC por máquina (texto de la hoja)",
+      "archivo": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt",
+      "linea": 103
+    },
+    {
+      "ruta": "Todos los planes: el plan 1a no pone candado de plan",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3729
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "aparato": "POS de WINDOWS en el Alienware del laboratorio (Windows 11, 1920x1080, mouse y teclado) contra el simulador QuickPay Mini V1.2 en la Mac (Tailscale)",
+    "version": "2.25.54-escritorio (89b76a79) en el recorrido; la página cita e7d51ad0 (árbol 2.25.56, sin publicar)",
+    "fecha": "2026-11-21",
+    "fotos": [
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/p15.jpg",
+      "docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a/fotos/r1a.jpg"
+    ],
+    "filasCreadas": ["CashMachineBinding cmwraqd37000hwa48ocpkbuii (Mindform de la siembra, base av-db-25-maquina, desechable)"],
+    "nota": "Recorrido real del 21-nov-2026 (docs/audit/2026-11-17-maquina-de-efectivo/recorrido-1a.md) en el POS de WINDOWS del Alienware contra el simulador V1.2 de APS: rama feat/maquina-de-efectivo-1a en 89b76a79 («Versión 2.25.54-escritorio»). Caso 0: «Probar conexión» → «Conectada» y «Emparejar esta PC con la máquina» → «Emparejada con 100.70.105.41». Caso R1: en la PC, IP y «Desemparejar» bloqueados con «Hay cobros de la máquina sin subir o en duda: resuélvelos primero»; otra PC por la API: 409 CASH_MACHINE_FOLIOS_PENDING. No se marca PROBADO porque el paquete de ese recorrido se reescribió el 22-nov (~11:00 UTC, ~/maquina1a/salida del Alien) y su huella se perdió; además b34dc2a3 (E1) cambió después del recorrido «Te debemos» en la pantalla de éxito, «Registrando la venta…» y el título «Cobro cancelado». Lo sella el full-testing sobre e7d51ad0 (paquete avoqado-pos-windows-prueba.zip, sha256 27f16df63688e261b0e457e1c0dae8cea38c110ff09acc6d8e27f51a1f1d9246): al pasar, estado PROBADO con esa huella, su fecha y sus fotos, y deviceTested en la página."
+  },
+  "codex": {
+    "lote": 12,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

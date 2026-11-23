@@ -92,6 +92,14 @@ import * as promotionDashboardController from '../controllers/dashboard/promotio
 import * as couponController from '../controllers/dashboard/coupon.dashboard.controller'
 import * as shiftController from '../controllers/dashboard/shift.dashboard.controller'
 import * as cashDrawerController from '../controllers/dashboard/cashDrawer.dashboard.controller'
+// Máquina de efectivo (fase 1a, R4-4): los «Cobros en duda» se listan y resuelven igual en el panel y en el POS del mostrador.
+import * as cashMachineMobileController from '../controllers/mobile/cashMachine.mobile.controller'
+import { permisoDeReembolsoSegunElCobro } from '../middlewares/permisoDeReembolso.middleware'
+import {
+  listarDudasDeLaMaquinaSchema,
+  resolverDudaDeLaMaquinaSchema,
+  revisarIncidenciaDeLaMaquinaSchema,
+} from '../schemas/mobile/cashMachine.schema'
 import * as teamController from '../controllers/dashboard/team.dashboard.controller'
 import * as testingController from '../controllers/dashboard/testing.dashboard.controller'
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
@@ -4079,7 +4087,8 @@ router.post(
 router.post(
   '/venues/:venueId/payments/:paymentId/refund',
   authenticateTokenMiddleware,
-  checkPermission('payments:refund'),
+  // `payments:refund`; devolver en efectivo una venta de la máquina pide `payments:refund-to-cash` (Codex r1 #14, decisión c).
+  permisoDeReembolsoSegunElCobro({ paymentIdDe: req => req.params.paymentId, entrada: 'PANEL' }),
   refundController.issueRefund,
 )
 router.get(
@@ -8991,6 +9000,31 @@ router.get(
   checkPermission('shifts:read'),
   marcarPermiso(PERMISO_VER_ESPERADO, 'puedeVerEsperado'),
   cashDrawerController.getDrawerSessions,
+)
+
+// ── Máquina de efectivo · «Cobros de la máquina en duda» (fase 1a, R4-4) ────────────────────────────────────────────
+// La PC de la máquina perdió el cierre de una operación; un gerente la resuelve aquí con SU sesión (`cash-machine:resolve`).
+// Las mismas rutas que en /mobile (POS del mostrador): mismo controlador, misma lista acotada (≤ 100, total y cursor).
+router.get(
+  '/venues/:venueId/cash-machine/doubts',
+  authenticateTokenMiddleware,
+  validateRequest(listarDudasDeLaMaquinaSchema),
+  checkPermission('cash-machine:resolve'),
+  cashMachineMobileController.listarDudas,
+)
+router.post(
+  '/venues/:venueId/cash-machine/doubts/:referenceCC/resolve',
+  authenticateTokenMiddleware,
+  validateRequest(resolverDudaDeLaMaquinaSchema),
+  checkPermission('cash-machine:resolve'),
+  cashMachineMobileController.resolverDuda,
+)
+router.post(
+  '/venues/:venueId/cash-machine/incidents/:incidentId/review',
+  authenticateTokenMiddleware,
+  validateRequest(revisarIncidenciaDeLaMaquinaSchema),
+  checkPermission('cash-machine:resolve'),
+  cashMachineMobileController.revisarIncidencia,
 )
 
 /**

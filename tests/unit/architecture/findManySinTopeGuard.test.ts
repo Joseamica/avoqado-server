@@ -463,7 +463,9 @@ const INVENTARIO: Record<string, number> = {
   // 2026-10-21 (A6, S6): 4 → 5. Soporte suelta la terminal bajo los MISMOS candados que la ventana (`soltarRanuraPorSoporte`):
   // enumera los VÍNCULOS de UNA solicitud para tomar el candado de cada intento y tiene que verlos TODOS (truncarlos dejaría
   // intentos sin candado). Una solicitud tiene un vínculo por intento de la terminal (unidades), acotado por `requestId`.
-  'src/services/terminal-payment.service.ts': 5,
+  // 2026-11-22 (D26): 5 → 6. El techo a «sigo cobrando» (`soltarRanuraPorTechoTrasCancelar`) suelta la RANURA bajo los MISMOS
+  // candados que la ventana y soporte: enumera TODOS los vínculos de UNA solicitud para tomar el candado de cada intento.
+  'src/services/terminal-payment.service.ts': 6,
   // 2026-09-18: settlementCalendar.superadmin 1 → 0. El calendario de todos los negocios
   // recorre por páginas con cursor; al llegar a cero sale del inventario.
   'src/services/tpv/blumon-webhook.service.ts': 2,

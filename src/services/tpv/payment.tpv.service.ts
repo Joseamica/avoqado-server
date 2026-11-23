@@ -421,6 +421,7 @@ import {
   renovarRecuperacionDeFolioEnTx,
   salirSiLaLlaveYaTienePago,
 } from '../shared/cuentaCancelada'
+import { horaDelIntentoParaGuardar, revisarTarjetaTardia } from '../shared/avisoDeTarjetaTardia'
 // El candado del toque repetido en «Efectivo». La regla vive AHÍ, pura y probada aparte.
 import { aplicaCandadoDeEfectivo, cobroEnEfectivoSobreOrdenSaldada } from '../shared/cobroEnEfectivoDuplicado'
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
@@ -2969,6 +2970,14 @@ function avisoDeVentaApartada(
  * Límite aceptado (Codex r1 #1, controlador 12-nov): una cuenta pagada en dos partes que cruza la medianoche, cuya parte sin red
  * sube DESPUÉS de la parte en línea, queda con la hora local de la parte sin red (el día anterior). Raro y sólo fecha la lealtad.
  */
+/**
+ * D7 (encargo a25cd7): ¿este registro es una tarjeta que el banco YA aprobó? Lo que la terminal registra con tarjeta llega
+ * después del cargo: rechazarlo no devuelve el dinero, sólo lo deja sin Payment. El efectivo y lo no completado no entran.
+ */
+export function tarjetaYaCobradaPorElBanco(paymentData: Pick<PaymentCreationData, 'method' | 'status'>): boolean {
+  return paymentData.status === 'COMPLETED' && (paymentData.method === 'CREDIT_CARD' || paymentData.method === 'DEBIT_CARD')
+}
+
 function horaDeLaVentaDeLaCola(paymentData: PaymentCreationData, llegada: Date): Date | undefined {
   if (paymentData.isOfflineReplay !== true || paymentData.createdAtLocal == null) return undefined
   return horaDeLaVenta(paymentData, llegada)
@@ -3000,6 +3009,12 @@ interface PaymentCreationData {
   cashDrawerSessionId?: string | null
   /** Epoch ms del aparato al cobrar la venta de su cola; sólo cuenta con `isOfflineReplay === true` (`horaDeLaVentaDeLaCola`). */
   createdAtLocal?: number | string | null
+  /**
+   * D7 (encargo a25cd7): cuántos ms pasaron, medidos con el reloj del aparato, desde que se ABRIÓ el intento de tarjeta hasta este
+   * envío. Una DURACIÓN, no una hora: un reloj del aparato adelantado o atrasado no la cambia (Codex r3). Sólo la manda la
+   * recuperación de la libreta de la TPV. No cambia el cobro: sólo decide el aviso `LATE_CARD_RECORDED` de Pago rápido.
+   */
+  edadDelIntentoMs?: number | null
   // Detalle del cobro declarado a mano ("Tarjeta (terminal externa)"). Sólo aplica a
   // métodos que NO pasaron por Avoqado; en efectivo va null. iOS manda null explícito.
   externalSource?: string | null
@@ -3911,6 +3926,11 @@ export async function recordOrderPayment(
     throw new NotFoundError(`Order ${orderId} not found in venue ${venueId}`, 'ORDER_NOT_FOUND')
   }
 
+  // D7: la forma de dividir con la que se GUARDA este cobro. Sólo cambia cuando una tarjeta ya cobrada llega con otra forma que la
+  // cuenta (abajo): entonces queda con la de la cuenta y sin repartir por producto, para no marcar como pagado un producto ni cambiar la
+  // forma que leen la TPV y el POS (`lastSplitType`). La forma que mandó la terminal queda en `posRawData.splitType`.
+  let divisionDelCobro = paymentData.splitType
+  let sinRepartoPorProducto = false
   // Validate splitType business logic
   if (activeOrder.splitType && activeOrder.splitType !== paymentData.splitType) {
     // Define allowed transitions based on business rules
@@ -3923,7 +3943,27 @@ export async function recordOrderPayment(
 
     const allowedMethods = allowedTransitions[activeOrder.splitType] || []
 
-    if (!allowedMethods.includes(paymentData.splitType)) {
+    if (
+      !allowedMethods.includes(paymentData.splitType) &&
+      activeOrder.splitType === 'FULLPAYMENT' &&
+      activeOrder.paymentStatus === 'PAID' &&
+      tarjetaYaCobradaPorElBanco(paymentData)
+    ) {
+      // 🔴 D7 (encargo a25cd7): la tarjeta ya la aprobó el banco. Si la cuenta se CERRÓ como «pago completo» mientras el registro
+      // llegaba (la cajera la cobró en efectivo y después llega el «Aprobado» de «partes iguales» o «por producto»), un 400 aquí deja
+      // dinero cobrado SIN Payment y la terminal reintenta para siempre. Se registra igual, como la tarjeta sobre una cuenta pagada
+      // o cancelada (`dineroCapturado`), y si pasa de la cuenta salta el aviso de sobrepago de siempre. Sólo «pago completo» YA PAGADA:
+      // una cuenta abierta (también una `FULLPAYMENT` con un abono parcial, que el POS deja así; Codex r4 #1) sigue como hoy.
+      logger.warn('⚠️ [recordOrderPayment] Tarjeta ya cobrada con otra forma de dividir: se registra igual', {
+        venueId,
+        orderId,
+        orderSplitType: activeOrder.splitType,
+        paymentSplitType: paymentData.splitType,
+        idempotencyKey: paymentData.idempotencyKey ?? null,
+      })
+      divisionDelCobro = activeOrder.splitType
+      sinRepartoPorProducto = true
+    } else if (!allowedMethods.includes(paymentData.splitType)) {
       throw new BadRequestError(
         `Order has splitType ${activeOrder.splitType}. Cannot use ${paymentData.splitType}. Allowed methods: ${allowedMethods.join(', ')}`,
       )
@@ -4274,7 +4314,7 @@ export async function recordOrderPayment(
             // guarda cuando el dinero NO pasó por Avoqado.
             externalSource: classicMethod === 'CASH' ? null : paymentData.externalSource?.trim()?.slice(0, 50) || null,
             status: paymentStatusSnapshot as any, // Direct enum mapping since frontend sends correct values
-            splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
+            splitType: divisionDelCobro as SplitType, // D7: la de la cuenta si una tarjeta ya cobrada llegó con otra
             source: fuenteDelPago(paymentData.source, { registroExterno: classicMethod !== 'CASH' }),
             processor: 'TBD',
             // Snapshot de MERCHANT_ROUTING_RULES (por qué la TPV mostró/eligió este merchant)
@@ -4343,7 +4383,9 @@ export async function recordOrderPayment(
             feeAmount: 0, // TODO: Calculate based on amount and percentage
             netAmount: totalAmount + tipAmount, // For now, net amount = total
             posRawData: {
-              splitType: paymentData.splitType,
+              // D7: la forma con la que se guardó; si la terminal mandó otra (tarjeta ya cobrada sobre «pago completo»), va aparte.
+              splitType: divisionDelCobro,
+              ...(sinRepartoPorProducto && { splitTypeDeLaTerminal: paymentData.splitType }),
               staffId: validatedStaffId, // identidad efectiva validada (POS en relay; TPV en cobro directo)
               source: fuenteDelPago(paymentData.source, { registroExterno: classicMethod !== 'CASH' }),
               paidProductsId: paymentData.paidProductsId || [],
@@ -4448,7 +4490,7 @@ export async function recordOrderPayment(
         }
 
         // Handle split payment allocations based on splitType
-        if (paymentData.splitType === 'PERPRODUCT' && paymentData.paidProductsId.length > 0) {
+        if (!sinRepartoPorProducto && divisionDelCobro === 'PERPRODUCT' && paymentData.paidProductsId.length > 0) {
           // Create allocations for specific products
           const orderItems = activeOrder.items.filter((item: any) => paymentData.paidProductsId.includes(item.id))
 
@@ -5615,11 +5657,20 @@ export async function recordFastPayment(
         montoPesos: existingByKey.amount,
         terminalSerial: paymentData.authenticatedTerminalSerial ?? null,
       })
-      return {
+      // D7: si el primer registro murió antes del aviso de tarjeta tardía, el reintento con la llave lo vuelve a revisar (una vez).
+      // Si el primero entró sin edad (registro en vivo) y este reintento de la libreta sí la trae, cuenta la que trae (Codex r4 #2).
+      // Se lanza después de lo que la respuesta espera (Codex r5 #4).
+      const respuesta = {
         ...((await consolidarRegistroRepetido(existingByKey, paymentData as RegistroEntrante, venueId, null)) ?? existingByKey),
         digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]),
         customerLink,
       }
+      void revisarTarjetaTardia(
+        existingByKey,
+        horaDelIntentoParaGuardar({ method: existingByKey.method, edadDelIntentoMs: paymentData.edadDelIntentoMs }, llegada)
+          .intentoAbiertoEn,
+      )
+      return respuesta
     }
   }
 
@@ -6002,6 +6053,8 @@ export async function recordFastPayment(
               currency: paymentData.currency,
               authorizationNumber: paymentData.authorizationNumber,
               referenceNumber: paymentData.referenceNumber,
+              // D7: la hora del intento de una tarjeta que la TPV registró tarde (sólo tarjeta, legible); la lee el aviso de tarjeta tardía.
+              ...horaDelIntentoParaGuardar({ method: paymentData.method, edadDelIntentoMs: paymentData.edadDelIntentoMs }, llegada),
               isInternational: paymentData.isInternational,
               ...(paymentData.isInternationalFromTerminal !== undefined
                 ? { isInternationalFromTerminal: paymentData.isInternationalFromTerminal }
@@ -6272,11 +6325,17 @@ export async function recordFastPayment(
           // La carrera la ganó otra petición: su orden ya existe, así que el cliente se
           // rellena (nunca se reasigna) igual que en cualquier reintento idempotente.
           const winnerCustomerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(winner), effectiveCustomerId, customerActor)
-          return {
+          const respuesta = {
             ...((await consolidarRegistroRepetido(winner, paymentData as RegistroEntrante, venueId, null)) ?? winner),
             digitalReceipt: await ensureDigitalReceiptResponse(winner.id, winner.receipts[0]),
             customerLink: winnerCustomerLink,
           }
+          // D7 (Codex r5 #2): el reenvío de la libreta que pierde la carrera contra el registro en vivo también revisa el aviso.
+          void revisarTarjetaTardia(
+            winner,
+            horaDelIntentoParaGuardar({ method: winner.method, edadDelIntentoMs: paymentData.edadDelIntentoMs }, llegada).intentoAbiertoEn,
+          )
+          return respuesta
         }
 
         logger.error('🚨 [recordFastPayment] P2002 on idempotencyKey but winner not found — should be impossible', {
@@ -6548,6 +6607,11 @@ export async function recordFastPayment(
   const autofacturaAvailable = digitalReceipt ? await timing.time('autofactura', () => resolveAutofacturaAvailable(fastOrder?.id)) : false
   t.end({ paymentId: payment.id })
   timing.end(payment.id)
+
+  // D7 (encargo a25cd7): la tarjeta que llega aprobada TARDE avisa al dueño (pudo cobrarse de otra forma mientras tanto). Después del
+  // commit, sin esperarlo y DESPUÉS de lo que la respuesta sí espera (Codex r4 #3): nunca toca ni demora el cobro; un cobro normal no
+  // hace ninguna consulta de más.
+  void revisarTarjetaTardia(payment)
 
   return {
     ...payment,

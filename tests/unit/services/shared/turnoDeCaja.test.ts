@@ -24,3 +24,22 @@ describe('turnoAbiertoDelNegocio', () => {
     expect(await turnoAbiertoDelNegocio({ shift: { findFirst } } as never, 'v1')).toBeNull()
   })
 })
+
+describe('turnoDelNegocioAhora (máquina de efectivo, Codex r1 #13)', () => {
+  it('el MISMO turno vivo OPEN del negocio (por `turnoAbiertoDelNegocio`), con su inicio, en lecturas acotadas', async () => {
+    const prisma = (await import('@/utils/prismaClient')).default
+    const { turnoDelNegocioAhora } = await import('@/services/shared/turnoDeCaja')
+    const inicio = new Date('2026-11-20T14:00:00.000Z')
+    jest
+      .mocked(prisma.shift.findFirst)
+      .mockResolvedValueOnce({ id: 'shift-1' } as never)
+      .mockResolvedValueOnce({ startTime: inicio } as never)
+    await expect(turnoDelNegocioAhora('v1')).resolves.toEqual({ shiftId: 'shift-1', startTime: inicio })
+    const [vivo, inicioDelTurno] = jest.mocked(prisma.shift.findFirst).mock.calls.map(c => c[0]!)
+    expect(vivo.where).toEqual({ venueId: 'v1', status: 'OPEN', endTime: null })
+    expect(vivo.orderBy).toEqual({ startTime: 'desc' })
+    expect(inicioDelTurno).toEqual({ where: { id: 'shift-1', venueId: 'v1' }, select: { startTime: true } })
+    jest.mocked(prisma.shift.findFirst).mockReset().mockResolvedValue(null)
+    await expect(turnoDelNegocioAhora('v1')).resolves.toBeNull()
+  })
+})

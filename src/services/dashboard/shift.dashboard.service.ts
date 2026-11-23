@@ -12,6 +12,8 @@ import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
 import { ORDEN_DE_TARJETAS_SELECT } from '../giftCards/giftCardMarks'
 import { tieneRenglonDeTarjeta } from '../giftCards/cuentaDeTarjetas'
 import { ventasDelTurnoSinTarjetas, ventasSinTarjetasPorTurno } from '../shared/ventasDelTurno'
+import { efectivoFisicoDeCobros } from '../shared/efectivoFisico'
+import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 
 interface ShiftFilters {
   staffId?: string
@@ -226,13 +228,15 @@ export async function resolveShiftCashDrawer(
   endTime?: Date | null,
   incluirEsperado = false,
   shiftId?: string,
+  // H8 (Codex servidor r5): el detalle del turno lo lee con el cliente de SU foto (`RepeatableRead`), junto con el turno.
+  db: Pick<Prisma.TransactionClient, 'cashDrawerSession'> = prisma,
 ) {
   const include = { events: { orderBy: { createdAt: 'asc' as const } } }
 
   // Identidad durable: no compite con una fila legacy más nueva ni depende de que la ventana
   // histórica esté completa. `venueId` conserva el aislamiento aun cuando `shiftId` es único.
   const findLinkedSession = () =>
-    shiftId ? prisma.cashDrawerSession.findFirst({ where: { venueId, shiftId }, include }) : Promise.resolve(null)
+    shiftId ? db.cashDrawerSession.findFirst({ where: { venueId, shiftId }, include }) : Promise.resolve(null)
   let session = await findLinkedSession()
   if (!session && !startTime) {
     // Incluso sin ventana temporal, una liga puede haber aparecido después de la primera
@@ -254,7 +258,7 @@ export async function resolveShiftCashDrawer(
       where: Record<string, unknown>,
       stage: ShiftCashDrawerWindowStage,
     ): Promise<ShiftCashDrawerLegacySelection> => {
-      const candidates = await prisma.cashDrawerSession.findMany({
+      const candidates = await db.cashDrawerSession.findMany({
         where: { ...where, venueId, shiftId: null },
         select: { id: true },
         orderBy: [{ openedAt: 'desc' }, { id: 'desc' }],
@@ -283,7 +287,7 @@ export async function resolveShiftCashDrawer(
       throw new AmbiguousShiftCashDrawerError(legacySelection.stage)
     }
     if (!session && legacySelection.kind === 'ONE') {
-      session = await prisma.cashDrawerSession.findFirst({
+      session = await db.cashDrawerSession.findFirst({
         // Mantener ambos filtros es deliberado: si la fila se ligó a otro turno durante la
         // carrera, no podemos leer su libro. Pero tampoco es "ausencia": hubo una identidad
         // elegida y perderla vuelve desconocida la autoridad financiera de este turno.
@@ -367,20 +371,9 @@ const ORDEN_DEL_DETALLE = {
   },
 } satisfies Prisma.OrderSelect
 
-export async function getShiftById(
-  venueId: string,
-  shiftId: string,
-  incluirEsperado = false,
-  view: 'detail' | 'state' = 'detail',
-): Promise<any | null> {
-  // La terminal sólo necesita acreditar SU caja cerrada, sin cargar el corte completo.
-  if (view === 'state') {
-    return prisma.shift.findFirst({
-      where: { id: shiftId, venueId },
-      select: { id: true, venueId: true, status: true },
-    })
-  }
-  const shift = await prisma.shift.findFirst({
+/** El turno del detalle con sus cobros y órdenes, leído con el cliente que se le pase (la foto de `getShiftById`). */
+function leerElTurnoDelDetalle(db: Prisma.TransactionClient, venueId: string, shiftId: string) {
+  return db.shift.findFirst({
     where: {
       id: shiftId,
       venueId: venueId,
@@ -443,10 +436,71 @@ export async function getShiftById(
       },
     },
   })
+}
 
-  if (!shift) {
+export async function getShiftById(
+  venueId: string,
+  shiftId: string,
+  incluirEsperado = false,
+  view: 'detail' | 'state' = 'detail',
+): Promise<any | null> {
+  // La terminal sólo necesita acreditar SU caja cerrada, sin cargar el corte completo.
+  if (view === 'state') {
+    return prisma.shift.findFirst({
+      where: { id: shiftId, venueId },
+      select: { id: true, venueId: true, status: true },
+    })
+  }
+  // 🔴 Máquina de efectivo (D6, r6-8): los movimientos del turno y el desglose agregado de Efectivo salen de la MISMA foto de Postgres
+  // (`RepeatableRead`, el mismo cliente de transacción). Antes un cobro que entraba entre las dos lecturas dejaba «Efectivo $100» con
+  // hijos «Gaveta $100 · máquina $150» (r3 #8). F11 (Codex servidor r4): también las cuentas de los cobros del turno y el total de
+  // respaldo de un turno sin cobros cargados: un turno vacío ya no dice «$150 vendidos» con cero pagos. Los campos no cambian.
+  const foto = await prisma.$transaction(
+    async tx => {
+      const leido = await leerElTurnoDelDetalle(tx, venueId, shiftId)
+      if (!leido) return null
+      const efectivoPorLugar = await efectivoPorLugarDelTurno(venueId, leido.id, tx)
+      // Las cuentas de los cobros estampados con el turno que la lectura del turno no trajo (una vez cada una).
+      const yaLeidas = new Set(leido.orders.map(order => order.id))
+      const faltantes = [...new Set(leido.payments.filter(p => p.type !== 'REFUND').map(p => p.orderId))].filter(id => !yaLeidas.has(id))
+      const cobradas = faltantes.length
+        ? await tx.order.findMany({
+            where: { venueId, id: { in: faltantes } },
+            select: ORDEN_DEL_DETALLE,
+            // ids únicos del turno: el tope es exacto y nunca recorta.
+            take: faltantes.length,
+          })
+        : []
+      // Toda la lógica del desglose vive en `buildPaymentBreakdown` (función pura, con tests): desglosa por método REAL —débito y
+      // crédito por separado— y calcula el porcentaje por marca contra la suma de tarjetas, no contra una cubeta 'CARD' que ya no existe.
+      const desglose = buildPaymentBreakdown(leido.payments as any, efectivoPorLugar)
+      // El respaldo del total (R3, Codex #5 del cierre) sólo se usa si los cobros cargados no suman ventas en un turno sin cerrar.
+      const respaldo = leido.status !== 'CLOSED' && desglose.totalSales <= 0 ? await ventasDelTurnoSinTarjetas(venueId, leido.id, tx) : null
+      // H8 (Codex servidor r5): la gaveta (su conteo y su diferencia) también sale de ESTA foto. La corrección de conteo escribe turno y
+      // gaveta juntos; leída aparte, la misma respuesta decía «contado $100» en el turno y «$200» en la gaveta. Va al FINAL y atrapada:
+      // el campo es aditivo (P2, Codex 27-ago) y lo leído antes ya no depende de cómo termine esta transacción de sólo lectura.
+      // `shiftId` acota al turno: sin él, el detalle puede PINTAR la gaveta de otro turno junto a un `cashDifference` que se firmó contra
+      // la propia — dos números para el mismo dinero.
+      let cashDrawer: Awaited<ReturnType<typeof resolveShiftCashDrawer>> = null
+      let cashDrawerReadFailed = false
+      try {
+        cashDrawer = await resolveShiftCashDrawer(venueId, leido.startTime ?? null, leido.endTime ?? null, incluirEsperado, shiftId, tx)
+      } catch (err) {
+        cashDrawerReadFailed = true
+        logger.warn('[CASH-DRAWER] No se pudo adjuntar el arqueo del cajón al detalle del turno', {
+          shiftId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+      return { shift: leido, desglose, cobradas, respaldo, cashDrawer, cashDrawerReadFailed }
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  )
+
+  if (!foto) {
     return null
   }
+  const { shift, desglose, cobradas, respaldo, cashDrawer, cashDrawerReadFailed } = foto
 
   // Las órdenes del detalle son las cuentas COBRADAS en el turno, con la misma membresía que firma el cierre y que
   // enseña la lista (`readShiftPaymentsForClose` + `contarOrdenesCobradas`; no se importan porque shift.tpv.service
@@ -467,16 +521,7 @@ export async function getShiftById(
   }
   // Las cuentas de los cobros estampados con el turno, UNA vez cada una: una cuenta pagada en abonos no se trae N veces.
   const delTurno = [...new Set(shift.payments.filter(p => p.type !== 'REFUND').map(p => p.orderId))]
-  const faltantes = delTurno.filter(id => !leidas.has(id))
-  if (faltantes.length > 0) {
-    const cobradas = await prisma.order.findMany({
-      where: { venueId, id: { in: faltantes } },
-      select: ORDEN_DEL_DETALLE,
-      // ids únicos del turno: el tope es exacto y nunca recorta.
-      take: faltantes.length,
-    })
-    for (const order of cobradas) leidas.set(order.id, order)
-  }
+  for (const order of cobradas) leidas.set(order.id, order)
   for (const id of delTurno) {
     const order = leidas.get(id)
     if (order) ordersById.set(id, order)
@@ -487,18 +532,7 @@ export async function getShiftById(
   const now = new Date()
   const effectiveStatus = shift.endTime && shift.endTime < now ? 'CLOSED' : shift.status
 
-  // ============================================================
-  // Calculate Payment Method Breakdown
-  // ============================================================
-  // Toda la lógica vive en `buildPaymentBreakdown` (función pura, con tests): desglosa por
-  // método REAL —débito y crédito por separado— y calcula el porcentaje por marca contra la
-  // suma de tarjetas, no contra una cubeta 'CARD' que ya no existe.
-  const {
-    paymentMethodBreakdown,
-    cardBrandBreakdown,
-    totalSales: calculatedTotalSales,
-    totalTips: calculatedTotalTips,
-  } = buildPaymentBreakdown(shift.payments as any)
+  const { paymentMethodBreakdown, cardBrandBreakdown, totalSales: calculatedTotalSales, totalTips: calculatedTotalTips } = desglose
 
   // R3 (full-testing v2 #2): la cuenta de tarjetas de regalo no es una orden de VENTA del turno: no entra a las órdenes por
   // empleado, a la lista, a los productos vendidos, al conteo ni al ticket promedio. Su dinero sí (cobros, efectivo y caja).
@@ -663,33 +697,8 @@ export async function getShiftById(
   // Use calculated totals if they're more accurate than stored values. R3 (Codex #5 del cierre): el guardado de un turno SIN cerrar es
   // el acumulado en vivo, que cuenta las cargas de tarjetas; su respaldo es la agregación que ya las excluye.
   const finalTotalSales =
-    calculatedTotalSales > 0
-      ? calculatedTotalSales
-      : shift.status === 'CLOSED'
-        ? Number(shift.totalSales)
-        : Number(await ventasDelTurnoSinTarjetas(venueId, shift.id))
+    calculatedTotalSales > 0 ? calculatedTotalSales : shift.status === 'CLOSED' ? Number(shift.totalSales) : Number(respaldo ?? 0)
   const finalTotalTips = calculatedTotalTips > 0 ? calculatedTotalTips : Number(shift.totalTips)
-
-  // P2 (Codex 27-ago): el campo es ADITIVO — si su consulta truena, el endpoint viejo no puede volverse un 500.
-  let cashDrawer: Awaited<ReturnType<typeof resolveShiftCashDrawer>> = null
-  let cashDrawerReadFailed = false
-  try {
-    // `shiftId` acota al turno: sin él, el detalle puede PINTAR la gaveta de otro turno junto a un
-    // `cashDifference` que se firmó contra la propia — dos números para el mismo dinero.
-    cashDrawer = await resolveShiftCashDrawer(
-      venueId,
-      (shift as any).startTime ?? null,
-      (shift as any).endTime ?? null,
-      incluirEsperado,
-      shiftId,
-    )
-  } catch (err) {
-    cashDrawerReadFailed = true
-    logger.warn('[CASH-DRAWER] No se pudo adjuntar el arqueo del cajón al detalle del turno', {
-      shiftId,
-      error: err instanceof Error ? err.message : String(err),
-    })
-  }
 
   // Aditivos, como `cashDrawer`: si truenan, el detalle no se vuelve un 500. `TOO_MANY` sólo se muestra: la corrección la
   // rechaza con su propio CASH_COUNT_TOO_MANY, contando igual que aquí.
@@ -1152,6 +1161,55 @@ async function ventasDeTurnosSinCerrar(venueId: string, shifts: Array<{ id: stri
  * Además, las marcas se recogen SÓLO de pagos con tarjeta: antes cualquier pago que no fuera
  * efectivo entraba al mapa de marcas, así que una transferencia inventaba una marca "OTHER".
  */
+type TotalesDelLugar = { total: number; tips: number; count: number }
+
+/**
+ * 🔴 Máquina de efectivo (R5 #11, Codex r2 #12): las VENTAS en efectivo del turno por DÓNDE quedó el billete —«Gaveta» (la autoridad del
+ * cajón, `tenderSemantics`) y «Efectivo · máquina» (su folio)— con sus propinas, SUMADAS EN POSTGRES por destino: dos consultas
+ * agrupadas de pocas filas, nunca recorrer los pagos cargados. `null` = el turno no tuvo ventas de la máquina y Efectivo responde como
+ * hoy. Lo CASH que no es de ninguna de las dos conserva su etiqueta: los hijos siempre suman la cabecera (mismo filtro que la carga).
+ */
+export async function efectivoPorLugarDelTurno(
+  venueId: string,
+  shiftId: string,
+  db: Pick<Prisma.TransactionClient, 'payment'> = prisma,
+): Promise<Map<string, TotalesDelLugar> | null> {
+  const where = { venueId, shiftId, status: 'COMPLETED' as const, method: 'CASH' as const }
+  const [maquina, resto] = await Promise.all([
+    db.payment.aggregate({
+      where: { ...where, cashMachineRef: { not: null } },
+      _sum: { amount: true, tipAmount: true },
+      _count: { _all: true },
+    }),
+    db.payment.groupBy({
+      by: ['fundsFlow', 'tenderTypeId', 'tenderCountsAsCash', 'tenderLabel', 'externalSource'],
+      where: { ...where, cashMachineRef: null },
+      _sum: { amount: true, tipAmount: true },
+      _count: { _all: true },
+    }),
+  ])
+  if (!maquina?._count?._all) return null
+  const lugares = new Map<string, TotalesDelLugar>()
+  const sumar = (lugar: string, total: unknown, tips: unknown, count: number) => {
+    const e = lugares.get(lugar) ?? { total: 0, tips: 0, count: 0 }
+    e.total += Number(total ?? 0)
+    e.tips += Number(tips ?? 0)
+    e.count += count
+    lugares.set(lugar, e)
+  }
+  sumar('Efectivo · máquina', maquina._sum.amount, maquina._sum.tipAmount, maquina._count._all)
+  for (const g of resto) {
+    const enElCajon = paymentCountsAsDrawerCash({
+      method: 'CASH',
+      fundsFlow: g.fundsFlow,
+      tenderTypeId: g.tenderTypeId,
+      tenderCountsAsCash: g.tenderCountsAsCash,
+    })
+    sumar(enElCajon ? 'Gaveta' : g.tenderLabel || g.externalSource || 'Efectivo', g._sum.amount, g._sum.tipAmount, g._count._all)
+  }
+  return lugares
+}
+
 export function buildPaymentBreakdown(
   payments: Array<{
     amount: unknown
@@ -1164,6 +1222,8 @@ export function buildPaymentBreakdown(
     /** R3: la marca de cuenta de tarjetas (`ORDEN_DE_TARJETAS_SELECT`). Sin `order`, el cobro cuenta como venta, como siempre. */
     order?: { items?: ReadonlyArray<unknown> | null } | null
   }>,
+  /** Máquina de efectivo (R5 #11, Codex r2 #12): los hijos de Efectivo ya sumados en Postgres (`efectivoPorLugarDelTurno`). */
+  efectivoPorLugar: Map<string, TotalesDelLugar> | null = null,
 ): {
   paymentMethodBreakdown: PaymentMethodBreakdownRow[]
   cardBrandBreakdown: Array<{ brand: string; total: number; count: number; percentage: number }>
@@ -1230,6 +1290,9 @@ export function buildPaymentBreakdown(
       }
     }
   }
+
+  // Máquina de efectivo: con ventas de la máquina, los hijos de Efectivo son los de Postgres (un turno sin ella responde lo de hoy).
+  if (efectivoPorLugar) labelMap.set('CASH', efectivoPorLugar)
 
   const salesDenominator = totalCobrado || 1
   const cardDenominator = cardTotal || 1
@@ -1505,8 +1568,32 @@ export async function updateShift(
     })
     return Number(r?._sum?.thirdPartyCashAmount ?? 0)
   }
+  // 🔴 Máquina de efectivo (A5): `totalCashPayments`/`totalCashTips` son VENTAS en efectivo y traen también lo que cobró la
+  // máquina, cuyo billete NO está en el cajón. Se resta lo que `efectivoFisicoDeCobros` (la autoridad de `tenderSemantics`) deja
+  // fuera del cajón, sobre lo FIRMADO: con cobros sin `fundsFlow` (todo lo anterior) resta 0 y el esperado de un corte firmado
+  // no se mueve aunque sus cobros hayan cambiado después. Una consulta agrupada por cómo entró el dinero: pocas filas, no el día.
+  const efectivoFueraDelCajon = async () => {
+    const grupos = await prisma.payment.groupBy({
+      by: ['method', 'fundsFlow', 'tenderCountsAsCash'],
+      where: { venueId, shiftId: existingShift.id, status: 'COMPLETED' },
+      _sum: { amount: true, tipAmount: true },
+    })
+    const fisico = efectivoFisicoDeCobros(
+      grupos.map(g => ({
+        method: g.method,
+        fundsFlow: g.fundsFlow,
+        tenderCountsAsCash: g.tenderCountsAsCash,
+        amount: g._sum.amount,
+        tipAmount: g._sum.tipAmount,
+      })),
+    )
+    // En `number`, como el resto de esta fórmula: `computeCashDifference` la pasa a Decimal y redondea a centavos.
+    return fisico.ventasEnEfectivo.add(fisico.propinasEnEfectivo).toNumber() - fisico.alCajon.toNumber()
+  }
   const mandaLaFormulaDelTurno = gaveta != null && gaveta.fuente !== 'DESCONOCIDO' && gaveta.esperado == null
-  const cashInDrawerConTerceros = cashInDrawer + (mandaLaFormulaDelTurno ? await tercerosDelTurno() : 0)
+  const cashInDrawerConTerceros = mandaLaFormulaDelTurno
+    ? cashInDrawer + (await tercerosDelTurno()) - (await efectivoFueraDelCajon())
+    : cashInDrawer
   const expectedCash =
     gaveta == null || gaveta.fuente === 'DESCONOCIDO' ? null : (gaveta.esperado ?? effectiveStartingCash + cashInDrawerConTerceros)
 

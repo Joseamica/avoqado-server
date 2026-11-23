@@ -521,21 +521,16 @@ export async function postPayOutInTx(
     select: { id: true },
   })
   if (previo) return previo.id
-  const [session] = await tx.$queryRaw<Array<{ id: string }>>`
-    SELECT id FROM "CashDrawerSession"
-    WHERE "venueId" = ${i.venueId} AND status = 'OPEN'
-    ORDER BY "openedAt" DESC, id DESC
-    LIMIT 1
-    FOR UPDATE`
-  if (!session) throw new ConflictError('Abre caja para devolver en efectivo.', 'CASH_DRAWER_NOT_OPEN')
+  const sessionId = await cajaAbiertaBloqueadaEnTx(tx, i.venueId)
+  if (!sessionId) throw new ConflictError('Abre caja para devolver en efectivo.', 'CASH_DRAWER_NOT_OPEN')
   const event = await tx.cashDrawerEvent.create({
     data: {
-      sessionId: session.id,
+      sessionId,
       venueId: i.venueId,
       type: 'PAY_OUT',
       amount: new Decimal(i.amount.toString()).abs(),
       staffId: i.staffId,
-      staffName: await resolveStaffName(i.staffId),
+      staffName: await resolveStaffName(i.staffId, tx),
       orderId: i.orderId ?? null,
       note: `${DRAWER_REFUND_NOTE_PREFIX} ${i.reason}`,
       localId: i.idempotencyKey,
@@ -543,6 +538,64 @@ export async function postPayOutInTx(
     select: { id: true },
   })
   return event.id
+}
+
+/** La caja OPEN del negocio, bloqueada `FOR UPDATE` en `tx` (un cierre en vuelo la saca del `WHERE` al re-evaluarlo). `null` = no hay. */
+async function cajaAbiertaBloqueadaEnTx(tx: Prisma.TransactionClient, venueId: string): Promise<string | null> {
+  const [session] = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT id FROM "CashDrawerSession"
+    WHERE "venueId" = ${venueId} AND status = 'OPEN'
+    ORDER BY "openedAt" DESC, id DESC
+    LIMIT 1
+    FOR UPDATE`
+  return session?.id ?? null
+}
+
+/**
+ * Máquina de efectivo (A6, R4-7 #4): la caja que AUTORIZA devolver en efectivo una venta de la máquina (`devuelveEfectivoDeLaMaquina`).
+ * A diferencia de `postCashRefundToDrawer` (post-commit, fail-open), aquí la caja SÍ autoriza, como `postPayOutInTx`: el billete de esa
+ * venta nunca entró al cajón, así que sin una caja abierta no hay de dónde sale el dinero ni dónde anotarlo, y el reembolso entero se
+ * revierte (409). Se pide ANTES de reclamar el turno: Order → Payment → caja → Shift, el mismo orden que el cierre de caja (caja →
+ * turno). Devuelve el id de la caja bloqueada; el `PAY_OUT` va con `salidaDelReembolsoEnTx` en ESA caja.
+ */
+export async function cajaParaDevolverEnTx(tx: Prisma.TransactionClient, venueId: string): Promise<string> {
+  const sessionId = await cajaAbiertaBloqueadaEnTx(tx, venueId)
+  if (!sessionId) throw new ConflictError('Abre la caja para devolver en efectivo', 'CASH_DRAWER_NOT_OPEN')
+  return sessionId
+}
+
+/**
+ * El `PAY_OUT` de la devolución de una venta de la máquina, en la caja que la autorizó (`cajaParaDevolverEnTx`) y en la MISMA
+ * transacción que la fila REFUND: no hay reembolso confirmado sin su salida de caja, ni salida sin reembolso. Su llave es la de
+ * `postCashRefundToDrawer` (`cashRefundDrawerLocalId`), así que cualquier enganche post-commit que la repita es un no-op.
+ */
+export async function salidaDelReembolsoEnTx(
+  tx: Prisma.TransactionClient,
+  i: {
+    venueId: string
+    sessionId: string
+    refundPaymentId: string
+    /** Lo que sale del cajón (venta + propina), en pesos; se guarda positivo. */
+    amount: Decimal
+    staffId?: string | null
+    orderId?: string | null
+    reason?: string | null
+  },
+): Promise<void> {
+  await tx.cashDrawerEvent.create({
+    data: {
+      sessionId: i.sessionId,
+      venueId: i.venueId,
+      type: 'PAY_OUT',
+      amount: new Decimal(i.amount.toString()).abs(),
+      staffId: i.staffId || 'SYSTEM',
+      staffName: await resolveStaffName(i.staffId, tx),
+      orderId: i.orderId ?? null,
+      note: i.reason ? `${DRAWER_REFUND_NOTE_PREFIX} ${i.reason}` : DRAWER_REFUND_NOTE_PREFIX,
+      localId: cashRefundDrawerLocalId(i.refundPaymentId),
+    },
+    select: { id: true },
+  })
 }
 
 /** Nombre legible del cajero para el listado de movimientos. Nunca lanza. */
@@ -754,10 +807,14 @@ async function createEventUnderSessionLock(
   return transactionResult.result
 }
 
-async function resolveStaffName(staffId?: string | null): Promise<string> {
+/**
+ * `db`: dentro de una transacción que ya tiene la caja y el turno, la MISMA transacción (Codex r1 #18): pedir otra conexión del pool
+ * con los candados tomados puede vencer la transacción cuando el pool está lleno.
+ */
+async function resolveStaffName(staffId?: string | null, db: Pick<Prisma.TransactionClient, 'staff'> = prisma): Promise<string> {
   if (!staffId) return 'Sistema'
   try {
-    const staff = await prisma.staff.findUnique({
+    const staff = await db.staff.findUnique({
       where: { id: staffId },
       select: { firstName: true, lastName: true },
     })

@@ -1,13 +1,13 @@
 {
   "pagina": "tpv/caja/abrir-y-cerrar-caja",
   "sourceRepo": "avoqado-tpv",
-  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
-  "version": "2.16.0",
+  "sourceRef": "18685818f1b0b1059d1f4b34e00710c451db4341",
+  "version": "2.22.4",
   "pasos": [
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
-      "linea": 947,
+      "linea": 944,
       "cita": "label = \"Turnos de caja\""
     },
     {
@@ -19,7 +19,7 @@
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/LocalCajaContent.kt",
-      "linea": 68,
+      "linea": 69,
       "cita": "Text(\"Abrir nueva caja\")"
     },
     {
@@ -55,49 +55,49 @@
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
-      "linea": 510,
+      "linea": 512,
       "cita": "text = \"Arqueo de caja\""
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
-      "linea": 530,
+      "linea": 534,
       "cita": "label = { Text(\"Efectivo total contado\") }"
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
-      "linea": 594,
+      "linea": 598,
       "cita": "is CashCountParseResult.Success -> \"Incluye el fondo inicial\""
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
-      "linea": 556,
+      "linea": 560,
       "cita": "text = \"Cerrar y conciliar\""
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
-      "linea": 568,
+      "linea": 572,
       "cita": "text = \"Cerrar sin conteo\""
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
-      "linea": 501,
+      "linea": 503,
       "cita": "Text(\"Sí, cerrar sin conteo\""
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/ShiftDialogs.kt",
-      "linea": 415,
+      "linea": 417,
       "cita": "text = \"Cerrar caja\","
     },
     {
       "paso": 6,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt",
-      "linea": 153,
+      "linea": 154,
       "cita": "return Result.Success(proyectar(row))"
     },
     {
@@ -123,12 +123,12 @@
     {
       "permiso": "tpv-shifts:create",
       "archivo": "avoqado-server/src/routes/tpv.routes.ts",
-      "linea": 1354
+      "linea": 1427
     },
     {
       "permiso": "tpv-shifts:close",
       "archivo": "avoqado-server/src/routes/tpv.routes.ts",
-      "linea": 1535
+      "linea": 1608
     }
   ],
   "plan": [],
@@ -141,24 +141,24 @@
     {
       "afirmacion": "Abrir y cerrar se guardan primero en la terminal y la sincronización los envía después",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt",
-      "linea": 244
+      "linea": 289
     }
   ],
   "rutas": [
     {
       "ruta": "Antes: «Turnos de caja» sólo si el negocio usa turnos",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
-      "linea": 1020
+      "linea": 1017
     },
     {
       "ruta": "Inicio → Turnos de caja → nav:Shifts",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
-      "linea": 1250
+      "linea": 1475
     },
     {
       "ruta": "El cierre local no trae totales (financialTotalsKnown = false)",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/data/repository/ShiftRepository.kt",
-      "linea": 1129
+      "linea": 1374
     },
     {
       "ruta": "Problema: «Caja pendiente de revisión»",
@@ -168,7 +168,7 @@
     {
       "ruta": "Problema: «Revisar registros pendientes»",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/shift/presentation/LocalCajaContent.kt",
-      "linea": 74
+      "linea": 77
     },
     {
       "ruta": "Problema: «Cierre guardado en este aparato»",

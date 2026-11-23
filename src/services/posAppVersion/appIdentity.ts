@@ -52,12 +52,21 @@ function esEscritorio(headers: IncomingHttpHeaders): boolean {
 }
 
 /**
+ * ¿Es una Sunmi? Su app no llega por Google Play: la reparte Avoqado por la tienda de Sunmi (founder, 22-nov). El aviso manda a
+ * Play, así que en una Sunmi no tiene salida. Su `Build.MANUFACTURER` es «SUNMI» (la D3 de Testarudo se registra como «Sunmi»).
+ */
+function esSunmi(headers: IncomingHttpHeaders): boolean {
+  return algunValor(headers['x-device-manufacturer'], v => v === 'sunmi')
+}
+
+/**
  * La app que pide el inicio, o `null` si no se sabe con certeza. Devuelve `null`:
  * - sin `x-device-platform` (el DASHBOARD), o con una plataforma desconocida o repetida;
  * - con `x-device-platform: DESKTOP`;
  * - con `x-device-form-factor: DESKTOP`, en cualquier mayúscula;
  * - 🔴 con las señales del WINDOWS, que manda `ANDROID` (`posSinSoloSaldo.ts:8`): `x-device-manufacturer: Avoqado` o un
  *   `x-device-model` que empieza con «Windows», en cualquier mayúscula y con espacios (ver `esEscritorio`);
+ * - con `x-device-manufacturer: SUNMI` (ver `esSunmi`);
  * - si falta o no se lee el campo que decide: `x-app-version-code` en ANDROID, `x-app-version` (con `VERSION_NAME_RE`) en iOS.
  */
 export function readHomeAppIdentity(headers: IncomingHttpHeaders | undefined): HomeAppIdentity | null {
@@ -65,7 +74,7 @@ export function readHomeAppIdentity(headers: IncomingHttpHeaders | undefined): H
     if (!headers) return null
     const platform = parsePlatform(texto(headers['x-device-platform']))
     if (platform !== 'ANDROID' && platform !== 'IOS') return null
-    if (esEscritorio(headers)) return null
+    if (esEscritorio(headers) || esSunmi(headers)) return null
 
     if (platform === 'ANDROID') {
       const versionCode = parseVersionCode(headers['x-app-version-code'])

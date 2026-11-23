@@ -1083,9 +1083,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // table has no QR_LEGACY rows, and buildPaymentWhereFilter throws on QR_LEGACY.
   if (paymentMethod === 'QR_LEGACY') {
     // Only MindForm has legacy QR data. Controller already rejects QR_LEGACY
-    // for other venues; this is defense-in-depth. D9.1 (Codex r1 #8): the legacy QR rows have no merchant account, so with a
-    // merchant chosen nothing of them belongs to it.
-    if (venueId !== MINDFORM_NEW_VENUE_ID || merchantAccountId) {
+    // for other venues; this is defense-in-depth.
+    if (venueId !== MINDFORM_NEW_VENUE_ID) {
       return {
         dateRange: { startDate: parsedStartDate, endDate: parsedEndDate },
         reportType,
@@ -1097,17 +1096,18 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     let amount = 0
     let tips = 0
     let legacyCount = 0
-    const paginas = await forEachLegacyPaymentPage(
-      { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
-      rows => {
-        for (const payment of rows) {
-          if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
-          amount += Number(payment.amount)
-          tips += Number(payment.tipAmount)
-          legacyCount += 1
-        }
-      },
-    )
+    // D9.1 (Codex r1 #8): the legacy QR rows have no merchant account, so with a merchant chosen nothing of them belongs to it:
+    // not summed, not asked (the statement below still answers, with zeros).
+    const paginas = merchantAccountId
+      ? { unavailable: false }
+      : await forEachLegacyPaymentPage({ startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() }, rows => {
+          for (const payment of rows) {
+            if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
+            amount += Number(payment.amount)
+            tips += Number(payment.tipAmount)
+            legacyCount += 1
+          }
+        })
     const summary: SalesSummaryMetrics = {
       ...emptySummary(),
       tips,
@@ -1122,7 +1122,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     let byPeriod: TimePeriodMetrics[] | undefined
     // The headline total above is partial if the page walk failed; the period query below can only ADD to the flag.
     let legacyUnavailable = paginas.unavailable
-    if ((reportType as string) !== 'summary') {
+    if ((reportType as string) !== 'summary' && !merchantAccountId) {
       const legacyPeriod = await getLegacyPeriodMetrics(
         parsedStartDate.toISOString(),
         parsedEndDate.toISOString(),
