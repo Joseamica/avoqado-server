@@ -381,6 +381,61 @@ describe('D26 · VENTA: la persona puede declarar «no se cobró» 150 s despué
     await sigoCobrando(requestId)
     await expect(declarar(requestId)).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
   })
+
+  it('Codex r2 #2: una TPV sin `executionVersion` (2.12.5 / 2.13.x) que dijo «sigo» tras el cancel también espera los 150 s de la VENTA', async () => {
+    const { requestId, venta } = await incidente({ executionVersion: null })
+    await pasaElTecho(requestId)
+    await vigia()
+    // La RANURA sí se suelta a los 30 s (la terminal no se congela)…
+    expect(await fila(requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
+    expect(await ocupada()).toBe(false)
+    // …pero la VENTA no se abre a los ~40 s: el SDK todavía puede aprobar ese cobro.
+    await expect(declarar(requestId)).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
+    expect(await ventaCercada(venta.id)).toBe(true)
+
+    await pasaElTechoDeLaVenta(requestId)
+    await expect(declarar(requestId)).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+    expect(await fila(requestId)).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' })
+    expect(await ventaCercada(venta.id)).toBe(false)
+  })
+
+  it('esa TPV sólo espera el RELOJ: con 51 intentos viejos ligados no se queda sin salida, a los 150 s la persona declara', async () => {
+    const { requestId } = await incidente({ executionVersion: null })
+    for (let i = 0; i < 51; i++) await intentoHace(requestId, 10 * 60_000)
+    await pasaElTechoDeLaVenta(requestId)
+    await vigia()
+    expect(await fila(requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
+    await expect(declarar(requestId)).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+
+  it('un intento que esa TPV abrió DESPUÉS del cancel mueve su reloj: 150 s desde ese intento', async () => {
+    const { requestId } = await incidente({ executionVersion: null })
+    await pasaElTechoDeLaVenta(requestId)
+    await vigia()
+    expect(await fila(requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
+    const attemptId = await intentoHace(requestId, 60_000)
+    await expect(declarar(requestId)).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
+    await prisma.terminalPaymentAttemptLink.updateMany({
+      where: { attemptId },
+      data: { createdAt: new Date(Date.now() - VENTA_MS - 1_000) },
+    })
+    await expect(declarar(requestId)).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+
+  it('control · la excepción del 3-nov sigue: SIN cancel del POS, una TPV sin `executionVersion` con la ranura ya suelta no veta a la persona', async () => {
+    const venta = await f.nuevaVenta(100)
+    const { requestId } = await f.solicitud({
+      orderId: venta.id,
+      status: 'TIMED_OUT',
+      failureCode: 'AUTO_RELEASED',
+      acknowledgedAt: new Date(),
+      lastDeliveredAt: new Date(),
+      expiresAt: new Date(Date.now() - 60 * 60_000),
+      deliveryProvenance: { deliveries: [entrega(null)] },
+    })
+    await sigoCobrando(requestId)
+    await expect(declarar(requestId)).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
 })
 
 /** El COMPLETED de la terminal etiquetado con la solicitud y atribuido a ESTA terminal (el registro de la TPV). */
