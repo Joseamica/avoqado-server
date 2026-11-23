@@ -5692,6 +5692,8 @@ test.each(['cancelOrder', 'mergeOrders'] as const)(
     // Missing direct socket resolves delivery as UNKNOWN without speaking to any apparatus.
     const socketManager = (await import('@/communication/sockets/managers/socketManager')).default
     const transport = jest.spyOn(socketManager, 'getServer').mockReturnValue({ sockets: { sockets: new Map() } } as any)
+    // Cobro simple · S1: el socket perdido deja la venta en «sin respuesta» (cercada) y la cierra «no cobrada» (aquí en 1.5 s).
+    process.env.TERMINAL_PAYMENT_SIN_RESPUESTA_MS = '1500'
     const i = operationInput<'cancelOrder' | 'mergeOrders'>(
       action === 'cancelOrder'
         ? { action, refs: { orderId: source.id }, payload: { reason: null } }
@@ -5722,18 +5724,19 @@ test.each(['cancelOrder', 'mergeOrders'] as const)(
       expect(waiter.query).toContain('FROM "Order"')
       evidence(`Task8-terminal-${action}-native`, i, { admissionPid, waiter, requestId, transport: 'missing-direct-socket; no hardware' })
       insertGate.release()
-      expect((await sender).status).toBe('timeout')
+      expect((await sender).status).toBe('failed')
       const response = await rejected
       expect(response.status).toBe(409)
       expect(response.body.code).toBe('ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE')
       const row = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId } })
-      expect(row).toMatchObject({ orderId: source.id, requestedById: authorId, status: 'UNKNOWN', amountCents: 10000 })
+      expect(row).toMatchObject({ orderId: source.id, requestedById: authorId, status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW', amountCents: 10000 })
       expect((await prisma.order.findUniqueOrThrow({ where: { id: source.id } })).status).toBe('PENDING')
       expect(await prisma.payment.count({ where: { orderId: source.id } })).toBe(0)
     } finally {
       await insertGate.cleanup(pending)
       terminalRegistry.unregisterBySocketId(socketId)
       transport.mockRestore()
+      delete process.env.TERMINAL_PAYMENT_SIN_RESPUESTA_MS
     }
   },
 )

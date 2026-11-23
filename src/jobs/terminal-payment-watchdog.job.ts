@@ -70,28 +70,17 @@ export class TerminalPaymentWatchdogJob {
       }
     }
     try {
+      // 🔴 Cobro simple · S1 (22-nov): «sin respuesta ⇒ 10 s ⇒ no cobrado». Vencidas en vuelo o canceladas sin respuesta entran a
+      // «sin respuesta» (el cancel otra vez a la terminal).
       await paso('stale requests sweep', () => terminalPaymentService.reconcileStaleRequests())
-      // UNKNOWN is not a dead end anymore: a terminal that is back (and stays back) + 20 min with
-      // no card payment frees the slot; released rows are still swept for a late payment (see
-      // reconcileUnknownRequests). A row parked UNKNOWN by the sweep above is seen by this one in
-      // the same tick, which at most stamps "terminal returned" 30 s earlier — never frees it.
+      // Las SENT con acuse de hace > 60 s sin final: se le pregunta a la terminal; sin «sigo cobrando», «sin respuesta».
+      await paso('sent without final sweep', () => terminalPaymentService.preguntarPorSolicitudesSinFinal())
+      // La conciliación tardía de lo ya cerrado (un Payment registrado sin el requestId) y la sonda a las UNKNOWN.
       await paso('unknown sweep', () => terminalPaymentService.reconcileUnknownRequests())
-      // Ventana de confirmación (plan 16-sep): un negativo de la terminal sin evidencia que lleve ≥ 30 s se libera
-      // aquí si el temporizador en proceso no llegó (reinicio, otra instancia). Idempotente por CAS. Un barrido que falle
-      // (base caída a media pasada) no puede dejar sin la recuperación del long-poll de S5 a un POS que ya tiene su fila
-      // COMPLETED — el barrido se repite en el siguiente tick, el 504 del POS no.
-      await paso('confirmation window sweep', () => terminalPaymentService.releaseUnprovenNegativesAfterWindow())
-      // S5: un POS que sigue esperando en memoria mientras la fila ya quedó COMPLETED con Payment (el webhook
-      // confirmó desde otra instancia, o el aviso se perdió) recibe el resultado durable en vez de un 504.
+      // La RED del temporizador de 10 s (reinicio, publicación) y las filas de antes de S1 (S1.4): cierra lo vencido.
+      await paso('no-response close sweep', () => terminalPaymentService.cerrarSinRespuestaVencidas())
+      // S5: un POS que sigue esperando en memoria mientras la fila ya quedó COMPLETED con Payment recibe el resultado durable.
       await paso('long-poll recovery', () => terminalPaymentService.resolvePendingFromDurableState())
-      // S2 («ninguna duda de un cobro sin salida», A4b): la red durable del temporizador de 10 s que suelta la RANURA (nunca la
-      // venta) tras el cese acreditado por la terminal nueva (reinicio, o el gancho nunca se llamó). DESPUÉS del rescate del
-      // long-poll (revisión A4, I-1): recorre hasta 200 filas en serie y no puede retrasar a un POS que ya tiene su respuesta en la
-      // base. Corre aunque el rescate truene.
-      await paso('execution-closed release sweep', () => terminalPaymentService.liberarTrasCierreDeEjecucion())
-      // D26 (22-nov): el techo a «sigo cobrando» — 5 min después del cancel del POS, con la terminal todavía diciendo que cobra y
-      // sin intento nuevo ni señal de dinero, se suelta la RANURA (nunca la venta). Después de S2: el cese certificado gana.
-      await paso('cancel-ceiling release sweep', () => terminalPaymentService.liberarPorTechoTrasCancelar())
       await paso('approved without references alert recovery', () => recuperarAvisosAprobadosSinReferencias())
     } finally {
       this.isRunning = false

@@ -225,6 +225,7 @@ describe('Task4: Order lock entre primer cierre0 y admisión real de terminal', 
   }
 
   it('la admisión real gana Order lock: pay0 espera su commit y rechaza sin pago ni inventario', async () => {
+    process.env.TERMINAL_PAYMENT_SIN_RESPUESTA_MS = '3000'
     const f = await cuenta()
     const antes = await huella(f)
     const request = solicitud(f.orderId)
@@ -258,9 +259,10 @@ describe('Task4: Order lock entre primer cierre0 y admisión real de terminal', 
       spy.mockRestore()
       await Promise.allSettled([card, ...(cash ? [cash] : [])])
     }
-    expect(await card).toMatchObject({ ok: true, value: { status: 'timeout' } })
+    // Cobro simple · S1: el socket perdido deja la cuenta en «sin respuesta» (cercada) y a los 10 s (aquí, 3 s) «no cobrada».
     expect(await cash!).toMatchObject({ ok: false, error: { statusCode: 409, code: 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE', details: { requestId: request.requestId } } })
-    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId: request.requestId } })).status).toBe('UNKNOWN')
+    expect(await card).toMatchObject({ ok: true, value: { status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW' } })
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId: request.requestId } })).status).toBe('FAILED')
     expect(await huella(f)).toEqual(antes)
   }, 30000)
 
@@ -314,7 +316,13 @@ describe('Task4: Order lock entre primer cierre0 y admisión real de terminal', 
   it('efectivo positivo ya capturado sigue entrando íntegro con terminal incierta y venta ya cerrada', async () => {
     const f = await cuenta(false)
     const request = solicitud(f.orderId)
-    expect(await terminal.sendPaymentToTerminal(request)).toMatchObject({ status: 'timeout' })
+    // Cobro simple · S1: con el socket perdido la cuenta entra a «sin respuesta» y el POS sigue esperando; aquí el efectivo entra
+    // en esos 10 s (la terminal incierta), y al final se cierra la espera.
+    const envio = terminal.sendPaymentToTerminal(request)
+    for (let i = 0; i < 50; i++) {
+      if ((await prisma.terminalPaymentRequest.findUnique({ where: { requestId: request.requestId } }))?.status === 'UNKNOWN') break
+      await new Promise(r => setTimeout(r, 100))
+    }
     expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId: request.requestId } })).status).toBe('UNKNOWN')
     await pago(f.orderId, randomUUID(), 11000)
     const antes = await huella(f)
@@ -325,5 +333,7 @@ describe('Task4: Order lock entre primer cierre0 y admisión real de terminal', 
     expect(despues.postings).toBe(antes.postings)
     expect(despues.stock).toBe(antes.stock)
     expect((await prisma.payment.findMany({ where: { venueId, orderId: f.orderId }, take: 3 })).map(p => p.amount.toFixed(2))).toEqual(['110.00', '110.00'])
+    await terminal.cerrarSinRespuesta(request.requestId, venueId, new Date(Date.now() + 11_000))
+    await envio
   }, 30000)
 })

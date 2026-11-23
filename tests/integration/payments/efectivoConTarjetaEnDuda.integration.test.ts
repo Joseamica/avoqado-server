@@ -136,7 +136,8 @@ describe('D10-B · la venta se cobra igual y queda UN rastro', () => {
 
   it.each([
     ['en vuelo (SENT)', { status: 'SENT', failureCode: null, expiresAt: new Date(Date.now() + 60_000) }],
-    ['ranura suelta, venta en duda (TIMED_OUT/AUTO_RELEASED)', { status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' }],
+    // Cobro simple · S1: la duda es «en vuelo o en sus 10 s» (UNKNOWN); una TIMED_OUT soltada ya no lo es (el vigía la cierra).
+    ['en sus 10 s de «sin respuesta» (UNKNOWN)', { status: 'UNKNOWN', failureCode: null, noResponseAt: new Date() }],
     [
       'cerrada por la terminal sin Payment (COMPLETED sin pago)',
       { status: 'COMPLETED', failureCode: null, resultJson: { status: 'success' } },

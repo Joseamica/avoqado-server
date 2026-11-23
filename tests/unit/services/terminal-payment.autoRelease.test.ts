@@ -238,182 +238,9 @@ describe('reconcileUnknownRequests — money first: a recorded card payment alwa
   })
 })
 
-describe('reconcileUnknownRequests — the terminal must be BACK before anything is freed', () => {
-  it('terminal never sent a heartbeat → row untouched, no release', async () => {
-    tpr().findMany.mockResolvedValueOnce([unknownRow()])
-    terminalWithHeartbeat(null)
+// Cobro simple · S1 (22-nov): el reloj de 20 min con latido que soltaba la RANURA de una UNKNOWN se quitó — una UNKNOWN ya no
+// aparta la terminal y la cierra `cerrarSinRespuesta` a los 10 s (pruebas en tests/integration/payments/cobroSimple.*).
 
-    const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
-
-    expect(summary.released).toBe(0)
-    expect(summary.marked).toBe(0)
-    expect(tpr().updateMany).not.toHaveBeenCalled()
-  })
-
-  it('last heartbeat is OLDER than the request deadline → the terminal has not come back → untouched', async () => {
-    tpr().findMany.mockResolvedValueOnce([unknownRow()])
-    terminalWithHeartbeat(new Date(EXPIRED_AT.getTime() - 60_000))
-
-    const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
-
-    expect(summary.released).toBe(0)
-    expect(summary.marked).toBe(0)
-    expect(tpr().updateMany).not.toHaveBeenCalled()
-  })
-
-  it('first heartbeat AFTER the deadline → stamps terminalReturnedAt with the OBSERVATION time (CAS on UNKNOWN + unmarked), does NOT release', async () => {
-    tpr().findMany.mockResolvedValueOnce([unknownRow()])
-    // Heartbeat after the deadline but ~6 min old (server was down in between): stamping ITS time
-    // instead of the observation time would shorten the grace by those 6 minutes.
-    const back = new Date(EXPIRED_AT.getTime() + 30_000)
-    terminalWithHeartbeat(back)
-
-    const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
-
-    expect(summary.marked).toBe(1)
-    expect(summary.released).toBe(0)
-    expect(tpr().updateMany).toHaveBeenCalledTimes(1)
-    expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ id: 'row-u', status: 'UNKNOWN', terminalReturnedAt: null }),
-        data: expect.objectContaining({ terminalReturnedAt: NOW }),
-      }),
-    )
-    expect(mockedSendOpsAlert).not.toHaveBeenCalled()
-  })
-
-  // S4 (A6, 21-oct): antes el estampado se BORRABA y el reloj de 20 min empezaba de cero con cada hueco de latido.
-  it('marked, grace elapsed, but the terminal went dark again (no heartbeat in the alive window) → stamp KEPT, NOT released', async () => {
-    const returnedAt = new Date(NOW.getTime() - GRACE_MS - 60_000)
-    tpr().findMany.mockResolvedValueOnce([unknownRow({ terminalReturnedAt: returnedAt })])
-    terminalWithHeartbeat(new Date(NOW.getTime() - ALIVE_WINDOW_MS - 1_000)) // last seen just outside the window
-
-    const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
-
-    expect(summary.released).toBe(0)
-    expect(tpr().updateMany).not.toHaveBeenCalled()
-    expect(mockedLogAction).not.toHaveBeenCalled()
-    expect(mockedSendOpsAlert).not.toHaveBeenCalled()
-  })
-
-  it('marked but the grace has not elapsed → untouched', async () => {
-    const returnedAt = new Date(NOW.getTime() - GRACE_MS + 5_000)
-    tpr().findMany.mockResolvedValueOnce([unknownRow({ terminalReturnedAt: returnedAt })])
-    terminalWithHeartbeat(new Date(NOW.getTime() - 10_000))
-
-    const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
-
-    expect(summary.released).toBe(0)
-    expect(tpr().updateMany).not.toHaveBeenCalled()
-  })
-
-  // 🔴 CAMBIO DE POLÍTICA (12-sep). Estas dos pruebas fijaban «pasada la gracia NO se suelta nada»,
-  // y eran correctas para esa política. La política cambió porque su consecuencia era que una
-  // terminal cuya evidencia no llega NUNCA queda muerta para siempre — medido en hardware y vivido
-  // por el cliente (Testarudo, 4-sep, 3 h sin poder cobrar).
-  //
-  // 🔑 Lo que NO cambió, y es lo que estas pruebas siguen guardando: el latido y el plazo siguen sin
-  // probar que la autorización terminó. Por eso soltar libera CAPACIDAD y jamás acredita «no se
-  // cobró»: la fila se queda pendiente de desenlace (su venta sigue cerrada, la sonda sigue
-  // preguntando) y ningún mensaje puede insinuar que cobrar de nuevo esa venta sea seguro.
-  it('pasada la gracia suelta la RANURA con su código, pero NUNCA acredita que no se cobró', async () => {
-    tpr().findMany.mockResolvedValueOnce([unknownRow({ terminalReturnedAt: new Date(NOW.getTime() - GRACE_MS) })])
-    terminalWithHeartbeat(NOW)
-    const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
-
-    expect(summary.released).toBe(1)
-    // Se marca TIMED_OUT/AUTO_RELEASED: el código es lo que separa una liberación DELIBERADA (que
-    // suelta la ranura) de un TIMED_OUT histórico sin explicación (que la sigue reteniendo).
-    expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ id: 'row-u', status: 'UNKNOWN' }),
-        data: { status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' },
-      }),
-    )
-    // 🔴 Y NO se escribe ningún código de la lista blanca: esos afirman «no hubo cobro», y el plazo
-    // no demuestra eso. Si alguien mete AUTO_RELEASED en `CODIGOS_SIN_COBRO`, esto cae.
-    const escritos = tpr().updateMany.mock.calls.map((c: any[]) => c[0].data?.failureCode)
-    expect(
-      escritos.filter((f: string) => ['TPV_NEVER_RECEIVED', 'TPV_INBOX_NOT_FOUND', 'OPERATOR_RECONCILED_NO_CHARGE'].includes(f)),
-    ).toEqual([])
-  })
-
-  it('al soltar deja rastro auditable y su aviso DICE que la venta sigue protegida (nunca que sea seguro recobrar)', async () => {
-    tpr().findMany.mockResolvedValueOnce([unknownRow({ terminalReturnedAt: new Date(NOW.getTime() - GRACE_MS) })])
-    terminalWithHeartbeat(NOW)
-    await terminalPaymentService.reconcileUnknownRequests(NOW)
-
-    // Soltar una terminal por política es exactamente lo que un dueño audita después.
-    expect(mockedLogAction).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'TERMINAL_PAYMENT_AUTO_RELEASED', entity: 'TerminalPaymentRequest' }),
-    )
-    expect(mockedSendOpsAlert).toHaveBeenCalled()
-
-    // 🔴 El aviso tiene que decir las DOS cosas. Con sólo la primera, quien lo lee concluye que la
-    // venta quedó libre y la cobra otra vez — que es el daño que este trabajo existe para evitar.
-    const aviso = mockedSendOpsAlert.mock.calls[0][0]
-    const texto = [aviso.subject, ...(aviso.lines ?? [])].join(' ')
-    expect(texto).toMatch(/liberad[ao]|liberó/i) // la TERMINAL se soltó
-    expect(texto).toMatch(/VENTA sigue protegida/i) // …y la VENTA no
-  })
-
-  it('marked and grace elapsed, but a card payment appeared meanwhile → COMPLETED wins, never released', async () => {
-    const returnedAt = new Date(NOW.getTime() - GRACE_MS - 60_000)
-    tpr().findMany.mockResolvedValueOnce([unknownRow({ terminalReturnedAt: returnedAt })])
-    terminalWithHeartbeat(new Date(NOW.getTime() - 10_000))
-    cierreComunCon(unknownRow({ terminalReturnedAt: returnedAt }), { id: 'pay-late', terminal: { serialNumber: '2841653112' } })
-
-    const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
-
-    expect(summary.completed).toBe(1)
-    expect(summary.released).toBe(0)
-    const calls = tpr().updateMany.mock.calls.map((c: any[]) => c[0].data.status)
-    expect(calls).toEqual(['COMPLETED'])
-    cerradaPorElCierreComun('REQ-U', 'pay-late')
-  })
-
-  it('a release that loses the CAS (row already closed by a late result) is not counted and not alerted', async () => {
-    const returnedAt = new Date(NOW.getTime() - GRACE_MS)
-    tpr().findMany.mockResolvedValueOnce([unknownRow({ terminalReturnedAt: returnedAt })])
-    terminalWithHeartbeat(new Date(NOW.getTime() - 10_000))
-    tpr().updateMany.mockResolvedValueOnce({ count: 0 })
-
-    const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
-
-    expect(summary.released).toBe(0)
-    expect(mockedLogAction).not.toHaveBeenCalled()
-    expect(mockedSendOpsAlert).not.toHaveBeenCalled()
-  })
-
-  it('resolves the Terminal by serial with and without the AVQD- prefix, case-insensitive, and NOT scoped by venue (a migrated terminal must still count as back)', async () => {
-    tpr().findMany.mockResolvedValueOnce([unknownRow({ terminalId: 'n860w173400' })])
-    terminalWithHeartbeat(null)
-
-    await terminalPaymentService.reconcileUnknownRequests(NOW)
-
-    const where = prismaMock.terminal.findFirst.mock.calls[0][0].where
-    expect(where).not.toHaveProperty('venueId')
-    expect(prismaMock.terminal.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          OR: expect.arrayContaining([
-            { serialNumber: { equals: 'n860w173400', mode: 'insensitive' } },
-            { serialNumber: { equals: 'AVQD-n860w173400', mode: 'insensitive' } },
-          ]),
-        }),
-      }),
-    )
-  })
-
-  it('reads only UNKNOWN rows (never touches in-flight ones) with the cron-safe entry read', async () => {
-    await terminalPaymentService.reconcileUnknownRequests(NOW)
-    expect(tpr().findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ status: 'UNKNOWN' }) }))
-  })
-})
-
-// ═══════════════════════════════════════════════════════════════════════════
-// releaseUnknownRequest — the manual path (MCP / superadmin / manager on the tablet)
-// ═══════════════════════════════════════════════════════════════════════════
 describe('releaseUnknownRequest — a human may free the slot, but never on top of money', () => {
   const actor = { staffId: 'staff-9', source: 'MOBILE' as const }
 
@@ -619,27 +446,8 @@ describe('reconcileUnknownRequests — a payment landing on an already-RELEASED 
 // ═══════════════════════════════════════════════════════════════════════════
 // 2. REGRESSION — the stale sweep still parks UNKNOWN exactly as before
 // ═══════════════════════════════════════════════════════════════════════════
-describe('regression — reconcileStaleRequests keeps parking UNKNOWN and still holds the slot', () => {
-  it('a stale in-flight row with no payment → UNKNOWN + TIMED_OUT failureCode (unchanged)', async () => {
-    tpr().findMany.mockResolvedValueOnce([
-      {
-        id: 'row-s',
-        requestId: 'REQ-S',
-        venueId: 'venue-1',
-        terminalId: 'abc',
-        orderId: null,
-        status: 'PENDING',
-        createdAt: new Date(NOW.getTime() - 400_000),
-      },
-    ])
-    const summary = await terminalPaymentService.reconcileStaleRequests(NOW)
-    expect(summary.unknown).toBe(1)
-    expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'UNKNOWN', failureCode: 'TIMED_OUT' }) }),
-    )
-  })
-
-  it('entering UNKNOWN now also sends the ops email (the Better Stack alarm is no longer the only channel)', async () => {
+describe('Cobro simple · S1 — reconcileStaleRequests ya no estaciona UNKNOWN: entra a «sin respuesta»', () => {
+  it('una fila vencida sin pago entra a «sin respuesta» (UNKNOWN + noResponseAt, causa en el sobre) y NO manda correo a operaciones', async () => {
     tpr().findMany.mockResolvedValueOnce([
       {
         id: 'row-s',
@@ -652,18 +460,11 @@ describe('regression — reconcileStaleRequests keeps parking UNKNOWN and still 
         createdAt: new Date(NOW.getTime() - 400_000),
       },
     ])
-    await terminalPaymentService.reconcileStaleRequests(NOW)
-    expect(mockedSendOpsAlert).toHaveBeenCalledWith(expect.objectContaining({ subject: expect.stringContaining('abc') }))
-  })
-})
-
-describe('Audit round1 truthful watchdog instructions', () => {
-  it('never promises elapsed-time release of a financially unknown request', async () => {
-    tpr().findMany.mockResolvedValueOnce([{ ...unknownRow(), status: 'PENDING', amountCents: 10000 }])
-    await terminalPaymentService.reconcileStaleRequests(NOW)
-    expect(mockedSendOpsAlert).toHaveBeenCalled()
-    const text = mockedSendOpsAlert.mock.calls[0][0].lines.join(' ')
-    expect(text).not.toMatch(/liberar[aá] solo|20 minutos/i)
-    expect(text).toMatch(/confirma|concilia/i)
+    prismaMock.$executeRaw.mockResolvedValueOnce(1)
+    const summary = await terminalPaymentService.reconcileStaleRequests(NOW)
+    expect(summary.unknown).toBe(1)
+    const sql = prismaMock.$executeRaw.mock.calls.map((c: unknown[]) => String((c[0] as string[]).join('?')))
+    expect(sql.some((q: string) => q.includes('"noResponseAt" = COALESCE'))).toBe(true)
+    expect(mockedSendOpsAlert).not.toHaveBeenCalled()
   })
 })

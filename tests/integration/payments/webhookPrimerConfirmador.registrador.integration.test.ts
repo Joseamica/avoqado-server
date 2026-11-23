@@ -1484,9 +1484,11 @@ describe('Codex R12 (pasada exhaustiva) · R12-6: un `paymentId` en un resultado
     // Un `timeout` de la terminal entra en la VENTANA DE CONFIRMACIÓN (plan 16-sep, Task 2): TIMED_OUT con el sobre de la
     // terminal, ranura retenida hasta que la ventana decida. Lo que se afirma aquí es que NO tiene ganador: el `paymentId`
     // de un resultado no-success no liga nada, ni en la columna ni en el sobre.
-    expect(await fila(q3.requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: null })
+    // Cobro simple · S1: entra a «sin respuesta» (UNKNOWN con reloj) y la terminal queda libre.
+    expect(await fila(q3.requestId)).toMatchObject({ status: 'UNKNOWN', failureCode: null })
+    expect((await fila(q3.requestId)).noResponseAt).not.toBeNull()
     expect((await fila(q3.requestId)).resultJson).toMatchObject({ status: 'timeout', terminalResult: expect.any(Object) })
-    expect(await terminalPaymentService.isTerminalBusy(f.serial, f.venueId)).toBe(true)
+    expect(await terminalPaymentService.isTerminalBusy(f.serial, f.venueId)).toBe(false)
     sinGanador(await fila(q3.requestId))
     expect(await pago(pagoB.id)).toMatchObject({ status: 'COMPLETED', terminalPaymentRequestId: null })
   })
@@ -1500,7 +1502,9 @@ describe('Codex R12 (pasada exhaustiva) · R12-6: un `paymentId` en un resultado
     )
     // El `timeout` tardío entra por el camino `late` (una UNKNOWN sí entra a la ventana aunque lleve código): TIMED_OUT sin código,
     // con el sobre de la terminal, y sigue sin ganador.
-    expect(await fila(Q.requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: null, lateResult: true })
+    // Cobro simple · S1: arranca el reloj de «sin respuesta» de esa UNKNOWN (sin ganador).
+    expect(await fila(Q.requestId)).toMatchObject({ status: 'UNKNOWN' })
+    expect((await fila(Q.requestId)).noResponseAt).not.toBeNull()
     sinGanador(await fila(Q.requestId))
   })
 

@@ -13,7 +13,7 @@
  * estrenar uno dejaría sin buzón a las apps ya publicadas. Se reusa `PAYMENT_RECEIVED`, que además es literal: un
  * pago entró.
  */
-import { NotificationPriority, NotificationType } from '@prisma/client'
+import { NotificationPriority, NotificationType, OrgRole, StaffRole } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
@@ -111,6 +111,177 @@ export async function avisarCobroTardioAlCajero(ctx: {
     logger.warn('⚠️ [TerminalPayment] no se pudo avisar al cajero del cobro tardío — el dinero SÍ quedó registrado', {
       requestId: ctx.requestId,
       venueId: ctx.venueId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+/** Cómo se devuelve un cobro de más, por procesador (diseño §6; Norman 19-nov para AngelPay; Blumon pide la tarjeta presente). */
+export function comoDevolverlo(procesador: 'ANGELPAY' | 'BLUMON' | null): string {
+  if (procesador === 'ANGELPAY')
+    return 'Para devolverlo: cancélalo desde la terminal el mismo día antes de las 22:59; después, hazle una devolución desde la terminal o con soporte de AngelPay.'
+  if (procesador === 'BLUMON')
+    return 'Para devolverlo: hazle una devolución desde la terminal con la tarjeta del cliente; si no se puede, devuélvelo en efectivo.'
+  return 'Para devolverlo: hazle una devolución desde la terminal o devuélvelo en efectivo.'
+}
+
+/**
+ * Cobro simple · S1.6 (22-nov): «el banco aprobó tarde un cobro que se había dado por no cobrado» — el aviso al DUEÑO y a los
+ * GERENTES del negocio (no al cajero: desde S1 nadie declara; lo que pudo pasar es que la cajera cobrara otra vez, y quien devuelve
+ * es el negocio). Campanita (`PAYMENT_RECEIVED`, el tipo que ya existe: iOS tira el arreglo con un tipo nuevo), en vivo, y correo.
+ * Un aviso de DINERO no se silencia: la fila siempre se crea. Fire-and-forget: NUNCA lanza ni corre dentro de la transacción.
+ */
+export async function avisarAprobadoTardio(ctx: {
+  venueId: string
+  orderId: string | null
+  orderNumber?: string | null
+  paymentId: string
+  montoPesos: number
+  procesador: 'ANGELPAY' | 'BLUMON' | null
+  /** Otros cobros con tarjeta del MISMO importe en el negocio desde el «no cobrado» (la cuenta pudo cobrarse en otra). */
+  cobrosMismoImporte: { orderNumber: string; at: Date }[]
+  requestId?: string | null
+}): Promise<void> {
+  try {
+    const destinatarios = await duenosYGerentes(ctx.venueId)
+    if (destinatarios.length === 0) return
+    const monto = '$' + ctx.montoPesos.toFixed(2)
+    const cuenta = ctx.orderNumber ? ` de la cuenta ${ctx.orderNumber}` : ''
+    const otros = ctx.cobrosMismoImporte.length
+      ? ` Cobros de ${monto} con tarjeta desde entonces: ${ctx.cobrosMismoImporte.map(c => c.orderNumber).join(', ')}.`
+      : ''
+    const title = 'El banco aprobó tarde un cobro'
+    const message =
+      `El banco aprobó tarde un cobro de ${monto}${cuenta} que se había dado por no cobrado. Ya quedó registrado. ` +
+      `Si el cliente pagó otra vez, devuélvele ${monto}.${otros} ${comoDevolverlo(ctx.procesador)}`
+    for (const d of destinatarios) {
+      const notificacion = await prisma.notification.create({
+        data: {
+          recipientId: d.staffId,
+          venueId: ctx.venueId,
+          type: NotificationType.PAYMENT_RECEIVED,
+          priority: NotificationPriority.HIGH,
+          title,
+          message,
+          entityType: 'Payment',
+          entityId: ctx.paymentId,
+          metadata: { paymentId: ctx.paymentId, orderId: ctx.orderId, requestId: ctx.requestId ?? null, cobroTardio: true },
+        },
+      })
+      try {
+        socketManager.getBroadcastingService()?.broadcastNewNotification({
+          notificationId: notificacion.id,
+          recipientId: notificacion.recipientId,
+          venueId: ctx.venueId,
+          userId: notificacion.recipientId,
+          type: notificacion.type,
+          title,
+          message,
+          priority: 'HIGH',
+          isRead: false,
+          metadata: (notificacion.metadata as Record<string, unknown>) || undefined,
+        })
+      } catch {
+        // La fila ya está guardada: la verá al abrir el buzón.
+      }
+      if (d.email) {
+        const { sendNotificationEmail } = await import('../resend.service')
+        await sendNotificationEmail(d.email, `${title}: ${monto}`, title, message).catch(() => false)
+      }
+    }
+    logger.warn('🧾 [TerminalPayment] aprobado tardío — avisado al dueño y a los gerentes', {
+      venueId: ctx.venueId,
+      paymentId: ctx.paymentId,
+      destinatarios: destinatarios.length,
+    })
+  } catch (err) {
+    logger.warn('⚠️ [TerminalPayment] no se pudo avisar al dueño del aprobado tardío — el dinero SÍ quedó registrado', {
+      venueId: ctx.venueId,
+      paymentId: ctx.paymentId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+/** Dueños, administradores y gerentes activos de la sucursal, más los dueños de la organización. Nunca el cajero. Con tope. */
+async function duenosYGerentes(venueId: string): Promise<{ staffId: string; email: string | null }[]> {
+  const deLaSucursal = await prisma.staffVenue.findMany({
+    where: { venueId, active: true, role: { in: [StaffRole.OWNER, StaffRole.ADMIN, StaffRole.MANAGER] }, staff: { active: true } },
+    select: { staffId: true, staff: { select: { email: true } } },
+    orderBy: { staffId: 'asc' },
+    take: 50,
+  })
+  const deLaOrganizacion = await prisma.staffOrganization.findMany({
+    where: { role: OrgRole.OWNER, isActive: true, staff: { active: true }, organization: { venues: { some: { id: venueId } } } },
+    select: { staffId: true, staff: { select: { email: true } } },
+    orderBy: { staffId: 'asc' },
+    take: 50,
+  })
+  const porPersona = new Map<string, string | null>()
+  for (const f of [...deLaSucursal, ...deLaOrganizacion]) porPersona.set(f.staffId, f.staff.email ?? null)
+  return [...porPersona].map(([staffId, email]) => ({ staffId, email }))
+}
+
+/**
+ * Lo que arma el aviso a partir de la SOLICITUD que se reabrió (la llama `avisarAprobacionTardiaTrasVentana` tras el commit): el
+ * importe REGISTRADO (con propina), el procesador de la cuenta del cobro y los cobros con tarjeta del mismo importe desde el
+ * «no cobrado» (Review Focus 5). Nunca lanza.
+ */
+export async function avisarAprobadoTardioDeLaSolicitud(ctx: {
+  requestId: string
+  venueId: string
+  paymentId: string
+  orderId: string | null
+  /** Desde cuándo se dio por no cobrado. */
+  desde: Date | null
+}): Promise<void> {
+  try {
+    const pago = await prisma.payment.findFirst({
+      where: { id: ctx.paymentId, venueId: ctx.venueId },
+      select: {
+        amount: true,
+        tipAmount: true,
+        order: { select: { orderNumber: true } },
+        merchantAccount: { select: { provider: { select: { code: true } } } },
+      },
+    })
+    if (!pago) return
+    const codigo = pago.merchantAccount?.provider.code ?? null
+    const total = pago.amount.add(pago.tipAmount ?? 0)
+    // Codex S1 r1 #4: el mismo TOTAL (venta + propina), no sólo la venta. Acotado: los primeros 50 cobros con tarjeta desde el «no
+    // cobrado»; de ésos, los del mismo total (a lo más 10 en el texto).
+    const mismos = ctx.desde
+      ? (
+          await prisma.payment.findMany({
+            where: {
+              venueId: ctx.venueId,
+              id: { not: ctx.paymentId },
+              status: 'COMPLETED',
+              method: { in: ['CREDIT_CARD', 'DEBIT_CARD'] },
+              createdAt: { gte: ctx.desde },
+              OR: [{ type: null }, { type: { not: 'REFUND' } }],
+            },
+            select: { createdAt: true, amount: true, tipAmount: true, order: { select: { orderNumber: true } } },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+            take: 50,
+          })
+        )
+          .filter(m => m.amount.add(m.tipAmount ?? 0).equals(total))
+          .slice(0, 10)
+      : []
+    await avisarAprobadoTardio({
+      venueId: ctx.venueId,
+      orderId: ctx.orderId,
+      orderNumber: pago.order?.orderNumber ?? null,
+      paymentId: ctx.paymentId,
+      montoPesos: Number(pago.amount) + Number(pago.tipAmount ?? 0),
+      procesador: codigo === 'ANGELPAY' || codigo === 'BLUMON' ? codigo : null,
+      cobrosMismoImporte: mismos.map(m => ({ orderNumber: m.order?.orderNumber ?? 'sin número', at: m.createdAt })),
+      requestId: ctx.requestId,
+    })
+  } catch (err) {
+    logger.warn('⚠️ [TerminalPayment] no se pudo armar el aviso del aprobado tardío', {
+      requestId: ctx.requestId,
       error: err instanceof Error ? err.message : String(err),
     })
   }

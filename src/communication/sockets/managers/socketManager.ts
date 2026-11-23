@@ -620,6 +620,8 @@ export class SocketManager implements ISocketManager {
       }
       // Clean up terminal registry
       terminalRegistry.unregisterBySocketId(socket.id)
+      // Cobro simple · S1: si la terminal no vuelve en 10 s, sus cobros en vuelo entran a «sin respuesta» (`TERMINAL_GONE`).
+      if (terminal?.terminalId && terminal.venueId) terminalPaymentService.alDesconectarseLaTerminal(terminal.terminalId, terminal.venueId)
       const user = socket.authContext?.userId || 'unauthenticated'
       logger.info(`📡 Socket disconnected: ${user} (${socket.id})`, {
         socketId: socket.id,
