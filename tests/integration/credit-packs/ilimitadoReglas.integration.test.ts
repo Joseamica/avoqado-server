@@ -243,10 +243,19 @@ describe('D679 · reglas del Ilimitado (integración, base real)', () => {
     ).id
   }
   /** Una cita a `horas` de ahora, de Ana, sin canje todavía. */
-  const cita = async (horas: number, extra: Partial<Prisma.ReservationUncheckedCreateInput> = {}) => {
-    n += 1
+  /**
+   * Una hora en punto a `horas` de ahora que no cruce la medianoche del negocio: una cita de 1 h que empieza a las 23:00 termina
+   * fuera del horario (00:00–23:59) y el apartado para reagendar la rechaza. Sin esto la prueba dependía de la hora a la que corre.
+   */
+  const enPunto = (horas: number) => {
     const startsAt = new Date(Date.now() + horas * H)
     startsAt.setUTCMinutes(0, 0, 0)
+    if (formatInTimeZone(startsAt, TZ, 'H') === '23') startsAt.setTime(startsAt.getTime() - 2 * H)
+    return startsAt
+  }
+  const cita = async (horas: number, extra: Partial<Prisma.ReservationUncheckedCreateInput> = {}) => {
+    n += 1
+    const startsAt = enPunto(horas)
     const endsAt = new Date(startsAt.getTime() + H)
     return prisma.reservation.create({
       data: {
@@ -301,8 +310,7 @@ describe('D679 · reglas del Ilimitado (integración, base real)', () => {
       .set('Authorization', `Bearer ${await token(email)}`)
       .send({ guestName: 'Ana López', guestPhone: '+525599998888', guestEmail: `otra-${RUN}@test.com`, ...body })
   const reservarCita = async (horas: number, body: Record<string, unknown>, email = ana.email) => {
-    const startsAt = new Date(Date.now() + horas * H)
-    startsAt.setUTCMinutes(0, 0, 0)
+    const startsAt = enPunto(horas)
     return reservar(
       {
         productId: masaje,
