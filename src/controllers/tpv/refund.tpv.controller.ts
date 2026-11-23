@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 import * as refundTpvService from '../../services/tpv/refund.tpv.service'
+import { permisoConcedidoDe } from '../../middlewares/permisoDeReembolso.middleware'
 import { esCantidadNoNegativaEnCentavos, esCantidadPositivaEnCentavos, vieneAusente } from '../../services/shared/devueltoDeUnCobro'
 
 /**
@@ -119,7 +120,7 @@ export async function recordRefund(req: Request, res: Response, next: NextFuncti
     }
 
     // Call service to record the refund
-    const result = await refundTpvService.recordRefund(venueId, refundData, userId, orgId)
+    const result = await refundTpvService.recordRefund(venueId, refundData, userId, orgId, permisoConcedidoDe(req))
 
     // Send success response
     res.status(201).json({

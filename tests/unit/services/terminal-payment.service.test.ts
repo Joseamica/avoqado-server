@@ -2612,8 +2612,11 @@ describe('P1-B · reconcileUnknownRequests pagina las filas liberadas por keyset
       { updatedAt: { gt: ultimaV.updatedAt } },
       { updatedAt: ultimaV.updatedAt, id: { gt: ultimaV.id } },
     ])
-    // Y el filtro de la ventana de 30 min se conserva en TODAS las consultas (el cursor se le suma, no lo sustituye).
-    for (const a of [...deLiberadas, ...deVentana]) expect(a.where.updatedAt).toEqual({ gte: expect.any(Date) })
+    // Y el filtro de la ventana de 30 min se conserva en TODAS las consultas (el cursor se le suma, no lo sustituye). D26: en las
+    // soltadas va dentro de un AND, junto a las 3 h desde el cancel del POS (el `OR` de arriba es del cursor).
+    for (const a of deVentana) expect(a.where.updatedAt).toEqual({ gte: expect.any(Date) })
+    for (const a of deLiberadas)
+      expect(a.where.AND).toEqual([{ OR: [{ updatedAt: { gte: expect.any(Date) } }, { cancelRequestedAt: { gte: expect.any(Date) } }] }])
     // Se procesaron las 403 + 201: cada fila buscó su Payment reconciliable.
     const buscadas = prismaMock.payment.findFirst.mock.calls.map(([a]: any[]) => etiquetaBuscada(a.where))
     expect(buscadas.filter((r: string) => r?.startsWith('rel-req-'))).toHaveLength(403)

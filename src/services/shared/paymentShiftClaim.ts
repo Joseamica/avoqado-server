@@ -89,6 +89,17 @@ interface ClaimCapturedPaymentShiftInput {
    * sin conteo, vale: nadie firmó un corte.
    */
   cajaLigadaAbierta?: string
+  /**
+   * Máquina de efectivo (R4-7 #8): la hora o el turno de la venta no se conocen, o el dinero entró después de que su turno terminó.
+   * El cobro queda sin turno (`NO_SHIFT`) para conciliarlo: nunca se busca el vivo.
+   */
+  porConciliar?: boolean
+  /**
+   * Máquina de efectivo (Codex r1 #11): `expectedShiftId` lo validó el SERVIDOR (inicio y fin contra la hora del comprobante), no es un
+   * id del cliente. Como el de la caja capturada, se respeta aunque un ADMIN lo borre a media subida: la venta queda aparte por ESE
+   * turno (`SALE_SHIFT_CLOSED` con su referencia), nunca vuelve al vivo.
+   */
+  turnoDelServidor?: boolean
 }
 
 /**
@@ -184,6 +195,10 @@ export interface VentaDeLaCola {
   cajaSinTurno?: string
   /** La caja capturada estaba ABIERTA y ligada a su turno: el claim la relee (Codex r6 código #2). */
   cajaLigadaAbierta?: string
+  /** Máquina de efectivo (R4-7 #8): ni el turno vivo ni otro; la venta y su cobro quedan por conciliar. */
+  porConciliar?: boolean
+  /** Máquina de efectivo (Codex r1 #11): el turno lo validó el servidor; se respeta aunque desaparezca (ver el claim). */
+  turnoDelServidor?: boolean
 }
 
 /**
@@ -194,8 +209,12 @@ export interface VentaDeLaCola {
 export async function ventaDeLaColaEnTx(
   tx: Pick<Prisma.TransactionClient, 'cashDrawerSession'>,
   venueId: string,
-  venta: { shiftIdDeLaVenta?: string | null; cashDrawerSessionId?: string | null },
+  venta: { shiftIdDeLaVenta?: string | null; cashDrawerSessionId?: string | null; porConciliar?: boolean; turnoDelServidor?: boolean },
 ): Promise<VentaDeLaCola> {
+  if (venta.porConciliar) return { expectedShiftId: null, cajaCapturada: false, porConciliar: true }
+  if (venta.turnoDelServidor && venta.shiftIdDeLaVenta) {
+    return { expectedShiftId: venta.shiftIdDeLaVenta, cajaCapturada: false, turnoDelServidor: true }
+  }
   const caja = await laCajaDeLaVenta(tx, venueId, venta.cashDrawerSessionId)
   if (venta.shiftIdDeLaVenta) {
     if (caja?.shiftId && caja.shiftId !== venta.shiftIdDeLaVenta) {
@@ -232,7 +251,7 @@ export function entradaDelClaim(
   venta: VentaDeLaCola,
 ): Pick<
   ClaimCapturedPaymentShiftInput,
-  'expectedShiftId' | 'cajaCapturada' | 'apartePorCajaCerrada' | 'cajaSinTurno' | 'cajaLigadaAbierta'
+  'expectedShiftId' | 'cajaCapturada' | 'apartePorCajaCerrada' | 'cajaSinTurno' | 'cajaLigadaAbierta' | 'porConciliar' | 'turnoDelServidor'
 > {
   return {
     expectedShiftId: venta.expectedShiftId,
@@ -240,6 +259,8 @@ export function entradaDelClaim(
     apartePorCajaCerrada: venta.apartePorCajaCerrada,
     cajaSinTurno: venta.cajaSinTurno,
     cajaLigadaAbierta: venta.cajaLigadaAbierta,
+    porConciliar: venta.porConciliar,
+    turnoDelServidor: venta.turnoDelServidor,
   }
 }
 
@@ -253,7 +274,7 @@ export async function turnoDeLaOrdenQueNace<T extends { id: string }>(
   venta: VentaDeLaCola,
   turnoVivo: T | null,
 ): Promise<T | null> {
-  if (venta.apartePorCajaCerrada) return null
+  if (venta.apartePorCajaCerrada || venta.porConciliar) return null
   // Codex r4 código #2: la caja sin turno se relee DESPUÉS de leer el turno vivo; si cambió, la orden no nace en el turno nuevo.
   if (venta.cajaSinTurno) {
     const ahora = await laCajaDeLaVenta(tx, venueId, venta.cajaSinTurno)
@@ -262,8 +283,9 @@ export async function turnoDeLaOrdenQueNace<T extends { id: string }>(
   }
   const pedido = venta.expectedShiftId
   if (!pedido || pedido === turnoVivo?.id) return turnoVivo
-  // Codex r7 código #1: el turno de una caja ya validada no se pone en duda (ver `turnoDeLaVentaQueSeRespeta`).
-  if (venta.cajaCapturada) return null
+  // Codex r7 código #1: el turno de una caja ya validada no se pone en duda (ver `turnoDeLaVentaQueSeRespeta`). Tampoco el que validó el
+  // servidor para la máquina de efectivo (Codex r1 #11).
+  if (venta.cajaCapturada || venta.turnoDelServidor) return null
   return (await esTurnoDelNegocio(tx, venueId, pedido)) ? null : turnoVivo
 }
 
@@ -304,7 +326,8 @@ async function turnoDeLaVentaQueSeRespeta(
   // 🔴 S3 (Codex r7 código #1): el turno que salió de la caja capturada (`ventaDeLaColaEnTx`, ya validada contra este negocio) no es un id
   // del cliente: si ya no se encuentra es que un ADMIN lo borró desde el panel a media subida (`deleteShift` sólo borra turnos cerrados y
   // suelta la liga de la caja). Se respeta igual ⇒ la venta queda aparte por ese turno; nunca vuelve al vivo.
-  if (input.cajaCapturada) return pedido
+  // Máquina de efectivo (Codex r1 #11): lo mismo con el turno que validó el servidor contra la hora del comprobante.
+  if (input.cajaCapturada || input.turnoDelServidor) return pedido
   if (!(await esTurnoDelNegocio(tx, input.venueId, pedido))) return null
   if (!input.orderId) return pedido
   const orden = await tx.order.findFirst({ where: { id: input.orderId, venueId: input.venueId }, select: { shiftId: true } })
@@ -582,6 +605,10 @@ export async function claimShiftForCapturedPayment(
     orderBy: { startTime: 'desc' },
     select: { id: true, status: true },
   })
+  // Máquina de efectivo (R4-7 #8): sin turno conocido, por conciliar; nunca el vivo.
+  if (input.porConciliar) {
+    return { shiftId: null, candidateShiftId: candidate?.id ?? null, observedStatus: candidate?.status ?? null, pendingReason: 'NO_SHIFT' }
+  }
 
   // 🔴 «Cobrar sin red» (D4): una venta tardía de un turno que ya no es el vivo nunca se mezcla en silencio con el nuevo.
   const vivoOpenId = candidate?.status === ShiftStatus.OPEN ? candidate.id : null

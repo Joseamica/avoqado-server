@@ -340,6 +340,14 @@ export async function evaluateRolePermission(p: {
  * @param requiredPermission Permission string (format: "resource:action")
  * @returns Express middleware function
  */
+/**
+ * Máquina de efectivo (Codex r1 #8, decisión b del founder): permisos que SÓLO la sesión autenticada puede tener. El PIN de gerente
+ * (`x-permission-override`) no los concede sobre la sesión de otra persona: emparejar la PC o declarar qué pasó con los billetes de una
+ * duda quedan a nombre de quien hizo login (el gerente cambia de usuario por PIN, R5#10), nunca de la cajera con el PIN del gerente.
+ * Su 403 tampoco ofrece el PIN (`overridable`).
+ */
+export const PERMISOS_SOLO_DE_LA_SESION: ReadonlySet<string> = new Set(['cash-machine:configure', 'cash-machine:resolve'])
+
 export const checkPermission = (requiredPermission: string) => {
   const middleware = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -452,7 +460,7 @@ export const checkPermission = (requiredPermission: string) => {
         // 🔴 PIN de autorización de gerente. Este es el ÚNICO punto de integración
         // del override: cubre las ~200 rutas con checkPermission de hoy y las que
         // vengan. Cero cambios por-acción, igual que lo resuelve Square.
-        const overrideToken = req.headers?.['x-permission-override']
+        const overrideToken = PERMISOS_SOLO_DE_LA_SESION.has(requiredPermission) ? undefined : req.headers?.['x-permission-override']
         if (typeof overrideToken === 'string' && overrideToken.length > 0) {
           // D4 (Codex r1 #4): una venta puede traer varios tokens separados por coma (cortesía y descuento con aprobación). Cada
           // token está atado a UN permiso al consumirse, así que esta revisión sólo gasta el suyo y deja los demás para la suya.
@@ -565,7 +573,7 @@ export const checkPermission = (requiredPermission: string) => {
         // Nunca se toca error/message/required/userRole: apps viejas los leen.
         // El 403 de MEMBRESÍA (arriba) y el de TIER (checkFeatureAccess, otro
         // middleware) no pasan por aquí — ningún PIN los arregla.
-        const overridable = await isManagerPinOverrideEnabled(venueId)
+        const overridable = !PERMISOS_SOLO_DE_LA_SESION.has(requiredPermission) && (await isManagerPinOverrideEnabled(venueId))
 
         return res.status(403).json({
           error: 'Forbidden',

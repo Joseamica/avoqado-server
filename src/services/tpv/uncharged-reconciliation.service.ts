@@ -36,6 +36,7 @@ import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANS
 import { contradiccionDeProcedenciaSql, sinVetoDeDineroSql } from './evidenciaPositivaSql'
 import { sondaReportoActiva, sondaVetaLaDeclaracion } from './sondaActiva'
 import logger from '../../config/logger'
+import { elTechoLevantaElVeto } from './techoDeEjecucionViva'
 
 export const RECONCILE_UNCHARGED_PERMISSION = 'payments:reconcile-uncharged'
 
@@ -590,6 +591,13 @@ export async function reconcileUncharged(
     const entregas = (row.deliveryProvenance as { deliveries?: { ackVersion?: number }[] } | null)?.deliveries
     const procedenciaDesconocida = !Array.isArray(entregas)
     const entregadaASordo = Array.isArray(entregas) && entregas.length > 0 && entregas.every(e => !Number(e?.ackVersion))
+    // D26 (22-nov, Testarudo): el techo de la VENTA. Con la ranura ya suelta, el «sigo cobrando» que la terminal contestó DESPUÉS del
+    // cancel del POS deja de vetar a la PERSONA cuando ya lleva 150 s sin intento abierto ni dinero en la puerta
+    // (`elTechoLevantaElVeto`): es el residuo de la TPV 2.16.0/2.20.0, que contesta «viva» con la pantalla del cobro muerta. Sólo la
+    // persona y sólo la condición del veto: permiso, PIN y vetos de dinero siguen igual; un Payment tardío concilia con 🚨.
+    // ⚠️ Codex r1 #2 y #7 se revirtieron por la regla de parada (la r2 encontró regresiones de esos arreglos): el rechazo del banco
+    // sigue la regla de antes, y el «sigo» no cuenta como recepción si se perdió el ACK. Límites en la promesa del trabajo.
+    const techoDeLaVenta = !porElBanco && ranuraYaSuelta(row) && (await elTechoLevantaElVeto(tx, row, new Date()))
     const constaQueSalio =
       Boolean(row.acknowledgedAt) ||
       sobreConRespuesta ||
@@ -601,7 +609,8 @@ export async function reconcileUncharged(
       (!porElBanco && (await sondaNoLaEncontroTrasEntregarla(tx, row.id, identity.venueId)))
     if (!constaQueSalio) throw new UnchargedReconciliationError('TERMINAL_NEVER_ANSWERED')
 
-    if (sondaVetaLaDeclaracion(row, ranuraYaSuelta(row))) throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
+    if (sondaVetaLaDeclaracion(row, ranuraYaSuelta(row)) && !techoDeLaVenta)
+      throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
 
     const sobre =
       row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)

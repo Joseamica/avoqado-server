@@ -2933,6 +2933,78 @@
       "origen": "app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt:186",
       "quienLaVe": "Quien tiene sesión en la caja, arriba de cualquier pantalla: es la franja de «Sin conexión» (app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:526-533 y 833-840), no una pantalla del NavHost, por eso el extractor no la ve. Sólo con internet (app/src/main/java/com/avoqado/pos/designsystem/components/ConnectivityBanner.kt:96-97), con `orders:read` (avoqado-server/src/routes/mobile.routes.ts:4157) y cuando el SERVIDOR dice que una estación activa con pantalla de cocina y plan KITCHEN_DISPLAY lleva 90 s sin pedir su tablero (app/src/main/java/com/avoqado/pos/kds/data/EstadoDePantallasDeCocina.kt:116; avoqado-server/src/services/kds/kitchenDisplayStations.ts:90-113). En la misma franja sale «La pantalla de {estación} no se alcanza por el WiFi» (app/src/main/java/com/avoqado/pos/printing/routing/KitchenDeliveryPolicy.kt:172). Las líneas son del commit 6e37a5418eda101109e73fd319bdb3eb5932cbe6 (D6 de Flautas, 20-nov-2026), posterior a la ref de este inventario: la franja de internet no existe en las versiones vivas de la cabecera y su página lleva versionMin.",
       "paginas": ["windows/impresoras/pantalla-de-cocina-sin-internet"]
+    },
+    {
+      "id": "accion:nav:MainTab.MORE.route/maquina-de-efectivo",
+      "tipo": "accion",
+      "nombre": "Máquina de efectivo",
+      "origen": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:2024",
+      "quienLaVe": "Sólo en WINDOWS (esEscritorio, app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:2028), en Más › Ajustes › «Este aparato»; se abre con `cash-machine:configure` en la sesión (app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:399; de fábrica MANAGER, ADMIN y OWNER: avoqado-server/src/lib/permissions.ts:1043, 1233, 1389). Sin él, en gris con «Pide a un gerente que entre con su PIN…» (app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:2025). Rama feat/maquina-de-efectivo-1a (e7d51ad0), posterior a la ref de este inventario: no existe en las versiones vivas y sus páginas llevan versionMin.",
+      "paginas": ["windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo"]
+    },
+    {
+      "id": "accion:nav:MainTab.MORE.route/emparejar-la-maquina-de-efectivo",
+      "tipo": "accion",
+      "nombre": "Emparejar esta PC con la máquina",
+      "origen": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt:146",
+      "quienLaVe": "En Ajustes › Máquina de efectivo, con `cash-machine:configure` (avoqado-server/src/routes/mobile.routes.ts:3729), una IP válida y, antes, «Probar conexión» (app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt:137). Con red: con cobros a medias el SERVIDOR contesta 409 (app/src/main/java/com/avoqado/pos/maquina/AjustesDeLaMaquina.kt:34). Rama feat/maquina-de-efectivo-1a (e7d51ad0), posterior a la ref de este inventario: no existe en las versiones vivas y sus páginas llevan versionMin.",
+      "paginas": ["windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo"]
+    },
+    {
+      "id": "accion:nav:MainTab.MORE.route/desemparejar-la-maquina-de-efectivo",
+      "tipo": "accion",
+      "nombre": "Desemparejar",
+      "origen": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt:154",
+      "quienLaVe": "En Ajustes › Máquina de efectivo con la PC emparejada y `cash-machine:configure` (avoqado-server/src/routes/mobile.routes.ts:3738); bloqueado con cobros sin subir o en duda (app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoViewModel.kt:79). Rama feat/maquina-de-efectivo-1a (e7d51ad0), posterior a la ref de este inventario: no existe en las versiones vivas y sus páginas llevan versionMin.",
+      "paginas": ["windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo"]
+    },
+    {
+      "id": "accion:nav:MainTab.CHECKOUT.route/efectivo-en-la-maquina",
+      "tipo": "accion",
+      "nombre": "Efectivo en la máquina",
+      "origen": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt:56",
+      "quienLaVe": "Quien ve Cobrar, en la PC emparejada y con la sesión en su sucursal (app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt:458); con `payments:create` (avoqado-server/src/routes/mobile.routes.ts:3706). En gris con su razón (app/src/main/java/com/avoqado/pos/maquina/MaquinaDeEfectivo.kt:126). Con la máquina, el efectivo a mano no sale (app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt:110). Rama feat/maquina-de-efectivo-1a (e7d51ad0), posterior a la ref de este inventario: no existe en las versiones vivas y sus páginas llevan versionMin.",
+      "paginas": ["windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo", "windows/maquina-de-efectivo/esperando-a-la-maquina"]
+    },
+    {
+      "id": "accion:nav:MainTab.CHECKOUT.route/cancelar-y-devolverme-mi-dinero",
+      "tipo": "accion",
+      "nombre": "Cancelar y devolverme mi dinero",
+      "origen": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt:114",
+      "quienLaVe": "En «Paga en la máquina», sólo con el cobro propio de esta conexión (app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt:112). Rama feat/maquina-de-efectivo-1a (e7d51ad0), posterior a la ref de este inventario: no existe en las versiones vivas y sus páginas llevan versionMin.",
+      "paginas": ["windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo"]
+    },
+    {
+      "id": "accion:nav:MainTab.CHECKOUT.route/sigues-ahi-en-la-maquina",
+      "tipo": "accion",
+      "nombre": "¿Sigues ahí? Toca para continuar",
+      "origen": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt:121",
+      "quienLaVe": "En el cobro de la máquina tras 120 s sin dinero nuevo; a los 30 s sin respuesta se cancela guardando el dinero (app/src/main/java/com/avoqado/pos/maquina/CobroConMaquina.kt:525-526, :455). Rama feat/maquina-de-efectivo-1a (e7d51ad0), posterior a la ref de este inventario: no existe en las versiones vivas y sus páginas llevan versionMin.",
+      "paginas": ["windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo"]
+    },
+    {
+      "id": "accion:nav:MainTab.CHECKOUT.route/imprimir-tickets-de-la-maquina",
+      "tipo": "accion",
+      "nombre": "Imprimir",
+      "origen": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt:86",
+      "quienLaVe": "Junto a «Hay N tickets sin imprimir» en el cobro de la PC con máquina (app/src/main/java/com/avoqado/pos/payment/presentation/PaymentMethodSelectionScreen.kt:248). Rama feat/maquina-de-efectivo-1a (e7d51ad0), posterior a la ref de este inventario: no existe en las versiones vivas y sus páginas llevan versionMin.",
+      "paginas": ["windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo"]
+    },
+    {
+      "id": "extra:esperando-a-la-maquina",
+      "tipo": "pantalla",
+      "nombre": "Esperando a la máquina: un gerente lo resuelve en el panel",
+      "origen": "app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt:143",
+      "quienLaVe": "Quien cobra en la máquina cuando la caja no supo cómo terminó el cobro (acuse perdido a los 3 s, app/src/main/java/com/avoqado/pos/maquina/CobroConMaquina.kt:283); con «Salir» (app/src/main/java/com/avoqado/pos/maquina/ui/PantallaDeLaMaquina.kt:147). Es un estado del cobro, no una ruta: el extractor no lo ve. Rama feat/maquina-de-efectivo-1a (e7d51ad0), posterior a la ref de este inventario: no existe en las versiones vivas y sus páginas llevan versionMin.",
+      "paginas": ["windows/maquina-de-efectivo/esperando-a-la-maquina"]
+    },
+    {
+      "id": "accion:nav:MainTab.MORE.route/imprimir-comprobante-de-la-maquina",
+      "tipo": "accion",
+      "nombre": "Imprimir comprobante",
+      "origen": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt:181",
+      "quienLaVe": "En Ajustes › Máquina de efectivo, «Lo que la máquina les debe a clientes» (app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt:167), junto a cada folio con monto. Rama feat/maquina-de-efectivo-1a (e7d51ad0), posterior a la ref de este inventario: no existe en las versiones vivas y sus páginas llevan versionMin.",
+      "paginas": ["windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina"]
     }
   ]
 }

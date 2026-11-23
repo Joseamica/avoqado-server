@@ -29,6 +29,8 @@ export interface CobroParaDevolver {
    * Se compara contra el enum de Prisma (sin consulta): este archivo sigue siendo PURO.
    */
   tenderSystemKind?: string | null
+  /** Máquina de efectivo (A6): el folio de la QuickPay. Opcional y ausente = como siempre. Ver `devuelveEfectivoDeLaMaquina`. */
+  cashMachineRef?: string | null
 }
 
 /**
@@ -165,11 +167,28 @@ export function sePuedeEscogerComoDevolver(payment: CobroParaDevolver): boolean 
 }
 
 /**
+ * 🔴 Máquina de efectivo (A6, R4-7 #4; Codex R1 #7, R2 #13): LA decisión de «¿esta devolución sale del cajón?» para una venta de la
+ * QuickPay. Su cobro es efectivo que se quedó en la MÁQUINA (`EXTERNAL_RECORDED`), pero la máquina no devuelve billetes: lo que se le
+ * devuelve al cliente sale de la GAVETA del mostrador. Sin escoger (el `null` del POS, `RefundSubmitRules.kt`, que su controlador
+ * vuelve ausente; la TPV nunca escoge) o con «Efectivo», es efectivo del cajón: la fila va `CASH_DRAWER` y lleva UN `PAY_OUT` en la
+ * caja abierta, en la misma transacción (sin caja, 409). Por transferencia, como cualquier otro cobro.
+ * La usan todas las entradas: `devolverConEfectivo` (panel, POS, MCP y el Cambio, vía `writeRefundInTx`) y la TPV.
+ */
+export function devuelveEfectivoDeLaMaquina(
+  original: Pick<CobroParaDevolver, 'cashMachineRef'>,
+  refundMethod: DevolverEnDinero | null | undefined,
+): boolean {
+  return !!original.cashMachineRef && (refundMethod == null || refundMethod === 'CASH')
+}
+
+/**
  * Lo escogido, normalizado: `undefined` = «por el mismo medio» (el reembolso hereda todo, como siempre).
  * Igual al método del cobro, o efectivo sobre algo que YA entra al cajón (un vale), es el mismo medio.
+ * La única excepción es la venta de la máquina (`devuelveEfectivoDeLaMaquina`): sin escoger o con efectivo, es `CASH` del cajón.
  * NO valida si se puede escoger: eso lo hace quien llama con `sePuedeEscogerComoDevolver`.
  */
 export function devolverConEfectivo(original: CobroParaDevolver, refundMethod: DevolverEnDinero | undefined): DevolverEnDinero | undefined {
+  if (devuelveEfectivoDeLaMaquina(original, refundMethod)) return 'CASH'
   if (!refundMethod || refundMethod === original.method) return undefined
   if (refundMethod === 'CASH' && paymentCountsAsDrawerCash(original)) return undefined
   return refundMethod

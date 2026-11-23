@@ -646,7 +646,8 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         .optional()
         .describe(
           'Sólo soporte de Avoqado: suelta LA TERMINAL, nunca la venta, de un cobro con resultado UNKNOWN — lo mismo que la ' +
-            'liberación automática hace 20 min después de que la terminal vuelve, pero ya. La venta sigue bloqueada hasta confirmar ' +
+            'liberación automática hace (20 min después de que la terminal vuelve, o 30 s después de que el punto de venta canceló ' +
+            'si la terminal sigue diciendo que cobra sin señales de dinero), pero ya. La venta sigue bloqueada hasta confirmar ' +
             'qué pasó, y si ese cobro dejó rastro de dinero no se suelta nada. Pide reason y confirm:true.',
         ),
     },
