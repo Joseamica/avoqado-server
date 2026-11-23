@@ -533,7 +533,8 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           outcomeEvidence: estado.outcomeEvidence,
           evidenceClass: estado.evidenceClass,
           ...(estado.reconciliationRequired ? { reconciliationRequired: true } : {}),
-          busy: estado.outcome === 'UNRESOLVED',
+          // Cobro simple · S1 (22-nov): la terminal sólo está ocupada mientras ESE cobro está en vuelo (la ranura del servidor).
+          busy: r.status === 'PENDING' || r.status === 'SENT' || r.status === 'CANCEL_REQUESTED',
           amount: estado.amount, // PESOS
           tip: estado.tip,
           orderId: estado.orderId,
