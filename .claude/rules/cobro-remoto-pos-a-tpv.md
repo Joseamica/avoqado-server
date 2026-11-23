@@ -26,10 +26,14 @@ probar en hardware, con los tres lados leídos (servidor, terminal, POS).
 - **Aprobado tardío** ⇒ el cierre común reabre a `COMPLETED` con 🚨 y avisa al DUEÑO y a los gerentes (`avisarAprobadoTardio`).
 - **Ningún cierre negativo gana a un aprobado ya conocido** (`aprobacionBancariaConocida`, la afirmación de la terminal
   `claimedSuccess` —un `success` sin ids también lo es— y los vetos de `sinVetoDeDineroSql`): queda «aprobado, por registrar»
-  (UNKNOWN, la cuenta cercada, marcado en el sobre `aprobadoPorRegistrarAt` y proyectado UNKNOWN) y 🚨 a los 5 min sin `Payment`.
+  (UNKNOWN, la cuenta cercada; el POS sigue esperando y el GET la proyecta en vuelo hasta la alarma: 🚨 a los 5 min sin `Payment`,
+  que la marca en el sobre `aprobadoPorRegistrarAt` y desde ahí sale UNKNOWN, como develop).
   Vale para TODO escritor de un negativo (Codex S1 r3): el cierre de 10 s, `reconcileBankDeclined`, el negativo de la terminal
   (`cerrarConNegativo`, que conserva la afirmación en el sobre) y el cancel `ACCEPTED`, que pasa por ese mismo escritor. La
   prueba de tabla señal × escritor vive en `tests/integration/payments/cobroSimple.elAprobadoManda.integration.test.ts`.
+- **Al POS que espera (long-poll) se le contesta con UNA regla y UN lector** (`leerParaLaEspera`, Codex S1 r4): final ⇒ ese final
+  (un «no cobrado» con un `claimedSuccess` guardado NO cuenta como final para despertarlo); en «sin respuesta» sin decisión ⇒ sigue
+  esperando; si no ⇒ el `timeout` de siempre. Todo escritor que despierta al POS pasa por `resolverEsperaDelPos`, que usa ese lector.
 - **La RANURA de la terminal sólo existe en vuelo** (`PENDING/SENT/CANCEL_REQUESTED`; índice parcial migrado el 22-nov). La CUENTA
   se cerca en vuelo, en «sin respuesta» (UNKNOWN), con COMPLETED sin `Payment`, y —sólo hasta que el barrido las cierra— las filas
   viejas sin desenlace (TIMED_OUT sin `Payment`, FAILED y CANCELLED sin desenlace acreditado) (`UNRESOLVED_FINANCIAL_OUTCOME`). Nada aparta la terminal por una duda; un doble cobro teórico se DETECTA y se avisa, nunca con
