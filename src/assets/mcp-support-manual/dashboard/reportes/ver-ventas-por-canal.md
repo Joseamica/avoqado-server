@@ -7,7 +7,7 @@ task: ver-ventas-por-canal
 requiredPermissions:
   - reports:read
 sourceRepo: avoqado-web-dashboard
-sourceRef: 13cdb840a0057ebe1c353debb22a1ddcd96d8632
+sourceRef: ee9adc0fd6af0d8c859b483d00404379ef91d4c7
 keywords:
   - cuánto vendí por rappi
   - cuánto vendí en línea

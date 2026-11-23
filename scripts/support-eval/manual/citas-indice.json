@@ -6726,7 +6726,7 @@
       },
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632"
+        "sourceRef": "ee9adc0fd6af0d8c859b483d00404379ef91d4c7"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/routes/dashboard/reservation.routes.ts": [
@@ -6886,7 +6886,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/salesSummaryCanales.ts": [
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632"
+        "sourceRef": "ee9adc0fd6af0d8c859b483d00404379ef91d4c7"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/salesSummaryPoblacion.ts": [
@@ -7268,7 +7268,7 @@
       },
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632"
+        "sourceRef": "ee9adc0fd6af0d8c859b483d00404379ef91d4c7"
       },
       {
         "pagina": "dashboard/reservaciones/agregar-a-lista-de-espera",
@@ -7674,7 +7674,7 @@
       },
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632"
+        "sourceRef": "ee9adc0fd6af0d8c859b483d00404379ef91d4c7"
       }
     ],
     "avoqado-web-dashboard:src/locales/es/reservations.json": [
@@ -7856,7 +7856,7 @@
       },
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632"
+        "sourceRef": "ee9adc0fd6af0d8c859b483d00404379ef91d4c7"
       },
       {
         "pagina": "dashboard/reservaciones/agregar-a-lista-de-espera",
@@ -8372,13 +8372,13 @@
       },
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632"
+        "sourceRef": "ee9adc0fd6af0d8c859b483d00404379ef91d4c7"
       }
     ],
     "avoqado-web-dashboard:src/pages/Reports/components/SalesByChannelSection.tsx": [
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632"
+        "sourceRef": "ee9adc0fd6af0d8c859b483d00404379ef91d4c7"
       }
     ],
     "avoqado-web-dashboard:src/pages/Reservations/CreateReservation.tsx": [

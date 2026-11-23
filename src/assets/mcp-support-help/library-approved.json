@@ -686,7 +686,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/reportes/ver-ventas-por-canal": {
-      "sha256": "dd8875926bf6fe10a975b42cc052b83a97c5c42ac186d4e20e9adc1d7706d18f",
+      "sha256": "ba9eb48c9b8c3950f65b249402243cb8868a86512f53dba9a0e2e9b6407985c6",
       "requiredPermissions": [
         "reports:read"
       ]

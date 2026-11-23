@@ -54,7 +54,11 @@ const fila = (key: string, netSales: number) => ({
 beforeAll(() => {
   registerSalesByChannelTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
 })
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  // Sin restos de un `mockResolvedValueOnce` de otra prueba.
+  mockRangoBloqueado.mockReset().mockResolvedValue(false)
+})
 
 it('es de lectura en el catálogo', () => {
   expect(TOOL_EFFECTS.sales_by_channel).toBe('read')
@@ -90,6 +94,24 @@ describe('🔴 todos los planes (decisión del founder del 22-nov): sin candado 
     expect(dia(startDate)).toBe(dia(endDate))
     expect(dia(endDate)).toBe(new Date().toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' }))
     expect(out.headline).toMatchObject({ netSales: 10 })
+  })
+
+  it('🔴 Codex r7 #1 · sólo con la fecha final de hoy, un negocio Gratis también recibe «hoy»', async () => {
+    mockRangoBloqueado.mockResolvedValueOnce(true).mockResolvedValue(false)
+    mockGetSalesSummary.mockResolvedValue({ summary: { netSales: 10 }, byChannel: [], byOrderType: [] })
+    const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' })
+    const out = parse(await call({ venueId: 'v1', toDate: hoy }))
+    const { startDate } = mockGetSalesSummary.mock.calls[0][1]
+    expect(new Date(startDate).toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' })).toBe(hoy)
+    expect(out.headline).toMatchObject({ netSales: 10 })
+  })
+
+  it('sólo con una fecha final de otro día, un negocio Gratis recibe el aviso de plan', async () => {
+    mockRangoBloqueado.mockResolvedValueOnce(true)
+    const ayer = new Date(Date.now() - 86_400_000).toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' })
+    const out = parse(await call({ venueId: 'v1', toDate: ayer }))
+    expect(out).toMatchObject({ ok: false, planRequired: true })
+    expect(mockGetSalesSummary).not.toHaveBeenCalled()
   })
 
   it('con fechas de histórico, un negocio Gratis recibe el mismo aviso de plan que el panel', async () => {

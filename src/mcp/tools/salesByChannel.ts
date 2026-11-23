@@ -85,10 +85,12 @@ export function registerSalesByChannelTools(server: McpServer, scope: McpScope) 
       let window = rangoDelNegocio(tz, fromDate, toDate)
       if ('error' in window) return text({ ok: false, error: window.error })
       // El mismo candado de rango que el panel (la ruta del reporte lo aplica a todos, superadmin incluido): en un negocio Gratis
-      // sólo «hoy». Sin fechas se le da «hoy» en vez de rechazarlo; un histórico pedido a propósito recibe el aviso del panel.
+      // sólo «hoy». Sin fecha de inicio y con el fin en hoy (o sin fin) se le da «hoy» en vez de rechazarlo (Codex r7 #1); un
+      // histórico pedido a propósito recibe el aviso del panel.
       if (await rangoBloqueadoPorPlan(venueId, window.startDate, window.endDate)) {
-        if (fromDate || toDate) return text({ ok: false, planRequired: true, error: RESPUESTA_RANGO_FUERA_DEL_PLAN.message })
         const hoy = DateTime.now().setZone(tz).toFormat('yyyy-MM-dd')
+        if (fromDate || (toDate && toDate !== hoy))
+          return text({ ok: false, planRequired: true, error: RESPUESTA_RANGO_FUERA_DEL_PLAN.message })
         window = rangoDelNegocio(tz, hoy, hoy) as { startDate: string; endDate: string }
       }
 

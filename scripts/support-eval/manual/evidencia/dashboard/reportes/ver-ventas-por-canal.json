@@ -1,7 +1,7 @@
 {
   "pagina": "dashboard/reportes/ver-ventas-por-canal",
   "sourceRepo": "avoqado-web-dashboard",
-  "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632",
+  "sourceRef": "ee9adc0fd6af0d8c859b483d00404379ef91d4c7",
   "version": "develop (rama fix/resumen-ventas-canales, sin publicar)",
   "pasos": [
     {
@@ -175,7 +175,7 @@
       "docs/audit/2026-11-21-resumen-de-ventas/canales/capturas/G7-paquetes-y-depositos.png"
     ],
     "filasCreadas": [],
-    "nota": "Pasada con Playwright y datos SIMULADOS (sin servidor real), el 22-nov: la pantalla, celular, plan Gratis y los renglones de anticipos. Desde la decisión del founder del 22-nov la sección va en todos los planes, sin candado. Falta la pasada contra el servidor local."
+    "nota": "Pasada con Playwright y datos SIMULADOS (sin servidor real), el 22-nov, ANTES de quitar el candado: la pantalla, celular y los renglones de anticipos. No acredita las tablas en un negocio Gratis (desde la decisión del founder del 22-nov van en todos los planes). Falta la pasada contra el servidor local, también con un negocio Gratis."
   },
   "codex": {
     "lote": 3,
