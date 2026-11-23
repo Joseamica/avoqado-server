@@ -119,6 +119,12 @@ export interface SalesSummaryMetrics {
   tenderCommissions?: number
   /** D10.1 — aditivo. Cuántas devoluciones hay en `refunds` (ya no cuentan en `transactionCount`). */
   refundCount?: number
+  /**
+   * Carril F (hz:fefa11b6:D16.2) — aditivo, SÓLO en la vista de movimientos (filtro de método o de comercio): los cobros de esa
+   * vista sin las devoluciones, con propina (como «Cobraste» del estado del periodo). Cierra la cuenta de la pantalla al centavo:
+   * chargedAmount − refunds − platformFees − tenderCommissions = totalCollected. En la vista de ventas no se manda.
+   */
+  chargedAmount?: number
   // Tarjetas de regalo (1a, spec §7) — aditivos; sólo en la vista sin filtro de método.
   /** Tarjetas cargadas en el rango, menos sus cancelaciones. NO es venta: no está en grossSales. */
   giftCardLoads?: number
@@ -1337,6 +1343,21 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         })
         .then(r => Number(r._sum.amount || 0))
     : Promise.resolve(0)
+  // D16.2 (carril F): lo cobrado en la vista de movimientos, sin devoluciones y con propina. Mismo filtro que el volumen de arriba;
+  // `type` puede ser NULL en cobros viejos (cuentan).
+  const cobradoEnLaVistaPromise: Promise<number | null> = vistaDeMovimientos
+    ? prisma.payment
+        .aggregate({
+          where: enElRango({
+            venueId,
+            status: 'COMPLETED' as const,
+            OR: [{ type: null }, { type: { not: 'REFUND' as const } }],
+            ...paymentLevelFilter,
+          }),
+          _sum: { amount: true, tipAmount: true },
+        })
+        .then(r => round2(Number(r._sum.amount || 0) + Number(r._sum.tipAmount || 0)))
+    : Promise.resolve(null)
 
   // ============================================================
   // Calculate Core Metrics
@@ -1665,6 +1686,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // promise was kicked off near the top of the function so it runs in
   // parallel with the other core-metric queries.
   const paymentVolumeForFiltered = await paymentVolumeForFilteredPromise
+  const cobradoEnLaVista = await cobradoEnLaVistaPromise
 
   // Total Collected = Net Sales + Tips - Platform Fees - Third-party fees (D1)
   // Mexico model: taxes are already included in prices, NOT added on top
@@ -1704,6 +1726,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     unpaidOrders,
     tenderCommissions,
     refundCount,
+    ...(cobradoEnLaVista !== null ? { chargedAmount: cobradoEnLaVista } : {}),
   }
 
   // ⚠️ MindForm legacy QR bridge. Mirrors the gate in
@@ -1739,6 +1762,9 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       summary.transactionCount += legacyAggregate.count
       summary.totalCollected += legacyAggregate.amount + legacyAggregate.tips
       summary.netProfit += legacyAggregate.amount
+      // D16.2: lo cobrado de la vista también trae el QR anterior (cobros aceptados, con propina), para que la cuenta siga cerrando.
+      if (summary.chargedAmount !== undefined)
+        summary.chargedAmount = round2(summary.chargedAmount + legacyAggregate.amount + legacyAggregate.tips)
 
       // Order-derived totals only when NOT filtered (legacy sold real food,
       // so grossSales/netSales should include it on the unfiltered view).
