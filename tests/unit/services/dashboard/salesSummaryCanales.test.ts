@@ -74,7 +74,7 @@ describe('centavosComoSeVen (el redondeo del formateador de la pantalla)', () =>
 })
 
 describe('computeSalesByChannel', () => {
-  it('el QR viejo de Mindform sale como su propio renglón en las dos tablas, con lo que sumó la cabecera', async () => {
+  it('el QR del sistema anterior sale como su propio renglón en las dos tablas, con lo que sumó la cabecera', async () => {
     const db = { $queryRawUnsafe: jest.fn().mockResolvedValue([]) }
     const r = await computeSalesByChannel('v', new Date(), new Date(), { legacy: { amount: 300, tips: 30, count: 3 }, db: db as never })
     for (const filas of [r.byChannel, r.byOrderType]) {

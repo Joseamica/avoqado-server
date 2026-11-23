@@ -106,7 +106,7 @@ export function registerSalesByChannelTools(server: McpServer, scope: McpScope) 
         venueId,
         window,
         timezone: tz,
-        // D15: con el puente de cobros QR viejos caído (sólo Mindform), lo de esa fuente puede estar incompleto.
+        // D15: con el puente de cobros QR del sistema anterior caído (un solo negocio lo usa), lo de esa fuente puede estar incompleto.
         ...(report.legacyUnavailable ? { legacyUnavailable: true as const, aviso: AVISO_PUENTE_QR_CAIDO } : {}),
         // Las tablas se leyeron un instante después de la cabecera y alguna cifra cambió (entró una venta): hay que volver a preguntar.
         ...(report.channelBreakdownOutOfSync

@@ -40,7 +40,7 @@ export type SalesChannel =
 /**
  * Cómo se entregó: `Order.type`, salvo dos que no son una forma de entrega. El cobro de un monto (TPV · PAGO RÁPIDO, el checkout
  * web, cripto: un cobro `FAST`) se guarda como `TAKEOUT` y no es «para llevar» (Codex r1 #6): va como `QUICK_PAYMENT`. El QR viejo
- * de Mindform no tiene cuenta ni tipo.
+ * del sistema anterior no tiene cuenta ni tipo.
  */
 export type SalesOrderType = 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP' | 'MANUAL_ENTRY' | 'QUICK_PAYMENT' | 'QR_LEGACY' | 'OTHER'
 
@@ -58,7 +58,7 @@ export interface SalesBreakdownRow<K extends string = string> {
   tenderCommissions: number
   /** Neto cobrado (`totalCollected`): ventas netas + propinas − las dos comisiones (puede diferir $0.01 de su renglón por el reparto). */
   totalCollected: number
-  /** Cuentas que son venta. `null` en el QR viejo de Mindform: sus cobros no traen cuenta. */
+  /** Cuentas que son venta. `null` en el QR del sistema anterior: sus cobros no traen cuenta. */
   orderCount: number | null
   /** Cobros (sin devoluciones), como `transactionCount`. */
   transactionCount: number
@@ -72,7 +72,7 @@ export interface SalesByChannel {
   cuadra: boolean
 }
 
-/** Lo que el puente de cobros QR viejos (sólo Mindform) sumó a la cabecera: venta, propina y cobros, sin cuenta. */
+/** Lo que el puente de cobros QR del sistema anterior (un solo negocio) sumó a la cabecera: venta, propina y cobros, sin cuenta. */
 export interface LegacyQrAggregate {
   amount: number
   tips: number
@@ -264,7 +264,7 @@ const COLUMNAS_DE_MARCA = (o: string) =>
  * El desglose por canal y por tipo de pedido del rango, en la vista de ventas.
  *
  * @param cabecera la `summary` ya calculada: cada columna se reparte hasta su cifra (al centavo de lo que enseña la pantalla).
- * @param legacy lo que el puente QR de Mindform ya sumó a la cabecera (renglón «QR (sistema anterior)» en las dos tablas).
+ * @param legacy lo que el puente QR del sistema anterior ya sumó a la cabecera (renglón «QR (sistema anterior)» en las dos tablas).
  * @param db cliente de lectura: la transacción de la foto única del reporte cuando exista (D17/D18), o el de siempre.
  */
 export async function computeSalesByChannel(
