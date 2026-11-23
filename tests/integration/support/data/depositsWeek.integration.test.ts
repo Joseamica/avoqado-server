@@ -121,16 +121,7 @@ describe('parity to the cent with getSettlementsLandingInWeek (case 37)', () => 
     await pay(mx(17, '22:01'), 1000, 0, '25.0050') // un minuto después del corte → vie 20
     await pay(mx(21, '10:00'), 333.33, 33.33, '8.3333', { amount: 0, cardType: 'DEBIT' }) // débito sáb 21 → dom 22
     await pay(mx(22, '23:30'), 444.44, 0, '11.1111', { amount: 0, cardType: 'DEBIT' }) // débito dom 22 después del corte → la siguiente
-    await pay(mx(18, '12:00'), -100.01, -10.01, '-2.5003', { amount: 0, refund: true, fixed: '-0.5000' }) // una devolución → el mié 18 en que se registró (D17)
-    // Una devolución no espera su costo ni su regla: cae el día en que se registró, con comisión 0 si su costo no llegó (D17)
-    await pay(mx(19, '12:00'), -50, 0, '0.0000', { amount: 0, refund: true, cost: false, fixed: '0.0000' }) // jue 19, −50
-    await pay(mx(19, '13:00'), -20, 0, '-0.5000', { amount: 0, refund: true, cardType: 'AMEX', fixed: '0.0000' }) // jue 19, −19.50
-    // …pero una devolución por transferencia que guardó la afiliación, sin costo, no sale del banco (Codex r2 del carril C2, #1)
-    await pay(mx(19, '14:00'), -30.03, 0, '0.0000', { amount: 0, refund: true, cost: false, method: 'BANK_TRANSFER', fixed: '0.0000' })
-    await prisma.payment.updateMany({ where: { venueId: f.northId, amount: -30.03 }, data: { fundsFlow: 'EXTERNAL_RECORDED' } })
-    // …y si ya trae su costo (copiado del cobro), sigue como antes: por su regla, el mar 17 → jue 19, no el día en que se registró (r3 #2)
-    await pay(mx(17, '12:00'), -10, 0, '0.0000', { amount: 0, refund: true, method: 'BANK_TRANSFER', fixed: '0.0000' })
-    await prisma.payment.updateMany({ where: { venueId: f.northId, amount: -10 }, data: { fundsFlow: 'EXTERNAL_RECORDED' } })
+    await pay(mx(18, '12:00'), -100.01, -10.01, '-2.5003', { amount: 0, refund: true, fixed: '-0.5000' }) // una devolución → vie 20
     // Lo que el panel no cuenta, tampoco la B: efectivo, pendiente, sin costo, y sin regla para su tipo de tarjeta
     await pay(mx(17, '12:00'), 777.77, 0, '1.0000', { amount: 0, method: 'CASH' })
     await pay(mx(17, '12:00'), 666.66, 0, '1.0000', { amount: 0, status: 'PENDING' })
@@ -141,12 +132,12 @@ describe('parity to the cent with getSettlementsLandingInWeek (case 37)', () => 
     // A mano: neto = importe + propina − redondeo a 2 decimales de (comisión + cargo fijo)
     expect(panelDays(panel)).toEqual([
       { date: '2026-11-17', net: 106.22 }, // 110.02 − 3.80
-      { date: '2026-11-18', net: 181.04 }, // (20.01 − 0.95) + (275.75 − 6.75) + (−110.02 + 3.00) de la devolución
-      { date: '2026-11-19', net: 7.1 }, // 88.88 − 2.28 − 50 − 19.50 − 10 (la devolución por transferencia, por su regla)
-      { date: '2026-11-20', net: 974.49 }, // 1000 − 25.51
+      { date: '2026-11-18', net: 288.06 }, // (20.01 − 0.95) + (275.75 − 6.75)
+      { date: '2026-11-19', net: 86.6 }, // 88.88 − 2.28
+      { date: '2026-11-20', net: 867.47 }, // (1000 − 25.51) + (−110.02 + 3.00)
       { date: '2026-11-22', net: 357.83 }, // 366.66 − 8.83
     ])
-    expect(panel.weekTotal).toEqual({ gross: 1671.3, commission: 44.62, net: 1626.68, count: 10 })
+    expect(panel.weekTotal).toEqual({ gross: 1751.3, commission: 45.12, net: 1706.18, count: 7 })
     expect(b.days).toEqual(panelDays(panel))
     expect(b.total).toEqual(panel.weekTotal)
   })
@@ -409,14 +400,11 @@ describe('what the B cannot add up exactly, it does not say (cases 38 and 39)', 
       .map(n => [n['Index Name'], /venueId/.test(n['Index Cond'] ?? '') && /createdAt/.test(n['Index Cond'] ?? '')])
     try {
       expect(nodes.filter(n => n['Node Type'] === 'Seq Scan' && n['Relation Name'] === 'Payment')).toEqual([])
-      // UN índice de Payment por cada mitad de la consulta (los cobros por su regla y las devoluciones por su día, D17), de los que
-      // empiezan por la sucursal y llevan la fecha, con las dos en su condición. Con estos datos (todos COMPLETED, como casi todo en
-      // producción) el planificador toma el de sucursal y fecha; el estado no filtra nada.
-      expect(onPayment).toHaveLength(2)
-      for (const [index, conFecha] of onPayment) {
-        expect(VENUE_INDEXES).toContain(index)
-        expect(conFecha).toBe(true)
-      }
+      // UN índice de Payment, de los que empiezan por la sucursal y llevan la fecha, con las dos en su condición. Con estos datos (todos
+      // COMPLETED, como casi todo en producción) el planificador toma el de sucursal y fecha; el estado no filtra nada.
+      expect(onPayment).toHaveLength(1)
+      expect(VENUE_INDEXES).toContain(onPayment[0][0])
+      expect(onPayment[0][1]).toBe(true)
     } catch (err) {
       console.log('settlementGroupsPlan', JSON.stringify(plan)) // el plan sólo se imprime si falla
       throw err

@@ -25,7 +25,7 @@ const rule = (id: string, over: Partial<Parameters<typeof foldSettlementGroups>[
   effectiveTo: null,
   ...over,
 })
-const group = (configId: string | null, first: string, last: string, gross: string, commission: string, count = 1): SettlementGroup => ({
+const group = (configId: string, first: string, last: string, gross: string, commission: string, count = 1): SettlementGroup => ({
   configId,
   gross,
   commission,
@@ -54,24 +54,6 @@ const pesosText = (cents: bigint) => `${cents / 100n}.${String(cents % 100n).pad
 const WEEK = venueWeekBounds('2026-11-18', CDMX)
 
 describe('foldSettlementGroups', () => {
-  it('D17: a group of refunds (no rule) lands on the venue day it was registered, even on a Friday night of the window', () => {
-    const out = foldSettlementGroups(
-      [
-        group(null, '2026-11-20T23:00:00-06:00', '2026-11-20T23:30:00-06:00', '-110.02', '-3.00', 2),
-        group(null, '2026-11-14T10:00:00-06:00', '2026-11-14T10:00:00-06:00', '-50.00', '0.00'), // before the week: out
-      ],
-      [],
-      WEEK.weekStart,
-      WEEK.weekEnd,
-      CDMX,
-    )
-    expect(out).toEqual({
-      ok: true,
-      days: [{ date: '2026-11-20', net: -107.02 }],
-      total: { gross: -110.02, commission: -3, net: -107.02, count: 2 },
-    })
-  })
-
   it('each group lands on its day with the functions of the panel, and the days and the total are exact sums', () => {
     const r = rule('r1')
     const out = foldSettlementGroups(
@@ -265,9 +247,7 @@ describe('getSettlementWeekByGroups', () => {
     expect(sql.values).toEqual(
       expect.arrayContaining(['v1', new Date(WEEK.weekStart.getTime() - 21 * 86_400_000), WEEK.weekEnd, CDMX, 2001]),
     )
-    // La misma ventana dos veces: los cobros por su regla y las devoluciones por su día (D17).
-    expect(sql.values.filter(v => v instanceof Date)).toHaveLength(4)
-    expect(sql.sql).toContain(`p."type" IS NOT DISTINCT FROM 'REFUND'`)
+    expect(sql.values.filter(v => v instanceof Date)).toHaveLength(2)
   })
 
   it('the read sets SET LOCAL statement_timeout to depositTimeoutMs in its transaction, before its one query (case 39)', async () => {

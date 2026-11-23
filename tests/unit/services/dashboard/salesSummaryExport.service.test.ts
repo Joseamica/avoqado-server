@@ -83,7 +83,7 @@ describe('detailed rows where-clause + cap', () => {
     expect(where.status).toBe('COMPLETED')
     // from buildPaymentWhereFilter('CASH'): el método, y (carril C2, D12) sólo dinero — sin medios de sistema ni cortesías de $0
     expect(where.AND[0]).toEqual({ method: 'CASH' })
-    expect(JSON.stringify(where.AND[1])).toContain('FREE_CART')
+    expect(JSON.stringify(where.AND[1])).toContain('tipAmount')
     expect(where.createdAt.gte).toBeInstanceOf(Date)
   })
 

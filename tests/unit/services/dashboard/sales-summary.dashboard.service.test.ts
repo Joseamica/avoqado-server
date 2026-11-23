@@ -81,13 +81,7 @@ const NO_ES_MEDIO_DE_SISTEMA = {
         { tenderType: { is: { systemKind: { notIn: ['GIFT_CARD', 'STORE_CREDIT', 'EXCHANGE_CREDIT'] } } } },
       ],
     },
-    {
-      OR: [
-        { processorData: { equals: Prisma.DbNull } },
-        { processorData: { path: ['type'], equals: Prisma.AnyNull } },
-        { NOT: { processorData: { path: ['type'], equals: 'FREE_CART' } } },
-      ],
-    },
+    { NOT: { amount: 0, tipAmount: 0 } },
   ],
 }
 function soloMetodo(where: Prisma.PaymentWhereInput): unknown {
@@ -164,8 +158,8 @@ describe('buildPaymentSqlClause · medios de sistema (D12)', () => {
     expect(buildPaymentWhereFilter('CASH', undefined, { incluirMediosDeSistema: true })).toEqual({ method: 'CASH' })
   })
 
-  it('el cierre de un carrito de $0 por cortesía (FREE_CART) no es dinero', () => {
-    expect(buildPaymentSqlClause('OTHER', undefined, 'p')).toContain(`AND (p."processorData" ->> 'type') IS DISTINCT FROM 'FREE_CART'`)
+  it('un cobro de $0 (cortesía de la TPV con FREE_CART o del POS sin marca) no es dinero', () => {
+    expect(buildPaymentSqlClause('OTHER', undefined, 'p')).toContain(`AND NOT (p."amount" = 0 AND p."tipAmount" = 0)`)
   })
 
   it('todo filtro de método excluye saldo de regalo, saldo a favor y crédito de cambio, con el alias que le pasen', () => {
@@ -295,7 +289,7 @@ describe('buildPaymentWhereFilter <-> buildPaymentSqlClause parity', () => {
   })
 
   it.each(combos)('agree on constraining the international flag for (%s, %s)', (pm, ct) => {
-    // Sólo la parte del método: la de «es dinero» mira `processorData.type` (FREE_CART) en los dos lados.
+    // Sólo la parte del método (la de «es dinero» no toca `processorData`, pero así la paridad mira lo mismo que antes).
     const where = soloMetodo(buildPaymentWhereFilter(pm, ct))
     const clause = buildPaymentSqlClause(pm, ct)
     expect(keyAppears(where, 'processorData')).toBe(clause.includes('isInternational'))
@@ -749,39 +743,6 @@ describe('computeSettlementProjection', () => {
     expect(nextByMerchant.get('ma-A')).toEqual({ nextDate: '2026-06-05', settlementDays: 1 })
     expect(nextByMerchant.get('ma-ext')).toEqual({ nextDate: '2026-06-08', settlementDays: 1 })
     expect(nextByMerchant.has('ma-noconf')).toBe(false)
-  })
-
-  it('D17: una devolución se fecha el día en que se registró (se liquida al registrarse), sin regla ni depósito futuro', async () => {
-    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([
-      {
-        amount: 1000,
-        tipAmount: 0,
-        createdAt: new Date('2026-06-04T15:00:00.000Z'), // jueves → su depósito cae el viernes 06-05
-        type: 'REGULAR',
-        merchantAccountId: 'ma-A',
-        transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 30, venueFixedFee: 0 },
-      },
-      {
-        amount: -300,
-        tipAmount: 0,
-        createdAt: new Date('2026-06-04T20:00:00.000Z'), // la devolución del mismo jueves: ese jueves, no el viernes
-        type: 'REFUND',
-        merchantAccountId: 'ma-A',
-        transactionCost: { transactionType: 'CREDIT', venueChargeAmount: -9, venueFixedFee: 0 },
-      },
-    ])
-    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([
-      { merchantAccountId: 'ma-A', cardType: 'CREDIT', ...baseConfig },
-    ])
-    ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([{ id: 'ma-A', displayName: 'A', alias: null }])
-
-    const { calendar, nextByMerchant } = await computeSettlementProjection(VENUE, START, END, TZ)
-    expect(calendar.map(d => [d.date, d.totalNet])).toEqual([
-      ['2026-06-04', -291],
-      ['2026-06-05', 970],
-    ])
-    // La devolución no trae regla: el comercio sigue con la de su cobro.
-    expect(nextByMerchant.get('ma-A')?.settlementDays).toBe(1)
   })
 
   it('returns an empty projection when there are no card payments', async () => {

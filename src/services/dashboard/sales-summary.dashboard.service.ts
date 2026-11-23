@@ -393,27 +393,33 @@ const sqlEnLineaDeAvoqado = (alias: 'p' | 'orig') =>
   `(COALESCE(${alias}."fundsFlow" = 'AVOQADO_PROCESSED', false) OR ${alias}."ecommerceMerchantId" IS NOT NULL)`
 /**
  * La moneda de un cobro (carril C2, D17). `Payment` no guarda moneda: la tiene su sesión de pago (`CheckoutSession.currency`),
- * y una liga (por API o por la MCP) acepta cualquier `currency`. Se buscan primero las sesiones del negocio que NO son pesos
- * (`484` es el código numérico ISO del peso: es MXN) — casi siempre ninguna, así que el resto del cálculo es gratis — y un cobro
- * es de esa moneda si su sesión lo enlaza por cualquiera de las formas que se han escrito (Codex r1-r3 del carril C2):
+ * y una liga (por API o por la MCP) acepta cualquier `currency`. Se juntan primero las sesiones PAGADAS (`COMPLETED`) del negocio
+ * que NO son pesos (`484` es el código numérico ISO del peso: es MXN) — casi siempre ninguna — como pares (enlace → moneda), y
+ * cada cobro se une a ellas por IGUALDAD (Codex r4 del carril C2, #6), por las formas que se han escrito (r1-r3):
  * `paymentId` (desde D7, 26-oct-2026); antes, el id del cobro en la sesión: `sessionId` (PaymentIntent de Stripe),
  * `metadata.stripePaymentIntentId` (Stripe Checkout) o `blumonCheckoutId` (Blumon E-commerce, aunque el cobro no traiga su
- * canal). Una devolución toma la de su cobro original. Sin sesión extranjera, MXN.
+ * canal). Una devolución toma la de su cobro original. Sin sesión extranjera, MXN. Un enlace repetido cuenta una vez.
  */
 const sqlSesionesExtranjeras = (venueId: string) => Prisma.sql`sesiones_extranjeras AS MATERIALIZED (
-  SELECT UPPER(TRIM(cs."currency")) AS moneda, cs."paymentId", cs."sessionId", cs."blumonCheckoutId",
-         cs."metadata" ->> 'stripePaymentIntentId' AS "piId"
+  SELECT DISTINCT ON (e.tipo, e.enlace) e.tipo, e.enlace, e.moneda
   FROM "CheckoutSession" cs
   JOIN "EcommerceMerchant" em ON em.id = cs."ecommerceMerchantId"
+  CROSS JOIN LATERAL (VALUES
+    ('pago', cs."paymentId", UPPER(TRIM(cs."currency"))),
+    ('cobro', CASE WHEN cs."paymentId" IS NULL THEN cs."sessionId" END, UPPER(TRIM(cs."currency"))),
+    ('cobro', CASE WHEN cs."paymentId" IS NULL THEN cs."blumonCheckoutId" END, UPPER(TRIM(cs."currency"))),
+    ('cobro', CASE WHEN cs."paymentId" IS NULL THEN cs."metadata" ->> 'stripePaymentIntentId' END, UPPER(TRIM(cs."currency")))
+  ) AS e(tipo, enlace, moneda)
   WHERE em."venueId" = ${venueId}
+    AND cs."status" = 'COMPLETED'
     AND UPPER(TRIM(cs."currency")) NOT IN ('MXN', '484')
+    AND e.enlace IS NOT NULL
+  ORDER BY e.tipo, e.enlace, cs."createdAt"
 )`
-const SQL_MONEDA_DEL_COBRO = `m.moneda`
-const SQL_MONEDA_CRUDA = `COALESCE((
-  SELECT s.moneda FROM sesiones_extranjeras s
-  WHERE s."paymentId" = (CASE WHEN orig.id IS NOT NULL THEN orig.id ELSE p.id END)
-     OR (s."paymentId" IS NULL AND (CASE WHEN orig.id IS NOT NULL THEN orig."processorId" ELSE p."processorId" END) IN (s."sessionId", s."blumonCheckoutId", s."piId"))
-  LIMIT 1), 'MXN')`
+/** Las dos uniones por igualdad con las sesiones extranjeras (la de una devolución, con su cobro original). */
+const SQL_UNE_SESIONES_EXTRANJERAS = `LEFT JOIN sesiones_extranjeras sx_pago ON sx_pago.tipo = 'pago' AND sx_pago.enlace = (CASE WHEN orig.id IS NOT NULL THEN orig.id ELSE p.id END)
+        LEFT JOIN sesiones_extranjeras sx_cobro ON sx_cobro.tipo = 'cobro' AND sx_cobro.enlace = (CASE WHEN orig.id IS NOT NULL THEN orig."processorId" ELSE p."processorId" END)`
+const SQL_MONEDA_DEL_COBRO = `COALESCE(sx_pago.moneda, sx_cobro.moneda, 'MXN')`
 const SQL_COMISION_DEL_COBRO = `CASE WHEN tc."id" IS NOT NULL THEN COALESCE(tc."venueChargeAmount", 0) + COALESCE(tc."venueFixedFee", 0) WHEN ${sqlEnLineaDeAvoqado('p')} THEN COALESCE(p."feeAmount", 0) ELSE 0 END`
 
 export type CardTypeFilter = 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL'
@@ -508,9 +514,10 @@ function withPercentages(buckets: PaymentMethodBreakdown[]): PaymentMethodBreakd
 /**
  * Carril C2 (hz:fefa11b6:D12): con un filtro de método, el reporte es una vista de DINERO. No es dinero que entró o salió de la
  * caja o del banco: los medios de SISTEMA —el saldo de una tarjeta de regalo, el saldo a favor (una devolución abonada al sobre de
- * la clienta) y el crédito de un cambio— ni el cierre de un carrito de $0 por cortesía (`processorData.type = 'FREE_CART'`, que
- * la TPV registra para distinguirlo de una cuenta abandonada). El estado de cuenta ya excluye los medios de sistema; con un
- * filtro de método entraban y una devolución a saldo a favor salía como −$30 de «Neto cobrado».
+ * la clienta) y el crédito de un cambio— ni un cobro de $0 (importe y propina en cero: el cierre de una cuenta cubierta por una
+ * cortesía o un descuento, que la TPV marca `FREE_CART` y el POS guarda como efectivo de $0 sin marca; Codex r4 del carril C2, #1).
+ * El estado de cuenta ya excluye los medios de sistema; con un filtro de método entraban y una devolución a saldo a favor salía
+ * como −$30 de «Neto cobrado».
  *
  * Las COMISIONES DEL PERSONAL no usan esta exclusión (`incluirMediosDeSistema`): una venta pagada con saldo de regalo sí le genera
  * comisión a quien vendió, y ese gasto no desaparece por cómo pagó la clienta (Codex r1 del carril C2, #1).
@@ -525,22 +532,16 @@ const WHERE_ES_DINERO: Prisma.PaymentWhereInput = {
         { tenderType: { is: { systemKind: { notIn: [...MEDIOS_DE_SISTEMA] } } } },
       ],
     },
-    // NULL-safe, como NOT_INTERNATIONAL: un `NOT { path equals }` a secas descartaría los cobros sin `processorData`.
-    {
-      OR: [
-        { processorData: { equals: Prisma.DbNull } },
-        { processorData: { path: ['type'], equals: Prisma.AnyNull } },
-        { NOT: { processorData: { path: ['type'], equals: 'FREE_CART' } } },
-      ],
-    },
+    // Las dos columnas no aceptan nulos: el `NOT` no descarta nada de más.
+    { NOT: { amount: 0, tipAmount: 0 } },
   ],
 }
-/** El gemelo en SQL (`NOT EXISTS` y `IS DISTINCT FROM` ya son NULL-safe). Sin alias, la tabla es `"Payment"`, como en los periodos. */
+/** El gemelo en SQL (`NOT EXISTS` ya es NULL-safe; importe y propina no aceptan nulos). Sin alias, la tabla es `"Payment"`. */
 function sqlEsDinero(columnPrefix: string): string {
   const t = columnPrefix || '"Payment"'
   return (
     `NOT EXISTS (SELECT 1 FROM "VenueTenderType" ms_t WHERE ms_t."venueId" = ${t}."venueId" AND ms_t.id = ${t}."tenderTypeId" AND ms_t."systemKind" IN (${MEDIOS_DE_SISTEMA.map(k => `'${k}'`).join(', ')}))` +
-    ` AND (${t}."processorData" ->> 'type') IS DISTINCT FROM 'FREE_CART'`
+    ` AND NOT (${t}."amount" = 0 AND ${t}."tipAmount" = 0)`
   )
 }
 
@@ -870,8 +871,7 @@ export async function computeSettlementProjection(
         WHERE_COBRO_DE_TERMINAL_DE_AVOQADO,
         ...(merchantAccountId ? [{ merchantAccountId }] : []),
         // Sin costo no hay fecha: sólo se leen si alguien va a contar ese dinero como «sin fecha» (Codex r5 #5).
-        // Una devolución no necesita su costo para tener fecha (D17).
-        ...(contarSinFecha ? [] : [{ OR: [{ transactionCost: { isNot: null } }, { type: 'REFUND' as const }] }]),
+        ...(contarSinFecha ? [] : [{ transactionCost: { isNot: null } }]),
       ],
     },
     startDate,
@@ -906,8 +906,7 @@ export async function computeSettlementProjection(
   // dateKey -> merchantId -> accumulator
   const days = new Map<string, Map<string, SettlementCalendarMerchant>>()
   // merchantId -> { dates seen, settlementDays of the matched config }
-  // `settlementDays` undefined = sólo hubo devoluciones (no traen regla); sale como null.
-  const datesByMerchant = new Map<string, { dates: Set<string>; settlementDays: number | null | undefined }>()
+  const datesByMerchant = new Map<string, { dates: Set<string>; settlementDays: number | null }>()
   const unprojectedByMerchant = new Map<string, number>()
 
   let cursorId: string | undefined
@@ -919,7 +918,6 @@ export async function computeSettlementProjection(
         amount: true,
         tipAmount: true,
         createdAt: true,
-        type: true,
         merchantAccountId: true,
         transactionCost: {
           select: { transactionType: true, venueChargeAmount: true, venueFixedFee: true },
@@ -941,7 +939,6 @@ export async function computeSettlementProjection(
 
       // configs is ordered effectiveFrom desc, so projectPaymentSettlement's `find`
       // picks the most recent config whose window contains the payment date.
-      // D17 (carril C2): una devolución se fecha el día en que se registró (la regla vive en `projectPaymentSettlement`, con `type`).
       const projection = projectPaymentSettlement({ ...p, merchantAccountId: merchantId }, configs, venueTimezone)
       if (!projection) {
         // No cost or no matching rule → can't project honestly; out of the calendar, counted as «sin fecha estimada».
@@ -971,18 +968,14 @@ export async function computeSettlementProjection(
       slot.transactionCount += 1
 
       const md = datesByMerchant.get(merchantId)
-      const esDevolucion = p.type === 'REFUND'
       if (!md) {
-        datesByMerchant.set(merchantId, { dates: new Set([dateKey]), settlementDays: esDevolucion ? undefined : settlementDays })
+        datesByMerchant.set(merchantId, { dates: new Set([dateKey]), settlementDays })
       } else {
         md.dates.add(dateKey)
         // Only report a rule when it is unambiguous: a merchant whose card types
         // settle differently (e.g. debit 1 day, Amex 3) gets null instead of a
-        // last-write-wins value that depends on payment iteration order. A refund carries no rule (it settles when recorded).
-        if (!esDevolucion) {
-          if (md.settlementDays === undefined) md.settlementDays = settlementDays
-          else if (md.settlementDays !== settlementDays) md.settlementDays = null
-        }
+        // last-write-wins value that depends on payment iteration order.
+        if (md.settlementDays !== settlementDays) md.settlementDays = null
       }
     }
 
@@ -1010,7 +1003,7 @@ export async function computeSettlementProjection(
     const sorted = Array.from(dates).sort()
     const upcoming = sorted.filter(d => d >= todayKey)
     const nextDate = upcoming.length > 0 ? upcoming[0] : sorted.length > 0 ? sorted[sorted.length - 1] : null
-    nextByMerchant.set(merchantId, { nextDate, settlementDays: settlementDays ?? null })
+    nextByMerchant.set(merchantId, { nextDate, settlementDays })
   }
 
   for (const [id, neto] of unprojectedByMerchant) unprojectedByMerchant.set(id, round2(neto))
@@ -1818,8 +1811,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
                COALESCE(SUM(${Prisma.raw(SQL_COMISION_DEL_COBRO)}), 0)::text AS "fees",
                COALESCE(SUM(ROUND((${Prisma.raw(SQL_COMISION_DEL_COBRO)})::numeric, 2)), 0)::text AS "feesCents",
                COALESCE(SUM(p."amount" + p."tipAmount") FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND'), 0)::text AS "chargedAmount",
-               (COUNT(*) FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND' AND (p."processorData" ->> 'type') IS DISTINCT FROM 'FREE_CART'))::int AS "chargedCount",
-               (COUNT(*) FILTER (WHERE (p."processorData" ->> 'type') = 'FREE_CART'))::int AS "cortesias",
+               (COUNT(*) FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND' AND NOT (p."amount" = 0 AND p."tipAmount" = 0)))::int AS "chargedCount",
+               (COUNT(*) FILTER (WHERE p."amount" = 0 AND p."tipAmount" = 0))::int AS "cortesias",
                COALESCE(-SUM(p."amount" + p."tipAmount") FILTER (WHERE p."type" = 'REFUND'), 0)::text AS "refundAmount",
                COALESCE(SUM(COALESCE(p."tenderCommissionAmount", 0)), 0)::text AS "tenderCommissions",
                COALESCE(-SUM(p."amount" + p."tipAmount") FILTER (WHERE p."type" = 'REFUND' AND o."status" IN ('CANCELLED', 'DELETED')), 0)::text AS "cancelledOrderRefunds"
@@ -1827,7 +1820,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
         LEFT JOIN "Order" o ON o.id = p."orderId"
         LEFT JOIN "Payment" orig ON p."type" = 'REFUND' AND orig.id = p."processorData" ->> 'originalPaymentId' AND orig."venueId" = p."venueId"
-        CROSS JOIN LATERAL (SELECT ${Prisma.raw(SQL_MONEDA_CRUDA)} AS moneda) m
+        ${Prisma.raw(SQL_UNE_SESIONES_EXTRANJERAS)}
         WHERE p."venueId" = ${venueId}
           AND ${sqlRangoHoraRealSql('p', parsedStartDate, parsedEndDate)}
           AND p."status" = 'COMPLETED'
@@ -1938,7 +1931,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       d.collected += amt + tip
       d.platformFee += feeCents
       d.refunds += refunded
-      // Un carrito de $0 por cortesía (FREE_CART) no es un cobro de dinero: no cuenta como transacción del estado.
+      // Un cobro de $0 (una cuenta cubierta por cortesía o descuento, en la TPV o en el POS) no es dinero: no cuenta como transacción.
       const cobros = count - Number(row.cortesias)
       d.refundCount += count - chargedCount - Number(row.cortesias)
       d.transactionCount += cobros

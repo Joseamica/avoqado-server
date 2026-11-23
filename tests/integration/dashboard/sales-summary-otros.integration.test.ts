@@ -200,9 +200,10 @@ beforeAll(async () => {
   await seed({ method: 'OTHER', amount: -100, type: 'REFUND', tender: 'exchange', tenderLabel: 'Crédito de cambio' })
   await seed({ method: 'OTHER', amount: 100, tender: 'exchange', tenderLabel: 'Crédito de cambio' })
   await seed({ method: 'OTHER', amount: 40, tender: 'giftCard', tenderLabel: 'Tarjeta de regalo' })
-  // El cierre de un carrito de $0 por cortesía en la TPV (FREE_CART): no es un cobro de dinero.
+  // Cuentas cubiertas por una cortesía: la TPV cierra con $0 marcado `FREE_CART`; el POS, con efectivo de $0 sin marca. No son dinero.
   await seed({ method: 'OTHER', amount: 0, processorData: { type: 'FREE_CART', reason: 'total_zero_cortesia_or_discount' } })
-  // D17 · devolución a tarjeta registrada hoy (con su comisión revertida): se fecha hoy, no en un depósito futuro.
+  await seed({ method: 'CASH', amount: 0 })
+  // Una devolución a tarjeta registrada hoy (con su comisión revertida) en el comercio R.
   await seed({ method: 'CREDIT_CARD', amount: -30, type: 'REFUND', merchant: merchantR, fee: -0.9 })
   // D17 · una liga cobrada en dólares (US$100, comisión 4) y su devolución parcial (US$20): no se suman como pesos.
   const usd = await seed({ method: 'CREDIT_CARD', amount: 100, ecommerce: true, fundsFlow: 'AVOQADO_PROCESSED', feeAmount: 4 })
@@ -284,6 +285,11 @@ describe('D12.1 · el filtro «Otros» sólo cuenta dinero', () => {
     expect(c(r.summary.tips)).toBe(0)
   })
 
+  it('con «Efectivo», la cortesía del POS (efectivo de $0 sin marca) tampoco cuenta', async () => {
+    const r = await getSalesSummary(venueId, base({ paymentMethod: 'CASH' }))
+    expect(r.summary.transactionCount).toBe(1)
+  })
+
   it('el archivo detallado con «Otros» tiene la misma población', async () => {
     const n = await countSalesSummaryDetailRows(venueId, {
       startDate: FROM.toISOString(),
@@ -299,6 +305,7 @@ describe('D12.2 y D12.3 · el estado de cuenta clasifica por tenderSemantics y n
     const r = await getSalesSummary(venueId, base())
     const d = r.statementDestinations!
     expect(c(d.drawer.collected)).toBe(180) // efectivo 100 + vales 80
+    expect(d.drawer.transactionCount).toBe(2) // la cortesía de $0 del POS no es un cobro
     expect(c(d.other.collected)).toBe(150) // Uber 100 + transferencia 50 (sin saldo a favor, cambio ni saldo de regalo)
     expect(c(d.tenderCommissions)).toBe(30)
     const tipos = (d.otherByType ?? []).map(t => [t.label ?? t.method, c(t.netToReceive), c(t.tenderCommissions)])
@@ -315,12 +322,6 @@ describe('D12.2 y D12.3 · el estado de cuenta clasifica por tenderSemantics y n
 })
 
 describe('D17 · fechas y monedas del estado de cuenta', () => {
-  it('una devolución a tarjeta se fecha el día en que se registró, no en un depósito futuro', async () => {
-    const r = await getSalesSummary(venueId, base())
-    const dias = (r.settlementCalendar ?? []).filter(x => x.byMerchant.some(m => m.merchantAccountId === merchantR))
-    expect(dias.map(x => [x.date, c(x.totalNet)])).toEqual([['2025-04-08', -29.1]])
-  })
-
   it('una liga en otra moneda sale aparte, en su moneda, y no se suma a cajones ni destinos', async () => {
     const r = await getSalesSummary(venueId, base())
     // USD: neto (100 cobrados − 20 devueltos), con sus cobros y sus devoluciones contados aparte. EUR: las dos ligas de antes de D7.
