@@ -1935,7 +1935,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       const cobros = count - Number(row.cortesias)
       d.refundCount += count - chargedCount - Number(row.cortesias)
       d.transactionCount += cobros
-      if (destino === 'terminal' && row.merchantAccountId) {
+      // «Por comercio» con los mismos conteos que su destino: un cobro de $0 no es un movimiento (Codex r5 del carril C2).
+      if (destino === 'terminal' && row.merchantAccountId && cobros > 0) {
         const m = porComercio.get(row.merchantAccountId) ?? {
           merchantAccountId: row.merchantAccountId,
           collected: 0,
@@ -1946,9 +1947,9 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         }
         m.collected += amt + tip
         m.fee += feeCents
-        m.txns += count
+        m.txns += cobros
         m.refunds += refunded
-        m.refundCount += count - chargedCount
+        m.refundCount += count - chargedCount - Number(row.cortesias)
         porComercio.set(row.merchantAccountId, m)
       }
       if (destino === 'other' && cobros > 0) {

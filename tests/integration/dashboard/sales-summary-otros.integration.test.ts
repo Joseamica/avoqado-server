@@ -203,6 +203,8 @@ beforeAll(async () => {
   // Cuentas cubiertas por una cortesía: la TPV cierra con $0 marcado `FREE_CART`; el POS, con efectivo de $0 sin marca. No son dinero.
   await seed({ method: 'OTHER', amount: 0, processorData: { type: 'FREE_CART', reason: 'total_zero_cortesia_or_discount' } })
   await seed({ method: 'CASH', amount: 0 })
+  // …y el registro rápido de la TPV puede guardar una tarjeta de $0 con afiliación: tampoco es un movimiento del comercio.
+  await seed({ method: 'CREDIT_CARD', amount: 0, merchant: merchantR })
   // Una devolución a tarjeta registrada hoy (con su comisión revertida) en el comercio R.
   await seed({ method: 'CREDIT_CARD', amount: -30, type: 'REFUND', merchant: merchantR, fee: -0.9 })
   // D17 · una liga cobrada en dólares (US$100, comisión 4) y su devolución parcial (US$20): no se suman como pesos.
@@ -301,6 +303,15 @@ describe('D12.1 · el filtro «Otros» sólo cuenta dinero', () => {
 })
 
 describe('D12.2 y D12.3 · el estado de cuenta clasifica por tenderSemantics y nombra los tipos de pago', () => {
+  it('«Por comercio» cuenta igual que su destino: la tarjeta de $0 no es un movimiento ni una devolución', async () => {
+    const r = await getSalesSummary(venueId, base())
+    const R = r.byMerchantAccount?.find(m => m.merchantAccountId === merchantR)
+    // Sólo la devolución de $30 a tarjeta de R.
+    expect([R?.transactionCount, R?.refundCount, c(R?.refunds)]).toEqual([1, 1, 30])
+    const t = r.statementDestinations!.terminal
+    expect([t.transactionCount, t.refundCount]).toEqual([1, 1])
+  })
+
   it('el vale que cuenta como efectivo está en «Ya en tu mano»; «Otros» trae Uber y la transferencia por nombre', async () => {
     const r = await getSalesSummary(venueId, base())
     const d = r.statementDestinations!
