@@ -34,6 +34,6 @@ Para *Inicio* necesitas permiso para ver el inicio y las analíticas; para *Repo
 ## Problemas frecuentes
 
 - Sin filtros, una cuenta abierta ayer y cobrada hoy sale ayer en *Resumen de Ventas* y hoy en *Inicio*.
-- Una cuenta pagada a medias no cuenta como venta, ni en *Neto cobrado*, hasta que se termina de pagar; la propina de su abono sí sale en *Propinas*.
+- Una cuenta pagada a medias no cuenta como venta, ni en *Neto cobrado*, hasta que se termina de pagar; su abono tampoco entra en *Propinas* ni en las transacciones hasta entonces.
 - *Inicio* no resta las devoluciones y el *Resumen de Ventas* sí. Las transacciones del *Resumen de Ventas* son cobros: las devoluciones van en su renglón, con su número.
 - *Liquidación de hoy*, en *Inicio*, no es lo que vendiste hoy: es lo que se estima que cae hoy en tu banco por cobros con tarjeta, sin el efectivo.
