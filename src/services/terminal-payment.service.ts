@@ -8290,14 +8290,15 @@ class TerminalPaymentService {
 
   /**
    * El origen del techo: cuándo pidió el POS cancelar por PRIMERA vez. Una sola escritura (los cancels repetidos no lo mueven) y sin
-   * tocar `updatedAt`. Nunca tumba el cancel: si no se puede sellar, esa fila no tiene techo (le queda el reloj de 20 min).
+   * tocar `updatedAt`. Codex S1 r3 (R3-11): con el reloj del SERVIDOR, como `noResponseAt`: los cortes de 10 s y 30 s tras el cancel
+   * (`reconcileStaleRequests`, `respetarActiveHasta`) se miden con ese mismo reloj. Nunca tumba el cancel: si no se puede sellar, esa fila no tiene techo (le queda el reloj de 20 min).
    * ⚠️ Límite (Codex r1 #6, arreglo revertido por la regla de parada tras la r2 #6): va DESPUÉS de la intención, no en su misma
    * transacción; si el proceso muere entre las dos, esa solicitud se queda sin techo.
    */
   private async sellarPrimerCancel(requestId: string, venueId: string): Promise<void> {
     try {
       await prisma.$executeRaw`
-        UPDATE "TerminalPaymentRequest" SET "cancelRequestedAt" = (NOW() AT TIME ZONE 'UTC')
+        UPDATE "TerminalPaymentRequest" SET "cancelRequestedAt" = ${utcTs(new Date())}
         WHERE "requestId" = ${requestId} AND "venueId" = ${venueId} AND "cancelRequestedAt" IS NULL`
     } catch (err) {
       logger.warn('⚠️ [TerminalPayment] could not stamp the first cancel — this request keeps the 20-min clock only', {

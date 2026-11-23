@@ -375,3 +375,32 @@ describe('R3-8 · la proyección para apps viejas va por ESTADO, no por edad', (
     expect(await terminalPaymentService.getPaymentStatus(s.requestId, f.venueId)).toMatchObject({ status: 'UNKNOWN' })
   })
 })
+
+describe('R3-11 · el primer cancel se sella con el reloj del SERVIDOR (el mismo con el que se corta)', () => {
+  it('con el reloj del servidor una hora adelante de la base, el sello es la hora del servidor', async () => {
+    const s = await f.solicitud({ status: 'CANCEL_REQUESTED', acknowledgedAt: new Date() })
+    const delServidor = new Date(Date.now() + 60 * 60_000)
+    jest.useFakeTimers({
+      now: delServidor,
+      doNotFake: [
+        'setTimeout',
+        'clearTimeout',
+        'setInterval',
+        'clearInterval',
+        'setImmediate',
+        'clearImmediate',
+        'nextTick',
+        'queueMicrotask',
+        'hrtime',
+        'performance',
+      ],
+    })
+    try {
+      await svc.sellarPrimerCancel(s.requestId, f.venueId)
+    } finally {
+      jest.useRealTimers()
+    }
+    const sello = (await fila(s.requestId)).cancelRequestedAt!
+    expect(Math.abs(sello.getTime() - delServidor.getTime())).toBeLessThan(5_000)
+  })
+})
