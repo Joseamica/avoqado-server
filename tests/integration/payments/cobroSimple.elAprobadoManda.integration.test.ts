@@ -36,7 +36,10 @@ beforeEach(() => {
   jest.clearAllMocks()
   const emit = jest.fn()
   const socket = { emit, timeout: () => ({ emit }) }
-  ;(socketManager.getServer as jest.Mock).mockReturnValue({ sockets: { sockets: new Map([[SOCKET, socket]]) }, to: () => ({ emit: jest.fn() }) })
+  ;(socketManager.getServer as jest.Mock).mockReturnValue({
+    sockets: { sockets: new Map([[SOCKET, socket]]) },
+    to: () => ({ emit: jest.fn() }),
+  })
   ;(terminalRegistry.getTerminal as jest.Mock).mockImplementation((terminalId: string) => ({
     terminalId,
     venueId: f.venueId,
@@ -95,7 +98,12 @@ const NEGATIVOS = ['FAILED', 'CANCELLED']
 describe('R3-1 · el rechazo del banco no le gana a un «sí cobré» de la terminal ya guardado', () => {
   it('fila en duda con `claimedSuccess`: el aviso rechazado de su intento NO la cierra BANK_DECLINED', async () => {
     const venta = await f.nuevaVenta(100)
-    const s = await f.solicitud({ orderId: venta.id, status: 'UNKNOWN', noResponseAt: new Date(), resultJson: { status: 'timeout', claimedSuccess: { status: 'success' } } })
+    const s = await f.solicitud({
+      orderId: venta.id,
+      status: 'UNKNOWN',
+      noResponseAt: new Date(),
+      resultJson: { status: 'timeout', claimedSuccess: { status: 'success' } },
+    })
     const a = await intento(s.requestId)
     await rechazo(a)
     expect(await fila(s.requestId)).toMatchObject({ status: 'UNKNOWN' })
@@ -122,7 +130,108 @@ describe('R3-1 · el rechazo del banco no le gana a un «sí cobré» de la term
     expect(await svc.entrarSinRespuestaYProgramar(s.requestId, f.venueId, 'NO_RESPONSE')).toBe(true)
     expect(await fila(s.requestId)).toMatchObject({ status: 'UNKNOWN' })
     expect(
-      await reconcileBankDeclined({ venueId: f.venueId, requestId: s.requestId, origen: 'ANGELPAY', evidencia: { eventLogId: 'x', attemptId: a } }),
+      await reconcileBankDeclined({
+        venueId: f.venueId,
+        requestId: s.requestId,
+        origen: 'ANGELPAY',
+        evidencia: { eventLogId: 'x', attemptId: a },
+      }),
     ).toMatchObject({ closed: false, reason: 'POSITIVE_EVIDENCE_EXISTS' })
+  })
+})
+
+describe('R3-2 · un negativo posterior de la terminal o un cancel ACCEPTED no borran el «sí»', () => {
+  const afirmada = (orderId: string) =>
+    f.solicitud({
+      orderId,
+      status: 'UNKNOWN',
+      noResponseAt: null,
+      acknowledgedAt: new Date(),
+      resultJson: { status: 'timeout', claimedSuccess: { status: 'success' } },
+    })
+
+  it('negativo ACREDITADO (PROCESSOR_DECLINED) sobre una afirmada: no la cierra, conserva `claimedSuccess` y el cierre dice «aprobado, por registrar»', async () => {
+    const venta = await f.nuevaVenta(100)
+    const s = await afirmada(venta.id)
+    await svc.handlePaymentResultFromSocket(
+      { requestId: s.requestId, status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED', errorMessage: 'Declinada' },
+      tpv(),
+    )
+    const r = await fila(s.requestId)
+    expect(NEGATIVOS).not.toContain(r.status)
+    expect((r.resultJson as any).claimedSuccess).toEqual({ status: 'success' })
+    expect(await terminalPaymentService.cerrarSinRespuesta(s.requestId, f.venueId, enDiezS())).toBe('APROBADO_POR_REGISTRAR')
+    expect(await cercada(venta.id)).toBe(true)
+  })
+
+  it('negativo SIN evidencia sobre una afirmada: entra a «sin respuesta» conservando `claimedSuccess`; a los 10 s, nunca «no cobrado»', async () => {
+    const venta = await f.nuevaVenta(100)
+    const s = await afirmada(venta.id)
+    await svc.handlePaymentResultFromSocket({ requestId: s.requestId, status: 'failed', errorMessage: 'U101' }, tpv())
+    const r = await fila(s.requestId)
+    expect(r.status).toBe('UNKNOWN')
+    expect((r.resultJson as any).claimedSuccess).toEqual({ status: 'success' })
+    expect(await terminalPaymentService.cerrarSinRespuesta(s.requestId, f.venueId, enDiezS())).toBe('APROBADO_POR_REGISTRAR')
+    expect(await cercada(venta.id)).toBe(true)
+  })
+
+  it('cancel ACCEPTED sobre una afirmada: no la cierra CANCELLED y el POS que espera no recibe `cancelled`', async () => {
+    const venta = await f.nuevaVenta(100)
+    const s = await afirmada(venta.id)
+    const resolve = jest.fn()
+    svc.pendingPayments.set(s.requestId, {
+      resolve,
+      reject: jest.fn(),
+      timeout: setTimeout(() => undefined, 60_000),
+      requestId: s.requestId,
+      terminalId: f.llaveTerminal,
+      venueId: f.venueId,
+    })
+    await svc.handleCancelDispositionFromSocket({ requestId: s.requestId, disposition: 'ACCEPTED' }, tpv())
+    const r = await fila(s.requestId)
+    expect(NEGATIVOS).not.toContain(r.status)
+    expect((r.resultJson as any).claimedSuccess).toEqual({ status: 'success' })
+    expect(resolve).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }))
+    expect(await cercada(venta.id)).toBe(true)
+  })
+
+  it('cancel ACCEPTED con un aviso APROBADO ya guardado de su intento: no la cierra CANCELLED', async () => {
+    const venta = await f.nuevaVenta(100)
+    const s = await f.solicitud({
+      orderId: venta.id,
+      status: 'CANCEL_REQUESTED',
+      cancelRequestedAt: new Date(),
+      acknowledgedAt: new Date(),
+    })
+    const a = await intento(s.requestId)
+    await prisma.providerEventLog.create({
+      data: {
+        provider: 'PAYMENT_PROCESSOR',
+        type: 'send_transaction',
+        eventId: `angelpay-${f.nuevoEventId()}`,
+        venueId: f.venueId,
+        attemptId: a,
+        payload: f.eventoAngelPay(a),
+      } as any,
+    })
+    await svc.handleCancelDispositionFromSocket({ requestId: s.requestId, disposition: 'ACCEPTED' }, tpv())
+    expect(NEGATIVOS).not.toContain((await fila(s.requestId)).status)
+    expect(await cercada(venta.id)).toBe(true)
+  })
+
+  it('CONTROL: sin señal de dinero, el cancel ACCEPTED sí cierra CANCELLED/ACCEPTED y el POS recibe `cancelled`', async () => {
+    const s = await f.solicitud({ status: 'CANCEL_REQUESTED', cancelRequestedAt: new Date(), acknowledgedAt: new Date() })
+    const resolve = jest.fn()
+    svc.pendingPayments.set(s.requestId, {
+      resolve,
+      reject: jest.fn(),
+      timeout: setTimeout(() => undefined, 60_000),
+      requestId: s.requestId,
+      terminalId: f.llaveTerminal,
+      venueId: f.venueId,
+    })
+    await svc.handleCancelDispositionFromSocket({ requestId: s.requestId, disposition: 'ACCEPTED' }, tpv())
+    expect(await fila(s.requestId)).toMatchObject({ status: 'CANCELLED', cancelDisposition: 'ACCEPTED' })
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }))
   })
 })

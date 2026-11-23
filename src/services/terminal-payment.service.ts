@@ -3222,8 +3222,15 @@ class TerminalPaymentService {
    * programan DESPUÉS del commit. Un error de la transacción (lock_timeout, base) NO escribe nada: la fila conserva su estado y la
    * sonda/el watchdog vuelven a preguntar (antes tampoco se escribía: «closeRow failed»).
    */
-  private async cerrarConNegativo(requestId: string, venueId: string, original: TerminalPaymentResult): Promise<TerminalPaymentResult> {
+  private async cerrarConNegativo(
+    requestId: string,
+    venueId: string,
+    original: TerminalPaymentResult,
+    // Codex S1 r3 (R3-2): el cancel ACCEPTED de la terminal es un negativo acreditado que entra por aquí, con los mismos vetos.
+    opciones: { acreditado?: boolean } = {},
+  ): Promise<TerminalPaymentResult> {
     const acreditado =
+      opciones.acreditado === true ||
       original.outcomeEvidence === 'PRE_AUTHORIZATION' ||
       (original.status === 'failed' && original.outcomeEvidence === 'PROCESSOR_DECLINED')
     type Escrito = { result: TerminalPaymentResult; newStatus: TerminalPaymentRequestStatus; late: boolean; sinRespuesta: boolean } | { result: null }
@@ -3237,7 +3244,13 @@ class TerminalPaymentService {
         for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)
         const aprobacion = attemptIds.length ? await this.aprobacionBancariaConocida(tx, venueId, attemptIds) : null
         if (aprobacion) this.avisarNegativoDegradadoPorAprobacion(requestId, venueId, original, acreditado, aprobacion.eventLogId)
-        let result: TerminalPaymentResult = !acreditado || aprobacion ? this.degradarNegativo(requestId, original) : original
+        // R3-2: una afirmación de cobro ya guardada (`claimedSuccess`) también es un aprobado conocido: el negativo se degrada.
+        const afirmada = async () =>
+          !!afirmacionDeLaTerminal(
+            (await tx.terminalPaymentRequest.findFirst({ where: { requestId, venueId }, select: { resultJson: true } }))?.resultJson ?? null,
+          )
+        let result: TerminalPaymentResult =
+          !acreditado || aprobacion || (await afirmada()) ? this.degradarNegativo(requestId, original) : original
         for (let intento = 0; intento < 3; intento++) {
           // Cobro simple · S1: el negativo degradado (sin evidencia, o con un aprobado conocido) entra a «sin respuesta» (UNKNOWN +
           // `noResponseAt`), ya no a la ventana de 30 s (TIMED_OUT). El brazo tardío es el de la ventana: no reinicia un reloj.
@@ -3254,7 +3267,10 @@ class TerminalPaymentService {
           const n = await tx.$executeRaw`
             UPDATE "TerminalPaymentRequest"
             SET "status" = ${newStatus}::"TerminalPaymentRequestStatus",
-                "resultJson" = ${JSON.stringify(result)}::jsonb,
+                -- R3-2: el sobre nuevo CONSERVA la afirmación de cobro ya guardada (nunca se borra un «sí»).
+                "resultJson" = (CASE WHEN jsonb_typeof("resultJson"->'claimedSuccess') = 'object'
+                                  THEN jsonb_set(${JSON.stringify(result)}::jsonb, '{claimedSuccess}', "resultJson"->'claimedSuccess', true)
+                                  ELSE ${JSON.stringify(result)}::jsonb END),
                 "failureCode" = ${result.status === 'failed' ? 'TPV_CONFIRMED_NO_CHARGE' : null},
                 "updatedAt" = (NOW() AT TIME ZONE 'UTC')
                 ${result.status === 'cancelled' ? Prisma.sql`, "cancelDisposition" = 'ACCEPTED'` : Prisma.empty}
@@ -3262,13 +3278,17 @@ class TerminalPaymentService {
                 ${sinRespuesta ? Prisma.sql`, "noResponseAt" = COALESCE("noResponseAt", ${utcTs(new Date())})` : Prisma.empty}
             WHERE "id" = ${fila.id} AND "status" = ${fila.status}::"TerminalPaymentRequestStatus"
               AND "failureCode" IS NOT DISTINCT FROM ${fila.failureCode} AND "updatedAt" = ${utcTs(fila.updatedAt)}
-              ${negativoAcreditado ? Prisma.sql`AND ${sinVetoDeDineroSql({ requestId, venueId, attemptIds, terminalId: fila.terminalId })}` : Prisma.empty}`
+              ${
+                negativoAcreditado
+                  ? Prisma.sql`AND ${SIN_AFIRMACION_DE_LA_TERMINAL_SQL} AND ${sinVetoDeDineroSql({ requestId, venueId, attemptIds, terminalId: fila.terminalId })}`
+                  : Prisma.empty
+              }`
           if (n === 1) return { result, newStatus, late, sinRespuesta }
           // 0 filas: o apareció evidencia de dinero (sólo puede frenar al negativo acreditado), o la fila cambió debajo.
           if (negativoAcreditado) {
             const tardia = attemptIds.length ? await this.aprobacionBancariaConocida(tx, venueId, attemptIds) : null
-            if (tardia) {
-              this.avisarNegativoDegradadoPorAprobacion(requestId, venueId, original, acreditado, tardia.eventLogId)
+            if (tardia || (await afirmada())) {
+              if (tardia) this.avisarNegativoDegradadoPorAprobacion(requestId, venueId, original, acreditado, tardia.eventLogId)
               result = this.degradarNegativo(requestId, original)
               continue
             }
@@ -7716,26 +7736,28 @@ class TerminalPaymentService {
     // terminal replays its actual result separately for ALREADY_RESOLVED.
     // Cobro simple · S1: también sobre una fila en sus 10 s de «sin respuesta»: un ACCEPTED de la terminal es su respuesta.
     if (event.disposition === 'ALREADY_RESOLVED' || !ESTADOS_SIN_DESENLACE.includes(row.status)) return true
-    const accepted = event.disposition === 'ACCEPTED'
-    const result: TerminalPaymentResult = {
-      requestId: event.requestId,
-      status: 'cancelled',
-      errorMessage: 'Cancelado antes de iniciar el cobro',
-    }
-    const updated = await prisma.terminalPaymentRequest.updateMany({
-      where: { ...where, status: { in: ESTADOS_SIN_DESENLACE } },
-      data: {
-        cancelDisposition: event.disposition,
-        ...(accepted ? { status: TerminalPaymentRequestStatus.CANCELLED, resultJson: result as unknown as Prisma.InputJsonValue } : {}),
-      },
-    })
-    if (accepted && updated.count > 0) {
+    if (event.disposition === 'ACCEPTED') {
+      // Codex S1 r3 (R3-2): el ACCEPTED es un negativo acreditado y pasa por el MISMO escritor que el negativo de la terminal (sus
+      // candados, sus vetos de dinero y la afirmación de cobro, sin borrarla). Si lo vetan, la fila entra a «sin respuesta» y decide
+      // el cierre: el POS no recibe `cancelled`.
+      const cerrado = await this.cerrarConNegativo(
+        event.requestId,
+        terminal.venueId,
+        { requestId: event.requestId, status: 'cancelled', errorMessage: 'Cancelado antes de iniciar el cobro' },
+        { acreditado: true },
+      )
+      const vigente = await prisma.terminalPaymentRequest.findFirst({ where, select: { status: true, cancelDisposition: true } })
       const pending = this.pendingPayments.get(event.requestId)
-      if (pending?.venueId === terminal.venueId) {
+      if (vigente?.status === TerminalPaymentRequestStatus.CANCELLED && vigente.cancelDisposition === 'ACCEPTED' && pending?.venueId === terminal.venueId) {
         clearTimeout(pending.timeout)
         this.pendingPayments.delete(event.requestId)
-        pending.resolve(result)
+        pending.resolve(cerrado)
       }
+    } else {
+      await prisma.terminalPaymentRequest.updateMany({
+        where: { ...where, status: { in: ESTADOS_SIN_DESENLACE } },
+        data: { cancelDisposition: event.disposition },
+      })
     }
     if (this.ejecucionCerradaAcreditada(event, terminal)) {
       await this.marcarEjecucionCerrada({ ...row, requestId: event.requestId }, terminal, 'CANCEL_DISPOSITION')

@@ -371,19 +371,24 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     expect(tpr().updateMany).not.toHaveBeenCalled()
   })
 
-  it('a confirmed pre-execution cancellation is durable and explicitly safe for new POS clients', async () => {
+  it('a confirmed pre-execution cancellation goes through the vetted negative writer (CANCELLED/ACCEPTED, with the money vetoes)', async () => {
+    // Codex S1 r3 (R3-2): ya no es un `updateMany` sin vetos; el CAS real contra Postgres está en `cobroSimple.elAprobadoManda`.
     tpr().findFirst.mockResolvedValueOnce({ id: 'row-accepted', requestId: 'REQ-ACCEPTED', status: 'CANCEL_REQUESTED' })
-    expect(
-      await (terminalPaymentService as any).handleCancelDispositionFromSocket(
-        { requestId: 'REQ-ACCEPTED', disposition: 'ACCEPTED' },
-        { socketId: 'socket', terminalId: 't-accepted', venueId: 'venue-1' },
-      ),
-    ).toBe(true)
-    expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ status: 'CANCELLED', cancelDisposition: 'ACCEPTED' }),
-      }),
-    )
+    const escritor = jest
+      .spyOn(terminalPaymentService as any, 'cerrarConNegativo')
+      .mockResolvedValue({ requestId: 'REQ-ACCEPTED', status: 'cancelled' })
+    try {
+      expect(
+        await (terminalPaymentService as any).handleCancelDispositionFromSocket(
+          { requestId: 'REQ-ACCEPTED', disposition: 'ACCEPTED' },
+          { socketId: 'socket', terminalId: 't-accepted', venueId: 'venue-1' },
+        ),
+      ).toBe(true)
+      expect(escritor).toHaveBeenCalledWith('REQ-ACCEPTED', 'venue-1', expect.objectContaining({ status: 'cancelled' }), { acreditado: true })
+      expect(tpr().updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'CANCELLED' }) }))
+    } finally {
+      escritor.mockRestore()
+    }
   })
 
   it('rejects a second concurrent charge during physical admission with a busy error naming the blocker (and leaves its tombstone)', async () => {
