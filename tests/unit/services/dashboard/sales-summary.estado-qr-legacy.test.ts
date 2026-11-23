@@ -48,4 +48,3 @@ describe('getSalesSummary · QR del sistema anterior con el estado del periodo',
     expect((s.chargedAmount ?? 0) - s.refunds - s.platformFees - (s.tenderCommissions ?? 0)).toBe(s.totalCollected)
   })
 })
-
