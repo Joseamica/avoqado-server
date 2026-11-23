@@ -83,7 +83,29 @@ describe('readHomeAppIdentity — la app que pide el inicio', () => {
     })
 
     it('un modelo que sólo CONTIENE «windows» no es el WINDOWS: sigue teniendo su identidad', () => {
-      expect(readHomeAppIdentity({ ...android95, 'x-device-manufacturer': 'SUNMI', 'x-device-model': 'T2-windowsless' })).toEqual({
+      expect(readHomeAppIdentity({ ...android95, 'x-device-manufacturer': 'Lenovo', 'x-device-model': 'T2-windowsless' })).toEqual({
+        platform: 'ANDROID',
+        versionCode: 95,
+      })
+    })
+  })
+
+  // 🔴 Founder, 22-nov: la app de las Sunmi la reparte él (tienda de Sunmi), no Google Play. El aviso manda a Play, que en una
+  // Sunmi no existe o no tiene esa versión: a una Sunmi nunca se le enseña. Medido: la D3 de Testarudo reporta fabricante «Sunmi».
+  describe('una Sunmi, que no se actualiza por Google Play', () => {
+    const android95 = { 'x-device-platform': 'ANDROID', 'x-device-form-factor': 'TABLET', 'x-app-version-code': '95' }
+
+    it('con x-device-manufacturer «SUNMI» o «Sunmi» → null', () => {
+      expect(readHomeAppIdentity({ ...android95, 'x-device-manufacturer': 'SUNMI', 'x-device-model': 'D3' })).toBeNull()
+      expect(readHomeAppIdentity({ ...android95, 'x-device-manufacturer': 'Sunmi', 'x-device-model': 'T3 PRO' })).toBeNull()
+    })
+
+    it('con mayúsculas y espacios → null', () => {
+      expect(readHomeAppIdentity({ ...android95, 'x-device-manufacturer': ' sunmi ' })).toBeNull()
+    })
+
+    it('un fabricante que sólo CONTIENE «sunmi» no es una Sunmi: sigue teniendo su identidad', () => {
+      expect(readHomeAppIdentity({ ...android95, 'x-device-manufacturer': 'NoSunmiTech' })).toEqual({
         platform: 'ANDROID',
         versionCode: 95,
       })

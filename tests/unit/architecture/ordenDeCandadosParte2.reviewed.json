@@ -9,7 +9,15 @@
     "efectosRevisados: archivo#función#llamada → motivo (UNA función y UNA llamada; una entrada que no coincide con nada es un hallazgo). Una llamada cuyo nombre parece un efecto (emit…, mandar…, setTimeout) pero que sólo toca la base o es un plazo; se revisa en el código antes de listarla. Techo de la prueba: los parámetros-callback que recibe un cuerpo y que ella no puede seguir (`afterCas` y `dentroDeLaTx` de `transitions.service.ts`/`capture.service.ts`) se revisan a mano; sus llamadores pasan funciones que sólo escriben con el `tx` que reciben (paso 7). `denyTx` de `bookingIngestion` queda SIN envolver: no escribe ninguna tabla protegida."
   ],
   "corridaSobreSrc": true,
-  "padresConAccionReferencial": ["Consumer", "CustomerGroup", "LoyaltyPromotion", "Order", "Staff", "StaffVenue", "Venue"],
+  "padresConAccionReferencial": [
+    "Consumer",
+    "CustomerGroup",
+    "LoyaltyPromotion",
+    "Order",
+    "Staff",
+    "StaffVenue",
+    "Venue"
+  ],
   "openersGenericos": {
     "src/services/mobile/http-operation.mobile.service.ts#executeHttpOperation": {
       "cuerpo": 1,
@@ -18,6 +26,10 @@
     "src/services/delivery-channels/core/deliveryOrderLock.ts#withDeliveryOrderLockConReintento": {
       "cuerpo": 1,
       "motivo": "Paso 8: abre withDeadlockRetry con el candado del pedido de reparto y recibe el cuerpo por parámetro; sólo lo usa la reconciliación de reparto (deliveryReconciliation), que devuelve cerradoEnProveedor y selloPorRevertir en su retorno."
+    },
+    "src/services/cashMachine/ventaDeLaMaquina.ts#conElFolio": {
+      "cuerpo": 2,
+      "motivo": "Máquina de efectivo (rediseño r3): abre withDeadlockRetry con el candado del folio, lee lo que el folio tiene y recibe el cuerpo por parámetro; cada entrada del folio (venta, duda, GET, resolución, revisión, repetición, carrera) decide ahí con decidirSobreElFolio. Sólo base: folio congelado, observaciones, incidencias, cierres de la máquina y su duda."
     }
   },
   "castsPermitidos": {
@@ -764,6 +776,11 @@
       "cantidad": 1,
       "nota": "Siempre por withDeadlockRetry, también sin cambio de mesa, estado ni cliente (update recibe TxConReintento)."
     },
+    "src/services/dashboard/printStation.dashboard.service.ts#deleteStation": {
+      "etiqueta": "deleteStation",
+      "cantidad": 1,
+      "nota": "hz:e82938e1:D40 (Codex d40-r4 #2): el SET NULL de la estación se cruza con el folio de cocina que copia esa estación al anular una cuenta separada; el cuerpo sólo borra (logAction va después del commit)."
+    },
     "src/services/dashboard/paymentLink.service.ts#completeCharge": {
       "etiqueta": "completeCharge",
       "cantidad": 1,
@@ -945,6 +962,23 @@
     },
     "src/services/mobile/order.mobile.service.ts#payGiftCardOnNewOrder": {
       "etiqueta": "payGiftCardOnNewOrder",
+      "cantidad": 1
+    },
+    "src/services/mobile/order.mobile.service.ts#venderLoQueCobroLaMaquina": {
+      "etiqueta": "venderLoQueCobroLaMaquina",
+      "cantidad": 1
+    },
+    "src/services/cashMachine/ventaDeLaMaquina.ts#conElFolio": {
+      "etiqueta": "conElFolio",
+      "cantidad": 1,
+      "nota": "Codex servidor r2 (familia A): la única transacción del folio de la máquina (venta sin pago, «no se pudo registrar», conflicto, duda, consulta y revisión), con su candado."
+    },
+    "src/services/cashMachine/emparejamiento.ts#emparejarAparato": {
+      "etiqueta": "emparejarAparato",
+      "cantidad": 1
+    },
+    "src/services/cashMachine/emparejamiento.ts#desemparejarAparato": {
+      "etiqueta": "desemparejarAparato",
       "cantidad": 1
     },
     "src/services/mobile/order.mobile.service.ts#removeOrderDiscount": {

@@ -694,7 +694,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/reservaciones/configurar-reservaciones-avanzadas": {
-      "sha256": "c8843e494cd630227a54eebc1d50dd9c15aaa5577bc0f653820889c65c8973b6",
+      "sha256": "088a8afb1d386a86ebc6e59e2c95dcaafa6ddcef69ac5d9b5826efbc2f920fae",
       "requiredPermissions": [
         "reservations:update"
       ],
@@ -801,6 +801,10 @@
       "featureCode": "DELIVERY_CHANNELS",
       "gateKind": "FEATURE"
     },
+    "dashboard/ventas/resolver-cobros-de-la-maquina-en-duda": {
+      "sha256": "5fcb1de5651e073e536e2228c349033426969cd7db5164104b9e9acbd1339afd",
+      "requiredPermissions": []
+    },
     "dashboard/ventas/solicitar-activacion-uber-eats": {
       "sha256": "e40f5151fd9c415777f88ae1607e67a93a29d25549eb2d4c1b86ca6bb3b7720f",
       "requiredPermissions": [],
@@ -850,7 +854,7 @@
       "requiredPermissions": []
     },
     "tpv/caja/abrir-y-cerrar-caja": {
-      "sha256": "6bd7259bf64033c1e62eb6b2f67f9be69bfab4bcf970fb85e7ed239df24ca25f",
+      "sha256": "2fa30138e7472ac448555dc290c7766ce944c557fd066c6b792ffa498ae8d6bf",
       "requiredPermissions": [
         "tpv-shifts:create",
         "tpv-shifts:close"
@@ -1141,6 +1145,30 @@
       "requiredPermissions": [],
       "featureCode": "LOYALTY_PROGRAM",
       "gateKind": "FEATURE"
+    },
+    "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo": {
+      "sha256": "cd217e5992d8b8049018df3ab2371decc45a785fd0780fe819d8d98dd9baa344",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "windows/maquina-de-efectivo/emparejar-la-maquina-de-efectivo": {
+      "sha256": "ec593e7e9bf0f2a937a13873edd9a57d0b28521cf03e46711a68dba8c9cc1198",
+      "requiredPermissions": [
+        "cash-machine:configure"
+      ]
+    },
+    "windows/maquina-de-efectivo/esperando-a-la-maquina": {
+      "sha256": "c921317bcb9e07be1f6e85389dc65d9bb3f6d0ccd5eb001a46c5fb0a7bb47e37",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina": {
+      "sha256": "8bdda459d43440d34ef5a408980ee86db02cf59a7ba5049311e469e2dc91d8d9",
+      "requiredPermissions": [
+        "cash-drawer:pay-out"
+      ]
     },
     "windows/mesas/abrir-mesa-y-ordenar": {
       "sha256": "48d8b65988206ac760d90993e5e32c1614b3bca812ed4d6bab16673d6bc3e72c",

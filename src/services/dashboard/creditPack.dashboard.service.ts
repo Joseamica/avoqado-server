@@ -229,19 +229,33 @@ export async function updateCreditPack(
         throw new BadRequestError('Uno o mas productos no existen o no estan activos en este venue')
       }
 
-      // Delete existing items and recreate
-      await tx.creditPackItem.deleteMany({ where: { creditPackId: id } })
-      await Promise.all(
-        data.items.map(item =>
-          tx.creditPackItem.create({
-            data: {
-              creditPackId: id,
-              productId: item.productId,
-              quantity: item.quantity,
-            },
-          }),
-        ),
-      )
+      // Los renglones se concilian en su lugar, nunca se borran y recrean: el saldo de quien ya compró apunta a su renglón
+      // (CreditItemBalance.creditPackItemId, ON DELETE RESTRICT) y borrarlo tumbaba con 500 cualquier edición de un paquete
+      // vendido (22-nov-2026). Editar cambia lo que se vende de aquí en adelante; lo vendido conserva sus créditos.
+      const actuales =
+        (
+          await tx.creditPack.findUnique({
+            where: { id },
+            select: { items: { select: { id: true, productId: true, quantity: true } } },
+          })
+        )?.items ?? []
+      const pedidos = new Set(productIds)
+      const sobran = actuales.filter(item => !pedidos.has(item.productId)).map(item => item.id)
+      if (sobran.length > 0) {
+        // Un producto que sale del paquete: los saldos ya vendidos de ese renglón sólo pierden el enlace (como la entrega
+        // por foto del paquete); su producto y sus créditos quedan intactos.
+        await tx.creditItemBalance.updateMany({ where: { creditPackItemId: { in: sobran } }, data: { creditPackItemId: null } })
+        await tx.creditPackItem.deleteMany({ where: { id: { in: sobran } } })
+      }
+      const porProducto = new Map(actuales.map(item => [item.productId, item]))
+      for (const item of data.items) {
+        const previo = porProducto.get(item.productId)
+        if (!previo) {
+          await tx.creditPackItem.create({ data: { creditPackId: id, productId: item.productId, quantity: item.quantity } })
+        } else if (previo.quantity !== item.quantity) {
+          await tx.creditPackItem.update({ where: { id: previo.id }, data: { quantity: item.quantity } })
+        }
+      }
     }
 
     return tx.creditPack.update({

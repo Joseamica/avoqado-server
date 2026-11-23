@@ -41,6 +41,7 @@ const moneyOf = (p: {
   tenderCountsAsCash: boolean | null
   tenderSatFormaPago: string | null
   tenderType: { systemKind: string | null } | null
+  cashMachineRef?: string | null
 }): MoneyShape => ({
   method: p.method,
   source: p.source,
@@ -50,6 +51,7 @@ const moneyOf = (p: {
   tenderCountsAsCash: p.tenderCountsAsCash,
   tenderSatFormaPago: p.tenderSatFormaPago,
   tenderSystemKind: p.tenderType?.systemKind ?? null,
+  cashMachineRef: p.cashMachineRef ?? null,
 })
 
 /** Una sola lectura acotada de la venta para el cambio y su pantalla. Quien escribe ya tiene el candado de Order. */

@@ -51,6 +51,7 @@ import { registerPromotionTools } from './tools/promotions'
 import { registerServiceChargeTools } from './tools/service-charges'
 import { registerPaymentTools } from './tools/payments'
 import { registerPaymentEffectTools } from './tools/paymentEffects'
+import { registerCashMachineTools } from './tools/cash-machine'
 import { registerOverviewTools } from './tools/overview'
 import { registerTableTools } from './tools/tables'
 import { registerFeatureTools } from './tools/features'
@@ -164,6 +165,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerServiceChargeTools(server, scope)
   registerPaymentTools(server, scope)
   registerPaymentEffectTools(server, scope)
+  registerCashMachineTools(server, scope) // máquina de efectivo (1a): cierres y dudas, sólo lectura y sólo /mcp libre
   registerOverviewTools(server, scope)
   registerTableTools(server, scope)
   registerFeatureTools(server, scope)

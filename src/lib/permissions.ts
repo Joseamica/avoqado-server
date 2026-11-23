@@ -213,6 +213,10 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'cash-drawer:view-expected': ['cash-drawer:view-expected'],
   // Retirar efectivo de la caja (pay-out) con permiso propio; Toast «3.22 Pay Out» (founder, 10-nov D1)
   'cash-drawer:pay-out': ['cash-drawer:pay-out'],
+  // Máquina de efectivo (QuickPay Mini, fase 1a, R5#10 y R4-4): habilitar la PC que le habla a la máquina, y resolver un cobro de
+  // la máquina en duda. Configurar no da cobrar (la PC cobra con el `payments:create` de su sesión); resolver mira los cobros.
+  'cash-machine:configure': ['cash-machine:configure'],
+  'cash-machine:resolve': ['cash-machine:resolve', 'payments:read'],
   'shifts:close': [
     'shifts:read',
     'shifts:close',
@@ -1036,6 +1040,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'inventory:log-waste', // registrar merma desde el POS (además tiene inventory:adjust)
     'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
     'cash-drawer:pay-out', // retira efectivo de la caja (el cajero lo hace con autorización de un gerente)
+    'cash-machine:configure', // habilita la PC de la máquina de efectivo (R5#10)
+    'cash-machine:resolve', // resuelve un cobro de la máquina «Esperando» (R4-4)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'self-service:check-in', // Autoservicio 0.e — lista y check-in del kiosco
     'attendance:read', // Revisar el checador — nunca a roles de piso
@@ -1224,6 +1230,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   [StaffRole.ADMIN]: [
     'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
     'cash-drawer:pay-out', // retira efectivo de la caja (el cajero lo hace con autorización de un gerente)
+    'cash-machine:configure', // habilita la PC de la máquina de efectivo (R5#10)
+    'cash-machine:resolve', // resuelve un cobro de la máquina «Esperando» (R4-4)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'self-service:check-in', // Autoservicio 0.e — explícito: no hay comodín self-service:*
     'attendance:read', // Revisar el checador — nunca a roles de piso
@@ -1378,6 +1386,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   [StaffRole.OWNER]: [
     'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
     'cash-drawer:pay-out', // retira efectivo de la caja (el cajero lo hace con autorización de un gerente)
+    'cash-machine:configure', // habilita la PC de la máquina de efectivo (R5#10)
+    'cash-machine:resolve', // resuelve un cobro de la máquina «Esperando» (R4-4)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'self-service:check-in', // Autoservicio 0.e — explícito: no hay comodín self-service:*
     'attendance:read', // Revisar el checador — nunca a roles de piso
@@ -2049,6 +2059,8 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   shifts: ['shifts:read', 'shifts:create', 'shifts:update', 'shifts:delete', 'shifts:close'],
   // Cajón físico (Android/iOS): ver el esperado durante el día = conteo NO ciego (Toast: Full vs Blind).
   'cash-drawer': ['cash-drawer:view-expected', 'cash-drawer:pay-out'],
+  // Máquina de efectivo (QuickPay Mini): habilitar la PC que le habla y resolver un cobro en duda. MANAGER+ de fábrica.
+  'cash-machine': ['cash-machine:configure', 'cash-machine:resolve'],
   tpv: [
     'tpv:read',
     'tpv:create',
