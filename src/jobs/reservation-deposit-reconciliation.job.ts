@@ -5,6 +5,7 @@ import { getProvider } from '../services/payments/provider-registry'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '../services/payments/providers/money'
 import { getVatRateBps } from '../services/superadmin/platformSettings.service'
 import { processStripeConnectWebhookEvent } from '../services/payments/reservation-deposit-webhook.service'
+import { cuentaStripeDeLaReserva } from '../services/reservation/volverSinPagar'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
 
@@ -54,8 +55,13 @@ export class ReservationDepositReconciliationJob {
     const expired = await retry(
       () =>
         prisma.reservation.updateMany({
+          // D681: el reloj sólo suelta una reserva que sigue PENDING y cuya liga de Stripe nunca se creó. Si hay liga, lo decide
+          // Stripe (su aviso de vencida o `reconcileCheckoutSessions`): quien pagó a tiempo con el aviso retrasado no pierde su
+          // lugar, y a quien ya llegó no se le cancela por reloj.
           where: {
             depositStatus: 'PENDING',
+            status: 'PENDING',
+            checkoutSessionId: null,
             depositExpiresAt: { lt: new Date() },
           },
           data: {
@@ -96,7 +102,7 @@ export class ReservationDepositReconciliationJob {
       // session — falling back to "latest active" here would query a
       // different account and return PENDING forever for venues that
       // swapped Stripe accounts.
-      const merchant = await this.resolveMerchantForReservation(reservation.venueId, reservation.ecommerceMerchantId)
+      const merchant = await cuentaStripeDeLaReserva(reservation.venueId, reservation.ecommerceMerchantId)
       if (!merchant || !reservation.checkoutSessionId) continue
 
       try {
@@ -161,7 +167,7 @@ export class ReservationDepositReconciliationJob {
       // mint failed before stamping). Use the pinned one when present;
       // otherwise fall back to "latest active" — and the stamp below will
       // pin it going forward.
-      const merchant = await this.resolveMerchantForReservation(reservation.venueId, reservation.ecommerceMerchantId)
+      const merchant = await cuentaStripeDeLaReserva(reservation.venueId, reservation.ecommerceMerchantId)
       if (!merchant || !reservation.depositAmount || !reservation.depositExpiresAt || !reservation.idempotencyKey) continue
 
       try {
@@ -203,35 +209,6 @@ export class ReservationDepositReconciliationJob {
         })
       }
     }
-  }
-
-  /**
-   * Pick the EcommerceMerchant that should process this reservation's charge
-   * operations. When the reservation has a pinned merchant from checkout-mint
-   * time we use it — refunds and status polls MUST hit the same connected
-   * account. Falls back to "newest active" only for legacy/orphan rows that
-   * predate the pin.
-   */
-  private async resolveMerchantForReservation(venueId: string, pinnedMerchantId: string | null) {
-    if (pinnedMerchantId) {
-      const pinned = await prisma.ecommerceMerchant.findFirst({
-        where: { id: pinnedMerchantId, provider: { code: 'STRIPE_CONNECT' } },
-        include: { provider: true },
-      })
-      if (pinned) return pinned
-      logger.warn(
-        `⚠️ [RESERVATION DEPOSIT RECONCILIATION] Pinned merchant ${pinnedMerchantId} not found; falling back to latest active for venue ${venueId}`,
-      )
-    }
-    return prisma.ecommerceMerchant.findFirst({
-      where: {
-        venueId,
-        active: true,
-        provider: { code: 'STRIPE_CONNECT', active: true },
-      },
-      include: { provider: true },
-      orderBy: { createdAt: 'desc' },
-    })
   }
 }
 

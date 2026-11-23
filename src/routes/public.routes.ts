@@ -344,6 +344,14 @@ router.get(
   reservationPublicController.getReservation,
 )
 
+// D681: volvió de Stripe sin pagar → se cierra la liga y se suelta el lugar (sólo con la liga de gestión de ESA reserva).
+router.post(
+  '/venues/:venueSlug/reservations/:cancelSecret/abandon-payment',
+  cancelLimit,
+  validateRequest(z.object({ params: publicReservationParamsSchema })),
+  reservationPublicController.abandonPayment,
+)
+
 router.post(
   '/venues/:venueSlug/reservations/:cancelSecret/cancel',
   cancelLimit,

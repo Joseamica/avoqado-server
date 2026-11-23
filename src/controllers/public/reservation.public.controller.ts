@@ -36,6 +36,7 @@ import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { buildReservationBookingCapabilities } from '@/services/reservation/publicReservationCapabilities'
 import { buildReservationCheckoutReturnUrls } from '@/services/reservation/reservationReturnUrl'
 import { lockClassSession, sumOccupiedSeats } from '@/services/reservation/classBooking.service'
+import { soltarApartadoAlVolverSinPagar } from '@/services/reservation/volverSinPagar'
 import { enqueuePassSessionSync } from '@/services/aggregators/core/sessionSync.service'
 
 // ==========================================
@@ -996,9 +997,10 @@ export async function createReservation(req: Request, res: Response, next: NextF
 
         // Pin the EcommerceMerchant alongside the session id so refunds and
         // reconciliation always route through the same connected account.
+        // D681: y el vencimiento de la liga (el que contestó Stripe), para que «Tu Reservación» diga hasta qué hora se aparta el lugar.
         await prisma.reservation.update({
           where: { id: reservation.id },
-          data: { checkoutSessionId: session.id, ecommerceMerchantId: stripeMerchant.id },
+          data: { checkoutSessionId: session.id, ecommerceMerchantId: stripeMerchant.id, depositExpiresAt: session.expiresAt },
         })
         checkoutUrl = session.url
       }
@@ -1313,7 +1315,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
       // reconciliation always route through the same connected account.
       reservation = await prisma.reservation.update({
         where: { id: reservation.id },
-        data: { checkoutSessionId: session.id, ecommerceMerchantId: stripeMerchant.id },
+        // D681: con el vencimiento de la liga (el que contestó Stripe).
+        data: { checkoutSessionId: session.id, ecommerceMerchantId: stripeMerchant.id, depositExpiresAt: session.expiresAt },
         include: {
           customer: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
           table: { select: { id: true, number: true, capacity: true } },
@@ -1521,6 +1524,8 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
       specialRequests: reservation.specialRequests,
       depositAmount: reservation.depositAmount,
       depositStatus: reservation.depositStatus,
+      // D681 (aditivo): hasta cuándo queda apartado el lugar mientras el pago por adelantado sigue pendiente.
+      depositExpiresAt: reservation.depositExpiresAt,
       cancellation: (() => {
         // `allowed` is the FULL decision (toggle + status + time window), not just
         // the venue toggle — so every frontend that reads it (widget, consumer app)
@@ -1808,6 +1813,21 @@ function computeCancellationPreview(args: {
     return { refundPercent: 100, label: `TIME_BASED:free` }
   }
   return { refundPercent: Math.max(0, Math.min(100, creditLateRefundPercent)), label: `TIME_BASED:late` }
+}
+
+/**
+ * POST /public/venues/:venueSlug/reservations/:cancelSecret/abandon-payment
+ *
+ * D681: la clienta volvió de Stripe SIN pagar (la liga «atrás», `cancel_url`). Se cierra su liga y se suelta el lugar por el
+ * mismo camino del aviso de liga vencida. Sólo quien tiene la liga de gestión (`cancelSecret`) de ESA reserva puede pedirlo.
+ */
+export async function abandonPayment(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueSlug, cancelSecret } = req.params
+    res.json(await soltarApartadoAlVolverSinPagar(venueSlug, cancelSecret))
+  } catch (error) {
+    next(error)
+  }
 }
 
 /**
