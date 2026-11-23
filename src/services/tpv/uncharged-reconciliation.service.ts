@@ -907,8 +907,10 @@ export async function reconcileBankDeclined(input: {
   evidencia: { eventLogId: string; attemptId?: string | null; codigo?: string | null; descripcion?: string | null }
 }): Promise<{ closed: boolean; reason?: 'NOT_FOUND' | 'NOT_ELIGIBLE' | 'POSITIVE_EVIDENCE_EXISTS' | 'ERROR' }> {
   // 🔴 Cobro simple · S1.5 (22-nov): el rechazo del banco ya NO entra por el núcleo de la declaración de una persona. Es un CAS
-  // directo a `FAILED/BANK_DECLINED` con el motivo, también con la solicitud EN VUELO («un no del banco es final»: el POS lo ve al
-  // momento y reintenta). Se conservan las dos guardas que no son capa sino «el aprobado manda»:
+  // directo a `FAILED/BANK_DECLINED` con el motivo, FUERA de vuelo (Codex S1 r2, R2-6, decisión de la dueña: con la solicitud EN
+  // VUELO la Nexgo 2.20 ofrece «Reintentar» dentro de la MISMA solicitud; cerrarla le quita el permiso al intento B y abre dos cargos
+  // sucesivos. En vuelo el aviso sólo se guarda y decide al entrar a «sin respuesta»). Se conservan las dos guardas que no son capa
+  // sino «el aprobado manda»:
   //  · el rechazo del intento A no cierra si la solicitud tiene OTRO intento (B pudo cobrar; Codex 21-sep);
   //  · ningún rechazo gana a un aprobado ya conocido de la solicitud o de sus intentos (`sinVetoDeDineroSql` dentro del CAS y el
   //    aprobado firmado que todavía no se pudo guardar, `puertaDelDinero`; Codex plan r1 #4).
@@ -944,11 +946,14 @@ export async function reconcileBankDeclined(input: {
               AND e."type" = 'send_transaction' AND ${estadoBancarioSql(Prisma.sql`e."payload"->'payload'->'status'`)} = 'RECHAZADO')`
         if (sinRechazo > 0) return 'NOT_ELIGIBLE' as const
       }
-      const { desenlaceCanonico, ESTADOS_SIN_DESENLACE } = await import('../terminal-payment.service')
+      const { desenlaceCanonico } = await import('../terminal-payment.service')
       const retenidaConAprobado = row.failureCode === 'BANK_APPROVED_AWAITING_PAYMENT' || row.failureCode === 'PAYMENT_UNBOUND_AWAITING_REVIEW'
-      const abierta =
-        (ESTADOS_SIN_DESENLACE.includes(row.status) || row.status === TerminalPaymentRequestStatus.TIMED_OUT) &&
-        desenlaceCanonico(row).outcome === 'UNRESOLVED'
+      const enVuelo =
+        row.status === TerminalPaymentRequestStatus.PENDING ||
+        row.status === TerminalPaymentRequestStatus.SENT ||
+        row.status === TerminalPaymentRequestStatus.CANCEL_REQUESTED
+      // Fuera de vuelo y sin desenlace: UNKNOWN (con o sin reloj), TIMED_OUT y las FAILED/CANCELLED sin desenlace acreditado.
+      const abierta = !enVuelo && row.status !== TerminalPaymentRequestStatus.COMPLETED && desenlaceCanonico(row).outcome === 'UNRESOLVED'
       if (!abierta || row.paymentId || retenidaConAprobado) return 'NOT_ELIGIBLE' as const
       const { puertaDelDinero } = await import('./avisosNoGuardados')
       if (attemptIds.some(puertaDelDinero)) return 'POSITIVE_EVIDENCE_EXISTS' as const
@@ -969,13 +974,11 @@ export async function reconcileBankDeclined(input: {
           at: new Date().toISOString(),
         },
       }
-      const enVuelo = row.status === TerminalPaymentRequestStatus.PENDING || row.status === TerminalPaymentRequestStatus.SENT ||
-        row.status === TerminalPaymentRequestStatus.CANCEL_REQUESTED
       const n = await tx.$executeRaw`
         UPDATE "TerminalPaymentRequest"
         SET "status" = 'FAILED', "failureCode" = 'BANK_DECLINED', "cancelDisposition" = NULL,
             "resultJson" = ${JSON.stringify(sobreDeclarado)}::jsonb,
-            "lateResult" = ${!enVuelo},
+            "lateResult" = true,
             "updatedAt" = (NOW() AT TIME ZONE 'UTC')
         WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL
           AND ${sinVetoDeDineroSql({ requestId, venueId, attemptIds, terminalId: row.terminalId })}`

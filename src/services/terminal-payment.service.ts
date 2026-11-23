@@ -8438,6 +8438,8 @@ class TerminalPaymentService {
       await this.emitCancelToTerminal(entry?.socketId, opciones.terminalId, requestId, 'Sin respuesta del cobro').catch(() => false)
     }
     this.programarCierreSinRespuesta(requestId, venueId)
+    // R2-6: el rechazo que llegó mientras estaba en vuelo (sólo se guardó) decide ahora. Si falla, el cierre de los 10 s lo repite.
+    await this.cerrarPorRechazoGuardado(requestId, venueId).catch(() => false)
     return true
   }
 
@@ -8537,12 +8539,7 @@ class TerminalPaymentService {
       return this.aprobadoPorRegistrar(row, ahora, `PAYMENT_NOT_BOUND:${cierre.reason}`)
     }
 
-    const rechazo = await this.rechazoGuardadoDeTodosSusIntentos(requestId, venueId)
-    if (rechazo) {
-      const { reconcileBankDeclined } = await import('./tpv/uncharged-reconciliation.service')
-      const r = await reconcileBankDeclined({ venueId, requestId, origen: 'ANGELPAY', evidencia: rechazo })
-      if (r.closed) return 'BANK_DECLINED'
-    }
+    if (await this.cerrarPorRechazoGuardado(requestId, venueId)) return 'BANK_DECLINED'
 
     const causa = causaDelSobre(row.resultJson) ?? 'NO_RESPONSE'
     let decision: 'NO_COBRADO' | 'APROBADO_POR_REGISTRAR' | 'NO_APLICA'
@@ -8678,6 +8675,17 @@ class TerminalPaymentService {
       })
     }
     return 'APROBADO_POR_REGISTRAR'
+  }
+
+  /**
+   * Un rechazo del banco ya guardado para TODOS sus intentos cierra la solicitud `BANK_DECLINED` (fuera de vuelo; R2-6). Lo usan la
+   * entrada a «sin respuesta» (el aviso que llegó mientras estaba en vuelo decide al entrar, sin esperar los 10 s) y el cierre.
+   */
+  private async cerrarPorRechazoGuardado(requestId: string, venueId: string): Promise<boolean> {
+    const rechazo = await this.rechazoGuardadoDeTodosSusIntentos(requestId, venueId)
+    if (!rechazo) return false
+    const { reconcileBankDeclined } = await import('./tpv/uncharged-reconciliation.service')
+    return (await reconcileBankDeclined({ venueId, requestId, origen: 'ANGELPAY', evidencia: rechazo })).closed
   }
 
   /** El rechazo del banco guardado para TODOS los intentos ligados (y al menos uno), o `null`. El más reciente. */

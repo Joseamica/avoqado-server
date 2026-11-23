@@ -10,7 +10,9 @@ probar en hardware, con los tres lados leídos (servidor, terminal, POS).
 `docs/superpowers/plans/2026-11-22-cobro-simple.md` del workspace).** Manda lo que contesta el procesador:
 - **Aprobado** (SDK o aviso) ⇒ se registra UNA vez (llave del intento; el árbitro detecta la segunda captura).
 - **Rechazado** ⇒ al momento, con su motivo (`TPV_CONFIRMED_NO_CHARGE` + evidencia, o `BANK_DECLINED` del aviso de AngelPay, que
-  ahora es un CAS directo en `reconcileBankDeclined`, también con la solicitud en vuelo).
+  ahora es un CAS directo en `reconcileBankDeclined` FUERA de vuelo). Con la solicitud EN VUELO el aviso sólo se guarda: la Nexgo
+  2.20 ofrece «Reintentar» dentro de la MISMA solicitud y cerrarla le quitaría el permiso al intento B (dos cargos sucesivos); el
+  rechazo guardado decide al entrar a «sin respuesta» (Codex S1 r2, R2-6).
 - **Sin respuesta** (la terminal no dio veredicto, no acusó en 5 s, se desconectó 10 s, no contestó al cancel en 10 s, contestó
   «sigo cobrando» más de 30 s tras el cancel, o acusó y lleva > 60 s sin final y no dice ACTIVE a la sonda; tope 150 s desde el
   acuse) ⇒ `UNKNOWN` + `noResponseAt` (`src/services/tpv/sinRespuesta.ts`) y a los **10 s** `cerrarSinRespuesta` la cierra «no

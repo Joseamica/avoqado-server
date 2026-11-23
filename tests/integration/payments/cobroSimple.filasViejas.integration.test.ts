@@ -4,8 +4,8 @@
  * S1.4: al publicar S1, lo que quedó «en duda» con las reglas viejas (UNKNOWN sin reloj, `TIMED_OUT` sin código o soltada por
  * política) lo cierra el vigía con la MISMA regla de los 10 s, con asiento `historico: true`. Medido el 22-nov en producción (Q1): 1
  * fila (de un negocio, `TIMED_OUT/AUTO_RELEASED`, 8-sep). Nunca reescribe una fila ya final.
- * S1.5: el rechazo del banco por aviso de AngelPay es un CAS directo a `FAILED/BANK_DECLINED`, también con la solicitud en vuelo,
- * con dos guardas: el intento B abierto y el aprobado ya conocido.
+ * S1.5: el rechazo del banco por aviso de AngelPay es un CAS directo a `FAILED/BANK_DECLINED` FUERA de vuelo (Codex S1 r2, R2-6: en
+ * vuelo la Nexgo reintenta dentro de la misma solicitud), con dos guardas: el intento B abierto y el aprobado ya conocido.
  */
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
@@ -117,13 +117,31 @@ describe('S1.4 · filas viejas: el vigía las cierra con la misma regla', () => 
   })
 })
 
-describe('S1.5 · el rechazo de AngelPay es un CAS directo, con sus dos guardas', () => {
-  it('rechazo EN VUELO cierra al momento con el motivo del banco (no espera a la terminal ni a una persona)', async () => {
+/** Una solicitud fuera de vuelo: en sus 10 s de «sin respuesta». */
+const enSusDiezSegundos = () => f.solicitud({ status: 'UNKNOWN', noResponseAt: new Date(), acknowledgedAt: new Date() })
+const tpv = () => ({ socketId: 'socket-tpv', terminalId: f.serial, venueId: f.venueId })
+
+describe('S1.5 · el rechazo de AngelPay es un CAS directo fuera de vuelo, con sus dos guardas', () => {
+  it('Codex S1 r2 (R2-6) · rechazo con la solicitud EN VUELO no la cierra y la terminal puede reintentar (el intento B sigue autorizado)', async () => {
     const s = await f.solicitud({ status: 'SENT', acknowledgedAt: new Date() })
-    const attemptId = await intento(s.requestId)
-    await rechazo(attemptId)
-    expect(await fila(s.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'BANK_DECLINED', lateResult: false })
-    expect(await terminalPaymentService.getPaymentStatus(s.requestId, f.venueId)).toMatchObject({
+    const a = await intento(s.requestId)
+    await rechazo(a)
+    expect(await fila(s.requestId)).toMatchObject({ status: 'SENT' })
+    // «Reintentar» de la Nexgo 2.20: el intento B dentro de la MISMA solicitud sigue autorizado.
+    expect(await terminalPaymentService.handleAttemptOpenedFromSocket({ requestId: s.requestId, attemptId: randomUUID() }, tpv())).toMatchObject({
+      success: true,
+      executionAuthorized: true,
+    })
+  })
+
+  it('Codex S1 r2 (R2-6) · …y al entrar a «sin respuesta», el rechazo guardado de su único intento la cierra BANK_DECLINED con su motivo', async () => {
+    const sola = await f.solicitud({ status: 'SENT', acknowledgedAt: new Date() })
+    const unico = await intento(sola.requestId)
+    await rechazo(unico)
+    expect(await fila(sola.requestId)).toMatchObject({ status: 'SENT' })
+    expect(await svc.entrarSinRespuestaYProgramar(sola.requestId, f.venueId, 'NO_RESPONSE')).toBe(true)
+    expect(await fila(sola.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'BANK_DECLINED', lateResult: true })
+    expect(await terminalPaymentService.getPaymentStatus(sola.requestId, f.venueId)).toMatchObject({
       outcome: 'NOT_CHARGED',
       outcomeEvidence: 'PROCESSOR_DECLINED',
       errorMessage: 'El banco rechazó este cobro. No tiene fondos suficientes. No se cobró nada: puedes volver a cobrar.',
@@ -131,15 +149,15 @@ describe('S1.5 · el rechazo de AngelPay es un CAS directo, con sus dos guardas'
   })
 
   it('el rechazo del intento A con el intento B abierto NO cierra (B pudo cobrar)', async () => {
-    const s = await f.solicitud({ status: 'SENT', acknowledgedAt: new Date() })
+    const s = await enSusDiezSegundos()
     const a = await intento(s.requestId)
     await intento(s.requestId)
     await rechazo(a)
-    expect(await fila(s.requestId)).toMatchObject({ status: 'SENT' })
+    expect(await fila(s.requestId)).toMatchObject({ status: 'UNKNOWN' })
   })
 
   it('un rechazo repetido no reescribe ni re-audita', async () => {
-    const s = await f.solicitud({ status: 'SENT', acknowledgedAt: new Date() })
+    const s = await enSusDiezSegundos()
     const attemptId = await intento(s.requestId)
     await rechazo(attemptId)
     const primera = await fila(s.requestId)
@@ -187,11 +205,11 @@ describe('Codex S1 r1 · arreglos', () => {
   })
 
   it('#5 · dos rechazos confirmados (A y B) cierran como rechazo del banco, con su motivo', async () => {
-    const s = await f.solicitud({ status: 'SENT', acknowledgedAt: new Date() })
+    const s = await enSusDiezSegundos()
     const a = await intento(s.requestId)
     const b = await intento(s.requestId)
     await rechazo(a)
-    expect(await fila(s.requestId)).toMatchObject({ status: 'SENT' })
+    expect(await fila(s.requestId)).toMatchObject({ status: 'UNKNOWN' })
     await rechazo(b)
     expect(await fila(s.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'BANK_DECLINED' })
   })
