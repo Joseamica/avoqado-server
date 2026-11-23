@@ -52,7 +52,12 @@ export function rangoDelNegocio(
   fromDate?: string,
   toDate?: string,
 ): { startDate: string; endDate: string } | { error: string } {
-  const dia = (s: string) => DateTime.fromFormat(s, 'yyyy-MM-dd', { zone: tz })
+  // Sólo vale un día que existe tal cual en la zona del negocio: Luxon movería un día saltado (Samoa, 30-dic-2011) al siguiente
+  // (Codex r10 #2).
+  const dia = (s: string) => {
+    const d = DateTime.fromFormat(s, 'yyyy-MM-dd', { zone: tz })
+    return d.isValid && d.toFormat('yyyy-MM-dd') === s ? d : DateTime.invalid('el día no existe en la zona del negocio')
+  }
   const hoy = DateTime.now().setZone(tz)
   // Omitida es `undefined`; una fecha vacía ("") se rechaza como inválida, no se toma como omitida (Codex r9 #1).
   const hasta = toDate !== undefined ? dia(toDate) : hoy

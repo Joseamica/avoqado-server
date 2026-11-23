@@ -197,6 +197,13 @@ describe('rangoDelNegocio (Codex r2 #7)', () => {
     expect(rangoDelNegocio('America/Mexico_City', '', '')).toHaveProperty('error')
   })
 
+  it('🔴 Codex r10 #2 · un día que no existió en la zona del negocio se rechaza, no se mueve al siguiente', () => {
+    // Samoa se saltó el 30 de diciembre de 2011.
+    expect(rangoDelNegocio('Pacific/Apia', '2011-12-31', '2011-12-30')).toHaveProperty('error')
+    expect(rangoDelNegocio('Pacific/Apia', '2011-12-30', '2011-12-31')).toHaveProperty('error')
+    expect(rangoDelNegocio('Pacific/Apia', '2011-12-29', '2011-12-31')).not.toHaveProperty('error')
+  })
+
   it('la tool contesta el error sin consultar el reporte', async () => {
     mockPlanGate.mockResolvedValue(null)
     const out = parse(await call({ venueId: 'v1', fromDate: '2026-02-30' }))
