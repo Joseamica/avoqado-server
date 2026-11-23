@@ -143,7 +143,8 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       endDate,
       groupBy: (groupBy as 'none' | 'paymentMethod') || 'none',
       reportType: (reportType as ReportType) || 'summary',
-      timezone: venue?.timezone || 'America/Mexico_City',
+      // «GMT-6» guardado (altas viejas) no es IANA: «Por días» daba 400 y la proyección 500 (hz:fefa11b6:D15). Como el exporte.
+      timezone: zonaDelCalculo(venue?.timezone),
       merchantAccountId: typeof merchantAccountId === 'string' ? merchantAccountId : undefined,
       paymentMethod: typeof paymentMethod === 'string' ? (paymentMethod as PaymentMethodFilter) : undefined,
       cardType: typeof cardType === 'string' ? (cardType as CardTypeFilter) : undefined,

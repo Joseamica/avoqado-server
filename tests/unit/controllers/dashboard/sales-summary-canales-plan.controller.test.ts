@@ -91,3 +91,17 @@ it('sin pedir el desglose no se consulta el plan', async () => {
   expect(mockFeatureAccess).not.toHaveBeenCalled()
   expect(mockGetSalesSummary).toHaveBeenCalledWith('v-gratis', expect.objectContaining({ includeChannelBreakdown: false }))
 })
+
+// Carril F (hz:fefa11b6:D15, Codex r1 #9): con la zona guardada como «GMT-6» el cálculo recibía la zona cruda («Por días» daba 400 y
+// la proyección de depósitos 500). La misma zona del candado y del exporte: la Ciudad de México.
+it('🔴 una zona guardada como «GMT-6» llega al cálculo como America/Mexico_City', async () => {
+  ;(prismaMock.venue.findUnique as jest.Mock).mockResolvedValue({ timezone: 'GMT-6' })
+  await salesSummaryReport(req({ reportType: 'days' }), makeRes(), jest.fn())
+  expect(mockGetSalesSummary).toHaveBeenCalledWith('v-gratis', expect.objectContaining({ timezone: 'America/Mexico_City' }))
+})
+
+it('control · una zona IANA válida llega tal cual', async () => {
+  ;(prismaMock.venue.findUnique as jest.Mock).mockResolvedValue({ timezone: 'America/Tijuana' })
+  await salesSummaryReport(req({}), makeRes(), jest.fn())
+  expect(mockGetSalesSummary).toHaveBeenCalledWith('v-gratis', expect.objectContaining({ timezone: 'America/Tijuana' }))
+})
