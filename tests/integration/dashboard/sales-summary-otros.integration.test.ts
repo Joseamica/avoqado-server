@@ -359,7 +359,7 @@ describe('D17 · fechas y monedas del estado de cuenta', () => {
     const card = r.byPaymentMethodDetailed?.find(b => b.bucket === 'CARD')
     // Los campos de siempre del cajón siguen contando todo (−30 de R + 100 − 20 + 50 + 30 + 25), como «Métodos de pago» y el
     // total; el cajón dice cuánto es de otra moneda, y lo nuevo del estado (lo cobrado) es sólo pesos.
-    expect([c(card?.amount), card?.count]).toEqual([155, 8]) // + las dos tarjetas de $0 de R, que el cajón de siempre sí cuenta
+    expect([c(card?.amount), card?.count]).toEqual([155, 8]) // + las dos tarjetas de $0 (una de R y una de S), que el cajón de siempre sí cuenta
     expect([c(card?.foreignAmount), card?.foreignCount]).toEqual([160, 4])
     expect([c(card?.chargedAmount), card?.chargedCount]).toEqual([25, 1])
   })
