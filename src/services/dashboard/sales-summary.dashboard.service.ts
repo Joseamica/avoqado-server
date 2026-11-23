@@ -1935,8 +1935,9 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       const cobros = count - Number(row.cortesias)
       d.refundCount += count - chargedCount - Number(row.cortesias)
       d.transactionCount += cobros
-      // «Por comercio» con los mismos conteos que su destino: un cobro de $0 no es un movimiento (Codex r5 del carril C2).
-      if (destino === 'terminal' && row.merchantAccountId && cobros > 0) {
+      // «Por comercio» con los mismos conteos que su destino: un cobro de $0 no es un movimiento (Codex r5 del carril C2), pero su
+      // comisión fija sí es dinero y queda en los dos (r6). Sólo un $0 sin comisión no abre un comercio.
+      if (destino === 'terminal' && row.merchantAccountId && (cobros > 0 || Math.abs(feeCents) >= 0.005)) {
         const m = porComercio.get(row.merchantAccountId) ?? {
           merchantAccountId: row.merchantAccountId,
           collected: 0,

@@ -205,6 +205,8 @@ beforeAll(async () => {
   await seed({ method: 'CASH', amount: 0 })
   // …y el registro rápido de la TPV puede guardar una tarjeta de $0 con afiliación: tampoco es un movimiento del comercio.
   await seed({ method: 'CREDIT_CARD', amount: 0, merchant: merchantR })
+  // …y una de $0 con la comisión fija de su afiliación (−$2): esa comisión sí es dinero, en el destino y en «Por comercio».
+  await seed({ method: 'CREDIT_CARD', amount: 0, merchant: merchantR, fee: 2 })
   // Una devolución a tarjeta registrada hoy (con su comisión revertida) en el comercio R.
   await seed({ method: 'CREDIT_CARD', amount: -30, type: 'REFUND', merchant: merchantR, fee: -0.9 })
   // D17 · una liga cobrada en dólares (US$100, comisión 4) y su devolución parcial (US$20): no se suman como pesos.
@@ -306,10 +308,11 @@ describe('D12.2 y D12.3 · el estado de cuenta clasifica por tenderSemantics y n
   it('«Por comercio» cuenta igual que su destino: la tarjeta de $0 no es un movimiento ni una devolución', async () => {
     const r = await getSalesSummary(venueId, base())
     const R = r.byMerchantAccount?.find(m => m.merchantAccountId === merchantR)
-    // Sólo la devolución de $30 a tarjeta de R.
+    // Sólo la devolución de $30 a tarjeta de R cuenta como movimiento; la comisión fija de $2 de la tarjeta de $0 queda en los dos.
     expect([R?.transactionCount, R?.refundCount, c(R?.refunds)]).toEqual([1, 1, 30])
     const t = r.statementDestinations!.terminal
     expect([t.transactionCount, t.refundCount]).toEqual([1, 1])
+    expect(c(R?.netToReceive)).toBe(c(t.netToReceive))
   })
 
   it('el vale que cuenta como efectivo está en «Ya en tu mano»; «Otros» trae Uber y la transferencia por nombre', async () => {
@@ -345,7 +348,7 @@ describe('D17 · fechas y monedas del estado de cuenta', () => {
     const card = r.byPaymentMethodDetailed?.find(b => b.bucket === 'CARD')
     // Los campos de siempre del cajón siguen contando todo (−30 de R + 100 − 20 + 50 + 30 + 25), como «Métodos de pago» y el
     // total; el cajón dice cuánto es de otra moneda, y lo nuevo del estado (lo cobrado) es sólo pesos.
-    expect([c(card?.amount), card?.count]).toEqual([155, 6])
+    expect([c(card?.amount), card?.count]).toEqual([155, 8]) // + las dos tarjetas de $0 de R, que el cajón de siempre sí cuenta
     expect([c(card?.foreignAmount), card?.foreignCount]).toEqual([160, 4])
     expect([c(card?.chargedAmount), card?.chargedCount]).toEqual([25, 1])
   })
