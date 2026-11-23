@@ -6,6 +6,7 @@ import { terminalPaymentService } from '../services/terminal-payment.service'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 import { scheduleJob } from '../observability/jobContext'
 import { recuperarAvisosAprobadosSinReferencias } from '../services/tpv/angelpay-webhook.service'
+import { barrerRechazosDeBlumon } from '../services/tpv/rechazoDeBlumon'
 
 /**
  * Terminal Payment Watchdog
@@ -92,6 +93,9 @@ export class TerminalPaymentWatchdogJob {
       // D26 (22-nov): el techo a «sigo cobrando» — 5 min después del cancel del POS, con la terminal todavía diciendo que cobra y
       // sin intento nuevo ni señal de dinero, se suelta la RANURA (nunca la venta). Después de S2: el cese certificado gana.
       await paso('cancel-ceiling release sweep', () => terminalPaymentService.liberarPorTechoTrasCancelar())
+      // D26 · Blumon (22-nov): la red durable del cierre por el rechazo que avisó Blumon (lo disparan el aviso, el cancel del POS y
+      // el sello del cese; esto recoge lo que un candado ocupado o un reinicio dejaron sin cerrar).
+      await paso('blumon decline close sweep', () => barrerRechazosDeBlumon())
       await paso('approved without references alert recovery', () => recuperarAvisosAprobadosSinReferencias())
     } finally {
       this.isRunning = false

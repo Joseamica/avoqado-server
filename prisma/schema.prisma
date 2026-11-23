@@ -6530,6 +6530,11 @@ model TerminalPaymentRequest {
   /// D26 (22-nov): cuándo pidió el POS cancelar por PRIMERA vez (`cancelPayment`, una sola escritura). Origen del techo a
   /// «sigo cobrando»: nunca acredita «no se cobró»; sólo deja soltar la RANURA si la terminal sigue contestando ACTIVE sin dinero.
   cancelRequestedAt       DateTime?
+  /// D26 (22-nov): el aviso de Blumon (`ProviderEventLog.id`) que dijo que el banco RECHAZÓ una venta de esta terminal mientras
+  /// esta solicitud ocupaba su ranura, con su importe exacto y hora del banco posterior a su creación. Lo escribe SÓLO el receptor
+  /// de Blumon (`anotarRechazoDeBlumon`), una vez. No dice «no se cobró» por sí solo: la venta se cierra `BANK_DECLINED` cuando ya no
+  /// puede haber otro intento en vuelo (cese certificado o techo de la venta tras el cancel del POS). Ver `tpv/rechazoDeBlumon.ts`.
+  bankDeclineEventLogId   String?
   deliveryAttempts        Int                          @default(0)
   lastDeliveredAt         DateTime?
   acknowledgedAt          DateTime?

@@ -63,6 +63,7 @@ import { exigirQueNoRijaSoloSaldoEnTerminal } from './storeCredit/soloSaldoEnTer
 import { marcarDevolucionEnTerminal } from './storeCredit/terminalRefundMarker'
 import { esRappiEnEfectivo, MENSAJE_RAPPI_SOLO_EFECTIVO } from './shared/rappiEfectivoGuard'
 import { TECHO_DE_LA_RANURA_MS, techoCumplidoSql, TOPE_DEL_BARRIDO_DEL_TECHO, VENTANA_DE_EJECUCION_MS } from './tpv/techoDeEjecucionViva'
+import { cerrarVentaPorRechazoDeBlumon } from './tpv/rechazoDeBlumon'
 import { computeOrderBalance } from './shared/orderBalance'
 import { isCardOnlineOrderInTx, MENSAJE_PAGADO_CON_TARJETA, ONLINE_ORDER_PAID_BY_CARD } from './online-ordering/card/guards'
 import { exigirCancelacionParaDevolverEnTerminal } from './giftCards/giftCardCancel.service'
@@ -7579,8 +7580,11 @@ class TerminalPaymentService {
         ...(await prisma.terminalPaymentRequest.findMany({
           where: {
             requestId: { in: lote.map(p => p.requestId) },
-            status: TerminalPaymentRequestStatus.COMPLETED,
-            paymentId: { not: null },
+            // D26 (Codex r1 #3): también el rechazo del banco (AngelPay o Blumon) cuyo aviso a la espera se perdió tras el commit.
+            OR: [
+              { status: TerminalPaymentRequestStatus.COMPLETED, paymentId: { not: null } },
+              { status: TerminalPaymentRequestStatus.FAILED, failureCode: 'BANK_DECLINED' },
+            ],
           },
           take: lote.length,
           select: seleccion,
@@ -7591,7 +7595,7 @@ class TerminalPaymentService {
     for (const row of rows) {
       const pending = this.pendingPayments.get(row.requestId)
       if (!pending || pending.venueId !== row.venueId) continue
-      if (desenlaceCanonico(row).outcome !== 'CHARGED') continue
+      if (desenlaceCanonico(row).outcome === 'UNRESOLVED') continue
       clearTimeout(pending.timeout)
       this.pendingPayments.delete(row.requestId)
       pending.resolve(resultFromRow(row))
@@ -7907,7 +7911,11 @@ class TerminalPaymentService {
       status: despues,
       primera,
     })
-    if (primera) this.programarLiberacionTrasCierre(row.requestId, terminal.venueId)
+    if (primera) {
+      this.programarLiberacionTrasCierre(row.requestId, terminal.venueId)
+      // D26 · Blumon: con el cese certificado, un rechazo del banco ya anotado cierra la venta ahora (no espera S2 ni al vigía).
+      await cerrarVentaPorRechazoDeBlumon({ requestId: row.requestId, venueId: terminal.venueId })
+    }
     return primera
   }
 
@@ -7950,6 +7958,10 @@ class TerminalPaymentService {
     }
     if (this.ejecucionCerradaAcreditada(event, terminal)) {
       await this.marcarEjecucionCerrada({ ...row, requestId: event.requestId }, terminal, 'CANCEL_DISPOSITION')
+    } else if (event.disposition === 'ACTIVE' && updated.count > 0) {
+      // D26 · Blumon: la terminal ya recibió el cancel del POS y sigue diciendo «sigo». Si el banco ya rechazó este cobro (aviso
+      // anotado), la venta se cierra `BANK_DECLINED` ahora: la tablet lo soltó y el banco contestó. Nunca lanza.
+      await cerrarVentaPorRechazoDeBlumon({ requestId: event.requestId, venueId: terminal.venueId })
     }
     return true
   }
