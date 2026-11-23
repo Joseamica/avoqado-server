@@ -25,6 +25,8 @@ const WHAT: Record<HandoffMeta['reason'], string> = {
   DATA: 'no pudo consultar un dato y aceptó',
 }
 export const SEVERAL_PROFILES = 'Número registrado en varios perfiles'
+/** Ayuda pública: quien pidió una persona escribió desde un número que no es de ninguna cuenta. */
+export const UNREGISTERED_NUMBER = 'Número no registrado'
 /** DATA without a capability (out of the catalog, la B off, not linked, superadmin). */
 const OTHER_DATA = 'otro dato'
 /** The subject's topic of a DATA handoff: WHAT.DATA does not fit the 30 characters of a part (the body keeps WHAT.DATA). */
@@ -69,7 +71,7 @@ const ascii = (text: string) =>
 type Row = [label: string, value: string, detail?: string]
 function personRows(meta: HandoffMeta): Row[] {
   const venues = (p: HandoffMeta['people'][number]) => p.venues.map(v => v.name).join(', ') || 'Sin sucursal'
-  if (!meta.people.length) return [['Persona', 'Sin perfil']]
+  if (!meta.people.length) return [['Persona', meta.unregistered ? UNREGISTERED_NUMBER : 'Sin perfil']]
   if (!meta.multipleProfiles && meta.people.length === 1) {
     const [p] = meta.people
     return [
@@ -89,7 +91,8 @@ function personRows(meta: HandoffMeta): Row[] {
 }
 function conversationRows(meta: HandoffMeta): Row[] {
   return [
-    ['Número', meta.phone],
+    // Ayuda pública: el número sin cuenta va enmascarado a la vista; el botón para escribirle lo lleva completo.
+    ['Número', meta.unregistered ? `***${meta.phone.slice(-4)}` : meta.phone],
     ['App', appOf(meta.app)],
     ['Versión', meta.appVersion ?? 'Sin indicar'],
     ...(meta.deviceFamily ? [['Equipo', meta.deviceFamily] as Row] : []),
@@ -177,9 +180,11 @@ const plainText = (lines: string[]) =>
 
 /** El aviso de una persona que pidió ayuda: sólo lo que trae `meta`. */
 export function buildHandoffEmail(meta: HandoffMeta, to: string): EmailContent {
-  const business = meta.multipleProfiles
-    ? 'Varios perfiles'
-    : (meta.people[0]?.organization ?? meta.people[0]?.venues[0]?.name ?? 'Sin negocio')
+  const business = meta.unregistered
+    ? UNREGISTERED_NUMBER
+    : meta.multipleProfiles
+      ? 'Varios perfiles'
+      : (meta.people[0]?.organization ?? meta.people[0]?.venues[0]?.name ?? 'Sin negocio')
   const subject = ['Soporte', business, appOf(meta.app), meta.guides[0] ?? (meta.reason === 'DATA' ? DATA_SUBJECT : WHAT.REQUESTED)]
     .map(part)
     .join(' · ')
@@ -219,7 +224,13 @@ function compact(meta: HandoffMeta): [first: string, second: string] {
   const name = (p: HandoffMeta['people'][number]) => `${clip(p.name || 'Sin nombre', 40)} (${roleOf(p.role)})`
   const business = (p: HandoffMeta['people'][number]) => clip(p.organization ?? 'Sin negocio', 40)
   const single = !meta.multipleProfiles && meta.people.length === 1 ? meta.people[0] : null
-  const where = single ? `${business(single)} · ${venues(single)}` : meta.people.length ? SEVERAL_PROFILES : 'Sin perfil'
+  const where = single
+    ? `${business(single)} · ${venues(single)}`
+    : meta.people.length
+      ? SEVERAL_PROFILES
+      : meta.unregistered
+        ? UNREGISTERED_NUMBER
+        : 'Sin perfil'
   // Several profiles: every one of them, without picking.
   const who = single ? name(single) : meta.people.map(p => `${name(p)}: ${business(p)} · ${venues(p)}`).join('; ')
   const app = [appOf(meta.app), meta.appVersion].filter(Boolean).join(' ')

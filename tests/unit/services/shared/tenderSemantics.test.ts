@@ -1,4 +1,10 @@
-import { DRAWER_CASH_WHERE, paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '@/services/shared/tenderSemantics'
+import {
+  DRAWER_CASH_WHERE,
+  NOT_DRAWER_CASH_WHERE,
+  paymentCountsAsDrawerCash,
+  paymentIsAvoqadoSettled,
+  sqlEsEfectivoDelCajon,
+} from '@/services/shared/tenderSemantics'
 
 /**
  * The two predicates every closeout/settlement path must share (audit v4).
@@ -105,5 +111,51 @@ describe('DRAWER_CASH_WHERE — el veredicto de paymentCountsAsDrawerCash, expre
     expect(cumpleWhere({ method: 'CASH', fundsFlow: 'EXTERNAL_RECORDED', tenderCountsAsCash: null }, DRAWER_CASH_WHERE)).toBe(false)
     expect(cumpleWhere({ method: 'CASH', fundsFlow: null, tenderCountsAsCash: false }, DRAWER_CASH_WHERE)).toBe(false)
     expect(cumpleWhere({ method: 'CASH', fundsFlow: null, tenderCountsAsCash: null }, DRAWER_CASH_WHERE)).toBe(true)
+  })
+})
+
+/**
+ * D9.1 (21-nov-2026): el complemento de DRAWER_CASH_WHERE para el filtro por comercio. Evaluador con la semántica de SQL que Prisma
+ * genera: `{ not: v }` es `<> v` y NO admite NULL; `null` es IS NULL.
+ */
+function cumpleWhereSql(row: Record<string, unknown>, where: { OR: ReadonlyArray<Record<string, unknown>> }): boolean {
+  return where.OR.some(rama =>
+    Object.entries(rama).every(([campo, valor]) => {
+      const v = row[campo] ?? null
+      if (valor === null) return v === null
+      if (typeof valor === 'object' && 'not' in (valor as object)) return v !== null && v !== (valor as { not: unknown }).not
+      return v === valor
+    }),
+  )
+}
+
+describe('NOT_DRAWER_CASH_WHERE y sqlEsEfectivoDelCajon — lo que NO está en el cajón (D9.1)', () => {
+  const flows = ['CASH_DRAWER', 'AVOQADO_PROCESSED', 'EXTERNAL_RECORDED', null, undefined] as const
+  const snapshots = [true, false, null, undefined] as const
+  const methods = ['CASH', 'OTHER', 'CREDIT_CARD', 'BANK_TRANSFER'] as const
+
+  it('es el complemento exacto del predicado en las 80 combinaciones (sin perder las filas con NULL)', () => {
+    let combinaciones = 0
+    for (const fundsFlow of flows)
+      for (const tenderCountsAsCash of snapshots)
+        for (const method of methods) {
+          const fila = { method, fundsFlow, tenderCountsAsCash }
+          expect({ fila, sql: cumpleWhereSql(fila, NOT_DRAWER_CASH_WHERE) }).toEqual({ fila, sql: !paymentCountsAsDrawerCash(fila) })
+          combinaciones += 1
+        }
+    expect(combinaciones).toBe(80)
+  })
+
+  it('🔴 una tarjeta vieja (sin fundsFlow ni snapshot) NO es efectivo y sí pasa el filtro', () => {
+    expect(cumpleWhereSql({ method: 'CREDIT_CARD', fundsFlow: null, tenderCountsAsCash: null }, NOT_DRAWER_CASH_WHERE)).toBe(true)
+    expect(cumpleWhereSql({ method: 'CASH', fundsFlow: null, tenderCountsAsCash: null }, NOT_DRAWER_CASH_WHERE)).toBe(false)
+  })
+
+  it('el gemelo en SQL sigue la misma precedencia (fundsFlow → snapshot → método) y califica con el alias', () => {
+    const sql = sqlEsEfectivoDelCajon('p')
+    expect(sql).toBe(
+      `(CASE WHEN p."fundsFlow" IS NOT NULL THEN p."fundsFlow" = 'CASH_DRAWER' WHEN p."tenderCountsAsCash" IS NOT NULL THEN p."tenderCountsAsCash" ELSE p."method" = 'CASH' END)`,
+    )
+    expect(sqlEsEfectivoDelCajon()).not.toContain('."')
   })
 })

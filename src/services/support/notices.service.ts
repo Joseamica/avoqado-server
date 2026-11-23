@@ -5,7 +5,7 @@ import { Prisma, type SupportNotice } from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { getSupportHandoffConfig, type SupportHandoffConfig } from '@/config/supportWhatsapp'
+import { getSupportHandoffConfig, isSupportPublicHelpEnabled, type SupportHandoffConfig } from '@/config/supportWhatsapp'
 import { ForbiddenError } from '@/errors/AppError'
 import { runWithContext } from '@/observability/executionContext'
 import { conNegocio } from '@/services/demo/candadoDemo'
@@ -59,7 +59,10 @@ async function venueStillAllowed(tx: Prisma.TransactionClient, staffId: string, 
  * sale, y la persona que las perdió todas también. Nadie → null.
  */
 export async function stillAllowed(tx: Prisma.TransactionClient, row: SupportNotice, meta: HandoffMeta): Promise<HandoffMeta | null> {
-  let people = meta.people
+  // Ayuda pública: un número sin cuenta no trae personas ni sucursales que revalidar; sale mientras la ayuda pública siga prendida.
+  if (meta.unregistered && !row.linkId && !meta.people.length) return isSupportPublicHelpEnabled() ? meta : null
+  let people = meta.people,
+    nobody = false
   if (row.linkId) {
     const link = await tx.supportWhatsappLink.findUnique({ where: { id: row.linkId }, select: { staffId: true, phone: true } })
     const usable = link && link.staffId === row.staffId ? await usableLink(tx, link.phone) : null
@@ -68,6 +71,7 @@ export async function stillAllowed(tx: Prisma.TransactionClient, row: SupportNot
   } else {
     const registered = await listRegisteredSupportStaff(meta.phone, tx)
     people = people.filter(p => registered.includes(p.staffId))
+    nobody = !registered.length
   }
   const kept: HandoffMeta['people'] = []
   for (const person of people) {
@@ -76,7 +80,10 @@ export async function stillAllowed(tx: Prisma.TransactionClient, row: SupportNot
     // One shown without a venue (a link still choosing it) stays: there was nothing to lose.
     if (venues.length || !person.venues.length) kept.push({ ...person, venues })
   }
-  return kept.length ? { ...meta, people: kept, multipleProfiles: kept.length > 1 } : null
+  if (kept.length) return { ...meta, people: kept, multipleProfiles: kept.length > 1 }
+  // Public help: a number that lost its account after asking was told someone writes to it, and now is one of public help: the
+  // notice still goes, as a number with no account (without the people or venues it no longer has).
+  return nobody && isSupportPublicHelpEnabled() ? { ...meta, people: [], multipleProfiles: false, unregistered: true } : null
 }
 
 /** Los HELD de cada día anterior a hoy (CDMX) van a un solo resumen de ese día. */
@@ -320,6 +327,11 @@ async function sendOne(row: SupportNotice, now: Date, to: string, dependencies: 
     return 'uncertain'
   }
   const meta = row.firstAttemptAt ? (row.meta as object | null) : await freezeMeta(row, now, mine)
+  // Public help switched off after the first attempt: a retry of a number with no account no longer goes out.
+  if (row.kind === 'HANDOFF' && asMeta(meta as Prisma.JsonValue)?.unregistered && !isSupportPublicHelpEnabled()) {
+    await finish('SKIPPED', { errorCode: 'REVOKED' })
+    return 'skipped'
+  }
   if (!meta) {
     // Revoked at the first attempt (already SKIPPED), or a meta the 30-day purge cleared.
     if (row.firstAttemptAt) await finish('SKIPPED', { errorCode: 'NO_META' })

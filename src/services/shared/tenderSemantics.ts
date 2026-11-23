@@ -69,6 +69,29 @@ export const DRAWER_CASH_WHERE: Readonly<{ OR: Prisma.PaymentWhereInput[] }> = {
 }
 
 /**
+ * El complemento EXACTO de `DRAWER_CASH_WHERE` (lo que NO está en el cajón), con ramas positivas. 🔴 Nunca
+ * `NOT: DRAWER_CASH_WHERE`: en SQL `NOT (NULL OR …)` es NULL y una tarjeta vieja sin `fundsFlow` ni snapshot quedaría fuera.
+ * Lo usa el filtro por comercio del Resumen de ventas (D9.1, 21-nov-2026): la TPV guarda el comercio del serial también en un
+ * cobro en efectivo, y ese efectivo no es dinero de ese comercio. Paridad con el predicado en tenderSemantics.test.ts.
+ */
+export const NOT_DRAWER_CASH_WHERE: Readonly<{ OR: Prisma.PaymentWhereInput[] }> = {
+  OR: [
+    { fundsFlow: { not: PaymentFundsFlow.CASH_DRAWER } }, // Prisma: `<> 'CASH_DRAWER'`, sin los NULL
+    { fundsFlow: null, tenderCountsAsCash: false },
+    { fundsFlow: null, tenderCountsAsCash: null, method: { not: PaymentMethod.CASH } },
+  ],
+}
+
+/**
+ * El mismo veredicto que `paymentCountsAsDrawerCash` en SQL crudo, como booleano que nunca es NULL (`method` no lo es).
+ * `alias` es texto de confianza (código propio); vacío = columnas sin calificar.
+ */
+export function sqlEsEfectivoDelCajon(alias = ''): string {
+  const a = alias ? `${alias}.` : ''
+  return `(CASE WHEN ${a}"fundsFlow" IS NOT NULL THEN ${a}"fundsFlow" = 'CASH_DRAWER' WHEN ${a}"tenderCountsAsCash" IS NOT NULL THEN ${a}"tenderCountsAsCash" ELSE ${a}"method" = 'CASH' END)`
+}
+
+/**
  * ¿Este dinero lo liquida/deposita AVOQADO? (available balance + VenueTransaction
  * material). Custom tenders and externally-recorded payments are NEVER ours to
  * deposit, no matter what `method` says.

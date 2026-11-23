@@ -2,7 +2,9 @@ import {
   getSupportAiConfig,
   getSupportDataConfig,
   getSupportHandoffConfig,
+  getSupportPublicHelpDailyUsd,
   isSupportDataEnabled,
+  isSupportPublicHelpEnabled,
   isSupportWhatsappEnabled,
   LUNA_SUPPORT_PRICING as pricing,
   maximumSupportCost,
@@ -23,6 +25,10 @@ import {
   SUPPORT_NOTICE_DATA_SENTENCE,
   SUPPORT_NOTICE_FREE_TEXT,
   SUPPORT_NOTICE_TEXTS,
+  SUPPORT_PUBLIC_DAY_LIMIT,
+  SUPPORT_PUBLIC_HOUR_LIMIT,
+  SUPPORT_PUBLIC_INTRO,
+  SUPPORT_PUBLIC_NOTICE_TEXTS,
   SUPPORT_LITERAL_CAP,
   SUPPORT_OTHER_QUESTION,
   SUPPORT_SECOND_FAILURE,
@@ -33,6 +39,8 @@ import {
   supportHandoffDone,
   supportManualSource,
   supportOldVersion,
+  supportPublicNotice,
+  supportPublicPause,
 } from '@/services/support/texts'
 
 const originalEnv = process.env
@@ -424,5 +432,59 @@ describe('pasar a una persona: configuración y textos', () => {
       expect(logger.warn).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ variable: 'SUPPORT_HANDOFF_EMAIL_TO' }))
       expect(JSON.stringify(logger.warn.mock.calls)).not.toMatch(/llámame|veinte|arroba/)
     })
+  })
+})
+
+describe('ayuda pública para números no registrados (22-nov)', () => {
+  const hybrid = (extra: Record<string, string | undefined> = {}) => {
+    process.env.SUPPORT_WHATSAPP_FREE_TEXT_ENABLED = 'true'
+    process.env.SUPPORT_WHATSAPP_HYBRID_ENABLED = 'true'
+    for (const [key, value] of Object.entries(extra)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+  it('is on by default with the hybrid; SUPPORT_PUBLIC_HELP_ENABLED=false turns it off; without the hybrid it is off', () => {
+    hybrid()
+    expect(isSupportPublicHelpEnabled()).toBe(true)
+    for (const off of ['false', ' FALSE ']) {
+      hybrid({ SUPPORT_PUBLIC_HELP_ENABLED: off })
+      expect(isSupportPublicHelpEnabled()).toBe(false)
+    }
+    hybrid({ SUPPORT_PUBLIC_HELP_ENABLED: 'true', SUPPORT_WHATSAPP_HYBRID_ENABLED: undefined })
+    expect(isSupportPublicHelpEnabled()).toBe(false)
+  })
+  it('its daily AI budget: US$1 by default, an exact USD amount, an invalid value falls back to 1', () => {
+    expect(getSupportPublicHelpDailyUsd().toString()).toBe('1')
+    process.env.SUPPORT_PUBLIC_HELP_DAILY_USD = '2.50'
+    expect(getSupportPublicHelpDailyUsd().toString()).toBe('2.5')
+    process.env.SUPPORT_PUBLIC_HELP_DAILY_USD = '0'
+    expect(getSupportPublicHelpDailyUsd().toString()).toBe('0')
+    for (const bad of ['-1', 'un dólar', '1e3', '01'])
+      expect((process.env.SUPPORT_PUBLIC_HELP_DAILY_USD = bad) && getSupportPublicHelpDailyUsd().toString()).toBe('1')
+  })
+  it('the first message says what the bot does and that business data needs the number linked, then the notice of today', () => {
+    hybrid()
+    expect(supportPublicNotice()).toBe(`${SUPPORT_PUBLIC_INTRO}\n\n${SUPPORT_NOTICE_FREE_TEXT}`)
+    expect(SUPPORT_PUBLIC_INTRO).toContain('https://dashboard.avoqado.io/support/whatsapp')
+    hybrid({ SUPPORT_DATA_ENABLED: 'true' })
+    expect(supportPublicNotice()).toBe(`${SUPPORT_PUBLIC_INTRO}\n\n${SUPPORT_NOTICE_DATA_FREE_TEXT}`)
+    // Every variant is recognized as a shown notice, and fits in one WhatsApp answer.
+    expect(SUPPORT_PUBLIC_NOTICE_TEXTS).toEqual(SUPPORT_NOTICE_TEXTS.map(text => `${SUPPORT_PUBLIC_INTRO}\n\n${text}`))
+    for (const text of SUPPORT_PUBLIC_NOTICE_TEXTS) expect(text.length).toBeLessThanOrEqual(1500)
+    // The four of today are untouched.
+    expect(SUPPORT_NOTICE_TEXTS).toEqual([SUPPORT_NOTICE, SUPPORT_NOTICE_FREE_TEXT, SUPPORT_NOTICE_DATA, SUPPORT_NOTICE_DATA_FREE_TEXT])
+  })
+  it('the limit and pause texts are exact', () => {
+    expect(SUPPORT_PUBLIC_DAY_LIMIT).toBe('Llegaste al límite de preguntas por hoy. Seguimos mañana. Mientras: https://avoqado.io/help')
+    expect(SUPPORT_PUBLIC_HOUR_LIMIT).toBe(
+      'Llegaste al límite de preguntas por ahora. Seguimos en una hora. Mientras: https://avoqado.io/help',
+    )
+    expect(supportPublicPause(1)).toBe(
+      'Pausé esta conversación 24 horas. Si necesitas ayuda con Avoqado, escríbeme después o ve a https://avoqado.io/help',
+    )
+    expect(supportPublicPause(7)).toBe(
+      'Pausé esta conversación 7 días. Si necesitas ayuda con Avoqado, escríbeme después o ve a https://avoqado.io/help',
+    )
   })
 })

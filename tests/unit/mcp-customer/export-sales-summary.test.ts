@@ -40,12 +40,23 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+const schemas = new Map<string, Record<string, { description?: string }>>()
+const descripciones = new Map<string, string>()
 const scope = { staffId: 'staff-1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
 const call = (n: string, args: Record<string, unknown>) => handlers.get(n)!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
 beforeAll(() => {
-  registerSalesTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+  registerSalesTools(
+    {
+      tool: (...a: unknown[]) => {
+        handlers.set(a[0] as string, a[a.length - 1] as never)
+        schemas.set(a[0] as string, a[2] as never)
+        descripciones.set(a[0] as string, a[1] as string)
+      },
+    } as never,
+    scope,
+  )
 })
 beforeEach(() => jest.clearAllMocks())
 
@@ -93,6 +104,65 @@ describe('export_sales_summary — plan gating', () => {
     expect(out.rows[0]).not.toHaveProperty('maskedPan') // redacted
     expect(out.rows[0]).not.toHaveProperty('processorData') // dropped (nested card/processor blob)
     expect(out.rows[0]).toMatchObject({ id: 'p1', amount: 100, cardBrand: 'VISA' }) // safe fields survive
+  })
+
+  // D13.2: la MCP forzaba reportType 'summary' y «byPeriod» salía vacío.
+  it('🔴 D13.2 · byPeriod pide el desglose: el reportType dado, o por día si no se da', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockGetSalesSummary.mockResolvedValue({ summary: {}, byPaymentMethod: [] })
+    mockFlatten.mockReturnValue({ rows: [] })
+    await call('export_sales_summary', { venueId: 'v1', sections: 'byPeriod', reportType: 'weeks' })
+    expect(mockGetSalesSummary.mock.calls[0][1].reportType).toBe('weeks')
+    await call('export_sales_summary', { venueId: 'v1', sections: 'totals,byPeriod' })
+    expect(mockGetSalesSummary.mock.calls[1][1].reportType).toBe('days')
+    await call('export_sales_summary', { venueId: 'v1', sections: 'totals', reportType: 'hours' })
+    expect(mockGetSalesSummary.mock.calls[2][1].reportType).toBe('summary')
+  })
+
+  // Codex D13 r1 #10: el MCP certificado comparte el esquema de entrada; lo nuevo se describe en la descripción de la tool, que el
+  // directorio sustituye por la suya, así su `sections` no cambia de texto.
+  it('🔴 D13.6 · la tool anuncia «statement» y reportType en su descripción; `sections` conserva su texto certificado', () => {
+    expect(descripciones.get('export_sales_summary')).toMatch(/statement/)
+    expect(descripciones.get('export_sales_summary')).toMatch(/reportType/)
+    expect(schemas.get('export_sales_summary')!.sections.description).toBe(
+      'Summary sections, comma-separated: totals,paymentMethods,cardTypes,merchantAccounts,byPeriod',
+    )
+  })
+
+  it('«Por periodo» con demasiadas filas no se manda entero ni a medias: lo dice', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockGetSalesSummary.mockResolvedValue({ summary: {}, byPaymentMethod: [] })
+    mockFlatten.mockReturnValue({ rows: Array.from({ length: 1001 }, (_, i) => ({ section: 'byPeriod', label: `h${i}` })) })
+    const out = parse(await call('export_sales_summary', { venueId: 'v1', sections: 'byPeriod', reportType: 'hours' }))
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/1,001/)
+    expect(out.rows).toBeUndefined()
+  })
+
+  it('🔴 D13.3 · las filas del detallado dicen su hora real en la zona del negocio y no traen la zona anidada', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockCount.mockResolvedValue(1)
+    mockFetch.mockResolvedValue([
+      {
+        id: 'p1',
+        amount: 50,
+        createdAt: new Date('2026-11-12T06:10:00.000Z'),
+        clientCreatedAt: new Date('2026-11-12T05:50:00.000Z'),
+        zona: 'America/Mexico_City',
+      },
+    ])
+    const out = parse(await call('export_sales_summary', { venueId: 'v1', mode: 'detailed' }))
+    expect(out.rows[0].fecha).toBe('2026-11-11 23:50:00')
+    expect(out.rows[0]).not.toHaveProperty('zona')
+  })
+
+  it('Codex D13 r3 #6 · con más periodos que el tope, avisa sin etiquetarlos uno por uno', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockGetSalesSummary.mockResolvedValue({ summary: {}, byPeriod: Array.from({ length: 1001 }, (_, i) => ({ period: `p${i}` })) })
+    const out = parse(await call('export_sales_summary', { venueId: 'v1', sections: 'byPeriod', reportType: 'hours' }))
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/1,001/)
+    expect(mockFlatten).not.toHaveBeenCalled()
   })
 
   it('summary mode returns flattened rows for an entitled venue', async () => {
