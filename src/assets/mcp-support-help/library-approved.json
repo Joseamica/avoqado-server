@@ -685,6 +685,12 @@
       "featureCode": "ADVANCED_REPORTS",
       "gateKind": "FEATURE"
     },
+    "dashboard/reportes/ver-ventas-por-canal": {
+      "sha256": "ba9eb48c9b8c3950f65b249402243cb8868a86512f53dba9a0e2e9b6407985c6",
+      "requiredPermissions": [
+        "reports:read"
+      ]
+    },
     "dashboard/reservaciones/agregar-a-lista-de-espera": {
       "sha256": "5f4e0d425177db67bf0728a21607d59d9c8227a14bd1c80242e68cbf8f74596c",
       "requiredPermissions": [

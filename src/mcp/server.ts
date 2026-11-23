@@ -15,6 +15,7 @@ import { configureToolCatalog } from './catalog'
 import { registerVenueTools } from './tools/venues'
 import { registerVenueAdministrationTools } from './tools/venueAdministration'
 import { registerSalesTools } from './tools/sales'
+import { registerSalesByChannelTools } from './tools/salesByChannel'
 import { registerSettlementReportTools } from './tools/settlementReport'
 import { registerOrderTools } from './tools/orders'
 import { registerTerminalTools } from './tools/terminals'
@@ -129,6 +130,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerVenueTools(server, scope)
   registerVenueAdministrationTools(server, scope)
   registerSalesTools(server, scope)
+  registerSalesByChannelTools(server, scope)
   registerSettlementReportTools(server, scope)
   registerOrderTools(server, scope)
   registerTerminalTools(server, scope)

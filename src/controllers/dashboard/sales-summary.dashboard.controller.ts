@@ -79,6 +79,8 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       cardType,
       includeMerchantBreakdown,
       includeSettlementProjection,
+      includeChannelBreakdown,
+      includePrepaid,
     } = req.query
 
     // Validate required params
@@ -146,6 +148,10 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       cardType: typeof cardType === 'string' ? (cardType as CardTypeFilter) : undefined,
       includeMerchantBreakdown: includeMerchantBreakdown === 'true' && reconciliationAllowed,
       includeSettlementProjection: includeSettlementProjection === 'true' && reconciliationAllowed,
+      // Carril G · D4 y D5: «Ventas por canal», «Por tipo de pedido» y los anticipos van en TODOS los planes, sin candado (decisión
+      // del founder del 22-nov, como el agrupar por origen o canal de Square y el channel-mix del Inicio).
+      includeChannelBreakdown: includeChannelBreakdown === 'true',
+      includePrepaid: includePrepaid === 'true',
     }
 
     const report = await getSalesSummary(venueId, filters)

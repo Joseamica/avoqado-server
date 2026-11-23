@@ -6617,7 +6617,11 @@
       "nombre": "Resumen de Ventas",
       "origen": "src/pages/Reports/SalesSummary.tsx:724",
       "quienLaVe": "La ruta no tiene candado de permiso (src/routes/venueRoutes.tsx:298-301): entra quien tenga la dirección; en el menú el renglón pide reports:read (src/components/Sidebar/app-sidebar.tsx:890), por omisión MANAGER, ADMIN y OWNER. Plan: Gratis ve el día de hoy; filtros e historial con <FeatureGate feature=\"ADVANCED_REPORTS\"> (src/pages/Reports/SalesSummary.tsx:2446). En marca blanca, canWL('AVOQADO_REPORTS') (src/components/Sidebar/app-sidebar.tsx:946).",
-      "paginas": ["dashboard/reportes/revisar-reportes-ventas", "dashboard/reportes/comparar-inicio-y-resumen-de-ventas"]
+      "paginas": [
+        "dashboard/reportes/revisar-reportes-ventas",
+        "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
+        "dashboard/reportes/ver-ventas-por-canal"
+      ]
     },
     {
       "id": "accion:ruta:venue/reports/sales-summary/exportar-resumen",
