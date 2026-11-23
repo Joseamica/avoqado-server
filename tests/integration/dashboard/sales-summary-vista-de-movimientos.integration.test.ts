@@ -136,6 +136,12 @@ describe('D16.2 · lo cobrado con el método elegido (vista de movimientos)', ()
     expect(cents((s.chargedAmount ?? 0) - s.refunds - s.platformFees - (s.tenderCommissions ?? 0))).toBe(cents(s.totalCollected))
   })
 
+  it('🔴 Codex r6 · por días con el mismo filtro, las devoluciones de cada día suman las de la cabecera (sin la que falló)', async () => {
+    const r = await resumen({ paymentMethod: 'CASH', reportType: 'days' })
+    const suma = (r.byPeriod ?? []).reduce((s, p) => s + Math.round(p.metrics.refunds * 100), 0)
+    expect(suma).toBe(3300)
+  })
+
   it('🔴 «Otros»: $90 cobrados, menos la comisión de la plataforma, dan «Neto cobrado»', async () => {
     const r = await resumen({ paymentMethod: 'OTHER' })
     expect(cents(r.summary.chargedAmount)).toBe(9000)

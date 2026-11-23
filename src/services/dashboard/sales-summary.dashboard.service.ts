@@ -2953,7 +2953,8 @@ async function calculateTimePeriodMetrics(
       AND type = 'REFUND'
       ${
         isFiltered
-          ? ''
+          ? // D16.2 (carril F, Codex r6): en la vista de movimientos sólo lo que de verdad salió, como la cabecera.
+            `AND status = 'COMPLETED'`
           : `AND ${sqlOrdenSinTarjetasTexto('"Payment"."orderId"')}
       -- Codex r3 #1: igual que el resumen, la devolución de una cuenta cancelada o borrada no se resta (r4 H5: sin filtro).
       AND NOT EXISTS (SELECT 1 FROM "Order" o WHERE o.id = "Payment"."orderId" AND o.status IN ('CANCELLED', 'DELETED'))`
