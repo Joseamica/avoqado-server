@@ -8,7 +8,7 @@ requiredPermissions:
   - menu:read
   - creditPacks:read
 sourceRepo: avoqado-web-dashboard
-sourceRef: 1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a
+sourceRef: 34005596348b40e47ca5ea0b00d2ad55140221a2
 keywords:
   - crear paquete de clases
   - paquete de créditos
@@ -36,17 +36,17 @@ keywords:
 ## Cómo funciona un paquete Ilimitado
 
 - Para un paquete de clases sin límite (como una membresía mensual), en el renglón del producto prende *Ilimitado*: la cantidad desaparece. Un paquete con un renglón Ilimitado necesita *Días de Validez*.
-- La clienta ve «Ilimitado · vence el …» en su cuenta, en el panel y en el POS, nunca un número.
+- La clienta ve «Ilimitado · vence el …» en su cuenta, en el panel y en el POS, nunca un número de créditos. En la pestaña *Compras* (abre la compra con la flecha) y en la ficha de la clienta ves «Ilimitado · vence el … · usó N» (cuántas veces lo ha usado) o, si se reembolsó, «Ilimitado · reembolsado».
 - Es personal: cubre un lugar por clase, a su nombre. Aunque escriba otro nombre o teléfono al reservar, la reserva queda con los datos de su ficha. Los lugares de más (por ejemplo, para una amiga) se pagan aparte.
 - Sólo sirve para clases que empiezan antes de que venza, también al cambiar de horario.
 - Puede reservar las clases que quiera, sin máximo por día.
-- Si cancela, no se le descuenta nada. Si cancela tarde o no llega, se cuenta como falta en su compra (*Faltas*), sin castigo.
+- Si cancela, no se le descuenta nada. Si cancela tarde o no llega, se cuenta como falta en su compra («Faltas: N sin llegar · N cancelaciones tardías»), sin castigo.
 - Mientras su Ilimitado esté vigente, ella no puede cambiar su nombre desde su cuenta; lo corriges tú desde la ficha de la clienta en *Clientes*.
 
 ## Problemas frecuentes
 
 - Debajo del campo sale lo que falta: «El nombre es requerido», «El precio es requerido» o «El producto es requerido».
-- «Un paquete Ilimitado necesita días de vigencia.»: escribe los *Días de Validez* antes de guardar.
+- «Un paquete Ilimitado necesita días de vigencia»: sale debajo de *Días de Validez*; escríbelos antes de guardar.
 - «Este paquete tiene un renglón Ilimitado: cambia sus productos desde el panel actualizado.»: el paquete se está editando desde una versión vieja del panel o de la app del POS. Recarga el panel (o actualiza la app) y vuelve a hacer el cambio.
 - Mensajes que puede ver la clienta con su Ilimitado:
   - «Tu Ilimitado es personal: cubre 1 lugar por clase a tu nombre. Los demás lugares se pagan aparte.»: pidió más de un lugar.
@@ -54,5 +54,5 @@ keywords:
   - «Tu Ilimitado vence el …; esta clase es después.»: la clase es después del vencimiento; puede comprar otro paquete.
   - «Tu nombre está ligado a tu Ilimitado. Para corregirlo, pídeselo al estudio.»: quiso cambiar su nombre en su cuenta.
 - «Esta reserva se pagó con un Ilimitado y va a nombre de su titular: no se le puede cambiar el nombre ni el contacto.»: sale al editar esa reserva en el panel; las notas sí se pueden cambiar.
-- «Un paquete Ilimitado no tiene saldo que ajustar.»: un Ilimitado no se ajusta; si hace falta, reembolsa la compra o vende otra.
+- En un Ilimitado no aparece *Ajustar Balance*: no tiene saldo que ajustar (desde una versión vieja sale «Un paquete Ilimitado no tiene saldo que ajustar.»). Si hace falta, reembolsa la compra o vende otra.
 - Si sale «Error», el aviso trae la razón; si no la trae, dice «Ocurrió un error». Si salió al crear el paquete, no lo vuelvas a crear: pudo quedar creado en un primer intento. Pide que lo revise una persona del equipo de Avoqado.
