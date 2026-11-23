@@ -36,7 +36,7 @@ import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANS
 import { contradiccionDeProcedenciaSql, sinVetoDeDineroSql } from './evidenciaPositivaSql'
 import { sondaReportoActiva, sondaVetaLaDeclaracion } from './sondaActiva'
 import logger from '../../config/logger'
-import { elTechoLevantaElVeto } from './techoDeEjecucionViva'
+import { activaTrasElCancel, cumplioElTechoDeLaVenta, elTechoLevantaElVeto } from './techoDeEjecucionViva'
 
 export const RECONCILE_UNCHARGED_PERMISSION = 'payments:reconcile-uncharged'
 
@@ -609,7 +609,22 @@ export async function reconcileUncharged(
       (!porElBanco && (await sondaNoLaEncontroTrasEntregarla(tx, row.id, identity.venueId)))
     if (!constaQueSalio) throw new UnchargedReconciliationError('TERMINAL_NEVER_ANSWERED')
 
-    if (sondaVetaLaDeclaracion(row, ranuraYaSuelta(row)) && !techoDeLaVenta)
+    // D26 (Codex r2 #2 del techo): la excepción del 3-nov deja de vetar a la TPV sin `executionVersion` (2.12.5 / 2.13.x) en cuanto
+    // la ranura se suelta, y el techo de la RANURA la suelta a los 30 s del cancel: la persona podía declarar a los ~40 s con un
+    // cobro que el SDK todavía puede aprobar (hasta 150 s). Si la terminal dijo «sigo» DESPUÉS del cancel del POS, esa TPV espera
+    // el RELOJ de la venta: 150 s desde el cancel o desde su último intento. Sólo el reloj (sin el tope de vínculos ni la puerta en
+    // memoria de `elTechoLevantaElVeto`, que para estas TPV serían un veto sin salida que antes no tenían) y sólo la persona: la
+    // ruta del banco queda como estaba.
+    let esperaElRelojDeLaVenta = false
+    if (!porElBanco && ranuraYaSuelta(row) && sondaReportoActiva(row) && activaTrasElCancel(row) && !sondaVetaLaDeclaracion(row, true)) {
+      const ultimoIntento = await tx.terminalPaymentAttemptLink.findFirst({
+        where: { requestId: row.requestId },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: { createdAt: true },
+      })
+      esperaElRelojDeLaVenta = !cumplioElTechoDeLaVenta(row, ultimoIntento?.createdAt ?? null, new Date())
+    }
+    if ((sondaVetaLaDeclaracion(row, ranuraYaSuelta(row)) && !techoDeLaVenta) || esperaElRelojDeLaVenta)
       throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
 
     const sobre =
