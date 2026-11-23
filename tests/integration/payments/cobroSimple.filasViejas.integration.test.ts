@@ -66,7 +66,13 @@ const rechazo = (attemptId: string, description = '51 FONDOS INSUFICIENTES') =>
 describe('S1.4 · filas viejas: el vigía las cierra con la misma regla', () => {
   it('una TIMED_OUT/AUTO_RELEASED de hace 3 días queda NOT_CHARGED (asiento histórico) y su cuenta se puede cancelar', async () => {
     const venta = await f.nuevaVenta(308)
-    const s = await f.solicitud({ orderId: venta.id, status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED', amountCents: 30800, createdAt: vieja(3) })
+    const s = await f.solicitud({
+      orderId: venta.id,
+      status: 'TIMED_OUT',
+      failureCode: 'AUTO_RELEASED',
+      amountCents: 30800,
+      createdAt: vieja(3),
+    })
     await alUpdatedAt(s.id, vieja(3))
     await terminalPaymentService.cerrarSinRespuestaVencidas(new Date())
     expect(await terminalPaymentService.getPaymentStatus(s.requestId, f.venueId)).toMatchObject({
@@ -75,7 +81,9 @@ describe('S1.4 · filas viejas: el vigía las cierra con la misma regla', () => 
       outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
       noChargeCause: 'NO_RESPONSE',
     })
-    const [asiento] = await prisma.activityLog.findMany({ where: { venueId: f.venueId, action: 'TERMINAL_PAYMENT_CLOSED_NO_RESPONSE', entityId: s.id } })
+    const [asiento] = await prisma.activityLog.findMany({
+      where: { venueId: f.venueId, action: 'TERMINAL_PAYMENT_CLOSED_NO_RESPONSE', entityId: s.id },
+    })
     expect(asiento.data).toMatchObject({ historico: true, priorStatus: 'TIMED_OUT', priorFailureCode: 'AUTO_RELEASED' })
     expect(await terminalPaymentService.hasChargeBlockingOrderCancel(f.venueId, venta.id)).toBe(false)
   })
@@ -85,7 +93,12 @@ describe('S1.4 · filas viejas: el vigía las cierra con la misma regla', () => 
     const s = await f.solicitud({ orderId: venta.id, status: 'UNKNOWN', failureCode: 'TIMED_OUT', createdAt: vieja(1) })
     await alUpdatedAt(s.id, vieja(1))
     // El cobro entró por una cola vieja: etiquetado sólo en `processorData` (sin la llave del intento ni el requestId del registro).
-    const pago = await recordOrderPayment(f.venueId, venta.id, f.registroDeLaTerminal({ attemptId: randomUUID(), sinLlave: true }), f.staffId)
+    const pago = await recordOrderPayment(
+      f.venueId,
+      venta.id,
+      f.registroDeLaTerminal({ attemptId: randomUUID(), sinLlave: true }),
+      f.staffId,
+    )
     const actual = await exigir(prisma.payment.findUnique({ where: { id: pago.id } }))
     await prisma.payment.update({
       where: { id: pago.id },
@@ -109,7 +122,12 @@ describe('S1.4 · filas viejas: el vigía las cierra con la misma regla', () => 
 
   it('una retenida con un aprobado conocido (`BANK_APPROVED_AWAITING_PAYMENT`) no se toca y sigue cercando su cuenta', async () => {
     const venta = await f.nuevaVenta(100)
-    const s = await f.solicitud({ orderId: venta.id, status: 'TIMED_OUT', failureCode: 'BANK_APPROVED_AWAITING_PAYMENT', createdAt: vieja(1) })
+    const s = await f.solicitud({
+      orderId: venta.id,
+      status: 'TIMED_OUT',
+      failureCode: 'BANK_APPROVED_AWAITING_PAYMENT',
+      createdAt: vieja(1),
+    })
     await alUpdatedAt(s.id, vieja(1))
     await terminalPaymentService.cerrarSinRespuestaVencidas(new Date())
     expect(await fila(s.requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'BANK_APPROVED_AWAITING_PAYMENT' })
@@ -128,7 +146,9 @@ describe('S1.5 · el rechazo de AngelPay es un CAS directo fuera de vuelo, con s
     await rechazo(a)
     expect(await fila(s.requestId)).toMatchObject({ status: 'SENT' })
     // «Reintentar» de la Nexgo 2.20: el intento B dentro de la MISMA solicitud sigue autorizado.
-    expect(await terminalPaymentService.handleAttemptOpenedFromSocket({ requestId: s.requestId, attemptId: randomUUID() }, tpv())).toMatchObject({
+    expect(
+      await terminalPaymentService.handleAttemptOpenedFromSocket({ requestId: s.requestId, attemptId: randomUUID() }, tpv()),
+    ).toMatchObject({
       success: true,
       executionAuthorized: true,
     })
@@ -202,7 +222,10 @@ describe('Codex S1 r1 · arreglos', () => {
     for (const r of [cancelada, fallida]) await alUpdatedAt(r.id, vieja(2))
     await terminalPaymentService.cerrarSinRespuestaVencidas(new Date())
     for (const r of [cancelada, fallida])
-      expect(await terminalPaymentService.getPaymentStatus(r.requestId, f.venueId)).toMatchObject({ status: 'FAILED', outcome: 'NOT_CHARGED' })
+      expect(await terminalPaymentService.getPaymentStatus(r.requestId, f.venueId)).toMatchObject({
+        status: 'FAILED',
+        outcome: 'NOT_CHARGED',
+      })
   })
 
   it('#5 · dos rechazos confirmados (A y B) cierran como rechazo del banco, con su motivo', async () => {
@@ -227,7 +250,132 @@ describe('Codex S1 r1 · arreglos', () => {
     await recordOrderPayment(f.venueId, venta.id, f.registroDeLaTerminal({ attemptId, requestId: s.requestId }), f.staffId)
     expect(await fila(s.requestId)).toMatchObject({ status: 'COMPLETED' })
     expect(
-      await prisma.activityLog.count({ where: { venueId: f.venueId, action: 'TERMINAL_PAYMENT_LATE_APPROVAL_AFTER_WINDOW', entityId: s.id } }),
+      await prisma.activityLog.count({
+        where: { venueId: f.venueId, action: 'TERMINAL_PAYMENT_LATE_APPROVAL_AFTER_WINDOW', entityId: s.id },
+      }),
     ).toBe(1)
+  })
+})
+
+/**
+ * Codex S1 r2 (R2-9) · pasada exhaustiva de la familia «el aprobado manda»: para cada estado viejo o en duda y cada señal de que el
+ * banco ya dijo que sí (o la terminal lo afirmó), ni el cierre de los 10 s ni el barrido la dejan «no cobrada», y la cuenta NUNCA
+ * admite otro cobro: ni antes de la primera pasada del vigía ni después.
+ */
+describe('Codex S1 r2 (R2-9) · el aprobado manda, en todas las filas', () => {
+  const ESTADOS: [string, Record<string, unknown>][] = [
+    ['UNKNOWN con reloj vencido', { status: 'UNKNOWN', noResponseAt: vieja(1) }],
+    ['UNKNOWN sin reloj', { status: 'UNKNOWN', noResponseAt: null }],
+    ['TIMED_OUT sin código', { status: 'TIMED_OUT', failureCode: null }],
+    ['TIMED_OUT/AUTO_RELEASED', { status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' }],
+    ['TIMED_OUT/MANUAL_RELEASE', { status: 'TIMED_OUT', failureCode: 'MANUAL_RELEASE' }],
+    ['FAILED sin código', { status: 'FAILED', failureCode: null }],
+    ['CANCELLED sin ACCEPTED', { status: 'CANCELLED', cancelDisposition: null }],
+  ]
+  const SENALES = ['aviso aprobado guardado', 'afirmación con ids', 'afirmación sólo success'] as const
+  const CASOS = ESTADOS.flatMap(([nombre, estado]) => SENALES.map(senal => [nombre, senal, estado] as const))
+
+  beforeEach(() => {
+    // La terminal en línea: el 409 de la CUENTA se mide sin que la conexión decida antes.
+    ;(terminalRegistry.getTerminal as jest.Mock).mockImplementation((terminalId: string) => ({
+      terminalId,
+      venueId: f.venueId,
+      socketId: 'socket-tpv',
+      identityVerified: true,
+      terminalPaymentAckVersion: 1,
+    }))
+  })
+
+  const otroCobroDeLaCuenta = (orderId: string) =>
+    terminalPaymentService.sendPaymentToTerminal({
+      terminalId: f.serial,
+      venueId: f.venueId,
+      amountCents: 10000,
+      orderId,
+      requestedBy: f.staffId,
+      requestId: randomUUID(),
+    })
+
+  it.each(CASOS)(
+    '%s + %s: nunca «no cobrado» y la cuenta rechaza otro cobro (409 ORDER) antes y después del barrido',
+    async (_n, senal, estado) => {
+      const venta = await f.nuevaVenta(100)
+      const sobre =
+        senal === 'afirmación con ids'
+          ? { status: 'timeout', claimedSuccess: { paymentId: 'pay-afirmado', transactionId: 'tx-afirmado' } }
+          : senal === 'afirmación sólo success'
+            ? { status: 'timeout', claimedSuccess: { status: 'success' } }
+            : { status: 'timeout' }
+      const s = await f.solicitud({ orderId: venta.id, createdAt: vieja(1), resultJson: sobre, ...estado })
+      const attemptId = await intento(s.requestId)
+      if (senal === 'aviso aprobado guardado')
+        await prisma.providerEventLog.create({
+          data: {
+            provider: 'PAYMENT_PROCESSOR',
+            type: 'send_transaction',
+            eventId: `angelpay-${f.nuevoEventId()}`,
+            venueId: f.venueId,
+            attemptId,
+            payload: f.eventoAngelPay(attemptId),
+          } as any,
+        })
+      await alUpdatedAt(s.id, vieja(1))
+
+      await expect(otroCobroDeLaCuenta(venta.id)).rejects.toMatchObject({ details: expect.objectContaining({ scope: 'ORDER' }) })
+      expect(await terminalPaymentService.cerrarSinRespuesta(s.requestId, f.venueId, new Date())).not.toBe('NO_COBRADO')
+      await terminalPaymentService.cerrarSinRespuestaVencidas(new Date())
+      expect(await fila(s.requestId)).toMatchObject({ paymentId: null })
+      expect((await fila(s.requestId)).failureCode).not.toBe('NO_EVIDENCE_AFTER_WINDOW')
+      await expect(otroCobroDeLaCuenta(venta.id)).rejects.toMatchObject({ details: expect.objectContaining({ scope: 'ORDER' }) })
+    },
+  )
+
+  describe('una fila ya cerrada sin cobro + el Payment tardío', () => {
+    let duenaId: string
+    beforeAll(async () => {
+      duenaId = (
+        await prisma.staff.create({
+          data: {
+            email: `${f.fixture}-duena-r29@example.test`,
+            firstName: 'Dueña',
+            lastName: 'R29',
+            venues: { create: { venueId: f.venueId, role: 'OWNER', active: true } },
+          },
+          select: { id: true },
+        })
+      ).id
+    })
+    afterAll(async () => {
+      await prisma.notification.deleteMany({ where: { recipientId: duenaId } })
+      await prisma.staffVenue.deleteMany({ where: { staffId: duenaId } })
+      await prisma.staff.deleteMany({ where: { id: duenaId } })
+    })
+
+    it.each([
+      [
+        'FAILED/NO_EVIDENCE_AFTER_WINDOW',
+        {
+          failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+          resultJson: {
+            status: 'failed',
+            outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
+            releasedAfterWindow: { windowMs: 10000, releasedAt: new Date(Date.now() - 60_000).toISOString(), origen: 'SIN_RESPUESTA' },
+          },
+        },
+      ],
+      ['FAILED/BANK_DECLINED', { failureCode: 'BANK_DECLINED', resultJson: { status: 'failed', outcomeEvidence: 'BANK_DECLINED' } }],
+    ] as const)('%s: COMPLETED con UN Payment y aviso a la dueña', async (_n, cierre) => {
+      const venta = await f.nuevaVenta(100)
+      const s = await f.solicitud({ orderId: venta.id, status: 'FAILED', ...cierre })
+      const attemptId = await intento(s.requestId)
+      const pago = await recordOrderPayment(f.venueId, venta.id, f.registroDeLaTerminal({ attemptId, requestId: s.requestId }), f.staffId)
+      expect(await fila(s.requestId)).toMatchObject({ status: 'COMPLETED', paymentId: pago.id })
+      expect(await prisma.payment.count({ where: { venueId: f.venueId, orderId: venta.id } })).toBe(1)
+      await new Promise(r => setTimeout(r, 300)) // el aviso va fuera de la transacción
+      const avisos = (await prisma.notification.findMany({ where: { venueId: f.venueId, recipientId: duenaId } })).filter(
+        a => (a.metadata as { paymentId?: string } | null)?.paymentId === pago.id,
+      )
+      expect(avisos).toHaveLength(1)
+    })
   })
 })
