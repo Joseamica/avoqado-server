@@ -24,6 +24,7 @@ let venueId: string
 let providerId: string
 let aggregatorId: string
 let merchantR: string
+let merchantS: string
 let ecommerceId: string
 const tenders: Record<'vales' | 'uber' | 'storeCredit' | 'exchange' | 'giftCard', string> = {
   vales: '',
@@ -163,6 +164,12 @@ beforeAll(async () => {
       select: { id: true },
     })
   ).id
+  merchantS = (
+    await prisma.merchantAccount.create({
+      data: { providerId, externalMerchantId: `s-${suffix}`, credentialsEncrypted: {}, aggregatorId, displayName: 'Comercio S' },
+      select: { id: true },
+    })
+  ).id
   await prisma.settlementConfiguration.create({
     data: {
       merchantAccountId: merchantR,
@@ -205,8 +212,9 @@ beforeAll(async () => {
   await seed({ method: 'CASH', amount: 0 })
   // …y el registro rápido de la TPV puede guardar una tarjeta de $0 con afiliación: tampoco es un movimiento del comercio.
   await seed({ method: 'CREDIT_CARD', amount: 0, merchant: merchantR })
-  // …y una de $0 con la comisión fija de su afiliación (−$2): esa comisión sí es dinero, en el destino y en «Por comercio».
-  await seed({ method: 'CREDIT_CARD', amount: 0, merchant: merchantR, fee: 2 })
+  // …y en el comercio S, SÓLO una de $0 con la comisión fija de su afiliación (−$2): esa comisión sí es dinero, en el destino y en
+  // «Por comercio», aunque no haya ningún movimiento (Codex r6-r7 del carril C2).
+  await seed({ method: 'CREDIT_CARD', amount: 0, merchant: merchantS, fee: 2 })
   // Una devolución a tarjeta registrada hoy (con su comisión revertida) en el comercio R.
   await seed({ method: 'CREDIT_CARD', amount: -30, type: 'REFUND', merchant: merchantR, fee: -0.9 })
   // D17 · una liga cobrada en dólares (US$100, comisión 4) y su devolución parcial (US$20): no se suman como pesos.
@@ -271,7 +279,7 @@ afterAll(async () => {
   await prisma.payment.deleteMany({ where: { venueId } })
   await prisma.order.deleteMany({ where: { venueId } })
   await prisma.settlementConfiguration.deleteMany({ where: { merchantAccountId: merchantR } })
-  await prisma.merchantAccount.deleteMany({ where: { id: merchantR } })
+  await prisma.merchantAccount.deleteMany({ where: { id: { in: [merchantR, merchantS].filter(Boolean) } } })
   if (ecommerceId) await prisma.ecommerceMerchant.deleteMany({ where: { id: ecommerceId } })
   if (aggregatorId) await prisma.aggregator.deleteMany({ where: { id: aggregatorId } })
   if (providerId) await prisma.paymentProvider.deleteMany({ where: { id: providerId } })
@@ -308,11 +316,14 @@ describe('D12.2 y D12.3 · el estado de cuenta clasifica por tenderSemantics y n
   it('«Por comercio» cuenta igual que su destino: la tarjeta de $0 no es un movimiento ni una devolución', async () => {
     const r = await getSalesSummary(venueId, base())
     const R = r.byMerchantAccount?.find(m => m.merchantAccountId === merchantR)
-    // Sólo la devolución de $30 a tarjeta de R cuenta como movimiento; la comisión fija de $2 de la tarjeta de $0 queda en los dos.
+    // Sólo la devolución de $30 a tarjeta de R cuenta como movimiento.
     expect([R?.transactionCount, R?.refundCount, c(R?.refunds)]).toEqual([1, 1, 30])
+    // S sólo tiene la tarjeta de $0 con su comisión fija: 0 movimientos, pero sus −$2 sí salen.
+    const S = r.byMerchantAccount?.find(m => m.merchantAccountId === merchantS)
+    expect([S?.transactionCount, S?.refundCount, c(S?.netToReceive)]).toEqual([0, 0, -2])
     const t = r.statementDestinations!.terminal
     expect([t.transactionCount, t.refundCount]).toEqual([1, 1])
-    expect(c(R?.netToReceive)).toBe(c(t.netToReceive))
+    expect(c(R!.netToReceive + S!.netToReceive)).toBe(c(t.netToReceive))
   })
 
   it('el vale que cuenta como efectivo está en «Ya en tu mano»; «Otros» trae Uber y la transferencia por nombre', async () => {
