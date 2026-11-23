@@ -36,7 +36,12 @@ import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { buildReservationBookingCapabilities } from '@/services/reservation/publicReservationCapabilities'
 import { buildReservationCheckoutReturnUrls } from '@/services/reservation/reservationReturnUrl'
 import { lockClassSession, sumOccupiedSeats } from '@/services/reservation/classBooking.service'
-import { redeemCreditsForReservation, requireSessionCustomerForCredits } from '@/services/reservation/creditRedemption.service'
+import {
+  redeemCreditsForReservation,
+  requireSessionCustomerForCredits,
+  titularDelPase,
+} from '@/services/reservation/creditRedemption.service'
+import { CREDIT_RESERVATION_NOT_ALIVE } from '@/services/credits/ilimitado'
 import { enqueuePassSessionSync } from '@/services/aggregators/core/sessionSync.service'
 
 // ==========================================
@@ -791,6 +796,17 @@ export async function createReservation(req: Request, res: Response, next: NextF
     }
     if (settings.publicBooking.requireEmail && !req.body.guestEmail) {
       throw new BadRequestError('El email es requerido')
+    }
+
+    // D679 (C1, C2) · el Ilimitado es personal: pagando con uno, la reserva (y su confirmación) va a nombre y contacto de la
+    // titular, no del formulario. Antes de crear: así el correo y el WhatsApp de confirmación ya salen a ella.
+    if (wantsCredits) {
+      const titular = await titularDelPase(prisma, {
+        venueId: venue.id,
+        sessionCustomerId: identity.customerId,
+        balanceIds: Array.isArray(req.body.creditItemBalanceIds) ? req.body.creditItemBalanceIds : [req.body.creditItemBalanceId],
+      })
+      if (titular) Object.assign(req.body, titular)
     }
 
     const incomingHoldId: string | undefined =
@@ -2464,6 +2480,8 @@ export async function redeemCreditsWithCompensation(
   try {
     return await deps.redeem(args)
   } catch (error) {
+    // D679: la reserva ya no estaba viva (la cancelaron mientras): no hay nada que compensar ni anomalía que registrar.
+    if ((error as { code?: string })?.code === CREDIT_RESERVATION_NOT_ALIVE) throw error
     logger.error(
       `[CREDIT REDEEM FAILED] reservation=${args.confirmationCode} balances=${args.balanceIds.join(',')} — cancelling as compensation`,
       {

@@ -75,7 +75,7 @@ const INVENTARIO: Record<string, number> = {
   'src/controllers/mobile/staff.mobile.controller.ts': 1,
   'src/controllers/mobile/supplier.mobile.controller.ts': 1,
   'src/controllers/mobile/tpvSettings.mobile.controller.ts': 1,
-  'src/controllers/public/reservation.public.controller.ts': 12,
+  'src/controllers/public/reservation.public.controller.ts': 11,
   'src/controllers/sdk/session-dashboard.sdk.controller.ts': 1,
   'src/controllers/superadmin/angelpayUserAccount.controller.ts': 2,
   'src/controllers/superadmin/appUpdate.controller.ts': 1,
@@ -154,7 +154,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/b4bit/b4bit.service.ts': 1,
   'src/services/cleanup/liveDemoCleanup.service.ts': 2,
   'src/services/command-center/commandCenter.service.ts': 6,
-  'src/services/consumer/reservation.consumer.service.ts': 3,
+  'src/services/consumer/reservation.consumer.service.ts': 2,
   // accounting.dashboard.service.ts: 2 → 0 (B4b, 2026-10-05/06). El estado de resultados enumera con un SELECT con LIMIT
   // (Tarea 4) y el Resumen y Bancos suman en Postgres con groupBy (Tarea 5): ya no traen una fila por cobro del periodo.
   'src/services/dashboard/activity-log.service.ts': 9,
@@ -206,7 +206,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/cost-management.service.ts': 2,
   'src/services/dashboard/costRecalculationTrigger.service.ts': 2,
   'src/services/dashboard/creditPack.dashboard.service.ts': 4,
-  'src/services/dashboard/creditPack.public.service.ts': 5,
+  'src/services/dashboard/creditPack.public.service.ts': 4,
   'src/services/dashboard/customer.dashboard.service.ts': 1,
   'src/services/dashboard/customerGroup.dashboard.service.ts': 2,
   'src/services/dashboard/discount.dashboard.service.ts': 2,

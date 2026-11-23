@@ -32,6 +32,7 @@ import {
 import { esVentaCerrada } from '@/services/shared/orderBalance'
 import { generateCustomerSession, type ContactoProbado } from '@/jwt.service'
 import { normalizarTelefonoMx, phonesMatch } from '@/utils/phone'
+import { errorIlimitado } from '@/services/credits/ilimitado'
 import type { CustomerAuthContext } from '@/middlewares/customerAuth.middleware'
 import { apartarReto, consumirReto, requestOtp } from '@/services/public/otpAuth.public.service'
 import { fichaConContacto, repetirSiChoca, tapar, type SesionEmitida } from '@/services/public/sesionDeCliente.service'
@@ -104,6 +105,30 @@ export async function updateProfile(venueId: string, customerId: string, data: {
         'El teléfono no se cambia desde aquí. Para actualizarlo sin perder tu historial, pide ayuda al negocio.',
         'CUSTOMER_PHONE_CHANGE_NOT_ALLOWED',
       )
+    }
+  }
+
+  // D679 (C7): mientras tenga un Ilimitado vigente, su nombre (el que ven recepción y el kiosco) lo corrige el estudio, no ella:
+  // el pase es personal. Reenviar el mismo nombre no es cambiarlo.
+  if (data.firstName !== undefined || data.lastName !== undefined) {
+    const actual = await prisma.customer.findFirst({ where: { id: customerId, venueId }, select: { firstName: true, lastName: true } })
+    const cambia =
+      (data.firstName !== undefined && (data.firstName.trim() || null) !== (actual?.firstName?.trim() || null)) ||
+      (data.lastName !== undefined && (data.lastName.trim() || null) !== (actual?.lastName?.trim() || null))
+    if (cambia) {
+      const pase = await prisma.creditItemBalance.findFirst({
+        where: {
+          unlimited: true,
+          creditPackPurchase: {
+            venueId,
+            customerId,
+            status: CreditPurchaseStatus.ACTIVE,
+            OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+          },
+        },
+        select: { id: true },
+      })
+      if (pase) throw errorIlimitado('CREDIT_UNLIMITED_NAME_LOCKED')
     }
   }
 

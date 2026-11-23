@@ -69,11 +69,11 @@ describe('D10, D13 y D14 · lo que regresa al cancelar un lugar en una clase (in
         customerId: clienta.id,
         productId: yoga.id,
         statusLog: [{ status: 'CONFIRMED', at: new Date().toISOString(), by: null }],
-        ...extra,
       },
       select: { id: true },
     })
-    // Un crédito, por el canje de las reservas (D679): el mismo que usan el widget y la app de clientes.
+    // Un crédito, por el canje de las reservas (D679): el mismo que usan el widget y la app de clientes. Se canjea con la
+    // reserva viva (como al reservar) y DESPUÉS se aplica lo que pida la prueba (p. ej. que ya llegó).
     await prisma.$transaction(tx =>
       redeemCreditsForReservation(tx, {
         venueId: venueId!,
@@ -84,6 +84,9 @@ describe('D10, D13 y D14 · lo que regresa al cancelar un lugar en una clase (in
         customerId: clienta.id,
       }),
     )
+    if (Object.keys(extra).length > 0) {
+      await prisma.reservation.update({ where: { id: reserva.id }, data: extra as Prisma.ReservationUncheckedUpdateInput })
+    }
     return { sessionId: clase.id, reservationId: reserva.id, balanceId }
   }
 

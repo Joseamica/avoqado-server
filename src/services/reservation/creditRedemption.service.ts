@@ -9,6 +9,96 @@
 import { CreditPurchaseStatus, Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
+import { LUGAR_DEL_PASE, RESERVA_VIVA, errorIlimitado, errorVenceAntes } from '@/services/credits/ilimitado'
+
+type Lector = Pick<Prisma.TransactionClient, 'creditItemBalance' | 'customer'>
+
+/**
+ * D679 (C1–C3) · el Ilimitado es personal: si algún saldo con el que se va a pagar es Ilimitado, la reserva toma el nombre, el
+ * teléfono y el correo de la FICHA de la clienta de la sesión, nunca los del formulario. Lo que le falte a su ficha queda vacío
+ * (`null`): un teléfono escrito por otra persona le abriría el kiosco. `null` si ninguno es Ilimitado (o no hay sesión: el canje
+ * contesta 401). La marca de un saldo no cambia nunca, así que se lee sin candado y ANTES de crear la reserva: la confirmación por
+ * correo y WhatsApp ya sale a la titular.
+ */
+export async function titularDelPase(
+  db: Lector,
+  args: { venueId: string; sessionCustomerId: string | null | undefined; balanceIds: string[] },
+): Promise<{ guestName: string | null; guestPhone: string | null; guestEmail: string | null } | null> {
+  if (!args.sessionCustomerId || args.balanceIds.length === 0) return null
+  const ilimitado = await db.creditItemBalance.findFirst({
+    where: { id: { in: args.balanceIds }, unlimited: true, creditPackPurchase: { venueId: args.venueId } },
+    select: { id: true },
+  })
+  if (!ilimitado) return null
+  const ficha = await db.customer.findFirst({
+    where: { id: args.sessionCustomerId, venueId: args.venueId },
+    select: { firstName: true, lastName: true, phone: true, email: true },
+  })
+  if (!ficha) return null
+  const nombre = [ficha.firstName, ficha.lastName]
+    .map(parte => parte?.trim())
+    .filter(Boolean)
+    .join(' ')
+  return { guestName: nombre || null, guestPhone: ficha.phone || null, guestEmail: ficha.email || null }
+}
+
+/**
+ * D679 · las reglas del pase, en orden: (a) 1 persona; (b) la clase o cita empieza antes de que venza; (c) en una clase, la titular
+ * no tiene otra reserva viva (o en «No asistió») pagada con un Ilimitado suyo. Lo usan el canje y los cambios de horario.
+ */
+export async function revisarPase(
+  tx: Prisma.TransactionClient,
+  args: {
+    venueId: string
+    customerId: string
+    expiresAt: Date | null
+    timezone: string
+    startsAt: Date
+    classSessionId: string | null
+    personas: number
+    excludeReservationId: string
+  },
+): Promise<void> {
+  if (args.personas > 1) throw errorIlimitado('CREDIT_UNLIMITED_ONE_SEAT')
+  if (args.expiresAt && args.startsAt >= args.expiresAt) throw errorVenceAntes(args.expiresAt, args.timezone)
+  if (args.classSessionId) {
+    const otroLugar = await tx.creditTransaction.findFirst({
+      where: {
+        venueId: args.venueId,
+        type: 'REDEEM',
+        customerId: args.customerId,
+        creditItemBalance: { unlimited: true },
+        reservation: { classSessionId: args.classSessionId, status: { in: LUGAR_DEL_PASE }, id: { not: args.excludeReservationId } },
+      },
+      select: { id: true },
+    })
+    if (otroLugar) throw errorIlimitado('CREDIT_UNLIMITED_SAME_CLASS')
+  }
+}
+
+/** Los pases Ilimitados con los que se pagó una reserva: uno por compra, con su titular y su vencimiento. */
+export async function pasesDeLaReserva(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  reservationId: string,
+): Promise<{ customerId: string; expiresAt: Date | null }[]> {
+  // Una reserva tiene pocos canjes (uno por servicio); el tope sólo cuida la consulta.
+  const canjes = await tx.creditTransaction.findMany({
+    where: { venueId, reservationId, type: 'REDEEM', creditItemBalance: { unlimited: true } },
+    select: { customerId: true, creditPackPurchaseId: true, creditPackPurchase: { select: { expiresAt: true } } },
+    take: 50,
+  })
+  const porCompra = new Map(
+    canjes.map(c => [c.creditPackPurchaseId, { customerId: c.customerId, expiresAt: c.creditPackPurchase.expiresAt }]),
+  )
+  return [...porCompra.values()]
+}
+
+/** La zona del negocio, para escribir la fecha de vencimiento como la ve la clienta. */
+export async function zonaDelNegocio(tx: Prisma.TransactionClient, venueId: string): Promise<string> {
+  const venue = await tx.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  return venue?.timezone || 'America/Mexico_City'
+}
 
 /**
  * Fase 0.B — quién puede gastar créditos al reservar: SÓLO el customer de la sesión.
@@ -97,10 +187,20 @@ export async function redeemCreditsForReservation(
 
   const customer = await requireSessionCustomerForCredits(tx, { sessionCustomerId: args.customerId, venueId: args.venueId })
 
+  // D679 (regla 5): la reserva bajo candado ANTES que los saldos (el mismo orden que cancelar) y viva. Así un cambio de horario
+  // y el canje no se cruzan, y una cita ya cancelada no se cobra (deuda H8).
+  const [reserva] = await tx.$queryRaw<
+    { status: string; startsAt: Date; partySize: number; classSessionId: string | null }[]
+  >`SELECT status, "startsAt", "partySize", "classSessionId" FROM "Reservation" WHERE id = ${args.reservationId} AND "venueId" = ${args.venueId} FOR UPDATE`
+  if (!reserva || !(RESERVA_VIVA as string[]).includes(reserva.status)) throw errorIlimitado('CREDIT_RESERVATION_NOT_ALIVE')
+  let pagoConIlimitado = false
+
   let totalCreditsUsed = 0
   for (const balanceId of args.balanceIds) {
-    const balances = await tx.$queryRaw<{ id: string; remainingQuantity: number; creditPackPurchaseId: string; productId: string }[]>`
-      SELECT id, "remainingQuantity", "creditPackPurchaseId", "productId"
+    const balances = await tx.$queryRaw<
+      { id: string; remainingQuantity: number; creditPackPurchaseId: string; productId: string; unlimited: boolean }[]
+    >`
+      SELECT id, "remainingQuantity", "creditPackPurchaseId", "productId", "unlimited"
       FROM "CreditItemBalance"
       WHERE id = ${balanceId}
       FOR UPDATE
@@ -114,23 +214,45 @@ export async function redeemCreditsForReservation(
       throw new BadRequestError(textos.otroProducto)
     }
 
-    if (balance.remainingQuantity < args.creditsPerBalance) {
-      throw new BadRequestError(textos.noAlcanza(balance.remainingQuantity, args.creditsPerBalance))
-    }
-
     const purchase = await tx.creditPackPurchase.findUnique({
       where: { id: balance.creditPackPurchaseId },
       select: { status: true, expiresAt: true, customerId: true },
     })
-    if (!purchase || purchase.customerId !== customer.id) {
-      throw new BadRequestError('Credito no valido para este cliente')
+    const validarCompra = () => {
+      if (!purchase || purchase.customerId !== customer.id) {
+        throw new BadRequestError('Credito no valido para este cliente')
+      }
+      if (purchase.status !== CreditPurchaseStatus.ACTIVE) {
+        throw new BadRequestError('Los creditos ya no estan activos')
+      }
+      if (purchase.expiresAt && purchase.expiresAt < new Date()) {
+        throw new BadRequestError('Los creditos han expirado')
+      }
     }
-    if (purchase.status !== CreditPurchaseStatus.ACTIVE) {
-      throw new BadRequestError('Los creditos ya no estan activos')
+
+    if (balance.unlimited) {
+      // D679: el pase se revisa ANTES de «no alcanza» (su 99,999 nunca se enseña), y después de que la compra es suya y vigente.
+      validarCompra()
+      const clase = reserva.classSessionId
+        ? await tx.classSession.findUnique({ where: { id: reserva.classSessionId }, select: { startsAt: true } })
+        : null
+      await revisarPase(tx, {
+        venueId: args.venueId,
+        customerId: customer.id,
+        expiresAt: purchase!.expiresAt,
+        timezone: await zonaDelNegocio(tx, args.venueId),
+        startsAt: clase?.startsAt ?? reserva.startsAt,
+        classSessionId: reserva.classSessionId,
+        personas: Math.max(reserva.partySize, args.creditsPerBalance),
+        excludeReservationId: args.reservationId,
+      })
+      pagoConIlimitado = true
     }
-    if (purchase.expiresAt && purchase.expiresAt < new Date()) {
-      throw new BadRequestError('Los creditos han expirado')
+
+    if (balance.remainingQuantity < args.creditsPerBalance) {
+      throw new BadRequestError(textos.noAlcanza(balance.remainingQuantity, args.creditsPerBalance))
     }
+    validarCompra()
 
     await tx.creditItemBalance.update({
       where: { id: balanceId },
@@ -162,6 +284,12 @@ export async function redeemCreditsForReservation(
         data: { status: CreditPurchaseStatus.EXHAUSTED },
       })
     }
+  }
+
+  if (pagoConIlimitado) {
+    // D679: se TOCA la reserva. Un cambio de horario en SERIALIZABLE que la tomó con una foto de antes de este canje choca aquí
+    // (40001) y se reintenta viendo el pase; sin esto, su foto no ve el REDEEM y la movería fuera de vigencia.
+    await tx.reservation.update({ where: { id: args.reservationId }, data: { updatedAt: new Date() } })
   }
 
   logger.info(

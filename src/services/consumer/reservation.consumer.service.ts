@@ -12,7 +12,7 @@ import { activateCustomerAccount, assertCustomerCanCreateReservation } from '@/s
 import { withDeadlockRetry, withSerializableRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { fastFailLiveHold } from '@/services/reservation/appointmentSlotHold.service'
 import { normalizeBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
-import { redeemCreditsForReservation } from '@/services/reservation/creditRedemption.service'
+import { redeemCreditsForReservation, titularDelPase } from '@/services/reservation/creditRedemption.service'
 
 type ConsumerReservationInput = {
   startsAt?: Date
@@ -299,13 +299,17 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
   }
 
   if (input.classSessionId) {
+    // D679 (C3) · pagando con un Ilimitado, la reserva va a nombre y contacto de la titular, nunca de lo que escribió.
+    const titular = input.creditItemBalanceId
+      ? await titularDelPase(prisma, { venueId: venue.id, sessionCustomerId: customer.id, balanceIds: [input.creditItemBalanceId] })
+      : null
     const reservation = await createClassReservationForConsumer(
       venue.id,
       {
         classSessionId: input.classSessionId,
-        guestName,
-        guestPhone: guestPhone ?? '',
-        guestEmail,
+        ...(titular
+          ? { guestName: titular.guestName, guestPhone: titular.guestPhone, guestEmail: titular.guestEmail ?? undefined }
+          : { guestName, guestPhone: guestPhone ?? '', guestEmail }),
         partySize: input.partySize,
         spotIds: input.spotIds,
         specialRequests: input.specialRequests,
@@ -571,8 +575,9 @@ async function createClassReservationForConsumer(
   venueId: string,
   body: {
     classSessionId: string
-    guestName: string
-    guestPhone: string
+    /** `null` sólo con un Ilimitado cuya titular no tiene ese dato en su ficha (D679). */
+    guestName: string | null
+    guestPhone: string | null
     guestEmail?: string
     partySize?: number
     spotIds?: string[]
