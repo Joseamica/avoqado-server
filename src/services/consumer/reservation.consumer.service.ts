@@ -1,4 +1,4 @@
-import { Prisma, ReservationChannel, ReservationStatus, VenueStatus } from '@prisma/client'
+import { ReservationChannel, ReservationStatus, VenueStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import * as reservationService from '@/services/dashboard/reservation.dashboard.service'

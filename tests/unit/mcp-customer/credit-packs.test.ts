@@ -18,6 +18,9 @@ const mockBalanceFindMany = jest.fn()
 const mockStaffVenueFindFirst = jest.fn()
 const mockRedeem = jest.fn()
 const mockAudit = jest.fn()
+const mockVenueFindUnique = jest.fn()
+const mockPackFindMany = jest.fn()
+const mockSell = jest.fn()
 
 jest.mock('@/services/dashboard/creditPack.dashboard.service', () => ({
   getCreditPacks: (...a: unknown[]) => mockGetPacks(...(a as [])),
@@ -25,6 +28,7 @@ jest.mock('@/services/dashboard/creditPack.dashboard.service', () => ({
   redeemItemManually: (...a: unknown[]) => mockRedeem(...(a as [])),
 }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
+jest.mock('@/services/mobile/creditPack.mobile.service', () => ({ sellPackInPerson: (...a: unknown[]) => mockSell(...(a as [])) }))
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
     venueFilter: (v: string) => {
@@ -42,6 +46,8 @@ jest.mock('@/utils/prismaClient', () => ({
     customer: { findMany: (...a: unknown[]) => mockCustomerFindMany(...(a as [])) },
     creditItemBalance: { findMany: (...a: unknown[]) => mockBalanceFindMany(...(a as [])) },
     staffVenue: { findFirst: (...a: unknown[]) => mockStaffVenueFindFirst(...(a as [])) },
+    venue: { findUnique: (...a: unknown[]) => mockVenueFindUnique(...(a as [])) },
+    creditPack: { findMany: (...a: unknown[]) => mockPackFindMany(...(a as [])) },
   },
 }))
 
@@ -227,5 +233,145 @@ describe('redeem_credit (write, confirm-gated, creditPacks:redeem)', () => {
     const out = parse(await call('redeem_credit', { venueId: 'v1', search: 'juan', confirm: true }))
     expect(out.ok).toBe(false)
     expect(out.error).toMatch(/expirado/)
+  })
+})
+
+// D679 · paquete Ilimitado: el modelo nunca lee 99,999. Los campos de hoy siguen ahí (en un renglón Ilimitado van en null) y se
+// agregan `unlimited` y `display`. Los paquetes normales salen igual que antes.
+describe('D679 · Ilimitado en las herramientas de créditos', () => {
+  const VENCE = new Date('2026-12-22T18:00:00Z') // 22 de diciembre en México
+  const ili = (over: Record<string, unknown> = {}) => ({
+    id: 'bal-ili',
+    remainingQuantity: 99996,
+    unlimited: true,
+    product: { name: 'Lagree' },
+    creditPackPurchase: { expiresAt: VENCE, creditPack: { name: 'Ilimitado' } },
+    ...over,
+  })
+  beforeEach(() => mockVenueFindUnique.mockResolvedValue({ timezone: 'America/Mexico_City' }))
+
+  const salidas = async () => {
+    const out: unknown[] = []
+    mockGetPacks.mockResolvedValueOnce([
+      {
+        id: 'cp-ili',
+        name: 'Ilimitado',
+        price: 2500,
+        currency: 'MXN',
+        active: true,
+        _count: { purchases: 1 },
+        items: [
+          { product: { name: 'Lagree' }, quantity: 99999, unlimited: true },
+          { product: { name: 'Shake' }, quantity: 2, unlimited: false },
+        ],
+      },
+    ])
+    out.push(parse(await call('list_credit_packs', { venueId: 'v1' })))
+
+    mockCustomerFindMany.mockResolvedValueOnce([{ id: 'c1', firstName: 'Ana', lastName: 'T' }])
+    mockGetPurchases.mockResolvedValueOnce({
+      purchases: [
+        {
+          creditPack: { name: 'Ilimitado' },
+          status: 'ACTIVE',
+          purchasedAt: new Date('2026-11-22T10:00:00Z'),
+          expiresAt: VENCE,
+          amountPaid: 2500,
+          faltas: { noLlego: 1, cancelTarde: 2 },
+          itemBalances: [
+            { product: { name: 'Lagree' }, remainingQuantity: 99996, originalQuantity: 99999, unlimited: true },
+            { product: { name: 'Shake' }, remainingQuantity: 1, originalQuantity: 2, unlimited: false },
+          ],
+        },
+        {
+          creditPack: { name: 'Ilimitado viejo' },
+          status: 'REFUNDED',
+          purchasedAt: new Date('2026-10-01T10:00:00Z'),
+          expiresAt: new Date('2026-10-31T10:00:00Z'),
+          amountPaid: 2500,
+          itemBalances: [{ product: { name: 'Lagree' }, remainingQuantity: 0, originalQuantity: 99999, unlimited: true }],
+        },
+      ],
+      total: 2,
+    })
+    out.push(parse(await call('customer_credit_balance', { venueId: 'v1', search: 'ana', includeInactive: true })))
+
+    mockCustomerFindMany.mockResolvedValueOnce([{ id: 'c1', firstName: 'Ana', lastName: 'T' }])
+    mockBalanceFindMany.mockResolvedValueOnce([ili()])
+    out.push(parse(await call('redeem_credit', { venueId: 'v1', search: 'ana' })))
+
+    mockCustomerFindMany.mockResolvedValueOnce([{ id: 'c1', firstName: 'Ana', lastName: 'T' }])
+    mockBalanceFindMany.mockResolvedValueOnce([ili()])
+    mockStaffVenueFindFirst.mockResolvedValueOnce({ id: 'sv-1' })
+    mockRedeem.mockResolvedValueOnce({ id: 'txn-ili' })
+    out.push(parse(await call('redeem_credit', { venueId: 'v1', search: 'ana', confirm: true })))
+
+    mockCustomerFindMany.mockResolvedValueOnce([{ id: 'c1', firstName: 'Ana', lastName: 'T' }])
+    mockPackFindMany.mockResolvedValueOnce([
+      { id: 'cp-ili', name: 'Ilimitado', price: 2500, items: [{ quantity: 99999, unlimited: true, product: { name: 'Lagree' } }] },
+    ])
+    out.push(parse(await call('sell_credit_pack', { venueId: 'v1', customerSearch: 'ana', packSearch: 'ilimitado' })))
+    return out
+  }
+
+  it('ningún resultado de las 4 herramientas con un Ilimitado contiene 99999 ni 99998', async () => {
+    const texto = JSON.stringify(await salidas())
+    expect(texto).not.toContain('99999')
+    expect(texto).not.toContain('99998')
+    expect(texto).not.toContain('99996')
+  })
+
+  it('list_credit_packs y sell_credit_pack: el renglón Ilimitado lleva credits null, unlimited y display; el normal igual que hoy', async () => {
+    const [lista, , , , venta] = (await salidas()) as any[]
+    expect(lista.creditPacks[0].includes).toEqual([
+      { product: 'Lagree', credits: null, unlimited: true, display: 'Ilimitado' },
+      { product: 'Shake', credits: 2 },
+    ])
+    expect(venta.preview.includes).toEqual([{ product: 'Lagree', credits: null, unlimited: true, display: 'Ilimitado' }])
+  })
+
+  it('customer_credit_balance de un Ilimitado: used, display y faltas; compra REFUNDED sin used y «reembolsado»', async () => {
+    const [, saldo] = (await salidas()) as any[]
+    expect(saldo.purchases[0].items).toEqual([
+      {
+        product: 'Lagree',
+        remaining: null,
+        original: null,
+        unlimited: true,
+        used: 3,
+        display: 'Ilimitado · vence el 22 de diciembre de 2026',
+      },
+      { product: 'Shake', remaining: 1, original: 2 },
+    ])
+    expect(saldo.purchases[0].faltas).toEqual({ noLlego: 1, cancelTarde: 2 })
+    expect(saldo.purchases[1].items).toEqual([
+      { product: 'Lagree', remaining: null, original: null, unlimited: true, display: 'Ilimitado · reembolsado' },
+    ])
+    expect(saldo.purchases[1]).not.toHaveProperty('faltas')
+  })
+
+  it('redeem_credit previsualiza «REGISTRARÁ 1 uso» y confirma sin restante', async () => {
+    const [, , previa, hecho] = (await salidas()) as any[]
+    expect(previa.message).toBe(
+      'Esto REGISTRARÁ 1 uso de "Lagree" (Ilimitado, vence el 22 de diciembre de 2026) de Ana T. Vuelve a llamar con confirm:true para aplicar.',
+    )
+    expect(previa.preview).toMatchObject({ remaining: null, after: null, unlimited: true })
+    expect(hecho).toMatchObject({ ok: true, redeemed: { remaining: null, unlimited: true, transactionId: 'txn-ili' } })
+  })
+
+  it('paquete normal idéntico a hoy: sin unlimited ni display, y sin consultar la zona', async () => {
+    mockCustomerFindMany.mockResolvedValueOnce([{ id: 'c1', firstName: 'Juan', lastName: 'P' }])
+    mockBalanceFindMany.mockResolvedValueOnce([ili({ unlimited: false, remainingQuantity: 6 })])
+    const out = parse(await call('redeem_credit', { venueId: 'v1', search: 'juan' }))
+    expect(out.preview).toEqual({
+      customer: 'Juan P',
+      product: 'Lagree',
+      pack: 'Ilimitado',
+      expiresAt: VENCE.toISOString(),
+      remaining: 6,
+      after: 5,
+    })
+    expect(out.message).toContain('CANJEARÁ 1 crédito')
+    expect(mockVenueFindUnique).not.toHaveBeenCalled()
   })
 })

@@ -9,10 +9,23 @@ import { getCreditPacks, getCustomerPurchases, redeemItemManually } from '@/serv
 import { sellPackInPerson } from '@/services/mobile/creditPack.mobile.service'
 import { auditMcpWrite } from '../audit'
 import { CreditPurchaseStatus } from '@prisma/client'
+import { formatInTimeZone } from 'date-fns-tz'
+import { es } from 'date-fns/locale'
 
 // Credit packs ("paquete de 10 clases / 10 masajes" — buy N, redeem over time): core to the
 // appointment-services ICP. Gated by creditPacks:read (mirrors the dashboard route). Money PESOS.
 const num = (v: unknown): number | null => (v == null ? null : Number(v))
+
+// D679 · paquete Ilimitado: por dentro es un saldo de 99,999; el modelo nunca debe leer ese número. En un renglón Ilimitado los
+// campos de hoy (`credits`, `remaining`, `original`, `after`) van en null —no se quitan— junto a `unlimited` y `display`. Los
+// paquetes normales salen igual que siempre.
+const renglonDelPaquete = (it: { product?: { name?: string } | null; quantity: number; unlimited?: boolean }) =>
+  it.unlimited
+    ? { product: it.product?.name ?? null, credits: null, unlimited: true, display: 'Ilimitado' }
+    : { product: it.product?.name ?? null, credits: it.quantity }
+const fechaDelNegocio = (d: Date, tz: string) => formatInTimeZone(d, tz, "d 'de' MMMM 'de' yyyy", { locale: es })
+const zonaDe = async (venueId: string) =>
+  (await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }))?.timezone || 'America/Mexico_City'
 
 export function registerCreditPackTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -40,7 +53,7 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
           currency: p.currency,
           active: p.active,
           sold: p._count.purchases,
-          includes: p.items.map(it => ({ product: it.product?.name ?? null, credits: it.quantity })),
+          includes: p.items.map(renglonDelPaquete),
         })),
       })
     },
@@ -86,26 +99,47 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
         ...(includeInactive ? {} : { status: CreditPurchaseStatus.ACTIVE }),
         limit: 50,
       })
+      type Saldo = { product?: { name?: string } | null; remainingQuantity: number; originalQuantity: number; unlimited?: boolean }
+      const saldos = (p: unknown) => (p as { itemBalances?: Saldo[] }).itemBalances ?? []
+      const tz = result.purchases.some(p => saldos(p).some(b => b.unlimited)) ? await zonaDe(venueId) : null
       return text({
         found: true,
         venueId,
         customer: name,
         count: result.purchases.length,
-        purchases: result.purchases.map(p => ({
-          pack: (p as { creditPack?: { name?: string } }).creditPack?.name ?? null,
-          status: p.status, // ACTIVE | EXHAUSTED | EXPIRED | REFUNDED
-          purchasedAt: p.purchasedAt.toISOString(),
-          expiresAt: p.expiresAt?.toISOString() ?? null,
-          amountPaid: num(p.amountPaid), // pesos
-          items:
-            (
-              p as { itemBalances?: Array<{ product?: { name?: string } | null; remainingQuantity: number; originalQuantity: number }> }
-            ).itemBalances?.map(b => ({
-              product: b.product?.name ?? null,
-              remaining: b.remainingQuantity,
-              original: b.originalQuantity,
-            })) ?? [],
-        })),
+        purchases: result.purchases.map(p => {
+          const faltas = (p as { faltas?: { noLlego: number; cancelTarde: number } }).faltas
+          return {
+            pack: (p as { creditPack?: { name?: string } }).creditPack?.name ?? null,
+            status: p.status, // ACTIVE | EXHAUSTED | EXPIRED | REFUNDED
+            purchasedAt: p.purchasedAt.toISOString(),
+            expiresAt: p.expiresAt?.toISOString() ?? null,
+            amountPaid: num(p.amountPaid), // pesos
+            items: saldos(p).map(b => {
+              if (!b.unlimited) return { product: b.product?.name ?? null, remaining: b.remainingQuantity, original: b.originalQuantity }
+              // Reembolsado: su saldo quedó en 0 y «usó 99,999» mentiría.
+              if (p.status === CreditPurchaseStatus.REFUNDED) {
+                return {
+                  product: b.product?.name ?? null,
+                  remaining: null,
+                  original: null,
+                  unlimited: true,
+                  display: 'Ilimitado · reembolsado',
+                }
+              }
+              return {
+                product: b.product?.name ?? null,
+                remaining: null,
+                original: null,
+                unlimited: true,
+                used: b.originalQuantity - b.remainingQuantity,
+                display: p.expiresAt ? `Ilimitado · vence el ${fechaDelNegocio(p.expiresAt, tz!)}` : 'Ilimitado',
+              }
+            }),
+            // D679: las faltas de un Ilimitado (no llegó / canceló tarde), por reserva. Sólo se cuentan.
+            ...(faltas ? { faltas } : {}),
+          }
+        }),
       })
     },
   )
@@ -158,6 +192,7 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
         select: {
           id: true,
           remainingQuantity: true,
+          unlimited: true,
           product: { select: { name: true } },
           creditPackPurchase: { select: { expiresAt: true, creditPack: { select: { name: true } } } },
         },
@@ -189,6 +224,30 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
       })[0]
       const productName = target.product?.name ?? '(servicio)'
       const packName = target.creditPackPurchase.creditPack?.name ?? '(paquete)'
+
+      // D679: un Ilimitado no tiene «restante»: se registra un uso.
+      const ilimitado = target.unlimited === true
+      const vence =
+        ilimitado && target.creditPackPurchase.expiresAt
+          ? fechaDelNegocio(target.creditPackPurchase.expiresAt, await zonaDe(venueId))
+          : null
+
+      if (!confirm && ilimitado) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            customer: name,
+            product: productName,
+            pack: packName,
+            expiresAt: target.creditPackPurchase.expiresAt?.toISOString() ?? null,
+            remaining: null,
+            after: null,
+            unlimited: true,
+          },
+          message: `Esto REGISTRARÁ 1 uso de "${productName}" (Ilimitado${vence ? `, vence el ${vence}` : ''}) de ${name}. Vuelve a llamar con confirm:true para aplicar.`,
+        })
+      }
 
       if (!confirm) {
         return text({
@@ -227,7 +286,8 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
             customer: name,
             product: productName,
             pack: packName,
-            remaining: target.remainingQuantity - 1,
+            remaining: ilimitado ? null : target.remainingQuantity - 1,
+            ...(ilimitado ? { unlimited: true } : {}),
             transactionId: (tx as { id?: string })?.id ?? null,
           },
         })
@@ -280,7 +340,12 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
 
       const packs = await prisma.creditPack.findMany({
         where: { venueId, active: true, name: { contains: packSearch, mode: 'insensitive' as const } },
-        select: { id: true, name: true, price: true, items: { select: { quantity: true, product: { select: { name: true } } } } },
+        select: {
+          id: true,
+          name: true,
+          price: true,
+          items: { select: { quantity: true, unlimited: true, product: { select: { name: true } } } },
+        },
         take: 5,
       })
       if (packs.length === 0) return text({ ok: false, error: `No encontré ningún paquete activo que coincida con "${packSearch}".` })
@@ -304,7 +369,7 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
             customer: customerName,
             pack: pack.name,
             amountPaid: price,
-            includes: pack.items.map(it => ({ product: it.product?.name ?? null, credits: it.quantity })),
+            includes: pack.items.map(renglonDelPaquete),
           },
           message: `Esto VENDERÁ el paquete "${pack.name}" a ${customerName} por $${price} y le otorgará los créditos. Vuelve a llamar con confirm:true para aplicar.`,
         })
