@@ -36,7 +36,7 @@ import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANS
 import { contradiccionDeProcedenciaSql, sinVetoDeDineroSql } from './evidenciaPositivaSql'
 import { sondaReportoActiva, sondaVetaLaDeclaracion } from './sondaActiva'
 import logger from '../../config/logger'
-import { elTechoLevantaElVeto } from './techoDeEjecucionViva'
+import { activaTrasElCancel, elTechoLevantaElVeto } from './techoDeEjecucionViva'
 
 export const RECONCILE_UNCHARGED_PERMISSION = 'payments:reconcile-uncharged'
 
@@ -609,7 +609,12 @@ export async function reconcileUncharged(
       (!porElBanco && (await sondaNoLaEncontroTrasEntregarla(tx, row.id, identity.venueId)))
     if (!constaQueSalio) throw new UnchargedReconciliationError('TERMINAL_NEVER_ANSWERED')
 
-    if (sondaVetaLaDeclaracion(row, ranuraYaSuelta(row)) && !techoDeLaVenta)
+    // D26 (Codex r2 #2 del techo): la excepción del 3-nov deja de vetar a la TPV sin `executionVersion` (2.12.5 / 2.13.x) en cuanto
+    // la ranura se suelta, y el techo de la RANURA la suelta a los 30 s del cancel: la persona podía declarar a los ~40 s con un
+    // cobro que el SDK todavía puede aprobar (hasta 150 s). Si la terminal dijo «sigo» DESPUÉS del cancel del POS, esa TPV espera
+    // el mismo techo de la VENTA que las demás. Sólo la persona: la ruta del banco queda como estaba.
+    const sigoTrasElCancel = !porElBanco && ranuraYaSuelta(row) && sondaReportoActiva(row) && activaTrasElCancel(row)
+    if ((sondaVetaLaDeclaracion(row, ranuraYaSuelta(row)) || sigoTrasElCancel) && !techoDeLaVenta)
       throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
 
     const sobre =
