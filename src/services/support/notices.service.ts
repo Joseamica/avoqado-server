@@ -262,17 +262,14 @@ async function freezeMeta(row: SupportNotice, now: Date, mine: Prisma.SupportNot
     return row.meta as object | null
   }
   // DAILY_DIGEST: every row by itself; the ones that no longer pass are left out and marked SKIPPED. Public help: the registered
-  // ones go first, so numbers with no account never take their place in the 100.
-  // ponytail: reads 5× the digest; past 500 held notices in a day, a registered one after them could still be left out.
-  const rows = (
-    await prisma.supportNotice.findMany({
-      where: { digestId: row.id, status: 'HELD' },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: DIGEST_ITEMS * 5,
-    })
-  )
-    .sort((a, b) => Number(!!asMeta(a.meta)?.unregistered) - Number(!!asMeta(b.meta)?.unregistered))
-    .slice(0, DIGEST_ITEMS)
+  // ones go first, so numbers with no account never take their place in the 100, however many they are.
+  const chosen = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT n.id FROM "SupportNotice" n WHERE n."digestId" = ${row.id} AND n.status = 'HELD'
+    ORDER BY (n.meta->>'unregistered' IS NOT NULL), n."createdAt", n.id LIMIT ${DIGEST_ITEMS}`
+  const rows = chosen.length
+    ? await prisma.supportNotice.findMany({ where: { id: { in: chosen.map(c => c.id) } }, take: DIGEST_ITEMS })
+    : []
+  rows.sort((a, b) => chosen.findIndex(c => c.id === a.id) - chosen.findIndex(c => c.id === b.id))
   const items: HandoffMeta[] = [],
     dropped: string[] = []
   for (const heldRow of rows) {
@@ -328,6 +325,11 @@ async function sendOne(row: SupportNotice, now: Date, to: string, dependencies: 
     return 'uncertain'
   }
   const meta = row.firstAttemptAt ? (row.meta as object | null) : await freezeMeta(row, now, mine)
+  // Public help switched off after the first attempt: a retry of a number with no account no longer goes out.
+  if (row.kind === 'HANDOFF' && asMeta(meta as Prisma.JsonValue)?.unregistered && !isSupportPublicHelpEnabled()) {
+    await finish('SKIPPED', { errorCode: 'REVOKED' })
+    return 'skipped'
+  }
   if (!meta) {
     // Revoked at the first attempt (already SKIPPED), or a meta the 30-day purge cleared.
     if (row.firstAttemptAt) await finish('SKIPPED', { errorCode: 'NO_META' })

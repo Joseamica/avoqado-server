@@ -158,11 +158,9 @@ export async function startAiAttempt(
     const current = getSupportAiConfig(),
       at = new Date(Math.max(now.getTime(), Date.now()))
     if (!current || !message || !message.conversation.noticeAcceptedAt || !isSupportWindowOpen(message.conversation, at)) return false
-    // The day of a public call is the day it starts: a call reserved before midnight (CDMX) that leaves after it counts on the new day.
-    const dayKey = publicReserved ? publicDayKey(at) : undefined
-    if (dayKey) {
+    if (publicReserved) {
       if (options?.requestBytes === undefined || options.requestBytes > current.pricing.longContextAfter) return false
-      if (publicDaySpent(await tx.supportBudget.findUnique({ where: { key: dayKey } }), current.pricing)) return false
+      if (publicDaySpent(await tx.supportBudget.findUnique({ where: { key: publicDayKey(at) } }), current.pricing)) return false
     }
     if (options?.verify && !(await options.verify(tx))) return false
     // The window can expire while the write waits; the statement checks its own UTC clock too.
@@ -177,11 +175,14 @@ export async function startAiAttempt(
             AND m."leaseUntil" > t.at AND m."expiresAt" > t.at AND c."noticeAcceptedAt" IS NOT NULL
             AND c."lastUserMessageAt" <= t.at AND c."lastUserMessageAt" > t.at - INTERVAL '24 hours'
             AND c."lastActivityAt" <= t.at AND c."lastActivityAt" > t.at - INTERVAL '30 minutes')`
-    // The public hold goes with the start: from here the call may cost; finish settles it, an uncertain one keeps it.
-    if (count === 1 && dayKey) {
+    // The public hold goes with the start: from here the call may cost; finish settles it, an uncertain one keeps it. Its day is
+    // the day it started (the statement's own clock): a call reserved before midnight (CDMX) that leaves after it counts on the new day.
+    if (count === 1 && publicReserved) {
+      const { startedAt } = await tx.supportAttempt.findUniqueOrThrow({ where: { id: attemptId }, select: { startedAt: true } })
+      const dayKey = publicDayKey(startedAt!)
       await tx.supportBudget.upsert({
         where: { key: dayKey },
-        create: { key: dayKey, windowStart: mexicoDay(at), heldUsd: publicCallHold(current.pricing) },
+        create: { key: dayKey, windowStart: mexicoDay(startedAt!), heldUsd: publicCallHold(current.pricing) },
         update: { heldUsd: { increment: publicCallHold(current.pricing) } },
       })
       // finish settles on the day it started.

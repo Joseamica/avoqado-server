@@ -704,3 +704,65 @@ describe('round 2 of the audit', () => {
     ).toBe(1)
   })
 })
+
+describe('exhaustive pass after round 2 of the audit', () => {
+  const marker = async () =>
+    (await open()) &&
+    prisma.supportBudget.count({ where: { key: `CONTROL:${receiverId}:${sha(unknown)}:PUBLIC_CONV:${(await open())!.id}` } })
+  it('a sensitive or too long first message gets the notice, and its text is kept out', async () => {
+    const secret = await send('mi contraseña es 4321')
+    expect(await reply(secret.event)).toMatchObject({ answer: supportPublicNotice(), body: '' })
+  })
+  it('with the day spent, a «sí» to the offer of a person still reaches the team (no model)', async () => {
+    await ready()
+    const offered = await admitSupportMessage(input('¿Cómo hago algo raro?'))
+    await prisma.supportMessage.update({
+      where: { id: offered.messageId },
+      data: { status: 'SENT', answer: 'No encontré eso.', outcome: 'UNKNOWN', handoffOffered: true },
+    })
+    process.env.SUPPORT_PUBLIC_HELP_DAILY_USD = '0'
+    await send('sí')
+    const { p, message } = await work([])
+    expect(p.fetcher).not.toHaveBeenCalled()
+    expect(message).toMatchObject({ outcome: 'HANDOFF' })
+  })
+  it('a reaction while registered keeps the public mark; a question answered as registered drops it', async () => {
+    await ready()
+    expect(await marker()).toBe(1)
+    const other = await prisma.staff.create({
+      data: { email: `${receiverId}-mark@test.local`, firstName: 'Marca', lastName: 'Prueba', emailVerified: true, phone: unknown },
+    })
+    await prisma.staffVenue.create({ data: { staffId: other.id, venueId, role: 'VIEWER' } })
+    try {
+      expect(await tryRouteSupport(input('', unknown, { type: 'reaction' }))).toBe('IGNORED')
+      expect(await marker()).toBe(1)
+      // Queued as public, answered as registered: the conversation is no longer one public help keeps.
+      await prisma.staff.update({ where: { id: other.id }, data: { phone: null } })
+      await send('¿Cómo cambio de sucursal?')
+      await prisma.staff.update({ where: { id: other.id }, data: { phone: unknown } })
+      await work([question, draft, supported])
+      expect(await marker()).toBe(0)
+    } finally {
+      await prisma.staffVenue.deleteMany({ where: { staffId: other.id } })
+      await prisma.staff.delete({ where: { id: other.id } })
+    }
+  })
+  it("switched off after a failed first attempt: the retry of an unknown phone's email does not go out", async () => {
+    await ready()
+    await send('persona')
+    const fail = async () => ({ ok: false, transient: true, errorCode: 'SEND_ERROR' })
+    await runSupportNotices(new Date(Date.now() + 1000), { send: fail })
+    const [notice] = await prisma.supportNotice.findMany({ where: { conversationId: { in: await conversationIds() } } })
+    expect(notice).toMatchObject({ status: 'PENDING', firstAttemptAt: expect.any(Date) })
+    process.env.SUPPORT_PUBLIC_HELP_ENABLED = 'false'
+    const sent: string[] = []
+    await runSupportNotices(new Date(Date.now() + 120_000), {
+      send: async options => {
+        sent.push(options.subject)
+        return { ok: true, resendId: 're_4', transient: false }
+      },
+    })
+    expect(sent.filter(subject => subject.includes('Número no registrado'))).toEqual([])
+    expect(await prisma.supportNotice.findUniqueOrThrow({ where: { id: notice.id } })).toMatchObject({ status: 'SKIPPED' })
+  })
+})

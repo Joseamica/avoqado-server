@@ -385,7 +385,7 @@ export async function decideSupportAdmission(
   const { registered, soleStaffId } = await resolveRegisteredSupportPhone(input.phone, tx)
   if (registered) {
     // A registered answer may cite the internal manual: this conversation is no longer one public help can keep using.
-    if (conversation) await forgetPublicConversation(tx, input.receiverId, input.phone, conversation.id)
+    if (conversation && !ignoredType(input.type)) await forgetPublicConversation(tx, input.receiverId, input.phone, conversation.id)
     return { route: 'SUPPORT', registered, soleStaffId }
   }
   // Public help (founder, 22-nov): an unknown phone talks like anyone else, within its caps. The day's US$ only stops what would
@@ -597,6 +597,8 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
             ? 'Escribe tu pregunta en un máximo de 2,000 caracteres, sin datos sensibles.'
             : null,
         body = answer ? '' : scrubbed.body
+      // Public help: the first contact always gets the notice (it also says not to send passwords or cards); the text stays out.
+      if (answer && publicHelp && !conversation.noticeAcceptedAt) answer = supportPublicNotice()
       if (!answer && input.contextId) {
         const original = await tx.supportMessage.findUnique({ where: { outboundWamid: input.contextId }, include: { conversation: true } })
         if (

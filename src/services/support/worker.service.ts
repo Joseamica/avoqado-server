@@ -56,7 +56,14 @@ import { resolveSupportDeviceContext } from './deviceContext.service'
 import { reserveAiAttempt, startAiAttempt, finishAiAttempt, releaseUnstartedAiAttempt } from './budget.service'
 import { resetSupportConversation, takeDailyStaticReply } from './router.service'
 import { resolveRegisteredSupportPhone } from './registeredPhone.service'
-import { addPublicStrike, clearPublicStrikes, isPublicPaused, publicDayKey, publicDaySpent } from './publicHelp.service'
+import {
+  addPublicStrike,
+  clearPublicStrikes,
+  forgetPublicConversation,
+  isPublicPaused,
+  publicDayKey,
+  publicDaySpent,
+} from './publicHelp.service'
 import { buildHumanSummary } from './humanSummary.service'
 import {
   SUPPORT_FAILURE_OUTCOMES,
@@ -383,16 +390,17 @@ export async function prepareSupportAnswer(
       })
       return first ? ('READY' as const) : ('CANCELLED' as const)
     })
-  // Public help (an unknown phone): what its caps say instead of an answer; null = it is answered. Off, not public, or the day's
-  // US$ spent: the fixed message, as with it off. Paused: silence.
-  const publicStop = async (): Promise<'READY' | 'CANCELLED' | null> => {
+  // Public help (an unknown phone): what its state says instead of an answer; null = it is answered. Off or not public: the fixed
+  // message, as with it off. Paused: silence. `spent` (a model call was refused or could not start): the day's US$ spent is the
+  // fixed message too. It is not checked before: what needs no model (a «sí» to the offer of a person) still goes.
+  const publicStop = async (spent = false): Promise<'READY' | 'CANCELLED' | null> => {
     if (!isSupportPublicHelpEnabled() || conversation.mode !== 'PUBLIC') return fixedReply()
     if (await isPublicPaused(prisma, conversation.receiverId, conversation.phone, clock())) {
       await completeClaim(claim, { status: 'CANCELLED' }, clock())
       return 'CANCELLED'
     }
     const ai = getSupportAiConfig()
-    if (ai && publicDaySpent(await prisma.supportBudget.findUnique({ where: { key: publicDayKey(clock()) } }), ai.pricing))
+    if (spent && ai && publicDaySpent(await prisma.supportBudget.findUnique({ where: { key: publicDayKey(clock()) } }), ai.pricing))
       return fixedReply()
     return null
   }
@@ -401,7 +409,9 @@ export async function prepareSupportAnswer(
     const stop = await publicStop()
     if (stop) return stop
     publicHelp = true
-  }
+  } else if (isSupportFreeTextEnabled() && conversation.mode === 'PUBLIC')
+    // Answered as registered (its answer may cite the internal manual): public help no longer keeps using this conversation.
+    await forgetPublicConversation(prisma, conversation.receiverId, conversation.phone, conversation.id)
   // Public help never shows a page of the internal manual, not even one a registered person of this phone got in this same
   // conversation before (a message prepared in public right after losing the registration). Anything that is not a public
   // guide today counts as internal: a retired page included.
@@ -420,7 +430,7 @@ export async function prepareSupportAnswer(
     }
     if (await unregistered()) {
       if (!publicHelp) return fixedReply()
-      const stop = await publicStop()
+      const stop = await publicStop(true)
       if (stop) return stop
     }
     // A personal context the phone no longer belongs to only gets the public notice (readSupportContext throws).
@@ -570,7 +580,7 @@ export async function prepareSupportAnswer(
         initial: initial.fingerprint,
         save,
         notStarted,
-        publicHelp: publicHelp ? { stop: publicStop, citesInternal } : undefined,
+        publicHelp: publicHelp ? { stop: () => publicStop(true), citesInternal } : undefined,
       })
     const result = await searchVerifiedHelp(
       {
