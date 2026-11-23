@@ -183,6 +183,7 @@ let cobroSinTipo: string
 let sinRenglonesQueDeben: string
 let folioVencidoConAbono: string
 let enLineaCobradoAntesDeAceptar: string
+let folioVencidoConPropina: string
 let reparto: string
 let folios: string
 let noSonCuentas: string
@@ -277,8 +278,24 @@ beforeAll(async () => {
     pagos: [{ amount: 50 }, { amount: -50, type: 'REFUND', reopenedAmount: 50 }, { amount: 50, tip: 5 }],
   })
 
-  // Un pedido en línea que se cobró en caja ANTES de que alguien lo aceptara (Codex B3 r2 #4): la cuenta ya está COMPLETED/PAID. Base
-  // de caja: lo cobrado es venta (como lo que entra al banco), aunque el pedido siga por aceptar.
+  // Folio vencido (R44) reabierto por un cobro tardío de SÓLO propina ($0 de venta + $5; Codex B3 r3 F4): recibió dinero, vuelve a
+  // ser cobrable en «Cuentas abiertas» ⇒ es cuenta y debe los $100.
+  folioVencidoConPropina = await venue('folio-vencido-con-propina')
+  await cuenta({
+    venueId: folioVencidoConPropina,
+    source: 'WEB',
+    type: 'PICKUP',
+    subtotal: 100,
+    tip: 5,
+    paymentStatus: 'PARTIAL',
+    remainingBalance: 100,
+    enLinea: { requiresAcceptance: false, status: 'EXPIRED' },
+    pagos: [{ amount: 50 }, { amount: -50, type: 'REFUND', reopenedAmount: 50 }, { amount: 0, tip: 5 }],
+  })
+
+  // Lo cobrado en el negocio es venta aunque nadie haya aceptado el pedido (Codex B3 r2 #4 y r3 F3): un pedido en línea cobrado en
+  // caja antes de aceptarse (COMPLETED/PAID, $206), el mismo que un administrador regresó a «Pendiente» (PENDING/PAID, $100) y un
+  // kiosco PENDING ya PAID ($30). Base de caja: lo cobrado es venta, como lo que entra al banco.
   enLineaCobradoAntesDeAceptar = await venue('en-linea-cobrado')
   await cuenta({
     venueId: enLineaCobradoAntesDeAceptar,
@@ -289,6 +306,23 @@ beforeAll(async () => {
     paymentStatus: 'PAID',
     enLinea: { requiresAcceptance: true },
     pagos: [{ amount: 206 }],
+  })
+  await cuenta({
+    venueId: enLineaCobradoAntesDeAceptar,
+    source: 'WEB',
+    type: 'PICKUP',
+    subtotal: 100,
+    paymentStatus: 'PAID',
+    enLinea: { requiresAcceptance: true },
+    pagos: [{ amount: 100 }],
+  })
+  await cuenta({
+    venueId: enLineaCobradoAntesDeAceptar,
+    source: 'KIOSK',
+    type: 'TAKEOUT',
+    subtotal: 30,
+    paymentStatus: 'PAID',
+    pagos: [{ amount: 30 }],
   })
 
   // Reparto en modo manual: aceptar a mano NO cambia el estado (sólo estampa `providerAcceptedAt`). Sin aceptar no es cuenta, ni su
@@ -477,11 +511,20 @@ describe('B3 · pedido en línea vencido o cobrado', () => {
     expect(cents(r.summary.totalCollected)).toBe(0)
   })
 
-  it('cobrado en caja antes de que alguien lo aceptara: venta $206, 1 transacción (lo cobrado es venta)', async () => {
+  it('folio vencido reabierto con sólo propina: es cuenta y debe $100', async () => {
+    const r = await resumen(folioVencidoConPropina)
+    expect(cents(r.summary.unpaidSales)).toBe(10000)
+    expect(r.summary.unpaidOrders).toBe(1)
+    expect(r.summary.transactionCount).toBe(0)
+  })
+
+  it('cobrado en el negocio antes de aceptarse (también vuelto a «Pendiente» y un kiosco PAID): venta $336, 3 transacciones', async () => {
     const r = await resumen(enLineaCobradoAntesDeAceptar)
-    expect(cents(r.summary.grossSales)).toBe(20600)
-    expect(r.summary.transactionCount).toBe(1)
+    expect(cents(r.summary.grossSales)).toBe(33600)
+    expect(r.summary.transactionCount).toBe(3)
     expect(cents(r.summary.unpaidSales)).toBe(0)
+    expect(await sumaPorDia(enLineaCobradoAntesDeAceptar, 'grossSales')).toBe(33600)
+    await correoCuadra(enLineaCobradoAntesDeAceptar, r.summary.netSales)
   })
 })
 

@@ -40,22 +40,28 @@ export function sqlCuentaCobrada(o: AliasDeOrden): string {
  * viva de la TPV mientras sigue abierta (abrir mesa, Cobrar, «Pagar después», separar, el check-in de una reserva, una cuenta
  * reabierta). Tratarla como borrador sacaba de la cabecera las mesas abiertas («Sin cobrar» en $0) y las ya cubiertas (fuera de las
  * ventas). La referencia son las listas de cuentas abiertas de la TPV y del POS (`getOrders`, `listOrders`) más «lo que nadie aceptó
- * ni cobró no es cuenta». Una `PENDING` todavía NO es cuenta (pasada exhaustiva, `docs/audit/2026-11-21-resumen-de-ventas/mesas/`):
- *  - el kiosco legacy (abandonado, `OrderSource.KIOSK`);
- *  - el reparto en modo manual sin aceptar (aceptarlo a mano no cambia el estado: sólo estampa `providerAcceptedAt`);
- *  - el pedido en línea por aceptar (`PENDING_ACCEPTANCE`): «Mi equipo» sin aceptar, el apartado con tarjeta y el folio por pagar de
- *    la tienda híbrida (coordinador, 23-nov: «A», como `NO_ES_FOLIO_POR_PAGAR`: se cobra desde su lista «Por pagar»);
- *  - el pedido en línea vencido, rechazado o cancelado que sigue `PENDING` sin dinero (R44: el folio vencido con su abono devuelto).
- *    Con dinero sí es cuenta: el abono tardío lo deja cobrable en «Cuentas abiertas» (Codex B3 r2 #3);
- *  - la orden testigo de un cobro con cripto que no se completó (`b4bit`: sin renglones). Sin renglones por otra razón sí cuenta: la
- *    mesa que sólo debe un descorche (Codex B3 r2 #2) y la cabecera de SoftRestaurant (Codex B3 r1 #4).
- * Lo ya cobrado siempre es cuenta. El `CASE` corta antes de las subconsultas en toda cuenta que no es `PENDING` (casi todas).
+ * ni se cobró en el negocio no es cuenta». Pasada exhaustiva y sus verificaciones: `docs/audit/2026-11-21-resumen-de-ventas/mesas/`.
+ * Una `PENDING` todavía NO es cuenta:
+ *  - el reparto en modo manual sin aceptar (aceptarlo a mano no cambia el estado: sólo estampa `providerAcceptedAt`), aunque la
+ *    plataforma ya lo haya pagado: ese dinero se revierte si el negocio lo rechaza;
+ *  - el kiosco legacy (abandonado, `OrderSource.KIOSK`) y el pedido en línea por aceptar (`PENDING_ACCEPTANCE`: «Mi equipo» sin
+ *    aceptar, el apartado con tarjeta y el folio por pagar de la tienda híbrida, «A» del coordinador del 23-nov), salvo que ya se
+ *    hayan cobrado en el negocio (entonces son venta, como todo lo cobrado);
+ *  - el pedido en línea vencido, rechazado o cancelado que sigue `PENDING` sin dinero neto (R44: el folio vencido con su abono
+ *    devuelto). Con dinero —también sólo propina— sí: vuelve a ser cobrable en «Cuentas abiertas» (Codex B3 r2 #3, r3 F4);
+ *  - la orden testigo de un cobro con cripto que no se completó (`b4bit`: sin renglones) y no está cobrada. Sin renglones por otra
+ *    razón sí es cuenta: la mesa que sólo debe un descorche (Codex B3 r2 #2) y la cabecera de SoftRestaurant (r1 #4).
+ * El `CASE` corta antes de las subconsultas en toda cuenta que no es `PENDING` (casi todas).
  */
 export function sqlEsCuenta(o: AliasDeOrden): string {
+  const cobrada = sqlCuentaCobrada(o)
   // El estado de su pedido en línea, leído UNA vez: 0 = por aceptar, 1 = vencido/rechazado/cancelado, 2 = vivo o sin pedido en línea.
   const pedidoEnLinea = `COALESCE((SELECT CASE WHEN oo.status = 'PENDING_ACCEPTANCE' THEN 0 WHEN oo.status IN ('EXPIRED', 'REJECTED', 'CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_STAFF') THEN 1 ELSE 2 END FROM "OnlineOrder" oo WHERE oo."orderId" = ${o}.id), 2)`
+  // Dinero neto que entró (importe y propina, sin lo que una devolución de abono volvió a deber).
+  const conDinero = `(SELECT COALESCE(SUM(CASE WHEN pn.type = 'REFUND' THEN -(ABS(COALESCE(pn."reopenedAmount", 0)) + ABS(COALESCE(pn."reopenedTipAmount", 0))) ELSE pn.amount + pn."tipAmount" END), 0) FROM "Payment" pn WHERE pn."orderId" = ${o}.id AND pn.status = 'COMPLETED') > 0`
   const testigoDeCripto = `NOT EXISTS (SELECT 1 FROM "OrderItem" oi WHERE oi."orderId" = ${o}.id) AND EXISTS (SELECT 1 FROM "Payment" px WHERE px."orderId" = ${o}.id AND px.method = 'CRYPTOCURRENCY' AND px.status <> 'COMPLETED')`
-  return `(CASE WHEN ${o}.status IN ('CANCELLED', 'DELETED') THEN FALSE WHEN ${o}.status <> 'PENDING' THEN TRUE WHEN ${o}.source = 'KIOSK' THEN FALSE WHEN ${o}."originSystem" = 'DELIVERY_PLATFORM' AND ${o}."providerAcceptedAt" IS NULL THEN FALSE ELSE (CASE ${pedidoEnLinea} WHEN 0 THEN FALSE WHEN 1 THEN ${pagadoQueCubreSql(o)} > 0 ELSE NOT (${testigoDeCripto}) OR ${sqlCuentaCobrada(o)} END) END)`
+  // Lo cobrado en el negocio siempre es cuenta (y venta): una sola vez, después de las razones por las que una PENDING no lo es.
+  return `(CASE WHEN ${o}.status IN ('CANCELLED', 'DELETED') THEN FALSE WHEN ${o}.status <> 'PENDING' THEN TRUE WHEN ${o}."originSystem" = 'DELIVERY_PLATFORM' AND ${o}."providerAcceptedAt" IS NULL THEN FALSE ELSE (CASE WHEN ${o}.source = 'KIOSK' THEN FALSE ELSE (CASE ${pedidoEnLinea} WHEN 0 THEN FALSE WHEN 1 THEN ${conDinero} ELSE NOT (${testigoDeCripto}) END) END) OR ${cobrada} END)`
 }
 
 /**
