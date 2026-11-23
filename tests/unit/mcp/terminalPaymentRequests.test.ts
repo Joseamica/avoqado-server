@@ -213,9 +213,11 @@ describe('terminal_payment_requests — la misma proyección que el GET del POS'
     await capturarTool('terminal_payment_requests')({ venueId: 'venue-1' })
     const where = (prismaMock as any).terminalPaymentRequest.findMany.mock.calls[0][0].where
     // El primer brazo del OR es el predicado del servicio (la cerca de la cuenta), no una lista de estados escrita aquí. Cobro
-    // simple · S1: en vuelo, en sus 10 s (UNKNOWN) o con un aprobado del banco sin registrar.
+    // simple · S1: en vuelo, en sus 10 s (UNKNOWN) y las viejas sin desenlace hasta que el barrido las cierra (R2-2, R2-9).
+    const { UNRESOLVED_FINANCIAL_OUTCOME } = await import('@/services/terminal-payment.service')
+    expect(where.OR[0]).toEqual(UNRESOLVED_FINANCIAL_OUTCOME)
     expect(JSON.stringify(where)).toContain('UNKNOWN')
-    expect(JSON.stringify(where)).toContain('BANK_APPROVED_AWAITING_PAYMENT')
+    expect(JSON.stringify(where)).toContain('TIMED_OUT')
     expect(where.OR).toHaveLength(2)
   })
 })
