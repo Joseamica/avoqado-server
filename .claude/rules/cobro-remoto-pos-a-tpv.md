@@ -109,8 +109,10 @@ Invariantes de este lado, ya construidos y con prueba — no los debilites:
   Con la ranura suelta, `proyectarEstado` manda `cancelDisposition=null` (`fueSoltadaPorPolitica`): «El cobro sigue activo» ya no sale.
   **D26 (22-nov):** con la ranura suelta, tampoco veta a la PERSONA el ACTIVE de una TPV con `executionVersion >= 1` si el POS canceló
   y ese ACTIVE lleva 150 s sin intento abierto ni dinero en la puerta (`elTechoLevantaElVeto`): es el residuo que trabó a
-  Testarudo; ese ACTIVE también prueba la recepción si se perdió el ACK. El rechazo del BANCO sigue vetado por un ACTIVE posterior
-  al cancel (aunque la TPV no tenga `executionVersion`) y una ranura soltada sin cancel del POS sigue como antes.
+  Testarudo. El rechazo del BANCO y una ranura soltada sin cancel del POS siguen como antes. ⚠️ Límites conocidos (Codex r2,
+  `docs/audit/2026-11-22-terminal-sigue-cobrando/` del workspace): una TPV SIN `executionVersion` (2.12.5/2.13.x) ya no veta a la
+  persona desde que se suelta la ranura (30 s, regla del 3-nov), y un aviso APROBADO de Blumon guardado sin Payment no entra al
+  veto (la PAX no liga intentos).
 - 🔴 **El EFECTIVO sobre una venta con la tarjeta en duda se deja cobrar y sólo se avisa** (founder, 2-nov, D10 → «B»; medido en
   prod, 90 días: 0 casos en 8,098 cobros). «No se inicia otro cobro» de arriba es de la TERMINAL: no le pongas una guarda al efectivo.
   Después del commit queda `CASH_WITH_CARD_IN_DOUBT` (`avisarEfectivoConTarjetaEnDuda`, sin esperarlo: nunca tumba ni demora el cobro).

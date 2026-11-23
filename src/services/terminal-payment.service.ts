@@ -6929,19 +6929,9 @@ class TerminalPaymentService {
     if (requestId) {
       // Mark the durable row as cancel-requested (CAS, still holds the slot).
       try {
-        // D26 (Codex r1 #6): la intención y el sello del PRIMER cancel (`cancelRequestedAt`, origen del techo) en la MISMA
-        // transacción: sin eso, un fallo entre las dos dejaba la intención sin reloj para siempre (la fila pasa a UNKNOWN y ya no
-        // admite otro cancel). El sello no se mueve con los cancels repetidos y no toca `updatedAt`.
-        const intent = await prisma.$transaction(async tx => {
-          const r = await tx.terminalPaymentRequest.updateMany({
-            where: { requestId, venueId, terminalId: normalizeTerminalId(terminalId), status: { in: IN_FLIGHT } },
-            data: { status: TerminalPaymentRequestStatus.CANCEL_REQUESTED },
-          })
-          if (r.count > 0)
-            await tx.$executeRaw`
-              UPDATE "TerminalPaymentRequest" SET "cancelRequestedAt" = (NOW() AT TIME ZONE 'UTC')
-              WHERE "requestId" = ${requestId} AND "venueId" = ${venueId} AND "cancelRequestedAt" IS NULL`
-          return r
+        const intent = await prisma.terminalPaymentRequest.updateMany({
+          where: { requestId, venueId, terminalId: normalizeTerminalId(terminalId), status: { in: IN_FLIGHT } },
+          data: { status: TerminalPaymentRequestStatus.CANCEL_REQUESTED },
         })
         if (intent.count === 0) {
           // 🔴 La intención no se registró. `payment` (releído) es lo que dice POR QUÉ y con qué desenlace quedó el
@@ -6952,6 +6942,7 @@ class TerminalPaymentService {
             ? { cancelIntent: 'ALREADY_FINAL', cancelEmitted: false, payment: proyectarEstado(fila) }
             : { cancelIntent: 'NOT_FOUND', cancelEmitted: false, payment: null }
         }
+        await this.sellarPrimerCancel(requestId, venueId)
       } catch (err) {
         logger.error(`❌ [TerminalPayment] cancel row update failed`, {
           requestId,
@@ -8440,6 +8431,26 @@ class TerminalPaymentService {
   /* ── D26 (22-nov) · el TECHO a «sigo cobrando» tras el cancel del POS (`./tpv/techoDeEjecucionViva.ts`). ── */
 
   private techoCursor: { createdAt: Date; id: string } | null = null
+
+  /**
+   * El origen del techo: cuándo pidió el POS cancelar por PRIMERA vez. Una sola escritura (los cancels repetidos no lo mueven) y sin
+   * tocar `updatedAt`. Nunca tumba el cancel: si no se puede sellar, esa fila no tiene techo (le queda el reloj de 20 min).
+   * ⚠️ Límite (Codex r1 #6, arreglo revertido por la regla de parada tras la r2 #6): va DESPUÉS de la intención, no en su misma
+   * transacción; si el proceso muere entre las dos, esa solicitud se queda sin techo.
+   */
+  private async sellarPrimerCancel(requestId: string, venueId: string): Promise<void> {
+    try {
+      await prisma.$executeRaw`
+        UPDATE "TerminalPaymentRequest" SET "cancelRequestedAt" = (NOW() AT TIME ZONE 'UTC')
+        WHERE "requestId" = ${requestId} AND "venueId" = ${venueId} AND "cancelRequestedAt" IS NULL`
+    } catch (err) {
+      logger.warn('⚠️ [TerminalPayment] could not stamp the first cancel — this request keeps the 20-min clock only', {
+        requestId,
+        venueId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
 
   /**
    * D26 · suelta la RANURA (nunca la venta) de una solicitud que el POS canceló hace ≥ 30 s y cuya terminal sigue contestando «sigo

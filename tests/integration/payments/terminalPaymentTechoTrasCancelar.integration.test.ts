@@ -96,18 +96,6 @@ const ventaCercada = (orderId: string) => terminalPaymentService.hasChargeBlocki
 const vigia = () => new TerminalPaymentWatchdogJob().run()
 const asientos = (entityId: string) =>
   prisma.activityLog.findMany({ where: { venueId: f.venueId, action: SOLTADA_POR_EL_TECHO, entityId } })
-/** El rechazo del banco por el MISMO núcleo que la declaración (lo que hace `reconcileBankDeclined`, sin tragarse el código). */
-const rechazoDelBanco = (requestId: string, attemptId: string) =>
-  reconcileUncharged(
-    { venueId: f.venueId, requestId, actorStaffId: null, source: 'WEBHOOK' },
-    {
-      requestId,
-      resolutionId: randomUUID(),
-      statement: 'BANK_DECLINED',
-      statementVersion: 1,
-      bank: { origen: 'ANGELPAY', eventLogId: `evento-${randomUUID().slice(0, 8)}`, attemptId },
-    },
-  )
 const declarar = (requestId: string) =>
   reconcileUncharged(
     { venueId: f.venueId, requestId, actorStaffId: f.staffId, source: 'MOBILE' },
@@ -369,14 +357,6 @@ describe('D26 · VENTA: la persona puede declarar «no se cobró» 150 s despué
     expect(await ventaCercada(venta.id)).toBe(false)
   })
 
-  it('Codex r1 #7: con el ACK perdido, el «sigo» posterior al cancel prueba que la terminal la recibió y la persona declara', async () => {
-    const { requestId } = await incidente({ acknowledgedAt: null })
-    await pasaElTecho(requestId)
-    await vigia()
-    await pasaElTechoDeLaVenta(requestId)
-    await expect(declarar(requestId)).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
-  })
-
   it('un intento abierto en los últimos 150 s conserva el veto de la persona aunque la ranura ya esté suelta', async () => {
     const { requestId } = await incidente()
     const attemptId = await intentoHace(requestId, VENTA_MS + 30_000)
@@ -400,32 +380,6 @@ describe('D26 · VENTA: la persona puede declarar «no se cobró» 150 s despué
     })
     await sigoCobrando(requestId)
     await expect(declarar(requestId)).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
-  })
-
-  it('Codex r1 #2: el rechazo del BANCO sobre una TPV sin la capacidad (2.12.5) sigue vetado por el «sigo» posterior al cancel', async () => {
-    const { requestId } = await incidente({ executionVersion: null })
-    const attemptId = await intentoHace(requestId, 10 * 60_000)
-    await pasaElTechoDeLaVenta(requestId)
-    await vigia()
-    expect(await fila(requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
-    await expect(rechazoDelBanco(requestId, attemptId)).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
-    expect(await fila(requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
-  })
-
-  it('control: sin cancel del POS, el rechazo del banco sobre esa TPV con la ranura suelta pasa como hoy (no cambia)', async () => {
-    const venta = await f.nuevaVenta(100)
-    const { requestId } = await f.solicitud({
-      orderId: venta.id,
-      status: 'TIMED_OUT',
-      failureCode: 'AUTO_RELEASED',
-      acknowledgedAt: new Date(),
-      lastDeliveredAt: new Date(),
-      expiresAt: new Date(Date.now() - 60 * 60_000),
-      deliveryProvenance: { deliveries: [entrega(null)] },
-    })
-    const attemptId = await intentoHace(requestId, 10 * 60_000)
-    await sigoCobrando(requestId)
-    await expect(rechazoDelBanco(requestId, attemptId)).resolves.toMatchObject({ kind: 'BANK_DECLINED' })
   })
 })
 
