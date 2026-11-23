@@ -6527,6 +6527,9 @@ model TerminalPaymentRequest {
   // A cancel request/timeout is not proof of no charge. Only a terminal's
   // explicit pre-execution acceptance sets ACCEPTED.
   cancelDisposition       String?
+  /// D26 (22-nov): cuándo pidió el POS cancelar por PRIMERA vez (`cancelPayment`, una sola escritura). Origen del techo a
+  /// «sigo cobrando»: nunca acredita «no se cobró»; sólo deja soltar la RANURA si la terminal sigue contestando ACTIVE sin dinero.
+  cancelRequestedAt       DateTime?
   deliveryAttempts        Int                          @default(0)
   lastDeliveredAt         DateTime?
   acknowledgedAt          DateTime?

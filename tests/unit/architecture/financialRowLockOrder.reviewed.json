@@ -1212,6 +1212,11 @@
       "loops": 0,
       "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
     },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.soltarRanuraPorTechoTrasCancelar#findReconcilablePayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "D26: el mismo patrón que soltarRanuraTrasCierre — cada invocación abre/termina su propia transacción; el bucle del vigía no conserva filas de invocaciones anteriores."
+    },
     "src/services/shared/puntosAlReembolsar.ts#quitarPuntosPorReembolso#reversaEnTx": {
       "count": 1,
       "loops": 0,
