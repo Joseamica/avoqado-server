@@ -8,7 +8,7 @@ requiredPermissions:
   - menu:read
   - creditPacks:read
 sourceRepo: avoqado-web-dashboard
-sourceRef: 34005596348b40e47ca5ea0b00d2ad55140221a2
+sourceRef: 0910a27a6665667fd0f7001f8b822bf933ff6ef8
 keywords:
   - crear paquete de clases
   - paquete de créditos

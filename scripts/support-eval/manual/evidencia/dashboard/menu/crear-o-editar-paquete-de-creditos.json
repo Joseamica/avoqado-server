@@ -1,7 +1,7 @@
 {
   "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
   "sourceRepo": "avoqado-web-dashboard",
-  "sourceRef": "34005596348b40e47ca5ea0b00d2ad55140221a2",
+  "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8",
   "version": "main",
   "pasos": [
     {
@@ -49,7 +49,7 @@
     {
       "paso": 2,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 287,
+      "linea": 298,
       "cita": "<FormLabel>{t('form.fields.name')}</FormLabel>"
     },
     {
@@ -61,7 +61,7 @@
     {
       "paso": 2,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 320,
+      "linea": 331,
       "cita": "<FormLabel>{t('form.fields.price')}</FormLabel>"
     },
     {
@@ -85,7 +85,7 @@
     {
       "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 426,
+      "linea": 437,
       "cita": "<h3 className=\"font-medium text-sm\">{t('form.fields.items')}</h3>"
     },
     {
@@ -97,7 +97,7 @@
     {
       "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 458,
+      "linea": 469,
       "cita": "<FormLabel>{t('form.fields.product')}</FormLabel>"
     },
     {
@@ -109,7 +109,7 @@
     {
       "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 486,
+      "linea": 497,
       "cita": "<FormLabel>{t('form.fields.quantity')}</FormLabel>"
     },
     {
@@ -121,7 +121,7 @@
     {
       "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 432,
+      "linea": 443,
       "cita": "onClick={() => append({ productId: '', quantity: 1, unlimited: false })}"
     },
     {
@@ -133,7 +133,7 @@
     {
       "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 519,
+      "linea": 530,
       "cita": "<FormLabel>{t('form.fields.unlimited')}</FormLabel>"
     },
     {
@@ -145,7 +145,7 @@
     {
       "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 520,
+      "linea": 531,
       "cita": "<FormDescription>{t('form.unlimitedHelp')}</FormDescription>"
     },
     {
@@ -157,19 +157,19 @@
     {
       "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 472,
+      "linea": 483,
       "cita": "{!ilimitado && ("
     },
     {
       "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 213,
+      "linea": 120,
       "cita": "? { productId: item.productId, unlimited: true }"
     },
     {
       "paso": 4,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 255,
+      "linea": 266,
       "cita": "{mutation.isPending ? tCommon('saving') : t('actions.save')}"
     },
     {
@@ -181,7 +181,7 @@
     {
       "paso": 4,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 224,
+      "linea": 235,
       "cita": "title: isEditing ? t('toasts.updateSuccess') : t('toasts.createSuccess'),"
     },
     {
@@ -252,7 +252,7 @@
     {
       "ruta": "Problema: regla del nombre",
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 284
+      "linea": 295
     },
     {
       "ruta": "Problema: texto del nombre",
@@ -262,7 +262,7 @@
     {
       "ruta": "Problema: regla del precio",
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 315
+      "linea": 326
     },
     {
       "ruta": "Problema: texto del precio",
@@ -272,7 +272,7 @@
     {
       "ruta": "Problema: regla del producto",
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 455
+      "linea": 466
     },
     {
       "ruta": "Problema: texto del producto",
@@ -282,7 +282,7 @@
     {
       "ruta": "Problema: el error trae la razón del SERVIDOR",
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 232
+      "linea": 243
     },
     {
       "ruta": "Problema: texto por omisión",
@@ -302,7 +302,7 @@
     {
       "ruta": "Ilimitado: con un renglón Ilimitado, Días de Validez es obligatorio (regla)",
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 374
+      "linea": 385
     },
     {
       "ruta": "Ilimitado: texto debajo de Días de Validez",
@@ -367,12 +367,12 @@
     {
       "ruta": "Ilimitado: textos del SERVIDOR que ve la clienta o el panel (personal, misma clase, nombre ligado, titular, ajuste, vigencia, panel actualizado)",
       "archivo": "avoqado-server/src/services/credits/ilimitado.ts",
-      "linea": 29
+      "linea": 30
     },
     {
       "ruta": "Ilimitado: «Tu Ilimitado vence el …; esta clase es después.»",
       "archivo": "avoqado-server/src/services/credits/ilimitado.ts",
-      "linea": 48
+      "linea": 49
     }
   ],
   "aparato": {
