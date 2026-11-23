@@ -946,7 +946,7 @@ export async function reconcileBankDeclined(input: {
               AND e."type" = 'send_transaction' AND ${estadoBancarioSql(Prisma.sql`e."payload"->'payload'->'status'`)} = 'RECHAZADO')`
         if (sinRechazo > 0) return 'NOT_ELIGIBLE' as const
       }
-      const { desenlaceCanonico } = await import('../terminal-payment.service')
+      const { afirmacionDeLaTerminal, desenlaceCanonico, sinAfirmacionDeLaTerminalSql } = await import('../terminal-payment.service')
       const retenidaConAprobado = row.failureCode === 'BANK_APPROVED_AWAITING_PAYMENT' || row.failureCode === 'PAYMENT_UNBOUND_AWAITING_REVIEW'
       const enVuelo =
         row.status === TerminalPaymentRequestStatus.PENDING ||
@@ -956,7 +956,8 @@ export async function reconcileBankDeclined(input: {
       const abierta = !enVuelo && row.status !== TerminalPaymentRequestStatus.COMPLETED && desenlaceCanonico(row).outcome === 'UNRESOLVED'
       if (!abierta || row.paymentId || retenidaConAprobado) return 'NOT_ELIGIBLE' as const
       const { puertaDelDinero } = await import('./avisosNoGuardados')
-      if (attemptIds.some(puertaDelDinero)) return 'POSITIVE_EVIDENCE_EXISTS' as const
+      // Codex S1 r3 (R3-1): «la terminal dijo que cobró» (`claimedSuccess`) también es un aprobado conocido; lo veta aquí y en el CAS.
+      if (attemptIds.some(puertaDelDinero) || afirmacionDeLaTerminal(row.resultJson)) return 'POSITIVE_EVIDENCE_EXISTS' as const
       const sobre =
         row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson) ? (row.resultJson as Record<string, unknown>) : {}
       const motivo = motivoDelBanco(evidencia.descripcion)
@@ -981,6 +982,7 @@ export async function reconcileBankDeclined(input: {
             "lateResult" = true,
             "updatedAt" = (NOW() AT TIME ZONE 'UTC')
         WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL
+          AND ${sinAfirmacionDeLaTerminalSql(Prisma.raw('"resultJson"'))}
           AND ${sinVetoDeDineroSql({ requestId, venueId, attemptIds, terminalId: row.terminalId })}`
       if (n !== 1) return 'POSITIVE_EVIDENCE_EXISTS' as const
       await tx.activityLog.create({

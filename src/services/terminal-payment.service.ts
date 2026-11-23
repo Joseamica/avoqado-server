@@ -1136,7 +1136,7 @@ export const sinAfirmacionDeLaTerminalSql = (resultJson: Prisma.Sql): Prisma.Sql
  * para que el selector de la red durable —que sí vive en un join con alias— pregunte lo MISMO, sin una segunda copia.
  */
 const SIN_AFIRMACION_DE_LA_TERMINAL_SQL = sinAfirmacionDeLaTerminalSql(Prisma.raw('"resultJson"'))
-function afirmacionDeLaTerminal(resultJson: Prisma.JsonValue | null): Record<string, unknown> | null {
+export function afirmacionDeLaTerminal(resultJson: Prisma.JsonValue | null): Record<string, unknown> | null {
   const sobre = resultJson && typeof resultJson === 'object' && !Array.isArray(resultJson) ? (resultJson as Record<string, unknown>) : null
   const afirmacion = sobre?.claimedSuccess
   if (afirmacion === undefined || afirmacion === null) return null
