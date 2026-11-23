@@ -20,7 +20,7 @@ keywords:
 
 ## Antes de empezar
 
-Si arriba sale un aviso de un cobro sin confirmar, revisa antes que de verdad no se cobró: al declararlo queda tu nombre y la hora. Si el aviso no trae *No se cobró*, ese cobro no se puede declarar desde ahí.
+Si arriba sale un aviso de un cobro sin confirmar, revisa antes que de verdad no se cobró: al declararlo queda tu nombre y la hora. Si el aviso no trae *No se cobró*, ese cobro no se puede declarar desde ahí. Un cobro que mandó el punto de venta y se quedó sin respuesta Avoqado lo cierra solo como no cobrado y su aviso se quita: ahí no hay nada que declarar.
 
 ## Pasos
 
