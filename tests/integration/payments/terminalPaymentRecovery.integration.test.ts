@@ -528,8 +528,9 @@ describe('Terminal relay uncertainty survives database commits', () => {
         venueId,
       },
     )
-    // Cobro simple · S1: en sus 10 s de «sin respuesta» el GET la proyecta EN VUELO (las apps viejas siguen consultando).
-    expect(await terminalPaymentService.getPaymentStatus(requestId, venueId)).toMatchObject({ status: 'SENT', outcome: 'UNRESOLVED', paymentId: null })
+    // Cobro simple · S1: la terminal AFIRMÓ un cobro que no acredita ⇒ «aprobado, por registrar»: sigue UNKNOWN (sin reloj de
+    // 10 s, la cuenta cercada) y nunca «no cobrado».
+    expect(await terminalPaymentService.getPaymentStatus(requestId, venueId)).toMatchObject({ status: 'UNKNOWN', outcome: 'UNRESOLVED', paymentId: null })
   })
 
   it('does not emit a charge for an order that is absent from the authenticated venue', async () => {
@@ -574,8 +575,14 @@ describe('Terminal relay uncertainty survives database commits', () => {
           venueId,
         },
       )
-      // Cobro simple · S1: en sus 10 s de «sin respuesta» el GET la proyecta EN VUELO (las apps viejas siguen consultando).
-    expect(await terminalPaymentService.getPaymentStatus(requestId, venueId)).toMatchObject({ status: 'SENT', outcome: 'UNRESOLVED', paymentId: null })
+      // Cobro simple · S1: la terminal AFIRMÓ un cobro que no acredita ⇒ «aprobado, por registrar»: sigue UNKNOWN (sin reloj de
+      // 10 s, la cuenta cercada) y nunca «no cobrado».
+      expect(await terminalPaymentService.getPaymentStatus(requestId, venueId)).toMatchObject({
+        status: 'UNKNOWN',
+        outcome: 'UNRESOLVED',
+        paymentId: null,
+      })
+      expect((await prisma.terminalPaymentRequest.findFirstOrThrow({ where: { requestId, venueId } })).noResponseAt).toBeNull()
     },
   )
 
