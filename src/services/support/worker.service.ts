@@ -13,6 +13,7 @@ import {
   isSupportDataEnabled,
   isSupportFreeTextEnabled,
   isSupportHybridEnabled,
+  isSupportPublicHelpEnabled,
   isSupportWhatsappEnabled,
   supportPhoneNumberId,
   type SupportHandoffConfig,
@@ -55,6 +56,14 @@ import { resolveSupportDeviceContext } from './deviceContext.service'
 import { reserveAiAttempt, startAiAttempt, finishAiAttempt, releaseUnstartedAiAttempt } from './budget.service'
 import { resetSupportConversation, takeDailyStaticReply } from './router.service'
 import { resolveRegisteredSupportPhone } from './registeredPhone.service'
+import {
+  addPublicStrike,
+  clearPublicStrikes,
+  isPublicPaused,
+  publicDayKey,
+  publicDaySpent,
+  refundPublicMessage,
+} from './publicHelp.service'
 import { buildHumanSummary } from './humanSummary.service'
 import {
   SUPPORT_FAILURE_OUTCOMES,
@@ -80,6 +89,8 @@ import {
   keepOtherQuestion,
   supportNotice,
   supportOldVersion,
+  supportPublicNotice,
+  supportPublicPause,
   supportTextCap,
   withOtherQuestion,
 } from './texts'
@@ -267,7 +278,15 @@ export async function recordShownSupportAnswer(
 }
 
 export async function replaceWithPublicNotice(claim: SupportClaim, now = new Date()): Promise<void> {
+  // The phone lock first, as the router (phone, conversation, then its messages): AYUDA or SALIR at the same time never waits on
+  // this message while this waits on its conversation.
+  const owner = await prisma.supportConversation.findUnique({
+    where: { id: claim.conversationId },
+    select: { receiverId: true, phone: true },
+  })
   await prisma.$transaction(async tx => {
+    if (owner)
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`support-phone:${owner.receiverId}:${owner.phone}`}, 0))`
     const message = await readCurrentClaim(tx, claim, now)
     if (!message) return
     const conversation = await resetSupportConversation(tx, message.conversation)
@@ -344,12 +363,16 @@ export async function prepareSupportAnswer(
     await completeClaim(claim, { status: 'ANSWER_READY' }, clock())
     return 'READY'
   }
+  // Hybrid refs (`id@hash8`) are read with or without the flag: a message prepared with it may be resent after it.
+  const library = () => dependencies.library ?? loadSupportLibrary()
   const unregistered = async () =>
     isSupportFreeTextEnabled() && !(await resolveRegisteredSupportPhone(conversation.phone, prisma)).registered
   // The fixed message keeps the router's one-per-day cap; once it went out today the question ends silently.
-  // Cap and reply commit together on a still-valid claim, so a lost save never spends the day's message.
+  // Cap and reply commit together on a still-valid claim, so a lost save never spends the day's message. The phone lock goes
+  // first, as in the router (phone, its control rows, then the messages): the two never wait on each other's rows.
   const fixedReply = () =>
     prisma.$transaction(async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`support-phone:${conversation.receiverId}:${conversation.phone}`}, 0))`
       if (!(await readCurrentClaim(tx, claim, clock()))) return 'CANCELLED' as const
       const first = await takeDailyStaticReply(tx, conversation.receiverId, conversation.phone, clock())
       await tx.supportMessage.update({
@@ -365,9 +388,33 @@ export async function prepareSupportAnswer(
             }
           : { status: 'CANCELLED', claimToken: null, leaseUntil: null },
       })
+      // Ended in silence: its place in the caps of public help comes back (nothing, if it was never counted there).
+      if (!first) await refundPublicMessage(tx, conversation.receiverId, conversation.phone, message.inboundEventId)
       return first ? ('READY' as const) : ('CANCELLED' as const)
     })
-  if (await unregistered()) return fixedReply()
+  // Public help (an unknown phone): what its state says instead of an answer; null = it is answered. Off or not public: the fixed
+  // message, as with it off. Paused: silence. `spent` (a model call was refused or could not start): the day's US$ spent is the
+  // fixed message too. It is not checked before: what needs no model (a «sí» to the offer of a person) still goes.
+  const publicStop = async (spent = false): Promise<'READY' | 'CANCELLED' | null> => {
+    if (!isSupportPublicHelpEnabled() || conversation.mode !== 'PUBLIC') return fixedReply()
+    if (await isPublicPaused(prisma, conversation.receiverId, conversation.phone, clock())) {
+      await prisma.$transaction(async tx => {
+        if (await completeClaim(claim, { status: 'CANCELLED' }, clock(), tx))
+          await refundPublicMessage(tx, conversation.receiverId, conversation.phone, message.inboundEventId)
+      })
+      return 'CANCELLED'
+    }
+    const ai = getSupportAiConfig()
+    if (spent && ai && publicDaySpent(await prisma.supportBudget.findUnique({ where: { key: publicDayKey(clock()) } }), ai.pricing))
+      return fixedReply()
+    return null
+  }
+  let publicHelp = false
+  if (await unregistered()) {
+    const stop = await publicStop()
+    if (stop) return stop
+    publicHelp = true
+  }
   // A model call that could not start: the message may have expired, lost its registration or its personal context.
   // null = the message is still current (a hybrid call 2 or 3 then answers with the literal guide).
   const notStarted = async () => {
@@ -376,18 +423,22 @@ export async function prepareSupportAnswer(
       await completeClaim(claim, { status: 'EXPIRED', answerCipher: null }, clock())
       return 'EXPIRED' as const
     }
-    if (await unregistered()) return fixedReply()
+    if (await unregistered()) {
+      if (!publicHelp) return fixedReply()
+      const stop = await publicStop(true)
+      if (stop) return stop
+    }
     // A personal context the phone no longer belongs to only gets the public notice (readSupportContext throws).
     if (stopped && isSupportFreeTextEnabled()) await readSupportContext(stopped.conversation, [], clock())
     return stopped ? null : ('CANCELLED' as const)
   }
   let attemptId: string | undefined,
     started = false
-  // Hybrid refs (`id@hash8`) are read with or without the flag: a message prepared with it may be resent after it.
-  const library = () => dependencies.library ?? loadSupportLibrary()
   try {
     const initial = await readSupportContext(conversation, [], clock())
     if (message.body.toUpperCase() === 'RECUPERAR') {
+      // Public help keeps no memory of another conversation.
+      if (publicHelp) return save(`No encontré una guía guardada vigente para esa app. ${SUPPORT_CONTACT}`)
       const saved = await prisma.supportMessage.findFirst({
         where: {
           purpose: 'HELP',
@@ -508,10 +559,19 @@ export async function prepareSupportAnswer(
       }
       message.body = previous.body
     }
-    if (!conversation.noticeAcceptedAt) return save(supportNotice())
+    if (!conversation.noticeAcceptedAt) return save(publicHelp ? supportPublicNotice() : supportNotice())
     if (!['dashboard', 'android', 'windows', 'tpv'].includes(conversation.app ?? '')) return save(SUPPORT_ASK_APP)
     if (isSupportHybridEnabled())
-      return await prepareHybridAnswer({ claim, message, dependencies, clock, initial: initial.fingerprint, save, notStarted })
+      return await prepareHybridAnswer({
+        claim,
+        message,
+        dependencies,
+        clock,
+        initial: initial.fingerprint,
+        save,
+        notStarted,
+        publicHelp: publicHelp ? { stop: () => publicStop(true) } : undefined,
+      })
     const result = await searchVerifiedHelp(
       {
         topic: message.body,
@@ -649,7 +709,8 @@ async function askVersionOrDevice(
 type Prepared = 'READY' | 'UNKNOWN' | 'EXPIRED' | 'CANCELLED'
 type CurrentMessage = NonNullable<Awaited<ReturnType<typeof readCurrentClaim>>>
 class CallNotStarted extends Error {}
-class HandoffLost extends Error {}
+/** The claim was lost inside a transaction that must leave nothing behind. */
+class ClaimLost extends Error {}
 
 async function prepareHybridAnswer(job: {
   claim: SupportClaim
@@ -659,8 +720,10 @@ async function prepareHybridAnswer(job: {
   initial: string
   save: (answer: string, sourceIds?: string[], fingerprint?: string, mark?: AnswerMark) => Promise<'READY' | 'CANCELLED'>
   notStarted: () => Promise<Prepared | null>
+  /** Public help (an unknown phone): its state check, for a model call that was refused or could not start. */
+  publicHelp?: { stop: () => Promise<Prepared | null> }
 }): Promise<Prepared> {
-  const { claim, message, dependencies, clock, initial, save, notStarted } = job
+  const { claim, message, dependencies, clock, initial, save, notStarted, publicHelp } = job
   const conversation = message.conversation
   const begun = Date.now()
   let kind: string | undefined,
@@ -724,14 +787,14 @@ async function prepareHybridAnswer(job: {
         return await prisma.$transaction(async tx => {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`support-phone:${conversation.receiverId}:${conversation.phone}`}, 0))`
           const current = await readCurrentClaim(tx, claim, clock())
-          if (!current) throw new HandoffLost()
+          if (!current) throw new ClaimLost()
           const done = await requestSupportHandoff(tx, current.conversation, reason, clock(), config, dependencies.library, extra)
           const patch = { status: 'ANSWER_READY' as const, answer: done.text, sourceIds: [], accessFingerprint: final.fingerprint }
-          if (!(await completeAnswer(tx, claim, current, patch, { outcome: done.outcome }, clock()))) throw new HandoffLost()
+          if (!(await completeAnswer(tx, claim, current, patch, { outcome: done.outcome }, clock()))) throw new ClaimLost()
           return 'READY' as const
         })
       } catch (err) {
-        if (err instanceof HandoffLost) return 'CANCELLED'
+        if (err instanceof ClaimLost) return 'CANCELLED'
         throw err
       }
     }
@@ -786,6 +849,50 @@ async function prepareHybridAnswer(job: {
       })
     }
 
+    // Capa 2 (public help): the strike commits with its answer, once (a retried message never counts twice), under the phone lock
+    // first, as the router. The third in a row answers with the pause and silences what this phone left in line; a link code asked
+    // from the panel is not cancelled: linking is the way out of public help.
+    const strike = async (text: string): Promise<Prepared> => {
+      const fresh = await recheck()
+      if (!fresh) return 'CANCELLED'
+      const final = await readSupportContext(fresh.conversation, [], clock())
+      try {
+        return await prisma.$transaction(async tx => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`support-phone:${conversation.receiverId}:${conversation.phone}`}, 0))`
+          const current = await readCurrentClaim(tx, claim, clock())
+          if (!current) throw new ClaimLost()
+          // Registered meanwhile: no strike (and nothing it queued as registered is cancelled).
+          const registered = (await resolveRegisteredSupportPhone(conversation.phone, tx)).registered
+          const days = registered ? 0 : await addPublicStrike(tx, conversation.receiverId, conversation.phone, clock())
+          if (days) {
+            const silenced = await tx.supportMessage.findMany({
+              where: {
+                conversationId: current.conversationId,
+                purpose: 'HELP',
+                sequence: { gt: current.sequence },
+                status: { in: ['QUEUED', 'ANSWER_READY', 'AI_UNKNOWN'] },
+              },
+              select: { id: true, inboundEventId: true },
+              take: 100,
+            })
+            await tx.supportMessage.updateMany({
+              where: { id: { in: silenced.map(m => m.id) } },
+              data: { status: 'CANCELLED', claimToken: null, leaseUntil: null },
+            })
+            // They were counted at the door and never answered: their places come back.
+            for (const m of silenced) await refundPublicMessage(tx, conversation.receiverId, conversation.phone, m.inboundEventId)
+          }
+          const answer = days ? supportPublicPause(days) : text
+          const patch = { status: 'ANSWER_READY' as const, answer, sourceIds: [], accessFingerprint: final.fingerprint }
+          if (!(await completeAnswer(tx, claim, current, patch, { outcome: 'FIXED' }, clock()))) throw new ClaimLost()
+          return 'READY' as const
+        })
+      } catch (err) {
+        if (err instanceof ClaimLost) return 'CANCELLED'
+        throw err
+      }
+    }
+
     const library = dependencies.library ?? loadSupportLibrary()
     // Through finish, like any «no encontré»: two in a row offer a person (T5-c2).
     if (!library.length) return finish([], () => SUPPORT_HYBRID_UNKNOWN, 'UNKNOWN')
@@ -827,7 +934,7 @@ async function prepareHybridAnswer(job: {
       n: 1 | 2 | 3,
       run: (gated: OpenAI) => Promise<T>,
     ): Promise<{ value: T } | 'limit' | 'refused' | 'changed' | 'gone' | 'threw'> => {
-      const attempt = await reserveAiAttempt(claim, config, clock(), { call: n })
+      const attempt = await reserveAiAttempt(claim, config, clock(), { call: n, ...(publicHelp ? { publicHelp: true } : {}) })
       if (!attempt) return 'limit'
       let started = false,
         changed = false
@@ -837,6 +944,7 @@ async function prepareHybridAnswer(job: {
         responses: {
           create: async (body: unknown, options?: unknown) => {
             started = await startAiAttempt(attempt.id, claim, clock(), {
+              requestBytes: Buffer.byteLength(JSON.stringify(body)),
               verify: async tx => {
                 const current = await readCurrentClaim(tx, claim, clock())
                 if (!current) return false
@@ -879,7 +987,10 @@ async function prepareHybridAnswer(job: {
         await replaceWithPublicNotice(claim, clock())
         return 'CANCELLED'
       }
-      if (outcome === 'limit' && n === 1) return save(`Por ahora se alcanzó el límite de consultas del asistente. ${SUPPORT_CONTACT}`)
+      if (outcome === 'limit' && n === 1)
+        return (
+          (publicHelp && (await publicHelp.stop())) || save(`Por ahora se alcanzó el límite de consultas del asistente. ${SUPPORT_CONTACT}`)
+        )
       return notStarted()
     }
 
@@ -906,6 +1017,17 @@ async function prepareHybridAnswer(job: {
     const understood = first.value.result
     kind = understood.kind
     also = first.value.otherQuestion === true
+    if (publicHelp) {
+      // Capa 2: sin sentido o fuera de tema (el ataque también) cuenta; una pregunta de Avoqado empieza la cuenta otra vez. Un saludo
+      // o un «no sé» (que también es una salida inválida del modelo) no cuentan ni la borran.
+      if (understood.kind === 'nonsense' || understood.kind === 'off_topic')
+        return await strike(hybridFixedReply(understood, false, [])!.text)
+      // Only while the message is still current: a late result after AYUDA or APP never touches the count of what came after.
+      if (understood.kind !== 'greeting' && understood.kind !== 'unknown')
+        await prisma.$transaction(async tx => {
+          if (await readCurrentClaim(tx, claim, clock())) await clearPublicStrikes(tx, conversation.receiverId, conversation.phone)
+        })
+    }
     if (understood.kind === 'human') {
       if (handoff) return await finishHandoff('REQUESTED', handoff)
       const summary = await buildHumanSummary(conversation.id, claim.generation, undefined, library)
