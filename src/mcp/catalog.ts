@@ -368,6 +368,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   resume_hybrid_purchase: 'write',
   revenue_by_venue: 'read',
   review_sale_verification: 'write',
+  sales_by_channel: 'read',
   sales_by_payment_method: 'read',
   sales_comparison: 'read',
   sales_vs_target: 'read',

@@ -547,7 +547,7 @@
       ]
     },
     "dashboard/menu/crear-o-editar-paquete-de-creditos": {
-      "sha256": "c056c1ee19eca277eb3269cdcbd183257357eb215d875d86c37dcbf4116fc025",
+      "sha256": "077db8d0928a7f8e8c99d7eeda6c07670e36754846c100c3fc46f47e8c9bce4e",
       "requiredPermissions": [
         "menu:read",
         "creditPacks:read"
@@ -684,6 +684,12 @@
       ],
       "featureCode": "ADVANCED_REPORTS",
       "gateKind": "FEATURE"
+    },
+    "dashboard/reportes/ver-ventas-por-canal": {
+      "sha256": "ba9eb48c9b8c3950f65b249402243cb8868a86512f53dba9a0e2e9b6407985c6",
+      "requiredPermissions": [
+        "reports:read"
+      ]
     },
     "dashboard/reservaciones/agregar-a-lista-de-espera": {
       "sha256": "5f4e0d425177db67bf0728a21607d59d9c8227a14bd1c80242e68cbf8f74596c",

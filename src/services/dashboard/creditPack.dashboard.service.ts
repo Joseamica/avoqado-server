@@ -15,6 +15,18 @@ import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { omitirPorDemo } from '@/services/demo/candadoDemo'
+import { UNLIMITED_LATE_CANCEL_MARK, UNLIMITED_QUANTITY, errorIlimitado, marcaDelRenglon } from '@/services/credits/ilimitado'
+
+/** Lo que pide el panel por renglón (D679): un Ilimitado no trae cantidad; el editor viejo no trae `unlimited`. */
+type RenglonPedido = { productId: string; quantity?: number; unlimited?: boolean }
+
+/** Cantidad y marca que se guardan (Inventario 2). Un Ilimitado guarda 99,999 aunque llegue otro número. */
+function renglonResuelto(pedido: RenglonPedido, actual: { unlimited: boolean } | null): { quantity: number; unlimited: boolean } {
+  const unlimited = marcaDelRenglon(pedido, actual)
+  if (unlimited) return { quantity: UNLIMITED_QUANTITY, unlimited }
+  if (!pedido.quantity || pedido.quantity < 1) throw new BadRequestError('La cantidad debe ser mayor a 0')
+  return { quantity: pedido.quantity, unlimited }
+}
 
 /**
  * Lazy Stripe singleton. We used to do `new Stripe(process.env.STRIPE_SECRET_KEY || '')`
@@ -41,20 +53,26 @@ function getStripe(): Stripe {
 // ==========================================
 
 export async function getCreditPacks(venueId: string) {
-  return prisma.creditPack.findMany({
-    where: { venueId },
-    include: {
-      items: {
+  // D679 (Codex código r2 #3): paquete y renglones en UNA foto de la base. El POS de ANDROID firma con esta lista la foto con la que
+  // vende sin red; una lectura partida contra una edición daría un Ilimitado con la vigencia vieja (esa foto ya no se firma).
+  return prisma.$transaction(
+    tx =>
+      tx.creditPack.findMany({
+        where: { venueId },
         include: {
-          product: {
-            select: { id: true, name: true, type: true, price: true, imageUrl: true },
+          items: {
+            include: {
+              product: {
+                select: { id: true, name: true, type: true, price: true, imageUrl: true },
+              },
+            },
           },
+          _count: { select: { purchases: true } },
         },
-      },
-      _count: { select: { purchases: true } },
-    },
-    orderBy: { displayOrder: 'asc' },
-  })
+        orderBy: { displayOrder: 'asc' },
+      }),
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  )
 }
 
 export async function getCreditPackById(venueId: string, id: string) {
@@ -86,9 +104,13 @@ export async function createCreditPack(
     validityDays?: number
     maxPerCustomer?: number
     displayOrder?: number
-    items: { productId: string; quantity: number }[]
+    items: RenglonPedido[]
   },
 ) {
+  // D679 (W1): la marca sólo si la pide el renglón; con algún Ilimitado, la vigencia es obligatoria. Antes de Stripe.
+  const renglones = data.items.map(item => ({ productId: item.productId, ...renglonResuelto(item, null) }))
+  if (renglones.some(r => r.unlimited) && !data.validityDays) throw errorIlimitado('CREDIT_UNLIMITED_NEEDS_VALIDITY')
+
   // Validate all products exist and belong to the venue
   const productIds = data.items.map(i => i.productId)
   const products = await prisma.product.findMany({
@@ -148,9 +170,10 @@ export async function createCreditPack(
       stripeProductId,
       stripePriceId,
       items: {
-        create: data.items.map(item => ({
-          productId: item.productId,
-          quantity: item.quantity,
+        create: renglones.map(r => ({
+          productId: r.productId,
+          quantity: r.quantity,
+          ...(r.unlimited ? { unlimited: true } : {}),
         })),
       },
     },
@@ -182,7 +205,7 @@ export async function updateCreditPack(
     maxPerCustomer?: number | null
     displayOrder?: number
     active?: boolean
-    items?: { productId: string; quantity: number }[]
+    items?: RenglonPedido[]
   },
 ) {
   const existing = await prisma.creditPack.findFirst({
@@ -217,6 +240,17 @@ export async function updateCreditPack(
   }
 
   return prisma.$transaction(async tx => {
+    // D679 (W5): el paquete bajo candado ANTES de leer su vigencia y sus renglones. Dos ediciones a la vez (una lo vuelve
+    // Ilimitado, otra le quita la vigencia) se forman: la segunda ve lo que dejó la primera.
+    await tx.$queryRaw`SELECT id FROM "CreditPack" WHERE id = ${id} AND "venueId" = ${venueId} FOR UPDATE`
+    const vigente = await tx.creditPack.findUnique({
+      where: { id },
+      select: { validityDays: true, items: { select: { id: true, productId: true, quantity: true, unlimited: true } } },
+    })
+    const actuales = vigente?.items ?? []
+    const vigencia = data.validityDays !== undefined ? data.validityDays : vigente?.validityDays
+    let quedaIlimitado = actuales.some(item => item.unlimited)
+
     // Update items if provided
     if (data.items) {
       const productIds = data.items.map(i => i.productId)
@@ -229,17 +263,25 @@ export async function updateCreditPack(
         throw new BadRequestError('Uno o mas productos no existen o no estan activos en este venue')
       }
 
+      // D679 (W4): un editor viejo (ninguna llave `unlimited`) no puede cambiar los productos de un paquete con un Ilimitado:
+      // sin la llave, el renglón que entra sería normal y la marca se perdería en silencio.
+      const pedidos = new Set(productIds)
+      const mismosProductos = pedidos.size === actuales.length && actuales.every(item => pedidos.has(item.productId))
+      if (!data.items.some(item => item.unlimited !== undefined) && quedaIlimitado && !mismosProductos) {
+        throw errorIlimitado('CREDIT_UNLIMITED_EDIT_IN_PANEL')
+      }
+
       // Los renglones se concilian en su lugar, nunca se borran y recrean: el saldo de quien ya compró apunta a su renglón
       // (CreditItemBalance.creditPackItemId, ON DELETE RESTRICT) y borrarlo tumbaba con 500 cualquier edición de un paquete
       // vendido (22-nov-2026). Editar cambia lo que se vende de aquí en adelante; lo vendido conserva sus créditos.
-      const actuales =
-        (
-          await tx.creditPack.findUnique({
-            where: { id },
-            select: { items: { select: { id: true, productId: true, quantity: true } } },
-          })
-        )?.items ?? []
-      const pedidos = new Set(productIds)
+      const porProducto = new Map(actuales.map(item => [item.productId, item]))
+      const resueltos = data.items.map(item => {
+        const previo = porProducto.get(item.productId) ?? null
+        return { productId: item.productId, previo, ...renglonResuelto(item, previo) }
+      })
+      quedaIlimitado = resueltos.some(r => r.unlimited)
+      if (quedaIlimitado && !vigencia) throw errorIlimitado('CREDIT_UNLIMITED_NEEDS_VALIDITY')
+
       const sobran = actuales.filter(item => !pedidos.has(item.productId)).map(item => item.id)
       if (sobran.length > 0) {
         // Un producto que sale del paquete: los saldos ya vendidos de ese renglón sólo pierden el enlace (como la entrega
@@ -247,15 +289,21 @@ export async function updateCreditPack(
         await tx.creditItemBalance.updateMany({ where: { creditPackItemId: { in: sobran } }, data: { creditPackItemId: null } })
         await tx.creditPackItem.deleteMany({ where: { id: { in: sobran } } })
       }
-      const porProducto = new Map(actuales.map(item => [item.productId, item]))
-      for (const item of data.items) {
-        const previo = porProducto.get(item.productId)
-        if (!previo) {
-          await tx.creditPackItem.create({ data: { creditPackId: id, productId: item.productId, quantity: item.quantity } })
-        } else if (previo.quantity !== item.quantity) {
-          await tx.creditPackItem.update({ where: { id: previo.id }, data: { quantity: item.quantity } })
+      for (const r of resueltos) {
+        if (!r.previo) {
+          await tx.creditPackItem.create({
+            data: { creditPackId: id, productId: r.productId, quantity: r.quantity, ...(r.unlimited ? { unlimited: true } : {}) },
+          })
+        } else if (r.previo.quantity !== r.quantity || Boolean(r.previo.unlimited) !== r.unlimited) {
+          const cambiaLaMarca = Boolean(r.previo.unlimited) !== r.unlimited
+          await tx.creditPackItem.update({
+            where: { id: r.previo.id },
+            data: { quantity: r.quantity, ...(cambiaLaMarca ? { unlimited: r.unlimited } : {}) },
+          })
         }
       }
+    } else if (quedaIlimitado && !vigencia) {
+      throw errorIlimitado('CREDIT_UNLIMITED_NEEDS_VALIDITY')
     }
 
     return tx.creditPack.update({
@@ -343,7 +391,38 @@ export async function getCustomerPurchases(
     prisma.creditPackPurchase.count({ where }),
   ])
 
-  return { purchases, total, page, limit, totalPages: Math.ceil(total / limit) }
+  // D679 (regla 8): las compras con un Ilimitado traen sus faltas, contadas por RESERVA (una cita de dos servicios es una falta).
+  // Sólo se cuentan: no castigan. Dos agregados sobre las compras de ESTA página.
+  const conIlimitado = purchases.filter(p => p.itemBalances.some(b => b.unlimited)).map(p => p.id)
+  if (conIlimitado.length === 0) return { purchases, total, page, limit, totalPages: Math.ceil(total / limit) }
+  const [noLlego, cancelTarde] = await Promise.all([
+    prisma.creditTransaction.groupBy({
+      by: ['creditPackPurchaseId', 'reservationId'],
+      where: {
+        venueId,
+        creditPackPurchaseId: { in: conIlimitado },
+        type: 'REDEEM',
+        creditItemBalance: { unlimited: true },
+        reservation: { status: 'NO_SHOW' },
+      },
+    }),
+    prisma.creditTransaction.groupBy({
+      by: ['creditPackPurchaseId', 'reservationId'],
+      where: {
+        venueId,
+        creditPackPurchaseId: { in: conIlimitado },
+        type: 'REFUND',
+        reservationId: { not: null },
+        reason: { endsWith: UNLIMITED_LATE_CANCEL_MARK },
+      },
+    }),
+  ])
+  const contar = (filas: { creditPackPurchaseId: string }[], id: string) => filas.filter(f => f.creditPackPurchaseId === id).length
+  const conFaltas = purchases.map(p =>
+    conIlimitado.includes(p.id) ? { ...p, faltas: { noLlego: contar(noLlego, p.id), cancelTarde: contar(cancelTarde, p.id) } } : p,
+  )
+
+  return { purchases: conFaltas, total, page, limit, totalPages: Math.ceil(total / limit) }
 }
 
 export async function getTransactionHistory(
@@ -479,6 +558,8 @@ export async function adjustItemBalance(venueId: string, balanceId: string, quan
 
   if (!balance) throw new NotFoundError('Balance de credito no encontrado')
   if (balance.creditPackPurchase.venueId !== venueId) throw new NotFoundError('Balance de credito no encontrado')
+  // D679 (N4): un Ilimitado no tiene saldo que ajustar (y nunca se enseña su 99,999).
+  if (balance.unlimited) throw errorIlimitado('CREDIT_UNLIMITED_NO_ADJUST')
 
   // Don't allow negative remaining
   if (balance.remainingQuantity + quantity < 0) {
@@ -543,7 +624,9 @@ export async function refundPurchase(venueId: string, purchaseId: string, staffI
     throw new BadRequestError('Esta compra ya fue reembolsada')
   }
 
-  const creditsVoided = purchase.itemBalances.reduce((sum, b) => sum + Math.max(b.remainingQuantity, 0), 0)
+  // D679 (N5): la bitácora suma sólo los saldos normales; un Ilimitado anulado se cuenta aparte, nunca como 99,999 créditos.
+  const creditsVoided = purchase.itemBalances.filter(b => !b.unlimited).reduce((sum, b) => sum + Math.max(b.remainingQuantity, 0), 0)
+  const ilimitadosAnulados = purchase.itemBalances.filter(b => b.unlimited && b.remainingQuantity > 0).length
 
   const result = await prisma.$transaction(async tx => {
     // Zero out all balances
@@ -588,7 +671,7 @@ export async function refundPurchase(venueId: string, purchaseId: string, staffI
     action: 'CREDIT_PACK_PURCHASE_REFUNDED',
     entity: 'CreditPackPurchase',
     entityId: purchaseId,
-    data: { reason, customerId: purchase.customerId, creditsVoided },
+    data: { reason, customerId: purchase.customerId, creditsVoided, ilimitadosAnulados },
   })
 
   return result

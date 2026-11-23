@@ -51,6 +51,9 @@ import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { resolveServicesMany, type ServiceResolvable } from '@/services/reservation/reservation-services.resolver'
 import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 import { fechaHoraDelNegocio, horaQueNoExiste } from '@/utils/fechaHoraDelNegocio'
+import { pasesDeLaReserva, revisarPase, zonaDelNegocio } from '@/services/reservation/creditRedemption.service'
+import { errorIlimitado } from '@/services/credits/ilimitado'
+import { phonesMatch } from '@/utils/phone'
 
 export { enforceBookingWindow } from '@/services/reservation/bookingWindow.service'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow.
@@ -1570,6 +1573,43 @@ export async function updateReservation(
     const newProductIds = productIdentity.productIds
     const newPartySize = data.partySize ?? reservation.partySize
 
+    // D679 (C5, C6): una reserva pagada con un Ilimitado es de su titular, de 1 persona y dentro de la vigencia de cada pase.
+    const pases = await pasesDeLaReserva(tx, venueId, reservationId)
+    if (pases.length > 0) {
+      if (data.guestName !== undefined || data.guestPhone !== undefined || data.guestEmail !== undefined) {
+        const actual = await tx.reservation.findUnique({
+          where: { id: reservationId },
+          select: { guestName: true, guestPhone: true, guestEmail: true },
+        })
+        const igual = (nuevo: string | null | undefined, previo: string | null | undefined) =>
+          (nuevo?.trim() || null) === (previo?.trim() || null)
+        // Reenviar lo mismo (un formulario que manda todo) no es cambiarlo; el teléfono, en cualquier formato.
+        const cambia =
+          (data.guestName !== undefined && !igual(data.guestName, actual?.guestName)) ||
+          (data.guestEmail !== undefined && !igual(data.guestEmail, actual?.guestEmail)) ||
+          (data.guestPhone !== undefined &&
+            !igual(data.guestPhone, actual?.guestPhone) &&
+            !(data.guestPhone && actual?.guestPhone && phonesMatch(data.guestPhone, actual.guestPhone)))
+        if (cambia) throw errorIlimitado('CREDIT_UNLIMITED_TITULAR')
+      }
+      if (newPartySize > 1) throw errorIlimitado('CREDIT_UNLIMITED_ONE_SEAT')
+      if (newStartsAt.getTime() !== reservation.startsAt.getTime()) {
+        const timezone = await zonaDelNegocio(tx, venueId)
+        for (const pase of pases) {
+          await revisarPase(tx, {
+            venueId,
+            customerId: pase.customerId,
+            expiresAt: pase.expiresAt,
+            timezone,
+            startsAt: newStartsAt,
+            classSessionId: null,
+            personas: newPartySize,
+            excludeReservationId: reservationId,
+          })
+        }
+      }
+    }
+
     const { product } = await validateResourceOwnership(tx, venueId, {
       tableId: newTableId,
       productId: newProductId,
@@ -2197,6 +2237,24 @@ async function rescheduleAppointmentWithHold(args: {
       }
     }
 
+    // D679 (C5): cada pase Ilimitado con el que se pagó la cita tiene que seguir vigente a la hora nueva.
+    const pases = await pasesDeLaReserva(tx, venueId, reservation.id)
+    if (pases.length > 0) {
+      const timezone = await zonaDelNegocio(tx, venueId)
+      for (const pase of pases) {
+        await revisarPase(tx, {
+          venueId,
+          customerId: pase.customerId,
+          expiresAt: pase.expiresAt,
+          timezone,
+          startsAt: newStartsAt,
+          classSessionId: null,
+          personas: reservation.partySize,
+          excludeReservationId: reservation.id,
+        })
+      }
+    }
+
     const updated = await tx.reservation.update({
       where: { id: reservation.id },
       data: {
@@ -2523,6 +2581,25 @@ export async function rescheduleClassReservation(args: {
       if (taken.length > 0) {
         const conflicts = taken.flatMap(r => r.spotIds).filter(id => requestedSpotIds.includes(id))
         throw new ConflictError(`Los lugares ${conflicts.join(', ')} ya estan reservados`)
+      }
+    }
+
+    // D679 (C4): con un Ilimitado, la clase nueva cumple las reglas del pase: 1 lugar, vigente y sin otro lugar suyo ahí.
+    const pases = await pasesDeLaReserva(tx, venueId, reservationId)
+    if (pases.length > 0) {
+      if (requestedSpotIds.length > 1) throw errorIlimitado('CREDIT_UNLIMITED_ONE_SEAT')
+      const timezone = await zonaDelNegocio(tx, venueId)
+      for (const pase of pases) {
+        await revisarPase(tx, {
+          venueId,
+          customerId: pase.customerId,
+          expiresAt: pase.expiresAt,
+          timezone,
+          startsAt: newSession.startsAt,
+          classSessionId: newClassSessionId,
+          personas: reservation.partySize,
+          excludeReservationId: reservationId,
+        })
       }
     }
 

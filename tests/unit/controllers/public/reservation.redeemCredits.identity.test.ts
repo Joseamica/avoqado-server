@@ -16,7 +16,12 @@ function mkTx(opts: { customerByContact?: any; customerById?: any; purchaseCusto
         return opts.customerByContact ?? null
       }),
     },
-    $queryRaw: jest.fn(async () => [{ id: 'bal-1', remainingQuantity: 5, creditPackPurchaseId: 'pur-1', productId: 'prod-1' }]),
+    // D679: el canje toma primero la reserva (viva) y luego el saldo.
+    $queryRaw: jest.fn(async (sql: TemplateStringsArray) =>
+      sql.join('').includes('"Reservation"')
+        ? [{ status: 'CONFIRMED', startsAt: new Date(), partySize: 1, classSessionId: null }]
+        : [{ id: 'bal-1', remainingQuantity: 5, creditPackPurchaseId: 'pur-1', productId: 'prod-1', unlimited: false }],
+    ),
     creditPackPurchase: {
       findUnique: jest.fn(async () => ({ status: 'ACTIVE', expiresAt: null, customerId: opts.purchaseCustomerId })),
       update: jest.fn(async () => ({})),

@@ -144,4 +144,48 @@ describe('Fase 9 · candados del aviso nocturno', () => {
       }),
     )
   })
+
+  // D679 (N9): un Ilimitado no cuenta para «pocas clases»; los demás renglones del paquete sí.
+  it('paquete mixto (Ilimitado + 2 shakes, queda 1 shake) sí avisa pocas clases; un Ilimitado solo no', async () => {
+    prismaMock.venue.findMany.mockResolvedValue([{ id: 'venue-1', slug: 'mindform' }] as any)
+    const lejos = new Date(now.getTime() + 60 * 86_400_000)
+    prismaMock.creditPackPurchase.findMany.mockResolvedValue([
+      {
+        id: 'p-mixto',
+        customerId: 'cust-1',
+        expiresAt: lejos,
+        creditPack: { name: 'Ilimitado + shakes' },
+        itemBalances: [
+          { remainingQuantity: 99999, unlimited: true },
+          { remainingQuantity: 1, unlimited: false },
+        ],
+      },
+      {
+        id: 'p-solo',
+        customerId: 'cust-2',
+        expiresAt: lejos,
+        creditPack: { name: 'Ilimitado' },
+        itemBalances: [{ remainingQuantity: 99996, unlimited: true }],
+      },
+    ] as any)
+
+    const { enqueueNightlyOutreach } = await import('@/services/reservation/kioskOutreach.service')
+    const out = await enqueueNightlyOutreach({ now })
+
+    expect(out).toEqual({ enqueued: 1, skipped: 1 })
+    expect(prismaMock.kioskOutreachOutbox.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          customerId: 'cust-1',
+          event: 'CREDITS_RUNNING_OUT',
+          payload: expect.objectContaining({ remaining: 1 }),
+        }),
+      }),
+    )
+    expect(prismaMock.creditPackPurchase.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({ itemBalances: { select: { remainingQuantity: true, unlimited: true } } }),
+      }),
+    )
+  })
 })
