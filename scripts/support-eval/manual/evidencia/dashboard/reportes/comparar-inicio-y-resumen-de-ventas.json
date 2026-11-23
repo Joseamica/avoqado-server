@@ -1,7 +1,7 @@
 {
   "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
   "sourceRepo": "avoqado-web-dashboard",
-  "sourceRef": "7d96242442400aba5298cb3e5a79ce50c0386214",
+  "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0",
   "version": "main",
   "pasos": [
     {
@@ -61,7 +61,7 @@
     {
       "paso": 2,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 2110,
+      "linea": 2166,
       "cita": "label={t('salesSummary.rows.grossSales')}"
     },
     {
@@ -97,7 +97,7 @@
     {
       "paso": 3,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 1930,
+      "linea": 1984,
       "cita": "(selectedMetrics.includes('deferredSales') || (data.summary.unpaidOrders ?? 0) > 0)"
     },
     {
@@ -121,7 +121,7 @@
     {
       "paso": 3,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 1587,
+      "linea": 1640,
       "cita": "onClick={applyMetrics}"
     },
     {
@@ -139,7 +139,7 @@
     {
       "paso": 4,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 2019,
+      "linea": 2075,
       "cita": "<p className=\"text-sm text-muted-foreground mb-1\">{t('salesSummary.totalSales')}</p>"
     },
     {
@@ -151,7 +151,7 @@
     {
       "paso": 4,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 2211,
+      "linea": 2253,
       "cita": "label={t('salesSummary.rows.tenderCommissions')}"
     },
     {

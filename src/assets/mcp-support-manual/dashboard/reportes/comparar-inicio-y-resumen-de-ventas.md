@@ -6,7 +6,7 @@ category: reportes
 task: comparar-inicio-y-resumen-de-ventas
 requiredPermissions: []
 sourceRepo: avoqado-web-dashboard
-sourceRef: 7d96242442400aba5298cb3e5a79ce50c0386214
+sourceRef: aa8a35a4edcec79df6fb8746d4b1e11d0be803e0
 keywords:
   - no me cuadra
   - el panel y la app no cuadran
@@ -28,7 +28,7 @@ Para *Inicio* necesitas permiso para ver el inicio y las analíticas; para *Repo
 
 1. En *Inicio*, *Ventas netas* suma lo que se cobró en el periodo, sin propinas, en el día del cobro. Los reembolsos no se restan ahí.
 2. En *Reportes* › *Resumen de Ventas*, *Ventas brutas* suma las cuentas ya cobradas (artículos y *Cargos por servicio*) el día en que se abrieron. *Ventas netas* les resta *Descuentos* y *Devoluciones*.
-3. Las cuentas abiertas o pagadas a medias no son venta: van abajo, en *Aparte*, como *Sin cobrar*, con cuántas son y lo que deben sin propina. Si no sale, toca *Métricas*, marca *Sin cobrar* y *Aplicar*.
+3. Las cuentas abiertas o pagadas a medias no son venta: salen en *Sin cobrar* (en *Resumen*, abajo, en *Aparte*), con cuántas son y lo que deben sin propina. Si no sale, toca *Métricas*, marca *Sin cobrar* y *Aplicar*.
 4. El número grande, *Neto cobrado*, es *Ventas netas* más propinas, menos *Comisiones de plataforma* y *Comisiones de terceros* (Rappi, Uber Eats, DiDi o un tipo de pago con comisión).
 
 ## Problemas frecuentes
