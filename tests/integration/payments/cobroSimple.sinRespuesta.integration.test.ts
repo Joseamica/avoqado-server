@@ -99,6 +99,8 @@ afterEach(async () => {
     p.resolve({ requestId: id, status: 'timeout' })
   }
   svc.preguntasSinFinal.clear()
+  svc.activasTrasPregunta?.clear()
+  svc.sinConexionVista?.clear()
   delete process.env.TERMINAL_PAYMENT_SIN_RESPUESTA_MS
   await prisma.notification.deleteMany({ where: { venueId: f.venueId } })
   await prisma.activityLog.deleteMany({ where: { venueId: f.venueId } })
@@ -531,5 +533,53 @@ describe('Codex S1 r2', () => {
     await avisarAprobadoTardioDeLaSolicitud({ requestId: randomUUID(), venueId: f.venueId, paymentId: aprobado.id, orderId: tardia.id, desde })
     const aviso = await prisma.notification.findFirst({ where: { venueId: f.venueId, recipientId: duenaId } })
     expect(aviso?.message).toContain(duplicado.orderNumber)
+  })
+
+  it('R2-7 · un ACTIVE con la base 8 s atrasada o adelantada no corta el cobro antes de 150 s', async () => {
+    const s = await f.solicitud({ acknowledgedAt: hace(61_000) })
+    const ahora = new Date()
+    await terminalPaymentService.preguntarPorSolicitudesSinFinal(ahora)
+    await svc.handleProbeResultFromSocket({ requestId: s.requestId, disposition: 'ACTIVE', executionAlive: true }, tpv())
+    // El sello de la base, 8 s ATRASADO respecto al servidor.
+    await prisma.terminalPaymentRequest.update({ where: { id: s.id }, data: { probeActiveAt: new Date(ahora.getTime() - 8_000) } })
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date(ahora.getTime() + 30_000))).toEqual({ entradas: 0, preguntas: 1 })
+    await svc.handleProbeResultFromSocket({ requestId: s.requestId, disposition: 'ACTIVE', executionAlive: true }, tpv())
+    // …y ADELANTADO.
+    await prisma.terminalPaymentRequest.update({ where: { id: s.id }, data: { probeActiveAt: new Date(ahora.getTime() + 38_000) } })
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date(ahora.getTime() + 60_000))).toEqual({ entradas: 0, preguntas: 1 })
+    expect(await fila(s.requestId)).toMatchObject({ status: 'SENT' })
+  })
+
+  it('R2-7 · un cancel del POS entre la lectura del barrido y su escritura: el barrido no la mete a «sin respuesta»', async () => {
+    const s = await f.solicitud({ acknowledgedAt: hace(151_000) })
+    const original = svc.entrarSinRespuestaYProgramar.bind(svc)
+    const espia = jest.spyOn(svc, 'entrarSinRespuestaYProgramar').mockImplementationOnce(async (...args: unknown[]) => {
+      await prisma.terminalPaymentRequest.update({
+        where: { id: s.id },
+        data: { status: 'CANCEL_REQUESTED', cancelRequestedAt: new Date() },
+      })
+      return original(...args)
+    })
+    try {
+      expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date())).toEqual({ entradas: 0, preguntas: 0 })
+      expect(await fila(s.requestId)).toMatchObject({ status: 'CANCEL_REQUESTED', noResponseAt: null })
+    } finally {
+      espia.mockRestore()
+    }
+  })
+
+  it('R2-7 · primera pasada (tras un reinicio) con la terminal todavía sin socket no entra; si vuelve, nada; si ≥ 10 s después sigue fuera, TERMINAL_GONE', async () => {
+    const s = await f.solicitud({ acknowledgedAt: hace(61_000) })
+    const ahora = new Date()
+    conectada = false
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(ahora)).toEqual({ entradas: 0, preguntas: 0 })
+    expect(await fila(s.requestId)).toMatchObject({ status: 'SENT' })
+    conectada = true
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date(ahora.getTime() + 15_000))).toMatchObject({ entradas: 0 })
+    conectada = false
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date(ahora.getTime() + 20_000))).toMatchObject({ entradas: 0 })
+    expect(await fila(s.requestId)).toMatchObject({ status: 'SENT' })
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date(ahora.getTime() + 31_000))).toMatchObject({ entradas: 1 })
+    expect(await fila(s.requestId)).toMatchObject({ status: 'UNKNOWN', resultJson: expect.objectContaining({ noChargeCause: 'TERMINAL_GONE' }) })
   })
 })

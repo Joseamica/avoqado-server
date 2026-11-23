@@ -62,6 +62,8 @@ export async function entrarSinRespuesta(
      * (el tope de 30 s). Lo usan el vigía y la revisión del cancel; una terminal que se fue (`TERMINAL_GONE`) no lo respeta.
      */
     respetarActiveHasta?: Date
+    /** Codex S1 r2 (R2-7): sólo desde `SENT` (el barrido de las acusadas sin final: un cancel del POS en medio no entra por ahí). */
+    soloDesdeSent?: boolean
   },
 ): Promise<boolean> {
   const sobre = {
@@ -79,7 +81,11 @@ export async function entrarSinRespuesta(
         "resultJson" = COALESCE("resultJson", '{}'::jsonb) || ${JSON.stringify(sobre)}::jsonb,
         "updatedAt" = (NOW() AT TIME ZONE 'UTC')
     WHERE "requestId" = ${input.requestId} AND "venueId" = ${input.venueId}
-      AND ("status" IN ('PENDING', 'SENT', 'CANCEL_REQUESTED') OR ("status" = 'UNKNOWN' AND "noResponseAt" IS NULL))
+      AND ${
+        input.soloDesdeSent
+          ? Prisma.sql`"status" = 'SENT'`
+          : Prisma.sql`("status" IN ('PENDING', 'SENT', 'CANCEL_REQUESTED') OR ("status" = 'UNKNOWN' AND "noResponseAt" IS NULL))`
+      }
       ${
         input.respetarActiveHasta
           ? Prisma.sql`AND NOT ("status" = 'CANCEL_REQUESTED' AND "cancelDisposition" IS NOT DISTINCT FROM 'ACTIVE'
