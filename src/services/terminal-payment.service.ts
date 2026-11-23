@@ -8484,6 +8484,7 @@ class TerminalPaymentService {
       respetarActiveHasta?: Date
       soloDesde?: 'SENT' | 'PENDING'
       probeActiveAtLeido?: Date | null
+      entregasLeidas?: number
     } = {},
   ): Promise<boolean> {
     const entro = await entrarSinRespuesta(prisma, {
@@ -8496,6 +8497,7 @@ class TerminalPaymentService {
       respetarActiveHasta: opciones.respetarActiveHasta,
       soloDesde: opciones.soloDesde,
       probeActiveAtLeido: opciones.probeActiveAtLeido,
+      entregasLeidas: opciones.entregasLeidas,
     })
     if (!entro) return false
     logger.warn('⏳ [TerminalPayment] Sin respuesta: se espera el aviso del banco a lo más 10 s y luego queda «no cobrado»', {
@@ -8958,7 +8960,7 @@ class TerminalPaymentService {
       where: { status: TerminalPaymentRequestStatus.PENDING, acknowledgedAt: null, createdAt: { lte: new Date(corte) } },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: 50,
-      select: { requestId: true, venueId: true, terminalId: true, deliveryProvenance: true },
+      select: { requestId: true, venueId: true, terminalId: true, deliveryProvenance: true, deliveryAttempts: true },
     })
     let entradas = 0
     for (const f of filas) {
@@ -8972,6 +8974,8 @@ class TerminalPaymentService {
             terminalId: f.terminalId,
             failureCode: 'ACK_TIMEOUT',
             soloDesde: 'PENDING',
+            // R4-B: sólo si no hubo otra entrega desde esta lectura (cada entrega suma `deliveryAttempts` en `recordDelivery`).
+            entregasLeidas: f.deliveryAttempts,
             emitirCancel: true,
             sobre: { errorMessage: 'El cobro no llegó a la terminal. Confirmando…', origin: 'SERVER' },
           })

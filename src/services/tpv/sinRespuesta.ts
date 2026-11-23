@@ -75,6 +75,8 @@ export async function entrarSinRespuesta(
     soloDesde?: 'SENT' | 'PENDING'
     /** Codex S1 r3 (R3-9): sólo si `probeActiveAt` sigue siendo éste (un ACTIVE sellado después de la lectura gana). */
     probeActiveAtLeido?: Date | null
+    /** Codex S1 r4 (R4-B): sólo si `deliveryAttempts` sigue siendo éste (una reentrega registrada después de la lectura gana). */
+    entregasLeidas?: number
   },
 ): Promise<boolean> {
   const sobre = {
@@ -98,6 +100,7 @@ export async function entrarSinRespuesta(
           : Prisma.sql`("status" IN ('PENDING', 'SENT', 'CANCEL_REQUESTED') OR ("status" = 'UNKNOWN' AND "noResponseAt" IS NULL))`
       }
       ${input.probeActiveAtLeido !== undefined ? Prisma.sql`AND "probeActiveAt" IS NOT DISTINCT FROM ${utcTsOrNull(input.probeActiveAtLeido)}` : Prisma.empty}
+      ${input.entregasLeidas !== undefined ? Prisma.sql`AND "deliveryAttempts" = ${input.entregasLeidas}` : Prisma.empty}
       ${
         input.respetarActiveHasta
           ? Prisma.sql`AND NOT ("status" = 'CANCEL_REQUESTED' AND "cancelDisposition" IS NOT DISTINCT FROM 'ACTIVE'

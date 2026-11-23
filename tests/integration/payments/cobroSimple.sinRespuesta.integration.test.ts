@@ -649,4 +649,22 @@ describe('Codex S1 r2', () => {
     expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date())).toMatchObject({ entradas: 0 })
     expect(await fila(reciente.requestId)).toMatchObject({ status: 'PENDING' })
   })
+
+  it('R4-B · una reentrega registrada entre la lectura del barrido de PENDING y su UPDATE: no entra, y su acuse la pasa a SENT', async () => {
+    const s = await f.solicitud({ status: 'PENDING', acknowledgedAt: null, createdAt: hace(40_000), deliveryProvenance: entrega('DURABLE', hace(31_000)), deliveryAttempts: 1 })
+    const original = svc.entrarSinRespuestaYProgramar.bind(svc)
+    const espia = jest.spyOn(svc, 'entrarSinRespuestaYProgramar').mockImplementationOnce(async (...args: unknown[]) => {
+      // La TPV reconectó: el servidor registra la reentrega (y la emite) mientras el barrido ya decidió con la lectura vieja.
+      expect(await svc.recordDelivery(s.requestId, f.venueId, { terminalPaymentAckVersion: 1 }, SOCKET, true)).toBe(true)
+      return original(...args)
+    })
+    try {
+      expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date())).toMatchObject({ entradas: 0 })
+    } finally {
+      espia.mockRestore()
+    }
+    expect(await fila(s.requestId)).toMatchObject({ status: 'PENDING', noResponseAt: null })
+    expect(await svc.registrarAckDeReplay(s.requestId, f.venueId)).toBe(1)
+    expect(await fila(s.requestId)).toMatchObject({ status: 'SENT' })
+  })
 })
