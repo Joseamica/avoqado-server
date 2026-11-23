@@ -229,6 +229,7 @@ afterEach(async () => {
     'SUPPORT_HANDOFF_EMAIL_TO',
     'SUPPORT_HANDOFF_PHONE_DAILY_CAP',
     'SUPPORT_HANDOFF_DAILY_CAP',
+    'SUPPORT_PUBLIC_HELP_ENABLED',
   ])
     delete process.env[key]
   await prisma.supportWhatsappLink.deleteMany({ where: { staffId } })
@@ -411,6 +412,8 @@ describe('PERSONA (router)', () => {
     ['fits', false],
     ['does not fit', true],
   ])("an ineligible phone gets today's summary plus how to link if it %s; FIXED and no row", async (_label, long) => {
+    // With public help off, as before it (public-help.integration.test.ts covers it on).
+    process.env.SUPPORT_PUBLIC_HELP_ENABLED = 'false'
     // Long titles fill the summary until the link no longer fits in 1,500. Measured with the real buildHumanSummary: 2 of
     // the 3 lines enter; repeat(34) = 1,343 characters, 1,527 with the link (repeat(28) = 1,371 fits; repeat(33) = 1,501).
     const titled = (n: number) =>
@@ -466,7 +469,8 @@ describe('PERSONA (router)', () => {
     expect(order).toEqual(['snapshot', 'day lock'])
   })
 
-  it('an unknown phone never creates a notice (router STATIC and worker fixedReply)', async () => {
+  it('public help off: an unknown phone never creates a notice (router STATIC and worker fixedReply)', async () => {
+    process.env.SUPPORT_PUBLIC_HELP_ENABLED = 'false'
     const event = input('PERSONA', unknownPhone)
     expect(await tryRouteSupport(event)).toBe('QUEUED')
     expect(await reply(event)).toMatchObject({ answer: SUPPORT_UNREGISTERED, outcome: null })
@@ -676,7 +680,8 @@ describe('worker', () => {
     expect(await notices()).toEqual([expect.objectContaining({ reason: 'OLD_VERSION' })])
   })
 
-  it('old version from an unknown phone: no offer', async () => {
+  it('public help off: old version from an unknown phone: no offer', async () => {
+    process.env.SUPPORT_PUBLIC_HELP_ENABLED = 'false'
     // Registered when the message was queued, unknown by the time the answer is saved.
     const { message } = await ask([tipQuestion], '¿Cómo agrego propina?', {
       from: lonePhone,
