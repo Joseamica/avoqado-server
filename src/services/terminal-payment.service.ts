@@ -500,7 +500,7 @@ const IN_FLIGHT: TerminalPaymentRequestStatus[] = [
 /**
  * 🔴 Cobro simple · S1 (22-nov): la RANURA de la terminal sólo existe mientras el cobro está EN VUELO (= el índice parcial de la
  * migración `20261122230000`). Antes también la retenía UNKNOWN («nunca liberar a ciegas»), y eso es lo que trabó terminales 25 y
- * 8 min en Testarudo. Ahora una duda no aparta la terminal: la espera de ≤ 10 s es de ESA cuenta (`SIN_DESENLACE`).
+ * 8 min en un negocio. Ahora una duda no aparta la terminal: la espera de ≤ 10 s es de ESA cuenta (`SIN_DESENLACE`).
  */
 const SLOT_HELD: TerminalPaymentRequestStatus[] = IN_FLIGHT
 /** S1: sin desenlace = en vuelo o en sus 10 s de «sin respuesta» (UNKNOWN). Lo que cerca la CUENTA y lo que admite un hecho tardío. */

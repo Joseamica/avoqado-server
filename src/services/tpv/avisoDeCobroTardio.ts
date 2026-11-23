@@ -116,7 +116,7 @@ export async function avisarCobroTardioAlCajero(ctx: {
   }
 }
 
-/** Cómo se devuelve un cobro de más, por procesador (diseño §6; Norman 19-nov para AngelPay; Blumon pide la tarjeta presente). */
+/** Cómo se devuelve un cobro de más, por procesador (diseño §6; AngelPay, 19-nov; Blumon pide la tarjeta presente). */
 export function comoDevolverlo(procesador: 'ANGELPAY' | 'BLUMON' | null): string {
   if (procesador === 'ANGELPAY')
     return 'Para devolverlo: cancélalo desde la terminal el mismo día antes de las 22:59; después, hazle una devolución desde la terminal o con soporte de AngelPay.'

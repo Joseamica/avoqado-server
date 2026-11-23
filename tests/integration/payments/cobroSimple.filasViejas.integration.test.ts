@@ -3,7 +3,7 @@
  *
  * S1.4: al publicar S1, lo que quedó «en duda» con las reglas viejas (UNKNOWN sin reloj, `TIMED_OUT` sin código o soltada por
  * política) lo cierra el vigía con la MISMA regla de los 10 s, con asiento `historico: true`. Medido el 22-nov en producción (Q1): 1
- * fila (Testarudo, `TIMED_OUT/AUTO_RELEASED`, 8-sep, $308). Nunca reescribe una fila ya final.
+ * fila (de un negocio, `TIMED_OUT/AUTO_RELEASED`, 8-sep). Nunca reescribe una fila ya final.
  * S1.5: el rechazo del banco por aviso de AngelPay es un CAS directo a `FAILED/BANK_DECLINED`, también con la solicitud en vuelo,
  * con dos guardas: el intento B abierto y el aprobado ya conocido.
  */
