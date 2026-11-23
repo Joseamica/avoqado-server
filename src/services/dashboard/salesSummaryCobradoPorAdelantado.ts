@@ -6,9 +6,9 @@
  *   El paquete vendido en la caja pasa por una cuenta (`fulfillCreditPacksForOrder`, `sellPackInPerson`) y ya está en ventas;
  * - el depósito de una reserva (`Reservation.depositAmount`, cobrado por Stripe): sólo marca `depositStatus = PAID` y `depositPaidAt`.
  *
- * ¿Es venta el día que se compra o cuando se usa? ¿El depósito es venta o anticipo? Lo decide el founder (promesa del carril G).
- * Mientras, como «Tarjetas de regalo cargadas» y como el «Deferred» de Square y Toast: renglones informativos aparte, por la fecha en
- * que se cobraron, FUERA de ventas y de «Neto cobrado».
+ * Son anticipos (decisión del founder del 22-nov, hz:fefa11b6:D5 «A»): como «Tarjetas de regalo cargadas» y como el «Deferred» de
+ * Square y Toast, renglones informativos aparte, por la fecha en que se cobraron, FUERA de ventas y de «Neto cobrado». Contarlos como
+ * venta al usarse (la clase tomada, la reserva que llega) es un proyecto aparte.
  *
  * - Paquetes: en pesos; los de otra moneda aparte, nunca sumados (Codex r2 #5). Por `purchasedAt`, la hora en que Avoqado recibió la confirmación del pago (el aviso de Stripe llega segundos después;
  *   si tarda, puede caer al día siguiente: no se guarda la hora del cargo, Codex r1 #8). Todos los estados: el «reembolsado» del
