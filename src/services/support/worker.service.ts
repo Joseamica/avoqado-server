@@ -59,10 +59,10 @@ import { resolveRegisteredSupportPhone } from './registeredPhone.service'
 import {
   addPublicStrike,
   clearPublicStrikes,
-  forgetPublicConversation,
   isPublicPaused,
   publicDayKey,
   publicDaySpent,
+  refundPublicMessage,
 } from './publicHelp.service'
 import { buildHumanSummary } from './humanSummary.service'
 import {
@@ -388,6 +388,8 @@ export async function prepareSupportAnswer(
             }
           : { status: 'CANCELLED', claimToken: null, leaseUntil: null },
       })
+      // Ended in silence: its place in the caps of public help comes back (nothing, if it was never counted there).
+      if (!first) await refundPublicMessage(tx, conversation.receiverId, conversation.phone, message.createdAt)
       return first ? ('READY' as const) : ('CANCELLED' as const)
     })
   // Public help (an unknown phone): what its state says instead of an answer; null = it is answered. Off or not public: the fixed
@@ -396,7 +398,10 @@ export async function prepareSupportAnswer(
   const publicStop = async (spent = false): Promise<'READY' | 'CANCELLED' | null> => {
     if (!isSupportPublicHelpEnabled() || conversation.mode !== 'PUBLIC') return fixedReply()
     if (await isPublicPaused(prisma, conversation.receiverId, conversation.phone, clock())) {
-      await completeClaim(claim, { status: 'CANCELLED' }, clock())
+      await prisma.$transaction(async tx => {
+        if (await completeClaim(claim, { status: 'CANCELLED' }, clock(), tx))
+          await refundPublicMessage(tx, conversation.receiverId, conversation.phone, message.createdAt)
+      })
       return 'CANCELLED'
     }
     const ai = getSupportAiConfig()
@@ -409,16 +414,6 @@ export async function prepareSupportAnswer(
     const stop = await publicStop()
     if (stop) return stop
     publicHelp = true
-  } else if (isSupportFreeTextEnabled() && conversation.mode === 'PUBLIC')
-    // Answered as registered (its answer may cite the internal manual): public help no longer keeps using this conversation.
-    await forgetPublicConversation(prisma, conversation.receiverId, conversation.phone, conversation.id)
-  // Public help never shows a page of the internal manual, not even one a registered person of this phone got in this same
-  // conversation before (a message prepared in public right after losing the registration). Anything that is not a public
-  // guide today counts as internal: a retired page included.
-  let publicIds: Set<string> | undefined
-  const citesInternal = (sourceIds: string[]) => {
-    publicIds ??= new Set(library().flatMap(g => (g.internal ? [] : [g.id])))
-    return guideIdsOf(sourceIds).some(id => !publicIds!.has(id))
   }
   // A model call that could not start: the message may have expired, lost its registration or its personal context.
   // null = the message is still current (a hybrid call 2 or 3 then answers with the literal guide).
@@ -524,12 +519,7 @@ export async function prepareSupportAnswer(
         // with up to three AI calls could leave it out.
         include: { attempts: { where: { kind: 'SEND', state: 'UNKNOWN' }, take: 1 } },
       })
-      if (
-        !previous ||
-        previous.retryOfId ||
-        (publicHelp && citesInternal(previous.sourceIds)) ||
-        (await prisma.supportMessage.findUnique({ where: { retryOfId: previous.id } }))
-      )
+      if (!previous || previous.retryOfId || (await prisma.supportMessage.findUnique({ where: { retryOfId: previous.id } })))
         return save(`No hay otra consulta incierta que pueda repetir. Se permite un solo reintento por pregunta. ${SUPPORT_CONTACT}`)
       const attached = await prisma.$transaction(async tx => {
         if (!(await readCurrentClaim(tx, claim, clock()))) return false
@@ -580,7 +570,7 @@ export async function prepareSupportAnswer(
         initial: initial.fingerprint,
         save,
         notStarted,
-        publicHelp: publicHelp ? { stop: () => publicStop(true), citesInternal } : undefined,
+        publicHelp: publicHelp ? { stop: () => publicStop(true) } : undefined,
       })
     const result = await searchVerifiedHelp(
       {
@@ -730,8 +720,8 @@ async function prepareHybridAnswer(job: {
   initial: string
   save: (answer: string, sourceIds?: string[], fingerprint?: string, mark?: AnswerMark) => Promise<'READY' | 'CANCELLED'>
   notStarted: () => Promise<Prepared | null>
-  /** Public help (an unknown phone): its state check and the internal-page test of prepareSupportAnswer. */
-  publicHelp?: { stop: () => Promise<Prepared | null>; citesInternal: (sourceIds: string[]) => boolean }
+  /** Public help (an unknown phone): its state check, for a model call that was refused or could not start. */
+  publicHelp?: { stop: () => Promise<Prepared | null> }
 }): Promise<Prepared> {
   const { claim, message, dependencies, clock, initial, save, notStarted, publicHelp } = job
   const conversation = message.conversation
@@ -765,10 +755,7 @@ async function prepareHybridAnswer(job: {
         take: 4,
         select: { body: true, answer: true, sourceIds: true, outcome: true, handoffOffered: true, purpose: true, dataCapability: true },
       })
-    )
-      // Public help: an answer with a page of the internal manual (given while this phone was registered) never reaches the model.
-      .filter(p => !publicHelp?.citesInternal(p.sourceIds))
-      .map(p => (p.purpose === 'DATA' ? { ...p, answer: supportDataHistoryMark(labelOf(p.dataCapability ?? '')) } : p))
+    ).map(p => (p.purpose === 'DATA' ? { ...p, answer: supportDataHistoryMark(labelOf(p.dataCapability ?? '')) } : p))
     // Same context as the first read. A revoked link or a lost venue (readSupportContext or getUserAccess throw) is a change.
     const unchanged = async (current: SupportConversation, db?: Prisma.TransactionClient) => {
       try {
@@ -877,16 +864,24 @@ async function prepareHybridAnswer(job: {
           // Registered meanwhile: no strike (and nothing it queued as registered is cancelled).
           const registered = (await resolveRegisteredSupportPhone(conversation.phone, tx)).registered
           const days = registered ? 0 : await addPublicStrike(tx, conversation.receiverId, conversation.phone, clock())
-          if (days)
-            await tx.supportMessage.updateMany({
+          if (days) {
+            const silenced = await tx.supportMessage.findMany({
               where: {
                 conversationId: current.conversationId,
                 purpose: 'HELP',
                 sequence: { gt: current.sequence },
                 status: { in: ['QUEUED', 'ANSWER_READY', 'AI_UNKNOWN'] },
               },
+              select: { id: true, createdAt: true },
+              take: 100,
+            })
+            await tx.supportMessage.updateMany({
+              where: { id: { in: silenced.map(m => m.id) } },
               data: { status: 'CANCELLED', claimToken: null, leaseUntil: null },
             })
+            // They were counted at the door and never answered: their places come back.
+            for (const m of silenced) await refundPublicMessage(tx, conversation.receiverId, conversation.phone, m.createdAt)
+          }
           const answer = days ? supportPublicPause(days) : text
           const patch = { status: 'ANSWER_READY' as const, answer, sourceIds: [], accessFingerprint: final.fingerprint }
           if (!(await completeAnswer(tx, claim, current, patch, { outcome: 'FIXED' }, clock()))) throw new ClaimLost()
@@ -898,8 +893,7 @@ async function prepareHybridAnswer(job: {
       }
     }
 
-    // Public help: only the public guides (never the internal manual).
-    const library = (dependencies.library ?? loadSupportLibrary()).filter(g => !publicHelp || !g.internal)
+    const library = dependencies.library ?? loadSupportLibrary()
     // Through finish, like any «no encontré»: two in a row offer a person (T5-c2).
     if (!library.length) return finish([], () => SUPPORT_HYBRID_UNKNOWN, 'UNKNOWN')
     const config = getSupportAiConfig()
@@ -927,7 +921,7 @@ async function prepareHybridAnswer(job: {
             select: { answer: true, sourceIds: true },
           })
         : null
-    const quoted = quotedMessage && !publicHelp?.citesInternal(quotedMessage.sourceIds) ? (quotedMessage.answer ?? undefined) : undefined
+    const quoted = quotedMessage?.answer ?? undefined
     const { history, clarifiedTwice } = hybridHistory(previous, library)
     // Arriba del tope, entender ve las mejores para la plática; siempre las de las dos últimas respuestas y la citada.
     const candidates = topSupportCandidates(scoped.guides, {

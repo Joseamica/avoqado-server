@@ -81,30 +81,10 @@ export async function countPublicMessage(db: Prisma.TransactionClient, receiverI
   return null
 }
 
-/**
- * La plática que la ayuda pública abrió o ya usó. Una que no la trae se usó mientras el número era de una cuenta (sus respuestas
- * pueden citar el manual interno): el router la cierra antes de seguir en público. Una respuesta a un registrado la borra.
- */
-const conversationKey = (receiverId: string, phone: string, conversationId: string) =>
-  control(receiverId, phone, `PUBLIC_CONV:${conversationId}`)
-export async function isPublicConversation(db: Prisma.TransactionClient, receiverId: string, phone: string, conversationId: string) {
-  return !!(await db.supportBudget.findUnique({
-    where: { key: conversationKey(receiverId, phone, conversationId) },
-    select: { key: true },
-  }))
-}
-export async function markPublicConversation(
-  db: Prisma.TransactionClient,
-  receiverId: string,
-  phone: string,
-  conversationId: string,
-  now: Date,
-) {
-  const key = conversationKey(receiverId, phone, conversationId)
-  await db.supportBudget.upsert({ where: { key }, create: { key, windowStart: now }, update: {} })
-}
-export async function forgetPublicConversation(db: Prisma.TransactionClient, receiverId: string, phone: string, conversationId: string) {
-  await db.supportBudget.deleteMany({ where: { key: conversationKey(receiverId, phone, conversationId) } })
+/** Capa 1: un mensaje que se contó al admitirlo y que el worker termina en silencio devuelve su lugar (en las ventanas en que contó). */
+export async function refundPublicMessage(db: Prisma.TransactionClient, receiverId: string, phone: string, countedAt: Date) {
+  for (const cap of publicPhoneCaps(receiverId, phone, countedAt))
+    await db.supportBudget.updateMany({ where: { key: cap.key, callCount: { gt: 0 } }, data: { callCount: { decrement: 1 } } })
 }
 /** true sólo la primera vez en esa ventana: el aviso del tope sale una vez y luego hay silencio. */
 export async function takePublicLimitNotice(

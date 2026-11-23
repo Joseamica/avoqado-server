@@ -19,15 +19,7 @@ import {
 } from '@/config/supportWhatsapp'
 import { recordSupportEvent, requestSupportHandoff } from './handoff.service'
 import { normalizeAppVersion } from './deviceContext.service'
-import {
-  countPublicMessage,
-  forgetPublicConversation,
-  isPublicConversation,
-  isPublicPaused,
-  markPublicConversation,
-  mexicoDay,
-  takePublicLimitNotice,
-} from './publicHelp.service'
+import { countPublicMessage, isPublicPaused, mexicoDay, takePublicLimitNotice } from './publicHelp.service'
 import {
   SUPPORT_ASK_APP,
   SUPPORT_CONTACT,
@@ -383,17 +375,14 @@ export async function decideSupportAdmission(
   // SALIR must always close, so it never counts toward or waits on the cap.
   if (command !== 'SALIR' && (await overMinuteCap(tx, input, now))) return { route: 'IGNORED', registered: false }
   const { registered, soleStaffId } = await resolveRegisteredSupportPhone(input.phone, tx)
-  if (registered) {
-    // A registered answer may cite the internal manual: this conversation is no longer one public help can keep using.
-    if (conversation && !ignoredType(input.type)) await forgetPublicConversation(tx, input.receiverId, input.phone, conversation.id)
-    return { route: 'SUPPORT', registered, soleStaffId }
-  }
+  if (registered) return { route: 'SUPPORT', registered, soleStaffId }
   // Public help (founder, 22-nov): an unknown phone talks like anyone else, within its caps. The day's US$ only stops what would
   // use the model, in the worker (the fixed message, once a day): the notice, the app menu and «persona» keep working.
   if (isSupportPublicHelpEnabled()) {
     // Paused (three strikes): nothing is answered, SALIR included, so the pause notice is never cancelled before it goes out.
     if (await isPublicPaused(tx, input.receiverId, input.phone, now)) return { route: 'IGNORED', registered }
-    if (command === 'SALIR' || ignoredType(input.type)) return { route: 'SUPPORT', registered, publicHelp: true }
+    // SALIR is not counted (it never gets an answer); one that quotes a message gets «no puedo identificar…», so it is.
+    if ((command === 'SALIR' && !input.contextId) || ignoredType(input.type)) return { route: 'SUPPORT', registered, publicHelp: true }
     const over = await countPublicMessage(tx, input.receiverId, input.phone, now)
     if (!over) return { route: 'SUPPORT', registered, publicHelp: true }
     if (!(await takePublicLimitNotice(tx, input.receiverId, input.phone, over, now))) return { route: 'IGNORED', registered }
@@ -527,16 +516,6 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
             conversation = await tx.supportConversation.update({ where: { id: conversation.id }, data: { noticeAcceptedAt: consent, app } })
           }
         }
-        // Public help never continues a conversation used while this phone was of an account (its answers may cite the internal
-        // manual, and history, quotes and REINTENTAR read them): it closes, and a fresh public one starts with the notice.
-        if (publicHelp && conversation && !(await isPublicConversation(tx, input.receiverId, input.phone, conversation.id))) {
-          await resetSupportConversation(tx, conversation, 'CLOSED')
-          conversation = null
-          if (command === 'SALIR') {
-            await recordIgnored()
-            return 'IGNORED'
-          }
-        }
       }
       if (!conversation) {
         const memory = freeText && !unregistered ? await inheritSupportMemory(tx, input.receiverId, input.phone, now) : null
@@ -560,7 +539,6 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
         })
         created = true
       }
-      if (publicHelp) await markPublicConversation(tx, input.receiverId, input.phone, conversation.id, now)
       // Only the first message after linking recognizes the person: its code was confirmed after the last message of this
       // conversation (or of the closed one it inherits from), so a later PUBLICA keeps public help.
       if (!relist && conversation.mode === 'PUBLIC' && soleStaffId && conversation.noticeAcceptedAt) {
