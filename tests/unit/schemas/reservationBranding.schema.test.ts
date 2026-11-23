@@ -3,9 +3,9 @@ import { PAYMENT_LINK_FONT_IDS } from '@/schemas/dashboard/paymentLink.schema'
 
 // La Marca de reservaciones del DASHBOARD ofrece el mismo selector de 40 fuentes que las ligas de pago
 // (payment-link-fonts.ts), pero el SERVIDOR validaba contra una lista vieja de 28: «Outfit» y otras 13
-// contestaban 400 al guardar (Mindform BSF, 22-nov-2026).
+// contestaban 400 al guardar (hz:a702b284:D3, 22-nov-2026).
 describe('reservationBrandingBodySchema · fontFamily', () => {
-  it('acepta «Outfit», la fuente que rechazaba en Mindform BSF', () => {
+  it('acepta «Outfit», la fuente que rechazaba en un negocio real', () => {
     expect(reservationBrandingBodySchema.safeParse({ fontFamily: 'Outfit' }).success).toBe(true)
   })
 

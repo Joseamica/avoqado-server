@@ -2,7 +2,7 @@
 //
 // Marca de reservaciones, por la ruta real (autenticación, candado de RESERVATIONS, validación, servicio y Postgres):
 // guardar «Outfit» contestaba 400 porque el esquema validaba contra la lista vieja de 28 fuentes y el DASHBOARD ofrece 40
-// (Mindform BSF, 22-nov-2026).
+// (hz:a702b284:D3, 22-nov-2026).
 import { randomUUID } from 'crypto'
 import type { Server } from 'http'
 import { StaffRole } from '@prisma/client'
