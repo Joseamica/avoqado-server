@@ -1,4 +1,4 @@
-import { CreditPurchaseStatus, Prisma, ReservationChannel, ReservationStatus, VenueStatus } from '@prisma/client'
+import { Prisma, ReservationChannel, ReservationStatus, VenueStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import * as reservationService from '@/services/dashboard/reservation.dashboard.service'
@@ -12,6 +12,7 @@ import { activateCustomerAccount, assertCustomerCanCreateReservation } from '@/s
 import { withDeadlockRetry, withSerializableRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { fastFailLiveHold } from '@/services/reservation/appointmentSlotHold.service'
 import { normalizeBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
+import { redeemCreditsForReservation } from '@/services/reservation/creditRedemption.service'
 
 type ConsumerReservationInput = {
   startsAt?: Date
@@ -692,61 +693,17 @@ async function createClassReservationForConsumer(
       let creditRedeemed = false
       let creditsUsed = 0
       if (body.creditItemBalanceId) {
-        const balances = await tx.$queryRaw<{ id: string; remainingQuantity: number; creditPackPurchaseId: string; productId: string }[]>`
-        SELECT id, "remainingQuantity", "creditPackPurchaseId", "productId"
-        FROM "CreditItemBalance"
-        WHERE id = ${body.creditItemBalanceId}
-        FOR UPDATE
-      `
-        if (balances.length === 0) throw new BadRequestError('Balance de credito no encontrado')
-
-        const balance = balances[0]
-        if (balance.productId !== session.productId) throw new BadRequestError('El credito no corresponde al producto de esta clase')
-        if (balance.remainingQuantity < requestedPartySize) {
-          throw new BadRequestError(
-            `No tienes suficientes creditos. Disponibles: ${balance.remainingQuantity}, necesarios: ${requestedPartySize}. Compra mas creditos para continuar.`,
-          )
-        }
-
-        const purchase = await tx.creditPackPurchase.findUnique({
-          where: { id: balance.creditPackPurchaseId },
-          select: { status: true, expiresAt: true, customerId: true },
+        // Mismo canje que el widget (D679): la dueña de los créditos es la clienta de esta cuenta.
+        await redeemCreditsForReservation(tx, {
+          venueId,
+          reservationId: reservation.id,
+          confirmationCode: reservation.confirmationCode,
+          balanceIds: [body.creditItemBalanceId],
+          creditsPerBalance: requestedPartySize,
+          customerId: body.customerId,
+          expectedProductIds: [session.productId],
+          contexto: 'CLASE',
         })
-        if (!purchase || purchase.customerId !== body.customerId) throw new BadRequestError('Credito no valido para este cliente')
-        if (purchase.status !== CreditPurchaseStatus.ACTIVE) throw new BadRequestError('Los creditos ya no estan activos')
-        if (purchase.expiresAt && purchase.expiresAt < new Date()) throw new BadRequestError('Los creditos han expirado')
-
-        await tx.creditItemBalance.update({
-          where: { id: body.creditItemBalanceId },
-          data: { remainingQuantity: { decrement: requestedPartySize } },
-        })
-
-        await tx.creditTransaction.create({
-          data: {
-            venueId,
-            customerId: body.customerId,
-            creditPackPurchaseId: balance.creditPackPurchaseId,
-            creditItemBalanceId: body.creditItemBalanceId,
-            type: 'REDEEM',
-            quantity: -requestedPartySize,
-            reservationId: reservation.id,
-            reason: requestedPartySize > 1 ? `Reserva de ${requestedPartySize} lugares` : null,
-          },
-        })
-
-        const remainingBalances = await tx.creditItemBalance.findMany({
-          where: {
-            creditPackPurchaseId: balance.creditPackPurchaseId,
-            remainingQuantity: { gt: 0 },
-          },
-        })
-        if (remainingBalances.length === 0) {
-          await tx.creditPackPurchase.update({
-            where: { id: balance.creditPackPurchaseId },
-            data: { status: CreditPurchaseStatus.EXHAUSTED },
-          })
-        }
-
         creditRedeemed = true
         creditsUsed = requestedPartySize
       }

@@ -15,7 +15,7 @@ import { Prisma, CreditPurchaseStatus, ReservationStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
-import { withDeadlockRetry, withSerializableRetry } from '@/utils/serializableRetry'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { logAction } from './activity-log.service'
 import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 import { findCustomerIdByPhone } from '@/services/public/customerPhoneLookup'
@@ -799,92 +799,6 @@ export async function refundCreditsForReservation(
 
   logger.info(`💸 [CREDIT REFUND] reservation=${reservationId} refunded=${totalRefunded}/${totalSpent} policy=${policyApplied}`)
   return { creditsRefunded: totalRefunded, policyApplied }
-}
-
-/**
- * Redeem 1 credit for a reservation (called within serializable transaction)
- */
-export async function redeemForReservation(venueId: string, customerId: string, balanceId: string, reservationId: string) {
-  return withSerializableRetry(async tx => {
-    // Lock the balance row
-    const balances = await tx.$queryRaw<{ id: string; remainingQuantity: number; creditPackPurchaseId: string; productId: string }[]>`
-      SELECT id, "remainingQuantity", "creditPackPurchaseId", "productId"
-      FROM "CreditItemBalance"
-      WHERE id = ${balanceId}
-      FOR UPDATE
-    `
-
-    if (balances.length === 0) {
-      throw new NotFoundError('Balance de credito no encontrado')
-    }
-
-    const balance = balances[0]
-
-    if (balance.remainingQuantity <= 0) {
-      throw new BadRequestError('No hay creditos disponibles en este balance')
-    }
-
-    // Verify the purchase is still active and not expired
-    const purchase = await tx.creditPackPurchase.findUnique({
-      where: { id: balance.creditPackPurchaseId },
-      select: { status: true, expiresAt: true, venueId: true, customerId: true },
-    })
-
-    if (!purchase || purchase.venueId !== venueId || purchase.customerId !== customerId) {
-      throw new BadRequestError('Balance de credito no valido para este cliente')
-    }
-
-    if (purchase.status !== CreditPurchaseStatus.ACTIVE) {
-      throw new BadRequestError('La compra de creditos ya no esta activa')
-    }
-
-    if (purchase.expiresAt && purchase.expiresAt < new Date()) {
-      throw new BadRequestError('Los creditos han expirado')
-    }
-
-    // Decrement balance
-    await tx.creditItemBalance.update({
-      where: { id: balanceId },
-      data: { remainingQuantity: { decrement: 1 } },
-    })
-
-    // Create transaction
-    await tx.creditTransaction.create({
-      data: {
-        venueId,
-        customerId,
-        creditPackPurchaseId: balance.creditPackPurchaseId,
-        creditItemBalanceId: balanceId,
-        type: 'REDEEM',
-        quantity: -1,
-        reservationId,
-      },
-    })
-
-    // Check if all balances in the purchase are exhausted
-    const remainingBalances = await tx.creditItemBalance.findMany({
-      where: {
-        creditPackPurchaseId: balance.creditPackPurchaseId,
-        remainingQuantity: { gt: 0 },
-      },
-    })
-
-    if (remainingBalances.length === 0) {
-      await tx.creditPackPurchase.update({
-        where: { id: balance.creditPackPurchaseId },
-        data: { status: CreditPurchaseStatus.EXHAUSTED },
-      })
-    }
-
-    logger.info('✅ [CREDIT PACK] Credit redeemed for reservation', {
-      balanceId,
-      reservationId,
-      customerId,
-      venueId,
-    })
-
-    return { redeemed: true }
-  })
 }
 
 // ==========================================

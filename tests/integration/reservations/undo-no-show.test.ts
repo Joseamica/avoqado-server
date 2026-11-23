@@ -21,7 +21,7 @@ jest.mock('@/services/reservation/noShowNotices.service', () => ({
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { markNoShow } from '@/services/dashboard/reservation.dashboard.service'
-import { redeemForReservation } from '@/services/dashboard/creditPack.public.service'
+import { redeemCreditsForReservation } from '@/services/reservation/creditRedemption.service'
 import { undoNoShow, type UndoNoShowCommand } from '@/services/reservation/undoNoShow.service'
 import { undoCheckIn, CHECK_IN_UNDO_NOT_APPLICABLE } from '@/services/reservation/checkIn.service'
 import { kioskCheckInReservation } from '@/services/reservation/kioskCheckIn.service'
@@ -81,7 +81,17 @@ describe('D4 · «Sí llegó» deshace un «No asistió» (integración, base re
       },
       select: { id: true },
     })
-    await redeemForReservation(venueId!, clienta.id, balanceId, reserva.id)
+    // Un crédito, por el canje de las reservas (D679): el mismo que usan el widget y la app de clientes.
+    await prisma.$transaction(tx =>
+      redeemCreditsForReservation(tx, {
+        venueId: venueId!,
+        reservationId: reserva.id,
+        confirmationCode: reserva.id,
+        balanceIds: [balanceId],
+        creditsPerBalance: 1,
+        customerId: clienta.id,
+      }),
+    )
     return { reservationId: reserva.id, balanceId }
   }
 

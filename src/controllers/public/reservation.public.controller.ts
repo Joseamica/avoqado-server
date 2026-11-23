@@ -9,7 +9,7 @@ import { checkExternalBusyBlock } from '../../services/reservation/external-busy
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { CreditPurchaseStatus, ReservationStatus } from '@prisma/client'
+import { ReservationStatus } from '@prisma/client'
 import { Prisma } from '@prisma/client'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '../../services/payments/providers/money'
 import { getVatRateBps } from '../../services/superadmin/platformSettings.service'
@@ -36,6 +36,7 @@ import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { buildReservationBookingCapabilities } from '@/services/reservation/publicReservationCapabilities'
 import { buildReservationCheckoutReturnUrls } from '@/services/reservation/reservationReturnUrl'
 import { lockClassSession, sumOccupiedSeats } from '@/services/reservation/classBooking.service'
+import { redeemCreditsForReservation, requireSessionCustomerForCredits } from '@/services/reservation/creditRedemption.service'
 import { enqueuePassSessionSync } from '@/services/aggregators/core/sessionSync.service'
 
 // ==========================================
@@ -1898,30 +1899,8 @@ export function resolveClassCustomerBinding(input: { sessionCustomerId: string |
   return { customerId: null, source: 'NONE' }
 }
 
-/**
- * Fase 0.B — quién puede gastar créditos al reservar: SÓLO el customer de la sesión.
- *
- * Antes, sin sesión, el dueño se resolvía por `guestEmail/guestPhone` del body; como el
- * balance también era público por contacto, conocer el email de alguien bastaba para
- * obtener un balanceId y gastar sus créditos (auditoría 2, P1). Compartido por los dos
- * caminos que canjean (clase inline y `redeemCreditsForReservation` de cita).
- *
- * - sin sesión → 401 CUSTOMER_AUTH_REQUIRED (antes de tocar la DB)
- * - sesión cuyo customer ya no existe en el venue → 400
- */
-export async function requireSessionCustomerForCredits(
-  tx: Prisma.TransactionClient,
-  input: { sessionCustomerId: string | null | undefined; venueId: string },
-): Promise<{ id: string }> {
-  if (!input.sessionCustomerId) {
-    throw new UnauthorizedError('Inicia sesión para pagar con tus créditos', 'CUSTOMER_AUTH_REQUIRED')
-  }
-  const customer = await tx.customer.findFirst({ where: { id: input.sessionCustomerId, venueId: input.venueId }, select: { id: true } })
-  if (!customer) {
-    throw new BadRequestError('No se encontro el cliente para canjear creditos')
-  }
-  return customer
-}
+// El canje de créditos de una reserva vive en un solo lugar (D679); se re-exporta con su nombre de siempre.
+export { requireSessionCustomerForCredits, redeemCreditsForReservation }
 
 async function createClassReservation(
   venueId: string,
@@ -2133,85 +2112,17 @@ async function createClassReservation(
       let creditRedeemed = false
       let creditsUsed = 0
       if (body.creditItemBalanceId) {
-        // Fase 0.B: los créditos son SÓLO del customer de la sesión; sin sesión → 401.
-        const customer = await requireSessionCustomerForCredits(tx, { sessionCustomerId, venueId })
-
-        // Lock and verify balance
-        const balances = await tx.$queryRaw<{ id: string; remainingQuantity: number; creditPackPurchaseId: string; productId: string }[]>`
-        SELECT id, "remainingQuantity", "creditPackPurchaseId", "productId"
-        FROM "CreditItemBalance"
-        WHERE id = ${body.creditItemBalanceId}
-        FOR UPDATE
-      `
-
-        if (balances.length === 0) {
-          throw new BadRequestError('Balance de credito no encontrado')
-        }
-
-        const balance = balances[0]
-
-        if (balance.productId !== session.productId) {
-          throw new BadRequestError('El credito no corresponde al producto de esta clase')
-        }
-
-        if (balance.remainingQuantity < requestedPartySize) {
-          throw new BadRequestError(
-            `No tienes suficientes creditos. Disponibles: ${balance.remainingQuantity}, necesarios: ${requestedPartySize}. Compra mas creditos para continuar.`,
-          )
-        }
-
-        // Verify purchase is active and not expired
-        const purchase = await tx.creditPackPurchase.findUnique({
-          where: { id: balance.creditPackPurchaseId },
-          select: { status: true, expiresAt: true, customerId: true },
+        // Fase 0.B: los créditos son SÓLO del customer de la sesión; sin sesión → 401. Mismo canje que la cita (D679).
+        await redeemCreditsForReservation(tx, {
+          venueId,
+          reservationId: reservation.id,
+          confirmationCode: reservation.confirmationCode,
+          balanceIds: [body.creditItemBalanceId],
+          creditsPerBalance: requestedPartySize,
+          customerId: sessionCustomerId,
+          expectedProductIds: [session.productId],
+          contexto: 'CLASE',
         })
-
-        if (!purchase || purchase.customerId !== customer.id) {
-          throw new BadRequestError('Credito no valido para este cliente')
-        }
-
-        if (purchase.status !== CreditPurchaseStatus.ACTIVE) {
-          throw new BadRequestError('Los creditos ya no estan activos')
-        }
-
-        if (purchase.expiresAt && purchase.expiresAt < new Date()) {
-          throw new BadRequestError('Los creditos han expirado')
-        }
-
-        // Decrement balance by partySize (one credit per seat)
-        await tx.creditItemBalance.update({
-          where: { id: body.creditItemBalanceId },
-          data: { remainingQuantity: { decrement: requestedPartySize } },
-        })
-
-        // Create single credit transaction with negative quantity = seats
-        await tx.creditTransaction.create({
-          data: {
-            venueId,
-            customerId: customer.id,
-            creditPackPurchaseId: balance.creditPackPurchaseId,
-            creditItemBalanceId: body.creditItemBalanceId,
-            type: 'REDEEM',
-            quantity: -requestedPartySize,
-            reservationId: reservation.id,
-            reason: requestedPartySize > 1 ? `Reserva de ${requestedPartySize} lugares` : null,
-          },
-        })
-
-        // Check if purchase is exhausted
-        const remainingBalances = await tx.creditItemBalance.findMany({
-          where: {
-            creditPackPurchaseId: balance.creditPackPurchaseId,
-            remainingQuantity: { gt: 0 },
-          },
-        })
-
-        if (remainingBalances.length === 0) {
-          await tx.creditPackPurchase.update({
-            where: { id: balance.creditPackPurchaseId },
-            data: { status: CreditPurchaseStatus.EXHAUSTED },
-          })
-        }
 
         creditRedeemed = true
         creditsUsed = requestedPartySize
@@ -2596,129 +2507,4 @@ export async function redeemCreditsWithCompensation(
     // than think they paid with credits when they didn't.
     throw error
   }
-}
-
-/**
- * Redeems credits from one or more CreditItemBalance rows against a reservation.
- * Mirrors the inline class-path logic but works for any reservation type and
- * accepts an array of balance IDs so multi-service appointments can redeem
- * across products in a single transaction.
- *
- * Each balance is:
- *   1. Locked with FOR UPDATE
- *   2. Validated: belongs to customer, expected productId (when provided),
- *      sufficient quantity, parent purchase ACTIVE + not expired
- *   3. Decremented by `creditsPerBalance`
- *   4. Stamped with a REDEEM CreditTransaction
- *   5. Parent purchase flipped to EXHAUSTED if all balances drained
- *
- * Caller MUST pass a Prisma transaction client. We don't open one ourselves
- * because the class path already wraps everything in a tx and we want
- * everything-or-nothing semantics with the reservation insert.
- */
-export async function redeemCreditsForReservation(
-  tx: Prisma.TransactionClient,
-  args: {
-    venueId: string
-    reservationId: string
-    confirmationCode: string
-    /** One balance ID per redemption (length 1 = legacy single-product). */
-    balanceIds: string[]
-    creditsPerBalance: number
-    /**
-     * Fase 0.B: identidad de SESIÓN — obligatoria para canjear. El dueño de los créditos es
-     * este customer; sin sesión es 401 CUSTOMER_AUTH_REQUIRED (ver requireSessionCustomerForCredits).
-     */
-    customerId?: string | null
-    /** Sólo informativos (mensajes/emails); NO identifican al dueño de los créditos. */
-    customerEmail?: string
-    customerPhone?: string
-    /** When provided, every balance.productId MUST match one of these (no
-     *  random balance ID swapping for a different product). For multi-service
-     *  redemption pass every selected service's productId. */
-    expectedProductIds?: string[]
-  },
-): Promise<{ creditsUsed: number; redeemed: boolean }> {
-  if (args.balanceIds.length === 0) {
-    return { creditsUsed: 0, redeemed: false }
-  }
-
-  const customer = await requireSessionCustomerForCredits(tx, { sessionCustomerId: args.customerId, venueId: args.venueId })
-
-  let totalCreditsUsed = 0
-  for (const balanceId of args.balanceIds) {
-    const balances = await tx.$queryRaw<{ id: string; remainingQuantity: number; creditPackPurchaseId: string; productId: string }[]>`
-      SELECT id, "remainingQuantity", "creditPackPurchaseId", "productId"
-      FROM "CreditItemBalance"
-      WHERE id = ${balanceId}
-      FOR UPDATE
-    `
-
-    if (balances.length === 0) {
-      throw new BadRequestError(`Balance de credito no encontrado: ${balanceId}`)
-    }
-    const balance = balances[0]
-
-    if (args.expectedProductIds && !args.expectedProductIds.includes(balance.productId)) {
-      throw new BadRequestError('El credito no corresponde a los servicios reservados')
-    }
-
-    if (balance.remainingQuantity < args.creditsPerBalance) {
-      throw new BadRequestError(
-        `No tienes suficientes creditos. Disponibles: ${balance.remainingQuantity}, necesarios: ${args.creditsPerBalance}.`,
-      )
-    }
-
-    const purchase = await tx.creditPackPurchase.findUnique({
-      where: { id: balance.creditPackPurchaseId },
-      select: { status: true, expiresAt: true, customerId: true },
-    })
-    if (!purchase || purchase.customerId !== customer.id) {
-      throw new BadRequestError('Credito no valido para este cliente')
-    }
-    if (purchase.status !== CreditPurchaseStatus.ACTIVE) {
-      throw new BadRequestError('Los creditos ya no estan activos')
-    }
-    if (purchase.expiresAt && purchase.expiresAt < new Date()) {
-      throw new BadRequestError('Los creditos han expirado')
-    }
-
-    await tx.creditItemBalance.update({
-      where: { id: balanceId },
-      data: { remainingQuantity: { decrement: args.creditsPerBalance } },
-    })
-
-    await tx.creditTransaction.create({
-      data: {
-        venueId: args.venueId,
-        customerId: customer.id,
-        creditPackPurchaseId: balance.creditPackPurchaseId,
-        creditItemBalanceId: balanceId,
-        type: 'REDEEM',
-        quantity: -args.creditsPerBalance,
-        reservationId: args.reservationId,
-        reason: args.creditsPerBalance > 1 ? `Reserva de ${args.creditsPerBalance} creditos` : null,
-      },
-    })
-
-    totalCreditsUsed += args.creditsPerBalance
-
-    // Check if purchase is fully drained
-    const remaining = await tx.creditItemBalance.findFirst({
-      where: { creditPackPurchaseId: balance.creditPackPurchaseId, remainingQuantity: { gt: 0 } },
-      select: { id: true },
-    })
-    if (!remaining) {
-      await tx.creditPackPurchase.update({
-        where: { id: balance.creditPackPurchaseId },
-        data: { status: CreditPurchaseStatus.EXHAUSTED },
-      })
-    }
-  }
-
-  logger.info(
-    `[CREDIT REDEEM] ${totalCreditsUsed} credit(s) redeemed across ${args.balanceIds.length} balance(s) for reservation ${args.confirmationCode}`,
-  )
-
-  return { creditsUsed: totalCreditsUsed, redeemed: true }
 }
