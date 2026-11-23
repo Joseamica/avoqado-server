@@ -18,6 +18,12 @@ export const TOPE_SIGO_TRAS_CANCEL_MS = 30_000
 export const SIN_FINAL_TRAS_ACUSE_MS = 60_000
 /** El tope de una llamada al SDK: un «sigo cobrando» (ACTIVE) no se tolera más allá de esto desde el acuse. */
 export const TOPE_DE_UNA_LLAMADA_AL_SDK_MS = 150_000
+/**
+ * Codex S1 r3 (R3-10): una solicitud PENDING entregada por el protocolo CON acuse que lleva esto sin acusar desde su último envío
+ * entra a «sin respuesta» desde el vigía (un reinicio entre guardarla y su acuse la dejaba esperando los 5 min). El acuse se espera 5 s;
+ * una entrega LEGACY (TPV sin acuse) se queda PENDING toda su vida a propósito y nunca entra por aquí.
+ */
+export const SIN_ACUSE_TRAS_ENVIO_MS = 30_000
 /** «Aprobado, por registrar»: si a los 5 min el aviso aprobado sigue sin `Payment`, 🚨 a operaciones (una vez por fila). */
 export const APROBADO_SIN_REGISTRO_MS = 5 * 60_000
 /**
@@ -62,8 +68,11 @@ export async function entrarSinRespuesta(
      * (el tope de 30 s). Lo usan el vigía y la revisión del cancel; una terminal que se fue (`TERMINAL_GONE`) no lo respeta.
      */
     respetarActiveHasta?: Date
-    /** Codex S1 r2 (R2-7): sólo desde `SENT` (el barrido de las acusadas sin final: un cancel del POS en medio no entra por ahí). */
-    soloDesdeSent?: boolean
+    /**
+     * Sólo desde ese estado: `SENT` en el barrido de las acusadas sin final (R2-7: un cancel del POS en medio no entra por ahí) y
+     * `PENDING` en el acuse perdido de una reentrega o en el barrido de las que nunca acusaron (R3-10).
+     */
+    soloDesde?: 'SENT' | 'PENDING'
     /** Codex S1 r3 (R3-9): sólo si `probeActiveAt` sigue siendo éste (un ACTIVE sellado después de la lectura gana). */
     probeActiveAtLeido?: Date | null
   },
@@ -84,8 +93,8 @@ export async function entrarSinRespuesta(
         "updatedAt" = (NOW() AT TIME ZONE 'UTC')
     WHERE "requestId" = ${input.requestId} AND "venueId" = ${input.venueId}
       AND ${
-        input.soloDesdeSent
-          ? Prisma.sql`"status" = 'SENT'`
+        input.soloDesde
+          ? Prisma.sql`"status" = ${input.soloDesde}::"TerminalPaymentRequestStatus"`
           : Prisma.sql`("status" IN ('PENDING', 'SENT', 'CANCEL_REQUESTED') OR ("status" = 'UNKNOWN' AND "noResponseAt" IS NULL))`
       }
       ${input.probeActiveAtLeido !== undefined ? Prisma.sql`AND "probeActiveAt" IS NOT DISTINCT FROM ${utcTsOrNull(input.probeActiveAtLeido)}` : Prisma.empty}

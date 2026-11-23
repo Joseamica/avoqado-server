@@ -76,6 +76,7 @@ import {
   SIN_FINAL_TRAS_ACUSE_MS,
   sinRespuestaMs,
   TOPE_DE_UNA_LLAMADA_AL_SDK_MS,
+  SIN_ACUSE_TRAS_ENVIO_MS,
   TOPE_DE_INTENTOS_POR_SOLICITUD,
   TOPE_SIGO_TRAS_CANCEL_MS,
   type CausaSinRespuesta,
@@ -2725,7 +2726,19 @@ class TerminalPaymentService {
         directSocket
           .timeout(PAYMENT_DELIVERY_ACK_TIMEOUT_MS)
           .emit('terminal:payment_request', payload, (error: Error | null, response?: { accepted?: boolean; requestId?: string }) => {
-            if (error || response?.accepted !== true || response.requestId !== row.requestId) return
+            if (error || response?.accepted !== true || response.requestId !== row.requestId) {
+              // Codex S1 r3 (R3-10): la reentrega sin acuse de una fila que nunca acusó entra a «sin respuesta» como el primer envío.
+              // Sólo desde PENDING: una SENT ya acusó y la gobierna la sonda (su reentrega no prueba nada nuevo).
+              void this.entrarSinRespuestaYProgramar(row.requestId, venueId, 'ACK_TIMEOUT', {
+                terminalId,
+                failureCode: error ? 'ACK_TIMEOUT' : 'ACK_REJECTED',
+                soloDesde: 'PENDING',
+                sobre: { errorMessage: 'El cobro no llegó a la terminal. Confirmando…', origin: 'SERVER' },
+              })
+                .then(entro => (entro ? false : this.resolverEsperaDelPos(row.requestId, venueId)))
+                .catch(err => logger.warn('⚠️ [TerminalPayment] Could not persist the replay no-ACK outcome', { requestId: row.requestId, error: String(err) }))
+              return
+            }
             // 🔴 Antes era `void prisma…updateMany(…)` pelón, y una consulta de Prisma es PEREZOSA: sin `await`/`.then`
             // no se ejecuta NUNCA, así que el ACK de un replay jamás se escribía. El método es `async` (corre al llamarlo)
             // y `.catch` evita un rechazo sin manejar, que `server.ts` convierte en gracefulShutdown.
@@ -8479,7 +8492,7 @@ class TerminalPaymentService {
       emitirCancel?: boolean
       ahora?: Date
       respetarActiveHasta?: Date
-      soloDesdeSent?: boolean
+      soloDesde?: 'SENT' | 'PENDING'
       probeActiveAtLeido?: Date | null
     } = {},
   ): Promise<boolean> {
@@ -8491,7 +8504,7 @@ class TerminalPaymentService {
       sobre: opciones.sobre,
       ahora: opciones.ahora,
       respetarActiveHasta: opciones.respetarActiveHasta,
-      soloDesdeSent: opciones.soloDesdeSent,
+      soloDesde: opciones.soloDesde,
       probeActiveAtLeido: opciones.probeActiveAtLeido,
     })
     if (!entro) return false
@@ -8890,7 +8903,7 @@ class TerminalPaymentService {
         await this.entrarSinRespuestaYProgramar(f.requestId, f.venueId, causa, {
           terminalId: f.terminalId,
           emitirCancel: true,
-          soloDesdeSent: true,
+          soloDesde: 'SENT',
           ...(probeActiveAtLeido !== undefined ? { probeActiveAtLeido } : {}),
         })
       ) {
@@ -8938,6 +8951,7 @@ class TerminalPaymentService {
         })
       }
     }
+    entradas += await this.entrarPendientesSinAcuse(now)
     for (const [requestId, p] of this.preguntasSinFinal) if (now.getTime() - p.at > 10 * 60_000) this.preguntasSinFinal.delete(requestId)
     for (const [terminal, at] of this.sinConexionVista) if (now.getTime() - at > 10 * 60_000) this.sinConexionVista.delete(terminal)
     return { entradas, preguntas }
@@ -8948,6 +8962,46 @@ class TerminalPaymentService {
    * respuesta» (`TERMINAL_GONE`). Si vuelve, la sonda y la reentrega de la reconexión siguen como siempre y su resultado gana.
    * La red durable (reinicio en medio) es `preguntarPorSolicitudesSinFinal` y el vencimiento de 5 min.
    */
+  /**
+   * Codex S1 r3 (R3-10): las PENDING que nunca acusaron (un reinicio entre guardarlas y su acuse, o un acuse perdido de la reentrega)
+   * entran a «sin respuesta» (`ACK_TIMEOUT`) a los 30 s de su último envío por el protocolo con acuse. Las de procedencia LEGACY
+   * (TPV sin acuse: PENDING toda su vida) o desconocida no se tocan. Lote de 50, las más viejas primero.
+   */
+  private async entrarPendientesSinAcuse(now: Date): Promise<number> {
+    const corte = now.getTime() - SIN_ACUSE_TRAS_ENVIO_MS
+    const filas = await prisma.terminalPaymentRequest.findMany({
+      where: { status: TerminalPaymentRequestStatus.PENDING, acknowledgedAt: null, createdAt: { lte: new Date(corte) } },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: 50,
+      select: { requestId: true, venueId: true, terminalId: true, deliveryProvenance: true },
+    })
+    let entradas = 0
+    for (const f of filas) {
+      const entregas = leerProcedencia(f.deliveryProvenance)
+      if (!entregas || entregas.some(d => d.protocol === 'LEGACY')) continue
+      const ultima = entregas.at(-1)?.at
+      if (ultima && new Date(ultima).getTime() > corte) continue
+      try {
+        if (
+          await this.entrarSinRespuestaYProgramar(f.requestId, f.venueId, 'ACK_TIMEOUT', {
+            terminalId: f.terminalId,
+            failureCode: 'ACK_TIMEOUT',
+            soloDesde: 'PENDING',
+            emitirCancel: true,
+            sobre: { errorMessage: 'El cobro no llegó a la terminal. Confirmando…', origin: 'SERVER' },
+          })
+        )
+          entradas += 1
+      } catch (err) {
+        logger.error('❌ [Terminal-payment watchdog] PENDING-without-ACK check failed for one request — the sweep goes on', {
+          requestId: f.requestId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+    return entradas
+  }
+
   /** La terminal (re)conectó a ESTE proceso: su observación de «sin conexión» del vigía se borra (R3-9). */
   alConectarseLaTerminal(terminalId: string): void {
     this.sinConexionVista.delete(normalizeTerminalId(terminalId))

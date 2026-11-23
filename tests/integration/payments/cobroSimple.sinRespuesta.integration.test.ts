@@ -611,4 +611,42 @@ describe('Codex S1 r2', () => {
     expect(await fila(s.requestId)).toMatchObject({ status: 'SENT' })
     expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date(ahora.getTime() + 22_000))).toMatchObject({ entradas: 1 })
   })
+
+  /** Una entrega registrada (procedencia) como la deja `recordDelivery`, con su hora del servidor. */
+  const entrega = (protocol: 'DURABLE' | 'LEGACY', at: Date) => ({
+    deliveries: [{ protocol, ackVersion: protocol === 'DURABLE' ? 1 : 0, cancelDispositionVersion: 2, probeVersion: 1, executionVersion: 1, socketId: 'otro-socket', at: at.toISOString(), replay: false }],
+  })
+
+  it('R3-10 · la REENTREGA (tras un reinicio) sin acuse entra a «sin respuesta» como el primer envío (ACK_TIMEOUT)', async () => {
+    const s = await f.solicitud({ status: 'PENDING', acknowledgedAt: null, deliveryProvenance: entrega('DURABLE', hace(3_000)) })
+    directEmit.mockImplementation((_e: string, _p: unknown, ack?: (err: Error | null) => void) => ack?.(new Error('operation has timed out')))
+    await terminalPaymentService.replayPendingForTerminal(f.serial, f.venueId, SOCKET)
+    for (let i = 0; i < 50 && (await fila(s.requestId)).status === 'PENDING'; i++) await esperar(20)
+    expect(await fila(s.requestId)).toMatchObject({ status: 'UNKNOWN', failureCode: 'ACK_TIMEOUT' })
+    expect((await fila(s.requestId)).noResponseAt).not.toBeNull()
+  })
+
+  it('R3-10 · …pero la reentrega de una SENT ya acusada que no vuelve a acusar NO la saca de vuelo (la gobierna la sonda)', async () => {
+    const s = await f.solicitud({ status: 'SENT', acknowledgedAt: hace(3_000), deliveryProvenance: entrega('DURABLE', hace(3_000)) })
+    directEmit.mockImplementation((_e: string, _p: unknown, ack?: (err: Error | null) => void) => ack?.(new Error('operation has timed out')))
+    await terminalPaymentService.replayPendingForTerminal(f.serial, f.venueId, SOCKET)
+    await esperar(200)
+    expect(await fila(s.requestId)).toMatchObject({ status: 'SENT', noResponseAt: null })
+  })
+
+  it('R3-10 · el vigía toma una PENDING sin acuse de hace > 30 s desde su último envío (protocolo con acuse); no una LEGACY ni una reciente', async () => {
+    const vieja = await f.solicitud({ status: 'PENDING', acknowledgedAt: null, createdAt: hace(40_000), deliveryProvenance: entrega('DURABLE', hace(31_000)) })
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date())).toMatchObject({ entradas: 1 })
+    expect(await fila(vieja.requestId)).toMatchObject({ status: 'UNKNOWN', failureCode: 'ACK_TIMEOUT' })
+    await prisma.terminalPaymentRequest.delete({ where: { id: vieja.id } })
+
+    const legacy = await f.solicitud({ status: 'PENDING', acknowledgedAt: null, createdAt: hace(90_000), deliveryProvenance: entrega('LEGACY', hace(89_000)) })
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date())).toMatchObject({ entradas: 0 })
+    expect(await fila(legacy.requestId)).toMatchObject({ status: 'PENDING' })
+    await prisma.terminalPaymentRequest.delete({ where: { id: legacy.id } })
+
+    const reciente = await f.solicitud({ status: 'PENDING', acknowledgedAt: null, createdAt: hace(60_000), deliveryProvenance: entrega('DURABLE', hace(10_000)) })
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date())).toMatchObject({ entradas: 0 })
+    expect(await fila(reciente.requestId)).toMatchObject({ status: 'PENDING' })
+  })
 })
