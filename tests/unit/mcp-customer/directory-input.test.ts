@@ -16,6 +16,12 @@ describe('parámetros del catálogo de directorio', () => {
     expect(parsed).toEqual({ venueId: 'v', name: 'X' })
   })
 
+  // D13.2: `reportType` es nuevo en el MCP manual; el catálogo certificado no cambia lo que ya se revisó.
+  it('export_sales_summary pierde «reportType» en el directorio', () => {
+    const esquema = { venueId: z.string(), sections: z.string().optional(), reportType: z.string().optional() }
+    expect(Object.keys(directoryInputSchema('export_sales_summary', esquema) ?? {}).sort()).toEqual(['sections', 'venueId'])
+  })
+
   it('las demás herramientas conservan su esquema tal cual', () => {
     expect(directoryInputSchema('create_coupon', schema)).toBe(schema)
     expect(directoryInputSchema('daily_sales', undefined)).toBeUndefined()

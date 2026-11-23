@@ -27,6 +27,8 @@ keywords:
   - el reporte no coincide con los pagos
   - una métrica sale vacía
   - exportar reporte de ventas
+  - el archivo no trae mis filtros
+  - la hora del archivo no coincide
   - ventas por artículo
   - dentro de paquete
   - las flautas del paquete no salen como vendidas
@@ -46,7 +48,7 @@ Ten presente que los reportes pueden tratar descuentos, propinas, impuestos y co
 3. Elige el tipo de reporte o vista disponible.
 4. Revisa métricas como ventas brutas, descuentos, reembolsos, ventas netas, impuestos, propinas y total cobrado.
 5. Abre **Reportes > Ventas por artículo** para analizar artículos vendidos.
-6. Exporta o comparte datos solo después de confirmar filtros y sucursal.
+6. Exporta o comparte datos solo después de confirmar filtros y sucursal. Al tocar **Exportar**, el archivo trae las fechas y los filtros que ves en la pantalla (puedes cambiarlos ahí mismo). Marca al menos una sección: con un filtro de método de pago, el desglose por método y el detalle por tipo de tarjeta no aplican. **Por periodo** trae una fila por periodo del tipo de informe que ves (por día si ves el resumen sin desglose). **Transacciones detalladas** (Premium) trae una fila por cobro o devolución, con la fecha y hora del negocio; los cobros del sistema QR anterior sólo salen en el resumen.
 
 ## Problemas frecuentes
 
