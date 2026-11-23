@@ -20,8 +20,8 @@ jest.mock('@/services/email.service', () => ({
   default: { sendCreditPackPurchaseEmail: (...a: any[]) => mockCorreo(...a) },
 }))
 
-import { fulfillPurchase, lookupCustomerCredits } from '../../../../src/services/dashboard/creditPack.public.service'
-import { CreditPurchaseStatus } from '@prisma/client'
+import { fulfillPurchase, getAvailablePacks, lookupCustomerCredits } from '../../../../src/services/dashboard/creditPack.public.service'
+import { CreditPurchaseStatus, Prisma } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 
 const VENUE_ID = 'venue-1'
@@ -140,6 +140,23 @@ describe('D679 · Ilimitado en el carril en línea', () => {
       conSaldos({ id: 'b-1', remainingQuantity: 3, unlimited: false })
       expect(await suficiente(2)).toEqual([true])
       expect(await suficiente(4)).toEqual([false])
+    })
+  })
+
+  // Codex código r2 #3: el catálogo que lee el POS (y su foto firmada) sale de UNA lectura consistente, y un paquete con un
+  // renglón Ilimitado sin vigencia no se ofrece.
+  describe('getAvailablePacks', () => {
+    it('lee paquetes y renglones en una sola foto de la base (REPEATABLE READ) y no ofrece un Ilimitado sin vigencia', async () => {
+      prismaMock.creditPack.findMany.mockResolvedValue([
+        { id: 'ok', validityDays: 30, items: [{ productId: 'p1', quantity: 99999, unlimited: true }] },
+        { id: 'roto', validityDays: null, items: [{ productId: 'p1', quantity: 99999, unlimited: true }] },
+        { id: 'normal', validityDays: null, items: [{ productId: 'p1', quantity: 5, unlimited: false }] },
+      ])
+      const packs = await getAvailablePacks(VENUE_ID)
+      expect(packs.map((p: any) => p.id)).toEqual(['ok', 'normal'])
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+        isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+      })
     })
   })
 })

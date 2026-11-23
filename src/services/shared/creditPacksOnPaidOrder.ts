@@ -31,18 +31,24 @@ export type CreditPackSnapshot = {
   items: { productId: string; quantity: number; unlimited?: boolean }[]
 }
 
-export const CreditPackSnapshotSchema: z.ZodType<CreditPackSnapshot> = z.object({
-  v: z.literal(1),
-  creditPackId: z.string().min(1),
-  name: z.string(),
-  price: z.string().regex(/^\d+\.\d{2}$/, 'Precio inválido en la foto del paquete'),
-  currency: z.string().min(1),
-  validityDays: z.number().int().positive().nullable(),
-  items: z
-    .array(z.object({ productId: z.string().min(1), quantity: z.number().int().min(1), unlimited: z.boolean().optional() }))
-    .min(1, 'La foto del paquete no trae productos')
-    .refine(items => new Set(items.map(i => i.productId)).size === items.length, 'Producto repetido en la foto del paquete'),
-})
+export const CreditPackSnapshotSchema: z.ZodType<CreditPackSnapshot> = z
+  .object({
+    v: z.literal(1),
+    creditPackId: z.string().min(1),
+    name: z.string(),
+    price: z.string().regex(/^\d+\.\d{2}$/, 'Precio inválido en la foto del paquete'),
+    currency: z.string().min(1),
+    validityDays: z.number().int().positive().nullable(),
+    items: z
+      .array(z.object({ productId: z.string().min(1), quantity: z.number().int().min(1), unlimited: z.boolean().optional() }))
+      .min(1, 'La foto del paquete no trae productos')
+      .refine(items => new Set(items.map(i => i.productId)).size === items.length, 'Producto repetido en la foto del paquete'),
+  })
+  .refine(
+    // D679 (Codex código r2 #3): un Ilimitado siempre vence. Una foto así no se firma (el POS no ofrece ese paquete) ni se acepta.
+    foto => foto.validityDays != null || !foto.items.some(i => i.unlimited),
+    'Un paquete Ilimitado necesita días de vigencia.',
+  )
 
 /** La foto de lo vendido. Sin ids de `CreditPackItem`: cambian cada vez que la dueña edita el paquete. */
 export function buildCreditPackSnapshot(pack: {

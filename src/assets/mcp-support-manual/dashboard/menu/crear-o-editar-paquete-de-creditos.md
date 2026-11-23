@@ -47,7 +47,7 @@ keywords:
 
 - Debajo del campo sale lo que falta: «El nombre es requerido», «El precio es requerido» o «El producto es requerido».
 - «Un paquete Ilimitado necesita días de vigencia»: sale debajo de *Días de Validez*; escríbelos antes de guardar.
-- «Este paquete tiene un renglón Ilimitado: cambia sus productos desde el panel actualizado.»: el paquete se está editando desde una versión vieja del panel o de la app del POS. Recarga el panel (o actualiza la app) y vuelve a hacer el cambio.
+- «Este paquete tiene un renglón Ilimitado: cambia sus productos desde el panel actualizado.»: el paquete se está editando desde una versión vieja del panel o desde la app del POS. Los productos de un paquete Ilimitado se cambian sólo desde el panel: recárgalo y vuelve a hacer el cambio ahí.
 - Mensajes que puede ver la clienta con su Ilimitado:
   - «Tu Ilimitado es personal: cubre 1 lugar por clase a tu nombre. Los demás lugares se pagan aparte.»: pidió más de un lugar.
   - «Ya tienes un lugar en esta clase con tu Ilimitado.»: ya tiene esa clase reservada.

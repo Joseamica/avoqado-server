@@ -41,26 +41,34 @@ function getStripeChargeBounds() {
  * Get active credit packs for a venue (public)
  */
 export async function getAvailablePacks(venueId: string, productId?: string) {
-  const packs = await prisma.creditPack.findMany({
-    where: { venueId, active: true },
-    include: {
-      items: {
+  // D679 (Codex código r2 #3): paquete y renglones en UNA foto de la base (Prisma los lee en dos consultas). Con esta lista el POS
+  // firma la foto con la que vende sin red; una lectura partida contra una edición daría un Ilimitado con la vigencia vieja.
+  const leidos = await prisma.$transaction(
+    tx =>
+      tx.creditPack.findMany({
+        where: { venueId, active: true },
         include: {
-          product: {
-            select: {
-              id: true,
-              name: true,
-              type: true,
-              price: true,
-              imageUrl: true,
-              duration: true,
+          items: {
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  type: true,
+                  price: true,
+                  imageUrl: true,
+                  duration: true,
+                },
+              },
             },
           },
         },
-      },
-    },
-    orderBy: { displayOrder: 'asc' },
-  })
+        orderBy: { displayOrder: 'asc' },
+      }),
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  )
+  // Un Ilimitado sin vigencia no se ofrece (ni en el POS ni en la tienda): siempre vence (la edición lo exige; esto cuida datos viejos).
+  const packs = leidos.filter(pack => pack.validityDays != null || !pack.items.some(item => item.unlimited))
 
   // If productId filter, only return packs that include that product
   if (productId) {
@@ -773,7 +781,24 @@ export async function refundCreditsForReservation(
       // D679 (regla 7): un Ilimitado regresa siempre completo; si fue en la ventana tardía, la falta queda anotada en el reason.
       const ilimitado = esIlimitado(tx)
       // Codex código r1 #7: un pase cuya compra ya se reembolsó está anulado; devolverle una clase sería un crédito que no se puede usar.
-      if (ilimitado && tx.creditPackPurchase?.status === CreditPurchaseStatus.REFUNDED) continue
+      // Codex código r2 #7b: la cancelación tardía SÍ se anota (un movimiento de 0 con la marca), para el conteo de faltas.
+      if (ilimitado && tx.creditPackPurchase?.status === CreditPurchaseStatus.REFUNDED) {
+        if (tardia && tx.creditItemBalanceId) {
+          await conexion.creditTransaction.create({
+            data: {
+              venueId,
+              customerId: tx.customerId,
+              creditPackPurchaseId: tx.creditPackPurchaseId,
+              creditItemBalanceId: tx.creditItemBalanceId,
+              type: 'REFUND',
+              quantity: 0,
+              reservationId,
+              reason: `${reasonPrefix ?? 'Cancellation refund'} — policy: ${policyApplied} (compra reembolsada, sin devolución) · ${UNLIMITED_LATE_CANCEL_MARK}`,
+            },
+          })
+        }
+        continue
+      }
       const refundQty = Math.floor((Math.abs(tx.quantity) * (ilimitado ? 100 : refundPercent)) / 100)
       if (refundQty <= 0) continue
       if (!tx.creditItemBalanceId) continue

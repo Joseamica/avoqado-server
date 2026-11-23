@@ -547,7 +547,7 @@
       ]
     },
     "dashboard/menu/crear-o-editar-paquete-de-creditos": {
-      "sha256": "4d914af799c372c85b1ffeb7db6588cfe7ae166b0b402eca2208b9056866e3ba",
+      "sha256": "077db8d0928a7f8e8c99d7eeda6c07670e36754846c100c3fc46f47e8c9bce4e",
       "requiredPermissions": [
         "menu:read",
         "creditPacks:read"

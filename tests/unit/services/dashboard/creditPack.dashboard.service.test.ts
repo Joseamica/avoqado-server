@@ -30,7 +30,7 @@ import { prismaMock } from '../../../__helpers__/setup'
 // Mocked globally in setup.ts — asserting on it verifies the audit dual-write.
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
-import { CreditPurchaseStatus, CreditTransactionType } from '@prisma/client'
+import { CreditPurchaseStatus, CreditTransactionType, Prisma } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 
 // ==========================================
@@ -2044,6 +2044,15 @@ describe('Credit Pack Dashboard Service', () => {
       prismaMock.creditPackPurchase.count.mockResolvedValue(1)
       await getCustomerPurchases('venue-123', {})
       expect(prismaMock.creditTransaction.groupBy).not.toHaveBeenCalled()
+    })
+  })
+
+  // Codex código r2 #3: la lista que lee el POS de ANDROID (y con la que se firma la foto) sale de una lectura consistente.
+  it('getCreditPacks lee paquetes y renglones en una sola foto de la base (REPEATABLE READ)', async () => {
+    prismaMock.creditPack.findMany.mockResolvedValue([])
+    await getCreditPacks('venue-123')
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
     })
   })
 })

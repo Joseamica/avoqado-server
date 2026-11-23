@@ -53,20 +53,26 @@ function getStripe(): Stripe {
 // ==========================================
 
 export async function getCreditPacks(venueId: string) {
-  return prisma.creditPack.findMany({
-    where: { venueId },
-    include: {
-      items: {
+  // D679 (Codex código r2 #3): paquete y renglones en UNA foto de la base. El POS de ANDROID firma con esta lista la foto con la que
+  // vende sin red; una lectura partida contra una edición daría un Ilimitado con la vigencia vieja (esa foto ya no se firma).
+  return prisma.$transaction(
+    tx =>
+      tx.creditPack.findMany({
+        where: { venueId },
         include: {
-          product: {
-            select: { id: true, name: true, type: true, price: true, imageUrl: true },
+          items: {
+            include: {
+              product: {
+                select: { id: true, name: true, type: true, price: true, imageUrl: true },
+              },
+            },
           },
+          _count: { select: { purchases: true } },
         },
-      },
-      _count: { select: { purchases: true } },
-    },
-    orderBy: { displayOrder: 'asc' },
-  })
+        orderBy: { displayOrder: 'asc' },
+      }),
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  )
 }
 
 export async function getCreditPackById(venueId: string, id: string) {

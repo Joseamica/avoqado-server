@@ -624,6 +624,16 @@ describe('D679 · reglas del Ilimitado (integración, base real)', () => {
       expect(await saldo(balanceId)).toBe(99998)
     })
 
+    it('r2 #1 · cita con la lista de saldos normal y un Ilimitado suelto que NO se canjea: el formulario manda, como hoy', async () => {
+      const normal = await comprar({ productId: masaje, unlimited: false })
+      const ili = await comprar({ productId: masaje })
+      const res = await reservarCita(304, { creditItemBalanceIds: [normal.balanceId], creditItemBalanceId: ili.balanceId })
+      expect(res.status).toBe(201)
+      expect(await reserva(res.body.confirmationCode)).toMatchObject({ guestName: 'Ana López', guestPhone: '+525599998888' })
+      expect(await saldo(normal.balanceId)).toBe(4)
+      expect(await saldo(ili.balanceId)).toBe(99999)
+    })
+
     it('#2 · si recepción cambió el contacto de la cita antes del canje, el canje la deja otra vez a nombre de la titular', async () => {
       const { balanceId } = await comprar({ productId: masaje })
       const c = await cita(301, { guestName: 'Ana López', guestPhone: '+525599998888', guestEmail: `otra-${RUN}@test.com` })
@@ -659,6 +669,29 @@ describe('D679 · reglas del Ilimitado (integración, base real)', () => {
       expect(esperando).toBe(1)
       expect(resultados[0]).toMatchObject({ status: 'rejected', reason: expect.objectContaining({ code: 'CREDIT_UNLIMITED_NAME_LOCKED' }) })
       expect((await prisma.customer.findUniqueOrThrow({ where: { id: gina.id } })).firstName).toBe('Gina')
+    })
+
+    it('r2 #7b · cancelar TARDE la reserva de un pase ya reembolsado: no devuelve crédito pero sí cuenta la cancelación tardía', async () => {
+      await prisma.reservationSettings.update({
+        where: { venueId: venue!.id },
+        data: { creditRefundMode: 'TIME_BASED', creditFreeRefundHoursBefore: 24, creditLateRefundPercent: 0 } as any,
+      })
+      const hilda = await prisma.customer.create({ data: { venueId: venue!.id, firstName: 'Hilda' } })
+      const { balanceId, purchaseId } = await comprar({ customerId: hilda.id, productId: masaje })
+      const c = await cita(3, { customerId: hilda.id })
+      await canjear(c.id, [balanceId], 1, hilda.id)
+      await refundPurchase(venue!.id, purchaseId, staffVenueId, 'reembolso')
+      expect(await cancelReservation(venue!.id, c.id, 'CUSTOMER')).toMatchObject({ creditsRefunded: 0 })
+      expect(await saldo(balanceId)).toBe(0)
+      const devoluciones = await prisma.creditTransaction.findMany({
+        where: { reservationId: c.id, type: 'REFUND' },
+        select: { quantity: true, reason: true },
+      })
+      expect(devoluciones).toEqual([
+        expect.objectContaining({ quantity: 0, reason: expect.stringMatching(/· ilimitado: cancelación tardía$/) }),
+      ])
+      const compras = await getCustomerPurchases(venue!.id, { customerId: hilda.id })
+      expect((compras.purchases.find(p => p.id === purchaseId) as any).faltas).toEqual({ noLlego: 0, cancelTarde: 1 })
     })
 
     it('#7 · cancelar después de reembolsar la compra del pase: no devuelve nada y la vista previa lo dice', async () => {

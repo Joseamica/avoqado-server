@@ -135,4 +135,10 @@ describe('Paquetes del POS: llave y foto en el borde', () => {
     const foto = leerFotoDelPaquete(firmarFotoDelPaquete(pack))!
     expect(foto.items.every(i => i.unlimited !== true)).toBe(true)
   })
+
+  // Codex código r2 #3: una foto con un renglón Ilimitado y sin vigencia no se firma (el POS no ofrece ese paquete).
+  it('un paquete con un renglón Ilimitado y sin vigencia no lleva foto', () => {
+    const roto = { ...pack, validityDays: null, items: [{ id: 'i-1', productId: 'prod-1', quantity: 99999, unlimited: true }] }
+    expect(firmarFotoDelPaquete(roto)).toBeNull()
+  })
 })

@@ -746,6 +746,19 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
 /**
  * POST /public/venues/:venueSlug/reservations
  */
+/**
+ * Los saldos que de verdad se canjean, en el orden en que se canjean (D679, Codex código r2 #1): la clase canjea
+ * `creditItemBalanceId`; la cita, la lista `creditItemBalanceIds` si viene (aunque vacía) y si no, `creditItemBalanceId`. La
+ * identidad de la titular se decide con esta MISMA lista.
+ */
+function saldosQueSeCanjean(body: { classSessionId?: unknown; creditItemBalanceId?: unknown; creditItemBalanceIds?: unknown }): string[] {
+  const suelto = typeof body.creditItemBalanceId === 'string' && body.creditItemBalanceId ? [body.creditItemBalanceId] : []
+  if (body.classSessionId) return suelto
+  return Array.isArray(body.creditItemBalanceIds)
+    ? body.creditItemBalanceIds.filter((id: unknown): id is string => typeof id === 'string')
+    : suelto
+}
+
 export async function createReservation(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueSlug } = req.params
@@ -805,12 +818,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
       const titular = await titularDelPase(prisma, {
         venueId: venue.id,
         sessionCustomerId: identity.customerId,
-        // Codex código r1 #1: los dos campos, juntos. La clase canjea `creditItemBalanceId` y la cita la lista: si CUALQUIERA de
-        // los saldos que mandó es Ilimitado, la reserva va a nombre de la titular.
-        balanceIds: [
-          ...(Array.isArray(req.body.creditItemBalanceIds) ? req.body.creditItemBalanceIds : []),
-          ...(typeof req.body.creditItemBalanceId === 'string' ? [req.body.creditItemBalanceId] : []),
-        ],
+        // Codex código r2 #1: los MISMOS saldos que va a canjear (clase o cita). Un Ilimitado que viene pero no se usa no cambia nada.
+        balanceIds: saldosQueSeCanjean(req.body),
       })
       if (titular) Object.assign(req.body, titular)
     }
@@ -1248,11 +1257,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
     // compensation (SYSTEM / CREDIT_REDEEM_FAILED) and the error surfaces.
     let creditRedeemed = false
     let creditsUsed = 0
-    const balanceIds: string[] = Array.isArray(req.body.creditItemBalanceIds)
-      ? req.body.creditItemBalanceIds.filter((id: unknown): id is string => typeof id === 'string')
-      : req.body.creditItemBalanceId
-        ? [req.body.creditItemBalanceId]
-        : []
+    const balanceIds = saldosQueSeCanjean(req.body)
     if (balanceIds.length > 0) {
       const seats = (req.body.spotIds?.length || req.body.partySize || 1) as number
       const result = await redeemCreditsWithCompensation({
