@@ -1,13 +1,13 @@
 {
   "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
   "sourceRepo": "avoqado-web-dashboard",
-  "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc",
+  "sourceRef": "7d96242442400aba5298cb3e5a79ce50c0386214",
   "version": "main",
   "pasos": [
     {
       "paso": 1,
       "archivo": "src/components/Sidebar/app-sidebar.tsx",
-      "linea": 1156,
+      "linea": 1172,
       "cita": "title: t('sidebar:routes.home'),"
     },
     {
@@ -49,7 +49,7 @@
     {
       "paso": 2,
       "archivo": "src/components/Sidebar/app-sidebar.tsx",
-      "linea": 898,
+      "linea": 914,
       "cita": "title: t('sidebar:reportsMenu.salesSummary'),"
     },
     {
@@ -61,13 +61,13 @@
     {
       "paso": 2,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 2100,
+      "linea": 2110,
       "cita": "label={t('salesSummary.rows.grossSales')}"
     },
     {
       "paso": 2,
       "archivo": "src/locales/es/reports.json",
-      "linea": 598,
+      "linea": 609,
       "cita": "\"serviceCosts\": \"Cargos por servicio\","
     },
     {
@@ -97,31 +97,31 @@
     {
       "paso": 3,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 2171,
-      "cita": "(selectedMetrics.includes('deferredSales') || (data.summary.unpaidOrders ?? 0) > 0) && ("
+      "linea": 1930,
+      "cita": "(selectedMetrics.includes('deferredSales') || (data.summary.unpaidOrders ?? 0) > 0)"
     },
     {
       "paso": 3,
       "archivo": "src/locales/es/reports.json",
-      "linea": 805,
+      "linea": 799,
       "cita": "\"deferredSales\": \"Sin cobrar\","
     },
     {
       "paso": 3,
       "archivo": "src/locales/es/reports.json",
-      "linea": 649,
+      "linea": 671,
       "cita": "\"unpaidOrdersLabel_other\": \"cuentas\","
     },
     {
       "paso": 3,
       "archivo": "src/locales/es/reports.json",
-      "linea": 602,
+      "linea": 613,
       "cita": "\"deferredSales\": \"Sin cobrar\","
     },
     {
       "paso": 3,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 1608,
+      "linea": 1587,
       "cita": "onClick={applyMetrics}"
     },
     {
@@ -139,7 +139,7 @@
     {
       "paso": 4,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 2030,
+      "linea": 2019,
       "cita": "<p className=\"text-sm text-muted-foreground mb-1\">{t('salesSummary.totalSales')}</p>"
     },
     {
@@ -151,13 +151,13 @@
     {
       "paso": 4,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 2244,
+      "linea": 2211,
       "cita": "label={t('salesSummary.rows.tenderCommissions')}"
     },
     {
       "paso": 4,
       "archivo": "src/locales/es/reports.json",
-      "linea": 606,
+      "linea": 617,
       "cita": "\"tenderCommissions\": \"Comisiones de terceros\","
     },
     {
@@ -171,6 +171,12 @@
       "archivo": "avoqado-server/src/services/dashboard/salesSummaryPoblacion.ts",
       "linea": 49,
       "cita": "export function sqlComisionDeTerceros(p: string, vistaDeMovimientos: boolean): string {"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 982,
+      "cita": "\"apart\": \"Aparte: no entra en «Neto cobrado»\","
     }
   ],
   "permisos": [

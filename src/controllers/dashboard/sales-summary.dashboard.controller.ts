@@ -31,6 +31,7 @@ import {
 } from '@/services/dashboard/export.helpers'
 import { BadRequestError } from '@/errors/AppError'
 import { zonaDelCalculo } from '@/utils/sanitizeTimezone'
+import { conceptoDelArchivo, seccionDelArchivo } from '@/services/dashboard/salesSummaryExportLabels'
 import { decidirCarril, MENSAJE_GET_VIEJO_GRANDE } from '@/services/exports/exportPolicy'
 import { MENSAJE_QR_ANTERIOR_SIN_DETALLE, VENTAS_DETALLADAS_COLUMNAS } from '@/services/exports/exportadores/ventasDetalladas.exportador'
 import { AVISO_PUENTE_QR_CAIDO, MINDFORM_NEW_VENUE_ID } from '@/services/legacy/qrPayments.legacy.service'
@@ -379,8 +380,9 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
     type Row = SalesSummaryExportRow
 
     const allColumns: ExportColumnDef<Row>[] = [
-      { id: 'section', label: 'Sección', value: r => r.section },
-      { id: 'label', label: 'Concepto', value: r => r.label },
+      // Ids en inglés (`totals`, `CARD`) sólo en las filas, que también lee la MCP; en el archivo, en español (carril F).
+      { id: 'section', label: 'Sección', value: r => seccionDelArchivo(r) },
+      { id: 'label', label: 'Concepto', value: r => conceptoDelArchivo(r) },
       { id: 'count', label: 'Cantidad', value: r => r.count },
       { id: 'amount', label: 'Monto', value: r => r.amount },
       { id: 'percentage', label: 'Porcentaje', value: r => r.percentage },

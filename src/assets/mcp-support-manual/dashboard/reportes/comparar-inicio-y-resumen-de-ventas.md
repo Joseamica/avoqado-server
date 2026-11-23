@@ -6,7 +6,7 @@ category: reportes
 task: comparar-inicio-y-resumen-de-ventas
 requiredPermissions: []
 sourceRepo: avoqado-web-dashboard
-sourceRef: c456800b67e7426832578e8bade2b6caa1c265bc
+sourceRef: 7d96242442400aba5298cb3e5a79ce50c0386214
 keywords:
   - no me cuadra
   - el panel y la app no cuadran
@@ -28,12 +28,12 @@ Para *Inicio* necesitas permiso para ver el inicio y las analíticas; para *Repo
 
 1. En *Inicio*, *Ventas netas* suma lo que se cobró en el periodo, sin propinas, en el día del cobro. Los reembolsos no se restan ahí.
 2. En *Reportes* › *Resumen de Ventas*, *Ventas brutas* suma las cuentas ya cobradas (artículos y *Cargos por servicio*) el día en que se abrieron. *Ventas netas* les resta *Descuentos* y *Devoluciones*.
-3. Las cuentas abiertas o pagadas a medias no son venta: salen en *Sin cobrar*, con cuántas son y lo que todavía deben sin propina. Si no ves el renglón, toca *Métricas*, marca *Sin cobrar* y toca *Aplicar*.
+3. Las cuentas abiertas o pagadas a medias no son venta: salen abajo, en *Aparte: no entra en «Neto cobrado»*, en el renglón *Sin cobrar*, con cuántas son y lo que todavía deben sin propina. Si no ves el renglón, toca *Métricas*, marca *Sin cobrar* y toca *Aplicar*.
 4. El número grande, *Neto cobrado*, es *Ventas netas* más propinas, menos *Comisiones de plataforma* y *Comisiones de terceros* (Rappi, Uber Eats, DiDi o un tipo de pago con comisión).
 
 ## Problemas frecuentes
 
 - Sin filtros, una cuenta abierta ayer y cobrada hoy sale ayer en *Resumen de Ventas* y hoy en *Inicio*.
-- Una cuenta pagada a medias no cuenta como venta, ni en *Neto cobrado*, hasta que se termina de pagar; su abono tampoco entra en *Propinas* ni en las transacciones hasta entonces.
-- *Inicio* no resta las devoluciones y el *Resumen de Ventas* sí. Las transacciones del *Resumen de Ventas* son cobros: las devoluciones van en su renglón, con su número.
+- Una cuenta pagada a medias no cuenta como venta, ni en *Neto cobrado*, hasta que se termina de pagar; su abono tampoco entra en *Propinas* ni en los cobros que cuenta el reporte hasta entonces.
+- *Inicio* no resta las devoluciones y el *Resumen de Ventas* sí. El número de *cobros* del *Resumen de Ventas* no cuenta las devoluciones: van en su renglón, con su número. Una cuenta pagada en tres pagos cuenta tres cobros.
 - *Liquidación de hoy*, en *Inicio*, no es lo que vendiste hoy: es lo que se estima que cae hoy en tu banco por cobros con tarjeta, sin el efectivo.

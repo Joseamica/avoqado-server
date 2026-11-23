@@ -454,7 +454,11 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
       .set(authHeader('OWNER'))
     expect(res.status).toBe(200)
     expect(res.text).toContain('Ventas brutas')
-    expect(res.text).toContain('CARD')
+    // Carril F (deuda del carril E): «Sección» y «Concepto» en español en el archivo, no los ids (`totals`, `CARD`).
+    expect(res.text).toContain('Totales')
+    expect(res.text).toContain('Métodos de pago')
+    expect(res.text).toContain('Tarjeta')
+    expect(res.text).not.toMatch(/(^|[,"])(totals|paymentMethods|CARD)([,"]|$)/m)
   })
 
   it('🔴 D13.6 · la sección «statement» se acepta y pide el estado de cuenta (compuerta Pro)', async () => {
