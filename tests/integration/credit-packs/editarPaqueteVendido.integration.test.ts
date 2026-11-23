@@ -10,7 +10,7 @@
  */
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { sellPackInPerson } from '@/services/mobile/creditPack.mobile.service'
+import { grantPackInTx, sellPackInPerson } from '@/services/mobile/creditPack.mobile.service'
 import { updateCreditPack } from '@/services/dashboard/creditPack.dashboard.service'
 
 const RUN = Date.now()
@@ -156,6 +156,35 @@ describe('Editar un paquete de créditos ya vendido (integración, base real)', 
         [yoga.id, 3],
         [lagree.id, 2],
       ].sort(),
+    )
+  })
+
+  it('🔴 la dueña quita un producto justo cuando el POS entrega: lo vendido se entrega sin enlace y no truena', async () => {
+    await prisma.creditPackItem.create({ data: { creditPackId: pack.id, productId: lagree.id, quantity: 2 } })
+    // Lo que la venta lee ANTES de abrir su transacción (`sellPackInPerson` y la compra en línea leen el paquete afuera).
+    const leido = await prisma.creditPack.findUniqueOrThrow({ where: { id: pack.id }, include: { items: true } })
+    // En ese instante el panel quita Lagree: su renglón deja de existir.
+    await updateCreditPack(venueId!, pack.id, { items: [{ productId: yoga.id, quantity: 5 }] })
+
+    // Antes: el saldo de Lagree apuntaba al renglón borrado y la entrega tronaba con P2003 (cobrado y sin créditos).
+    const compra = await prisma.$transaction(tx =>
+      grantPackInTx(tx as any, {
+        pack: leido as any,
+        venueId: venueId!,
+        customerId: clienta.id,
+        amountPaid: new Prisma.Decimal(1450),
+        deliveryKey: `carrera-${RUN}`,
+      }),
+    )
+
+    const [vivo] = await productosDelPaquete()
+    const entregados = await saldos(compra.id)
+    expect(entregados).toHaveLength(2)
+    expect(entregados).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ productId: yoga.id, originalQuantity: 5, creditPackItemId: vivo.id }),
+        expect.objectContaining({ productId: lagree.id, originalQuantity: 2, creditPackItemId: null }),
+      ]),
     )
   })
 })

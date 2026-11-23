@@ -25,6 +25,8 @@ describe('Venta en persona con llave de entrega', () => {
     return {
       creditPackPurchase: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'purchase-1' }) },
       creditItemBalance: { create: jest.fn().mockResolvedValue({ id: 'bal-1' }) },
+      // `renglonesVivos`: qué renglones del paquete siguen existiendo al entregar (aquí no importa el enlace).
+      creditPackItem: { findMany: jest.fn().mockResolvedValue([]) },
       creditTransaction: { create: jest.fn().mockResolvedValue({}) },
       customer: { update: jest.fn().mockResolvedValue({}) },
       product: { findMany: jest.fn().mockResolvedValue([{ id: 'prod-1' }]) },

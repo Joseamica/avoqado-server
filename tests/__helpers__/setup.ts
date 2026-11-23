@@ -625,6 +625,9 @@ prismaMock.productModifierGroup.findMany.mockResolvedValue([])
 // Variantes (tarea 11): `archivarProductos` (todo borrado de producto y «Reemplazar menú») busca los padres que se quedaron sin
 // variantes vivas, y «Reemplazar» las familias vivas cuya categoría vuelve al menú. Casi ningún negocio tiene familias: ninguna.
 prismaMock.productGroup.findMany.mockResolvedValue([])
+// Entrega de paquetes de créditos: `renglonesVivos` relee qué renglones del paquete siguen existiendo antes de ligar el saldo.
+// Por default ninguno (el saldo queda sin enlace); la prueba que afirma el enlace declara los suyos.
+prismaMock.creditPackItem.findMany.mockResolvedValue([])
 prismaMock.externalBusyBlock.findFirst.mockResolvedValue(null)
 // Terminal list endpoints (getOrgTerminals / getAllTerminals) run an incidental
 // migration-badge query (prisma.tpvCommandQueue.findMany) for the page's terminals.
