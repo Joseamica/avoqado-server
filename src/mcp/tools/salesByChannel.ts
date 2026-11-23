@@ -54,10 +54,11 @@ export function rangoDelNegocio(
 ): { startDate: string; endDate: string } | { error: string } {
   const dia = (s: string) => DateTime.fromFormat(s, 'yyyy-MM-dd', { zone: tz })
   const hoy = DateTime.now().setZone(tz)
-  const hasta = toDate ? dia(toDate) : hoy
+  // Omitida es `undefined`; una fecha vacía ("") se rechaza como inválida, no se toma como omitida (Codex r9 #1).
+  const hasta = toDate !== undefined ? dia(toDate) : hoy
   // Sin inicio, los siete días que terminan en el fin (hoy, si tampoco hay fin): sólo con un fin antiguo no sale un rango al revés
   // (Codex r8 #1).
-  const desde = fromDate ? dia(fromDate) : hasta.minus({ days: 6 })
+  const desde = fromDate !== undefined ? dia(fromDate) : hasta.minus({ days: 6 })
   if (!desde.isValid || !hasta.isValid) return { error: 'Las fechas van como AAAA-MM-DD y tienen que existir (por ejemplo 2026-11-01).' }
   if (desde.startOf('day') > hasta.startOf('day')) return { error: 'La fecha de inicio va antes que la de fin.' }
   return { startDate: desde.startOf('day').toUTC().toISO()!, endDate: hasta.endOf('day').toUTC().toISO()! }

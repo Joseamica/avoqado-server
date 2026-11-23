@@ -191,6 +191,12 @@ describe('rangoDelNegocio (Codex r2 #7)', () => {
     expect(rangoDelNegocio('America/Mexico_City', '2026-11-07', '2026-11-01')).toHaveProperty('error')
   })
 
+  it('🔴 Codex r9 #1 · una fecha vacía se rechaza, no se toma como omitida', () => {
+    expect(rangoDelNegocio('America/Mexico_City', '', '2026-11-22')).toHaveProperty('error')
+    expect(rangoDelNegocio('America/Mexico_City', '2026-11-01', '')).toHaveProperty('error')
+    expect(rangoDelNegocio('America/Mexico_City', '', '')).toHaveProperty('error')
+  })
+
   it('la tool contesta el error sin consultar el reporte', async () => {
     mockPlanGate.mockResolvedValue(null)
     const out = parse(await call({ venueId: 'v1', fromDate: '2026-02-30' }))
