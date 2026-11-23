@@ -1063,17 +1063,14 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     // not summed, not asked (the statement below still answers, with zeros).
     const paginas = merchantAccountId
       ? { unavailable: false }
-      : await forEachLegacyPaymentPage(
-          { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
-          rows => {
-            for (const payment of rows) {
-              if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
-              amount += Number(payment.amount)
-              tips += Number(payment.tipAmount)
-              legacyCount += 1
-            }
-          },
-        )
+      : await forEachLegacyPaymentPage({ startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() }, rows => {
+          for (const payment of rows) {
+            if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
+            amount += Number(payment.amount)
+            tips += Number(payment.tipAmount)
+            legacyCount += 1
+          }
+        })
     const summary: SalesSummaryMetrics = {
       ...emptySummary(),
       tips,
