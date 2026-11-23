@@ -205,7 +205,7 @@ describe('S6 · consulta durable POR INTENTO, sólo de la terminal del JWT', () 
     expect(JSON.stringify(estado)).not.toContain('NOT_CHARGED')
   })
 
-  it('declined del procesador: evidencia DECLINED sobre el intento, NOT_RECORDED, y la solicitud cerrada por el rechazo del banco (S1.5)', async () => {
+  it('declined del procesador: evidencia DECLINED sobre el intento, pero NOT_RECORDED y la solicitud sigue en vuelo (un approved posterior aún puede crear)', async () => {
     const solicitud = await f.solicitud()
     const A = await vincular(solicitud.requestId)
     expect((await webhook(A, { status: 'declined', description: 'RECHAZADA' })).result.action).toBe('NOT_APPROVED')
@@ -213,7 +213,8 @@ describe('S6 · consulta durable POR INTENTO, sólo de la terminal del JWT', () 
     const estado = await consultar(A)
     expect(estado!.attempt).toMatchObject({ outcome: 'NOT_RECORDED', paymentId: null, processorEvidence: 'DECLINED' })
     expect(estado!.attempt.processorEvidenceAt).not.toBeNull()
-    expect(estado!.request).toMatchObject({ status: 'FAILED', outcome: 'NOT_CHARGED', outcomeEvidence: 'PROCESSOR_DECLINED' })
+    expect(estado!.request).toMatchObject({ status: 'SENT', outcome: 'UNRESOLVED' })
+    expect(JSON.stringify(estado)).not.toContain('NOT_CHARGED')
   })
 
   it.each([

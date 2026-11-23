@@ -374,9 +374,8 @@ describe('S7 · declined es evidencia, nunca una liberación', () => {
     expect(result).toMatchObject({ action: 'NOT_APPROVED' })
     expect(await evento(eventId)).toMatchObject({ status: 'ERROR', errorReason: 'NOT_APPROVED', attemptId, paymentId: null })
     expect(await pagos()).toHaveLength(0)
-    // S1.5: el rechazo cierra la solicitud al momento (FAILED/BANK_DECLINED).
-    expect(await fila(solicitud.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'BANK_DECLINED', paymentId: null })
-    // Y una aprobación POSTERIOR del mismo intento sí crea (y reabre como aprobado tardío): el rechazo no lo volvió inelegible.
+    expect(await fila(solicitud.requestId)).toMatchObject({ status: 'SENT', paymentId: null })
+    // Y una aprobación POSTERIOR del mismo intento sí crea: el rechazo no lo volvió inelegible ni lo liberó.
     expect((await webhook(attemptId)).result.action).toBe('CONFIRMED')
   })
 
@@ -2041,14 +2040,12 @@ describe('S2-bis · el webhook DECLINED suelta la venta y la ranura (camino real
     expect((await fila(solicitud.requestId)).status).toBe('UNKNOWN')
   })
 
-  // Cobro simple · S1.5 (22-nov): un «no» del banco es final y se ve AL MOMENTO, también con la solicitud en vuelo (antes esperaba
-  // a la terminal o a una persona). Las guardas que quedan: otro intento abierto y un aprobado conocido.
-  it('🔴 S1.5 · un declined cierra al momento una solicitud todavía en vuelo (SENT) con su motivo', async () => {
+  it('🔴 un declined NO cierra una solicitud todavía en vuelo (SENT): el cajero puede estar cobrando', async () => {
     const solicitud = await f.solicitud({ status: 'SENT' })
     const attemptId = await vincular(solicitud.requestId)
 
     await webhook(attemptId, { status: 'declined' })
 
-    expect(await fila(solicitud.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'BANK_DECLINED' })
+    expect((await fila(solicitud.requestId)).status).toBe('SENT')
   })
 })
