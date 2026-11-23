@@ -10,6 +10,7 @@ import prisma from '@/utils/prismaClient'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { processAngelPayWebhook } from '@/services/tpv/angelpay-webhook.service'
 import { reconcileBankDeclined } from '@/services/tpv/uncharged-reconciliation.service'
+import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
 import { crearFixture, exigirBaseDesechable, exigir, type Fixture } from './webhookCheckpoint.fixture'
@@ -233,5 +234,68 @@ describe('R3-2 · un negativo posterior de la terminal o un cancel ACCEPTED no b
     await svc.handleCancelDispositionFromSocket({ requestId: s.requestId, disposition: 'ACCEPTED' }, tpv())
     expect(await fila(s.requestId)).toMatchObject({ status: 'CANCELLED', cancelDisposition: 'ACCEPTED' })
     expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }))
+  })
+})
+
+describe('R3-5 · un Payment que llega tras BANK_DECLINED y una re-retención avisa al dueño', () => {
+  it('BANK_DECLINED → re-retenida por un aprobado de B → Payment de B: aprobado tardío con su asiento y aviso a la dueña', async () => {
+    const duena = await prisma.staff.create({
+      data: {
+        email: `${f.fixture}-duena-r35@example.test`,
+        firstName: 'Dueña',
+        lastName: 'R35',
+        venues: { create: { venueId: f.venueId, role: 'OWNER', active: true } },
+      },
+      select: { id: true },
+    })
+    try {
+      const venta = await f.nuevaVenta(100)
+      const s = await f.solicitud({ orderId: venta.id, status: 'UNKNOWN', noResponseAt: new Date(), acknowledgedAt: new Date() })
+      const a = await intento(s.requestId)
+      await rechazo(a)
+      expect(await fila(s.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'BANK_DECLINED' })
+      const b = await intento(s.requestId)
+      const evento = await prisma.providerEventLog.create({
+        data: {
+          provider: 'PAYMENT_PROCESSOR',
+          type: 'send_transaction',
+          eventId: `angelpay-${f.nuevoEventId()}`,
+          venueId: f.venueId,
+          attemptId: b,
+          payload: f.eventoAngelPay(b),
+        } as any,
+      })
+      expect(
+        await terminalPaymentService.retenerSolicitudLiberadaPorAprobacion({
+          requestId: s.requestId,
+          venueId: f.venueId,
+          attemptId: b,
+          eventLogId: evento.id,
+          motivo: 'PROCESSING_ERROR',
+        }),
+      ).not.toBe('NOT_APPLICABLE')
+      expect(await fila(s.requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'BANK_APPROVED_AWAITING_PAYMENT' })
+      const pago = await recordOrderPayment(
+        f.venueId,
+        venta.id,
+        f.registroDeLaTerminal({ attemptId: b, requestId: s.requestId }),
+        f.staffId,
+      )
+      expect(await fila(s.requestId)).toMatchObject({ status: 'COMPLETED', paymentId: pago.id })
+      expect(
+        await prisma.activityLog.count({
+          where: { venueId: f.venueId, action: 'TERMINAL_PAYMENT_LATE_APPROVAL_AFTER_WINDOW', entityId: s.id },
+        }),
+      ).toBe(1)
+      await new Promise(r => setTimeout(r, 300))
+      const avisos = (await prisma.notification.findMany({ where: { venueId: f.venueId, recipientId: duena.id } })).filter(
+        n => (n.metadata as { paymentId?: string } | null)?.paymentId === pago.id,
+      )
+      expect(avisos).toHaveLength(1)
+    } finally {
+      await prisma.notification.deleteMany({ where: { recipientId: duena.id } })
+      await prisma.staffVenue.deleteMany({ where: { staffId: duena.id } })
+      await prisma.staff.deleteMany({ where: { id: duena.id } })
+    }
   })
 })

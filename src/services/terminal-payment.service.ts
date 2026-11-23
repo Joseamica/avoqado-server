@@ -1146,11 +1146,18 @@ export function afirmacionDeLaTerminal(resultJson: Prisma.JsonValue | null): Rec
   return { valor: afirmacion }
 }
 
-/** El instante en que la VENTANA liberó la fila, tal como lo dejó escrito `releaseUnprovenNegative`; `null` si no está o no se lee. */
+/**
+ * El instante en que el SERVIDOR soltó la fila sin cobro, tal como lo dejó escrito quien la soltó: la ventana o el cierre de 10 s
+ * (`releasedAfterWindow.releasedAt`) o el rechazo del banco (`bankDeclined.at`, Codex S1 r3 R3-5: sin él, un Payment que llegaba tras
+ * BANK_DECLINED y una re-retención se registraba sin el aviso del aprobado tardío). `null` si no está o no se lee.
+ */
 function instanteDeLiberacionPorVentana(resultJson: Prisma.JsonValue | null): Date | null {
   const sobre = resultJson && typeof resultJson === 'object' && !Array.isArray(resultJson) ? (resultJson as Record<string, unknown>) : null
-  const liberacion = sobre?.releasedAfterWindow
-  const releasedAt = liberacion && typeof liberacion === 'object' ? (liberacion as Record<string, unknown>).releasedAt : undefined
+  const leer = (llave: string, campo: string) => {
+    const v = sobre?.[llave]
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>)[campo] : undefined
+  }
+  const releasedAt = leer('releasedAfterWindow', 'releasedAt') ?? leer('bankDeclined', 'at')
   if (typeof releasedAt !== 'string') return null
   const fecha = new Date(releasedAt)
   return Number.isNaN(fecha.getTime()) ? null : fecha
