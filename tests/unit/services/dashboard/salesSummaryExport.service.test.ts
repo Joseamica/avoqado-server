@@ -152,7 +152,10 @@ describe('detailed rows where-clause + cap', () => {
     const where = filtrosDe(paymentCount.mock.calls[0][0].where)
     expect(where.venueId).toBe('v1')
     expect(where.status).toBe('COMPLETED')
-    expect(where.method).toBe('CASH') // from buildPaymentWhereFilter('CASH')
+    // from buildPaymentWhereFilter('CASH'): el método, y (carril C2, D12) sólo dinero — sin medios de sistema ni cortesías de $0
+    const delMetodo = where.AND as unknown[]
+    expect(delMetodo[0]).toEqual({ method: 'CASH' })
+    expect(JSON.stringify(delMetodo[1])).toContain('tipAmount')
   })
 
   // D13.3: la pantalla cuenta cada cobro por su hora REAL (la del aparato si se cobró sin red); el detallado lo elegía por la hora de

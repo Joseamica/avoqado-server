@@ -128,6 +128,12 @@ export interface PaymentMethodDetailedBreakdown {
   tenderCommissions?: number
   /** Lo devuelto de cuentas CANCELADAS o borradas: sí salió dinero, pero la cabecera no lo resta (su venta tampoco se cuenta). */
   cancelledOrderRefunds?: number
+  /**
+   * Aditivo (carril C2, D17): de `amount`/`count`, lo que es de cobros en OTRA moneda (sumado tal cual, sin convertir). Los campos
+   * nuevos del estado (`chargedAmount`, `chargedCount`, …) ya son sólo pesos; el estado resta esto de `amount`. Sólo si hay.
+   */
+  foreignAmount?: number
+  foreignCount?: number
   subBuckets?: Array<{
     type: 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL'
     amount: number
@@ -241,6 +247,32 @@ export interface StatementDestinations {
   terminal: MoneyDestination
   online: MoneyDestination
   other: MoneyDestination
+  tenderCommissions: number
+  /**
+   * Aditivo (carril C2, D12.3): «otros» por tipo de pago. `key` = el id del tipo de pago propio (Rappi, Uber, Vales…) con su
+   * `label`; sin tipo, el método (`BANK_TRANSFER`, `DIGITAL_WALLET`, `CARD` de otra terminal…; `label` null). Suman `other`.
+   * `tenderCommissions` es la comisión congelada de ESE tipo (ya incluida en el total de arriba). Sólo si hay algo.
+   */
+  otherByType?: OtherTypeBreakdown[]
+  /**
+   * Aditivo (carril C2, D17): movimientos en línea en OTRA moneda (una liga puede cobrar en dólares; `Payment` no guarda moneda:
+   * se lee de su sesión de pago). No entran a cajones ni destinos —sumarlos como pesos mentía—: van aquí, en su moneda y sin
+   * convertir. `net` es cobros menos devoluciones (con signo); `transactionCount` cuenta cobros y `refundCount` devoluciones.
+   */
+  foreignCurrency?: ForeignCurrencyMovement[]
+}
+
+export interface ForeignCurrencyMovement {
+  currency: string
+  net: number
+  transactionCount: number
+  refundCount: number
+}
+
+export interface OtherTypeBreakdown extends MoneyDestination {
+  key: string
+  label: string | null
+  method: string
   tenderCommissions: number
 }
 
@@ -360,6 +392,35 @@ export type PaymentMethodFilter = 'CASH' | 'CARD' | 'QR_LEGACY' | 'OTHER'
 /** «En línea de Avoqado» del cobro con alias `alias`: siempre true o false (nunca NULL), así se puede agrupar y negar. */
 const sqlEnLineaDeAvoqado = (alias: 'p' | 'orig') =>
   `(COALESCE(${alias}."fundsFlow" = 'AVOQADO_PROCESSED', false) OR ${alias}."ecommerceMerchantId" IS NOT NULL)`
+/**
+ * La moneda de un cobro (carril C2, D17). `Payment` no guarda moneda: la tiene su sesión de pago (`CheckoutSession.currency`),
+ * y una liga (por API o por la MCP) acepta cualquier `currency`. Se juntan primero las sesiones PAGADAS (`COMPLETED`) del negocio
+ * que NO son pesos (`484` es el código numérico ISO del peso: es MXN) — casi siempre ninguna — como pares (enlace → moneda), y
+ * cada cobro se une a ellas por IGUALDAD (Codex r4 del carril C2, #6), por las formas que se han escrito (r1-r3):
+ * `paymentId` (desde D7, 26-oct-2026); antes, el id del cobro en la sesión: `sessionId` (PaymentIntent de Stripe),
+ * `metadata.stripePaymentIntentId` (Stripe Checkout) o `blumonCheckoutId` (Blumon E-commerce, aunque el cobro no traiga su
+ * canal). Una devolución toma la de su cobro original. Sin sesión extranjera, MXN. Un enlace repetido cuenta una vez.
+ */
+const sqlSesionesExtranjeras = (venueId: string) => Prisma.sql`sesiones_extranjeras AS MATERIALIZED (
+  SELECT DISTINCT ON (e.tipo, e.enlace) e.tipo, e.enlace, e.moneda
+  FROM "CheckoutSession" cs
+  JOIN "EcommerceMerchant" em ON em.id = cs."ecommerceMerchantId"
+  CROSS JOIN LATERAL (VALUES
+    ('pago', cs."paymentId", UPPER(TRIM(cs."currency"))),
+    ('cobro', CASE WHEN cs."paymentId" IS NULL THEN cs."sessionId" END, UPPER(TRIM(cs."currency"))),
+    ('cobro', CASE WHEN cs."paymentId" IS NULL THEN cs."blumonCheckoutId" END, UPPER(TRIM(cs."currency"))),
+    ('cobro', CASE WHEN cs."paymentId" IS NULL THEN cs."metadata" ->> 'stripePaymentIntentId' END, UPPER(TRIM(cs."currency")))
+  ) AS e(tipo, enlace, moneda)
+  WHERE em."venueId" = ${venueId}
+    AND cs."status" = 'COMPLETED'
+    AND UPPER(TRIM(cs."currency")) NOT IN ('MXN', '484')
+    AND e.enlace IS NOT NULL
+  ORDER BY e.tipo, e.enlace, cs."createdAt"
+)`
+/** Las dos uniones por igualdad con las sesiones extranjeras (la de una devolución, con su cobro original). */
+const SQL_UNE_SESIONES_EXTRANJERAS = `LEFT JOIN sesiones_extranjeras sx_pago ON sx_pago.tipo = 'pago' AND sx_pago.enlace = (CASE WHEN orig.id IS NOT NULL THEN orig.id ELSE p.id END)
+        LEFT JOIN sesiones_extranjeras sx_cobro ON sx_cobro.tipo = 'cobro' AND sx_cobro.enlace = (CASE WHEN orig.id IS NOT NULL THEN orig."processorId" ELSE p."processorId" END)`
+const SQL_MONEDA_DEL_COBRO = `COALESCE(sx_pago.moneda, sx_cobro.moneda, 'MXN')`
 const SQL_COMISION_DEL_COBRO = `CASE WHEN tc."id" IS NOT NULL THEN COALESCE(tc."venueChargeAmount", 0) + COALESCE(tc."venueFixedFee", 0) WHEN ${sqlEnLineaDeAvoqado('p')} THEN COALESCE(p."feeAmount", 0) ELSE 0 END`
 
 export type CardTypeFilter = 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL'
@@ -451,9 +512,56 @@ function withPercentages(buckets: PaymentMethodBreakdown[]): PaymentMethodBreakd
  * getSalesSummary. We throw here as defense-in-depth so any direct caller
  * (e.g. a test) gets a clear failure instead of silent zero rows.
  */
-export function buildPaymentWhereFilter(paymentMethod?: PaymentMethodFilter, cardType?: CardTypeFilter): Prisma.PaymentWhereInput {
-  if (!paymentMethod) return {}
+/**
+ * Carril C2 (hz:fefa11b6:D12): con un filtro de método, el reporte es una vista de DINERO. No es dinero que entró o salió de la
+ * caja o del banco: los medios de SISTEMA —el saldo de una tarjeta de regalo, el saldo a favor (una devolución abonada al sobre de
+ * la clienta) y el crédito de un cambio— ni un cobro de $0 (importe y propina en cero: el cierre de una cuenta cubierta por una
+ * cortesía o un descuento, que la TPV marca `FREE_CART` y el POS guarda como efectivo de $0 sin marca; Codex r4 del carril C2, #1).
+ * El estado de cuenta ya excluye los medios de sistema; con un filtro de método entraban y una devolución a saldo a favor salía
+ * como −$30 de «Neto cobrado».
+ *
+ * Las COMISIONES DEL PERSONAL no usan esta exclusión (`incluirMediosDeSistema`): una venta pagada con saldo de regalo sí le genera
+ * comisión a quien vendió, y ese gasto no desaparece por cómo pagó la clienta (Codex r1 del carril C2, #1).
+ */
+const MEDIOS_DE_SISTEMA = ['GIFT_CARD', 'STORE_CREDIT', 'EXCHANGE_CREDIT'] as const
+const WHERE_ES_DINERO: Prisma.PaymentWhereInput = {
+  AND: [
+    {
+      OR: [
+        { tenderTypeId: null },
+        { tenderType: { is: { systemKind: null } } },
+        { tenderType: { is: { systemKind: { notIn: [...MEDIOS_DE_SISTEMA] } } } },
+      ],
+    },
+    // Las dos columnas no aceptan nulos: el `NOT` no descarta nada de más.
+    { NOT: { amount: 0, tipAmount: 0 } },
+  ],
+}
+/** El gemelo en SQL (`NOT EXISTS` ya es NULL-safe; importe y propina no aceptan nulos). Sin alias, la tabla es `"Payment"`. */
+function sqlEsDinero(columnPrefix: string): string {
+  const t = columnPrefix || '"Payment"'
+  return (
+    `NOT EXISTS (SELECT 1 FROM "VenueTenderType" ms_t WHERE ms_t."venueId" = ${t}."venueId" AND ms_t.id = ${t}."tenderTypeId" AND ms_t."systemKind" IN (${MEDIOS_DE_SISTEMA.map(k => `'${k}'`).join(', ')}))` +
+    ` AND NOT (${t}."amount" = 0 AND ${t}."tipAmount" = 0)`
+  )
+}
 
+export interface OpcionesDelFiltroDeMetodo {
+  /** Las comisiones del personal: también los cobros con medios de sistema y las cortesías de $0 (ver arriba). */
+  incluirMediosDeSistema?: boolean
+}
+
+export function buildPaymentWhereFilter(
+  paymentMethod?: PaymentMethodFilter,
+  cardType?: CardTypeFilter,
+  opciones: OpcionesDelFiltroDeMetodo = {},
+): Prisma.PaymentWhereInput {
+  if (!paymentMethod) return {}
+  if (opciones.incluirMediosDeSistema) return filtroDelMetodo(paymentMethod, cardType)
+  return { AND: [filtroDelMetodo(paymentMethod, cardType), WHERE_ES_DINERO] }
+}
+
+function filtroDelMetodo(paymentMethod: PaymentMethodFilter, cardType?: CardTypeFilter): Prisma.PaymentWhereInput {
   if (paymentMethod === 'CASH') return { method: 'CASH' }
 
   if (paymentMethod === 'OTHER') {
@@ -521,9 +629,14 @@ export function buildPaymentSqlClause(
   paymentMethod: PaymentMethodFilter | undefined,
   cardType: CardTypeFilter | undefined,
   columnPrefix = '',
+  opciones: OpcionesDelFiltroDeMetodo = {},
 ): string {
   if (!paymentMethod) return ''
+  if (opciones.incluirMediosDeSistema) return clausulaDelMetodo(paymentMethod, cardType, columnPrefix)
+  return `${clausulaDelMetodo(paymentMethod, cardType, columnPrefix)} AND ${sqlEsDinero(columnPrefix)}`
+}
 
+function clausulaDelMetodo(paymentMethod: PaymentMethodFilter, cardType: CardTypeFilter | undefined, columnPrefix: string): string {
   const c = columnPrefix ? `${columnPrefix}.` : ''
   const pdJson = `${c}"processorData"`
   const pdIsIntl = `(${pdJson}->>'isInternational')::boolean = true`
@@ -784,6 +897,7 @@ export async function computeSettlementProjection(
     const filas = await prisma.merchantAccount.findMany({
       where: { id: { in: faltantes } },
       select: { id: true, displayName: true, alias: true },
+      take: faltantes.length, // uno por id pedido
     })
     for (const a of filas) nameById.set(a.id, a.displayName || a.alias || 'Comercio')
   }
@@ -1324,7 +1438,15 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           venueId,
           createdAt: dateFilter.createdAt,
           status: { not: 'VOIDED' },
-          ...(hasPaymentFilter ? { payment: paymentLevelFilter } : {}),
+          // Carril C2: las comisiones del personal cuentan también las ventas pagadas con saldo (ver `OpcionesDelFiltroDeMetodo`).
+          ...(hasPaymentFilter
+            ? {
+                payment: {
+                  ...(merchantAccountId ? { merchantAccountId } : {}),
+                  ...buildPaymentWhereFilter(paymentMethod, cardType, { incluirMediosDeSistema: true }),
+                },
+              }
+            : {}),
         },
         _sum: {
           netCommission: true,
@@ -1607,6 +1729,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       tenderCommissions: number
       cancelledOrderRefunds: number
       platformFeesCents: number
+      foreignAmount: number
+      foreignCount: number
     }
     const newAcc = (): Acc => ({
       amount: 0,
@@ -1619,6 +1743,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       tenderCommissions: 0,
       cancelledOrderRefunds: 0,
       platformFeesCents: 0,
+      foreignAmount: 0,
+      foreignCount: 0,
     })
     const buckets = new Map<BreakdownBucket, Acc>()
     const subBuckets = new Map<CardSubBucket, Acc>()
@@ -1653,9 +1779,11 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           GroupRow & {
             fundsFlow: string | null
             tenderCountsAsCash: boolean | null
-            hasTender: boolean
+            tenderTypeId: string | null
             merchantAccountId: string | null
             enLinea: boolean
+            moneda: string
+            cortesias: number
             amount: string
             tips: string
             fees: string
@@ -1668,21 +1796,24 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           }
         >
       >`
+        WITH ${sqlSesionesExtranjeras(venueId)}
         SELECT p."method"::text AS "method",
                p."cardBrand"::text AS "cardBrand",
                ${IS_INTERNATIONAL_SQL} AS "isIntl",
                p."fundsFlow"::text AS "fundsFlow",
                p."tenderCountsAsCash" AS "tenderCountsAsCash",
-               (p."tenderTypeId" IS NOT NULL) AS "hasTender",
+               p."tenderTypeId" AS "tenderTypeId",
                p."merchantAccountId" AS "merchantAccountId",
                (${Prisma.raw(sqlEnLineaDeAvoqado('p'))} OR ${Prisma.raw(sqlEnLineaDeAvoqado('orig'))}) AS "enLinea",
+               ${Prisma.raw(SQL_MONEDA_DEL_COBRO)} AS "moneda",
                COUNT(*)::int AS "count",
                COALESCE(SUM(p."amount"), 0)::text AS "amount",
                COALESCE(SUM(p."tipAmount"), 0)::text AS "tips",
                COALESCE(SUM(${Prisma.raw(SQL_COMISION_DEL_COBRO)}), 0)::text AS "fees",
                COALESCE(SUM(ROUND((${Prisma.raw(SQL_COMISION_DEL_COBRO)})::numeric, 2)), 0)::text AS "feesCents",
                COALESCE(SUM(p."amount" + p."tipAmount") FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND'), 0)::text AS "chargedAmount",
-               (COUNT(*) FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND'))::int AS "chargedCount",
+               (COUNT(*) FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND' AND NOT (p."amount" = 0 AND p."tipAmount" = 0)))::int AS "chargedCount",
+               (COUNT(*) FILTER (WHERE p."amount" = 0 AND p."tipAmount" = 0))::int AS "cortesias",
                COALESCE(-SUM(p."amount" + p."tipAmount") FILTER (WHERE p."type" = 'REFUND'), 0)::text AS "refundAmount",
                COALESCE(SUM(COALESCE(p."tenderCommissionAmount", 0)), 0)::text AS "tenderCommissions",
                COALESCE(-SUM(p."amount" + p."tipAmount") FILTER (WHERE p."type" = 'REFUND' AND o."status" IN ('CANCELLED', 'DELETED')), 0)::text AS "cancelledOrderRefunds"
@@ -1690,6 +1821,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
         LEFT JOIN "Order" o ON o.id = p."orderId"
         LEFT JOIN "Payment" orig ON p."type" = 'REFUND' AND orig.id = p."processorData" ->> 'originalPaymentId' AND orig."venueId" = p."venueId"
+        ${Prisma.raw(SQL_UNE_SESIONES_EXTRANJERAS)}
         WHERE p."venueId" = ${venueId}
           AND ${sqlRangoHoraRealSql('p', parsedStartDate, parsedEndDate)}
           AND p."status" = 'COMPLETED'
@@ -1698,7 +1830,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           AND ${sqlCobroNoEsSaldoDeRegalo('p')}
           AND ${sqlPaymentIsNotExchangeCredit('p')}
           AND ${sqlNoEsDelMedioSaldoAFavor('p')}
-        GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+        GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
       `,
       wantsBuckets
         ? prisma.$queryRaw<Array<GroupRow & { refunds: string }>>`
@@ -1736,6 +1868,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       other: nuevoDestino(),
     }
     const porComercio = new Map<string, MerchantSums>()
+    const porTipo = new Map<string, OtherTypeBreakdown>()
+    const enOtraMoneda = new Map<string, ForeignCurrencyMovement>()
     let tenderCommissionsTotal = 0
     for (const row of completedGroups) {
       const { bucket, sub } = bucketOf(row.method, row.cardBrand, row.isIntl)
@@ -1747,22 +1881,39 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       const chargedCount = Number(row.chargedCount)
       const refunded = Number(row.refundAmount)
 
+      // Los campos de siempre del cajón (`amount`, `count`, `tips`, `platformFees`, sus %) no cambian: siguen contando todo, para
+      // que «Métodos de pago», `cardTypes` y el total de arriba sigan siendo la misma población (Codex r1 del carril C2, #4).
       const b = ensure(buckets, bucket)
       b.amount += amt + tip // tips-inclusive, matching byPaymentMethod
       b.tips += tip
       b.count += count
       b.platformFees += fee
-      b.chargedAmount += charged
-      b.chargedCount += chargedCount
-      b.tenderCommissions += Number(row.tenderCommissions)
-      b.cancelledOrderRefunds += Number(row.cancelledOrderRefunds)
-
-      if (sub) {
-        const s = ensure(subBuckets, sub)
+      const s = sub ? ensure(subBuckets, sub) : null
+      if (s) {
         s.amount += amt + tip
         s.tips += tip
         s.count += count
         s.platformFees += fee
+      }
+
+      // D17: un cobro en otra moneda no se suma como pesos en el estado: va aparte, en su moneda, y el cajón dice cuánto de su
+      // movimiento es de otra moneda (`foreignAmount`/`foreignCount`) para que el estado lo descuente.
+      if (row.moneda !== 'MXN') {
+        const f = enOtraMoneda.get(row.moneda) ?? { currency: row.moneda, net: 0, transactionCount: 0, refundCount: 0 }
+        f.net += amt + tip
+        f.transactionCount += chargedCount
+        f.refundCount += count - chargedCount - Number(row.cortesias)
+        enOtraMoneda.set(row.moneda, f)
+        b.foreignAmount += amt + tip
+        b.foreignCount += count
+        continue
+      }
+
+      b.chargedAmount += charged
+      b.chargedCount += chargedCount
+      b.tenderCommissions += Number(row.tenderCommissions)
+      b.cancelledOrderRefunds += Number(row.cancelledOrderRefunds)
+      if (s) {
         s.chargedAmount += charged
         s.chargedCount += chargedCount
         s.platformFeesCents += Number(row.feesCents)
@@ -1771,14 +1922,23 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       // El estado de cuenta usa la comisión redondeada POR COBRO, como la liquidación (`proyectarComisionYNeto`): así banco, «Por
       // comercio» y el calendario no se separan un centavo (Codex r3 #4). `platformFees` del cajón sigue siendo la suma cruda.
       const feeCents = Number(row.feesCents)
-      const destino = destinationOf({ ...row, enLinea: !!row.enLinea, hasMerchant: row.merchantAccountId != null })
+      const destino = destinationOf({
+        ...row,
+        hasTender: row.tenderTypeId != null,
+        enLinea: !!row.enLinea,
+        hasMerchant: row.merchantAccountId != null,
+      })
       const d = destinos[destino]
       d.collected += amt + tip
       d.platformFee += feeCents
       d.refunds += refunded
-      d.refundCount += count - chargedCount
-      d.transactionCount += count
-      if (destino === 'terminal' && row.merchantAccountId) {
+      // Un cobro de $0 (una cuenta cubierta por cortesía o descuento, en la TPV o en el POS) no es dinero: no cuenta como transacción.
+      const cobros = count - Number(row.cortesias)
+      d.refundCount += count - chargedCount - Number(row.cortesias)
+      d.transactionCount += cobros
+      // «Por comercio» con los mismos conteos que su destino: un cobro de $0 no es un movimiento (Codex r5 del carril C2), pero su
+      // comisión fija sí es dinero y queda en los dos (r6). Sólo un $0 sin comisión no abre un comercio.
+      if (destino === 'terminal' && row.merchantAccountId && (cobros > 0 || Math.abs(feeCents) >= 0.005)) {
         const m = porComercio.get(row.merchantAccountId) ?? {
           merchantAccountId: row.merchantAccountId,
           collected: 0,
@@ -1789,10 +1949,29 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         }
         m.collected += amt + tip
         m.fee += feeCents
-        m.txns += count
+        m.txns += cobros
         m.refunds += refunded
-        m.refundCount += count - chargedCount
+        m.refundCount += count - chargedCount - Number(row.cortesias)
         porComercio.set(row.merchantAccountId, m)
+      }
+      if (destino === 'other' && cobros > 0) {
+        // D12.3: «otros» por tipo de pago propio (su id; el nombre se pone abajo, el de hoy) o, sin tipo, por método (una tarjeta
+        // de otra terminal es CARD).
+        const key = row.tenderTypeId ?? (bucket === 'CARD' ? 'CARD' : row.method)
+        const t = porTipo.get(key) ?? {
+          key,
+          label: null,
+          method: row.tenderTypeId ? row.method : key,
+          ...nuevoDestino(),
+          tenderCommissions: 0,
+        }
+        t.collected += amt + tip
+        t.platformFee += feeCents
+        t.refunds += refunded
+        t.refundCount += count - chargedCount - Number(row.cortesias)
+        t.transactionCount += cobros
+        t.tenderCommissions += Number(row.tenderCommissions)
+        porTipo.set(key, t)
       }
       tenderCommissionsTotal += Number(row.tenderCommissions)
     }
@@ -1821,6 +2000,15 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       acc.chargedCount += legacyAggregate.count
       destinos.other.collected += legacyAggregate.amount + legacyAggregate.tips
       destinos.other.transactionCount += legacyAggregate.count
+      porTipo.set('QR_LEGACY', {
+        key: 'QR_LEGACY',
+        label: null,
+        method: 'QR_LEGACY',
+        ...nuevoDestino(),
+        collected: legacyAggregate.amount + legacyAggregate.tips,
+        transactionCount: legacyAggregate.count,
+        tenderCommissions: 0,
+      })
     }
 
     if (wantsBuckets) {
@@ -1855,6 +2043,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
             chargedCount: b.chargedCount,
             tenderCommissions: b.tenderCommissions,
             cancelledOrderRefunds: b.cancelledOrderRefunds,
+            ...(b.foreignCount > 0 ? { foreignAmount: b.foreignAmount, foreignCount: b.foreignCount } : {}),
           }
 
           // Attach card sub-buckets (only present types), percentages relative to
@@ -1882,6 +2071,23 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         })
     }
 
+    // D12.3: el nombre de cada tipo de pago propio, el de HOY (Rappi/Uber guardan el cobro sin `tenderLabel`, y un tipo renombrado
+    // tiene nombres viejos en sus cobros: Codex r1 del carril C2, #3). Una lectura por los ids que aparecieron.
+    const idsDeTipos = Array.from(porTipo.values())
+      .filter(t => t.key !== t.method)
+      .map(t => t.key)
+    if (wantsStatement && idsDeTipos.length > 0) {
+      const nombres = await prisma.venueTenderType.findMany({
+        where: { venueId, id: { in: idsDeTipos } },
+        select: { id: true, name: true },
+        take: idsDeTipos.length,
+      })
+      for (const n of nombres) {
+        const t = porTipo.get(n.id)
+        if (t) t.label = n.name
+      }
+    }
+
     if (wantsStatement) {
       // Al centavo, como un comercio: cobrado y comisión redondeados, y el neto es su resta (lo que el dueño ve cuadra).
       const redondeado = (d: MoneyDestination): MoneyDestination => {
@@ -1895,6 +2101,20 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         online: redondeado(destinos.online),
         other: redondeado(destinos.other),
         tenderCommissions: round2(tenderCommissionsTotal),
+        ...(porTipo.size > 0
+          ? {
+              otherByType: Array.from(porTipo.values())
+                .map(t => ({ ...t, ...redondeado(t), tenderCommissions: round2(t.tenderCommissions) }))
+                .sort((a, b) => b.collected - a.collected),
+            }
+          : {}),
+        ...(enOtraMoneda.size > 0
+          ? {
+              foreignCurrency: Array.from(enOtraMoneda.values())
+                .sort((x, y) => (x.currency < y.currency ? -1 : 1))
+                .map(f => ({ ...f, net: round2(f.net) })),
+            }
+          : {}),
       }
       merchantSums = Array.from(porComercio.values())
     }
@@ -2170,6 +2390,16 @@ export function flattenSalesSummaryForExport(
         percentage: null,
       })
     }
+    // D17: una liga en otra moneda también llega al banco, pero en su moneda: su propia fila, sin convertir (Codex r2 del carril C2).
+    for (const f of report.statementDestinations?.foreignCurrency ?? []) {
+      rows.push({
+        section: 'merchantAccounts',
+        label: etiquetaEnOtraMoneda(f.currency),
+        count: f.transactionCount + f.refundCount,
+        amount: round2x(f.net),
+        percentage: null,
+      })
+    }
   }
   // Carril C: el «Estado del periodo» (dinero, no ventas) para el archivo y la MCP del exporte. Sale con `includeMerchantBreakdown`.
   const destinos = report.statementDestinations
@@ -2204,6 +2434,28 @@ export function flattenSalesSummaryForExport(
     rows.push(fila('Ya en tu mano (efectivo)', destinos.drawer.netToReceive))
     rows.push(fila('Llega a tu banco', destinos.terminal.netToReceive + destinos.online.netToReceive))
     rows.push(fila('Otros métodos', destinos.other.netToReceive))
+    // Carril C2 (D12.3): «Otros métodos» por tipo de pago, con su nombre; suman el renglón de arriba.
+    for (const t of destinos.otherByType ?? []) {
+      rows.push(
+        fila(
+          `Otros métodos · ${t.label ?? NOMBRE_DEL_METODO_EN_OTROS[t.method] ?? t.method}`,
+          t.netToReceive,
+          t.transactionCount - t.refundCount,
+        ),
+      )
+      // La comisión de la plataforma de ese tipo, como en la pantalla (ya está restada en «Comisión de plataformas…»).
+      if (Math.abs(t.tenderCommissions) >= 0.005) {
+        rows.push(
+          fila(
+            `Otros métodos · ${t.label ?? NOMBRE_DEL_METODO_EN_OTROS[t.method] ?? t.method} · comisión de la plataforma`,
+            -t.tenderCommissions,
+          ),
+        )
+      }
+    }
+    // D17: lo que se movió en otra moneda, sin convertir y fuera de los pesos de arriba (cobros y devoluciones).
+    for (const f of destinos.foreignCurrency ?? [])
+      rows.push(fila(etiquetaEnOtraMoneda(f.currency), f.net, f.transactionCount + f.refundCount))
   }
   if (want.has('byPeriod') && report.byPeriod) {
     const vistas = new Set<string>()
@@ -2219,6 +2471,19 @@ export function flattenSalesSummaryForExport(
   }
   return { rows }
 }
+
+/** El nombre de un renglón de «Otros métodos» sin tipo de pago propio (el mismo que la pantalla). */
+const NOMBRE_DEL_METODO_EN_OTROS: Record<string, string> = {
+  CARD: 'Tarjeta de otra terminal',
+  CASH: 'Efectivo que no entró a la caja',
+  BANK_TRANSFER: 'Transferencia',
+  DIGITAL_WALLET: 'Monedero digital',
+  CRYPTOCURRENCY: 'Cripto',
+  OTHER: 'Otro método',
+  QR_LEGACY: 'QR del sistema anterior',
+}
+/** Cobros y devoluciones en otra moneda: su neto, sin convertir; la cantidad cuenta los dos. */
+const etiquetaEnOtraMoneda = (currency: string) => `Movimientos en línea en ${currency} (neto, sin convertir: no se suman a los pesos)`
 
 /**
  * Shared WHERE used by both count + fetch for detailed-mode rows (honors the active filter).
@@ -2503,7 +2768,10 @@ async function calculateTimePeriodMetrics(
   // Query staff commissions grouped by period
   // When a payment-method filter is active, also constrain the inner Payment
   // subquery so only commissions for matching payments are aggregated.
-  const staffCommissionsPaymentInnerClause = isFiltered ? buildPaymentSqlClause(paymentMethod, cardType) : ''
+  // Carril C2: las comisiones del personal cuentan también las ventas pagadas con saldo (ver `OpcionesDelFiltroDeMetodo`).
+  const staffCommissionsPaymentInnerClause = isFiltered
+    ? buildPaymentSqlClause(paymentMethod, cardType, '', { incluirMediosDeSistema: true })
+    : ''
   const staffCommissionsPaymentSubquery = isFiltered
     ? `AND "paymentId" IN (SELECT id FROM "Payment" WHERE "venueId" = $1 ${staffCommissionsPaymentInnerClause})`
     : ''
