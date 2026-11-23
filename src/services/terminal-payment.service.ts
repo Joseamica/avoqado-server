@@ -949,13 +949,27 @@ export function proyectarCancelDisposition(guardada: string | null | undefined, 
  * 🔴 Una LÁPIDA (`FAILED` + `REJECTED_…`) NO se traduce: sale FAILED, que es justo lo que permite a esas apps
  * soltar su llave sabiendo que el cobro nunca se creó.
  */
-export function proyectarStatus(row: FilaDeDesenlace, desenlace: TerminalPaymentDesenlace): TerminalPaymentRequestStatus {
+export function proyectarStatus(
+  row: FilaDeDesenlace,
+  desenlace: TerminalPaymentDesenlace,
+  ahora: Date = new Date(),
+): TerminalPaymentRequestStatus {
   // 🔴 Cobro simple · S1 (Codex S1 r1 #8): en sus 10 s de «sin respuesta» la fila se proyecta EN VUELO. Las apps publicadas
   // (ANDROID 2.22, iOS 1.13) dejan de consultar con `inProgress: false` y pintarían «cobro sin confirmar» justo cuando el SERVIDOR
-  // está por cerrarla; así siguen consultando y a los ≤ 10 s leen el «no cobrado» (o el cobro).
-  if (row.status === TerminalPaymentRequestStatus.UNKNOWN && row.noResponseAt) return TerminalPaymentRequestStatus.SENT
+  // está por cerrarla; así siguen consultando y a los ≤ 10 s leen el «no cobrado» (o el cobro). Sólo DENTRO de los 10 s (Codex S1 r2,
+  // R2-3): una UNKNOWN que sigue ahí después («aprobado, por registrar») se proyecta UNKNOWN, como en develop.
+  if (enSusDiezSegundos(row, ahora)) return TerminalPaymentRequestStatus.SENT
   const traducible = row.status === TerminalPaymentRequestStatus.FAILED || row.status === TerminalPaymentRequestStatus.CANCELLED
   return traducible && desenlace.outcome === 'UNRESOLVED' ? TerminalPaymentRequestStatus.UNKNOWN : row.status
+}
+
+/** ¿La fila está DENTRO de sus 10 s de «sin respuesta»? (la proyección en vuelo de `proyectarStatus`). */
+function enSusDiezSegundos(row: FilaDeDesenlace, ahora: Date): boolean {
+  return (
+    row.status === TerminalPaymentRequestStatus.UNKNOWN &&
+    !!row.noResponseAt &&
+    ahora.getTime() < row.noResponseAt.getTime() + sinRespuestaMs()
+  )
 }
 
 /** La fila que hace falta para proyectar el estado completo hacia el cliente. */
@@ -990,13 +1004,16 @@ function causaDelSobre(resultJson: Prisma.JsonValue | null | undefined): CausaSi
   return c === 'NO_RESPONSE' || c === 'ACK_TIMEOUT' || c === 'TERMINAL_GONE' ? c : null
 }
 
-export function proyectarEstado(row: FilaProyectable): TerminalPaymentStatus {
+export function proyectarEstado(row: FilaProyectable, ahora: Date = new Date()): TerminalPaymentStatus {
   const desenlace = desenlaceCanonico(row)
+  // R2-3: mientras se proyecta EN VUELO por sus 10 s, un ACTIVE guardado (del cancel automático) sale null: ANDROID 2.22 e iOS 1.13
+  // lo leen antes que el estado y cortarían la consulta con «el cobro sigue activo».
+  const enEspera = enSusDiezSegundos(row, ahora)
   return {
     requestId: row.requestId,
     venueId: row.venueId,
     terminalId: row.terminalId,
-    status: proyectarStatus(row, desenlace),
+    status: proyectarStatus(row, desenlace, ahora),
     amount: row.amountCents / 100,
     tip: row.tipCents / 100,
     orderId: row.orderId,
@@ -1004,10 +1021,12 @@ export function proyectarEstado(row: FilaProyectable): TerminalPaymentStatus {
     senderDevice: row.senderDevice,
     lateResult: row.lateResult,
     // Revisión de iOS (3-nov): con la ranura ya suelta (filas viejas soltadas por política), «el cobro sigue activo» es falso.
-    cancelDisposition: proyectarCancelDisposition(
-      fueSoltadaPorPolitica(row) && row.cancelDisposition === 'ACTIVE' ? null : row.cancelDisposition,
-      desenlace,
-    ),
+    cancelDisposition: enEspera
+      ? null
+      : proyectarCancelDisposition(
+          fueSoltadaPorPolitica(row) && row.cancelDisposition === 'ACTIVE' ? null : row.cancelDisposition,
+          desenlace,
+        ),
     // Una lápida (`REJECTED_…`) sale FAILED y con su motivo: NO se traduce a UNKNOWN, sí prueba que no se creó.
     failureCode: row.failureCode ?? null,
     outcome: desenlace.outcome,
