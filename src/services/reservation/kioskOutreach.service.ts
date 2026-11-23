@@ -77,12 +77,13 @@ export async function enqueueNightlyOutreach(args: { now: Date; venueId?: string
         customerId: true,
         expiresAt: true,
         creditPack: { select: { name: true } },
-        itemBalances: { select: { remainingQuantity: true } },
+        itemBalances: { select: { remainingQuantity: true, unlimited: true } },
       },
     })
 
     for (const p of purchases) {
-      const remaining = p.itemBalances.reduce((sum, b) => sum + b.remainingQuantity, 0)
+      // D679 (N9): un Ilimitado no cuenta como «pocas clases» (ni como muchas): sólo suman los renglones normales.
+      const remaining = p.itemBalances.filter(b => !b.unlimited).reduce((sum, b) => sum + b.remainingQuantity, 0)
       const lowCredits = remaining > 0 && remaining <= LOW_CREDITS_THRESHOLD
       const expiringSoon = p.expiresAt != null && p.expiresAt > args.now && p.expiresAt <= expiringBefore
 

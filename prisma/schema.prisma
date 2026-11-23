@@ -16601,6 +16601,10 @@ model CreditPackItem {
 
   quantity Int // Number of credits for this product (e.g., 10 classes)
 
+  // Paquete «Ilimitado» (D679): saldo de 99,999 con esta marca, como Mindbody. La marca sale SÓLO de lo que pide el panel (o del
+  // mismo renglón que ya lo era); un número suelto nunca convierte. Con algún renglón Ilimitado, el paquete exige vigencia.
+  unlimited Boolean @default(false)
+
   // Relations
   balances CreditItemBalance[]
 
@@ -16678,6 +16682,9 @@ model CreditItemBalance {
 
   originalQuantity  Int // Quantity at purchase time
   remainingQuantity Int // Current balance
+
+  // D679: copia la marca del renglón vendido (o de la foto) y nunca cambia. Un Ilimitado no enseña su número (99,999).
+  unlimited Boolean @default(false)
 
   // Relations
   transactions CreditTransaction[]

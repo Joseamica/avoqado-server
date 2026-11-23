@@ -264,4 +264,19 @@ describe('Paquete vendido en un renglón de orden: entrega desde la foto (integr
     await prisma.orderItem.update({ where: { id: linea.id }, data: { creditPackId: null, creditPackSnapshot: Prisma.DbNull } })
     expect(await entregar()).toEqual({ delivered: 0, skipped: 0, held: 0 })
   })
+
+  // D679 (W8): la entrega desde el renglón de orden copia la marca de la foto.
+  it('entrega de un renglón de orden con foto Ilimitada: saldo 99999 con la marca', async () => {
+    const foto = buildCreditPackSnapshot({
+      ...(await paqueteConItems(pack.id)),
+      items: [{ productId: yoga.id, quantity: 99999, unlimited: true }],
+    })
+    await prisma.orderItem.update({ where: { id: linea.id }, data: { creditPackSnapshot: foto as unknown as Prisma.InputJsonValue } })
+
+    expect(await entregar()).toEqual({ delivered: 1, skipped: 0, held: 0 })
+    const compra = await prisma.creditPackPurchase.findUniqueOrThrow({ where: { orderItemId: linea.id }, include: { itemBalances: true } })
+    expect(compra.itemBalances).toEqual([
+      expect.objectContaining({ productId: yoga.id, originalQuantity: 99999, remainingQuantity: 99999, unlimited: true }),
+    ])
+  })
 })

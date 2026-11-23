@@ -3,7 +3,7 @@
  *
  * Revierte EXACTAMENTE lo que hizo el «No asistió» (`markNoShow` + el trabajo automático), según lo que dejó escrito:
  *   - la clase que se le devolvió (REFUND «No-show refund…») se vuelve a descontar del MISMO saldo, si todavía hay de
- *     dónde (compra ACTIVE, no vencida, con saldo — la regla de `redeemForReservation`);
+ *     dónde (compra ACTIVE, no vencida, con saldo — la regla de `redeemCreditsForReservation`);
  *   - la multa anotada y NO cobrada (`noShowFeeAmount` sin `noShowFeeCapturedAt`) se anula;
  *   - el depósito retenido (`FORFEITED`) vuelve a `PAID`.
  * Lo que no se puede revertir solo queda como pendiente para una persona en la corrección.

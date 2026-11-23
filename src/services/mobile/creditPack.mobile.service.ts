@@ -14,6 +14,7 @@ import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetr
 import logger from '@/config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import type { CreditPackSnapshot } from '@/services/shared/creditPacksOnPaidOrder'
+import { vigenciaAlEntregar } from '@/services/credits/ilimitado'
 
 type PackWithItems = {
   id: string
@@ -23,7 +24,7 @@ type PackWithItems = {
   validityDays: number | null
   maxPerCustomer: number | null
   /** `id` = el `CreditPackItem` del catálogo (POS y kiosco lo mandan). `null` = renglón nacido de la FOTO (0.d). */
-  items: { id: string | null; productId: string; quantity: number }[]
+  items: { id: string | null; productId: string; quantity: number; unlimited?: boolean }[]
 }
 
 /**
@@ -69,7 +70,9 @@ export async function grantPackInTx(
     }
   }
 
-  const expiresAt = pack.validityDays ? new Date(Date.now() + pack.validityDays * 24 * 60 * 60 * 1000) : null
+  // D679 (Codex código r1 #3): un renglón Ilimitado sin vigencia es una lectura partida del paquete; se relee en esta transacción.
+  const validityDays = await vigenciaAlEntregar(tx, pack)
+  const expiresAt = validityDays ? new Date(Date.now() + validityDays * 24 * 60 * 60 * 1000) : null
 
   const newPurchase = await tx.creditPackPurchase.create({
     data: {
@@ -93,6 +96,8 @@ export async function grantPackInTx(
         productId: item.productId,
         originalQuantity: item.quantity,
         remainingQuantity: item.quantity,
+        // D679 (W7): el saldo copia la marca de lo vendido (renglón del catálogo o foto) y nunca la cambia.
+        ...(item.unlimited === true ? { unlimited: true } : {}),
       },
     })
 
@@ -215,7 +220,7 @@ export async function sellPackInPerson(
         active: true,
         validityDays: foto.validityDays,
         maxPerCustomer: pack.maxPerCustomer,
-        items: foto.items.map(i => ({ id: null, productId: i.productId, quantity: i.quantity })),
+        items: foto.items.map(i => ({ id: null, productId: i.productId, quantity: i.quantity, unlimited: i.unlimited === true })),
       }
     : (pack as PackWithItems)
 
