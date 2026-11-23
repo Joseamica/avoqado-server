@@ -10,18 +10,31 @@ import { supportEnabled, usableLink } from './link.service'
 import { listSupportVenues } from './access.service'
 import { buildHumanSummary } from './humanSummary.service'
 import { resolveRegisteredSupportPhone } from './registeredPhone.service'
-import { getSupportHandoffConfig, isSupportFreeTextEnabled, isSupportHybridEnabled, supportPhoneNumberId } from '@/config/supportWhatsapp'
+import {
+  getSupportAiConfig,
+  getSupportHandoffConfig,
+  isSupportFreeTextEnabled,
+  isSupportHybridEnabled,
+  isSupportPublicHelpEnabled,
+  LUNA_SUPPORT_PRICING,
+  supportPhoneNumberId,
+} from '@/config/supportWhatsapp'
 import { recordSupportEvent, requestSupportHandoff } from './handoff.service'
 import { normalizeAppVersion } from './deviceContext.service'
+import { countPublicMessage, isPublicPaused, mexicoDay, publicDayKey, publicDaySpent, takePublicLimitNotice } from './publicHelp.service'
 import {
   SUPPORT_ASK_APP,
   SUPPORT_CONTACT,
   SUPPORT_GREETING,
   SUPPORT_LINK,
   SUPPORT_NOTICE_TEXTS,
+  SUPPORT_PUBLIC_DAY_LIMIT,
+  SUPPORT_PUBLIC_HOUR_LIMIT,
+  SUPPORT_PUBLIC_NOTICE_TEXTS,
   SUPPORT_SENSITIVE,
   SUPPORT_UNREGISTERED,
   supportNotice,
+  supportPublicNotice,
 } from './texts'
 
 const appItems = [
@@ -222,7 +235,7 @@ const noticeShown = async (tx: Prisma.TransactionClient, conversation: SupportCo
     where: {
       conversationId: conversation.id,
       generation: conversation.generation,
-      answer: { in: SUPPORT_NOTICE_TEXTS },
+      answer: { in: [...SUPPORT_NOTICE_TEXTS, ...SUPPORT_PUBLIC_NOTICE_TEXTS] },
       status: { in: ['SENT', 'SEND_UNKNOWN'] },
     },
     select: { id: true },
@@ -242,9 +255,10 @@ async function overMinuteCap(tx: Prisma.TransactionClient, input: SupportInput, 
   })
   return rate.callCount > 10
 }
-// True only for the first fixed «not registered» message of this phone on this UTC day (router and worker share it).
+// True only for the first fixed «not registered» message of this phone on this day (router and worker share it). The day is
+// UTC, or CDMX with public help on: the same day as its caps and its US$, so the fixed message never comes twice in one day.
 export async function takeDailyStaticReply(tx: Prisma.TransactionClient, receiverId: string, phone: string, now: Date) {
-  const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+  const day = isSupportPublicHelpEnabled() ? mexicoDay(now) : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
   const key = `CONTROL:${receiverId}:${phoneHash(phone)}:STATIC:${day.toISOString()}`
   const sent = await tx.supportBudget.upsert({
     where: { key },
@@ -337,7 +351,15 @@ export async function decideSupportAdmission(
   command: string,
   tx: Prisma.TransactionClient,
   now = new Date(),
-): Promise<{ route: 'SUPPORT' | 'STATIC' | 'IGNORED'; registered: boolean; soleStaffId?: string | null }> {
+): Promise<{
+  route: 'SUPPORT' | 'STATIC' | 'IGNORED'
+  registered: boolean
+  soleStaffId?: string | null
+  /** Ayuda pública: un número sin cuenta que sigue en el modo público (con sus topes). */
+  publicHelp?: boolean
+  /** STATIC: el texto, si no es SUPPORT_UNREGISTERED (el aviso de un tope de la ayuda pública). */
+  text?: string
+}> {
   // T-F15: on the support's own number nothing is left to the old relay. A person who also answers customer chats is one more
   // person, and a message without text and without a conversation takes the normal way (media answer, or the day's fixed message).
   if (!conversation) {
@@ -355,8 +377,29 @@ export async function decideSupportAdmission(
   // SALIR must always close, so it never counts toward or waits on the cap.
   if (command !== 'SALIR' && (await overMinuteCap(tx, input, now))) return { route: 'IGNORED', registered: false }
   const { registered, soleStaffId } = await resolveRegisteredSupportPhone(input.phone, tx)
+  if (registered) return { route: 'SUPPORT', registered, soleStaffId }
+  // Public help (founder, 22-nov): an unknown phone talks like anyone else, within its four caps.
+  if (isSupportPublicHelpEnabled()) {
+    // Paused (three strikes): nothing is answered, SALIR included, so the pause notice is never cancelled before it goes out.
+    if (await isPublicPaused(tx, input.receiverId, input.phone, now)) return { route: 'IGNORED', registered }
+    const ai = getSupportAiConfig()
+    const spent = publicDaySpent(
+      await tx.supportBudget.findUnique({ where: { key: publicDayKey(now) } }),
+      ai?.pricing ?? LUNA_SUPPORT_PRICING,
+    )
+    // The day's US$ only stops what would use the model: «persona» after the notice still reaches the team.
+    if (!spent || (command === 'PERSONA' && conversation?.noticeAcceptedAt)) {
+      if (command === 'SALIR' || ignoredType(input.type)) return { route: 'SUPPORT', registered, publicHelp: true }
+      const over = await countPublicMessage(tx, input.receiverId, input.phone, now)
+      if (!over) return { route: 'SUPPORT', registered, publicHelp: true }
+      if (!(await takePublicLimitNotice(tx, input.receiverId, input.phone, over, now))) return { route: 'IGNORED', registered }
+      if (conversation) await resetSupportConversation(tx, conversation, 'CLOSED')
+      return { route: 'STATIC', registered, text: over === 'DAY' ? SUPPORT_PUBLIC_DAY_LIMIT : SUPPORT_PUBLIC_HOUR_LIMIT }
+    }
+    // Spent: from here, exactly as with public help off (the fixed message, once a day).
+  }
   // The only AI-free way in for an unknown phone: reading the notice, leaving, or accepting it to link a code.
-  if (registered || command === 'AYUDA' || command === 'SALIR') return { route: 'SUPPORT', registered, soleStaffId }
+  if (command === 'AYUDA' || command === 'SALIR') return { route: 'SUPPORT', registered, soleStaffId }
   // An unknown phone may only accept the privacy notice this generation actually showed it.
   if (conversation && acceptsNotice(command, conversation) && (await noticeShown(tx, conversation)))
     return { route: 'SUPPORT', registered, soleStaffId }
@@ -424,6 +467,8 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
       }
       const freeText = isSupportFreeTextEnabled()
       let unregistered = false,
+        // Public help: an unknown phone answered in the public mode (decideSupportAdmission).
+        publicHelp = false,
         soleStaffId: string | null | undefined,
         // Pick the venue now: the remembered identity's venue lost access, or the person just linked (`linked`).
         relist = false,
@@ -454,11 +499,12 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
           const admitted = await admitSupportMessage({ ...input, body: '' }, tx)
           await tx.supportMessage.update({
             where: { id: admitted.messageId },
-            data: { answer: SUPPORT_UNREGISTERED, status: 'ANSWER_READY' },
+            data: { answer: admission.text ?? SUPPORT_UNREGISTERED, status: 'ANSWER_READY' },
           })
           return 'QUEUED'
         }
         unregistered = !admission.registered
+        publicHelp = !!admission.publicHelp
         soleStaffId = admission.soleStaffId
         if (conversation?.mode === 'PERSONAL') {
           const link = await ownLink(tx, input.phone, soleStaffId)
@@ -547,12 +593,14 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
         await recordIgnored()
         return 'IGNORED'
       }
+      // Public help: even CONTINUAR only accepts a notice this generation showed (an unknown phone never saw one before).
       const accepting = freeText
-        ? acceptsNotice(command, conversation) && (command === 'CONTINUAR' || (await noticeShown(tx, conversation)))
+        ? acceptsNotice(command, conversation) && ((command === 'CONTINUAR' && !publicHelp) || (await noticeShown(tx, conversation)))
         : command === 'CONTINUAR'
+      const notice = publicHelp ? supportPublicNotice : supportNotice
       if (!answer && command === 'AYUDA') {
         conversation = await resetSupportConversation(tx, conversation)
-        answer = supportNotice()
+        answer = notice()
       } else if (!answer && command === 'PUBLICA') {
         const consent = conversation.noticeAcceptedAt
         conversation = await resetSupportConversation(tx, conversation)
@@ -564,27 +612,29 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
         conversation = await resetSupportConversation(tx, conversation)
         conversation = await tx.supportConversation.update({
           where: { id: conversation.id },
-          data: unregistered
-            ? { noticeAcceptedAt: now }
-            : {
-                noticeAcceptedAt: now,
-                pendingSelection: 'APP',
-                selectionOptions: { items: appItems, ...(topic ? { topic } : {}) },
-                selectionExpiresAt: new Date(now.getTime() + 600_000),
-              },
+          data:
+            unregistered && !publicHelp
+              ? { noticeAcceptedAt: now }
+              : {
+                  noticeAcceptedAt: now,
+                  pendingSelection: 'APP',
+                  selectionOptions: { items: appItems, ...(topic ? { topic } : {}) },
+                  selectionExpiresAt: new Date(now.getTime() + 600_000),
+                },
         })
-        answer = unregistered
-          ? SUPPORT_LINK
-          : expired
-            ? `Tu pregunta anterior venció. Escríbela otra vez después de elegir la app.\n\n${SUPPORT_ASK_APP}`
-            : SUPPORT_ASK_APP
-      } else if (!answer && command === 'PERSONA') {
+        answer =
+          unregistered && !publicHelp
+            ? SUPPORT_LINK
+            : expired
+              ? `Tu pregunta anterior venció. Escríbela otra vez después de elegir la app.\n\n${SUPPORT_ASK_APP}`
+              : SUPPORT_ASK_APP
+      } else if (!answer && command === 'PERSONA' && (!publicHelp || conversation.noticeAcceptedAt)) {
         const handoff = getSupportHandoffConfig()
         // The notice row commits with this answer, or not at all.
         if (handoff) ({ text: answer, outcome } = await requestSupportHandoff(tx, conversation, 'REQUESTED', now, handoff))
         else answer = await buildHumanSummary(conversation.id, conversation.generation, tx)
       } else if (!answer && !conversation.noticeAcceptedAt && command !== 'REINTENTAR') {
-        answer = supportNotice()
+        answer = notice()
         // The question waits for the notice to be accepted (media arrives with an empty body).
         if (freeText && questionOf(body))
           conversation = await tx.supportConversation.update({

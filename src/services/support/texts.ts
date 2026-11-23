@@ -20,6 +20,23 @@ export const SUPPORT_NOTICE_TEXTS = [SUPPORT_NOTICE, SUPPORT_NOTICE_FREE_TEXT, S
 // The B depends on free text (through hybrid), so with it on the notice is always the free-text one.
 export const supportNotice = () =>
   isSupportDataEnabled() ? SUPPORT_NOTICE_DATA_FREE_TEXT : isSupportFreeTextEnabled() ? SUPPORT_NOTICE_FREE_TEXT : SUPPORT_NOTICE
+/**
+ * Ayuda pública (founder, 22-nov): lo primero que lee quien escribe sin tener su número en Avoqado, delante del aviso de hoy. Dice
+ * qué hace el asistente y que los datos del negocio piden ligar el número. El founder puede cambiar la redacción.
+ */
+export const SUPPORT_PUBLIC_INTRO =
+  'Hola, soy el asistente de ayuda de Avoqado. Te explico cómo usar el panel, el POS y la terminal con nuestras guías. Para ver datos de tu negocio, liga este WhatsApp a tu cuenta en https://dashboard.avoqado.io/support/whatsapp.'
+const withPublicIntro = (notice: string) => `${SUPPORT_PUBLIC_INTRO}\n\n${notice}`
+export const supportPublicNotice = () => withPublicIntro(supportNotice())
+/** Cada aviso general con la presentación delante: el router los reconoce como mostrados (un «sí» los acepta). */
+export const SUPPORT_PUBLIC_NOTICE_TEXTS = SUPPORT_NOTICE_TEXTS.map(withPublicIntro)
+/** Los topes por número de la ayuda pública (10 por hora, 20 al día de CDMX): se avisan una sola vez, luego silencio. */
+export const SUPPORT_PUBLIC_DAY_LIMIT = 'Llegaste al límite de preguntas por hoy. Seguimos mañana. Mientras: https://avoqado.io/help'
+export const SUPPORT_PUBLIC_HOUR_LIMIT =
+  'Llegaste al límite de preguntas por ahora. Seguimos en una hora. Mientras: https://avoqado.io/help'
+/** Tres mensajes seguidos sin sentido, fuera de tema o de ataque: 24 h de silencio (7 días si reincide), avisado una vez. */
+export const supportPublicPause = (days: 1 | 7) =>
+  `Pausé esta conversación ${days === 1 ? '24 horas' : '7 días'}. Si necesitas ayuda con Avoqado, escríbeme después o ve a https://avoqado.io/help`
 export const SUPPORT_ASK_APP =
   '¿Qué app usas? Responde con una opción:\n1. Dashboard web\n2. POS Android\n3. POS Windows\n4. Terminal de cobro PAX/Nexgo'
 /** El nombre de cada app como lo lee una persona: el resumen de hoy y el correo del aviso (sin efectos al importarse). */

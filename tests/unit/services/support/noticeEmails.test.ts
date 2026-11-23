@@ -520,3 +520,21 @@ describe('buildWeeklyEmail', () => {
     expect(decoded(buildWeeklyEmail(stored, 'soporte@test.local').html)).not.toContain('Consultas de datos')
   })
 })
+
+describe('ayuda pública: el aviso de un número no registrado (22-nov)', () => {
+  const unknown = meta({ people: [], app: 'android', appVersion: null, deviceFamily: null, guides: [], unregistered: true })
+  it('says it is a number with no account, in the body, the subject and the digest, and keeps the button to write back', () => {
+    const email = buildHandoffEmail(unknown, 'soporte@test.local')
+    expect(email.subject.split(' · ')[1]).toBe('Número no registrado')
+    expect(decoded(email.html)).toContain('Número no registrado')
+    expect(email.text).toContain('Persona: Numero no registrado')
+    expect(email.text).toContain('https://wa.me/525512345678')
+    expect(decoded(email.html)).not.toContain('Sin perfil')
+    const digest = buildHeldDigestEmail('2026-11-12', [unknown], 'soporte@test.local')
+    expect(decoded(digest.html)).toContain('Número no registrado')
+    expect(decoded(digest.html)).not.toContain('Sin perfil')
+  })
+  it('a meta without the mark (registered, nobody left) still says «Sin perfil», as today', () => {
+    expect(decoded(buildHandoffEmail(meta({ people: [] }), 'soporte@test.local').html)).toContain('Sin perfil')
+  })
+})

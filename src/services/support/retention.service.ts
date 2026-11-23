@@ -105,7 +105,7 @@ export async function purgeSupportBatch(now = new Date(), limit = 100): Promise<
       SELECT id FROM "SupportWhatsappLink" WHERE "expiresAt" <= ${utcTs(now)} ORDER BY "expiresAt", id LIMIT ${take} FOR UPDATE SKIP LOCKED
     ) DELETE FROM "SupportWhatsappLink" l USING chosen WHERE l.id = chosen.id`
       deleted += await tx.$executeRaw`WITH chosen AS (
-      SELECT key FROM "SupportBudget" WHERE "windowStart" <= ${utcTs(old)} AND (key LIKE 'CONTROL:%' OR key LIKE 'AI:PHONE_%' OR key LIKE 'AI:STAFF_%')
+      SELECT key FROM "SupportBudget" WHERE "windowStart" <= ${utcTs(old)} AND (key LIKE 'CONTROL:%' OR key LIKE 'AI:PHONE_%' OR key LIKE 'AI:STAFF_%' OR key LIKE 'AI:PUBLIC_DAY:%')
         AND NOT EXISTS (SELECT 1 FROM "SupportAttempt" a WHERE a.kind = 'AI' AND a.state = 'RESERVED' AND a.usage->'reservation'->'countKeys' ? "SupportBudget".key)
       ORDER BY "windowStart", key LIMIT ${take} FOR UPDATE SKIP LOCKED
     ) DELETE FROM "SupportBudget" b USING chosen WHERE b.key = chosen.key`

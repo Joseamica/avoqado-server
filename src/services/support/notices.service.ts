@@ -59,6 +59,8 @@ async function venueStillAllowed(tx: Prisma.TransactionClient, staffId: string, 
  * sale, y la persona que las perdió todas también. Nadie → null.
  */
 export async function stillAllowed(tx: Prisma.TransactionClient, row: SupportNotice, meta: HandoffMeta): Promise<HandoffMeta | null> {
+  // Ayuda pública: un número sin cuenta no trae personas ni sucursales que revalidar; se le prometió que alguien le escribe.
+  if (meta.unregistered && !row.linkId && !meta.people.length) return meta
   let people = meta.people
   if (row.linkId) {
     const link = await tx.supportWhatsappLink.findUnique({ where: { id: row.linkId }, select: { staffId: true, phone: true } })

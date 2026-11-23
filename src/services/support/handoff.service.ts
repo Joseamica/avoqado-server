@@ -4,7 +4,7 @@ import crypto from 'crypto'
 import type { Prisma, SupportConversation, SupportOutcome } from '@prisma/client'
 import { ForbiddenError } from '@/errors/AppError'
 import { isActiveSuperAdmin } from '@/mcp/scope'
-import type { SupportHandoffConfig } from '@/config/supportWhatsapp'
+import { isSupportPublicHelpEnabled, type SupportHandoffConfig } from '@/config/supportWhatsapp'
 import { venueDayKey } from '@/utils/venueDateKeys'
 import { listSupportVenues } from './access.service'
 import { normalizeAppVersion } from './deviceContext.service'
@@ -29,6 +29,8 @@ export interface HandoffMeta {
   guides: string[]
   /** DATA: la etiqueta del dato que intentó la B (nunca una cifra). */
   dataCapability?: string | null
+  /** Ayuda pública: el número no es de ninguna cuenta (sin personas que mostrar ni revalidar). */
+  unregistered?: true
 }
 export const SUPPORT_FAILURE_OUTCOMES: SupportOutcome[] = ['UNKNOWN', 'JUDGE_LITERAL']
 const CDMX = 'America/Mexico_City'
@@ -61,14 +63,18 @@ export function secondFailureText(nearest: LibraryGuide | null): string {
     .join('\n\n')
 }
 
-/** Una plática vinculada, o un número dado de alta como del equipo de un negocio (un superadmin también). Desconocido → no. */
+/**
+ * Una plática vinculada, o un número dado de alta como del equipo de un negocio (un superadmin también). Desconocido → no, salvo
+ * con la ayuda pública prendida: entonces sí, sin staff (`unregistered`).
+ */
 export async function isHandoffEligible(
   tx: Prisma.TransactionClient,
   conversation: SupportConversation,
-): Promise<{ eligible: boolean; staffId: string | null }> {
+): Promise<{ eligible: boolean; staffId: string | null; unregistered?: true }> {
   if (conversation.mode === 'PERSONAL') return { eligible: !!conversation.staffId, staffId: conversation.staffId }
   if (conversation.mode !== 'PUBLIC') return { eligible: false, staffId: null }
   const { registered, soleStaffId } = await resolveRegisteredSupportPhone(conversation.phone, tx)
+  if (!registered && isSupportPublicHelpEnabled()) return { eligible: true, staffId: null, unregistered: true }
   return { eligible: registered, staffId: soleStaffId }
 }
 
@@ -169,7 +175,7 @@ export async function requestSupportHandoff(
   extra?: { dataCapability?: string },
 ): Promise<{ text: string; outcome: 'HANDOFF' | 'FIXED' }> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`support-phone:${conversation.receiverId}:${conversation.phone}`}, 0))`
-  const { eligible, staffId } = await isHandoffEligible(tx, conversation)
+  const { eligible, staffId, unregistered } = await isHandoffEligible(tx, conversation)
   if (!eligible) {
     // Never an email for an unknown phone: today's summary and how to link, if it fits.
     const summary = await buildHumanSummary(conversation.id, conversation.generation, tx, library)
@@ -180,15 +186,27 @@ export async function requestSupportHandoff(
   const already = { text: supportHandoffAlready(config.whatsappDisplay), outcome: 'HANDOFF' as const }
   if (await tx.supportNotice.findUnique({ where: { dedupeKey }, select: { id: true } })) return already
   // The snapshot does not depend on the counts: it is read before the global lock, which then only covers them.
-  const meta = await snapshotHandoffMeta(tx, conversation, reason, now, library, extra)
+  const snapshot = await snapshotHandoffMeta(tx, conversation, reason, now, library, extra)
+  const meta: HandoffMeta = unregistered ? { ...snapshot, people: [], multipleProfiles: false, unregistered } : snapshot
   // ponytail: un candado global por día; los avisos son pocos. Contadores por fila si un día pasan de cientos.
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('support-handoff-day', 0))`
   const day = venueDayKey(now, CDMX),
     phoneHash = supportPhoneHash(conversation.receiverId, conversation.phone)
   const counted = { kind: 'HANDOFF' as const, day, status: { not: 'HELD' as const } }
+  // Ayuda pública: los números sin cuenta tienen su propio cupo del día (el mismo tope), contado en su fila: nunca le quitan
+  // lugar a un registrado. La fila sólo suma los avisos que no se retuvieron, como el conteo de abajo.
+  const publicKey = `CONTROL:${conversation.receiverId}:HANDOFF_PUBLIC:${day}`
+  const publicCount = (await tx.supportBudget.findUnique({ where: { key: publicKey } }))?.callCount ?? 0
+  const all = await tx.supportNotice.count({ where: counted })
   const held =
     (await tx.supportNotice.count({ where: { ...counted, phoneHash } })) >= config.phoneDailyCap ||
-    (await tx.supportNotice.count({ where: counted })) >= config.dailyCap
+    (unregistered ? publicCount : all - publicCount) >= config.dailyCap
+  if (unregistered && !held)
+    await tx.supportBudget.upsert({
+      where: { key: publicKey },
+      create: { key: publicKey, windowStart: now, callCount: 1 },
+      update: { callCount: { increment: 1 } },
+    })
   const personal = conversation.mode === 'PERSONAL'
   await tx.supportNotice.create({
     data: {

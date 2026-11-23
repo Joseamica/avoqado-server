@@ -7,6 +7,7 @@ import {
   getSupportAiConfig,
   isSupportFreeTextEnabled,
   isSupportHybridEnabled,
+  isSupportPublicHelpEnabled,
   LUNA_SUPPORT_PRICING,
   maximumSupportCost,
   observedSupportCost,
@@ -16,9 +17,15 @@ import {
 import { readCurrentClaim, type SupportClaim } from './store.service'
 import { isSupportWindowOpen } from './context.service'
 import { resolveRegisteredSupportPhone } from './registeredPhone.service'
+import { mexicoDay, publicCallHold, publicDayKey, publicDaySpent } from './publicHelp.service'
 
 const reservationSchema = z.object({
-  reservation: z.object({ monthKey: z.string().startsWith('AI:MONTH:'), countKeys: z.array(z.string().startsWith('AI:')).max(3) }),
+  reservation: z.object({
+    monthKey: z.string().startsWith('AI:MONTH:'),
+    countKeys: z.array(z.string().startsWith('AI:')).max(3),
+    /** Ayuda pública: el día de su US$ (AI:PUBLIC_DAY:…) contra el que esta llamada retiene al arrancar y liquida al terminar. */
+    publicDayKey: z.string().startsWith('AI:PUBLIC_DAY:').optional(),
+  }),
 })
 const lock = (tx: Prisma.TransactionClient) => tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('support-ai-budget', 0))`
 async function releaseReservation(tx: Prisma.TransactionClient, attempt: SupportAttempt, now: Date) {
@@ -29,14 +36,18 @@ async function releaseReservation(tx: Prisma.TransactionClient, attempt: Support
   await tx.supportAttempt.update({ where: { id: attempt.id }, data: { state: 'DEFINITIVE_FAILURE', finishedAt: now } })
 }
 
-/** Hybrid mode: `call` n (1-3) of one message is one model call; only call 1 counts against the hour/day question caps. */
+/**
+ * Hybrid mode: `call` n (1-3) of one message is one model call; only call 1 counts against the hour/day question caps.
+ * `publicHelp` (a phone with no account): no per-phone AI caps (the router counts its messages) and the day's US$ of public help.
+ */
 export async function reserveAiAttempt(
   claim: SupportClaim,
   config: SupportAiConfig,
   now = new Date(),
-  options?: { call: 1 | 2 | 3 },
+  options?: { call: 1 | 2 | 3; publicHelp?: boolean },
 ): Promise<SupportAttempt | null> {
-  const call = options && isSupportHybridEnabled() ? options.call : undefined
+  const call = options && isSupportHybridEnabled() ? options.call : undefined,
+    publicHelp = !!options?.publicHelp && isSupportPublicHelpEnabled()
   return prisma.$transaction(async tx => {
     await lock(tx)
     const current = getSupportAiConfig()
@@ -63,8 +74,9 @@ export async function reserveAiAttempt(
       hour = new Date(Math.floor(now.getTime() / 3_600_000) * 3_600_000),
       hash = (value: string) => crypto.createHash('sha256').update(value).digest('hex'),
       monthKey = `AI:MONTH:${month.toISOString()}`,
+      dayKey = publicHelp ? publicDayKey(now) : undefined,
       limits =
-        (call ?? 1) > 1
+        (call ?? 1) > 1 || publicHelp
           ? []
           : [
               { key: `AI:PHONE_HOUR:${hash(message.conversation.phone)}:${hour.toISOString()}`, start: hour, maximum: 10 },
@@ -81,6 +93,14 @@ export async function reserveAiAttempt(
     const monthly = await tx.supportBudget.upsert({ where: { key: monthKey }, create: { key: monthKey, windowStart: month }, update: {} })
     const reserve = maximumSupportCost(current.pricing)
     if (monthly.spentUsd.plus(global.heldUsd).plus(reserve).gt(current.monthlyLimitUsd)) return null
+    if (dayKey) {
+      const day = await tx.supportBudget.upsert({
+        where: { key: dayKey },
+        create: { key: dayKey, windowStart: mexicoDay(now) },
+        update: {},
+      })
+      if (publicDaySpent(day, current.pricing)) return null
+    }
     for (const limit of limits) {
       const row = await tx.supportBudget.upsert({
         where: { key: limit.key },
@@ -100,31 +120,46 @@ export async function reserveAiAttempt(
         state: 'RESERVED',
         reservedUsd: reserve,
         pricingVersion: current.pricing.version,
-        usage: { reservation: { monthKey, countKeys: limits.map(l => l.key) } },
+        usage: { reservation: { monthKey, countKeys: limits.map(l => l.key), ...(dayKey ? { publicDayKey: dayKey } : {}) } },
       },
     })
   })
 }
-/** `verify` runs under the budget lock, after the claim/registration/window checks and before the call is marked STARTED. */
+/**
+ * `verify` runs under the budget lock, after the claim/registration/window checks and before the call is marked STARTED.
+ * `requestBytes`: the size of the request about to leave; a call of public help needs it (its hold is only a true bound up to
+ * `longContextAfter` bytes, see publicCallHold).
+ */
 export async function startAiAttempt(
   attemptId: string,
   claim: SupportClaim,
   now = new Date(),
-  options?: { verify?: (tx: Prisma.TransactionClient) => Promise<boolean> },
+  options?: { verify?: (tx: Prisma.TransactionClient) => Promise<boolean>; requestBytes?: number },
 ): Promise<boolean> {
   return prisma.$transaction(async tx => {
     await lock(tx)
     const message = await readCurrentClaim(tx, claim, new Date(Math.max(now.getTime(), Date.now())))
+    const reserved = await tx.supportAttempt.findUnique({ where: { id: attemptId }, select: { usage: true } })
+    const dayKey = reservationSchema.safeParse(reserved?.usage).data?.reservation.publicDayKey
     // Read under the budget lock: a registration withdrawn while this waited stops the call, and a personal history
-    // only goes out while the phone still belongs only to its owner (same rule as readSupportContext).
+    // only goes out while the phone still belongs only to its owner (same rule as readSupportContext). A call reserved as
+    // public help (dayKey) may go out for a phone with no account, while that help is on and the conversation public.
     if (message && isSupportFreeTextEnabled()) {
       const owner = await resolveRegisteredSupportPhone(message.conversation.phone, tx)
-      if (!owner.registered || (message.conversation.mode === 'PERSONAL' && owner.soleStaffId !== message.conversation.staffId))
+      const publicCall = !!dayKey && isSupportPublicHelpEnabled() && message.conversation.mode === 'PUBLIC'
+      if (
+        (!owner.registered && !publicCall) ||
+        (message.conversation.mode === 'PERSONAL' && owner.soleStaffId !== message.conversation.staffId)
+      )
         return false
     }
     const current = getSupportAiConfig(),
       at = new Date(Math.max(now.getTime(), Date.now()))
     if (!current || !message || !message.conversation.noticeAcceptedAt || !isSupportWindowOpen(message.conversation, at)) return false
+    if (dayKey) {
+      if (options?.requestBytes === undefined || options.requestBytes > current.pricing.longContextAfter) return false
+      if (publicDaySpent(await tx.supportBudget.findUnique({ where: { key: dayKey } }), current.pricing)) return false
+    }
     if (options?.verify && !(await options.verify(tx))) return false
     // The window can expire while the write waits; the statement checks its own UTC clock too.
     const count = await tx.$executeRaw`
@@ -138,6 +173,9 @@ export async function startAiAttempt(
             AND m."leaseUntil" > t.at AND m."expiresAt" > t.at AND c."noticeAcceptedAt" IS NOT NULL
             AND c."lastUserMessageAt" <= t.at AND c."lastUserMessageAt" > t.at - INTERVAL '24 hours'
             AND c."lastActivityAt" <= t.at AND c."lastActivityAt" > t.at - INTERVAL '30 minutes')`
+    // The public hold goes with the start: from here the call may cost; finish settles it, an uncertain one keeps it.
+    if (count === 1 && dayKey)
+      await tx.supportBudget.update({ where: { key: dayKey }, data: { heldUsd: { increment: publicCallHold(current.pricing) } } })
     return count === 1
   })
 }
@@ -156,6 +194,11 @@ export async function finishAiAttempt(attemptId: string, usage: unknown, request
     const resultUnavailable = (attempt.usage as Prisma.JsonObject).resultUnavailable === true
     await tx.supportBudget.update({ where: { key: 'AI:GLOBAL' }, data: { heldUsd: { decrement: attempt.reservedUsd } } })
     await tx.supportBudget.update({ where: { key: reservation.monthKey }, data: { spentUsd: { increment: actual } } })
+    if (reservation.publicDayKey)
+      await tx.supportBudget.updateMany({
+        where: { key: reservation.publicDayKey },
+        data: { heldUsd: { decrement: publicCallHold(LUNA_SUPPORT_PRICING) }, spentUsd: { increment: actual } },
+      })
     await tx.supportAttempt.update({
       where: { id: attempt.id },
       data: {
