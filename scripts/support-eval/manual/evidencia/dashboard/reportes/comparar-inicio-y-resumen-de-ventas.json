@@ -1,25 +1,25 @@
 {
   "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
   "sourceRepo": "avoqado-web-dashboard",
-  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc",
   "version": "main",
   "pasos": [
     {
       "paso": 1,
       "archivo": "src/components/Sidebar/app-sidebar.tsx",
-      "linea": 1191,
+      "linea": 1156,
       "cita": "title: t('sidebar:routes.home'),"
     },
     {
       "paso": 1,
       "archivo": "src/locales/es/sidebar.json",
-      "linea": 151,
+      "linea": 153,
       "cita": "\"home\": \"Inicio\","
     },
     {
       "paso": 1,
       "archivo": "src/pages/Home.tsx",
-      "linea": 497,
+      "linea": 505,
       "cita": "<p className=\"text-sm text-muted-foreground\">{t('newHome.performance.netSales')}</p>"
     },
     {
@@ -30,189 +30,147 @@
     },
     {
       "paso": 1,
-      "archivo": "src/pages/Home.tsx",
-      "linea": 498,
-      "cita": "<p className=\"mt-1 text-4xl font-bold tracking-tight\">{Currency(dashboardData.totalAmount, false)}</p>"
-    },
-    {
-      "paso": 1,
       "archivo": "src/hooks/useDashboardData.ts",
-      "linea": 160,
+      "linea": 163,
       "cita": "const totalAmount = summary ? summary.totalAmount : filteredPayments.length > 0 ? amount : 0"
     },
     {
       "paso": 1,
       "archivo": "avoqado-server/src/services/dashboard/generalStats.dashboard.service.ts",
-      "linea": 534,
+      "linea": 536,
       "cita": "COALESCE(SUM(p.\"amount\"), 0) AS \"total\","
     },
     {
       "paso": 1,
       "archivo": "avoqado-server/src/services/dashboard/generalStats.dashboard.service.ts",
-      "linea": 541,
-      "cita": "AND p.\"status\" = 'COMPLETED'"
-    },
-    {
-      "paso": 1,
-      "archivo": "avoqado-server/src/services/dashboard/generalStats.dashboard.service.ts",
-      "linea": 542,
+      "linea": 544,
       "cita": "AND p.\"type\" <> 'REFUND'"
-    },
-    {
-      "paso": 1,
-      "archivo": "avoqado-server/src/services/dashboard/generalStats.dashboard.service.ts",
-      "linea": 543,
-      "cita": "AND p.\"createdAt\" >= ${utcTs(fromDate)} AND p.\"createdAt\" <= ${utcTs(toDate)}"
     },
     {
       "paso": 2,
       "archivo": "src/components/Sidebar/app-sidebar.tsx",
-      "linea": 887,
+      "linea": 898,
       "cita": "title: t('sidebar:reportsMenu.salesSummary'),"
     },
     {
       "paso": 2,
       "archivo": "src/locales/es/sidebar.json",
-      "linea": 115,
+      "linea": 116,
       "cita": "\"salesSummary\": \"Resumen de Ventas\","
     },
     {
       "paso": 2,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 2080,
+      "linea": 2100,
       "cita": "label={t('salesSummary.rows.grossSales')}"
     },
     {
       "paso": 2,
       "archivo": "src/locales/es/reports.json",
-      "linea": 593,
-      "cita": "\"grossSales\": \"Ventas brutas\","
-    },
-    {
-      "paso": 2,
-      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
-      "linea": 1017,
-      "cita": "SELECT SUM(subtotal) AS subtotal, SUM(\"taxAmount\") AS tax, SUM(LEAST(\"discountAmount\", subtotal)) AS discounts"
-    },
-    {
-      "paso": 2,
-      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
-      "linea": 1020,
-      "cita": "AND \"createdAt\" >= ${utcTsParam(2)}"
-    },
-    {
-      "paso": 2,
-      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
-      "linea": 1023,
-      "cita": "AND \"paymentStatus\" NOT IN ('REFUNDED')"
-    },
-    {
-      "paso": 2,
-      "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 2137,
-      "cita": "label={t('salesSummary.rows.netSales')}"
-    },
-    {
-      "paso": 2,
-      "archivo": "src/locales/es/reports.json",
       "linea": 598,
-      "cita": "\"netSales\": \"Ventas netas\","
+      "cita": "\"serviceCosts\": \"Cargos por servicio\","
     },
     {
       "paso": 2,
-      "archivo": "src/locales/es/reports.json",
-      "linea": 596,
-      "cita": "\"discounts\": \"Descuentos\","
-    },
-    {
-      "paso": 2,
-      "archivo": "src/locales/es/reports.json",
-      "linea": 597,
-      "cita": "\"refunds\": \"Devoluciones\","
+      "archivo": "avoqado-server/src/services/dashboard/salesSummaryPoblacion.ts",
+      "linea": 31,
+      "cita": "export function sqlCuentaCobrada(o: AliasDeOrden): string {"
     },
     {
       "paso": 2,
       "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
-      "linea": 1221,
+      "linea": 1091,
+      "cita": "SELECT SUM(subtotal + ${sqlImpuestoQueSeCobraAparte()}) FILTER (WHERE cuenta.es_venta) AS subtotal,"
+    },
+    {
+      "paso": 2,
+      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
+      "linea": 1308,
+      "cita": "grossSales: grossSalesResult ? grossSalesResult.subtotal + grossSalesResult.serviceCosts : null,"
+    },
+    {
+      "paso": 2,
+      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
+      "linea": 1356,
       "cita": "const netSales = grossSales !== null && discounts !== null ? grossSales - discounts - refunds : null"
     },
     {
       "paso": 3,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 1894,
-      "cita": "onClick={() => openControlPanel('metrics')}"
-    },
-    {
-      "paso": 3,
-      "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 1898,
-      "cita": "<span className=\"text-muted-foreground mr-1\">{t('salesSummary.controls.metrics.label')}</span>"
+      "linea": 2171,
+      "cita": "(selectedMetrics.includes('deferredSales') || (data.summary.unpaidOrders ?? 0) > 0) && ("
     },
     {
       "paso": 3,
       "archivo": "src/locales/es/reports.json",
-      "linea": 772,
-      "cita": "\"label\": \"Métricas\","
+      "linea": 805,
+      "cita": "\"deferredSales\": \"Sin cobrar\","
     },
     {
       "paso": 3,
       "archivo": "src/locales/es/reports.json",
-      "linea": 790,
-      "cita": "\"deferredSales\": \"Ventas diferidas\","
+      "linea": 649,
+      "cita": "\"unpaidOrdersLabel_other\": \"cuentas\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 602,
+      "cita": "\"deferredSales\": \"Sin cobrar\","
     },
     {
       "paso": 3,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 1595,
+      "linea": 1608,
       "cita": "onClick={applyMetrics}"
     },
     {
       "paso": 3,
-      "archivo": "src/locales/es/reports.json",
-      "linea": 652,
-      "cita": "\"apply\": \"Aplicar\","
-    },
-    {
-      "paso": 3,
-      "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 2149,
-      "cita": "label={t('salesSummary.rows.deferredSales')}"
-    },
-    {
-      "paso": 3,
       "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
-      "linea": 1106,
-      "cita": "paymentStatus: { in: ['PENDING', 'PARTIAL'] },"
+      "linea": 1098,
+      "cita": "SUM(cuenta.falta) FILTER (WHERE cuenta.abierta AND NOT cuenta.es_venta) AS unpaid,"
     },
     {
       "paso": 3,
-      "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
-      "linea": 1206,
-      "cita": "const deferredSales = deferredResult ? Number(deferredResult._sum.remainingBalance || 0) : null"
+      "archivo": "avoqado-server/src/services/dashboard/salesSummaryPoblacion.ts",
+      "linea": 21,
+      "cita": "export function sqlLoQueFaltaCobrar(o: AliasDeOrden): string {"
     },
     {
       "paso": 4,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 2010,
+      "linea": 2030,
       "cita": "<p className=\"text-sm text-muted-foreground mb-1\">{t('salesSummary.totalSales')}</p>"
     },
     {
       "paso": 4,
       "archivo": "src/locales/es/reports.json",
-      "linea": 470,
+      "linea": 473,
       "cita": "\"totalSales\": \"Neto cobrado\","
     },
     {
       "paso": 4,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 2011,
-      "cita": "<p className=\"text-4xl font-bold tracking-tight\">{Currency(data.summary.totalCollected)}</p>"
+      "linea": 2244,
+      "cita": "label={t('salesSummary.rows.tenderCommissions')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 606,
+      "cita": "\"tenderCommissions\": \"Comisiones de terceros\","
     },
     {
       "paso": 4,
       "archivo": "avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts",
-      "linea": 1235,
-      "cita": "? netSales + tips - platformFees"
+      "linea": 1370,
+      "cita": "? netSales + tips - platformFees - tenderCommissions"
+    },
+    {
+      "paso": 4,
+      "archivo": "avoqado-server/src/services/dashboard/salesSummaryPoblacion.ts",
+      "linea": 49,
+      "cita": "export function sqlComisionDeTerceros(p: string, vistaDeMovimientos: boolean): string {"
     }
   ],
   "permisos": [

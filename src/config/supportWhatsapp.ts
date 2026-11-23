@@ -78,6 +78,21 @@ export function isSupportFreeTextEnabled(): boolean {
 export function isSupportHybridEnabled(): boolean {
   return process.env.SUPPORT_WHATSAPP_HYBRID_ENABLED === 'true' && isSupportFreeTextEnabled()
 }
+/**
+ * Ayuda pública (founder, 22-nov): un número que no es de ninguna cuenta recibe el aviso, guías públicas y «persona», con topes.
+ * SUPPORT_PUBLIC_HELP_ENABLED: prendida salvo `false`; sólo con el modo híbrido (los strikes salen de su clasificador). Apagada,
+ * ese número recibe el mensaje fijo una vez al día, como antes.
+ */
+export function isSupportPublicHelpEnabled(): boolean {
+  return isSupportHybridEnabled() && process.env.SUPPORT_PUBLIC_HELP_ENABLED?.trim().toLowerCase() !== 'false'
+}
+/** SUPPORT_PUBLIC_HELP_DAILY_USD: lo más que gastan en IA, juntos y en un día de CDMX, los números sin cuenta. Default 1; 0 = nada. */
+export function getSupportPublicHelpDailyUsd(): Prisma.Decimal {
+  const text = process.env.SUPPORT_PUBLIC_HELP_DAILY_USD?.trim() ?? ''
+  if (/^(?:0|[1-9]\d{0,5})(?:\.\d{1,8})?$/.test(text)) return new Prisma.Decimal(text)
+  if (text) invalidSetting('SUPPORT_PUBLIC_HELP_DAILY_USD')
+  return new Prisma.Decimal(1)
+}
 export interface SupportHandoffConfig {
   /** SUPPORT_HANDOFF_EMAIL_TO: obligatoria; sin ella no hay aviso por correo. */
   to: string

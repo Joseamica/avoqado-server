@@ -66,3 +66,19 @@ export const zTimezoneBase = z.string().refine(isValidIANATimezone, { message: '
  *   → If omitted, falls back to 'America/Mexico_City' (default fires before optional).
  */
 export const zTimezone = zTimezoneBase.default('America/Mexico_City')
+
+/**
+ * The venue's zone for a calculation that also goes to SQL (`sanitizeTimezone`): valid IANA as is; another name Intl knows goes to
+ * its canonical one («GMT» → «UTC»); anything else («GMT-6», empty) to
+ * America/Mexico_City. Without this, old sign-ups answered 400 on «Por periodo» (D13, Codex r3 #1, r4, r5).
+ */
+export function zonaDelCalculo(timezone: string | null | undefined): string {
+  if (!timezone) return 'America/Mexico_City'
+  if (isValidIANATimezone(timezone)) return timezone
+  try {
+    const canonica = new Intl.DateTimeFormat('en-US', { timeZone: timezone }).resolvedOptions().timeZone
+    return isValidIANATimezone(canonica) ? canonica : 'America/Mexico_City'
+  } catch {
+    return 'America/Mexico_City'
+  }
+}

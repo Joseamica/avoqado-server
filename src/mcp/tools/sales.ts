@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { DateTime } from 'luxon'
 import prisma from '@/utils/prismaClient'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
+import { zonaDelCalculo } from '@/utils/sanitizeTimezone'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -30,6 +31,8 @@ import { getAvailableBalance, getBalanceByCardType } from '@/services/dashboard/
 import { getSettlementsLandingInWeek, venueWeekBounds } from '@/services/dashboard/settlementCalendar.dashboard.service'
 import { hasPermission } from '@/services/access/access.service'
 import { AVISO_PUENTE_QR_CAIDO } from '@/services/legacy/qrPayments.legacy.service'
+import { fechaDelCobro } from '@/services/exports/exportadores/ventasDetalladas.exportador'
+import { EXPORT_PDF_ROW_CAP } from '@/services/dashboard/export.helpers'
 
 /**
  * D15: el servicio marcó `legacyUnavailable` porque el puente de cobros QR legacy (sólo MindForm) no contestó. Las cifras
@@ -848,7 +851,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'export_sales_summary',
-    'Export the sales summary for a venue you can access ("exporta mis ventas"). mode=summary returns the flattened totals + chosen sections; mode=detailed returns the matching per-transaction rows. Honors the same date range + payment-method/card-type/merchant filters as the dashboard report. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD), mode, sections (comma list), paymentMethod, cardType, merchantAccountId. The server enforces plan access and returns a clear message if the venue is not entitled — do NOT pre-judge plan eligibility yourself.',
+    'Export the sales summary for a venue you can access ("exporta mis ventas"). mode=summary returns the flattened totals + chosen sections; mode=detailed returns the matching per-transaction rows. Honors the same date range + payment-method/card-type/merchant filters as the dashboard report. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD), mode, sections (comma list), paymentMethod, cardType, merchantAccountId. Totals are cash-basis like the dashboard: gross and net sales count only collected accounts (items plus service charges); open or half-paid accounts are a separate «Sin cobrar» row (what they still owe, without tip, with how many) and are not sales; third-party fees (Rappi, Uber Eats, DiDi, payment types with a commission) are their own row and are already subtracted from «Total cobrado»; transaction counts are charges (refunds are not counted). With paymentMethod or merchantAccountId the totals are a money-movement view: order-level rows (gross/net sales, discounts, taxes, «Sin cobrar») are empty and «Total cobrado» is the payments of that method or merchant. Sections also accept statement (where the money of the period went: collected, refunds, fees, what you keep, cash in hand, to your bank, other methods); byPeriod rows follow reportType (hours, days, weeks, months, hourlySum, dailySum; default days). Detailed rows carry fecha, the real time of each payment in the venue timezone. The server enforces plan access and returns a clear message if the venue is not entitled — do NOT pre-judge plan eligibility yourself.',
     {
       venueId: z.string().describe('Venue to export (must be in your scope)'),
       mode: z
@@ -861,18 +864,22 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         .string()
         .optional()
         .describe('Summary sections, comma-separated: totals,paymentMethods,cardTypes,merchantAccounts,byPeriod'),
+      reportType: z
+        .enum(['hours', 'days', 'weeks', 'months', 'hourlySum', 'dailySum'])
+        .optional()
+        .describe('Breakdown used by the byPeriod section (default: days)'),
       paymentMethod: z.enum(['CASH', 'CARD', 'QR_LEGACY', 'OTHER']).optional().describe('Filter to one payment bucket'),
       cardType: z.enum(['CREDIT', 'DEBIT', 'AMEX', 'INTERNATIONAL']).optional().describe('Card sub-filter (only when paymentMethod=CARD)'),
       merchantAccountId: z.string().optional().describe('Filter to one merchant account'),
     },
-    async ({ venueId, mode, fromDate, toDate, sections, paymentMethod, cardType, merchantAccountId }) => {
+    async ({ venueId, mode, fromDate, toDate, sections, reportType, paymentMethod, cardType, merchantAccountId }) => {
       guard.venueFilter(venueId) // throws ScopeError if out of scope
       guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
       const reportGate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'La exportación de ventas')
       if (reportGate) return text({ ok: false, planRequired: true, error: reportGate })
 
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
-      const tz = venue?.timezone || 'America/Mexico_City'
+      const tz = zonaDelCalculo(venue?.timezone) // Codex D13 r3 #8, r4: «GMT-6» o «GMT» guardados no tumban el rango ni los periodos
       const start = venueStartOfDay(tz, fromDate ? new Date(`${fromDate}T12:00:00`) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))
       const end = venueEndOfDay(tz, toDate ? new Date(`${toDate}T12:00:00`) : undefined)
       const range = { startDate: start.toISOString(), endDate: end.toISOString() }
@@ -894,8 +901,9 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         // cover (auth/reference numbers, operation ids), so drop it explicitly. Same redaction policy
         // the platform applies everywhere card data could leave the building.
         const rows = guard.redact(rawRows).map(r => {
-          const copy = { ...(r as Record<string, unknown>) }
+          const copy: Record<string, unknown> = { ...(r as Record<string, unknown>), fecha: fechaDelCobro({ ...r, zona: tz }) } // D13.3: hora real, en la MISMA zona del rango de esta respuesta
           delete copy.processorData
+          delete copy.zona
           return copy
         })
         return text({ venueId, mode: 'detailed', window: range, timezone: tz, total, returned: rows.length, rows })
@@ -913,14 +921,24 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       const report = await getSalesSummary(venueId, {
         ...range,
         groupBy: 'paymentMethod',
-        reportType: 'summary',
+        // D13.2: periods only when byPeriod is asked for (it was forced to 'summary' and the section came out empty).
+        reportType: requested.includes('byPeriod') ? (reportType ?? 'days') : 'summary',
         timezone: tz,
         paymentMethod,
         cardType,
         merchantAccountId,
         includeMerchantBreakdown: true,
       })
-      const { rows } = flattenSalesSummaryForExport(report, requested)
+      // D13.2: hours over a long range can be thousands of rows; never cut them silently, say so (same cap as the dashboard PDF),
+      // before labelling every period (Codex r3 #6).
+      const demasiadas = (filas: number, alMenos = false) =>
+        text({
+          ok: false,
+          error: `El resumen tendría ${alMenos ? 'al menos ' : ''}${filas.toLocaleString('es-MX')} filas (máximo ${EXPORT_PDF_ROW_CAP.toLocaleString('es-MX')}). Usa un rango más corto o un desglose más grande (days, weeks o months).`,
+        })
+      if ((report.byPeriod?.length ?? 0) > EXPORT_PDF_ROW_CAP) return demasiadas(report.byPeriod!.length, true)
+      const { rows } = flattenSalesSummaryForExport(report, requested, tz)
+      if (rows.length > EXPORT_PDF_ROW_CAP) return demasiadas(rows.length)
       return text({
         venueId,
         mode: 'summary',
