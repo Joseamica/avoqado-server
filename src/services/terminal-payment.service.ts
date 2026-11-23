@@ -76,6 +76,7 @@ import {
   SIN_FINAL_TRAS_ACUSE_MS,
   sinRespuestaMs,
   TOPE_DE_UNA_LLAMADA_AL_SDK_MS,
+  TOPE_DE_INTENTOS_POR_SOLICITUD,
   TOPE_SIGO_TRAS_CANCEL_MS,
   type CausaSinRespuesta,
 } from './tpv/sinRespuesta'
@@ -5911,8 +5912,8 @@ class TerminalPaymentService {
       logger.info('🔎 [TerminalPayment watchdog] probes sent', { terminals: terminalesVistas.size, rows: sondasEnviadas })
 
     let completed = 0
-    let marked = 0
-    let released = 0
+    const marked = 0
+    const released = 0
     let lateReconciled = 0
     let aliasesRetirados = 0
 
@@ -8533,7 +8534,14 @@ class TerminalPaymentService {
     try {
       decision = await prisma.$transaction(async tx => {
         await candadoDeSolicitud(tx, requestId)
-        const attemptIds = (await tx.terminalPaymentAttemptLink.findMany({ where: { requestId, venueId }, select: { attemptId: true } }))
+        const attemptIds = (
+          await tx.terminalPaymentAttemptLink.findMany({
+            where: { requestId, venueId },
+            select: { attemptId: true },
+            orderBy: { attemptId: 'asc' },
+            take: TOPE_DE_INTENTOS_POR_SOLICITUD,
+          })
+        )
           .map(l => llaveDeIntento(l.attemptId))
           .filter((a): a is string => Boolean(a))
           .sort()

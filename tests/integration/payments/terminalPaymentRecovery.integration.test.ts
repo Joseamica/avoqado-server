@@ -4,13 +4,10 @@ import { Prisma, TerminalPaymentRequestStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import {
   SIN_DESENLACE_ACREDITADO,
-  UNPROVEN_NEGATIVE_WINDOW_MS,
   UNRESOLVED_FINANCIAL_OUTCOME,
-  desenlaceCanonico,
   terminalPaymentService,
   unresolvedFinancialOutcomeSql,
 } from '@/services/terminal-payment.service'
-import { utcTs } from '@/utils/sqlDates'
 import { invalidarVenuesEstrictos } from '@/services/terminal-payment-strictness'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import socketManager from '@/communication/sockets/managers/socketManager'
@@ -21,7 +18,6 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { cancelOrder } from '@/services/mobile/order.mobile.service'
 import { OrderTableTopologyChanged } from '@/services/shared/tableOrderLock'
 import { sondaReportoActiva } from '@/services/tpv/sondaActiva'
-import logger from '@/config/logger'
 jest.mock('@/communication/sockets/managers/socketManager', () => {
   // El índice `@/communication/sockets` reexporta el NOMBRADO `socketManager` (lo usa `cancelOrder`); el resto importa el
   // default. Es el mismo objeto. `getBroadcastingService`: `cancelOrder` avisa al venue al cancelar; aquí no hay a quién.
@@ -86,10 +82,6 @@ afterEach(async () => {
 afterAll(async () => {
   await prisma.order.deleteMany({ where: { venueId } })
   await prisma.terminal.deleteMany({ where: { venueId } })
-  if (avisoComprobado) {
-    await prisma.merchantAccount.deleteMany({ where: { id: avisoComprobado.cuentaId } })
-    await prisma.angelPayUserAccount.deleteMany({ where: { id: avisoComprobado.accesoId } })
-  }
   await prisma.venue.deleteMany({ where: { id: venueId } })
   await prisma.organization.deleteMany({ where: { id: fixture } })
 })
@@ -122,48 +114,6 @@ async function terminalDelFixture(serial: string = fixture) {
   })
 }
 
-/**
- * A8 (21-oct): la ventana de 30 s sólo escribe «no se cobró» donde el aviso del banco de TODAS las cuentas con las que pudo cobrar
- * la terminal está COMPROBADO; si no, suelta sólo la ranura. Las pruebas que fijan esa liberación (el caso de Testarudo) siembran
- * aquí lo mínimo: una cuenta AngelPay del negocio, activa y con avisos recibidos (sin cobros con tarjeta suyos), asignada a la
- * terminal de la fila. Se borra en `afterAll`.
- */
-let avisoComprobado: { cuentaId: string; accesoId: string } | undefined
-async function conAvisoDelBancoComprobado(serial: string = fixture) {
-  if (!avisoComprobado) {
-    const angelpay = await prisma.paymentProvider.upsert({
-      where: { code: 'ANGELPAY' },
-      update: {},
-      create: { code: 'ANGELPAY', name: 'AngelPay', type: 'PAYMENT_PROCESSOR', countryCode: ['MX'] },
-    })
-    const acceso = await prisma.angelPayUserAccount.create({
-      data: { venueId, email: `${fixture}@angelpay.test`, environment: 'QA', status: 'ACTIVE' },
-    })
-    const cuenta = await prisma.merchantAccount.create({
-      data: {
-        providerId: angelpay.id,
-        externalMerchantId: `${fixture}-aviso`,
-        alias: 'AngelPay con aviso comprobado',
-        credentialsEncrypted: {},
-        angelpayUserAccountId: acceso.id,
-        angelpayWebhookLastReceivedAt: new Date(Date.now() - 60_000),
-      },
-    })
-    avisoComprobado = { cuentaId: cuenta.id, accesoId: acceso.id }
-  }
-  await prisma.terminal.upsert({
-    where: { serialNumber: serial },
-    update: { assignedMerchantIds: [avisoComprobado.cuentaId] },
-    create: {
-      venueId,
-      name: 'fixture terminal',
-      serialNumber: serial,
-      type: 'TPV_ANDROID',
-      assignedMerchantIds: [avisoComprobado.cuentaId],
-    },
-  })
-}
-
 async function auditPayment(overrides: Record<string, unknown> = {}, serial: string = fixture) {
   const terminal = await terminalDelFixture(serial)
   return prisma.payment.create({
@@ -182,26 +132,6 @@ async function auditPayment(overrides: Record<string, unknown> = {}, serial: str
     } as Prisma.PaymentUncheckedCreateInput,
   })
 }
-/**
- * Enciende el RÉGIMEN ESTRICTO en el venue de la prueba. El `afterEach` de abajo lo apaga SIEMPRE.
- *
- * 🔴 Por qué hace falta desde el 11-sep: el interruptor por venue (I.6) dejó la **ranura física de la terminal**
- * en el régimen heredado mientras está apagado — que es como sale a producción, para no trabar las 386 filas
- * históricas medidas. El **bloqueo por orden**, en cambio, es estricto SIEMPRE (decisión del founder tras la
- * auditoría de Codex: el riesgo de que un cobro incierto sí haya cobrado NO caduca).
- *
- * Las pruebas que miden la RANURA no se debilitan: se ejecutan en el régimen donde esa garantía vive. Las que
- * miden la ORDEN se quedan fuera a propósito — deben pasar en los DOS regímenes, y de hecho pasan. El corte va
- * en 1970 para que cubra cualquier fila que la prueba siembre.
- */
-async function encenderRegimenEstricto(): Promise<void> {
-  await prisma.venue.update({
-    where: { id: venueId },
-    data: { terminalPaymentStrictEnabled: true, terminalPaymentStrictSince: new Date(0) },
-  })
-  await invalidarVenuesEstrictos()
-}
-
 afterEach(async () => {
   // Idempotente y barato: deja el venue en el régimen de fábrica pase lo que pase, incluso si la prueba falló
   // a mitad. Sin esto, una prueba encendida contaminaría a la siguiente con el régimen equivocado.
@@ -1541,39 +1471,6 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
       },
     })
 
-  /** Una transacción que TOMA el candado de admisión de esa terminal (el mismo `pg_advisory_xact_lock` del servicio) y lo suelta cuando se le pide. */
-  function retenerCandado(clave: string) {
-    let soltar!: () => void
-    const liberado = new Promise<void>(r => (soltar = r))
-    let avisarTomado!: () => void
-    const tomado = new Promise<void>(r => (avisarTomado = r))
-    const tx = prisma.$transaction(
-      async t => {
-        await t.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${clave}, 0))::text`
-        avisarTomado()
-        await liberado
-      },
-      { timeout: 20_000, maxWait: 10_000 },
-    )
-    return { tomado, soltar: () => soltar(), tx }
-  }
-  /** Espera a que haya `n` sesiones FORMADAS en ese candado exacto (pg_locks por la llave, no por el texto): sin relojes. */
-  async function esperarFormados(clave: string, n: number) {
-    for (let i = 0; i < 400; i++) {
-      const [{ formados }] = await prisma.$queryRaw<Array<{ formados: number }>>`
-        WITH k AS (SELECT hashtextextended(${clave}, 0) AS v)
-        SELECT count(*)::int AS formados
-          FROM pg_locks l, k
-         WHERE l.locktype = 'advisory' AND NOT l.granted AND l.objsubid = 1
-           AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
-           AND l.classid::bigint = ((k.v >> 32) & 4294967295)
-           AND l.objid::bigint = (k.v & 4294967295)`
-      if (formados >= n) return
-      await new Promise(r => setTimeout(r, 25))
-    }
-    throw new Error(`No se formaron ${n} sesiones en el candado de ${clave}`)
-  }
-
   beforeEach(() => {
     // Si una copia se ADMITIERA por error, el ACK perdido la cierra rápido (UNKNOWN) en vez de colgar la prueba 5 min.
     directEmit.mockImplementation((_event: string, _payload: unknown, callback?: (error: Error) => void) =>
@@ -2262,9 +2159,6 @@ describe('S1 · la terminal cerró la solicitud y no tiene ejecución viva (A3)'
   // Un ACTIVE anterior, sellado hace un momento: el veto de la declaración del cajero.
   const activaAntes = () => new Date(Date.now() - 5_000)
   const ACCION = 'TERMINAL_PAYMENT_EXECUTION_CLOSED'
-  const asientos = (rowId: string) => prisma.activityLog.findMany({ where: { venueId, action: ACCION, entityId: rowId } })
-  const avisosDeCierre = () =>
-    (logger.info as jest.Mock).mock.calls.filter(([msg]) => String(msg).includes('cerró la solicitud y no tiene ejecución viva'))
   let gancho: jest.SpyInstance
   beforeEach(() => {
     gancho = jest.spyOn(terminalPaymentService as any, 'programarLiberacionTrasCierre')
@@ -2323,15 +2217,7 @@ describe('A6 · S4 el reloj de 20 min no se reinicia · S6 soporte suelta la TER
   const ACCION = 'TERMINAL_PAYMENT_MANUAL_RELEASED'
   const MOTIVO = 'Amaena: la PAX se reinició a media venta y la tablet no puede cobrar'
   let soporteId: string
-  const leer = (id: string) => prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id } })
   const asientos = (rowId: string) => prisma.activityLog.findMany({ where: { venueId, action: ACCION, entityId: rowId } })
-  const soltarComoSoporte = (requestId: string) =>
-    terminalPaymentService.releaseUnknownRequest({
-      requestId,
-      venueId,
-      actor: { staffId: soporteId, source: 'SUPERADMIN' },
-      reason: MOTIVO,
-    })
   function resFalso() {
     const res: any = {}
     res.status = jest.fn(() => res)

@@ -20,6 +20,12 @@ export const SIN_FINAL_TRAS_ACUSE_MS = 60_000
 export const TOPE_DE_UNA_LLAMADA_AL_SDK_MS = 150_000
 /** «Aprobado, por registrar»: si a los 5 min el aviso aprobado sigue sin `Payment`, 🚨 a operaciones (una vez por fila). */
 export const APROBADO_SIN_REGISTRO_MS = 5 * 60_000
+/**
+ * Tope de los intentos ligados que leen los cierres de S1 (`cerrarSinRespuesta`, `reconcileBankDeclined`) para tomar sus candados.
+ * Una solicitud real tiene uno o unos cuantos (un intento por toque en la terminal). ponytail: lo que pase de 100 no se lee (ni se
+ * candadea ni cuenta para los vetos por llave; los vetos por `requestId` del CAS sí lo cubren); paginar si algún día es alcanzable.
+ */
+export const TOPE_DE_INTENTOS_POR_SOLICITUD = 100
 
 /** Por qué quedó sin respuesta. Viaja en `resultJson.noChargeCause` y, al cerrar, en el campo opcional `noChargeCause`. */
 export type CausaSinRespuesta = 'NO_RESPONSE' | 'ACK_TIMEOUT' | 'TERMINAL_GONE'

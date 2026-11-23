@@ -1057,11 +1057,6 @@
       "loops": 0,
       "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
     },
-    "src/services/tpv/uncharged-reconciliation.service.ts#reconcileBankDeclined#reconcileUncharged": {
-      "count": 1,
-      "loops": 0,
-      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
-    },
     "src/services/exchanges/exchangeSettle.ts#prepareCardSettlementInTx#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
@@ -1216,6 +1211,16 @@
       "count": 1,
       "loops": 0,
       "reason": "D26: el mismo patrón que soltarRanuraTrasCierre — cada invocación abre/termina su propia transacción; el bucle del vigía no conserva filas de invocaciones anteriores."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.cerrarSinRespuesta#findReconcilablePayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cobro simple S1: el mismo patrón que releaseUnknownRequest — se llama con el cliente global, fuera de toda transacción (temporizador, vigía o GET), y cada invocación abre/termina las suyas; el barrido del vigía llama una vez por fila sin conservar filas de la anterior."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.cerrarSinRespuesta#closeRowFromPaymentTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cobro simple S1: un Payment exacto por solicitud (el que devolvió findReconcilablePayment), en una transacción propia por fila; la transacción del cierre «no cobrado» es otra y sólo toma solicitud → intentos en orden, sin Orders/Payments/GiftCards."
     },
     "src/services/shared/puntosAlReembolsar.ts#quitarPuntosPorReembolso#reversaEnTx": {
       "count": 1,

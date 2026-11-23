@@ -38,6 +38,7 @@ import { estadoBancarioSql } from './estadoBancario'
 import { sondaReportoActiva, sondaVetaLaDeclaracion } from './sondaActiva'
 import logger from '../../config/logger'
 import { elTechoLevantaElVeto } from './techoDeEjecucionViva'
+import { TOPE_DE_INTENTOS_POR_SOLICITUD } from './sinRespuesta'
 
 export const RECONCILE_UNCHARGED_PERMISSION = 'payments:reconcile-uncharged'
 
@@ -916,7 +917,14 @@ export async function reconcileBankDeclined(input: {
   try {
     const desenlace = await prisma.$transaction(async tx => {
       await candadoDeSolicitud(tx, requestId)
-      const attemptIds = (await tx.terminalPaymentAttemptLink.findMany({ where: { requestId, venueId }, select: { attemptId: true } }))
+      const attemptIds = (
+        await tx.terminalPaymentAttemptLink.findMany({
+          where: { requestId, venueId },
+          select: { attemptId: true },
+          orderBy: { attemptId: 'asc' },
+          take: TOPE_DE_INTENTOS_POR_SOLICITUD,
+        })
+      )
         .map(v => llaveDeIntento(v.attemptId))
         .filter((a): a is string => Boolean(a))
         .sort()

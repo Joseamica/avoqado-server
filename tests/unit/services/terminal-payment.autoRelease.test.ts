@@ -55,11 +55,6 @@ const tpr = () => prismaMock.terminalPaymentRequest
 
 const NOW = new Date('2026-09-04T20:40:00.000Z')
 const EXPIRED_AT = new Date('2026-09-04T20:33:20.000Z') // the request's 5-min deadline, in the past
-// 20 min, not 2: the TPV replays its offline payment queue every 15 min (PaymentSyncScheduler), so a
-// charge whose REST record got cut can land up to 15 min after the terminal is back. Freeing earlier
-// would invite a second charge.
-const GRACE_MS = 20 * 60_000
-const ALIVE_WINDOW_MS = 5 * 60_000
 
 function unknownRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -78,10 +73,6 @@ function unknownRow(overrides: Record<string, unknown> = {}) {
     terminalReturnedAt: null,
     ...overrides,
   }
-}
-
-function terminalWithHeartbeat(lastHeartbeat: Date | null) {
-  prismaMock.terminal.findFirst.mockResolvedValue({ id: 'term-1', lastHeartbeat })
 }
 
 beforeEach(() => {
