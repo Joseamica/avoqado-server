@@ -69,17 +69,17 @@ describe('S1.6 · aprobado tardío ⇒ aviso al dueño', () => {
 })
 
 describe('Codex S1 r1 #4 · «del mismo importe» es el mismo TOTAL (venta + propina)', () => {
-  it('lista el cobro de $120 sin propina y no el de $100, para un aprobado de $100 + $20 de propina', async () => {
+  it('busca el cobro de $120 (no el de $100), para un aprobado de $100 + $20 de propina, y lo lista', async () => {
     const D = (n: number) => new Prisma.Decimal(n)
     db.payment.findFirst.mockResolvedValue({ amount: D(100), tipAmount: D(20), order: { orderNumber: 'ORD-1' }, merchantAccount: null })
-    db.payment.findMany.mockResolvedValue([
-      { createdAt: new Date(), amount: D(100), tipAmount: D(0), order: { orderNumber: 'ORD-100' } },
-      { createdAt: new Date(), amount: D(120), tipAmount: D(0), order: { orderNumber: 'ORD-120' } },
-    ])
+    // Codex S1 r2 (R2-5): el total se compara EN la consulta (la prueba contra Postgres está en `cobroSimple.sinRespuesta`).
+    db.$queryRaw.mockResolvedValue([{ createdAt: new Date(), orderNumber: 'ORD-120' }])
     await avisarAprobadoTardioDeLaSolicitud({ requestId: 'r', venueId: 'v1', paymentId: 'pay-1', orderId: 'o1', desde: new Date(0) })
+    const [sql, ...valores] = db.$queryRaw.mock.calls[0]
+    expect(sql.join('?')).toContain('COALESCE(p."tipAmount", 0) =')
+    expect(valores).toContain('120')
     const msg: string = db.notification.create.mock.calls[0][0].data.message
     expect(msg).toContain('ORD-120')
-    expect(msg).not.toContain('ORD-100')
     expect(msg).toContain('$120.00')
   })
 })

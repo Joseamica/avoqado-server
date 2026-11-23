@@ -17,6 +17,8 @@ import logger from '@/config/logger'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { processAngelPayWebhook } from '@/services/tpv/angelpay-webhook.service'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
+import { avisarAprobadoTardioDeLaSolicitud } from '@/services/tpv/avisoDeCobroTardio'
+import { Prisma } from '@prisma/client'
 import { TerminalBusyError } from '@/errors/AppError'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
@@ -501,5 +503,33 @@ describe('Codex S1 r2', () => {
     const pago = await recordOrderPayment(f.venueId, venta.id, f.registroDeLaTerminal({ attemptId, requestId: s.requestId }), f.staffId)
     expect(await fila(s.requestId)).toMatchObject({ status: 'COMPLETED', paymentId: pago.id })
     expect(await prisma.payment.count({ where: { venueId: f.venueId, orderId: venta.id } })).toBe(1)
+  })
+
+  it('R2-5 · 60 cobros con tarjeta de otros importes y luego uno del mismo TOTAL: el posible duplicado sale en el aviso a la dueña', async () => {
+    const desde = new Date(Date.now() - 1_000)
+    const D = (n: number) => new Prisma.Decimal(n)
+    const pagoBase = { venueId: f.venueId, source: 'TPV', method: 'CREDIT_CARD', status: 'COMPLETED', feePercentage: D(0), feeAmount: D(0) }
+    const otraVenta = await f.nuevaVenta(500)
+    await prisma.payment.createMany({
+      data: Array.from({ length: 60 }, (_, i) => ({
+        ...pagoBase,
+        orderId: otraVenta.id,
+        amount: D(200 + i),
+        tipAmount: D(0),
+        netAmount: D(200 + i),
+        createdAt: new Date(desde.getTime() + 10 + i),
+      })) as Prisma.PaymentCreateManyInput[],
+    })
+    const duplicado = await f.nuevaVenta(120)
+    await prisma.payment.create({
+      data: { ...pagoBase, orderId: duplicado.id, amount: D(100), tipAmount: D(20), netAmount: D(120), createdAt: new Date(desde.getTime() + 500) } as any,
+    })
+    const tardia = await f.nuevaVenta(120)
+    const aprobado = await prisma.payment.create({
+      data: { ...pagoBase, orderId: tardia.id, amount: D(120), tipAmount: D(0), netAmount: D(120) } as any,
+    })
+    await avisarAprobadoTardioDeLaSolicitud({ requestId: randomUUID(), venueId: f.venueId, paymentId: aprobado.id, orderId: tardia.id, desde })
+    const aviso = await prisma.notification.findFirst({ where: { venueId: f.venueId, recipientId: duenaId } })
+    expect(aviso?.message).toContain(duplicado.orderNumber)
   })
 })

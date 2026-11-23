@@ -15,6 +15,7 @@
  */
 import { NotificationPriority, NotificationType, OrgRole, StaffRole } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { utcTs } from '../../utils/sqlDates'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { readUnchargedReconciliation } from './uncharged-reconciliation.service'
@@ -248,26 +249,18 @@ export async function avisarAprobadoTardioDeLaSolicitud(ctx: {
     if (!pago) return
     const codigo = pago.merchantAccount?.provider.code ?? null
     const total = pago.amount.add(pago.tipAmount ?? 0)
-    // Codex S1 r1 #4: el mismo TOTAL (venta + propina), no sólo la venta. Acotado: los primeros 50 cobros con tarjeta desde el «no
-    // cobrado»; de ésos, los del mismo total (a lo más 10 en el texto).
+    // Codex S1 r1 #4: el mismo TOTAL (venta + propina), no sólo la venta. Codex S1 r2 (R2-5): el total se compara EN la consulta;
+    // filtrar después de un tope perdía el posible duplicado número 51. A lo más 10 en el texto.
     const mismos = ctx.desde
-      ? (
-          await prisma.payment.findMany({
-            where: {
-              venueId: ctx.venueId,
-              id: { not: ctx.paymentId },
-              status: 'COMPLETED',
-              method: { in: ['CREDIT_CARD', 'DEBIT_CARD'] },
-              createdAt: { gte: ctx.desde },
-              OR: [{ type: null }, { type: { not: 'REFUND' } }],
-            },
-            select: { createdAt: true, amount: true, tipAmount: true, order: { select: { orderNumber: true } } },
-            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-            take: 50,
-          })
-        )
-          .filter(m => m.amount.add(m.tipAmount ?? 0).equals(total))
-          .slice(0, 10)
+      ? await prisma.$queryRaw<{ createdAt: Date; orderNumber: string | null }[]>`
+          SELECT p."createdAt", o."orderNumber"
+          FROM "Payment" p LEFT JOIN "Order" o ON o."id" = p."orderId"
+          WHERE p."venueId" = ${ctx.venueId} AND p."id" <> ${ctx.paymentId} AND p."status"::text = 'COMPLETED'
+            AND p."method"::text IN ('CREDIT_CARD', 'DEBIT_CARD') AND p."createdAt" >= ${utcTs(ctx.desde)}
+            AND (p."type" IS NULL OR p."type"::text <> 'REFUND')
+            AND p."amount" + COALESCE(p."tipAmount", 0) = ${total.toString()}::numeric
+          ORDER BY p."createdAt" ASC, p."id" ASC
+          LIMIT 10`
       : []
     await avisarAprobadoTardio({
       venueId: ctx.venueId,
@@ -276,7 +269,7 @@ export async function avisarAprobadoTardioDeLaSolicitud(ctx: {
       paymentId: ctx.paymentId,
       montoPesos: Number(pago.amount) + Number(pago.tipAmount ?? 0),
       procesador: codigo === 'ANGELPAY' || codigo === 'BLUMON' ? codigo : null,
-      cobrosMismoImporte: mismos.map(m => ({ orderNumber: m.order?.orderNumber ?? 'sin número', at: m.createdAt })),
+      cobrosMismoImporte: mismos.map(m => ({ orderNumber: m.orderNumber ?? 'sin número', at: m.createdAt })),
       requestId: ctx.requestId,
     })
   } catch (err) {
