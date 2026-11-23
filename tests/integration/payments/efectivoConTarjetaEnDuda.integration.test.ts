@@ -8,6 +8,7 @@
  * Contra Postgres real: «en duda», las llaves y el cierre de la fila son cosas de la base, no de un mock.
  */
 import { randomUUID } from 'crypto'
+import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { settleCustomerBalance } from '@/services/dashboard/customer.dashboard.service'
@@ -541,5 +542,209 @@ describe('D10-B · si después la tarjeta SÍ pasó', () => {
     expect(await sobrepagos(exacta.id)).toEqual([])
     // El cierre tardío de la fila sí se grita: la duda se resolvió por dinero, no por sobrepago.
     expect(gritos('Payment recorded for an already-UNKNOWN request').length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+/**
+ * D7 (encargo a25cd7): la tarjeta que el banco YA aprobó y que llega tarde, después de que la cajera cobró la venta en efectivo.
+ *  · Con cuenta: si la cuenta se cerró como «pago completo» (efectivo) y la tarjeta era «partes iguales» o «por producto», antes había
+ *    un 400 y el dinero quedaba sin Payment. Ahora se registra y salta el sobrepago de siempre. Una cuenta abierta sigue como hoy.
+ *  · Pago rápido: cada `/fast` es su propia venta; toda tarjeta que llega aprobada tarde (≥ 1 min tras su intento) deja `LATE_CARD_RECORDED` (revisar si se
+ *    cobró de otra forma). A propósito no se empareja con el efectivo.
+ */
+describe('D7 · la tarjeta ya cobrada que llega tarde nunca se pierde', () => {
+  const sobrepagos = (orderId: string) =>
+    prisma.activityLog.findMany({ where: { venueId: f.venueId, entityId: orderId, action: 'SOBREPAGO_DETECTADO' }, take: 10 })
+  const tardias = (paymentId: string) =>
+    prisma.activityLog.findMany({ where: { venueId: f.venueId, entityId: paymentId, action: 'LATE_CARD_RECORDED' }, take: 10 })
+
+  it.each(['EQUALPARTS', 'PERPRODUCT'] as const)(
+    'cuenta cerrada en efectivo como pago completo y llega la tarjeta de «%s»: se registra, la cuenta sigue pagada y salta el sobrepago',
+    async splitType => {
+      const venta = await f.nuevaVenta(100)
+      const efectivo = await efectivoDeLaTerminal(venta.id)
+      expect(await orden(venta.id)).toMatchObject({ splitType: 'FULLPAYMENT', paymentStatus: 'PAID' })
+
+      const tarjeta = await recordOrderPayment(
+        f.venueId,
+        venta.id,
+        { ...f.registroDeLaTerminal({ attemptId: randomUUID() }), splitType, paidProductsId: [] },
+        f.staffId,
+      )
+
+      expect(tarjeta.status).toBe('COMPLETED')
+      const lista = await cobros(venta.id)
+      expect(lista.map(p => [p.id, p.method])).toEqual(
+        expect.arrayContaining([
+          [efectivo.id, 'CASH'],
+          [tarjeta.id, 'CREDIT_CARD'],
+        ]),
+      )
+      expect(lista).toHaveLength(2)
+      expect(await orden(venta.id)).toMatchObject({ splitType: 'FULLPAYMENT', paymentStatus: 'PAID' })
+      // Se guarda con la forma de la cuenta (no cambia lo que leen la TPV, el POS ni el DASHBOARD) y sin repartir por producto; la
+      // que mandó la terminal queda aparte como evidencia.
+      const guardada = exigir(prisma.payment.findUnique({ where: { id: tarjeta.id }, include: { allocations: true } }))
+      expect(await guardada).toMatchObject({
+        splitType: 'FULLPAYMENT',
+        posRawData: expect.objectContaining({ splitType: 'FULLPAYMENT', splitTypeDeLaTerminal: splitType }),
+      })
+      expect((await guardada).allocations.every(a => a.orderItemId === null)).toBe(true)
+      expect(await f.esperar(async () => (await sobrepagos(venta.id)).length > 0)).toBe(true)
+      expect((await sobrepagos(venta.id))[0].data).toMatchObject({ overpaidBy: 100, wasAlreadyPaid: true, paymentId: tarjeta.id })
+    },
+  )
+
+  it('cuenta ABIERTA por producto y llega una tarjeta de «partes iguales»: sigue como hoy (400); la excepción es sólo para «pago completo»', async () => {
+    const venta = await f.nuevaVenta(100)
+    await prisma.order.update({ where: { id: venta.id }, data: { splitType: 'PERPRODUCT' } })
+    const renglon = await prisma.orderItem.create({
+      data: {
+        orderId: venta.id,
+        productName: 'Producto D7',
+        quantity: 1,
+        unitPrice: new Prisma.Decimal(50),
+        taxAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(50),
+      },
+    })
+    await expect(
+      recordOrderPayment(
+        f.venueId,
+        venta.id,
+        { ...f.registroDeLaTerminal({ attemptId: randomUUID() }), splitType: 'EQUALPARTS', paidProductsId: [renglon.id], amount: 5000 },
+        f.staffId,
+      ),
+    ).rejects.toThrow(/Cannot use EQUALPARTS/)
+    expect(await cobros(venta.id)).toHaveLength(0)
+    expect(renglon.id).toBeTruthy()
+  })
+
+  it('cuenta «pago completo» con un abono parcial (sigue abierta): la tarjeta por producto sigue como hoy (400)', async () => {
+    const venta = await f.nuevaVenta(100)
+    await efectivoDeLaTerminal(venta.id, randomUUID(), { amount: 6000 })
+    expect(await orden(venta.id)).toMatchObject({ splitType: 'FULLPAYMENT' })
+    expect((await orden(venta.id)).paymentStatus).not.toBe('PAID')
+    await expect(
+      recordOrderPayment(
+        f.venueId,
+        venta.id,
+        { ...f.registroDeLaTerminal({ attemptId: randomUUID() }), splitType: 'PERPRODUCT', amount: 4000 },
+        f.staffId,
+      ),
+    ).rejects.toThrow(/Cannot use PERPRODUCT/)
+    expect(await cobros(venta.id)).toHaveLength(1)
+  })
+
+  it('reintentar la misma tarjeta tardía con su llave no crea otro cobro', async () => {
+    const venta = await f.nuevaVenta(100)
+    await efectivoDeLaTerminal(venta.id)
+    const registro = { ...f.registroDeLaTerminal({ attemptId: randomUUID() }), splitType: 'EQUALPARTS' }
+    const primera = await recordOrderPayment(f.venueId, venta.id, registro, f.staffId)
+    const otra = await recordOrderPayment(f.venueId, venta.id, { ...registro }, f.staffId)
+    expect(otra.id).toBe(primera.id)
+    expect(await cobros(venta.id)).toHaveLength(2)
+  })
+
+  it('lo que NO es tarjeta ya cobrada sigue rechazado con la forma de dividir equivocada (efectivo y tarjeta no completada)', async () => {
+    const venta = await f.nuevaVenta(100)
+    await efectivoDeLaTerminal(venta.id)
+    await expect(efectivoDeLaTerminal(venta.id, randomUUID(), { splitType: 'EQUALPARTS' })).rejects.toThrow(/Cannot use EQUALPARTS/)
+    await expect(
+      recordOrderPayment(
+        f.venueId,
+        venta.id,
+        { ...f.registroDeLaTerminal({ attemptId: randomUUID() }), splitType: 'EQUALPARTS', status: 'FAILED' },
+        f.staffId,
+      ),
+    ).rejects.toThrow(/Cannot use EQUALPARTS/)
+    expect(await cobros(venta.id)).toHaveLength(1)
+  })
+
+  describe('Pago rápido', () => {
+    const efectivoRapido = () =>
+      recordFastPayment(
+        f.venueId,
+        { ...f.registroDeLaTerminal({ attemptId: randomUUID(), sinMerchant: true }), method: 'CASH', authorizationNumber: undefined },
+        f.staffId,
+      )
+    const tarjetaRapida = (over: Record<string, unknown> = {}) =>
+      recordFastPayment(f.venueId, { ...f.registroDeLaTerminal({ attemptId: randomUUID() }), ...over }, f.staffId)
+
+    it('la tarjeta que estaba por confirmar llega aprobada tarde y en medio se cobró en efectivo: las dos ventas quedan y hay UN aviso', async () => {
+      const antes = Date.now()
+      const efectivo = await efectivoRapido()
+
+      const tarjeta = await tarjetaRapida({ edadDelIntentoMs: 5 * 60_000 })
+
+      expect(tarjeta.status).toBe('COMPLETED')
+      expect(tarjeta.orderId).not.toBe(efectivo.orderId)
+      expect(await f.esperar(async () => (await tardias(tarjeta.id)).length > 0)).toBe(true)
+      await darleTiempoAlRastro()
+      const [aviso, ...otros] = await tardias(tarjeta.id)
+      expect(otros).toEqual([])
+      expect(aviso.data).toMatchObject({
+        paymentId: tarjeta.id,
+        orderId: tarjeta.orderId,
+        amount: 100,
+      })
+      // El intento se fecha en el reloj del SERVIDOR: llegada − edad (≈ 5 min antes del efectivo).
+      expect(Date.parse((aviso.data as { attemptStartedAt: string }).attemptStartedAt)).toBeLessThan(antes - 4 * 60_000)
+      expect((aviso.data as { minutesLate: number }).minutesLate).toBeGreaterThanOrEqual(5)
+      expect(gritos('🚨 [Tarjeta tardía]')).toHaveLength(1)
+      // La hora del intento queda con la tarjeta: es lo que deja repetir el aviso tras un reinicio.
+      const guardada = await exigir(prisma.payment.findUnique({ where: { id: tarjeta.id } }))
+      expect(guardada.processorData).toMatchObject({ intentoAbiertoEn: expect.any(Number) })
+    })
+
+    it('sin aviso: TPV vieja (sin la hora del intento), registro a tiempo, efectivo, u hora ilegible (que tampoco tumba el cobro)', async () => {
+      const vieja = await tarjetaRapida()
+      const aTiempo = await tarjetaRapida({ edadDelIntentoMs: 10_000 })
+      const ilegible = await tarjetaRapida({ edadDelIntentoMs: 'no-es-edad' })
+      const efectivo = await recordFastPayment(
+        f.venueId,
+        {
+          ...f.registroDeLaTerminal({ attemptId: randomUUID(), sinMerchant: true }),
+          method: 'CASH',
+          authorizationNumber: undefined,
+          edadDelIntentoMs: 5 * 60_000,
+        },
+        f.staffId,
+      )
+      await darleTiempoAlRastro()
+      for (const p of [vieja, aTiempo, ilegible, efectivo]) {
+        expect(p.status).toBe('COMPLETED')
+        expect(await tardias(p.id)).toEqual([])
+      }
+      expect(gritos('🚨 [Tarjeta tardía]')).toEqual([])
+    })
+
+    it('si el servidor murió antes del aviso, el reintento de la TPV con su llave lo deja (y no lo repite)', async () => {
+      const registro = { ...f.registroDeLaTerminal({ attemptId: randomUUID() }), edadDelIntentoMs: 5 * 60_000 }
+      const tarjeta = await recordFastPayment(f.venueId, registro, f.staffId)
+      expect(await f.esperar(async () => (await tardias(tarjeta.id)).length > 0)).toBe(true)
+      await prisma.activityLog.deleteMany({ where: { venueId: f.venueId, action: 'LATE_CARD_RECORDED' } }) // «murió antes»
+
+      const otra = await recordFastPayment(f.venueId, { ...registro }, f.staffId)
+      expect(otra.id).toBe(tarjeta.id)
+      expect(await f.esperar(async () => (await tardias(tarjeta.id)).length > 0)).toBe(true)
+      await recordFastPayment(f.venueId, { ...registro }, f.staffId)
+      await darleTiempoAlRastro()
+      expect(await tardias(tarjeta.id)).toHaveLength(1)
+    })
+
+    it('el primer registro entró en vivo sin edad y la libreta lo reenvía con su llave trayendo la edad: UN aviso', async () => {
+      const registro = f.registroDeLaTerminal({ attemptId: randomUUID() })
+      const tarjeta = await recordFastPayment(f.venueId, registro, f.staffId)
+      await darleTiempoAlRastro()
+      expect(await tardias(tarjeta.id)).toEqual([])
+
+      const otra = await recordFastPayment(f.venueId, { ...registro, edadDelIntentoMs: 5 * 60_000 }, f.staffId)
+
+      expect(otra.id).toBe(tarjeta.id)
+      expect(await f.esperar(async () => (await tardias(tarjeta.id)).length > 0)).toBe(true)
+      await darleTiempoAlRastro()
+      expect(await tardias(tarjeta.id)).toHaveLength(1)
+    })
   })
 })

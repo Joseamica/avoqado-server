@@ -10,6 +10,7 @@ import AppError from '../../errors/AppError'
 import * as refundService from '../../services/mobile/refund.mobile.service'
 import type { RefundReason } from '../../services/dashboard/refund.dashboard.service'
 import { issuePosRefund } from '../../services/storeCredit/storeCreditRefund.service'
+import { permisoConcedidoDe } from '../../middlewares/permisoDeReembolso.middleware'
 import { esPosSinSoloSaldo } from '../../services/storeCredit/posSinSoloSaldo'
 import { esCantidadNoNegativaEnCentavos, esCantidadPositivaEnCentavos, vieneAusente } from '../../services/shared/devueltoDeUnCobro'
 
@@ -107,6 +108,8 @@ export const issueAssociatedRefund = async (req: Request, res: Response, next: N
     }
 
     const result = await issuePosRefund({
+      // Codex r2 #2: el permiso que concedió la ruta para ESTE destino (también la cadena de un Cambio de la máquina).
+      permisoConcedido: permisoConcedidoDe(req),
       venueId,
       paymentId,
       amount: typeof amount === 'number' ? amount : undefined,

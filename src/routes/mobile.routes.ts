@@ -47,6 +47,18 @@ import { customerDisplayAckSchema } from '../schemas/mobile/customerDisplay.mobi
 import * as notificationMobileController from '../controllers/mobile/notification.mobile.controller'
 import * as supplierMobileController from '../controllers/mobile/supplier.mobile.controller'
 import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.mobile.controller'
+import * as cashMachineMobileController from '../controllers/mobile/cashMachine.mobile.controller'
+import { permisoDeReembolsoSegunElCobro } from '../middlewares/permisoDeReembolso.middleware'
+import {
+  consultarDudaDeLaMaquinaSchema,
+  consultarVentaDeLaMaquinaSchema,
+  cotizarParaLaMaquinaSchema,
+  desemparejarAparatoSchema,
+  emparejarAparatoSchema,
+  registrarVentaDeLaMaquinaSchema,
+  subirDudaDeLaMaquinaSchema,
+  turnoDelNegocioSchema,
+} from '../schemas/mobile/cashMachine.schema'
 import { ponerLlaveDelRetiro } from '../lib/llaveDelRetiro'
 import * as purchaseOrderMobileController from '../controllers/mobile/purchase-order.mobile.controller'
 import * as transferMobileController from '../controllers/mobile/transfer.mobile.controller'
@@ -101,7 +113,7 @@ import { httpOperationGuard } from '../middlewares/httpOperation.middleware'
 import * as httpOperationMobileController from '../controllers/mobile/http-operation.mobile.controller'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import onlineOrdersMobileRoutes from './mobile/onlineOrders.mobile.routes'
-import { checkPermission } from '../middlewares/checkPermission.middleware'
+import { checkAnyPermission, checkPermission } from '../middlewares/checkPermission.middleware'
 import { marcarPermiso, PERMISO_VER_ESPERADO } from '../middlewares/permissionFlag.middleware'
 import { permisoDeLiberacion } from '../middlewares/permisoDeLiberacion.middleware'
 import { PAYMENT_OWNERSHIP_OVERRIDES, checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
@@ -3681,6 +3693,109 @@ router.post(
   cashDrawerMobileController.syncEvents,
 )
 
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-machine/sales
+ * Máquina de efectivo (fase 1a, R4-1): UNA operación de la QuickPay por petición (folio = `referenceCC`). `PAGADO` crea la cuenta
+ * y su pago en la misma transacción que el cierre; `CANCELADO`/`GUARDADO`, sólo el cierre. Idempotente por folio.
+ * Body: { referenceCC, cierre: { outcome, dueCents, saleCents, tipCents, creditCents, changeDispensedCents, occurredAt?, occurredAtKnown, saleShiftId? }, pedido? }
+ */
+router.post(
+  '/venues/:venueId/cash-machine/sales',
+  authenticateTokenMiddleware,
+  validateRequest(registrarVentaDeLaMaquinaSchema),
+  checkPermission('payments:create'),
+  cashMachineMobileController.registrarVenta,
+)
+
+/** GET /api/v1/mobile/venues/:venueId/cash-machine/sales/:referenceCC — la misma evidencia que el POST (acuse perdido). */
+router.get(
+  '/venues/:venueId/cash-machine/sales/:referenceCC',
+  authenticateTokenMiddleware,
+  validateRequest(consultarVentaDeLaMaquinaSchema),
+  checkPermission('payments:read'),
+  cashMachineMobileController.consultarVenta,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-machine/binding — emparejar ESTA PC (la del `X-Device-ID`) con la máquina (R4-3, R5#3).
+ * Body: { machineIp }. 201 { bindingId, credential }: la credencial sale una sola vez y viaja después en `X-Cash-Machine-Credential`.
+ * Revoca a la PC anterior de esa máquina. Sólo una sesión con `cash-machine:configure` (R5#10). Recorte R1: con cobros a medias
+ * (dudas o desenlaces sin terminar) 409 `CASH_MACHINE_FOLIOS_PENDING` `{ count, folios: [{ referenceCC, kind }] }`, sin revocar nada.
+ */
+router.post(
+  '/venues/:venueId/cash-machine/binding',
+  authenticateTokenMiddleware,
+  validateRequest(emparejarAparatoSchema),
+  checkPermission('cash-machine:configure'),
+  cashMachineMobileController.emparejar,
+)
+
+/** DELETE /api/v1/mobile/venues/:venueId/cash-machine/binding — esta PC deja de ser emisor. 200 { revoked }; con cobros a medias, el mismo 409. */
+router.delete(
+  '/venues/:venueId/cash-machine/binding',
+  authenticateTokenMiddleware,
+  validateRequest(desemparejarAparatoSchema),
+  checkPermission('cash-machine:configure'),
+  cashMachineMobileController.desemparejar,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-machine/quote — el total del carrito ANTES del `paycash`, con la lógica de `POST /orders`
+ * y sin escribir nada (R4-2). Body: el mismo de `POST /orders`. 200 { quoteId, expiresAt, totalCents, saleCents, tipCents,
+ * discountCents, renglones, cobrableEnMaquina, motivo? }. Sin guardias de cortesía ni de aprobación: un carrito con descuento contesta
+ * `motivo: 'DESCUENTO'` (la fase 1a no lo cobra en la máquina; decisión a del founder, Codex r1 #9). Recorte R6 (Codex servidor r8): un
+ * carrito ligado a una reserva o clase → `RESERVA`, antes que nada; un carrito de más de 512 KiB → `CARRITO_MUY_GRANDE` (su cierre y su
+ * duda leen hasta 4 MiB, `config/cuerpoJson.ts`).
+ */
+router.post(
+  '/venues/:venueId/cash-machine/quote',
+  authenticateTokenMiddleware,
+  validateRequest(cotizarParaLaMaquinaSchema),
+  checkPermission('payments:create'),
+  cashMachineMobileController.cotizar,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/cash-machine/doubts — «Cobros en duda» (R4-4, R5#6): la PC perdió el cierre y no sabe cómo
+ * terminó. La MISMA puerta que la venta: `payments:create` y la PC emparejada (`X-Cash-Machine-Credential`). Idempotente por folio.
+ * La resuelve un gerente SÓLO en el panel (recorte R2).
+ * Body: { referenceCC, dueCents, saleCents, tipCents, pedido, startedAt, lastSeen?, saleShiftId?, creditCents? }. 200 { status: 'ABIERTO' }
+ * o la evidencia del cierre si el folio ya se resolvió. H3/H4 (Codex servidor r5): la ruta sólo exige el folio y el adeudo como número;
+ * lo demás lo lee el servicio después de guardar la duda (nunca un 400 sin evidencia). H1: `creditCents` (opcional) = lo que vio entrar.
+ */
+router.post(
+  '/venues/:venueId/cash-machine/doubts',
+  authenticateTokenMiddleware,
+  validateRequest(subirDudaDeLaMaquinaSchema),
+  checkPermission('payments:create'),
+  cashMachineMobileController.subirDuda,
+)
+
+/** GET /api/v1/mobile/venues/:venueId/cash-machine/doubts/:referenceCC — la PC pregunta cada 60 s: { status: 'ABIERTO' } o la evidencia. */
+router.get(
+  '/venues/:venueId/cash-machine/doubts/:referenceCC',
+  authenticateTokenMiddleware,
+  validateRequest(consultarDudaDeLaMaquinaSchema),
+  checkPermission('payments:read'),
+  cashMachineMobileController.consultarDuda,
+)
+
+// Recorte R2 (founder «a», 21-nov): listar, resolver y revisar los cobros de la máquina es SÓLO del panel (`dashboard.routes.ts`). La PC
+// sube su duda y la consulta; el POS no tiene bandeja.
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/shifts/business-current — el turno vivo del NEGOCIO para la PC de la máquina, que no tiene gaveta
+ * (R3#8, Codex r1 #13). 200 `{ shiftId, startTime }` o `null`. `payments:create` o `shifts:read` (Codex r2 #6, el contrato del plan):
+ * sólo devuelve el id y el inicio del turno vivo, y quien cobra en la máquina lo necesita aunque su rol no lea turnos.
+ */
+router.get(
+  '/venues/:venueId/shifts/business-current',
+  authenticateTokenMiddleware,
+  validateRequest(turnoDelNegocioSchema),
+  checkAnyPermission(['payments:create', 'shifts:read']),
+  cashMachineMobileController.turnoDelNegocio,
+)
+
 // ============================================================================
 // PURCHASE ORDERS
 // Authenticated endpoints - requires valid JWT
@@ -3832,14 +3947,9 @@ router.post(
  */
 const revisarReembolso = checkPermission('payments:refund')
 const revisarDevolverEnEfectivo = checkPermission('payments:refund-to-cash')
-export const permisoDeReembolso = Object.assign(
-  (req: Request, res: Response, next: NextFunction) =>
-    (req.body as { refundMethod?: unknown } | undefined)?.refundMethod === 'CASH'
-      ? revisarDevolverEnEfectivo(req, res, next)
-      : revisarReembolso(req, res, next),
-  // Para la inspección de rutas: el permiso base. El de efectivo lo ven el audit y los fixtures por el literal de arriba.
-  { requiredPermission: 'payments:refund' },
-)
+// Máquina de efectivo (Codex r1 #14, decisión c): una venta de la QuickPay devuelta en efectivo (medio vacío o «Efectivo») también pide
+// `payments:refund-to-cash`. La regla vive en `permisoDeReembolsoSegunElCobro`, la misma del panel y de la terminal.
+export const permisoDeReembolso = permisoDeReembolsoSegunElCobro({ paymentIdDe: req => req.params.paymentId, entrada: 'POS' })
 
 // Una sola revisión: el código del encargado autoriza un permiso y se consume una vez.
 export const permisoDeCambio = Object.assign(

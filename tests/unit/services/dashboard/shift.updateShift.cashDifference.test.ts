@@ -97,6 +97,8 @@ function mundo(
 ) {
   const turno = turnoCerrado(opciones.turno)
   escrito = undefined
+  // Máquina de efectivo (A5): el efectivo del turno agrupado por cómo entró. Por default ningún cobro: nada que restar.
+  prismaMock.payment.groupBy.mockResolvedValue([])
   prismaMock.shift.findFirst.mockResolvedValue(turno)
   prismaMock.shift.updateMany.mockImplementation(async (args: any) => {
     escrito = args.data
@@ -196,6 +198,69 @@ describe('el esperado de una edición sale de la GAVETA, igual que el del cierre
 
     // 3800 − (2000 + 1800) = 0
     expect(escrito.cashDifference).toBe(0)
+  })
+})
+
+// ============================================================================
+// MÁQUINA DE EFECTIVO (fase 1a, A5): VENTA EN EFECTIVO QUE NO ESTÁ EN EL CAJÓN
+// ============================================================================
+
+describe('máquina de efectivo: la edición del corte espera sólo lo que está en el cajón', () => {
+  /** Grupo de `payment.groupBy` por cómo entró el efectivo, como lo devuelve Prisma. */
+  const grupo = (amount: string, fundsFlow: string | null, tipAmount = '0') => ({
+    method: 'CASH',
+    fundsFlow,
+    tenderCountsAsCash: null,
+    _sum: { amount, tipAmount },
+  })
+
+  it('🔴 $100 en el cajón + $150 de la máquina: espera fondo + 100, no + 250 (sin faltante falso de $150)', async () => {
+    // El cierre firmó ventas en efectivo 250 (la de la máquina es venta) y el cajero contó fondo + 100.
+    mundo({ gaveta: null, turno: { totalCashPayments: '250.00', totalSales: '250.00', cashDeclared: '2100.00', endingCash: '2100.00' } })
+    prismaMock.payment.groupBy.mockResolvedValue([grupo('100.00', null), grupo('150.00', 'EXTERNAL_RECORDED')])
+
+    await updateShift(VENUE, TURNO, { totalSales: 250 }, DUENO)
+
+    // Con la fórmula vieja: 2100 − (2000 + 250) = −150.
+    expect(escrito.cashDifference).toBe(0)
+    const registro = (logAction as jest.Mock).mock.calls.at(-1)![0]
+    expect(registro.data.expectedCash).toBe('2100.00')
+    // Acotado al negocio y al turno, sólo lo cobrado.
+    expect(prismaMock.payment.groupBy).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ venueId: VENUE, shiftId: TURNO, status: 'COMPLETED' }) }),
+    )
+  })
+
+  it('la propina cobrada por la máquina tampoco está en el cajón', async () => {
+    mundo({
+      gaveta: null,
+      turno: { totalCashPayments: '250.00', totalCashTips: '15.00', cashDeclared: '2110.00', endingCash: '2110.00' },
+    })
+    prismaMock.payment.groupBy.mockResolvedValue([grupo('100.00', null, '10.00'), grupo('150.00', 'EXTERNAL_RECORDED', '5.00')])
+
+    await updateShift(VENUE, TURNO, { totalSales: 250 }, DUENO)
+
+    // fondo 2000 + venta 100 + propina 10 del cajón = 2110.
+    expect(escrito.cashDifference).toBe(0)
+  })
+
+  it('🔴 regresión: reabrir y editar un corte firmado con cobros sin fundsFlow NO mueve su esperado', async () => {
+    // Aunque los cobros de hoy no sumen lo firmado (uno se movió después), sin dinero fuera del cajón no se resta nada:
+    // manda lo firmado, igual que antes.
+    mundo({ gaveta: null, turno: { cashDeclared: '3800.00', endingCash: '3800.00' } })
+    prismaMock.payment.groupBy.mockResolvedValue([grupo('1500.00', null)])
+
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
+    await updateShift(VENUE, TURNO, { totalSales: 1950 }, DUENO)
+
+    expect(escrito.cashDifference).toBe(0)
+    expect((logAction as jest.Mock).mock.calls.at(-1)![0].data.expectedCash).toBe('3800.00')
+  })
+
+  it('con gaveta manda la gaveta: ni siquiera se consulta el efectivo por cobro', async () => {
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
+
+    expect(prismaMock.payment.groupBy).not.toHaveBeenCalled()
   })
 })
 
