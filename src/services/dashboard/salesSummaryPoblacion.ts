@@ -25,20 +25,54 @@ export function sqlLoQueFaltaCobrar(o: AliasDeOrden): string {
 /**
  * D6 · ¿la cuenta ya es venta? `PAID`, o abierta (`PENDING`/`PARTIAL`) pero con cobros que ya la cubren (Codex r1 #1: la TPV
  * registra el cobro de una cuenta de SoftRestaurant y el cierre lo hace el otro sistema; si ese aviso se pierde, la bandera se
- * queda atrás y la venta desaparecería). Mismo criterio que «pagada pero abierta»: un cobro REGULAR/FAST positivo y lo pagado ≥ lo
- * que cobra la cuenta. El CASE corta antes de las subconsultas en la cuenta `PAID` (casi todas).
+ * queda atrás y la venta desaparecería). Criterio de «pagada pero abierta»: un cobro positivo y lo pagado ≥ lo que cobra la cuenta.
+ * B3 (revisión de apps viejas, hallazgo 4): un cobro viejo con `type` NULL SÍ es cobro, como en el resto del resumen (transacciones:
+ * «type distinto de REFUND, con NULL adentro») y en `pagadoQueCubreSql`. Antes la puerta pedía REGULAR/FAST y una cuenta de $100
+ * cubierta por un cobro NULL de $100 salía con $0 de venta y $0 «Sin cobrar». El barrido que CIERRA cuentas conserva su puerta
+ * conservadora (`criterioPagadaPeroAbiertaSql`): escribe, y esto sólo lee. El CASE corta antes de las subconsultas en la `PAID`.
  */
 export function sqlCuentaCobrada(o: AliasDeOrden): string {
-  return `(CASE WHEN ${o}."paymentStatus" = 'PAID' THEN TRUE WHEN ${o}."paymentStatus" IN ('PENDING', 'PARTIAL') THEN (EXISTS (SELECT 1 FROM "Payment" pc WHERE pc."orderId" = ${o}.id AND pc.status = 'COMPLETED' AND pc.type IN ('REGULAR', 'FAST') AND pc.amount > 0) AND ${pagadoQueCubreSql(o)} >= ${sqlLoQueCobraLaCuenta(o)} - 0.01) ELSE FALSE END)`
+  return `(CASE WHEN ${o}."paymentStatus" = 'PAID' THEN TRUE WHEN ${o}."paymentStatus" IN ('PENDING', 'PARTIAL') THEN (EXISTS (SELECT 1 FROM "Payment" pc WHERE pc."orderId" = ${o}.id AND pc.status = 'COMPLETED' AND (pc.type IS NULL OR pc.type IN ('REGULAR', 'FAST')) AND pc.amount > 0) AND ${pagadoQueCubreSql(o)} >= ${sqlLoQueCobraLaCuenta(o)} - 0.01) ELSE FALSE END)`
 }
 
 /**
- * Las cuentas que son venta en la cabecera: no borrador/cancelada/borrada, cobradas y que no son venta de tarjetas de regalo.
- * Exportada para el correo nocturno (desglose por categoría y por origen), que tiene que sumar las mismas ventas netas.
+ * B3 (hz:fefa11b6:D19): ¿la fila es una CUENTA? `PENDING` NO es «borrador»: es el estado por default de `Order` y el de toda cuenta
+ * viva de la TPV mientras sigue abierta (abrir mesa, Cobrar, «Pagar después», separar, el check-in de una reserva, una cuenta
+ * reabierta). Tratarla como borrador sacaba de la cabecera las mesas abiertas («Sin cobrar» en $0) y las ya cubiertas (fuera de las
+ * ventas). Una `PENDING` todavía NO es cuenta cuando nadie la ha aceptado o no tiene nada:
+ *  - el kiosco legacy (abandonado, `OrderSource.KIOSK`);
+ *  - el reparto en modo manual sin aceptar (aceptarlo a mano no cambia el estado: sólo estampa `providerAcceptedAt`);
+ *  - el pedido en línea que no está aceptado, listo ni entregado (por aceptar, vencido, rechazado), también el folio por pagar de la
+ *    tienda híbrida (coordinador, 23-nov: «A», como `NO_ES_FOLIO_POR_PAGAR`: se cobra desde su lista «Por pagar»);
+ *  - la que no tiene ningún renglón vivo y no se ha cobrado (la orden testigo de un cobro con cripto, una mesa recién abierta). Con
+ *    renglones o ya cubierta sí cuenta: la cabecera de SoftRestaurant se guarda sin renglones (Codex B3 r1 #4).
+ * El `CASE` corta antes de las subconsultas en toda cuenta que no es `PENDING` (casi todas).
+ */
+export function sqlEsCuenta(o: AliasDeOrden): string {
+  return `(CASE WHEN ${o}.status IN ('CANCELLED', 'DELETED') THEN FALSE WHEN ${o}.status <> 'PENDING' THEN TRUE WHEN ${o}.source = 'KIOSK' THEN FALSE WHEN ${o}."originSystem" = 'DELIVERY_PLATFORM' AND ${o}."providerAcceptedAt" IS NULL THEN FALSE WHEN EXISTS (SELECT 1 FROM "OnlineOrder" oo WHERE oo."orderId" = ${o}.id AND oo.status NOT IN ('ACCEPTED', 'READY', 'COMPLETED')) THEN FALSE ELSE (EXISTS (SELECT 1 FROM "OrderItem" oi WHERE oi."orderId" = ${o}.id AND oi."removedAt" IS NULL) OR ${sqlCuentaCobrada(o)}) END)`
+}
+
+/**
+ * B3: el `FROM` del enunciado de cuentas (resumen y periodos): dos `CROSS JOIN LATERAL` que dan, por fila, `cuenta.es_venta`,
+ * `cuenta.abierta` (todavía debe: «Ventas diferidas» y «Sin cobrar») y `cuenta.falta` (lo que debe sin propina). Una fila que no es
+ * cuenta (`sqlEsCuenta`) queda con las tres en falso/0.
+ * 🔴 Rendimiento (medido con `EXPLAIN ANALYZE` a 1×, 10× y 100×, `docs/audit/2026-11-21-resumen-de-ventas/mesas/`): cada lateral
+ * lleva `OFFSET 0` para que Postgres no lo aplane, y así `sqlEsCuenta` y `sqlCuentaCobrada` se calculan UNA vez por fila. Aplanados,
+ * cada bandera se copiaba en cada `FILTER` que la usa; en el WHERE, el planificador cobraba sus subconsultas por cada fila del rango.
+ * Las dos formas cruzaban el umbral de JIT: +1.6 s en la cabecera a 10× y hasta +6 s en los periodos desde 1×.
+ */
+export function sqlLateralDeLaCuenta(o: AliasDeOrden): string {
+  const debe = `${o}."paymentStatus" IN ('PENDING', 'PARTIAL')`
+  return `CROSS JOIN LATERAL (SELECT ${sqlEsCuenta(o)} AS es OFFSET 0) viva CROSS JOIN LATERAL (SELECT (CASE WHEN viva.es THEN ${sqlCuentaCobrada(o)} ELSE FALSE END) AS es_venta, (viva.es AND ${debe}) AS abierta, (CASE WHEN viva.es AND ${debe} THEN ${sqlLoQueFaltaCobrar(o)} ELSE 0 END) AS falta OFFSET 0) cuenta`
+}
+
+/**
+ * Las cuentas que son venta en la cabecera: una cuenta (`sqlEsCuenta`), cobrada y que no es venta de tarjetas de regalo.
+ * Exportada para el correo nocturno (desglose por categoría y por origen) y los canales, que tienen que sumar las mismas ventas netas.
  */
 export function sqlCuentaQueEsVenta(o: AliasDeOrden): string {
   const columna = `${o}.id` as const
-  return `${o}.status NOT IN ('PENDING', 'CANCELLED', 'DELETED') AND ${sqlCuentaCobrada(o)} AND ${sqlOrdenSinTarjetasTexto(columna)}`
+  return `${sqlEsCuenta(o)} AND ${sqlCuentaCobrada(o)} AND ${sqlOrdenSinTarjetasTexto(columna)}`
 }
 
 /**
@@ -53,12 +87,14 @@ export function sqlComisionDeTerceros(p: string, vistaDeMovimientos: boolean): s
 }
 
 /**
- * D6 (Codex r4 #1): ¿este cobro es de una cuenta ABIERTA que todavía no es venta (un abono)? En la vista de ventas no cuenta en nada
- * de la cabecera —ni su propina, ni la comisión de Avoqado, ni como transacción— hasta que la cuenta se cobre completa: si no, un
- * abono de $40 con $2 de comisión dejaba «Neto cobrado» en −$2. Una cuenta en borrador (`PENDING`), cancelada o borrada sigue como
- * antes. `p` es el alias del cobro (vacío = `"Payment"` sin alias).
+ * D6 (Codex r4 #1): ¿este cobro es de una cuenta VIVA que todavía no es venta? En la vista de ventas no cuenta en nada de la cabecera
+ * —ni su propina, ni la comisión de Avoqado, ni como transacción— hasta que su cuenta sea venta: si no, un abono de $40 con $2 de
+ * comisión dejaba «Neto cobrado» en −$2. B3: también el abono de una mesa abierta de la TPV (`PENDING`), el cobro de un reparto que
+ * nadie aceptó y el abono de un folio por pagar (Codex B3 r1 #1). Una cuenta cancelada, borrada o `REFUNDED` sigue como antes.
+ * Una `PAID` siempre está cobrada: sólo queda fuera si sigue `PENDING` y no es cuenta (así la `PAID` cerrada, casi todas, no evalúa
+ * nada más; medido a 100×). `p` es el alias del cobro (vacío = `"Payment"` sin alias).
  */
 export function sqlCobroDeCuentaSinCobrar(p: string): string {
   const a = p ? `${p}.` : `"Payment".`
-  return `EXISTS (SELECT 1 FROM "Order" o WHERE o.id = ${a}"orderId" AND o."paymentStatus" IN ('PENDING', 'PARTIAL') AND o.status NOT IN ('PENDING', 'CANCELLED', 'DELETED') AND NOT ${sqlCuentaCobrada('o')})`
+  return `EXISTS (SELECT 1 FROM "Order" o WHERE o.id = ${a}"orderId" AND o.status NOT IN ('CANCELLED', 'DELETED') AND (CASE WHEN o."paymentStatus" IN ('PENDING', 'PARTIAL') THEN NOT (${sqlEsCuenta('o')} AND ${sqlCuentaCobrada('o')}) WHEN o."paymentStatus" = 'PAID' THEN o.status = 'PENDING' AND NOT ${sqlEsCuenta('o')} ELSE FALSE END))`
 }

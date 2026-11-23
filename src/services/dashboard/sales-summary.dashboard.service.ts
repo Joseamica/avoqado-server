@@ -66,12 +66,7 @@ import {
   sqlEsEfectivoDelCajon,
 } from '@/services/shared/tenderSemantics'
 import { proyectarComisionYNeto } from '@/services/payments/proyeccionMonetaria'
-import {
-  sqlCobroDeCuentaSinCobrar,
-  sqlComisionDeTerceros,
-  sqlCuentaCobrada,
-  sqlLoQueFaltaCobrar,
-} from '@/services/dashboard/salesSummaryPoblacion'
+import { sqlCobroDeCuentaSinCobrar, sqlComisionDeTerceros, sqlLateralDeLaCuenta } from '@/services/dashboard/salesSummaryPoblacion'
 import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraReal, sqlRangoHoraRealSql } from '@/services/shared/horaRealDelAparato'
 import { relojDelNegocio, zonaValida } from '@/utils/datetime'
 
@@ -1315,8 +1310,9 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // 1. Gross Sales, service charges, taxes, Discounts and the hidden giveaways — ONE statement, ONE snapshot.
   // Skipped in the movement view (payment-method or merchant filter) — orders can't be honestly split per bucket.
   //
-  // D6 (base de caja, founder 15-sep-2026): only accounts that are a SALE — collected (`sqlCuentaCobrada`), not a draft,
-  // cancelled or deleted, and not a gift-card sale. An open or half-paid account goes to «Sin cobrar» (query 4).
+  // D6 (base de caja, founder 15-sep-2026): only accounts that are a SALE — an account (`sqlEsCuenta`: not cancelled or deleted,
+  // and a PENDING one only once someone opened it with something inside), collected (`sqlCuentaCobrada`), and not a gift-card
+  // sale. An open or half-paid account goes to «Sin cobrar» (query 4).
   // D2: `serviceChargeAmount` is taxable revenue that adds to the account total (`computeStoredOrderTotal`), never inside the
   // subtotal: it is its own sum and grossSales = items + serviceCosts.
   //
@@ -1363,11 +1359,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
              SUM(cuenta.falta) FILTER (WHERE cuenta.abierta AND NOT cuenta.es_venta) AS unpaid,
              (COUNT(*) FILTER (WHERE cuenta.abierta AND NOT cuenta.es_venta AND cuenta.falta > 0.005))::int AS cuentas
       FROM "Order"
-      CROSS JOIN LATERAL (
-        SELECT ${sqlCuentaCobrada('"Order"')} AS es_venta,
-               "Order"."paymentStatus" IN ('PENDING', 'PARTIAL') AS abierta,
-               (CASE WHEN "Order"."paymentStatus" IN ('PENDING', 'PARTIAL') THEN ${sqlLoQueFaltaCobrar('"Order"')} ELSE 0 END) AS falta
-      ) cuenta
+      ${sqlLateralDeLaCuenta('"Order"')}
       LEFT JOIN LATERAL (
         SELECT SUM("discountCents") AS discount_cents FROM "OrderPromotion" WHERE "orderId" = "Order".id
       ) promo ON TRUE
@@ -1376,7 +1368,9 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       ) comp ON TRUE
       WHERE "venueId" = $1
         AND ${sqlRangoHoraReal('"Order"', utcTsParam(2), utcTsParam(3))}
-        AND status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
+        -- B3 (hz:fefa11b6:D19): sólo el prefiltro barato; quién es cuenta (también la mesa abierta de la TPV, PENDING, que antes se
+        -- tomaba por borrador) lo dicen las banderas de cuenta (sqlLateralDeLaCuenta).
+        AND "Order".status NOT IN ('CANCELLED', 'DELETED')
         AND ${sqlOrdenSinTarjetasTexto('"Order".id')}
     `,
           venueId,
@@ -2817,11 +2811,7 @@ async function calculateTimePeriodMetrics(
       COUNT(*) FILTER (WHERE cuenta.abierta AND NOT cuenta.es_venta AND cuenta.falta > 0.005) as unpaid_orders,
       COUNT(*) FILTER (WHERE cuenta.es_venta) as order_count
     FROM "Order"
-    CROSS JOIN LATERAL (
-      SELECT ${sqlCuentaCobrada('"Order"')} AS es_venta,
-             "Order"."paymentStatus" IN ('PENDING', 'PARTIAL') AS abierta,
-             (CASE WHEN "Order"."paymentStatus" IN ('PENDING', 'PARTIAL') THEN ${sqlLoQueFaltaCobrar('"Order"')} ELSE 0 END) AS falta
-    ) cuenta
+    ${sqlLateralDeLaCuenta('"Order"')}
     LEFT JOIN LATERAL (
       SELECT SUM("discountCents") AS discount_cents
       FROM "OrderPromotion" WHERE "orderId" = "Order".id
@@ -2833,8 +2823,8 @@ async function calculateTimePeriodMetrics(
     WHERE "venueId" = $1
       AND ${rangoHoraReal}
       -- Must mirror the summary filter so the period bars sum to the headline total (D6: the sales are the collected ones, see
-      -- the FILTERs above).
-      AND status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
+      -- the FILTERs above; B3: whether a row is an account, an open TPV table in PENDING too, is in the cuenta flags).
+      AND "Order".status NOT IN ('CANCELLED', 'DELETED')
       AND ${sqlOrdenSinTarjetasTexto('"Order".id')}
       -- Codex r3/r4: only a sale or an open account that owes something makes a bar (an imported REFUNDED account, or an open
       -- account given away whole, alone used to make a day of zeros).
