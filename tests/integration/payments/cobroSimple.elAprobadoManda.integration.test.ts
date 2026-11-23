@@ -299,3 +299,39 @@ describe('R3-5 · un Payment que llega tras BANK_DECLINED y una re-retención av
     }
   })
 })
+
+describe('R3-7 · el POS nunca recibe un desenlace viejo', () => {
+  it('el resultado `timeout` de la terminal llega cuando el cierre ya escribió el final: el POS recibe ese final (422), no el 504', async () => {
+    const s = await f.solicitud({ acknowledgedAt: new Date() })
+    const resolve = jest.fn()
+    svc.pendingPayments.set(s.requestId, {
+      resolve,
+      reject: jest.fn(),
+      timeout: setTimeout(() => undefined, 60_000),
+      requestId: s.requestId,
+      terminalId: f.llaveTerminal,
+      venueId: f.venueId,
+    })
+    const original = svc.closeRow.bind(svc)
+    const espia = jest.spyOn(svc, 'closeRow').mockImplementationOnce(async (...args: unknown[]) => {
+      const r = await original(...args)
+      // Entre el `timeout` en mano y la decisión del handler, el cierre de los 10 s escribe «no cobrado».
+      await prisma.terminalPaymentRequest.update({
+        where: { id: s.id },
+        data: {
+          status: 'FAILED',
+          failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+          resultJson: { requestId: s.requestId, status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW' },
+        },
+      })
+      return r
+    })
+    try {
+      await svc.handlePaymentResultFromSocket({ requestId: s.requestId, status: 'timeout', errorMessage: 'G505' }, tpv())
+    } finally {
+      espia.mockRestore()
+    }
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW' }))
+  })
+})

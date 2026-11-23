@@ -2555,11 +2555,27 @@ describe('Codex S1 r2 (R2-4) · el POS que sigue esperando recibe el desenlace F
     const { resolve } = esperaDelPos()
     const findMany = tpr().findMany as jest.Mock
     findMany.mockReset().mockResolvedValue([cerradaNoCobrada])
+    ;(tpr().findFirst as jest.Mock).mockReset().mockResolvedValue(cerradaNoCobrada)
     const r = await terminalPaymentService.resolvePendingFromDurableState()
     expect(r).toEqual({ resolved: 1, checked: 1 })
     expect(findMany.mock.calls[0][0].where).not.toHaveProperty('status')
     expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'REQ-NC', status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW' }))
     expect(svc().pendingPayments.has('REQ-NC')).toBe(false)
+  })
+
+  it('Codex S1 r3 (R3-7) · el lote leyó «no cobrada» pero la fila ya cerró con su cobro: el POS recibe el cobro (lectura fresca), nunca el negativo viejo', async () => {
+    const { resolve } = esperaDelPos()
+    ;(tpr().findMany as jest.Mock).mockReset().mockResolvedValue([cerradaNoCobrada])
+    ;(tpr().findFirst as jest.Mock).mockReset().mockResolvedValue({
+      ...cerradaNoCobrada,
+      status: TerminalPaymentRequestStatus.COMPLETED,
+      paymentId: 'pay-1',
+      failureCode: null,
+      resultJson: { requestId: 'REQ-NC', status: 'success', paymentId: 'pay-1' },
+    })
+    await terminalPaymentService.resolvePendingFromDurableState()
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ status: 'success', paymentId: 'pay-1' }))
   })
 
   it('…y una fila todavía sin desenlace (UNKNOWN en sus 10 s) no se contesta', async () => {

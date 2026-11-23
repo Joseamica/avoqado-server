@@ -2813,12 +2813,18 @@ class TerminalPaymentService {
     // sobre (UNKNOWN: success inacreditable, error verificando) se contesta como siempre.
     // Cobro simple · S1: la fila en sus 10 s de «sin respuesta» la contesta el cierre (`cerrarSinRespuesta` → 422 `failed`) o el
     // dinero. Se mira la FILA, no el sobre: un `timeout` repetido sobre una fila que ya corre su reloj tampoco despierta al POS.
-    if (outcome.status === 'timeout' && (await this.enEsperaSinRespuesta(result.requestId, terminal.venueId))) {
-      logger.info('⏳ [TerminalPayment] Result entered «sin respuesta» — the POS keeps waiting for the 10 s decision', {
-        requestId: result.requestId,
-        venueId: terminal.venueId,
-      })
-      return true
+    if (outcome.status === 'timeout') {
+      // Codex S1 r3 (R3-7): con un `timeout` en la mano, primero gana el desenlace DURABLE (el cierre pudo escribir el final
+      // mientras tanto): el POS lo recibe de una lectura fresca y nunca un 504 sobre una fila ya final.
+      if (await this.resolverEsperaDelPos(result.requestId, terminal.venueId)) return true
+      if (await this.enEsperaSinRespuesta(result.requestId, terminal.venueId)) {
+        logger.info('⏳ [TerminalPayment] Result entered «sin respuesta» — the POS keeps waiting for the 10 s decision', {
+          requestId: result.requestId,
+          venueId: terminal.venueId,
+        })
+        return true
+      }
+      if (this.pendingPayments.get(result.requestId) !== pending) return true
     }
     clearTimeout(pending.timeout)
     this.pendingPayments.delete(result.requestId)
@@ -7406,7 +7412,14 @@ class TerminalPaymentService {
     for (const row of rows) {
       const pending = this.pendingPayments.get(row.requestId)
       if (!pending || pending.venueId !== row.venueId) continue
-      if (desenlaceCanonico(row).outcome === 'UNRESOLVED') continue
+      const outcome = desenlaceCanonico(row).outcome
+      if (outcome === 'UNRESOLVED') continue
+      // Codex S1 r3 (R3-7): un desenlace que no es el cobro se contesta desde una lectura FRESCA de esa fila (un aprobado pudo
+      // cerrarla después de la foto del lote); sólo el CHARGED de la foto se entrega tal cual (ya no puede volverse negativo).
+      if (outcome !== 'CHARGED') {
+        if (await this.resolverEsperaDelPos(row.requestId, row.venueId)) resolved++
+        continue
+      }
       clearTimeout(pending.timeout)
       this.pendingPayments.delete(row.requestId)
       pending.resolve(resultFromRow(row))
