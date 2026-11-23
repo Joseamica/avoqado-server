@@ -456,6 +456,55 @@ export function formatInVenueTimezone(
 }
 
 /**
+ * One Intl formatter per zone string (a handful in all): `formatInTimeZone` builds one per call, ~40 µs a row. An invalid zone
+ * caches the default one under its own name (no retry per row). Capped: venue zones are user input (case variants…).
+ */
+const relojes = new Map<string, Intl.DateTimeFormat>()
+const nuevoReloj = (timeZone: string) =>
+  new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+    timeZoneName: 'longOffset',
+  })
+function relojDe(timezone: string): Intl.DateTimeFormat {
+  let reloj = relojes.get(timezone)
+  if (!reloj) {
+    try {
+      reloj = nuevoReloj(timezone)
+    } catch {
+      reloj = nuevoReloj(DEFAULT_TIMEZONE)
+    }
+    if (relojes.size >= 200) relojes.clear() // ponytail: a full clear is enough for a cache of a few zones
+    relojes.set(timezone, reloj)
+  }
+  return reloj
+}
+
+/**
+ * The venue's wall clock at `instante`, in parts («2026», «11», «21», «20», «30», «00», «-06:00»). For exports that write one date
+ * per row (D13): a cached formatter per zone, so 20,000 rows don't hold the event loop. A zone that is not valid IANA («GMT-6»)
+ * falls back to `DEFAULT_TIMEZONE` instead of throwing.
+ */
+export function relojDelNegocio(
+  instante: Date,
+  timezone: string | null | undefined,
+): { anio: string; mes: string; dia: string; hora: string; minuto: string; segundo: string; desfase: string } {
+  // Una zona IANA cabe en 64 caracteres: un texto más largo no entra al caché como llave (Codex r6), va el default.
+  const zona = timezone && timezone.length <= 64 ? timezone : DEFAULT_TIMEZONE
+  const p: Record<string, string> = {}
+  for (const { type, value } of relojDe(zona).formatToParts(instante)) p[type] = value
+  // longOffset: «GMT-06:00», or «GMT» at offset zero.
+  const desfase = p.timeZoneName === 'GMT' ? '+00:00' : (p.timeZoneName ?? '').replace('GMT', '')
+  return { anio: p.year, mes: p.month, dia: p.day, hora: p.hour, minuto: p.minute, segundo: p.second, desfase }
+}
+
+/**
  * Validate if a string is a valid IANA timezone
  *
  * @param timezone - Timezone string to validate

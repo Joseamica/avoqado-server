@@ -80,6 +80,7 @@ import {
   type SalesOrderType,
 } from '@/services/dashboard/salesSummaryCanales'
 import { computePrepaidOutsideSales } from '@/services/dashboard/salesSummaryCobradoPorAdelantado'
+import { relojDelNegocio, zonaValida } from '@/utils/datetime'
 
 // ============================================================
 // Types
@@ -2420,6 +2421,39 @@ export interface SalesSummaryExportFilters {
 
 const round2x = (n: number | null | undefined): number | null => (n == null ? null : Math.round(n * 100) / 100)
 
+const DIAS_DE_LA_SEMANA: Record<string, string> = {
+  sunday: 'Domingo',
+  monday: 'Lunes',
+  tuesday: 'Martes',
+  wednesday: 'Miércoles',
+  thursday: 'Jueves',
+  friday: 'Viernes',
+  saturday: 'Sábado',
+}
+/**
+ * D13.2 (Codex r2 #6): the period label of the export, sortable and with its year, on the venue clock. The screen's
+ * («21 nov, 10:00 a.m.») repeated between years. An hour the clock goes through twice (fall back) carries its offset. `vistas`
+ * collects the labels already written in this file.
+ */
+function etiquetaDelPeriodoEnElArchivo(period: string, reportType: ReportType, timezone: string, vistas: Set<string>): string {
+  if (reportType === 'dailySum') return DIAS_DE_LA_SEMANA[period] ?? period
+  const instante = new Date(period)
+  if (!['hours', 'days', 'weeks', 'months'].includes(reportType) || Number.isNaN(instante.getTime())) return period // hourlySum («09:00»)
+  const h = relojDelNegocio(instante, timezone)
+  const dia = `${h.anio}-${h.mes}-${h.dia}`
+  let etiqueta =
+    reportType === 'hours'
+      ? `${dia} ${h.hora}:${h.minuto}`
+      : reportType === 'days'
+        ? dia
+        : reportType === 'weeks'
+          ? `Semana del ${dia}`
+          : `${h.anio}-${h.mes}`
+  if (vistas.has(etiqueta)) etiqueta = `${etiqueta} (UTC${h.desfase})`
+  vistas.add(etiqueta)
+  return etiqueta
+}
+
 /**
  * Flatten an already-computed SalesSummaryResponse into labeled rows, one per requested section.
  * Order-derived totals can be null under a payment-method filter — preserved as null (the
@@ -2428,6 +2462,8 @@ const round2x = (n: number | null | undefined): number | null => (n == null ? nu
 export function flattenSalesSummaryForExport(
   report: SalesSummaryResponse,
   sections: SalesSummaryExportSection[],
+  /** The venue's timezone: with it, «Por periodo» rows carry a year-bearing local label (Codex D13 r2 #6). */
+  timezone?: string,
 ): { rows: SalesSummaryExportRow[] } {
   const want = new Set(sections)
   const rows: SalesSummaryExportRow[] = []
@@ -2460,7 +2496,10 @@ export function flattenSalesSummaryForExport(
     rows.push(t('Propinas', s.tips))
     rows.push(t('Comisiones de plataforma', -s.platformFees))
     if (hay(s.tenderCommissions)) rows.push(t('Comisiones de terceros (Rappi, Uber Eats, tipos de pago)', -s.tenderCommissions))
+    // D13.4: like the screen (staff commissions, then total collected, then net profit).
+    rows.push(t('Comisiones a empleados', -s.staffCommissions))
     rows.push(t('Total cobrado', s.totalCollected))
+    rows.push(t('Ganancia neta', s.netProfit))
     // Tarjetas de regalo (spec §7): fuera de las ventas, cada una con su leyenda.
     if (s.giftCardLoads !== undefined) {
       rows.push(t('Tarjetas de regalo cargadas (no es venta)', s.giftCardLoads, s.giftCardLoadsCount ?? null))
@@ -2611,10 +2650,11 @@ export function flattenSalesSummaryForExport(
       rows.push(fila(etiquetaEnOtraMoneda(f.currency), f.net, f.transactionCount + f.refundCount))
   }
   if (want.has('byPeriod') && report.byPeriod) {
+    const vistas = new Set<string>()
     for (const p of report.byPeriod) {
       rows.push({
         section: 'byPeriod',
-        label: p.periodLabel || p.period,
+        label: timezone ? etiquetaDelPeriodoEnElArchivo(p.period, report.reportType, timezone, vistas) : p.periodLabel || p.period,
         count: p.metrics.transactionCount,
         amount: round2x(p.metrics.totalCollected),
         percentage: null,
@@ -2637,21 +2677,26 @@ const NOMBRE_DEL_METODO_EN_OTROS: Record<string, string> = {
 /** Cobros y devoluciones en otra moneda: su neto, sin convertir; la cantidad cuenta los dos. */
 const etiquetaEnOtraMoneda = (currency: string) => `Movimientos en línea en ${currency} (neto, sin convertir: no se suman a los pesos)`
 
-/** Shared WHERE used by both count + fetch for detailed-mode rows (honors the active filter). */
+/**
+ * Shared WHERE used by both count + fetch for detailed-mode rows (honors the active filter).
+ * D13.3: by the payment's REAL time, like the screen (`enElRango` in getSalesSummary): an offline sale of 23:50 uploaded at 00:10
+ * belongs to its own day, not to the next one. `dondeHoraRealEntre` wraps in an AND, so the card-type OR/AND keys never collide.
+ */
 export function buildSalesSummaryDetailWhere(venueId: string, filters: SalesSummaryExportFilters): Prisma.PaymentWhereInput {
   const paymentWhereFilter = buildPaymentWhereFilter(filters.paymentMethod, filters.cardType)
   const where: Prisma.PaymentWhereInput = {
     venueId,
     status: 'COMPLETED',
-    createdAt: { gte: new Date(filters.startDate), lte: new Date(filters.endDate) },
     ...(filters.merchantAccountId ? { merchantAccountId: filters.merchantAccountId } : {}),
     ...(filters.staffIds && filters.staffIds.length > 0 ? { processedById: { in: filters.staffIds } } : {}),
     ...(filters.shiftId ? { shiftId: filters.shiftId } : {}),
     ...paymentWhereFilter,
   }
-  // D9.1 (Codex r2 #6): con comercio, el detalle tampoco trae el efectivo que la TPV estampó con el comercio de su serial (la
-  // cabecera y «Métodos de pago» ya no lo cuentan). En un AND aparte: el filtro de tarjeta trae su propio `AND`.
-  return filters.merchantAccountId ? { AND: [where, NOT_DRAWER_CASH_WHERE] } : where
+  // D13.3: by the payment's REAL time, like the screen. D9.1 (Codex r2 #6): with a merchant, the detail also leaves out the cash
+  // the TPV stamped with its serial's merchant (the header and «Métodos de pago» no longer count it). In its own AND entry: the
+  // card-type filter brings its own `AND`.
+  const conHoraReal = dondeHoraRealEntre(where, new Date(filters.startDate), new Date(filters.endDate))
+  return filters.merchantAccountId ? { AND: [...conHoraReal.AND, NOT_DRAWER_CASH_WHERE] } : conHoraReal
 }
 
 /** Pre-flight count for detailed-mode export (caller compares against the row cap before fetching). */
@@ -2663,6 +2708,8 @@ export async function countSalesSummaryDetailRows(venueId: string, filters: Sale
 export const SALES_SUMMARY_DETAIL_SELECT = {
   id: true,
   createdAt: true,
+  // D13.3: «Fecha» is the real time (device time of an offline sale, else arrival) in the venue's timezone (`conZona`).
+  clientCreatedAt: true,
   method: true,
   cardBrand: true,
   maskedPan: true,
@@ -2676,13 +2723,28 @@ export const SALES_SUMMARY_DETAIL_SELECT = {
   merchantAccount: { select: { displayName: true, externalMerchantId: true } },
 } satisfies Prisma.PaymentSelect
 
+/**
+ * D13.3 (Codex r6, r7): each row carries the venue's zone, read ONCE per call (never the raw text repeated in every row), as the
+ * DASHBOARD reads it to build the range the file was asked for: any zone Intl knows («+05:30», «GMT»); anything else (or a text
+ * longer than a zone name) is America/Mexico_City.
+ */
+async function conZona<T>(venueId: string, filas: Promise<T[]>): Promise<Array<T & { zona: string }>> {
+  const [lista, venue] = await Promise.all([filas, prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })])
+  const guardada = venue?.timezone
+  const zona = guardada && guardada.length <= 64 ? zonaValida(guardada) : 'America/Mexico_City'
+  return lista.map(f => ({ ...f, zona }))
+}
+
 export async function fetchSalesSummaryDetailRows(venueId: string, filters: SalesSummaryExportFilters, limit: number) {
-  return prisma.payment.findMany({
-    where: buildSalesSummaryDetailWhere(venueId, filters),
-    select: SALES_SUMMARY_DETAIL_SELECT,
-    orderBy: { createdAt: 'desc' },
-    take: limit,
-  })
+  return conZona(
+    venueId,
+    prisma.payment.findMany({
+      where: buildSalesSummaryDetailWhere(venueId, filters),
+      select: SALES_SUMMARY_DETAIL_SELECT,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    }),
+  )
 }
 
 /** Página por keyset (createdAt desc, id desc) para exportes en segundo plano. `corte` deja fuera lo que entró después de pedirlo. */
@@ -2693,12 +2755,15 @@ export async function fetchSalesSummaryDetailPage(
   keyset: Prisma.PaymentWhereInput,
   limit: number,
 ) {
-  return prisma.payment.findMany({
-    where: { AND: [buildSalesSummaryDetailWhere(venueId, filters), { createdAt: { lte: corte } }, keyset] },
-    select: SALES_SUMMARY_DETAIL_SELECT,
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    take: limit,
-  })
+  return conZona(
+    venueId,
+    prisma.payment.findMany({
+      where: { AND: [buildSalesSummaryDetailWhere(venueId, filters), { createdAt: { lte: corte } }, keyset] },
+      select: SALES_SUMMARY_DETAIL_SELECT,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit,
+    }),
+  )
 }
 
 export async function countSalesSummaryDetailRowsHasta(venueId: string, filters: SalesSummaryExportFilters, corte: Date): Promise<number> {

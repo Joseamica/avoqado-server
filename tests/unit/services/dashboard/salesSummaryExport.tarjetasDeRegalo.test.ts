@@ -44,8 +44,11 @@ describe('exportación de Ventas · tarjetas de regalo', () => {
     ])
   })
 
-  it('regresión: sin cifras de tarjetas, los totales son los 8 de siempre', () => {
-    expect(flattenSalesSummaryForExport(reporte(), ['totals']).rows).toHaveLength(8)
+  // D13.4 (carril E, 22-nov): los 8 de siempre + «Comisiones a empleados» y «Ganancia neta», como la pantalla.
+  it('regresión: sin cifras de tarjetas, los totales son los 10 (sin renglones de tarjetas)', () => {
+    const { rows } = flattenSalesSummaryForExport(reporte(), ['totals'])
+    expect(rows).toHaveLength(10)
+    expect(rows.some(r => /tarjeta de regalo|Tarjetas de regalo/.test(r.label))).toBe(false)
   })
 
   it('con tarjetas, los métodos son DINERO como el panel; el saldo va aparte, bruto y sin porcentaje, y dice lo que regresó', () => {

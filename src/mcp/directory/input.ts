@@ -5,6 +5,8 @@
 const OMITTED: Record<string, readonly string[]> = {
   // Un descuento automático lo aplica la caja a cuentas que ya estaban abiertas: cambia el total de una cuenta abierta.
   create_discount: ['automatic'],
+  // D13.2 (22-nov): `reportType` es nuevo en el MCP manual; el certificado conserva lo que se revisó (su «byPeriod» va por día).
+  export_sales_summary: ['reportType'],
 }
 
 export function directoryInputSchema<T extends Record<string, unknown> | undefined>(name: string, inputSchema: T): T {
