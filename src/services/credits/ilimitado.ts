@@ -11,10 +11,11 @@ import { BadRequestError } from '@/errors/AppError'
 export const UNLIMITED_QUANTITY = 99_999
 /** Final del `reason` del REFUND cuando una clase pagada con Ilimitado se cancela dentro de la ventana tardía. */
 export const UNLIMITED_LATE_CANCEL_MARK = 'ilimitado: cancelación tardía'
-/** Reservas que ocupan el lugar del pase en una clase (`NO_SHOW` también: «Sí llegó» la regresa a CHECKED_IN). */
-export const LUGAR_DEL_PASE: ReservationStatus[] = ['PENDING', 'CONFIRMED', 'CHECKED_IN', 'NO_SHOW']
-/** Reservas sobre las que todavía se puede canjear. */
-export const RESERVA_VIVA: ReservationStatus[] = ['PENDING', 'CONFIRMED']
+/**
+ * Reservas que ocupan el lugar del pase en una clase: todas menos las canceladas. `NO_SHOW` también («Sí llegó» la regresa a
+ * CHECKED_IN) y `COMPLETED` (su canje sigue registrado; Codex código r1 #4).
+ */
+export const LUGAR_DEL_PASE: ReservationStatus[] = ['PENDING', 'CONFIRMED', 'CHECKED_IN', 'COMPLETED', 'NO_SHOW']
 
 export const CREDIT_UNLIMITED_ONE_SEAT = 'CREDIT_UNLIMITED_ONE_SEAT'
 export const CREDIT_UNLIMITED_SAME_CLASS = 'CREDIT_UNLIMITED_SAME_CLASS'
@@ -58,4 +59,24 @@ export function errorVenceAntes(expiresAt: Date, timezone: string): BadRequestEr
  */
 export function marcaDelRenglon(pedido: { unlimited?: boolean }, actual: { unlimited: boolean } | null): boolean {
   return pedido.unlimited ?? actual?.unlimited ?? false
+}
+
+/**
+ * La vigencia con la que se entrega una venta (Codex código r1 #3). La venta lee el paquete fuera del candado de la edición y en
+ * dos consultas: puede ver la vigencia vieja (vacía) y los renglones ya Ilimitados. La edición escribe las dos cosas juntas, así
+ * que ante un renglón Ilimitado sin vigencia se relee la vigente DENTRO de la transacción de la entrega. Si aun así no tiene, no se
+ * entrega un Ilimitado eterno. Un paquete normal no se toca.
+ */
+export async function vigenciaAlEntregar(
+  tx: {
+    creditPack: {
+      findUnique: (a: { where: { id: string }; select: { validityDays: true } }) => Promise<{ validityDays: number | null } | null>
+    }
+  },
+  pack: { id: string; validityDays: number | null; items: { unlimited?: boolean }[] },
+): Promise<number | null> {
+  if (pack.validityDays || !pack.items.some(item => item.unlimited)) return pack.validityDays
+  const vigente = (await tx.creditPack.findUnique({ where: { id: pack.id }, select: { validityDays: true } }))?.validityDays ?? null
+  if (!vigente) throw errorIlimitado('CREDIT_UNLIMITED_NEEDS_VALIDITY')
+  return vigente
 }

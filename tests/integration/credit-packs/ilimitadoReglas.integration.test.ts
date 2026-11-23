@@ -48,7 +48,7 @@ import { mintRescheduleAppointmentHold } from '@/services/reservation/appointmen
 import { checkInByIdentifier } from '@/services/reservation/kioskCheckIn.service'
 import { undoNoShow } from '@/services/reservation/undoNoShow.service'
 import { updateProfile } from '@/services/public/customerPortal.public.service'
-import { getCustomerPurchases, redeemItemManually } from '@/services/dashboard/creditPack.dashboard.service'
+import { getCustomerPurchases, redeemItemManually, refundPurchase } from '@/services/dashboard/creditPack.dashboard.service'
 
 const P = '/api/v1/public'
 const RUN = Date.now()
@@ -575,25 +575,111 @@ describe('D679 · reglas del Ilimitado (integración, base real)', () => {
   // ---------- la reserva tiene que estar viva ----------
 
   describe('canjear sobre una reserva que ya no está viva', () => {
-    it.each([
-      ['Ilimitado', true],
-      ['paquete normal', false],
-    ])('%s: CREDIT_RESERVATION_NOT_ALIVE, el saldo no baja y no hay MoneyAnomaly', async (_n, unlimited) => {
-      const { balanceId } = await comprar({ productId: masaje, unlimited })
-      const antes = await saldo(balanceId)
+    const canjearConCompensacion = (reservationId: string, confirmationCode: string, balanceId: string) =>
+      redeemCreditsWithCompensation({
+        venueId: venue!.id,
+        reservationId,
+        confirmationCode,
+        balanceIds: [balanceId],
+        creditsPerBalance: 1,
+        customerId: ana.id,
+      })
+
+    it('Ilimitado sobre una cita cancelada: CREDIT_RESERVATION_NOT_ALIVE, el saldo no baja y no hay MoneyAnomaly', async () => {
+      const { balanceId } = await comprar({ productId: masaje })
       const c = await cita(150, { status: 'CANCELLED' })
-      await expect(
-        redeemCreditsWithCompensation({
-          venueId: venue!.id,
-          reservationId: c.id,
-          confirmationCode: c.confirmationCode,
-          balanceIds: [balanceId],
-          creditsPerBalance: 1,
-          customerId: ana.id,
-        }),
-      ).rejects.toMatchObject({ code: 'CREDIT_RESERVATION_NOT_ALIVE', message: 'La reserva ya no está activa.' })
-      expect(await saldo(balanceId)).toBe(antes)
+      await expect(canjearConCompensacion(c.id, c.confirmationCode, balanceId)).rejects.toMatchObject({
+        code: 'CREDIT_RESERVATION_NOT_ALIVE',
+        message: 'La reserva ya no está activa.',
+      })
+      expect(await saldo(balanceId)).toBe(99999)
       expect(await prisma.moneyAnomaly.count({ where: { reservationId: c.id } })).toBe(0)
+    })
+
+    // Codex código r1 #6: recepción registra la llegada entre el alta de la cita y el canje. El pase sí se cobra.
+    it('Ilimitado sobre una cita que ya llegó (CHECKED_IN): se canjea', async () => {
+      const { balanceId } = await comprar({ productId: masaje })
+      const c = await cita(151, { status: 'CHECKED_IN' })
+      await expect(canjearConCompensacion(c.id, c.confirmationCode, balanceId)).resolves.toEqual({ creditsUsed: 1, redeemed: true })
+      expect(await saldo(balanceId)).toBe(99998)
+    })
+
+    // Decisión: un paquete normal cobra EXACTAMENTE como en develop, también sobre una cita que ya llegó o se canceló.
+    it.each(['CHECKED_IN', 'CANCELLED'] as const)('paquete normal sobre una cita %s: cobra como en develop', async status => {
+      const { balanceId } = await comprar({ productId: masaje, unlimited: false })
+      const c = await cita(152, { status })
+      await expect(canjearConCompensacion(c.id, c.confirmationCode, balanceId)).resolves.toEqual({ creditsUsed: 1, redeemed: true })
+      expect(await saldo(balanceId)).toBe(4)
+    })
+  })
+
+  // ---------- Codex código r1: #1, #2, #4, #5, #7 ----------
+
+  describe('Codex código r1', () => {
+    it('#1 · con creditItemBalanceIds vacío y el Ilimitado en creditItemBalanceId, la clase queda a nombre de la titular', async () => {
+      const { balanceId } = await comprar()
+      const res = await reservar({ classSessionId: await clase(300), creditItemBalanceId: balanceId, creditItemBalanceIds: [] })
+      expect(res.status).toBe(201)
+      expect(await reserva(res.body.confirmationCode)).toMatchObject({ ...TITULAR, guestPhone: ana.phone })
+      expect(await saldo(balanceId)).toBe(99998)
+    })
+
+    it('#2 · si recepción cambió el contacto de la cita antes del canje, el canje la deja otra vez a nombre de la titular', async () => {
+      const { balanceId } = await comprar({ productId: masaje })
+      const c = await cita(301, { guestName: 'Ana López', guestPhone: '+525599998888', guestEmail: `otra-${RUN}@test.com` })
+      await canjear(c.id, [balanceId])
+      expect(await reserva(c.confirmationCode)).toMatchObject({ ...TITULAR, guestPhone: ana.phone })
+    })
+
+    it('#4 · con una reserva suya COMPLETADA en esa clase, pagada con su Ilimitado → SAME_CLASS', async () => {
+      const { balanceId } = await comprar()
+      const c = await clase(302)
+      const primera = await reservar({ classSessionId: c, creditItemBalanceId: balanceId })
+      await prisma.reservation.update({ where: { id: (await reserva(primera.body.confirmationCode)).id }, data: { status: 'COMPLETED' } })
+      expect((await reservar({ classSessionId: c, creditItemBalanceId: balanceId })).body.code).toBe('CREDIT_UNLIMITED_SAME_CLASS')
+    })
+
+    it('#5 · cambiar el nombre mientras se le acredita su primer Ilimitado: el cambio espera y lo rechaza', async () => {
+      const gina = await prisma.customer.create({ data: { venueId: venue!.id, firstName: 'Gina', email: `gina-${RUN}@test.com` } })
+      const { resultados, esperando } = await enCarrera('', [() => updateProfile(venue!.id, gina.id, { firstName: 'Otra' })], {
+        candado: tx => tx.$queryRaw`SELECT id FROM "Customer" WHERE id = ${gina.id} FOR UPDATE`,
+        // La venta se acredita mientras el cambio espera (misma fila de la clienta que toca la entrega).
+        antesDeSoltar: tx =>
+          tx.creditPackPurchase.create({
+            data: {
+              venueId: venue!.id,
+              customerId: gina.id,
+              creditPackId: pack,
+              amountPaid: new Prisma.Decimal(2500),
+              expiresAt: new Date(Date.now() + 30 * D),
+              itemBalances: { create: [{ productId: lagree, originalQuantity: 99999, remainingQuantity: 99999, unlimited: true }] },
+            },
+          }),
+      })
+      expect(esperando).toBe(1)
+      expect(resultados[0]).toMatchObject({ status: 'rejected', reason: expect.objectContaining({ code: 'CREDIT_UNLIMITED_NAME_LOCKED' }) })
+      expect((await prisma.customer.findUniqueOrThrow({ where: { id: gina.id } })).firstName).toBe('Gina')
+    })
+
+    it('#7 · cancelar después de reembolsar la compra del pase: no devuelve nada y la vista previa lo dice', async () => {
+      await prisma.reservationSettings.update({ where: { venueId: venue!.id }, data: { creditRefundMode: 'NEVER' } })
+      try {
+        const { balanceId, purchaseId } = await comprar({ productId: masaje })
+        const c = await cita(303)
+        await canjear(c.id, [balanceId])
+        await refundPurchase(venue!.id, purchaseId, staffVenueId, 'reembolso')
+        const { cancelSecret } = await prisma.reservation.findUniqueOrThrow({ where: { id: c.id }, select: { cancelSecret: true } })
+        const previa = await request(app)
+          .get(`${P}/venues/${venue!.slug}/reservations/${cancelSecret}`)
+          .set('cf-connecting-ip', visitante())
+        expect(previa.body.cancellation).toMatchObject({ creditsUsed: 1, creditsRefundable: 0 })
+        const cancelada = await cancelReservation(venue!.id, c.id, 'CUSTOMER')
+        expect(cancelada).toMatchObject({ creditsRefunded: 0 })
+        expect(await prisma.creditTransaction.count({ where: { reservationId: c.id, type: 'REFUND' } })).toBe(0)
+        expect(await saldo(balanceId)).toBe(0)
+      } finally {
+        await prisma.reservationSettings.update({ where: { venueId: venue!.id }, data: { creditRefundMode: 'TIME_BASED' } })
+      }
     })
   })
 
@@ -853,12 +939,20 @@ describe('D679 · reglas del Ilimitado (integración, base real)', () => {
    * Corre `pasos` EN ORDEN mientras otra transacción tiene la fila de la reserva: arranca uno, espera a que ya esté bloqueado,
    * arranca el siguiente; cuando todos esperan, suelta. Misma técnica que tests/integration/reservations/undo-no-show.test.ts.
    */
-  async function enCarrera(reservationId: string, pasos: Array<() => Promise<unknown>>) {
+  async function enCarrera(
+    reservationId: string,
+    pasos: Array<() => Promise<unknown>>,
+    opts: {
+      candado?: (tx: Prisma.TransactionClient) => Promise<unknown>
+      antesDeSoltar?: (tx: Prisma.TransactionClient) => Promise<unknown>
+    } = {},
+  ) {
     let enCurso: Promise<PromiseSettledResult<unknown>>[] = []
     let esperando = 0
     await prisma.$transaction(
       async tx => {
-        await tx.$queryRaw`SELECT id FROM "Reservation" WHERE id = ${reservationId} FOR UPDATE`
+        if (opts.candado) await opts.candado(tx)
+        else await tx.$queryRaw`SELECT id FROM "Reservation" WHERE id = ${reservationId} FOR UPDATE`
         const [{ pid }] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`
         const bloqueadas = async () => {
           await tx.$executeRaw`SELECT pg_stat_clear_snapshot()`
@@ -876,6 +970,7 @@ describe('D679 · reglas del Ilimitado (integración, base real)', () => {
           const limite = Date.now() + 10_000
           while ((esperando = await bloqueadas()) < enCurso.length && Date.now() < limite) await new Promise(r => setTimeout(r, 25))
         }
+        if (opts.antesDeSoltar) await opts.antesDeSoltar(tx)
       },
       { timeout: 40_000 },
     )

@@ -108,33 +108,34 @@ export async function updateProfile(venueId: string, customerId: string, data: {
     }
   }
 
-  // D679 (C7): mientras tenga un Ilimitado vigente, su nombre (el que ven recepción y el kiosco) lo corrige el estudio, no ella:
-  // el pase es personal. Reenviar el mismo nombre no es cambiarlo.
-  if (data.firstName !== undefined || data.lastName !== undefined) {
-    const actual = await prisma.customer.findFirst({ where: { id: customerId, venueId }, select: { firstName: true, lastName: true } })
-    const cambia =
-      (data.firstName !== undefined && (data.firstName.trim() || null) !== (actual?.firstName?.trim() || null)) ||
-      (data.lastName !== undefined && (data.lastName.trim() || null) !== (actual?.lastName?.trim() || null))
-    if (cambia) {
-      const pase = await prisma.creditItemBalance.findFirst({
-        where: {
-          unlimited: true,
-          creditPackPurchase: {
-            venueId,
-            customerId,
-            status: CreditPurchaseStatus.ACTIVE,
-            OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-          },
-        },
-        select: { id: true },
-      })
-      if (pase) throw errorIlimitado('CREDIT_UNLIMITED_NAME_LOCKED')
-    }
-  }
-
   const customer = await withDeadlockRetry(
-    tx =>
-      tx.customer.update({
+    async tx => {
+      // D679 (C7): mientras tenga un Ilimitado vigente, su nombre (el que ven recepción y el kiosco) lo corrige el estudio, no
+      // ella: el pase es personal. Reenviar el mismo nombre no es cambiarlo. Codex código r1 #5: la revisión y la escritura van en
+      // la misma transacción, con la ficha bajo candado (la entrega de un paquete también la toca), así no se cruzan.
+      if (data.firstName !== undefined || data.lastName !== undefined) {
+        await tx.$queryRaw`SELECT id FROM "Customer" WHERE id = ${customerId} AND "venueId" = ${venueId} FOR UPDATE`
+        const actual = await tx.customer.findFirst({ where: { id: customerId, venueId }, select: { firstName: true, lastName: true } })
+        const cambia =
+          (data.firstName !== undefined && (data.firstName.trim() || null) !== (actual?.firstName?.trim() || null)) ||
+          (data.lastName !== undefined && (data.lastName.trim() || null) !== (actual?.lastName?.trim() || null))
+        if (cambia) {
+          const pase = await tx.creditItemBalance.findFirst({
+            where: {
+              unlimited: true,
+              creditPackPurchase: {
+                venueId,
+                customerId,
+                status: CreditPurchaseStatus.ACTIVE,
+                OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+              },
+            },
+            select: { id: true },
+          })
+          if (pase) throw errorIlimitado('CREDIT_UNLIMITED_NAME_LOCKED')
+        }
+      }
+      return tx.customer.update({
         where: { id: customerId },
         data: {
           ...(data.firstName !== undefined ? { firstName: data.firstName } : {}),
@@ -147,7 +148,8 @@ export async function updateProfile(venueId: string, customerId: string, data: {
           email: true,
           phone: true,
         },
-      }),
+      })
+    },
     { etiqueta: 'updateProfile' },
   )
 

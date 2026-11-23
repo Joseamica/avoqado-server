@@ -805,7 +805,12 @@ export async function createReservation(req: Request, res: Response, next: NextF
       const titular = await titularDelPase(prisma, {
         venueId: venue.id,
         sessionCustomerId: identity.customerId,
-        balanceIds: Array.isArray(req.body.creditItemBalanceIds) ? req.body.creditItemBalanceIds : [req.body.creditItemBalanceId],
+        // Codex código r1 #1: los dos campos, juntos. La clase canjea `creditItemBalanceId` y la cita la lista: si CUALQUIERA de
+        // los saldos que mandó es Ilimitado, la reserva va a nombre de la titular.
+        balanceIds: [
+          ...(Array.isArray(req.body.creditItemBalanceIds) ? req.body.creditItemBalanceIds : []),
+          ...(typeof req.body.creditItemBalanceId === 'string' ? [req.body.creditItemBalanceId] : []),
+        ],
       })
       if (titular) Object.assign(req.body, titular)
     }
@@ -1483,15 +1488,15 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
     const prisma = (await import('../../utils/prismaClient')).default
     const redeems = await prisma.creditTransaction.findMany({
       where: { venueId: reservation.venueId, reservationId: reservation.id, type: 'REDEEM' },
-      select: { quantity: true, creditItemBalance: { select: { unlimited: true } } },
+      select: { quantity: true, creditItemBalance: { select: { unlimited: true } }, creditPackPurchase: { select: { status: true } } },
     })
     const creditsUsed = redeems.reduce((sum, t) => sum + Math.abs(t.quantity), 0)
-    // D679 (N14): canje por canje, con la misma regla que la devolución: un Ilimitado regresa completo.
-    const creditsRefundable = redeems.reduce(
-      (sum, t) =>
-        sum + Math.floor((Math.abs(t.quantity) * (t.creditItemBalance.unlimited ? 100 : cancellationPreview.refundPercent)) / 100),
-      0,
-    )
+    // D679 (N14): canje por canje, con la misma regla que la devolución: un Ilimitado regresa completo, salvo que su compra ya se
+    // haya reembolsado (Codex código r1 #7: ese saldo está anulado, no hay nada que regresar).
+    const creditsRefundable = redeems.reduce((sum, t) => {
+      if (!t.creditItemBalance.unlimited) return sum + Math.floor((Math.abs(t.quantity) * cancellationPreview.refundPercent) / 100)
+      return t.creditPackPurchase.status === 'REFUNDED' ? sum : sum + Math.abs(t.quantity)
+    }, 0)
     const todoIlimitado = redeems.length > 0 && redeems.every(t => t.creditItemBalance.unlimited)
 
     // Fetch modifiers if any were selected on the reservation

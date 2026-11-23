@@ -16,12 +16,12 @@ import { es } from 'date-fns/locale'
 // appointment-services ICP. Gated by creditPacks:read (mirrors the dashboard route). Money PESOS.
 const num = (v: unknown): number | null => (v == null ? null : Number(v))
 
-// D679 · paquete Ilimitado: por dentro es un saldo de 99,999; el modelo nunca debe leer ese número. En un renglón Ilimitado los
-// campos de hoy (`credits`, `remaining`, `original`, `after`) van en null —no se quitan— junto a `unlimited` y `display`. Los
-// paquetes normales salen igual que siempre.
+// D679 · paquete Ilimitado: por dentro es un saldo de 99,999. Tanda certificada (Codex código r1 #8): ningún campo que ya existía
+// cambia de tipo —`credits`, `remaining`, `original` y `after` siguen siendo números—; lo nuevo va en campos que se agregan
+// (`unlimited: true`, `display: 'Ilimitado…'`, `used`), que le dicen al modelo que ese número no es un saldo. Normales, igual.
 const renglonDelPaquete = (it: { product?: { name?: string } | null; quantity: number; unlimited?: boolean }) =>
   it.unlimited
-    ? { product: it.product?.name ?? null, credits: null, unlimited: true, display: 'Ilimitado' }
+    ? { product: it.product?.name ?? null, credits: it.quantity, unlimited: true, display: 'Ilimitado' }
     : { product: it.product?.name ?? null, credits: it.quantity }
 const fechaDelNegocio = (d: Date, tz: string) => formatInTimeZone(d, tz, "d 'de' MMMM 'de' yyyy", { locale: es })
 const zonaDe = async (venueId: string) =>
@@ -121,16 +121,16 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
               if (p.status === CreditPurchaseStatus.REFUNDED) {
                 return {
                   product: b.product?.name ?? null,
-                  remaining: null,
-                  original: null,
+                  remaining: b.remainingQuantity,
+                  original: b.originalQuantity,
                   unlimited: true,
                   display: 'Ilimitado · reembolsado',
                 }
               }
               return {
                 product: b.product?.name ?? null,
-                remaining: null,
-                original: null,
+                remaining: b.remainingQuantity,
+                original: b.originalQuantity,
                 unlimited: true,
                 used: b.originalQuantity - b.remainingQuantity,
                 display: p.expiresAt ? `Ilimitado · vence el ${fechaDelNegocio(p.expiresAt, tz!)}` : 'Ilimitado',
@@ -241,8 +241,8 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
             product: productName,
             pack: packName,
             expiresAt: target.creditPackPurchase.expiresAt?.toISOString() ?? null,
-            remaining: null,
-            after: null,
+            remaining: target.remainingQuantity,
+            after: target.remainingQuantity - 1,
             unlimited: true,
           },
           message: `Esto REGISTRARÁ 1 uso de "${productName}" (Ilimitado${vence ? `, vence el ${vence}` : ''}) de ${name}. Vuelve a llamar con confirm:true para aplicar.`,
@@ -286,7 +286,7 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
             customer: name,
             product: productName,
             pack: packName,
-            remaining: ilimitado ? null : target.remainingQuantity - 1,
+            remaining: target.remainingQuantity - 1,
             ...(ilimitado ? { unlimited: true } : {}),
             transactionId: (tx as { id?: string })?.id ?? null,
           },

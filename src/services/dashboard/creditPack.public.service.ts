@@ -23,7 +23,7 @@ import emailService from '@/services/email.service'
 import { resolveChargeableStripeMerchant } from '@/services/payments/ecommerceCapability'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
 import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
-import { UNLIMITED_LATE_CANCEL_MARK } from '@/services/credits/ilimitado'
+import { UNLIMITED_LATE_CANCEL_MARK, vigenciaAlEntregar } from '@/services/credits/ilimitado'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -516,14 +516,15 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
     })
   }
 
-  // Calculate expiration
-  const expiresAt = pack.validityDays ? new Date(Date.now() + pack.validityDays * 24 * 60 * 60 * 1000) : null
-
   const amountPaid = new Prisma.Decimal((session.amount_total || 0) / 100)
 
   // Create everything in a transaction
   const purchase = await withDeadlockRetry(
     async tx => {
+      // Calculate expiration. D679 (Codex código r1 #3): un renglón Ilimitado sin vigencia es una lectura partida; se relee aquí.
+      const validityDays = await vigenciaAlEntregar(tx, pack)
+      const expiresAt = validityDays ? new Date(Date.now() + validityDays * 24 * 60 * 60 * 1000) : null
+
       // Create purchase
       const newPurchase = await tx.creditPackPurchase.create({
         data: {
@@ -639,7 +640,7 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
         itemLines,
         amountPaid: Number(amountPaid),
         currency: pack.currency || 'MXN',
-        validUntilIso: expiresAt ? expiresAt.toISOString() : null,
+        validUntilIso: purchase.expiresAt ? purchase.expiresAt.toISOString() : null,
         purchaseRef: purchase.id.slice(-8).toUpperCase(),
       })
     } catch (mailError) {
@@ -741,7 +742,7 @@ export async function refundCreditsForReservation(
   // D679: con la marca de su saldo (un Ilimitado siempre regresa).
   const redeems = await (db ?? prisma).creditTransaction.findMany({
     where: { venueId, reservationId, type: 'REDEEM' },
-    include: { creditItemBalance: { select: { unlimited: true } } },
+    include: { creditItemBalance: { select: { unlimited: true } }, creditPackPurchase: { select: { status: true } } },
   })
 
   if (redeems.length === 0) return { creditsRefunded: 0, policyApplied: 'no-credits-used' }
@@ -771,6 +772,8 @@ export async function refundCreditsForReservation(
     for (const tx of redeems) {
       // D679 (regla 7): un Ilimitado regresa siempre completo; si fue en la ventana tardía, la falta queda anotada en el reason.
       const ilimitado = esIlimitado(tx)
+      // Codex código r1 #7: un pase cuya compra ya se reembolsó está anulado; devolverle una clase sería un crédito que no se puede usar.
+      if (ilimitado && tx.creditPackPurchase?.status === CreditPurchaseStatus.REFUNDED) continue
       const refundQty = Math.floor((Math.abs(tx.quantity) * (ilimitado ? 100 : refundPercent)) / 100)
       if (refundQty <= 0) continue
       if (!tx.creditItemBalanceId) continue

@@ -9,7 +9,7 @@
 import { CreditPurchaseStatus, Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
-import { LUGAR_DEL_PASE, RESERVA_VIVA, errorIlimitado, errorVenceAntes } from '@/services/credits/ilimitado'
+import { LUGAR_DEL_PASE, errorIlimitado, errorVenceAntes } from '@/services/credits/ilimitado'
 
 type Lector = Pick<Prisma.TransactionClient, 'creditItemBalance' | 'customer'>
 
@@ -30,8 +30,17 @@ export async function titularDelPase(
     select: { id: true },
   })
   if (!ilimitado) return null
+  return fichaDeLaTitular(db, args.venueId, args.sessionCustomerId)
+}
+
+/** Nombre (`firstName lastName`), teléfono y correo de la ficha; lo que falte, `null`. */
+async function fichaDeLaTitular(
+  db: Pick<Prisma.TransactionClient, 'customer'>,
+  venueId: string,
+  customerId: string,
+): Promise<{ guestName: string | null; guestPhone: string | null; guestEmail: string | null } | null> {
   const ficha = await db.customer.findFirst({
-    where: { id: args.sessionCustomerId, venueId: args.venueId },
+    where: { id: customerId, venueId },
     select: { firstName: true, lastName: true, phone: true, email: true },
   })
   if (!ficha) return null
@@ -187,12 +196,12 @@ export async function redeemCreditsForReservation(
 
   const customer = await requireSessionCustomerForCredits(tx, { sessionCustomerId: args.customerId, venueId: args.venueId })
 
-  // D679 (regla 5): la reserva bajo candado ANTES que los saldos (el mismo orden que cancelar) y viva. Así un cambio de horario
-  // y el canje no se cruzan, y una cita ya cancelada no se cobra (deuda H8).
+  // D679 (regla 5): la reserva bajo candado ANTES que los saldos (el mismo orden que cancelar). Así un cambio de horario y el canje
+  // de un pase no se cruzan. Un paquete normal cobra EXACTAMENTE como antes (Codex código r1 #6): la reserva sólo se exige viva
+  // —no cancelada— para un Ilimitado.
   const [reserva] = await tx.$queryRaw<
     { status: string; startsAt: Date; partySize: number; classSessionId: string | null }[]
   >`SELECT status, "startsAt", "partySize", "classSessionId" FROM "Reservation" WHERE id = ${args.reservationId} AND "venueId" = ${args.venueId} FOR UPDATE`
-  if (!reserva || !(RESERVA_VIVA as string[]).includes(reserva.status)) throw errorIlimitado('CREDIT_RESERVATION_NOT_ALIVE')
   let pagoConIlimitado = false
 
   let totalCreditsUsed = 0
@@ -232,6 +241,7 @@ export async function redeemCreditsForReservation(
 
     if (balance.unlimited) {
       // D679: el pase se revisa ANTES de «no alcanza» (su 99,999 nunca se enseña), y después de que la compra es suya y vigente.
+      if (!reserva || reserva.status === 'CANCELLED') throw errorIlimitado('CREDIT_RESERVATION_NOT_ALIVE')
       validarCompra()
       const clase = reserva.classSessionId
         ? await tx.classSession.findUnique({ where: { id: reserva.classSessionId }, select: { startsAt: true } })
@@ -287,9 +297,11 @@ export async function redeemCreditsForReservation(
   }
 
   if (pagoConIlimitado) {
-    // D679: se TOCA la reserva. Un cambio de horario en SERIALIZABLE que la tomó con una foto de antes de este canje choca aquí
-    // (40001) y se reintenta viendo el pase; sin esto, su foto no ve el REDEEM y la movería fuera de vigencia.
-    await tx.reservation.update({ where: { id: args.reservationId }, data: { updatedAt: new Date() } })
+    // D679: con la reserva bajo candado, queda a nombre y contacto de la titular (Codex código r1 #2: recepción pudo cambiarlo
+    // entre el alta de la cita y este canje). Y se TOCA: un cambio de horario en SERIALIZABLE que la tomó con una foto de antes
+    // de este canje choca aquí (40001) y se reintenta viendo el pase; sin esto, su foto no ve el REDEEM.
+    const titular = await fichaDeLaTitular(tx, args.venueId, customer.id)
+    await tx.reservation.update({ where: { id: args.reservationId }, data: { updatedAt: new Date(), ...(titular ?? {}) } })
   }
 
   logger.info(

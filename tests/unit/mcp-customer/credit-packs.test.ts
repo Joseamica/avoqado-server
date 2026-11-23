@@ -236,8 +236,9 @@ describe('redeem_credit (write, confirm-gated, creditPacks:redeem)', () => {
   })
 })
 
-// D679 · paquete Ilimitado: el modelo nunca lee 99,999. Los campos de hoy siguen ahí (en un renglón Ilimitado van en null) y se
-// agregan `unlimited` y `display`. Los paquetes normales salen igual que antes.
+// D679 · paquete Ilimitado. Tanda certificada «lecturas» (Codex código r1 #8): ningún campo que ya existía cambia de tipo —
+// `credits`, `remaining`, `original` y `after` siguen siendo números, también en un renglón Ilimitado—; lo nuevo va en campos que
+// se agregan (`unlimited`, `display`, `used`, `faltas`) y le dicen al modelo que ese número no es un saldo. Paquetes normales, igual.
 describe('D679 · Ilimitado en las herramientas de créditos', () => {
   const VENCE = new Date('2026-12-22T18:00:00Z') // 22 de diciembre en México
   const ili = (over: Record<string, unknown> = {}) => ({
@@ -314,29 +315,34 @@ describe('D679 · Ilimitado en las herramientas de créditos', () => {
     return out
   }
 
-  it('ningún resultado de las 4 herramientas con un Ilimitado contiene 99999 ni 99998', async () => {
-    const texto = JSON.stringify(await salidas())
-    expect(texto).not.toContain('99999')
-    expect(texto).not.toContain('99998')
-    expect(texto).not.toContain('99996')
+  it('ningún campo que ya existía cambia de tipo: credits, remaining, original y after siguen siendo números', async () => {
+    const [lista, saldo, previa, hecho, venta] = (await salidas()) as any[]
+    for (const it of [...lista.creditPacks[0].includes, ...venta.preview.includes]) expect(typeof it.credits).toBe('number')
+    for (const p of saldo.purchases)
+      for (const it of p.items) expect([typeof it.remaining, typeof it.original]).toEqual(['number', 'number'])
+    expect([typeof previa.preview.remaining, typeof previa.preview.after, typeof hecho.redeemed.remaining]).toEqual([
+      'number',
+      'number',
+      'number',
+    ])
   })
 
-  it('list_credit_packs y sell_credit_pack: el renglón Ilimitado lleva credits null, unlimited y display; el normal igual que hoy', async () => {
+  it('list_credit_packs y sell_credit_pack: el renglón Ilimitado agrega unlimited y display; el normal igual que hoy', async () => {
     const [lista, , , , venta] = (await salidas()) as any[]
     expect(lista.creditPacks[0].includes).toEqual([
-      { product: 'Lagree', credits: null, unlimited: true, display: 'Ilimitado' },
+      { product: 'Lagree', credits: 99999, unlimited: true, display: 'Ilimitado' },
       { product: 'Shake', credits: 2 },
     ])
-    expect(venta.preview.includes).toEqual([{ product: 'Lagree', credits: null, unlimited: true, display: 'Ilimitado' }])
+    expect(venta.preview.includes).toEqual([{ product: 'Lagree', credits: 99999, unlimited: true, display: 'Ilimitado' }])
   })
 
-  it('customer_credit_balance de un Ilimitado: used, display y faltas; compra REFUNDED sin used y «reembolsado»', async () => {
+  it('customer_credit_balance de un Ilimitado: agrega unlimited, used, display y faltas; compra REFUNDED sin used y «reembolsado»', async () => {
     const [, saldo] = (await salidas()) as any[]
     expect(saldo.purchases[0].items).toEqual([
       {
         product: 'Lagree',
-        remaining: null,
-        original: null,
+        remaining: 99996,
+        original: 99999,
         unlimited: true,
         used: 3,
         display: 'Ilimitado · vence el 22 de diciembre de 2026',
@@ -345,18 +351,18 @@ describe('D679 · Ilimitado en las herramientas de créditos', () => {
     ])
     expect(saldo.purchases[0].faltas).toEqual({ noLlego: 1, cancelTarde: 2 })
     expect(saldo.purchases[1].items).toEqual([
-      { product: 'Lagree', remaining: null, original: null, unlimited: true, display: 'Ilimitado · reembolsado' },
+      { product: 'Lagree', remaining: 0, original: 99999, unlimited: true, display: 'Ilimitado · reembolsado' },
     ])
     expect(saldo.purchases[1]).not.toHaveProperty('faltas')
   })
 
-  it('redeem_credit previsualiza «REGISTRARÁ 1 uso» y confirma sin restante', async () => {
+  it('redeem_credit previsualiza «REGISTRARÁ 1 uso» y marca unlimited', async () => {
     const [, , previa, hecho] = (await salidas()) as any[]
     expect(previa.message).toBe(
       'Esto REGISTRARÁ 1 uso de "Lagree" (Ilimitado, vence el 22 de diciembre de 2026) de Ana T. Vuelve a llamar con confirm:true para aplicar.',
     )
-    expect(previa.preview).toMatchObject({ remaining: null, after: null, unlimited: true })
-    expect(hecho).toMatchObject({ ok: true, redeemed: { remaining: null, unlimited: true, transactionId: 'txn-ili' } })
+    expect(previa.preview).toMatchObject({ remaining: 99996, after: 99995, unlimited: true })
+    expect(hecho).toMatchObject({ ok: true, redeemed: { remaining: 99995, unlimited: true, transactionId: 'txn-ili' } })
   })
 
   it('paquete normal idéntico a hoy: sin unlimited ni display, y sin consultar la zona', async () => {

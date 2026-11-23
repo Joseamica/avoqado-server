@@ -14,6 +14,7 @@ import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetr
 import logger from '@/config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import type { CreditPackSnapshot } from '@/services/shared/creditPacksOnPaidOrder'
+import { vigenciaAlEntregar } from '@/services/credits/ilimitado'
 
 type PackWithItems = {
   id: string
@@ -69,7 +70,9 @@ export async function grantPackInTx(
     }
   }
 
-  const expiresAt = pack.validityDays ? new Date(Date.now() + pack.validityDays * 24 * 60 * 60 * 1000) : null
+  // D679 (Codex código r1 #3): un renglón Ilimitado sin vigencia es una lectura partida del paquete; se relee en esta transacción.
+  const validityDays = await vigenciaAlEntregar(tx, pack)
+  const expiresAt = validityDays ? new Date(Date.now() + validityDays * 24 * 60 * 60 * 1000) : null
 
   const newPurchase = await tx.creditPackPurchase.create({
     data: {

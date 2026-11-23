@@ -86,6 +86,14 @@ describe('D679 · Ilimitado en el carril en línea', () => {
       expect(normal).toMatchObject({ originalQuantity: 2, remainingQuantity: 2 })
     })
 
+    it('Codex r1 #3 · lectura partida (sin vigencia + renglón Ilimitado): relee la vigencia en la entrega y vence', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue({ ...pack, validityDays: null })
+      prismaMock.creditPack.findUnique.mockResolvedValue({ validityDays: 30 })
+      await fulfillPurchase('cs_ili')
+      const { expiresAt } = prismaMock.creditPackPurchase.create.mock.calls[0][0].data
+      expect(expiresAt.getTime()).toBeGreaterThan(Date.now() + 29 * 24 * 3_600_000)
+    })
+
     it('el correo dice «Ilimitado de Lagree», nunca 99999', async () => {
       await fulfillPurchase('cs_ili')
       const datos = (mockCorreo.mock.calls[0] as any[])[1]
