@@ -15,7 +15,6 @@ jest.mock('@/services/access/basePlan.service', () => ({
   venueHasFeatureAccess: (...a: unknown[]) => mockFeatureAccess(...a),
 }))
 jest.mock('@/services/access/rolVigente', () => ({ esSuperadminDeLaSesion: jest.fn().mockResolvedValue(false) }))
-jest.mock('@/services/legacy/qrPayments.legacy.service', () => ({ MINDFORM_NEW_VENUE_ID: 'qr-venue' }))
 
 import { salesSummaryReport } from '@/controllers/dashboard/sales-summary.dashboard.controller'
 import { prismaMock } from '@tests/__helpers__/setup'
