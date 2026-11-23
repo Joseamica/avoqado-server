@@ -531,6 +531,9 @@ describe('Terminal relay uncertainty survives database commits', () => {
     // Cobro simple · S1: la terminal AFIRMÓ un cobro que no acredita ⇒ «aprobado, por registrar»: sigue UNKNOWN (sin reloj de
     // 10 s, la cuenta cercada) y nunca «no cobrado».
     expect(await terminalPaymentService.getPaymentStatus(requestId, venueId)).toMatchObject({ status: 'UNKNOWN', outcome: 'UNRESOLVED', paymentId: null })
+    // Codex S1 r2 (R2-1): pasados los 10 s, nunca «no cobrado»; la cuenta sigue cercada.
+    expect(await terminalPaymentService.cerrarSinRespuesta(requestId, venueId, new Date(Date.now() + 10_050))).toBe('APROBADO_POR_REGISTRAR')
+    expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(true)
   })
 
   it('does not emit a charge for an order that is absent from the authenticated venue', async () => {
@@ -583,6 +586,10 @@ describe('Terminal relay uncertainty survives database commits', () => {
         paymentId: null,
       })
       expect((await prisma.terminalPaymentRequest.findFirstOrThrow({ where: { requestId, venueId } })).noResponseAt).toBeNull()
+      // Codex S1 r2 (R2-1): pasados los 10 s, nunca «no cobrado» (con `undefined`: el `success` sin ids de una Nexgo que encola su
+      // registro); la cuenta sigue cercada.
+      expect(await terminalPaymentService.cerrarSinRespuesta(requestId, venueId, new Date(Date.now() + 10_050))).toBe('APROBADO_POR_REGISTRAR')
+      expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(true)
     },
   )
 
