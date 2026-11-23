@@ -1517,11 +1517,14 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           createdAt: dateFilter.createdAt,
           status: { not: 'VOIDED' },
           // Carril C2: las comisiones del personal cuentan también las ventas pagadas con saldo (ver `OpcionesDelFiltroDeMetodo`).
+          // D9.1: con comercio, sin el efectivo del cajón que la terminal guardó con ese comercio (como el resto de la vista).
           ...(hasPaymentFilter
             ? {
                 payment: {
-                  ...(merchantAccountId ? { merchantAccountId } : {}),
-                  ...buildPaymentWhereFilter(paymentMethod, cardType, { incluirMediosDeSistema: true }),
+                  AND: [
+                    ...(merchantAccountId ? [{ merchantAccountId }, NOT_DRAWER_CASH_WHERE] : []),
+                    ...(paymentMethod ? [buildPaymentWhereFilter(paymentMethod, cardType, { incluirMediosDeSistema: true })] : []),
+                  ],
                 },
               }
             : {}),

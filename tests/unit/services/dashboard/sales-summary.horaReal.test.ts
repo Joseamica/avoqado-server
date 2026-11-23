@@ -3,7 +3,8 @@
  * se hicieron sin internet; si no, la llegada), en las cifras de arriba Y en las barras, para que sigan sumando lo mismo. Las comisiones
  * del personal siguen con su propia fecha. La prueba con Postgres de verdad es `tests/integration/dashboard/sales-summary-hora-real`.
  */
-import { getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.service'
+import { buildPaymentWhereFilter, getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.service'
+import { NOT_DRAWER_CASH_WHERE } from '@/services/shared/tenderSemantics'
 import { prismaMock } from '@tests/__helpers__/setup'
 
 const TZ = 'America/Mexico_City'
@@ -66,6 +67,18 @@ describe('getSalesSummary — la hora real de lo vendido sin internet (D93)', ()
     const where = ((prismaMock as any).commissionCalculation.aggregate.mock.calls[0][0] as any).where
     expect(where.createdAt).toEqual({ gte: new Date(FROM), lte: new Date(TO) })
     expect(where).not.toHaveProperty('AND')
+  })
+
+  // hz:fefa11b6:D9.1: con un comercio elegido, la comisión del personal no cuenta el efectivo del cajón que la terminal guardó con
+  // ese comercio (el mismo filtro que el resto de la vista de movimientos). Con método, también los medios de sistema (carril C2).
+  it('🔴 con comercio, las comisiones del personal sacan el efectivo del cajón; con método, el filtro del método con medios de sistema', async () => {
+    await getSalesSummary('venue-1', { startDate: FROM, endDate: TO, timezone: TZ, merchantAccountId: 'comercio-a' })
+    const conComercio = ((prismaMock as any).commissionCalculation.aggregate.mock.calls[0][0] as any).where.payment
+    expect(conComercio.AND).toEqual(expect.arrayContaining([{ merchantAccountId: 'comercio-a' }, NOT_DRAWER_CASH_WHERE]))
+
+    await getSalesSummary('venue-1', { startDate: FROM, endDate: TO, timezone: TZ, paymentMethod: 'CASH' })
+    const conMetodo = ((prismaMock as any).commissionCalculation.aggregate.mock.calls[1][0] as any).where.payment
+    expect(conMetodo.AND).toEqual([buildPaymentWhereFilter('CASH', undefined, { incluirMediosDeSistema: true })])
   })
 
   it('las barras agrupan órdenes y cobros por la hora real; las comisiones, por la suya', async () => {
