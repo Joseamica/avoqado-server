@@ -39,17 +39,23 @@ export function sqlCuentaCobrada(o: AliasDeOrden): string {
  * B3 (hz:fefa11b6:D19): ¿la fila es una CUENTA? `PENDING` NO es «borrador»: es el estado por default de `Order` y el de toda cuenta
  * viva de la TPV mientras sigue abierta (abrir mesa, Cobrar, «Pagar después», separar, el check-in de una reserva, una cuenta
  * reabierta). Tratarla como borrador sacaba de la cabecera las mesas abiertas («Sin cobrar» en $0) y las ya cubiertas (fuera de las
- * ventas). Una `PENDING` todavía NO es cuenta cuando nadie la ha aceptado o no tiene nada:
+ * ventas). La referencia son las listas de cuentas abiertas de la TPV y del POS (`getOrders`, `listOrders`) más «lo que nadie aceptó
+ * ni cobró no es cuenta». Una `PENDING` todavía NO es cuenta (pasada exhaustiva, `docs/audit/2026-11-21-resumen-de-ventas/mesas/`):
  *  - el kiosco legacy (abandonado, `OrderSource.KIOSK`);
  *  - el reparto en modo manual sin aceptar (aceptarlo a mano no cambia el estado: sólo estampa `providerAcceptedAt`);
- *  - el pedido en línea que no está aceptado, listo ni entregado (por aceptar, vencido, rechazado), también el folio por pagar de la
- *    tienda híbrida (coordinador, 23-nov: «A», como `NO_ES_FOLIO_POR_PAGAR`: se cobra desde su lista «Por pagar»);
- *  - la que no tiene ningún renglón vivo y no se ha cobrado (la orden testigo de un cobro con cripto, una mesa recién abierta). Con
- *    renglones o ya cubierta sí cuenta: la cabecera de SoftRestaurant se guarda sin renglones (Codex B3 r1 #4).
- * El `CASE` corta antes de las subconsultas en toda cuenta que no es `PENDING` (casi todas).
+ *  - el pedido en línea por aceptar (`PENDING_ACCEPTANCE`): «Mi equipo» sin aceptar, el apartado con tarjeta y el folio por pagar de
+ *    la tienda híbrida (coordinador, 23-nov: «A», como `NO_ES_FOLIO_POR_PAGAR`: se cobra desde su lista «Por pagar»);
+ *  - el pedido en línea vencido, rechazado o cancelado que sigue `PENDING` sin dinero (R44: el folio vencido con su abono devuelto).
+ *    Con dinero sí es cuenta: el abono tardío lo deja cobrable en «Cuentas abiertas» (Codex B3 r2 #3);
+ *  - la orden testigo de un cobro con cripto que no se completó (`b4bit`: sin renglones). Sin renglones por otra razón sí cuenta: la
+ *    mesa que sólo debe un descorche (Codex B3 r2 #2) y la cabecera de SoftRestaurant (Codex B3 r1 #4).
+ * Lo ya cobrado siempre es cuenta. El `CASE` corta antes de las subconsultas en toda cuenta que no es `PENDING` (casi todas).
  */
 export function sqlEsCuenta(o: AliasDeOrden): string {
-  return `(CASE WHEN ${o}.status IN ('CANCELLED', 'DELETED') THEN FALSE WHEN ${o}.status <> 'PENDING' THEN TRUE WHEN ${o}.source = 'KIOSK' THEN FALSE WHEN ${o}."originSystem" = 'DELIVERY_PLATFORM' AND ${o}."providerAcceptedAt" IS NULL THEN FALSE WHEN EXISTS (SELECT 1 FROM "OnlineOrder" oo WHERE oo."orderId" = ${o}.id AND oo.status NOT IN ('ACCEPTED', 'READY', 'COMPLETED')) THEN FALSE ELSE (EXISTS (SELECT 1 FROM "OrderItem" oi WHERE oi."orderId" = ${o}.id AND oi."removedAt" IS NULL) OR ${sqlCuentaCobrada(o)}) END)`
+  // El estado de su pedido en línea, leído UNA vez: 0 = por aceptar, 1 = vencido/rechazado/cancelado, 2 = vivo o sin pedido en línea.
+  const pedidoEnLinea = `COALESCE((SELECT CASE WHEN oo.status = 'PENDING_ACCEPTANCE' THEN 0 WHEN oo.status IN ('EXPIRED', 'REJECTED', 'CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_STAFF') THEN 1 ELSE 2 END FROM "OnlineOrder" oo WHERE oo."orderId" = ${o}.id), 2)`
+  const testigoDeCripto = `NOT EXISTS (SELECT 1 FROM "OrderItem" oi WHERE oi."orderId" = ${o}.id) AND EXISTS (SELECT 1 FROM "Payment" px WHERE px."orderId" = ${o}.id AND px.method = 'CRYPTOCURRENCY' AND px.status <> 'COMPLETED')`
+  return `(CASE WHEN ${o}.status IN ('CANCELLED', 'DELETED') THEN FALSE WHEN ${o}.status <> 'PENDING' THEN TRUE WHEN ${o}.source = 'KIOSK' THEN FALSE WHEN ${o}."originSystem" = 'DELIVERY_PLATFORM' AND ${o}."providerAcceptedAt" IS NULL THEN FALSE ELSE (CASE ${pedidoEnLinea} WHEN 0 THEN FALSE WHEN 1 THEN ${pagadoQueCubreSql(o)} > 0 ELSE NOT (${testigoDeCripto}) OR ${sqlCuentaCobrada(o)} END) END)`
 }
 
 /**
@@ -96,5 +102,5 @@ export function sqlComisionDeTerceros(p: string, vistaDeMovimientos: boolean): s
  */
 export function sqlCobroDeCuentaSinCobrar(p: string): string {
   const a = p ? `${p}.` : `"Payment".`
-  return `EXISTS (SELECT 1 FROM "Order" o WHERE o.id = ${a}"orderId" AND o.status NOT IN ('CANCELLED', 'DELETED') AND (CASE WHEN o."paymentStatus" IN ('PENDING', 'PARTIAL') THEN NOT (${sqlEsCuenta('o')} AND ${sqlCuentaCobrada('o')}) WHEN o."paymentStatus" = 'PAID' THEN o.status = 'PENDING' AND NOT ${sqlEsCuenta('o')} ELSE FALSE END))`
+  return `EXISTS (SELECT 1 FROM "Order" o WHERE o.id = ${a}"orderId" AND o.status NOT IN ('CANCELLED', 'DELETED') AND o."paymentStatus" IN ('PENDING', 'PARTIAL', 'PAID') AND NOT (CASE WHEN o."paymentStatus" = 'PAID' AND o.status <> 'PENDING' THEN TRUE ELSE ${sqlEsCuenta('o')} AND ${sqlCuentaCobrada('o')} END))`
 }

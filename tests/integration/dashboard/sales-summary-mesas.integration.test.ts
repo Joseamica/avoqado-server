@@ -60,6 +60,8 @@ type Cuenta = {
   venueId: string
   subtotal: number
   tip?: number
+  /** Cargo por servicio (descorche, servicio) de la cuenta. */
+  serviceCharge?: number
   status?: 'PENDING' | 'CONFIRMED' | 'COMPLETED'
   paymentStatus?: 'PAID' | 'PENDING' | 'PARTIAL'
   remainingBalance?: number
@@ -67,7 +69,7 @@ type Cuenta = {
   type?: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP'
   originSystem?: 'AVOQADO' | 'DELIVERY_PLATFORM' | 'POS_SOFTRESTAURANT'
   providerAcceptedAt?: Date
-  /** Sin renglones = la orden testigo de un cobro con cripto, una mesa recién abierta o la cabecera de SoftRestaurant. */
+  /** Sin renglones: la orden testigo de un cobro con cripto, una mesa recién abierta, un descorche o la cabecera de SoftRestaurant. */
   sinRenglones?: boolean
   /** Su pedido en línea: «Mi equipo» (`requiresAcceptance: true`) o un folio de la tienda híbrida (`false`). */
   enLinea?: { requiresAcceptance: boolean; status?: OnlineOrderStatus }
@@ -85,7 +87,8 @@ async function cuenta(c: Cuenta): Promise<string> {
       subtotal: c.subtotal,
       taxAmount: 0,
       tipAmount: c.tip ?? 0,
-      total: c.subtotal + (c.tip ?? 0),
+      serviceChargeAmount: c.serviceCharge ?? 0,
+      total: c.subtotal + (c.serviceCharge ?? 0) + (c.tip ?? 0),
       remainingBalance: c.remainingBalance ?? 0,
       status: c.status ?? 'PENDING',
       paymentStatus: c.paymentStatus ?? 'PENDING',
@@ -158,7 +161,7 @@ async function cuenta(c: Cuenta): Promise<string> {
 const resumen = (venueId: string, extra: Record<string, unknown> = {}) =>
   getSalesSummary(venueId, { startDate: FROM, endDate: TO, timezone: TZ, ...extra })
 
-type Metrica = 'grossSales' | 'unpaidSales' | 'unpaidOrders' | 'tips' | 'transactionCount'
+type Metrica = 'grossSales' | 'unpaidSales' | 'unpaidOrders' | 'tips' | 'transactionCount' | 'totalCollected' | 'platformFees'
 /** La suma de una métrica en la tabla por día, en centavos (los conteos, tal cual). */
 async function sumaPorDia(venueId: string, k: Metrica): Promise<number> {
   const r = await resumen(venueId, { reportType: 'days' })
@@ -177,6 +180,9 @@ let cubierta: string
 let pagadaSinCerrar: string
 let cabeceraSinRenglones: string
 let cobroSinTipo: string
+let sinRenglonesQueDeben: string
+let folioVencidoConAbono: string
+let enLineaCobradoAntesDeAceptar: string
 let reparto: string
 let folios: string
 let noSonCuentas: string
@@ -241,6 +247,48 @@ beforeAll(async () => {
     status: 'CONFIRMED',
     paymentStatus: 'PARTIAL',
     pagos: [{ amount: 100, type: null }],
+  })
+
+  // Sin renglones que SÍ deben (Codex B3 r2 #2 y r1 #4): una mesa que sólo debe un descorche de $150 (o a la que le quitaron el
+  // último artículo y conserva el cargo fijo) y la cabecera abierta de SoftRestaurant de $60, que se guarda sin renglones.
+  sinRenglonesQueDeben = await venue('sin-renglones-que-deben')
+  await cuenta({ venueId: sinRenglonesQueDeben, subtotal: 0, serviceCharge: 150, sinRenglones: true, remainingBalance: 150 })
+  await cuenta({
+    venueId: sinRenglonesQueDeben,
+    subtotal: 60,
+    source: 'POS',
+    originSystem: 'POS_SOFTRESTAURANT',
+    sinRenglones: true,
+    remainingBalance: 60,
+  })
+
+  // Folio vencido con su abono devuelto (R44) y LUEGO un abono tardío de $50 desde la cola sin red (Codex B3 r2 #3): la cuenta vuelve
+  // a tener dinero y se cobra desde «Cuentas abiertas» del POS ⇒ sí es cuenta y debe $50. El abono no cuenta hasta que se cobre.
+  folioVencidoConAbono = await venue('folio-vencido-con-abono')
+  await cuenta({
+    venueId: folioVencidoConAbono,
+    source: 'WEB',
+    type: 'PICKUP',
+    subtotal: 100,
+    tip: 5,
+    paymentStatus: 'PARTIAL',
+    remainingBalance: 50,
+    enLinea: { requiresAcceptance: false, status: 'EXPIRED' },
+    pagos: [{ amount: 50 }, { amount: -50, type: 'REFUND', reopenedAmount: 50 }, { amount: 50, tip: 5 }],
+  })
+
+  // Un pedido en línea que se cobró en caja ANTES de que alguien lo aceptara (Codex B3 r2 #4): la cuenta ya está COMPLETED/PAID. Base
+  // de caja: lo cobrado es venta (como lo que entra al banco), aunque el pedido siga por aceptar.
+  enLineaCobradoAntesDeAceptar = await venue('en-linea-cobrado')
+  await cuenta({
+    venueId: enLineaCobradoAntesDeAceptar,
+    source: 'WEB',
+    type: 'PICKUP',
+    subtotal: 206,
+    status: 'COMPLETED',
+    paymentStatus: 'PAID',
+    enLinea: { requiresAcceptance: true },
+    pagos: [{ amount: 206 }],
   })
 
   // Reparto en modo manual: aceptar a mano NO cambia el estado (sólo estampa `providerAcceptedAt`). Sin aceptar no es cuenta, ni su
@@ -391,11 +439,13 @@ describe('B3 · una mesa abierta de la TPV (PENDING) es una cuenta', () => {
     expect(cents(r.summary.netProfit)).toBe(0)
   })
 
-  it('por periodo igual: las barras suman la cabecera', async () => {
+  it('por periodo igual: las barras suman la cabecera (también «Total cobrado» y la comisión, Codex B3 r2 #5)', async () => {
     expect(await sumaPorDia(mesas, 'unpaidSales')).toBe(10500)
     expect(await sumaPorDia(mesas, 'unpaidOrders')).toBe(2)
     expect(await sumaPorDia(mesas, 'transactionCount')).toBe(0)
     expect(await sumaPorDia(mesas, 'tips')).toBe(0)
+    expect(await sumaPorDia(mesas, 'platformFees')).toBe(0)
+    expect(await sumaPorDia(mesas, 'totalCollected')).toBe(0)
   })
 
   it('en la vista de movimientos (comercio elegido) el abono sí se ve, como antes: $30 + $5 − $1', async () => {
@@ -403,6 +453,35 @@ describe('B3 · una mesa abierta de la TPV (PENDING) es una cuenta', () => {
     expect(r.summary.unpaidSales).toBeNull()
     expect(cents(r.summary.totalCollected)).toBe(3400)
     expect(r.summary.transactionCount).toBe(1)
+  })
+})
+
+describe('B3 · sin renglones, pero debe algo: sí es cuenta (sólo el testigo de cripto queda fuera)', () => {
+  it('descorche de $150 y cabecera de SoftRestaurant de $60: «Sin cobrar» $210, 2 cuentas', async () => {
+    const r = await resumen(sinRenglonesQueDeben)
+    expect(cents(r.summary.unpaidSales)).toBe(21000)
+    expect(r.summary.unpaidOrders).toBe(2)
+    expect(cents(r.summary.grossSales)).toBe(0)
+    expect(await sumaPorDia(sinRenglonesQueDeben, 'unpaidSales')).toBe(21000)
+  })
+})
+
+describe('B3 · pedido en línea vencido o cobrado', () => {
+  it('folio vencido con un abono tardío: debe $50 y es 1 cuenta; su abono no cuenta en propinas ni transacciones', async () => {
+    const r = await resumen(folioVencidoConAbono)
+    expect(cents(r.summary.unpaidSales)).toBe(5000)
+    expect(r.summary.unpaidOrders).toBe(1)
+    expect(cents(r.summary.grossSales)).toBe(0)
+    expect(r.summary.transactionCount).toBe(0)
+    expect(cents(r.summary.tips)).toBe(0)
+    expect(cents(r.summary.totalCollected)).toBe(0)
+  })
+
+  it('cobrado en caja antes de que alguien lo aceptara: venta $206, 1 transacción (lo cobrado es venta)', async () => {
+    const r = await resumen(enLineaCobradoAntesDeAceptar)
+    expect(cents(r.summary.grossSales)).toBe(20600)
+    expect(r.summary.transactionCount).toBe(1)
+    expect(cents(r.summary.unpaidSales)).toBe(0)
   })
 })
 
