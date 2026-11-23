@@ -399,6 +399,29 @@ describe('D26 · VENTA: la persona puede declarar «no se cobró» 150 s despué
     expect(await ventaCercada(venta.id)).toBe(false)
   })
 
+  it('esa TPV sólo espera el RELOJ: con 51 intentos viejos ligados no se queda sin salida, a los 150 s la persona declara', async () => {
+    const { requestId } = await incidente({ executionVersion: null })
+    for (let i = 0; i < 51; i++) await intentoHace(requestId, 10 * 60_000)
+    await pasaElTechoDeLaVenta(requestId)
+    await vigia()
+    expect(await fila(requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
+    await expect(declarar(requestId)).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+
+  it('un intento que esa TPV abrió DESPUÉS del cancel mueve su reloj: 150 s desde ese intento', async () => {
+    const { requestId } = await incidente({ executionVersion: null })
+    await pasaElTechoDeLaVenta(requestId)
+    await vigia()
+    expect(await fila(requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
+    const attemptId = await intentoHace(requestId, 60_000)
+    await expect(declarar(requestId)).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
+    await prisma.terminalPaymentAttemptLink.updateMany({
+      where: { attemptId },
+      data: { createdAt: new Date(Date.now() - VENTA_MS - 1_000) },
+    })
+    await expect(declarar(requestId)).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+
   it('control · la excepción del 3-nov sigue: SIN cancel del POS, una TPV sin `executionVersion` con la ranura ya suelta no veta a la persona', async () => {
     const venta = await f.nuevaVenta(100)
     const { requestId } = await f.solicitud({
