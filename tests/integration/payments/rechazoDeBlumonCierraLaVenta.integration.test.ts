@@ -307,8 +307,10 @@ describe('D26 · la venta se cierra SOLA como «rechazada por el banco» cuando 
 
   it('Codex r1 #2: la PAX sin red al cancelar no recibe el cancel ⇒ se conserva la gracia (CANCEL_REQUESTED) y luego cierra el vigía', async () => {
     const { requestId } = await cobroEnLaTerminal()
-    await processBlumonPaymentWebhook(aviso())
     await terminalPaymentService.cancelPayment(f.serial, requestId, 'Cancelado desde el POS', f.venueId)
+    // El rechazo llega después del cancel, que la PAX no recibió: se anota, pero no cierra (el cancel se le puede reenviar).
+    const r = await processBlumonPaymentWebhook(aviso())
+    expect((await fila(requestId)).bankDeclineEventLogId).toBe(r.eventLogId)
     await vigia()
     expect(await fila(requestId)).toMatchObject({ status: 'CANCEL_REQUESTED', cancelDisposition: null })
     // Pasa la gracia del cancel sin respuesta: el vigía la deja UNKNOWN y la red la cierra.
