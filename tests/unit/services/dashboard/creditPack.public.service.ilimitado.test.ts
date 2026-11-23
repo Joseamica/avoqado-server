@@ -14,7 +14,7 @@ jest.mock('@/utils/serializableRetry', () => ({
   withDeadlockRetry: jest.fn((fn: any) => fn(prismaMock)),
 }))
 jest.mock('@/services/superadmin/platformSettings.service', () => ({ getVatRateBps: jest.fn().mockResolvedValue(1600) }))
-const mockCorreo = jest.fn(async () => true)
+const mockCorreo = jest.fn(async (..._a: unknown[]) => true)
 jest.mock('@/services/email.service', () => ({
   __esModule: true,
   default: { sendCreditPackPurchaseEmail: (...a: any[]) => mockCorreo(...a) },

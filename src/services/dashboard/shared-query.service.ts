@@ -520,7 +520,7 @@ export interface CreditPackBalanceSummary {
     initialQuantity: number
     remainingQuantity: number
     /** D679: un Ilimitado; el total de créditos no lo suma y el texto dice «Ilimitado», nunca su 99,999. */
-    unlimited: boolean
+    unlimited?: boolean
     expiresAt: Date | null
     status: string
   }>
