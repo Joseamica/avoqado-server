@@ -465,7 +465,8 @@ describe('Familia 1 · señal × escritor de negativo: el aprobado manda en toda
       ...(senal === 'claimedSuccess' ? { resultJson: { status: 'timeout', claimedSuccess: { status: 'success' } } } : {}),
     })
     const a = await intento(s.requestId)
-    if (senal === 'aviso aprobado guardado' || senal === 'marcador de retención')
+    // Codex S1 r4 (R4-C): el marcador va SOLO (sin aviso sembrado), para que la celda pruebe el marcador y nada más.
+    if (senal === 'aviso aprobado guardado')
       await prisma.providerEventLog.create({
         data: {
           provider: 'PAYMENT_PROCESSOR',
@@ -492,7 +493,19 @@ describe('Familia 1 · señal × escritor de negativo: el aprobado manda en toda
         } as any,
       })
 
-    await escribirNegativo(escritor, s.requestId, a)
+    const antes = await fila(s.requestId)
+    const escritorDelNegativo = jest.spyOn(svc, 'cerrarConNegativo')
+    try {
+      await escribirNegativo(escritor, s.requestId, a)
+      // R4-C: con el marcador (TIMED_OUT), el handler del cancel ACCEPTED retorna ANTES del escritor: no hay veto que ejercer, y la
+      // celda lo dice así, con la fila intacta.
+      if (senal === 'marcador de retención' && escritor === 'cancel ACCEPTED') {
+        expect(escritorDelNegativo).not.toHaveBeenCalled()
+        expect(await fila(s.requestId)).toEqual(antes)
+      }
+    } finally {
+      escritorDelNegativo.mockRestore()
+    }
 
     const r = await fila(s.requestId)
     expect(NEGATIVOS).not.toContain(r.status)
