@@ -9,6 +9,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
 import prisma from '../../../../src/utils/prismaClient'
 import * as svc from '../../../../src/services/dashboard/sales-summary.dashboard.service'
 import { dondeHoraRealEntre } from '../../../../src/services/shared/horaRealDelAparato'
+import { NOT_DRAWER_CASH_WHERE } from '../../../../src/services/shared/tenderSemantics'
 
 const paymentCount = (prisma as any).payment.count as jest.Mock
 const paymentFindMany = (prisma as any).payment.findMany as jest.Mock
@@ -135,6 +136,32 @@ describe('flattenSalesSummaryForExport', () => {
     const { rows } = svc.flattenSalesSummaryForExport(report, ['totals', 'paymentMethods'])
     expect(rows.some(r => r.section === 'aviso')).toBe(false)
   })
+
+  // Carril B (21-nov, D2/D6/D1): el archivo y el MCP dicen los renglones nuevos de la pantalla, con su leyenda, sólo si no son 0.
+  it('cargos por servicio, «Sin cobrar» (con cuántas cuentas) y comisiones de terceros salen como renglones propios', () => {
+    const conTodo = {
+      ...report,
+      summary: { ...report.summary, serviceCosts: 15.5, unpaidSales: 695, unpaidOrders: 3, tenderCommissions: 27 },
+    }
+    const { rows } = svc.flattenSalesSummaryForExport(conTodo, ['totals'])
+    const fila = (label: string) => rows.find(r => r.label === label)
+    expect(fila('Cargos por servicio (incluidos en ventas brutas)')).toMatchObject({ amount: 15.5, count: null })
+    expect(fila('Sin cobrar: cuentas abiertas (no es venta)')).toMatchObject({ amount: 695, count: 3 })
+    expect(fila('Comisiones de terceros (Rappi, Uber Eats, tipos de pago)')).toMatchObject({ amount: -27 })
+    // En el orden de la pantalla: los cargos bajo las ventas brutas, la comisión de terceros bajo la de plataforma.
+    const orden = rows.map(r => r.label)
+    expect(orden.indexOf('Cargos por servicio (incluidos en ventas brutas)')).toBe(orden.indexOf('Ventas brutas') + 1)
+    expect(orden.indexOf('Comisiones de terceros (Rappi, Uber Eats, tipos de pago)')).toBe(orden.indexOf('Comisiones de plataforma') + 1)
+  })
+
+  it('en cero o nulos (vista de movimientos, servidor viejo) no salen', () => {
+    const { rows } = svc.flattenSalesSummaryForExport(
+      { ...report, summary: { ...report.summary, serviceCosts: null, unpaidSales: null, unpaidOrders: null, tenderCommissions: 0 } },
+      ['totals'],
+    )
+    expect(rows.some(r => /Cargos por servicio|Sin cobrar|terceros/.test(r.label))).toBe(false)
+    expect(svc.flattenSalesSummaryForExport(report, ['totals']).rows.some(r => /Cargos|Sin cobrar|terceros/.test(r.label))).toBe(false)
+  })
 })
 
 describe('detailed rows where-clause + cap', () => {
@@ -215,10 +242,12 @@ describe('detailed rows where-clause + cap', () => {
       },
       1000,
     )
-    const where = filtrosDe(paymentFindMany.mock.calls[0][0].where)
+    // D9.1 (Codex r2 #6): con comercio, el filtro va en un AND con «no es efectivo del cajón» (D13.3: junto a la hora real).
+    const [where, , sinEfectivo] = paymentFindMany.mock.calls[0][0].where.AND
     expect(where.processedById).toEqual({ in: ['staff-1', 'staff-2'] })
     expect(where.shiftId).toBe('shift-9')
     expect(where.merchantAccountId).toBe('ma-7')
+    expect(sinEfectivo).toBe(NOT_DRAWER_CASH_WHERE)
   })
 
   it('omits staff/shift/merchant from the WHERE when not provided', async () => {
