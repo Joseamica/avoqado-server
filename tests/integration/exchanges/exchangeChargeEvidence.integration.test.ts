@@ -46,16 +46,10 @@ describe('exchange charge evidence', () => {
     const o = await s.newOrder()
     expect(await evidence(o.id)).toEqual({ kind: 'NOT_CHARGED', requestCount: 0, lastActivityAt: null })
   })
-  it.each(['SENT', 'CANCEL_REQUESTED', 'UNKNOWN'] as const)('%s stays unresolved (en vuelo o en sus 10 s de «sin respuesta»)', async status => {
+  it.each(['SENT', 'CANCEL_REQUESTED', 'UNKNOWN', 'TIMED_OUT'] as const)('%s stays unresolved, including AUTO_RELEASED', async status => {
     const o = await s.newOrder()
     const r = await s.seedRequest(o.id, { terminalId: o.id, status, failureCode: 'AUTO_RELEASED' })
     expect(await evidence(o.id)).toMatchObject({ kind: 'UNRESOLVED', requestId: r.requestId, positiveRequestId: null })
-  })
-  // Cobro simple · S1: una TIMED_OUT soltada ya no cerca la venta (el vigía la cierra «no cobrada» con la regla de los 10 s).
-  it('TIMED_OUT/AUTO_RELEASED ya no queda en duda: no hay dinero ni cobro en vuelo', async () => {
-    const o = await s.newOrder()
-    await s.seedRequest(o.id, { terminalId: o.id, status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
-    expect(await evidence(o.id)).toMatchObject({ kind: 'NOT_CHARGED', requestCount: 1 })
   })
   it.each([
     { status: 'FAILED' as const, failureCode: 'TPV_CONFIRMED_NO_CHARGE', resultJson: { outcomeEvidence: 'PROCESSOR_DECLINED' } },
