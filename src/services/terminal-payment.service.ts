@@ -2628,11 +2628,13 @@ class TerminalPaymentService {
    * que una persona declarara (un caso duró 5.6 días). El sobre se FUNDE: una afirmación de cobro ya guardada se conserva.
    */
   private async failUndelivered(requestId: string, venueId: string, failureCode: string, terminalId?: string): Promise<void> {
-    await this.entrarSinRespuestaYProgramar(requestId, venueId, 'ACK_TIMEOUT', {
+    const entro = await this.entrarSinRespuestaYProgramar(requestId, venueId, 'ACK_TIMEOUT', {
       terminalId,
       failureCode,
       sobre: { errorMessage: 'El cobro no llegó a la terminal. Confirmando…', origin: 'SERVER' },
     })
+    // Codex S1 r2 (R2-4): no entró porque otro camino ya la movió; si ya es final, el POS que espera recibe ese final ahora.
+    if (!entro) await this.resolverEsperaDelPos(requestId, venueId)
   }
 
   /**
@@ -7333,8 +7335,8 @@ class TerminalPaymentService {
   /**
    * S5: recuperación del long-poll desde la FILA. Un POS que sigue esperando en memoria mientras la solicitud ya quedó
    * COMPLETED con Payment (el webhook confirmó desde otra instancia, o el aviso —socket o webhook— se perdió) recibe
-   * el resultado durable en vez de un 504 a los 5 min. Sólo despierta con dinero acreditado (`CHARGED`); un desenlace
-   * negativo o incierto sigue su camino de siempre (nunca se inventa). La llama el vigía cada tick, en un solo lote.
+   * el resultado durable en vez de un 504 a los 5 min. Despierta con cualquier desenlace FINAL (Codex S1 r2, R2-4: también el
+   * «no cobrado» que escribió otro camino); el incierto sigue esperando (nunca se inventa). La llama el vigía cada tick, por lotes.
    */
   async resolvePendingFromDurableState(): Promise<{ resolved: number; checked: number }> {
     const esperando = [...this.pendingPayments.values()]
@@ -7355,11 +7357,7 @@ class TerminalPaymentService {
       const lote = esperando.slice(i, i + LOTE)
       rows.push(
         ...(await prisma.terminalPaymentRequest.findMany({
-          where: {
-            requestId: { in: lote.map(p => p.requestId) },
-            status: TerminalPaymentRequestStatus.COMPLETED,
-            paymentId: { not: null },
-          },
+          where: { requestId: { in: lote.map(p => p.requestId) } },
           take: lote.length,
           select: seleccion,
         })),
@@ -7369,7 +7367,7 @@ class TerminalPaymentService {
     for (const row of rows) {
       const pending = this.pendingPayments.get(row.requestId)
       if (!pending || pending.venueId !== row.venueId) continue
-      if (desenlaceCanonico(row).outcome !== 'CHARGED') continue
+      if (desenlaceCanonico(row).outcome === 'UNRESOLVED') continue
       clearTimeout(pending.timeout)
       this.pendingPayments.delete(row.requestId)
       pending.resolve(resultFromRow(row))
@@ -7383,14 +7381,14 @@ class TerminalPaymentService {
     return { resolved, checked: esperando.length }
   }
 
-  /** La fila al vencer el long-poll: el resultado durable si ya hay dinero acreditado, o `null` (incierto, como siempre). */
+  /** La fila al vencer el long-poll: el resultado durable si ya tiene desenlace FINAL (R2-4), o `null` (incierto, como siempre). */
   private async desenlaceDurableAlVencer(requestId: string, venueId: string): Promise<TerminalPaymentResult | null> {
     try {
       const row = await prisma.terminalPaymentRequest.findFirst({
         where: { requestId, venueId },
         select: { requestId: true, status: true, paymentId: true, resultJson: true, failureCode: true, cancelDisposition: true },
       })
-      if (!row || desenlaceCanonico(row).outcome !== 'CHARGED') return null
+      if (!row || desenlaceCanonico(row).outcome === 'UNRESOLVED') return null
       return resultFromRow(row)
     } catch (error) {
       logger.error('❌ [TerminalPayment] Could not read durable state at long-poll timeout', { requestId, error: String(error) })

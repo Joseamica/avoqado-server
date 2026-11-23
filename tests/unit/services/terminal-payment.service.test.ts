@@ -2523,6 +2523,67 @@ describe('Codex R1 (P2) · resolvePendingFromDurableState consulta por LOTES aco
   })
 })
 
+describe('Codex S1 r2 (R2-4) · el POS que sigue esperando recibe el desenlace FINAL, no el 504', () => {
+  const cerradaNoCobrada = {
+    requestId: 'REQ-NC',
+    venueId: 'venue-nc',
+    status: TerminalPaymentRequestStatus.FAILED,
+    paymentId: null,
+    failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+    cancelDisposition: null,
+    resultJson: { requestId: 'REQ-NC', status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW', noChargeCause: 'ACK_TIMEOUT' },
+  }
+  const svc = () => terminalPaymentService as any
+  function esperaDelPos() {
+    const resolve = jest.fn()
+    const timeout = setTimeout(() => undefined, 60_000)
+    svc().pendingPayments.set('REQ-NC', { resolve, reject: jest.fn(), timeout, requestId: 'REQ-NC', terminalId: 't', venueId: 'venue-nc' })
+    return { resolve, timeout }
+  }
+  afterEach(() => {
+    const p = svc().pendingPayments.get('REQ-NC')
+    if (p) clearTimeout(p.timeout)
+    svc().pendingPayments.delete('REQ-NC')
+  })
+
+  it('fila cerrada «no cobrada» con el POS aún esperando: el rescate del vigía le contesta `failed` (422), no espera al 504', async () => {
+    const { resolve } = esperaDelPos()
+    const findMany = tpr().findMany as jest.Mock
+    findMany.mockReset().mockResolvedValue([cerradaNoCobrada])
+    const r = await terminalPaymentService.resolvePendingFromDurableState()
+    expect(r).toEqual({ resolved: 1, checked: 1 })
+    expect(findMany.mock.calls[0][0].where).not.toHaveProperty('status')
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'REQ-NC', status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW' }))
+    expect(svc().pendingPayments.has('REQ-NC')).toBe(false)
+  })
+
+  it('…y una fila todavía sin desenlace (UNKNOWN en sus 10 s) no se contesta', async () => {
+    const { resolve } = esperaDelPos()
+    ;(tpr().findMany as jest.Mock).mockReset().mockResolvedValue([
+      { ...cerradaNoCobrada, status: TerminalPaymentRequestStatus.UNKNOWN, failureCode: null, resultJson: { status: 'timeout' } },
+    ])
+    expect(await terminalPaymentService.resolvePendingFromDurableState()).toEqual({ resolved: 0, checked: 1 })
+    expect(resolve).not.toHaveBeenCalled()
+  })
+
+  it('al vencer el long-poll con la fila ya final negativa contesta ese final', async () => {
+    ;(tpr().findFirst as jest.Mock).mockReset().mockResolvedValue(cerradaNoCobrada)
+    expect(await svc().desenlaceDurableAlVencer('REQ-NC', 'venue-nc')).toMatchObject({ requestId: 'REQ-NC', status: 'failed' })
+  })
+
+  it('entrega fallida que ya no puede entrar a «sin respuesta» (otro la cerró): despierta al POS con la fila', async () => {
+    const entrar = jest.spyOn(svc(), 'entrarSinRespuestaYProgramar').mockResolvedValue(false)
+    const despertar = jest.spyOn(svc(), 'resolverEsperaDelPos').mockResolvedValue(true)
+    try {
+      await svc().failUndelivered('REQ-NC', 'venue-nc', 'SOCKET_NOT_FOUND', 't')
+      expect(despertar).toHaveBeenCalledWith('REQ-NC', 'venue-nc')
+    } finally {
+      entrar.mockRestore()
+      despertar.mockRestore()
+    }
+  })
+})
+
 describe('desenlaceCanonico — ventana de confirmación', () => {
   it('FAILED/NO_EVIDENCE_AFTER_WINDOW acredita «no se cobró» con clase SERVER (la ventana venció sin webhook, historial ni cajero)', () => {
     expect(desenlaceCanonico({ status: TerminalPaymentRequestStatus.FAILED, failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })).toEqual({
