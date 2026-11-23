@@ -133,13 +133,8 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
     // non-entitled venues (additive endpoint — no 403; the UI shows the upsell).
     // SUPERADMIN bypasses, mirroring the platform-wide guard rule.
     const wantsReconciliation = includeMerchantBreakdown === 'true' || includeSettlementProjection === 'true'
-    // Carril G · D4: «Ventas por canal» es otro desglose avanzado (Pro): el mismo candado, y la respuesta dice que se quedó fuera.
-    const wantsChannels = includeChannelBreakdown === 'true'
-    const advancedAllowed =
-      wantsReconciliation || wantsChannels
-        ? (await esSuperadminDeLaSesion(req.authContext)) || (await venueHasFeatureAccess(venueId, 'ADVANCED_REPORTS'))
-        : false
-    const reconciliationAllowed = wantsReconciliation && advancedAllowed
+    const reconciliationAllowed =
+      wantsReconciliation && ((await esSuperadminDeLaSesion(req.authContext)) || (await venueHasFeatureAccess(venueId, 'ADVANCED_REPORTS')))
 
     const filters: SalesSummaryFilters = {
       startDate,
@@ -152,8 +147,9 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       cardType: typeof cardType === 'string' ? (cardType as CardTypeFilter) : undefined,
       includeMerchantBreakdown: includeMerchantBreakdown === 'true' && reconciliationAllowed,
       includeSettlementProjection: includeSettlementProjection === 'true' && reconciliationAllowed,
-      includeChannelBreakdown: wantsChannels && advancedAllowed,
-      // D5: renglones de la cabecera (no son un desglose), como las tarjetas de regalo cargadas: sin candado.
+      // Carril G · D4 y D5: «Ventas por canal», «Por tipo de pedido» y los anticipos van en TODOS los planes, sin candado (decisión
+      // del founder del 22-nov, como el agrupar por origen o canal de Square y el channel-mix del Inicio).
+      includeChannelBreakdown: includeChannelBreakdown === 'true',
       includePrepaid: includePrepaid === 'true',
     }
 
@@ -161,8 +157,7 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
 
     res.json({
       success: true,
-      // Apagado se ve y se explica: el candado de «Ventas por canal» no depende de que la pantalla haya leído bien el plan.
-      data: wantsChannels && !advancedAllowed ? { ...report, channelBreakdownLocked: true as const } : report,
+      data: report,
     })
   } catch (error) {
     logger.error('Sales summary report error:', error)

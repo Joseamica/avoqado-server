@@ -6,10 +6,8 @@ category: reportes
 task: ver-ventas-por-canal
 requiredPermissions:
   - reports:read
-featureCode: ADVANCED_REPORTS
-gateKind: FEATURE
 sourceRepo: avoqado-web-dashboard
-sourceRef: 621e5b1e66204e026df61416f7d93df2e7415540
+sourceRef: 13cdb840a0057ebe1c353debb22a1ddcd96d8632
 keywords:
   - cuánto vendí por rappi
   - cuánto vendí en línea
@@ -25,7 +23,7 @@ keywords:
 
 ## Antes de empezar
 
-Necesitas permiso para ver reportes. *Ventas por canal* es del plan Pro: con el plan Gratis ves la sección con candado. Sólo sale sin filtros: con un *Comercio* elegido o un método en *Filtrar por*, el reporte cuenta cobros y no cuentas.
+Necesitas permiso para ver reportes. *Ventas por canal* viene en todos los planes; con el plan Gratis el reporte enseña sólo el día de hoy. Sólo sale sin filtros: con un *Comercio* elegido o un método en *Filtrar por*, el reporte cuenta cobros y no cuentas.
 
 ## Pasos
 

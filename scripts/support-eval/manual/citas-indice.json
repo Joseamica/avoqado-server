@@ -6455,12 +6455,6 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       }
     ],
-    "avoqado-web-dashboard:avoqado-server/src/controllers/dashboard/sales-summary.dashboard.controller.ts": [
-      {
-        "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "621e5b1e66204e026df61416f7d93df2e7415540"
-      }
-    ],
     "avoqado-web-dashboard:avoqado-server/src/controllers/dashboard/shift.dashboard.controller.ts": [
       {
         "pagina": "dashboard/turnos/editar-o-eliminar-turno",
@@ -6732,7 +6726,7 @@
       },
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "621e5b1e66204e026df61416f7d93df2e7415540"
+        "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/routes/dashboard/reservation.routes.ts": [
@@ -6892,7 +6886,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/salesSummaryCanales.ts": [
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "621e5b1e66204e026df61416f7d93df2e7415540"
+        "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/salesSummaryPoblacion.ts": [
@@ -7274,7 +7268,7 @@
       },
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "621e5b1e66204e026df61416f7d93df2e7415540"
+        "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632"
       },
       {
         "pagina": "dashboard/reservaciones/agregar-a-lista-de-espera",
@@ -7680,7 +7674,7 @@
       },
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "621e5b1e66204e026df61416f7d93df2e7415540"
+        "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632"
       }
     ],
     "avoqado-web-dashboard:src/locales/es/reservations.json": [
@@ -7862,7 +7856,7 @@
       },
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "621e5b1e66204e026df61416f7d93df2e7415540"
+        "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632"
       },
       {
         "pagina": "dashboard/reservaciones/agregar-a-lista-de-espera",
@@ -8378,13 +8372,13 @@
       },
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "621e5b1e66204e026df61416f7d93df2e7415540"
+        "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632"
       }
     ],
     "avoqado-web-dashboard:src/pages/Reports/components/SalesByChannelSection.tsx": [
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
-        "sourceRef": "621e5b1e66204e026df61416f7d93df2e7415540"
+        "sourceRef": "13cdb840a0057ebe1c353debb22a1ddcd96d8632"
       }
     ],
     "avoqado-web-dashboard:src/pages/Reservations/CreateReservation.tsx": [

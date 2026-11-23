@@ -1,6 +1,7 @@
 /**
- * Carril G (hz:fefa11b6:D4, D5): `sales_by_channel` — mismo permiso y mismo candado que la pantalla del Resumen de ventas, nombres
- * llanos en cada renglón, lo cobrado por adelantado aparte y el aviso del puente QR caído.
+ * Carril G (hz:fefa11b6:D4, D5): `sales_by_channel` — mismo permiso y mismo candado de rango que la pantalla del Resumen de ventas,
+ * en TODOS los planes (decisión del founder del 22-nov), nombres llanos en cada renglón, lo cobrado por adelantado aparte y el
+ * aviso del puente QR caído.
  */
 import { rangoDelNegocio, registerSalesByChannelTools } from '../../../src/mcp/tools/salesByChannel'
 import { TOOL_EFFECTS } from '../../../src/mcp/catalog'
@@ -59,13 +60,44 @@ it('es de lectura en el catálogo', () => {
   expect(TOOL_EFFECTS.sales_by_channel).toBe('read')
 })
 
-it('🔒 pide `reports:read` (el del Resumen de ventas, no `analytics:read`) y el candado ADVANCED_REPORTS', async () => {
-  mockPlanGate.mockResolvedValue('Las ventas por canal no está incluido en el plan actual de este local (requiere ADVANCED_REPORTS).')
-  const out = parse(await call({ venueId: 'v1' }))
+it('🔒 pide `reports:read` (el del Resumen de ventas, no `analytics:read`)', async () => {
+  mockGetSalesSummary.mockResolvedValue({ summary: { netSales: 10 }, byChannel: [], byOrderType: [] })
+  await call({ venueId: 'v1' })
   expect(mockRequirePermission).toHaveBeenCalledWith('reports:read', 'v1')
-  expect(mockPlanGate).toHaveBeenCalledWith('v1', 'ADVANCED_REPORTS', expect.any(String))
-  expect(out).toMatchObject({ ok: false, planRequired: true })
-  expect(mockGetSalesSummary).not.toHaveBeenCalled()
+})
+
+describe('🔴 todos los planes (decisión del founder del 22-nov): sin candado de plan, con el candado de rango del panel', () => {
+  it('un negocio en plan Gratis recibe byChannel y byOrderType de hoy', async () => {
+    mockRangoBloqueado.mockResolvedValue(false)
+    mockGetSalesSummary.mockResolvedValue({
+      summary: { netSales: 10 },
+      byChannel: [fila('COUNTER', 10)],
+      byOrderType: [fila('DINE_IN', 10)],
+    })
+    const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' })
+    const out = parse(await call({ venueId: 'v1', fromDate: hoy, toDate: hoy }))
+    expect(mockPlanGate).not.toHaveBeenCalled()
+    expect(out.byChannel).toEqual([expect.objectContaining({ key: 'COUNTER', label: 'Mostrador' })])
+    expect(out.byOrderType).toEqual([expect.objectContaining({ key: 'DINE_IN' })])
+  })
+
+  it('sin fechas, en un negocio Gratis se le da «hoy» en vez de rechazarlo', async () => {
+    mockRangoBloqueado.mockResolvedValueOnce(true).mockResolvedValue(false)
+    mockGetSalesSummary.mockResolvedValue({ summary: { netSales: 10 }, byChannel: [], byOrderType: [] })
+    const out = parse(await call({ venueId: 'v1' }))
+    const { startDate, endDate } = mockGetSalesSummary.mock.calls[0][1]
+    const dia = (iso: string) => new Date(iso).toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' })
+    expect(dia(startDate)).toBe(dia(endDate))
+    expect(dia(endDate)).toBe(new Date().toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' }))
+    expect(out.headline).toMatchObject({ netSales: 10 })
+  })
+
+  it('con fechas de histórico, un negocio Gratis recibe el mismo aviso de plan que el panel', async () => {
+    mockRangoBloqueado.mockResolvedValueOnce(true)
+    const out = parse(await call({ venueId: 'v1', fromDate: '2026-11-01', toDate: '2026-11-07' }))
+    expect(out).toMatchObject({ ok: false, planRequired: true })
+    expect(mockGetSalesSummary).not.toHaveBeenCalled()
+  })
 })
 
 it('pide el desglose y lo cobrado por adelantado, y devuelve cada renglón con su nombre llano', async () => {
@@ -146,21 +178,6 @@ it('🔴 los paquetes en otra moneda salen aparte y nunca se suman a los pesos (
   const out = parse(await call({ venueId: 'v1' }))
   expect(out.collectedInAdvanceNotSales.packagesSoldOnline).toEqual({ amount: 1200, count: 1, currency: 'MXN' })
   expect(out.collectedInAdvanceNotSales.packagesSoldOnlineOtherCurrencies).toEqual([{ currency: 'USD', amount: 100, count: 1 }])
-})
-
-it('🔴 Codex r4 #2 · el superadmin de la plataforma no pasa por el candado (igual que en el panel)', async () => {
-  const handlers2 = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
-  registerSalesByChannelTools(
-    { tool: (...a: unknown[]) => handlers2.set(a[0] as string, a[a.length - 1] as never) } as never,
-    { ...scope, isSuperAdmin: true } as McpScope,
-  )
-  mockPlanGate.mockResolvedValue('Las ventas por canal no está incluido en el plan actual de este local (requiere ADVANCED_REPORTS).')
-  mockGetSalesSummary.mockResolvedValue({ summary: { netSales: 10 }, byChannel: [], byOrderType: [] })
-  const out = parse(await handlers2.get('sales_by_channel')!({ venueId: 'v1' }, {}))
-  expect(mockPlanGate).not.toHaveBeenCalled()
-  expect(out.headline).toMatchObject({ netSales: 10 })
-  // Las demás comprobaciones siguen: la sucursal y `reports:read`.
-  expect(mockRequirePermission).toHaveBeenCalledWith('reports:read', 'v1')
 })
 
 it('🔴 Codex r5 #1 · el superadmin en un negocio Gratis recibe «hoy», pero el histórico tiene el mismo candado de rango que el panel', async () => {

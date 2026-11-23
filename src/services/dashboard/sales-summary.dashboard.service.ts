@@ -412,13 +412,11 @@ export interface SalesSummaryResponse {
   settlementCalendar?: SettlementCalendarDay[] // additive; present only when includeSettlementProjection=true
   giftCardBalanceBreakdown?: GiftCardBalanceBreakdown // aditivo (tarjetas de regalo); con groupBy=paymentMethod y sin filtro
   /**
-   * Carril G · D4 — aditivos; sólo con `includeChannelBreakdown` (Pro) y en la vista de ventas. La cabecera repartida por canal
+   * Carril G · D4 — aditivos; sólo con `includeChannelBreakdown` (todos los planes) y en la vista de ventas. La cabecera repartida por canal
    * (por dónde entró) y por tipo de pedido (cómo se entregó): cada tabla suma la cabecera al centavo.
    */
   byChannel?: SalesBreakdownRow<SalesChannel>[]
   byOrderType?: SalesBreakdownRow<SalesOrderType>[]
-  /** El controlador lo pone cuando se pidió el desglose por canal y el plan del negocio no lo incluye (la pantalla pinta el candado). */
-  channelBreakdownLocked?: true
   /**
    * Las tablas por canal se leyeron un instante después de la cabecera y alguna cifra ya no es la misma (entró una venta entre las
    * dos lecturas). Se dice en vez de esconderlo; se arregla al recargar. Lo cierra la foto única del reporte (D17 del carril B2).
@@ -497,7 +495,7 @@ export interface SalesSummaryFilters {
   includeSettlementProjection?: boolean // additive opt-in; adds settlementCalendar + per-merchant estimatedSettlement
   /** La B (C1): no corre el agregado de CommissionCalculation y `staffCommissions` sale 0. Sin la opción, el panel no cambia. */
   skipStaffCommissions?: boolean
-  /** Carril G · D4: `byChannel` y `byOrderType` (el controlador sólo la deja pasar con ADVANCED_REPORTS). */
+  /** Carril G · D4: `byChannel` y `byOrderType` (todos los planes, decisión del founder del 22-nov). */
   includeChannelBreakdown?: boolean
   /** Carril G · D5: paquetes vendidos en línea y depósitos de reservas en `summary` (renglones que no son venta). */
   includePrepaid?: boolean

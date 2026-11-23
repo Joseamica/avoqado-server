@@ -5,7 +5,6 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
-import { planGateMessage } from '../planGate'
 import { getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.service'
 import type { SalesBreakdownRow } from '@/services/dashboard/salesSummaryCanales'
 import { AVISO_PUENTE_QR_CAIDO } from '@/services/legacy/qrPayments.legacy.service'
@@ -64,13 +63,14 @@ export function rangoDelNegocio(
 
 /**
  * Carril G (hz:fefa11b6:D4 y D5): las ventas del Resumen de ventas repartidas por canal y por tipo de pedido, y lo cobrado por
- * adelantado que no es venta. Mismo permiso (`reports:read`) y mismo candado de plan (ADVANCED_REPORTS) que la pantalla.
+ * adelantado que no es venta. Mismo permiso (`reports:read`) y mismo candado de rango que la pantalla, en TODOS los planes (decisión
+ * del founder del 22-nov).
  */
 export function registerSalesByChannelTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   server.tool(
     'sales_by_channel',
-    'Sales of a venue you can access split by channel (where the sale came in: counter, tables, self-service kiosk, customer QR, online store, online payments, payment links, phone, recorded in the dashboard, Rappi, Uber Eats, DiDi Food, other delivery apps) and by order type (in the venue, takeout, delivery, pickup, direct record, amount-only charge), over a date range (venue-local days; default today and the 6 previous days, like the dashboard). Same numbers as the dashboard Sales Summary: each table adds up to its headline to the cent (gross sales, discounts, refunds, net sales, tips, Avoqado fees, third-party fees, net collected, transactions, refunds count; orders per row). Money in pesos. Also returns what was collected in advance and is NOT a sale (class packages bought online, in pesos and any other currency listed apart; reservation deposits net of refunds). Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
+    'Sales of a venue you can access split by channel (where the sale came in: counter, tables, self-service kiosk, customer QR, online store, online payments, payment links, phone, recorded in the dashboard, Rappi, Uber Eats, DiDi Food, other delivery apps) and by order type (in the venue, takeout, delivery, pickup, direct record, amount-only charge), over a date range (venue-local days; default today and the 6 previous days, like the dashboard; on a venue without the Pro plan only today, and the default becomes today). Same numbers as the dashboard Sales Summary: each table adds up to its headline to the cent (gross sales, discounts, refunds, net sales, tips, Avoqado fees, third-party fees, net collected, transactions, refunds count; orders per row). Money in pesos. Also returns what was collected in advance and is NOT a sale (class packages bought online, in pesos and any other currency listed apart; reservation deposits net of refunds). Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
     {
       venueId: z.string().describe('Venue to analyze (must be in your scope)'),
       fromDate: z.string().optional().describe('Start date YYYY-MM-DD, venue-local (default: 6 days before today, so 7 days with today)'),
@@ -79,18 +79,17 @@ export function registerSalesByChannelTools(server: McpServer, scope: McpScope) 
     async ({ venueId, fromDate, toDate }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('reports:read', venueId) // the same as the dashboard Sales Summary
-      // El superadmin de la plataforma no pasa por el candado, igual que en el panel (el controlador del reporte; Codex r4 #2).
-      const gate = scope.isSuperAdmin ? null : await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Las ventas por canal')
-      if (gate) return text({ ok: false, planRequired: true, error: gate })
 
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
       const tz = venue?.timezone || 'America/Mexico_City'
-      const window = rangoDelNegocio(tz, fromDate, toDate)
+      let window = rangoDelNegocio(tz, fromDate, toDate)
       if ('error' in window) return text({ ok: false, error: window.error })
-      // El superadmin pasa el candado del desglose, pero no el del rango, igual que en el panel (la ruta del reporte aplica el rango
-      // a todos antes del controlador): en un negocio Gratis sólo «hoy» (Codex r5 #1).
-      if (scope.isSuperAdmin && (await rangoBloqueadoPorPlan(venueId, window.startDate, window.endDate))) {
-        return text({ ok: false, planRequired: true, error: RESPUESTA_RANGO_FUERA_DEL_PLAN.message })
+      // El mismo candado de rango que el panel (la ruta del reporte lo aplica a todos, superadmin incluido): en un negocio Gratis
+      // sólo «hoy». Sin fechas se le da «hoy» en vez de rechazarlo; un histórico pedido a propósito recibe el aviso del panel.
+      if (await rangoBloqueadoPorPlan(venueId, window.startDate, window.endDate)) {
+        if (fromDate || toDate) return text({ ok: false, planRequired: true, error: RESPUESTA_RANGO_FUERA_DEL_PLAN.message })
+        const hoy = DateTime.now().setZone(tz).toFormat('yyyy-MM-dd')
+        window = rangoDelNegocio(tz, hoy, hoy) as { startDate: string; endDate: string }
       }
 
       const report = await getSalesSummary(venueId, {
