@@ -126,19 +126,15 @@ describe('S1.3 · contrato con las apps viejas', () => {
     expect(res.json.mock.calls[0][0]).toMatchObject({ inProgress: true, status: 'SENT' })
   })
 
-  it('Codex S1 r2 (R2-3) · dentro de los 10 s: SENT, inProgress y cancelDisposition null aunque la fila guarde un ACTIVE del cancel', async () => {
-    const ahora = new Date('2026-11-22T15:25:20Z')
-    const enDuda = proyectarEstado(
-      {
-        ...cerrada,
-        status: TerminalPaymentRequestStatus.UNKNOWN,
-        noResponseAt: new Date(ahora.getTime() - 4_000),
-        failureCode: 'ACK_TIMEOUT',
-        cancelDisposition: 'ACTIVE',
-        resultJson: { status: 'timeout', noChargeCause: 'ACK_TIMEOUT' },
-      },
-      ahora,
-    )
+  it('Codex S1 r2 (R2-3) · en «sin respuesta» sin decisión: SENT, inProgress y cancelDisposition null aunque la fila guarde un ACTIVE del cancel — también pasados los 10 s con el cierre diferido (R3-8, por estado y no por edad)', async () => {
+    const enDuda = proyectarEstado({
+      ...cerrada,
+      status: TerminalPaymentRequestStatus.UNKNOWN,
+      noResponseAt: new Date(Date.now() - 60_000),
+      failureCode: 'ACK_TIMEOUT',
+      cancelDisposition: 'ACTIVE',
+      resultJson: { status: 'timeout', noChargeCause: 'ACK_TIMEOUT' },
+    })
     expect(enDuda).toMatchObject({ status: 'SENT', cancelDisposition: null, outcome: 'UNRESOLVED' })
     mockStatus.mockResolvedValue(enDuda)
     const res = resFalso()
@@ -146,19 +142,20 @@ describe('S1.3 · contrato con las apps viejas', () => {
     expect(res.json.mock.calls[0][0]).toMatchObject({ inProgress: true, status: 'SENT', cancelDisposition: null })
   })
 
-  it('Codex S1 r2 (R2-3) · a los 11 s una UNKNOWN que sigue ahí («aprobado, por registrar») ya no se ve en vuelo: UNKNOWN, inProgress false', async () => {
-    const ahora = new Date('2026-11-22T15:25:20Z')
-    const porRegistrar = proyectarEstado(
-      {
-        ...cerrada,
-        status: TerminalPaymentRequestStatus.UNKNOWN,
-        noResponseAt: new Date(ahora.getTime() - 11_000),
-        failureCode: null,
-        cancelDisposition: null,
-        resultJson: { status: 'timeout', noChargeCause: 'NO_RESPONSE', claimedSuccess: { status: 'success' } },
+  it('Codex S1 r3 (R3-8) · cuando el cierre DECIDIÓ «aprobado, por registrar» (marca en la fila) ya no se ve en vuelo: UNKNOWN, inProgress false', async () => {
+    const porRegistrar = proyectarEstado({
+      ...cerrada,
+      status: TerminalPaymentRequestStatus.UNKNOWN,
+      noResponseAt: new Date(Date.now() - 11_000),
+      failureCode: null,
+      cancelDisposition: null,
+      resultJson: {
+        status: 'timeout',
+        noChargeCause: 'NO_RESPONSE',
+        claimedSuccess: { status: 'success' },
+        aprobadoPorRegistrarAt: new Date().toISOString(),
       },
-      ahora,
-    )
+    })
     expect(porRegistrar).toMatchObject({ status: 'UNKNOWN', outcome: 'UNRESOLVED' })
     mockStatus.mockResolvedValue(porRegistrar)
     const res = resFalso()

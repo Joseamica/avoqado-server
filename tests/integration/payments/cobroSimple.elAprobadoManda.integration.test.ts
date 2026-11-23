@@ -335,3 +335,43 @@ describe('R3-7 · el POS nunca recibe un desenlace viejo', () => {
     expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW' }))
   })
 })
+
+describe('R3-8 · la proyección para apps viejas va por ESTADO, no por edad', () => {
+  it('pasados los 10 s con el cierre diferido (NO_APLICA) la fila se sigue viendo EN VUELO; cuando el cierre decide «aprobado, por registrar», UNKNOWN', async () => {
+    const venta = await f.nuevaVenta(100)
+    const s = await f.solicitud({
+      orderId: venta.id,
+      status: 'UNKNOWN',
+      noResponseAt: new Date(Date.now() - 15_000),
+      acknowledgedAt: new Date(),
+      cancelDisposition: 'ACTIVE',
+    })
+    const a = await intento(s.requestId)
+    const diferido = jest.spyOn(terminalPaymentService, 'cerrarSinRespuesta').mockResolvedValueOnce('NO_APLICA')
+    try {
+      expect(await terminalPaymentService.getPaymentStatus(s.requestId, f.venueId)).toMatchObject({
+        status: 'SENT',
+        cancelDisposition: null,
+      })
+    } finally {
+      diferido.mockRestore()
+    }
+    await prisma.providerEventLog.create({
+      data: {
+        provider: 'PAYMENT_PROCESSOR',
+        type: 'send_transaction',
+        eventId: `angelpay-${f.nuevoEventId()}`,
+        venueId: f.venueId,
+        attemptId: a,
+        payload: f.eventoAngelPay(a),
+      } as any,
+    })
+    expect(await terminalPaymentService.getPaymentStatus(s.requestId, f.venueId)).toMatchObject({
+      status: 'UNKNOWN',
+      outcome: 'UNRESOLVED',
+    })
+    // La marca sobrevive a un escritor que funde el sobre.
+    await prisma.$executeRaw`UPDATE "TerminalPaymentRequest" SET "resultJson" = "resultJson" || '{"errorMessage":"otro"}'::jsonb WHERE "id" = ${s.id}`
+    expect(await terminalPaymentService.getPaymentStatus(s.requestId, f.venueId)).toMatchObject({ status: 'UNKNOWN' })
+  })
+})

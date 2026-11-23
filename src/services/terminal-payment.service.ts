@@ -961,27 +961,29 @@ export function proyectarCancelDisposition(guardada: string | null | undefined, 
  * 🔴 Una LÁPIDA (`FAILED` + `REJECTED_…`) NO se traduce: sale FAILED, que es justo lo que permite a esas apps
  * soltar su llave sabiendo que el cobro nunca se creó.
  */
-export function proyectarStatus(
-  row: FilaDeDesenlace,
-  desenlace: TerminalPaymentDesenlace,
-  ahora: Date = new Date(),
-): TerminalPaymentRequestStatus {
-  // 🔴 Cobro simple · S1 (Codex S1 r1 #8): en sus 10 s de «sin respuesta» la fila se proyecta EN VUELO. Las apps publicadas
-  // (ANDROID 2.22, iOS 1.13) dejan de consultar con `inProgress: false` y pintarían «cobro sin confirmar» justo cuando el SERVIDOR
-  // está por cerrarla; así siguen consultando y a los ≤ 10 s leen el «no cobrado» (o el cobro). Sólo DENTRO de los 10 s (Codex S1 r2,
-  // R2-3): una UNKNOWN que sigue ahí después («aprobado, por registrar») se proyecta UNKNOWN, como en develop.
-  if (enSusDiezSegundos(row, ahora)) return TerminalPaymentRequestStatus.SENT
+export function proyectarStatus(row: FilaDeDesenlace, desenlace: TerminalPaymentDesenlace): TerminalPaymentRequestStatus {
+  // 🔴 Cobro simple · S1 (Codex S1 r1 #8): mientras el cierre de «sin respuesta» no DECIDE, la fila se proyecta EN VUELO. Las apps
+  // publicadas (ANDROID 2.22, iOS 1.13) dejan de consultar con `inProgress: false` y pintarían «cobro sin confirmar» justo cuando
+  // el SERVIDOR está por cerrarla; así siguen consultando y leen el «no cobrado» (o el cobro). Codex S1 r3 (R3-8): por ESTADO, no
+  // por edad — un cierre diferido (candado ocupado, reinicio) no la saca de vuelo; sólo la decisión «aprobado, por registrar»,
+  // que queda marcada en la fila, la proyecta UNKNOWN como en develop.
+  if (enEsperaDelCierre(row)) return TerminalPaymentRequestStatus.SENT
   const traducible = row.status === TerminalPaymentRequestStatus.FAILED || row.status === TerminalPaymentRequestStatus.CANCELLED
   return traducible && desenlace.outcome === 'UNRESOLVED' ? TerminalPaymentRequestStatus.UNKNOWN : row.status
 }
 
-/** ¿La fila está DENTRO de sus 10 s de «sin respuesta»? (la proyección en vuelo de `proyectarStatus`). */
-function enSusDiezSegundos(row: FilaDeDesenlace, ahora: Date): boolean {
-  return (
-    row.status === TerminalPaymentRequestStatus.UNKNOWN &&
-    !!row.noResponseAt &&
-    ahora.getTime() < row.noResponseAt.getTime() + sinRespuestaMs()
-  )
+/**
+ * La marca DURABLE con la que `aprobadoPorRegistrar` deja escrito que el cierre ya decidió «aprobado, por registrar». Vive en el
+ * sobre (`resultJson`): los escritores que lo FUNDEN la conservan; si uno lo reemplaza con la fila aún UNKNOWN, la siguiente lectura
+ * vuelve a cerrar y la vuelve a escribir.
+ */
+const MARCA_APROBADO_POR_REGISTRAR = 'aprobadoPorRegistrarAt'
+
+/** ¿La fila está en «sin respuesta» y el cierre todavía no decidió? (la proyección en vuelo y la espera del long-poll). */
+function enEsperaDelCierre(row: FilaDeDesenlace): boolean {
+  if (row.status !== TerminalPaymentRequestStatus.UNKNOWN || !row.noResponseAt) return false
+  const sobre = row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson) ? (row.resultJson as Record<string, unknown>) : null
+  return typeof sobre?.[MARCA_APROBADO_POR_REGISTRAR] !== 'string'
 }
 
 /** La fila que hace falta para proyectar el estado completo hacia el cliente. */
@@ -1016,16 +1018,16 @@ function causaDelSobre(resultJson: Prisma.JsonValue | null | undefined): CausaSi
   return c === 'NO_RESPONSE' || c === 'ACK_TIMEOUT' || c === 'TERMINAL_GONE' ? c : null
 }
 
-export function proyectarEstado(row: FilaProyectable, ahora: Date = new Date()): TerminalPaymentStatus {
+export function proyectarEstado(row: FilaProyectable): TerminalPaymentStatus {
   const desenlace = desenlaceCanonico(row)
-  // R2-3: mientras se proyecta EN VUELO por sus 10 s, un ACTIVE guardado (del cancel automático) sale null: ANDROID 2.22 e iOS 1.13
-  // lo leen antes que el estado y cortarían la consulta con «el cobro sigue activo».
-  const enEspera = enSusDiezSegundos(row, ahora)
+  // R2-3: mientras se proyecta EN VUELO, un ACTIVE guardado (del cancel automático) sale null: ANDROID 2.22 e iOS 1.13 lo leen antes
+  // que el estado y cortarían la consulta con «el cobro sigue activo».
+  const enEspera = enEsperaDelCierre(row)
   return {
     requestId: row.requestId,
     venueId: row.venueId,
     terminalId: row.terminalId,
-    status: proyectarStatus(row, desenlace, ahora),
+    status: proyectarStatus(row, desenlace),
     amount: row.amountCents / 100,
     tip: row.tipCents / 100,
     orderId: row.orderId,
@@ -8722,6 +8724,12 @@ class TerminalPaymentService {
                "updatedAt" = (NOW() AT TIME ZONE 'UTC')
         WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL`
     }
+    // R3-8: la decisión queda escrita en la fila (sin mover `updatedAt`): desde aquí se proyecta UNKNOWN, como en develop.
+    await prisma.$executeRaw`
+      UPDATE "TerminalPaymentRequest"
+      SET "resultJson" = COALESCE("resultJson", '{}'::jsonb) || jsonb_build_object(${MARCA_APROBADO_POR_REGISTRAR}::text, ${new Date().toISOString()}::text)
+      WHERE "id" = ${row.id} AND "status" = 'UNKNOWN' AND "paymentId" IS NULL
+        AND jsonb_typeof(COALESCE("resultJson", '{}'::jsonb) -> ${MARCA_APROBADO_POR_REGISTRAR}::text) IS DISTINCT FROM 'string'`
     const desde = row.noResponseAt ?? row.updatedAt
     if (desde.getTime() + APROBADO_SIN_REGISTRO_MS <= ahora.getTime() && (await this.debeAuditar('TERMINAL_PAYMENT_APPROVED_NOT_RECORDED', row.id))) {
       const datos = { requestId: row.requestId, terminalId: row.terminalId, orderId: row.orderId, amountCents: row.amountCents, motivo }
@@ -8776,10 +8784,13 @@ class TerminalPaymentService {
     return f ? { eventLogId: f.id, attemptId: f.attemptId, descripcion: f.descripcion } : null
   }
 
-  /** ¿La fila está en sus 10 s de «sin respuesta»? Lo que decide si el POS sigue esperando en el long-poll. */
+  /** ¿La fila está en «sin respuesta» sin decisión todavía (R3-8)? Lo que decide si el POS sigue esperando en el long-poll. */
   private async enEsperaSinRespuesta(requestId: string, venueId: string): Promise<boolean> {
-    const row = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId }, select: { status: true, noResponseAt: true } })
-    return row?.status === TerminalPaymentRequestStatus.UNKNOWN && row.noResponseAt !== null
+    const row = await prisma.terminalPaymentRequest.findFirst({
+      where: { requestId, venueId },
+      select: { status: true, noResponseAt: true, resultJson: true },
+    })
+    return !!row && enEsperaDelCierre(row)
   }
 
   /**
@@ -8790,7 +8801,8 @@ class TerminalPaymentService {
     if (row.status !== TerminalPaymentRequestStatus.UNKNOWN || !row.noResponseAt) return false
     if (row.noResponseAt.getTime() + sinRespuestaMs() > Date.now()) return false
     const r = await this.cerrarSinRespuesta(row.requestId, row.venueId).catch(() => 'NO_APLICA' as const)
-    return r === 'COMPLETED' || r === 'BANK_DECLINED' || r === 'NO_COBRADO'
+    // R3-8: también «aprobado, por registrar»: dejó su marca en la fila y el llamador tiene que releerla.
+    return r !== 'NO_APLICA'
   }
 
   /**
