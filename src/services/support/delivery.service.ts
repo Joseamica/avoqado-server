@@ -251,6 +251,22 @@ export async function deliverSupportMessage(
         await replaceWithPublicNotice(claim)
         return 'CANCELLED'
       }
+      // Public help switched off: an answer it prepared with the model (its call was reserved as public) no longer goes out.
+      if (
+        !isSupportPublicHelpEnabled() &&
+        isSupportFreeTextEnabled() &&
+        (await prisma.supportAttempt.findFirst({
+          where: {
+            messageId: message.id,
+            kind: 'AI',
+            usage: { path: ['reservation', 'publicDayKey'], string_starts_with: 'AI:PUBLIC_DAY:' },
+          },
+          select: { id: true },
+        }))
+      ) {
+        await completeClaim(claim, { status: 'CANCELLED', answerCipher: null })
+        return 'CANCELLED'
+      }
       if (hybrid) current.push(...hybrid.guides)
       else
         for (const sectionId of message.sourceIds.slice(0, 3)) {

@@ -60,20 +60,47 @@ export async function isPublicPaused(db: Prisma.TransactionClient, receiverId: s
 }
 
 /**
- * Capa 1, en el router y bajo el candado del teléfono: suma este mensaje a la hora y al día; la ventana que se pasó, o null. Como
- * el tope por minuto, también cuenta lo que se pasa.
+ * Capa 1, en el router y bajo el candado del teléfono: la ventana que ya se llenó (la del día primero), o null y este mensaje
+ * cuenta en las dos. Lo que se rechaza no cuenta: el día sólo suma lo que sí se contestó.
  */
 export async function countPublicMessage(db: Prisma.TransactionClient, receiverId: string, phone: string, now: Date) {
-  let over: 'DAY' | 'HOUR' | null = null
-  for (const cap of publicPhoneCaps(receiverId, phone, now)) {
-    const row = await db.supportBudget.upsert({
+  const caps = publicPhoneCaps(receiverId, phone, now)
+  const rows = await db.supportBudget.findMany({ where: { key: { in: caps.map(c => c.key) } }, select: { key: true, callCount: true } })
+  const full = caps.find(cap => (rows.find(r => r.key === cap.key)?.callCount ?? 0) >= cap.maximum)
+  if (full) return full.window
+  for (const cap of caps)
+    await db.supportBudget.upsert({
       where: { key: cap.key },
       create: { key: cap.key, windowStart: cap.start, callCount: 1 },
       update: { callCount: { increment: 1 } },
     })
-    if (row.callCount > cap.maximum) over ??= cap.window
-  }
-  return over
+  return null
+}
+
+/**
+ * La plática que la ayuda pública abrió o ya usó. Una que no la trae se usó mientras el número era de una cuenta (sus respuestas
+ * pueden citar el manual interno): el router la cierra antes de seguir en público. Una respuesta a un registrado la borra.
+ */
+const conversationKey = (receiverId: string, phone: string, conversationId: string) =>
+  control(receiverId, phone, `PUBLIC_CONV:${conversationId}`)
+export async function isPublicConversation(db: Prisma.TransactionClient, receiverId: string, phone: string, conversationId: string) {
+  return !!(await db.supportBudget.findUnique({
+    where: { key: conversationKey(receiverId, phone, conversationId) },
+    select: { key: true },
+  }))
+}
+export async function markPublicConversation(
+  db: Prisma.TransactionClient,
+  receiverId: string,
+  phone: string,
+  conversationId: string,
+  now: Date,
+) {
+  const key = conversationKey(receiverId, phone, conversationId)
+  await db.supportBudget.upsert({ where: { key }, create: { key, windowStart: now }, update: {} })
+}
+export async function forgetPublicConversation(db: Prisma.TransactionClient, receiverId: string, phone: string, conversationId: string) {
+  await db.supportBudget.deleteMany({ where: { key: conversationKey(receiverId, phone, conversationId) } })
 }
 /** true sólo la primera vez en esa ventana: el aviso del tope sale una vez y luego hay silencio. */
 export async function takePublicLimitNotice(

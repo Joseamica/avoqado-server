@@ -271,7 +271,15 @@ export async function recordShownSupportAnswer(
 }
 
 export async function replaceWithPublicNotice(claim: SupportClaim, now = new Date()): Promise<void> {
+  // The phone lock first, as the router (phone, conversation, then its messages): AYUDA or SALIR at the same time never waits on
+  // this message while this waits on its conversation.
+  const owner = await prisma.supportConversation.findUnique({
+    where: { id: claim.conversationId },
+    select: { receiverId: true, phone: true },
+  })
   await prisma.$transaction(async tx => {
+    if (owner)
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`support-phone:${owner.receiverId}:${owner.phone}`}, 0))`
     const message = await readCurrentClaim(tx, claim, now)
     if (!message) return
     const conversation = await resetSupportConversation(tx, message.conversation)
@@ -394,11 +402,13 @@ export async function prepareSupportAnswer(
     if (stop) return stop
     publicHelp = true
   }
-  // Public help never shows a page of the internal manual, not even one a registered person of this phone got before.
-  let internal: Set<string> | undefined
+  // Public help never shows a page of the internal manual, not even one a registered person of this phone got in this same
+  // conversation before (a message prepared in public right after losing the registration). Anything that is not a public
+  // guide today counts as internal: a retired page included.
+  let publicIds: Set<string> | undefined
   const citesInternal = (sourceIds: string[]) => {
-    internal ??= new Set(library().flatMap(g => (g.internal ? [g.id] : [])))
-    return guideIdsOf(sourceIds).some(id => internal!.has(id))
+    publicIds ??= new Set(library().flatMap(g => (g.internal ? [] : [g.id])))
+    return guideIdsOf(sourceIds).some(id => !publicIds!.has(id))
   }
   // A model call that could not start: the message may have expired, lost its registration or its personal context.
   // null = the message is still current (a hybrid call 2 or 3 then answers with the literal guide).
@@ -854,7 +864,9 @@ async function prepareHybridAnswer(job: {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`support-phone:${conversation.receiverId}:${conversation.phone}`}, 0))`
           const current = await readCurrentClaim(tx, claim, clock())
           if (!current) throw new ClaimLost()
-          const days = await addPublicStrike(tx, conversation.receiverId, conversation.phone, clock())
+          // Registered meanwhile: no strike (and nothing it queued as registered is cancelled).
+          const registered = (await resolveRegisteredSupportPhone(conversation.phone, tx)).registered
+          const days = registered ? 0 : await addPublicStrike(tx, conversation.receiverId, conversation.phone, clock())
           if (days)
             await tx.supportMessage.updateMany({
               where: {
@@ -1006,8 +1018,11 @@ async function prepareHybridAnswer(job: {
       // o un «no sé» (que también es una salida inválida del modelo) no cuentan ni la borran.
       if (understood.kind === 'nonsense' || understood.kind === 'off_topic')
         return await strike(hybridFixedReply(understood, false, [])!.text)
+      // Only while the message is still current: a late result after AYUDA or APP never touches the count of what came after.
       if (understood.kind !== 'greeting' && understood.kind !== 'unknown')
-        await clearPublicStrikes(prisma, conversation.receiverId, conversation.phone)
+        await prisma.$transaction(async tx => {
+          if (await readCurrentClaim(tx, claim, clock())) await clearPublicStrikes(tx, conversation.receiverId, conversation.phone)
+        })
     }
     if (understood.kind === 'human') {
       if (handoff) return await finishHandoff('REQUESTED', handoff)

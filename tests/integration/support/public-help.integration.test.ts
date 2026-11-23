@@ -14,7 +14,8 @@ import { type SupportDraft } from '@/services/support/hybrid.service'
 import { tryRouteSupport } from '@/services/support/router.service'
 import { deliverSupportMessage } from '@/services/support/delivery.service'
 import { runSupportNotices } from '@/services/support/notices.service'
-import { publicDayKey, publicPhoneCaps } from '@/services/support/publicHelp.service'
+import { mexicoDay as publicDayStart, publicDayKey, publicPhoneCaps } from '@/services/support/publicHelp.service'
+import { finishAiAttempt, reserveAiAttempt, startAiAttempt } from '@/services/support/budget.service'
 import { aiInput } from '@tests/__helpers__/supportAiInput'
 import {
   SUPPORT_ASK_APP,
@@ -34,6 +35,8 @@ const receiverId = `support-public-${Date.now()}`,
   unknown = '+525500009401',
   member = '+525500009402'
 const sha = (s: string) => crypto.createHash('sha256').update(s).digest('hex')
+const cdmxDay = (at: Date) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Mexico_City' }).format(at)
+const yesterday = cdmxDay(new Date(Date.now() - 86_400_000))
 const guide = (id: string, title: string, body: string, extra: Partial<LibraryGuide> = {}): LibraryGuide => ({
   id,
   app: 'dashboard',
@@ -85,10 +88,11 @@ const input = (body: string, from = unknown, extra = {}) => ({
   ...extra,
 })
 type Reply = object | Error
-function provider(replies: Reply[]) {
+function provider(replies: Reply[], onCall?: (n: number) => Promise<void>) {
   const bodies: Record<string, any>[] = []
   const fetcher = jest.fn(async (_url: unknown, init?: { body?: unknown }) => {
     bodies.push(JSON.parse(String(init?.body)))
+    await onCall?.(bodies.length)
     const reply = replies[bodies.length - 1]
     if (!reply) throw new TypeError('fixture: no reply configured for this call')
     if (reply instanceof Error) throw reply
@@ -121,6 +125,9 @@ async function clean() {
   await prisma.supportBudget.deleteMany({
     where: { OR: [{ key: { startsWith: 'AI:' } }, { key: { startsWith: `CONTROL:${receiverId}:` } }] },
   })
+  await prisma.supportNotice.deleteMany({
+    where: { OR: [{ dedupeKey: { startsWith: `held:${receiverId}:` } }, { dedupeKey: `daily:${yesterday}` }] },
+  })
 }
 const reply = (event: { wamid: string }) => prisma.supportMessage.findFirstOrThrow({ where: { inboundEvent: { wamid: event.wamid } } })
 const open = (from = unknown) => prisma.supportConversation.findFirst({ where: { receiverId, phone: from, mode: { not: 'CLOSED' } } })
@@ -136,8 +143,8 @@ async function send(body: string, from = unknown) {
   return { routed, event }
 }
 /** The worker takes the next message with the fake provider and the fixture library. */
-async function work(replies: Reply[]) {
-  const p = provider(replies)
+async function work(replies: Reply[], onCall?: (n: number) => Promise<void>) {
+  const p = provider(replies, onCall)
   const claim = await claimNext(new Date(Date.now() + 10), receiverId)
   if (!claim) return { p, result: null, message: null }
   const result = await prepareSupportAnswer(claim, { client: p.client, library })
@@ -281,14 +288,19 @@ describe('capa 1: 10 respuestas por hora y 20 al día por número', () => {
   it.each([
     ['DAY', SUPPORT_PUBLIC_DAY_LIMIT],
     ['HOUR', SUPPORT_PUBLIC_HOUR_LIMIT],
-  ] as const)('over the %s cap: its notice once, then silence («persona» included)', async (window, text) => {
+  ] as const)('over the %s cap: its notice once, then silence («persona» included); what it queued still goes', async (window, text) => {
     await ready()
+    const queued = await send('¿Cómo cambio de sucursal?')
     await seed(window)
-    const over = await send('¿Cómo cambio de sucursal?')
+    const before = await counts()
+    const over = await send('¿Y en la terminal?')
     expect(await reply(over.event)).toMatchObject({ answer: text, status: 'ANSWER_READY' })
-    await deliver()
     expect((await send('¿y ahora?')).routed).toBe('IGNORED')
     expect((await send('persona')).routed).toBe('IGNORED')
+    // In the same conversation, behind what it already queued (never cancelled); the refused ones are not counted.
+    expect(await reply(queued.event)).toMatchObject({ status: 'QUEUED' })
+    expect((await reply(over.event)).conversationId).toBe((await reply(queued.event)).conversationId)
+    expect(await counts()).toEqual(before)
   })
   it('every message it answers counts once, also the ones the router answers; SALIR does not; the AI caps of today are not used', async () => {
     expect(caps().map(c => [c.window, c.maximum])).toEqual([
@@ -365,12 +377,19 @@ describe('capa 2: tres mensajes sin sentido o fuera de tema seguidos', () => {
 })
 
 describe('capa 3: US$1 al día de IA entre todos los no registrados', () => {
-  it('spent: the unknown phone gets the fixed message once a day; a registered phone is not affected', async () => {
+  it('spent: a question gets the fixed message once a day, then silence; the conversation, the notice and «persona» go on', async () => {
     await ready()
     process.env.SUPPORT_PUBLIC_HELP_DAILY_USD = '0'
-    const spent = await send('¿Cómo cambio de sucursal?')
-    expect(await reply(spent.event)).toMatchObject({ answer: SUPPORT_UNREGISTERED })
-    expect((await send('¿Y ahora?')).routed).toBe('IGNORED')
+    expect((await send('¿Cómo cambio de sucursal?')).routed).toBe('QUEUED')
+    const first = await work([question])
+    expect(first.message).toMatchObject({ answer: SUPPORT_UNREGISTERED })
+    expect(first.p.fetcher).not.toHaveBeenCalled()
+    await send('¿Y en la terminal?')
+    expect((await work([question])).message).toMatchObject({ status: 'CANCELLED' })
+    // The same conversation, with its notice accepted: «persona» still reaches the team.
+    expect(await open()).toMatchObject({ noticeAcceptedAt: expect.any(Date) })
+    const asked = await send('persona')
+    expect(await reply(asked.event)).toMatchObject({ outcome: 'HANDOFF' })
     const registered = await send('hola', member)
     expect(await reply(registered.event)).toMatchObject({ answer: SUPPORT_NOTICE_FREE_TEXT })
   })
@@ -383,8 +402,31 @@ describe('capa 3: US$1 al día de IA entre todos los no registrados', () => {
     expect(calls).toHaveLength(3)
     expect(day.spentUsd.toString()).toBe(calls.reduce((sum, a) => sum.plus(a.actualUsd!), new Prisma.Decimal(0)).toString())
     expect(day.spentUsd.gt(0)).toBe(true)
-    // Every call settled: nothing stays held.
+    // Every call settled: nothing stays held; the month held only the public hold of each call, never the full reserve.
     expect(day.heldUsd.toString()).toBe('0')
+    expect(calls.map(c => c.reservedUsd.toString())).toEqual(['0.0685', '0.0685', '0.0685'])
+  })
+  it('an uncertain public call keeps its hold on the day it started, also when it was reserved the day before', async () => {
+    await ready()
+    await send('¿Cómo cambio de sucursal?')
+    const claim = (await claimNext(new Date(Date.now() + 10), receiverId))!
+    const config = getSupportAiConfig()!
+    // Reserved before midnight of yesterday (CDMX); it starts now.
+    const before = new Date(publicDayStart(new Date()).getTime() - 1000)
+    const attempt = (await reserveAiAttempt(claim, config, before, { call: 1, publicHelp: true }))!
+    expect(await startAiAttempt(attempt.id, claim, new Date(), { requestBytes: 1000 })).toBe(true)
+    await finishAiAttempt(attempt.id, null)
+    const today = await prisma.supportBudget.findUniqueOrThrow({ where: { key: publicDayKey(new Date()) } })
+    expect(today.heldUsd.toString()).toBe('0.0685')
+    expect((await prisma.supportBudget.findUnique({ where: { key: publicDayKey(before) } }))?.heldUsd.toString()).toBe('0')
+  })
+  it('a public request bigger than its proven bound never starts', async () => {
+    await ready()
+    await send('¿Cómo cambio de sucursal?')
+    const claim = (await claimNext(new Date(Date.now() + 10), receiverId))!
+    const attempt = (await reserveAiAttempt(claim, getSupportAiConfig()!, new Date(), { call: 1, publicHelp: true }))!
+    expect(await startAiAttempt(attempt.id, claim, new Date(), { requestBytes: pricing.longContextAfter + 1 })).toBe(false)
+    expect(await startAiAttempt(attempt.id, claim, new Date())).toBe(false)
   })
   it('spent in the worker: a queued question gets the fixed message, without the model', async () => {
     await ready()
@@ -426,6 +468,20 @@ describe('«persona» from an unknown phone', () => {
 })
 
 describe('privacy order and the internal manual', () => {
+  it('a voice note or PUBLICA as the first message get the notice too', async () => {
+    const voice = await tryRouteSupport(input('', unknown, { type: 'audio' }))
+    expect(voice).toBe('QUEUED')
+    expect(
+      await prisma.supportMessage.findFirstOrThrow({
+        where: { conversation: { receiverId, phone: unknown } },
+        orderBy: { sequence: 'desc' },
+      }),
+    ).toMatchObject({
+      answer: supportPublicNotice(),
+    })
+    const publica = await send('PUBLICA')
+    expect(await reply(publica.event)).toMatchObject({ answer: supportPublicNotice() })
+  })
   it('CONTINUAR or «persona» as the first message never skip the notice', async () => {
     const go = await send('CONTINUAR')
     expect(await reply(go.event)).toMatchObject({ answer: supportPublicNotice() })
@@ -433,6 +489,32 @@ describe('privacy order and the internal manual', () => {
     const person = await send('persona')
     expect(await reply(person.event)).toMatchObject({ answer: supportPublicNotice() })
     expect(await prisma.supportNotice.count({ where: { conversationId: { in: await conversationIds() } } })).toBe(0)
+  })
+  it('a conversation used while the phone was of an account closes when it no longer is; public help starts fresh', async () => {
+    await send('hola', member)
+    await deliver()
+    await send('sí', member)
+    await deliver()
+    await send('1', member)
+    await deliver()
+    const used = (await open(member))!
+    const shown = await admitSupportMessage(input('¿Cómo cierro la caja?', member))
+    await prisma.supportMessage.update({
+      where: { id: shown.messageId },
+      data: { status: 'SENT', answer: 'Para cerrar la caja abre Turnos y toca cerrar.', sourceIds: [knowledge.sourceRef(manual)] },
+    })
+    await prisma.staff.update({ where: { id: staffId }, data: { active: false } })
+    try {
+      const after = await send('REINTENTAR', member)
+      expect(await reply(after.event)).toMatchObject({ answer: supportPublicNotice() })
+      expect(await prisma.supportConversation.findUniqueOrThrow({ where: { id: used.id } })).toMatchObject({ mode: 'CLOSED' })
+      expect(await prisma.supportMessage.findUniqueOrThrow({ where: { id: shown.messageId } })).toMatchObject({
+        answer: null,
+        sourceIds: [],
+      })
+    } finally {
+      await prisma.staff.update({ where: { id: staffId }, data: { active: true } })
+    }
   })
   it('an answer with an internal page (from when this phone was of an account) never reaches the model nor goes out', async () => {
     await ready()
@@ -488,5 +570,137 @@ describe('«persona» and the caps of today', () => {
       orderBy: { createdAt: 'asc' },
     })
     expect(notices.map(n => n.status)).toEqual(['HELD', 'PENDING'])
+  })
+})
+
+describe('round 2 of the audit', () => {
+  it('a phone that registers during the third classification gets no pause, and nothing it queued is cancelled', async () => {
+    await ready()
+    for (let i = 0; i < 2; i++) {
+      await send('asdfgh')
+      await work([fixed('nonsense')])
+    }
+    await send('asdfgh')
+    const other = await prisma.staff.create({
+      data: { email: `${receiverId}-late@test.local`, firstName: 'Tarde', lastName: 'Prueba', emailVerified: true },
+    })
+    await prisma.staffVenue.create({ data: { staffId: other.id, venueId, role: 'VIEWER' } })
+    try {
+      const { message } = await work([fixed('nonsense')], async () => {
+        await prisma.staff.update({ where: { id: other.id }, data: { phone: unknown } })
+      })
+      expect(message?.answer).toBe(SUPPORT_REPHRASE)
+      expect(await prisma.supportBudget.count({ where: { key: `CONTROL:${receiverId}:${sha(unknown)}:PAUSE` } })).toBe(0)
+    } finally {
+      await prisma.staffVenue.deleteMany({ where: { staffId: other.id } })
+      await prisma.staff.delete({ where: { id: other.id } })
+    }
+  })
+  it('switched off: an answer public help prepared with the model does not go out, nor its email to the team', async () => {
+    await ready()
+    await send('¿Cómo cambio de sucursal?')
+    const p = provider([question, draft, supported])
+    const claim = (await claimNext(new Date(Date.now() + 10), receiverId))!
+    expect(await prepareSupportAnswer(claim, { client: p.client, library })).toBe('READY')
+    const asked = await send('persona')
+    expect(await reply(asked.event)).toMatchObject({ outcome: 'HANDOFF' })
+    process.env.SUPPORT_PUBLIC_HELP_ENABLED = 'false'
+    const out = (await claimNext(new Date(Date.now() + 10), receiverId))!
+    expect(out.messageId).toBe(claim.messageId)
+    expect(await deliverSupportMessage(out, undefined, library)).toBe('CANCELLED')
+    expect(await prisma.supportMessage.findUniqueOrThrow({ where: { id: claim.messageId } })).toMatchObject({ status: 'CANCELLED' })
+    const sent: string[] = []
+    await runSupportNotices(new Date(Date.now() + 1000), {
+      send: async options => {
+        sent.push(options.subject)
+        return { ok: true, resendId: 're_2', transient: false }
+      },
+    })
+    expect(sent.filter(subject => subject.includes('Número no registrado'))).toEqual([])
+    const [notice] = await prisma.supportNotice.findMany({ where: { conversationId: { in: await conversationIds() } } })
+    expect(notice).toMatchObject({ status: 'SKIPPED', errorCode: 'REVOKED' })
+  })
+  it('three public notices of a phone never hold its first one once it is registered', async () => {
+    const day = cdmxDay(new Date())
+    const phoneHash = sha(`${receiverId}:${member}`)
+    // Today this phone already asked three times as a number with no account.
+    await prisma.supportBudget.createMany({
+      data: [
+        { key: `CONTROL:${receiverId}:HANDOFF_PUBLIC:${day}`, windowStart: new Date(), callCount: 3 },
+        { key: `CONTROL:${receiverId}:HANDOFF_PUBLIC:${day}:${phoneHash}`, windowStart: new Date(), callCount: 3 },
+      ],
+    })
+    const ghost = await prisma.supportConversation.create({ data: { receiverId, phone: member, mode: 'CLOSED' } })
+    await prisma.supportNotice.createMany({
+      data: [1, 2, 3].map(n => ({
+        kind: 'HANDOFF' as const,
+        dedupeKey: `handoff:${ghost.id}:${n}`,
+        day,
+        conversationId: ghost.id,
+        generation: n,
+        phoneHash,
+      })),
+    })
+    await send('hola', member)
+    await deliver()
+    await send('sí', member)
+    await deliver()
+    const asked = await send('persona', member)
+    expect(await reply(asked.event)).toMatchObject({ answer: supportHandoffDone('+52 56 4007 0001') })
+  })
+  it('the daily digest puts registered notices first: 100 public ones never push one out', async () => {
+    const conversation = await prisma.supportConversation.create({ data: { receiverId, phone: unknown, mode: 'CLOSED' } })
+    const meta = (extra: object) => ({
+      requestedAt: new Date(Date.now() - 86_400_000).toISOString(),
+      reason: 'REQUESTED',
+      phone: unknown,
+      app: 'dashboard',
+      appVersion: null,
+      deviceFamily: null,
+      multipleProfiles: false,
+      people: [],
+      guides: [],
+      ...extra,
+    })
+    await prisma.supportNotice.createMany({
+      data: Array.from({ length: 100 }, (_, n) => ({
+        kind: 'HANDOFF' as const,
+        status: 'HELD' as const,
+        dedupeKey: `held:${receiverId}:public-${n}`,
+        day: yesterday,
+        conversationId: conversation.id,
+        meta: meta({ unregistered: true }),
+        createdAt: new Date(Date.now() - 86_400_000 + n),
+      })),
+    })
+    const registered = await prisma.supportNotice.create({
+      data: {
+        kind: 'HANDOFF',
+        status: 'HELD',
+        dedupeKey: `held:${receiverId}:registered`,
+        day: yesterday,
+        conversationId: conversation.id,
+        staffId,
+        meta: meta({
+          phone: member,
+          people: [{ staffId, name: 'Registrada Prueba', role: 'VIEWER', venues: [{ id: venueId, name: 'Norte' }], organization: null }],
+        }),
+        createdAt: new Date(Date.now() - 1000),
+      },
+    })
+    const sent: { subject: string; html: string }[] = []
+    await runSupportNotices(new Date(), {
+      send: async options => {
+        sent.push({ subject: options.subject, html: String(options.html) })
+        return { ok: true, resendId: 're_3', transient: false }
+      },
+    })
+    expect(await prisma.supportNotice.findUniqueOrThrow({ where: { id: registered.id } })).toMatchObject({
+      status: 'HELD',
+      digestId: expect.any(String),
+    })
+    expect(
+      await prisma.supportNotice.count({ where: { dedupeKey: { startsWith: `held:${receiverId}:public-` }, errorCode: 'DIGEST_FULL' } }),
+    ).toBe(1)
   })
 })

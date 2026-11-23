@@ -91,7 +91,8 @@ export async function reserveAiAttempt(
       update: {},
     })
     const monthly = await tx.supportBudget.upsert({ where: { key: monthKey }, create: { key: monthKey, windowStart: month }, update: {} })
-    const reserve = maximumSupportCost(current.pricing)
+    // A public call can never cost more than its hold (startAiAttempt refuses a bigger request): the month holds that, not more.
+    const reserve = publicHelp ? publicCallHold(current.pricing) : maximumSupportCost(current.pricing)
     if (monthly.spentUsd.plus(global.heldUsd).plus(reserve).gt(current.monthlyLimitUsd)) return null
     if (dayKey) {
       const day = await tx.supportBudget.upsert({
@@ -140,13 +141,14 @@ export async function startAiAttempt(
     await lock(tx)
     const message = await readCurrentClaim(tx, claim, new Date(Math.max(now.getTime(), Date.now())))
     const reserved = await tx.supportAttempt.findUnique({ where: { id: attemptId }, select: { usage: true } })
-    const dayKey = reservationSchema.safeParse(reserved?.usage).data?.reservation.publicDayKey
+    const reservation = reservationSchema.safeParse(reserved?.usage).data?.reservation
+    const publicReserved = !!reservation?.publicDayKey
     // Read under the budget lock: a registration withdrawn while this waited stops the call, and a personal history
     // only goes out while the phone still belongs only to its owner (same rule as readSupportContext). A call reserved as
     // public help (dayKey) may go out for a phone with no account, while that help is on and the conversation public.
     if (message && isSupportFreeTextEnabled()) {
       const owner = await resolveRegisteredSupportPhone(message.conversation.phone, tx)
-      const publicCall = !!dayKey && isSupportPublicHelpEnabled() && message.conversation.mode === 'PUBLIC'
+      const publicCall = publicReserved && isSupportPublicHelpEnabled() && message.conversation.mode === 'PUBLIC'
       if (
         (!owner.registered && !publicCall) ||
         (message.conversation.mode === 'PERSONAL' && owner.soleStaffId !== message.conversation.staffId)
@@ -156,6 +158,8 @@ export async function startAiAttempt(
     const current = getSupportAiConfig(),
       at = new Date(Math.max(now.getTime(), Date.now()))
     if (!current || !message || !message.conversation.noticeAcceptedAt || !isSupportWindowOpen(message.conversation, at)) return false
+    // The day of a public call is the day it starts: a call reserved before midnight (CDMX) that leaves after it counts on the new day.
+    const dayKey = publicReserved ? publicDayKey(at) : undefined
     if (dayKey) {
       if (options?.requestBytes === undefined || options.requestBytes > current.pricing.longContextAfter) return false
       if (publicDaySpent(await tx.supportBudget.findUnique({ where: { key: dayKey } }), current.pricing)) return false
@@ -174,8 +178,19 @@ export async function startAiAttempt(
             AND c."lastUserMessageAt" <= t.at AND c."lastUserMessageAt" > t.at - INTERVAL '24 hours'
             AND c."lastActivityAt" <= t.at AND c."lastActivityAt" > t.at - INTERVAL '30 minutes')`
     // The public hold goes with the start: from here the call may cost; finish settles it, an uncertain one keeps it.
-    if (count === 1 && dayKey)
-      await tx.supportBudget.update({ where: { key: dayKey }, data: { heldUsd: { increment: publicCallHold(current.pricing) } } })
+    if (count === 1 && dayKey) {
+      await tx.supportBudget.upsert({
+        where: { key: dayKey },
+        create: { key: dayKey, windowStart: mexicoDay(at), heldUsd: publicCallHold(current.pricing) },
+        update: { heldUsd: { increment: publicCallHold(current.pricing) } },
+      })
+      // finish settles on the day it started.
+      if (dayKey !== reservation!.publicDayKey)
+        await tx.supportAttempt.update({
+          where: { id: attemptId },
+          data: { usage: { reservation: { ...reservation!, publicDayKey: dayKey } } },
+        })
+    }
     return count === 1
   })
 }

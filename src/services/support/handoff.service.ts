@@ -193,20 +193,26 @@ export async function requestSupportHandoff(
   const day = venueDayKey(now, CDMX),
     phoneHash = supportPhoneHash(conversation.receiverId, conversation.phone)
   const counted = { kind: 'HANDOFF' as const, day, status: { not: 'HELD' as const } }
-  // Ayuda pública: los números sin cuenta tienen su propio cupo del día (el mismo tope), contado en su fila: nunca le quitan
-  // lugar a un registrado. La fila sólo suma los avisos que no se retuvieron, como el conteo de abajo.
-  const publicKey = `CONTROL:${conversation.receiverId}:HANDOFF_PUBLIC:${day}`
-  const publicCount = (await tx.supportBudget.findUnique({ where: { key: publicKey } }))?.callCount ?? 0
-  const all = await tx.supportNotice.count({ where: counted })
-  const held =
-    (await tx.supportNotice.count({ where: { ...counted, phoneHash } })) >= config.phoneDailyCap ||
-    (unregistered ? publicCount : all - publicCount) >= config.dailyCap
+  // Ayuda pública: los números sin cuenta tienen su propio cupo del día, con los mismos topes (por teléfono y en total), contado en
+  // filas propias: nunca le quitan lugar a un registrado, ni al mismo teléfono cuando se registra. Sólo suman los que no se retienen.
+  const publicKeys = [
+    `CONTROL:${conversation.receiverId}:HANDOFF_PUBLIC:${day}`,
+    `CONTROL:${conversation.receiverId}:HANDOFF_PUBLIC:${day}:${phoneHash}`,
+  ]
+  const publicRows = await tx.supportBudget.findMany({ where: { key: { in: publicKeys } }, select: { key: true, callCount: true } })
+  const [publicAll, publicPhone] = publicKeys.map(key => publicRows.find(r => r.key === key)?.callCount ?? 0)
+  const phoneCount = await tx.supportNotice.count({ where: { ...counted, phoneHash } }),
+    allCount = await tx.supportNotice.count({ where: counted })
+  const held = unregistered
+    ? publicPhone >= config.phoneDailyCap || publicAll >= config.dailyCap
+    : phoneCount - publicPhone >= config.phoneDailyCap || allCount - publicAll >= config.dailyCap
   if (unregistered && !held)
-    await tx.supportBudget.upsert({
-      where: { key: publicKey },
-      create: { key: publicKey, windowStart: now, callCount: 1 },
-      update: { callCount: { increment: 1 } },
-    })
+    for (const key of publicKeys)
+      await tx.supportBudget.upsert({
+        where: { key },
+        create: { key, windowStart: now, callCount: 1 },
+        update: { callCount: { increment: 1 } },
+      })
   const personal = conversation.mode === 'PERSONAL'
   await tx.supportNotice.create({
     data: {

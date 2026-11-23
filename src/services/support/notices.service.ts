@@ -5,7 +5,7 @@ import { Prisma, type SupportNotice } from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { getSupportHandoffConfig, type SupportHandoffConfig } from '@/config/supportWhatsapp'
+import { getSupportHandoffConfig, isSupportPublicHelpEnabled, type SupportHandoffConfig } from '@/config/supportWhatsapp'
 import { ForbiddenError } from '@/errors/AppError'
 import { runWithContext } from '@/observability/executionContext'
 import { conNegocio } from '@/services/demo/candadoDemo'
@@ -59,8 +59,8 @@ async function venueStillAllowed(tx: Prisma.TransactionClient, staffId: string, 
  * sale, y la persona que las perdió todas también. Nadie → null.
  */
 export async function stillAllowed(tx: Prisma.TransactionClient, row: SupportNotice, meta: HandoffMeta): Promise<HandoffMeta | null> {
-  // Ayuda pública: un número sin cuenta no trae personas ni sucursales que revalidar; se le prometió que alguien le escribe.
-  if (meta.unregistered && !row.linkId && !meta.people.length) return meta
+  // Ayuda pública: un número sin cuenta no trae personas ni sucursales que revalidar; sale mientras la ayuda pública siga prendida.
+  if (meta.unregistered && !row.linkId && !meta.people.length) return isSupportPublicHelpEnabled() ? meta : null
   let people = meta.people
   if (row.linkId) {
     const link = await tx.supportWhatsappLink.findUnique({ where: { id: row.linkId }, select: { staffId: true, phone: true } })
@@ -261,12 +261,18 @@ async function freezeMeta(row: SupportNotice, now: Date, mine: Prisma.SupportNot
     if (!frozen.count) throw new Error('SUPPORT_NOTICE_LEASE_LOST')
     return row.meta as object | null
   }
-  // DAILY_DIGEST: every row by itself; the ones that no longer pass are left out and marked SKIPPED.
-  const rows = await prisma.supportNotice.findMany({
-    where: { digestId: row.id, status: 'HELD' },
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    take: DIGEST_ITEMS,
-  })
+  // DAILY_DIGEST: every row by itself; the ones that no longer pass are left out and marked SKIPPED. Public help: the registered
+  // ones go first, so numbers with no account never take their place in the 100.
+  // ponytail: reads 5× the digest; past 500 held notices in a day, a registered one after them could still be left out.
+  const rows = (
+    await prisma.supportNotice.findMany({
+      where: { digestId: row.id, status: 'HELD' },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: DIGEST_ITEMS * 5,
+    })
+  )
+    .sort((a, b) => Number(!!asMeta(a.meta)?.unregistered) - Number(!!asMeta(b.meta)?.unregistered))
+    .slice(0, DIGEST_ITEMS)
   const items: HandoffMeta[] = [],
     dropped: string[] = []
   for (const heldRow of rows) {

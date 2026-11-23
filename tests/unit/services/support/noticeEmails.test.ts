@@ -528,6 +528,9 @@ describe('ayuda pública: el aviso de un número no registrado (22-nov)', () => 
     expect(email.subject.split(' · ')[1]).toBe('Número no registrado')
     expect(decoded(email.html)).toContain('Número no registrado')
     expect(email.text).toContain('Persona: Numero no registrado')
+    // The number shows masked; only the button to write back carries it whole.
+    expect(email.text).toContain('Numero: ***5678')
+    expect(decoded(email.html)).not.toContain('+525512345678')
     expect(email.text).toContain('https://wa.me/525512345678')
     expect(decoded(email.html)).not.toContain('Sin perfil')
     const digest = buildHeldDigestEmail('2026-11-12', [unknown], 'soporte@test.local')

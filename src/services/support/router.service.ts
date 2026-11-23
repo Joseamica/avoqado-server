@@ -11,17 +11,23 @@ import { listSupportVenues } from './access.service'
 import { buildHumanSummary } from './humanSummary.service'
 import { resolveRegisteredSupportPhone } from './registeredPhone.service'
 import {
-  getSupportAiConfig,
   getSupportHandoffConfig,
   isSupportFreeTextEnabled,
   isSupportHybridEnabled,
   isSupportPublicHelpEnabled,
-  LUNA_SUPPORT_PRICING,
   supportPhoneNumberId,
 } from '@/config/supportWhatsapp'
 import { recordSupportEvent, requestSupportHandoff } from './handoff.service'
 import { normalizeAppVersion } from './deviceContext.service'
-import { countPublicMessage, isPublicPaused, mexicoDay, publicDayKey, publicDaySpent, takePublicLimitNotice } from './publicHelp.service'
+import {
+  countPublicMessage,
+  forgetPublicConversation,
+  isPublicConversation,
+  isPublicPaused,
+  markPublicConversation,
+  mexicoDay,
+  takePublicLimitNotice,
+} from './publicHelp.service'
 import {
   SUPPORT_ASK_APP,
   SUPPORT_CONTACT,
@@ -377,26 +383,22 @@ export async function decideSupportAdmission(
   // SALIR must always close, so it never counts toward or waits on the cap.
   if (command !== 'SALIR' && (await overMinuteCap(tx, input, now))) return { route: 'IGNORED', registered: false }
   const { registered, soleStaffId } = await resolveRegisteredSupportPhone(input.phone, tx)
-  if (registered) return { route: 'SUPPORT', registered, soleStaffId }
-  // Public help (founder, 22-nov): an unknown phone talks like anyone else, within its four caps.
+  if (registered) {
+    // A registered answer may cite the internal manual: this conversation is no longer one public help can keep using.
+    if (conversation) await forgetPublicConversation(tx, input.receiverId, input.phone, conversation.id)
+    return { route: 'SUPPORT', registered, soleStaffId }
+  }
+  // Public help (founder, 22-nov): an unknown phone talks like anyone else, within its caps. The day's US$ only stops what would
+  // use the model, in the worker (the fixed message, once a day): the notice, the app menu and «persona» keep working.
   if (isSupportPublicHelpEnabled()) {
     // Paused (three strikes): nothing is answered, SALIR included, so the pause notice is never cancelled before it goes out.
     if (await isPublicPaused(tx, input.receiverId, input.phone, now)) return { route: 'IGNORED', registered }
-    const ai = getSupportAiConfig()
-    const spent = publicDaySpent(
-      await tx.supportBudget.findUnique({ where: { key: publicDayKey(now) } }),
-      ai?.pricing ?? LUNA_SUPPORT_PRICING,
-    )
-    // The day's US$ only stops what would use the model: «persona» after the notice still reaches the team.
-    if (!spent || (command === 'PERSONA' && conversation?.noticeAcceptedAt)) {
-      if (command === 'SALIR' || ignoredType(input.type)) return { route: 'SUPPORT', registered, publicHelp: true }
-      const over = await countPublicMessage(tx, input.receiverId, input.phone, now)
-      if (!over) return { route: 'SUPPORT', registered, publicHelp: true }
-      if (!(await takePublicLimitNotice(tx, input.receiverId, input.phone, over, now))) return { route: 'IGNORED', registered }
-      if (conversation) await resetSupportConversation(tx, conversation, 'CLOSED')
-      return { route: 'STATIC', registered, text: over === 'DAY' ? SUPPORT_PUBLIC_DAY_LIMIT : SUPPORT_PUBLIC_HOUR_LIMIT }
-    }
-    // Spent: from here, exactly as with public help off (the fixed message, once a day).
+    if (command === 'SALIR' || ignoredType(input.type)) return { route: 'SUPPORT', registered, publicHelp: true }
+    const over = await countPublicMessage(tx, input.receiverId, input.phone, now)
+    if (!over) return { route: 'SUPPORT', registered, publicHelp: true }
+    if (!(await takePublicLimitNotice(tx, input.receiverId, input.phone, over, now))) return { route: 'IGNORED', registered }
+    // Its notice goes in the open conversation: what it already queued under the cap still goes out.
+    return { route: 'STATIC', registered, text: over === 'DAY' ? SUPPORT_PUBLIC_DAY_LIMIT : SUPPORT_PUBLIC_HOUR_LIMIT }
   }
   // The only AI-free way in for an unknown phone: reading the notice, leaving, or accepting it to link a code.
   if (command === 'AYUDA' || command === 'SALIR') return { route: 'SUPPORT', registered, soleStaffId }
@@ -487,15 +489,25 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
           return 'IGNORED'
         }
         if (admission.route === 'STATIC') {
-          // Any open conversation was just closed; the fixed message gets its own deliverable one.
-          await tx.supportConversation.create({
-            data: {
-              receiverId: input.receiverId,
-              phone: input.phone,
-              lastUserMessageAt: supportInboundClock(input.timestamp, now, null),
-              lastActivityAt: now,
-            },
-          })
+          // The notice of a public cap goes in the open conversation. The fixed message of today: any open conversation was just
+          // closed, so it gets its own deliverable one.
+          if (conversation && admission.text)
+            await tx.supportConversation.update({
+              where: { id: conversation.id },
+              data: {
+                lastUserMessageAt: supportInboundClock(input.timestamp, now, conversation.lastUserMessageAt),
+                lastActivityAt: new Date(Math.max(now.getTime(), conversation.lastActivityAt.getTime())),
+              },
+            })
+          else
+            await tx.supportConversation.create({
+              data: {
+                receiverId: input.receiverId,
+                phone: input.phone,
+                lastUserMessageAt: supportInboundClock(input.timestamp, now, null),
+                lastActivityAt: now,
+              },
+            })
           const admitted = await admitSupportMessage({ ...input, body: '' }, tx)
           await tx.supportMessage.update({
             where: { id: admitted.messageId },
@@ -513,6 +525,16 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
               app = conversation.app
             conversation = await resetSupportConversation(tx, conversation)
             conversation = await tx.supportConversation.update({ where: { id: conversation.id }, data: { noticeAcceptedAt: consent, app } })
+          }
+        }
+        // Public help never continues a conversation used while this phone was of an account (its answers may cite the internal
+        // manual, and history, quotes and REINTENTAR read them): it closes, and a fresh public one starts with the notice.
+        if (publicHelp && conversation && !(await isPublicConversation(tx, input.receiverId, input.phone, conversation.id))) {
+          await resetSupportConversation(tx, conversation, 'CLOSED')
+          conversation = null
+          if (command === 'SALIR') {
+            await recordIgnored()
+            return 'IGNORED'
           }
         }
       }
@@ -538,6 +560,7 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
         })
         created = true
       }
+      if (publicHelp) await markPublicConversation(tx, input.receiverId, input.phone, conversation.id, now)
       // Only the first message after linking recognizes the person: its code was confirmed after the last message of this
       // conversation (or of the closed one it inherits from), so a later PUBLICA keeps public help.
       if (!relist && conversation.mode === 'PUBLIC' && soleStaffId && conversation.noticeAcceptedAt) {
@@ -601,7 +624,7 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
       if (!answer && command === 'AYUDA') {
         conversation = await resetSupportConversation(tx, conversation)
         answer = notice()
-      } else if (!answer && command === 'PUBLICA') {
+      } else if (!answer && command === 'PUBLICA' && (!publicHelp || conversation.noticeAcceptedAt)) {
         const consent = conversation.noticeAcceptedAt
         conversation = await resetSupportConversation(tx, conversation)
         conversation = await tx.supportConversation.update({ where: { id: conversation.id }, data: { noticeAcceptedAt: consent } })
@@ -633,7 +656,8 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
         // The notice row commits with this answer, or not at all.
         if (handoff) ({ text: answer, outcome } = await requestSupportHandoff(tx, conversation, 'REQUESTED', now, handoff))
         else answer = await buildHumanSummary(conversation.id, conversation.generation, tx)
-      } else if (!answer && !conversation.noticeAcceptedAt && command !== 'REINTENTAR') {
+      } else if (!answer && !conversation.noticeAcceptedAt && (command !== 'REINTENTAR' || publicHelp)) {
+        // Public help: nothing to retry before the notice was accepted, so REINTENTAR gets the notice too.
         answer = notice()
         // The question waits for the notice to be accepted (media arrives with an empty body).
         if (freeText && questionOf(body))
@@ -806,7 +830,9 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
           await recordIgnored()
           return 'IGNORED'
         }
-        answer = `Por ahora sólo puedo ayudarte con texto; no descargo ni interpreto archivos. ${SUPPORT_CONTACT}`
+        // Public help: the first contact always gets the notice, even if it starts with a photo or a voice note.
+        if (!publicHelp || conversation.noticeAcceptedAt)
+          answer = `Por ahora sólo puedo ayudarte con texto; no descargo ni interpreto archivos. ${SUPPORT_CONTACT}`
       }
       if (!freeText && (await overMinuteCap(tx, input, now))) {
         await recordIgnored()

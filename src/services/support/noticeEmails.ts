@@ -91,7 +91,8 @@ function personRows(meta: HandoffMeta): Row[] {
 }
 function conversationRows(meta: HandoffMeta): Row[] {
   return [
-    ['Número', meta.phone],
+    // Ayuda pública: el número sin cuenta va enmascarado a la vista; el botón para escribirle lo lleva completo.
+    ['Número', meta.unregistered ? `***${meta.phone.slice(-4)}` : meta.phone],
     ['App', appOf(meta.app)],
     ['Versión', meta.appVersion ?? 'Sin indicar'],
     ...(meta.deviceFamily ? [['Equipo', meta.deviceFamily] as Row] : []),
