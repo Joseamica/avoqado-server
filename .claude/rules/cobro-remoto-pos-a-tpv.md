@@ -13,18 +13,26 @@ probar en hardware, con los tres lados leídos (servidor, terminal, POS).
   ahora es un CAS directo en `reconcileBankDeclined` FUERA de vuelo). Con la solicitud EN VUELO el aviso sólo se guarda: la Nexgo
   2.20 ofrece «Reintentar» dentro de la MISMA solicitud y cerrarla le quitaría el permiso al intento B (dos cargos sucesivos); el
   rechazo guardado decide al entrar a «sin respuesta» (Codex S1 r2, R2-6).
-- **Sin respuesta** (la terminal no dio veredicto, no acusó en 5 s, se desconectó 10 s, no contestó al cancel en 10 s, contestó
-  «sigo cobrando» más de 30 s tras el cancel, o acusó y lleva > 60 s sin final y no dice ACTIVE a la sonda; tope 150 s desde el
-  acuse) ⇒ `UNKNOWN` + `noResponseAt` (`src/services/tpv/sinRespuesta.ts`) y a los **10 s** `cerrarSinRespuesta` la cierra «no
+- **Sin respuesta** (la terminal no dio veredicto, no acusó en 5 s —también una reentrega, y una PENDING del protocolo con acuse
+  que lleva 30 s sin acusar desde su último envío—, se desconectó 10 s, no contestó al cancel en 10 s, contestó «sigo cobrando»
+  más de 30 s tras el cancel, o acusó y lleva > 60 s sin final y no dice ACTIVE a la sonda; tope 150 s desde el acuse) ⇒ `UNKNOWN`
+  + `noResponseAt` (`src/services/tpv/sinRespuesta.ts`) y a los **10 s** `cerrarSinRespuesta` la cierra «no
   cobrada»: `FAILED / NO_EVIDENCE_AFTER_WINDOW`, `outcome NOT_CHARGED`, `cancelDisposition` null, causa en `noChargeCause`
   (campo aditivo). Es la única forma que ANDROID 2.22+, iOS 1.13 y la TPV ≥ 2.11.1 pintan como «puedes volver a cobrar». La red
-  del temporizador es el vigía (`cerrarSinRespuestaVencidas`, cada 30 s) y la primera lectura del GET (POS o TPV).
+  del temporizador es el vigía (`cerrarSinRespuestaVencidas`, cada 30 s) y la primera lectura del GET (POS o TPV). Mientras el
+  cierre no DECIDE, el GET la proyecta EN VUELO (`SENT`, sin `cancelDisposition`), por ESTADO y no por edad (R3-8). Todos los
+  sellos que se comparan con esos plazos (`noResponseAt`, `cancelRequestedAt`) son del reloj del SERVIDOR (R3-11); «contestó
+  ACTIVE» se decide con el sello guardado `probeActiveAt` contra sí mismo, y el CAS de entrada lo exige igual (R3-9).
 - **Aprobado tardío** ⇒ el cierre común reabre a `COMPLETED` con 🚨 y avisa al DUEÑO y a los gerentes (`avisarAprobadoTardio`).
-- **Ningún cierre negativo gana a un aprobado ya conocido** (`aprobacionBancariaConocida`, la afirmación de la terminal y los vetos
-  de `sinVetoDeDineroSql`): queda «aprobado, por registrar» (UNKNOWN, la cuenta cercada) y 🚨 a los 5 min sin `Payment`.
+- **Ningún cierre negativo gana a un aprobado ya conocido** (`aprobacionBancariaConocida`, la afirmación de la terminal
+  `claimedSuccess` —un `success` sin ids también lo es— y los vetos de `sinVetoDeDineroSql`): queda «aprobado, por registrar»
+  (UNKNOWN, la cuenta cercada, marcado en el sobre `aprobadoPorRegistrarAt` y proyectado UNKNOWN) y 🚨 a los 5 min sin `Payment`.
+  Vale para TODO escritor de un negativo (Codex S1 r3): el cierre de 10 s, `reconcileBankDeclined`, el negativo de la terminal
+  (`cerrarConNegativo`, que conserva la afirmación en el sobre) y el cancel `ACCEPTED`, que pasa por ese mismo escritor. La
+  prueba de tabla señal × escritor vive en `tests/integration/payments/cobroSimple.elAprobadoManda.integration.test.ts`.
 - **La RANURA de la terminal sólo existe en vuelo** (`PENDING/SENT/CANCEL_REQUESTED`; índice parcial migrado el 22-nov). La CUENTA
-  se cerca en vuelo, en sus 10 s (UNKNOWN), con COMPLETED sin `Payment` o retenida con un aprobado sin registrar
-  (`UNRESOLVED_FINANCIAL_OUTCOME`). Nada aparta la terminal por una duda; un doble cobro teórico se DETECTA y se avisa, nunca con
+  se cerca en vuelo, en «sin respuesta» (UNKNOWN), con COMPLETED sin `Payment`, y —sólo hasta que el barrido las cierra— las filas
+  viejas sin desenlace (TIMED_OUT sin `Payment`, FAILED y CANCELLED sin desenlace acreditado) (`UNRESOLVED_FINANCIAL_OUTCOME`). Nada aparta la terminal por una duda; un doble cobro teórico se DETECTA y se avisa, nunca con
   un candado ni con el paso de una persona.
 - Nadie declara ni pone PIN. Las rutas viejas (`/release`, `/uncharged-declaration`, `no-instrument-resolution` con solicitud)
   siguen vivas hasta S3, que las deja contestando en corto. La ventana de 30 s, S2 (cese certificado), el reloj de 20 min y el
