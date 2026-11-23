@@ -34,7 +34,7 @@ import { localInstantRaw, localWallClockRaw, utcTs, utcTsParam } from '@/utils/s
 
 import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
-import { foldGiveawaysIntoSummary, HIDDEN_COMP_LINE_WHERE } from '@/services/dashboard/salesGiveaways'
+import { foldGiveawaysIntoSummary } from '@/services/dashboard/salesGiveaways'
 import {
   cargarReglasFaltantes,
   projectPaymentSettlement,
@@ -59,8 +59,19 @@ import {
 } from '@/services/giftCards/giftCardMarks'
 import { montoSaldoAFavorSql, sqlNoEsDelMedioSaldoAFavor } from '@/services/storeCredit/saldoAFavorEnLectores'
 import { sqlImpuestoQueSeCobraAparte } from '@/services/shared/orderBalance'
-import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '@/services/shared/tenderSemantics'
+import {
+  NOT_DRAWER_CASH_WHERE,
+  paymentCountsAsDrawerCash,
+  paymentIsAvoqadoSettled,
+  sqlEsEfectivoDelCajon,
+} from '@/services/shared/tenderSemantics'
 import { proyectarComisionYNeto } from '@/services/payments/proyeccionMonetaria'
+import {
+  sqlCobroDeCuentaSinCobrar,
+  sqlComisionDeTerceros,
+  sqlCuentaCobrada,
+  sqlLoQueFaltaCobrar,
+} from '@/services/dashboard/salesSummaryPoblacion'
 import { dondeHoraRealEntre, sqlHoraReal, sqlRangoHoraReal, sqlRangoHoraRealSql } from '@/services/shared/horaRealDelAparato'
 
 // ============================================================
@@ -87,8 +98,24 @@ export interface SalesSummaryMetrics {
   commissions: number
   totalCollected: number
   // True profit after all costs
-  netProfit: number // netSales - platformFees - staffCommissions
+  netProfit: number // netSales - platformFees - tenderCommissions - staffCommissions
   transactionCount: number
+  /**
+   * D6 (base de caja, founder 15-sep-2026) — aditivo. «Sin cobrar»: lo que todavía deben las cuentas abiertas o pagadas a medias
+   * del rango, sin propina y en las unidades de `grossSales`. NO es venta. `null` en la vista de movimientos (filtro de método o
+   * de comercio), como las demás métricas de orden.
+   */
+  unpaidSales?: number | null
+  /** D6 — aditivo. Cuántas de esas cuentas deben algo. */
+  unpaidOrders?: number | null
+  /**
+   * D1 — aditivo. Comisiones de terceros: la comisión CONGELADA en cada cobro por su tipo de pago (Rappi, Uber Eats, DiDi, vales
+   * con comisión), con signo (el ajuste del proveedor la regresa en negativo). Ya restada de `totalCollected` y `netProfit`.
+   * No es de Avoqado: ésa es `platformFees`.
+   */
+  tenderCommissions?: number
+  /** D10.1 — aditivo. Cuántas devoluciones hay en `refunds` (ya no cuentan en `transactionCount`). */
+  refundCount?: number
   // Tarjetas de regalo (1a, spec §7) — aditivos; sólo en la vista sin filtro de método.
   /** Tarjetas cargadas en el rango, menos sus cancelaciones. NO es venta: no está en grossSales. */
   giftCardLoads?: number
@@ -127,6 +154,12 @@ export interface PaymentMethodDetailedBreakdown {
   tenderCommissions?: number
   /** Lo devuelto de cuentas CANCELADAS o borradas: sí salió dinero, pero la cabecera no lo resta (su venta tampoco se cuenta). */
   cancelledOrderRefunds?: number
+  /**
+   * Aditivo (carril C2, D17): de `amount`/`count`, lo que es de cobros en OTRA moneda (sumado tal cual, sin convertir). Los campos
+   * nuevos del estado (`chargedAmount`, `chargedCount`, …) ya son sólo pesos; el estado resta esto de `amount`. Sólo si hay.
+   */
+  foreignAmount?: number
+  foreignCount?: number
   subBuckets?: Array<{
     type: 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL'
     amount: number
@@ -240,6 +273,32 @@ export interface StatementDestinations {
   terminal: MoneyDestination
   online: MoneyDestination
   other: MoneyDestination
+  tenderCommissions: number
+  /**
+   * Aditivo (carril C2, D12.3): «otros» por tipo de pago. `key` = el id del tipo de pago propio (Rappi, Uber, Vales…) con su
+   * `label`; sin tipo, el método (`BANK_TRANSFER`, `DIGITAL_WALLET`, `CARD` de otra terminal…; `label` null). Suman `other`.
+   * `tenderCommissions` es la comisión congelada de ESE tipo (ya incluida en el total de arriba). Sólo si hay algo.
+   */
+  otherByType?: OtherTypeBreakdown[]
+  /**
+   * Aditivo (carril C2, D17): movimientos en línea en OTRA moneda (una liga puede cobrar en dólares; `Payment` no guarda moneda:
+   * se lee de su sesión de pago). No entran a cajones ni destinos —sumarlos como pesos mentía—: van aquí, en su moneda y sin
+   * convertir. `net` es cobros menos devoluciones (con signo); `transactionCount` cuenta cobros y `refundCount` devoluciones.
+   */
+  foreignCurrency?: ForeignCurrencyMovement[]
+}
+
+export interface ForeignCurrencyMovement {
+  currency: string
+  net: number
+  transactionCount: number
+  refundCount: number
+}
+
+export interface OtherTypeBreakdown extends MoneyDestination {
+  key: string
+  label: string | null
+  method: string
   tenderCommissions: number
 }
 
@@ -359,6 +418,35 @@ export type PaymentMethodFilter = 'CASH' | 'CARD' | 'QR_LEGACY' | 'OTHER'
 /** «En línea de Avoqado» del cobro con alias `alias`: siempre true o false (nunca NULL), así se puede agrupar y negar. */
 const sqlEnLineaDeAvoqado = (alias: 'p' | 'orig') =>
   `(COALESCE(${alias}."fundsFlow" = 'AVOQADO_PROCESSED', false) OR ${alias}."ecommerceMerchantId" IS NOT NULL)`
+/**
+ * La moneda de un cobro (carril C2, D17). `Payment` no guarda moneda: la tiene su sesión de pago (`CheckoutSession.currency`),
+ * y una liga (por API o por la MCP) acepta cualquier `currency`. Se juntan primero las sesiones PAGADAS (`COMPLETED`) del negocio
+ * que NO son pesos (`484` es el código numérico ISO del peso: es MXN) — casi siempre ninguna — como pares (enlace → moneda), y
+ * cada cobro se une a ellas por IGUALDAD (Codex r4 del carril C2, #6), por las formas que se han escrito (r1-r3):
+ * `paymentId` (desde D7, 26-oct-2026); antes, el id del cobro en la sesión: `sessionId` (PaymentIntent de Stripe),
+ * `metadata.stripePaymentIntentId` (Stripe Checkout) o `blumonCheckoutId` (Blumon E-commerce, aunque el cobro no traiga su
+ * canal). Una devolución toma la de su cobro original. Sin sesión extranjera, MXN. Un enlace repetido cuenta una vez.
+ */
+const sqlSesionesExtranjeras = (venueId: string) => Prisma.sql`sesiones_extranjeras AS MATERIALIZED (
+  SELECT DISTINCT ON (e.tipo, e.enlace) e.tipo, e.enlace, e.moneda
+  FROM "CheckoutSession" cs
+  JOIN "EcommerceMerchant" em ON em.id = cs."ecommerceMerchantId"
+  CROSS JOIN LATERAL (VALUES
+    ('pago', cs."paymentId", UPPER(TRIM(cs."currency"))),
+    ('cobro', CASE WHEN cs."paymentId" IS NULL THEN cs."sessionId" END, UPPER(TRIM(cs."currency"))),
+    ('cobro', CASE WHEN cs."paymentId" IS NULL THEN cs."blumonCheckoutId" END, UPPER(TRIM(cs."currency"))),
+    ('cobro', CASE WHEN cs."paymentId" IS NULL THEN cs."metadata" ->> 'stripePaymentIntentId' END, UPPER(TRIM(cs."currency")))
+  ) AS e(tipo, enlace, moneda)
+  WHERE em."venueId" = ${venueId}
+    AND cs."status" = 'COMPLETED'
+    AND UPPER(TRIM(cs."currency")) NOT IN ('MXN', '484')
+    AND e.enlace IS NOT NULL
+  ORDER BY e.tipo, e.enlace, cs."createdAt"
+)`
+/** Las dos uniones por igualdad con las sesiones extranjeras (la de una devolución, con su cobro original). */
+const SQL_UNE_SESIONES_EXTRANJERAS = `LEFT JOIN sesiones_extranjeras sx_pago ON sx_pago.tipo = 'pago' AND sx_pago.enlace = (CASE WHEN orig.id IS NOT NULL THEN orig.id ELSE p.id END)
+        LEFT JOIN sesiones_extranjeras sx_cobro ON sx_cobro.tipo = 'cobro' AND sx_cobro.enlace = (CASE WHEN orig.id IS NOT NULL THEN orig."processorId" ELSE p."processorId" END)`
+const SQL_MONEDA_DEL_COBRO = `COALESCE(sx_pago.moneda, sx_cobro.moneda, 'MXN')`
 const SQL_COMISION_DEL_COBRO = `CASE WHEN tc."id" IS NOT NULL THEN COALESCE(tc."venueChargeAmount", 0) + COALESCE(tc."venueFixedFee", 0) WHEN ${sqlEnLineaDeAvoqado('p')} THEN COALESCE(p."feeAmount", 0) ELSE 0 END`
 
 export type CardTypeFilter = 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL'
@@ -450,9 +538,56 @@ function withPercentages(buckets: PaymentMethodBreakdown[]): PaymentMethodBreakd
  * getSalesSummary. We throw here as defense-in-depth so any direct caller
  * (e.g. a test) gets a clear failure instead of silent zero rows.
  */
-export function buildPaymentWhereFilter(paymentMethod?: PaymentMethodFilter, cardType?: CardTypeFilter): Prisma.PaymentWhereInput {
-  if (!paymentMethod) return {}
+/**
+ * Carril C2 (hz:fefa11b6:D12): con un filtro de método, el reporte es una vista de DINERO. No es dinero que entró o salió de la
+ * caja o del banco: los medios de SISTEMA —el saldo de una tarjeta de regalo, el saldo a favor (una devolución abonada al sobre de
+ * la clienta) y el crédito de un cambio— ni un cobro de $0 (importe y propina en cero: el cierre de una cuenta cubierta por una
+ * cortesía o un descuento, que la TPV marca `FREE_CART` y el POS guarda como efectivo de $0 sin marca; Codex r4 del carril C2, #1).
+ * El estado de cuenta ya excluye los medios de sistema; con un filtro de método entraban y una devolución a saldo a favor salía
+ * como −$30 de «Neto cobrado».
+ *
+ * Las COMISIONES DEL PERSONAL no usan esta exclusión (`incluirMediosDeSistema`): una venta pagada con saldo de regalo sí le genera
+ * comisión a quien vendió, y ese gasto no desaparece por cómo pagó la clienta (Codex r1 del carril C2, #1).
+ */
+const MEDIOS_DE_SISTEMA = ['GIFT_CARD', 'STORE_CREDIT', 'EXCHANGE_CREDIT'] as const
+const WHERE_ES_DINERO: Prisma.PaymentWhereInput = {
+  AND: [
+    {
+      OR: [
+        { tenderTypeId: null },
+        { tenderType: { is: { systemKind: null } } },
+        { tenderType: { is: { systemKind: { notIn: [...MEDIOS_DE_SISTEMA] } } } },
+      ],
+    },
+    // Las dos columnas no aceptan nulos: el `NOT` no descarta nada de más.
+    { NOT: { amount: 0, tipAmount: 0 } },
+  ],
+}
+/** El gemelo en SQL (`NOT EXISTS` ya es NULL-safe; importe y propina no aceptan nulos). Sin alias, la tabla es `"Payment"`. */
+function sqlEsDinero(columnPrefix: string): string {
+  const t = columnPrefix || '"Payment"'
+  return (
+    `NOT EXISTS (SELECT 1 FROM "VenueTenderType" ms_t WHERE ms_t."venueId" = ${t}."venueId" AND ms_t.id = ${t}."tenderTypeId" AND ms_t."systemKind" IN (${MEDIOS_DE_SISTEMA.map(k => `'${k}'`).join(', ')}))` +
+    ` AND NOT (${t}."amount" = 0 AND ${t}."tipAmount" = 0)`
+  )
+}
 
+export interface OpcionesDelFiltroDeMetodo {
+  /** Las comisiones del personal: también los cobros con medios de sistema y las cortesías de $0 (ver arriba). */
+  incluirMediosDeSistema?: boolean
+}
+
+export function buildPaymentWhereFilter(
+  paymentMethod?: PaymentMethodFilter,
+  cardType?: CardTypeFilter,
+  opciones: OpcionesDelFiltroDeMetodo = {},
+): Prisma.PaymentWhereInput {
+  if (!paymentMethod) return {}
+  if (opciones.incluirMediosDeSistema) return filtroDelMetodo(paymentMethod, cardType)
+  return { AND: [filtroDelMetodo(paymentMethod, cardType), WHERE_ES_DINERO] }
+}
+
+function filtroDelMetodo(paymentMethod: PaymentMethodFilter, cardType?: CardTypeFilter): Prisma.PaymentWhereInput {
   if (paymentMethod === 'CASH') return { method: 'CASH' }
 
   if (paymentMethod === 'OTHER') {
@@ -520,9 +655,14 @@ export function buildPaymentSqlClause(
   paymentMethod: PaymentMethodFilter | undefined,
   cardType: CardTypeFilter | undefined,
   columnPrefix = '',
+  opciones: OpcionesDelFiltroDeMetodo = {},
 ): string {
   if (!paymentMethod) return ''
+  if (opciones.incluirMediosDeSistema) return clausulaDelMetodo(paymentMethod, cardType, columnPrefix)
+  return `${clausulaDelMetodo(paymentMethod, cardType, columnPrefix)} AND ${sqlEsDinero(columnPrefix)}`
+}
 
+function clausulaDelMetodo(paymentMethod: PaymentMethodFilter, cardType: CardTypeFilter | undefined, columnPrefix: string): string {
   const c = columnPrefix ? `${columnPrefix}.` : ''
   const pdJson = `${c}"processorData"`
   const pdIsIntl = `(${pdJson}->>'isInternational')::boolean = true`
@@ -783,6 +923,7 @@ export async function computeSettlementProjection(
     const filas = await prisma.merchantAccount.findMany({
       where: { id: { in: faltantes } },
       select: { id: true, displayName: true, alias: true },
+      take: faltantes.length, // uno por id pedido
     })
     for (const a of filas) nameById.set(a.id, a.displayName || a.alias || 'Comercio')
   }
@@ -1008,6 +1149,10 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // payment-derived metrics and return null for grossSales/items/discounts/
   // taxes/deferred — frontend hides those rows.
   const isFiltered = !!paymentMethod
+  // D9.1 (21-nov-2026): con un comercio elegido la vista también es «de movimientos», como con un método: una cuenta de $300
+  // pagada $100 con el comercio A y $200 en efectivo no es una venta de A de $300. Las métricas de orden van en null y lo cobrado
+  // sale de los pagos de ese comercio. Los desgloses por método (estado de cuenta) conservan su compuerta `isFiltered`.
+  const vistaDeMovimientos = isFiltered || !!merchantAccountId
 
   // QR_LEGACY short-circuit. This filter only makes sense for MindForm (the one
   // venue with legacy avo-pwa QR payments). We compute the summary directly from
@@ -1028,17 +1173,18 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     let amount = 0
     let tips = 0
     let legacyCount = 0
-    const paginas = await forEachLegacyPaymentPage(
-      { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
-      rows => {
-        for (const payment of rows) {
-          if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
-          amount += Number(payment.amount)
-          tips += Number(payment.tipAmount)
-          legacyCount += 1
-        }
-      },
-    )
+    // D9.1 (Codex r1 #8): the legacy QR rows have no merchant account, so with a merchant chosen nothing of them belongs to it:
+    // not summed, not asked (the statement below still answers, with zeros).
+    const paginas = merchantAccountId
+      ? { unavailable: false }
+      : await forEachLegacyPaymentPage({ startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() }, rows => {
+          for (const payment of rows) {
+            if (payment.status !== 'COMPLETED' || payment.type === 'REFUND') continue
+            amount += Number(payment.amount)
+            tips += Number(payment.tipAmount)
+            legacyCount += 1
+          }
+        })
     const summary: SalesSummaryMetrics = {
       ...emptySummary(),
       tips,
@@ -1053,7 +1199,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     let byPeriod: TimePeriodMetrics[] | undefined
     // The headline total above is partial if the page walk failed; the period query below can only ADD to the flag.
     let legacyUnavailable = paginas.unavailable
-    if ((reportType as string) !== 'summary') {
+    if ((reportType as string) !== 'summary' && !merchantAccountId) {
       const legacyPeriod = await getLegacyPeriodMetrics(
         parsedStartDate.toISOString(),
         parsedEndDate.toISOString(),
@@ -1121,7 +1267,15 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   }
 
   const paymentWhereFilter = buildPaymentWhereFilter(paymentMethod, cardType)
-  const paymentLevelFilter = { ...(merchantAccountId ? { merchantAccountId } : {}), ...paymentWhereFilter }
+  // D9.1 (Codex r1 #7): la TPV guarda el comercio del serial también en un cobro en EFECTIVO; ese dinero no es de ese comercio.
+  // Un solo `AND` con las piezas: el filtro de tarjeta trae su propio `AND` y un spread lo pisaría.
+  const filtrosDePago: Prisma.PaymentWhereInput[] = [
+    ...(merchantAccountId ? [{ merchantAccountId }, NOT_DRAWER_CASH_WHERE] : []),
+    ...(paymentMethod ? [paymentWhereFilter] : []),
+  ]
+  const paymentLevelFilter: Prisma.PaymentWhereInput = filtrosDePago.length > 0 ? { AND: filtrosDePago } : {}
+  // El gemelo en SQL del filtro de comercio, para las consultas crudas (parámetro $4).
+  const merchantSqlClause = merchantAccountId ? ` AND p."merchantAccountId" = $4 AND NOT ${sqlEsEfectivoDelCajon('p')}` : ''
 
   logger.info('Calculating sales summary', { venueId, startDate, endDate, groupBy, merchantAccountId, paymentMethod, cardType })
 
@@ -1136,18 +1290,15 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   }
   const enElRango = <W extends object>(where: W) => dondeHoraRealEntre(where, parsedStartDate, parsedEndDate)
 
-  // When filtering by merchant, we scope orders to only those that have at
-  // least one Payment linked to the target merchantAccountId.
-  const merchantOrderFilter = merchantAccountId ? { payments: { some: { merchantAccountId } } } : {}
-
-  // Payment-level merchant filter
-  const merchantPaymentFilter = merchantAccountId ? { merchantAccountId } : {}
+  // Payment-level merchant filter for the by-method breakdowns below (which keep their own gate). D9.1 (Codex r2 #6): never the
+  // cash a TPV stamped with the merchant of its serial — same pieces as `filtrosDePago`, to go inside each `AND`.
+  const filtroDeComercio: Prisma.PaymentWhereInput[] = merchantAccountId ? [{ merchantAccountId }, NOT_DRAWER_CASH_WHERE] : []
 
   // Kick off the filtered payment-volume query in parallel with the rest of
   // the core-metric awaits below. We need this number only when deriving
   // totalCollected/netProfit under a filter; awaiting at the derived-metrics
   // block lets the other 8 queries run concurrently with this one.
-  const paymentVolumeForFilteredPromise: Promise<number> = isFiltered
+  const paymentVolumeForFilteredPromise: Promise<number> = vistaDeMovimientos
     ? prisma.payment
         .aggregate({
           where: enElRango({ venueId, status: 'COMPLETED' as const, ...paymentLevelFilter }),
@@ -1160,8 +1311,13 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // Calculate Core Metrics
   // ============================================================
 
-  // 1. Gross Sales, taxes and Discounts — ONE statement, ONE snapshot (exclude drafts, cancelled, deleted, refunded).
-  // Skipped under a payment-method filter — orders can't be honestly split per bucket.
+  // 1. Gross Sales, service charges, taxes, Discounts and the hidden giveaways — ONE statement, ONE snapshot.
+  // Skipped in the movement view (payment-method or merchant filter) — orders can't be honestly split per bucket.
+  //
+  // D6 (base de caja, founder 15-sep-2026): only accounts that are a SALE — collected (`sqlCuentaCobrada`), not a draft,
+  // cancelled or deleted, and not a gift-card sale. An open or half-paid account goes to «Sin cobrar» (query 4).
+  // D2: `serviceChargeAmount` is taxable revenue that adds to the account total (`computeStoredOrderTotal`), never inside the
+  // subtotal: it is its own sum and grossSales = items + serviceCosts.
   //
   // Discounts are the EFFECTIVE merchandise discount PER ORDER, LEAST(discountAmount, subtotal): since B2/B2c the header is
   // the Σ of the discount rows WITHOUT a cap (a cortesía on top of an account-level fixed discount leaves it above the
@@ -1170,64 +1326,80 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // order's excess eat another order's sales.
   // 🔴 The gross and the discount MUST come from the same statement (Codex B2c r2): read in two queries, a sale saved between
   // them counted its discount but not its gross ($100 + an interleaved $200 − $150 ⇒ net −$50).
-  const orderTotalsParams: Array<string | Date> = merchantAccountId
-    ? [venueId, parsedStartDate, parsedEndDate, merchantAccountId]
-    : [venueId, parsedStartDate, parsedEndDate]
-  const grossSalesResult = !isFiltered
+  //
+  // 1b. The hidden giveaways (Square-style Discounts & Comps), in the SAME statement and over the SAME accounts. Promotion lines
+  // and mobile/TABLE_SERVICE cortesías follow the NET convention: their giveaway is in neither Order.subtotal nor
+  // Order.discountAmount, so the report showed a $200-catalog combo sold at $99 as $99 gross / $0 discounts. Cobrar cortesías
+  // are excluded by total=0 (they already create an OrderDiscount COMP row — counting them here would double-count). Same
+  // lateral sums as the period query, so the bars keep summing to the headline.
+  //
+  // 🔴 «Sin cobrar» (query 4 de antes) sale del MISMO enunciado (Codex r2 #3): leídos en dos, una mesa liquidada entre las dos
+  // lecturas salía abierta en la primera y pagada en la segunda, y desaparecía de las dos. Una cuenta abierta que sus cobros ya
+  // cubren es venta y no está «Sin cobrar» (Codex r2 #5: la misma bandera para las dos, sin tolerancias distintas).
+  const grossSalesResult = !vistaDeMovimientos
     ? await prisma
-        .$queryRawUnsafe<Array<{ subtotal: Prisma.Decimal | null; tax: Prisma.Decimal | null; discounts: Prisma.Decimal | null }>>(
+        .$queryRawUnsafe<
+          Array<{
+            subtotal: Prisma.Decimal | null
+            service: Prisma.Decimal | null
+            tax: Prisma.Decimal | null
+            discounts: Prisma.Decimal | null
+            promo_discount_cents: Prisma.Decimal | null
+            comp_given_away: Prisma.Decimal | null
+            deferred: Prisma.Decimal | null
+            unpaid: Prisma.Decimal | null
+            cuentas: number | null
+          }>
+        >(
           `
-      SELECT SUM(subtotal + ${sqlImpuestoQueSeCobraAparte()}) AS subtotal, SUM("taxAmount") AS tax, SUM(LEAST("discountAmount", subtotal)) AS discounts
+      SELECT SUM(subtotal + ${sqlImpuestoQueSeCobraAparte()}) FILTER (WHERE cuenta.es_venta) AS subtotal,
+             SUM("serviceChargeAmount") FILTER (WHERE cuenta.es_venta) AS service,
+             SUM("taxAmount") FILTER (WHERE cuenta.es_venta) AS tax,
+             SUM(LEAST("discountAmount", subtotal)) FILTER (WHERE cuenta.es_venta) AS discounts,
+             SUM(promo."discount_cents") FILTER (WHERE cuenta.es_venta) AS promo_discount_cents,
+             SUM(comp."given_away") FILTER (WHERE cuenta.es_venta) AS comp_given_away,
+             SUM("remainingBalance") FILTER (WHERE cuenta.abierta) AS deferred,
+             SUM(cuenta.falta) FILTER (WHERE cuenta.abierta AND NOT cuenta.es_venta) AS unpaid,
+             (COUNT(*) FILTER (WHERE cuenta.abierta AND NOT cuenta.es_venta AND cuenta.falta > 0.005))::int AS cuentas
       FROM "Order"
+      CROSS JOIN LATERAL (
+        SELECT ${sqlCuentaCobrada('"Order"')} AS es_venta,
+               "Order"."paymentStatus" IN ('PENDING', 'PARTIAL') AS abierta,
+               (CASE WHEN "Order"."paymentStatus" IN ('PENDING', 'PARTIAL') THEN ${sqlLoQueFaltaCobrar('"Order"')} ELSE 0 END) AS falta
+      ) cuenta
+      LEFT JOIN LATERAL (
+        SELECT SUM("discountCents") AS discount_cents FROM "OrderPromotion" WHERE "orderId" = "Order".id
+      ) promo ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT SUM("discountAmount") AS given_away FROM "OrderItem" WHERE "orderId" = "Order".id AND "isCortesia" = TRUE AND total = 0
+      ) comp ON TRUE
       WHERE "venueId" = $1
         AND ${sqlRangoHoraReal('"Order"', utcTsParam(2), utcTsParam(3))}
         AND status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
-        AND "paymentStatus" NOT IN ('REFUNDED')
         AND ${sqlOrdenSinTarjetasTexto('"Order".id')}
-        ${merchantAccountId ? 'AND id IN (SELECT "orderId" FROM "Payment" WHERE "merchantAccountId" = $4)' : ''}
     `,
-          ...orderTotalsParams,
+          venueId,
+          parsedStartDate,
+          parsedEndDate,
         )
         .then(rows => ({
           subtotal: Number(rows[0]?.subtotal ?? 0),
+          serviceCosts: Number(rows[0]?.service ?? 0),
           taxAmount: Number(rows[0]?.tax ?? 0),
           discounts: Number(rows[0]?.discounts ?? 0),
+          promoDiscountCents: Number(rows[0]?.promo_discount_cents ?? 0),
+          hiddenCompPesos: Number(rows[0]?.comp_given_away ?? 0),
+          deferred: Number(rows[0]?.deferred ?? 0),
+          unpaid: Number(rows[0]?.unpaid ?? 0),
+          cuentas: Number(rows[0]?.cuentas ?? 0),
         }))
     : null
 
   // 2. Items - Using Order.subtotal (more reliable than OrderItem aggregation
   // because some orders synced from POS don't have OrderItem records)
   // NOTE: items = grossSalesResult.subtotal (already queried above)
-
-  // 1b. Hidden giveaways (Square-style Discounts & Comps). Promotion lines and
-  // mobile/TABLE_SERVICE cortesías follow the NET convention: their giveaway is
-  // in neither Order.subtotal nor Order.discountAmount, so the report showed a
-  // $200-catalog combo sold at $99 as $99 gross / $0 discounts. Both aggregates
-  // scope through the SAME order filter as grossSalesResult so the numbers stay
-  // coherent. Cobrar cortesías are excluded by total=0 (they already create an
-  // OrderDiscount COMP row — counting them here would double-count).
-  const giveawayOrderScope = enElRango({
-    venueId,
-    status: { notIn: ['PENDING', 'CANCELLED', 'DELETED'] as any },
-    paymentStatus: { notIn: ['REFUNDED'] as any },
-    ...merchantOrderFilter,
-    // Tarjetas de regalo (spec §7): la cuenta de tarjetas no es mercancía (además no admite promociones ni cortesías, A5).
-    ...WHERE_ORDEN_SIN_TARJETAS,
-  }) as Prisma.OrderWhereInput
-  const [promoGiveawayResult, compGiveawayResult] = !isFiltered
-    ? await Promise.all([
-        prisma.orderPromotion.aggregate({
-          where: { order: giveawayOrderScope },
-          _sum: { discountCents: true },
-        }),
-        prisma.orderItem.aggregate({
-          where: { ...HIDDEN_COMP_LINE_WHERE, order: giveawayOrderScope },
-          _sum: { discountAmount: true },
-        }),
-      ])
-    : [null, null]
-  const promoDiscountCents = Number(promoGiveawayResult?._sum.discountCents || 0)
-  const hiddenCompPesos = Number(compGiveawayResult?._sum.discountAmount || 0)
+  const promoDiscountCents = grossSalesResult?.promoDiscountCents ?? 0
+  const hiddenCompPesos = grossSalesResult?.hiddenCompPesos ?? 0
 
   // 3. Refunds — sum of refund Payments (type=REFUND, status=COMPLETED).
   // The legacy query filtered `status='REFUNDED'` which matched a handful of
@@ -1246,46 +1418,66 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       // resta, igual que su venta no se suma arriba. Sin esto, devolver un pedido rechazado que el negocio había cobrado a mano en
       // su Stripe dejaba las ventas netas en −$250. Codex r4 H5: sólo sin filtro de método; filtrada, la vista es de movimientos
       // (ventas netas nulas, cobrado = suma con signo) y la devolución que sí salió se ve.
-      order: isFiltered
-        ? WHERE_ORDEN_SIN_TARJETAS
-        : { ...WHERE_ORDEN_SIN_TARJETAS, status: { notIn: ['CANCELLED', 'DELETED'] as Array<'CANCELLED' | 'DELETED'> } },
+      // Codex r2 #7: en la vista de movimientos (método o comercio) TODA devolución que salió, también la cancelación de una venta de
+      // tarjetas de regalo: «Total cobrado» ahí ya la resta (suma con signo) y sin esto «Devoluciones» no la explicaba.
+      ...(vistaDeMovimientos
+        ? {}
+        : {
+            order: {
+              ...WHERE_ORDEN_SIN_TARJETAS,
+              status: { notIn: ['CANCELLED', 'DELETED'] as Array<'CANCELLED' | 'DELETED'> },
+            },
+          }),
     }),
     _sum: {
       amount: true,
       tipAmount: true,
+      // D6 (Codex r1 #2): lo que una devolución de un ABONO volvió a deber (D19). No devuelve mercancía: la cuenta sigue abierta y
+      // lo debe en «Sin cobrar». En la vista de ventas no se resta (antes: $100 abonados $40 y devueltos ⇒ −$40 de venta neta).
+      reopenedAmount: true,
+      // Codex r2 #4: y la propina de ese abono, que también vuelve a deberse.
+      reopenedTipAmount: true,
     },
     _count: true,
   })
 
-  // 4. Deferred Sales - Orders with PENDING or PARTIAL payment status
-  // Skipped under a payment-method filter (order-derived).
-  const deferredResult = !isFiltered
-    ? await prisma.order.aggregate({
-        where: enElRango({
-          venueId,
-          status: { notIn: ['PENDING', 'CANCELLED', 'DELETED'] as Array<'PENDING' | 'CANCELLED' | 'DELETED'> },
-          paymentStatus: { in: ['PENDING', 'PARTIAL'] as Array<'PENDING' | 'PARTIAL'> },
-          ...merchantOrderFilter,
-          ...WHERE_ORDEN_SIN_TARJETAS,
-        }) as Prisma.OrderWhereInput,
-        _sum: {
-          remainingBalance: true,
-        },
-        _count: true,
-      })
-    : null
+  // 4. Las cuentas abiertas («Ventas diferidas» y, D6, «Sin cobrar») salen del enunciado 1 (Codex r2 #3).
+  const openAccountsResult = grossSalesResult
 
   // 5. Tips - From completed payments (more accurate than order tips)
-  const tipsResult = await prisma.payment.aggregate({
-    where: enElRango({
-      venueId,
-      status: 'COMPLETED' as const,
-      ...paymentLevelFilter,
-    }),
-    _sum: {
-      tipAmount: true,
-    },
-  })
+  // D6 (Codex r4 #1): en la vista de ventas, sin los cobros de una cuenta abierta que todavía no es venta (un abono): su propina,
+  // su comisión y su transacción entran cuando la cuenta se cobra completa, igual que su venta. Ahí, propinas y transacciones salen
+  // de un solo enunciado en SQL (el predicado no cabe en Prisma); en la vista de movimientos, como siempre.
+  const cobrosDeVentas = !vistaDeMovimientos
+    ? await prisma
+        .$queryRawUnsafe<Array<{ tips: Prisma.Decimal | null; cobros: number | null }>>(
+          `
+    SELECT SUM(p."tipAmount") AS tips,
+           (COUNT(*) FILTER (WHERE p.type IS DISTINCT FROM 'REFUND' AND ${sqlOrdenSinTarjetasTexto('p."orderId"')}))::int AS cobros
+    FROM "Payment" p
+    WHERE p."venueId" = $1
+      AND ${sqlRangoHoraReal('p', utcTsParam(2), utcTsParam(3))}
+      AND p."status" = 'COMPLETED'
+      AND NOT ${sqlCobroDeCuentaSinCobrar('p')}
+  `,
+          venueId,
+          parsedStartDate,
+          parsedEndDate,
+        )
+        .then(rows => ({ tips: Number(rows[0]?.tips ?? 0), cobros: Number(rows[0]?.cobros ?? 0) }))
+    : null
+  const tipsResult = vistaDeMovimientos
+    ? await prisma.payment.aggregate({
+        where: enElRango({
+          venueId,
+          status: 'COMPLETED' as const,
+          ...paymentLevelFilter,
+        }),
+        _sum: {
+          tipAmount: true,
+        },
+      })
+    : null
 
   // 6. Platform Fees (Avoqado fees) - From TransactionCost.venueChargeAmount
   // (joined via Payment because TransactionCost has no venueId column).
@@ -1295,7 +1487,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // buildPaymentSqlClause — only enum-derived literals (CASH/CREDIT_CARD/etc),
   // never user-supplied strings, so it is safe to concatenate.
   const platformFeesSqlClause = buildPaymentSqlClause(paymentMethod, cardType, 'p')
-  const platformFeesMerchantClause = merchantAccountId ? ' AND p."merchantAccountId" = $4' : ''
+  const platformFeesMerchantClause = merchantSqlClause
   // Codex r4 H1: un cobro sin TransactionCost (Stripe de pedidos en línea, ligas) trae su comisión en `Payment.feeAmount`; las filas de
   // costo de siempre se conservan todas (cualquier estado del pago), y sólo se agregan los cobros COMPLETED sin costo.
   const platformFeesQuery = `
@@ -1305,6 +1497,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     WHERE p."venueId" = $1
       AND ${sqlRangoHoraReal('p', utcTsParam(2), utcTsParam(3))}
       AND (tc."id" IS NOT NULL OR p."status" = 'COMPLETED')
+      ${vistaDeMovimientos ? '' : `AND NOT ${sqlCobroDeCuentaSinCobrar('p')}`}
       ${platformFeesMerchantClause}
       ${platformFeesSqlClause}
   `
@@ -1315,7 +1508,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
 
   // 7. Staff Commissions (paid to employees) - From CommissionCalculation
   // CommissionCalculation has paymentId → Payment.merchantAccountId for filtering
-  const hasPaymentFilter = !!merchantAccountId || isFiltered
+  const hasPaymentFilter = vistaDeMovimientos
   const staffCommissionsResult = filters.skipStaffCommissions
     ? null
     : await prisma.commissionCalculation.aggregate({
@@ -1323,24 +1516,56 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           venueId,
           createdAt: dateFilter.createdAt,
           status: { not: 'VOIDED' },
-          ...(hasPaymentFilter ? { payment: paymentLevelFilter } : {}),
+          // Carril C2: las comisiones del personal cuentan también las ventas pagadas con saldo (ver `OpcionesDelFiltroDeMetodo`).
+          // D9.1: con comercio, sin el efectivo del cajón que la terminal guardó con ese comercio (como el resto de la vista).
+          ...(hasPaymentFilter
+            ? {
+                payment: {
+                  AND: [
+                    ...(merchantAccountId ? [{ merchantAccountId }, NOT_DRAWER_CASH_WHERE] : []),
+                    ...(paymentMethod ? [buildPaymentWhereFilter(paymentMethod, cardType, { incluirMediosDeSistema: true })] : []),
+                  ],
+                },
+              }
+            : {}),
         },
         _sum: {
           netCommission: true,
         },
       })
 
-  // 8. Transaction Count - Completed payments
+  // 8. Transaction Count - Completed CHARGES
   // Tarjetas de regalo (B5 r1, M-2): sin filtro de método, los cobros se cuentan como las ventas brutas, sin los de cuentas de
   // tarjetas (lo pagado con saldo SÍ cuenta). Con filtro es la vista de dinero y no se toca.
-  const transactionCountResult = await prisma.payment.count({
-    where: enElRango({
-      venueId,
-      status: 'COMPLETED' as const,
-      ...paymentLevelFilter,
-      ...(!isFiltered ? { AND: [{ order: WHERE_ORDEN_SIN_TARJETAS }] } : {}),
-    }),
-  })
+  // D10.1 (21-nov-2026): una devolución también es COMPLETED, pero no es una transacción de venta: «Ventas brutas $100 · 2
+  // transacciones» con un cobro y una devolución. Se cuentan cobros; las devoluciones llevan su conteo aparte (`refundCount`).
+  // NULL-safe: un cobro viejo con `type` NULL sí cuenta (Prisma `not` sola deja fuera los NULL).
+  const transactionCountResult = cobrosDeVentas
+    ? cobrosDeVentas.cobros
+    : await prisma.payment.count({
+        where: enElRango({
+          venueId,
+          status: 'COMPLETED' as const,
+          AND: [...filtrosDePago, { OR: [{ type: null }, { type: { not: 'REFUND' as const } }] }],
+        }),
+      })
+
+  // 9. D1 · Comisiones de terceros (Rappi, Uber Eats, DiDi y los tipos de pago propios con comisión): la congelada en cada cobro, con
+  // signo (el ajuste del proveedor la regresa en negativo; una devolución manual no hereda comisión). Aparte de las de Avoqado: en
+  // ese carril `feeAmount` es 0, así que no hay doble resta. Vista de ventas: sólo la de cobros de cuentas que son venta.
+  const tenderCommissionsRows = await prisma.$queryRawUnsafe<Array<{ total: Prisma.Decimal | null }>>(
+    `
+    SELECT SUM(${sqlComisionDeTerceros('p', vistaDeMovimientos)}) AS total
+    FROM "Payment" p
+    WHERE p."venueId" = $1
+      AND ${sqlRangoHoraReal('p', utcTsParam(2), utcTsParam(3))}
+      AND p."status" = 'COMPLETED'
+      AND p."tenderCommissionAmount" IS NOT NULL
+      ${merchantSqlClause}
+      ${platformFeesSqlClause}
+  `,
+    ...platformFeesParams,
+  )
 
   // ============================================================
   // Calculate Derived Metrics
@@ -1355,7 +1580,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // Discounts — folding the SAME amount into both keeps netSales untouched.
   const { grossSales, items, discounts } = foldGiveawaysIntoSummary(
     {
-      grossSales: grossSalesResult ? grossSalesResult.subtotal : null,
+      grossSales: grossSalesResult ? grossSalesResult.subtotal + grossSalesResult.serviceCosts : null,
       items: grossSalesResult ? grossSalesResult.subtotal : null,
       discounts: grossSalesResult ? grossSalesResult.discounts : null,
     },
@@ -1363,18 +1588,43 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     hiddenCompPesos,
   )
   const taxes = grossSalesResult ? grossSalesResult.taxAmount : null
-  const deferredSales = deferredResult ? Number(deferredResult._sum.remainingBalance || 0) : null
-  // Service costs = any revenue beyond item sales (delivery fees, service charges, etc.)
-  // Currently no separate serviceCharge field in Order schema, so this is derived
-  const serviceCosts = grossSalesResult ? 0 : null
+  const deferredSales = openAccountsResult ? openAccountsResult.deferred : null
+  const unpaidSales = openAccountsResult ? round2(openAccountsResult.unpaid) : null
+  const unpaidOrders = openAccountsResult ? openAccountsResult.cuentas : null
+  // D2: los cargos por servicio de las mismas cuentas (`Order.serviceChargeAmount`). Ya están dentro de `grossSales`.
+  const serviceCosts = grossSalesResult ? grossSalesResult.serviceCosts : null
 
   // Payment-derived metrics — always computed (filter or not).
   // Refund amounts are stored negative on Payment.amount/tipAmount. Sum both so
   // the total includes the tip portion (tip split fix 2026-04-19), take abs so
   // downstream consumers treat "refunds" as a positive magnitude.
-  const refunds = Math.abs(Number(refundsResult._sum.amount || 0) + Number(refundsResult._sum.tipAmount || 0))
-  const tips = Number(tipsResult._sum.tipAmount || 0)
+  // D6 (Codex r1 #2): en la vista de ventas, la parte de una devolución que sólo regresó un ABONO (y volvió a deberse) no es
+  // devolución de venta. En la vista de movimientos sí: ese dinero salió.
+  const abonosDevueltos = vistaDeMovimientos
+    ? 0
+    : Number(refundsResult._sum.reopenedAmount || 0) + Number(refundsResult._sum.reopenedTipAmount || 0)
+  const refunds = Math.max(
+    0,
+    Math.abs(Number(refundsResult._sum.amount || 0) + Number(refundsResult._sum.tipAmount || 0)) - abonosDevueltos,
+  )
+  // Codex r4 #2: en la vista de ventas no cuentan las devoluciones que sólo regresaron un abono (su importe tampoco cuenta).
+  const devolucionesDeAbono = vistaDeMovimientos
+    ? 0
+    : await prisma.payment.count({
+        where: enElRango({
+          venueId,
+          type: 'REFUND' as const,
+          reopenedAmount: { gt: 0 },
+          order: {
+            ...WHERE_ORDEN_SIN_TARJETAS,
+            status: { notIn: ['CANCELLED', 'DELETED'] as Array<'CANCELLED' | 'DELETED'> },
+          },
+        }),
+      })
+  const refundCount = Math.max(0, Number(refundsResult._count || 0) - Number(devolucionesDeAbono || 0))
+  const tips = cobrosDeVentas ? cobrosDeVentas.tips : Number(tipsResult?._sum.tipAmount || 0)
   const platformFees = Number(platformFeesRows[0]?.sum_fee || 0)
+  const tenderCommissions = round2(Number(tenderCommissionsRows[0]?.total ?? 0))
   const staffCommissions = Number(staffCommissionsResult?._sum.netCommission || 0)
 
   // Net Sales = Gross Sales - Discounts - Refunds (null when filtered)
@@ -1386,22 +1636,22 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // parallel with the other core-metric queries.
   const paymentVolumeForFiltered = await paymentVolumeForFilteredPromise
 
-  // Total Collected = Net Sales + Tips - Platform Fees
+  // Total Collected = Net Sales + Tips - Platform Fees - Third-party fees (D1)
   // Mexico model: taxes are already included in prices, NOT added on top
   // This represents the actual cash flow (money in account after platform fees)
-  const totalCollected = isFiltered
-    ? paymentVolumeForFiltered + tips - platformFees
+  const totalCollected = vistaDeMovimientos
+    ? paymentVolumeForFiltered + tips - platformFees - tenderCommissions
     : netSales !== null
-      ? netSales + tips - platformFees
+      ? netSales + tips - platformFees - tenderCommissions
       : 0
 
-  // Net Profit = Net Sales - Platform Fees - Staff Commissions
+  // Net Profit = Net Sales - Platform Fees - Third-party fees - Staff Commissions
   // This is the true profit after all costs to the venue
   // Note: Tips are NOT subtracted here because they are pass-through to employees
-  const netProfit = isFiltered
-    ? paymentVolumeForFiltered - platformFees - staffCommissions
+  const netProfit = vistaDeMovimientos
+    ? paymentVolumeForFiltered - platformFees - tenderCommissions - staffCommissions
     : netSales !== null
-      ? netSales - platformFees - staffCommissions
+      ? netSales - platformFees - tenderCommissions - staffCommissions
       : 0
 
   const summary: SalesSummaryMetrics = {
@@ -1420,6 +1670,10 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     totalCollected,
     netProfit,
     transactionCount: transactionCountResult,
+    unpaidSales,
+    unpaidOrders,
+    tenderCommissions,
+    refundCount,
   }
 
   // ⚠️ MindForm legacy QR bridge. Mirrors the gate in
@@ -1432,7 +1686,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // A filter that admits NO legacy row (OTHER, CARD → DEBIT / AMEX / INTERNATIONAL) never asks the bridge: nothing of it can
   // be part of that total, so its outage cannot make the total incomplete either. Asking anyway copied the bridge failure
   // into a total it does not feed — a false "may be incomplete" (Codex r2 #2). Same gate as the period query below.
-  if (sumsLegacyQrPayments(venueId) && legacyAdmission(paymentMethod, cardType).include) {
+  // D9.1 (21-nov): with a merchant chosen nothing of the legacy QR belongs to it (it has no merchant account): not summed, not asked.
+  if (sumsLegacyQrPayments(venueId) && legacyAdmission(paymentMethod, cardType).include && !merchantAccountId) {
     legacyAggregate = { amount: 0, tips: 0, count: 0 }
     const paginas = await forEachLegacyPaymentPage(
       { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
@@ -1457,7 +1712,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
 
       // Order-derived totals only when NOT filtered (legacy sold real food,
       // so grossSales/netSales should include it on the unfiltered view).
-      if (!isFiltered) {
+      if (!vistaDeMovimientos) {
         summary.grossSales = (summary.grossSales ?? 0) + legacyAggregate.amount
         summary.items = (summary.items ?? 0) + legacyAggregate.amount
         summary.netSales = (summary.netSales ?? 0) + legacyAggregate.amount
@@ -1469,7 +1724,9 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // Tarjetas de regalo (spec §7): «tarjetas cargadas» y «pagado con saldo», aparte de la mercancía. Sólo sin filtro de método.
   // ============================================================
   const tarjetas = !isFiltered ? await computeGiftCardFigures(venueId, parsedStartDate, parsedEndDate, merchantAccountId) : null
-  if (tarjetas) {
+  // D9.1: en la vista de movimientos (también con comercio) la cabecera no lleva cifras de orden; «Total cobrado» ahí SÍ trae el
+  // dinero de una venta de tarjetas, así que el renglón «cargadas (no es venta)» se contradiría. Los desgloses de abajo las siguen usando.
+  if (tarjetas && !vistaDeMovimientos) {
     summary.giftCardLoads = round2(tarjetas.loads - tarjetas.loadRefunds)
     summary.giftCardLoadsCount = tarjetas.loadsCount
     summary.paidWithGiftCardBalance = round2(tarjetas.balancePaid - tarjetas.balanceReversals)
@@ -1490,9 +1747,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       where: enElRango({
         venueId,
         status: 'COMPLETED' as const,
-        ...merchantPaymentFilter,
         // Tarjetas de regalo: lo pagado con saldo no se mezcla con OTHER (va en `giftCardBalanceBreakdown`).
-        AND: [WHERE_COBRO_NO_ES_SALDO_DE_REGALO],
+        AND: [WHERE_COBRO_NO_ES_SALDO_DE_REGALO, ...filtroDeComercio],
       }),
       _sum: {
         amount: true,
@@ -1537,13 +1793,12 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         where: enElRango({
           venueId,
           status: 'COMPLETED' as const,
-          ...merchantPaymentFilter,
-          AND: [WHERE_COBRO_NO_ES_SALDO_DE_REGALO, { order: WHERE_ORDEN_SIN_TARJETAS }],
+          AND: [WHERE_COBRO_NO_ES_SALDO_DE_REGALO, { order: WHERE_ORDEN_SIN_TARJETAS }, ...filtroDeComercio],
         }),
         _sum: { amount: true, tipAmount: true },
         _count: true,
       })
-      const saldo = summary.paidWithGiftCardBalance ?? 0
+      const saldo = round2(tarjetas.balancePaid - tarjetas.balanceReversals)
       const ventasPorMetodo = ventas.map(p => ({
         method: String(p.method),
         amount: Number(p._sum.amount || 0) + Number(p._sum.tipAmount || 0),
@@ -1606,6 +1861,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       tenderCommissions: number
       cancelledOrderRefunds: number
       platformFeesCents: number
+      foreignAmount: number
+      foreignCount: number
     }
     const newAcc = (): Acc => ({
       amount: 0,
@@ -1618,6 +1875,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       tenderCommissions: 0,
       cancelledOrderRefunds: 0,
       platformFeesCents: 0,
+      foreignAmount: 0,
+      foreignCount: 0,
     })
     const buckets = new Map<BreakdownBucket, Acc>()
     const subBuckets = new Map<CardSubBucket, Acc>()
@@ -1642,7 +1901,10 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     // Es DINERO, como `byPaymentMethod`: ni lo pagado con saldo ni la devolución a saldo a favor (S8b: no salió de la caja ni del banco).
     // Carril C: cada grupo trae además lo que decide su DESTINO (`destinationOf`) y su comercio; la cuenta (`Order`) y el cobro
     // original de una devolución se unen 1:1 por llave primaria, así que no multiplican filas.
-    const merchantSql = merchantAccountId ? Prisma.sql`AND p."merchantAccountId" = ${merchantAccountId}` : Prisma.empty
+    // D9.1 (carril C): con comercio, tampoco el efectivo que la TPV guardó con su comercio (no sale en «Ya en tu mano»).
+    const merchantSql = merchantAccountId
+      ? Prisma.sql`AND p."merchantAccountId" = ${merchantAccountId} AND NOT ${Prisma.raw(sqlEsEfectivoDelCajon('p'))}`
+      : Prisma.empty
     // Sólo literales de enum (`buildPaymentSqlClause`), nunca texto del usuario; vacío sin filtro de método.
     const metodoSql = Prisma.raw(buildPaymentSqlClause(paymentMethod, cardType, 'p'))
     type GroupRow = { method: string; cardBrand: string | null; isIntl: boolean; count: number }
@@ -1652,9 +1914,11 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           GroupRow & {
             fundsFlow: string | null
             tenderCountsAsCash: boolean | null
-            hasTender: boolean
+            tenderTypeId: string | null
             merchantAccountId: string | null
             enLinea: boolean
+            moneda: string
+            cortesias: number
             amount: string
             tips: string
             fees: string
@@ -1667,21 +1931,24 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           }
         >
       >`
+        WITH ${sqlSesionesExtranjeras(venueId)}
         SELECT p."method"::text AS "method",
                p."cardBrand"::text AS "cardBrand",
                ${IS_INTERNATIONAL_SQL} AS "isIntl",
                p."fundsFlow"::text AS "fundsFlow",
                p."tenderCountsAsCash" AS "tenderCountsAsCash",
-               (p."tenderTypeId" IS NOT NULL) AS "hasTender",
+               p."tenderTypeId" AS "tenderTypeId",
                p."merchantAccountId" AS "merchantAccountId",
                (${Prisma.raw(sqlEnLineaDeAvoqado('p'))} OR ${Prisma.raw(sqlEnLineaDeAvoqado('orig'))}) AS "enLinea",
+               ${Prisma.raw(SQL_MONEDA_DEL_COBRO)} AS "moneda",
                COUNT(*)::int AS "count",
                COALESCE(SUM(p."amount"), 0)::text AS "amount",
                COALESCE(SUM(p."tipAmount"), 0)::text AS "tips",
                COALESCE(SUM(${Prisma.raw(SQL_COMISION_DEL_COBRO)}), 0)::text AS "fees",
                COALESCE(SUM(ROUND((${Prisma.raw(SQL_COMISION_DEL_COBRO)})::numeric, 2)), 0)::text AS "feesCents",
                COALESCE(SUM(p."amount" + p."tipAmount") FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND'), 0)::text AS "chargedAmount",
-               (COUNT(*) FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND'))::int AS "chargedCount",
+               (COUNT(*) FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND' AND NOT (p."amount" = 0 AND p."tipAmount" = 0)))::int AS "chargedCount",
+               (COUNT(*) FILTER (WHERE p."amount" = 0 AND p."tipAmount" = 0))::int AS "cortesias",
                COALESCE(-SUM(p."amount" + p."tipAmount") FILTER (WHERE p."type" = 'REFUND'), 0)::text AS "refundAmount",
                COALESCE(SUM(COALESCE(p."tenderCommissionAmount", 0)), 0)::text AS "tenderCommissions",
                COALESCE(-SUM(p."amount" + p."tipAmount") FILTER (WHERE p."type" = 'REFUND' AND o."status" IN ('CANCELLED', 'DELETED')), 0)::text AS "cancelledOrderRefunds"
@@ -1689,6 +1956,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
         LEFT JOIN "Order" o ON o.id = p."orderId"
         LEFT JOIN "Payment" orig ON p."type" = 'REFUND' AND orig.id = p."processorData" ->> 'originalPaymentId' AND orig."venueId" = p."venueId"
+        ${Prisma.raw(SQL_UNE_SESIONES_EXTRANJERAS)}
         WHERE p."venueId" = ${venueId}
           AND ${sqlRangoHoraRealSql('p', parsedStartDate, parsedEndDate)}
           AND p."status" = 'COMPLETED'
@@ -1697,7 +1965,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           AND ${sqlCobroNoEsSaldoDeRegalo('p')}
           AND ${sqlPaymentIsNotExchangeCredit('p')}
           AND ${sqlNoEsDelMedioSaldoAFavor('p')}
-        GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+        GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
       `,
       wantsBuckets
         ? prisma.$queryRaw<Array<GroupRow & { refunds: string }>>`
@@ -1735,6 +2003,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       other: nuevoDestino(),
     }
     const porComercio = new Map<string, MerchantSums>()
+    const porTipo = new Map<string, OtherTypeBreakdown>()
+    const enOtraMoneda = new Map<string, ForeignCurrencyMovement>()
     let tenderCommissionsTotal = 0
     for (const row of completedGroups) {
       const { bucket, sub } = bucketOf(row.method, row.cardBrand, row.isIntl)
@@ -1746,22 +2016,39 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       const chargedCount = Number(row.chargedCount)
       const refunded = Number(row.refundAmount)
 
+      // Los campos de siempre del cajón (`amount`, `count`, `tips`, `platformFees`, sus %) no cambian: siguen contando todo, para
+      // que «Métodos de pago», `cardTypes` y el total de arriba sigan siendo la misma población (Codex r1 del carril C2, #4).
       const b = ensure(buckets, bucket)
       b.amount += amt + tip // tips-inclusive, matching byPaymentMethod
       b.tips += tip
       b.count += count
       b.platformFees += fee
-      b.chargedAmount += charged
-      b.chargedCount += chargedCount
-      b.tenderCommissions += Number(row.tenderCommissions)
-      b.cancelledOrderRefunds += Number(row.cancelledOrderRefunds)
-
-      if (sub) {
-        const s = ensure(subBuckets, sub)
+      const s = sub ? ensure(subBuckets, sub) : null
+      if (s) {
         s.amount += amt + tip
         s.tips += tip
         s.count += count
         s.platformFees += fee
+      }
+
+      // D17: un cobro en otra moneda no se suma como pesos en el estado: va aparte, en su moneda, y el cajón dice cuánto de su
+      // movimiento es de otra moneda (`foreignAmount`/`foreignCount`) para que el estado lo descuente.
+      if (row.moneda !== 'MXN') {
+        const f = enOtraMoneda.get(row.moneda) ?? { currency: row.moneda, net: 0, transactionCount: 0, refundCount: 0 }
+        f.net += amt + tip
+        f.transactionCount += chargedCount
+        f.refundCount += count - chargedCount - Number(row.cortesias)
+        enOtraMoneda.set(row.moneda, f)
+        b.foreignAmount += amt + tip
+        b.foreignCount += count
+        continue
+      }
+
+      b.chargedAmount += charged
+      b.chargedCount += chargedCount
+      b.tenderCommissions += Number(row.tenderCommissions)
+      b.cancelledOrderRefunds += Number(row.cancelledOrderRefunds)
+      if (s) {
         s.chargedAmount += charged
         s.chargedCount += chargedCount
         s.platformFeesCents += Number(row.feesCents)
@@ -1770,14 +2057,23 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       // El estado de cuenta usa la comisión redondeada POR COBRO, como la liquidación (`proyectarComisionYNeto`): así banco, «Por
       // comercio» y el calendario no se separan un centavo (Codex r3 #4). `platformFees` del cajón sigue siendo la suma cruda.
       const feeCents = Number(row.feesCents)
-      const destino = destinationOf({ ...row, enLinea: !!row.enLinea, hasMerchant: row.merchantAccountId != null })
+      const destino = destinationOf({
+        ...row,
+        hasTender: row.tenderTypeId != null,
+        enLinea: !!row.enLinea,
+        hasMerchant: row.merchantAccountId != null,
+      })
       const d = destinos[destino]
       d.collected += amt + tip
       d.platformFee += feeCents
       d.refunds += refunded
-      d.refundCount += count - chargedCount
-      d.transactionCount += count
-      if (destino === 'terminal' && row.merchantAccountId) {
+      // Un cobro de $0 (una cuenta cubierta por cortesía o descuento, en la TPV o en el POS) no es dinero: no cuenta como transacción.
+      const cobros = count - Number(row.cortesias)
+      d.refundCount += count - chargedCount - Number(row.cortesias)
+      d.transactionCount += cobros
+      // «Por comercio» con los mismos conteos que su destino: un cobro de $0 no es un movimiento (Codex r5 del carril C2), pero su
+      // comisión fija sí es dinero y queda en los dos (r6). Sólo un $0 sin comisión no abre un comercio.
+      if (destino === 'terminal' && row.merchantAccountId && (cobros > 0 || Math.abs(feeCents) >= 0.005)) {
         const m = porComercio.get(row.merchantAccountId) ?? {
           merchantAccountId: row.merchantAccountId,
           collected: 0,
@@ -1788,10 +2084,29 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         }
         m.collected += amt + tip
         m.fee += feeCents
-        m.txns += count
+        m.txns += cobros
         m.refunds += refunded
-        m.refundCount += count - chargedCount
+        m.refundCount += count - chargedCount - Number(row.cortesias)
         porComercio.set(row.merchantAccountId, m)
+      }
+      if (destino === 'other' && cobros > 0) {
+        // D12.3: «otros» por tipo de pago propio (su id; el nombre se pone abajo, el de hoy) o, sin tipo, por método (una tarjeta
+        // de otra terminal es CARD).
+        const key = row.tenderTypeId ?? (bucket === 'CARD' ? 'CARD' : row.method)
+        const t = porTipo.get(key) ?? {
+          key,
+          label: null,
+          method: row.tenderTypeId ? row.method : key,
+          ...nuevoDestino(),
+          tenderCommissions: 0,
+        }
+        t.collected += amt + tip
+        t.platformFee += feeCents
+        t.refunds += refunded
+        t.refundCount += count - chargedCount - Number(row.cortesias)
+        t.transactionCount += cobros
+        t.tenderCommissions += Number(row.tenderCommissions)
+        porTipo.set(key, t)
       }
       tenderCommissionsTotal += Number(row.tenderCommissions)
     }
@@ -1820,6 +2135,15 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       acc.chargedCount += legacyAggregate.count
       destinos.other.collected += legacyAggregate.amount + legacyAggregate.tips
       destinos.other.transactionCount += legacyAggregate.count
+      porTipo.set('QR_LEGACY', {
+        key: 'QR_LEGACY',
+        label: null,
+        method: 'QR_LEGACY',
+        ...nuevoDestino(),
+        collected: legacyAggregate.amount + legacyAggregate.tips,
+        transactionCount: legacyAggregate.count,
+        tenderCommissions: 0,
+      })
     }
 
     if (wantsBuckets) {
@@ -1854,6 +2178,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
             chargedCount: b.chargedCount,
             tenderCommissions: b.tenderCommissions,
             cancelledOrderRefunds: b.cancelledOrderRefunds,
+            ...(b.foreignCount > 0 ? { foreignAmount: b.foreignAmount, foreignCount: b.foreignCount } : {}),
           }
 
           // Attach card sub-buckets (only present types), percentages relative to
@@ -1881,6 +2206,23 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         })
     }
 
+    // D12.3: el nombre de cada tipo de pago propio, el de HOY (Rappi/Uber guardan el cobro sin `tenderLabel`, y un tipo renombrado
+    // tiene nombres viejos en sus cobros: Codex r1 del carril C2, #3). Una lectura por los ids que aparecieron.
+    const idsDeTipos = Array.from(porTipo.values())
+      .filter(t => t.key !== t.method)
+      .map(t => t.key)
+    if (wantsStatement && idsDeTipos.length > 0) {
+      const nombres = await prisma.venueTenderType.findMany({
+        where: { venueId, id: { in: idsDeTipos } },
+        select: { id: true, name: true },
+        take: idsDeTipos.length,
+      })
+      for (const n of nombres) {
+        const t = porTipo.get(n.id)
+        if (t) t.label = n.name
+      }
+    }
+
     if (wantsStatement) {
       // Al centavo, como un comercio: cobrado y comisión redondeados, y el neto es su resta (lo que el dueño ve cuadra).
       const redondeado = (d: MoneyDestination): MoneyDestination => {
@@ -1894,6 +2236,20 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         online: redondeado(destinos.online),
         other: redondeado(destinos.other),
         tenderCommissions: round2(tenderCommissionsTotal),
+        ...(porTipo.size > 0
+          ? {
+              otherByType: Array.from(porTipo.values())
+                .map(t => ({ ...t, ...redondeado(t), tenderCommissions: round2(t.tenderCommissions) }))
+                .sort((a, b) => b.collected - a.collected),
+            }
+          : {}),
+        ...(enOtraMoneda.size > 0
+          ? {
+              foreignCurrency: Array.from(enOtraMoneda.values())
+                .sort((x, y) => (x.currency < y.currency ? -1 : 1))
+                .map(f => ({ ...f, net: round2(f.net) })),
+            }
+          : {}),
       }
       merchantSums = Array.from(porComercio.values())
     }
@@ -1959,7 +2315,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     transactionCount: transactionCountResult,
     reportType,
     periodsCount: byPeriod?.length,
-    filtered: isFiltered,
+    filtered: vistaDeMovimientos,
   })
 
   return {
@@ -1977,7 +2333,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     ...(statementDestinations ? { statementDestinations } : {}),
     settlementCalendar,
     ...(giftCardBalanceBreakdown ? { giftCardBalanceBreakdown } : {}),
-    filtered: isFiltered,
+    // D9.1: true en la vista de movimientos (método o comercio) — las métricas de orden vienen en null.
+    filtered: vistaDeMovimientos,
     ...(legacyUnavailable ? { legacyUnavailable: true as const } : {}),
   }
 }
@@ -2041,13 +2398,19 @@ export function flattenSalesSummaryForExport(
       amount: round2x(amount),
       percentage: null,
     })
+    // Carril B (21-nov): los renglones nuevos de la pantalla, cada uno con su leyenda y sólo si no es 0 (un servidor viejo, la vista
+    // de movimientos o un día sin cargos no agregan filas vacías).
+    const hay = (n: number | null | undefined): n is number => typeof n === 'number' && round2x(n) !== 0
     rows.push(t('Ventas brutas', s.grossSales, s.transactionCount))
+    if (hay(s.serviceCosts)) rows.push(t('Cargos por servicio (incluidos en ventas brutas)', s.serviceCosts))
     rows.push(t('Descuentos', s.discounts == null ? null : -s.discounts))
     rows.push(t('Reembolsos', -s.refunds))
     rows.push(t('Ventas netas', s.netSales))
+    if (hay(s.unpaidSales)) rows.push(t('Sin cobrar: cuentas abiertas (no es venta)', s.unpaidSales, s.unpaidOrders ?? null))
     rows.push(t('Impuestos', s.taxes))
     rows.push(t('Propinas', s.tips))
     rows.push(t('Comisiones de plataforma', -s.platformFees))
+    if (hay(s.tenderCommissions)) rows.push(t('Comisiones de terceros (Rappi, Uber Eats, tipos de pago)', -s.tenderCommissions))
     rows.push(t('Total cobrado', s.totalCollected))
     // Tarjetas de regalo (spec §7): fuera de las ventas, cada una con su leyenda.
     if (s.giftCardLoads !== undefined) {
@@ -2131,6 +2494,16 @@ export function flattenSalesSummaryForExport(
         percentage: null,
       })
     }
+    // D17: una liga en otra moneda también llega al banco, pero en su moneda: su propia fila, sin convertir (Codex r2 del carril C2).
+    for (const f of report.statementDestinations?.foreignCurrency ?? []) {
+      rows.push({
+        section: 'merchantAccounts',
+        label: etiquetaEnOtraMoneda(f.currency),
+        count: f.transactionCount + f.refundCount,
+        amount: round2x(f.net),
+        percentage: null,
+      })
+    }
   }
   // Carril C: el «Estado del periodo» (dinero, no ventas) para el archivo y la MCP del exporte. Sale con `includeMerchantBreakdown`.
   const destinos = report.statementDestinations
@@ -2165,6 +2538,28 @@ export function flattenSalesSummaryForExport(
     rows.push(fila('Ya en tu mano (efectivo)', destinos.drawer.netToReceive))
     rows.push(fila('Llega a tu banco', destinos.terminal.netToReceive + destinos.online.netToReceive))
     rows.push(fila('Otros métodos', destinos.other.netToReceive))
+    // Carril C2 (D12.3): «Otros métodos» por tipo de pago, con su nombre; suman el renglón de arriba.
+    for (const t of destinos.otherByType ?? []) {
+      rows.push(
+        fila(
+          `Otros métodos · ${t.label ?? NOMBRE_DEL_METODO_EN_OTROS[t.method] ?? t.method}`,
+          t.netToReceive,
+          t.transactionCount - t.refundCount,
+        ),
+      )
+      // La comisión de la plataforma de ese tipo, como en la pantalla (ya está restada en «Comisión de plataformas…»).
+      if (Math.abs(t.tenderCommissions) >= 0.005) {
+        rows.push(
+          fila(
+            `Otros métodos · ${t.label ?? NOMBRE_DEL_METODO_EN_OTROS[t.method] ?? t.method} · comisión de la plataforma`,
+            -t.tenderCommissions,
+          ),
+        )
+      }
+    }
+    // D17: lo que se movió en otra moneda, sin convertir y fuera de los pesos de arriba (cobros y devoluciones).
+    for (const f of destinos.foreignCurrency ?? [])
+      rows.push(fila(etiquetaEnOtraMoneda(f.currency), f.net, f.transactionCount + f.refundCount))
   }
   if (want.has('byPeriod') && report.byPeriod) {
     for (const p of report.byPeriod) {
@@ -2180,6 +2575,19 @@ export function flattenSalesSummaryForExport(
   return { rows }
 }
 
+/** El nombre de un renglón de «Otros métodos» sin tipo de pago propio (el mismo que la pantalla). */
+const NOMBRE_DEL_METODO_EN_OTROS: Record<string, string> = {
+  CARD: 'Tarjeta de otra terminal',
+  CASH: 'Efectivo que no entró a la caja',
+  BANK_TRANSFER: 'Transferencia',
+  DIGITAL_WALLET: 'Monedero digital',
+  CRYPTOCURRENCY: 'Cripto',
+  OTHER: 'Otro método',
+  QR_LEGACY: 'QR del sistema anterior',
+}
+/** Cobros y devoluciones en otra moneda: su neto, sin convertir; la cantidad cuenta los dos. */
+const etiquetaEnOtraMoneda = (currency: string) => `Movimientos en línea en ${currency} (neto, sin convertir: no se suman a los pesos)`
+
 /** Shared WHERE used by both count + fetch for detailed-mode rows (honors the active filter). */
 export function buildSalesSummaryDetailWhere(venueId: string, filters: SalesSummaryExportFilters): Prisma.PaymentWhereInput {
   const paymentWhereFilter = buildPaymentWhereFilter(filters.paymentMethod, filters.cardType)
@@ -2192,7 +2600,9 @@ export function buildSalesSummaryDetailWhere(venueId: string, filters: SalesSumm
     ...(filters.shiftId ? { shiftId: filters.shiftId } : {}),
     ...paymentWhereFilter,
   }
-  return where
+  // D9.1 (Codex r2 #6): con comercio, el detalle tampoco trae el efectivo que la TPV estampó con el comercio de su serial (la
+  // cabecera y «Métodos de pago» ya no lo cuentan). En un AND aparte: el filtro de tarjeta trae su propio `AND`.
+  return filters.merchantAccountId ? { AND: [where, NOT_DRAWER_CASH_WHERE] } : where
 }
 
 /** Pre-flight count for detailed-mode export (caller compares against the row cap before fetching). */
@@ -2266,7 +2676,8 @@ async function calculateTimePeriodMetrics(
   // When a payment-method filter is active, order-derived metrics (gross/items/
   // discounts/taxes/deferred) become null and the corresponding raw queries are
   // skipped. Payment-derived queries get the SQL clause appended.
-  const isFiltered = !!paymentMethod
+  // D9.1: a merchant filter is the same movement view (the headline's `vistaDeMovimientos`).
+  const isFiltered = !!paymentMethod || !!merchantAccountId
   const paymentSqlClause = buildPaymentSqlClause(paymentMethod, cardType)
   const paymentSqlClauseWithPrefix = buildPaymentSqlClause(paymentMethod, cardType, 'p')
 
@@ -2309,11 +2720,13 @@ async function calculateTimePeriodMetrics(
   const orderByExpression = 'period'
   const rangoHoraReal = sqlRangoHoraReal('', '$2::timestamp', '$3::timestamp')
 
-  // Optional merchant filter clause for raw SQL queries
-  const merchantPaymentClause = merchantAccountId ? `AND "merchantAccountId" = $4` : ''
-  const merchantOrderClause = merchantAccountId ? `AND id IN (SELECT "orderId" FROM "Payment" WHERE "merchantAccountId" = $4)` : ''
-  const merchantPlatformClause = merchantAccountId ? `AND p."merchantAccountId" = $4` : ''
-  const merchantCommissionClause = merchantAccountId ? `AND "paymentId" IN (SELECT id FROM "Payment" WHERE "merchantAccountId" = $4)` : ''
+  // Optional merchant filter clause for raw SQL queries. D9.1: never the cash a TPV stamped with the merchant of its serial, and
+  // no «orders with some payment of that merchant» any more (the order queries are skipped in the movement view).
+  const merchantPaymentClause = merchantAccountId ? `AND "merchantAccountId" = $4 AND NOT ${sqlEsEfectivoDelCajon()}` : ''
+  const merchantPlatformClause = merchantAccountId ? `AND p."merchantAccountId" = $4 AND NOT ${sqlEsEfectivoDelCajon('p')}` : ''
+  const merchantCommissionClause = merchantAccountId
+    ? `AND "paymentId" IN (SELECT id FROM "Payment" WHERE "merchantAccountId" = $4 AND NOT ${sqlEsEfectivoDelCajon()})`
+    : ''
 
   // Query order metrics grouped by period
   // Using subtotal for gross_sales (not total) to match accounting standards
@@ -2321,17 +2734,29 @@ async function calculateTimePeriodMetrics(
   // cortesías with total=0 — same discriminator as HIDDEN_COMP_LINE_WHERE);
   // they get folded into gross_sales/discounts per row with the SAME
   // foldGiveawaysIntoSummary the headline uses, so the bars keep summing to it.
+  // D6: the sales (collected accounts) and the open ones («Ventas diferidas», «Sin cobrar») come from the SAME statement, like the
+  // headline (Codex r2 #3), and a period with only open accounts still gets its bar (Codex r1 #3).
   const orderMetricsQuery = `
     SELECT
       ${groupByExpression} as period,
-      COALESCE(SUM(subtotal + ${sqlImpuestoQueSeCobraAparte()}), 0) as gross_sales,
-      COALESCE(SUM("taxAmount"), 0) as taxes,
+      COALESCE(SUM(subtotal + ${sqlImpuestoQueSeCobraAparte()}) FILTER (WHERE cuenta.es_venta), 0) as gross_sales,
+      -- D2: the service charges of the same accounts (grossSales = items + serviceCosts).
+      COALESCE(SUM("serviceChargeAmount") FILTER (WHERE cuenta.es_venta), 0) as service_costs,
+      COALESCE(SUM("taxAmount") FILTER (WHERE cuenta.es_venta), 0) as taxes,
       -- EFFECTIVE discount per order (header can exceed the subtotal since B2/B2c); same rule as the summary cards.
-      COALESCE(SUM(LEAST("discountAmount", subtotal)), 0) as discounts,
-      COALESCE(SUM(promo."discount_cents"), 0) as promo_discount_cents,
-      COALESCE(SUM(comp."given_away"), 0) as comp_given_away,
-      COUNT(*) as order_count
+      COALESCE(SUM(LEAST("discountAmount", subtotal)) FILTER (WHERE cuenta.es_venta), 0) as discounts,
+      COALESCE(SUM(promo."discount_cents") FILTER (WHERE cuenta.es_venta), 0) as promo_discount_cents,
+      COALESCE(SUM(comp."given_away") FILTER (WHERE cuenta.es_venta), 0) as comp_given_away,
+      COALESCE(SUM("remainingBalance") FILTER (WHERE cuenta.abierta), 0) as deferred_sales,
+      COALESCE(SUM(cuenta.falta) FILTER (WHERE cuenta.abierta AND NOT cuenta.es_venta), 0) as unpaid_sales,
+      COUNT(*) FILTER (WHERE cuenta.abierta AND NOT cuenta.es_venta AND cuenta.falta > 0.005) as unpaid_orders,
+      COUNT(*) FILTER (WHERE cuenta.es_venta) as order_count
     FROM "Order"
+    CROSS JOIN LATERAL (
+      SELECT ${sqlCuentaCobrada('"Order"')} AS es_venta,
+             "Order"."paymentStatus" IN ('PENDING', 'PARTIAL') AS abierta,
+             (CASE WHEN "Order"."paymentStatus" IN ('PENDING', 'PARTIAL') THEN ${sqlLoQueFaltaCobrar('"Order"')} ELSE 0 END) AS falta
+    ) cuenta
     LEFT JOIN LATERAL (
       SELECT SUM("discountCents") AS discount_cents
       FROM "OrderPromotion" WHERE "orderId" = "Order".id
@@ -2342,13 +2767,13 @@ async function calculateTimePeriodMetrics(
     ) comp ON TRUE
     WHERE "venueId" = $1
       AND ${rangoHoraReal}
-      -- Must mirror the summary grossSales filter (status notIn PENDING/CANCELLED/DELETED)
-      -- so the period bars sum to the headline total. Previously this only excluded
-      -- CANCELLED, double-counting PENDING/DELETED orders vs the summary card.
+      -- Must mirror the summary filter so the period bars sum to the headline total (D6: the sales are the collected ones, see
+      -- the FILTERs above).
       AND status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
-      AND "paymentStatus" NOT IN ('REFUNDED')
       AND ${sqlOrdenSinTarjetasTexto('"Order".id')}
-      ${merchantOrderClause}
+      -- Codex r3/r4: only a sale or an open account that owes something makes a bar (an imported REFUNDED account, or an open
+      -- account given away whole, alone used to make a day of zeros).
+      AND (cuenta.es_venta OR (cuenta.abierta AND (cuenta.falta > 0.005 OR "remainingBalance" <> 0)))
     GROUP BY ${groupByExpression}
     ORDER BY ${orderByExpression}
   `
@@ -2357,17 +2782,24 @@ async function calculateTimePeriodMetrics(
   // before GROUP BY so the filter narrows rows, not groups.
   // ⭐ Tarjetas de regalo (B5 r1, M-2): sin filtro de método, los cobros de las barras se cuentan como la cabecera —sin los de
   // cuentas de tarjetas—; con filtro es la vista de dinero y cuentan todos. El monto y la propina no cambian.
-  const cobrosQueCuentan = isFiltered ? '' : ` FILTER (WHERE ${sqlOrdenSinTarjetasTexto('"Payment"."orderId"')})`
+  // D10.1: como la cabecera, una devolución no es una transacción (NULL-safe: el `type` NULL de un cobro viejo sí cuenta).
+  // D6 (Codex r4 #1): en la vista de ventas, sin los cobros de una cuenta abierta que todavía no es venta (WHERE de abajo).
+  const cobrosQueCuentan = ` FILTER (WHERE "Payment".type IS DISTINCT FROM 'REFUND'${
+    isFiltered ? '' : ` AND ${sqlOrdenSinTarjetasTexto('"Payment"."orderId"')}`
+  })`
   const paymentMetricsQuery = `
     SELECT
       ${groupByExpression} as period,
       COALESCE(SUM(amount), 0) as payment_amount,
       COALESCE(SUM("tipAmount"), 0) as tips,
+      -- D1: the third-party commission frozen on each charge, with the headline's population.
+      COALESCE(SUM(${sqlComisionDeTerceros('', isFiltered)}), 0) as tender_commissions,
       COUNT(*)${cobrosQueCuentan} as transaction_count
     FROM "Payment"
     WHERE "venueId" = $1
       AND ${rangoHoraReal}
       AND status = 'COMPLETED'
+      ${isFiltered ? '' : `AND NOT ${sqlCobroDeCuentaSinCobrar('')}`}
       ${merchantPaymentClause}
       ${paymentSqlClause}
     GROUP BY ${groupByExpression}
@@ -2377,40 +2809,28 @@ async function calculateTimePeriodMetrics(
   // Query refunds grouped by period — REFUND Payments have negative amount and
   // (since 2026-04-19) negative tipAmount. Use ABS so "refunds" is a positive
   // magnitude matching the consumer contract of the non-raw aggregate above.
+  // D6 (Codex r1 #2, r2 #4): in the sales view, the part of a refund that only returned a down payment and its tip
+  // (`reopenedAmount`/`reopenedTipAmount`, owed again in «Sin cobrar») is not a sales refund — same rule as the headline. In the
+  // movement view every refund that went out counts, a gift-card cancellation too (Codex r2 #7).
   const refundsQuery = `
     SELECT
       ${groupByExpression} as period,
-      COALESCE(SUM(ABS(amount) + ABS("tipAmount")), 0) as refunds
+      COALESCE(SUM(ABS(amount) + ABS("tipAmount")${
+        isFiltered ? '' : ' - COALESCE("reopenedAmount", 0) - COALESCE("reopenedTipAmount", 0)'
+      }), 0) as refunds
     FROM "Payment"
     WHERE "venueId" = $1
       AND ${rangoHoraReal}
       AND type = 'REFUND'
-      AND ${sqlOrdenSinTarjetasTexto('"Payment"."orderId"')}
       ${
         isFiltered
           ? ''
-          : `-- Codex r3 #1: igual que el resumen, la devolución de una cuenta cancelada o borrada no se resta (r4 H5: sin filtro).
+          : `AND ${sqlOrdenSinTarjetasTexto('"Payment"."orderId"')}
+      -- Codex r3 #1: igual que el resumen, la devolución de una cuenta cancelada o borrada no se resta (r4 H5: sin filtro).
       AND NOT EXISTS (SELECT 1 FROM "Order" o WHERE o.id = "Payment"."orderId" AND o.status IN ('CANCELLED', 'DELETED'))`
       }
       ${merchantPaymentClause}
       ${paymentSqlClause}
-    GROUP BY ${groupByExpression}
-    ORDER BY ${orderByExpression}
-  `
-
-  // Query deferred sales grouped by period
-  const deferredQuery = `
-    SELECT
-      ${groupByExpression} as period,
-      COALESCE(SUM("remainingBalance"), 0) as deferred_sales
-    FROM "Order"
-    WHERE "venueId" = $1
-      AND ${rangoHoraReal}
-      -- Mirror the summary deferred filter (status notIn PENDING/CANCELLED/DELETED).
-      AND status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
-      AND "paymentStatus" IN ('PENDING', 'PARTIAL')
-      AND ${sqlOrdenSinTarjetasTexto('"Order".id')}
-      ${merchantOrderClause}
     GROUP BY ${groupByExpression}
     ORDER BY ${orderByExpression}
   `
@@ -2431,6 +2851,7 @@ async function calculateTimePeriodMetrics(
     WHERE p."venueId" = $1
       AND ${conAliasP(rangoHoraReal)}
       AND (tc."id" IS NOT NULL OR p."status" = 'COMPLETED')
+      ${isFiltered ? '' : `AND NOT ${sqlCobroDeCuentaSinCobrar('p')}`}
       ${merchantPlatformClause}
       ${paymentSqlClauseWithPrefix}
     GROUP BY ${platformFeesGroupBy}
@@ -2440,7 +2861,10 @@ async function calculateTimePeriodMetrics(
   // Query staff commissions grouped by period
   // When a payment-method filter is active, also constrain the inner Payment
   // subquery so only commissions for matching payments are aggregated.
-  const staffCommissionsPaymentInnerClause = isFiltered ? buildPaymentSqlClause(paymentMethod, cardType) : ''
+  // Carril C2: las comisiones del personal cuentan también las ventas pagadas con saldo (ver `OpcionesDelFiltroDeMetodo`).
+  const staffCommissionsPaymentInnerClause = isFiltered
+    ? buildPaymentSqlClause(paymentMethod, cardType, '', { incluirMediosDeSistema: true })
+    : ''
   const staffCommissionsPaymentSubquery = isFiltered
     ? `AND "paymentId" IN (SELECT id FROM "Payment" WHERE "venueId" = $1 ${staffCommissionsPaymentInnerClause})`
     : ''
@@ -2480,38 +2904,25 @@ async function calculateTimePeriodMetrics(
 
   // Under a payment-method filter, skip order-derived queries entirely — their
   // results would be misleading because a single order can't be split per method.
-  const [orderMetrics, paymentMetrics, refundsMetrics, deferredMetrics, platformFeesMetrics, staffCommissionsMetrics] = await Promise.all([
-    isFiltered
-      ? Promise.resolve(
-          [] as Array<{
-            period: Date | number
-            gross_sales: number
-            taxes: number
-            discounts: number
-            promo_discount_cents: number
-            comp_given_away: number
-            order_count: bigint
-          }>,
-        )
-      : prisma.$queryRawUnsafe<
-          Array<{
-            period: Date | number
-            gross_sales: number
-            taxes: number
-            discounts: number
-            promo_discount_cents: number
-            comp_given_away: number
-            order_count: bigint
-          }>
-        >(orderMetricsQuery, ...queryParams),
-    prisma.$queryRawUnsafe<Array<{ period: Date | number; payment_amount: number; tips: number; transaction_count: bigint }>>(
-      paymentMetricsQuery,
-      ...queryParams,
-    ),
+  type FilaDeOrdenes = {
+    period: Date | number
+    gross_sales: number
+    service_costs: number
+    taxes: number
+    discounts: number
+    promo_discount_cents: number
+    comp_given_away: number
+    deferred_sales: number
+    unpaid_sales: number
+    unpaid_orders: bigint
+    order_count: bigint
+  }
+  const [orderMetrics, paymentMetrics, refundsMetrics, platformFeesMetrics, staffCommissionsMetrics] = await Promise.all([
+    isFiltered ? Promise.resolve([] as FilaDeOrdenes[]) : prisma.$queryRawUnsafe<FilaDeOrdenes[]>(orderMetricsQuery, ...queryParams),
+    prisma.$queryRawUnsafe<
+      Array<{ period: Date | number; payment_amount: number; tips: number; tender_commissions: number; transaction_count: bigint }>
+    >(paymentMetricsQuery, ...queryParams),
     prisma.$queryRawUnsafe<Array<{ period: Date | number; refunds: number }>>(refundsQuery, ...queryParams),
-    isFiltered
-      ? Promise.resolve([] as Array<{ period: Date | number; deferred_sales: number }>)
-      : prisma.$queryRawUnsafe<Array<{ period: Date | number; deferred_sales: number }>>(deferredQuery, ...queryParams),
     prisma.$queryRawUnsafe<Array<{ period: Date | number; platform_fees: number }>>(platformFeesQuery, ...queryParams),
     prisma.$queryRawUnsafe<Array<{ period: Date | number; staff_commissions: number }>>(staffCommissionsQuery, ...queryParams),
   ])
@@ -2520,7 +2931,6 @@ async function calculateTimePeriodMetrics(
   // Use String(Number()) to normalize Decimal/BigInt types from PostgreSQL
   const paymentMap = new Map(paymentMetrics.map(p => [String(Number(p.period)), p]))
   const refundsMap = new Map(refundsMetrics.map(r => [String(Number(r.period)), r]))
-  const deferredMap = new Map(deferredMetrics.map(d => [String(Number(d.period)), d]))
   const platformFeesMap = new Map(platformFeesMetrics.map(c => [String(Number(c.period)), c]))
   const staffCommissionsMap = new Map(staffCommissionsMetrics.map(c => [String(Number(c.period)), c]))
   const orderMetricsMap = new Map(orderMetrics.map(o => [String(Number(o.period)), o]))
@@ -2539,7 +2949,8 @@ async function calculateTimePeriodMetrics(
   // rest of the MindForm QR bridge when native QR ships.
   let legacyPeriodMap = new Map<string, LegacyPeriodMetric>()
   let legacyUnavailable = false
-  if (venueId === MINDFORM_NEW_VENUE_ID && (reportType as string) !== 'summary') {
+  // D9.1: the legacy QR rows have no merchant account — with a merchant chosen they are not part of the bars.
+  if (venueId === MINDFORM_NEW_VENUE_ID && (reportType as string) !== 'summary' && !merchantAccountId) {
     // Single source of truth for which legacy rows the active filter admits.
     // QR_LEGACY never reaches here (getSalesSummary short-circuits it).
     const admission = legacyAdmission(paymentMethod, cardType)
@@ -2571,6 +2982,7 @@ async function calculateTimePeriodMetrics(
     // antes la barra se descartaba y la gráfica no sumaba la cabecera. Por clave, en orden de tiempo.
     const porClave = new Map<string, Date | number>()
     // Codex D93 r1 #1: y las de comisión del personal SOLA (su cobro ahora puede caer en otra barra por su hora real).
+    // D6 (Codex r1 #3): `orderMetrics` trae también el periodo de una cuenta abierta SOLA (ya no es venta; sin eso desaparecía).
     for (const filas of [isFiltered ? [] : orderMetrics, paymentMetrics, refundsMetrics, platformFeesMetrics, staffCommissionsMetrics])
       for (const f of filas) if (!porClave.has(String(Number(f.period)))) porClave.set(String(Number(f.period)), f.period)
     const nativePeriods = [...porClave.entries()].sort(([a], [b]) => Number(a) - Number(b)).map(([, period]) => period)
@@ -2599,7 +3011,6 @@ async function calculateTimePeriodMetrics(
     const order = orderMetricsMap.get(periodKey)
     const payment = paymentMap.get(periodKey)
     const refund = refundsMap.get(periodKey)
-    const deferred = deferredMap.get(periodKey)
     const platformFee = platformFeesMap.get(periodKey)
     const staffCommission = staffCommissionsMap.get(periodKey)
 
@@ -2617,7 +3028,7 @@ async function calculateTimePeriodMetrics(
     // function as the headline so the period bars keep summing to it.
     const { grossSales, discounts } = foldGiveawaysIntoSummary(
       {
-        grossSales: isFiltered ? null : Number(order?.gross_sales || 0) + legacyAmount,
+        grossSales: isFiltered ? null : Number(order?.gross_sales || 0) + Number(order?.service_costs || 0) + legacyAmount,
         items: null,
         discounts: isFiltered ? null : Number(order?.discounts || 0),
       },
@@ -2625,7 +3036,10 @@ async function calculateTimePeriodMetrics(
       Number(order?.comp_given_away || 0),
     )
     const taxes = isFiltered ? null : Number(order?.taxes || 0)
-    const deferredSales = isFiltered ? null : Number(deferred?.deferred_sales || 0)
+    const deferredSales = isFiltered ? null : Number(order?.deferred_sales || 0)
+    const unpaidSales = isFiltered ? null : round2(Number(order?.unpaid_sales || 0))
+    const unpaidOrders = isFiltered ? null : Number(order?.unpaid_orders || 0)
+    const serviceCosts = isFiltered ? null : Number(order?.service_costs || 0)
 
     // Payment-derived metrics are always present; legacy tips/count always count.
     const refunds = Number(refund?.refunds || 0)
@@ -2633,6 +3047,7 @@ async function calculateTimePeriodMetrics(
     const platformFees = Number(platformFee?.platform_fees || 0)
     const staffCommissions = Number(staffCommission?.staff_commissions || 0)
     const paymentAmount = Number(payment?.payment_amount || 0)
+    const tenderCommissions = round2(Number(payment?.tender_commissions || 0))
 
     // grossSales already includes legacyAmount (unfiltered), so netSales does too.
     const netSales = grossSales !== null && discounts !== null ? grossSales - discounts - refunds : null
@@ -2643,16 +3058,16 @@ async function calculateTimePeriodMetrics(
     // (amount + tips) is added on top in both branches. Note `tips` already
     // includes legacyTips, so only legacyAmount is added explicitly here.
     const totalCollected = isFiltered
-      ? paymentAmount + tips - platformFees + legacyAmount
+      ? paymentAmount + tips - platformFees - tenderCommissions + legacyAmount
       : netSales !== null
-        ? netSales + tips - platformFees
+        ? netSales + tips - platformFees - tenderCommissions
         : 0
-    // Net Profit = Net Sales - Platform Fees - Staff Commissions (true profit).
+    // Net Profit = Net Sales - Platform Fees - Third-party fees - Staff Commissions (true profit).
     // netSales already includes legacyAmount when unfiltered; under filter add it.
     const netProfit = isFiltered
-      ? paymentAmount - platformFees - staffCommissions + legacyAmount
+      ? paymentAmount - platformFees - tenderCommissions - staffCommissions + legacyAmount
       : netSales !== null
-        ? netSales - platformFees - staffCommissions
+        ? netSales - platformFees - tenderCommissions - staffCommissions
         : 0
 
     return {
@@ -2660,10 +3075,9 @@ async function calculateTimePeriodMetrics(
       periodLabel: formatPeriodLabel(periodValue, reportType, timezone),
       metrics: {
         grossSales,
-        items: grossSales, // Simplified - using grossSales as items proxy
-        // serviceCosts: schema has no service-charge column yet; surface 0 when an
-        // order exists, null when order metrics are skipped under filter.
-        serviceCosts: grossSales !== null ? 0 : null,
+        // items = gross without the service charges (D2), like the headline.
+        items: grossSales !== null && serviceCosts !== null ? round2(grossSales - serviceCosts) : null,
+        serviceCosts,
         discounts,
         refunds,
         netSales,
@@ -2676,6 +3090,9 @@ async function calculateTimePeriodMetrics(
         totalCollected,
         netProfit,
         transactionCount: Number(payment?.transaction_count || 0) + legacyCount,
+        unpaidSales,
+        unpaidOrders,
+        tenderCommissions,
       },
     }
   })

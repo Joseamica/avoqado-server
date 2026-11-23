@@ -22,8 +22,8 @@ const cents = (n: number) => Math.round(n * 100)
 type Fila = { name: string; itemsSold: number | null; netSales: number }
 
 /** Lo que la consulta de categorías devuelve (la primera `$queryRaw` del job) y el resumen del día. */
-async function desgloseCon(categorias: Array<[string, number, number]>, netSales: number, refunds = 0): Promise<Fila[]> {
-  const resumen = { summary: { netSales, refunds, transactionCount: 1, grossSales: netSales + refunds, discounts: 0 } }
+async function desgloseCon(categorias: Array<[string, number, number]>, netSales: number, refunds = 0, serviceCosts = 0): Promise<Fila[]> {
+  const resumen = { summary: { netSales, refunds, serviceCosts, transactionCount: 1, grossSales: netSales + refunds, discounts: 0 } }
   ;(getSalesSummary as jest.Mock).mockResolvedValue(resumen)
   ;(prismaMock.$queryRaw as jest.Mock)
     .mockReset()
@@ -110,6 +110,17 @@ describe('D21 · el desglose por categoría suma las ventas netas del correo', (
   it('si las categorías suman MÁS que las ventas netas (una venta cambió entre consultas) no inventa un renglón negativo', async () => {
     const filas = await desgloseCon([['Bebidas', 2, 727.5]], 553)
     expect(filas).toEqual([{ name: 'Bebidas', itemsSold: 2, netSales: 727.5 }])
+  })
+
+  // Carril B · D2 (21-nov): el cargo por servicio ya es venta en la cifra de ventas netas; no tiene categoría, así que va en su
+  // propio renglón y no se cuela como «importe libre».
+  it('🔴 los cargos por servicio del día van en su renglón (no como «importe libre») y el desglose sigue cuadrando', async () => {
+    const filas = await desgloseCon([['Bebidas', 2, 200]], 215, 0, 15)
+    expect(filas).toEqual([
+      { name: 'Bebidas', itemsSold: 2, netSales: 200 },
+      { name: 'Cargos por servicio', itemsSold: null, netSales: 15 },
+    ])
+    expect(suma(filas)).toBe(cents(215))
   })
 
   it('un día sin ventas sigue sin desglose', async () => {
