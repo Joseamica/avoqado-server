@@ -2605,6 +2605,36 @@ describe('Codex S1 r2 (R2-4) · el POS que sigue esperando recibe el desenlace F
   })
 })
 
+describe('Codex S1 r4 (R4-A) · UNA lectura decide qué se le contesta al POS que espera', () => {
+  const base = { requestId: 'REQ-L', venueId: 'venue-l', paymentId: null, cancelDisposition: null, noResponseAt: null }
+  const leer = (fila: Record<string, unknown>) => {
+    ;(tpr().findFirst as jest.Mock).mockReset().mockResolvedValue({ ...base, ...fila })
+    return (terminalPaymentService as any).leerParaLaEspera('REQ-L', 'venue-l')
+  }
+
+  it('con desenlace final ⇒ FINAL con ese final', async () => {
+    const r = await leer({ status: TerminalPaymentRequestStatus.FAILED, failureCode: 'NO_EVIDENCE_AFTER_WINDOW', resultJson: { status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW' } })
+    expect(r).toMatchObject({ tipo: 'FINAL', resultado: expect.objectContaining({ status: 'failed' }) })
+  })
+
+  it('en «sin respuesta» sin decisión ⇒ EN_ESPERA (el POS sigue esperando)', async () => {
+    expect(await leer({ status: TerminalPaymentRequestStatus.UNKNOWN, failureCode: null, noResponseAt: new Date(), resultJson: { status: 'timeout' } })).toEqual({ tipo: 'EN_ESPERA' })
+  })
+
+  it('ni final ni en espera ⇒ SIN_FINAL (se contesta el `timeout` de siempre)', async () => {
+    expect(await leer({ status: TerminalPaymentRequestStatus.UNKNOWN, failureCode: null, noResponseAt: null, resultJson: { status: 'timeout' } })).toEqual({ tipo: 'SIN_FINAL' })
+  })
+
+  it('un «no cobrado» con un «sí» de la terminal guardado NO es final para despertar al POS', async () => {
+    const r = await leer({
+      status: TerminalPaymentRequestStatus.FAILED,
+      failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+      resultJson: { status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW', claimedSuccess: { status: 'success' } },
+    })
+    expect(r).toEqual({ tipo: 'SIN_FINAL' })
+  })
+})
+
 describe('desenlaceCanonico — ventana de confirmación', () => {
   it('FAILED/NO_EVIDENCE_AFTER_WINDOW acredita «no se cobró» con clase SERVER (la ventana venció sin webhook, historial ni cajero)', () => {
     expect(desenlaceCanonico({ status: TerminalPaymentRequestStatus.FAILED, failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })).toEqual({

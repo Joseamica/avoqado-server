@@ -2828,22 +2828,20 @@ class TerminalPaymentService {
     // sobre (UNKNOWN: success inacreditable, error verificando) se contesta como siempre.
     // Cobro simple · S1: la fila en sus 10 s de «sin respuesta» la contesta el cierre (`cerrarSinRespuesta` → 422 `failed`) o el
     // dinero. Se mira la FILA, no el sobre: un `timeout` repetido sobre una fila que ya corre su reloj tampoco despierta al POS.
-    if (outcome.status === 'timeout') {
-      // Codex S1 r3 (R3-7): con un `timeout` en la mano, primero gana el desenlace DURABLE (el cierre pudo escribir el final
-      // mientras tanto): el POS lo recibe de una lectura fresca y nunca un 504 sobre una fila ya final.
-      if (await this.resolverEsperaDelPos(result.requestId, terminal.venueId)) return true
-      if (await this.enEsperaSinRespuesta(result.requestId, terminal.venueId)) {
-        logger.info('⏳ [TerminalPayment] Result entered «sin respuesta» — the POS keeps waiting for the 10 s decision', {
-          requestId: result.requestId,
-          venueId: terminal.venueId,
-        })
-        return true
-      }
-      if (this.pendingPayments.get(result.requestId) !== pending) return true
+    // R4-A: con un `timeout` en la mano decide UNA lectura de la fila (`leerParaLaEspera`): el final durable gana, en «sin respuesta»
+    // el POS sigue esperando al cierre, y si no hay ninguno de los dos se contesta el `timeout`.
+    const lectura = outcome.status === 'timeout' ? await this.leerParaLaEspera(result.requestId, terminal.venueId) : null
+    if (this.pendingPayments.get(result.requestId) !== pending) return true
+    if (lectura?.tipo === 'EN_ESPERA') {
+      logger.info('⏳ [TerminalPayment] Result entered «sin respuesta» — the POS keeps waiting for the decision', {
+        requestId: result.requestId,
+        venueId: terminal.venueId,
+      })
+      return true
     }
     clearTimeout(pending.timeout)
     this.pendingPayments.delete(result.requestId)
-    pending.resolve(outcome)
+    pending.resolve(lectura?.tipo === 'FINAL' ? lectura.resultado : outcome)
     return true
   }
 
@@ -2858,23 +2856,39 @@ class TerminalPaymentService {
   async resolverEsperaDelPos(requestId: string, venueId: string): Promise<boolean> {
     const pending = this.pendingPayments.get(requestId)
     if (!pending || pending.venueId !== venueId) return false
-    const row = await prisma.terminalPaymentRequest.findFirst({
-      where: { requestId, venueId },
-      select: { requestId: true, status: true, paymentId: true, resultJson: true, failureCode: true, cancelDisposition: true },
-    })
-    if (!row || desenlaceCanonico(row).outcome === 'UNRESOLVED') return false
+    const lectura = await this.leerParaLaEspera(requestId, venueId)
+    if (lectura.tipo !== 'FINAL') return false
     // La lectura es asíncrona: otro camino pudo contestar (y borrar) la espera mientras tanto. Sólo se resuelve la MISMA.
     if (this.pendingPayments.get(requestId) !== pending) return false
     clearTimeout(pending.timeout)
     this.pendingPayments.delete(requestId)
-    pending.resolve(resultFromRow(row))
-    logger.info('🔔 [TerminalPayment] POS long-poll answered with the durable decision', {
-      requestId,
-      venueId,
-      status: row.status,
-      failureCode: row.failureCode,
-    })
+    pending.resolve(lectura.resultado)
+    logger.info('🔔 [TerminalPayment] POS long-poll answered with the durable decision', { requestId, venueId, status: lectura.resultado.status })
     return true
+  }
+
+  /**
+   * 🔴 Codex S1 r4 (R4-A): LA regla para contestarle al POS que espera, desde UNA sola lectura de su fila. Tres salidas:
+   *  · `FINAL`: la fila ya tiene desenlace ⇒ se le contesta ese final. Un «no cobrado» que trae una afirmación de cobro de la
+   *    terminal guardada (`claimedSuccess`) NO cuenta como final para despertarlo (el «sí» manda; el GET de esa fila no cambia);
+   *  · `EN_ESPERA`: la fila está en «sin respuesta» y el cierre todavía no decidió (`enEsperaDelCierre`) ⇒ el POS sigue esperando;
+   *  · `SIN_FINAL`: ninguna de las dos ⇒ el `timeout` de siempre (lo prudente: «pendiente de confirmar»).
+   * La usan `resolverEsperaDelPos` (todos los escritores que despiertan al POS), el resultado `timeout` de la terminal, el rescate
+   * del vigía y el vencimiento del long-poll. Nadie más decide si la espera se contesta.
+   */
+  private async leerParaLaEspera(
+    requestId: string,
+    venueId: string,
+  ): Promise<{ tipo: 'FINAL'; resultado: TerminalPaymentResult } | { tipo: 'EN_ESPERA' } | { tipo: 'SIN_FINAL' }> {
+    const row = await prisma.terminalPaymentRequest.findFirst({
+      where: { requestId, venueId },
+      select: { requestId: true, status: true, paymentId: true, resultJson: true, failureCode: true, cancelDisposition: true, noResponseAt: true },
+    })
+    if (!row) return { tipo: 'SIN_FINAL' }
+    const outcome = desenlaceCanonico(row).outcome
+    if (outcome === 'CHARGED' || (outcome === 'NOT_CHARGED' && !afirmacionDeLaTerminal(row.resultJson)))
+      return { tipo: 'FINAL', resultado: resultFromRow(row) }
+    return enEsperaDelCierre(row) ? { tipo: 'EN_ESPERA' } : { tipo: 'SIN_FINAL' }
   }
 
   /**
@@ -7427,23 +7441,15 @@ class TerminalPaymentService {
     for (const row of rows) {
       const pending = this.pendingPayments.get(row.requestId)
       if (!pending || pending.venueId !== row.venueId) continue
-      const outcome = desenlaceCanonico(row).outcome
-      if (outcome === 'UNRESOLVED') continue
-      // Codex S1 r3 (R3-7): un desenlace que no es el cobro se contesta desde una lectura FRESCA de esa fila (un aprobado pudo
-      // cerrarla después de la foto del lote); sólo el CHARGED de la foto se entrega tal cual (ya no puede volverse negativo).
-      if (outcome !== 'CHARGED') {
-        if (await this.resolverEsperaDelPos(row.requestId, row.venueId)) resolved++
-        continue
+      // R4-A: la foto del lote sólo elige candidatas; la respuesta sale de la lectura única de esa fila (`resolverEsperaDelPos`).
+      if (desenlaceCanonico(row).outcome === 'UNRESOLVED') continue
+      if (await this.resolverEsperaDelPos(row.requestId, row.venueId)) {
+        resolved++
+        logger.info('🔁 [TerminalPayment] Long-poll resolved from durable state (notice lost or confirmed elsewhere)', {
+          requestId: row.requestId,
+          venueId: row.venueId,
+        })
       }
-      clearTimeout(pending.timeout)
-      this.pendingPayments.delete(row.requestId)
-      pending.resolve(resultFromRow(row))
-      resolved++
-      logger.info('🔁 [TerminalPayment] Long-poll resolved from durable state (notice lost or confirmed elsewhere)', {
-        requestId: row.requestId,
-        venueId: row.venueId,
-        paymentId: row.paymentId,
-      })
     }
     return { resolved, checked: esperando.length }
   }
@@ -7451,12 +7457,8 @@ class TerminalPaymentService {
   /** La fila al vencer el long-poll: el resultado durable si ya tiene desenlace FINAL (R2-4), o `null` (incierto, como siempre). */
   private async desenlaceDurableAlVencer(requestId: string, venueId: string): Promise<TerminalPaymentResult | null> {
     try {
-      const row = await prisma.terminalPaymentRequest.findFirst({
-        where: { requestId, venueId },
-        select: { requestId: true, status: true, paymentId: true, resultJson: true, failureCode: true, cancelDisposition: true },
-      })
-      if (!row || desenlaceCanonico(row).outcome === 'UNRESOLVED') return null
-      return resultFromRow(row)
+      const lectura = await this.leerParaLaEspera(requestId, venueId)
+      return lectura.tipo === 'FINAL' ? lectura.resultado : null
     } catch (error) {
       logger.error('❌ [TerminalPayment] Could not read durable state at long-poll timeout', { requestId, error: String(error) })
       return null
@@ -7775,19 +7777,14 @@ class TerminalPaymentService {
       // Codex S1 r3 (R3-2): el ACCEPTED es un negativo acreditado y pasa por el MISMO escritor que el negativo de la terminal (sus
       // candados, sus vetos de dinero y la afirmación de cobro, sin borrarla). Si lo vetan, la fila entra a «sin respuesta» y decide
       // el cierre: el POS no recibe `cancelled`.
-      const cerrado = await this.cerrarConNegativo(
+      await this.cerrarConNegativo(
         event.requestId,
         terminal.venueId,
         { requestId: event.requestId, status: 'cancelled', errorMessage: 'Cancelado antes de iniciar el cobro' },
         { acreditado: true },
       )
-      const vigente = await prisma.terminalPaymentRequest.findFirst({ where, select: { status: true, cancelDisposition: true } })
-      const pending = this.pendingPayments.get(event.requestId)
-      if (vigente?.status === TerminalPaymentRequestStatus.CANCELLED && vigente.cancelDisposition === 'ACCEPTED' && pending?.venueId === terminal.venueId) {
-        clearTimeout(pending.timeout)
-        this.pendingPayments.delete(event.requestId)
-        pending.resolve(cerrado)
-      }
+      // R4-A: lo que recibe el POS lo decide la lectura única de su fila (CANCELLED/ACCEPTED es final; vetada, sigue esperando).
+      await this.resolverEsperaDelPos(event.requestId, terminal.venueId)
     } else {
       await prisma.terminalPaymentRequest.updateMany({
         where: { ...where, status: { in: ESTADOS_SIN_DESENLACE } },
@@ -8112,12 +8109,8 @@ class TerminalPaymentService {
       // Un `success` que no logró ligar su Payment tampoco produce evidencia nueva en el siguiente
       // barrido: entra al mismo backoff (el barrido de UNKNOWN por Payment sigue vivo aparte).
       if (!resuelta) this.marcarEsperaDeSonda(requestId)
-      const pending = this.pendingPayments.get(requestId)
-      if (pending && pending.venueId === terminal.venueId && resuelta) {
-        clearTimeout(pending.timeout)
-        this.pendingPayments.delete(requestId)
-        pending.resolve(outcome)
-      }
+      // R4-A: el POS recibe el desenlace por la lectura única de su fila.
+      if (resuelta) await this.resolverEsperaDelPos(requestId, terminal.venueId)
       return true
     }
 
@@ -8239,12 +8232,8 @@ class TerminalPaymentService {
         entityId: row.id,
         data: { requestId, terminalId: row.terminalId, priorStatus: row.status, evidence: 'NOT_FOUND_NEVER_DELIVERED' },
       })
-      const pending = this.pendingPayments.get(requestId)
-      if (pending && pending.venueId === terminal.venueId) {
-        clearTimeout(pending.timeout)
-        this.pendingPayments.delete(requestId)
-        pending.resolve(result)
-      }
+      // R4-A: el POS recibe el desenlace por la lectura única de su fila.
+      await this.resolverEsperaDelPos(requestId, terminal.venueId)
     }
     return true
   }
@@ -8740,14 +8729,18 @@ class TerminalPaymentService {
                "updatedAt" = (NOW() AT TIME ZONE 'UTC')
         WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL`
     }
-    // R3-8: la decisión queda escrita en la fila (sin mover `updatedAt`): desde aquí se proyecta UNKNOWN, como en develop.
-    await prisma.$executeRaw`
-      UPDATE "TerminalPaymentRequest"
-      SET "resultJson" = COALESCE("resultJson", '{}'::jsonb) || jsonb_build_object(${MARCA_APROBADO_POR_REGISTRAR}::text, ${new Date().toISOString()}::text)
-      WHERE "id" = ${row.id} AND "status" = 'UNKNOWN' AND "paymentId" IS NULL
-        AND jsonb_typeof(COALESCE("resultJson", '{}'::jsonb) -> ${MARCA_APROBADO_POR_REGISTRAR}::text) IS DISTINCT FROM 'string'`
     const desde = row.noResponseAt ?? row.updatedAt
-    if (desde.getTime() + APROBADO_SIN_REGISTRO_MS <= ahora.getTime() && (await this.debeAuditar('TERMINAL_PAYMENT_APPROVED_NOT_RECORDED', row.id))) {
+    const alarma = desde.getTime() + APROBADO_SIN_REGISTRO_MS <= ahora.getTime()
+    // R3-8 + Codex S1 r4 (R4-A): la marca va con la ALARMA de los 5 min, no con la primera decisión: hasta entonces el POS sigue
+    // esperando (el GET la proyecta en vuelo y un `timeout` de la terminal no corta el POST), por si el `Payment` llega. Idempotente
+    // (no depende de `debeAuditar`, que es una vez por fila para el asiento) y sin mover `updatedAt`. Desde aquí, UNKNOWN como develop.
+    if (alarma)
+      await prisma.$executeRaw`
+        UPDATE "TerminalPaymentRequest"
+        SET "resultJson" = COALESCE("resultJson", '{}'::jsonb) || jsonb_build_object(${MARCA_APROBADO_POR_REGISTRAR}::text, ${new Date().toISOString()}::text)
+        WHERE "id" = ${row.id} AND "status" = 'UNKNOWN' AND "paymentId" IS NULL
+          AND jsonb_typeof(COALESCE("resultJson", '{}'::jsonb) -> ${MARCA_APROBADO_POR_REGISTRAR}::text) IS DISTINCT FROM 'string'`
+    if (alarma && (await this.debeAuditar('TERMINAL_PAYMENT_APPROVED_NOT_RECORDED', row.id))) {
       const datos = { requestId: row.requestId, terminalId: row.terminalId, orderId: row.orderId, amountCents: row.amountCents, motivo }
       // 🚨 token estable para Better Stack — NO renombrar.
       logger.error('🚨 [TerminalPayment] El banco aprobó este cobro y a los 5 min sigue sin registrarse — revisar a mano', datos)
@@ -8798,15 +8791,6 @@ class TerminalPaymentService {
       LIMIT 1`
     const f = filas[0]
     return f ? { eventLogId: f.id, attemptId: f.attemptId, descripcion: f.descripcion } : null
-  }
-
-  /** ¿La fila está en «sin respuesta» sin decisión todavía (R3-8)? Lo que decide si el POS sigue esperando en el long-poll. */
-  private async enEsperaSinRespuesta(requestId: string, venueId: string): Promise<boolean> {
-    const row = await prisma.terminalPaymentRequest.findFirst({
-      where: { requestId, venueId },
-      select: { status: true, noResponseAt: true, resultJson: true },
-    })
-    return !!row && enEsperaDelCierre(row)
   }
 
   /**

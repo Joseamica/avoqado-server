@@ -337,7 +337,7 @@ describe('R3-7 · el POS nunca recibe un desenlace viejo', () => {
 })
 
 describe('R3-8 · la proyección para apps viejas va por ESTADO, no por edad', () => {
-  it('pasados los 10 s con el cierre diferido (NO_APLICA) la fila se sigue viendo EN VUELO; cuando el cierre decide «aprobado, por registrar», UNKNOWN', async () => {
+  it('pasados los 10 s con el cierre diferido (NO_APLICA) la fila se sigue viendo EN VUELO; «aprobado, por registrar» también hasta la alarma de los 5 min (R4-A); después, UNKNOWN', async () => {
     const venta = await f.nuevaVenta(100)
     const s = await f.solicitud({
       orderId: venta.id,
@@ -366,6 +366,9 @@ describe('R3-8 · la proyección para apps viejas va por ESTADO, no por edad', (
         payload: f.eventoAngelPay(a),
       } as any,
     })
+    // R4-A: decidido «aprobado, por registrar», pero antes de los 5 min: el POS sigue esperando el `Payment`.
+    expect(await terminalPaymentService.getPaymentStatus(s.requestId, f.venueId)).toMatchObject({ status: 'SENT', outcome: 'UNRESOLVED' })
+    await prisma.terminalPaymentRequest.update({ where: { id: s.id }, data: { noResponseAt: new Date(Date.now() - 5 * 60_000 - 1_000) } })
     expect(await terminalPaymentService.getPaymentStatus(s.requestId, f.venueId)).toMatchObject({
       status: 'UNKNOWN',
       outcome: 'UNRESOLVED',
@@ -552,5 +555,88 @@ describe('R3-3 · documenta: el Payment tardío de A con B de la misma cuenta en
       await prisma.staffVenue.deleteMany({ where: { staffId: duena.id } })
       await prisma.staff.deleteMany({ where: { id: duena.id } })
     }
+  })
+})
+
+describe('R4-A · una sola regla para contestarle al POS que espera', () => {
+  const esperaDelPos = (requestId: string) => {
+    const resolve = jest.fn()
+    svc.pendingPayments.set(requestId, {
+      resolve,
+      reject: jest.fn(),
+      timeout: setTimeout(() => undefined, 60_000),
+      requestId,
+      terminalId: f.llaveTerminal,
+      venueId: f.venueId,
+    })
+    return resolve
+  }
+  const aprobadoGuardado = (attemptId: string) =>
+    prisma.providerEventLog.create({
+      data: {
+        provider: 'PAYMENT_PROCESSOR',
+        type: 'send_transaction',
+        eventId: `angelpay-${f.nuevoEventId()}`,
+        venueId: f.venueId,
+        attemptId,
+        payload: f.eventoAngelPay(attemptId),
+      } as any,
+    })
+
+  it('FAILED/NO_EVIDENCE y la terminal manda su `success` sin Payment con el POS esperando: el POS no recibe el negativo', async () => {
+    const venta = await f.nuevaVenta(100)
+    const s = await f.solicitud({
+      orderId: venta.id,
+      status: 'FAILED',
+      failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+      acknowledgedAt: new Date(),
+      resultJson: { status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW' },
+    })
+    const resolve = esperaDelPos(s.requestId)
+    const diferida = jest.spyOn(svc, 'retenerSolicitudLiberadaPorAfirmacionDeLaTerminal').mockResolvedValue('DEFERRED')
+    try {
+      await svc.handlePaymentResultFromSocket({ requestId: s.requestId, status: 'success' }, tpv())
+    } finally {
+      diferida.mockRestore()
+    }
+    expect(((await fila(s.requestId)).resultJson as any).claimedSuccess).toBeDefined()
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(resolve.mock.calls[0][0].status).not.toBe('failed')
+  })
+
+  it('«aprobado, por registrar» a los 11 s: el GET la sigue viendo en vuelo y un `timeout` de la terminal no despierta al POS', async () => {
+    const venta = await f.nuevaVenta(100)
+    const s = await f.solicitud({
+      orderId: venta.id,
+      status: 'UNKNOWN',
+      noResponseAt: new Date(Date.now() - 11_000),
+      acknowledgedAt: new Date(),
+    })
+    await aprobadoGuardado(await intento(s.requestId))
+    expect(await terminalPaymentService.cerrarSinRespuesta(s.requestId, f.venueId)).toBe('APROBADO_POR_REGISTRAR')
+    expect(await terminalPaymentService.getPaymentStatus(s.requestId, f.venueId)).toMatchObject({ status: 'SENT', outcome: 'UNRESOLVED' })
+    const resolve = esperaDelPos(s.requestId)
+    await svc.handlePaymentResultFromSocket({ requestId: s.requestId, status: 'timeout', errorMessage: 'G505' }, tpv())
+    expect(resolve).not.toHaveBeenCalled()
+  })
+
+  it('«aprobado, por registrar» a los 5 min: queda marcado, el GET dice UNKNOWN y el POST se contesta', async () => {
+    const venta = await f.nuevaVenta(100)
+    const s = await f.solicitud({
+      orderId: venta.id,
+      status: 'UNKNOWN',
+      noResponseAt: new Date(Date.now() - 5 * 60_000 - 1_000),
+      acknowledgedAt: new Date(),
+    })
+    await aprobadoGuardado(await intento(s.requestId))
+    expect(await terminalPaymentService.cerrarSinRespuesta(s.requestId, f.venueId)).toBe('APROBADO_POR_REGISTRAR')
+    expect(((await fila(s.requestId)).resultJson as any).aprobadoPorRegistrarAt).toEqual(expect.any(String))
+    expect(await terminalPaymentService.getPaymentStatus(s.requestId, f.venueId)).toMatchObject({
+      status: 'UNKNOWN',
+      outcome: 'UNRESOLVED',
+    })
+    const resolve = esperaDelPos(s.requestId)
+    await svc.handlePaymentResultFromSocket({ requestId: s.requestId, status: 'timeout', errorMessage: 'G505' }, tpv())
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ status: 'timeout' }))
   })
 })
