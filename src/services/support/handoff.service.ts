@@ -11,7 +11,14 @@ import { normalizeAppVersion } from './deviceContext.service'
 import { buildHumanSummary, citedTitle } from './humanSummary.service'
 import { loadSupportLibrary, resolveSourceRefs, type LibraryGuide } from './knowledge.service'
 import { listRegisteredSupportStaff, resolveRegisteredSupportPhone } from './registeredPhone.service'
-import { SUPPORT_HANDOFF_OFFER, SUPPORT_LINK, SUPPORT_SECOND_FAILURE, supportHandoffAlready, supportHandoffDone } from './texts'
+import {
+  SUPPORT_HANDOFF_OFFER,
+  SUPPORT_LINK,
+  SUPPORT_PUBLIC_HANDOFF_FULL,
+  SUPPORT_SECOND_FAILURE,
+  supportHandoffAlready,
+  supportHandoffDone,
+} from './texts'
 
 /** La foto que se copia a SupportNotice.meta al nacer el aviso (R1-03); nunca texto del cliente. */
 export interface HandoffMeta {
@@ -210,7 +217,9 @@ export async function requestSupportHandoff(
   const held = unregistered
     ? publicPhone >= config.phoneDailyCap || publicAll >= config.dailyCap
     : phoneCount - publicPhone >= config.phoneDailyCap || allCount - publicAll >= config.dailyCap
-  if (unregistered && !held)
+  // Ayuda pública: con su cupo lleno no se promete nada (ningún resumen lo mandaría): no hay aviso y se dice cómo escribirnos.
+  if (unregistered && held) return { text: SUPPORT_PUBLIC_HANDOFF_FULL, outcome: 'FIXED' }
+  if (unregistered)
     for (const key of publicKeys)
       await tx.supportBudget.upsert({
         where: { key },

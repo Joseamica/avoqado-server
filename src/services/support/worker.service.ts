@@ -389,7 +389,7 @@ export async function prepareSupportAnswer(
           : { status: 'CANCELLED', claimToken: null, leaseUntil: null },
       })
       // Ended in silence: its place in the caps of public help comes back (nothing, if it was never counted there).
-      if (!first) await refundPublicMessage(tx, conversation.receiverId, conversation.phone, message.createdAt)
+      if (!first) await refundPublicMessage(tx, conversation.receiverId, conversation.phone, message.inboundEventId)
       return first ? ('READY' as const) : ('CANCELLED' as const)
     })
   // Public help (an unknown phone): what its state says instead of an answer; null = it is answered. Off or not public: the fixed
@@ -400,7 +400,7 @@ export async function prepareSupportAnswer(
     if (await isPublicPaused(prisma, conversation.receiverId, conversation.phone, clock())) {
       await prisma.$transaction(async tx => {
         if (await completeClaim(claim, { status: 'CANCELLED' }, clock(), tx))
-          await refundPublicMessage(tx, conversation.receiverId, conversation.phone, message.createdAt)
+          await refundPublicMessage(tx, conversation.receiverId, conversation.phone, message.inboundEventId)
       })
       return 'CANCELLED'
     }
@@ -872,7 +872,7 @@ async function prepareHybridAnswer(job: {
                 sequence: { gt: current.sequence },
                 status: { in: ['QUEUED', 'ANSWER_READY', 'AI_UNKNOWN'] },
               },
-              select: { id: true, createdAt: true },
+              select: { id: true, inboundEventId: true },
               take: 100,
             })
             await tx.supportMessage.updateMany({
@@ -880,7 +880,7 @@ async function prepareHybridAnswer(job: {
               data: { status: 'CANCELLED', claimToken: null, leaseUntil: null },
             })
             // They were counted at the door and never answered: their places come back.
-            for (const m of silenced) await refundPublicMessage(tx, conversation.receiverId, conversation.phone, m.createdAt)
+            for (const m of silenced) await refundPublicMessage(tx, conversation.receiverId, conversation.phone, m.inboundEventId)
           }
           const answer = days ? supportPublicPause(days) : text
           const patch = { status: 'ANSWER_READY' as const, answer, sourceIds: [], accessFingerprint: final.fingerprint }

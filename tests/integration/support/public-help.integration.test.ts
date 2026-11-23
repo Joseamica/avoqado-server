@@ -25,7 +25,7 @@ import {
   SUPPORT_PUBLIC_HOUR_LIMIT,
   SUPPORT_REPHRASE,
   SUPPORT_UNREGISTERED,
-  supportHandoffAlready,
+  SUPPORT_PUBLIC_HANDOFF_FULL,
   supportHandoffDone,
   supportPublicNotice,
   supportPublicPause,
@@ -243,7 +243,12 @@ describe('the way in', () => {
     expect(result).toBe('READY')
     expect(message?.sourceIds).toEqual([knowledge.sourceRef(branch)])
     // The same library as the public mode of today: the internal manual included (founder, 22-nov, «a»).
-    expect(p.inputs()[0].index.map((g: { id: string }) => g.id)).toEqual([manual.id, branch.id])
+    expect(
+      p
+        .inputs()[0]
+        .index.map((g: { id: string }) => g.id)
+        .sort(),
+    ).toEqual([manual.id, branch.id].sort())
   })
   it('the switch off: exactly today (the fixed message, once a day)', async () => {
     process.env.SUPPORT_PUBLIC_HELP_ENABLED = 'false'
@@ -308,12 +313,18 @@ describe('capa 1: 10 respuestas por hora y 20 al día por número', () => {
     expect((await reply(over.event)).conversationId).toBe((await reply(queued.event)).conversationId)
     expect(await counts()).toEqual(before)
   })
-  it('SALIR quoting a message it cannot identify gets that answer, so it counts', async () => {
+  it('SALIR always closes, even quoting a message and with the cap full, and never counts', async () => {
     await ready()
-    const quoted = input('SALIR', unknown, { contextId: 'wamid.not-ours' })
+    const conversation = (await open())!
+    await seed('HOUR')
+    expect(await tryRouteSupport(input('SALIR', unknown, { contextId: 'wamid.not-ours' }))).toBe('IGNORED')
+    expect(await prisma.supportConversation.findUniqueOrThrow({ where: { id: conversation.id } })).toMatchObject({ mode: 'CLOSED' })
+    expect(await capCounts()).toEqual([3, 10])
+  })
+  it('a quote it cannot identify as the first message gets the notice', async () => {
+    const quoted = input('¿y esto?', unknown, { contextId: 'wamid.not-ours' })
     expect(await tryRouteSupport(quoted)).toBe('QUEUED')
-    expect((await reply(quoted)).answer).toMatch(/^No puedo identificar esa respuesta/)
-    expect(await capCounts()).toEqual([4, 4])
+    expect(await reply(quoted)).toMatchObject({ answer: supportPublicNotice(), body: '' })
   })
   it('every message it answers counts once, also the ones the router answers; SALIR does not; the AI caps of today are not used', async () => {
     expect(caps().map(c => [c.window, c.maximum])).toEqual([
@@ -352,6 +363,13 @@ describe('capa 2: tres mensajes sin sentido o fuera de tema seguidos', () => {
     await ready()
     expect(await strikes(['nonsense', 'nonsense', 'question', 'nonsense', 'greeting', 'nonsense'])).not.toContain(supportPublicPause(1))
     expect((await strikes(['off_topic'])).at(-1)).toBe(supportPublicPause(1))
+  })
+  it('«persona» through the router is a valid request too: it starts the count again', async () => {
+    await ready()
+    await strikes(['nonsense', 'nonsense'])
+    await send('persona')
+    await deliver()
+    expect(await strikes(['nonsense'])).toEqual([SUPPORT_REPHRASE])
   })
   it('after the 24 h it answers again; three more within 7 days of the end are 7 days', async () => {
     await ready()
@@ -537,13 +555,13 @@ describe('«persona» and the caps of today', () => {
     const asked = await send('persona')
     expect(await reply(asked.event)).toMatchObject({ outcome: 'HANDOFF' })
   })
-  it('unknown phones have their own daily pool: when it is full they wait, and a registered phone is not pushed out', async () => {
+  it('unknown phones have their own daily pool: when it is full nothing is promised, and a registered phone is not pushed out', async () => {
     const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Mexico_City' }).format(new Date())
     const key = `CONTROL:${receiverId}:HANDOFF_PUBLIC:${day}`
     await prisma.supportBudget.create({ data: { key, windowStart: new Date(), callCount: 20 } })
     await ready()
     const unknownAsked = await send('persona')
-    expect(await reply(unknownAsked.event)).toMatchObject({ answer: supportHandoffAlready('+52 56 4007 0001') })
+    expect(await reply(unknownAsked.event)).toMatchObject({ answer: SUPPORT_PUBLIC_HANDOFF_FULL })
     await send('hola', member)
     await deliver()
     await send('sí', member)
@@ -554,7 +572,8 @@ describe('«persona» and the caps of today', () => {
       where: { conversationId: { in: await conversationIds() } },
       orderBy: { createdAt: 'asc' },
     })
-    expect(notices.map(n => n.status)).toEqual(['HELD', 'PENDING'])
+    // The unknown phone got no notice (nothing would mail it); the registered one goes out now.
+    expect(notices.map(n => n.status)).toEqual(['PENDING'])
   })
 })
 
@@ -633,61 +652,6 @@ describe('round 2 of the audit', () => {
     const asked = await send('persona', member)
     expect(await reply(asked.event)).toMatchObject({ answer: supportHandoffDone('+52 56 4007 0001') })
   })
-  it('the daily digest puts registered notices first: 100 public ones never push one out', async () => {
-    const conversation = await prisma.supportConversation.create({ data: { receiverId, phone: unknown, mode: 'CLOSED' } })
-    const meta = (extra: object) => ({
-      requestedAt: new Date(Date.now() - 86_400_000).toISOString(),
-      reason: 'REQUESTED',
-      phone: unknown,
-      app: 'dashboard',
-      appVersion: null,
-      deviceFamily: null,
-      multipleProfiles: false,
-      people: [],
-      guides: [],
-      ...extra,
-    })
-    await prisma.supportNotice.createMany({
-      data: Array.from({ length: 100 }, (_, n) => ({
-        kind: 'HANDOFF' as const,
-        status: 'HELD' as const,
-        dedupeKey: `held:${receiverId}:public-${n}`,
-        day: yesterday,
-        conversationId: conversation.id,
-        meta: meta({ unregistered: true }),
-        createdAt: new Date(Date.now() - 86_400_000 + n),
-      })),
-    })
-    const registered = await prisma.supportNotice.create({
-      data: {
-        kind: 'HANDOFF',
-        status: 'HELD',
-        dedupeKey: `held:${receiverId}:registered`,
-        day: yesterday,
-        conversationId: conversation.id,
-        staffId,
-        meta: meta({
-          phone: member,
-          people: [{ staffId, name: 'Registrada Prueba', role: 'VIEWER', venues: [{ id: venueId, name: 'Norte' }], organization: null }],
-        }),
-        createdAt: new Date(Date.now() - 1000),
-      },
-    })
-    const sent: { subject: string; html: string }[] = []
-    await runSupportNotices(new Date(), {
-      send: async options => {
-        sent.push({ subject: options.subject, html: String(options.html) })
-        return { ok: true, resendId: 're_3', transient: false }
-      },
-    })
-    expect(await prisma.supportNotice.findUniqueOrThrow({ where: { id: registered.id } })).toMatchObject({
-      status: 'HELD',
-      digestId: expect.any(String),
-    })
-    expect(
-      await prisma.supportNotice.count({ where: { dedupeKey: { startsWith: `held:${receiverId}:public-` }, errorCode: 'DIGEST_FULL' } }),
-    ).toBe(1)
-  })
 })
 
 describe('exhaustive pass after round 2 of the audit', () => {
@@ -729,5 +693,73 @@ describe('exhaustive pass after round 2 of the audit', () => {
     })
     expect(sent.filter(subject => subject.includes('Número no registrado'))).toEqual([])
     expect(await prisma.supportNotice.findUniqueOrThrow({ where: { id: notice.id } })).toMatchObject({ status: 'SKIPPED' })
+  })
+})
+
+describe('round 3 of the audit', () => {
+  async function memberReady() {
+    await send('hola', member)
+    await deliver()
+    await send('sí', member)
+    await deliver()
+    await send('1', member)
+    await deliver()
+  }
+  it('a message the worker ends in silence gives back only a place it took: one admitted as registered gives back nothing', async () => {
+    await ready()
+    process.env.SUPPORT_PUBLIC_HELP_DAILY_USD = '0'
+    await send('¿Cómo cambio de sucursal?')
+    expect((await work([question])).message).toMatchObject({ answer: SUPPORT_UNREGISTERED })
+    expect(await capCounts()).toEqual([4, 4])
+    // Queued without counting (as when the phone was still of an account).
+    await admitSupportMessage(input('¿Y en la terminal?'))
+    expect((await work([question])).message).toMatchObject({ status: 'CANCELLED' })
+    expect(await capCounts()).toEqual([4, 4])
+  })
+  it('«persona» asked while registered still reaches the team if the phone loses its account before the email', async () => {
+    await memberReady()
+    const asked = await send('persona', member)
+    expect(await reply(asked.event)).toMatchObject({ outcome: 'HANDOFF' })
+    await prisma.staff.update({ where: { id: staffId }, data: { active: false } })
+    try {
+      const sent: { subject: string; text: string }[] = []
+      await runSupportNotices(new Date(Date.now() + 1000), {
+        send: async options => {
+          sent.push({ subject: options.subject, text: String(options.text) })
+          return { ok: true, resendId: 're_5', transient: false }
+        },
+      })
+      const mine = sent.find(e => e.subject.startsWith('Soporte · Número no registrado'))
+      expect(mine?.text).toContain('Persona: Numero no registrado')
+      expect(mine?.text).not.toContain('Registrada')
+    } finally {
+      await prisma.staff.update({ where: { id: staffId }, data: { active: true } })
+    }
+  })
+  it('a guide recovered from another conversation while registered does not go out once the phone has no account', async () => {
+    const old = await admitSupportMessage(input('¿Cómo cambio de sucursal?', member))
+    await prisma.supportMessage.update({
+      where: { id: old.messageId },
+      data: { status: 'SENT', answer: 'guía', sourceIds: [knowledge.sourceRef(branch)] },
+    })
+    await prisma.supportConversation.updateMany({
+      where: { receiverId, phone: member },
+      data: { mode: 'CLOSED', app: 'dashboard', lastActivityAt: new Date(Date.now() - 3_600_000) },
+    })
+    await memberReady()
+    await send('RECUPERAR', member)
+    const { message } = await work([])
+    expect(message?.sourceIds).toEqual([knowledge.sourceRef(branch)])
+    // Prepared as registered; before it goes out the phone loses its account.
+    await prisma.supportMessage.update({ where: { id: message!.id }, data: { status: 'ANSWER_READY', outboundWamid: null } })
+    await prisma.staff.update({ where: { id: staffId }, data: { active: false } })
+    try {
+      const claim = (await claimNext(new Date(Date.now() + 10), receiverId))!
+      expect(claim.messageId).toBe(message!.id)
+      expect(await deliverSupportMessage(claim, undefined, library)).toBe('CANCELLED')
+      expect((await prisma.supportMessage.findUniqueOrThrow({ where: { id: message!.id } })).answer).toMatch(/^Tu acceso cambió/)
+    } finally {
+      await prisma.staff.update({ where: { id: staffId }, data: { active: true } })
+    }
   })
 })

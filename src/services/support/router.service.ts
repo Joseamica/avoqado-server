@@ -19,7 +19,7 @@ import {
 } from '@/config/supportWhatsapp'
 import { recordSupportEvent, requestSupportHandoff } from './handoff.service'
 import { normalizeAppVersion } from './deviceContext.service'
-import { countPublicMessage, isPublicPaused, mexicoDay, takePublicLimitNotice } from './publicHelp.service'
+import { clearPublicStrikes, countPublicMessage, isPublicPaused, mexicoDay, takePublicLimitNotice } from './publicHelp.service'
 import {
   SUPPORT_ASK_APP,
   SUPPORT_CONTACT,
@@ -357,6 +357,8 @@ export async function decideSupportAdmission(
   publicHelp?: boolean
   /** STATIC: el texto, si no es SUPPORT_UNREGISTERED (el aviso de un tope de la ayuda pública). */
   text?: string
+  /** Ayuda pública: cuándo contó este mensaje en la capa 1 (viaja con el mensaje). */
+  countedAt?: Date
 }> {
   // T-F15: on the support's own number nothing is left to the old relay. A person who also answers customer chats is one more
   // person, and a message without text and without a conversation takes the normal way (media answer, or the day's fixed message).
@@ -381,10 +383,11 @@ export async function decideSupportAdmission(
   if (isSupportPublicHelpEnabled()) {
     // Paused (three strikes): nothing is answered, SALIR included, so the pause notice is never cancelled before it goes out.
     if (await isPublicPaused(tx, input.receiverId, input.phone, now)) return { route: 'IGNORED', registered }
-    // SALIR is not counted (it never gets an answer); one that quotes a message gets «no puedo identificar…», so it is.
-    if ((command === 'SALIR' && !input.contextId) || ignoredType(input.type)) return { route: 'SUPPORT', registered, publicHelp: true }
+    // SALIR always closes (even quoting a message) and never gets an answer: it is not counted.
+    if (command === 'SALIR' || ignoredType(input.type)) return { route: 'SUPPORT', registered, publicHelp: true }
     const over = await countPublicMessage(tx, input.receiverId, input.phone, now)
-    if (!over) return { route: 'SUPPORT', registered, publicHelp: true }
+    // Counted: the time goes with the message, so the worker gives back exactly this place if it ends it in silence.
+    if (!over) return { route: 'SUPPORT', registered, publicHelp: true, countedAt: now }
     if (!(await takePublicLimitNotice(tx, input.receiverId, input.phone, over, now))) return { route: 'IGNORED', registered }
     // Its notice goes in the open conversation: what it already queued under the cap still goes out.
     return { route: 'STATIC', registered, text: over === 'DAY' ? SUPPORT_PUBLIC_DAY_LIMIT : SUPPORT_PUBLIC_HOUR_LIMIT }
@@ -458,8 +461,9 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
       }
       const freeText = isSupportFreeTextEnabled()
       let unregistered = false,
-        // Public help: an unknown phone answered in the public mode (decideSupportAdmission).
+        // Public help: an unknown phone answered in the public mode (decideSupportAdmission), and when it counted in its caps.
         publicHelp = false,
+        countedAt: Date | undefined,
         soleStaffId: string | null | undefined,
         // Pick the venue now: the remembered identity's venue lost access, or the person just linked (`linked`).
         relist = false,
@@ -506,6 +510,7 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
         }
         unregistered = !admission.registered
         publicHelp = !!admission.publicHelp
+        countedAt = admission.countedAt
         soleStaffId = admission.soleStaffId
         if (conversation?.mode === 'PERSONAL') {
           const link = await ownLink(tx, input.phone, soleStaffId)
@@ -575,9 +580,8 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
             ? 'Escribe tu pregunta en un máximo de 2,000 caracteres, sin datos sensibles.'
             : null,
         body = answer ? '' : scrubbed.body
-      // Public help: the first contact always gets the notice (it also says not to send passwords or cards); the text stays out.
-      if (answer && publicHelp && !conversation.noticeAcceptedAt) answer = supportPublicNotice()
-      if (!answer && input.contextId) {
+      // Public help: SALIR closes even quoting a message (it is never counted, so it never answers).
+      if (!answer && input.contextId && !(publicHelp && command === 'SALIR')) {
         const original = await tx.supportMessage.findUnique({ where: { outboundWamid: input.contextId }, include: { conversation: true } })
         if (
           !original ||
@@ -591,6 +595,8 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
           answer = 'No puedo identificar esa respuesta en esta conversación. Escribe AYUDA para empezar; no usaré la conversación citada.'
         }
       }
+      // Public help: the first contact always gets the notice (it also says not to send passwords or cards); the text stays out.
+      if (answer && publicHelp && !conversation.noticeAcceptedAt) answer = supportPublicNotice()
       if (!answer && command === 'SALIR') {
         await resetSupportConversation(tx, conversation, 'CLOSED')
         await recordIgnored()
@@ -632,6 +638,8 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
               ? `Tu pregunta anterior venció. Escríbela otra vez después de elegir la app.\n\n${SUPPORT_ASK_APP}`
               : SUPPORT_ASK_APP
       } else if (!answer && command === 'PERSONA' && (!publicHelp || conversation.noticeAcceptedAt)) {
+        // Public help: asking for a person is a valid request between strikes.
+        if (publicHelp) await clearPublicStrikes(tx, input.receiverId, input.phone)
         const handoff = getSupportHandoffConfig()
         // The notice row commits with this answer, or not at all.
         if (handoff) ({ text: answer, outcome } = await requestSupportHandoff(tx, conversation, 'REQUESTED', now, handoff))
@@ -818,7 +826,7 @@ export async function tryRouteSupport(input: SupportInput): Promise<'QUEUED' | '
         await recordIgnored()
         return 'IGNORED'
       }
-      const admitted = await admitSupportMessage({ ...input, body }, tx)
+      const admitted = await admitSupportMessage({ ...input, body, ...(countedAt ? { publicCountedAt: countedAt.toISOString() } : {}) }, tx)
       if (answer) {
         const saved = await tx.supportMessage.update({
           where: { id: admitted.messageId },

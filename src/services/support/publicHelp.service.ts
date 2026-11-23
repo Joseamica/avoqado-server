@@ -81,9 +81,18 @@ export async function countPublicMessage(db: Prisma.TransactionClient, receiverI
   return null
 }
 
-/** Capa 1: un mensaje que se contó al admitirlo y que el worker termina en silencio devuelve su lugar (en las ventanas en que contó). */
-export async function refundPublicMessage(db: Prisma.TransactionClient, receiverId: string, phone: string, countedAt: Date) {
-  for (const cap of publicPhoneCaps(receiverId, phone, countedAt))
+/**
+ * Capa 1: un mensaje que el worker termina en silencio devuelve su lugar, sólo si contó al admitirlo y en las ventanas en que
+ * contó (el router guarda esa hora en su evento: `publicCountedAt`). Lo que no contó (admitido como registrado, el aviso del
+ * tope) no devuelve nada.
+ */
+export async function refundPublicMessage(db: Prisma.TransactionClient, receiverId: string, phone: string, inboundEventId: string | null) {
+  const event = inboundEventId
+    ? await db.whatsappInboundEvent.findUnique({ where: { id: inboundEventId }, select: { rawBody: true } })
+    : null
+  const counted = (event?.rawBody as { publicCountedAt?: unknown } | null)?.publicCountedAt
+  if (typeof counted !== 'string' || Number.isNaN(Date.parse(counted))) return
+  for (const cap of publicPhoneCaps(receiverId, phone, new Date(counted)))
     await db.supportBudget.updateMany({ where: { key: cap.key, callCount: { gt: 0 } }, data: { callCount: { decrement: 1 } } })
 }
 /** true sólo la primera vez en esa ventana: el aviso del tope sale una vez y luego hay silencio. */

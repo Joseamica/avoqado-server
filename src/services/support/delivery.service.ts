@@ -19,6 +19,7 @@ import { esCorreoDemo, conNegocio } from '@/services/demo/candadoDemo'
 import { runWithContext } from '@/observability/executionContext'
 import { readCurrentClaim, completeClaim, type SupportClaim } from './store.service'
 import { readSupportContext, isSupportWindowOpen, isSupportAccessLost } from './context.service'
+import { resolveRegisteredSupportPhone } from './registeredPhone.service'
 import { supportCipher, assertSupportPrincipal } from './link.service'
 import { listSupportVenues } from './access.service'
 import { supportSelectionSchema, resetSupportConversation } from './router.service'
@@ -240,6 +241,18 @@ export async function deliverSupportMessage(
     try {
       // Hybrid refs (`id@hash8`) are read with or without the flag: a message prepared with it may go out after it.
       const hybrid = resolveSourceRefs(message.sourceIds, () => library ?? loadSupportLibrary())
+      // Public help keeps no memory of another conversation: a RECUPERAR prepared while this phone was of an account (it cites the
+      // guide of a closed conversation) does not go out once the phone is not.
+      if (
+        message.body.trim().toUpperCase() === 'RECUPERAR' &&
+        message.sourceIds.length > 0 &&
+        conversation.mode === 'PUBLIC' &&
+        isSupportPublicHelpEnabled() &&
+        !(await resolveRegisteredSupportPhone(conversation.phone, prisma)).registered
+      ) {
+        await replaceWithPublicNotice(claim)
+        return 'CANCELLED'
+      }
       // Public help switched off: an answer it prepared with the model (its call was reserved as public) no longer goes out.
       if (
         !isSupportPublicHelpEnabled() &&

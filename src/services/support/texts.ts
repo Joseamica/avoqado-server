@@ -34,6 +34,8 @@ export const SUPPORT_PUBLIC_NOTICE_TEXTS = SUPPORT_NOTICE_TEXTS.map(withPublicIn
 export const SUPPORT_PUBLIC_DAY_LIMIT = 'Llegaste al límite de preguntas por hoy. Seguimos mañana. Mientras: https://avoqado.io/help'
 export const SUPPORT_PUBLIC_HOUR_LIMIT =
   'Llegaste al límite de preguntas por ahora. Seguimos en una hora. Mientras: https://avoqado.io/help'
+/** «persona» de un número sin cuenta con su cupo del día lleno: no se promete que alguien escriba. El founder puede cambiar la redacción. */
+export const SUPPORT_PUBLIC_HANDOFF_FULL = `Hoy ya no puedo pasar más avisos al equipo. ${SUPPORT_CONTACT}`
 /** Tres mensajes seguidos sin sentido, fuera de tema o de ataque: 24 h de silencio (7 días si reincide), avisado una vez. */
 export const supportPublicPause = (days: 1 | 7) =>
   `Pausé esta conversación ${days === 1 ? '24 horas' : '7 días'}. Si necesitas ayuda con Avoqado, escríbeme después o ve a https://avoqado.io/help`

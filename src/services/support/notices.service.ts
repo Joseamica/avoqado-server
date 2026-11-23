@@ -61,7 +61,8 @@ async function venueStillAllowed(tx: Prisma.TransactionClient, staffId: string, 
 export async function stillAllowed(tx: Prisma.TransactionClient, row: SupportNotice, meta: HandoffMeta): Promise<HandoffMeta | null> {
   // Ayuda pública: un número sin cuenta no trae personas ni sucursales que revalidar; sale mientras la ayuda pública siga prendida.
   if (meta.unregistered && !row.linkId && !meta.people.length) return isSupportPublicHelpEnabled() ? meta : null
-  let people = meta.people
+  let people = meta.people,
+    nobody = false
   if (row.linkId) {
     const link = await tx.supportWhatsappLink.findUnique({ where: { id: row.linkId }, select: { staffId: true, phone: true } })
     const usable = link && link.staffId === row.staffId ? await usableLink(tx, link.phone) : null
@@ -70,6 +71,7 @@ export async function stillAllowed(tx: Prisma.TransactionClient, row: SupportNot
   } else {
     const registered = await listRegisteredSupportStaff(meta.phone, tx)
     people = people.filter(p => registered.includes(p.staffId))
+    nobody = !registered.length
   }
   const kept: HandoffMeta['people'] = []
   for (const person of people) {
@@ -78,7 +80,10 @@ export async function stillAllowed(tx: Prisma.TransactionClient, row: SupportNot
     // One shown without a venue (a link still choosing it) stays: there was nothing to lose.
     if (venues.length || !person.venues.length) kept.push({ ...person, venues })
   }
-  return kept.length ? { ...meta, people: kept, multipleProfiles: kept.length > 1 } : null
+  if (kept.length) return { ...meta, people: kept, multipleProfiles: kept.length > 1 }
+  // Public help: a number that lost its account after asking was told someone writes to it, and now is one of public help: the
+  // notice still goes, as a number with no account (without the people or venues it no longer has).
+  return nobody && isSupportPublicHelpEnabled() ? { ...meta, people: [], multipleProfiles: false, unregistered: true } : null
 }
 
 /** Los HELD de cada día anterior a hoy (CDMX) van a un solo resumen de ese día. */
@@ -261,15 +266,12 @@ async function freezeMeta(row: SupportNotice, now: Date, mine: Prisma.SupportNot
     if (!frozen.count) throw new Error('SUPPORT_NOTICE_LEASE_LOST')
     return row.meta as object | null
   }
-  // DAILY_DIGEST: every row by itself; the ones that no longer pass are left out and marked SKIPPED. Public help: the registered
-  // ones go first, so numbers with no account never take their place in the 100, however many they are.
-  const chosen = await prisma.$queryRaw<{ id: string }[]>`
-    SELECT n.id FROM "SupportNotice" n WHERE n."digestId" = ${row.id} AND n.status = 'HELD'
-    ORDER BY (n.meta->>'unregistered' IS NOT NULL), n."createdAt", n.id LIMIT ${DIGEST_ITEMS}`
-  const rows = chosen.length
-    ? await prisma.supportNotice.findMany({ where: { id: { in: chosen.map(c => c.id) } }, take: DIGEST_ITEMS })
-    : []
-  rows.sort((a, b) => chosen.findIndex(c => c.id === a.id) - chosen.findIndex(c => c.id === b.id))
+  // DAILY_DIGEST: every row by itself; the ones that no longer pass are left out and marked SKIPPED.
+  const rows = await prisma.supportNotice.findMany({
+    where: { digestId: row.id, status: 'HELD' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: DIGEST_ITEMS,
+  })
   const items: HandoffMeta[] = [],
     dropped: string[] = []
   for (const heldRow of rows) {
