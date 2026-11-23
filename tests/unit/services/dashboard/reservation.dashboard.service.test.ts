@@ -3970,6 +3970,8 @@ describe('rescheduleAppointmentReservation', () => {
     })
     prismaMock.reservation.findUnique.mockResolvedValue(makeAppt() as any)
     prismaMock.reservation.update.mockResolvedValue(makeAppt({ startsAt: newStart, endsAt: newEnd }) as any)
+    // D679: cambiar de horario revisa los pases Ilimitados de la cita; sin canjes, no hay ninguno.
+    prismaMock.creditTransaction.findMany.mockResolvedValue([])
     // Buffer post-servicio: la reprogramación recalcula el fin de bloque y para
     // eso consulta el catálogo. Lista vacía = sin buffer (comportamiento previo).
     prismaMock.product.findMany.mockResolvedValue([])

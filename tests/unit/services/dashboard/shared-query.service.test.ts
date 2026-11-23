@@ -599,6 +599,62 @@ describe('SharedQueryService', () => {
     })
   })
 
+  // D679 (N7, N8): el asistente nunca lee 99,999.
+  describe('Ilimitado', () => {
+    it('getCreditPackBalance: el renglón lleva unlimited y el total no lo suma', async () => {
+      ;(creditPackDashboardService.getCustomerPurchases as jest.Mock).mockResolvedValue({
+        purchases: [
+          {
+            id: 'p-ili',
+            status: 'ACTIVE',
+            expiresAt: new Date('2026-06-01T00:00:00.000Z'),
+            customer: { id: 'cust-1', firstName: 'Ana', lastName: 'Perez' },
+            creditPack: { name: 'Ilimitado' },
+            itemBalances: [
+              { id: 'b-1', unlimited: true, originalQuantity: 99999, remainingQuantity: 99996, product: { name: 'Lagree', type: 'CLASS' } },
+              { id: 'b-2', unlimited: false, originalQuantity: 2, remainingQuantity: 1, product: { name: 'Shake', type: 'FOOD_AND_BEV' } },
+            ],
+          },
+        ],
+        total: 1,
+      })
+
+      const result = await SharedQueryService.getCreditPackBalance('venue-test', 'cust-1')
+
+      expect(result.totalRemainingCredits).toBe(1)
+      expect(result.balances).toEqual([
+        expect.objectContaining({ productName: 'Lagree', unlimited: true }),
+        expect.objectContaining({ productName: 'Shake', unlimited: false, remainingQuantity: 1 }),
+      ])
+    })
+
+    it('getCreditPacks: un renglón Ilimitado sale con unlimited true y quantity null', async () => {
+      ;(creditPackDashboardService.getCreditPacks as jest.Mock).mockResolvedValue([
+        {
+          name: 'Ilimitado',
+          active: true,
+          price: 2500,
+          currency: 'MXN',
+          validityDays: 30,
+          maxPerCustomer: null,
+          _count: { purchases: 2 },
+          items: [
+            { quantity: 99999, unlimited: true, product: { name: 'Lagree', type: 'CLASS' } },
+            { quantity: 2, unlimited: false, product: { name: 'Shake', type: 'FOOD_AND_BEV' } },
+          ],
+        },
+      ])
+
+      const result = await SharedQueryService.getCreditPacks('venue-test')
+
+      expect(result.packs[0].items).toEqual([
+        { productName: 'Lagree', productType: 'CLASS', quantity: null, unlimited: true },
+        { productName: 'Shake', productType: 'FOOD_AND_BEV', quantity: 2 },
+      ])
+      expect(JSON.stringify(result)).not.toContain('99999')
+    })
+  })
+
   describe('getCreditPacksSummary', () => {
     it('summarizes credit packs without Stripe/product IDs', async () => {
       ;(creditPackDashboardService.getCreditPacks as jest.Mock).mockResolvedValue([

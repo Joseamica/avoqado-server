@@ -800,7 +800,9 @@ export class ConversationOrchestratorService {
         const packs = await SharedQueryService.getCreditPacks(venueId, { limit: this.limit(step, 10) })
         const list = packs.packs
           .map(pack => {
-            const items = pack.items.map(item => `${item.quantity} ${item.productName}`).join(', ')
+            const items = pack.items
+              .map(item => (item.unlimited ? `Ilimitado de ${item.productName}` : `${item.quantity} ${item.productName}`))
+              .join(', ')
             const validity = pack.validityDays ? `, vigencia ${pack.validityDays} días` : ''
             return `- ${pack.name}: ${pack.active ? 'activo' : 'inactivo'}, ${this.money(pack.price, pack.currency)}, ${pack.purchaseCount} compras${validity}${items ? `; incluye ${items}` : ''}.`
           })
@@ -829,6 +831,12 @@ export class ConversationOrchestratorService {
           .slice(0, this.limit(step, 10))
           .map(item => {
             const expiration = item.expiresAt ? `, vence ${this.formatDate(item.expiresAt)}` : ''
+            // D679 (N7): un Ilimitado dice cuánto usó; reembolsado, sólo eso (su saldo quedó en 0 y «usó 99999» mentiría).
+            if (item.unlimited) {
+              if (item.status === 'REFUNDED') return `- ${item.productName} (${item.packName}): Ilimitado, reembolsado.`
+              const estado = item.status === 'ACTIVE' ? '' : `, ${item.status}`
+              return `- ${item.productName} (${item.packName}): Ilimitado, usó ${item.initialQuantity - item.remainingQuantity}${estado}${expiration}.`
+            }
             return `- ${item.productName} (${item.packName}): ${item.remainingQuantity}/${item.initialQuantity} créditos, ${item.status}${expiration}.`
           })
           .join('\n')
@@ -836,7 +844,11 @@ export class ConversationOrchestratorService {
           step.tool,
           credits,
           credits.balances.length > 0
-            ? `${credits.customerName} tiene ${credits.totalRemainingCredits} créditos disponibles en ${credits.activePurchases} compras activas.${list ? `\nCréditos por producto:\n${list}` : ''}`
+            ? `${credits.customerName} tiene ${
+                credits.balances.some(b => b.unlimited && b.status === 'ACTIVE')
+                  ? `un Ilimitado activo${credits.totalRemainingCredits > 0 ? ` y ${credits.totalRemainingCredits} créditos disponibles` : ''}`
+                  : `${credits.totalRemainingCredits} créditos disponibles`
+              } en ${credits.activePurchases} compras activas.${list ? `\nCréditos por producto:\n${list}` : ''}`
             : `${credits.customerName} no tiene créditos disponibles.`,
           credits.balances.length,
         )

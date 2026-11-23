@@ -1,13 +1,13 @@
 {
   "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
   "sourceRepo": "avoqado-web-dashboard",
-  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8",
   "version": "main",
   "pasos": [
     {
       "paso": 1,
       "archivo": "src/components/Sidebar/app-sidebar.tsx",
-      "linea": 1201,
+      "linea": 1182,
       "cita": "title: term('menu'),"
     },
     {
@@ -25,31 +25,31 @@
     {
       "paso": 1,
       "archivo": "src/components/Sidebar/app-sidebar.tsx",
-      "linea": 373,
+      "linea": 377,
       "cita": "permission: 'creditPacks:read',"
     },
     {
       "paso": 1,
       "archivo": "src/locales/es/sidebar.json",
-      "linea": 43,
+      "linea": 44,
       "cita": "\"creditPacks\": \"Paquetes de Créditos\","
     },
     {
       "paso": 1,
       "archivo": "src/pages/CreditPacks/CreditPacks.tsx",
-      "linea": 311,
+      "linea": 318,
       "cita": "{t('actions.create')}"
     },
     {
       "paso": 1,
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 88,
+      "linea": 91,
       "cita": "\"create\": \"Crear Paquete\","
     },
     {
       "paso": 2,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 276,
+      "linea": 298,
       "cita": "<FormLabel>{t('form.fields.name')}</FormLabel>"
     },
     {
@@ -61,7 +61,7 @@
     {
       "paso": 2,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 309,
+      "linea": 331,
       "cita": "<FormLabel>{t('form.fields.price')}</FormLabel>"
     },
     {
@@ -85,7 +85,7 @@
     {
       "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 409,
+      "linea": 437,
       "cita": "<h3 className=\"font-medium text-sm\">{t('form.fields.items')}</h3>"
     },
     {
@@ -97,7 +97,7 @@
     {
       "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 438,
+      "linea": 469,
       "cita": "<FormLabel>{t('form.fields.product')}</FormLabel>"
     },
     {
@@ -109,7 +109,7 @@
     {
       "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 461,
+      "linea": 497,
       "cita": "<FormLabel>{t('form.fields.quantity')}</FormLabel>"
     },
     {
@@ -121,8 +121,8 @@
     {
       "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 415,
-      "cita": "onClick={() => append({ productId: '', quantity: 1 })}"
+      "linea": 443,
+      "cita": "onClick={() => append({ productId: '', quantity: 1, unlimited: false })}"
     },
     {
       "paso": 3,
@@ -131,45 +131,81 @@
       "cita": "\"addItem\": \"Agregar Item\","
     },
     {
+      "paso": 3,
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 530,
+      "cita": "<FormLabel>{t('form.fields.unlimited')}</FormLabel>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 42,
+      "cita": "\"unlimited\": \"Ilimitado\""
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 531,
+      "cita": "<FormDescription>{t('form.unlimitedHelp')}</FormDescription>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 62,
+      "cita": "\"unlimitedHelp\": \"Personal: sólo a nombre de quien lo compra, un lugar por clase\""
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 483,
+      "cita": "{!ilimitado && ("
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 120,
+      "cita": "? { productId: item.productId, unlimited: true }"
+    },
+    {
       "paso": 4,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 244,
+      "linea": 266,
       "cita": "{mutation.isPending ? tCommon('saving') : t('actions.save')}"
     },
     {
       "paso": 4,
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 91,
+      "linea": 94,
       "cita": "\"save\": \"Guardar Cambios\","
     },
     {
       "paso": 4,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 213,
+      "linea": 235,
       "cita": "title: isEditing ? t('toasts.updateSuccess') : t('toasts.createSuccess'),"
     },
     {
       "paso": 4,
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 127,
+      "linea": 130,
       "cita": "\"createSuccess\": \"Paquete de créditos creado exitosamente\","
     },
     {
       "paso": 5,
       "archivo": "src/pages/CreditPacks/CreditPacks.tsx",
-      "linea": 268,
+      "linea": 275,
       "cita": "<MoreHorizontal className=\"h-4 w-4\" />"
     },
     {
       "paso": 5,
       "archivo": "src/pages/CreditPacks/CreditPacks.tsx",
-      "linea": 273,
+      "linea": 280,
       "cita": "<DropdownMenuItem onClick={() => openEdit(row.original.id)} className=\"cursor-pointer\">"
     },
     {
       "paso": 5,
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 89,
+      "linea": 92,
       "cita": "\"edit\": \"Editar\","
     }
   ],
@@ -177,17 +213,17 @@
     {
       "permiso": "menu:read",
       "archivo": "src/routes/venueRoutes.tsx",
-      "linea": 207
+      "linea": 210
     },
     {
       "permiso": "creditPacks:read",
       "archivo": "src/components/Sidebar/app-sidebar.tsx",
-      "linea": 373
+      "linea": 377
     },
     {
       "permiso": "creditPacks:create",
       "archivo": "src/pages/CreditPacks/CreditPacks.tsx",
-      "linea": 308
+      "linea": 315
     },
     {
       "permiso": "creditPacks:create",
@@ -197,7 +233,7 @@
     {
       "permiso": "creditPacks:update",
       "archivo": "src/pages/CreditPacks/CreditPacks.tsx",
-      "linea": 272
+      "linea": 279
     },
     {
       "permiso": "creditPacks:update",
@@ -211,57 +247,132 @@
     {
       "ruta": "Antes: la ruta cuelga de menumaker (menu:read)",
       "archivo": "src/routes/venueRoutes.tsx",
-      "linea": 227
+      "linea": 230
     },
     {
       "ruta": "Problema: regla del nombre",
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 273
+      "linea": 295
     },
     {
       "ruta": "Problema: texto del nombre",
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 52
+      "linea": 53
     },
     {
       "ruta": "Problema: regla del precio",
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 304
+      "linea": 326
     },
     {
       "ruta": "Problema: texto del precio",
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 53
+      "linea": 54
     },
     {
       "ruta": "Problema: regla del producto",
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 435
+      "linea": 466
     },
     {
       "ruta": "Problema: texto del producto",
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 56
+      "linea": 57
     },
     {
       "ruta": "Problema: el error trae la razón del SERVIDOR",
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 221
+      "linea": 243
     },
     {
       "ruta": "Problema: texto por omisión",
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 133
+      "linea": 136
     },
     {
       "ruta": "Problema: título del error",
       "archivo": "src/locales/es/common.json",
-      "linea": 513
+      "linea": 516
     },
     {
-      "ruta": "T11-12: el panel reintenta una vez cualquier petición tras un error de red, sin llave",
+      "ruta": "D6: un error de red no dice si llegó; el panel repite solo lo que no crea (crear un paquete no se repite)",
       "archivo": "src/api.ts",
-      "linea": 98
+      "linea": 168
+    },
+    {
+      "ruta": "Ilimitado: con un renglón Ilimitado, Días de Validez es obligatorio (regla)",
+      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
+      "linea": 385
+    },
+    {
+      "ruta": "Ilimitado: texto debajo de Días de Validez",
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 60
+    },
+    {
+      "ruta": "Ilimitado: el SERVIDOR exige la vigencia al crear",
+      "archivo": "avoqado-server/src/services/dashboard/creditPack.dashboard.service.ts",
+      "linea": 106
+    },
+    {
+      "ruta": "Ilimitado: un editor viejo no cambia los productos de un paquete con Ilimitado",
+      "archivo": "avoqado-server/src/services/dashboard/creditPack.dashboard.service.ts",
+      "linea": 265
+    },
+    {
+      "ruta": "Ilimitado: compras dicen «Ilimitado · vence el … · usó N»",
+      "archivo": "src/pages/CreditPacks/CreditPackPurchases.tsx",
+      "linea": 212
+    },
+    {
+      "ruta": "Ilimitado: compra reembolsada dice «Ilimitado · reembolsado»",
+      "archivo": "src/pages/CreditPacks/CreditPackPurchases.tsx",
+      "linea": 211
+    },
+    {
+      "ruta": "Ilimitado: texto de compras",
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 168
+    },
+    {
+      "ruta": "Ilimitado: texto reembolsado",
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 169
+    },
+    {
+      "ruta": "Ilimitado: ficha de la clienta con el mismo texto",
+      "archivo": "src/pages/Customers/CustomerDetail.tsx",
+      "linea": 681
+    },
+    {
+      "ruta": "Ilimitado: faltas en la compra",
+      "archivo": "src/pages/CreditPacks/CreditPackPurchases.tsx",
+      "linea": 244
+    },
+    {
+      "ruta": "Ilimitado: texto de faltas",
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 171
+    },
+    {
+      "ruta": "Ilimitado: sin Ajustar Balance en un Ilimitado",
+      "archivo": "src/pages/CreditPacks/CreditPackPurchases.tsx",
+      "linea": 229
+    },
+    {
+      "ruta": "Ilimitado: texto de Ajustar Balance",
+      "archivo": "src/locales/es/creditPacks.json",
+      "linea": 97
+    },
+    {
+      "ruta": "Ilimitado: textos del SERVIDOR que ve la clienta o el panel (personal, misma clase, nombre ligado, titular, ajuste, vigencia, panel actualizado)",
+      "archivo": "avoqado-server/src/services/credits/ilimitado.ts",
+      "linea": 30
+    },
+    {
+      "ruta": "Ilimitado: «Tu Ilimitado vence el …; esta clase es después.»",
+      "archivo": "avoqado-server/src/services/credits/ilimitado.ts",
+      "linea": 49
     }
   ],
   "aparato": {

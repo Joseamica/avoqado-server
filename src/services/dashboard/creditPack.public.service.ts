@@ -15,7 +15,7 @@ import { Prisma, CreditPurchaseStatus, ReservationStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
-import { withDeadlockRetry, withSerializableRetry } from '@/utils/serializableRetry'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { logAction } from './activity-log.service'
 import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 import { findCustomerIdByPhone } from '@/services/public/customerPhoneLookup'
@@ -23,6 +23,7 @@ import emailService from '@/services/email.service'
 import { resolveChargeableStripeMerchant } from '@/services/payments/ecommerceCapability'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
 import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
+import { UNLIMITED_LATE_CANCEL_MARK, vigenciaAlEntregar } from '@/services/credits/ilimitado'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -40,26 +41,34 @@ function getStripeChargeBounds() {
  * Get active credit packs for a venue (public)
  */
 export async function getAvailablePacks(venueId: string, productId?: string) {
-  const packs = await prisma.creditPack.findMany({
-    where: { venueId, active: true },
-    include: {
-      items: {
+  // D679 (Codex código r2 #3): paquete y renglones en UNA foto de la base (Prisma los lee en dos consultas). Con esta lista el POS
+  // firma la foto con la que vende sin red; una lectura partida contra una edición daría un Ilimitado con la vigencia vieja.
+  const leidos = await prisma.$transaction(
+    tx =>
+      tx.creditPack.findMany({
+        where: { venueId, active: true },
         include: {
-          product: {
-            select: {
-              id: true,
-              name: true,
-              type: true,
-              price: true,
-              imageUrl: true,
-              duration: true,
+          items: {
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  type: true,
+                  price: true,
+                  imageUrl: true,
+                  duration: true,
+                },
+              },
             },
           },
         },
-      },
-    },
-    orderBy: { displayOrder: 'asc' },
-  })
+        orderBy: { displayOrder: 'asc' },
+      }),
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  )
+  // Un Ilimitado sin vigencia no se ofrece (ni en el POS ni en la tienda): siempre vence (la edición lo exige; esto cuida datos viejos).
+  const packs = leidos.filter(pack => pack.validityDays != null || !pack.items.some(item => item.unlimited))
 
   // If productId filter, only return packs that include that product
   if (productId) {
@@ -140,7 +149,8 @@ export async function lookupCustomerCredits(
       ...p,
       itemBalances: p.itemBalances.map(b => ({
         ...b,
-        sufficient: seats != null ? b.remainingQuantity >= seats : true,
+        // D679 (N2): un Ilimitado es personal, cubre 1 lugar; su 99,999 no cuenta como «alcanza para 2».
+        sufficient: seats == null ? true : b.unlimited ? seats <= 1 : b.remainingQuantity >= seats,
       })),
     }))
     .filter(p => (productId || productIds ? p.itemBalances.length > 0 : true))
@@ -514,14 +524,15 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
     })
   }
 
-  // Calculate expiration
-  const expiresAt = pack.validityDays ? new Date(Date.now() + pack.validityDays * 24 * 60 * 60 * 1000) : null
-
   const amountPaid = new Prisma.Decimal((session.amount_total || 0) / 100)
 
   // Create everything in a transaction
   const purchase = await withDeadlockRetry(
     async tx => {
+      // Calculate expiration. D679 (Codex código r1 #3): un renglón Ilimitado sin vigencia es una lectura partida; se relee aquí.
+      const validityDays = await vigenciaAlEntregar(tx, pack)
+      const expiresAt = validityDays ? new Date(Date.now() + validityDays * 24 * 60 * 60 * 1000) : null
+
       // Create purchase
       const newPurchase = await tx.creditPackPurchase.create({
         data: {
@@ -545,6 +556,8 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
             productId: item.productId,
             originalQuantity: item.quantity,
             remainingQuantity: item.quantity,
+            // D679 (W9): la marca del renglón del paquete al entregar.
+            ...(item.unlimited ? { unlimited: true } : {}),
           },
         })
 
@@ -622,6 +635,8 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
       const itemNameById = new Map(itemProducts.map(p => [p.id, p.name]))
       const itemLines = pack.items.map(it => {
         const name = it.productId ? (itemNameById.get(it.productId) ?? 'Servicio') : 'Servicio'
+        // D679 (N3): nunca «99999 sesiones».
+        if (it.unlimited) return `Ilimitado de ${name}`
         return `${it.quantity} ${it.quantity === 1 ? 'sesión' : 'sesiones'} de ${name}`
       })
       const customerName = (customer as { firstName?: string | null }).firstName || (customer as { name?: string | null }).name || 'Cliente'
@@ -633,7 +648,7 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
         itemLines,
         amountPaid: Number(amountPaid),
         currency: pack.currency || 'MXN',
-        validUntilIso: expiresAt ? expiresAt.toISOString() : null,
+        validUntilIso: purchase.expiresAt ? purchase.expiresAt.toISOString() : null,
         purchaseRef: purchase.id.slice(-8).toUpperCase(),
       })
     } catch (mailError) {
@@ -675,6 +690,25 @@ export async function checkRedemptionEligibility(venueId: string, customerId: st
 }
 
 /**
+ * Cuánto regresa la política al cancelar ahora (la cuenta de siempre). `tardia` = `TIME_BASED` y dentro de la ventana: con un
+ * Ilimitado no quita nada, sólo anota la falta (D679). La usan la devolución y la vista previa del widget.
+ */
+export function porcentajeDeDevolucion(
+  policy: { creditRefundMode: 'NEVER' | 'ALWAYS' | 'TIME_BASED'; creditFreeRefundHoursBefore: number; creditLateRefundPercent: number },
+  startsAt: Date,
+  now: Date,
+): { percent: number; policyApplied: string; tardia: boolean } {
+  if (policy.creditRefundMode === 'NEVER') return { percent: 0, policyApplied: 'NEVER', tardia: false }
+  if (policy.creditRefundMode === 'ALWAYS') return { percent: 100, policyApplied: 'ALWAYS', tardia: false }
+  const hoursUntilStart = (startsAt.getTime() - now.getTime()) / 3_600_000
+  if (hoursUntilStart >= policy.creditFreeRefundHoursBefore) {
+    return { percent: 100, policyApplied: `TIME_BASED:free (≥${policy.creditFreeRefundHoursBefore}h)`, tardia: false }
+  }
+  const percent = Math.max(0, Math.min(100, policy.creditLateRefundPercent))
+  return { percent, policyApplied: `TIME_BASED:late (${percent}%)`, tardia: true }
+}
+
+/**
  * Refund credits for a cancelled reservation according to the venue's policy.
  *
  * Looks up the original REDEEM transaction(s) for this reservation, computes the refund
@@ -713,8 +747,10 @@ export async function refundCreditsForReservation(
 
   // Find the original REDEEM transaction(s) for this reservation.
   // We sum their negative quantities to know how many credits were spent on it.
+  // D679: con la marca de su saldo (un Ilimitado siempre regresa).
   const redeems = await (db ?? prisma).creditTransaction.findMany({
     where: { venueId, reservationId, type: 'REDEEM' },
+    include: { creditItemBalance: { select: { unlimited: true } }, creditPackPurchase: { select: { status: true } } },
   })
 
   if (redeems.length === 0) return { creditsRefunded: 0, policyApplied: 'no-credits-used' }
@@ -723,27 +759,10 @@ export async function refundCreditsForReservation(
   if (totalSpent <= 0) return { creditsRefunded: 0, policyApplied: 'no-credits-used' }
 
   // Compute refund amount based on policy
-  let refundPercent = 0
-  let policyApplied = ''
-  if (policy.creditRefundMode === 'NEVER') {
-    refundPercent = 0
-    policyApplied = 'NEVER'
-  } else if (policy.creditRefundMode === 'ALWAYS') {
-    refundPercent = 100
-    policyApplied = 'ALWAYS'
-  } else {
-    // TIME_BASED
-    const hoursUntilStart = (startsAt.getTime() - Date.now()) / 3_600_000
-    if (hoursUntilStart >= policy.creditFreeRefundHoursBefore) {
-      refundPercent = 100
-      policyApplied = `TIME_BASED:free (≥${policy.creditFreeRefundHoursBefore}h)`
-    } else {
-      refundPercent = Math.max(0, Math.min(100, policy.creditLateRefundPercent))
-      policyApplied = `TIME_BASED:late (${refundPercent}%)`
-    }
-  }
+  const { percent: refundPercent, policyApplied, tardia } = porcentajeDeDevolucion(policy, startsAt, new Date())
+  const esIlimitado = (t: (typeof redeems)[number]) => t.creditItemBalance?.unlimited === true
 
-  if (refundPercent === 0) {
+  if (refundPercent === 0 && !redeems.some(esIlimitado)) {
     logger.info(`💸 [CREDIT REFUND] No refund per policy (${policyApplied}) — reservation=${reservationId} spent=${totalSpent}`)
     return { creditsRefunded: 0, policyApplied }
   }
@@ -759,7 +778,28 @@ export async function refundCreditsForReservation(
       if (rows[0]?.status !== onlyIfReservationStatus) return true
     }
     for (const tx of redeems) {
-      const refundQty = Math.floor((Math.abs(tx.quantity) * refundPercent) / 100)
+      // D679 (regla 7): un Ilimitado regresa siempre completo; si fue en la ventana tardía, la falta queda anotada en el reason.
+      const ilimitado = esIlimitado(tx)
+      // Codex código r1 #7: un pase cuya compra ya se reembolsó está anulado; devolverle una clase sería un crédito que no se puede usar.
+      // Codex código r2 #7b: la cancelación tardía SÍ se anota (un movimiento de 0 con la marca), para el conteo de faltas.
+      if (ilimitado && tx.creditPackPurchase?.status === CreditPurchaseStatus.REFUNDED) {
+        if (tardia && tx.creditItemBalanceId) {
+          await conexion.creditTransaction.create({
+            data: {
+              venueId,
+              customerId: tx.customerId,
+              creditPackPurchaseId: tx.creditPackPurchaseId,
+              creditItemBalanceId: tx.creditItemBalanceId,
+              type: 'REFUND',
+              quantity: 0,
+              reservationId,
+              reason: `${reasonPrefix ?? 'Cancellation refund'} — policy: ${policyApplied} (compra reembolsada, sin devolución) · ${UNLIMITED_LATE_CANCEL_MARK}`,
+            },
+          })
+        }
+        continue
+      }
+      const refundQty = Math.floor((Math.abs(tx.quantity) * (ilimitado ? 100 : refundPercent)) / 100)
       if (refundQty <= 0) continue
       if (!tx.creditItemBalanceId) continue
 
@@ -776,7 +816,7 @@ export async function refundCreditsForReservation(
           type: 'REFUND',
           quantity: refundQty,
           reservationId,
-          reason: `${reasonPrefix ?? 'Cancellation refund'} — policy: ${policyApplied}`,
+          reason: `${reasonPrefix ?? 'Cancellation refund'} — policy: ${policyApplied}${ilimitado && tardia ? ` · ${UNLIMITED_LATE_CANCEL_MARK}` : ''}`,
         },
       })
       // If the purchase was marked EXHAUSTED but now has balance again, restore ACTIVE.
@@ -799,92 +839,6 @@ export async function refundCreditsForReservation(
 
   logger.info(`💸 [CREDIT REFUND] reservation=${reservationId} refunded=${totalRefunded}/${totalSpent} policy=${policyApplied}`)
   return { creditsRefunded: totalRefunded, policyApplied }
-}
-
-/**
- * Redeem 1 credit for a reservation (called within serializable transaction)
- */
-export async function redeemForReservation(venueId: string, customerId: string, balanceId: string, reservationId: string) {
-  return withSerializableRetry(async tx => {
-    // Lock the balance row
-    const balances = await tx.$queryRaw<{ id: string; remainingQuantity: number; creditPackPurchaseId: string; productId: string }[]>`
-      SELECT id, "remainingQuantity", "creditPackPurchaseId", "productId"
-      FROM "CreditItemBalance"
-      WHERE id = ${balanceId}
-      FOR UPDATE
-    `
-
-    if (balances.length === 0) {
-      throw new NotFoundError('Balance de credito no encontrado')
-    }
-
-    const balance = balances[0]
-
-    if (balance.remainingQuantity <= 0) {
-      throw new BadRequestError('No hay creditos disponibles en este balance')
-    }
-
-    // Verify the purchase is still active and not expired
-    const purchase = await tx.creditPackPurchase.findUnique({
-      where: { id: balance.creditPackPurchaseId },
-      select: { status: true, expiresAt: true, venueId: true, customerId: true },
-    })
-
-    if (!purchase || purchase.venueId !== venueId || purchase.customerId !== customerId) {
-      throw new BadRequestError('Balance de credito no valido para este cliente')
-    }
-
-    if (purchase.status !== CreditPurchaseStatus.ACTIVE) {
-      throw new BadRequestError('La compra de creditos ya no esta activa')
-    }
-
-    if (purchase.expiresAt && purchase.expiresAt < new Date()) {
-      throw new BadRequestError('Los creditos han expirado')
-    }
-
-    // Decrement balance
-    await tx.creditItemBalance.update({
-      where: { id: balanceId },
-      data: { remainingQuantity: { decrement: 1 } },
-    })
-
-    // Create transaction
-    await tx.creditTransaction.create({
-      data: {
-        venueId,
-        customerId,
-        creditPackPurchaseId: balance.creditPackPurchaseId,
-        creditItemBalanceId: balanceId,
-        type: 'REDEEM',
-        quantity: -1,
-        reservationId,
-      },
-    })
-
-    // Check if all balances in the purchase are exhausted
-    const remainingBalances = await tx.creditItemBalance.findMany({
-      where: {
-        creditPackPurchaseId: balance.creditPackPurchaseId,
-        remainingQuantity: { gt: 0 },
-      },
-    })
-
-    if (remainingBalances.length === 0) {
-      await tx.creditPackPurchase.update({
-        where: { id: balance.creditPackPurchaseId },
-        data: { status: CreditPurchaseStatus.EXHAUSTED },
-      })
-    }
-
-    logger.info('✅ [CREDIT PACK] Credit redeemed for reservation', {
-      balanceId,
-      reservationId,
-      customerId,
-      venueId,
-    })
-
-    return { redeemed: true }
-  })
 }
 
 // ==========================================

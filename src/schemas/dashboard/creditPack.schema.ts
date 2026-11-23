@@ -18,7 +18,9 @@ export const createCreditPackSchema = z.object({
       .array(
         z.object({
           productId: z.string().min(1, 'El producto es requerido'),
-          quantity: z.number().int().positive('La cantidad debe ser mayor a 0'),
+          // D679: un renglón Ilimitado no trae cantidad (la pone el servidor). Uno normal sin cantidad lo rechaza el servicio.
+          quantity: z.number().int().positive('La cantidad debe ser mayor a 0').optional(),
+          unlimited: z.boolean({ invalid_type_error: 'Ilimitado debe ser sí o no' }).optional(),
         }),
         { required_error: 'Agrega al menos un producto al paquete' },
       )
@@ -44,7 +46,9 @@ export const updateCreditPackSchema = z.object({
       .array(
         z.object({
           productId: z.string().min(1, 'El producto es requerido'),
-          quantity: z.number().int().positive('La cantidad debe ser mayor a 0'),
+          // D679: un renglón Ilimitado no trae cantidad (la pone el servidor). Uno normal sin cantidad lo rechaza el servicio.
+          quantity: z.number().int().positive('La cantidad debe ser mayor a 0').optional(),
+          unlimited: z.boolean({ invalid_type_error: 'Ilimitado debe ser sí o no' }).optional(),
         }),
       )
       .min(1, 'El paquete debe tener al menos un item')

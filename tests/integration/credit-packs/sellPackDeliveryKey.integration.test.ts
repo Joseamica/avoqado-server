@@ -192,4 +192,29 @@ describe('Venta en persona con llave de entrega (integración, base real)', () =
     expect(a.id).not.toBe(b.id)
     expect((a as any).deliveryKey).toBeNull()
   })
+
+  // D679 (W7): el saldo copia la marca de lo vendido, del catálogo o de la foto firmada.
+  it('vender un Ilimitado (catálogo y foto) deja saldo 99999 con la marca; la foto manda aunque la dueña lo cambie después', async () => {
+    const ilimitado = await prisma.creditPack.create({
+      data: {
+        venueId,
+        name: `Ilimitado ${n}`,
+        price: new Prisma.Decimal(2500),
+        validityDays: 30,
+        items: { create: [{ productId: yoga.id, quantity: 99999, unlimited: true }] },
+      },
+      include: { items: true },
+    })
+    const saldo = (compra: any) => compra.itemBalances[0]
+
+    const delCatalogo = await sellPackInPerson(venueId, ilimitado.id, clienta.id, staffVenueId, { deliveryKey: `ili-cat-${n}` })
+    expect(saldo(delCatalogo)).toMatchObject({ originalQuantity: 99999, remainingQuantity: 99999, unlimited: true })
+
+    const foto = leerFotoDelPaquete(firmarFotoDelPaquete(ilimitado))
+    expect(foto!.items).toEqual([{ productId: yoga.id, quantity: 99999, unlimited: true }])
+    // La dueña lo vuelve normal (10) antes de que llegue la venta sin red: se entrega lo vendido.
+    await prisma.creditPackItem.updateMany({ where: { creditPackId: ilimitado.id }, data: { quantity: 10, unlimited: false } })
+    const deLaFoto = await sellPackInPerson(venueId, ilimitado.id, clienta.id, staffVenueId, { deliveryKey: `ili-foto-${n}`, foto })
+    expect(saldo(deLaFoto)).toMatchObject({ originalQuantity: 99999, remainingQuantity: 99999, unlimited: true, creditPackItemId: null })
+  })
 })

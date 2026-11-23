@@ -122,4 +122,23 @@ describe('Paquetes del POS: llave y foto en el borde', () => {
     expect(opts).toMatchObject({ note: 'hola', foto: null })
     expect(opts.deliveryKey).toBeUndefined()
   })
+
+  // D679 (W6): la foto copia la marca de cada renglón; una foto vieja sin el campo es lo que se vendió entonces: normal.
+  it('la foto firmada lleva unlimited y leerFotoDelPaquete la devuelve', () => {
+    const ilimitado = { ...pack, items: [{ id: 'i-1', productId: 'prod-1', quantity: 99999, unlimited: true }] }
+    expect(leerFotoDelPaquete(firmarFotoDelPaquete(ilimitado))!.items).toEqual([{ productId: 'prod-1', quantity: 99999, unlimited: true }])
+    // un paquete normal sale igual que antes de D679: sin la llave
+    expect(leerFotoDelPaquete(firmarFotoDelPaquete(pack))!.items).toEqual([{ productId: 'prod-1', quantity: 10 }])
+  })
+
+  it('una foto vieja sin el campo se lee normal', () => {
+    const foto = leerFotoDelPaquete(firmarFotoDelPaquete(pack))!
+    expect(foto.items.every(i => i.unlimited !== true)).toBe(true)
+  })
+
+  // Codex código r2 #3: una foto con un renglón Ilimitado y sin vigencia no se firma (el POS no ofrece ese paquete).
+  it('un paquete con un renglón Ilimitado y sin vigencia no lleva foto', () => {
+    const roto = { ...pack, validityDays: null, items: [{ id: 'i-1', productId: 'prod-1', quantity: 99999, unlimited: true }] }
+    expect(firmarFotoDelPaquete(roto)).toBeNull()
+  })
 })
