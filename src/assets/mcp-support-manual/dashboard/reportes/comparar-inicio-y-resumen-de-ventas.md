@@ -15,6 +15,7 @@ keywords:
   - sin cobrar
   - ventas diferidas
   - cuenta abierta
+  - mesa abierta
   - cargos por servicio
   - comisión de uber
   - comisiones de terceros
@@ -34,6 +35,6 @@ Para *Inicio* necesitas permiso para ver el inicio y las analíticas; para *Repo
 ## Problemas frecuentes
 
 - Sin filtros, una cuenta abierta ayer y cobrada hoy sale ayer en *Resumen de Ventas* y hoy en *Inicio*.
-- Una cuenta pagada a medias no cuenta como venta, ni en *Neto cobrado*, hasta que se termina de pagar; su abono tampoco entra en *Propinas* ni en los cobros que cuenta el reporte hasta entonces.
+- Una cuenta abierta o pagada a medias (también una mesa) no cuenta como venta hasta que se termina de pagar: su abono no sale en *Propinas*, en *Neto cobrado* ni en los cobros que cuenta el *Resumen de Ventas*. En *Inicio* sí sale, el día del abono.
 - *Inicio* no resta las devoluciones y el *Resumen de Ventas* sí. El número de *cobros* del *Resumen de Ventas* no cuenta las devoluciones: van en su renglón, con su número. Una cuenta pagada en tres pagos cuenta tres cobros.
 - *Liquidación de hoy*, en *Inicio*, no es lo que vendiste hoy: es lo que se estima que cae hoy en tu banco por cobros con tarjeta, sin el efectivo.

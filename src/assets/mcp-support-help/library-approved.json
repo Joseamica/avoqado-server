@@ -640,7 +640,7 @@
       ]
     },
     "dashboard/reportes/comparar-inicio-y-resumen-de-ventas": {
-      "sha256": "0c992dec502d75e034a50c9e66d1daaea8b087690e3faafebfd88494c9792668",
+      "sha256": "ee8f3e04f90fdaafc226c86660f2b7fd69c9540c8ddb74037a13b76db7c3b9c6",
       "requiredPermissions": []
     },
     "dashboard/reportes/revisar-reportes-avanzados": {
