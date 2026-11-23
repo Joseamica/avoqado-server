@@ -106,6 +106,13 @@ describe('🔴 todos los planes (decisión del founder del 22-nov): sin candado 
     expect(out.headline).toMatchObject({ netSales: 10 })
   })
 
+  it('🔴 Codex r8 #1 · sólo con una fecha final antigua, un negocio Gratis recibe el aviso de plan (no «inicio después del fin»)', async () => {
+    mockRangoBloqueado.mockResolvedValueOnce(true)
+    const out = parse(await call({ venueId: 'v1', toDate: '2026-11-01' }))
+    expect(out).toMatchObject({ ok: false, planRequired: true })
+    expect(mockGetSalesSummary).not.toHaveBeenCalled()
+  })
+
   it('sólo con una fecha final de otro día, un negocio Gratis recibe el aviso de plan', async () => {
     mockRangoBloqueado.mockResolvedValueOnce(true)
     const ayer = new Date(Date.now() - 86_400_000).toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' })
@@ -163,6 +170,13 @@ describe('rangoDelNegocio (Codex r2 #7)', () => {
     const r = rangoDelNegocio('America/Mexico_City') as { startDate: string; endDate: string }
     const dias = (new Date(r.endDate).getTime() - new Date(r.startDate).getTime()) / 86_400_000
     expect(Math.round(dias)).toBe(7)
+  })
+
+  it('🔴 Codex r8 #1 · sólo con la fecha final son los siete días que terminan ese día (no un rango al revés)', () => {
+    expect(rangoDelNegocio('America/Mexico_City', undefined, '2026-11-01')).toEqual({
+      startDate: '2026-10-26T06:00:00.000Z',
+      endDate: '2026-11-02T05:59:59.999Z',
+    })
   })
 
   it('las fechas van en días del negocio', () => {
