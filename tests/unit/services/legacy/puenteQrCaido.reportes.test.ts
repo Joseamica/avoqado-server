@@ -236,6 +236,15 @@ describe('Inicio (generalStats)', () => {
   })
 })
 
+/**
+ * Los cobros propios de Avoqado en la vista de movimientos: desde D16.2 (carril F) el volumen de la vista y «Cobrado» salen de UNA
+ * lectura agrupada por tipo (`payment.groupBy` por `type`). Las demás agrupaciones siguen vacías.
+ */
+const cobrosDeAvoqadoEnLaVista = () =>
+  (prismaMock.payment.groupBy as jest.Mock).mockImplementation(async (args: { by?: string[] }) =>
+    args?.by?.includes('type') ? [{ type: 'REGULAR', _sum: { amount: 700, tipAmount: 70 } }] : [],
+  )
+
 describe('Resumen de ventas (getSalesSummary)', () => {
   const RANGO = { startDate: DESDE, endDate: HASTA }
 
@@ -305,6 +314,7 @@ describe('Resumen de ventas (getSalesSummary)', () => {
   // los periodos), así que tampoco se le pregunta al puente ni su caída marca un total en el que no entran.
   it('🔴 con un comercio elegido: el puente no suma, no se le pregunta y su caída no marca', async () => {
     ;(prismaMock.payment.aggregate as jest.Mock).mockResolvedValue({ _sum: { amount: 700, tipAmount: 70 } })
+    cobrosDeAvoqadoEnLaVista()
     ;(prismaMock.payment.count as jest.Mock).mockResolvedValue(7)
     fallaLaSegundaPagina()
 
@@ -344,6 +354,7 @@ describe('Resumen de ventas (getSalesSummary)', () => {
     beforeEach(() => {
       // Avoqado SÍ tiene cobros propios en estas pruebas: así «las mismas cifras» no es comparar ceros con ceros.
       ;(prismaMock.payment.aggregate as jest.Mock).mockResolvedValue({ _sum: { amount: 700, tipAmount: 70 } })
+      cobrosDeAvoqadoEnLaVista()
       ;(prismaMock.payment.count as jest.Mock).mockResolvedValue(7)
     })
 
