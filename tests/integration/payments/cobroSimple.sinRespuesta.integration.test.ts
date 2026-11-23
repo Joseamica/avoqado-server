@@ -262,7 +262,8 @@ describe('S1.2 · entrar a «sin respuesta» y cerrar a los 10 s', () => {
       requestedBy: f.staffId,
       requestId,
     })
-    await esperar(100)
+    // La admisión (alta, procedencia, emisión) puede tardar más de 100 ms con la máquina cargada: se espera al hecho, no al reloj.
+    for (let i = 0; i < 100 && (await prisma.terminalPaymentRequest.findUnique({ where: { requestId } }))?.status !== 'UNKNOWN'; i++) await esperar(20)
     expect(await fila(requestId)).toMatchObject({ status: 'UNKNOWN', failureCode: 'ACK_TIMEOUT' })
     expect(cancelEmit).toHaveBeenCalledWith('terminal:payment_cancel', expect.objectContaining({ requestId }))
     expect(await ocupada()).toBe(false)
