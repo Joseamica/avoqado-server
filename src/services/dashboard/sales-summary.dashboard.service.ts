@@ -1228,6 +1228,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       totalCollected: amount + tips,
       netProfit: amount,
       transactionCount: legacyCount,
+      // D16.2 (Codex r5 #3): también aquí «Cobrado» (cobros aceptados del QR anterior, con propina): sin devoluciones ni comisiones.
+      chargedAmount: round2(amount + tips),
     }
 
     // For a non-summary reportType, build the time-series from legacy alone so
@@ -1335,28 +1337,22 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // the core-metric awaits below. We need this number only when deriving
   // totalCollected/netProfit under a filter; awaiting at the derived-metrics
   // block lets the other 8 queries run concurrently with this one.
-  const paymentVolumeForFilteredPromise: Promise<number> = vistaDeMovimientos
+  // D16.2 (carril F, Codex r5 #5): el volumen y lo cobrado de la vista salen de UNA lectura (agrupada por tipo): «Cobrado» y el
+  // volumen con que se arma «Neto cobrado» no pueden ver momentos distintos de la base. `type` puede ser NULL en cobros viejos.
+  const movimientosDeLaVistaPromise: Promise<{ volumen: number; cobrado: number } | null> = vistaDeMovimientos
     ? prisma.payment
-        .aggregate({
+        .groupBy({
+          by: ['type'],
           where: enElRango({ venueId, status: 'COMPLETED' as const, ...paymentLevelFilter }),
-          _sum: { amount: true },
-        })
-        .then(r => Number(r._sum.amount || 0))
-    : Promise.resolve(0)
-  // D16.2 (carril F): lo cobrado en la vista de movimientos, sin devoluciones y con propina. Mismo filtro que el volumen de arriba;
-  // `type` puede ser NULL en cobros viejos (cuentan).
-  const cobradoEnLaVistaPromise: Promise<number | null> = vistaDeMovimientos
-    ? prisma.payment
-        .aggregate({
-          where: enElRango({
-            venueId,
-            status: 'COMPLETED' as const,
-            OR: [{ type: null }, { type: { not: 'REFUND' as const } }],
-            ...paymentLevelFilter,
-          }),
           _sum: { amount: true, tipAmount: true },
         })
-        .then(r => round2(Number(r._sum.amount || 0) + Number(r._sum.tipAmount || 0)))
+        .then(grupos => ({
+          volumen: grupos.reduce((s, g) => s + Number(g._sum.amount || 0), 0),
+          // Los cobros de la vista sin devoluciones, con propina.
+          cobrado: round2(
+            grupos.filter(g => g.type !== 'REFUND').reduce((s, g) => s + Number(g._sum.amount || 0) + Number(g._sum.tipAmount || 0), 0),
+          ),
+        }))
     : Promise.resolve(null)
 
   // ============================================================
@@ -1471,8 +1467,10 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       // (ventas netas nulas, cobrado = suma con signo) y la devolución que sí salió se ve.
       // Codex r2 #7: en la vista de movimientos (método o comercio) TODA devolución que salió, también la cancelación de una venta de
       // tarjetas de regalo: «Total cobrado» ahí ya la resta (suma con signo) y sin esto «Devoluciones» no la explicaba.
+      // D16.2 (carril F, Codex r5 #1): en la vista de movimientos sólo lo que de verdad salió (`COMPLETED`), como el neto, que sale
+      // de los pagos `COMPLETED`: un reembolso anulado (FAILED) no es dinero devuelto. La vista de ventas no cambia aquí.
       ...(vistaDeMovimientos
-        ? {}
+        ? { status: 'COMPLETED' as const }
         : {
             order: {
               ...WHERE_ORDEN_SIN_TARJETAS,
@@ -1685,8 +1683,9 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // volume directly (Payment.amount sum) rather than from netSales. The
   // promise was kicked off near the top of the function so it runs in
   // parallel with the other core-metric queries.
-  const paymentVolumeForFiltered = await paymentVolumeForFilteredPromise
-  const cobradoEnLaVista = await cobradoEnLaVistaPromise
+  const movimientosDeLaVista = await movimientosDeLaVistaPromise
+  const paymentVolumeForFiltered = movimientosDeLaVista?.volumen ?? 0
+  const cobradoEnLaVista = movimientosDeLaVista?.cobrado ?? null
 
   // Total Collected = Net Sales + Tips - Platform Fees - Third-party fees (D1)
   // Mexico model: taxes are already included in prices, NOT added on top

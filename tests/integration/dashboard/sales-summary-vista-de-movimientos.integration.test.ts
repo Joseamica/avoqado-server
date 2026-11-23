@@ -31,6 +31,7 @@ type Pago = {
   tip?: number
   method?: 'CASH' | 'OTHER'
   type?: 'REGULAR' | 'REFUND' | null
+  status?: 'COMPLETED' | 'FAILED'
   tenderCommission?: number
   at?: Date
 }
@@ -61,7 +62,7 @@ async function cuenta(subtotal: number, pagos: Pago[], at = INSIDE) {
         amount: p.amount,
         tipAmount: p.tip ?? 0,
         method: p.method ?? 'CASH',
-        status: 'COMPLETED',
+        status: p.status ?? 'COMPLETED',
         type: p.type === undefined ? 'REGULAR' : p.type,
         tenderCommissionAmount: p.tenderCommission === undefined ? undefined : new Prisma.Decimal(p.tenderCommission),
         feePercentage: 0,
@@ -99,6 +100,15 @@ beforeAll(async () => {
     ],
     AYER,
   )
+  // Hoy, en efectivo: una devolución de $20 que FALLÓ (un reembolso anulado conserva su importe y queda FAILED): no salió dinero.
+  await cuenta(
+    20,
+    [
+      { amount: 20, at: AYER },
+      { amount: -20, type: 'REFUND', status: 'FAILED', at: INSIDE },
+    ],
+    AYER,
+  )
   // Hoy, «Otros»: un pedido de Uber de $90 con $27 de comisión de la plataforma.
   await cuenta(90, [{ amount: 90, method: 'OTHER', tenderCommission: 27 }])
 })
@@ -118,7 +128,9 @@ describe('D16.2 · lo cobrado con el método elegido (vista de movimientos)', ()
     const r = await resumen({ paymentMethod: 'CASH' })
     expect(r.filtered).toBe(true)
     expect(cents(r.summary.chargedAmount)).toBe(16000)
+    // Codex r5 #1: la devolución que falló no se cuenta como dinero devuelto en esta vista (el neto tampoco la resta).
     expect(cents(r.summary.refunds)).toBe(3300)
+    expect(r.summary.refundCount).toBe(1)
     expect(cents(r.summary.totalCollected)).toBe(12700)
     const s = r.summary
     expect(cents((s.chargedAmount ?? 0) - s.refunds - s.platformFees - (s.tenderCommissions ?? 0))).toBe(cents(s.totalCollected))
@@ -135,7 +147,7 @@ describe('D16.2 · lo cobrado con el método elegido (vista de movimientos)', ()
     const r = await resumen()
     expect(r.filtered).toBe(false)
     expect(r.summary.chargedAmount).toBeUndefined()
-    // La devolución de ayer se resta con su propina en la vista de ventas (eso no cambia aquí).
-    expect(cents(r.summary.netSales)).toBe(24000 - 3300)
+    // La vista de ventas no cambia aquí: resta la devolución de ayer con su propina y (deuda anotada) también la que falló.
+    expect(cents(r.summary.netSales)).toBe(24000 - 3300 - 2000)
   })
 })
