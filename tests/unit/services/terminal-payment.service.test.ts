@@ -2928,6 +2928,19 @@ describe('Revisión final · A: el long-poll del POS no se rinde al entrar en la
 
   it('regresión: un `failed` CON evidencia (PROCESSOR_DECLINED) la resuelve al instante con el FAILED de la terminal', async () => {
     const estado = await cobroEnEspera('REQ-A-DECLINED')
+    // Codex S1 r5 (R5-A): el negativo sale de la lectura única de la fila (`leerParaLaEspera`, la que pide `noResponseAt`), que ya
+    // ve lo que `closeRow` escribió; el camino real contra Postgres está en `cobroSimple.elAprobadoManda` (CONTROL de R5-A).
+    const enVuelo = { id: 'row-REQ-A-DECLINED', requestId: 'REQ-A-DECLINED', status: 'SENT', failureCode: null, updatedAt: new Date() }
+    const declinada = {
+      requestId: 'REQ-A-DECLINED',
+      status: 'FAILED',
+      failureCode: 'TPV_CONFIRMED_NO_CHARGE',
+      paymentId: null,
+      cancelDisposition: null,
+      noResponseAt: null,
+      resultJson: { requestId: 'REQ-A-DECLINED', status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED', errorMessage: 'Declinada' },
+    }
+    tpr().findFirst.mockImplementation(async (args: any) => (args?.select?.noResponseAt ? declinada : enVuelo))
     await terminalPaymentService.handlePaymentResultFromSocket(
       { requestId: 'REQ-A-DECLINED', status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED', errorMessage: 'Declinada' },
       socket,

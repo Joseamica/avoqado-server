@@ -2828,9 +2828,10 @@ class TerminalPaymentService {
     // sobre (UNKNOWN: success inacreditable, error verificando) se contesta como siempre.
     // Cobro simple · S1: la fila en sus 10 s de «sin respuesta» la contesta el cierre (`cerrarSinRespuesta` → 422 `failed`) o el
     // dinero. Se mira la FILA, no el sobre: un `timeout` repetido sobre una fila que ya corre su reloj tampoco despierta al POS.
-    // R4-A: con un `timeout` en la mano decide UNA lectura de la fila (`leerParaLaEspera`): el final durable gana, en «sin respuesta»
-    // el POS sigue esperando al cierre, y si no hay ninguno de los dos se contesta el `timeout`.
-    const lectura = outcome.status === 'timeout' ? await this.leerParaLaEspera(result.requestId, terminal.venueId) : null
+    // R4-A + Codex S1 r5 (R5-A): sólo un `success` se contesta con lo que devolvió `closeRow`; todo lo demás (también el ganador
+    // releído) lo decide UNA lectura de la fila (`leerParaLaEspera`): el final durable gana, en «sin respuesta» el POS sigue esperando,
+    // y si no hay ninguno de los dos se contesta un `timeout` — nunca el negativo en mano.
+    const lectura = outcome.status === 'success' ? null : await this.leerParaLaEspera(result.requestId, terminal.venueId)
     if (this.pendingPayments.get(result.requestId) !== pending) return true
     if (lectura?.tipo === 'EN_ESPERA') {
       logger.info('⏳ [TerminalPayment] Result entered «sin respuesta» — the POS keeps waiting for the decision', {
@@ -2841,7 +2842,13 @@ class TerminalPaymentService {
     }
     clearTimeout(pending.timeout)
     this.pendingPayments.delete(result.requestId)
-    pending.resolve(lectura?.tipo === 'FINAL' ? lectura.resultado : outcome)
+    pending.resolve(
+      lectura?.tipo === 'FINAL'
+        ? lectura.resultado
+        : !lectura || outcome.status === 'timeout'
+          ? outcome
+          : { requestId: result.requestId, status: 'timeout', errorMessage: 'El resultado sigue pendiente de confirmar' },
+    )
     return true
   }
 

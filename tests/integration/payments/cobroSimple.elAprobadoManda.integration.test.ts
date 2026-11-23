@@ -653,3 +653,53 @@ describe('R4-A · una sola regla para contestarle al POS que espera', () => {
     expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ status: 'timeout' }))
   })
 })
+
+describe('R5-A · el resultado de la terminal sólo contesta un negativo que salga de la lectura única', () => {
+  const esperaDelPos = (requestId: string) => {
+    const resolve = jest.fn()
+    svc.pendingPayments.set(requestId, {
+      resolve,
+      reject: jest.fn(),
+      timeout: setTimeout(() => undefined, 60_000),
+      requestId,
+      terminalId: f.llaveTerminal,
+      venueId: f.venueId,
+    })
+    return resolve
+  }
+
+  it('FAILED/NO_EVIDENCE con el POS esperando → `success` tardío sin Payment → `timeout` de la TPV: el POS NO recibe `failed`', async () => {
+    const venta = await f.nuevaVenta(100)
+    const s = await f.solicitud({
+      orderId: venta.id,
+      status: 'FAILED',
+      failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+      acknowledgedAt: new Date(),
+      resultJson: { status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW' },
+    })
+    const diferida = jest.spyOn(svc, 'retenerSolicitudLiberadaPorAfirmacionDeLaTerminal').mockResolvedValue('DEFERRED')
+    try {
+      // El `success` tardío guarda su afirmación (todavía sin la espera del POS en el mapa).
+      await svc.handlePaymentResultFromSocket({ requestId: s.requestId, status: 'success' }, tpv())
+      expect(((await fila(s.requestId)).resultJson as any).claimedSuccess).toBeDefined()
+      const resolve = esperaDelPos(s.requestId)
+      await svc.handlePaymentResultFromSocket({ requestId: s.requestId, status: 'timeout', errorMessage: 'G505' }, tpv())
+      expect(resolve).toHaveBeenCalledTimes(1)
+      expect(resolve.mock.calls[0][0].status).toBe('timeout')
+    } finally {
+      diferida.mockRestore()
+    }
+  })
+
+  it('CONTROL: un negativo ACREDITADO recién escrito le llega al POS como `failed` al momento', async () => {
+    const s = await f.solicitud({ acknowledgedAt: new Date() })
+    const resolve = esperaDelPos(s.requestId)
+    await svc.handlePaymentResultFromSocket(
+      { requestId: s.requestId, status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED', errorMessage: 'Declinada' },
+      tpv(),
+    )
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }))
+    expect(await fila(s.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'TPV_CONFIRMED_NO_CHARGE' })
+  })
+})
