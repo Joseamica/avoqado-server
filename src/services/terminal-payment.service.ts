@@ -626,20 +626,17 @@ const SIN_DESENLACE_CANONICO: Prisma.TerminalPaymentRequestWhereInput = {
  * 🔴 Cobro simple · S1 (22-nov): la CERCA de la CUENTA. Una venta no admite otro cobro (en ninguna terminal) ni se cancela mientras
  * su cobro está EN VUELO o en sus ≤ 10 s de «sin respuesta» (UNKNOWN). Después, libre: el «no cobrado» por silencio lo escribe
  * `cerrarSinRespuesta` y un aprobado tardío se registra igual, con aviso al dueño. Ya NO cerca lo que antes quedaba «en duda» para
- * siempre (`TIMED_OUT/AUTO_RELEASED`, FAILED sin código acreditado, CANCELLED sin `ACCEPTED`): eso era lo que obligaba a una persona a
- * declarar. Sí cerca, porque ahí el banco YA dijo que sí: COMPLETED sin `Payment` y la venta retenida con un aprobado conocido sin
- * registrar (`BANK_APPROVED_AWAITING_PAYMENT` / `PAYMENT_UNBOUND_AWAITING_REVIEW`). La duda del DESENLACE (lo que ve el POS) la sigue
+ * siempre (FAILED sin código acreditado, CANCELLED sin `ACCEPTED`): eso era lo que obligaba a una persona a declarar. Sí cerca, porque ahí el banco YA dijo que sí: COMPLETED sin `Payment` y la venta retenida con un aprobado conocido sin
+ * registrar; y, por R2-2, toda TIMED_OUT vieja sin `Payment` hasta que el barrido la cierre. La duda del DESENLACE (lo que ve el POS) la sigue
  * dando `desenlaceCanonico`; esto es sólo la cerca. Espejo SQL: `unresolvedFinancialOutcomeSql` (misma prueba contra Postgres).
  */
 export const UNRESOLVED_FINANCIAL_OUTCOME: Prisma.TerminalPaymentRequestWhereInput = {
   OR: [
     { status: { in: ESTADOS_SIN_DESENLACE } },
     { status: TerminalPaymentRequestStatus.COMPLETED, OR: [{ paymentId: null }, { paymentId: '' }] },
-    {
-      status: TerminalPaymentRequestStatus.TIMED_OUT,
-      failureCode: { in: [...MARCADORES_DE_RETENCION_DE_LA_VENTANA] },
-      OR: [{ paymentId: null }, { paymentId: '' }],
-    },
+    // Codex S1 r2 (R2-2): TODA TIMED_OUT sin `Payment`, como en develop. S1 ya no escribe TIMED_OUT; las viejas (con un aprobado
+    // guardado o no) cercan hasta que el barrido las cierra (≤ 1 pasada), sin carrera al publicar.
+    { status: TerminalPaymentRequestStatus.TIMED_OUT, OR: [{ paymentId: null }, { paymentId: '' }] },
   ],
 }
 
@@ -659,8 +656,7 @@ export function unresolvedFinancialOutcomeSql(r: string): Prisma.Sql {
   return Prisma.sql`(
     ${status} IN (${Prisma.join(ESTADOS_SIN_DESENLACE)})
     OR (${status} = ${TerminalPaymentRequestStatus.COMPLETED} AND ${sinPago})
-    OR (${status} = ${TerminalPaymentRequestStatus.TIMED_OUT} AND ${col('failureCode')} IN (${Prisma.join([...MARCADORES_DE_RETENCION_DE_LA_VENTANA])})
-      AND ${sinPago})
+    OR (${status} = ${TerminalPaymentRequestStatus.TIMED_OUT} AND ${sinPago})
   )`
 }
 

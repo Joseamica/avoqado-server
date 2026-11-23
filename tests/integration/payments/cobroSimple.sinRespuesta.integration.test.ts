@@ -155,11 +155,40 @@ describe('S1.1 · la ranura sólo mientras el cobro está en vuelo; la cuenta, t
     expect(enDuda.status).toBe('UNKNOWN')
   })
 
-  it('una TIMED_OUT/AUTO_RELEASED ya no cerca la cuenta (antes la tenía que declarar una persona)', async () => {
+  it('una TIMED_OUT/AUTO_RELEASED vieja cerca la cuenta hasta que el barrido la cierra; después ya no (nadie la declara)', async () => {
     const venta = await f.nuevaVenta(100)
-    await f.solicitud({ orderId: venta.id, status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
-    expect(await cercada(venta.id)).toBe(false)
+    const vieja = await f.solicitud({ orderId: venta.id, status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
     expect(await ocupada()).toBe(false)
+    expect(await cercada(venta.id)).toBe(true)
+    await terminalPaymentService.cerrarSinRespuestaVencidas(enDiezS())
+    expect(await fila(vieja.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })
+    expect(await cercada(venta.id)).toBe(false)
+  })
+
+  it('Codex S1 r2 (R2-2) · TIMED_OUT sin código con un aviso aprobado guardado y sin Payment: ANTES de cualquier barrido, otro cobro de esa cuenta ⇒ 409 ORDER', async () => {
+    const venta = await f.nuevaVenta(100)
+    const vieja = await f.solicitud({ orderId: venta.id, status: 'TIMED_OUT', failureCode: null })
+    const attemptId = await intento(vieja.requestId)
+    await prisma.providerEventLog.create({
+      data: {
+        provider: 'PAYMENT_PROCESSOR',
+        type: 'send_transaction',
+        eventId: `angelpay-${f.nuevoEventId()}`,
+        venueId: f.venueId,
+        attemptId,
+        payload: f.eventoAngelPay(attemptId),
+      } as any,
+    })
+    expect(await cercada(venta.id)).toBe(true)
+    const otro = terminalPaymentService.sendPaymentToTerminal({
+      terminalId: f.serial,
+      venueId: f.venueId,
+      amountCents: 10000,
+      orderId: venta.id,
+      requestedBy: f.staffId,
+      requestId: randomUUID(),
+    })
+    await expect(otro).rejects.toMatchObject({ details: expect.objectContaining({ scope: 'ORDER' }) })
   })
 })
 
