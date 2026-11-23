@@ -189,7 +189,8 @@ describe('Codex S1 r1 · arreglos', () => {
     const s = await f.solicitud({ orderId: venta.id, status: 'TIMED_OUT', failureCode: null, createdAt: vieja(1) })
     await aprobadoGuardado(await intento(s.requestId))
     await alUpdatedAt(s.id, vieja(1))
-    expect(await terminalPaymentService.hasChargeBlockingOrderCancel(f.venueId, venta.id)).toBe(false)
+    // Codex S1 r2 (R2-2): cercada desde la primera lectura, sin esperar al barrido (antes había una carrera al publicar).
+    expect(await terminalPaymentService.hasChargeBlockingOrderCancel(f.venueId, venta.id)).toBe(true)
     await terminalPaymentService.cerrarSinRespuestaVencidas(new Date())
     expect(await fila(s.requestId)).toMatchObject({ status: 'UNKNOWN', paymentId: null })
     expect(await terminalPaymentService.hasChargeBlockingOrderCancel(f.venueId, venta.id)).toBe(true)
