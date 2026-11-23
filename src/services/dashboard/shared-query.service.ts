@@ -492,7 +492,9 @@ export interface CreditPackListSummary {
     items: Array<{
       productName: string
       productType: string | null
-      quantity: number
+      /** `null` en un renglón Ilimitado (D679): su 99,999 no se enseña. */
+      quantity: number | null
+      unlimited?: true
     }>
   }>
 }
@@ -517,6 +519,8 @@ export interface CreditPackBalanceSummary {
     productType: string | null
     initialQuantity: number
     remainingQuantity: number
+    /** D679: un Ilimitado; el total de créditos no lo suma y el texto dice «Ilimitado», nunca su 99,999. */
+    unlimited: boolean
     expiresAt: Date | null
     status: string
   }>
@@ -2223,7 +2227,7 @@ export class SharedQueryService {
         items: (pack.items || []).map(item => ({
           productName: item.product?.name || 'Producto',
           productType: item.product?.type || null,
-          quantity: Number(item.quantity || 0),
+          ...(item.unlimited ? { quantity: null, unlimited: true as const } : { quantity: Number(item.quantity || 0) }),
         })),
       })),
     }
@@ -2246,6 +2250,7 @@ export class SharedQueryService {
         productType: balance.product?.type || null,
         initialQuantity: Number((balance as any).initialQuantity ?? balance.originalQuantity ?? 0),
         remainingQuantity: Number(balance.remainingQuantity || 0),
+        unlimited: balance.unlimited === true,
         expiresAt: purchase.expiresAt || null,
         status: purchase.status,
       })),
@@ -2255,7 +2260,7 @@ export class SharedQueryService {
       customerName,
       totalPurchases: result.total,
       activePurchases: result.purchases.filter(purchase => purchase.status === 'ACTIVE').length,
-      totalRemainingCredits: balances.reduce((sum, balance) => sum + balance.remainingQuantity, 0),
+      totalRemainingCredits: balances.filter(balance => !balance.unlimited).reduce((sum, balance) => sum + balance.remainingQuantity, 0),
       balances,
     }
   }

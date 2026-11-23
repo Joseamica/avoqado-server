@@ -37,6 +37,7 @@ import { redeemCreditsForReservation } from '@/services/reservation/creditRedemp
 import { redeemCreditsWithCompensation } from '@/controllers/public/reservation.public.controller'
 import { createReservationForConsumer } from '@/services/consumer/reservation.consumer.service'
 import {
+  cancelReservation,
   markNoShow,
   rescheduleAppointmentReservation,
   rescheduleClassReservation,
@@ -47,7 +48,7 @@ import { mintRescheduleAppointmentHold } from '@/services/reservation/appointmen
 import { checkInByIdentifier } from '@/services/reservation/kioskCheckIn.service'
 import { undoNoShow } from '@/services/reservation/undoNoShow.service'
 import { updateProfile } from '@/services/public/customerPortal.public.service'
-import { redeemItemManually } from '@/services/dashboard/creditPack.dashboard.service'
+import { getCustomerPurchases, redeemItemManually } from '@/services/dashboard/creditPack.dashboard.service'
 
 const P = '/api/v1/public'
 const RUN = Date.now()
@@ -708,6 +709,143 @@ describe('D679 · reglas del Ilimitado (integración, base real)', () => {
         { timeout: 30_000 },
       )
       expect(await saldo(balanceId)).toBe(99998)
+    })
+  })
+
+  // ---------- Task 4: cancelar sin castigo, vista previa y faltas ----------
+
+  describe('cancelar no castiga y las faltas sólo se cuentan', () => {
+    const politica = (creditRefundMode: 'NEVER' | 'TIME_BASED' | 'ALWAYS', extra: Record<string, unknown> = {}) =>
+      prisma.reservationSettings.update({
+        where: { venueId: venue!.id },
+        data: { creditRefundMode, creditFreeRefundHoursBefore: 24, creditLateRefundPercent: 0, ...extra } as any,
+      })
+    afterAll(() => politica('TIME_BASED', { creditNoShowRefund: true }))
+    const devoluciones = (reservationId: string) =>
+      prisma.creditTransaction.findMany({
+        where: { reservationId, type: 'REFUND' },
+        select: { quantity: true, reason: true, creditItemBalanceId: true },
+        take: 10,
+      })
+    const cancelar = (reservationId: string) => cancelReservation(venue!.id, reservationId, 'CUSTOMER')
+    const vistaPrevia = async (reservationId: string) => {
+      const { cancelSecret } = await prisma.reservation.findUniqueOrThrow({ where: { id: reservationId }, select: { cancelSecret: true } })
+      const res = await request(app).get(`${P}/venues/${venue!.slug}/reservations/${cancelSecret}`).set('cf-connecting-ip', visitante())
+      expect(res.status).toBe(200)
+      return res.body.cancellation
+    }
+    /** Una compra con dos renglones Ilimitados (Lagree y Masaje), de una clienta aparte para contar sus faltas. */
+    const ilimitadoDoble = async (customerId: string) =>
+      prisma.creditPackPurchase.create({
+        data: {
+          venueId: venue!.id,
+          customerId,
+          creditPackId: pack,
+          amountPaid: new Prisma.Decimal(2500),
+          expiresAt: new Date(Date.now() + 30 * D),
+          itemBalances: {
+            create: [
+              { productId: lagree, originalQuantity: 99999, remainingQuantity: 99999, unlimited: true },
+              { productId: masaje, originalQuantity: 99999, remainingQuantity: 99999, unlimited: true },
+            ],
+          },
+        },
+        select: { id: true, itemBalances: { select: { id: true } } },
+      })
+    const faltasDe = async (customerId: string, purchaseId: string) => {
+      const r = await getCustomerPurchases(venue!.id, { customerId })
+      return (r.purchases.find(p => p.id === purchaseId) as any)?.faltas
+    }
+
+    it('TIME_BASED, cancelar dentro de la ventana con Ilimitado: REFUND +1 con la marca de cancelación tardía', async () => {
+      await politica('TIME_BASED')
+      const { balanceId } = await comprar({ productId: masaje })
+      const c = await cita(3)
+      await canjear(c.id, [balanceId])
+      await cancelar(c.id)
+      expect(await devoluciones(c.id)).toEqual([
+        expect.objectContaining({ quantity: 1, reason: expect.stringMatching(/· ilimitado: cancelación tardía$/) }),
+      ])
+      expect(await saldo(balanceId)).toBe(99999)
+    })
+
+    it('NEVER, cancelar con días: REFUND +1 sin la marca', async () => {
+      await politica('NEVER')
+      const { balanceId } = await comprar({ productId: masaje })
+      const c = await cita(200)
+      await canjear(c.id, [balanceId])
+      await cancelar(c.id)
+      const [r] = await devoluciones(c.id)
+      expect(r.quantity).toBe(1)
+      expect(r.reason).not.toContain('ilimitado')
+    })
+
+    it('paquete normal con NEVER: no regresa nada (regresión)', async () => {
+      await politica('NEVER')
+      const { balanceId } = await comprar({ productId: masaje, unlimited: false })
+      const c = await cita(201)
+      await canjear(c.id, [balanceId])
+      await cancelar(c.id)
+      expect(await devoluciones(c.id)).toEqual([])
+      expect(await saldo(balanceId)).toBe(4)
+    })
+
+    it('cita con un Ilimitado y un crédito normal, NEVER: la vista previa dice 1 de 2 sin unlimited y regresa sólo el Ilimitado', async () => {
+      await politica('NEVER')
+      const ili = await comprar({ productId: masaje })
+      const normal = await comprar({ productId: masaje, unlimited: false })
+      const c = await cita(202)
+      await canjear(c.id, [ili.balanceId, normal.balanceId])
+      const previa = await vistaPrevia(c.id)
+      expect(previa).toMatchObject({ creditsUsed: 2, creditsRefundable: 1 })
+      expect(previa.unlimited).toBeFalsy()
+      await cancelar(c.id)
+      expect(await devoluciones(c.id)).toEqual([expect.objectContaining({ creditItemBalanceId: ili.balanceId, quantity: 1 })])
+    })
+
+    it('reserva sólo Ilimitada con NEVER: creditsRefundable = creditsUsed y unlimited true', async () => {
+      await politica('NEVER')
+      const { balanceId } = await comprar({ productId: masaje })
+      const c = await cita(203)
+      await canjear(c.id, [balanceId])
+      expect(await vistaPrevia(c.id)).toMatchObject({ creditsUsed: 1, creditsRefundable: 1, unlimited: true })
+    })
+
+    it('cita de dos servicios del mismo Ilimitado cancelada en la ventana: faltas.cancelTarde = 1', async () => {
+      await politica('TIME_BASED')
+      const eva = await prisma.customer.create({ data: { venueId: venue!.id, firstName: 'Eva' } })
+      const compra = await ilimitadoDoble(eva.id)
+      const c = await cita(4, { customerId: eva.id })
+      await canjear(
+        c.id,
+        compra.itemBalances.map(b => b.id),
+        1,
+        eva.id,
+      )
+      await cancelar(c.id)
+      expect(await faltasDe(eva.id, compra.id)).toEqual({ noLlego: 0, cancelTarde: 1 })
+    })
+
+    it('«No asistió» sin devolución: faltas.noLlego = 1, y «Sí llegó» lo quita', async () => {
+      await politica('TIME_BASED', { creditNoShowRefund: false })
+      const fer = await prisma.customer.create({ data: { venueId: venue!.id, firstName: 'Fer' } })
+      const compra = await ilimitadoDoble(fer.id)
+      const c = await cita(-1, { customerId: fer.id, productId: lagree })
+      await canjear(c.id, [compra.itemBalances[0].id], 1, fer.id)
+      await markNoShow(venue!.id, c.id, staffId!)
+      expect(await faltasDe(fer.id, compra.id)).toEqual({ noLlego: 1, cancelTarde: 0 })
+      await prisma.$transaction(
+        tx =>
+          undoNoShow(tx, {
+            reservationId: c.id,
+            venueId: venue!.id,
+            actor: { type: 'HUMAN', staffId: staffId! },
+            source: 'DASHBOARD',
+            now: new Date(),
+          }),
+        { timeout: 30_000 },
+      )
+      expect(await faltasDe(fer.id, compra.id)).toEqual({ noLlego: 0, cancelTarde: 0 })
     })
   })
 

@@ -15,7 +15,7 @@ import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { omitirPorDemo } from '@/services/demo/candadoDemo'
-import { UNLIMITED_QUANTITY, errorIlimitado, marcaDelRenglon } from '@/services/credits/ilimitado'
+import { UNLIMITED_LATE_CANCEL_MARK, UNLIMITED_QUANTITY, errorIlimitado, marcaDelRenglon } from '@/services/credits/ilimitado'
 
 /** Lo que pide el panel por renglón (D679): un Ilimitado no trae cantidad; el editor viejo no trae `unlimited`. */
 type RenglonPedido = { productId: string; quantity?: number; unlimited?: boolean }
@@ -385,7 +385,38 @@ export async function getCustomerPurchases(
     prisma.creditPackPurchase.count({ where }),
   ])
 
-  return { purchases, total, page, limit, totalPages: Math.ceil(total / limit) }
+  // D679 (regla 8): las compras con un Ilimitado traen sus faltas, contadas por RESERVA (una cita de dos servicios es una falta).
+  // Sólo se cuentan: no castigan. Dos agregados sobre las compras de ESTA página.
+  const conIlimitado = purchases.filter(p => p.itemBalances.some(b => b.unlimited)).map(p => p.id)
+  if (conIlimitado.length === 0) return { purchases, total, page, limit, totalPages: Math.ceil(total / limit) }
+  const [noLlego, cancelTarde] = await Promise.all([
+    prisma.creditTransaction.groupBy({
+      by: ['creditPackPurchaseId', 'reservationId'],
+      where: {
+        venueId,
+        creditPackPurchaseId: { in: conIlimitado },
+        type: 'REDEEM',
+        creditItemBalance: { unlimited: true },
+        reservation: { status: 'NO_SHOW' },
+      },
+    }),
+    prisma.creditTransaction.groupBy({
+      by: ['creditPackPurchaseId', 'reservationId'],
+      where: {
+        venueId,
+        creditPackPurchaseId: { in: conIlimitado },
+        type: 'REFUND',
+        reservationId: { not: null },
+        reason: { endsWith: UNLIMITED_LATE_CANCEL_MARK },
+      },
+    }),
+  ])
+  const contar = (filas: { creditPackPurchaseId: string }[], id: string) => filas.filter(f => f.creditPackPurchaseId === id).length
+  const conFaltas = purchases.map(p =>
+    conIlimitado.includes(p.id) ? { ...p, faltas: { noLlego: contar(noLlego, p.id), cancelTarde: contar(cancelTarde, p.id) } } : p,
+  )
+
+  return { purchases: conFaltas, total, page, limit, totalPages: Math.ceil(total / limit) }
 }
 
 export async function getTransactionHistory(
@@ -521,6 +552,8 @@ export async function adjustItemBalance(venueId: string, balanceId: string, quan
 
   if (!balance) throw new NotFoundError('Balance de credito no encontrado')
   if (balance.creditPackPurchase.venueId !== venueId) throw new NotFoundError('Balance de credito no encontrado')
+  // D679 (N4): un Ilimitado no tiene saldo que ajustar (y nunca se enseña su 99,999).
+  if (balance.unlimited) throw errorIlimitado('CREDIT_UNLIMITED_NO_ADJUST')
 
   // Don't allow negative remaining
   if (balance.remainingQuantity + quantity < 0) {
@@ -585,7 +618,9 @@ export async function refundPurchase(venueId: string, purchaseId: string, staffI
     throw new BadRequestError('Esta compra ya fue reembolsada')
   }
 
-  const creditsVoided = purchase.itemBalances.reduce((sum, b) => sum + Math.max(b.remainingQuantity, 0), 0)
+  // D679 (N5): la bitácora suma sólo los saldos normales; un Ilimitado anulado se cuenta aparte, nunca como 99,999 créditos.
+  const creditsVoided = purchase.itemBalances.filter(b => !b.unlimited).reduce((sum, b) => sum + Math.max(b.remainingQuantity, 0), 0)
+  const ilimitadosAnulados = purchase.itemBalances.filter(b => b.unlimited && b.remainingQuantity > 0).length
 
   const result = await prisma.$transaction(async tx => {
     // Zero out all balances
@@ -630,7 +665,7 @@ export async function refundPurchase(venueId: string, purchaseId: string, staffI
     action: 'CREDIT_PACK_PURCHASE_REFUNDED',
     entity: 'CreditPackPurchase',
     entityId: purchaseId,
-    data: { reason, customerId: purchase.customerId, creditsVoided },
+    data: { reason, customerId: purchase.customerId, creditsVoided, ilimitadosAnulados },
   })
 
   return result

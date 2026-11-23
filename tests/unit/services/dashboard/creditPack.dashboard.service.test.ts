@@ -1974,4 +1974,76 @@ describe('Credit Pack Dashboard Service', () => {
       })
     })
   })
+
+  // D679 (N4, N5, faltas)
+  describe('D679 · Ilimitado: ajuste, reembolso y faltas', () => {
+    it('adjustItemBalance en Ilimitado → NO_ADJUST, sin «dejaría el balance en 99999» y sin escribir', async () => {
+      prismaMock.creditItemBalance.findUnique.mockResolvedValue(
+        createMockBalance({
+          unlimited: true,
+          remainingQuantity: 99999,
+          creditPackPurchase: { id: 'purchase-123', venueId: 'venue-123', customerId: 'customer-123', status: 'ACTIVE' },
+        }),
+      )
+      const error = await adjustItemBalance('venue-123', 'balance-123', -100000, 'x', 'staff-123').catch(e => e)
+      expect(error).toMatchObject({
+        statusCode: 400,
+        code: 'CREDIT_UNLIMITED_NO_ADJUST',
+        message: 'Un paquete Ilimitado no tiene saldo que ajustar.',
+      })
+      expect(prismaMock.creditTransaction.create).not.toHaveBeenCalled()
+    })
+
+    it('reembolsar un Ilimitado sin usar: creditsVoided 0 y ilimitadosAnulados 1', async () => {
+      prismaMock.creditPackPurchase.findFirst.mockResolvedValue(
+        createMockPurchase({
+          itemBalances: [createMockBalance({ id: 'b-ili', unlimited: true, originalQuantity: 99999, remainingQuantity: 99999 })],
+        }),
+      )
+      prismaMock.creditItemBalance.update.mockResolvedValue({})
+      prismaMock.creditTransaction.create.mockResolvedValue({})
+      prismaMock.creditPackPurchase.update.mockResolvedValue({})
+
+      await refundPurchase('venue-123', 'purchase-123', 'staff-123', 'reembolso')
+
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'CREDIT_PACK_PURCHASE_REFUNDED',
+          data: expect.objectContaining({ creditsVoided: 0, ilimitadosAnulados: 1 }),
+        }),
+      )
+    })
+
+    it('getCustomerPurchases: sólo las compras con un Ilimitado traen faltas, contadas por reserva', async () => {
+      prismaMock.creditPackPurchase.findMany.mockResolvedValue([
+        createMockPurchase({ id: 'p-ili', itemBalances: [createMockBalance({ unlimited: true })] }),
+        createMockPurchase({ id: 'p-normal', itemBalances: [createMockBalance({ unlimited: false })] }),
+      ])
+      prismaMock.creditPackPurchase.count.mockResolvedValue(2)
+      prismaMock.creditTransaction.groupBy
+        .mockResolvedValueOnce([{ creditPackPurchaseId: 'p-ili', reservationId: 'r-1' }]) // no llegó
+        .mockResolvedValueOnce([
+          { creditPackPurchaseId: 'p-ili', reservationId: 'r-2' },
+          { creditPackPurchaseId: 'p-ili', reservationId: 'r-3' },
+        ]) // tarde
+
+      const result = await getCustomerPurchases('venue-123', { customerId: 'customer-123' })
+
+      expect((result.purchases[0] as any).faltas).toEqual({ noLlego: 1, cancelTarde: 2 })
+      expect((result.purchases[1] as any).faltas).toBeUndefined()
+      expect(prismaMock.creditTransaction.groupBy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          by: ['creditPackPurchaseId', 'reservationId'],
+          where: expect.objectContaining({ creditPackPurchaseId: { in: ['p-ili'] } }),
+        }),
+      )
+    })
+
+    it('getCustomerPurchases sin Ilimitados no consulta faltas (como hoy)', async () => {
+      prismaMock.creditPackPurchase.findMany.mockResolvedValue([createMockPurchase({ itemBalances: [createMockBalance()] })])
+      prismaMock.creditPackPurchase.count.mockResolvedValue(1)
+      await getCustomerPurchases('venue-123', {})
+      expect(prismaMock.creditTransaction.groupBy).not.toHaveBeenCalled()
+    })
+  })
 })

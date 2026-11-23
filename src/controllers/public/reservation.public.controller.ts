@@ -42,6 +42,7 @@ import {
   titularDelPase,
 } from '@/services/reservation/creditRedemption.service'
 import { CREDIT_RESERVATION_NOT_ALIVE } from '@/services/credits/ilimitado'
+import { porcentajeDeDevolucion } from '@/services/dashboard/creditPack.public.service'
 import { enqueuePassSessionSync } from '@/services/aggregators/core/sessionSync.service'
 
 // ==========================================
@@ -1482,10 +1483,16 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
     const prisma = (await import('../../utils/prismaClient')).default
     const redeems = await prisma.creditTransaction.findMany({
       where: { venueId: reservation.venueId, reservationId: reservation.id, type: 'REDEEM' },
-      select: { quantity: true },
+      select: { quantity: true, creditItemBalance: { select: { unlimited: true } } },
     })
     const creditsUsed = redeems.reduce((sum, t) => sum + Math.abs(t.quantity), 0)
-    const creditsRefundable = Math.floor((creditsUsed * cancellationPreview.refundPercent) / 100)
+    // D679 (N14): canje por canje, con la misma regla que la devolución: un Ilimitado regresa completo.
+    const creditsRefundable = redeems.reduce(
+      (sum, t) =>
+        sum + Math.floor((Math.abs(t.quantity) * (t.creditItemBalance.unlimited ? 100 : cancellationPreview.refundPercent)) / 100),
+      0,
+    )
+    const todoIlimitado = redeems.length > 0 && redeems.every(t => t.creditItemBalance.unlimited)
 
     // Fetch modifiers if any were selected on the reservation
     const modifierRows = await prisma.reservationModifier.findMany({
@@ -1560,6 +1567,8 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
           creditsRefundable,
           refundPercent: cancellationPreview.refundPercent,
           policyLabel: cancellationPreview.label,
+          // D679: sólo cuando TODOS sus canjes son de un Ilimitado («Cancelar no te cuesta nada»).
+          ...(todoIlimitado ? { unlimited: true } : {}),
         }
       })(),
       // Reschedule eligibility — same window as cancel, plus the venue toggle.
@@ -1817,14 +1826,10 @@ function computeCancellationPreview(args: {
     creditLateRefundPercent: number
   }
 }): { refundPercent: number; label: string } {
-  const { creditRefundMode, creditFreeRefundHoursBefore, creditLateRefundPercent } = args.cancellationPolicy
-  if (creditRefundMode === 'NEVER') return { refundPercent: 0, label: 'NEVER' }
-  if (creditRefundMode === 'ALWAYS') return { refundPercent: 100, label: 'ALWAYS' }
-  const hoursUntilStart = (args.startsAt.getTime() - Date.now()) / 3_600_000
-  if (hoursUntilStart >= creditFreeRefundHoursBefore) {
-    return { refundPercent: 100, label: `TIME_BASED:free` }
-  }
-  return { refundPercent: Math.max(0, Math.min(100, creditLateRefundPercent)), label: `TIME_BASED:late` }
+  // D679: la misma cuenta que la devolución (`porcentajeDeDevolucion`); la etiqueta, la de siempre.
+  const { percent, tardia } = porcentajeDeDevolucion(args.cancellationPolicy, args.startsAt, new Date())
+  const mode = args.cancellationPolicy.creditRefundMode
+  return { refundPercent: percent, label: mode === 'TIME_BASED' ? (tardia ? 'TIME_BASED:late' : 'TIME_BASED:free') : mode }
 }
 
 /**

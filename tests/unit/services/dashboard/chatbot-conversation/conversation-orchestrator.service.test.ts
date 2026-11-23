@@ -734,6 +734,81 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'creditPacks.balance', status: 'executed' })])
   })
 
+  // D679 (N7): un Ilimitado activo dice cuánto usó; uno reembolsado, sólo «reembolsado». Nunca 99,999.
+  it('asistente: Ilimitado activo dice «usó 3», reembolsado dice «reembolsado» y nunca 99999', async () => {
+    jest.spyOn(SharedQueryService, 'getCreditPackBalance').mockResolvedValue({
+      customerName: 'Ana Perez',
+      totalPurchases: 2,
+      activePurchases: 1,
+      totalRemainingCredits: 0,
+      balances: [
+        {
+          packName: 'Ilimitado',
+          productName: 'Lagree',
+          productType: 'CLASS',
+          initialQuantity: 99999,
+          remainingQuantity: 99996,
+          unlimited: true,
+          expiresAt: new Date('2026-06-01T12:00:00.000Z'),
+          status: 'ACTIVE',
+        },
+        {
+          packName: 'Ilimitado viejo',
+          productName: 'Lagree',
+          productType: 'CLASS',
+          initialQuantity: 99999,
+          remainingQuantity: 0,
+          unlimited: true,
+          expiresAt: null,
+          status: 'REFUNDED',
+        },
+      ],
+    } as any)
+
+    const response = await orchestrator.process({
+      message: 'cuantos creditos le quedan al cliente cust_123',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(response?.response).toContain('- Lagree (Ilimitado): Ilimitado, usó 3, vence')
+    expect(response?.response).toContain('- Lagree (Ilimitado viejo): Ilimitado, reembolsado.')
+    expect(response?.response).not.toMatch(/9999[89]/)
+    expect(response?.response).not.toContain('usó 99999')
+    expect(response?.response).toContain('Ana Perez tiene un Ilimitado activo en 1 compras activas')
+  })
+
+  it('lista de paquetes: un renglón Ilimitado dice «Ilimitado de X», nunca «null X»', async () => {
+    jest.spyOn(SharedQueryService, 'getCreditPacks').mockResolvedValue({
+      total: 1,
+      limit: 10,
+      packs: [
+        {
+          name: 'Ilimitado',
+          active: true,
+          price: 2500,
+          currency: 'MXN',
+          validityDays: 30,
+          maxPerCustomer: null,
+          purchaseCount: 1,
+          items: [
+            { productName: 'Lagree', productType: 'CLASS', quantity: null, unlimited: true },
+            { productName: 'Shake', productType: 'FOOD_AND_BEV', quantity: 2 },
+          ],
+        },
+      ],
+    })
+    const list = await orchestrator.process({
+      message: 'que paquetes de credito tengo',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+    expect(list?.response).toContain('incluye Ilimitado de Lagree, 2 Shake')
+    expect(list?.response).not.toContain('null')
+  })
+
   it('answers credit-pack list and summary questions with registered shared query tools', async () => {
     jest.spyOn(SharedQueryService, 'getCreditPacks').mockResolvedValue({
       total: 1,

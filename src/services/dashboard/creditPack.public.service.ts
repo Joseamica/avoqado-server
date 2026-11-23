@@ -23,6 +23,7 @@ import emailService from '@/services/email.service'
 import { resolveChargeableStripeMerchant } from '@/services/payments/ecommerceCapability'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
 import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
+import { UNLIMITED_LATE_CANCEL_MARK } from '@/services/credits/ilimitado'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -680,6 +681,25 @@ export async function checkRedemptionEligibility(venueId: string, customerId: st
 }
 
 /**
+ * Cuánto regresa la política al cancelar ahora (la cuenta de siempre). `tardia` = `TIME_BASED` y dentro de la ventana: con un
+ * Ilimitado no quita nada, sólo anota la falta (D679). La usan la devolución y la vista previa del widget.
+ */
+export function porcentajeDeDevolucion(
+  policy: { creditRefundMode: 'NEVER' | 'ALWAYS' | 'TIME_BASED'; creditFreeRefundHoursBefore: number; creditLateRefundPercent: number },
+  startsAt: Date,
+  now: Date,
+): { percent: number; policyApplied: string; tardia: boolean } {
+  if (policy.creditRefundMode === 'NEVER') return { percent: 0, policyApplied: 'NEVER', tardia: false }
+  if (policy.creditRefundMode === 'ALWAYS') return { percent: 100, policyApplied: 'ALWAYS', tardia: false }
+  const hoursUntilStart = (startsAt.getTime() - now.getTime()) / 3_600_000
+  if (hoursUntilStart >= policy.creditFreeRefundHoursBefore) {
+    return { percent: 100, policyApplied: `TIME_BASED:free (≥${policy.creditFreeRefundHoursBefore}h)`, tardia: false }
+  }
+  const percent = Math.max(0, Math.min(100, policy.creditLateRefundPercent))
+  return { percent, policyApplied: `TIME_BASED:late (${percent}%)`, tardia: true }
+}
+
+/**
  * Refund credits for a cancelled reservation according to the venue's policy.
  *
  * Looks up the original REDEEM transaction(s) for this reservation, computes the refund
@@ -718,8 +738,10 @@ export async function refundCreditsForReservation(
 
   // Find the original REDEEM transaction(s) for this reservation.
   // We sum their negative quantities to know how many credits were spent on it.
+  // D679: con la marca de su saldo (un Ilimitado siempre regresa).
   const redeems = await (db ?? prisma).creditTransaction.findMany({
     where: { venueId, reservationId, type: 'REDEEM' },
+    include: { creditItemBalance: { select: { unlimited: true } } },
   })
 
   if (redeems.length === 0) return { creditsRefunded: 0, policyApplied: 'no-credits-used' }
@@ -728,27 +750,10 @@ export async function refundCreditsForReservation(
   if (totalSpent <= 0) return { creditsRefunded: 0, policyApplied: 'no-credits-used' }
 
   // Compute refund amount based on policy
-  let refundPercent = 0
-  let policyApplied = ''
-  if (policy.creditRefundMode === 'NEVER') {
-    refundPercent = 0
-    policyApplied = 'NEVER'
-  } else if (policy.creditRefundMode === 'ALWAYS') {
-    refundPercent = 100
-    policyApplied = 'ALWAYS'
-  } else {
-    // TIME_BASED
-    const hoursUntilStart = (startsAt.getTime() - Date.now()) / 3_600_000
-    if (hoursUntilStart >= policy.creditFreeRefundHoursBefore) {
-      refundPercent = 100
-      policyApplied = `TIME_BASED:free (≥${policy.creditFreeRefundHoursBefore}h)`
-    } else {
-      refundPercent = Math.max(0, Math.min(100, policy.creditLateRefundPercent))
-      policyApplied = `TIME_BASED:late (${refundPercent}%)`
-    }
-  }
+  const { percent: refundPercent, policyApplied, tardia } = porcentajeDeDevolucion(policy, startsAt, new Date())
+  const esIlimitado = (t: (typeof redeems)[number]) => t.creditItemBalance?.unlimited === true
 
-  if (refundPercent === 0) {
+  if (refundPercent === 0 && !redeems.some(esIlimitado)) {
     logger.info(`💸 [CREDIT REFUND] No refund per policy (${policyApplied}) — reservation=${reservationId} spent=${totalSpent}`)
     return { creditsRefunded: 0, policyApplied }
   }
@@ -764,7 +769,9 @@ export async function refundCreditsForReservation(
       if (rows[0]?.status !== onlyIfReservationStatus) return true
     }
     for (const tx of redeems) {
-      const refundQty = Math.floor((Math.abs(tx.quantity) * refundPercent) / 100)
+      // D679 (regla 7): un Ilimitado regresa siempre completo; si fue en la ventana tardía, la falta queda anotada en el reason.
+      const ilimitado = esIlimitado(tx)
+      const refundQty = Math.floor((Math.abs(tx.quantity) * (ilimitado ? 100 : refundPercent)) / 100)
       if (refundQty <= 0) continue
       if (!tx.creditItemBalanceId) continue
 
@@ -781,7 +788,7 @@ export async function refundCreditsForReservation(
           type: 'REFUND',
           quantity: refundQty,
           reservationId,
-          reason: `${reasonPrefix ?? 'Cancellation refund'} — policy: ${policyApplied}`,
+          reason: `${reasonPrefix ?? 'Cancellation refund'} — policy: ${policyApplied}${ilimitado && tardia ? ` · ${UNLIMITED_LATE_CANCEL_MARK}` : ''}`,
         },
       })
       // If the purchase was marked EXHAUSTED but now has balance again, restore ACTIVE.
