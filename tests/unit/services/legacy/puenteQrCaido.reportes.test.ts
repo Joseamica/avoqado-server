@@ -301,6 +301,22 @@ describe('Resumen de ventas (getSalesSummary)', () => {
     expect((await getSalesSummary(MINDFORM, { ...RANGO, reportType: 'days' })).legacyUnavailable).toBe(true)
   })
 
+  // D9.1 (21-nov): los cobros QR del sistema anterior no tienen comercio. Con un comercio elegido no suman (ni en el total ni en
+  // los periodos), así que tampoco se le pregunta al puente ni su caída marca un total en el que no entran.
+  it('🔴 con un comercio elegido: el puente no suma, no se le pregunta y su caída no marca', async () => {
+    ;(prismaMock.payment.aggregate as jest.Mock).mockResolvedValue({ _sum: { amount: 700, tipAmount: 70 } })
+    ;(prismaMock.payment.count as jest.Mock).mockResolvedValue(7)
+    fallaLaSegundaPagina()
+
+    const reporte = await getSalesSummary(MINDFORM, { ...RANGO, merchantAccountId: 'comercio-a' })
+    const porDia = await getSalesSummary(MINDFORM, { ...RANGO, merchantAccountId: 'comercio-a', reportType: 'days' })
+
+    expect(consultasAlPuente()).toBe(0)
+    expect(reporte).not.toHaveProperty('legacyUnavailable')
+    expect(porDia).not.toHaveProperty('legacyUnavailable')
+    expect(reporte.summary).toMatchObject({ grossSales: null, tips: 70, totalCollected: 770, transactionCount: 7 })
+  })
+
   it('otro negocio: sin marca y sin tocar el puente', async () => {
     puenteSinConfigurar()
     expect(await getSalesSummary(OTRO_NEGOCIO, RANGO)).not.toHaveProperty('legacyUnavailable')

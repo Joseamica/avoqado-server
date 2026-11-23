@@ -18,6 +18,7 @@ import { CronJob } from 'cron'
 import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import { getSalesSummary, type SalesSummaryMetrics } from '../services/dashboard/sales-summary.dashboard.service'
+import { sqlCuentaQueEsVenta } from '../services/dashboard/salesSummaryPoblacion'
 import emailService from '../services/email.service'
 import { sqlRangoHoraRealSql } from '../services/shared/horaRealDelAparato'
 import { NotificationType, Prisma, StaffRole, VenueStatus } from '@prisma/client'
@@ -296,6 +297,7 @@ export class NightlySalesSummaryJob {
             todaySummary.summary.netSales ?? 0,
             todaySummary.summary.refunds,
             venue.id,
+            todaySummary.summary.serviceCosts ?? 0,
           )
 
           // Get order sources breakdown
@@ -324,6 +326,9 @@ export class NightlySalesSummaryJob {
               netSales: todaySummary.summary.netSales ?? 0,
               deferredSales: todaySummary.summary.deferredSales ?? 0,
               taxes: todaySummary.summary.taxes ?? 0,
+              // D6 · «Sin cobrar» (aditivos): el correo los pinta sólo si hay cuentas abiertas.
+              unpaidSales: todaySummary.summary.unpaidSales ?? 0,
+              unpaidOrders: todaySummary.summary.unpaidOrders ?? 0,
             },
             previousPeriod: {
               netSales: yesterdaySummary.summary.netSales ?? 0,
@@ -483,7 +488,13 @@ const CATEGORY_ROWS = 10
  * no lines here either). A remainder below zero can only come from a sale that changed between the email's queries
  * (Codex r1 #3, the same race the headline's own queries have): no negative row is invented, it is logged.
  */
-export function reconcileCategoryBreakdown(categories: CategoryRow[], netSales: number, refunds: number, venueId?: string): CategoryRow[] {
+export function reconcileCategoryBreakdown(
+  categories: CategoryRow[],
+  netSales: number,
+  refunds: number,
+  venueId?: string,
+  serviceCosts = 0,
+): CategoryRow[] {
   const cents = (n: number) => Math.round(n * 100)
   const rows: CategoryRow[] = categories.slice(0, CATEGORY_ROWS).map(c => ({ ...c, netSales: cents(c.netSales) / 100 }))
   const rest = categories.slice(CATEGORY_ROWS)
@@ -495,6 +506,8 @@ export function reconcileCategoryBreakdown(categories: CategoryRow[], netSales: 
     })
   }
   if (cents(refunds) > 0) rows.push({ name: 'Devoluciones', itemsSold: null, netSales: -cents(refunds) / 100 })
+  // D2 (21-nov-2026): the service charges are a sale in the headline but have no category (the categories carry the merchandise).
+  if (cents(serviceCosts) > 0) rows.push({ name: 'Cargos por servicio', itemsSold: null, netSales: cents(serviceCosts) / 100 })
   const remainder = cents(netSales) - rows.reduce((s, r) => s + cents(r.netSales), 0)
   if (remainder > 0) rows.push({ name: 'Ventas sin producto (importe libre)', itemsSold: null, netSales: remainder / 100 })
   else if (remainder < 0) {
@@ -551,9 +564,8 @@ export async function getCategoryBreakdown(
         AND ${sqlRangoHoraRealSql('o', startDate, endDate)} -- D93: la hora real, la misma del resumen de arriba
         -- D21: the SAME orders as the headline net sales (getSalesSummary «1. Gross Sales»): it counted PENDING and DELETED
         -- orders and gift-card sales, which the headline does not (27 orders, $5,455.50 too many in av-db-25).
-        AND o.status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
-        AND o."paymentStatus" NOT IN ('REFUNDED')
-        AND ${sqlOrdenSinTarjetas('o.id')}
+        -- D6 (21-nov-2026): and only the collected ones (base de caja): an open account is «Sin cobrar», not a sale.
+        AND ${Prisma.raw(sqlCuentaQueEsVenta('o'))}
     ),
     shared AS (
       SELECT
@@ -697,12 +709,15 @@ export async function getOrderSourcesBreakdown(
         o.subtotal - LEAST(o."discountAmount", o.subtotal)
       -- D16: the IVA an order charged ON TOP is part of what the customer paid (same rule as the summary's netSales),
       -- added outside the clamp like computeStoredOrderTotal does.
-      + ${Prisma.raw(sqlImpuestoQueSeCobraAparte('o'))}), 0) as net_sales
+      + ${Prisma.raw(sqlImpuestoQueSeCobraAparte('o'))}
+      -- D2 (21-nov-2026): the service charge is a sale in the headline too (taxable, it adds to the account total).
+      + o."serviceChargeAmount"), 0) as net_sales
     FROM "Order" o
     WHERE o."venueId" = ${venueId}
       AND ${sqlRangoHoraRealSql('o', startDate, endDate)} -- D93: la hora real, la misma del resumen de arriba
-      AND o.status NOT IN ('CANCELLED')
-      AND o."paymentStatus" NOT IN ('REFUNDED')
+      -- D6 (21-nov-2026, Codex r1 #10): the SAME accounts as the headline — collected, not a draft/cancelled/deleted, not a
+      -- gift-card sale. It used to count drafts, deleted accounts, open tables and gift-card sales the headline leaves out.
+      AND ${Prisma.raw(sqlCuentaQueEsVenta('o'))}
     GROUP BY o.source
     ORDER BY net_sales DESC
   `
@@ -718,7 +733,9 @@ export async function getOrderSourcesBreakdown(
     SELECT
       COALESCE(o.source::text, 'TPV') as source,
       -- Refund rows are negative (amount and tipAmount); −SUM keeps Σ groups = |Σ all| like the summary.
-      COALESCE(-SUM(p.amount + p."tipAmount"), 0) as refunds
+      -- D6 (Codex r1 #2, r3 #4): minus what only returned a down payment and its tip, owed again (reopenedAmount and
+      -- reopenedTipAmount), like the headline.
+      COALESCE(-SUM(p.amount + p."tipAmount" + COALESCE(p."reopenedAmount", 0) + COALESCE(p."reopenedTipAmount", 0)), 0) as refunds
     FROM "Payment" p
     JOIN "Order" o ON o.id = p."orderId"
     WHERE p."venueId" = ${venueId}

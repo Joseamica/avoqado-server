@@ -9,14 +9,28 @@ import {
   type PaymentMethodFilter,
   type SalesSummaryExportFilters,
 } from '@/services/dashboard/sales-summary.dashboard.service'
+import { relojDelNegocio } from '@/utils/datetime'
 import { construirWhereKeyset, fecha, lista, sinFuncion, str } from './comun'
 import type { Exportador } from './types'
 
 export type FilaVentaDetallada = Awaited<ReturnType<typeof fetchSalesSummaryDetailPage>>[number]
 
+/**
+ * D13.3: la hora REAL del cobro (la del aparato si se cobró sin red, si no la de llegada), en la zona del negocio y legible
+ * («2026-11-21 20:30:00»). Antes salía `toISOString()`: una venta de las 20:30 se leía como las 02:30 del día siguiente.
+ */
+export function fechaDelCobro(r: Pick<FilaVentaDetallada, 'createdAt' | 'clientCreatedAt' | 'zona'>): string {
+  const real = r.clientCreatedAt ?? r.createdAt
+  if (!real) return ''
+  // `zona` ya viene normalizada una vez por página (`conZona`): la misma del cálculo, y nunca una que lance `RangeError`.
+  const h = relojDelNegocio(real, r.zona)
+  return `${h.anio}-${h.mes}-${h.dia} ${h.hora}:${h.minuto}:${h.segundo}`
+}
+
 // Mismo registro de columnas que el GET viejo (sales-summary.dashboard.controller.ts); ahora vive aquí y el controller lo importa.
 export const VENTAS_DETALLADAS_COLUMNAS: ExportColumnDef<FilaVentaDetallada>[] = [
-  { id: 'createdAt', label: 'Fecha', value: r => r.createdAt?.toISOString() ?? '' },
+  // `pdfAncho`: «2026-11-21 20:30:00» no cabe en una de 13 columnas iguales del PDF y se cortaba con «…» (Codex D13 r1 #7).
+  { id: 'createdAt', label: 'Fecha', value: fechaDelCobro, pdfAncho: 1.5 },
   { id: 'paymentId', label: 'ID', value: r => r.id },
   {
     id: 'waiterName',
@@ -43,6 +57,9 @@ export const VENTAS_DETALLADAS_COLUMNAS: ExportColumnDef<FilaVentaDetallada>[] =
   { id: 'source', label: 'Origen', value: r => r.source ?? '' },
 ]
 
+/** El 400 que ve la persona si pide el detallado con el filtro del QR anterior (sus cobros no se guardan uno por uno). */
+export const MENSAJE_QR_ANTERIOR_SIN_DETALLE = 'Los cobros del QR anterior no se pueden exportar uno por uno: sólo salen en el resumen.'
+
 const METODOS: PaymentMethodFilter[] = ['CASH', 'CARD', 'QR_LEGACY', 'OTHER']
 const TARJETAS: CardTypeFilter[] = ['CREDIT', 'DEBIT', 'AMEX', 'INTERNATIONAL']
 
@@ -60,8 +77,7 @@ export const ventasDetalladas: Exportador<SalesSummaryExportFilters, FilaVentaDe
     const paymentMethod = str(r.paymentMethod) as PaymentMethodFilter | undefined
     if (paymentMethod && !METODOS.includes(paymentMethod))
       throw new BadRequestError(`Invalid paymentMethod. Must be one of: ${METODOS.join(', ')}`)
-    if (paymentMethod === 'QR_LEGACY')
-      throw new BadRequestError('QR_LEGACY detailed export is not available; legacy QR transactions are not stored per-payment.')
+    if (paymentMethod === 'QR_LEGACY') throw new BadRequestError(MENSAJE_QR_ANTERIOR_SIN_DETALLE)
     const cardType = str(r.cardType) as CardTypeFilter | undefined
     if (cardType && !TARJETAS.includes(cardType)) throw new BadRequestError(`Invalid cardType. Must be one of: ${TARJETAS.join(', ')}`)
     return {

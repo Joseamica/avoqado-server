@@ -100,11 +100,11 @@ it('parity: the six figures are the ones getSalesSummary gives the panel for the
     `*Ventas netas ${fmtMoney(panel.netSales!)}*`,
     `Propinas (aparte) ${fmtMoney(panel.tips)} · ${fmtCount(panel.transactionCount)} transacciones`,
   ])
-  // …y son las sembradas: dos ventas y una devolución, al centavo
+  // …y son las sembradas: dos ventas y una devolución, al centavo. D10.1 (21-nov-2026): la devolución no es una transacción.
   expect(lines.slice(1, 4)).toEqual([
     'Ventas brutas $1,456.78 · Descuentos −$106.78 · Devoluciones −$120.40',
     '*Ventas netas $1,229.60*',
-    'Propinas (aparte) $75.50 · 3 transacciones',
+    'Propinas (aparte) $75.50 · 2 transacciones',
   ])
 })
 
@@ -252,7 +252,8 @@ it('with skipStaffCommissions the commissions aggregate does not run and the six
   expect(b.commissions).toEqual([])
   expect(b.summary.staffCommissions).toBe(0)
   expect(six(b.summary)).toEqual(six(panel.summary))
-  expect(six(b.summary)).toEqual([1250, 50, 30, 1170, 120, 2])
+  // D10.1 (21-nov-2026): una venta y una devolución = 1 transacción.
+  expect(six(b.summary)).toEqual([1250, 50, 30, 1170, 120, 1])
 })
 
 it('«Sales summary calculated» carries no amount, also when the panel calls it (case 23)', async () => {
@@ -286,7 +287,8 @@ it('a day with only a $150.00 refund of an earlier sale: the final answer says �
   expect(sealed?.text.split('\n').slice(1, 4)).toEqual([
     'Ventas brutas $0.00 · Descuentos $0.00 · Devoluciones −$150.00',
     `*Ventas netas ${fmtMoney(panel.netSales!)}*`,
-    'Propinas (aparte) $0.00 · 1 transacción',
+    // D10.1 (21-nov-2026): un día de sólo una devolución no tiene transacciones.
+    'Propinas (aparte) $0.00 · 0 transacciones',
   ])
 })
 

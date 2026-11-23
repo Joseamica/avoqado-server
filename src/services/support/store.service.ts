@@ -11,6 +11,8 @@ export interface SupportInput {
   body: string
   timestamp: string
   contextId?: string
+  /** Ayuda pública: cuándo contó en la capa 1 (ISO); se guarda en el evento para devolver ese lugar exacto. */
+  publicCountedAt?: string
 }
 export interface SupportClaim {
   messageId: string
@@ -45,6 +47,7 @@ export async function admitSupportMessage(
           type: input.type,
           timestamp: input.timestamp,
           ...(input.contextId ? { contextId: input.contextId } : {}),
+          ...(input.publicCountedAt ? { publicCountedAt: input.publicCountedAt } : {}),
         },
         routedAs: 'SUPPORT_QUEUED',
         processedAt: now,

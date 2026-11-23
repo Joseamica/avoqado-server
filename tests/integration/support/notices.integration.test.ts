@@ -121,6 +121,7 @@ afterEach(async () => {
   jest.restoreAllMocks()
   await prisma.staffVenue.updateMany({ where: { staffId: { in: [anaId, betoId] } }, data: { active: true } })
   await prisma.staff.updateMany({ where: { id: { in: [anaId, betoId] } }, data: { active: true } })
+  delete process.env.SUPPORT_PUBLIC_HELP_ENABLED
 })
 afterAll(async () => {
   await clean()
@@ -430,6 +431,9 @@ describe('access at send time (R1-02, R2-01)', () => {
     ['person deactivated (linked)', personal, () => prisma.staff.update({ where: { id: anaId }, data: { active: false } })],
     ['person deactivated (public)', () => openConversation(), () => prisma.staff.update({ where: { id: anaId }, data: { active: false } })],
   ])('%s → SKIPPED', async (_label, open, revoke) => {
+    // With public help off, as before it: a public phone that now belongs to nobody goes out as a number with no account
+    // (public-help.integration.test.ts).
+    process.env.SUPPORT_PUBLIC_HELP_ENABLED = 'false'
     const notice = await handoff(await open())
     await revoke()
     const t = transport()
@@ -476,6 +480,7 @@ describe('daily digest', () => {
   })
 
   it('a held digest row whose person lost the venue is left out and marked SKIPPED', async () => {
+    process.env.SUPPORT_PUBLIC_HELP_ENABLED = 'false'
     const ana = await held(await openConversation()),
       beto = await held(await openConversation(betoPhone))
     await removeVenue(betoId, northId)
@@ -490,6 +495,7 @@ describe('daily digest', () => {
   })
 
   it('a digest whose every row lost access is SKIPPED and nothing is sent', async () => {
+    process.env.SUPPORT_PUBLIC_HELP_ENABLED = 'false'
     const beto = await held(await openConversation(betoPhone))
     await removeVenue(betoId, northId)
     const t = transport()
