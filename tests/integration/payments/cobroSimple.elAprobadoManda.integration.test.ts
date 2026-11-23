@@ -497,3 +497,60 @@ describe('Familia 1 · señal × escritor de negativo: el aprobado manda en toda
     if (!cobrada) expect(await cercada(venta.id)).toBe(true)
   })
 })
+
+/**
+ * R3-3 (límite escrito por la dueña, sin código): qué pasa HOY si el aprobado tardío de A llega con otra solicitud B de la misma
+ * cuenta en vuelo. Esta prueba no pide un comportamiento nuevo: deja fijado el de hoy para que un cambio lo haga a propósito.
+ */
+describe('R3-3 · documenta: el Payment tardío de A con B de la misma cuenta en vuelo', () => {
+  it('A se reabre COMPLETED con su aviso; B sigue en vuelo, no se le manda cancel y el aviso no la menciona (aún no cobró)', async () => {
+    const duena = await prisma.staff.create({
+      data: {
+        email: `${f.fixture}-duena-r33@example.test`,
+        firstName: 'Dueña',
+        lastName: 'R33',
+        venues: { create: { venueId: f.venueId, role: 'OWNER', active: true } },
+      },
+      select: { id: true },
+    })
+    try {
+      const venta = await f.nuevaVenta(100)
+      const sA = await f.solicitud({
+        orderId: venta.id,
+        status: 'UNKNOWN',
+        noResponseAt: new Date(Date.now() - 60_000),
+        acknowledgedAt: new Date(),
+      })
+      const a = await intento(sA.requestId)
+      expect(await terminalPaymentService.cerrarSinRespuesta(sA.requestId, f.venueId, enDiezS())).toBe('NO_COBRADO')
+      // La cajera vuelve a cobrar la misma cuenta: B entra (la cuenta ya no está cercada) y queda en vuelo.
+      const sB = await f.solicitud({ orderId: venta.id, status: 'SENT', acknowledgedAt: new Date() })
+      const emitAlLocal = jest.fn()
+      ;(socketManager.getServer as jest.Mock).mockReturnValue({ sockets: { sockets: new Map() }, to: () => ({ emit: emitAlLocal }) })
+      const pagoA = await recordOrderPayment(
+        f.venueId,
+        venta.id,
+        f.registroDeLaTerminal({ attemptId: a, requestId: sA.requestId }),
+        f.staffId,
+      )
+      expect(await fila(sA.requestId)).toMatchObject({ status: 'COMPLETED', paymentId: pagoA.id })
+      expect(await fila(sB.requestId)).toMatchObject({ status: 'SENT', paymentId: null })
+      expect(
+        emitAlLocal.mock.calls.filter(
+          ([e, p]) => e === 'terminal:payment_cancel' && (p as { requestId?: string })?.requestId === sB.requestId,
+        ),
+      ).toHaveLength(0)
+      await new Promise(r => setTimeout(r, 300))
+      const aviso = (await prisma.notification.findMany({ where: { venueId: f.venueId, recipientId: duena.id } })).find(
+        n => (n.metadata as { paymentId?: string } | null)?.paymentId === pagoA.id,
+      )
+      expect(aviso).toBeDefined()
+      expect(aviso!.message).not.toContain(sB.requestId)
+      expect(aviso!.message).not.toContain('Cobros de')
+    } finally {
+      await prisma.notification.deleteMany({ where: { recipientId: duena.id } })
+      await prisma.staffVenue.deleteMany({ where: { staffId: duena.id } })
+      await prisma.staff.deleteMany({ where: { id: duena.id } })
+    }
+  })
+})
