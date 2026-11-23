@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-23T17:55:50.730Z",
-  "approvedHash": "36ee5e666e38e1e541ca570609969362d15afd018ba0908493193035d2078d2f",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -640,7 +640,7 @@
       ]
     },
     "dashboard/reportes/comparar-inicio-y-resumen-de-ventas": {
-      "sha256": "63dac9727b05d0003fbd7aa7d2534a25283482f36da6ff552aeb2b0ae7b80bb4",
+      "sha256": "442ec957c47fab5c4d593e429b732a4170d2e654a24c7d1b3fe639994c45d835",
       "requiredPermissions": []
     },
     "dashboard/reportes/revisar-reportes-avanzados": {

@@ -72,7 +72,8 @@ beforeAll(async () => {
   // Cobro rápido de la TPV: $26.99 SIN renglones (el caso medido el 27-oct).
   await sembrarCobro({ venueId, staffId, saleCents: 2699 })
 
-  // Cuentas con café que las ventas netas NO cuentan: una PENDING y una DELETED.
+  // Dos cuentas de café ya pagadas: una que sigue PENDING (B3, hz:fefa11b6:D19: PENDING no es borrador, es la cuenta viva de la TPV
+  // sin cerrar; ya pagada ES venta, en la cabecera y en el correo) y una DELETED, que las ventas netas NO cuentan.
   for (const status of ['PENDING', 'DELETED'] as const) {
     const fuera = await sembrarCobro({
       venueId,
@@ -176,12 +177,12 @@ afterAll(async () => {
 })
 
 describe('D21 · el desglose por categoría del correo nocturno suma las ventas netas', () => {
-  it('las categorías cuentan las mismas cuentas que las ventas netas (sin PENDING ni DELETED)', async () => {
+  it('las categorías cuentan las mismas cuentas que las ventas netas (sin DELETED; la PENDING ya pagada sí, B3)', async () => {
     const categorias = await getCategoryBreakdown(venueId, desde, hasta)
     // Café: 100 + 146 (la promoción de la cuenta repartida a su renglón) + 133.20 (lo que se cobró por las pesadas) + 100 (la
-    // cuenta con el pastel regalado) + 0.01 (las pesadas casi gratis). El pastel regalado no cobró nada.
+    // cuenta con el pastel regalado) + 0.01 (las pesadas casi gratis) + 30 (la PENDING ya pagada). El pastel regalado no cobró nada.
     expect(categorias).toEqual([
-      { name: 'Bebidas', itemsSold: 7, netSales: 479.21 },
+      { name: 'Bebidas', itemsSold: 8, netSales: 509.21 },
       { name: 'Sin categorizar', itemsSold: 1, netSales: 50 },
       { name: 'Postres', itemsSold: 1, netSales: 0 },
     ])
@@ -189,12 +190,12 @@ describe('D21 · el desglose por categoría del correo nocturno suma las ventas 
 
   it('🔴 el desglose del correo suma las ventas netas del Resumen, al centavo, con su renglón de importe libre', async () => {
     const r = await getSalesSummary(venueId, { startDate: desde.toISOString(), endDate: hasta.toISOString(), timezone: TZ })
-    // 100 + 50 + 26.99 + 146 + 133.20 + 100 + 0.01 vendidos − 10 devueltos.
-    expect(r.summary.netSales).toBeCloseTo(546.2, 2)
+    // 100 + 50 + 26.99 + 146 + 133.20 + 100 + 0.01 + 30 (la PENDING ya pagada, B3) vendidos − 10 devueltos.
+    expect(r.summary.netSales).toBeCloseTo(576.2, 2)
 
     const filas = reconcileCategoryBreakdown(await getCategoryBreakdown(venueId, desde, hasta), r.summary.netSales ?? 0, r.summary.refunds)
     expect(filas).toEqual([
-      { name: 'Bebidas', itemsSold: 7, netSales: 479.21 },
+      { name: 'Bebidas', itemsSold: 8, netSales: 509.21 },
       { name: 'Sin categorizar', itemsSold: 1, netSales: 50 },
       { name: 'Postres', itemsSold: 1, netSales: 0 },
       { name: 'Devoluciones', itemsSold: null, netSales: -10 },

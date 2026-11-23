@@ -17,7 +17,7 @@ import { utcTsParam } from '@/utils/sqlDates'
 import { sqlRangoHoraReal } from '@/services/shared/horaRealDelAparato'
 import { sqlImpuestoQueSeCobraAparte } from '@/services/shared/orderBalance'
 import { sqlOrdenSinTarjetasTexto } from '@/services/giftCards/giftCardMarks'
-import { sqlCobroDeCuentaSinCobrar, sqlComisionDeTerceros, sqlCuentaCobrada } from '@/services/dashboard/salesSummaryPoblacion'
+import { sqlCobroDeCuentaSinCobrar, sqlComisionDeTerceros, sqlLateralDeLaCuenta } from '@/services/dashboard/salesSummaryPoblacion'
 
 /** Por dónde entró la venta, en nombres de dueño (los textos viven en el panel y en la tool del MCP). */
 export type SalesChannel =
@@ -286,6 +286,7 @@ export async function computeSalesByChannel(
              COUNT(*)::int AS cuentas
       FROM "Order"
       ${marcasDe('"Order"')}
+      ${sqlLateralDeLaCuenta('"Order"')}
       LEFT JOIN LATERAL (
         SELECT SUM("discountCents") AS discount_cents FROM "OrderPromotion" WHERE "orderId" = "Order".id
       ) promo ON TRUE
@@ -294,9 +295,11 @@ export async function computeSalesByChannel(
       ) comp ON TRUE
       WHERE "Order"."venueId" = $1
         AND ${sqlRangoHoraReal('"Order"', utcTsParam(2), utcTsParam(3))}
-        AND "Order".status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
+        -- B3 (hz:fefa11b6:D19): la MISMA regla de la cabecera (sqlLateralDeLaCuenta = sqlCuentaQueEsVenta, una vez por fila):
+        -- también la mesa PENDING ya cubierta, que antes se tomaba por borrador.
+        AND "Order".status NOT IN ('CANCELLED', 'DELETED')
         AND ${sqlOrdenSinTarjetasTexto('"Order".id')}
-        AND ${sqlCuentaCobrada('"Order"')}
+        AND cuenta.es_venta
       ${AGRUPAR('"Order"')}
       `,
       venueId,

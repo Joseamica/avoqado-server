@@ -75,7 +75,7 @@ type Cuenta = {
   serviceCharge?: number
   tax?: number
   contrato?: 'IVA_INCLUIDO' | 'IVA_APARTE'
-  status?: 'COMPLETED' | 'CONFIRMED' | 'CANCELLED'
+  status?: 'COMPLETED' | 'CONFIRMED' | 'CANCELLED' | 'PENDING'
   paymentStatus?: 'PAID' | 'PENDING' | 'PARTIAL'
   at?: Date
   clientAt?: Date
@@ -155,6 +155,7 @@ const resumen = (venueId: string, extra: Record<string, unknown> = {}) =>
 
 let tienda: string
 let estudio: string
+let restaurante: string
 
 beforeAll(async () => {
   orgId = (
@@ -371,6 +372,44 @@ beforeAll(async () => {
   // Fuera del rango: no aparece.
   await cuenta({ venueId: tienda, source: 'RAPPI', type: 'DELIVERY', subtotal: 999, at: AYER, pagos: [{ amount: 999, at: AYER }] })
 
+  // ── B3 (hz:fefa11b6:D19) · un restaurante con mesas de la TPV, que viven en PENDING mientras siguen abiertas ──────────────────
+  restaurante = await venue('restaurante')
+  const mesa2 = (
+    await prisma.table.create({ data: { venueId: restaurante, number: '4', capacity: 4, qrCode: `qr2-${suffix}` }, select: { id: true } })
+  ).id
+  // Abiertas: $50 sin pagar y $85 con un abono de $30 + $5 de propina ($1 de comisión). No son venta; su abono no cuenta en nada.
+  await cuenta({ venueId: restaurante, source: 'TPV', tableId: mesa2, subtotal: 50, status: 'PENDING', paymentStatus: 'PENDING' })
+  await cuenta({
+    venueId: restaurante,
+    source: 'TPV',
+    tableId: mesa2,
+    subtotal: 85,
+    status: 'PENDING',
+    paymentStatus: 'PARTIAL',
+    pagos: [{ amount: 30, tip: 5, method: 'CREDIT_CARD', fee: 1 }],
+  })
+  // Cubiertas sin cerrar: una que sus cobros ya cubren ($120 + $10 de propina) y otra PAID ($40). Son venta, en «Mesas».
+  await cuenta({
+    venueId: restaurante,
+    source: 'TPV',
+    tableId: mesa2,
+    subtotal: 120,
+    status: 'PENDING',
+    paymentStatus: 'PARTIAL',
+    pagos: [{ amount: 120, tip: 10 }],
+  })
+  await cuenta({
+    venueId: restaurante,
+    source: 'TPV',
+    tableId: mesa2,
+    subtotal: 40,
+    status: 'PENDING',
+    paymentStatus: 'PAID',
+    pagos: [{ amount: 40 }],
+  })
+  // Y una venta de mostrador cerrada ($60), para que haya dos canales.
+  await cuenta({ venueId: restaurante, source: 'TPV', type: 'TAKEOUT', subtotal: 60, pagos: [{ amount: 60 }] })
+
   // ── D5 · un estudio que vende paquetes en línea y cobra depósitos ──────────────────────────────────────────────────────────
   estudio = await venue('estudio')
   await cuenta({ venueId: estudio, source: 'TPV', subtotal: 300, pagos: [{ amount: 300 }] })
@@ -526,6 +565,32 @@ describe('D4 · ventas por canal y por tipo de pedido', () => {
     expect((await resumen(tienda)).byChannel).toBeUndefined()
     expect((await resumen(tienda, { includeChannelBreakdown: true, paymentMethod: 'CASH' })).byChannel).toBeUndefined()
     expect((await resumen(tienda, { includeChannelBreakdown: true, merchantAccountId: comercio })).byOrderType).toBeUndefined()
+  })
+})
+
+describe('B3 · las mesas abiertas y cubiertas de la TPV (PENDING) en los canales', () => {
+  it('🔴 cada tabla suma la cabecera al centavo con mesas abiertas y cubiertas; las cubiertas son venta de «Mesas»', async () => {
+    const r = await resumen(restaurante, { includeChannelBreakdown: true })
+    expect(r.channelBreakdownOutOfSync).toBeUndefined()
+    const s = r.summary
+    for (const filas of [r.byChannel!, r.byOrderType!] as unknown as Fila[][]) {
+      expect(suma(filas, 'grossSales')).toBe(cents(s.grossSales))
+      expect(suma(filas, 'netSales')).toBe(cents(s.netSales))
+      expect(suma(filas, 'tips')).toBe(cents(s.tips))
+      expect(suma(filas, 'platformFees')).toBe(cents(s.platformFees))
+      expect(suma(filas, 'totalCollected')).toBe(cents(s.totalCollected))
+      expect(filas.reduce((n, f) => n + Number(f.transactionCount), 0)).toBe(s.transactionCount)
+    }
+    // Ventas: 120 + 40 de las mesas cubiertas + 60 del mostrador; «Sin cobrar»: 50 + 55 de las abiertas.
+    expect(cents(s.grossSales)).toBe(22000)
+    expect(cents(s.unpaidSales)).toBe(10500)
+    expect(s.unpaidOrders).toBe(2)
+    expect(s.transactionCount).toBe(3)
+    expect(cents(s.tips)).toBe(1000)
+    expect(cents(s.platformFees)).toBe(0)
+    const c = r.byChannel! as unknown as Fila[]
+    expect(fila(c, 'TABLES')).toMatchObject({ grossSales: 160, netSales: 160, tips: 10, transactionCount: 2, orderCount: 2 })
+    expect(fila(c, 'COUNTER')).toMatchObject({ grossSales: 60, transactionCount: 1, orderCount: 1 })
   })
 })
 
