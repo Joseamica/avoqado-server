@@ -65,7 +65,11 @@ export async function isPublicPaused(db: Prisma.TransactionClient, receiverId: s
  */
 export async function countPublicMessage(db: Prisma.TransactionClient, receiverId: string, phone: string, now: Date) {
   const caps = publicPhoneCaps(receiverId, phone, now)
-  const rows = await db.supportBudget.findMany({ where: { key: { in: caps.map(c => c.key) } }, select: { key: true, callCount: true } })
+  const rows = await db.supportBudget.findMany({
+    where: { key: { in: caps.map(c => c.key) } },
+    select: { key: true, callCount: true },
+    take: caps.length,
+  })
   const full = caps.find(cap => (rows.find(r => r.key === cap.key)?.callCount ?? 0) >= cap.maximum)
   if (full) return full.window
   for (const cap of caps)

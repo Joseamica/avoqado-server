@@ -199,7 +199,11 @@ export async function requestSupportHandoff(
     `CONTROL:${conversation.receiverId}:HANDOFF_PUBLIC:${day}`,
     `CONTROL:${conversation.receiverId}:HANDOFF_PUBLIC:${day}:${phoneHash}`,
   ]
-  const publicRows = await tx.supportBudget.findMany({ where: { key: { in: publicKeys } }, select: { key: true, callCount: true } })
+  const publicRows = await tx.supportBudget.findMany({
+    where: { key: { in: publicKeys } },
+    select: { key: true, callCount: true },
+    take: publicKeys.length,
+  })
   const [publicAll, publicPhone] = publicKeys.map(key => publicRows.find(r => r.key === key)?.callCount ?? 0)
   const phoneCount = await tx.supportNotice.count({ where: { ...counted, phoneHash } }),
     allCount = await tx.supportNotice.count({ where: counted })
