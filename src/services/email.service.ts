@@ -3110,6 +3110,11 @@ Avoqado Dashboard
         totalCollected: number
         netProfit: number
         transactionCount: number
+        /** D6 (aditivo): cuentas abiertas o pagadas a medias — lo que deben sin propina. NO es venta. */
+        unpaidSales?: number | null
+        unpaidOrders?: number | null
+        /** D1 (aditivo): comisiones de terceros (Rappi, Uber Eats, tipos de pago), ya restadas de `totalCollected`. */
+        tenderCommissions?: number
       }
       previousPeriod?: {
         netSales: number
@@ -3344,7 +3349,27 @@ Avoqado Dashboard
           </td>
           <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.metrics.platformFees)}</td>
           <td style="padding: 16px 0; font-size: 14px; color: #666; text-align: right;"></td>
-        </tr>
+        </tr>${
+          // D1 (21-nov-2026): la comisión de Rappi/Uber/tipos de pago ya está restada del «Total en ventas»; aquí se dice cuánta fue.
+          (data.metrics.tenderCommissions ?? 0) !== 0
+            ? `
+        <tr style="border-bottom: 1px solid #f0f0f0;">
+          <td style="padding: 16px 0; font-size: 15px; color: #000;">Comisiones de terceros (Rappi, Uber Eats, tipos de pago)</td>
+          <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.metrics.tenderCommissions ?? 0)}</td>
+          <td style="padding: 16px 0; font-size: 14px; color: #666; text-align: right;"></td>
+        </tr>`
+            : ''
+        }${
+          // D6 (21-nov-2026, base de caja): las cuentas abiertas no son venta; se dice cuánto falta cobrar y de cuántas.
+          (data.metrics.unpaidSales ?? 0) > 0
+            ? `
+        <tr style="border-bottom: 1px solid #f0f0f0;">
+          <td style="padding: 16px 0; font-size: 15px; color: #000;">Sin cobrar (${data.metrics.unpaidOrders ?? 0} ${(data.metrics.unpaidOrders ?? 0) === 1 ? 'cuenta abierta' : 'cuentas abiertas'}, no es venta)</td>
+          <td style="padding: 16px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.metrics.unpaidSales ?? 0)}</td>
+          <td style="padding: 16px 0; font-size: 14px; color: #666; text-align: right;"></td>
+        </tr>`
+            : ''
+        }
       </table>
     </div>
 
@@ -3460,7 +3485,15 @@ Ventas netas: ${formatCurrency(data.metrics.netSales)}
 Impuestos: ${formatCurrency(data.metrics.taxes)}
 Propinas: ${formatCurrency(data.metrics.tips)}
 Total: ${formatCurrency(data.metrics.totalCollected)}
-Comisiones: ${formatCurrency(data.metrics.platformFees)}
+Comisiones: ${formatCurrency(data.metrics.platformFees)}${
+      (data.metrics.tenderCommissions ?? 0) !== 0
+        ? `\nComisiones de terceros (Rappi, Uber Eats, tipos de pago): ${formatCurrency(data.metrics.tenderCommissions ?? 0)}`
+        : ''
+    }${
+      (data.metrics.unpaidSales ?? 0) > 0
+        ? `\nSin cobrar (${data.metrics.unpaidOrders ?? 0} ${(data.metrics.unpaidOrders ?? 0) === 1 ? 'cuenta abierta' : 'cuentas abiertas'}, no es venta): ${formatCurrency(data.metrics.unpaidSales ?? 0)}`
+        : ''
+    }
 
 Ver mas detalles en: ${data.dashboardUrl}
 

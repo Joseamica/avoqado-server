@@ -208,7 +208,8 @@ describe('getSalesSummary — bruto y descuento salen de UNA foto (una venta int
           taxAmount: 0,
           total: subtotal - descuento,
           status: 'COMPLETED',
-          paymentStatus: 'PENDING',
+          // D6 (base de caja, 21-nov-2026): una venta es una cuenta COBRADA; una abierta va en «Sin cobrar».
+          paymentStatus: 'PAID',
         },
       })
     await venta('1', 100, 0)
