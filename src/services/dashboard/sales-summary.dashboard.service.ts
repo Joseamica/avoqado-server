@@ -501,7 +501,12 @@ export interface SalesSummaryFilters {
   includeChannelBreakdown?: boolean
   /** Carril G · D5: paquetes vendidos en línea y depósitos de reservas en `summary` (renglones que no son venta). */
   includePrepaid?: boolean
+  /** Carril F2 (comparar): la lectura del periodo comparado no toca el puente del QR anterior. Los demás lectores no lo pasan. */
+  skipLegacyQr?: boolean
 }
+
+/** Carril F2: contra qué se compara el Resumen de ventas (`salesSummaryComparar.ts`). */
+export type CompararCon = 'previous_period' | 'previous_year'
 
 /** Round money to cents — keeps API/MCP payloads free of float-accumulation noise. */
 const round2 = (n: number): number => Math.round(n * 100) / 100
@@ -1739,7 +1744,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // be part of that total, so its outage cannot make the total incomplete either. Asking anyway copied the bridge failure
   // into a total it does not feed — a false "may be incomplete" (Codex r2 #2). Same gate as the period query below.
   // D9.1 (21-nov): with a merchant chosen nothing of the legacy QR belongs to it (it has no merchant account): not summed, not asked.
-  if (sumsLegacyQrPayments(venueId) && legacyAdmission(paymentMethod, cardType).include && !merchantAccountId) {
+  if (sumsLegacyQrPayments(venueId) && legacyAdmission(paymentMethod, cardType).include && !merchantAccountId && !filters.skipLegacyQr) {
     legacyAggregate = { amount: 0, tips: 0, count: 0 }
     const paginas = await forEachLegacyPaymentPage(
       { startDate: parsedStartDate.toISOString(), endDate: parsedEndDate.toISOString() },
