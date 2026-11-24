@@ -667,4 +667,82 @@ describe('Codex S1 r2', () => {
     expect(await svc.registrarAckDeReplay(s.requestId, f.venueId)).toBe(1)
     expect(await fila(s.requestId)).toMatchObject({ status: 'SENT' })
   })
+
+  /* ── Revisión de apps viejas de S1 (Codex, 23-nov): `docs/audit/2026-11-22-cobro-simple/apps-viejas-s1-r1.md` del workspace. ── */
+
+  it('apps viejas #2 · la terminal reconecta justo después de la comprobación del seguimiento de la desconexión: su cobro no entra a «sin respuesta» ni recibe cancel', async () => {
+    process.env.TERMINAL_PAYMENT_SIN_RESPUESTA_MS = '200'
+    const s = await f.solicitud({ acknowledgedAt: new Date() })
+    const enLinea = (terminalId: string) => ({
+      terminalId,
+      venueId: f.venueId,
+      socketId: SOCKET,
+      identityVerified: true,
+      terminalPaymentAckVersion: 1,
+      terminalPaymentCancelDispositionVersion: 2,
+      terminalPaymentProbeVersion: 1,
+      terminalPaymentExecutionVersion: 1,
+    })
+    // La primera consulta (el «¿volvió?» del temporizador) todavía la ve caída; reconecta mientras se leen sus filas.
+    let consultas = 0
+    ;(terminalRegistry.getTerminal as jest.Mock).mockImplementation((terminalId: string) =>
+      ++consultas === 1 ? undefined : enLinea(terminalId),
+    )
+    terminalPaymentService.alDesconectarseLaTerminal(f.serial, f.venueId)
+    await esperar(500)
+    expect(await fila(s.requestId)).toMatchObject({ status: 'SENT', noResponseAt: null })
+    expect(cancelEmit).not.toHaveBeenCalled()
+  })
+
+  it('apps viejas #2 · una reentrega registrada entre la lectura del seguimiento de la desconexión y su UPDATE gana: la fila sigue en vuelo', async () => {
+    process.env.TERMINAL_PAYMENT_SIN_RESPUESTA_MS = '200'
+    const s = await f.solicitud({
+      status: 'PENDING',
+      acknowledgedAt: null,
+      deliveryProvenance: entrega('DURABLE', hace(1_000)),
+      deliveryAttempts: 1,
+    })
+    conectada = false
+    const original = svc.entrarSinRespuestaYProgramar.bind(svc)
+    const espia = jest.spyOn(svc, 'entrarSinRespuestaYProgramar').mockImplementationOnce(async (...args: unknown[]) => {
+      // La TPV reconectó y el servidor registró la reentrega cuando el seguimiento ya había leído la fila.
+      conectada = true
+      expect(await svc.recordDelivery(s.requestId, f.venueId, { terminalPaymentAckVersion: 1 }, SOCKET, true)).toBe(true)
+      return original(...args)
+    })
+    try {
+      terminalPaymentService.alDesconectarseLaTerminal(f.serial, f.venueId)
+      await esperar(500)
+    } finally {
+      espia.mockRestore()
+    }
+    expect(await fila(s.requestId)).toMatchObject({ status: 'PENDING', noResponseAt: null })
+    expect(cancelEmit).not.toHaveBeenCalled()
+  })
+
+  it('apps viejas #1 · una TPV que no anuncia que contesta el cancel (2.9.1, 2.10.0) no recibe el cancel automático; el cierre del servidor sigue igual', async () => {
+    ;(terminalRegistry.getTerminal as jest.Mock).mockImplementation((terminalId: string) => ({
+      terminalId,
+      venueId: f.venueId,
+      socketId: SOCKET,
+      identityVerified: true,
+    }))
+    const s = await f.solicitud({ acknowledgedAt: new Date() })
+    expect(
+      await svc.entrarSinRespuestaYProgramar(s.requestId, f.venueId, 'TERMINAL_GONE', { terminalId: f.serial, ahora: hace(DIEZ_S + 50) }),
+    ).toBe(true)
+    expect(cancelEmit).not.toHaveBeenCalled()
+    expect(await fila(s.requestId)).toMatchObject({ status: 'UNKNOWN' })
+    await terminalPaymentService.cerrarSinRespuestaVencidas(new Date())
+    expect(await terminalPaymentService.getPaymentStatus(s.requestId, f.venueId)).toMatchObject({
+      ...NO_COBRADO,
+      noChargeCause: 'TERMINAL_GONE',
+    })
+  })
+
+  it('…y a una TPV que sí lo anuncia (2.12.5 en adelante) se le sigue mandando', async () => {
+    const s = await f.solicitud({ acknowledgedAt: new Date() })
+    expect(await svc.entrarSinRespuestaYProgramar(s.requestId, f.venueId, 'TERMINAL_GONE', { terminalId: f.serial })).toBe(true)
+    expect(cancelEmit).toHaveBeenCalledWith('terminal:payment_cancel', expect.objectContaining({ requestId: s.requestId }))
+  })
 })

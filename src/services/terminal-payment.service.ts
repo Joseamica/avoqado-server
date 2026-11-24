@@ -8515,7 +8515,10 @@ class TerminalPaymentService {
     })
     if ((opciones.emitirCancel ?? causa !== 'NO_RESPONSE') && opciones.terminalId) {
       const entry = terminalRegistry.getTerminal(opciones.terminalId)
-      await this.emitCancelToTerminal(entry?.socketId, opciones.terminalId, requestId, 'Sin respuesta del cobro').catch(() => false)
+      // Apps viejas #1 (23-nov): el cancel AUTOMÁTICO sólo va a la TPV que anuncia que lo contesta (2.12.5 en adelante). Una 2.9.1 o
+      // 2.10.0 lo obedece sin mirar de qué cobro es y puede sacar al cajero de OTRO cobro; con ellas basta el cierre del servidor.
+      if ((entry?.terminalPaymentCancelDispositionVersion ?? 0) >= 1)
+        await this.emitCancelToTerminal(entry?.socketId, opciones.terminalId, requestId, 'Sin respuesta del cobro').catch(() => false)
     }
     this.programarCierreSinRespuesta(requestId, venueId)
     // R2-6: el rechazo que llegó mientras estaba en vuelo (sólo se guardó) decide ahora. Si falla, el cierre de los 10 s lo repite.
@@ -9013,10 +9016,15 @@ class TerminalPaymentService {
       void (async () => {
         const filas = await prisma.terminalPaymentRequest.findMany({
           where: { terminalId: llave, venueId, status: { in: IN_FLIGHT } },
-          select: { requestId: true },
+          select: { requestId: true, deliveryAttempts: true },
           take: 10,
         })
-        for (const f of filas) await this.entrarSinRespuestaYProgramar(f.requestId, venueId, 'TERMINAL_GONE', { terminalId })
+        for (const f of filas) {
+          // Apps viejas #2 (23-nov): si volvió mientras se leían sus filas, no «se fue»: su cobro se le reentrega. Y una reentrega
+          // registrada después de la lectura gana (el mismo candado de R4-B): nunca se cancela un cobro recién entregado.
+          if (terminalRegistry.getTerminal(terminalId)?.socketId) return
+          await this.entrarSinRespuestaYProgramar(f.requestId, venueId, 'TERMINAL_GONE', { terminalId, entregasLeidas: f.deliveryAttempts })
+        }
       })().catch(err =>
         logger.warn('⚠️ [TerminalPayment] disconnect follow-up failed — the watchdog covers it', { terminalId, error: String(err) }),
       )
