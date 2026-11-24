@@ -112,9 +112,12 @@ it('🔴 el negocio del QR anterior: lo dice y no calcula el cambio; y avisa si 
   expect(out.lines.every((l: { change: unknown }) => l.change === null)).toBe(true)
 })
 
-it('un periodo que no empieza: error con su motivo, sin leer el comparado', async () => {
+it('🔴 lo que no se puede comparar se dice sin leer nada (ni el reporte de siempre): un periodo que no empieza y más de un año', async () => {
   mockGetSalesSummary.mockReset().mockResolvedValue({ summary: resumen() })
-  const out = parse(await call({ venueId: 'v1', fromDate: '2026-11-24', toDate: '2026-11-24', compareTo: 'previous_year' }))
-  expect(out).toEqual({ ok: false, error: 'Ese periodo todavía no empieza: no hay con qué compararlo.' })
-  expect(mockGetSalesSummary).toHaveBeenCalledTimes(1)
+  const noEmpieza = parse(await call({ venueId: 'v1', fromDate: '2026-11-24', toDate: '2026-11-24', compareTo: 'previous_year' }))
+  expect(noEmpieza).toEqual({ ok: false, error: 'Ese periodo todavía no empieza: no hay con qué compararlo.' })
+  const largo = parse(await call({ venueId: 'v1', fromDate: '2025-01-01', toDate: '2026-11-23' }))
+  expect(largo.ok).toBe(false)
+  expect(largo.error).toMatch(/año o menos/)
+  expect(mockGetSalesSummary).not.toHaveBeenCalled()
 })

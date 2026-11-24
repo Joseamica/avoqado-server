@@ -7288,7 +7288,7 @@
       },
       {
         "pagina": "dashboard/reportes/comparar-con-otro-periodo",
-        "sourceRef": "6d6a65c5f99a22cc0091fb21bb683a8fd7854384"
+        "sourceRef": "d0dea93fcba1f9eb1c0db9edcc12e380215ac045"
       },
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
@@ -7698,7 +7698,7 @@
       },
       {
         "pagina": "dashboard/reportes/comparar-con-otro-periodo",
-        "sourceRef": "6d6a65c5f99a22cc0091fb21bb683a8fd7854384"
+        "sourceRef": "d0dea93fcba1f9eb1c0db9edcc12e380215ac045"
       },
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
@@ -7884,7 +7884,7 @@
       },
       {
         "pagina": "dashboard/reportes/comparar-con-otro-periodo",
-        "sourceRef": "6d6a65c5f99a22cc0091fb21bb683a8fd7854384"
+        "sourceRef": "d0dea93fcba1f9eb1c0db9edcc12e380215ac045"
       },
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
@@ -8428,7 +8428,7 @@
     "avoqado-web-dashboard:src/pages/Reports/SalesSummary.tsx": [
       {
         "pagina": "dashboard/reportes/comparar-con-otro-periodo",
-        "sourceRef": "6d6a65c5f99a22cc0091fb21bb683a8fd7854384"
+        "sourceRef": "d0dea93fcba1f9eb1c0db9edcc12e380215ac045"
       },
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
@@ -8442,13 +8442,13 @@
     "avoqado-web-dashboard:src/pages/Reports/components/CambioDelPeriodo.tsx": [
       {
         "pagina": "dashboard/reportes/comparar-con-otro-periodo",
-        "sourceRef": "6d6a65c5f99a22cc0091fb21bb683a8fd7854384"
+        "sourceRef": "d0dea93fcba1f9eb1c0db9edcc12e380215ac045"
       }
     ],
     "avoqado-web-dashboard:src/pages/Reports/components/PeriodBreakdownTable.tsx": [
       {
         "pagina": "dashboard/reportes/comparar-con-otro-periodo",
-        "sourceRef": "6d6a65c5f99a22cc0091fb21bb683a8fd7854384"
+        "sourceRef": "d0dea93fcba1f9eb1c0db9edcc12e380215ac045"
       }
     ],
     "avoqado-web-dashboard:src/pages/Reports/components/SalesByChannelSection.tsx": [

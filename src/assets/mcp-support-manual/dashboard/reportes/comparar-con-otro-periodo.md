@@ -7,7 +7,7 @@ task: comparar-con-otro-periodo
 requiredPermissions:
   - reports:read
 sourceRepo: avoqado-web-dashboard
-sourceRef: 6d6a65c5f99a22cc0091fb21bb683a8fd7854384
+sourceRef: d0dea93fcba1f9eb1c0db9edcc12e380215ac045
 keywords:
   - vendí más que la semana pasada
   - comparar con la semana pasada
@@ -27,9 +27,9 @@ Necesitas permiso para ver reportes. Comparar es del plan Pro: con el plan Grati
 
 1. En *Reportes* › *Resumen de Ventas*, elige las fechas y toca *Comparar con*.
 2. Elige *Periodo anterior* (los mismos días justo antes; un mes completo contra el mes anterior) o *Mismo periodo del año pasado*.
-3. Arriba del *Resumen* salen las fechas exactas de cada lado. Si el periodo todavía no termina (hoy, esta semana), los dos se cuentan hasta la misma hora.
+3. Junto al número grande salen las fechas exactas de cada lado. Si el periodo todavía no termina (hoy, esta semana), los dos se cuentan hasta la misma hora.
 4. Debajo de cada cifra sale *antes* con lo del otro periodo y cuánto cambió en pesos y en %. Verde es mejor (más ventas); rojo, peor (más devoluciones o comisiones).
-5. *nuevo* quiere decir que antes era $0. El número grande también dice cuánto fue el otro periodo.
+5. *nuevo* quiere decir que antes era $0. Junto al número grande, *Antes* dice cuánto fue el otro periodo y cuánto cambió.
 6. En *Por días* o *Por horas*, la columna *Total* trae el total del otro periodo y su cambio.
 
 ## Problemas frecuentes
@@ -38,4 +38,5 @@ Necesitas permiso para ver reportes. Comparar es del plan Pro: con el plan Grati
 - Una cuenta abierta antes de la hora y cobrada después cuenta como venta del periodo comparado; la de hoy sale en *Sin cobrar* hasta que se cobre.
 - Sin % es porque antes era $0 (*nuevo*) o negativo. Gris es informativo (impuestos, *Sin cobrar*).
 - *Todo el tiempo* no se compara: elige un periodo de un año o menos.
-- En el negocio con cobros del QR anterior, el otro periodo no los trae: se ven las dos cifras sin cambio.
+- Si tu negocio tiene cobros del QR anterior, el otro periodo no los trae: se ven las dos cifras sin cambio (con un comercio elegido sí se calcula).
+- Un cobro que entra mientras se carga el reporte puede faltar hasta que recargues.

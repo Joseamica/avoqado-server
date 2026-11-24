@@ -133,6 +133,23 @@ describe('rangoComparado · la pasada exhaustiva de la promesa', () => {
     expect(res.untilSameTime).toBe(false)
   })
 
+  it('🔴 un mes más corto se queda en su último día: «Este mes» el 31-mar a las 14:00 contra 1 – 28 feb hasta las 14:00', () => {
+    const ahora = DateTime.fromISO('2026-03-31T14:00', { zone: MX }).toJSDate()
+    expect(comparado('2026-03-01', '2026-03-31', 'previous_period', ahora)).toMatchObject({
+      base: '2026-03-01 00:00:00.000 → 2026-03-31 14:00:00.000',
+      comparado: '2026-02-01 00:00:00.000 → 2026-02-28 14:00:00.000',
+      untilSameTime: true,
+    })
+  })
+
+  it('🔴 una fecha sin desfase («2026-11-20») se lee como la lee el reporte de siempre (`new Date`, UTC): comparar no mueve el rango', () => {
+    const res = rangoComparado('2026-11-20', '2026-11-21', 'previous_period', MX, T)
+    expect(res.status).toBe('ok')
+    if (res.status !== 'ok') return
+    expect(res.base).toEqual({ startDate: '2026-11-20T00:00:00.000Z', endDate: '2026-11-21T00:00:00.000Z' })
+    expect(new Date(res.comparado.endDate).getTime()).toBe(new Date('2026-11-20T00:00:00.000Z').getTime() - 1)
+  })
+
   it('«GMT-6» guardado se calcula como la Ciudad de México', () => {
     const r = rango('2026-11-22', '2026-11-22')
     expect(rangoComparado(r.startDate, r.endDate, 'previous_period', 'GMT-6', T)).toEqual(

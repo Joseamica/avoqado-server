@@ -48,8 +48,9 @@ export function rangoComparado(
   T: Date,
 ): RangoComparado {
   const zona = zonaDelCalculo(zonaGuardada)
-  const inicio = DateTime.fromISO(startDate, { zone: zona })
-  const finPedido = DateTime.fromISO(endDate, { zone: zona })
+  // Se leen como las lee `getSalesSummary` (`new Date`): comparar no mueve el rango del reporte de siempre («2026-11-20» sin desfase = UTC).
+  const inicio = DateTime.fromJSDate(new Date(startDate)).setZone(zona)
+  const finPedido = DateTime.fromJSDate(new Date(endDate)).setZone(zona)
   if (!inicio.isValid) throw new BadRequestError(`Invalid startDate: ${startDate}`)
   if (!finPedido.isValid) throw new BadRequestError(`Invalid endDate: ${endDate}`)
   const ahora = DateTime.fromJSDate(T).setZone(zona)

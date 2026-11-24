@@ -90,9 +90,11 @@ beforeAll(async () => {
   await cuenta(100, local('2025-06-09', '10:00'), local('2025-06-09', '10:05'))
   await cuenta(200, local('2025-06-09', '15:00'), local('2025-06-09', '15:05'))
   await cuenta(300, local('2025-06-09', '13:00'), local('2025-06-09', '16:00'))
-  // Hoy: $150 a las 9:00 (con tarjeta) y una mesa de $80 abierta a la 1:00 p. m. sin cobrar.
+  // Hoy: $150 a las 9:00 (con tarjeta), una mesa de $80 abierta a la 1:00 p. m. sin cobrar y $70 en efectivo a las 3:00 p. m.
+  // (después de la hora: el lado actual tampoco la trae).
   await cuenta(150, local('2025-06-10', '09:00'), local('2025-06-10', '09:05'), 'CREDIT_CARD')
   await cuenta(80, local('2025-06-10', '13:00'), null)
+  await cuenta(70, local('2025-06-10', '15:00'), local('2025-06-10', '15:05'))
   // Antier: $500 (para el periodo cerrado).
   await cuenta(500, local('2025-06-08', '12:00'), local('2025-06-08', '12:05'))
 })
@@ -125,8 +127,11 @@ describe('F2 · hoy a la mitad contra ayer hasta la misma hora', () => {
       baseRange: { startDate: HOY.startDate, endDate: T.toISOString() },
       dateRange: { startDate: AYER.startDate, endDate: '2025-06-09T20:00:00.000Z' },
     })
-    // Hoy: $150 de venta y la mesa de $80 en «Sin cobrar».
+    // Hoy hasta las 2:00 p. m.: $150 de venta y la mesa de $80 en «Sin cobrar»; los $70 de las 3:00 p. m. no entran…
     expect(cents(r.summary.grossSales)).toBe(15000)
+    // …aunque el día completo sí los trae.
+    const diaCompleto = await getSalesSummary(venueId, filtros())
+    expect(cents(diaCompleto.summary.grossSales)).toBe(22000)
     expect(cents(r.summary.unpaidSales)).toBe(8000)
     // Ayer hasta las 2:00 p. m.: $100 y la mesa de $300 (abierta antes, cobrada después: borde declarado).
     expect(cents(r.comparison.summary!.grossSales)).toBe(40000)
@@ -160,7 +165,8 @@ describe('F2 · hoy a la mitad contra ayer hasta la misma hora', () => {
     expect(r.filtered).toBe(true)
     expect(r.comparison.summary!.grossSales).toBeNull()
     expect(r.comparison.changes!.grossSales).toBeNull()
-    // Hoy no hubo efectivo cobrado; ayer hasta las 2:00 p. m., $100 + $10 de propina.
+    // Hoy no hubo efectivo cobrado antes de las 2:00 p. m. (el de las 3:00 p. m. no entra); ayer hasta las 2:00 p. m., $100 + $10 de propina.
+    expect(cents(r.summary.chargedAmount)).toBe(0)
     expect(cents(r.comparison.summary!.chargedAmount)).toBe(11000)
     expect(r.comparison.changes!.chargedAmount).toEqual({ difference: -110, percent: -100, isNew: false })
   })

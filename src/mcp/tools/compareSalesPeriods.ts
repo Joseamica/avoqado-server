@@ -6,7 +6,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { rangoDelNegocio } from './salesByChannel'
-import { CIFRAS_QUE_SE_COMPARAN, leerConComparacion } from '@/services/dashboard/salesSummaryComparar'
+import { CIFRAS_QUE_SE_COMPARAN, MENSAJES_DE_COMPARAR, leerConComparacion, rangoComparado } from '@/services/dashboard/salesSummaryComparar'
 import { comparacionBloqueadaPorPlan } from '@/services/dashboard/salesSummaryPlanRange'
 import { AVISO_PUENTE_QR_CAIDO } from '@/services/legacy/qrPayments.legacy.service'
 import { zonaDelCalculo } from '@/utils/sanitizeTimezone'
@@ -70,6 +70,9 @@ export function registerCompareSalesPeriodsTools(server: McpServer, scope: McpSc
       const T = new Date()
       const window = rangoDelNegocio(tz, fromDate, toDate ?? DateTime.fromJSDate(T).setZone(tz).toFormat('yyyy-MM-dd'))
       if ('error' in window) return text({ ok: false, error: window.error })
+      // Lo que no se puede comparar se dice antes de leer: la tool no necesita el reporte de siempre (el GET sí).
+      const rango = rangoComparado(window.startDate, window.endDate, compareTo ?? 'previous_period', tz, T)
+      if (rango.status !== 'ok') return text({ ok: false, error: MENSAJES_DE_COMPARAR[rango.status] })
 
       const r = await leerConComparacion(
         venueId,

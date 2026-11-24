@@ -1,7 +1,7 @@
 {
   "pagina": "dashboard/reportes/comparar-con-otro-periodo",
   "sourceRepo": "avoqado-web-dashboard",
-  "sourceRef": "6d6a65c5f99a22cc0091fb21bb683a8fd7854384",
+  "sourceRef": "d0dea93fcba1f9eb1c0db9edcc12e380215ac045",
   "version": "develop (rama feat/resumen-ventas-comparar, sin publicar)",
   "pasos": [
     {
@@ -49,13 +49,13 @@
     {
       "paso": 3,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 2325,
+      "linea": 2229,
       "cita": "{t('salesSummary.compare.thisPeriod')}: <span className=\"text-foreground\">{ventanaActual}</span>"
     },
     {
       "paso": 3,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
-      "linea": 2330,
+      "linea": 2234,
       "cita": "{comparado.untilSameTime && <p>{t('salesSummary.compare.untilSameTimeNote')}</p>}"
     },
     {
@@ -92,7 +92,7 @@
       "paso": 5,
       "archivo": "src/pages/Reports/SalesSummary.tsx",
       "linea": 2219,
-      "cita": "{t('salesSummary.compare.headline', { window: ventanaComparada, amount: pesos(comparado.summary.totalCollected) })}"
+      "cita": "{t('salesSummary.compare.headline', { amount: pesos(comparado.summary.totalCollected) })}"
     },
     {
       "paso": 6,
