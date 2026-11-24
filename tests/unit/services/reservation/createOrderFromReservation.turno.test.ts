@@ -44,6 +44,8 @@ describe('createOrderFromReservation — la orden del check-in cae en el turno d
   beforeEach(() => {
     jest.resetAllMocks()
     prismaMock.order.findFirst.mockResolvedValue(null)
+    // D20 0a: sin canjes de créditos en la reserva, la cuenta nace igual que siempre.
+    prismaMock.creditTransaction.findMany.mockResolvedValue([])
     prismaMock.reservation.findFirst.mockResolvedValue(reserva() as any)
     prismaMock.product.findMany.mockResolvedValue([
       {

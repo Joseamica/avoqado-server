@@ -31,6 +31,8 @@ describe('createOrderFromReservation staff prefill', () => {
   beforeEach(() => {
     jest.resetAllMocks()
     prismaMock.order.findFirst.mockResolvedValue(null)
+    // D20 0a: sin canjes de créditos en la reserva, la cuenta nace igual que siempre.
+    prismaMock.creditTransaction.findMany.mockResolvedValue([])
     prismaMock.product.findMany.mockResolvedValue([
       {
         id: 'product-1',
@@ -108,6 +110,7 @@ describe('🔴 el REPORTE no puede contradecir a la orden', () => {
   beforeEach(() => {
     jest.resetAllMocks()
     prismaMock.order.findFirst.mockResolvedValue(null)
+    prismaMock.creditTransaction.findMany.mockResolvedValue([])
     prismaMock.product.findMany.mockResolvedValue([
       {
         id: 'product-1',
@@ -172,6 +175,7 @@ describe('🔴 el precio de catálogo es FINAL: el IVA no se suma encima', () =>
   beforeEach(() => {
     jest.resetAllMocks()
     prismaMock.order.findFirst.mockResolvedValue(null)
+    prismaMock.creditTransaction.findMany.mockResolvedValue([])
     prismaMock.product.findMany.mockResolvedValue([
       {
         id: 'product-1',
