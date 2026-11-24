@@ -762,6 +762,8 @@ export async function refundCreditsForReservation(
   // Compute refund amount based on policy
   const { percent: refundPercent, policyApplied, tardia } = porcentajeDeDevolucion(policy, startsAt, new Date())
   const esIlimitado = (t: (typeof redeems)[number]) => t.creditItemBalance?.unlimited === true
+  // D687: el % tardío es de los paquetes normales; un Ilimitado regresa completo, así que su razón no lo enseña (decía «(0%)»).
+  const politicaDelPase = tardia ? 'TIME_BASED:late' : policyApplied
 
   if (refundPercent === 0 && !redeems.some(esIlimitado)) {
     logger.info(`💸 [CREDIT REFUND] No refund per policy (${policyApplied}) — reservation=${reservationId} spent=${totalSpent}`)
@@ -794,7 +796,7 @@ export async function refundCreditsForReservation(
               type: 'REFUND',
               quantity: 0,
               reservationId,
-              reason: `${reasonPrefix ?? 'Cancellation refund'} — policy: ${policyApplied} (compra reembolsada, sin devolución) · ${UNLIMITED_LATE_CANCEL_MARK}`,
+              reason: `${reasonPrefix ?? 'Cancellation refund'} — policy: ${politicaDelPase} (compra reembolsada, sin devolución) · ${UNLIMITED_LATE_CANCEL_MARK}`,
             },
           })
         }
@@ -817,7 +819,7 @@ export async function refundCreditsForReservation(
           type: 'REFUND',
           quantity: refundQty,
           reservationId,
-          reason: `${reasonPrefix ?? 'Cancellation refund'} — policy: ${policyApplied}${ilimitado && tardia ? ` · ${UNLIMITED_LATE_CANCEL_MARK}` : ''}`,
+          reason: `${reasonPrefix ?? 'Cancellation refund'} — policy: ${ilimitado ? politicaDelPase : policyApplied}${ilimitado && tardia ? ` · ${UNLIMITED_LATE_CANCEL_MARK}` : ''}`,
         },
       })
       // If the purchase was marked EXHAUSTED but now has balance again, restore ACTIVE.

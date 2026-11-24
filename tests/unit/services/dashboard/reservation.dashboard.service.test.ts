@@ -4349,6 +4349,56 @@ describe('rescheduleAppointmentReservation', () => {
     expect(emailService.sendReservationRescheduledEmail).toHaveBeenCalledTimes(1)
     expect(activityLogService.logAction).toHaveBeenCalledTimes(1)
   })
+
+  // D687 (hz:73e6a32c:D687): el texto del Ilimitado le habla a quien lo ve. Widget y app de clientes: «Tu Ilimitado…»; DASHBOARD,
+  // POS y MCP, sin posesivo. El código no cambia. El pase vence a la 01:22 del 2-sep y la cita se mueve a las 09:00 del mismo día.
+  describe('D687 · a quién le habla el texto del Ilimitado', () => {
+    const vence = new Date('2026-09-02T07:22:00.000Z')
+    const CLIENTA = 'Tu Ilimitado vence el 2 de septiembre, antes de este horario.'
+    const PERSONAL = 'Este Ilimitado vence el 2 de septiembre, antes de este horario.'
+
+    beforeEach(() => {
+      jest.spyOn(appointmentSlotHoldService, 'lockReservationForReschedule').mockResolvedValue(lockedIdentity({ partySize: 1 }))
+      prismaMock.reservation.findFirst.mockResolvedValue(makeAppt({ partySize: 1 }) as any)
+      prismaMock.creditTransaction.findMany.mockResolvedValue([
+        { customerId: 'cust-1', creditPackPurchaseId: 'compra-1', creditPackPurchase: { expiresAt: vence } },
+      ] as any)
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
+    })
+
+    it.each([
+      ['widget con apartado', 'PUBLIC', 'h1', CLIENTA],
+      ['widget sin apartado', 'PUBLIC', undefined, CLIENTA],
+      ['MCP', 'MCP', undefined, PERSONAL],
+    ] as const)('%s → %s', async (_caso, writeOrigin, holdId, mensaje) => {
+      await expect(
+        rescheduleAppointmentReservation({
+          venueId: VENUE,
+          reservationId: 'res-appt-1',
+          newStartsAt: newStart,
+          holdId,
+          rescheduledBy: writeOrigin === 'PUBLIC' ? 'CUSTOMER' : 'SYSTEM',
+          writeOrigin,
+        }),
+      ).rejects.toMatchObject({ code: 'CREDIT_UNLIMITED_AFTER_EXPIRY', message: mensaje })
+      expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+    })
+
+    it('reagendar desde el DASHBOARD → texto del personal', async () => {
+      await expect(
+        rescheduleReservation(VENUE, 'res-appt-1', { startsAt: newStart, endsAt: newEnd }, { writeOrigin: 'DASHBOARD' }, 'staff-1'),
+      ).rejects.toMatchObject({ code: 'CREDIT_UNLIMITED_AFTER_EXPIRY', message: PERSONAL })
+    })
+
+    it('subirle personas desde el DASHBOARD → ONE_SEAT con el texto del personal', async () => {
+      await expect(updateReservation(VENUE, 'res-appt-1', { partySize: 2 }, { writeOrigin: 'DASHBOARD' }, 'staff-1')).rejects.toMatchObject(
+        {
+          code: 'CREDIT_UNLIMITED_ONE_SEAT',
+          message: 'El Ilimitado es personal: cubre 1 lugar por clase, a nombre de quien lo compró. Los demás lugares se pagan aparte.',
+        },
+      )
+    })
+  })
 })
 
 describe('countAppointmentOccupancy — reschedule self-exclusion', () => {

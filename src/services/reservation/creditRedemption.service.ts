@@ -9,7 +9,7 @@
 import { CreditPurchaseStatus, Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
-import { LUGAR_DEL_PASE, errorIlimitado, errorVenceAntes } from '@/services/credits/ilimitado'
+import { type Audiencia, LUGAR_DEL_PASE, errorIlimitado, errorVenceAntes } from '@/services/credits/ilimitado'
 
 type Lector = Pick<Prisma.TransactionClient, 'creditItemBalance' | 'customer'>
 
@@ -66,10 +66,12 @@ export async function revisarPase(
     classSessionId: string | null
     personas: number
     excludeReservationId: string
+    /** D687: a quién le habla el texto del error. Default: a quien compró el pase. */
+    audiencia?: Audiencia
   },
 ): Promise<void> {
-  if (args.personas > 1) throw errorIlimitado('CREDIT_UNLIMITED_ONE_SEAT')
-  if (args.expiresAt && args.startsAt >= args.expiresAt) throw errorVenceAntes(args.expiresAt, args.timezone)
+  if (args.personas > 1) throw errorIlimitado('CREDIT_UNLIMITED_ONE_SEAT', args.audiencia)
+  if (args.expiresAt && args.startsAt >= args.expiresAt) throw errorVenceAntes(args.expiresAt, args.timezone, args.audiencia)
   if (args.classSessionId) {
     const otroLugar = await tx.creditTransaction.findFirst({
       where: {
@@ -81,7 +83,7 @@ export async function revisarPase(
       },
       select: { id: true },
     })
-    if (otroLugar) throw errorIlimitado('CREDIT_UNLIMITED_SAME_CLASS')
+    if (otroLugar) throw errorIlimitado('CREDIT_UNLIMITED_SAME_CLASS', args.audiencia)
   }
 }
 

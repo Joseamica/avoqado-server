@@ -47,6 +47,7 @@ import {
   refundCreditsForReservation,
 } from '../../../../src/services/dashboard/creditPack.public.service'
 import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
+import { UNLIMITED_LATE_CANCEL_MARK } from '../../../../src/services/credits/ilimitado'
 import { CreditPurchaseStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 
@@ -1403,6 +1404,85 @@ describe('CreditPack Public Service', () => {
       expect(prismaMock.creditTransaction.create).toHaveBeenCalledWith({
         data: expect.objectContaining({ type: 'REFUND', quantity: 1, reservationId: 'res-1' }),
       })
+    })
+  })
+
+  // D687 (hz:73e6a32c:D687): un Ilimitado cancelado tarde regresa completo; la razón ya no enseña el % de la política, que es de
+  // los paquetes normales y contradecía lo devuelto. La marca sigue AL FINAL, idéntica: el conteo de faltas lee `endsWith`.
+  describe('razón de la devolución tardía de un Ilimitado', () => {
+    const TARDE = { creditRefundMode: 'TIME_BASED' as const, creditFreeRefundHoursBefore: 24, creditLateRefundPercent: 0 }
+    const canje = (unlimited: boolean, status: CreditPurchaseStatus = CreditPurchaseStatus.ACTIVE) => ({
+      id: 'ctx-1',
+      venueId: VENUE_ID,
+      customerId: CUSTOMER_ID,
+      creditPackPurchaseId: 'purchase-001',
+      creditItemBalanceId: BALANCE_ID,
+      type: 'REDEEM',
+      quantity: -1,
+      reservationId: 'res-1',
+      creditItemBalance: { unlimited },
+      creditPackPurchase: { status },
+    })
+    const enUnaHora = () => new Date(Date.now() + 60 * 60 * 1000)
+    const razon = () => (prismaMock.creditTransaction.create.mock.calls[0][0] as any).data.reason as string
+
+    beforeEach(() => {
+      prismaMock.$transaction.mockImplementation(async (arg: any) => (typeof arg === 'function' ? arg(prismaMock) : Promise.all(arg)))
+    })
+
+    it('devuelve 1 y la razón no dice «(0%)»; la marca queda al final', async () => {
+      prismaMock.creditTransaction.findMany.mockResolvedValue([canje(true)] as any)
+
+      const r = await refundCreditsForReservation({
+        venueId: VENUE_ID,
+        reservationId: 'res-1',
+        startsAt: enUnaHora(),
+        policy: TARDE,
+        reasonPrefix: 'Staff cancellation',
+      })
+
+      expect(r.creditsRefunded).toBe(1)
+      expect(prismaMock.creditTransaction.create).toHaveBeenCalledWith({ data: expect.objectContaining({ type: 'REFUND', quantity: 1 }) })
+      expect(razon()).toBe('Staff cancellation — policy: TIME_BASED:late · ilimitado: cancelación tardía')
+      expect(razon().endsWith(UNLIMITED_LATE_CANCEL_MARK)).toBe(true)
+    })
+
+    it('con un % tardío distinto de 0 tampoco lo enseña (el pase regresa completo igual)', async () => {
+      prismaMock.creditTransaction.findMany.mockResolvedValue([canje(true)] as any)
+
+      await refundCreditsForReservation({
+        venueId: VENUE_ID,
+        reservationId: 'res-1',
+        startsAt: enUnaHora(),
+        policy: { ...TARDE, creditLateRefundPercent: 50 },
+      })
+
+      expect(razon()).toBe('Cancellation refund — policy: TIME_BASED:late · ilimitado: cancelación tardía')
+    })
+
+    it('pase cuya compra ya se reembolsó: movimiento de 0, sin «%» y con la marca al final', async () => {
+      prismaMock.creditTransaction.findMany.mockResolvedValue([canje(true, CreditPurchaseStatus.REFUNDED)] as any)
+
+      await refundCreditsForReservation({ venueId: VENUE_ID, reservationId: 'res-1', startsAt: enUnaHora(), policy: TARDE })
+
+      expect(prismaMock.creditTransaction.create).toHaveBeenCalledWith({ data: expect.objectContaining({ type: 'REFUND', quantity: 0 }) })
+      expect(razon()).toBe(
+        `Cancellation refund — policy: TIME_BASED:late (compra reembolsada, sin devolución) · ${UNLIMITED_LATE_CANCEL_MARK}`,
+      )
+    })
+
+    it('un paquete normal tarde conserva su % en la razón (regresión)', async () => {
+      prismaMock.creditTransaction.findMany.mockResolvedValue([{ ...canje(false), quantity: -2 }] as any)
+
+      await refundCreditsForReservation({
+        venueId: VENUE_ID,
+        reservationId: 'res-1',
+        startsAt: enUnaHora(),
+        policy: { ...TARDE, creditLateRefundPercent: 50 },
+      })
+
+      expect(prismaMock.creditTransaction.create).toHaveBeenCalledWith({ data: expect.objectContaining({ type: 'REFUND', quantity: 1 }) })
+      expect(razon()).toBe('Cancellation refund — policy: TIME_BASED:late (50%)')
     })
   })
 
