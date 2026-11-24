@@ -489,6 +489,43 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
   })
 
   // Positive twin: an entitled venue (ADVANCED_REPORTS=true) keeps includeMerchantBreakdown:true.
+  // Codex r8 #4 · r9 #2 · r10 #2-#3 (carril F): el encabezado nombra el comercio elegido sólo con la regla de la lista de comercios.
+  it('🔴 con filtro de comercio y permiso de liquidaciones, el encabezado dice su nombre', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    mockGetSalesSummary.mockResolvedValue({ ...makeFakeReport(), filtered: true })
+    prismaMock.payment.findFirst.mockResolvedValue({ merchantAccount: { displayName: 'Cuenta A', alias: null } } as never)
+    const res = await request(app)
+      .get(exportUrl(`mode=summary&format=csv&merchantAccountId=clmerchantsse01234567890&${RANGE}`))
+      .set(authHeader('OWNER'))
+    expect(res.status).toBe(200)
+    expect(res.text).toContain('Filtros,Comercio Cuenta A')
+    expect(prismaMock.payment.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { venueId: VENUE_ID, merchantAccountId: 'clmerchantsse01234567890' } }),
+    )
+  })
+
+  it('🔴 sin permiso de liquidaciones, el encabezado no nombra el comercio aunque el reporte traiga su desglose', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    mockGetSalesSummary.mockResolvedValue({
+      ...makeFakeReport(),
+      filtered: true,
+      byMerchantAccount: [{ merchantAccountId: 'clmerchantsse01234567890', displayName: 'Cuenta A' }],
+    } as never)
+    prismaMock.payment.findFirst.mockClear()
+    mirrorTokenRoleOnStaffVenue('MANAGER', VENUE_ID, { permissionSet: { id: 'ps-solo-reportes', permissions: ['reports:read'] } as never })
+    const token = jwt.sign(
+      { sub: STAFF_ID, orgId: ORG_ID, venueId: VENUE_ID, role: 'MANAGER' },
+      process.env.ACCESS_TOKEN_SECRET || TEST_SECRET,
+    )
+    const res = await request(app)
+      .get(exportUrl(`mode=summary&format=csv&merchantAccountId=clmerchantsse01234567890&${RANGE}`))
+      .set({ Authorization: `Bearer ${token}` })
+    expect(res.status).toBe(200)
+    expect(res.text).toContain('Filtros,Comercio elegido')
+    expect(res.text).not.toContain('Comercio Cuenta A')
+    expect(prismaMock.payment.findFirst).not.toHaveBeenCalled()
+  })
+
   it('summary mode keeps includeMerchantBreakdown for an ENTITLED venue', async () => {
     mockVenueHasFeatureAccess.mockResolvedValue(true)
     mockGetSalesSummary.mockResolvedValue(makeFakeReport())

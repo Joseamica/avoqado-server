@@ -139,10 +139,24 @@ describe('el archivo del Resumen de ventas dice lo mismo que la pantalla (full-t
         {},
       )[1],
     ).toBe('Filtros: Efectivo')
-    // Codex r9 #2: el nombre sólo sale de lo que el reporte ya trae (con su candado); sin eso, «Comercio elegido».
+    // Codex r9/r10: el nombre sólo si quien llama lo resolvió con el permiso de la lista de comercios; si no, «Comercio elegido».
     expect(encabezadoDelArchivo('2026-11-23T06:00:00.000Z', '2026-11-24T05:59:59.999Z', { ...z, merchantAccountId: 'm9' }, {})[1]).toBe(
       'Filtros: Comercio elegido',
     )
+    expect(
+      encabezadoDelArchivo('2026-11-23T06:00:00.000Z', '2026-11-24T05:59:59.999Z', { ...z, merchantAccountId: 'm9' }, {}, 'Cuenta B')[1],
+    ).toBe('Filtros: Comercio Cuenta B')
+    // Aunque el reporte traiga el desglose por comercio, sin el nombre resuelto con permiso no se toma de ahí.
+    expect(
+      encabezadoDelArchivo(
+        '2026-11-23T06:00:00.000Z',
+        '2026-11-24T05:59:59.999Z',
+        { ...z, merchantAccountId: 'm1' },
+        {
+          byMerchantAccount: [{ merchantAccountId: 'm1', displayName: 'Cuenta A' } as never],
+        },
+      )[1],
+    ).toBe('Filtros: Comercio elegido')
   })
 
   it('🔴 W3 · los nombres de la pantalla: Devoluciones, Impuestos incluidos, Neto cobrado; y empleados después de «Neto cobrado»', () => {
@@ -222,7 +236,8 @@ describe('el archivo del Resumen de ventas dice lo mismo que la pantalla (full-t
       '2026-11-23T06:00:00.000Z',
       '2026-11-24T05:59:59.999Z',
       { paymentMethod: 'CARD', cardType: 'CREDIT', merchantAccountId: 'm1', timezone: 'America/Mexico_City' },
-      { byMerchantAccount: [{ merchantAccountId: 'm1', displayName: 'Cuenta A' } as never] },
+      {},
+      'Cuenta A',
     )
     expect(lineas).toEqual(['Periodo: 23 nov 2026 – 23 nov 2026', 'Filtros: Tarjeta · Crédito · Comercio Cuenta A'])
     expect(encabezadoDelArchivo('2026-11-23T06:00:00.000Z', '2026-11-24T05:59:59.999Z', { timezone: 'America/Mexico_City' }, {})[1]).toBe(
