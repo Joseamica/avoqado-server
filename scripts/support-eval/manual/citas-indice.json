@@ -6505,6 +6505,12 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       }
     ],
+    "avoqado-web-dashboard:avoqado-server/src/middlewares/validation.ts": [
+      {
+        "pagina": "dashboard/menu/crear-producto",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
+      }
+    ],
     "avoqado-web-dashboard:avoqado-server/src/routes/dashboard.routes.ts": [
       {
         "pagina": "dashboard/bancos/enviar-spei",
@@ -6743,6 +6749,12 @@
       {
         "pagina": "dashboard/reservaciones/por-que-no-salen-horarios-en-linea",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-server/src/schemas/dashboard/inventory.schema.ts": [
+      {
+        "pagina": "dashboard/menu/crear-producto",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/access/basePlan.service.ts": [
@@ -7043,6 +7055,12 @@
       {
         "pagina": "dashboard/plan/cancelar-o-reanudar-plan",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-server/src/utils/zodEnEspanol.ts": [
+      {
+        "pagina": "dashboard/menu/crear-producto",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:avoqado-tpv/app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/data/VigiaDeFolios.kt": [

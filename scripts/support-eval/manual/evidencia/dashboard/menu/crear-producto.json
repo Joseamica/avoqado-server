@@ -161,6 +161,18 @@
       "cita": "\"initialStock\": \"Stock Inicial\","
     },
     {
+      "paso": 4,
+      "archivo": "src/pages/Inventory/components/ProductWizardDialog.tsx",
+      "linea": 2263,
+      "cita": "<Label htmlFor=\"costPerUnit\">{t('wizard.step3.costPerUnit')} *</Label>"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 695,
+      "cita": "\"costPerUnit\": \"Costo por Unidad\","
+    },
+    {
       "paso": 5,
       "archivo": "src/pages/Inventory/components/ProductWizardDialog.tsx",
       "linea": 1632,
@@ -284,6 +296,31 @@
       "linea": 599
     },
     {
+      "ruta": "Paso 4 y problema: el alta con piezas exige costo y punto de reorden (sin ellos, 400 de validación)",
+      "archivo": "avoqado-server/src/schemas/dashboard/inventory.schema.ts",
+      "linea": 989
+    },
+    {
+      "ruta": "Problema: texto «Error de validación: …»",
+      "archivo": "avoqado-server/src/middlewares/validation.ts",
+      "linea": 43
+    },
+    {
+      "ruta": "Problema: texto «Se esperaba un número y llegó vacío»",
+      "archivo": "avoqado-server/src/utils/zodEnEspanol.ts",
+      "linea": 90
+    },
+    {
+      "ruta": "Problema: texto «Punto de Reorden»",
+      "archivo": "src/locales/es/inventory.json",
+      "linea": 699
+    },
+    {
+      "ruta": "Problema: la ✕ sólo pregunta si la sección tiene datos",
+      "archivo": "src/pages/Inventory/components/ProductWizardDialog.tsx",
+      "linea": 1715
+    },
+    {
       "ruta": "Problema: sin permiso, la sección Inventario no se abre y enseña el porqué en lugar de su descripción",
       "archivo": "src/pages/Inventory/components/ProductOptionalSection.tsx",
       "linea": 35
@@ -370,9 +407,19 @@
     "filasCreadas": []
   },
   "navegador": {
-    "estado": "NO PROBADO EN NAVEGADOR",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "banco 05d53d (SERVIDOR 98ed6236a, DASHBOARD 501e3707)",
+    "fecha": "2026-11-24",
+    "fotos": [
+      "~/banco/recibos/05d53d/capturas/01-alta-con-piezas.png",
+      "~/banco/recibos/05d53d/capturas/02-gerente-sin-permiso.png",
+      "~/banco/recibos/05d53d/capturas/03-acceso-cambio.png"
+    ],
+    "filasCreadas": [
+      "Product «Prueba guía 553f45 piezas» (QUANTITY, 12 piezas) en avoqado-full sin INVENTORY_TRACKING"
+    ],
+    "nota": "Gratis: receta con candado Premium e Inventario en Más opciones (Comida y Bebida). Sólo Stock Inicial: 400 «Error de validación: Se esperaba un número y llegó vacío», sin fila (corrigió el paso 4). Con costo: 201 y la fila. Gerente con inventory:update quitado: Inventario cerrado con «Tu usuario no tiene acceso…» y Finalizar sin inventario: 403 «Permission 'inventory:update' required», sin fila. «Ya no puedes contar las piezas…» no se provocó (la recomendación no se volvió a pedir): sólo código."
   },
   "codex": {
     "lote": 6,

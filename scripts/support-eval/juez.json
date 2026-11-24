@@ -528,8 +528,8 @@
         "quote": "Escribe el *Nombre del Producto* y el *Precio* y, si aparece, elige la *Categoría*."
       },
       {
-        "text": "Si quieres llevar cuántas piezas tienes, toca *Inventario* (si no lo ves, búscalo en *Más opciones*; lo digital y las donaciones no llevan piezas), deja *Seguimiento de Cantidad* y escribe el *Stock Inicial*.",
-        "quote": "Si quieres llevar cuántas piezas tienes, toca *Inventario* (si no lo ves, búscalo en *Más opciones*; lo digital y las donaciones no llevan piezas), deja *Seguimiento de Cantidad* y escribe el *Stock Inicial*."
+        "text": "Para llevar tus piezas, toca *Inventario* (si no está, búscalo en *Más opciones*; lo digital y las donaciones no llevan), deja *Seguimiento de Cantidad* y escribe el *Stock Inicial* y el *Costo por Unidad*.",
+        "quote": "Para llevar tus piezas, toca *Inventario* (si no está, búscalo en *Más opciones*; lo digital y las donaciones no llevan), deja *Seguimiento de Cantidad* y escribe el *Stock Inicial* y el *Costo por Unidad*."
       },
       {
         "text": "Toca *Finalizar*.",

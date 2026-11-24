@@ -560,7 +560,7 @@
       ]
     },
     "dashboard/menu/crear-producto": {
-      "sha256": "1f4da8b2d860fed77fc38df183010180245a482f507c2478b70e50583c558587",
+      "sha256": "8beb7b7bc1d4d207879434bafbf676c071a5444569fac79475b1aa2faa522fe4",
       "requiredPermissions": [
         "menu:read",
         "menu:create",
