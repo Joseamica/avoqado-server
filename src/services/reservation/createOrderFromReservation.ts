@@ -2,7 +2,7 @@ import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import { Prisma, OrderType, OrderSource, OrderStatus } from '@prisma/client'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { turnoAbiertoDelNegocio } from '@/services/shared/turnoDeCaja'
-import { creditosDeLaReserva, partirPorCreditos } from './loYaPagadoDeLaReserva'
+import { creditosDeLaReserva, NOTA_PAGADA_CON_PAQUETE, serviciosPagadosConCreditos } from './loYaPagadoDeLaReserva'
 
 /** Statuses that do NOT count as "the reservation already has an order". Mirrors the partial unique index. */
 export const ALIVE_ORDER_EXCLUDED_STATUSES: OrderStatus[] = ['CANCELLED', 'DELETED']
@@ -33,8 +33,8 @@ interface CreateOrderResult {
  * customer arrives. The order stays PENDING + paymentStatus=PENDING — the
  * cashier still drives the actual charge via the existing TPV flow.
  *
- * D20 0a (hz:fefa11b6:D20): the seats already paid with package credits come in at $0 («Pagada con paquete»), so the cashier
- * never charges them again and they never sit in «Sin cobrar». The order stays open even at $0 (see `loYaPagadoDeLaReserva.ts`).
+ * D20 0a (hz:fefa11b6:D20): a service whose seats are ALL paid with package credits comes in at $0 («Pagada con paquete») in the
+ * same line as always, so the cashier never charges it again and it never sits in «Sin cobrar» (see `loYaPagadoDeLaReserva.ts`).
  */
 export async function createOrderFromReservation(
   tx: Prisma.TransactionClient,
@@ -148,28 +148,27 @@ export async function createOrderFromReservation(
     taxAmount: Prisma.Decimal
     total: Prisma.Decimal
     modifiers: Array<{ name: string; quantity: number; price: Prisma.Decimal; modifierId: string | null }>
-    quantity: number
     notes: string | null
   }
   const lines: LineDraft[] = []
 
-  // D20 0a: los lugares que ya pagó un crédito de paquete van en $0; los demás, a su precio (una sola regla, la de los tramos).
-  const servicios = productIds.flatMap(pid => {
-    const product = productById.get(pid)
-    return product ? [{ productId: pid, unitPrice: new Prisma.Decimal(product.price) }] : []
-  })
-  const { tramos, creditosAplicados } = partirPorCreditos(servicios, seatCount, await creditosDeLaReserva(tx, { venueId, reservationId }))
+  // D20 0a: los servicios pagados enteros con créditos de esta reserva (por su posición en `productIds`).
+  const pagados = serviciosPagadosConCreditos(productIds, seatCount, await creditosDeLaReserva(tx, { venueId, reservationId }))
 
-  for (const tramo of tramos) {
-    const pid = servicios[tramo.renglon].productId
-    const product = productById.get(pid)!
-    const unitPrice = tramo.unitPrice
-    // Line subtotal scales with the seats of this chunk (all of them when nothing is prepaid): a partySize=3 walk-in charges
-    // 3× the class price in one transaction. seatCount=1 (the historical default) leaves the math identical.
-    const lineSubtotal = unitPrice.mul(tramo.quantity)
+  for (const [indice, pid] of productIds.entries()) {
+    const product = productById.get(pid)
+    if (!product) continue
+    const pagadoConPaquete = pagados.has(indice)
+    const unitPrice = pagadoConPaquete ? new Prisma.Decimal(0) : new Prisma.Decimal(product.price)
+    // Line subtotal scales with seatCount so a partySize=3 walk-in charges
+    // 3× the class price in one transaction. seatCount=1 (the historical
+    // default) leaves the math identical to the previous behavior.
+    const lineSubtotal = unitPrice.mul(seatCount)
+    // El total del renglón ES su precio de lista: el IVA ya está contenido.
+    const lineTotal = lineSubtotal
     subtotal = subtotal.add(lineSubtotal)
 
-    const modRows = tramo.conModificadores ? (modifiersByProduct.get(pid) ?? []) : []
+    const modRows = modifiersByProduct.get(pid) ?? []
     const modLines: LineDraft['modifiers'] = []
     for (const m of modRows) {
       // Modifiers are per-seat add-ons: 1 "Esmalte de color" picked at
@@ -195,12 +194,6 @@ export async function createOrderFromReservation(
         modifierId: m.modifierId,
       })
     }
-    // El total del renglón ES su precio de lista: el IVA ya está contenido. D20 0a: un servicio pagado entero con créditos lleva
-    // sus extras en el total, o la factura omitiría el renglón ($0) aunque la caja cobre los extras (Codex 0-r1 #8).
-    // ponytail: los renglones con precio conservan la forma de siempre (total = sólo el servicio); el desajuste de esa forma con
-    // la factura cuando hay extras ya existía y va a la deuda.
-    const lineTotal =
-      unitPrice.isZero() && modLines.length > 0 ? modLines.reduce((t, m) => t.add(m.price.mul(m.quantity)), lineSubtotal) : lineSubtotal
 
     lines.push({
       productId: product.id,
@@ -209,10 +202,12 @@ export async function createOrderFromReservation(
       categoryName: product.category?.name ?? null,
       unitPrice,
       taxAmount: SIN_IMPUESTO_SEPARADO,
-      total: lineTotal,
+      // D20 0a: el servicio pagado con paquete lleva sus extras en el total, o la factura omitiría el renglón ($0) aunque la caja
+      // cobre los extras (Codex 0-r1 #8). ponytail: los demás renglones conservan la forma de siempre (total = sólo el servicio);
+      // el desajuste de esa forma con la factura cuando hay extras ya existía (deuda).
+      total: pagadoConPaquete ? modLines.reduce((t, m) => t.add(m.price.mul(m.quantity)), lineTotal) : lineTotal,
       modifiers: modLines,
-      quantity: tramo.quantity,
-      notes: tramo.notes,
+      notes: pagadoConPaquete ? NOTA_PAGADA_CON_PAQUETE : null,
     })
   }
 
@@ -271,9 +266,9 @@ export async function createOrderFromReservation(
         productName: line.productName,
         productSku: line.productSku,
         categoryName: line.categoryName,
-        // OrderItem.quantity = number of seats of this chunk (all seats when nothing is prepaid).
+        // OrderItem.quantity = number of seats sold for this product.
         // Subtotal/tax above already include the seat multiplier.
-        quantity: line.quantity,
+        quantity: seatCount,
         unitPrice: line.unitPrice,
         taxAmount: line.taxAmount,
         total: line.total,
@@ -295,15 +290,15 @@ export async function createOrderFromReservation(
     }
   }
 
-  // D20 0a · el rastro: qué cubrieron los créditos de la reserva (la cuenta nació con esos lugares en $0).
-  if (creditosAplicados > 0) {
+  // D20 0a · el rastro: qué servicios cubrieron los créditos de la reserva (la cuenta nació con ellos en $0).
+  if (pagados.size > 0) {
     await tx.activityLog.create({
       data: {
         venueId,
         action: 'RESERVATION_ORDER_PREPAID_APPLIED',
         entity: 'Order',
         entityId: created.id,
-        data: { reservationId, orderNumber, creditsApplied: creditosAplicados, total: total.toFixed(2) },
+        data: { reservationId, orderNumber, servicesPaidWithCredits: pagados.size, seats: seatCount, total: total.toFixed(2) },
       },
     })
   }

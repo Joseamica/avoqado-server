@@ -1,11 +1,15 @@
 /**
- * Los lugares de una reserva que ya se pagaron con créditos de paquete, para que la cuenta del check-in no los vuelva a cobrar
+ * Los servicios de una reserva que ya se pagaron con créditos de paquete, para que la cuenta del check-in no los vuelva a cobrar
  * (hz:fefa11b6:D20, bloque 0a).
  *
- * Antes, `createOrderFromReservation` abría la cuenta a precio de lista aunque la clienta hubiera pagado la clase con un crédito:
- * salía en «Sin cobrar» y la caja podía cobrarla dos veces. Ahora cada lugar pagado con un crédito va en $0 con la nota «Pagada con
- * paquete»; los lugares sin crédito y los extras se siguen cobrando. La cuenta sigue ABIERTA (aunque quede en $0): así se le puede
- * agregar un consumo, deshacer la llegada no deja una venta, y el turno y el cobro corren como siempre (Codex 0-r1 #4-#6, #9).
+ * Antes, `createOrderFromReservation` abría la cuenta a precio de lista aunque la clienta hubiera pagado la clase con créditos: salía
+ * en «Sin cobrar» y la caja podía cobrarla dos veces. Ahora un servicio cuyos lugares están TODOS pagados con créditos entra en $0
+ * con la nota «Pagada con paquete», en el MISMO renglón de siempre (misma cantidad y mismos extras: inventario, ingresos y factura
+ * leen los extras igual que antes, Codex 0-r2 #8). Los extras se siguen cobrando. La cuenta sigue ABIERTA aunque quede en $0: se le
+ * puede agregar un consumo, deshacer la llegada no deja una venta, y el turno y el cobro corren como siempre (Codex 0-r1 #4-#6, #9).
+ *
+ * Si los créditos no alcanzan para todos los lugares de un servicio, el servicio se cobra completo, como hoy. No se alcanza en la
+ * práctica: un canje gasta un crédito por lugar (o falla) y un Ilimitado sólo aparta un lugar.
  *
  * Créditos = el NETO por producto de los movimientos de ESTA reserva: canjes (`REDEEM`, cantidad negativa) menos devoluciones
  * positivas (`REFUND` > 0; un `REFUND` de 0 es sólo la marca de una cancelación tardía). Un pase Ilimitado deja el mismo `REDEEM −1`
@@ -42,47 +46,18 @@ export async function creditosDeLaReserva(
   return porProducto
 }
 
-export type Tramo = {
-  /** Índice del servicio de la reserva del que sale este tramo. */
-  renglon: number
-  quantity: number
-  unitPrice: Prisma.Decimal
-  notes: string | null
-  /**
-   * Los extras del servicio van UNA vez: en el tramo que se cobra si lo hay (son lo que queda por cobrar), si no en el de $0.
-   */
-  conModificadores: boolean
-}
-
 /**
- * Parte cada servicio en tramos: primero los lugares pagados con crédito ($0), luego los demás a su precio. La suma de `quantity`
- * de los tramos de un servicio es siempre `lugares`; los créditos de un producto se gastan una vez aunque el producto se repita.
+ * Qué servicios (por posición en la reserva) quedan pagados enteros con créditos: los que tienen créditos para TODOS sus lugares.
+ * Los créditos de un producto se gastan una vez aunque el producto se repita en la reserva.
  */
-export function partirPorCreditos(
-  servicios: Array<{ productId: string; unitPrice: Prisma.Decimal }>,
-  lugares: number,
-  creditos: Map<string, number>,
-): { tramos: Tramo[]; creditosAplicados: number } {
+export function serviciosPagadosConCreditos(productIds: string[], lugares: number, creditos: Map<string, number>): Set<number> {
   const quedan = new Map(creditos)
-  let creditosAplicados = 0
-  const tramos: Tramo[] = []
-  servicios.forEach((s, renglon) => {
-    const conCredito = Math.min(lugares, quedan.get(s.productId) ?? 0)
-    if (conCredito > 0) {
-      quedan.set(s.productId, (quedan.get(s.productId) ?? 0) - conCredito)
-      creditosAplicados += conCredito
-      const todos = conCredito === lugares
-      tramos.push({
-        renglon,
-        quantity: conCredito,
-        unitPrice: new Prisma.Decimal(0),
-        notes: NOTA_PAGADA_CON_PAQUETE,
-        conModificadores: todos,
-      })
-    }
-    if (lugares - conCredito > 0) {
-      tramos.push({ renglon, quantity: lugares - conCredito, unitPrice: s.unitPrice, notes: null, conModificadores: true })
+  const pagados = new Set<number>()
+  productIds.forEach((pid, i) => {
+    if ((quedan.get(pid) ?? 0) >= lugares) {
+      quedan.set(pid, (quedan.get(pid) ?? 0) - lugares)
+      pagados.add(i)
     }
   })
-  return { tramos, creditosAplicados }
+  return pagados
 }

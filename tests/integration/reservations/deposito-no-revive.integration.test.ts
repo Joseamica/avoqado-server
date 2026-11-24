@@ -174,7 +174,9 @@ describe('D20 0b — el cobro de un depósito no revive lo cerrado (integration,
       expect(fila.depositStatus).toBe('REFUNDED')
       expect(fila.depositPaidAt).toBeTruthy()
       expect(provider.refund).toHaveBeenCalledTimes(1)
-      expect(await anomalias(r.id)).toHaveLength(0)
+      // La alerta nace con el cobro (no se pierde si el proceso cae) y queda resuelta al devolverse.
+      const a = await anomalias(r.id)
+      expect(a.map(x => [x.category, x.resolvedAt !== null])).toEqual([['DEPOSIT_PAID_ON_CANCELLED_RESERVATION', true]])
     })
 
     it('si esa devolución automática falla: el cobro queda registrado y UNA alerta de dinero', async () => {
@@ -188,7 +190,7 @@ describe('D20 0b — el cobro de un depósito no revive lo cerrado (integration,
       expect(fila.status).toBe('CANCELLED')
       expect(fila.depositStatus).toBe('PAID')
       expect(fila.refundStatus).toBe('FAILED')
-      expect((await anomalias(r.id)).map(a => a.category)).toEqual(['DEPOSIT_PAID_ON_CANCELLED_RESERVATION'])
+      expect((await anomalias(r.id)).map(a => [a.category, a.resolvedAt])).toEqual([['DEPOSIT_PAID_ON_CANCELLED_RESERVATION', null]])
     })
 
     it('regresión: pendiente y pagado ⇒ PAID y CONFIRMED', async () => {
@@ -217,6 +219,34 @@ describe('D20 0b — el cobro de un depósito no revive lo cerrado (integration,
       expect(fila.depositStatus).toBe('REFUNDED')
       expect(fila.depositProcessorRef).toBe('pi_simulado')
       expect(provider.refund).toHaveBeenCalledTimes(1)
+    })
+
+    it('el aviso que llega DESPUÉS de que la app registró y devolvió el mismo cobro no deja una alerta falsa', async () => {
+      const r = await mkReservation({ status: 'CANCELLED', cancelledBy: 'CUSTOMER', cancelledAt: new Date() })
+      provider.getPaymentStatus.mockResolvedValue(pagado())
+      await expect(finalizeDepositCheckoutForConsumer(consumerId!, r.checkoutSessionId!)).rejects.toThrow(/cancelada/)
+      await processStripeConnectWebhookEvent(avisoDeStripe(r.checkoutSessionId!) as never)
+      const a = await anomalias(r.id)
+      expect(a.map(x => x.category)).toEqual(['DEPOSIT_PAID_ON_CANCELLED_RESERVATION'])
+      expect(a[0].resolvedAt).not.toBeNull()
+    })
+
+    it('regresión de la conciliación: vencer el plazo de una reserva que una persona ya canceló no cambia quién la canceló', async () => {
+      const { reservationDepositReconciliationJob } = await import('@/jobs/reservation-deposit-reconciliation.job')
+      const r = await mkReservation({
+        status: 'CANCELLED',
+        cancelledBy: 'staff-1',
+        cancelledAt: new Date(),
+        depositExpiresAt: new Date(Date.now() - 60_000),
+      })
+      await (reservationDepositReconciliationJob as any).expirePastDueReservations()
+      const fila = await prisma.reservation.findUniqueOrThrow({ where: { id: r.id } })
+      expect(fila.depositStatus).toBe('EXPIRED')
+      expect(fila.cancelledBy).toBe('staff-1')
+      // …y por eso, si después llega el pago, NO se re-confirma.
+      provider.getPaymentStatus.mockResolvedValue(pagado())
+      await expect(finalizeDepositCheckoutForConsumer(consumerId!, r.checkoutSessionId!)).rejects.toThrow(/cancelada/)
+      expect((await prisma.reservation.findUniqueOrThrow({ where: { id: r.id } })).status).toBe('CANCELLED')
     })
 
     it('y si la devolución no se completa, queda la alerta (y la app no duplica la alerta)', async () => {
@@ -264,6 +294,19 @@ describe('D20 0b — el cobro de un depósito no revive lo cerrado (integration,
       expect(fila.depositStatus).toBe('PAID')
       expect(fila.checkoutSessionId).toBe(r.checkoutSessionId)
       expect(provider.expireAuthorizationCheckout).toHaveBeenCalledWith(expect.anything(), 'cs_nuevo')
+    })
+
+    it('dos toques a la vez reciben de Stripe la MISMA sesión: el segundo no vence el enlace vigente', async () => {
+      const r = await mkReservation({})
+      const sesion = { id: `cs_gemela_${RUN}`, url: 'https://pago.simulado/gemela', expiresAt: new Date(Date.now() + 1_800_000) }
+      provider.createCheckoutSession.mockImplementation(async () => {
+        // El otro toque ya instaló esta misma sesión.
+        await prisma.reservation.update({ where: { id: r.id }, data: { checkoutSessionId: sesion.id } })
+        return sesion
+      })
+      const res = await createDepositCheckoutForConsumer(consumerId!, venueSlug, r.cancelSecret)
+      expect(res.checkoutUrl).toBe(sesion.url)
+      expect(provider.expireAuthorizationCheckout).not.toHaveBeenCalled()
     })
 
     it('regresión: depósito vencido ⇒ enlace nuevo y vuelve a pendiente', async () => {

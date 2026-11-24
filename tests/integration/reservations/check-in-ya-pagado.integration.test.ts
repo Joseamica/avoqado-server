@@ -182,7 +182,7 @@ describe('D20 0a — check-in de una reserva ya pagada (integration, real DB)', 
     const rastro = await prisma.activityLog.findFirst({
       where: { venueId, entityId: order.id, action: 'RESERVATION_ORDER_PREPAID_APPLIED' },
     })
-    expect(rastro?.data).toEqual(expect.objectContaining({ reservationId: r.id, creditsApplied: 1, total: '0.00' }))
+    expect(rastro?.data).toEqual(expect.objectContaining({ reservationId: r.id, servicesPaidWithCredits: 1, seats: 1, total: '0.00' }))
 
     // Idempotente: otra llegada devuelve la MISMA cuenta.
     const otra = await llegada(r.id)
@@ -199,7 +199,7 @@ describe('D20 0a — check-in de una reserva ya pagada (integration, real DB)', 
     expect(sinCobrar).toBe(false)
   })
 
-  it('canje + devolución (canceló a tiempo y aun así llega): NO está pagada, la cuenta es a precio de lista', async () => {
+  it('canje y su devolución (el crédito regresó): NO está pagada, la cuenta es a precio de lista', async () => {
     const r = await mkReservation()
     const { purchase, balance } = await pagarConPaquete(r.id)
     await prisma.creditTransaction.create({
@@ -242,19 +242,22 @@ describe('D20 0a — check-in de una reserva ya pagada (integration, real DB)', 
     expect(Number(order.total)).toBe(0)
   })
 
-  it('2 lugares y 1 crédito: 1 lugar en $0 y 1 a precio lleno ($200 por cobrar)', async () => {
+  it('2 lugares y 2 créditos: el renglón de siempre (cantidad 2) en $0', async () => {
+    const r = await mkReservation({ partySize: 2 })
+    await pagarConPaquete(r.id, { creditos: 2 })
+
+    const { order, sinCobrar } = await cuentaDe((await llegada(r.id)).orderId!)
+    expect(Number(order.total)).toBe(0)
+    expect(order.items.map(i => [i.quantity, Number(i.unitPrice), i.notes])).toEqual([[2, 0, 'Pagada con paquete']])
+    expect(sinCobrar).toBe(false)
+  })
+
+  it('2 lugares y 1 crédito (no alcanza para todos): se cobra completo, como hoy', async () => {
     const r = await mkReservation({ partySize: 2 })
     await pagarConPaquete(r.id)
-
-    const { order, sinCobrar, falta } = await cuentaDe((await llegada(r.id)).orderId!)
-    expect(Number(order.total)).toBe(200)
-    expect(order.paymentStatus).toBe('PENDING')
-    expect(order.items.map(i => [i.quantity, Number(i.unitPrice), i.notes])).toEqual([
-      [1, 0, 'Pagada con paquete'],
-      [1, 200, null],
-    ])
-    expect(sinCobrar).toBe(true)
-    expect(falta).toBe(200)
+    const { order } = await cuentaDe((await llegada(r.id)).orderId!)
+    expect(Number(order.total)).toBe(400)
+    expect(order.items.map(i => [i.quantity, Number(i.unitPrice), i.notes])).toEqual([[2, 200, null]])
   })
 
   it('con un extra de $50: sólo queda el extra por cobrar', async () => {
@@ -272,21 +275,22 @@ describe('D20 0a — check-in de una reserva ya pagada (integration, real DB)', 
     expect(falta).toBe(50)
   })
 
-  it('2 lugares, 1 crédito y un extra de $50 por lugar: el extra va en el lugar que se cobra', async () => {
+  it('2 lugares pagados con créditos y un extra de $50 por lugar: mismo renglón (cantidad 2) con su extra; quedan $100', async () => {
     const r = await mkReservation({ partySize: 2 })
     await prisma.reservationModifier.create({ data: { reservationId: r.id, productId: yogaId, name: 'Tapete', quantity: 1, price: 50 } })
-    await pagarConPaquete(r.id)
+    await pagarConPaquete(r.id, { creditos: 2 })
 
     const { order, falta } = await cuentaDe((await llegada(r.id)).orderId!)
-    expect(Number(order.total)).toBe(300) // un lugar de $200 + 2 tapetes de $50
-    expect(order.items.map(i => [i.quantity, Number(i.unitPrice), i.modifiers.length])).toEqual([
-      [1, 0, 0],
-      [1, 200, 1],
+    expect(Number(order.total)).toBe(100)
+    // Misma forma que una cuenta sin paquete: un renglón, cantidad 2, el extra con su precio por los 2 lugares (inventario y
+    // reportes leen igual que antes, Codex 0-r2 #8).
+    expect(order.items.map(i => [i.quantity, Number(i.unitPrice), i.modifiers.map(m => [m.quantity, Number(m.price)])])).toEqual([
+      [2, 0, [[1, 100]]],
     ])
-    expect(falta).toBe(300)
+    expect(falta).toBe(100)
   })
 
-  it('3 lugares, 3 canjes y 1 devolución: cubren 2', async () => {
+  it('3 lugares, 3 canjes y 1 devolución: quedan 2 créditos para 3 lugares ⇒ se cobra completo', async () => {
     const r = await mkReservation({ partySize: 3 })
     const { purchase, balance } = await pagarConPaquete(r.id, { creditos: 3 })
     await prisma.creditTransaction.create({
@@ -301,11 +305,7 @@ describe('D20 0a — check-in de una reserva ya pagada (integration, real DB)', 
       },
     })
     const { order } = await cuentaDe((await llegada(r.id)).orderId!)
-    expect(order.items.map(i => [i.quantity, Number(i.unitPrice)])).toEqual([
-      [2, 0],
-      [1, 200],
-    ])
-    expect(Number(order.total)).toBe(200)
+    expect(Number(order.total)).toBe(600)
   })
 
   it('un canje ya hecho cubre aunque después marquen la compra «reembolsada» (la marca sólo anula lo que quedaba)', async () => {

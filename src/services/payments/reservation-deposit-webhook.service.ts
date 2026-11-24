@@ -270,7 +270,7 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
 
       const current = await tx.reservation.findFirst({
         where: { checkoutSessionId: session.id },
-        select: { id: true, status: true, depositStatus: true },
+        select: { id: true, status: true, depositStatus: true, depositProcessorRef: true },
       })
 
       if (!current) {
@@ -282,6 +282,8 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
       }
 
       if (current.depositStatus === 'PAID') return
+      // D20 0b (Codex 0-r2 #3): la app ya registró ESTE mismo cobro (y quizá ya se devolvió): no es una divergencia.
+      if (paymentIntentId && current.depositProcessorRef === paymentIntentId) return
 
       await recordMoneyAnomaly({
         tx,
@@ -444,6 +446,8 @@ async function processCheckoutExpired(event: VerifiedWebhookEvent) {
         where: {
           checkoutSessionId: session.id,
           depositStatus: 'PENDING',
+          // D20 0b (Codex 0-r2 #1): una reserva que una persona ya canceló conserva quién la canceló; sólo vence su depósito.
+          status: { not: ReservationStatus.CANCELLED },
         },
         data: {
           status: ReservationStatus.CANCELLED,
@@ -455,6 +459,12 @@ async function processCheckoutExpired(event: VerifiedWebhookEvent) {
       })
 
       if (updated.count === 1) return
+
+      const yaCancelada = await tx.reservation.updateMany({
+        where: { checkoutSessionId: session.id, depositStatus: 'PENDING', status: ReservationStatus.CANCELLED },
+        data: { depositStatus: 'EXPIRED' },
+      })
+      if (yaCancelada.count === 1) return
 
       const current = await tx.reservation.findFirst({
         where: { checkoutSessionId: session.id },

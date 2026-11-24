@@ -167,7 +167,13 @@ async function createReservationDepositCheckout(
       ecommerceMerchantId: stripeMerchant.id,
     },
   })
-  if (instalado.count !== 1) {
+  // Dos toques a la vez con la misma llave reciben de Stripe la MISMA sesión: si la otra petición ya la instaló, es la vigente y
+  // no se vence (Codex 0-r2 #4).
+  const yaInstalada =
+    instalado.count === 1 ||
+    (await prisma.reservation.findFirst({ where: { id: reservation.id, venueId: venue.id }, select: { checkoutSessionId: true } }))
+      ?.checkoutSessionId === session.id
+  if (!yaInstalada) {
     await provider.expireAuthorizationCheckout(stripeMerchant, session.id).catch(err =>
       logger.warn('[RESERVATION DEPOSIT] No se pudo vencer el enlace que ya no aplica', {
         reservationId: reservation.id,
