@@ -195,7 +195,7 @@ describe('invitation to link the phone (free text)', () => {
   })
   // T-F10c: the literal's cap is SUPPORT_LITERAL_CAP (3,500) for the invitation too.
   it('omits the link, never cuts or downgrades the guide, when both do not fit in the literal cap', () => {
-    const whole = `PRIMER_PASO ${'a'.repeat(1600)}\nULTIMO_PASO ${'b'.repeat(1600)}`
+    const whole = `PRIMER_PASO ${'a'.repeat(1625)}\nULTIMO_PASO ${'b'.repeat(1625)}`
     flag(false)
     const without = composeSupportAnswer([{ ...guide, whole }], null)
     expect(without.length).toBeLessThanOrEqual(SUPPORT_LITERAL_CAP)
