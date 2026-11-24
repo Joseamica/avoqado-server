@@ -372,20 +372,9 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
     }
     // Carril F (full-testing W3 y W4): el ARCHIVO dice lo que la pantalla (nombres, orden, «Cobrado» con filtro, sin renglones vacíos) y
     // arriba qué periodo y qué filtros trae. Las filas de `flattenSalesSummaryForExport` (las que lee la MCP) no cambian.
-    // El nombre del comercio elegido, sólo si es de un cobro de ESTE negocio (sin esa sección el reporte no trae nombres; Codex r8 #4).
-    const comercioElegido = filters.merchantAccountId
-      ? await prisma.payment.findFirst({
-          where: { venueId, merchantAccountId: filters.merchantAccountId },
-          select: { merchantAccount: { select: { displayName: true, alias: true } } },
-        })
-      : null
-    const encabezado = encabezadoDelArchivo(
-      startDate,
-      endDate,
-      filters,
-      report,
-      comercioElegido?.merchantAccount?.displayName || comercioElegido?.merchantAccount?.alias,
-    )
+    // El comercio elegido se nombra sólo con lo que el reporte ya trae (su desglose por comercio, con su candado); sin eso, «Comercio
+    // elegido». Buscar el nombre aparte se saltaba el permiso que protege la lista de comercios (Codex r9 #2 del carril F).
+    const encabezado = encabezadoDelArchivo(startDate, endDate, filters, report)
     const encoded = await encodeExport(format, {
       allColumns: COLUMNAS_DEL_ARCHIVO,
       requestedColumnIds: COLUMNAS_DEL_ARCHIVO.map(c => c.id),

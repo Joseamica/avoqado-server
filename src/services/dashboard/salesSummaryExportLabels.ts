@@ -161,8 +161,6 @@ export function encabezadoDelArchivo(
   endDate: string,
   filtros: Pick<SalesSummaryFilters, 'paymentMethod' | 'cardType' | 'merchantAccountId' | 'timezone'>,
   report: Pick<SalesSummaryResponse, 'byMerchantAccount'>,
-  /** El nombre del comercio elegido, si quien llama lo resolvió (dentro del negocio). */
-  nombreDelComercio?: string | null,
 ): string[] {
   const zona = filtros.timezone || 'America/Mexico_City'
   const partes: string[] = []
@@ -170,7 +168,7 @@ export function encabezadoDelArchivo(
   // El tipo de tarjeta sólo cuenta con «Tarjeta» (el cálculo lo ignora con otro método; Codex r8 #4).
   if (filtros.cardType && filtros.paymentMethod === 'CARD') partes.push(TIPO_DE_TARJETA[filtros.cardType] ?? filtros.cardType)
   if (filtros.merchantAccountId) {
-    const nombre = nombreDelComercio || report.byMerchantAccount?.find(m => m.merchantAccountId === filtros.merchantAccountId)?.displayName
+    const nombre = report.byMerchantAccount?.find(m => m.merchantAccountId === filtros.merchantAccountId)?.displayName
     partes.push(nombre ? `Comercio ${nombre}` : 'Comercio elegido')
   }
   return [`Periodo: ${dia(startDate, zona)} – ${dia(endDate, zona)}`, `Filtros: ${partes.length > 0 ? partes.join(' · ') : 'Ninguno'}`]
