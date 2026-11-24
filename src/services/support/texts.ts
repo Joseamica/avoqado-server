@@ -144,7 +144,7 @@ export const SUPPORT_SECOND_FAILURE = 'No encontré eso en nuestras guías.'
 /** El saludo que abre el botón del correo (wa.me). */
 export const SUPPORT_HANDOFF_GREETING = 'Hola, te escribo de Avoqado por tu mensaje en el asistente de ayuda.'
 export const SUPPORT_LINK =
-  'Para adaptar las instrucciones a tus permisos, vincula un WhatsApp personal desde https://dashboard.avoqado.io/support/whatsapp. Si el teléfono es compartido, conserva ayuda pública.'
+  'Para adaptar las instrucciones a tus permisos, vincula un WhatsApp personal desde https://dashboard.avoqado.io/support/whatsapp.'
 export const SUPPORT_SENSITIVE =
   'Por privacidad omití tu texto y no lo enviaré al asistente. Para recuperar tu contraseña, abre https://dashboard.avoqado.io/auth/forgot-password. Para dudas sobre el PIN o acceso al negocio, consulta https://avoqado.io/help o escribe a hola@avoqado.io. Si tu duda es de un cobro u otra cosa, escríbela otra vez sin mencionar el NIP, el PIN, la clave ni el código. No compartas contraseñas, PIN, códigos, tarjetas ni secretos.'
 export const SUPPORT_SEND_RETRY_NOTICE = 'Este es el único reenvío que pediste. El primer mensaje pudo haber llegado.'
