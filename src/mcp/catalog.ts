@@ -79,6 +79,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   class_session_detail: 'read',
   close_accounting_period: 'write',
   commission_payouts: 'read',
+  compare_sales_periods: 'read',
   comp_table_check: 'write',
   configure_auto_reorder: 'write',
   configure_kitchen_release: 'write',

@@ -7287,6 +7287,10 @@
         "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
       },
       {
+        "pagina": "dashboard/reportes/comparar-con-otro-periodo",
+        "sourceRef": "6481f012bc27ce3eb062de86ec51d26742ec591f"
+      },
+      {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
         "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
@@ -7693,6 +7697,10 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       },
       {
+        "pagina": "dashboard/reportes/comparar-con-otro-periodo",
+        "sourceRef": "6481f012bc27ce3eb062de86ec51d26742ec591f"
+      },
+      {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
         "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
@@ -7873,6 +7881,10 @@
       {
         "pagina": "dashboard/reembolsos/reembolsar-un-pago",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      },
+      {
+        "pagina": "dashboard/reportes/comparar-con-otro-periodo",
+        "sourceRef": "6481f012bc27ce3eb062de86ec51d26742ec591f"
       },
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
@@ -8415,12 +8427,28 @@
     ],
     "avoqado-web-dashboard:src/pages/Reports/SalesSummary.tsx": [
       {
+        "pagina": "dashboard/reportes/comparar-con-otro-periodo",
+        "sourceRef": "6481f012bc27ce3eb062de86ec51d26742ec591f"
+      },
+      {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
         "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
         "sourceRef": "ee9adc0fd6af0d8c859b483d00404379ef91d4c7"
+      }
+    ],
+    "avoqado-web-dashboard:src/pages/Reports/components/CambioDelPeriodo.tsx": [
+      {
+        "pagina": "dashboard/reportes/comparar-con-otro-periodo",
+        "sourceRef": "6481f012bc27ce3eb062de86ec51d26742ec591f"
+      }
+    ],
+    "avoqado-web-dashboard:src/pages/Reports/components/PeriodBreakdownTable.tsx": [
+      {
+        "pagina": "dashboard/reportes/comparar-con-otro-periodo",
+        "sourceRef": "6481f012bc27ce3eb062de86ec51d26742ec591f"
       }
     ],
     "avoqado-web-dashboard:src/pages/Reports/components/SalesByChannelSection.tsx": [

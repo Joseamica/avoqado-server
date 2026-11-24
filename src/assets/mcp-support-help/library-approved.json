@@ -637,6 +637,12 @@
         "payments:refund"
       ]
     },
+    "dashboard/reportes/comparar-con-otro-periodo": {
+      "sha256": "8b7d04cd93d6c14c12a2c1d935a1308c5ed187c65e8e485c70ffc55b2b1bb8af",
+      "requiredPermissions": [
+        "reports:read"
+      ]
+    },
     "dashboard/reportes/comparar-inicio-y-resumen-de-ventas": {
       "sha256": "ee8f3e04f90fdaafc226c86660f2b7fd69c9540c8ddb74037a13b76db7c3b9c6",
       "requiredPermissions": []

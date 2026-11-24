@@ -30,3 +30,11 @@ export async function rangoBloqueadoPorPlan(venueId: string, startDate: string, 
   const hoy = formatInTimeZone(new Date(), timezone, 'yyyy-MM-dd')
   return !(formatInTimeZone(start, timezone, 'yyyy-MM-dd') === hoy && formatInTimeZone(end, timezone, 'yyyy-MM-dd') === hoy)
 }
+
+/**
+ * Carril F2: comparar con otro periodo es de Pro (`ADVANCED_REPORTS`, el mismo resolutor del candado de rango: concesiones, exentos y
+ * demo incluidos). Se revisa antes de leer el periodo comparado; aunque los dos rangos fueran de hoy, sin el plan no se compara.
+ */
+export async function comparacionBloqueadaPorPlan(venueId: string): Promise<boolean> {
+  return !(await venueHasFeatureAccess(venueId, 'ADVANCED_REPORTS'))
+}

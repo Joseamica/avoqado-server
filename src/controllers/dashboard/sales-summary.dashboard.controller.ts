@@ -21,7 +21,9 @@ import {
   fetchSalesSummaryDetailRows,
 } from '@/services/dashboard/sales-summary.dashboard.service'
 import { encodeExport, sendExport, parseColumnsParam, parseFormatParam, getRowCapForFormat } from '@/services/dashboard/export.helpers'
-import { BadRequestError } from '@/errors/AppError'
+import AppError, { BadRequestError } from '@/errors/AppError'
+import { leerConComparacion, OPCIONES_DE_COMPARAR } from '@/services/dashboard/salesSummaryComparar'
+import type { CompararCon } from '@/services/dashboard/sales-summary.dashboard.service'
 import { exigirComercioDelNegocio } from '@/services/venuePaymentConfig.service'
 import { zonaDelCalculo } from '@/utils/sanitizeTimezone'
 import { COLUMNAS_DEL_ARCHIVO, encabezadoDelArchivo, filasDelArchivo } from '@/services/dashboard/salesSummaryExportLabels'
@@ -32,6 +34,8 @@ import { resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import prisma from '@/utils/prismaClient'
 import { esSuperadminDeLaSesion } from '../../services/access/rolVigente'
+
+const esUn400 = (error: unknown) => error instanceof AppError && error.statusCode === 400
 
 /**
  * GET /api/v1/dashboard/reports/sales-summary
@@ -50,6 +54,8 @@ import { esSuperadminDeLaSesion } from '../../services/access/rolVigente'
  *   are computed. QR_LEGACY is only valid for the MindForm venue.
  * - cardType: 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL' (optional) - sub-filter when paymentMethod=CARD.
  *   Ignored (with a warning) for any other paymentMethod.
+ * - compareTo: 'previous_period' | 'previous_year' (optional, carril F2) - adds `comparison` (the other period read up to the same
+ *   time, its figures and the changes). What prevents comparing goes inside `comparison.status`; the report always comes back.
  *
  * @permission reports:read
  */
@@ -75,7 +81,12 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       includeSettlementProjection,
       includeChannelBreakdown,
       includePrepaid,
+      compareTo,
     } = req.query
+
+    if (compareTo !== undefined && !OPCIONES_DE_COMPARAR.includes(compareTo as CompararCon)) {
+      throw new BadRequestError(`compareTo no válido. Usa: ${OPCIONES_DE_COMPARAR.join(', ')}`)
+    }
 
     // Validate required params
     if (!startDate || typeof startDate !== 'string') {
@@ -150,14 +161,18 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
     }
 
     await exigirComercioDelNegocio(venueId, merchantAccountId) // el valor crudo: una lista (parámetro repetido) es 400, no «sin filtro»
-    const report = await getSalesSummary(venueId, filters)
+    const report = compareTo
+      ? await leerConComparacion(venueId, filters, compareTo as CompararCon)
+      : await getSalesSummary(venueId, filters)
 
     res.json({
       success: true,
       data: report,
     })
   } catch (error) {
-    logger.error('Sales summary report error:', error)
+    // Un 400 esperado (el filtro de comercio de otro negocio, dos comercios, un parámetro mal escrito) no es una falla del servidor.
+    if (esUn400(error)) logger.warn('Sales summary report rejected:', { message: (error as Error).message })
+    else logger.error('Sales summary report error:', error)
     next(error)
   }
 }
@@ -392,7 +407,8 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
     logger.info('[SalesSummary export summary]', { venueId, format, sections })
     sendExport(res, encoded, 'resumen-ventas')
   } catch (error) {
-    logger.error('Sales summary export error:', error)
+    if (esUn400(error)) logger.warn('Sales summary export rejected:', { message: (error as Error).message })
+    else logger.error('Sales summary export error:', error)
     next(error)
   }
 }
