@@ -1,7 +1,7 @@
 {
   "pagina": "dashboard/reportes/comparar-con-otro-periodo",
   "sourceRepo": "avoqado-web-dashboard",
-  "sourceRef": "d0dea93fcba1f9eb1c0db9edcc12e380215ac045",
+  "sourceRef": "6481f012bc27ce3eb062de86ec51d26742ec591f",
   "version": "develop (rama feat/resumen-ventas-comparar, sin publicar)",
   "pasos": [
     {

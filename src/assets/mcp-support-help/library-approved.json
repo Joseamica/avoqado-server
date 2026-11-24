@@ -638,7 +638,7 @@
       ]
     },
     "dashboard/reportes/comparar-con-otro-periodo": {
-      "sha256": "d7c98e9914cc23e7ff03369b912bad68e8655cebd9f8fc1f5aed7c6404b2c71b",
+      "sha256": "8b7d04cd93d6c14c12a2c1d935a1308c5ed187c65e8e485c70ffc55b2b1bb8af",
       "requiredPermissions": [
         "reports:read"
       ]

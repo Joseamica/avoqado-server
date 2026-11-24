@@ -7,7 +7,7 @@ task: comparar-con-otro-periodo
 requiredPermissions:
   - reports:read
 sourceRepo: avoqado-web-dashboard
-sourceRef: d0dea93fcba1f9eb1c0db9edcc12e380215ac045
+sourceRef: 6481f012bc27ce3eb062de86ec51d26742ec591f
 keywords:
   - vendí más que la semana pasada
   - comparar con la semana pasada
@@ -35,6 +35,7 @@ Necesitas permiso para ver reportes. Comparar es del plan Pro: con el plan Grati
 ## Problemas frecuentes
 
 - *Mismo periodo del año pasado* de un día o de semanas completas usa el mismo día de la semana de hace 52 semanas; un mes o un rango suelto, las mismas fechas.
+- Un mes más corto se queda en su último día: *Este mes* el 31 de marzo se compara con febrero hasta el 28.
 - Una cuenta abierta antes de la hora y cobrada después cuenta como venta del periodo comparado; la de hoy sale en *Sin cobrar* hasta que se cobre.
 - Sin % es porque antes era $0 (*nuevo*) o negativo. Gris es informativo (impuestos, *Sin cobrar*).
 - *Todo el tiempo* no se compara: elige un periodo de un año o menos.
