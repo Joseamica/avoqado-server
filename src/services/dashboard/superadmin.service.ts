@@ -433,6 +433,27 @@ export async function getAllPlatformFeatures(): Promise<PlatformFeature[]> {
 }
 
 /**
+ * Encargo 1569b9: escribe el estado nuevo del negocio SÓLO si sigue en el que se leyó.
+ *
+ * En el banco un doble clic en «Cambiar Estado» mandó dos peticiones: las dos leyeron «Activo», las dos escribieron y la
+ * bitácora quedó con dos asientos de un solo cambio. Con el candado, la segunda ya no encuentra el negocio así:
+ * - si quedó en el estado que pedía, contesta 'ya-estaba' y quien llama no escribe asiento (el cambio ya lo registró la otra);
+ * - si quedó en OTRO estado, 409 con un texto que se puede enseñar.
+ */
+async function escribirEstadoSiSigueIgual(
+  venueId: string,
+  estadoLeido: VenueStatus,
+  estadoNuevo: VenueStatus,
+  data: Prisma.VenueUpdateManyMutationInput,
+): Promise<'cambiado' | 'ya-estaba'> {
+  const { count } = await prisma.venue.updateMany({ where: { id: venueId, status: estadoLeido }, data })
+  if (count === 1) return 'cambiado'
+  const ahora = await prisma.venue.findUnique({ where: { id: venueId }, select: { status: true } })
+  if (ahora?.status === estadoNuevo) return 'ya-estaba'
+  throw new ConflictError('El estado del negocio cambió mientras lo editabas. Recarga la página y vuelve a intentarlo.')
+}
+
+/**
  * Approve a venue for platform access (Superadmin action)
  * Transitions venue from PENDING_ACTIVATION to ACTIVE
  */
@@ -452,16 +473,14 @@ export async function approveVenue(venueId: string, approvedBy: string): Promise
       throw new Error(`Cannot approve venue in ${venue.status} status. Expected PENDING_ACTIVATION.`)
     }
 
-    await prisma.venue.update({
-      where: { id: venueId },
-      data: {
-        status: VenueStatus.ACTIVE,
-        statusChangedAt: new Date(),
-        statusChangedBy: approvedBy,
-        active: true, // Keep backwards compatible
-        updatedAt: new Date(),
-      },
+    const escrito = await escribirEstadoSiSigueIgual(venueId, venue.status, VenueStatus.ACTIVE, {
+      status: VenueStatus.ACTIVE,
+      statusChangedAt: new Date(),
+      statusChangedBy: approvedBy,
+      active: true, // Keep backwards compatible
+      updatedAt: new Date(),
     })
+    if (escrito === 'ya-estaba') return
 
     logger.info(`Venue ${venue.name} (${venueId}) approved by ${approvedBy}`)
 
@@ -498,17 +517,15 @@ export async function suspendVenueByAdmin(venueId: string, reason: string, suspe
       throw new Error(`Cannot suspend venue in ${venue.status} status. Expected ACTIVE.`)
     }
 
-    await prisma.venue.update({
-      where: { id: venueId },
-      data: {
-        status: VenueStatus.ADMIN_SUSPENDED,
-        statusChangedAt: new Date(),
-        statusChangedBy: suspendedBy,
-        suspensionReason: reason,
-        active: false, // Keep backwards compatible
-        updatedAt: new Date(),
-      },
+    const escrito = await escribirEstadoSiSigueIgual(venueId, venue.status, VenueStatus.ADMIN_SUSPENDED, {
+      status: VenueStatus.ADMIN_SUSPENDED,
+      statusChangedAt: new Date(),
+      statusChangedBy: suspendedBy,
+      suspensionReason: reason,
+      active: false, // Keep backwards compatible
+      updatedAt: new Date(),
     })
+    if (escrito === 'ya-estaba') return
 
     logger.info(`Venue ${venue.name} (${venueId}) suspended by admin ${suspendedBy}. Reason: ${reason}`)
 
@@ -547,17 +564,15 @@ export async function reactivateVenueByAdmin(venueId: string, reactivatedBy: str
       throw new Error(`Cannot reactivate venue in ${venue.status} status. Expected SUSPENDED or ADMIN_SUSPENDED.`)
     }
 
-    await prisma.venue.update({
-      where: { id: venueId },
-      data: {
-        status: VenueStatus.ACTIVE,
-        statusChangedAt: new Date(),
-        statusChangedBy: reactivatedBy,
-        suspensionReason: null, // Clear suspension reason
-        active: true, // Keep backwards compatible
-        updatedAt: new Date(),
-      },
+    const escrito = await escribirEstadoSiSigueIgual(venueId, venue.status, VenueStatus.ACTIVE, {
+      status: VenueStatus.ACTIVE,
+      statusChangedAt: new Date(),
+      statusChangedBy: reactivatedBy,
+      suspensionReason: null, // Clear suspension reason
+      active: true, // Keep backwards compatible
+      updatedAt: new Date(),
     })
+    if (escrito === 'ya-estaba') return
 
     logger.info(`Venue ${venue.name} (${venueId}) reactivated by ${reactivatedBy}`)
 
@@ -617,18 +632,16 @@ export async function changeVenueStatus(
     const isSuspending = newStatus === VenueStatus.SUSPENDED || newStatus === VenueStatus.ADMIN_SUSPENDED
     const isClosing = newStatus === VenueStatus.CLOSED
 
-    await prisma.venue.update({
-      where: { id: venueId },
-      data: {
-        status: newStatus,
-        statusChangedAt: new Date(),
-        statusChangedBy: changedBy,
-        ...(isActivating && { suspensionReason: null, active: true }),
-        ...(isSuspending && { suspensionReason: reason || 'Suspendido por administrador', active: false }),
-        ...(isClosing && { suspensionReason: reason || 'Cerrado por administrador', active: false }),
-        updatedAt: new Date(),
-      },
+    const escrito = await escribirEstadoSiSigueIgual(venueId, venue.status, newStatus, {
+      status: newStatus,
+      statusChangedAt: new Date(),
+      statusChangedBy: changedBy,
+      ...(isActivating && { suspensionReason: null, active: true }),
+      ...(isSuspending && { suspensionReason: reason || 'Suspendido por administrador', active: false }),
+      ...(isClosing && { suspensionReason: reason || 'Cerrado por administrador', active: false }),
+      updatedAt: new Date(),
     })
+    if (escrito === 'ya-estaba') return
 
     logger.info(`Venue ${venue.name} (${venueId}) status changed from ${venue.status} to ${newStatus} by ${changedBy}`, {
       reason,

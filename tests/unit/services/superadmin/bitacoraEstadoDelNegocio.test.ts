@@ -5,12 +5,17 @@
  *
  * Nuevo: los dos guardan quién, el estado de antes y el de después, y el motivo. El cambio de estado usa la MISMA acción
  * que el panel nuevo (`SUPERADMIN_VENUE_STATUS_UPDATED`, con `changes.status.{from,to}`), que el DASHBOARD ya sabe leer.
+ *
+ * Y en el banco (24-nov) un doble clic en «Cambiar Estado» mandó dos PATCH: los dos leyeron «Activo», los dos escribieron y
+ * la bitácora quedó con DOS asientos de un solo cambio. Ahora el estado se escribe sólo si el negocio sigue en el que se
+ * leyó: la segunda petición encuentra que ya quedó como pedía (no escribe ni registra nada) o choca con otro (409).
  */
 import { VenueStatus } from '@prisma/client'
 import { logAction } from '@/services/dashboard/activity-log.service' // mockeado globalmente en setup
 import { prismaMock } from '../../../__helpers__/setup'
 
-import { approveVenue, changeVenueStatus, reactivateVenueByAdmin } from '@/services/dashboard/superadmin.service'
+import { approveVenue, changeVenueStatus, reactivateVenueByAdmin, suspendVenueByAdmin } from '@/services/dashboard/superadmin.service'
+import { ConflictError } from '@/errors/AppError'
 import * as superadminController from '@/controllers/dashboard/superadmin.controller'
 
 /** Los asientos de la bitácora con esa acción. */
@@ -27,7 +32,9 @@ const negocio = (status: VenueStatus) => ({ status, name: 'Un negocio', organiza
 
 beforeEach(() => {
   ;(logAction as jest.Mock).mockClear()
-  prismaMock.venue.update.mockReset().mockResolvedValue({ id: 'cven1' } as never)
+  prismaMock.venue.update.mockReset()
+  prismaMock.venue.updateMany.mockReset().mockResolvedValue({ count: 1 } as never)
+  prismaMock.venue.findUnique.mockReset()
 })
 
 describe('bitácora: el superadmin cambia el estado de un negocio (montaje legado)', () => {
@@ -71,13 +78,13 @@ describe('bitácora: el superadmin cambia el estado de un negocio (montaje legad
 
     await expect(changeVenueStatus('cven1', VenueStatus.CLOSED, 'x', 'sa-1')).rejects.toThrow(/Cannot transition/)
 
-    expect(prismaMock.venue.update).not.toHaveBeenCalled()
+    expect(prismaMock.venue.updateMany).not.toHaveBeenCalled()
     expect(asientos('SUPERADMIN_VENUE_STATUS_UPDATED')).toHaveLength(0)
   })
 
   it('si la escritura falla, no deja un asiento de algo que no pasó', async () => {
     prismaMock.venue.findUnique.mockResolvedValue(negocio(VenueStatus.ACTIVE) as never)
-    prismaMock.venue.update.mockRejectedValue(new Error('base caída') as never)
+    prismaMock.venue.updateMany.mockRejectedValue(new Error('base caída') as never)
 
     await expect(changeVenueStatus('cven1', VenueStatus.SUSPENDED, 'x', 'sa-1')).rejects.toThrow('base caída')
 
@@ -89,8 +96,8 @@ describe('bitácora: el superadmin cambia el estado de un negocio (montaje legad
 
     await changeVenueStatus('cven1', VenueStatus.SUSPENDED, 'Falta de pago', 'sa-1')
 
-    expect(prismaMock.venue.update).toHaveBeenCalledWith({
-      where: { id: 'cven1' },
+    expect(prismaMock.venue.updateMany).toHaveBeenCalledWith({
+      where: { id: 'cven1', status: 'ACTIVE' },
       data: expect.objectContaining({
         status: 'SUSPENDED',
         statusChangedBy: 'sa-1',
@@ -98,6 +105,60 @@ describe('bitácora: el superadmin cambia el estado de un negocio (montaje legad
         active: false,
       }),
     })
+  })
+})
+
+describe('doble clic o dos superadmins a la vez: un cambio, un asiento', () => {
+  it('cambiar estado: si otra petición ya lo dejó como se pedía, no escribe ni registra otra vez', async () => {
+    prismaMock.venue.findUnique
+      .mockResolvedValueOnce(negocio(VenueStatus.ACTIVE) as never) // lo que leyó antes de que la otra escribiera
+      .mockResolvedValueOnce({ status: VenueStatus.SUSPENDED } as never) // cómo quedó
+    prismaMock.venue.updateMany.mockResolvedValue({ count: 0 } as never)
+
+    await expect(changeVenueStatus('cven1', VenueStatus.SUSPENDED, 'Falta de pago', 'sa-1')).resolves.toBeUndefined()
+
+    expect(asientos('SUPERADMIN_VENUE_STATUS_UPDATED')).toHaveLength(0)
+  })
+
+  it('cambiar estado: si otra petición lo dejó en OTRO estado, contesta 409 y no registra nada', async () => {
+    prismaMock.venue.findUnique
+      .mockResolvedValueOnce(negocio(VenueStatus.ACTIVE) as never)
+      .mockResolvedValueOnce({ status: VenueStatus.CLOSED } as never)
+    prismaMock.venue.updateMany.mockResolvedValue({ count: 0 } as never)
+
+    const error = await changeVenueStatus('cven1', VenueStatus.SUSPENDED, 'x', 'sa-1').catch(e => e)
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error.message).toMatch(/cambió/)
+    expect(asientos('SUPERADMIN_VENUE_STATUS_UPDATED')).toHaveLength(0)
+  })
+
+  it('suspender dos veces seguidas deja un solo asiento', async () => {
+    prismaMock.venue.findUnique
+      .mockResolvedValueOnce(negocio(VenueStatus.ACTIVE) as never)
+      .mockResolvedValueOnce(negocio(VenueStatus.ACTIVE) as never)
+      .mockResolvedValueOnce({ status: VenueStatus.ADMIN_SUSPENDED } as never)
+    prismaMock.venue.updateMany.mockResolvedValueOnce({ count: 1 } as never).mockResolvedValueOnce({ count: 0 } as never)
+
+    await suspendVenueByAdmin('cven1', 'Falta de pago', 'sa-1')
+    await suspendVenueByAdmin('cven1', 'Falta de pago', 'sa-1')
+
+    expect(asientos('VENUE_SUSPENDED')).toHaveLength(1)
+  })
+
+  it('aprobar y reactivar tampoco registran dos veces', async () => {
+    prismaMock.venue.findUnique
+      .mockResolvedValueOnce(negocio(VenueStatus.PENDING_ACTIVATION) as never)
+      .mockResolvedValueOnce({ status: VenueStatus.ACTIVE } as never)
+      .mockResolvedValueOnce(negocio(VenueStatus.SUSPENDED) as never)
+      .mockResolvedValueOnce({ status: VenueStatus.ACTIVE } as never)
+    prismaMock.venue.updateMany.mockResolvedValue({ count: 0 } as never)
+
+    await approveVenue('cven1', 'sa-1')
+    await reactivateVenueByAdmin('cven1', 'sa-1')
+
+    expect(asientos('VENUE_APPROVED')).toHaveLength(0)
+    expect(asientos('VENUE_REACTIVATED')).toHaveLength(0)
   })
 })
 
@@ -120,7 +181,7 @@ describe('bitácora: el POST …/suspend legado', () => {
       entityId: 'cven1',
       data: { changes: { status: { from: 'ACTIVE', to: 'ADMIN_SUSPENDED' } }, reason: 'Falta de pago' },
     })
-    expect(prismaMock.venue.update).toHaveBeenCalledWith(
+    expect(prismaMock.venue.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ statusChangedBy: 'sa-1', suspensionReason: 'Falta de pago' }) }),
     )
   })
