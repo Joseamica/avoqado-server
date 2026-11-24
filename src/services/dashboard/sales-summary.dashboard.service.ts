@@ -119,6 +119,12 @@ export interface SalesSummaryMetrics {
   tenderCommissions?: number
   /** D10.1 — aditivo. Cuántas devoluciones hay en `refunds` (ya no cuentan en `transactionCount`). */
   refundCount?: number
+  /**
+   * Carril F (hz:fefa11b6:D16.2) — aditivo, SÓLO en la vista de movimientos (filtro de método o de comercio): los cobros de esa
+   * vista sin las devoluciones, con propina (como «Cobraste» del estado del periodo). Cierra la cuenta de la pantalla al centavo:
+   * chargedAmount − refunds − platformFees − tenderCommissions = totalCollected. En la vista de ventas no se manda.
+   */
+  chargedAmount?: number
   // Tarjetas de regalo (1a, spec §7) — aditivos; sólo en la vista sin filtro de método.
   /** Tarjetas cargadas en el rango, menos sus cancelaciones. NO es venta: no está en grossSales. */
   giftCardLoads?: number
@@ -1222,6 +1228,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       totalCollected: amount + tips,
       netProfit: amount,
       transactionCount: legacyCount,
+      // D16.2 (Codex r5 #3): también aquí «Cobrado» (cobros aceptados del QR anterior, con propina): sin devoluciones ni comisiones.
+      chargedAmount: round2(amount + tips),
     }
 
     // For a non-summary reportType, build the time-series from legacy alone so
@@ -1329,14 +1337,23 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // the core-metric awaits below. We need this number only when deriving
   // totalCollected/netProfit under a filter; awaiting at the derived-metrics
   // block lets the other 8 queries run concurrently with this one.
-  const paymentVolumeForFilteredPromise: Promise<number> = vistaDeMovimientos
+  // D16.2 (carril F, Codex r5 #5): el volumen y lo cobrado de la vista salen de UNA lectura (agrupada por tipo): «Cobrado» y el
+  // volumen con que se arma «Neto cobrado» no pueden ver momentos distintos de la base. `type` puede ser NULL en cobros viejos.
+  const movimientosDeLaVistaPromise: Promise<{ volumen: number; cobrado: number } | null> = vistaDeMovimientos
     ? prisma.payment
-        .aggregate({
+        .groupBy({
+          by: ['type'],
           where: enElRango({ venueId, status: 'COMPLETED' as const, ...paymentLevelFilter }),
-          _sum: { amount: true },
+          _sum: { amount: true, tipAmount: true },
         })
-        .then(r => Number(r._sum.amount || 0))
-    : Promise.resolve(0)
+        .then(grupos => ({
+          volumen: grupos.reduce((s, g) => s + Number(g._sum.amount || 0), 0),
+          // Los cobros de la vista sin devoluciones, con propina.
+          cobrado: round2(
+            grupos.filter(g => g.type !== 'REFUND').reduce((s, g) => s + Number(g._sum.amount || 0) + Number(g._sum.tipAmount || 0), 0),
+          ),
+        }))
+    : Promise.resolve(null)
 
   // ============================================================
   // Calculate Core Metrics
@@ -1450,8 +1467,10 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       // (ventas netas nulas, cobrado = suma con signo) y la devolución que sí salió se ve.
       // Codex r2 #7: en la vista de movimientos (método o comercio) TODA devolución que salió, también la cancelación de una venta de
       // tarjetas de regalo: «Total cobrado» ahí ya la resta (suma con signo) y sin esto «Devoluciones» no la explicaba.
+      // D16.2 (carril F, Codex r5 #1): en la vista de movimientos sólo lo que de verdad salió (`COMPLETED`), como el neto, que sale
+      // de los pagos `COMPLETED`: un reembolso anulado (FAILED) no es dinero devuelto. La vista de ventas no cambia aquí.
       ...(vistaDeMovimientos
-        ? {}
+        ? { status: 'COMPLETED' as const }
         : {
             order: {
               ...WHERE_ORDEN_SIN_TARJETAS,
@@ -1664,7 +1683,9 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // volume directly (Payment.amount sum) rather than from netSales. The
   // promise was kicked off near the top of the function so it runs in
   // parallel with the other core-metric queries.
-  const paymentVolumeForFiltered = await paymentVolumeForFilteredPromise
+  const movimientosDeLaVista = await movimientosDeLaVistaPromise
+  const paymentVolumeForFiltered = movimientosDeLaVista?.volumen ?? 0
+  const cobradoEnLaVista = movimientosDeLaVista?.cobrado ?? null
 
   // Total Collected = Net Sales + Tips - Platform Fees - Third-party fees (D1)
   // Mexico model: taxes are already included in prices, NOT added on top
@@ -1704,6 +1725,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     unpaidOrders,
     tenderCommissions,
     refundCount,
+    ...(cobradoEnLaVista !== null ? { chargedAmount: cobradoEnLaVista } : {}),
   }
 
   // ⚠️ MindForm legacy QR bridge. Mirrors the gate in
@@ -1739,6 +1761,9 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       summary.transactionCount += legacyAggregate.count
       summary.totalCollected += legacyAggregate.amount + legacyAggregate.tips
       summary.netProfit += legacyAggregate.amount
+      // D16.2: lo cobrado de la vista también trae el QR anterior (cobros aceptados, con propina), para que la cuenta siga cerrando.
+      if (summary.chargedAmount !== undefined)
+        summary.chargedAmount = round2(summary.chargedAmount + legacyAggregate.amount + legacyAggregate.tips)
 
       // Order-derived totals only when NOT filtered (legacy sold real food,
       // so grossSales/netSales should include it on the unfiltered view).
@@ -2413,7 +2438,12 @@ export interface SalesSummaryExportFilters {
   shiftId?: string
 }
 
-const round2x = (n: number | null | undefined): number | null => (n == null ? null : Math.round(n * 100) / 100)
+// Al centavo EXACTAMENTE como la pantalla, con el mismo Intl: la mitad se aleja del cero también en negativos y sobre el decimal más
+// corto del número (1.005 ⇒ 1.01, aunque 1.005 × 100 = 100.49999…). `Math.round(n * 100)` daba −4.42 y −1.00 donde la pantalla dice
+// −$4.43 y −$1.01 (full-testing W2, Codex r8 #2 del carril F).
+const formatoAlCentavo = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2, useGrouping: false })
+export const alCentavoComoLaPantalla = (n: number): number => Number(formatoAlCentavo.format(n)) || 0
+const round2x = (n: number | null | undefined): number | null => (n == null ? null : alCentavoComoLaPantalla(n))
 
 const DIAS_DE_LA_SEMANA: Record<string, string> = {
   sunday: 'Domingo',
@@ -2928,7 +2958,8 @@ async function calculateTimePeriodMetrics(
       AND type = 'REFUND'
       ${
         isFiltered
-          ? ''
+          ? // D16.2 (carril F, Codex r6): en la vista de movimientos sólo lo que de verdad salió, como la cabecera.
+            `AND status = 'COMPLETED'`
           : `AND ${sqlOrdenSinTarjetasTexto('"Payment"."orderId"')}
       -- Codex r3 #1: igual que el resumen, la devolución de una cuenta cancelada o borrada no se resta (r4 H5: sin filtro).
       AND NOT EXISTS (SELECT 1 FROM "Order" o WHERE o.id = "Payment"."orderId" AND o.status IN ('CANCELLED', 'DELETED'))`
