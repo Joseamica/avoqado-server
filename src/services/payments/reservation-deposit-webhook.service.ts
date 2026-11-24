@@ -307,12 +307,26 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
     if (error?.code === 'P2002') {
       logger.info('ℹ️ [STRIPE CONNECT] Duplicate webhook event ignored', { eventId: event.id, type: event.type })
       // D20 0b (Codex 0-r4 #2): si la primera entrega devolvió el depósito y cayó antes de cerrar su alerta, la reentrega la cierra.
-      const reserva = await prisma.reservation.findFirst({
-        where: { checkoutSessionId: session.id, depositProcessorRef: paymentIntentId ?? undefined },
-        select: { id: true, venueId: true },
-      })
-      if (reserva && paymentIntentId) {
-        await resolverAlertaSiYaSeDevolvio(prisma, { reservationId: reserva.id, venueId: reserva.venueId, checkoutSessionId: session.id })
+      // Es limpieza: un fallo aquí no convierte el duplicado en un 500 (Codex 0-r5 #2).
+      if (paymentIntentId) {
+        try {
+          const reserva = await prisma.reservation.findFirst({
+            where: { checkoutSessionId: session.id, depositProcessorRef: paymentIntentId },
+            select: { id: true, venueId: true },
+          })
+          if (reserva) {
+            await resolverAlertaSiYaSeDevolvio(prisma, {
+              reservationId: reserva.id,
+              venueId: reserva.venueId,
+              checkoutSessionId: session.id,
+            })
+          }
+        } catch (limpieza) {
+          logger.warn('[STRIPE CONNECT] No se pudo cerrar la alerta del depósito en un aviso duplicado', {
+            eventId: event.id,
+            err: (limpieza as Error)?.message,
+          })
+        }
       }
       return
     }

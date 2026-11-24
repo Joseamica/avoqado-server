@@ -315,6 +315,76 @@ describe('D20 0b — el cobro de un depósito no revive lo cerrado (integration,
       expect((await anomalias(r.id)).map(a => a.resolvedAt !== null)).toEqual([true])
     })
 
+    it('🔴 la cancelación de la clase EN CURSO cuando la app confirma el pago: espera y no la revive (Codex 0-r5 #1)', async () => {
+      const categoria = await prisma.menuCategory.create({ data: { venueId: venueId!, name: 'Clases 2', slug: `clases-dep2-${RUN}` } })
+      const pilates = await prisma.product.create({
+        data: {
+          venueId: venueId!,
+          sku: `DEP2-${RUN}`,
+          name: 'Pilates',
+          categoryId: categoria.id,
+          price: new Prisma.Decimal(200),
+          type: 'CLASS',
+        },
+      })
+      const clase = await prisma.classSession.create({
+        data: {
+          venueId: venueId!,
+          productId: pilates.id,
+          startsAt: new Date(Date.now() + 86_400_000),
+          endsAt: new Date(Date.now() + 90_000_000),
+          duration: 60,
+          capacity: 10,
+        },
+      })
+      const r = await mkReservation({
+        classSessionId: clase.id,
+        productId: pilates.id,
+        status: 'CANCELLED',
+        cancelledBy: 'SYSTEM',
+        cancellationReason: 'Reservation deposit payment window expired',
+        cancelledAt: new Date(),
+        depositStatus: 'EXPIRED',
+      })
+      provider.getPaymentStatus.mockResolvedValue(pagado())
+
+      // El negocio está cancelando la clase: su transacción ya escribió la clase pero todavía no confirma.
+      let soltar!: () => void
+      const enCurso = new Promise<void>(res => (soltar = res))
+      const cancelacion = prisma.$transaction(
+        async tx => {
+          await tx.$executeRaw`UPDATE "ClassSession" SET status = 'CANCELLED' WHERE id = ${clase.id}`
+          await enCurso
+        },
+        { timeout: 20_000 },
+      )
+      await new Promise(res => setTimeout(res, 300))
+      const reconfirmacion = finalizeDepositCheckoutForConsumer(consumerId!, r.checkoutSessionId!).then(
+        () => 'resuelta',
+        (e: Error) => e.message,
+      )
+      await new Promise(res => setTimeout(res, 700))
+      soltar()
+      await cancelacion
+
+      expect(await reconfirmacion).toMatch(/cancelada/)
+      const fila = await prisma.reservation.findUniqueOrThrow({ where: { id: r.id } })
+      expect(fila.status).toBe('CANCELLED')
+      expect(fila.depositStatus).toBe('REFUNDED')
+    })
+
+    it('el aviso duplicado nunca termina en error aunque falle la limpieza de la alerta (Codex 0-r5 #2)', async () => {
+      const r = await mkReservation({})
+      const aviso = avisoDeStripe(r.checkoutSessionId!)
+      await processStripeConnectWebhookEvent(aviso as never)
+      const espia = jest.spyOn(prisma.reservation, 'findFirst').mockRejectedValueOnce(new Error('la base no contestó'))
+      try {
+        await expect(processStripeConnectWebhookEvent(aviso as never)).resolves.toBeUndefined()
+      } finally {
+        espia.mockRestore()
+      }
+    })
+
     it('si el proceso cayó entre devolver y resolver la alerta, el aviso tardío del mismo cobro la resuelve', async () => {
       const r = await mkReservation({ status: 'CANCELLED', cancelledBy: 'CUSTOMER', cancelledAt: new Date() })
       provider.getPaymentStatus.mockResolvedValue(pagado())

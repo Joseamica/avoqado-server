@@ -43,25 +43,27 @@ export async function registrarCobroDelDeposito(
       checkoutSessionId: string | null
       cancelledBy: string | null
       cancellationReason: string | null
-      claseCancelada: boolean
+      classSessionId: string | null
     }>
-  >`SELECT r.status, r."depositStatus", r."checkoutSessionId", r."cancelledBy", r."cancellationReason",
-           COALESCE(cs.status = 'CANCELLED', FALSE) AS "claseCancelada"
-      FROM "Reservation" r LEFT JOIN "ClassSession" cs ON cs.id = r."classSessionId"
-     WHERE r.id = ${a.reservationId}
-       FOR UPDATE OF r`
+  >`SELECT status, "depositStatus", "checkoutSessionId", "cancelledBy", "cancellationReason", "classSessionId" FROM "Reservation" WHERE id = ${a.reservationId} FOR UPDATE`
   if (!r || r.checkoutSessionId !== a.checkoutSessionId || !a.desde.includes(r.depositStatus as 'PENDING' | 'EXPIRED')) {
     return 'SIN_CAMBIO'
   }
   // Sólo el vencimiento del plazo del depósito (sus dos escritores y sus textos): «SYSTEM» también cancela una clase entera que
-  // canceló el negocio (Codex 0-r3 #1), y ésa no se re-confirma. Tampoco la que venció por plazo y DESPUÉS el negocio canceló su
-  // clase (la cancelación de la clase sólo toca reservas vivas, así que la vencida conserva su motivo: Codex 0-r4 #1).
-  const vencidaPorElPlazo =
+  // canceló el negocio (Codex 0-r3 #1), y ésa no se re-confirma.
+  let vencidaPorElPlazo =
     r.status === 'CANCELLED' &&
     r.depositStatus === 'EXPIRED' &&
     r.cancelledBy === 'SYSTEM' &&
-    MOTIVOS_DE_VENCIMIENTO_DEL_DEPOSITO.includes(r.cancellationReason ?? '') &&
-    !r.claseCancelada
+    MOTIVOS_DE_VENCIMIENTO_DEL_DEPOSITO.includes(r.cancellationReason ?? '')
+  // Tampoco la que venció por plazo si su clase está cancelada (la cancelación de la clase sólo toca reservas vivas, así que la
+  // vencida conserva su motivo: Codex 0-r4 #1). `FOR SHARE` espera a una cancelación de la clase en curso y lee su resultado
+  // (Codex 0-r5 #1). Sin interbloqueo: esa cancelación no toca esta reserva (ya está cancelada).
+  if (vencidaPorElPlazo && r.classSessionId) {
+    const [clase] = await tx.$queryRaw<Array<{ status: string }>>`
+      SELECT status FROM "ClassSession" WHERE id = ${r.classSessionId} FOR SHARE`
+    if (clase?.status === 'CANCELLED') vencidaPorElPlazo = false
+  }
   const confirmar = r.status === 'PENDING' || r.status === 'CONFIRMED' || vencidaPorElPlazo
   await tx.reservation.update({
     where: { id: a.reservationId },
