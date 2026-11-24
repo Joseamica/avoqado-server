@@ -6455,6 +6455,12 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       }
     ],
+    "avoqado-web-dashboard:avoqado-server/src/controllers/dashboard/inventory/productWizard.controller.ts": [
+      {
+        "pagina": "dashboard/menu/crear-producto",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
+      }
+    ],
     "avoqado-web-dashboard:avoqado-server/src/controllers/dashboard/payment.dashboard.controller.ts": [
       {
         "pagina": "dashboard/pagos/enviar-recibo-por-correo",
@@ -6491,10 +6497,6 @@
     ],
     "avoqado-web-dashboard:avoqado-server/src/middlewares/checkFeatureAccess.middleware.ts": [
       {
-        "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
-      },
-      {
         "pagina": "dashboard/reportes/ver-reembolsos",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       }
@@ -6502,11 +6504,17 @@
     "avoqado-web-dashboard:avoqado-server/src/middlewares/checkPermission.middleware.ts": [
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       },
       {
         "pagina": "dashboard/reembolsos/reembolsar-un-pago",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-server/src/middlewares/validation.ts": [
+      {
+        "pagina": "dashboard/menu/crear-producto",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/routes/dashboard.routes.ts": [
@@ -6587,10 +6595,6 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       },
       {
-        "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
-      },
-      {
         "pagina": "dashboard/pagos/enviar-recibo-por-correo",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       },
@@ -6616,7 +6620,7 @@
       },
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-cuando-cae-el-dinero",
@@ -6692,7 +6696,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/routes/dashboard/manualPayment.routes.ts": [
@@ -6724,7 +6728,7 @@
     "avoqado-web-dashboard:avoqado-server/src/routes/dashboard/reports.routes.ts": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-reembolsos",
@@ -6753,10 +6757,16 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       }
     ],
+    "avoqado-web-dashboard:avoqado-server/src/schemas/dashboard/inventory.schema.ts": [
+      {
+        "pagina": "dashboard/menu/crear-producto",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
+      }
+    ],
     "avoqado-web-dashboard:avoqado-server/src/services/access/basePlan.service.ts": [
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/credits/ilimitado.ts": [
@@ -6802,7 +6812,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/generalStats.dashboard.service.ts": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts": [
@@ -6857,6 +6867,10 @@
       {
         "pagina": "dashboard/inventario/por-que-una-receta-no-descuenta",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      },
+      {
+        "pagina": "dashboard/menu/crear-producto",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/productWizard.service.ts": [
@@ -6898,7 +6912,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/salesSummaryCanales.ts": [
@@ -6910,7 +6924,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/salesSummaryPoblacion.ts": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/seatReconciliation.service.ts": [
@@ -7049,6 +7063,12 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       }
     ],
+    "avoqado-web-dashboard:avoqado-server/src/utils/zodEnEspanol.ts": [
+      {
+        "pagina": "dashboard/menu/crear-producto",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
+      }
+    ],
     "avoqado-web-dashboard:avoqado-tpv/app/src/main/java/com/jaac/avoqado_tpv/features/onlineorders/data/VigiaDeFolios.kt": [
       {
         "pagina": "dashboard/pedidos-en-linea/pagar-en-linea-pedidos-que-entran-solos",
@@ -7100,7 +7120,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       },
       {
         "pagina": "dashboard/pagos/enviar-recibo-por-correo",
@@ -7254,7 +7274,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       },
       {
         "pagina": "dashboard/plan/cambiar-tarjeta-del-plan",
@@ -7273,8 +7293,12 @@
         "sourceRef": "6632a3e7b673a803c714bdd4216a71d262522038"
       },
       {
+        "pagina": "dashboard/reportes/comparar-con-otro-periodo",
+        "sourceRef": "6481f012bc27ce3eb062de86ec51d26742ec591f"
+      },
+      {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-cuando-cae-el-dinero",
@@ -7380,7 +7404,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/dashboard-main.tsx": [
@@ -7392,7 +7416,7 @@
     "avoqado-web-dashboard:src/features/master-catalog/errors.ts": [
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/hooks/use-access.ts": [
@@ -7414,7 +7438,7 @@
     "avoqado-web-dashboard:src/hooks/useDashboardData.ts": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       }
     ],
     "avoqado-web-dashboard:src/lib/inventoryWaste.ts": [
@@ -7508,7 +7532,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       },
       {
         "pagina": "dashboard/pagos/registrar-pago-manual",
@@ -7566,7 +7590,7 @@
     "avoqado-web-dashboard:src/locales/es/home.json": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       }
     ],
     "avoqado-web-dashboard:src/locales/es/inventory.json": [
@@ -7592,7 +7616,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/locales/es/loyalty.json": [
@@ -7624,7 +7648,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/locales/es/onlineOrdering.json": [
@@ -7679,8 +7703,12 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       },
       {
+        "pagina": "dashboard/reportes/comparar-con-otro-periodo",
+        "sourceRef": "6481f012bc27ce3eb062de86ec51d26742ec591f"
+      },
+      {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-cuando-cae-el-dinero",
@@ -7861,8 +7889,12 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       },
       {
+        "pagina": "dashboard/reportes/comparar-con-otro-periodo",
+        "sourceRef": "6481f012bc27ce3eb062de86ec51d26742ec591f"
+      },
+      {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-cuando-cae-el-dinero",
@@ -8090,7 +8122,7 @@
     "avoqado-web-dashboard:src/pages/Home.tsx": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       }
     ],
     "avoqado-web-dashboard:src/pages/Inventory/InventoryHistory.tsx": [
@@ -8143,16 +8175,22 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       }
     ],
+    "avoqado-web-dashboard:src/pages/Inventory/components/ProductOptionalSection.tsx": [
+      {
+        "pagina": "dashboard/menu/crear-producto",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
+      }
+    ],
     "avoqado-web-dashboard:src/pages/Inventory/components/ProductTypeSelectorModal.tsx": [
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/pages/Inventory/components/ProductWizardDialog.tsx": [
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/pages/Inventory/components/RawMaterialDialog.tsx": [
@@ -8242,7 +8280,7 @@
     "avoqado-web-dashboard:src/pages/Menu/Products/Products.tsx": [
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/pages/Menu/Products/productId.tsx": [
@@ -8395,12 +8433,28 @@
     ],
     "avoqado-web-dashboard:src/pages/Reports/SalesSummary.tsx": [
       {
+        "pagina": "dashboard/reportes/comparar-con-otro-periodo",
+        "sourceRef": "6481f012bc27ce3eb062de86ec51d26742ec591f"
+      },
+      {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
         "sourceRef": "ee9adc0fd6af0d8c859b483d00404379ef91d4c7"
+      }
+    ],
+    "avoqado-web-dashboard:src/pages/Reports/components/CambioDelPeriodo.tsx": [
+      {
+        "pagina": "dashboard/reportes/comparar-con-otro-periodo",
+        "sourceRef": "6481f012bc27ce3eb062de86ec51d26742ec591f"
+      }
+    ],
+    "avoqado-web-dashboard:src/pages/Reports/components/PeriodBreakdownTable.tsx": [
+      {
+        "pagina": "dashboard/reportes/comparar-con-otro-periodo",
+        "sourceRef": "6481f012bc27ce3eb062de86ec51d26742ec591f"
       }
     ],
     "avoqado-web-dashboard:src/pages/Reports/components/SalesByChannelSection.tsx": [
@@ -8744,7 +8798,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       },
       {
         "pagina": "dashboard/plan/cambiar-tarjeta-del-plan",
@@ -8764,7 +8818,7 @@
       },
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-cuando-cae-el-dinero",
@@ -8812,7 +8866,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/services/manualPayment.service.ts": [

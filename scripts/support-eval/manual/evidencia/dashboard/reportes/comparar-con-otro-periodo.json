@@ -1,0 +1,147 @@
+{
+  "pagina": "dashboard/reportes/comparar-con-otro-periodo",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "6481f012bc27ce3eb062de86ec51d26742ec591f",
+  "version": "develop (rama feat/resumen-ventas-comparar, sin publicar)",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 914,
+      "cita": "title: t('sidebar:reportsMenu.salesSummary'),"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 116,
+      "cita": "\"salesSummary\": \"Resumen de Ventas\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 1975,
+      "cita": "<span className=\"text-muted-foreground\">{t('salesSummary.compare.label')}</span>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 1001,
+      "cita": "\"label\": \"Comparar con\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 1987,
+      "cita": "{t(`salesSummary.compare.options.${opcion}`)}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 1004,
+      "cita": "\"previous_period\": \"Periodo anterior\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 1005,
+      "cita": "\"previous_year\": \"Mismo periodo del año pasado\""
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 2229,
+      "cita": "{t('salesSummary.compare.thisPeriod')}: <span className=\"text-foreground\">{ventanaActual}</span>"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 2234,
+      "cita": "{comparado.untilSameTime && <p>{t('salesSummary.compare.untilSameTimeNote')}</p>}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 1179,
+      "cita": "<AntesDelPeriodo"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 1014,
+      "cita": "\"before\": \"antes\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reports/components/CambioDelPeriodo.tsx",
+      "linea": 37,
+      "cita": "tono === 'mejora' && 'text-emerald-600 dark:text-emerald-400',"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Reports/components/CambioDelPeriodo.tsx",
+      "linea": 38,
+      "cita": "tono === 'empeora' && 'text-destructive',"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/reports.json",
+      "linea": 1016,
+      "cita": "\"new\": \"nuevo\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 2219,
+      "cita": "{t('salesSummary.compare.headline', { amount: pesos(comparado.summary.totalCollected) })}"
+    },
+    {
+      "paso": 6,
+      "archivo": "src/pages/Reports/components/PeriodBreakdownTable.tsx",
+      "linea": 244,
+      "cita": "{t('salesSummary.compare.versus', { window: comparado.ventana })}"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "reports:read",
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 917
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "ADVANCED_REPORTS",
+      "archivo": "src/pages/Reports/SalesSummary.tsx",
+      "linea": 2020
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "QR anterior: el otro periodo no trae esos cobros y no se calcula el cambio",
+      "archivo": "src/locales/es/reports.json",
+      "linea": 1009
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [
+      "docs/audit/2026-11-21-resumen-de-ventas/comparar/capturas/C1-escritorio-claro.png",
+      "docs/audit/2026-11-21-resumen-de-ventas/comparar/capturas/C3b-celular-390-entera.png",
+      "docs/audit/2026-11-21-resumen-de-ventas/comparar/capturas/C5a-tabla-por-dias.png",
+      "docs/audit/2026-11-21-resumen-de-ventas/comparar/capturas/C6a-gratis-escritorio.png"
+    ],
+    "filasCreadas": [],
+    "nota": "Pasada con Playwright y datos SIMULADOS (sin servidor real), el 24-nov: escritorio claro y oscuro, celular de 390 px, plan Gratis, teclado, por días y el negocio del QR anterior. Falta la pasada contra el servidor local."
+  },
+  "codex": {
+    "lote": 3,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

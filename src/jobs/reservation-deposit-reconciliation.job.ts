@@ -7,6 +7,7 @@ import { getVatRateBps } from '../services/superadmin/platformSettings.service'
 import { processStripeConnectWebhookEvent } from '../services/payments/reservation-deposit-webhook.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
+import { MOTIVO_PLAZO_VENCIDO } from '@/services/payments/cobroDelDeposito'
 
 export class ReservationDepositReconciliationJob {
   private job: CronJob | null = null
@@ -51,22 +52,35 @@ export class ReservationDepositReconciliationJob {
   private async expirePastDueReservations(): Promise<void> {
     // Idempotent updateMany (the WHERE excludes already-EXPIRED rows), so retrying a
     // transient DB connection blip (P1001 during the cron stampede) is safe. See .claude/rules/cron-jobs.md
+    const ahora = new Date()
     const expired = await retry(
       () =>
         prisma.reservation.updateMany({
           where: {
             depositStatus: 'PENDING',
-            depositExpiresAt: { lt: new Date() },
+            depositExpiresAt: { lt: ahora },
+            // D20 0b (Codex 0-r2 #1): una reserva que una persona ya canceló conserva QUIÉN la canceló (abajo sólo vence su
+            // depósito). Si no, «cancelada por el sistema + vencido» dejaría de distinguir el vencimiento de una cancelación de
+            // recepción, y la reconfirmación de la app la volvería a confirmar.
+            status: { not: 'CANCELLED' },
           },
           data: {
             status: 'CANCELLED',
-            cancelledAt: new Date(),
+            cancelledAt: ahora,
             cancelledBy: 'SYSTEM',
-            cancellationReason: 'Reservation deposit payment window expired',
+            cancellationReason: MOTIVO_PLAZO_VENCIDO,
             depositStatus: 'EXPIRED',
           },
         }),
       { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'deposit-reconciliation.expirePastDue' },
+    )
+    await retry(
+      () =>
+        prisma.reservation.updateMany({
+          where: { depositStatus: 'PENDING', depositExpiresAt: { lt: ahora }, status: 'CANCELLED' },
+          data: { depositStatus: 'EXPIRED' },
+        }),
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'deposit-reconciliation.expireCancelled' },
     )
 
     if (expired.count > 0) {

@@ -1,6 +1,7 @@
 import { formatInTimeZone } from 'date-fns-tz'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import prisma from '@/utils/prismaClient'
+import { zonaDelCalculo } from '@/utils/sanitizeTimezone'
 
 /** Código estable cuando un venue sin ADVANCED_REPORTS pide más que «hoy» del resumen de ventas. */
 export const PLAN_LIMIT_RANGE_CODE = 'PLAN_LIMIT_RANGE'
@@ -23,7 +24,17 @@ export async function rangoBloqueadoPorPlan(venueId: string, startDate: string, 
   const end = new Date(endDate)
   if (isNaN(start.getTime()) || isNaN(end.getTime())) return false
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
-  const timezone = venue?.timezone || 'America/Mexico_City'
+  // «GMT-6» guardado (altas viejas) no es IANA y `formatInTimeZone` tronaba con 500 (hz:fefa11b6:D15): la misma zona del cálculo que
+  // el resumen y su exporte.
+  const timezone = zonaDelCalculo(venue?.timezone)
   const hoy = formatInTimeZone(new Date(), timezone, 'yyyy-MM-dd')
   return !(formatInTimeZone(start, timezone, 'yyyy-MM-dd') === hoy && formatInTimeZone(end, timezone, 'yyyy-MM-dd') === hoy)
+}
+
+/**
+ * Carril F2: comparar con otro periodo es de Pro (`ADVANCED_REPORTS`, el mismo resolutor del candado de rango: concesiones, exentos y
+ * demo incluidos). Se revisa antes de leer el periodo comparado; aunque los dos rangos fueran de hoy, sin el plan no se compara.
+ */
+export async function comparacionBloqueadaPorPlan(venueId: string): Promise<boolean> {
+  return !(await venueHasFeatureAccess(venueId, 'ADVANCED_REPORTS'))
 }

@@ -454,7 +454,18 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
       .set(authHeader('OWNER'))
     expect(res.status).toBe(200)
     expect(res.text).toContain('Ventas brutas')
-    expect(res.text).toContain('CARD')
+    // Carril F (deuda del carril E): «Sección» y «Concepto» en español en el archivo, no los ids (`totals`, `CARD`).
+    expect(res.text).toContain('Totales')
+    expect(res.text).toContain('Métodos de pago')
+    expect(res.text).toContain('Tarjeta')
+    expect(res.text).not.toMatch(/(^|[,"])(totals|paymentMethods|CARD)([,"]|$)/m)
+    // Carril F (full-testing W3 y W4): arriba el periodo y los filtros; los nombres de la pantalla.
+    const lineas = res.text.replace(/^\uFEFF/, '').split(/\r?\n/)
+    expect(lineas[1]).toMatch(/^Periodo,/)
+    expect(lineas[2]).toMatch(/^Filtros,Ninguno/)
+    expect(res.text).toContain('Devoluciones')
+    expect(res.text).toContain('Neto cobrado')
+    expect(res.text).not.toMatch(/Reembolsos|Total cobrado/)
   })
 
   it('🔴 D13.6 · la sección «statement» se acepta y pide el estado de cuenta (compuerta Pro)', async () => {
@@ -478,6 +489,41 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
   })
 
   // Positive twin: an entitled venue (ADVANCED_REPORTS=true) keeps includeMerchantBreakdown:true.
+  // Codex r8 #4 · r9-r11 (carril F, regla de parada): el encabezado nombra el comercio por su clave; nunca busca ni imprime su nombre.
+  it('🔴 con filtro de comercio, el encabezado dice su clave y no su nombre, aunque el reporte traiga el desglose', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    mockGetSalesSummary.mockResolvedValue({
+      ...makeFakeReport(),
+      filtered: true,
+      byMerchantAccount: [{ merchantAccountId: 'clmerchantsse012345678901', displayName: 'Cuenta A' }],
+    } as never)
+    // La clave es de este negocio (tiene cobros aquí): pasa la validación del comercio (Codex r13).
+    prismaMock.payment.findFirst.mockResolvedValue({ id: 'clpagosse0123456789012345' } as never)
+    const res = await request(app)
+      .get(exportUrl(`mode=summary&format=csv&merchantAccountId=clmerchantsse012345678901&${RANGE}`))
+      .set(authHeader('OWNER'))
+    expect(res.status).toBe(200)
+    expect(res.text).toContain('Filtros,Comercio con clave clmerchantsse012345678901')
+    expect(res.text).not.toContain('Comercio Cuenta A')
+    // Sólo se pregunta si hay un cobro de este negocio con esa clave; nunca su nombre.
+    expect(prismaMock.payment.findFirst).toHaveBeenCalledWith({
+      where: { venueId: VENUE_ID, merchantAccountId: 'clmerchantsse012345678901' },
+      select: { id: true },
+    })
+  })
+
+  it('🔴 Codex r13 · un comercio que no es de este negocio ⇒ 400 en español, sin armar el archivo', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    mockGetSalesSummary.mockClear()
+    prismaMock.payment.findFirst.mockResolvedValue(null)
+    const res = await request(app)
+      .get(exportUrl(`mode=summary&format=csv&merchantAccountId=clajenosse01234567890123a&${RANGE}`))
+      .set(authHeader('OWNER'))
+    expect(res.status).toBe(400)
+    expect(JSON.stringify(res.body)).toContain('Ese comercio no es de este negocio')
+    expect(mockGetSalesSummary).not.toHaveBeenCalled()
+  })
+
   it('summary mode keeps includeMerchantBreakdown for an ENTITLED venue', async () => {
     mockVenueHasFeatureAccess.mockResolvedValue(true)
     mockGetSalesSummary.mockResolvedValue(makeFakeReport())

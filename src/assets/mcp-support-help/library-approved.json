@@ -560,14 +560,12 @@
       ]
     },
     "dashboard/menu/crear-producto": {
-      "sha256": "3d14d561a7b61bd8053ea74e3bff3036aea46fa8db8cc569150400d1ba1bb4d4",
+      "sha256": "8beb7b7bc1d4d207879434bafbf676c071a5444569fac79475b1aa2faa522fe4",
       "requiredPermissions": [
         "menu:read",
         "menu:create",
         "inventory:update"
-      ],
-      "featureCode": "INVENTORY_TRACKING",
-      "gateKind": "FEATURE"
+      ]
     },
     "dashboard/menu/gestionar-productos": {
       "sha256": "cb34d9459d260801215ae25cc26969c988d697904161d4c83f2bb613c92b05f5",
@@ -639,8 +637,14 @@
         "payments:refund"
       ]
     },
+    "dashboard/reportes/comparar-con-otro-periodo": {
+      "sha256": "8b7d04cd93d6c14c12a2c1d935a1308c5ed187c65e8e485c70ffc55b2b1bb8af",
+      "requiredPermissions": [
+        "reports:read"
+      ]
+    },
     "dashboard/reportes/comparar-inicio-y-resumen-de-ventas": {
-      "sha256": "442ec957c47fab5c4d593e429b732a4170d2e654a24c7d1b3fe639994c45d835",
+      "sha256": "ee8f3e04f90fdaafc226c86660f2b7fd69c9540c8ddb74037a13b76db7c3b9c6",
       "requiredPermissions": []
     },
     "dashboard/reportes/revisar-reportes-avanzados": {

@@ -10,6 +10,12 @@ import { confirmCardAuthorization } from '@/services/online-ordering/card/confir
 import { handleStripeRefundEvent } from '@/services/online-ordering/card/refund.service'
 import { chargeMerchant, isForeignStripeEvent } from '@/services/online-ordering/card/merchant'
 import { getProvider } from '@/services/payments/provider-registry'
+import {
+  devolverCobroDeReservaCancelada,
+  MOTIVO_SESION_VENCIDA,
+  registrarCobroDelDeposito,
+  resolverAlertaSiYaSeDevolvio,
+} from '@/services/payments/cobroDelDeposito'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import emailService from '@/services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '@/services/whatsapp.service'
@@ -223,6 +229,8 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
   }
 
   let justConfirmedReservationId: string | null = null
+  // D20 0b: una reserva cancelada por una persona no se re-confirma; su cobro se registra y se devuelve después del commit.
+  let cobradaEnCancelada: { id: string; venueId: string } | null = null
   try {
     await prisma.$transaction(async tx => {
       await tx.processedStripeEvent.create({
@@ -235,39 +243,39 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
         },
       })
 
-      // Capture the row id BEFORE updating so we can fire the confirmation
-      // email after the tx commits. updateMany doesn't return rows; the
-      // findFirst+update pair keeps the original idempotency semantics
-      // (no-op when depositStatus has already advanced past PENDING).
+      // Capture the row id BEFORE updating so we can fire the confirmation email after the tx commits. The write itself lives in
+      // `registrarCobroDelDeposito` (bajo el candado de la fila, de ESTA sesión y sólo desde PENDING; no-op si ya avanzó).
       const target = await tx.reservation.findFirst({
         where: {
           checkoutSessionId: session.id,
           depositStatus: 'PENDING',
         },
-        select: { id: true },
+        select: { id: true, venueId: true },
       })
 
-      const updated = target
-        ? await tx.reservation.updateMany({
-            where: { id: target.id, depositStatus: 'PENDING' },
-            data: {
-              status: ReservationStatus.CONFIRMED,
-              confirmedAt: new Date(),
-              depositStatus: 'PAID',
-              depositPaidAt: new Date(),
-              depositProcessorRef: paymentIntentId,
-            },
+      const desenlace = target
+        ? await registrarCobroDelDeposito(tx, {
+            reservationId: target.id,
+            checkoutSessionId: session.id,
+            paymentIntentId,
+            paidAt: new Date(),
+            desde: ['PENDING'],
           })
-        : { count: 0 }
+        : 'SIN_CAMBIO'
 
-      if (updated.count === 1) {
+      if (desenlace === 'CONFIRMADA') {
         justConfirmedReservationId = target!.id
         return
       }
+      if (desenlace === 'COBRADA_EN_CANCELADA') {
+        cobradaEnCancelada = target!
+        return
+      }
+      if (desenlace === 'COBRADA') return
 
       const current = await tx.reservation.findFirst({
         where: { checkoutSessionId: session.id },
-        select: { id: true, status: true, depositStatus: true },
+        select: { id: true, venueId: true, status: true, depositStatus: true, depositProcessorRef: true },
       })
 
       if (!current) {
@@ -279,6 +287,12 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
       }
 
       if (current.depositStatus === 'PAID') return
+      // D20 0b (Codex 0-r2 #3): la app ya registró ESTE mismo cobro (y quizá ya se devolvió): no es una divergencia. Si ya se
+      // devolvió y el proceso cayó antes de resolver su alerta, se resuelve aquí (Codex 0-r3 #4).
+      if (paymentIntentId && current.depositProcessorRef === paymentIntentId) {
+        await resolverAlertaSiYaSeDevolvio(tx, { reservationId: current.id, venueId: current.venueId, checkoutSessionId: session.id })
+        return
+      }
 
       await recordMoneyAnomaly({
         tx,
@@ -292,9 +306,37 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
   } catch (error: any) {
     if (error?.code === 'P2002') {
       logger.info('ℹ️ [STRIPE CONNECT] Duplicate webhook event ignored', { eventId: event.id, type: event.type })
+      // D20 0b (Codex 0-r4 #2): si la primera entrega devolvió el depósito y cayó antes de cerrar su alerta, la reentrega la cierra.
+      // Es limpieza: un fallo aquí no convierte el duplicado en un 500 (Codex 0-r5 #2).
+      if (paymentIntentId) {
+        try {
+          const reserva = await prisma.reservation.findFirst({
+            where: { checkoutSessionId: session.id, depositProcessorRef: paymentIntentId },
+            select: { id: true, venueId: true },
+          })
+          if (reserva) {
+            await resolverAlertaSiYaSeDevolvio(prisma, {
+              reservationId: reserva.id,
+              venueId: reserva.venueId,
+              checkoutSessionId: session.id,
+            })
+          }
+        } catch (limpieza) {
+          logger.warn('[STRIPE CONNECT] No se pudo cerrar la alerta del depósito en un aviso duplicado', {
+            eventId: event.id,
+            err: (limpieza as Error)?.message,
+          })
+        }
+      }
       return
     }
     throw error
+  }
+
+  if (cobradaEnCancelada) {
+    const { id, venueId } = cobradaEnCancelada as { id: string; venueId: string }
+    await devolverCobroDeReservaCancelada({ reservationId: id, venueId, checkoutSessionId: session.id })
+    return
   }
 
   // After the status flip commits, fire the booking confirmation email. We
@@ -435,17 +477,25 @@ async function processCheckoutExpired(event: VerifiedWebhookEvent) {
         where: {
           checkoutSessionId: session.id,
           depositStatus: 'PENDING',
+          // D20 0b (Codex 0-r2 #1): una reserva que una persona ya canceló conserva quién la canceló; sólo vence su depósito.
+          status: { not: ReservationStatus.CANCELLED },
         },
         data: {
           status: ReservationStatus.CANCELLED,
           cancelledAt: new Date(),
           cancelledBy: 'SYSTEM',
-          cancellationReason: 'Stripe Checkout session expired',
+          cancellationReason: MOTIVO_SESION_VENCIDA,
           depositStatus: 'EXPIRED',
         },
       })
 
       if (updated.count === 1) return
+
+      const yaCancelada = await tx.reservation.updateMany({
+        where: { checkoutSessionId: session.id, depositStatus: 'PENDING', status: ReservationStatus.CANCELLED },
+        data: { depositStatus: 'EXPIRED' },
+      })
+      if (yaCancelada.count === 1) return
 
       const current = await tx.reservation.findFirst({
         where: { checkoutSessionId: session.id },

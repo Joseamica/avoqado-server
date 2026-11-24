@@ -6620,7 +6620,8 @@
       "paginas": [
         "dashboard/reportes/revisar-reportes-ventas",
         "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "dashboard/reportes/ver-ventas-por-canal"
+        "dashboard/reportes/ver-ventas-por-canal",
+        "dashboard/reportes/comparar-con-otro-periodo"
       ]
     },
     {
