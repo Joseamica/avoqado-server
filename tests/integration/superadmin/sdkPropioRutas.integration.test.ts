@@ -64,7 +64,7 @@ beforeAll(async () => {
   ).id
   duenoId = (await prisma.staff.create({ data: { email: `sdk-rutas-ow-${sufijo}@example.test`, firstName: 'Prueba', lastName: 'Dueña' } }))
     .id
-  // La dueña tiene `system:manage` DE VERDAD: el guardia de permiso del montaje legado la deja pasar, y sólo el de rol la frena.
+  // La dueña tiene `system:manage` DE VERDAD: el guardia de permiso del montaje legado la deja pasar, y el de rol la frena.
   await prisma.venueRolePermission.create({ data: { venueId, role: 'OWNER', permissions: ['system:manage'], modifiedBy: superadminId } })
   const firmar = async (staffId: string, role: 'SUPERADMIN' | 'OWNER') => {
     await prisma.staffVenue.create({ data: { venueId: venueId!, staffId, role } })
@@ -177,9 +177,9 @@ describe('PUT /terminals/:terminalId/in-house-sdk', () => {
 
   it('un OWNER con system:manage otorgado, por el montaje legado ⇒ 403; la columna no cambia', async () => {
     const t = await pax()
-    // El permiso otorgado sí la deja pasar el guardia del montaje legado: una ruta hermana sin guardia de rol le contesta.
+    // Desde el encargo fc9c53 TODO el montaje legado exige el rol: ni la ficha hermana le contesta.
     const ficha = await request(app).get(`${LEGADO}/${t.id}`).set('Authorization', `Bearer ${tokenDueno}`)
-    expect(ficha.status).toBe(200)
+    expect(ficha.status).toBe(403)
 
     const respuesta = await poner(LEGADO, t.id, { enabled: true, serialNumber: t.serialNumber }, tokenDueno)
 
