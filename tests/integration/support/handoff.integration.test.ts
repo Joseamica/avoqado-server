@@ -409,13 +409,13 @@ describe('PERSONA (router)', () => {
   })
 
   it.each([
-    ['fits', false],
-    ['does not fit', true],
-  ])("an ineligible phone gets today's summary plus how to link if it %s; FIXED and no row", async (_label, long) => {
+    ['short', false],
+    ['as long as it gets', true],
+  ])("an ineligible phone gets today's summary plus how to link, %s; FIXED and no row", async (_label, long) => {
     // With public help off, as before it (public-help.integration.test.ts covers it on).
     process.env.SUPPORT_PUBLIC_HELP_ENABLED = 'false'
-    // Long titles fill the summary until the link no longer fits in 1,500. Measured with the real buildHumanSummary: 2 of
-    // the 3 lines enter; repeat(34) = 1,343 characters, 1,527 with the link (repeat(28) = 1,371 fits; repeat(33) = 1,501).
+    // Long titles fill the summary as much as buildHumanSummary lets them (2 of the 3 lines enter; it keeps 260 characters
+    // free). The link to the panel, without «conserva ayuda pública», fits even then.
     const titled = (n: number) =>
       guide(`dashboard/largas/guia-larga-${n}`, `${'Título largo '.repeat(34)}${n}`, 'Resumen.', `Cuerpo de la guía larga ${n}.`)
     const lib = [1, 2, 3].map(titled)
@@ -430,13 +430,11 @@ describe('PERSONA (router)', () => {
         })
       }
     const summary = await buildHumanSummary(conversation.id, conversation.generation)
-    expect(summary.length + 2 + SUPPORT_LINK.length > 1500).toBe(long)
+    expect(summary.length + 2 + SUPPORT_LINK.length).toBeLessThanOrEqual(1500)
     const result = await prisma.$transaction(tx =>
       requestSupportHandoff(tx, conversation, 'REQUESTED', new Date(), getSupportHandoffConfig()!),
     )
-    expect(result).toEqual({ text: long ? summary : `${summary}\n\n${SUPPORT_LINK}`, outcome: 'FIXED' })
-    // Without room the link is dropped, never the summary.
-    expect(result.text.includes(SUPPORT_LINK)).toBe(!long)
+    expect(result).toEqual({ text: `${summary}\n\n${SUPPORT_LINK}`, outcome: 'FIXED' })
     expect(result.text.length).toBeLessThanOrEqual(1500)
     expect(await notices()).toEqual([])
   })
