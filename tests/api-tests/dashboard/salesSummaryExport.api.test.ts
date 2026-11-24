@@ -495,14 +495,14 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
     mockGetSalesSummary.mockResolvedValue({
       ...makeFakeReport(),
       filtered: true,
-      byMerchantAccount: [{ merchantAccountId: 'clmerchantsse01234567890', displayName: 'Cuenta A' }],
+      byMerchantAccount: [{ merchantAccountId: 'clmerchantsse012345678901', displayName: 'Cuenta A' }],
     } as never)
     prismaMock.payment.findFirst.mockClear()
     const res = await request(app)
-      .get(exportUrl(`mode=summary&format=csv&merchantAccountId=clmerchantsse01234567890&${RANGE}`))
+      .get(exportUrl(`mode=summary&format=csv&merchantAccountId=clmerchantsse012345678901&${RANGE}`))
       .set(authHeader('OWNER'))
     expect(res.status).toBe(200)
-    expect(res.text).toContain('Filtros,Comercio con clave clmerchantsse01234567890')
+    expect(res.text).toContain('Filtros,Comercio con clave clmerchantsse012345678901')
     expect(res.text).not.toContain('Comercio Cuenta A')
     expect(prismaMock.payment.findFirst).not.toHaveBeenCalled()
   })

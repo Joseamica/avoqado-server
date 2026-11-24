@@ -167,6 +167,9 @@ export function encabezadoDelArchivo(
   if (filtros.paymentMethod) partes.push(FILTRO_DE_METODO[filtros.paymentMethod] ?? filtros.paymentMethod)
   // El tipo de tarjeta sólo cuenta con «Tarjeta» (el cálculo lo ignora con otro método; Codex r8 #4).
   if (filtros.cardType && filtros.paymentMethod === 'CARD') partes.push(TIPO_DE_TARJETA[filtros.cardType] ?? filtros.cardType)
-  if (filtros.merchantAccountId) partes.push(`Comercio con clave ${filtros.merchantAccountId}`)
+  // Sólo una clave con forma de clave (cuid v1) se imprime; la ruta acepta cualquier texto (Codex r12).
+  if (filtros.merchantAccountId) {
+    partes.push(/^c[a-z0-9]{24}$/.test(filtros.merchantAccountId) ? `Comercio con clave ${filtros.merchantAccountId}` : 'Comercio elegido')
+  }
   return [`Periodo: ${dia(startDate, zona)} – ${dia(endDate, zona)}`, `Filtros: ${partes.length > 0 ? partes.join(' · ') : 'Ninguno'}`]
 }

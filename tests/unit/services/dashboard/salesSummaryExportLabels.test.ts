@@ -135,9 +135,13 @@ describe('el archivo del Resumen de ventas dice lo mismo que la pantalla (full-t
     const fin = '2026-11-24T05:59:59.999Z'
     expect(encabezadoDelArchivo(inicio, fin, { ...z, paymentMethod: 'CASH', cardType: 'CREDIT' })[1]).toBe('Filtros: Efectivo')
     // Regla de parada (Codex r9-r11): el nombre pedía otro permiso, se podía renombrar o reusar y el PDF no dibuja todas las letras.
-    expect(encabezadoDelArchivo(inicio, fin, { ...z, merchantAccountId: 'clmerchantsse01234567890' })[1]).toBe(
-      'Filtros: Comercio con clave clmerchantsse01234567890',
+    expect(encabezadoDelArchivo(inicio, fin, { ...z, merchantAccountId: 'clmerchantsse012345678901' })[1]).toBe(
+      'Filtros: Comercio con clave clmerchantsse012345678901',
     )
+    // Codex r12: la ruta acepta cualquier texto; sólo una clave con forma de clave (cuid) se imprime como clave.
+    for (const libre of ['Comercio de mi primo', 'cl-falsa', 'c李12345678901234567890123']) {
+      expect(encabezadoDelArchivo(inicio, fin, { ...z, merchantAccountId: libre })[1]).toBe('Filtros: Comercio elegido')
+    }
   })
 
   it('🔴 W3 · los nombres de la pantalla: Devoluciones, Impuestos incluidos, Neto cobrado; y empleados después de «Neto cobrado»', () => {
@@ -216,10 +220,13 @@ describe('el archivo del Resumen de ventas dice lo mismo que la pantalla (full-t
     const lineas = encabezadoDelArchivo('2026-11-23T06:00:00.000Z', '2026-11-24T05:59:59.999Z', {
       paymentMethod: 'CARD',
       cardType: 'CREDIT',
-      merchantAccountId: 'm1',
+      merchantAccountId: 'clmerchantsse012345678901',
       timezone: 'America/Mexico_City',
     })
-    expect(lineas).toEqual(['Periodo: 23 nov 2026 – 23 nov 2026', 'Filtros: Tarjeta · Crédito · Comercio con clave m1'])
+    expect(lineas).toEqual([
+      'Periodo: 23 nov 2026 – 23 nov 2026',
+      'Filtros: Tarjeta · Crédito · Comercio con clave clmerchantsse012345678901',
+    ])
     expect(encabezadoDelArchivo('2026-11-23T06:00:00.000Z', '2026-11-24T05:59:59.999Z', { timezone: 'America/Mexico_City' })[1]).toBe(
       'Filtros: Ninguno',
     )
