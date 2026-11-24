@@ -6614,7 +6614,7 @@
       },
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-cuando-cae-el-dinero",
@@ -6722,7 +6722,7 @@
     "avoqado-web-dashboard:avoqado-server/src/routes/dashboard/reports.routes.ts": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-reembolsos",
@@ -6806,7 +6806,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/generalStats.dashboard.service.ts": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts": [
@@ -6906,7 +6906,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/sales-summary.dashboard.service.ts": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/salesSummaryCanales.ts": [
@@ -6918,7 +6918,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/salesSummaryPoblacion.ts": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/seatReconciliation.service.ts": [
@@ -7288,7 +7288,7 @@
       },
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-cuando-cae-el-dinero",
@@ -7428,7 +7428,7 @@
     "avoqado-web-dashboard:src/hooks/useDashboardData.ts": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       }
     ],
     "avoqado-web-dashboard:src/lib/inventoryWaste.ts": [
@@ -7580,7 +7580,7 @@
     "avoqado-web-dashboard:src/locales/es/home.json": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       }
     ],
     "avoqado-web-dashboard:src/locales/es/inventory.json": [
@@ -7694,7 +7694,7 @@
       },
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-cuando-cae-el-dinero",
@@ -7876,7 +7876,7 @@
       },
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-cuando-cae-el-dinero",
@@ -8104,7 +8104,7 @@
     "avoqado-web-dashboard:src/pages/Home.tsx": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       }
     ],
     "avoqado-web-dashboard:src/pages/Inventory/InventoryHistory.tsx": [
@@ -8416,7 +8416,7 @@
     "avoqado-web-dashboard:src/pages/Reports/SalesSummary.tsx": [
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-ventas-por-canal",
@@ -8784,7 +8784,7 @@
       },
       {
         "pagina": "dashboard/reportes/comparar-inicio-y-resumen-de-ventas",
-        "sourceRef": "c456800b67e7426832578e8bade2b6caa1c265bc"
+        "sourceRef": "aa8a35a4edcec79df6fb8746d4b1e11d0be803e0"
       },
       {
         "pagina": "dashboard/reportes/ver-cuando-cae-el-dinero",

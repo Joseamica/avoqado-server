@@ -16,21 +16,15 @@ import {
   CardTypeFilter,
   SalesSummaryExportFilters,
   SalesSummaryExportSection,
-  SalesSummaryExportRow,
   flattenSalesSummaryForExport,
   countSalesSummaryDetailRows,
   fetchSalesSummaryDetailRows,
 } from '@/services/dashboard/sales-summary.dashboard.service'
-import {
-  encodeExport,
-  sendExport,
-  parseColumnsParam,
-  parseFormatParam,
-  getRowCapForFormat,
-  type ExportColumnDef,
-} from '@/services/dashboard/export.helpers'
+import { encodeExport, sendExport, parseColumnsParam, parseFormatParam, getRowCapForFormat } from '@/services/dashboard/export.helpers'
 import { BadRequestError } from '@/errors/AppError'
+import { exigirComercioDelNegocio } from '@/services/venuePaymentConfig.service'
 import { zonaDelCalculo } from '@/utils/sanitizeTimezone'
+import { COLUMNAS_DEL_ARCHIVO, encabezadoDelArchivo, filasDelArchivo } from '@/services/dashboard/salesSummaryExportLabels'
 import { decidirCarril, MENSAJE_GET_VIEJO_GRANDE } from '@/services/exports/exportPolicy'
 import { MENSAJE_QR_ANTERIOR_SIN_DETALLE, VENTAS_DETALLADAS_COLUMNAS } from '@/services/exports/exportadores/ventasDetalladas.exportador'
 import { AVISO_PUENTE_QR_CAIDO, MINDFORM_NEW_VENUE_ID } from '@/services/legacy/qrPayments.legacy.service'
@@ -142,7 +136,8 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       endDate,
       groupBy: (groupBy as 'none' | 'paymentMethod') || 'none',
       reportType: (reportType as ReportType) || 'summary',
-      timezone: venue?.timezone || 'America/Mexico_City',
+      // «GMT-6» guardado (altas viejas) no es IANA: «Por días» daba 400 y la proyección 500 (hz:fefa11b6:D15). Como el exporte.
+      timezone: zonaDelCalculo(venue?.timezone),
       merchantAccountId: typeof merchantAccountId === 'string' ? merchantAccountId : undefined,
       paymentMethod: typeof paymentMethod === 'string' ? (paymentMethod as PaymentMethodFilter) : undefined,
       cardType: typeof cardType === 'string' ? (cardType as CardTypeFilter) : undefined,
@@ -154,6 +149,7 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       includePrepaid: includePrepaid === 'true',
     }
 
+    await exigirComercioDelNegocio(venueId, merchantAccountId) // el valor crudo: una lista (parámetro repetido) es 400, no «sin filtro»
     const report = await getSalesSummary(venueId, filters)
 
     res.json({
@@ -209,6 +205,8 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
     if (paymentMethod === 'QR_LEGACY' && venueId !== MINDFORM_NEW_VENUE_ID) {
       throw new BadRequestError('QR_LEGACY filter is only available for the MindForm venue')
     }
+    // Carril F (Codex r13): el filtro de comercio es de este negocio (los dos modos); si no, 400 en español.
+    await exigirComercioDelNegocio(venueId, merchantAccountId)
 
     const cap = getRowCapForFormat(format)
     const parseList = (raw: unknown): string[] | undefined => {
@@ -376,24 +374,20 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
       demasiadas(rows.length)
       return
     }
-    type Row = SalesSummaryExportRow
-
-    const allColumns: ExportColumnDef<Row>[] = [
-      { id: 'section', label: 'Sección', value: r => r.section },
-      { id: 'label', label: 'Concepto', value: r => r.label },
-      { id: 'count', label: 'Cantidad', value: r => r.count },
-      { id: 'amount', label: 'Monto', value: r => r.amount },
-      { id: 'percentage', label: 'Porcentaje', value: r => r.percentage },
-    ]
-
+    // Carril F (full-testing W3 y W4): el ARCHIVO dice lo que la pantalla (nombres, orden, «Cobrado» con filtro, sin renglones vacíos) y
+    // arriba qué periodo y qué filtros trae. Las filas de `flattenSalesSummaryForExport` (las que lee la MCP) no cambian.
+    // El comercio elegido va por su clave, no por su nombre: el nombre pedía un permiso aparte, se podía renombrar o reusar y el PDF no
+    // dibuja todas las letras (regla de parada del carril F, Codex r8-r11).
+    const encabezado = encabezadoDelArchivo(startDate, endDate, filters)
     const encoded = await encodeExport(format, {
-      allColumns,
-      requestedColumnIds: allColumns.map(c => c.id),
-      rows,
+      allColumns: COLUMNAS_DEL_ARCHIVO,
+      requestedColumnIds: COLUMNAS_DEL_ARCHIVO.map(c => c.id),
+      // En el PDF el periodo y los filtros van bajo el título (no se repiten como filas de la tabla).
+      rows: filasDelArchivo(rows, report, format === 'pdf' ? [] : encabezado),
       title: 'Resumen de ventas',
-      // D15: CSV y Excel llevan el aviso como primera fila (viene en `rows`); el PDF corta las celdas largas con «…», así
-      // que además lo lleva completo bajo el título.
-      ...(report.legacyUnavailable ? { resumen: [AVISO_PUENTE_QR_CAIDO] } : {}),
+      // D15: CSV y Excel llevan el aviso como primera fila (viene en `rows`); el PDF lo lleva además completo bajo el título, con
+      // el periodo y los filtros.
+      resumen: [...encabezado, ...(report.legacyUnavailable ? [AVISO_PUENTE_QR_CAIDO] : [])],
     })
     logger.info('[SalesSummary export summary]', { venueId, format, sections })
     sendExport(res, encoded, 'resumen-ventas')

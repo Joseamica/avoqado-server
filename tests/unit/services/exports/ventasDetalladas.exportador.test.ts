@@ -4,7 +4,15 @@ jest.mock('@/services/dashboard/salesSummaryPlanRange', () => ({
   rangoBloqueadoPorPlan: jest.fn(async () => false),
 }))
 
+jest.mock('@/services/organization-payment-config.service', () => ({
+  ...jest.requireActual('@/services/organization-payment-config.service'),
+  getEffectivePaymentConfig: jest.fn(),
+}))
+
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import { getEffectivePaymentConfig } from '@/services/organization-payment-config.service'
+import { MENSAJE_COMERCIO_AJENO, MENSAJE_COMERCIO_UNO_SOLO } from '@/services/venuePaymentConfig.service'
+import { prismaMock } from '@tests/__helpers__/setup'
 import { rangoBloqueadoPorPlan, PLAN_LIMIT_RANGE_CODE } from '@/services/dashboard/salesSummaryPlanRange'
 import { construirWhereKeyset } from '@/services/exports/exportadores/comun'
 import { ventasDetalladas, VENTAS_DETALLADAS_COLUMNAS } from '@/services/exports/exportadores/ventasDetalladas.exportador'
@@ -143,6 +151,19 @@ describe('exportador ventas-detalladas', () => {
     const r = await ventasDetalladas.autorizar({ ...ctx, esSuperadmin: true }, filtros)
     expect(r).toEqual({ status: 403, body: expect.objectContaining({ code: PLAN_LIMIT_RANGE_CODE, featureCode: 'ADVANCED_REPORTS' }) })
     expect(rangoBloqueadoPorPlan).toHaveBeenCalledWith('v1', filtros.startDate, filtros.endDate)
+  })
+  // Carril F (Codex r13): el exporte detallado en segundo plano comparte el filtro de comercio; una clave ajena ⇒ 400 en español.
+  it('🔴 autorizar: un comercio que no es del negocio ⇒ 400 en español', async () => {
+    ;(getEffectivePaymentConfig as jest.Mock).mockResolvedValue({ config: { primaryAccount: { id: 'clpropiosse0123456789012a' } } })
+    ;(prismaMock.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    await expect(ventasDetalladas.autorizar(ctx, { ...filtros, merchantAccountId: 'clajenosse01234567890123a' })).rejects.toMatchObject({
+      statusCode: 400,
+      message: MENSAJE_COMERCIO_AJENO,
+    })
+    await expect(ventasDetalladas.autorizar(ctx, { ...filtros, merchantAccountId: 'clpropiosse0123456789012a' })).resolves.toBeNull()
+  })
+  it('🔴 parsearFiltros: dos comercios a la vez ⇒ 400 en español (Codex r14 #1)', () => {
+    expect(() => ventasDetalladas.parsearFiltros({ ...filtros, merchantAccountId: ['a', 'b'] })).toThrow(MENSAJE_COMERCIO_UNO_SOLO)
   })
   it('está registrado', () => {
     expect(obtenerExportador('ventas-detalladas')?.kind).toBe('ventas-detalladas')

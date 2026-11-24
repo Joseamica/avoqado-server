@@ -2,7 +2,8 @@ import { NextFunction, Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
 import * as availableBalanceService from '../../services/dashboard/availableBalance.dashboard.service'
 import { getSettlementsLandingInWeek, venueWeekBounds } from '../../services/dashboard/settlementCalendar.dashboard.service'
-import { DEFAULT_TIMEZONE, venueStartOfDay } from '../../utils/datetime'
+import { venueStartOfDay } from '../../utils/datetime'
+import { zonaDelCalculo } from '../../utils/sanitizeTimezone'
 import logger from '../../config/logger'
 import { AuthenticationError } from '../../errors/AppError'
 
@@ -190,7 +191,8 @@ export async function getSettlementCalendar(
         where: { id: venueId },
         select: { timezone: true },
       })
-      const venueTimezone = venue?.timezone || DEFAULT_TIMEZONE
+      // «GMT-6» guardado (altas viejas) no es IANA y la fecha tronaba (hz:fefa11b6:D15): la zona del cálculo, como el resumen.
+      const venueTimezone = zonaDelCalculo(venue?.timezone)
       const startOfToday = venueStartOfDay(venueTimezone)
       dateRange = {
         from: startOfToday,
@@ -223,7 +225,7 @@ export async function getSettlementWeek(
     const { venueId } = req.params
     const { weekStart } = req.query
     const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
-    const venueTimezone = venue?.timezone || DEFAULT_TIMEZONE
+    const venueTimezone = zonaDelCalculo(venue?.timezone)
     const bounds = venueWeekBounds(weekStart, venueTimezone)
     const week = await getSettlementsLandingInWeek(venueId, bounds.weekStart, bounds.weekEnd, venueTimezone)
     res.status(200).json({ success: true, data: week })

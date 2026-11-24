@@ -40,4 +40,11 @@ describe('getSalesSummary · QR del sistema anterior con el estado del periodo',
     expect(r.statementDestinations).toBeUndefined()
     expect(r.byMerchantAccount).toBeUndefined()
   })
+
+  it('🔴 D16.2 (carril F, Codex r5 #3) · «Cobrado» también con este filtro: cobros aceptados con propina, y la cuenta cierra', async () => {
+    const r = await getSalesSummary(MINDFORM_NEW_VENUE_ID, rango)
+    const s = r.summary
+    expect(s.chargedAmount).toBe(100)
+    expect((s.chargedAmount ?? 0) - s.refunds - s.platformFees - (s.tenderCommissions ?? 0)).toBe(s.totalCollected)
+  })
 })

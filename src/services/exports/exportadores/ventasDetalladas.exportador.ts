@@ -9,6 +9,7 @@ import {
   type PaymentMethodFilter,
   type SalesSummaryExportFilters,
 } from '@/services/dashboard/sales-summary.dashboard.service'
+import { MENSAJE_COMERCIO_UNO_SOLO, exigirComercioDelNegocio } from '@/services/venuePaymentConfig.service'
 import { relojDelNegocio } from '@/utils/datetime'
 import { construirWhereKeyset, fecha, lista, sinFuncion, str } from './comun'
 import type { Exportador } from './types'
@@ -80,6 +81,8 @@ export const ventasDetalladas: Exportador<SalesSummaryExportFilters, FilaVentaDe
     if (paymentMethod === 'QR_LEGACY') throw new BadRequestError(MENSAJE_QR_ANTERIOR_SIN_DETALLE)
     const cardType = str(r.cardType) as CardTypeFilter | undefined
     if (cardType && !TARJETAS.includes(cardType)) throw new BadRequestError(`Invalid cardType. Must be one of: ${TARJETAS.join(', ')}`)
+    // Un comercio repetido llega como lista: 400, nunca «sin filtro» (Codex r14 #1). Que sea del negocio lo mira `autorizar`.
+    if (r.merchantAccountId != null && typeof r.merchantAccountId !== 'string') throw new BadRequestError(MENSAJE_COMERCIO_UNO_SOLO)
     return {
       startDate,
       endDate,
@@ -94,8 +97,9 @@ export const ventasDetalladas: Exportador<SalesSummaryExportFilters, FilaVentaDe
   async autorizar(ctx, f) {
     if (await rangoBloqueadoPorPlan(ctx.venueId, f.startDate, f.endDate))
       return { status: 403, body: { ...RESPUESTA_RANGO_FUERA_DEL_PLAN } }
-    if (ctx.esSuperadmin || (await venueHasFeatureAccess(ctx.venueId, 'TRANSACTION_EXPORT'))) return null
-    return sinFuncion('TRANSACTION_EXPORT')
+    if (!ctx.esSuperadmin && !(await venueHasFeatureAccess(ctx.venueId, 'TRANSACTION_EXPORT'))) return sinFuncion('TRANSACTION_EXPORT')
+    await exigirComercioDelNegocio(ctx.venueId, f.merchantAccountId) // el mismo 400 que el GET y el exporte directo
+    return null
   },
   columnas: VENTAS_DETALLADAS_COLUMNAS,
   contar: (venueId, f, corte) => countSalesSummaryDetailRowsHasta(venueId, f, corte),
