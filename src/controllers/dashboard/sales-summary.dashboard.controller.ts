@@ -149,7 +149,7 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       includePrepaid: includePrepaid === 'true',
     }
 
-    await exigirComercioDelNegocio(venueId, filters.merchantAccountId)
+    await exigirComercioDelNegocio(venueId, merchantAccountId) // el valor crudo: una lista (parámetro repetido) es 400, no «sin filtro»
     const report = await getSalesSummary(venueId, filters)
 
     res.json({
@@ -206,7 +206,7 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
       throw new BadRequestError('QR_LEGACY filter is only available for the MindForm venue')
     }
     // Carril F (Codex r13): el filtro de comercio es de este negocio (los dos modos); si no, 400 en español.
-    await exigirComercioDelNegocio(venueId, typeof merchantAccountId === 'string' ? merchantAccountId : undefined)
+    await exigirComercioDelNegocio(venueId, merchantAccountId)
 
     const cap = getRowCapForFormat(format)
     const parseList = (raw: unknown): string[] | undefined => {

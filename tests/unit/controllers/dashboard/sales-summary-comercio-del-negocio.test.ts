@@ -19,7 +19,7 @@ jest.mock('@/services/access/basePlan.service', () => ({ venueHasFeatureAccess: 
 jest.mock('@/services/access/rolVigente', () => ({ esSuperadminDeLaSesion: jest.fn().mockResolvedValue(false) }))
 
 import { salesSummaryExport, salesSummaryReport } from '@/controllers/dashboard/sales-summary.dashboard.controller'
-import { MENSAJE_COMERCIO_AJENO } from '@/services/venuePaymentConfig.service'
+import { MENSAJE_COMERCIO_AJENO, MENSAJE_COMERCIO_UNO_SOLO } from '@/services/venuePaymentConfig.service'
 import { prismaMock } from '@tests/__helpers__/setup'
 
 const PROPIO = 'clpropiosse0123456789012a'
@@ -74,6 +74,16 @@ describe('el filtro de comercio del Resumen de ventas es del negocio', () => {
 
   it('🔴 exporte (detallado): una clave que no es del negocio ⇒ 400 en español', async () => {
     es400Ajeno(await llamar(salesSummaryExport, { merchantAccountId: AJENO, mode: 'detailed', format: 'csv' }))
+  })
+
+  // Codex r14 #1: un parámetro repetido llega como lista; antes se tiraba y el reporte salía de TODO el negocio sin decirlo.
+  it('🔴 GET y exporte: dos comercios a la vez (parámetro repetido) ⇒ 400 en español, no el reporte sin filtro', async () => {
+    const dos = [PROPIO, AJENO] as unknown as string
+    for (const fn of [salesSummaryReport, salesSummaryExport]) {
+      const next = await llamar(fn, { merchantAccountId: dos, mode: 'summary', format: 'csv' })
+      expect(next.mock.calls[0][0]).toMatchObject({ statusCode: 400, message: MENSAJE_COMERCIO_UNO_SOLO })
+    }
+    expect(mockGetSalesSummary).not.toHaveBeenCalled()
   })
 
   it('control: la clave de su configuración de cobro pasa', async () => {

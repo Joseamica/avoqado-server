@@ -9,7 +9,7 @@ import {
   type PaymentMethodFilter,
   type SalesSummaryExportFilters,
 } from '@/services/dashboard/sales-summary.dashboard.service'
-import { exigirComercioDelNegocio } from '@/services/venuePaymentConfig.service'
+import { MENSAJE_COMERCIO_UNO_SOLO, exigirComercioDelNegocio } from '@/services/venuePaymentConfig.service'
 import { relojDelNegocio } from '@/utils/datetime'
 import { construirWhereKeyset, fecha, lista, sinFuncion, str } from './comun'
 import type { Exportador } from './types'
@@ -81,6 +81,8 @@ export const ventasDetalladas: Exportador<SalesSummaryExportFilters, FilaVentaDe
     if (paymentMethod === 'QR_LEGACY') throw new BadRequestError(MENSAJE_QR_ANTERIOR_SIN_DETALLE)
     const cardType = str(r.cardType) as CardTypeFilter | undefined
     if (cardType && !TARJETAS.includes(cardType)) throw new BadRequestError(`Invalid cardType. Must be one of: ${TARJETAS.join(', ')}`)
+    // Un comercio repetido llega como lista: 400, nunca «sin filtro» (Codex r14 #1). Que sea del negocio lo mira `autorizar`.
+    if (r.merchantAccountId != null && typeof r.merchantAccountId !== 'string') throw new BadRequestError(MENSAJE_COMERCIO_UNO_SOLO)
     return {
       startDate,
       endDate,
