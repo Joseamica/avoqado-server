@@ -373,6 +373,76 @@ describe('D20 0b — el cobro de un depósito no revive lo cerrado (integration,
       expect(fila.depositStatus).toBe('REFUNDED')
     })
 
+    it('🔴 cancelación de una clase con 2 reservas cruzada con la confirmación de una vencida: sin interbloqueo (Codex 0-r6)', async () => {
+      const categoria = await prisma.menuCategory.create({ data: { venueId: venueId!, name: 'Clases 3', slug: `clases-dep3-${RUN}` } })
+      const spinning = await prisma.product.create({
+        data: {
+          venueId: venueId!,
+          sku: `DEP3-${RUN}`,
+          name: 'Spinning',
+          categoryId: categoria.id,
+          price: new Prisma.Decimal(200),
+          type: 'CLASS',
+        },
+      })
+      const clase = await prisma.classSession.create({
+        data: {
+          venueId: venueId!,
+          productId: spinning.id,
+          startsAt: new Date(Date.now() + 86_400_000),
+          endsAt: new Date(Date.now() + 90_000_000),
+          duration: 60,
+          capacity: 10,
+        },
+      })
+      const viva = await mkReservation({ classSessionId: clase.id, productId: spinning.id, status: 'CONFIRMED', depositStatus: null })
+      const vencida = await mkReservation({
+        classSessionId: clase.id,
+        productId: spinning.id,
+        status: 'CANCELLED',
+        cancelledBy: 'SYSTEM',
+        cancellationReason: 'Reservation deposit payment window expired',
+        cancelledAt: new Date(),
+        depositStatus: 'EXPIRED',
+      })
+      provider.getPaymentStatus.mockResolvedValue(pagado())
+
+      // La cancelación de la clase, como en el servicio: primero la clase y luego las reservas de la clase (todas, como cuando
+      // reevalúa una fila que otra transacción acaba de cambiar).
+      let seguir!: () => void
+      const pausa = new Promise<void>(res => (seguir = res))
+      const cancelacion = prisma
+        .$transaction(
+          async tx => {
+            await tx.$executeRaw`UPDATE "ClassSession" SET status = 'CANCELLED' WHERE id = ${clase.id}`
+            await pausa
+            await tx.$queryRaw`SELECT id FROM "Reservation" WHERE "classSessionId" = ${clase.id} FOR UPDATE`
+            await tx.$executeRaw`UPDATE "Reservation" SET status = 'CANCELLED', "cancelledBy" = 'SYSTEM', "cancellationReason" = 'Sesión cancelada por el establecimiento' WHERE "classSessionId" = ${clase.id} AND status IN ('PENDING', 'CONFIRMED')`
+          },
+          { timeout: 20_000 },
+        )
+        .then(
+          () => 'ok',
+          (e: Error) => e.message,
+        )
+      await new Promise(res => setTimeout(res, 300))
+      const reconfirmacion = finalizeDepositCheckoutForConsumer(consumerId!, vencida.checkoutSessionId!).then(
+        () => 'resuelta',
+        (e: Error) => e.message,
+      )
+      await new Promise(res => setTimeout(res, 500))
+      seguir()
+
+      const [c, f] = await Promise.all([cancelacion, reconfirmacion])
+      expect(c).toBe('ok')
+      expect(f).toMatch(/cancelada/)
+      expect(f).not.toMatch(/deadlock/i)
+      const fila = await prisma.reservation.findUniqueOrThrow({ where: { id: vencida.id } })
+      expect(fila.status).toBe('CANCELLED')
+      expect(fila.depositStatus).toBe('REFUNDED')
+      expect((await prisma.reservation.findUniqueOrThrow({ where: { id: viva.id } })).status).toBe('CANCELLED')
+    })
+
     it('el aviso duplicado nunca termina en error aunque falle la limpieza de la alerta (Codex 0-r5 #2)', async () => {
       const r = await mkReservation({})
       const aviso = avisoDeStripe(r.checkoutSessionId!)
