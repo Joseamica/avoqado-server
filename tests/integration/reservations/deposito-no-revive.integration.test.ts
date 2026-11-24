@@ -315,65 +315,12 @@ describe('D20 0b — el cobro de un depósito no revive lo cerrado (integration,
       expect((await anomalias(r.id)).map(a => a.resolvedAt !== null)).toEqual([true])
     })
 
-    it('🔴 la cancelación de la clase EN CURSO cuando la app confirma el pago: espera y no la revive (Codex 0-r5 #1)', async () => {
-      const categoria = await prisma.menuCategory.create({ data: { venueId: venueId!, name: 'Clases 2', slug: `clases-dep2-${RUN}` } })
-      const pilates = await prisma.product.create({
-        data: {
-          venueId: venueId!,
-          sku: `DEP2-${RUN}`,
-          name: 'Pilates',
-          categoryId: categoria.id,
-          price: new Prisma.Decimal(200),
-          type: 'CLASS',
-        },
-      })
-      const clase = await prisma.classSession.create({
-        data: {
-          venueId: venueId!,
-          productId: pilates.id,
-          startsAt: new Date(Date.now() + 86_400_000),
-          endsAt: new Date(Date.now() + 90_000_000),
-          duration: 60,
-          capacity: 10,
-        },
-      })
-      const r = await mkReservation({
-        classSessionId: clase.id,
-        productId: pilates.id,
-        status: 'CANCELLED',
-        cancelledBy: 'SYSTEM',
-        cancellationReason: 'Reservation deposit payment window expired',
-        cancelledAt: new Date(),
-        depositStatus: 'EXPIRED',
-      })
-      provider.getPaymentStatus.mockResolvedValue(pagado())
+    // Caso DECLARADO, sin prueba a propósito (Codex 0-r5 #1, decisión «B» del 24-nov): si la cancelación de la clase está EN CURSO
+    // (escribió la clase y no ha confirmado) cuando la app confirma el pago de una reserva vencida, la clase se lee sin candado y se
+    // ve viva: la reserva revive con su depósito en una clase cancelada. El candado que lo cerraba trajo un interbloqueo (0-r6) y,
+    // ordenado, dos regresiones (0-r7). Ver `anticipos-ganados/promesa-0.md`, «Lo que queda abierto».
 
-      // El negocio está cancelando la clase: su transacción ya escribió la clase pero todavía no confirma.
-      let soltar!: () => void
-      const enCurso = new Promise<void>(res => (soltar = res))
-      const cancelacion = prisma.$transaction(
-        async tx => {
-          await tx.$executeRaw`UPDATE "ClassSession" SET status = 'CANCELLED' WHERE id = ${clase.id}`
-          await enCurso
-        },
-        { timeout: 20_000 },
-      )
-      await new Promise(res => setTimeout(res, 300))
-      const reconfirmacion = finalizeDepositCheckoutForConsumer(consumerId!, r.checkoutSessionId!).then(
-        () => 'resuelta',
-        (e: Error) => e.message,
-      )
-      await new Promise(res => setTimeout(res, 700))
-      soltar()
-      await cancelacion
-
-      expect(await reconfirmacion).toMatch(/cancelada/)
-      const fila = await prisma.reservation.findUniqueOrThrow({ where: { id: r.id } })
-      expect(fila.status).toBe('CANCELLED')
-      expect(fila.depositStatus).toBe('REFUNDED')
-    })
-
-    it('🔴 cancelación de una clase con 2 reservas cruzada con la confirmación de una vencida: sin interbloqueo (Codex 0-r6)', async () => {
+    it('cancelación de una clase con 2 reservas cruzada con la confirmación de una vencida: las dos terminan, sin interbloqueo (Codex 0-r6)', async () => {
       const categoria = await prisma.menuCategory.create({ data: { venueId: venueId!, name: 'Clases 3', slug: `clases-dep3-${RUN}` } })
       const spinning = await prisma.product.create({
         data: {
@@ -434,12 +381,11 @@ describe('D20 0b — el cobro de un depósito no revive lo cerrado (integration,
       seguir()
 
       const [c, f] = await Promise.all([cancelacion, reconfirmacion])
+      // Lo que se garantiza: ninguna de las dos se aborta por interbloqueo y el cobro queda registrado. Si la reserva vencida queda
+      // confirmada o devuelta depende del instante (el caso declarado de arriba), así que no se afirma.
       expect(c).toBe('ok')
-      expect(f).toMatch(/cancelada/)
       expect(f).not.toMatch(/deadlock/i)
-      const fila = await prisma.reservation.findUniqueOrThrow({ where: { id: vencida.id } })
-      expect(fila.status).toBe('CANCELLED')
-      expect(fila.depositStatus).toBe('REFUNDED')
+      expect((await prisma.reservation.findUniqueOrThrow({ where: { id: vencida.id } })).depositStatus).not.toBe('EXPIRED')
       expect((await prisma.reservation.findUniqueOrThrow({ where: { id: viva.id } })).status).toBe('CANCELLED')
     })
 

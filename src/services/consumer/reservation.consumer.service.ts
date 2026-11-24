@@ -549,17 +549,14 @@ export async function finalizeDepositCheckoutForConsumer(consumerId: string, ses
   // D20 0b: sólo un depósito PENDIENTE o VENCIDO de ESTA sesión pasa a pagado (antes, cualquiera que no fuera PAID: también uno
   // devuelto o retenido), y una reserva cancelada por una persona no se re-confirma (`registrarCobroDelDeposito`).
   if (paymentStatus.status === 'PAID' && reservation.depositStatus !== 'PAID') {
-    // Puede esperar a una cancelación de la clase en curso (su presupuesto es de 30 s): el mismo plazo aquí (Codex 0-r6).
-    const desenlace = await prisma.$transaction(
-      tx =>
-        registrarCobroDelDeposito(tx, {
-          reservationId: reservation.id,
-          checkoutSessionId: sessionId,
-          paymentIntentId: paymentStatus.paymentIntentId ?? null,
-          paidAt: paymentStatus.paidAt ?? new Date(),
-          desde: ['PENDING', 'EXPIRED'],
-        }),
-      { timeout: 30_000 },
+    const desenlace = await prisma.$transaction(tx =>
+      registrarCobroDelDeposito(tx, {
+        reservationId: reservation.id,
+        checkoutSessionId: sessionId,
+        paymentIntentId: paymentStatus.paymentIntentId ?? null,
+        paidAt: paymentStatus.paidAt ?? new Date(),
+        desde: ['PENDING', 'EXPIRED'],
+      }),
     )
     if (desenlace === 'COBRADA_EN_CANCELADA') {
       await devolverCobroDeReservaCancelada({ reservationId: reservation.id, venueId: reservation.venueId, checkoutSessionId: sessionId })

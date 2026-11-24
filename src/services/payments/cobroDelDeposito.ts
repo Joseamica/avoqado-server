@@ -36,19 +36,6 @@ export async function registrarCobroDelDeposito(
     desde: Array<'PENDING' | 'EXPIRED'>
   },
 ): Promise<DesenlaceDelCobro> {
-  // Orden de candados (Codex 0-r6): la CLASE antes que la reserva, el mismo orden que la cancelación de la clase (que bloquea la
-  // clase y luego sus reservas). Al revés, una confirmación y una cancelación se esperaban la una a la otra. Una cita no tiene clase.
-  // `FOR SHARE` también espera a una cancelación de la clase en curso y lee su resultado (Codex 0-r5 #1).
-  const [previa] = await tx.$queryRaw<Array<{ classSessionId: string | null }>>`
-    SELECT "classSessionId" FROM "Reservation" WHERE id = ${a.reservationId}`
-  const estadoDeLaClase = async (classSessionId: string, candado: boolean) => {
-    const [clase] = candado
-      ? await tx.$queryRaw<Array<{ status: string }>>`SELECT status FROM "ClassSession" WHERE id = ${classSessionId} FOR SHARE`
-      : await tx.$queryRaw<Array<{ status: string }>>`SELECT status FROM "ClassSession" WHERE id = ${classSessionId}`
-    return clase?.status ?? null
-  }
-  const claseAntes = previa?.classSessionId ? await estadoDeLaClase(previa.classSessionId, true) : null
-
   const [r] = await tx.$queryRaw<
     Array<{
       status: ReservationStatus
@@ -56,29 +43,29 @@ export async function registrarCobroDelDeposito(
       checkoutSessionId: string | null
       cancelledBy: string | null
       cancellationReason: string | null
-      classSessionId: string | null
+      claseCancelada: boolean
     }>
-  >`SELECT status, "depositStatus", "checkoutSessionId", "cancelledBy", "cancellationReason", "classSessionId" FROM "Reservation" WHERE id = ${a.reservationId} FOR UPDATE`
+  >`SELECT r.status, r."depositStatus", r."checkoutSessionId", r."cancelledBy", r."cancellationReason",
+           COALESCE(cs.status = 'CANCELLED', FALSE) AS "claseCancelada"
+      FROM "Reservation" r LEFT JOIN "ClassSession" cs ON cs.id = r."classSessionId"
+     WHERE r.id = ${a.reservationId}
+       FOR UPDATE OF r`
   if (!r || r.checkoutSessionId !== a.checkoutSessionId || !a.desde.includes(r.depositStatus as 'PENDING' | 'EXPIRED')) {
     return 'SIN_CAMBIO'
   }
-  // ponytail: si en ese instante la reserva cambió de clase, la nueva se lee sin candado (pedirlo ya con la reserva bloqueada
-  // volvería al orden que se traba); la ventana es la de mover una reserva vencida de clase en el mismo milisegundo.
-  const estadoClase =
-    r.classSessionId === (previa?.classSessionId ?? null)
-      ? claseAntes
-      : r.classSessionId
-        ? await estadoDeLaClase(r.classSessionId, false)
-        : null
   // Sólo el vencimiento del plazo del depósito (sus dos escritores y sus textos): «SYSTEM» también cancela una clase entera que
-  // canceló el negocio (Codex 0-r3 #1), y ésa no se re-confirma. Tampoco la vencida cuya clase se canceló después: la cancelación
-  // de la clase sólo toca reservas vivas, así que la vencida conserva su motivo (Codex 0-r4 #1).
+  // canceló el negocio (Codex 0-r3 #1), y ésa no se re-confirma. Tampoco la que venció por plazo y DESPUÉS el negocio canceló su
+  // clase (la cancelación de la clase sólo toca reservas vivas, así que la vencida conserva su motivo: Codex 0-r4 #1).
+  // ponytail: la clase se lee SIN candado (sólo la reserva va `FOR UPDATE OF r`). Caso declarado (Codex 0-r5 #1, decisión «B» del
+  // 24-nov): si la cancelación de la clase está a milisegundos de confirmarse cuando llega este cobro, aquí se ve viva y la reserva
+  // vencida revive con su depósito en una clase cancelada. Pedir la clase con candado trajo un interbloqueo (r6) y, ordenado, dos
+  // regresiones (r7); se quitó.
   const vencidaPorElPlazo =
     r.status === 'CANCELLED' &&
     r.depositStatus === 'EXPIRED' &&
     r.cancelledBy === 'SYSTEM' &&
     MOTIVOS_DE_VENCIMIENTO_DEL_DEPOSITO.includes(r.cancellationReason ?? '') &&
-    estadoClase !== 'CANCELLED'
+    !r.claseCancelada
   const confirmar = r.status === 'PENDING' || r.status === 'CONFIRMED' || vencidaPorElPlazo
   await tx.reservation.update({
     where: { id: a.reservationId },
