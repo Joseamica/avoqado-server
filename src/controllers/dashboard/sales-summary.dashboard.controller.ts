@@ -22,6 +22,7 @@ import {
 } from '@/services/dashboard/sales-summary.dashboard.service'
 import { encodeExport, sendExport, parseColumnsParam, parseFormatParam, getRowCapForFormat } from '@/services/dashboard/export.helpers'
 import { BadRequestError } from '@/errors/AppError'
+import { exigirComercioDelNegocio } from '@/services/venuePaymentConfig.service'
 import { zonaDelCalculo } from '@/utils/sanitizeTimezone'
 import { COLUMNAS_DEL_ARCHIVO, encabezadoDelArchivo, filasDelArchivo } from '@/services/dashboard/salesSummaryExportLabels'
 import { decidirCarril, MENSAJE_GET_VIEJO_GRANDE } from '@/services/exports/exportPolicy'
@@ -148,6 +149,7 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       includePrepaid: includePrepaid === 'true',
     }
 
+    await exigirComercioDelNegocio(venueId, filters.merchantAccountId)
     const report = await getSalesSummary(venueId, filters)
 
     res.json({
@@ -203,6 +205,8 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
     if (paymentMethod === 'QR_LEGACY' && venueId !== MINDFORM_NEW_VENUE_ID) {
       throw new BadRequestError('QR_LEGACY filter is only available for the MindForm venue')
     }
+    // Carril F (Codex r13): el filtro de comercio es de este negocio (los dos modos); si no, 400 en español.
+    await exigirComercioDelNegocio(venueId, typeof merchantAccountId === 'string' ? merchantAccountId : undefined)
 
     const cap = getRowCapForFormat(format)
     const parseList = (raw: unknown): string[] | undefined => {

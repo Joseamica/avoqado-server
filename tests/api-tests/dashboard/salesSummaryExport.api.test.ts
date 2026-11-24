@@ -497,14 +497,31 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
       filtered: true,
       byMerchantAccount: [{ merchantAccountId: 'clmerchantsse012345678901', displayName: 'Cuenta A' }],
     } as never)
-    prismaMock.payment.findFirst.mockClear()
+    // La clave es de este negocio (tiene cobros aquí): pasa la validación del comercio (Codex r13).
+    prismaMock.payment.findFirst.mockResolvedValue({ id: 'clpagosse0123456789012345' } as never)
     const res = await request(app)
       .get(exportUrl(`mode=summary&format=csv&merchantAccountId=clmerchantsse012345678901&${RANGE}`))
       .set(authHeader('OWNER'))
     expect(res.status).toBe(200)
     expect(res.text).toContain('Filtros,Comercio con clave clmerchantsse012345678901')
     expect(res.text).not.toContain('Comercio Cuenta A')
-    expect(prismaMock.payment.findFirst).not.toHaveBeenCalled()
+    // Sólo se pregunta si hay un cobro de este negocio con esa clave; nunca su nombre.
+    expect(prismaMock.payment.findFirst).toHaveBeenCalledWith({
+      where: { venueId: VENUE_ID, merchantAccountId: 'clmerchantsse012345678901' },
+      select: { id: true },
+    })
+  })
+
+  it('🔴 Codex r13 · un comercio que no es de este negocio ⇒ 400 en español, sin armar el archivo', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    mockGetSalesSummary.mockClear()
+    prismaMock.payment.findFirst.mockResolvedValue(null)
+    const res = await request(app)
+      .get(exportUrl(`mode=summary&format=csv&merchantAccountId=clajenosse01234567890123a&${RANGE}`))
+      .set(authHeader('OWNER'))
+    expect(res.status).toBe(400)
+    expect(JSON.stringify(res.body)).toContain('Ese comercio no es de este negocio')
+    expect(mockGetSalesSummary).not.toHaveBeenCalled()
   })
 
   it('summary mode keeps includeMerchantBreakdown for an ENTITLED venue', async () => {

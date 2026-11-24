@@ -342,6 +342,21 @@ export async function getVenueMerchantAccounts(venueId: string) {
   return accounts
 }
 
+/** El 400 cuando el filtro de comercio de un reporte no es de este negocio (carril F del Resumen de ventas, Codex r13). */
+export const MENSAJE_COMERCIO_AJENO = 'Ese comercio no es de este negocio. Elige uno de la lista de comercios.'
+
+/**
+ * El filtro de comercio debe ser de ESTE negocio: de su configuración de cobro (la lista del panel) o de un cobro suyo (una
+ * afiliación que ya no está configurada pero cobró aquí). Si no, 400. Lo usan el GET y el exporte del Resumen de ventas y su exporte
+ * en segundo plano.
+ */
+export async function exigirComercioDelNegocio(venueId: string, merchantAccountId: string | undefined): Promise<void> {
+  if (!merchantAccountId) return
+  if ((await getVenueMerchantAccounts(venueId)).some(c => c.id === merchantAccountId)) return
+  const cobro = await prisma.payment.findFirst({ where: { venueId, merchantAccountId }, select: { id: true } })
+  if (!cobro) throw new BadRequestError(MENSAJE_COMERCIO_AJENO)
+}
+
 /**
  * Get venue pricing structures for a venue (with org-level fallback)
  */

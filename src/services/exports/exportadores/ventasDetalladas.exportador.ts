@@ -9,6 +9,7 @@ import {
   type PaymentMethodFilter,
   type SalesSummaryExportFilters,
 } from '@/services/dashboard/sales-summary.dashboard.service'
+import { exigirComercioDelNegocio } from '@/services/venuePaymentConfig.service'
 import { relojDelNegocio } from '@/utils/datetime'
 import { construirWhereKeyset, fecha, lista, sinFuncion, str } from './comun'
 import type { Exportador } from './types'
@@ -94,8 +95,9 @@ export const ventasDetalladas: Exportador<SalesSummaryExportFilters, FilaVentaDe
   async autorizar(ctx, f) {
     if (await rangoBloqueadoPorPlan(ctx.venueId, f.startDate, f.endDate))
       return { status: 403, body: { ...RESPUESTA_RANGO_FUERA_DEL_PLAN } }
-    if (ctx.esSuperadmin || (await venueHasFeatureAccess(ctx.venueId, 'TRANSACTION_EXPORT'))) return null
-    return sinFuncion('TRANSACTION_EXPORT')
+    if (!ctx.esSuperadmin && !(await venueHasFeatureAccess(ctx.venueId, 'TRANSACTION_EXPORT'))) return sinFuncion('TRANSACTION_EXPORT')
+    await exigirComercioDelNegocio(ctx.venueId, f.merchantAccountId) // el mismo 400 que el GET y el exporte directo
+    return null
   },
   columnas: VENTAS_DETALLADAS_COLUMNAS,
   contar: (venueId, f, corte) => countSalesSummaryDetailRowsHasta(venueId, f, corte),
