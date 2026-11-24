@@ -6449,6 +6449,12 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       }
     ],
+    "avoqado-web-dashboard:avoqado-server/src/controllers/dashboard/inventory/productWizard.controller.ts": [
+      {
+        "pagina": "dashboard/menu/crear-producto",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
+      }
+    ],
     "avoqado-web-dashboard:avoqado-server/src/controllers/dashboard/payment.dashboard.controller.ts": [
       {
         "pagina": "dashboard/pagos/enviar-recibo-por-correo",
@@ -6485,10 +6491,6 @@
     ],
     "avoqado-web-dashboard:avoqado-server/src/middlewares/checkFeatureAccess.middleware.ts": [
       {
-        "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
-      },
-      {
         "pagina": "dashboard/reportes/ver-reembolsos",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       }
@@ -6496,7 +6498,7 @@
     "avoqado-web-dashboard:avoqado-server/src/middlewares/checkPermission.middleware.ts": [
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       },
       {
         "pagina": "dashboard/reembolsos/reembolsar-un-pago",
@@ -6578,10 +6580,6 @@
       },
       {
         "pagina": "dashboard/menu/crear-o-editar-servicio",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
-      },
-      {
-        "pagina": "dashboard/menu/crear-producto",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       },
       {
@@ -6686,7 +6684,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/routes/dashboard/manualPayment.routes.ts": [
@@ -6750,7 +6748,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/access/basePlan.service.ts": [
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/credits/ilimitado.ts": [
@@ -6851,6 +6849,10 @@
       {
         "pagina": "dashboard/inventario/por-que-una-receta-no-descuenta",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      },
+      {
+        "pagina": "dashboard/menu/crear-producto",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/productWizard.service.ts": [
@@ -7094,7 +7096,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       },
       {
         "pagina": "dashboard/pagos/enviar-recibo-por-correo",
@@ -7248,7 +7250,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       },
       {
         "pagina": "dashboard/plan/cambiar-tarjeta-del-plan",
@@ -7374,7 +7376,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/dashboard-main.tsx": [
@@ -7386,7 +7388,7 @@
     "avoqado-web-dashboard:src/features/master-catalog/errors.ts": [
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/hooks/use-access.ts": [
@@ -7502,7 +7504,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       },
       {
         "pagina": "dashboard/pagos/registrar-pago-manual",
@@ -7586,7 +7588,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/locales/es/loyalty.json": [
@@ -7618,7 +7620,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/locales/es/onlineOrdering.json": [
@@ -8137,16 +8139,22 @@
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
       }
     ],
+    "avoqado-web-dashboard:src/pages/Inventory/components/ProductOptionalSection.tsx": [
+      {
+        "pagina": "dashboard/menu/crear-producto",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
+      }
+    ],
     "avoqado-web-dashboard:src/pages/Inventory/components/ProductTypeSelectorModal.tsx": [
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/pages/Inventory/components/ProductWizardDialog.tsx": [
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/pages/Inventory/components/RawMaterialDialog.tsx": [
@@ -8236,7 +8244,7 @@
     "avoqado-web-dashboard:src/pages/Menu/Products/Products.tsx": [
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/pages/Menu/Products/productId.tsx": [
@@ -8738,7 +8746,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       },
       {
         "pagina": "dashboard/plan/cambiar-tarjeta-del-plan",
@@ -8806,7 +8814,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-producto",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/services/manualPayment.service.ts": [

@@ -512,8 +512,8 @@
     "intro": null,
     "steps": [
       {
-        "text": "El panel guarda el producto nuevo sólo si tienes permiso para crear productos y para editar el inventario, y si tu negocio tiene incluida la función de inventario.",
-        "quote": "El panel guarda el producto nuevo sólo si tienes permiso para crear productos y para editar el inventario, y si tu negocio tiene incluida la función de inventario."
+        "text": "Para guardar un producto nuevo necesitas permiso para crear productos y para editar el inventario, aunque no le cuentes piezas.",
+        "quote": "Para guardar un producto nuevo necesitas permiso para crear productos y para editar el inventario, aunque no le cuentes piezas."
       },
       {
         "text": "En la barra lateral, abre el menú de tu catálogo (su nombre cambia según tu giro, por ejemplo *Menú* o *Catálogo*), entra a *Productos* y toca *Nuevo producto*.",
@@ -528,14 +528,18 @@
         "quote": "Escribe el *Nombre del Producto* y el *Precio* y, si aparece, elige la *Categoría*."
       },
       {
+        "text": "Si quieres llevar cuántas piezas tienes, toca *Inventario* (si no lo ves, búscalo en *Más opciones*; lo digital y las donaciones no llevan piezas), deja *Seguimiento de Cantidad* y escribe el *Stock Inicial*.",
+        "quote": "Si quieres llevar cuántas piezas tienes, toca *Inventario* (si no lo ves, búscalo en *Más opciones*; lo digital y las donaciones no llevan piezas), deja *Seguimiento de Cantidad* y escribe el *Stock Inicial*."
+      },
+      {
         "text": "Toca *Finalizar*.",
         "quote": "Toca *Finalizar*."
       }
     ],
     "supported": true,
     "alteracion": "falta-advertencia",
-    "falta": "Si al tocar *Finalizar* sale cualquier «Error», también esos dos, no lo vuelvas a crear ni le pidas a otra persona que lo cree: pudo quedar creado en un primer intento.",
-    "nota": "T-F13: la de c65 de b-tf6-r1. Los cuatro pasos de la guía, pero sin su advertencia de no volver a crear el producto si sale un error."
+    "falta": "Si al tocar *Finalizar* sale cualquier otro «Error», no lo vuelvas a crear ni le pidas a otra persona que lo cree: pudo quedar creado aunque saliera el error.",
+    "nota": "T-F13: la de c65 de b-tf6-r1. Los cinco pasos de la guía, pero sin su advertencia de no volver a crear el producto si sale un error."
   },
   {
     "id": "j27",

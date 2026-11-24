@@ -560,14 +560,12 @@
       ]
     },
     "dashboard/menu/crear-producto": {
-      "sha256": "3d14d561a7b61bd8053ea74e3bff3036aea46fa8db8cc569150400d1ba1bb4d4",
+      "sha256": "1f4da8b2d860fed77fc38df183010180245a482f507c2478b70e50583c558587",
       "requiredPermissions": [
         "menu:read",
         "menu:create",
         "inventory:update"
-      ],
-      "featureCode": "INVENTORY_TRACKING",
-      "gateKind": "FEATURE"
+      ]
     },
     "dashboard/menu/gestionar-productos": {
       "sha256": "cb34d9459d260801215ae25cc26969c988d697904161d4c83f2bb613c92b05f5",
