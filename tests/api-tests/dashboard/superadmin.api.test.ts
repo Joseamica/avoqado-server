@@ -9,7 +9,7 @@
 import request from 'supertest'
 import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
-import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
+import { mirrorTokenRoleOnStaffVenue, simularSuperadminReal } from '@tests/__helpers__/venueRoleMock'
 
 let app: Express
 const TEST_SECRET = 'test-secret'
@@ -78,6 +78,8 @@ const TOKEN_VENUE_ID = 'test-venue'
 const makeToken = (role: string) => {
   // El rol se AUTORIZA contra StaffVenue, no contra el JWT (7bdbac01).
   mirrorTokenRoleOnStaffVenue(role, TOKEN_VENUE_ID)
+  // El montaje exige además el ROL SUPERADMIN, leído de la base (encargo fc9c53): la fila SUPERADMIN real sólo existe para ese rol.
+  simularSuperadminReal(role === 'SUPERADMIN')
   return jwt.sign({ sub: 'test-user', orgId: 'test-org', venueId: TOKEN_VENUE_ID, role }, process.env.ACCESS_TOKEN_SECRET || TEST_SECRET)
 }
 
