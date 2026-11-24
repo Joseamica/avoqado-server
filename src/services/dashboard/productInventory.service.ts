@@ -71,7 +71,10 @@ export async function adjustInventoryStockInTx(
   // camino legítimo hacia negativo es la venta. El throw dentro de la tx
   // revierte el increment.
   if (newStock.lessThan(0) && previousStock.greaterThanOrEqualTo(0)) {
-    throw new AppError(`Insufficient stock. Current: ${previousStock}, Requested adjustment: ${data.quantity}`, 400)
+    throw new AppError(
+      `No alcanza el inventario: hay ${previousStock} y el ajuste quita ${previousStock.sub(newStock)}. Si alguien vendió o ajustó mientras tanto, actualiza la pantalla.`,
+      400,
+    )
   }
 
   await tx.inventoryMovement.create({

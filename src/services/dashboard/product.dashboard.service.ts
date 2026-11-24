@@ -872,6 +872,10 @@ export const productoCambioError = () =>
     'PRODUCT_CHANGED',
   )
 
+/** D1 (choques): otra persona quitó un grupo de modificadores mientras este producto se editaba, o el id ya no es del negocio. */
+export const GRUPO_DE_MODIFICADORES_YA_NO_EXISTE =
+  'Uno de los grupos de modificadores ya no existe: alguien pudo quitarlo mientras editabas. Vuelve a abrir el producto e inténtalo de nuevo.'
+
 export async function updateProduct(
   venueId: string,
   productId: string,
@@ -942,7 +946,7 @@ export async function updateProduct(
       const invalidGroupIds = modifierGroupIds.filter(id => !validGroupIds.includes(id))
 
       if (invalidGroupIds.length > 0) {
-        throw new AppError(`Invalid modifier group IDs: ${invalidGroupIds.join(', ')}`, 400)
+        throw new AppError(GRUPO_DE_MODIFICADORES_YA_NO_EXISTE, 400)
       }
 
       updateData.modifierGroups = {
@@ -987,7 +991,7 @@ export async function updateProduct(
     // curso terminó antes. Si no, este PATCH re-enlazaría un grupo recién archivado.
     if (modifierGroupIds?.length) {
       const vivos = await tx.modifierGroup.count({ where: { id: { in: modifierGroupIds }, venueId, active: true } })
-      if (vivos !== new Set(modifierGroupIds).size) throw new AppError(`Invalid modifier group IDs: ${modifierGroupIds.join(', ')}`, 400)
+      if (vivos !== new Set(modifierGroupIds).size) throw new AppError(GRUPO_DE_MODIFICADORES_YA_NO_EXISTE, 400)
     }
     await assertLegacyProductReferencesForVenue(tx, {
       venueId,

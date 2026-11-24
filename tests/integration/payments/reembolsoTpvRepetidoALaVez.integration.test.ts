@@ -130,7 +130,7 @@ describe('D1 · el mismo reembolso de la TPV repetido a la vez', () => {
     ])
 
     expect(resultados.map(r => r.status).sort()).toEqual(['fulfilled', 'rejected'])
-    expect(resultados.map(motivo).filter(Boolean)).toEqual([expect.stringMatching(/exceeds remaining refundable/)])
+    expect(resultados.map(motivo).filter(Boolean)).toEqual([expect.stringMatching(/sólo quedan \$[\d.]+ por devolver/)])
     expect(await reembolsosDe(pago.id)).toHaveLength(1)
   })
 })

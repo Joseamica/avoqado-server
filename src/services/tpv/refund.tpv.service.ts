@@ -186,6 +186,12 @@ const LLAVE_IDEMPOTENCIA_MAX = 64
 // list would undercount money already returned and could permit an over-refund.
 const MAX_REFUND_ROWS_PER_PAYMENT = 1_000
 
+/** D1 (choques): se pide devolver más de lo que queda, casi siempre porque otro reembolso del mismo cobro entró primero. */
+const sinSaldoParaDevolver = (pedidoPesos: number, quedanPesos: number) =>
+  new BadRequestError(
+    `No se puede devolver $${pedidoPesos.toFixed(2)}: de este cobro sólo quedan $${Math.max(0, quedanPesos).toFixed(2)} por devolver. Puede que alguien ya haya hecho otro reembolso de este cobro; actualiza la pantalla.`,
+  )
+
 /**
  * 🔴 Prefijo obligatorio. `Payment.idempotencyKey` es UNA sola columna para cobros Y
  * reembolsos, bajo un `@@unique([venueId, idempotencyKey])` de toda la tabla. Un cliente que
@@ -529,7 +535,7 @@ export async function recordRefund(
       alreadyRefunded,
       remainingRefundable,
     })
-    throw new BadRequestError(`Refund amount (${refundAmountInPesos}) exceeds remaining refundable amount (${remainingRefundable})`)
+    throw sinSaldoParaDevolver(refundAmountInPesos, remainingRefundable)
   }
 
   // Split between sale (Payment.amount) and tip (Payment.tipAmount). Default
@@ -821,7 +827,7 @@ export async function recordRefund(
         // su anomalía (`exchangeTerminalRefund.ts`).
         const noPasoPorElBanco = laTerminalYaDevolvio(locked) ? centavosQueNoPasaronPorElBanco(filasDeReembolso) : 0
         if (esteReembolsoCents > lockedRemainingCents + noPasoPorElBanco) {
-          throw new BadRequestError(`Refund amount (${refundAmountInPesos}) exceeds remaining refundable amount (${lockedRemaining})`)
+          throw sinSaldoParaDevolver(refundAmountInPesos, lockedRemaining)
         }
         const anotadaDeMas = esteReembolsoCents > lockedRemainingCents
         const anotadaTrasUnCambio = anotadaDeMas && centavosQueUsaronLosCambios(filasDeReembolso) > 0

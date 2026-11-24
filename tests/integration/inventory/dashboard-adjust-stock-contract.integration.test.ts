@@ -292,7 +292,10 @@ describe('POST …/products/:id/adjust-stock — la forma de la respuesta', () =
       },
     )
 
-    expect(r.error).toMatchObject({ statusCode: 400, message: expect.stringMatching(/Insufficient stock/) })
+    expect(r.error).toMatchObject({
+      statusCode: 400,
+      message: 'No alcanza el inventario: hay 1 y el ajuste quita 4. Si alguien vendió o ajustó mientras tanto, actualiza la pantalla.',
+    })
     expect((await prisma.inventory.findFirstOrThrow({ where: { productId: item.id } })).currentStock.toString()).toBe('1')
   })
 

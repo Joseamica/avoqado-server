@@ -286,7 +286,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
 
     await expect(
       refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE, amount: 10000, isPartialRefund: false }) as never, 'staff-1'),
-    ).rejects.toThrow(/exceeds remaining refundable/)
+    ).rejects.toThrow(/sólo quedan \$[\d.]+ por devolver/)
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
   })
 
