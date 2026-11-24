@@ -372,11 +372,25 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
     }
     // Carril F (full-testing W3 y W4): el ARCHIVO dice lo que la pantalla (nombres, orden, «Cobrado» con filtro, sin renglones vacíos) y
     // arriba qué periodo y qué filtros trae. Las filas de `flattenSalesSummaryForExport` (las que lee la MCP) no cambian.
-    const encabezado = encabezadoDelArchivo(startDate, endDate, filters, report)
+    // El nombre del comercio elegido, sólo si es de un cobro de ESTE negocio (sin esa sección el reporte no trae nombres; Codex r8 #4).
+    const comercioElegido = filters.merchantAccountId
+      ? await prisma.payment.findFirst({
+          where: { venueId, merchantAccountId: filters.merchantAccountId },
+          select: { merchantAccount: { select: { displayName: true, alias: true } } },
+        })
+      : null
+    const encabezado = encabezadoDelArchivo(
+      startDate,
+      endDate,
+      filters,
+      report,
+      comercioElegido?.merchantAccount?.displayName || comercioElegido?.merchantAccount?.alias,
+    )
     const encoded = await encodeExport(format, {
       allColumns: COLUMNAS_DEL_ARCHIVO,
       requestedColumnIds: COLUMNAS_DEL_ARCHIVO.map(c => c.id),
-      rows: filasDelArchivo(rows, report, encabezado),
+      // En el PDF el periodo y los filtros van bajo el título (no se repiten como filas de la tabla).
+      rows: filasDelArchivo(rows, report, format === 'pdf' ? [] : encabezado),
       title: 'Resumen de ventas',
       // D15: CSV y Excel llevan el aviso como primera fila (viene en `rows`); el PDF lo lleva además completo bajo el título, con
       // el periodo y los filtros.

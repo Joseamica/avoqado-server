@@ -1,4 +1,9 @@
-import type { SalesSummaryExportRow, SalesSummaryFilters, SalesSummaryResponse } from '@/services/dashboard/sales-summary.dashboard.service'
+import {
+  alCentavoComoLaPantalla,
+  type SalesSummaryExportRow,
+  type SalesSummaryFilters,
+  type SalesSummaryResponse,
+} from '@/services/dashboard/sales-summary.dashboard.service'
 import type { ExportColumnDef } from '@/services/dashboard/export.helpers'
 
 /**
@@ -61,7 +66,7 @@ const TOTAL_EN_PANTALLA: Record<string, string> = {
   Reembolsos: 'Devoluciones',
   Impuestos: 'Impuestos incluidos',
   'Total cobrado': 'Neto cobrado',
-  'Sin cobrar: cuentas abiertas (no es venta)': 'Sin cobrar (cuentas abiertas, no es venta)',
+  'Sin cobrar: cuentas abiertas (no es venta)': 'Sin cobrar (aparte: cuentas abiertas, no es venta)',
 }
 /** Renglones que la pantalla sólo enseña si no son cero. */
 const SOLO_SI_HAY = new Set([
@@ -69,8 +74,8 @@ const SOLO_SI_HAY = new Set([
   'Pagado con saldo de tarjeta de regalo (incluido en ventas y propinas)',
 ])
 
-/** Redondeo al centavo como la pantalla (Intl): la mitad se aleja del cero, también en negativos (−4.425 ⇒ −4.43). */
-const alCentavo = (n: number | null): number | null => (n === null ? null : (Math.sign(n) * Math.round(Math.abs(n) * 100)) / 100)
+/** Redondeo al centavo como la pantalla (el mismo Intl). */
+const alCentavo = (n: number | null): number | null => (n === null ? null : alCentavoComoLaPantalla(n))
 
 /**
  * Las filas del archivo: arriba el periodo y los filtros (W4); los totales con los nombres y el orden de la pantalla, sin renglones
@@ -114,9 +119,14 @@ export function filasDelArchivo(rows: SalesSummaryExportRow[], report: SalesSumm
     const neto = totales.findIndex(t => t.concepto === 'Neto cobrado')
     totales.splice(neto >= 0 ? neto + 1 : totales.length, 0, f)
   }
-  // D16.2: con un filtro de pago, la cuenta abre con lo cobrado con ese filtro (con propina, sin devoluciones).
+  // «Sin cobrar» al final, aparte, como en la pantalla (no entra en «Neto cobrado»; Codex r8 #3).
+  const sinCobrar = totales.findIndex(f => f.concepto.startsWith('Sin cobrar'))
+  if (sinCobrar >= 0) totales.push(...totales.splice(sinCobrar, 1))
+  // D16.2: con un filtro de pago, la cuenta abre con lo cobrado con ese filtro (con propina, sin devoluciones). Las propinas ya van
+  // dentro: se dice en su renglón, para que nadie las sume dos veces (Codex r8 #3).
   if (totales.length > 0 && typeof report.summary.chargedAmount === 'number') {
     totales.unshift(fila('Totales', 'Cobrado', null, alCentavo(report.summary.chargedAmount)))
+    for (const f of totales) if (f.concepto === 'Propinas') f.concepto = 'Propinas (ya incluidas en «Cobrado»)'
   }
 
   // El aviso del QR anterior (sección «Aviso») sigue siendo lo primero después del encabezado.
@@ -151,13 +161,16 @@ export function encabezadoDelArchivo(
   endDate: string,
   filtros: Pick<SalesSummaryFilters, 'paymentMethod' | 'cardType' | 'merchantAccountId' | 'timezone'>,
   report: Pick<SalesSummaryResponse, 'byMerchantAccount'>,
+  /** El nombre del comercio elegido, si quien llama lo resolvió (dentro del negocio). */
+  nombreDelComercio?: string | null,
 ): string[] {
   const zona = filtros.timezone || 'America/Mexico_City'
   const partes: string[] = []
   if (filtros.paymentMethod) partes.push(FILTRO_DE_METODO[filtros.paymentMethod] ?? filtros.paymentMethod)
-  if (filtros.cardType) partes.push(TIPO_DE_TARJETA[filtros.cardType] ?? filtros.cardType)
+  // El tipo de tarjeta sólo cuenta con «Tarjeta» (el cálculo lo ignora con otro método; Codex r8 #4).
+  if (filtros.cardType && filtros.paymentMethod === 'CARD') partes.push(TIPO_DE_TARJETA[filtros.cardType] ?? filtros.cardType)
   if (filtros.merchantAccountId) {
-    const nombre = report.byMerchantAccount?.find(m => m.merchantAccountId === filtros.merchantAccountId)?.displayName
+    const nombre = nombreDelComercio || report.byMerchantAccount?.find(m => m.merchantAccountId === filtros.merchantAccountId)?.displayName
     partes.push(nombre ? `Comercio ${nombre}` : 'Comercio elegido')
   }
   return [`Periodo: ${dia(startDate, zona)} – ${dia(endDate, zona)}`, `Filtros: ${partes.length > 0 ? partes.join(' · ') : 'Ninguno'}`]

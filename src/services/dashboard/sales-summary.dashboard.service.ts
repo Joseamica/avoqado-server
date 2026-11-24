@@ -2438,10 +2438,12 @@ export interface SalesSummaryExportFilters {
   shiftId?: string
 }
 
-// Al centavo como la pantalla (Intl): la mitad se aleja del cero también en negativos. `Math.round` la manda hacia +∞ y el archivo
-// decía −4.42 donde la pantalla dice −$4.43 (full-testing W2 del carril F).
-const round2x = (n: number | null | undefined): number | null =>
-  n == null ? null : (Math.sign(n) * Math.round(Math.abs(n) * 100)) / 100 || 0
+// Al centavo EXACTAMENTE como la pantalla, con el mismo Intl: la mitad se aleja del cero también en negativos y sobre el decimal más
+// corto del número (1.005 ⇒ 1.01, aunque 1.005 × 100 = 100.49999…). `Math.round(n * 100)` daba −4.42 y −1.00 donde la pantalla dice
+// −$4.43 y −$1.01 (full-testing W2, Codex r8 #2 del carril F).
+const formatoAlCentavo = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2, useGrouping: false })
+export const alCentavoComoLaPantalla = (n: number): number => Number(formatoAlCentavo.format(n)) || 0
+const round2x = (n: number | null | undefined): number | null => (n == null ? null : alCentavoComoLaPantalla(n))
 
 const DIAS_DE_LA_SEMANA: Record<string, string> = {
   sunday: 'Domingo',

@@ -98,6 +98,52 @@ describe('el archivo del Resumen de ventas dice lo mismo que la pantalla (full-t
     expect(monto(reporte(), 'Neto cobrado')).toBe(643.98)
   })
 
+  it('🔴 Codex r8 #2 · el redondeo es el de la pantalla también donde ×100 queda apenas abajo de la mitad (1.005 ⇒ −1.01)', () => {
+    expect(monto(reporte({ summary: { ...BASE, platformFees: 1.005 } }), 'Comisiones de plataforma')).toBe(-1.01)
+  })
+
+  it('🔴 Codex r8 #3 · con «Cobrado», las propinas dicen que ya van dentro; «Sin cobrar» va al final, aparte, como en la pantalla', () => {
+    const filtrado = reporte({
+      filtered: true,
+      summary: {
+        ...BASE,
+        grossSales: null,
+        items: null,
+        serviceCosts: null,
+        discounts: null,
+        netSales: null,
+        deferredSales: null,
+        taxes: null,
+        unpaidSales: null,
+        unpaidOrders: null,
+        chargedAmount: 110,
+        refunds: 0,
+        tips: 10,
+        platformFees: 0,
+        tenderCommissions: 0,
+        totalCollected: 110,
+      },
+    })
+    expect(totales(filtrado).map(f => f.concepto)).toContain('Propinas (ya incluidas en «Cobrado»)')
+    const conceptos = totales(reporte()).map(f => f.concepto)
+    expect(conceptos[conceptos.length - 1]).toMatch(/^Sin cobrar/)
+  })
+
+  it('🔴 Codex r8 #4 · el encabezado sólo dice el tipo de tarjeta con «Tarjeta» y nombra el comercio que se le pase', () => {
+    const z = { timezone: 'America/Mexico_City' }
+    expect(
+      encabezadoDelArchivo(
+        '2026-11-23T06:00:00.000Z',
+        '2026-11-24T05:59:59.999Z',
+        { ...z, paymentMethod: 'CASH', cardType: 'CREDIT' },
+        {},
+      )[1],
+    ).toBe('Filtros: Efectivo')
+    expect(
+      encabezadoDelArchivo('2026-11-23T06:00:00.000Z', '2026-11-24T05:59:59.999Z', { ...z, merchantAccountId: 'm9' }, {}, 'Cuenta B')[1],
+    ).toBe('Filtros: Comercio Cuenta B')
+  })
+
   it('🔴 W3 · los nombres de la pantalla: Devoluciones, Impuestos incluidos, Neto cobrado; y empleados después de «Neto cobrado»', () => {
     const conceptos = totales(reporte()).map(f => f.concepto)
     expect(conceptos).toEqual(expect.arrayContaining(['Devoluciones', 'Impuestos incluidos', 'Neto cobrado']))
