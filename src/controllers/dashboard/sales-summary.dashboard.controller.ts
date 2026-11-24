@@ -16,22 +16,14 @@ import {
   CardTypeFilter,
   SalesSummaryExportFilters,
   SalesSummaryExportSection,
-  SalesSummaryExportRow,
   flattenSalesSummaryForExport,
   countSalesSummaryDetailRows,
   fetchSalesSummaryDetailRows,
 } from '@/services/dashboard/sales-summary.dashboard.service'
-import {
-  encodeExport,
-  sendExport,
-  parseColumnsParam,
-  parseFormatParam,
-  getRowCapForFormat,
-  type ExportColumnDef,
-} from '@/services/dashboard/export.helpers'
+import { encodeExport, sendExport, parseColumnsParam, parseFormatParam, getRowCapForFormat } from '@/services/dashboard/export.helpers'
 import { BadRequestError } from '@/errors/AppError'
 import { zonaDelCalculo } from '@/utils/sanitizeTimezone'
-import { conceptoDelArchivo, seccionDelArchivo } from '@/services/dashboard/salesSummaryExportLabels'
+import { COLUMNAS_DEL_ARCHIVO, encabezadoDelArchivo, filasDelArchivo } from '@/services/dashboard/salesSummaryExportLabels'
 import { decidirCarril, MENSAJE_GET_VIEJO_GRANDE } from '@/services/exports/exportPolicy'
 import { MENSAJE_QR_ANTERIOR_SIN_DETALLE, VENTAS_DETALLADAS_COLUMNAS } from '@/services/exports/exportadores/ventasDetalladas.exportador'
 import { AVISO_PUENTE_QR_CAIDO, MINDFORM_NEW_VENUE_ID } from '@/services/legacy/qrPayments.legacy.service'
@@ -378,25 +370,17 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
       demasiadas(rows.length)
       return
     }
-    type Row = SalesSummaryExportRow
-
-    const allColumns: ExportColumnDef<Row>[] = [
-      // Ids en inglés (`totals`, `CARD`) sólo en las filas, que también lee la MCP; en el archivo, en español (carril F).
-      { id: 'section', label: 'Sección', value: r => seccionDelArchivo(r) },
-      { id: 'label', label: 'Concepto', value: r => conceptoDelArchivo(r) },
-      { id: 'count', label: 'Cantidad', value: r => r.count },
-      { id: 'amount', label: 'Monto', value: r => r.amount },
-      { id: 'percentage', label: 'Porcentaje', value: r => r.percentage },
-    ]
-
+    // Carril F (full-testing W3 y W4): el ARCHIVO dice lo que la pantalla (nombres, orden, «Cobrado» con filtro, sin renglones vacíos) y
+    // arriba qué periodo y qué filtros trae. Las filas de `flattenSalesSummaryForExport` (las que lee la MCP) no cambian.
+    const encabezado = encabezadoDelArchivo(startDate, endDate, filters, report)
     const encoded = await encodeExport(format, {
-      allColumns,
-      requestedColumnIds: allColumns.map(c => c.id),
-      rows,
+      allColumns: COLUMNAS_DEL_ARCHIVO,
+      requestedColumnIds: COLUMNAS_DEL_ARCHIVO.map(c => c.id),
+      rows: filasDelArchivo(rows, report, encabezado),
       title: 'Resumen de ventas',
-      // D15: CSV y Excel llevan el aviso como primera fila (viene en `rows`); el PDF corta las celdas largas con «…», así
-      // que además lo lleva completo bajo el título.
-      ...(report.legacyUnavailable ? { resumen: [AVISO_PUENTE_QR_CAIDO] } : {}),
+      // D15: CSV y Excel llevan el aviso como primera fila (viene en `rows`); el PDF lo lleva además completo bajo el título, con
+      // el periodo y los filtros.
+      resumen: [...encabezado, ...(report.legacyUnavailable ? [AVISO_PUENTE_QR_CAIDO] : [])],
     })
     logger.info('[SalesSummary export summary]', { venueId, format, sections })
     sendExport(res, encoded, 'resumen-ventas')

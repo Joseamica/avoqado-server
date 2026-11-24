@@ -459,6 +459,13 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
     expect(res.text).toContain('Métodos de pago')
     expect(res.text).toContain('Tarjeta')
     expect(res.text).not.toMatch(/(^|[,"])(totals|paymentMethods|CARD)([,"]|$)/m)
+    // Carril F (full-testing W3 y W4): arriba el periodo y los filtros; los nombres de la pantalla.
+    const lineas = res.text.replace(/^\uFEFF/, '').split(/\r?\n/)
+    expect(lineas[1]).toMatch(/^Periodo,/)
+    expect(lineas[2]).toMatch(/^Filtros,Ninguno/)
+    expect(res.text).toContain('Devoluciones')
+    expect(res.text).toContain('Neto cobrado')
+    expect(res.text).not.toMatch(/Reembolsos|Total cobrado/)
   })
 
   it('🔴 D13.6 · la sección «statement» se acepta y pide el estado de cuenta (compuerta Pro)', async () => {

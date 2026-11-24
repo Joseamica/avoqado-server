@@ -2438,7 +2438,10 @@ export interface SalesSummaryExportFilters {
   shiftId?: string
 }
 
-const round2x = (n: number | null | undefined): number | null => (n == null ? null : Math.round(n * 100) / 100)
+// Al centavo como la pantalla (Intl): la mitad se aleja del cero también en negativos. `Math.round` la manda hacia +∞ y el archivo
+// decía −4.42 donde la pantalla dice −$4.43 (full-testing W2 del carril F).
+const round2x = (n: number | null | undefined): number | null =>
+  n == null ? null : (Math.sign(n) * Math.round(Math.abs(n) * 100)) / 100 || 0
 
 const DIAS_DE_LA_SEMANA: Record<string, string> = {
   sunday: 'Domingo',
