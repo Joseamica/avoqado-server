@@ -10,6 +10,7 @@ import { confirmCardAuthorization } from '@/services/online-ordering/card/confir
 import { handleStripeRefundEvent } from '@/services/online-ordering/card/refund.service'
 import { chargeMerchant, isForeignStripeEvent } from '@/services/online-ordering/card/merchant'
 import { getProvider } from '@/services/payments/provider-registry'
+import { devolverCobroDeReservaCancelada, registrarCobroDelDeposito } from '@/services/payments/cobroDelDeposito'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import emailService from '@/services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '@/services/whatsapp.service'
@@ -223,6 +224,8 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
   }
 
   let justConfirmedReservationId: string | null = null
+  // D20 0b: una reserva cancelada por una persona no se re-confirma; su cobro se registra y se devuelve después del commit.
+  let cobradaEnCancelada: { id: string; venueId: string } | null = null
   try {
     await prisma.$transaction(async tx => {
       await tx.processedStripeEvent.create({
@@ -235,35 +238,35 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
         },
       })
 
-      // Capture the row id BEFORE updating so we can fire the confirmation
-      // email after the tx commits. updateMany doesn't return rows; the
-      // findFirst+update pair keeps the original idempotency semantics
-      // (no-op when depositStatus has already advanced past PENDING).
+      // Capture the row id BEFORE updating so we can fire the confirmation email after the tx commits. The write itself lives in
+      // `registrarCobroDelDeposito` (bajo el candado de la fila, de ESTA sesión y sólo desde PENDING; no-op si ya avanzó).
       const target = await tx.reservation.findFirst({
         where: {
           checkoutSessionId: session.id,
           depositStatus: 'PENDING',
         },
-        select: { id: true },
+        select: { id: true, venueId: true },
       })
 
-      const updated = target
-        ? await tx.reservation.updateMany({
-            where: { id: target.id, depositStatus: 'PENDING' },
-            data: {
-              status: ReservationStatus.CONFIRMED,
-              confirmedAt: new Date(),
-              depositStatus: 'PAID',
-              depositPaidAt: new Date(),
-              depositProcessorRef: paymentIntentId,
-            },
+      const desenlace = target
+        ? await registrarCobroDelDeposito(tx, {
+            reservationId: target.id,
+            checkoutSessionId: session.id,
+            paymentIntentId,
+            paidAt: new Date(),
+            desde: ['PENDING'],
           })
-        : { count: 0 }
+        : 'SIN_CAMBIO'
 
-      if (updated.count === 1) {
+      if (desenlace === 'CONFIRMADA') {
         justConfirmedReservationId = target!.id
         return
       }
+      if (desenlace === 'COBRADA_EN_CANCELADA') {
+        cobradaEnCancelada = target!
+        return
+      }
+      if (desenlace === 'COBRADA') return
 
       const current = await tx.reservation.findFirst({
         where: { checkoutSessionId: session.id },
@@ -295,6 +298,12 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
       return
     }
     throw error
+  }
+
+  if (cobradaEnCancelada) {
+    const { id, venueId } = cobradaEnCancelada as { id: string; venueId: string }
+    await devolverCobroDeReservaCancelada({ reservationId: id, venueId, checkoutSessionId: session.id })
+    return
   }
 
   // After the status flip commits, fire the booking confirmation email. We

@@ -31,6 +31,8 @@ describe('createOrderFromReservation staff prefill', () => {
   beforeEach(() => {
     jest.resetAllMocks()
     prismaMock.order.findFirst.mockResolvedValue(null)
+    // D20 0a: sin canjes de créditos en la reserva, la cuenta nace igual que siempre.
+    prismaMock.creditTransaction.findMany.mockResolvedValue([])
     prismaMock.product.findMany.mockResolvedValue([
       {
         id: 'product-1',

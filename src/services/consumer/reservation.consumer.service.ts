@@ -13,6 +13,7 @@ import { withDeadlockRetry, withSerializableRetry, type TxConReintento } from '@
 import { fastFailLiveHold } from '@/services/reservation/appointmentSlotHold.service'
 import { normalizeBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
 import { redeemCreditsForReservation, titularDelPase } from '@/services/reservation/creditRedemption.service'
+import { devolverCobroDeReservaCancelada, registrarCobroDelDeposito } from '@/services/payments/cobroDelDeposito'
 
 type ConsumerReservationInput = {
   startsAt?: Date
@@ -100,6 +101,8 @@ async function createReservationDepositCheckout(
     depositAmount: any
     depositExpiresAt: Date | null
     idempotencyKey?: string | null
+    /** La sesión vigente al revisar el estado (null si nunca hubo): la escritura sólo pasa si sigue siendo ésa. */
+    checkoutSessionId?: string | null
   },
   idempotencyKey?: string,
 ) {
@@ -145,8 +148,15 @@ async function createReservationDepositCheckout(
     paymentMethodTypes: ['card'],
   })
 
-  await prisma.reservation.update({
-    where: { id: reservation.id },
+  // D20 0b: la revisión del estado se hizo ANTES de crear la sesión; en medio, el enlace anterior pudo cobrarse. Se escribe sólo si
+  // la reserva sigue con la MISMA sesión, viva y con un depósito que se puede pagar; si no, se vence el enlace nuevo.
+  const instalado = await prisma.reservation.updateMany({
+    where: {
+      id: reservation.id,
+      checkoutSessionId: reservation.checkoutSessionId ?? null,
+      status: { not: ReservationStatus.CANCELLED },
+      OR: [{ depositStatus: null }, { depositStatus: { in: ['PENDING', 'EXPIRED', 'CARD_HOLD'] } }],
+    },
     data: {
       checkoutSessionId: session.id,
       depositStatus: 'PENDING',
@@ -157,6 +167,15 @@ async function createReservationDepositCheckout(
       ecommerceMerchantId: stripeMerchant.id,
     },
   })
+  if (instalado.count !== 1) {
+    await provider.expireAuthorizationCheckout(stripeMerchant, session.id).catch(err =>
+      logger.warn('[RESERVATION DEPOSIT] No se pudo vencer el enlace que ya no aplica', {
+        reservationId: reservation.id,
+        err: (err as Error)?.message,
+      }),
+    )
+    throw new ConflictError('El depósito de esta reserva cambió mientras se preparaba el pago. Vuelve a abrir tu reserva.')
+  }
 
   return {
     checkoutUrl: session.url,
@@ -459,6 +478,7 @@ export async function createDepositCheckoutForConsumer(consumerId: string, venue
       depositAmount: true,
       depositStatus: true,
       depositExpiresAt: true,
+      checkoutSessionId: true,
     },
   })
 
@@ -520,17 +540,21 @@ export async function finalizeDepositCheckoutForConsumer(consumerId: string, ses
   const provider = getProvider(stripeMerchant)
   const paymentStatus = await provider.getPaymentStatus(stripeMerchant, sessionId)
 
+  // D20 0b: sólo un depósito PENDIENTE o VENCIDO de ESTA sesión pasa a pagado (antes, cualquiera que no fuera PAID: también uno
+  // devuelto o retenido), y una reserva cancelada por una persona no se re-confirma (`registrarCobroDelDeposito`).
   if (paymentStatus.status === 'PAID' && reservation.depositStatus !== 'PAID') {
-    await prisma.reservation.update({
-      where: { id: reservation.id },
-      data: {
-        status: ReservationStatus.CONFIRMED,
-        confirmedAt: new Date(),
-        depositStatus: 'PAID',
-        depositPaidAt: paymentStatus.paidAt ?? new Date(),
-        depositProcessorRef: paymentStatus.paymentIntentId,
-      },
-    })
+    const desenlace = await prisma.$transaction(tx =>
+      registrarCobroDelDeposito(tx, {
+        reservationId: reservation.id,
+        checkoutSessionId: sessionId,
+        paymentIntentId: paymentStatus.paymentIntentId ?? null,
+        paidAt: paymentStatus.paidAt ?? new Date(),
+        desde: ['PENDING', 'EXPIRED'],
+      }),
+    )
+    if (desenlace === 'COBRADA_EN_CANCELADA') {
+      await devolverCobroDeReservaCancelada({ reservationId: reservation.id, venueId: reservation.venueId, checkoutSessionId: sessionId })
+    }
   }
 
   const latest = await prisma.reservation.findUnique({
@@ -543,6 +567,15 @@ export async function finalizeDepositCheckoutForConsumer(consumerId: string, ses
       venue: { select: { slug: true } },
     },
   })
+
+  // D20 0b: la app sólo mira el depósito; con «pagado» diría «Tu reserva quedó confirmada» de una reserva cancelada (Codex 0-r1
+  // #13). Se contesta la verdad: está cancelada y el depósito se devuelve.
+  if (paymentStatus.status === 'PAID' && latest?.status === 'CANCELLED') {
+    throw new ConflictError(
+      'Esta reserva ya estaba cancelada cuando se completó el pago: el negocio te devuelve el depósito.',
+      'RESERVATION_CANCELLED_DEPOSIT_REFUND',
+    )
+  }
 
   return {
     confirmationCode: latest?.confirmationCode ?? reservation.confirmationCode,
