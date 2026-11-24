@@ -1843,10 +1843,10 @@ describe('T-F7 to T-F13: what the judge says is missing, by line number, sends t
         },
         { text: 'Toca *Finalizar*.', guideId: 'dashboard/menu/crear-producto', quote: 'Toca *Finalizar*.' },
         {
-          text: 'El panel guarda el producto nuevo sólo si tienes permiso para crear productos y para editar el inventario, y si tu negocio tiene incluida la función de inventario.',
+          text: 'Para guardar un producto nuevo necesitas permiso para crear productos y para editar el inventario, aunque no le cuentes piezas.',
           guideId: 'dashboard/menu/crear-producto',
           quote:
-            'El panel guarda el producto nuevo sólo si tienes permiso para crear productos y para editar el inventario, y si tu negocio tiene incluida la función de inventario.',
+            'Para guardar un producto nuevo necesitas permiso para crear productos y para editar el inventario, aunque no le cuentes piezas.',
         },
       ],
     },
@@ -1865,7 +1865,7 @@ describe('T-F7 to T-F13: what the judge says is missing, by line number, sends t
     ],
     c63: ['Si no ves una sucursal, tu usuario no está asignado o el local no está disponible para tu cuenta.'],
     c65: [
-      'Si al tocar *Finalizar* sale cualquier «Error», también esos dos, no lo vuelvas a crear ni le pidas a otra persona que lo cree: pudo quedar creado en un primer intento.',
+      'Si al tocar *Finalizar* sale cualquier otro «Error», no lo vuelvas a crear ni le pidas a otra persona que lo cree: pudo quedar creado aunque saliera el error.',
     ],
   }
   /** T-F8: the line numbers of a guide whose texts, joined, are exactly this quote (one sentence, or two in a row). */
@@ -2298,8 +2298,9 @@ describe('T-F10: the judge reads ONE copy of each guide: as it is, with the numb
     expect(pairs.find(p => p.id === 'j16')!.steps[0].text).toBe('El plan Pro cuesta $899 al mes.')
     expect(JSON.stringify(pairs)).not.toContain('avoqado.io/pricing')
     // measured on 17-nov: with T-F8's copy 34 of the 46 quotes were whole; now 38 (the 8 that are not cross a sentence: j05, j06,
-    // j15, j16, j19 and j20). T-F13 adds 8 pairs (49 quotes, 41 whole: the 8 others cross a sentence of their step).
-    expect([whole, total]).toEqual([79, 95])
+    // j15, j16, j19 and j20). T-F13 adds 8 pairs (49 quotes, 41 whole: the 8 others cross a sentence of their step). Encargo 553f45
+    // (24-nov): j26 also quotes the new step 4 of crear-producto (the pieces), one more whole quote.
+    expect([whole, total]).toEqual([80, 96])
   })
 
   // T-F13 (ruling T-F13.3): the mini-exam measured only `supported`. These pairs measure `missing`: every claim is true, every step
