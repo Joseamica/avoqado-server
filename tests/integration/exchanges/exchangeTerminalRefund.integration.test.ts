@@ -75,14 +75,14 @@ describe('devolución de la terminal después de un Cambio', () => {
     expect(bitacora[0].data).toMatchObject({ reviewReason: 'TERMINAL_REFUND_AFTER_EXCHANGE', refundPaymentId: fila.id })
 
     // El banco ya devolvió todo: un centavo más no se anota.
-    await expect(terminalRefund(s, 1)).rejects.toThrow(/exceeds remaining refundable/)
+    await expect(terminalRefund(s, 1)).rejects.toThrow(/sólo quedan \$[\d.]+ por devolver/)
     expect(await devuelto(s)).toBe(100000)
   })
 
   it('en efectivo sigue rechazándose: el dinero todavía no salió', async () => {
     const s = await seed()
     const { exchange } = await createExchange(s.input())
-    await expect(terminalRefund(s, 50000)).rejects.toThrow(/exceeds remaining refundable/)
+    await expect(terminalRefund(s, 50000)).rejects.toThrow(/sólo quedan \$[\d.]+ por devolver/)
     expect(await devuelto(s)).toBe(50000)
     expect((await prisma.exchange.findUniqueOrThrow({ where: { id: exchange.id } })).status).toBe('COMPLETED')
   })
@@ -126,7 +126,7 @@ describe('devolución de la terminal después de un Cambio', () => {
 
   it('sin Cambio, el exceso con tarjeta se rechaza igual que hoy', async () => {
     const s = await seed({ card: true })
-    await expect(terminalRefund(s, 50001)).rejects.toThrow(/exceeds remaining refundable/)
+    await expect(terminalRefund(s, 50001)).rejects.toThrow(/sólo quedan \$[\d.]+ por devolver/)
     expect(await devuelto(s)).toBe(0)
   })
 })

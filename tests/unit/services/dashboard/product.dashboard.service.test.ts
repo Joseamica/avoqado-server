@@ -635,3 +635,39 @@ describe('updateProduct — versión esperada (expectedUpdatedAt)', () => {
     expect(prismaMock.product.update.mock.calls[0][0].where).toEqual({ id: 'product-abc' })
   })
 })
+
+// D1 (choques, 24-nov): guardar un producto cuyo grupo de modificadores otra persona borró mientras se editaba.
+describe('updateProduct — grupo de modificadores que ya no existe', () => {
+  it('rechaza con 400 en español, sin ids, y no escribe el producto', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(makeMockProduct())
+    prismaMock.modifierGroup.findMany.mockResolvedValue([])
+
+    await expect(
+      productService.updateProduct('venue-xyz', 'product-abc', { modifierGroupIds: ['grupo-borrado'] } as any, humanActor),
+    ).rejects.toMatchObject({ statusCode: 400, message: productService.GRUPO_DE_MODIFICADORES_YA_NO_EXISTE })
+    expect(productService.GRUPO_DE_MODIFICADORES_YA_NO_EXISTE).toMatch(/^Uno de los grupos de modificadores ya no existe/)
+    expect(prismaMock.product.update).not.toHaveBeenCalled()
+  })
+
+  it('el choque de verdad: estaba vivo al validar y otra persona lo borró antes del candado → mismo aviso, sin escribir', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(makeMockProduct())
+    prismaMock.modifierGroup.findMany.mockResolvedValue([{ id: 'grupo-vivo' }] as any)
+    prismaMock.modifierGroup.count.mockResolvedValue(0)
+
+    await expect(
+      productService.updateProduct('venue-xyz', 'product-abc', { modifierGroupIds: ['grupo-vivo'] } as any, humanActor),
+    ).rejects.toMatchObject({ statusCode: 400, message: productService.GRUPO_DE_MODIFICADORES_YA_NO_EXISTE })
+    expect(prismaMock.product.update).not.toHaveBeenCalled()
+  })
+
+  it('REGRESSION — con todos los grupos vivos sigue guardando', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(makeMockProduct())
+    prismaMock.modifierGroup.findMany.mockResolvedValue([{ id: 'grupo-vivo' }] as any)
+    prismaMock.modifierGroup.count.mockResolvedValue(1) // la relectura con el candado puesto (D16) también lo ve vivo
+    prismaMock.product.update.mockResolvedValue(makeMockProduct())
+
+    await productService.updateProduct('venue-xyz', 'product-abc', { modifierGroupIds: ['grupo-vivo'] } as any, humanActor)
+
+    expect(prismaMock.product.update).toHaveBeenCalled()
+  })
+})
