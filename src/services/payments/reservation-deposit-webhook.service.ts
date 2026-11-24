@@ -10,7 +10,12 @@ import { confirmCardAuthorization } from '@/services/online-ordering/card/confir
 import { handleStripeRefundEvent } from '@/services/online-ordering/card/refund.service'
 import { chargeMerchant, isForeignStripeEvent } from '@/services/online-ordering/card/merchant'
 import { getProvider } from '@/services/payments/provider-registry'
-import { devolverCobroDeReservaCancelada, registrarCobroDelDeposito } from '@/services/payments/cobroDelDeposito'
+import {
+  devolverCobroDeReservaCancelada,
+  MOTIVO_SESION_VENCIDA,
+  registrarCobroDelDeposito,
+  resolverAlertaSiYaSeDevolvio,
+} from '@/services/payments/cobroDelDeposito'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import emailService from '@/services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '@/services/whatsapp.service'
@@ -270,7 +275,7 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
 
       const current = await tx.reservation.findFirst({
         where: { checkoutSessionId: session.id },
-        select: { id: true, status: true, depositStatus: true, depositProcessorRef: true },
+        select: { id: true, venueId: true, status: true, depositStatus: true, depositProcessorRef: true },
       })
 
       if (!current) {
@@ -282,8 +287,12 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
       }
 
       if (current.depositStatus === 'PAID') return
-      // D20 0b (Codex 0-r2 #3): la app ya registró ESTE mismo cobro (y quizá ya se devolvió): no es una divergencia.
-      if (paymentIntentId && current.depositProcessorRef === paymentIntentId) return
+      // D20 0b (Codex 0-r2 #3): la app ya registró ESTE mismo cobro (y quizá ya se devolvió): no es una divergencia. Si ya se
+      // devolvió y el proceso cayó antes de resolver su alerta, se resuelve aquí (Codex 0-r3 #4).
+      if (paymentIntentId && current.depositProcessorRef === paymentIntentId) {
+        await resolverAlertaSiYaSeDevolvio(tx, { reservationId: current.id, venueId: current.venueId, checkoutSessionId: session.id })
+        return
+      }
 
       await recordMoneyAnomaly({
         tx,
@@ -453,7 +462,7 @@ async function processCheckoutExpired(event: VerifiedWebhookEvent) {
           status: ReservationStatus.CANCELLED,
           cancelledAt: new Date(),
           cancelledBy: 'SYSTEM',
-          cancellationReason: 'Stripe Checkout session expired',
+          cancellationReason: MOTIVO_SESION_VENCIDA,
           depositStatus: 'EXPIRED',
         },
       })

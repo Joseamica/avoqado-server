@@ -3,30 +3,38 @@
  * Regla pura (los tramos) + la lectura del neto de créditos de la reserva.
  */
 import { prismaMock } from '@tests/__helpers__/setup'
-import { creditosDeLaReserva, serviciosPagadosConCreditos } from '@/services/reservation/loYaPagadoDeLaReserva'
+import { creditosDeLaReserva, tramosPorCreditos } from '@/services/reservation/loYaPagadoDeLaReserva'
 
-const ver = (s: Set<number>) => [...s].sort()
+const ver = (t: ReturnType<typeof tramosPorCreditos>) => t.map(tramos => tramos.map(x => [x.quantity, x.pagado]))
 
-describe('serviciosPagadosConCreditos', () => {
-  it('sin créditos: ninguno (la cuenta nace igual que antes)', () => {
-    expect(ver(serviciosPagadosConCreditos(['yoga'], 1, new Map()))).toEqual([])
+describe('tramosPorCreditos', () => {
+  it('sin créditos: un solo tramo con todos los lugares (la cuenta nace igual que antes)', () => {
+    expect(ver(tramosPorCreditos(['yoga'], 3, new Map()))).toEqual([[[3, false]]])
   })
 
   it('1 lugar y 1 crédito: pagado', () => {
-    expect(ver(serviciosPagadosConCreditos(['yoga'], 1, new Map([['yoga', 1]])))).toEqual([0])
+    expect(ver(tramosPorCreditos(['yoga'], 1, new Map([['yoga', 1]])))).toEqual([[[1, true]]])
   })
 
-  it('3 lugares y 3 créditos: pagado; con 2 créditos NO (se cobra completo, como hoy)', () => {
-    expect(ver(serviciosPagadosConCreditos(['yoga'], 3, new Map([['yoga', 3]])))).toEqual([0])
-    expect(ver(serviciosPagadosConCreditos(['yoga'], 3, new Map([['yoga', 2]])))).toEqual([])
+  it('3 lugares y 2 créditos: 2 pagados y 1 por cobrar', () => {
+    expect(ver(tramosPorCreditos(['yoga'], 3, new Map([['yoga', 2]])))).toEqual([
+      [
+        [2, true],
+        [1, false],
+      ],
+    ])
   })
 
-  it('cita de dos servicios con crédito sólo del primero: sólo el primero', () => {
-    expect(ver(serviciosPagadosConCreditos(['yoga', 'masaje'], 1, new Map([['yoga', 1]])))).toEqual([0])
+  it('más créditos que lugares: sólo cubre los lugares', () => {
+    expect(ver(tramosPorCreditos(['yoga'], 1, new Map([['yoga', 5]])))).toEqual([[[1, true]]])
+  })
+
+  it('cita de dos servicios con crédito sólo del primero: el segundo se cobra entero', () => {
+    expect(ver(tramosPorCreditos(['yoga', 'masaje'], 1, new Map([['yoga', 1]])))).toEqual([[[1, true]], [[1, false]]])
   })
 
   it('el mismo producto dos veces con un solo crédito: lo paga una sola vez', () => {
-    expect(ver(serviciosPagadosConCreditos(['yoga', 'yoga'], 1, new Map([['yoga', 1]])))).toEqual([0])
+    expect(ver(tramosPorCreditos(['yoga', 'yoga'], 1, new Map([['yoga', 1]])))).toEqual([[[1, true]], [[1, false]]])
   })
 })
 

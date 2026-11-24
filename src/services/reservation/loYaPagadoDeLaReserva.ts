@@ -3,13 +3,12 @@
  * (hz:fefa11b6:D20, bloque 0a).
  *
  * Antes, `createOrderFromReservation` abría la cuenta a precio de lista aunque la clienta hubiera pagado la clase con créditos: salía
- * en «Sin cobrar» y la caja podía cobrarla dos veces. Ahora un servicio cuyos lugares están TODOS pagados con créditos entra en $0
- * con la nota «Pagada con paquete», en el MISMO renglón de siempre (misma cantidad y mismos extras: inventario, ingresos y factura
- * leen los extras igual que antes, Codex 0-r2 #8). Los extras se siguen cobrando. La cuenta sigue ABIERTA aunque quede en $0: se le
- * puede agregar un consumo, deshacer la llegada no deja una venta, y el turno y el cobro corren como siempre (Codex 0-r1 #4-#6, #9).
- *
- * Si los créditos no alcanzan para todos los lugares de un servicio, el servicio se cobra completo, como hoy. No se alcanza en la
- * práctica: un canje gasta un crédito por lugar (o falla) y un Ilimitado sólo aparta un lugar.
+ * en «Sin cobrar» y la caja podía cobrarla dos veces. Ahora los lugares pagados con créditos entran en $0 con la nota «Pagada con
+ * paquete» y los demás a su precio. Si un servicio tiene lugares de los dos tipos (p. ej. la reserva pasó de 1 a 2 personas después
+ * del canje, Codex 0-r3), se parte en dos renglones, y CADA renglón lleva los extras de SUS lugares (precio × sus lugares, la misma
+ * forma que el renglón entero de siempre): inventario, ingresos y factura leen cada extra una vez por lugar (Codex 0-r2 #8). Los
+ * extras se siguen cobrando. La cuenta sigue ABIERTA aunque quede en $0: se le puede agregar un consumo, deshacer la llegada no deja
+ * una venta, y el turno y el cobro corren como siempre (Codex 0-r1 #4-#6, #9).
  *
  * Créditos = el NETO por producto de los movimientos de ESTA reserva: canjes (`REDEEM`, cantidad negativa) menos devoluciones
  * positivas (`REFUND` > 0; un `REFUND` de 0 es sólo la marca de una cancelación tardía). Un pase Ilimitado deja el mismo `REDEEM −1`
@@ -46,18 +45,21 @@ export async function creditosDeLaReserva(
   return porProducto
 }
 
+/** Un tramo de lugares de un servicio: `pagado` = esos lugares ya los pagó un crédito. */
+export type Tramo = { quantity: number; pagado: boolean }
+
 /**
- * Qué servicios (por posición en la reserva) quedan pagados enteros con créditos: los que tienen créditos para TODOS sus lugares.
- * Los créditos de un producto se gastan una vez aunque el producto se repita en la reserva.
+ * Los tramos de cada servicio (por su posición en la reserva): primero los lugares pagados con créditos, luego los demás. Sin créditos
+ * es un solo tramo con todos los lugares, igual que antes. Los créditos de un producto se gastan una vez aunque se repita en la reserva.
  */
-export function serviciosPagadosConCreditos(productIds: string[], lugares: number, creditos: Map<string, number>): Set<number> {
+export function tramosPorCreditos(productIds: string[], lugares: number, creditos: Map<string, number>): Tramo[][] {
   const quedan = new Map(creditos)
-  const pagados = new Set<number>()
-  productIds.forEach((pid, i) => {
-    if ((quedan.get(pid) ?? 0) >= lugares) {
-      quedan.set(pid, (quedan.get(pid) ?? 0) - lugares)
-      pagados.add(i)
-    }
+  return productIds.map(pid => {
+    const pagados = Math.min(lugares, quedan.get(pid) ?? 0)
+    quedan.set(pid, (quedan.get(pid) ?? 0) - pagados)
+    const tramos: Tramo[] = []
+    if (pagados > 0) tramos.push({ quantity: pagados, pagado: true })
+    if (lugares - pagados > 0) tramos.push({ quantity: lugares - pagados, pagado: false })
+    return tramos
   })
-  return pagados
 }

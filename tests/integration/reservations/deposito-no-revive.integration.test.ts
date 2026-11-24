@@ -202,11 +202,32 @@ describe('D20 0b — el cobro de un depósito no revive lo cerrado (integration,
     })
 
     it('regresión: el SISTEMA la canceló porque venció el plazo y el pago fue a tiempo ⇒ se recupera (PAID y CONFIRMED)', async () => {
-      const r = await mkReservation({ status: 'CANCELLED', cancelledBy: 'SYSTEM', cancelledAt: new Date(), depositStatus: 'EXPIRED' })
+      const r = await mkReservation({
+        status: 'CANCELLED',
+        cancelledBy: 'SYSTEM',
+        cancellationReason: 'Reservation deposit payment window expired',
+        cancelledAt: new Date(),
+        depositStatus: 'EXPIRED',
+      })
       provider.getPaymentStatus.mockResolvedValue(pagado())
       const res = await finalizeDepositCheckoutForConsumer(consumerId!, r.checkoutSessionId!)
       expect(res).toEqual(expect.objectContaining({ status: 'CONFIRMED', depositStatus: 'PAID' }))
       expect(provider.refund).not.toHaveBeenCalled()
+    })
+
+    it('🔴 una CLASE que canceló el negocio (también «SYSTEM») con depósito vencido no se re-confirma: se devuelve', async () => {
+      const r = await mkReservation({
+        status: 'CANCELLED',
+        cancelledBy: 'SYSTEM',
+        cancellationReason: 'Sesión cancelada por el establecimiento',
+        cancelledAt: new Date(),
+        depositStatus: 'EXPIRED',
+      })
+      provider.getPaymentStatus.mockResolvedValue(pagado())
+      await expect(finalizeDepositCheckoutForConsumer(consumerId!, r.checkoutSessionId!)).rejects.toThrow(/cancelada/)
+      const fila = await prisma.reservation.findUniqueOrThrow({ where: { id: r.id } })
+      expect(fila.status).toBe('CANCELLED')
+      expect(fila.depositStatus).toBe('REFUNDED')
     })
   })
 
@@ -229,6 +250,19 @@ describe('D20 0b — el cobro de un depósito no revive lo cerrado (integration,
       const a = await anomalias(r.id)
       expect(a.map(x => x.category)).toEqual(['DEPOSIT_PAID_ON_CANCELLED_RESERVATION'])
       expect(a[0].resolvedAt).not.toBeNull()
+    })
+
+    it('si el proceso cayó entre devolver y resolver la alerta, el aviso tardío del mismo cobro la resuelve', async () => {
+      const r = await mkReservation({ status: 'CANCELLED', cancelledBy: 'CUSTOMER', cancelledAt: new Date() })
+      provider.getPaymentStatus.mockResolvedValue(pagado())
+      await expect(finalizeDepositCheckoutForConsumer(consumerId!, r.checkoutSessionId!)).rejects.toThrow(/cancelada/)
+      // Simula la caída: devuelto, pero la alerta quedó abierta.
+      await prisma.moneyAnomaly.updateMany({
+        where: { reservationId: r.id },
+        data: { resolvedAt: null, resolvedBy: null, resolution: null },
+      })
+      await processStripeConnectWebhookEvent(avisoDeStripe(r.checkoutSessionId!) as never)
+      expect((await anomalias(r.id)).map(a => a.resolvedAt !== null)).toEqual([true])
     })
 
     it('regresión de la conciliación: vencer el plazo de una reserva que una persona ya canceló no cambia quién la canceló', async () => {

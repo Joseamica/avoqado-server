@@ -19,6 +19,11 @@ import prisma from '@/utils/prismaClient'
 
 export const CATEGORIA_COBRO_EN_CANCELADA = 'DEPOSIT_PAID_ON_CANCELLED_RESERVATION'
 
+/** Los textos con que la conciliación y el aviso de vencimiento cancelan una reserva cuyo depósito no se pagó a tiempo. */
+export const MOTIVO_PLAZO_VENCIDO = 'Reservation deposit payment window expired'
+export const MOTIVO_SESION_VENCIDA = 'Stripe Checkout session expired'
+const MOTIVOS_DE_VENCIMIENTO_DEL_DEPOSITO = [MOTIVO_PLAZO_VENCIDO, MOTIVO_SESION_VENCIDA]
+
 export type DesenlaceDelCobro = 'CONFIRMADA' | 'COBRADA_EN_CANCELADA' | 'COBRADA' | 'SIN_CAMBIO'
 
 export async function registrarCobroDelDeposito(
@@ -32,12 +37,24 @@ export async function registrarCobroDelDeposito(
   },
 ): Promise<DesenlaceDelCobro> {
   const [r] = await tx.$queryRaw<
-    Array<{ status: ReservationStatus; depositStatus: string | null; checkoutSessionId: string | null; cancelledBy: string | null }>
-  >`SELECT status, "depositStatus", "checkoutSessionId", "cancelledBy" FROM "Reservation" WHERE id = ${a.reservationId} FOR UPDATE`
+    Array<{
+      status: ReservationStatus
+      depositStatus: string | null
+      checkoutSessionId: string | null
+      cancelledBy: string | null
+      cancellationReason: string | null
+    }>
+  >`SELECT status, "depositStatus", "checkoutSessionId", "cancelledBy", "cancellationReason" FROM "Reservation" WHERE id = ${a.reservationId} FOR UPDATE`
   if (!r || r.checkoutSessionId !== a.checkoutSessionId || !a.desde.includes(r.depositStatus as 'PENDING' | 'EXPIRED')) {
     return 'SIN_CAMBIO'
   }
-  const vencidaPorElPlazo = r.status === 'CANCELLED' && r.depositStatus === 'EXPIRED' && r.cancelledBy === 'SYSTEM'
+  // Sólo el vencimiento del plazo del depósito (sus dos escritores y sus textos): «SYSTEM» también cancela una clase entera que
+  // canceló el negocio (Codex 0-r3 #1), y ésa no se re-confirma.
+  const vencidaPorElPlazo =
+    r.status === 'CANCELLED' &&
+    r.depositStatus === 'EXPIRED' &&
+    r.cancelledBy === 'SYSTEM' &&
+    MOTIVOS_DE_VENCIMIENTO_DEL_DEPOSITO.includes(r.cancellationReason ?? '')
   const confirmar = r.status === 'PENDING' || r.status === 'CONFIRMED' || vencidaPorElPlazo
   await tx.reservation.update({
     where: { id: a.reservationId },
@@ -65,6 +82,22 @@ export async function registrarCobroDelDeposito(
   return 'COBRADA_EN_CANCELADA'
 }
 
+/**
+ * Si el depósito ya quedó devuelto, la alerta de su cobro se marca resuelta. La llaman la devolución automática y, por si el proceso
+ * cayó entre devolver y resolver, el aviso tardío del mismo cobro (Codex 0-r3 #4). Idempotente.
+ */
+export async function resolverAlertaSiYaSeDevolvio(
+  db: Pick<Prisma.TransactionClient, 'reservation' | 'moneyAnomaly'>,
+  a: { reservationId: string; venueId: string; checkoutSessionId: string },
+) {
+  const r = await db.reservation.findFirst({ where: { id: a.reservationId, venueId: a.venueId }, select: { depositStatus: true } })
+  if (r?.depositStatus !== 'REFUNDED') return
+  await db.moneyAnomaly.updateMany({
+    where: { stripeEventId: llaveDeLaAlerta(a.checkoutSessionId), category: CATEGORIA_COBRO_EN_CANCELADA, resolvedAt: null },
+    data: { resolvedAt: new Date(), resolvedBy: 'SYSTEM', resolution: 'Devuelto solo al registrar el cobro' },
+  })
+}
+
 /** Una alerta por sesión de Stripe: el aviso y la app pueden pasar los dos por aquí. */
 const llaveDeLaAlerta = (checkoutSessionId: string) => `deposito:${checkoutSessionId}`
 
@@ -77,12 +110,7 @@ export async function devolverCobroDeReservaCancelada(a: { reservationId: string
   try {
     const { handleReservationDepositCancellation } = await import('@/services/dashboard/reservation.dashboard.service')
     await handleReservationDepositCancellation(a.reservationId, a.venueId, { sinRetener: true })
-    const r = await prisma.reservation.findFirst({ where: { id: a.reservationId, venueId: a.venueId }, select: { depositStatus: true } })
-    if (r?.depositStatus !== 'REFUNDED') return
-    await prisma.moneyAnomaly.updateMany({
-      where: { stripeEventId: llaveDeLaAlerta(a.checkoutSessionId), category: CATEGORIA_COBRO_EN_CANCELADA, resolvedAt: null },
-      data: { resolvedAt: new Date(), resolvedBy: 'SYSTEM', resolution: 'Devuelto solo al registrar el cobro' },
-    })
+    await resolverAlertaSiYaSeDevolvio(prisma, a)
   } catch (err) {
     logger.error('❌ [RESERVATION DEPOSIT] No se pudo devolver el depósito cobrado sobre una reserva cancelada', {
       reservationId: a.reservationId,

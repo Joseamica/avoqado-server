@@ -7,6 +7,7 @@ import { getVatRateBps } from '../services/superadmin/platformSettings.service'
 import { processStripeConnectWebhookEvent } from '../services/payments/reservation-deposit-webhook.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
+import { MOTIVO_PLAZO_VENCIDO } from '@/services/payments/cobroDelDeposito'
 
 export class ReservationDepositReconciliationJob {
   private job: CronJob | null = null
@@ -67,7 +68,7 @@ export class ReservationDepositReconciliationJob {
             status: 'CANCELLED',
             cancelledAt: ahora,
             cancelledBy: 'SYSTEM',
-            cancellationReason: 'Reservation deposit payment window expired',
+            cancellationReason: MOTIVO_PLAZO_VENCIDO,
             depositStatus: 'EXPIRED',
           },
         }),
