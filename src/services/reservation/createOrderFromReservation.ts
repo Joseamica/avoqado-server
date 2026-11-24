@@ -2,6 +2,7 @@ import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import { Prisma, OrderType, OrderSource, OrderStatus } from '@prisma/client'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { turnoAbiertoDelNegocio } from '@/services/shared/turnoDeCaja'
+import { creditosDeLaReserva, NOTA_PAGADA_CON_PAQUETE, tramosPorCreditos } from './loYaPagadoDeLaReserva'
 
 /** Statuses that do NOT count as "the reservation already has an order". Mirrors the partial unique index. */
 export const ALIVE_ORDER_EXCLUDED_STATUSES: OrderStatus[] = ['CANCELLED', 'DELETED']
@@ -31,6 +32,9 @@ interface CreateOrderResult {
  * "Manicura tradicional + Esmalte de color +$150" pre-populated when the
  * customer arrives. The order stays PENDING + paymentStatus=PENDING — the
  * cashier still drives the actual charge via the existing TPV flow.
+ *
+ * D20 0a (hz:fefa11b6:D20): the seats already paid with package credits come in at $0 («Pagada con paquete»), so the cashier never
+ * charges them again and they never sit in «Sin cobrar» (see `loYaPagadoDeLaReserva.ts`).
  */
 export async function createOrderFromReservation(
   tx: Prisma.TransactionClient,
@@ -144,58 +148,71 @@ export async function createOrderFromReservation(
     taxAmount: Prisma.Decimal
     total: Prisma.Decimal
     modifiers: Array<{ name: string; quantity: number; price: Prisma.Decimal; modifierId: string | null }>
+    quantity: number
+    notes: string | null
   }
   const lines: LineDraft[] = []
 
-  for (const pid of productIds) {
+  // D20 0a: los lugares de cada servicio ya pagados con créditos de esta reserva (sin créditos, un solo tramo: igual que antes).
+  const tramosDe = tramosPorCreditos(productIds, seatCount, await creditosDeLaReserva(tx, { venueId, reservationId }))
+  let lugaresPagados = 0
+
+  for (const [indice, pid] of productIds.entries()) {
     const product = productById.get(pid)
     if (!product) continue
-    const unitPrice = new Prisma.Decimal(product.price)
-    // Line subtotal scales with seatCount so a partySize=3 walk-in charges
-    // 3× the class price in one transaction. seatCount=1 (the historical
-    // default) leaves the math identical to the previous behavior.
-    const lineSubtotal = unitPrice.mul(seatCount)
-    // El total del renglón ES su precio de lista: el IVA ya está contenido.
-    const lineTotal = lineSubtotal
-    subtotal = subtotal.add(lineSubtotal)
+    for (const tramo of tramosDe[indice]) {
+      if (tramo.pagado) lugaresPagados += tramo.quantity
+      const lugares = tramo.quantity
+      const unitPrice = tramo.pagado ? new Prisma.Decimal(0) : new Prisma.Decimal(product.price)
+      // Line subtotal scales with the seats of this line (all seats when nothing is prepaid): a partySize=3 walk-in charges
+      // 3× the class price in one transaction. seatCount=1 (the historical default) leaves the math identical.
+      const lineSubtotal = unitPrice.mul(lugares)
+      subtotal = subtotal.add(lineSubtotal)
 
-    const modRows = modifiersByProduct.get(pid) ?? []
-    const modLines: LineDraft['modifiers'] = []
-    for (const m of modRows) {
-      // Modifiers are per-seat add-ons: 1 "Esmalte de color" picked at
-      // booking time times a family of 3 means 3 esmaltes on the bill.
-      const lineTotalMod = new Prisma.Decimal(m.price).mul(m.quantity).mul(seatCount)
-      subtotal = subtotal.add(lineTotalMod)
-      modLines.push({
-        name: m.name ?? '',
-        // `quantity` se queda PER-UNIT porque hay dos lectores que lo exigen: el analytics
-        // de inventario multiplica el mismo por la cantidad del renglon
-        // (`modifierInventoryAnalytics.service.ts`: `orderItemQty * modifierQty`), y el KDS
-        // imprime "Nx <nombre>" — en 3 manicures con un esmalte cada una, "3x Esmalte" le
-        // mentiria a quien prepara.
-        quantity: m.quantity,
-        // 🔴 …y por eso el seatCount viaja en el PRECIO. El reporte de ingresos
-        // (`lineRevenue.ts`) suma `unitPrice x quantity + Sum(price x quantity)` y NO
-        // multiplica los modificadores por la cantidad del renglon. Sin el seatCount aqui,
-        // 3 manicures con esmalte se COBRAN en $450 y se REPORTAN en $350: el duenio ve un
-        // numero y el banco otro. Es el mismo contrato que ya cumple el otro escritor de
-        // esta tabla, los canales de delivery (`core/types.ts`: «`price` ya viene
-        // multiplicado por la cantidad del padre»).
-        price: new Prisma.Decimal(m.price).mul(seatCount),
-        modifierId: m.modifierId,
+      const modRows = modifiersByProduct.get(pid) ?? []
+      const modLines: LineDraft['modifiers'] = []
+      for (const m of modRows) {
+        // Modifiers are per-seat add-ons: 1 "Esmalte de color" picked at
+        // booking time times a family of 3 means 3 esmaltes on the bill.
+        const lineTotalMod = new Prisma.Decimal(m.price).mul(m.quantity).mul(lugares)
+        subtotal = subtotal.add(lineTotalMod)
+        modLines.push({
+          name: m.name ?? '',
+          // `quantity` se queda PER-UNIT porque hay dos lectores que lo exigen: el analytics
+          // de inventario multiplica el mismo por la cantidad del renglon
+          // (`modifierInventoryAnalytics.service.ts`: `orderItemQty * modifierQty`), y el KDS
+          // imprime "Nx <nombre>" — en 3 manicures con un esmalte cada una, "3x Esmalte" le
+          // mentiria a quien prepara.
+          quantity: m.quantity,
+          // 🔴 …y por eso los lugares viajan en el PRECIO. El reporte de ingresos
+          // (`lineRevenue.ts`) suma `unitPrice x quantity + Sum(price x quantity)` y NO
+          // multiplica los modificadores por la cantidad del renglon. Sin los lugares aqui,
+          // 3 manicures con esmalte se COBRAN en $450 y se REPORTAN en $350: el duenio ve un
+          // numero y el banco otro. Es el mismo contrato que ya cumple el otro escritor de
+          // esta tabla, los canales de delivery (`core/types.ts`: «`price` ya viene
+          // multiplicado por la cantidad del padre»). D20 0a: con dos tramos, cada uno con SUS lugares.
+          price: new Prisma.Decimal(m.price).mul(lugares),
+          modifierId: m.modifierId,
+        })
+      }
+
+      lines.push({
+        productId: product.id,
+        productName: product.name,
+        productSku: product.sku,
+        categoryName: product.category?.name ?? null,
+        unitPrice,
+        taxAmount: SIN_IMPUESTO_SEPARADO,
+        // El total del renglón ES su precio de lista: el IVA ya está contenido. D20 0a: un renglón de $0 (pagado con paquete, o un
+        // servicio gratis del catálogo) lleva sus extras en el total, o la factura lo omitiría aunque la caja cobre los extras
+        // (Codex 0-r1 #8, 0-r3 #2). ponytail: los renglones con precio conservan la forma de siempre (total = sólo el servicio); el
+        // desajuste de esa forma con la factura cuando hay extras ya existía (deuda).
+        total: unitPrice.isZero() ? modLines.reduce((t, m) => t.add(m.price.mul(m.quantity)), lineSubtotal) : lineSubtotal,
+        modifiers: modLines,
+        quantity: lugares,
+        notes: tramo.pagado ? NOTA_PAGADA_CON_PAQUETE : null,
       })
     }
-
-    lines.push({
-      productId: product.id,
-      productName: product.name,
-      productSku: product.sku,
-      categoryName: product.category?.name ?? null,
-      unitPrice,
-      taxAmount: SIN_IMPUESTO_SEPARADO,
-      total: lineTotal,
-      modifiers: modLines,
-    })
   }
 
   // El total de la cuenta ES la suma de precios de lista: el IVA ya está contenido.
@@ -253,13 +270,14 @@ export async function createOrderFromReservation(
         productName: line.productName,
         productSku: line.productSku,
         categoryName: line.categoryName,
-        // OrderItem.quantity = number of seats sold for this product.
+        // OrderItem.quantity = number of seats of this line (all seats when nothing is prepaid).
         // Subtotal/tax above already include the seat multiplier.
-        quantity: seatCount,
+        quantity: line.quantity,
         unitPrice: line.unitPrice,
         taxAmount: line.taxAmount,
         total: line.total,
         sequence: i,
+        ...(line.notes ? { notes: line.notes } : {}),
       },
       select: { id: true },
     })
@@ -274,6 +292,19 @@ export async function createOrderFromReservation(
         })),
       })
     }
+  }
+
+  // D20 0a · el rastro: qué servicios cubrieron los créditos de la reserva (la cuenta nació con ellos en $0).
+  if (lugaresPagados > 0) {
+    await tx.activityLog.create({
+      data: {
+        venueId,
+        action: 'RESERVATION_ORDER_PREPAID_APPLIED',
+        entity: 'Order',
+        entityId: created.id,
+        data: { reservationId, orderNumber, seatsPaidWithCredits: lugaresPagados, seats: seatCount, total: total.toFixed(2) },
+      },
+    })
   }
 
   return { orderId: created.id, created: true }
