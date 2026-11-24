@@ -486,7 +486,7 @@ export async function suspendVenueByAdmin(venueId: string, reason: string, suspe
   try {
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
-      select: { status: true, name: true },
+      select: { status: true, name: true, organizationId: true },
     })
 
     if (!venue) {
@@ -515,9 +515,11 @@ export async function suspendVenueByAdmin(venueId: string, reason: string, suspe
     logAction({
       staffId: suspendedBy,
       venueId,
+      organizationId: venue.organizationId,
       action: 'VENUE_SUSPENDED',
       entity: 'Venue',
       entityId: venueId,
+      data: { changes: { status: { from: venue.status, to: VenueStatus.ADMIN_SUSPENDED } }, reason },
     })
   } catch (error) {
     logger.error('Error suspending venue:', error)
@@ -599,7 +601,7 @@ export async function changeVenueStatus(
   try {
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
-      select: { status: true, name: true },
+      select: { status: true, name: true, organizationId: true },
     })
 
     if (!venue) {
@@ -630,6 +632,18 @@ export async function changeVenueStatus(
 
     logger.info(`Venue ${venue.name} (${venueId}) status changed from ${venue.status} to ${newStatus} by ${changedBy}`, {
       reason,
+    })
+
+    // Encargo 1569b9: la bitácora del negocio no veía este cambio (sólo el log). Misma acción y forma que el panel nuevo
+    // (`venueAdministration.service.ts`), que el DASHBOARD ya sabe leer.
+    void logAction({
+      staffId: changedBy,
+      venueId,
+      organizationId: venue.organizationId,
+      action: 'SUPERADMIN_VENUE_STATUS_UPDATED',
+      entity: 'Venue',
+      entityId: venueId,
+      data: { changes: { status: { from: venue.status, to: newStatus } }, ...(reason ? { reason } : {}) },
     })
   } catch (error) {
     logger.error('Error changing venue status:', error)
@@ -666,9 +680,9 @@ export async function getVenuesByStatus(status?: VenueStatus): Promise<{ status:
  * @deprecated Use suspendVenueByAdmin instead
  * Legacy function for backwards compatibility
  */
-export async function suspendVenue(venueId: string, reason: string): Promise<void> {
-  // Delegate to new function with unknown suspender
-  return suspendVenueByAdmin(venueId, reason, 'system')
+export async function suspendVenue(venueId: string, reason: string, suspendedBy: string): Promise<void> {
+  // Encargo 1569b9: antes iba a nombre de 'system' y la bitácora perdía quién lo hizo.
+  return suspendVenueByAdmin(venueId, reason, suspendedBy)
 }
 
 /**

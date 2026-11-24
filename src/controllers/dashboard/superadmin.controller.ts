@@ -181,7 +181,7 @@ export async function suspendVenue(req: Request, res: Response, next: NextFuncti
     const { reason } = req.body
     logger.info('Suspending venue', { venueId, reason, userId: req.authContext?.userId })
 
-    await superadminService.suspendVenue(venueId, reason)
+    await superadminService.suspendVenue(venueId, reason, req.authContext!.userId)
     res.json({ success: true, data: { venueId }, message: 'Venue suspended successfully' })
   } catch (error) {
     logger.error('Error suspending venue', {
