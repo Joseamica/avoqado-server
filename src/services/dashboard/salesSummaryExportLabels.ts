@@ -153,28 +153,20 @@ const dia = (iso: string, zona: string) =>
 const FILTRO_DE_METODO: Record<string, string> = { CASH: 'Efectivo', CARD: 'Tarjeta', OTHER: 'Otros', QR_LEGACY: 'QR anterior' }
 
 /**
- * Las líneas de arriba del archivo (W4): «Periodo: …» y «Filtros: …». El comercio va con el nombre que ya trae el reporte (su
- * desglose por comercio, del mismo negocio); sin él, «Comercio elegido».
+ * Las líneas de arriba del archivo (W4): «Periodo: …» y «Filtros: …». El comercio va por su clave (la que eligió quien exporta), nunca
+ * por su nombre: el nombre pedía el permiso de la lista de comercios, se puede renombrar o reusar y el PDF no dibuja todas las letras
+ * (regla de parada del carril F, Codex r8-r11).
  */
 export function encabezadoDelArchivo(
   startDate: string,
   endDate: string,
   filtros: Pick<SalesSummaryFilters, 'paymentMethod' | 'cardType' | 'merchantAccountId' | 'timezone'>,
-  report: Pick<SalesSummaryResponse, 'byMerchantAccount'>,
-  /**
-   * El nombre del comercio elegido, SÓLO si quien exporta puede ver la lista de comercios (`settlements:read`, la misma regla de esa
-   * lista); si no, `null` y sale «Comercio elegido» (Codex r9 #2 y r10 #2-#3 del carril F).
-   */
-  nombreDelComercio: string | null = null,
 ): string[] {
   const zona = filtros.timezone || 'America/Mexico_City'
   const partes: string[] = []
   if (filtros.paymentMethod) partes.push(FILTRO_DE_METODO[filtros.paymentMethod] ?? filtros.paymentMethod)
   // El tipo de tarjeta sólo cuenta con «Tarjeta» (el cálculo lo ignora con otro método; Codex r8 #4).
   if (filtros.cardType && filtros.paymentMethod === 'CARD') partes.push(TIPO_DE_TARJETA[filtros.cardType] ?? filtros.cardType)
-  if (filtros.merchantAccountId) {
-    const nombre = nombreDelComercio
-    partes.push(nombre ? `Comercio ${nombre}` : 'Comercio elegido')
-  }
+  if (filtros.merchantAccountId) partes.push(`Comercio con clave ${filtros.merchantAccountId}`)
   return [`Periodo: ${dia(startDate, zona)} – ${dia(endDate, zona)}`, `Filtros: ${partes.length > 0 ? partes.join(' · ') : 'Ninguno'}`]
 }

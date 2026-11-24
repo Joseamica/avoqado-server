@@ -129,34 +129,15 @@ describe('el archivo del Resumen de ventas dice lo mismo que la pantalla (full-t
     expect(conceptos[conceptos.length - 1]).toMatch(/^Sin cobrar/)
   })
 
-  it('🔴 Codex r8 #4 · el encabezado sólo dice el tipo de tarjeta con «Tarjeta» y nombra el comercio que se le pase', () => {
+  it('🔴 Codex r8 #4 · el encabezado sólo dice el tipo de tarjeta con «Tarjeta»; el comercio va por su clave, nunca por su nombre', () => {
     const z = { timezone: 'America/Mexico_City' }
-    expect(
-      encabezadoDelArchivo(
-        '2026-11-23T06:00:00.000Z',
-        '2026-11-24T05:59:59.999Z',
-        { ...z, paymentMethod: 'CASH', cardType: 'CREDIT' },
-        {},
-      )[1],
-    ).toBe('Filtros: Efectivo')
-    // Codex r9/r10: el nombre sólo si quien llama lo resolvió con el permiso de la lista de comercios; si no, «Comercio elegido».
-    expect(encabezadoDelArchivo('2026-11-23T06:00:00.000Z', '2026-11-24T05:59:59.999Z', { ...z, merchantAccountId: 'm9' }, {})[1]).toBe(
-      'Filtros: Comercio elegido',
+    const inicio = '2026-11-23T06:00:00.000Z'
+    const fin = '2026-11-24T05:59:59.999Z'
+    expect(encabezadoDelArchivo(inicio, fin, { ...z, paymentMethod: 'CASH', cardType: 'CREDIT' })[1]).toBe('Filtros: Efectivo')
+    // Regla de parada (Codex r9-r11): el nombre pedía otro permiso, se podía renombrar o reusar y el PDF no dibuja todas las letras.
+    expect(encabezadoDelArchivo(inicio, fin, { ...z, merchantAccountId: 'clmerchantsse01234567890' })[1]).toBe(
+      'Filtros: Comercio con clave clmerchantsse01234567890',
     )
-    expect(
-      encabezadoDelArchivo('2026-11-23T06:00:00.000Z', '2026-11-24T05:59:59.999Z', { ...z, merchantAccountId: 'm9' }, {}, 'Cuenta B')[1],
-    ).toBe('Filtros: Comercio Cuenta B')
-    // Aunque el reporte traiga el desglose por comercio, sin el nombre resuelto con permiso no se toma de ahí.
-    expect(
-      encabezadoDelArchivo(
-        '2026-11-23T06:00:00.000Z',
-        '2026-11-24T05:59:59.999Z',
-        { ...z, merchantAccountId: 'm1' },
-        {
-          byMerchantAccount: [{ merchantAccountId: 'm1', displayName: 'Cuenta A' } as never],
-        },
-      )[1],
-    ).toBe('Filtros: Comercio elegido')
   })
 
   it('🔴 W3 · los nombres de la pantalla: Devoluciones, Impuestos incluidos, Neto cobrado; y empleados después de «Neto cobrado»', () => {
@@ -232,15 +213,14 @@ describe('el archivo del Resumen de ventas dice lo mismo que la pantalla (full-t
   })
 
   it('🔴 W4 · el encabezado dice el periodo en la zona del negocio y los filtros con sus nombres', () => {
-    const lineas = encabezadoDelArchivo(
-      '2026-11-23T06:00:00.000Z',
-      '2026-11-24T05:59:59.999Z',
-      { paymentMethod: 'CARD', cardType: 'CREDIT', merchantAccountId: 'm1', timezone: 'America/Mexico_City' },
-      {},
-      'Cuenta A',
-    )
-    expect(lineas).toEqual(['Periodo: 23 nov 2026 – 23 nov 2026', 'Filtros: Tarjeta · Crédito · Comercio Cuenta A'])
-    expect(encabezadoDelArchivo('2026-11-23T06:00:00.000Z', '2026-11-24T05:59:59.999Z', { timezone: 'America/Mexico_City' }, {})[1]).toBe(
+    const lineas = encabezadoDelArchivo('2026-11-23T06:00:00.000Z', '2026-11-24T05:59:59.999Z', {
+      paymentMethod: 'CARD',
+      cardType: 'CREDIT',
+      merchantAccountId: 'm1',
+      timezone: 'America/Mexico_City',
+    })
+    expect(lineas).toEqual(['Periodo: 23 nov 2026 – 23 nov 2026', 'Filtros: Tarjeta · Crédito · Comercio con clave m1'])
+    expect(encabezadoDelArchivo('2026-11-23T06:00:00.000Z', '2026-11-24T05:59:59.999Z', { timezone: 'America/Mexico_City' })[1]).toBe(
       'Filtros: Ninguno',
     )
   })

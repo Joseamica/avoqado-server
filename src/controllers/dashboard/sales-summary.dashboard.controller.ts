@@ -22,7 +22,6 @@ import {
 } from '@/services/dashboard/sales-summary.dashboard.service'
 import { encodeExport, sendExport, parseColumnsParam, parseFormatParam, getRowCapForFormat } from '@/services/dashboard/export.helpers'
 import { BadRequestError } from '@/errors/AppError'
-import { staffHasPermissionInVenue } from '@/middlewares/checkPermission.middleware'
 import { zonaDelCalculo } from '@/utils/sanitizeTimezone'
 import { COLUMNAS_DEL_ARCHIVO, encabezadoDelArchivo, filasDelArchivo } from '@/services/dashboard/salesSummaryExportLabels'
 import { decidirCarril, MENSAJE_GET_VIEJO_GRANDE } from '@/services/exports/exportPolicy'
@@ -373,20 +372,9 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
     }
     // Carril F (full-testing W3 y W4): el ARCHIVO dice lo que la pantalla (nombres, orden, «Cobrado» con filtro, sin renglones vacíos) y
     // arriba qué periodo y qué filtros trae. Las filas de `flattenSalesSummaryForExport` (las que lee la MCP) no cambian.
-    // El comercio elegido se nombra con la MISMA regla de la lista de comercios (`settlements:read`) y sólo si es de un cobro de este
-    // negocio; si no, «Comercio elegido» (Codex r9 #2 y r10 #2-#3 del carril F).
-    const nombreDelComercio =
-      filters.merchantAccountId &&
-      req.authContext?.userId &&
-      (await staffHasPermissionInVenue({ staffId: req.authContext.userId, venueId, permission: 'settlements:read' }))
-        ? await prisma.payment
-            .findFirst({
-              where: { venueId, merchantAccountId: filters.merchantAccountId },
-              select: { merchantAccount: { select: { displayName: true, alias: true } } },
-            })
-            .then(p => p?.merchantAccount?.displayName || p?.merchantAccount?.alias || null)
-        : null
-    const encabezado = encabezadoDelArchivo(startDate, endDate, filters, report, nombreDelComercio)
+    // El comercio elegido va por su clave, no por su nombre: el nombre pedía un permiso aparte, se podía renombrar o reusar y el PDF no
+    // dibuja todas las letras (regla de parada del carril F, Codex r8-r11).
+    const encabezado = encabezadoDelArchivo(startDate, endDate, filters)
     const encoded = await encodeExport(format, {
       allColumns: COLUMNAS_DEL_ARCHIVO,
       requestedColumnIds: COLUMNAS_DEL_ARCHIVO.map(c => c.id),
