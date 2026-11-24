@@ -23,7 +23,7 @@ jest.mock('../../../src/config/swagger', () => ({ __esModule: true, setupSwagger
 
 import jwt from 'jsonwebtoken'
 import { api, startApiServer } from '@tests/__helpers__/apiServer'
-import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
+import { mirrorTokenRoleOnStaffVenue, simularSuperadminReal } from '@tests/__helpers__/venueRoleMock'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 
 const app = require('../../../src/app').default
@@ -35,6 +35,8 @@ const requestId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 const RUTA = `/api/v1/dashboard/superadmin/terminals/payment-requests/${requestId}/release`
 const token = (role: string, sub: string) => {
   mirrorTokenRoleOnStaffVenue(role, tokenVenueId)
+  // El montaje exige además el ROL SUPERADMIN, leído de la base (encargo fc9c53): la fila SUPERADMIN real sólo existe para ese rol.
+  simularSuperadminReal(role === 'SUPERADMIN')
   return jwt.sign({ sub, orgId: 'org_test', venueId: tokenVenueId, role }, process.env.ACCESS_TOKEN_SECRET as string, { expiresIn: '15m' })
 }
 

@@ -14,7 +14,7 @@ import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetr
 import logger from '@/config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import type { CreditPackSnapshot } from '@/services/shared/creditPacksOnPaidOrder'
-import { vigenciaAlEntregar } from '@/services/credits/ilimitado'
+import { renglonesVivos, vigenciaAlEntregar } from '@/services/credits/ilimitado'
 
 type PackWithItems = {
   id: string
@@ -88,11 +88,12 @@ export async function grantPackInTx(
     },
   })
 
+  const vivos = await renglonesVivos(tx, pack.items)
   for (const item of pack.items) {
     const balance = await tx.creditItemBalance.create({
       data: {
         creditPackPurchaseId: newPurchase.id,
-        creditPackItemId: item.id,
+        creditPackItemId: item.id && vivos.has(item.id) ? item.id : null,
         productId: item.productId,
         originalQuantity: item.quantity,
         remainingQuantity: item.quantity,
