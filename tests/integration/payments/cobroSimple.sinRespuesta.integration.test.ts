@@ -720,7 +720,7 @@ describe('Codex S1 r2', () => {
     expect(cancelEmit).not.toHaveBeenCalled()
   })
 
-  it('apps viejas #1 · una TPV que no anuncia que contesta el cancel (2.9.1, 2.10.0) no recibe el cancel automático; el cierre del servidor sigue igual', async () => {
+  it('apps viejas #1 · una TPV que no anuncia que contesta el cancel (2.9.x) no recibe el cancel automático; el cierre del servidor sigue igual', async () => {
     ;(terminalRegistry.getTerminal as jest.Mock).mockImplementation((terminalId: string) => ({
       terminalId,
       venueId: f.venueId,
@@ -740,7 +740,7 @@ describe('Codex S1 r2', () => {
     })
   })
 
-  it('…y a una TPV que sí lo anuncia (2.12.5 en adelante) se le sigue mandando', async () => {
+  it('…y a una TPV que sí lo anuncia (2.10.0 en adelante) se le sigue mandando', async () => {
     const s = await f.solicitud({ acknowledgedAt: new Date() })
     expect(await svc.entrarSinRespuestaYProgramar(s.requestId, f.venueId, 'TERMINAL_GONE', { terminalId: f.serial })).toBe(true)
     expect(cancelEmit).toHaveBeenCalledWith('terminal:payment_cancel', expect.objectContaining({ requestId: s.requestId }))

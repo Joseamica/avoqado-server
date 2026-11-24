@@ -8515,8 +8515,8 @@ class TerminalPaymentService {
     })
     if ((opciones.emitirCancel ?? causa !== 'NO_RESPONSE') && opciones.terminalId) {
       const entry = terminalRegistry.getTerminal(opciones.terminalId)
-      // Apps viejas #1 (23-nov): el cancel AUTOMÁTICO sólo va a la TPV que anuncia que lo contesta (2.12.5 en adelante). Una 2.9.1 o
-      // 2.10.0 lo obedece sin mirar de qué cobro es y puede sacar al cajero de OTRO cobro; con ellas basta el cierre del servidor.
+      // Apps viejas #1 (23-nov): el cancel AUTOMÁTICO sólo va a la TPV que anuncia que lo contesta (2.10.0 en adelante). Una 2.9.x lo
+      // obedece sin mirar de qué cobro es y puede sacar al cajero de OTRO cobro; con ella basta el cierre del servidor.
       if ((entry?.terminalPaymentCancelDispositionVersion ?? 0) >= 1)
         await this.emitCancelToTerminal(entry?.socketId, opciones.terminalId, requestId, 'Sin respuesta del cobro').catch(() => false)
     }
