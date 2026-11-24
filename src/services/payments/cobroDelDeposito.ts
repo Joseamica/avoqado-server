@@ -43,18 +43,25 @@ export async function registrarCobroDelDeposito(
       checkoutSessionId: string | null
       cancelledBy: string | null
       cancellationReason: string | null
+      claseCancelada: boolean
     }>
-  >`SELECT status, "depositStatus", "checkoutSessionId", "cancelledBy", "cancellationReason" FROM "Reservation" WHERE id = ${a.reservationId} FOR UPDATE`
+  >`SELECT r.status, r."depositStatus", r."checkoutSessionId", r."cancelledBy", r."cancellationReason",
+           COALESCE(cs.status = 'CANCELLED', FALSE) AS "claseCancelada"
+      FROM "Reservation" r LEFT JOIN "ClassSession" cs ON cs.id = r."classSessionId"
+     WHERE r.id = ${a.reservationId}
+       FOR UPDATE OF r`
   if (!r || r.checkoutSessionId !== a.checkoutSessionId || !a.desde.includes(r.depositStatus as 'PENDING' | 'EXPIRED')) {
     return 'SIN_CAMBIO'
   }
   // Sólo el vencimiento del plazo del depósito (sus dos escritores y sus textos): «SYSTEM» también cancela una clase entera que
-  // canceló el negocio (Codex 0-r3 #1), y ésa no se re-confirma.
+  // canceló el negocio (Codex 0-r3 #1), y ésa no se re-confirma. Tampoco la que venció por plazo y DESPUÉS el negocio canceló su
+  // clase (la cancelación de la clase sólo toca reservas vivas, así que la vencida conserva su motivo: Codex 0-r4 #1).
   const vencidaPorElPlazo =
     r.status === 'CANCELLED' &&
     r.depositStatus === 'EXPIRED' &&
     r.cancelledBy === 'SYSTEM' &&
-    MOTIVOS_DE_VENCIMIENTO_DEL_DEPOSITO.includes(r.cancellationReason ?? '')
+    MOTIVOS_DE_VENCIMIENTO_DEL_DEPOSITO.includes(r.cancellationReason ?? '') &&
+    !r.claseCancelada
   const confirmar = r.status === 'PENDING' || r.status === 'CONFIRMED' || vencidaPorElPlazo
   await tx.reservation.update({
     where: { id: a.reservationId },

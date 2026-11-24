@@ -130,6 +130,9 @@ describe('D20 0b — el cobro de un depósito no revive lo cerrado (integration,
       await step(() => prisma.moneyAnomaly.deleteMany({ where: { reservationId: { in: ids } } }))
       await step(() => prisma.processedStripeEvent.deleteMany({ where: { account: 'acct_simulado' } }))
       await step(() => prisma.reservation.deleteMany({ where: { venueId } }))
+      await step(() => prisma.classSession.deleteMany({ where: { venueId } }))
+      await step(() => prisma.product.deleteMany({ where: { venueId } }))
+      await step(() => prisma.menuCategory.deleteMany({ where: { venueId } }))
       await step(() => prisma.reservationSettings.deleteMany({ where: { venueId } }))
       await step(() => prisma.customer.deleteMany({ where: { venueId } }))
       await step(() => prisma.ecommerceMerchant.deleteMany({ where: { venueId } }))
@@ -250,6 +253,66 @@ describe('D20 0b — el cobro de un depósito no revive lo cerrado (integration,
       const a = await anomalias(r.id)
       expect(a.map(x => x.category)).toEqual(['DEPOSIT_PAID_ON_CANCELLED_RESERVATION'])
       expect(a[0].resolvedAt).not.toBeNull()
+    })
+
+    it('🔴 vencida por el plazo y DESPUÉS el negocio canceló la clase: el pago no la revive, se devuelve (Codex 0-r4 #1)', async () => {
+      const categoria = await prisma.menuCategory.create({ data: { venueId: venueId!, name: 'Clases', slug: `clases-dep-${RUN}` } })
+      const yoga = await prisma.product.create({
+        data: {
+          venueId: venueId!,
+          sku: `DEP-${RUN}`,
+          name: 'Yoga',
+          categoryId: categoria.id,
+          price: new Prisma.Decimal(200),
+          type: 'CLASS',
+        },
+      })
+      const clase = await prisma.classSession.create({
+        data: {
+          venueId: venueId!,
+          productId: yoga.id,
+          startsAt: new Date(Date.now() + 86_400_000),
+          endsAt: new Date(Date.now() + 90_000_000),
+          duration: 60,
+          capacity: 10,
+          status: 'CANCELLED',
+        },
+      })
+      // El orden real: la conciliación la venció (SYSTEM + motivo de plazo) y luego el negocio canceló la clase, que sólo toca
+      // reservas PENDING/CONFIRMED: ésta conserva el motivo del vencimiento.
+      const r = await mkReservation({
+        classSessionId: clase.id,
+        productId: yoga.id,
+        status: 'CANCELLED',
+        cancelledBy: 'SYSTEM',
+        cancellationReason: 'Reservation deposit payment window expired',
+        cancelledAt: new Date(),
+        depositStatus: 'EXPIRED',
+      })
+      provider.getPaymentStatus.mockResolvedValue(pagado())
+
+      await expect(finalizeDepositCheckoutForConsumer(consumerId!, r.checkoutSessionId!)).rejects.toThrow(/cancelada/)
+
+      const fila = await prisma.reservation.findUniqueOrThrow({ where: { id: r.id } })
+      expect(fila.status).toBe('CANCELLED')
+      expect(fila.depositStatus).toBe('REFUNDED')
+      expect(provider.refund).toHaveBeenCalledTimes(1)
+    })
+
+    it('🔴 el MISMO aviso reentregado (ya procesado) cierra la alerta si la devolución ya está guardada (Codex 0-r4 #2)', async () => {
+      const r = await mkReservation({ status: 'CANCELLED', cancelledBy: 'staff-1', cancelledAt: new Date() })
+      const aviso = avisoDeStripe(r.checkoutSessionId!)
+      await processStripeConnectWebhookEvent(aviso as never)
+      expect((await prisma.reservation.findUniqueOrThrow({ where: { id: r.id } })).depositStatus).toBe('REFUNDED')
+      // Simula la caída: la devolución quedó guardada, pero la alerta no alcanzó a cerrarse.
+      await prisma.moneyAnomaly.updateMany({
+        where: { reservationId: r.id },
+        data: { resolvedAt: null, resolvedBy: null, resolution: null },
+      })
+
+      await processStripeConnectWebhookEvent(aviso as never) // Stripe reentrega el mismo evento (mismo id)
+
+      expect((await anomalias(r.id)).map(a => a.resolvedAt !== null)).toEqual([true])
     })
 
     it('si el proceso cayó entre devolver y resolver la alerta, el aviso tardío del mismo cobro la resuelve', async () => {
