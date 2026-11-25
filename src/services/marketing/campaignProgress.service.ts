@@ -12,8 +12,9 @@ import prisma from '@/utils/prismaClient'
  * 0. Contar al leer no agrega escritores ni carreras, y corrige también lo ya mandado; no leas
  * esas columnas.
  *
- * - Salieron (`sentCount`) = `SENT`: el proveedor lo aceptó y no ha rebotado. Como las
- *   «entregas exitosas» de Mailchimp (los que no rebotaron).
+ * - Enviados (`sentCount`) = `SENT`: el proveedor lo aceptó y no ha rebotado. No es «llegó»: el
+ *   aviso de entrega de Resend no se guarda. Mailchimp cuenta igual sus «entregas exitosas» (los
+ *   que no rebotaron).
  * - Fallaron (`failedCount`) = `DEAD` (se agotaron los intentos) + `FAILED` (rebotó o lo
  *   marcaron como spam).
  * - Omitidos (`skippedCount`) = `SKIPPED` (quitó su permiso, correo bloqueado, venció…).
@@ -34,13 +35,18 @@ export async function conAvanceReal<T extends { id: string; status: C }>(
   venueId: string,
   campanas: T[],
 ): Promise<Array<T & AvanceDeEnvio>> {
-  if (campanas.length === 0) return []
-
-  const grupos = await prisma.customerCampaignDelivery.groupBy({
-    by: ['campaignId', 'status'],
-    where: { venueId, campaignId: { in: campanas.map(c => c.id) } },
-    _count: { _all: true },
-  })
+  // Un borrador o una programada no tiene envíos: se crean en la MISMA transacción que la pasa a
+  // `ENQUEUED`. Contarla sólo serviría para mezclar dos momentos (la fila leída en borrador y sus
+  // envíos recién creados) y devolver «Borrador · 1 enviado».
+  const ids = campanas.filter(c => c.status !== C.DRAFT && c.status !== C.SCHEDULED).map(c => c.id)
+  const grupos =
+    ids.length === 0
+      ? []
+      : await prisma.customerCampaignDelivery.groupBy({
+          by: ['campaignId', 'status'],
+          where: { venueId, campaignId: { in: ids } },
+          _count: { _all: true },
+        })
 
   const porCampana = new Map<string, Map<D, number>>()
   for (const g of grupos) {

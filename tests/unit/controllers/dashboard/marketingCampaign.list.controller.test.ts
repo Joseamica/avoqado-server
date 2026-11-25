@@ -126,7 +126,7 @@ describe('listCampaigns — consulta acotada', () => {
 
     expect(next).not.toHaveBeenCalled()
     expect(groupBy).toHaveBeenCalledTimes(1)
-    expect(groupBy.mock.calls[0][0].where).toEqual({ venueId: VENUE, campaignId: { in: ['c1', 'c2'] } })
+    expect(groupBy.mock.calls[0][0].where).toEqual({ venueId: VENUE, campaignId: { in: ['c1'] } })
     const { items, total } = (res.json as jest.Mock).mock.calls[0][0]
     expect(total).toBe(2)
     expect(items[0]).toMatchObject({ id: 'c1', status: 'SENT', sentCount: 8, failedCount: 2, totalRecipients: 10 })

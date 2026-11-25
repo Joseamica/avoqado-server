@@ -43,7 +43,23 @@ describe('conAvanceReal — los números salen de los envíos', () => {
     expect(groupBy).toHaveBeenCalledTimes(1)
     const args = groupBy.mock.calls[0][0]
     expect(args.by).toEqual(['campaignId', 'status'])
-    expect(args.where).toEqual({ venueId: VENUE, campaignId: { in: ['c1', 'c2', 'c3'] } })
+    // El borrador no entra: no puede tener envíos (ver la prueba de la carrera abajo).
+    expect(args.where).toEqual({ venueId: VENUE, campaignId: { in: ['c1', 'c2'] } })
+  })
+
+  it('🔴 un borrador leído justo antes de encolarse NO sale «Borrador · 1 enviado»', async () => {
+    // La fila se leyó en DRAFT y, antes del conteo, se encoló y salió su primer correo.
+    groupBy.mockResolvedValue([g('c1', D.SENT, 1)])
+    const [c] = await conAvanceReal(VENUE, [{ id: 'c1', status: C.DRAFT }])
+    expect(c).toMatchObject({ status: C.DRAFT, sentCount: 0, failedCount: 0, skippedCount: 0 })
+  })
+
+  it('una página sólo de borradores y programadas no consulta los envíos', async () => {
+    await conAvanceReal(VENUE, [
+      { id: 'c1', status: C.DRAFT },
+      { id: 'c2', status: C.SCHEDULED },
+    ])
+    expect(groupBy).not.toHaveBeenCalled()
   })
 
   it('página vacía: no consulta nada', async () => {

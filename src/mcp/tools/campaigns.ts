@@ -28,7 +28,7 @@ export function registerCampaignTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_customer_campaigns',
-    'Email CAMPAIGNS a venue sent (or is preparing) to ITS OWN customers — promotions, news, announcements: each with its name, subject, status (DRAFT/SENT/…), who it went to, and how many were delivered vs failed. Answers "¿qué campañas de correo he mandado? ¿cuántos correos llegaron? ¿tengo borradores sin mandar?". This is the venue→its customers lane, NOT Avoqado→venues. Pass venueId. Requires marketing:manage.',
+    'Email CAMPAIGNS a venue sent (or is preparing) to ITS OWN customers — promotions, news, announcements: each with its name, subject, status (DRAFT/SENT/…), who it went to, and how many went out (accepted by the email provider and not bounced — not a confirmed inbox delivery), failed (bounced, spam or out of retries) or were skipped. Answers "¿qué campañas de correo he mandado? ¿cuántos correos llegaron? ¿tengo borradores sin mandar?". This is the venue→its customers lane, NOT Avoqado→venues. Pass venueId. Requires marketing:manage.',
     {
       venueId: z.string().describe('Venue whose campaigns to list (must be in your scope)'),
       limit: z.number().int().positive().max(50).optional().describe('Max campaigns (default 20, newest first)'),
@@ -73,6 +73,7 @@ export function registerCampaignTools(server: McpServer, scope: McpScope) {
           estado: c.status,
           audiencia: c.audience,
           destinatarios: c.totalRecipients,
+          // Nombre de siempre (lo leen clientes viejos): cuenta los que SALIERON y no rebotaron.
           entregados: c.sentCount,
           fallidos: c.failedCount,
           omitidos: c.skippedCount,
