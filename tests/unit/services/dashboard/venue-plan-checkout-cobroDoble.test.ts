@@ -65,9 +65,23 @@ describe('createVenuePlanCheckoutSession — pasa por la regla común de compra'
     expect(mockCheckout).not.toHaveBeenCalled()
   })
 
-  it('precio igual → la sesión lleva el priceId verificado', async () => {
+  it('🔴 Codex B0 #3: con precio distinto, 409 y NO se vence ningún checkout abierto (la regla común ni se llama)', async () => {
+    // La regla común es la que vence las sesiones abiertas del cliente: si corriera antes del 409, el enlace de pago
+    // válido de otra pestaña quedaba vencido y el cliente sin uno nuevo.
+    mockResolverPrecio.mockResolvedValue({ priceId: 'price_otro', unitAmount: 92684 })
+    await expect(createVenuePlanCheckoutSession('org-1', 'venue-1', 'monthly', 'PREMIUM')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_PRICE_MISMATCH',
+    })
+    expect(mockAutorizar).not.toHaveBeenCalled()
+    expect(mockCheckout).not.toHaveBeenCalled()
+  })
+
+  it('precio igual → la sesión lleva el priceId verificado ANTES de la regla común, sin volver a leerlo dentro', async () => {
     await createVenuePlanCheckoutSession('org-1', 'venue-1', 'monthly', 'PRO')
     expect(mockResolverPrecio).toHaveBeenCalledWith('PLAN_PRO', 'monthly')
+    expect(mockResolverPrecio).toHaveBeenCalledTimes(1)
+    expect(mockResolverPrecio.mock.invocationCallOrder[0]).toBeLessThan(mockAutorizar.mock.invocationCallOrder[0])
     expect(mockCheckout).toHaveBeenCalledWith(expect.objectContaining({ priceId: 'price_verificado' }))
   })
 
