@@ -2,13 +2,12 @@
 import prisma from '@/utils/prismaClient'
 
 /**
- * El reporte de dibujo del POS y su orden (hz:a5fa2439:D1) viven en Terminal, pero la omisión global del cliente
- * (`serverOnlyOmit`) los saca de toda lectura: ninguna respuesta vieja que devuelve la fila (o la anida) los filtra.
- * Sólo quien los pide por nombre los recibe. La omisión es del motor de Prisma, por eso se prueba contra la base.
+ * El reporte de dibujo del POS (hz:a5fa2439:D1) vive en Terminal, pero la omisión global del cliente (`serverOnlyOmit`)
+ * lo saca de toda lectura: ninguna respuesta vieja que devuelve la fila (o la anida) lo filtra. Sólo quien lo pide por
+ * nombre lo recibe. La omisión es del motor de Prisma, por eso se prueba contra la base.
  */
 const suffix = `omit-${Date.now()}`
 const DIAGNOSTICS = { renderer: 'software', probe: 1 }
-const ORDER = { mode: 'safe', seq: 1 }
 let orgId: string
 let venueId: string
 let terminalId: string
@@ -28,7 +27,7 @@ beforeAll(async () => {
   ).id
   terminalId = (
     await prisma.terminal.create({
-      data: { venueId, name: 'PC', type: 'POS_DESKTOP', deviceDiagnostics: DIAGNOSTICS, drawingModeOrder: ORDER },
+      data: { venueId, name: 'PC', type: 'POS_DESKTOP', deviceDiagnostics: DIAGNOSTICS },
       select: { id: true },
     })
   ).id
@@ -42,7 +41,7 @@ afterAll(async () => {
   await prisma.$disconnect()
 })
 
-it('una lectura normal de Terminal, directa o anidada, no trae ninguno de los dos campos', async () => {
+it('una lectura normal de Terminal, directa o anidada, no trae el reporte de dibujo', async () => {
   const [direct, nested] = await Promise.all([
     prisma.terminal.findUniqueOrThrow({ where: { id: terminalId } }),
     prisma.venue.findUniqueOrThrow({ where: { id: venueId }, include: { terminals: true } }),
@@ -50,15 +49,12 @@ it('una lectura normal de Terminal, directa o anidada, no trae ninguno de los do
 
   expect(direct).toHaveProperty('id', terminalId)
   expect(direct).not.toHaveProperty('deviceDiagnostics')
-  expect(direct).not.toHaveProperty('drawingModeOrder')
   expect(nested.terminals).toHaveLength(1)
   expect(nested.terminals[0]).not.toHaveProperty('deviceDiagnostics')
-  expect(nested.terminals[0]).not.toHaveProperty('drawingModeOrder')
 })
 
-it('con omit: { deviceDiagnostics: false } trae ése y sólo ése', async () => {
+it('con omit: { deviceDiagnostics: false } sí lo trae', async () => {
   const row = await prisma.terminal.findUniqueOrThrow({ where: { id: terminalId }, omit: { deviceDiagnostics: false } })
 
   expect(row).toHaveProperty('deviceDiagnostics', DIAGNOSTICS)
-  expect(row).not.toHaveProperty('drawingModeOrder')
 })
