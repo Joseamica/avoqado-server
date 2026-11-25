@@ -18,7 +18,9 @@ export class ErrorDePreparacion extends Error {
   ranura: Ranura
   stripeCode?: string
   constructor(motivo: MotivoDePreparacion, ranura: Ranura, message: string, stripeCode?: string, cause?: unknown) {
-    super(message, cause === undefined ? undefined : { cause })
+    super(message)
+    // El objetivo es es2020 (sin `ErrorOptions`): la causa va no enumerable, como `new Error(msg, { cause })`.
+    if (cause !== undefined) Object.defineProperty(this, 'cause', { value: cause, enumerable: false, writable: true, configurable: true })
     this.name = 'ErrorDePreparacion'
     this.motivo = motivo
     this.ranura = ranura
