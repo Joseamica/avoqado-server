@@ -330,7 +330,7 @@ describe('D679 · reglas del Ilimitado (integración, base real)', () => {
   const saldo = async (balanceId: string) =>
     (await prisma.creditItemBalance.findUniqueOrThrow({ where: { id: balanceId }, select: { remainingQuantity: true } })).remainingQuantity
   const venceTexto = (fecha: Date) =>
-    `Tu Ilimitado vence el ${formatInTimeZone(fecha, TZ, "d 'de' MMMM", { locale: es })}; esta clase es después.`
+    `Tu Ilimitado vence el ${formatInTimeZone(fecha, TZ, "d 'de' MMMM", { locale: es })}, antes de este horario.`
 
   const TITULAR = { guestName: 'Ana Titular', guestEmail: ana.email }
 
