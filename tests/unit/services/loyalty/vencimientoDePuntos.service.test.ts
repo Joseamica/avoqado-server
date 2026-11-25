@@ -78,7 +78,7 @@ describe('vencerPuntosDelCliente', () => {
     expect(sqls[0]).toMatch(/FROM "Customer".*FOR UPDATE/s)
     expect(sqls[1]).toMatch(/FROM "LoyaltyConfig".*FOR SHARE/s)
     // La limpieza demo → real y el borrado de un negocio toman la fila del negocio ANTES que la del cliente (Codex r4 #1).
-    expect(sqls.some(q => /FROM "Venue"/.test(q))).toBe(false)
+    expect(sqls.some((q: string) => /FROM "Venue"/.test(q))).toBe(false)
     const [fila, config] = prismaMock.$queryRaw.mock.invocationCallOrder
     expect(advisory).toBeLessThan(fila)
     expect(fila).toBeLessThan(config)

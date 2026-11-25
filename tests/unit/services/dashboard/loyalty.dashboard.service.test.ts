@@ -960,7 +960,7 @@ describe('Loyalty Dashboard Service', () => {
     it('corre el vencimiento del negocio y responde con la forma de siempre', async () => {
       const spy = jest
         .spyOn(vencimiento, 'vencerPuntosDelNegocio')
-        .mockResolvedValue({ customersAffected: 3, pointsExpired: 420, fallidos: 1, anclaFijada: false, sinPlan: false, pendientes: false })
+        .mockResolvedValue({ customersAffected: 3, pointsExpired: 420, fallidos: 1, anclaFijada: false, sinPlan: false })
 
       await expect(expireOldPoints('venue-123')).resolves.toEqual({ customersAffected: 3, pointsExpired: 420, fallidos: 1 })
       expect(spy).toHaveBeenCalledWith('venue-123')
