@@ -10,6 +10,16 @@
  *   una prueba detecta una guarda que falta. `jsonb_set` no crea padres que falten (como Postgres): el JSON tiene que nacer completo.
  *
  * Los métodos de cada modelo se registran en `llamadas` (con el número de la transacción, `null` fuera de una) para las aserciones.
+ *
+ * ⚠️ LÍMITES (no es Postgres; que una prueba nueva no se apoye en esto):
+ * - **El deshacer restaura la fila COMPLETA como estaba al escribir.** Si entre la escritura de una transacción y su deshacer otra
+ *   escritura (fuera de transacción, «autocommit») toca la misma fila, el deshacer la borra. En Postgres esa otra escritura esperaría
+ *   el candado de la fila. Las pruebas de hoy no lo hacen: cada lector espera el candado del escritor o corre después de su commit.
+ * - **Sin aislamiento:** lo que una transacción escribió y aún no confirma lo ven todas las demás lecturas.
+ * - **`select` se ignora:** cada lectura devuelve la fila completa (y el puntero, con sus dos versiones colgadas).
+ * - **`pg_advisory_xact_lock` fuera de una transacción no espera** (ni toma nada).
+ * - **`$executeRaw` reconoce las guardas por pedazos del SQL** (`"status" = 'PREPARING'`, `"col"->'k'->>?`, `'{ruta}'`, `?::jsonb`):
+ *   otra forma de escribir la misma condición se trataría como ausente. Cualquier SQL que no reconoce, lanza.
  */
 type Fila = Record<string, any>
 
@@ -114,6 +124,8 @@ export function crearBaseDePrueba(prismaMock: any) {
     valor: unknown
     aplicada: boolean
     fila: Fila | undefined
+    /** Los candados que alguna transacción tenía tomados en ese momento. */
+    candadosTomados: string[]
   }> = []
   const contextos = new WeakMap<object, Contexto>()
   let siguienteTx = 0
@@ -219,7 +231,15 @@ export function crearBaseDePrueba(prismaMock: any) {
     const id = String(valores[i++])
     const fila = tablas.planOfferVersion.get(id)
     const anotar = (aplicada: boolean) => {
-      historial.push({ tx: ctx?.id ?? null, columna, ruta, valor, aplicada, fila: copia(tablas.planOfferVersion.get(id)) })
+      historial.push({
+        tx: ctx?.id ?? null,
+        columna,
+        ruta,
+        valor,
+        aplicada,
+        fila: copia(tablas.planOfferVersion.get(id)),
+        candadosTomados: [...tomadosAhora.keys()],
+      })
       return aplicada ? 1 : 0
     }
     if (!fila) return anotar(false)

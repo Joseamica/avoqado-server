@@ -101,6 +101,9 @@ const puntero = () => base.fila('planOfferPointer', 'vigente')!
 const lista = (tier: 'PRO' | 'PREMIUM') => base.fila('hybridCampaign', tier === 'PRO' ? 'list_pro' : 'list_premium')!
 const pendienteId = () => puntero().pendingVersionId as string
 const llamadasAStripe = () => stripeList.mock.calls.length + stripeCreate.mock.calls.length
+/** Las escrituras de `preparacion.ultimoError`, en orden. */
+const notasDeUltimoError = () => base.historial.filter(h => h.columna === 'preparacion' && h.ruta[0] === 'ultimoError')
+const ultimaNota = () => notasDeUltimoError()[notasDeUltimoError().length - 1]
 
 function sembrarHoy() {
   base.sembrar('planOfferVersion', {
@@ -582,6 +585,14 @@ describe('las listas híbridas y el movimiento', () => {
       expect(puntero()).toMatchObject({ currentVersionId: 'cv1', pendingVersionId: atorada })
       expect(version(atorada).status).toBe('PREPARING')
       expect(base.bitacora.map(l => l.action)).not.toContain('HYBRID_LIST_PRICE_SAVED')
+      // M2: la negativa del movimiento queda en ultimoError, escrita después de la transacción y sin candados.
+      expect(version(atorada).preparacion.ultimoError).toEqual({
+        etapa: 'LISTA',
+        ranura: null,
+        motivo: 'PLAN_OFFER_PREPARING',
+        at: expect.any(String),
+      })
+      expect(ultimaNota()).toMatchObject({ tx: null, candadosTomados: [], aplicada: true })
     }
   })
 
@@ -664,18 +675,112 @@ describe('las listas híbridas y el movimiento', () => {
     expect(puntero()).toMatchObject({ currentVersionId: 'cv1', pendingVersionId: atorada })
     expect(lista('PRO')).toMatchObject({ currentPublicationId: 'pub_pro', pendingPublicationId: version(atorada).hybridPublicationIds.PRO })
     expect(base.bitacora.map(l => l.action)).toEqual(['PLAN_OFFER_PUBLISH_STARTED'])
+    expect(version(atorada).preparacion.ultimoError).toEqual({
+      etapa: 'MOVIMIENTO',
+      ranura: null,
+      motivo: 'PLAN_EDIT_DISABLED',
+      at: expect.any(String),
+    })
+    expect(ultimaNota()).toMatchObject({ tx: null, candadosTomados: [], aplicada: true })
+  })
+
+  it('el movimiento desfasado con la versión todavía PREPARING anota MOVIMIENTO / PLAN_OFFER_STALE en ultimoError', async () => {
+    // Algo movió la vigente mientras se preparaba la lista: el movimiento ya no está sobre la base de la versión.
+    mockEnsure.mockImplementationOnce(async (publicationId: string) => {
+      base.tablas.hybridOfferPublication.set(publicationId, {
+        ...base.tablas.hybridOfferPublication.get(publicationId)!,
+        stripePriceId: 'price_h',
+        stripeProductId: 'prod_h',
+      })
+      base.tablas.planOfferPointer.set('vigente', { ...puntero(), currentVersionId: 'cv_otra' })
+    })
+    const err = await publicarVersion(entrada({ PRO: PRO_MENSUAL_NUEVO }), 1, STAFF).catch(e => e)
+    const atorada = pendienteId()
+
+    expect(err).toMatchObject({ statusCode: 409, code: 'PLAN_OFFER_STALE' })
+    expect(version(atorada).status).toBe('PREPARING')
+    expect(version(atorada).preparacion.ultimoError).toEqual({
+      etapa: 'MOVIMIENTO',
+      ranura: null,
+      motivo: 'PLAN_OFFER_STALE',
+      at: expect.any(String),
+    })
+    expect(ultimaNota()).toMatchObject({ tx: null, candadosTomados: [], aplicada: true })
+  })
+
+  it('un paso que sale bien después de una falla limpia ultimoError (y la versión publicada no lo arrastra)', async () => {
+    const atorada = await publicacionAtorada()
+    expect(version(atorada).preparacion.ultimoError).toMatchObject({ etapa: 'PRECIO' })
+
+    // El precio sale bien (limpia) y la lista falla (anota la suya).
+    mockEnsure.mockImplementationOnce(async () => {
+      throw new Error('Stripe no contestó')
+    })
+    await expect(reintentarPublicacion(atorada, STAFF)).rejects.toMatchObject({ details: { etapa: 'LISTA' } })
+    expect(notasDeUltimoError().map(h => (h.valor as { etapa?: string } | null)?.etapa ?? null)).toEqual(['PRECIO', null, 'LISTA'])
+
+    // El siguiente reintento: la lista sale bien (limpia) y se publica sin el error viejo.
+    await expect(reintentarPublicacion(atorada, STAFF)).resolves.toMatchObject({ number: 2, versionId: atorada })
+    expect(notasDeUltimoError().map(h => (h.valor as { etapa?: string } | null)?.etapa ?? null)).toEqual(['PRECIO', null, 'LISTA', null])
+    expect(version(atorada)).toMatchObject({ status: 'PUBLISHED', preparacion: { ultimoError: null } })
   })
 })
 
 describe('reintentar y descartar', () => {
   it('el reintento de otra versión que ya no es la pendiente → 409 PLAN_OFFER_STALE', async () => {
     await publicacionAtorada()
+    base.sembrar('planOfferVersion', { id: 'cv_vieja', status: 'DISCARDED', definition: versionUno() })
     stripeList.mockClear()
     stripeCreate.mockClear()
 
     await expect(reintentarPublicacion('cv_otra', STAFF)).rejects.toMatchObject({ statusCode: 409, code: 'PLAN_OFFER_STALE' })
-    await expect(reintentarPublicacion('cv1', STAFF)).rejects.toMatchObject({ statusCode: 409, code: 'PLAN_OFFER_STALE' })
+    await expect(reintentarPublicacion('cv_vieja', STAFF)).rejects.toMatchObject({ statusCode: 409, code: 'PLAN_OFFER_STALE' })
+    // M1: la versión que ya está en venta no es «otra»: reintentarla responde con ella, sin tocar nada.
+    await expect(reintentarPublicacion('cv1', STAFF)).resolves.toEqual({ number: 1, versionId: 'cv1' })
     expect(llamadasAStripe()).toBe(0)
+  })
+
+  it('🔴 doble clic: dos reintentos encimados de la misma versión terminan los dos con la misma versión publicada y una sola bitácora', async () => {
+    const atorada = await publicacionAtorada()
+    // A se detiene en Stripe; B termina y publica.
+    const detenida = pausa()
+    pausasDeCrear.push(detenida.promesa)
+    const a = reintentarPublicacion(atorada, STAFF)
+    await vueltas()
+    const b = await reintentarPublicacion(atorada, STAFF)
+    expect(b).toEqual({ number: 2, versionId: atorada })
+
+    // A vuelve: su escritura ya no aplica (la versión está PUBLISHED) y su STALE es el éxito de B.
+    detenida.soltar()
+    await expect(a).resolves.toEqual({ number: 2, versionId: atorada })
+    const escrituras = base.historial.filter(h => h.columna === 'definition')
+    expect(escrituras.map(h => h.aplicada)).toEqual([true, false])
+    // Un tercer clic, después: la revisión corta ya ve la versión publicada.
+    stripeList.mockClear()
+    stripeCreate.mockClear()
+    await expect(reintentarPublicacion(atorada, STAFF)).resolves.toEqual({ number: 2, versionId: atorada })
+    expect(llamadasAStripe()).toBe(0)
+    expect(base.bitacora.filter(l => l.action === 'PLAN_OFFER_PUBLISHED')).toHaveLength(1)
+    expect(precios).toHaveLength(1)
+  })
+
+  it('M4: descartar una versión que renombró la lista y publicar una que reusa la vigente devuelve el nombre de la lista', async () => {
+    mockEnsure.mockImplementationOnce(async () => {
+      throw new Error('Stripe no contestó')
+    })
+    await expect(publicarVersion(entrada({ PRO: { displayName: 'Pro Plus' } }), 1, STAFF)).rejects.toMatchObject({
+      details: { etapa: 'LISTA' },
+    })
+    expect(lista('PRO').name).toBe('Plan Pro Plus')
+    await descartarPublicacion(pendienteId(), STAFF)
+    // Soltar sólo limpia la pendiente: el nombre del descarte se queda.
+    expect(lista('PRO')).toMatchObject({ name: 'Plan Pro Plus', pendingPublicationId: null, revision: 5 })
+
+    const r = await publicarVersion(entrada({ PRO: { trialDays: 14 } }), 3, STAFF)
+    expect(r.number).toBe(2)
+    expect(version(r.versionId).hybridPublicationIds.PRO).toBe('pub_pro')
+    expect(lista('PRO')).toMatchObject({ name: 'Plan Pro', currentPublicationId: 'pub_pro', pendingPublicationId: null, revision: 6 })
+    expect(lista('PRO').name).toBe(base.fila('hybridOfferPublication', 'pub_pro')!.name)
   })
 
   it('🔴 un reintento con el interruptor ya apagado → 409 PLAN_EDIT_DISABLED con cero llamadas a Stripe (ni prices.list, ni prices.create, ni ensureHybridPublicationPrices) y la versión, sus ranuras y sus listas sin cambio', async () => {
@@ -736,6 +841,20 @@ describe('reintentar y descartar', () => {
     await expect(descartarPublicacion(atorada, STAFF)).rejects.toMatchObject({ code: 'PLAN_OFFER_STALE' })
   })
 
+  it('M7: si el estado no se puede leer después de descartar, el descarte responde con un estado mínimo (no un error)', async () => {
+    const atorada = await publicacionAtorada()
+    // La vigente guardada está rota: `estadoDeLaOferta` respondería 503.
+    base.tablas.planOfferVersion.set('cv1', { ...version('cv1'), definition: { schemaVersion: 1 } })
+
+    await expect(descartarPublicacion(atorada, STAFF)).resolves.toEqual({ revision: 3, pendiente: null, parcial: true })
+    expect(version(atorada)).toMatchObject({ status: 'DISCARDED' })
+    expect(puntero()).toMatchObject({ pendingVersionId: null, revision: 3 })
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[PlanOffer] se descartó la versión, pero no se pudo leer el estado de la oferta',
+      expect.objectContaining({ versionId: atorada }),
+    )
+  })
+
   it('🔴 una preparación que corría cuando se descartó no escribe su priceId (CAS PREPARING) ni mueve nada', async () => {
     const detenida = pausa()
     pausasDeCrear.push(detenida.promesa)
@@ -786,6 +905,18 @@ describe('estadoDeLaOferta', () => {
       nombresEnStripe: { PRO: 'pendiente' },
       destinatarios: [],
     })
+  })
+
+  it('M7: la pendiente se lee en la misma consulta del puntero; una que ya no está PREPARING sale como null', async () => {
+    const atorada = await publicacionAtorada()
+    const antes = base.llamadasA('planOfferVersion', 'findUnique').length
+    expect((await estadoDeLaOferta()).pendiente).toMatchObject({ versionId: atorada })
+    // Ninguna lectura aparte de la versión pendiente.
+    expect(base.llamadasA('planOfferVersion', 'findUnique')).toHaveLength(antes)
+
+    // El puntero todavía la nombra, pero ya se descartó (la carrera que antes devolvía una descartada).
+    base.tablas.planOfferVersion.set(atorada, { ...version(atorada), status: 'DISCARDED' })
+    expect((await estadoDeLaOferta()).pendiente).toBeNull()
   })
 
   it('sin versiones: el respaldo con número 1 y revisión 0', async () => {

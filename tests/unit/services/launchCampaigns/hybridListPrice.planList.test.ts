@@ -114,6 +114,15 @@ describe('prepararListaDelPlan', () => {
     expect(listaPro()).toMatchObject({ currentPublicationId: 'pub_pro', pendingPublicationId: null, revision: 4 })
   })
 
+  it('al reusar la vigente, el nombre que dejó una versión descartada vuelve al de la publicación en venta', async () => {
+    base.tablas.hybridCampaign.set('list_pro', { ...listaPro(), name: 'Plan Pro Plus' })
+    const r = await prepararListaDelPlan('PRO', { precio: 1158.84, nombre: 'Plan Pro' }, 'staff1', versionPendiente())
+
+    expect(r).toEqual({ publicationId: 'pub_pro', reusada: true })
+    expect(listaPro()).toMatchObject({ name: 'Plan Pro', currentPublicationId: 'pub_pro', pendingPublicationId: null, revision: 4 })
+    expect(mockEnsure).not.toHaveBeenCalled()
+  })
+
   it('con otro nombre crea una publicación pendiente «Plan Pro Plus» y renombra la lista', async () => {
     const r = await prepararListaDelPlan('PRO', { precio: 1158.84, nombre: 'Plan Pro Plus' }, 'staff1', versionPendiente())
 

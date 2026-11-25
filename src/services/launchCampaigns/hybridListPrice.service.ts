@@ -451,7 +451,8 @@ const sameCents = (a: number, b: number) => Math.round(a * 100) === Math.round(b
  * asks the version which publication it already linked (`version.ligada`, which also refuses a version that is no longer the
  * pending one), so two overlapping retries end on the same publication:
  * - linked and on sale → `reusada: true`; linked and pending → `reusada: false` (its Stripe prices are prepared again);
- * - nothing linked: the publication on sale at the same price and name → `reusada: true` (and an old pending is released);
+ * - nothing linked: the publication on sale at the same price and name → `reusada: true` (an old pending is released, and a
+ *   name a discarded version left on the list goes back to the publication's);
  *   otherwise a new pending publication `kind: 'PLAN'` with that price and name (the list takes the name too).
  * Then `version.ligar` records it in the same transaction: if anything throws, nothing stays. Outside the transaction, when
  * `reusada` is false, `ensureHybridPublicationPrices` (idempotent by its lookup key); its failure is today's 409
@@ -495,12 +496,20 @@ export async function prepararListaDelPlan(
         ? await tx.hybridOfferPublication.findUnique({ where: { id: list.currentPublicationId }, select: { name: true, definition: true } })
         : null
       if (list?.currentPublicationId && current && current.name === datos.nombre && sameCents(priceOf(current.definition), datos.precio)) {
-        if (list.pendingPublicationId) {
-          const released = await tx.hybridCampaign.updateMany({
+        // Una pendiente vieja se suelta, y el nombre que dejó una versión descartada (la reclamación renombra la lista) vuelve al de
+        // la publicación en venta.
+        const releasePending = list.pendingPublicationId !== null
+        const restoreName = list.name !== current.name
+        if (releasePending || restoreName) {
+          const cleaned = await tx.hybridCampaign.updateMany({
             where: { id: list.id, revision: list.revision, pendingPublicationId: list.pendingPublicationId },
-            data: { pendingPublicationId: null, revision: { increment: 1 } },
+            data: {
+              ...(releasePending ? { pendingPublicationId: null } : {}),
+              ...(restoreName ? { name: current.name } : {}),
+              revision: { increment: 1 },
+            },
           })
-          if (released.count !== 1) planListStale(tier)
+          if (cleaned.count !== 1) planListStale(tier)
         }
         r = { publicationId: list.currentPublicationId, reusada: true }
       } else {
