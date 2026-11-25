@@ -52,20 +52,26 @@ describe('D27 · el vencimiento queda apagado en las configuraciones que ya exis
     const sinDias = await negocioConDias('venc-null', null)
     const sql = readFileSync(MIGRACION, 'utf8')
 
-    let despues: Record<string, number | null> = {}
+    let despues: Record<string, { dias: number | null; activo: boolean }> = {}
     await expect(
       prisma.$transaction(async tx => {
         await tx.$executeRawUnsafe(sql)
         const filas = await tx.loyaltyConfig.findMany({
           where: { venueId: { in: [con365, con365Apagado, con30, sinDias] } },
-          select: { venueId: true, pointsExpireDays: true },
+          select: { venueId: true, pointsExpireDays: true, active: true },
         })
-        despues = Object.fromEntries(filas.map(f => [f.venueId, f.pointsExpireDays]))
+        despues = Object.fromEntries(filas.map(f => [f.venueId, { dias: f.pointsExpireDays, activo: f.active }]))
         throw new Deshacer('se deshace a propósito')
       }),
     ).rejects.toBeInstanceOf(Deshacer)
 
-    expect(despues).toEqual({ [con365]: null, [con365Apagado]: null, [con30]: 30, [sinDias]: null })
+    // Sólo cambian los días: el programa sigue prendido o apagado como estaba.
+    expect(despues).toEqual({
+      [con365]: { dias: null, activo: true },
+      [con365Apagado]: { dias: null, activo: false },
+      [con30]: { dias: 30, activo: true },
+      [sinDias]: { dias: null, activo: true },
+    })
   })
 
   it('con la expiración en null, el negocio no vence a nadie ni arranca su reloj', async () => {
