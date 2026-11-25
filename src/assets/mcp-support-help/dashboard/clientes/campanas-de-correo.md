@@ -47,6 +47,6 @@ Sólo se le escribe a los clientes que dieron su permiso expreso para recibir co
 - **«Ningún cliente te ha dado permiso todavía para enviarle promociones.»:** pídeles permiso al registrarlos o márcalo en el formulario del cliente. Sin aviso de privacidad la casilla sale apagada.
 - **«Pídele a un administrador que la encienda: encenderla autoriza el envío de correos.»:** quien tiene el permiso de enviar es quien la enciende.
 - **La felicitación no llegó a tiempo:** cada día se revisa quién cumple años. Si el correo fuera a llegar tarde no se envía: felicitar después del cumpleaños es peor que no felicitar.
-- **Los correos salen en los minutos siguientes, no en el mismo segundo:** la campaña queda **En cola** y luego **Enviando**, aunque el aviso diga que sale de inmediato. Revisa **Entregados** en la lista.
-- **Una campaña enviada ya no se edita:** se puede abrir para verla, no para cambiarla. En la lista, **Entregados** dice cuántos llegaron y cuántos tuvieron error.
+- **Los correos salen en los minutos siguientes, no en el mismo segundo:** la campaña queda **En cola** y luego **Enviando**, aunque el aviso diga que sale de inmediato. Revisa la lista para ver cuántos ya salieron.
+- **Una campaña enviada ya no se edita:** se puede abrir para verla, no para cambiarla. En la lista, **Entregados** cuenta los correos que el proveedor ya aceptó para enviar, no los que confirmó que llegaron; también dice cuántos tuvieron error.
 - **El estado de la felicitación** dice **Sin configurar**, **Encendida** o **Pausada**.

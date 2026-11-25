@@ -36,4 +36,4 @@ Sirve cuando la computadora tiene un segundo monitor para el cliente. En reposo 
 - Si «Invertir pantallas» dice «Termina la venta en curso para poder cambiar de pantalla.», cobra o guarda la venta y vuelve a intentar.
 - Las sugerencias de «¿Algo más?» se configuran en el panel, en *Promociones* › *Sugerencias al cobrar*.
 - Prender la segunda pantalla no prende la propina ni la calificación: si el negocio no las pide en ese cobro, no salen.
-- «Kiosco de check-in» cambia la pantalla del cliente por un QR para que cada quien registre su llegada a su clase.
+- «Kiosco de check-in» cambia la pantalla del cliente para que cada quien registre su llegada a su clase: desde la 2.25.47 con un QR; en versiones anteriores, tocando su nombre en una lista.

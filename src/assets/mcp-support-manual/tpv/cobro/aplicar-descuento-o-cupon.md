@@ -41,4 +41,4 @@ Es en *Cobrar*, con productos en el carrito. *Descuento* pide el permiso de apli
 ## Sin internet
 
 - Si *Cupón* dice «Necesita internet», no se puede validar ni quitar un cupón hasta que vuelva la conexión.
-- En la 2.22 y versiones nuevas, si se va la red después de aplicar el cupón, la venta no se cobra (tampoco en efectivo) y sale «Sin conexión: el cupón necesita internet. Reintenta cuando vuelva la conexión, o quita el cupón para cobrar sin él.»: espera a que vuelva la conexión para cobrarla o quitar el cupón.
+- Desde la 2.16.2, si se va la red después de aplicar el cupón, la venta no se cobra (tampoco en efectivo) y sale «Sin conexión: el cupón necesita internet. Reintenta cuando vuelva la conexión, o quita el cupón para cobrar sin él.»: espera a que vuelva la conexión para cobrarla o quitar el cupón.

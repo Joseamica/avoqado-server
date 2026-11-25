@@ -54,7 +54,7 @@
       ]
     },
     "android/clientes/pantalla-del-cliente": {
-      "sha256": "4816d0ad15f803852fd76209d86c8d2501a81e709c44a8660f8e7067b6250ab0",
+      "sha256": "e5e84ccf70f624ad277f1928c9cbef0fc3638801b940a2bf0be1092bbe2a790c",
       "requiredPermissions": []
     },
     "android/cobro/agregar-propina": {
@@ -322,7 +322,7 @@
       ]
     },
     "dashboard/clientes/campanas-de-correo": {
-      "sha256": "4de46b95d30f00a5923ec3bf202d66ad8616a584c1e9260b4b243326214f3dc2",
+      "sha256": "a9b76920b946657b55e0b875c7fc8055fb16b825ddd1fdeee301a878d59dafc2",
       "requiredPermissions": [
         "marketing:manage"
       ],
@@ -423,7 +423,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/reenviar-tarjeta-de-regalo": {
-      "sha256": "a37b94a33e1b7181417153c06d2f055529033a76f15f2f91814923b80717c9fa",
+      "sha256": "677217b0e0d0edb92ee83699b128cfcfc4555bd1fa181af7437206540b27ace9",
       "requiredPermissions": [
         "giftCards:read",
         "giftCards:manage"
@@ -1237,7 +1237,7 @@
       ]
     },
     "windows/clientes/pantalla-del-cliente": {
-      "sha256": "f4c6b7da7a28587cf5d15ab53063934b3d426a2dea91780f3fdb9de559465fa1",
+      "sha256": "3bfff2b9b74c2ac6832893f0146945ff5afbc09058460e2d925da62177dd45dc",
       "requiredPermissions": []
     },
     "windows/cobro/agregar-propina": {

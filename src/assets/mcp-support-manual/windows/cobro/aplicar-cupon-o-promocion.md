@@ -24,7 +24,7 @@ keywords:
 
 ## Antes de empezar
 
-Es en *Cobrar*, con productos en el carrito. Los cupones y las promociones se crean en el panel (o en *Más* › *Artículos*); las promociones (combos y paquetes) vienen en el plan Pro. Validar un cupón pide el permiso de canjear cupones y aplicar una promoción, el de aplicar descuentos (de fábrica los dos, del mesero para arriba).
+Es en *Cobrar*, con productos en el carrito. Los cupones y los descuentos se crean en el panel o en *Más* › *Artículos*; las promociones de combo y 2×1 se crean sólo en el panel, en *Menú* › *Combos y paquetes*, y vienen en el plan Pro. Validar un cupón pide el permiso de canjear cupones y aplicar una promoción, el de aplicar descuentos (de fábrica los dos, del mesero para arriba).
 
 ## Pasos
 
