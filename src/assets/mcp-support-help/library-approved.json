@@ -330,7 +330,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/configurar-lealtad": {
-      "sha256": "e1d0a5c224d2cefc617c5551105e3a3b3578840d4d566887489680aad07dc54c",
+      "sha256": "512c9c372ca74a97f79919037f51a7c9a9491fae47c5897b7c5f1a1c127d542d",
       "requiredPermissions": [
         "loyalty:update"
       ],
@@ -346,7 +346,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/configurar-puntos-de-lealtad": {
-      "sha256": "5bd882ae12e7dcb42d612f9b6d9229944070b52e89985d3ef8b7ca499d4ecfc7",
+      "sha256": "c426966f061e72e5839b4fc6c3590834b294307df074633fd322bc516271c4b5",
       "requiredPermissions": [
         "loyalty:read",
         "loyalty:update"

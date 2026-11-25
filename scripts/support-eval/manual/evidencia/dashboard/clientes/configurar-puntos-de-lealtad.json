@@ -243,6 +243,16 @@
       "ruta": "Problema: los días cuentan desde que se prende o se acorta",
       "archivo": "avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts",
       "linea": 181
+    },
+    {
+      "ruta": "Problema: el vencimiento viene apagado",
+      "archivo": "avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts",
+      "linea": 53
+    },
+    {
+      "ruta": "Problema: el vencimiento viene apagado (las que ya existían)",
+      "archivo": "avoqado-server/prisma/migrations/20261125190100_lealtad_vencimiento_apagado_en_configs_existentes/migration.sql",
+      "linea": 5
     }
   ],
   "aparato": {

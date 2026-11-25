@@ -40,7 +40,7 @@ El programa de lealtad es para los negocios que lo tienen incluido en su plan. N
 - *Guardar Cambios* se prende hasta que cambias algo.
 - Con *Estado del Programa* en *Inactivo*, las ventas no suman puntos ni sellos.
 - Para que una venta sume puntos, tiene que llevar al cliente.
-- Con la expiración prendida, si un cliente pasa esos días sin movimientos en sus puntos (ganar, canjear o un ajuste), vencen todos sus puntos.
+- El vencimiento viene apagado: mientras no lo prendas, los puntos nunca vencen. Si lo prendes, vencen todos los puntos de quien pase esos días sin movimientos en sus puntos (ganar, canjear o un ajuste).
 - Al prender la expiración, al volver a prender el programa o al bajar los días, los días sin movimientos empiezan a contar desde ese día: nadie pierde sus puntos por el cambio. Debajo de los días dice desde qué fecha cuentan.
 - Si a un cliente le quedaron 0 puntos sin canjear, en su *Historial de Lealtad* sale «Vencieron … puntos: … días sin movimientos de puntos»: pasó los días de la expiración sin moverlos. Para devolvérselos, usa *Ajustar Puntos*.
 - Si devuelves una venta cuyos puntos ya vencieron, al cliente no se le quitan los puntos que ganó después.

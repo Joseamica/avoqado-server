@@ -7025,6 +7025,12 @@
         "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
       }
     ],
+    "avoqado-web-dashboard:avoqado-server/prisma/migrations/20261125190100_lealtad_vencimiento_apagado_en_configs_existentes/migration.sql": [
+      {
+        "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
+        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+      }
+    ],
     "avoqado-web-dashboard:avoqado-server/src/controllers/dashboard/financialConnection.controller.ts": [
       {
         "pagina": "dashboard/bancos/enviar-spei",
