@@ -25,6 +25,7 @@ import {
   modalidadDeLaSuscripcion,
   retrievePlanSubscription,
 } from '../services/stripe.service'
+import { resolverPrecioDelPlan } from '../services/billing/precioDelPlan'
 import { autorizarObligacionNueva } from '../services/access/autorizarObligacionNueva'
 import { resolvePlanNotificationTarget } from '../services/access/planNotification.service'
 import * as resendService from '../services/resend.service'
@@ -1511,7 +1512,8 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           venue.id,
           customerId,
           { tipo: 'PLAN', tier: paidTier },
-          () => {
+          async () => {
+            const { priceId } = await resolverPrecioDelPlan(tierCode, planData.interval)
             return createPlanSubscription({
               // «Pudo cobrarse» empieza justo antes del POST, no al entrar aquí (Codex C15).
               antesDeCobrar: () => {
@@ -1522,6 +1524,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
               paymentMethodId,
               tierCode,
               interval: planData.interval,
+              priceId,
               trialPeriodDays: planData.payNow ? 0 : TRIAL_DAYS,
               coupon: introPromo ? LEGACY_INTRO_OFFER.couponId : undefined,
               // 🔴 Sin esta llave, una petición perdida en la red y reintentada crea DOS suscripciones

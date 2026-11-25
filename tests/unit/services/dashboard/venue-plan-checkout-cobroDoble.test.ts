@@ -10,6 +10,10 @@ jest.mock('@/services/stripe.service', () => ({
   createPlanCheckoutSession: (...a: unknown[]) => mockCheckout(...a),
   getOrCreateStripeCustomer: jest.fn(),
 }))
+const mockResolverPrecio = jest.fn()
+jest.mock('@/services/billing/precioDelPlan', () => ({
+  resolverPrecioDelPlan: (...a: unknown[]) => mockResolverPrecio(...a),
+}))
 jest.mock('@/services/access/autorizarObligacionNueva', () => ({
   autorizarObligacionNueva: (...a: unknown[]) => mockAutorizar(...a),
 }))
@@ -26,9 +30,15 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 const mockFilasDelPlan = jest.fn()
 
+import { STANDARD_PLAN_GROSS_CENTS } from '@/services/access/planPricing.constants'
 import { createVenuePlanCheckoutSession } from '@/services/dashboard/venue.dashboard.service'
 
 beforeEach(() => {
+  // Por defecto Stripe coincide con las constantes que muestra el dashboard, para el plan y ciclo pedidos.
+  mockResolverPrecio.mockReset().mockImplementation(async (tierCode: string, interval: 'monthly' | 'annual') => ({
+    priceId: 'price_verificado',
+    unitAmount: STANDARD_PLAN_GROSS_CENTS[tierCode === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO'][interval],
+  }))
   mockFilasDelPlan.mockReset().mockResolvedValue([])
   mockCheckout.mockReset().mockResolvedValue('https://checkout.stripe.test/x')
   // Por defecto la regla común autoriza y ejecuta lo que se le pide crear.
@@ -43,6 +53,22 @@ describe('createVenuePlanCheckoutSession — pasa por la regla común de compra'
     expect(mockCheckout).toHaveBeenCalledWith(
       expect.objectContaining({ venueId: 'venue-1', customerId: 'cus_1', tierCode: 'PLAN_PREMIUM' }),
     )
+  })
+
+  it('precio de Stripe distinto al de las constantes → 409 PLAN_PRICE_MISMATCH y no abre sesión', async () => {
+    mockResolverPrecio.mockResolvedValue({ priceId: 'price_otro', unitAmount: 92684 })
+    await expect(createVenuePlanCheckoutSession('org-1', 'venue-1', 'monthly', 'PRO')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_PRICE_MISMATCH',
+      details: { esperado: 115884, stripe: 92684 },
+    })
+    expect(mockCheckout).not.toHaveBeenCalled()
+  })
+
+  it('precio igual → la sesión lleva el priceId verificado', async () => {
+    await createVenuePlanCheckoutSession('org-1', 'venue-1', 'monthly', 'PRO')
+    expect(mockResolverPrecio).toHaveBeenCalledWith('PLAN_PRO', 'monthly')
+    expect(mockCheckout).toHaveBeenCalledWith(expect.objectContaining({ priceId: 'price_verificado' }))
   })
 
   it('🔴 si la regla común rechaza (plan vivo, suelta absorbida, compra abierta…): no se crea ninguna sesión', async () => {

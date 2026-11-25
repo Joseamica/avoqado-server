@@ -54,6 +54,8 @@ import {
   createTrialSetupIntent,
 } from '../stripe.service'
 import { autorizarObligacionNueva } from '../access/autorizarObligacionNueva'
+import { resolverPrecioDelPlan } from '../billing/precioDelPlan'
+import { STANDARD_PLAN_GROSS_CENTS } from '../access/planPricing.constants'
 import { ventaSueltaAbierta } from '../access/ventaSuelta'
 import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.service'
 import { cleanDemoData } from '../onboarding/demoCleanup.service'
@@ -1850,9 +1852,26 @@ export async function createVenuePlanCheckoutSession(
         'COBRO_DIFERIDO_CADUCO',
       )
     }
+    // El precio de Stripe se lee UNA vez; si no es el que el dashboard muestra, NO se abre sesión (nada se cobra).
+    const { priceId, unitAmount } = await resolverPrecioDelPlan(tierCode, interval)
+    const esperado = STANDARD_PLAN_GROSS_CENTS[tier][interval]
+    if (unitAmount !== esperado) {
+      logger.error('🚨 plan-checkout: el precio de Stripe no coincide con las constantes — NO se abre la sesión', {
+        venueId,
+        tierCode,
+        interval,
+        esperado,
+        stripe: unitAmount,
+      })
+      throw new ConflictError('El precio del plan cambió. Recarga la página para ver el precio vigente.', 'PLAN_PRICE_MISMATCH', {
+        esperado,
+        stripe: unitAmount,
+      })
+    }
     return createPlanCheckoutSession({
       venueId,
       customerId: cliente,
+      priceId,
       interval,
       tierCode,
       successUrl: `${billingBase}?checkout=success${trialEnd ? '&sinCobroHoy=1' : ''}`,

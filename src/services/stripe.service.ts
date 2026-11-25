@@ -698,6 +698,8 @@ export interface CreatePlanSubscriptionInput {
   customerId: string
   paymentMethodId: string
   tierCode: PlanTierCode
+  /** Precio de Stripe ya resuelto (`resolverPrecioDelPlan`): se cobra con éste, sin volver a listar la llave. */
+  priceId: string
   interval: 'monthly' | 'annual'
   trialPeriodDays: number // 0 = pay-now (no trial), 30 = trial
   coupon?: string // e.g. 'INTRO_PRO_3M' (PRO monthly pay-now only)
@@ -992,12 +994,6 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
     return { subscriptionId: existing.stripeSubscriptionId, reused: true }
   }
 
-  const lookupKey = planLookupKey(input.tierCode, input.interval)
-  // 🔴 Corre bajo el candado de la regla común (Codex C3): cada llamada con tiempo propio y sin reintentos del SDK.
-  const prices = await stripe.prices.list({ lookup_keys: [lookupKey], limit: 1 }, STRIPE_DENTRO_DEL_CANDADO)
-  const price = prices.data[0]
-  if (!price) throw new Error(`Stripe price not found for lookup_key ${lookupKey} — run scripts/seed-plan-pro.ts`)
-
   const metadata: Record<string, string> = {
     venueId: input.venueId,
     featureId: feature.id,
@@ -1010,7 +1006,7 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
   }
   const params: Stripe.SubscriptionCreateParams = {
     customer: input.customerId,
-    items: [{ price: price.id }],
+    items: [{ price: input.priceId }],
     trial_period_days: input.trialPeriodDays,
     default_payment_method: input.paymentMethodId,
     // No Stripe Tax: IVA is baked into the price (tax_behavior 'inclusive'), so we charge the
@@ -1171,6 +1167,8 @@ function planLabel(tierCode: PlanTierCode): string {
 export interface CreatePlanCheckoutSessionInput {
   venueId: string
   customerId: string
+  /** Precio de Stripe ya resuelto y verificado (`resolverPrecioDelPlan`). */
+  priceId: string
   interval: 'monthly' | 'annual'
   successUrl: string
   cancelUrl: string
@@ -1199,12 +1197,6 @@ export async function createPlanCheckoutSession(input: CreatePlanCheckoutSession
   const feature = await prisma.feature.findFirst({ where: { code: tierCode, active: true } })
   if (!feature) throw new Error(`Feature ${tierCode} not found or inactive`)
 
-  const lookupKey = planLookupKey(tierCode, input.interval)
-  // 🔴 Corre bajo el candado de la regla común (Codex C3): cada llamada con tiempo propio y sin reintentos del SDK.
-  const prices = await stripe.prices.list({ lookup_keys: [lookupKey], limit: 1 }, STRIPE_DENTRO_DEL_CANDADO)
-  const price = prices.data[0]
-  if (!price) throw new Error(`Stripe price not found for lookup_key ${lookupKey} — run scripts/seed-plan-pro.ts`)
-
   const description = input.venueName ? `Plan Avoqado ${planLabel(tierCode)} - ${input.venueName}` : `Plan Avoqado ${planLabel(tierCode)}`
 
   const session = await retry(
@@ -1213,7 +1205,7 @@ export async function createPlanCheckoutSession(input: CreatePlanCheckoutSession
         {
           mode: 'subscription',
           customer: input.customerId,
-          line_items: [{ price: price.id, quantity: 1 }],
+          line_items: [{ price: input.priceId, quantity: 1 }],
           allow_promotion_codes: !input.trialEnd,
           // V5-A: sólo tarjeta (un pago diferido dejaría `active` sin haber cobrado) y caducidad de 30 min, el mínimo que
           // Stripe permite: una sesión que nadie abrió no queda viva para siempre.

@@ -964,6 +964,16 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
     )
   })
 
+  it('si la llave cambia entre el PASO 4 y la creación, se crea con el priceId verificado', async () => {
+    mockPriceList
+      .mockReset()
+      .mockResolvedValueOnce({ data: [{ id: 'price_A', unit_amount: 115884 }] })
+      .mockResolvedValue({ data: [{ id: 'price_B', unit_amount: 92684 }] })
+    await activatePlan({ ...BASE, payNow: false, offer: { kind: 'STANDARD', expectedFirstChargeCents: 0 } })
+    expect(mockSubCreate.mock.calls[0][0].items).toEqual([{ price: 'price_A' }])
+    expect(mockPriceList).toHaveBeenCalledTimes(1)
+  })
+
   it('🔴 la promoción legacy NO se derrama a PREMIUM anual', async () => {
     mockPriceList.mockResolvedValue({ data: [{ id: 'price_pa', unit_amount: 1970840 }] })
     await activatePlan({ ...BASE, tier: 'PREMIUM', interval: 'annual', offer: { kind: 'STANDARD', expectedFirstChargeCents: 1970840 } })
@@ -2107,14 +2117,13 @@ describe('🔴 D2: el banco pide autenticar el primer cobro (primer pedido)', ()
   })
 
   it('🔴 sin tiempo en el candado para el 2.º create ⇒ 503, intento IN_PROGRESS y lugar RESERVED', async () => {
-    // Codex r1 #4: cada consulta de precio tarda 140 s en este reloj; la de DENTRO del candado deja sin tiempo al #2.
+    // Codex r1 #4: el 1.er create tarda 140 s en este reloj (ya no hay consulta de precio dentro del candado): al #2 no le queda tiempo.
     let reloj = Date.now()
     const ahora = jest.spyOn(Date, 'now').mockImplementation(() => reloj)
-    mockPriceList.mockImplementation(async () => {
+    mockSubCreate.mockImplementationOnce(async () => {
       reloj += 140_000
-      return { data: [{ id: 'price_x', unit_amount: LISTA, currency: 'mxn', recurring: { interval: 'month' }, tax_behavior: 'inclusive' }] }
+      throw errorDeAutenticacion()
     })
-    mockSubCreate.mockRejectedValueOnce(errorDeAutenticacion())
 
     try {
       await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({

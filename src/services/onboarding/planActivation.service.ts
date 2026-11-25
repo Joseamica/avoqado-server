@@ -277,12 +277,17 @@ async function verificarPlanConfigurado(tier: PaidPlanTier): Promise<void> {
   )
 }
 
-async function verificarPrecioDeStripe(tier: PaidPlanTier, interval: PlanBillingInterval, esperado: number): Promise<void> {
+async function verificarPrecioDeStripe(
+  tier: PaidPlanTier,
+  interval: PlanBillingInterval,
+  esperado: number,
+): Promise<{ priceId: string; unitAmount: number }> {
   const tierCode = tier === 'PREMIUM' ? ('PLAN_PREMIUM' as const) : ('PLAN_PRO' as const)
   const lookupKey = planLookupKey(tierCode, interval)
   const prices = await stripe.prices.list({ lookup_keys: [lookupKey], limit: 1 })
-  const unitAmount = prices.data[0]?.unit_amount
-  if (unitAmount !== esperado) {
+  const price = prices.data[0]
+  const unitAmount = price?.unit_amount
+  if (!price || unitAmount !== esperado) {
     // 🚨 a propósito: significa que alguien movió el precio en Stripe debajo de una oferta viva.
     logger.error('🚨 activate-plan: el precio de Stripe no coincide con el snapshot — NO se cobra', {
       lookupKey,
@@ -294,6 +299,8 @@ async function verificarPrecioDeStripe(tier: PaidPlanTier, interval: PlanBilling
       stripe: unitAmount ?? null,
     })
   }
+  // El MISMO precio que se leyó aquí es el que se cobra: no se vuelve a listar la llave.
+  return { priceId: price.id, unitAmount }
 }
 
 /**
@@ -866,7 +873,7 @@ export async function activatePlan(
   const { expected, campaign, listPriceCents } = await cotizar(input, progress, now)
 
   // ---- PASO 4: verificación contra Stripe (sólo lecturas) ----
-  await verificarPrecioDeStripe(input.tier, input.interval, listPriceCents)
+  const precioVerificado = await verificarPrecioDeStripe(input.tier, input.interval, listPriceCents)
   await verificarPlanConfigurado(input.tier)
   const venueRecord = await prisma.venue.findUnique({
     where: { id: venue.id },
@@ -1112,6 +1119,7 @@ export async function activatePlan(
             paymentMethodId: input.paymentMethodId,
             tierCode: input.tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO',
             interval: input.interval,
+            priceId: precioVerificado.priceId,
             // Con campaña SIEMPRE se paga el primer ciclo: la oferta no tiene prueba gratis.
             trialPeriodDays: campaign || input.payNow ? 0 : TRIAL_DAYS,
             coupon: cuponEsperado ?? undefined,
