@@ -924,4 +924,31 @@ if (onboardingController.requiresBaseSubscriptionPlan()) {
   )
 }
 
+/**
+ * POST /api/v1/onboarding/organizations/:organizationId/v2/retomar-pago
+ *
+ * «Confirmar mi pago» (planes editables B2, Task 5): retoma el reto del banco del intento del alta que quedó a medio pago,
+ * aunque la oferta vigente ya no tenga opciones. Sólo lee la suscripción del intento; nunca cobra, anula ni crea nada en
+ * Stripe. Como `activate-plan`, sólo existe con el candado del plan encendido y sólo para la dueña.
+ *
+ * @openapi
+ * /api/v1/onboarding/organizations/{organizationId}/v2/retomar-pago:
+ *   post:
+ *     tags: [Onboarding]
+ *     summary: Retoma el reto del banco del primer cobro del plan (sin cuerpo)
+ *     responses:
+ *       200: { description: "{ estado: 'RETO', clientSecret } · { estado: 'CERRADA' } · { estado: 'NADA' }" }
+ *       403: { description: ORG_OWNER_REQUIRED }
+ *       503: { description: PLAN_ACTIVATION_PENDING }
+ */
+if (onboardingController.requiresBaseSubscriptionPlan()) {
+  router.post(
+    '/organizations/:organizationId/v2/retomar-pago',
+    authenticateTokenMiddleware,
+    requireOnboardingOrgOwner,
+    validateRequest(onboardingController.RetomarPagoSchema),
+    onboardingController.retomarPagoController,
+  )
+}
+
 export default router

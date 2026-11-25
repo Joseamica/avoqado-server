@@ -92,8 +92,14 @@ export class AltasAMedioPagoJob {
             where: {
               completedAt: null,
               planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
-              planStripeSubscriptionId: { not: null },
               OR: [{ planActivationLeaseUntil: null }, { planActivationLeaseUntil: { lt: new Date(ahora) } }],
+              // B2 Task 5 (b2-r1 #1): con su id guardado o, si es un intento de una versión del editor, también sin él (la
+              // respuesta del `create` se perdió): `cerrarAltaSinNavegador` lo busca por la llave del intento.
+              AND: [
+                {
+                  OR: [{ planStripeSubscriptionId: { not: null } }, { planStripeSubscriptionId: null, planOfferVersionNumber: { gte: 2 } }],
+                },
+              ],
               updatedAt: { lt: new Date(ahora - QUIETA_MS) },
             },
             select: { id: true, organizationId: true },

@@ -1912,6 +1912,27 @@ export async function activatePlanController(req: Request, res: Response, next: 
   }
 }
 
+/** Esquema de `POST …/v2/retomar-pago` (B2 Task 5): sin cuerpo, sólo la organización. */
+export const RetomarPagoSchema = z.object({
+  params: z.object({ organizationId: z.string().cuid() }),
+})
+
+/**
+ * POST /api/v1/onboarding/organizations/:organizationId/v2/retomar-pago
+ *
+ * 🔴 B2 Task 5 (b2-r9 #2): «Confirmar mi pago» retoma el reto del banco del intento a medio pago aunque la oferta vigente ya no
+ * tenga opciones. Sólo lee la suscripción del intento: nunca cobra, nunca anula ni crea nada en Stripe. El secreto del reto
+ * sólo va a la dueña autenticada (como el 409 `PLAN_PAYMENT_REQUIRES_ACTION`), nunca a un log.
+ */
+export async function retomarPagoController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const data = await planActivationService.retomarPagoDelAlta(req.params.organizationId)
+    res.status(200).json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
 /**
  * Esquema de `PUT …/v2/launch-campaign` (§ 3.5): asociar una oferta a un alta que ya existe.
  * Cubre a quien ya tenía cuenta y hace clic en un anuncio.

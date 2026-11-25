@@ -733,8 +733,10 @@ export interface CreatePlanSubscriptionInput {
   coupon?: string // e.g. 'INTRO_PRO_3M' (PRO monthly pay-now only)
   /**
    * Planes editables (B2, b2-r9 #1): los `discounts` van SIEMPRE explícitos en los dos `create` — `[{ coupon }]` con el cupón,
-   * o `''` sin él (la forma de `hybridProvision.service.ts`), para no heredar a ciegas un descuento del cliente. Sin esta
-   * opción, el `discounts` de hoy (sólo con cupón).
+   * o `''` sin él (la forma de `hybridProvision.service.ts`). Sin esta opción, el `discounts` de hoy (sólo con cupón).
+   * 🔴 Ojo: según el SDK instalado (stripe 19, `SubscriptionsResource.d.ts`), un `discounts` vacío SÍ hereda el descuento del
+   * cliente, así que `''` no lo impide. La protección real es el cierre del reto del banco (`primerCobroPagado.ts`): sólo acepta
+   * un total menor por los descuentos que la propia factura declara (un descuento sólo baja el precio).
    */
   descuentosExplicitos?: true
   venueName?: string

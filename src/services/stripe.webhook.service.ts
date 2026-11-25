@@ -603,7 +603,10 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
   // 🔴 H0 (28-oct): la PRIMERA factura pagada del alta termina el alta si el navegador no lo hizo (autorizó con su banco y
   // cerró, o pagó y cerró antes de «Entrar»). Va ANTES de las salidas tempranas de abajo (plan sin fila de acceso o ya
   // activo): es justo el caso del alta. Sólo programa; la garantía es el barrido `altas-a-medio-pago`.
-  if (invoice.billing_reason === 'subscription_create') programarCierreDelAltaPorAviso(subscriptionIdStr)
+  // B2 Task 5 (b2-r1 #1): con la metadata de la suscripción que trae la factura (sin otra llamada), para el alta cuyo id nunca
+  // se guardó.
+  if (invoice.billing_reason === 'subscription_create')
+    programarCierreDelAltaPorAviso(subscriptionIdStr, invoice.parent?.subscription_details?.metadata ?? null)
 
   // ✅ FIX BUG #7: Retry with backoff if VenueFeature not yet created
   // Race condition: Webhook can fire before sync code creates VenueFeature

@@ -70,11 +70,25 @@ beforeEach(() => {
 
 describe('🔴 H0: la primera factura pagada programa el cierre del alta', () => {
   it.each([
-    ['forma vieja (2020-03-02, prod)', vieja],
-    ['forma basil', basil],
-  ])('%s: la factura de alta (subscription_create) lo programa con su suscripción', async (_n, factura) => {
-    await handleInvoicePaymentSucceeded(factura({ billing_reason: 'subscription_create' }))
-    expect(programarCierreDelAltaPorAviso).toHaveBeenCalledWith('sub_pro')
+    ['forma vieja (2020-03-02, prod)', vieja, null],
+    ['forma basil', basil, {}],
+  ])(
+    '%s: la factura de alta (subscription_create) lo programa con su suscripción y la metadata que trae',
+    async (_n, factura, metadata) => {
+      await handleInvoicePaymentSucceeded(factura({ billing_reason: 'subscription_create' }))
+      expect(programarCierreDelAltaPorAviso).toHaveBeenCalledWith('sub_pro', metadata)
+    },
+  )
+
+  it('B2 Task 5: la forma basil pasa la metadata de la suscripción de la factura (versión e intento), sin otra llamada', async () => {
+    const metadata = { organizationId: 'org-1', planActivationKey: 'plan-activation:org-1:1', planOfferVersion: '2' }
+    await handleInvoicePaymentSucceeded(
+      basil({
+        billing_reason: 'subscription_create',
+        parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_pro', metadata } },
+      }),
+    )
+    expect(programarCierreDelAltaPorAviso).toHaveBeenCalledWith('sub_pro', metadata)
   })
 
   it('también cuando el plan ya estaba activo (la salida temprana de «ya activo» no lo salta)', async () => {
@@ -88,7 +102,7 @@ describe('🔴 H0: la primera factura pagada programa el cierre del alta', () =>
     const corrida = handleInvoicePaymentSucceeded(vieja({ billing_reason: 'subscription_create' }))
     await jest.advanceTimersByTimeAsync(2_000)
     await corrida
-    expect(programarCierreDelAltaPorAviso).toHaveBeenCalledWith('sub_pro')
+    expect(programarCierreDelAltaPorAviso).toHaveBeenCalledWith('sub_pro', null)
   })
 
   it.each(['subscription_cycle', 'subscription_update', 'manual'])('una factura %s (renovación u otra) no lo programa', async motivo => {
