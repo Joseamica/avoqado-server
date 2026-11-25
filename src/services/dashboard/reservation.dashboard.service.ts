@@ -1252,10 +1252,14 @@ export async function cancelReservation(
   )
 
   // El depósito pasa por Stripe y no cabe en la transacción: la reserva YA se canceló, un fallo aquí no puede contestar que no.
-  try {
-    await handleReservationDepositCancellation(updated.id, venueId)
-  } catch (err) {
-    logger.error(`❌ [RESERVATION DEPOSIT] Failed for reservation ${updated.confirmationCode}`, err)
+  // Sólo el que ya estaba pagado AL CANCELAR (`updated` se leyó con la fila tomada): el que se cobra después lo devuelve completo,
+  // sin retener, el camino del cobro (`cobroDelDeposito.ts`); si esta cancelación lo leyera, su retención le ganaría o lo pisaría.
+  if (updated.depositStatus === 'PAID') {
+    try {
+      await handleReservationDepositCancellation(updated.id, venueId)
+    } catch (err) {
+      logger.error(`❌ [RESERVATION DEPOSIT] Failed for reservation ${updated.confirmationCode}`, err)
+    }
   }
 
   return Object.assign(updated, refundResult)
@@ -1294,11 +1298,16 @@ export async function handleReservationDepositCancellation(
   const shouldForfeit = !opciones.sinRetener && settings.cancellation.forfeitDeposit && hoursUntilStart < minHoursBeforeStart
 
   if (shouldForfeit) {
-    await prisma.reservation.update({
-      where: { id: reservation.id },
+    // CAS sobre lo que se leyó: nunca pisa una devolución que terminó o empezó después de la lectura.
+    const { count } = await prisma.reservation.updateMany({
+      where: { id: reservation.id, depositStatus: 'PAID', refundStatus: reservation.refundStatus },
       data: { depositStatus: 'FORFEITED' },
     })
-    logger.info(`💰 [RESERVATION DEPOSIT] Forfeited deposit for ${reservation.confirmationCode}`)
+    logger.info(
+      count > 0
+        ? `💰 [RESERVATION DEPOSIT] Forfeited deposit for ${reservation.confirmationCode}`
+        : `💰 [RESERVATION DEPOSIT] ${reservation.confirmationCode} changed before forfeiting (refund in progress or done) — nothing to forfeit`,
+    )
     return
   }
 
