@@ -25,6 +25,7 @@
 import Stripe from 'stripe'
 import prisma from '../src/utils/prismaClient'
 import logger from '../src/config/logger'
+import { exigirSinVersionDeLaOferta } from '../src/services/billing/planOffer'
 
 // Match src/services/stripe.service.ts: use the SDK's default (pinned) API version.
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!)
@@ -105,6 +106,10 @@ async function ensureCoupon(id: string, cfg: Stripe.CouponCreateParams): Promise
 }
 
 async function main() {
+  // 🔴 Planes editables (B1, diseño §15): desde la versión 1 de la oferta, el precio de un plan sólo cambia publicando una
+  // versión. Este script mueve llaves `plan_*` y recrea cupones: con versión se niega (409 PLAN_OFFER_OWNS_PLAN_LISTS), también
+  // en --dry-run.
+  await exigirSinVersionDeLaOferta('seed-plan-pro')
   log(`Stripe key mode: ${(process.env.STRIPE_SECRET_KEY ?? '').startsWith('sk_live') ? 'LIVE (production)' : 'TEST'}`)
 
   // 1. Product — anchor on the strongly-consistent monthly lookup_key. products.search is

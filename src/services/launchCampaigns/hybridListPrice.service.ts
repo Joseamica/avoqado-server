@@ -5,6 +5,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError
 import { FREE_TIER_CODES } from '@/services/access/basePlan.service'
 import prisma from '@/utils/prismaClient'
 import { utcTs } from '@/utils/sqlDates'
+import { exigirSinVersionDeLaOferta } from '@/services/billing/planOffer'
 import { audit, changed } from './hybridCampaign.service'
 import { compileHybridPublication } from './hybridOffer.service'
 import { hybridOfferDefinition } from './hybridOffer.schema'
@@ -64,6 +65,19 @@ const PRODUCTS: readonly ProductRow[] = [
 export const LISTABLE_FEATURE_CODES: string[] = PRODUCTS.filter(p => p.featureCode && !p.notEditableReason).map(p => p.featureCode!)
 
 const priceOf = (definition: Prisma.JsonValue) => hybridOfferDefinition.parse(definition).terms.price
+
+/** The two plan lists. Since the plan offer has a version, only its publisher writes them (planes editables B1, design §15). */
+const PLAN_LIST_KEYS: readonly string[] = ['PLAN:PRO', 'PLAN:PREMIUM']
+const isPlanList = (key: string) => PLAN_LIST_KEYS.includes(key)
+
+/**
+ * 409 `PLAN_OFFER_OWNS_PLAN_LISTS` for a plan list once the plan offer has a version; other products pass untouched (and
+ * read nothing). With `tx`, call it AFTER `lockProducts`: a writer that passed the quick check before the seed is still
+ * refused inside its own transaction.
+ */
+async function refusePlanListOnceOfferOwnsIt(key: string, context: string, tx?: Prisma.TransactionClient) {
+  if (isPlanList(key)) await exigirSinVersionDeLaOferta(context, tx)
+}
 
 /**
  * The groups with an ACTIVE, still-in-force generated promotion over each product, in creation order: one bounded query for
@@ -144,6 +158,8 @@ export async function listPriceBoard(): Promise<ListPriceRow[]> {
 async function finalizeListPublication(key: ProductKey, listId: string, publicationId: string, expectedRevision: number, staffId: string) {
   await priceTransaction(async tx => {
     await lockProducts(tx, [key])
+    // A pending price prepared before the plan offer was seeded never goes on sale afterwards.
+    await refusePlanListOnceOfferOwnsIt(key, 'finalizeListPublication', tx)
     const list = await tx.hybridCampaign.findUniqueOrThrow({ where: { id: listId } })
     const moved = await tx.hybridCampaign.updateMany({
       where: { id: listId, purpose: 'LIST', revision: expectedRevision, pendingPublicationId: publicationId },
@@ -202,6 +218,8 @@ async function saveList(product: ProductRow, definition: unknown, expectedRevisi
   const compiled = compileHybridPublication(definition)
   const pending = await priceTransaction(async tx => {
     await lockProducts(tx, [key])
+    // The seed takes these same product locks: a writer that passed the quick check before it prepares nothing after it.
+    await refusePlanListOnceOfferOwnsIt(key, 'saveList', tx)
     const found = await tx.hybridCampaign.findFirst({ where: { purpose: 'LIST', listProductKey: key } })
     if ((found?.revision ?? null) !== expectedRevision) changed()
     // The Plan Básico is not a catalog product: no promotion is ever priced against it.
@@ -348,8 +366,10 @@ export async function getBasicPlanRow(): Promise<BasicPlanRow> {
  * Finishes a pending price (preparation failed earlier); with nothing pending it returns the row unchanged.
  * `expectedRevision` is the row the admin saw: a newer save (a different pending) fails as superseded instead of being
  * published under their «Reintentar». Without it (clients before the field) it finishes whatever is pending.
+ * A plan list is refused (409 `PLAN_OFFER_OWNS_PLAN_LISTS`) once the plan offer has a version.
  */
 export async function retryListPrice(productKey: string, staffId: string, expectedRevision?: number): Promise<ListPriceRow> {
+  await refusePlanListOnceOfferOwnsIt(productKey, 'retryListPrice')
   const list = await prisma.hybridCampaign.findFirst({
     where: { purpose: 'LIST', listProductKey: productKey },
     select: { id: true, revision: true, pendingPublicationId: true },
@@ -374,13 +394,15 @@ export function planSeedOutcome(row: Pick<ListPriceRow, 'price' | 'pendingPrice'
  * Spec §4.2 «listas de los planes»: the LIST of a plan at the classic monthly price, through the same flow as
  * `saveListPrice` (product lock first, then a pending publication, Stripe, finalize) with a PLAN definition. Internal to
  * the seed script, never exposed over HTTP. Idempotent: a priced plan list is reported, never changed (phase 2 decides
- * plan prices); a price left pending by a failed Stripe preparation is finished.
+ * plan prices); a price left pending by a failed Stripe preparation is finished. Refused (409 `PLAN_OFFER_OWNS_PLAN_LISTS`)
+ * once the plan offer has a version: from then on only publishing a version writes the plan lists.
  */
 export async function seedPlanList(
   tier: 'PRO' | 'PREMIUM',
   price: number,
   staffId: string,
 ): Promise<{ outcome: PlanSeedOutcome; row: ListPriceRow }> {
+  await exigirSinVersionDeLaOferta('seedPlanList')
   const product = PRODUCTS.find(p => p.planTier === tier)!
   const before = await rowOf(product.productKey)
   const outcome = planSeedOutcome(before, price)
@@ -420,12 +442,14 @@ export async function planListCompositionGap(tier: 'PRO' | 'PREMIUM'): Promise<{
 /**
  * Republishes the plan's list with its SAME definition (price and terms) so its composition follows the code, through the
  * same flow as a saved price (product lock, pending publication, Stripe, finalize). Contracts already accepted keep theirs.
- * Does nothing when the list already sells the code's composition; a pending price must be finished first.
+ * Does nothing when the list already sells the code's composition; a pending price must be finished first. Refused (409
+ * `PLAN_OFFER_OWNS_PLAN_LISTS`) once the plan offer has a version.
  */
 export async function recomposePlanList(
   tier: 'PRO' | 'PREMIUM',
   staffId: string,
 ): Promise<{ missing: string[]; extra: string[]; recomposed: boolean }> {
+  await exigirSinVersionDeLaOferta('recomposePlanList')
   const product = PRODUCTS.find(p => p.planTier === tier)!
   const list = await prisma.hybridCampaign.findFirst({ where: { purpose: 'LIST', listProductKey: product.productKey } })
   if (!list?.currentPublicationId) throw new NotFoundError('Este plan no tiene precio de lista.', 'HYBRID_LIST_NOT_FOUND')

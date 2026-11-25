@@ -75,3 +75,100 @@ export function punteroA(versionId: string, number: number, definition: unknown)
 export function versionUno() {
   return definicionDePrueba({ ids: idsDeLaVersion('v1') })
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// El sembrado de la v1 (Task 3)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Un precio de Stripe de llave de plan, como lo devuelve `prices.list`. */
+export function precioDeStripe(id: string, product: string, unitAmount: number, interval: 'month' | 'year', extra: object = {}) {
+  return {
+    id,
+    object: 'price',
+    product,
+    unit_amount: unitAmount,
+    currency: 'mxn',
+    tax_behavior: 'inclusive',
+    active: true,
+    lookup_key: null as string | null,
+    recurring: { interval, interval_count: 1 },
+    ...extra,
+  }
+}
+
+/** La definición de la lista híbrida de un plan a `price` pesos con IVA al mes (la de `seedPlanList`). */
+export function definicionDeLaListaDelPlan(tier: 'PRO' | 'PREMIUM', price: number) {
+  return {
+    schemaVersion: 1,
+    kind: 'PLAN',
+    planTier: tier,
+    terms: { currency: 'MXN', interval: 'MONTHLY', price, taxIncluded: true, promotionCycles: null, renewal: { kind: 'SAME_PRICE' } },
+  }
+}
+
+/**
+ * Lo que Stripe y la base tienen hoy cuando la v1 se puede sembrar (el caso CREATE): las cuatro llaves en el producto de su
+ * plan, con el monto de hoy, y las dos listas `PLAN:*` en venta a su precio. Escrito a mano (no desde las constantes).
+ */
+export function escenarioDelSembrado() {
+  return {
+    features: [
+      { code: 'PLAN_PRO', active: true, stripeProductId: 'prod_pro' },
+      { code: 'PLAN_PREMIUM', active: true, stripeProductId: 'prod_premium' },
+    ],
+    precios: {
+      plan_pro_monthly: precioDeStripe('price_key_pro_m', 'prod_pro', 115884, 'month', { lookup_key: 'plan_pro_monthly' }),
+      plan_pro_annual: precioDeStripe('price_key_pro_a', 'prod_pro', 1158840, 'year', { lookup_key: 'plan_pro_annual' }),
+      plan_premium_monthly: precioDeStripe('price_key_premium_m', 'prod_premium', 197084, 'month', { lookup_key: 'plan_premium_monthly' }),
+      plan_premium_annual: precioDeStripe('price_key_premium_a', 'prod_premium', 1970840, 'year', { lookup_key: 'plan_premium_annual' }),
+    } as Record<string, ReturnType<typeof precioDeStripe> | undefined>,
+    listas: [
+      { id: 'list_pro', listProductKey: 'PLAN:PRO', status: 'ACTIVE', currentPublicationId: 'pub_pro', pendingPublicationId: null },
+      {
+        id: 'list_premium',
+        listProductKey: 'PLAN:PREMIUM',
+        status: 'ACTIVE',
+        currentPublicationId: 'pub_premium',
+        pendingPublicationId: null,
+      },
+    ] as Array<{
+      id: string
+      listProductKey: string
+      status: string
+      currentPublicationId: string | null
+      pendingPublicationId: string | null
+    }>,
+    publicaciones: [
+      { id: 'pub_pro', definition: definicionDeLaListaDelPlan('PRO', 1158.84) },
+      { id: 'pub_premium', definition: definicionDeLaListaDelPlan('PREMIUM', 1970.84) },
+    ] as Array<{ id: string; definition: unknown }>,
+    nombres: { prod_pro: 'Plan Avoqado Pro', prod_premium: 'Plan Avoqado Premium' } as Record<string, string>,
+  }
+}
+
+export type EscenarioDelSembrado = ReturnType<typeof escenarioDelSembrado>
+
+/**
+ * Monta el escenario sobre el `prismaMock` y los `jest.fn` de Stripe de la prueba. `prices.list` contesta por la llave pedida;
+ * `subscriptions.list`, sin suscripciones.
+ */
+export function montarEscenarioDelSembrado(
+  e: EscenarioDelSembrado,
+  mocks: { prisma: any; pricesList: jest.Mock; productsRetrieve: jest.Mock; subscriptionsList: jest.Mock },
+) {
+  mocks.prisma.planOfferPointer.findUnique.mockReset().mockResolvedValue(null)
+  mocks.prisma.feature.findMany.mockReset().mockResolvedValue(e.features)
+  mocks.prisma.hybridCampaign.findMany.mockReset().mockResolvedValue(e.listas)
+  mocks.prisma.hybridOfferPublication.findMany
+    .mockReset()
+    .mockImplementation(async (args: { where: { id: { in: string[] } } }) => e.publicaciones.filter(p => args.where.id.in.includes(p.id)))
+  mocks.prisma.planOfferVersion.create.mockReset().mockResolvedValue({ id: 'cv1' })
+  mocks.prisma.planOfferPointer.upsert.mockReset().mockResolvedValue({ id: 'vigente' })
+  mocks.prisma.activityLog.create.mockReset().mockResolvedValue({ id: 'log1' })
+  mocks.pricesList.mockReset().mockImplementation(async (params: { lookup_keys: string[] }) => {
+    const precio = e.precios[params.lookup_keys[0]]
+    return { object: 'list', data: precio ? [precio] : [], has_more: false }
+  })
+  mocks.productsRetrieve.mockReset().mockImplementation(async (id: string) => ({ id, name: e.nombres[id] ?? null }))
+  mocks.subscriptionsList.mockReset().mockResolvedValue({ object: 'list', data: [], has_more: false })
+}
