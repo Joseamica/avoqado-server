@@ -2,7 +2,7 @@ const mockPriceList = jest.fn()
 const mockPriceRetrieve = jest.fn()
 jest.mock('stripe', () => jest.fn().mockImplementation(() => ({ prices: { list: mockPriceList, retrieve: mockPriceRetrieve } })))
 
-import { resolverPrecioDelPlan, resolverPrecioPorLlave } from '../../../../src/services/billing/precioDelPlan'
+import { exigirPrecioDeStripe, resolverPrecioDelPlan, resolverPrecioPorLlave } from '../../../../src/services/billing/precioDelPlan'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { definicionDePrueba, idsDeLaVersion, punteroA, versionUno } from '@tests/__helpers__/planOfferFixtures'
 
@@ -110,5 +110,28 @@ describe('con versiones', () => {
     await expect(resolverPrecioDelPlan('PLAN_PRO', 'monthly')).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED' })
     expect(mockPriceList).not.toHaveBeenCalled()
     expect(mockPriceRetrieve).not.toHaveBeenCalled()
+  })
+})
+
+describe('exigirPrecioDeStripe', () => {
+  it('exigirPrecioDeStripe: activo y del monto → { priceId, unitAmount }; inactivo, otro monto o 404 → 503 PLAN_NOT_CONFIGURED; un 500 sube tal cual', async () => {
+    mockPriceRetrieve.mockResolvedValue({ id: 'price_x', active: true, unit_amount: 92684 })
+    await expect(exigirPrecioDeStripe('price_x', 92684)).resolves.toEqual({ priceId: 'price_x', unitAmount: 92684 })
+    expect(mockPriceRetrieve).toHaveBeenCalledWith('price_x', { timeout: 15_000, maxNetworkRetries: 0 })
+
+    mockPriceRetrieve.mockResolvedValue({ id: 'price_x', active: false, unit_amount: 92684 })
+    await expect(exigirPrecioDeStripe('price_x', 92684, { tier: 'PRO' })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_NOT_CONFIGURED',
+    })
+    mockPriceRetrieve.mockResolvedValue({ id: 'price_x', active: true, unit_amount: 1 })
+    await expect(exigirPrecioDeStripe('price_x', 92684)).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED' })
+    mockPriceRetrieve.mockRejectedValue(
+      Object.assign(new Error('No such price'), { type: 'StripeInvalidRequestError', statusCode: 404, code: 'resource_missing' }),
+    )
+    await expect(exigirPrecioDeStripe('price_x', 92684)).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED' })
+    const caida = Object.assign(new Error('boom'), { type: 'StripeAPIError', statusCode: 500 })
+    mockPriceRetrieve.mockRejectedValue(caida)
+    await expect(exigirPrecioDeStripe('price_x', 92684)).rejects.toBe(caida)
   })
 })

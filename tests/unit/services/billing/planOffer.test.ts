@@ -17,6 +17,7 @@ import {
   nombreDelProductoEnStripe,
   ofertaDeRespaldo,
   ofertaPorId,
+  ofertaPorNumero,
   ofertaVigente,
   planOfferDefinition,
   planOfferInput,
@@ -206,6 +207,22 @@ describe('ofertaPorId', () => {
     await expect(ofertaPorId('nope')).rejects.toMatchObject({ statusCode: 404 })
     prismaMock.planOfferVersion.findUnique.mockResolvedValueOnce({ id: 'cv3', number: null, status: 'PREPARING', definition: {} } as never)
     await expect(ofertaPorId('cv3')).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED' })
+  })
+})
+
+describe('ofertaPorNumero', () => {
+  it('ofertaPorNumero(2) devuelve la v2 SUPERSEDED con su definición; una versión DISCARDED o inexistente → 404 PLAN_OFFER_NOT_FOUND', async () => {
+    const d = definicionDePrueba({ ids: idsDeLaVersion('v2') })
+    prismaMock.planOfferVersion.findFirst.mockReset()
+    prismaMock.planOfferVersion.findFirst.mockResolvedValueOnce({ id: 'cv2', number: 2, status: 'SUPERSEDED', definition: d } as never)
+    expect(await ofertaPorNumero(2)).toEqual({ number: 2, versionId: 'cv2', definition: d, respaldo: false })
+    const donde = prismaMock.planOfferVersion.findFirst.mock.calls[0][0].where
+    expect(donde).toMatchObject({ number: 2, status: { in: ['PUBLISHED', 'SUPERSEDED'] } })
+
+    prismaMock.planOfferVersion.findFirst.mockResolvedValueOnce(null) // una DISCARDED no pasa el filtro de estado
+    await expect(ofertaPorNumero(3)).rejects.toMatchObject({ statusCode: 404, code: 'PLAN_OFFER_NOT_FOUND' })
+    prismaMock.planOfferVersion.findFirst.mockResolvedValueOnce({ id: 'cv2', number: 2, status: 'SUPERSEDED', definition: {} } as never)
+    await expect(ofertaPorNumero(2)).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED' })
   })
 })
 

@@ -331,6 +331,19 @@ export async function ofertaPorId(
   return { number: version.number, status: version.status, definition: leerDefinicion(version.id, version.definition) }
 }
 
+/**
+ * La versión `PUBLISHED` o `SUPERSEDED` con ese número (la que un comprobante o una compra ya aceptada cita). Otra cosa
+ * (inexistente, en preparación o descartada) → 404 `PLAN_OFFER_NOT_FOUND`; una definición rota → el 503 de `leerDefinicion`.
+ */
+export async function ofertaPorNumero(number: number, db: Db = prisma): Promise<OfertaVigente> {
+  const version = await db.planOfferVersion.findFirst({
+    where: { number, status: { in: ['PUBLISHED', 'SUPERSEDED'] } },
+    select: { id: true, number: true, status: true, definition: true },
+  })
+  if (!version) throw new NotFoundError('No encontramos esa versión de los planes.', 'PLAN_OFFER_NOT_FOUND', { number })
+  return { number, versionId: version.id, definition: leerDefinicion(version.id, version.definition), respaldo: false }
+}
+
 /** La ranura de precio de un plan y una periodicidad. */
 export function precioDeLaOferta(definition: PlanOfferDefinition, tier: PlanPagado, interval: Periodicidad): PrecioDeLaVersion {
   return definition[tier][interval]

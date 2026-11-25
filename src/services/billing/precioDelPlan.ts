@@ -26,6 +26,36 @@ export async function resolverPrecioPorLlave(
   return { priceId: price.id, unitAmount: price.unit_amount ?? 0 }
 }
 
+function noConfigurado(registro: Record<string, unknown>, tierCode?: unknown): AppError {
+  // 🚨 a propósito: la versión vigente apunta a un precio de Stripe que no sirve para cobrar.
+  logger.error('🚨 resolverPrecioDelPlan: el precio de la versión vigente no sirve para cobrar — NO se cobra', registro)
+  return new AppError(MENSAJE_PLAN_NO_CONFIGURADO, 503, true, 'PLAN_NOT_CONFIGURED', { tierCode: tierCode ?? registro.tierCode })
+}
+
+/**
+ * Lee un precio de Stripe por su id y exige que sirva para cobrar: `active` y del bruto esperado. 404, inactivo u otro monto →
+ * 503 `PLAN_NOT_CONFIGURED` (falla cerrado, con el 🚨 de siempre); otro error de Stripe (tiempo agotado, 5xx) sube tal cual.
+ * Bajo el candado de la regla común: tiempo propio y sin reintentos del SDK. `contexto` sólo alimenta el log.
+ */
+export async function exigirPrecioDeStripe(
+  priceId: string,
+  grossCents: number,
+  contexto: Record<string, unknown> = {},
+): Promise<{ priceId: string; unitAmount: number }> {
+  const falla = (motivo: string, stripeAmount: number | null) =>
+    noConfigurado({ ...contexto, priceId, esperado: grossCents, stripe: stripeAmount, motivo })
+  let price: Stripe.Price
+  try {
+    price = await stripe.prices.retrieve(priceId, STRIPE_DENTRO_DEL_CANDADO)
+  } catch (error) {
+    if (stripeAfirmaQueNoExiste(error)) throw falla('NO_EXISTE', null)
+    throw error
+  }
+  if (!price.active) throw falla('INACTIVO', price.unit_amount ?? null)
+  if (price.unit_amount !== grossCents) throw falla('OTRO_MONTO', price.unit_amount ?? null)
+  return { priceId, unitAmount: grossCents }
+}
+
 /**
  * Resuelve UNA vez el precio de Stripe de un plan para que quien cobra lo haga con ese `priceId` y no lo vuelva a buscar.
  *
@@ -44,31 +74,8 @@ export async function resolverPrecioDelPlan(
 
   const tier: PlanPagado = tierCode === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO'
   const ranura = precioDeLaOferta(version.definition, tier, interval)
-  const noConfigurado = (motivo: string, stripeAmount: number | null) => {
-    // 🚨 a propósito: la versión vigente apunta a un precio de Stripe que no sirve para cobrar.
-    logger.error('🚨 resolverPrecioDelPlan: el precio de la versión vigente no sirve para cobrar — NO se cobra', {
-      tierCode,
-      interval,
-      versionId: version.versionId,
-      number: version.number,
-      priceId: ranura.stripePriceId,
-      esperado: ranura.grossCents,
-      stripe: stripeAmount,
-      motivo,
-    })
-    return new AppError(MENSAJE_PLAN_NO_CONFIGURADO, 503, true, 'PLAN_NOT_CONFIGURED', { tierCode })
-  }
-  if (!ranura.stripePriceId) throw noConfigurado('SIN_PRECIO', null)
-
-  let price: Stripe.Price
-  try {
-    // 🔴 Mismo trato que la llave: bajo el candado de la regla común, tiempo propio y sin reintentos del SDK.
-    price = await stripe.prices.retrieve(ranura.stripePriceId, STRIPE_DENTRO_DEL_CANDADO)
-  } catch (error) {
-    if (stripeAfirmaQueNoExiste(error)) throw noConfigurado('NO_EXISTE', null)
-    throw error
-  }
-  if (!price.active) throw noConfigurado('INACTIVO', price.unit_amount ?? null)
-  if (price.unit_amount !== ranura.grossCents) throw noConfigurado('OTRO_MONTO', price.unit_amount ?? null)
-  return { priceId: ranura.stripePriceId, unitAmount: ranura.grossCents }
+  const contexto = { tierCode, interval, versionId: version.versionId, number: version.number }
+  if (!ranura.stripePriceId)
+    throw noConfigurado({ ...contexto, priceId: null, esperado: ranura.grossCents, stripe: null, motivo: 'SIN_PRECIO' }, tierCode)
+  return exigirPrecioDeStripe(ranura.stripePriceId, ranura.grossCents, contexto)
 }

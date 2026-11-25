@@ -5,6 +5,8 @@
  * pasar sólo porque el fixture y el código comparten el mismo error.
  */
 
+import { firmarCotizacion, type CotizacionFirmable } from '@/services/billing/comprobanteDeCotizacion'
+
 type Ranura = 'PRO:monthly' | 'PRO:annual' | 'PREMIUM:monthly' | 'PREMIUM:annual'
 
 /** Las bases de hoy, sin IVA, en centavos (las de `planPricing.constants.ts`). */
@@ -24,11 +26,13 @@ export interface OpcionesDeLaDefinicion {
   netos?: Partial<Record<Ranura, number>>
   nombres?: Partial<Record<'FREE' | 'PRO' | 'PREMIUM', string>>
   productos?: Partial<Record<'PRO' | 'PREMIUM', string | null>>
+  /** Cambios por plan (en venta, tarjeta, días de prueba); lo demás queda como hoy. */
+  planes?: Partial<Record<'PRO' | 'PREMIUM', Partial<{ onSale: boolean; requiresCard: boolean; trialDays: number }>>>
 }
 
 /** Una definición guardada válida: lo de hoy (Gratis / Pro / Premium, con tarjeta, 30 días) con los cambios pedidos. */
 export function definicionDePrueba(opciones: OpcionesDeLaDefinicion = {}) {
-  const { ids = {}, netos = {}, nombres = {}, productos = {} } = opciones
+  const { ids = {}, netos = {}, nombres = {}, productos = {}, planes = {} } = opciones
   const precio = (ranura: Ranura) => {
     const netCents = netos[ranura] ?? NETO_DE_HOY[ranura]
     return { netCents, grossCents: bruto(netCents), stripePriceId: ids[ranura] ?? null }
@@ -38,6 +42,7 @@ export function definicionDePrueba(opciones: OpcionesDeLaDefinicion = {}) {
     onSale: true,
     requiresCard: true,
     trialDays: 30,
+    ...planes[tier],
     monthly: precio(`${tier}:monthly`),
     annual: precio(`${tier}:annual`),
     stripeProductName: productos[tier] ?? null,
@@ -48,6 +53,17 @@ export function definicionDePrueba(opciones: OpcionesDeLaDefinicion = {}) {
     PRO: plan('PRO', 'Pro'),
     PREMIUM: plan('PREMIUM', 'Premium'),
   }
+}
+
+/**
+ * Un comprobante firmado de verdad (con el `firmarCotizacion` real). Por default: Pro mensual de la v2, $79,900 + IVA
+ * (92684 con IVA), 14 días de prueba (primer cobro $0). `emitido` = la hora de emisión (default, ahora).
+ */
+export function comprobanteDePrueba(c: Partial<CotizacionFirmable> & { alcance: string }, emitido?: Date): string {
+  return firmarCotizacion(
+    { versionNumber: 2, tier: 'PRO', interval: 'monthly', firstChargeCents: 0, precioCents: 92684, trialEndsAt: null, ...c },
+    emitido,
+  )
 }
 
 /** Los cuatro `priceId` de una versión: `price_<prefijo>_pro_m`, `…_pro_a`, `…_premium_m`, `…_premium_a`. */

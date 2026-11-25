@@ -1,4 +1,9 @@
-import { firmarCotizacion, verificarCotizacion, VIGENCIA_DE_LA_COTIZACION_MS, type CotizacionFirmable } from '@/services/billing/comprobanteDeCotizacion'
+import {
+  firmarCotizacion,
+  verificarCotizacion,
+  VIGENCIA_DE_LA_COTIZACION_MS,
+  type CotizacionFirmable,
+} from '@/services/billing/comprobanteDeCotizacion'
 import crypto from 'crypto'
 import { ACCESS_TOKEN_SECRET } from '@/config/env'
 import { signPlatformUnsubscribeToken } from '@/utils/platformUnsubscribeToken'
@@ -8,6 +13,7 @@ const c: CotizacionFirmable = {
   tier: 'PRO',
   interval: 'monthly',
   firstChargeCents: 0,
+  precioCents: 115884,
   trialEndsAt: new Date('2026-12-25T06:00:00Z'),
   alcance: 'org:o1',
 }
@@ -20,6 +26,28 @@ describe('comprobante de cotización', () => {
     expect(verificarCotizacion(firmarCotizacion(c, T0), 'org:o1', T0)).toEqual({ ...c, issuedAt: T0 })
     const sinPrueba = { ...c, trialEndsAt: null }
     expect(verificarCotizacion(firmarCotizacion(sinPrueba, T0), 'org:o1', T0).trialEndsAt).toBeNull()
+  })
+
+  it('ida y vuelta conserva precioCents', () => {
+    expect(verificarCotizacion(firmarCotizacion(c, T0), 'org:o1', T0).precioCents).toBe(115884)
+    // Aunque hoy se pague $0, el comprobante lleva el bruto del precio que se cobrará.
+    expect(verificarCotizacion(firmarCotizacion({ ...c, firstChargeCents: 0, precioCents: 92684 }, T0), 'org:o1', T0).precioCents).toBe(
+      92684,
+    )
+  })
+
+  it('un cuerpo firmado sin precioCents (o con 0, o con 1.5) → 400 QUOTE_INVALID', () => {
+    const firmar = (cuerpo: unknown) => {
+      const b64 = Buffer.from(JSON.stringify(cuerpo)).toString('base64url')
+      const key = crypto.createHmac('sha256', ACCESS_TOKEN_SECRET).update('avoqado-plan-quote-v1').digest()
+      return `${b64}.${crypto.createHmac('sha256', key).update(b64).digest('base64url')}`
+    }
+    const base = { f: 1, p: 'plan-quote', n: 2, t: 'PRO', i: 'monthly', c: 0, e: null, s: T0.getTime(), a: 'org:o1' }
+    for (const m of [undefined, 0, 1.5]) {
+      expect(() => verificarCotizacion(firmar({ ...base, m }), 'org:o1', T0)).toThrow(
+        expect.objectContaining({ statusCode: 400, code: 'QUOTE_INVALID' }),
+      )
+    }
   })
 
   it('un solo carácter cambiado en el cuerpo o en la firma → 400 QUOTE_INVALID', () => {
@@ -65,6 +93,8 @@ describe('comprobante de cotización', () => {
       ['cobro no finito', () => firmarCotizacion({ ...c, firstChargeCents: Infinity }, T0)],
       ['cobro NaN', () => firmarCotizacion({ ...c, firstChargeCents: NaN }, T0)],
       ['cobro no entero', () => firmarCotizacion({ ...c, firstChargeCents: 10.5 }, T0)],
+      ['sin precio', () => firmarCotizacion({ ...c, precioCents: 0 }, T0)],
+      ['precio no entero', () => firmarCotizacion({ ...c, precioCents: 1.5 }, T0)],
       ['versión no entera', () => firmarCotizacion({ ...c, versionNumber: 1.5 }, T0)],
       ['alcance vacío', () => firmarCotizacion({ ...c, alcance: '' }, T0)],
       ['resultado demasiado largo', () => firmarCotizacion({ ...c, alcance: 'org:' + 'x'.repeat(2100) }, T0)],
@@ -80,7 +110,7 @@ describe('comprobante de cotización', () => {
       const key = crypto.createHmac('sha256', ACCESS_TOKEN_SECRET).update('avoqado-plan-quote-v1').digest()
       return `${b64}.${crypto.createHmac('sha256', key).update(b64).digest('base64url')}`
     }
-    const bueno = { f: 1, p: 'plan-quote', n: 2, t: 'PRO', i: 'monthly', c: 0, e: null, s: T0.getTime(), a: 'org:o1' }
+    const bueno = { f: 1, p: 'plan-quote', n: 2, t: 'PRO', i: 'monthly', c: 0, m: 115884, e: null, s: T0.getTime(), a: 'org:o1' }
 
     it('el cuerpo bueno firmado a mano sí vale (valida el ayudante)', () => {
       expect(verificarCotizacion(firmarA_Mano(bueno), 'org:o1', T0).versionNumber).toBe(2)
@@ -93,6 +123,9 @@ describe('comprobante de cotización', () => {
       ['plan desconocido', { ...bueno, t: 'FREE' }],
       ['periodicidad desconocida', { ...bueno, i: 'weekly' }],
       ['cobro negativo', { ...bueno, c: -1 }],
+      ['sin precio (m)', { ...bueno, m: undefined }],
+      ['precio 0', { ...bueno, m: 0 }],
+      ['precio 1.5', { ...bueno, m: 1.5 }],
       ['fin de prueba no numérico', { ...bueno, e: 'x' }],
       ['sin campo n', { ...bueno, n: undefined }],
       ['cuerpo nulo', null],
