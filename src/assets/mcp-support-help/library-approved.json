@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-25T15:46:48.061Z",
-  "approvedHash": "cbf1bcf3d96e12f13b99f347c665ce861fc4797cf778796f7b3661677d8f967e",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -414,7 +414,7 @@
       ]
     },
     "dashboard/clientes/programa-de-referidos": {
-      "sha256": "a9a9cc5a8f117df432ef45201cc2bdd919ebe498ac928693b3161bb83f271338",
+      "sha256": "65c51e806ede17f2f348f1f0d79ca958e06c59ed47fdf7740f37386aef1794f3",
       "requiredPermissions": [
         "referral:read",
         "referral:configure"
