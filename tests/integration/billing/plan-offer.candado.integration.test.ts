@@ -307,6 +307,30 @@ async function sostenerElCandado() {
   }
 }
 
+/** Una operación que corre en segundo plano: su rechazo se observa después (o en el `finally`), nunca queda suelto. */
+function enSegundoPlano<T>(p: Promise<T>): Promise<T> {
+  p.catch(() => undefined)
+  return p
+}
+
+/** Espera a que la operación llegue a la pausa; si termina antes (bien o mal), falla de inmediato en vez de colgarse. */
+async function hastaQueLlegue(llego: Promise<void>, operacion: Promise<unknown>) {
+  const termino = operacion.then(
+    () => {
+      throw new Error('La operación terminó sin llegar a su pausa')
+    },
+    error => {
+      throw error
+    },
+  )
+  termino.catch(() => undefined)
+  await Promise.race([llego, termino])
+}
+
+/** En el `finally` de cada caso con pausas: lo que quedó corriendo termina antes de que `afterEach` toque la base. */
+const asentar = (...operaciones: Array<Promise<unknown> | undefined>) =>
+  Promise.allSettled(operaciones.filter((o): o is Promise<unknown> => o !== undefined))
+
 const leerVersion = (id: string) => prisma.planOfferVersion.findUniqueOrThrow({ where: { id } })
 const elPuntero = () => prisma.planOfferPointer.findUniqueOrThrow({ where: { id: 'vigente' } })
 
@@ -389,8 +413,13 @@ afterAll(async () => {
     })
   for (const { id, listProductKey, code, slug } of listasAparcadas)
     await prisma.hybridCampaign.update({ where: { id }, data: { listProductKey, code, slug } })
-  for (const f of featuresOriginales)
-    await prisma.feature.update({ where: { code: f.code }, data: { stripeProductId: f.stripeProductId, active: f.active } })
+  // Las Features que ya existían vuelven a como estaban; las que creó esta suite se borran.
+  for (const f of featuresOriginales) {
+    if (f.existia) await prisma.feature.update({ where: { code: f.code }, data: { stripeProductId: f.stripeProductId, active: f.active } })
+    else await prisma.feature.deleteMany({ where: { code: f.code } })
+  }
+  // Su bitácora queda (sin actor: `staffId` es SET NULL); el renglón de la persona de prueba se va.
+  if (staffId) await prisma.staff.deleteMany({ where: { id: staffId } })
 })
 
 beforeEach(async () => {
@@ -425,11 +454,18 @@ describe('activar una campaña y publicar los planes: un solo candado (Postgres 
     // Dentro del candado: la prueba lo sostiene; la activación llega a esperarlo (ya con su cupón) y DESPUÉS la publicación,
     // que pasa su revisión rápida (la campaña sigue en borrador) y se forma detrás.
     const candado = await sostenerElCandado()
-    const activacion = activar(id)
-    await hastaQueEsperen(1)
-    const publicacion = publicar()
-    await hastaQueEsperen(2)
-    await candado.soltar()
+    let activacion: Promise<unknown> | undefined
+    let publicacion: Promise<unknown> | undefined
+    try {
+      activacion = enSegundoPlano(activar(id))
+      await hastaQueEsperen(1)
+      publicacion = enSegundoPlano(publicar())
+      await hastaQueEsperen(2)
+    } finally {
+      // Pase lo que pase, el candado se suelta y las dos terminan antes de seguir (o de que `afterEach` cierre la campaña).
+      await candado.soltar().catch(() => undefined)
+      await asentar(activacion, publicacion)
+    }
 
     await expect(activacion).resolves.toMatchObject({ status: 'ACTIVE' })
     await expect(publicacion).rejects.toMatchObject({ statusCode: 409, code: 'PLAN_PRICE_BLOCKED_BY_CAMPAIGNS' })
@@ -448,24 +484,34 @@ describe('activar una campaña y publicar los planes: un solo candado (Postgres 
   it('con la publicación PREPARING, el CAS de la activación → 409 PLAN_OFFER_PENDING; al terminar la publicación, el segundo intento activa con el mensual nuevo', async () => {
     const { id, code } = await campanaEnBorrador()
 
-    // La activación pasa su revisión (nada pendiente) y se detiene en Stripe, creando su cupón.
-    mockStripe.pausaDelCupon = mockNuevaPausa()
-    const pausaDelCupon = mockStripe.pausaDelCupon
-    const activacion = activar(id)
-    await pausaDelCupon.llego
-    // La publicación deja su versión PREPARING y se detiene en Stripe, creando el precio nuevo.
-    mockStripe.pausaDelPrecio = mockNuevaPausa()
-    const pausaDelPrecio = mockStripe.pausaDelPrecio
-    const publicacion = publicar()
-    await pausaDelPrecio.llego
-    expect((await elPuntero()).pendingVersionId).not.toBeNull()
+    const pausaDelCupon = mockNuevaPausa()
+    const pausaDelPrecio = mockNuevaPausa()
+    let activacion: Promise<unknown> | undefined
+    let publicacion: Promise<unknown> | undefined
+    try {
+      // La activación pasa su revisión (nada pendiente) y se detiene en Stripe, creando su cupón.
+      mockStripe.pausaDelCupon = pausaDelCupon
+      activacion = enSegundoPlano(activar(id))
+      await hastaQueLlegue(pausaDelCupon.llego, activacion)
+      // La publicación deja su versión PREPARING y se detiene en Stripe, creando el precio nuevo.
+      mockStripe.pausaDelPrecio = pausaDelPrecio
+      publicacion = enSegundoPlano(publicar())
+      await hastaQueLlegue(pausaDelPrecio.llego, publicacion)
+      expect((await elPuntero()).pendingVersionId).not.toBeNull()
 
-    pausaDelCupon.soltar()
-    await expect(activacion).rejects.toMatchObject({ statusCode: 409, code: 'PLAN_OFFER_PENDING' })
-    expect((await prisma.launchCampaign.findUniqueOrThrow({ where: { id } })).status).toBe('DRAFT')
+      pausaDelCupon.soltar()
+      await expect(activacion).rejects.toMatchObject({ statusCode: 409, code: 'PLAN_OFFER_PENDING' })
+      expect((await prisma.launchCampaign.findUniqueOrThrow({ where: { id } })).status).toBe('DRAFT')
 
-    pausaDelPrecio.soltar()
-    await expect(publicacion).resolves.toMatchObject({ number: 2 })
+      pausaDelPrecio.soltar()
+      await expect(publicacion).resolves.toMatchObject({ number: 2 })
+    } finally {
+      pausaDelCupon.soltar()
+      pausaDelPrecio.soltar()
+      mockStripe.pausaDelCupon = null
+      mockStripe.pausaDelPrecio = null
+      await asentar(activacion, publicacion)
+    }
 
     await expect(activar(id)).resolves.toMatchObject({ status: 'ACTIVE' })
     const c = await comprobarCampana(id, LISTA_V2)
@@ -477,17 +523,28 @@ describe('activar una campaña y publicar los planes: un solo candado (Postgres 
   it('🔴 la activación lee v1 y crea su cupón; la publicación mueve a v2 antes del candado de la activación → 409 PLAN_OFFER_STALE; el segundo intento crea LC_<code>_V1_P2 y queda ACTIVE', async () => {
     const { id, code } = await campanaEnBorrador()
 
-    mockStripe.pausaDelCupon = mockNuevaPausa()
-    const pausaDelCupon = mockStripe.pausaDelCupon
-    const activacion = activar(id)
-    await pausaDelCupon.llego
+    const pausaDelCupon = mockNuevaPausa()
+    let activacion: Promise<unknown> | undefined
+    try {
+      mockStripe.pausaDelCupon = pausaDelCupon
+      activacion = enSegundoPlano(activar(id))
+      await hastaQueLlegue(pausaDelCupon.llego, activacion)
 
-    // Mientras Stripe crea el cupón de la v1, la publicación termina completa.
-    await expect(publicar()).resolves.toMatchObject({ number: 2 })
+      // Mientras Stripe crea el cupón de la v1, la publicación termina completa.
+      await expect(publicar()).resolves.toMatchObject({ number: 2 })
 
-    pausaDelCupon.soltar()
-    await expect(activacion).rejects.toMatchObject({ statusCode: 409, code: 'PLAN_OFFER_STALE', details: { leida: 1, vigente: 2 } })
-    expect((await prisma.launchCampaign.findUniqueOrThrow({ where: { id } })).status).toBe('DRAFT')
+      pausaDelCupon.soltar()
+      await expect(activacion).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'PLAN_OFFER_STALE',
+        details: { leida: 1, vigente: 2 },
+      })
+      expect((await prisma.launchCampaign.findUniqueOrThrow({ where: { id } })).status).toBe('DRAFT')
+    } finally {
+      pausaDelCupon.soltar()
+      mockStripe.pausaDelCupon = null
+      await asentar(activacion)
+    }
 
     await expect(activar(id)).resolves.toMatchObject({ status: 'ACTIVE' })
     const c = await comprobarCampana(id, LISTA_V2)
@@ -536,24 +593,29 @@ describe('M3: las escrituras de la preparación sobre la fila de la versión (Po
       await listaSuelta
       throw new Error('Stripe no contestó')
     })
-    const reintento = reintentarPublicacion(versionId, staffId)
-    await llegoALaLista
-    fila = await leerVersion(versionId)
-    expect((fila.definition as any).PRO.monthly).toEqual({
-      netCents: NETO,
-      grossCents: BRUTO,
-      stripePriceId: `price_po_${versionId}_pro_monthly`,
-    })
-    expect((fila.preparacion as any).ultimoError).toBeNull()
-    expect((fila.preparacion as any).intentos.PRO_monthly).toBe(1)
-    expect(typeof (fila.hybridPublicationIds as any).PREMIUM).toBe('string')
-    expect(mockStripe.llavesDePrecio).toEqual([
-      `plan-offer-price:${versionId}:PRO:monthly:0`,
-      `plan-offer-price:${versionId}:PRO:monthly:1`,
-    ])
+    const reintento = enSegundoPlano(reintentarPublicacion(versionId, staffId))
+    try {
+      await hastaQueLlegue(llegoALaLista, reintento)
+      fila = await leerVersion(versionId)
+      expect((fila.definition as any).PRO.monthly).toEqual({
+        netCents: NETO,
+        grossCents: BRUTO,
+        stripePriceId: `price_po_${versionId}_pro_monthly`,
+      })
+      expect((fila.preparacion as any).ultimoError).toBeNull()
+      expect((fila.preparacion as any).intentos.PRO_monthly).toBe(1)
+      expect(typeof (fila.hybridPublicationIds as any).PREMIUM).toBe('string')
+      expect(mockStripe.llavesDePrecio).toEqual([
+        `plan-offer-price:${versionId}:PRO:monthly:0`,
+        `plan-offer-price:${versionId}:PRO:monthly:1`,
+      ])
+    } finally {
+      // …y la lista falla (también si una comprobación de arriba falló: el reintento termina antes de seguir).
+      soltar()
+      await asentar(reintento)
+    }
 
-    // …y la lista falla: queda PREPARING con su último error de LISTA (el intento no sube: es incierto).
-    soltar()
+    // Queda PREPARING con su último error de LISTA (el intento no sube: es incierto).
     await expect(reintento).rejects.toMatchObject({
       statusCode: 409,
       code: 'PLAN_OFFER_PREPARING',

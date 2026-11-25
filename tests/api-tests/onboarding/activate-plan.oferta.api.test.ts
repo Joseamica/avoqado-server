@@ -165,7 +165,13 @@ beforeEach(() => {
   prismaMock.hybridPurchase.findUnique.mockResolvedValue(null as never)
   prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue(null as never)
   // `createPlanSubscription` es el REAL (sólo Stripe está simulado): necesita su Feature y su VenueFeature.
-  prismaMock.feature.findFirst.mockResolvedValue({ id: 'feat-pro', code: 'PLAN_PRO', monthlyPrice: 999 } as never)
+  // El producto del plan: un precio de campaña (del lugar, de su suscripción o de la versión) tiene que ser de él.
+  prismaMock.feature.findFirst.mockResolvedValue({
+    id: 'feat-pro',
+    code: 'PLAN_PRO',
+    monthlyPrice: 999,
+    stripeProductId: 'prod_pro',
+  } as never)
   prismaMock.venueFeature.findUnique.mockResolvedValue(null as never)
   prismaMock.venueFeature.upsert.mockResolvedValue({} as never)
 })

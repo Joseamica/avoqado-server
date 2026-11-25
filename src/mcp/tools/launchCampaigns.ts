@@ -38,6 +38,9 @@ import { reviewHybridCampaignOffer } from '@/services/launchCampaigns/hybridCamp
 
 const SOLO_AVOQADO = 'Solo Avoqado puede ver o cambiar las ofertas de lanzamiento.'
 
+/** Las negativas de activar una oferta que la herramienta explica con su código (planes editables B1). */
+const NEGATIVAS_DE_ACTIVAR = new Set(['LAUNCH_CAMPAIGN_PREVIEW_STALE', 'PLAN_OFFER_PENDING', 'PLAN_OFFER_STALE', 'PLAN_NOT_ON_SALE'])
+
 /** Pesos con dos decimales, para que el texto que lee una persona no hable en centavos. */
 const pesos = (cents: number) => `$${(cents / 100).toFixed(2)}`
 
@@ -301,7 +304,9 @@ export function registerLaunchCampaignTools(server: McpServer, scope: McpScope):
               ? await pauseLaunchCampaign(ficha.id, reason as string, scope.staffId)
               : await endLaunchCampaign(ficha.id, reason as string, scope.staffId)
       } catch (error) {
-        if (error instanceof AppError && error.code === 'LAUNCH_CAMPAIGN_PREVIEW_STALE') {
+        // Las negativas que la persona resuelve volviendo a revisar (o esperando a que termine una publicación de los planes):
+        // un código estable y el mensaje, en vez de un error genérico.
+        if (error instanceof AppError && error.code && NEGATIVAS_DE_ACTIVAR.has(error.code)) {
           return text({ ok: false, codigo: error.code, error: error.message })
         }
         throw error

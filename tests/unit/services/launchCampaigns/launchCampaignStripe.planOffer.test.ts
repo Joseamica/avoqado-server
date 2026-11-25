@@ -284,6 +284,41 @@ describe('activateLaunchCampaign bajo el candado de la oferta', () => {
     })
   })
 
+  it('🔴 si la v2 se publica entre el paso 1 y la lectura del precio de lista → 409 PLAN_OFFER_STALE y cero cupones', async () => {
+    // El paso 1 lee el puntero dos veces (la pendiente y la vigente) y ve la v1; la lectura del precio de lista ya ve la v2.
+    const v1 = punteroA('cv1', 1, definicionDePrueba({ ids: idsDeLaVersion('v1') }))
+    const v2 = punteroA('cv2', 2, versionDos())
+    let lecturas = 0
+    prismaMock.planOfferPointer.findUnique.mockImplementation((async () => (++lecturas <= 2 ? v1 : v2)) as never)
+
+    await expect(activateLaunchCampaign('lc-1', 'staff-1')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_OFFER_STALE',
+      details: { leida: 1, vigente: 2 },
+    })
+    // El precio de la v2 sí se leyó, pero ningún cupón se buscó ni se creó con él: sería un `_P2` con otra versión leída.
+    expect(mockPriceRetrieve).toHaveBeenCalledWith('price_v2_pro_m')
+    expect(mockCouponRetrieve).not.toHaveBeenCalled()
+    expect(mockCouponCreate).not.toHaveBeenCalled()
+    expect(mockCouponDel).not.toHaveBeenCalled()
+    expect(prismaMock.launchCampaign.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('el mensual de la v2 existe en Stripe con OTRO importe que el de la versión → 409 PLAN_PRICE_UNAVAILABLE y cero cupones', async () => {
+    puntero = punteroA('cv2', 2, versionDos())
+    precios.price_v2_pro_m = precio('price_v2_pro_m', LISTA_V2 + 100)
+
+    await expect(activateLaunchCampaign('lc-1', 'staff-1')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_PRICE_UNAVAILABLE',
+      details: { versionDeLaOferta: 2, priceId: 'price_v2_pro_m', motivo: 'su importe no es el de la versión vigente' },
+    })
+    expect(mockCouponRetrieve).not.toHaveBeenCalled()
+    expect(mockCouponCreate).not.toHaveBeenCalled()
+    expect(mockCouponDel).not.toHaveBeenCalled()
+    expect(prismaMock.launchCampaign.updateMany).not.toHaveBeenCalled()
+  })
+
   it('🔴 reactivar después de publicar una v2 que sólo cambió el anual: comprueba y conserva LC_POS22_V1 (no guarda LC_POS22_V1_P2)', async () => {
     // La v2 hereda el mensual de la v1 (su mismo priceId) y sólo trae un anual nuevo.
     const d = definicionDePrueba({

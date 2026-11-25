@@ -157,7 +157,13 @@ beforeEach(() => {
   prismaMock.launchCampaign.findUnique.mockResolvedValue(campana as never)
   prismaMock.launchCampaign.updateMany.mockResolvedValue({ count: 1 } as never)
   prismaMock.launchCampaignRedemption.updateMany.mockResolvedValue({ count: 1 } as never)
-  prismaMock.feature.findFirst.mockResolvedValue({ id: 'feat-pro', code: 'PLAN_PRO', monthlyPrice: 999 } as never)
+  // El producto del plan: un precio de campaña (del lugar, de su suscripción o de la versión) tiene que ser de él.
+  prismaMock.feature.findFirst.mockResolvedValue({
+    id: 'feat-pro',
+    code: 'PLAN_PRO',
+    monthlyPrice: 999,
+    stripeProductId: 'prod_pro',
+  } as never)
   prismaMock.venue.findUnique.mockResolvedValue({
     id: 'venue-1',
     name: 'Negocio',

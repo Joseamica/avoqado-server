@@ -351,24 +351,39 @@ function precioNoCoincide(contexto: Record<string, unknown>, esperado: number, s
 }
 
 /**
- * Lo que un precio de CAMPAÑA tiene que ser además de su monto: activo, en MXN, mensual y con el IVA incluido (las mismas
- * comprobaciones con las que se activó la campaña). Devuelve el motivo si no lo es.
+ * Lo que un precio de CAMPAÑA tiene que ser además de su monto: activo, en MXN, mensual, con el IVA incluido (las mismas
+ * comprobaciones con las que se activó la campaña) y del PRODUCTO del plan. Devuelve el motivo si no lo es.
+ *
+ * 🔴 El producto no es ceremonia: el cupón de la campaña se creó con `applies_to: [producto del plan]`; un precio de otro
+ * producto con el mismo monto cobraría la lista completa, sin el descuento anunciado.
  */
-function formaDeCampanaQueFalta(price: Stripe.Price): string | null {
+function formaDeCampanaQueFalta(price: Stripe.Price, productoDelPlan: string | null): string | null {
   if (price.active !== true) return 'INACTIVO'
   if (price.currency !== 'mxn') return 'OTRA_MONEDA'
   if (price.recurring?.interval !== 'month') return 'NO_ES_MENSUAL'
   if (price.tax_behavior !== 'inclusive') return 'SIN_IVA_INCLUIDO'
+  const producto = typeof price.product === 'string' ? price.product : (price.product as { id?: string } | null)?.id
+  if (!productoDelPlan || producto !== productoDelPlan) return 'OTRO_PRODUCTO'
   return null
 }
 
-/** El precio de la ranura de una versión del editor. `forma: 'CAMPANA'` exige además la forma de un precio de campaña. */
+/** El producto de Stripe del plan: el de su `Feature` activa (`PLAN_PRO` / `PLAN_PREMIUM`). `null` si no lo tiene (falla cerrado). */
+async function productoDelPlan(tier: PaidPlanTier): Promise<string | null> {
+  const code = tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
+  const feature = await prisma.feature.findFirst({ where: { code, active: true }, select: { stripeProductId: true } })
+  return feature?.stripeProductId ?? null
+}
+
+/**
+ * El precio de la ranura de una versión del editor. Con `campana` exige además la forma de un precio de campaña (también el
+ * producto del plan).
+ */
 async function verificarPrecioDeLaVersion(
   version: OfertaVigente,
   tier: PaidPlanTier,
   interval: PlanBillingInterval,
   esperado: number,
-  forma?: 'CAMPANA',
+  campana?: { productoDelPlan: string | null },
 ): Promise<{ priceId: string; unitAmount: number; origen: 'VERSION' }> {
   const ranura = precioDeLaOferta(version.definition, tier, interval)
   const contexto = {
@@ -391,21 +406,22 @@ async function verificarPrecioDeLaVersion(
   const unitAmount = price.unit_amount ?? null
   if (!price.active) throw precioNoCoincide(contexto, esperado, unitAmount, 'INACTIVO')
   if (unitAmount !== esperado || ranura.grossCents !== esperado) throw precioNoCoincide(contexto, esperado, unitAmount, 'OTRO_MONTO')
-  const falta = forma === 'CAMPANA' ? formaDeCampanaQueFalta(price) : null
+  const falta = campana ? formaDeCampanaQueFalta(price, campana.productoDelPlan) : null
   if (falta) throw precioNoCoincide(contexto, esperado, unitAmount, falta)
   // El MISMO precio que se leyó aquí es el que se cobra; la relectura sólo compara el puntero.
   return { priceId: ranura.stripePriceId, unitAmount: esperado, origen: 'VERSION' }
 }
 
-/** Un precio ya leído (del lugar o de la suscripción) que se va a cobrar sin releer: su monto y su forma, o 409. */
+/** Un precio ya leído (del lugar o de la suscripción) que se va a cobrar sin releer: su monto, su forma y su producto, o 409. */
 function exigirPrecioDeCampana(
   price: Stripe.Price | null | undefined,
   esperado: number,
+  productoDelPlan: string | null,
   contexto: Record<string, unknown>,
 ): { priceId: string; unitAmount: number } {
   if (!price?.id) throw precioNoCoincide(contexto, esperado, null, 'SIN_PRECIO')
   const unitAmount = price.unit_amount ?? null
-  const falta = formaDeCampanaQueFalta(price) ?? (unitAmount !== esperado ? 'OTRO_MONTO' : null)
+  const falta = formaDeCampanaQueFalta(price, productoDelPlan) ?? (unitAmount !== esperado ? 'OTRO_MONTO' : null)
   if (falta) throw precioNoCoincide({ ...contexto, priceId: price.id }, esperado, unitAmount, falta)
   return { priceId: price.id, unitAmount: esperado }
 }
@@ -419,9 +435,12 @@ function exigirPrecioDeCampana(
  * - **Con ella**, en este orden:
  *   1. el lugar `RESERVED` de esta organización, campaña y versión de la oferta **con** su `stripePriceId` → ése (`LUGAR`);
  *   2. un lugar `RESERVED` **sin** precio (apartado antes de B1) con la suscripción de su intento → el precio que de verdad
- *      cobró ese intento (`SUSCRIPCION`);
- *   3. un lugar `RESERVED` sin precio ni suscripción → la llave (`LLAVE`; la llave nunca se movió después de B1, §15);
+ *      cobró ese intento (`SUSCRIPCION`). Sólo si la suscripción es de ESE lugar (`metadata.launchRedemptionId`): la de otro
+ *      intento (otro lugar, o una prueba estándar) o una que Stripe ya no tiene (404) caen al paso 3, como en B0;
+ *   3. un lugar `RESERVED` sin precio ni suscripción suya → la llave (`LLAVE`; la llave nunca se movió después de B1, §15);
  *   4. un intento nuevo → el mensual de la versión (`VERSION`).
+ *   En LUGAR, SUSCRIPCION y VERSION el precio también tiene que ser del producto del plan (el `applies_to` del cupón); la LLAVE
+ *   sigue literal, como B0.
  */
 async function precioDeLaCampana(
   campaign: LaunchCampaignRow,
@@ -447,22 +466,35 @@ async function precioDeLaCampana(
       if (stripeAfirmaQueNoExiste(error)) throw precioNoCoincide({ ...contexto, origen: 'LUGAR' }, esperado, null, 'NO_EXISTE')
       throw error
     }
-    return { ...exigirPrecioDeCampana(price, esperado, { ...contexto, origen: 'LUGAR' }), origen: 'LUGAR' }
+    return { ...exigirPrecioDeCampana(price, esperado, await productoDelPlan(tier), { ...contexto, origen: 'LUGAR' }), origen: 'LUGAR' }
   }
 
   if (lugar && progress.planStripeSubscriptionId) {
-    // El precio que de verdad cobró ese intento: «no pude ver» sube tal cual (nunca se lee como «no existe»).
-    const sub = await stripe.subscriptions.retrieve(progress.planStripeSubscriptionId)
-    const price = sub.items?.data?.[0]?.price as Stripe.Price | undefined
-    return {
-      ...exigirPrecioDeCampana(price, esperado, { ...contexto, origen: 'SUSCRIPCION', subscriptionId: sub.id }),
-      origen: 'SUSCRIPCION',
+    // El precio que de verdad cobró ese intento. Un 404 (Stripe dice que no existe) cae a la llave; cualquier otro error sube
+    // tal cual («no pude ver» nunca se lee como «no existe»).
+    let sub: Stripe.Subscription | null
+    try {
+      sub = await stripe.subscriptions.retrieve(progress.planStripeSubscriptionId)
+    } catch (error) {
+      if (!stripeAfirmaQueNoExiste(error)) throw error
+      sub = null
+    }
+    if (sub && sub.metadata?.launchRedemptionId === lugar.id) {
+      const price = sub.items?.data?.[0]?.price as Stripe.Price | undefined
+      return {
+        ...exigirPrecioDeCampana(price, esperado, await productoDelPlan(tier), {
+          ...contexto,
+          origen: 'SUSCRIPCION',
+          subscriptionId: sub.id,
+        }),
+        origen: 'SUSCRIPCION',
+      }
     }
   }
 
   if (lugar) return { ...(await verificarPrecioPorLlave(tier, 'monthly', esperado)), origen: 'LLAVE' }
 
-  return verificarPrecioDeLaVersion(version, tier, 'monthly', esperado, 'CAMPANA')
+  return verificarPrecioDeLaVersion(version, tier, 'monthly', esperado, { productoDelPlan: await productoDelPlan(tier) })
 }
 
 /**

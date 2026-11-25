@@ -366,6 +366,23 @@ describe('set_launch_campaign_status: la vista previa de activar ata el precio d
     expect(prismaMock.launchCampaign.updateMany).not.toHaveBeenCalled()
   })
 
+  it('activar con una publicación de los planes pendiente → { ok: false, codigo: PLAN_OFFER_PENDING } y no se crea cupón', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue({
+      ...punteroA('cv1', 1, definicionDePrueba({ ids: idsDeLaVersion('v1') })),
+      pendingVersionId: 'cvpendiente',
+    } as never)
+    const vista = await llamar({ code: 'POS22', action: 'activate' })
+    expect(vista).toMatchObject({ requiresConfirmation: true, expectedListPrice: 1158.84 })
+
+    const r = await llamar({ ...vista.confirmationArguments, confirm: true, confirmationToken: vista.confirmationToken })
+
+    expect(r).toMatchObject({ ok: false, codigo: 'PLAN_OFFER_PENDING' })
+    expect(typeof r.error).toBe('string')
+    expect(mockCouponRetrieve).not.toHaveBeenCalled()
+    expect(mockCouponCreate).not.toHaveBeenCalled()
+    expect(prismaMock.launchCampaign.updateMany).not.toHaveBeenCalled()
+  })
+
   it('la vista previa devuelve expectedListPrice y el token lo ata: confirmar con otro valor pide una vista previa vigente', async () => {
     const vista = await llamar({ code: 'POS22', action: 'activate' })
     expect(vista.expectedListPrice).toBe(1158.84)
