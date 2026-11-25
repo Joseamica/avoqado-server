@@ -1468,7 +1468,74 @@ describe('Planes editables B1: el precio de un intento de campaña', () => {
     )
   })
 
-  it('con el precio del lugar o de la suscripción no hay relectura; con el de la llave se relee la llave (no la versión); con el de la versión, la versión', async () => {
+  /** Las liberaciones del lugar (`liberarLugarEn`: CAS sobre RESERVED → RELEASED). */
+  const liberaciones = () =>
+    prismaMock.launchCampaignRedemption.updateMany.mock.calls.filter((c: any[]) => c[0]?.data?.status === 'RELEASED')
+
+  it('🔴 Codex B1 #2: un intento nuevo con la v2 aparta su lugar con el precio A; si el puntero pasa a la v3 (precio B) antes de cobrar, se cobra con A y el lugar NO se libera', async () => {
+    // PASO 4 con la v2 (su mensual es el de la campaña: price_v2_pro_m); cualquier lectura posterior del puntero ya ve la v3, que
+    // tiene OTRO priceId para ese mensual (la campaña se pausó y se publicó la v3 entre el PASO 7 y la relectura).
+    prismaMock.planOfferPointer.findUnique
+      .mockResolvedValueOnce(punteroA('cv2', 2, v2MismoMensual()) as never)
+      .mockResolvedValue(punteroA('cv3', 3, definicionDePrueba({ ids: idsDeLaVersion('v3') })) as never)
+
+    const r = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(r).toMatchObject({ status: 'ACTIVE', firstChargeCents: ANUNCIADO })
+    // El lugar se apartó en ESTA petición con el precio A…
+    expect(prismaMock.launchCampaignRedemption.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ stripePriceId: 'price_v2_pro_m' }) }),
+    )
+    // …y se cobra con A, con el cupón de la campaña: el lugar ya consintió ese precio (origen LUGAR, no se relee).
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(mockSubCreate.mock.calls[0][0].items).toEqual([{ price: 'price_v2_pro_m' }])
+    expect(mockSubCreate.mock.calls[0][0].discounts).toEqual([{ coupon: 'LC_POS22_V1' }])
+    expect(prismaMock.planOfferPointer.findUnique).toHaveBeenCalledTimes(1)
+    expect(liberaciones()).toEqual([])
+    expect(logger.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('la versión vigente cambió al momento de cobrar'),
+      expect.anything(),
+    )
+  })
+
+  it('Codex B1 #2 (gemela, LLAVE): sin versión del editor el lugar se aparta con el precio de la llave y, si la llave se movió antes de cobrar, 409 PLAN_PRICE_MISMATCH y el lugar se libera, como B0', async () => {
+    mockPriceList
+      .mockReset()
+      .mockResolvedValueOnce({ data: [precioDe('price_llave_b', LISTA)] })
+      .mockResolvedValue({ data: [precioDe('price_llave_otra', LISTA)] })
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({ statusCode: 409, code: 'PLAN_PRICE_MISMATCH' })
+
+    expect(prismaMock.launchCampaignRedemption.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ stripePriceId: 'price_llave_b' }) }),
+    )
+    // La relectura de la llave de B0 no cambia: se lista otra vez, ya dentro de la regla común, y no se cobra.
+    expect(mockPriceList).toHaveBeenCalledTimes(2)
+    expect(mockPriceList.mock.invocationCallOrder[1]).toBeGreaterThan(mockAutorizar.mock.invocationCallOrder[0])
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(liberaciones()).toEqual([
+      [expect.objectContaining({ where: { id: 'red-1', status: 'RESERVED' }, data: expect.objectContaining({ status: 'RELEASED' }) })],
+    ])
+  })
+
+  it('Codex B1 #2: un lugar REUSADO con otro precio que el verificado sigue con la relectura de la versión (sólo el lugar con ESE precio cuenta como LUGAR)', async () => {
+    conVersion(v2MismoMensual())
+    // El PASO 4 no encuentra lugar de esta campaña; el PASO 7 encuentra uno vivo (lo apartó otra petición en medio) con OTRO precio.
+    prismaMock.launchCampaignRedemption.findFirst.mockImplementation((async (args: { where?: { campaignId?: string } }) =>
+      args?.where?.campaignId
+        ? null
+        : { id: 'red-1', status: 'RESERVED', campaignId: 'lc-1', offerVersion: 1, stripePriceId: 'price_otro_lugar' }) as never)
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(prismaMock.launchCampaignRedemption.create).not.toHaveBeenCalled()
+    // Se releyó el puntero (origen VERSION) y, como sigue en la v2, se cobra con el verificado.
+    expect(prismaMock.planOfferPointer.findUnique).toHaveBeenCalledTimes(2)
+    expect(prismaMock.planOfferPointer.findUnique.mock.invocationCallOrder[1]).toBeGreaterThan(mockAutorizar.mock.invocationCallOrder[0])
+    expect(mockSubCreate.mock.calls[0][0].items).toEqual([{ price: 'price_v2_pro_m' }])
+  })
+
+  it('con el precio del lugar o de la suscripción no hay relectura; con el de la llave se relee la llave (no la versión); con el de la versión ya guardado en el lugar apartado, tampoco', async () => {
     const lecturasDelPuntero = () => prismaMock.planOfferPointer.findUnique.mock.calls.length
 
     // LUGAR: una sola lectura del puntero (el PASO 4) y un solo retrieve.
@@ -1535,7 +1602,9 @@ describe('Planes editables B1: el precio de un intento de campaña', () => {
     expect(lecturasDelPuntero()).toBe(1)
     expect(mockPriceRetrieve).not.toHaveBeenCalled()
 
-    // VERSION (intento nuevo con la v2): la relectura lee el puntero (sólo la base), no la llave.
+    // VERSION (intento nuevo con la v2): el PASO 7 guarda ese precio en el lugar apartado, así que ya es el del lugar y no se relee
+    // (Codex B1 #2). El puntero sólo se lee en el PASO 4 y la llave nunca. (Un lugar reusado con OTRO precio sí relee la versión:
+    // su prueba está arriba.)
     jest.clearAllMocks()
     mockSubCreate.mockReset().mockResolvedValue({ id: 'sub_1' })
     prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue(null as never)
@@ -1543,8 +1612,9 @@ describe('Planes editables B1: el precio de un intento de campaña', () => {
     await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
     expect(mockPriceRetrieve).toHaveBeenCalledTimes(1)
     expect(mockPriceList).not.toHaveBeenCalled()
-    expect(lecturasDelPuntero()).toBe(2)
-    expect(prismaMock.planOfferPointer.findUnique.mock.invocationCallOrder[1]).toBeGreaterThan(mockAutorizar.mock.invocationCallOrder[0])
+    expect(lecturasDelPuntero()).toBe(1)
+    expect(prismaMock.planOfferPointer.findUnique.mock.invocationCallOrder[0]).toBeLessThan(mockAutorizar.mock.invocationCallOrder[0])
+    expect(mockSubCreate.mock.calls[0][0].items).toEqual([{ price: 'price_v2_pro_m' }])
   })
 })
 

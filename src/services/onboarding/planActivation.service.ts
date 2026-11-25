@@ -283,7 +283,8 @@ async function verificarPlanConfigurado(tier: PaidPlanTier): Promise<void> {
 /**
  * De dónde salió el precio verificado: la relectura antes de cobrar compara contra la MISMA fuente. `LUGAR` (el precio que
  * guardó el lugar apartado de la campaña) y `SUSCRIPCION` (el que de verdad cobró el intento de un lugar de antes de B1) no se
- * releen: Avoqado no archiva precios (diseño §15).
+ * releen: Avoqado no archiva precios (diseño §15). Un precio de la `VERSION` que el PASO 7 guardó en el lugar apartado también se
+ * relee como `LUGAR` (Codex B1 #2); la `LLAVE`, nunca: se relee como B0.
  */
 type OrigenDelPrecio = 'VERSION' | 'LLAVE' | 'LUGAR' | 'SUSCRIPCION'
 type PrecioVerificado = { priceId: string; unitAmount: number; origen: OrigenDelPrecio }
@@ -596,7 +597,7 @@ async function apartarLugar(
   now: Date,
   /** El precio verificado en el PASO 4: el lugar nuevo lo guarda y, retomado después de publicar otra versión, cobra con él. */
   stripePriceId: string,
-): Promise<{ id: string; reused: boolean }> {
+): Promise<{ id: string; reused: boolean; stripePriceId: string | null }> {
   return prisma.$transaction(async tx => {
     const vivo = await tx.launchCampaignRedemption.findFirst({
       where: { organizationId, status: { not: REDEMPTION_STATUS.RELEASED } },
@@ -615,7 +616,7 @@ async function apartarLugar(
           launchOffer: buildLaunchOfferView(toOfferRow(campaign), now),
         })
       }
-      return { id: vivo.id, reused: true }
+      return { id: vivo.id, reused: true, stripePriceId: vivo.stripePriceId ?? null }
     }
 
     // 🔴 EL CANDADO DEL CUPO. En Read Committed, `UPDATE … WHERE count < cap` bloquea la fila y
@@ -659,7 +660,7 @@ async function apartarLugar(
       },
       select: { id: true },
     })
-    return { id: creada.id, reused: false }
+    return { id: creada.id, reused: false, stripePriceId }
   })
 }
 
@@ -1258,7 +1259,7 @@ export async function activatePlan(
   }
 
   // ---- PASO 7: apartar el lugar del cupo ----
-  let redemption: { id: string; reused: boolean } | null = null
+  let redemption: { id: string; reused: boolean; stripePriceId: string | null } | null = null
   if (campaign) {
     try {
       redemption = await apartarLugar(campaign, organizationId, venue.id, staffId, now, precioVerificado.priceId)
@@ -1268,6 +1269,12 @@ export async function activatePlan(
       throw error
     }
   }
+  // 🔴 Codex B1 #2: un precio de la VERSIÓN que ya quedó guardado en el lugar apartado (nuevo o reusado, con ESE precio) se relee
+  // como `LUGAR`: el lugar ya consintió ese precio y Avoqado no archiva precios (§15). Releer el puntero respondía 409 si en medio se
+  // pausó la campaña y se publicó otra versión, y el 409 liberaba un lugar que la campaña pausada ya no deja recuperar. La `LLAVE`
+  // (sin versión del editor) se relee como B0, aunque el lugar la guarde: es la paridad con B0 (#1/#2 de B0).
+  const origenDeLaRelectura: OrigenDelPrecio =
+    precioVerificado.origen === 'VERSION' && redemption?.stripePriceId === precioVerificado.priceId ? 'LUGAR' : precioVerificado.origen
 
   // ---- PASOS 8-11: Stripe y cierre ----
   const planActivationKey = `plan-activation:${organizationId}:${attempt}`
@@ -1317,19 +1324,20 @@ export async function activatePlan(
           // coincide, se cobra con el priceId del PASO 4 (el que se comparó contra el monto consentido).
           // Planes editables B1: se relee la MISMA fuente que dio el precio verificado. `VERSION` → el puntero (sólo la
           // base, sin Stripe: otra versión publicada en medio es otro priceId); `LLAVE` → la llave, como B0. `LUGAR` y
-          // `SUSCRIPCION` no se releen: es el precio que ese lugar ya consintió y Avoqado no archiva precios (§15).
+          // `SUSCRIPCION` no se releen: es el precio que ese lugar ya consintió y Avoqado no archiva precios (§15). Un precio
+          // de la versión que el PASO 7 guardó en el lugar ya es `LUGAR` (`origenDeLaRelectura`).
           const vigente =
-            precioVerificado.origen === 'VERSION'
+            origenDeLaRelectura === 'VERSION'
               ? { priceId: await priceIdVigente(input.tier, input.interval), unitAmount: null }
-              : precioVerificado.origen === 'LLAVE'
+              : origenDeLaRelectura === 'LLAVE'
                 ? await resolverPrecioPorLlave(tierCode, input.interval)
                 : null
           if (vigente && vigente.priceId !== precioVerificado.priceId) {
             // 🚨 a propósito: el precio del plan cambió a media alta.
             logger.error('🚨 activate-plan: la versión vigente cambió al momento de cobrar — NO se cobra', {
               organizationId,
-              origen: precioVerificado.origen,
-              ...(precioVerificado.origen === 'LLAVE' ? { lookupKey: planLookupKey(tierCode, input.interval) } : {}),
+              origen: origenDeLaRelectura,
+              ...(origenDeLaRelectura === 'LLAVE' ? { lookupKey: planLookupKey(tierCode, input.interval) } : {}),
               verificado: precioVerificado.priceId,
               vigente: vigente.priceId,
             })
