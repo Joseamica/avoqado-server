@@ -328,6 +328,7 @@ import { AltasAMedioPagoJob } from '@/jobs/altas-a-medio-pago.job'
 import { cerrarAltaSinNavegador } from '@/services/onboarding/planActivation.service'
 import { ofertaDeRespaldo } from '@/services/billing/planOffer'
 import { definicionDePrueba, idsDeLaVersion } from '@tests/__helpers__/planOfferFixtures'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 const app = require('../../../src/app').default
 
@@ -465,17 +466,37 @@ async function borrarElAlta() {
   await prisma.staff.deleteMany({ where: { id: a.staffId } })
 }
 
-const autorizado = () => ({ Authorization: `Bearer ${alta?.token}` })
-const leerProgreso = () => request(app).get(`/api/v1/onboarding/organizations/${alta?.orgId}/progress`).set(autorizado())
+/** El negocio del caso en curso (siempre sembrado por `beforeEach`). */
+function negocio() {
+  if (!alta) throw new Error('sin negocio sembrado')
+  return alta
+}
+const autorizado = () => ({ Authorization: `Bearer ${negocio().token}` })
+const leerProgreso = () => request(app).get(`/api/v1/onboarding/organizations/${negocio().orgId}/progress`).set(autorizado())
 const activar = (cuerpo: object) =>
-  request(app).post(`/api/v1/onboarding/organizations/${alta?.orgId}/v2/activate-plan`).set(autorizado()).send(cuerpo)
-const elAlta = () => prisma.onboardingProgress.findUniqueOrThrow({ where: { organizationId: alta?.orgId } })
+  request(app).post(`/api/v1/onboarding/organizations/${negocio().orgId}/v2/activate-plan`).set(autorizado()).send(cuerpo)
+const elAlta = () => prisma.onboardingProgress.findUniqueOrThrow({ where: { organizationId: negocio().orgId } })
 const planGuardado = async () => ((await elAlta()).v2SetupData as unknown as { plan?: Record<string, unknown> } | null)?.plan
 const filaDePro = () =>
   prisma.venueFeature.findFirst({
-    where: { venueId: alta?.venueId, feature: { code: 'PLAN_PRO' } },
+    where: { venueId: negocio().venueId, feature: { code: 'PLAN_PRO' } },
     select: { active: true, stripeSubscriptionId: true },
   })
+
+/**
+ * El cierre del alta quedó en la bitácora: `logAction` con la acción del alta estándar, a nombre de la dueña, sobre su
+ * `OnboardingProgress` y con lo que se cobró. (Simulado en la integración: se revisa la LLAMADA, nunca una fila.)
+ */
+const seAuditoElCierre = (subscriptionId: string, payNow: boolean) =>
+  expect(jest.mocked(logAction)).toHaveBeenCalledWith(
+    expect.objectContaining({
+      action: 'PLAN_ACTIVATED_ONBOARDING',
+      staffId: negocio().staffId,
+      organizationId: negocio().orgId,
+      entity: 'OnboardingProgress',
+      data: expect.objectContaining({ tier: 'PRO', interval: 'monthly', subscriptionId, firstChargeCents: payNow ? PRO_M_V2 : 0 }),
+    }),
+  )
 
 /** La opción de Pro mensual que el alta publica en `progress` (con su comprobante). */
 async function opcionDeProMensual() {
@@ -489,7 +510,7 @@ const cuerpoDe = (opcion: { quoteToken: string; firstChargeCents: number; trialE
   tier: 'PRO',
   interval: 'monthly',
   payNow: opcion.trialEndsAt === null,
-  paymentMethodId: alta?.pm,
+  paymentMethodId: negocio().pm,
   offer: { kind: 'STANDARD', expectedFirstChargeCents: opcion.firstChargeCents, quoteToken: opcion.quoteToken },
 })
 
@@ -574,6 +595,8 @@ afterAll(async () => {
 beforeEach(async () => {
   if (!preparada) return
   mockAlmacen.reset()
+  // `logAction` está simulado en toda la integración (`integration-setup.ts`): cada caso revisa SUS llamadas, no filas.
+  jest.mocked(logAction).mockClear()
   try {
     await borrarLaOferta()
   } finally {
@@ -614,13 +637,14 @@ describe('el alta cita su versión y la recuperación cierra con su suscripción
     expect(subs).toHaveLength(1)
     expect(subs[0].precioId).toBe('price_v2_pro_m')
     expect(subs[0].trial_end).toBe(Math.floor(Date.parse(opcion.trialEndsAt as string) / 1000))
-    expect(subs[0].metadata).toMatchObject({ planOfferVersion: '2', planActivationKey: `plan-activation:${alta?.orgId}:1` })
+    expect(subs[0].metadata).toMatchObject({ planOfferVersion: '2', planActivationKey: `plan-activation:${negocio().orgId}:1` })
     expect(mockAlmacen.creates[0][0]).not.toHaveProperty('trial_period_days')
 
     const progreso = await elAlta()
     expect(progreso).toMatchObject({ planActivationStatus: 'ACTIVE', planOfferVersionNumber: 2, planStripeSubscriptionId: subs[0].id })
     expect(await planGuardado()).toMatchObject({ tier: 'PRO', interval: 'monthly', payNow: false, offerVersion: 2 })
     expect(await filaDePro()).toEqual({ active: true, stripeSubscriptionId: subs[0].id })
+    seAuditoElCierre(subs[0].id, false)
   })
 
   it('🔴 GET progress con la v2, el puntero pasa a la v3, POST con el comprobante de la v2 → 409 OFFER_CHANGED y el almacén sin suscripciones', async () => {
@@ -661,7 +685,7 @@ describe('el alta cita su versión y la recuperación cierra con su suscripción
     await publicarLaV3(0)
     mockAlmacen.pagar(sub.id)
 
-    await expect(cerrarAltaSinNavegador(alta?.orgId as string)).resolves.toBe('CERRADA')
+    await expect(cerrarAltaSinNavegador(negocio().orgId)).resolves.toBe('CERRADA')
 
     expect(await elAlta()).toMatchObject({ planActivationStatus: 'ACTIVE', planStripeSubscriptionId: sub.id, planOfferVersionNumber: 2 })
     expect(await filaDePro()).toEqual({ active: true, stripeSubscriptionId: sub.id })
@@ -669,6 +693,7 @@ describe('el alta cita su versión y la recuperación cierra con su suscripción
     expect(await planGuardado()).toMatchObject({ tier: 'PRO', interval: 'monthly', payNow: true, offerVersion: 2 })
     expect(mockAlmacen.creates).toHaveLength(creadas)
     expect(mockAlmacen.escrituras).toEqual([])
+    seAuditoElCierre(sub.id, true)
   })
 
   it('🔴 b2-r2 #1: Pro de 0 días cobrado en el primer create y la respuesta perdida (503, sin id); el puntero pasa a la v3; la entrada real del job → CERRADA con el id registrado y el alta ACTIVE', async () => {
@@ -688,7 +713,7 @@ describe('el alta cita su versión y la recuperación cierra con su suscripción
     const creadas = mockAlmacen.creates.length
 
     await publicarLaV3(0)
-    await dejarQuieta(alta?.orgId as string)
+    await dejarQuieta(negocio().orgId)
 
     // La entrada real del job, con su resolver real. El cursor rota: se corre hasta que ESTA alta se cierre (otras suites
     // pueden haber dejado altas a medio pago en la base desechable).
@@ -702,6 +727,7 @@ describe('el alta cita su versión y la recuperación cierra con su suscripción
     expect(await planGuardado()).toMatchObject({ tier: 'PRO', interval: 'monthly', payNow: true, offerVersion: 2 })
     expect(mockAlmacen.creates).toHaveLength(creadas)
     expect(mockAlmacen.escrituras).toEqual([])
+    seAuditoElCierre(sub.id, true)
   })
 
   it('🔴 b2-r4 regresión, sin versiones: POST activate-plan con tarjeta y offer.quoteToken null → 200; en Postgres v2SetupData.plan.offer no tiene la llave quoteToken y GET progress tampoco la devuelve', async () => {
@@ -722,7 +748,7 @@ describe('el alta cita su versión y la recuperación cierra con su suscripción
       tier: 'PRO',
       interval: 'monthly',
       payNow: false,
-      paymentMethodId: alta?.pm,
+      paymentMethodId: negocio().pm,
       offer: { kind: 'STANDARD', expectedFirstChargeCents: 0, quoteToken: null },
     })
 

@@ -2184,10 +2184,14 @@ export async function cerrarAltaSinNavegador(
     },
     { soloRecuperar: sub.id, via },
   )
-  logger.info('altas-a-medio-pago: el cobro del alta estaba hecho y nadie lo cerró — el alta se cerró sin el navegador', {
-    organizationId,
-    subscriptionId: sub.id,
-  })
+  // Sin versión del editor, el texto de hoy (paridad con el interruptor apagado); con ella, el cierre también cubre el cobro
+  // sin la marca del reto, y lo dice.
+  logger.info(
+    conVersion
+      ? 'altas-a-medio-pago: el cobro del alta estaba hecho y nadie lo cerró — el alta se cerró sin el navegador'
+      : 'altas-a-medio-pago: el cliente autorizó y cerró la pestaña — el alta se cerró sin el navegador',
+    { organizationId, subscriptionId: sub.id },
+  )
   return 'CERRADA'
 }
 

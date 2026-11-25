@@ -535,6 +535,16 @@ function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
 }
 
 /**
+ * Planes editables B2, Task 5: la metadata de la suscripción que trae la factura (la foto que Stripe sacó al finalizarla), en
+ * las DOS formas y sin otra llamada. Desde basil vive en `parent.subscription_details.metadata`; en 2020-03-02 —la versión
+ * que sigue el endpoint de planes, igual que `invoiceSubscriptionId`— en `subscription_details.metadata`. Sin ninguna, `null`.
+ */
+function invoiceSubscriptionMetadata(invoice: Stripe.Invoice): Record<string, string> | null {
+  const vieja = (invoice as unknown as { subscription_details?: { metadata?: Record<string, string> | null } | null }).subscription_details
+  return invoice.parent?.subscription_details?.metadata ?? vieja?.metadata ?? null
+}
+
+/**
  * Handle invoice payment succeeded event
  * Triggered when subscription payment OR token purchase payment is successful
  *
@@ -603,10 +613,10 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
   // 🔴 H0 (28-oct): la PRIMERA factura pagada del alta termina el alta si el navegador no lo hizo (autorizó con su banco y
   // cerró, o pagó y cerró antes de «Entrar»). Va ANTES de las salidas tempranas de abajo (plan sin fila de acceso o ya
   // activo): es justo el caso del alta. Sólo programa; la garantía es el barrido `altas-a-medio-pago`.
-  // B2 Task 5 (b2-r1 #1): con la metadata de la suscripción que trae la factura (sin otra llamada), para el alta cuyo id nunca
-  // se guardó.
+  // B2 Task 5 (b2-r1 #1): con la metadata de la suscripción que trae la factura (sin otra llamada, en sus dos formas), para el
+  // alta cuyo id nunca se guardó.
   if (invoice.billing_reason === 'subscription_create')
-    programarCierreDelAltaPorAviso(subscriptionIdStr, invoice.parent?.subscription_details?.metadata ?? null)
+    programarCierreDelAltaPorAviso(subscriptionIdStr, invoiceSubscriptionMetadata(invoice))
 
   // ✅ FIX BUG #7: Retry with backoff if VenueFeature not yet created
   // Race condition: Webhook can fire before sync code creates VenueFeature

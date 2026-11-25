@@ -222,10 +222,11 @@ describe('B2 Task 4: activate-plan cobra un intento nuevo con su comprobante', (
       progresos: progresos(),
       plan: planDelCierre(),
     }
-    expect(deHoy.creates[0][0].trial_period_days).toBe(30)
-    expect('trial_end' in deHoy.creates[0][0]).toBe(false)
-    expect('discounts' in deHoy.creates[0][0]).toBe(false)
-    expect(deHoy.creates[0][0].metadata.planOfferVersion).toBeUndefined()
+    const cuerpoDeHoy = deHoy.creates[0][0] as { trial_period_days?: number; metadata: Record<string, string> }
+    expect(cuerpoDeHoy.trial_period_days).toBe(30)
+    expect('trial_end' in cuerpoDeHoy).toBe(false)
+    expect('discounts' in cuerpoDeHoy).toBe(false)
+    expect(cuerpoDeHoy.metadata.planOfferVersion).toBeUndefined()
 
     // Con un comprobante (válido, uno largo, null o un número): exactamente lo mismo, sin leerlo.
     for (const quoteToken of [comprobante(), 'x'.repeat(3000), null, 7]) {

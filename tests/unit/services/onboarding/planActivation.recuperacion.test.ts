@@ -72,6 +72,7 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import { comprobanteDePrueba, definicionDePrueba, idsDeLaVersion, punteroA } from '@tests/__helpers__/planOfferFixtures'
 import type { CotizacionFirmable } from '@/services/billing/comprobanteDeCotizacion'
 import emailService from '@/services/email.service'
+import logger from '@/config/logger'
 
 const DIA = 86_400_000
 const ORG = 'org-1'
@@ -572,5 +573,38 @@ describe('B2 Task 5: un intento anterior que pudo cobrar se recupera con su susc
     expect(mockSubCreate).not.toHaveBeenCalled()
     expect(mockPmRetrieve).not.toHaveBeenCalled()
     expect(emailService.sendPlanConfirmationEmail).not.toHaveBeenCalled()
+  })
+
+  it('el texto del cierre del barrido: sin versión del editor, el de hoy; con versión, el nuevo (cubre también el cobro sin la marca)', async () => {
+    const DE_HOY = 'altas-a-medio-pago: el cliente autorizó y cerró la pestaña — el alta se cerró sin el navegador'
+    const NUEVO = 'altas-a-medio-pago: el cobro del alta estaba hecho y nadie lo cerró — el alta se cerró sin el navegador'
+    const textos = () => (logger.info as jest.Mock).mock.calls.map((c: unknown[]) => c[0])
+
+    // Sin versión: B0 literal (el 3DS de Pro anual con la llave de hoy y su marca).
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(null)
+    alta({ planOfferVersionNumber: null })
+    mockSubRetrieve.mockResolvedValue(
+      cobrada(
+        {
+          latest_invoice: { id: 'in_1', status: 'paid', amount_paid: 1158840 },
+          items: { data: [{ current_period_end: FIN, price: precio('price_llave_pro_a', 1158840, 'year') }] },
+          metadata: { ...sin(cobrada().metadata, 'planOfferVersion', 'planOfferPrecioDe'), primerCobroEsperadoCents: '1158840' },
+        },
+        {},
+      ),
+    )
+    await expect(cerrarAltaSinNavegador(ORG)).resolves.toBe('CERRADA')
+    expect(textos()).toContain(DE_HOY)
+    expect(textos()).not.toContain(NUEVO)
+
+    // Con versión: el texto nuevo.
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation(async (cb: unknown) => (cb as (tx: unknown) => unknown)(prismaMock))
+    conVigente(v2(), 2)
+    alta()
+    mockSubRetrieve.mockResolvedValue(cobrada())
+    await expect(cerrarAltaSinNavegador(ORG)).resolves.toBe('CERRADA')
+    expect(textos()).toContain(NUEVO)
+    expect(textos()).not.toContain(DE_HOY)
   })
 })
