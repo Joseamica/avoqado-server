@@ -13,6 +13,7 @@ import { registerPlanOfferTools } from '@/mcp/tools/planOffer'
 import type { McpScope } from '@/mcp/scope'
 import { auditMcpWrite } from '@/mcp/audit'
 import { ConflictError } from '@/errors/AppError'
+import { planOfferInput } from '@/services/billing/planOffer'
 import {
   descartarPublicacion,
   estadoDeLaOferta,
@@ -365,4 +366,96 @@ describe('publish_plan_offer: el token de confirmación ata la entrada y la revi
     expect(bien.ok).toBe(true)
     expect(descartarPublicacion).toHaveBeenCalledWith('v3', 'staff-1')
   })
+})
+
+/** Todas las llaves de un JSON, sin la `entrada` de get_plan_offer (la forma de ENTRADA de publish: centavos, por contrato). */
+const llaves = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value.flatMap(llaves)
+    : value && typeof value === 'object'
+      ? Object.entries(value).flatMap(([k, v]) => [k, ...llaves(v)])
+      : []
+const sinCentavos = (value: unknown) => expect(llaves(value).filter((k: string) => /cents$/i.test(k))).toEqual([])
+
+describe('ningún dato que sale del MCP lleva centavos', () => {
+  it('get_plan_offer (salvo la `entrada` para publicar), la vista previa y un rechazo con detalles', async () => {
+    const lectura = read(await call('get_plan_offer', {}))
+    delete lectura.entrada
+    sinCentavos(lectura)
+    const vista = read(await call('publish_plan_offer', { entrada: entradaNueva, expectedRevision: 4 }))
+    sinCentavos(vista)
+    expect(vista.preview.cambios[0]).toMatchObject({ plan: 'PRO', campo: 'Pro mensual sin IVA', antes: 799, despues: 899 })
+    expect(vista.preview.cambios[0].resumen).toBe('Pro mensual: $799.00 → $899.00 sin IVA ($926.84 → $1,042.84 con IVA)')
+    ;(publicarVersion as jest.Mock).mockRejectedValue(
+      new ConflictError('Hay campañas.', 'PLAN_PRICE_BLOCKED_BY_CAMPAIGNS', {
+        motivo: 'PRECIO',
+        campaigns: [{ code: 'C1', priceCents: 2200 }],
+      }),
+    )
+    const rechazo = read(await call('publish_plan_offer', { entrada: entradaNueva, expectedRevision: 4, confirm: true }))
+    sinCentavos(rechazo)
+    expect(rechazo.detalles.campaigns[0]).toEqual({ code: 'C1', pricePesos: 22 })
+  })
+
+  it('M2: si la revisión ya no es la que se leyó, la vista previa avisa y dice la vigente', async () => {
+    const r = read(await call('publish_plan_offer', { entrada: entradaNueva, expectedRevision: 3 }))
+    expect(r.preview.aviso).toBe('La oferta cambió desde que la leíste; vuelve a leerla antes de confirmar.')
+    expect(r.preview.revisionVigente).toBe(4)
+    const ok = read(await call('publish_plan_offer', { entrada: entradaNueva, expectedRevision: 4 }))
+    expect(ok.preview.aviso).toBeUndefined()
+  })
+})
+
+describe('la entrada local no se separa de planOfferInput', () => {
+  const esquema = () => {
+    const captured: { shape?: any } = {}
+    const server = { tool: (...a: any[]) => a[0] === 'publish_plan_offer' && (captured.shape = a[2]) } as any
+    registerPlanOfferTools(server, superadmin)
+    return captured.shape.entrada as { safeParse: (v: unknown) => { success: boolean } }
+  }
+  const clon = () => JSON.parse(JSON.stringify(entradaNueva))
+  const casos: Array<[string, unknown]> = [['válida', clon()]]
+  const niveles: Array<[string, (o: any) => any]> = [
+    ['raíz', (o: any) => o],
+    ['FREE', (o: any) => o.FREE],
+    ['PRO', (o: any) => o.PRO],
+    ['PREMIUM', (o: any) => o.PREMIUM],
+  ]
+  for (const [nombre, nivel] of niveles) {
+    const extra = clon()
+    nivel(extra).desconocido = 1
+    casos.push([`llave desconocida en ${nombre}`, extra])
+    const falta = clon()
+    delete nivel(falta)[Object.keys(nivel(falta))[0]]
+    casos.push([`falta una llave en ${nombre}`, falta])
+  }
+  for (const campo of ['monthlyNetCents', 'annualNetCents']) {
+    const texto = clon()
+    texto.PRO[campo] = '79900'
+    casos.push([`${campo} como texto`, texto])
+  }
+  it.each(casos)('coinciden en aceptar o rechazar: %s', (_nombre: string, valor: unknown) => {
+    expect(esquema().safeParse(valor).success).toBe(planOfferInput.safeParse(valor).success)
+  })
+})
+
+describe('resolve_pending_plan_offer: descarte parcial', () => {
+  it('pasa { revision: -1, pendiente: null, parcial: true } tal cual y dice que el descarte SÍ se hizo', async () => {
+    ;(descartarPublicacion as jest.Mock).mockResolvedValue({ revision: -1, pendiente: null, parcial: true })
+    const r = read(await call('resolve_pending_plan_offer', { versionId: 'v3', accion: 'descartar', confirm: true }))
+    expect(r.estado).toEqual({ revision: -1, pendiente: null, parcial: true })
+    expect(r.aviso).toMatch(/SÍ se hizo/)
+    expect(toolsFor().descriptions.get('resolve_pending_plan_offer')).toMatch(/descarte SÍ se hizo/)
+  })
+})
+
+describe('los demás rechazos regresan como datos', () => {
+  it.each(['PLAN_OFFER_PENDING', 'PLAN_OFFER_PREPARING', 'HYBRID_LIST_BREAKS_PROMOTIONS', 'PLAN_OFFER_INVALID', 'PLAN_OFFER_UNCHANGED'])(
+    '%s',
+    async (codigo: string) => {
+      ;(publicarVersion as jest.Mock).mockRejectedValue(new ConflictError('Motivo.', codigo, { x: 1 }))
+      const r = read(await call('publish_plan_offer', { entrada: entradaNueva, expectedRevision: 4, confirm: true }))
+      expect(r).toEqual({ ok: false, codigo, error: 'Motivo.', detalles: { x: 1 } })
+    },
+  )
 })

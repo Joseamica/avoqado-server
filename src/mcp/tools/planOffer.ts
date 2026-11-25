@@ -23,7 +23,7 @@ import {
   reintentarPublicacion,
   vistaPreviaDeLaOferta,
 } from '@/services/billing/planOfferPublisher'
-import { brutoDeNeto, type PlanOfferDefinition, type PlanPagado } from '@/services/billing/planOffer'
+import { brutoDeNeto, type PlanOfferDefinition, type PlanOfferInput, type PlanPagado } from '@/services/billing/planOffer'
 
 const SOLO_AVOQADO = 'Solo Avoqado puede ver o cambiar la oferta de los planes.'
 const confirm = z.boolean().optional().describe('true sólo después de revisar y aceptar la vista previa')
@@ -48,9 +48,47 @@ const entrada = z
   .strict()
   .describe(`La oferta completa que se quiere publicar. Todo precio va ${CENTAVOS}: no pesos, no con IVA.`)
 
+// Compile-time: la forma local no se puede separar de `planOfferInput` (ni sobra ni falta un campo).
+const _formaIgual: z.ZodType<PlanOfferInput> = entrada
+void _formaIgual
+
 const pesos = (cents: number) => cents / 100
 const dinero = (netCents: number, grossCents: number) => ({ sinIva: pesos(netCents), conIva: pesos(grossCents) })
 const texto = (value: { sinIva: number; conIva: number }) => `$${value.sinIva.toFixed(2)} sin IVA ($${value.conIva.toFixed(2)} con IVA)`
+const NOMBRE_DEL_PLAN: Record<PlanPagado, string> = { PRO: 'Pro', PREMIUM: 'Premium' }
+const CAMPOS_EN_CENTAVOS: Record<string, string> = { monthlyNetCents: 'mensual sin IVA', annualNetCents: 'anual sin IVA' }
+
+/** Nada que salga del MCP lleva centavos: un valor bajo una llave `...Cents` se convierte a pesos y la llave pasa a `...Pesos`. */
+function enPesos(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(enPesos)
+  if (value instanceof Date || value === null || typeof value !== 'object') return value
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, v]) =>
+      /cents$/i.test(key) && typeof v === 'number' ? [key.replace(/cents$/i, 'Pesos'), v / 100] : [key, enPesos(v)],
+    ),
+  )
+}
+
+const mxn = (n: number) => `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+
+/** Los cambios de la vista previa en los términos de quien lee: dinero en pesos y el campo con nombre de persona. */
+function cambiosEnPesos(cambios: Array<{ plan: string; campo: string; antes: unknown; despues: unknown }>) {
+  return cambios.map(c => {
+    const periodo = CAMPOS_EN_CENTAVOS[c.campo]
+    if (!periodo) return { plan: c.plan, campo: c.campo, antes: c.antes, despues: c.despues }
+    const nombre = NOMBRE_DEL_PLAN[c.plan as PlanPagado] ?? c.plan
+    const [antes, despues] = [Number(c.antes) / 100, Number(c.despues) / 100]
+    const [antesIva, despuesIva] = [brutoDeNeto(Number(c.antes)) / 100, brutoDeNeto(Number(c.despues)) / 100]
+    return {
+      plan: c.plan,
+      campo: `${nombre} ${periodo}`,
+      antes,
+      despues,
+      resumen: `${nombre} ${periodo.split(' ')[0]}: ${mxn(antes)} → ${mxn(despues)} sin IVA (${mxn(antesIva)} → ${mxn(despuesIva)} con IVA)`,
+    }
+  })
+}
+
 const PLANES: readonly PlanPagado[] = ['PRO', 'PREMIUM']
 
 function planesEnPesos(definition: PlanOfferDefinition) {
@@ -84,7 +122,7 @@ const RECHAZOS = new Set([
 function refusal(error: unknown) {
   const e = error as { isOperational?: boolean; message?: string; code?: string; details?: unknown }
   if (e?.isOperational !== true || !e.code || !RECHAZOS.has(e.code)) throw error
-  return text({ ok: false, error: e.message, codigo: e.code, detalles: e.details ?? null })
+  return text({ ok: false, error: e.message, codigo: e.code, detalles: enPesos(e.details ?? null) })
 }
 
 export function registerPlanOfferTools(server: McpServer, scope: McpScope): void {
@@ -114,11 +152,11 @@ export function registerPlanOfferTools(server: McpServer, scope: McpScope): void
               versionId: estado.pendiente.versionId,
               creadaEn: estado.pendiente.creadaAt,
               planes: planesEnPesos(estado.pendiente.definition),
-              preparacion: estado.pendiente.preparacion,
+              preparacion: enPesos(estado.pendiente.preparacion),
             }
           : null,
         interruptor: { prendido: estado.interruptor.prendido, desde: estado.interruptor.desde, faltan: estado.interruptor.faltan },
-        renombrePendiente: estado.nombresEnStripe,
+        renombrePendiente: enPesos(estado.nombresEnStripe),
       })
     },
   )
@@ -150,6 +188,8 @@ export function registerPlanOfferTools(server: McpServer, scope: McpScope): void
               }
             }),
           )
+          const avisoDeRevision =
+            estado.revision !== expectedRevision ? 'La oferta cambió desde que la leíste; vuelve a leerla antes de confirmar.' : null
           const lineas = precios
             .filter(p => p.actual.sinIva !== p.nuevo.sinIva)
             .map(p => `${p.plan} ${p.periodo}: ${texto(p.actual)} → ${texto(p.nuevo)}`)
@@ -158,12 +198,13 @@ export function registerPlanOfferTools(server: McpServer, scope: McpScope): void
             requiresConfirmation: true,
             preview: {
               precios,
-              cambios: vista.cambios,
+              cambios: cambiosEnPesos(vista.cambios),
               preciosNuevosEnStripe: vista.preciosNuevos,
-              bloqueos: vista.bloqueos,
+              bloqueos: enPesos(vista.bloqueos),
               negociosQueConservanSuPrecio: vista.conservanSuPrecio,
+              ...(avisoDeRevision ? { aviso: avisoDeRevision, revisionVigente: estado.revision } : {}),
             },
-            mensaje: `Precio actual → nuevo (pesos MXN): ${lineas.length ? lineas.join('; ') : 'sin cambios de precio'}. Quien ya paga conserva el suyo. Vuelve a llamar con confirm: true.`,
+            mensaje: `Precio actual → nuevo (pesos MXN): ${lineas.length ? lineas.join('; ') : 'sin cambios de precio'}. Quien ya paga conserva el suyo.${avisoDeRevision ? ` ${avisoDeRevision}` : ''} Vuelve a llamar con confirm: true.`,
           })
         }
         const publicada = await publicarVersion(oferta, expectedRevision, scope.staffId)
@@ -183,7 +224,7 @@ export function registerPlanOfferTools(server: McpServer, scope: McpScope): void
 
   server.tool(
     'resolve_pending_plan_offer',
-    'Resuelve una publicación de la oferta de planes que quedó pendiente (get_plan_offer dice cuál y por qué): reintentar la retoma donde se quedó, descartar la deja sin efecto (no toca la oferta vigente ni Stripe). Sin confirm sólo describe lo que haría; con confirm:true lo hace. Reintentar pide el interruptor prendido; descartar siempre se puede. Sólo para Avoqado.',
+    'Resuelve una publicación de la oferta de planes que quedó pendiente (get_plan_offer dice cuál y por qué): reintentar la retoma donde se quedó, descartar la deja sin efecto (no toca la oferta vigente ni Stripe). Sin confirm sólo describe lo que haría; con confirm:true lo hace. Reintentar pide el interruptor prendido; descartar siempre se puede. Si la respuesta trae parcial: true, el descarte SÍ se hizo (nunca significa «medio descartado»); sólo no se pudo leer el estado después: llama a get_plan_offer para verlo. Sólo para Avoqado.',
     {
       versionId: z.string().min(1).describe('La versión pendiente, como la dice get_plan_offer'),
       accion: z.enum(['reintentar', 'descartar']),
@@ -217,7 +258,13 @@ export function registerPlanOfferTools(server: McpServer, scope: McpScope): void
         // Puede ser el estado parcial `{ revision, pendiente: null, parcial: true }` (`revision: -1` = no se pudo leer): se pasa tal cual.
         const estado = await descartarPublicacion(versionId, scope.staffId)
         await auditMcpWrite(scope, { venueId: null, action: 'MCP_PLAN_OFFER_DISCARDED', entity: 'PlanOfferVersion', entityId: versionId })
-        return text({ ok: true, estado })
+        return text({
+          ok: true,
+          estado,
+          ...('parcial' in estado && estado.parcial
+            ? { aviso: 'El descarte SÍ se hizo; sólo no se pudo leer el estado después. Llama a get_plan_offer para verlo.' }
+            : {}),
+        })
       } catch (error) {
         return refusal(error)
       }
