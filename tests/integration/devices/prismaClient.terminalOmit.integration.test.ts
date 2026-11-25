@@ -34,10 +34,12 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  if (!venueId || !orgId) return // sin esta guarda, un id undefined vaciaría tablas enteras (8-oct)
-  await prisma.terminal.deleteMany({ where: { venueId } })
-  await prisma.venue.deleteMany({ where: { id: venueId } })
-  await prisma.organization.deleteMany({ where: { id: orgId } })
+  // Cada borrado con su propia guarda: un id undefined vaciaría tablas enteras (8-oct), y lo que sí se creó se limpia.
+  if (venueId) {
+    await prisma.terminal.deleteMany({ where: { venueId } })
+    await prisma.venue.deleteMany({ where: { id: venueId } })
+  }
+  if (orgId) await prisma.organization.deleteMany({ where: { id: orgId } })
   await prisma.$disconnect()
 })
 
@@ -53,8 +55,12 @@ it('una lectura normal de Terminal, directa o anidada, no trae el reporte de dib
   expect(nested.terminals[0]).not.toHaveProperty('deviceDiagnostics')
 })
 
-it('con omit: { deviceDiagnostics: false } sí lo trae', async () => {
-  const row = await prisma.terminal.findUniqueOrThrow({ where: { id: terminalId }, omit: { deviceDiagnostics: false } })
+it('con omit: { deviceDiagnostics: false } o con select: { deviceDiagnostics: true } sí lo trae', async () => {
+  const [row, selected] = await Promise.all([
+    prisma.terminal.findUniqueOrThrow({ where: { id: terminalId }, omit: { deviceDiagnostics: false } }),
+    prisma.terminal.findUniqueOrThrow({ where: { id: terminalId }, select: { deviceDiagnostics: true } }),
+  ])
 
   expect(row).toHaveProperty('deviceDiagnostics', DIAGNOSTICS)
+  expect(selected).toEqual({ deviceDiagnostics: DIAGNOSTICS })
 })
