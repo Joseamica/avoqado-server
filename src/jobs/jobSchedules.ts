@@ -131,4 +131,8 @@ export const DATABASE_JOB_SCHEDULES = {
   // D17 (Flautas): archiva las comandas de un día del negocio terminado con la cuenta cerrada. Cada 15 min en los minutos 7, 22,
   // 37 y 52 (lejos del :00 y de los */5 y */10) y en el segundo :09, libre en todo el archivo el 20-nov. Tope de 500 por pasada.
   kdsArchiveClosedDay: '9 7,22,37,52 * * * *',
+  // Planes editables (B1, Task 8): el nombre del producto de Stripe de cada plan converge con la oferta vigente. Cada minuto en
+  // el segundo :03, libre en todo el archivo el 25-nov (vecinos: :02 del reconciliador de caja, cada 5 min, y :04 de
+  // displayModeRequestExpiry). Sin versiones o con sólo la v1 es una lectura del puntero por su llave y nada más.
+  planOfferRename: '3 * * * * *',
 } as const

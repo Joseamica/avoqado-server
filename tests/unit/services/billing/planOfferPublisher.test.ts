@@ -52,6 +52,9 @@ jest.mock('@/services/billing/interruptorPlanesEditables', () => ({
   estadoDelInterruptor: async () => ({ prendido: interruptor.real, desde: null, actualizadoPor: null, faltan: [] }),
 }))
 let mockCandadosDe: (tx: object) => string[] = () => []
+// Task 8: el intento inmediato del renombre en Stripe (el job propio se prueba en su suite).
+const mockRunNow = jest.fn()
+jest.mock('@/jobs/plan-offer-rename.job', () => ({ planOfferRenameJob: { runNow: (...a: unknown[]) => mockRunNow(...a) } }))
 
 import logger from '@/config/logger'
 import { ofertaVigente, tomarCandadoDeLaOferta } from '@/services/billing/planOffer'
@@ -214,6 +217,7 @@ beforeEach(() => {
   })
   mockRotas.mockReset().mockResolvedValue([])
   mockRegla.mockReset().mockResolvedValue(undefined)
+  mockRunNow.mockReset().mockResolvedValue(null)
 })
 
 afterEach(() => {
@@ -874,6 +878,35 @@ describe('reintentar y descartar', () => {
     expect(lista('PRO')).toMatchObject({ currentPublicationId: 'pub_pro', pendingPublicationId: null, revision: 3 })
     expect(base.tablas.hybridOfferPublication.size).toBe(2)
     expect(mockEnsure).not.toHaveBeenCalled()
+  })
+})
+
+describe('el nombre en Stripe (Task 8)', () => {
+  it('publicar con nombre nuevo llama a planOfferRenameJob.runNow() al terminar; si rechaza, igual responde la versión publicada', async () => {
+    const alLlamar: Array<{ vigente: unknown; candados: boolean }> = []
+    mockRunNow.mockImplementation(async () => {
+      alLlamar.push({ vigente: puntero().currentVersionId, candados: base.candadoTomado('plan-offer-publish') })
+      throw new Error('Stripe no contesta')
+    })
+
+    const r = await publicarVersion(entrada({ PRO: { displayName: 'Pro Plus' } }), 1, STAFF)
+    await vueltas()
+
+    expect(r).toEqual({ number: 2, versionId: expect.any(String) })
+    expect(version(r.versionId).definition.PRO.stripeProductName).toBe('Plan Avoqado Pro Plus')
+    expect(mockRunNow).toHaveBeenCalledTimes(1)
+    // Después del movimiento (la vigente ya es la nueva) y con plan-offer-publish suelto.
+    expect(alLlamar).toEqual([{ vigente: r.versionId, candados: false }])
+    expect(logger.warn).toHaveBeenCalledWith('[PlanOffer] el renombre inmediato en Stripe falló; el job lo reintenta', {
+      versionId: r.versionId,
+      error: 'Stripe no contesta',
+    })
+  })
+
+  it('una publicación que no llega al movimiento no llama al renombre', async () => {
+    await publicacionAtorada({ PRO: { displayName: 'Pro Plus', ...PRO_MENSUAL_NUEVO } })
+    await vueltas()
+    expect(mockRunNow).not.toHaveBeenCalled()
   })
 })
 

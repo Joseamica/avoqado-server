@@ -26,6 +26,7 @@ import AppError, { BadRequestError, ConflictError } from '../../errors/AppError'
 import { lockProducts, priceTransaction } from '../launchCampaigns/hybridProduct'
 import { finalizarListaDelPlanEn, prepararListaDelPlan, soltarListaPendienteDelPlanEn } from '../launchCampaigns/hybridListPrice.service'
 import { planesEditablesPrendidos } from './interruptorPlanesEditables'
+import { planOfferRenameJob } from '../../jobs/plan-offer-rename.job'
 import { asegurarPrecioDeLaRanura, ErrorDePreparacion, type MotivoDePreparacion } from './preciosDeLaVersion'
 import {
   definicionDesdeEntrada,
@@ -569,6 +570,16 @@ async function moverPunterosEnUnaTransaccion(versionId: string, staffId: string)
     return { number, versionId }
   })
   logger.info('[PlanOffer] versión publicada', { ...hecho, por: staffId })
+  // Task 8: el nombre del producto de Stripe, ya fuera de toda transacción y candado. Sin esperarlo: la respuesta no espera a Stripe y,
+  // mientras converge, la puerta del checkout de «Tu plan» no abre con otro nombre. Si falla, el job lo reintenta cada minuto.
+  void Promise.resolve()
+    .then(() => planOfferRenameJob.runNow())
+    .catch((error: unknown) =>
+      logger.warn('[PlanOffer] el renombre inmediato en Stripe falló; el job lo reintenta', {
+        versionId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    )
   return hecho
 }
 

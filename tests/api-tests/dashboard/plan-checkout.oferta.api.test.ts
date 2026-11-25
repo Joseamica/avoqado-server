@@ -1,5 +1,6 @@
 /*
   Planes editables B1, Task 2: el precio con el que «Tu plan» abre la sesión de Stripe, por la ruta real.
+  Task 8: y el nombre — mientras Stripe muestre otro nombre del que publicó la oferta, 503 PLAN_RENAME_PENDING ANTES de la regla común.
 
   POST /api/v1/dashboard/venues/:venueId/plan/checkout  { tier: 'PRO', interval: 'monthly' }
 
@@ -20,10 +21,13 @@ process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://user:pass@l
 const mockPriceList = jest.fn()
 const mockPriceRetrieve = jest.fn()
 const mockSessionCreate = jest.fn()
+const mockSessionExpire = jest.fn()
+const mockProductRetrieve = jest.fn()
 jest.mock('stripe', () =>
   jest.fn().mockImplementation(() => ({
     prices: { list: mockPriceList, retrieve: mockPriceRetrieve },
-    checkout: { sessions: { create: mockSessionCreate, list: jest.fn(), expire: jest.fn() } },
+    products: { retrieve: mockProductRetrieve },
+    checkout: { sessions: { create: mockSessionCreate, list: jest.fn(), expire: mockSessionExpire } },
     subscriptions: { list: jest.fn(), retrieve: jest.fn() },
     customers: { create: jest.fn(), retrieve: jest.fn() },
   })),
@@ -67,6 +71,8 @@ beforeEach(() => {
   jest.clearAllMocks()
   mockPriceList.mockReset()
   mockPriceRetrieve.mockReset()
+  mockProductRetrieve.mockReset()
+  mockSessionExpire.mockReset()
   mockSessionCreate.mockReset().mockResolvedValue({ id: 'cs_1', url: 'https://checkout.stripe.test/cs_1' })
   mockAutorizar
     .mockReset()
@@ -135,5 +141,62 @@ describe('POST /dashboard/venues/:venueId/plan/checkout — el precio de la sesi
     expect(res.body.code).toBe('PLAN_NOT_CONFIGURED')
     expect(mockSessionCreate).not.toHaveBeenCalled()
     expect(mockAutorizar).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /dashboard/venues/:venueId/plan/checkout — el nombre del plan en Stripe (Task 8)', () => {
+  beforeEach(() => {
+    // El producto de Stripe de Pro (lo que la puerta lee para saber qué producto revisar).
+    prismaMock.feature.findUnique.mockReset().mockResolvedValue({ stripeProductId: 'prod_pro' })
+  })
+
+  /** La v2 del editor: Pro se llama «Pro Plus» (con el mismo monto de hoy) y su producto de Stripe debe decir «Plan Avoqado Pro Plus». */
+  const conProPlus = () => {
+    const v2 = definicionDePrueba({ ids: idsDeLaVersion('v2'), nombres: { PRO: 'Pro Plus' }, productos: { PRO: 'Plan Avoqado Pro Plus' } })
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv2', 2, v2) as never)
+    mockPriceRetrieve.mockResolvedValue({ id: 'price_v2_pro_m', active: true, unit_amount: 115884 })
+  }
+
+  it('🔴 con el renombre pendiente → 503 PLAN_RENAME_PENDING, sin checkout.sessions.create y sin vencer la sesión abierta de otra pestaña', async () => {
+    conProPlus()
+    mockProductRetrieve.mockResolvedValue({ id: 'prod_pro', name: 'Plan Avoqado Pro' })
+
+    const res = await pedir()
+
+    expect(res.status).toBe(503)
+    expect(res.body).toMatchObject({
+      code: 'PLAN_RENAME_PENDING',
+      message: 'Estamos actualizando el nombre de tu plan. Intenta en un minuto. No se te cobró nada.',
+    })
+    expect(mockProductRetrieve).toHaveBeenCalledWith('prod_pro', { timeout: 15_000, maxNetworkRetries: 0 })
+    // La puerta está ANTES de la regla común: la sesión abierta de otra pestaña sigue viva.
+    expect(mockAutorizar).not.toHaveBeenCalled()
+    expect(mockSessionExpire).not.toHaveBeenCalled()
+    expect(mockSessionCreate).not.toHaveBeenCalled()
+  })
+
+  it('con el nombre al día abre la sesión como siempre', async () => {
+    conProPlus()
+    mockProductRetrieve.mockResolvedValue({ id: 'prod_pro', name: 'Plan Avoqado Pro Plus' })
+
+    const res = await pedir()
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ success: true, url: 'https://checkout.stripe.test/cs_1' })
+    expect(lineItems()).toEqual([{ price: 'price_v2_pro_m', quantity: 1 }])
+    expect(mockProductRetrieve).toHaveBeenCalledTimes(1)
+    expect(mockAutorizar).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 con la v1 sembrada y products.retrieve fallando, la sesión abre igual (la puerta no lee Stripe)', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv1', 1, versionUno()) as never)
+    mockPriceList.mockResolvedValue({ data: [{ id: 'price_key_pro_m', unit_amount: 115884 }] })
+    mockProductRetrieve.mockRejectedValue(Object.assign(new Error('Stripe caído'), { type: 'StripeConnectionError' }))
+
+    const res = await pedir()
+
+    expect(res.status).toBe(200)
+    expect(lineItems()).toEqual([{ price: 'price_key_pro_m', quantity: 1 }])
+    expect(mockProductRetrieve).not.toHaveBeenCalled()
   })
 })
