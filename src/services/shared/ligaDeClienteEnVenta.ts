@@ -333,7 +333,8 @@ export async function sePuedeQuitarElCliente(
     return { allowed: false, code: 'ORDER_CANCELLED_NO_EDIT', reason: 'Esta venta está cancelada: ya no se le cambia el cliente.' }
   const paid = await ventaYaCobradaBajoCandado(db, venta, order)
   if (!paid?.cobrada) return { allowed: true }
-  if (reemplazaAlDueno(await duenosDeLaVenta(db, venta.orderId, order.customerId), null))
+  // Con cliente en la cabecera ya hay dueño: no hace falta buscar el primario.
+  if (order.customerId || reemplazaAlDueno(await duenosDeLaVenta(db, venta.orderId, order.customerId), null))
     return {
       allowed: false,
       code: CODIGO_CLIENTE_YA_ASIGNADO,
