@@ -4,10 +4,12 @@
  * La sentencia condicionada (lo guardado nunca retrocede) se prueba contra la base en
  * tests/integration/devices/deviceDiagnostics.integration.test.ts.
  */
+import { Prisma } from '@prisma/client'
 import type { Request } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
 import logger from '@/config/logger'
 import {
+  esEsperaDeLaBase,
   parseDeviceDiagnostics,
   parseStoredDeviceDiagnostics,
   readDeviceDiagnostics,
@@ -194,7 +196,8 @@ describe('reportarDiagnosticoTrasElSondeo', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
-    prismaMock.$transaction.mockImplementation((cb: any) => cb(prismaMock))
+    // La forma en lote: Prisma recibe las dos sentencias juntas y devuelve sus resultados en orden.
+    prismaMock.$transaction.mockImplementation((ops: any) => Promise.all(ops))
     prismaMock.$executeRaw.mockResolvedValue(1)
   })
 
@@ -203,6 +206,10 @@ describe('reportarDiagnosticoTrasElSondeo', () => {
     await vaciar()
 
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    // En lote (un arreglo), no interactiva: la conexión no se queda apartada entre turnos de JS.
+    const [lote] = prismaMock.$transaction.mock.calls[0] as unknown as [unknown[]]
+    expect(Array.isArray(lote)).toBe(true)
+    expect(lote).toHaveLength(2)
     expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(2)
     const [primera] = prismaMock.$executeRaw.mock.calls[0]
     expect((primera as TemplateStringsArray).join('?')).toContain("SET LOCAL lock_timeout = '2s'")
@@ -219,8 +226,8 @@ describe('reportarDiagnosticoTrasElSondeo', () => {
   it('con un guardado que tarda 5 s regresa de inmediato y no lanza', async () => {
     jest.useFakeTimers()
     try {
-      prismaMock.$transaction.mockImplementationOnce(() => new Promise(r => setTimeout(() => r(1), 5_000)))
-      expect(reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), TERMINAL, NOW)).toBeUndefined()
+      prismaMock.$transaction.mockImplementationOnce(() => new Promise(r => setTimeout(() => r([0, 1]), 5_000)))
+      reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), TERMINAL, NOW)
       // Ya regresó y la escritura de 5 s sigue pendiente: nadie la esperó.
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
       expect(jest.getTimerCount()).toBe(1)
@@ -272,7 +279,7 @@ describe('reportarDiagnosticoTrasElSondeo', () => {
     await vaciar()
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
 
-    primero.soltar(1)
+    primero.soltar([0, 1])
     await vaciar()
     reportarDiagnosticoTrasElSondeo(reqCon([con('rev', '9')]), TERMINAL, NOW)
     await vaciar()
@@ -298,5 +305,70 @@ describe('reportarDiagnosticoTrasElSondeo', () => {
       },
     } as unknown as Request
     expect(() => reportarDiagnosticoTrasElSondeo(rara, TERMINAL, NOW)).not.toThrow()
+  })
+
+  // Cada PC sondea cada 15–20 s: un aviso por sondeo fallido llenaría el log. Ids propios en cada prueba: la memoria de avisos es
+  // del módulo.
+  const errorDePrisma = (code: string, meta?: Record<string, unknown>) =>
+    new Prisma.PrismaClientKnownRequestError('falló', { code, clientVersion: 'prueba', ...(meta ? { meta } : {}) })
+  const a = (minutos: number) => new Date(NOW.getTime() + minutos * 60_000)
+
+  it.each([
+    ['la fila tomada (55P03)', 'cterminal0000000000000101', errorDePrisma('P2010', { code: '55P03' })],
+    ['la transacción que no arrancó a tiempo (P2028)', 'cterminal0000000000000102', errorDePrisma('P2028')],
+    ['el pool sin conexiones libres (P2024)', 'cterminal0000000000000103', errorDePrisma('P2024')],
+  ])('%s es una espera normal de la base: va a debug, nunca a warn', async (_caso, terminal, error) => {
+    expect(esEsperaDeLaBase(error)).toBe(true)
+    prismaMock.$transaction.mockRejectedValueOnce(error)
+    reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), terminal, NOW)
+    await vaciar()
+    expect(logger.warn).not.toHaveBeenCalled()
+    expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining('dibujo'), expect.objectContaining({ terminalId: terminal }))
+  })
+
+  it('cualquier otro error avisa a lo más una vez cada 10 min por aparato; un guardado bueno reinicia la cuenta', async () => {
+    const pc = 'cterminal0000000000000201'
+    const otra = 'cterminal0000000000000202'
+    const falla = (terminal: string, minuto: number) => {
+      prismaMock.$transaction.mockRejectedValueOnce(errorDePrisma('P2010', { code: '57P01' }))
+      reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), terminal, a(minuto))
+    }
+
+    falla(pc, 0)
+    await vaciar()
+    falla(pc, 9)
+    await vaciar()
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+
+    falla(otra, 9) // otro aparato tiene su propia cuenta
+    await vaciar()
+    expect(logger.warn).toHaveBeenCalledTimes(2)
+
+    falla(pc, 10)
+    await vaciar()
+    expect(logger.warn).toHaveBeenCalledTimes(3)
+
+    reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), pc, a(11)) // guarda bien
+    await vaciar()
+    falla(pc, 12)
+    await vaciar()
+    expect(logger.warn).toHaveBeenCalledTimes(4)
+    expect(logger.debug).not.toHaveBeenCalled()
+  })
+
+  it('la memoria de avisos nunca pasa de 1 000 aparatos: si se fuera a pasar, se vacía', async () => {
+    const id = (i: number) => `ctope${String(i).padStart(20, '0')}`
+    prismaMock.$transaction.mockRejectedValue(new Error('se cayó la base'))
+    for (let i = 0; i < 1_000; i++) reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), id(i), NOW)
+    await vaciar()
+    expect(logger.warn).toHaveBeenCalledTimes(1_000)
+
+    // El aparato 1 000 ya no cabe: la memoria se vacía antes de anotarlo…
+    reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), id(1_000), NOW)
+    await vaciar()
+    // …así que el 0 vuelve a avisar aunque no hayan pasado sus 10 min.
+    reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), id(0), NOW)
+    await vaciar()
+    expect(logger.warn).toHaveBeenCalledTimes(1_002)
   })
 })

@@ -1,7 +1,7 @@
 // tests/integration/devices/deviceDiagnostics.integration.test.ts
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { guardarDiagnostico, type DeviceDiagnostics } from '@/services/mobile/deviceDiagnostics'
+import { esEsperaDeLaBase, guardarDiagnostico, type DeviceDiagnostics } from '@/services/mobile/deviceDiagnostics'
 import { getTerminalsData, updateTpv } from '@/services/dashboard/tpv.dashboard.service'
 import { getTerminalForOrg } from '@/services/organization-dashboard/orgTerminals.service'
 import { getAllTerminals, getTerminalById } from '@/services/dashboard/terminals.superadmin.service'
@@ -149,20 +149,26 @@ describe('guardarDiagnostico', () => {
     // Sin la espera corta, la sentencia esperaría para siempre: la prueba se rinde a los 6 s y suelta la fila.
     const t0 = Date.now()
     let error: unknown
+    let rendirse: NodeJS.Timeout | undefined
     try {
       await Promise.race([
         guardarDiagnostico(posId, reporte(A, 2), T1),
-        new Promise((_ok, mal) => setTimeout(() => mal(new Error('colgada: la sentencia no tiene espera corta')), 6_000)),
+        new Promise((_ok, mal) => {
+          rendirse = setTimeout(() => mal(new Error('colgada: la sentencia no tiene espera corta')), 6_000)
+        }),
       ])
     } catch (e) {
       error = e
     } finally {
+      clearTimeout(rendirse)
       soltar()
     }
     const espera = Date.now() - t0
     await otra
 
     expect(String(error)).toMatch(/lock timeout|55P03/i)
+    // El error real de Prisma se reconoce como espera de la base: va a debug, no llena el log.
+    expect(esEsperaDeLaBase(error)).toBe(true)
     expect(espera).toBeGreaterThanOrEqual(1_500)
     expect(espera).toBeLessThan(4_500)
     expect((await leer()).deviceDiagnostics).toBeNull()

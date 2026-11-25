@@ -159,10 +159,11 @@ export async function guardarDiagnostico(terminalId: string, d: DeviceDiagnostic
   const prevViejo = Prisma.sql`(CASE WHEN jsonb_typeof(${viejo} -> 'prevProc') = 'string' THEN ${viejo} ->> 'prevProc' END)`
   const revViejo = Prisma.sql`(CASE WHEN jsonb_typeof(${viejo} -> 'rev') = 'number' AND (${viejo} ->> 'rev') ~ '^[0-9]{1,18}$' THEN (${viejo} ->> 'rev')::bigint END)`
 
-  const escritas = await prisma.$transaction(async tx => {
-    // Si la fila está tomada, se falla rápido: el siguiente sondeo lo reintenta.
-    await tx.$executeRaw`SET LOCAL lock_timeout = '2s'`
-    return tx.$executeRaw(Prisma.sql`
+  // En lote, no interactiva: la conexión no se queda apartada entre turnos de JS. Si la fila está tomada, se falla rápido: el
+  // siguiente sondeo lo reintenta.
+  const [, escritas] = await prisma.$transaction([
+    prisma.$executeRaw`SET LOCAL lock_timeout = '2s'`,
+    prisma.$executeRaw(Prisma.sql`
       UPDATE "Terminal" AS t
       SET "deviceDiagnostics" = ${nuevo}::jsonb || jsonb_strip_nulls(jsonb_build_object(
         'prevProc', CASE WHEN ${procViejo} = ${d.proc} THEN ${prevViejo} ELSE ${procViejo} END))
@@ -172,13 +173,43 @@ export async function guardarDiagnostico(terminalId: string, d: DeviceDiagnostic
           ${procViejo} IS NULL
           OR (${procViejo} <> ${d.proc} AND ${prevViejo} IS DISTINCT FROM ${d.proc})
           OR (${procViejo} = ${d.proc} AND (${revViejo} IS NULL OR ${revViejo} < ${d.rev}))
-        )`)
-  })
+        )`),
+  ])
   return escritas > 0
+}
+
+// Fila tomada (55P03, llega dentro de un P2010), transacción que no arrancó a tiempo (P2028) o pool lleno (P2024).
+const ESPERAS = new Set(['55P03', 'P2028', 'P2024'])
+
+/** ¿El guardado falló sólo porque la base estaba ocupada? Es lo normal bajo carga: el siguiente sondeo lo reintenta. */
+export function esEsperaDeLaBase(error: unknown): boolean {
+  const e = error as { code?: unknown; meta?: { code?: unknown } } | null | undefined
+  return [e?.code, e?.meta?.code].some(c => typeof c === 'string' && ESPERAS.has(c))
 }
 
 // A lo más un guardado en curso por aparato: si ya hay uno, el sondeo no lanza otro (nunca se encolan).
 const enCurso = new Set<string>()
+
+// Cada PC sondea cada 15–20 s: un error que se repite avisa a lo más una vez cada 10 min por aparato. Se borra al guardar bien y
+// nunca pasa de 1 000 aparatos (si se fuera a pasar, se vacía: a lo más se repite un aviso).
+const AVISO_CADA_MS = 10 * 60_000
+const TOPE_DE_AVISOS = 1_000
+const ultimoAviso = new Map<string, number>()
+
+function avisarFallo(terminalId: string, error: unknown, ahoraMs: number): void {
+  if (esEsperaDeLaBase(error)) {
+    logger.debug('[dibujo-del-pos] la base estaba ocupada; el siguiente sondeo guarda el reporte de dibujo', {
+      terminalId,
+      error: mensaje(error),
+    })
+    return
+  }
+  const antes = ultimoAviso.get(terminalId)
+  if (antes !== undefined && ahoraMs - antes < AVISO_CADA_MS) return
+  if (antes === undefined && ultimoAviso.size >= TOPE_DE_AVISOS) ultimoAviso.clear()
+  ultimoAviso.set(terminalId, ahoraMs)
+  logger.warn('[dibujo-del-pos] no se guardó el reporte de dibujo', { terminalId, error: mensaje(error) })
+}
 
 /**
  * Lo que llama el sondeo DESPUÉS de responder: valida la sesión, lee la cabecera y guarda sin que nadie lo espere.
@@ -192,7 +223,10 @@ export function reportarDiagnosticoTrasElSondeo(req: Request, terminalId: string
     if (!d || enCurso.has(terminalId)) return
     enCurso.add(terminalId)
     void guardarDiagnostico(terminalId, d, now)
-      .catch(error => logger.warn('[dibujo-del-pos] no se guardó el reporte de dibujo', { terminalId, error: mensaje(error) }))
+      .then(
+        () => ultimoAviso.delete(terminalId),
+        error => avisarFallo(terminalId, error, now.getTime()),
+      )
       .finally(() => enCurso.delete(terminalId))
   } catch (error) {
     logger.warn('[dibujo-del-pos] no se pudo leer el reporte de dibujo', { terminalId, error: mensaje(error) })
