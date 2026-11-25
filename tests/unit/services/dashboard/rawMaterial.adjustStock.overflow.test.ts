@@ -216,3 +216,42 @@ describe('createRawMaterial — stock inicial atómico', () => {
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'RAW_MATERIAL_CREATED', entityId: 'rm-new' }))
   })
 })
+
+// hz:cea3b289:D1 (25-nov): los avisos de insumos le hablan en español al dueño y al gerente.
+describe('avisos de insumos en español', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(prisma.$transaction as jest.Mock).mockImplementation(async (cb: any) => cb(prisma))
+  })
+
+  it('un ajuste que dejaría el insumo en negativo dice cuánto hay y cuánto quita, sin escribir nada', async () => {
+    ;(prisma.rawMaterial.findFirst as jest.Mock).mockResolvedValue(mockHielo({ currentStock: new Decimal(1) }))
+
+    await expect(
+      adjustStock(VENUE_ID, RM_ID, { quantity: -4, type: RawMaterialMovementType.ADJUSTMENT } as any, STAFF_ID),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message:
+        'No alcanza el inventario de este insumo: hay 1 y el ajuste quita 4. Si alguien lo usó o ajustó mientras tanto, actualiza la pantalla.',
+    })
+    expect(prisma.rawMaterial.update).not.toHaveBeenCalled()
+  })
+
+  it('un insumo que ya no existe contesta 404 en español, sin el id', async () => {
+    ;(prisma.rawMaterial.findFirst as jest.Mock).mockResolvedValue(null)
+
+    await expect(
+      adjustStock(VENUE_ID, RM_ID, { quantity: 1, type: RawMaterialMovementType.ADJUSTMENT } as any, STAFF_ID),
+    ).rejects.toMatchObject({ statusCode: 404, message: 'No se encontró este insumo: pudo borrarse o archivarse. Actualiza la pantalla.' })
+  })
+
+  it('un SKU repetido al dar de alta lo dice en español y no crea nada', async () => {
+    ;(prisma.rawMaterial.findFirst as jest.Mock).mockResolvedValue(mockHielo({ sku: 'HIE-1' }))
+
+    await expect(createRawMaterial(VENUE_ID, { name: 'Hielo 2', sku: 'HIE-1' } as any)).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'Ya existe un insumo con el SKU HIE-1. Usa otro SKU o edita el insumo que ya lo tiene.',
+    })
+    expect(prisma.rawMaterial.create).not.toHaveBeenCalled()
+  })
+})

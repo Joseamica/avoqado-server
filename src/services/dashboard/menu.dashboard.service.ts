@@ -1363,7 +1363,7 @@ async function findVenueRawMaterialForModifier(venueId: string, rawMaterialId: s
     select: { id: true, avgCostPerUnit: true },
   })
   if (!rawMaterial) {
-    throw new NotFoundError(`Raw material with ID ${rawMaterialId} not found in venue ${venueId}.`)
+    throw new NotFoundError('No se encontró este insumo: pudo borrarse o archivarse. Actualiza la pantalla.')
   }
   return rawMaterial
 }
