@@ -227,6 +227,12 @@ describe('assignModifierGroupToProduct — sin displayOrder va al final', () => 
     expect(ordenCreado()).toBe(3)
   })
 
+  it('con la última unión en el tope del entero no se pasa del tope', async () => {
+    preparar({ displayOrder: 2_147_483_647 })
+    await asignar({ modifierGroupId: 'grupo-1' })
+    expect(ordenCreado()).toBe(2_147_483_647)
+  })
+
   it('sin uniones crea con 0', async () => {
     preparar(null)
     await asignar({ modifierGroupId: 'grupo-1' })

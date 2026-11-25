@@ -1759,7 +1759,8 @@ export async function assignModifierGroupToProduct(
         orderBy: { displayOrder: 'desc' },
         select: { displayOrder: true },
       })
-      displayOrder = ultima ? ultima.displayOrder + 1 : 0
+      // El tope del Int de Postgres: con el último ya en el tope, empata ahí en vez de fallar al guardar.
+      displayOrder = ultima ? Math.min(ultima.displayOrder + 1, 2_147_483_647) : 0
     }
 
     return tx.productModifierGroup.create({
