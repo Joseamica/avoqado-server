@@ -10,7 +10,7 @@ requiredPermissions:
 featureCode: LOYALTY_PROGRAM
 gateKind: FEATURE
 sourceRepo: avoqado-web-dashboard
-sourceRef: 804921b3ccab36cbc05d1627b6a04fb585118c53
+sourceRef: 0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354
 keywords:
   - programa de lealtad
   - puntos por compra
