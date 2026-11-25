@@ -10,20 +10,31 @@
  * coincide con la oferta, esto responde 409 y no toca nada.
  */
 import Stripe from 'stripe'
+import type { Prisma } from '@prisma/client'
 import { CAMPAIGN_STATUS } from './launchCampaignEnums'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { ConflictError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
-import { planLookupKey } from '../stripe.service'
+import { planLookupKey, stripeAfirmaQueNoExiste } from '../stripe.service'
+import { ofertaVigente, precioDeLaOferta, tomarCandadoDeLaOferta, versionQueCobra, type PlanPagado } from '../billing/planOffer'
 import { computeCouponAmountOff, ivaBreakdownIsExact, promoPeriodTotalCents, splitIvaInclusive } from './launchOfferMath'
 import { LAUNCH_CAMPAIGN_SELECT, LaunchCampaignRow } from './launchCampaign.service'
+import { priceTransaction } from './hybridProduct'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
-/** El id del cupón de una ficha. Versionado: es lo que ata cada redención a lo que se consintió. */
-export function launchCouponId(code: string, offerVersion: number): string {
-  return `LC_${code}_V${offerVersion}`
+/**
+ * El id del cupón de una ficha. Versionado: es lo que ata cada redención a lo que se consintió.
+ *
+ * Planes editables (B1): también queda atado a la VERSIÓN DE LOS PLANES con la que se calculó su descuento. Sin ella o con la
+ * v1, el id de hoy (`LC_<code>_V<n>`); con la v2 o más, `LC_<code>_V<n>_P<versión>`. Una activación que pierde la carrera
+ * contra una publicación deja un cupón sin usar (nadie lo guarda ni lo canjea) y la siguiente calcula otro id: nunca choca
+ * con un cupón de otro precio de lista.
+ */
+export function launchCouponId(code: string, offerVersion: number, versionDeLaOferta?: number): string {
+  const base = `LC_${code}_V${offerVersion}`
+  return versionDeLaOferta !== undefined && versionDeLaOferta >= 2 ? `${base}_P${versionDeLaOferta}` : base
 }
 
 export interface PlanListPrice {
@@ -31,6 +42,8 @@ export interface PlanListPrice {
   unitAmount: number
   /** Producto de Stripe al que pertenece el precio: es lo que acota el cupón con `applies_to`. */
   productId: string
+  /** La versión de los planes de la que salió el precio: 1 = la llave (sin versiones o sólo la v1), como B0. */
+  versionDeLaOferta: number
 }
 
 /**
@@ -39,8 +52,15 @@ export interface PlanListPrice {
  * 🔴 Las cinco comprobaciones no son ceremonia: cada una produce un cobro equivocado si falta.
  * `tax_behavior !== 'inclusive'` es la más silenciosa — Stripe le sumaría el IVA encima al
  * precio, y entonces lo anunciado ($22.00 «IVA incluido») y lo cobrado dejan de coincidir.
+ *
+ * Planes editables (B1): con una versión publicada por el editor (`versionQueCobra()`), el precio de lista es el MENSUAL de
+ * esa versión, leído por su `priceId` con `prices.retrieve` (las mismas cinco comprobaciones, más `active` y que el monto sea
+ * el de la versión). Sin ella (sin versiones o sólo la v1), la llave del plan, exactamente como hoy.
  */
 export async function readPlanListPrice(planTier: 'PRO' | 'PREMIUM', advertisedPriceCents: number): Promise<PlanListPrice> {
+  const version = await versionQueCobra()
+  if (version) return leerMensualDeLaVersion(planTier, advertisedPriceCents, version)
+
   const tierCode = planTier === 'PREMIUM' ? ('PLAN_PREMIUM' as const) : ('PLAN_PRO' as const)
   const lookupKey = planLookupKey(tierCode, 'monthly')
   const prices = await stripe.prices.list({ lookup_keys: [lookupKey], limit: 1 })
@@ -55,6 +75,15 @@ export async function readPlanListPrice(planTier: 'PRO' | 'PREMIUM', advertisedP
   }
 
   if (!price) return problema('no existe')
+  return { ...comprobarPrecioDeLista(price, advertisedPriceCents, problema), versionDeLaOferta: 1 }
+}
+
+/** Las cinco comprobaciones de un precio de lista (moneda, mensual, IVA incluido, importe fijo y mayor que lo anunciado, producto). */
+function comprobarPrecioDeLista(
+  price: Stripe.Price,
+  advertisedPriceCents: number,
+  problema: (motivo: string) => never,
+): Omit<PlanListPrice, 'versionDeLaOferta'> {
   if (price.currency !== 'mxn') return problema(`está en ${price.currency.toUpperCase()}, no en MXN`)
   if (price.recurring?.interval !== 'month') return problema('no es mensual')
   if (price.tax_behavior !== 'inclusive') return problema('no trae el IVA incluido (tax_behavior)')
@@ -67,6 +96,34 @@ export async function readPlanListPrice(planTier: 'PRO' | 'PREMIUM', advertisedP
   const productId = typeof price.product === 'string' ? price.product : (price.product as { id?: string } | null)?.id
   if (!productId) return problema('no tiene producto asociado en Stripe')
   return { id: price.id, unitAmount: price.unit_amount, productId }
+}
+
+/** El mensual de una versión del editor, por su `priceId`. Un precio que Stripe ya no tiene (404) también es «no sirve». */
+async function leerMensualDeLaVersion(
+  planTier: PlanPagado,
+  advertisedPriceCents: number,
+  version: NonNullable<Awaited<ReturnType<typeof versionQueCobra>>>,
+): Promise<PlanListPrice> {
+  const ranura = precioDeLaOferta(version.definition, planTier, 'monthly')
+  const problema = (motivo: string): never => {
+    throw new ConflictError(
+      `El precio de lista del plan no sirve para esta oferta: ${motivo}. Revisa el precio mensual de la versión ${version.number} de los planes.`,
+      'PLAN_PRICE_UNAVAILABLE',
+      { versionDeLaOferta: version.number, priceId: ranura.stripePriceId, motivo },
+    )
+  }
+  if (!ranura.stripePriceId) return problema('la versión vigente no trae su precio mensual')
+  let price: Stripe.Price
+  try {
+    price = await stripe.prices.retrieve(ranura.stripePriceId)
+  } catch (error) {
+    if (stripeAfirmaQueNoExiste(error)) return problema('no existe')
+    throw error
+  }
+  if (price.active !== true) return problema('está archivado')
+  const leido = comprobarPrecioDeLista(price, advertisedPriceCents, problema)
+  if (leido.unitAmount !== ranura.grossCents) return problema('su importe no es el de la versión vigente')
+  return { ...leido, versionDeLaOferta: version.number }
 }
 
 export interface LaunchOfferPreview {
@@ -118,16 +175,63 @@ export async function previewLaunchOffer(input: {
     }),
     renewalMonthlyCents: price.unitAmount,
     promo: { subtotalCents: promo.subtotalCents, ivaCents: promo.ivaCents, ivaExact },
-    couponId: input.code ? launchCouponId(input.code, input.offerVersion ?? 1) : null,
+    // El id que crearía la PRIMERA activación con la versión de los planes vigente (el de hoy sin versiones o con la v1).
+    couponId: input.code ? launchCouponId(input.code, input.offerVersion ?? 1, price.versionDeLaOferta) : null,
     problems,
   }
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// La oferta de los planes al activar (planes editables, B1)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Lo que la oferta de los planes dice para activar una campaña de `planTier`: el número de la versión que cobra (1 = sin
+ * versiones o sólo la v1). Con una publicación pendiente → 409 `PLAN_OFFER_PENDING`; con el plan fuera de venta → 409
+ * `PLAN_NOT_ON_SALE`. Sin puntero no hay nada pendiente y el plan está a la venta, como hoy.
+ */
+async function ofertaParaActivar(db: Prisma.TransactionClient | typeof prisma, planTier: PlanPagado): Promise<number> {
+  const puntero = await db.planOfferPointer.findUnique({ where: { id: 'vigente' }, select: { pendingVersionId: true } })
+  if (puntero?.pendingVersionId) {
+    throw new ConflictError(
+      'Se está publicando una versión de los planes. Espera a que termine (o descártala) antes de activar la campaña.',
+      'PLAN_OFFER_PENDING',
+      { pendingVersionId: puntero.pendingVersionId },
+    )
+  }
+  const vigente = await ofertaVigente(db)
+  if (!vigente.definition[planTier].onSale) {
+    throw new ConflictError(
+      `El plan ${vigente.definition[planTier].displayName} no está a la venta. Ponlo a la venta en «Planes» antes de activar esta campaña.`,
+      'PLAN_NOT_ON_SALE',
+      { planTier },
+    )
+  }
+  return vigente.respaldo || vigente.number < 2 ? 1 : vigente.number
+}
+
+const otraVersionDeLosPlanes = (leida: number, vigente: number) =>
+  new ConflictError('Se publicó otra versión de los planes; vuelve a activarla.', 'PLAN_OFFER_STALE', { leida, vigente })
+
 /**
  * ACTIVAR. El orden importa: primero se valida el estado, después se lee Stripe, después se
  * resuelve el cupón, y sólo al final se escribe el CAS que congela el snapshot.
+ *
+ * Planes editables (B1): 🔴 **Stripe va ANTES del candado de la oferta y bajo el candado sólo la base.** Publicar una versión y
+ * activar una campaña toman el mismo candado (`plan-offer-publish`): bajo él se relee el puntero (pendiente, otra versión que
+ * la leída o el plan fuera de venta → 409) y se hace el CAS. Así nunca queda una campaña ACTIVE con un precio de lista distinto
+ * del mensual vigente al confirmar. Ninguna llamada a Stripe ocurre con el candado tomado: la transacción no puede vencer con
+ * el cupón a medias.
+ *
+ * `expectedListPriceCents` (lo manda el MCP desde su vista previa; el SUPERADMIN viejo no lo manda): si el precio de lista que
+ * se lee es otro → 409 `LAUNCH_CAMPAIGN_PREVIEW_STALE`, antes de buscar o crear el cupón.
  */
-export async function activateLaunchCampaign(id: string, staffId?: string | null, reason?: string): Promise<LaunchCampaignRow> {
+export async function activateLaunchCampaign(
+  id: string,
+  staffId?: string | null,
+  reason?: string,
+  opciones: { expectedListPriceCents?: number } = {},
+): Promise<LaunchCampaignRow> {
   const campaign = await prisma.launchCampaign.findUnique({ where: { id }, select: LAUNCH_CAMPAIGN_SELECT })
   if (!campaign) throw new NotFoundError('Campaña no encontrada', 'LAUNCH_CAMPAIGN_NOT_FOUND')
 
@@ -144,9 +248,21 @@ export async function activateLaunchCampaign(id: string, staffId?: string | null
   if (campaign.planTier !== 'PRO' && campaign.planTier !== 'PREMIUM') {
     throw new ConflictError('Una campaña sólo puede ofrecer un plan de pago (PRO o PREMIUM)', 'LAUNCH_CAMPAIGN_INVALID_OFFER')
   }
+  const planTier: PlanPagado = campaign.planTier
 
-  // 2. Precio de lista vivo en Stripe.
-  const price = await readPlanListPrice(campaign.planTier, campaign.advertisedPriceCents)
+  // 1b. La oferta de los planes: nada pendiente, el plan a la venta, y el número de la versión que cobra.
+  const versionLeida = await ofertaParaActivar(prisma, planTier)
+
+  // 2. Precio de lista vivo en Stripe (el mensual de esa versión, o la llave sin versión del editor).
+  const price = await readPlanListPrice(planTier, campaign.advertisedPriceCents)
+  // El cupón se ata a la versión con la que se calcula su descuento: si se publicó otra entre el paso 1 y éste, no se crea nada.
+  if (price.versionDeLaOferta !== versionLeida) throw otraVersionDeLosPlanes(versionLeida, price.versionDeLaOferta)
+  if (opciones.expectedListPriceCents !== undefined && price.unitAmount !== opciones.expectedListPriceCents) {
+    throw new ConflictError('El precio de lista cambió desde la vista previa; vuelve a revisarla.', 'LAUNCH_CAMPAIGN_PREVIEW_STALE', {
+      esperado: opciones.expectedListPriceCents,
+      actual: price.unitAmount,
+    })
+  }
 
   // 3. El descuento es una RESTA, nunca un porcentaje: un porcentaje redondeado por Stripe
   //    cobraría $22.01 o $21.99 sobre un anuncio que prometió $22.00 exactos.
@@ -157,7 +273,8 @@ export async function activateLaunchCampaign(id: string, staffId?: string | null
     throw new ConflictError(error instanceof Error ? error.message : 'Oferta inválida', 'LAUNCH_CAMPAIGN_INVALID_OFFER')
   }
 
-  const couponId = launchCouponId(campaign.code, campaign.offerVersion)
+  // 🔴 Al reactivar se usa SIEMPRE el cupón que la campaña ya tiene: nunca se reemplaza por uno de otra versión de los planes.
+  const couponId = campaign.stripeCouponId ?? launchCouponId(campaign.code, campaign.offerVersion, versionLeida)
 
   if (campaign.stripeCouponId) {
     // 5. Se REACTIVA desde PAUSED: el cupón ya existe y el snapshot ya está congelado.
@@ -234,22 +351,27 @@ export async function activateLaunchCampaign(id: string, staffId?: string | null
     }
   }
 
-  // 6. CAS a ACTIVE que congela el snapshot. `activatedAt` sólo se pone la primera vez: es lo que
-  //    marca «esta ficha ya se publicó» y lo que congela el slug y la oferta para siempre.
-  const r = await prisma.launchCampaign.updateMany({
-    where: { id, status: campaign.status, updatedAt: campaign.updatedAt },
-    data: {
-      status: CAMPAIGN_STATUS.ACTIVE,
-      stripeCouponId: couponId,
-      stripePriceId: price.id,
-      listPriceCentsSnapshot: price.unitAmount,
-      discountAmountCents: amountOff,
-      activatedAt: campaign.activatedAt ?? now,
-      statusReason: reason ?? null,
-      updatedById: staffId ?? null,
-    },
+  // 6. Bajo el candado de la oferta, SÓLO la base: el puntero se relee y el CAS a ACTIVE congela el snapshot. `activatedAt`
+  //    sólo se pone la primera vez: es lo que marca «esta ficha ya se publicó» y lo que congela el slug y la oferta para siempre.
+  await priceTransaction(async tx => {
+    await tomarCandadoDeLaOferta(tx)
+    const versionVigente = await ofertaParaActivar(tx, planTier)
+    if (versionVigente !== versionLeida) throw otraVersionDeLosPlanes(versionLeida, versionVigente)
+    const r = await tx.launchCampaign.updateMany({
+      where: { id, status: campaign.status, updatedAt: campaign.updatedAt },
+      data: {
+        status: CAMPAIGN_STATUS.ACTIVE,
+        stripeCouponId: couponId,
+        stripePriceId: price.id,
+        listPriceCentsSnapshot: price.unitAmount,
+        discountAmountCents: amountOff,
+        activatedAt: campaign.activatedAt ?? now,
+        statusReason: reason ?? null,
+        updatedById: staffId ?? null,
+      },
+    })
+    if (r.count === 0) throw new ConflictError('Alguien más cambió esta campaña. Vuelve a abrirla.', 'LAUNCH_CAMPAIGN_STALE')
   })
-  if (r.count === 0) throw new ConflictError('Alguien más cambió esta campaña. Vuelve a abrirla.', 'LAUNCH_CAMPAIGN_STALE')
 
   const actualizada = await prisma.launchCampaign.findUniqueOrThrow({ where: { id }, select: LAUNCH_CAMPAIGN_SELECT })
   await logAction({

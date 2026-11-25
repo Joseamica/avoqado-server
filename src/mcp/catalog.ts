@@ -658,6 +658,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'expectedSerialNumber',
             // …y al ESTADO que se VIO (negocio, serie, tipo, marca y el ajuste, R2-2): si cambió cualquiera, 409.
             'expectedTerminalState',
+            // Publicar una campaña (`set_launch_campaign_status`): con el precio de lista que se VIO, en pesos; si cambió, 409.
+            'expectedListPrice',
           ]) {
             // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
             // no atar un `null` que el esquema de otra herramienta no acepta.

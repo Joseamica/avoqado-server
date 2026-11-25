@@ -30,16 +30,21 @@ const mockSubList = jest.fn()
 const mockPriceList = jest.fn()
 const mockPriceRetrieve = jest.fn()
 const mockPmRetrieve = jest.fn()
+// La evidencia del primer cobro de un 3DS (`primerCobroPagado`, el lector REAL): la factura, sus pagos y el saldo.
+const mockInvList = jest.fn()
+const mockIpList = jest.fn()
+const mockBalTx = jest.fn()
+const mockCnList = jest.fn()
 jest.mock('stripe', () =>
   jest.fn().mockImplementation(() => ({
     subscriptions: { create: mockSubCreate, retrieve: mockSubRetrieve, list: mockSubList },
     prices: { list: mockPriceList, retrieve: mockPriceRetrieve },
     paymentMethods: { retrieve: mockPmRetrieve },
     coupons: { create: jest.fn(), retrieve: jest.fn(), del: jest.fn() },
-    customers: { create: jest.fn(), retrieve: jest.fn(), listBalanceTransactions: jest.fn() },
-    invoices: { list: jest.fn(), voidInvoice: jest.fn() },
-    invoicePayments: { list: jest.fn() },
-    creditNotes: { list: jest.fn() },
+    customers: { create: jest.fn(), retrieve: jest.fn(), listBalanceTransactions: (...a: unknown[]) => mockBalTx(...a) },
+    invoices: { list: (...a: unknown[]) => mockInvList(...a), voidInvoice: jest.fn() },
+    invoicePayments: { list: (...a: unknown[]) => mockIpList(...a) },
+    creditNotes: { list: (...a: unknown[]) => mockCnList(...a) },
   })),
 )
 jest.mock('../../../src/config/session', () => {
@@ -240,5 +245,245 @@ describe('POST /onboarding/organizations/:organizationId/v2/activate-plan — el
     expect(res.status).toBe(409)
     expect(res.body.code).toBe('PLAN_PRICE_MISMATCH')
     expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Planes editables B1, Task 7: un pago de CAMPAÑA ya apartado cierra con SU precio, por la ruta real.
+ *
+ * IDs distintos a propósito: la llave apunta a 'price_llave_b', la campaña guardó 'price_campana_a' (archivado) y el lugar
+ * 'price_lugar_c'. La v2 vigente trae OTRO mensual de Pro, así que un intento nuevo con ella ya no cuadraría con la campaña.
+ */
+describe('POST …/v2/activate-plan con una campaña — el precio de su lugar apartado', () => {
+  const LISTA = 115884
+  const ANUNCIADO = 2200
+  const CAMPANA = {
+    id: 'lc-1',
+    code: 'POS22',
+    name: 'POS $22',
+    landingSlug: 'pos-22',
+    vertical: 'ALL',
+    channel: null,
+    featuredForVertical: false,
+    planTier: 'PRO',
+    billingInterval: 'MONTHLY',
+    advertisedPriceCents: ANUNCIADO,
+    discountMonths: 3,
+    currency: 'MXN',
+    offerVersion: 1,
+    listPriceCentsSnapshot: LISTA,
+    discountAmountCents: LISTA - ANUNCIADO,
+    stripePriceId: 'price_campana_a',
+    stripeCouponId: 'LC_POS22_V1',
+    validFrom: new Date('2020-01-01T00:00:00Z'),
+    validUntil: new Date('2099-01-01T00:00:00Z'),
+    redemptionCap: 100,
+    redemptionCount: 1,
+    headline: null,
+    subheadline: null,
+    bullets: [],
+    status: 'ACTIVE',
+    statusReason: null,
+    activatedAt: new Date('2026-11-01T00:00:00Z'),
+    createdAt: new Date('2026-11-01T00:00:00Z'),
+    updatedAt: new Date('2026-11-01T00:00:00Z'),
+  }
+  const LANZAMIENTO = {
+    tier: 'PRO',
+    interval: 'monthly',
+    payNow: true,
+    paymentMethodId: 'pm_1',
+    offer: { kind: 'LAUNCH', code: 'POS22', offerVersion: 1, expectedFirstChargeCents: ANUNCIADO },
+  }
+  const pedirLaOferta = () => request(app).post(RUTA).set('Authorization', `Bearer ${token()}`).send(LANZAMIENTO)
+  const precio = (id: string, unitAmount: number, extra: Record<string, unknown> = {}) => ({
+    id,
+    active: true,
+    product: 'prod_pro',
+    currency: 'mxn',
+    recurring: { interval: 'month', interval_count: 1 },
+    tax_behavior: 'inclusive',
+    unit_amount: unitAmount,
+    ...extra,
+  })
+  const precios: Record<string, ReturnType<typeof precio>> = {
+    price_campana_a: precio('price_campana_a', LISTA, { active: false }),
+    price_lugar_c: precio('price_lugar_c', LISTA),
+    price_v2_pro_m: precio('price_v2_pro_m', 150684),
+  }
+  const conV2 = () =>
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(
+      punteroA('cv2', 2, definicionDePrueba({ ids: idsDeLaVersion('v2'), netos: { 'PRO:monthly': 129900 } })) as never,
+    )
+  const conLugar = (stripePriceId: string | null) =>
+    prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue({
+      id: 'red-1',
+      status: 'RESERVED',
+      campaignId: 'lc-1',
+      offerVersion: 1,
+      stripePriceId,
+    } as never)
+  const progreso = (o: Record<string, unknown> = {}) =>
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue({
+      id: 'op-1',
+      organizationId: ORG,
+      completedAt: null,
+      v2SetupData: {},
+      launchCampaignId: 'lc-1',
+      termsAcceptedAt: new Date('2026-11-20T00:00:00Z'),
+      planActivationStatus: 'NONE',
+      planActivationAttempt: 0,
+      planActivationLeaseUntil: null,
+      planStripeSubscriptionId: null,
+      ...o,
+    } as never)
+
+  beforeEach(() => {
+    progreso()
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(CAMPANA as never)
+    prismaMock.launchCampaign.updateMany.mockResolvedValue({ count: 1 } as never)
+    prismaMock.launchCampaignRedemption.create.mockResolvedValue({ id: 'red-nuevo' } as never)
+    prismaMock.launchCampaignRedemption.updateMany.mockResolvedValue({ count: 1 } as never)
+    mockPriceRetrieve.mockImplementation(async (id: string) => {
+      if (!precios[id]) throw Object.assign(new Error('No such price'), { code: 'resource_missing', statusCode: 404 })
+      return precios[id]
+    })
+    mockPriceList.mockResolvedValue({ data: [precio('price_llave_b', LISTA)] })
+    mockSubRetrieve.mockResolvedValue({
+      id: 'sub_1',
+      status: 'active',
+      current_period_end: Math.floor(new Date('2026-12-25T00:00:00Z').getTime() / 1000),
+      latest_invoice: { amount_paid: ANUNCIADO },
+      discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
+    })
+    mockInvList.mockReset()
+    mockIpList.mockReset()
+    mockBalTx.mockReset().mockResolvedValue({ has_more: false, data: [] })
+    mockCnList.mockReset().mockResolvedValue({ has_more: false, data: [] })
+  })
+
+  it('🔴 por la ruta: LAUNCH con lugar RESERVED (price_lugar_c) y v2 vigente → 200 ACTIVE cobrando price_lugar_c', async () => {
+    conV2()
+    conLugar('price_lugar_c')
+
+    const res = await pedirLaOferta()
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({ status: 'ACTIVE', firstChargeCents: ANUNCIADO })
+    expect(itemsCobrados()).toEqual([{ price: 'price_lugar_c' }])
+    expect(mockSubCreate.mock.calls[0][0].discounts).toEqual([{ coupon: 'LC_POS22_V1' }])
+    expect(mockPriceRetrieve.mock.calls.map(c => c[0])).toEqual(['price_lugar_c'])
+  })
+
+  it('🔴 por la ruta: LAUNCH nuevo sin versiones → 200 cobrando price_llave_b, no price_campana_a', async () => {
+    const res = await pedirLaOferta()
+
+    expect(res.status).toBe(200)
+    expect(itemsCobrados()).toEqual([{ price: 'price_llave_b' }])
+    expect(mockPriceRetrieve).not.toHaveBeenCalled()
+    // El lugar nuevo guarda el precio con el que se cobró.
+    expect(prismaMock.launchCampaignRedemption.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ stripePriceId: 'price_llave_b' }) }),
+    )
+  })
+
+  it('🔴 por la ruta: lugar de antes de B1 (stripePriceId null) con 3DS autorizado y v2 vigente → 200 ACTIVE con la suscripción de su intento', async () => {
+    conV2()
+    conLugar(null)
+    progreso({
+      planActivationStatus: 'IN_PROGRESS',
+      planActivationAttempt: 1,
+      planActivationLeaseUntil: null,
+      planStripeSubscriptionId: 'sub_3ds',
+    })
+    mockSubRetrieve.mockResolvedValue({
+      id: 'sub_3ds',
+      status: 'active',
+      default_payment_method: 'pm_1',
+      metadata: {
+        organizationId: ORG,
+        featureCode: 'PLAN_PRO',
+        launchCampaignId: 'lc-1',
+        launchCampaignCode: 'POS22',
+        launchOfferVersion: '1',
+        launchRedemptionId: 'red-1',
+        planActivationKey: `plan-activation:${ORG}:1`,
+        primerCobroEsperadoCents: String(ANUNCIADO),
+      },
+      latest_invoice: { id: 'in_1', status: 'paid', amount_paid: ANUNCIADO },
+      current_period_end: Math.floor(new Date('2026-12-25T00:00:00Z').getTime() / 1000),
+      items: { data: [{ price: precio('price_sub_d', LISTA) }] },
+      discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
+    })
+    // La primera factura del 3DS, pagada con tarjeta por lo consentido.
+    mockInvList.mockResolvedValue({
+      has_more: false,
+      data: [
+        {
+          id: 'in_1',
+          customer: 'cus_1',
+          currency: 'mxn',
+          billing_reason: 'subscription_create',
+          status: 'paid',
+          total: ANUNCIADO,
+          amount_paid: ANUNCIADO,
+          starting_balance: 0,
+          ending_balance: 0,
+          post_payment_credit_notes_amount: 0,
+        },
+      ],
+    })
+    mockIpList.mockResolvedValue({
+      has_more: false,
+      data: [
+        {
+          status: 'paid',
+          currency: 'mxn',
+          amount_paid: ANUNCIADO,
+          payment: {
+            type: 'charge',
+            charge: { id: 'ch_1', paid: true, currency: 'mxn', amount: ANUNCIADO, amount_refunded: 0, disputed: false },
+          },
+        },
+      ],
+    })
+
+    const res = await pedirLaOferta()
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({ status: 'ACTIVE' })
+    // Cerró la suscripción de su intento: nada se creó, y ni la versión ni la llave decidieron el precio.
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(mockPriceRetrieve).not.toHaveBeenCalled()
+    expect(mockPriceList).not.toHaveBeenCalled()
+    expect(mockEntregar).toHaveBeenCalledWith(expect.objectContaining({ subscriptionId: 'sub_3ds' }))
+  })
+
+  it('🔴 por la ruta, sin versión del editor: lugar de antes de B1, sin suscripción, y la llave sin precio en Stripe → 409 PLAN_PRICE_MISMATCH como hoy (no 503)', async () => {
+    conLugar(null)
+    // Después de una caída: el intento quedó abierto con el lease vencido y sin suscripción.
+    progreso({ planActivationStatus: 'IN_PROGRESS', planActivationAttempt: 1, planActivationLeaseUntil: new Date('2026-11-20T00:00:00Z') })
+    mockPriceList.mockResolvedValue({ data: [] })
+
+    const res = await pedirLaOferta()
+
+    expect(res.status).toBe(409)
+    expect(res.body.code).toBe('PLAN_PRICE_MISMATCH')
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(mockPriceRetrieve).not.toHaveBeenCalled()
+  })
+
+  it('lo mismo con una versión del editor → el mismo 409 PLAN_PRICE_MISMATCH', async () => {
+    conV2()
+    conLugar(null)
+    progreso({ planActivationStatus: 'IN_PROGRESS', planActivationAttempt: 1, planActivationLeaseUntil: new Date('2026-11-20T00:00:00Z') })
+    mockPriceList.mockResolvedValue({ data: [] })
+
+    const res = await pedirLaOferta()
+
+    expect(res.status).toBe(409)
+    expect(res.body.code).toBe('PLAN_PRICE_MISMATCH')
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(mockPriceRetrieve).not.toHaveBeenCalled()
   })
 })

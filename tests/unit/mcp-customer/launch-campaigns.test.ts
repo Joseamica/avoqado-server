@@ -6,6 +6,26 @@
  */
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn().mockResolvedValue(undefined) }))
 
+// Planes editables B1 (Task 7): Stripe simulado entero; sin respuesta configurada, una lectura falla (y la prueba que no la
+// prepara la atrapa, como antes).
+const mockPriceList = jest.fn()
+const mockPriceRetrieve = jest.fn()
+const mockCouponRetrieve = jest.fn()
+const mockCouponCreate = jest.fn()
+jest.mock('stripe', () =>
+  jest.fn().mockImplementation(() => ({
+    prices: { list: mockPriceList, retrieve: mockPriceRetrieve },
+    coupons: { retrieve: mockCouponRetrieve, create: mockCouponCreate, del: jest.fn() },
+    subscriptions: { create: jest.fn(), retrieve: jest.fn(), list: jest.fn() },
+    paymentMethods: { retrieve: jest.fn() },
+  })),
+)
+
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { configureToolCatalog } from '@/mcp/catalog'
+import { definicionDePrueba, idsDeLaVersion, punteroA } from '@tests/__helpers__/planOfferFixtures'
 import { registerAllTools } from '@/mcp/server'
 import { registerLaunchCampaignTools } from '@/mcp/tools/launchCampaigns'
 import { ScopeError } from '@/mcp/errors'
@@ -237,5 +257,139 @@ describe('set_launch_campaign_featured', () => {
       handlers.get('set_launch_campaign_featured')!({ code: 'POS22MX', featured: true, confirm: true } as never),
     ).rejects.toBeInstanceOf(ScopeError)
     expect(prismaMock.launchCampaign.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Planes editables B1 (Task 7, b1-r4 #4): la vista previa de ACTIVAR dice el precio de lista que vio (en PESOS) y el token de
+ * confirmación lo ata. Si al confirmar el precio de lista ya es otro (se publicó un mensual nuevo), la activación responde
+ * 409 `LAUNCH_CAMPAIGN_PREVIEW_STALE` antes de tocar el cupón: nunca se confirma una campaña con otra renovación.
+ * Por `tools/call` real, con `configureToolCatalog` y el token que firma el catálogo.
+ */
+describe('set_launch_campaign_status: la vista previa de activar ata el precio de lista', () => {
+  const LISTA = 115884
+  const NETO_NUEVO = 129900
+  const LISTA_NUEVA = Math.round((NETO_NUEVO * 116) / 100) // 150684
+  const scope = {
+    staffId: 'cm32345678901234567890123',
+    activeOrg: 'cm42345678901234567890123',
+    allowedVenueIds: [],
+    perVenueAccess: new Map(),
+    isSuperAdmin: true,
+    scopes: ['mcp:read', 'mcp:write'],
+  } as unknown as McpScope
+  const borrador = {
+    id: 'lc-1',
+    code: 'POS22',
+    name: 'POS $22',
+    landingSlug: 'pos-22',
+    vertical: 'ALL',
+    channel: null,
+    featuredForVertical: false,
+    planTier: 'PRO',
+    billingInterval: 'MONTHLY',
+    advertisedPriceCents: 2200,
+    discountMonths: 3,
+    currency: 'MXN',
+    offerVersion: 1,
+    listPriceCentsSnapshot: null,
+    discountAmountCents: null,
+    stripePriceId: null,
+    stripeCouponId: null,
+    validFrom: new Date('2026-09-01T00:00:00Z'),
+    validUntil: new Date('2099-01-01T00:00:00Z'),
+    redemptionCap: 100,
+    redemptionCount: 0,
+    headline: null,
+    subheadline: null,
+    bullets: [],
+    status: 'DRAFT',
+    statusReason: null,
+    activatedAt: null,
+    createdAt: new Date('2026-09-01T00:00:00Z'),
+    updatedAt: new Date('2026-09-01T00:00:00Z'),
+  }
+  const precio = (id: string, unitAmount: number) => ({
+    id,
+    active: true,
+    product: 'prod_plan_pro',
+    currency: 'mxn',
+    recurring: { interval: 'month', interval_count: 1 },
+    tax_behavior: 'inclusive',
+    unit_amount: unitAmount,
+  })
+
+  let server: McpServer
+  let client: Client
+  beforeEach(async () => {
+    mockPriceList.mockReset().mockResolvedValue({ data: [precio('price_key_pro_m', LISTA)] })
+    mockPriceRetrieve.mockReset()
+    mockCouponRetrieve.mockReset().mockRejectedValue(Object.assign(new Error('No such coupon'), { code: 'resource_missing' }))
+    mockCouponCreate.mockReset().mockImplementation(async (b: Record<string, unknown>) => b)
+    prismaMock.planOfferPointer.findUnique.mockReset().mockResolvedValue(null)
+    prismaMock.launchCampaign.findUnique.mockReset().mockResolvedValue(borrador as never)
+    prismaMock.launchCampaign.updateMany.mockReset().mockResolvedValue({ count: 1 } as never)
+    prismaMock.launchCampaign.findUniqueOrThrow.mockReset().mockResolvedValue({ ...borrador, status: 'ACTIVE' } as never)
+    server = new McpServer({ name: 'campanas', version: '1' })
+    configureToolCatalog(server, scope)
+    registerLaunchCampaignTools(server, scope)
+    client = new Client({ name: 'prueba', version: '1' })
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(a), client.connect(b)])
+  })
+  afterEach(async () => {
+    await client.close()
+    await server.close()
+  })
+  const llamar = async (args: Record<string, unknown>) => {
+    const r = await client.callTool({ name: 'set_launch_campaign_status', arguments: args })
+    return JSON.parse((r.content as Array<{ text: string }>)[0].text)
+  }
+
+  it('🔴 vista previa de activar con lista 1158.84; se publica un mensual mayor; confirmar con el mismo token → { ok: false, codigo: LAUNCH_CAMPAIGN_PREVIEW_STALE }, la campaña sigue en borrador y no se crea cupón', async () => {
+    const vista = await llamar({ code: 'POS22', action: 'activate' })
+    expect(vista).toMatchObject({ requiresConfirmation: true, expectedListPrice: 1158.84 })
+    expect(vista.confirmationArguments).toMatchObject({ code: 'POS22', action: 'activate', expectedListPrice: 1158.84 })
+
+    // Entre la vista previa y la confirmación se publica la v2 con un mensual de Pro mayor.
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(
+      punteroA('cv2', 2, definicionDePrueba({ ids: idsDeLaVersion('v2'), netos: { 'PRO:monthly': NETO_NUEVO } })) as never,
+    )
+    mockPriceRetrieve.mockResolvedValue(precio('price_v2_pro_m', LISTA_NUEVA))
+
+    const r = await llamar({ ...vista.confirmationArguments, confirm: true, confirmationToken: vista.confirmationToken })
+
+    expect(r).toMatchObject({ ok: false, codigo: 'LAUNCH_CAMPAIGN_PREVIEW_STALE' })
+    expect(typeof r.error).toBe('string')
+    expect(mockCouponRetrieve).not.toHaveBeenCalled()
+    expect(mockCouponCreate).not.toHaveBeenCalled()
+    expect(prismaMock.launchCampaign.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('la vista previa devuelve expectedListPrice y el token lo ata: confirmar con otro valor pide una vista previa vigente', async () => {
+    const vista = await llamar({ code: 'POS22', action: 'activate' })
+    expect(vista.expectedListPrice).toBe(1158.84)
+
+    const otro = await llamar({
+      ...vista.confirmationArguments,
+      expectedListPrice: 1506.84,
+      confirm: true,
+      confirmationToken: vista.confirmationToken,
+    })
+    expect(otro).toMatchObject({ ok: false, needsInput: true, field: 'confirmationToken' })
+    // Tampoco sin el valor atado.
+    const sinPrecio = { ...vista.confirmationArguments }
+    delete sinPrecio.expectedListPrice
+    const sin = await llamar({ ...sinPrecio, confirm: true, confirmationToken: vista.confirmationToken })
+    expect(sin).toMatchObject({ ok: false, needsInput: true, field: 'confirmationToken' })
+    expect(prismaMock.launchCampaign.updateMany).not.toHaveBeenCalled()
+
+    // Con lo firmado, se activa: el servicio recibe el precio en centavos (la conversión es del borde de la herramienta).
+    const bien = await llamar({ ...vista.confirmationArguments, confirm: true, confirmationToken: vista.confirmationToken })
+    expect(bien).toMatchObject({ ok: true, estado: 'ACTIVE' })
+    expect(mockCouponCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'LC_POS22_V1', amount_off: LISTA - 2200 }),
+      expect.anything(),
+    )
   })
 })
