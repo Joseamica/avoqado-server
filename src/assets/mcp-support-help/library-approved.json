@@ -139,9 +139,12 @@
       "gateKind": "FEATURE"
     },
     "android/lealtad/canjear-puntos": {
-      "sha256": "7d36725aeb631c0f566e7a9fedf559eb2e5e61b58ad05a390e085faa786fab9d",
+      "sha256": "33b89b3b02cc734ae17a352f7fac8804d733a498d1807a2e414ac5a451adece2",
       "requiredPermissions": [
-        "orders:update"
+        "tables:read",
+        "orders:update",
+        "loyalty:read",
+        "customers:read"
       ],
       "featureCode": "LOYALTY_PROGRAM",
       "gateKind": "FEATURE"

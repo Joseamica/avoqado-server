@@ -17,6 +17,36 @@
       "cita": "label = if (customerName.isNullOrBlank()) \"Asignar cliente\" else \"Cambiar cliente\","
     },
     {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt",
+      "linea": 38,
+      "cita": "val showTables = posMode == PosMode.RESTAURANT"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/domain/PosMode.kt",
+      "linea": 14,
+      "cita": "RESTAURANT(\"restaurant\", \"Mesas\", \"Servicio en mesa — cuentas por mesa y comandas\"),"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 145,
+      "cita": "if (!viewModel.planManager.hasFeature(\"TABLE_SERVICE\")) {"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 722,
+      "cita": "text = \"Ver cheque\","
+    },
+    {
+      "paso": 1,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt",
+      "linea": 48,
+      "cita": "val windowSizeClass = WindowSizeClass.calculateFromSize(DpSize(maxWidth, maxHeight))"
+    },
+    {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
       "linea": 2800,
@@ -85,9 +115,24 @@
   ],
   "permisos": [
     {
+      "permiso": "tables:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 2903
+    },
+    {
       "permiso": "orders:update",
-      "archivo": "app/src/main/java/com/avoqado/pos/core/data/network/ApiService.kt",
-      "linea": 426
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3613
+    },
+    {
+      "permiso": "loyalty:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3567
+    },
+    {
+      "permiso": "customers:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1630
     }
   ],
   "plan": [
@@ -95,6 +140,11 @@
       "featureCode": "LOYALTY_PROGRAM",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
       "linea": 480
+    },
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 145
     }
   ],
   "sinInternet": [
@@ -107,9 +157,24 @@
       "afirmacion": "El canje pide red antes de mandar nada",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
       "linea": 2135
+    },
+    {
+      "afirmacion": "Quitar la recompensa (un descuento aplicado) también pide internet",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1906
     }
   ],
   "rutas": [
+    {
+      "ruta": "Sin el plan: «Esta función es parte del plan PRO. Actívala desde tu dashboard web (Configuración → Plan).»",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/PlanGate.kt",
+      "linea": 281
+    },
+    {
+      "ruta": "Mesa de … — solo lectura (cuenta de otro mesero: no se entra a Cliente ni a Acciones)",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 393
+    },
     {
       "ruta": "Esta cuenta no tiene puntos para canjear. Agrega el cliente en la pestaña «Cliente».",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
@@ -136,9 +201,19 @@
       "linea": 2151
     },
     {
+      "ruta": "No se puede modificar una orden ya pagada (quitar la recompensa con un abono)",
+      "archivo": "avoqado-server/src/services/mobile/order.mobile.service.ts",
+      "linea": 3540
+    },
+    {
       "ruta": "En Cobrar (mostrador) el menú del carrito ya no trae «Canjear recompensa»",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
       "linea": 1199
+    },
+    {
+      "ruta": "«La cuenta cambió»: el saldo del cliente bajó por un canje en otra cuenta",
+      "archivo": "avoqado-server/src/services/mobile/loyalty.mobile.service.ts",
+      "linea": 374
     }
   ],
   "aparato": {
