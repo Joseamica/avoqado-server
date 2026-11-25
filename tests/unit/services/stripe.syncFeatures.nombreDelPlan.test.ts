@@ -1,10 +1,11 @@
 /**
  * Planes editables B1, Task 8: `syncFeaturesToStripe` (corre al arrancar y desde `scripts/sync-features-to-stripe.ts`) escribe el nombre
- * del producto de Pro y Premium por el ÚNICO escritor del nombre (`escribirNombreDelPlan`, bajo `plan-offer-nombre`).
+ * del producto de Pro y Premium por `escribirNombreDelPlan(tier, 'SYNC')`.
  *
- * 🔴 Sin versión del editor (sin versiones o con sólo la v1) hacia Stripe nada cambia: las mismas llamadas, con el mismo cuerpo y en el
- * mismo orden que hoy. `GRABACION_DE_HOY` es lo que hacía el código antes de este cambio con estas funciones (se comprobó corriendo esta
- * misma prueba contra él). Lo único nuevo en el `products.update` de un plan es la opción de tiempo (10 s), que no viaja a Stripe.
+ * 🔴 Sin versión del editor (sin versiones o con sólo la v1) hacia Stripe nada cambia: las mismas llamadas, con TODOS sus argumentos
+ * iguales (también las opciones de la petición: ninguna), en el mismo orden y las mismas veces que B0. `GRABACION_DE_HOY` es lo que
+ * hacía B0 (`32ffd08c8`) con estas funciones (se comprobó corriendo esta misma prueba contra su `stripe.service.ts`). Lo único nuevo son
+ * lecturas de la base (el candado del nombre y la vigente). Lo mismo si el candado o la lectura fallan (Codex B1 #3).
  */
 const llamadas: unknown[][] = []
 const mockOpcionesDeRetry: unknown[] = []
@@ -81,7 +82,10 @@ const FUNCIONES = () => [
   },
 ]
 
-/** Lo que el código de antes de este cambio le mandaba a Stripe con `FUNCIONES()`: método y cuerpo, en orden. */
+/**
+ * Lo que B0 le mandaba a Stripe con `FUNCIONES()`: método y TODOS los argumentos, en orden (ningún `products.update` llevaba opciones
+ * de petición: la grabación tiene exactamente los dos argumentos de B0).
+ */
 const GRABACION_DE_HOY = [
   ['products.update', 'prod_pro', { name: 'Plan Pro', description: 'Todo Pro' }],
   ['products.update', 'prod_premium', { name: 'Plan Premium', description: undefined }],
@@ -119,12 +123,17 @@ const RETRY_DE_HOY = [
 ].map((context: string) => ({ retries: 3, shouldRetry: shouldRetryStripeError, context }))
 
 const llamadasAStripe = () => llamadas.filter((l: unknown[]) => typeof l[0] === 'string' && /^(products|prices)\./.test(l[0] as string))
-/** Sólo método y cuerpo (sin las opciones de la petición, que no viajan a Stripe). */
+/** Sólo método y cuerpo (sin las opciones de la petición), para los casos con una versión del editor. */
 const sinOpciones = (l: unknown[]) => (l[0] === 'products.update' ? l.slice(0, 3) : l.slice(0, 2))
 
-/** La transacción del escritor del nombre: registra el candado y la lectura de la vigente en la misma bitácora que Stripe. */
+/**
+ * La transacción del escritor del nombre: registra el candado y la lectura de la vigente en la misma bitácora que Stripe. La vigente
+ * sale de `tx.base.puntero`, que una prueba puede cambiar a media sincronización (una publicación que llega en medio).
+ */
 function usarTx(puntero: unknown) {
+  const base = { puntero }
   const tx = {
+    base,
     $executeRaw: jest.fn(async (sql: TemplateStringsArray, ...valores: unknown[]) => {
       llamadas.push(['candado', sql.join('?'), ...valores])
       return 0
@@ -132,7 +141,7 @@ function usarTx(puntero: unknown) {
     planOfferPointer: {
       findUnique: jest.fn(async (args: { select?: Record<string, unknown> }) => {
         llamadas.push([args.select?.currentVersion ? 'lee la vigente' : 'lee la observación'])
-        return puntero === null ? null : { ...(puntero as object), nombresEnStripe: null }
+        return base.puntero === null ? null : { ...(base.puntero as object), nombresEnStripe: null }
       }),
       update: jest.fn(async () => ({})),
     },
@@ -184,13 +193,12 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
       await syncFeaturesToStripe()
 
       const stripe = llamadasAStripe()
-      expect(stripe.map(sinOpciones)).toEqual(GRABACION_DE_HOY)
+      // 🔴 Codex B1 #3: TODOS los argumentos, también el tercero de products.update (las opciones de la petición): B0 no mandaba
+      // ninguno, así que cada llamada tiene exactamente la aridad de B0 y ninguna lleva un tope de tiempo propio.
+      expect(stripe).toStrictEqual(GRABACION_DE_HOY)
+      expect(stripe.map((l: unknown[]) => l.length)).toEqual(GRABACION_DE_HOY.map((l: unknown[]) => l.length))
       expect(mockOpcionesDeRetry).toEqual(RETRY_DE_HOY)
       expect(stripe.some((l: unknown[]) => l[0] === 'products.retrieve')).toBe(false)
-      // La única opción nueva: el tope de 10 s en el products.update de los planes. Las demás funciones, sin opciones (como hoy).
-      expect(stripe[0][3]).toEqual({ timeout: 10_000 })
-      expect(stripe[1][3]).toEqual({ timeout: 10_000 })
-      expect(stripe[3]).toHaveLength(3)
       // Lo nuevo es sólo el candado y la lectura de la vigente: nadie escribe la observación (la oferta no es dueña del nombre), y el
       // producto es el mismo argumento de hoy, el de la Feature que se sincroniza (no se vuelve a leer).
       expect(tx.planOfferPointer.update).not.toHaveBeenCalled()
@@ -211,7 +219,7 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
     usarTx(null)
     prismaMock.feature.findMany.mockResolvedValue([{ ...FUNCIONES()[0], stripePriceId: null }])
     await syncFeaturesToStripe()
-    expect(llamadasAStripe().map(sinOpciones)).toEqual([
+    expect(llamadasAStripe()).toStrictEqual([
       ['products.update', 'prod_pro', { name: 'Plan Pro', description: 'Todo Pro' }],
       [
         'prices.create',
@@ -246,7 +254,9 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
     await syncFeaturesToStripe()
 
     const orden = llamadas.map((l: unknown[]) => (l[0] === 'candado' ? `candado:${l[2]}` : (l[0] as string)))
-    // Cada plan: candado → vigente → update (Pro, dueña de su nombre, anota además la observación). Las demás funciones, sin candado.
+    // Pro (la v2 es dueña de su nombre): candado → vigente → update bajo el candado → observación. Premium (la v2 no lo nombra):
+    // candado → vigente → el update de B0 sin candado → la revisión posterior (candado → vigente; sigue sin nombre propio: no toca
+    // Stripe). Las demás funciones, sin candado.
     expect(orden).toEqual([
       'candado:plan-offer-nombre',
       'lee la vigente',
@@ -255,6 +265,8 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
       'candado:plan-offer-nombre',
       'lee la vigente',
       'products.update',
+      'candado:plan-offer-nombre',
+      'lee la vigente',
       'prices.create',
       'products.update',
       'products.create',
@@ -267,14 +279,21 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
       { name: 'Plan Avoqado Pro Plus', description: 'Todo Pro' },
       { timeout: 10_000 },
     ])
+    // El update de Premium es el de B0: sin opciones de petición.
+    expect(llamadas[6]).toStrictEqual(['products.update', 'prod_premium', { name: 'Plan Premium', description: undefined }])
     // La vigente se leyó con la transacción del candado, no con el cliente de afuera.
-    expect(tx.planOfferPointer.findUnique).toHaveBeenCalledTimes(3)
+    expect(tx.planOfferPointer.findUnique).toHaveBeenCalledTimes(4)
     expect(tx.planOfferPointer.update).toHaveBeenCalledWith({
       where: { id: 'vigente' },
       data: { nombresEnStripe: { PRO: { esperado: 'Plan Avoqado Pro Plus', enStripe: 'Plan Avoqado Pro Plus', estado: 'RENOMBRADO' } } },
     })
     expect(prismaMock.planOfferPointer.findUnique).not.toHaveBeenCalled()
-    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { maxWait: 15_000, timeout: 150_000 })
+    // Decidir (y escribir el nombre propio) cabe en la transacción de la sincronización; la revisión, en la del job.
+    expect(prismaMock.$transaction.mock.calls.map((c: unknown[]) => c[1])).toEqual([
+      { maxWait: 15_000, timeout: 150_000 },
+      { maxWait: 15_000, timeout: 150_000 },
+      { maxWait: 15_000, timeout: 30_000 },
+    ])
   })
 
   it('🔴 con versión del editor y products.update del plan fallando, NO crea el precio, igual que hoy', async () => {
@@ -323,17 +342,15 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
     expect(llamadasAStripe().map(sinOpciones).slice(1)).toEqual(GRABACION_DE_HOY.slice(1))
   })
 
-  it('🔴 si el candado o la lectura de la vigente fallan: aviso, NINGÚN nombre escrito para ese plan (ni sin candado) y sigue con el precio', async () => {
+  it('🔴 Codex B1 #3: si el candado o la lectura de la vigente fallan, se hace la llamada de B0 igual (mismos argumentos, sin opciones), con aviso', async () => {
     usarTx(null)
     prismaMock.$transaction.mockRejectedValue(Object.assign(new Error('Transaction API error'), { code: 'P2028' }))
 
     await syncFeaturesToStripe()
 
-    const stripe = llamadasAStripe().map(sinOpciones)
-    // Ni Pro ni Premium escriben su nombre; Premium igual crea su precio, y las demás funciones siguen como hoy.
-    expect(stripe).toEqual(
-      GRABACION_DE_HOY.filter((l: unknown[]) => !(l[0] === 'products.update' && /^prod_(pro|premium)$/.test(l[1] as string))),
-    )
+    // Hacia Stripe, exactamente B0: también los products.update de Pro y Premium, con el nombre del catálogo y sin opciones.
+    expect(llamadasAStripe()).toStrictEqual(GRABACION_DE_HOY)
+    expect(mockOpcionesDeRetry).toEqual(RETRY_DE_HOY)
     expect(prismaMock.feature.update.mock.calls.map((c: unknown[]) => (c[0] as { where: { id: string } }).where.id)).toEqual([
       'f_pro',
       'f_premium',
@@ -341,7 +358,49 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
       'f_chat',
     ])
     expect((logger.warn as jest.Mock).mock.calls.map((c: unknown[]) => c[0])).toContain(
-      '  ⚠️ Stripe product prod_pro for feature PLAN_PRO: name NOT written (the name lock or the offer read failed)',
+      'Renombre de los planes: no se pudo tomar el candado del nombre o leer la vigente — se escribe el nombre del catálogo, como antes de los planes editables',
     )
+    expect((logger.info as jest.Mock).mock.calls.map((c: unknown[]) => c[0])).toContain(
+      '  ✅ Updated Stripe product prod_pro for feature PLAN_PRO',
+    )
+  })
+
+  it('🔴 Codex B1 #3: una publicación con nombre nuevo que llega mientras el products.update de B0 está detenido → la revisión posterior escribe el nombre de la v2 y es lo último que queda en Stripe', async () => {
+    const v2 = definicionDePrueba({ ids: idsDeLaVersion('v2'), nombres: { PRO: 'Pro Plus' }, productos: { PRO: 'Plan Avoqado Pro Plus' } })
+    const tx = usarTx(punteroA('cv1', 1, versionUno()))
+    prismaMock.feature.findMany.mockResolvedValue([FUNCIONES()[0]])
+    const enStripe = new Map<string, string>([['prod_pro', 'Plan Avoqado Pro']])
+    mockStripe.productsRetrieve.mockImplementation(async (...a: unknown[]) => {
+      llamadas.push(['products.retrieve', ...a])
+      return { id: a[0], name: enStripe.get(a[0] as string) ?? null }
+    })
+    mockStripe.productsUpdate.mockImplementation(async (...a: unknown[]) => {
+      llamadas.push(['products.update', ...a])
+      const cuerpo = a[1] as { name: string }
+      // Mientras el update de B0 (el del catálogo) está en vuelo, se publica la v2 con otro nombre de Pro.
+      if (cuerpo.name === 'Plan Pro') tx.base.puntero = punteroA('cv2', 2, v2)
+      enStripe.set(a[0] as string, cuerpo.name)
+      return { id: a[0], name: cuerpo.name }
+    })
+
+    await syncFeaturesToStripe()
+
+    const updates = llamadasAStripe().filter((l: unknown[]) => l[0] === 'products.update')
+    // Primero el update de B0, tal cual (sin opciones); después, la revisión bajo el candado escribe el de la v2 con el tope de 10 s.
+    expect(updates).toStrictEqual([
+      ['products.update', 'prod_pro', { name: 'Plan Pro', description: 'Todo Pro' }],
+      ['products.update', 'prod_pro', { name: 'Plan Avoqado Pro Plus' }, { timeout: 10_000, maxNetworkRetries: 0 }],
+    ])
+    expect(enStripe.get('prod_pro')).toBe('Plan Avoqado Pro Plus')
+    // La revisión tomó plan-offer-nombre y leyó la vigente con su transacción, después del update de B0.
+    const orden = llamadas.map((l: unknown[]) => (l[0] === 'candado' ? `candado:${l[2]}` : (l[0] as string)))
+    expect(orden.slice(orden.indexOf('products.update'))).toEqual([
+      'products.update',
+      'candado:plan-offer-nombre',
+      'lee la vigente',
+      'products.retrieve',
+      'products.update',
+      'lee la observación',
+    ])
   })
 })

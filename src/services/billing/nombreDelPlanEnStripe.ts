@@ -3,21 +3,26 @@
  *
  * Una versión publicada puede renombrar un plan («Pro» → «Pro Plus»), y el nombre del producto de Stripe es lo que el cliente ve en
  * el checkout de Stripe. Tres piezas:
- * - `escribirNombreDelPlan`: **el único que escribe el nombre del producto de un plan** (el job, el intento inmediato del publicador y
- *   la sincronización del catálogo, `syncFeaturesToStripe`). Todos se forman en el mismo candado y cada uno calcula el nombre de la
- *   vigente JUSTO antes de escribir: el que llega tarde escribe lo más nuevo, así se converge en vez de deshacer un renombre.
+ * - `escribirNombreDelPlan`: escribe el nombre del producto de un plan para el job, el intento inmediato del publicador y la
+ *   sincronización del catálogo (`syncFeaturesToStripe`). Cuando la vigente es dueña del nombre, se escribe bajo el candado y con el
+ *   nombre calculado JUSTO antes de escribir: el que llega tarde escribe lo más nuevo, así se converge en vez de deshacer un renombre.
  * - `renombrarProductosDelPlan`: lo que corre el job (`plan-offer-rename.job.ts`) cada minuto.
  * - `exigirNombreDelPlanAlDia`: la puerta del checkout de «Tu plan». Mientras Stripe diga otro nombre, 503 `PLAN_RENAME_PENDING`.
  *
  * 🔴 Reglas que no se negocian aquí:
  * 1. **`plan-offer-nombre` se toma SOLO**, nunca junto a `plan-offer-publish` ni a los candados de producto, y las llamadas a Stripe
- *    con él tomado tienen tope de 10 s.
+ *    con él tomado tienen tope de 10 s por petición.
  * 2. **Con sólo la v1 (o sin versiones) la oferta no es dueña del nombre** (`stripeProductName` nulo): la puerta no lee Stripe, el job
- *    sólo lee la base, nadie escribe `nombresEnStripe`, y la sincronización hace exactamente las llamadas a Stripe de hoy.
- * 3. **Nunca un `products.update` del nombre de un plan sin el candado**: si el candado o la lectura de la vigente fallan, no se escribe.
+ *    sólo lee la base, nadie escribe `nombresEnStripe`, y la sincronización hace hacia Stripe exactamente lo de B0 (mismos argumentos,
+ *    sin opciones de petición, mismo orden y mismas veces). Lo único extra son lecturas de la base.
+ * 3. **El nombre de una vigente dueña de él sólo se escribe bajo el candado.** La sincronización escribe el del catálogo sin candado
+ *    (es B0) cuando la vigente no es dueña del nombre o cuando no se pudo saber (falló el candado o la lectura); después lo revisa bajo
+ *    el candado y, si para entonces la vigente es dueña de otro nombre, lo escribe (Codex B1 #3).
  *
- * Residuo declarado: una petición a Stripe abortada a los 10 s que Stripe procese después de soltar el candado. La siguiente vuelta del
- * job lo corrige y la puerta del checkout no abre mientras dure.
+ * Residuos declarados (la puerta del checkout no abre mientras duren; el job los corrige en su siguiente vuelta, ~1 min):
+ * - una petición a Stripe abortada a los 10 s que Stripe procese después de soltar el candado;
+ * - el nombre del catálogo que la sincronización escribe sin candado (B0) queda encima de un renombre publicado porque su revisión
+ *   posterior no lo pudo corregir (falló, o Stripe procesó el update de B0 después de la revisión).
  */
 import type { Prisma, PrismaClient } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
@@ -30,7 +35,7 @@ import { ofertaVigente, type OfertaVigente, type PlanPagado } from './planOffer'
 /**
  * Cómo quedó el nombre de un plan:
  * - `SIN_VERSION`: la vigente no es dueña del nombre (sin versiones, la v1, o una versión que nunca lo cambió). El job no toca Stripe;
- *   la sincronización escribe el nombre del catálogo, como hoy.
+ *   la sincronización escribió el nombre del catálogo, como B0 (también cuando no pudo saber de quién es el nombre).
  * - `AL_DIA`: Stripe ya dice el nombre de la vigente.
  * - `RENOMBRADO`: se le escribió el nombre de la vigente.
  * - `FALLO`: no se pudo (Stripe, el candado o la base); lo intenta la siguiente vuelta.
@@ -49,22 +54,23 @@ const PUNTERO_ID = 'vigente'
 /** Bajo el candado del nombre: tope de 10 s y sin los reintentos del SDK (el job lo vuelve a intentar en un minuto). */
 const STRIPE_BAJO_EL_CANDADO = { timeout: 10_000, maxNetworkRetries: 0 } as const
 /**
- * La sincronización conserva TODO lo de hoy hacia Stripe (el mismo cuerpo, el mismo `retry` de 3 reintentos y los reintentos propios del
- * SDK, que mandan su `Idempotency-Key`); lo único nuevo es el tope de 10 s por petición, que no viaja a Stripe.
+ * Sólo el paso 2 de la sincronización (la vigente es dueña del nombre, lo que exige una versión del editor): el mismo cuerpo y el mismo
+ * `retry` que el resto de la sincronización, con los reintentos propios del SDK, y un tope de 10 s por petición porque va bajo el
+ * candado. El nombre del catálogo (paso 3, lo de B0) NO lleva opciones de petición.
  */
-const STRIPE_EN_LA_SINCRONIZACION = { timeout: 10_000 } as const
+const STRIPE_NOMBRE_PROPIO_EN_LA_SINCRONIZACION = { timeout: 10_000 } as const
 /** La puerta del checkout no toma ningún candado: el tope de la regla común. */
 const STRIPE_EN_LA_PUERTA = { timeout: 15_000, maxNetworkRetries: 0 } as const
 
-/** El job y el publicador: lo que dura su turno en el candado (más la espera del turno de otro). */
+/** El job, el publicador y la revisión posterior de la sincronización: su turno en el candado (más la espera del turno de otro). */
 const TRANSACCION_DEL_JOB = { maxWait: 15_000, timeout: 30_000 } as const
 /**
- * La sincronización. Su peor caso con Stripe colgado cabe en 150 s: 4 intentos de `retry` × 3 peticiones del SDK × 10 s = 120 s, más
+ * Los pasos 1 y 2 de la sincronización (decidir y, si la vigente es dueña del nombre, escribirlo). Sin nombre propio dura el candado y
+ * una lectura. Con él, el tope lo pone el paso 2 con Stripe colgado: 4 intentos de `retry` × 3 peticiones del SDK × 10 s = 120 s, más
  * las esperas entre intentos de `retry` (1 + 2 + 4 s con ±25 %: hasta 8.75 s) y las del SDK entre sus peticiones (0.5 y 1 s por
  * intento: hasta 6 s), ≈ 135 s. No cuenta un `Retry-After` de Stripe (el SDK lo respeta hasta 60 s) ni una espera larga por el
- * candado (el job lo suelta en cuanto termina sus dos llamadas de 10 s): si una de ésas lo empuja más allá, Prisma deshace la
- * transacción, se suelta el candado y la siguiente vuelta del job corrige lo que haya quedado. Mientras tanto, el job y el publicador
- * esperan su turno o lo intentan en la siguiente vuelta.
+ * candado: si una de ésas lo empuja más allá, Prisma deshace la transacción, se suelta el candado y la siguiente vuelta del job corrige
+ * lo que haya quedado.
  */
 const TRANSACCION_DE_LA_SINCRONIZACION = { maxWait: 15_000, timeout: 150_000 } as const
 
@@ -117,14 +123,13 @@ async function anotarObservacion(
 }
 
 /**
- * Escribe el nombre del producto de Stripe del plan. 🔴 Toma `plan-offer-nombre` y DESPUÉS lee la vigente con esa transacción.
+ * Escribe el nombre del producto de Stripe del plan.
  *
- * - `JOB` (el job y el intento inmediato del publicador): sin nombre propio → `SIN_VERSION` sin tocar Stripe. Con él, lee el producto
- *   y, si dice otro, `products.update(productId, { name })` (la respuesta ya trae el nombre: no se relee). Nunca lanza: `FALLO`.
- * - `SYNC` (`syncFeaturesToStripe`): el `products.update(productId, { name, description })` de hoy, directo, con el mismo `retry`,
- *   sobre el mismo producto que la sincronización (`catalogo.productId`) y sin leer antes ni después. El nombre es el de la vigente o,
- *   sin nombre propio, el del catálogo (`catalogo.nombre`). Si Stripe lo rechaza, el error sube tal cual (la sincronización salta el
- *   precio de ese plan, como hoy). Si el candado o la lectura fallan, `FALLO` con aviso y sin escribir ningún nombre.
+ * - `JOB` (el job, el intento inmediato del publicador y la revisión posterior de la sincronización): toma `plan-offer-nombre` y
+ *   DESPUÉS lee la vigente con esa transacción. Sin nombre propio → `SIN_VERSION` sin tocar Stripe. Con él, lee el producto y, si dice
+ *   otro, `products.update(productId, { name })` (la respuesta ya trae el nombre: no se relee), con el tope de 10 s y sin los
+ *   reintentos del SDK. Nunca lanza: `FALLO`.
+ * - `SYNC` (`syncFeaturesToStripe`): ver `escribirEnLaSincronizacion`.
  *
  * Si Stripe ya tiene el nombre y lo que falla después es la observación o el commit, se avisa así («ya se escribió en Stripe») y se
  * devuelve lo que se escribió, no `FALLO`.
@@ -136,87 +141,46 @@ export async function escribirNombreDelPlan(
   origen: 'JOB' | 'SYNC',
   catalogo?: { nombre: string; descripcion: string | null; productId: string },
 ): Promise<EstadoDelNombre> {
-  if (origen === 'SYNC' && !catalogo) throw new Error('escribirNombreDelPlan: la sincronización necesita el nombre del catálogo')
-  /**
-   * Lo que pasó dentro de la transacción, para el `catch` de afuera (en un objeto: el análisis de flujo no ve lo que una función
-   * interna le asigna a una variable).
-   * - `rechazoDeStripe`: el error de Stripe de la sincronización; ése sube tal cual, los demás (candado, base) son `FALLO`.
-   * - `escritoEnStripe`: lo que ya quedó en Stripe (un `products.update` que contestó); `null` = no se escribió nada.
-   */
-  const marca: { rechazoDeStripe: unknown; escritoEnStripe: EstadoDelNombre | null } = { rechazoDeStripe: undefined, escritoEnStripe: null }
+  if (origen === 'SYNC') {
+    if (!catalogo) throw new Error('escribirNombreDelPlan: la sincronización necesita el nombre del catálogo')
+    return escribirEnLaSincronizacion(tier, catalogo)
+  }
+  /** `escritoEnStripe`: lo que ya quedó en Stripe (un `products.update` que contestó); `null` = no se escribió nada. */
+  const marca: { escritoEnStripe: EstadoDelNombre | null } = { escritoEnStripe: null }
   try {
-    return await prisma.$transaction(
-      async (tx): Promise<EstadoDelNombre> => {
-        // 🔴 Primero el candado; la vigente se lee DESPUÉS y con esta transacción.
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CANDADO_DEL_NOMBRE}))`
-        const vigente = await ofertaVigente(tx)
-        const propio = nombrePropio(vigente, tier)
-        if (!propio && origen === 'JOB') return 'SIN_VERSION'
+    return await prisma.$transaction(async (tx): Promise<EstadoDelNombre> => {
+      // 🔴 Primero el candado; la vigente se lee DESPUÉS y con esta transacción.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CANDADO_DEL_NOMBRE}))`
+      const propio = nombrePropio(await ofertaVigente(tx), tier)
+      if (!propio) return 'SIN_VERSION'
 
-        if (origen === 'SYNC') {
-          const {
-            nombre: delCatalogo,
-            descripcion,
-            productId,
-          } = catalogo as { nombre: string; descripcion: string | null; productId: string }
-          let actualizado: { name?: string | null } | undefined
-          try {
-            actualizado = await retry(
-              () =>
-                stripe.products.update(
-                  productId,
-                  { name: propio ?? delCatalogo, description: descripcion || undefined },
-                  STRIPE_EN_LA_SINCRONIZACION,
-                ),
-              { retries: 3, shouldRetry: shouldRetryStripeError, context: 'stripe.updateProduct' },
-            )
-          } catch (error) {
-            marca.rechazoDeStripe = error
-            throw error
-          }
-          // Sin nombre propio es el nombre del catálogo, como hoy: nadie anota la observación.
-          const escrito: EstadoDelNombre = propio ? 'RENOMBRADO' : 'SIN_VERSION'
-          marca.escritoEnStripe = escrito
-          if (propio) await anotarObservacion(tx, tier, propio, 'RENOMBRADO', actualizado?.name ?? null)
-          return escrito
+      // La vigente es dueña del nombre: su producto se lee de la base.
+      const productId = await productoDelPlan(tx, tier)
+      if (!productId) {
+        logger.error('🚨 nombreDelPlanEnStripe: el plan no tiene producto de Stripe — no se escribe su nombre', { tier, origen })
+        return 'FALLO'
+      }
+      /** `undefined` mientras Stripe no se haya podido leer. */
+      let enStripe: string | null | undefined
+      let estado: EstadoDelNombre
+      try {
+        enStripe = (await stripe.products.retrieve(productId, STRIPE_BAJO_EL_CANDADO)).name ?? null
+        estado = 'AL_DIA'
+        if (enStripe !== propio) {
+          enStripe = (await stripe.products.update(productId, { name: propio }, STRIPE_BAJO_EL_CANDADO)).name ?? null
+          estado = enStripe === propio ? 'RENOMBRADO' : 'FALLO'
+          marca.escritoEnStripe = estado
         }
-
-        // JOB, con la vigente dueña del nombre: su producto se lee de la base.
-        const productId = await productoDelPlan(tx, tier)
-        if (!productId) {
-          logger.error('🚨 nombreDelPlanEnStripe: el plan no tiene producto de Stripe — no se escribe su nombre', { tier, origen })
-          return 'FALLO'
-        }
-        const esperado = propio as string
-        /** `undefined` mientras Stripe no se haya podido leer. */
-        let enStripe: string | null | undefined
-        let estado: EstadoDelNombre
-        try {
-          enStripe = (await stripe.products.retrieve(productId, STRIPE_BAJO_EL_CANDADO)).name ?? null
-          estado = 'AL_DIA'
-          if (enStripe !== esperado) {
-            enStripe = (await stripe.products.update(productId, { name: esperado }, STRIPE_BAJO_EL_CANDADO)).name ?? null
-            estado = enStripe === esperado ? 'RENOMBRADO' : 'FALLO'
-            marca.escritoEnStripe = estado
-          }
-        } catch (error) {
-          logger.warn('Renombre de los planes: Stripe no contestó el nombre del plan', { tier, error: comoTexto(error) })
-          estado = 'FALLO'
-        }
-        await anotarObservacion(tx, tier, esperado, estado, enStripe)
-        return estado
-      },
-      origen === 'SYNC' ? TRANSACCION_DE_LA_SINCRONIZACION : TRANSACCION_DEL_JOB,
-    )
+      } catch (error) {
+        logger.warn('Renombre de los planes: Stripe no contestó el nombre del plan', { tier, error: comoTexto(error) })
+        estado = 'FALLO'
+      }
+      await anotarObservacion(tx, tier, propio, estado, enStripe)
+      return estado
+    }, TRANSACCION_DEL_JOB)
   } catch (error) {
-    if (origen === 'SYNC' && marca.rechazoDeStripe !== undefined && error === marca.rechazoDeStripe) throw error
     if (marca.escritoEnStripe !== null) {
-      // Stripe ya tiene el nombre; lo que falló después fue la observación o el commit (la siguiente vuelta la vuelve a anotar).
-      logger.warn('Renombre de los planes: el nombre ya se escribió en Stripe; no se guardó la observación', {
-        tier,
-        origen,
-        error: comoTexto(error),
-      })
+      avisarYaEscrito(tier, origen, error)
       return marca.escritoEnStripe
     }
     // El candado no llegó a tiempo, la base no contestó o la vigente está rota: no se escribió ningún nombre.
@@ -227,6 +191,123 @@ export async function escribirNombreDelPlan(
     })
     return 'FALLO'
   }
+}
+
+/** Stripe ya tiene el nombre; lo que falló después fue la observación o el commit (la siguiente vuelta la vuelve a anotar). */
+function avisarYaEscrito(tier: PlanPagado, origen: 'JOB' | 'SYNC', error: unknown): void {
+  logger.warn('Renombre de los planes: el nombre ya se escribió en Stripe; no se guardó la observación', {
+    tier,
+    origen,
+    error: comoTexto(error),
+  })
+}
+
+/**
+ * La sincronización del catálogo (`syncFeaturesToStripe`) sobre el producto de un plan (Codex B1 #3). Con el interruptor apagado (sin
+ * versiones o con sólo la v1), hacia Stripe es B0 byte a byte; lo único extra son lecturas de la base.
+ *
+ * 1. **Decidir:** toma `plan-offer-nombre` y lee la vigente con esa transacción. Si el candado o la lectura fallan, el nombre de la
+ *    oferta queda DESCONOCIDO (con aviso).
+ * 2. **Si la vigente es dueña del nombre** (sólo existe con una versión del editor): en la misma transacción, con el candado tomado,
+ *    `products.update(productId, { name: <el de la vigente>, description })` con el mismo `retry` y el tope de 10 s por petición. Si
+ *    Stripe lo rechaza, el error sube tal cual (la sincronización salta el precio de ese plan, como B0) y no hay revisión. Si se cae la
+ *    transacción antes de escribir, `FALLO` sin escribir nada (sin candado nunca se escribe el nombre de una vigente dueña de él).
+ * 3. **Si no hay nombre de la oferta (nulo o desconocido):** exactamente lo de B0, fuera de toda transacción:
+ *    `products.update(productId, { name: <el del catálogo>, description })` con el mismo `retry` y SIN opciones de petición. Si falla,
+ *    el error sube tal cual (la sincronización salta el precio de ese plan, como B0).
+ * 4. **Revisión posterior** (sólo si el paso 3 escribió): una vuelta del job para este plan (`escribirNombreDelPlan(tier, 'JOB')`). Si
+ *    la vigente AHORA es dueña del nombre (se publicó una versión a media escritura), lo escribe bajo el candado con el tope de 10 s y
+ *    converge sin esperar al job. Nunca lanza: si falla deja su aviso, el job lo corrige en su siguiente vuelta y la puerta del
+ *    checkout no abre mientras tanto. Sin nombre propio sólo es el candado y una lectura: no toca Stripe.
+ *
+ * Devuelve `RENOMBRADO`/`AL_DIA` si quedó el nombre de la vigente (paso 2 o la revisión), `SIN_VERSION` si quedó el del catálogo y
+ * `FALLO` sólo en el caso del paso 2 que no escribió.
+ */
+async function escribirEnLaSincronizacion(
+  tier: PlanPagado,
+  catalogo: { nombre: string; descripcion: string | null; productId: string },
+): Promise<EstadoDelNombre> {
+  const { nombre, descripcion, productId } = catalogo
+  /**
+   * Lo que pasó dentro de la transacción, para el `catch` de afuera (en un objeto: el análisis de flujo no ve lo que una función
+   * interna le asigna a una variable).
+   * - `propio`: el nombre de la vigente leído bajo el candado; `null` = no es dueña; `undefined` = no se llegó a leer (desconocido).
+   * - `rechazoDeStripe`: el error de Stripe del paso 2; ése sube tal cual.
+   * - `escritoEnStripe`: lo que ya quedó en Stripe en el paso 2; `null` = nada.
+   */
+  const marca: { propio: string | null | undefined; rechazoDeStripe: unknown; escritoEnStripe: EstadoDelNombre | null } = {
+    propio: undefined,
+    rechazoDeStripe: undefined,
+    escritoEnStripe: null,
+  }
+  try {
+    const escrito = await prisma.$transaction(async (tx): Promise<EstadoDelNombre | null> => {
+      // Paso 1. 🔴 Primero el candado; la vigente se lee DESPUÉS y con esta transacción.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CANDADO_DEL_NOMBRE}))`
+      const propio = nombrePropio(await ofertaVigente(tx), tier)
+      marca.propio = propio
+      if (!propio) return null
+
+      // Paso 2: bajo el candado, el nombre de la vigente con la descripción del catálogo.
+      let actualizado: { name?: string | null } | undefined
+      try {
+        actualizado = await retry(
+          () =>
+            stripe.products.update(
+              productId,
+              { name: propio, description: descripcion || undefined },
+              STRIPE_NOMBRE_PROPIO_EN_LA_SINCRONIZACION,
+            ),
+          { retries: 3, shouldRetry: shouldRetryStripeError, context: 'stripe.updateProduct' },
+        )
+      } catch (error) {
+        marca.rechazoDeStripe = error
+        throw error
+      }
+      marca.escritoEnStripe = 'RENOMBRADO'
+      await anotarObservacion(tx, tier, propio, 'RENOMBRADO', actualizado?.name ?? null)
+      return 'RENOMBRADO'
+    }, TRANSACCION_DE_LA_SINCRONIZACION)
+    if (escrito) return escrito
+  } catch (error) {
+    if (marca.rechazoDeStripe !== undefined && error === marca.rechazoDeStripe) throw error
+    if (marca.escritoEnStripe !== null) {
+      avisarYaEscrito(tier, 'SYNC', error)
+      return marca.escritoEnStripe
+    }
+    if (marca.propio) {
+      // La vigente es dueña del nombre y la transacción se cayó antes de escribirlo: sin candado no se escribe (lo hace el job).
+      logger.warn('Renombre de los planes: la sincronización no pudo escribir el nombre de la vigente — lo escribe el job', {
+        tier,
+        error: comoTexto(error),
+      })
+      return 'FALLO'
+    }
+    // `null`: la vigente no es dueña del nombre y sólo falló el commit de la lectura; nada que avisar. `undefined`: desconocido.
+    if (marca.propio === undefined)
+      logger.warn(
+        'Renombre de los planes: no se pudo tomar el candado del nombre o leer la vigente — se escribe el nombre del catálogo, como antes de los planes editables',
+        { tier, error: comoTexto(error) },
+      )
+  }
+
+  // Paso 3: lo de B0, tal cual (sin transacción, sin candado y sin opciones de petición). Si falla, sube.
+  await retry(
+    () =>
+      stripe.products.update(productId, {
+        name: nombre,
+        description: descripcion || undefined,
+      }),
+    {
+      retries: 3,
+      shouldRetry: shouldRetryStripeError,
+      context: 'stripe.updateProduct',
+    },
+  )
+
+  // Paso 4: si en medio se publicó un nombre, se escribe ahora bajo el candado (sin nombre propio no toca Stripe).
+  const revision = await escribirNombreDelPlan(tier, 'JOB')
+  return revision === 'RENOMBRADO' || revision === 'AL_DIA' ? revision : 'SIN_VERSION'
 }
 
 /**

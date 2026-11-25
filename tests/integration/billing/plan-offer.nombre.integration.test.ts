@@ -1,9 +1,11 @@
 /**
  * Planes editables B1, Task 8: el nombre del producto de Stripe de un plan, contra Postgres REAL (los candados son de verdad).
  *
- * Todos los escritores del nombre (el job, el intento inmediato del publicador y `syncFeaturesToStripe`) se forman en
- * `plan-offer-nombre` y calculan el nombre de la vigente JUSTO antes de escribir: el que llega tarde escribe lo más nuevo. La puerta
- * del checkout de «Tu plan» (por HTTP, con un JWT real) responde 503 `PLAN_RENAME_PENDING` mientras Stripe diga otro nombre.
+ * Los escritores del nombre de una vigente dueña de él (el job, el intento inmediato del publicador y `syncFeaturesToStripe`) se forman
+ * en `plan-offer-nombre` y calculan el nombre de la vigente JUSTO antes de escribir: el que llega tarde escribe lo más nuevo. Sin
+ * nombre propio, la sincronización escribe el del catálogo como B0 (sin candado) y después lo revisa bajo el candado (Codex B1 #3).
+ * La puerta del checkout de «Tu plan» (por HTTP, con un JWT real) responde 503 `PLAN_RENAME_PENDING` mientras Stripe diga otro
+ * nombre.
  *
  * Stripe se simula con un almacén en memoria que guarda el nombre de cada producto y deja detener a mano el siguiente
  * `products.update` de un producto. La preparación de las listas híbridas sólo estampa ids falsos (como en `plan-offer.candado`),
@@ -577,29 +579,36 @@ describe('el nombre de un plan en Stripe: un solo escritor y la puerta del check
     })
   })
 
-  it('🔴 una sincronización que empezó en v1 (detenida en su products.update con Feature.name) y la PRIMERA publicación con otro nombre: el renombre del publicador espera el candado y escribe después; el nombre final en Stripe es el de v2', async () => {
+  it('🔴 una sincronización que empezó en v1 (detenida en su products.update de B0, con Feature.name y sin candado) y la PRIMERA publicación con otro nombre: el nombre final en Stripe es el de v2 y es la última escritura (la revisión posterior de la sincronización lo vuelve a poner)', async () => {
     await conSoloLosPlanes(async () => {
       const pausa = detenerElSiguienteNombre(productos.PRO)
       let sincronizacion: Promise<unknown> | undefined
       try {
         sincronizacion = enSegundoPlano(syncFeaturesToStripe())
         await hastaQueLlegue(pausa.llego, sincronizacion)
-        // Con la v1 la oferta no es dueña del nombre: la sincronización escribe el del catálogo, como hoy.
+        // Con la v1 la oferta no es dueña del nombre: la sincronización escribe el del catálogo, como B0 (sin opciones de petición).
         expect(pausa.cuerpo).toEqual({ name: CATALOGO.PLAN_PRO.name, description: CATALOGO.PLAN_PRO.description })
 
         await expect(publicarConNombre('Pro Plus')).resolves.toMatchObject({ number: 2 })
-        await hastaQueEsperen(1)
+        // El update de B0 no tiene el candado: el renombre inmediato del publicador no lo espera y escribe «Pro Plus» ya.
+        await hastaQue(
+          () => mockStripe.productos.get(productos.PRO)?.name === PRO_PLUS && !renombreCorriendo(),
+          'el publicador escribió «Pro Plus»',
+        )
       } finally {
         pausa.soltar()
         await asentar(sincronizacion)
       }
 
       await expect(sincronizacion).resolves.toBeDefined()
-      await hastaQue(() => mockStripe.productos.get(productos.PRO)?.name === PRO_PLUS && !renombreCorriendo(), 'Stripe dice «Pro Plus»')
-      expect(nombresEscritos(productos.PRO).map(e => [e.nombre, e.origen])).toEqual([
-        [CATALOGO.PLAN_PRO.name, 'SYNC'],
-        [PRO_PLUS, 'JOB'],
-      ])
+      await hastaQue(() => !renombreCorriendo(), 'el renombre en segundo plano terminó')
+      // El update detenido de B0 cayó encima con el nombre del catálogo; la revisión posterior (bajo el candado) leyó la v2 y lo
+      // corrigió: el nombre final y la última escritura son los de la v2.
+      const escritas = nombresEscritos(productos.PRO)
+      expect(escritas.filter(e => e.origen === 'SYNC').map(e => e.nombre)).toEqual([CATALOGO.PLAN_PRO.name])
+      expect(escritas[escritas.length - 1]).toMatchObject({ producto: productos.PRO, nombre: PRO_PLUS })
+      expect(mockStripe.productos.get(productos.PRO)?.name).toBe(PRO_PLUS)
+      expect(escritas.map(e => e.nombre).indexOf(CATALOGO.PLAN_PRO.name)).toBeLessThan(escritas.length - 1)
       // Con el nombre al día, el checkout abre.
       const abierto = await pedirCheckout()
       expect(abierto.status).toBe(200)
