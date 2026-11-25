@@ -7025,6 +7025,12 @@
         "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
       }
     ],
+    "avoqado-web-dashboard:avoqado-server/prisma/migrations/20261125190100_lealtad_vencimiento_apagado_en_configs_existentes/migration.sql": [
+      {
+        "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
+        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+      }
+    ],
     "avoqado-web-dashboard:avoqado-server/src/controllers/dashboard/financialConnection.controller.ts": [
       {
         "pagina": "dashboard/bancos/enviar-spei",
@@ -7104,7 +7110,7 @@
       },
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
@@ -7394,7 +7400,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts": [
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
@@ -7555,6 +7561,12 @@
       {
         "pagina": "dashboard/inventario/por-que-una-receta-no-descuenta",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      }
+    ],
+    "avoqado-web-dashboard:avoqado-server/src/services/loyalty/vencimientoDePuntos.ts": [
+      {
+        "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
+        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/online-ordering/card/confirm.service.ts": [
@@ -7766,7 +7778,7 @@
       },
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
@@ -8210,7 +8222,7 @@
     "avoqado-web-dashboard:src/locales/es/loyalty.json": [
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
@@ -8382,7 +8394,7 @@
       },
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
@@ -8828,7 +8840,7 @@
     "avoqado-web-dashboard:src/pages/Loyalty/LoyaltySettings.tsx": [
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
       }
     ],
     "avoqado-web-dashboard:src/pages/Loyalty/WalletCardDesigner.tsx": [
@@ -9334,7 +9346,7 @@
       },
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",

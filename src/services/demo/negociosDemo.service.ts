@@ -789,7 +789,8 @@ async function seedLoyalty(bp: VenueBlueprint, venueId: string): Promise<void> {
       pointsPerVisit: bp.loyalty.pointsPerVisit,
       redemptionRate: 0.01, // 100 pts = $1
       minPointsRedeem: bp.loyalty.minPointsRedeem,
-      pointsExpireDays: 365,
+      // D27: el vencimiento viene apagado, también en los demos (los puntos sí vencen cuando se prende).
+      pointsExpireDays: null,
       active: true,
       isDemo: true,
     },
