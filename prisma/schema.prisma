@@ -5774,6 +5774,47 @@ model HybridOfferPublication {
   @@unique([campaignId, version])
 }
 
+/// Estado de una versión de la oferta de planes (precios y pruebas de FREE/PRO/PREMIUM).
+enum PlanOfferVersionStatus {
+  PREPARING
+  PUBLISHED
+  SUPERSEDED
+  DISCARDED
+}
+
+/// Versión inmutable de la oferta de planes. Una publicada siempre tiene `number`.
+model PlanOfferVersion {
+  id                   String                 @id @default(cuid())
+  number               Int?                   @unique
+  status               PlanOfferVersionStatus @default(PREPARING)
+  definition           Json
+  basedOnVersionId     String?
+  hybridPublicationIds Json?
+  preparacion          Json?
+  createdById          String
+  publishedById        String?
+  discardedById        String?
+  createdAt            DateTime               @default(now())
+  publishedAt          DateTime?
+  discardedAt          DateTime?
+  vigenteDe            PlanOfferPointer?      @relation("vigente")
+  pendienteDe          PlanOfferPointer?      @relation("pendiente")
+
+  @@index([status, createdAt])
+}
+
+/// Un solo renglón (`id = 'vigente'`): qué versión rige y cuál está pendiente.
+model PlanOfferPointer {
+  id               String            @id @default("vigente")
+  currentVersionId String?           @unique
+  currentVersion   PlanOfferVersion? @relation("vigente", fields: [currentVersionId], references: [id], onDelete: Restrict)
+  pendingVersionId String?           @unique
+  pendingVersion   PlanOfferVersion? @relation("pendiente", fields: [pendingVersionId], references: [id], onDelete: Restrict)
+  revision         Int               @default(0)
+  nombresEnStripe  Json?
+  updatedAt        DateTime          @updatedAt
+}
+
 /// A quote becomes the durable purchase intent on acceptance. The quote never changes.
 model HybridPurchase {
   id                   String                   @id @default(cuid())
@@ -7190,6 +7231,9 @@ model PlatformSettings {
   /// passed to Stripe is `gross × platformFeeBps/10000 × (10000+vatRateBps)/10000`.
   /// Set to 0 to charge no VAT (e.g. for testing or non-MX deployments).
   vatRateBps Int @default(1600)
+
+  /// Destinatarios internos de los avisos del alta (vacío = ninguno).
+  avisosDelAltaCorreos String[] @default([])
 
   updatedAt   DateTime @updatedAt
   updatedById String?
@@ -20971,6 +21015,8 @@ model LaunchCampaignRedemption {
   discountMonths       Int
   listPriceCents       Int
   stripeCouponId       String
+  /// El Price con el que se apartó el lugar; null = apartado antes de B1.
+  stripePriceId        String?
 
   stripeSubscriptionId String? @unique
   /// PaymentMethod.card.fingerprint — se REGISTRA; bloquear por tarjeta repetida es decisión
