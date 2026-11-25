@@ -1823,6 +1823,70 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
     })
   })
 
+  describe('🔴 D39 · cuenta con puntos canjeados: el cobro remoto no puede pasar de lo que falta (POS viejo sin expectedRemainingCents)', () => {
+    // Cuenta de $120 a la que se le canjearon $20 en puntos (sin abono): debe $100. Un POS anterior a 2.25.53 con la vista vieja manda $120.
+    const cuentaConCanje = async () => {
+      const cliente = await prisma.customer.create({ data: { venueId, firstName: 'D39', loyaltyPoints: 0 } })
+      const orden = await nuevaOrden({
+        customerId: cliente.id,
+        subtotal: new Prisma.Decimal(120),
+        discountAmount: new Prisma.Decimal(20),
+        total: new Prisma.Decimal(100),
+        remainingBalance: new Prisma.Decimal(100),
+      })
+      const canje = await prisma.loyaltyTransaction.create({
+        data: { customerId: cliente.id, type: 'REDEEM', points: -200, orderId: orden.id, reason: 'Canje D39' },
+      })
+      await prisma.orderDiscount.create({
+        data: {
+          orderId: orden.id,
+          type: 'FIXED_AMOUNT',
+          name: 'Recompensas — 200 puntos',
+          value: new Prisma.Decimal(20),
+          amount: new Prisma.Decimal(20),
+          isManual: true,
+          loyaltyTransactionId: canje.id,
+        },
+      })
+      return { orden, clienteId: cliente.id }
+    }
+    const limpiar = async (orderId: string, clienteId: string) => {
+      await prisma.terminalPaymentRequest.deleteMany({ where: { venueId, orderId } })
+      await prisma.order.deleteMany({ where: { id: orderId } })
+      await prisma.loyaltyTransaction.deleteMany({ where: { customerId: clienteId } })
+      await prisma.customer.deleteMany({ where: { id: clienteId } })
+    }
+
+    it('$120 sobre una cuenta que debe $100 por un canje ⇒ 412 con lápida ANTES de tocar la terminal', async () => {
+      const { orden, clienteId } = await cuentaConCanje()
+      const requestId = nextRequest()
+      const r = await enviar({ requestId, venueId, terminalId: terminalDe('canje-de-mas'), orderId: orden.id, amountCents: 12000, requestedBy: fixture })
+      expect(directEmit).not.toHaveBeenCalled()
+      expect(r).toMatchObject({ statusCode: 412, code: 'AMOUNT_EXCEEDS_REMAINING_BALANCE', details: { requestId, remainingCents: 10000 } })
+      expect((r as Error).message).toContain('tiene puntos canjeados: falta $100.00')
+      expect((await filasDe(requestId))[0]).toMatchObject({ status: 'FAILED', failureCode: 'REJECTED_ORDER_AMOUNT_OVER_BALANCE' })
+      await limpiar(orden.id, clienteId)
+    })
+
+    it('sin el margen de D7: $1 de más sobre una cuenta con canje también se rechaza (Codex r4 #3)', async () => {
+      const { orden, clienteId } = await cuentaConCanje()
+      const requestId = nextRequest()
+      const r = await enviar({ requestId, venueId, terminalId: terminalDe('canje-un-peso'), orderId: orden.id, amountCents: 10100, requestedBy: fixture })
+      expect(directEmit).not.toHaveBeenCalled()
+      expect(r).toMatchObject({ statusCode: 412, code: 'AMOUNT_EXCEEDS_REMAINING_BALANCE' })
+      await limpiar(orden.id, clienteId)
+    })
+
+    it('control: lo que falta (o con propina aparte) se admite', async () => {
+      const { orden, clienteId } = await cuentaConCanje()
+      const requestId = nextRequest()
+      const r = await enviar({ requestId, venueId, terminalId: terminalDe('canje-ok'), orderId: orden.id, amountCents: 10000, tipCents: 1500, requestedBy: fixture })
+      expect(r).toMatchObject({ requestId })
+      expect(directEmit).toHaveBeenCalledWith('terminal:payment_request', expect.objectContaining({ requestId }), expect.any(Function))
+      await limpiar(orden.id, clienteId)
+    })
+  })
+
   it('(d) orden inexistente en el venue ⇒ 400 ORDER_NOT_FOUND con lápida; aunque la orden aparezca, el MISMO requestId repite el 400', async () => {
     const ordenId = `${fixture}-orden-${randomUUID().slice(0, 8)}`
     const terminalId = terminalDe('orden-ausente')

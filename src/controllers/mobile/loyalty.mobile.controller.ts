@@ -28,7 +28,7 @@ export const getCustomerLoyalty = async (req: Request, res: Response, next: Next
 export const redeemPoints = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
-    const { customerId, points, expectedDiscountAmount } = req.body || {}
+    const { customerId, points, expectedDiscountAmount, expectedVersion } = req.body || {}
     const staffId = (req as any).authContext?.userId as string | undefined
     // Candado de la oferta (D18): el monto que enseñó la tablet. Opcional (apps viejas no lo mandan); `null` = no vino.
     const montoEsperado: number | undefined = expectedDiscountAmount ?? undefined
@@ -42,11 +42,19 @@ export const redeemPoints = async (req: Request, res: Response, next: NextFuncti
     if (montoEsperado !== undefined && (typeof montoEsperado !== 'number' || !Number.isFinite(montoEsperado) || montoEsperado < 0)) {
       return res.status(400).json({ success: false, message: 'expectedDiscountAmount debe ser un número no negativo' })
     }
+    // D39: la versión de la cuenta que enseñó la caja (Pedidos la manda; apps viejas y Mesas no). `null` = no vino.
+    const versionEsperada: number | undefined = expectedVersion ?? undefined
+    if (versionEsperada !== undefined && (!Number.isInteger(versionEsperada) || versionEsperada < 0)) {
+      return res.status(400).json({ success: false, message: 'expectedVersion debe ser un entero no negativo' })
+    }
 
     const operation = parseHttpOperation(req.body)
     if (!operation) {
       // La tablet enseña los puntos que pide (nunca recorta) y a la clienta de la cabecera: se comparan esos y el monto.
-      const esperado = montoEsperado === undefined ? undefined : { monto: montoEsperado, puntos: points, deLaCabecera: true }
+      const esperado =
+        montoEsperado === undefined
+          ? undefined
+          : { monto: montoEsperado, puntos: points, deLaCabecera: true, ...(versionEsperada !== undefined ? { version: versionEsperada } : {}) }
       const data = await loyaltyMobileService.redeemPointsToOrder(venueId, orderId, customerId, points, staffId, esperado)
       return res.json({ success: true, data })
     }

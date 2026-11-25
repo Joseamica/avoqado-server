@@ -13,9 +13,13 @@ jest.mock('@/services/online-ordering/card/guards', () => ({ assertCardOrderMone
 jest.mock('@/services/giftCards/cuentaDeTarjetas', () => ({ rechazarSiEsCuentaDeTarjetas: jest.fn() }))
 jest.mock('@/services/shared/repartoDescuentoTx', () => ({ conservarDescuentoHistorico: jest.fn() }))
 jest.mock('@/services/mobile/comp-item.mobile.service', () => ({ recalculateOrderTotals: jest.fn().mockResolvedValue({}) }))
+jest.mock('@/services/shared/orderCancelGuard', () => ({ assertNoLiveTerminalCharge: jest.fn() }))
 
 import { BadRequestError } from '@/errors/AppError'
 import { bloquearCuentaParaEditar } from '@/services/shared/cuentaCancelada'
+import { assertNoLiveTerminalCharge } from '@/services/shared/orderCancelGuard'
+import { recalculateOrderTotals } from '@/services/mobile/comp-item.mobile.service'
+import { ConflictError } from '@/errors/AppError'
 import {
   minimoParaCanjear,
   puntosQueCaben,
@@ -264,5 +268,76 @@ describe('Candado de la oferta · la tablet sólo canjea exactamente lo que most
     await expect(
       redeemPointsToOrderInTransaction(mcp, 'v1', 'o1', 'c1', 1000, undefined, conf as any, { monto: 0.14, puntos: 28 }),
     ).resolves.toMatchObject({ pointsToBurn: 28, discountAmount: 0.14 })
+  })
+})
+
+describe('D39 · la versión de la cuenta y el cobro en la terminal', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('con la versión que enseñó la caja y la cuenta igual: canjea', async () => {
+    const tx = txFalso({ ...cuenta(500), version: 7 })
+    await expect(
+      redeemPointsToOrderInTransaction(tx, 'v1', 'o1', 'c1', 500, undefined, config as any, { monto: 50, puntos: 500, version: 7 }),
+    ).resolves.toMatchObject({ pointsToBurn: 500, discountAmount: 50 })
+  })
+
+  it('otra versión (la cuenta cambió aunque la oferta dé lo mismo, o ya entró este canje y se perdió la respuesta): 409 y nada se quema', async () => {
+    // Codex D39 r1 #2: $120 → $110 no cambia lo que valen 100 puntos; #3: el canje que ya entró subió la versión.
+    const tx = txFalso({ ...cuenta(500), version: 8 })
+    const rechazo = redeemPointsToOrderInTransaction(tx, 'v1', 'o1', 'c1', 500, undefined, config as any, {
+      monto: 50,
+      puntos: 500,
+      version: 7,
+    })
+    await expect(rechazo).rejects.toMatchObject({ statusCode: 409, code: 'LOYALTY_OFFER_CHANGED' })
+    nadaSeQuemo(tx)
+  })
+
+  it('sin versión (Mesas, apps viejas): como siempre', async () => {
+    const tx = txFalso({ ...cuenta(500), version: 8 })
+    await expect(
+      redeemPointsToOrderInTransaction(tx, 'v1', 'o1', 'c1', 500, undefined, config as any, { monto: 50, puntos: 500 }),
+    ).resolves.toMatchObject({ pointsToBurn: 500 })
+  })
+
+  it('con un cobro de la terminal sin desenlace en la cuenta: 409 con su texto y nada se quema (Codex D39 r1 #4)', async () => {
+    ;(assertNoLiveTerminalCharge as jest.Mock).mockRejectedValueOnce(
+      new ConflictError('Hay un cobro con tarjeta en curso', 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE', { requestId: 'r1' }),
+    )
+    const tx = txFalso(cuenta(500))
+    await expect(
+      redeemPointsToOrderInTransaction(tx, 'v1', 'o1', 'c1', 500, undefined, config as any, { monto: 50, puntos: 500 }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE' })
+    nadaSeQuemo(tx)
+    expect(assertNoLiveTerminalCharge).toHaveBeenCalledWith(tx, { venueId: 'v1', orderId: 'o1' }, expect.objectContaining({ mensaje: expect.any(String) }))
+  })
+})
+
+describe('D39 · una cuenta de «Pagar después» no se deja en $0.00 con puntos (Codex r4 #4)', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('el total ya recalculado queda en $0 en una cuenta de «Pagar después»: 400 y se deshace con la transacción', async () => {
+    ;(recalculateOrderTotals as jest.Mock).mockResolvedValueOnce({ total: 0 })
+    const tx = txFalso({ ...cuenta(50), payLater: true })
+    await expect(
+      redeemPointsToOrderInTransaction(tx, 'v1', 'o1', 'c1', 500, undefined, config as any, { monto: 50, puntos: 500 }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'LOYALTY_REDEEM_WOULD_ZERO_PAY_LATER' })
+  })
+
+  it('con un cargo fijo el total sigue arriba de $0: canjea; y una cuenta que no es de «Pagar después» en $0 sigue como siempre', async () => {
+    ;(recalculateOrderTotals as jest.Mock).mockResolvedValueOnce({ total: 5 })
+    await expect(
+      redeemPointsToOrderInTransaction(txFalso({ ...cuenta(50), payLater: true }), 'v1', 'o1', 'c1', 500, undefined, config as any, {
+        monto: 50,
+        puntos: 500,
+      }),
+    ).resolves.toMatchObject({ pointsToBurn: 500 })
+    ;(recalculateOrderTotals as jest.Mock).mockResolvedValueOnce({ total: 0 })
+    await expect(
+      redeemPointsToOrderInTransaction(txFalso({ ...cuenta(50), payLater: null }), 'v1', 'o1', 'c1', 500, undefined, config as any, {
+        monto: 50,
+        puntos: 500,
+      }),
+    ).resolves.toMatchObject({ pointsToBurn: 500 })
   })
 })

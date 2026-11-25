@@ -2127,6 +2127,26 @@ class TerminalPaymentService {
               ),
             )
           }
+          // 🔴 D39 (Codex r2 #1, r3 #4 y r4 #3): un canje de puntos (Mesas, Pedidos) baja la cuenta SIN abono; una caja con la vista vieja
+          // —un POS anterior a 2.25.53 no manda `expectedRemainingCents`— mandaba el total de antes y la terminal cobraba de más. Con un canje
+          // en la cuenta, el importe no pasa de lo que falta, SIN el margen de D7 (100 puntos a $0.01 bajan justo $1, lo mismo que el margen).
+          // Los POS de hoy cobran lo que dice el SERVIDOR al centavo. Sin canje, nada cambia. Bajo el MISMO candado.
+          if (
+            request.amountCents > faltaCents &&
+            (await tx.orderDiscount.count({ where: { orderId: request.orderId, loyaltyTransactionId: { not: null } } })) > 0
+          ) {
+            const falta = (faltaCents / 100).toFixed(2)
+            return rechazar(
+              'REJECTED_ORDER_AMOUNT_OVER_BALANCE',
+              new AppError(
+                `La cuenta ${order.orderNumber ?? request.orderId} tiene puntos canjeados: falta $${falta}. Actualiza la cuenta y vuelve a intentar.`,
+                HTTP_COBRO_MAYOR_QUE_EL_SALDO,
+                true,
+                COBRO_MAYOR_QUE_EL_SALDO,
+                { ...detalles, remainingCents: faltaCents },
+              ),
+            )
+          }
         }
       } else {
         // 🔴 EL RODEO DEL PAGO RÁPIDO (P1-2 de la auditoría de Codex, 11-sep). El candado de arriba sólo corre
