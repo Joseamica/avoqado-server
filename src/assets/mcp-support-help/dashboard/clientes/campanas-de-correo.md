@@ -1,0 +1,52 @@
+---
+title: Mandar una campaña de correo y la felicitación de cumpleaños
+description: Arma una campaña de correo para los clientes que te dieron permiso, mándala, y configura la felicitación que sale sola antes de cada cumpleaños.
+product: dashboard
+category: clientes
+featureCode: CUSTOMER_CAMPAIGNS
+dashboardRoutes:
+  - campaigns
+roles:
+  - OWNER
+  - ADMIN
+lastVerified: 2026-11-25
+sourceRepo: avoqado-web-dashboard
+sourceRef: 501e37072a13f5ed8f22e3d650f2598d3d8820b6
+relatedArticles:
+  - aviso-de-privacidad
+  - gestionar-clientes
+keywords:
+  - campaña de correo
+  - mandar promoción por correo
+  - correo a mis clientes
+  - felicitación de cumpleaños
+  - correo de cumpleaños
+  - no me deja enviar la campaña
+  - ningún cliente recibe el correo
+  - newsletter
+---
+
+## Antes de empezar
+
+Las campañas de correo vienen en el plan **Pro**. La entrada **Clientes > Campañas de correo** pide el permiso de manejar campañas; **Enviar** una campaña, **encender** la felicitación y guardar cambios mientras está encendida piden aparte el permiso de enviar. De fábrica, los dos los tienen el administrador y el dueño.
+
+Sólo se le escribe a los clientes que dieron su permiso expreso para recibir correos de marketing. Ese permiso se pide al dar de alta o editar al cliente, y para pedirlo tu negocio necesita un **aviso de privacidad**.
+
+## Pasos
+
+1. Abre **Clientes > Campañas de correo** y toca **Nueva campaña**.
+2. Escribe el **Nombre de la campaña** (sólo lo ves tú) y el **Asunto del correo**. En **A quién le llega** queda **Todos los que dieron permiso**.
+3. Arma el **Contenido del correo** con los botones **Título**, **Texto**, **Imagen**, **Botón** y **Separador**; acomódalos con **Subir** y **Bajar** o quítalos con **Quitar**. Toca **Guardar borrador**: sale «Campaña guardada».
+4. Para mandarla, abre la campaña en la lista y toca **Enviar**. El aviso dice a cuántos clientes les va a llegar; toca **Enviar a … clientes**. Sale «Campaña enviada a … clientes». Ya no se puede deshacer.
+5. Para la felicitación de cumpleaños, en la tarjeta **Felicitación de cumpleaños** de arriba toca **Configurar** (o **Editar**). Revisa el **Asunto del correo**, los **Días de antelación** (0 = el mismo día, hasta 30) y el **Contenido del correo**.
+6. Prende **Encender la felicitación** y toca **Guardar**. Sale «Felicitación encendida». Si la guardas apagada sale «Felicitación guardada y pausada».
+
+## Problemas frecuentes
+
+- **No sale el botón Enviar:** te falta el permiso de enviar. Una campaña nueva se manda hasta guardarla primero.
+- **«Ningún cliente te ha dado permiso todavía para enviarle promociones.»:** pídeles permiso al registrarlos o márcalo en el formulario del cliente. Sin aviso de privacidad la casilla sale apagada.
+- **«Pídele a un administrador que la encienda: encenderla autoriza el envío de correos.»:** quien tiene el permiso de enviar es quien la enciende.
+- **La felicitación no llegó a tiempo:** cada día se revisa quién cumple años. Si el correo fuera a llegar tarde no se envía: felicitar después del cumpleaños es peor que no felicitar.
+- **Los correos salen en los minutos siguientes, no en el mismo segundo:** la campaña queda **En cola** y sale sola en los minutos siguientes, aunque el aviso diga que sale de inmediato.
+- **Una campaña enviada ya no se edita:** se puede abrir para verla, no para cambiarla.
+- **El estado de la felicitación** dice **Sin configurar**, **Encendida** o **Pausada**.

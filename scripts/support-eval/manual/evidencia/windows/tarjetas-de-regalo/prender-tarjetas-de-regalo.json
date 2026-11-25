@@ -1,0 +1,117 @@
+{
+  "pagina": "windows/tarjetas-de-regalo/prender-tarjetas-de-regalo",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff",
+  "version": "2.25.58-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 118,
+      "cita": "SHORTCUTS(\"Atajos\"),"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
+      "linea": 262,
+      "cita": "name = com.avoqado.pos.giftcards.domain.TextosDeTarjetas.MOSAICO,"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 7,
+      "cita": "const val MOSAICO = \"Tarjeta de regalo\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/HojaDeTarjetaDeRegalo.kt",
+      "linea": 71,
+      "cita": "AccionDeTarjeta(TextosDeTarjetas.PRENDER, hoja.prender) { pidiendoPrender = true }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 10,
+      "cita": "const val PRENDER = \"Prender tarjetas de regalo\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 27,
+      "cita": "const val PRENDER_ACEPTO = \"Acepto los Términos y Condiciones y el Aviso de Privacidad\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/HojaDeTarjetaDeRegalo.kt",
+      "linea": 96,
+      "cita": "enabled = acepta && prender.habilitada && !prendiendo,"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 30,
+      "cita": "const val PRENDER_BOTON = \"Prender\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1324,
+      "cita": "message = com.avoqado.pos.giftcards.domain.TextosDeTarjetas.PRENDER_LISTO,"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 16,
+      "cita": "const val PRENDER_LISTO = \"¡Tarjetas de regalo prendidas!\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/HojaDeTarjetaDeRegalo.kt",
+      "linea": 53,
+      "cita": "// Ya prendidas, la fila se va y el diálogo con ella: «Vender tarjeta» queda activo en la misma hoja."
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "giftCards:enable",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 282
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "GIFT_CARDS",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/EntradaDeTarjetas.kt",
+      "linea": 42
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red, Prender sale apagado con el aviso de sin conexión",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/EntradaDeTarjetas.kt",
+      "linea": 31
+    },
+    {
+      "afirmacion": "Sin respuesta al prender: aviso para reintentar",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/TarjetasDeRegaloViewModel.kt",
+      "linea": 85
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Cobrar › Atajos › Tarjeta de regalo",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
+      "linea": 382
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

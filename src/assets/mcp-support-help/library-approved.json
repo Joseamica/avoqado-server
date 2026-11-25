@@ -33,6 +33,13 @@
         "customers:read"
       ]
     },
+    "android/clientes/agregar-cliente-a-una-venta-cobrada": {
+      "sha256": "3ce5c04ceed239ef673b5ec32061315ed707712f7ff4df6b29c96cabf40db0dc",
+      "requiredPermissions": [
+        "customers:read",
+        "orders:attach-customer"
+      ]
+    },
     "android/clientes/crear-cliente": {
       "sha256": "9ef36472172594513658cdb06d9db0e763687e2cdc7ee0738d295995f3eb3b03",
       "requiredPermissions": [
@@ -45,6 +52,10 @@
         "customers:read",
         "customers:update"
       ]
+    },
+    "android/clientes/pantalla-del-cliente": {
+      "sha256": "e5e84ccf70f624ad277f1928c9cbef0fc3638801b940a2bf0be1092bbe2a790c",
+      "requiredPermissions": []
     },
     "android/cobro/agregar-propina": {
       "sha256": "efa768d7ffd2b218a9b331af758905d0e583f4df5b39ec9aedf7dc0171753a9b",
@@ -149,6 +160,14 @@
       "featureCode": "TABLE_SERVICE",
       "gateKind": "FEATURE"
     },
+    "android/mesas/cliente-y-comensales-de-la-mesa": {
+      "sha256": "2c3cf995d4a4440aa687436ffa79bb65265115a2101511615609499a2023af13",
+      "requiredPermissions": [
+        "orders:update"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
     "android/mesas/mover-o-unir-cuentas": {
       "sha256": "89889d14504557cb01b7f4865f1e1ea3bcfa97fb360b33b49beca6f8966c9485",
       "requiredPermissions": [
@@ -183,6 +202,12 @@
     "android/personal/checar-entrada-y-salida": {
       "sha256": "f5b565762bb942e46527809804ddc0756cc1192c5c49a3edac754abac39ddc6d",
       "requiredPermissions": []
+    },
+    "android/promociones/crear-editar-o-eliminar-cupones-y-descuentos": {
+      "sha256": "70853cef1241b3086cc6726027ebaae83678de9fb5544b847cf931d82e8b72bc",
+      "requiredPermissions": [],
+      "featureCode": "PROMOTIONS",
+      "gateKind": "FEATURE"
     },
     "android/recibos/imprimir-y-reimprimir-recibo": {
       "sha256": "db9da4142270a80edd215409650f459e5c21fda33e76d87df05d35ca4703f1f9",
@@ -236,6 +261,20 @@
       "featureCode": "RESERVATIONS",
       "gateKind": "FEATURE"
     },
+    "android/tarjetas-de-regalo/entregar-reenviar-o-imprimir-tarjeta-de-regalo": {
+      "sha256": "25258b2ee171c9e023a059539e1d0a5c38411c158b537319fd7e4f479cea3b1a",
+      "requiredPermissions": [
+        "giftCards:sell"
+      ]
+    },
+    "android/tarjetas-de-regalo/prender-tarjetas-de-regalo": {
+      "sha256": "454a3d27488d4bd6bc0083ac058f82b975e7ba4a35df292bfd9fa1ac0685ce44",
+      "requiredPermissions": [
+        "giftCards:enable"
+      ],
+      "featureCode": "GIFT_CARDS",
+      "gateKind": "FEATURE"
+    },
     "android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo": {
       "sha256": "b284e4d1f87b516e4e533bd00c9f8561b0a00247ba7615921a8ce129712da854",
       "requiredPermissions": []
@@ -251,6 +290,44 @@
       "requiredPermissions": [
         "customers:read"
       ]
+    },
+    "dashboard/clientes/ajustar-sellos-de-un-cliente": {
+      "sha256": "b549a6be926245216b9fc38b29c0fc954fa9dc25f2e99bd6148800fdc67187ca",
+      "requiredPermissions": [
+        "customers:read",
+        "loyalty:read",
+        "loyalty:adjust"
+      ],
+      "featureCode": "LOYALTY_PROGRAM",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/clientes/aprobar-o-rechazar-clientes": {
+      "sha256": "89bd5f269a2be4b3746ef45c14f2c2b25ad191b25a7304681eafb83ef6f1dadf",
+      "requiredPermissions": [
+        "customers:read",
+        "customers:approve"
+      ]
+    },
+    "dashboard/clientes/asignar-grupo-a-un-cliente": {
+      "sha256": "a714d490d3a4e22f98438502ed72b41ac1024d13ff66a49795b7def39cc974b1",
+      "requiredPermissions": [
+        "customers:read",
+        "customer-groups:read"
+      ]
+    },
+    "dashboard/clientes/aviso-de-privacidad": {
+      "sha256": "61079f1f765173deb2b61551a87016ace74a83351e28f44e72588d932e716cdd",
+      "requiredPermissions": [
+        "marketing:manage"
+      ]
+    },
+    "dashboard/clientes/campanas-de-correo": {
+      "sha256": "f4527631bf3285ad95f56bb42186e22accf6d475bf751569879830d206d812ef",
+      "requiredPermissions": [
+        "marketing:manage"
+      ],
+      "featureCode": "CUSTOMER_CAMPAIGNS",
+      "gateKind": "FEATURE"
     },
     "dashboard/clientes/configurar-lealtad": {
       "sha256": "51f91568579ff6892ab5ccceaa4424b0c0dcef9150613b58529cc42c1afb6f89",
@@ -293,10 +370,63 @@
         "customer-groups:read"
       ]
     },
+    "dashboard/clientes/disenar-tarjeta-digital": {
+      "sha256": "660398eda0e4b2ef9f8497d0847127fffb36949072ff400120ae5ef157f51fa1",
+      "requiredPermissions": [
+        "loyalty:read",
+        "loyalty:update"
+      ],
+      "featureCode": "LOYALTY_PROGRAM",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/clientes/editar-clonar-o-eliminar-descuento": {
+      "sha256": "853937e386248d9d7b583b0bc9271f013a9e13f508eab1336701b5cf8a0c2b2d",
+      "requiredPermissions": [
+        "discounts:read"
+      ],
+      "featureCode": "PROMOTIONS",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/clientes/eliminar-cliente-o-grupo": {
+      "sha256": "1b67d1835f070ed8975418e46abe81dbfe3f8900d82c123b4d9014abd9e3465c",
+      "requiredPermissions": [
+        "customers:read"
+      ]
+    },
+    "dashboard/clientes/generar-o-eliminar-cupones": {
+      "sha256": "65a8d8049486d22388c2774f53504500b102f94577f2bb68f54c39c1160ebf7e",
+      "requiredPermissions": [
+        "coupons:read"
+      ],
+      "featureCode": "PROMOTIONS",
+      "gateKind": "FEATURE"
+    },
     "dashboard/clientes/gestionar-clientes": {
       "sha256": "09c0eb743c793cc82735f6911f7998866d560b485334e7a61880ad737fb06333",
       "requiredPermissions": [
         "customers:read"
+      ]
+    },
+    "dashboard/clientes/prender-y-configurar-tarjetas-de-regalo": {
+      "sha256": "01c9d576d1c38a2a3492c395bdeb66d37d56e430bc7071a46fb76a18f383fbb2",
+      "requiredPermissions": [
+        "giftCards:read"
+      ]
+    },
+    "dashboard/clientes/programa-de-referidos": {
+      "sha256": "a9a9cc5a8f117df432ef45201cc2bdd919ebe498ac928693b3161bb83f271338",
+      "requiredPermissions": [
+        "referral:read",
+        "referral:configure"
+      ],
+      "featureCode": "REFERRAL_PROGRAM",
+      "gateKind": "FEATURE"
+    },
+    "dashboard/clientes/reenviar-tarjeta-de-regalo": {
+      "sha256": "2b9e03367441fb74e01272ced73ee46dac1525f63c329d780bc784ff5f373e3b",
+      "requiredPermissions": [
+        "giftCards:read",
+        "giftCards:manage"
       ]
     },
     "dashboard/clientes/revisar-resenas": {
@@ -304,6 +434,14 @@
       "requiredPermissions": [
         "reviews:read"
       ]
+    },
+    "dashboard/clientes/sugerencias-al-cobrar": {
+      "sha256": "34213c3759bf84065a01c5286060310e0931915a6ec07f49ec1334d2df4fa9ca",
+      "requiredPermissions": [
+        "upsells:read"
+      ],
+      "featureCode": "UPSELL",
+      "gateKind": "FEATURE"
     },
     "dashboard/clientes/ver-o-ajustar-puntos-de-un-cliente": {
       "sha256": "3de46489e0b620f269026e91ee04271329ea8315c69a65a0652cdc63b495a58d",
@@ -647,6 +785,14 @@
       "sha256": "ee8f3e04f90fdaafc226c86660f2b7fd69c9540c8ddb74037a13b76db7c3b9c6",
       "requiredPermissions": []
     },
+    "dashboard/reportes/reporte-de-promociones": {
+      "sha256": "b675138de99024ec5bf4b1fb62e3666e0df3009408f5a7ea85aafb2fe2596bac",
+      "requiredPermissions": [
+        "reports:read"
+      ],
+      "featureCode": "PROMOTIONS",
+      "gateKind": "FEATURE"
+    },
     "dashboard/reportes/revisar-reportes-avanzados": {
       "sha256": "acc6a3f582feb20c82f286bade4343e2a3a099373976fc1ea8ce782bad192f8a",
       "requiredPermissions": [
@@ -799,6 +945,14 @@
       "featureCode": "DELIVERY_CHANNELS",
       "gateKind": "FEATURE"
     },
+    "dashboard/ventas/ligar-cliente-a-un-pago": {
+      "sha256": "5ec1af2f692269f6543da70974f35eda48143c76f22ccd34338f49a87bd0be43",
+      "requiredPermissions": [
+        "payments:read",
+        "customers:read",
+        "orders:update"
+      ]
+    },
     "dashboard/ventas/problemas-con-pedidos-de-delivery": {
       "sha256": "a1bb100156e86cc79a220c862fad63c76970d834931b197abc13f2870629ab6e",
       "requiredPermissions": [],
@@ -875,6 +1029,12 @@
       "requiredPermissions": [
         "tpv-shifts:create",
         "tpv-shifts:close"
+      ]
+    },
+    "tpv/clientes/agregar-cliente-a-la-venta": {
+      "sha256": "0f9a4d8888198cdd4407b7536b2b7200a58a69dee73433f8d72db25b7888b698",
+      "requiredPermissions": [
+        "customers:read"
       ]
     },
     "tpv/cobro/agregar-propina": {
@@ -1056,6 +1216,13 @@
         "customers:read"
       ]
     },
+    "windows/clientes/agregar-cliente-a-una-venta-cobrada": {
+      "sha256": "799c6765d0260ad5c810616f4d19666cf571f950303e4ddb738266ed554a80ea",
+      "requiredPermissions": [
+        "customers:read",
+        "orders:attach-customer"
+      ]
+    },
     "windows/clientes/crear-cliente": {
       "sha256": "b557684892a42703a6b84ab944180bdb08457cc3c71f659df67c4d92ce2ed125",
       "requiredPermissions": [
@@ -1068,6 +1235,10 @@
         "customers:read",
         "customers:update"
       ]
+    },
+    "windows/clientes/pantalla-del-cliente": {
+      "sha256": "3bfff2b9b74c2ac6832893f0146945ff5afbc09058460e2d925da62177dd45dc",
+      "requiredPermissions": []
     },
     "windows/cobro/agregar-propina": {
       "sha256": "6dada947d5dae35607fb16b22c4598ec5ab34620284e4448381f872d875aa880",
@@ -1188,6 +1359,14 @@
       "featureCode": "TABLE_SERVICE",
       "gateKind": "FEATURE"
     },
+    "windows/mesas/cliente-y-comensales-de-la-mesa": {
+      "sha256": "3c7b5f3ae52a887d108bab49b5917281df7d1909b8fe6d3d409087dfea73d461",
+      "requiredPermissions": [
+        "orders:update"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
+    },
     "windows/mesas/mover-o-unir-cuentas": {
       "sha256": "5f67bcf89609fedc4643637712d13d8ffcae427214c1c7a6150ee5114c610d04",
       "requiredPermissions": [
@@ -1222,6 +1401,12 @@
     "windows/personal/checar-entrada-y-salida": {
       "sha256": "4bd6ea1f12850938c044895e1b7464cd46541425a36f1f6f93e147e5b44eb5c7",
       "requiredPermissions": []
+    },
+    "windows/promociones/crear-editar-o-eliminar-cupones-y-descuentos": {
+      "sha256": "6d29db730e562ae1de2ba6919db123c26799c27be61f628260c2378bc7c34337",
+      "requiredPermissions": [],
+      "featureCode": "PROMOTIONS",
+      "gateKind": "FEATURE"
     },
     "windows/recibos/imprimir-y-reimprimir-recibo": {
       "sha256": "39b7ca8de443cd41a53dcc9535e1ce6588237b9bc4fa4979c4d990d2c533555d",
@@ -1271,6 +1456,20 @@
         "reservations:read"
       ],
       "featureCode": "RESERVATIONS",
+      "gateKind": "FEATURE"
+    },
+    "windows/tarjetas-de-regalo/entregar-reenviar-o-imprimir-tarjeta-de-regalo": {
+      "sha256": "296fc549d773f1aaa080bbdcc835417e7b6ebe6ac70b1516e28f449f3210c2f4",
+      "requiredPermissions": [
+        "giftCards:sell"
+      ]
+    },
+    "windows/tarjetas-de-regalo/prender-tarjetas-de-regalo": {
+      "sha256": "1f10ece64241bcb29d28b7db13070a384b85b6d5b5550857afe127f395827b66",
+      "requiredPermissions": [
+        "giftCards:enable"
+      ],
+      "featureCode": "GIFT_CARDS",
       "gateKind": "FEATURE"
     },
     "windows/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo": {

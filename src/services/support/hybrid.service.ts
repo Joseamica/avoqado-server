@@ -870,8 +870,12 @@ export function savedGuidesNeed(
  * Máquina de efectivo 1a (22-nov): las 4 guías de WINDOWS de la máquina llevan la app más grande a 128 (154 con el 20 %), así
  * que sube a 160 (133 entre 1.2). Ninguna app pasa de 150, así que la petición de hoy es la misma con los dos topes; cada guía
  * de más agrega ~70 tokens (~US$0.000008 por mensaje sin caché), lejos del tope de la barra 7.
+ * Guías de clientes G1 (25-nov): tarjetas de regalo, referidos, campañas, clientes, lealtad y promociones llevan la app más
+ * grande (WINDOWS) a 151 (182 con el 20 %), así que sube a 190 (158 entre 1.2). Ninguna app pasa de 160, así que la petición de
+ * hoy es la misma con los dos topes; las ~23 guías de más agregan ~1,600 tokens (~US$0.0002 por mensaje sin caché), lejos del
+ * tope de la barra 7.
  */
-export const UNDERSTAND_INDEX_CAP = 160
+export const UNDERSTAND_INDEX_CAP = 190
 /** Los ids de las guías que cita una respuesta guardada (`id@hash8`); una aclaración aporta sus opciones. */
 export const guideIdsOf = (sourceIds: string[]): string[] =>
   sourceIds.flatMap(ref => (ref === '#clarify' ? [] : (parseSourceRef(ref)?.id ?? [])))

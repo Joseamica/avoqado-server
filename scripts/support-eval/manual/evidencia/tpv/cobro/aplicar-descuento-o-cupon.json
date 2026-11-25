@@ -1,0 +1,130 @@
+{
+  "pagina": "tpv/cobro/aplicar-descuento-o-cupon",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/InputTab.kt",
+      "linea": 16,
+      "cita": "SHORTCUTS(\"Shortcuts\"),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/ShortcutsGridView.kt",
+      "linea": 216,
+      "cita": "label = \"Descuento\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/shortcuts/ManualDiscountSubView.kt",
+      "linea": 135,
+      "cita": "ModeChip(label = \"Porcentaje\", selected = mode == DiscountMode.PERCENT, modifier = Modifier.weight(1f)) {"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/shortcuts/ManualDiscountSubView.kt",
+      "linea": 139,
+      "cita": "ModeChip(label = \"Monto fijo\", selected = mode == DiscountMode.AMOUNT, modifier = Modifier.weight(1f)) {"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/shortcuts/ManualDiscountSubView.kt",
+      "linea": 173,
+      "cita": "label = { Text(\"Motivo (opcional)\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/shortcuts/ManualDiscountSubView.kt",
+      "linea": 183,
+      "cita": "text = \"Descuento: −$${String.format(\"%.2f\", computedCents / 100.0)}\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/shortcuts/ManualDiscountSubView.kt",
+      "linea": 201,
+      "cita": "Text(if (cartState.manualDiscountCents > 0) \"Reemplazar descuento\" else \"Aplicar\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/shortcuts/ManualDiscountSubView.kt",
+      "linea": 212,
+      "cita": "Text(\"Quitar descuento\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/ShortcutsGridView.kt",
+      "linea": 224,
+      "cita": "label = \"Cupón\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/shortcuts/CouponSubView.kt",
+      "linea": 122,
+      "cita": "label = { Text(\"Código\") },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/shortcuts/CouponSubView.kt",
+      "linea": 155,
+      "cita": "Text(if (isValidating) \"Validando…\" else \"Aplicar cupón\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/shortcuts/CouponSubView.kt",
+      "linea": 88,
+      "cita": "text = \"Aplicado: ${discount.name}\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/shortcuts/CouponSubView.kt",
+      "linea": 106,
+      "cita": "}) { Text(\"Quitar\") }"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt",
+      "linea": 396,
+      "cita": "text = \"Total\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "discounts:apply",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/ShortcutsGridView.kt",
+      "linea": 284
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "PROMOTIONS",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/CheckoutScreen.kt",
+      "linea": 209
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Cupón sin red: Necesita internet",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/ShortcutsGridView.kt",
+      "linea": 282
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Un descuento nuevo reemplaza al actual",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/shortcuts/ManualDiscountSubView.kt",
+      "linea": 127
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

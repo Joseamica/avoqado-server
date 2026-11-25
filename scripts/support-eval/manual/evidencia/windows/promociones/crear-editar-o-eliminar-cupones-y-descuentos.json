@@ -1,0 +1,165 @@
+{
+  "pagina": "windows/promociones/crear-editar-o-eliminar-cupones-y-descuentos",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff",
+  "version": "2.25.58-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 632,
+      "cita": "label = \"Artículos\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/data/model/ArticlesModels.kt",
+      "linea": 16,
+      "cita": "DISCOUNTS(\"Descuentos\", \"local_offer\"),"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/data/model/ArticlesModels.kt",
+      "linea": 17,
+      "cita": "COUPONS(\"Cupones\", \"confirmation_number\"),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/discounts/DiscountListView.kt",
+      "linea": 119,
+      "cita": "contentDescription = \"Nuevo descuento\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/coupons/CouponListView.kt",
+      "linea": 122,
+      "cita": "contentDescription = \"Nuevo cupon\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/discounts/DiscountFormSheet.kt",
+      "linea": 154,
+      "cita": "label = { Text(\"Nombre del descuento\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/discounts/DiscountFormSheet.kt",
+      "linea": 163,
+      "cita": "text = \"TIPO Y VALOR\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/data/model/ArticlesModels.kt",
+      "linea": 71,
+      "cita": "FIXED(\"Monto fijo\"),"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/discounts/DiscountFormSheet.kt",
+      "linea": 213,
+      "cita": "text = \"ALCANCE\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/discounts/DiscountFormSheet.kt",
+      "linea": 104,
+      "cita": "primaryActionText = if (isEditing) \"Guardar\" else \"Crear\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/coupons/CouponFormSheet.kt",
+      "linea": 135,
+      "cita": "label = { Text(\"Código\") },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/coupons/CouponFormSheet.kt",
+      "linea": 144,
+      "cita": "text = \"3-30 caracteres, letras y números\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/coupons/CouponFormSheet.kt",
+      "linea": 211,
+      "cita": "label = { Text(\"Usos totales\") },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/coupons/CouponFormSheet.kt",
+      "linea": 220,
+      "cita": "label = { Text(\"Usos por cliente\") },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/coupons/CouponFormSheet.kt",
+      "linea": 90,
+      "cita": "primaryActionText = if (isEditing) \"Guardar\" else \"Crear\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/coupons/CouponListView.kt",
+      "linea": 174,
+      "cita": "onTap = { editingCoupon = coupon },"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/discounts/DiscountListView.kt",
+      "linea": 171,
+      "cita": "onTap = { editingDiscount = discount },"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/coupons/CouponListView.kt",
+      "linea": 235,
+      "cita": "onLongClick = { showMenu = true },"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/coupons/CouponListView.kt",
+      "linea": 188,
+      "cita": "Text(text = \"Eliminar cupon\")"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/discounts/DiscountListView.kt",
+      "linea": 185,
+      "cita": "Text(text = \"Eliminar descuento\")"
+    },
+    {
+      "paso": 6,
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/discounts/DiscountListView.kt",
+      "linea": 188,
+      "cita": "Text(text = \"Esta acción no se puede deshacer\")"
+    }
+  ],
+  "permisos": [],
+  "plan": [
+    {
+      "featureCode": "PROMOTIONS",
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/ArticlesScreen.kt",
+      "linea": 339
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "El descuento de un cupón no se cambia",
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/coupons/CouponFormSheet.kt",
+      "linea": 194
+    },
+    {
+      "ruta": "WINDOWS: clic derecho abre el menú desde la 2.25.54 (60767a50)",
+      "archivo": "app/src/main/java/com/avoqado/pos/articles/presentation/coupons/CouponListView.kt",
+      "linea": 232
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -1,0 +1,157 @@
+{
+  "pagina": "dashboard/tarjetas-de-regalo/cancelar-venta-de-tarjetas-de-regalo",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 21,
+      "cita": "\"giftCards\": \"Tarjetas de regalo\""
+    },
+    {
+      "paso": 1,
+      "archivo": "src/components/Sidebar/app-sidebar.tsx",
+      "linea": 800,
+      "cita": "url: 'gift-cards',"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 172,
+      "cita": "\"title\": \"Acciones del gerente\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 726,
+      "cita": "{t('actions.cancelSale.button')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 237,
+      "cita": "\"button\": \"Cancelar la venta\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 597,
+      "cita": "? t('actions.cancelSale.descriptionSale', {"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 246,
+      "cita": "\"confirm\": \"Bloquear y empezar\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 577,
+      "cita": "if (modo === 'cancelar') toast({ title: t('actions.cancelSale.started') })"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 247,
+      "cita": "\"started\": \"Tarjetas bloqueadas. Ahora devuelve el dinero desde la venta.\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 681,
+      "cita": "{t('actions.cancelSale.goToSale')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 249,
+      "cita": "\"goToSale\": \"Ir a la venta\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 243,
+      "cita": "\"step2\": \"Devuelve el dinero por donde se pagó: en la terminal o desde la venta.\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 244,
+      "cita": "\"step3\": \"Al registrar la devolución, las tarjetas se cancelan solas.\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 248,
+      "cita": "\"inProgressAll\": \"Cancelación en curso: las tarjetas de la venta están bloqueadas. Devuelve el dinero desde la venta.\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 684,
+      "cita": "{t('actions.cancelSale.release')}"
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 250,
+      "cita": "\"release\": \"Ya no cancelar\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 253,
+      "cita": "\"releaseCheck\": \"Comprobé que la devolución NO se hizo (la terminal la rechazó o no se intentó). Si no lo sabes, deja la tarjeta bloqueada.\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 255,
+      "cita": "\"released\": \"Listo: las tarjetas se pueden usar otra vez.\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "giftCards:read",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 730
+    },
+    {
+      "permiso": "giftCards:manage",
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 671
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Clientes › Tarjetas de regalo",
+      "archivo": "src/routes/venueRoutes.tsx",
+      "linea": 729
+    },
+    {
+      "ruta": "Ir a la venta abre la venta en Ventas",
+      "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
+      "linea": 680
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

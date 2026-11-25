@@ -228,6 +228,8 @@ export class SocketManager implements ISocketManager {
       // repetición a una APK vieja (sin dedupe local) podría cobrar dos veces.
       if (terminalId) {
         const venueId = authenticatedSocket.authContext?.venueId
+        // Cobro simple · S1 (Codex r3, R3-9): la terminal volvió a este proceso; una caída posterior empieza de cero para el vigía.
+        terminalPaymentService.alConectarseLaTerminal(terminalId)
         // 🔴 Codex servidor r1 · F3 (21-oct): la SONDA va ANTES que la reentrega, en serie. Antes corrían en paralelo y, si la
         // reentrega grababa primero su procedencia, la SENT de la app muerta ya apuntaba a este socket y la sonda la saltaba
         // (E9): sin certificado de cese hasta el vencimiento de 5 min. A las filas SIN desenlace acreditado se les pregunta: la
@@ -620,6 +622,8 @@ export class SocketManager implements ISocketManager {
       }
       // Clean up terminal registry
       terminalRegistry.unregisterBySocketId(socket.id)
+      // Cobro simple · S1: si la terminal no vuelve en 10 s, sus cobros en vuelo entran a «sin respuesta» (`TERMINAL_GONE`).
+      if (terminal?.terminalId && terminal.venueId) terminalPaymentService.alDesconectarseLaTerminal(terminal.terminalId, terminal.venueId)
       const user = socket.authContext?.userId || 'unauthenticated'
       logger.info(`📡 Socket disconnected: ${user} (${socket.id})`, {
         socketId: socket.id,

@@ -1,0 +1,111 @@
+{
+  "pagina": "android/tarjetas-de-regalo/vender-varias-tarjetas-de-regalo",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff",
+  "version": "2.25.58",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 87,
+      "cita": "Text(\"${TextosDeTarjetas.MOSAICO} ${i + 1}\", style = MaterialTheme.typography.titleMedium)"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 99,
+      "cita": "AvoqadoPillTextField(value = montos.getOrElse(i) { \"\" }, placeholder = TextosDeTarjetas.OTRO_MONTO,"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 106,
+      "cita": "Text(TextosDeTarjetas.COMO_LA_ENTREGAS)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 140,
+      "cita": "}) { Text(TextosDeTarjetas.AGREGAR_OTRA) }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 54,
+      "cita": "const val AGREGAR_OTRA = \"Agregar otra tarjeta\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 44,
+      "cita": "const val PARA = \"Para (opcional)\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 133,
+      "cita": "}) { Text(\"Quitar tarjeta\") }"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 141,
+      "cita": "AvoqadoPillTextField(value = form.deParteDe, onValueChange = { viewModel.cambiar(form.copy(deParteDe = it)) }, placeholder = TextosDeTarjetas.DE_PARTE_DE)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 91,
+      "cita": "const val OBLIGATORIO_CON_ENTREGA = \"Obligatorio con WhatsApp o correo\""
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 61,
+      "cita": "primaryActionText = if (viewModel.bloqueado) TextosDeTarjetas.REINTENTAR else TextosDeTarjetas.cobrar(form.sobres.sumOf { it.montoCents ?: 0 }),"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 149,
+      "cita": "CobroDeCuentaScreen(orderId = id, onSalir = { cierre ->"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "giftCards:sell",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 273
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red no se vende: sale el aviso",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 69
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Cobrar › Atajos › Tarjeta de regalo › Vender tarjeta",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/HojaDeTarjetaDeRegalo.kt",
+      "linea": 75
+    },
+    {
+      "ruta": "Hasta 20 tarjetas por venta",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt",
+      "linea": 137
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

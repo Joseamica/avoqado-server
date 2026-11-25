@@ -1,0 +1,99 @@
+{
+  "pagina": "windows/mesas/cliente-y-comensales-de-la-mesa",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff",
+  "version": "2.25.58-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2496,
+      "cita": "internal enum class PanelTab(val label: String) { CUENTA(\"Cuenta\"), ACCIONES(\"Acciones\"), CLIENTE(\"Cliente\") }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3070,
+      "cita": "label = if (customerName.isNullOrBlank()) \"Asignar cliente\" else \"Cambiar cliente\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 1541,
+      "cita": "viewModel.updateDetails(customerId = customer.id)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3061,
+      "cita": "\"Cliente de la cuenta\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1805,
+      "cita": "showMessage(\"Cuenta actualizada\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3066,
+      "cita": "TextButton(onClick = onDetachCustomer) { Text(\"Quitar\", color = Color(0xFFD32F2F)) }"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2778,
+      "cita": "label = \"Conteo de clientes\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3217,
+      "cita": "Text(\"Comensales\", modifier = Modifier.weight(1f))"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3208,
+      "cita": "onClick = { onConfirm(covers) },"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "customers:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 163
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/PlanManager.kt",
+      "linea": 144
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Desde aquí no se crean clientes",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 1545
+    },
+    {
+      "ruta": "Comensales de 1 a 200",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3227
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

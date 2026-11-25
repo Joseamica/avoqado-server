@@ -1,0 +1,120 @@
+{
+  "pagina": "android/cobro/aplicar-cupon-o-promocion",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff",
+  "version": "2.25.58",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 118,
+      "cita": "SHORTCUTS(\"Atajos\"),"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
+      "linea": 283,
+      "cita": "name = \"Cupones\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
+      "linea": 928,
+      "cita": "label = { Text(\"Código de cupón\") },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
+      "linea": 934,
+      "cita": "text = if (isValidating) \"Validando...\" else \"Validar cupón\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
+      "linea": 1026,
+      "cita": "text = \"Ahorro estimado: ${formatMoney(savings)}\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
+      "linea": 1033,
+      "cita": "text = \"Aplicar cupón\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 125,
+      "cita": "PROMOS(\"Promociones\"),"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/promotions/PromotionSheet.kt",
+      "linea": 359,
+      "cita": "text = \"Elige una opción de cada grupo para agregar la promoción.\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/promotions/PromotionSheet.kt",
+      "linea": 343,
+      "cita": "text = if (estimado != null) \"Agregar al carrito · ${pesos(estimado + extrasDelCombo)}\" else \"Agregar al carrito\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "discounts:apply",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/promotions/PromotionsPanel.kt",
+      "linea": 488
+    },
+    {
+      "permiso": "coupons:redeem",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
+      "linea": 283
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "PROMOTIONS",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/promotions/PromotionsPanel.kt",
+      "linea": 445
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "El cupón necesita internet para validarse",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/data/DiscountsRepository.kt",
+      "linea": 143
+    },
+    {
+      "afirmacion": "Sin red no cargan las promociones",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/promotions/PromotionsPanel.kt",
+      "linea": 103
+    },
+    {
+      "afirmacion": "Sin red al cobrar con el beneficio aplicado: no se cobra",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/model/PaymentModels.kt",
+      "linea": 432
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Sin promociones",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/promotions/PromotionsPanel.kt",
+      "linea": 100
+    },
+    {
+      "ruta": "La pestaña Promociones sólo en modo TAB",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 121
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

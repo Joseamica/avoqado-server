@@ -1,0 +1,127 @@
+{
+  "pagina": "android/clientes/pantalla-del-cliente",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff",
+  "version": "2.25.58",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/domain/EnElPanelWeb.kt",
+      "linea": 47,
+      "cita": "OPERACION(\"Hardware y aparatos\"),"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1987,
+      "cita": "label = \"Pantalla del cliente\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 1988,
+      "cita": "subtitle = if (customerDisplayDetected) \"Detectada\" else \"No detectada\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/presentation/CustomerDisplaySheet.kt",
+      "linea": 118,
+      "cita": "text = \"El cliente elige propina y calificación\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/presentation/CustomerDisplaySheet.kt",
+      "linea": 123,
+      "cita": "\"El cajero verá una espera mientras el cliente decide.\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt",
+      "linea": 929,
+      "cita": "text = \"¿Cómo estuvo tu experiencia?\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt",
+      "linea": 937,
+      "cita": "(1..5).forEach { star ->"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt",
+      "linea": 965,
+      "cita": "text = \"¿Deseas dejar propina?\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt",
+      "linea": 1023,
+      "cita": "text = \"Sin propina\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt",
+      "linea": 760,
+      "cita": "text = \"¿Algo más?\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt",
+      "linea": 798,
+      "cita": "text = if (hasSelection && !botonesEnFila) \"Agregar · ${money(c.selectedDeltaCents)}\" else \"Agregar\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt",
+      "linea": 815,
+      "cita": "Text(\"No, gracias\", fontSize = CdBody, fontWeight = FontWeight.Bold)"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/presentation/CustomerDisplaySheet.kt",
+      "linea": 184,
+      "cita": "text = \"Invertir pantallas\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/presentation/CustomerDisplaySheet.kt",
+      "linea": 235,
+      "cita": "\"El cliente ve la pantalla grande y el cajero trabaja en la chica.\""
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "En reposo dice Bienvenido",
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt",
+      "linea": 286
+    },
+    {
+      "ruta": "Mientras se cobra: Tu compra",
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt",
+      "linea": 530
+    },
+    {
+      "ruta": "Al final: Gracias por tu compra",
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt",
+      "linea": 1133
+    },
+    {
+      "ruta": "Kiosco de check-in",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/presentation/CustomerDisplaySheet.kt",
+      "linea": 148
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}
