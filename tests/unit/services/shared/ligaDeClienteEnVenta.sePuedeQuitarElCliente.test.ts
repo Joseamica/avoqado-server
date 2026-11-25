@@ -169,6 +169,17 @@ describe('D34 · el detalle del pago trae `customerUnlink`', () => {
     expect(r.customerUnlink).toEqual({ allowed: false, code: 'SALE_CUSTOMER_ALREADY_ASSIGNED', reason: expect.any(String) })
   })
 
+  it('el total y los cobros se leen en una sola foto de la base (REPEATABLE READ)', async () => {
+    preparar({ status: 'PENDING', paymentStatus: 'PARTIAL', customerId: 'cust-A', cobrado: 40 })
+    prismaMock.payment.findFirst.mockResolvedValueOnce(pago({ orderId: ORDER, order: { id: ORDER, items: [] } }) as any)
+    sinCobradoPorRenglon()
+    await getPaymentById(VENUE, 'pay-1')
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ isolationLevel: 'RepeatableRead' }),
+    )
+  })
+
   it('con cuenta abierta: se puede quitar', async () => {
     preparar({ status: 'PENDING', paymentStatus: 'PARTIAL', customerId: 'cust-A', cobrado: 40 })
     prismaMock.payment.findFirst.mockResolvedValueOnce(pago({ orderId: ORDER, order: { id: ORDER, items: [] } }) as any)
