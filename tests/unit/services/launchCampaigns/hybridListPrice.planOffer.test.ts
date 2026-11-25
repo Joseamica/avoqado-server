@@ -2,7 +2,8 @@
  * Planes editables B1, Task 3: con la versión de la oferta sembrada, los escritores viejos de las listas `PLAN:PRO` y
  * `PLAN:PREMIUM` se niegan (409 `PLAN_OFFER_OWNS_PLAN_LISTS`).
  *
- * 🔴 Dos capas: la negativa rápida al inicio (`retryListPrice`, `seedPlanList`, `recomposePlanList`) y la misma negativa DENTRO
+ * 🔴 Dos capas: la negativa rápida al inicio (`seedPlanList`, `recomposePlanList`; `retryListPrice` en cuanto ve un precio pendiente:
+ * sin él devuelve la fila, como B0) y la misma negativa DENTRO
  * de la transacción de `saveList` y de `finalizeListPublication`, después del candado del producto: un escritor viejo que pasó
  * la revisión rápida antes del sembrado no prepara ni finaliza después. Con `FEATURE:*` y `PLAN:BASICO` nada cambia.
  */
@@ -42,15 +43,35 @@ const movioElPuntero = () =>
   prismaMock.hybridCampaign.updateMany.mock.calls.some((c: [{ data: Record<string, unknown> }]) => 'currentPublicationId' in c[0].data)
 
 describe('la negativa rápida', () => {
-  it.each(['PLAN:PRO', 'PLAN:PREMIUM'])('retryListPrice(%s) con versión → 409 PLAN_OFFER_OWNS_PLAN_LISTS y no toca Stripe', async key => {
-    vigente = PUNTERO()
-    prismaMock.hybridCampaign.findFirst.mockResolvedValue({ id: 'list1', revision: 2, pendingPublicationId: 'pub_pend' })
+  it.each(['PLAN:PRO', 'PLAN:PREMIUM'])(
+    'retryListPrice(%s) con versión y un precio PENDIENTE → 409 PLAN_OFFER_OWNS_PLAN_LISTS y no toca Stripe',
+    async key => {
+      vigente = PUNTERO()
+      prismaMock.hybridCampaign.findFirst.mockResolvedValue({ id: 'list1', revision: 2, pendingPublicationId: 'pub_pend' })
 
-    await expect(retryListPrice(key, 'staff1')).rejects.toMatchObject(NEGATIVA)
-    expect(mockEnsure).not.toHaveBeenCalled()
-    expect(prismaMock.$transaction).not.toHaveBeenCalled()
-    expect(prismaMock.hybridCampaign.findFirst).not.toHaveBeenCalled()
-  })
+      await expect(retryListPrice(key, 'staff1')).rejects.toMatchObject(NEGATIVA)
+      // Codex B1 #4: primero se lee la lista (¿hay algo que terminar?); con pendiente, la negativa, y nada se prepara.
+      expect(mockEnsure).not.toHaveBeenCalled()
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
+      expect(prismaMock.planOfferPointer.findUnique.mock.invocationCallOrder[0]).toBeGreaterThan(
+        prismaMock.hybridCampaign.findFirst.mock.invocationCallOrder[0],
+      )
+    },
+  )
+
+  it.each(['PLAN:PRO', 'PLAN:PREMIUM'])(
+    '🔴 Codex B1 #4: retryListPrice(%s) con versión y SIN pendiente devuelve la fila, como B0 (sin negativa ni Stripe)',
+    async key => {
+      vigente = PUNTERO()
+      prismaMock.hybridCampaign.findFirst.mockResolvedValue({ id: 'list1', revision: 2, pendingPublicationId: null })
+
+      await expect(retryListPrice(key, 'staff1')).resolves.toMatchObject({ productKey: key, pendingPrice: null })
+      expect(mockEnsure).not.toHaveBeenCalled()
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
+      // Sin nada que terminar, ni siquiera se lee la oferta (como B0, que no la conocía).
+      expect(prismaMock.planOfferPointer.findUnique).not.toHaveBeenCalled()
+    },
+  )
 
   it.each(['FEATURE:CFDI', 'PLAN:BASICO'])('retryListPrice de %s sigue igual: prepara y finaliza su pendiente', async key => {
     vigente = PUNTERO()

@@ -411,15 +411,17 @@ export async function getBasicPlanRow(): Promise<BasicPlanRow> {
  * Finishes a pending price (preparation failed earlier); with nothing pending it returns the row unchanged.
  * `expectedRevision` is the row the admin saw: a newer save (a different pending) fails as superseded instead of being
  * published under their «Reintentar». Without it (clients before the field) it finishes whatever is pending.
- * A plan list is refused (409 `PLAN_OFFER_OWNS_PLAN_LISTS`) once the plan offer has a version.
+ * A plan list WITH a pending price is refused (409 `PLAN_OFFER_OWNS_PLAN_LISTS`) once the plan offer has a version: that pending
+ * may be the publisher's (a version still PREPARING), and finishing it here would put it on sale without moving both pointers.
+ * With nothing pending there is nothing to finish: the row, with 200, exactly like before the plan offer (Codex B1 #4).
  */
 export async function retryListPrice(productKey: string, staffId: string, expectedRevision?: number): Promise<ListPriceRow> {
-  await refusePlanListOnceOfferOwnsIt(productKey, 'retryListPrice')
   const list = await prisma.hybridCampaign.findFirst({
     where: { purpose: 'LIST', listProductKey: productKey },
     select: { id: true, revision: true, pendingPublicationId: true },
   })
   if (!list?.pendingPublicationId) return rowOf(productKey)
+  await refusePlanListOnceOfferOwnsIt(productKey, 'retryListPrice')
   if (expectedRevision !== undefined && list.revision !== expectedRevision)
     throw new ConflictError('Hay un cambio de precio más reciente.', 'HYBRID_LIST_SUPERSEDED')
   return prepareAndFinalize(productKey as ProductKey, list.id, list.pendingPublicationId, list.revision, staffId)
