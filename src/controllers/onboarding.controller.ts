@@ -44,6 +44,8 @@ import { buildLaunchOfferView } from '../services/launchCampaigns/launchOfferMat
 import { toOfferRow } from '../services/launchCampaigns/launchCampaign.service'
 import { PLAN_ACTIVATION_STATUS } from '../services/launchCampaigns/launchCampaignEnums'
 import { standardPlanQuote } from '../services/access/planPricing.constants'
+import { versionQueCobra, type OfertaVigente } from '../services/billing/planOffer'
+import { cotizarOferta, type OfertaDelAlta } from '../services/billing/cotizacionDeLaOferta'
 import * as planActivationService from '../services/onboarding/planActivation.service'
 import * as launchCampaignService from '../services/launchCampaigns/launchCampaign.service'
 import { claimLaunchCampaign } from '../services/launchCampaigns/launchCampaignClaim.service'
@@ -215,6 +217,63 @@ export async function startOnboarding(req: Request, res: Response, next: NextFun
   }
 }
 
+/** `planQuote` de hoy (sin versión del editor), idéntico al de siempre. */
+function planQuoteDeHoy(quote: ReturnType<typeof standardPlanQuote>) {
+  return {
+    currency: 'MXN' as const,
+    ivaIncluded: true as const,
+    trialDays: TRIAL_DAYS,
+    tiers: {
+      PRO: {
+        monthlyCents: quote.grossCents.PRO.monthly,
+        annualCents: quote.grossCents.PRO.annual,
+        monthlyNetCents: STANDARD_PLAN_NET_CENTS.PRO.monthly,
+        annualNetCents: STANDARD_PLAN_NET_CENTS.PRO.annual,
+        intro: {
+          monthlyCents: LEGACY_INTRO_OFFER.introMonthlyCents,
+          months: LEGACY_INTRO_OFFER.months,
+          interval: LEGACY_INTRO_OFFER.interval,
+          requiresPayNow: true as const,
+        },
+      },
+      PREMIUM: {
+        monthlyCents: quote.grossCents.PREMIUM.monthly,
+        annualCents: quote.grossCents.PREMIUM.annual,
+        monthlyNetCents: STANDARD_PLAN_NET_CENTS.PREMIUM.monthly,
+        annualNetCents: STANDARD_PLAN_NET_CENTS.PREMIUM.annual,
+        intro: null,
+      },
+    },
+  }
+}
+
+/** `planQuote` con la versión del editor: las llaves de siempre salen de la vigente y se suma `oferta`. */
+function planQuoteDeLaVersion(vigente: OfertaVigente, oferta: OfertaDelAlta) {
+  const d = vigente.definition
+  return {
+    currency: 'MXN' as const,
+    ivaIncluded: true as const,
+    trialDays: d.PRO.trialDays,
+    tiers: {
+      PRO: {
+        monthlyCents: d.PRO.monthly.grossCents,
+        annualCents: d.PRO.annual.grossCents,
+        monthlyNetCents: d.PRO.monthly.netCents,
+        annualNetCents: d.PRO.annual.netCents,
+        intro: null,
+      },
+      PREMIUM: {
+        monthlyCents: d.PREMIUM.monthly.grossCents,
+        annualCents: d.PREMIUM.annual.grossCents,
+        monthlyNetCents: d.PREMIUM.monthly.netCents,
+        annualNetCents: d.PREMIUM.annual.netCents,
+        intro: null,
+      },
+    },
+    oferta,
+  }
+}
+
 /**
  * GET /api/v1/onboarding/organizations/:organizationId/progress
  *
@@ -271,6 +330,18 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
     const campaign = progress.launchCampaignId ? await prisma.launchCampaign.findUnique({ where: { id: progress.launchCampaignId } }) : null
     const launchOffer = campaign ? buildLaunchOfferView(toOfferRow(campaign as never), new Date()) : null
     const quote = standardPlanQuote()
+    // Planes editables (B2): con una versión del editor, la cotización sale de ella y trae un comprobante por plan y periodicidad.
+    // 🔴 Leer la oferta nunca tumba una lectura de hoy: si falla (p. ej. una definición que no pasa el esquema), `planQuote` es el de hoy.
+    let planQuote: ReturnType<typeof planQuoteDeHoy> | ReturnType<typeof planQuoteDeLaVersion> = planQuoteDeHoy(quote)
+    try {
+      const versionDelEditor = await versionQueCobra()
+      if (versionDelEditor) planQuote = planQuoteDeLaVersion(versionDelEditor, cotizarOferta(versionDelEditor, organizationId))
+    } catch (error) {
+      logger.warn('onboarding progress: no se pudo leer la oferta de planes; planQuote sale como hoy', {
+        organizationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
 
     res.status(200).json({
       featureFlags: onboardingFeatureFlags(),
@@ -286,32 +357,7 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
           ...(await modalidadDelAlta(organizationId, progress)),
         },
         legal: legalConsentState(progress.termsVersion),
-        planQuote: {
-          currency: 'MXN' as const,
-          ivaIncluded: true as const,
-          trialDays: TRIAL_DAYS,
-          tiers: {
-            PRO: {
-              monthlyCents: quote.grossCents.PRO.monthly,
-              annualCents: quote.grossCents.PRO.annual,
-              monthlyNetCents: STANDARD_PLAN_NET_CENTS.PRO.monthly,
-              annualNetCents: STANDARD_PLAN_NET_CENTS.PRO.annual,
-              intro: {
-                monthlyCents: LEGACY_INTRO_OFFER.introMonthlyCents,
-                months: LEGACY_INTRO_OFFER.months,
-                interval: LEGACY_INTRO_OFFER.interval,
-                requiresPayNow: true as const,
-              },
-            },
-            PREMIUM: {
-              monthlyCents: quote.grossCents.PREMIUM.monthly,
-              annualCents: quote.grossCents.PREMIUM.annual,
-              monthlyNetCents: STANDARD_PLAN_NET_CENTS.PREMIUM.monthly,
-              annualNetCents: STANDARD_PLAN_NET_CENTS.PREMIUM.annual,
-              intro: null,
-            },
-          },
-        },
+        planQuote,
         completedSteps: progress.completedSteps,
         completionPercentage,
         startedAt: progress.startedAt,
@@ -1196,7 +1242,7 @@ async function marcarPlanCobrado(organizationId: string, subscriptionId: string)
 async function modalidadDelAlta(
   organizationId: string,
   progreso?: { planActivationStatus: string | null; planStripeSubscriptionId: string | null },
-): Promise<{ trialModality?: 'RENEWS_AS_PRO' | 'ENDS_FREE'; trialEndsAt?: string }> {
+): Promise<{ trialModality?: 'RENEWS_AS_PRO' | 'ENDS_FREE'; trialEndsAt?: string; sinTarjeta?: true }> {
   try {
     const p =
       progreso ??
@@ -1266,7 +1312,9 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       )
       throw new BadRequestError('Falta elegir tu plan. Completa el paso de plan para terminar.')
     }
-    if (planEnabled && planData && planData.tier !== 'FREE' && !planData.paymentMethodId) {
+    // Planes editables (B2): un alta ya cobrada SIN tarjeta (plan raíz `sinTarjeta`, alta ACTIVE) no trae método de pago y no lo necesita.
+    const altaActivaSinTarjeta = planData?.sinTarjeta === true && progress.planActivationStatus === PLAN_ACTIVATION_STATUS.ACTIVE
+    if (planEnabled && planData && planData.tier !== 'FREE' && !planData.paymentMethodId && !altaActivaSinTarjeta) {
       throw new BadRequestError('Falta el método de pago del plan. Completa el paso de plan para terminar.')
     }
     // 🔴 Plan Básico: sólo es la prueba de Pro mensual sin pagar hoy (el paso del plan ya lo valida al guardar).
@@ -1343,6 +1391,24 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       if (cierre.motivo !== 'SIN_NEGOCIO') {
         throw new ConflictError('Tu registro se está terminando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
       }
+    }
+
+    // 🔴 Planes editables (B2): con una versión del editor el alta larga ya no cobra (el cobro es `activate-plan`, con su comprobante).
+    // Va ANTES del candado optimista: no marca `completedAt`, no crea ni activa el negocio y no llama a Stripe. Sólo se lee la oferta
+    // cuando este carril cobraría; si esa lectura falla, falla cerrada (nunca se cobra por el carril viejo con la oferta ilegible).
+    if (
+      planEnabled &&
+      !planYaCobrado &&
+      !progress.launchCampaignId &&
+      planData &&
+      planData.tier !== 'FREE' &&
+      planData.paymentMethodId &&
+      (await versionQueCobra())
+    ) {
+      throw new ConflictError(
+        'Esta forma de contratar ya no está disponible. Recarga la página para elegir tu plan. No se te cobró nada.',
+        'PLAN_FLOW_RETIRED',
+      )
     }
 
     // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue

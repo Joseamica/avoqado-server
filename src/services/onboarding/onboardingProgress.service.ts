@@ -142,6 +142,8 @@ export interface V2PlanData {
   interval: 'monthly' | 'annual'
   payNow: boolean
   acceptedAt: string | null
+  /** Planes editables (B2): el plan raíz se eligió sin tarjeta (la prueba sin método de pago). La escribe Task 6. */
+  sinTarjeta?: true
   /** Plan Básico: se eligió la prueba de Pro que termina sola sin cobrar. Sólo para el texto: la modalidad real es Stripe. */
   basicPlan?: true
 }
@@ -182,6 +184,7 @@ export function parseV2Plan(v2SetupData: unknown): V2PlanData | null {
     interval: plan.interval === 'annual' ? 'annual' : 'monthly',
     payNow: plan.payNow === true,
     acceptedAt: typeof plan.acceptedAt === 'string' ? plan.acceptedAt : null,
+    ...(plan.sinTarjeta === true ? { sinTarjeta: true as const } : {}),
     ...(plan.basicPlan === true ? { basicPlan: true as const } : {}),
   }
 }

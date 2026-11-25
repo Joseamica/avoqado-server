@@ -84,6 +84,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
     venue: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
     organization: { update: jest.fn(), findUnique: jest.fn() },
     launchCampaign: { findUnique: jest.fn() },
+    planOfferPointer: { findUnique: jest.fn().mockResolvedValue(null) },
   },
 }))
 
