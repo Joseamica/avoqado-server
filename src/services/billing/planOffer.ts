@@ -27,6 +27,14 @@ import { STANDARD_PLAN_GROSS_CENTS, STANDARD_PLAN_NET_CENTS, TRIAL_DAYS } from '
 
 export type PlanPagado = 'PRO' | 'PREMIUM'
 export type Periodicidad = 'monthly' | 'annual'
+/** El `Feature.code` del plan pagado (el de las filas de `VenueFeature` y de `PlanTierCode`). */
+export function codigoDelPlan(tier: PlanPagado): 'PLAN_PRO' | 'PLAN_PREMIUM' {
+  return tier === 'PRO' ? 'PLAN_PRO' : 'PLAN_PREMIUM'
+}
+
+export const MENSAJE_PLAN_NO_CONFIGURADO =
+  'No pudimos activar tu plan por un problema nuestro de configuración. No se te cobró nada. Escríbenos y lo resolvemos.'
+
 export type Ranura = `${PlanPagado}:${Periodicidad}`
 
 type Db = Prisma.TransactionClient | PrismaClient

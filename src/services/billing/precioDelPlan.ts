@@ -2,10 +2,9 @@ import type Stripe from 'stripe'
 import AppError from '../../errors/AppError'
 import logger from '../../config/logger'
 import { stripe, STRIPE_DENTRO_DEL_CANDADO, planLookupKey, stripeAfirmaQueNoExiste, type PlanTierCode } from '../stripe.service'
-import { precioDeLaOferta, versionQueCobra, type PlanPagado } from './planOffer'
+import { MENSAJE_PLAN_NO_CONFIGURADO, precioDeLaOferta, versionQueCobra, type PlanPagado } from './planOffer'
 
-export const MENSAJE_PLAN_NO_CONFIGURADO =
-  'No pudimos activar tu plan por un problema nuestro de configuración. No se te cobró nada. Escríbenos y lo resolvemos.'
+export { MENSAJE_PLAN_NO_CONFIGURADO }
 
 /**
  * B0, tal cual: el precio de Stripe de un plan por su LLAVE (`plan_pro_monthly`…). Sin precio: el 503 `PLAN_NOT_CONFIGURED`
@@ -28,7 +27,7 @@ export async function resolverPrecioPorLlave(
 
 function noConfigurado(registro: Record<string, unknown>, tierCode?: unknown): AppError {
   // 🚨 a propósito: la versión vigente apunta a un precio de Stripe que no sirve para cobrar.
-  logger.error('🚨 resolverPrecioDelPlan: el precio de la versión vigente no sirve para cobrar — NO se cobra', registro)
+  logger.error('🚨 el precio de Stripe de la versión no está disponible o no coincide — NO se cobra', registro)
   return new AppError(MENSAJE_PLAN_NO_CONFIGURADO, 503, true, 'PLAN_NOT_CONFIGURED', { tierCode: tierCode ?? registro.tierCode })
 }
 

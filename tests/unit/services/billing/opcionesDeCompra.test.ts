@@ -104,15 +104,29 @@ describe('opcionDelAlta', () => {
 
 describe('esPruebaRegaladaVigente', () => {
   it('activa, sin suspender, sin Stripe, vigente y del mismo plan', () => {
-    expect(esPruebaRegaladaVigente(filaRegalada('PRO', 10 * H), 'PRO', ahoraMs)).toBe(true)
-    expect(esPruebaRegaladaVigente(filaRegalada('PRO', 0), 'PRO', ahoraMs)).toBe(true)
-    expect(esPruebaRegaladaVigente(filaRegalada('PRO', -1), 'PRO', ahoraMs)).toBe(false)
-    expect(esPruebaRegaladaVigente(filaRegalada('PREMIUM', 10 * H), 'PRO', ahoraMs)).toBe(false)
-    expect(esPruebaRegaladaVigente(filaRegalada('PRO', 10 * H, { active: false }), 'PRO', ahoraMs)).toBe(false)
-    expect(esPruebaRegaladaVigente(filaRegalada('PRO', 10 * H, { suspendedAt: ahora }), 'PRO', ahoraMs)).toBe(false)
-    expect(esPruebaRegaladaVigente(filaRegalada('PRO', 10 * H, { stripeSubscriptionId: 'sub_1' }), 'PRO', ahoraMs)).toBe(false)
-    expect(esPruebaRegaladaVigente(filaRegalada('PRO', 10 * H, { endDate: null }), 'PRO', ahoraMs)).toBe(false)
+    expect(esPruebaRegaladaVigente(filaRegalada('PLAN_PRO', 10 * H), 'PRO', ahoraMs)).toBe(true)
+    expect(esPruebaRegaladaVigente(filaRegalada('PLAN_PRO', 0), 'PRO', ahoraMs)).toBe(true)
+    expect(esPruebaRegaladaVigente(filaRegalada('PLAN_PRO', -1), 'PRO', ahoraMs)).toBe(false)
+    expect(esPruebaRegaladaVigente(filaRegalada('PLAN_PREMIUM', 10 * H), 'PRO', ahoraMs)).toBe(false)
+    expect(esPruebaRegaladaVigente(filaRegalada('PLAN_PRO', 10 * H, { active: false }), 'PRO', ahoraMs)).toBe(false)
+    expect(esPruebaRegaladaVigente(filaRegalada('PLAN_PRO', 10 * H, { suspendedAt: ahora }), 'PRO', ahoraMs)).toBe(false)
+    expect(esPruebaRegaladaVigente(filaRegalada('PLAN_PRO', 10 * H, { stripeSubscriptionId: 'sub_1' }), 'PRO', ahoraMs)).toBe(false)
+    expect(esPruebaRegaladaVigente(filaRegalada('PLAN_PRO', 10 * H, { endDate: null }), 'PRO', ahoraMs)).toBe(false)
     expect(esPruebaRegaladaVigente(null, 'PRO', ahoraMs)).toBe(false)
+  })
+})
+
+describe('el código del plan en la fila (PLAN_PRO / PLAN_PREMIUM)', () => {
+  it('🔴 una fila con el código real PLAN_PRO cuenta para el plan PRO; una con «PRO» a secas no', () => {
+    expect(esPruebaRegaladaVigente(filaRegalada('PLAN_PRO', 10 * H), 'PRO', ahoraMs)).toBe(true)
+    expect(esPruebaRegaladaVigente(filaRegalada('PLAN_PREMIUM', 10 * H), 'PREMIUM', ahoraMs)).toBe(true)
+    expect(esPruebaRegaladaVigente(filaRegalada('PRO', 10 * H), 'PRO', ahoraMs)).toBe(false)
+    expect(esPruebaRegaladaVigente(filaRegalada('PLAN_PRO', 10 * H), 'PREMIUM', ahoraMs)).toBe(false)
+  })
+  it('🔴 D3 difiere con la fila real PLAN_PRO y no con «PRO»', () => {
+    const args = { vigente: v3(69900), enPruebaDeStripe: null, tier: 'PRO', interval: 'monthly', ahoraMs, margenMs: 72 * H } as const
+    expect(opcionDeTuPlan({ ...args, fila: filaRegalada('PLAN_PRO', 100 * H) })).toMatchObject({ firstChargeCents: 0 })
+    expect(opcionDeTuPlan({ ...args, fila: filaRegalada('PRO', 100 * H) })).toMatchObject({ trialEndsAt: null, firstChargeCents: 81084 })
   })
 })
 
@@ -120,7 +134,7 @@ describe('opcionDeTuPlan', () => {
   const base = { vigente: v3(69900), enPruebaDeStripe: null, tier: 'PRO', interval: 'monthly', ahoraMs, margenMs: 72 * H } as const
 
   it('opcionDeTuPlan: prueba regalada de Pro a 73 h del fin con margen 72 h → trialEndsAt = fin y firstChargeCents 0; a 71 h → cobra hoy el precio de la vigente', () => {
-    const fila73 = filaRegalada('PRO', 73 * H)
+    const fila73 = filaRegalada('PLAN_PRO', 73 * H)
     expect(opcionDeTuPlan({ ...base, fila: fila73 })).toMatchObject({
       trialEndsAt: fila73.endDate,
       firstChargeCents: 0,
@@ -128,7 +142,7 @@ describe('opcionDeTuPlan', () => {
       priceId: 'price_v3_pro_m',
       precioDe: 3,
     })
-    expect(opcionDeTuPlan({ ...base, fila: filaRegalada('PRO', 71 * H) })).toMatchObject({
+    expect(opcionDeTuPlan({ ...base, fila: filaRegalada('PLAN_PRO', 71 * H) })).toMatchObject({
       trialEndsAt: null,
       firstChargeCents: 81084,
       precioCents: 81084,
@@ -143,8 +157,8 @@ describe('opcionDeTuPlan', () => {
   it('opcionDeTuPlan: plan fuera de venta sin prueba → null; con una prueba regalada de ese plan, o enPruebaDeStripe del mismo plan → se puede comprar', () => {
     const fuera = oferta(3, definicionDePrueba({ ids: idsDeLaVersion('v3'), planes: { PRO: { onSale: false } } }))
     expect(opcionDeTuPlan({ ...base, vigente: fuera, fila: null })).toBeNull()
-    expect(opcionDeTuPlan({ ...base, vigente: fuera, fila: filaRegalada('PREMIUM', 100 * H) })).toBeNull()
-    expect(opcionDeTuPlan({ ...base, vigente: fuera, fila: filaRegalada('PRO', 100 * H) })).not.toBeNull()
+    expect(opcionDeTuPlan({ ...base, vigente: fuera, fila: filaRegalada('PLAN_PREMIUM', 100 * H) })).toBeNull()
+    expect(opcionDeTuPlan({ ...base, vigente: fuera, fila: filaRegalada('PLAN_PRO', 100 * H) })).not.toBeNull()
     expect(opcionDeTuPlan({ ...base, vigente: fuera, fila: null, enPruebaDeStripe: 'PRO' })).not.toBeNull()
     expect(opcionDeTuPlan({ ...base, vigente: fuera, fila: null, enPruebaDeStripe: 'PREMIUM' })).toBeNull()
   })
@@ -182,13 +196,13 @@ describe('cotizarOpcion y revisarComprobante', () => {
   })
 
   it.each([
-    ['sin token', () => undefined, 'OFFER_CHANGED', 'QUOTE_REQUIRED', {}],
-    ['otra versión', () => comprobanteDePrueba({ alcance, versionNumber: 1 }, ahora), 'OFFER_CHANGED', 'VERSION', {}],
-    ['otro plan', () => comprobanteDePrueba({ alcance, tier: 'PREMIUM' }, ahora), 'OFFER_CHANGED', 'QUOTE_MISMATCH', {}],
-    ['otro alcance', () => comprobanteDePrueba({ alcance: 'org:otra' }, ahora), 'QUOTE_INVALID', undefined, {}],
-    ['de hace 24 h', () => comprobanteDePrueba({ alcance }, new Date(ahoraMs - 24 * H)), 'QUOTE_EXPIRED', undefined, {}],
-    ['null', () => null, 'OFFER_CHANGED', 'QUOTE_REQUIRED', {}],
-    ['un número', () => 42, 'QUOTE_INVALID', undefined, {}],
+    ['sin token', () => undefined, 'OFFER_CHANGED', 'QUOTE_REQUIRED'],
+    ['otra versión', () => comprobanteDePrueba({ alcance, versionNumber: 1 }, ahora), 'OFFER_CHANGED', 'VERSION'],
+    ['otro plan', () => comprobanteDePrueba({ alcance, tier: 'PREMIUM' }, ahora), 'OFFER_CHANGED', 'QUOTE_MISMATCH'],
+    ['otro alcance', () => comprobanteDePrueba({ alcance: 'org:otra' }, ahora), 'QUOTE_INVALID', undefined],
+    ['de hace 24 h', () => comprobanteDePrueba({ alcance }, new Date(ahoraMs - 24 * H)), 'QUOTE_EXPIRED', undefined],
+    ['null', () => null, 'OFFER_CHANGED', 'QUOTE_REQUIRED'],
+    ['un número', () => 42, 'QUOTE_INVALID', undefined],
   ])('revisarComprobante %s → rechazo %s (%s) y nunca lanza', (_n, token, code, razon) => {
     const r = revisarComprobante({ ...pedido, token: token() })
     expect(r.comprobante).toBeNull()

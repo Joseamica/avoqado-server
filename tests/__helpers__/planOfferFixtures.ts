@@ -57,12 +57,21 @@ export function definicionDePrueba(opciones: OpcionesDeLaDefinicion = {}) {
 
 /**
  * Un comprobante firmado de verdad (con el `firmarCotizacion` real). Por default: Pro mensual de la v2, $79,900 + IVA
- * (92684 con IVA), 14 días de prueba (primer cobro $0). `emitido` = la hora de emisión (default, ahora).
+ * (92684 con IVA), la prueba de 14 días desde `emitido` (primer cobro $0 hoy). `emitido` = la hora de emisión (default, ahora).
  */
 export function comprobanteDePrueba(c: Partial<CotizacionFirmable> & { alcance: string }, emitido?: Date): string {
+  const emision = emitido ?? new Date()
   return firmarCotizacion(
-    { versionNumber: 2, tier: 'PRO', interval: 'monthly', firstChargeCents: 0, precioCents: 92684, trialEndsAt: null, ...c },
-    emitido,
+    {
+      versionNumber: 2,
+      tier: 'PRO',
+      interval: 'monthly',
+      firstChargeCents: 0,
+      precioCents: 92684,
+      trialEndsAt: new Date(emision.getTime() + 14 * 86_400_000),
+      ...c,
+    },
+    emision,
   )
 }
 

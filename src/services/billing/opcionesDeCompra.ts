@@ -5,10 +5,17 @@
  * que se nombra (`precioDe`), y el comprobante lo firma junto con el primer cobro y el fin de la prueba.
  */
 import AppError, { ConflictError } from '../../errors/AppError'
-import { MENSAJE_PLAN_NO_CONFIGURADO } from './precioDelPlan'
+import logger from '../../config/logger'
 import { finDePruebaDiferible, type FilaDePrueba } from './cobroDiferido'
 import { firmarCotizacion, verificarCotizacion, type CotizacionFirmada } from './comprobanteDeCotizacion'
-import { precioDeLaOferta, type OfertaVigente, type Periodicidad, type PlanPagado } from './planOffer'
+import {
+  MENSAJE_PLAN_NO_CONFIGURADO,
+  codigoDelPlan,
+  precioDeLaOferta,
+  type OfertaVigente,
+  type Periodicidad,
+  type PlanPagado,
+} from './planOffer'
 
 export const DIA_MS = 86_400_000
 
@@ -43,7 +50,15 @@ export interface OpcionDeCompra {
 }
 
 function sinPrecio(vigente: OfertaVigente, tier: PlanPagado, interval: Periodicidad): AppError {
-  return new AppError(MENSAJE_PLAN_NO_CONFIGURADO, 503, true, 'PLAN_NOT_CONFIGURED', { tier, interval, number: vigente.number })
+  // 🚨 a propósito, igual que `resolverPrecioDelPlan`: la versión vigente no trae el precio de Stripe de esta ranura.
+  logger.error('🚨 opcionesDeCompra: la versión vigente no trae el precio de Stripe de esta ranura — NO se vende', {
+    tierCode: codigoDelPlan(tier),
+    interval,
+    versionId: vigente.versionId,
+    number: vigente.number,
+    motivo: 'SIN_PRECIO',
+  })
+  return new AppError(MENSAJE_PLAN_NO_CONFIGURADO, 503, true, 'PLAN_NOT_CONFIGURED', { tierCode: codigoDelPlan(tier) })
 }
 
 /** La compra del alta: `null` si el plan no está en venta; con `trialDays > 0` el primer cobro es $0 y la prueba termina al cumplirse. */
@@ -72,7 +87,7 @@ export function esPruebaRegaladaVigente(fila: FilaDePrueba | null, tier: PlanPag
       !fila.stripeSubscriptionId &&
       fila.endDate &&
       fila.endDate.getTime() >= ahoraMs &&
-      fila.feature.code === tier,
+      fila.feature.code === codigoDelPlan(tier),
   )
 }
 
@@ -95,7 +110,7 @@ export function opcionDeTuPlan(args: {
   if (!vigente.definition[tier].onSale && !regalada && enPruebaDeStripe !== tier) return null
   const precio = precioDeLaOferta(vigente.definition, tier, interval)
   if (!precio.stripePriceId) throw sinPrecio(vigente, tier, interval)
-  const fin = finDePruebaDiferible(fila, tier, ahoraMs, margenMs)
+  const fin = finDePruebaDiferible(fila, codigoDelPlan(tier), ahoraMs, margenMs)
   return {
     priceId: precio.stripePriceId,
     precioCents: precio.grossCents,
