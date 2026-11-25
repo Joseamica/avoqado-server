@@ -39,6 +39,7 @@ import {
   tierQueVendeLaSuscripcion,
   getOrCreateStripeCustomer,
   planLookupKey,
+  stripeAfirmaQueNoExiste,
 } from '../stripe.service'
 import { autorizarObligacionNueva, TIMEOUT_DE_LA_TRANSACCION_MS } from '../access/autorizarObligacionNueva'
 import { inventarioDeObligaciones } from '../access/inventarioDeObligaciones'
@@ -46,7 +47,8 @@ import { ensureVenueForOnboarding } from './ensureVenue.service'
 import { primerCobroCubierto } from './primerCobroPagado'
 import { basicPlanValido, fusionarV2SetupData, MENSAJE_BASIC_PLAN_INVALIDO, parseV2Plan } from './onboardingProgress.service'
 import { modalidadDePrueba, type TrialModality } from '../billing/modalidadDePrueba'
-import { resolverPrecioDelPlan } from '../billing/precioDelPlan'
+import { resolverPrecioPorLlave } from '../billing/precioDelPlan'
+import { precioDeLaOferta, priceIdVigente, versionQueCobra } from '../billing/planOffer'
 import {
   isLegacyIntroEligible,
   LEGACY_INTRO_OFFER,
@@ -278,7 +280,14 @@ async function verificarPlanConfigurado(tier: PaidPlanTier): Promise<void> {
   )
 }
 
-async function verificarPrecioDeStripe(
+/** De dónde salió el precio verificado: la relectura antes de cobrar compara contra la MISMA fuente. */
+type OrigenDelPrecio = 'VERSION' | 'LLAVE'
+
+/**
+ * B0, tal cual: el precio de la LLAVE del plan, con su 409 `PLAN_PRICE_MISMATCH` también cuando la lista viene vacía (nunca
+ * el 503 del resolver). Es el camino sin una versión publicada por el editor (tablas vacías o sólo la v1).
+ */
+async function verificarPrecioPorLlave(
   tier: PaidPlanTier,
   interval: PlanBillingInterval,
   esperado: number,
@@ -302,6 +311,56 @@ async function verificarPrecioDeStripe(
   }
   // El MISMO precio que se leyó aquí es el que se cobra: no se vuelve a listar la llave.
   return { priceId: price.id, unitAmount }
+}
+
+/**
+ * PASO 4 — el precio que se va a cobrar tiene que ser el que el cliente consintió (`esperado`).
+ *
+ * - Sin una versión publicada por el editor (`versionQueCobra()` nulo): `verificarPrecioPorLlave`, idéntico a B0.
+ * - Con ella: el `priceId` de su ranura con `prices.retrieve`. Un precio que Stripe ya no tiene (404), inactivo, de otro
+ *   monto o una ranura sin precio dan el MISMO 409 `PLAN_PRICE_MISMATCH` de la llave (la pantalla se recarga), nunca el 503
+ *   del resolver.
+ */
+async function verificarPrecioDeStripe(
+  tier: PaidPlanTier,
+  interval: PlanBillingInterval,
+  esperado: number,
+): Promise<{ priceId: string; unitAmount: number; origen: OrigenDelPrecio }> {
+  const version = await versionQueCobra()
+  if (!version) return { ...(await verificarPrecioPorLlave(tier, interval, esperado)), origen: 'LLAVE' }
+
+  const ranura = precioDeLaOferta(version.definition, tier, interval)
+  const noCoincide = (stripeAmount: number | null, motivo: string) => {
+    // 🚨 a propósito: el precio de la versión vigente no es el que el cliente vio.
+    logger.error('🚨 activate-plan: el precio de la versión vigente no coincide con el snapshot — NO se cobra', {
+      versionId: version.versionId,
+      number: version.number,
+      tier,
+      interval,
+      priceId: ranura.stripePriceId,
+      esperado,
+      stripe: stripeAmount,
+      motivo,
+    })
+    return new ConflictError('El precio del plan cambió. Vuelve a cargar la página.', 'PLAN_PRICE_MISMATCH', {
+      esperado,
+      stripe: stripeAmount,
+    })
+  }
+  if (!ranura.stripePriceId) throw noCoincide(null, 'SIN_PRECIO')
+
+  let price: Stripe.Price
+  try {
+    price = await stripe.prices.retrieve(ranura.stripePriceId)
+  } catch (error) {
+    if (stripeAfirmaQueNoExiste(error)) throw noCoincide(null, 'NO_EXISTE')
+    throw error
+  }
+  const unitAmount = price.unit_amount ?? null
+  if (!price.active) throw noCoincide(unitAmount, 'INACTIVO')
+  if (unitAmount !== esperado || ranura.grossCents !== esperado) throw noCoincide(unitAmount, 'OTRO_MONTO')
+  // El MISMO precio que se leyó aquí es el que se cobra; la relectura sólo compara el puntero.
+  return { priceId: ranura.stripePriceId, unitAmount: esperado, origen: 'VERSION' }
 }
 
 /**
@@ -1111,17 +1170,23 @@ export async function activatePlan(
         customerId,
         { tipo: 'PLAN', tier: input.tier },
         async () => {
-          // 🔴 Codex B0 #1/#2: la llave se vuelve a leer JUSTO antes de cobrar (aún sin `intentoCobrar`). Si entre el PASO 4
-          // y aquí se movió a otro precio, cobrar con el verificado dejaba al cliente cobrado sin acceso (la entrega ya no
-          // reconoce ese precio por su llave) o, si se archivó, un rechazo de Stripe clasificado como «pudo cobrarse». Se
-          // responde 409 sin cobrar: el catch de abajo suelta el lease y libera el lugar como cualquier rechazo previo al
-          // cobro. Si coincide, se cobra con el priceId del PASO 4 (el que se comparó contra el monto consentido).
-          const vigente = await resolverPrecioDelPlan(tierCode, input.interval)
+          // 🔴 Codex B0 #1/#2: el precio se vuelve a leer JUSTO antes de cobrar (aún sin `intentoCobrar`). Si entre el PASO 4
+          // y aquí cambió, cobrar con el verificado dejaba al cliente cobrado sin acceso (la entrega ya no reconoce ese
+          // precio por su llave) o, si se archivó, un rechazo de Stripe clasificado como «pudo cobrarse». Se responde 409
+          // sin cobrar: el catch de abajo suelta el lease y libera el lugar como cualquier rechazo previo al cobro. Si
+          // coincide, se cobra con el priceId del PASO 4 (el que se comparó contra el monto consentido).
+          // Planes editables B1: se relee la MISMA fuente que dio el precio verificado. `VERSION` → el puntero (sólo la
+          // base, sin Stripe: otra versión publicada en medio es otro priceId); `LLAVE` → la llave, como B0.
+          const vigente =
+            precioVerificado.origen === 'VERSION'
+              ? { priceId: await priceIdVigente(input.tier, input.interval), unitAmount: null }
+              : await resolverPrecioPorLlave(tierCode, input.interval)
           if (vigente.priceId !== precioVerificado.priceId) {
-            // 🚨 a propósito: alguien movió la llave del plan en Stripe a media alta.
-            logger.error('🚨 activate-plan: la llave del plan apunta a otro precio al momento de cobrar — NO se cobra', {
+            // 🚨 a propósito: el precio del plan cambió a media alta.
+            logger.error('🚨 activate-plan: la versión vigente cambió al momento de cobrar — NO se cobra', {
               organizationId,
-              lookupKey: planLookupKey(tierCode, input.interval),
+              origen: precioVerificado.origen,
+              ...(precioVerificado.origen === 'LLAVE' ? { lookupKey: planLookupKey(tierCode, input.interval) } : {}),
               verificado: precioVerificado.priceId,
               vigente: vigente.priceId,
             })
