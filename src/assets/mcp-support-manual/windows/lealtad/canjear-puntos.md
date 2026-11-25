@@ -8,7 +8,6 @@ requiredPermissions:
   - tables:read
   - orders:update
   - loyalty:read
-  - customers:read
 featureCode: LOYALTY_PROGRAM
 gateKind: FEATURE
 money: true
@@ -32,13 +31,13 @@ Los puntos se canjean en una cuenta de *Mesas*, con el cliente en la cuenta. En 
 
 Para canjear hace falta:
 - el aparato en modo *Mesas* (*Más* › *Modo*; sin él no sale la pestaña *Mesas*) y el servicio de mesas en el plan (si falta, *Mesas* dice «Esta función es parte del plan PRO»);
-- permiso para ver las mesas, cambiar cuentas, ver los puntos del cliente y buscar clientes;
+- permiso para ver las mesas, cambiar cuentas y ver los puntos del cliente (y para buscar clientes, si hay que agregarlo a la cuenta);
 - que la cuenta sea tuya o que puedas editarla: si sale «Mesa de … — solo lectura», no se entra a *Cliente* ni a *Acciones*;
 - internet.
 
 ## Pasos
 
-1. Abre la cuenta en *Mesas*. Con la ventana angosta, toca antes *Ver cheque*. En *Cliente*, toca *Asignar cliente* (o *Cambiar cliente* si tiene otro) y elige al cliente; si ya está el correcto, sigue.
+1. Abre la cuenta en *Mesas*. Con la ventana angosta, toca antes *Ver cheque*. En *Cliente*, toca *Asignar cliente* o *Cambiar cliente* (el que salga) y elige al cliente; si ya está el correcto, sigue.
 2. En la pestaña *Acciones*, toca *Recompensas* (si no se ve, baja la lista).
 3. Sale el nombre del cliente con sus puntos disponibles y cuánto valen. Elige cuántos con *−* y *+*: debajo dice cuánto baja la cuenta.
 4. Toca *Canjear*. La cuenta ya trae el descuento «Recompensas — … puntos» y el botón de pagar baja.
@@ -47,7 +46,7 @@ Para canjear hace falta:
 ## Problemas frecuentes
 
 - Si *Recompensas* está en gris, tócalo: dice por qué. Por ejemplo «Esta cuenta no tiene puntos para canjear. Agrega el cliente en la pestaña «Cliente».», que no llega al mínimo de puntos, que el programa de lealtad está apagado (se prende desde el panel web) o que la cuenta ya tiene un pago registrado.
-- Si al canjear sale «La cuenta cambió: revisa los puntos.», no se canjeó nada: cambió la cuenta, el programa o el saldo del cliente (por ejemplo, gastó puntos en otra cuenta). La app vuelve a leer la cuenta y los puntos: espera la oferta nueva y, si *Canjear* se prende, revísala y tócalo; si sale en gris, el diálogo dice por qué.
+- Si al canjear sale «La cuenta cambió: revisa los puntos.», no se canjeó nada: cambió la cuenta, el programa o el saldo del cliente (por ejemplo, gastó puntos en otra cuenta). La app vuelve a leer la cuenta y los puntos: espera la oferta nueva y, si *Canjear* se prende, revísala y tócalo. Si sigue en gris, revisa que elegiste al menos el mínimo de puntos (y al menos 1) y lo que diga el diálogo.
 - *Quitar* la recompensa ya no se puede si la cuenta tiene un pago registrado («No se puede modificar una orden ya pagada»): los puntos se quedan canjeados.
 - Si en *Cobrar* buscas cómo canjear: ahí no se puede todavía. Para usar los puntos, la venta tiene que ser una cuenta de *Mesas*.
 

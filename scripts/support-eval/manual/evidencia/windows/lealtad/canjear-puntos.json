@@ -43,7 +43,7 @@
     {
       "paso": 1,
       "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt",
-      "linea": 48,
+      "linea": 49,
       "cita": "val windowSizeClass = WindowSizeClass.calculateFromSize(DpSize(maxWidth, maxHeight))"
     },
     {
@@ -214,6 +214,11 @@
       "ruta": "«La cuenta cambió»: el saldo del cliente bajó por un canje en otra cuenta",
       "archivo": "avoqado-server/src/services/mobile/loyalty.mobile.service.ts",
       "linea": 374
+    },
+    {
+      "ruta": "«Canjear» en gris con menos del mínimo o 0 puntos elegidos",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
+      "linea": 508
     }
   ],
   "aparato": {
