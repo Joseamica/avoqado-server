@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-25T15:46:48.061Z",
-  "approvedHash": "cbf1bcf3d96e12f13b99f347c665ce861fc4797cf778796f7b3661677d8f967e",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -261,6 +261,13 @@
       "featureCode": "RESERVATIONS",
       "gateKind": "FEATURE"
     },
+    "android/tarjetas-de-regalo/cambiar-destino-de-tarjeta-de-regalo": {
+      "sha256": "0625ca7ac0afaa2f28354fd3a07ae8fcf13cda94de33f11d58a336affc5287b2",
+      "requiredPermissions": [
+        "giftCards:read",
+        "giftCards:manage"
+      ]
+    },
     "android/tarjetas-de-regalo/entregar-reenviar-o-imprimir-tarjeta-de-regalo": {
       "sha256": "25258b2ee171c9e023a059539e1d0a5c38411c158b537319fd7e4f479cea3b1a",
       "requiredPermissions": [
@@ -274,6 +281,12 @@
       ],
       "featureCode": "GIFT_CARDS",
       "gateKind": "FEATURE"
+    },
+    "android/tarjetas-de-regalo/vender-varias-tarjetas-de-regalo": {
+      "sha256": "0653cee139bfc7c280e4ccf4d82bfd5b6293807c96d28b78e2a451a9e4fe1729",
+      "requiredPermissions": [
+        "giftCards:sell"
+      ]
     },
     "android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo": {
       "sha256": "b284e4d1f87b516e4e533bd00c9f8561b0a00247ba7615921a8ce129712da854",
