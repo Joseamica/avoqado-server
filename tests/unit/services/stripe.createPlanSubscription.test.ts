@@ -532,3 +532,87 @@ describe('🔴 D2: el banco pide autenticar el primer cobro', () => {
     expect(pideAutenticacion(undefined)).toBe(false)
   })
 })
+
+/**
+ * Planes editables B2 (Task 4): una compra con comprobante cobra con el fin de prueba que el comprobante firmó (`trial_end`,
+ * nunca días contados desde ahora) y con `discounts` explícitos (b2-r9 #1). Sin esas opciones, el cuerpo de siempre.
+ */
+describe('B2: el fin de prueba del comprobante y los descuentos explícitos', () => {
+  const FIN = new Date('2026-12-25T12:34:56.789Z')
+  const errorDeAutenticacion = () =>
+    Object.assign(new Error('Payment for this subscription requires additional user action…'), {
+      type: 'StripeCardError',
+      code: 'subscription_payment_intent_requires_action',
+      statusCode: 402,
+    })
+  const porAutenticar = {
+    id: 'sub_3ds',
+    status: 'incomplete',
+    latest_invoice: { id: 'in_1', status: 'open', confirmation_secret: { type: 'payment_intent', client_secret: 'pi_1_secret_x' } },
+  }
+  const base = (extra: Partial<CreatePlanSubscriptionInput> = {}): CreatePlanSubscriptionInput => ({
+    venueId: 'v1',
+    customerId: 'cus_1',
+    paymentMethodId: 'pm_1',
+    priceId: 'price_v2_pro_m',
+    tierCode: 'PLAN_PRO',
+    interval: 'monthly',
+    trialPeriodDays: 0,
+    idempotencyKey: 'plan-activation:org-1:1',
+    paymentBehavior: 'error_if_incomplete',
+    autenticarEnElNavegador: { primerCobroEsperadoCents: 92684, terminarAntesDe: Date.now() + 140_000 },
+    ...extra,
+  })
+
+  it('con trialEnd manda trial_end en segundos y no trial_period_days; sin trialEnd, el cuerpo de siempre', async () => {
+    await createPlanSubscription(base({ trialEnd: FIN }))
+    const conFin = mockSubCreate.mock.calls[0][0]
+    expect(conFin.trial_end).toBe(Math.floor(FIN.getTime() / 1000))
+    expect('trial_period_days' in conFin).toBe(false)
+
+    mockSubCreate.mockClear()
+    await createPlanSubscription(base({ trialPeriodDays: 30, paymentBehavior: undefined, autenticarEnElNavegador: undefined }))
+    const deHoy = mockSubCreate.mock.calls[0][0]
+    expect(deHoy.trial_period_days).toBe(30)
+    expect('trial_end' in deHoy).toBe(false)
+    expect(Object.keys(deHoy)).toEqual([
+      'customer',
+      'items',
+      'trial_period_days',
+      'default_payment_method',
+      'description',
+      'metadata',
+      'collection_method',
+      'payment_settings',
+    ])
+  })
+
+  it('con trialEnd no manda payment_behavior ni intenta el 2.º create de autenticación', async () => {
+    await createPlanSubscription(base({ trialEnd: FIN }))
+    expect(mockSubCreate.mock.calls[0][0].payment_behavior).toBeUndefined()
+
+    // Con prueba no hay primer cobro: un 402 de autenticación (no debería ocurrir) sale intacto, con UN solo create.
+    mockSubCreate.mockReset().mockRejectedValueOnce(errorDeAutenticacion()).mockResolvedValueOnce(porAutenticar)
+    await expect(createPlanSubscription(base({ trialEnd: FIN }))).rejects.toMatchObject({
+      code: 'subscription_payment_intent_requires_action',
+    })
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 b2-r9 #1: con descuentosExplicitos y sin cupón, los dos create llevan discounts ""; con cupón, [{ coupon }]; sin descuentosExplicitos y sin cupón, el cuerpo no trae la llave discounts (como hoy)', async () => {
+    mockSubCreate.mockReset().mockRejectedValueOnce(errorDeAutenticacion()).mockResolvedValueOnce(porAutenticar)
+    await createPlanSubscription(base({ descuentosExplicitos: true }))
+    expect(mockSubCreate).toHaveBeenCalledTimes(2)
+    expect(mockSubCreate.mock.calls[0][0].discounts).toBe('')
+    expect(mockSubCreate.mock.calls[1][0].discounts).toBe('')
+
+    mockSubCreate.mockReset().mockRejectedValueOnce(errorDeAutenticacion()).mockResolvedValueOnce(porAutenticar)
+    await createPlanSubscription(base({ descuentosExplicitos: true, coupon: 'LC_X' }))
+    expect(mockSubCreate.mock.calls[0][0].discounts).toEqual([{ coupon: 'LC_X' }])
+    expect(mockSubCreate.mock.calls[1][0].discounts).toEqual([{ coupon: 'LC_X' }])
+
+    mockSubCreate.mockReset().mockResolvedValue({ id: 'sub_1', status: 'active' })
+    await createPlanSubscription(base())
+    expect('discounts' in mockSubCreate.mock.calls[0][0]).toBe(false)
+  })
+})

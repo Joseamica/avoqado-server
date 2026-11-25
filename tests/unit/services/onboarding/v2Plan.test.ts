@@ -72,4 +72,24 @@ describe('parseV2Plan', () => {
       acceptedAt: null,
     })
   })
+
+  // Planes editables B2 (Task 4): el plan cobrado con un comprobante guarda el número de su versión; `sinTarjeta`, la prueba
+  // sin método de pago. Lo demás (texto, número no entero, `false`) no se conserva.
+  it('parseV2Plan conserva offerVersion (entero) y sinTarjeta (true); ignora otros valores', () => {
+    expect(parseV2Plan({ plan: { paymentMethodId: 'pm_1', offerVersion: 2, sinTarjeta: true } })).toEqual({
+      tier: 'PRO',
+      paymentMethodId: 'pm_1',
+      interval: 'monthly',
+      payNow: false,
+      acceptedAt: null,
+      offerVersion: 2,
+      sinTarjeta: true,
+    })
+    for (const offerVersion of ['2', 2.5, 0, -1, null, true]) {
+      expect(parseV2Plan({ plan: { paymentMethodId: 'pm_1', offerVersion } })).not.toHaveProperty('offerVersion')
+    }
+    for (const sinTarjeta of [false, 'true', 1, null]) {
+      expect(parseV2Plan({ plan: { paymentMethodId: 'pm_1', sinTarjeta } })).not.toHaveProperty('sinTarjeta')
+    }
+  })
 })

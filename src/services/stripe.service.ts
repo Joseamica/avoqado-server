@@ -724,7 +724,19 @@ export interface CreatePlanSubscriptionInput {
   priceId: string
   interval: 'monthly' | 'annual'
   trialPeriodDays: number // 0 = pay-now (no trial), 30 = trial
+  /**
+   * Planes editables (B2): el fin de la prueba que firmó el comprobante. Con él se manda `trial_end` (en segundos) y **no**
+   * `trial_period_days` (nunca días contados desde ahora), y cuenta como prueba para `paymentBehavior`,
+   * `autenticarEnElNavegador` y `cancelAtTrialEnd`. Sin él, el cuerpo de hoy.
+   */
+  trialEnd?: Date
   coupon?: string // e.g. 'INTRO_PRO_3M' (PRO monthly pay-now only)
+  /**
+   * Planes editables (B2, b2-r9 #1): los `discounts` van SIEMPRE explícitos en los dos `create` — `[{ coupon }]` con el cupón,
+   * o `''` sin él (la forma de `hybridProvision.service.ts`), para no heredar a ciegas un descuento del cliente. Sin esta
+   * opción, el `discounts` de hoy (sólo con cupón).
+   */
+  descuentosExplicitos?: true
   venueName?: string
   venueSlug?: string
   /**
@@ -985,7 +997,9 @@ export async function suscripcionVendeElPlan(
 }
 
 export async function createPlanSubscription(input: CreatePlanSubscriptionInput): Promise<CreatePlanSubscriptionResult> {
-  if (input.cancelAtTrialEnd && !(input.trialPeriodDays > 0)) {
+  // Planes editables (B2): un fin de prueba del comprobante también es prueba. Sin él, las comprobaciones de hoy, literales.
+  const conPrueba = !!input.trialEnd || input.trialPeriodDays > 0
+  if (input.cancelAtTrialEnd && !conPrueba) {
     throw new Error('cancelAtTrialEnd sólo aplica a una prueba gratis (trialPeriodDays > 0)')
   }
   const feature = await prisma.feature.findFirst({ where: { code: input.tierCode, active: true } })
@@ -1029,17 +1043,21 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
   const params: Stripe.SubscriptionCreateParams = {
     customer: input.customerId,
     items: [{ price: input.priceId }],
-    trial_period_days: input.trialPeriodDays,
+    ...(input.trialEnd ? { trial_end: Math.floor(input.trialEnd.getTime() / 1000) } : { trial_period_days: input.trialPeriodDays }),
     default_payment_method: input.paymentMethodId,
     // No Stripe Tax: IVA is baked into the price (tax_behavior 'inclusive'), so we charge the
     // price as-is and the merchant remits/itemizes the IVA on their own CFDI factura.
-    ...(input.coupon ? { discounts: [{ coupon: input.coupon }] } : {}),
+    ...(input.descuentosExplicitos
+      ? { discounts: input.coupon ? [{ coupon: input.coupon }] : '' }
+      : input.coupon
+        ? { discounts: [{ coupon: input.coupon }] }
+        : {}),
     description: input.venueName
       ? `Plan Avoqado ${planLabel(input.tierCode)} - ${input.venueName}`
       : `Plan Avoqado ${planLabel(input.tierCode)}`,
     metadata,
     // 🔴 Sólo se manda con trial 0: con prueba gratis no hay primer cobro que pueda fallar.
-    ...(input.paymentBehavior && input.trialPeriodDays === 0 ? { payment_behavior: input.paymentBehavior } : {}),
+    ...(input.paymentBehavior && !input.trialEnd && input.trialPeriodDays === 0 ? { payment_behavior: input.paymentBehavior } : {}),
     collection_method: 'charge_automatically',
     payment_settings: { save_default_payment_method: 'on_subscription', payment_method_types: ['card'] },
     ...(input.cancelAtTrialEnd ? { cancel_at_period_end: true } : {}),
@@ -1067,6 +1085,7 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
       !autenticar ||
       !input.idempotencyKey ||
       input.paymentBehavior !== 'error_if_incomplete' ||
+      !!input.trialEnd ||
       input.trialPeriodDays !== 0 ||
       !pideAutenticacion(error)
     ) {

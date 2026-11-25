@@ -49,6 +49,8 @@ import { basicPlanValido, fusionarV2SetupData, MENSAJE_BASIC_PLAN_INVALIDO, pars
 import { modalidadDePrueba, type TrialModality } from '../billing/modalidadDePrueba'
 import { resolverPrecioPorLlave } from '../billing/precioDelPlan'
 import { precioDeLaOferta, priceIdVigente, versionQueCobra, type OfertaVigente } from '../billing/planOffer'
+import { DIA_MS, ofertaCambio, planFueraDeVenta, revisarComprobante } from '../billing/opcionesDeCompra'
+import type { CotizacionFirmada } from '../billing/comprobanteDeCotizacion'
 import {
   isLegacyIntroEligible,
   LEGACY_INTRO_OFFER,
@@ -99,6 +101,12 @@ export interface ActivatePlanInput {
   language?: 'es' | 'en'
   /** Plan Básico: la prueba de Pro que termina sola sin cobrar. Sólo con PRO mensual y `payNow: false`. */
   basicPlan?: boolean
+  /**
+   * Planes editables (B2): el comprobante firmado de la cotización del alta. 🔴 Viaja APARTE de `offer` (el controlador lo
+   * separa) para que ningún camino lo guarde ni lo devuelva. Sólo lo lee el camino con una versión del editor; sin ella, ni su
+   * forma se revisa.
+   */
+  quoteToken?: unknown
 }
 
 export interface ActivatePlanResult {
@@ -178,10 +186,80 @@ function primerCobroDe(sub: Stripe.Subscription, respaldo: number): number {
   return respaldo
 }
 
+/**
+ * Planes editables (B2): un intento STANDARD con una versión publicada por el editor. `comprobante` es el que se cobra (su
+ * versión, su precio, su fin de prueba); `rechazo`, por qué no se puede cobrar con lo que llegó. Nunca los dos a la vez.
+ */
+export interface EstandarConVersion {
+  version: OfertaVigente
+  comprobante: CotizacionFirmada | null
+  rechazo: AppError | null
+}
+
 interface Cotizacion {
   expected: number
   campaign: LaunchCampaignRow | null
   listPriceCents: number
+  /** Sólo STANDARD con una versión del editor (`versionQueCobra()`); sin ella no existe y todo es B0/B1. */
+  estandar?: EstandarConVersion
+}
+
+/**
+ * Planes editables (B2): ¿el comprobante de esta petición sirve para cobrar un intento NUEVO con la versión vigente? Nunca
+ * lanza: devuelve el rechazo para que quien llama lo lance donde le toque. En este orden:
+ *  1. el Básico, con una versión del editor, ya no se vende (`PLAN_NOT_ON_SALE`);
+ *  2. un plan con `onSale` falso tampoco;
+ *  3. el comprobante mismo (`revisarComprobante`, alcance `org:<id>`): falta, no es válido, venció, es de otra versión, o de
+ *     otro plan o periodicidad;
+ *  4. con tarjeta y el plan de la vigente sin tarjeta → `SIN_TARJETA`; sin tarjeta y el plan con tarjeta → `CON_TARJETA`;
+ *  5. otro bruto que el de la vigente, otro primer cobro que el que la persona vio, u otro fin de prueba que el de sus días
+ *     (o un fin con 0 días) → `QUOTE_MISMATCH`;
+ *  6. `payNow` que no es «el comprobante no tiene prueba» → `PAGO_HOY`.
+ */
+export function revisarComprobanteDelAlta(args: {
+  input: Pick<ActivatePlanInput, 'tier' | 'interval' | 'payNow' | 'basicPlan' | 'paymentMethodId'> & {
+    offer: { expectedFirstChargeCents: number }
+    quoteToken?: unknown
+  }
+  organizationId: string
+  version: OfertaVigente
+  ahora: Date
+}): { comprobante: CotizacionFirmada; rechazo: null } | { comprobante: null; rechazo: AppError } {
+  const { input, organizationId, version, ahora } = args
+  const n = version.number
+  const plan = version.definition[input.tier]
+  const rechazo = (error: AppError) => ({ comprobante: null, rechazo: error })
+
+  if (input.basicPlan === true) return rechazo(planFueraDeVenta('BASICO', 'Básico'))
+  if (!plan.onSale) return rechazo(planFueraDeVenta(input.tier, plan.displayName))
+
+  const revisado = revisarComprobante({
+    token: input.quoteToken,
+    alcance: `org:${organizationId}`,
+    tier: input.tier,
+    interval: input.interval,
+    versionNumber: n,
+    ahora,
+  })
+  if (revisado.comprobante === null) return revisado
+  const { comprobante } = revisado
+
+  const conTarjeta = Boolean(input.paymentMethodId)
+  if (conTarjeta && !plan.requiresCard) return rechazo(ofertaCambio('SIN_TARJETA', n))
+  if (!conTarjeta && plan.requiresCard) return rechazo(ofertaCambio('CON_TARJETA', n))
+
+  const bruto = precioDeLaOferta(version.definition, input.tier, input.interval).grossCents
+  const finEsperado = plan.trialDays > 0 ? comprobante.issuedAt.getTime() + plan.trialDays * DIA_MS : null
+  const finFirmado = comprobante.trialEndsAt ? comprobante.trialEndsAt.getTime() : null
+  if (
+    comprobante.precioCents !== bruto ||
+    comprobante.firstChargeCents !== input.offer.expectedFirstChargeCents ||
+    finFirmado !== finEsperado
+  ) {
+    return rechazo(ofertaCambio('QUOTE_MISMATCH', n))
+  }
+  if (input.payNow !== (comprobante.trialEndsAt === null)) return rechazo(ofertaCambio('PAGO_HOY', n))
+  return { comprobante, rechazo: null }
 }
 
 /**
@@ -190,6 +268,18 @@ interface Cotizacion {
  */
 async function cotizar(input: ActivatePlanInput, progress: { launchCampaignId: string | null }, now: Date): Promise<Cotizacion> {
   if (input.offer.kind === 'STANDARD') {
+    // Planes editables (B2): con una versión del editor el precio sale de su comprobante. 🔴 Aquí NO se lanza su rechazo: lo
+    // lanza el PASO 4 (y Task 5 lo difiere cuando hay un intento anterior que pudo cobrar). Sin versión, lo de hoy, literal.
+    const version = await versionQueCobra()
+    if (version) {
+      const { comprobante, rechazo } = revisarComprobanteDelAlta({ input, organizationId: input.organizationId, version, ahora: now })
+      return {
+        expected: comprobante?.firstChargeCents ?? input.offer.expectedFirstChargeCents,
+        campaign: null,
+        listPriceCents: comprobante?.precioCents ?? precioDeLaOferta(version.definition, input.tier, input.interval).grossCents,
+        estandar: { version, comprobante, rechazo },
+      }
+    }
     const expected = standardFirstChargeCents(standardPlanQuote(), input.tier, input.interval, input.payNow)
     if (expected !== input.offer.expectedFirstChargeCents) {
       throw new ConflictError('El precio cambió. Revísalo antes de pagar.', 'OFFER_CHANGED', {
@@ -322,17 +412,20 @@ async function verificarPrecioPorLlave(
 /**
  * PASO 4 — el precio que se va a cobrar tiene que ser el que el cliente consintió (`esperado`).
  *
- * - Sin una versión publicada por el editor (`versionQueCobra()` nulo): `verificarPrecioPorLlave`, idéntico a B0.
+ * - Sin una versión publicada por el editor (`version` nulo): `verificarPrecioPorLlave`, idéntico a B0.
  * - Con ella: el `priceId` de su ranura con `prices.retrieve`. Un precio que Stripe ya no tiene (404), inactivo, de otro
  *   monto o una ranura sin precio dan el MISMO 409 `PLAN_PRICE_MISMATCH` de la llave (la pantalla se recarga), nunca el 503
  *   del resolver.
+ *
+ * `version` es la que leyó el PASO 3 (`cotizar`, B2): una sola lectura decide si el intento va por la llave o por el
+ * comprobante, así una versión publicada en medio no hace cobrar con ella a quien no trae su comprobante.
  */
 async function verificarPrecioDeStripe(
+  version: OfertaVigente | null,
   tier: PaidPlanTier,
   interval: PlanBillingInterval,
   esperado: number,
 ): Promise<{ priceId: string; unitAmount: number; origen: 'VERSION' | 'LLAVE' }> {
-  const version = await versionQueCobra()
   if (!version) return { ...(await verificarPrecioPorLlave(tier, interval, esperado)), origen: 'LLAVE' }
   return verificarPrecioDeLaVersion(version, tier, interval, esperado)
 }
@@ -1068,13 +1161,20 @@ export async function activatePlan(
   }
 
   // ---- PASO 3: cotización del servidor ----
-  const { expected, campaign, listPriceCents } = await cotizar(input, progress, now)
+  const { expected, campaign, listPriceCents, estandar } = await cotizar(input, progress, now)
+  /** Planes editables (B2): el comprobante con el que se cobra este intento (sólo STANDARD con versión del editor). */
+  const conComprobante = estandar?.comprobante ?? null
 
   // ---- PASO 4: verificación contra Stripe (sólo lecturas) ----
+  // Planes editables (B2): un comprobante que no sirve se rechaza AQUÍ, antes de Stripe y del lease. El revisor (`soloRecuperar`)
+  // no lo necesita: nunca cobra, sólo cierra lo que Stripe ya cobró (la regla R2 de abajo); Task 5 lo generaliza a todo
+  // intento anterior `IN_PROGRESS`.
+  if (estandar?.rechazo && !opciones.soloRecuperar) throw estandar.rechazo
   // Una campaña cobra con el precio de su lugar apartado, de su intento, de la llave o de la versión (`precioDeLaCampana`).
+  // STANDARD: con un comprobante, su precio (`precioCents`) contra la ranura de SU versión (origen `VERSION`).
   const precioVerificado: PrecioVerificado = campaign
     ? await precioDeLaCampana(campaign, organizationId, progress)
-    : await verificarPrecioDeStripe(input.tier, input.interval, listPriceCents)
+    : await verificarPrecioDeStripe(estandar?.version ?? null, input.tier, input.interval, listPriceCents)
   await verificarPlanConfigurado(input.tier)
   const venueRecord = await prisma.venue.findUnique({
     where: { id: venue.id },
@@ -1130,6 +1230,11 @@ export async function activatePlan(
       // de ESTE intento, y se cobraría encima de la que este intento sí creó. Desde NONE no se toca (el único que deja NONE
       // con id es el carril viejo de `complete`, que usa ese rastro); al recuperar un IN_PROGRESS, el id es el suyo.
       ...(prev.status === PLAN_ACTIVATION_STATUS.DECLINED ? { planStripeSubscriptionId: null } : {}),
+      // Planes editables (B2): la INTENCIÓN queda en la base antes de cualquier llamada a Stripe. Sólo un intento nuevo seguro
+      // (desde NONE o DECLINED) con su comprobante; al recuperar un IN_PROGRESS no se toca (Task 5).
+      ...(conComprobante && (prev.status === PLAN_ACTIVATION_STATUS.NONE || prev.status === PLAN_ACTIVATION_STATUS.DECLINED)
+        ? { planOfferVersionNumber: conComprobante.versionNumber }
+        : {}),
     },
   })
   if (tomado.count === 0) throw new ConflictError('Tu pago se está confirmando. Espera unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
@@ -1278,7 +1383,8 @@ export async function activatePlan(
 
   // ---- PASOS 8-11: Stripe y cierre ----
   const planActivationKey = `plan-activation:${organizationId}:${attempt}`
-  const legacyIntro = !campaign && isLegacyIntroEligible(input.tier, input.interval, input.payNow)
+  // 🔴 Planes editables (B2, §12.2): con una versión del editor nunca va `INTRO_PRO_3M`; el precio es el de la versión.
+  const legacyIntro = !campaign && !estandar && isLegacyIntroEligible(input.tier, input.interval, input.payNow)
   const cuponEsperado = campaign ? (campaign.stripeCouponId as string) : legacyIntro ? LEGACY_INTRO_OFFER.couponId : null
 
   let subscriptionId: string
@@ -1326,8 +1432,28 @@ export async function activatePlan(
           // base, sin Stripe: otra versión publicada en medio es otro priceId); `LLAVE` → la llave, como B0. `LUGAR` y
           // `SUSCRIPCION` no se releen: es el precio que ese lugar ya consintió y Avoqado no archiva precios (§15). Un precio
           // de la versión que el PASO 7 guardó en el lugar ya es `LUGAR` (`origenDeLaRelectura`).
-          const vigente =
-            origenDeLaRelectura === 'VERSION'
+          if (conComprobante) {
+            // Planes editables (B2): con comprobante se relee la vigente (sólo la base) y tiene que ser LA MISMA versión del
+            // comprobante con el MISMO precio en esta ranura: otra versión publicada en medio (aunque sólo cambien los días) es
+            // otra oferta. 409 por el mismo camino de hoy (suelta el lease y el lugar). Lo que se publique DESPUÉS de esta
+            // relectura es residuo aceptado: sale con la versión que la persona vio.
+            const releida = await versionQueCobra()
+            const priceIdReleido = releida ? precioDeLaOferta(releida.definition, input.tier, input.interval).stripePriceId : null
+            if (!releida || releida.number !== conComprobante.versionNumber || priceIdReleido !== precioVerificado.priceId) {
+              logger.warn('activate-plan: otra versión de la oferta quedó vigente al momento de cobrar — NO se cobra', {
+                organizationId,
+                origen: 'VERSION',
+                comprobante: conComprobante.versionNumber,
+                vigenteNumber: releida?.number ?? null,
+                verificado: precioVerificado.priceId,
+                vigente: priceIdReleido,
+              })
+              throw ofertaCambio('VERSION', releida?.number ?? 1)
+            }
+          }
+          const vigente = conComprobante
+            ? null
+            : origenDeLaRelectura === 'VERSION'
               ? { priceId: await priceIdVigente(input.tier, input.interval), unitAmount: null }
               : origenDeLaRelectura === 'LLAVE'
                 ? await resolverPrecioPorLlave(tierCode, input.interval)
@@ -1358,8 +1484,12 @@ export async function activatePlan(
             interval: input.interval,
             priceId: precioVerificado.priceId,
             // Con campaña SIEMPRE se paga el primer ciclo: la oferta no tiene prueba gratis.
-            trialPeriodDays: campaign || input.payNow ? 0 : TRIAL_DAYS,
+            // 🔴 B2: con comprobante, la prueba termina cuando dice el comprobante (`trial_end`), nunca 30 días desde ahora.
+            trialPeriodDays: conComprobante || campaign || input.payNow ? 0 : TRIAL_DAYS,
+            ...(conComprobante?.trialEndsAt ? { trialEnd: conComprobante.trialEndsAt } : {}),
             coupon: cuponEsperado ?? undefined,
+            // B2 (b2-r9 #1): con comprobante los descuentos van explícitos (aquí ninguno): no se hereda uno del cliente a ciegas.
+            ...(conComprobante ? { descuentosExplicitos: true as const } : {}),
             idempotencyKey: planActivationKey,
             // Plan Básico: la prueba termina sola sin cobrar. Sólo en ESTE create; un reuso devuelve la suscripción tal cual.
             ...(input.basicPlan ? { cancelAtTrialEnd: true } : {}),
@@ -1379,6 +1509,13 @@ export async function activatePlan(
             extraMetadata: {
               organizationId,
               planActivationKey,
+              // B2: la versión del comprobante y la versión cuyo precio se cobra (hoy la misma).
+              ...(conComprobante
+                ? {
+                    planOfferVersion: String(conComprobante.versionNumber),
+                    planOfferPrecioDe: String(conComprobante.versionNumber),
+                  }
+                : {}),
               ...(campaign
                 ? {
                     launchCampaignId: campaign.id,
@@ -1581,7 +1718,13 @@ export async function activatePlan(
       payNow: payNowCobrado,
       acceptedAt: now.toISOString(),
       // Lo guardado describe lo COBRADO: si la oferta no aplicó, no queda como alta con oferta.
-      offer: ofertaNoAplicada ? ({ kind: 'STANDARD', expectedFirstChargeCents: primerCobroDe(sub, expected) } as const) : input.offer,
+      // 🔴 B2: el comprobante NUNCA se guarda (lo devolvería `GET progress`): STANDARD se escribe campo por campo.
+      offer: ofertaNoAplicada
+        ? ({ kind: 'STANDARD', expectedFirstChargeCents: primerCobroDe(sub, expected) } as const)
+        : input.offer.kind === 'STANDARD'
+          ? ({ kind: 'STANDARD', expectedFirstChargeCents: input.offer.expectedFirstChargeCents } as const)
+          : input.offer,
+      ...(conComprobante ? { offerVersion: conComprobante.versionNumber } : {}),
       ...(terminaSinCobro ? { basicPlan: true as const } : {}),
     }
     const cerrado = await tx.onboardingProgress.updateMany({
@@ -1623,6 +1766,11 @@ export async function activatePlan(
   })
 
   const firstChargeCents = primerCobroDe(sub, expected)
+  // Planes editables (B2, §10.5): con una versión del editor los correos dicen el precio de la SUSCRIPCIÓN (lo que Stripe va a
+  // cobrar), nunca una constante. Sin versión, las constantes de hoy.
+  const montoDelPlanCents = estandar
+    ? ((sub.items?.data?.[0]?.price as { unit_amount?: number | null } | undefined)?.unit_amount ?? listPriceCents)
+    : undefined
 
   if (ofertaNoAplicada) {
     await logAction({
@@ -1699,6 +1847,7 @@ export async function activatePlan(
     nextChargeAt,
     timeZone: venueRecord?.timezone,
     terminaSinCobro,
+    ...(montoDelPlanCents !== undefined ? { montoDelPlanCents } : {}),
   }).catch(error =>
     logger.warn('activate-plan: no se pudo enviar el correo de confirmación', {
       organizationId,
@@ -1717,6 +1866,7 @@ export async function activatePlan(
     nextChargeAt,
     campaign,
     terminaSinCobro,
+    ...(montoDelPlanCents !== undefined ? { montoDelPlanCents } : {}),
   })
 
   await terminarElAlta()
@@ -1859,6 +2009,8 @@ function avisarActivacion(a: {
   campaign: LaunchCampaignRow | null
   /** Plan Básico (`ENDS_FREE`): la prueba termina sin cobrar, así que no hay «primer cobro» que calcular ni anunciar. */
   terminaSinCobro?: boolean
+  /** Planes editables (B2): con una versión del editor, el precio de la suscripción. Sin él, las constantes de hoy. */
+  montoDelPlanCents?: number
 }): void {
   const primerCobro = a.terminaSinCobro
     ? 0
@@ -1866,7 +2018,7 @@ function avisarActivacion(a: {
       ? a.firstChargeCents
       : a.campaign
         ? (a.campaign.listPriceCentsSnapshot as number)
-        : STANDARD_PLAN_GROSS_CENTS[a.tier][a.interval]
+        : (a.montoDelPlanCents ?? STANDARD_PLAN_GROSS_CENTS[a.tier][a.interval])
   void resolvePlanNotificationTarget(a.venueId)
     .then(target =>
       resendService.sendPlanActivatedNotice({
@@ -1905,12 +2057,17 @@ async function enviarConfirmacion(args: {
   timeZone?: string
   /** Plan Básico: la suscripción REAL termina sin cobrar. El correo no anuncia el cobro de Pro. */
   terminaSinCobro?: boolean
+  /**
+   * Planes editables (B2, §10.5): con una versión del editor, el precio de la suscripción leída en el PASO 9. Con él nunca hay
+   * introducción legacy (esa compra no lleva `INTRO_PRO_3M`). Sin él, las constantes de hoy.
+   */
+  montoDelPlanCents?: number
 }): Promise<void> {
   const target = await resolvePlanNotificationTarget(args.venueId)
   if (!target.email) return
 
   const { campaign, input } = args
-  const legacyIntro = !campaign && isLegacyIntroEligible(input.tier, input.interval, input.payNow)
+  const legacyIntro = !campaign && args.montoDelPlanCents === undefined && isLegacyIntroEligible(input.tier, input.interval, input.payNow)
 
   await emailService.sendPlanConfirmationEmail(target.email, {
     locale: input.language ?? target.locale,
@@ -1922,7 +2079,9 @@ async function enviarConfirmacion(args: {
     // decía un mes, no un año; deuda de la campaña 3DS, 20-oct).
     firstChargeDate: new Date(args.nextChargeAt),
     timeZone: args.timeZone,
-    firstChargeAmountCents: campaign ? (campaign.listPriceCentsSnapshot as number) : STANDARD_PLAN_GROSS_CENTS[input.tier][input.interval],
+    firstChargeAmountCents: campaign
+      ? (campaign.listPriceCentsSnapshot as number)
+      : (args.montoDelPlanCents ?? STANDARD_PLAN_GROSS_CENTS[input.tier][input.interval]),
     ...(campaign
       ? {
           introAmountCents: campaign.advertisedPriceCents,

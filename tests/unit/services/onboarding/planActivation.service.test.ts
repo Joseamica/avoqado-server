@@ -86,7 +86,7 @@ import {
 import { standardPlanQuote } from '@/services/access/planPricing.constants'
 import { standardFirstChargeCents } from '@/services/launchCampaigns/launchOfferMath'
 import { prismaMock } from '@tests/__helpers__/setup'
-import { definicionDePrueba, idsDeLaVersion, punteroA } from '@tests/__helpers__/planOfferFixtures'
+import { comprobanteDePrueba, definicionDePrueba, idsDeLaVersion, punteroA } from '@tests/__helpers__/planOfferFixtures'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import logger from '@/config/logger'
 import { inspect } from 'util'
@@ -1004,8 +1004,20 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
   })
 
   // Planes editables B1: la relectura compara contra la MISMA fuente que dio el precio verificado. Con la v2, el puntero.
-  const VERSION_DOS = () => definicionDePrueba({ ids: idsDeLaVersion('v2') })
-  const ANUAL_PRO = { ...BASE, interval: 'annual' as const, offer: { kind: 'STANDARD' as const, expectedFirstChargeCents: 1158840 } }
+  // B2 (Task 4): con la v2 el alta manda su comprobante (Pro anual de 0 días: paga hoy el precio de la versión).
+  const VERSION_DOS = () => definicionDePrueba({ ids: idsDeLaVersion('v2'), planes: { PRO: { trialDays: 0 } } })
+  const ANUAL_PRO = {
+    ...BASE,
+    interval: 'annual' as const,
+    offer: { kind: 'STANDARD' as const, expectedFirstChargeCents: 1158840 },
+    quoteToken: comprobanteDePrueba({
+      alcance: 'org:org-1',
+      interval: 'annual',
+      firstChargeCents: 1158840,
+      precioCents: 1158840,
+      trialEndsAt: null,
+    }),
+  }
 
   it('con la v2 vigente, la relectura antes de cobrar no llama a Stripe y cobra con el priceId de la v2', async () => {
     prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv2', 2, VERSION_DOS()) as never)
@@ -1024,14 +1036,18 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
     expect(prismaMock.planOfferPointer.findUnique.mock.invocationCallOrder[1]).toBeLessThan(mockSubCreate.mock.invocationCallOrder[0])
   })
 
-  it('🔴 si otra versión quedó vigente entre el PASO 4 y el cobro → 409 PLAN_PRICE_MISMATCH y no se cobra', async () => {
+  it('🔴 si otra versión quedó vigente entre el PASO 4 y el cobro → 409 OFFER_CHANGED reason VERSION (B2: el comprobante es de la v2) y no se cobra', async () => {
     // PASO 4 con la v2; la segunda lectura del puntero (la relectura, dentro de la regla común) ya ve la v3.
     prismaMock.planOfferPointer.findUnique
       .mockResolvedValueOnce(punteroA('cv2', 2, VERSION_DOS()) as never)
       .mockResolvedValue(punteroA('cv3', 3, definicionDePrueba({ ids: idsDeLaVersion('v3') })) as never)
     mockPriceRetrieve.mockResolvedValue({ id: 'price_v2_pro_a', active: true, unit_amount: 1158840 })
 
-    await expect(activatePlan(ANUAL_PRO)).rejects.toMatchObject({ statusCode: 409, code: 'PLAN_PRICE_MISMATCH' })
+    await expect(activatePlan(ANUAL_PRO)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'OFFER_CHANGED',
+      details: { reason: 'VERSION', offerVersion: 3 },
+    })
 
     expect(mockSubCreate).not.toHaveBeenCalled()
     expect(mockPriceList).not.toHaveBeenCalled()
@@ -1039,8 +1055,8 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
     expect(prismaMock.onboardingProgress.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: { planActivationStatus: 'NONE', planActivationLeaseUntil: null } }),
     )
-    expect(logger.error).toHaveBeenCalledWith(
-      expect.stringContaining('la versión vigente cambió al momento de cobrar'),
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('otra versión de la oferta quedó vigente al momento de cobrar'),
       expect.objectContaining({ origen: 'VERSION', verificado: 'price_v2_pro_a', vigente: 'price_v3_pro_a' }),
     )
   })

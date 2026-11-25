@@ -1861,7 +1861,13 @@ export const ActivatePlanSchema = z.object({
           offerVersion: z.number().int().min(1),
           expectedFirstChargeCents: z.number().int().min(0),
         }),
-        z.object({ kind: z.literal('STANDARD'), expectedFirstChargeCents: z.number().int().min(0) }),
+        z.object({
+          kind: z.literal('STANDARD'),
+          expectedFirstChargeCents: z.number().int().min(0),
+          // Planes editables (B2): el comprobante de la cotización. 🔴 `unknown` a propósito: con cualquier otro tipo, un cuerpo
+          // de hoy con `null`, un número o un texto largo daría 400. Sólo lo revisa el servicio, y sólo con una versión del editor.
+          quoteToken: z.unknown().optional(),
+        }),
       ]),
       language: z.enum(['es', 'en']).optional(),
       // Plan Básico: la prueba de Pro que termina sola sin cobrar. Sólo con PRO mensual sin pagar hoy.
@@ -1885,6 +1891,9 @@ export async function activatePlanController(req: Request, res: Response, next: 
     const authContext = (req as unknown as { authContext?: { userId?: string } }).authContext
     if (!authContext?.userId) throw new BadRequestError('User authentication required')
 
+    // 🔴 Planes editables (B2, b2-r4): el comprobante viaja APARTE de `offer`. El cierre guarda `offer` en `v2SetupData`, que
+    // `GET progress` devuelve: con el comprobante adentro, ningún camino (con o sin versión) debe poder guardarlo ni devolverlo.
+    const { quoteToken, ...offer } = req.body.offer as planActivationService.ActivatePlanOffer & { quoteToken?: unknown }
     const data = await planActivationService.activatePlan({
       organizationId: req.params.organizationId,
       staffId: authContext.userId,
@@ -1892,7 +1901,8 @@ export async function activatePlanController(req: Request, res: Response, next: 
       interval: req.body.interval,
       payNow: req.body.payNow,
       paymentMethodId: req.body.paymentMethodId,
-      offer: req.body.offer,
+      offer: offer as planActivationService.ActivatePlanOffer,
+      quoteToken,
       language: req.body.language,
       ...(req.body.basicPlan === true ? { basicPlan: true } : {}),
     })
