@@ -1,0 +1,171 @@
+{
+  "pagina": "android/lealtad/canjear-puntos",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e",
+  "version": "2.25.58",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2496,
+      "cita": "internal enum class PanelTab(val label: String) { CUENTA(\"Cuenta\"), ACCIONES(\"Acciones\"), CLIENTE(\"Cliente\") }"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3070,
+      "cita": "label = if (customerName.isNullOrBlank()) \"Asignar cliente\" else \"Cambiar cliente\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2800,
+      "cita": "label = \"Recompensas\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3668,
+      "cita": "description = loyalty?.let { \"${it.customerName ?: \"Cliente\"} · ${it.balance} puntos disponibles, valen ${money(it.balanceValue)}\" }"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3695,
+      "cita": "Icon(Icons.Default.Remove, contentDescription = \"Menos puntos\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3700,
+      "cita": "text = \"− ${money(loyalty.valorDelCanje(points))} en la cuenta\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3706,
+      "cita": "Icon(Icons.Default.Add, contentDescription = \"Más puntos\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3673,
+      "cita": "text = \"Canjear\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 2143,
+      "cita": "\"Recompensa aplicada — ${aplicado.pointsRedeemed} puntos por \" +"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2792,
+      "cita": "label = \"Descuentos\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3302,
+      "cita": "Text(\"Aplicados\", fontWeight = FontWeight.SemiBold)"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3330,
+      "cita": "TextButton(onClick = { onRemove(d.id) }, enabled = quitar.quitarActivo) {"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3722,
+      "cita": "text = \"Mínimo ${loyalty.minPointsRedeem} puntos. Si quitas la recompensa de la cuenta, los puntos regresan.\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "orders:update",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/data/network/ApiService.kt",
+      "linea": 426
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "LOYALTY_PROGRAM",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
+      "linea": 480
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin conexión, «Recompensas» sale en gris con «Sin conexión: canjear puntos necesita internet. Se puede en cuanto vuelva la red.» y no se canjea nada",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
+      "linea": 545
+    },
+    {
+      "afirmacion": "El canje pide red antes de mandar nada",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 2135
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Esta cuenta no tiene puntos para canjear. Agrega el cliente en la pestaña «Cliente».",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
+      "linea": 577
+    },
+    {
+      "ruta": "El programa de lealtad está apagado en esta sucursal. Se prende desde el panel web.",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
+      "linea": 581
+    },
+    {
+      "ruta": "No llega al mínimo de puntos",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
+      "linea": 583
+    },
+    {
+      "ruta": "En esta cuenta ya no se pueden canjear puntos: tiene un pago registrado o no queda nada que descontar.",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
+      "linea": 599
+    },
+    {
+      "ruta": "La cuenta cambió: revisa los puntos.",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 2151
+    },
+    {
+      "ruta": "En Cobrar (mostrador) el menú del carrito ya no trae «Canjear recompensa»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 1199
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "SAMSUNG del laboratorio del Alien (serial R8YL200592L), en horizontal",
+    "version": "2.25.58-dev (72), copia de QA com.avoqado.pos.d31qa compilada en 06e80115 (rama fix/d31-canjear-recompensa-mostrador), contra el SERVIDOR local del 3000",
+    "apkSha256": "e1a3630a0a4168f9592835c8c23e64245f9d629e5381d2f1dd2c09949367f9c0",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/02-menu-carrito-con-red.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/03-menu-con-cliente-con-puntos.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/04-menu-sin-red.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/05-mesa-cliente-asignado.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/06a-acciones-recompensas.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/06-recompensas-dialogo.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/07-recompensa-aplicada.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/08-descuentos-aplicados.png"
+    ],
+    "filasCreadas": [
+      "Cliente de prueba FULLTEST-D31 Puntos con 500 puntos (ajuste del panel)",
+      "Cuenta de la mesa M3: canje de 400 puntos por $4.00 (LoyaltyTransaction REDEEM −400, OrderDiscount «Recompensas — 400 puntos»), quitado desde Descuentos (ADJUST +400) y la cuenta anulada"
+    ],
+    "nota": "Avoqado Full del seed, manager@manager.com. En Cobrar: el menú «⋯» trae Vaciar carrito, Tarjeta de regalo y Agregar importe personalizado, sin «Canjear recompensa», con y sin cliente y con el WiFi apagado (sin-red de la puerta). En Mesas: Cliente › Asignar cliente → Acciones › Recompensas (500 pts, $5.00) → − a 400 → Canjear: total de $45 a $41; Descuentos › Aplicados › Quitar regresa los 400 puntos. El texto sin red de Recompensas se probó en la SAMSUNG el 12-nov (docs/audit/2026-11-12-d18-recompensas/full-testing/report.md, caso 4a)."
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

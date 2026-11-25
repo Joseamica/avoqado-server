@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-25T15:46:48.061Z",
-  "approvedHash": "cbf1bcf3d96e12f13b99f347c665ce861fc4797cf778796f7b3661677d8f967e",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -134,6 +134,14 @@
         "customers:read",
         "loyalty:read",
         "loyalty:adjust"
+      ],
+      "featureCode": "LOYALTY_PROGRAM",
+      "gateKind": "FEATURE"
+    },
+    "android/lealtad/canjear-puntos": {
+      "sha256": "7d36725aeb631c0f566e7a9fedf559eb2e5e61b58ad05a390e085faa786fab9d",
+      "requiredPermissions": [
+        "orders:update"
       ],
       "featureCode": "LOYALTY_PROGRAM",
       "gateKind": "FEATURE"
