@@ -6,6 +6,7 @@ jest.mock('@/services/terminal-payment.service', () => ({
   terminalPaymentService: {
     replayPendingForTerminal: jest.fn().mockResolvedValue(undefined),
     probeUnresolvedForTerminal: jest.fn().mockResolvedValue(0),
+    alConectarseLaTerminal: jest.fn(),
     handleProbeResultFromSocket: jest.fn().mockResolvedValue(true),
     handleCancelDispositionFromSocket: jest.fn().mockResolvedValue(true),
   },

@@ -784,7 +784,7 @@ describe('Ronda 2 · hermano: el correo de la aprobación tardía dice cuál de 
   it('regresión: la VENTANA conserva su asunto exacto', () => {
     avisarAprobacionTardiaTrasVentana(cierre('NO_EVIDENCE_AFTER_WINDOW'), ctx)
     expect(alerta).toHaveBeenCalledWith(expect.objectContaining({ subject: 'Cobro aprobado tarde tras la ventana — T-M' }))
-    expect((alerta.mock.calls[0][0] as { lines: string[] }).lines[0]).toContain('la ventana de 30 s la liberara')
+    expect((alerta.mock.calls[0][0] as { lines: string[] }).lines[0]).toContain('se diera por no cobrado (sin respuesta del banco)')
   })
 
   it('regresión: un desenlace sin código previo (anterior a este cambio) se trata como ventana', () => {

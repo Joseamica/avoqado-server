@@ -65,6 +65,12 @@
       "cita": "val aviso = AvisoDeCobrosPendientes.texto(pendientes, ahora"
     },
     {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/BandejaServerRecovery.kt",
+      "linea": 83,
+      "cita": "\"🧾 [BandejaD] %s conciliada con el servidor (%s/%s): el aviso de «cobro sin confirmar» se apaga\","
+    },
+    {
       "paso": 4,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/AvisoDeCobrosPendientes.kt",
       "linea": 66,
@@ -157,7 +163,7 @@
     "fecha": "2026-11-18",
     "fotos": [],
     "filasCreadas": [],
-    "nota": "No se provocó la terminal ocupada (dos cobros a la misma terminal). Sí se vio en la PAX (copia 2.13.2, no la 2.16.0 de la guía) el aviso de *Problemas frecuentes* «El POS canceló este cobro. No se cobró.» al cancelar desde el POS (foto en android/cobro/cancelar-cobro-en-la-terminal/3b-pax.png). Falta mandar un segundo cobro mientras la terminal tiene uno en curso."
+    "nota": "No se provocó la terminal ocupada (dos cobros a la misma terminal). Sí se vio en la PAX (copia 2.13.2, no la 2.16.0 de la guía) el aviso de *Problemas frecuentes* «El POS canceló este cobro. No se cobró.» al cancelar desde el POS (foto en android/cobro/cancelar-cobro-en-la-terminal/3b-pax.png). Falta mandar un segundo cobro mientras la terminal tiene uno en curso. 23-nov (recorrido de Cobro simple S1 en la PAX con la 2.16.0, docs/audit/2026-11-22-cobro-simple/full-testing-s1 del workspace): se vio «El POS canceló este cobro. No se cobró.» al cancelar desde el POS y al vencer el tope sin tocar la terminal; «Este cobro ya se cerró. Pídele al POS que lo vuelva a enviar.» al tocar Tarjeta en un cobro que el servidor ya había cerrado; y en el logcat, la conciliación que apaga el aviso. Sigue sin provocarse la terminal ocupada con dos cobros."
   },
   "codex": {
     "lote": 8,

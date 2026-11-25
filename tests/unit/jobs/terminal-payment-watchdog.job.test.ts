@@ -1,22 +1,22 @@
 /**
- * S5 (checkpoint 1 del webhook): el vigía de cobros remotos, además de conciliar filas viejas y UNKNOWN, recupera el
- * long-poll desde la fila (`resolvePendingFromDurableState`) — DESPUÉS de las conciliaciones, que son las que pueden
- * dejar una fila COMPLETED con Payment en ese mismo tick. Sin este cableado el método existe y nadie lo llama.
+ * El vigía de cobros remotos (cada 30 s). Cobro simple · S1 (22-nov): en este orden concilia o mete a «sin respuesta» lo vencido,
+ * le pregunta a la terminal por las SENT sin final, concilia lo tardío, CIERRA lo que cumplió sus 10 s (la red del temporizador y
+ * las filas de antes de S1) y recupera el long-poll desde la fila. Ya no corren la ventana de 30 s, S2 (cese) ni el techo D26: con
+ * S1 una duda no aparta la terminal y se cierra sola. Cada paso en su propio try/catch: uno que truena no tumba a los demás.
  */
 jest.mock('@/services/terminal-payment.service', () => ({
   terminalPaymentService: {
     reconcileStaleRequests: jest.fn().mockResolvedValue({ completed: 0, unknown: 0, cancelled: 0 }),
+    preguntarPorSolicitudesSinFinal: jest.fn().mockResolvedValue({ entradas: 0, preguntas: 0 }),
     reconcileUnknownRequests: jest.fn().mockResolvedValue(undefined),
-    // Ventana de confirmación (plan 16-sep, Task 2): el barrido de negativos sin evidencia va entre la conciliación de
-    // UNKNOWN y la recuperación del long-poll. Un mock de lista fija sin él convertía el tick en un TypeError silencioso.
-    releaseUnprovenNegativesAfterWindow: jest.fn().mockResolvedValue({ released: 0, reconciled: 0, held: 0 }),
-    // S2 (A4b, 21-oct): la red durable del destrabe de la RANURA 10 s tras el cese acreditado por la terminal nueva.
-    liberarTrasCierreDeEjecucion: jest.fn().mockResolvedValue({ released: 0, reconciled: 0, scanned: 0 }),
-    // D26 (22-nov): el techo a «sigo cobrando» tras el cancel del POS, después de S2.
-    liberarPorTechoTrasCancelar: jest.fn().mockResolvedValue({ released: 0, reconciled: 0, scanned: 0 }),
+    cerrarSinRespuestaVencidas: jest.fn().mockResolvedValue({}),
     resolvePendingFromDurableState: jest.fn().mockResolvedValue({ resolved: 0, checked: 0 }),
+    releaseUnprovenNegativesAfterWindow: jest.fn(),
+    liberarTrasCierreDeEjecucion: jest.fn(),
+    liberarPorTechoTrasCancelar: jest.fn(),
   },
 }))
+jest.mock('@/services/tpv/angelpay-webhook.service', () => ({ recuperarAvisosAprobadosSinReferencias: jest.fn().mockResolvedValue(undefined) }))
 jest.mock('@/observability/jobContext', () => ({ scheduleJob: jest.fn(() => ({ start: jest.fn(), stop: jest.fn() })) }))
 
 import logger from '@/config/logger'
@@ -25,69 +25,34 @@ import { TerminalPaymentWatchdogJob } from '@/jobs/terminal-payment-watchdog.job
 
 const s = terminalPaymentService as unknown as Record<string, jest.Mock>
 
-describe('S5 · el vigía recupera el long-poll desde la fila en cada tick', () => {
+describe('Cobro simple · S1 · el vigía', () => {
   beforeEach(() => jest.clearAllMocks())
 
-  it('llama a la recuperación durable en cada pasada, después de conciliar filas viejas y UNKNOWN', async () => {
+  it('corre los pasos de S1 en orden y ya no la ventana, S2 ni el techo', async () => {
     await new TerminalPaymentWatchdogJob().run()
-    expect(s.reconcileStaleRequests).toHaveBeenCalledTimes(1)
-    expect(s.reconcileUnknownRequests).toHaveBeenCalledTimes(1)
-    expect(s.releaseUnprovenNegativesAfterWindow).toHaveBeenCalledTimes(1)
-    expect(s.liberarTrasCierreDeEjecucion).toHaveBeenCalledTimes(1)
-    expect(s.resolvePendingFromDurableState).toHaveBeenCalledTimes(1)
     const orden = [
       s.reconcileStaleRequests,
+      s.preguntarPorSolicitudesSinFinal,
       s.reconcileUnknownRequests,
-      s.releaseUnprovenNegativesAfterWindow,
-      // Revisión A4 (I-1): el rescate del long-poll (S5) va ANTES que S2 — S2 recorre hasta 200 filas en serie.
+      s.cerrarSinRespuestaVencidas,
       s.resolvePendingFromDurableState,
-      s.liberarTrasCierreDeEjecucion,
-      // D26: el cese certificado (S2) gana; el techo va después.
-      s.liberarPorTechoTrasCancelar,
-    ].map(m => m.mock.invocationCallOrder[0])
+    ].map(m => {
+      expect(m).toHaveBeenCalledTimes(1)
+      return m.mock.invocationCallOrder[0]
+    })
     expect(orden).toEqual([...orden].sort((a, b) => a - b))
+    expect(s.releaseUnprovenNegativesAfterWindow).not.toHaveBeenCalled()
+    expect(s.liberarTrasCierreDeEjecucion).not.toHaveBeenCalled()
+    expect(s.liberarPorTechoTrasCancelar).not.toHaveBeenCalled()
   })
 
-  it('D26 · un fallo del techo tras el cancel no tumba el tick: se loguea y el vigía queda libre para la siguiente pasada', async () => {
-    s.liberarPorTechoTrasCancelar.mockRejectedValueOnce(new Error('db down'))
+  it('un paso que truena no tumba a los demás ni deja el vigía trabado', async () => {
+    s.cerrarSinRespuestaVencidas.mockRejectedValueOnce(new Error('db down'))
     const job = new TerminalPaymentWatchdogJob()
     await expect(job.run()).resolves.toBeUndefined()
-    expect(s.liberarPorTechoTrasCancelar).toHaveBeenCalledTimes(1)
-    expect((logger.error as jest.Mock).mock.calls.some(([m]) => String(m).includes('cancel-ceiling release sweep failed'))).toBe(true)
+    expect(s.resolvePendingFromDurableState).toHaveBeenCalledTimes(1)
+    expect((logger.error as jest.Mock).mock.calls.some(([m]) => String(m).includes('no-response close sweep failed'))).toBe(true)
     await job.run()
-    expect(s.liberarPorTechoTrasCancelar).toHaveBeenCalledTimes(2)
-  })
-
-  it('un fallo del barrido de la ventana NO impide la recuperación del long-poll en el mismo tick', async () => {
-    s.releaseUnprovenNegativesAfterWindow.mockRejectedValueOnce(new Error('db down'))
-    await expect(new TerminalPaymentWatchdogJob().run()).resolves.toBeUndefined()
-    expect(s.releaseUnprovenNegativesAfterWindow).toHaveBeenCalledTimes(1)
-    expect(s.resolvePendingFromDurableState).toHaveBeenCalledTimes(1)
-  })
-
-  it('S2 · un fallo del barrido tras el cese NO impide la recuperación del long-poll en el mismo tick', async () => {
-    s.liberarTrasCierreDeEjecucion.mockRejectedValueOnce(new Error('db down'))
-    await expect(new TerminalPaymentWatchdogJob().run()).resolves.toBeUndefined()
-    expect(s.liberarTrasCierreDeEjecucion).toHaveBeenCalledTimes(1)
-    expect(s.resolvePendingFromDurableState).toHaveBeenCalledTimes(1)
-  })
-
-  it('S2 · con el rescate del long-poll lanzando error, el barrido tras el cese corre igual en la MISMA pasada (y el error se loguea)', async () => {
-    s.resolvePendingFromDurableState.mockRejectedValueOnce(new Error('db down'))
-    await expect(new TerminalPaymentWatchdogJob().run()).resolves.toBeUndefined()
-    expect(s.resolvePendingFromDurableState).toHaveBeenCalledTimes(1)
-    expect(s.liberarTrasCierreDeEjecucion).toHaveBeenCalledTimes(1)
-    expect(s.resolvePendingFromDurableState.mock.invocationCallOrder[0]).toBeLessThan(
-      s.liberarTrasCierreDeEjecucion.mock.invocationCallOrder[0],
-    )
-    expect((logger.error as jest.Mock).mock.calls.some(([m]) => String(m).includes('long-poll recovery failed'))).toBe(true)
-  })
-
-  it('un fallo de la recuperación no tumba el tick ni deja el vigía marcado como «corriendo»', async () => {
-    s.resolvePendingFromDurableState.mockRejectedValueOnce(new Error('db down'))
-    const job = new TerminalPaymentWatchdogJob()
-    await expect(job.run()).resolves.toBeUndefined()
-    await job.run()
-    expect(s.reconcileStaleRequests).toHaveBeenCalledTimes(2)
+    expect(s.cerrarSinRespuestaVencidas).toHaveBeenCalledTimes(2)
   })
 })

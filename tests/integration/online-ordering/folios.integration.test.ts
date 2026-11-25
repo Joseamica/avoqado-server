@@ -1050,9 +1050,10 @@ describe('R50 · las lecturas de vencer excluyen EN SU SQL la cuenta con un cobr
     return folio
   }
 
-  it('vencer principal: el cobro TIMED_OUT (incierto) saca de la lectura a su folio; el acreditado como «no se cobró» y el que no tiene cobro sí salen, también de «Mi equipo»', async () => {
+  // Cobro simple · S1: «incierto» es un cobro EN VUELO o en sus 10 s de «sin respuesta» (UNKNOWN); una TIMED_OUT vieja ya no cerca.
+  it('vencer principal: el cobro UNKNOWN (incierto) saca de la lectura a su folio; el acreditado como «no se cobró» y el que no tiene cobro sí salen, también de «Mi equipo»', async () => {
     const incierto = await nuevoFolio({ vencido: true })
-    await cobroDeTerminal(incierto.orderId)
+    await cobroDeTerminal(incierto.orderId, { status: 'UNKNOWN' })
     const acreditado = await nuevoFolio({ vencido: true })
     await cobroDeTerminal(acreditado.orderId, { status: 'FAILED', failureCode: 'TPV_NEVER_RECEIVED' })
     const equipo = await nuevoFolio({ vencido: true, equipo: true })

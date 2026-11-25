@@ -17,11 +17,13 @@ keywords:
   - no se cobró
   - cobrar dos veces
   - cobro pendiente
+  - reintentar el cobro
+  - la terminal no contesta
 ---
 
 ## Antes de empezar
 
-Cuando la tablet no sabe si la tarjeta se cobró, pregunta si se cobró la venta. No la vuelvas a cobrar hasta saber qué pasó en la terminal.
+Si la terminal no contesta, espera sin cobrar de otra forma: la tablet deja de esperar solo y avisa que no se cobró; suele tardar cerca de un minuto. Si el banco aprueba ese cobro más tarde, Avoqado lo registra solo y le avisa al negocio. Si en cambio la tablet pregunta si se cobró la venta, no la vuelvas a cobrar hasta saber qué pasó en la terminal.
 
 ## Pasos
 
@@ -34,6 +36,7 @@ Cuando la tablet no sabe si la tarjeta se cobró, pregunta si se cobró la venta
 
 ## Problemas frecuentes
 
+- Si sale un aviso que termina en «Puedes volver a cobrar. Si el banco lo aprueba tarde, se registra solo y te avisamos.», la tarjeta no se cobró: toca *Reintentar* para mandar el cobro otra vez.
 - Si la terminal dice aprobado y pasan varios minutos sin que se registre, no lo cobres otra vez: una persona de soporte tiene que revisarlo.
 - Si aparece *Cancelar la venta* y ya no la vas a cobrar, tócalo: pide cancelar el cobro y, si la venta se creó en ese cobro, también la venta, lo que pide además el permiso de cancelar ventas sin cobrar. Puede quedar pendiente o resultar cobrado: no la cobres otra vez mientras no conste, y si queda pendiente, una persona tiene que revisarla. Si consta que no se cobró, una mesa o una cuenta que ya existía sigue abierta; si la terminal sí cobró, ese cobro se queda en la cuenta.
 - Si aparece «Esta venta tiene un cobro pendiente de confirmar.», otra terminal tampoco sirve: toca *Revisar ese cobro* si aparece.

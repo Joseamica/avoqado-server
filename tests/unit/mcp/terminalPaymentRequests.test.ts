@@ -144,16 +144,17 @@ describe('terminal_payment_requests — la misma proyección que el GET del POS'
       outcomeEvidence: null,
       evidenceClass: null,
       failureCode: 'TPV_ERROR',
-      busy: true,
+      busy: false, // S1: busy = en vuelo
     })
-    expect(salida.busyTerminals).toEqual(['term-1'])
+    expect(salida.busyTerminals).toEqual([])
     expect(salida.unknownCount).toBe(1)
   })
 
   it('🔴 una TIMED_OUT/AUTO_RELEASED de producción ocupa la terminal (TPR_ACTIVE no la contaba)', async () => {
     const salida = await listar([fila({ requestId: 'R-AUTO', terminalId: 'term-9', status: S.TIMED_OUT, failureCode: 'AUTO_RELEASED' })])
-    expect(salida.requests[0]).toMatchObject({ status: 'TIMED_OUT', outcome: 'UNRESOLVED', busy: true })
-    expect(salida.busyTerminals).toEqual(['term-9'])
+    // Cobro simple · S1: el desenlace sigue sin acreditar, pero la terminal ya no está ocupada (busy = en vuelo).
+    expect(salida.requests[0]).toMatchObject({ status: 'TIMED_OUT', outcome: 'UNRESOLVED', busy: false })
+    expect(salida.busyTerminals).toEqual([])
   })
 
   it('una LÁPIDA de admisión sale FAILED, NO ocupa y se marca rejectedAtAdmission', async () => {
@@ -195,7 +196,7 @@ describe('terminal_payment_requests — la misma proyección que el GET del POS'
 
   it('🔴 una CANCELLED sin aceptación de la terminal sale UNKNOWN y ocupa; con ACCEPTED sale CANCELLED y libera', async () => {
     const sinAceptar = await listar([fila({ requestId: 'R-CANCEL', status: S.CANCELLED })])
-    expect(sinAceptar.requests[0]).toMatchObject({ status: 'UNKNOWN', outcome: 'UNRESOLVED', busy: true })
+    expect(sinAceptar.requests[0]).toMatchObject({ status: 'UNKNOWN', outcome: 'UNRESOLVED', busy: false }) // S1: busy = en vuelo
 
     const aceptada = await listar([fila({ requestId: 'R-CANCEL-OK', status: S.CANCELLED, cancelDisposition: 'ACCEPTED' })])
     expect(aceptada.requests[0]).toMatchObject({
@@ -211,8 +212,12 @@ describe('terminal_payment_requests — la misma proyección que el GET del POS'
     ;(prismaMock as any).terminalPaymentRequest.findMany.mockResolvedValue([])
     await capturarTool('terminal_payment_requests')({ venueId: 'venue-1' })
     const where = (prismaMock as any).terminalPaymentRequest.findMany.mock.calls[0][0].where
-    // El primer brazo del OR es el predicado del servicio (bloqueo), no una lista de estados escrita aquí.
-    expect(JSON.stringify(where)).toContain('TPV_CONFIRMED_NO_CHARGE')
+    // El primer brazo del OR es el predicado del servicio (la cerca de la cuenta), no una lista de estados escrita aquí. Cobro
+    // simple · S1: en vuelo, en sus 10 s (UNKNOWN) y las viejas sin desenlace hasta que el barrido las cierra (R2-2, R2-9).
+    const { UNRESOLVED_FINANCIAL_OUTCOME } = await import('@/services/terminal-payment.service')
+    expect(where.OR[0]).toEqual(UNRESOLVED_FINANCIAL_OUTCOME)
+    expect(JSON.stringify(where)).toContain('UNKNOWN')
+    expect(JSON.stringify(where)).toContain('TIMED_OUT')
     expect(where.OR).toHaveLength(2)
   })
 })

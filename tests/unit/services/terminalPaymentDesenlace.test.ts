@@ -441,18 +441,24 @@ describe('proyectarEstado — lo que ven las apps', () => {
     ).toBe('ACCEPTED')
   })
 
-  // Revisión de iOS (3-nov): con la ranura ya suelta, «El cobro sigue activo» debajo de «La terminal ya está libre» es falso.
-  it.each(['AUTO_RELEASED', 'MANUAL_RELEASE'])(
-    '🔴 con la ranura ya suelta (%s) el ACTIVE se proyecta null y la venta sigue en duda',
-    failureCode => {
-      expect(proyectar({ status: S.TIMED_OUT, failureCode, cancelDisposition: 'ACTIVE' })).toMatchObject({
-        status: S.TIMED_OUT,
-        failureCode,
-        cancelDisposition: null,
-        outcome: 'UNRESOLVED',
-      })
-    },
-  )
+  // Cobro simple · S1 (22-nov): la rama de «ranura ya suelta» (AUTO_RELEASED/MANUAL_RELEASE) se quitó del GET: esas filas viejas las
+  // cierra el vigía a «no cobrado» y entonces el ACTIVE viejo se proyecta null por el desenlace, como cualquier final.
+  it('🔴 S1: «no cobrado» por silencio con un ACTIVE viejo encima: cancelDisposition null, la causa en `noChargeCause`', () => {
+    expect(
+      proyectar({
+        status: S.FAILED,
+        failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+        cancelDisposition: 'ACTIVE',
+        resultJson: { status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW', noChargeCause: 'ACK_TIMEOUT' },
+      }),
+    ).toMatchObject({
+      status: S.FAILED,
+      outcome: 'NOT_CHARGED',
+      outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
+      cancelDisposition: null,
+      noChargeCause: 'ACK_TIMEOUT',
+    })
+  })
 
   it('🔴 con la ranura apartada el ACTIVE se sigue viendo', () => {
     expect(proyectar({ status: S.TIMED_OUT, failureCode: null, cancelDisposition: 'ACTIVE' }).cancelDisposition).toBe('ACTIVE')

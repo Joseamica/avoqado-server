@@ -34,9 +34,11 @@ import { PIN_REGEX } from '../../schemas/common/pin.schema'
 import { normalizeTerminalId } from '../../communication/sockets/terminal-registry'
 import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
 import { contradiccionDeProcedenciaSql, sinVetoDeDineroSql } from './evidenciaPositivaSql'
+import { estadoBancarioSql } from './estadoBancario'
 import { sondaReportoActiva, sondaVetaLaDeclaracion } from './sondaActiva'
 import logger from '../../config/logger'
 import { activaTrasElCancel, cumplioElTechoDeLaVenta, elTechoLevantaElVeto } from './techoDeEjecucionViva'
+import { TOPE_DE_INTENTOS_POR_SOLICITUD } from './sinRespuesta'
 
 export const RECONCILE_UNCHARGED_PERMISSION = 'payments:reconcile-uncharged'
 
@@ -919,38 +921,103 @@ export async function reconcileBankDeclined(input: {
   origen: 'ANGELPAY' | 'BLUMON'
   evidencia: { eventLogId: string; attemptId?: string | null; codigo?: string | null; descripcion?: string | null }
 }): Promise<{ closed: boolean; reason?: 'NOT_FOUND' | 'NOT_ELIGIBLE' | 'POSITIVE_EVIDENCE_EXISTS' | 'ERROR' }> {
+  // 🔴 Cobro simple · S1.5 (22-nov): el rechazo del banco ya NO entra por el núcleo de la declaración de una persona. Es un CAS
+  // directo a `FAILED/BANK_DECLINED` con el motivo, FUERA de vuelo (Codex S1 r2, R2-6, decisión de la dueña: con la solicitud EN
+  // VUELO la Nexgo 2.20 ofrece «Reintentar» dentro de la MISMA solicitud; cerrarla le quita el permiso al intento B y abre dos cargos
+  // sucesivos. En vuelo el aviso sólo se guarda y decide al entrar a «sin respuesta»). Se conservan las dos guardas que no son capa
+  // sino «el aprobado manda»:
+  //  · el rechazo del intento A no cierra si la solicitud tiene OTRO intento (B pudo cobrar; Codex 21-sep);
+  //  · ningún rechazo gana a un aprobado ya conocido de la solicitud o de sus intentos (`sinVetoDeDineroSql` dentro del CAS y el
+  //    aprobado firmado que todavía no se pudo guardar, `puertaDelDinero`; Codex plan r1 #4).
   const { venueId, requestId, origen, evidencia } = input
+  const elDelRechazo = llaveDeIntento(evidencia.attemptId ?? '')
   try {
-    await reconcileUncharged(
-      { venueId, requestId, actorStaffId: null, source: 'WEBHOOK' },
-      {
+    const desenlace = await prisma.$transaction(async tx => {
+      await candadoDeSolicitud(tx, requestId)
+      const attemptIds = (
+        await tx.terminalPaymentAttemptLink.findMany({
+          where: { requestId, venueId },
+          select: { attemptId: true },
+          orderBy: { attemptId: 'asc' },
+          take: TOPE_DE_INTENTOS_POR_SOLICITUD,
+        })
+      )
+        .map(v => llaveDeIntento(v.attemptId))
+        .filter((a): a is string => Boolean(a))
+        .sort()
+      for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)
+      const row = await tx.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
+      if (!row) return 'NOT_FOUND' as const
+      if (attemptIds.length === 0) return 'NOT_ELIGIBLE' as const
+      // El intento B «abierto» es el que NO tiene su propio rechazo guardado (Codex S1 r1 #5: dos rechazos confirmados, A y B, sí
+      // cierran como rechazo del banco, no como «el banco no confirmó»).
+      const otros = attemptIds.filter(a => a !== elDelRechazo)
+      if (otros.length > 0) {
+        const [{ sinRechazo }] = await tx.$queryRaw<{ sinRechazo: number }[]>`
+          SELECT count(*)::int AS "sinRechazo" FROM unnest(${otros}::text[]) AS a("attemptId")
+          WHERE NOT EXISTS (
+            SELECT 1 FROM "ProviderEventLog" e
+            WHERE e."attemptId" = a."attemptId" AND e."venueId" = ${venueId} AND e."provider" = 'PAYMENT_PROCESSOR'
+              AND e."type" = 'send_transaction' AND ${estadoBancarioSql(Prisma.sql`e."payload"->'payload'->'status'`)} = 'RECHAZADO')`
+        if (sinRechazo > 0) return 'NOT_ELIGIBLE' as const
+      }
+      const { afirmacionDeLaTerminal, desenlaceCanonico, sinAfirmacionDeLaTerminalSql } = await import('../terminal-payment.service')
+      const retenidaConAprobado = row.failureCode === 'BANK_APPROVED_AWAITING_PAYMENT' || row.failureCode === 'PAYMENT_UNBOUND_AWAITING_REVIEW'
+      const enVuelo =
+        row.status === TerminalPaymentRequestStatus.PENDING ||
+        row.status === TerminalPaymentRequestStatus.SENT ||
+        row.status === TerminalPaymentRequestStatus.CANCEL_REQUESTED
+      // Fuera de vuelo y sin desenlace: UNKNOWN (con o sin reloj), TIMED_OUT y las FAILED/CANCELLED sin desenlace acreditado.
+      const abierta = !enVuelo && row.status !== TerminalPaymentRequestStatus.COMPLETED && desenlaceCanonico(row).outcome === 'UNRESOLVED'
+      if (!abierta || row.paymentId || retenidaConAprobado) return 'NOT_ELIGIBLE' as const
+      const { puertaDelDinero } = await import('./avisosNoGuardados')
+      // Codex S1 r3 (R3-1): «la terminal dijo que cobró» (`claimedSuccess`) también es un aprobado conocido; lo veta aquí y en el CAS.
+      if (attemptIds.some(puertaDelDinero) || afirmacionDeLaTerminal(row.resultJson)) return 'POSITIVE_EVIDENCE_EXISTS' as const
+      const sobre =
+        row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson) ? (row.resultJson as Record<string, unknown>) : {}
+      const motivo = motivoDelBanco(evidencia.descripcion)
+      const sobreDeclarado = {
+        ...sobre,
         requestId,
-        resolutionId: resolucionDelEvento(evidencia.eventLogId),
-        statement: 'BANK_DECLINED',
-        statementVersion: 1,
-        bank: {
+        status: 'failed',
+        outcomeEvidence: 'BANK_DECLINED',
+        // El motivo con NUESTRAS palabras (lista blanca): el texto libre del procesador nunca llega a la pantalla.
+        errorMessage: `El banco rechazó este cobro.${motivo ? ` ${motivo}` : ''} No se cobró nada: puedes volver a cobrar.`,
+        bankDeclined: {
           origen,
           eventLogId: textoSeguro(evidencia.eventLogId, 64),
-          // 🔴 P1 de Codex (4ª pasada): el `attemptId` es una IDENTIDAD, no texto para pintar. `textoSeguro`
-          // sustituye controles internos por espacios, así que `"x\ty"` se convertía en `"x y"` — y podía
-          // COINCIDIR con otro intento, excluyendo del veto al equivocado. La identidad se canonicaliza con
-          // `llaveDeIntento`, la misma de S1 y de los candados, en todo el recorrido; lo que no sea una
-          // identidad válida simplemente no se manda, y entonces no se excluye a nadie.
-          ...(llaveDeIntento(evidencia.attemptId ?? '') ? { attemptId: llaveDeIntento(evidencia.attemptId ?? '') as string } : {}),
-          ...(evidencia.descripcion ? { descripcion: textoSeguro(evidencia.descripcion, 300) } : {}),
+          descripcion: evidencia.descripcion ? textoSeguro(evidencia.descripcion, 300) : null,
+          at: new Date().toISOString(),
         },
-      },
-    )
-    // 🔴 P2 de Codex (2ª pasada): liberar no basta — el POS puede estar esperando el resultado en su long-poll
-    // y quedarse hasta CINCO MINUTOS aunque el desenlace ya sea durable. `resolverEsperaDelPos` sólo despierta
-    // si `desenlaceCanonico` ya dice algo (con `BANK_DECLINED` en `CODIGOS_SIN_COBRO`, sí), y nunca toca la
-    // espera de otro venue. Va POST-COMMIT y best-effort: la liberación ya está escrita y no puede depender de
-    // despertar a nadie. Mismo patrón que la resolución por no-instrumento.
+      }
+      const n = await tx.$executeRaw`
+        UPDATE "TerminalPaymentRequest"
+        SET "status" = 'FAILED', "failureCode" = 'BANK_DECLINED', "cancelDisposition" = NULL,
+            "resultJson" = ${JSON.stringify(sobreDeclarado)}::jsonb,
+            "lateResult" = true,
+            "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+        WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL
+          AND ${sinAfirmacionDeLaTerminalSql(Prisma.raw('"resultJson"'))}
+          AND ${sinVetoDeDineroSql({ requestId, venueId, attemptIds, terminalId: row.terminalId })}`
+      if (n !== 1) return 'POSITIVE_EVIDENCE_EXISTS' as const
+      await tx.activityLog.create({
+        data: {
+          action: 'TERMINAL_PAYMENT_BANK_DECLINED_RELEASED',
+          entity: 'TerminalPaymentRequest',
+          entityId: row.id,
+          venueId,
+          data: { origen, eventLogId: evidencia.eventLogId, requestId, terminalId: row.terminalId, orderId: row.orderId, previousStatus: row.status },
+        },
+      })
+      return 'CLOSED' as const
+    }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
+    if (desenlace !== 'CLOSED') return { closed: false, reason: desenlace }
+    // Post-commit y best-effort: el POS que espera el long-poll recibe el rechazo ya (con BANK_DECLINED en `CODIGOS_SIN_COBRO`).
     try {
       const { terminalPaymentService } = await import('../terminal-payment.service')
       await terminalPaymentService.resolverEsperaDelPos(requestId, venueId)
     } catch (err) {
-      logger.warn('⚠️ [BankDeclined] liberada, pero no se pudo despertar la espera del POS', {
+      logger.warn('⚠️ [BankDeclined] cerrada, pero no se pudo despertar la espera del POS', {
         requestId,
         venueId,
         error: err instanceof Error ? err.message : String(err),
@@ -958,33 +1025,13 @@ export async function reconcileBankDeclined(input: {
     }
     return { closed: true }
   } catch (error) {
-    const reason =
-      error instanceof UnchargedReconciliationError
-        ? error.code === 'ATTEMPT_NOT_FOUND'
-          ? ('NOT_FOUND' as const)
-          : error.code === 'POSITIVE_EVIDENCE_EXISTS'
-            ? ('POSITIVE_EVIDENCE_EXISTS' as const)
-            : ('NOT_ELIGIBLE' as const)
-        : ('ERROR' as const)
-    // 🔴 Sólo se alarma lo que NO es un desenlace esperado: que la fila no exista, no sea elegible o tenga
-    // evidencia positiva es el sistema haciendo su trabajo, no un fallo.
-    if (reason === 'ERROR')
-      logger.error('🚨 [BankDeclined] no se pudo liberar la solicitud por el rechazo del banco', {
-        requestId,
-        venueId,
-        origen,
-        error: error instanceof Error ? error.message : String(error),
-      })
-    return { closed: false, reason }
+    logger.error('🚨 [BankDeclined] no se pudo cerrar la solicitud por el rechazo del banco', {
+      requestId,
+      venueId,
+      origen,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return { closed: false, reason: 'ERROR' }
   }
 }
 
-/**
- * UUID determinista del evento: un reenvío produce la MISMA declaración y nunca choca con `RESOLUTION_CONFLICT`
- * sobre su propia liberación. ⚠️ NO entra al replay idempotente del núcleo — `readUnchargedReconciliation` no
- * reconoce `kind: 'BANK_DECLINED'`—: cae en el veto de estados, como dice la nota de arriba.
- */
-function resolucionDelEvento(eventLogId: string): string {
-  const h = createHash('sha256').update(`bank-declined:${eventLogId}`).digest('hex')
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`
-}

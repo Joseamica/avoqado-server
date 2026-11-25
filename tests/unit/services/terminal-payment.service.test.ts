@@ -313,29 +313,23 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     expect(directEmit).not.toHaveBeenCalled()
   })
 
-  it('terminal timeout leaves the execution protected instead of releasing the slot (ventana: TIMED_OUT con el sobre de la terminal)', async () => {
+  it('Cobro simple · S1: un `timeout` de la terminal entra a «sin respuesta» (UNKNOWN + noResponseAt) y programa el cierre de 10 s', async () => {
     const pending = terminalPaymentService.sendPaymentToTerminal(baseRequest({ requestId: 'REQ-UNKNOWN-RESULT' }))
     await flush()
+    prismaMock.$executeRaw.mockResolvedValueOnce(1)
     terminalPaymentService.handlePaymentResult({ requestId: 'REQ-UNKNOWN-RESULT', status: 'timeout' })
     await pending
     await flush()
-    // Plan 16-sep: un `timeout` que MANDA LA TERMINAL entra en la ventana de confirmación — TIMED_OUT (no UNKNOWN), sin código
-    // y con el sobre original conservado en `terminalResult`. La ranura y la orden siguen bloqueadas mientras la ventana decide.
-    expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ requestId: 'REQ-UNKNOWN-RESULT' }),
-        data: expect.objectContaining({
-          status: 'TIMED_OUT',
-          failureCode: null,
-          resultJson: expect.objectContaining({ status: 'timeout', terminalResult: expect.objectContaining({ status: 'timeout' }) }),
-        }),
-      }),
-    )
-    expect(tpr().updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'UNKNOWN' }) }))
-    const programadas = (terminalPaymentService as any).ventanasProgramadas as Map<string, NodeJS.Timeout>
-    expect(programadas.has('REQ-UNKNOWN-RESULT')).toBe(true)
-    clearTimeout(programadas.get('REQ-UNKNOWN-RESULT')!)
-    programadas.delete('REQ-UNKNOWN-RESULT')
+    const entrada = prismaMock.$executeRaw.mock.calls.find((c: unknown[]) => (c[0] as string[]).join('?').includes('"noResponseAt" = COALESCE'))
+    expect(entrada).toBeDefined()
+    // El sobre conserva lo que dijo la terminal (`terminalResult`) y la causa.
+    expect(JSON.stringify(entrada)).toContain('terminalResult')
+    expect(JSON.stringify(entrada)).toContain('NO_RESPONSE')
+    expect(tpr().updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'TIMED_OUT' }) }))
+    const cierres = (terminalPaymentService as any).cierresSinRespuesta as Map<string, NodeJS.Timeout>
+    expect(cierres.has('REQ-UNKNOWN-RESULT')).toBe(true)
+    clearTimeout(cierres.get('REQ-UNKNOWN-RESULT')!)
+    cierres.delete('REQ-UNKNOWN-RESULT')
   })
 
   it('cancel intent is durable before the terminal can synchronously acknowledge it', async () => {
@@ -377,19 +371,24 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     expect(tpr().updateMany).not.toHaveBeenCalled()
   })
 
-  it('a confirmed pre-execution cancellation is durable and explicitly safe for new POS clients', async () => {
+  it('a confirmed pre-execution cancellation goes through the vetted negative writer (CANCELLED/ACCEPTED, with the money vetoes)', async () => {
+    // Codex S1 r3 (R3-2): ya no es un `updateMany` sin vetos; el CAS real contra Postgres está en `cobroSimple.elAprobadoManda`.
     tpr().findFirst.mockResolvedValueOnce({ id: 'row-accepted', requestId: 'REQ-ACCEPTED', status: 'CANCEL_REQUESTED' })
-    expect(
-      await (terminalPaymentService as any).handleCancelDispositionFromSocket(
-        { requestId: 'REQ-ACCEPTED', disposition: 'ACCEPTED' },
-        { socketId: 'socket', terminalId: 't-accepted', venueId: 'venue-1' },
-      ),
-    ).toBe(true)
-    expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ status: 'CANCELLED', cancelDisposition: 'ACCEPTED' }),
-      }),
-    )
+    const escritor = jest
+      .spyOn(terminalPaymentService as any, 'cerrarConNegativo')
+      .mockResolvedValue({ requestId: 'REQ-ACCEPTED', status: 'cancelled' })
+    try {
+      expect(
+        await (terminalPaymentService as any).handleCancelDispositionFromSocket(
+          { requestId: 'REQ-ACCEPTED', disposition: 'ACCEPTED' },
+          { socketId: 'socket', terminalId: 't-accepted', venueId: 'venue-1' },
+        ),
+      ).toBe(true)
+      expect(escritor).toHaveBeenCalledWith('REQ-ACCEPTED', 'venue-1', expect.objectContaining({ status: 'cancelled' }), { acreditado: true })
+      expect(tpr().updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'CANCELLED' }) }))
+    } finally {
+      escritor.mockRestore()
+    }
   })
 
   it('rejects a second concurrent charge during physical admission with a busy error naming the blocker (and leaves its tombstone)', async () => {
@@ -550,22 +549,32 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     await p1
   })
 
-  it('un ACK perdido conserva resultado desconocido aunque la terminal ya haya iniciado el cobro', async () => {
+  it('Cobro simple · S1: un ACK perdido entra a «sin respuesta» (ACK_TIMEOUT), manda el cancel y el POS SIGUE esperando el cierre', async () => {
     directEmit.mockImplementationOnce((_event: string, _payload: unknown, callback: (error: Error) => void) =>
       callback(new Error('operation has timed out')),
     )
-
-    await expect(
-      terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-NO-ACK', requestId: 'REQ-NO-ACK' })),
-    ).resolves.toMatchObject({ requestId: 'REQ-NO-ACK', status: 'timeout' })
+    prismaMock.$executeRaw.mockResolvedValue(1)
+    let resuelto = false
+    const p = terminalPaymentService
+      .sendPaymentToTerminal(baseRequest({ terminalId: 'T-NO-ACK', requestId: 'REQ-NO-ACK' }))
+      .then(r => ((resuelto = true), r))
     await flush()
-
-    expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { requestId: 'REQ-NO-ACK', venueId: 'venue-1', status: 'PENDING' },
-        data: expect.objectContaining({ status: 'UNKNOWN', failureCode: 'ACK_TIMEOUT' }),
-      }),
-    )
+    await flush()
+    const entrada = prismaMock.$executeRaw.mock.calls.find((c: unknown[]) => (c[0] as string[]).join('?').includes('"noResponseAt" = COALESCE'))
+    expect(JSON.stringify(entrada)).toContain('ACK_TIMEOUT')
+    expect(resuelto).toBe(false)
+    const esperas = (terminalPaymentService as any).pendingPayments as Map<string, { resolve: (r: unknown) => void; timeout: NodeJS.Timeout }>
+    const espera = esperas.get('REQ-NO-ACK')!
+    expect(espera).toBeDefined()
+    const cierres = (terminalPaymentService as any).cierresSinRespuesta as Map<string, NodeJS.Timeout>
+    expect(cierres.has('REQ-NO-ACK')).toBe(true)
+    clearTimeout(cierres.get('REQ-NO-ACK')!)
+    cierres.delete('REQ-NO-ACK')
+    clearTimeout(espera.timeout)
+    esperas.delete('REQ-NO-ACK')
+    espera.resolve({ requestId: 'REQ-NO-ACK', status: 'failed' })
+    await p
+    prismaMock.$executeRaw.mockResolvedValue(0)
   })
 
   it('una TPV publicada sin capacidad ACK conserva la entrega única compatible', async () => {
@@ -858,6 +867,9 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
   })
 })
 
+const entroSinRespuesta = () =>
+  (prisma as any).$executeRaw.mock.calls.some((c: unknown[]) => (c[0] as string[]).join('?').includes('"noResponseAt" = COALESCE'))
+
 describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
   const now = new Date('2026-07-11T12:00:00.000Z')
   // Codex R14-4: la limpieza de aliases corre en `prisma.$transaction` (el mock entrega el propio `prismaMock`) con SAVEPOINT y una
@@ -984,9 +996,8 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
     errSpy.mockRestore()
   })
 
-  it('a stale row with no reconcilable Payment → UNKNOWN + holds slot + alerts', async () => {
-    const logger = require('@/config/logger').default
-    const errSpy = jest.spyOn(logger, 'error')
+  it('Cobro simple · S1: a stale row with no reconcilable Payment → «sin respuesta» (10 s y «no cobrado»), sin 🚨 ni correo', async () => {
+    prismaMock.$executeRaw.mockResolvedValue(1)
     tpr().findMany.mockResolvedValueOnce([
       {
         id: 'row-2',
@@ -1002,12 +1013,11 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
 
     const summary = await terminalPaymentService.reconcileStaleRequests(now)
     expect(summary.unknown).toBe(1)
-    expect(tpr().updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'UNKNOWN' }) }))
-    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('🚨 [Terminal-payment watchdog]'), expect.any(Object))
-    errSpy.mockRestore()
+    expect(entroSinRespuesta()).toBe(true)
   })
 
-  it('cancel silence after the grace is UNKNOWN, never proof of no charge', async () => {
+  it('Cobro simple · S1: cancel silence after 10 s enters «sin respuesta» (the 10 s close decides, not a person)', async () => {
+    prismaMock.$executeRaw.mockResolvedValue(1)
     tpr().findMany.mockResolvedValueOnce([
       {
         id: 'row-cancel-silent',
@@ -1022,14 +1032,11 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
     const summary = await terminalPaymentService.reconcileStaleRequests(now)
     expect(summary.cancelled).toBe(0)
     expect(summary.unknown).toBe(1)
-    expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ status: 'UNKNOWN' }),
-      }),
-    )
+    expect(entroSinRespuesta()).toBe(true)
   })
 
   it('requires the exact request identity rather than a similar payment on the same order', async () => {
+    prismaMock.$executeRaw.mockResolvedValue(1)
     const rowCreatedAt = new Date(now.getTime() - 200_000)
     tpr().findMany.mockResolvedValueOnce([
       { id: 'row-1', requestId: 'REQ-A', venueId: 'venue-1', terminalId: 'abc', orderId: 'o1', status: 'PENDING', createdAt: rowCreatedAt },
@@ -1055,6 +1062,7 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
   it('does NOT complete against a Payment whose ACCREDITED owner is ANOTHER request (tagged for it, charged on its terminal) → UNKNOWN (never free blind)', async () => {
     // Split/multi-card orders record several payments; a payment ACCREDITED to a different terminal request is not ours.
     // Stealing it would free the slot on a mis-linked payment. Codex R13-7: el veto exige procedencia, no mera existencia.
+    prismaMock.$executeRaw.mockResolvedValue(1)
     const rowCreatedAt = new Date(now.getTime() - 400_000)
     tpr().findMany.mockResolvedValueOnce([
       {
@@ -1091,7 +1099,7 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
     // El dueño acreditado se conserva: ningún puntero ajeno se retira.
     expect(tpr().updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: { paymentId: null } }))
     expect(summary.unknown).toBe(1)
-    expect(tpr().updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'UNKNOWN' }) }))
+    expect(entroSinRespuesta()).toBe(true)
   })
 
   // Codex R13-7: la pregunta inversa de R12-6 — «otra solicitud apunta a MI Payment» sin procedencia (alias contaminado por el
@@ -1650,11 +1658,11 @@ describe('TerminalPaymentService — hasChargeBlockingOrderCancel (guard for can
     expect(blocked).toBe(true)
     const where = (tpr().findFirst as jest.Mock).mock.calls[0][0].where
     expect(where).toMatchObject({ venueId: 'venue-1', orderId: 'order-1' })
+    // Cobro simple · S1: la cuenta queda cercada mientras su cobro está en vuelo o en sus 10 s de «sin respuesta» (UNKNOWN), ya no
+    // por una TIMED_OUT soltada (eso obligaba a una persona a declarar).
     expect(where.OR).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          status: { in: expect.arrayContaining(['PENDING', 'SENT', 'UNKNOWN', 'CANCEL_REQUESTED', 'TIMED_OUT']) },
-        }),
+        expect.objectContaining({ status: { in: ['PENDING', 'SENT', 'CANCEL_REQUESTED', 'UNKNOWN'] } }),
       ]),
     )
   })
@@ -2174,11 +2182,24 @@ describe('Audit round1 lost captured socket', () => {
     // permiso para volver a pasar la tarjeta. La afirmación que este test guarda —«nunca
     // afirma que no se inició autorización»— sólo se cumple de verdad con `status:'timeout'`,
     // que los clientes ya publicados leen como incierto (504).
-    await expect(terminalPaymentService.sendPaymentToTerminal(baseRequest({ requestId: 'lost-captured-socket' }))).resolves.toMatchObject({
-      requestId: 'lost-captured-socket',
-      status: 'timeout',
-    })
+    // Cobro simple · S1: el POS ya no recibe el 504 al instante — SIGUE esperando y lo despierta el cierre de los 10 s (422
+    // `failed`, «el cobro no llegó a la terminal»). Lo que se guarda sigue siendo «no afirmes que no se inició»: nunca FAILED aquí.
+    prismaMock.$executeRaw.mockResolvedValue(1)
+    let resuelto = false
+    const p = terminalPaymentService.sendPaymentToTerminal(baseRequest({ requestId: 'lost-captured-socket' })).then(r => ((resuelto = true), r))
     await flush()
+    await flush()
+    expect(resuelto).toBe(false)
+    const esperas = (terminalPaymentService as any).pendingPayments as Map<string, { resolve: (r: unknown) => void; timeout: NodeJS.Timeout }>
+    const cierres = (terminalPaymentService as any).cierresSinRespuesta as Map<string, NodeJS.Timeout>
+    clearTimeout(cierres.get('lost-captured-socket')!)
+    cierres.delete('lost-captured-socket')
+    const espera = esperas.get('lost-captured-socket')!
+    clearTimeout(espera.timeout)
+    esperas.delete('lost-captured-socket')
+    espera.resolve({ requestId: 'lost-captured-socket', status: 'failed' })
+    await p
+    prismaMock.$executeRaw.mockResolvedValue(0)
     // 🔴 `failUndelivered` pasó de `updateMany` a SQL crudo el 21-sep (P1 de Codex: el sobre se FUSIONA
     // para no borrar una afirmación de cobro ya guardada). Aquí se comprueba lo que importa —que la
     // retención se escribe y NUNCA se marca FAILED—; la semántica exacta del UPDATE la fija la prueba de
@@ -2507,6 +2528,113 @@ describe('Codex R1 (P2) · resolvePendingFromDurableState consulta por LOTES aco
   })
 })
 
+describe('Codex S1 r2 (R2-4) · el POS que sigue esperando recibe el desenlace FINAL, no el 504', () => {
+  const cerradaNoCobrada = {
+    requestId: 'REQ-NC',
+    venueId: 'venue-nc',
+    status: TerminalPaymentRequestStatus.FAILED,
+    paymentId: null,
+    failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+    cancelDisposition: null,
+    resultJson: { requestId: 'REQ-NC', status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW', noChargeCause: 'ACK_TIMEOUT' },
+  }
+  const svc = () => terminalPaymentService as any
+  function esperaDelPos() {
+    const resolve = jest.fn()
+    const timeout = setTimeout(() => undefined, 60_000)
+    svc().pendingPayments.set('REQ-NC', { resolve, reject: jest.fn(), timeout, requestId: 'REQ-NC', terminalId: 't', venueId: 'venue-nc' })
+    return { resolve, timeout }
+  }
+  afterEach(() => {
+    const p = svc().pendingPayments.get('REQ-NC')
+    if (p) clearTimeout(p.timeout)
+    svc().pendingPayments.delete('REQ-NC')
+  })
+
+  it('fila cerrada «no cobrada» con el POS aún esperando: el rescate del vigía le contesta `failed` (422), no espera al 504', async () => {
+    const { resolve } = esperaDelPos()
+    const findMany = tpr().findMany as jest.Mock
+    findMany.mockReset().mockResolvedValue([cerradaNoCobrada])
+    ;(tpr().findFirst as jest.Mock).mockReset().mockResolvedValue(cerradaNoCobrada)
+    const r = await terminalPaymentService.resolvePendingFromDurableState()
+    expect(r).toEqual({ resolved: 1, checked: 1 })
+    expect(findMany.mock.calls[0][0].where).not.toHaveProperty('status')
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'REQ-NC', status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW' }))
+    expect(svc().pendingPayments.has('REQ-NC')).toBe(false)
+  })
+
+  it('Codex S1 r3 (R3-7) · el lote leyó «no cobrada» pero la fila ya cerró con su cobro: el POS recibe el cobro (lectura fresca), nunca el negativo viejo', async () => {
+    const { resolve } = esperaDelPos()
+    ;(tpr().findMany as jest.Mock).mockReset().mockResolvedValue([cerradaNoCobrada])
+    ;(tpr().findFirst as jest.Mock).mockReset().mockResolvedValue({
+      ...cerradaNoCobrada,
+      status: TerminalPaymentRequestStatus.COMPLETED,
+      paymentId: 'pay-1',
+      failureCode: null,
+      resultJson: { requestId: 'REQ-NC', status: 'success', paymentId: 'pay-1' },
+    })
+    await terminalPaymentService.resolvePendingFromDurableState()
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ status: 'success', paymentId: 'pay-1' }))
+  })
+
+  it('…y una fila todavía sin desenlace (UNKNOWN en sus 10 s) no se contesta', async () => {
+    const { resolve } = esperaDelPos()
+    ;(tpr().findMany as jest.Mock).mockReset().mockResolvedValue([
+      { ...cerradaNoCobrada, status: TerminalPaymentRequestStatus.UNKNOWN, failureCode: null, resultJson: { status: 'timeout' } },
+    ])
+    expect(await terminalPaymentService.resolvePendingFromDurableState()).toEqual({ resolved: 0, checked: 1 })
+    expect(resolve).not.toHaveBeenCalled()
+  })
+
+  it('al vencer el long-poll con la fila ya final negativa contesta ese final', async () => {
+    ;(tpr().findFirst as jest.Mock).mockReset().mockResolvedValue(cerradaNoCobrada)
+    expect(await svc().desenlaceDurableAlVencer('REQ-NC', 'venue-nc')).toMatchObject({ requestId: 'REQ-NC', status: 'failed' })
+  })
+
+  it('entrega fallida que ya no puede entrar a «sin respuesta» (otro la cerró): despierta al POS con la fila', async () => {
+    const entrar = jest.spyOn(svc(), 'entrarSinRespuestaYProgramar').mockResolvedValue(false)
+    const despertar = jest.spyOn(svc(), 'resolverEsperaDelPos').mockResolvedValue(true)
+    try {
+      await svc().failUndelivered('REQ-NC', 'venue-nc', 'SOCKET_NOT_FOUND', 't')
+      expect(despertar).toHaveBeenCalledWith('REQ-NC', 'venue-nc')
+    } finally {
+      entrar.mockRestore()
+      despertar.mockRestore()
+    }
+  })
+})
+
+describe('Codex S1 r4 (R4-A) · UNA lectura decide qué se le contesta al POS que espera', () => {
+  const base = { requestId: 'REQ-L', venueId: 'venue-l', paymentId: null, cancelDisposition: null, noResponseAt: null }
+  const leer = (fila: Record<string, unknown>) => {
+    ;(tpr().findFirst as jest.Mock).mockReset().mockResolvedValue({ ...base, ...fila })
+    return (terminalPaymentService as any).leerParaLaEspera('REQ-L', 'venue-l')
+  }
+
+  it('con desenlace final ⇒ FINAL con ese final', async () => {
+    const r = await leer({ status: TerminalPaymentRequestStatus.FAILED, failureCode: 'NO_EVIDENCE_AFTER_WINDOW', resultJson: { status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW' } })
+    expect(r).toMatchObject({ tipo: 'FINAL', resultado: expect.objectContaining({ status: 'failed' }) })
+  })
+
+  it('en «sin respuesta» sin decisión ⇒ EN_ESPERA (el POS sigue esperando)', async () => {
+    expect(await leer({ status: TerminalPaymentRequestStatus.UNKNOWN, failureCode: null, noResponseAt: new Date(), resultJson: { status: 'timeout' } })).toEqual({ tipo: 'EN_ESPERA' })
+  })
+
+  it('ni final ni en espera ⇒ SIN_FINAL (se contesta el `timeout` de siempre)', async () => {
+    expect(await leer({ status: TerminalPaymentRequestStatus.UNKNOWN, failureCode: null, noResponseAt: null, resultJson: { status: 'timeout' } })).toEqual({ tipo: 'SIN_FINAL' })
+  })
+
+  it('un «no cobrado» con un «sí» de la terminal guardado NO es final para despertar al POS', async () => {
+    const r = await leer({
+      status: TerminalPaymentRequestStatus.FAILED,
+      failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+      resultJson: { status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW', claimedSuccess: { status: 'success' } },
+    })
+    expect(r).toEqual({ tipo: 'SIN_FINAL' })
+  })
+})
+
 describe('desenlaceCanonico — ventana de confirmación', () => {
   it('FAILED/NO_EVIDENCE_AFTER_WINDOW acredita «no se cobró» con clase SERVER (la ventana venció sin webhook, historial ni cajero)', () => {
     expect(desenlaceCanonico({ status: TerminalPaymentRequestStatus.FAILED, failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })).toEqual({
@@ -2755,28 +2883,39 @@ describe('Revisión final · A: el long-poll del POS no se rinde al entrar en la
     programadas().clear()
   })
 
-  it('un `timeout` de la terminal escribe TIMED_OUT con su sobre y NO resuelve ni borra la espera: la ventana decide', async () => {
+  // Cobro simple · S1: ya no es la VENTANA (TIMED_OUT, 30 s) sino «sin respuesta» (UNKNOWN + `noResponseAt`, 10 s). El POS sigue
+  // esperando mientras la FILA esté en sus 10 s; lo contesta el cierre (`cerrarSinRespuesta` → 422 `failed`) o el dinero.
+  const enSinRespuesta = (requestId: string) => {
+    prismaMock.$executeRaw.mockResolvedValue(1)
+    tpr().findFirst.mockResolvedValue({ id: `row-${requestId}`, requestId, status: 'UNKNOWN', noResponseAt: new Date(), failureCode: null, updatedAt: new Date() })
+  }
+  const cierres = () => (terminalPaymentService as any).cierresSinRespuesta as Map<string, NodeJS.Timeout>
+  afterEach(() => {
+    for (const t of cierres().values()) clearTimeout(t)
+    cierres().clear()
+    prismaMock.$executeRaw.mockResolvedValue(0)
+  })
+
+  it('un `timeout` de la terminal entra a «sin respuesta» (noResponseAt) y NO resuelve ni borra la espera: decide el cierre de los 10 s', async () => {
     const estado = await cobroEnEspera('REQ-A-TIMEOUT')
+    enSinRespuesta('REQ-A-TIMEOUT')
     const handled = await terminalPaymentService.handlePaymentResultFromSocket(
       { requestId: 'REQ-A-TIMEOUT', status: 'timeout', errorMessage: 'No pude verificar el resultado' },
       socket,
     )
     await flush()
     await flush()
-    expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ status: 'TIMED_OUT', resultJson: expect.objectContaining({ terminalResult: expect.any(Object) }) }),
-      }),
-    )
+    const sql = prismaMock.$executeRaw.mock.calls.map((c: unknown[]) => (c[0] as string[]).join('?'))
+    expect(sql.some((q: string) => q.includes('"noResponseAt" = COALESCE'))).toBe(true)
     expect(estado.resuelto).toBe(false)
     expect(esperas().has('REQ-A-TIMEOUT')).toBe(true)
-    // La espera sigue siendo de ESTE cobro: el resultado se aceptó y la ventana la contestará.
     expect(handled).toBe(true)
-    expect(programadas().has('REQ-A-TIMEOUT')).toBe(true)
+    expect(cierres().has('REQ-A-TIMEOUT')).toBe(true)
   })
 
-  it('un `failed` SIN evidencia (degradado a la ventana) tampoco la resuelve', async () => {
+  it('un `failed` SIN evidencia (degradado a «sin respuesta») tampoco la resuelve', async () => {
     const estado = await cobroEnEspera('REQ-A-FAILED')
+    enSinRespuesta('REQ-A-FAILED')
     await terminalPaymentService.handlePaymentResultFromSocket(
       { requestId: 'REQ-A-FAILED', status: 'failed', errorMessage: 'SDK U100' },
       socket,
@@ -2789,6 +2928,19 @@ describe('Revisión final · A: el long-poll del POS no se rinde al entrar en la
 
   it('regresión: un `failed` CON evidencia (PROCESSOR_DECLINED) la resuelve al instante con el FAILED de la terminal', async () => {
     const estado = await cobroEnEspera('REQ-A-DECLINED')
+    // Codex S1 r5 (R5-A): el negativo sale de la lectura única de la fila (`leerParaLaEspera`, la que pide `noResponseAt`), que ya
+    // ve lo que `closeRow` escribió; el camino real contra Postgres está en `cobroSimple.elAprobadoManda` (CONTROL de R5-A).
+    const enVuelo = { id: 'row-REQ-A-DECLINED', requestId: 'REQ-A-DECLINED', status: 'SENT', failureCode: null, updatedAt: new Date() }
+    const declinada = {
+      requestId: 'REQ-A-DECLINED',
+      status: 'FAILED',
+      failureCode: 'TPV_CONFIRMED_NO_CHARGE',
+      paymentId: null,
+      cancelDisposition: null,
+      noResponseAt: null,
+      resultJson: { requestId: 'REQ-A-DECLINED', status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED', errorMessage: 'Declinada' },
+    }
+    tpr().findFirst.mockImplementation(async (args: any) => (args?.select?.noResponseAt ? declinada : enVuelo))
     await terminalPaymentService.handlePaymentResultFromSocket(
       { requestId: 'REQ-A-DECLINED', status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED', errorMessage: 'Declinada' },
       socket,
@@ -3343,17 +3495,16 @@ describe('IQ: cancelación recuperable tras reiniciar la TPV', () => {
     expect(directEmit.mock.calls.filter(([event]) => event === 'terminal:payment_request')).toHaveLength(0)
   })
 
-  it('el correo describe los 149 segundos reales y la cancelación pendiente, sin afirmar cinco minutos', async () => {
+  it('Cobro simple · S1: la cancelación sin respuesta entra a «sin respuesta» sin correo a operaciones (se cierra sola a los 10 s)', async () => {
     const opsAlert = require('@/services/alerts/opsAlert.service')
     const alert = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true)
+    prismaMock.$executeRaw.mockResolvedValue(1)
     try {
-      await terminalPaymentService.reconcileStaleRequests(now)
-      const text = alert.mock.calls.map(([message]: any) => message.lines.join('\n')).join('\n')
-      expect(text).toContain('149 segundos')
-      expect(text).toContain('cancelación')
-      expect(text).not.toContain('5 minutos')
+      expect((await terminalPaymentService.reconcileStaleRequests(now)).unknown).toBe(1)
+      expect(alert).not.toHaveBeenCalled()
     } finally {
       alert.mockRestore()
+      prismaMock.$executeRaw.mockResolvedValue(0)
     }
   })
 
@@ -3362,6 +3513,7 @@ describe('IQ: cancelación recuperable tras reiniciar la TPV', () => {
     const opsAlert = require('@/services/alerts/opsAlert.service')
     const alert = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true)
     tpr().updateMany.mockResolvedValue({ count: 0 })
+    prismaMock.$executeRaw.mockResolvedValue(0)
     try {
       expect((await terminalPaymentService.reconcileStaleRequests(now)).unknown).toBe(0)
       expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('🚨 [Terminal-payment watchdog]'), expect.anything())
