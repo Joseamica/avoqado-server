@@ -52,7 +52,7 @@ import { resolveServicesMany, type ServiceResolvable } from '@/services/reservat
 import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 import { fechaHoraDelNegocio, horaQueNoExiste } from '@/utils/fechaHoraDelNegocio'
 import { pasesDeLaReserva, revisarPase, zonaDelNegocio } from '@/services/reservation/creditRedemption.service'
-import { errorIlimitado } from '@/services/credits/ilimitado'
+import { type Audiencia, errorIlimitado } from '@/services/credits/ilimitado'
 import { phonesMatch } from '@/utils/phone'
 
 export { enforceBookingWindow } from '@/services/reservation/bookingWindow.service'
@@ -271,6 +271,10 @@ export interface CreateReservationInput {
 }
 
 export type WriteOrigin = 'PUBLIC' | 'CONSUMER' | 'DASHBOARD' | 'MCP'
+
+/** D687: el widget y la app de clientes le hablan a quien compró el Ilimitado («Tu…»); DASHBOARD, POS y MCP, al personal. */
+const audienciaDelIlimitado = (writeOrigin: WriteOrigin): Audiencia =>
+  writeOrigin === 'PUBLIC' || writeOrigin === 'CONSUMER' ? 'CLIENTA' : 'PERSONAL'
 
 export interface ReservationWriteContext {
   writeOrigin: WriteOrigin
@@ -1592,7 +1596,8 @@ export async function updateReservation(
             !(data.guestPhone && actual?.guestPhone && phonesMatch(data.guestPhone, actual.guestPhone)))
         if (cambia) throw errorIlimitado('CREDIT_UNLIMITED_TITULAR')
       }
-      if (newPartySize > 1) throw errorIlimitado('CREDIT_UNLIMITED_ONE_SEAT')
+      const audiencia = audienciaDelIlimitado(context.writeOrigin)
+      if (newPartySize > 1) throw errorIlimitado('CREDIT_UNLIMITED_ONE_SEAT', audiencia)
       if (newStartsAt.getTime() !== reservation.startsAt.getTime()) {
         const timezone = await zonaDelNegocio(tx, venueId)
         for (const pase of pases) {
@@ -1605,6 +1610,7 @@ export async function updateReservation(
             classSessionId: null,
             personas: newPartySize,
             excludeReservationId: reservationId,
+            audiencia,
           })
         }
       }
@@ -2251,6 +2257,7 @@ async function rescheduleAppointmentWithHold(args: {
           classSessionId: null,
           personas: reservation.partySize,
           excludeReservationId: reservation.id,
+          audiencia: audienciaDelIlimitado(writeOrigin),
         })
       }
     }

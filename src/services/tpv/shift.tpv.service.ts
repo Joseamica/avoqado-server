@@ -1766,7 +1766,7 @@ async function claimShiftForClose(
       if (owner) throw shiftCloseInProgress()
     }
     if (shift.endTime !== null || shift.status === ShiftStatus.CLOSED) {
-      throw new BadRequestError('Shift is already closed')
+      throw new BadRequestError('Esta caja ya se cerró: pudo cerrarla otra persona u otro aparato. Actualiza la pantalla.')
     }
     // Esta muestra pertenece al estado autoritativo que acabamos de releer bajo el lock.
     // Tomarla antes permitiría que un lifecycle writer moviera `startTime` mientras
@@ -1801,7 +1801,7 @@ async function claimShiftForClose(
       throw new NotFoundError('Shift not found or does not belong to this venue')
     }
     if (latest.endTime !== null || latest.status === ShiftStatus.CLOSED) {
-      throw new BadRequestError('Shift is already closed')
+      throw new BadRequestError('Esta caja ya se cerró: pudo cerrarla otra persona u otro aparato. Actualiza la pantalla.')
     }
 
     const staleBefore = new Date(claimedAt.getTime() - SHIFT_CLOSE_STALE_MS)

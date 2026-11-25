@@ -39,18 +39,34 @@ const TEXTOS = {
   [CREDIT_RESERVATION_NOT_ALIVE]: 'La reserva ya no está activa.',
 } as const
 
+/**
+ * A quién le habla el texto (D687): `CLIENTA` es quien compró el pase (widget, app de clientes) y lee «tu»; `PERSONAL` es quien
+ * atiende (DASHBOARD, POS, MCP) y lee el texto sin posesivo. El código del error es el mismo para los dos.
+ */
+export type Audiencia = 'CLIENTA' | 'PERSONAL'
+
+/** Sólo los textos que le hablan de «tu» a quien lo compró y le pueden salir al personal; los demás ya son neutros. */
+const TEXTOS_PERSONAL: Partial<Record<keyof typeof TEXTOS, string>> = {
+  [CREDIT_UNLIMITED_ONE_SEAT]:
+    'El Ilimitado es personal: cubre 1 lugar por clase, a nombre de quien lo compró. Los demás lugares se pagan aparte.',
+}
+
 /** El 400 con su texto y su código. */
-export function errorIlimitado(code: keyof typeof TEXTOS): BadRequestError {
-  return new BadRequestError(TEXTOS[code], code)
+export function errorIlimitado(code: keyof typeof TEXTOS, audiencia: Audiencia = 'CLIENTA'): BadRequestError {
+  return new BadRequestError((audiencia === 'PERSONAL' && TEXTOS_PERSONAL[code]) || TEXTOS[code], code)
 }
 
-/** «Tu Ilimitado vence el 22 de diciembre; esta clase es después.», con la fecha en la zona del negocio. */
-export function mensajeVenceAntes(expiresAt: Date, timezone: string): string {
-  return `Tu Ilimitado vence el ${formatInTimeZone(expiresAt, timezone, "d 'de' MMMM", { locale: es })}; esta clase es después.`
+/**
+ * «Tu Ilimitado vence el 22 de diciembre, antes de este horario.» (el mismo texto del widget), con la fecha en la zona del negocio.
+ * Al personal: «Este Ilimitado vence…». No dice «esta clase es después»: confundía si vence y la clase empieza el mismo día.
+ */
+export function mensajeVenceAntes(expiresAt: Date, timezone: string, audiencia: Audiencia = 'CLIENTA'): string {
+  const fecha = formatInTimeZone(expiresAt, timezone, "d 'de' MMMM", { locale: es })
+  return `${audiencia === 'PERSONAL' ? 'Este' : 'Tu'} Ilimitado vence el ${fecha}, antes de este horario.`
 }
 
-export function errorVenceAntes(expiresAt: Date, timezone: string): BadRequestError {
-  return new BadRequestError(mensajeVenceAntes(expiresAt, timezone), CREDIT_UNLIMITED_AFTER_EXPIRY)
+export function errorVenceAntes(expiresAt: Date, timezone: string, audiencia: Audiencia = 'CLIENTA'): BadRequestError {
+  return new BadRequestError(mensajeVenceAntes(expiresAt, timezone, audiencia), CREDIT_UNLIMITED_AFTER_EXPIRY)
 }
 
 /**

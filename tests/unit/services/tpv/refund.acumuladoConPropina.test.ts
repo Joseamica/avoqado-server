@@ -246,7 +246,10 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     // trae los centavos se leía como 0 y la terminal volvía a ofrecer el cobro entero.
     armar({ refundedAmountCents: 12000 })
 
-    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never, 'staff-1')).rejects.toThrow(/exceeds remaining refundable/i)
+    // D1: el cajero lee en español cuánto pidió, cuánto queda y qué pudo pasar.
+    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never, 'staff-1')).rejects.toThrow(
+      'No se puede devolver $10.00: de este cobro sólo quedan $0.00 por devolver. Puede que alguien ya haya hecho otro reembolso de este cobro; actualiza la pantalla.',
+    )
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
     // 🔴 Y lo rechaza el PRE-VUELO, antes de abrir la transacción. Sin esta línea la prueba
     // pasaría también con el pre-vuelo roto (lo atraparía el candado) y no guardaría nada de
@@ -305,7 +308,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     // se saltaba `refundedAmountCents`.
     armarDosFotos({}, { refundedAmountCents: 12000 })
 
-    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never, 'staff-1')).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never, 'staff-1')).rejects.toThrow(/sólo quedan \$[\d.]+ por devolver/)
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
   })
 
@@ -314,7 +317,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     // previo); bajo el candado ya están los 12000 correctos. Gana el candado.
     armarDosFotos({ refundedAmount: 110, refundedAmountCents: 11000 }, { refundedAmount: 120, refundedAmountCents: 12000 })
 
-    await expect(refundService.recordRefund(VENUE, cuerpo(500) as never, 'staff-1')).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(refundService.recordRefund(VENUE, cuerpo(500) as never, 'staff-1')).rejects.toThrow(/sólo quedan \$[\d.]+ por devolver/)
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
   })
 
@@ -327,7 +330,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     // cobro vivo tiene dos reembolsos»), no el código.
     armar({ refundedAmount: 110, refundedAmountCents: 11000 }, [filaDeReembolso(-50, -10), filaDeReembolso(-50, -10)])
 
-    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never, 'staff-1')).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never, 'staff-1')).rejects.toThrow(/sólo quedan \$[\d.]+ por devolver/)
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
     // Y lo rechaza el CANDADO, no el pre-vuelo: el pre-vuelo sólo ve el acumulado (110) y
     // cree que quedan $10. Sin esta línea la prueba no distinguiría los dos caminos.
@@ -601,7 +604,7 @@ describe('Task 5r — lo que el dashboard escribe es lo que la terminal lee', ()
     jest.clearAllMocks()
     armar(persistido)
 
-    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never, 'staff-1')).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never, 'staff-1')).rejects.toThrow(/sólo quedan \$[\d.]+ por devolver/)
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
   })
 })

@@ -282,7 +282,7 @@ describe('adaptDashboardWaste — el contrato viejo entra al libro de merma', ()
   test('🔴 ADJUSTMENT sigue rechazando llevar una existencia ≥ 0 a negativo', async () => {
     const item = await product(1)
     await expect(adjustInventoryStock(venueId, item.id, { type: 'ADJUSTMENT', quantity: -4 } as never, staffId)).rejects.toThrow(
-      /Insufficient stock/,
+      /No alcanza el inventario: hay 1 y el ajuste quita 4\./,
     )
   })
 

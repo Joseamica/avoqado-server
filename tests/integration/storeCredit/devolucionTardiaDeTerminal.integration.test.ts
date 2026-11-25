@@ -171,7 +171,7 @@ describe('la devolución de la terminal después del saldo a favor · Postgres r
     expect(await anomalias(s)).toHaveLength(2)
 
     // El banco tenía $500 y ya devolvió $500: un centavo más no se anota.
-    await expect(terminal(s, 1)).rejects.toThrow(/exceeds remaining refundable/)
+    await expect(terminal(s, 1)).rejects.toThrow(/sólo quedan \$[\d.]+ por devolver/)
     filas = await reembolsosDeTerminal(s)
     expect(filas.map(f => f.amount.toNumber())).toEqual([-400, -100])
   })

@@ -484,6 +484,21 @@ describe('durable CLOSE — real isolated Postgres', () => {
     }
   })
 
+  // D1 (choques, 24-nov): otra persona u otro aparato ya cerró la caja; la cajera lo lee en español.
+  it('a legacy close over an already closed shift answers 400 in Spanish and changes nothing', async () => {
+    const n = await fixture()
+    expect((await close(n, { cashDeclared: 600 })).status).toBe(200)
+    const cerrado = await prisma.shift.findFirstOrThrow({ where: { id: n.shiftId, venueId: n.venueId } })
+
+    const r = await close(n, { cashDeclared: 999 })
+
+    expect(r.status).toBe(400)
+    expect(r.body.message).toBe('Esta caja ya se cerró: pudo cerrarla otra persona u otro aparato. Actualiza la pantalla.')
+    const despues = await prisma.shift.findFirstOrThrow({ where: { id: n.shiftId, venueId: n.venueId } })
+    expect(despues.cashDeclared?.toString()).toBe(cerrado.cashDeclared?.toString())
+    expect(despues.endTime).toEqual(cerrado.endTime)
+  })
+
   it('exact GET checks current read permission, active actor, venue and authenticated terminal; no internal request/serial leaks', async () => {
     const n = await fixture(),
       input = body(n)

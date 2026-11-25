@@ -51,8 +51,11 @@ keywords:
 - Mensajes que puede ver la clienta con su Ilimitado:
   - «Tu Ilimitado es personal: cubre 1 lugar por clase a tu nombre. Los demás lugares se pagan aparte.»: pidió más de un lugar.
   - «Ya tienes un lugar en esta clase con tu Ilimitado.»: ya tiene esa clase reservada.
-  - «Tu Ilimitado vence el …; esta clase es después.»: la clase es después del vencimiento; puede comprar otro paquete.
+  - «Tu Ilimitado vence el …, antes de este horario.»: la clase empieza después del vencimiento; puede comprar otro paquete.
   - «Tu nombre está ligado a tu Ilimitado. Para corregirlo, pídeselo al estudio.»: quiso cambiar su nombre en su cuenta.
+- Mensajes que ve el personal en el panel con un Ilimitado (al reagendar o al subir el número de personas de una reserva):
+  - «Este Ilimitado vence el …, antes de este horario.»: el horario nuevo empieza después del vencimiento del pase.
+  - «El Ilimitado es personal: cubre 1 lugar por clase, a nombre de quien lo compró. Los demás lugares se pagan aparte.»: se pidió más de un lugar con el pase.
 - «Esta reserva se pagó con un Ilimitado y va a nombre de su titular: no se le puede cambiar el nombre ni el contacto.»: sale al editar esa reserva en el panel; las notas sí se pueden cambiar.
 - En un Ilimitado no aparece *Ajustar Balance*: no tiene saldo que ajustar (desde una versión vieja sale «Un paquete Ilimitado no tiene saldo que ajustar.»). Si hace falta, reembolsa la compra o vende otra.
 - Si sale «Error», el aviso trae la razón; si no la trae, dice «Ocurrió un error». Si salió al crear el paquete, no lo vuelvas a crear: pudo quedar creado en un primer intento. Pide que lo revise una persona del equipo de Avoqado.
