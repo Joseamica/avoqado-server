@@ -22,6 +22,7 @@ import {
   publicarVersion,
   reintentarPublicacion,
   vistaPreviaDeLaOferta,
+  type EstadoDeLaOferta,
 } from '@/services/billing/planOfferPublisher'
 import { brutoDeNeto, type PlanOfferDefinition, type PlanOfferInput, type PlanPagado } from '@/services/billing/planOffer'
 
@@ -125,6 +126,34 @@ function refusal(error: unknown) {
   return text({ ok: false, error: e.message, codigo: e.code, detalles: enPesos(e.details ?? null) })
 }
 
+/**
+ * El estado de la oferta como lo lee quien usa el MCP: precios en pesos, sin y con IVA, y sin los destinatarios de los avisos. Lo
+ * usan `get_plan_offer` y el descarte (Codex B1 #5: el descarte devolvía el estado de la API tal cual, en centavos). La `entrada` va
+ * en centavos SIN IVA a propósito: es la forma exacta que acepta `publish_plan_offer`.
+ */
+function estadoEnPesos(estado: EstadoDeLaOferta) {
+  return {
+    revision: estado.revision,
+    vigente: {
+      numero: estado.vigente.number,
+      versionId: estado.vigente.versionId,
+      publicadaEn: estado.vigente.publishedAt,
+      planes: planesEnPesos(estado.vigente.definition),
+    },
+    entrada: estado.vigente.entrada,
+    pendiente: estado.pendiente
+      ? {
+          versionId: estado.pendiente.versionId,
+          creadaEn: estado.pendiente.creadaAt,
+          planes: planesEnPesos(estado.pendiente.definition),
+          preparacion: enPesos(estado.pendiente.preparacion),
+        }
+      : null,
+    interruptor: { prendido: estado.interruptor.prendido, desde: estado.interruptor.desde, faltan: estado.interruptor.faltan },
+    renombrePendiente: enPesos(estado.nombresEnStripe),
+  }
+}
+
 export function registerPlanOfferTools(server: McpServer, scope: McpScope): void {
   const forbidden = () => text({ ok: false, error: SOLO_AVOQADO })
   const write = () =>
@@ -136,28 +165,7 @@ export function registerPlanOfferTools(server: McpServer, scope: McpScope): void
     {},
     async () => {
       if (!scope.isSuperAdmin) return forbidden()
-      const estado = await estadoDeLaOferta()
-      return text({
-        ok: true,
-        revision: estado.revision,
-        vigente: {
-          numero: estado.vigente.number,
-          versionId: estado.vigente.versionId,
-          publicadaEn: estado.vigente.publishedAt,
-          planes: planesEnPesos(estado.vigente.definition),
-        },
-        entrada: estado.vigente.entrada,
-        pendiente: estado.pendiente
-          ? {
-              versionId: estado.pendiente.versionId,
-              creadaEn: estado.pendiente.creadaAt,
-              planes: planesEnPesos(estado.pendiente.definition),
-              preparacion: enPesos(estado.pendiente.preparacion),
-            }
-          : null,
-        interruptor: { prendido: estado.interruptor.prendido, desde: estado.interruptor.desde, faltan: estado.interruptor.faltan },
-        renombrePendiente: enPesos(estado.nombresEnStripe),
-      })
+      return text({ ok: true, ...estadoEnPesos(await estadoDeLaOferta()) })
     },
   )
 
@@ -255,16 +263,17 @@ export function registerPlanOfferTools(server: McpServer, scope: McpScope): void
           })
           return text({ ok: true, publicada })
         }
-        // Puede ser el estado parcial `{ revision, pendiente: null, parcial: true }` (`revision: -1` = no se pudo leer): se pasa tal cual.
+        // El estado completo sale con el mismo formato en pesos que get_plan_offer. El parcial `{ revision, pendiente: null, parcial: true }`
+        // (`revision: -1` = no se pudo leer) no trae dinero: se pasa tal cual.
         const estado = await descartarPublicacion(versionId, scope.staffId)
         await auditMcpWrite(scope, { venueId: null, action: 'MCP_PLAN_OFFER_DISCARDED', entity: 'PlanOfferVersion', entityId: versionId })
-        return text({
-          ok: true,
-          estado,
-          ...('parcial' in estado && estado.parcial
-            ? { aviso: 'El descarte SÍ se hizo; sólo no se pudo leer el estado después. Llama a get_plan_offer para verlo.' }
-            : {}),
-        })
+        if ('parcial' in estado)
+          return text({
+            ok: true,
+            estado,
+            aviso: 'El descarte SÍ se hizo; sólo no se pudo leer el estado después. Llama a get_plan_offer para verlo.',
+          })
+        return text({ ok: true, estado: estadoEnPesos(estado) })
       } catch (error) {
         return refusal(error)
       }

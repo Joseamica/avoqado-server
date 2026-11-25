@@ -397,6 +397,41 @@ describe('ningún dato que sale del MCP lleva centavos', () => {
     expect(rechazo.detalles.campaigns[0]).toEqual({ code: 'C1', pricePesos: 22 })
   })
 
+  it('Codex B1 #5: descartar con el estado COMPLETO lo devuelve con el mismo formato en pesos que get_plan_offer; reintentar tampoco suelta centavos', async () => {
+    const pendiente = {
+      versionId: 'v3',
+      definition,
+      creadaAt: new Date('2026-11-02T00:00:00Z'),
+      preparacion: { ultimoError: { motivo: 'STRIPE' }, montoCents: 115884 },
+    }
+    ;(descartarPublicacion as jest.Mock).mockResolvedValue(
+      estado({ revision: 5, pendiente, nombresEnStripe: { PRO: { estado: 'FALLO' } } }),
+    )
+    ;(estadoDeLaOferta as jest.Mock).mockResolvedValue(estado({ revision: 5, pendiente, nombresEnStripe: { PRO: { estado: 'FALLO' } } }))
+
+    const descarte = read(await call('resolve_pending_plan_offer', { versionId: 'v3', accion: 'descartar', confirm: true }))
+    const lectura = read(await call('get_plan_offer', {}))
+    expect(descarte.ok).toBe(true)
+    expect(descarte.aviso).toBeUndefined()
+    // El mismo formateador: lo que dice get_plan_offer (sin su `ok`) es exactamente el `estado` del descarte.
+    expect(lectura.ok).toBe(true)
+    delete lectura.ok
+    expect(descarte.estado).toEqual(lectura)
+    expect(descarte.estado.vigente.planes.PRO.mensual).toEqual({ sinIva: 799, conIva: 926.84 })
+    expect(descarte.estado.pendiente.preparacion.montoPesos).toBe(1158.84)
+    // Salvo la `entrada` para publicar (centavos sin IVA por contrato, como en get_plan_offer), ninguna llave en centavos.
+    delete descarte.estado.entrada
+    sinCentavos(descarte)
+
+    // El parcial sigue igual, y reintentar responde sin centavos.
+    ;(descartarPublicacion as jest.Mock).mockResolvedValue({ revision: 5, pendiente: null, parcial: true })
+    const parcial = read(await call('resolve_pending_plan_offer', { versionId: 'v3', accion: 'descartar', confirm: true }))
+    expect(parcial.estado).toEqual({ revision: 5, pendiente: null, parcial: true })
+    const reintento = read(await call('resolve_pending_plan_offer', { versionId: 'v3', accion: 'reintentar', confirm: true }))
+    expect(reintento).toEqual({ ok: true, publicada: { number: 3, versionId: 'v3' } })
+    sinCentavos(reintento)
+  })
+
   it('M2: si la revisión ya no es la que se leyó, la vista previa avisa y dice la vigente', async () => {
     const r = read(await call('publish_plan_offer', { entrada: entradaNueva, expectedRevision: 3 }))
     expect(r.preview.aviso).toBe('La oferta cambió desde que la leíste; vuelve a leerla antes de confirmar.')
