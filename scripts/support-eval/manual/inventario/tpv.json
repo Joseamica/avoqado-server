@@ -197,7 +197,7 @@
       "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt:207",
       "quienLaVe": "Todos en Cobrar, desde el detalle del carrito",
       "equipos": ["PAX", "NEXGO"],
-      "paginas": []
+      "paginas": ["tpv/clientes/agregar-cliente-a-la-venta"]
     },
     {
       "id": "accion:nav:Checkout/agregar-impuesto",
@@ -233,7 +233,7 @@
       "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/referrals/presentation/ReferralCaptureSection.kt:116",
       "quienLaVe": "Con un cliente elegido (ReferralCaptureSection.kt:145); pide plan REFERRAL_PROGRAM (Pro) (CheckoutScreen.kt:210); necesita internet (ReferralCaptureSection.kt:128); «Forzar atribución» todavía no funciona (CheckoutScreen.kt:477)",
       "equipos": ["PAX", "NEXGO"],
-      "paginas": []
+      "paginas": ["tpv/clientes/capturar-codigo-de-referido"]
     },
     {
       "id": "accion:nav:Checkout/configurar-favoritos",
@@ -260,7 +260,7 @@
       "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/ShortcutsGridView.kt:224",
       "quienLaVe": "Todos en Cobrar; sin red dice «Necesita internet» (ShortcutsGridView.kt:282)",
       "equipos": ["PAX", "NEXGO"],
-      "paginas": []
+      "paginas": ["tpv/cobro/aplicar-descuento-o-cupon"]
     },
     {
       "id": "accion:nav:Checkout/descuento",
@@ -269,7 +269,7 @@
       "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/ShortcutsGridView.kt:216",
       "quienLaVe": "Permiso discounts:apply (CheckoutViewModel.kt:1446; «Sin permiso» ShortcutsGridView.kt:284); el descuento escrito a mano pide plan PROMOTIONS (Pro) (CheckoutScreen.kt:209)",
       "equipos": ["PAX", "NEXGO"],
-      "paginas": []
+      "paginas": ["tpv/cobro/aplicar-descuento-o-cupon"]
     },
     {
       "id": "accion:nav:Checkout/eliminar-del-carrito",
@@ -662,7 +662,11 @@
       "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/GuestTab.kt:594",
       "quienLaVe": "Todos en la orden, pestaña de clientes",
       "equipos": ["PAX", "NEXGO"],
-      "paginas": []
+      "paginas": [],
+      "sinPagina": {
+        "razon": "legacy",
+        "detalle": "Pantalla de la orden de «Órdenes» (Ordenar), LEGACY: su tarjeta y pantallas se quitaron de la app (D34, PR #104, 20-nov-2026); en v2.22.3 ya no existe ActionsTab.kt ni GuestTab.kt de features/ordering/presentation/menu."
+      }
     },
     {
       "id": "accion:nav:Menu/cupones",
@@ -671,7 +675,11 @@
       "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/ActionsTab.kt:280",
       "quienLaVe": "Todos en la orden, pestaña de acciones",
       "equipos": ["PAX", "NEXGO"],
-      "paginas": []
+      "paginas": [],
+      "sinPagina": {
+        "razon": "legacy",
+        "detalle": "Pantalla de la orden de «Órdenes» (Ordenar), LEGACY: su tarjeta y pantallas se quitaron de la app (D34, PR #104, 20-nov-2026); en v2.22.3 ya no existe ActionsTab.kt ni GuestTab.kt de features/ordering/presentation/menu."
+      }
     },
     {
       "id": "accion:nav:Menu/descuentos",
@@ -680,7 +688,11 @@
       "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/ordering/presentation/menu/ActionsTab.kt:269",
       "quienLaVe": "Permiso discounts:apply (MenuViewModel.kt:309); sin él «Sin permisos para descuentos» (ActionsTab.kt:273)",
       "equipos": ["PAX", "NEXGO"],
-      "paginas": []
+      "paginas": [],
+      "sinPagina": {
+        "razon": "legacy",
+        "detalle": "Pantalla de la orden de «Órdenes» (Ordenar), LEGACY: su tarjeta y pantallas se quitaron de la app (D34, PR #104, 20-nov-2026); en v2.22.3 ya no existe ActionsTab.kt ni GuestTab.kt de features/ordering/presentation/menu."
+      }
     },
     {
       "id": "accion:nav:Menu/dividir-cuenta",
@@ -1672,7 +1684,7 @@
       "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt:389",
       "quienLaVe": "Todos en el cobro de la mesa; la app no revisa permiso aquí, lo valida el servidor",
       "equipos": ["PAX", "NEXGO"],
-      "paginas": []
+      "paginas": ["tpv/mesas/descuento-en-la-cuenta-de-la-mesa"]
     },
     {
       "id": "accion:nav:TableCheckout/cobrar-con-tarjeta",
@@ -1717,7 +1729,7 @@
       "origen": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt:603",
       "quienLaVe": "Todos en el cobro de la mesa, junto a un descuento o un cargo por servicio ya aplicado; sólo con conexión (TableCheckoutScreen.kt:119-139); la app no revisa permiso aquí, lo valida el servidor",
       "equipos": ["PAX", "NEXGO"],
-      "paginas": []
+      "paginas": ["tpv/mesas/descuento-en-la-cuenta-de-la-mesa"]
     },
     {
       "id": "nav:TableMenu",

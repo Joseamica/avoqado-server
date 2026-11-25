@@ -1,0 +1,93 @@
+{
+  "pagina": "dashboard/ligas-de-pago/quitar-descuento-de-liga-de-pago",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 244,
+      "cita": "\"links\": \"Ligas de pago\","
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/PaymentLinks/PaymentLinkDiscountStatus.tsx",
+      "linea": 34,
+      "cita": "⚠ {t(`discountStatus.${discountStatus}`)}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/pages/PaymentLinks/PaymentLinkDiscountStatus.tsx",
+      "linea": 39,
+      "cita": "{t('discountStatus.remove')}"
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 247,
+      "cita": "\"removeDiscountConfirm\": \"Quitar descuento\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 331,
+      "cita": "\"removed\": \"Descuento quitado\""
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/PaymentLinks/PaymentLinkDiscountStatus.tsx",
+      "linea": 43,
+      "cita": "{t('discountStatus.replace')}"
+    },
+    {
+      "paso": 3,
+      "archivo": "src/pages/PaymentLinks/PaymentLinks.tsx",
+      "linea": 381,
+      "cita": "onReplace={() => openEdit(row.original.id)}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/PaymentLinks/PaymentLinkDiscountStatus.tsx",
+      "linea": 47,
+      "cita": "{t('discountStatus.archive')}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 244,
+      "cita": "\"archiveConfirm\": \"Archivar\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payment-link:update",
+      "archivo": "src/pages/PaymentLinks/PaymentLinks.tsx",
+      "linea": 379
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Quien abra la liga paga el precio completo",
+      "archivo": "src/locales/es/paymentLinks.json",
+      "linea": 246
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

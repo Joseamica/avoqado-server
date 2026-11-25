@@ -1,0 +1,98 @@
+{
+  "pagina": "dashboard/tarjetas-de-regalo/cambiar-destino-de-tarjeta-de-regalo",
+  "sourceRepo": "avoqado-web-dashboard",
+  "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6",
+  "version": "main",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 21,
+      "cita": "\"giftCards\": \"Tarjetas de regalo\""
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/GiftCards/components/GiftCardDelivery.tsx",
+      "linea": 295,
+      "cita": "<h3 className=\"text-sm font-semibold\">{t('detail.facts.delivery')}</h3>"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/pages/GiftCards/components/GiftCardDelivery.tsx",
+      "linea": 197,
+      "cita": "title={t('deliveryActions.changeDestination')}"
+    },
+    {
+      "paso": 1,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 90,
+      "cita": "\"changeDestination\": \"Cambiar destino\","
+    },
+    {
+      "paso": 2,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 96,
+      "cita": "\"changeChannel\": \"¿Cómo la mandamos?\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 97,
+      "cita": "\"changePhone\": \"Teléfono de quien la recibe\","
+    },
+    {
+      "paso": 3,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 98,
+      "cita": "\"changeEmail\": \"Correo de quien la recibe\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 99,
+      "cita": "\"changeConfirm\": \"Reponer y enviar\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 100,
+      "cita": "\"changeDone\": \"Se repuso el código y la tarjeta va en camino al destino nuevo.\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "giftCards:manage",
+      "archivo": "src/pages/GiftCards/components/GiftCardDelivery.tsx",
+      "linea": 314
+    }
+  ],
+  "plan": [],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "Sólo tarjeta activa, no guardada en la tarjeta de un cliente",
+      "archivo": "src/pages/GiftCards/components/GiftCardDelivery.tsx",
+      "linea": 287
+    },
+    {
+      "ruta": "Apagado si ya se usó o está guardada",
+      "archivo": "src/locales/es/giftCards.json",
+      "linea": 91
+    }
+  ],
+  "aparato": {
+    "estado": "NO APLICA",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "navegador": {
+    "estado": "NO PROBADO EN NAVEGADOR",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 325,
+      "cita": "title = \"Cobrar · ${session.label}\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 389,
+      "cita": "text = \"+ Agregar descuento\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/DiscountPickerSheet.kt",
+      "linea": 64,
+      "cita": "Text(text = \"Descuentos disponibles\", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 326,
+      "cita": "subtitle = \"Restante ${moneyDisplay(state.remaining)}\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 603,
+      "cita": "contentDescription = \"Quitar $label\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 249,
+      "cita": "onPayCash = { viewModel.payCash(chargeableAmount) },"
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Quitar descuento siempre online",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
+      "linea": 120
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Sin descuentos",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/DiscountPickerSheet.kt",
+      "linea": 76
+    },
+    {
+      "ruta": "Autorización de gerente",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/DiscountPickerSheet.kt",
+      "linea": 132
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

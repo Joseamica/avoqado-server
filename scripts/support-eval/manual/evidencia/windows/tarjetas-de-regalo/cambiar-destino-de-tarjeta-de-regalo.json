@@ -1,0 +1,93 @@
+{
+  "pagina": "windows/tarjetas-de-regalo/cambiar-destino-de-tarjeta-de-regalo",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff",
+  "version": "2.25.58-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/TarjetaDeLaCuentaRow.kt",
+      "linea": 37,
+      "cita": "if (sobre.puedeCambiarDestino) TextButton(enabled=habilitada,onClick={onAccion(\"CHANGE_DESTINATION\")}) { Text(TextosDeTarjetas.CAMBIAR_DESTINO) }"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 65,
+      "cita": "const val CAMBIAR_DESTINO = \"Cambiar destino\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt",
+      "linea": 89,
+      "cita": "RadioButton(selected=canal==\"WHATSAPP\",enabled=!fijado,onClick={canal=\"WHATSAPP\"});Text(TextosDeTarjetas.WHATSAPP)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt",
+      "linea": 90,
+      "cita": "RadioButton(selected=canal==\"EMAIL\",enabled=!fijado,onClick={canal=\"EMAIL\"});Text(TextosDeTarjetas.CORREO)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt",
+      "linea": 92,
+      "cita": "if(canal==\"WHATSAPP\") AvoqadoPillTextField(value=telefono,enabled=!fijado && !ocupado,onValueChange={if(!fijado) telefono=filtrarTecleoDeTelefono(it)},placeholder=TextosDeTarjetas.EJEMPLO_DE_CELULAR,keyboardType=KeyboardType.Phone)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt",
+      "linea": 93,
+      "cita": "else AvoqadoPillTextField(value=correo,enabled=!fijado && !ocupado,onValueChange={if(!fijado) correo=it},placeholder=TextosDeTarjetas.CORREO_DE_QUIEN_LA_RECIBE,keyboardType=KeyboardType.Email)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt",
+      "linea": 69,
+      "cita": "if (accion!=\"SHOW_QR\" || qr==null) PrimaryButton(text=if(aviso==null) titulo else TextosDeTarjetas.REINTENTAR,enabled=!ocupado && conectado && servidor,"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaViewModel.kt",
+      "linea": 307,
+      "cita": "is Respuesta.Ok -> if(vigente(g) && versionDialogo==vd) {dialogoTerminado=true;primeraRevelacion=true;sinLigas.remove(id);revisionSondeo++;exitoValor.value=\"Destino actualizado\";refrescarDentro()}"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "giftCards:manage",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 275
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red: aviso y no se cambia",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaViewModel.kt",
+      "linea": 295
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Para corregir el destino",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt",
+      "linea": 87
+    },
+    {
+      "ruta": "Celular inválido",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 48
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

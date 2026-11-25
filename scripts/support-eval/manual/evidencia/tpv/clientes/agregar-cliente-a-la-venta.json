@@ -1,0 +1,81 @@
+{
+  "pagina": "tpv/clientes/agregar-cliente-a-la-venta",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/CheckoutScreen.kt",
+      "linea": 409,
+      "cita": "CartDetailsSheet("
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt",
+      "linea": 207,
+      "cita": "text = customerName ?: \"Agregar cliente\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt",
+      "linea": 203,
+      "cita": ".clickable(enabled = !necesitaInternet, onClick = onCustomerTap)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CustomerSelectorSheet.kt",
+      "linea": 127,
+      "cita": "text = \"Recientes\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CustomerSelectorSheet.kt",
+      "linea": 106,
+      "cita": "placeholder = { Text(\"Buscar por nombre, teléfono o email\") },"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CustomerSelectorSheet.kt",
+      "linea": 88,
+      "cita": "text = if (hasSelectedCustomer) \"Cambiar cliente\" else \"Agregar cliente\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CustomerSelectorSheet.kt",
+      "linea": 97,
+      "cita": "Text(\"Quitar\")"
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red: Necesita internet arriba del carrito",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt",
+      "linea": 216
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Sin resultados",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CustomerSelectorSheet.kt",
+      "linea": 255
+    },
+    {
+      "ruta": "Sin recientes",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CustomerSelectorSheet.kt",
+      "linea": 238
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

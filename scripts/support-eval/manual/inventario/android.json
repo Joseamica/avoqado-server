@@ -309,7 +309,7 @@
       "nombre": "Cupones",
       "origen": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt:282",
       "quienLaVe": "quien entra a Cobrar (canAccessPOS: WAITER, CASHIER, MANAGER, ADMIN, OWNER, SUPERADMIN, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:55-56); «Validar cupón» (app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt:905) y «Aplicar cupón» (app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt:1004).",
-      "paginas": []
+      "paginas": ["android/cobro/aplicar-cupon-o-promocion"]
     },
     {
       "id": "accion:nav:MainTab.CHECKOUT.route/anular-articulos",
@@ -373,7 +373,7 @@
       "nombre": "Promociones",
       "origen": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt:122",
       "quienLaVe": "quien entra a Cobrar (canAccessPOS: WAITER, CASHIER, MANAGER, ADMIN, OWNER, SUPERADMIN, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:55-56); plan con featureCode PROMOTIONS (PlanManager.hasFeature, app/src/main/java/com/avoqado/pos/pos/presentation/promotions/PromotionsPanelViewModel.kt:66-67) y permiso `discounts:apply` (lista vacía = se permite; :79-81; app/src/main/java/com/avoqado/pos/pos/presentation/promotions/PromotionsPanel.kt:128).",
-      "paginas": []
+      "paginas": ["android/cobro/aplicar-cupon-o-promocion"]
     },
     {
       "id": "accion:nav:MainTab.CHECKOUT.route/quitar-combo",
@@ -389,7 +389,7 @@
       "nombre": "Aplicar {premio}",
       "origen": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt:1569",
       "quienLaVe": "quien entra a Cobrar (canAccessPOS: WAITER, CASHIER, MANAGER, ADMIN, OWNER, SUPERADMIN, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:55-56), con un cliente que tiene premio de sellos.",
-      "paginas": []
+      "paginas": ["android/lealtad/aplicar-premio-de-sellos"]
     },
     {
       "id": "accion:nav:MainTab.CHECKOUT.route/quitar-premio",
@@ -421,7 +421,7 @@
       "nombre": "¿Te recomendó alguien?",
       "origen": "app/src/main/java/com/avoqado/pos/referrals/presentation/ReferralCaptureSection.kt:114",
       "quienLaVe": "quien entra a Cobrar (canAccessPOS: WAITER, CASHIER, MANAGER, ADMIN, OWNER, SUPERADMIN, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:55-56), con un cliente elegido; plan con featureCode REFERRAL_PROGRAM (planAllowsReferrals, app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt:418; app/src/main/java/com/avoqado/pos/core/domain/PlanManager.kt:112).",
-      "paginas": []
+      "paginas": ["android/clientes/capturar-codigo-de-referido"]
     },
     {
       "id": "accion:nav:MainTab.CHECKOUT.route/elegir-vendedor",
@@ -468,8 +468,8 @@
       "tipo": "accion",
       "nombre": "Prender tarjetas de regalo",
       "origen": "app/src/main/java/com/avoqado/pos/giftcards/presentation/HojaDeTarjetaDeRegalo.kt:71",
-      "quienLaVe": "Rol ADMIN, OWNER o SUPERADMIN, o quien tenga `giftCards:*` (RoleManager.canEnableGiftCards, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:282: el aparato pregunta por «giftCards:enable», nombre que el servidor no define, así que sólo lo cumple un comodín), con red y si el negocio las tiene apagadas (app/src/main/java/com/avoqado/pos/giftcards/domain/EntradaDeTarjetas.kt:49-53).",
-      "paginas": []
+      "quienLaVe": "Rol ADMIN, OWNER o SUPERADMIN, o quien tenga `giftCards:*` (RoleManager.canEnableGiftCards, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:282: el aparato pregunta por «giftCards:enable», que el SERVIDOR sí define (src/lib/permissions.ts) y que por omisión sólo traen ADMIN y OWNER por giftCards:*), con red y si el negocio las tiene apagadas (app/src/main/java/com/avoqado/pos/giftcards/domain/EntradaDeTarjetas.kt:49-53).",
+      "paginas": ["android/tarjetas-de-regalo/prender-tarjetas-de-regalo"]
     },
     {
       "id": "accion:nav:MainTab.CHECKOUT.route/emitir-vale",
@@ -910,7 +910,7 @@
       "nombre": "Conteo de clientes",
       "origen": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt:2509",
       "quienLaVe": "quien abre la cuenta de una mesa desde Mesas (app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:569) con plan con featureCode TABLE_SERVICE (sin él sale «Servicio de mesas · PRO», app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt:143-144).",
-      "paginas": []
+      "paginas": ["android/mesas/cliente-y-comensales-de-la-mesa"]
     },
     {
       "id": "accion:nav:\"table-order\"/cambiar-cumplimiento",
@@ -926,7 +926,7 @@
       "nombre": "Descuentos",
       "origen": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt:2523",
       "quienLaVe": "quien abre la cuenta de una mesa desde Mesas (app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:569) con plan con featureCode TABLE_SERVICE (sin él sale «Servicio de mesas · PRO», app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt:143-144); el servidor decide el permiso.",
-      "paginas": []
+      "paginas": ["android/cobro/dar-descuento-o-cortesia"]
     },
     {
       "id": "accion:nav:\"table-order\"/canjear-recompensa",
@@ -982,7 +982,7 @@
       "nombre": "Asignar cliente",
       "origen": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt:2798",
       "quienLaVe": "Quien ve Mesas: rol WAITER, CASHIER, MANAGER, ADMIN, OWNER o SUPERADMIN (RoleManager.canAccessPOS, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:55-56), aparato en modo Restaurante (app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt:38) y plan TABLE_SERVICE (Pro) (app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt:143). Quien abre la mesa, en la pestaña «Cliente» (app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt:2245); dice «Cambiar cliente» si ya hay uno y se quita con «Quitar» (:2794).",
-      "paginas": []
+      "paginas": ["android/mesas/cliente-y-comensales-de-la-mesa"]
     },
     {
       "id": "accion:nav:MainTab.INVENTORY.route/registrar-merma",
@@ -1295,7 +1295,7 @@
       "nombre": "Agregar cliente",
       "origen": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionDetailSheet.kt:1128",
       "quienLaVe": "quien entra a Ventas (rol CASHIER, MANAGER, ADMIN, OWNER o SUPERADMIN, RoleManager.canAccessTransactions, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:124-125) y rol MANAGER, ADMIN, OWNER o SUPERADMIN con `orders:attach-customer` (RoleManager.canAttachCustomer, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:15-16) y `customers:read`, si la venta no tiene cliente (app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionsViewModel.kt:217-221); crear uno nuevo pide `customers:create` (:223-224).",
-      "paginas": []
+      "paginas": ["android/clientes/agregar-cliente-a-una-venta-cobrada"]
     },
     {
       "id": "accion:nav:MainTab.TRANSACTIONS.route/confirmar-estado-de-reembolso",
@@ -1567,7 +1567,7 @@
       "nombre": "Cancelar venta",
       "origen": "app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt:63",
       "quienLaVe": "En «Pedidos», al abrir una venta de tarjetas de regalo ya pagada (app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt:307-308); pide `giftCards:read` y `giftCards:manage` (respaldo MANAGER+, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:272, 275; app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasViewModel.kt:60) y red (app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt:81).",
-      "paginas": []
+      "paginas": ["android/tarjetas-de-regalo/cancelar-venta-de-tarjetas-de-regalo"]
     },
     {
       "id": "accion:nav:MainTab.MORE.route/liberar-tarjetas-de-regalo",
@@ -1575,7 +1575,7 @@
       "nombre": "Liberar",
       "origen": "app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt:73",
       "quienLaVe": "Igual que «Cancelar venta» (app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasViewModel.kt:61); «Devolver completo · {medio} · {importe}» pide además `payments:refund` (RoleManager.canIssueRefund; app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt:66-70).",
-      "paginas": []
+      "paginas": ["android/tarjetas-de-regalo/cancelar-venta-de-tarjetas-de-regalo"]
     },
     {
       "id": "accion:nav:MainTab.MORE.route/aceptar-pedido-en-linea",
@@ -1759,7 +1759,7 @@
       "nombre": "Nuevo descuento",
       "origen": "app/src/main/java/com/avoqado/pos/articles/presentation/discounts/DiscountListView.kt:117",
       "quienLaVe": "«Artículos» en Más sólo con rol MANAGER, ADMIN, OWNER o SUPERADMIN (RoleManager.canCreateProducts, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:136-137; app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:624) si no se ocultó en «Personalizar menú» de este aparato (PreferenciasDelMenu, app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:272); descuentos y cupones con candado sin el featureCode PROMOTIONS (app/src/main/java/com/avoqado/pos/articles/presentation/ArticlesViewModel.kt:54-55).",
-      "paginas": []
+      "paginas": ["android/promociones/crear-editar-o-eliminar-cupones-y-descuentos"]
     },
     {
       "id": "accion:nav:MainTab.MORE.route/editar-descuento",
@@ -1767,7 +1767,7 @@
       "nombre": "Editar descuento",
       "origen": "app/src/main/java/com/avoqado/pos/articles/presentation/discounts/DiscountFormSheet.kt:102",
       "quienLaVe": "«Artículos» en Más sólo con rol MANAGER, ADMIN, OWNER o SUPERADMIN (RoleManager.canCreateProducts, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:136-137; app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:624) si no se ocultó en «Personalizar menú» de este aparato (PreferenciasDelMenu, app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:272); descuentos y cupones con candado sin el featureCode PROMOTIONS (app/src/main/java/com/avoqado/pos/articles/presentation/ArticlesViewModel.kt:54-55).",
-      "paginas": []
+      "paginas": ["android/promociones/crear-editar-o-eliminar-cupones-y-descuentos"]
     },
     {
       "id": "accion:nav:MainTab.MORE.route/eliminar-descuento",
@@ -1775,7 +1775,7 @@
       "nombre": "Eliminar descuento",
       "origen": "app/src/main/java/com/avoqado/pos/articles/presentation/discounts/DiscountListView.kt:183",
       "quienLaVe": "«Artículos» en Más sólo con rol MANAGER, ADMIN, OWNER o SUPERADMIN (RoleManager.canCreateProducts, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:136-137; app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:624) si no se ocultó en «Personalizar menú» de este aparato (PreferenciasDelMenu, app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:272); descuentos y cupones con candado sin el featureCode PROMOTIONS (app/src/main/java/com/avoqado/pos/articles/presentation/ArticlesViewModel.kt:54-55).",
-      "paginas": []
+      "paginas": ["android/promociones/crear-editar-o-eliminar-cupones-y-descuentos"]
     },
     {
       "id": "accion:nav:MainTab.MORE.route/crear-cupon",
@@ -1783,7 +1783,7 @@
       "nombre": "Nuevo cupon",
       "origen": "app/src/main/java/com/avoqado/pos/articles/presentation/coupons/CouponListView.kt:120",
       "quienLaVe": "«Artículos» en Más sólo con rol MANAGER, ADMIN, OWNER o SUPERADMIN (RoleManager.canCreateProducts, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:136-137; app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:624) si no se ocultó en «Personalizar menú» de este aparato (PreferenciasDelMenu, app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:272); descuentos y cupones con candado sin el featureCode PROMOTIONS (app/src/main/java/com/avoqado/pos/articles/presentation/ArticlesViewModel.kt:54-55).",
-      "paginas": []
+      "paginas": ["android/promociones/crear-editar-o-eliminar-cupones-y-descuentos"]
     },
     {
       "id": "accion:nav:MainTab.MORE.route/editar-cupon",
@@ -1791,7 +1791,7 @@
       "nombre": "Editar cupon",
       "origen": "app/src/main/java/com/avoqado/pos/articles/presentation/coupons/CouponFormSheet.kt:88",
       "quienLaVe": "«Artículos» en Más sólo con rol MANAGER, ADMIN, OWNER o SUPERADMIN (RoleManager.canCreateProducts, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:136-137; app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:624) si no se ocultó en «Personalizar menú» de este aparato (PreferenciasDelMenu, app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:272); descuentos y cupones con candado sin el featureCode PROMOTIONS (app/src/main/java/com/avoqado/pos/articles/presentation/ArticlesViewModel.kt:54-55).",
-      "paginas": []
+      "paginas": ["android/promociones/crear-editar-o-eliminar-cupones-y-descuentos"]
     },
     {
       "id": "accion:nav:MainTab.MORE.route/eliminar-cupon",
@@ -1799,7 +1799,7 @@
       "nombre": "Eliminar cupon",
       "origen": "app/src/main/java/com/avoqado/pos/articles/presentation/coupons/CouponListView.kt:186",
       "quienLaVe": "«Artículos» en Más sólo con rol MANAGER, ADMIN, OWNER o SUPERADMIN (RoleManager.canCreateProducts, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:136-137; app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:624) si no se ocultó en «Personalizar menú» de este aparato (PreferenciasDelMenu, app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:272); descuentos y cupones con candado sin el featureCode PROMOTIONS (app/src/main/java/com/avoqado/pos/articles/presentation/ArticlesViewModel.kt:54-55).",
-      "paginas": []
+      "paginas": ["android/promociones/crear-editar-o-eliminar-cupones-y-descuentos"]
     },
     {
       "id": "accion:nav:MainTab.MORE.route/crear-paquete-de-credito",
@@ -2207,7 +2207,7 @@
       "nombre": "Pantalla del cliente",
       "origen": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:1970",
       "quienLaVe": "«Ajustes» → «Pantalla del cliente»: «El cliente elige propina y calificación», «Kiosco de check-in», «Invertir pantallas» (app/src/main/java/com/avoqado/pos/settings/presentation/CustomerDisplaySheet.kt:118, 148, 184); útil en aparatos con segunda pantalla («Detectada», app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:1971).",
-      "paginas": []
+      "paginas": ["android/clientes/pantalla-del-cliente"]
     },
     {
       "id": "accion:nav:MainTab.MORE.route/personalizar-menu",
@@ -2720,7 +2720,7 @@
       "nombre": "Tu compra",
       "origen": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt:530",
       "quienLaVe": "Lo ve el cliente del negocio frente a la segunda pantalla, con el kiosco apagado (app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayPresentation.kt:76-84; app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayActivity.kt:97): el carrito y el total mientras se cobra, «Bienvenido» en reposo (app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt:286) y «¡Gracias por tu compra!» al final (:1104).",
-      "paginas": []
+      "paginas": ["android/clientes/pantalla-del-cliente"]
     },
     {
       "id": "accion:extra:pantalla-del-cliente/calificar-experiencia",
@@ -2728,7 +2728,7 @@
       "nombre": "¿Cómo estuvo tu experiencia?",
       "origen": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt:900",
       "quienLaVe": "el cliente del negocio frente a la segunda pantalla, con el kiosco apagado (app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayPresentation.kt:76-84; app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayActivity.kt:97) y con «El cliente elige propina y calificación» prendido en este aparato (app/src/main/java/com/avoqado/pos/settings/presentation/CustomerDisplaySheet.kt:118-123); mientras, la caja espera («El cliente está calificando», app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt:264-273).",
-      "paginas": []
+      "paginas": ["android/clientes/pantalla-del-cliente"]
     },
     {
       "id": "accion:extra:pantalla-del-cliente/dejar-propina",
@@ -2736,7 +2736,7 @@
       "nombre": "¿Deseas dejar propina?",
       "origen": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt:936",
       "quienLaVe": "el cliente del negocio frente a la segunda pantalla, con el kiosco apagado (app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayPresentation.kt:76-84; app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayActivity.kt:97) y con «El cliente elige propina y calificación» prendido en este aparato (app/src/main/java/com/avoqado/pos/settings/presentation/CustomerDisplaySheet.kt:118-123); mientras, la caja espera («El cliente está calificando», app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt:264-273); «Sin propina» (app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt:994).",
-      "paginas": []
+      "paginas": ["android/clientes/pantalla-del-cliente"]
     },
     {
       "id": "accion:extra:pantalla-del-cliente/agregar-sugerencia",
@@ -2744,7 +2744,7 @@
       "nombre": "Agregar",
       "origen": "app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt:781",
       "quienLaVe": "el cliente del negocio frente a la segunda pantalla, con el kiosco apagado (app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayPresentation.kt:76-84; app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayActivity.kt:97), cuando la caja ofrece «¿Algo más?» (app/src/main/java/com/avoqado/pos/customerdisplay/CustomerDisplayScreen.kt:746); «No, gracias» (:797).",
-      "paginas": []
+      "paginas": ["android/clientes/pantalla-del-cliente"]
     },
     {
       "id": "extra:que-hara-este-aparato",
@@ -2808,7 +2808,7 @@
       "nombre": "Tarjetas de regalo",
       "origen": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt:47",
       "quienLaVe": "Se abre sola al terminar una venta de tarjetas de regalo hecha en Cobrar (app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:394-401) y desde «Pedidos» al abrir una venta de tarjetas pagada (app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt:307-308; app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt:18-19). Sus botones piden red (app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt:55, 68). Aquí también salen «Cancelar venta» y «Liberar» (ver esas acciones en Más; app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt:23, 61-73).",
-      "paginas": []
+      "paginas": ["android/tarjetas-de-regalo/entregar-reenviar-o-imprimir-tarjeta-de-regalo"]
     },
     {
       "id": "accion:extra:tarjetas-de-regalo-de-la-venta/imprimir-tarjeta-de-regalo",
@@ -2816,7 +2816,7 @@
       "nombre": "Imprimir",
       "origen": "app/src/main/java/com/avoqado/pos/giftcards/presentation/TarjetaDeLaCuentaRow.kt:33",
       "quienLaVe": "Se abre sola al terminar una venta de tarjetas de regalo hecha en Cobrar (app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:394-401) y desde «Pedidos» al abrir una venta de tarjetas pagada (app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt:307-308; app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt:18-19). Sus botones piden red (app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt:55, 68); tarjetas que se entregan impresas o que se pueden revelar.",
-      "paginas": []
+      "paginas": ["android/tarjetas-de-regalo/entregar-reenviar-o-imprimir-tarjeta-de-regalo"]
     },
     {
       "id": "accion:extra:tarjetas-de-regalo-de-la-venta/mostrar-qr-de-tarjeta",
@@ -2824,7 +2824,7 @@
       "nombre": "Mostrar QR",
       "origen": "app/src/main/java/com/avoqado/pos/giftcards/presentation/TarjetaDeLaCuentaRow.kt:34",
       "quienLaVe": "Se abre sola al terminar una venta de tarjetas de regalo hecha en Cobrar (app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:394-401) y desde «Pedidos» al abrir una venta de tarjetas pagada (app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt:307-308; app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt:18-19). Sus botones piden red (app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt:55, 68); «Compartir liga» (app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt:82; app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt:58).",
-      "paginas": []
+      "paginas": ["android/tarjetas-de-regalo/entregar-reenviar-o-imprimir-tarjeta-de-regalo"]
     },
     {
       "id": "accion:extra:tarjetas-de-regalo-de-la-venta/reenviar-tarjeta-de-regalo",
@@ -2832,7 +2832,7 @@
       "nombre": "Reenviar",
       "origen": "app/src/main/java/com/avoqado/pos/giftcards/presentation/TarjetaDeLaCuentaRow.kt:36",
       "quienLaVe": "Se abre sola al terminar una venta de tarjetas de regalo hecha en Cobrar (app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:394-401) y desde «Pedidos» al abrir una venta de tarjetas pagada (app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt:307-308; app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt:18-19). Sus botones piden red (app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt:55, 68); tarjetas enviadas por WhatsApp o correo.",
-      "paginas": []
+      "paginas": ["android/tarjetas-de-regalo/entregar-reenviar-o-imprimir-tarjeta-de-regalo"]
     },
     {
       "id": "accion:extra:tarjetas-de-regalo-de-la-venta/cambiar-destino-de-tarjeta",
@@ -2840,7 +2840,7 @@
       "nombre": "Cambiar destino",
       "origen": "app/src/main/java/com/avoqado/pos/giftcards/presentation/TarjetaDeLaCuentaRow.kt:37",
       "quienLaVe": "Se abre sola al terminar una venta de tarjetas de regalo hecha en Cobrar (app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:394-401) y desde «Pedidos» al abrir una venta de tarjetas pagada (app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt:307-308; app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt:18-19). Sus botones piden red (app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt:55, 68); elige «WhatsApp» o «Correo» (app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt:88-92).",
-      "paginas": []
+      "paginas": ["android/tarjetas-de-regalo/cambiar-destino-de-tarjeta-de-regalo"]
     },
     {
       "id": "extra:cuenta-con-saldo-por-cobrar",
@@ -2960,7 +2960,7 @@
       "nombre": "Agregar otra tarjeta",
       "origen": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt:135",
       "quienLaVe": "en «Vender tarjeta» (Atajos › Tarjeta de regalo), con `giftCards:sell` (src/routes/mobile.routes.ts:1705); de fábrica CASHIER, MANAGER, ADMIN, OWNER (src/lib/permissions.ts:1001, 1146, 1256, 1415); hasta 20 tarjetas en la misma venta.",
-      "paginas": []
+      "paginas": ["android/tarjetas-de-regalo/vender-varias-tarjetas-de-regalo"]
     },
     {
       "id": "accion:nav:MainTab.CHECKOUT.route/quitar-tarjeta-de-regalo-de-la-venta",
@@ -2968,7 +2968,7 @@
       "nombre": "Quitar tarjeta",
       "origen": "app/src/main/java/com/avoqado/pos/giftcards/presentation/VenderTarjetaScreen.kt:131",
       "quienLaVe": "en «Vender tarjeta» (Atajos › Tarjeta de regalo), con `giftCards:sell` (src/routes/mobile.routes.ts:1705); de fábrica CASHIER, MANAGER, ADMIN, OWNER (src/lib/permissions.ts:1001, 1146, 1256, 1415); sólo con más de una tarjeta en la venta (`form.sobres.size > 1`).",
-      "paginas": []
+      "paginas": ["android/tarjetas-de-regalo/vender-varias-tarjetas-de-regalo"]
     },
     {
       "id": "extra:franja-de-pantallas-de-cocina",

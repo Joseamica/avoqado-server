@@ -1,0 +1,128 @@
+{
+  "pagina": "windows/tarjetas-de-regalo/cancelar-venta-de-tarjetas-de-regalo",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff",
+  "version": "2.25.58-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 596,
+      "cita": "label = \"Pedidos\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt",
+      "linea": 298,
+      "cita": "pedido.esCuentaDeTarjetas && pedido.orderPaymentStatus == PaymentStatus.PAID && !cobrando"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt",
+      "linea": 63,
+      "cita": "}) { Text(TextosDeTarjetas.CANCELAR_VENTA) }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 145,
+      "cita": "fun cancelarVentaConfirmacion(n: String, k: Int, xCents: Int) = if (k == 1) \"Venta #$n: se cancela su tarjeta (${formatMoneyFromCents(xCents)})\" else \"Venta #$n: se cancelan juntas sus $k tarjetas (${formatMoneyFromCents(xCents)})\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt",
+      "linea": 81,
+      "cita": "PrimaryButton(text=titulo,enabled=!ocupado && conectado && servidor && (!liberar || comprobado),onClick={"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt",
+      "linea": 87,
+      "cita": "if (!liberar && viewModel.roles.canIssueRefund) devolucion=viewModel.pagosPorDevolver.value.firstOrNull()"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt",
+      "linea": 105,
+      "cita": "puedeDevolverEnEfectivo=viewModel.roles.canRefundToCash,codigoDeEncargadoActivo=pinActivo,soloCompleto=true,"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt",
+      "linea": 109,
+      "cita": "if (devuelto) AvoqadoSuccessToast(message=\"¡Reembolso registrado!\",onDismiss={devuelto=false})"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt",
+      "linea": 68,
+      "cita": "}) { Text(\"Devolver completo · ${pago.methodDescription} · ${formatMoney(pago.remainingRefundable)}\") }"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 92,
+      "cita": "const val DEVUELVE_COMPLETO = \"Ahora devuelve completo cada cobro de esta venta.\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt",
+      "linea": 68,
+      "cita": "}) { Text(\"Devolver completo · ${pago.methodDescription} · ${formatMoney(pago.remainingRefundable)}\") }"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt",
+      "linea": 73,
+      "cita": "}) { Text(TextosDeTarjetas.LIBERAR) }"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 88,
+      "cita": "const val COMPROBE_NO_DEVUELTO = \"Comprobé que la devolución NO se hizo\""
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "giftCards:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasViewModel.kt",
+      "linea": 60
+    },
+    {
+      "permiso": "giftCards:manage",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 275
+    },
+    {
+      "permiso": "payments:refund",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt",
+      "linea": 70
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red no se cancela ni se libera",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt",
+      "linea": 58
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "El motivo por el que no se puede cancelar sale debajo del total",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/CuentaDeTarjetasScreen.kt",
+      "linea": 56
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

@@ -3461,7 +3461,7 @@
       "nombre": "Campañas de correo",
       "origen": "src/pages/Customers/Campaigns.tsx:44",
       "quienLaVe": "Permiso marketing:manage (src/routes/venueRoutes.tsx:619); por omisión ADMIN y OWNER. Plan: <FeatureGate feature=\"CUSTOMER_CAMPAIGNS\"> (src/pages/Customers/Campaigns.tsx:123).",
-      "paginas": []
+      "paginas": ["dashboard/clientes/campanas-de-correo"]
     },
     {
       "id": "accion:ruta:venue/campaigns/configurar-cumpleanos",
@@ -3469,7 +3469,7 @@
       "nombre": "Felicitación de cumpleaños: Configurar / Editar",
       "origen": "src/pages/Customers/components/BirthdayAutomationCard.tsx:122",
       "quienLaVe": "Permiso marketing:manage (src/pages/Customers/components/BirthdayAutomationCard.tsx:120); por omisión ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/campanas-de-correo"]
     },
     {
       "id": "accion:ruta:venue/campaigns/crear-campana",
@@ -3477,7 +3477,7 @@
       "nombre": "Nueva campaña",
       "origen": "src/pages/Customers/Campaigns.tsx:136",
       "quienLaVe": "Permiso marketing:manage (src/pages/Customers/Campaigns.tsx:133) y plan CUSTOMER_CAMPAIGNS; por omisión ADMIN y OWNER. Se guarda con «Guardar borrador» (src/pages/Customers/components/CampaignEditorModal.tsx:128).",
-      "paginas": []
+      "paginas": ["dashboard/clientes/campanas-de-correo"]
     },
     {
       "id": "accion:ruta:venue/campaigns/encender-cumpleanos",
@@ -3485,7 +3485,7 @@
       "nombre": "Encender la felicitación",
       "origen": "src/pages/Customers/components/BirthdayAutomationCard.tsx:174",
       "quienLaVe": "Permiso marketing:send (src/pages/Customers/components/BirthdayAutomationCard.tsx:170-171); por omisión ADMIN y OWNER; sin él sale «Pídele a un administrador que la encienda» (src/pages/Customers/components/BirthdayAutomationCard.tsx:177).",
-      "paginas": []
+      "paginas": ["dashboard/clientes/campanas-de-correo"]
     },
     {
       "id": "accion:ruta:venue/campaigns/enviar-campana",
@@ -3493,7 +3493,7 @@
       "nombre": "Enviar",
       "origen": "src/pages/Customers/components/CampaignEditorModal.tsx:135",
       "quienLaVe": "Permiso marketing:send (src/pages/Customers/components/CampaignEditorModal.tsx:132); por omisión ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/campanas-de-correo"]
     },
     {
       "id": "ruta:venue/cfdi",
@@ -3986,7 +3986,7 @@
       "nombre": "Aviso de privacidad",
       "origen": "src/pages/Customers/Customers.tsx:388",
       "quienLaVe": "Permiso marketing:manage (src/pages/Customers/Customers.tsx:385); por omisión ADMIN y OWNER. Es el mismo aviso de Configuración › local › privacidad (src/routes/venueRoutes.tsx:827-832).",
-      "paginas": []
+      "paginas": ["dashboard/clientes/aviso-de-privacidad"]
     },
     {
       "id": "accion:ruta:venue/customers/crear-cliente",
@@ -4010,7 +4010,7 @@
       "nombre": "Eliminar",
       "origen": "src/pages/Customers/Customers.tsx:355",
       "quienLaVe": "Permiso customers:delete (src/pages/Customers/Customers.tsx:352); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/eliminar-cliente-o-grupo"]
     },
     {
       "id": "accion:ruta:venue/customers/liquidar-saldo",
@@ -4026,7 +4026,7 @@
       "nombre": "Aprobar",
       "origen": "src/pages/Customers/components/CustomersAwaitingApproval.tsx:150",
       "quienLaVe": "La sección «En espera de aprobación» se monta en Clientes (src/pages/Customers/Customers.tsx:423), sólo con customers:approve y alguien en espera (src/pages/Customers/components/CustomersAwaitingApproval.tsx:48, :95-97). El SERVIDOR pide RESERVATIONS y customers:approve (avoqado-server/src/routes/dashboard.routes.ts:10608-10609).",
-      "paginas": []
+      "paginas": ["dashboard/clientes/aprobar-o-rechazar-clientes"]
     },
     {
       "id": "accion:ruta:venue/customers/rechazar-cliente",
@@ -4034,7 +4034,7 @@
       "nombre": "Rechazar",
       "origen": "src/pages/Customers/components/CustomersAwaitingApproval.tsx:159",
       "quienLaVe": "La sección «En espera de aprobación» se monta en Clientes (src/pages/Customers/Customers.tsx:423), sólo con customers:approve y alguien en espera (src/pages/Customers/components/CustomersAwaitingApproval.tsx:48, :95-97). El SERVIDOR pide RESERVATIONS y customers:approve (avoqado-server/src/routes/dashboard.routes.ts:10608-10609). Abre un cuadro con motivo y confirma con «Rechazar» (:229).",
-      "paginas": []
+      "paginas": ["dashboard/clientes/aprobar-o-rechazar-clientes"]
     },
     {
       "id": "ruta:venue/customers/:customerId",
@@ -4067,7 +4067,7 @@
       "nombre": "Eliminar",
       "origen": "src/pages/Customers/CustomerDetail.tsx:335",
       "quienLaVe": "Permiso customers:delete (src/pages/Customers/CustomerDetail.tsx:328); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/eliminar-cliente-o-grupo"]
     },
     {
       "id": "ruta:venue/customers/groups",
@@ -4100,7 +4100,7 @@
       "nombre": "Eliminar",
       "origen": "src/pages/Customers/CustomerGroups.tsx:175",
       "quienLaVe": "Permiso customer-groups:delete (src/pages/Customers/CustomerGroups.tsx:172); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/eliminar-cliente-o-grupo"]
     },
     {
       "id": "ruta:venue/delivery",
@@ -4568,15 +4568,23 @@
       "nombre": "Cancelar la venta",
       "origen": "src/pages/GiftCards/components/GiftCardManagerActions.tsx:726",
       "quienLaVe": "Permiso giftCards:manage (src/pages/GiftCards/components/GiftCardManagerActions.tsx:289); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/tarjetas-de-regalo/cancelar-venta-de-tarjetas-de-regalo"]
     },
     {
       "id": "accion:ruta:venue/gift-cards/reenviar-tarjeta",
       "tipo": "accion",
-      "nombre": "Reenviar / Cambiar destino",
+      "nombre": "Reenviar",
       "origen": "src/pages/GiftCards/components/GiftCardDelivery.tsx:326",
       "quienLaVe": "Permiso giftCards:manage (src/pages/GiftCards/components/GiftCardDelivery.tsx:314); sólo tarjetas digitales; por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/reenviar-tarjeta-de-regalo"]
+    },
+    {
+      "id": "accion:ruta:venue/gift-cards/cambiar-destino",
+      "tipo": "accion",
+      "nombre": "Cambiar destino",
+      "origen": "src/pages/GiftCards/components/GiftCardDelivery.tsx:339",
+      "quienLaVe": "Permiso giftCards:manage (src/pages/GiftCards/components/GiftCardDelivery.tsx:314); en una tarjeta activa que no está guardada en la tarjeta de un cliente (src/pages/GiftCards/components/GiftCardDelivery.tsx:287); por omisión MANAGER, ADMIN y OWNER. Repone el código: era parte de la fila «Reenviar» y se separó porque es de dinero (líneas de 501e3707).",
+      "paginas": ["dashboard/tarjetas-de-regalo/cambiar-destino-de-tarjeta-de-regalo"]
     },
     {
       "id": "accion:ruta:venue/gift-cards/reponer-codigo",
@@ -4591,8 +4599,8 @@
       "tipo": "accion",
       "nombre": "Vender tarjetas de regalo",
       "origen": "src/pages/Settings/components/giftCards/GiftCardsSwitch.tsx:89",
-      "quienLaVe": "Permiso giftCards:enable para cambiar el interruptor (src/pages/GiftCards/GiftCardsPage.tsx:65, src/pages/GiftCards/GiftCardsPage.tsx:132); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "quienLaVe": "Permiso giftCards:enable para cambiar el interruptor (src/pages/GiftCards/GiftCardsPage.tsx:65, src/pages/GiftCards/GiftCardsPage.tsx:132); por omisión ADMIN y OWNER (el gerente no lo trae: src/lib/permissions.ts del SERVIDOR, giftCards:* sólo en ADMIN y OWNER).",
+      "paginas": ["dashboard/clientes/prender-y-configurar-tarjetas-de-regalo"]
     },
     {
       "id": "ruta:venue/home",
@@ -5133,7 +5141,7 @@
       "nombre": "Guardar cambios",
       "origen": "src/pages/Loyalty/WalletCardDesigner.tsx:287",
       "quienLaVe": "Permiso loyalty:update (src/pages/Loyalty/WalletCardDesigner.tsx:279); por omisión MANAGER, ADMIN y OWNER. Incluye logo, imagen y colores (src/pages/Loyalty/WalletCardDesigner.tsx:452-587).",
-      "paginas": []
+      "paginas": ["dashboard/clientes/disenar-tarjeta-digital"]
     },
     {
       "id": "ruta:venue/menumaker",
@@ -6045,7 +6053,7 @@
       "nombre": "Quitar descuento",
       "origen": "src/pages/PaymentLinks/PaymentLinks.tsx:650",
       "quienLaVe": "Permiso payment-link:update (src/pages/PaymentLinks/PaymentLinks.tsx:375); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/ligas-de-pago/quitar-descuento-de-liga-de-pago"]
     },
     {
       "id": "ruta:venue/payment-links/branding",
@@ -6213,7 +6221,7 @@
       "nombre": "Añadir cliente / Editar cliente",
       "origen": "src/pages/Payment/PaymentDrawerContent.tsx:322",
       "quienLaVe": "Todos los que abren el pago (payments:read); sólo si el pago tiene un pedido (src/pages/Payment/PaymentDrawerContent.tsx:241, src/pages/Payment/PaymentDrawerContent.tsx:94).",
-      "paginas": []
+      "paginas": ["dashboard/ventas/ligar-cliente-a-un-pago"]
     },
     {
       "id": "ruta:venue/payments/exchanges",
@@ -6314,7 +6322,7 @@
       "nombre": "Eliminar Cupón",
       "origen": "src/pages/Promotions/Coupons.tsx:260",
       "quienLaVe": "Permiso coupons:delete (src/pages/Promotions/Coupons.tsx:257); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/generar-o-eliminar-cupones"]
     },
     {
       "id": "accion:ruta:venue/promotions/coupons/generar-cupones",
@@ -6322,7 +6330,7 @@
       "nombre": "Generar en Masa",
       "origen": "src/pages/Promotions/Coupons.tsx:293",
       "quienLaVe": "Permiso coupons:create (src/pages/Promotions/Coupons.tsx:288); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/generar-o-eliminar-cupones"]
     },
     {
       "id": "ruta:venue/promotions/coupons/:couponId",
@@ -6373,7 +6381,7 @@
       "nombre": "Clonar",
       "origen": "src/pages/Promotions/Discounts.tsx:322",
       "quienLaVe": "Permiso discounts:create (src/pages/Promotions/Discounts.tsx:316); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/editar-clonar-o-eliminar-descuento"]
     },
     {
       "id": "accion:ruta:venue/promotions/discounts/crear-descuento",
@@ -6389,7 +6397,7 @@
       "nombre": "Editar",
       "origen": "src/pages/Promotions/Discounts.tsx:313",
       "quienLaVe": "Permiso discounts:update (src/pages/Promotions/Discounts.tsx:310); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/editar-clonar-o-eliminar-descuento"]
     },
     {
       "id": "accion:ruta:venue/promotions/discounts/eliminar-descuento",
@@ -6397,7 +6405,7 @@
       "nombre": "Eliminar Descuento",
       "origen": "src/pages/Promotions/Discounts.tsx:329",
       "quienLaVe": "Permiso discounts:delete (src/pages/Promotions/Discounts.tsx:326); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/editar-clonar-o-eliminar-descuento"]
     },
     {
       "id": "ruta:venue/promotions/discounts/:discountId",
@@ -6414,7 +6422,7 @@
       "nombre": "Editar",
       "origen": "src/pages/Promotions/Discounts/DiscountDetail.tsx:191",
       "quienLaVe": "Permiso discounts:update (src/pages/Promotions/Discounts/DiscountDetail.tsx:190); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/editar-clonar-o-eliminar-descuento"]
     },
     {
       "id": "ruta:venue/promotions/discounts/create",
@@ -6440,7 +6448,7 @@
       "nombre": "Sugerencias al cobrar",
       "origen": "src/pages/Promotions/Upsell.tsx:885",
       "quienLaVe": "Permiso upsells:read (src/routes/venueRoutes.tsx:766); por omisión VIEWER, WAITER, CASHIER, MANAGER, ADMIN y OWNER. Plan: <FeatureGate feature=\"UPSELL\"> (src/pages/Promotions/Upsell.tsx:892).",
-      "paginas": []
+      "paginas": ["dashboard/clientes/sugerencias-al-cobrar"]
     },
     {
       "id": "accion:ruta:venue/promotions/upsell/activar-sugerencia",
@@ -6448,7 +6456,7 @@
       "nombre": "Activar",
       "origen": "src/pages/Promotions/Upsell.tsx:725",
       "quienLaVe": "Permiso upsells:update (src/pages/Promotions/Upsell.tsx:714); por omisión MANAGER, ADMIN y OWNER. Junto está descartar/borrar (src/pages/Promotions/Upsell.tsx:727-732).",
-      "paginas": []
+      "paginas": ["dashboard/clientes/sugerencias-al-cobrar"]
     },
     {
       "id": "accion:ruta:venue/promotions/upsell/crear-sugerencia",
@@ -6456,7 +6464,7 @@
       "nombre": "Nueva",
       "origen": "src/pages/Promotions/Upsell.tsx:861",
       "quienLaVe": "Permiso upsells:create (src/pages/Promotions/Upsell.tsx:856); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/sugerencias-al-cobrar"]
     },
     {
       "id": "accion:ruta:venue/promotions/upsell/donde-se-ofrece",
@@ -6464,7 +6472,7 @@
       "nombre": "En el mostrador / Cuando el mesero toma la orden / Cuando el cliente paga su mesa en caja",
       "origen": "src/pages/Promotions/Upsell.tsx:264",
       "quienLaVe": "Permiso upsells:update (src/pages/Promotions/Upsell.tsx:258); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/sugerencias-al-cobrar"]
     },
     {
       "id": "accion:ruta:venue/promotions/upsell/generar-con-ia",
@@ -6472,7 +6480,7 @@
       "nombre": "Generar con IA",
       "origen": "src/pages/Promotions/Upsell.tsx:812",
       "quienLaVe": "Permiso upsells:create (src/pages/Promotions/Upsell.tsx:856-858); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/sugerencias-al-cobrar"]
     },
     {
       "id": "ruta:venue/referrals",
@@ -6481,7 +6489,7 @@
       "nombre": "Programa de Referidos",
       "origen": "src/pages/Referrals/ReferralsSettings.tsx:161",
       "quienLaVe": "Permiso referral:read (src/routes/venueRoutes.tsx:703); por omisión VIEWER, HOST, WAITER, CASHIER, MANAGER, ADMIN y OWNER. Plan: <FeatureGate feature=\"REFERRAL_PROGRAM\"> (src/pages/Referrals/ReferralsSettings.tsx:296).",
-      "paginas": []
+      "paginas": ["dashboard/clientes/programa-de-referidos"]
     },
     {
       "id": "accion:ruta:venue/referrals/activar-referidos",
@@ -6489,7 +6497,7 @@
       "nombre": "Activar programa de referidos",
       "origen": "src/pages/Referrals/ReferralsSettings.tsx:694",
       "quienLaVe": "Permiso referral:configure (src/pages/Referrals/ReferralsSettings.tsx:547, src/pages/Referrals/ReferralsSettings.tsx:681); por omisión ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/programa-de-referidos"]
     },
     {
       "id": "accion:ruta:venue/referrals/editar-nivel",
@@ -6497,7 +6505,7 @@
       "nombre": "Editar nivel",
       "origen": "src/pages/Referrals/ReferralsSettings.tsx:408",
       "quienLaVe": "Permiso referral:configure (src/pages/Referrals/ReferralsSettings.tsx:399); por omisión ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/programa-de-referidos"]
     },
     {
       "id": "accion:ruta:venue/referrals/pausar-referidos",
@@ -6505,7 +6513,7 @@
       "nombre": "Pausar programa",
       "origen": "src/pages/Referrals/ReferralsSettings.tsx:358",
       "quienLaVe": "Permiso referral:configure (src/pages/Referrals/ReferralsSettings.tsx:350); por omisión ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/programa-de-referidos"]
     },
     {
       "id": "ruta:venue/reports/home-charts",
@@ -6565,7 +6573,7 @@
       "nombre": "Promociones",
       "origen": "src/pages/Reports/PromotionSales.tsx:62",
       "quienLaVe": "La ruta no tiene candado de permiso (src/routes/venueRoutes.tsx:320-323); en el menú pide reports:read (src/components/Sidebar/app-sidebar.tsx:934). Plan: <FeatureGate feature=\"PROMOTIONS\"> (src/pages/Reports/PromotionSales.tsx:177).",
-      "paginas": []
+      "paginas": ["dashboard/reportes/reporte-de-promociones"]
     },
     {
       "id": "ruta:venue/reports/refunds",
@@ -7232,7 +7240,7 @@
       "nombre": "Tarjetas de regalo",
       "origen": "src/pages/Settings/GiftCardSettings.tsx:26",
       "quienLaVe": "Permiso giftCards:read (src/routes/venueRoutes.tsx:963); por omisión CASHIER, MANAGER, ADMIN y OWNER, en sólo lectura sin giftCards:manage (src/pages/Settings/GiftCardSettings.tsx:30, src/pages/Settings/GiftCardSettings.tsx:43). Plan: <FeatureGate> de GIFT_CARDS si está apagado y sin plan (src/pages/Settings/GiftCardSettings.tsx:99).",
-      "paginas": []
+      "paginas": ["dashboard/clientes/prender-y-configurar-tarjetas-de-regalo"]
     },
     {
       "id": "accion:ruta:venue/settings/gift-cards/guardar-reglas",
@@ -7240,15 +7248,15 @@
       "nombre": "Guardar (reglas de venta y términos)",
       "origen": "src/pages/Settings/components/giftCards/GiftCardRulesForm.tsx:187",
       "quienLaVe": "Permiso giftCards:manage (src/pages/Settings/GiftCardSettings.tsx:78); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "paginas": ["dashboard/clientes/prender-y-configurar-tarjetas-de-regalo"]
     },
     {
       "id": "accion:ruta:venue/settings/gift-cards/vender-tarjetas",
       "tipo": "accion",
       "nombre": "Vender tarjetas de regalo",
       "origen": "src/pages/Settings/components/giftCards/GiftCardsSwitch.tsx:89",
-      "quienLaVe": "Permiso giftCards:enable (src/pages/Settings/GiftCardSettings.tsx:77); por omisión MANAGER, ADMIN y OWNER.",
-      "paginas": []
+      "quienLaVe": "Permiso giftCards:enable (src/pages/Settings/GiftCardSettings.tsx:77); por omisión ADMIN y OWNER (el gerente no lo trae: src/lib/permissions.ts del SERVIDOR, giftCards:* sólo en ADMIN y OWNER).",
+      "paginas": ["dashboard/clientes/prender-y-configurar-tarjetas-de-regalo"]
     },
     {
       "id": "ruta:venue/settings/integrations",
@@ -8117,7 +8125,7 @@
       "nombre": "Nuevo Grupo de Clientes — en el formulario del cliente",
       "origen": "src/pages/Customers/components/CustomerForm.tsx:323",
       "quienLaVe": "Quien da de alta o edita un cliente (customers:create o customers:update); sin candado en la pantalla; el SERVIDOR pide customer-groups:create (dashboard.routes.ts:10834).",
-      "paginas": []
+      "paginas": ["dashboard/clientes/asignar-grupo-a-un-cliente"]
     },
     {
       "id": "accion:ruta:venue/promotions/coupons/create/crear-descuento",
@@ -8125,7 +8133,7 @@
       "nombre": "Crear Descuento — en la lista de Descuento Padre del cupón",
       "origen": "src/pages/Promotions/components/CreateDiscountDialog.tsx:147",
       "quienLaVe": "Quien crea o edita un cupón (coupons:create, src/pages/Promotions/Coupons.tsx:315; PROMOTIONS); el SERVIDOR pide discounts:create (dashboard.routes.ts:11721).",
-      "paginas": []
+      "paginas": ["dashboard/promociones/crear-o-editar-cupon", "dashboard/clientes/editar-clonar-o-eliminar-descuento"]
     },
     {
       "id": "accion:ruta:venue/team/:memberId/asignar-puesto",
@@ -8237,7 +8245,7 @@
       "nombre": "Liberar (cancelación de la venta en curso)",
       "origen": "src/pages/GiftCards/components/GiftCardManagerActions.tsx:684",
       "quienLaVe": "Permiso giftCards:manage (src/pages/GiftCards/components/GiftCardManagerActions.tsx:671) y una venta de tarjetas en cancelación (src/pages/GiftCards/giftCardText.ts:256).",
-      "paginas": []
+      "paginas": ["dashboard/tarjetas-de-regalo/cancelar-venta-de-tarjetas-de-regalo"]
     },
     {
       "id": "accion:ruta:venue/cfdi/confirmar-iva-incluido",
@@ -8269,7 +8277,7 @@
       "nombre": "Ajustar sellos",
       "origen": "src/pages/Customers/components/StampCardSection.tsx:142",
       "quienLaVe": "Permiso loyalty:adjust (src/pages/Customers/components/StampCardSection.tsx:140), en la ficha del cliente con la tarjeta de sellos prendida (src/pages/Customers/CustomerDetail.tsx:487); el servidor pide loyalty:adjust y LOYALTY_PROGRAM (avoqado-server src/routes/dashboard.routes.ts:11477, :11005).",
-      "paginas": []
+      "paginas": ["dashboard/clientes/ajustar-sellos-de-un-cliente"]
     },
     {
       "id": "accion:ruta:venue/inventory/recipes/eliminar-receta",
@@ -8301,7 +8309,7 @@
       "nombre": "+ Crear cliente — en el formulario de cita",
       "origen": "src/pages/Reservations/CreateReservation.tsx:534",
       "quienLaVe": "Quien abre Crear › Cita (reservations:create, src/pages/Reservations/Reservations.tsx:274; también desde el Calendario). Abre el formulario de clientes (CreateReservation.tsx:908); el servidor pide customers:create (avoqado-server src/routes/dashboard.routes.ts:10427). Al terminar no deja elegido al cliente (CreateReservation.tsx:911-913).",
-      "paginas": []
+      "paginas": ["dashboard/reservaciones/crear-cita", "dashboard/clientes/agregar-o-editar-cliente"]
     },
     {
       "id": "accion:ruta:venue/reservations/crear-servicio-desde-cita",
