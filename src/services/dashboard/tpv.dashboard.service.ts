@@ -247,7 +247,9 @@ export async function getTpvById(
   tpvId: string,
 ): Promise<
   DeviceManagementDto<
-    Terminal & { fulfillmentArea: { id: string; name: string; sendsComanda: boolean; active: boolean; fulfillmentMode: FulfillmentMode } | null }
+    Terminal & {
+      fulfillmentArea: { id: string; name: string; sendsComanda: boolean; active: boolean; fulfillmentMode: FulfillmentMode } | null
+    }
   > &
     ExtrasDeLaFicha
 > {
@@ -267,6 +269,8 @@ export async function getTpvById(
     },
     // Aparatos claros: el área que emite y si manda comanda, para el letrero de arriba de la ficha (campo nuevo, opcional).
     include: { fulfillmentArea: { select: { id: true, name: true, sendsComanda: true, active: true, fulfillmentMode: true } } },
+    // Cómo dibuja el POS de Windows (hz:a5fa2439:D1), tal cual está guardado: sólo esta ficha lo pide; el cliente lo omite en las demás.
+    omit: { deviceDiagnostics: false },
   })
 
   // 3. Verificar si la terminal existe

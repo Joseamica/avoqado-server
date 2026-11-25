@@ -2,7 +2,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { esEsperaDeLaBase, guardarDiagnostico, type DeviceDiagnostics } from '@/services/mobile/deviceDiagnostics'
-import { getTerminalsData, updateTpv } from '@/services/dashboard/tpv.dashboard.service'
+import { getTerminalsData, getTpvById, updateTpv } from '@/services/dashboard/tpv.dashboard.service'
 import { getTerminalForOrg } from '@/services/organization-dashboard/orgTerminals.service'
 import { getAllTerminals, getTerminalById } from '@/services/dashboard/terminals.superadmin.service'
 
@@ -199,5 +199,20 @@ describe('contrato: lo que ya devuelven las pantallas no trae el reporte', () =>
         marca: false,
       })
     }
+  })
+
+  it('la ficha de UN aparato sí lo trae, tal cual está guardado (con su marca interna)', async () => {
+    await guardarDiagnostico(posId, reporte(A, 7, { cpu: MARCA }), T1)
+    await guardarDiagnostico(posId, reporte(B, 1, { cpu: MARCA }), T2)
+    const guardado = (await leer()).deviceDiagnostics
+    expect(guardado).toMatchObject({ proc: B, prevProc: A })
+
+    const ficha = await getTpvById(venueId, posId)
+    expect(ficha.id).toBe(posId)
+    expect(ficha.deviceDiagnostics).toEqual(guardado)
+
+    // Sin reporte, la ficha lo dice con null (no lo esconde).
+    await poner(Prisma.DbNull)
+    expect((await getTpvById(venueId, posId)).deviceDiagnostics).toBeNull()
   })
 })

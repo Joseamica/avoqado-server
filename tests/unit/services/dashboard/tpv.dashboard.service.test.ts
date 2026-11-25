@@ -3,7 +3,14 @@ import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { getVenueTpvSettings, updateVenueTpvSettings, computeOverrides, updateTpv } from '@/services/dashboard/tpv.dashboard.service'
+import {
+  computeOverrides,
+  getTerminalsData,
+  getTpvById,
+  getVenueTpvSettings,
+  updateTpv,
+  updateVenueTpvSettings,
+} from '@/services/dashboard/tpv.dashboard.service'
 
 const venueId = 'venue-123'
 const orgId = 'org-456'
@@ -651,5 +658,51 @@ describe('updateVenueTpvSettings — el negocio y sus terminales se guardan junt
 
     expect(result).toMatchObject({ terminalsUpdated: 0, terminalsOmitted: 0 })
     expect(logger.warn).not.toHaveBeenCalled()
+  })
+})
+
+// hz:a5fa2439:D1 — el reporte de dibujo del POS de Windows vive en una columna que el cliente de Prisma omite por defecto.
+// Sólo la ficha de UN aparato la pide; la lista y la respuesta de editar siguen sin ella (lo de verdad, contra la base:
+// tests/integration/devices/deviceDiagnostics.integration.test.ts).
+describe('ficha del aparato — el reporte de dibujo del POS de Windows', () => {
+  const REPORTE = {
+    proc: '3fa9c1d2',
+    rev: 2,
+    api: 'SOFTWARE_FAST',
+    paintMs: 712,
+    performance: 'LIGHT',
+    drawingMode: 'FAST',
+    forced: true,
+    failed: false,
+    manual: false,
+    receivedAt: '2026-11-25T18:00:00.000Z',
+    prevProc: 'aaaaaaaa',
+  }
+  const pc = { id: 'pos-1', venueId, name: 'Caja PC', type: 'POS_ANDROID', version: '2.26.0' }
+
+  it('la ficha pide la columna y la devuelve tal cual está guardada', async () => {
+    prismaMock.terminal.findFirst.mockResolvedValue({ ...pc, deviceDiagnostics: REPORTE } as any)
+
+    const ficha = await getTpvById(venueId, 'pos-1')
+
+    expect(prismaMock.terminal.findFirst).toHaveBeenCalledWith(expect.objectContaining({ omit: { deviceDiagnostics: false } }))
+    expect(ficha.deviceDiagnostics).toEqual(REPORTE)
+  })
+
+  it('la lista y editar un aparato no la piden', async () => {
+    prismaMock.$transaction.mockResolvedValueOnce([[], 0] as any)
+    prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
+    await getTerminalsData(venueId, 1, 20, {})
+
+    prismaMock.terminal.findFirst.mockResolvedValue(pc as any)
+    prismaMock.terminal.update.mockResolvedValue(pc as any)
+    await updateTpv(venueId, 'pos-1', { name: 'Caja 2' })
+
+    for (const llamada of [...prismaMock.terminal.findMany.mock.calls, ...prismaMock.terminal.update.mock.calls]) {
+      expect(llamada[0]).not.toHaveProperty('omit')
+      expect(llamada[0]).not.toHaveProperty('select.deviceDiagnostics')
+    }
+    expect(prismaMock.terminal.findMany).toHaveBeenCalled()
+    expect(prismaMock.terminal.update).toHaveBeenCalled()
   })
 })
