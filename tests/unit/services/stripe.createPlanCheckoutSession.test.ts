@@ -211,7 +211,14 @@ describe('🔴 Codex C3: se abre bajo el candado de la regla', () => {
     expect(conPrueba.subscription_data.trial_end).toBe(Math.floor(fin.getTime() / 1000))
     expect(conPrueba.allow_promotion_codes).toBe(false)
 
-    await createPlanCheckoutSession({ venueId: 'v1', customerId: 'cus_1', interval: 'monthly', successUrl: 's', cancelUrl: 'c' })
+    await createPlanCheckoutSession({
+      venueId: 'v1',
+      customerId: 'cus_1',
+      priceId: 'price_cotizado',
+      interval: 'monthly',
+      successUrl: 's',
+      cancelUrl: 'c',
+    })
     const normal = mockSessionCreate.mock.calls[1][0]
     expect(normal.subscription_data.trial_end).toBeUndefined()
     expect(normal.allow_promotion_codes).toBe(true)
