@@ -163,7 +163,9 @@ describe('D34 · el detalle del pago trae `customerUnlink`', () => {
 
   it('con venta cobrada y cliente: no se puede quitar, con su código', async () => {
     preparar({ status: 'COMPLETED', paymentStatus: 'PAID', customerId: 'cust-A', cobrado: 100 })
-    prismaMock.payment.findFirst.mockResolvedValueOnce(pago({ orderId: ORDER, order: { id: ORDER, items: [] } }) as any)
+    prismaMock.payment.findFirst.mockResolvedValueOnce(
+      pago({ orderId: ORDER, order: { id: ORDER, customerId: 'cust-A', items: [] } }) as any,
+    )
     sinCobradoPorRenglon()
     const r: any = await getPaymentById(VENUE, 'pay-1')
     expect(r.customerUnlink).toEqual({ allowed: false, code: 'SALE_CUSTOMER_ALREADY_ASSIGNED', reason: expect.any(String) })
@@ -171,7 +173,9 @@ describe('D34 · el detalle del pago trae `customerUnlink`', () => {
 
   it('el total y los cobros se leen en una sola foto de la base (REPEATABLE READ)', async () => {
     preparar({ status: 'PENDING', paymentStatus: 'PARTIAL', customerId: 'cust-A', cobrado: 40 })
-    prismaMock.payment.findFirst.mockResolvedValueOnce(pago({ orderId: ORDER, order: { id: ORDER, items: [] } }) as any)
+    prismaMock.payment.findFirst.mockResolvedValueOnce(
+      pago({ orderId: ORDER, order: { id: ORDER, customerId: 'cust-A', items: [] } }) as any,
+    )
     sinCobradoPorRenglon()
     await getPaymentById(VENUE, 'pay-1')
     expect(prismaMock.$transaction).toHaveBeenCalledWith(
@@ -182,7 +186,9 @@ describe('D34 · el detalle del pago trae `customerUnlink`', () => {
 
   it('con cuenta abierta: se puede quitar', async () => {
     preparar({ status: 'PENDING', paymentStatus: 'PARTIAL', customerId: 'cust-A', cobrado: 40 })
-    prismaMock.payment.findFirst.mockResolvedValueOnce(pago({ orderId: ORDER, order: { id: ORDER, items: [] } }) as any)
+    prismaMock.payment.findFirst.mockResolvedValueOnce(
+      pago({ orderId: ORDER, order: { id: ORDER, customerId: 'cust-A', items: [] } }) as any,
+    )
     sinCobradoPorRenglon()
     const r: any = await getPaymentById(VENUE, 'pay-1')
     expect(r.customerUnlink).toEqual({ allowed: true })
@@ -190,7 +196,9 @@ describe('D34 · el detalle del pago trae `customerUnlink`', () => {
 
   it('🔴 si la lectura del campo falla, el detalle del pago responde igual y el campo dice que no se pudo revisar', async () => {
     preparar({ status: 'COMPLETED', paymentStatus: 'PAID', customerId: 'cust-A', cobrado: 100 })
-    prismaMock.payment.findFirst.mockResolvedValueOnce(pago({ orderId: ORDER, order: { id: ORDER, items: [] } }) as any)
+    prismaMock.payment.findFirst.mockResolvedValueOnce(
+      pago({ orderId: ORDER, order: { id: ORDER, customerId: 'cust-A', items: [] } }) as any,
+    )
     sinCobradoPorRenglon()
     prismaMock.order.findFirst.mockRejectedValue(new Error('P1001 la base no contestó'))
     const r: any = await getPaymentById(VENUE, 'pay-1')
@@ -200,6 +208,16 @@ describe('D34 · el detalle del pago trae `customerUnlink`', () => {
       code: 'CUSTOMER_UNLINK_UNKNOWN',
       reason: expect.stringMatching(/No se pudo revisar/),
     })
+  })
+
+  it('una venta sin cliente en la cabecera: no trae el campo y no hace lecturas de más', async () => {
+    preparar({ status: 'COMPLETED', paymentStatus: 'PAID', customerId: null, cobrado: 100 })
+    prismaMock.payment.findFirst.mockResolvedValueOnce(pago({ orderId: ORDER, order: { id: ORDER, customerId: null, items: [] } }) as any)
+    sinCobradoPorRenglon()
+    const r: any = await getPaymentById(VENUE, 'pay-1')
+    expect(r).not.toHaveProperty('customerUnlink')
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.orderCustomer.findFirst).not.toHaveBeenCalled()
   })
 
   it('regresión: un pago sin venta no trae el campo y responde como antes', async () => {
