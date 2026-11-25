@@ -322,7 +322,7 @@
       ]
     },
     "dashboard/clientes/campanas-de-correo": {
-      "sha256": "a9b76920b946657b55e0b875c7fc8055fb16b825ddd1fdeee301a878d59dafc2",
+      "sha256": "f4527631bf3285ad95f56bb42186e22accf6d475bf751569879830d206d812ef",
       "requiredPermissions": [
         "marketing:manage"
       ],
@@ -423,7 +423,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/reenviar-tarjeta-de-regalo": {
-      "sha256": "677217b0e0d0edb92ee83699b128cfcfc4555bd1fa181af7437206540b27ace9",
+      "sha256": "2b9e03367441fb74e01272ced73ee46dac1525f63c329d780bc784ff5f373e3b",
       "requiredPermissions": [
         "giftCards:read",
         "giftCards:manage"

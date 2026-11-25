@@ -40,7 +40,7 @@ Mandarla a **otro** teléfono o correo es **Cambiar destino**, junto a **Reenvia
 
 ## Problemas frecuentes
 
-- **«WhatsApp todavía no está disponible para tarjetas…»:** desde el panel, cambia el destino a un correo (eso repone el código). Imprimirla o enseñar su QR se hace desde la venta, en el POS.
+- **«WhatsApp todavía no está disponible para tarjetas…»:** desde el panel, si la tarjeta todavía no se ha usado, cambia el destino a un correo (eso repone el código). Imprimirla o enseñar su QR se hace desde la venta, en el POS; después del día de la venta, el cajero necesita la autorización de un gerente.
 - **«WhatsApp avisó que el mensaje no llegó a ese teléfono.»:** revisa el número; si está mal, hay que cambiar el destino.
 - **«El correo de quien la recibe no es válido.»:** hay que cambiar el destino a un correo bueno.
 - **«No supimos si salió el envío. Reenvíala para estar seguros.»:** toca **Reenviar**.
