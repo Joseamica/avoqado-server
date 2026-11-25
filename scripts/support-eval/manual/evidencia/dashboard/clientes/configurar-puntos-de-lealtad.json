@@ -1,13 +1,13 @@
 {
   "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
   "sourceRepo": "avoqado-web-dashboard",
-  "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a",
+  "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354",
   "version": "main",
   "pasos": [
     {
       "paso": 1,
       "archivo": "src/components/Sidebar/app-sidebar.tsx",
-      "linea": 1277,
+      "linea": 1242,
       "cita": "title: t('sidebar:customersMenu.title'),"
     },
     {
@@ -19,7 +19,7 @@
     {
       "paso": 1,
       "archivo": "src/components/Sidebar/app-sidebar.tsx",
-      "linea": 746,
+      "linea": 762,
       "cita": "title: t('sidebar:customersMenu.loyalty'),"
     },
     {
@@ -31,7 +31,7 @@
     {
       "paso": 1,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 276,
+      "linea": 311,
       "cita": "<h3 className=\"font-semibold text-sm\">{t('settings.status.label')}</h3>"
     },
     {
@@ -43,7 +43,7 @@
     {
       "paso": 1,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 291,
+      "linea": 326,
       "cita": "<Switch checked={watchedActive} onCheckedChange={checked => setValue('active', checked, { shouldDirty: true })} />"
     },
     {
@@ -55,7 +55,7 @@
     {
       "paso": 2,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 300,
+      "linea": 335,
       "cita": "title={t('settings.earning.title')}"
     },
     {
@@ -67,7 +67,7 @@
     {
       "paso": 2,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 306,
+      "linea": 341,
       "cita": "label={t('settings.earning.pointsPerDollar.label')}"
     },
     {
@@ -79,104 +79,110 @@
     {
       "paso": 2,
       "archivo": "src/locales/es/loyalty.json",
-      "linea": 21,
+      "linea": 24,
       "cita": "\"label\": \"Puntos Bonus por Visita\","
     },
     {
       "paso": 3,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 329,
+      "linea": 374,
       "cita": "title={t('settings.redemption.title')}"
     },
     {
       "paso": 3,
       "archivo": "src/locales/es/loyalty.json",
-      "linea": 27,
+      "linea": 30,
       "cita": "\"title\": \"Reglas de Canje\","
     },
     {
       "paso": 3,
       "archivo": "src/locales/es/loyalty.json",
-      "linea": 30,
+      "linea": 33,
       "cita": "\"label\": \"Tasa de Canje\","
     },
     {
       "paso": 3,
       "archivo": "src/locales/es/loyalty.json",
-      "linea": 31,
+      "linea": 34,
       "cita": "\"description\": \"Cuánto vale cada punto al canjearlo\","
     },
     {
       "paso": 3,
       "archivo": "src/locales/es/loyalty.json",
-      "linea": 36,
+      "linea": 39,
       "cita": "\"label\": \"Mínimo de Puntos para Canjear\","
     },
     {
       "paso": 4,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 369,
+      "linea": 414,
       "cita": "title={t('settings.expiration.title')}"
     },
     {
       "paso": 4,
       "archivo": "src/locales/es/loyalty.json",
-      "linea": 42,
+      "linea": 45,
       "cita": "\"title\": \"Expiración de Puntos\","
     },
     {
       "paso": 4,
       "archivo": "src/locales/es/loyalty.json",
-      "linea": 45,
+      "linea": 48,
       "cita": "\"label\": \"Habilitar Expiración\","
     },
     {
       "paso": 4,
       "archivo": "src/locales/es/loyalty.json",
-      "linea": 49,
+      "linea": 52,
       "cita": "\"label\": \"Días Hasta Expiración\","
     },
     {
       "paso": 4,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 170,
-      "cita": "pointsExpireDays: enableExpiration ? data.pointsExpireDays : null,"
+      "linea": 191,
+      "cita": "...(dirtyFields.pointsExpireDays ? { pointsExpireDays: enableExpiration ? data.pointsExpireDays : null } : {}),"
     },
     {
       "paso": 5,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 494,
+      "linea": 558,
       "cita": "t('settings.save')"
     },
     {
       "paso": 5,
       "archivo": "src/locales/es/loyalty.json",
-      "linea": 55,
+      "linea": 62,
       "cita": "\"save\": \"Guardar Cambios\","
     },
     {
       "paso": 5,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 173,
+      "linea": 194,
       "cita": "toast({ title: t('settings.toasts.updateSuccess') })"
     },
     {
       "paso": 5,
       "archivo": "src/locales/es/loyalty.json",
-      "linea": 58,
+      "linea": 65,
       "cita": "\"updateSuccess\": \"Configuración de lealtad actualizada exitosamente\","
+    },
+    {
+      "paso": 5,
+      "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
+      "linea": 549,
+      "cita": "data-testid=\"loyalty-save-bar\""
     }
   ],
   "permisos": [
     {
       "permiso": "loyalty:read",
       "archivo": "src/routes/venueRoutes.tsx",
-      "linea": 693
+      "linea": 709
     },
     {
       "permiso": "loyalty:update",
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 486
+      "linea": 546
     },
     {
       "permiso": "loyalty:update",
@@ -188,7 +194,7 @@
     {
       "featureCode": "LOYALTY_PROGRAM",
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 229
+      "linea": 264
     },
     {
       "featureCode": "LOYALTY_PROGRAM",
@@ -201,32 +207,42 @@
     {
       "ruta": "Problema: Guardar Cambios apagado sin cambios",
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 487
+      "linea": 551
     },
     {
       "ruta": "Problema: sin el plan no suma",
       "archivo": "avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts",
-      "linea": 303
+      "linea": 330
     },
     {
       "ruta": "Problema: inactivo no suma puntos",
       "archivo": "avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts",
-      "linea": 317
+      "linea": 344
     },
     {
       "ruta": "Problema: los sellos se dan después de esa salida",
       "archivo": "avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts",
-      "linea": 349
+      "linea": 377
     },
     {
       "ruta": "Problema: sumar pide al cliente",
       "archivo": "avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts",
-      "linea": 295
+      "linea": 322
     },
     {
       "ruta": "Problema: texto",
       "archivo": "src/locales/es/loyalty.json",
       "linea": 9
+    },
+    {
+      "ruta": "Problema: los puntos vencen por inactividad",
+      "archivo": "avoqado-server/src/services/loyalty/vencimientoDePuntos.ts",
+      "linea": 103
+    },
+    {
+      "ruta": "Problema: los días cuentan desde que se prende o se acorta",
+      "archivo": "avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts",
+      "linea": 181
     }
   ],
   "aparato": {

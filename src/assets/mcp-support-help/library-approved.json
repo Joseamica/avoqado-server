@@ -346,7 +346,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/configurar-puntos-de-lealtad": {
-      "sha256": "6ee64a0fe7a69be5e8a09d55c4a5eba2c1855d12f5401eb95c58f74b6668d125",
+      "sha256": "5bd882ae12e7dcb42d612f9b6d9229944070b52e89985d3ef8b7ca499d4ecfc7",
       "requiredPermissions": [
         "loyalty:read",
         "loyalty:update"
