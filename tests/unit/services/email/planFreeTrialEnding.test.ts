@@ -100,3 +100,87 @@ describe('sendPlanFreeTrialEndingEmail', () => {
     expect(text).toContain(LIGA)
   })
 })
+
+/**
+ * Planes editables B2, Task 6 (§18, b2-r8): el mismo correo sirve de bienvenida a la prueba SIN tarjeta (`empezo`) y, en Task 9,
+ * de recordatorio. Dice qué tarjeta cobraría Stripe al terminar (o que no hay ninguna) y el monto, con la nota del saldo. Sin
+ * esos campos, el correo de hoy (las pruebas de arriba lo fijan).
+ */
+describe('sendPlanFreeTrialEndingEmail — la prueba sin tarjeta (B2)', () => {
+  const LIGA = 'https://dashboard.avoqado.io/venues/taqueria/settings/billing/subscriptions'
+  const NOTA = 'Si tu cuenta tiene saldo a favor o pendiente en Stripe, se aplica en tu recibo'
+
+  it('empezo: asunto «Empezó tu prueba de Avoqado Pro: termina el …», con la tarjeta guardada, el monto y la nota del saldo', async () => {
+    await emailService.sendPlanFreeTrialEndingEmail('a@x.com', {
+      locale: 'es',
+      venueName: 'Taqueria',
+      endDate: FIN,
+      timeZone: 'America/Mexico_City',
+      billingUrl: LIGA,
+      empezo: true,
+      montoAlTerminarCents: 92684,
+      tarjeta: { brand: 'visa', last4: '4242' },
+      idempotencyKey: 'plan-trial-no-card-start:sub_1',
+    })
+    const { subject, html, text, idempotencyKey } = enviado()
+
+    expect(subject).toBe('Empezó tu prueba de Avoqado Pro: termina el 5 de diciembre de 2026')
+    expect(subject).not.toMatch(EMOJI_RE)
+    expect(idempotencyKey).toBe('plan-trial-no-card-start:sub_1')
+    for (const cuerpo of [html, text]) {
+      expect(cuerpo).toContain('al terminar se cobrarán $926.84 en tu tarjeta visa ••••4242; puedes quitarla o cancelar en «Tu plan»')
+      expect(cuerpo).toContain(NOTA)
+      // No es la prueba regalada: nunca «no te cobraremos nada».
+      expect(cuerpo).not.toContain('no te cobraremos nada')
+    }
+    expect(html).toContain(`href="${LIGA}"`)
+    expect(html.split('https://avoqado.io/isotipo.svg').length - 1).toBeGreaterThanOrEqual(2)
+    expect(html).toMatch(/background-color:\s*#000000/)
+    expect(text.length).toBeGreaterThan(0)
+  })
+
+  it('sin tarjeta (tarjeta: null): «pon tu tarjeta en «Tu plan»; si no, sigues en Gratis», con el monto y la nota', async () => {
+    await emailService.sendPlanFreeTrialEndingEmail('a@x.com', {
+      locale: 'es',
+      venueName: 'Taqueria',
+      endDate: FIN,
+      billingUrl: LIGA,
+      empezo: true,
+      montoAlTerminarCents: 92684,
+      tarjeta: null,
+    })
+    const { html, text } = enviado()
+    for (const cuerpo of [html, text]) {
+      expect(cuerpo).toContain('pon tu tarjeta en «Tu plan»; si no, sigues en Gratis')
+      expect(cuerpo).toContain('$926.84')
+      expect(cuerpo).toContain(NOTA)
+      expect(cuerpo).not.toContain('••••')
+    }
+  })
+
+  it('sin empezo (el recordatorio de Task 9): el asunto de hoy; sin monto, ni el monto ni la nota del saldo', async () => {
+    await emailService.sendPlanFreeTrialEndingEmail('a@x.com', { locale: 'es', venueName: 'Taqueria', endDate: FIN, tarjeta: null })
+    const { subject, html, text } = enviado()
+    expect(subject).toBe('Tu prueba gratis de Avoqado Pro termina el 5 de diciembre de 2026')
+    for (const cuerpo of [html, text]) {
+      expect(cuerpo).toContain('pon tu tarjeta en «Tu plan»; si no, sigues en Gratis')
+      expect(cuerpo).not.toMatch(/\$\d/)
+      expect(cuerpo).not.toContain(NOTA)
+    }
+  })
+
+  it('en inglés también: el asunto de la bienvenida y la tarjeta', async () => {
+    await emailService.sendPlanFreeTrialEndingEmail('a@x.com', {
+      locale: 'en',
+      venueName: 'Taqueria',
+      endDate: FIN,
+      empezo: true,
+      montoAlTerminarCents: 92684,
+      tarjeta: { brand: 'visa', last4: '4242' },
+    })
+    const { subject, text } = enviado()
+    expect(subject).toBe('Your Avoqado Pro trial started: it ends on December 5, 2026')
+    expect(text).toContain('••••4242')
+    expect(text).toContain('$926.84')
+  })
+})

@@ -24,6 +24,7 @@ import {
   getOrCreateStripeCustomer,
   modalidadDeLaSuscripcion,
   retrievePlanSubscription,
+  suscripcionConTopeCorto,
 } from '../services/stripe.service'
 import { resolverPrecioDelPlan } from '../services/billing/precioDelPlan'
 import { autorizarObligacionNueva } from '../services/access/autorizarObligacionNueva'
@@ -45,6 +46,13 @@ import { toOfferRow } from '../services/launchCampaigns/launchCampaign.service'
 import { PLAN_ACTIVATION_STATUS } from '../services/launchCampaigns/launchCampaignEnums'
 import { standardPlanQuote } from '../services/access/planPricing.constants'
 import { versionQueCobra, type OfertaVigente } from '../services/billing/planOffer'
+import { ofertaCambio } from '../services/billing/opcionesDeCompra'
+import {
+  avisoDeLaPruebaSinTarjeta,
+  clienteDeStripeVivo,
+  tarjetaQueCobraria,
+  type TarjetaVisible,
+} from '../services/billing/tarjetaQueCobraria'
 import { cotizarOferta, type OfertaDelAlta } from '../services/billing/cotizacionDeLaOferta'
 import * as planActivationService from '../services/onboarding/planActivation.service'
 import * as launchCampaignService from '../services/launchCampaigns/launchCampaign.service'
@@ -55,6 +63,7 @@ import logger from '../config/logger'
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '../errors/AppError'
 import prisma from '../utils/prismaClient'
 import { billingPageUrl } from '@/utils/dashboardLinks'
+import { validateRequest } from '../middlewares/validation'
 
 /**
  * POST /api/v1/onboarding/signup
@@ -859,6 +868,7 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
         planActivationStatus: progress.planActivationStatus,
         planActivationAttempt: progress.planActivationAttempt,
         planStripeSubscriptionId: progress.planStripeSubscriptionId,
+        planOfferVersionNumber: progress.planOfferVersionNumber,
       }))
     ) {
       throw new ConflictError(
@@ -1242,7 +1252,13 @@ async function marcarPlanCobrado(organizationId: string, subscriptionId: string)
 async function modalidadDelAlta(
   organizationId: string,
   progreso?: { planActivationStatus: string | null; planStripeSubscriptionId: string | null },
-): Promise<{ trialModality?: 'RENEWS_AS_PRO' | 'ENDS_FREE'; trialEndsAt?: string; sinTarjeta?: true }> {
+): Promise<{
+  trialModality?: 'RENEWS_AS_PRO' | 'ENDS_FREE'
+  trialEndsAt?: string
+  sinTarjeta?: true
+  tarjetaQueCobrara?: TarjetaVisible | null
+  noHabraCobro?: boolean
+}> {
   try {
     const p =
       progreso ??
@@ -1251,7 +1267,11 @@ async function modalidadDelAlta(
         select: { planActivationStatus: true, planStripeSubscriptionId: true },
       }))
     if (p?.planActivationStatus !== PLAN_ACTIVATION_STATUS.ACTIVE || !p.planStripeSubscriptionId) return {}
-    return await modalidadDeLaSuscripcion(p.planStripeSubscriptionId)
+    const modalidad = await modalidadDeLaSuscripcion(p.planStripeSubscriptionId)
+    if (!modalidad.sinTarjeta) return modalidad
+    // B2 Task 6 (b2-r8 #9, b2-r9 #7): la prueba sin tarjeta dice, leído de Stripe ahora, qué tarjeta cobraría y si habrá cobro. Es el
+    // mismo ayudante que la respuesta de «Terminar» y de `activate-plan`. Sin `sinTarjeta`, la forma de hoy (ninguna lectura más).
+    return { ...modalidad, ...(await avisoDeLaPruebaSinTarjeta(await suscripcionConTopeCorto(p.planStripeSubscriptionId))) }
   } catch (error) {
     logger.warn('onboarding: no se pudo leer la modalidad de la prueba; se omite', {
       organizationId,
@@ -1360,6 +1380,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         planActivationStatus: progress.planActivationStatus,
         planActivationAttempt: progress.planActivationAttempt,
         planStripeSubscriptionId: progress.planStripeSubscriptionId,
+        planOfferVersionNumber: progress.planOfferVersionNumber,
       }))
     ) {
       throw new ConflictError(
@@ -1414,6 +1435,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           planActivationStatus: progress.planActivationStatus,
           planActivationAttempt: progress.planActivationAttempt,
           planStripeSubscriptionId: progress.planStripeSubscriptionId,
+          planOfferVersionNumber: progress.planOfferVersionNumber,
         }))
       ) {
         throw new ConflictError(
@@ -1840,6 +1862,56 @@ export async function planSetupIntent(req: Request, res: Response, next: NextFun
 // Lanzamiento con campañas ligeras (spec 2026-09-17)
 // =============================================
 
+/** La oferta de una campaña de lanzamiento. */
+const ofertaDeCampana = z.object({
+  kind: z.literal('LAUNCH'),
+  code: z.string(),
+  offerVersion: z.number().int().min(1),
+  expectedFirstChargeCents: z.number().int().min(0),
+})
+/** La oferta estándar (con tarjeta). */
+const ofertaEstandar = z.object({
+  kind: z.literal('STANDARD'),
+  expectedFirstChargeCents: z.number().int().min(0),
+  // Planes editables (B2): el comprobante de la cotización. 🔴 `unknown` a propósito: con cualquier otro tipo, un cuerpo
+  // de hoy con `null`, un número o un texto largo daría 400. Sólo lo revisa el servicio, y sólo con una versión del editor.
+  quoteToken: z.unknown().optional(),
+})
+/**
+ * B2 Task 6 (§16, §18): la prueba SIN tarjeta. 🔴 Sólo la reconoce `ActivatePlanSchemaConVersion`, y sólo con una versión del
+ * editor (`validarActivatePlan`): sin ella, este cuerpo recibe el 400 de hoy.
+ */
+const ofertaSinTarjeta = z.object({
+  kind: z.literal('STANDARD_SIN_TARJETA'),
+  expectedFirstChargeCents: z.literal(0),
+  quoteToken: z.unknown(),
+})
+const PAYMENT_METHOD_ID = z.string().regex(/^pm_[A-Za-z0-9]+$/)
+
+/** El cuerpo de `activate-plan`, con el método de pago y las ofertas que acepte cada esquema (mismas llaves, mismo orden). */
+const cuerpoDeActivatePlan = <M extends z.ZodTypeAny, O extends z.ZodTypeAny>(paymentMethodId: M, offer: O) =>
+  z.object({
+    tier: z.enum(['PRO', 'PREMIUM']),
+    interval: z.enum(['monthly', 'annual']),
+    payNow: z.boolean(),
+    paymentMethodId,
+    offer,
+    language: z.enum(['es', 'en']).optional(),
+    // Plan Básico: la prueba de Pro que termina sola sin cobrar. Sólo con PRO mensual sin pagar hoy.
+    basicPlan: z.boolean({ invalid_type_error: 'basicPlan debe ser verdadero o falso' }).optional(),
+  })
+
+const refinarPlanBasico = (body: { basicPlan?: unknown; tier?: unknown; interval?: unknown; payNow?: unknown }, ctx: z.RefinementCtx) => {
+  if (!onboardingProgressService.basicPlanValido(body)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['basicPlan'],
+      message: onboardingProgressService.MENSAJE_BASIC_PLAN_INVALIDO,
+      params: { code: 'BASIC_PLAN_INVALID' },
+    })
+  }
+}
+
 /**
  * Esquema de `POST …/v2/activate-plan` (§ 3.6).
  *
@@ -1848,42 +1920,70 @@ export async function planSetupIntent(req: Request, res: Response, next: NextFun
  */
 export const ActivatePlanSchema = z.object({
   params: z.object({ organizationId: z.string().cuid() }),
-  body: z
-    .object({
-      tier: z.enum(['PRO', 'PREMIUM']),
-      interval: z.enum(['monthly', 'annual']),
-      payNow: z.boolean(),
-      paymentMethodId: z.string().regex(/^pm_[A-Za-z0-9]+$/),
-      offer: z.discriminatedUnion('kind', [
-        z.object({
-          kind: z.literal('LAUNCH'),
-          code: z.string(),
-          offerVersion: z.number().int().min(1),
-          expectedFirstChargeCents: z.number().int().min(0),
-        }),
-        z.object({
-          kind: z.literal('STANDARD'),
-          expectedFirstChargeCents: z.number().int().min(0),
-          // Planes editables (B2): el comprobante de la cotización. 🔴 `unknown` a propósito: con cualquier otro tipo, un cuerpo
-          // de hoy con `null`, un número o un texto largo daría 400. Sólo lo revisa el servicio, y sólo con una versión del editor.
-          quoteToken: z.unknown().optional(),
-        }),
-      ]),
-      language: z.enum(['es', 'en']).optional(),
-      // Plan Básico: la prueba de Pro que termina sola sin cobrar. Sólo con PRO mensual sin pagar hoy.
-      basicPlan: z.boolean({ invalid_type_error: 'basicPlan debe ser verdadero o falso' }).optional(),
-    })
-    .superRefine((body, ctx) => {
-      if (!onboardingProgressService.basicPlanValido(body)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['basicPlan'],
-          message: onboardingProgressService.MENSAJE_BASIC_PLAN_INVALIDO,
-          params: { code: 'BASIC_PLAN_INVALID' },
-        })
-      }
-    }),
+  body: cuerpoDeActivatePlan(PAYMENT_METHOD_ID, z.discriminatedUnion('kind', [ofertaDeCampana, ofertaEstandar])).superRefine(
+    refinarPlanBasico,
+  ),
 })
+
+/**
+ * B2 Task 6: el esquema de hoy más la prueba sin tarjeta. Con ella, `paymentMethodId` debe faltar y `payNow` ser `false`;
+ * `STANDARD` y `LAUNCH` siguen con `paymentMethodId` obligatorio. Sólo se usa con una versión del editor (`validarActivatePlan`).
+ */
+export const ActivatePlanSchemaConVersion = z.object({
+  params: z.object({ organizationId: z.string().cuid() }),
+  body: cuerpoDeActivatePlan(
+    PAYMENT_METHOD_ID.optional(),
+    z.discriminatedUnion('kind', [ofertaDeCampana, ofertaEstandar, ofertaSinTarjeta]),
+  ).superRefine((body, ctx) => {
+    refinarPlanBasico(body, ctx)
+    if (body.offer.kind === 'STANDARD_SIN_TARJETA') {
+      if (body.paymentMethodId !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['paymentMethodId'], message: 'La prueba sin tarjeta no lleva método de pago' })
+      }
+      if (body.payNow !== false) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['payNow'], message: 'La prueba sin tarjeta no se paga hoy' })
+      }
+    } else if (body.paymentMethodId === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['paymentMethodId'], message: 'Falta el método de pago' })
+    }
+  }),
+})
+
+const validarConElEsquemaDeHoy = validateRequest(ActivatePlanSchema)
+const validarConVersion = validateRequest(ActivatePlanSchemaConVersion)
+
+/**
+ * La validación de `POST …/v2/activate-plan` (B2 Task 6; b2-r5 ruling 13, b2-r6 y b2-r7 regresión).
+ *
+ * 🔴 Primero el esquema de HOY: si pasa, sigue (un cuerpo válido de hoy ni consulta la versión). Si falla y el cuerpo no es
+ * `STANDARD_SIN_TARJETA`, responde ese 400. Sólo si falla y el cuerpo ES `STANDARD_SIN_TARJETA` se consulta `versionQueCobra()`:
+ * con versión del editor, valida con `ActivatePlanSchemaConVersion`; sin ella **o si la consulta falla**, el MISMO 400 que ya
+ * calculó el esquema de hoy. Así, pase lo que pase, sin versión del editor ese cuerpo recibe el 400 y el cuerpo de error de hoy,
+ * nunca un 5xx.
+ */
+export async function validarActivatePlan(req: Request, res: Response, next: NextFunction): Promise<void> {
+  let errorDeHoy: unknown = undefined
+  let paso = false
+  await validarConElEsquemaDeHoy(req, res, (error?: unknown) => {
+    if (error) errorDeHoy = error
+    else paso = true
+  })
+  if (paso) return next()
+  const oferta = (req.body as { offer?: { kind?: unknown } } | null | undefined)?.offer
+  if (!oferta || typeof oferta !== 'object' || oferta.kind !== 'STANDARD_SIN_TARJETA') return next(errorDeHoy)
+  let version: OfertaVigente | null
+  try {
+    version = await versionQueCobra()
+  } catch (error) {
+    logger.warn('activate-plan: no se pudo leer la oferta para validar la prueba sin tarjeta — se responde el 400 de hoy', {
+      organizationId: req.params.organizationId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return next(errorDeHoy)
+  }
+  if (!version) return next(errorDeHoy)
+  return validarConVersion(req, res, next)
+}
 
 /** POST /api/v1/onboarding/organizations/:organizationId/v2/activate-plan */
 export async function activatePlanController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -1907,6 +2007,39 @@ export async function activatePlanController(req: Request, res: Response, next: 
       ...(req.body.basicPlan === true ? { basicPlan: true } : {}),
     })
     res.status(200).json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** Esquema de `GET …/v2/tarjeta-de-la-prueba` (B2 Task 6): sin cuerpo, sólo la organización. */
+export const TarjetaDeLaPruebaSchema = z.object({
+  params: z.object({ organizationId: z.string().cuid() }),
+})
+
+/**
+ * GET /api/v1/onboarding/organizations/:organizationId/v2/tarjeta-de-la-prueba
+ *
+ * 🔴 B2 Task 6 (§18, b2-r8): la ventana del alta, al abrirse, pregunta qué tarjeta cobraría Stripe al terminar la prueba sin
+ * tarjeta: `tarjetaQueCobraria({ customer })` en ESE momento, con el cliente del negocio (`clienteDeStripeVivo`: sin id, `null` sin
+ * llamar a Stripe; borrado, `null`: el alta creará otro). Sólo informa: no escribe nada y nada lo compara al cobrar. Sin versión
+ * del editor no hay prueba sin tarjeta: 409 `OFFER_CHANGED` (`VERSION`, versión 1), sin llamar a Stripe.
+ */
+export async function tarjetaDeLaPruebaController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { organizationId } = req.params
+    if (!(await versionQueCobra())) throw ofertaCambio('VERSION', 1)
+    // El negocio del alta: el mismo que elige `ensureVenueForOnboarding` (el primero de la organización), sin crearlo.
+    const negocio = await prisma.venue.findFirst({
+      where: { organizationId },
+      select: { stripeCustomerId: true },
+      orderBy: { createdAt: 'asc' },
+    })
+    const cliente = await clienteDeStripeVivo(negocio?.stripeCustomerId ?? null)
+    const tarjeta = cliente ? await tarjetaQueCobraria({ customer: cliente }) : null
+    res
+      .status(200)
+      .json({ success: true, data: { tarjeta: tarjeta ? { id: tarjeta.id, brand: tarjeta.brand, last4: tarjeta.last4 } : null } })
   } catch (error) {
     next(error)
   }

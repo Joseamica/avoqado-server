@@ -323,6 +323,19 @@ export interface PlanFreeTrialEndingEmailData {
    * prueba). Sin ella (le quedan menos de 3 días), el botón escribe a hola@avoqado.io como antes.
    */
   billingUrl?: string
+  /**
+   * Planes editables (B2, Task 6, §18): la prueba SIN tarjeta. Lo que Stripe cobraría al terminar: en la bienvenida, el precio de
+   * la versión (b2-r8); en los recordatorios (Task 9), la vista previa. Con él, el correo agrega la nota del saldo. Sin él, sin
+   * frase de monto.
+   */
+  montoAlTerminarCents?: number
+  /** B2 Task 6: la bienvenida de la prueba sin tarjeta (asunto «Empezó tu prueba de Avoqado {plan}: termina el {fecha}»). */
+  empezo?: true
+  /**
+   * B2 Task 6: la tarjeta que Stripe cobraría al terminar (`tarjetaQueCobraria`). `null` = «sin tarjeta» (pon tu tarjeta en «Tu
+   * plan»; si no, sigues en Gratis). Sin `montoAlTerminarCents`, `empezo` ni `tarjeta`, el correo de hoy, byte por byte.
+   */
+  tarjeta?: { brand: string | null; last4: string | null } | null
 }
 
 export interface PlanWinbackEmailData {
@@ -5465,6 +5478,10 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
    * botón abre un correo a hola@avoqado.io en vez de mandar a pagar.
    */
   async sendPlanFreeTrialEndingEmail(email: string, data: PlanFreeTrialEndingEmailData): Promise<boolean> {
+    // B2 Task 6: la prueba SIN tarjeta tiene su propio texto; la regalada sigue con el de hoy, intacto.
+    if (data.empezo === true || data.tarjeta !== undefined || data.montoAlTerminarCents !== undefined) {
+      return this.sendPlanNoCardTrialEmail(email, data)
+    }
     const en = data.locale === 'en'
     const planName = data.planName ?? 'Pro'
     const fecha = data.endDate.toLocaleDateString(en ? 'en-US' : 'es-MX', {
@@ -5499,6 +5516,82 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
             ? `Después de esa fecha tu negocio sigue funcionando con el plan Gratis y tus datos se quedan igual. Si quieres seguir con ${planName}, pon tu tarjeta en Facturación: hoy no pagas nada y el primer cobro es el día que termina tu prueba. ¿Dudas? Escríbenos a ${correo}.`
             : `Después de esa fecha tu negocio sigue funcionando con el plan Gratis y tus datos se quedan igual. Si quieres seguir con ${planName}, escríbenos a ${correo} y te ayudamos a contratarlo.`,
         ]
+    const greeting = en ? 'Hi,' : 'Hola,'
+    const bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
+      ${parrafos.map(p => `<p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${p}</p>`).join('\n      ')}`
+    const text = `${greeting}
+
+${parrafos.map(p => p.replace(/<[^>]+>/g, '')).join('\n\n')}
+
+${ctaLabel}: ${data.billingUrl ?? 'hola@avoqado.io'}
+
+${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
+
+    const html = this.buildPlanEmailHtml({
+      locale: data.locale,
+      title: subject,
+      venueName: escapeHtml(data.venueName),
+      bodyHtml,
+      ctaLabel,
+      ctaUrl,
+    })
+    return this.sendEmail({ to: email, subject, html, text, idempotencyKey: data.idempotencyKey })
+  }
+
+  /**
+   * Planes editables (B2, Task 6, §18, b2-r8): la prueba SIN tarjeta, que vive en Stripe. La bienvenida (`empezo`) y los
+   * recordatorios (Task 9) dicen qué tarjeta cobraría Stripe al terminar (o que no hay ninguna) y cuánto, con la nota del saldo:
+   * el monto que se enseña es el precio, y un saldo a favor o pendiente en Stripe se aplica en el recibo. Se avisa en vez de
+   * impedir: nada compara esta tarjeta al cobrar.
+   */
+  private async sendPlanNoCardTrialEmail(email: string, data: PlanFreeTrialEndingEmailData): Promise<boolean> {
+    const en = data.locale === 'en'
+    const planName = data.planName ?? 'Pro'
+    const fecha = data.endDate.toLocaleDateString(en ? 'en-US' : 'es-MX', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      timeZone: zonaValida(data.timeZone),
+    })
+    const subject = data.empezo
+      ? en
+        ? `Your Avoqado ${planName} trial started: it ends on ${fecha}`
+        : `Empezó tu prueba de Avoqado ${planName}: termina el ${fecha}`
+      : en
+        ? `Your free Avoqado ${planName} trial ends on ${fecha}`
+        : `Tu prueba gratis de Avoqado ${planName} termina el ${fecha}`
+    const monto = data.montoAlTerminarCents !== undefined ? formatMoney(data.montoAlTerminarCents) : null
+    const tarjeta = data.tarjeta
+    const marca = tarjeta ? escapeHtml(`${tarjeta.brand ?? (en ? 'card' : 'tarjeta')} ••••${tarjeta.last4 ?? '····'}`) : ''
+    const correo = '<a href="mailto:hola@avoqado.io" style="color: #000;">hola@avoqado.io</a>'
+    const inicio = data.empezo
+      ? en
+        ? `Your Avoqado ${planName} trial started today and ends on <strong>${fecha}</strong>.`
+        : `Empezó tu prueba de Avoqado ${planName}: termina el <strong>${fecha}</strong>.`
+      : en
+        ? `Your Avoqado ${planName} trial ends on <strong>${fecha}</strong>.`
+        : `Tu prueba de Avoqado ${planName} termina el <strong>${fecha}</strong>.`
+    const cobro = en
+      ? tarjeta
+        ? `If you do nothing, when it ends we'll charge ${monto ?? 'your plan'} to your ${marca}; you can remove it or cancel in «Your plan».`
+        : tarjeta === null
+          ? `To keep ${planName}, add your card in «Your plan»; otherwise you stay on Free.${monto ? ` With your card, we'll charge ${monto} when it ends.` : ''}`
+          : `In «Your plan» you can see which card will be charged when it ends, or cancel.`
+      : tarjeta
+        ? `Si no haces nada, al terminar se cobrarán ${monto ?? 'tu plan'} en tu tarjeta ${marca}; puedes quitarla o cancelar en «Tu plan».`
+        : tarjeta === null
+          ? `Para seguir con ${planName}, pon tu tarjeta en «Tu plan»; si no, sigues en Gratis.${monto ? ` Con tu tarjeta, al terminar se cobrarán ${monto}.` : ''}`
+          : `En «Tu plan» ves qué tarjeta se cobrará al terminar, o puedes cancelar.`
+    const nota = monto
+      ? en
+        ? 'If your account has a credit or pending balance in Stripe, it is applied to your receipt.'
+        : 'Si tu cuenta tiene saldo a favor o pendiente en Stripe, se aplica en tu recibo.'
+      : null
+    const dudas = en ? `Questions? Write to ${correo}.` : `¿Dudas? Escríbenos a ${correo}.`
+    const parrafos = [inicio, cobro, ...(nota ? [nota] : []), dudas]
+    const ctaLabel = en ? 'See my plan' : 'Ver mi plan'
+    const ctaUrl = data.billingUrl ?? `mailto:hola@avoqado.io?subject=${encodeURIComponent(`${ctaLabel} · ${data.venueName}`)}`
     const greeting = en ? 'Hi,' : 'Hola,'
     const bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>

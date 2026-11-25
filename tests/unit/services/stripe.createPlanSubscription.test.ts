@@ -616,3 +616,64 @@ describe('B2: el fin de prueba del comprobante y los descuentos explícitos', ()
     expect('discounts' in mockSubCreate.mock.calls[0][0]).toBe(false)
   })
 })
+
+/**
+ * Planes editables B2, Task 6 (§16, §18): la prueba SIN tarjeta se abre en Stripe sin método de pago y, si al terminar sigue sin
+ * tarjeta, Stripe la cancela (`missing_payment_method: 'cancel'`). La metadata `sinTarjeta: 'true'` es la que la reconoce.
+ */
+describe('B2 Task 6: la prueba sin tarjeta', () => {
+  const FIN = new Date('2026-12-09T16:00:00.000Z')
+  const base = (extra: Partial<CreatePlanSubscriptionInput> = {}): CreatePlanSubscriptionInput => ({
+    venueId: 'v1',
+    customerId: 'cus_1',
+    paymentMethodId: 'pm_1',
+    priceId: 'price_v2_pro_m',
+    tierCode: 'PLAN_PRO',
+    interval: 'monthly',
+    trialPeriodDays: 0,
+    idempotencyKey: 'plan-activation:org-1:1',
+    ...extra,
+  })
+
+  it('con sinTarjeta: sin default_payment_method, con trial_settings.end_behavior.missing_payment_method "cancel" y el mismo payment_settings; sin trialEnd → Error', async () => {
+    await createPlanSubscription(base({ paymentMethodId: undefined, sinTarjeta: true, trialEnd: FIN }))
+    const [cuerpo] = mockSubCreate.mock.calls[0] as [Record<string, any>]
+    expect('default_payment_method' in cuerpo).toBe(false)
+    expect(cuerpo.trial_settings).toEqual({ end_behavior: { missing_payment_method: 'cancel' } })
+    expect(cuerpo.trial_end).toBe(Math.floor(FIN.getTime() / 1000))
+    expect('trial_period_days' in cuerpo).toBe(false)
+    expect(cuerpo.payment_settings).toEqual({ save_default_payment_method: 'on_subscription', payment_method_types: ['card'] })
+    expect(cuerpo.collection_method).toBe('charge_automatically')
+    expect(cuerpo.metadata).toMatchObject({ sinTarjeta: 'true' })
+
+    // Sin el fin de la prueba no hay prueba sin tarjeta: error de programación, antes de «pudo cobrarse».
+    mockSubCreate.mockClear()
+    const antesDeCobrar = jest.fn()
+    await expect(createPlanSubscription(base({ paymentMethodId: undefined, sinTarjeta: true, antesDeCobrar }))).rejects.toThrow(Error)
+    expect(antesDeCobrar).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
+  it('sin sinTarjeta y sin paymentMethodId → Error; con paymentMethodId, el cuerpo de hoy', async () => {
+    const antesDeCobrar = jest.fn()
+    await expect(createPlanSubscription(base({ paymentMethodId: undefined, trialEnd: FIN, antesDeCobrar }))).rejects.toThrow(Error)
+    expect(antesDeCobrar).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+
+    await createPlanSubscription(base({ trialEnd: FIN }))
+    const [cuerpo] = mockSubCreate.mock.calls[0] as [Record<string, any>]
+    expect(cuerpo.default_payment_method).toBe('pm_1')
+    expect('trial_settings' in cuerpo).toBe(false)
+    expect(cuerpo.metadata).not.toHaveProperty('sinTarjeta')
+    expect(Object.keys(cuerpo)).toEqual([
+      'customer',
+      'items',
+      'trial_end',
+      'default_payment_method',
+      'description',
+      'metadata',
+      'collection_method',
+      'payment_settings',
+    ])
+  })
+})

@@ -718,7 +718,15 @@ export async function createTrialSubscriptions(
 export interface CreatePlanSubscriptionInput {
   venueId: string
   customerId: string
-  paymentMethodId: string
+  /** La tarjeta del cobro. Obligatoria salvo con `sinTarjeta` (la prueba que se abre sin método de pago). */
+  paymentMethodId?: string
+  /**
+   * Planes editables (B2, Task 6, §16, §18): la prueba SIN tarjeta. Exige `trialEnd` (si no, `Error` de programación, antes de
+   * «pudo cobrarse»). No manda `default_payment_method`: al terminar, Stripe cobra la tarjeta que diga su jerarquía (la del
+   * cliente, si la tiene) o, sin ninguna, la CANCELA (`trial_settings.end_behavior.missing_payment_method: 'cancel'`). Lleva la
+   * metadata `sinTarjeta: 'true'`, la única marca que la reconoce (Ruling P6). El resto del cuerpo, el de hoy.
+   */
+  sinTarjeta?: boolean
   tierCode: PlanTierCode
   /** Precio de Stripe ya resuelto (`resolverPrecioDelPlan`): se cobra con éste, sin volver a listar la llave. */
   priceId: string
@@ -1004,6 +1012,9 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
   if (input.cancelAtTrialEnd && !conPrueba) {
     throw new Error('cancelAtTrialEnd sólo aplica a una prueba gratis (trialPeriodDays > 0)')
   }
+  // B2 Task 6: errores de programación, antes de tocar nada (nada pudo cobrarse).
+  if (input.sinTarjeta && !input.trialEnd) throw new Error('una prueba sin tarjeta necesita el fin de su prueba (trialEnd)')
+  if (!input.sinTarjeta && !input.paymentMethodId) throw new Error('createPlanSubscription: falta el método de pago')
   const feature = await prisma.feature.findFirst({ where: { code: input.tierCode, active: true } })
   if (!feature) throw new Error(`Feature ${input.tierCode} not found or inactive`)
 
@@ -1041,12 +1052,15 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
     ...(input.venueSlug ? { venueSlug: input.venueSlug } : {}),
     ...(input.extraMetadata ?? {}),
     ...(input.cancelAtTrialEnd ? { basicPlanChosen: 'true' } : {}),
+    ...(input.sinTarjeta ? { sinTarjeta: 'true' } : {}),
   }
   const params: Stripe.SubscriptionCreateParams = {
     customer: input.customerId,
     items: [{ price: input.priceId }],
     ...(input.trialEnd ? { trial_end: Math.floor(input.trialEnd.getTime() / 1000) } : { trial_period_days: input.trialPeriodDays }),
-    default_payment_method: input.paymentMethodId,
+    ...(input.sinTarjeta
+      ? { trial_settings: { end_behavior: { missing_payment_method: 'cancel' as const } } }
+      : { default_payment_method: input.paymentMethodId }),
     // No Stripe Tax: IVA is baked into the price (tax_behavior 'inclusive'), so we charge the
     // price as-is and the merchant remits/itemizes the IVA on their own CFDI factura.
     ...(input.descuentosExplicitos
@@ -1137,8 +1151,8 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
   }
 
   // Plan Básico: la tarjeta del alta queda como la del cliente, para que el clic del día 30 compre sin pedirla otra vez.
-  // Es comodidad, no garantía: si falla, se registra y el alta sigue.
-  if (input.cancelAtTrialEnd) {
+  // Es comodidad, no garantía: si falla, se registra y el alta sigue. (Sin tarjeta no hay qué fijar.)
+  if (input.cancelAtTrialEnd && input.paymentMethodId) {
     await stripe.customers
       .update(input.customerId, { invoice_settings: { default_payment_method: input.paymentMethodId } }, STRIPE_DENTRO_DEL_CANDADO)
       .catch(error =>
@@ -1903,7 +1917,16 @@ export async function retrievePlanSubscription(
  * llama omite el campo, nunca inventa una modalidad.
  */
 export async function modalidadDeLaSuscripcion(subscriptionId: string): Promise<ModalidadDePrueba> {
-  return modalidadDePrueba(await stripe.subscriptions.retrieve(subscriptionId, {}, { timeout: 5_000, maxNetworkRetries: 0 }))
+  return modalidadDePrueba(await suscripcionConTopeCorto(subscriptionId))
+}
+
+/**
+ * La suscripción leída con el tope corto de `modalidadDeLaSuscripcion` (5 s, sin reintentos), para las respuestas del alta y
+ * `GET /progress`. Planes editables (B2, Task 6): la prueba sin tarjeta la vuelve a leer para decir qué tarjeta cobraría. Si
+ * Stripe no contesta, LANZA: quien llama omite el campo.
+ */
+export async function suscripcionConTopeCorto(subscriptionId: string): Promise<Stripe.Subscription> {
+  return stripe.subscriptions.retrieve(subscriptionId, {}, { timeout: 5_000, maxNetworkRetries: 0 })
 }
 
 /** El id del producto de un precio de Stripe, venga como id o expandido. */

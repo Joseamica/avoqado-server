@@ -43,6 +43,8 @@ const mockAlmacen = {
   pideAutenticar: false,
   /** El siguiente `subscriptions.create` crea la suscripción y después «pierde» la respuesta (un error que no se reintenta). */
   pierdeLaRespuesta: false,
+  /** B2 Task 6: el siguiente `subscriptions.create` no contesta y NO crea nada (un error que no se reintenta). */
+  noContesta: false,
   n: 0,
   creates: [] as unknown[][],
   /** Toda escritura que el alta nunca debe hacer en Stripe: cambiar, cancelar o anular. */
@@ -56,6 +58,7 @@ const mockAlmacen = {
     this.porLlave = {}
     this.pideAutenticar = false
     this.pierdeLaRespuesta = false
+    this.noContesta = false
     this.n = 0
     this.creates = []
     this.escrituras = []
@@ -135,6 +138,11 @@ const mockCliente = {
       if (previa?.subId) return mockAlmacen.vista(mockAlmacen.subs[previa.subId], params.expand)
       const precio = mockAlmacen.precios[params.items?.[0]?.price]
       if (!precio) throw mockNoExiste('price')
+      if (mockAlmacen.noContesta) {
+        mockAlmacen.noContesta = false
+        // Sin `type`, `code` ni `statusCode`: `retry` no lo reintenta; el alta lo trata como resultado desconocido (503).
+        throw new Error('Stripe no contestó y no creó la suscripción')
+      }
       if (params.payment_behavior === 'error_if_incomplete' && mockAlmacen.pideAutenticar) {
         const error = Object.assign(
           new Error('Payment for this subscription requires additional user action before it can be completed.'),
@@ -308,7 +316,10 @@ jest.mock('stripe', () => jest.fn().mockImplementation(() => mockCliente))
 // Los correos y avisos no salen; el cierre final del alta tiene su suite (aquí sólo importa que el plan quede ACTIVE).
 jest.mock('@/services/email.service', () => ({
   __esModule: true,
-  default: { sendPlanConfirmationEmail: jest.fn().mockResolvedValue(true) },
+  default: {
+    sendPlanConfirmationEmail: jest.fn().mockResolvedValue(true),
+    sendPlanFreeTrialEndingEmail: jest.fn().mockResolvedValue(true),
+  },
 }))
 jest.mock('@/services/resend.service', () => ({
   __esModule: true,
@@ -329,6 +340,7 @@ import { cerrarAltaSinNavegador } from '@/services/onboarding/planActivation.ser
 import { ofertaDeRespaldo } from '@/services/billing/planOffer'
 import { definicionDePrueba, idsDeLaVersion } from '@tests/__helpers__/planOfferFixtures'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { terminarAltaCobrada, terminarAltaCobradaSinRomper } from '@/services/onboarding/terminarAltaCobrada'
 
 const app = require('../../../src/app').default
 
@@ -770,5 +782,156 @@ describe('el alta cita su versión y la recuperación cierra con su suscripción
     expect(leido.status).toBe(200)
     expect(leido.body.progress.v2SetupData.plan.offer).toEqual({ kind: 'STANDARD', expectedFirstChargeCents: 0 })
     expect(JSON.stringify(leido.body.progress.v2SetupData)).not.toContain('quoteToken')
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// B2 Task 6: la prueba SIN tarjeta (§16, §18)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Una versión con Pro SIN tarjeta: mensual a `netoProM` + IVA y `trialDays` días; Premium como hoy (con tarjeta), los mismos días. */
+const versionSinTarjeta = (prefijo: string, netoProM: number, trialDays: number): Def =>
+  definicionDePrueba({
+    ids: idsDeLaVersion(prefijo),
+    netos: { 'PRO:monthly': netoProM },
+    planes: { PRO: { requiresCard: false, trialDays }, PREMIUM: { trialDays } },
+  })
+/** El cuerpo de la prueba sin tarjeta con el comprobante de esa opción: sin método de pago y sin pagar hoy. */
+const cuerpoSinTarjeta = (opcion: { quoteToken: string }) => ({
+  tier: 'PRO',
+  interval: 'monthly',
+  payNow: false,
+  offer: { kind: 'STANDARD_SIN_TARJETA', expectedFirstChargeCents: 0, quoteToken: opcion.quoteToken },
+})
+type SubDelAlmacen = {
+  id: string
+  status: string
+  precioId: string
+  trial_end: number
+  ended_at?: number
+  default_payment_method: string | null
+  trial_settings: unknown
+  metadata: Record<string, string>
+}
+
+describe('la prueba sin tarjeta por HTTP (Postgres real)', () => {
+  it('🔴 sin tarjeta por HTTP: GET progress → POST STANDARD_SIN_TARJETA → 200; el almacén tiene UNA suscripción trialing sin método de pago con el trial_end del comprobante; en Postgres el alta ACTIVE y terminada y el VenueFeature ligado', async () => {
+    await publicar(1, ofertaDeRespaldo())
+    await publicar(2, versionSinTarjeta('v2', 79900, 14))
+    const opcion = await opcionDeProMensual()
+    expect(opcion).toMatchObject({ firstChargeCents: 0, trialEndsAt: expect.any(String) })
+
+    const r = await activar(cuerpoSinTarjeta(opcion))
+
+    expect(r.status).toBe(200)
+    expect(r.body.data).toMatchObject({
+      status: 'ACTIVE',
+      tier: 'PRO',
+      interval: 'monthly',
+      firstChargeCents: 0,
+      sinTarjeta: true,
+      tarjetaQueCobrara: null,
+    })
+    const subs = Object.values(mockAlmacen.subs) as SubDelAlmacen[]
+    expect(subs).toHaveLength(1)
+    expect(subs[0]).toMatchObject({ status: 'trialing', precioId: 'price_v2_pro_m', default_payment_method: null })
+    expect(subs[0].trial_end).toBe(Math.floor(Date.parse(opcion.trialEndsAt as string) / 1000))
+    expect(subs[0].trial_settings).toEqual({ end_behavior: { missing_payment_method: 'cancel' } })
+    expect(subs[0].metadata).toMatchObject({
+      sinTarjeta: 'true',
+      planOfferVersion: '2',
+      planActivationKey: `plan-activation:${negocio().orgId}:1`,
+    })
+    expect(mockAlmacen.creates[0][0]).not.toHaveProperty('default_payment_method')
+
+    expect(await elAlta()).toMatchObject({
+      planActivationStatus: 'ACTIVE',
+      planOfferVersionNumber: 2,
+      planStripeSubscriptionId: subs[0].id,
+    })
+    expect(await planGuardado()).toMatchObject({ tier: 'PRO', payNow: false, paymentMethodId: null, sinTarjeta: true, offerVersion: 2 })
+    // El cierre final del alta (con su suite) corrió para esta organización.
+    expect(jest.mocked(terminarAltaCobradaSinRomper)).toHaveBeenCalledWith(negocio().orgId, expect.objectContaining({ via: 'cobro' }))
+    expect(await filaDePro()).toEqual({ active: true, stripeSubscriptionId: subs[0].id })
+    seAuditoElCierre(subs[0].id, false)
+    expect(mockAlmacen.escrituras).toEqual([])
+  })
+
+  it('🔴 b2-r2 #2 por HTTP: POST con tarjeta queda IN_PROGRESS (el almacén no contesta el create y no lo crea); vence el lease; el puntero pasa a una v3 con Pro sin tarjeta; GET progress → POST sin tarjeta con el comprobante de la v3 → 200 ACTIVE', async () => {
+    await conLaV2(30)
+    mockAlmacen.noContesta = true
+    const conTarjeta = await opcionDeProMensual()
+
+    const sinRespuesta = await activar(cuerpoDe(conTarjeta))
+
+    expect(sinRespuesta.status).toBe(503)
+    expect(sinRespuesta.body.code).toBe('PLAN_ACTIVATION_PENDING')
+    expect(Object.keys(mockAlmacen.subs)).toHaveLength(0)
+    expect(await elAlta()).toMatchObject({ planActivationStatus: 'IN_PROGRESS', planStripeSubscriptionId: null, planOfferVersionNumber: 2 })
+
+    await dejarQuieta(negocio().orgId)
+    await publicar(3, versionSinTarjeta('v3', 79900, 14))
+    const sinTarjeta = await opcionDeProMensual()
+
+    const r = await activar(cuerpoSinTarjeta(sinTarjeta))
+
+    expect(r.status).toBe(200)
+    expect(r.body.data).toMatchObject({ status: 'ACTIVE', sinTarjeta: true })
+    const subs = Object.values(mockAlmacen.subs) as SubDelAlmacen[]
+    expect(subs).toHaveLength(1)
+    expect(subs[0]).toMatchObject({ status: 'trialing', precioId: 'price_v3_pro_m', default_payment_method: null })
+    // El intento con tarjeta se descartó (nunca llegó a Stripe): la prueba es el intento 2, con la versión de su comprobante.
+    expect(subs[0].metadata).toMatchObject({
+      planActivationKey: `plan-activation:${negocio().orgId}:2`,
+      planOfferVersion: '3',
+      sinTarjeta: 'true',
+    })
+    expect(await elAlta()).toMatchObject({
+      planActivationStatus: 'ACTIVE',
+      planActivationAttempt: 2,
+      planOfferVersionNumber: 3,
+      planStripeSubscriptionId: subs[0].id,
+    })
+    expect(await planGuardado()).toMatchObject({ sinTarjeta: true, paymentMethodId: null, offerVersion: 3 })
+    expect(await filaDePro()).toEqual({ active: true, stripeSubscriptionId: subs[0].id })
+  })
+
+  it('🔴 b2-r3 #3 por HTTP: POST sin tarjeta con la respuesta del create perdida; el almacén la cancela al terminar la prueba; la persona vuelve: POST → 409 PLAN_TRIAL_ENDED y en Postgres el alta terminada en Gratis', async () => {
+    await publicar(1, ofertaDeRespaldo())
+    await publicar(2, versionSinTarjeta('v2', 79900, 14))
+    mockAlmacen.pierdeLaRespuesta = true
+    const opcion = await opcionDeProMensual()
+
+    const perdida = await activar(cuerpoSinTarjeta(opcion))
+
+    expect(perdida.status).toBe(503)
+    const [sub] = Object.values(mockAlmacen.subs) as SubDelAlmacen[]
+    expect(sub).toMatchObject({ status: 'trialing', default_payment_method: null, metadata: { sinTarjeta: 'true' } })
+    expect(await elAlta()).toMatchObject({ planActivationStatus: 'IN_PROGRESS', planStripeSubscriptionId: null, planOfferVersionNumber: 2 })
+    const creadas = mockAlmacen.creates.length
+
+    // Terminó la prueba sin tarjeta: Stripe la cancela (`missing_payment_method: 'cancel'`). La persona vuelve más tarde.
+    Object.assign(mockAlmacen.subs[sub.id], { status: 'canceled', ended_at: mockAlmacen.subs[sub.id].trial_end })
+    await dejarQuieta(negocio().orgId)
+    const otraVez = await opcionDeProMensual()
+
+    const r = await activar(cuerpoSinTarjeta(otraVez))
+
+    expect(r.status).toBe(409)
+    expect(r.body).toMatchObject({
+      code: 'PLAN_TRIAL_ENDED',
+      message: 'Tu prueba terminó sin tarjeta y tu negocio quedó en Gratis. No se te cobró nada.',
+    })
+    // En Postgres: el paso del plan resuelto en Gratis, sin suscripción ni lease; y el cierre final pedido para esta organización.
+    expect(await elAlta()).toMatchObject({ planActivationStatus: 'ACTIVE', planStripeSubscriptionId: null, planActivationLeaseUntil: null })
+    expect(await planGuardado()).toMatchObject({ tier: 'FREE', pruebaSinTarjetaTerminada: true, subscriptionId: sub.id, offerVersion: 2 })
+    expect(jest.mocked(terminarAltaCobrada)).toHaveBeenCalledWith(negocio().orgId, expect.objectContaining({ via: 'navegador' }))
+    expect(jest.mocked(logAction)).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'PLAN_TRIAL_ENDED_ONBOARDING', organizationId: negocio().orgId }),
+    )
+    // Nada se cobró, creó ni escribió de nuevo en Stripe, y ningún VenueFeature quedó prendido.
+    expect(mockAlmacen.creates).toHaveLength(creadas)
+    expect(mockAlmacen.escrituras).toEqual([])
+    expect((await filaDePro())?.active ?? false).toBe(false)
   })
 })

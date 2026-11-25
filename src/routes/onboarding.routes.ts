@@ -919,8 +919,36 @@ if (onboardingController.requiresBaseSubscriptionPlan()) {
     '/organizations/:organizationId/v2/activate-plan',
     authenticateTokenMiddleware,
     requireOnboardingOrgOwner,
-    validateRequest(onboardingController.ActivatePlanSchema),
+    // Planes editables (B2, Task 6): el esquema de hoy primero; `STANDARD_SIN_TARJETA` sólo existe con una versión del editor.
+    onboardingController.validarActivatePlan,
     onboardingController.activatePlanController,
+  )
+}
+
+/**
+ * GET /api/v1/onboarding/organizations/:organizationId/v2/tarjeta-de-la-prueba
+ *
+ * La tarjeta que Stripe cobraría al terminar la prueba sin tarjeta (planes editables B2, Task 6, §18): la ventana del alta la pide
+ * al abrirse. Sólo informa; nada la compara al cobrar. Como `activate-plan`, sólo existe con el candado del plan encendido y sólo
+ * para la dueña.
+ *
+ * @openapi
+ * /api/v1/onboarding/organizations/{organizationId}/v2/tarjeta-de-la-prueba:
+ *   get:
+ *     tags: [Onboarding]
+ *     summary: La tarjeta que Stripe cobraría al terminar la prueba sin tarjeta
+ *     responses:
+ *       200: { description: "{ tarjeta: { id, brand, last4 } | null }" }
+ *       403: { description: ORG_OWNER_REQUIRED }
+ *       409: { description: "OFFER_CHANGED (sin versión del editor: no hay prueba sin tarjeta)" }
+ */
+if (onboardingController.requiresBaseSubscriptionPlan()) {
+  router.get(
+    '/organizations/:organizationId/v2/tarjeta-de-la-prueba',
+    authenticateTokenMiddleware,
+    requireOnboardingOrgOwner,
+    validateRequest(onboardingController.TarjetaDeLaPruebaSchema),
+    onboardingController.tarjetaDeLaPruebaController,
   )
 }
 

@@ -804,6 +804,8 @@ export interface PlanActivatedNoticeData {
   campaignCode: string | null
   /** Plan Básico: la prueba de Pro termina SIN cobro (eligió el Básico). Sin él, lo de siempre. */
   trialEndsFree?: boolean
+  /** Planes editables (B2, Task 6): la prueba empezó SIN tarjeta; si no la pone, queda en Gratis. Sin él, lo de siempre. */
+  sinTarjeta?: boolean
 }
 
 export async function sendPlanActivatedNotice(data: PlanActivatedNoticeData): Promise<boolean> {
@@ -824,9 +826,11 @@ export async function sendPlanActivatedNotice(data: PlanActivatedNoticeData): Pr
   })
   const cobro = data.trialEndsFree
     ? 'Prueba de Pro sin cobro (eligió el Básico)'
-    : data.payNow
-      ? `Pagó hoy ${monto}. Siguiente cobro: ${fecha}.`
-      : `Prueba gratis con tarjeta. Primer cobro: ${monto} el ${fecha}.`
+    : data.sinTarjeta
+      ? `Prueba sin tarjeta hasta el ${fecha}. Si no pone tarjeta, queda en Gratis.`
+      : data.payNow
+        ? `Pagó hoy ${monto}. Siguiente cobro: ${fecha}.`
+        : `Prueba gratis con tarjeta. Primer cobro: ${monto} el ${fecha}.`
   const filas: Array<[string, string]> = [
     ['Negocio', data.venueName],
     ['Plan', data.planName],

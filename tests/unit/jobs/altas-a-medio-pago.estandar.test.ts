@@ -13,6 +13,7 @@ const mockSubList = jest.fn()
 const mockPriceList = jest.fn()
 const mockPriceRetrieve = jest.fn()
 const mockSubCreate = jest.fn()
+const mockInvList = jest.fn()
 jest.mock('stripe', () =>
   jest.fn().mockImplementation(() => ({
     subscriptions: { create: mockSubCreate, retrieve: mockSubRetrieve, list: mockSubList },
@@ -20,7 +21,7 @@ jest.mock('stripe', () =>
     paymentMethods: { retrieve: jest.fn() },
     coupons: { create: jest.fn(), retrieve: jest.fn(), del: jest.fn() },
     customers: { create: jest.fn(), retrieve: jest.fn(), listBalanceTransactions: jest.fn() },
-    invoices: { list: jest.fn(), voidInvoice: jest.fn() },
+    invoices: { list: (...a: unknown[]) => mockInvList(...a), voidInvoice: jest.fn() },
     invoicePayments: { list: jest.fn() },
     creditNotes: { list: jest.fn() },
   })),
@@ -201,6 +202,7 @@ beforeEach(() => {
   })
   mockSubRetrieve.mockReset().mockResolvedValue(cobrada())
   mockSubList.mockReset()
+  mockInvList.mockReset().mockResolvedValue({ has_more: false, data: [] })
   mockCubierto.mockReset().mockResolvedValue(true)
   mockEntregar.mockReset().mockImplementation(async ({ subscriptionId }: { subscriptionId: string }) => ({
     venueId: 'venue-1',
@@ -290,5 +292,52 @@ describe('altas-a-medio-pago con un alta estándar y una versión del editor', (
     expect(mockPriceRetrieve).not.toHaveBeenCalled()
     expect(mockPriceList).not.toHaveBeenCalled()
     expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Planes editables B2, Task 6 (b2-r3 #3): la prueba SIN tarjeta cuya respuesta del `create` se perdió, y que Stripe ya canceló
+ * al terminar sin tarjeta. El barrido la encuentra por la llave del intento y cierra el alta en Gratis: no la deja esperando un
+ * cobro que nunca llegará (ni un 503 eterno), y nunca crea nada en Stripe.
+ */
+describe('altas-a-medio-pago con una prueba sin tarjeta que ya terminó', () => {
+  /** Lo que el cierre en Gratis agregó al formulario (`fusionarV2SetupData`). */
+  function planDelCierre(): any {
+    const fusiones = (prismaMock.$executeRaw as jest.Mock).mock.calls.filter(
+      (c: any[]) => Array.isArray(c[0]) && c[0].join('').includes('"v2SetupData"'),
+    )
+    const ultima = fusiones.at(-1)
+    return ultima ? JSON.parse(ultima[1]).plan : undefined
+  }
+
+  it('🔴 b2-r3 #3: alta sin tarjeta IN_PROGRESS sin id (respuesta perdida) y la prueba ya cancelada al terminar → el job la encuentra por la llave y cierra el alta en Gratis, sin 503 ni create', async () => {
+    filas = [altaEnCurso({ planStripeSubscriptionId: null })]
+    const terminada = {
+      ...cobrada({ primerCobroEsperadoCents: undefined, sinTarjeta: 'true' }),
+      status: 'canceled',
+      default_payment_method: null,
+      trial_end: FIN,
+      ended_at: FIN,
+      latest_invoice: { id: 'in_0', status: 'paid', amount_paid: 0 },
+    }
+    mockSubRetrieve.mockResolvedValue(terminada)
+    mockSubList.mockReturnValue({
+      autoPagingEach: async (cb: (s: unknown) => boolean | Promise<boolean>) => {
+        for (const s of [{ id: 'sub_ajena', metadata: { planActivationKey: 'otra' } }, terminada]) if ((await cb(s)) === false) return
+      },
+    })
+    // Su historia: sólo la factura de $0 de la prueba.
+    mockInvList.mockResolvedValue({ has_more: false, data: [{ id: 'in_0', status: 'paid', total: 0, amount_paid: 0 }] })
+
+    const r = await nuevoJob().runNow()
+
+    expect(r).toMatchObject({ revisadas: 1, cerradas: 1, fallidas: 0 })
+    expect(mockInvList).toHaveBeenCalledWith({ subscription: 'sub_3ds', status: 'paid', limit: 100 })
+    // El paso del plan quedó resuelto en Gratis: ACTIVE sin suscripción y sin lease, y el plan dice FREE.
+    expect(filas[0]).toMatchObject({ planActivationStatus: 'ACTIVE', planStripeSubscriptionId: null, planActivationLeaseUntil: null })
+    expect(planDelCierre()).toMatchObject({ tier: 'FREE', pruebaSinTarjetaTerminada: true, subscriptionId: 'sub_3ds', offerVersion: 2 })
+    // Nada se cobró, creó ni entregó.
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(mockEntregar).not.toHaveBeenCalled()
   })
 })

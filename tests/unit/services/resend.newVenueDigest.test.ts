@@ -176,6 +176,18 @@ describe('sendNewVenueOnboardingDigest', () => {
       expect(bodies).not.toContain('Primer cobro')
       expect(bodies).not.toContain('$')
     })
+
+    it('🔴 B2 Task 6: la prueba SIN tarjeta dice hasta cuándo y que sin tarjeta queda en Gratis, sin anunciar un primer cobro', async () => {
+      process.env.RESEND_API_KEY = 're_test_key'
+      mockSend.mockResolvedValue({ data: { id: 'resend-sin-tarjeta' }, error: null })
+      const mod = await import('../../../src/services/resend.service')
+
+      await mod.sendPlanActivatedNotice({ ...aviso, payNow: false, firstChargeCents: 92684, campaignCode: null, sinTarjeta: true })
+      const bodies = `${mockSend.mock.calls[0][0].html}\n${mockSend.mock.calls[0][0].text}`
+      expect(bodies).toContain('Prueba sin tarjeta hasta el 27 de noviembre de 2026. Si no pone tarjeta, queda en Gratis.')
+      expect(bodies).not.toContain('Prueba gratis con tarjeta')
+      expect(bodies).not.toContain('Primer cobro')
+    })
   })
 
   // -------------------------------------------------------------------------
