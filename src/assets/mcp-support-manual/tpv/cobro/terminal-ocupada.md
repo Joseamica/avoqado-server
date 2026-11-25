@@ -15,6 +15,10 @@ keywords:
   - no puedo mandar el cobro a la terminal
   - la terminal no recibe el cobro
   - cobro trabado
+  - terminal bloqueada
+  - está bloqueada desde Avoqado
+  - terminal en mantenimiento
+  - no se abrió la devolución
 ---
 
 ## Antes de empezar
@@ -35,4 +39,7 @@ El punto de venta dice que la terminal está ocupada cuando tiene un cobro en cu
 - Si aparece «Este cobro ya se cerró. Pídele al POS que lo vuelva a enviar.», vuelve a mandarlo desde el punto de venta.
 - Si aparece «Hay otro cobro en curso en esta terminal», espera a que termine; si no ves ningún cobro en la pantalla, reinicia la app.
 - Si aparece «Este cobro del POS NO se inició», espera a que termine el otro cobro; si es de otra venta, también puedes cobrar con otra terminal.
+- Si aparece «En la terminal: Está bloqueada desde Avoqado. Este cobro NO se inició.», no se cobró nada: la terminal muestra *Terminal bloqueada* y no acepta cobros. Pide a quien administra el negocio que la desbloquee desde Avoqado, o cobra con otra terminal.
+- Si aparece «En la terminal: Está en mantenimiento. Este cobro NO se inició.», no se cobró nada: en la terminal toca *Salir de mantenimiento* y vuelve a mandar el cobro desde el punto de venta.
+- Si al pedir una devolución aparece «La terminal está bloqueada desde Avoqado. No se abrió la devolución.» o «La terminal está en mantenimiento. No se abrió la devolución.», no se devolvió nada: quita el bloqueo o el mantenimiento como en los dos puntos anteriores y vuelve a pedirla.
 - Si aparece *No se cobró* en el aviso de arriba, úsalo sólo si estás seguro de que no se cobró, como explica la guía para declarar que un cobro no se cobró desde el aviso.
