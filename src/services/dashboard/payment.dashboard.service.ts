@@ -433,14 +433,18 @@ export async function getPaymentById(venueId: string, paymentId: string) {
     return chargedTotal === undefined ? it : { ...it, chargedTotal }
   })
   // D34 (aditivo, opcional): si el PUT del panel aceptaría quitar el cliente de la venta. El panel sólo ofrece «Eliminar de la
-  // transacción» cuando sí, y si no, enseña `reason`. Si esta lectura falla, el detalle responde sin el campo (el panel no ofrece
-  // el botón): pintar un botón no tumba el detalle del pago.
+  // transacción» cuando sí, y si no, enseña `reason`. Si esta lectura falla, el detalle responde igual y el campo dice que no se
+  // pudo revisar (el panel no ofrece el botón y lo explica): pintar un botón no tumba el detalle del pago.
   const customerUnlink = await sePuedeQuitarElCliente(prisma, { venueId, orderId: conMedio.order.id }).catch(error => {
-    logger.warn('[PAYMENT.DASHBOARD] No se pudo leer si se puede quitar el cliente: el detalle sale sin customerUnlink', {
+    logger.warn('[PAYMENT.DASHBOARD] No se pudo leer si se puede quitar el cliente: el detalle sale con customerUnlink sin revisar', {
       paymentId,
       error: error instanceof Error ? error.message : String(error),
     })
-    return null
+    return {
+      allowed: false as const,
+      code: 'CUSTOMER_UNLINK_UNKNOWN',
+      reason: 'No se pudo revisar si se puede quitar el cliente. Cierra y vuelve a abrir el pago.',
+    }
   })
   return { ...conMedio, order: { ...conMedio.order, items }, ...(customerUnlink && { customerUnlink }) }
 }

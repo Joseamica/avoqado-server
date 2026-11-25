@@ -946,7 +946,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/ventas/ligar-cliente-a-un-pago": {
-      "sha256": "59095dfaa31d7c3734dbc5a107c7f49984dd8e850df600efdb831344071bc5fc",
+      "sha256": "1fd073070521c3c4c392db07ee80551a0c5c04b727a9a5e4cae3576de3932e49",
       "requiredPermissions": [
         "payments:read",
         "customers:read",

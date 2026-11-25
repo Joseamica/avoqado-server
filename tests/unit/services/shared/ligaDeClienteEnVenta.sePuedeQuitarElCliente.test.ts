@@ -177,14 +177,18 @@ describe('D34 · el detalle del pago trae `customerUnlink`', () => {
     expect(r.customerUnlink).toEqual({ allowed: true })
   })
 
-  it('🔴 si la lectura del campo falla, el detalle del pago responde igual, sin el campo (el panel no ofrece el botón)', async () => {
+  it('🔴 si la lectura del campo falla, el detalle del pago responde igual y el campo dice que no se pudo revisar', async () => {
     preparar({ status: 'COMPLETED', paymentStatus: 'PAID', customerId: 'cust-A', cobrado: 100 })
     prismaMock.payment.findFirst.mockResolvedValueOnce(pago({ orderId: ORDER, order: { id: ORDER, items: [] } }) as any)
     sinCobradoPorRenglon()
     prismaMock.order.findFirst.mockRejectedValue(new Error('P1001 la base no contestó'))
     const r: any = await getPaymentById(VENUE, 'pay-1')
     expect(r).toMatchObject({ id: 'pay-1', order: { id: ORDER } })
-    expect(r).not.toHaveProperty('customerUnlink')
+    expect(r.customerUnlink).toEqual({
+      allowed: false,
+      code: 'CUSTOMER_UNLINK_UNKNOWN',
+      reason: expect.stringMatching(/No se pudo revisar/),
+    })
   })
 
   it('regresión: un pago sin venta no trae el campo y responde como antes', async () => {
