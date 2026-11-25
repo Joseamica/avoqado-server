@@ -903,6 +903,29 @@ describe('el nombre en Stripe (Task 8)', () => {
     })
   })
 
+  it('M2: el reintento que encuentra la versión ya publicada (yaPublicada) también pide el renombre, sin esperarlo; si rechaza, igual responde el éxito', async () => {
+    const atorada = await publicacionAtorada({ PRO: { displayName: 'Pro Plus', ...PRO_MENSUAL_NUEVO } })
+    await expect(reintentarPublicacion(atorada, STAFF)).resolves.toEqual({ number: 2, versionId: atorada })
+    await vueltas()
+    expect(mockRunNow).toHaveBeenCalledTimes(1)
+
+    // Otro clic después (su respuesta se perdió, o un doble clic): la versión ya es la vigente y se responde como éxito.
+    const alLlamar: boolean[] = []
+    mockRunNow.mockImplementation(async () => {
+      alLlamar.push(base.candadoTomado('plan-offer-publish'))
+      throw new Error('Stripe no contesta')
+    })
+    await expect(reintentarPublicacion(atorada, STAFF)).resolves.toEqual({ number: 2, versionId: atorada })
+    await vueltas()
+    expect(mockRunNow).toHaveBeenCalledTimes(2)
+    expect(alLlamar).toEqual([false])
+    expect(logger.warn).toHaveBeenCalledWith('[PlanOffer] el renombre inmediato en Stripe falló; el job lo reintenta', {
+      versionId: atorada,
+      error: 'Stripe no contesta',
+    })
+    expect(base.bitacora.filter(l => l.action === 'PLAN_OFFER_PUBLISHED')).toHaveLength(1)
+  })
+
   it('una publicación que no llega al movimiento no llama al renombre', async () => {
     await publicacionAtorada({ PRO: { displayName: 'Pro Plus', ...PRO_MENSUAL_NUEVO } })
     await vueltas()

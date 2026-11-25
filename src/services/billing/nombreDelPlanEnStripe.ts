@@ -59,12 +59,14 @@ const STRIPE_EN_LA_PUERTA = { timeout: 15_000, maxNetworkRetries: 0 } as const
 /** El job y el publicador: lo que dura su turno en el candado (más la espera del turno de otro). */
 const TRANSACCION_DEL_JOB = { maxWait: 15_000, timeout: 30_000 } as const
 /**
- * La sincronización: 4 intentos de `retry` × (hasta 3 peticiones del SDK × 10 s) más la espera entre intentos. Con la API lenta pero
- * contestando (lo normal), cabe en 120 s; el peor caso de laboratorio (las 12 peticiones colgadas los 10 s completos) llega a ~130 s:
- * Prisma deshace la transacción, se suelta el candado y la siguiente vuelta del job corrige lo que haya quedado. Mientras tanto, el job y
- * el publicador esperan su turno o lo intentan en la siguiente vuelta.
+ * La sincronización. Su peor caso con Stripe colgado cabe en 150 s: 4 intentos de `retry` × 3 peticiones del SDK × 10 s = 120 s, más
+ * las esperas entre intentos de `retry` (1 + 2 + 4 s con ±25 %: hasta 8.75 s) y las del SDK entre sus peticiones (0.5 y 1 s por
+ * intento: hasta 6 s), ≈ 135 s. No cuenta un `Retry-After` de Stripe (el SDK lo respeta hasta 60 s) ni una espera larga por el
+ * candado (el job lo suelta en cuanto termina sus dos llamadas de 10 s): si una de ésas lo empuja más allá, Prisma deshace la
+ * transacción, se suelta el candado y la siguiente vuelta del job corrige lo que haya quedado. Mientras tanto, el job y el publicador
+ * esperan su turno o lo intentan en la siguiente vuelta.
  */
-const TRANSACCION_DE_LA_SINCRONIZACION = { maxWait: 15_000, timeout: 120_000 } as const
+const TRANSACCION_DE_LA_SINCRONIZACION = { maxWait: 15_000, timeout: 150_000 } as const
 
 const MENSAJE_RENOMBRE_PENDIENTE = 'Estamos actualizando el nombre de tu plan. Intenta en un minuto. No se te cobró nada.'
 
@@ -120,20 +122,28 @@ async function anotarObservacion(
  * - `JOB` (el job y el intento inmediato del publicador): sin nombre propio → `SIN_VERSION` sin tocar Stripe. Con él, lee el producto
  *   y, si dice otro, `products.update(productId, { name })` (la respuesta ya trae el nombre: no se relee). Nunca lanza: `FALLO`.
  * - `SYNC` (`syncFeaturesToStripe`): el `products.update(productId, { name, description })` de hoy, directo, con el mismo `retry`,
- *   sin leer antes ni después. El nombre es el de la vigente o, sin nombre propio, el del catálogo (`catalogo.nombre`). Si Stripe
- *   lo rechaza, el error sube tal cual (la sincronización salta el precio de ese plan, como hoy). Si el candado o la lectura fallan,
- *   `FALLO` con aviso y sin escribir ningún nombre.
+ *   sobre el mismo producto que la sincronización (`catalogo.productId`) y sin leer antes ni después. El nombre es el de la vigente o,
+ *   sin nombre propio, el del catálogo (`catalogo.nombre`). Si Stripe lo rechaza, el error sube tal cual (la sincronización salta el
+ *   precio de ese plan, como hoy). Si el candado o la lectura fallan, `FALLO` con aviso y sin escribir ningún nombre.
+ *
+ * Si Stripe ya tiene el nombre y lo que falla después es la observación o el commit, se avisa así («ya se escribió en Stripe») y se
+ * devuelve lo que se escribió, no `FALLO`.
  *
  * Sin llave de idempotencia: poner un nombre es repetible.
  */
 export async function escribirNombreDelPlan(
   tier: PlanPagado,
   origen: 'JOB' | 'SYNC',
-  catalogo?: { nombre: string; descripcion: string | null },
+  catalogo?: { nombre: string; descripcion: string | null; productId: string },
 ): Promise<EstadoDelNombre> {
   if (origen === 'SYNC' && !catalogo) throw new Error('escribirNombreDelPlan: la sincronización necesita el nombre del catálogo')
-  /** El error de Stripe de la sincronización: ése sube tal cual; los demás (candado, base) son `FALLO`. */
-  let rechazoDeStripe: unknown = undefined
+  /**
+   * Lo que pasó dentro de la transacción, para el `catch` de afuera (en un objeto: el análisis de flujo no ve lo que una función
+   * interna le asigna a una variable).
+   * - `rechazoDeStripe`: el error de Stripe de la sincronización; ése sube tal cual, los demás (candado, base) son `FALLO`.
+   * - `escritoEnStripe`: lo que ya quedó en Stripe (un `products.update` que contestó); `null` = no se escribió nada.
+   */
+  const marca: { rechazoDeStripe: unknown; escritoEnStripe: EstadoDelNombre | null } = { rechazoDeStripe: undefined, escritoEnStripe: null }
   try {
     return await prisma.$transaction(
       async (tx): Promise<EstadoDelNombre> => {
@@ -142,36 +152,41 @@ export async function escribirNombreDelPlan(
         const vigente = await ofertaVigente(tx)
         const propio = nombrePropio(vigente, tier)
         if (!propio && origen === 'JOB') return 'SIN_VERSION'
-        const productId = await productoDelPlan(tx, tier)
-        if (!productId) {
-          logger.error('🚨 nombreDelPlanEnStripe: el plan no tiene producto de Stripe — no se escribe su nombre', { tier, origen })
-          return 'FALLO'
-        }
 
         if (origen === 'SYNC') {
-          const nombre = propio ?? (catalogo as { nombre: string }).nombre
+          const {
+            nombre: delCatalogo,
+            descripcion,
+            productId,
+          } = catalogo as { nombre: string; descripcion: string | null; productId: string }
           let actualizado: { name?: string | null } | undefined
           try {
             actualizado = await retry(
               () =>
                 stripe.products.update(
                   productId,
-                  { name: nombre, description: catalogo?.descripcion || undefined },
+                  { name: propio ?? delCatalogo, description: descripcion || undefined },
                   STRIPE_EN_LA_SINCRONIZACION,
                 ),
               { retries: 3, shouldRetry: shouldRetryStripeError, context: 'stripe.updateProduct' },
             )
           } catch (error) {
-            rechazoDeStripe = error
+            marca.rechazoDeStripe = error
             throw error
           }
           // Sin nombre propio es el nombre del catálogo, como hoy: nadie anota la observación.
-          if (!propio) return 'SIN_VERSION'
-          await anotarObservacion(tx, tier, propio, 'RENOMBRADO', actualizado?.name ?? null)
-          return 'RENOMBRADO'
+          const escrito: EstadoDelNombre = propio ? 'RENOMBRADO' : 'SIN_VERSION'
+          marca.escritoEnStripe = escrito
+          if (propio) await anotarObservacion(tx, tier, propio, 'RENOMBRADO', actualizado?.name ?? null)
+          return escrito
         }
 
-        // JOB, con la vigente dueña del nombre.
+        // JOB, con la vigente dueña del nombre: su producto se lee de la base.
+        const productId = await productoDelPlan(tx, tier)
+        if (!productId) {
+          logger.error('🚨 nombreDelPlanEnStripe: el plan no tiene producto de Stripe — no se escribe su nombre', { tier, origen })
+          return 'FALLO'
+        }
         const esperado = propio as string
         /** `undefined` mientras Stripe no se haya podido leer. */
         let enStripe: string | null | undefined
@@ -182,6 +197,7 @@ export async function escribirNombreDelPlan(
           if (enStripe !== esperado) {
             enStripe = (await stripe.products.update(productId, { name: esperado }, STRIPE_BAJO_EL_CANDADO)).name ?? null
             estado = enStripe === esperado ? 'RENOMBRADO' : 'FALLO'
+            marca.escritoEnStripe = estado
           }
         } catch (error) {
           logger.warn('Renombre de los planes: Stripe no contestó el nombre del plan', { tier, error: comoTexto(error) })
@@ -193,7 +209,16 @@ export async function escribirNombreDelPlan(
       origen === 'SYNC' ? TRANSACCION_DE_LA_SINCRONIZACION : TRANSACCION_DEL_JOB,
     )
   } catch (error) {
-    if (origen === 'SYNC' && rechazoDeStripe !== undefined && error === rechazoDeStripe) throw error
+    if (origen === 'SYNC' && marca.rechazoDeStripe !== undefined && error === marca.rechazoDeStripe) throw error
+    if (marca.escritoEnStripe !== null) {
+      // Stripe ya tiene el nombre; lo que falló después fue la observación o el commit (la siguiente vuelta la vuelve a anotar).
+      logger.warn('Renombre de los planes: el nombre ya se escribió en Stripe; no se guardó la observación', {
+        tier,
+        origen,
+        error: comoTexto(error),
+      })
+      return marca.escritoEnStripe
+    }
     // El candado no llegó a tiempo, la base no contestó o la vigente está rota: no se escribió ningún nombre.
     logger.warn('Renombre de los planes: no se pudo tomar el candado del nombre o leer la vigente — no se escribe el nombre', {
       tier,

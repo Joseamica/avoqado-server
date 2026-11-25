@@ -2,13 +2,13 @@
  * Planes editables B1, Task 8: el job que hace converger el nombre del producto de Stripe de cada plan con la oferta vigente.
  *
  * Se prueba con el `scheduleJob` REAL: el `CronJob` que registra el job se toma con `Reflect.get(job, 'cron')` y se dispara con
- * `fireOnTick()` (pasa por `runInJobContext`, como en producción). Un tick cuyo renombrador rechaza nunca deja escapar la promesa:
- * en `server.ts` un `unhandledRejection` arranca el apagado.
+ * `fireOnTick()` (pasa por `runInJobContext`, como en producción). El tick que registró el scheduler no devuelve ninguna promesa: un
+ * rechazo que llegara a `cron` sería un `unhandledRejection`, y en `server.ts` eso arranca el apagado.
  */
 import fs from 'node:fs'
 import path from 'node:path'
 import ts from 'typescript'
-import type { CronJob } from 'cron'
+import { CronTime, type CronJob } from 'cron'
 
 jest.mock('@/services/billing/nombreDelPlanEnStripe', () => ({ renombrarProductosDelPlan: jest.fn() }))
 
@@ -22,6 +22,28 @@ type Resultado = Record<PlanPagado, EstadoDelNombre>
 const AL_DIA: Resultado = { PRO: 'AL_DIA', PREMIUM: 'SIN_VERSION' }
 
 const cronDe = (job: PlanOfferRenameJob) => Reflect.get(job, 'cron') as CronJob
+/** El callback tal como lo registró `scheduleJob` en el `CronJob` (el envoltorio de `runInJobContext` con el tick adentro). */
+function tickDe(job: PlanOfferRenameJob): () => unknown {
+  const registrados = Reflect.get(cronDe(job), '_callbacks') as Array<() => unknown> | undefined
+  if (!Array.isArray(registrados) || registrados.length !== 1) throw new Error('El CronJob no trae exactamente un callback registrado')
+  return registrados[0]
+}
+
+/** Los segundos que dispara el primer campo de un horario de 6 campos, expandidos por el propio `cron` (listas, rangos y pasos). */
+function segundosDe(horario: string): number[] {
+  const campo = horario.trim().split(/\s+/)[0]
+  const tiempo = new CronTime(`${campo} * * * * *`, 'UTC')
+  const inicio = new Date('2026-11-25T12:00:00.000Z')
+  const fin = inicio.getTime() + 60_000
+  const segundos: number[] = []
+  let cursor = new Date(inicio.getTime() - 1)
+  for (;;) {
+    const siguiente = tiempo.getNextDateFrom(cursor, 'UTC').toJSDate()
+    if (siguiente.getTime() >= fin) return segundos
+    segundos.push(siguiente.getUTCSeconds())
+    cursor = siguiente
+  }
+}
 const microtareas = () => new Promise<void>(listo => setImmediate(listo))
 
 const jobs: PlanOfferRenameJob[] = []
@@ -46,30 +68,22 @@ describe('PlanOfferRenameJob', () => {
     expect(renombrar).toHaveBeenCalledTimes(1)
   })
 
-  it('🔴 un tick cuyo renombrador rechaza no deja escapar la promesa: logger.error y ningún unhandledRejection; el siguiente tick vuelve a correr', async () => {
-    const sinManejar = jest.fn()
-    process.on('unhandledRejection', sinManejar)
-    try {
-      const renombrar = jest
-        .fn<Promise<Resultado>, []>()
-        .mockRejectedValueOnce(new Error('la base no contesta'))
-        .mockResolvedValueOnce(AL_DIA)
-      const job = nuevo(renombrar)
+  it('🔴 el tick que registró el scheduler no le devuelve una promesa: si el renombrador rechaza, logger.error y el siguiente tick vuelve a correr', async () => {
+    const renombrar = jest
+      .fn<Promise<Resultado>, []>()
+      .mockRejectedValueOnce(new Error('la base no contesta'))
+      .mockResolvedValueOnce(AL_DIA)
+    const tick = tickDe(nuevo(renombrar))
 
-      void cronDe(job).fireOnTick()
-      await microtareas()
-      await microtareas()
+    // Un tick que devolviera la promesa de la corrida se la entregaría a `cron`, que no la espera: su rechazo escaparía.
+    expect(tick()).toBeUndefined()
+    await microtareas()
+    await microtareas()
+    expect(logger.error).toHaveBeenCalledWith('Renombre de los planes: la corrida falló', { error: expect.any(Error) })
 
-      expect(sinManejar).not.toHaveBeenCalled()
-      expect(logger.error).toHaveBeenCalledWith('Renombre de los planes: la corrida falló', { error: expect.any(Error) })
-
-      void cronDe(job).fireOnTick()
-      await microtareas()
-      expect(renombrar).toHaveBeenCalledTimes(2)
-      expect(sinManejar).not.toHaveBeenCalled()
-    } finally {
-      process.off('unhandledRejection', sinManejar)
-    }
+    expect(tick()).toBeUndefined()
+    await microtareas()
+    expect(renombrar).toHaveBeenCalledTimes(2)
   })
 
   it('start() deja el CronJob activo y stop() lo detiene', () => {
@@ -85,16 +99,28 @@ describe('PlanOfferRenameJob', () => {
     expect(cron.isActive).toBe(false)
   })
 
-  it('el segundo :03 es sólo suyo en la lista de horarios', () => {
-    const otros = Object.entries(DATABASE_JOB_SCHEDULES as Record<string, string>)
+  // `job-schedule-hardening` sólo revisa sus siete jobs y el de displayModeRequestExpiry contra los demás: el :03 se revisa aquí.
+  it('el segundo :03 es sólo suyo en la lista de horarios (con listas, rangos y pasos en el campo de los segundos)', () => {
+    // El expansor entiende cada forma.
+    expect(segundosDe('*/20 * * * * *')).toEqual([0, 20, 40])
+    expect(segundosDe('1-59/10 * * * * *')).toEqual([1, 11, 21, 31, 41, 51])
+    expect(segundosDe('0-5 * * * * *')).toEqual([0, 1, 2, 3, 4, 5])
+    expect(segundosDe('5,35 */10 * * * *')).toEqual([5, 35])
+    expect(segundosDe(DATABASE_JOB_SCHEDULES.planOfferRename)).toEqual([3])
+
+    const conElTres = Object.entries(DATABASE_JOB_SCHEDULES as Record<string, string>)
       .filter(([nombre]: [string, string]) => nombre !== 'planOfferRename')
-      .flatMap(([, horario]: [string, string]) => horario.split(' ')[0].split(','))
-    expect(otros).not.toContain('3')
+      .filter(([, horario]: [string, string]) => segundosDe(horario).includes(3))
+      .map(([nombre]: [string, string]) => nombre)
+    expect(conElTres).toEqual([])
   })
 
-  it('runNow renombra y devuelve el estado por plan; dos vueltas encimadas: la segunda devuelve null sin llamar a Stripe', async () => {
+  it('runNow renombra y devuelve el estado por plan; una vuelta encimada devuelve null sin llamar a Stripe y deja pedida exactamente UNA vuelta más al terminar', async () => {
     let soltar!: (r: Resultado) => void
-    const renombrar = jest.fn<Promise<Resultado>, []>().mockImplementationOnce(() => new Promise<Resultado>(listo => (soltar = listo)))
+    const renombrar = jest
+      .fn<Promise<Resultado>, []>()
+      .mockImplementationOnce(() => new Promise<Resultado>(listo => (soltar = listo)))
+      .mockResolvedValue(AL_DIA)
     const job = nuevo(renombrar)
 
     const primera = job.runNow()
@@ -103,12 +129,62 @@ describe('PlanOfferRenameJob', () => {
 
     soltar({ PRO: 'RENOMBRADO', PREMIUM: 'SIN_VERSION' })
     await expect(primera).resolves.toEqual({ PRO: 'RENOMBRADO', PREMIUM: 'SIN_VERSION' })
+    // La vuelta pedida arrancó al terminar la primera (pudo leer la vigente antes de que se publicara otra), y sólo una.
+    await microtareas()
+    expect(renombrar).toHaveBeenCalledTimes(2)
+    await microtareas()
+    expect(renombrar).toHaveBeenCalledTimes(2)
+  })
 
-    // La marca se soltó: la siguiente vuelta corre, también después de una que falló.
-    renombrar.mockRejectedValueOnce(new Error('falló')).mockResolvedValueOnce(AL_DIA)
-    await expect(job.runNow()).rejects.toThrow('falló')
+  it('dos llamadas encimadas siguen dejando UNA sola vuelta más; sin llamadas encimadas no hay vuelta extra', async () => {
+    let soltar!: (r: Resultado) => void
+    const renombrar = jest
+      .fn<Promise<Resultado>, []>()
+      .mockImplementationOnce(() => new Promise<Resultado>(listo => (soltar = listo)))
+      .mockResolvedValue(AL_DIA)
+    const job = nuevo(renombrar)
+
+    const primera = job.runNow()
+    await expect(job.runNow()).resolves.toBeNull()
+    await expect(job.runNow()).resolves.toBeNull()
+    soltar(AL_DIA)
+    await primera
+    await microtareas()
+    await microtareas()
+    expect(renombrar).toHaveBeenCalledTimes(2)
+
+    // Una vuelta sola, sin nadie encimado, no pide otra.
     await expect(job.runNow()).resolves.toEqual(AL_DIA)
+    await microtareas()
     expect(renombrar).toHaveBeenCalledTimes(3)
+  })
+
+  it('la marca se suelta también después de una vuelta que falló; una vuelta extra que falla queda en logger.error', async () => {
+    let fallar!: (e: Error) => void
+    const renombrar = jest
+      .fn<Promise<Resultado>, []>()
+      .mockRejectedValueOnce(new Error('falló'))
+      .mockImplementationOnce(() => new Promise<Resultado>((_listo, rechazar) => (fallar = rechazar)))
+      .mockRejectedValueOnce(new Error('la vuelta extra falló'))
+      .mockResolvedValue(AL_DIA)
+    const job = nuevo(renombrar)
+
+    await expect(job.runNow()).rejects.toThrow('falló')
+
+    // La segunda vuelta corre (la marca se soltó); mientras, alguien pide otra.
+    const segunda = job.runNow()
+    await expect(job.runNow()).resolves.toBeNull()
+    expect(renombrar).toHaveBeenCalledTimes(2)
+    fallar(new Error('la segunda falló'))
+    await expect(segunda).rejects.toThrow('la segunda falló')
+
+    // La vuelta pedida corre aunque la segunda haya fallado, y su rechazo queda en el log (no escapa).
+    await microtareas()
+    await microtareas()
+    expect(renombrar).toHaveBeenCalledTimes(3)
+    expect(logger.error).toHaveBeenCalledWith('Renombre de los planes: la corrida falló', { error: expect.any(Error) })
+    await expect(job.runNow()).resolves.toEqual(AL_DIA)
+    expect(renombrar).toHaveBeenCalledTimes(4)
   })
 
   it('🔴 arranca y se detiene con el SERVIDOR', () => {

@@ -214,14 +214,18 @@ export async function syncFeaturesToStripe(): Promise<Feature[]> {
         // que calcula el nombre de la vigente justo antes de escribir (así esta sincronización no deshace un renombre publicado). Sin
         // versión del editor es el mismo `products.update` de hoy (nombre y descripción del catálogo, el mismo `retry`). Si Stripe lo
         // rechaza, el error llega al `catch` de abajo como hoy (se salta el precio de este plan); si el candado o la lectura de la
-        // vigente fallan, no se escribe ningún nombre y se sigue con el precio. Import perezoso: el escritor importa este módulo.
+        // vigente fallan, no se escribe ningún nombre y se sigue con el precio. Si el nombre quedó en Stripe pero no su observación, el
+        // escritor lo avisa y aquí cuenta como escrito. Import perezoso: el escritor importa este módulo.
         const { escribirNombreDelPlan } = await import('./billing/nombreDelPlanEnStripe')
         const estado = await escribirNombreDelPlan(tierDelPlan, 'SYNC', {
           nombre: feature.name,
           descripcion: feature.description,
+          productId,
         })
         if (estado === 'FALLO')
-          logger.warn(`  ⚠️ Stripe product ${productId} for feature ${feature.code}: name not written (lock or read failed)`)
+          logger.warn(
+            `  ⚠️ Stripe product ${productId} for feature ${feature.code}: name NOT written (the name lock or the offer read failed)`,
+          )
         else logger.info(`  ✅ Updated Stripe product ${productId} for feature ${feature.code}`)
       } else {
         await retry(

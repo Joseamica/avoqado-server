@@ -191,8 +191,10 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
       expect(stripe[0][3]).toEqual({ timeout: 10_000 })
       expect(stripe[1][3]).toEqual({ timeout: 10_000 })
       expect(stripe[3]).toHaveLength(3)
-      // Lo nuevo es sólo el candado y la lectura de la vigente: nadie escribe la observación (la oferta no es dueña del nombre).
+      // Lo nuevo es sólo el candado y la lectura de la vigente: nadie escribe la observación (la oferta no es dueña del nombre), y el
+      // producto es el mismo argumento de hoy, el de la Feature que se sincroniza (no se vuelve a leer).
       expect(tx.planOfferPointer.update).not.toHaveBeenCalled()
+      expect(tx.feature.findUnique).not.toHaveBeenCalled()
       expect(llamadas.filter((l: unknown[]) => l[0] === 'lee la observación')).toEqual([])
       // Lo que se guarda en la base, como hoy.
       expect(prismaMock.feature.update.mock.calls.map((c: unknown[]) => c[0])).toEqual([
@@ -272,7 +274,7 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
       data: { nombresEnStripe: { PRO: { esperado: 'Plan Avoqado Pro Plus', enStripe: 'Plan Avoqado Pro Plus', estado: 'RENOMBRADO' } } },
     })
     expect(prismaMock.planOfferPointer.findUnique).not.toHaveBeenCalled()
-    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { maxWait: 15_000, timeout: 120_000 })
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { maxWait: 15_000, timeout: 150_000 })
   })
 
   it('🔴 con versión del editor y products.update del plan fallando, NO crea el precio, igual que hoy', async () => {
@@ -304,6 +306,23 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
     expect(logger.error).toHaveBeenCalledWith('❌ Error syncing feature PLAN_PREMIUM to Stripe:', rechazo)
   })
 
+  it('M3: si el nombre ya quedó en Stripe y sólo falló la observación, la sincronización lo cuenta como escrito (no dice «not written»)', async () => {
+    const v2 = definicionDePrueba({ ids: idsDeLaVersion('v2'), nombres: { PRO: 'Pro Plus' }, productos: { PRO: 'Plan Avoqado Pro Plus' } })
+    const tx = usarTx(punteroA('cv2', 2, v2))
+    tx.planOfferPointer.update.mockRejectedValue(Object.assign(new Error('Transaction already closed'), { code: 'P2028' }))
+
+    await syncFeaturesToStripe()
+
+    const avisos = (logger.warn as jest.Mock).mock.calls.map((c: unknown[]) => c[0] as string)
+    expect(avisos).toContain('Renombre de los planes: el nombre ya se escribió en Stripe; no se guardó la observación')
+    expect(avisos.some((a: string) => a.includes('name NOT written'))).toBe(false)
+    expect((logger.info as jest.Mock).mock.calls.map((c: unknown[]) => c[0])).toContain(
+      '  ✅ Updated Stripe product prod_pro for feature PLAN_PRO',
+    )
+    // Y sigue igual: el precio que le falta a Premium se crea y las demás funciones siguen.
+    expect(llamadasAStripe().map(sinOpciones).slice(1)).toEqual(GRABACION_DE_HOY.slice(1))
+  })
+
   it('🔴 si el candado o la lectura de la vigente fallan: aviso, NINGÚN nombre escrito para ese plan (ni sin candado) y sigue con el precio', async () => {
     usarTx(null)
     prismaMock.$transaction.mockRejectedValue(Object.assign(new Error('Transaction API error'), { code: 'P2028' }))
@@ -321,6 +340,8 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
       'f_inv',
       'f_chat',
     ])
-    expect(logger.warn).toHaveBeenCalled()
+    expect((logger.warn as jest.Mock).mock.calls.map((c: unknown[]) => c[0])).toContain(
+      '  ⚠️ Stripe product prod_pro for feature PLAN_PRO: name NOT written (the name lock or the offer read failed)',
+    )
   })
 })

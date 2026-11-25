@@ -21,13 +21,12 @@ process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://user:pass@l
 const mockPriceList = jest.fn()
 const mockPriceRetrieve = jest.fn()
 const mockSessionCreate = jest.fn()
-const mockSessionExpire = jest.fn()
 const mockProductRetrieve = jest.fn()
 jest.mock('stripe', () =>
   jest.fn().mockImplementation(() => ({
     prices: { list: mockPriceList, retrieve: mockPriceRetrieve },
     products: { retrieve: mockProductRetrieve },
-    checkout: { sessions: { create: mockSessionCreate, list: jest.fn(), expire: mockSessionExpire } },
+    checkout: { sessions: { create: mockSessionCreate, list: jest.fn(), expire: jest.fn() } },
     subscriptions: { list: jest.fn(), retrieve: jest.fn() },
     customers: { create: jest.fn(), retrieve: jest.fn() },
   })),
@@ -72,7 +71,6 @@ beforeEach(() => {
   mockPriceList.mockReset()
   mockPriceRetrieve.mockReset()
   mockProductRetrieve.mockReset()
-  mockSessionExpire.mockReset()
   mockSessionCreate.mockReset().mockResolvedValue({ id: 'cs_1', url: 'https://checkout.stripe.test/cs_1' })
   mockAutorizar
     .mockReset()
@@ -169,9 +167,8 @@ describe('POST /dashboard/venues/:venueId/plan/checkout — el nombre del plan e
       message: 'Estamos actualizando el nombre de tu plan. Intenta en un minuto. No se te cobró nada.',
     })
     expect(mockProductRetrieve).toHaveBeenCalledWith('prod_pro', { timeout: 15_000, maxNetworkRetries: 0 })
-    // La puerta está ANTES de la regla común: la sesión abierta de otra pestaña sigue viva.
+    // La puerta está ANTES de la regla común (la única que vence las sesiones abiertas): la de otra pestaña sigue viva.
     expect(mockAutorizar).not.toHaveBeenCalled()
-    expect(mockSessionExpire).not.toHaveBeenCalled()
     expect(mockSessionCreate).not.toHaveBeenCalled()
   })
 

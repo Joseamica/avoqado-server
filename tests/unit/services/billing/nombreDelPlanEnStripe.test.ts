@@ -141,9 +141,13 @@ describe('el escritor (escribirNombreDelPlan)', () => {
       usarTx(crearTx(puntero))
       mockUpdate.mockReset().mockResolvedValue({ id: 'prod_pro', name: 'Plan Pro' })
 
-      await expect(escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: 'Todo Pro' })).resolves.toBe('SIN_VERSION')
+      await expect(
+        escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: 'Todo Pro', productId: 'prod_sync' }),
+      ).resolves.toBe('SIN_VERSION')
       // El mismo `products.update` de hoy (nombre y descripción del catálogo); la única opción nueva es el tope de 10 s.
-      expect(mockUpdate.mock.calls).toEqual([['prod_pro', { name: 'Plan Pro', description: 'Todo Pro' }, { timeout: 10_000 }]])
+      // Sobre el producto que trae la sincronización (el mismo argumento de hoy): no se vuelve a leer de la base.
+      expect(mockUpdate.mock.calls).toEqual([['prod_sync', { name: 'Plan Pro', description: 'Todo Pro' }, { timeout: 10_000 }]])
+      expect(tx.feature.findUnique).not.toHaveBeenCalled()
       expect(mockRetrieve).not.toHaveBeenCalled()
       // 🔴 Sin nombre propio nadie escribe la observación (C3).
       expect(tx.planOfferPointer.update).not.toHaveBeenCalled()
@@ -151,7 +155,7 @@ describe('el escritor (escribirNombreDelPlan)', () => {
     // Una descripción vacía viaja como hoy: `undefined`.
     usarTx(crearTx(punteroA('cv1', 1, versionUno())))
     mockUpdate.mockReset().mockResolvedValue({ id: 'prod_pro', name: 'Plan Pro' })
-    await escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: null })
+    await escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: null, productId: 'prod_sync' })
     expect(mockUpdate.mock.calls[0][1]).toEqual({ name: 'Plan Pro', description: undefined })
   })
 
@@ -236,14 +240,17 @@ describe('el escritor (escribirNombreDelPlan)', () => {
     await expect(escribirNombreDelPlan('PRO', 'JOB')).resolves.toBe('FALLO')
   })
 
-  it('SYNC con la vigente dueña del nombre: escribe el de la vigente con la descripción del catálogo, en una transacción de 120 s, y anota la observación', async () => {
+  it('SYNC con la vigente dueña del nombre: escribe el de la vigente con la descripción del catálogo, en una transacción de 150 s, y anota la observación', async () => {
     usarTx(crearTx(punteroA('cv2', 2, versionDos())))
     mockUpdate.mockResolvedValue({ id: 'prod_pro', name: PRO_PLUS })
 
-    await expect(escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: 'Todo Pro' })).resolves.toBe('RENOMBRADO')
-    expect(mockUpdate.mock.calls).toEqual([['prod_pro', { name: PRO_PLUS, description: 'Todo Pro' }, { timeout: 10_000 }]])
+    await expect(
+      escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: 'Todo Pro', productId: 'prod_sync' }),
+    ).resolves.toBe('RENOMBRADO')
+    expect(mockUpdate.mock.calls).toEqual([['prod_sync', { name: PRO_PLUS, description: 'Todo Pro' }, { timeout: 10_000 }]])
+    expect(tx.feature.findUnique).not.toHaveBeenCalled()
     expect(mockRetrieve).not.toHaveBeenCalled()
-    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { maxWait: 15_000, timeout: 120_000 })
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { maxWait: 15_000, timeout: 150_000 })
     expect(tx.planOfferPointer.update).toHaveBeenCalledWith({
       where: { id: 'vigente' },
       data: { nombresEnStripe: { PRO: { esperado: PRO_PLUS, enStripe: PRO_PLUS, estado: 'RENOMBRADO' } } },
@@ -255,22 +262,72 @@ describe('el escritor (escribirNombreDelPlan)', () => {
     const rechazo = Object.assign(new Error('Invalid request'), { type: 'StripeInvalidRequestError', statusCode: 400 })
     mockUpdate.mockRejectedValue(rechazo)
 
-    await expect(escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: null })).rejects.toBe(rechazo)
+    await expect(escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: null, productId: 'prod_sync' })).rejects.toBe(
+      rechazo,
+    )
     expect(tx.planOfferPointer.update).not.toHaveBeenCalled()
   })
 
   it('🔴 SYNC: si el candado o la lectura de la vigente fallan, FALLO con aviso y sin escribir ningún nombre (nunca un update sin candado)', async () => {
     prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('Transaction API error'), { code: 'P2028' }))
-    await expect(escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: null })).resolves.toBe('FALLO')
+    await expect(escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: null, productId: 'prod_sync' })).resolves.toBe(
+      'FALLO',
+    )
 
     const roto = crearTx(null)
     roto.planOfferPointer.findUnique.mockRejectedValue(Object.assign(new Error('Can’t reach database server'), { code: 'P1001' }))
     usarTx(roto)
-    await expect(escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: null })).resolves.toBe('FALLO')
+    await expect(escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: null, productId: 'prod_sync' })).resolves.toBe(
+      'FALLO',
+    )
 
     expect(mockUpdate).not.toHaveBeenCalled()
     expect(mockRetrieve).not.toHaveBeenCalled()
     expect(logger.warn).toHaveBeenCalledTimes(2)
+  })
+
+  it('M3: si el nombre ya quedó en Stripe y lo que falla es la observación o el commit, se dice así y se devuelve lo que se escribió', async () => {
+    const yaEscrito = 'Renombre de los planes: el nombre ya se escribió en Stripe; no se guardó la observación'
+    const noSeEscribe = 'Renombre de los planes: no se pudo tomar el candado del nombre o leer la vigente — no se escribe el nombre'
+    const caida = Object.assign(new Error('Transaction already closed'), { code: 'P2028' })
+    const mensajes = () => (logger.warn as jest.Mock).mock.calls.map((c: unknown[]) => c[0])
+
+    // JOB: el update contestó y la observación no se pudo guardar.
+    const job = crearTx(punteroA('cv2', 2, versionDos()))
+    job.planOfferPointer.update.mockRejectedValue(caida)
+    usarTx(job)
+    mockRetrieve.mockResolvedValue({ id: 'prod_pro', name: 'Plan Avoqado Pro' })
+    mockUpdate.mockResolvedValue({ id: 'prod_pro', name: PRO_PLUS })
+    await expect(escribirNombreDelPlan('PRO', 'JOB')).resolves.toBe('RENOMBRADO')
+    expect(mensajes()).toEqual([yaEscrito])
+
+    // SYNC con nombre propio: lo mismo con la observación.
+    ;(logger.warn as jest.Mock).mockClear()
+    const conNombre = crearTx(punteroA('cv2', 2, versionDos()))
+    conNombre.planOfferPointer.update.mockRejectedValue(caida)
+    usarTx(conNombre)
+    await expect(escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: null, productId: 'prod_sync' })).resolves.toBe(
+      'RENOMBRADO',
+    )
+    expect(mensajes()).toEqual([yaEscrito])
+
+    // SYNC sin nombre propio: el update de hoy contestó y lo que falló fue el commit.
+    ;(logger.warn as jest.Mock).mockClear()
+    usarTx(crearTx(punteroA('cv1', 1, versionUno())))
+    prismaMock.$transaction.mockImplementationOnce(async (fn: (t: TxDePrueba) => unknown) => {
+      await fn(tx)
+      throw caida
+    })
+    await expect(escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: null, productId: 'prod_sync' })).resolves.toBe(
+      'SIN_VERSION',
+    )
+    expect(mensajes()).toEqual([yaEscrito])
+
+    // Y si no se llegó a escribir nada, el aviso de siempre.
+    ;(logger.warn as jest.Mock).mockClear()
+    prismaMock.$transaction.mockRejectedValueOnce(caida)
+    await expect(escribirNombreDelPlan('PRO', 'JOB')).resolves.toBe('FALLO')
+    expect(mensajes()).toEqual([noSeEscribe])
   })
 
   it('renombrarProductosDelPlan: sólo el plan dueño de su nombre pasa por el escritor; el otro queda SIN_VERSION sin abrir transacción', async () => {

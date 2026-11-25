@@ -27,6 +27,8 @@ export class PlanOfferRenameJob {
   private readonly cron: CronHandle
   private readonly renombrar: () => Promise<Resultado>
   private corriendo = false
+  /** Alguien pidió una vuelta mientras otra corría (un publicador que movió el puntero a media vuelta): se corre una más al terminar. */
+  private otraVuelta = false
 
   constructor(deps: Dependencias = {}) {
     this.renombrar = deps.renombrar ?? renombrarProductosDelPlan
@@ -53,9 +55,15 @@ export class PlanOfferRenameJob {
     this.cron.stop()
   }
 
-  /** Una vuelta. `null` si otra sigue corriendo (la marca se suelta en `finally`, también si la vuelta falla). */
+  /**
+   * Una vuelta. `null` si otra sigue corriendo: entonces queda pedida UNA vuelta más, que arranca en cuanto ésa termine (pudo leer la
+   * vigente antes de que se publicara la nueva). La marca se suelta en `finally`, también si la vuelta falla.
+   */
   async runNow(): Promise<Resultado | null> {
-    if (this.corriendo) return null
+    if (this.corriendo) {
+      this.otraVuelta = true
+      return null
+    }
     this.corriendo = true
     try {
       const resultado = await this.renombrar()
@@ -64,6 +72,10 @@ export class PlanOfferRenameJob {
       return resultado
     } finally {
       this.corriendo = false
+      if (this.otraVuelta) {
+        this.otraVuelta = false
+        void this.runNow().catch(error => logger.error('Renombre de los planes: la corrida falló', { error }))
+      }
     }
   }
 }

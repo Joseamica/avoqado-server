@@ -226,7 +226,24 @@ async function yaPublicada(versionId: string, error: unknown): Promise<{ number:
   const number = version && version.status === 'PUBLISHED' ? version.number : null
   if (number === null || puntero?.currentVersionId !== versionId) return null
   logger.info('[PlanOffer] la versión ya la publicó otra petición: se responde como éxito', { versionId, number })
+  // La respuesta de esa otra petición pudo perderse antes de pedir el renombre: se pide aquí también (el job no corre dos a la vez).
+  renombrarSinEsperar(versionId)
   return { number, versionId }
+}
+
+/**
+ * Task 8: el nombre del producto de Stripe, siempre fuera de toda transacción y candado. Sin esperarlo: la respuesta no espera a
+ * Stripe y, mientras converge, la puerta del checkout de «Tu plan» no abre con otro nombre. Si falla, el job lo reintenta cada minuto.
+ */
+function renombrarSinEsperar(versionId: string): void {
+  void Promise.resolve()
+    .then(() => planOfferRenameJob.runNow())
+    .catch((error: unknown) =>
+      logger.warn('[PlanOffer] el renombre inmediato en Stripe falló; el job lo reintenta', {
+        versionId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    )
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -570,16 +587,7 @@ async function moverPunterosEnUnaTransaccion(versionId: string, staffId: string)
     return { number, versionId }
   })
   logger.info('[PlanOffer] versión publicada', { ...hecho, por: staffId })
-  // Task 8: el nombre del producto de Stripe, ya fuera de toda transacción y candado. Sin esperarlo: la respuesta no espera a Stripe y,
-  // mientras converge, la puerta del checkout de «Tu plan» no abre con otro nombre. Si falla, el job lo reintenta cada minuto.
-  void Promise.resolve()
-    .then(() => planOfferRenameJob.runNow())
-    .catch((error: unknown) =>
-      logger.warn('[PlanOffer] el renombre inmediato en Stripe falló; el job lo reintenta', {
-        versionId,
-        error: error instanceof Error ? error.message : String(error),
-      }),
-    )
+  renombrarSinEsperar(versionId)
   return hecho
 }
 
