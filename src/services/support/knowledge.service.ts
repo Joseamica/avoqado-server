@@ -13,9 +13,14 @@ import {
   compareVersions,
   duplicateTitles,
   manifestApprovalHash,
+  parseSignatures,
   products,
   readLibrarySources,
+  sameEntry,
+  signatureState,
+  signaturesPathFor,
   slug,
+  type LibrarySignatures,
   versionParts,
   wholeGuide,
 } from './libraryFiles'
@@ -166,8 +171,8 @@ export function loadVerifiedSections(directory = SUPPORT_HELP_DIRECTORY): Verifi
 
 // ── Biblioteca única del modo híbrido ──────────────────────────────────────────────────────────
 // Las guías de mcp-support-help (sin «comingSoon»), dos resúmenes del MCP (una copia por app) y las páginas del manual
-// interno (mcp-support-manual). Sólo responden las guías cuyo archivo coincide con el manifiesto aprobado
-// (library-approved.json); ahí viven también sus candados.
+// interno (mcp-support-manual). La propuesta (library-approved.json) trae el sha256 y los candados de cada guía; las firmas
+// del founder, guía por guía, viven en library-signatures.json (D22). Sólo responde lo firmado tal como se firmó.
 
 export interface LibraryGuide extends VerifiedSection {
   body: string
@@ -189,10 +194,11 @@ export const libraryGuideHash = (file: Buffer | string, gates: object): string =
 
 const manifestSchema = z.object({
   version: z.literal(1),
-  approvedBy: z.string().min(1).nullable(),
-  approvedAt: z.string().min(1).nullable(),
-  // Un manifiesto de antes de R5-01 no los trae: sin approvedHash no carga firmado.
-  approvedHash: z.string().nullable().default(null),
+  // Campos de la firma de formato viejo: sólo los lee el camino sin library-signatures.json (abajo). Con ese archivo nadie
+  // los lee, así que una cabecera vieja rota no cambia lo que se sirve.
+  approvedBy: z.unknown(),
+  approvedAt: z.unknown(),
+  approvedHash: z.unknown(),
   retired: z.record(z.string(), z.string()).default({}),
   guides: z.record(z.string(), z.unknown()),
 })
@@ -206,25 +212,49 @@ const entrySchema = z.object({
 })
 
 /**
- * Sólo carga lo aprobado: la firma del manifiesto, que sella todo el conjunto (salvo `allowDraft`, que es del examen), el
- * sha256 del archivo y los candados válidos. Una guía retirada no está en `guides`: no carga. Lo que no cumple sale con un
- * registro de su id, nunca de su texto. Dos títulos iguales entre guías distintas rompen la carga: la aclaración se las
- * muestra a la persona por su título.
+ * Sólo carga lo aprobado (salvo `allowDraft`, que es del examen y lee sólo la propuesta), el sha256 del archivo y los
+ * candados válidos. Si junto a la propuesta existe library-signatures.json (D22), sólo él decide, guía por guía; los campos
+ * de firma de la propuesta (approvedBy/approvedAt/approvedHash) no se leen:
+ * - sin firma, con la firma o su salida retocadas, o con una salida firmada igual o más nueva que su firma: fuera;
+ * - si la propuesta la trae distinta de como se firmó (archivo o candados): fuera, hasta que se firme;
+ * - si la propuesta ya no la trae (retirada o quitada): sigue con su entrada firmada hasta que se firme su salida (R5-01).
+ * Sin ese archivo decide el formato de antes: la firma del manifiesto sella todo el conjunto, todo o nada.
+ * Lo que no cumple sale con un registro de su id, nunca de su texto. Dos títulos iguales entre guías distintas rompen la
+ * carga: la aclaración se las muestra a la persona por su título.
  */
 export function loadSupportLibrary(
-  options: { helpDir?: string; overviewDir?: string; manifest?: string; allowDraft?: boolean; manualDir?: string } = {},
+  options: {
+    helpDir?: string
+    overviewDir?: string
+    manifest?: string
+    allowDraft?: boolean
+    manualDir?: string
+    signatures?: string
+  } = {},
 ): LibraryGuide[] {
+  const manifestFile = options.manifest ?? SUPPORT_LIBRARY_MANIFEST
   let manifest: Manifest
   try {
-    manifest = manifestSchema.parse(JSON.parse(fs.readFileSync(options.manifest ?? SUPPORT_LIBRARY_MANIFEST, 'utf8')))
+    manifest = manifestSchema.parse(JSON.parse(fs.readFileSync(manifestFile, 'utf8')))
   } catch {
     logger.error('Support library manifest unreadable', { code: 'SUPPORT_LIBRARY_MANIFEST_INVALID' })
     return []
   }
-  if (!options.allowDraft) {
-    if (!(manifest.approvedBy && manifest.approvedAt)) return []
-    // Quitar una entrada o retirar una guía después de firmar cambia lo firmado: no carga nada.
-    if (manifest.approvedHash !== manifestApprovalHash(manifest)) {
+  let signatures: LibrarySignatures | undefined
+  const signaturesFile = options.signatures ?? signaturesPathFor(manifestFile)
+  if (!options.allowDraft && fs.existsSync(signaturesFile)) {
+    try {
+      signatures = parseSignatures(fs.readFileSync(signaturesFile, 'utf8'))
+    } catch {
+      logger.error('Support library signatures unreadable', { code: 'SUPPORT_LIBRARY_SIGNATURES_INVALID' })
+      return []
+    }
+  } else if (!options.allowDraft) {
+    const { approvedBy, approvedAt } = manifest
+    if (!(typeof approvedBy === 'string' && approvedBy && typeof approvedAt === 'string' && approvedAt)) return []
+    // Formato viejo: quitar una entrada o retirar una guía después de firmar cambia lo firmado y no carga nada. Sin
+    // approvedHash (un manifiesto de antes de R5-01) tampoco.
+    if (manifest.approvedHash !== manifestApprovalHash({ ...manifest, approvedBy, approvedAt })) {
       logger.error('Support library manifest tampered', { code: 'SUPPORT_LIBRARY_MANIFEST_TAMPERED' })
       return []
     }
@@ -238,7 +268,20 @@ export function loadSupportLibrary(
     logger.warn('Support library guide excluded', { code: 'SUPPORT_LIBRARY_GUIDE_EXCLUDED', id, reason })
   }
   for (const source of readLibrarySources(options.helpDir, options.overviewDir, options.manualDir)) {
-    const listed = entrySchema.safeParse(entries.get(source.id))
+    let proposed = entries.get(source.id)
+    if (signatures) {
+      const decision = signatureState(source.id, signatures)
+      if (decision.state !== 'served') {
+        exclude(source.id, decision.state)
+        continue
+      }
+      if (proposed !== undefined && !sameEntry(proposed, decision.approval.entry)) {
+        exclude(source.id, 'unsigned')
+        continue
+      }
+      proposed = decision.approval.entry
+    }
+    const listed = entrySchema.safeParse(proposed)
     if (!listed.success) {
       exclude(source.id, entries.has(source.id) ? 'gates' : 'unlisted')
       continue

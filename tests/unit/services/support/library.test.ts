@@ -12,8 +12,26 @@ import {
   sourceRef,
   resolveSourceRefs,
 } from '@/services/support/knowledge.service'
-import { readLibrarySources, SUPPORT_LIBRARY_MANIFEST } from '@/services/support/libraryFiles'
-import { buildManifest, outsideLines, signManifest, signableSources } from '../../../../scripts/support-eval/aprobar-biblioteca'
+import {
+  approvalHash,
+  parseSignatures,
+  readLibrarySources,
+  SUPPORT_LIBRARY_MANIFEST,
+  SUPPORT_LIBRARY_SIGNATURES,
+  validApproval,
+  validExit,
+  type LibrarySignatures,
+} from '@/services/support/libraryFiles'
+import {
+  buildManifest,
+  outsideLines,
+  pendingChanges,
+  signGuides,
+  signableSources,
+  withSignaturesLock,
+  writeLibrary,
+  type Manifest,
+} from '../../../../scripts/support-eval/aprobar-biblioteca'
 
 jest.mock('@/config/logger', () => ({
   __esModule: true,
@@ -81,10 +99,15 @@ const entry = (dir: string, rel: string, gates: Record<string, unknown> = {}) =>
   requiredPermissions: [],
   ...gates,
 })
-const writeManifest = (guides: Record<string, unknown>, signed = true, retired: Record<string, string> = {}) => {
+const writeManifest = (
+  guides: Record<string, unknown>,
+  signed = true,
+  retired: Record<string, string> = {},
+  at = '2026-11-10T12:00:00.000Z',
+) => {
   const body = {
     approvedBy: signed ? 'Fundador' : null,
-    approvedAt: signed ? '2026-11-10T12:00:00.000Z' : null,
+    approvedAt: signed ? at : null,
     retired,
     guides: guides as never,
   }
@@ -93,11 +116,23 @@ const writeManifest = (guides: Record<string, unknown>, signed = true, retired: 
 const load = (options = {}) =>
   loadSupportLibrary({ helpDir: help, overviewDir: overviews, manualDir: manual, manifest: manifestFile, ...options })
 const sourcesNow = () => readLibrarySources(help, overviews, manual)
-/** Genera y firma el manifiesto de lo que hay en el directorio temporal, como el script. */
-const signAll = (previous: unknown = null) => {
-  const signed = signManifest(buildManifest(previous, sourcesNow()), sourcesNow(), 'Fundador')
-  fs.writeFileSync(manifestFile, JSON.stringify(signed))
-  return signed
+/** Las firmas por guía (D22) viven junto a la propuesta; sin ese archivo el cargador usa el formato viejo (todo o nada). */
+const signaturesFile = () => path.join(root, 'library-signatures.json')
+const readSignatures = (): LibrarySignatures =>
+  fs.existsSync(signaturesFile()) ? JSON.parse(fs.readFileSync(signaturesFile(), 'utf8')) : { version: 1, guides: {} }
+const readProposal = (): Manifest => JSON.parse(fs.readFileSync(manifestFile, 'utf8'))
+/** El script sin argumentos: regenera la propuesta (nunca toca las firmas). */
+const regenerate = (previous: unknown = fs.existsSync(manifestFile) ? readProposal() : null) => {
+  const next = buildManifest(previous, sourcesNow())
+  fs.writeFileSync(manifestFile, JSON.stringify(next))
+  return next
+}
+/** El script sin argumentos y luego con --firmar: todo lo pendiente queda firmado. */
+const signAll = (previous?: unknown) => {
+  const proposal = regenerate(previous)
+  const result = signGuides(proposal, readSignatures(), sourcesNow(), 'Fundador')
+  fs.writeFileSync(signaturesFile(), JSON.stringify(result.signatures))
+  return proposal
 }
 const CASH = 'android/caja/abrir-caja'
 const PAX = 'tpv/cobro/cobrar-con-pax'
@@ -292,6 +327,20 @@ describe('loadSupportLibrary', () => {
     expect(new Set(loaded.filter(g => g.id === 'general/overview').map(g => g.hash)).size).toBe(1)
   })
 
+  it('real assets (D22): every committed signature keeps its seal, and the bot serves only signed guides that match the proposal', () => {
+    const signatures: LibrarySignatures = JSON.parse(fs.readFileSync(SUPPORT_LIBRARY_SIGNATURES, 'utf8'))
+    const proposal = JSON.parse(fs.readFileSync(SUPPORT_LIBRARY_MANIFEST, 'utf8'))
+    // Una firma retocada a mano se ve aquí, en CI, y no sólo como una guía que deja de contestar.
+    for (const [id, approval] of Object.entries(signatures.guides)) expect([id, validApproval(id, approval)]).toEqual([id, true])
+    for (const [id, exit] of Object.entries(signatures.exits ?? {})) expect([id, validExit(id, exit)]).toEqual([id, true])
+    const served = [...new Set(loadSupportLibrary().map(g => g.id))]
+    expect(served.length).toBeGreaterThan(0)
+    for (const id of served) expect(signatures.guides).toHaveProperty([id])
+    const pending = new Set(pendingChanges(proposal, signatures).changed)
+    const draft = [...new Set(loadSupportLibrary({ allowDraft: true }).map(g => g.id))]
+    expect(draft.filter(id => !pending.has(id)).every(id => served.includes(id))).toBe(true)
+  })
+
   it('real assets: the load returns exactly the ids of signableSources(readLibrarySources())', () => {
     const real = loadSupportLibrary({ allowDraft: true })
     const manifest = JSON.parse(fs.readFileSync(SUPPORT_LIBRARY_MANIFEST, 'utf8'))
@@ -469,33 +518,37 @@ describe('internal manual pages (decision 6)', () => {
     })
   })
 
-  it("a public guide listed in retired is not generated nor signed and stops loading; resolveSourceRefs of a ref to it returns no guide and same:false, the input of today's path", () => {
+  it('a public guide listed in retired is not generated; it keeps answering as signed until its exit is signed, then a ref to it resolves to no guide and same:false (R5-01, D22)', () => {
     const RETIRED = 'android/ventas/cobrar-en-efectivo'
     const first = signAll()
     const before = load()
     const ref = sourceRef(before.find(g => g.id === RETIRED)!)
-    // Agregarla a retired sin regenerar no se puede firmar: lo firmado no es lo que se generó.
-    const handEdited = { ...first, retired: { [RETIRED]: 'La cubre el manual: android/caja/abrir-caja' } }
-    expect(() => signManifest(handEdited, sourcesNow(), 'Fundador')).toThrow(/cambiaron/)
-    const next = buildManifest(handEdited, sourcesNow())
-    expect(next).toMatchObject({ approvedBy: null, approvedAt: null, approvedHash: null, retired: handEdited.retired })
+    // Retirarla: la propuesta ya no la trae, pero su firma sigue: el bot la sirve igual, con su misma huella.
+    const next = regenerate({ ...first, retired: { [RETIRED]: 'La cubre el manual: android/caja/abrir-caja' } })
     expect(next.guides).not.toHaveProperty(RETIRED)
     expect(signableSources(sourcesNow(), next).map(s => s.id)).not.toContain(RETIRED)
-    const signed = signManifest(next, sourcesNow(), 'Fundador')
-    expect(signed.retired).toEqual(handEdited.retired)
-    expect(signed.guides).not.toHaveProperty(RETIRED)
-    fs.writeFileSync(manifestFile, JSON.stringify(signed))
+    expect(load().map(sourceRef)).toEqual(before.map(sourceRef))
+    expect(pendingChanges(next, readSignatures())).toEqual({ changed: [], leaving: [RETIRED] })
+    // Sólo la firma la saca.
+    const { signatures, signed, left } = signGuides(next, readSignatures(), sourcesNow(), 'Fundador')
+    expect({ signed, left }).toEqual({ signed: [], left: [RETIRED] })
+    fs.writeFileSync(signaturesFile(), JSON.stringify(signatures))
     const after = load()
     expect(after.map(g => g.id)).toEqual(before.map(g => g.id).filter(id => id !== RETIRED))
     expect(resolveSourceRefs([ref], () => after)).toEqual({ clarify: false, guides: [], same: false })
     // Regenerar otra vez conserva retired.
-    expect(buildManifest(signed, sourcesNow()).retired).toEqual(handEdited.retired)
+    expect(regenerate().retired).toEqual({ [RETIRED]: 'La cubre el manual: android/caja/abrir-caja' })
   })
 
-  describe('the signature seals the whole manifest (R5-01)', () => {
+  describe('the old format (no signatures file) is all or nothing, as before D22 (R5-01)', () => {
     const without = (o: object, key: string) => Object.fromEntries(Object.entries(o).filter(([k]) => k !== key))
+    const legacySigned = () => {
+      const guides = buildManifest(null, sourcesNow()).guides
+      writeManifest(guides)
+      return JSON.parse(fs.readFileSync(manifestFile, 'utf8'))
+    }
     it('a signed manifest with one entry removed from guides, keeping the signature, loads nothing', () => {
-      const signed = signAll()
+      const signed = legacySigned()
       expect(load().length).toBeGreaterThan(0)
       fs.writeFileSync(manifestFile, JSON.stringify({ ...signed, guides: without(signed.guides, ONE) }))
       ;(logger.error as jest.Mock).mockClear()
@@ -505,26 +558,282 @@ describe('internal manual pages (decision 6)', () => {
       expect(load({ allowDraft: true }).length).toBeGreaterThan(0)
     })
 
-    it('a signed manifest with a guide added to retired, keeping the signature, loads nothing', () => {
-      const signed = signAll()
+    it('a signed manifest with a guide added to retired, keeping the signature, loads nothing; without approvedHash neither', () => {
+      const signed = legacySigned()
       fs.writeFileSync(manifestFile, JSON.stringify({ ...signed, retired: { [ONE]: 'quitada a mano' } }))
       expect(load()).toEqual([])
-      // Una firma de antes de este cambio (sin approvedHash) tampoco carga.
       fs.writeFileSync(manifestFile, JSON.stringify(without(signed, 'approvedHash')))
       expect(load()).toEqual([])
     })
+  })
 
-    it('signing again makes it load', () => {
-      const signed = signAll()
-      const all = load().map(g => g.id)
-      fs.writeFileSync(manifestFile, JSON.stringify({ ...signed, guides: without(signed.guides, ONE) }))
+  describe('per-guide signature (D22): a change waits for its own signature, the rest keeps answering', () => {
+    const NEW = 'dashboard/inicio/ver-reportes'
+    const ids = () => [...new Set(load().map(g => g.id))]
+    const excludedWith = (id: string, reason: string) =>
+      expect(logger.warn).toHaveBeenCalledWith('Support library guide excluded', { code: 'SUPPORT_LIBRARY_GUIDE_EXCLUDED', id, reason })
+
+    it('(a) a new unsigned guide stays out alone; the signed ones keep loading', () => {
+      signAll()
+      const before = ids()
+      put(help, 'dashboard/inicio/ver-reportes.md', guide({ title: 'Ver reportes' }))
+      const proposal = regenerate()
+      expect(proposal).toMatchObject({ approvedBy: null, approvedAt: null, approvedHash: null })
+      expect(proposal.guides).toHaveProperty(NEW)
+      expect(ids()).toEqual(before)
+      excludedWith(NEW, 'unsigned')
+      expect(pendingChanges(proposal, readSignatures())).toEqual({ changed: [NEW], leaving: [] })
+      // El examen sí la ve: mide la propuesta.
+      expect(load({ allowDraft: true }).map(g => g.id)).toContain(NEW)
+    })
+
+    it('(b) a signed guide whose file changes stays out alone, regenerated or not; so does a change of its gates', () => {
+      signAll()
+      const before = ids()
+      fs.appendFileSync(path.join(help, 'dashboard/inicio/editar-perfil.md'), ' ')
+      expect(ids()).toEqual(before.filter(id => id !== 'dashboard/inicio/editar-perfil'))
+      regenerate()
+      expect(ids()).toEqual(before.filter(id => id !== 'dashboard/inicio/editar-perfil'))
+      excludedWith('dashboard/inicio/editar-perfil', 'unsigned')
+      // Candados de una pública: viven en la propuesta; cambiarlos también espera firma.
+      const proposal = readProposal()
+      proposal.guides[ONE] = { ...proposal.guides[ONE], requiredPermissions: ['orders:read'] }
+      fs.writeFileSync(manifestFile, JSON.stringify(proposal))
+      expect(ids()).toEqual(before.filter(id => id !== ONE && id !== 'dashboard/inicio/editar-perfil'))
+      expect(pendingChanges(proposal, readSignatures()).changed.sort()).toEqual([ONE, 'dashboard/inicio/editar-perfil'])
+    })
+
+    it('(c) --firmar approves the pending guides (all, or only the given ids) and says which', () => {
+      signAll()
+      put(help, 'dashboard/inicio/ver-reportes.md', guide({ title: 'Ver reportes' }))
+      fs.appendFileSync(path.join(help, 'dashboard/inicio/editar-perfil.md'), ' ')
+      const proposal = regenerate()
+      const only = signGuides(proposal, readSignatures(), sourcesNow(), 'Fundador', [NEW], new Date('2026-11-21T10:00:00Z'))
+      expect({ signed: only.signed, left: only.left }).toEqual({ signed: [NEW], left: [] })
+      expect(only.signatures.guides[NEW]).toMatchObject({ approvedBy: 'Fundador', approvedAt: '2026-11-21T10:00:00.000Z' })
+      fs.writeFileSync(signaturesFile(), JSON.stringify(only.signatures))
+      expect(ids()).toContain(NEW)
+      expect(ids()).not.toContain('dashboard/inicio/editar-perfil')
+      // Lo que ya estaba firmado conserva su firma original.
+      expect(readSignatures().guides[ONE].approvedAt).not.toBe('2026-11-21T10:00:00.000Z')
+      expect(() => signGuides(proposal, readSignatures(), sourcesNow(), 'Fundador', [ONE])).toThrow(/pendiente/)
+      const rest = signGuides(proposal, readSignatures(), sourcesNow(), 'Fundador')
+      expect(rest.signed).toEqual(['dashboard/inicio/editar-perfil'])
+      fs.writeFileSync(signaturesFile(), JSON.stringify(rest.signatures))
+      expect(ids()).toEqual(load({ allowDraft: true }).map(g => g.id))
+      // Firma sólo una propuesta al día con los archivos, y con nombre.
+      fs.appendFileSync(path.join(help, 'dashboard/inicio/editar-perfil.md'), ' ')
+      expect(() => signGuides(proposal, readSignatures(), sourcesNow(), 'Fundador')).toThrow(/cambiaron/)
+      expect(() => signGuides(regenerate(), readSignatures(), sourcesNow(), '  ')).toThrow(/nombre/)
+    })
+
+    it('quitting a signed guide from the proposal by hand does not take it out: it answers as signed until its exit is signed', () => {
+      const proposal = signAll()
+      const before = load().map(sourceRef)
+      const rest = Object.fromEntries(Object.entries(proposal.guides).filter(([id]) => id !== ONE))
+      fs.writeFileSync(manifestFile, JSON.stringify({ ...proposal, guides: rest }))
+      expect(load().map(sourceRef)).toEqual(before)
+      expect(pendingChanges(readProposal(), readSignatures())).toEqual({ changed: [], leaving: [ONE] })
+    })
+
+    it('(f) editing a signature by hand approves nothing: its seal stops matching and the guide stays out', () => {
+      signAll()
+      const signatures = readSignatures()
+      const file = path.join(help, 'dashboard/inicio/editar-perfil.md')
+      fs.appendFileSync(file, ' ')
+      const proposal = regenerate()
+      const ID = 'dashboard/inicio/editar-perfil'
+      // La huella nueva puesta a mano en la firma (y en la propuesta), sin rehacer su sello.
+      const forged = { ...signatures.guides[ID], entry: { ...signatures.guides[ID].entry, sha256: sha(fs.readFileSync(file)) } }
+      expect(validApproval(ID, forged)).toBe(false)
+      fs.writeFileSync(signaturesFile(), JSON.stringify({ ...signatures, guides: { ...signatures.guides, [ID]: forged } }))
+      expect(proposal.guides[ID]).toEqual(forged.entry)
+      expect(ids()).not.toContain(ID)
+      excludedWith(ID, 'tampered')
+      // Otro nombre o fecha, o la firma de otra guía, tampoco valen.
+      const byOther = { ...signatures.guides[ONE], approvedBy: 'Otro' }
+      expect(validApproval(ONE, byOther)).toBe(false)
+      expect(validApproval('android/ventas/cobrar-en-efectivo', signatures.guides[ONE])).toBe(false)
+      expect(validApproval(ONE, signatures.guides[ONE])).toBe(true)
+    })
+
+    it('a money page without its test never loads, even with a well-formed signature, and --firmar cannot sign it', () => {
+      put(
+        manual,
+        'tpv/caja/cobrar.md',
+        manualPage({ title: 'Cobrar (tpv)', product: 'tpv', category: 'caja', extra: 'money: true\n' }).replace(
+          'sourceRepo: avoqado-android',
+          'sourceRepo: avoqado-tpv',
+        ),
+      )
+      const MONEY = 'tpv/caja/cobrar'
+      const proposal = signAll()
+      expect(proposal.guides).not.toHaveProperty(MONEY)
+      const entry = { sha256: sha(fs.readFileSync(path.join(manual, 'tpv/caja/cobrar.md'))), requiredPermissions: ['shifts:create'] }
+      const approval = { entry, approvedBy: 'Fundador', approvedAt: '2026-11-21T10:00:00.000Z' }
+      const signatures = readSignatures()
+      signatures.guides[MONEY] = { ...approval, approvedHash: approvalHash(MONEY, approval) }
+      fs.writeFileSync(signaturesFile(), JSON.stringify(signatures))
+      fs.writeFileSync(manifestFile, JSON.stringify({ ...proposal, guides: { ...proposal.guides, [MONEY]: entry } }))
+      expect(ids()).not.toContain(MONEY)
+      // Firmar todo lo pendiente no la mete: no es fuente. Su firma suelta sale como «sale de la lista».
+      const result = signGuides(regenerate(), readSignatures(), sourcesNow(), 'Fundador')
+      expect({ signed: result.signed, left: result.left }).toEqual({ signed: [], left: [MONEY] })
+      fs.writeFileSync(signaturesFile(), JSON.stringify(result.signatures))
+      expect(ids()).not.toContain(MONEY)
+    })
+
+    it('(d) without a signatures file the old format still decides: signed loads all, unsigned loads nothing', () => {
+      writeManifest(buildManifest(null, sourcesNow()).guides)
+      expect(fs.existsSync(signaturesFile())).toBe(false)
+      expect(ids()).toEqual([...new Set(load({ allowDraft: true }).map(g => g.id))])
+      expect(ids()).toContain(CASH)
+      writeManifest(buildManifest(null, sourcesNow()).guides, false)
       expect(load()).toEqual([])
-      signAll(JSON.parse(fs.readFileSync(manifestFile, 'utf8')))
-      expect(load().map(g => g.id)).toEqual(all)
-      fs.writeFileSync(manifestFile, JSON.stringify({ ...signed, retired: { [ONE]: 'ya la cubre otra' } }))
+    })
+
+    it('an unreadable signatures file loads nothing', () => {
+      signAll()
+      fs.writeFileSync(signaturesFile(), '{ no es json')
+      ;(logger.error as jest.Mock).mockClear()
       expect(load()).toEqual([])
-      signAll(JSON.parse(fs.readFileSync(manifestFile, 'utf8')))
-      expect(load().map(g => g.id)).toEqual(all.filter(id => id !== ONE))
+      expect(logger.error).toHaveBeenCalledWith('Support library signatures unreadable', { code: 'SUPPORT_LIBRARY_SIGNATURES_INVALID' })
+    })
+
+    it('codex r1-1: signing only the replacement of a leaving guide with the same title is refused; signing both works', () => {
+      const RETIRED = 'android/ventas/cobrar-en-efectivo'
+      const first = signAll()
+      // Su reemplazo: una interna con el mismo título.
+      put(manual, 'android/caja/cobrar-en-efectivo.md', manualPage({ title: 'Cobrar en efectivo' }))
+      const proposal = regenerate({ ...first, retired: { [RETIRED]: 'La cubre el manual' } })
+      const REPLACEMENT = 'android/caja/cobrar-en-efectivo'
+      expect(pendingChanges(proposal, readSignatures())).toEqual({ changed: [REPLACEMENT], leaving: [RETIRED] })
+      expect(() => signGuides(proposal, readSignatures(), sourcesNow(), 'Fundador', [REPLACEMENT])).toThrow(/mismo título/)
+      // Sin firmar nada, sigue la retirada y el reemplazo espera: el bot no se queda vacío.
+      expect(ids()).toContain(RETIRED)
+      expect(ids()).not.toContain(REPLACEMENT)
+      const both = signGuides(proposal, readSignatures(), sourcesNow(), 'Fundador', [REPLACEMENT, RETIRED])
+      fs.writeFileSync(signaturesFile(), JSON.stringify(both.signatures))
+      expect(ids()).toContain(REPLACEMENT)
+      expect(ids()).not.toContain(RETIRED)
+    })
+
+    it('r3: writeLibrary writes the signatures before the proposal, each in one go (a cut leaves the previous file whole), and nothing if the signatures changed since they were read', () => {
+      signAll()
+      const files = { signatures: signaturesFile(), proposal: manifestFile }
+      const read = fs.readFileSync(files.signatures, 'utf8')
+      const proposalBefore = fs.readFileSync(manifestFile, 'utf8')
+      // Algo cambió las firmas mientras tanto: no se pisa.
+      fs.writeFileSync(files.signatures, JSON.stringify({ ...readSignatures(), guides: {} }))
+      const changedMeanwhile = fs.readFileSync(files.signatures, 'utf8')
+      expect(() => writeLibrary({ signatures: readSignatures(), proposal: readProposal() }, read, files)).toThrow(/mientras tanto/)
+      expect(fs.readFileSync(files.signatures, 'utf8')).toBe(changedMeanwhile)
+      expect(fs.readFileSync(manifestFile, 'utf8')).toBe(proposalBefore)
+      // Un corte a media escritura (escribe la mitad y truena): el archivo anterior queda entero y no queda basura.
+      const real = fs.writeFileSync
+      const spy = jest.spyOn(fs, 'writeFileSync').mockImplementationOnce(((file: fs.PathOrFileDescriptor, data: string) => {
+        real(file, data.slice(0, data.length / 2))
+        throw new Error('se cortó')
+      }) as typeof fs.writeFileSync)
+      expect(() =>
+        writeLibrary(
+          { signatures: { version: 1, guides: { [ONE]: readSignatures().guides[ONE] } }, proposal: { ...readProposal(), guides: {} } },
+          changedMeanwhile,
+          files,
+        ),
+      ).toThrow(/se cortó/)
+      spy.mockRestore()
+      expect(fs.readFileSync(files.signatures, 'utf8')).toBe(changedMeanwhile)
+      expect(fs.readFileSync(manifestFile, 'utf8')).toBe(proposalBefore)
+      expect(fs.readdirSync(root).filter(f => f.includes('.tmp-'))).toEqual([])
+    })
+
+    it('r3: two runs at once do not step on each other: the second one finds the lock and writes nothing; the lock is released even on error', () => {
+      const lock = path.join(root, 'library-signatures.json.lock')
+      const inner = jest.fn()
+      withSignaturesLock(() => {
+        expect(fs.existsSync(lock)).toBe(true)
+        expect(() => withSignaturesLock(inner, lock)).toThrow(/Otra corrida/)
+      }, lock)
+      expect(inner).not.toHaveBeenCalled()
+      expect(fs.existsSync(lock)).toBe(false)
+      expect(() =>
+        withSignaturesLock(() => {
+          throw new Error('falló')
+        }, lock),
+      ).toThrow('falló')
+      expect(fs.existsSync(lock)).toBe(false)
+      expect(withSignaturesLock(() => 7, lock)).toBe(7)
+    })
+
+    describe('r4: the signatures file is the only authority; a signed exit beats an older signature of the same guide', () => {
+      const RETIRED = 'android/ventas/cobrar-en-efectivo'
+      const signOn = (day: string, ids?: string[], proposal = regenerate()) => {
+        const result = signGuides(proposal, readSignatures(), sourcesNow(), 'Fundador', ids, new Date(day))
+        fs.writeFileSync(signaturesFile(), JSON.stringify(result.signatures))
+        return result
+      }
+
+      it('an old-format signature in the proposal is never read when the signatures file exists (and the generator does not import it)', () => {
+        signOn('2026-11-20T12:00:00Z')
+        const before = ids()
+        fs.appendFileSync(path.join(help, 'dashboard/inicio/editar-perfil.md'), ' ')
+        // Una rama firmó con el generador de antes y se unió: su firma vieja (válida) no cuenta.
+        writeManifest(buildManifest(readProposal(), sourcesNow()).guides, true, {}, '2026-11-21T05:23:02.139Z')
+        expect(ids()).toEqual(before.filter(id => id !== 'dashboard/inicio/editar-perfil'))
+        // Regenerar no la importa: queda pendiente hasta --firmar.
+        const signaturesBefore = fs.readFileSync(signaturesFile(), 'utf8')
+        const proposal = regenerate()
+        expect(fs.readFileSync(signaturesFile(), 'utf8')).toBe(signaturesBefore)
+        expect(pendingChanges(proposal, readSignatures()).changed).toEqual(['dashboard/inicio/editar-perfil'])
+        // Una cabecera vieja rota tampoco cambia nada.
+        fs.writeFileSync(manifestFile, JSON.stringify({ ...readProposal(), approvedBy: 'x', approvedAt: '', approvedHash: 'roto' }))
+        expect(ids()).toEqual(before.filter(id => id !== 'dashboard/inicio/editar-perfil'))
+      })
+
+      it('a signed exit merged from another branch beats an older signature of the same guide; a later signature beats the exit', () => {
+        signOn('2026-11-20T12:00:00Z')
+        const before = ids()
+        const older = readSignatures()
+        // Rama A: retira la guía y firma su salida.
+        const exit = signOn(
+          '2026-11-21T00:00:00Z',
+          [RETIRED],
+          regenerate({ ...readProposal(), retired: { [RETIRED]: 'La cubre el manual' } }),
+        )
+        expect(exit.left).toEqual([RETIRED])
+        // Git une la salida de A con la firma anterior de la guía que trae otra rama: las dos claves conviven.
+        const merged = { ...exit.signatures, guides: { ...exit.signatures.guides, [RETIRED]: older.guides[RETIRED] } }
+        fs.writeFileSync(signaturesFile(), JSON.stringify(merged))
+        regenerate({ ...readProposal(), retired: {} })
+        expect(ids()).toEqual(before.filter(id => id !== RETIRED))
+        excludedWith(RETIRED, 'exited')
+        // Generador y cargador dicen lo mismo: pendiente de firma (nueva o cambiada), no «servida».
+        expect(pendingChanges(readProposal(), merged)).toEqual({ changed: [RETIRED], leaving: [] })
+        // Una salida retocada a mano también la tapa (retocar nunca revive).
+        const forgedExit = { ...merged, exits: { [RETIRED]: { ...merged.exits![RETIRED], approvedAt: '2026-01-01T00:00:00.000Z' } } }
+        fs.writeFileSync(signaturesFile(), JSON.stringify(forgedExit))
+        expect(ids()).not.toContain(RETIRED)
+        excludedWith(RETIRED, 'tampered')
+        // Si el founder la vuelve a firmar, su firma es posterior a la salida y vuelve a servirse.
+        fs.writeFileSync(signaturesFile(), JSON.stringify(merged))
+        const back = signOn('2026-11-22T00:00:00Z', [RETIRED], readProposal())
+        expect(back.signatures.exits ?? {}).not.toHaveProperty([RETIRED])
+        expect(ids()).toEqual(before)
+        // Y una firma posterior que convive con una salida anterior (otra unión) también gana.
+        const laterSig = { ...back.signatures, exits: merged.exits }
+        fs.writeFileSync(signaturesFile(), JSON.stringify(laterSig))
+        expect(ids()).toEqual(before)
+      })
+    })
+
+    it('codex r1-5: a signatures file the loader cannot read is not read by the generator either', () => {
+      signAll()
+      const wrong = JSON.stringify({ ...readSignatures(), version: 2 })
+      fs.writeFileSync(signaturesFile(), wrong)
+      expect(load()).toEqual([])
+      expect(() => parseSignatures(wrong)).toThrow()
+      expect(parseSignatures(JSON.stringify({ version: 1, guides: {} }))).toEqual({ version: 1, guides: {} })
     })
   })
 })
@@ -698,16 +1007,22 @@ describe('aprobar-biblioteca (manifest generator)', () => {
     expect(new Set(load({ allowDraft: true }).map(g => g.id)).size).toBe(4)
   })
 
-  it('signs only when no file changed since the manifest was written', () => {
+  it('signs only when no file changed since the manifest was written; each signature seals its own entry', () => {
     const sources = sourcesNow()
     const manifest = buildManifest(null, sources)
-    const signed = signManifest(manifest, sources, 'Fundador', new Date('2026-11-11T10:00:00Z'))
-    expect(signed).toMatchObject({ approvedBy: 'Fundador', approvedAt: '2026-11-11T10:00:00.000Z' })
-    expect(signed.approvedHash).toBe(manifestApprovalHash(signed))
-    expect(signed.guides).toEqual(manifest.guides)
+    const empty: LibrarySignatures = { version: 1, guides: {} }
+    const { signatures, signed } = signGuides(manifest, empty, sources, ' Fundador ', undefined, new Date('2026-11-11T10:00:00Z'))
+    expect(signed).toEqual(Object.keys(manifest.guides))
+    for (const [id, entry] of Object.entries(manifest.guides)) {
+      const approval = signatures.guides[id]
+      expect(approval).toMatchObject({ entry, approvedBy: 'Fundador', approvedAt: '2026-11-11T10:00:00.000Z' })
+      expect(approval.approvedHash).toBe(approvalHash(id, approval))
+    }
+    // La propuesta no se toca: firmar sólo escribe las firmas.
+    expect(manifest).toMatchObject({ approvedBy: null, approvedAt: null, approvedHash: null })
     fs.appendFileSync(path.join(help, 'dashboard/inicio/editar-perfil.md'), ' ')
-    expect(() => signManifest(manifest, sourcesNow(), 'Fundador')).toThrow(/cambiaron/)
-    expect(() => signManifest(manifest, sources, '  ')).toThrow(/nombre/)
+    expect(() => signGuides(manifest, empty, sourcesNow(), 'Fundador')).toThrow(/cambiaron/)
+    expect(() => signGuides(manifest, empty, sources, '  ')).toThrow(/nombre/)
   })
 })
 
