@@ -1750,11 +1750,23 @@ export async function assignModifierGroupToProduct(
       throw new BadRequestError(`Modifier group ${data.modifierGroupId} is already assigned to product ${productId}.`)
     }
 
+    // hz:960ee149:D1: sin orden, el grupo va al final (antes quedaba en 0 y empataba con el primero).
+    // ponytail: dos asignaciones simultáneas al mismo producto pueden empatar; candado del producto si llega a importar.
+    let displayOrder = data.displayOrder
+    if (displayOrder === undefined) {
+      const ultima = await tx.productModifierGroup.findFirst({
+        where: { productId },
+        orderBy: { displayOrder: 'desc' },
+        select: { displayOrder: true },
+      })
+      displayOrder = ultima ? ultima.displayOrder + 1 : 0
+    }
+
     return tx.productModifierGroup.create({
       data: {
         product: { connect: { id: productId } },
         group: { connect: { id: data.modifierGroupId } },
-        displayOrder: data.displayOrder ?? 0,
+        displayOrder,
       },
     })
   })
