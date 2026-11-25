@@ -239,7 +239,7 @@ describe('activateLaunchCampaign bajo el candado de la oferta', () => {
     expect(ordenDeStripe().filter(o => o > toma.orden)).toEqual([])
     // Bajo el candado se relee el puntero (después de tomarlo).
     const lecturas = prismaMock.planOfferPointer.findUnique.mock.invocationCallOrder
-    expect(lecturas.some(o => o > toma.orden && o < prismaMock.launchCampaign.updateMany.mock.invocationCallOrder[0])).toBe(true)
+    expect(lecturas.some((o: number) => o > toma.orden && o < prismaMock.launchCampaign.updateMany.mock.invocationCallOrder[0])).toBe(true)
     expect(prismaMock.launchCampaign.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
