@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-25T15:46:48.061Z",
-  "approvedHash": "cbf1bcf3d96e12f13b99f347c665ce861fc4797cf778796f7b3661677d8f967e",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -330,7 +330,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/configurar-lealtad": {
-      "sha256": "51f91568579ff6892ab5ccceaa4424b0c0dcef9150613b58529cc42c1afb6f89",
+      "sha256": "e1d0a5c224d2cefc617c5551105e3a3b3578840d4d566887489680aad07dc54c",
       "requiredPermissions": [
         "loyalty:update"
       ],
@@ -346,7 +346,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/configurar-puntos-de-lealtad": {
-      "sha256": "8898c6e359894a0b751372622539b0f92728faf765e7f4034d23321f9ab28207",
+      "sha256": "e1cc903baab67f90029d9dcb3ea14ba0861ec9a963da46ea4ec8fad126240619",
       "requiredPermissions": [
         "loyalty:read",
         "loyalty:update"

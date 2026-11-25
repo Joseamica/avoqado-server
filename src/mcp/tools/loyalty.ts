@@ -105,6 +105,13 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
               redemptionRate: Number(cfg.redemptionRate), // money value of 1 point
               minPointsToRedeem: cfg.minPointsRedeem,
               pointsExpireDays: cfg.pointsExpireDays, // null = never expire
+              // D27: vencen por INACTIVIDAD (todo el saldo), no a los N días de cada compra. Dicho en palabras para quien lo explica.
+              // Sólo con el programa activo: apagado, no vence nada aunque haya días guardados.
+              ...(cfg.active && cfg.pointsExpireDays && cfg.pointsExpireDays > 0
+                ? {
+                    pointsExpireRule: `Si un cliente pasa ${cfg.pointsExpireDays} días sin movimientos en sus puntos (ganar, canjear o un ajuste), vencen todos sus puntos.`,
+                  }
+                : {}),
             }
           : null,
       })
@@ -455,7 +462,13 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
       pointsPerVisit: z.number().int().min(0).optional().describe('Points earned per visit'),
       redemptionRate: z.number().min(0).optional().describe('Money value of 1 point (e.g. 0.05)'),
       minPointsToRedeem: z.number().int().min(0).optional().describe('Minimum points required to redeem'),
-      pointsExpireDays: z.number().int().positive().nullable().optional().describe('Days until points expire; null = never'),
+      pointsExpireDays: z
+        .number()
+        .int()
+        .positive()
+        .nullable()
+        .optional()
+        .describe('Days a customer can go without any points activity before ALL of their points expire; null = never'),
       stampsEnabled: z.boolean().optional().describe('Turn the STAMP card on/off (buy N, get a reward)'),
       stampsRequired: z.number().int().min(2).max(50).optional().describe('Stamps needed to fill one card'),
       maxStampsPerDay: z.number().int().min(1).optional().describe('Max stamps one customer earns per day'),
@@ -538,11 +551,20 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
         }
         const num = (v: unknown) => (v != null && typeof v === 'object' && 'toString' in v ? Number(v) : v)
         const changes = Object.entries(data).map(([k, to]) => ({ label: LBL[k] ?? k, from: cur ? (num(cur[k]) ?? null) : null, to }))
+        // D27 (Codex r7 #2): si al aplicar queda el programa activo con días de expiración, se dice en la vista previa aunque los días no
+        // cambien: prender el programa también prende que los puntos venzan.
+        const activoAlFinal = active ?? (cur?.active as boolean | undefined) ?? false
+        const diasAlFinal =
+          pointsExpireDays !== undefined ? pointsExpireDays : ((cur?.pointsExpireDays as number | null | undefined) ?? null)
+        const vencimiento =
+          activoAlFinal && diasAlFinal && diasAlFinal > 0
+            ? `\n\nOjo: con esto, si un cliente pasa ${diasAlFinal} días sin movimientos en sus puntos (ganar, canjear o un ajuste), vencen todos sus puntos (los días empiezan a contar desde hoy si la expiración apenas se prende).`
+            : ''
         return text({
           ok: false,
           requiresConfirmation: true,
           changes,
-          message: `Esto cambiará la economía del programa de lealtad:\n${changes.map(c => `• ${c.label}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`).join('\n')}\n\nConfirma con el operador; luego vuelve a llamar con confirm:true.`,
+          message: `Esto cambiará la economía del programa de lealtad:\n${changes.map(c => `• ${c.label}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`).join('\n')}${vencimiento}\n\nConfirma con el operador; luego vuelve a llamar con confirm:true.`,
         })
       }
 
