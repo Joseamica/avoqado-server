@@ -35,6 +35,7 @@ jest.mock('../../../src/services/onboarding/ensureVenue.service', () => ({
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 
+import logger from '../../../src/config/logger'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { verificarCotizacion } from '@/services/billing/comprobanteDeCotizacion'
 import { definicionDePrueba, idsDeLaVersion, punteroA, versionUno } from '@tests/__helpers__/planOfferFixtures'
@@ -120,6 +121,10 @@ describe('GET /onboarding/organizations/:organizationId/progress — la cotizaci
     const res = await leer()
     expect(res.status).toBe(200)
     expect(res.body.progress.planQuote).toStrictEqual(PLAN_QUOTE_DE_HOY)
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('no se pudo leer la oferta de planes'),
+      expect.objectContaining({ organizationId: ORG }),
+    )
   })
 
   it('con la v2 (Pro sin tarjeta 14 días, mensual 79900; Premium con tarjeta 0 días): publica su comprobante por plan y periodicidad', async () => {

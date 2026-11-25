@@ -1405,6 +1405,22 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       planData.paymentMethodId &&
       (await versionQueCobra())
     ) {
+      // Un intento anterior pudo cobrar (IN_PROGRESS con el lease vencido): decir «no se cobró nada» sería falso. Se responde lo mismo
+      // que el resto de los carriles ante un cobro sin cerrar.
+      if (
+        progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS &&
+        (await planActivationService.hayCobroDelAltaSinCerrar({
+          organizationId,
+          planActivationStatus: progress.planActivationStatus,
+          planActivationAttempt: progress.planActivationAttempt,
+          planStripeSubscriptionId: progress.planStripeSubscriptionId,
+        }))
+      ) {
+        throw new ConflictError(
+          'Tienes un pago de plan sin confirmar. Confírmalo antes de terminar tu alta: no se te cobrará dos veces.',
+          'PLAN_CHARGE_PENDING',
+        )
+      }
       throw new ConflictError(
         'Esta forma de contratar ya no está disponible. Recarga la página para elegir tu plan. No se te cobró nada.',
         'PLAN_FLOW_RETIRED',

@@ -44,6 +44,11 @@ jest.mock('../../../src/services/stripe.service', () => ({
   retrievePlanSubscription: jest.fn().mockResolvedValue({ status: 'trialing', currentPeriodEnd: null, cancelAtPeriodEnd: false }),
   modalidadDeLaSuscripcion: jest.fn().mockResolvedValue({}),
 }))
+const mockHayCobro = jest.fn()
+jest.mock('../../../src/services/onboarding/planActivation.service', () => ({
+  ...jest.requireActual('../../../src/services/onboarding/planActivation.service'),
+  hayCobroDelAltaSinCerrar: (...a: unknown[]) => mockHayCobro(...a),
+}))
 const mockTerminar = jest.fn()
 jest.mock('../../../src/services/onboarding/terminarAltaCobrada', () => ({
   ...jest.requireActual('../../../src/services/onboarding/terminarAltaCobrada'),
@@ -81,7 +86,7 @@ import jwt from 'jsonwebtoken'
 import request from 'supertest'
 
 import { prismaMock } from '@tests/__helpers__/setup'
-import { definicionDePrueba, idsDeLaVersion, punteroA } from '@tests/__helpers__/planOfferFixtures'
+import { definicionDePrueba, idsDeLaVersion, punteroA, versionUno } from '@tests/__helpers__/planOfferFixtures'
 
 const app = require('../../../src/app').default
 
@@ -138,6 +143,7 @@ beforeEach(() => {
     timezone: 'America/Mexico_City',
   } as never)
   prismaMock.venue.update.mockResolvedValue({ id: 'venue-1', slug: 'negocio-de-prueba', name: 'Negocio', status: 'ACTIVE' } as never)
+  mockHayCobro.mockReset().mockResolvedValue(false)
   mockCustomersCreate.mockReset().mockResolvedValue('cus_1')
   mockSubCreate.mockReset().mockResolvedValue({ id: 'sub_1' })
   mockPriceList.mockReset().mockResolvedValue({ data: [{ id: 'price_key_pro_m', unit_amount: 115884 }] })
@@ -226,5 +232,55 @@ describe('POST /onboarding/organizations/:organizationId/v2/complete — el alta
     )
     const sinMarca = await terminar()
     expect(sinMarca.status).toBe(400)
+  })
+
+  it('🔴 con la v2 y un intento anterior IN_PROGRESS con cobro posible → PLAN_CHARGE_PENDING (no «No se te cobró nada»); sin cobro posible → PLAN_FLOW_RETIRED', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv2', 2, v2()) as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso(PLAN_CON_TARJETA, { planActivationStatus: 'IN_PROGRESS' }) as never)
+
+    mockHayCobro.mockResolvedValue(true)
+    const pendiente = await terminar()
+    expect(pendiente.status).toBe(409)
+    expect(pendiente.body.code).toBe('PLAN_CHARGE_PENDING')
+    expect(mockHayCobro).toHaveBeenCalledTimes(1)
+    expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+
+    mockHayCobro.mockResolvedValue(false)
+    const retirado = await terminar()
+    expect(retirado.status).toBe(409)
+    expect(retirado.body.code).toBe('PLAN_FLOW_RETIRED')
+    expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('con la v2 y una campaña reclamada, o con el plan FREE: no sale PLAN_FLOW_RETIRED', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv2', 2, v2()) as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso(PLAN_CON_TARJETA, { launchCampaignId: 'camp_1' }) as never)
+    const conCampana = await terminar()
+    expect(conCampana.body.code).not.toBe('PLAN_FLOW_RETIRED')
+
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso({ tier: 'FREE', acceptedAt: '2026-11-20T00:00:00Z' }) as never)
+    const gratis = await terminar()
+    expect(gratis.body.code).not.toBe('PLAN_FLOW_RETIRED')
+    expect(gratis.status).toBe(201)
+  })
+
+  it('con sólo la v1 el carril viejo cobra como hoy', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv1', 1, versionUno()) as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso(PLAN_CON_TARJETA) as never)
+    const res = await terminar()
+    expect(res.status).toBe(201)
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 una v1 rota hace lanzar a versionQueCobra en el carril que cobra → 503 PLAN_NOT_CONFIGURED, sin updateMany ni Stripe', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv1', 1, { schemaVersion: 1, roto: true }) as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso(PLAN_CON_TARJETA) as never)
+    const res = await terminar()
+    expect(res.status).toBe(503)
+    expect(res.body.code).toBe('PLAN_NOT_CONFIGURED')
+    expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+    expect(mockCustomersCreate).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
   })
 })
