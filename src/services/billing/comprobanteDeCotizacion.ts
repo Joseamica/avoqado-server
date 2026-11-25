@@ -60,8 +60,18 @@ export function firmarCotizacion(c: CotizacionFirmable, now: Date = new Date()):
     s: now.getTime(),
     a: c.alcance,
   }
+  // Errores de programación (no del usuario): nunca se firma algo que `verificarCotizacion` no podría leer.
+  const dinero = (v: number, min: number) => Number.isSafeInteger(v) && v >= min
+  if (Number.isNaN(now.getTime())) throw new Error('firmarCotizacion: la hora de emisión no es válida')
+  if (c.trialEndsAt && Number.isNaN(c.trialEndsAt.getTime())) throw new Error('firmarCotizacion: el fin de la prueba no es una fecha válida')
+  if (!dinero(c.versionNumber, 1) || !dinero(c.firstChargeCents, 0)) {
+    throw new Error('firmarCotizacion: la versión y el primer cobro deben ser enteros válidos')
+  }
+  if (!c.alcance) throw new Error('firmarCotizacion: falta el alcance')
   const b64 = Buffer.from(JSON.stringify(cuerpo)).toString('base64url')
-  return `${b64}.${sign(b64)}`
+  const token = `${b64}.${sign(b64)}`
+  if (token.length > MAX_LARGO) throw new Error('firmarCotizacion: el comprobante excede el largo permitido')
+  return token
 }
 
 export function verificarCotizacion(token: unknown, alcance: string, now: Date = new Date()): CotizacionFirmada {

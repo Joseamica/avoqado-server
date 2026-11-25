@@ -1,7 +1,8 @@
 import type { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
-import { ConflictError } from '../../errors/AppError'
+import AppError, { ConflictError } from '../../errors/AppError'
+import { priceTransaction } from '../launchCampaigns/hybridProduct'
 import { ofertaVigente, tomarCandadoDeLaOferta, type Periodicidad, type PlanPagado } from './planOffer'
 import { cuponDeIntroduccionRetirado, SERVIDOR_LISTO_PARA_PLANES_EDITABLES } from './planesEditablesListos'
 
@@ -28,10 +29,14 @@ const RANURAS: ReadonlyArray<[PlanPagado, Periodicidad]> = [
 let leido: { prendido: boolean; hasta: number } | null = null
 let enCurso: Promise<boolean> | null = null
 
-export function __resetInterruptorPlanesParaPruebas(): void {
+/** Olvida lo leído: producción lo llama después de cada escritura del interruptor. */
+export function invalidarCacheDelInterruptor(): void {
   leido = null
   enCurso = null
 }
+
+/** Alias para las pruebas. */
+export const __resetInterruptorPlanesParaPruebas = invalidarCacheDelInterruptor
 
 export async function planesEditablesPrendidos(opciones: { sinCache?: boolean; db?: Prisma.TransactionClient } = {}): Promise<boolean> {
   const leer = async (db: Pick<typeof prisma, 'interruptorDePlataforma'>) => {
@@ -65,7 +70,9 @@ export async function requisitosFaltantes(db?: Prisma.TransactionClient): Promis
   try {
     const vigente = await ofertaVigente(db ?? prisma)
     versionValida = !vigente.respaldo && RANURAS.every(([tier, interval]) => Boolean(vigente.definition[tier][interval].stripePriceId))
-  } catch {
+  } catch (e) {
+    // Sólo una vigente rota (503) cuenta como «falta la v1»; un error de la base se propaga.
+    if (!(e instanceof AppError && e.code === 'PLAN_NOT_CONFIGURED')) throw e
     versionValida = false
   }
   if (!versionValida) faltan.push('VERSION_1')
@@ -92,11 +99,12 @@ export async function estadoDelInterruptor(): Promise<{
   }
 }
 
-const TRANSACCION = { maxWait: 10_000, timeout: 30_000 }
-
 export async function prenderPlanesEditables(staffId: string): Promise<{ desde: Date }> {
-  const desde = await prisma.$transaction(async tx => {
+  const desde = await priceTransaction(async tx => {
     await tomarCandadoDeLaOferta(tx)
+    // Ya prendido: no se mueve «desde» ni se repite la bitácora.
+    const actual = await tx.interruptorDePlataforma.findUnique({ where: { clave: CLAVE_PLANES_EDITABLES }, select: { desde: true } })
+    if (actual?.desde) return actual.desde
     const faltan = await requisitosFaltantes(tx)
     if (faltan.length > 0) {
       throw new ConflictError('Todavía no se pueden prender los planes editables: faltan requisitos.', 'PLAN_EDIT_PREREQUISITE', { faltan })
@@ -113,15 +121,18 @@ export async function prenderPlanesEditables(staffId: string): Promise<{ desde: 
       data: { staffId, action: 'PLAN_OFFER_SWITCH_ON', entity: 'InterruptorDePlataforma', entityId: CLAVE_PLANES_EDITABLES, data: {} },
     })
     return escrito
-  }, TRANSACCION)
-  __resetInterruptorPlanesParaPruebas()
+  })
+  invalidarCacheDelInterruptor()
   logger.info('[PlanOffer] planes editables PRENDIDOS', { por: staffId })
   return { desde }
 }
 
 export async function apagarPlanesEditables(staffId: string): Promise<void> {
-  await prisma.$transaction(async tx => {
+  await priceTransaction(async tx => {
     await tomarCandadoDeLaOferta(tx)
+    // Ya apagado (o sin renglón): nada que escribir ni que anotar.
+    const actual = await tx.interruptorDePlataforma.findUnique({ where: { clave: CLAVE_PLANES_EDITABLES }, select: { desde: true } })
+    if (!actual?.desde) return
     await tx.$executeRaw`
       INSERT INTO "public"."InterruptorDePlataforma" ("clave", "desde", "actualizadoPor", "updatedAt")
       VALUES (${CLAVE_PLANES_EDITABLES}, NULL, ${staffId}, (clock_timestamp() AT TIME ZONE 'UTC'))
@@ -130,7 +141,7 @@ export async function apagarPlanesEditables(staffId: string): Promise<void> {
     await tx.activityLog.create({
       data: { staffId, action: 'PLAN_OFFER_SWITCH_OFF', entity: 'InterruptorDePlataforma', entityId: CLAVE_PLANES_EDITABLES, data: {} },
     })
-  }, TRANSACCION)
-  __resetInterruptorPlanesParaPruebas()
+  })
+  invalidarCacheDelInterruptor()
   logger.info('[PlanOffer] planes editables APAGADOS', { por: staffId })
 }

@@ -12,6 +12,7 @@ jest.mock('@/services/billing/planesEditablesListos', () => ({
 
 import {
   __resetInterruptorPlanesParaPruebas,
+  invalidarCacheDelInterruptor,
   apagarPlanesEditables,
   CLAVE_PLANES_EDITABLES,
   estadoDelInterruptor,
@@ -70,6 +71,54 @@ describe('requisitos y prender', () => {
     expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
   })
 
+  it('🔴 el módulo REAL: en B1 SERVIDOR_LISTO es false y el cupón de introducción sigue vivo (poner true en un commit rompe esto)', () => {
+    const real = jest.requireActual('@/services/billing/planesEditablesListos')
+    expect(real.SERVIDOR_LISTO_PARA_PLANES_EDITABLES).toBe(false)
+    // Con B0, `standardPlanQuote().legacyIntro` sigue existiendo: el requisito real también falta.
+    expect(real.cuponDeIntroduccionRetirado()).toBe(false)
+  })
+
+  it('un vigente roto (503 PLAN_NOT_CONFIGURED) cuenta como VERSION_1; un error de la base se propaga', async () => {
+    conVigente({ schemaVersion: 1 })
+    await expect(requisitosFaltantes()).resolves.toContain('VERSION_1')
+    ;(prismaMock.planOfferPointer.findUnique as jest.Mock).mockRejectedValue(new Error('conexión perdida'))
+    await expect(requisitosFaltantes()).rejects.toThrow('conexión perdida')
+    await expect(estadoDelInterruptor()).rejects.toThrow('conexión perdida')
+  })
+
+  it('prender y apagar corren en priceTransaction: P2028 → 409 HYBRID_PRICE_BUSY', async () => {
+    const t = prismaMock.$transaction as unknown as jest.Mock
+    t.mockRejectedValueOnce({ code: 'P2028' })
+    await expect(prenderPlanesEditables('s1')).rejects.toMatchObject({ statusCode: 409, code: 'HYBRID_PRICE_BUSY' })
+    t.mockRejectedValueOnce({ code: 'P2028' })
+    await expect(apagarPlanesEditables('s1')).rejects.toMatchObject({ statusCode: 409, code: 'HYBRID_PRICE_BUSY' })
+  })
+
+  it('prender con el interruptor ya prendido no hace nada: mismo desde, sin segunda bitácora', async () => {
+    const antes = new Date('2026-11-01T00:00:00Z')
+    fila().findUnique.mockResolvedValue({ desde: antes } as any)
+    await expect(prenderPlanesEditables('s2')).resolves.toEqual({ desde: antes })
+    expect(raw()).not.toHaveBeenCalled()
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+  })
+
+  it('apagar con el interruptor ya apagado (o sin renglón) no hace nada: sin escritura ni bitácora', async () => {
+    fila().findUnique.mockResolvedValue(null)
+    await apagarPlanesEditables('s1')
+    fila().findUnique.mockResolvedValue({ desde: null } as any)
+    await apagarPlanesEditables('s1')
+    expect(exec().mock.calls.filter(c => textoDe(c).includes('INSERT INTO'))).toHaveLength(0)
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+  })
+
+  it('invalidarCacheDelInterruptor fuerza la siguiente lectura a la base', async () => {
+    fila().findUnique.mockResolvedValue(null)
+    await planesEditablesPrendidos()
+    invalidarCacheDelInterruptor()
+    await planesEditablesPrendidos()
+    expect(fila().findUnique).toHaveBeenCalledTimes(2)
+  })
+
   it('faltan VERSION_1 sin vigente o con una ranura sin priceId; CUPON_DE_INTRODUCCION mientras legacyIntro exista', async () => {
     await expect(requisitosFaltantes()).resolves.toEqual(['VERSION_1', 'CUPON_DE_INTRODUCCION', 'SERVIDOR_LISTO'])
     conVigente(definicionDePrueba({ ids: { ...idsDeLaVersion('a'), 'PRO:annual': null } }))
@@ -82,6 +131,7 @@ describe('requisitos y prender', () => {
     conVigente(definicionDePrueba({ ids: idsDeLaVersion('a') }))
     listos.SERVIDOR_LISTO_PARA_PLANES_EDITABLES = true
     listos.cuponDeIntroduccionRetirado = () => true
+    fila().findUnique.mockResolvedValue(null)
     const desde = new Date('2026-11-25T12:00:00Z')
     raw().mockResolvedValue([{ desde }])
     await expect(prenderPlanesEditables('s1')).resolves.toEqual({ desde })
@@ -96,6 +146,7 @@ describe('requisitos y prender', () => {
   })
 
   it('apagar toma plan-offer-publish, pone desde en NULL, deja bitácora y no toca versiones ni puntero', async () => {
+    fila().findUnique.mockResolvedValue({ desde: new Date() } as any)
     await apagarPlanesEditables('s1')
     const llamadas = exec().mock.calls
     expect(textoDe(llamadas[0])).toContain('pg_advisory_xact_lock')
