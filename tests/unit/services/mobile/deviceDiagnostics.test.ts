@@ -239,11 +239,14 @@ describe('reportarDiagnosticoTrasElSondeo', () => {
     expect(logger.warn).not.toHaveBeenCalled()
   })
 
+  // Cada prueba que hace fallar el guardado usa su propio aparato: la memoria de avisos es del módulo, y así ningún orden de las
+  // pruebas puede callar un aviso que otra espera.
   it('con un guardado que rechaza no lanza ni deja una promesa sin atender: sólo avisa en el log', async () => {
-    prismaMock.$transaction.mockRejectedValueOnce(new Error('lock timeout'))
-    expect(() => reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), TERMINAL, NOW)).not.toThrow()
+    const pc = 'cterminal0000000000000011'
+    prismaMock.$transaction.mockRejectedValueOnce(new Error('se cayó la base'))
+    expect(() => reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), pc, NOW)).not.toThrow()
     await vaciar()
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('dibujo'), expect.objectContaining({ terminalId: TERMINAL }))
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('dibujo'), expect.objectContaining({ terminalId: pc }))
   })
 
   it.each([
@@ -287,12 +290,13 @@ describe('reportarDiagnosticoTrasElSondeo', () => {
   })
 
   it('el cupo también se libera cuando el guardado rechaza', async () => {
+    const pc = 'cterminal0000000000000012'
     const primero = pendiente()
     prismaMock.$transaction.mockImplementationOnce(() => primero.promesa)
-    reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), TERMINAL, NOW)
+    reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), pc, NOW)
     primero.fallar(new Error('se cayó la base'))
     await vaciar()
-    reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), TERMINAL, NOW)
+    reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), pc, NOW)
     await vaciar()
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
   })

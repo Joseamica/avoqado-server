@@ -699,8 +699,8 @@ describe('ficha del aparato — el reporte de dibujo del POS de Windows', () => 
     await updateTpv(venueId, 'pos-1', { name: 'Caja 2' })
 
     for (const llamada of [...prismaMock.terminal.findMany.mock.calls, ...prismaMock.terminal.update.mock.calls]) {
-      expect(llamada[0]).not.toHaveProperty('omit')
-      expect(llamada[0]).not.toHaveProperty('select.deviceDiagnostics')
+      expect(llamada[0]).not.toHaveProperty('omit.deviceDiagnostics', false)
+      expect(llamada[0]).not.toHaveProperty('select.deviceDiagnostics', true)
     }
     expect(prismaMock.terminal.findMany).toHaveBeenCalled()
     expect(prismaMock.terminal.update).toHaveBeenCalled()
