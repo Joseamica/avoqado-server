@@ -23,6 +23,9 @@ keywords:
   - correo de cumpleaños
   - no me deja enviar la campaña
   - ningún cliente recibe el correo
+  - entregados en cero
+  - cuántos correos llegaron
+  - la campaña sigue en cola
   - newsletter
 ---
 
@@ -47,6 +50,7 @@ Sólo se le escribe a los clientes que dieron su permiso expreso para recibir co
 - **«Ningún cliente te ha dado permiso todavía para enviarle promociones.»:** pídeles permiso al registrarlos o márcalo en el formulario del cliente. Sin aviso de privacidad la casilla sale apagada.
 - **«Pídele a un administrador que la encienda: encenderla autoriza el envío de correos.»:** quien tiene el permiso de enviar es quien la enciende.
 - **La felicitación no llegó a tiempo:** cada día se revisa quién cumple años. Si el correo fuera a llegar tarde no se envía: felicitar después del cumpleaños es peor que no felicitar.
-- **Los correos salen en los minutos siguientes, no en el mismo segundo:** la campaña queda **En cola** y sale sola en los minutos siguientes, aunque el aviso diga que sale de inmediato.
+- **Los correos salen en los minutos siguientes, no en el mismo segundo:** la campaña queda **En cola**, pasa a **Enviando** cuando empiezan a salir y a **Enviada** cuando ya no queda ninguno por salir, aunque el aviso diga que sale de inmediato. Mientras envía, la lista se actualiza sola.
+- **¿Cuántos correos salieron?:** en la lista, **Entregados** dice cuántos ya salieron de los que se iban a mandar, por ejemplo «118 / 120». Los que rebotaron o el cliente marcó como spam aparecen **con error**. Los **omitidos** no se mandaron: el cliente quitó su permiso, lo desactivaste o ya no tiene correo; su correo quedó bloqueado porque antes rebotó o lo marcó como spam; venció el plazo de envío; o al negocio le falta su nombre o un correo o teléfono de contacto.
 - **Una campaña enviada ya no se edita:** se puede abrir para verla, no para cambiarla.
 - **El estado de la felicitación** dice **Sin configurar**, **Encendida** o **Pausada**.

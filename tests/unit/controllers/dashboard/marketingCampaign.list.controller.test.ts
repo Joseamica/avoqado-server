@@ -17,13 +17,14 @@
  * REGRESSION: sigue paginando igual y sigue devolviendo `{items,total,page,pageSize}`.
  */
 import { Request, Response, NextFunction } from 'express'
-import { listCampaigns } from '@/controllers/dashboard/marketingCampaign.dashboard.controller'
+import { getCampaign, listCampaigns } from '@/controllers/dashboard/marketingCampaign.dashboard.controller'
 import prisma from '@/utils/prismaClient'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    customerCampaign: { findMany: jest.fn(), count: jest.fn() },
+    customerCampaign: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn() },
+    customerCampaignDelivery: { groupBy: jest.fn() },
   },
 }))
 
@@ -34,6 +35,7 @@ jest.mock('@/config/logger', () => ({
 
 const findMany = prisma.customerCampaign.findMany as jest.Mock
 const count = prisma.customerCampaign.count as jest.Mock
+const groupBy = (prisma as any).customerCampaignDelivery.groupBy as jest.Mock
 
 const VENUE = 'clv1000000000000000000000'
 
@@ -49,6 +51,7 @@ describe('listCampaigns — consulta acotada', () => {
     jest.clearAllMocks()
     findMany.mockResolvedValue([])
     count.mockResolvedValue(0)
+    groupBy.mockResolvedValue([])
   })
 
   it('pide un select explícito (no trae la fila completa)', async () => {
@@ -89,22 +92,45 @@ describe('listCampaigns — consulta acotada', () => {
     const args = findMany.mock.calls[0][0]
     expect(args.select).toBeDefined()
     const select = args.select
-    for (const campo of [
-      'id',
-      'name',
-      'subject',
-      'status',
-      'audience',
-      'totalRecipients',
-      'sentCount',
-      'failedCount',
-      'skippedCount',
-      'scheduledFor',
-      'createdAt',
-      'updatedAt',
-    ]) {
+    for (const campo of ['id', 'name', 'subject', 'status', 'audience', 'totalRecipients', 'scheduledFor', 'createdAt', 'updatedAt']) {
       expect(select[campo]).toBe(true)
     }
+  })
+
+  // ---- D37: «Entregados» salía en 0 aunque los correos ya habían salido ----
+
+  it('🔴 NO lee los contadores de la columna (nacen en 0 y nadie los sube)', async () => {
+    const { req, res, next } = armar()
+    await listCampaigns(req, res, next)
+
+    const select = findMany.mock.calls[0][0].select
+    expect(select).toBeDefined()
+    for (const campo of ['sentCount', 'failedCount', 'skippedCount']) {
+      expect(select[campo] ?? false).toBe(false)
+    }
+  })
+
+  it('🔴 entregados, fallidos y estado salen de contar los envíos de cada campaña', async () => {
+    findMany.mockResolvedValue([
+      { id: 'c1', name: 'Navidad', status: 'ENQUEUED', totalRecipients: 10 },
+      { id: 'c2', name: 'Borrador', status: 'DRAFT', totalRecipients: 0 },
+    ])
+    count.mockResolvedValue(2)
+    groupBy.mockResolvedValue([
+      { campaignId: 'c1', status: 'SENT', _count: { _all: 8 } },
+      { campaignId: 'c1', status: 'FAILED', _count: { _all: 1 } },
+      { campaignId: 'c1', status: 'DEAD', _count: { _all: 1 } },
+    ])
+    const { req, res, next } = armar()
+    await listCampaigns(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(groupBy).toHaveBeenCalledTimes(1)
+    expect(groupBy.mock.calls[0][0].where).toEqual({ venueId: VENUE, campaignId: { in: ['c1', 'c2'] } })
+    const { items, total } = (res.json as jest.Mock).mock.calls[0][0]
+    expect(total).toBe(2)
+    expect(items[0]).toMatchObject({ id: 'c1', status: 'SENT', sentCount: 8, failedCount: 2, totalRecipients: 10 })
+    expect(items[1]).toMatchObject({ id: 'c2', status: 'DRAFT', sentCount: 0, failedCount: 0 })
   })
 
   // ---- REGRESIÓN: lo que ya funcionaba sigue igual ----
@@ -132,7 +158,12 @@ describe('listCampaigns — consulta acotada', () => {
     const args = findMany.mock.calls[0][0]
     expect(args.skip).toBe(0)
     expect(args.take).toBe(20)
-    expect(res.json).toHaveBeenCalledWith({ items: [{ id: 'c1' }], total: 37, page: 1, pageSize: 20 })
+    expect(res.json).toHaveBeenCalledWith({
+      items: [{ id: 'c1', sentCount: 0, failedCount: 0, skippedCount: 0 }],
+      total: 37,
+      page: 1,
+      pageSize: 20,
+    })
   })
 
   it('respeta page y pageSize cuando vienen', async () => {
@@ -151,5 +182,22 @@ describe('listCampaigns — consulta acotada', () => {
 
     expect(next).toHaveBeenCalledWith(expect.any(Error))
     expect(res.json).not.toHaveBeenCalled()
+  })
+})
+
+describe('getCampaign — D37: el detalle dice lo mismo que la lista', () => {
+  it('cuenta los envíos y avanza el estado, sin perder el resto de la fila', async () => {
+    const findFirst = (prisma as any).customerCampaign.findFirst as jest.Mock
+    findFirst.mockResolvedValue({ id: 'c1', venueId: VENUE, status: 'ENQUEUED', htmlBody: '<p>hola</p>', sentCount: 0 })
+    groupBy.mockResolvedValue([{ campaignId: 'c1', status: 'SENT', _count: { _all: 4 } }])
+    const req = { params: { venueId: VENUE, id: 'c1' } } as unknown as Request
+    const res = { json: jest.fn() } as unknown as Response
+    const next = jest.fn() as unknown as NextFunction
+
+    await getCampaign(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(findFirst).toHaveBeenCalledWith({ where: { id: 'c1', venueId: VENUE } })
+    expect((res.json as jest.Mock).mock.calls[0][0]).toMatchObject({ id: 'c1', status: 'SENT', sentCount: 4, htmlBody: '<p>hola</p>' })
   })
 })

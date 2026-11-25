@@ -7,6 +7,7 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import prisma from '@/utils/prismaClient'
 import { obtenerAutomatizacion, cambiarEstadoAutomatizacion } from '@/services/marketing/birthdayAutomation.service'
+import { conAvanceReal } from '@/services/marketing/campaignProgress.service'
 
 /**
  * Campañas de correo de un negocio a SUS clientes (promociones y felicitación de
@@ -37,7 +38,7 @@ export function registerCampaignTools(server: McpServer, scope: McpScope) {
       guard.requirePermission('marketing:manage', venueId, 'read')
 
       const take = limit ?? 20
-      const [items, total] = await Promise.all([
+      const [filas, total] = await Promise.all([
         prisma.customerCampaign.findMany({
           where: { venueId },
           // 🔴 `select` acotado: sin él viajarían `htmlBody`/`textBody` — el correo entero de
@@ -49,9 +50,7 @@ export function registerCampaignTools(server: McpServer, scope: McpScope) {
             status: true,
             audience: true,
             totalRecipients: true,
-            sentCount: true,
-            failedCount: true,
-            skippedCount: true,
+            // Los contadores de la fila nacen en 0 y nadie los sube: salen de los envíos (D37).
             createdAt: true,
           },
           // Desempate único: con `skip`/`take` sobre `createdAt` solo, dos campañas creadas
@@ -61,6 +60,7 @@ export function registerCampaignTools(server: McpServer, scope: McpScope) {
         }),
         prisma.customerCampaign.count({ where: { venueId } }),
       ])
+      const items = await conAvanceReal(venueId, filas)
 
       return text({
         venueId,
