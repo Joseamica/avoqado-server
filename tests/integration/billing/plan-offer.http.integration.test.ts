@@ -107,6 +107,7 @@ import { planOfferRenameJob } from '@/jobs/plan-offer-rename.job'
 import { ofertaDeRespaldo } from '@/services/billing/planOffer'
 import { __resetInterruptorPlanesParaPruebas } from '@/services/billing/interruptorPlanesEditables'
 import { definicionDeLaListaDelPlan } from '@tests/__helpers__/planOfferFixtures'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 jest.setTimeout(120_000)
 
@@ -993,9 +994,16 @@ describe('PUT /api/v1/superadmin/plan-offer/recipients (Postgres real)', () => {
     const fila = await prisma.platformSettings.findUniqueOrThrow({ where: { id: 'default' } })
     expect(fila.avisosDelAltaCorreos).toEqual(['ventas@example.com', 'ops@example.com'])
     expect(fila.updatedById).toBe(superadmin.staffId)
-    await hastaQue(
-      async () => (await prisma.activityLog.count({ where: { action: 'PLATFORM_SETTINGS_UPDATED', staffId: superadmin.staffId } })) > 0,
-      'la bitácora de los destinatarios',
+    // `logAction` está simulado para TODA la integración (`tests/__helpers__/integration-setup.ts`): no escribe la fila, así que
+    // se revisa la llamada (como `exchangeChain.integration.test.ts`). La escritura real la prueba la unitaria de los destinatarios.
+    expect(jest.mocked(logAction)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'PLATFORM_SETTINGS_UPDATED',
+        staffId: superadmin.staffId,
+        data: expect.objectContaining({
+          avisosDelAltaCorreos: expect.objectContaining({ to: ['ventas@example.com', 'ops@example.com'] }),
+        }),
+      }),
     )
 
     const estado = await pedir.get()
