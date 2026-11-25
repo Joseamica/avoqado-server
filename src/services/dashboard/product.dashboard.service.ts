@@ -949,9 +949,10 @@ export async function updateProduct(
         throw new AppError(GRUPO_DE_MODIFICADORES_YA_NO_EXISTE, 400)
       }
 
+      // hz:960ee149:D1: el orden es el que mandó el panel (no el de la base); un id repetido cuenta en su primera posición.
       updateData.modifierGroups = {
         deleteMany: {}, // Remove all existing relationships
-        create: validGroupIds.map((groupId, index) => ({
+        create: [...new Set(modifierGroupIds)].map((groupId, index) => ({
           groupId,
           displayOrder: index,
         })),
