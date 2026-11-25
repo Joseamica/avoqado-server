@@ -237,6 +237,48 @@ describe('depósito cobrado sobre una reserva cancelada, con retención por canc
     expect(provider.refund).toHaveBeenCalledTimes(1)
   })
 
+  it('🔴 la retención tampoco escribe sobre una devolución que empezó después de su lectura y sigue en curso', async () => {
+    const r = await mkReservation({
+      status: 'CANCELLED',
+      cancelledBy: 'CUSTOMER',
+      cancelledAt: new Date(),
+      depositStatus: 'PAID',
+      depositPaidAt: new Date(),
+      depositProcessorRef: 'pi_en_curso',
+    })
+    const enStripe = señal()
+    const stripeContesta = señal()
+    provider.refund.mockImplementation(async () => {
+      enStripe.dar()
+      await stripeContesta.esperar('Stripe nunca contestó')
+      return { status: 'SUCCEEDED', refundId: 're_simulado' }
+    })
+    const enCurso: { devolucion?: Promise<void> } = {}
+    let primera = true
+    jest.spyOn(prisma.reservation, 'findFirst').mockImplementation((async (args: unknown) => {
+      if (esLecturaDelDeposito(args) && primera) {
+        primera = false
+        const leido = await leer(args as never)
+        // Después de la lectura de la retención empieza una devolución: marca su intento (PENDING, el depósito sigue PAID) y
+        // queda esperando la respuesta de Stripe.
+        enCurso.devolucion = handleReservationDepositCancellation(r.id, venueId!, { sinRetener: true })
+        await enStripe.esperar('la devolución no llegó a Stripe')
+        return leido
+      }
+      return leer(args as never)
+    }) as never)
+
+    await handleReservationDepositCancellation(r.id, venueId!)
+
+    const durante = await fila(r.id)
+    expect(durante.depositStatus).toBe('PAID')
+    expect(durante.refundStatus).toBe('PENDING')
+    stripeContesta.dar()
+    await aTiempo(enCurso.devolucion!, 8_000, 'la devolución no terminó')
+    expect((await fila(r.id)).depositStatus).toBe('REFUNDED')
+    expect(provider.refund).toHaveBeenCalledTimes(1)
+  })
+
   it('regresión: el depósito que ya estaba pagado al cancelar tarde se retiene, sin devolución', async () => {
     const r = await mkReservation({
       status: 'CONFIRMED',
