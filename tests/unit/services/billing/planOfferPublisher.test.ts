@@ -61,6 +61,7 @@ import { ofertaVigente, tomarCandadoDeLaOferta } from '@/services/billing/planOf
 import {
   descartarPublicacion,
   estadoDeLaOferta,
+  estadoDespuesDeConfirmar,
   publicarVersion,
   reintentarPublicacion,
   vistaPreviaDeLaOferta,
@@ -975,6 +976,15 @@ describe('estadoDeLaOferta', () => {
     expect((await estadoDeLaOferta()).pendiente).toBeNull()
   })
 
+  it('Task 9: trae los destinatarios de los avisos internos guardados en PlatformSettings', async () => {
+    prismaMock.platformSettings.findUnique.mockResolvedValueOnce({ avisosDelAltaCorreos: ['ops@example.com', 'ventas@example.com'] })
+    await expect(estadoDeLaOferta()).resolves.toMatchObject({ destinatarios: ['ops@example.com', 'ventas@example.com'] })
+    expect(prismaMock.platformSettings.findUnique).toHaveBeenCalledWith({
+      where: { id: 'default' },
+      select: { avisosDelAltaCorreos: true },
+    })
+  })
+
   it('sin versiones: el respaldo con número 1 y revisión 0', async () => {
     base.tablas.planOfferPointer.clear()
     base.tablas.planOfferVersion.clear()
@@ -986,6 +996,28 @@ describe('estadoDeLaOferta', () => {
       nombresEnStripe: null,
     })
     expect(estado.vigente.entrada).toEqual(entrada())
+  })
+})
+
+describe('estadoDespuesDeConfirmar (Task 9: lo que responden publicar, reintentar y descartar)', () => {
+  it('con el estado legible, lo devuelve completo', async () => {
+    await expect(estadoDespuesDeConfirmar('se publicó la versión', 'cv1')).resolves.toMatchObject({
+      revision: 1,
+      vigente: { number: 1, versionId: 'cv1' },
+      pendiente: null,
+    })
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('no se pudo leer el estado'), expect.anything())
+  })
+
+  it('si el estado ya no se puede leer, el mínimo con la revisión del puntero y un aviso en el log (nunca un error)', async () => {
+    // La vigente guardada está rota: `estadoDeLaOferta` respondería 503.
+    base.tablas.planOfferVersion.set('cv1', { ...version('cv1'), definition: { schemaVersion: 1 } })
+
+    await expect(estadoDespuesDeConfirmar('se publicó la versión', 'cv2')).resolves.toEqual({ revision: 1, pendiente: null, parcial: true })
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[PlanOffer] se publicó la versión, pero no se pudo leer el estado de la oferta',
+      expect.objectContaining({ versionId: 'cv2' }),
+    )
   })
 })
 

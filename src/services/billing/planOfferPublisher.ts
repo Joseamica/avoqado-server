@@ -628,11 +628,19 @@ export async function descartarPublicacion(versionId: string, staffId: string): 
     })
   })
   logger.info('[PlanOffer] versión descartada', { versionId, por: staffId })
+  return estadoDespuesDeConfirmar('se descartó la versión', versionId)
+}
+
+/**
+ * El estado completo de la oferta para responder después de una escritura YA confirmada (publicar, reintentar, descartar). Si no se
+ * puede leer, la escritura no se vuelve un error: se avisa en el log y se responde el mínimo, con la revisión del puntero
+ * (`{ revision, pendiente: null, parcial: true }`); la pantalla vuelve a pedir el estado completo.
+ */
+export async function estadoDespuesDeConfirmar(accion: string, versionId: string): Promise<EstadoDeLaOferta | EstadoParcialDeLaOferta> {
   try {
     return await estadoDeLaOferta()
   } catch (error) {
-    // El descarte ya se confirmó: no se responde como error. La pantalla vuelve a pedir el estado completo.
-    logger.warn('[PlanOffer] se descartó la versión, pero no se pudo leer el estado de la oferta', {
+    logger.warn(`[PlanOffer] ${accion}, pero no se pudo leer el estado de la oferta`, {
       versionId,
       error: error instanceof Error ? error.message : String(error),
     })

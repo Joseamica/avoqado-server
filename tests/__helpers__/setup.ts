@@ -253,6 +253,9 @@ const prismaMock: any = {
   platformCharge: createMockModel(),
   platformChargeOccurrence: createMockModel(),
   platformChargeDigest: createMockModel(),
+  // Planes editables B1 (Task 9): los destinatarios de los avisos internos (`avisosDelAltaCorreos`) los lee `estadoDeLaOferta`.
+  // Sin renglón (`findUnique` → undefined) la lista es [].
+  platformSettings: createMockModel(),
   posAppVersionPolicy: createMockModel(),
   // Actualizador del POS (r7): la política crea y archiva sus avisos de actualizar como anuncios de plataforma. Las entregas
   // están para que una prueba pueda afirmar que NUNCA se crean (las pruebas de anuncios usan su propio `jest.mock`).

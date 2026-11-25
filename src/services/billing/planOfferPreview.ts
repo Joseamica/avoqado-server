@@ -11,6 +11,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import AppError, { BadRequestError, ConflictError } from '../../errors/AppError'
 import { promotionsBrokenByList, type RuleViolation } from '../launchCampaigns/hybridPriceRule'
+import { getDestinatariosDelAlta } from '../superadmin/platformSettings.service'
 import { estadoDelInterruptor } from './interruptorPlanesEditables'
 import {
   definicionDesdeEntrada,
@@ -72,7 +73,7 @@ export interface EstadoDeLaOferta {
   pendiente: { versionId: string; definition: PlanOfferDefinition; creadaAt: Date; preparacion: unknown } | null
   interruptor: Awaited<ReturnType<typeof estadoDelInterruptor>>
   nombresEnStripe: unknown
-  /** Los destinatarios de los avisos internos (Task 9). */
+  /** Los destinatarios de los avisos internos (Task 9): `PlatformSettings.avisosDelAltaCorreos`, `[]` sin renglón. */
   destinatarios: string[]
 }
 
@@ -261,7 +262,7 @@ export async function estadoDeLaOferta(): Promise<EstadoDeLaOferta> {
       pendiente,
       interruptor: await estadoDelInterruptor(),
       nombresEnStripe: puntero?.nombresEnStripe ?? null,
-      destinatarios: [],
+      destinatarios: await getDestinatariosDelAlta(),
     }
   }
   throw desfasada()

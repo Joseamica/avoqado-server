@@ -12,10 +12,26 @@ import { Request, Response } from 'express'
 import * as platformSettingsService from '@/services/superadmin/platformSettings.service'
 import logger from '@/config/logger'
 
+/**
+ * La forma de HOY de esta API, con un `pick` explícito (planes editables B1, Task 9): una columna nueva de `PlatformSettings`
+ * (p. ej. `avisosDelAltaCorreos`, los destinatarios de los avisos internos) no sale por aquí. Los destinatarios tienen su propia
+ * ruta en /api/v1/superadmin/plan-offer/recipients.
+ */
+type PlatformSettingsRow = Awaited<ReturnType<typeof platformSettingsService.getPlatformSettings>>
+function formaDeHoy(settings: PlatformSettingsRow) {
+  return {
+    id: settings.id,
+    ecommercePlatformFeeBpsDefault: settings.ecommercePlatformFeeBpsDefault,
+    vatRateBps: settings.vatRateBps,
+    updatedAt: settings.updatedAt,
+    updatedById: settings.updatedById,
+  }
+}
+
 export async function getPlatformSettings(_req: Request, res: Response) {
   try {
     const settings = await platformSettingsService.getPlatformSettings()
-    res.json({ success: true, data: settings })
+    res.json({ success: true, data: formaDeHoy(settings) })
   } catch (error: any) {
     logger.error('Error fetching platform settings:', error)
     res.status(error.statusCode || 500).json({
@@ -73,7 +89,7 @@ export async function updatePlatformSettings(req: Request, res: Response) {
 
     const updatedById = (req as any).authContext?.staffId
     const updated = await platformSettingsService.updatePlatformSettings(input, updatedById)
-    res.json({ success: true, data: updated })
+    res.json({ success: true, data: formaDeHoy(updated) })
   } catch (error: any) {
     logger.error('Error updating platform settings:', error)
     res.status(error.statusCode || 500).json({

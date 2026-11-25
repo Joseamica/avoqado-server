@@ -1,20 +1,8 @@
-const store: any[] = []
-const idem = new Map<string, { ok: boolean; value: any }>()
-let hideArchived = false
-let failNextCreateWith: { statusCode?: number; code?: string } | null = null
-let seq = 0
-const list = jest.fn()
-const create = jest.fn()
+import { crearAlmacenDePrecios, FakeStripeError } from '@tests/__helpers__/fakeStripePrices'
 
-class FakeStripeError extends Error {
-  statusCode?: number
-  code?: string
-  constructor(statusCode: number | undefined, code?: string) {
-    super(`stripe ${statusCode} ${code}`)
-    this.statusCode = statusCode
-    this.code = code
-  }
-}
+// El almacén de precios de Stripe simulado vive en `tests/__helpers__/fakeStripePrices.ts` (lo comparte la integración de Task 9).
+const almacen = crearAlmacenDePrecios()
+const { store, idem, list, create } = almacen
 
 jest.mock('@/services/stripe.service', () => ({
   stripe: { prices: { list: (...a: unknown[]) => list(...a), create: (...a: unknown[]) => create(...a) } },
@@ -39,37 +27,7 @@ const base = (over: Record<string, unknown> = {}) => ({
 })
 
 beforeEach(() => {
-  store.length = 0
-  idem.clear()
-  hideArchived = false
-  failNextCreateWith = null
-  seq = 0
-  list.mockReset().mockImplementation(async (params: any) => {
-    const data = store.filter(p => params.lookup_keys.includes(p.lookup_key) && (!hideArchived || p.active))
-    return { data: data.slice(0, params.limit), has_more: data.length > params.limit }
-  })
-  create.mockReset().mockImplementation(async (params: any, opts: any) => {
-    const key = opts?.idempotencyKey as string
-    const saved = idem.get(key)
-    if (saved) {
-      if (saved.ok) return saved.value
-      throw saved.value
-    }
-    let outcome: { ok: boolean; value: any }
-    if (failNextCreateWith) {
-      outcome = { ok: false, value: new FakeStripeError(failNextCreateWith.statusCode, failNextCreateWith.code) }
-      failNextCreateWith = null
-    } else if (store.some(p => p.lookup_key === params.lookup_key)) {
-      outcome = { ok: false, value: new FakeStripeError(400, 'lookup_key_already_used') }
-    } else {
-      const price = { id: `price_${++seq}`, active: true, ...params }
-      store.push(price)
-      outcome = { ok: true, value: price }
-    }
-    idem.set(key, outcome)
-    if (outcome.ok) return outcome.value
-    throw outcome.value
-  })
+  almacen.reset()
 })
 
 const precio = (lookup_key: string, over: Record<string, unknown> = {}) => {
@@ -134,7 +92,7 @@ describe('asegurarPrecioDeLaRanura', () => {
 
   it('🔴 un precio archivado que la lista no devuelve: el create choca por la llave (400) → RECHAZADO, y el almacén sigue con uno solo', async () => {
     store.push(precio(`po_${V}_pro_monthly`, { active: false }))
-    hideArchived = true
+    almacen.hideArchived = true
     await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({
       motivo: 'RECHAZADO',
       ranura: 'PRO:monthly',
@@ -191,7 +149,7 @@ describe('asegurarPrecioDeLaRanura', () => {
   })
 
   it('🔴 con un 500 se lanza INCIERTO y el siguiente intento usa la MISMA llave (intento 0); el 500 guardado se repite', async () => {
-    failNextCreateWith = { statusCode: 500 }
+    almacen.failNextCreateWith = { statusCode: 500 }
     await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({ motivo: 'INCIERTO' })
     await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({ motivo: 'INCIERTO' })
     const keys = create.mock.calls.map(c => c[1].idempotencyKey)
@@ -199,8 +157,17 @@ describe('asegurarPrecioDeLaRanura', () => {
     expect(store).toHaveLength(0)
   })
 
+  it('🔴 Stripe creó el precio y la respuesta se perdió: INCIERTO; la siguiente vuelta lo recupera por su llave de búsqueda sin crear otro', async () => {
+    almacen.loseNextCreateResponse = true
+    await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({ motivo: 'INCIERTO' })
+    expect(store).toHaveLength(1)
+    await expect(asegurarPrecioDeLaRanura(base())).resolves.toEqual({ priceId: 'price_1' })
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(store).toHaveLength(1)
+  })
+
   it('con un 400 se lanza RECHAZADO; la llave del intento 1 es distinta y ya crea', async () => {
-    failNextCreateWith = { statusCode: 400, code: 'parameter_invalid' }
+    almacen.failNextCreateWith = { statusCode: 400, code: 'parameter_invalid' }
     await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({ motivo: 'RECHAZADO', stripeCode: 'parameter_invalid' })
     const r = await asegurarPrecioDeLaRanura(base({ intento: 1 }))
     expect(r.priceId).toBe('price_1')
@@ -220,7 +187,7 @@ describe('asegurarPrecioDeLaRanura', () => {
   })
 
   it('conserva el error original de Stripe como cause', async () => {
-    failNextCreateWith = { statusCode: 400, code: 'parameter_invalid' }
+    almacen.failNextCreateWith = { statusCode: 400, code: 'parameter_invalid' }
     const e = await asegurarPrecioDeLaRanura(base()).catch(x => x)
     expect(e.cause).toBeInstanceOf(FakeStripeError)
     expect(e.cause.statusCode).toBe(400)
