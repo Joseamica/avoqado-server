@@ -53,7 +53,7 @@ describe('cerrarAltaEnGratis', () => {
   it('CAS IN_PROGRESS → ACTIVE con plan FREE, pruebaSinTarjetaTerminada y subscriptionId, planStripeSubscriptionId null, luego terminarAltaCobrada; CAS perdido (o un lease vivo, desde el barrido) → no termina nada', async () => {
     const lease = new Date('2026-12-09T10:05:00Z')
 
-    await expect(cerrarAltaEnGratis(ORG, 1, sub(), lease, { via: 'navegador', staffId: 'staff-1' })).resolves.toBe(true)
+    await expect(cerrarAltaEnGratis(ORG, 1, sub(), lease, { via: 'navegador', staffId: 'staff-1', venueId: 'venue-1' })).resolves.toBe(true)
 
     expect(updates()).toEqual([
       {
@@ -79,6 +79,8 @@ describe('cerrarAltaEnGratis', () => {
       expect.objectContaining({
         action: 'PLAN_TRIAL_ENDED_ONBOARDING',
         staffId: 'staff-1',
+        // La bitácora del negocio filtra por él: la fila lleva el negocio del alta (fix round 1).
+        venueId: 'venue-1',
         organizationId: ORG,
         data: expect.objectContaining({ subscriptionId: 'sub_prueba', offerVersion: 2, via: 'navegador' }),
       }),
@@ -139,5 +141,23 @@ describe('pruebaSinTarjetaTerminada', () => {
     await expect(pruebaSinTarjetaTerminada(sub())).resolves.toBe(false)
     mockInvList.mockResolvedValueOnce({ has_more: true, data: [] })
     await expect(pruebaSinTarjetaTerminada(sub())).resolves.toBe(false)
+  })
+})
+
+describe('cerrarAltaEnGratis — el negocio de la bitácora (fix round 1)', () => {
+  it('sin venueId (el barrido) usa el primer negocio de la organización, el mismo que elige el alta; si no se puede leer, la fila sale sin negocio y el cierre no se frena', async () => {
+    prismaMock.venue.findFirst.mockResolvedValueOnce({ id: 'venue-del-alta' } as never)
+    await expect(cerrarAltaEnGratis(ORG, 1, sub(), null, { via: 'barrido' })).resolves.toBe(true)
+    expect(prismaMock.venue.findFirst).toHaveBeenCalledWith({
+      where: { organizationId: ORG },
+      select: { id: true },
+      orderBy: { createdAt: 'asc' },
+    })
+    expect(jest.mocked(logAction)).toHaveBeenLastCalledWith(expect.objectContaining({ venueId: 'venue-del-alta', organizationId: ORG }))
+
+    prismaMock.venue.findFirst.mockRejectedValueOnce(new Error('la base no contesta'))
+    await expect(cerrarAltaEnGratis(ORG, 1, sub(), null, { via: 'barrido' })).resolves.toBe(true)
+    expect(jest.mocked(logAction)).toHaveBeenLastCalledWith(expect.objectContaining({ venueId: null }))
+    expect(mockTerminar).toHaveBeenLastCalledWith(ORG, { via: 'barrido' })
   })
 })

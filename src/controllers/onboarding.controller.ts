@@ -22,10 +22,10 @@ import {
   createPlanSubscription,
   entregarSuscripcionDePlan,
   getOrCreateStripeCustomer,
-  modalidadDeLaSuscripcion,
   retrievePlanSubscription,
   suscripcionConTopeCorto,
 } from '../services/stripe.service'
+import { modalidadDePrueba } from '../services/billing/modalidadDePrueba'
 import { resolverPrecioDelPlan } from '../services/billing/precioDelPlan'
 import { autorizarObligacionNueva } from '../services/access/autorizarObligacionNueva'
 import { resolvePlanNotificationTarget } from '../services/access/planNotification.service'
@@ -45,7 +45,7 @@ import { buildLaunchOfferView } from '../services/launchCampaigns/launchOfferMat
 import { toOfferRow } from '../services/launchCampaigns/launchCampaign.service'
 import { PLAN_ACTIVATION_STATUS } from '../services/launchCampaigns/launchCampaignEnums'
 import { standardPlanQuote } from '../services/access/planPricing.constants'
-import { versionQueCobra, type OfertaVigente } from '../services/billing/planOffer'
+import { MENSAJE_PLAN_NO_CONFIGURADO, versionQueCobra, type OfertaVigente } from '../services/billing/planOffer'
 import { ofertaCambio } from '../services/billing/opcionesDeCompra'
 import {
   avisoDeLaPruebaSinTarjeta,
@@ -1267,11 +1267,14 @@ async function modalidadDelAlta(
         select: { planActivationStatus: true, planStripeSubscriptionId: true },
       }))
     if (p?.planActivationStatus !== PLAN_ACTIVATION_STATUS.ACTIVE || !p.planStripeSubscriptionId) return {}
-    const modalidad = await modalidadDeLaSuscripcion(p.planStripeSubscriptionId)
+    // UNA lectura, acotada (5 s, sin reintentos): de ella salen la modalidad y, con una prueba sin tarjeta, su aviso.
+    const sub = await suscripcionConTopeCorto(p.planStripeSubscriptionId)
+    const modalidad = modalidadDePrueba(sub)
     if (!modalidad.sinTarjeta) return modalidad
     // B2 Task 6 (b2-r8 #9, b2-r9 #7): la prueba sin tarjeta dice, leído de Stripe ahora, qué tarjeta cobraría y si habrá cobro. Es el
-    // mismo ayudante que la respuesta de «Terminar» y de `activate-plan`. Sin `sinTarjeta`, la forma de hoy (ninguna lectura más).
-    return { ...modalidad, ...(await avisoDeLaPruebaSinTarjeta(await suscripcionConTopeCorto(p.planStripeSubscriptionId))) }
+    // mismo ayudante que la respuesta de «Terminar» y de `activate-plan`, y nunca lanza: si la tarjeta no se puede leer (o tarda
+    // más que su tope), `tarjetaQueCobrara` no viaja («no se sabe») y lo ya leído se queda. Sin `sinTarjeta`, la forma de hoy.
+    return { ...modalidad, ...(await avisoDeLaPruebaSinTarjeta(sub)) }
   } catch (error) {
     logger.warn('onboarding: no se pudo leer la modalidad de la prueba; se omite', {
       organizationId,
@@ -2028,7 +2031,18 @@ export const TarjetaDeLaPruebaSchema = z.object({
 export async function tarjetaDeLaPruebaController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { organizationId } = req.params
-    if (!(await versionQueCobra())) throw ofertaCambio('VERSION', 1)
+    // Si leer la oferta falla, el 503 de «plan no configurado» de las compras (nunca un 500): sin oferta no hay prueba que avisar.
+    let version: OfertaVigente | null
+    try {
+      version = await versionQueCobra()
+    } catch (error) {
+      logger.warn('tarjeta-de-la-prueba: no se pudo leer la oferta de planes', {
+        organizationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw new AppError(MENSAJE_PLAN_NO_CONFIGURADO, 503, true, 'PLAN_NOT_CONFIGURED')
+    }
+    if (!version) throw ofertaCambio('VERSION', 1)
     // El negocio del alta: el mismo que elige `ensureVenueForOnboarding` (el primero de la organización), sin crearlo.
     const negocio = await prisma.venue.findFirst({
       where: { organizationId },

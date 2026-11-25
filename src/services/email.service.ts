@@ -306,6 +306,29 @@ function precioSinIva(cents: number): string {
   return formatMoney(cents).replace(/\.00$/, '')
 }
 
+/** Las claves de marca que Stripe da (`card.brand`, o la marca de una fuente vieja), ya sin espacios ni guiones y en minúsculas. */
+const MARCAS_DE_TARJETA: Record<string, string> = {
+  visa: 'Visa',
+  mastercard: 'Mastercard',
+  amex: 'American Express',
+  americanexpress: 'American Express',
+  discover: 'Discover',
+  diners: 'Diners Club',
+  dinersclub: 'Diners Club',
+  jcb: 'JCB',
+  unionpay: 'UnionPay',
+}
+
+/**
+ * B2 Task 6: la marca de una tarjeta como la lee una persona («Visa», «American Express»), no la clave de Stripe (`visa`,
+ * `amex`). Una marca que no se conoce sale con mayúscula inicial; sin marca, `null`.
+ */
+export function marcaLegible(brand: string | null | undefined): string | null {
+  const limpia = brand?.trim()
+  if (!limpia) return null
+  return MARCAS_DE_TARJETA[limpia.toLowerCase().replace(/[\s-]/g, '')] ?? limpia.charAt(0).toUpperCase() + limpia.slice(1)
+}
+
 /** Prueba REGALADA del plan (SUPERADMIN «Dar días de prueba», sin tarjeta): se acaba y no se cobra nada. */
 export interface PlanFreeTrialEndingEmailData {
   locale: 'es' | 'en'
@@ -5563,7 +5586,9 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
         : `Tu prueba gratis de Avoqado ${planName} termina el ${fecha}`
     const monto = data.montoAlTerminarCents !== undefined ? formatMoney(data.montoAlTerminarCents) : null
     const tarjeta = data.tarjeta
-    const marca = tarjeta ? escapeHtml(`${tarjeta.brand ?? (en ? 'card' : 'tarjeta')} ••••${tarjeta.last4 ?? '····'}`) : ''
+    // «Visa ••••4242»; sin marca, sólo «••••4242» (en inglés, «card ••••4242»).
+    const terminacion = `••••${tarjeta?.last4 ?? '····'}`
+    const marca = tarjeta ? escapeHtml(`${marcaLegible(tarjeta.brand) ?? (en ? 'card' : '')} ${terminacion}`.trim()) : ''
     const correo = '<a href="mailto:hola@avoqado.io" style="color: #000;">hola@avoqado.io</a>'
     const inicio = data.empezo
       ? en
@@ -5579,7 +5604,7 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
           ? `To keep ${planName}, add your card in «Your plan»; otherwise you stay on Free.${monto ? ` With your card, we'll charge ${monto} when it ends.` : ''}`
           : `In «Your plan» you can see which card will be charged when it ends, or cancel.`
       : tarjeta
-        ? `Si no haces nada, al terminar se cobrarán ${monto ?? 'tu plan'} en tu tarjeta ${marca}; puedes quitarla o cancelar en «Tu plan».`
+        ? `Si no haces nada, al terminar ${monto ? `se cobrarán ${monto}` : 'se cobrará tu plan'} en tu tarjeta ${marca}; puedes quitarla o cancelar en «Tu plan».`
         : tarjeta === null
           ? `Para seguir con ${planName}, pon tu tarjeta en «Tu plan»; si no, sigues en Gratis.${monto ? ` Con tu tarjeta, al terminar se cobrarán ${monto}.` : ''}`
           : `En «Tu plan» ves qué tarjeta se cobrará al terminar, o puedes cancelar.`

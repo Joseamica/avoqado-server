@@ -16,6 +16,14 @@ import { noHabraCobro } from './siguienteCobro'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
+/**
+ * 🔴 El tope de cada lectura de este ayudante (fix round 1 de Task 6): 5 s y sin reintentos, el mismo de `suscripcionConTopeCorto`
+ * (`stripe.service.ts`). Lo esperan respuestas (`GET /progress`, «Terminar», `activate-plan`, la ventana del alta): con el cliente
+ * de siempre (80 s y 2 reintentos) un Stripe lento las colgaba minutos. Un tiempo agotado es un error como cualquier otro: quien
+ * llama dice «no se sabe qué tarjeta» (`avisoDeLaPruebaSinTarjeta` omite el campo).
+ */
+export const LECTURA_ACOTADA = { timeout: 5_000, maxNetworkRetries: 0 } as const
+
 export interface TarjetaQueCobraria {
   id: string
   tipo: 'payment_method' | 'source'
@@ -37,14 +45,15 @@ async function leerOMuerto<T>(lectura: () => Promise<T>): Promise<T | null> {
 }
 
 async function delMetodo(ref: string | Stripe.PaymentMethod): Promise<TarjetaQueCobraria | null> {
-  const metodo = typeof ref === 'string' ? await leerOMuerto(() => stripe.paymentMethods.retrieve(ref)) : ref
+  const metodo = typeof ref === 'string' ? await leerOMuerto(() => stripe.paymentMethods.retrieve(ref, {}, LECTURA_ACOTADA)) : ref
   if (!metodo || metodo.type !== 'card') return null
   return { id: metodo.id, tipo: 'payment_method', brand: metodo.card?.brand ?? null, last4: metodo.card?.last4 ?? null }
 }
 
 /** Una fuente (la API vieja): una `card` (`card_…`) o un `source` de tipo `card` (`src_…`). Una cuenta de banco no cuenta. */
 async function deLaFuente(ref: string | Stripe.CustomerSource, customerId: string): Promise<TarjetaQueCobraria | null> {
-  const fuente = typeof ref === 'string' ? await leerOMuerto(() => stripe.customers.retrieveSource(customerId, ref)) : ref
+  const fuente =
+    typeof ref === 'string' ? await leerOMuerto(() => stripe.customers.retrieveSource(customerId, ref, {}, LECTURA_ACOTADA)) : ref
   if (!fuente) return null
   const f = fuente as {
     id: string
@@ -88,7 +97,7 @@ export async function tarjetaQueCobraria(args: {
 export async function clienteDeStripeVivo(customerId: string | null): Promise<Stripe.Customer | null> {
   if (!customerId) return null
   const cliente = await leerOMuerto(() =>
-    stripe.customers.retrieve(customerId, { expand: ['invoice_settings.default_payment_method', 'default_source'] }),
+    stripe.customers.retrieve(customerId, { expand: ['invoice_settings.default_payment_method', 'default_source'] }, LECTURA_ACOTADA),
   )
   if (cliente === null || (cliente as Stripe.DeletedCustomer | undefined)?.deleted === true) return null
   return cliente as Stripe.Customer
@@ -100,8 +109,9 @@ const idDe = (valor: string | { id: string } | null | undefined): string | null 
  * Lo que la respuesta, la pantalla final y `progress` dicen de una prueba SIN tarjeta (b2-r8 #9, b2-r9 #7), leído de Stripe ahora:
  * - `noHabraCobro`: al terminar la prueba no se cobrará (cancelación programada o cobranza en pausa), la misma regla de «Tu
  *   plan» y los recordatorios;
- * - `tarjetaQueCobrara`: la tarjeta que Stripe cobraría, o `null`. Si Stripe no deja leerla, el campo NO viaja (no se sabe:
- *   decir «sin tarjeta» sería falso si la tiene).
+ * - `tarjetaQueCobrara`: la tarjeta que Stripe cobraría, o `null`. Si Stripe no deja leerla (error o tiempo agotado,
+ *   `LECTURA_ACOTADA`), el campo NO viaja: «no se sabe», porque decir «sin tarjeta» sería falso si la tiene. Lo demás que ya se
+ *   leyó (la modalidad, `noHabraCobro`) se queda: nunca lanza.
  */
 export async function avisoDeLaPruebaSinTarjeta(
   sub: Stripe.Subscription,

@@ -18,7 +18,10 @@ jest.mock('stripe', () =>
 )
 
 import type Stripe from 'stripe'
-import { clienteDeStripeVivo, tarjetaQueCobraria } from '@/services/billing/tarjetaQueCobraria'
+import { avisoDeLaPruebaSinTarjeta, clienteDeStripeVivo, tarjetaQueCobraria } from '@/services/billing/tarjetaQueCobraria'
+
+/** El tope de cada lectura de Stripe del ayudante: 5 s y sin reintentos (fix round 1). */
+const TOPE = { timeout: 5_000, maxNetworkRetries: 0 }
 
 const tarjeta = (id: string, brand: string, last4: string) => ({ id, object: 'payment_method', type: 'card', card: { brand, last4 } })
 const PMS: Record<string, unknown> = {
@@ -58,7 +61,7 @@ describe('tarjetaQueCobraria — la jerarquía de Stripe', () => {
     const r = await tarjetaQueCobraria({ sub: sub(), customer: cliente({ default_source: 'card_vieja' }) })
 
     expect(r).toEqual({ id: 'card_vieja', tipo: 'source', brand: 'Visa', last4: '4242' })
-    expect(mockRetrieveSource).toHaveBeenCalledWith('cus_1', 'card_vieja')
+    expect(mockRetrieveSource).toHaveBeenCalledWith('cus_1', 'card_vieja', {}, TOPE)
     // Expandida (como la deja `clienteDeStripeVivo`), sin otra llamada.
     mockRetrieveSource.mockClear()
     const expandida = await tarjetaQueCobraria({ sub: sub(), customer: cliente({ default_source: fuenteVieja }) })
@@ -143,5 +146,48 @@ describe('tarjetaQueCobraria — la jerarquía de Stripe', () => {
 
     mockCustomerRetrieve.mockRejectedValueOnce(Object.assign(new Error('Stripe caído'), { type: 'StripeAPIError', statusCode: 500 }))
     await expect(clienteDeStripeVivo('cus_1')).rejects.toThrow('Stripe caído')
+  })
+
+  it('🔴 fix round 1: cada lectura de Stripe lleva el tope de 5 s sin reintentos (el cliente, el método y la fuente), como `suscripcionConTopeCorto`', async () => {
+    mockCustomerRetrieve.mockResolvedValueOnce(cliente())
+    await clienteDeStripeVivo('cus_1')
+    expect(mockCustomerRetrieve).toHaveBeenCalledWith(
+      'cus_1',
+      { expand: ['invoice_settings.default_payment_method', 'default_source'] },
+      TOPE,
+    )
+
+    await tarjetaQueCobraria({ sub: sub({ default_payment_method: 'pm_sub' }), customer: cliente() })
+    expect(mockPmRetrieve).toHaveBeenCalledWith('pm_sub', {}, TOPE)
+
+    await tarjetaQueCobraria({ customer: cliente({ default_source: 'card_vieja' }) })
+    expect(mockRetrieveSource).toHaveBeenCalledWith('cus_1', 'card_vieja', {}, TOPE)
+  })
+})
+
+describe('avisoDeLaPruebaSinTarjeta', () => {
+  const FIN = Math.floor(new Date('2026-12-09T16:00:00Z').getTime() / 1000)
+  const prueba = (o: Record<string, unknown> = {}) => sub({ status: 'trialing', trial_end: FIN, cancel_at_period_end: false, ...o })
+
+  it('🔴 fix round 1: si leer la tarjeta falla o se agota su tiempo, no lanza: dice noHabraCobro y OMITE tarjetaQueCobrara («no se sabe»)', async () => {
+    mockCustomerRetrieve.mockRejectedValueOnce(
+      Object.assign(new Error('Request aborted due to timeout being reached (5000ms)'), { type: 'StripeConnectionError' }),
+    )
+    const tiempoAgotado = await avisoDeLaPruebaSinTarjeta(prueba())
+    expect(tiempoAgotado).toEqual({ noHabraCobro: false })
+
+    mockCustomerRetrieve.mockResolvedValueOnce(cliente({ invoice_settings: { default_payment_method: 'pm_cliente' } }))
+    mockPmRetrieve.mockRejectedValueOnce(Object.assign(new Error('Stripe caído'), { type: 'StripeAPIError', statusCode: 500 }))
+    expect(await avisoDeLaPruebaSinTarjeta(prueba({ cancel_at_period_end: true }))).toEqual({ noHabraCobro: true })
+  })
+
+  it('con el cliente y su tarjeta: { tarjetaQueCobrara: { brand, last4 }, noHabraCobro }; sin tarjeta, tarjetaQueCobrara null', async () => {
+    mockCustomerRetrieve.mockResolvedValueOnce(cliente({ invoice_settings: { default_payment_method: 'pm_cliente' } }))
+    expect(await avisoDeLaPruebaSinTarjeta(prueba())).toEqual({
+      noHabraCobro: false,
+      tarjetaQueCobrara: { brand: 'mastercard', last4: '4444' },
+    })
+    mockCustomerRetrieve.mockResolvedValueOnce(cliente())
+    expect(await avisoDeLaPruebaSinTarjeta(prueba())).toEqual({ noHabraCobro: false, tarjetaQueCobrara: null })
   })
 })

@@ -82,6 +82,8 @@ import { comprobanteDePrueba, definicionDePrueba, idsDeLaVersion, punteroA } fro
 import type { CotizacionFirmable } from '@/services/billing/comprobanteDeCotizacion'
 import emailService from '@/services/email.service'
 import * as resendService from '@/services/resend.service'
+import { terminarAltaCobradaSinRomper } from '@/services/onboarding/terminarAltaCobrada'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 const DIA = 86_400_000
 const ORG = 'org-1'
@@ -452,6 +454,10 @@ describe('B2 Task 6: el alta sin tarjeta abre su prueba en Stripe', () => {
     )
     expect(planDelCierre()).toMatchObject({ tier: 'FREE', pruebaSinTarjetaTerminada: true, subscriptionId: 'sub_1', offerVersion: 2 })
     expect(mockTerminar).toHaveBeenCalledWith(ORG, expect.objectContaining({ via: 'navegador' }))
+    // La bitácora del negocio la ve: la fila lleva el negocio del alta (fix round 1).
+    expect(jest.mocked(logAction)).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'PLAN_TRIAL_ENDED_ONBOARDING', venueId: 'venue-1', organizationId: ORG }),
+    )
     expect(mockSubCreate).not.toHaveBeenCalled()
     expect(mockEntregar).not.toHaveBeenCalled()
 
@@ -504,6 +510,72 @@ describe('B2 Task 6: el alta sin tarjeta abre su prueba en Stripe', () => {
       noHabraCobro: true,
     })
     expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+})
+
+describe('B2 Task 6, fix round 1: la tarjeta es informativa y nunca frena el cierre (Important #1, §18)', () => {
+  const CLIENTE_VIVO = { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: null } }
+  const tiempoAgotado = () =>
+    Object.assign(new Error('Request aborted due to timeout being reached (5000ms)'), { type: 'StripeConnectionError' })
+
+  it('🔴 si leer la tarjeta falla después de abrir la prueba, el alta igual queda ACTIVE y terminada; la respuesta y la bienvenida omiten la tarjeta («no se sabe»)', async () => {
+    // La 1.ª lectura del cliente es la del PASO 4 (¿sigue vivo?); la 2.ª, la de la tarjeta, después de abrir la prueba.
+    mockCustomerRetrieve.mockReset().mockResolvedValueOnce(CLIENTE_VIVO).mockRejectedValueOnce(tiempoAgotado())
+
+    const r = await pedir({ quoteToken: comprobante() })
+    await sinPendientes()
+
+    expect(r).toMatchObject({ status: 'ACTIVE', alreadyActive: false, sinTarjeta: true, noHabraCobro: false })
+    expect(r).not.toHaveProperty('tarjetaQueCobrara')
+    expect(progresos().at(-1)).toMatchObject({ data: { planActivationStatus: 'ACTIVE', planStripeSubscriptionId: 'sub_1' } })
+    expect(terminarAltaCobradaSinRomper).toHaveBeenCalledWith(ORG, expect.objectContaining({ via: 'cobro' }))
+    const [, datos] = (emailService.sendPlanFreeTrialEndingEmail as jest.Mock).mock.calls[0] as [string, Record<string, unknown>]
+    expect(datos).toMatchObject({ empezo: true, montoAlTerminarCents: PRO_M })
+    expect(datos).not.toHaveProperty('tarjeta')
+  })
+
+  it('🔴 una lectura de la tarjeta LENTA no retrasa el cierre: terminarElAlta corre antes de que conteste; la respuesta la espera y la dice', async () => {
+    let contestar: (cliente: unknown) => void = () => undefined
+    mockCustomerRetrieve
+      .mockReset()
+      .mockResolvedValueOnce(CLIENTE_VIVO)
+      .mockImplementationOnce(() => new Promise(resolver => (contestar = resolver)))
+
+    const enCurso = pedir({ quoteToken: comprobante() })
+    for (let i = 0; i < 50 && (terminarAltaCobradaSinRomper as jest.Mock).mock.calls.length === 0; i++) {
+      await new Promise(res => setImmediate(res))
+    }
+
+    // El alta ya se cerró y se terminó mientras la tarjeta sigue sin contestar.
+    expect(terminarAltaCobradaSinRomper).toHaveBeenCalledTimes(1)
+    expect(progresos().at(-1)).toMatchObject({ data: { planActivationStatus: 'ACTIVE' } })
+    contestar({ ...CLIENTE_VIVO, invoice_settings: { default_payment_method: 'pm_premium' } })
+    await expect(enCurso).resolves.toMatchObject({ sinTarjeta: true, tarjetaQueCobrara: { brand: 'visa', last4: '4242' } })
+  })
+
+  it('una suscripción REUSADA al pedir la prueba sin tarjeta (un Pro con tarjeta ya pagado) cierra con SU modalidad: payNow true, su tarjeta, sinTarjeta false, la confirmación de pago y no la bienvenida', async () => {
+    // El negocio ya tiene la fila de Pro con una suscripción que sigue cobrando: `createPlanSubscription` la reusa.
+    prismaMock.venueFeature.findUnique.mockResolvedValue({ stripeSubscriptionId: 'sub_viejo' } as never)
+    const pagada = {
+      ...prueba({}, { sinTarjeta: undefined as unknown as string }),
+      id: 'sub_viejo',
+      status: 'active',
+      default_payment_method: 'pm_viejo',
+      trial_end: null,
+      latest_invoice: { id: 'in_1', status: 'paid', amount_paid: PRO_M },
+      metadata: { organizationId: ORG, featureCode: 'PLAN_PRO', planOfferVersion: '2', planActivationKey: 'plan-activation:org-1:7' },
+    }
+    mockSubRetrieve.mockResolvedValue(pagada)
+
+    const r = await pedir({ quoteToken: comprobante() })
+    await sinPendientes()
+
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(r).toMatchObject({ status: 'ACTIVE', tier: 'PRO', interval: 'monthly', firstChargeCents: PRO_M })
+    expect(r).not.toHaveProperty('sinTarjeta')
+    expect(planDelCierre()).toMatchObject({ payNow: true, paymentMethodId: 'pm_viejo', sinTarjeta: false, offerVersion: 2 })
+    expect(emailService.sendPlanConfirmationEmail).toHaveBeenCalledTimes(1)
+    expect(emailService.sendPlanFreeTrialEndingEmail).not.toHaveBeenCalled()
   })
 })
 

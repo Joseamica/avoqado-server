@@ -62,7 +62,8 @@ export async function cerrarAltaEnGratis(
   intento: number,
   sub: Stripe.Subscription,
   lease: Date | null,
-  opciones: { via: ViaDelCierre; staffId?: string },
+  /** `venueId`: el negocio del alta, para la bitácora del negocio. Sin él (el barrido), el primero de la organización. */
+  opciones: { via: ViaDelCierre; staffId?: string; venueId?: string },
 ): Promise<boolean> {
   const ahora = new Date()
   const numero = Number(sub.metadata?.planOfferVersion)
@@ -101,8 +102,20 @@ export async function cerrarAltaEnGratis(
     subscriptionId: sub.id,
     via: opciones.via,
   })
+  // El negocio del alta, el mismo que elige `ensureVenueForOnboarding`: la pantalla de bitácora del negocio filtra por él. Leerlo no
+  // puede deshacer ni frenar el cierre, que ya quedó: si falla, la fila sale sin negocio.
+  let venueId = opciones.venueId ?? null
+  if (!venueId) {
+    try {
+      venueId =
+        (await prisma.venue.findFirst({ where: { organizationId }, select: { id: true }, orderBy: { createdAt: 'asc' } }))?.id ?? null
+    } catch {
+      venueId = null
+    }
+  }
   await logAction({
     ...(opciones.staffId ? { staffId: opciones.staffId } : {}),
+    venueId,
     organizationId,
     action: 'PLAN_TRIAL_ENDED_ONBOARDING',
     entity: 'Organization',

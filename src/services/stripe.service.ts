@@ -32,7 +32,6 @@ import {
   registrarConflictoDeObligacion,
 } from './access/conflictosDeObligacion.service'
 import { descuentoDelPlan, type DescuentoDelPlan } from './billing/descuentoDelPlan'
-import { modalidadDePrueba, type ModalidadDePrueba } from './billing/modalidadDePrueba'
 import {
   clasificarEstado,
   clasificarSuscripcion,
@@ -1912,18 +1911,10 @@ export async function retrievePlanSubscription(
 }
 
 /**
- * Plan Básico: la modalidad de la prueba de UNA suscripción, leída de Stripe ahora (`modalidadDePrueba`). Acotada: un
+ * Plan Básico: UNA suscripción leída de Stripe ahora para decir la modalidad de su prueba (`modalidadDePrueba`). Acotada: un
  * intento de 5 s sin reintentos, porque la usan respuestas del alta y `GET /progress`. Si Stripe no contesta, LANZA: quien
- * llama omite el campo, nunca inventa una modalidad.
- */
-export async function modalidadDeLaSuscripcion(subscriptionId: string): Promise<ModalidadDePrueba> {
-  return modalidadDePrueba(await suscripcionConTopeCorto(subscriptionId))
-}
-
-/**
- * La suscripción leída con el tope corto de `modalidadDeLaSuscripcion` (5 s, sin reintentos), para las respuestas del alta y
- * `GET /progress`. Planes editables (B2, Task 6): la prueba sin tarjeta la vuelve a leer para decir qué tarjeta cobraría. Si
- * Stripe no contesta, LANZA: quien llama omite el campo.
+ * llama omite el campo, nunca inventa una modalidad. Planes editables (B2, Task 6): de la MISMA lectura salen la modalidad y, con
+ * una prueba sin tarjeta, qué tarjeta cobraría (antes era `modalidadDeLaSuscripcion`, que leía sólo la modalidad).
  */
 export async function suscripcionConTopeCorto(subscriptionId: string): Promise<Stripe.Subscription> {
   return stripe.subscriptions.retrieve(subscriptionId, {}, { timeout: 5_000, maxNetworkRetries: 0 })

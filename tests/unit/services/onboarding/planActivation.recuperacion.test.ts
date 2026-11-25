@@ -55,7 +55,11 @@ jest.mock('@/services/access/planNotification.service', () => ({
 }))
 jest.mock('@/services/email.service', () => ({
   __esModule: true,
-  default: { sendPlanConfirmationEmail: jest.fn().mockResolvedValue(true) },
+  default: {
+    sendPlanConfirmationEmail: jest.fn().mockResolvedValue(true),
+    // B2 Task 6: la bienvenida de la prueba sin tarjeta (la recibe el cierre de una prueba sin tarjeta recuperada).
+    sendPlanFreeTrialEndingEmail: jest.fn().mockResolvedValue(true),
+  },
 }))
 jest.mock('@/services/resend.service', () => ({
   __esModule: true,
@@ -573,6 +577,15 @@ describe('B2 Task 5: un intento anterior que pudo cobrar se recupera con su susc
     expect(mockSubCreate).not.toHaveBeenCalled()
     expect(mockPmRetrieve).not.toHaveBeenCalled()
     expect(emailService.sendPlanConfirmationEmail).not.toHaveBeenCalled()
+    // B2 Task 6: en su lugar, la bienvenida de la prueba sin tarjeta, una por suscripción, al precio de su suscripción.
+    expect(emailService.sendPlanFreeTrialEndingEmail).toHaveBeenCalledWith(
+      'duena@example.com',
+      expect.objectContaining({ empezo: true, idempotencyKey: 'plan-trial-no-card-start:sub_3ds', montoAlTerminarCents: PRO_M_V2 }),
+    )
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      'activate-plan: no se pudo enviar la bienvenida de la prueba sin tarjeta',
+      expect.anything(),
+    )
   })
 
   it('el texto del cierre del barrido: sin versión del editor, el de hoy; con versión, el nuevo (cubre también el cobro sin la marca)', async () => {

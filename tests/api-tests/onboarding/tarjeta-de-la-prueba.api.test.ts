@@ -47,6 +47,7 @@ import request from 'supertest'
 
 import { prismaMock } from '@tests/__helpers__/setup'
 import { definicionDePrueba, idsDeLaVersion, punteroA, versionUno } from '@tests/__helpers__/planOfferFixtures'
+import { MENSAJE_PLAN_NO_CONFIGURADO } from '@/services/billing/planOffer'
 
 const app = require('../../../src/app').default
 
@@ -151,6 +152,22 @@ describe('GET …/v2/tarjeta-de-la-prueba', () => {
       expect(prismaMock.venue.update).not.toHaveBeenCalled()
       expect(prismaMock.venue.updateMany).not.toHaveBeenCalled()
       expect(mockPmRetrieve).not.toHaveBeenCalled()
+    }
+  })
+
+  it('🔴 fix round 1: si leer la oferta falla (la base no contesta, o una vigente que no pasa el esquema) → el 503 PLAN_NOT_CONFIGURED de las compras, nunca un 500, y sin llamar a Stripe', async () => {
+    for (const leerFalla of [
+      () => prismaMock.planOfferPointer.findUnique.mockRejectedValue(new Error('la base no contesta')),
+      () => prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv2', 2, { schemaVersion: 1, PRO: 'roto' }) as never),
+    ]) {
+      jest.clearAllMocks()
+      leerFalla()
+
+      const res = await leer()
+
+      expect(res.status).toBe(503)
+      expect(res.body).toMatchObject({ code: 'PLAN_NOT_CONFIGURED', message: MENSAJE_PLAN_NO_CONFIGURADO })
+      sinLlamarAStripe()
     }
   })
 })

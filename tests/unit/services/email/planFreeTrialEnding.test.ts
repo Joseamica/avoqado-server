@@ -128,7 +128,9 @@ describe('sendPlanFreeTrialEndingEmail — la prueba sin tarjeta (B2)', () => {
     expect(subject).not.toMatch(EMOJI_RE)
     expect(idempotencyKey).toBe('plan-trial-no-card-start:sub_1')
     for (const cuerpo of [html, text]) {
-      expect(cuerpo).toContain('al terminar se cobrarán $926.84 en tu tarjeta visa ••••4242; puedes quitarla o cancelar en «Tu plan»')
+      // La marca como la lee una persona («Visa»), no la clave de Stripe (`visa`).
+      expect(cuerpo).toContain('al terminar se cobrarán $926.84 en tu tarjeta Visa ••••4242; puedes quitarla o cancelar en «Tu plan»')
+      expect(cuerpo).not.toContain('visa ••••')
       expect(cuerpo).toContain(NOTA)
       // No es la prueba regalada: nunca «no te cobraremos nada».
       expect(cuerpo).not.toContain('no te cobraremos nada')
@@ -180,7 +182,41 @@ describe('sendPlanFreeTrialEndingEmail — la prueba sin tarjeta (B2)', () => {
     })
     const { subject, text } = enviado()
     expect(subject).toBe('Your Avoqado Pro trial started: it ends on December 5, 2026')
-    expect(text).toContain('••••4242')
-    expect(text).toContain('$926.84')
+    expect(text).toContain("we'll charge $926.84 to your Visa ••••4242")
+  })
+
+  it('fix round 1: la marca legible (Mastercard, American Express; una que no se conoce, con mayúscula) y, sin monto, «se cobrará tu plan», nunca «se cobrarán tu plan»', async () => {
+    for (const [brand, legible] of [
+      ['mastercard', 'Mastercard'],
+      ['amex', 'American Express'],
+      ['American Express', 'American Express'],
+      ['diners', 'Diners Club'],
+      ['cartes_bancaires', 'Cartes_bancaires'],
+    ] as const) {
+      spy.mockClear()
+      await emailService.sendPlanFreeTrialEndingEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Taqueria',
+        endDate: FIN,
+        empezo: true,
+        tarjeta: { brand, last4: '1234' },
+      })
+      const { html, text } = enviado()
+      for (const cuerpo of [html, text]) {
+        expect(cuerpo).toContain(`al terminar se cobrará tu plan en tu tarjeta ${legible} ••••1234`)
+        expect(cuerpo).not.toContain('se cobrarán tu plan')
+      }
+    }
+    // Sin marca: sólo la terminación.
+    spy.mockClear()
+    await emailService.sendPlanFreeTrialEndingEmail('a@x.com', {
+      locale: 'es',
+      venueName: 'Taqueria',
+      endDate: FIN,
+      empezo: true,
+      montoAlTerminarCents: 92684,
+      tarjeta: { brand: null, last4: '1234' },
+    })
+    expect(enviado().text).toContain('al terminar se cobrarán $926.84 en tu tarjeta ••••1234;')
   })
 })

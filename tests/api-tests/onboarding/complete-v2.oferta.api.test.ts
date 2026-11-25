@@ -42,7 +42,8 @@ jest.mock('../../../src/services/stripe.service', () => ({
   entregarSuscripcionDePlan: (...a: unknown[]) => mockEntregar(...a),
   getOrCreateStripeCustomer: (...a: unknown[]) => mockCustomersCreate(...a),
   retrievePlanSubscription: jest.fn().mockResolvedValue({ status: 'trialing', currentPeriodEnd: null, cancelAtPeriodEnd: false }),
-  modalidadDeLaSuscripcion: jest.fn().mockResolvedValue({}),
+  // La modalidad sale de UNA lectura acotada (B2 Task 6, fix round 1): una suscripción activa no tiene modalidad de prueba.
+  suscripcionConTopeCorto: jest.fn().mockResolvedValue({ id: 'sub_x', status: 'active', metadata: {} }),
 }))
 const mockHayCobro = jest.fn()
 jest.mock('../../../src/services/onboarding/planActivation.service', () => ({

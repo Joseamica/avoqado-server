@@ -101,12 +101,17 @@ jest.mock('../../../src/services/onboarding/terminarAltaCobrada', () => ({
   terminarAltaCobrada: (...a: unknown[]) => mockTerminar(...a),
   terminarAltaCobradaSinRomper: jest.fn().mockResolvedValue(undefined),
 }))
+// «Terminar» rehidrata el negocio provisional (con su `generateUniqueSlug`, que con la base simulada no termina): fuera de esta suite.
+jest.mock('../../../src/services/onboarding/venueCreation.service', () => ({
+  __esModule: true,
+  applyBusinessInfoToVenue: jest.fn().mockResolvedValue(undefined),
+  createVenueFromOnboarding: jest.fn(),
+}))
 jest.mock('../../../src/services/onboarding/sesionTrasElAlta', () => ({
   __esModule: true,
   renovarSesionConLaSucursal: jest.fn().mockResolvedValue(undefined),
 }))
 
-import express from 'express'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 
@@ -114,13 +119,11 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import { comprobanteDePrueba, definicionDePrueba, idsDeLaVersion, punteroA } from '@tests/__helpers__/planOfferFixtures'
 import type { CotizacionFirmable } from '@/services/billing/comprobanteDeCotizacion'
 import * as planOffer from '@/services/billing/planOffer'
-import { validateRequest } from '@/middlewares/validation'
-import * as onboardingController from '@/controllers/onboarding.controller'
 import * as planActivationService from '@/services/onboarding/planActivation.service'
 import emailService from '@/services/email.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
-const { default: app, globalErrorHandler } = require('../../../src/app')
+const app = require('../../../src/app').default
 
 const ORG = 'clorgplanoferta0000000001'
 const RUTA = `/api/v1/onboarding/organizations/${ORG}/v2/activate-plan`
@@ -141,18 +144,16 @@ const leerTarjeta = () => request(app).get(`/api/v1/onboarding/organizations/${O
 const terminar = () => request(app).post(`/api/v1/onboarding/organizations/${ORG}/v2/complete`).set(autorizado).send({})
 
 /**
- * El 400 que el esquema de HOY da a ese cuerpo: la misma validación (`validateRequest(ActivatePlanSchema)`) y el mismo manejador
- * de errores, en una app mínima. Es la referencia contra la que se compara la ruta real.
+ * 🔴 Los 400 de HOY, LITERALES: el estado y el cuerpo que daba la base 94e17b8ae (su `ActivatePlanSchema` con `validateRequest` y el
+ * `globalErrorHandler` real) a esos cuerpos, capturados una vez y escritos aquí a mano. No se calculan con el esquema de ahora: si
+ * alguien cambia el esquema de hoy, estas pruebas lo notan (fix round 1 de Task 6: la comparación anterior era circular).
  */
-const appDeHoy = express()
-  .use(express.json())
-  .post(
-    '/api/v1/onboarding/organizations/:organizationId/v2/activate-plan',
-    validateRequest(onboardingController.ActivatePlanSchema),
-    (_r, res) => res.status(200).json({ pasoLaValidacion: true }),
-  )
-  .use(globalErrorHandler)
-const respuestaDeHoy = (cuerpo: object) => request(appDeHoy).post(RUTA).send(cuerpo)
+/** `STANDARD_SIN_TARJETA` sin `paymentMethodId` (con `expectedFirstChargeCents` 1, o válido con su comprobante). */
+const CUERPO_400_SIN_TARJETA = {
+  message: 'Error de validación: Falta el dato «paymentMethodId», Tipo no válido. Opciones: LAUNCH, STANDARD',
+}
+/** `STANDARD` sin `paymentMethodId` (con `payNow` false y un `quoteToken` de texto). */
+const CUERPO_400_SIN_METODO = { message: 'Error de validación: Falta el dato «paymentMethodId»' }
 
 type Planes = NonNullable<Parameters<typeof definicionDePrueba>[0]>['planes']
 /** La v2: Pro SIN tarjeta 14 días a $799 + IVA; Premium como hoy (con tarjeta, 30 días). */
@@ -375,17 +376,17 @@ describe('POST …/v2/activate-plan — la validación del alta sin tarjeta', ()
   it('🔴 b2-r6, regresión (el caso de Codex): sin versión del editor, STANDARD_SIN_TARJETA con expectedFirstChargeCents 1 y sin paymentMethodId → el mismo 400 y el mismo cuerpo de error que hoy (comparado con la respuesta del esquema de hoy)', async () => {
     const cuerpo = { tier: 'PRO', interval: 'monthly', payNow: false, offer: { kind: 'STANDARD_SIN_TARJETA', expectedFirstChargeCents: 1 } }
 
-    const hoy = await respuestaDeHoy(cuerpo)
     const res = await pedirCon(cuerpo)
 
-    expect(hoy.status).toBe(400)
+    // El 400 de hoy, literal (capturado de la base 94e17b8ae): mismo estado y mismo cuerpo.
     expect(res.status).toBe(400)
-    expect(res.body).toEqual(hoy.body)
+    expect(res.body).toStrictEqual(CUERPO_400_SIN_TARJETA)
     expect(mockSubCreate).not.toHaveBeenCalled()
     expect(mockAutorizar).not.toHaveBeenCalled()
     // Un cuerpo VÁLIDO de la rama nueva, sin versión del editor: también el 400 de hoy.
-    const valido = SIN_TARJETA()
-    expect((await pedirCon(valido)).body).toEqual((await respuestaDeHoy(valido)).body)
+    const valido = await pedirCon(SIN_TARJETA())
+    expect(valido.status).toBe(400)
+    expect(valido.body).toStrictEqual(CUERPO_400_SIN_TARJETA)
   })
 
   it('🔴 b2-r7 #7: versionQueCobra() lanza un error → el mismo cuerpo STANDARD_SIN_TARJETA inválido recibe el 400 de hoy, nunca un 5xx; un cuerpo válido de hoy ni siquiera consulta la versión', async () => {
@@ -397,7 +398,7 @@ describe('POST …/v2/activate-plan — la validación del alta sin tarjeta', ()
       const res = await pedirCon(cuerpo)
 
       expect(res.status).toBe(400)
-      expect(res.body).toEqual((await respuestaDeHoy(cuerpo)).body)
+      expect(res.body).toStrictEqual(CUERPO_400_SIN_TARJETA)
       expect(espia).toHaveBeenCalledTimes(1)
 
       // Un cuerpo válido de hoy (con tarjeta, sin versiones): la validación no consulta la versión; sólo el servicio (PASO 3).
@@ -424,17 +425,14 @@ describe('POST …/v2/activate-plan — la validación del alta sin tarjeta', ()
       payNow: false,
       offer: { kind: 'STANDARD', expectedFirstChargeCents: 0, quoteToken: 'hola' },
     }
-    const hoy = await respuestaDeHoy(cuerpo)
-
     const sinVersion = await pedirCon(cuerpo)
     conVigente()
     const conV2 = await pedirCon(cuerpo)
 
-    expect(hoy.status).toBe(400)
     expect(sinVersion.status).toBe(400)
-    expect(sinVersion.body).toEqual(hoy.body)
+    expect(sinVersion.body).toStrictEqual(CUERPO_400_SIN_METODO)
     expect(conV2.status).toBe(400)
-    expect(conV2.body).toEqual(hoy.body)
+    expect(conV2.body).toStrictEqual(CUERPO_400_SIN_METODO)
     expect(mockSubCreate).not.toHaveBeenCalled()
   })
 
@@ -623,6 +621,138 @@ describe('POST …/v2/activate-plan — la prueba sin tarjeta con la v2', () => 
       expect(mockSubCreate).toHaveBeenCalledTimes(1)
       expect((mockSubCreate.mock.calls[0][0] as { customer: string }).customer).toBe('cus_nuevo')
     }
+  })
+
+  it('🔴 b2-r9 #4, con tarjeta: el cliente guardado ya no existe en Stripe → se suelta y se crea otro, y la tarjeta del cliente borrado no es de éste: el 400 de hoy (PAYMENT_METHOD_MISMATCH), sin cobrar', async () => {
+    // La v2 con Pro CON tarjeta (30 días): el alta de siempre, con su comprobante.
+    conVigente(v2({ PRO: { requiresCard: true, trialDays: 30 } }))
+    const emitido = new Date()
+    const quoteToken = comprobanteDePrueba(
+      { alcance: `org:${ORG}`, precioCents: PRO_M, firstChargeCents: 0, trialEndsAt: new Date(emitido.getTime() + 30 * DIA) },
+      emitido,
+    )
+    let clienteDelNegocio: string | null = 'cus_1'
+    prismaMock.venue.findUnique.mockImplementation((async () => ({
+      id: 'venue-1',
+      name: 'Negocio',
+      slug: 'negocio-de-prueba',
+      email: 'negocio@example.com',
+      stripeCustomerId: clienteDelNegocio,
+      organization: { email: 'org@example.com', name: 'Org' },
+    })) as never)
+    prismaMock.venue.updateMany.mockImplementation((async ({ where, data }: { where: Fila; data: Fila }) => {
+      if (where.stripeCustomerId !== clienteDelNegocio) return { count: 0 }
+      clienteDelNegocio = data.stripeCustomerId
+      return { count: 1 }
+    }) as never)
+    mockCustomerRetrieve.mockImplementation(async (id: string) =>
+      id === 'cus_1' ? { id: 'cus_1', object: 'customer', deleted: true } : { ...clienteSinTarjeta(), id },
+    )
+
+    // `pm_1` es del cliente borrado (`cus_1`), no del nuevo.
+    const res = await pedirCon({
+      tier: 'PRO',
+      interval: 'monthly',
+      payNow: false,
+      paymentMethodId: 'pm_1',
+      offer: { kind: 'STANDARD', expectedFirstChargeCents: 0, quoteToken },
+    })
+
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ code: 'PAYMENT_METHOD_MISMATCH', message: 'Ese método de pago no pertenece a este negocio' })
+    expect(clienteDelNegocio).toBe('cus_nuevo')
+    expect(mockPmRetrieve).toHaveBeenCalledWith('pm_1')
+    // Sin cobrar: ni la regla común ni Stripe, y el alta sin lease (el 400 sale antes del PASO 5).
+    expect(mockAutorizar).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(fila).toMatchObject({ planActivationStatus: 'NONE', planActivationLeaseUntil: null })
+  })
+
+  it('🔴 fix round 1 (Important #1): GET progress lee la suscripción UNA vez con su tope; si la tarjeta no se puede leer (tiempo agotado), progress conserva trialModality, trialEndsAt y sinTarjeta y sólo omite tarjetaQueCobrara', async () => {
+    fila = altaNueva({ planActivationStatus: 'ACTIVE', planActivationAttempt: 1, planStripeSubscriptionId: 'sub_1' })
+    mockCustomerRetrieve.mockRejectedValue(
+      Object.assign(new Error('Request aborted due to timeout being reached (5000ms)'), { type: 'StripeConnectionError' }),
+    )
+
+    const progreso = await leerProgreso()
+
+    expect(progreso.status).toBe(200)
+    const activacion = progreso.body.progress.planActivation
+    expect(activacion).toMatchObject({
+      status: 'ACTIVE',
+      sinTarjeta: true,
+      trialModality: 'RENEWS_AS_PRO',
+      trialEndsAt: new Date(FIN_S * 1000).toISOString(),
+      noHabraCobro: false,
+    })
+    // «No se sabe qué tarjeta»: el campo no viaja (decir `null` diría «sin tarjeta», que puede ser falso).
+    expect(activacion).not.toHaveProperty('tarjetaQueCobrara')
+    // Una sola lectura de la suscripción, y cada lectura de Stripe con el tope de 5 s y sin reintentos.
+    const TOPE = { timeout: 5_000, maxNetworkRetries: 0 }
+    expect(mockSubRetrieve.mock.calls).toEqual([['sub_1', {}, TOPE]])
+    expect(mockCustomerRetrieve).toHaveBeenCalledWith('cus_1', expect.anything(), TOPE)
+  })
+
+  describe('«Terminar» (POST v2/complete) ANTES de que el alta se cierre en Gratis (fix round 1, menor 7)', () => {
+    /** La prueba sin tarjeta del intento 1, ya cancelada por Stripe al terminar y sin cobrar; el alta todavía IN_PROGRESS. */
+    const altaConLaPruebaTerminada = (plan: object | undefined) => {
+      fila = altaNueva({
+        v2SetupData: { step2: { businessName: 'Negocio de prueba' }, ...(plan ? { plan } : {}) },
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationAttempt: 1,
+        planActivationLeaseUntil: new Date(Date.now() - 60_000),
+        planStripeSubscriptionId: 'sub_1',
+        planOfferVersionNumber: 2,
+      })
+      mockSubRetrieve.mockResolvedValue(prueba({ status: 'canceled', ended_at: FIN_S }))
+      // Lo vivo del negocio (lo que revisa `hayCobroDelAltaSinCerrar` después de la llave): nada.
+      prismaMock.venueFeature.findMany.mockResolvedValue([])
+      prismaMock.billingObligationConflict.findMany.mockResolvedValue([])
+      prismaMock.feature.findMany.mockResolvedValue([] as never)
+    }
+
+    it('con el plan FREE guardado en el asistente: la prueba terminada ya no cuenta como cobro abierto y «Terminar» cierra el alta en Gratis por el carril de hoy, pero deja planActivationStatus IN_PROGRESS con el id de la suscripción cancelada; nadie lo vuelve a tocar (el barrido y activate-plan lo dejan como está)', async () => {
+      altaConLaPruebaTerminada({
+        tier: 'FREE',
+        paymentMethodId: null,
+        interval: 'monthly',
+        payNow: false,
+        acceptedAt: '2026-11-25T00:00:00.000Z',
+      })
+
+      const fin = await terminar()
+
+      expect(fin.status).toBe(201)
+      expect(fin.body.code).not.toBe('PLAN_CHARGE_PENDING')
+      // 🔴 El estado que queda (lo describe el reporte): terminada, pero con el intento «en curso» para siempre.
+      expect(fila.completedAt).toBeInstanceOf(Date)
+      expect(fila).toMatchObject({ planActivationStatus: 'IN_PROGRESS', planStripeSubscriptionId: 'sub_1', planActivationAttempt: 1 })
+      expect(fila.v2SetupData.plan).toMatchObject({ tier: 'FREE' })
+      expect(fila.v2SetupData.plan).not.toHaveProperty('pruebaSinTarjetaTerminada')
+      expect(mockSubCreate).not.toHaveBeenCalled()
+
+      // El barrido ya no la ve (terminada) y activate-plan contesta «ya terminó»: ninguno la pasa a ACTIVE ni cobra.
+      await expect(planActivationService.cerrarAltaSinNavegador(ORG)).resolves.toBe('NADA')
+      const otraVez = await pedirCon(SIN_TARJETA())
+      expect(otraVez.status).toBe(409)
+      expect(otraVez.body.code).toBe('ONBOARDING_ALREADY_COMPLETED')
+      expect(fila.planActivationStatus).toBe('IN_PROGRESS')
+      expect(mockSubCreate).not.toHaveBeenCalled()
+    })
+
+    it('sin plan guardado en el asistente: «Terminar» responde el 400 de hoy sin tocar nada, y el barrido después cierra el alta en Gratis', async () => {
+      altaConLaPruebaTerminada(undefined)
+
+      const fin = await terminar()
+
+      expect(fin.status).toBe(400)
+      expect(fila).toMatchObject({ completedAt: null, planActivationStatus: 'IN_PROGRESS', planStripeSubscriptionId: 'sub_1' })
+
+      await expect(planActivationService.cerrarAltaSinNavegador(ORG)).resolves.toBe('CERRADA')
+      expect(fila).toMatchObject({ planActivationStatus: 'ACTIVE', planStripeSubscriptionId: null })
+      expect(fila.v2SetupData.plan).toMatchObject({ tier: 'FREE', pruebaSinTarjetaTerminada: true, subscriptionId: 'sub_1' })
+      expect(mockTerminar).toHaveBeenCalledWith(ORG, expect.objectContaining({ via: 'barrido' }))
+    })
   })
 
   it('🔴 b2-r3 #3: la persona vuelve con el alta IN_PROGRESS y su prueba sin tarjeta ya cancelada → POST → 409 PLAN_TRIAL_ENDED; GET progress → completedAt y plan FREE; POST v2/complete → el «ya terminada» de hoy, sin PLAN_CHARGE_PENDING', async () => {

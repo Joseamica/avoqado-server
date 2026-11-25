@@ -1515,6 +1515,7 @@ export async function activatePlan(
       await cerrarAltaEnGratis(organizationId, prev.attempt, suscripcionRecuperada, nuestroLease, {
         via: opciones.via ?? 'navegador',
         staffId,
+        venueId: venue.id,
       })
       throw pruebaTerminadaSinTarjeta()
     }
@@ -2063,8 +2064,10 @@ export async function activatePlan(
   const pruebaSinTarjeta =
     recuperada !== null ? recuperada.sinTarjeta && !recuperada.pagada && !recuperada.paymentMethodId : sinTarjetaNuevo
   // B2 Task 6 (§18, b2-r8 #9): la tarjeta que Stripe cobraría al terminar y si habrá cobro, leídos AHORA; sólo para decirlo
-  // (respuesta, pantalla final y bienvenida): nada lo compara con lo que enseñó la ventana.
-  const avisoSinTarjeta = modalidad.sinTarjeta ? await avisoDeLaPruebaSinTarjeta(sub, customerId) : null
+  // (respuesta, pantalla final y bienvenida): nada lo compara con lo que enseñó la ventana. 🔴 Es informativa: la lectura arranca
+  // aquí SIN esperarla, así que ni lenta ni fallida retrasa o frena el cierre del alta (`terminarElAlta`, abajo). Nunca rechaza
+  // (`avisoDeLaPruebaSinTarjeta` se degrada a «no se sabe qué tarjeta»); la esperan sólo la bienvenida y la respuesta.
+  const avisoSinTarjeta = modalidad.sinTarjeta ? avisoDeLaPruebaSinTarjeta(sub, customerId) : null
 
   if (ofertaNoAplicada) {
     await logAction({
@@ -2136,7 +2139,7 @@ export async function activatePlan(
   if (pruebaSinTarjeta) {
     // B2 Task 6 (§18, b2-r8): en vez de la confirmación de pago, la bienvenida a la prueba sin tarjeta. El monto es el precio de
     // la versión (el del comprobante, en un intento nuevo; el de su suscripción, al recuperarla), con la nota del saldo.
-    void enviarBienvenidaSinTarjeta({
+    const bienvenida = {
       venueId: venue.id,
       venueSlug: venueRecord?.slug ?? venue.slug,
       subscriptionId,
@@ -2145,13 +2148,15 @@ export async function activatePlan(
       timeZone: venueRecord?.timezone,
       trialEnd: typeof sub.trial_end === 'number' ? new Date(sub.trial_end * 1000) : new Date(nextChargeAt),
       montoAlTerminarCents: conComprobante && !recuperada ? conComprobante.precioCents : montoDelPlanCents,
-      tarjeta: avisoSinTarjeta?.tarjetaQueCobrara,
-    }).catch(error =>
-      logger.warn('activate-plan: no se pudo enviar la bienvenida de la prueba sin tarjeta', {
-        organizationId,
-        error: error instanceof Error ? error.message : String(error),
-      }),
-    )
+    }
+    void Promise.resolve(avisoSinTarjeta)
+      .then(aviso => enviarBienvenidaSinTarjeta({ ...bienvenida, tarjeta: aviso?.tarjetaQueCobrara }))
+      .catch(error =>
+        logger.warn('activate-plan: no se pudo enviar la bienvenida de la prueba sin tarjeta', {
+          organizationId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      )
   } else {
     void enviarConfirmacion({
       venueId: venue.id,
@@ -2195,7 +2200,8 @@ export async function activatePlan(
     firstChargeCents,
     nextChargeAt,
     ...modalidad,
-    ...(avisoSinTarjeta ?? {}),
+    // La lectura de la tarjeta corrió junto con el cierre; con su tope (5 s) la respuesta sólo la espera lo que le falte.
+    ...(avisoSinTarjeta ? await avisoSinTarjeta : {}),
     ...(campaign
       ? {
           launchOffer: {
