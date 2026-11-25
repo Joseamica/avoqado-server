@@ -1,0 +1,82 @@
+{
+  "pagina": "android/clientes/capturar-codigo-de-referido",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff",
+  "version": "2.25.58",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 139,
+      "cita": "text = \"Selecciona un cliente primero para usar un código de referido.\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 430,
+      "cita": "customerSelected = customerSelectedForReferral,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 114,
+      "cita": "text = \"¿Te recomendó alguien?\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 187,
+      "cita": "placeholder = { Text(\"CÓDIGO\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 216,
+      "cita": "Text(\"Validar\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 245,
+      "cita": "text = \"Referido por $referrerName\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 251,
+      "cita": "text = \"Se aplicó $discountPercent% descuento\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 263,
+      "cita": "Text(\"Quitar\")"
+    }
+  ],
+  "permisos": [],
+  "plan": [
+    {
+      "featureCode": "REFERRAL_PROGRAM",
+      "archivo": "app/src/main/java/com/avoqado/pos/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 121
+    }
+  ],
+  "sinInternet": [],
+  "rutas": [
+    {
+      "ruta": "El carrito de Cobrar trae la sección de referidos",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 427
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

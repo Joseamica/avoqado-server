@@ -1,0 +1,98 @@
+{
+  "pagina": "android/clientes/agregar-cliente-a-una-venta-cobrada",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff",
+  "version": "2.25.58",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 43,
+      "cita": "label = \"Ventas\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionDetailSheet.kt",
+      "linea": 1110,
+      "cita": "Text(\"Cliente\", fontSize = metrics.sectionTitleSize, fontWeight = FontWeight.Bold,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionDetailSheet.kt",
+      "linea": 1129,
+      "cita": "canTap -> \"Agregar cliente\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionDetailSheet.kt",
+      "linea": 1163,
+      "cita": "if (createSearch != null && viewModel.canCreateCustomerForAssignment) {"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionDetailSheet.kt",
+      "linea": 1188,
+      "cita": "title = \"Confirmar cliente\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionDetailSheet.kt",
+      "linea": 1202,
+      "cita": "Text(\"Agregar a ${candidate!!.fullName}\", style = MaterialTheme.typography.titleMedium)"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionDetailSheet.kt",
+      "linea": 1194,
+      "cita": "text = if (message != null) \"Reintentar\" else \"Agregar cliente\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionDetailSheet.kt",
+      "linea": 1209,
+      "cita": "AvoqadoSuccessToast(message = \"Cliente asignado\", onDismiss = viewModel::clearCustomerAssignmentSuccess)"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "customers:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionsViewModel.kt",
+      "linea": 220
+    },
+    {
+      "permiso": "orders:attach-customer",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 16
+    },
+    {
+      "permiso": "customers:create",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionsViewModel.kt",
+      "linea": 224
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red: necesitas conexión para asignar el cliente",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionDetailSheet.kt",
+      "linea": 1146
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Sólo si la venta no tiene cliente",
+      "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionsViewModel.kt",
+      "linea": 221
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

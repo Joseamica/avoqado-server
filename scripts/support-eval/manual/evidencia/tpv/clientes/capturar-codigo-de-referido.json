@@ -1,0 +1,82 @@
+{
+  "pagina": "tpv/clientes/capturar-codigo-de-referido",
+  "sourceRepo": "avoqado-tpv",
+  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
+  "version": "2.16.0",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt",
+      "linea": 238,
+      "cita": "referralSection()"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/components/cart/CartDetailsSheet.kt",
+      "linea": 207,
+      "cita": "text = customerName ?: \"Agregar cliente\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 116,
+      "cita": "text = \"¿Te recomendó alguien?\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 195,
+      "cita": "placeholder = { Text(\"CÓDIGO\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 224,
+      "cita": "Text(\"Validar\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 253,
+      "cita": "text = \"Referido por $referrerName\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 259,
+      "cita": "text = \"Se aplicó $discountPercent% descuento\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 271,
+      "cita": "Text(\"Quitar\")"
+    }
+  ],
+  "permisos": [],
+  "plan": [
+    {
+      "featureCode": "REFERRAL_PROGRAM",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/checkout/presentation/CheckoutScreen.kt",
+      "linea": 210
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red: Necesita internet",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/referrals/presentation/ReferralCaptureSection.kt",
+      "linea": 128
+    }
+  ],
+  "rutas": [],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

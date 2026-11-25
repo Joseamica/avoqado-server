@@ -1,0 +1,93 @@
+{
+  "pagina": "android/lealtad/aplicar-premio-de-sellos",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff",
+  "version": "2.25.58",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1622,
+      "cita": "is ScannedBarcodeResult.CustomerCardFound -> if (cartViewModel.selectedCustomer.value?.id == clienteAlEscanear) {"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1633,
+      "cita": "cartViewModel.setSelectedCustomer(c.id, nombre)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1751,
+      "cita": "val avance = \"${tarjeta.stampsEarned} de ${tarjeta.stampsRequired} sellos\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1755,
+      "cita": "\"🎁 Tiene un premio por cobrar: ${premio.rewardLabel}\\n\\n$avance · esta compra le suma otro\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1776,
+      "cita": "text = \"Aplicar ${premio.rewardLabel}\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 1108,
+      "cita": "text = \"Premio: $etiqueta\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 412,
+      "cita": "else -> \"Se calcula al cobrar\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1772,
+      "cita": "// servidor lo aplica al crearla — por eso el total que se cobra ya"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 1118,
+      "cita": "contentDescription = \"Quitar premio\","
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red al cobrar con el beneficio aplicado: no se cobra",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/data/model/PaymentModels.kt",
+      "linea": 428
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "No aplica a esta venta",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 410
+    },
+    {
+      "ruta": "Revisa el premio",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2455
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

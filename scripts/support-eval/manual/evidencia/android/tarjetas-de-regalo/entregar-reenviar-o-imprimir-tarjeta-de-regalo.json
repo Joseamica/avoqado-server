@@ -1,0 +1,134 @@
+{
+  "pagina": "android/tarjetas-de-regalo/entregar-reenviar-o-imprimir-tarjeta-de-regalo",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff",
+  "version": "2.25.58",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt",
+      "linea": 48,
+      "cita": "AvoqadoFullscreenHeader(title=TextosDeTarjetas.NOMBRE_EN_CUENTAS,onNav=onSalir,"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 57,
+      "cita": "const val NOMBRE_EN_CUENTAS = \"Tarjetas de regalo\""
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/TarjetaDeLaCuentaRow.kt",
+      "linea": 19,
+      "cita": "Text(\"•••• ${sobre.ultimos4}\", style = MaterialTheme.typography.titleMedium)"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/TarjetaDeLaCuentaRow.kt",
+      "linea": 33,
+      "cita": "if (sobre.deliveryChannel == \"PRINTED\" || sobre.puedeRevelar) TextButton(enabled=habilitada,onClick={onAccion(\"REPRINT\")}) { Text(TextosDeTarjetas.IMPRIMIR) }"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 41,
+      "cita": "const val IMPRIMIR = \"Imprimir\""
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt",
+      "linea": 69,
+      "cita": "if (accion!=\"SHOW_QR\" || qr==null) PrimaryButton(text=if(aviso==null) titulo else TextosDeTarjetas.REINTENTAR,enabled=!ocupado && conectado && servidor,"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaViewModel.kt",
+      "linea": 280,
+      "cita": "dialogoTerminado=true;avisoImpresion=null;limpiar();exitoValor.value=\"Tarjeta impresa\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/TarjetaDeLaCuentaRow.kt",
+      "linea": 34,
+      "cita": "if (!sinLiga && (sobre.deliveryChannel == \"HANDED_TO_BUYER\" || sobre.puedeRevelar)) TextButton(enabled=habilitada,onClick={onAccion(\"SHOW_QR\")}) { Text(TextosDeTarjetas.MOSTRAR_QR) }"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt",
+      "linea": 81,
+      "cita": "QrCode(qr)"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 63,
+      "cita": "const val COMPARTIR_LIGA = \"Compartir liga\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/TarjetaDeLaCuentaRow.kt",
+      "linea": 36,
+      "cita": "if (sobre.puedeReenviar) TextButton(enabled=habilitada,onClick={onAccion(\"RESEND\")}) { Text(TextosDeTarjetas.REENVIAR) }"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/domain/TextosDeTarjetas.kt",
+      "linea": 64,
+      "cita": "const val REENVIAR = \"Reenviar\""
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaViewModel.kt",
+      "linea": 293,
+      "cita": "is Respuesta.Ok -> if(vigente(g) && versionDialogo==vd) {dialogoTerminado=true;revisionSondeo++;exitoValor.value=\"Reenvío solicitado\";refrescarDentro()}"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt",
+      "linea": 49,
+      "cita": "primaryActionText=\"Listo\",onPrimaryAction=onSalir,showDivider=true)"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "giftCards:sell",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 273
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin red, los botones se apagan y sale el aviso",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt",
+      "linea": 52
+    },
+    {
+      "afirmacion": "Los botones de cada tarjeta piden red",
+      "archivo": "app/src/main/java/com/avoqado/pos/giftcards/presentation/ResultadoDeVentaScreen.kt",
+      "linea": 56
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Más › Pedidos: la venta de tarjetas pagada abre esta pantalla",
+      "archivo": "app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt",
+      "linea": 298
+    },
+    {
+      "ruta": "En Pedidos la venta se llama Tarjetas de regalo",
+      "archivo": "app/src/main/java/com/avoqado/pos/orders/presentation/OrdersScreen.kt",
+      "linea": 650
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}
