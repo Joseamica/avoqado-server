@@ -1,0 +1,235 @@
+{
+  "pagina": "windows/lealtad/canjear-puntos",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e",
+  "version": "2.25.58",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2496,
+      "cita": "internal enum class PanelTab(val label: String) { CUENTA(\"Cuenta\"), ACCIONES(\"Acciones\"), CLIENTE(\"Cliente\") }"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3070,
+      "cita": "label = if (customerName.isNullOrBlank()) \"Asignar cliente\" else \"Cambiar cliente\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt",
+      "linea": 38,
+      "cita": "val showTables = posMode == PosMode.RESTAURANT"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/domain/PosMode.kt",
+      "linea": 14,
+      "cita": "RESTAURANT(\"restaurant\", \"Mesas\", \"Servicio en mesa — cuentas por mesa y comandas\"),"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 145,
+      "cita": "if (!viewModel.planManager.hasFeature(\"TABLE_SERVICE\")) {"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 722,
+      "cita": "text = \"Ver cheque\","
+    },
+    {
+      "paso": 1,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt",
+      "linea": 49,
+      "cita": "val windowSizeClass = WindowSizeClass.calculateFromSize(DpSize(maxWidth, maxHeight))"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2800,
+      "cita": "label = \"Recompensas\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3668,
+      "cita": "description = loyalty?.let { \"${it.customerName ?: \"Cliente\"} · ${it.balance} puntos disponibles, valen ${money(it.balanceValue)}\" }"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3695,
+      "cita": "Icon(Icons.Default.Remove, contentDescription = \"Menos puntos\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3700,
+      "cita": "text = \"− ${money(loyalty.valorDelCanje(points))} en la cuenta\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3706,
+      "cita": "Icon(Icons.Default.Add, contentDescription = \"Más puntos\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3673,
+      "cita": "text = \"Canjear\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 2143,
+      "cita": "\"Recompensa aplicada — ${aplicado.pointsRedeemed} puntos por \" +"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 2792,
+      "cita": "label = \"Descuentos\","
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3302,
+      "cita": "Text(\"Aplicados\", fontWeight = FontWeight.SemiBold)"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3330,
+      "cita": "TextButton(onClick = { onRemove(d.id) }, enabled = quitar.quitarActivo) {"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 3722,
+      "cita": "text = \"Mínimo ${loyalty.minPointsRedeem} puntos. Si quitas la recompensa de la cuenta, los puntos regresan.\","
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "tables:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 2903
+    },
+    {
+      "permiso": "orders:update",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3613
+    },
+    {
+      "permiso": "loyalty:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3567
+    },
+    {
+      "permiso": "customers:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1630
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "LOYALTY_PROGRAM",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
+      "linea": 480
+    },
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt",
+      "linea": 145
+    }
+  ],
+  "sinInternet": [
+    {
+      "afirmacion": "Sin conexión, «Recompensas» sale en gris con «Sin conexión: canjear puntos necesita internet. Se puede en cuanto vuelva la red.» y no se canjea nada",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
+      "linea": 545
+    },
+    {
+      "afirmacion": "El canje pide red antes de mandar nada",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 2135
+    },
+    {
+      "afirmacion": "Quitar la recompensa (un descuento aplicado) también pide internet",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 1906
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Sin el plan: «Esta función es parte del plan PRO. Actívala desde tu dashboard web (Configuración → Plan).»",
+      "archivo": "app/src/main/java/com/avoqado/pos/designsystem/components/PlanGate.kt",
+      "linea": 281
+    },
+    {
+      "ruta": "Mesa de … — solo lectura (cuenta de otro mesero: no se entra a Cliente ni a Acciones)",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
+      "linea": 393
+    },
+    {
+      "ruta": "Esta cuenta no tiene puntos para canjear. Agrega el cliente en la pestaña «Cliente».",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
+      "linea": 577
+    },
+    {
+      "ruta": "El programa de lealtad está apagado en esta sucursal. Se prende desde el panel web.",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
+      "linea": 581
+    },
+    {
+      "ruta": "No llega al mínimo de puntos",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
+      "linea": 583
+    },
+    {
+      "ruta": "En esta cuenta ya no se pueden canjear puntos: tiene un pago registrado o no queda nada que descontar.",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
+      "linea": 599
+    },
+    {
+      "ruta": "La cuenta cambió: revisa los puntos.",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
+      "linea": 2151
+    },
+    {
+      "ruta": "No se puede modificar una orden ya pagada (quitar la recompensa con un abono)",
+      "archivo": "avoqado-server/src/services/mobile/order.mobile.service.ts",
+      "linea": 3540
+    },
+    {
+      "ruta": "En Cobrar (mostrador) el menú del carrito ya no trae «Canjear recompensa»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 1199
+    },
+    {
+      "ruta": "«La cuenta cambió»: el saldo del cliente bajó por un canje en otra cuenta",
+      "archivo": "avoqado-server/src/services/mobile/loyalty.mobile.service.ts",
+      "linea": 374
+    },
+    {
+      "ruta": "«Canjear» en gris con menos del mínimo o 0 puntos elegidos",
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
+      "linea": 508
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": [],
+    "nota": "El POS de WINDOWS compila las mismas fuentes; la prueba de Compose MenuDelCarritoEnLaEscenaTest (desktop/) monta el carrito compartido. Falta recorrerlo en el POS de WINDOWS."
+  },
+  "codex": {
+    "lote": 4,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

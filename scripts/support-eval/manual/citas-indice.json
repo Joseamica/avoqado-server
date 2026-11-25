@@ -895,12 +895,20 @@
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/designsystem/components/PlanGate.kt": [
       {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+      },
+      {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
         "pagina": "android/mesas/mover-o-unir-cuentas",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -1883,6 +1891,10 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+      },
+      {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -1913,6 +1925,10 @@
       {
         "pagina": "windows/inventario/contar-existencia",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -2797,6 +2813,10 @@
         "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
       },
       {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+      },
+      {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
@@ -2839,6 +2859,10 @@
       {
         "pagina": "windows/lealtad/aplicar-premio-de-sellos",
         "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
       },
       {
         "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
@@ -3963,12 +3987,20 @@
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/settings/domain/PosMode.kt": [
       {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+      },
+      {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
         "pagina": "android/mesas/mover-o-unir-cuentas",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -4079,6 +4111,16 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt": [
+      {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/tables/data/TableServiceRepository.kt": [
       {
         "pagina": "android/mesas/mover-o-unir-cuentas",
@@ -4109,6 +4151,10 @@
         "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       },
       {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+      },
+      {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -4131,6 +4177,10 @@
       {
         "pagina": "windows/impresoras/la-comanda-no-sale",
         "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -4163,6 +4213,10 @@
         "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+      },
+      {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -4187,6 +4241,10 @@
         "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+      },
+      {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
@@ -4201,6 +4259,10 @@
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt": [
       {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+      },
+      {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -4211,6 +4273,10 @@
       {
         "pagina": "android/mesas/mover-o-unir-cuentas",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -4721,6 +4787,10 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+      },
+      {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -4851,6 +4921,10 @@
       {
         "pagina": "windows/lealtad/ajustar-sellos",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
       },
       {
         "pagina": "windows/lealtad/sello-que-no-se-sumo",
@@ -5007,10 +5081,24 @@
         "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       }
     ],
+    "avoqado-android:avoqado-server/src/services/mobile/loyalty.mobile.service.ts": [
+      {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+      }
+    ],
     "avoqado-android:avoqado-server/src/services/mobile/order.mobile.service.ts": [
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
       },
       {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
@@ -5019,6 +5107,10 @@
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
       },
       {
         "pagina": "windows/lealtad/sello-que-no-se-sumo",
@@ -5413,6 +5505,10 @@
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
