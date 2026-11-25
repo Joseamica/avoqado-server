@@ -912,7 +912,9 @@ async function cloneSingletonConfig(model: 'venueSettings' | 'reservationSetting
     return
   }
   const { id: _id, venueId: _v, createdAt: _c, updatedAt: _u, ...rest } = src
-  await anyPrisma[model].create({ data: { ...rest, venueId } })
+  // D27: el vencimiento de puntos viene apagado también en el demo clonado (ni los días ni el reloj de la plantilla se copian).
+  const apagado = model === 'loyaltyConfig' ? { pointsExpireDays: null, pointsExpireSince: null } : {}
+  await anyPrisma[model].create({ data: { ...rest, ...apagado, venueId } })
   logger.info(`   ✅ cloned ${model} from avoqado-full`)
 }
 

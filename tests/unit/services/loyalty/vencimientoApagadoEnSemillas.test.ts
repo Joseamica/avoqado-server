@@ -18,3 +18,13 @@ describe.each(SEMILLAS)('%s', ruta => {
     for (const c of creaciones) expect(c).toMatch(/pointsExpireDays: null/)
   })
 })
+
+// Los scripts que clonan la configuración del demo plantilla no copian ni los días ni el reloj (Codex r11 #1).
+describe.each(['scripts/seed-avoqado-fitness-demo.ts', 'scripts/seed-la-ribera-demo.ts'])('%s', ruta => {
+  const fuente = readFileSync(join(__dirname, '../../../../', ruta), 'utf8')
+
+  it('clona la lealtad con la expiración apagada y sin el reloj de la plantilla', () => {
+    expect(fuente).toMatch(/model === 'loyaltyConfig' \? \{ pointsExpireDays: null, pointsExpireSince: null \}/)
+    expect(fuente).toMatch(/data: \{ \.\.\.rest, \.\.\.apagado, venueId \}/)
+  })
+})
