@@ -1,0 +1,247 @@
+const store: any[] = []
+const idem = new Map<string, { ok: boolean; value: any }>()
+let hideArchived = false
+let failNextCreateWith: { statusCode?: number; code?: string } | null = null
+let seq = 0
+const list = jest.fn()
+const create = jest.fn()
+
+class FakeStripeError extends Error {
+  statusCode?: number
+  code?: string
+  constructor(statusCode: number | undefined, code?: string) {
+    super(`stripe ${statusCode} ${code}`)
+    this.statusCode = statusCode
+    this.code = code
+  }
+}
+
+jest.mock('@/services/stripe.service', () => ({
+  stripe: { prices: { list: (...a: unknown[]) => list(...a), create: (...a: unknown[]) => create(...a) } },
+}))
+
+import {
+  asegurarPrecioDeLaRanura,
+  clasificarErrorDeStripe,
+  ErrorDePreparacion,
+  llaveDeBusqueda,
+  llaveDeIdempotencia,
+} from '@/services/billing/preciosDeLaVersion'
+
+const V = 'cv2abcdefghijklmnopqrstuv'
+const base = (over: Record<string, unknown> = {}) => ({
+  versionId: V,
+  ranura: 'PRO:monthly' as const,
+  grossCents: 92684,
+  productId: 'prod_pro',
+  intento: 0,
+  ...over,
+})
+
+beforeEach(() => {
+  store.length = 0
+  idem.clear()
+  hideArchived = false
+  failNextCreateWith = null
+  seq = 0
+  list.mockReset().mockImplementation(async (params: any) => {
+    const data = store.filter(p => params.lookup_keys.includes(p.lookup_key) && (!hideArchived || p.active))
+    return { data: data.slice(0, params.limit), has_more: data.length > params.limit }
+  })
+  create.mockReset().mockImplementation(async (params: any, opts: any) => {
+    const key = opts?.idempotencyKey as string
+    const saved = idem.get(key)
+    if (saved) {
+      if (saved.ok) return saved.value
+      throw saved.value
+    }
+    let outcome: { ok: boolean; value: any }
+    if (failNextCreateWith) {
+      outcome = { ok: false, value: new FakeStripeError(failNextCreateWith.statusCode, failNextCreateWith.code) }
+      failNextCreateWith = null
+    } else if (store.some(p => p.lookup_key === params.lookup_key)) {
+      outcome = { ok: false, value: new FakeStripeError(400, 'lookup_key_already_used') }
+    } else {
+      const price = { id: `price_${++seq}`, active: true, ...params }
+      store.push(price)
+      outcome = { ok: true, value: price }
+    }
+    idem.set(key, outcome)
+    if (outcome.ok) return outcome.value
+    throw outcome.value
+  })
+})
+
+const precio = (lookup_key: string, over: Record<string, unknown> = {}) => {
+  const [, , tier, interval] = lookup_key.split('_')
+  return {
+    id: `price_${lookup_key}`,
+    active: true,
+    product: 'prod_pro',
+    lookup_key,
+    currency: 'mxn',
+    unit_amount: interval === 'annual' ? 1077120 : 92684,
+    tax_behavior: 'inclusive',
+    recurring: { interval: interval === 'annual' ? 'year' : 'month', interval_count: 1 },
+    metadata: { kind: 'PLAN_OFFER_PRICE', planOfferVersionId: V, tier: tier.toUpperCase(), interval },
+    ...over,
+  }
+}
+
+describe('llaves', () => {
+  it('llave de búsqueda e idempotencia con el formato fijo', () => {
+    expect(llaveDeBusqueda(V, 'PRO:annual')).toBe(`po_${V}_pro_annual`)
+    expect(llaveDeBusqueda(V, 'PREMIUM:monthly')).toBe(`po_${V}_premium_monthly`)
+    expect(llaveDeIdempotencia(V, 'PREMIUM:annual', 2)).toBe(`plan-offer-price:${V}:PREMIUM:annual:2`)
+  })
+})
+
+describe('asegurarPrecioDeLaRanura', () => {
+  it('crea el mensual de Pro en el producto del plan, con su llave propia, IVA incluido y su metadata completa', async () => {
+    const r = await asegurarPrecioDeLaRanura(base())
+    expect(r.priceId).toBe('price_1')
+    expect(list).toHaveBeenCalledWith({ lookup_keys: [`po_${V}_pro_monthly`], limit: 2 }, { timeout: 15000, maxNetworkRetries: 0 })
+    expect(create).toHaveBeenCalledWith(
+      {
+        product: 'prod_pro',
+        lookup_key: `po_${V}_pro_monthly`,
+        currency: 'mxn',
+        unit_amount: 92684,
+        tax_behavior: 'inclusive',
+        recurring: { interval: 'month', interval_count: 1 },
+        metadata: { kind: 'PLAN_OFFER_PRICE', planOfferVersionId: V, tier: 'PRO', interval: 'monthly' },
+      },
+      { idempotencyKey: `plan-offer-price:${V}:PRO:monthly:0`, timeout: 15000, maxNetworkRetries: 0 },
+    )
+    expect(JSON.stringify(create.mock.calls[0][0])).not.toContain('plan_pro_monthly')
+  })
+
+  it('🔴 respuesta perdida del anual: el almacén ya tiene el mensual y el anual de la misma versión; recupera el ANUAL', async () => {
+    store.push(precio(`po_${V}_pro_monthly`), precio(`po_${V}_pro_annual`))
+    const r = await asegurarPrecioDeLaRanura(base({ ranura: 'PRO:annual', grossCents: 1077120 }))
+    expect(r.priceId).toBe(`price_po_${V}_pro_annual`)
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 con la llave de idempotencia caducada y el precio ya creado, no se duplica: lo encuentra por su llave de búsqueda', async () => {
+    await asegurarPrecioDeLaRanura(base())
+    idem.clear() // la llave de idempotencia caducó
+    const r = await asegurarPrecioDeLaRanura(base())
+    expect(r.priceId).toBe('price_1')
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(store).toHaveLength(1)
+  })
+
+  it('🔴 un precio archivado que la lista no devuelve: el create choca por la llave (400) → RECHAZADO, y el almacén sigue con uno solo', async () => {
+    store.push(precio(`po_${V}_pro_monthly`, { active: false }))
+    hideArchived = true
+    await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({
+      motivo: 'RECHAZADO',
+      ranura: 'PRO:monthly',
+      stripeCode: 'lookup_key_already_used',
+    })
+    expect(store).toHaveLength(1)
+  })
+
+  it('un precio archivado que la lista sí trae → NO_COINCIDE', async () => {
+    store.push(precio(`po_${V}_pro_monthly`, { active: false }))
+    await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({ motivo: 'NO_COINCIDE' })
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('dos con la llave → DUPLICADO; has_more → DUPLICADO; no crea', async () => {
+    const k = `po_${V}_pro_monthly`
+    store.push(precio(k), precio(k, { id: 'price_otro' }))
+    await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({ motivo: 'DUPLICADO' })
+    list.mockResolvedValueOnce({ data: [precio(k)], has_more: true })
+    await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({ motivo: 'DUPLICADO' })
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['otro monto', { unit_amount: 1 }],
+    ['inactivo', { active: false }],
+    ['otro producto', { product: 'prod_otro' }],
+    ['otra moneda', { currency: 'usd' }],
+    ['sin IVA incluido', { tax_behavior: 'exclusive' }],
+    ['otro intervalo', { recurring: { interval: 'year', interval_count: 1 } }],
+    ['interval_count 2', { recurring: { interval: 'month', interval_count: 2 } }],
+    ['metadata de otra versión', { metadata: { kind: 'PLAN_OFFER_PRICE', planOfferVersionId: 'x', tier: 'PRO', interval: 'monthly' } }],
+    ['metadata sin kind', { metadata: { planOfferVersionId: V, tier: 'PRO', interval: 'monthly' } }],
+  ])('uno con %s → NO_COINCIDE; no crea', async (_n, over) => {
+    store.push(precio(`po_${V}_pro_monthly`, over))
+    await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({ motivo: 'NO_COINCIDE' })
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('uno que la lista trae con otra llave de búsqueda → NO_COINCIDE; no crea', async () => {
+    list.mockResolvedValueOnce({ data: [precio(`po_${V}_pro_monthly`, { lookup_key: 'otra' })], has_more: false })
+    await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({ motivo: 'NO_COINCIDE' })
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('acepta el producto como objeto expandido', async () => {
+    store.push(precio(`po_${V}_pro_monthly`, { product: { id: 'prod_pro' } }))
+    await expect(asegurarPrecioDeLaRanura(base())).resolves.toEqual({ priceId: `price_po_${V}_pro_monthly` })
+  })
+
+  it('un create que devuelve algo distinto → NO_COINCIDE', async () => {
+    create.mockResolvedValueOnce(precio(`po_${V}_pro_monthly`, { unit_amount: 5 }))
+    await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({ motivo: 'NO_COINCIDE' })
+  })
+
+  it('🔴 con un 500 se lanza INCIERTO y el siguiente intento usa la MISMA llave (intento 0); el 500 guardado se repite', async () => {
+    failNextCreateWith = { statusCode: 500 }
+    await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({ motivo: 'INCIERTO' })
+    await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({ motivo: 'INCIERTO' })
+    const keys = create.mock.calls.map(c => c[1].idempotencyKey)
+    expect(keys).toEqual([`plan-offer-price:${V}:PRO:monthly:0`, `plan-offer-price:${V}:PRO:monthly:0`])
+    expect(store).toHaveLength(0)
+  })
+
+  it('con un 400 se lanza RECHAZADO; la llave del intento 1 es distinta y ya crea', async () => {
+    failNextCreateWith = { statusCode: 400, code: 'parameter_invalid' }
+    await expect(asegurarPrecioDeLaRanura(base())).rejects.toMatchObject({ motivo: 'RECHAZADO', stripeCode: 'parameter_invalid' })
+    const r = await asegurarPrecioDeLaRanura(base({ intento: 1 }))
+    expect(r.priceId).toBe('price_1')
+    expect(create.mock.calls.map(c => c[1].idempotencyKey)).toEqual([
+      `plan-offer-price:${V}:PRO:monthly:0`,
+      `plan-offer-price:${V}:PRO:monthly:1`,
+    ])
+  })
+
+  it('un error de lista sin statusCode no se traga: se lanza como INCIERTO', async () => {
+    list.mockRejectedValueOnce(new Error('ECONNRESET'))
+    const e = await asegurarPrecioDeLaRanura(base()).catch(x => x)
+    expect(e).toBeInstanceOf(ErrorDePreparacion)
+    expect(e.motivo).toBe('INCIERTO')
+  })
+
+  it('premium anual usa year y su tier en mayúsculas en la metadata', async () => {
+    await asegurarPrecioDeLaRanura(base({ ranura: 'PREMIUM:annual', grossCents: 2000000, productId: 'prod_prem' }))
+    expect(create.mock.calls[0][0]).toMatchObject({
+      lookup_key: `po_${V}_premium_annual`,
+      recurring: { interval: 'year', interval_count: 1 },
+      metadata: { tier: 'PREMIUM', interval: 'annual' },
+    })
+  })
+})
+
+describe('clasificarErrorDeStripe', () => {
+  it.each([
+    ['sin statusCode (conexión)', new Error('ECONNRESET'), 'INCIERTO'],
+    ['null', null, 'INCIERTO'],
+    ['500', new FakeStripeError(500), 'INCIERTO'],
+    ['503', { statusCode: 503 }, 'INCIERTO'],
+    ['429', new FakeStripeError(429), 'INCIERTO'],
+    ['409 idempotency_key_in_use', new FakeStripeError(409, 'idempotency_key_in_use'), 'INCIERTO'],
+    ['418 desconocido', { statusCode: 418 }, 'INCIERTO'],
+    ['400', new FakeStripeError(400), 'DEFINITIVO'],
+    ['401', { statusCode: 401 }, 'DEFINITIVO'],
+    ['402', { statusCode: 402 }, 'DEFINITIVO'],
+    ['403', { statusCode: 403 }, 'DEFINITIVO'],
+    ['404', new FakeStripeError(404), 'DEFINITIVO'],
+  ])('%s → %s', (_n, err, esperado) => {
+    expect(clasificarErrorDeStripe(err)).toBe(esperado)
+  })
+})
