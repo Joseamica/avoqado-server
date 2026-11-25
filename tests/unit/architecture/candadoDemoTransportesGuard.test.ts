@@ -98,6 +98,7 @@ const POR_QUE_NO_LO_ALCANZA: Array<[prefijo: string, razon: string]> = [
     'services/billing/',
     'utils/stripeSubscriptionPeriod.ts',
     'services/onboarding/planActivation.service.ts',
+    'services/onboarding/cerrarAltaEnGratis.ts',
     'services/launchCampaigns/',
     'services/access/inventarioDeObligaciones.ts',
     'services/shared/cancellationReason.ts',
