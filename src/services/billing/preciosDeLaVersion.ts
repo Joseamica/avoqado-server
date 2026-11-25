@@ -6,6 +6,7 @@
  */
 import type Stripe from 'stripe'
 import { stripe } from '@/services/stripe.service'
+import { BRUTO_MAXIMO_CENTS, BRUTO_MINIMO_CENTS } from './planOffer'
 import type { Periodicidad, PlanPagado, Ranura } from './planOffer'
 
 const OPCIONES_DE_STRIPE = { timeout: 15_000, maxNetworkRetries: 0 }
@@ -16,8 +17,8 @@ export class ErrorDePreparacion extends Error {
   motivo: MotivoDePreparacion
   ranura: Ranura
   stripeCode?: string
-  constructor(motivo: MotivoDePreparacion, ranura: Ranura, message: string, stripeCode?: string) {
-    super(message)
+  constructor(motivo: MotivoDePreparacion, ranura: Ranura, message: string, stripeCode?: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause })
     this.name = 'ErrorDePreparacion'
     this.motivo = motivo
     this.ranura = ranura
@@ -53,8 +54,11 @@ export function clasificarErrorDeStripe(error: unknown): 'INCIERTO' | 'DEFINITIV
   return [400, 401, 402, 403, 404].includes(status) ? 'DEFINITIVO' : 'INCIERTO'
 }
 
-function deError(error: unknown, ranura: Ranura): ErrorDePreparacion {
-  if (error instanceof ErrorDePreparacion) return error
+function intervaloDeStripe(interval: Periodicidad): 'month' | 'year' {
+  return interval === 'monthly' ? 'month' : 'year'
+}
+
+function deErrorDeCreacion(error: unknown, ranura: Ranura): ErrorDePreparacion {
   const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
   const stripeCode = typeof code === 'string' ? code : undefined
   const motivo = clasificarErrorDeStripe(error) === 'DEFINITIVO' ? 'RECHAZADO' : 'INCIERTO'
@@ -63,6 +67,7 @@ function deError(error: unknown, ranura: Ranura): ErrorDePreparacion {
     ranura,
     `Stripe ${motivo === 'RECHAZADO' ? 'rechazó' : 'no confirmó'} el precio de ${ranura}.`,
     stripeCode,
+    error,
   )
 }
 
@@ -75,7 +80,7 @@ function validar(price: Stripe.Price, a: { versionId: string; ranura: Ranura; gr
     price.unit_amount === a.grossCents &&
     price.currency === 'mxn' &&
     price.tax_behavior === 'inclusive' &&
-    price.recurring?.interval === (interval === 'monthly' ? 'month' : 'year') &&
+    price.recurring?.interval === intervaloDeStripe(interval) &&
     price.recurring?.interval_count === 1 &&
     producto === a.productId &&
     price.lookup_key === llaveDeBusqueda(a.versionId, a.ranura) &&
@@ -101,7 +106,15 @@ export async function asegurarPrecioDeLaRanura(args: {
   try {
     found = await stripe.prices.list({ lookup_keys: [lookupKey], limit: 2 }, OPCIONES_DE_STRIPE)
   } catch (error) {
-    throw deError(error, ranura)
+    // Una búsqueda fallida siempre es incierta: la llave de idempotencia aún no se usó.
+    const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
+    throw new ErrorDePreparacion(
+      'INCIERTO',
+      ranura,
+      `Stripe no respondió la búsqueda del precio de ${ranura}; reintenta.`,
+      typeof code === 'string' ? code : undefined,
+      error,
+    )
   }
   if (found.has_more || found.data.length > 1) {
     throw new ErrorDePreparacion('DUPLICADO', ranura, `Hay más de un precio con la llave ${lookupKey}.`)
@@ -109,6 +122,10 @@ export async function asegurarPrecioDeLaRanura(args: {
 
   let price: Stripe.Price | undefined = found.data[0]
   if (!price) {
+    if (!Number.isInteger(grossCents) || grossCents < BRUTO_MINIMO_CENTS || grossCents > BRUTO_MAXIMO_CENTS) {
+      throw new Error(`grossCents fuera de rango para ${ranura}: ${grossCents}`)
+    }
+    if (!productId) throw new Error(`productId vacío para ${ranura}`)
     try {
       price = await stripe.prices.create(
         {
@@ -117,13 +134,13 @@ export async function asegurarPrecioDeLaRanura(args: {
           currency: 'mxn',
           unit_amount: grossCents,
           tax_behavior: 'inclusive',
-          recurring: { interval: interval === 'monthly' ? 'month' : 'year', interval_count: 1 },
+          recurring: { interval: intervaloDeStripe(interval), interval_count: 1 },
           metadata: { kind: 'PLAN_OFFER_PRICE', planOfferVersionId: versionId, tier, interval },
         },
         { ...OPCIONES_DE_STRIPE, idempotencyKey: llaveDeIdempotencia(versionId, ranura, intento) },
       )
     } catch (error) {
-      throw deError(error, ranura)
+      throw deErrorDeCreacion(error, ranura)
     }
   }
   validar(price, { versionId, ranura, grossCents, productId })

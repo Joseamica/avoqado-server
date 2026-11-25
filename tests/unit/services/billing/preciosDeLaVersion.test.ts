@@ -210,6 +210,40 @@ describe('asegurarPrecioDeLaRanura', () => {
     ])
   })
 
+  it('una búsqueda fallida con 401 es INCIERTO (la llave de idempotencia nunca se usó) y no crea', async () => {
+    list.mockRejectedValueOnce(new FakeStripeError(401, 'api_key_invalid'))
+    const e = await asegurarPrecioDeLaRanura(base()).catch(x => x)
+    expect(e).toBeInstanceOf(ErrorDePreparacion)
+    expect(e.motivo).toBe('INCIERTO')
+    expect(e.message).toContain('búsqueda')
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('conserva el error original de Stripe como cause', async () => {
+    failNextCreateWith = { statusCode: 400, code: 'parameter_invalid' }
+    const e = await asegurarPrecioDeLaRanura(base()).catch(x => x)
+    expect(e.cause).toBeInstanceOf(FakeStripeError)
+    expect(e.cause.statusCode).toBe(400)
+    const orig = new FakeStripeError(500)
+    list.mockRejectedValueOnce(orig)
+    const e2 = await asegurarPrecioDeLaRanura(base()).catch(x => x)
+    expect(e2.cause).toBe(orig)
+  })
+
+  it.each([
+    ['grossCents con decimales', { grossCents: 1000.5 }],
+    ['grossCents bajo el mínimo', { grossCents: 999 }],
+    ['grossCents sobre el máximo', { grossCents: 10_000_001 }],
+    ['grossCents NaN', { grossCents: NaN }],
+    ['productId vacío', { productId: '' }],
+  ])('entrada inválida (%s): Error simple y no crea nada', async (_n, over) => {
+    const e = await asegurarPrecioDeLaRanura(base(over)).catch(x => x)
+    expect(e).toBeInstanceOf(Error)
+    expect(e).not.toBeInstanceOf(ErrorDePreparacion)
+    expect(create).not.toHaveBeenCalled()
+    expect(store).toHaveLength(0)
+  })
+
   it('un error de lista sin statusCode no se traga: se lanza como INCIERTO', async () => {
     list.mockRejectedValueOnce(new Error('ECONNRESET'))
     const e = await asegurarPrecioDeLaRanura(base()).catch(x => x)
@@ -229,19 +263,19 @@ describe('asegurarPrecioDeLaRanura', () => {
 
 describe('clasificarErrorDeStripe', () => {
   it.each([
-    ['sin statusCode (conexión)', new Error('ECONNRESET'), 'INCIERTO'],
-    ['null', null, 'INCIERTO'],
-    ['500', new FakeStripeError(500), 'INCIERTO'],
-    ['503', { statusCode: 503 }, 'INCIERTO'],
-    ['429', new FakeStripeError(429), 'INCIERTO'],
-    ['409 idempotency_key_in_use', new FakeStripeError(409, 'idempotency_key_in_use'), 'INCIERTO'],
-    ['418 desconocido', { statusCode: 418 }, 'INCIERTO'],
-    ['400', new FakeStripeError(400), 'DEFINITIVO'],
-    ['401', { statusCode: 401 }, 'DEFINITIVO'],
-    ['402', { statusCode: 402 }, 'DEFINITIVO'],
-    ['403', { statusCode: 403 }, 'DEFINITIVO'],
-    ['404', new FakeStripeError(404), 'DEFINITIVO'],
-  ])('%s → %s', (_n, err, esperado) => {
+    ['sin statusCode (conexión)', 'INCIERTO', new Error('ECONNRESET')],
+    ['null', 'INCIERTO', null],
+    ['500', 'INCIERTO', new FakeStripeError(500)],
+    ['503', 'INCIERTO', { statusCode: 503 }],
+    ['429', 'INCIERTO', new FakeStripeError(429)],
+    ['409 idempotency_key_in_use', 'INCIERTO', new FakeStripeError(409, 'idempotency_key_in_use')],
+    ['418 desconocido', 'INCIERTO', { statusCode: 418 }],
+    ['400', 'DEFINITIVO', new FakeStripeError(400)],
+    ['401', 'DEFINITIVO', { statusCode: 401 }],
+    ['402', 'DEFINITIVO', { statusCode: 402 }],
+    ['403', 'DEFINITIVO', { statusCode: 403 }],
+    ['404', 'DEFINITIVO', new FakeStripeError(404)],
+  ])('clasificarErrorDeStripe: %s → %s', (_n, esperado, err) => {
     expect(clasificarErrorDeStripe(err)).toBe(esperado)
   })
 })
