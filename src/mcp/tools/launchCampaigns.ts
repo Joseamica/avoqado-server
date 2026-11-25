@@ -1,5 +1,6 @@
 import { registerHybridCampaignTools } from './hybridBilling'
 import { registerHybridPricingTools } from './hybridPricing'
+import { registerPlanOfferTools } from './planOffer'
 /**
  * S11 — las campañas ligeras de lanzamiento, desde el MCP (spec 2026-09-17 § 3.9).
  *
@@ -47,6 +48,7 @@ const pesos = (cents: number) => `$${(cents / 100).toFixed(2)}`
 export function registerLaunchCampaignTools(server: McpServer, scope: McpScope): void {
   registerHybridCampaignTools(server, scope)
   registerHybridPricingTools(server, scope)
+  registerPlanOfferTools(server, scope)
   server.tool(
     'preview_hybrid_offer',
     'Simula una oferta de plan, funciones específicas o paquete a elección. Valida cantidad, funciones ya incluidas, dependencias, precio total en pesos MXN y renovación. Con la vigencia (startsAt y endsAt) de una oferta de un solo producto, «overlaps» lista las promociones activas de ese producto cuya vigencia se traslapa, sin la campaña campaignId (es un aviso: no bloquea). El escenario es hipotético. No publica, reserva, cobra ni activa funciones. Sólo para Avoqado.',
