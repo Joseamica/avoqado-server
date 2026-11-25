@@ -561,6 +561,7 @@ const prismaMock: any = {
   launchCampaignRedemption: createMockModel(),
   planOfferVersion: createMockModel(),
   planOfferPointer: createMockModel(),
+  planAcceptance: createMockModel(),
   onboardingProgress: createMockModel(),
   customerCaptureToken: createMockModel(),
   // Lo demás que BLOQUEA el borrado de un venue desechable (ver liveDemoCleanup.service).
