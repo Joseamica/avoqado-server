@@ -128,10 +128,19 @@ const superadmin = { staffId: '', orgId: '', venueId: '', token: '' }
 let versionUnoId: string
 let listasSembradas: Record<Plan, { listId: string; publicationId: string }>
 const featuresOriginales: Array<{ code: string; existia: boolean; stripeProductId: string | null; active: boolean }> = []
-let listasAparcadas: { id: string; listProductKey: string | null; code: string; slug: string }[] = []
+const listasAparcadas: { id: string; listProductKey: string | null; code: string; slug: string }[] = []
 let campanasAparcadas: string[] = []
 let promocionesAparcadas: string[] = []
-let ajustesOriginales: { existia: boolean; avisosDelAltaCorreos: string[] } = { existia: false, avisosDelAltaCorreos: [] }
+/** Los destinatarios de antes de la suite; `null` = todavía no se leyeron (entonces no se restaura nada). */
+let ajustesOriginales: { existia: boolean; avisosDelAltaCorreos: string[]; updatedById: string | null } | null = null
+/**
+ * `true` sólo cuando la guarda de la base desechable pasó. Si la guarda lanzó, Jest igual corre `afterEach` y `afterAll`: su limpieza
+ * (borrar toda la oferta, retirar las listas `PLAN:*`, borrar el renglón de `PlatformSettings`) no debe tocar una base que no es la de
+ * pruebas.
+ */
+let preparada = false
+/** Lo más que se aparca de cada cosa: si hay más, la suite se detiene antes de tocar nada (nunca deja filas activas en silencio). */
+const TOPE_DE_APARCADOS = 100
 const misPromociones: string[] = []
 let sembradas = 0
 
@@ -388,8 +397,26 @@ const renombreCorriendo = () => Reflect.get(planOfferRenameJob, 'corriendo') ===
 // Antes y después
 // ---------------------------------------------------------------------------------------------------------------------
 
+/** Aparca a lo más `TOPE_DE_APARCADOS`; con más, falla en voz alta (antes de cambiar nada). */
+function dentroDelTope<T>(filas: T[], que: string): T[] {
+  if (filas.length > TOPE_DE_APARCADOS)
+    throw new Error(`Hay más de ${TOPE_DE_APARCADOS} ${que}: la suite no aparca sólo una parte y se detiene sin tocarlas`)
+  return filas
+}
+
 beforeAll(async () => {
   if (!/test|hybrid/i.test(new URL(process.env.TEST_DATABASE_URL!).pathname)) throw new Error('Disposable DB required')
+  preparada = true
+  // Los destinatarios de hoy (el renglón es único y compartido), antes de cambiar nada: vuelven a como estaban.
+  const ajustes = await prisma.platformSettings.findUnique({
+    where: { id: 'default' },
+    select: { avisosDelAltaCorreos: true, updatedById: true },
+  })
+  ajustesOriginales = {
+    existia: !!ajustes,
+    avisosDelAltaCorreos: ajustes?.avisosDelAltaCorreos ?? [],
+    updatedById: ajustes?.updatedById ?? null,
+  }
   await borrarLaOferta()
   // El SUPERADMIN de verdad: persona activa con su fila SUPERADMIN activa (la relee `rolVigente` en cada petición).
   const org = await prisma.organization.create({
@@ -401,15 +428,13 @@ beforeAll(async () => {
   const staff = await prisma.staff.create({
     data: { email: `superadmin-t9-${stamp.toLowerCase()}@example.com`, firstName: 'Súper', lastName: 'Prueba' },
   })
+  Object.assign(superadmin, { staffId: staff.id, orgId: org.id, venueId: venue.id })
   await prisma.staffVenue.create({ data: { staffId: staff.id, venueId: venue.id, role: 'SUPERADMIN', active: true } })
-  Object.assign(superadmin, {
-    staffId: staff.id,
-    orgId: org.id,
-    venueId: venue.id,
-    token: jwt.sign({ sub: staff.id, orgId: org.id, venueId: venue.id, role: 'SUPERADMIN' }, process.env.ACCESS_TOKEN_SECRET as string, {
-      expiresIn: '1h',
-    }),
-  })
+  superadmin.token = jwt.sign(
+    { sub: staff.id, orgId: org.id, venueId: venue.id, role: 'SUPERADMIN' },
+    process.env.ACCESS_TOKEN_SECRET as string,
+    { expiresIn: '1h' },
+  )
   // Los productos de Stripe de los planes (los que lee el publicador), sin perder lo que había.
   for (const [code, product] of [
     ['PLAN_PRO', productos.PRO],
@@ -429,72 +454,115 @@ beforeAll(async () => {
       update: { stripeProductId: product, active: true },
     })
   }
-  // Las listas de los planes que dejaron otras suites: aparcadas durante la corrida.
-  listasAparcadas = await prisma.hybridCampaign.findMany({
-    where: {
-      purpose: 'LIST',
-      OR: [{ listProductKey: { in: KEYS } }, { code: { in: CODIGOS_DE_LISTA } }, { slug: { in: SLUGS_DE_LISTA } }],
-    },
-    select: { id: true, listProductKey: true, code: true, slug: true },
-    take: 10,
-  })
-  for (const { id } of listasAparcadas)
-    await prisma.hybridCampaign.update({
-      where: { id },
-      data: { listProductKey: `FEATURE:PARKED_${id}`, code: `PARKED_${id}`, slug: `parked-${id}` },
-    })
-  // Una campaña ACTIVE de otra suite bloquearía publicar: se pausa durante la corrida.
-  campanasAparcadas = (await prisma.launchCampaign.findMany({ where: { status: 'ACTIVE' }, select: { id: true }, take: 100 })).map(
-    c => c.id,
+  // Las listas de los planes que dejaron otras suites: aparcadas durante la corrida (se guardan ANTES de cambiarlas: si una falla,
+  // `afterAll` devuelve las que sí cambió).
+  const listas = dentroDelTope(
+    await prisma.hybridCampaign.findMany({
+      where: {
+        purpose: 'LIST',
+        OR: [{ listProductKey: { in: KEYS } }, { code: { in: CODIGOS_DE_LISTA } }, { slug: { in: SLUGS_DE_LISTA } }],
+      },
+      select: { id: true, listProductKey: true, code: true, slug: true },
+      orderBy: { id: 'asc' },
+      take: TOPE_DE_APARCADOS + 1,
+    }),
+    'listas de planes que aparcar',
   )
-  if (campanasAparcadas.length)
-    await prisma.launchCampaign.updateMany({ where: { id: { in: campanasAparcadas } }, data: { status: 'PAUSED' } })
+  for (const lista of listas) {
+    await prisma.hybridCampaign.update({
+      where: { id: lista.id },
+      data: { listProductKey: `FEATURE:PARKED_${lista.id}`, code: `PARKED_${lista.id}`, slug: `parked-${lista.id}` },
+    })
+    listasAparcadas.push(lista)
+  }
+  // Una campaña ACTIVE de otra suite bloquearía publicar: se pausa durante la corrida.
+  const campanas = dentroDelTope(
+    await prisma.launchCampaign.findMany({
+      where: { status: 'ACTIVE' },
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: TOPE_DE_APARCADOS + 1,
+    }),
+    'campañas ACTIVE',
+  ).map(c => c.id)
+  if (campanas.length) {
+    await prisma.launchCampaign.updateMany({ where: { id: { in: campanas } }, data: { status: 'PAUSED' } })
+    campanasAparcadas = campanas
+  }
   // Una promoción ACTIVE de un plan que dejó otra suite podría romper la regla del precio de lista: se pausa durante la corrida.
-  promocionesAparcadas = (
+  const promociones = dentroDelTope(
     await prisma.$queryRaw<Array<{ id: string }>>`
       SELECT c.id FROM "HybridCampaign" c JOIN "HybridOfferPublication" p ON p.id = c."currentPublicationId"
       WHERE c.purpose = 'PROMOTION' AND c.status = 'ACTIVE' AND ${productKeySql('p')} IN (${'PLAN:PRO'}, ${'PLAN:PREMIUM'})
-      ORDER BY c.id LIMIT 100`
+      ORDER BY c.id LIMIT ${TOPE_DE_APARCADOS + 1}`,
+    'promociones ACTIVE de los planes',
   ).map(c => c.id)
-  if (promocionesAparcadas.length)
-    await prisma.hybridCampaign.updateMany({ where: { id: { in: promocionesAparcadas } }, data: { status: 'PAUSED' } })
-  // Los destinatarios de hoy (el renglón es único y compartido): vuelven a como estaban.
-  const ajustes = await prisma.platformSettings.findUnique({ where: { id: 'default' }, select: { avisosDelAltaCorreos: true } })
-  ajustesOriginales = { existia: !!ajustes, avisosDelAltaCorreos: ajustes?.avisosDelAltaCorreos ?? [] }
+  if (promociones.length) {
+    await prisma.hybridCampaign.updateMany({ where: { id: { in: promociones } }, data: { status: 'PAUSED' } })
+    promocionesAparcadas = promociones
+  }
 })
 
 afterAll(async () => {
+  if (!preparada) return
+  // Paso por paso: si uno falla, los demás igual corren; al final se lanza un solo error con todos.
+  const errores: string[] = []
+  const paso = async (que: string, fn: () => Promise<unknown>) => {
+    try {
+      await fn()
+    } catch (error) {
+      errores.push(`${que}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
   await hastaQue(() => !renombreCorriendo(), 'el renombre en segundo plano terminó').catch(() => undefined)
-  await borrarLaOferta()
+  await paso('borrar la oferta', borrarLaOferta)
   __resetInterruptorPlanesParaPruebas()
-  if (misPromociones.length) await prisma.hybridCampaign.updateMany({ where: { id: { in: misPromociones } }, data: { status: 'ENDED' } })
+  if (misPromociones.length)
+    await paso('terminar las promociones de la suite', () =>
+      prisma.hybridCampaign.updateMany({ where: { id: { in: misPromociones } }, data: { status: 'ENDED' } }),
+    )
   if (campanasAparcadas.length)
-    await prisma.launchCampaign.updateMany({ where: { id: { in: campanasAparcadas } }, data: { status: 'ACTIVE' } })
+    await paso('reactivar las campañas aparcadas', () =>
+      prisma.launchCampaign.updateMany({ where: { id: { in: campanasAparcadas } }, data: { status: 'ACTIVE' } }),
+    )
   if (promocionesAparcadas.length)
-    await prisma.hybridCampaign.updateMany({ where: { id: { in: promocionesAparcadas } }, data: { status: 'ACTIVE' } })
-  await retirarListas()
+    await paso('reactivar las promociones aparcadas', () =>
+      prisma.hybridCampaign.updateMany({ where: { id: { in: promocionesAparcadas } }, data: { status: 'ACTIVE' } }),
+    )
+  await paso('retirar las listas de la suite', retirarListas)
   for (const { id, listProductKey, code, slug } of listasAparcadas)
-    await prisma.hybridCampaign.update({ where: { id }, data: { listProductKey, code, slug } })
-  for (const f of featuresOriginales) {
-    if (f.existia) await prisma.feature.update({ where: { code: f.code }, data: { stripeProductId: f.stripeProductId, active: f.active } })
-    else await prisma.feature.deleteMany({ where: { code: f.code } })
-  }
-  if (ajustesOriginales.existia)
-    await prisma.platformSettings.update({
-      where: { id: 'default' },
-      data: { avisosDelAltaCorreos: ajustesOriginales.avisosDelAltaCorreos },
-    })
-  else await prisma.platformSettings.deleteMany({ where: { id: 'default' } })
+    await paso(`devolver la lista aparcada ${id}`, () =>
+      prisma.hybridCampaign.update({ where: { id }, data: { listProductKey, code, slug } }),
+    )
+  for (const f of featuresOriginales)
+    await paso(`devolver la función ${f.code}`, () =>
+      f.existia
+        ? prisma.feature.update({ where: { code: f.code }, data: { stripeProductId: f.stripeProductId, active: f.active } })
+        : prisma.feature.deleteMany({ where: { code: f.code } }),
+    )
+  const ajustes = ajustesOriginales
+  if (ajustes)
+    await paso('devolver los destinatarios de PlatformSettings', () =>
+      ajustes.existia
+        ? prisma.platformSettings.update({
+            where: { id: 'default' },
+            data: { avisosDelAltaCorreos: ajustes.avisosDelAltaCorreos, updatedById: ajustes.updatedById },
+          })
+        : prisma.platformSettings.deleteMany({ where: { id: 'default' } }),
+    )
   // Su bitácora queda (sin actor: `staffId` es SET NULL); la persona, su fila, el negocio y la organización de prueba se van.
-  if (superadmin.staffId) {
-    await prisma.staffVenue.deleteMany({ where: { staffId: superadmin.staffId } })
-    await prisma.venue.deleteMany({ where: { id: superadmin.venueId } })
-    await prisma.organization.deleteMany({ where: { id: superadmin.orgId } })
-    await prisma.staff.deleteMany({ where: { id: superadmin.staffId } })
-  }
+  if (superadmin.staffId)
+    await paso('borrar al SUPERADMIN de prueba', async () => {
+      await prisma.staffVenue.deleteMany({ where: { staffId: superadmin.staffId } })
+      await prisma.venue.deleteMany({ where: { id: superadmin.venueId } })
+      await prisma.organization.deleteMany({ where: { id: superadmin.orgId } })
+      await prisma.staff.deleteMany({ where: { id: superadmin.staffId } })
+    })
+  if (errores.length) throw new Error(`La limpieza de plan-offer.http no quedó completa:\n- ${errores.join('\n- ')}`)
 })
 
 beforeEach(async () => {
+  if (!preparada) return
   mockAlmacen.reset()
   mockListas.falla = null
   mockListas.pausa = null
@@ -510,6 +578,7 @@ afterEach(async () => {
   // Una pausa que quedó armada no detiene a la siguiente prueba, y lo que corre en segundo plano termina antes de borrar la oferta.
   mockListas.pausa?.pausa.soltar()
   mockListas.pausa = null
+  if (!preparada) return
   if (misPromociones.length) await prisma.hybridCampaign.updateMany({ where: { id: { in: misPromociones } }, data: { status: 'ENDED' } })
   await hastaQue(() => !renombreCorriendo(), 'el renombre en segundo plano terminó')
 })
@@ -856,14 +925,16 @@ describe('POST /api/v1/superadmin/plan-offer: publicar, reintentar y descartar (
     expect(sueltas.PREMIUM.pendingPublicationId).toBeNull()
   })
 
-  it('🔴 POST /pending/:versionId/retry después de apagar → 409 PLAN_EDIT_DISABLED; el almacén de Stripe no recibió ninguna llamada y en Postgres la versión, sus ranuras, hybridPublicationIds y las pendientes de las listas siguen iguales', async () => {
-    mockListas.falla = 'PRO'
+  /**
+   * Publica (con la falla que ya armó el caso), apaga por la ruta y reintenta: 409 `PLAN_EDIT_DISABLED`, ninguna llamada a Stripe (ni a
+   * sus precios ni a la preparación de las listas) y la versión y las listas como estaban. Devuelve la versión, para lo que sigue.
+   */
+  async function reintentarApagadoNoTocaNada() {
     const fallo = await publicarPorHttp(RECORRIDO)
     expect(fallo.status).toBe(409)
     const versionId = await pendienteId()
     const versionAntes = await leerVersion(versionId)
     const listasAntes = await lasListas()
-    expect(listasAntes.PRO.pendingPublicationId).not.toBeNull()
 
     const apagado = await pedir.post('/interruptor', { prendido: false })
     expect(apagado.status).toBe(200)
@@ -884,6 +955,32 @@ describe('POST /api/v1/superadmin/plan-offer: publicar, reintentar y descartar (
     expect(versionDespues.preparacion).toEqual(versionAntes.preparacion)
     expect(versionDespues.hybridPublicationIds).toEqual(versionAntes.hybridPublicationIds)
     expect(await lasListas()).toEqual(listasAntes)
+    return { versionId, versionAntes, listasAntes }
+  }
+
+  it('🔴 POST /pending/:versionId/retry después de apagar → 409 PLAN_EDIT_DISABLED; el almacén de Stripe no recibió ninguna llamada y en Postgres la versión, sus ranuras, hybridPublicationIds y las pendientes de las listas siguen iguales', async () => {
+    // Falló la preparación de Stripe de la lista de PRO: los cuatro precios ya existen. Aquí lo que muerde es `mockListas.llamadas`
+    // (con el interruptor prendido, el reintento volvería a preparar las dos listas); el almacén de precios no se tocaría de todos modos.
+    // La variante de abajo es la que hace morder al almacén.
+    mockListas.falla = 'PRO'
+    const { listasAntes } = await reintentarApagadoNoTocaNada()
+    expect(listasAntes.PRO.pendingPublicationId).not.toBeNull()
+  })
+
+  it('🔴 la misma negativa con un precio sin crear (Stripe guardó un 500 en el mensual de Pro): ni prices.list ni prices.create; al prender, el mismo reintento sí llega a Stripe', async () => {
+    mockAlmacen.failNextCreateWith = { statusCode: 500 }
+    const { versionId, versionAntes } = await reintentarApagadoNoTocaNada()
+    // Falta un precio: con el interruptor prendido, el reintento lo buscaría y lo pediría. Apagado, el almacén quedó en cero (arriba).
+    expect(definicion(versionAntes).PRO.monthly.stripePriceId).toBeNull()
+
+    // La prueba de que esas dos aserciones muerden: prendido, el MISMO reintento sí llama a Stripe (y le repite su 500 guardado).
+    const prendido = await pedir.post('/interruptor', { prendido: true })
+    expect(prendido.status).toBe(200)
+    const conStripe = await reintentar(versionId)
+    expect(conStripe.status).toBe(409)
+    expect(conStripe.body).toMatchObject({ code: 'PLAN_OFFER_PREPARING', details: { ranura: 'PRO:monthly', motivo: 'INCIERTO' } })
+    expect(mockAlmacen.list).toHaveBeenCalled()
+    expect(llavesDeIdempotencia()).toEqual([`plan-offer-price:${versionId}:PRO:monthly:0`])
   })
 })
 

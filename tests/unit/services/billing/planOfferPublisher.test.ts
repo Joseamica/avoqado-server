@@ -1019,6 +1019,37 @@ describe('estadoDespuesDeConfirmar (Task 9: lo que responden publicar, reintenta
       expect.objectContaining({ versionId: 'cv2' }),
     )
   })
+
+  /** La base deja de contestar: toda lectura del puntero fuera de una transacción falla (las de la transacción, no). */
+  const laBaseNoContesta = () => {
+    prismaMock.planOfferPointer.findUnique = async () => {
+      throw new Error('la base no contesta')
+    }
+  }
+
+  it('M1: si tampoco se puede leer la revisión del puntero, null y dos avisos (nunca un error)', async () => {
+    laBaseNoContesta()
+
+    await expect(estadoDespuesDeConfirmar('se publicó la versión', 'cv2')).resolves.toBeNull()
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[PlanOffer] se publicó la versión, pero no se pudo leer el estado de la oferta',
+      expect.objectContaining({ versionId: 'cv2', error: 'la base no contesta' }),
+    )
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[PlanOffer] se publicó la versión; tampoco se pudo leer la revisión de la oferta',
+      expect.objectContaining({ versionId: 'cv2', error: 'la base no contesta' }),
+    )
+  })
+
+  it('M1: descartar ya confirmado con la base caída después responde el parcial con revision -1', async () => {
+    const atorada = await publicacionAtorada()
+    laBaseNoContesta()
+
+    await expect(descartarPublicacion(atorada, STAFF)).resolves.toEqual({ revision: -1, pendiente: null, parcial: true })
+    // El descarte sí quedó (se escribió dentro de su transacción).
+    expect(version(atorada)).toMatchObject({ status: 'DISCARDED' })
+    expect(base.tablas.planOfferPointer.get('vigente')).toMatchObject({ pendingVersionId: null, revision: 3 })
+  })
 })
 
 /** Vuelve a la v1 sin pendiente (para una segunda publicación dentro de la misma prueba). */

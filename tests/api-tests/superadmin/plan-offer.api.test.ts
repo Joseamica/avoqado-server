@@ -199,7 +199,12 @@ describe('cuerpos estrictos: se rechazan antes del servicio', () => {
   it.each(['retry', 'discard'])(
     'POST /pending/:versionId/%s con un id que no es cuid, o con cuerpo de más → 400 y no corre',
     async accion => {
-      expect((await api().post(`${BASE}/pending/no-es-cuid/${accion}`).set(como())).status).toBe(400)
+      const malFormado = await api().post(`${BASE}/pending/no-es-cuid/${accion}`).set(como())
+      expect(malFormado.status).toBe(400)
+      expect(malFormado.body).toMatchObject({
+        code: 'PLAN_OFFER_INVALID',
+        details: { issues: [{ path: 'versionId', message: 'El identificador de la versión no es válido.' }] },
+      })
       const conCuerpo = await api().post(`${BASE}/pending/${VID}/${accion}`).set(como()).send({ forzar: true })
       expect(conCuerpo.status).toBe(400)
       expect(conCuerpo.body.code).toBe('PLAN_OFFER_INVALID')
@@ -246,6 +251,17 @@ describe('lo del cuerpo llega tal cual y la respuesta', () => {
     expect(res.body.data).toEqual({ publicada: PUBLICADA, estado: { revision: 4, pendiente: null, parcial: true } })
   })
 
+  const yaHechos: Array<[string, () => PromiseLike<{ status: number; body: unknown }>]> = [
+    ['publish', () => api().post(`${BASE}/publish`).set(como()).send({ entrada: entrada(), expectedRevision: 3 })],
+    ['retry', () => api().post(`${BASE}/pending/${VID}/retry`).set(como())],
+  ]
+  it.each(yaHechos)('M1: POST %s ya hecho, sin poder leer ni la revisión → 200 con estado null', async (_n, pedir) => {
+    mockEstadoDespues.mockResolvedValueOnce(null)
+    const res = await pedir()
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true, data: { publicada: PUBLICADA, estado: null } })
+  })
+
   it('POST /pending/:versionId/retry reintenta ESA versión y responde como publicar', async () => {
     const res = await api().post(`${BASE}/pending/${VID}/retry`).set(como())
     expect(res.status).toBe(200)
@@ -257,6 +273,7 @@ describe('lo del cuerpo llega tal cual y la respuesta', () => {
   it.each([
     ['el estado completo', ESTADO],
     ['el estado mínimo', { revision: 5, pendiente: null, parcial: true }],
+    ['el mínimo sin revisión (-1)', { revision: -1, pendiente: null, parcial: true }],
   ])('POST /pending/:versionId/discard descarta ESA versión y responde %s tal cual', async (_n, respuesta) => {
     mockDescartar.mockResolvedValueOnce(respuesta)
     const res = await api().post(`${BASE}/pending/${VID}/discard`).set(como())
@@ -328,6 +345,19 @@ describe('el interruptor y los destinatarios', () => {
     expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
   })
 
+  it('M3: más de 100 correos se rechaza por la forma, con su mensaje, antes de normalizar', async () => {
+    const res = await api()
+      .put(`${BASE}/recipients`)
+      .set(como())
+      .send({ correos: Array.from({ length: 101 }, () => 'ops@example.com') })
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({
+      code: 'PLAN_OFFER_INVALID',
+      details: { issues: [{ path: 'correos', message: 'Son demasiados correos.' }] },
+    })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
   it('PUT /recipients normaliza y rechaza 11 correos o uno inválido con 400', async () => {
     const guardado = await api()
       .put(`${BASE}/recipients`)
@@ -363,6 +393,7 @@ describe('el interruptor y los destinatarios', () => {
     ['correos que no es lista', { correos: 'ops@example.com' }],
     ['un correo que no es texto', { correos: [42] }],
     ['un campo de más', { correos: [], todos: true }],
+    ['más de 100 correos', { correos: Array.from({ length: 101 }, (_, i) => `aviso${i}@example.com`) }],
   ])('PUT /recipients %s → 400 por la forma, sin escribir', async (_n, cuerpo) => {
     const res = await api().put(`${BASE}/recipients`).set(como()).send(cuerpo)
     expect(res.status).toBe(400)

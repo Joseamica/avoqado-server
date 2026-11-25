@@ -132,12 +132,14 @@ export async function getDestinatariosDelAlta(): Promise<string[]> {
  */
 export function normalizarDestinatarios(correos: string[]): string[] {
   const issues: { path: string; message: string }[] = []
-  const lista: string[] = []
+  // Un `Set` conserva el orden de llegada y no recorre la lista por cada correo.
+  const vistos = new Set<string>()
   correos.forEach((crudo, i) => {
     const correo = crudo.trim().toLowerCase()
     if (!correoValido.safeParse(correo).success) issues.push({ path: `correos.${i}`, message: 'No es un correo válido.' })
-    else if (!lista.includes(correo)) lista.push(correo)
+    else vistos.add(correo)
   })
+  const lista = [...vistos]
   if (lista.length > MAXIMO_DE_DESTINATARIOS)
     issues.push({ path: 'correos', message: `Caben hasta ${MAXIMO_DE_DESTINATARIOS} destinatarios (sin contar los repetidos).` })
   if (issues.length)
@@ -145,17 +147,30 @@ export function normalizarDestinatarios(correos: string[]): string[] {
   return lista
 }
 
+/**
+ * El candado de los destinatarios: dos guardados a la vez se forman, así el «antes» de la bitácora es el de verdad. 🔴 No tiene que ver
+ * con los candados de precios, de la oferta ni del nombre (`precio:*`, `plan-offer-publish`, `plan-offer-nombre`): se toma solo, en
+ * su propia transacción, y nunca junto a ellos.
+ */
+export const CANDADO_DE_LOS_DESTINATARIOS = 'platform-settings-recipients'
+
 /** Guarda la lista (normalizada) y, si cambió, deja `PLATFORM_SETTINGS_UPDATED` con el antes y el después. Devuelve lo guardado. */
 export async function setDestinatariosDelAlta(correos: string[], staffId: string): Promise<string[]> {
   const nuevos = normalizarDestinatarios(correos)
-  const antes = await getDestinatariosDelAlta()
-  await prisma.platformSettings.upsert({
-    where: { id: SINGLETON_ID },
-    create: { id: SINGLETON_ID, avisosDelAltaCorreos: nuevos, updatedById: staffId },
-    update: { avisosDelAltaCorreos: nuevos, updatedById: staffId },
+  // Leer el «antes» y escribir, bajo el candado y en la misma transacción.
+  const antes = await prisma.$transaction(async tx => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CANDADO_DE_LOS_DESTINATARIOS}))`
+    const fila = await tx.platformSettings.findUnique({ where: { id: SINGLETON_ID }, select: { avisosDelAltaCorreos: true } })
+    await tx.platformSettings.upsert({
+      where: { id: SINGLETON_ID },
+      create: { id: SINGLETON_ID, avisosDelAltaCorreos: nuevos, updatedById: staffId },
+      update: { avisosDelAltaCorreos: nuevos, updatedById: staffId },
+    })
+    return fila?.avisosDelAltaCorreos ?? []
   })
   const cambio = antes.length !== nuevos.length || antes.some((correo, i) => correo !== nuevos[i])
   if (cambio) {
+    // Después del commit y sin esperarlo: la bitácora nunca deshace ni frena el guardado.
     void logAction({
       staffId,
       action: 'PLATFORM_SETTINGS_UPDATED',

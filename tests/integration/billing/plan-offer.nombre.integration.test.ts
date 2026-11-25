@@ -367,8 +367,15 @@ async function conSoloLosPlanes<T>(fn: () => Promise<T>): Promise<T> {
 // Antes y después
 // ---------------------------------------------------------------------------------------------------------------------
 
+/**
+ * `true` sólo cuando la guarda de la base desechable pasó. Si la guarda lanzó, Jest igual corre `afterEach` y `afterAll`: su limpieza
+ * (borrar toda la oferta, retirar las listas `PLAN:*`…) no debe tocar una base que no es la de pruebas.
+ */
+let preparada = false
+
 beforeAll(async () => {
   if (!/test|hybrid/i.test(new URL(process.env.TEST_DATABASE_URL!).pathname)) throw new Error('Disposable DB required')
+  preparada = true
   await borrarLaOferta()
   staffId = (
     await prisma.staff.create({
@@ -427,6 +434,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  if (!preparada) return
   await hastaQue(() => !renombreCorriendo(), 'el renombre en segundo plano terminó').catch(() => undefined)
   await borrarLaOferta()
   __resetInterruptorPlanesParaPruebas()
@@ -477,6 +485,7 @@ afterAll(async () => {
 })
 
 beforeEach(async () => {
+  if (!preparada) return
   sembrarStripe()
   await reiniciarLaOferta()
 })

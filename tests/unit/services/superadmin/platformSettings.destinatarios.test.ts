@@ -20,6 +20,8 @@ const FILA = {
 
 beforeEach(() => {
   jest.mocked(logAction).mockClear()
+  prismaMock.$executeRaw.mockClear()
+  prismaMock.$transaction.mockClear()
   prismaMock.platformSettings.findUnique.mockReset()
   prismaMock.platformSettings.upsert.mockReset()
   prismaMock.platformSettings.create.mockReset()
@@ -69,6 +71,31 @@ describe('setDestinatariosDelAlta', () => {
     // Lo que quedó guardado es lo que se lee.
     prismaMock.platformSettings.findUnique.mockResolvedValueOnce({ avisosDelAltaCorreos: guardados })
     await expect(getDestinatariosDelAlta()).resolves.toEqual(['ventas@example.com', 'ops@example.com'])
+  })
+
+  it('M2: lee el antes y escribe dentro de UNA transacción que primero toma su propio candado (platform-settings-recipients)', async () => {
+    prismaMock.platformSettings.findUnique.mockResolvedValueOnce({ avisosDelAltaCorreos: ['viejo@example.com'] })
+    prismaMock.platformSettings.upsert.mockResolvedValue(FILA)
+
+    await setDestinatariosDelAlta(['ops@example.com'], 'staff_super')
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    const candados = prismaMock.$executeRaw.mock.calls.filter((c: unknown[]) =>
+      (c[0] as readonly string[]).join('?').includes('pg_advisory_xact_lock(hashtext('),
+    )
+    expect(candados).toHaveLength(1)
+    expect(candados[0].slice(1)).toEqual(['platform-settings-recipients'])
+    // Orden: candado → leer el antes → escribir (las tres con la transacción; el doble pasa `prismaMock` como `tx`).
+    const orden = [
+      prismaMock.$executeRaw.mock.invocationCallOrder[prismaMock.$executeRaw.mock.calls.indexOf(candados[0])],
+      prismaMock.platformSettings.findUnique.mock.invocationCallOrder[0],
+      prismaMock.platformSettings.upsert.mock.invocationCallOrder[0],
+    ]
+    expect([...orden].sort((a: number, b: number) => a - b)).toEqual(orden)
+    // Y la bitácora, con el antes leído bajo el candado, después del commit.
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { avisosDelAltaCorreos: { from: ['viejo@example.com'], to: ['ops@example.com'] } } }),
+    )
   })
 
   it('reemplaza la lista anterior: la bitácora trae el antes real', async () => {

@@ -20,6 +20,7 @@ import {
   publicarVersion,
   reintentarPublicacion,
   vistaPreviaDeLaOferta,
+  type RespuestaDePublicacion,
 } from '@/services/billing/planOfferPublisher'
 import { apagarPlanesEditables, estadoDelInterruptor, prenderPlanesEditables } from '@/services/billing/interruptorPlanesEditables'
 import { setDestinatariosDelAlta } from '@/services/superadmin/platformSettings.service'
@@ -40,9 +41,15 @@ const cuerpoDePublicar = z
   .strict(NO_ADMITIDO)
 const cuerpoVacio = z.object({}, { errorMap }).strict(NO_ADMITIDO)
 const cuerpoDelInterruptor = z.object({ prendido: z.boolean({ errorMap }) }, { errorMap }).strict(NO_ADMITIDO)
-// Sólo la forma: recortar, minúsculas, repetidos, el tope y que cada uno sea un correo los decide el servicio.
-const cuerpoDeLosDestinatarios = z.object({ correos: z.array(z.string({ errorMap }), { errorMap }) }, { errorMap }).strict(NO_ADMITIDO)
-const parametrosDeLaPendiente = z.object({ versionId: z.string({ errorMap }).cuid('Esa versión no existe.') }, { errorMap })
+// Sólo la forma (y un techo para no recorrer una lista enorme): recortar, minúsculas, repetidos, el tope de 10 y que cada uno sea un
+// correo los decide el servicio.
+const cuerpoDeLosDestinatarios = z
+  .object({ correos: z.array(z.string({ errorMap }), { errorMap }).max(100, 'Son demasiados correos.') }, { errorMap })
+  .strict(NO_ADMITIDO)
+const parametrosDeLaPendiente = z.object(
+  { versionId: z.string({ errorMap }).cuid('El identificador de la versión no es válido.') },
+  { errorMap },
+)
 
 function parse<T extends z.ZodTypeAny>(schema: T, input: unknown): z.output<T> {
   const result = schema.safeParse(input)
@@ -68,12 +75,19 @@ export const vistaPrevia = asyncHandler(async (req, res) => {
   res.json({ success: true, data: await vistaPreviaDeLaOferta(entrada) })
 })
 
+/**
+ * La respuesta de publicar y reintentar, ya confirmados: nunca un error. `estado` es el completo, el parcial si no se pudo leer, o
+ * `null` si ni la revisión del puntero se pudo leer (`RespuestaDePublicacion`).
+ */
+async function respuestaDePublicacion(publicada: RespuestaDePublicacion['publicada'], accion: string): Promise<RespuestaDePublicacion> {
+  return { publicada, estado: await estadoDespuesDeConfirmar(accion, publicada.versionId) }
+}
+
 /** `POST /publish` — publica exactamente esta `entrada` sobre `expectedRevision` (no hay borrador en el SERVIDOR). */
 export const publicar = asyncHandler(async (req, res) => {
   const { entrada, expectedRevision } = parse(cuerpoDePublicar, req.body)
   const publicada = await publicarVersion(entrada, expectedRevision, req.authContext!.userId)
-  // Ya publicada: si el estado no se puede leer, se responde el mínimo, nunca un error.
-  res.json({ success: true, data: { publicada, estado: await estadoDespuesDeConfirmar('se publicó la versión', publicada.versionId) } })
+  res.json({ success: true, data: await respuestaDePublicacion(publicada, 'se publicó la versión') })
 })
 
 /** `POST /pending/:versionId/retry` — retoma ESA versión pendiente; responde como publicar. */
@@ -81,17 +95,14 @@ export const reintentar = asyncHandler(async (req, res) => {
   const { versionId } = parse(parametrosDeLaPendiente, req.params)
   parse(cuerpoVacio, req.body ?? {})
   const publicada = await reintentarPublicacion(versionId, req.authContext!.userId)
-  res.json({
-    success: true,
-    data: { publicada, estado: await estadoDespuesDeConfirmar('se reintentó la publicación', publicada.versionId) },
-  })
+  res.json({ success: true, data: await respuestaDePublicacion(publicada, 'se reintentó la publicación') })
 })
 
 /** `POST /pending/:versionId/discard` — descarta ESA versión pendiente (también con el interruptor apagado). */
 export const descartar = asyncHandler(async (req, res) => {
   const { versionId } = parse(parametrosDeLaPendiente, req.params)
   parse(cuerpoVacio, req.body ?? {})
-  // El estado completo o, si no se pudo leer después del descarte, el mínimo: tal cual.
+  // El estado completo o, si no se pudo leer después del descarte, el parcial (`revision: -1` si ni la revisión se pudo leer): tal cual.
   res.json({ success: true, data: await descartarPublicacion(versionId, req.authContext!.userId) })
 })
 

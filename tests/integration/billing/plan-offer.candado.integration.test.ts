@@ -338,8 +338,15 @@ const elPuntero = () => prisma.planOfferPointer.findUniqueOrThrow({ where: { id:
 // Antes y después
 // ---------------------------------------------------------------------------------------------------------------------
 
+/**
+ * `true` sólo cuando la guarda de la base desechable pasó. Si la guarda lanzó, Jest igual corre `afterEach` y `afterAll`: su limpieza
+ * (borrar toda la oferta, retirar las listas `PLAN:*`…) no debe tocar una base que no es la de pruebas.
+ */
+let preparada = false
+
 beforeAll(async () => {
   if (!/test|hybrid/i.test(new URL(process.env.TEST_DATABASE_URL!).pathname)) throw new Error('Disposable DB required')
+  preparada = true
   await borrarLaOferta()
   staffId = (
     await prisma.staff.create({ data: { email: `plan-offer-${stamp.toLowerCase()}@example.com`, firstName: 'Oferta', lastName: 'Prueba' } })
@@ -386,6 +393,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  if (!preparada) return
   await borrarLaOferta()
   __resetInterruptorPlanesParaPruebas()
   if (misCampanas.length) await prisma.launchCampaign.deleteMany({ where: { id: { in: misCampanas } } })
@@ -423,11 +431,13 @@ afterAll(async () => {
 })
 
 beforeEach(async () => {
+  if (!preparada) return
   sembrarStripe()
   await reiniciarLaOferta()
 })
 
 afterEach(async () => {
+  if (!preparada) return
   // Una campaña ACTIVE de un caso bloquearía publicar en el siguiente.
   if (misCampanas.length) await prisma.launchCampaign.updateMany({ where: { id: { in: misCampanas } }, data: { status: 'ENDED' } })
   jest.mocked(ensureHybridPublicationPrices).mockClear()

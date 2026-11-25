@@ -70,11 +70,25 @@ type Etapa = 'PRECIO' | 'LISTA'
  */
 type UltimoError = { etapa: Etapa | 'MOVIMIENTO'; ranura: Ranura | null; motivo: MotivoDePreparacion | string; at: string }
 
-/** Lo que devuelve descartar si el descarte se confirmó pero el estado no se pudo leer después. */
+/**
+ * Lo que se responde cuando una escritura ya se confirmó pero el estado completo no se pudo leer después: la revisión del puntero, o
+ * `revision: -1` si tampoco ésa se pudo leer (sólo en descartar; publicar y reintentar responden `estado: null`). La pantalla vuelve a
+ * pedir el estado completo.
+ */
 export interface EstadoParcialDeLaOferta {
+  /** La revisión del puntero; `-1` = tampoco se pudo leer. */
   revision: number
   pendiente: null
   parcial: true
+}
+
+/**
+ * Lo que responden publicar y reintentar (`POST /publish`, `POST /pending/:versionId/retry`): la versión publicada y el estado. `estado`
+ * es el parcial si el completo no se pudo leer, y `null` si ni la revisión del puntero se pudo leer. Nunca un error: ya se publicó.
+ */
+export interface RespuestaDePublicacion {
+  publicada: { number: number; versionId: string }
+  estado: EstadoDeLaOferta | EstadoParcialDeLaOferta | null
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -628,23 +642,30 @@ export async function descartarPublicacion(versionId: string, staffId: string): 
     })
   })
   logger.info('[PlanOffer] versión descartada', { versionId, por: staffId })
-  return estadoDespuesDeConfirmar('se descartó la versión', versionId)
+  return (await estadoDespuesDeConfirmar('se descartó la versión', versionId)) ?? { revision: -1, pendiente: null, parcial: true }
 }
 
 /**
- * El estado completo de la oferta para responder después de una escritura YA confirmada (publicar, reintentar, descartar). Si no se
- * puede leer, la escritura no se vuelve un error: se avisa en el log y se responde el mínimo, con la revisión del puntero
- * (`{ revision, pendiente: null, parcial: true }`); la pantalla vuelve a pedir el estado completo.
+ * El estado completo de la oferta para responder después de una escritura YA confirmada (publicar, reintentar, descartar). No puede
+ * fallar: si el estado no se puede leer, se avisa en el log y se responde el mínimo con la revisión del puntero
+ * (`{ revision, pendiente: null, parcial: true }`); si tampoco ésa se puede leer (la base no contesta), `null`. La pantalla vuelve a
+ * pedir el estado completo.
  */
-export async function estadoDespuesDeConfirmar(accion: string, versionId: string): Promise<EstadoDeLaOferta | EstadoParcialDeLaOferta> {
+export async function estadoDespuesDeConfirmar(
+  accion: string,
+  versionId: string,
+): Promise<EstadoDeLaOferta | EstadoParcialDeLaOferta | null> {
+  const mensaje = (error: unknown) => (error instanceof Error ? error.message : String(error))
   try {
     return await estadoDeLaOferta()
   } catch (error) {
-    logger.warn(`[PlanOffer] ${accion}, pero no se pudo leer el estado de la oferta`, {
-      versionId,
-      error: error instanceof Error ? error.message : String(error),
-    })
+    logger.warn(`[PlanOffer] ${accion}, pero no se pudo leer el estado de la oferta`, { versionId, error: mensaje(error) })
+  }
+  try {
     const puntero = await prisma.planOfferPointer.findUnique({ where: { id: PUNTERO_ID }, select: { revision: true } })
     return { revision: puntero?.revision ?? 0, pendiente: null, parcial: true }
+  } catch (error) {
+    logger.warn(`[PlanOffer] ${accion}; tampoco se pudo leer la revisión de la oferta`, { versionId, error: mensaje(error) })
+    return null
   }
 }
