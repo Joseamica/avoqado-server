@@ -13,7 +13,7 @@ roles:
   - MANAGER
 lastVerified: 2026-11-25
 sourceRepo: avoqado-web-dashboard
-sourceRef: 501e37072a13f5ed8f22e3d650f2598d3d8820b6
+sourceRef: 820f1e9b767477aae700fb599f3896ddc54a6541
 relatedArticles:
   - ver-pagos
   - gestionar-clientes
@@ -23,6 +23,8 @@ keywords:
   - se me olvidó poner el cliente
   - asignar cliente a una venta cobrada
   - quitar cliente del pago
+  - no me deja eliminar el cliente
+  - no sale eliminar de la transacción
   - cliente equivocado en la venta
 ---
 
@@ -47,6 +49,8 @@ Una venta cobrada que ya tiene cliente no se le cambia ni se le quita desde aqu�
 - **«No se pudo asociar al cliente»:** lee el mensaje que trae debajo. Si dice que no tienes permiso, pídeselo a quien administra el negocio.
 - **«Tu directorio está vacío»** o **«No se encontraron clientes»:** todavía no hay clientes con ese dato; usa **Crear nuevo cliente**.
 - **Si el pago ya tiene cliente**, en **⋯** sale **Editar cliente** en lugar de **Añadir cliente**: eso corrige la ficha del cliente (pide el permiso de editar clientes) y se ve en todas sus ventas, no liga a otro.
-- **«Esta venta ya tiene un cliente asignado y no se puede reemplazar.»:** a una venta ya cobrada no se le cambia ni se le quita el cliente, ni con **Eliminar de la transacción**.
+- **Eliminar de la transacción** está dentro de **Editar cliente** (o al tocar su nombre en **Pagado por**) y quita a ese cliente de **Pagado por** en el pago. Sólo sale en una venta que todavía no se cobra completa y si tienes el permiso de editar órdenes.
+- **En lugar de Eliminar de la transacción sale un aviso:** «Esta venta ya se cobró: su cliente se queda y no se puede quitar.» (el cliente de una venta cobrada se queda, también para un gerente), «Esta venta está cancelada: ya no se le cambia el cliente.» o «Para quitar el cliente de la venta necesitas el permiso de editar órdenes.» (pídeselo a quien administra el negocio).
+- **«Esta venta ya tiene un cliente asignado y no se puede reemplazar.»:** a una venta ya cobrada no se le cambia el cliente. Si sale al tocar **Eliminar de la transacción**, la venta se terminó de cobrar mientras la tenías abierta: el botón se quita solo.
 - **«Esta venta no admite asignar un cliente.»:** ese pago no permite ligarle un cliente.
 - **El botón Añadir cliente está apagado** hasta que tocas un cliente de la lista.

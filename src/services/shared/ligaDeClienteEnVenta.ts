@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client'
 import { ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { isDeadlockError, isRetryableDbError } from '../../utils/serializableRetry'
-import { computeOrderBalance, esVentaCerrada, type OrderAmountsForBalance } from './orderBalance'
+import { claseDeEstado, computeOrderBalance, esVentaCerrada, type OrderAmountsForBalance } from './orderBalance'
 import { cobradoQueCubreEnTx } from './saldoReabiertoAlReembolsar'
 import { WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO } from '../exchanges/exchangeMarks'
 import {
@@ -190,6 +190,8 @@ export async function ventaTieneReembolso(
 export const MENSAJE_CLIENTE_DE_VENTA_COBRADA =
   'Para cambiar el cliente de una venta ya cobrada necesitas el permiso de cobrar. Pídeselo a tu administrador.'
 export const CODIGO_CLIENTE_DE_VENTA_COBRADA = 'CUSTOMER_CHANGE_REQUIRES_PAYMENTS_CREATE'
+/** El 409 de una venta cobrada a la que se le quiere cambiar o quitar el cliente (D34 lo enseña antes, en el detalle del pago). */
+const CODIGO_CLIENTE_YA_ASIGNADO = 'SALE_CUSTOMER_ALREADY_ASSIGNED'
 
 /**
  * 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A» del founder): `Order.customerId` es el respaldo heredado de la
@@ -261,10 +263,9 @@ export async function assertCustomerAttributionUnderLock(
   if (!order) throw new NotFoundError('Venta no encontrada')
   const paid = await ventaYaCobradaBajoCandado(tx, args, order)
   if (!paid?.cobrada && !args.historicalOnly) return
-  const primary = await tx.orderCustomer.findFirst({ where: { orderId: args.orderId, isPrimary: true }, select: { customerId: true } })
-  const owners = [order.customerId, primary?.customerId].filter((id): id is string => !!id)
-  if (owners.some(id => id !== args.customerId))
-    throw new ConflictError('Esta venta ya tiene un cliente asignado y no se puede reemplazar.', 'SALE_CUSTOMER_ALREADY_ASSIGNED')
+  const owners = await duenosDeLaVenta(tx, args.orderId, order.customerId)
+  if (reemplazaAlDueno(owners, args.customerId))
+    throw new ConflictError('Esta venta ya tiene un cliente asignado y no se puede reemplazar.', CODIGO_CLIENTE_YA_ASIGNADO)
   // Una repetición no crea autoridad nueva ni modifica el beneficiario de la venta.
   if (owners.length > 0 && args.customerId) return
   if (!args.customerId) return
@@ -283,4 +284,60 @@ export async function assertCustomerAttributionUnderLock(
     throw new ConflictError('Esta venta no admite asignar un cliente.', 'SALE_NOT_ELIGIBLE_FOR_CUSTOMER')
   if (actor.canAssignHistorical || (!args.historicalOnly && ownsRecentReceipt(payment, actor))) return
   requireHistoricalCustomerAuthority(actor)
+}
+
+/** Los clientes que ya son de la venta: la cabecera (`Order.customerId`) y el primario de `OrderCustomer`. */
+async function duenosDeLaVenta(
+  tx: Pick<Prisma.TransactionClient, 'orderCustomer'>,
+  orderId: string,
+  cabecera: string | null,
+): Promise<string[]> {
+  const primary = await tx.orderCustomer.findFirst({ where: { orderId, isPrimary: true }, select: { customerId: true } })
+  return [cabecera, primary?.customerId].filter((id): id is string => !!id)
+}
+
+/** En una venta cobrada, poner a otro o quitarlo (`null`) reemplaza a su dueño: eso no se hace. */
+function reemplazaAlDueno(owners: string[], customerId: string | null): boolean {
+  return owners.some(id => id !== customerId)
+}
+
+/** D34: lo que el panel puede ofrecer en el detalle del pago. `reason` va en llano, para enseñarlo en lugar del botón. */
+export type QuitarClienteDeLaVenta = { allowed: true } | { allowed: false; code: string; reason: string }
+
+/**
+ * 🔴 D34 (hz:be99f328:D34): ¿el PUT del panel con `customerId: null` («Eliminar de la transacción») aceptaría quitar el cliente de esta
+ * venta? Los mismos pasos que `updateOrder`: una venta anulada no se edita (`bloquearCuentaParaEditar`, 400) y en una cobrada el cliente
+ * se queda, también para un gerente (`assertCustomerAttributionUnderLock`, 409). Es sólo para PINTAR: lee sin candado y el PUT vuelve a
+ * decidir bajo el candado de la venta; si algo cambió en medio (un cobro), el PUT contesta 409 como siempre. `null` = la venta no es de
+ * este negocio. La regla no cambia aquí: si cambia allá, esta función usa sus mismas piezas (`duenosDeLaVenta`, `reemplazaAlDueno`).
+ */
+export async function sePuedeQuitarElCliente(
+  db: Pick<Prisma.TransactionClient, 'order' | 'orderCustomer' | 'payment'>,
+  venta: { venueId: string; orderId: string },
+): Promise<QuitarClienteDeLaVenta | null> {
+  const order = await db.order.findFirst({
+    where: { id: venta.orderId, venueId: venta.venueId },
+    select: {
+      status: true,
+      paymentStatus: true,
+      customerId: true,
+      subtotal: true,
+      discountAmount: true,
+      serviceChargeAmount: true,
+      contratoDePrecio: true,
+      taxAmount: true,
+    },
+  })
+  if (!order) return null
+  if (claseDeEstado(order.status) === 'CANCELADA')
+    return { allowed: false, code: 'ORDER_CANCELLED_NO_EDIT', reason: 'Esta venta está cancelada: ya no se le cambia el cliente.' }
+  const paid = await ventaYaCobradaBajoCandado(db, venta, order)
+  if (!paid?.cobrada) return { allowed: true }
+  if (reemplazaAlDueno(await duenosDeLaVenta(db, venta.orderId, order.customerId), null))
+    return {
+      allowed: false,
+      code: CODIGO_CLIENTE_YA_ASIGNADO,
+      reason: 'Esta venta ya se cobró: su cliente se queda y no se puede quitar.',
+    }
+  return { allowed: true }
 }

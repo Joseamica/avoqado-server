@@ -9,6 +9,7 @@ import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
 import { PaginatedPaymentsResponse } from '../../schemas/dashboard/payment.schema'
 import { logAction } from './activity-log.service'
 import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
+import { sePuedeQuitarElCliente } from '../shared/ligaDeClienteEnVenta'
 import {
   MINDFORM_NEW_VENUE_ID,
   getLegacyPayments,
@@ -431,7 +432,17 @@ export async function getPaymentById(venueId: string, paymentId: string) {
     const chargedTotal = chargedTotalDe(cobrado, it.id)
     return chargedTotal === undefined ? it : { ...it, chargedTotal }
   })
-  return { ...conMedio, order: { ...conMedio.order, items } }
+  // D34 (aditivo, opcional): si el PUT del panel aceptaría quitar el cliente de la venta. El panel sólo ofrece «Eliminar de la
+  // transacción» cuando sí, y si no, enseña `reason`. Si esta lectura falla, el detalle responde sin el campo (el panel no ofrece
+  // el botón): pintar un botón no tumba el detalle del pago.
+  const customerUnlink = await sePuedeQuitarElCliente(prisma, { venueId, orderId: conMedio.order.id }).catch(error => {
+    logger.warn('[PAYMENT.DASHBOARD] No se pudo leer si se puede quitar el cliente: el detalle sale sin customerUnlink', {
+      paymentId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return null
+  })
+  return { ...conMedio, order: { ...conMedio.order, items }, ...(customerUnlink && { customerUnlink }) }
 }
 
 /**
