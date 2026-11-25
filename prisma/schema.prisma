@@ -6264,6 +6264,12 @@ model Terminal {
   customerDisplayAck                  Json?
   customerDisplayDesign               CustomerDisplayDesign?
 
+  /// POS de WINDOWS (hz:a5fa2439:D1): cómo dibuja la PC, tal como lo reporta el aparato.
+  /// Omitido por defecto en el cliente de Prisma (`serverOnlyOmit`): sólo lo recibe quien lo pide por nombre.
+  deviceDiagnostics Json?
+  /// La orden de modo de dibujo que el dashboard le manda al aparato. Omitida por defecto, igual que la de arriba.
+  drawingModeOrder  Json?
+
   scaleProfileId String?
   scaleProfile   ScaleProfile? @relation(fields: [scaleProfileId], references: [id], onDelete: SetNull)
 

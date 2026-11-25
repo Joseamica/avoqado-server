@@ -31,9 +31,12 @@ const datasourceUrl = buildDatasourceUrl()
 // These H1 server-only scalars are opt-in provenance/fence inputs, not legacy
 // response fields. Global omit also protects Product rows nested by endpoints
 // we did not enumerate; internal H1 readers can override with select/omit=false.
+// Terminal: the Windows POS drawing report and its drawing-mode order (hz:a5fa2439:D1)
+// stay out of every existing Terminal response; only their own readers ask for them.
 const serverOnlyOmit = {
   product: { createdById: true },
   venue: { catalogGovernanceEnforcedAt: true },
+  terminal: { deviceDiagnostics: true, drawingModeOrder: true },
 } as const
 
 // Prisma encodes global omit in the client's generic type, which otherwise
