@@ -4,7 +4,8 @@ description: En el carrito de Cobrar, con el cliente elegido, escribe el código
 product: tpv
 category: clientes
 task: capturar-codigo-de-referido
-requiredPermissions: []
+requiredPermissions:
+  - referral:read
 featureCode: REFERRAL_PROGRAM
 gateKind: FEATURE
 money: true

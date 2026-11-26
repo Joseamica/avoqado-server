@@ -41,8 +41,10 @@
       ]
     },
     "android/clientes/capturar-codigo-de-referido": {
-      "sha256": "e0fcbf0b2ce384e67c8e7a08cde678d4a03366aab9990f9527dceb44934b8f2c",
-      "requiredPermissions": [],
+      "sha256": "f8d25c05dae41c222d57a088228599e7887d7daa4ed29d4e7a02ac1e3f97ceba",
+      "requiredPermissions": [
+        "referral:read"
+      ],
       "featureCode": "REFERRAL_PROGRAM",
       "gateKind": "FEATURE"
     },
@@ -186,8 +188,10 @@
       "gateKind": "FEATURE"
     },
     "android/mesas/anular-producto-enviado": {
-      "sha256": "d709ff2a5500d9463ec73bc6c042ccc2575cb90f8537628dabdd11897bfab77d",
-      "requiredPermissions": [],
+      "sha256": "33cbf3c73d7f5ca88770fc859c963bfd19c4fc0768c2f0dd9655ab9f7be1c166",
+      "requiredPermissions": [
+        "orders:void"
+      ],
       "featureCode": "TABLE_SERVICE",
       "gateKind": "FEATURE"
     },
@@ -1120,8 +1124,10 @@
       ]
     },
     "tpv/clientes/capturar-codigo-de-referido": {
-      "sha256": "559ed376da15dd825b4dde181d620ba97c3b71d2f4dd5184262be5ac8689c230",
-      "requiredPermissions": [],
+      "sha256": "944816c26f56e4f13cce0fbc3c82d9be2741044ba2186f76651c078c94c46ac6",
+      "requiredPermissions": [
+        "referral:read"
+      ],
       "featureCode": "REFERRAL_PROGRAM",
       "gateKind": "FEATURE"
     },
@@ -1328,8 +1334,10 @@
       ]
     },
     "windows/clientes/capturar-codigo-de-referido": {
-      "sha256": "56f4619fa511a91c41f26545aee0c9b2aa5f3ee6d89d70aa1eccde11d898e618",
-      "requiredPermissions": [],
+      "sha256": "bdc078b888392d15bb7a3f06564dedd6ba5b0c785cc2f789f36e5ff35dab260f",
+      "requiredPermissions": [
+        "referral:read"
+      ],
       "featureCode": "REFERRAL_PROGRAM",
       "gateKind": "FEATURE"
     },

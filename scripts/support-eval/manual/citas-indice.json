@@ -3369,6 +3369,16 @@
         "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/referrals/data/api/ReferralsApiService.kt": [
+      {
+        "pagina": "android/clientes/capturar-codigo-de-referido",
+        "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+      },
+      {
+        "pagina": "windows/clientes/capturar-codigo-de-referido",
+        "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/referrals/presentation/ReferralCaptureSection.kt": [
       {
         "pagina": "android/clientes/capturar-codigo-de-referido",
@@ -4671,6 +4681,16 @@
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
         "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      }
+    ],
+    "avoqado-android:avoqado-server/src/routes/dashboard/referrals.routes.ts": [
+      {
+        "pagina": "android/clientes/capturar-codigo-de-referido",
+        "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+      },
+      {
+        "pagina": "windows/clientes/capturar-codigo-de-referido",
+        "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
       }
     ],
     "avoqado-android:avoqado-server/src/routes/dashboard/reservation.routes.ts": [
@@ -6543,6 +6563,12 @@
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/referrals/data/api/ReferralsApiService.kt": [
+      {
+        "pagina": "tpv/clientes/capturar-codigo-de-referido",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      }
+    ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/referrals/presentation/ReferralCaptureSection.kt": [
       {
         "pagina": "tpv/clientes/capturar-codigo-de-referido",
@@ -6969,6 +6995,10 @@
       {
         "pagina": "tpv/caja/abrir-y-cerrar-caja-anterior",
         "sourceRef": "81cc9983b24beb0bcdb85c907a361d3806383999"
+      },
+      {
+        "pagina": "tpv/clientes/capturar-codigo-de-referido",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       },
       {
         "pagina": "tpv/cobro/agregar-propina",

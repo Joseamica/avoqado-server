@@ -36,6 +36,8 @@ const TITLE_END: Record<HelpApp, RegExp> = {
   dashboard: / en el panel$/,
 }
 const FAMILY_END = { PAX: / PAX$/, NEXGO: / Nexgo$/ }
+/** Páginas de dinero cuyo permiso trae otra rama (la de D42 las está editando): quien se lo ponga borra su renglón. */
+const PERMISO_EN_OTRA_RAMA = new Set(['android/lealtad/aplicar-premio-de-sellos', 'windows/lealtad/aplicar-premio-de-sellos'])
 const CHECKS = ['parses', 'deviceTested', 'browserTested', 'permissions', 'contact', 'sizes', 'titles', 'inventory'] as const
 type Problems = Record<(typeof CHECKS)[number], string[]>
 
@@ -95,14 +97,12 @@ function manualProblems(manualDir: string, evalRoot: string): Problems {
       problems.browserTested.push(`${id}: browserTested sin navegador PROBADO`)
     for (const permission of page.gates?.requiredPermissions ?? [])
       if (!isValidPermission(permission)) problems.permissions.push(`${id}: ${permission}`)
-    // hz:be99f328:D44: una página de dinero que entra a la biblioteca lleva candado; sin él, el bot le enseña los pasos a quien
-    // no puede hacerlos sin decirle que lo pida. La que todavía no entra (le falta su prueba) o está retirada se decide al
-    // probarla. Un `featureCode` con `CORE` no cuenta: el cargador lo tira (parseGates).
-    const gates = page.gates
-    const plan = !!gates?.featureCode && gates.gateKind !== 'CORE'
+    // hz:be99f328:D44: una página de dinero que entra a la biblioteca lleva candado de PERMISO; sin él, el bot le enseña los
+    // pasos a quien no puede hacerlos sin decirle que lo pida (el plan o el ajuste no dicen quién puede). La que todavía no
+    // entra (le falta su prueba) o está retirada se decide al probarla.
     const loads = sources.includes(page) && !retired.has(id)
-    if (page.money && loads && !gates?.requiredPermissions.length && !plan && !gates?.activationKey)
-      problems.permissions.push(`${id}: página de dinero sin candado`)
+    if (page.money && loads && !page.gates?.requiredPermissions.length && !PERMISO_EN_OTRA_RAMA.has(id))
+      problems.permissions.push(`${id}: página de dinero sin candado de permiso`)
     const text = `${page.title}\n${page.summary}\n${page.body}`
     if (CONTACT.some(re => re.test(text)) || hasPhone(text)) problems.contact.push(`${id}: trae un enlace, correo o teléfono`)
     if (steps.length > 6 || steps.some(s => s.length > 220) || page.summary.length > 160)
@@ -281,7 +281,7 @@ ${o.steps.length ? `\n## Pasos\n\n${o.steps.map((s, i) => `${i + 1}. ${s}`).join
     ])
   })
 
-  it('a money page that enters the library without any candado is caught (D44); with its permission it passes', () => {
+  it('a money page that enters the library without a permission candado is caught, even with a plan (D44); with its permission it passes', () => {
     const id = 'tpv/cobro/cobrar-en-efectivo'
     const write = (permissions: string) =>
       put(
@@ -300,11 +300,14 @@ ${o.steps.length ? `\n## Pasos\n\n${o.steps.map((s, i) => `${i + 1}. ${s}`).join
       JSON.stringify({ ...evidence(id, { pasos: [1] }), aparato: { ...probada, fotos: ['f.png'], filasCreadas: [] } }),
     )
     put(evalRoot, 'inventario/tpv.json', JSON.stringify(inventory('tpv', [id])))
+    const red = [`${id}: página de dinero sin candado de permiso`]
     write('requiredPermissions: []')
-    expect(manualProblems(manual, evalRoot).permissions).toEqual([`${id}: página de dinero sin candado`])
-    // Un plan con `CORE` no es candado: el cargador lo tira.
-    write('requiredPermissions: []\nfeatureCode: TABLE_SERVICE\ngateKind: CORE')
-    expect(manualProblems(manual, evalRoot).permissions).toEqual([`${id}: página de dinero sin candado`])
+    expect(manualProblems(manual, evalRoot).permissions).toEqual(red)
+    // El plan dice si el negocio la tiene, no quién puede hacerla: sin permiso sigue en rojo.
+    write('requiredPermissions: []\nfeatureCode: TABLE_SERVICE\ngateKind: FEATURE')
+    expect(manualProblems(manual, evalRoot).permissions).toEqual(red)
+    write('requiredPermissions:\n  - payments:create\nfeatureCode: TABLE_SERVICE\ngateKind: FEATURE')
+    expect(manualProblems(manual, evalRoot)).toEqual(Object.fromEntries(CHECKS.map(c => [c, []])))
     write('requiredPermissions:\n  - payments:create')
     expect(manualProblems(manual, evalRoot)).toEqual(Object.fromEntries(CHECKS.map(c => [c, []])))
   })
