@@ -1,8 +1,8 @@
 {
   "pagina": "windows/lealtad/canjear-puntos",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e",
-  "version": "2.25.58",
+  "sourceRef": "db119c61e189d2c2ea0e6d306c9120ded94887f6",
+  "version": "2.25.60",
   "pasos": [
     {
       "paso": 1,
@@ -54,32 +54,32 @@
     },
     {
       "paso": 3,
-      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
-      "linea": 3668,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/RewardsDialog.kt",
+      "linea": 51,
       "cita": "description = loyalty?.let { \"${it.customerName ?: \"Cliente\"} · ${it.balance} puntos disponibles, valen ${money(it.balanceValue)}\" }"
     },
     {
       "paso": 3,
-      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
-      "linea": 3695,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/RewardsDialog.kt",
+      "linea": 78,
       "cita": "Icon(Icons.Default.Remove, contentDescription = \"Menos puntos\")"
     },
     {
       "paso": 3,
-      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
-      "linea": 3700,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/RewardsDialog.kt",
+      "linea": 83,
       "cita": "text = \"− ${money(loyalty.valorDelCanje(points))} en la cuenta\","
     },
     {
       "paso": 3,
-      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
-      "linea": 3706,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/RewardsDialog.kt",
+      "linea": 89,
       "cita": "Icon(Icons.Default.Add, contentDescription = \"Más puntos\")"
     },
     {
       "paso": 4,
-      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
-      "linea": 3673,
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/RewardsDialog.kt",
+      "linea": 56,
       "cita": "text = \"Canjear\","
     },
     {
@@ -108,9 +108,9 @@
     },
     {
       "paso": 5,
-      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt",
-      "linea": 3722,
-      "cita": "text = \"Mínimo ${loyalty.minPointsRedeem} puntos. Si quitas la recompensa de la cuenta, los puntos regresan.\","
+      "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/RewardsDialog.kt",
+      "linea": 41,
+      "cita": "\"Mínimo ${it.minPointsRedeem} puntos. Si quitas la recompensa de la cuenta, los puntos regresan.\""
     }
   ],
   "permisos": [
@@ -139,7 +139,7 @@
     {
       "featureCode": "LOYALTY_PROGRAM",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
-      "linea": 480
+      "linea": 482
     },
     {
       "featureCode": "TABLE_SERVICE",
@@ -151,7 +151,7 @@
     {
       "afirmacion": "Sin conexión, «Recompensas» sale en gris con «Sin conexión: canjear puntos necesita internet. Se puede en cuanto vuelva la red.» y no se canjea nada",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
-      "linea": 545
+      "linea": 547
     },
     {
       "afirmacion": "El canje pide red antes de mandar nada",
@@ -162,6 +162,16 @@
       "afirmacion": "Quitar la recompensa (un descuento aplicado) también pide internet",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderViewModel.kt",
       "linea": 1906
+    },
+    {
+      "afirmacion": "En Pedidos, una cuenta de «Pagar después» con un canje de esta caja no se cobra sin internet: «Esta cuenta tiene puntos canjeados: se cobra con conexión. Espera a que vuelva la red.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
+      "linea": 622
+    },
+    {
+      "afirmacion": "Sin red, «Recompensas» de Pedidos sale en gris con el texto sin conexión de Mesas",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
+      "linea": 504
     }
   ],
   "rutas": [
@@ -178,22 +188,22 @@
     {
       "ruta": "Esta cuenta no tiene puntos para canjear. Agrega el cliente en la pestaña «Cliente».",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
-      "linea": 577
+      "linea": 579
     },
     {
       "ruta": "El programa de lealtad está apagado en esta sucursal. Se prende desde el panel web.",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
-      "linea": 581
+      "linea": 583
     },
     {
       "ruta": "No llega al mínimo de puntos",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
-      "linea": 583
+      "linea": 585
     },
     {
       "ruta": "En esta cuenta ya no se pueden canjear puntos: tiene un pago registrado o no queda nada que descontar.",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
-      "linea": 599
+      "linea": 601
     },
     {
       "ruta": "La cuenta cambió: revisa los puntos.",
@@ -203,7 +213,7 @@
     {
       "ruta": "No se puede modificar una orden ya pagada (quitar la recompensa con un abono)",
       "archivo": "avoqado-server/src/services/mobile/order.mobile.service.ts",
-      "linea": 3540
+      "linea": 3549
     },
     {
       "ruta": "En Cobrar (mostrador) el menú del carrito ya no trae «Canjear recompensa»",
@@ -213,12 +223,47 @@
     {
       "ruta": "«La cuenta cambió»: el saldo del cliente bajó por un canje en otra cuenta",
       "archivo": "avoqado-server/src/services/mobile/loyalty.mobile.service.ts",
-      "linea": 374
+      "linea": 85
     },
     {
       "ruta": "«Canjear» en gris con menos del mínimo o 0 puntos elegidos",
       "archivo": "app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt",
-      "linea": 508
+      "linea": 510
+    },
+    {
+      "ruta": "Pedidos › cuenta de «Pagar después»: botón «Recompensas» debajo de Cobrar",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
+      "linea": 1118
+    },
+    {
+      "ruta": "La cuenta en $0.00 se cierra con «Cerrar cuenta ($0.00)»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
+      "linea": 675
+    },
+    {
+      "ruta": "Canje sin respuesta: «No se sabe si el canje entró…» y el botón «Reintentar el canje»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
+      "linea": 618
+    },
+    {
+      "ruta": "Cobrar bloqueado con un canje sin terminar: «Hay un canje de puntos sin terminar en esta cuenta…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
+      "linea": 626
+    },
+    {
+      "ruta": "Sin permiso: «No tienes permiso para canjear puntos. Pídeselo a tu gerente.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
+      "linea": 629
+    },
+    {
+      "ruta": "Canje con un cobro con tarjeta en curso en la terminal",
+      "archivo": "avoqado-server/src/services/mobile/loyalty.mobile.service.ts",
+      "linea": 109
+    },
+    {
+      "ruta": "Cobro con terminal con el importe de antes del canje: «tiene puntos canjeados: falta $…»",
+      "archivo": "avoqado-server/src/services/terminal-payment.service.ts",
+      "linea": 2142
     }
   ],
   "aparato": {

@@ -163,16 +163,6 @@
       "featureCode": "LOYALTY_PROGRAM",
       "gateKind": "FEATURE"
     },
-    "android/lealtad/canjear-puntos": {
-      "sha256": "c287fa5bc80d38134bf2f24200d2ccfaef512fcc26e18a96b931172bcb636ca9",
-      "requiredPermissions": [
-        "tables:read",
-        "orders:update",
-        "loyalty:read"
-      ],
-      "featureCode": "LOYALTY_PROGRAM",
-      "gateKind": "FEATURE"
-    },
     "android/lealtad/sello-que-no-se-sumo": {
       "sha256": "d9866f45bb449cd7bab46039d18dd1d52f3b227cc9da61286828eeaf4c6da893",
       "requiredPermissions": [],
