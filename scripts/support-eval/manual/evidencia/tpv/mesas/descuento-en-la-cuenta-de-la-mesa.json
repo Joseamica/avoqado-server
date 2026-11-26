@@ -41,8 +41,35 @@
       "cita": "onPayCash = { viewModel.payCash(chargeableAmount) },"
     }
   ],
-  "permisos": [],
-  "plan": [],
+  "permisos": [
+    {
+      "permiso": "discounts:apply",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/api/TablesApiService.kt",
+      "linea": 203
+    },
+    {
+      "permiso": "discounts:apply",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/api/TablesApiService.kt",
+      "linea": 238
+    },
+    {
+      "permiso": "discounts:apply",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 5663
+    },
+    {
+      "permiso": "discounts:apply",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 5882
+    }
+  ],
+  "plan": [
+    {
+      "featureCode": "TABLE_SERVICE",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/screens/WelcomeScreen.kt",
+      "linea": 603
+    }
+  ],
   "sinInternet": [
     {
       "afirmacion": "Quitar descuento siempre online",
