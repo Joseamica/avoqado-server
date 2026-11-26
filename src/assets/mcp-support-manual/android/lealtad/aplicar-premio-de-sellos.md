@@ -11,7 +11,7 @@ gateKind: FEATURE
 money: true
 versionMin: 2.20.0
 sourceRepo: avoqado-android
-sourceRef: 78e5372f37ed7791d86fc1fe621d4a073e5a09ff
+sourceRef: 1c3999b1bf9de45ea788cbcf57a3ab6f75847a47
 deviceTested: 2026-11-25
 keywords:
   - aplicar premio de sellos
@@ -20,6 +20,9 @@ keywords:
   - escanear tarjeta digital del cliente
   - tarjeta de sellos llena
   - producto gratis por sellos
+  - producto no encontrado al escanear la tarjeta del cliente
+  - tarjeta no encontrada
+  - escanear tarjeta del cliente sin internet
 ---
 
 ## Antes de empezar
@@ -40,8 +43,10 @@ Es en *Cobrar*, con la venta en el carrito. El cliente enseña la tarjeta digita
 - Si el renglón dice «No aplica a esta venta», el premio no corresponde a lo que lleva el carrito.
 - La primera vez que se usa un lector nuevo puede perderse un carácter y salir «Producto no encontrado» con el código casi completo: cierra el aviso y vuelve a escanear.
 - Si dice «Esta venta ya se está cobrando por partes: su premio no se puede cambiar.», el premio ya no se cambia en esa venta.
+- Si al escanear sale «Tarjeta no encontrada» («Esa tarjeta no es de un cliente de este negocio. Puedes elegir al cliente a mano desde el carrito.»), la tarjeta es de otro negocio o ya no sirve: toca *Entendido* y elige al cliente desde el carrito (*Agregar cliente*, o *Cambiar cliente* si ya hay uno). Si sale «No se pudo leer la tarjeta», vuelve a escanearla o elígelo desde el carrito. Ninguno de los dos ofrece crear un producto: no des de alta el código de una tarjeta como producto.
 - Si al cobrar sale «Revisa el premio», el premio no quedó como lo anunció el carrito: revisa el total antes de entregar.
 
 ## Sin internet
 
+- Si al escanear la tarjeta sale «Sin conexión» («La tarjeta del cliente se lee cuando vuelva la red. Mientras, puedes elegir al cliente a mano desde el carrito.»), toca *Entendido* y elige al cliente desde el carrito (*Agregar cliente*; sin internet busca entre los clientes guardados en la tablet). La venta queda a su nombre y se cobra en efectivo como siempre. El premio no se aplica sin internet. En versiones anteriores sale «Producto no encontrado» con *Crear nuevo*: ciérralo con la X y no crees el producto.
 - Si al cobrar sale «Sin conexión: el premio necesita internet. Reintenta cuando vuelva la conexión, o quita el premio para cobrar sin él.», la venta no se cobró (tampoco en efectivo): reintenta con red o toca *Quitar premio*.
