@@ -528,6 +528,29 @@ describe('B2 Task 5: un intento anterior que pudo cobrar se recupera con su susc
     expect(mockSubCreate).not.toHaveBeenCalled()
   })
 
+  it('🔴 Codex b2-code r5 B: reto de Pro ANUAL de la v2 pendiente, un comprobante VÁLIDO de Premium anual de la v2 con prueba ($0 hoy) y un cuerpo que dice Pro y payNow, con la misma tarjeta → decide el comprobante (su plan y su «pagar hoy»): no es el mismo intento, se anula y sale el rechazo de la petición', async () => {
+    mockSubRetrieve.mockResolvedValue(retoDeLaV2())
+    pagoConEstado('requires_action')
+    const premiumConPrueba = comprobante({
+      tier: 'PREMIUM',
+      interval: 'annual',
+      precioCents: PREMIUM_A,
+      firstChargeCents: 0,
+      trialEndsAt: new Date(Date.now() + 14 * DIA),
+    })
+
+    await expect(
+      pedir({
+        interval: 'annual',
+        payNow: true,
+        offer: { kind: 'STANDARD', expectedFirstChargeCents: PRO_A_V2 },
+        quoteToken: premiumConPrueba,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'OFFER_CHANGED', details: { reason: 'QUOTE_MISMATCH', offerVersion: 2 } })
+    expect(mockVoid).toHaveBeenCalledWith('in_1')
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
   it('🔴 Codex b2-code r3 R3-1: reto de Pro anual de la v2 pendiente, un comprobante VÁLIDO de la v3 y la lectura del puntero falla → el comprobante decide (sin el puntero): se anula el reto viejo y sale el error diferido de la lectura, sin cobrar', async () => {
     // La vigente no se puede leer (una definición que no pasa el esquema); el comprobante dice su versión sin leer el puntero.
     prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv3', 3, { schemaVersion: 1, rota: true }) as never)

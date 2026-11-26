@@ -48,7 +48,15 @@ import { primerCobroCubierto } from './primerCobroPagado'
 import { basicPlanValido, fusionarV2SetupData, MENSAJE_BASIC_PLAN_INVALIDO, parseV2Plan } from './onboardingProgress.service'
 import { modalidadDePrueba, type TrialModality } from '../billing/modalidadDePrueba'
 import { resolverPrecioPorLlave } from '../billing/precioDelPlan'
-import { precioDeLaOferta, priceIdVigente, versionQueCobra, type OfertaVigente, type Periodicidad } from '../billing/planOffer'
+import {
+  codigoDelPlan,
+  precioDeLaOferta,
+  priceIdVigente,
+  versionQueCobra,
+  type OfertaVigente,
+  type Periodicidad,
+  type PlanPagado,
+} from '../billing/planOffer'
 import { basicoDeLaBienvenida } from '../billing/avisosDelBasico'
 import { DIA_MS, ofertaCambio, planFueraDeVenta, revisarComprobante } from '../billing/opcionesDeCompra'
 import { verificarCotizacion, type CotizacionFirmada } from '../billing/comprobanteDeCotizacion'
@@ -1004,19 +1012,18 @@ type LugarDelIntento = { redemptionId: string; campaignId: string; offerVersion:
  * (el reenvío del navegador tras el reto manda el suyo). `null` sin comprobante, o si no es legible para esta organización (firma,
  * alcance o vencimiento): nunca lanza. Sólo lo lee la recuperación de un reto con versión del editor (o con la oferta ilegible).
  */
-function loQueFirmaElComprobante(
-  token: unknown,
-  organizationId: string,
-  ahora: Date,
-): { versionNumber: number; interval: Periodicidad } | null {
+function loQueFirmaElComprobante(token: unknown, organizationId: string, ahora: Date): LoQueFirmaElComprobante | null {
   if (token === undefined || token === null) return null
   try {
-    const { versionNumber, interval } = verificarCotizacion(token, `org:${organizationId}`, ahora)
-    return { versionNumber, interval }
+    const { versionNumber, interval, tier, firstChargeCents } = verificarCotizacion(token, `org:${organizationId}`, ahora)
+    return { versionNumber, interval, tier, firstChargeCents }
   } catch {
     return null
   }
 }
+
+/** Lo que el reto compara del comprobante de la petición (r4 #2 y r5 B): su versión, su periodicidad, su plan y su primer cobro. */
+type LoQueFirmaElComprobante = { versionNumber: number; interval: Periodicidad; tier: PlanPagado; firstChargeCents: number }
 
 /** La periodicidad del precio de una suscripción del plan (`null` si no la trae). */
 function periodicidadDeLaSuscripcion(sub: Stripe.Subscription): 'monthly' | 'annual' | null {
@@ -1094,8 +1101,9 @@ async function anularIntento(sub: Stripe.Subscription): Promise<'DESCARTADA' | {
  *
  * 🔴 Codex b2-code #2 (r3 y r4, la regla corregida), también la versión de la oferta estándar (`planOfferVersion` de la suscripción)
  * y la periodicidad de la suscripción:
- * - con un comprobante VÁLIDO en la petición (`comprobanteDelPedido`: la versión y la periodicidad que firma el token, que no
- *   necesitan leer el puntero): decide el comprobante, aunque la lectura de la oferta falle (r4 #2: su periodicidad, no la del cuerpo);
+ * - con un comprobante VÁLIDO en la petición (`comprobanteDelPedido`: lo que firma el token, que no necesita leer el puntero):
+ *   decide el comprobante, aunque la lectura de la oferta falle: su versión, su periodicidad (r4 #2), su plan y si su primer cobro es
+ *   hoy (r5 B), nunca los del cuerpo. La tarjeta sigue siendo la del cuerpo;
  * - sin comprobante válido y con la versión del editor LEÍDA (`delEditor`): la versión vacía y la periodicidad del cuerpo; contra un
  *   reto de una versión del editor no es el mismo intento (se anula y sale el rechazo de la petición, como hoy);
  * - sin comprobante válido y con la lectura de la oferta fallida, o sin versión del editor: lo de B1, sin comparar.
@@ -1110,7 +1118,7 @@ async function resolverIntentoIncompleto(args: {
   attempt: number
   lease: Date
   delEditor: boolean
-  comprobanteDelPedido: { versionNumber: number; interval: Periodicidad } | null
+  comprobanteDelPedido: LoQueFirmaElComprobante | null
 }): Promise<{ recuperada: Stripe.Subscription | null; lugarDescartado: LugarDelIntento | null }> {
   const { input, campaign, organizationId, attempt, lease, delEditor, comprobanteDelPedido } = args
   /** La versión y la periodicidad con que se compara el reto (ver arriba); `null` = no se compara (B1). */
@@ -1119,6 +1127,13 @@ async function resolverIntentoIncompleto(args: {
     : delEditor
       ? { version: '', interval: input.interval }
       : null
+  // 🔴 Codex b2-code r5 B: con un comprobante válido, también el plan y «pagar hoy» salen de él (su primer cobro), no del cuerpo.
+  const planPedido = comprobanteDelPedido
+    ? codigoDelPlan(comprobanteDelPedido.tier)
+    : input.tier === 'PREMIUM'
+      ? 'PLAN_PREMIUM'
+      : 'PLAN_PRO'
+  const pagaHoy = comprobanteDelPedido ? comprobanteDelPedido.firstChargeCents > 0 : input.payNow
   const leer = async <T>(lectura: () => Promise<T>): Promise<T> => {
     try {
       return await lectura()
@@ -1166,7 +1181,7 @@ async function resolverIntentoIncompleto(args: {
 
   const mismoIntento =
     idDe(sub.default_payment_method) === input.paymentMethodId &&
-    sub.metadata?.featureCode === (input.tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO') &&
+    sub.metadata?.featureCode === planPedido &&
     (sub.metadata?.launchCampaignId ?? '') === (campaign?.id ?? '') &&
     // 🔴 Ruling 8: también la VERSIÓN de la oferta. Si la campaña cambió a media autorización, reanudar cobraría lo de la
     // versión vieja y el PASO 7 respondería OFFER_CHANGED (cobrado y sin acceso); así se anula y se estrena intento, y el
@@ -1175,7 +1190,7 @@ async function resolverIntentoIncompleto(args: {
     // Codex b2-code #2 (r4, la regla corregida): la versión de la oferta estándar y la periodicidad (ver arriba).
     (comparadoCon === null ||
       ((sub.metadata?.planOfferVersion ?? '') === comparadoCon.version && periodicidadDeLaSuscripcion(sub) === comparadoCon.interval)) &&
-    input.payNow
+    pagaHoy
 
   if (mismoIntento && (pi?.status === 'requires_action' || pi?.status === 'requires_confirmation')) {
     // REANUDAR: volver a confirmar un PI que espera al banco se acepta (medido), así sirve también tras una recarga.
