@@ -71,6 +71,7 @@ import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 import { comprobanteDePrueba, definicionDePrueba, idsDeLaVersion, punteroA, versionUno } from '@tests/__helpers__/planOfferFixtures'
 import type { CotizacionFirmable } from '@/services/billing/comprobanteDeCotizacion'
 import { getPlanState } from '@/services/dashboard/planState.service'
+import * as stripeService from '@/services/stripe.service'
 import logger from '@/config/logger'
 
 const app = require('../../../src/app').default
@@ -311,6 +312,60 @@ describe('GET /plan → POST /plan/checkout con la versión del editor (B2, Task
     expect(mockSubRetrieve).not.toHaveBeenCalled()
     expect(mockCreatePreview).not.toHaveBeenCalled()
     expect(mockSubList).not.toHaveBeenCalled()
+  })
+
+  it('🔴 fix round 2: GET /plan sin versión del editor (o con la oferta ilegible) lee la suscripción como hoy, retrievePlanSubscription(id) sin segundo argumento; con la v2, { conTarjeta: true }', async () => {
+    // Un negocio con Pro en Stripe, de HOY (con tarjeta, sin `sinTarjeta`).
+    prismaMock.venueFeature.findMany.mockResolvedValue([
+      { ...pruebaRegalada(-24), id: 'vf_pro', stripeSubscriptionId: 'sub_hoy', endDate: null },
+    ])
+    const periodo = Math.floor((Date.now() + 20 * DIA) / 1000)
+    mockSubRetrieve.mockResolvedValue({
+      id: 'sub_hoy',
+      object: 'subscription',
+      customer: 'cus_1',
+      status: 'active',
+      created: periodo - 60 * 86_400,
+      cancel_at_period_end: false,
+      cancel_at: null,
+      trial_end: null,
+      default_payment_method: 'pm_de_hoy',
+      metadata: {},
+      discounts: [],
+      items: {
+        data: [{ current_period_end: periodo, price: { id: 'price_key_pro_m', unit_amount: PRO_M_HOY, recurring: { interval: 'month' } } }],
+      },
+    })
+    const lecturas = jest.spyOn(stripeService, 'retrievePlanSubscription')
+    try {
+      for (const puntero of [null, punteroA('cv1', 1, versionUno()), punteroA('cv1', 1, { schemaVersion: 1, rota: true })]) {
+        prismaMock.planOfferPointer.findUnique.mockResolvedValue(puntero as never)
+        lecturas.mockClear()
+
+        const res = await leerPlan()
+
+        expect(res.status).toBe(200)
+        expect(lecturas.mock.calls).toEqual([['sub_hoy']])
+        expect(res.body.data).not.toHaveProperty('cotizacion')
+        expect(res.body.data.origin).toMatchObject({ kind: 'CLASSIC', tier: 'PRO', subscriptionId: 'sub_hoy' })
+        lecturas.mockClear()
+        expect(res.body.data).toEqual(JSON.parse(JSON.stringify(await getPlanState(venueId))))
+      }
+      // Ninguna lectura de la tarjeta ni de la vista previa: sólo la suscripción, como hoy.
+      expect(mockCustomerRetrieve).not.toHaveBeenCalled()
+      expect(mockCreatePreview).not.toHaveBeenCalled()
+
+      // Con la versión del editor, «Tu plan» pide la tarjeta de la prueba (una suscripción de hoy no lee nada más) y cotiza.
+      conVigente(2, v2())
+      lecturas.mockClear()
+      const conEditor = await leerPlan()
+      expect(conEditor.status).toBe(200)
+      expect(lecturas.mock.calls).toEqual([['sub_hoy', { conTarjeta: true }]])
+      expect(conEditor.body.data.cotizacion).toMatchObject({ versionNumber: 2 })
+      expect(mockCustomerRetrieve).not.toHaveBeenCalled()
+    } finally {
+      lecturas.mockRestore()
+    }
   })
 
   it('🔴 b2-r9 #8: GET /plan con una v1 dañada (versionQueCobra lanza) → 200 con getPlanState, sin cotizacion', async () => {

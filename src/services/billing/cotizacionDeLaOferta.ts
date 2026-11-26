@@ -267,8 +267,8 @@ async function aceptacionPendienteDe(
  *   un «$0 hoy» que ya no daría), firmadas para `venue:<id>`, sin llamadas nuevas a Stripe.
  * - `aceptacionPendiente` aunque ningún plan esté en venta en la vigente: el checkout con su `acceptanceId` honra la versión aceptada.
  *
- * Lanza si leer la oferta falla (una versión rota, una ranura sin precio): quien responde `GET /plan` usa
- * `cotizacionDeTuPlanSinRomper`.
+ * Lanza si leer la oferta falla (una versión rota, una ranura sin precio): quien responde `GET /plan` lee la versión UNA vez con
+ * `versionDeTuPlanSinRomper` y cotiza con `cotizacionDeTuPlanSinRomper`.
  */
 export async function cotizacionDeTuPlan(
   venueId: string,
@@ -277,7 +277,17 @@ export async function cotizacionDeTuPlan(
   ahora: Date = new Date(),
 ): Promise<CotizacionDeTuPlan | null> {
   const vigente = await versionQueCobra()
-  if (!vigente) return null
+  return vigente ? cotizarTuPlan(vigente, venueId, planState, sub, ahora) : null
+}
+
+/** `cotizacionDeTuPlan` con la versión del editor ya leída (fix round 2: `GET /plan` la lee una sola vez). */
+export async function cotizarTuPlan(
+  vigente: OfertaVigente,
+  venueId: string,
+  planState: PlanState,
+  sub: ResumenDeLaSuscripcionDelPlan | null,
+  ahora: Date = new Date(),
+): Promise<CotizacionDeTuPlan> {
   const estadoDeLaPrueba = await estadoDeLaPruebaSinTarjeta(planState, sub)
   const sinOpciones = estadoDeLaPrueba?.estado === 'SIN_TARJETA'
   const fila = sinOpciones ? null : await leerFilaDelPlan(venueId)
@@ -312,17 +322,35 @@ export async function cotizacionDeTuPlan(
 }
 
 /**
- * `cotizacionDeTuPlan` para `GET /plan`: leer la oferta nunca tumba «Tu plan» (b2-r9 #8). Si lanza, `null` con un aviso y la
- * respuesta es la de hoy.
+ * La versión del editor para `GET /plan`, leída UNA vez antes de todo (fix round 2): decide si «Tu plan» lee la tarjeta de la prueba
+ * (`conTarjeta`) y con qué versión cotiza. `null` sin versión del editor, o si leerla falla (b2-r9 #8: leer la oferta nunca tumba
+ * «Tu plan»; aviso y la respuesta de hoy, con las llamadas a Stripe de hoy).
+ */
+export async function versionDeTuPlanSinRomper(venueId: string): Promise<OfertaVigente | null> {
+  try {
+    return await versionQueCobra()
+  } catch (error) {
+    logger.warn('«Tu plan»: no se pudo leer la oferta; se responde lo de hoy, sin cotización', {
+      venueId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return null
+  }
+}
+
+/**
+ * `cotizarTuPlan` para `GET /plan`, con la versión que ya leyó `versionDeTuPlanSinRomper`: si la cotización lanza (una ranura sin
+ * precio), `null` con un aviso y la respuesta es la de hoy (b2-r9 #8).
  */
 export async function cotizacionDeTuPlanSinRomper(
+  vigente: OfertaVigente,
   venueId: string,
   planState: PlanState,
   sub: ResumenDeLaSuscripcionDelPlan | null,
   ahora: Date = new Date(),
 ): Promise<CotizacionDeTuPlan | null> {
   try {
-    return await cotizacionDeTuPlan(venueId, planState, sub, ahora)
+    return await cotizarTuPlan(vigente, venueId, planState, sub, ahora)
   } catch (error) {
     logger.warn('«Tu plan»: no se pudo leer la oferta; se responde lo de hoy, sin cotización', {
       venueId,
