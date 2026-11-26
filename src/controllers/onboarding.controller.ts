@@ -2039,8 +2039,9 @@ export const TarjetaDeLaPruebaSchema = z.object({
  *
  * 🔴 B2 Task 6 (§18, b2-r8): la ventana del alta, al abrirse, pregunta qué tarjeta cobraría Stripe al terminar la prueba sin
  * tarjeta: `tarjetaQueCobraria({ customer })` en ESE momento, con el cliente del negocio (`clienteDeStripeVivo`: sin id, `null` sin
- * llamar a Stripe; borrado, `null`: el alta creará otro). Sólo informa: no escribe nada y nada lo compara al cobrar. Sin versión
- * del editor no hay prueba sin tarjeta: 409 `OFFER_CHANGED` (`VERSION`, versión 1), sin llamar a Stripe.
+ * llamar a Stripe; borrado, `null`: el alta creará otro). Si Stripe no deja leerlo, 503 `TARJETA_NO_LEIDA` (nunca `null`). Sólo
+ * informa: no escribe nada y nada lo compara al cobrar. Sin versión del editor no hay prueba sin tarjeta: 409 `OFFER_CHANGED`
+ * (`VERSION`, versión 1), sin llamar a Stripe.
  */
 export async function tarjetaDeLaPruebaController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -2063,16 +2064,19 @@ export async function tarjetaDeLaPruebaController(req: Request, res: Response, n
       select: { stripeCustomerId: true },
       orderBy: { createdAt: 'asc' },
     })
-    // Sólo informa (§18): si Stripe no deja leer el cliente o su tarjeta (error o tiempo agotado), «sin tarjeta que decir», nunca un 500.
-    let tarjeta: Awaited<ReturnType<typeof tarjetaQueCobraria>> = null
+    // Sólo informa (§18). `null` («sin tarjeta») sólo sin cliente, con el cliente borrado o sin tarjeta. 🔴 Codex b2-code #5: si Stripe
+    // no deja leer el cliente o su tarjeta (error o tiempo agotado), 503 TARJETA_NO_LEIDA: «no pude ver» nunca es «sin tarjeta» (el
+    // cliente puede tener una guardada que Stripe cobrará). El DASHBOARD lo trata como «no se sabe» y deja el botón apagado.
+    let tarjeta: Awaited<ReturnType<typeof tarjetaQueCobraria>>
     try {
       const cliente = await clienteDeStripeVivo(negocio?.stripeCustomerId ?? null)
       tarjeta = cliente ? await tarjetaQueCobraria({ customer: cliente }) : null
     } catch (error) {
-      logger.warn('tarjeta-de-la-prueba: no se pudo leer en Stripe qué tarjeta cobraría; se responde sin tarjeta', {
+      logger.warn('tarjeta-de-la-prueba: no se pudo leer en Stripe qué tarjeta cobraría; se responde 503', {
         organizationId,
         error: error instanceof Error ? error.message : String(error),
       })
+      throw new AppError('No pudimos revisar tu cuenta de Stripe. Intenta en unos minutos.', 503, true, 'TARJETA_NO_LEIDA')
     }
     res
       .status(200)

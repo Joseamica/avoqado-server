@@ -7,6 +7,7 @@
   🔴 Lo que fija:
   - con una versión del editor, la tarjeta sale de `tarjetaQueCobraria` en ESE momento (la jerarquía de Stripe);
   - sin cliente de Stripe, o con uno que Stripe ya borró, `null` («sin tarjeta»); sin id, sin llamar a Stripe;
+  - si Stripe no deja leer el cliente o la tarjeta (error o tiempo agotado), 503 TARJETA_NO_LEIDA: nunca «sin tarjeta» (Codex b2-code #5);
   - sólo informa: no escribe nada (un cliente borrado lo cambia el alta, no esta lectura);
   - sin versión del editor, 409 OFFER_CHANGED reason VERSION con offerVersion 1 (Ruling P4), sin llamar a Stripe.
 
@@ -172,7 +173,7 @@ describe('GET …/v2/tarjeta-de-la-prueba', () => {
     }
   })
 
-  it('🔴 fix round 2: si Stripe no deja leer el cliente o su tarjeta (tiempo agotado, un 500) → { tarjeta: null } con un aviso en el log, nunca un 500; sin escribir nada', async () => {
+  it('🔴 Codex b2-code #5 (corrige el fix round 2): si Stripe no deja leer el cliente o su tarjeta (tiempo agotado, un 500) → 503 TARJETA_NO_LEIDA con un aviso en el log, nunca «sin tarjeta» ni un 500; sin escribir nada', async () => {
     conVigente()
     for (const falla of [
       () =>
@@ -193,8 +194,13 @@ describe('GET …/v2/tarjeta-de-la-prueba', () => {
 
       const res = await leer()
 
-      expect(res.status).toBe(200)
-      expect(res.body).toEqual({ success: true, data: { tarjeta: null } })
+      // «No pude ver» nunca es «sin tarjeta»: el cliente puede tener una guardada que Stripe cobrará al terminar la prueba.
+      expect(res.status).toBe(503)
+      expect(res.body).toMatchObject({
+        code: 'TARJETA_NO_LEIDA',
+        message: 'No pudimos revisar tu cuenta de Stripe. Intenta en unos minutos.',
+      })
+      expect(res.body).not.toHaveProperty('data')
       expect(logger.warn).toHaveBeenCalledWith(
         expect.stringContaining('tarjeta-de-la-prueba: no se pudo leer en Stripe'),
         expect.objectContaining({ organizationId: ORG }),
