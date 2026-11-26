@@ -47,7 +47,13 @@
       "cita": "const val IMPRIMIR = \"Imprimir\""
     }
   ],
-  "permisos": [],
+  "permisos": [
+    {
+      "permiso": "payments:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1130
+    }
+  ],
   "plan": [],
   "sinInternet": [],
   "rutas": [

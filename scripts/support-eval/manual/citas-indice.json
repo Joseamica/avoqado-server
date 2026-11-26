@@ -4831,6 +4831,10 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/recibos/imprimir-y-reimprimir-recibo",
+        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
         "pagina": "android/reembolsos/hacer-cambio",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -4980,6 +4984,10 @@
       },
       {
         "pagina": "windows/personal/checar-entrada-y-salida",
+        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/recibos/imprimir-y-reimprimir-recibo",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {

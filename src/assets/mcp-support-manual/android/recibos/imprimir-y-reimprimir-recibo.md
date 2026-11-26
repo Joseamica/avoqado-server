@@ -27,4 +27,4 @@ keywords:
 
 - Si *Imprimir recibo* dice *Sin impresora · Configurar*, esta caja no tiene impresora de recibos: tócalo y luego *Configurar impresora*.
 - Si sale «La impresora no tiene papel», pon papel y vuelve a imprimir.
-- *Ventas* sólo les sale a cajero, gerente, administrador y dueño: si no la ves, pide que reimprima el recibo alguien con uno de esos puestos.
+- *Ventas* les sale a cajero, gerente, administrador y dueño, y abrir una venta pide el permiso de ver pagos: si no la ves o no abre, pide que reimprima el recibo alguien que sí pueda.

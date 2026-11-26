@@ -241,7 +241,7 @@
       "gateKind": "FEATURE"
     },
     "android/recibos/imprimir-y-reimprimir-recibo": {
-      "sha256": "76449e08ddca4d28bcef299f2ce767392176a2841a3d0392378f66dbb281e3bb",
+      "sha256": "aec3465c5b9b380523fd47dd0c51fdb7c4123a550fd2a884fe22c1bcf63f6385",
       "requiredPermissions": []
     },
     "android/reembolsos/hacer-cambio": {
@@ -1534,7 +1534,7 @@
       "gateKind": "FEATURE"
     },
     "windows/recibos/imprimir-y-reimprimir-recibo": {
-      "sha256": "f203012c6f83243cd150af7c9a4fcabfef7a5b5d8583ffdcee8faa31c0ea9d26",
+      "sha256": "9ea70181b79b7ba1594b2036065bca8ae3672bfbb3769cdb84858633347fa2bf",
       "requiredPermissions": []
     },
     "windows/reembolsos/hacer-cambio": {
