@@ -1,0 +1,245 @@
+{
+  "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee",
+  "version": "2.25.58-escritorio",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 73,
+      "cita": "\"Esta computadora tarda en dibujar la pantalla. El modo rápido puede ayudar.\","
+    },
+    {
+      "paso": 1,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 76,
+      "cita": "Boton(\"Activar modo rápido\") { noSeGuardo = !DibujoDeLaCaja.elegir(Modo.RAPIDO) }"
+    },
+    {
+      "paso": 1,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 77,
+      "cita": "TextButton(onClick = { DibujoDeLaCaja.callarAviso() }, modifier = SIN_FOCO) { Text(\"Ahora no\") }"
+    },
+    {
+      "paso": 1,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/ModoDeDibujo.kt",
+      "linea": 82,
+      "cita": "fun alCallarAviso(a: Ajuste): Ajuste = a.copy(sinAviso = true, intentando = false)"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 57,
+      "cita": "label = \"Más\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 803,
+      "cita": "delEscritorio.map { MenuEntry(icon = it.icono, label = it.titulo, onClick = it.alTocar, subtitle = it.valor) }"
+    },
+    {
+      "paso": 1,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 124,
+      "cita": "RenglonDeEscritorio(Icons.Outlined.Speed, \"Modo de dibujo\", nombre(DibujoDeLaCaja.estado.value.modo)) { verModo = true }"
+    },
+    {
+      "paso": 1,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 109,
+      "cita": "Modo.RAPIDO -> \"Modo rápido\""
+    },
+    {
+      "paso": 2,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 61,
+      "cita": "recienElegido && e.aplicaAlReabrir -> Banda(\"Listo. Cierra y vuelve a abrir el POS para aplicarlo.\") {"
+    },
+    {
+      "paso": 2,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 62,
+      "cita": "Boton(\"Entendido\", DibujoDeLaCaja::callarConfirmacion)"
+    },
+    {
+      "paso": 2,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/DibujoDeLaCaja.kt",
+      "linea": 135,
+      "cita": "_recienElegido.value = true"
+    },
+    {
+      "paso": 3,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 142,
+      "cita": "\"video antigua; en una moderna puede ir más lento. Se aplica al volver a abrir el POS.\","
+    },
+    {
+      "paso": 3,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/DibujoDeLaCaja.kt",
+      "linea": 89,
+      "cita": "if (noFijar) Log.i(TAG, \"habría fijado ${ModoDeDibujo.MOTOR_RAPIDO}\") else fijar(ModoDeDibujo.MOTOR_RAPIDO)"
+    },
+    {
+      "paso": 3,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/ModoDeDibujo.kt",
+      "linea": 59,
+      "cita": "else -> AlArrancar(a.copy(intentando = true), fijar = true)"
+    },
+    {
+      "paso": 4,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 126,
+      "cita": "RenglonDeEscritorio(Icons.Outlined.Computer, \"Diagnóstico de esta computadora\", null) { verDiagnostico = true },"
+    },
+    {
+      "paso": 4,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/diagnostico/Veredicto.kt",
+      "linea": 109,
+      "cita": "Rendimiento.FLUIDA -> Punto(\"Gráficos\", Nivel.BIEN, \"usa la tarjeta de video ($medido).\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/diagnostico/Veredicto.kt",
+      "linea": 110,
+      "cita": "Rendimiento.LIGERA -> Punto(\"Gráficos\", Nivel.LENTA, \"$medido: modo rápido. La app dibuja sin la tarjeta de video y con menos animaciones.\")"
+    },
+    {
+      "paso": 5,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 108,
+      "cita": "Modo.AUTO -> \"Automático\""
+    },
+    {
+      "paso": 5,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 168,
+      "cita": "e.aplicaAlReabrir -> \"Se aplica al volver a abrir el POS.\""
+    },
+    {
+      "paso": 5,
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/ModoDeDibujo.kt",
+      "linea": 79,
+      "cita": "fun alElegir(a: Ajuste, modo: Modo): Ajuste = a.copy(modo = modo, intentando = false, fallo = false, sinAviso = modo == Modo.AUTO)"
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Cambiar el modo de dibujo no necesita internet: se guarda en dibujo.json de la computadora",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/ArchivoDeDibujo.kt",
+      "linea": 38
+    },
+    {
+      "afirmacion": "El panel se entera por la cabecera x-device-diagnostics del sondeo que el POS ya hace: sin red no llega hasta que vuelve",
+      "archivo": "app/src/main/java/com/avoqado/pos/customerdisplay/DisplayModeRemoteRepository.kt",
+      "linea": 213
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "WINDOWS: la banda va en su propio renglón arriba de la app",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt",
+      "linea": 95
+    },
+    {
+      "ruta": "Sólo se ofrece el modo rápido si la PC es lenta, no usa DIRECT3D (Direct3D 12 de Skiko), no está fijada a mano y está en automático",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/ModoDeDibujo.kt",
+      "linea": 101
+    },
+    {
+      "ruta": "Lento = el primer ciclo de dibujo tarda más de 4 s",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/Umbrales.kt",
+      "linea": 6
+    },
+    {
+      "ruta": "Problema: «El modo rápido no funcionó en esta computadora. La app regresó al modo automático.»",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 64
+    },
+    {
+      "ruta": "Modo seguro: si la apertura en modo rápido no pintó, la siguiente regresa a automático con fallo",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/ModoDeDibujo.kt",
+      "linea": 57
+    },
+    {
+      "ruta": "Problema: «Esta computadora tarda en dibujar la pantalla, aun en modo rápido. …»",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 68
+    },
+    {
+      "ruta": "Diagnóstico: la memoria RAM con lo recomendado",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/diagnostico/Veredicto.kt",
+      "linea": 74
+    },
+    {
+      "ruta": "Diagnóstico: el procesador con lo recomendado",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/diagnostico/Veredicto.kt",
+      "linea": 84
+    },
+    {
+      "ruta": "Problema: «Fijado a mano en esta computadora…» (SKIKO_RENDER_API o -Dskiko.renderApi mandan sobre la app)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 169
+    },
+    {
+      "ruta": "Con el ajuste a mano, la app no fija ningún motor al abrir",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/ModoDeDibujo.kt",
+      "linea": 58
+    },
+    {
+      "ruta": "Problema: con el apagador de soporte no sale «Modo de dibujo»; el diagnóstico sí",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 125
+    },
+    {
+      "ruta": "Qué esperar: la explicación de la hoja «Modo de dibujo» (sin la tarjeta de video, menos animaciones; en una moderna puede ir más lento)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt",
+      "linea": 141
+    },
+    {
+      "ruta": "Qué esperar: el modo de dibujo sólo lee y escribe dibujo.json y nunca impide abrir la caja (no toca ventas, mesas ni la cola sin red)",
+      "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/DibujoDeLaCaja.kt",
+      "linea": 10
+    },
+    {
+      "ruta": "Panel: «Dispositivos» en el menú, con permiso tpv:read",
+      "archivo": "avoqado-web-dashboard/src/components/Sidebar/app-sidebar.tsx",
+      "linea": 1230
+    },
+    {
+      "ruta": "Panel: «Rendimiento» de la página de la computadora",
+      "archivo": "avoqado-web-dashboard/src/locales/es/tpv.json",
+      "linea": 1078
+    },
+    {
+      "ruta": "Panel: «Fluida», «Modo rápido», «No alcanza», «Sin medir todavía»",
+      "archivo": "avoqado-web-dashboard/src/locales/es/tpv.json",
+      "linea": 1090
+    },
+    {
+      "ruta": "Panel: «Modo de dibujo» sólo se ve: «Se cambia en la computadora: en el aviso «Activar modo rápido» o en Más › Modo de dibujo.»",
+      "archivo": "avoqado-web-dashboard/src/locales/es/tpv.json",
+      "linea": 1106
+    },
+    {
+      "ruta": "Servidor: la ficha de UN aparato trae el reporte de dibujo (omitido en las listas)",
+      "archivo": "avoqado-server/src/services/dashboard/tpv.dashboard.service.ts",
+      "linea": 273
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": [],
+    "nota": "El ciclo (aviso, botón, confirmación, reabrir en SOFTWARE_FAST, regreso a automático, modo seguro y sin red) se recorrió en el laboratorio de WINDOWS con una versión anterior de la rama (docs/audit/2026-11-24-pos-windows-pcs-viejas/mediciones.md del workspace), no con 8f540228. Falta recorrerlo con la versión que salga."
+  },
+  "codex": {
+    "lote": 13,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

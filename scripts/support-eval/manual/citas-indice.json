@@ -705,6 +705,12 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/customerdisplay/DisplayModeRemoteRepository.kt": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/customers/data/CustomersRepository.kt": [
       {
         "pagina": "android/clientes/agregar-cliente-a-la-venta",
@@ -1757,6 +1763,10 @@
       {
         "pagina": "android/reservas/lista-de-espera",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
       },
       {
         "pagina": "windows/ayuda/ver-version-de-la-app",
@@ -3871,6 +3881,10 @@
         "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
       },
       {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      },
+      {
         "pagina": "windows/ayuda/ver-version-de-la-app",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
@@ -5069,6 +5083,12 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:avoqado-server/src/services/dashboard/tpv.dashboard.service.ts": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      }
+    ],
     "avoqado-android:avoqado-server/src/services/kds/kitchenDisplayStations.ts": [
       {
         "pagina": "android/impresoras/pantalla-de-cocina-sin-internet",
@@ -5273,6 +5293,10 @@
     ],
     "avoqado-android:avoqado-web-dashboard/src/components/Sidebar/app-sidebar.tsx": [
       {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      },
+      {
         "pagina": "windows/maquina-de-efectivo/esperando-a-la-maquina",
         "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       }
@@ -5295,6 +5319,12 @@
       {
         "pagina": "windows/mesas/tiempos-cocina-y-liberar",
         "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
+    "avoqado-android:avoqado-web-dashboard/src/locales/es/tpv.json": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
       }
     ],
     "avoqado-android:avoqado-web-dashboard/src/pages/Settings/ServiceCourses.tsx": [
@@ -5515,6 +5545,10 @@
     ],
     "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt": [
       {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      },
+      {
         "pagina": "windows/caja/abrir-y-cerrar-caja",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
@@ -5625,6 +5659,42 @@
       {
         "pagina": "windows/reembolsos/hacer-cambio",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      }
+    ],
+    "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/diagnostico/Veredicto.kt": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      }
+    ],
+    "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/ArchivoDeDibujo.kt": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      }
+    ],
+    "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      }
+    ],
+    "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/DibujoDeLaCaja.kt": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      }
+    ],
+    "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/ModoDeDibujo.kt": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      }
+    ],
+    "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/Umbrales.kt": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
       }
     ],
     "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/impresion/ImpresorasDeWindows.kt": [
