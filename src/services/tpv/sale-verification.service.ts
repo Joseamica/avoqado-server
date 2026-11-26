@@ -57,7 +57,8 @@ interface SaleVerificationResponse {
 }
 
 /** Al promotor sólo se le avisa que está repetido; la lista de choques es del back-office. */
-export type TerminalNumberAlert = 'LINKING_DUPLICATE' | 'PORTED_DUPLICATE'
+/** El portado puede repetirse (back-office, 26-nov): sólo la vinculación sale repetida. */
+export type TerminalNumberAlert = 'LINKING_DUPLICATE'
 
 interface PendingVerificationResponse {
   id: string
@@ -529,7 +530,6 @@ async function toTerminalDetails(orgId: string, rows: TerminalRow[]): Promise<Ve
     const d = duplicates.get(v.id)
     const alerts: TerminalNumberAlert[] = []
     if (d?.linking) alerts.push('LINKING_DUPLICATE')
-    if (d?.ported) alerts.push('PORTED_DUPLICATE')
     return {
       id: v.id,
       paymentId: v.paymentId,
@@ -657,7 +657,7 @@ export async function checkTerminalNumber(p: {
     iccid = own.serialNumbers[0]
   }
 
-  return { duplicate: await isNumberDuplicate(p.orgId, digits, { verificationId: p.verificationId, iccid }) }
+  return { duplicate: await isNumberDuplicate(p.orgId, digits, { verificationId: p.verificationId, iccid }, p.kind) }
 }
 
 // ============================================================
@@ -863,7 +863,7 @@ async function duplicatesOf(
 ): Promise<Pick<ProofOfSaleResult, 'linkingDuplicate' | 'portedDuplicate'>> {
   const check = (field: NumberField, n: string | null) =>
     isAccepted(outcomes[field]) && n
-      ? isNumberDuplicate(orgId, n, { verificationId: v.id, iccid: v.serialNumbers[0] })
+      ? isNumberDuplicate(orgId, n, { verificationId: v.id, iccid: v.serialNumbers[0] }, field)
       : Promise.resolve(undefined)
   const [linkingDuplicate, portedDuplicate] = await Promise.all([check('linking', v.linkingNumber), check('ported', v.portedNumber)])
   return {

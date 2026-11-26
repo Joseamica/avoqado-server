@@ -411,10 +411,7 @@ export async function listOrgSaleVerifications(orgId: string, filters: OrgSaleLi
             photos: v.photos,
             isExternalSale,
             linkingDuplicate: !!dup?.linking,
-            portedDuplicate: !!dup?.ported,
-          }).map(code =>
-            code === 'LINKING_DUPLICATE' ? { code, ...dup!.linking! } : code === 'PORTED_DUPLICATE' ? { code, ...dup!.ported! } : { code },
-          )
+          }).map(code => (code === 'LINKING_DUPLICATE' ? { code, ...dup!.linking! } : { code }))
         : []
 
     return {

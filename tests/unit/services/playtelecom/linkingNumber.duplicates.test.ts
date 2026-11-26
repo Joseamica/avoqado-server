@@ -234,24 +234,68 @@ describe('findDuplicatesForSales', () => {
   })
 })
 
+// Pedido del back-office (26-nov): «puede existir un número de portabilidad dos veces […] NO aplica para número de
+// vinculación». El portado ya no se marca repetido; la vinculación sí, también contra el portado de otra venta.
+const range2 = { from: new Date('2026-10-01T06:00:00Z'), to: new Date('2026-11-01T05:59:59.999Z') }
+describe('el número portado puede repetirse', () => {
+  const P = '4441234567'
+
+  it('un portado que ya está en otra venta no se marca repetido, y no se busca', async () => {
+    const out = await findDuplicatesForSales(ORG, [sale({ key: 'x', verificationId: 'x', iccid: 'I1', portedNumber: P })])
+
+    expect(out.get('x')).toEqual({})
+    expect(queryRaw).not.toHaveBeenCalled()
+    expect(histFindMany).not.toHaveBeenCalled()
+  })
+
+  it('con vinculación y portado, sólo busca la vinculación (contra los dos campos de las otras ventas)', async () => {
+    queryRaw.mockResolvedValue([saleRow(N, 'x', 2), saleRow(N, 'y', 2)])
+
+    const out = await findDuplicatesForSales(ORG, [sale({ key: 'x', verificationId: 'x', iccid: 'I1', linkingNumber: N, portedNumber: P })])
+
+    expect(out.get('x')?.linking?.total).toBe(1)
+    expect(out.get('x')?.ported).toBeUndefined()
+    expect(valuesOf()).toContainEqual([N])
+    expect(JSON.stringify(valuesOf())).not.toContain(P)
+    expect(sqlOf()).toContain('sv."portedNumber" = ANY(')
+    expect(histFindMany).toHaveBeenCalledWith(expect.objectContaining({ where: { organizationId: ORG, OR: [{ iccid: 'I1', number: N }] } }))
+  })
+
+  it('la revisión de la terminal de un portado nunca sale repetido, y no consulta', async () => {
+    await expect(isNumberDuplicate(ORG, P, { verificationId: 'x', iccid: 'I1' }, 'ported')).resolves.toBe(false)
+    expect(queryRaw).not.toHaveBeenCalled()
+  })
+
+  it('el filtro «repetido» sólo mira la vinculación de las ventas del rango', async () => {
+    queryRaw.mockResolvedValue([])
+    await findVerificationIdsWithNumberAlert(ORG, 'duplicate', range2)
+    const sql = sqlOf()
+    expect(sql).toContain('"linkingNumber" IN (SELECT n FROM dup)')
+    expect(sql).not.toContain('"portedNumber" IN (SELECT n FROM dup)')
+    expect(sql).not.toContain('SELECT "portedNumber" FROM in_range')
+    // El portado de OTRA venta sigue contando contra una vinculación.
+    expect(sql).toContain('sv."portedNumber" = ANY((SELECT a FROM range_nums)::text[])')
+  })
+})
+
 describe('isNumberDuplicate', () => {
   it('no se marca a sí misma y sí marca a otra venta', async () => {
     queryRaw.mockResolvedValue([saleRow(N, 'x', 1)])
-    await expect(isNumberDuplicate(ORG, N, { verificationId: 'x' })).resolves.toBe(false)
+    await expect(isNumberDuplicate(ORG, N, { verificationId: 'x' }, 'linking')).resolves.toBe(false)
 
     queryRaw.mockResolvedValue([saleRow(N, 'x', 2), saleRow(N, 'y', 2)])
-    await expect(isNumberDuplicate(ORG, N, { verificationId: 'x' })).resolves.toBe(true)
+    await expect(isNumberDuplicate(ORG, N, { verificationId: 'x' }, 'linking')).resolves.toBe(true)
   })
 
   it('un número nuevo (aún no guardado en ella) que ya tiene muchas ventas sale repetido', async () => {
     queryRaw.mockResolvedValue([1, 2, 3, 4, 5].map(i => saleRow(N, `o${i}`, 6)))
-    await expect(isNumberDuplicate(ORG, N, { verificationId: 'x', iccid: 'I1' })).resolves.toBe(true)
+    await expect(isNumberDuplicate(ORG, N, { verificationId: 'x', iccid: 'I1' }, 'linking')).resolves.toBe(true)
   })
 
   it('el histórico de su mismo ICCID no la marca', async () => {
     queryRaw.mockResolvedValue([histRow(N, 'I1', 1)])
     histFindMany.mockResolvedValue([{ iccid: 'I1', number: N }])
-    await expect(isNumberDuplicate(ORG, N, { iccid: 'I1' })).resolves.toBe(false)
+    await expect(isNumberDuplicate(ORG, N, { iccid: 'I1' }, 'linking')).resolves.toBe(false)
   })
 })
 

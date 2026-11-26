@@ -282,30 +282,38 @@ describe('bulkManualSales — vista previa con el interruptor prendido', () => {
     ])
   })
 
-  it('marca portedDuplicate contra la organización', async () => {
-    findDuplicatesMock.mockImplementation(async () => new Map([['0', { ported: { total: 1, matches: [] } }]]))
+  it('un portado que ya está en la organización no se marca repetido (puede repetirse, back-office, 26-nov)', async () => {
+    findDuplicatesMock.mockImplementation(async () => new Map([['0', {}]]))
     const result = await bulkManualSales(ORG_ID, ACTOR, [porta()], false, ON)
-    expect(result.crear[0]).toMatchObject({ portedDuplicate: true })
+    expect(result.crear[0]).not.toHaveProperty('portedDuplicate')
     expect(result.crear[0]).not.toHaveProperty('linkingDuplicate')
   })
 
-  it('marca como repetidas dos filas del mismo archivo con el mismo número (vinculación o portado)', async () => {
+  it('marca como repetidas dos filas del mismo archivo con la misma vinculación; el portado repetido no se marca', async () => {
     const rows = [
       row({ iccid: 'ICCID-A', linkingNumber: '5511111111' }),
       row({ iccid: 'ICCID-B', linkingNumber: '55 1111 1111' }),
       porta({ iccid: 'ICCID-C', linkingNumber: '5533333333', portedNumber: '5522222222' }),
       row({ iccid: 'ICCID-D', linkingNumber: '5522222222' }),
       row({ iccid: 'ICCID-E', linkingNumber: '5544444444' }),
+      porta({ iccid: 'ICCID-F', linkingNumber: '5566666666', portedNumber: '5577777777' }),
+      porta({ iccid: 'ICCID-G', linkingNumber: '5588888888', portedNumber: '5577777777' }),
     ]
 
     const result = await bulkManualSales(ORG_ID, ACTOR, rows, false, ON)
 
-    expect(result.crear).toHaveLength(5)
+    expect(result.crear).toHaveLength(7)
     expect(result.crear[0]).toMatchObject({ linkingDuplicate: true })
     expect(result.crear[1]).toMatchObject({ linkingDuplicate: true })
-    expect(result.crear[2]).toMatchObject({ portedDuplicate: true })
+    // C trae como portado la vinculación de D: D sale repetida; el portado de C no se marca.
+    expect(result.crear[2]).not.toHaveProperty('portedDuplicate')
     expect(result.crear[2]).not.toHaveProperty('linkingDuplicate')
     expect(result.crear[3]).toMatchObject({ linkingDuplicate: true })
+    // F y G portan el mismo número: ninguna se marca.
+    for (const i of [5, 6]) {
+      expect(result.crear[i]).not.toHaveProperty('portedDuplicate')
+      expect(result.crear[i]).not.toHaveProperty('linkingDuplicate')
+    }
     expect(result.crear[4]).not.toHaveProperty('linkingDuplicate')
     expect(result.crear[4]).not.toHaveProperty('portedDuplicate')
     expect(findDuplicatesMock).toHaveBeenCalledTimes(1)
