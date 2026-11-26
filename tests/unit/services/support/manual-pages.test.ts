@@ -14,6 +14,7 @@ import {
   SUPPORT_MANUAL_DIRECTORY,
   type LibrarySource,
 } from '@/services/support/libraryFiles'
+import { buildManifest } from '../../../../scripts/support-eval/aprobar-biblioteca'
 import {
   MANUAL_EVAL_DIRECTORY,
   readInventory,
@@ -101,8 +102,12 @@ function manualProblems(manualDir: string, evalRoot: string): Problems {
     // pasos a quien no puede hacerlos sin decirle que lo pida (el plan o el ajuste no dicen quién puede). La que todavía no
     // entra (le falta su prueba) o está retirada se decide al probarla.
     const loads = sources.includes(page) && !retired.has(id)
-    if (page.money && loads && !page.gates?.requiredPermissions.length && !PERMISO_EN_OTRA_RAMA.has(id))
+    const withPermission = !!page.gates?.requiredPermissions.length
+    if (page.money && loads && !withPermission && !PERMISO_EN_OTRA_RAMA.has(id))
       problems.permissions.push(`${id}: página de dinero sin candado de permiso`)
+    // La excepción caduca sola: en cuanto la página trae su permiso, su renglón sobra y se borra.
+    if (PERMISO_EN_OTRA_RAMA.has(id) && withPermission)
+      problems.permissions.push(`${id}: ya trae su permiso; borra su renglón de PERMISO_EN_OTRA_RAMA`)
     const text = `${page.title}\n${page.summary}\n${page.body}`
     if (CONTACT.some(re => re.test(text)) || hasPhone(text)) problems.contact.push(`${id}: trae un enlace, correo o teléfono`)
     if (steps.length > 6 || steps.some(s => s.length > 220) || page.summary.length > 160)
@@ -143,6 +148,12 @@ describe('manual pages (src/assets/mcp-support-manual)', () => {
   })
   it('every manual page is referenced by an inventory row', () => {
     expect(real.inventory).toEqual([])
+  })
+  // hz:be99f328:D44: el bot avisa con los candados del MANIFIESTO, no con los del archivo. Regenerarlo no cambia nada: una unión
+  // que deja una entrada con el hash al día pero sin el permiso de su frontmatter se cae aquí, no en la firma.
+  it('the committed manifest carries the same candados and hashes that regenerating it would write', () => {
+    const manifest = JSON.parse(fs.readFileSync(SUPPORT_LIBRARY_MANIFEST, 'utf8'))
+    expect(buildManifest(manifest, readLibrarySources()).guides).toEqual(manifest.guides)
   })
 })
 
