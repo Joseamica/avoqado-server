@@ -79,7 +79,7 @@ async function resolveUnit(venueId: string, itemType: WasteItemType, itemId: str
 
   if (itemType === 'RAW_MATERIAL') {
     const item = await prisma.rawMaterial.findFirst({ where: { id: itemId, venueId }, select: { unit: true } })
-    if (!item) throw new AppError(`Raw material with ID ${itemId} not found`, 404)
+    if (!item) throw new AppError('No se encontró este insumo: pudo borrarse o archivarse. Actualiza la pantalla.', 404)
     return item.unit
   }
 

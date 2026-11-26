@@ -416,7 +416,7 @@
       "nombre": "Recompensas",
       "origen": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt:2531",
       "quienLaVe": "Quien ve Mesas: rol WAITER, CASHIER, MANAGER, ADMIN, OWNER o SUPERADMIN (RoleManager.canAccessPOS, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:55-56), aparato en modo Restaurante (app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt:38) y plan TABLE_SERVICE (Pro) (app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt:143). Quien abre la mesa, con un cliente con puntos en la cuenta (app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt:2532); canjea con «Canjear» (:3347).",
-      "paginas": []
+      "paginas": ["windows/lealtad/canjear-puntos"]
     },
     {
       "id": "accion:nav:\"table-order\"/aplicar-cobro-por-servicio",

@@ -30,6 +30,9 @@ export const DATABASE_JOB_SCHEDULES = {
   // Lealtad post-cobro durable. Cada 5 min en :41, lejos del reconciliador de
   // caja (:02), inventario (:44) y calendarios (:26/:56). Máximo 25 órdenes.
   loyaltyReconciliation: '41 */5 * * * *',
+  // D27: vencimiento de puntos por inactividad. Cada hora en el minuto 19, segundo :03 (libre en todo el archivo; lejos del :00 de la
+  // estampida y de los */5 y */10). Cada negocio se procesa una vez por día local; las demás vueltas sólo leen la lista de configs.
+  loyaltyPointsExpiry: '3 19 * * * *',
   paymentEffects: '16,46 * * * * *',
   cancelOrderEffects: '24,54 * * * * *',
   // S4 (checkpoint 1 del webhook): worker propio de eventos PENDING de AngelPay. Segundos :13/:43, huecos libres

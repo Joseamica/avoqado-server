@@ -268,20 +268,72 @@ export async function activateReferralProgram(input: ActivateInput): Promise<voi
   }
 
   // Step 2 — resolve the prefix (cheap) and fire the backfill in the background.
-  let venuePrefix: string | null | undefined = config.codePrefix
-  if (!venuePrefix) {
-    const venue = await prisma.venue.findUnique({
-      where: { id: input.venueId },
-      select: { slug: true },
-    })
-    venuePrefix = venue?.slug ?? input.venueId.slice(-8)
-  }
+  startCodeBackfill(input.venueId, await resolveCodePrefix(input.venueId, config.codePrefix))
+}
 
-  // Fire-and-forget: activation returns immediately; codes populate in the
-  // background. NOT awaited so a large venue can never time out the request.
-  void backfillLegacyReferralCodes(input.venueId, venuePrefix as string).catch(err => {
-    logger.error('[referral] legacy code backfill failed', { venueId: input.venueId, err })
+/** The prefix for new referral codes: the configured one, else the venue slug. */
+async function resolveCodePrefix(venueId: string, codePrefix: string | null | undefined): Promise<string> {
+  if (codePrefix) return codePrefix
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { slug: true },
   })
+  return venue?.slug ?? venueId.slice(-8)
+}
+
+/** Fire-and-forget: NOT awaited, so a large venue can never time out the request. */
+function startCodeBackfill(venueId: string, venuePrefix: string): void {
+  void backfillLegacyReferralCodes(venueId, venuePrefix).catch(err => {
+    logger.error('[referral] legacy code backfill failed', { venueId, err })
+  })
+}
+
+/**
+ * Turn a PAUSED program back on exactly as it was saved (D28, hz:be99f328:D28).
+ *
+ * `activateReferralProgram` rewrites the five scalar settings (and, with `tiers`, every level's rewards): the dashboard used
+ * to reactivate through it with factory defaults and a percent coupon per level, so a free-product reward became a coupon.
+ * This only flips `active` (and stamps `activatedAt`): premio al referido, niveles, vigencia and `ReferralTierReward` rows stay
+ * untouched, and a stored config that today's validators would reject (e.g. thresholds edited one by one) still reactivates.
+ *
+ * CAS on `active: false`: two tabs (or the dashboard and the MCP) reactivating at once flip it once, log once and stamp
+ * `activatedAt` once. Customers created while paused got no code (the creation hook only runs while active), so the code
+ * backfill runs again, same as on activation.
+ */
+export async function reactivateReferralProgram(input: { venueId: string; staffId?: string }): Promise<{ reactivated: boolean }> {
+  // Every read that can fail happens BEFORE writing: a failed lookup leaves the program paused and the caller can retry,
+  // never «error» with the program already on, nor «ok» with nobody handing out the codes (Codex r2 #5 / r3 #5).
+  const current = await prisma.referralProgramConfig.findUnique({
+    where: { venueId: input.venueId },
+    select: { id: true, codePrefix: true },
+  })
+  if (!current) throw new Error('REFERRAL_PROGRAM_NOT_CONFIGURED')
+  const venuePrefix = await resolveCodePrefix(input.venueId, current.codePrefix)
+
+  const reactivated = await prisma.$transaction(async (tx: any) => {
+    const { count } = await tx.referralProgramConfig.updateMany({
+      where: { venueId: input.venueId, active: false },
+      data: { active: true, activatedAt: new Date() },
+    })
+    // Already active (another tab or the MCP won): no write, no log.
+    if (count === 0) return false
+
+    await tx.activityLog.create({
+      data: {
+        staffId: input.staffId ?? null,
+        venueId: input.venueId,
+        action: 'REFERRAL_PROGRAM_ACTIVATED',
+        entity: 'ReferralProgramConfig',
+        entityId: current.id,
+        data: { reactivated: true, codePrefixUsed: current.codePrefix ?? null, backfillScheduled: true },
+      },
+    })
+    return true
+  })
+
+  // Idempotent, so it also runs when another session already reactivated: a retry finishes codes an earlier run missed.
+  startCodeBackfill(input.venueId, venuePrefix)
+  return { reactivated }
 }
 
 /**
@@ -315,10 +367,13 @@ export async function backfillLegacyReferralCodes(venueId: string, venuePrefix: 
         venuePrefix,
         customerName: composeName(c.firstName, c.lastName),
       })
-      await withDeadlockRetry(tx => tx.customer.update({ where: { id: c.id }, data: { referralCode: code } }), {
-        etiqueta: 'backfillLegacyReferralCodes',
-      })
-      processed++
+      // Only while still code-less: «Activar código ahora» (or another backfill) may have given — and shared — a code
+      // since this batch was read. Never overwrite it (Codex r2 #6, D28). A skipped row already left the null set.
+      const { count } = await withDeadlockRetry(
+        tx => tx.customer.updateMany({ where: { id: c.id, referralCode: null }, data: { referralCode: code } }),
+        { etiqueta: 'backfillLegacyReferralCodes' },
+      )
+      if (count === 1) processed++
     }
   }
 
