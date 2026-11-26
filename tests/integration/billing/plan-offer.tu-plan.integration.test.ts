@@ -2,6 +2,10 @@
  * Planes editables B2, Task 7 (§17, §18, Review Focus 4): «Tu plan» dice la tarjeta y el monto de la prueba SIN tarjeta y lleva al
  * portal de Stripe a poner la tarjeta, contra Postgres REAL.
  *
+ * B2, Task 8 (Review Focus 5, b2-r1 #10): dos pestañas que convierten el mismo demo a la vez (`POST …/convert-from-demo`) y el
+ * checkout de la aceptación que ganó el CAS (`POST …/plan/checkout`). La limpieza del demo es la real, envuelta con una pausa que
+ * se arma por caso (sin armar, pasa directo).
+ *
  * La app real por HTTP con el JWT real de una dueña sembrada (organización, persona, `StaffOrganization` OWNER y `OnboardingProgress`
  * con los términos aceptados): el alta sin tarjeta (`GET …/progress` → `POST …/v2/activate-plan`), «Tu plan» (`GET …/plan`) y el
  * portal (`POST …/billing-portal` con `flujo: 'PONER_TARJETA'`). La regla común y la entrega son las reales.
@@ -51,6 +55,8 @@ const mockAlmacen = {
   escrituras: [] as string[],
   /** Las sesiones del portal de Stripe que se abrieron (B2 Task 7: «Poner mi tarjeta»). */
   portales: [] as any[],
+  /** Las sesiones de checkout que se abrieron (B2 Task 8: el checkout de la aceptación de la demo). */
+  sesiones: [] as any[],
   reset() {
     this.clientes = {}
     this.metodos = {}
@@ -65,6 +71,7 @@ const mockAlmacen = {
     this.creates = []
     this.escrituras = []
     this.portales = []
+    this.sesiones = []
   },
   /** La suscripción como la devuelve Stripe: con su factura expandida sólo si se pidió. */
   vista(sub: any, expand?: string[]) {
@@ -318,6 +325,11 @@ const mockCliente = {
   creditNotes: { list: async () => ({ object: 'list', data: [], has_more: false }) },
   checkout: {
     sessions: {
+      create: async (params: any) => {
+        mockAlmacen.sesiones.push(mockCopia(params))
+        const id = `cs_tuplan_${mockAlmacen.sesiones.length}`
+        return { id, object: 'checkout.session', url: `https://checkout.stripe.test/${id}` }
+      },
       list: async () => ({ object: 'list', data: [], has_more: false }),
       expire: async () => {
         throw new Error('no hay sesiones abiertas en esta suite')
@@ -362,6 +374,28 @@ jest.mock('@/services/resend.service', () => ({
   sendPlanActivatedNotice: jest.fn().mockResolvedValue(true),
   sendOnboardingWelcomeEmail: jest.fn().mockResolvedValue(true),
 }))
+// B2 Task 8: la conversión de demo avisa a superadmin al final (correo/notificación): aquí no sale nada.
+jest.mock('@/services/superadmin/kycReview.service', () => ({
+  ...jest.requireActual('@/services/superadmin/kycReview.service'),
+  notifySuperadminsNewKycSubmission: jest.fn().mockResolvedValue(undefined),
+}))
+// B2 Task 8: la limpieza del demo REAL, con una pausa opcional en su primera llamada (la pestaña que ya leyó TRIAL y espera).
+const mockLimpieza = { pausa: null as null | { llego: () => void; suelta: Promise<void> } }
+jest.mock('@/services/onboarding/demoCleanup.service', () => {
+  const real = jest.requireActual<typeof import('@/services/onboarding/demoCleanup.service')>('@/services/onboarding/demoCleanup.service')
+  return {
+    ...real,
+    cleanDemoData: async (...a: Parameters<typeof real.cleanDemoData>) => {
+      const pausa = mockLimpieza.pausa
+      if (pausa) {
+        mockLimpieza.pausa = null
+        pausa.llego()
+        await pausa.suelta
+      }
+      return real.cleanDemoData(...a)
+    },
+  }
+})
 jest.mock('@/services/onboarding/terminarAltaCobrada', () => ({
   __esModule: true,
   terminarAltaCobrada: jest.fn().mockResolvedValue({ estado: 'NADA', motivo: 'CIERRE_EN_CURSO' }),
@@ -522,6 +556,83 @@ const filaDePro = () =>
     select: { active: true, stripeSubscriptionId: true },
   })
 
+// ---------------------------------------------------------------------------------------------------------------------
+// B2 Task 8: la conversión de demo
+// ---------------------------------------------------------------------------------------------------------------------
+
+const documentos = {
+  entityType: 'PERSONA_FISICA',
+  idDocumentUrl: 'https://example.com/id.pdf',
+  rfcDocumentUrl: 'https://example.com/rfc.pdf',
+  comprobanteDomicilioUrl: 'https://example.com/domicilio.pdf',
+  caratulaBancariaUrl: 'https://example.com/caratula.pdf',
+}
+const convertir = (plan: unknown) =>
+  request(app)
+    .post(`/api/v1/dashboard/venues/${negocio().venueId}/convert-from-demo`)
+    .set(autorizado())
+    .send({ ...documentos, plan })
+const comprar = (cuerpo: object) =>
+  request(app)
+    .post(`/api/v1/dashboard/venues/${negocio().venueId}/plan/checkout`)
+    .set(autorizado())
+    .send({ interval: 'monthly', ...cuerpo })
+const aceptacionesDelNegocio = () =>
+  prisma.planAcceptance.findMany({
+    where: { venueId: negocio().venueId },
+    select: { id: true, tier: true, interval: true },
+    orderBy: { createdAt: 'asc' },
+    take: 10,
+  })
+/** La v2 del editor (Pro mensual a $799 + IVA) publicada sobre la v1, y el negocio de vuelta a demo (`TRIAL`). */
+async function demoConLaV2() {
+  await prisma.venue.update({ where: { id: negocio().venueId }, data: { status: 'TRIAL' } })
+  await publicar(1, ofertaDeRespaldo())
+  await publicar(2, definicionDePrueba({ ids: idsDeLaVersion('v2'), netos: { 'PRO:monthly': 79900 } }))
+}
+/** Lo que la pantalla de conversión manda por plan: los comprobantes de «Tu plan» del negocio demo (`GET /plan`). */
+async function planesDeLaConversion() {
+  const plan = await leerPlan()
+  expect(plan.status).toBe(200)
+  const { PRO, PREMIUM } = plan.body.data.cotizacion.planes
+  return {
+    PRO: { tier: 'PRO', interval: 'monthly', quoteToken: PRO.monthly.quoteToken as string },
+    PREMIUM: { tier: 'PREMIUM', interval: 'monthly', quoteToken: PREMIUM.monthly.quoteToken as string },
+    FREE: { tier: 'FREE' },
+  }
+}
+/** Arma la pausa en la PRIMERA llamada a `cleanDemoData`: `llegada` se cumple cuando esa pestaña ya leyó TRIAL y espera. */
+function pausarLaPrimeraLimpieza() {
+  let llego!: () => void
+  let soltar!: () => void
+  const llegada = new Promise<void>(resolve => (llego = resolve))
+  const suelta = new Promise<void>(resolve => (soltar = resolve))
+  mockLimpieza.pausa = { llego, suelta }
+  return { llegada, soltar }
+}
+/**
+ * La pestaña B arranca, lee TRIAL y se detiene antes de limpiar; mientras, corre `mientras` (la pestaña A y lo demás); luego se suelta
+ * B. Siempre se suelta y se espera a B (aunque `mientras` falle), para no dejar una petición colgada.
+ */
+async function conLaPestanaBEnPausa<T>(planB: unknown, mientras: () => Promise<T>) {
+  const pausa = pausarLaPrimeraLimpieza()
+  const pestanaB = convertir(planB).then(r => r)
+  let deA: T | undefined
+  try {
+    // Si B termina sin llegar a la limpieza (un rechazo antes), la prueba lo dice en vez de quedarse esperando.
+    await Promise.race([
+      pausa.llegada,
+      pestanaB.then(r => {
+        throw new Error(`La pestaña B terminó antes de limpiar: ${r.status} ${JSON.stringify(r.body)}`)
+      }),
+    ])
+    deA = await mientras()
+  } finally {
+    pausa.soltar()
+  }
+  return { deA: deA as T, deB: await pestanaB }
+}
+
 type SubDelAlmacen = {
   id: string
   status: string
@@ -633,6 +744,7 @@ afterAll(async () => {
 beforeEach(async () => {
   if (!preparada) return
   mockAlmacen.reset()
+  mockLimpieza.pausa = null
   // `logAction` está simulado en toda la integración (`integration-setup.ts`): cada caso revisa SUS llamadas, no filas.
   jest.mocked(logAction).mockClear()
   try {
@@ -744,5 +856,168 @@ describe('«Tu plan» con la prueba sin tarjeta, por HTTP (Postgres real)', () =
     })
     expect(Object.keys(mockAlmacen.subs)).toHaveLength(1)
     expect(mockAlmacen.escrituras).toEqual([])
+  })
+})
+
+describe('La conversión de demo con la v2: el CAS y su aceptación, por HTTP (Postgres real, B2 Task 8)', () => {
+  it('🔴 Review Focus 5: dos convert-from-demo a la vez, Pro y Premium → uno 200 con aceptación y otro 409 VENUE_ALREADY_CONVERTED; el checkout del ganador abre su plan y uno sin aceptación → 409 PLAN_ACCEPTANCE_REQUIRED', async () => {
+    await demoConLaV2()
+    const planes = await planesDeLaConversion()
+
+    const [pro, premium] = await Promise.all([convertir(planes.PRO), convertir(planes.PREMIUM)])
+
+    const respuestas = [
+      { tier: 'PRO', res: pro },
+      { tier: 'PREMIUM', res: premium },
+    ]
+    const ganadoras = respuestas.filter(r => r.res.status === 200)
+    const perdedoras = respuestas.filter(r => r.res.status !== 200)
+    expect(ganadoras).toHaveLength(1)
+    expect(perdedoras).toHaveLength(1)
+    const [ganadora] = ganadoras
+    const [perdedora] = perdedoras
+    expect(perdedora.res.status).toBe(409)
+    expect(perdedora.res.body).toMatchObject({
+      code: 'VENUE_ALREADY_CONVERTED',
+      message: 'Este negocio ya se convirtió en otra pestaña. Recarga la página.',
+    })
+    // Una sola aceptación: la de la conversión que ganó el CAS.
+    const aceptaciones = await aceptacionesDelNegocio()
+    expect(aceptaciones).toEqual([{ id: ganadora.res.body.data.planAcceptance.id, tier: ganadora.tier, interval: 'monthly' }])
+    expect(await prisma.venue.findUnique({ where: { id: negocio().venueId }, select: { status: true } })).toEqual({
+      status: 'PENDING_ACTIVATION',
+    })
+    expect(jest.mocked(logAction)).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'PLAN_ACCEPTANCE_CREATED', entityId: aceptaciones[0].id, venueId: negocio().venueId }),
+    )
+
+    // El plan de la que perdió, sin aceptación: la aceptación viva y sin usar se termina primero.
+    const sinAceptacion = await comprar({
+      tier: perdedora.tier,
+      quoteToken: perdedora.tier === 'PRO' ? planes.PRO.quoteToken : planes.PREMIUM.quoteToken,
+    })
+    expect(sinAceptacion.status).toBe(409)
+    expect(sinAceptacion.body).toMatchObject({
+      code: 'PLAN_ACCEPTANCE_REQUIRED',
+      details: { acceptanceId: aceptaciones[0].id, tier: ganadora.tier, interval: 'monthly' },
+    })
+    expect(mockAlmacen.sesiones).toHaveLength(0)
+
+    const delGanador = await comprar({ tier: ganadora.tier, acceptanceId: aceptaciones[0].id })
+
+    expect(delGanador.status).toBe(200)
+    expect(mockAlmacen.sesiones).toHaveLength(1)
+    const precio = ganadora.tier === 'PRO' ? 'price_v2_pro_m' : 'price_v2_premium_m'
+    expect(mockAlmacen.sesiones[0].line_items).toEqual([{ price: precio, quantity: 1 }])
+    expect(mockAlmacen.sesiones[0].metadata).toMatchObject({ planOfferVersion: '2', planAcceptanceId: aceptaciones[0].id })
+    expect(mockAlmacen.sesiones[0].subscription_data.metadata).toMatchObject({ planAcceptanceId: aceptaciones[0].id })
+  })
+
+  it('Gratis contra Pro, en los dos órdenes: una sola conversión gana y, si ganó Pro, su aceptación es la única que abre el checkout', async () => {
+    await demoConLaV2()
+    for (const orden of [
+      { gana: 'FREE', pierde: 'PRO' },
+      { gana: 'PRO', pierde: 'FREE' },
+    ] as const) {
+      // Cada orden con el negocio de vuelta a demo y sin aceptaciones (la oferta queda igual).
+      await prisma.planAcceptance.deleteMany({ where: { venueId: negocio().venueId } })
+      await prisma.venue.update({ where: { id: negocio().venueId }, data: { status: 'TRIAL' } })
+      mockAlmacen.sesiones = []
+      const planes = await planesDeLaConversion()
+
+      // La que pierde ya leyó TRIAL y validó su plan; la que gana convierte mientras tanto.
+      const { deA: ganadora, deB: perdedora } = await conLaPestanaBEnPausa(planes[orden.pierde], () => convertir(planes[orden.gana]))
+
+      expect(ganadora.status).toBe(200)
+      expect(perdedora.status).toBe(409)
+      expect(perdedora.body.code).toBe('VENUE_ALREADY_CONVERTED')
+      const aceptaciones = await aceptacionesDelNegocio()
+
+      if (orden.gana === 'FREE') {
+        expect(ganadora.body.data).not.toHaveProperty('planAcceptance')
+        expect(aceptaciones).toEqual([])
+        // Sin aceptación nada frena el checkout normal de «Tu plan».
+        const normal = await comprar({ tier: 'PRO', quoteToken: planes.PRO.quoteToken })
+        expect(normal.status).toBe(200)
+        expect(mockAlmacen.sesiones[0].metadata).not.toHaveProperty('planAcceptanceId')
+        continue
+      }
+
+      expect(aceptaciones).toEqual([{ id: ganadora.body.data.planAcceptance.id, tier: 'PRO', interval: 'monthly' }])
+      const otro = await comprar({ tier: 'PREMIUM', quoteToken: planes.PREMIUM.quoteToken })
+      expect(otro.status).toBe(409)
+      expect(otro.body).toMatchObject({ code: 'PLAN_ACCEPTANCE_REQUIRED', details: { acceptanceId: aceptaciones[0].id } })
+      const ajena = await comprar({ tier: 'PRO', acceptanceId: 'clnoexiste000000000000001' })
+      expect(ajena.status).toBe(409)
+      expect(ajena.body).toMatchObject({ code: 'OFFER_CHANGED', details: { reason: 'VERSION', offerVersion: 2 } })
+      expect(mockAlmacen.sesiones).toHaveLength(0)
+
+      const suya = await comprar({ tier: 'PRO', acceptanceId: aceptaciones[0].id })
+      expect(suya.status).toBe(200)
+      expect(mockAlmacen.sesiones).toHaveLength(1)
+      expect(mockAlmacen.sesiones[0].line_items).toEqual([{ price: 'price_v2_pro_m', quantity: 1 }])
+      expect(mockAlmacen.sesiones[0].metadata).toMatchObject({ planAcceptanceId: aceptaciones[0].id })
+    }
+  })
+
+  it('🔴 b2-r1 #10, en el orden de Codex: la pestaña B lee TRIAL y se detiene antes de limpiar (cleanDemoData envuelto con una pausa en su primera llamada); la A convierte; se registra una venta y un pago del negocio ya convertido; se suelta B → 409 VENUE_ALREADY_CONVERTED y la venta y el pago siguen en Postgres', async () => {
+    await demoConLaV2()
+    const planes = await planesDeLaConversion()
+    const venueId = negocio().venueId
+    const venta: { orderId?: string; paymentId?: string } = {}
+
+    try {
+      const { deA, deB } = await conLaPestanaBEnPausa(planes.PRO, async () => {
+        const a = await convertir(planes.PREMIUM)
+        // El negocio ya es real: su primera venta y su primer pago.
+        const order = await prisma.order.create({
+          data: {
+            venueId,
+            orderNumber: `B2T8-${stamp}-${Date.now()}`,
+            type: 'TAKEOUT',
+            source: 'TPV',
+            status: 'PENDING',
+            paymentStatus: 'PENDING',
+            subtotal: 100,
+            taxAmount: 0,
+            total: 100,
+            createdById: negocio().staffId,
+          },
+        })
+        venta.orderId = order.id
+        const pago = await prisma.payment.create({
+          data: {
+            venueId,
+            orderId: order.id,
+            amount: 100,
+            method: 'CRYPTOCURRENCY',
+            status: 'PENDING',
+            type: 'REGULAR',
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: 100,
+          },
+        })
+        venta.paymentId = pago.id
+        return a
+      })
+
+      expect(deA.status).toBe(200)
+      expect(deA.body.data.planAcceptance).toEqual(expect.objectContaining({ id: expect.any(String) }))
+      expect(deB.status).toBe(409)
+      expect(deB.body).toMatchObject({
+        code: 'VENUE_ALREADY_CONVERTED',
+        message: 'Este negocio ya se convirtió en otra pestaña. Recarga la página.',
+      })
+      // La limpieza de B esperó a A, vio que ya no era demo y no borró nada.
+      expect(await prisma.order.count({ where: { id: venta.orderId } })).toBe(1)
+      expect(await prisma.payment.count({ where: { id: venta.paymentId } })).toBe(1)
+      // Y la aceptación es sólo la de A (Premium).
+      expect(await aceptacionesDelNegocio()).toEqual([{ id: deA.body.data.planAcceptance.id, tier: 'PREMIUM', interval: 'monthly' }])
+    } finally {
+      // Una venta viva impide borrar el negocio: se quita antes de la limpieza del caso.
+      if (venta.paymentId) await prisma.payment.deleteMany({ where: { id: venta.paymentId } })
+      if (venta.orderId) await prisma.order.deleteMany({ where: { id: venta.orderId } })
+    }
   })
 })

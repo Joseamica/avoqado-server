@@ -254,11 +254,21 @@ export async function convertDemoVenue(
       message: 'Demo venue converted to real successfully',
     })
   } catch (error) {
-    logger.error('Error converting demo venue', {
-      error: error instanceof Error ? error.message : 'Unknown error',
-      orgId: req.authContext?.orgId,
-      venueId: req.params?.venueId,
-    })
+    // Planes editables (B2, Task 8): un rechazo a propósito (otra pestaña ya lo convirtió, la oferta cambió, el plan no es válido) es
+    // un warn, no un error en Better Stack (como el checkout, D7).
+    if (error instanceof AppError && error.statusCode < 500)
+      logger.warn('Demo venue conversion refused', {
+        message: error.message,
+        code: error.code,
+        statusCode: error.statusCode,
+        venueId: req.params?.venueId,
+      })
+    else
+      logger.error('Error converting demo venue', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        orgId: req.authContext?.orgId,
+        venueId: req.params?.venueId,
+      })
     next(error)
   }
 }

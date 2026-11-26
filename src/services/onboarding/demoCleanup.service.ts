@@ -50,9 +50,14 @@
  * 🔴 Tarjetas de regalo (⭐ C6 concern 1, legal): si el negocio vendió ALGUNA tarjeta, no se borra NADA. Su saldo es dinero de sus
  * clientes y la libreta es de sólo inserción: borrar las cuentas y cobros del demo dejaría sobres con saldo vivo sin la venta que
  * los respalda. Se regresa con `skippedReason: 'GIFT_CARDS'`, un aviso en el log y en ActivityLog; la conversión sigue.
+ *
+ * 🔴 Sólo se limpia un negocio que SIGUE siendo demo (planes editables B2, Task 8, b2-r1 #10): el estado se lee en la misma consulta
+ * que toma la fila del negocio `FOR UPDATE`. Dos pestañas que convierten el mismo demo leyeron `TRIAL` antes de empezar; si la
+ * segunda limpia DESPUÉS de que la primera convirtió, el negocio ya es real y lo que borraría son sus ventas. Así la segunda espera a
+ * la primera, ve el estado nuevo y regresa `skippedReason: 'NOT_DEMO'` sin borrar nada (con o sin versión del editor).
  */
 
-import { AccountType, Prisma } from '@prisma/client'
+import { AccountType, Prisma, VenueStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { withDeadlockRetry } from '@/utils/serializableRetry'
 import logger from '@/config/logger'
@@ -96,8 +101,11 @@ interface CleanupResult {
     /** Principal demo junto a cuentas reales: éstas se conservan como cuentas pero quedan sin posición (para volver a ligarlas). */
     cuentasRealesDesligadas: Array<{ posicion: AccountType; id: string }>
   }
-  /** ⭐ (C6 concern 1): por qué no se borró nada. `GIFT_CARDS` = el negocio vendió tarjetas de regalo. Sin el campo, se limpió. */
-  skippedReason?: 'GIFT_CARDS'
+  /**
+   * Por qué no se borró nada. `GIFT_CARDS` = el negocio vendió tarjetas de regalo (⭐ C6 concern 1). `NOT_DEMO` = al tomar su fila
+   * ya no era `TRIAL` (otra pestaña lo convirtió, b2-r1 #10). Sin el campo, se limpió.
+   */
+  skippedReason?: 'GIFT_CARDS' | 'NOT_DEMO'
   /** hz:nube0000:na4b2c82: canales en línea (de cualquier negocio) que el borrado dejó sin su tarifa o su costo. */
   canalesEnLineaSinTarifa: CanalSinTarifa[]
 }
@@ -191,7 +199,13 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
       // de leer la configuración de pagos y en el orden de un traslado (candado de posiciones → fila del negocio): un superadmin
       // que pone una cuenta real en una posición demo mientras se convierte espera a que acabemos y luego ve la pantalla vieja (409).
       await tomarCandadoDePosiciones(tx, { venueId })
-      await tx.$queryRaw`SELECT 1 FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
+      // B2 Task 8 (b2-r1 #10): la MISMA consulta que toma la fila lee su estado; si ya no es demo (o ya no existe), nada se borra.
+      const [negocio] = await tx.$queryRaw<Array<{ status: string }>>`
+        SELECT "status"::text AS status FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
+      if (negocio?.status !== VenueStatus.TRIAL) {
+        result.skippedReason = 'NOT_DEMO'
+        return result
+      }
       if (await tx.giftCard.findFirst({ where: { venueId }, select: { id: true } })) {
         result.skippedReason = 'GIFT_CARDS'
         return result
@@ -590,6 +604,15 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
       timeout: 120000, // 2 minute timeout for comprehensive cleanup
     },
   )
+
+  if (result.skippedReason === 'NOT_DEMO') {
+    // Nada cambió: no hay mutación que auditar. Quien convierte decide qué responde (con versión del editor, 409).
+    logger.warn(`⚠️ Demo cleanup skipped for venue ${venueId}: ya no es demo (otra conversión ganó); no se borra nada`, {
+      venueId,
+      skippedReason: result.skippedReason,
+    })
+    return result
+  }
 
   if (result.skippedReason) {
     logger.warn(`⚠️ Demo cleanup skipped for venue ${venueId}: it sold gift cards (their balance is customer money)`, {

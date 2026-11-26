@@ -526,6 +526,8 @@ describe('C5-2 · lo que la importación adopta en un negocio DEMO deja de ser d
     '«%s»: el producto, su categoría, su inventario y su grupo de extras sobreviven a cleanDemoData',
     async mode => {
       const x = await negocio()
+      // B2 Task 8 (b2-r1 #10): la limpieza sólo borra un negocio que sigue en demo (sin esto no borraría nada y la prueba no diría nada).
+      await prisma.venue.update({ where: { id: x.venueId }, data: { status: 'TRIAL' } })
       const categoria = await prisma.menuCategory.create({
         data: { venueId: x.venueId, name: 'Bebidas Calientes', slug: `bebidas-${x.rfc}`.toLowerCase(), isDemo: true },
       })
@@ -576,7 +578,7 @@ describe('C5-2 · lo que la importación adopta en un negocio DEMO deja de ser d
         SERVICIO,
       )
 
-      await expect(cleanDemoData(x.venueId)).resolves.toBeDefined()
+      await expect(cleanDemoData(x.venueId)).resolves.not.toHaveProperty('skippedReason')
 
       expect(await prisma.product.findUnique({ where: { id: demo.id }, select: { isDemo: true, deletedAt: true } })).toEqual({
         isDemo: false,

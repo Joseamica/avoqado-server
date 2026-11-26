@@ -8,8 +8,10 @@
  */
 import type Stripe from 'stripe'
 import type { PlanAcceptance, Prisma, PrismaClient } from '@prisma/client'
+import { z } from 'zod'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { BadRequestError } from '../../errors/AppError'
 import { stripe, type ResumenDeLaSuscripcionDelPlan } from '../stripe.service'
 import type { PlanState } from '../dashboard/planState.service'
 import { elegirFilaDelPlan } from '../access/filaDelPlan'
@@ -25,6 +27,7 @@ import {
   type OpcionDeCompra,
 } from './opcionesDeCompra'
 import { codigoDelPlan, versionQueCobra, type OfertaVigente, type Periodicidad, type PlanPagado } from './planOffer'
+import type { CotizacionFirmada } from './comprobanteDeCotizacion'
 import { montoDelSiguienteCobro } from './siguienteCobro'
 import { LECTURA_ACOTADA, type TarjetaVisible } from './tarjetaQueCobraria'
 
@@ -333,10 +336,8 @@ export async function cotizacionDeTuPlanSinRomper(
 // ---------------------------------------------------------------------------------------------------------------------
 
 /**
- * Pasos 1-3 de la compra de «Tu plan»: el comprobante (`venue:<id>`, la vigente; su rechazo se lanza), la opción de la vigente con
- * el margen del checkout (sin ella, `PLAN_NOT_ON_SALE`) y que el comprobante diga lo mismo que la opción: el precio, y el fin de la
- * prueba regalada si la difiere (`PRUEBA_CERCA` si ya no se puede, `QUOTE_MISMATCH` si cambió); sin fin de prueba, se paga hoy el
- * precio. Nunca toca Stripe. `trialEnd` es el fin con el que se abre la sesión (`undefined` = se cobra hoy).
+ * Pasos 1-3 de la compra de «Tu plan»: el comprobante (`venue:<id>`, la vigente; su rechazo se lanza) y `revisarLaOpcion`. Nunca
+ * toca Stripe. `trialEnd` es el fin con el que se abre la sesión (`undefined` = se cobra hoy).
  */
 export function revisarCompraDeTuPlan(args: {
   vigente: OfertaVigente
@@ -351,9 +352,27 @@ export function revisarCompraDeTuPlan(args: {
   const n = vigente.number
   const revisado = revisarComprobante({ token: quoteToken, alcance: `venue:${venueId}`, tier, interval, versionNumber: n, ahora })
   if (revisado.comprobante === null) throw revisado.rechazo
-  const { comprobante } = revisado
+  return revisarLaOpcion({ version: vigente, comprobante: revisado.comprobante, fila, tier, interval, ahora })
+}
+
+/**
+ * Pasos 2-3: la opción de `version` con el margen del checkout (sin ella, `PLAN_NOT_ON_SALE`) y que el comprobante ya verificado
+ * diga lo mismo que la opción: el precio, y el fin de la prueba regalada si la difiere (`PRUEBA_CERCA` si ya no se puede,
+ * `QUOTE_MISMATCH` si cambió); sin fin de prueba, se paga hoy el precio. `version` es la vigente («Tu plan») o la que se aceptó al
+ * convertir la demo (Task 8: aunque ya no sea la vigente, §11 N2); los rechazos citan SU número (ruling P3). Nunca toca Stripe.
+ */
+export function revisarLaOpcion(args: {
+  version: OfertaVigente
+  comprobante: Pick<CotizacionFirmada, 'precioCents' | 'firstChargeCents' | 'trialEndsAt'>
+  fila: FilaDePrueba | null
+  tier: PlanPagado
+  interval: Periodicidad
+  ahora: Date
+}): { opcion: OpcionDeCompra; trialEnd: Date | undefined } {
+  const { version, comprobante, fila, tier, interval, ahora } = args
+  const n = version.number
   const opcion = opcionDeTuPlan({
-    vigente,
+    vigente: version,
     fila,
     enPruebaDeStripe: null,
     tier,
@@ -361,7 +380,7 @@ export function revisarCompraDeTuPlan(args: {
     ahoraMs: ahora.getTime(),
     margenMs: MARGEN_CHECKOUT_MS,
   })
-  if (!opcion) throw planFueraDeVenta(tier, vigente.definition[tier].displayName)
+  if (!opcion) throw planFueraDeVenta(tier, version.definition[tier].displayName)
   if (comprobante.precioCents !== opcion.precioCents) throw ofertaCambio('QUOTE_MISMATCH', n)
   if (comprobante.trialEndsAt) {
     if (comprobante.firstChargeCents !== 0) throw ofertaCambio('QUOTE_MISMATCH', n)
@@ -385,9 +404,22 @@ export async function exigirLaMismaCompra(
   const { venueId, tier, interval, versionNumber, trialEnd } = args
   const releida = await versionQueCobra(tx)
   if (!releida || releida.number !== versionNumber) throw ofertaCambio('VERSION', releida?.number ?? 1)
+  await exigirLaMismaOpcion(tx, { version: releida, venueId, tier, interval, trialEnd })
+}
+
+/**
+ * La parte de `exigirLaMismaCompra` que no relee la vigente: la fila con su `tx` da la misma opción de `version` (y el mismo fin de
+ * la prueba regalada). La compra de una aceptación (Task 8) la usa con la versión ACEPTADA, sin la relectura del número vigente
+ * (§11 N2: lo aceptado cierra aunque se publique otra versión).
+ */
+export async function exigirLaMismaOpcion(
+  tx: Prisma.TransactionClient,
+  args: { version: OfertaVigente; venueId: string; tier: PlanPagado; interval: Periodicidad; trialEnd: Date | undefined },
+): Promise<void> {
+  const { version, venueId, tier, interval, trialEnd } = args
   const fila = await leerFilaDelPlan(venueId, tx)
   const opcion = opcionDeTuPlan({
-    vigente: releida,
+    vigente: version,
     fila,
     enPruebaDeStripe: null,
     tier,
@@ -395,8 +427,43 @@ export async function exigirLaMismaCompra(
     ahoraMs: Date.now(),
     margenMs: MARGEN_CHECKOUT_MS,
   })
-  if (!opcion) throw planFueraDeVenta(tier, releida.definition[tier].displayName)
+  if (!opcion) throw planFueraDeVenta(tier, version.definition[tier].displayName)
   if (trialEnd && opcion.trialEndsAt?.getTime() !== trialEnd.getTime()) {
-    throw ofertaCambio(opcion.trialEndsAt ? 'QUOTE_MISMATCH' : 'PRUEBA_CERCA', releida.number)
+    throw ofertaCambio(opcion.trialEndsAt ? 'QUOTE_MISMATCH' : 'PRUEBA_CERCA', version.number)
   }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// La conversión de demo y su aceptación (B2, Task 8, §11 N2)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Cuánto vive la aceptación de la conversión de demo: lo que dura una sesión de checkout de Stripe (30 min). */
+export const PLAN_ACCEPTANCE_TTL_MS = 30 * 60_000
+
+/** El plan que la persona eligió al convertir su demo. Gratis también se dice: una demo nunca pasa a Gratis en silencio (b2-r1 #9). */
+export type PlanDeLaConversion = { tier: 'FREE' } | { tier: PlanPagado; interval: Periodicidad; quoteToken: unknown }
+
+const planDeLaConversion = z.union([
+  z.object({ tier: z.literal('FREE') }).strict(),
+  z
+    .object({
+      tier: z.enum(['PRO', 'PREMIUM']),
+      interval: z.enum(['monthly', 'annual']),
+      // Su forma la revisa `revisarComprobante` (sin él, QUOTE_REQUIRED; un valor que no es texto, QUOTE_INVALID).
+      quoteToken: z.unknown(),
+    })
+    .strict(),
+])
+
+/**
+ * Lee el `plan` del cuerpo de la conversión. Sólo se llama con una versión del editor (sin ella, `plan` no se lee: b2-r3 #8).
+ * `null`: no vino (o vino `null`); quien llama responde QUOTE_REQUIRED. Una forma que no es ninguna de las dos → 400 `PLAN_INVALID`.
+ */
+export function leerPlanDeLaConversion(raw: unknown): PlanDeLaConversion | null {
+  if (raw === undefined || raw === null) return null
+  const leido = planDeLaConversion.safeParse(raw)
+  if (!leido.success) throw new BadRequestError('El plan elegido no es válido. Recarga la página.', 'PLAN_INVALID')
+  return leido.data.tier === 'FREE'
+    ? { tier: 'FREE' }
+    : { tier: leido.data.tier, interval: leido.data.interval, quoteToken: leido.data.quoteToken }
 }

@@ -164,6 +164,11 @@ export const convertDemoVenueSchema = z.object({
       // Stripe integration fields (optional)
       selectedFeatures: z.array(z.string()).optional(),
       paymentMethodId: z.string().optional(),
+
+      // Planes editables (B2, Task 8): el plan elegido (`{ tier: 'FREE' }` o `{ tier, interval, quoteToken }`). Sin forma aquí a
+      // propósito (b2-r3 #8): sin versión del editor no se lee (con `null` o un texto, el cuerpo pasa como hoy); con ella, lo revisa el
+      // servicio (`leerPlanDeLaConversion`).
+      plan: z.unknown().optional(),
     })
     // Acta Constitutiva is required for PERSONA_MORAL
     .refine(

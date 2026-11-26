@@ -137,6 +137,8 @@ describe('D5 · trigger BEFORE DELETE: un producto con ventas no se borra de ver
 
   it('convertir un demo (cleanDemoData real) sigue funcionando: sus órdenes se van antes que sus productos demo', async () => {
     const x = await nuevoNegocio({ contabilidad: false })
+    // B2 Task 8 (b2-r1 #10): la limpieza sólo borra un negocio que sigue en demo.
+    await prisma.venue.update({ where: { id: x.venueId }, data: { status: 'TRIAL' } })
     const demo = await producto(x, 'Demo', { isDemo: true })
     const real = await producto(x, 'Real')
     await renglon(x, demo)
