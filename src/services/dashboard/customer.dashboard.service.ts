@@ -544,19 +544,27 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
         select: { slug: true, name: true },
       })
       const { generateReferralCode } = await import('@/services/referrals/referralCode.service')
-      const code = await generateReferralCode({
+      const generated = await generateReferralCode({
         venueId: customer.venueId,
         venuePrefix: cfg.codePrefix ?? venue?.slug ?? customer.venueId.slice(-8),
         customerName: [customer.firstName, customer.lastName].filter(Boolean).join(' '),
       })
-      await withDeadlockRetry(tx => tx.customer.update({ where: { id: customer.id }, data: { referralCode: code } }), {
-        etiqueta: 'createCustomer',
-      })
+      // Sólo si sigue sin código: el reparto en segundo plano (al activar o reactivar referidos) pudo darle uno, quizá ya
+      // compartido. Entonces ése es el suyo y es el que va en el correo (D28, Codex r5 #2).
+      const { count } = await withDeadlockRetry(
+        tx => tx.customer.updateMany({ where: { id: customer.id, referralCode: null }, data: { referralCode: generated } }),
+        { etiqueta: 'createCustomer' },
+      )
+      const code =
+        count === 1
+          ? generated
+          : // Sin fila (se borró entretanto) no hay código guardado: nunca se manda uno que no existe (Codex r6).
+            ((await prisma.customer.findUnique({ where: { id: customer.id }, select: { referralCode: true } }))?.referralCode ?? null)
 
       // Welcome email — only fire if the customer is contactable via
       // email AND has opted in to marketing. Both checks are required
       // to avoid sending unsolicited mail.
-      if (customer.email && customer.marketingConsent && venue) {
+      if (code && customer.email && customer.marketingConsent && venue) {
         try {
           const { generateWelcomeCard } = await import('@/services/referrals/referralCard.service')
           const { sendReferralWelcomeEmail } = await import('@/services/email.service')

@@ -2168,7 +2168,8 @@ describe('Reservation Dashboard Service', () => {
         prismaMock.reservation.findFirst
           .mockResolvedValueOnce(createMockReservation({ status: 'CONFIRMED' })) // la transición
           .mockRejectedValueOnce(new Error('base caída')) // el depósito
-        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(createMockReservation({ status: 'CANCELLED' }))
+        // Pagado al cancelar: sólo ése pasa por el manejo del depósito (el que se cobra después lo devuelve el camino del cobro).
+        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(createMockReservation({ status: 'CANCELLED', depositStatus: 'PAID' }))
 
         const result = await cancelReservation(VENUE_ID, 'res-1', STAFF_ID)
 

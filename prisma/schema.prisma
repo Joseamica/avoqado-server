@@ -9003,6 +9003,10 @@ model LoyaltyConfig {
   redemptionRate   Decimal @default(0.01) @db.Decimal(5, 4) // $0.01 per point
   minPointsRedeem  Int     @default(100) // Minimum points to redeem
   pointsExpireDays Int? // Points expire after X days (null = never expire)
+  /// D27: los días sin actividad cuentan, a lo más, desde esta fecha (lo de antes nunca vence de golpe). La fija el job de
+  /// vencimiento la primera vez que ve el negocio, y `updateLoyaltyConfig` al prender, reactivar o acortar la expiración.
+  /// Null = el job todavía no la fija (no vence nada hasta entonces).
+  pointsExpireSince DateTime?
 
   active Boolean @default(true)
 
@@ -9047,6 +9051,9 @@ model LoyaltyTransaction {
   promotion   LoyaltyPromotion? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
   /// EARN: cuántos de `points` son el bono de la promo. Null = sin promo.
   bonusPoints Int?
+  /// EXPIRE (D27): true = este vencimiento se llevó TODO el saldo (por inactividad), así que ninguna venta anterior conserva puntos. Las
+  /// de antes (por lote, parciales) quedan null: una reversa de reembolso sólo confía en las que traen true.
+  wholeBalance Boolean?
 
   createdAt DateTime @default(now())
 

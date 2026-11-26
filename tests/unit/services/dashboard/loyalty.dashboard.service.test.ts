@@ -16,6 +16,7 @@ import { prismaMock } from '../../../__helpers__/setup'
 import * as loyaltyMobileService from '../../../../src/services/mobile/loyalty.mobile.service'
 import * as stampLedger from '../../../../src/services/wallet/stampLedger.service'
 import { venueHasFeatureAccess } from '../../../../src/services/access/basePlan.service'
+import * as vencimiento from '../../../../src/services/loyalty/vencimientoDePuntos'
 
 jest.mock('../../../../src/services/access/basePlan.service', () => ({
   venueHasFeatureAccess: jest.fn().mockResolvedValue(true),
@@ -75,6 +76,8 @@ describe('Loyalty Dashboard Service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(true)
+    // D27: `updateLoyaltyConfig` guarda dentro de una transacción (decide el reloj del vencimiento con la fila tomada).
+    prismaMock.$transaction.mockImplementation(((cb: any) => (typeof cb === 'function' ? cb(prismaMock) : Promise.all(cb))) as any)
   })
 
   describe('getOrCreateLoyaltyConfig', () => {
@@ -108,7 +111,9 @@ describe('Loyalty Dashboard Service', () => {
           pointsPerVisit: 0,
           redemptionRate: 0.01,
           minPointsRedeem: 100,
-          pointsExpireDays: 365,
+          // D27 (Codex r7 #2): la expiración nace APAGADA, como en Square. Antes nacía en 365 sin que nadie la eligiera; ahora que los
+          // puntos sí vencen, prender el programa por el MCP sin decir días no debe prender también el vencimiento.
+          pointsExpireDays: null,
           active: false,
         },
       })
@@ -951,166 +956,62 @@ describe('Loyalty Dashboard Service', () => {
     })
   })
 
-  describe('expireOldPoints', () => {
-    // D32: el corte son N × 24 h hacia atrás, sin importar la zona horaria del proceso
-    // (con setDate en America/Los_Angeles, cruzar el fin del horario de verano movía el corte una hora).
-    it('el corte de vencimiento es ahora − pointsExpireDays exactos, también cruzando el cambio de horario', async () => {
-      jest.useFakeTimers({ now: new Date('2026-11-03T18:00:00.000Z'), doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
-      try {
-        prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig({ pointsExpireDays: 7 }) as any)
-        prismaMock.loyaltyTransaction.findMany.mockResolvedValue([])
+  describe('expireOldPoints (D27: delega en el vencimiento por inactividad)', () => {
+    it('corre el vencimiento del negocio y responde con la forma de siempre', async () => {
+      const spy = jest
+        .spyOn(vencimiento, 'vencerPuntosDelNegocio')
+        .mockResolvedValue({ customersAffected: 3, pointsExpired: 420, fallidos: 1, anclaFijada: false, sinPlan: false })
 
-        await expireOldPoints('venue-123')
-
-        const where = prismaMock.loyaltyTransaction.findMany.mock.calls[0][0]!.where as any
-        expect(where.createdAt.lt.toISOString()).toBe('2026-10-27T18:00:00.000Z')
-      } finally {
-        jest.useRealTimers()
-      }
-    })
-
-    it('should expire old points and update customer balances', async () => {
-      const mockConfig = createMockLoyaltyConfig({ pointsExpireDays: 365 })
-      const oldDate = new Date()
-      oldDate.setDate(oldDate.getDate() - 400) // 400 days ago
-
-      const mockOldTransactions = [
-        {
-          ...createMockTransaction({ id: 'tx-1', points: 100, createdAt: oldDate }),
-          customer: { id: 'customer-1', loyaltyPoints: 150 },
-          customerId: 'customer-1',
-        },
-        {
-          ...createMockTransaction({ id: 'tx-2', points: 50, createdAt: oldDate }),
-          customer: { id: 'customer-2', loyaltyPoints: 80 },
-          customerId: 'customer-2',
-        },
-      ]
-
-      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-      prismaMock.loyaltyTransaction.findMany.mockResolvedValue(mockOldTransactions as any)
-      prismaMock.$transaction.mockResolvedValue([{}, {}] as any)
-
-      const result = await expireOldPoints('venue-123')
-
-      expect(result.customersAffected).toBe(2)
-      expect(result.pointsExpired).toBe(150) // 100 + 50
-      expect(prismaMock.$transaction).toHaveBeenCalledTimes(2) // Once per transaction
-    })
-
-    it('should return 0 if loyalty config is inactive', async () => {
-      const mockConfig = createMockLoyaltyConfig({ active: false })
-
-      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-
-      const result = await expireOldPoints('venue-123')
-
-      expect(result.customersAffected).toBe(0)
-      expect(result.pointsExpired).toBe(0)
+      await expect(expireOldPoints('venue-123')).resolves.toEqual({ customersAffected: 3, pointsExpired: 420, fallidos: 1 })
+      expect(spy).toHaveBeenCalledWith('venue-123')
+      // Ya no vence por su cuenta (la función vieja vencía otra vez lo ya vencido).
       expect(prismaMock.loyaltyTransaction.findMany).not.toHaveBeenCalled()
+      expect(prismaMock.loyaltyTransaction.create).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('updateLoyaltyConfig · el reloj del vencimiento (D27)', () => {
+    const fila = (o: { active: boolean; pointsExpireDays: number | null }) => [{ active: o.active, pointsExpireDays: o.pointsExpireDays }]
+    const guardar = async (antes: { active: boolean; pointsExpireDays: number | null }, data: Record<string, unknown>) => {
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig(antes) as any)
+      prismaMock.$transaction.mockImplementation(((cb: any) => cb(prismaMock)) as any)
+      prismaMock.$queryRaw.mockResolvedValue(fila(antes) as any)
+      prismaMock.loyaltyConfig.update.mockResolvedValue(createMockLoyaltyConfig() as any)
+      await updateLoyaltyConfig('venue-123', data as any)
+      return (prismaMock.loyaltyConfig.update.mock.calls[0][0] as any).data
+    }
+
+    it.each([
+      ['prender la expiración', { active: true, pointsExpireDays: null }, { pointsExpireDays: 365 }],
+      ['reactivar el programa con expiración', { active: false, pointsExpireDays: 365 }, { active: true }],
+      ['acortar los días', { active: true, pointsExpireDays: 365 }, { pointsExpireDays: 30 }],
+    ])('%s arranca el reloj hoy: nadie pierde puntos de golpe', async (_caso, antes, data) => {
+      const escrito = await guardar(antes, data)
+      expect(escrito.pointsExpireSince).toBeInstanceOf(Date)
     })
 
-    it('should return 0 if pointsExpireDays is null', async () => {
-      const mockConfig = createMockLoyaltyConfig({ pointsExpireDays: null })
-
-      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-
-      const result = await expireOldPoints('venue-123')
-
-      expect(result.customersAffected).toBe(0)
-      expect(result.pointsExpired).toBe(0)
-      expect(prismaMock.loyaltyTransaction.findMany).not.toHaveBeenCalled()
+    it.each([
+      ['alargar los días', { active: true, pointsExpireDays: 30 }, { pointsExpireDays: 365 }],
+      ['cambiar otra cosa', { active: true, pointsExpireDays: 365 }, { pointsPerDollar: 2 }],
+      ['apagar la expiración', { active: true, pointsExpireDays: 365 }, { pointsExpireDays: null }],
+      ['apagar el programa', { active: true, pointsExpireDays: 365 }, { active: false }],
+    ])('%s no toca el reloj', async (_caso, antes, data) => {
+      const escrito = await guardar(antes, data)
+      expect(escrito).not.toHaveProperty('pointsExpireSince')
     })
 
-    it('should not expire more points than customer has', async () => {
-      const mockConfig = createMockLoyaltyConfig({ pointsExpireDays: 365 })
-      const oldDate = new Date()
-      oldDate.setDate(oldDate.getDate() - 400)
+    it('decide con la fila tomada (FOR UPDATE), no con la lectura de afuera', async () => {
+      // Afuera parecía prendida; con la fila tomada, otro administrador ya la había apagado: guardar «365» la vuelve a prender ⇒ reloj nuevo.
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig({ active: true, pointsExpireDays: 365 }) as any)
+      prismaMock.$transaction.mockImplementation(((cb: any) => cb(prismaMock)) as any)
+      prismaMock.$queryRaw.mockResolvedValue(fila({ active: true, pointsExpireDays: null }) as any)
+      prismaMock.loyaltyConfig.update.mockResolvedValue(createMockLoyaltyConfig() as any)
 
-      const mockOldTransactions = [
-        {
-          ...createMockTransaction({ id: 'tx-1', points: 500, createdAt: oldDate }),
-          customer: { id: 'customer-1', loyaltyPoints: 200 }, // Only has 200 points
-          customerId: 'customer-1',
-        },
-      ]
+      await updateLoyaltyConfig('venue-123', { pointsExpireDays: 365 })
 
-      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-      prismaMock.loyaltyTransaction.findMany.mockResolvedValue(mockOldTransactions as any)
-      prismaMock.$transaction.mockResolvedValue([{}, {}] as any)
-
-      const result = await expireOldPoints('venue-123')
-
-      // Should only expire 200 points (customer's current balance), not the full 500 from the old transaction
-      expect(result.pointsExpired).toBe(200)
-      expect(prismaMock.$transaction).toHaveBeenCalled()
-    })
-
-    it('corre el cuerpo de la transacción: el asiento EXPIRE se crea ANTES de restar el saldo', async () => {
-      const mockConfig = createMockLoyaltyConfig({ pointsExpireDays: 365 })
-      const oldDate = new Date()
-      oldDate.setDate(oldDate.getDate() - 400)
-      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-      prismaMock.loyaltyTransaction.findMany.mockResolvedValue([
-        {
-          ...createMockTransaction({ id: 'tx-1', points: 100, createdAt: oldDate }),
-          customer: { id: 'customer-1', loyaltyPoints: 80 },
-          customerId: 'customer-1',
-        },
-      ] as any)
-      prismaMock.$transaction.mockImplementationOnce(((cb: any) => cb(prismaMock)) as any)
-      prismaMock.loyaltyTransaction.create.mockResolvedValue({} as any)
-      prismaMock.customer.update.mockResolvedValue({} as any)
-
-      await expireOldPoints('venue-123')
-
-      const crear = prismaMock.loyaltyTransaction.create.mock.invocationCallOrder[0]
-      const restar = prismaMock.customer.update.mock.invocationCallOrder[0]
-      expect(crear).toBeLessThan(restar)
-      expect(prismaMock.loyaltyTransaction.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({ customerId: 'customer-1', type: 'EXPIRE', points: -80 }),
-      })
-      expect(prismaMock.customer.update).toHaveBeenCalledWith({ where: { id: 'customer-1' }, data: { loyaltyPoints: { decrement: 80 } } })
-    })
-
-    it('should skip customers with 0 points', async () => {
-      const mockConfig = createMockLoyaltyConfig({ pointsExpireDays: 365 })
-      const oldDate = new Date()
-      oldDate.setDate(oldDate.getDate() - 400)
-
-      const mockOldTransactions = [
-        {
-          ...createMockTransaction({ id: 'tx-1', points: 100, createdAt: oldDate }),
-          customer: { id: 'customer-1', loyaltyPoints: 0 }, // No points to expire
-          customerId: 'customer-1',
-        },
-      ]
-
-      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-      prismaMock.loyaltyTransaction.findMany.mockResolvedValue(mockOldTransactions as any)
-
-      const result = await expireOldPoints('venue-123')
-
-      expect(result.customersAffected).toBe(0)
-      expect(result.pointsExpired).toBe(0)
-      expect(prismaMock.$transaction).not.toHaveBeenCalled()
-    })
-
-    it('should only find EARN transactions (not REDEEM, ADJUST, EXPIRE)', async () => {
-      const mockConfig = createMockLoyaltyConfig()
-
-      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(mockConfig as any)
-      prismaMock.loyaltyTransaction.findMany.mockResolvedValue([])
-
-      await expireOldPoints('venue-123')
-
-      expect(prismaMock.loyaltyTransaction.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({
-            type: LoyaltyTransactionType.EARN,
-          }),
-        }),
-      )
+      const sql = (prismaMock.$queryRaw.mock.calls[0][0] as unknown as TemplateStringsArray).join('?')
+      expect(sql).toMatch(/FROM "LoyaltyConfig".*FOR UPDATE/s)
+      expect((prismaMock.loyaltyConfig.update.mock.calls[0][0] as any).data.pointsExpireSince).toBeInstanceOf(Date)
     })
   })
 })

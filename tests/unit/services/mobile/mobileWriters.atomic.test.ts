@@ -1222,7 +1222,7 @@ describe('Task4 captured transaction results', () => {
         pointsPerVisit: 0,
         redemptionRate: 0.01,
         minPointsRedeem: 100,
-        pointsExpireDays: 365,
+        pointsExpireDays: null,
         active: false,
       },
     })

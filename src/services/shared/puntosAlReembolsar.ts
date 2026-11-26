@@ -58,6 +58,7 @@ async function reversaEnTx(tx: TxConReintento, venueId: string, orderId: string,
       visitBonusPoints: true,
       baseAmount: true,
       reason: true,
+      createdAt: true,
       order: { select: { orderNumber: true } },
     },
   })
@@ -102,7 +103,21 @@ async function reversaEnTx(tx: TxConReintento, venueId: string, orderId: string,
   const [cliente] = await tx.$queryRaw<Array<{ loyaltyPoints: number }>>`
     SELECT "loyaltyPoints" FROM "Customer" WHERE id = ${earn.customerId} AND "venueId" = ${venueId} FOR UPDATE`
   const saldo = Math.max(0, cliente?.loyaltyPoints ?? 0)
-  const quitados = Math.min(tocaba, saldo)
+  // 🔴 D27 (25-nov): un vencimiento se lleva TODO el saldo (es por inactividad), así que los puntos de una venta anterior a él ya no
+  // están: quitarlos otra vez se llevaría los de compras nuevas (Codex r1 #1). Se pregunta con la fila del cliente ya tomada, que es la
+  // que el vencimiento toma para escribir: o éste ve el EXPIRE, o el vencimiento ve esta reversa. La fila se escribe igual (en 0): la
+  // usan el recorrido de los cambios y la suma de lo ya devuelto.
+  const yaVencieron =
+    tocaba > 0 &&
+    !!(await tx.loyaltyTransaction.findFirst({
+      // Sólo los vencimientos de todo el saldo (los de antes eran parciales, Codex r3 #1), y estrictamente DESPUÉS del EARN: un cliente
+      // sólo vence si no tuvo actividad desde el límite, así que todo EARN que se llevó es anterior al límite y el EXPIRE (escrito después
+      // del límite) es estrictamente posterior. Un EARN que llega después del vencimiento tiene fecha igual o mayor y conserva sus puntos
+      // para la reversa: un empate de milisegundo nunca perdona una compra nueva (Codex r3 #2, r5 #4).
+      where: { customerId: earn.customerId, type: LoyaltyTransactionType.EXPIRE, wholeBalance: true, createdAt: { gt: earn.createdAt } },
+      select: { id: true },
+    }))
+  const quitados = yaVencieron ? 0 : Math.min(tocaba, saldo)
 
   const venta = `la venta ${earn.order?.orderNumber ?? orderId}`
   const completo = devuelto.gte(base.cobrado) && base.cobrado.gt(0)
@@ -112,9 +127,11 @@ async function reversaEnTx(tx: TxConReintento, venueId: string, orderId: string,
       : `Reembolso parcial de ${venta} (devuelto ${pesos(devuelto)} de ${pesos(base.cobrado)})`) +
     (tocaba === 0
       ? ': los puntos no cambian'
-      : quitados < tocaba
-        ? `: tocaba quitar ${tocaba} puntos, pero el cliente sólo tenía ${saldo}: ya había usado el resto`
-        : `: se quitan ${quitados} puntos`)
+      : yaVencieron
+        ? `: tocaba quitar ${tocaba} puntos, pero los puntos de esa venta ya habían vencido`
+        : quitados < tocaba
+          ? `: tocaba quitar ${tocaba} puntos, pero el cliente sólo tenía ${saldo}: ya había usado el resto`
+          : `: se quitan ${quitados} puntos`)
   const staffVenue = devolucion.processedById
     ? await tx.staffVenue.findFirst({ where: { staffId: devolucion.processedById, venueId }, select: { id: true } })
     : null

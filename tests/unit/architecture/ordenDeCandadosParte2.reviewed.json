@@ -220,10 +220,6 @@
       "clase": "EN_TX",
       "etiqueta": "adjustPoints"
     },
-    "src/services/dashboard/loyalty.dashboard.service.ts#expireOldPoints": {
-      "clase": "EN_TX",
-      "etiqueta": "expireOldPoints"
-    },
     "src/services/dashboard/paymentLink.service.ts#contarUsoDelDescuento": {
       "clase": "EN_TX",
       "etiqueta": "contarUsoDelDescuento"
@@ -514,6 +510,10 @@
     "src/services/giftCards/giftCardClaim.service.ts#guardarTarjetaEnMiCuenta": {
       "clase": "EN_TX",
       "etiqueta": "guardarTarjetaEnMiCuenta"
+    },
+    "src/services/loyalty/vencimientoDePuntos.ts#vencerPuntosDelCliente": {
+      "clase": "EN_TX",
+      "etiqueta": "vencerPuntosDelCliente"
     }
   },
   "aperturas": {
@@ -738,11 +738,6 @@
     "src/services/dashboard/loyalty.dashboard.service.ts#adjustPoints": {
       "etiqueta": "adjustPoints",
       "cantidad": 1
-    },
-    "src/services/dashboard/loyalty.dashboard.service.ts#expireOldPoints": {
-      "etiqueta": "expireOldPoints",
-      "cantidad": 1,
-      "nota": "Hoy es $transaction([…]) en arreglo: pasa a callback con las dos escrituras sobre tx (r5 #3)."
     },
     "src/services/dashboard/manualPayment.service.ts#createManualPayment": {
       "etiqueta": "createManualPayment",
@@ -1181,6 +1176,16 @@
     "src/services/public/customerPortal.public.service.ts#listarMisTarjetas": {
       "etiqueta": "listarMisTarjetas",
       "cantidad": 1
+    },
+    "src/services/dashboard/loyalty.dashboard.service.ts#updateLoyaltyConfig": {
+      "etiqueta": "updateLoyaltyConfig",
+      "cantidad": 1,
+      "nota": "D27: decide el reloj del vencimiento (pointsExpireSince) con la fila de LoyaltyConfig tomada; no escribe tablas protegidas."
+    },
+    "src/services/loyalty/vencimientoDePuntos.ts#vencerPuntosDelCliente": {
+      "etiqueta": "vencerPuntosDelCliente",
+      "cantidad": 1,
+      "nota": "D27: advisory del cliente → Customer FOR UPDATE → LoyaltyConfig FOR SHARE; EXPIRE, saldo y ActivityLog en la misma transacción."
     }
   },
   "efectosRevisados": {
