@@ -534,8 +534,9 @@ export async function getVenuePlan(req: Request<{ venueId: string }>, res: Respo
     // falla, el mismo `data`, sin `cotizacion` (la lectura de Stripe, abajo).
     // La versión se lee UNA vez, primero: sólo con ella se pide la tarjeta de la prueba sin tarjeta (`conTarjeta`) y se cotiza.
     // 🔴 Codex b2-code #7: con ella, la suscripción también se lee con el tope corto (5 s, sin reintentos), como las demás lecturas
-    // informativas de la pantalla; si no contesta, «Tu plan» se degrada como hoy. Con una versión del editor que no se puede leer
-    // (r2 #7), el mismo tope, sin la tarjeta ni la cotización. Sin versión del editor (o con la v1 dañada), la llamada de hoy.
+    // informativas de la pantalla; si no contesta, «Tu plan» se degrada como hoy. Con el puntero leído en una versión del editor de
+    // definición ilegible (r2 #7), el mismo tope, sin la tarjeta ni la cotización. Sin versión del editor, con la v1 dañada o con el
+    // puntero ilegible (r3 R3-2), la llamada de hoy.
     const { vigente, delEditor } = await versionDeTuPlanSinRomper(venueId)
     const { planState, suscripcion } = await planStateService.getPlanStateYSuscripcion(
       venueId,

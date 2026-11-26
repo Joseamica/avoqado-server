@@ -448,7 +448,7 @@ describe('GET /plan → POST /plan/checkout con la versión del editor (B2, Task
     expect(mockCustomerRetrieve).not.toHaveBeenCalled()
   })
 
-  it('🔴 Codex b2-code r2 #7: con una v2 dañada (o el puntero ilegible), GET /plan lee la suscripción con el tope corto y sin cotizacion; con Stripe lento, 200 degradado tras UNA llamada; con una v1 dañada, la llamada de hoy', async () => {
+  it('🔴 Codex b2-code r2 #7 + r3 R3-2: sólo con el puntero LEÍDO en una versión ≥ 2 de definición ilegible, GET /plan lee la suscripción con el tope corto y sin cotizacion (con Stripe lento, 200 degradado tras UNA llamada); con el puntero ilegible o una v1 dañada, la llamada de hoy', async () => {
     prismaMock.venueFeature.findMany.mockResolvedValue([
       { ...pruebaRegalada(-24), id: 'vf_pro', stripeSubscriptionId: 'sub_hoy', endDate: null },
     ])
@@ -475,7 +475,6 @@ describe('GET /plan → POST /plan/checkout con la versión del editor (B2, Task
     try {
       for (const ilegible of [
         () => prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv2', 2, { schemaVersion: 1, rota: true }) as never),
-        () => prismaMock.planOfferPointer.findUnique.mockRejectedValue(new Error('la base no contesta')),
       ]) {
         ilegible()
         mockSubRetrieve.mockReset().mockResolvedValue(deHoy)
@@ -502,13 +501,24 @@ describe('GET /plan → POST /plan/checkout con la versión del editor (B2, Task
         expect(lento.body.data).not.toHaveProperty('cotizacion')
       }
 
-      // Con una v1 dañada, la llamada de hoy, sin segundo argumento (el editor apagado no cambia ni en un estado anómalo).
-      prismaMock.planOfferPointer.findUnique.mockReset().mockResolvedValue(punteroA('cv1', 1, { schemaVersion: 1, rota: true }) as never)
-      mockSubRetrieve.mockReset().mockResolvedValue(deHoy)
-      lecturas.mockClear()
-      const v1 = await leerPlan()
-      expect(v1.status).toBe(200)
-      expect(lecturas.mock.calls).toEqual([['sub_hoy']])
+      // Con una v1 dañada, o con el puntero que no se puede leer (r3 R3-2: una lectura no se trata como un cobro), la llamada de hoy,
+      // sin segundo argumento y sin cotizacion: el editor apagado no cambia ni en un estado anómalo.
+      for (const deHoyIgual of [
+        () =>
+          prismaMock.planOfferPointer.findUnique
+            .mockReset()
+            .mockResolvedValue(punteroA('cv1', 1, { schemaVersion: 1, rota: true }) as never),
+        () => prismaMock.planOfferPointer.findUnique.mockReset().mockRejectedValue(new Error('la base no contesta')),
+      ]) {
+        deHoyIgual()
+        mockSubRetrieve.mockReset().mockResolvedValue(deHoy)
+        lecturas.mockClear()
+        const res = await leerPlan()
+        expect(res.status).toBe(200)
+        expect(res.body.data).not.toHaveProperty('cotizacion')
+        expect(lecturas.mock.calls).toEqual([['sub_hoy']])
+        expect(res.body.data).toMatchObject({ interval: 'month' })
+      }
     } finally {
       lecturas.mockRestore()
     }

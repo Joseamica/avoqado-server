@@ -326,9 +326,10 @@ export async function cotizarTuPlan(
  * (`conTarjeta`), con qué versión cotiza y si la suscripción se lee con el tope corto (`delEditor`).
  * - `vigente`: la versión del editor, o `null` sin ella o si leerla falla (b2-r9 #8: leer la oferta nunca tumba «Tu plan»; aviso y
  *   la respuesta de hoy, sin cotización).
- * - `delEditor`: hay una versión del editor, aunque no se pueda leer (Codex b2-code r2 #7, la regla de `versionDeLaConversion`): si
- *   la lectura lanza, decide el número del puntero (`numeroDeLaVigente`); en la v1 (dañada), `false` y la llamada a Stripe de hoy; en
- *   una versión del editor, sin número válido o con el puntero ilegible, `true`: la lectura con tope, sin cotización.
+ * - `delEditor`: hay una versión del editor, aunque su definición no se pueda leer (Codex b2-code r2 #7): si la lectura lanza,
+ *   decide el número del puntero (`numeroDeLaVigente`). Sólo con el puntero LEÍDO en una versión 2 o más, `true`: la lectura con
+ *   tope, sin cotización. 🔴 r3 R3-2 (la regla única: una lectura hace lo de hoy): en la v1 (dañada), sin número válido o con el
+ *   puntero ilegible, `false` y la llamada a Stripe de hoy.
  */
 export async function versionDeTuPlanSinRomper(venueId: string): Promise<{ vigente: OfertaVigente | null; delEditor: boolean }> {
   try {
@@ -341,7 +342,7 @@ export async function versionDeTuPlanSinRomper(venueId: string): Promise<{ vigen
       numero,
       error: error instanceof Error ? error.message : String(error),
     })
-    return { vigente: null, delEditor: numero !== 1 }
+    return { vigente: null, delEditor: numero !== null && numero >= 2 }
   }
 }
 
