@@ -874,8 +874,11 @@ export function savedGuidesNeed(
  * grande (WINDOWS) a 151 (182 con el 20 %), así que sube a 190 (158 entre 1.2). Ninguna app pasa de 160, así que la petición de
  * hoy es la misma con los dos topes; las ~23 guías de más agregan ~1,600 tokens (~US$0.0002 por mensaje sin caché), lejos del
  * tope de la barra 7.
+ * D36 (25-nov): las 18 guías de dinero ya probadas entran a la biblioteca y llevan WINDOWS a 160 (192 con el 20 %), así que sube
+ * a 200 (166 entre 1.2). Ninguna app pasa de 160, así que con 190 y con 200 la petición de hoy es la misma; las 6 guías de
+ * WINDOWS que entran agregan ~420 tokens (~US$0.00005 por mensaje sin caché), lejos del tope de la barra 7.
  */
-export const UNDERSTAND_INDEX_CAP = 190
+export const UNDERSTAND_INDEX_CAP = 200
 /** Los ids de las guías que cita una respuesta guardada (`id@hash8`); una aclaración aporta sus opciones. */
 export const guideIdsOf = (sourceIds: string[]): string[] =>
   sourceIds.flatMap(ref => (ref === '#clarify' ? [] : (parseSourceRef(ref)?.id ?? [])))
