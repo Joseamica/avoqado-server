@@ -11,6 +11,7 @@ money: true
 versionMin: 2.25.44
 sourceRepo: avoqado-android
 sourceRef: 78e5372f37ed7791d86fc1fe621d4a073e5a09ff
+deviceTested: 2026-11-25
 keywords:
   - cancelar tarjeta de regalo
   - devolver tarjeta de regalo
@@ -27,7 +28,7 @@ Cancelar pide el permiso de administrar tarjetas de regalo (de fábrica, gerente
 
 1. En *Más* › *Pedidos*, abre la venta pagada que dice *Tarjetas de regalo*.
 2. Toca *Cancelar venta*, lee cuántas tarjetas y cuánto se cancela, y toca *Cancelar venta* otra vez.
-3. Se abre la devolución del cobro: devuélvelo completo. Al terminar sale «¡Reembolso registrado!».
+3. Se abre *Emitir reembolso* por el cobro completo: elige el *Motivo del reembolso* y toca *Reembolsar …*. Al terminar sale «¡Reembolso registrado!».
 4. Si sale «Ahora devuelve completo cada cobro de esta venta.», toca *Devolver completo · …* en cada cobro que quede y devuélvelo igual.
 5. Si comprobaste que la devolución NO se hizo, toca *Liberar*, marca «Comprobé que la devolución NO se hizo» y toca *Liberar*: las tarjetas se pueden usar otra vez.
 

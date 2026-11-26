@@ -81,9 +81,24 @@
     "filasCreadas": []
   },
   "navegador": {
-    "estado": "NO PROBADO EN NAVEGADOR",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "DASHBOARD develop 1a878e36 (vite en :5903) + SERVIDOR aislado (develop 6409b3562 con #633, base av-db-25-d36) en :3004",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/l-03-aviso.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/l-04-poner-otro.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/l-05-quitar-confirmar.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/l-06-quitado.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/l-07-archivar-confirmar.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/l-08-archivada.png"
+    ],
+    "filasCreadas": [
+      "PaymentLink «QA D36 liga con descuento» ($200, descuento del catálogo) creada por la API del panel",
+      "PaymentLink «QA D36 liga para archivar» ($150) archivada",
+      "Discount FULLTEST-D38 9DSKI: validUntil puesto en ayer en la base desechable para vencerlo y regresado a null al terminar"
+    ],
+    "nota": "25-nov (D36): Ligas de pago: debajo del importe «⚠ Descuento vencido» con «Quitar descuento · Poner otro · Archivar». Poner otro abre «Editar liga de pago» con la sección Descuento (Sin descuento / Escribir descuento / Elegir del catálogo). Quitar descuento → «¿Quitar el descuento de esta liga?» («Quien abra la liga pagará el precio completo, también quien ya la recibió.») → Quitar descuento → «Descuento quitado». Archivar → «¿Archivar esta liga de pago?» → Archivar → «Archivada». Hallazgo menor: la liga ya archivada sigue enseñando el ⚠ con sus tres acciones. No se probaron los otros motivos (no disponible, horario, compra mínima)."
   },
   "codex": {
     "lote": 4,

@@ -116,9 +116,27 @@
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "aparato": "SAMSUNG del laboratorio del Alien (serial R8YL200592L)",
+    "version": "2.25.58-dev (develop 6afdcc28), copia de QA com.avoqado.pos.d36 compilada en la nube (avq-verify), contra el SERVIDOR aislado (develop 6409b3562 con #633, base av-db-25-d36) en :3004",
+    "apkSha256": "f4d8048d40f9014f141dc037c60f83afbcc5690bbdc02ec7ee949f12302adca5",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-30-pedidos.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-31-venta-tarjetas.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-32-cancelar-aviso.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-33-devolucion.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-34-motivo.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-36-venta-cancelada.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-38-sin-devolver.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-39-liberar.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-41-liberado.png"
+    ],
+    "filasCreadas": [
+      "ORD-0000000000013 ($1,500, 2 tarjetas): cancel-sale 200 + reembolso en efectivo −$1,500 → tarjetas DEACTIVATED",
+      "ORD-0000000000014 ($100, 1 tarjeta): cancelada sin devolver → Liberar → tarjeta ACTIVE"
+    ],
+    "nota": "25-nov (D36): Más › Pedidos → «Tarjetas de regalo» → panel con «Cancelar venta» → «Venta #ORD-…013: se cancelan juntas sus 2 tarjetas ($1,500.00)» → Cancelar venta → «Emitir reembolso» pide el «Motivo del reembolso» antes de «Reembolsar $1,500.00» (se corrigió el paso 3) → vuelve a Pedidos; la venta dice «Esta venta de tarjetas ya se canceló.» y las tarjetas «Cancelada». El aviso «¡Reembolso registrado!» no quedó en la foto (CuentaDeTarjetasScreen.kt:109; sí se vio en WINDOWS). Segunda venta: Cancelar venta → Cancelar en el reembolso → «Ahora devuelve completo cada cobro de esta venta.», «Devolver completo · Efectivo · $100.00», tarjeta «Bloqueada» → Liberar → casilla «Comprobé que la devolución NO se hizo» → Liberar → «Cancelar venta» de vuelta. No se probó: sin permiso de reembolso, sin red."
   },
   "codex": {
     "lote": 4,
