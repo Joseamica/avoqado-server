@@ -832,6 +832,9 @@ const priceSelectionSchema = z.object({
         .min(1, 'Elige al menos un módulo')
         .max(50, 'Son demasiados módulos'),
       pageUri: paginaSchema,
+      // Planes editables (B2, Task 10): la versión de la lista que vio la pestaña. `z.unknown()` a propósito (b2-r3 #8): sin versión
+      // del editor se ignora (con `null` o un texto también, como hoy, que el esquema la descartaba); su forma la revisa el servicio.
+      offerVersion: z.unknown().optional(),
     })
     .refine(body => !!body.nombre || !!body.telefono, { message: 'Escribe tu nombre o tu teléfono', path: ['nombre'] }),
 })

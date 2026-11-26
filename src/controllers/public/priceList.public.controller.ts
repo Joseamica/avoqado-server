@@ -19,9 +19,17 @@ export async function getPriceList(_req: Request, res: Response, next: NextFunct
 /** Recomputes everything from the live list: nothing the browser says about prices is trusted. */
 export async function postPriceSelection(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { nombre, telefono, ids, pageUri } = req.body as { nombre?: string; telefono?: string; ids: string[]; pageUri?: string }
+    const { nombre, telefono, ids, pageUri, offerVersion } = req.body as {
+      nombre?: string
+      telefono?: string
+      ids: string[]
+      pageUri?: string
+      offerVersion?: unknown
+    }
     const list = await getPublicPriceList()
-    const selection = priceSelection(list, ids)
+    // Planes editables (B2, Task 10): el esquema deja pasar `offerVersion` tal cual (`z.unknown()`); su forma la revisa `priceSelection`,
+    // y sólo si la lista cita su versión (con un valor que no es un entero, 409 como una versión vieja).
+    const selection = priceSelection(list, ids, offerVersion as number | undefined)
     const phone = telefonoParaWhatsApp(telefono)
     const sent = await emailService.sendPriceSelectionEmail(ONBOARDING_NOTIFY_EMAIL, {
       nombre: nombre || null,

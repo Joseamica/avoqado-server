@@ -18,6 +18,7 @@ import { elegirFilaDelPlan } from '../access/filaDelPlan'
 import { MARGEN_CHECKOUT_MS, MARGEN_OFERTA_MS, type FilaDePrueba } from './cobroDiferido'
 import {
   cotizarOpcion,
+  esPruebaRegaladaVigente,
   ofertaCambio,
   opcionDeTuPlan,
   opcionDelAlta,
@@ -26,7 +27,7 @@ import {
   type OpcionCotizada,
   type OpcionDeCompra,
 } from './opcionesDeCompra'
-import { codigoDelPlan, versionQueCobra, type OfertaVigente, type Periodicidad, type PlanPagado } from './planOffer'
+import { codigoDelPlan, numeroDeLaVigente, versionQueCobra, type OfertaVigente, type Periodicidad, type PlanPagado } from './planOffer'
 import type { CotizacionFirmada } from './comprobanteDeCotizacion'
 import { montoDelSiguienteCobro } from './siguienteCobro'
 import { LECTURA_ACOTADA, type TarjetaVisible } from './tarjetaQueCobraria'
@@ -466,4 +467,70 @@ export function leerPlanDeLaConversion(raw: unknown): PlanDeLaConversion | null 
   return leido.data.tier === 'FREE'
     ? { tier: 'FREE' }
     : { tier: leido.data.tier, interval: leido.data.interval, quoteToken: leido.data.quoteToken }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Los otros caminos de compra: funciones sueltas a Pro, el Básico (B2, Task 10, §11 F, §11.2)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Una prueba de Stripe vigente de ese plan: la fila del plan ligada a su suscripción, activa, sin suspender y con el fin de la prueba
+ * por venir. El aviso de Stripe sólo pone `endDate` mientras la suscripción está `trialing` (pagada, `null`).
+ */
+function esPruebaDeStripeVigente(fila: FilaDePrueba | null, tier: PlanPagado, ahoraMs: number): boolean {
+  return Boolean(
+    fila &&
+      fila.active &&
+      !fila.suspendedAt &&
+      fila.stripeSubscriptionId &&
+      fila.endDate &&
+      fila.endDate.getTime() >= ahoraMs &&
+      fila.feature.code === codigoDelPlan(tier),
+  )
+}
+
+/**
+ * La versión del editor que decide una compra nueva, leída sólo de la base (con `db`). Si no se puede leer, decide el número del
+ * puntero, como la conversión de demo (Task 8): en la v1 (o sin versiones), `null` con un aviso, el camino de hoy que nunca leyó la
+ * oferta; en una versión del editor, sin número válido o si ni el puntero se puede leer, el error (falla cerrado, sin cobrar).
+ */
+async function versionDelEditorParaComprar(db: Db, venueId: string): Promise<OfertaVigente | null> {
+  try {
+    return await versionQueCobra(db)
+  } catch (error) {
+    const numero = await numeroDeLaVigente(db).catch(() => null)
+    if (numero !== 1) throw error
+    logger.warn('Compra nueva: no se pudo leer la v1 de la oferta; sigue como hoy, sin versión del editor', {
+      venueId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return null
+  }
+}
+
+/**
+ * Lo que una compra NUEVA del Básico o de un plan necesita de la versión del editor (§11 F, §11.2), para los caminos que no cotizan
+ * con comprobante (las funciones sueltas a Pro por la compra híbrida, «Terminar mi Pro» del Básico):
+ * - sin versión del editor no hace nada (ni lee más que el puntero; sin `tier` ni `basico`, ni eso);
+ * - con ella, el Básico → 409 `PLAN_NOT_ON_SALE` (tier `BASICO`): se cierra en el código, no pausando su lista (`codex-r5.md` #10);
+ * - un `tier` fuera de venta → 409 `PLAN_NOT_ON_SALE`, salvo con una prueba vigente de ese plan (regalada o en Stripe).
+ *
+ * Con `db` = la `tx` del candado, todo se lee ahí. Lo ya aceptado, reservado o cobrado no pasa por aquí.
+ */
+export async function exigirCompraNuevaPermitida(
+  db: Prisma.TransactionClient | PrismaClient,
+  args: { venueId: string; tier: PlanPagado | null; basico: boolean },
+): Promise<void> {
+  const { venueId, tier, basico } = args
+  if (!tier && !basico) return
+  const vigente = await versionDelEditorParaComprar(db, venueId)
+  if (!vigente) return
+  if (basico) throw planFueraDeVenta('BASICO', 'Básico')
+  if (!tier) return
+  const plan = vigente.definition[tier]
+  if (plan.onSale) return
+  const fila = await leerFilaDelPlan(venueId, db)
+  const ahoraMs = Date.now()
+  if (esPruebaRegaladaVigente(fila, tier, ahoraMs) || esPruebaDeStripeVigente(fila, tier, ahoraMs)) return
+  throw planFueraDeVenta(tier, plan.displayName)
 }

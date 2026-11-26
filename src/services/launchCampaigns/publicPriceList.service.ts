@@ -1,6 +1,8 @@
 import { FEATURE_CATALOG, FEATURE_CATEGORIES, RETIRADAS_DE_LA_VENTA, type FeatureCatalogEntry } from '@/config/featureCatalog'
-import { BadRequestError } from '@/errors/AppError'
+import logger from '@/config/logger'
+import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { FREE_TIER_CODES } from '@/services/access/basePlan.service'
+import { versionQueCobra, type OfertaVigente } from '@/services/billing/planOffer'
 import prisma from '@/utils/prismaClient'
 import { HYBRID_DEPENDENCIES } from './hybridDependencies'
 import { listPriceBoard } from './hybridListPrice.service'
@@ -31,6 +33,11 @@ export interface PublicPlan {
 export interface PublicPriceList {
   plans: PublicPlan[]
   features: PublicFeature[]
+  /**
+   * Planes editables (B2, Task 10): el número de la versión del editor de la que salieron los planes. Sólo con una versión del editor;
+   * la selección tiene que citar el mismo (`priceSelection`).
+   */
+  offerVersion?: number
 }
 export interface PriceOption {
   kind: 'SUELTO' | PlanTier
@@ -61,6 +68,13 @@ export const CATEGORY_LABELS: Record<string, string> = {
 }
 
 export class PriceListChangedError extends BadRequestError {
+  constructor() {
+    super('Un módulo cambió o ya no está disponible. Recarga la página.', 'PRICE_LIST_CHANGED')
+  }
+}
+
+/** La pestaña se abrió con otra versión de la oferta (o sin ella): 409 con el código y el texto de hoy, que la página ya recarga. */
+export class PriceListVersionChangedError extends ConflictError {
   constructor() {
     super('Un módulo cambió o ya no está disponible. Recarga la página.', 'PRICE_LIST_CHANGED')
   }
@@ -98,13 +112,89 @@ async function publishedPlanCodes(): Promise<Map<PlanTier, Set<string>>> {
   )
 }
 
+/**
+ * La versión del editor que arma los planes (`versionQueCobra()`), o `null`. Leer la oferta nunca tumba la lista pública (b2-r8 #10):
+ * si falla (p. ej. una v1 dañada), `null` con un aviso, y la lista de hoy.
+ */
+async function versionDelEditorSinRomper(): Promise<OfertaVigente | null> {
+  try {
+    return await versionQueCobra()
+  } catch (error) {
+    logger.warn('Lista de precios: no se pudo leer la oferta de los planes; se arma la de hoy, del tablero', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return null
+  }
+}
+
+interface PlanesDeLaLista {
+  plans: PublicPlan[]
+  composition: Map<PlanTier, Set<string>>
+}
+
+/**
+ * Planes editables (B2, Task 10, b2-r1 #12): los planes de UNA foto de la versión, por su id (sus filas no cambian): el precio mensual
+ * con IVA de su definición (en pesos), su nombre, y la composición de las publicaciones de su `hybridPublicationIds` (también
+ * inmutables). Un plan fuera de venta no sale. Un plan en venta cuya publicación no se encuentra tampoco: no se puede decir qué
+ * incluye (aviso; no debería pasar, el publicador exige las dos listas antes de mover el puntero).
+ */
+async function planesDeLaVersion(vigente: OfertaVigente): Promise<PlanesDeLaLista> {
+  const fila = vigente.versionId
+    ? await prisma.planOfferVersion.findUnique({ where: { id: vigente.versionId }, select: { hybridPublicationIds: true } })
+    : null
+  const ligadas = (fila?.hybridPublicationIds ?? null) as Partial<Record<PlanTier, unknown>> | null
+  const idDe = (tier: PlanTier): string | null => {
+    const id = ligadas?.[tier]
+    return typeof id === 'string' ? id : null
+  }
+  const ids = TIERS.flatMap(tier => idDe(tier) ?? [])
+  const publications = ids.length
+    ? await prisma.hybridOfferPublication.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, includedFeatureCodes: true },
+        take: ids.length,
+      })
+    : []
+  const codes = new Map(publications.map(p => [p.id, p.includedFeatureCodes]))
+  const plans: PublicPlan[] = []
+  const composition = new Map<PlanTier, Set<string>>()
+  for (const tier of TIERS) {
+    const plan = vigente.definition[tier]
+    if (!plan.onSale) continue
+    const id = idDe(tier)
+    const incluidas = id ? codes.get(id) : undefined
+    if (!incluidas) {
+      logger.warn('Lista de precios: la versión vigente no trae la lista híbrida de un plan en venta; ese plan no se ofrece', {
+        tier,
+        versionId: vigente.versionId,
+        number: vigente.number,
+      })
+      continue
+    }
+    plans.push({ tier, name: plan.displayName, price: plan.monthly.grossCents / 100 })
+    composition.set(tier, new Set(incluidas))
+  }
+  return { plans, composition }
+}
+
 export async function getPublicPriceList(): Promise<PublicPriceList> {
-  const [board, composition] = await Promise.all([listPriceBoard(), publishedPlanCodes()])
+  // Planes editables (B2, Task 10): con una versión del editor los planes salen de una sola foto de ella; las funciones sueltas, del
+  // tablero. Sin ella (o si leer la oferta falla), todo del tablero, como hoy.
+  const vigente = await versionDelEditorSinRomper()
+  const [board, composition, deLaVersion] = await Promise.all([
+    listPriceBoard(),
+    vigente ? null : publishedPlanCodes(),
+    vigente ? planesDeLaVersion(vigente) : null,
+  ])
   const onSale = new Map(board.filter(r => r.status === 'ACTIVE' && r.price !== null).map(r => [r.productKey, r.price as number]))
-  const plans = TIERS.flatMap(tier => {
-    const price = onSale.get(`PLAN:${tier}`)
-    return price === undefined ? [] : [{ tier, name: tier === 'PRO' ? 'Pro' : 'Premium', price }]
-  })
+  const foto: PlanesDeLaLista = deLaVersion ?? {
+    plans: TIERS.flatMap(tier => {
+      const price = onSale.get(`PLAN:${tier}`)
+      return price === undefined ? [] : [{ tier, name: tier === 'PRO' ? 'Pro' : 'Premium', price }]
+    }),
+    composition: composition ?? new Map(),
+  }
+  const plans = foto.plans
   const order = (category: string) => (FEATURE_CATEGORIES as readonly string[]).indexOf(category)
   const features = FEATURE_CATALOG.filter(entry => !RETIRADAS_DE_LA_VENTA.includes(entry.id))
     .sort((a, b) => order(a.category) - order(b.category))
@@ -123,7 +213,7 @@ export async function getPublicPriceList(): Promise<PublicPriceList> {
           requires: entry.featureCode ? [...(HYBRID_DEPENDENCIES[entry.featureCode] ?? [])] : [],
           kind,
           price,
-          includedIn: plans.filter(p => entry.featureCode && composition.get(p.tier)?.has(entry.featureCode)).map(p => p.tier),
+          includedIn: plans.filter(p => entry.featureCode && foto.composition.get(p.tier)?.has(entry.featureCode)).map(p => p.tier),
         },
       ]
     })
@@ -136,15 +226,19 @@ export async function getPublicPriceList(): Promise<PublicPriceList> {
     changed = next.length !== sellable.length
     sellable = next
   }
-  return { plans, features: sellable }
+  return { plans, features: sellable, ...(vigente ? { offerVersion: vigente.number } : {}) }
 }
 
 /**
  * The money of the «B» option, in integer cents. The page mirrors it only to paint; the e-mail uses this one.
  * Loose = Σ ticked loose functions (and their paid requirements); each plan = its price + the loose ones it does not sell.
- * The cheapest wins; ties go to the first of SUELTO, PRO, PREMIUM.
+ * The cheapest wins; ties go to the first of SUELTO, PRO, PREMIUM. `offerVersion` is the one the tab read (`list.offerVersion`).
  */
-export function priceSelection(list: PublicPriceList, ids: string[]): PriceSelection {
+export function priceSelection(list: PublicPriceList, ids: string[], offerVersion?: number): PriceSelection {
+  // Planes editables (B2, Task 10): una lista que cita su versión exige la misma, entera (una pestaña vieja, sin ella o con otra, 409 y
+  // recarga). Una lista sin versión (sin versión del editor) ignora la que llegue (b2-r3 #8).
+  if (list.offerVersion !== undefined && (!Number.isInteger(offerVersion) || offerVersion !== list.offerVersion))
+    throw new PriceListVersionChangedError()
   const byId = new Map(list.features.map(f => [f.id, f]))
   if (new Set(ids).size !== ids.length) throw new PriceListChangedError()
   const picked = new Set<string>()

@@ -35,6 +35,7 @@ import { precioConDescuentoCents } from '../billing/descuentoDelPlan'
 import { isLastDiscountedPeriod } from '../billing/ultimoPeriodoConDescuento'
 import { BASIC_PLAN_DEFINITION_WHERE, isBasicPlanDefinition } from '@/services/launchCampaigns/basicPlanAccess'
 import { activeGrantWhere } from '@/services/access/capabilityGrants.service'
+import { exigirCompraNuevaPermitida } from '../billing/cotizacionDeLaOferta'
 
 /** Win-back coupon offered in the cancellation confirmation email (see scripts/seed-retention-coupon.ts). */
 const CANCELLATION_WINBACK_COUPON = 'WINBACK_30_1M'
@@ -678,7 +679,12 @@ async function setCancelIntent(venueId: string, cancel: boolean, input: CancelPl
 
 /** Schedule cancellation at period end (venue stays entitled until currentPeriodEnd), with the owner's reason if given. */
 export async function cancelPlan(venueId: string, input: CancelPlanInput = {}): Promise<PlanState> {
-  if (input.purpose === 'BASIC_PLAN') await assertProCanEndForBasic(venueId)
+  if (input.purpose === 'BASIC_PLAN') {
+    // Planes editables (B2, Task 10, §11.2): con una versión del editor el Básico ya no se vende, así que «Terminar mi Pro» para
+    // pasar a él responde 409 PLAN_NOT_ON_SALE antes de programar nada (ni Stripe). Sin versión del editor, lo de hoy.
+    await exigirCompraNuevaPermitida(prisma, { venueId, tier: null, basico: true })
+    await assertProCanEndForBasic(venueId)
+  }
   return setCancelIntent(venueId, true, input)
 }
 
