@@ -14,6 +14,7 @@ import {
   SUPPORT_MANUAL_DIRECTORY,
   type LibrarySource,
 } from '@/services/support/libraryFiles'
+import { buildManifest } from '../../../../scripts/support-eval/aprobar-biblioteca'
 import {
   MANUAL_EVAL_DIRECTORY,
   readInventory,
@@ -36,6 +37,8 @@ const TITLE_END: Record<HelpApp, RegExp> = {
   dashboard: / en el panel$/,
 }
 const FAMILY_END = { PAX: / PAX$/, NEXGO: / Nexgo$/ }
+/** Páginas de dinero cuyo permiso trae otra rama (la de D42 las está editando): quien se lo ponga borra su renglón. */
+const PERMISO_EN_OTRA_RAMA = new Set(['android/lealtad/aplicar-premio-de-sellos', 'windows/lealtad/aplicar-premio-de-sellos'])
 const CHECKS = ['parses', 'deviceTested', 'browserTested', 'permissions', 'contact', 'sizes', 'titles', 'inventory'] as const
 type Problems = Record<(typeof CHECKS)[number], string[]>
 
@@ -95,14 +98,16 @@ function manualProblems(manualDir: string, evalRoot: string): Problems {
       problems.browserTested.push(`${id}: browserTested sin navegador PROBADO`)
     for (const permission of page.gates?.requiredPermissions ?? [])
       if (!isValidPermission(permission)) problems.permissions.push(`${id}: ${permission}`)
-    // hz:be99f328:D44: una página de dinero que entra a la biblioteca lleva candado; sin él, el bot le enseña los pasos a quien
-    // no puede hacerlos sin decirle que lo pida. La que todavía no entra (le falta su prueba) o está retirada se decide al
-    // probarla. Un `featureCode` con `CORE` no cuenta: el cargador lo tira (parseGates).
-    const gates = page.gates
-    const plan = !!gates?.featureCode && gates.gateKind !== 'CORE'
+    // hz:be99f328:D44: una página de dinero que entra a la biblioteca lleva candado de PERMISO; sin él, el bot le enseña los
+    // pasos a quien no puede hacerlos sin decirle que lo pida (el plan o el ajuste no dicen quién puede). La que todavía no
+    // entra (le falta su prueba) o está retirada se decide al probarla.
     const loads = sources.includes(page) && !retired.has(id)
-    if (page.money && loads && !gates?.requiredPermissions.length && !plan && !gates?.activationKey)
-      problems.permissions.push(`${id}: página de dinero sin candado`)
+    const withPermission = !!page.gates?.requiredPermissions.length
+    if (page.money && loads && !withPermission && !PERMISO_EN_OTRA_RAMA.has(id))
+      problems.permissions.push(`${id}: página de dinero sin candado de permiso`)
+    // La excepción caduca sola: en cuanto la página trae su permiso, su renglón sobra y se borra.
+    if (PERMISO_EN_OTRA_RAMA.has(id) && withPermission)
+      problems.permissions.push(`${id}: ya trae su permiso; borra su renglón de PERMISO_EN_OTRA_RAMA`)
     const text = `${page.title}\n${page.summary}\n${page.body}`
     if (CONTACT.some(re => re.test(text)) || hasPhone(text)) problems.contact.push(`${id}: trae un enlace, correo o teléfono`)
     if (steps.length > 6 || steps.some(s => s.length > 220) || page.summary.length > 160)
@@ -143,6 +148,12 @@ describe('manual pages (src/assets/mcp-support-manual)', () => {
   })
   it('every manual page is referenced by an inventory row', () => {
     expect(real.inventory).toEqual([])
+  })
+  // hz:be99f328:D44: el bot avisa con los candados del MANIFIESTO, no con los del archivo. Regenerarlo no cambia nada: una unión
+  // que deja una entrada con el hash al día pero sin el permiso de su frontmatter se cae aquí, no en la firma.
+  it('the committed manifest carries the same candados and hashes that regenerating it would write', () => {
+    const manifest = JSON.parse(fs.readFileSync(SUPPORT_LIBRARY_MANIFEST, 'utf8'))
+    expect(buildManifest(manifest, readLibrarySources()).guides).toEqual(manifest.guides)
   })
 })
 
@@ -281,7 +292,7 @@ ${o.steps.length ? `\n## Pasos\n\n${o.steps.map((s, i) => `${i + 1}. ${s}`).join
     ])
   })
 
-  it('a money page that enters the library without any candado is caught (D44); with its permission it passes', () => {
+  it('a money page that enters the library without a permission candado is caught, even with a plan (D44); with its permission it passes', () => {
     const id = 'tpv/cobro/cobrar-en-efectivo'
     const write = (permissions: string) =>
       put(
@@ -300,11 +311,14 @@ ${o.steps.length ? `\n## Pasos\n\n${o.steps.map((s, i) => `${i + 1}. ${s}`).join
       JSON.stringify({ ...evidence(id, { pasos: [1] }), aparato: { ...probada, fotos: ['f.png'], filasCreadas: [] } }),
     )
     put(evalRoot, 'inventario/tpv.json', JSON.stringify(inventory('tpv', [id])))
+    const red = [`${id}: página de dinero sin candado de permiso`]
     write('requiredPermissions: []')
-    expect(manualProblems(manual, evalRoot).permissions).toEqual([`${id}: página de dinero sin candado`])
-    // Un plan con `CORE` no es candado: el cargador lo tira.
-    write('requiredPermissions: []\nfeatureCode: TABLE_SERVICE\ngateKind: CORE')
-    expect(manualProblems(manual, evalRoot).permissions).toEqual([`${id}: página de dinero sin candado`])
+    expect(manualProblems(manual, evalRoot).permissions).toEqual(red)
+    // El plan dice si el negocio la tiene, no quién puede hacerla: sin permiso sigue en rojo.
+    write('requiredPermissions: []\nfeatureCode: TABLE_SERVICE\ngateKind: FEATURE')
+    expect(manualProblems(manual, evalRoot).permissions).toEqual(red)
+    write('requiredPermissions:\n  - payments:create\nfeatureCode: TABLE_SERVICE\ngateKind: FEATURE')
+    expect(manualProblems(manual, evalRoot)).toEqual(Object.fromEntries(CHECKS.map(c => [c, []])))
     write('requiredPermissions:\n  - payments:create')
     expect(manualProblems(manual, evalRoot)).toEqual(Object.fromEntries(CHECKS.map(c => [c, []])))
   })
