@@ -2003,7 +2003,12 @@ export async function activatePlan(
   // ilegible) cierra con SU modalidad: pagó o no, sin tarjeta o con cuál, de qué versión y a qué precio. Nunca la del cuerpo
   // ni la del comprobante: un reenvío que pide otra cosa (u otra versión) no cambia lo que Stripe ya cobró.
   // B2 Task 6: también una suscripción REUSADA al pedir la prueba sin tarjeta: no es la que se pidió, así que cierra con lo suyo.
-  const recuperada = (recuperacionDiferida && suscripcionRecuperada) || (sinTarjetaPedido && reused) ? modalidadCobrada(sub) : null
+  // 🔴 Codex b2-code r2 N2: y una recuperada que es de una versión del editor (su metadata `planOfferVersion`, que sólo ponen las
+  // compras con comprobante), sea cual sea el tipo del cuerpo: un reenvío de CAMPAÑA que recupera una compra estándar de la v2 cierra
+  // con la tarjeta, la versión y el pagar-hoy de esa suscripción. Sin esa metadata (B1), la del cuerpo, como hoy.
+  const recuperadaDelEditor = Boolean(suscripcionRecuperada?.metadata?.planOfferVersion)
+  const recuperada =
+    (recuperacionDiferida && suscripcionRecuperada) || recuperadaDelEditor || (sinTarjetaPedido && reused) ? modalidadCobrada(sub) : null
   /** B2 Task 6: un intento NUEVO de prueba sin tarjeta (la recuperada cierra con su propia modalidad, b2-r7 #6). */
   const sinTarjetaNuevo = recuperada === null && sinTarjetaPedido
   const payNowCobrado = recuperada ? recuperada.pagada : noLaCreamosConElCupon ? yaCobrada : campaign ? true : input.payNow

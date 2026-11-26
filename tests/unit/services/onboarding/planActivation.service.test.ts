@@ -723,6 +723,44 @@ describe('recuperación de un intento desconocido', () => {
     expect(acciones.find(a => a.action === 'LAUNCH_CAMPAIGN_REDEEMED')).toBeUndefined()
   })
 
+  it('🔴 Codex b2-code r2 N2: un reenvío de CAMPAÑA recupera una compra ESTÁNDAR de la v2 pagada y sin entregar → el plan guardado lleva la tarjeta, la versión y el pagar-hoy de ESA suscripción, no los del cuerpo; sin planOfferVersion, B1 literal (la tarjeta del cuerpo)', async () => {
+    const periodo = Math.floor(new Date('2026-10-26T00:00:00Z').getTime() / 1000)
+    const deLaSuscripcion = (metadata: Record<string, string>) => ({
+      id: 'sub_rec',
+      status: 'active',
+      // La tarjeta con que se pagó la compra estándar; el reenvío trae otra del mismo cliente (`pm_1`).
+      default_payment_method: 'pm_suyo',
+      metadata: { planActivationKey: 'plan-activation:org-1:1', featureCode: 'PLAN_PRO', ...metadata },
+      discounts: [],
+      latest_invoice: { amount_paid: 92684 },
+      current_period_end: periodo,
+      items: { data: [{ current_period_end: periodo, price: { unit_amount: 92684, recurring: { interval: 'month' } } }] },
+    })
+    for (const [metadata, esperado] of [
+      [
+        { planOfferVersion: '2', planOfferPrecioDe: '2' },
+        { paymentMethodId: 'pm_suyo', offerVersion: 2, payNow: true },
+      ],
+      [{}, { paymentMethodId: 'pm_1' }],
+    ] as const) {
+      const sub = deLaSuscripcion(metadata)
+      mockSubList.mockReturnValue({
+        autoPagingEach: async (cb: (s: unknown) => boolean) => {
+          cb(sub)
+        },
+      })
+      mockSubRetrieve.mockResolvedValue(sub)
+      prismaMock.$executeRaw.mockClear()
+
+      // El 409 de «la oferta no aplicó» sale DESPUÉS del cierre: lo cobrado ya quedó entregado y guardado.
+      await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({ code: 'PLAN_ACTIVE_WITHOUT_OFFER' })
+
+      expect(mockSubCreate).not.toHaveBeenCalled()
+      expect(planDelCierre()).toMatchObject({ tier: 'PRO', interval: 'monthly', offer: { kind: 'STANDARD' }, ...esperado })
+      if (!('offerVersion' in esperado)) expect(planDelCierre()).not.toHaveProperty('offerVersion')
+    }
+  })
+
   it('🔴 el id se persiste EN CUANTO la suscripción existe, no al cerrar el éxito', async () => {
     // Lo que importa es el ORDEN: el id tiene que quedar guardado ANTES de cerrar el éxito. Si
     // sólo se guardara al cerrar, un fallo entre el cobro y ese cierre deja al reintento sin
