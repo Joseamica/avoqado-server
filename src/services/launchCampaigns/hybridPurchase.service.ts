@@ -524,10 +524,13 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
           return p.campaign.promotionGroupId ? (productKeyOf(hybridOfferDefinition.parse(p.definition)) ?? []) : []
         }),
       )
-      // Planes editables (B2, Task 10): con la tx y bajo los candados de producto (el publicador mueve el puntero de la oferta con esos
-      // mismos), ANTES del claim: la misma revisión de venta y, con una línea de plan, que la cotización cite la vigente (sin
-      // `offerVersion`, la v1; el respaldo y la v1 cuentan como 1). Una cotización tomada con la v1 se niega desde la primera
-      // publicación del editor aunque la v2 haya reusado la misma publicación híbrida (b2-r2 #9). Lo ya aceptado no pasa por aquí.
+      // Planes editables (B2, Task 10): con la tx y bajo los candados de producto, ANTES del claim: la misma revisión de venta y, con
+      // una línea de plan, que la cotización cite la vigente (sin `offerVersion`, la v1; el respaldo y la v1 cuentan como 1). Una
+      // cotización tomada con la v1 se niega desde la primera publicación del editor aunque la v2 haya reusado la misma publicación
+      // híbrida (b2-r2 #9). Lo ya aceptado no pasa por aquí. El publicador mueve el puntero con los candados de las listas de Pro y
+      // Premium (`LIST`): sólo esas líneas quedan en fila con él. El Básico (`PLAN:BASICO`) y una promoción fuera de grupo no toman
+      // ese candado: en el milisegundo de la publicación una compra puede pasar con el precio que la persona vio (residuo aceptado en
+      // Global Constraints; ni monto equivocado ni doble cobro).
       const lineaDePlan = saved.lines.find(line => line.planTier !== null)
       await exigirCompraNuevaPermitida(tx, { venueId, tier: lineaDePlan?.planTier ?? null, basico })
       if (lineaDePlan && (saved.offerVersion ?? 1) !== (await numeroDeLaVigente(tx))) throw offerChanged()

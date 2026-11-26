@@ -184,7 +184,10 @@ describe('B2 Task 10 · lista de precios y ofertas públicas con la versión del
     expect(res.status).toBe(200)
     expect(res.body.data.items.map((i: { slug: string }) => i.slug)).toEqual(['plan-basico', 'promo-0', 'promo-1'])
     expect(res.body.data.items[0].purchaseAvailable).toBe(true)
-    expect(logger.warn).toHaveBeenCalled()
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Ofertas públicas: no se pudo leer la oferta de los planes; el Básico sale como hoy',
+      expect.anything(),
+    )
   })
 
   it('🔴 b2-r8 #8 (el caso de Codex): con la v2, GET /api/v1/public/hybrid-offers/<slug del Básico> → purchaseAvailable false; sin versión del editor, true como hoy', async () => {
