@@ -19,10 +19,11 @@ process.env.COOKIE_SECRET = process.env.COOKIE_SECRET || 'test-cookie-secret'
 process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://user:pass@localhost:5432/testdb?schema=public'
 
 const mockPortalCreate = jest.fn()
+const mockCustomerCreate = jest.fn()
 jest.mock('stripe', () =>
   jest.fn().mockImplementation(() => ({
     billingPortal: { sessions: { create: mockPortalCreate } },
-    customers: { create: jest.fn(), retrieve: jest.fn() },
+    customers: { create: mockCustomerCreate, retrieve: jest.fn() },
   })),
 )
 jest.mock('../../../src/config/session', () => {
@@ -37,6 +38,7 @@ import request from 'supertest'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 import { definicionDePrueba, idsDeLaVersion, punteroA, versionUno } from '@tests/__helpers__/planOfferFixtures'
+import { MENSAJE_PLAN_NO_CONFIGURADO } from '@/services/billing/planOffer'
 
 const app = require('../../../src/app').default
 
@@ -150,5 +152,39 @@ describe('POST /dashboard/venues/:venueId/billing-portal — el flujo de la tarj
     // Una sola llamada, la del flujo: nunca un segundo intento con el portal genérico.
     expect(mockPortalCreate).toHaveBeenCalledTimes(1)
     expect(mockPortalCreate.mock.calls[0][0]).toHaveProperty('flow_data')
+  })
+
+  it('🔴 fix round 1: con flujo PONER_TARJETA y la oferta ilegible (versionQueCobra lanza) → 503 PLAN_NOT_CONFIGURED, sin portal ni cliente nuevo; sin flujo, el portal de hoy', async () => {
+    // Una versión guardada que no pasa el esquema: leerla lanza.
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv2', 2, { schemaVersion: 1, rota: true }) as never)
+    // Un negocio todavía sin cliente de Stripe: el 503 sale ANTES de crearlo.
+    prismaMock.venue.findFirst.mockResolvedValue({
+      id: venueId,
+      name: 'Negocio de prueba',
+      slug: 'negocio',
+      stripeCustomerId: null,
+      organizationId: 'org_test',
+    } as never)
+
+    const res = await abrir({ flujo: 'PONER_TARJETA' })
+
+    expect(res.status).toBe(503)
+    expect(res.body).toMatchObject({ code: 'PLAN_NOT_CONFIGURED', message: MENSAJE_PLAN_NO_CONFIGURADO })
+    expect(mockPortalCreate).not.toHaveBeenCalled()
+    expect(mockCustomerCreate).not.toHaveBeenCalled()
+
+    // Sin `flujo`, la oferta ni se lee: el portal de hoy, exactamente como hoy.
+    prismaMock.venue.findFirst.mockResolvedValue({
+      id: venueId,
+      name: 'Negocio de prueba',
+      slug: 'negocio',
+      stripeCustomerId: 'cus_1',
+      organizationId: 'org_test',
+    } as never)
+    prismaMock.planOfferPointer.findUnique.mockClear()
+    const deHoy = await abrir({})
+    expect(deHoy.status).toBe(200)
+    expect(mockPortalCreate.mock.calls).toEqual([[CUERPO_DE_HOY]])
+    expect(prismaMock.planOfferPointer.findUnique).not.toHaveBeenCalled()
   })
 })

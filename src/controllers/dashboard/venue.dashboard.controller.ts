@@ -518,8 +518,9 @@ export async function getVenuePlan(req: Request<{ venueId: string }>, res: Respo
   try {
     const { venueId } = req.params
     // Planes editables (B2, Task 7): con versión del editor, «Tu plan» trae `cotizacion` (de la MISMA lectura de Stripe). Sin ella, o
-    // si leer la oferta falla, `data` es exactamente `getPlanState`, como hoy.
-    const { planState, suscripcion } = await planStateService.getPlanStateYSuscripcion(venueId)
+    // si leer la oferta falla, `data` es exactamente `getPlanState`, como hoy. `conTarjeta`: sólo aquí se lee qué tarjeta cobraría una
+    // prueba sin tarjeta (una suscripción de hoy no lee nada más).
+    const { planState, suscripcion } = await planStateService.getPlanStateYSuscripcion(venueId, { conTarjeta: true })
     const cotizacion = await cotizacionDeTuPlanSinRomper(venueId, planState, suscripcion)
     res.status(200).json({ success: true, data: cotizacion ? { ...planState, cotizacion } : planState })
   } catch (error) {

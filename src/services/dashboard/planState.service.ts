@@ -408,7 +408,8 @@ export async function getPlanState(
   venueId: string,
   options: { skipPauseOffer?: boolean; stripeTimeoutMs?: number } = {},
 ): Promise<PlanState> {
-  return (await getPlanStateYSuscripcion(venueId, options)).planState
+  return (await getPlanStateYSuscripcion(venueId, { skipPauseOffer: options.skipPauseOffer, stripeTimeoutMs: options.stripeTimeoutMs }))
+    .planState
 }
 
 /**
@@ -418,7 +419,11 @@ export async function getPlanState(
  */
 export async function getPlanStateYSuscripcion(
   venueId: string,
-  options: { skipPauseOffer?: boolean; stripeTimeoutMs?: number } = {},
+  /**
+   * `conTarjeta` (fix round 1): con una prueba SIN tarjeta, leer también qué tarjeta cobraría Stripe (`origin.faltaTarjeta`). Sólo
+   * `GET /plan`; `getPlanState` nunca lo pide.
+   */
+  options: { skipPauseOffer?: boolean; stripeTimeoutMs?: number; conTarjeta?: boolean } = {},
 ): Promise<{ planState: PlanState; suscripcion: ResumenDeLaSuscripcionDelPlan | null }> {
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
@@ -465,8 +470,13 @@ export async function getPlanStateYSuscripcion(
   let stripeSub: ResumenDeLaSuscripcionDelPlan | null = null
   if (vf.stripeSubscriptionId) {
     try {
-      stripeSub = options.stripeTimeoutMs
-        ? await retrievePlanSubscription(vf.stripeSubscriptionId, { timeoutMs: options.stripeTimeoutMs })
+      // Sin `conTarjeta`, las llamadas de siempre (los mismos argumentos).
+      const lectura = {
+        ...(options.stripeTimeoutMs ? { timeoutMs: options.stripeTimeoutMs } : {}),
+        ...(options.conTarjeta ? { conTarjeta: true } : {}),
+      }
+      stripeSub = Object.keys(lectura).length
+        ? await retrievePlanSubscription(vf.stripeSubscriptionId, lectura)
         : await retrievePlanSubscription(vf.stripeSubscriptionId)
     } catch (error) {
       logger.warn('getPlanState: failed to retrieve Stripe subscription; degrading to nulls', {

@@ -33,8 +33,6 @@ function subSummary(overrides: Record<string, unknown> = {}) {
     descuento: null as import('@/services/billing/descuentoDelPlan').DescuentoDelPlan | null,
     // Planes editables (B2, Task 7): una suscripción de hoy no es una prueba sin tarjeta (lo que ya asumía cada aserción).
     sinTarjeta: false,
-    faltaTarjeta: false,
-    tarjetaQueCobrara: null as import('@/services/billing/tarjetaQueCobraria').TarjetaVisible | null,
     trialEnd: null as Date | null,
     noHabraCobro: false,
     ...overrides,

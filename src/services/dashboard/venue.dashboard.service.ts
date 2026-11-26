@@ -31,7 +31,7 @@ import { storeCreditAvailable } from '../storeCredit/storeCreditTender'
 import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
 import { Venue, AccountType, EntityType, StaffRole, VerificationStatus, VenueStatus, VenueOperationalRole, VenueType } from '@prisma/client'
-import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import AppError, { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { PAID_PLAN_TIER_CODES } from '../access/basePlan.service'
 import { elegirFilaDelPlan } from '../access/filaDelPlan'
 import { MARGEN_CHECKOUT_MS, finDePruebaDiferible } from '../billing/cobroDiferido'
@@ -56,7 +56,7 @@ import {
 import { autorizarObligacionNueva } from '../access/autorizarObligacionNueva'
 import { exigirPrecioDeStripe, resolverPrecioDelPlan } from '../billing/precioDelPlan'
 import { exigirNombreDelPlanAlDia } from '../billing/nombreDelPlanEnStripe'
-import { versionQueCobra, type OfertaVigente } from '../billing/planOffer'
+import { MENSAJE_PLAN_NO_CONFIGURADO, versionQueCobra, type OfertaVigente } from '../billing/planOffer'
 import { exigirLaMismaCompra, leerFilaDelPlan, revisarCompraDeTuPlan } from '../billing/cotizacionDeLaOferta'
 import { STANDARD_PLAN_GROSS_CENTS } from '../access/planPricing.constants'
 import { ventaSueltaAbierta } from '../access/ventaSuelta'
@@ -1607,7 +1607,8 @@ export async function createVenueBillingPortalSession(
   returnUrl: string,
   /**
    * `flujo` (planes editables, B2 Task 7, §17): sin revisar. Sólo `PONER_TARJETA` con una versión del editor abre el portal en el
-   * flujo de la tarjeta; cualquier otro valor, o sin versión del editor, el portal de hoy.
+   * flujo de la tarjeta; cualquier otro valor, o sin versión del editor, el portal de hoy. Con `PONER_TARJETA` y la oferta ilegible,
+   * 503 `PLAN_NOT_CONFIGURED` (fix round 1): el botón de la tarjeta nunca abre el portal genérico.
    */
   options: { skipOrgCheck?: boolean; flujo?: unknown } = {},
 ): Promise<string> {
@@ -1631,6 +1632,9 @@ export async function createVenueBillingPortalSession(
   if (!venue) {
     throw new NotFoundError(`Venue with ID ${venueId} not found`)
   }
+
+  // Planes editables (B2, Task 7): se decide ANTES de crear nada (con la oferta ilegible, el 503 no deja un cliente nuevo a medias).
+  const conFlujo = await pideElFlujoDeLaTarjeta(venueId, options.flujo)
 
   // If venue doesn't have Stripe customer, create one
   let stripeCustomerId = venue.stripeCustomerId
@@ -1693,7 +1697,7 @@ export async function createVenueBillingPortalSession(
   }
 
   // Create portal session
-  const portalUrl = (await pideElFlujoDeLaTarjeta(venueId, options.flujo))
+  const portalUrl = conFlujo
     ? await createCustomerPortalSession(stripeCustomerId, returnUrl, { flujo: 'PONER_TARJETA' })
     : await createCustomerPortalSession(stripeCustomerId, returnUrl)
 
@@ -1707,19 +1711,19 @@ export async function createVenueBillingPortalSession(
 
 /**
  * Planes editables (B2, Task 7): ¿se abre el portal en el flujo de la tarjeta? Sólo `PONER_TARJETA` con una versión del editor (la
- * prueba sin tarjeta sólo existe con ella). Si leer la oferta falla, el portal de hoy: no se cobra nada y «Tu plan» tampoco ofrece
- * «Poner mi tarjeta» sin su cotización.
+ * prueba sin tarjeta sólo existe con ella); sin `flujo` no se lee nada. Con `PONER_TARJETA` y la oferta ilegible, el 503 de «plan no
+ * configurado» de las compras (fix round 1, como `tarjeta-de-la-prueba`): el botón de la tarjeta nunca abre el portal genérico.
  */
 async function pideElFlujoDeLaTarjeta(venueId: string, flujo: unknown): Promise<boolean> {
   if (flujo !== 'PONER_TARJETA') return false
   try {
     return (await versionQueCobra()) !== null
   } catch (error) {
-    logger.warn('billing-portal: no se pudo leer la oferta; se abre el portal de hoy', {
+    logger.warn('billing-portal: no se pudo leer la oferta; el botón de la tarjeta no abre el portal', {
       venueId,
       error: error instanceof Error ? error.message : String(error),
     })
-    return false
+    throw new AppError(MENSAJE_PLAN_NO_CONFIGURADO, 503, true, 'PLAN_NOT_CONFIGURED')
   }
 }
 

@@ -519,6 +519,42 @@ describe('GET /plan → POST /plan/checkout con la versión del editor (B2, Task
     expect(sesion().success_url).toContain('sinCobroHoy=1')
   })
 
+  it('🔴 fix round 1, paso 5: el editor publica la v3 entre el comprobante y la regla común → dentro del candado 409 OFFER_CHANGED reason VERSION con offerVersion 3 y ninguna sesión de Stripe; la prueba regalada acortada dentro del candado → 409 PRUEBA_CERCA', async () => {
+    conVigente(2, v2())
+    precioV2()
+    // La regla común (simulada) toma su candado y ENTONCES corre lo de dentro: es justo ahí cuando la v3 ya está publicada.
+    mockAutorizar.mockImplementation(async (_v: string, _c: string, _i: unknown, crear: (tx: unknown) => unknown) => {
+      conVigente(3, definicionDePrueba({ ids: idsDeLaVersion('v3'), netos: { 'PRO:monthly': 79900 } }))
+      return crear(prismaMock)
+    })
+
+    const res = await comprar({ quoteToken: comprobanteDeTuPlan() })
+
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ code: 'OFFER_CHANGED', details: { reason: 'VERSION', offerVersion: 3 } })
+    // Los pasos 1-4 sí pasaron con la v2 (el comprobante, la opción, el precio de Stripe): lo detuvo la relectura bajo el candado.
+    expect(mockPriceRetrieve).toHaveBeenCalledWith('price_v2_pro_m', { timeout: 15_000, maxNetworkRetries: 0 })
+    expect(mockAutorizar).toHaveBeenCalledTimes(1)
+    expect(mockSessionCreate).not.toHaveBeenCalled()
+
+    // La misma versión, pero dentro del candado la prueba regalada ya no deja diferir (el SUPERADMIN la acortó a 30 h).
+    conVigente(2, v2())
+    const fila = pruebaRegalada(10 * 24)
+    prismaMock.venueFeature.findMany.mockResolvedValue([fila])
+    const opcion = (await leerPlan()).body.data.cotizacion.planes.PRO.monthly as { quoteToken: string; trialEndsAt: string }
+    expect(opcion.trialEndsAt).toBe(fila.endDate.toISOString())
+    mockAutorizar.mockImplementation(async (_v: string, _c: string, _i: unknown, crear: (tx: unknown) => unknown) => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([{ ...fila, endDate: new Date(Date.now() + 30 * H) }])
+      return crear(prismaMock)
+    })
+
+    const acortada = await comprar({ quoteToken: opcion.quoteToken })
+
+    expect(acortada.status).toBe(409)
+    expect(acortada.body).toMatchObject({ code: 'OFFER_CHANGED', details: { reason: 'PRUEBA_CERCA', offerVersion: 2 } })
+    expect(mockSessionCreate).not.toHaveBeenCalled()
+  })
+
   it('comprobante de otra versión → 409 OFFER_CHANGED reason VERSION; de otro negocio → 400 QUOTE_INVALID; con el renombre pendiente, 503 PLAN_RENAME_PENDING', async () => {
     conVigente(3, definicionDePrueba({ ids: idsDeLaVersion('v3'), netos: { 'PRO:monthly': 79900 } }))
     mockPriceRetrieve.mockResolvedValue({ id: 'price_v3_pro_m', active: true, unit_amount: PRO_M_V2 })

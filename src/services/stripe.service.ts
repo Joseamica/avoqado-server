@@ -1868,12 +1868,15 @@ export async function createWinbackPromotionCode(
  * only on the item, never on the subscription.
  *
  * @param subscriptionId - Stripe subscription ID
- * @param bound - La B (soporte por WhatsApp, C5): UNA llamada con este tiempo máximo y sin reintentos (ni los de `retry` ni los del
- *   SDK, que por omisión espera 80 s y reintenta 2 veces). Sin él, como siempre: `retry` con 3 reintentos.
+ * @param opciones.timeoutMs - La B (soporte por WhatsApp, C5): UNA llamada con este tiempo máximo y sin reintentos (ni los de `retry`
+ *   ni los del SDK, que por omisión espera 80 s y reintenta 2 veces). Sin él, como siempre: `retry` con 3 reintentos.
+ * @param opciones.conTarjeta - Planes editables (B2, Task 7, fix round 1): con una prueba SIN tarjeta, leer también qué tarjeta
+ *   cobraría Stripe (el cliente, con tope). Sólo lo pide «Tu plan» (`GET /plan`), fuera de toda transacción; sin él (y con
+ *   `timeoutMs`, que promete UNA llamada) no se lee nada más y `faltaTarjeta`/`tarjetaQueCobrara` no vienen.
  */
 export async function retrievePlanSubscription(
   subscriptionId: string,
-  bound?: { timeoutMs: number },
+  opciones: { timeoutMs?: number; conTarjeta?: boolean } = {},
 ): Promise<{
   status: string
   cancelAtPeriodEnd: boolean
@@ -1894,12 +1897,13 @@ export async function retrievePlanSubscription(
   /** Planes editables (B2, Task 7): es una prueba SIN tarjeta del alta (`metadata.sinTarjeta: 'true'`, ruling P6). */
   sinTarjeta: boolean
   /**
-   * Sólo con `sinTarjeta` (y sin `bound`): la prueba sigue `trialing`, terminará cancelándose sin método y Stripe no tiene una
-   * tarjeta con qué cobrarla. `false` también si no se pudo leer (no se anuncia lo que no se sabe).
+   * Sólo viene si se pidió `conTarjeta` (sin `timeoutMs`), con una prueba `sinTarjeta` todavía `trialing` y si Stripe dejó leer su
+   * tarjeta: la prueba terminará cancelándose sin método y Stripe no tiene una tarjeta con qué cobrarla. Ausente = no se leyó, no
+   * aplica o no se sabe (no se anuncia lo que no se sabe).
    */
-  faltaTarjeta: boolean
-  /** Sólo con `sinTarjeta`, en prueba: la tarjeta que cobraría Stripe al terminar (§18), o `null` (sin tarjeta, o no se pudo leer). */
-  tarjetaQueCobrara: TarjetaVisible | null
+  faltaTarjeta?: boolean
+  /** Con `faltaTarjeta` (las mismas condiciones): la tarjeta que cobraría Stripe al terminar la prueba (§18), o `null` (sin tarjeta). */
+  tarjetaQueCobrara?: TarjetaVisible | null
   /** El fin de la prueba de Stripe (`trial_end`), o `null`. */
   trialEnd: Date | null
   /**
@@ -1910,18 +1914,19 @@ export async function retrievePlanSubscription(
 }> {
   // D5: el detalle del cupón viene en la MISMA llamada (expand): sin él, `discounts` sólo trae ids.
   const params = { expand: ['discounts.source.coupon.applies_to'] }
-  const sub = bound
-    ? await stripe.subscriptions.retrieve(subscriptionId, params, { timeout: bound.timeoutMs, maxNetworkRetries: 0 })
+  const acotada = opciones.timeoutMs !== undefined
+  const sub = acotada
+    ? await stripe.subscriptions.retrieve(subscriptionId, params, { timeout: opciones.timeoutMs, maxNetworkRetries: 0 })
     : await retry(() => stripe.subscriptions.retrieve(subscriptionId, params), {
         retries: 3,
         shouldRetry: shouldRetryStripeError,
         context: 'stripe.retrievePlanSubscription',
       })
-  // Planes editables (B2, Task 7): una prueba SIN tarjeta se reconoce por su metadata (ruling P6). Sólo con ella se lee qué tarjeta
-  // cobraría (el cliente, con tope y sin lanzar): una suscripción de hoy hace las mismas llamadas de siempre. La B (`bound`) promete
-  // UNA llamada, así que ahí no se lee.
+  // Planes editables (B2, Task 7): una prueba SIN tarjeta se reconoce por su metadata (ruling P6). Qué tarjeta cobraría (el cliente,
+  // con tope y sin lanzar) sólo se lee si quien llama lo pide (`conTarjeta`, «Tu plan»): los demás (la cancelación dentro de su
+  // transacción, el CRM, los recordatorios) hacen las mismas llamadas de siempre. La B (`timeoutMs`) promete UNA llamada: ahí no.
   const sinTarjeta = (sub.metadata as Record<string, string> | null | undefined)?.sinTarjeta === 'true'
-  const tarjeta = sinTarjeta && !bound ? await tarjetaDeLaPrueba(sub) : { faltaTarjeta: false, tarjetaQueCobrara: null }
+  const tarjeta = sinTarjeta && opciones.conTarjeta && !acotada ? await tarjetaDeLaPrueba(sub) : null
   const trialEnd = typeof sub.trial_end === 'number' ? new Date(sub.trial_end * 1000) : null
   const createdRaw = (sub as any).created as number | undefined
   const rawInterval = sub.items.data[0]?.price.recurring?.interval
@@ -1939,8 +1944,7 @@ export async function retrievePlanSubscription(
     grossAmountCents: sub.items.data[0]?.price.unit_amount ?? null,
     descuento: descuentoDelPlan(sub as never, productoDe(sub.items.data[0]?.price.product)),
     sinTarjeta,
-    faltaTarjeta: tarjeta.faltaTarjeta,
-    tarjetaQueCobrara: tarjeta.tarjetaQueCobrara,
+    ...(tarjeta ?? {}),
     trialEnd,
     noHabraCobro: noHabraCobro(sub, trialEnd ? trialEnd.getTime() : Date.now()),
   }

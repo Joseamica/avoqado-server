@@ -51,8 +51,6 @@ const stripeSub = (now: Date, over: Partial<StripeSub> = {}): StripeSub => ({
   descuento: null,
   // Planes editables (B2, Task 7): una suscripción de hoy, no una prueba sin tarjeta.
   sinTarjeta: false,
-  faltaTarjeta: false,
-  tarjetaQueCobrara: null,
   trialEnd: null,
   noHabraCobro: false,
   ...over,

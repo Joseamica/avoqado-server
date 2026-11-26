@@ -44,19 +44,24 @@ export async function faltaTarjeta(sub: Stripe.Subscription, leerCliente: LeerCl
   return (await tarjetaDe(sub, leerCliente)) === null
 }
 
+/** Lo que se leyó de la tarjeta de una prueba sin tarjeta viva. */
+export interface TarjetaDeLaPrueba {
+  faltaTarjeta: boolean
+  tarjetaQueCobrara: TarjetaVisible | null
+}
+
 /**
- * Lo que «Tu plan» dice de una prueba sin tarjeta, de UNA lectura (`retrievePlanSubscription`): si le falta la tarjeta y cuál
- * cobraría. Sólo lee mientras la prueba sigue `trialing` (terminada o ya cobrándose, la pantalla no la anuncia); el cliente, con tope
- * (`clienteDeStripeVivo` por default, `LECTURA_ACOTADA`). 🔴 Nunca lanza: si Stripe no deja leer, «no se sabe» (`faltaTarjeta`
- * false, `tarjetaQueCobrara` null) y «Tu plan» no dice ni «sin tarjeta» ni «con tarjeta».
+ * Lo que «Tu plan» dice de una prueba sin tarjeta, de UNA lectura (`retrievePlanSubscription` con `conTarjeta`): si le falta la
+ * tarjeta y cuál cobraría. Sólo lee mientras la prueba sigue `trialing` (terminada o ya cobrándose, la pantalla no la anuncia); el
+ * cliente, con tope (`clienteDeStripeVivo` por default, `LECTURA_ACOTADA`). 🔴 Nunca lanza. `null` = no aplica (la prueba ya no
+ * está `trialing`) o no se sabe (Stripe no dejó leer): «Tu plan» no dice ni «sin tarjeta» ni «con tarjeta».
  */
 export async function tarjetaDeLaPrueba(
   sub: Stripe.Subscription,
   leerCliente: LeerCliente = clienteDeStripeVivo,
-): Promise<{ faltaTarjeta: boolean; tarjetaQueCobrara: TarjetaVisible | null }> {
-  const nada = { faltaTarjeta: false, tarjetaQueCobrara: null }
+): Promise<TarjetaDeLaPrueba | null> {
   try {
-    if (sub.status !== 'trialing') return nada
+    if (sub.status !== 'trialing') return null
     const tarjeta = await tarjetaDe(sub, leerCliente)
     return {
       faltaTarjeta: esperaTarjeta(sub) && tarjeta === null,
@@ -67,6 +72,6 @@ export async function tarjetaDeLaPrueba(
       subscriptionId: sub?.id,
       error: error instanceof Error ? error.message : String(error),
     })
-    return nada
+    return null
   }
 }

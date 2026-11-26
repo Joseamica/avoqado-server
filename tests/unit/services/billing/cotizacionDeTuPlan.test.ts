@@ -144,11 +144,23 @@ const cliente = (o: Record<string, unknown> = {}) => ({
   ...o,
 })
 
-/** Lo que `GET /plan` ya leyó de Stripe (`retrievePlanSubscription`), con la suscripción y el cliente de la prueba. */
+/** Lo que `GET /plan` ya leyó de Stripe (`retrievePlanSubscription` con `conTarjeta`), con la suscripción y el cliente de la prueba. */
 async function resumen(sub: Record<string, unknown> = {}, cli: Record<string, unknown> = {}) {
   mockSubRetrieve.mockResolvedValue(suscripcion(sub))
   mockCustomerRetrieve.mockResolvedValue(cliente(cli))
-  return retrievePlanSubscription('sub_1')
+  return retrievePlanSubscription('sub_1', { conTarjeta: true })
+}
+/** La suscripción de Pro de HOY (con tarjeta, sin `sinTarjeta`) en ese estado de Stripe, como la leyó `GET /plan`. */
+async function deHoy(status: string) {
+  mockSubRetrieve.mockResolvedValue(
+    suscripcion({
+      status,
+      metadata: {},
+      default_payment_method: 'pm_de_hoy',
+      trial_settings: { end_behavior: { missing_payment_method: 'create_invoice' } },
+    }),
+  )
+  return retrievePlanSubscription('sub_1', { conTarjeta: true })
 }
 
 /** La fila de plan de una prueba regalada de Pro que termina en `dias` días. */
@@ -407,9 +419,9 @@ describe('cotizacionDeTuPlan', () => {
     conSuscripcion('active')
     expect((await cotizacionDeTuPlan('v1', enGratis(), null, ahora))!.aceptacionPendiente).toBeUndefined()
 
-    // El negocio ya está en ese plan: ni se pregunta a Stripe.
+    // El negocio ya está en ese plan (la fila de Pro con su suscripción `trialing` en Stripe): ni se pregunta a Stripe.
     mockSubList.mockClear()
-    expect((await cotizacionDeTuPlan('v1', enPro(), null, ahora))!.aceptacionPendiente).toBeUndefined()
+    expect((await cotizacionDeTuPlan('v1', enPro(), await deHoy('trialing'), ahora))!.aceptacionPendiente).toBeUndefined()
     expect(mockSubList).not.toHaveBeenCalled()
 
     // Su compra venció sin pagarse: la aceptación sigue sin usar.
@@ -421,7 +433,48 @@ describe('cotizacionDeTuPlan', () => {
     const c = await cotizacionDeTuPlan('v1', enGratis(), null, ahora)
     expect(c).not.toBeNull()
     expect(c!.aceptacionPendiente).toBeUndefined()
-    await expect(aceptacionSinUsar('v1', enGratis(), 'cus_1', ahora)).rejects.toThrow('timeout')
+    await expect(aceptacionSinUsar('v1', enGratis(), null, 'cus_1', ahora)).rejects.toThrow('timeout')
+  })
+
+  it('🔴 fix round 1: «ya tiene el plan» lo dice el estado de Stripe (trialing, active o past_due), no el de la fila', async () => {
+    conVigente(3, definicionDePrueba({ ids: idsDeLaVersion('v3'), planes: { PRO: { onSale: false }, PREMIUM: { onSale: false } } }))
+    prismaMock.planAcceptance.findFirst.mockResolvedValue(ACEPTACION)
+    const pendiente = async (planState: PlanState, status: string) =>
+      (await cotizacionDeTuPlan('v1', planState, await deHoy(status), ahora))!.aceptacionPendiente
+
+    // Stripe la cobra (`active`, o `past_due` aunque la fila ya diga `suspended`): el negocio ya tiene Pro.
+    expect(await pendiente(enPro({ state: 'active' }), 'active')).toBeUndefined()
+    expect(await pendiente(enPro({ state: 'suspended' }), 'past_due')).toBeUndefined()
+    expect(mockSubList).not.toHaveBeenCalled()
+
+    // Stripe ya la canceló y la baja no llegó (la fila sigue `trial`): no tiene el plan; la aceptación sin usar se ofrece.
+    expect(await pendiente(enPro({ state: 'trial' }), 'canceled')).toMatchObject({ acceptanceId: ACEPTACION.id })
+    // Sin la suscripción (Stripe no contestó), decide la lista de suscripciones.
+    expect((await cotizacionDeTuPlan('v1', enPro(), null, ahora))!.aceptacionPendiente).toMatchObject({ acceptanceId: ACEPTACION.id })
+    expect(mockSubList).toHaveBeenCalledTimes(2)
+  })
+
+  it('🔴 fix round 1: más de 100 suscripciones sin la de la aceptación (has_more) → «no pude ver»: sin aceptacionPendiente y aceptacionSinUsar lanza', async () => {
+    conVigente(3, definicionDePrueba({ ids: idsDeLaVersion('v3'), planes: { PRO: { onSale: false }, PREMIUM: { onSale: false } } }))
+    prismaMock.planAcceptance.findFirst.mockResolvedValue(ACEPTACION)
+    mockSubList.mockResolvedValue({
+      object: 'list',
+      has_more: true,
+      data: [{ id: 'sub_otra', object: 'subscription', status: 'canceled', metadata: {} }],
+    })
+
+    const c = await cotizacionDeTuPlan('v1', enGratis(), null, ahora)
+
+    expect(c).not.toBeNull()
+    expect(c!.aceptacionPendiente).toBeUndefined()
+    await expect(aceptacionSinUsar('v1', enGratis(), null, 'cus_1', ahora)).rejects.toThrow('más de 100 suscripciones')
+    // Si entre las 100 primeras está la que la usó, ya se sabe: usada (sin lanzar).
+    mockSubList.mockResolvedValue({
+      object: 'list',
+      has_more: true,
+      data: [{ id: 'sub_acept', object: 'subscription', status: 'active', metadata: { planAcceptanceId: ACEPTACION.id } }],
+    })
+    await expect(aceptacionSinUsar('v1', enGratis(), null, 'cus_1', ahora)).resolves.toBeNull()
   })
 
   it('Gratis (sin plan): opciones de compra sin vista previa; prueba regalada de Pro a 10 días: diferida al fin; Premium fuera de venta: vendible false', async () => {
@@ -453,5 +506,35 @@ describe('cotizacionDeTuPlan', () => {
     expect(verificarCotizacion(pro.quoteToken, 'venue:v1', ahora).trialEndsAt!.getTime()).toBe(fila.endDate.getTime())
     expect(regalada!.planes.PREMIUM.vendible).toBe(false)
     expect(mockCreatePreview).not.toHaveBeenCalled()
+  })
+})
+
+describe('retrievePlanSubscription — la tarjeta de la prueba sólo para «Tu plan» (fix round 1)', () => {
+  it('🔴 sin conTarjeta, una prueba sin tarjeta no lee el cliente (ni trae la tarjeta); con él, UNA lectura del cliente con tope', async () => {
+    mockSubRetrieve.mockResolvedValue(suscripcion())
+    mockCustomerRetrieve.mockResolvedValue(cliente())
+
+    // Los demás lectores (la cancelación dentro de su transacción, el CRM, los recordatorios): sólo la suscripción.
+    const sinOpcion = await retrievePlanSubscription('sub_1')
+    expect(sinOpcion).toMatchObject({ sinTarjeta: true, trialEnd: new Date(FIN_S * 1000), noHabraCobro: false })
+    expect(sinOpcion).not.toHaveProperty('faltaTarjeta')
+    expect(sinOpcion).not.toHaveProperty('tarjetaQueCobrara')
+    // La B (UNA llamada con tope) tampoco la lee, aunque la pida.
+    await retrievePlanSubscription('sub_1', { timeoutMs: 3_000, conTarjeta: true })
+    expect(mockCustomerRetrieve).not.toHaveBeenCalled()
+    expect(mockPmRetrieve).not.toHaveBeenCalled()
+
+    // «Tu plan»: exactamente una lectura del cliente, con tope (la predeterminada ya viene expandida).
+    const conTarjeta = await retrievePlanSubscription('sub_1', { conTarjeta: true })
+    expect(conTarjeta).toMatchObject({ sinTarjeta: true, faltaTarjeta: true, tarjetaQueCobrara: null })
+    expect(mockCustomerRetrieve.mock.calls).toEqual([
+      ['cus_1', { expand: ['invoice_settings.default_payment_method', 'default_source'] }, TOPE],
+    ])
+    expect(mockPmRetrieve).not.toHaveBeenCalled()
+
+    // Una suscripción de hoy, con `conTarjeta`, tampoco lee nada más.
+    mockCustomerRetrieve.mockClear()
+    expect(await deHoy('active')).not.toHaveProperty('faltaTarjeta')
+    expect(mockCustomerRetrieve).not.toHaveBeenCalled()
   })
 })

@@ -168,18 +168,21 @@ async function estadoDeLaPruebaSinTarjeta(
     : null
   return sub.faltaTarjeta
     ? { estado: 'SIN_TARJETA', ...base, tarjeta: null, montoAlTerminarCents }
-    : { estado: 'CON_TARJETA', ...base, tarjeta: sub.tarjetaQueCobrara, montoAlTerminarCents }
+    : { estado: 'CON_TARJETA', ...base, tarjeta: sub.tarjetaQueCobrara ?? null, montoAlTerminarCents }
 }
 
-/** Una fila de ESE plan con su suscripción viva (en prueba, activa o con el cobro pendiente): el negocio ya lo tiene. */
-const ESTADOS_DEL_PLAN_VIVO: ReadonlySet<PlanState['state']> = new Set(['trial', 'active', 'canceling', 'past_due'])
+/** La suscripción de Stripe de la fila de ESE plan, en prueba, activa o con el cobro pendiente: el negocio ya lo tiene. */
+const SUSCRIPCION_DEL_PLAN_VIVO: ReadonlySet<string> = new Set(['trialing', 'active', 'past_due'])
 /** Una suscripción en estos estados nunca se cobró: la aceptación que cita sigue sin usar. */
 const SUSCRIPCION_SIN_USO: ReadonlySet<string> = new Set(['incomplete_expired', 'canceled'])
 
 /**
  * La aceptación viva del negocio (`expiresAt > ahora`, la más reciente) sólo si todavía no se usó (b2-r9 #5): el negocio no tiene ya
- * ese plan vivo y ninguna suscripción de su cliente de Stripe cita su id (`metadata.planAcceptanceId`, que pone el checkout de la
- * aceptación, Task 8), fuera de `incomplete_expired` y `canceled`. La lista de suscripciones sólo se pide con una aceptación viva.
+ * ese plan vivo (la fila de `planState` es de ese plan y su suscripción de Stripe, `sub`, la que leyó `getPlanStateYSuscripcion`,
+ * está `trialing`, `active` o `past_due`; fix round 1: el estado de Stripe, no el de la fila) y ninguna suscripción de su cliente de
+ * Stripe cita su id (`metadata.planAcceptanceId`, que pone el checkout de la aceptación, Task 8), fuera de `incomplete_expired` y
+ * `canceled`. La lista de suscripciones sólo se pide con una aceptación viva. Sin `sub` (sin suscripción o Stripe no contestó) decide
+ * la lista.
  * 🔴 Si Stripe no deja verla, LANZA: «no pude ver» no es «sin usar». `GET /plan` entonces no ofrece la acción; el checkout de Task 8
  * la trata como sin usar (su 409) y, si ya se pagó, la regla común responde `PLAN_YA_CONTRATADO`.
  *
@@ -188,6 +191,7 @@ const SUSCRIPCION_SIN_USO: ReadonlySet<string> = new Set(['incomplete_expired', 
 export async function aceptacionSinUsar(
   venueId: string,
   planState: PlanState,
+  sub: Pick<ResumenDeLaSuscripcionDelPlan, 'status'> | null,
   customerId: string | null,
   ahora: Date = new Date(),
   opcionesDeStripe: Stripe.RequestOptions = LECTURA_ACOTADA,
@@ -198,7 +202,10 @@ export async function aceptacionSinUsar(
   })
   if (!aceptacion) return null
   const yaTieneElPlan =
-    planState.planTier === aceptacion.tier && Boolean(planState.stripeSubscriptionId) && ESTADOS_DEL_PLAN_VIVO.has(planState.state)
+    planState.planTier === aceptacion.tier &&
+    Boolean(planState.stripeSubscriptionId) &&
+    sub !== null &&
+    SUSCRIPCION_DEL_PLAN_VIVO.has(sub.status)
   if (yaTieneElPlan) return null
   if (!customerId) return aceptacion
   const suscripciones = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 100 }, opcionesDeStripe)
@@ -214,10 +221,15 @@ const esPlanPagado = (tier: string): tier is PlanPagado => tier === 'PRO' || tie
 const esPeriodicidad = (interval: string): interval is Periodicidad => interval === 'monthly' || interval === 'annual'
 
 /** `aceptacionPendiente` de «Tu plan»: nunca lanza (si no se puede saber si se usó, no se ofrece). */
-async function aceptacionPendienteDe(venueId: string, planState: PlanState, ahora: Date): Promise<AceptacionPendiente | null> {
+async function aceptacionPendienteDe(
+  venueId: string,
+  planState: PlanState,
+  sub: ResumenDeLaSuscripcionDelPlan | null,
+  ahora: Date,
+): Promise<AceptacionPendiente | null> {
   try {
     const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { stripeCustomerId: true } })
-    const aceptacion = await aceptacionSinUsar(venueId, planState, venue?.stripeCustomerId ?? null, ahora)
+    const aceptacion = await aceptacionSinUsar(venueId, planState, sub, venue?.stripeCustomerId ?? null, ahora)
     if (!aceptacion) return null
     if (!esPlanPagado(aceptacion.tier) || !esPeriodicidad(aceptacion.interval)) {
       logger.warn('«Tu plan»: la aceptación guardada no es de un plan y periodicidad conocidos; no se ofrece', {
@@ -286,7 +298,7 @@ export async function cotizacionDeTuPlan(
     plan.vendible = plan.monthly !== null || plan.annual !== null
     planes[tier] = plan
   }
-  const aceptacionPendiente = await aceptacionPendienteDe(venueId, planState, ahora)
+  const aceptacionPendiente = await aceptacionPendienteDe(venueId, planState, sub, ahora)
   return {
     versionNumber: vigente.number,
     planes,
