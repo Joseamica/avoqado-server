@@ -13,7 +13,7 @@ import { definicionDePrueba, idsDeLaVersion, punteroA, versionUno } from '@tests
 import logger from '@/config/logger'
 import emailService from '@/services/email.service'
 import * as planNotification from '@/services/access/planNotification.service'
-import { avisarPlanTerminado, basicoPublicado } from '@/services/billing/avisosDelBasico'
+import { avisarPlanTerminado, basicoDeLaBienvenida, basicoPublicado } from '@/services/billing/avisosDelBasico'
 import { PlanRenewalReminderJob } from '@/jobs/plan-renewal-reminder.job'
 
 jest.mock('stripe', () => {
@@ -195,7 +195,7 @@ describe('basicoPublicado()', () => {
     conLaV1Danada()
     await expect(basicoPublicado()).resolves.toEqual(BASICO)
     expect(mockBasico).toHaveBeenCalledTimes(1)
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('avisosDelBasico'), expect.anything())
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('no se pudo leer la oferta'), expect.anything())
   })
 
   it('con la v2 → null; sin versiones o con la v1 → el Básico publicado de hoy (y si el catálogo falla, null como hoy)', async () => {
@@ -207,5 +207,82 @@ describe('basicoPublicado()', () => {
     await expect(basicoPublicado()).resolves.toEqual(BASICO)
     mockBasico.mockRejectedValueOnce(new Error('catálogo caído'))
     await expect(basicoPublicado()).resolves.toBeNull()
+  })
+})
+
+/**
+ * Fix round 1: la bienvenida de la prueba ENDS_FREE (`sendPlanConfirmationEmail` con `trialEndsFree`, que mandan `activatePlan`
+ * y el alta larga). Los dos arman el Básico con `basicoDeLaBienvenida()`; aquí se arma igual y se manda con el correo real.
+ */
+describe('la bienvenida de la prueba ENDS_FREE', () => {
+  const LIGA = 'https://dashboard.example.com/venues/negocio-de-prueba/settings/billing/subscriptions'
+  const BASE = {
+    locale: 'es' as const,
+    venueName: 'Negocio de prueba',
+    payNow: false,
+    interval: 'monthly' as const,
+    firstChargeDate: new Date('2026-12-17T18:00:00Z'),
+    firstChargeAmountCents: 115884,
+    billingPortalUrl: LIGA,
+  }
+  const bienvenida = async () => {
+    const basico = await basicoDeLaBienvenida()
+    await emailService.sendPlanConfirmationEmail('owner@example.com', { ...BASE, trialEndsFree: true, ...basico })
+    return basico
+  }
+  /** El correo que salía antes de B2 (los llamadores mandaban `basicPlanPriceWithoutTaxCents` directo), tal cual. */
+  const correoDeHoy = async (basicPlanPriceWithoutTaxCents: number | undefined) => {
+    enviar.mockClear()
+    await emailService.sendPlanConfirmationEmail('owner@example.com', { ...BASE, trialEndsFree: true, basicPlanPriceWithoutTaxCents })
+    return enviar.mock.calls[0][0]
+  }
+  const HOY =
+    '30 días gratis con todo Pro. Termina el 17 de diciembre de 2026 y no se te cobra nada; ese día podrás contratar el Básico por $499 + IVA al mes con un clic.'
+
+  it('🔴 con la v2: sin el precio del Básico, sin la línea del Básico «con un clic», y con la liga a «Tu plan»', async () => {
+    conLaV2()
+    const basico = await bienvenida()
+
+    expect(basico.basicPlanPriceWithoutTaxCents).toBeUndefined()
+    expect(mockBasico).not.toHaveBeenCalled()
+    const texto = textoEnviado()
+    expect(texto).toContain(
+      'Tu prueba de Pro termina el 17 de diciembre de 2026 y no se te cobra nada. Si quieres quedarte en Pro, puedes hacerlo desde «Tu plan».',
+    )
+    expect(texto).not.toContain('Básico')
+    expect(texto).not.toContain('un clic')
+    expect(texto).toContain(`Ver mi plan: ${LIGA}`)
+    const html = String((enviar.mock.calls[0][0] as { html?: string }).html ?? '')
+    expect(html).not.toContain('Básico')
+    expect(html).toContain(LIGA)
+  })
+
+  it('sin versión del editor (sin versiones o con la v1): el correo de hoy, byte por byte', async () => {
+    for (const sinEditor of [sinVersiones, conLaV1]) {
+      enviar.mockClear()
+      sinEditor()
+      await expect(bienvenida()).resolves.toEqual({ basicPlanPriceWithoutTaxCents: 49900 })
+      expect(textoEnviado()).toContain(HOY)
+      expect(textoEnviado()).toContain('Cámbialo en «Tu plan».')
+      const enviado = enviar.mock.calls[0][0]
+      expect(enviado).toEqual(await correoDeHoy(49900))
+    }
+    // Sin precio vigente (el catálogo no contesta): el texto de hoy sin precio, sin cambiar.
+    enviar.mockClear()
+    sinVersiones()
+    mockBasico.mockRejectedValueOnce(new Error('catálogo caído'))
+    await expect(bienvenida()).resolves.toEqual({ basicPlanPriceWithoutTaxCents: undefined })
+    expect(textoEnviado()).toContain('ese día podrás contratar el Básico con un clic.')
+    const sinPrecio = enviar.mock.calls[0][0]
+    expect(sinPrecio).toEqual(await correoDeHoy(undefined))
+  })
+
+  it('🔴 b2-r9 #8: con versionQueCobra lanzando (una v1 dañada), el correo de hoy, sin lanzar', async () => {
+    conLaV1Danada()
+    await expect(bienvenida()).resolves.toEqual({ basicPlanPriceWithoutTaxCents: 49900 })
+    expect(textoEnviado()).toContain(HOY)
+    const enviado = enviar.mock.calls[0][0]
+    expect(enviado).toEqual(await correoDeHoy(49900))
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('no se pudo leer la oferta'), expect.anything())
   })
 })

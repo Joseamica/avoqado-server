@@ -49,6 +49,7 @@ import { basicPlanValido, fusionarV2SetupData, MENSAJE_BASIC_PLAN_INVALIDO, pars
 import { modalidadDePrueba, type TrialModality } from '../billing/modalidadDePrueba'
 import { resolverPrecioPorLlave } from '../billing/precioDelPlan'
 import { precioDeLaOferta, priceIdVigente, versionQueCobra, type OfertaVigente } from '../billing/planOffer'
+import { basicoDeLaBienvenida } from '../billing/avisosDelBasico'
 import { DIA_MS, ofertaCambio, planFueraDeVenta, revisarComprobante } from '../billing/opcionesDeCompra'
 import type { CotizacionFirmada } from '../billing/comprobanteDeCotizacion'
 import {
@@ -2543,7 +2544,8 @@ async function enviarConfirmacion(args: {
       : legacyIntro
         ? { introAmountCents: LEGACY_INTRO_OFFER.introMonthlyCents, nextChargeAmountCents: LEGACY_INTRO_OFFER.introMonthlyCents }
         : {}),
-    ...(args.terminaSinCobro ? { trialEndsFree: true, basicPlanPriceWithoutTaxCents: await precioDelBasicoSinIvaCents() } : {}),
+    // B2 Task 9: el Básico pasa por `basicoDeLaBienvenida` (con una versión del editor ya no se ofrece; sin ella, lo de hoy).
+    ...(args.terminaSinCobro ? { trialEndsFree: true, ...(await basicoDeLaBienvenida()) } : {}),
     billingPortalUrl: billingPageUrl(args.venueSlug),
   })
 }
@@ -2580,24 +2582,6 @@ async function enviarBienvenidaSinTarjeta(args: {
     ...(args.montoAlTerminarCents !== undefined ? { montoAlTerminarCents: args.montoAlTerminarCents } : {}),
     ...(args.tarjeta !== undefined ? { tarjeta: args.tarjeta } : {}),
   })
-}
-
-/**
- * Plan Básico: su precio sin IVA en CENTAVOS sólo para escribirlo en el correo (el precio vive en la publicación del
- * SUPERADMIN, editable). `undefined` si no hay Básico vigente o no se pudo leer: el correo lo dice sin precio.
- */
-export async function precioDelBasicoSinIvaCents(): Promise<number | undefined> {
-  try {
-    // Import diferido: el catálogo híbrido no tiene por qué cargarse en cada alta.
-    const { getPublicBasicPlan } = await import('../launchCampaigns/hybridCampaign.service')
-    const basico = await getPublicBasicPlan()
-    return basico ? Math.round(Number(basico.priceWithoutTax) * 100) : undefined
-  } catch (error) {
-    logger.warn('activate-plan: no se pudo leer el precio del Plan Básico para el correo', {
-      error: error instanceof Error ? error.message : String(error),
-    })
-    return undefined
-  }
 }
 
 export { BadRequestError }

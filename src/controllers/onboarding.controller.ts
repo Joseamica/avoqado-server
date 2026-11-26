@@ -47,6 +47,7 @@ import { PLAN_ACTIVATION_STATUS } from '../services/launchCampaigns/launchCampai
 import { standardPlanQuote } from '../services/access/planPricing.constants'
 import { MENSAJE_PLAN_NO_CONFIGURADO, versionQueCobra, type OfertaVigente } from '../services/billing/planOffer'
 import { ofertaCambio } from '../services/billing/opcionesDeCompra'
+import { basicoDeLaBienvenida } from '../services/billing/avisosDelBasico'
 import {
   avisoDeLaPruebaSinTarjeta,
   clienteDeStripeVivo,
@@ -1715,7 +1716,8 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
                   nextChargeAmountCents: introPromo ? LEGACY_INTRO_OFFER.introMonthlyCents : grossCents,
                   billingPortalUrl: billingPageUrl(result.venue.slug),
                   ...(terminaSinCobro
-                    ? { trialEndsFree: true, basicPlanPriceWithoutTaxCents: await planActivationService.precioDelBasicoSinIvaCents() }
+                    ? // B2 Task 9: el Básico pasa por `basicoDeLaBienvenida` (con una versión del editor ya no se ofrece).
+                      { trialEndsFree: true, ...(await basicoDeLaBienvenida()) }
                     : {}),
                 })
             } else {
