@@ -2180,12 +2180,16 @@ describe('getTrackingByToken', () => {
       expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
     })
 
-    it('sellos apagados ⇒ sin sello (los puntos siguen); el programa apagado ⇒ lealtad null', async () => {
+    // hz:be99f328:D42: antes, con los puntos apagados (active=false) el folio no decía nada aunque la tarjeta de sellos estuviera
+    // prendida. Ahora el sello se ve y los puntos no; sólo con los dos apagados es null.
+    it('sellos apagados ⇒ sin sello (los puntos siguen); puntos apagados ⇒ sólo el sello; los dos apagados ⇒ lealtad null', async () => {
       prismaMock.onlineOrder.findUnique.mockResolvedValue(folio())
       prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ active: true, stampsEnabled: false })
       expect((await getTrackingByToken('T'.repeat(32)))!.lealtad).toEqual({ puntos: 42 })
       expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
       prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ active: false, stampsEnabled: true })
+      expect((await getTrackingByToken('T'.repeat(32)))!.lealtad).toEqual({ sello: { ganados: 7, meta: 10 } })
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ active: false, stampsEnabled: false })
       await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ lealtad: null })
     })
 
