@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-26T15:31:23.656Z",
-  "approvedHash": "5defa0df2289717feeb3e7526efe4fb20a3d512d7a93278612dd0a9d7d8b47ba",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -1221,7 +1221,7 @@
       "gateKind": "FEATURE"
     },
     "tpv/mesas/descuento-en-la-cuenta-de-la-mesa": {
-      "sha256": "b7f63938b8e06d23188dc583b68b2ff4241efd11f63744fe63ec40398f934756",
+      "sha256": "0ecd72e823bb4f349855e2d91fe93b396e839db97f18b88a496aa2c637ed2b20",
       "requiredPermissions": [
         "discounts:apply"
       ],
