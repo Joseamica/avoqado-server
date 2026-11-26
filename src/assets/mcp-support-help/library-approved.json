@@ -1292,6 +1292,10 @@
         "payments:create"
       ]
     },
+    "windows/ayuda/pantalla-lenta-o-trabada": {
+      "sha256": "97ea64803668818798d31dee274d1cb203c7c564d9e567a6379655fca68b4dca",
+      "requiredPermissions": []
+    },
     "windows/ayuda/ver-version-de-la-app": {
       "sha256": "dea954bb10492d99ce1a54d8836a27db48090ea53999cc2e371e4fbd634a06c4",
       "requiredPermissions": []

@@ -180,6 +180,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   get_cash_drawer_status: 'read',
   get_catalog_item: 'read',
   get_crypto_operation: 'read',
+  get_device_performance: 'read',
   get_document_request: 'read',
   get_hybrid_campaign: 'read',
   get_inventory_movements: 'read',
