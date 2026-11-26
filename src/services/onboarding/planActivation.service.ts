@@ -182,6 +182,12 @@ function requiereAutenticacion(clientSecret: string): AppError {
   )
 }
 
+/** Stripe rechazó el `trial_end` por estar en el pasado (400 `invalid_request_error`, `param: 'trial_end'`; medido el 26-nov). */
+function rechazoElFinDePrueba(error: unknown): boolean {
+  const e = error as { type?: string; param?: string } | null
+  return (e?.type === 'StripeInvalidRequestError' || e?.type === 'invalid_request_error') && e?.param === 'trial_end'
+}
+
 export function esErrorDeTarjeta(error: unknown): error is Stripe.errors.StripeError {
   const e = error as { type?: string; code?: string }
   return e?.type === 'StripeCardError' || e?.type === 'card_error'
@@ -1888,6 +1894,22 @@ export async function activatePlan(
               : null,
         })
         throw error
+      }
+      if (rechazoElFinDePrueba(error)) {
+        // 🔴 Codex b2-mac r4 #1: Stripe rechazó el `trial_end` del comprobante porque ya pasó. Nada se creó: Stripe valida antes de
+        // crear, y un reintento con la misma llave devuelve la suscripción ya creada en vez de este error. Se suelta como el rechazo de
+        // la regla y se vuelve a cotizar, en vez del 503 «confirmando con el banco» que dejaba el alta trabada.
+        await cerrarIntentoYLiberarLugar({
+          organizationId,
+          attempt,
+          lease: nuestroLease,
+          estadoFinal: prev.status,
+          lugar:
+            redemption && campaign
+              ? { redemptionId: redemption.id, campaignId: campaign.id, motivo: 'PLAN_PURCHASE_NOT_AUTHORIZED' }
+              : null,
+        })
+        throw new ConflictError('La cotización ya venció. Vuelve a cotizar.', 'QUOTE_EXPIRED')
       }
       if (esErrorDeTarjeta(error)) {
         // ---- PASO 10: rechazo del banco ----

@@ -1007,6 +1007,9 @@ export async function suscripcionVendeElPlan(
   return proyecciones.length === 1 && proyecciones[0].tipo === 'PLAN' && CODIGO_DEL_TIER[proyecciones[0].tier] === planCode
 }
 
+/** Lo mínimo que debe faltar para el fin de prueba al mandar el create (Codex b2-mac r4 #1). */
+const MARGEN_DEL_FIN_DE_PRUEBA_AL_ENVIAR_MS = 60_000
+
 export async function createPlanSubscription(input: CreatePlanSubscriptionInput): Promise<CreatePlanSubscriptionResult> {
   // Planes editables (B2): un fin de prueba del comprobante también es prueba. Sin él, las comprobaciones de hoy, literales.
   const conPrueba = !!input.trialEnd || input.trialPeriodDays > 0
@@ -1080,6 +1083,12 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
     ...(input.cancelAtTrialEnd ? { cancel_at_period_end: true } : {}),
   }
 
+  // 🔴 Codex b2-mac r4 #1: el fin de prueba del comprobante se revisó al entrar, pero lo de arriba (y la autorización) puede tardar
+  // minutos con Stripe lento. Justo antes del envío se vuelve a revisar: con menos de un minuto, Stripe lo rechazaría y el alta quedaría
+  // «confirmando con el banco». Antes de `antesDeCobrar`: nada se mandó y quien llama suelta el lease.
+  if (input.trialEnd && input.trialEnd.getTime() - Date.now() < MARGEN_DEL_FIN_DE_PRUEBA_AL_ENVIAR_MS) {
+    throw new ConflictError('La cotización ya venció. Vuelve a cotizar.', 'QUOTE_EXPIRED')
+  }
   input.antesDeCobrar?.()
   let subscription: Stripe.Subscription
   let conAutenticacion = false

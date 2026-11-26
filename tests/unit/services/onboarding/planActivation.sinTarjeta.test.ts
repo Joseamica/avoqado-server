@@ -365,6 +365,41 @@ describe('B2 Task 6: el alta sin tarjeta abre su prueba en Stripe', () => {
     expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
   })
 
+  it('🔴 Codex b2-mac r4 #1: el comprobante entra con 11 min de prueba, pero Stripe tarda 12 min antes del create → 409 QUOTE_EXPIRED, cero create y el lease suelto (nunca el 503 «confirmando con el banco»)', async () => {
+    const ahora = Date.now()
+    const reloj = jest.spyOn(Date, 'now').mockImplementation(() => ahora)
+    try {
+      // Lo último antes de crear: la autorización de la obligación nueva, que aquí «tarda» 12 minutos.
+      mockAutorizar.mockImplementation(async (_v: string, _c: string, _i: unknown, crear: () => Promise<unknown>) => {
+        reloj.mockImplementation(() => ahora + 12 * 60_000)
+        return crear()
+      })
+      // Una prueba de un día cotizada hace 23 h 49 min: al entrar le quedan 11 min (pasa el margen de 10).
+      conVigente(v2({ PRO: { requiresCard: false, trialDays: 1 } }))
+      const emitido = new Date(ahora - DIA + 11 * 60_000)
+      await expect(pedir({ quoteToken: comprobante({ trialEndsAt: new Date(emitido.getTime() + DIA) }, emitido) })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'QUOTE_EXPIRED',
+      })
+      expect(mockSubCreate).not.toHaveBeenCalled()
+      expect(progresos().at(-1)).toMatchObject({ data: { planActivationStatus: 'NONE', planActivationLeaseUntil: null } })
+    } finally {
+      reloj.mockRestore()
+    }
+  })
+
+  it('🔴 Codex b2-mac r4 #1: si Stripe rechaza el trial_end (ya pasó), nada se creó → 409 QUOTE_EXPIRED y el lease suelto, no 503', async () => {
+    mockSubCreate.mockRejectedValue(
+      Object.assign(new Error('Invalid timestamp: must be an integer Unix timestamp in the future.'), {
+        type: 'StripeInvalidRequestError',
+        param: 'trial_end',
+        statusCode: 400,
+      }),
+    )
+    await expect(pedir({ quoteToken: comprobante() })).rejects.toMatchObject({ statusCode: 409, code: 'QUOTE_EXPIRED' })
+    expect(progresos().at(-1)).toMatchObject({ data: { planActivationStatus: 'NONE', planActivationLeaseUntil: null } })
+  })
+
   it('sin versión del editor (o sin comprobante) nunca abre una prueba sin tarjeta: 409 OFFER_CHANGED, cero create', async () => {
     prismaMock.planOfferPointer.findUnique.mockResolvedValue(null)
     await expect(pedir({ quoteToken: comprobante() })).rejects.toMatchObject({

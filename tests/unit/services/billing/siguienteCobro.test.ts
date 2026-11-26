@@ -63,7 +63,7 @@ describe('montoDelSiguienteCobro', () => {
     const tope = { timeout: 5_000, maxNetworkRetries: 0 }
     await montoDelSiguienteCobro(f.stripe, 'sub_1', tope)
     expect(f.retrieve).toHaveBeenCalledTimes(2)
-    expect(f.retrieve).toHaveBeenCalledWith('sub_1', { expand: ['discounts'] }, tope)
+    expect(f.retrieve).toHaveBeenCalledWith('sub_1', { expand: ['discounts'] }, { ...tope, apiVersion: '2025-08-27.basil' })
     expect(f.createPreview.mock.calls.map((c: unknown[]) => c[1])).toEqual([tope, tope])
   })
 
@@ -97,7 +97,7 @@ describe('montoDelSiguienteCobro', () => {
       }),
     )
     await montoDelSiguienteCobro(f.stripe, 'sub_1')
-    expect(f.retrieve).toHaveBeenCalledWith('sub_1', { expand: ['discounts'] })
+    expect(f.retrieve).toHaveBeenCalledWith('sub_1', { expand: ['discounts'] }, { apiVersion: '2025-08-27.basil' })
     expect(f.createPreview).toHaveBeenLastCalledWith({
       customer: 'cus_1',
       subscription_details: { items: [{ price: 'price_v8', quantity: 1 }] },
@@ -117,6 +117,49 @@ describe('montoDelSiguienteCobro', () => {
     )
     await expect(montoDelSiguienteCobro(f.stripe, 'sub_1')).resolves.toBe(81084)
     expect(f.createPreview).toHaveBeenLastCalledWith(expect.objectContaining({ discounts: [{ coupon: 'VIGENTE' }, { coupon: 'SIEMPRE' }] }))
+  })
+
+  describe('🔴 Codex b2-mac r4 #2: un cupón que Operaciones retiró en Stripe sigue descontando, pero no se puede volver a aplicar', () => {
+    // Medido con Stripe de pruebas (26-nov): la factura real de $810.84 con el 20 % retirado cobra $648.67 (y $548.67 con $100 de saldo
+    // a favor); la vista previa con ese cupón dice «No such coupon». Sólo la versión basil conserva los términos (`valid: false`).
+    const retirado = (coupon: Record<string, unknown>) => ({
+      id: 'di_ret',
+      coupon: { id: 'RET', valid: false, percent_off: null, amount_off: null, currency: null, ...coupon },
+      source: null,
+    })
+    const conVistaPrevia = (sub: Record<string, unknown>, saldo = 0) => {
+      const f = stripeFalso(sub)
+      f.createPreview.mockImplementation(async (params: Record<string, unknown>) => {
+        if (params.subscription) throw sinRecibo()
+        return { subtotal: 81084, total: 81084, starting_balance: saldo, amount_due: Math.max(0, 81084 + saldo), currency: 'mxn' }
+      })
+      return f
+    }
+
+    it('un 20 % retirado: el precio menos el 20 % redondeado como Stripe, menos el saldo a favor; la vista previa sin descuentos', async () => {
+      const f = conVistaPrevia(pruebaSinMetodo({ discounts: [retirado({ percent_off: 20 })] }), -10000)
+      await expect(montoDelSiguienteCobro(f.stripe, 'sub_1')).resolves.toBe(54867)
+      expect(f.createPreview).toHaveBeenLastCalledWith({
+        customer: 'cus_1',
+        subscription_details: { items: [{ price: 'price_v8', quantity: 1 }] },
+        discounts: '',
+      })
+    })
+
+    it('$100 retirados (en la misma moneda): el precio menos $100', async () => {
+      const f = conVistaPrevia(pruebaSinMetodo({ discounts: [retirado({ amount_off: 10000, currency: 'mxn' })] }))
+      await expect(montoDelSiguienteCobro(f.stripe, 'sub_1')).resolves.toBe(71084)
+    })
+
+    it.each([
+      ['junto con otro descuento vivo', [retirado({ percent_off: 20 }), { id: 'di_v', coupon: { id: 'VIVO', valid: true } }]],
+      ['dos retirados', [retirado({ percent_off: 20 }), { ...retirado({ percent_off: 10 }), id: 'di_ret2' }]],
+      ['en otra moneda', [retirado({ amount_off: 10000, currency: 'usd' })]],
+      ['sólo para ciertos productos', [retirado({ percent_off: 20, applies_to: { products: ['prod_x'] } })]],
+    ])('un retirado %s → null: nunca un monto que no se puede reproducir', async (_que, discounts) => {
+      const f = conVistaPrevia(pruebaSinMetodo({ discounts }))
+      await expect(montoDelSiguienteCobro(f.stripe, 'sub_1')).resolves.toBeNull()
+    })
   })
 
   it('un descuento que no se puede leer (sin expandir) → null: nunca el precio sin el descuento', async () => {
