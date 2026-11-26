@@ -4,6 +4,7 @@ import prisma from '@/utils/prismaClient'
 import { NotFoundError } from '@/errors/AppError'
 import { guardarBorrador } from '@/services/marketing/campaignDraft.service'
 import { previsualizarEnvio, publicarCampana } from '@/services/marketing/campaignPublish.service'
+import { conAvanceReal } from '@/services/marketing/campaignProgress.service'
 
 /**
  * Controlador delgado de campañas de correo a clientes — Fase 1C-A, Task 6.
@@ -26,7 +27,7 @@ export async function listCampaigns(req: Request, res: Response, next: NextFunct
     const page = req.query.page ? Number(req.query.page) : 1
     const pageSize = req.query.pageSize ? Number(req.query.pageSize) : 20
 
-    const [items, total] = await Promise.all([
+    const [filas, total] = await Promise.all([
       prisma.customerCampaign.findMany({
         where: { venueId },
         // 🔴 `select` acotado, NO la fila completa. `htmlBody` y `textBody` son `@db.Text`
@@ -45,9 +46,8 @@ export async function listCampaigns(req: Request, res: Response, next: NextFunct
           customerGroupId: true,
           tags: true,
           totalRecipients: true,
-          sentCount: true,
-          failedCount: true,
-          skippedCount: true,
+          // 🔴 `sentCount`/`failedCount`/`skippedCount` NO se leen de la fila: nacen en 0 y nadie
+          // los sube. Salen de contar los envíos (`conAvanceReal`, D37).
           scheduledFor: true,
           createdAt: true,
           updatedAt: true,
@@ -64,6 +64,7 @@ export async function listCampaigns(req: Request, res: Response, next: NextFunct
       }),
       prisma.customerCampaign.count({ where: { venueId } }),
     ])
+    const items = await conAvanceReal(venueId, filas)
 
     res.json({ items, total, page, pageSize })
   } catch (error) {
@@ -78,7 +79,9 @@ export async function getCampaign(req: Request, res: Response, next: NextFunctio
     if (!campaign) {
       throw new NotFoundError('La campaña no existe en este negocio.')
     }
-    res.json(campaign)
+    // Los mismos números y estado que la lista (D37): la fila trae ceros y `ENQUEUED` para siempre.
+    const [conAvance] = await conAvanceReal(venueId, [campaign])
+    res.json(conAvance)
   } catch (error) {
     next(error)
   }

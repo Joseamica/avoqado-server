@@ -78,6 +78,18 @@ export async function updateConfig(req: Request, res: Response, next: NextFuncti
   }
 }
 
+/** D28: reactivar lo guardado tal cual (sin reescribir premio, niveles ni vigencia). */
+export async function reactivate(req: Request, res: Response, next: NextFunction) {
+  try {
+    const authContext = (req as any).authContext
+    const { reactivated } = await program.reactivateReferralProgram({ venueId: req.params.venueId, staffId: authContext?.userId })
+    res.json({ ok: true, reactivated })
+  } catch (e: any) {
+    if (mapConfigValidationError(e, res)) return
+    next(e)
+  }
+}
+
 export async function deactivate(req: Request, res: Response, next: NextFunction) {
   try {
     await program.deactivateReferralProgram({ venueId: req.params.venueId, reason: req.body.reason })
@@ -313,9 +325,16 @@ export async function generateCustomerCodeHandler(req: Request, res: Response, n
       venuePrefix: cfg.codePrefix || customer.venue.name,
       customerName,
     })
-    await withDeadlockRetry(tx => tx.customer.update({ where: { id: customer.id }, data: { referralCode } }), {
-      etiqueta: 'generateCustomerCodeHandler',
-    })
+    // Sólo si sigue sin código: el reparto en segundo plano (al activar o reactivar) pudo darle uno entretanto y quizá ya
+    // se compartió. Entonces se devuelve ése y no se reemplaza (D28, Codex r4 #4).
+    const { count } = await withDeadlockRetry(
+      tx => tx.customer.updateMany({ where: { id: customer.id, referralCode: null }, data: { referralCode } }),
+      { etiqueta: 'generateCustomerCodeHandler' },
+    )
+    if (count === 0) {
+      const actual = await prisma.customer.findUnique({ where: { id: customer.id }, select: { referralCode: true } })
+      return res.json({ referralCode: actual?.referralCode ?? null })
+    }
     res.json({ referralCode })
   } catch (e) {
     next(e)
@@ -349,7 +368,7 @@ export async function getShareLink(req: Request, res: Response, next: NextFuncti
     }
     const cfg = await prisma.referralProgramConfig.findUnique({
       where: { venueId: customer.venueId },
-      select: { newCustomerDiscountPercent: true },
+      select: { newCustomerDiscountPercent: true, active: true },
     })
     if (!cfg) {
       return res.status(404).json({ error: 'No code or program' })
@@ -365,6 +384,8 @@ export async function getShareLink(req: Request, res: Response, next: NextFuncti
       message: buildWelcomeShareMessage(linkInput),
       code: customer.referralCode,
       venueName: customer.venue.name,
+      // D30: en pausa la caja rechaza el código (PROGRAM_INACTIVE); el panel no ofrece compartirlo. Campo nuevo, opcional.
+      programActive: cfg.active,
     })
   } catch (e) {
     next(e)

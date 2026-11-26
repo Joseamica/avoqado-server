@@ -204,3 +204,53 @@ describe('importMenu — governed bulk preflight', () => {
     expect(prismaMock.product.create).not.toHaveBeenCalled()
   })
 })
+
+// hz:960ee149:D1: asignar un grupo sin orden lo guardaba en 0 y empataba con el primero; ahora va al final.
+describe('assignModifierGroupToProduct — sin displayOrder va al final', () => {
+  const preparar = (ultima: { displayOrder: number } | null, yaAsignado: object | null = null) => {
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'venue-xyz', productGroupId: null }]) // negocio y producto suelto (FOR SHARE)
+    prismaMock.modifierGroup.findFirst.mockResolvedValue({ id: 'grupo-1', venueId: 'venue-xyz', active: true })
+    prismaMock.productModifierGroup.findUnique.mockResolvedValue(yaAsignado)
+    prismaMock.productModifierGroup.findFirst.mockResolvedValue(ultima)
+    prismaMock.productModifierGroup.create.mockImplementation(({ data }: any) => Promise.resolve(data))
+  }
+  const asignar = (data: { modifierGroupId: string; displayOrder?: number }) =>
+    menuService.assignModifierGroupToProduct('venue-xyz', 'product-abc', data)
+  const ordenCreado = () => prismaMock.productModifierGroup.create.mock.calls[0][0].data.displayOrder
+
+  it('con uniones 0, 1, 2 crea con 3', async () => {
+    preparar({ displayOrder: 2 })
+    await asignar({ modifierGroupId: 'grupo-1' })
+    expect(prismaMock.productModifierGroup.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { productId: 'product-abc' }, orderBy: { displayOrder: 'desc' } }),
+    )
+    expect(ordenCreado()).toBe(3)
+  })
+
+  it('con la última unión en el tope del entero no se pasa del tope', async () => {
+    preparar({ displayOrder: 2_147_483_647 })
+    await asignar({ modifierGroupId: 'grupo-1' })
+    expect(ordenCreado()).toBe(2_147_483_647)
+  })
+
+  it('sin uniones crea con 0', async () => {
+    preparar(null)
+    await asignar({ modifierGroupId: 'grupo-1' })
+    expect(ordenCreado()).toBe(0)
+  })
+
+  it('REGRESSION — con displayOrder: 5 crea con 5', async () => {
+    preparar({ displayOrder: 2 })
+    await asignar({ modifierGroupId: 'grupo-1', displayOrder: 5 })
+    expect(ordenCreado()).toBe(5)
+  })
+
+  it('REGRESSION — grupo ya asignado: el mismo error de hoy y no crea', async () => {
+    preparar({ displayOrder: 2 }, { id: 'union-1' })
+    await expect(asignar({ modifierGroupId: 'grupo-1' })).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'Modifier group grupo-1 is already assigned to product product-abc.',
+    })
+    expect(prismaMock.productModifierGroup.create).not.toHaveBeenCalled()
+  })
+})

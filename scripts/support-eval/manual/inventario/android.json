@@ -934,7 +934,7 @@
       "nombre": "Recompensas",
       "origen": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt:2531",
       "quienLaVe": "quien abre la cuenta de una mesa desde Mesas (app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:569) con plan con featureCode TABLE_SERVICE (sin él sale «Servicio de mesas · PRO», app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt:143-144); con un cliente con puntos (app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt:2532); «Canjear» (app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt:3347).",
-      "paginas": []
+      "paginas": ["android/lealtad/canjear-puntos"]
     },
     {
       "id": "accion:nav:\"table-order\"/aplicar-cobro-por-servicio",

@@ -7,6 +7,7 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import prisma from '@/utils/prismaClient'
 import { obtenerAutomatizacion, cambiarEstadoAutomatizacion } from '@/services/marketing/birthdayAutomation.service'
+import { conAvanceReal } from '@/services/marketing/campaignProgress.service'
 
 /**
  * Campañas de correo de un negocio a SUS clientes (promociones y felicitación de
@@ -27,7 +28,7 @@ export function registerCampaignTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_customer_campaigns',
-    'Email CAMPAIGNS a venue sent (or is preparing) to ITS OWN customers — promotions, news, announcements: each with its name, subject, status (DRAFT/SENT/…), who it went to, and how many were delivered vs failed. Answers "¿qué campañas de correo he mandado? ¿cuántos correos llegaron? ¿tengo borradores sin mandar?". This is the venue→its customers lane, NOT Avoqado→venues. Pass venueId. Requires marketing:manage.',
+    'Email CAMPAIGNS a venue sent (or is preparing) to ITS OWN customers — promotions, news, announcements: each with its name, subject, status (DRAFT/SENT/…), who it went to, and how many went out (accepted by the email provider and not bounced — not a confirmed inbox delivery), failed (bounced, spam or out of retries) or were skipped. Answers "¿qué campañas de correo he mandado? ¿cuántos correos salieron? ¿tengo borradores sin mandar?". This is the venue→its customers lane, NOT Avoqado→venues. Pass venueId. Requires marketing:manage.',
     {
       venueId: z.string().describe('Venue whose campaigns to list (must be in your scope)'),
       limit: z.number().int().positive().max(50).optional().describe('Max campaigns (default 20, newest first)'),
@@ -37,7 +38,7 @@ export function registerCampaignTools(server: McpServer, scope: McpScope) {
       guard.requirePermission('marketing:manage', venueId, 'read')
 
       const take = limit ?? 20
-      const [items, total] = await Promise.all([
+      const [filas, total] = await Promise.all([
         prisma.customerCampaign.findMany({
           where: { venueId },
           // 🔴 `select` acotado: sin él viajarían `htmlBody`/`textBody` — el correo entero de
@@ -49,9 +50,7 @@ export function registerCampaignTools(server: McpServer, scope: McpScope) {
             status: true,
             audience: true,
             totalRecipients: true,
-            sentCount: true,
-            failedCount: true,
-            skippedCount: true,
+            // Los contadores de la fila nacen en 0 y nadie los sube: salen de los envíos (D37).
             createdAt: true,
           },
           // Desempate único: con `skip`/`take` sobre `createdAt` solo, dos campañas creadas
@@ -61,6 +60,7 @@ export function registerCampaignTools(server: McpServer, scope: McpScope) {
         }),
         prisma.customerCampaign.count({ where: { venueId } }),
       ])
+      const items = await conAvanceReal(venueId, filas)
 
       return text({
         venueId,
@@ -73,6 +73,7 @@ export function registerCampaignTools(server: McpServer, scope: McpScope) {
           estado: c.status,
           audiencia: c.audience,
           destinatarios: c.totalRecipients,
+          // Nombre de siempre (lo leen clientes viejos): cuenta los que SALIERON y no rebotaron.
           entregados: c.sentCount,
           fallidos: c.failedCount,
           omitidos: c.skippedCount,

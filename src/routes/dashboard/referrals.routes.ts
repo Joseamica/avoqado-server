@@ -10,6 +10,7 @@ import {
   ActivateReferralProgramSchema,
   UpdateReferralConfigSchema,
   DeactivateReferralProgramSchema,
+  ReactivateReferralProgramSchema,
   ValidateReferralCodeSchema,
   CaptureReferralSchema,
   ForceOverrideReferralSchema,
@@ -62,6 +63,21 @@ router.patch(
   checkPermission('referral:configure'),
   validateRequest(UpdateReferralConfigSchema),
   referralsController.updateConfig,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/referrals/reactivate:
+ *   post:
+ *     tags: [Referrals]
+ *     summary: Reactivate a paused referral program exactly as saved (no settings or tier rewards rewritten)
+ *     security: [{ bearerAuth: [] }]
+ */
+router.post(
+  '/reactivate',
+  checkPermission('referral:configure'),
+  validateRequest(ReactivateReferralProgramSchema),
+  referralsController.reactivate,
 )
 
 /**

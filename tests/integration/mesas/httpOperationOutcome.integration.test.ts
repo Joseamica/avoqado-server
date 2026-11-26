@@ -3637,7 +3637,7 @@ describe('Task4 receipt coverage', () => {
       active: false,
       minPointsRedeem: 100,
       pointsPerVisit: 0,
-      pointsExpireDays: 365,
+      pointsExpireDays: null,
     })
     expect(await prisma.loyaltyTransaction.count({ where: { orderId: o.id } })).toBe(0)
   })

@@ -453,6 +453,64 @@ describe('Customer Dashboard Service', () => {
       expect(prismaMock.customer.create).toHaveBeenCalled()
     })
 
+    // D28 / Codex r5 #2: el reparto de códigos (al reactivar referidos) pudo darle código a esta clienta mientras se daba
+    // de alta, y ese código quizá ya se compartió. El alta escribe el suyo sólo si sigue sin código; nunca lo reemplaza.
+    it('referidos activos: el alta sólo escribe el código si la clienta sigue sin uno', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(null)
+      prismaMock.customer.create.mockResolvedValue({ ...createMockCustomer({ referralCode: null }), customerGroup: null } as any)
+      prismaMock.referralProgramConfig.findUnique.mockResolvedValueOnce({
+        active: true,
+        codePrefix: 'MINEG',
+        newCustomerDiscountPercent: 10,
+      } as any)
+      prismaMock.venue.findUnique.mockResolvedValueOnce({ slug: 'mi-negocio', name: 'Mi Negocio' } as any)
+      prismaMock.customer.updateMany.mockResolvedValueOnce({ count: 0 } as any)
+
+      await createCustomer('venue-123', { phone: '+5215500000000', firstName: 'Ana' })
+
+      expect(prismaMock.customer.updateMany).toHaveBeenCalledWith({
+        where: { id: 'customer-123', referralCode: null },
+        data: { referralCode: expect.any(String) },
+      })
+      expect(prismaMock.customer.update).not.toHaveBeenCalledWith(expect.objectContaining({ data: { referralCode: expect.any(String) } }))
+    })
+
+    // Codex r6: el correo de bienvenida lleva el código que de verdad quedó guardado (el del reparto), y si la ficha ya no
+    // existe (no hay código guardado) no se manda ninguno.
+    describe('correo de bienvenida con el código guardado', () => {
+      async function altaConReparto(codigoGuardado: string | null) {
+        const email = await import('@/services/email.service')
+        const tarjeta = await import('@/services/referrals/referralCard.service')
+        const send = jest.spyOn(email, 'sendReferralWelcomeEmail').mockResolvedValue(undefined as any)
+        jest.spyOn(tarjeta, 'generateWelcomeCard').mockResolvedValue(Buffer.from('png') as any)
+        prismaMock.customer.findFirst.mockResolvedValue(null)
+        prismaMock.customer.create.mockResolvedValue({
+          ...createMockCustomer({ referralCode: null, email: 'ana@example.com', marketingConsent: true }),
+          customerGroup: null,
+        } as any)
+        prismaMock.referralProgramConfig.findUnique.mockResolvedValueOnce({
+          active: true,
+          codePrefix: 'MINEG',
+          newCustomerDiscountPercent: 10,
+        } as any)
+        prismaMock.venue.findUnique.mockResolvedValueOnce({ slug: 'mi-negocio', name: 'Mi Negocio' } as any)
+        prismaMock.customer.updateMany.mockResolvedValueOnce({ count: 0 } as any)
+        prismaMock.customer.findUnique.mockResolvedValueOnce((codigoGuardado ? { referralCode: codigoGuardado } : null) as any)
+        await createCustomer('venue-123', { phone: '+5215500000001', email: 'ana@example.com', firstName: 'Ana' })
+        return send
+      }
+
+      it('si el reparto le dio código, el correo lleva ESE', async () => {
+        const send = await altaConReparto('DEL-REPARTO-9')
+        expect(send).toHaveBeenCalledWith(expect.objectContaining({ referralCode: 'DEL-REPARTO-9' }))
+      })
+
+      it('si no quedó ningún código guardado, no se manda correo', async () => {
+        const send = await altaConReparto(null)
+        expect(send).not.toHaveBeenCalled()
+      })
+    })
+
     it('should throw BadRequestError if neither email nor phone provided', async () => {
       await expect(
         createCustomer('venue-123', {

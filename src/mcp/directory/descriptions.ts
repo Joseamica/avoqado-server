@@ -88,7 +88,7 @@ export const DIRECTORY_DESCRIPTIONS: Record<string, string> = {
   pending_external_confirmations:
     'Tickets charged in another register that are still waiting for a person to confirm that charge, excluding tickets already confirmed, disputed, declared uncharged or configured as assumed. Read-only; requires area-tickets:configure.',
   list_customer_campaigns:
-    'Email campaigns a branch sent or is preparing for its own customers: name, subject, status, audience and delivered vs failed counts. Requires marketing:manage.',
+    'Email campaigns a branch sent or is preparing for its own customers: name, subject, status, audience and how many went out (accepted and not bounced), failed or were skipped. Requires marketing:manage.',
   birthday_automation_status:
     'Automatic birthday greeting of a branch: whether it is on, paused or not yet set up, how many days in advance it is sent, its subject and the last date evaluated. Requires marketing:manage.',
   list_commission_schemes:

@@ -52,7 +52,22 @@ describe('loyalty_status', () => {
       redemptionRate: 0.05,
       minPointsToRedeem: 100,
       pointsExpireDays: 365,
+      // D27: la regla dicha en palabras, para que el asistente no la explique como «a los N días de ganarse».
+      pointsExpireRule: 'Si un cliente pasa 365 días sin movimientos en sus puntos (ganar, canjear o un ajuste), vencen todos sus puntos.',
     })
+  })
+
+  it('D27: with the program off, it does not announce an expiration rule (nothing expires)', async () => {
+    mockFind.mockResolvedValueOnce({
+      active: false,
+      pointsPerDollar: 1,
+      pointsPerVisit: 0,
+      redemptionRate: 0.01,
+      minPointsRedeem: 100,
+      pointsExpireDays: 365,
+    })
+    const out = parse(await call({ venueId: 'v1' }))
+    expect(out.program.pointsExpireRule).toBeUndefined()
   })
 
   it('returns configured:false / program:null when no program exists (read never creates one)', async () => {

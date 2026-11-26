@@ -671,3 +671,57 @@ describe('updateProduct — grupo de modificadores que ya no existe', () => {
     expect(prismaMock.product.update).toHaveBeenCalled()
   })
 })
+
+// hz:960ee149:D1: al editar, el orden guardado de los grupos era el que devolvía la base, no el que mandó el panel.
+describe('updateProduct — orden de los grupos de modificadores', () => {
+  const vivos = (...ids: string[]) => {
+    prismaMock.product.findFirst.mockResolvedValue(makeMockProduct())
+    // La base los devuelve en SU orden, no en el pedido.
+    prismaMock.modifierGroup.findMany.mockResolvedValue(ids.map(id => ({ id })) as any)
+    prismaMock.modifierGroup.count.mockResolvedValue(ids.length)
+    prismaMock.product.update.mockResolvedValue(makeMockProduct())
+  }
+  const guardado = () => prismaMock.product.update.mock.calls[0][0].data.modifierGroups
+
+  it('guarda el orden recibido, no el de la base', async () => {
+    vivos('g1', 'g2', 'g3')
+    await productService.updateProduct('venue-xyz', 'product-abc', { modifierGroupIds: ['g3', 'g1', 'g2'] } as any, humanActor)
+    expect(guardado()).toEqual({
+      deleteMany: {},
+      create: [
+        { groupId: 'g3', displayOrder: 0 },
+        { groupId: 'g1', displayOrder: 1 },
+        { groupId: 'g2', displayOrder: 2 },
+      ],
+    })
+  })
+
+  it('un id repetido cuenta una vez, en su primera posición', async () => {
+    vivos('g1', 'g2')
+    await productService.updateProduct('venue-xyz', 'product-abc', { modifierGroupIds: ['g2', 'g1', 'g2'] } as any, humanActor)
+    expect(guardado().create).toEqual([
+      { groupId: 'g2', displayOrder: 0 },
+      { groupId: 'g1', displayOrder: 1 },
+    ])
+  })
+
+  it('un id que no es un grupo vivo del negocio: el mismo 400 de hoy y nada se escribe', async () => {
+    vivos('g1')
+    await expect(
+      productService.updateProduct('venue-xyz', 'product-abc', { modifierGroupIds: ['g1', 'ajeno'] } as any, humanActor),
+    ).rejects.toMatchObject({ statusCode: 400, message: productService.GRUPO_DE_MODIFICADORES_YA_NO_EXISTE })
+    expect(prismaMock.product.update).not.toHaveBeenCalled()
+  })
+
+  it('REGRESSION — lista vacía quita todas las uniones', async () => {
+    vivos()
+    await productService.updateProduct('venue-xyz', 'product-abc', { modifierGroupIds: [] } as any, humanActor)
+    expect(guardado()).toEqual({ deleteMany: {} })
+  })
+
+  it('REGRESSION — sin modifierGroupIds no toca las uniones', async () => {
+    vivos()
+    await productService.updateProduct('venue-xyz', 'product-abc', { name: 'Otro' }, humanActor)
+    expect(prismaMock.product.update.mock.calls[0][0].data).not.toHaveProperty('modifierGroups')
+  })
+})
