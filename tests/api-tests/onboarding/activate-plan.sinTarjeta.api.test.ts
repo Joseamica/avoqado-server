@@ -608,7 +608,8 @@ describe('POST …/v2/activate-plan — la prueba sin tarjeta con la v2', () => 
         data: { stripeCustomerId: null },
       })
       // Fix round 2 (C2): esa lectura (la puerta antes de cobrar) va con las opciones del cliente de siempre, no con el tope.
-      expect(mockCustomerRetrieve.mock.calls[0]).toEqual(['cus_1', expect.anything(), {}])
+      // 🔴 Sin tercer argumento: stripe-node toma `{}` como un argumento de más y lanza «Unknown arguments» (Stripe de pruebas, 26-nov).
+      expect(mockCustomerRetrieve.mock.calls[0]).toEqual(['cus_1', expect.anything()])
       expect(mockCustomerCreate).toHaveBeenCalledTimes(1)
       expect(clienteDelNegocio).toBe('cus_nuevo')
       // Queda en la bitácora del negocio: qué cliente borrado se soltó (`logAction` está simulado en las pruebas: la llamada).
