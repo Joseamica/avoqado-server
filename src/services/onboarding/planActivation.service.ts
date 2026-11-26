@@ -48,7 +48,7 @@ import { primerCobroCubierto } from './primerCobroPagado'
 import { basicPlanValido, fusionarV2SetupData, MENSAJE_BASIC_PLAN_INVALIDO, parseV2Plan } from './onboardingProgress.service'
 import { modalidadDePrueba, type TrialModality } from '../billing/modalidadDePrueba'
 import { resolverPrecioPorLlave } from '../billing/precioDelPlan'
-import { precioDeLaOferta, priceIdVigente, versionQueCobra, type OfertaVigente } from '../billing/planOffer'
+import { precioDeLaOferta, priceIdVigente, versionQueCobra, type OfertaVigente, type Periodicidad } from '../billing/planOffer'
 import { basicoDeLaBienvenida } from '../billing/avisosDelBasico'
 import { DIA_MS, ofertaCambio, planFueraDeVenta, revisarComprobante } from '../billing/opcionesDeCompra'
 import { verificarCotizacion, type CotizacionFirmada } from '../billing/comprobanteDeCotizacion'
@@ -1000,14 +1000,19 @@ function modalidadCobrada(sub: Stripe.Subscription): ModalidadCobrada {
 type LugarDelIntento = { redemptionId: string; campaignId: string; offerVersion: string }
 
 /**
- * Codex b2-code #2: el número de versión que nombra el comprobante de la petición, aunque ya no sea el de la vigente (el reenvío del
- * navegador tras el reto manda el suyo). `null` sin comprobante, o si no es legible para esta organización (firma, alcance o
- * vencimiento): nunca lanza. Sólo lo lee la recuperación de un reto con versión del editor.
+ * Codex b2-code #2 (r4 #2): la versión y la periodicidad que firma el comprobante de la petición, aunque ya no sea el de la vigente
+ * (el reenvío del navegador tras el reto manda el suyo). `null` sin comprobante, o si no es legible para esta organización (firma,
+ * alcance o vencimiento): nunca lanza. Sólo lo lee la recuperación de un reto con versión del editor (o con la oferta ilegible).
  */
-function versionQueNombraElComprobante(token: unknown, organizationId: string, ahora: Date): number | null {
+function loQueFirmaElComprobante(
+  token: unknown,
+  organizationId: string,
+  ahora: Date,
+): { versionNumber: number; interval: Periodicidad } | null {
   if (token === undefined || token === null) return null
   try {
-    return verificarCotizacion(token, `org:${organizationId}`, ahora).versionNumber
+    const { versionNumber, interval } = verificarCotizacion(token, `org:${organizationId}`, ahora)
+    return { versionNumber, interval }
   } catch {
     return null
   }
@@ -1089,8 +1094,8 @@ async function anularIntento(sub: Stripe.Subscription): Promise<'DESCARTADA' | {
  *
  * 🔴 Codex b2-code #2 (r3 y r4, la regla corregida), también la versión de la oferta estándar (`planOfferVersion` de la suscripción)
  * y la periodicidad de la suscripción:
- * - con un comprobante VÁLIDO en la petición (`versionDelPedido`, la versión que dice el token, que no necesita leer el puntero):
- *   decide el comprobante, aunque la lectura de la oferta falle;
+ * - con un comprobante VÁLIDO en la petición (`comprobanteDelPedido`: la versión y la periodicidad que firma el token, que no
+ *   necesitan leer el puntero): decide el comprobante, aunque la lectura de la oferta falle (r4 #2: su periodicidad, no la del cuerpo);
  * - sin comprobante válido y con la versión del editor LEÍDA (`delEditor`): la versión vacía y la periodicidad del cuerpo; contra un
  *   reto de una versión del editor no es el mismo intento (se anula y sale el rechazo de la petición, como hoy);
  * - sin comprobante válido y con la lectura de la oferta fallida, o sin versión del editor: lo de B1, sin comparar.
@@ -1105,11 +1110,15 @@ async function resolverIntentoIncompleto(args: {
   attempt: number
   lease: Date
   delEditor: boolean
-  versionDelPedido: number | null
+  comprobanteDelPedido: { versionNumber: number; interval: Periodicidad } | null
 }): Promise<{ recuperada: Stripe.Subscription | null; lugarDescartado: LugarDelIntento | null }> {
-  const { input, campaign, organizationId, attempt, lease, delEditor, versionDelPedido } = args
-  /** La versión con la que se compara el reto (ver arriba); `null` = no se compara (B1). */
-  const versionComparada = versionDelPedido !== null ? String(versionDelPedido) : delEditor ? '' : null
+  const { input, campaign, organizationId, attempt, lease, delEditor, comprobanteDelPedido } = args
+  /** La versión y la periodicidad con que se compara el reto (ver arriba); `null` = no se compara (B1). */
+  const comparadoCon = comprobanteDelPedido
+    ? { version: String(comprobanteDelPedido.versionNumber), interval: comprobanteDelPedido.interval }
+    : delEditor
+      ? { version: '', interval: input.interval }
+      : null
   const leer = async <T>(lectura: () => Promise<T>): Promise<T> => {
     try {
       return await lectura()
@@ -1164,8 +1173,8 @@ async function resolverIntentoIncompleto(args: {
     // avance libera el lugar de la versión vieja con la misma regla.
     (sub.metadata?.launchOfferVersion ?? '') === (campaign ? String(campaign.offerVersion) : '') &&
     // Codex b2-code #2 (r4, la regla corregida): la versión de la oferta estándar y la periodicidad (ver arriba).
-    (versionComparada === null ||
-      ((sub.metadata?.planOfferVersion ?? '') === versionComparada && periodicidadDeLaSuscripcion(sub) === input.interval)) &&
+    (comparadoCon === null ||
+      ((sub.metadata?.planOfferVersion ?? '') === comparadoCon.version && periodicidadDeLaSuscripcion(sub) === comparadoCon.interval)) &&
     input.payNow
 
   if (mismoIntento && (pi?.status === 'requires_action' || pi?.status === 'requires_confirmation')) {
@@ -1587,7 +1596,7 @@ export async function activatePlan(
           // sin el puntero. Sin versión del editor (la lectura no la vio), el comprobante no se lee (B0/B1 literal). `delEditor`: la
           // versión del editor se LEYÓ (sin comprobante válido, entonces sí se compara).
           delEditor: estandar !== undefined,
-          versionDelPedido: recuperacionDiferida ? versionQueNombraElComprobante(input.quoteToken, organizationId, now) : null,
+          comprobanteDelPedido: recuperacionDiferida ? loQueFirmaElComprobante(input.quoteToken, organizationId, now) : null,
         }))
       } else if (!SUSCRIPCION_COBRADA.includes(estado as (typeof SUSCRIPCION_COBRADA)[number])) {
         logger.warn('activate-plan: suscripción recuperada en estado no concluyente', {
