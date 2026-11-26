@@ -632,6 +632,33 @@ describe('GET /plan → POST /plan/checkout con la versión del editor (B2, Task
     expect(mockSessionCreate).not.toHaveBeenCalled()
   })
 
+  it('🔴 Codex b2-code #3: el paso 0 no ve aceptación; la conversión de la demo guarda la suya antes del candado → dentro del candado, la relectura de la base da 409 PLAN_ACCEPTANCE_REQUIRED con sus datos, sin sesión de Stripe', async () => {
+    conVigente(2, v2())
+    precioV2()
+    const aceptacion = { id: 'clacepta0000000000000001', tier: 'PREMIUM', interval: 'monthly' }
+    // La regla común (simulada) toma su candado y ENTONCES corre lo de dentro: para entonces la conversión ya guardó su aceptación.
+    mockAutorizar.mockImplementation(async (_v: string, _c: string, _i: unknown, crear: (tx: unknown) => unknown) => {
+      prismaMock.planAcceptance.findFirst.mockResolvedValue(aceptacion as never)
+      return crear(prismaMock)
+    })
+
+    const res = await comprar({ quoteToken: comprobanteDeTuPlan() })
+
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({
+      code: 'PLAN_ACCEPTANCE_REQUIRED',
+      message: 'Termina la contratación que empezaste al convertir tu negocio, o espera 30 minutos.',
+      details: { acceptanceId: aceptacion.id, tier: 'PREMIUM', interval: 'monthly' },
+    })
+    expect(mockAutorizar).toHaveBeenCalledTimes(1)
+    expect(mockSessionCreate).not.toHaveBeenCalled()
+    // La relectura es sólo de la base: Stripe no se consulta dentro del candado para saber si ya se usó.
+    expect(mockSubList).not.toHaveBeenCalled()
+    expect(prismaMock.planAcceptance.findFirst).toHaveBeenLastCalledWith(
+      expect.objectContaining({ where: { venueId, expiresAt: { gt: expect.any(Date) } } }),
+    )
+  })
+
   it('comprobante de otra versión → 409 OFFER_CHANGED reason VERSION; de otro negocio → 400 QUOTE_INVALID; con el renombre pendiente, 503 PLAN_RENAME_PENDING', async () => {
     conVigente(3, definicionDePrueba({ ids: idsDeLaVersion('v3'), netos: { 'PRO:monthly': 79900 } }))
     mockPriceRetrieve.mockResolvedValue({ id: 'price_v3_pro_m', active: true, unit_amount: PRO_M_V2 })

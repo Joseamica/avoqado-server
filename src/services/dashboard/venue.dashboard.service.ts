@@ -2059,8 +2059,17 @@ export async function createVenuePlanCheckoutSession(
         acceptanceId: options.acceptanceId,
       })
     }
-    await exigirSinAceptacionPendiente(venueId, cliente)
-    return checkoutConLaOferta({ venue, customerId: cliente, vigente, tier, interval, billingBase, quoteToken: options.quoteToken })
+    const aceptacionYaRevisada = await exigirSinAceptacionPendiente(venueId, cliente)
+    return checkoutConLaOferta({
+      venue,
+      customerId: cliente,
+      vigente,
+      tier,
+      interval,
+      billingBase,
+      quoteToken: options.quoteToken,
+      aceptacionYaRevisada,
+    })
   }
   // El precio de Stripe se lee UNA vez; si no es el que el dashboard muestra, NO se abre sesión (nada se cobra).
   // 🔴 Codex B0 #3: ANTES de la regla común. La regla vence las compras abiertas del cliente antes de crear: si este 409
@@ -2155,8 +2164,9 @@ export async function createVenuePlanCheckoutSession(
  *  1-3. el comprobante y la opción de la vigente (`revisarCompraDeTuPlan`; su rechazo se lanza);
  *  4. el precio de la versión en Stripe (activo y del bruto) y el nombre del plan, ANTES de la regla común: dentro vencería la
  *     sesión abierta de otra pestaña (Codex B0 #3);
- *  5. dentro de la regla común, la relectura de la vigente y de la fila con su `tx` (`exigirLaMismaCompra`) y la sesión con el
- *     priceId de la versión, su fin de prueba y la metadata que la cita.
+ *  5. dentro de la regla común, con su `tx` y sólo la base: la aceptación de la demo que se guardó después del paso 0
+ *     (`exigirSinAceptacionNueva`, Codex b2-code #3), la relectura de la vigente y de la fila (`exigirLaMismaCompra`) y la sesión
+ *     con el priceId de la versión, su fin de prueba y la metadata que la cita.
  * Una prueba sin tarjeta viva del mismo plan la sigue negando la regla común (`PLAN_YA_CONTRATADO`).
  */
 async function checkoutConLaOferta(args: {
@@ -2167,8 +2177,10 @@ async function checkoutConLaOferta(args: {
   interval: 'monthly' | 'annual'
   billingBase: string
   quoteToken: unknown
+  /** La aceptación viva que el paso 0 ya juzgó usada (o `null` si no había ninguna). */
+  aceptacionYaRevisada: string | null
 }): Promise<string> {
-  const { venue, customerId, vigente, tier, interval, billingBase, quoteToken } = args
+  const { venue, customerId, vigente, tier, interval, billingBase, quoteToken, aceptacionYaRevisada } = args
   const venueId = venue.id
   const tierCode = tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
   const n = vigente.number
@@ -2190,6 +2202,8 @@ async function checkoutConLaOferta(args: {
   })
   await exigirNombreDelPlanAlDia(tier)
   const checkoutUrl = await autorizarObligacionNueva(venueId, customerId, { tipo: 'PLAN', tier }, async tx => {
+    // Como en el paso 0 (ruling P8), la aceptación va antes que la versión.
+    await exigirSinAceptacionNueva(tx, venueId, aceptacionYaRevisada)
     await exigirLaMismaCompra(tx, { venueId, tier, interval, versionNumber: n, trialEnd })
     return createPlanCheckoutSession({
       venueId,
@@ -2294,15 +2308,18 @@ async function checkoutDeLaAceptacion(args: {
  * perdió). La lectura de Stripe sólo existe con una aceptación viva, y es de compra (sin el tope de las lecturas informativas). Si no
  * se puede saber si ya se usó, se trata como sin usar (b2-r9 #5): al retomarla, si ya se pagó, la regla común responde
  * `PLAN_YA_CONTRATADO`.
+ *
+ * Devuelve el id de la aceptación viva que juzgó ya usada (o `null` si no había ninguna): la relectura dentro del candado
+ * (`exigirSinAceptacionNueva`) no la vuelve a frenar.
  */
-async function exigirSinAceptacionPendiente(venueId: string, customerId: string): Promise<void> {
+async function exigirSinAceptacionPendiente(venueId: string, customerId: string): Promise<string | null> {
   const ahora = new Date()
   const viva = await prisma.planAcceptance.findFirst({
     where: { venueId, expiresAt: { gt: ahora } },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     select: { id: true, tier: true, interval: true },
   })
-  if (!viva) return
+  if (!viva) return null
   let pendiente: { id: string; tier: string; interval: string } | null
   try {
     const { planState, suscripcion } = await getPlanStateYSuscripcion(venueId, { skipPauseOffer: true })
@@ -2315,12 +2332,33 @@ async function exigirSinAceptacionPendiente(venueId: string, customerId: string)
     })
     pendiente = viva
   }
-  if (!pendiente) return
-  throw new ConflictError(
+  if (!pendiente) return viva.id
+  throw aceptacionRequerida(pendiente)
+}
+
+/** 409 `PLAN_ACCEPTANCE_REQUIRED`, con lo necesario para retomar la aceptación de la demo. */
+function aceptacionRequerida(a: { id: string; tier: string; interval: string }): ConflictError {
+  return new ConflictError(
     'Termina la contratación que empezaste al convertir tu negocio, o espera 30 minutos.',
     'PLAN_ACCEPTANCE_REQUIRED',
-    { acceptanceId: pendiente.id, tier: pendiente.tier, interval: pendiente.interval },
+    { acceptanceId: a.id, tier: a.tier, interval: a.interval },
   )
+}
+
+/**
+ * Codex b2-code #3: dentro del candado del checkout de «Tu plan» (paso 5, con su `tx`), la aceptación de la demo viva que se guardó
+ * DESPUÉS del paso 0 (la conversión terminó a media petición). Sólo la base, sin Stripe: si hay una y no es la que el paso 0 ya
+ * juzgó usada, el mismo 409 `PLAN_ACCEPTANCE_REQUIRED`. Residuo aceptado: la conversión no toma este candado, así que lo que guarde
+ * entre esta lectura y la sesión de Stripe pasa; nadie paga otro precio del que vio y la regla común impide un segundo plan.
+ */
+async function exigirSinAceptacionNueva(tx: Prisma.TransactionClient, venueId: string, aceptacionYaRevisada: string | null): Promise<void> {
+  const viva = await tx.planAcceptance.findFirst({
+    where: { venueId, expiresAt: { gt: new Date() } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { id: true, tier: true, interval: true },
+  })
+  if (!viva || viva.id === aceptacionYaRevisada) return
+  throw aceptacionRequerida(viva)
 }
 
 /**
