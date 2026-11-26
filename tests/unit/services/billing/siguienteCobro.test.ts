@@ -15,8 +15,12 @@ const sinRecibo = () =>
     code: 'invoice_upcoming_none',
   })
 
+/** Fin de la prueba: en 60 días (segundos, como Stripe). */
+const FIN = Math.floor(Date.now() / 1000) + 60 * 86400
+
 const pruebaSinMetodo = (o: Record<string, unknown> = {}) => ({
   id: 'sub_1',
+  trial_end: FIN,
   customer: 'cus_1',
   status: 'trialing',
   cancel_at_period_end: false,
@@ -58,15 +62,16 @@ describe('montoDelSiguienteCobro', () => {
     const f = stripeFalso(pruebaSinMetodo())
     const tope = { timeout: 5_000, maxNetworkRetries: 0 }
     await montoDelSiguienteCobro(f.stripe, 'sub_1', tope)
-    expect(f.retrieve).toHaveBeenCalledWith('sub_1', tope)
+    expect(f.retrieve).toHaveBeenCalledWith('sub_1', { expand: ['discounts'] }, tope)
     expect(f.createPreview.mock.calls.map((c: unknown[]) => c[1])).toEqual([tope, tope])
   })
 
   it.each([
     ['ya cancelada', { status: 'canceled' }],
     ['con cancelación programada', { cancel_at_period_end: true }],
-    ['con fecha de cancelación', { cancel_at: 1 }],
-    ['con la cobranza en pausa', { pause_collection: { behavior: 'void' } }],
+    ['con fecha de cancelación antes del fin', { cancel_at: 1 }],
+    ['con la cobranza en pausa sin fecha', { pause_collection: { behavior: 'void' } }],
+    ['con la cobranza en pausa hasta después del fin', { pause_collection: { behavior: 'void', resumes_at: FIN + 86400 } }],
     ['que al terminar crea el recibo (no se cancela)', { trial_settings: { end_behavior: { missing_payment_method: 'create_invoice' } } }],
     // Codex b2-mac r1 #3: una prueba clásica que soporte configuró para cancelarse sin tarjeta no es la prueba sin tarjeta de B2.
     ['sin la marca de la prueba sin tarjeta del alta', { metadata: {} }],
@@ -76,14 +81,33 @@ describe('montoDelSiguienteCobro', () => {
     expect(f.createPreview).toHaveBeenCalledTimes(1)
   })
 
-  it('🔴 Codex b2-mac r1 #2: los descuentos propios de la suscripción (p. ej. la oferta de retención) van en la vista previa', async () => {
-    const f = stripeFalso(pruebaSinMetodo({ discounts: ['di_retencion', { id: 'di_objeto' }] }))
+  it('🔴 Codex b2-mac r2 #1: una pausa que se reanuda ANTES del fin de la prueba sí se cobra → hay monto', async () => {
+    const f = stripeFalso(pruebaSinMetodo({ pause_collection: { behavior: 'void', resumes_at: FIN - 30 * 86400 } }))
+    await expect(montoDelSiguienteCobro(f.stripe, 'sub_1')).resolves.toBe(81084)
+  })
+
+  it('🔴 Codex b2-mac r1 #2 y r2 #3: los descuentos propios de la suscripción van como CUPÓN (Stripe rechaza el di_… de otra suscripción)', async () => {
+    const f = stripeFalso(
+      pruebaSinMetodo({
+        discounts: [
+          { id: 'di_clover', source: { type: 'coupon', coupon: 'RETENCION30' } },
+          { id: 'di_viejo', coupon: { id: 'VIEJO10' } },
+        ],
+      }),
+    )
     await montoDelSiguienteCobro(f.stripe, 'sub_1')
+    expect(f.retrieve).toHaveBeenCalledWith('sub_1', { expand: ['discounts'] })
     expect(f.createPreview).toHaveBeenLastCalledWith({
       customer: 'cus_1',
       subscription_details: { items: [{ price: 'price_v8', quantity: 1 }] },
-      discounts: [{ discount: 'di_retencion' }, { discount: 'di_objeto' }],
+      discounts: [{ coupon: 'RETENCION30' }, { coupon: 'VIEJO10' }],
     })
+  })
+
+  it('un descuento que no se puede leer (sin expandir) → null: nunca el precio sin el descuento', async () => {
+    const f = stripeFalso(pruebaSinMetodo({ discounts: ['di_sin_expandir'] }))
+    await expect(montoDelSiguienteCobro(f.stripe, 'sub_1')).resolves.toBeNull()
+    expect(f.createPreview).toHaveBeenCalledTimes(1)
   })
 
   it('otro error de la vista previa → null, sin leer la suscripción', async () => {
