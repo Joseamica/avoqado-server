@@ -62,6 +62,7 @@ describe('montoDelSiguienteCobro', () => {
     const f = stripeFalso(pruebaSinMetodo())
     const tope = { timeout: 5_000, maxNetworkRetries: 0 }
     await montoDelSiguienteCobro(f.stripe, 'sub_1', tope)
+    expect(f.retrieve).toHaveBeenCalledTimes(2)
     expect(f.retrieve).toHaveBeenCalledWith('sub_1', { expand: ['discounts'] }, tope)
     expect(f.createPreview.mock.calls.map((c: unknown[]) => c[1])).toEqual([tope, tope])
   })
@@ -108,6 +109,18 @@ describe('montoDelSiguienteCobro', () => {
     const f = stripeFalso(pruebaSinMetodo({ discounts: ['di_sin_expandir'] }))
     await expect(montoDelSiguienteCobro(f.stripe, 'sub_1')).resolves.toBeNull()
     expect(f.createPreview).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['la cancelan', { cancel_at_period_end: true }],
+    ['termina cancelada', { status: 'canceled' }],
+    ['le cambian el descuento', { discounts: [{ id: 'di_nuevo', source: { type: 'coupon', coupon: 'OTRO' } }] }],
+    ['le mueven el fin de la prueba', { trial_end: FIN + 86400 }],
+  ])('🔴 Codex b2-mac r1 #4 y r2 #2: si mientras se calcula %s, el monto no vale → null', async (_que, cambio) => {
+    const f = stripeFalso(pruebaSinMetodo())
+    f.retrieve.mockReset().mockResolvedValueOnce(pruebaSinMetodo()).mockResolvedValueOnce(pruebaSinMetodo(cambio))
+    await expect(montoDelSiguienteCobro(f.stripe, 'sub_1')).resolves.toBeNull()
+    expect(f.createPreview).toHaveBeenCalledTimes(2)
   })
 
   it('otro error de la vista previa → null, sin leer la suscripción', async () => {

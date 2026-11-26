@@ -43,34 +43,52 @@ export async function montoDelSiguienteCobro(
  * suscripción (p. ej. la oferta de retención; Stripe rechaza el `di_…` de otra suscripción en una vista previa, visto el 26-nov). Sólo para
  * esa prueba viva que terminaría cancelada por no tener método; si al terminar no se cobrará (`noHabraCobro`: cancelada, con cancelación o
  * pausa que llega al fin) o no es la prueba sin tarjeta del alta, `null`: no se inventa un cobro.
+ * 🔴 La vista previa hipotética no sabe de la suscripción real: si en medio alguien la cancela o le cambia el descuento (Codex b2-mac r1 #4 y
+ * r2 #2), se relee DESPUÉS de la vista previa y el monto sólo vale si la prueba sigue igual. Lo que pase después de esa relectura es la
+ * misma carrera que tiene la vista previa clásica entre leer y avisar.
  * ponytail: sin tasas de impuesto propias (los planes llevan el IVA dentro del precio); si un día las llevan, `default_tax_rates`.
  */
 async function montoDeLaPruebaSinMetodo(stripe: Stripe, subscriptionId: string, opciones?: Stripe.RequestOptions): Promise<number | null> {
   try {
-    const conDescuentos = { expand: ['discounts'] }
-    const sub = opciones
-      ? await stripe.subscriptions.retrieve(subscriptionId, conDescuentos, opciones)
-      : await stripe.subscriptions.retrieve(subscriptionId, conDescuentos)
-    const seCancelaSinMetodo = sub.trial_settings?.end_behavior?.missing_payment_method === 'cancel'
-    const esLaPruebaSinTarjeta = sub.metadata?.sinTarjeta === 'true'
-    if (sub.status !== 'trialing' || !seCancelaSinMetodo || !esLaPruebaSinTarjeta || !sub.trial_end) return null
-    if (noHabraCobro(sub, sub.trial_end * 1000)) return null
-    const cupones = (sub.discounts ?? []).map(cuponDelDescuento)
-    if (cupones.some(c => c === null)) return null // un descuento que no se puede leer: «no se sabe», nunca el precio sin él
+    const leer = () => {
+      const conDescuentos = { expand: ['discounts'] }
+      return opciones
+        ? stripe.subscriptions.retrieve(subscriptionId, conDescuentos, opciones)
+        : stripe.subscriptions.retrieve(subscriptionId, conDescuentos)
+    }
+    const sub = await leer()
+    const cupones = cuponesSiSeCobrara(sub)
+    if (cupones === null) return null
     const customer = typeof sub.customer === 'string' ? sub.customer : sub.customer.id
     const params = {
       customer,
       subscription_details: { items: sub.items.data.map(i => ({ price: i.price.id, quantity: i.quantity ?? 1 })) },
-      ...(cupones.length > 0 ? { discounts: cupones.map(coupon => ({ coupon: coupon as string })) } : {}),
+      ...(cupones.length > 0 ? { discounts: cupones.map(coupon => ({ coupon })) } : {}),
     }
     const preview = opciones ? await stripe.invoices.createPreview(params, opciones) : await stripe.invoices.createPreview(params)
-    return typeof preview.amount_due === 'number' ? preview.amount_due : null
+    if (typeof preview.amount_due !== 'number') return null
+    const despues = await leer()
+    const igual = JSON.stringify(cuponesSiSeCobrara(despues)) === JSON.stringify(cupones) && despues.trial_end === sub.trial_end
+    return igual ? preview.amount_due : null
   } catch (err) {
     logger.warn(`siguienteCobro: falló la vista previa de respaldo de ${subscriptionId}`, {
       error: err instanceof Error ? err.message : 'Unknown error',
     })
     return null
   }
+}
+
+/**
+ * Los cupones de la prueba sin tarjeta del alta (B2) si al terminar se cobrará con tarjeta; `null` si no es esa prueba, si ya no se cobrará
+ * (cancelada, con cancelación o pausa que llega al fin) o si un descuento no se puede leer («no se sabe», nunca el precio sin él).
+ */
+function cuponesSiSeCobrara(sub: Stripe.Subscription): string[] | null {
+  const seCancelaSinMetodo = sub.trial_settings?.end_behavior?.missing_payment_method === 'cancel'
+  const esLaPruebaSinTarjeta = sub.metadata?.sinTarjeta === 'true'
+  if (sub.status !== 'trialing' || !seCancelaSinMetodo || !esLaPruebaSinTarjeta || !sub.trial_end) return null
+  if (noHabraCobro(sub, sub.trial_end * 1000)) return null
+  const cupones = (sub.discounts ?? []).map(cuponDelDescuento)
+  return cupones.every((c): c is string => c !== null) ? cupones : null
 }
 
 /** El cupón de un descuento expandido: `source.coupon` (API clover) o `coupon` (la de antes); `null` si no se puede leer. */
