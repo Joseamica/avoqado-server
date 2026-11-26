@@ -8,6 +8,9 @@ import { withSerializableRetry } from '../../utils/serializableRetry'
 import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
 import { assertPostingFence, PostingFence } from '../inventory/postingFence'
 
+/** Un insumo que ya no está en el negocio (borrado, archivado o de otra sucursal). Se lee en el panel y en el POS. */
+export const INSUMO_NO_ENCONTRADO = 'No se encontró este insumo: pudo borrarse o archivarse. Actualiza la pantalla.'
+
 /**
  * Generate unique batch number for a raw material
  * Format: BATCH-YYYYMMDD-XXX
@@ -73,7 +76,7 @@ export async function createStockBatch(
   })
 
   if (!rawMaterial) {
-    throw new AppError(`Raw material with ID ${rawMaterialId} not found`, 404)
+    throw new AppError(INSUMO_NO_ENCONTRADO, 404)
   }
 
   // INVARIANT: every batch is stored in the raw material's unit. Callers may

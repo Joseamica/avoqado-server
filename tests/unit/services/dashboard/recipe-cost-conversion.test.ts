@@ -238,4 +238,27 @@ describe('recalculateRecipeCost — unit-conversion + per-line refresh', () => {
     expect(acquireRecipeCostGraphVenueLockV1).toHaveBeenCalledWith(prisma, 'venue-before')
     expect(prisma.recipe.update).not.toHaveBeenCalled()
   })
+
+  // hz:cea3b289:D1 (25-nov): la receta con un ingrediente de otra sucursal se explica en español, con el mismo código.
+  it('una receta con un ingrediente de otra sucursal se rechaza con el aviso en español', async () => {
+    mockRecalculationRecipe({
+      id: 'recipe-ajena',
+      portionYield: 1,
+      lines: [
+        {
+          id: 'line-ajena',
+          quantity: new Decimal('1'),
+          unit: Unit.GRAM,
+          rawMaterial: { venueId: 'otro-negocio', unit: Unit.GRAM, costPerUnit: new Decimal('1') },
+        },
+      ],
+    })
+
+    await expect(recalculateRecipeCost('recipe-ajena')).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'RECIPE_COST_INPUT_INVALID',
+      message: 'Esta receta tiene un ingrediente de otra sucursal. Quítalo y elige un insumo de este negocio.',
+    })
+    expect(prisma.recipe.update).not.toHaveBeenCalled()
+  })
 })
