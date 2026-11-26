@@ -10,7 +10,7 @@ requiredPermissions:
 featureCode: LOYALTY_PROGRAM
 gateKind: FEATURE
 sourceRepo: avoqado-web-dashboard
-sourceRef: 1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a
+sourceRef: 5902b8c1f1583e3c9c9445ff0f1a78b6bd245517
 keywords:
   - tarjeta de sellos
   - cartilla de sellos
@@ -32,5 +32,5 @@ El programa de lealtad es para los negocios que lo tienen incluido en su plan. N
 ## Problemas frecuentes
 
 - *Guardar cambios*, arriba de la pantalla, guarda el diseño de la tarjeta, no el programa: el programa se guarda con *Guardar programa*.
-- Para que las ventas den sellos, en *Clientes* › *Programa de Lealtad* el *Estado del Programa* tiene que estar en *Activo*.
+- La tarjeta de sellos no depende de los puntos: con *Tarjeta de sellos activa* prendida, las ventas con cliente suman sello (hasta las *Visitas con sello por cliente al día*) aunque en *Clientes* › *Programa de Lealtad* el *Programa de Puntos* esté en *Inactivo*.
 - Si sale «No se pudo guardar», revisa el texto que trae debajo: ahí viene la razón cuando el sistema la da.

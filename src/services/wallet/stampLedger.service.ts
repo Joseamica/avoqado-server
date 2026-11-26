@@ -319,7 +319,8 @@ export async function grantStamp(
 ): Promise<GrantStampResult> {
   const config = options.config ?? (await prisma.loyaltyConfig.findUnique({ where: { venueId } }))
 
-  if (!config || !config.active) return { granted: false, reason: 'PROGRAM_INACTIVE' }
+  // hz:be99f328:D42: `active` es el interruptor de los PUNTOS y ya no apaga los sellos; sólo `stampsEnabled`.
+  if (!config) return { granted: false, reason: 'PROGRAM_INACTIVE' }
   if (!config.stampsEnabled) return { granted: false, reason: 'STAMPS_DISABLED' }
 
   // Atajo barato. La garantía de verdad es el índice único; esto sólo evita
@@ -852,8 +853,8 @@ export async function adjustStamps(venueId: string, customerId: string, input: A
       // una sola lectura, cualquier orden contra un cambio de config de otro admin es válido (el ajuste fue antes, con lo que vio
       // el gerente, o después, y da 409).
       const config = await tx.loyaltyConfig.findUnique({ where: { venueId } })
-      if (!config || !config.active || !config.stampsEnabled)
-        throw new ConflictError('El programa de sellos está apagado', 'STAMPS_DISABLED')
+      // hz:be99f328:D42: sólo `stampsEnabled`; el interruptor de PUNTOS (`active`) no apaga los sellos.
+      if (!config || !config.stampsEnabled) throw new ConflictError('El programa de sellos está apagado', 'STAMPS_DISABLED')
 
       // La abierta MÁS VIEJA: la que llena `grantStamp` y la que muestra `getStampCardStatus` (D2).
       let card = await tx.stampCard.findFirst({

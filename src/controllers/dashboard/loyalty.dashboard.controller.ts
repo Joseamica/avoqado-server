@@ -291,7 +291,9 @@ export async function uploadCardImageHandler(req: Request, res: Response) {
     }
     // Más grande no se abre al dibujar la tarjeta: mejor decirlo aquí que dejar la figura de respaldo sin explicación.
     if (size.width * size.height > MAX_PIXELES) {
-      throw new BadRequestError(`El sello es demasiado grande (${size.width}×${size.height}). Súbelo de 5000×5000 como máximo; lo ideal es 256×256.`)
+      throw new BadRequestError(
+        `El sello es demasiado grande (${size.width}×${size.height}). Súbelo de 5000×5000 como máximo; lo ideal es 256×256.`,
+      )
     }
     const desviacion = Math.abs(size.width - size.height) / Math.max(size.width, size.height)
     if (desviacion > 0.25) {
@@ -420,7 +422,8 @@ export async function getStampCardHandler(req: Request, res: Response) {
 
   // `version` es la mitad del CAS del ajuste manual; `stampsEnabled` deja a la pantalla apagar el botón con su razón.
   const version = await contarVersionDeCartilla(estado.stampCardId)
-  const stampsEnabled = config?.active === true && config?.stampsEnabled === true
+  // hz:be99f328:D42: sólo la tarjeta de sellos; el interruptor de PUNTOS (`active`) no la apaga.
+  const stampsEnabled = config?.stampsEnabled === true
 
   return res.status(200).json({ ...estado, version, stampsEnabled, rewardsToClaim: pendientes })
 }
