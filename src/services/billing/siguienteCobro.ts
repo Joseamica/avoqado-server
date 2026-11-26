@@ -87,7 +87,13 @@ function cuponesSiSeCobrara(sub: Stripe.Subscription): string[] | null {
   const esLaPruebaSinTarjeta = sub.metadata?.sinTarjeta === 'true'
   if (sub.status !== 'trialing' || !seCancelaSinMetodo || !esLaPruebaSinTarjeta || !sub.trial_end) return null
   if (noHabraCobro(sub, sub.trial_end * 1000)) return null
-  const cupones = (sub.discounts ?? []).map(cuponDelDescuento)
+  // Codex b2-mac r3 #1: sólo los descuentos que siguen vigentes en el primer cobro (al fin de la prueba); uno que vence antes no se cobra.
+  const fin = sub.trial_end
+  const venceAntes = (d: unknown) => {
+    const end = typeof d === 'object' && d !== null ? (d as { end?: number | null }).end : undefined
+    return typeof end === 'number' && end <= fin
+  }
+  const cupones = (sub.discounts ?? []).filter(d => !venceAntes(d)).map(cuponDelDescuento)
   return cupones.every((c): c is string => c !== null) ? cupones : null
 }
 

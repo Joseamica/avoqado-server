@@ -148,6 +148,9 @@ export function cotizarOpcion(
   }
 }
 
+/** Lo mínimo que debe faltar para el fin de prueba firmado al momento de comprar (Codex b2-mac r3 #2). */
+const MARGEN_DEL_FIN_DE_PRUEBA_MS = 10 * 60_000
+
 /**
  * Revisa el comprobante de una petición. 🔴 Nunca lanza: devuelve el rechazo para que quien llama lo lance donde le toque.
  * Sin token → `QUOTE_REQUIRED`; un valor que no es texto → `QUOTE_INVALID`; firma, forma, alcance o vencimiento → el error de
@@ -173,6 +176,11 @@ export function revisarComprobante(args: {
   if (comprobante.versionNumber !== versionNumber) return { comprobante: null, rechazo: ofertaCambio('VERSION', versionNumber) }
   if (comprobante.tier !== tier || comprobante.interval !== interval) {
     return { comprobante: null, rechazo: ofertaCambio('QUOTE_MISMATCH', versionNumber) }
+  }
+  // 🔴 Codex b2-mac r3 #2: el fin de prueba firmado de una prueba corta cotizada hace casi 24 h puede estar a segundos; Stripe rechazaría
+  // un `trial_end` ya pasado y el alta quedaría «confirmando con el banco». Con menos de 10 min por delante se vuelve a cotizar.
+  if (comprobante.trialEndsAt && comprobante.trialEndsAt.getTime() - ahora.getTime() < MARGEN_DEL_FIN_DE_PRUEBA_MS) {
+    return { comprobante: null, rechazo: new ConflictError('La cotización ya venció. Vuelve a cotizar.', 'QUOTE_EXPIRED') }
   }
   return { comprobante, rechazo: null }
 }

@@ -105,6 +105,20 @@ describe('montoDelSiguienteCobro', () => {
     })
   })
 
+  it('🔴 Codex b2-mac r3 #1: un descuento que vence ANTES del fin de la prueba no se aplica; uno que sigue vigente, sí', async () => {
+    const f = stripeFalso(
+      pruebaSinMetodo({
+        discounts: [
+          { id: 'di_un_mes', end: FIN - 10 * 86400, source: { type: 'coupon', coupon: 'UN_MES' } },
+          { id: 'di_vigente', end: FIN + 30 * 86400, source: { type: 'coupon', coupon: 'VIGENTE' } },
+          { id: 'di_siempre', end: null, source: { type: 'coupon', coupon: 'SIEMPRE' } },
+        ],
+      }),
+    )
+    await expect(montoDelSiguienteCobro(f.stripe, 'sub_1')).resolves.toBe(81084)
+    expect(f.createPreview).toHaveBeenLastCalledWith(expect.objectContaining({ discounts: [{ coupon: 'VIGENTE' }, { coupon: 'SIEMPRE' }] }))
+  })
+
   it('un descuento que no se puede leer (sin expandir) → null: nunca el precio sin el descuento', async () => {
     const f = stripeFalso(pruebaSinMetodo({ discounts: ['di_sin_expandir'] }))
     await expect(montoDelSiguienteCobro(f.stripe, 'sub_1')).resolves.toBeNull()

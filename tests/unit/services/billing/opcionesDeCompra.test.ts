@@ -201,6 +201,14 @@ describe('cotizarOpcion y revisarComprobante', () => {
     ['otro plan', () => comprobanteDePrueba({ alcance, tier: 'PREMIUM' }, ahora), 'OFFER_CHANGED', 'QUOTE_MISMATCH'],
     ['otro alcance', () => comprobanteDePrueba({ alcance: 'org:otra' }, ahora), 'QUOTE_INVALID', undefined],
     ['de hace 24 h', () => comprobanteDePrueba({ alcance }, new Date(ahoraMs - 24 * H)), 'QUOTE_EXPIRED', undefined],
+    // Codex b2-mac r3 #2: un fin de prueba firmado que ya casi llegó (prueba de 1 día cotizada hace casi 24 h) → que vuelva a cotizar
+    // ANTES de ir a Stripe, nunca un rechazo de Stripe que deje el alta «confirmando con el banco».
+    [
+      'con el fin de prueba a 5 minutos',
+      () => comprobanteDePrueba({ alcance, trialEndsAt: new Date(ahoraMs + 5 * 60_000) }, new Date(ahoraMs - 24 * H + 60_000)),
+      'QUOTE_EXPIRED',
+      undefined,
+    ],
     ['null', () => null, 'OFFER_CHANGED', 'QUOTE_REQUIRED'],
     ['un número', () => 42, 'QUOTE_INVALID', undefined],
   ])('revisarComprobante %s → rechazo %s (%s) y nunca lanza', (_n, token, code, razon) => {
