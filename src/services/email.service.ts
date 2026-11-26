@@ -321,12 +321,19 @@ const MARCAS_DE_TARJETA: Record<string, string> = {
 
 /**
  * B2 Task 6: la marca de una tarjeta como la lee una persona («Visa», «American Express»), no la clave de Stripe (`visa`,
- * `amex`). Una marca que no se conoce sale con mayúscula inicial; sin marca, `null`.
+ * `amex`). Una marca que no se conoce sale palabra por palabra con mayúscula inicial (`cartes_bancaires` → «Cartes Bancaires»).
+ * Sin marca, o con la que Stripe da cuando no la sabe (`unknown`), `null`: el texto dice sólo «••••4242».
  */
 export function marcaLegible(brand: string | null | undefined): string | null {
   const limpia = brand?.trim()
-  if (!limpia) return null
-  return MARCAS_DE_TARJETA[limpia.toLowerCase().replace(/[\s-]/g, '')] ?? limpia.charAt(0).toUpperCase() + limpia.slice(1)
+  if (!limpia || limpia.toLowerCase() === 'unknown') return null
+  const conocida = MARCAS_DE_TARJETA[limpia.toLowerCase().replace(/[\s_-]/g, '')]
+  if (conocida) return conocida
+  return limpia
+    .split(/[\s_]+/)
+    .filter(Boolean)
+    .map(palabra => palabra.charAt(0).toUpperCase() + palabra.slice(1))
+    .join(' ')
 }
 
 /** Prueba REGALADA del plan (SUPERADMIN «Dar días de prueba», sin tarjeta): se acaba y no se cobra nada. */

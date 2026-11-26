@@ -191,7 +191,7 @@ describe('sendPlanFreeTrialEndingEmail — la prueba sin tarjeta (B2)', () => {
       ['amex', 'American Express'],
       ['American Express', 'American Express'],
       ['diners', 'Diners Club'],
-      ['cartes_bancaires', 'Cartes_bancaires'],
+      ['cartes_bancaires', 'Cartes Bancaires'],
     ] as const) {
       spy.mockClear()
       await emailService.sendPlanFreeTrialEndingEmail('a@x.com', {
@@ -205,6 +205,27 @@ describe('sendPlanFreeTrialEndingEmail — la prueba sin tarjeta (B2)', () => {
       for (const cuerpo of [html, text]) {
         expect(cuerpo).toContain(`al terminar se cobrará tu plan en tu tarjeta ${legible} ••••1234`)
         expect(cuerpo).not.toContain('se cobrarán tu plan')
+      }
+    }
+    // La marca que Stripe da cuando no la sabe (`unknown`, o `Unknown` en una fuente vieja): como sin marca, sólo la terminación.
+    for (const [locale, frase] of [
+      ['es', 'al terminar se cobrará tu plan en tu tarjeta ••••4242;'],
+      ['en', "we'll charge your plan to your card ••••4242;"],
+    ] as const) {
+      for (const brand of ['unknown', 'Unknown']) {
+        spy.mockClear()
+        await emailService.sendPlanFreeTrialEndingEmail('a@x.com', {
+          locale,
+          venueName: 'Taqueria',
+          endDate: FIN,
+          empezo: true,
+          tarjeta: { brand, last4: '4242' },
+        })
+        const { html, text } = enviado()
+        for (const cuerpo of [html, text]) {
+          expect(cuerpo).toContain(frase)
+          expect(cuerpo).not.toMatch(/unknown/i)
+        }
       }
     }
     // Sin marca: sólo la terminación.

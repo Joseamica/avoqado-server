@@ -93,11 +93,18 @@ export async function tarjetaQueCobraria(args: {
  * El cliente de Stripe si existe (b2-r9 #4): `null` sin id (sin llamar a Stripe), con `deleted: true` o si Stripe dice que no
  * existe. Cualquier otro error sube. 🔴 Todo el que lee el cliente para `tarjetaQueCobraria` pasa por aquí: un cliente borrado es
  * «sin cliente», nunca «un cliente sin tarjeta» que luego se reusa.
+ *
+ * `opciones`: las de la lectura. Por default, `LECTURA_ACOTADA` (las lecturas que sólo informan: progress, el reintento, la ventana
+ * y la tarjeta tras abrir la prueba). Una compra pasa `{}` (fix round 2, C2): ahí la lectura es la puerta antes de cobrar y conserva
+ * los reintentos del cliente de siempre, como la comprobación del método y el `create` que la siguen.
  */
-export async function clienteDeStripeVivo(customerId: string | null): Promise<Stripe.Customer | null> {
+export async function clienteDeStripeVivo(
+  customerId: string | null,
+  opciones: Stripe.RequestOptions = LECTURA_ACOTADA,
+): Promise<Stripe.Customer | null> {
   if (!customerId) return null
   const cliente = await leerOMuerto(() =>
-    stripe.customers.retrieve(customerId, { expand: ['invoice_settings.default_payment_method', 'default_source'] }, LECTURA_ACOTADA),
+    stripe.customers.retrieve(customerId, { expand: ['invoice_settings.default_payment_method', 'default_source'] }, opciones),
   )
   if (cliente === null || (cliente as Stripe.DeletedCustomer | undefined)?.deleted === true) return null
   return cliente as Stripe.Customer
@@ -115,17 +122,21 @@ const idDe = (valor: string | { id: string } | null | undefined): string | null 
  */
 export async function avisoDeLaPruebaSinTarjeta(
   sub: Stripe.Subscription,
-  customerId: string | null = idDe(sub.customer as string | { id: string } | null),
-): Promise<{ tarjetaQueCobrara?: TarjetaVisible | null; noHabraCobro: boolean }> {
-  const fin = typeof sub.trial_end === 'number' ? sub.trial_end * 1000 : Date.now()
-  const aviso = { noHabraCobro: noHabraCobro(sub, fin) }
+  /** El cliente de Stripe; sin él, el de la suscripción. */
+  customerId?: string | null,
+): Promise<{ tarjetaQueCobrara?: TarjetaVisible | null; noHabraCobro?: boolean }> {
+  // 🔴 Fix round 2: TODO va dentro del `try`, también lo que hoy es puro. «Nunca rechaza» tiene que ser estructural: quien llama
+  // puede arrancar esta lectura sin esperarla (el cierre de `activatePlan`), y un rechazo sin manejar apaga el servidor.
+  let aviso: { noHabraCobro?: boolean } = {}
   try {
-    const cliente = await clienteDeStripeVivo(customerId)
+    const fin = typeof sub.trial_end === 'number' ? sub.trial_end * 1000 : Date.now()
+    aviso = { noHabraCobro: noHabraCobro(sub, fin) }
+    const cliente = await clienteDeStripeVivo(customerId !== undefined ? customerId : idDe(sub.customer as string | { id: string } | null))
     const tarjeta = cliente ? await tarjetaQueCobraria({ sub, customer: cliente }) : null
     return { ...aviso, tarjetaQueCobrara: tarjeta ? { brand: tarjeta.brand, last4: tarjeta.last4 } : null }
   } catch (error) {
     logger.warn('prueba sin tarjeta: no se pudo leer qué tarjeta cobraría Stripe; se omite', {
-      subscriptionId: sub.id,
+      subscriptionId: sub?.id,
       error: error instanceof Error ? error.message : String(error),
     })
     return aviso

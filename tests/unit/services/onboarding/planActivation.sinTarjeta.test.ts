@@ -84,6 +84,7 @@ import emailService from '@/services/email.service'
 import * as resendService from '@/services/resend.service'
 import { terminarAltaCobradaSinRomper } from '@/services/onboarding/terminarAltaCobrada'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import * as tarjetaQueCobrariaModulo from '@/services/billing/tarjetaQueCobraria'
 
 const DIA = 86_400_000
 const ORG = 'org-1'
@@ -576,6 +577,42 @@ describe('B2 Task 6, fix round 1: la tarjeta es informativa y nunca frena el cie
     expect(planDelCierre()).toMatchObject({ payNow: true, paymentMethodId: 'pm_viejo', sinTarjeta: false, offerVersion: 2 })
     expect(emailService.sendPlanConfirmationEmail).toHaveBeenCalledTimes(1)
     expect(emailService.sendPlanFreeTrialEndingEmail).not.toHaveBeenCalled()
+  })
+})
+
+describe('B2 Task 6, fix round 2', () => {
+  const TOPE = { timeout: 5_000, maxNetworkRetries: 0 }
+
+  it('🔴 C2: la lectura del cliente que es puerta de la compra (PASO 4) va con las opciones del cliente de siempre ({}); la de la tarjeta después de abrir la prueba, con el tope de 5 s', async () => {
+    await pedir({ quoteToken: comprobante() })
+
+    const lecturas = mockCustomerRetrieve.mock.calls.map((c: unknown[]) => c[2])
+    expect(lecturas).toEqual([{}, TOPE])
+  })
+
+  it('🔴 la lectura de la tarjeta RECHAZA (sin ir por la bienvenida: una prueba sin tarjeta recuperada que ya tiene tarjeta) → el cierre termina igual, sin un rechazo sin manejar (Jest falla la prueba si lo hay) y sin la tarjeta en la respuesta', async () => {
+    alta()
+    // Recuperada por su llave, en prueba, con la metadata sin tarjeta pero ya con una tarjeta puesta: se cierra con la confirmación,
+    // así que la promesa de la tarjeta sólo la espera la respuesta, al final.
+    const conTarjetaPuesta = prueba({ default_payment_method: 'pm_puesta' })
+    lista([conTarjetaPuesta])
+    mockSubRetrieve.mockResolvedValue(conTarjetaPuesta)
+    const espia = jest.spyOn(tarjetaQueCobrariaModulo, 'avisoDeLaPruebaSinTarjeta').mockRejectedValue(new Error('rechazo inesperado'))
+    // Entre la lectura y la respuesta corren esperas reales (aquí, una vuelta del ciclo de eventos en terminarElAlta).
+    ;(terminarAltaCobradaSinRomper as jest.Mock).mockImplementationOnce(() => new Promise(resolver => setImmediate(resolver)))
+    try {
+      const r = await pedir({ quoteToken: comprobante() })
+      await sinPendientes()
+
+      expect(espia).toHaveBeenCalled()
+      expect(r).toMatchObject({ status: 'ACTIVE', sinTarjeta: true })
+      expect(r).not.toHaveProperty('tarjetaQueCobrara')
+      expect(progresos().at(-1)).toMatchObject({ data: { planActivationStatus: 'ACTIVE', planStripeSubscriptionId: 'sub_1' } })
+      expect(terminarAltaCobradaSinRomper).toHaveBeenCalledTimes(1)
+      expect(emailService.sendPlanConfirmationEmail).toHaveBeenCalledTimes(1)
+    } finally {
+      espia.mockRestore()
+    }
   })
 })
 

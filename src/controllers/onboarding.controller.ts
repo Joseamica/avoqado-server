@@ -2049,8 +2049,17 @@ export async function tarjetaDeLaPruebaController(req: Request, res: Response, n
       select: { stripeCustomerId: true },
       orderBy: { createdAt: 'asc' },
     })
-    const cliente = await clienteDeStripeVivo(negocio?.stripeCustomerId ?? null)
-    const tarjeta = cliente ? await tarjetaQueCobraria({ customer: cliente }) : null
+    // Sólo informa (§18): si Stripe no deja leer el cliente o su tarjeta (error o tiempo agotado), «sin tarjeta que decir», nunca un 500.
+    let tarjeta: Awaited<ReturnType<typeof tarjetaQueCobraria>> = null
+    try {
+      const cliente = await clienteDeStripeVivo(negocio?.stripeCustomerId ?? null)
+      tarjeta = cliente ? await tarjetaQueCobraria({ customer: cliente }) : null
+    } catch (error) {
+      logger.warn('tarjeta-de-la-prueba: no se pudo leer en Stripe qué tarjeta cobraría; se responde sin tarjeta', {
+        organizationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
     res
       .status(200)
       .json({ success: true, data: { tarjeta: tarjeta ? { id: tarjeta.id, brand: tarjeta.brand, last4: tarjeta.last4 } : null } })

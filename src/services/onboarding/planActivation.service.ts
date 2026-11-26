@@ -1200,7 +1200,9 @@ async function esPruebaSinTarjetaTerminada(sub: Stripe.Subscription, organizatio
 async function soltarClienteBorrado(venueId: string, organizationId: string, staffId: string): Promise<void> {
   const negocio = await prisma.venue.findUnique({ where: { id: venueId }, select: { stripeCustomerId: true } })
   const guardado = negocio?.stripeCustomerId
-  if (!guardado || (await clienteDeStripeVivo(guardado)) !== null) return
+  // 🔴 Fix round 2 (C2): esta lectura es la puerta antes de cobrar, así que va con las opciones del cliente de siempre (`{}`, con
+  // sus reintentos), no con el tope de 5 s de las lecturas que sólo informan.
+  if (!guardado || (await clienteDeStripeVivo(guardado, {})) !== null) return
   const { count } = await prisma.venue.updateMany({ where: { id: venueId, stripeCustomerId: guardado }, data: { stripeCustomerId: null } })
   logger.warn('activate-plan: el cliente de Stripe del negocio ya no existe — se suelta y se crea otro', {
     organizationId,
@@ -2067,7 +2069,18 @@ export async function activatePlan(
   // (respuesta, pantalla final y bienvenida): nada lo compara con lo que enseñó la ventana. 🔴 Es informativa: la lectura arranca
   // aquí SIN esperarla, así que ni lenta ni fallida retrasa o frena el cierre del alta (`terminarElAlta`, abajo). Nunca rechaza
   // (`avisoDeLaPruebaSinTarjeta` se degrada a «no se sabe qué tarjeta»); la esperan sólo la bienvenida y la respuesta.
-  const avisoSinTarjeta = modalidad.sinTarjeta ? avisoDeLaPruebaSinTarjeta(sub, customerId) : null
+  // 🔴 Fix round 2: el manejador del rechazo se pone AL CREAR la promesa (no al final, tras otras esperas): un rechazo sin manejar
+  // apaga el servidor (`unhandledRejection`, server.ts). Rechazada, es «no se sabe qué tarjeta», igual que si fallara la lectura.
+  const avisoSinTarjeta = modalidad.sinTarjeta
+    ? avisoDeLaPruebaSinTarjeta(sub, customerId).catch(error => {
+        logger.warn('activate-plan: no se pudo leer la tarjeta de la prueba sin tarjeta; se omite', {
+          organizationId,
+          subscriptionId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        return null
+      })
+    : null
 
   if (ofertaNoAplicada) {
     await logAction({
@@ -2201,7 +2214,7 @@ export async function activatePlan(
     nextChargeAt,
     ...modalidad,
     // La lectura de la tarjeta corrió junto con el cierre; con su tope (5 s) la respuesta sólo la espera lo que le falte.
-    ...(avisoSinTarjeta ? await avisoSinTarjeta : {}),
+    ...((avisoSinTarjeta ? await avisoSinTarjeta : null) ?? {}),
     ...(campaign
       ? {
           launchOffer: {

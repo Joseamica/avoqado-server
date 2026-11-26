@@ -48,6 +48,7 @@ import request from 'supertest'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { definicionDePrueba, idsDeLaVersion, punteroA, versionUno } from '@tests/__helpers__/planOfferFixtures'
 import { MENSAJE_PLAN_NO_CONFIGURADO } from '@/services/billing/planOffer'
+import logger from '@/config/logger'
 
 const app = require('../../../src/app').default
 
@@ -168,6 +169,38 @@ describe('GET …/v2/tarjeta-de-la-prueba', () => {
       expect(res.status).toBe(503)
       expect(res.body).toMatchObject({ code: 'PLAN_NOT_CONFIGURED', message: MENSAJE_PLAN_NO_CONFIGURADO })
       sinLlamarAStripe()
+    }
+  })
+
+  it('🔴 fix round 2: si Stripe no deja leer el cliente o su tarjeta (tiempo agotado, un 500) → { tarjeta: null } con un aviso en el log, nunca un 500; sin escribir nada', async () => {
+    conVigente()
+    for (const falla of [
+      () =>
+        mockCustomerRetrieve.mockRejectedValue(
+          Object.assign(new Error('Request aborted due to timeout being reached (5000ms)'), { type: 'StripeConnectionError' }),
+        ),
+      () => {
+        mockCustomerRetrieve.mockResolvedValue({
+          id: 'cus_1',
+          object: 'customer',
+          invoice_settings: { default_payment_method: 'pm_premium' },
+        })
+        mockPmRetrieve.mockRejectedValue(Object.assign(new Error('Stripe caído'), { type: 'StripeAPIError', statusCode: 500 }))
+      },
+    ]) {
+      jest.clearAllMocks()
+      falla()
+
+      const res = await leer()
+
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ success: true, data: { tarjeta: null } })
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('tarjeta-de-la-prueba: no se pudo leer en Stripe'),
+        expect.objectContaining({ organizationId: ORG }),
+      )
+      expect(prismaMock.venue.update).not.toHaveBeenCalled()
+      expect(prismaMock.venue.updateMany).not.toHaveBeenCalled()
     }
   })
 })

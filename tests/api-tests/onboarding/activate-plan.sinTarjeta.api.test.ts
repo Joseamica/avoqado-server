@@ -607,6 +607,8 @@ describe('POST …/v2/activate-plan — la prueba sin tarjeta con la v2', () => 
         where: { id: 'venue-1', stripeCustomerId: 'cus_1' },
         data: { stripeCustomerId: null },
       })
+      // Fix round 2 (C2): esa lectura (la puerta antes de cobrar) va con las opciones del cliente de siempre, no con el tope.
+      expect(mockCustomerRetrieve.mock.calls[0]).toEqual(['cus_1', expect.anything(), {}])
       expect(mockCustomerCreate).toHaveBeenCalledTimes(1)
       expect(clienteDelNegocio).toBe('cus_nuevo')
       // Queda en la bitácora del negocio: qué cliente borrado se soltó (`logAction` está simulado en las pruebas: la llamada).

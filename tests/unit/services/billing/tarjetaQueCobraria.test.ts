@@ -190,4 +190,27 @@ describe('avisoDeLaPruebaSinTarjeta', () => {
     mockCustomerRetrieve.mockResolvedValueOnce(cliente())
     expect(await avisoDeLaPruebaSinTarjeta(prueba())).toEqual({ noHabraCobro: false, tarjetaQueCobrara: null })
   })
+
+  it('🔴 fix round 2: nunca rechaza, ni aunque falle lo que hoy es puro (un campo que no se puede leer): devuelve lo que alcanzó a saber', async () => {
+    const rara = prueba()
+    Object.defineProperty(rara, 'cancel_at_period_end', {
+      get() {
+        throw new Error('campo ilegible')
+      },
+    })
+
+    await expect(avisoDeLaPruebaSinTarjeta(rara)).resolves.toEqual({})
+    expect(mockCustomerRetrieve).not.toHaveBeenCalled()
+  })
+})
+
+describe('clienteDeStripeVivo — las opciones de cada camino (fix round 2, C2)', () => {
+  it('por default, el tope de las lecturas que informan; una compra pasa {} (el cliente de siempre, con sus reintentos)', async () => {
+    mockCustomerRetrieve.mockResolvedValue(cliente())
+
+    await clienteDeStripeVivo('cus_1')
+    await clienteDeStripeVivo('cus_1', {})
+
+    expect(mockCustomerRetrieve.mock.calls.map((c: unknown[]) => c[2])).toEqual([TOPE, {}])
+  })
 })
