@@ -3102,8 +3102,9 @@ test('D18 candado de la oferta: si la cuenta cambió, 409 final LOYALTY_OFFER_CH
   })
   const c = await prisma.customer.create({ data: { venueId, firstName: 'Candado', loyaltyPoints: 20000 } }),
     o = await plainOrder()
-  // La tablet sólo conoce a la clienta de la CABECERA de la cuenta (Codex android r10 #1).
-  await prisma.order.update({ where: { id: o.id }, data: { customerId: c.id } })
+  // La tablet sólo conoce a la clienta de la CABECERA de la cuenta (Codex android r10 #1). Es una cuenta de MESA (el canje final la deja
+  // en $0; desde D39 r10 también una sin mesa, que Pedidos cierra con «Cerrar cuenta ($0.00)»).
+  await prisma.order.update({ where: { id: o.id }, data: { customerId: c.id, tableId: (await emptyTable()).id } })
   // Otra caja dejó la cuenta con $1 por descontar; la tablet todavía enseña 1000 puntos por $10.
   await prisma.order.update({ where: { id: o.id }, data: { discountAmount: 99 } })
   const body = { customerId: c.id, points: 1000, expectedDiscountAmount: 10 }
@@ -5729,7 +5730,13 @@ test.each(['cancelOrder', 'mergeOrders'] as const)(
       expect(response.status).toBe(409)
       expect(response.body.code).toBe('ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE')
       const row = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId } })
-      expect(row).toMatchObject({ orderId: source.id, requestedById: authorId, status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW', amountCents: 10000 })
+      expect(row).toMatchObject({
+        orderId: source.id,
+        requestedById: authorId,
+        status: 'FAILED',
+        failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+        amountCents: 10000,
+      })
       expect((await prisma.order.findUniqueOrThrow({ where: { id: source.id } })).status).toBe('PENDING')
       expect(await prisma.payment.count({ where: { orderId: source.id } })).toBe(0)
     } finally {

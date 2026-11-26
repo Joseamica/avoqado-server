@@ -79,9 +79,14 @@ export const manifestSchema = z.discriminatedUnion('action', [
   manifestShape(
     'redeemLoyaltyPoints',
     orderRefs.extend({ customerId: idSchema }),
-    // D18: `expectedDiscountAmount` opcional (candado de la oferta); sin él, el canje recorta como siempre.
+    // D18: `expectedDiscountAmount` opcional (candado de la oferta); sin él, el canje recorta como siempre. D39 r10: `expectedVersion`
+    // opcional (la versión de la cuenta que enseñó la caja); va en la llave para que el reenvío idéntico reciba el mismo recibo.
     z
-      .object({ points: z.number().finite().int().positive(), expectedDiscountAmount: z.number().finite().nonnegative().optional() })
+      .object({
+        points: z.number().finite().int().positive(),
+        expectedDiscountAmount: z.number().finite().nonnegative().optional(),
+        expectedVersion: z.number().finite().int().nonnegative().optional(),
+      })
       .strict(),
   ),
   manifestShape('removeOrderDiscount', orderRefs.extend({ orderDiscountId: idSchema }), emptyPayload),

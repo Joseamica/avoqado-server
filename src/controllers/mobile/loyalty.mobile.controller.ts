@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 import * as loyaltyMobileService from '../../services/mobile/loyalty.mobile.service'
-import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
-import { parseHttpOperation, manifestSchema, executeHttpOperation } from '@/services/mobile/http-operation.mobile.service'
+import AppError, { BadRequestError, UnauthorizedError } from '@/errors/AppError'
+import { parseHttpOperation, manifestSchema, executeHttpOperation, DomainRejected } from '@/services/mobile/http-operation.mobile.service'
 import { sendHttpOperationReply } from './http-operation.mobile.controller'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
@@ -28,7 +28,7 @@ export const getCustomerLoyalty = async (req: Request, res: Response, next: Next
 export const redeemPoints = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
-    const { customerId, points, expectedDiscountAmount } = req.body || {}
+    const { customerId, points, expectedDiscountAmount, expectedVersion } = req.body || {}
     const staffId = (req as any).authContext?.userId as string | undefined
     // Candado de la oferta (D18): el monto que enseñó la tablet. Opcional (apps viejas no lo mandan); `null` = no vino.
     const montoEsperado: number | undefined = expectedDiscountAmount ?? undefined
@@ -42,32 +42,60 @@ export const redeemPoints = async (req: Request, res: Response, next: NextFuncti
     if (montoEsperado !== undefined && (typeof montoEsperado !== 'number' || !Number.isFinite(montoEsperado) || montoEsperado < 0)) {
       return res.status(400).json({ success: false, message: 'expectedDiscountAmount debe ser un número no negativo' })
     }
+    // D39: la versión de la cuenta que enseñó la caja (Pedidos la manda; apps viejas y Mesas no). `null` = no vino.
+    const versionEsperada: number | undefined = expectedVersion ?? undefined
+    if (versionEsperada !== undefined && (!Number.isInteger(versionEsperada) || versionEsperada < 0)) {
+      return res.status(400).json({ success: false, message: 'expectedVersion debe ser un entero no negativo' })
+    }
 
     const operation = parseHttpOperation(req.body)
     if (!operation) {
       // La tablet enseña los puntos que pide (nunca recorta) y a la clienta de la cabecera: se comparan esos y el monto.
-      const esperado = montoEsperado === undefined ? undefined : { monto: montoEsperado, puntos: points, deLaCabecera: true }
+      const esperado =
+        montoEsperado === undefined
+          ? undefined
+          : {
+              monto: montoEsperado,
+              puntos: points,
+              deLaCabecera: true,
+              ...(versionEsperada !== undefined ? { version: versionEsperada } : {}),
+            }
       const data = await loyaltyMobileService.redeemPointsToOrder(venueId, orderId, customerId, points, staffId, esperado)
       return res.json({ success: true, data })
     }
     if (!staffId) throw new UnauthorizedError('Autenticación requerida')
-    const payload = montoEsperado === undefined ? { points } : { points, expectedDiscountAmount: montoEsperado }
+    // D39 r10: la versión viaja en la llave igual que en la ruta sin llave (sólo cuenta junto con el monto, como allá).
+    const payload = {
+      points,
+      ...(montoEsperado !== undefined ? { expectedDiscountAmount: montoEsperado } : {}),
+      ...(versionEsperada !== undefined ? { expectedVersion: versionEsperada } : {}),
+    }
     const parsed = manifestSchema.safeParse({ action: 'redeemLoyaltyPoints', refs: { orderId, customerId }, payload })
     if (!parsed.success || parsed.data.action !== 'redeemLoyaltyPoints')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
     const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
-      const r = await loyaltyMobileService.redeemPointsToOrderInTransaction(
-        tx,
-        venueId,
-        orderId,
-        manifest.refs.customerId,
-        manifest.payload.points,
-        staffId,
-        undefined,
-        manifest.payload.expectedDiscountAmount === undefined
-          ? undefined
-          : { monto: manifest.payload.expectedDiscountAmount, puntos: manifest.payload.points, deLaCabecera: true },
+      // D39 r11 (Codex r10 #4): cualquier rechazo de negocio del canje (4xx: también el 409 de un cobro de la terminal en curso, de un
+      // pedido en línea con tarjeta apartada o de una cuenta de tarjetas de regalo) queda como recibo REJECTED de esta llave: la caja lo
+      // enseña como rechazo y el intento ya no puede aplicar después. La transacción se deshizo, así que el canje no entró.
+      const r = await canjearComoRecibo(() =>
+        loyaltyMobileService.redeemPointsToOrderInTransaction(
+          tx,
+          venueId,
+          orderId,
+          manifest.refs.customerId,
+          manifest.payload.points,
+          staffId,
+          undefined,
+          manifest.payload.expectedDiscountAmount === undefined
+            ? undefined
+            : {
+                monto: manifest.payload.expectedDiscountAmount,
+                puntos: manifest.payload.points,
+                deLaCabecera: true,
+                ...(manifest.payload.expectedVersion !== undefined ? { version: manifest.payload.expectedVersion } : {}),
+              },
+        ),
       )
       const auditData = { customerId: manifest.refs.customerId, points: r.pointsToBurn, discountAmount: r.discountAmount }
       return {
@@ -94,5 +122,17 @@ export const redeemPoints = async (req: Request, res: Response, next: NextFuncti
     return sendHttpOperationReply(res, operation, reply)
   } catch (error) {
     next(error)
+  }
+}
+
+/** D39 r11: un rechazo de negocio (AppError 4xx) del canje con llave se vuelve recibo REJECTED (ver `executeHttpOperation`). */
+async function canjearComoRecibo<T>(canjear: () => Promise<T>): Promise<T> {
+  try {
+    return await canjear()
+  } catch (error) {
+    if (error instanceof AppError && error.statusCode >= 400 && error.statusCode < 500) {
+      throw new DomainRejected({ status: error.statusCode, code: error.code ?? 'OPERATION_REJECTED', message: error.message })
+    }
+    throw error
   }
 }

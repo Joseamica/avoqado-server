@@ -10,6 +10,12 @@ jest.mock('@/services/online-ordering/card/guards', () => ({ assertCardOrderMone
 jest.mock('@/services/giftCards/cuentaDeTarjetas', () => ({ rechazarSiEsCuentaDeTarjetas: jest.fn() }))
 jest.mock('@/services/shared/repartoDescuentoTx', () => ({ conservarDescuentoHistorico: jest.fn() }))
 jest.mock('@/services/mobile/comp-item.mobile.service', () => ({ recalculateOrderTotals: jest.fn().mockResolvedValue({}) }))
+// D39: el canje revisa que no haya un cobro de la terminal sin desenlace (lee `terminalPaymentRequest`, que los `tx` a mano no traen).
+// Se prueba en `canjeCandadoDeLaOferta.test.ts` y en la integración.
+jest.mock('@/services/shared/orderCancelGuard', () => ({
+  ...jest.requireActual('@/services/shared/orderCancelGuard'),
+  assertNoLiveTerminalCharge: jest.fn(async () => undefined),
+}))
 
 import { getOrCreateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
 import { getCustomerLoyalty, previaDelCanjeEnCuenta, redeemPointsToOrderInTransaction } from '@/services/mobile/loyalty.mobile.service'
