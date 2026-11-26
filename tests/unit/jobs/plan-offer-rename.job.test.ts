@@ -89,8 +89,8 @@ describe('PlanOfferRenameJob', () => {
   it('start() deja el CronJob activo y stop() lo detiene', () => {
     const job = nuevo(jest.fn<Promise<Resultado>, []>().mockResolvedValue(AL_DIA))
     const cron = cronDe(job)
-    expect(cron.cronTime.source).toBe('3 * * * * *')
-    expect(DATABASE_JOB_SCHEDULES.planOfferRename).toBe('3 * * * * *')
+    expect(cron.cronTime.source).toBe('12 * * * * *')
+    expect(DATABASE_JOB_SCHEDULES.planOfferRename).toBe('12 * * * * *')
     expect(cron.isActive).toBe(false)
 
     job.start()
@@ -99,18 +99,18 @@ describe('PlanOfferRenameJob', () => {
     expect(cron.isActive).toBe(false)
   })
 
-  // `job-schedule-hardening` sólo revisa sus siete jobs y el de displayModeRequestExpiry contra los demás: el :03 se revisa aquí.
-  it('el segundo :03 es sólo suyo en la lista de horarios (con listas, rangos y pasos en el campo de los segundos)', () => {
+  // `job-schedule-hardening` sólo revisa sus siete jobs y el de displayModeRequestExpiry contra los demás: el :12 se revisa aquí.
+  it('el segundo :12 es sólo suyo en la lista de horarios (con listas, rangos y pasos en el campo de los segundos)', () => {
     // El expansor entiende cada forma.
     expect(segundosDe('*/20 * * * * *')).toEqual([0, 20, 40])
     expect(segundosDe('1-59/10 * * * * *')).toEqual([1, 11, 21, 31, 41, 51])
     expect(segundosDe('0-5 * * * * *')).toEqual([0, 1, 2, 3, 4, 5])
     expect(segundosDe('5,35 */10 * * * *')).toEqual([5, 35])
-    expect(segundosDe(DATABASE_JOB_SCHEDULES.planOfferRename)).toEqual([3])
+    expect(segundosDe(DATABASE_JOB_SCHEDULES.planOfferRename)).toEqual([12])
 
     const conElTres = Object.entries(DATABASE_JOB_SCHEDULES as Record<string, string>)
       .filter(([nombre]: [string, string]) => nombre !== 'planOfferRename')
-      .filter(([, horario]: [string, string]) => segundosDe(horario).includes(3))
+      .filter(([, horario]: [string, string]) => segundosDe(horario).includes(12))
       .map(([nombre]: [string, string]) => nombre)
     expect(conElTres).toEqual([])
   })
