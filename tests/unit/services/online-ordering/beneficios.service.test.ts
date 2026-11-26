@@ -187,8 +187,19 @@ describe('aplicarBeneficiosEnTx — el orden fijo', () => {
 
     expect((canjearPremioEnTx as jest.Mock).mock.calls[0]).toEqual([tx, 'v1', 'o-sim', 'premio-1'])
     const puntos = (redeemPointsToOrderInTransaction as jest.Mock).mock.calls[0]
-    // La configuración leída SIN crearla (R4) va en el parámetro de hoy: nunca `getOrCreateLoyaltyConfig` dentro.
-    expect(puntos).toEqual([tx, 'v1', 'o-sim', 'c1', 100, undefined, expect.objectContaining({ active: true, redemptionRate: 0.01 })])
+    // La configuración leída SIN crearla (R4) va en el parámetro de hoy: nunca `getOrCreateLoyaltyConfig` dentro. Su única opción es
+    // D39 r6 #1: la tienda cierra su propio folio en $0, así que el veto del $0 sin mesa del POS no le aplica.
+    expect(puntos).toEqual([
+      tx,
+      'v1',
+      'o-sim',
+      'c1',
+      100,
+      undefined,
+      expect.objectContaining({ active: true, redemptionRate: 0.01 }),
+      undefined,
+      { cierraSuPropioCero: true },
+    ])
     // El cupón se monta como en la caja sobre una cuenta abierta: % de lo que queda ($90), con su tope en el reparto.
     const fila = prismaMock.orderDiscount.create.mock.calls[0][0]!.data as any
     expect(fila).toMatchObject({ orderId: 'o-sim', discountId: 'd-cupon', couponCodeId: 'cc-1', type: 'PERCENTAGE', isManual: false })

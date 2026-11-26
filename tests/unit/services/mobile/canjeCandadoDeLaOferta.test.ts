@@ -309,7 +309,11 @@ describe('D39 · la versión de la cuenta y el cobro en la terminal', () => {
       redeemPointsToOrderInTransaction(tx, 'v1', 'o1', 'c1', 500, undefined, config as any, { monto: 50, puntos: 500 }),
     ).rejects.toMatchObject({ statusCode: 409, code: 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE' })
     nadaSeQuemo(tx)
-    expect(assertNoLiveTerminalCharge).toHaveBeenCalledWith(tx, { venueId: 'v1', orderId: 'o1' }, expect.objectContaining({ mensaje: expect.any(String) }))
+    expect(assertNoLiveTerminalCharge).toHaveBeenCalledWith(
+      tx,
+      { venueId: 'v1', orderId: 'o1' },
+      expect.objectContaining({ mensaje: expect.any(String) }),
+    )
   })
 })
 
@@ -329,20 +333,55 @@ describe('D39 · una cuenta SIN MESA no se deja en $0.00 con puntos (Codex r4 #4
   it('con un cargo fijo el total sigue arriba de $0: canjea', async () => {
     ;(recalculateOrderTotals as jest.Mock).mockResolvedValueOnce({ total: 5 })
     await expect(
-      redeemPointsToOrderInTransaction(txFalso({ ...cuenta(50), payLater: true, tableId: null }), 'v1', 'o1', 'c1', 500, undefined, config as any, {
-        monto: 50,
-        puntos: 500,
-      }),
+      redeemPointsToOrderInTransaction(
+        txFalso({ ...cuenta(50), payLater: true, tableId: null }),
+        'v1',
+        'o1',
+        'c1',
+        500,
+        undefined,
+        config as any,
+        {
+          monto: 50,
+          puntos: 500,
+        },
+      ),
+    ).resolves.toMatchObject({ pointsToBurn: 500 })
+  })
+
+  it('r6 #1: la TIENDA EN LÍNEA cierra su propio folio en $0: con `cierraSuPropioCero`, un pedido sin mesa sí queda en $0, como antes', async () => {
+    ;(recalculateOrderTotals as jest.Mock).mockResolvedValueOnce({ total: 0 })
+    await expect(
+      redeemPointsToOrderInTransaction(
+        txFalso({ ...cuenta(50), payLater: null, tableId: null }),
+        'v1',
+        'o1',
+        'c1',
+        500,
+        undefined,
+        config as any,
+        undefined,
+        { cierraSuPropioCero: true },
+      ),
     ).resolves.toMatchObject({ pointsToBurn: 500 })
   })
 
   it('r5 #3: un fiado que se movió a una MESA conserva `payLater` y en Mesas se sigue cerrando en $0, como antes', async () => {
     ;(recalculateOrderTotals as jest.Mock).mockResolvedValueOnce({ total: 0 })
     await expect(
-      redeemPointsToOrderInTransaction(txFalso({ ...cuenta(50), payLater: true, tableId: 'mesa-1' }), 'v1', 'o1', 'c1', 500, undefined, config as any, {
-        monto: 50,
-        puntos: 500,
-      }),
+      redeemPointsToOrderInTransaction(
+        txFalso({ ...cuenta(50), payLater: true, tableId: 'mesa-1' }),
+        'v1',
+        'o1',
+        'c1',
+        500,
+        undefined,
+        config as any,
+        {
+          monto: 50,
+          puntos: 500,
+        },
+      ),
     ).resolves.toMatchObject({ pointsToBurn: 500 })
   })
 })

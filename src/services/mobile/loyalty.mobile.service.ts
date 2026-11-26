@@ -328,6 +328,8 @@ export async function redeemPointsToOrderInTransaction(
   config?: Awaited<ReturnType<typeof getOrCreateLoyaltyConfig>>,
   /** Lo que enseñó quien canjea (la tablet, la previa del MCP). Con ello, sólo se canjea exactamente eso (candado de la oferta). */
   esperado?: OfertaEsperada,
+  /** D39 r6 #1: la TIENDA EN LÍNEA cierra su propio folio en $0 (`order.service.ts`); para ella no aplica el veto del $0 sin mesa. */
+  opciones?: { cierraSuPropioCero?: boolean },
 ) {
   if (!Number.isInteger(points) || points <= 0) {
     throw new BadRequestError('points debe ser un entero positivo')
@@ -472,8 +474,8 @@ export async function redeemPointsToOrderInTransaction(
   // D39 (Codex r1 #5, r2 #6, r3 #5, r4 #4 y r5 #3): una cuenta SIN MESA (la de «Pagar después» o la de mostrador de «Usar puntos») que el
   // canje deja en $0.00 no tiene con qué cerrarse en el POS (Pedidos sólo cobra con saldo). Se decide con el total YA recalculado (un cobro
   // por servicio en % baja con la base; uno fijo, no), y se deshace todo con la transacción. Una cuenta con mesa (también un fiado que se
-  // movió a una mesa y conserva `payLater`) sigue como siempre: Mesas la cierra en $0.
-  if (order.tableId == null && totals.total <= 0) {
+  // movió a una mesa y conserva `payLater`) sigue como siempre: Mesas la cierra en $0. La TIENDA EN LÍNEA tampoco (r6 #1): cierra su folio.
+  if (order.tableId == null && totals.total <= 0 && !opciones?.cierraSuPropioCero) {
     throw new BadRequestError(CANJE_DEJARIA_EN_CERO, CANJE_DEJARIA_EN_CERO_CODE)
   }
   return { pointsToBurn, discountAmount, newBalance, transaction, row, totals }
