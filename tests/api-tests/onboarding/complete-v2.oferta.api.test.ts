@@ -295,6 +295,37 @@ describe('POST /onboarding/organizations/:organizationId/v2/complete — el alta
     })
   })
 
+  it('🔴 Codex b2-code r4 #10: sin cobro anterior, la compuerta lee la v1 y la relectura dentro de la regla común no puede leer la oferta → 503 PLAN_NOT_CONFIGURED que se puede reintentar: completedAt se suelta, sin sesión y sin cobrar (nunca 201 en Gratis sin el plan elegido)', async () => {
+    prismaMock.planOfferPointer.findUnique
+      .mockResolvedValueOnce(punteroA('cv1', 1, versionUno()) as never)
+      .mockResolvedValue(punteroA('cv1', 1, { schemaVersion: 1, roto: true }) as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso(PLAN_CON_TARJETA) as never)
+
+    const res = await terminar()
+
+    expect(res.status).toBe(503)
+    expect(res.body.code).toBe('PLAN_NOT_CONFIGURED')
+    expect(mockAutorizar).toHaveBeenCalledTimes(1)
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(mockEntregar).not.toHaveBeenCalled()
+    expect(renovarSesionConLaSucursal).not.toHaveBeenCalled()
+    expect(prismaMock.onboardingProgress.updateMany).toHaveBeenLastCalledWith({
+      where: { organizationId: ORG, completedAt: { not: null } },
+      data: { completedAt: null },
+    })
+  })
+
+  it('Codex b2-code r4 #10, la guarda de la salida: sin versiones y sin precio de Stripe para la llave (B0), el alta larga termina como hoy en Gratis (201), sin cobrar', async () => {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso(PLAN_CON_TARJETA) as never)
+    mockPriceList.mockResolvedValue({ data: [] })
+
+    const res = await terminar()
+
+    expect(res.status).toBe(201)
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(renovarSesionConLaSucursal).toHaveBeenCalled()
+  })
+
   it('con sólo la v1 el carril viejo cobra como hoy', async () => {
     prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv1', 1, versionUno()) as never)
     prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso(PLAN_CON_TARJETA) as never)

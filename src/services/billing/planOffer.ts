@@ -298,6 +298,18 @@ function ofertaRota(versionId: string, motivo: string): AppError {
   return new AppError(MENSAJE_OFERTA_ROTA, 503, true, 'PLAN_NOT_CONFIGURED', { versionId })
 }
 
+/**
+ * ¿Es el 503 de `ofertaRota` (la oferta guardada no se puede leer, con el `versionId` que falló)? Lo distingue del 503 del mismo
+ * código que da una llave sin precio en Stripe (B0, `details.tierCode`): Codex b2-code r4 #10, el alta larga deja salir sólo éste.
+ */
+export function esOfertaIlegible(error: unknown): boolean {
+  return (
+    error instanceof AppError &&
+    error.code === 'PLAN_NOT_CONFIGURED' &&
+    typeof (error.details as { versionId?: unknown } | undefined)?.versionId === 'string'
+  )
+}
+
 function leerDefinicion(versionId: string, definition: unknown): PlanOfferDefinition {
   const r = planOfferDefinition.safeParse(definition)
   if (!r.success) throw ofertaRota(versionId, r.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; '))

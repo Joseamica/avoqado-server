@@ -45,7 +45,7 @@ import { buildLaunchOfferView } from '../services/launchCampaigns/launchOfferMat
 import { toOfferRow } from '../services/launchCampaigns/launchCampaign.service'
 import { PLAN_ACTIVATION_STATUS } from '../services/launchCampaigns/launchCampaignEnums'
 import { standardPlanQuote } from '../services/access/planPricing.constants'
-import { MENSAJE_PLAN_NO_CONFIGURADO, versionQueCobra, type OfertaVigente } from '../services/billing/planOffer'
+import { MENSAJE_PLAN_NO_CONFIGURADO, esOfertaIlegible, versionQueCobra, type OfertaVigente } from '../services/billing/planOffer'
 import { ofertaCambio } from '../services/billing/opcionesDeCompra'
 import { basicoDeLaBienvenida } from '../services/billing/avisosDelBasico'
 import {
@@ -1760,7 +1760,15 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         // Codex b2-code #1: la relectura del precio vio una versión del editor publicada en medio. Nada se cobró en esta petición ni
         // quedó un cobro anterior por entregar: se suelta la marca y sale el 409 (sin terminar el alta ni renovar la sesión). La
         // siguiente petición entra por la compuerta, que ya ve la versión. Con un cobro anterior posible, el camino de hoy (abajo).
-        if (!intentoCobrar && !cobroSinEntregar && planErr instanceof AppError && planErr.code === 'OFFER_CHANGED') {
+        // 🔴 Codex b2-code r4 #10: igual si esa relectura no pudo leer la oferta (`esOfertaIlegible`, la misma clase que T3-3): 503 que
+        // se puede reintentar, nunca un 201 en Gratis que suelta en silencio el plan elegido. El 503 de una llave sin precio en Stripe
+        // (B0) y los rechazos de la regla común siguen como hoy (abajo).
+        if (
+          !intentoCobrar &&
+          !cobroSinEntregar &&
+          planErr instanceof AppError &&
+          (planErr.code === 'OFFER_CHANGED' || esOfertaIlegible(planErr))
+        ) {
           await prisma.onboardingProgress.updateMany({
             where: { organizationId, completedAt: { not: null } },
             data: { completedAt: null },
