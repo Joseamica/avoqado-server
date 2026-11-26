@@ -482,15 +482,41 @@ describe('B2 Task 5: un intento anterior que pudo cobrar se recupera con su susc
     }
   })
 
-  it('el reenvío del navegador sin comprobante legible no reanuda el reto de una versión del editor (la versión vacía no es la suya): se anula y el intento nuevo pide su comprobante', async () => {
+  it('Codex b2-code r3 (la regla única): sin un comprobante VÁLIDO en la petición no se compara versión ni periodicidad, como B1 — el reenvío sin comprobante legible (o el DASHBOARD de hoy, sin ninguno) reanuda el mismo reto', async () => {
+    for (const quoteToken of ['no-es-un-comprobante', undefined]) {
+      jest.clearAllMocks()
+      prismaMock.$transaction.mockImplementation(async (cb: unknown) => (cb as (tx: unknown) => unknown)(prismaMock))
+      alta()
+      mockSubRetrieve.mockResolvedValue(retoDeLaV2())
+      pagoConEstado('requires_action')
+
+      await expect(pedir({ quoteToken })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'PLAN_PAYMENT_REQUIRES_ACTION',
+        details: { clientSecret: 'pi_reto_secret_x' },
+      })
+      expect(mockVoid).not.toHaveBeenCalled()
+      expect(mockSubCreate).not.toHaveBeenCalled()
+    }
+  })
+
+  it('🔴 Codex b2-code r3 R3-1: reto de Pro anual de la v2 pendiente, un comprobante VÁLIDO de la v3 y la lectura del puntero falla → el comprobante decide (sin el puntero): se anula el reto viejo y sale el error diferido de la lectura, sin cobrar', async () => {
+    // La vigente no se puede leer (una definición que no pasa el esquema); el comprobante dice su versión sin leer el puntero.
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv3', 3, { schemaVersion: 1, rota: true }) as never)
+    const PRO_A_V3 = 1042840
     mockSubRetrieve.mockResolvedValue(retoDeLaV2())
     pagoConEstado('requires_action')
 
     await expect(
-      pedir({ interval: 'annual', offer: { kind: 'STANDARD', expectedFirstChargeCents: PRO_A_V2 }, quoteToken: 'no-es-un-comprobante' }),
-    ).rejects.toMatchObject({ statusCode: 400, code: 'QUOTE_INVALID' })
+      pedir({
+        interval: 'annual',
+        offer: { kind: 'STANDARD', expectedFirstChargeCents: PRO_A_V3 },
+        quoteToken: comprobante({ versionNumber: 3, interval: 'annual', precioCents: PRO_A_V3, firstChargeCents: PRO_A_V3 }),
+      }),
+    ).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED' })
     expect(mockVoid).toHaveBeenCalledWith('in_1')
     expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(mockAutorizar).not.toHaveBeenCalled()
   })
 
   it('🔴 intento anterior sin cobro (otra tarjeta, se descarta) y comprobante de la v2 ya no vigente → 409 OFFER_CHANGED reason VERSION, cero subscriptions.create; queda IN_PROGRESS con el intento siguiente, sin lease ni id', async () => {
