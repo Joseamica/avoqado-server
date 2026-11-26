@@ -179,14 +179,14 @@
       "linea": 128
     },
     {
-      "ruta": "Problema: sellos dependen del programa activo",
+      "ruta": "Problema: los sellos no dependen del interruptor de puntos (D42)",
       "archivo": "avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts",
-      "linea": 317
+      "linea": 347
     },
     {
       "ruta": "Problema: el sello se da dentro de earnPoints",
       "archivo": "avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts",
-      "linea": 349
+      "linea": 380
     },
     {
       "ruta": "Problema: error con la razón del SERVIDOR",

@@ -406,6 +406,7 @@ export async function earnPoints(
       deferredStampError,
       otorgadoHastaAhora,
       sinPromo: options?.skipStamp === true,
+      puntosPrendidos: config.active,
     })
   } catch (error) {
     throw conLoOtorgado(error, otorgadoHastaAhora)
@@ -444,8 +445,13 @@ async function acreditarPuntosTrasElSello(ctx: {
   otorgadoHastaAhora: { sello: boolean; puntos: boolean }
   /** La venta nueva de un cambio (`skipStamp`): no es una visita nueva, así que tampoco gana promo. */
   sinPromo: boolean
+  /**
+   * hz:be99f328:D42 (Codex r1 #2): el interruptor de PUNTOS de la MISMA lectura con que se decidió llegar hasta aquí. Apagado ⇒ 0
+   * puntos sin releer la config: si otro administrador los prendiera y apagara a media venta, esta venta no escribe un EARN.
+   */
+  puntosPrendidos: boolean
 }): Promise<ResultadoDeEarnPoints> {
-  const { venueId, customerId, amount, orderId, staffId, sello, deferredStampError, otorgadoHastaAhora, sinPromo } = ctx
+  const { venueId, customerId, amount, orderId, staffId, sello, deferredStampError, otorgadoHastaAhora, sinPromo, puntosPrendidos } = ctx
 
   // The payment callers already isolate loyalty failures from the approved
   // charge. We therefore persist points first, then surface a stamp failure so
@@ -495,7 +501,8 @@ async function acreditarPuntosTrasElSello(ctx: {
   }
 
   // Los puntos de la regla normal (regla 8: sin ellos, la promo tampoco da). La promo se suma dentro de la transacción.
-  const { total: pointsEarned, bono, pointsPerDollar } = await calcularPuntosDeLaVenta(venueId, amount)
+  const base = puntosPrendidos ? await calcularPuntosDeLaVenta(venueId, amount) : { total: 0, bono: 0, pointsPerDollar: 0 }
+  const { total: pointsEarned, bono, pointsPerDollar } = base
 
   if (pointsEarned === 0) {
     // H4, tercera ola: negocio de sólo sellos. «Ya sellada» con el sello de OTRO cliente quiere decir que la venta es de él:

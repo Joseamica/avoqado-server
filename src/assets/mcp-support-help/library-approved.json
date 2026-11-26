@@ -404,7 +404,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/configurar-tarjeta-de-sellos": {
-      "sha256": "31163ed7cc87a1cc093724df7cfaba7cdc75c587d7c13c4077ce84c8e215bbda",
+      "sha256": "367794cf6c03816f863f9e57bda605d7275e5d74c83e3ccf6163659d0b56a6c4",
       "requiredPermissions": [
         "loyalty:read",
         "loyalty:update"

@@ -775,6 +775,20 @@ describe('Loyalty Dashboard Service', () => {
         expect(prismaMock.loyaltyConfig.create).not.toHaveBeenCalled()
       })
 
+      it('🔴 Codex r1 #2: si otro administrador prende los puntos a media venta, esta venta NO escribe puntos (una sola lectura)', async () => {
+        // La primera lectura (la que decide) ve los puntos apagados; cualquier relectura posterior los vería prendidos.
+        prismaMock.loyaltyConfig.findUnique
+          .mockResolvedValueOnce(soloSellos() as any)
+          .mockResolvedValue(createMockLoyaltyConfig({ active: true, stampsEnabled: true }) as any)
+        ;(stampLedger.grantStamp as jest.Mock).mockResolvedValue({ granted: true })
+
+        const r = await earnPoints('venue-123', 'customer-123', 100, 'order-123')
+
+        expect(r).toEqual({ pointsEarned: 0, newBalance: 0, otorgado: { sello: true, puntos: false } })
+        expect(prismaMock.loyaltyTransaction.create).not.toHaveBeenCalled()
+        expect(prismaMock.customer.update).not.toHaveBeenCalled()
+      })
+
       it('puntos Y sellos apagados ⇒ ni sello ni puntos (como siempre)', async () => {
         prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig({ active: false, stampsEnabled: false }) as any)
 

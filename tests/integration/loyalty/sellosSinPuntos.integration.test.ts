@@ -85,7 +85,9 @@ async function negocio(cfg: { active?: boolean; stampsEnabled?: boolean; maxStam
       stampRewardLabel: 'Postre gratis',
     },
   })
-  const c = await prisma.customer.create({ data: { venueId: v.id, firstName: `Clienta ${n}`, phone: `+52556699${String(n).padStart(4, '0')}` } })
+  const c = await prisma.customer.create({
+    data: { venueId: v.id, firstName: `Clienta ${n}`, phone: `+52556699${String(n).padStart(4, '0')}` },
+  })
   return { venueId: v.id, customerId: c.id }
 }
 
@@ -109,8 +111,7 @@ async function ventaPagada(venueId: string, customerId: string): Promise<string>
   return o.id
 }
 
-const sellosDeLaVenta = (venueId: string, orderId: string) =>
-  prisma.stampEvent.count({ where: { venueId, orderId, type: 'EARN' } })
+const sellosDeLaVenta = (venueId: string, orderId: string) => prisma.stampEvent.count({ where: { venueId, orderId, type: 'EARN' } })
 const puntosDe = async (customerId: string) => ({
   saldo: (await prisma.customer.findUniqueOrThrow({ where: { id: customerId }, select: { loyaltyPoints: true } })).loyaltyPoints,
   movimientos: await prisma.loyaltyTransaction.count({ where: { customerId } }),

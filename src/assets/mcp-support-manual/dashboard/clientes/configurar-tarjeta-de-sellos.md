@@ -32,5 +32,5 @@ El programa de lealtad es para los negocios que lo tienen incluido en su plan. N
 ## Problemas frecuentes
 
 - *Guardar cambios*, arriba de la pantalla, guarda el diseño de la tarjeta, no el programa: el programa se guarda con *Guardar programa*.
-- La tarjeta de sellos no depende de los puntos: con *Tarjeta de sellos activa* prendida, las ventas con cliente suman su sello aunque en *Clientes* › *Programa de Lealtad* el *Programa de Puntos* esté en *Inactivo*.
+- La tarjeta de sellos no depende de los puntos: con *Tarjeta de sellos activa* prendida, las ventas con cliente suman sello (hasta las *Visitas con sello por cliente al día*) aunque en *Clientes* › *Programa de Lealtad* el *Programa de Puntos* esté en *Inactivo*.
 - Si sale «No se pudo guardar», revisa el texto que trae debajo: ahí viene la razón cuando el sistema la da.

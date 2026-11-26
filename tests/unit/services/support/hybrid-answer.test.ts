@@ -1354,7 +1354,8 @@ describe('a guide never goes out without its conditions (T-F5)', () => {
   const real = (id: string) => library.find(g => g.id === id)!
   const card = real('dashboard/clientes/configurar-tarjeta-de-sellos')
   const stamp = real('android/lealtad/sello-que-no-se-sumo')
-  const ACTIVE = 'el *Estado del Programa* tiene que estar en *Activo*'
+  // hz:be99f328:D42: la condición de la guía cambió; antes «el *Estado del Programa* tiene que estar en *Activo*».
+  const ACTIVE = 'el *Programa de Puntos* esté en *Inactivo*'
   const WARNING = 'no agregues el cliente desde esa pantalla ni lo intentes otra vez'
   const cite = (g: LibraryGuide, quote: string, text = quote): DraftLine => ({ text, guideId: g.id, quote })
   // Todos los pasos de las dos guías y sus dos condiciones: 9 líneas, cada una con su cita literal.
@@ -1368,8 +1369,8 @@ describe('a guide never goes out without its conditions (T-F5)', () => {
       cite(card, 'Toca *Guardar programa*: sale «Programa de sellos guardado».'),
       cite(
         card,
-        'en *Clientes* › *Programa de Lealtad* el *Estado del Programa* tiene que estar en *Activo*',
-        `Para que las ventas den sellos, ${ACTIVE}.`,
+        'aunque en *Clientes* › *Programa de Lealtad* el *Programa de Puntos* esté en *Inactivo*',
+        `Las ventas suman sellos aunque ${ACTIVE}.`,
       ),
       cite(stamp, 'Si a la venta le faltó el cliente, toca *Agregar cliente*, arriba a la derecha de esa pantalla.'),
       cite(stamp, 'Búscalo y tócalo. Si queda ligado, sale «Cliente agregado: …»'),
@@ -1405,7 +1406,7 @@ describe('a guide never goes out without its conditions (T-F5)', () => {
 
   it("Codex's repro: the literal guide shows the steps of a guide only with its conditions, in both orders", () => {
     const first = literalSupportAnswer([card, stamp], null)
-    expect(first).toContain(wholeGuide(card.body)) // its 4 steps and «Estado del Programa … Activo»
+    expect(first).toContain(wholeGuide(card.body)) // its 4 steps and «Programa de Puntos … Inactivo»
     expect(first).toContain(ACTIVE)
     expect(first).not.toContain('toca *Agregar cliente*') // the POS guide goes as its card: no step without its warning
     expect(first).not.toContain(stamp.summary) // T-F6 (H3): nor its summary
