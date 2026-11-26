@@ -93,6 +93,11 @@ function manualProblems(manualDir: string, evalRoot: string): Problems {
       problems.browserTested.push(`${id}: browserTested sin navegador PROBADO`)
     for (const permission of page.gates?.requiredPermissions ?? [])
       if (!isValidPermission(permission)) problems.permissions.push(`${id}: ${permission}`)
+    // hz:be99f328:D44: una página de dinero que entra a la biblioteca lleva candado; sin él, el bot le enseña los pasos a quien
+    // no puede hacerlos sin decirle que lo pida. La que todavía no entra (le falta su prueba) se decide al probarla.
+    const gates = page.gates
+    if (page.money && sources.includes(page) && !gates?.requiredPermissions.length && !gates?.featureCode && !gates?.activationKey)
+      problems.permissions.push(`${id}: página de dinero sin candado`)
     const text = `${page.title}\n${page.summary}\n${page.body}`
     if (CONTACT.some(re => re.test(text)) || hasPhone(text)) problems.contact.push(`${id}: trae un enlace, correo o teléfono`)
     if (steps.length > 6 || steps.some(s => s.length > 220) || page.summary.length > 160)
@@ -119,7 +124,7 @@ describe('manual pages (src/assets/mcp-support-manual)', () => {
   it('browserTested only on dashboard pages whose evidence navegador.estado is PROBADO', () => {
     expect(real.browserTested).toEqual([])
   })
-  it('every requiredPermission passes isValidPermission', () => {
+  it('every requiredPermission passes isValidPermission, and every money page in the library has a candado', () => {
     expect(real.permissions).toEqual([])
   })
   it('no manual body contains http, www., avoqado.io, an email or a phone', () => {
@@ -269,6 +274,31 @@ ${o.steps.length ? `\n## Pasos\n\n${o.steps.map((s, i) => `${i + 1}. ${s}`).join
       'tpv/cobro/cobrar-en-efectivo: título repetido en la biblioteca',
       'tpv/cobro/cobrar: título repetido en la biblioteca',
     ])
+  })
+
+  it('a money page that enters the library without any candado is caught (D44); with its permission it passes', () => {
+    const id = 'tpv/cobro/cobrar-en-efectivo'
+    const write = (permissions: string) =>
+      put(
+        manual,
+        `${id}.md`,
+        page({
+          title: 'Cobrar en efectivo en la terminal',
+          steps: ['Toca *Cobrar*.'],
+          extra: 'money: true\ndeviceTested: 2026-11-25\n',
+        }).replace('requiredPermissions:\n  - payments:create', permissions),
+      )
+    const probada = { estado: 'PROBADO', aparato: 'PAX', version: '2.16.0', apkSha256: 'c'.repeat(64), fecha: '2026-11-25' }
+    put(
+      evalRoot,
+      `evidencia/${id}.json`,
+      JSON.stringify({ ...evidence(id, { pasos: [1] }), aparato: { ...probada, fotos: ['f.png'], filasCreadas: [] } }),
+    )
+    put(evalRoot, 'inventario/tpv.json', JSON.stringify(inventory('tpv', [id])))
+    write('requiredPermissions: []')
+    expect(manualProblems(manual, evalRoot).permissions).toEqual([`${id}: página de dinero sin candado`])
+    write('requiredPermissions:\n  - payments:create')
+    expect(manualProblems(manual, evalRoot)).toEqual(Object.fromEntries(CHECKS.map(c => [c, []])))
   })
 
   describe('each rule has its own red: one sample page that breaks only that rule', () => {

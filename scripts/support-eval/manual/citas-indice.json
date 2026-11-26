@@ -5887,6 +5887,10 @@
         "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      },
+      {
         "pagina": "tpv/mesas/fusionar-cuentas",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       },
@@ -6153,6 +6157,12 @@
       {
         "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
         "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      }
+    ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/api/PaymentApiService.kt": [
+      {
+        "pagina": "tpv/ventas/vender-con-cobrar",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/BlumonAttemptResolver.kt": [
@@ -6707,6 +6717,12 @@
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/api/TablesApiService.kt": [
+      {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      }
+    ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/AssignWaiterSheet.kt": [
       {
         "pagina": "tpv/mesas/reasignar-mesero",
@@ -6979,6 +6995,10 @@
         "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      },
+      {
         "pagina": "tpv/mesas/fusionar-cuentas",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       },
@@ -6996,6 +7016,10 @@
       },
       {
         "pagina": "tpv/reportes/ver-reportes-de-otros-dias",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      },
+      {
+        "pagina": "tpv/ventas/vender-con-cobrar",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],

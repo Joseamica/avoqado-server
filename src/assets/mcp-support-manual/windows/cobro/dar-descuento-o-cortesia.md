@@ -4,7 +4,8 @@ description: Aplica un descuento a toda la venta o a un producto con opciones, o
 product: windows
 category: cobro
 task: dar-descuento-o-cortesia
-requiredPermissions: []
+requiredPermissions:
+  - discounts:apply
 money: true
 sourceRepo: avoqado-android
 sourceRef: 212f9cf4f150b7770cf6e753e5e2dbd78451948f
