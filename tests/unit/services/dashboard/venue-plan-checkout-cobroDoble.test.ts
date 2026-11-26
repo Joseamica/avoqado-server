@@ -81,7 +81,7 @@ describe('createVenuePlanCheckoutSession — pasa por la regla común de compra'
 
   it('precio igual → la sesión lleva el priceId verificado ANTES de la regla común, sin volver a leerlo dentro', async () => {
     await createVenuePlanCheckoutSession('org-1', 'venue-1', 'monthly', 'PRO')
-    expect(mockResolverPrecio).toHaveBeenCalledWith('PLAN_PRO', 'monthly')
+    expect(mockResolverPrecio).toHaveBeenCalledWith('PLAN_PRO', 'monthly', { soloSinVersionDelEditor: true })
     expect(mockResolverPrecio).toHaveBeenCalledTimes(1)
     expect(mockResolverPrecio.mock.invocationCallOrder[0]).toBeLessThan(mockAutorizar.mock.invocationCallOrder[0])
     expect(mockCheckout).toHaveBeenCalledWith(expect.objectContaining({ priceId: 'price_verificado' }))

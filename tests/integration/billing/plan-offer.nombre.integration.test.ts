@@ -5,7 +5,8 @@
  * en `plan-offer-nombre` y calculan el nombre de la vigente JUSTO antes de escribir: el que llega tarde escribe lo más nuevo. Sin
  * nombre propio, la sincronización escribe el del catálogo como B0 (sin candado) y después lo revisa bajo el candado (Codex B1 #3).
  * La puerta del checkout de «Tu plan» (por HTTP, con un JWT real) responde 503 `PLAN_RENAME_PENDING` mientras Stripe diga otro
- * nombre.
+ * nombre. Desde B2 (Task 7) la compra con una versión del editor cita el comprobante de «Tu plan»: antes de cada POST se lee
+ * `GET …/plan` (la cotización de la versión vigente en ESE momento) y se manda su `quoteToken`.
  *
  * Stripe se simula con un almacén en memoria que guarda el nombre de cada producto y deja detener a mano el siguiente
  * `products.update` de un producto. La preparación de las listas híbridas sólo estampa ids falsos (como en `plan-offer.candado`),
@@ -332,19 +333,28 @@ async function hastaQueLlegue(llego: Promise<void>, operacion: Promise<unknown>)
 const asentar = (...operaciones: Array<Promise<unknown> | undefined>) =>
   Promise.allSettled(operaciones.filter((o): o is Promise<unknown> => o !== undefined))
 
-/** «Tu plan» → Pro mensual, por la ruta real con el JWT del dueño. */
-const pedirCheckout = () =>
-  request(app)
+const delDueno = () =>
+  `Bearer ${jwt.sign(
+    { sub: negocio.duenoId, orgId: negocio.orgId, venueId: negocio.venueId, role: 'OWNER' },
+    process.env.ACCESS_TOKEN_SECRET as string,
+    { expiresIn: '15m' },
+  )}`
+
+/**
+ * «Tu plan» → Pro mensual, por la ruta real con el JWT del dueño. B2 (Task 7): primero un `GET …/plan` fresco, que con la versión del
+ * editor `versionNumber` vigente trae su cotización, y el POST manda el `quoteToken` de Pro mensual (de ESA versión).
+ */
+async function pedirCheckout(versionNumber: number) {
+  const plan = await request(app).get(`/api/v1/dashboard/venues/${negocio.venueId}/plan`).set('Authorization', delDueno())
+  expect(plan.status).toBe(200)
+  expect(plan.body.data.cotizacion?.versionNumber).toBe(versionNumber)
+  const quoteToken: unknown = plan.body.data.cotizacion?.planes?.PRO?.monthly?.quoteToken
+  expect(quoteToken).toEqual(expect.any(String))
+  return request(app)
     .post(`/api/v1/dashboard/venues/${negocio.venueId}/plan/checkout`)
-    .set(
-      'Authorization',
-      `Bearer ${jwt.sign(
-        { sub: negocio.duenoId, orgId: negocio.orgId, venueId: negocio.venueId, role: 'OWNER' },
-        process.env.ACCESS_TOKEN_SECRET as string,
-        { expiresIn: '15m' },
-      )}`,
-    )
-    .send({ tier: 'PRO', interval: 'monthly' })
+    .set('Authorization', delDueno())
+    .send({ tier: 'PRO', interval: 'monthly', quoteToken })
+}
 
 /**
  * Durante la sincronización sólo los dos planes están activos: así `syncFeaturesToStripe` no le pide nada a Stripe por funciones de
@@ -519,7 +529,8 @@ describe('el nombre de un plan en Stripe: un solo escritor y la puerta del check
       // El intento inmediato del publicador espera su turno en el candado del nombre.
       await hastaQueEsperen(1)
 
-      const cerrado = await pedirCheckout()
+      // El comprobante es de la v3 (la vigente): la compra pasa los pasos 1-3 y la detiene la puerta del nombre.
+      const cerrado = await pedirCheckout(3)
       expect(cerrado.status).toBe(503)
       expect(cerrado.body).toMatchObject({
         code: 'PLAN_RENAME_PENDING',
@@ -541,7 +552,7 @@ describe('el nombre de un plan en Stripe: un solo escritor y la puerta del check
     const puntero = await prisma.planOfferPointer.findUniqueOrThrow({ where: { id: 'vigente' } })
     expect(puntero.nombresEnStripe).toMatchObject({ PRO: { esperado: PRO_MAX, enStripe: PRO_MAX } })
 
-    const abierto = await pedirCheckout()
+    const abierto = await pedirCheckout(3)
     expect(abierto.status).toBe(200)
     expect(abierto.body).toMatchObject({ success: true, url: 'https://checkout.stripe.test/cs_t8_1' })
     expect(mockStripe.sesiones).toHaveLength(1)
@@ -610,7 +621,7 @@ describe('el nombre de un plan en Stripe: un solo escritor y la puerta del check
       expect(mockStripe.productos.get(productos.PRO)?.name).toBe(PRO_PLUS)
       expect(escritas.map(e => e.nombre).indexOf(CATALOGO.PLAN_PRO.name)).toBeLessThan(escritas.length - 1)
       // Con el nombre al día, el checkout abre.
-      const abierto = await pedirCheckout()
+      const abierto = await pedirCheckout(2)
       expect(abierto.status).toBe(200)
     })
   })

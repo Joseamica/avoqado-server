@@ -224,3 +224,72 @@ describe('🔴 Codex C3: se abre bajo el candado de la regla', () => {
     expect(normal.allow_promotion_codes).toBe(true)
   })
 })
+
+// Planes editables (B2, Task 7): la compra de «Tu plan» con una versión del editor cita su versión en la metadata.
+describe('extraMetadata (B2, Task 7)', () => {
+  const abrir = (extraMetadata?: Record<string, string>) =>
+    createPlanCheckoutSession({
+      venueId: 'v1',
+      customerId: 'cus_1',
+      priceId: 'price_v2_pro_m',
+      interval: 'monthly',
+      tierCode: 'PLAN_PRO',
+      successUrl: 's',
+      cancelUrl: 'c',
+      venueName: 'Acme',
+      venueSlug: 'acme',
+      ...(extraMetadata ? { extraMetadata } : {}),
+    })
+
+  it('extraMetadata va en metadata y en subscription_data.metadata sin pisar kind, venueId, tierCode ni interval; sin ella, el cuerpo de siempre', async () => {
+    await abrir()
+    const deSiempre = mockSessionCreate.mock.calls[0]
+
+    await abrir({
+      planOfferVersion: '2',
+      planOfferPrecioDe: '2',
+      // Lo que intenta pisar lo nuestro no lo pisa.
+      kind: 'OTRO',
+      venueId: 'v_ajeno',
+      tierCode: 'PLAN_PREMIUM',
+      interval: 'annual',
+    })
+    const conVersion = mockSessionCreate.mock.calls[1][0]
+
+    expect(conVersion.metadata).toEqual({
+      planOfferVersion: '2',
+      planOfferPrecioDe: '2',
+      kind: 'PLAN_CHECKOUT',
+      venueId: 'v1',
+      tierCode: 'PLAN_PRO',
+      interval: 'monthly',
+    })
+    expect(conVersion.subscription_data.metadata).toEqual({
+      planOfferVersion: '2',
+      planOfferPrecioDe: '2',
+      kind: 'PLAN_CHECKOUT',
+      venueId: 'v1',
+      tierCode: 'PLAN_PRO',
+      featureId: 'feat-pro',
+      featureCode: 'PLAN_PRO',
+      interval: 'monthly',
+      venueName: 'Acme',
+      venueSlug: 'acme',
+    })
+
+    // Sin ella, exactamente el cuerpo de siempre: las mismas llaves, en el mismo orden, y las mismas opciones.
+    expect(deSiempre[0].metadata).toEqual({ kind: 'PLAN_CHECKOUT', venueId: 'v1', tierCode: 'PLAN_PRO', interval: 'monthly' })
+    expect(Object.keys(deSiempre[0].metadata)).toEqual(['kind', 'venueId', 'tierCode', 'interval'])
+    expect(Object.keys(deSiempre[0].subscription_data.metadata)).toEqual([
+      'kind',
+      'venueId',
+      'tierCode',
+      'featureId',
+      'featureCode',
+      'interval',
+      'venueName',
+      'venueSlug',
+    ])
+    expect(deSiempre[1]).toEqual({ timeout: 15_000, maxNetworkRetries: 0 })
+  })
+})

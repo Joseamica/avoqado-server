@@ -192,6 +192,7 @@ model Zone {
 }
 
 model Venue {
+  planAcceptances        PlanAcceptance[]
   exportRuns             ExportRun[]
   onlineOrderingSettings OnlineOrderingSettings?
   onlineOrders           OnlineOrder[]
@@ -610,9 +611,9 @@ model Venue {
   cashDrawerSessions CashDrawerSession[]
 
   // Máquina de efectivo (QuickPay Mini)
-  cashMachineCloses    CashMachineClose[]
-  cashMachineIncidents CashMachineIncident[]
-  cashMachineBindings  CashMachineBinding[]
+  cashMachineCloses       CashMachineClose[]
+  cashMachineIncidents    CashMachineIncident[]
+  cashMachineBindings     CashMachineBinding[]
   cashMachineFolios       CashMachineFolio[]
   cashMachineObservations CashMachineObservation[]
 
@@ -810,20 +811,20 @@ enum WhatsappInboundRouting {
 // webhook handler. Meta may redeliver the same wamid on retries; we de-dupe on
 // the unique constraint and route only once.
 model WhatsappInboundEvent {
-  id              String                  @id @default(cuid())
-  wamid           String                  @unique
-  fromPhone       String
-  messageType     String
-  rawBody         Json
-  receivedAt      DateTime                @default(now())
-  routedAs        WhatsappInboundRouting?
-  routedSessionId String?
-  processedAt     DateTime?
-  replyWamid      String?
-  replySentAt     DateTime?
-  receiverId      String?
+  id                    String                  @id @default(cuid())
+  wamid                 String                  @unique
+  fromPhone             String
+  messageType           String
+  rawBody               Json
+  receivedAt            DateTime                @default(now())
+  routedAs              WhatsappInboundRouting?
+  routedSessionId       String?
+  processedAt           DateTime?
+  replyWamid            String?
+  replySentAt           DateTime?
+  receiverId            String?
   supportTombstoneUntil DateTime?
-  supportMessage  SupportMessage?
+  supportMessage        SupportMessage?
 
   @@index([fromPhone, receivedAt])
   @@index([routedAs, receivedAt, id])
@@ -1244,8 +1245,8 @@ model VenueSettings {
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
   // null inherits the organization's complete service-course catalog.
-  serviceCourses         Json?
-  serviceCoursesRevision Int   @default(0)
+  serviceCourses           Json?
+  serviceCoursesRevision   Int     @default(0)
   /// «La cocina puede liberar tiempos desde su pantalla» (founder, 20-nov-2026; Flautas D17). Apagado de fábrica: liberar
   /// sigue siendo de la caja (`orders:update` + `orders:create`). Prendido, el SERVIDOR acepta el RELEASE de quien sólo trae
   /// `orders:update` (el rol de cocina). Se lee al REPRODUCIR cada intent, no al encolarlo.
@@ -1276,9 +1277,9 @@ model VenueSettings {
   /// Prendido: quien pone a mano un descuento o un «Ajuste de precio» en el POS elige un motivo de `discountReasons` (+ comentario
   /// opcional). Nace OFF, todos los planes. Switch canónico en el dashboard; el POS sólo lo lee. El SERVIDOR nunca rechaza una
   /// venta sin motivo (apps viejas y la cola sin red): lo exige la app.
-  discountReasonRequired    Boolean  @default(false)
+  discountReasonRequired Boolean  @default(false)
   /// La lista de motivos del negocio (≤ 30, ≤ 60 letras c/u, sin repetidos). No se prende el switch con la lista vacía.
-  discountReasons           String[] @default([])
+  discountReasons        String[] @default([])
 
   /// Cambio de talla o de producto en una venta ya cobrada (spec 2026-10-20). `null` = el default por giro, que resuelve el
   /// SERVIDOR (prendido en tiendas y servicios; apagado en restaurantes, bares y entretenimiento); `true`/`false` = decisión
@@ -2019,6 +2020,9 @@ model OnboardingProgress {
   organizationId String       @unique
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
+  /// La versión que citó el intento de plan del alta; `null` = sin versión del editor.
+  planOfferVersionNumber Int?
+
   // Progress tracking
   currentStep    Int  @default(0)
   completedSteps Json // Array of completed step numbers: [1, 2, 3]
@@ -2122,7 +2126,7 @@ model MenuCategory {
   children MenuCategory[] @relation("CategoryHierarchy")
 
   // Scheduling
-  active         Boolean  @default(true)
+  active         Boolean   @default(true)
   /// Eliminada por el dueño (encargo bc1dcc, 19-nov-2026): la fila sigue porque guarda archivados o una familia (RESTRICT); queda
   /// apagada y ESCONDIDA para el dueño. La base la vuelve a mostrar al prenderla o si algo vivo cae en ella (triggers).
   deletedAt      DateTime?
@@ -5035,7 +5039,7 @@ model Modifier {
   /// descuenta) y NO es venta suelta suya: sale en «Ventas por artículo» › «Dentro de paquete» (founder «B», 20-nov). Excluye a
   /// `rawMaterialId`. El plan al ponerlo: `LIGA_DE_EXTRA_PLAN` (menu.dashboard.service.ts); quitarlo siempre se puede.
   linkedProductId String?
-  linkedProduct   Product?              @relation("ModifierLinkedProduct", fields: [linkedProductId], references: [id], onDelete: SetNull)
+  linkedProduct   Product? @relation("ModifierLinkedProduct", fields: [linkedProductId], references: [id], onDelete: SetNull)
 
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
@@ -5799,8 +5803,28 @@ model PlanOfferVersion {
   discardedAt          DateTime?
   vigenteDe            PlanOfferPointer?      @relation("vigente")
   pendienteDe          PlanOfferPointer?      @relation("pendiente")
+  aceptaciones         PlanAcceptance[]
 
   @@index([status, createdAt])
+}
+
+/// La aceptación de un plan al convertir una demo: el checkout que sigue usa sólo ésta, 30 min.
+/// `validadoAt` = la hora con la que se validó el comprobante.
+model PlanAcceptance {
+  id             String           @id @default(cuid())
+  venueId        String
+  venue          Venue            @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  offerVersionId String
+  offerVersion   PlanOfferVersion @relation(fields: [offerVersionId], references: [id], onDelete: Restrict)
+  tier           String
+  interval       String
+  quoteToken     String
+  validadoAt     DateTime
+  createdById    String
+  createdAt      DateTime         @default(now())
+  expiresAt      DateTime
+
+  @@index([venueId, createdAt])
 }
 
 /// Un solo renglón (`id = 'vigente'`): qué versión rige y cuál está pendiente.
@@ -17113,7 +17137,7 @@ model CashMachineClose {
   createdAt       DateTime  @default(now())
 
   /// Rediseño r3 (D2): la huella del carrito COMPLETO congelado en `CashMachineFolio` (la misma de la cotización). Null = sin carrito.
-  cartHash String? @db.VarChar(64)
+  cartHash          String? @db.VarChar(64)
   /// Rediseño r3 (D1): por qué un PAGADO comprobado quedó SIN venta (el dinero está; la incidencia NO_SE_PUDO_REGISTRAR lo pone a
   /// revisión). 'DESCUENTO' | 'PC_REVOCADA' | 'SIN_SALDAR' | 'SIN_CARRITO' | 'CARRITO_ILEGIBLE' | 'VENTA_RECHAZADA' | 'PREMIO_PENDIENTE' |
   /// 'LLAVE_OCUPADA'. Null = la venta se registró (o no era PAGADO).
@@ -18093,25 +18117,25 @@ model AreaTicketLine {
   areaTicket   AreaTicket @relation(fields: [areaTicketId], references: [id], onDelete: Cascade)
   clientLineId String     @db.VarChar(64)
 
-  productId            String?
-  product              Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
-  productNameSnapshot  String
-  skuSnapshot          String?
-  categoryNameSnapshot String?
-  modifiersSnapshot    Json?
-  quantity             Decimal  @db.Decimal(12, 3)
-  weightKg             Decimal? @db.Decimal(12, 3)
-  unitPrice            Decimal  @db.Decimal(12, 2)
-  discountAmount       Decimal  @default(0) @db.Decimal(12, 2)
-  appliedDiscountId    String?
+  productId              String?
+  product                Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  productNameSnapshot    String
+  skuSnapshot            String?
+  categoryNameSnapshot   String?
+  modifiersSnapshot      Json?
+  quantity               Decimal  @db.Decimal(12, 3)
+  weightKg               Decimal? @db.Decimal(12, 3)
+  unitPrice              Decimal  @db.Decimal(12, 2)
+  discountAmount         Decimal  @default(0) @db.Decimal(12, 2)
+  appliedDiscountId      String?
   /// D4 (18-nov-2026): motivo, comentario y quién aprobó el descuento (id de StaffVenue, foto sin llave foránea: al cobrar se usa
   /// sólo si esa membresía sigue existiendo), congelados al emitir; la fila espejo los copia al cobrar.
   discountReason         String?
   discountReasonComment  String?
   discountAuthorizedById String?
-  taxAmount            Decimal  @db.Decimal(12, 2)
-  total                Decimal  @db.Decimal(12, 2)
-  notes                String?
+  taxAmount              Decimal  @db.Decimal(12, 2)
+  total                  Decimal  @db.Decimal(12, 2)
+  notes                  String?
 
   orderItem OrderItem?
 
@@ -21716,27 +21740,27 @@ model OnlineOrderingSettings {
   venueId String @unique
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
-  enabled            Boolean   @default(false)
-  minOrderAmount     Decimal   @default(0) @db.Decimal(10, 2)
-  defaultPrepMinutes Int       @default(15)
-  acceptsPayAtPickup Boolean   @default(true)
+  enabled             Boolean   @default(false)
+  minOrderAmount      Decimal   @default(0) @db.Decimal(10, 2)
+  defaultPrepMinutes  Int       @default(15)
+  acceptsPayAtPickup  Boolean   @default(true)
   /// Fase 2: pagar con tarjeta al pedir (apartar y cobrar al aceptar). Prendido por default (founder, 2-nov): la tienda lo ofrece
   /// sólo con un Stripe cobrable, y cada negocio lo puede apagar.
-  acceptsCardOnline  Boolean   @default(true)
+  acceptsCardOnline   Boolean   @default(true)
   /// Pausa del gerente (ajustes, `online-orders:manage`).
-  manualPause        Boolean   @default(false)
+  manualPause         Boolean   @default(false)
   /// Pausa temporal desde el piso (15/30/60 min, `online-orders:pause`: gerente para arriba o con su PIN en el POS).
-  pausedUntil        DateTime?
+  pausedUntil         DateTime?
   /// Mismo formato `HorarioSemanal` de `delivery-channels/core/deliveryHours.service.ts`. NULL = sin restricción. Al crear la
   /// fila se precarga el horario de reservas si existe y es válido.
-  hours              Json?
+  hours               Json?
   /// Último sondeo con la app A LA VISTA (cabecera `x-online-orders-tray: 1`; D662: el POS en cualquier pantalla): «latido» de presencia.
-  lastInboxPollAt    DateTime?
+  lastInboxPollAt     DateTime?
   /// Tienda híbrida: ¿los pedidos nuevos esperan a que alguien los acepte? `true` (default) = como hasta hoy. `false` = pedir por
   /// QR / pagar en la barra sin aceptación (el pedido nace aceptado).
-  requiresAcceptance Boolean   @default(true)
+  requiresAcceptance  Boolean   @default(true)
   /// Último sondeo de la lista «por cobrar» (pedidos sin aceptación que esperan pago en la barra): latido de presencia.
-  lastToPayPollAt    DateTime?
+  lastToPayPollAt     DateTime?
   /// D661: pagar con tarjeta al pedir en «Nadie» (apartar al pagar, cobrar cuando una caja abre el pedido). Su PROPIO consentimiento,
   /// apagado de fábrica: pasar de «Mi equipo» a «Nadie» nunca hereda `acceptsCardOnline`.
   cardOnlineNadie     Boolean   @default(false)
@@ -21749,11 +21773,11 @@ model OnlineOrderingSettings {
   /// D662 parte 2 (v4): el corte propio de la pausa sola. Sólo cuentan los pedidos cuya hora límite fue DESPUÉS de
   /// max(esta hora, el interruptor `pausa-sola` de `InterruptorDePlataforma`). Sólo SUBE: la escriben «Reanudar» (`pauseOnlineOrdering(null)`, = ahora) y la
   /// propia lectura (`corteSeguro`, sin pausa). Encender, apagar, cambiar de modo y pausar 15/30/60 no la tocan. Null = sin corte propio.
-  autoPauseResumedAt DateTime?
+  autoPauseResumedAt  DateTime?
   /// D662 parte 2 v5 (Codex p2v5-r4 #5): la versión de estos ajustes. La sube la BASE en cada UPDATE (trigger
   /// `OnlineOrderingSettings_sube_version`, bajo el candado de la fila): crece en el orden en que se confirman las escrituras. El panel
   /// ordena sus lecturas por ella (`storeVersion`). Nadie la escribe a mano.
-  version            Int       @default(0)
+  version             Int       @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -21797,7 +21821,7 @@ model OnlineOrder {
   /// D662 parte 2 (v3): la PRIMERA vez que una persona contestó este pedido de «Mi equipo»: aceptar o rechazar (caja, panel, TPV,
   /// MCP; con tarjeta, el paso a `CAPTURING`) o anular su cuenta mientras seguía por aceptar. Se escribe en la misma transacción de esa
   /// acción y nunca se pisa (`null` en el where). La pausa sola la lee: con esta hora a más tardar en su hora límite «se atendió».
-  staffAnsweredAt  DateTime?
+  staffAnsweredAt DateTime?
 
   /// Tienda híbrida: `true` = este pedido pasó (o pasa) por aceptación manual. Las filas viejas quedan en `true`.
   requiresAcceptance Boolean @default(true)
@@ -22588,12 +22612,12 @@ model CrmWhatsappMessage {
   sentAt        DateTime
   raw           Json
   receivedAt    DateTime @default(now())
-
-  @@index([contactPhone, sentAt])
-  @@index([phoneNumberId, sentAt])
   // 🔴 ÍNDICE CUBRIENTE MANTENIDO A MANO — Prisma no tiene INCLUDE en `@@index`; vive sólo en la migración
   // `20261120200000_crm_whatsapp_message_chat_cover_idx_concurrently`: ("contactPhone", "sentAt") INCLUDE ("receivedAt").
   // Lo lee la lista de chats del CRM (`services/crm/whatsapp.service.ts`) como index-only scan. No lo quites.
+
+  @@index([contactPhone, sentAt])
+  @@index([phoneNumberId, sentAt])
 }
 
 enum OrigenDeLaHora {

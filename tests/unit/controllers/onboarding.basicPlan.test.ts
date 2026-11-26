@@ -3,7 +3,8 @@
  * `GET /progress`.
  *
  * 🔴 La modalidad la fija la PRIMERA creación y se lee de Stripe; ningún camino del alta la escribe ni la quita. Cada
- * respuesta de éxito describe la modalidad REAL (aquí `modalidadDeLaSuscripcion`, el lector acotado del SERVIDOR).
+ * respuesta de éxito describe la modalidad REAL (aquí `suscripcionConTopeCorto`, la lectura acotada del SERVIDOR, y la
+ * `modalidadDePrueba` real).
  */
 import { Request, Response } from 'express'
 
@@ -43,6 +44,8 @@ jest.mock('../../../src/services/onboarding/terminarAltaCobrada', () => ({
 }))
 jest.mock('../../../src/services/billing/precioDelPlan', () => ({
   resolverPrecioDelPlan: jest.fn().mockResolvedValue({ priceId: 'price_x', unitAmount: 0 }),
+  // Codex b2-code r5 A: el `catch` del alta larga pregunta `instanceof LecturaDeLaOfertaFallida`; aquí ninguna lectura falla.
+  LecturaDeLaOfertaFallida: class LecturaDeLaOfertaFallida extends Error {},
 }))
 jest.mock('../../../src/services/stripe.service', () => ({
   __esModule: true,
@@ -52,7 +55,8 @@ jest.mock('../../../src/services/stripe.service', () => ({
   retrievePlanSubscription: jest.fn(),
   entregarSuscripcionDePlan: jest.fn(),
   getOrCreateStripeCustomer: jest.fn().mockResolvedValue('cus_1'),
-  modalidadDeLaSuscripcion: jest.fn(),
+  // B2 Task 6 (fix round 1): la modalidad sale de UNA lectura acotada de la suscripción (`suscripcionConTopeCorto`).
+  suscripcionConTopeCorto: jest.fn(),
 }))
 const mockAutorizar = jest.fn()
 jest.mock('../../../src/services/access/autorizarObligacionNueva', () => ({
@@ -84,6 +88,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
     venue: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
     organization: { update: jest.fn(), findUnique: jest.fn() },
     launchCampaign: { findUnique: jest.fn() },
+    planOfferPointer: { findUnique: jest.fn().mockResolvedValue(null) },
   },
 }))
 
@@ -98,6 +103,14 @@ const VENUE = { id: 'venue_1', slug: 'bar-test', name: 'Bar Test', status: 'ACTI
 const FIN = '2026-12-17T18:00:00.000Z'
 const ENDS_FREE = { trialModality: 'ENDS_FREE' as const, trialEndsAt: FIN }
 const RENEWS = { trialModality: 'RENEWS_AS_PRO' as const, trialEndsAt: FIN }
+/** La suscripción en prueba que da esa modalidad (lo que lee `suscripcionConTopeCorto`). */
+const enPrueba = (m: typeof ENDS_FREE | typeof RENEWS) => ({
+  id: 'sub_x',
+  status: 'trialing',
+  cancel_at_period_end: m.trialModality === 'ENDS_FREE',
+  trial_end: Math.floor(Date.parse(m.trialEndsAt) / 1000),
+  metadata: {},
+})
 
 const req = (body: Record<string, unknown> = {}, params: Record<string, string> = {}) =>
   ({
@@ -154,7 +167,7 @@ beforeEach(() => {
     status: 'trialing',
     cancelAtPeriodEnd: true,
   })
-  ;(stripeService.modalidadDeLaSuscripcion as jest.Mock).mockResolvedValue(ENDS_FREE)
+  ;(stripeService.suscripcionConTopeCorto as jest.Mock).mockResolvedValue(enPrueba(ENDS_FREE))
 })
 
 describe('alta larga (completeV2) con Básico', () => {
@@ -168,7 +181,7 @@ describe('alta larga (completeV2) con Básico', () => {
     )
     expect(r.status).toHaveBeenCalledWith(201)
     expect(cuerpo(r)).toMatchObject({ success: true, ...ENDS_FREE })
-    expect(stripeService.modalidadDeLaSuscripcion).toHaveBeenCalledWith('sub_1')
+    expect(stripeService.suscripcionConTopeCorto).toHaveBeenCalledWith('sub_1')
   })
 
   it('🔴 el correo dice Básico porque la suscripción REAL termina sin cobrar', async () => {
@@ -186,7 +199,7 @@ describe('alta larga (completeV2) con Básico', () => {
       status: 'trialing',
       cancelAtPeriodEnd: false,
     })
-    ;(stripeService.modalidadDeLaSuscripcion as jest.Mock).mockResolvedValue(RENEWS)
+    ;(stripeService.suscripcionConTopeCorto as jest.Mock).mockResolvedValue(enPrueba(RENEWS))
     const r = res()
     await completeV2Onboarding(req(), r as unknown as Response, jest.fn())
     await vaciar()
@@ -226,18 +239,18 @@ describe('alta larga (completeV2) con Básico', () => {
       planActivationStatus: 'ACTIVE',
       planStripeSubscriptionId: 'sub_vivo',
     })
-    ;(stripeService.modalidadDeLaSuscripcion as jest.Mock).mockResolvedValue(RENEWS)
+    ;(stripeService.suscripcionConTopeCorto as jest.Mock).mockResolvedValue(enPrueba(RENEWS))
     const r = res()
     await completeV2Onboarding(req(), r as unknown as Response, jest.fn())
     expect(stripeService.createPlanSubscription).not.toHaveBeenCalled()
     expect(stripeService.entregarSuscripcionDePlan).toHaveBeenCalledWith(expect.objectContaining({ subscriptionId: 'sub_vivo' }))
     expect(cuerpo(r)).toMatchObject(RENEWS)
-    expect(stripeService.modalidadDeLaSuscripcion).toHaveBeenCalledWith('sub_vivo')
+    expect(stripeService.suscripcionConTopeCorto).toHaveBeenCalledWith('sub_vivo')
   })
 
   it('si Stripe no contesta la modalidad, el alta termina igual y el campo no viaja', async () => {
     alta({ basicPlan: true })
-    ;(stripeService.modalidadDeLaSuscripcion as jest.Mock).mockRejectedValue(new Error('Stripe caído'))
+    ;(stripeService.suscripcionConTopeCorto as jest.Mock).mockRejectedValue(new Error('Stripe caído'))
     const r = res()
     await completeV2Onboarding(req(), r as unknown as Response, jest.fn())
     expect(r.status).toHaveBeenCalledWith(201)
@@ -258,7 +271,7 @@ describe('alta larga (completeV2) con Básico', () => {
 
   it('regresión: Pro normal por la larga crea como hoy, sin cancelAtTrialEnd', async () => {
     alta({})
-    ;(stripeService.modalidadDeLaSuscripcion as jest.Mock).mockResolvedValue(RENEWS)
+    ;(stripeService.suscripcionConTopeCorto as jest.Mock).mockResolvedValue(enPrueba(RENEWS))
     const r = res()
     await completeV2Onboarding(req(), r as unknown as Response, jest.fn())
     const [entrada] = (stripeService.createPlanSubscription as jest.Mock).mock.calls[0]
@@ -339,12 +352,12 @@ describe('GET /progress (recarga y «Volver a comprobar»)', () => {
     await getOnboardingProgress(req(), r as unknown as Response, jest.fn())
     expect(r.status).toHaveBeenCalledWith(200)
     expect(cuerpo(r).progress.planActivation).toMatchObject({ status: 'ACTIVE', ...ENDS_FREE })
-    expect(stripeService.modalidadDeLaSuscripcion).toHaveBeenCalledWith('sub_1')
+    expect(stripeService.suscripcionConTopeCorto).toHaveBeenCalledWith('sub_1')
   })
 
   it('si Stripe falla, se omite el campo y nunca es 500', async () => {
     ;(onboardingProgressService.getOnboardingProgress as jest.Mock).mockResolvedValue(progreso)
-    ;(stripeService.modalidadDeLaSuscripcion as jest.Mock).mockRejectedValue(new Error('Stripe caído'))
+    ;(stripeService.suscripcionConTopeCorto as jest.Mock).mockRejectedValue(new Error('Stripe caído'))
     const r = res()
     const next = jest.fn()
     await getOnboardingProgress(req(), r as unknown as Response, next)
@@ -361,7 +374,7 @@ describe('GET /progress (recarga y «Volver a comprobar»)', () => {
     })
     const r = res()
     await getOnboardingProgress(req(), r as unknown as Response, jest.fn())
-    expect(stripeService.modalidadDeLaSuscripcion).not.toHaveBeenCalled()
+    expect(stripeService.suscripcionConTopeCorto).not.toHaveBeenCalled()
     expect(cuerpo(r).progress.planActivation).not.toHaveProperty('trialModality')
   })
 })

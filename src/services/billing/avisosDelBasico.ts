@@ -23,23 +23,64 @@ import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { BASIC_PLAN_DEFINITION_WHERE } from '@/services/launchCampaigns/basicPlanAccess'
 import { TIPO_AVISOS_SIN_COBRO } from '@/services/notifications/avisosSinCobro'
 import { descuentoDelPlan } from './descuentoDelPlan'
+import { versionQueCobra } from './planOffer'
+import type { getPublicBasicPlan } from '@/services/launchCampaigns/hybridCampaign.service'
 import { isLastDiscountedPeriod, type SuscripcionConDescuento } from './ultimoPeriodoConDescuento'
 
 /** Holgura entre `ended_at` y el fin que se esperaba (Stripe borra en el segundo del fin; un reloj de prueba, igual). */
 const HOLGURA_S = 3600
 
-/** El Básico publicado hoy, o `null` (sin publicar, o no se pudo leer: entonces no se ofrece, nunca se inventa un precio). */
-export async function basicoPublicado() {
+type BasicoPublico = Awaited<ReturnType<typeof getPublicBasicPlan>>
+
+/**
+ * Lo que los avisos saben del Básico, con UNA lectura de la oferta (B2, Task 9):
+ * - `retirado`: hay una versión del editor (`versionQueCobra()`, b2-r2 #10) y el Básico ya no está a la venta; no se lee el catálogo;
+ * - si no, `basico`: el publicado de hoy, o `null` (sin publicar, o no se pudo leer: nunca se inventa un precio).
+ * Si leer la oferta falla (b2-r9 #8: p. ej. una v1 que no pasa el esquema), lo de hoy con un `logger.warn`: leer la oferta nunca
+ * tumba un aviso. `getPublicBasicPlan` no cambia.
+ */
+async function leerElBasico(): Promise<{ retirado: boolean; basico: BasicoPublico | null }> {
+  try {
+    if ((await versionQueCobra()) !== null) return { retirado: true, basico: null }
+  } catch (error) {
+    logger.warn('avisosDelBasico: no se pudo leer la oferta de los planes; el aviso sigue como hoy', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
   try {
     // Import diferido: el catálogo híbrido no tiene por qué cargarse con el job ni con el webhook.
     const { getPublicBasicPlan } = await import('@/services/launchCampaigns/hybridCampaign.service')
-    return await getPublicBasicPlan()
+    return { retirado: false, basico: await getPublicBasicPlan() }
   } catch (error) {
     logger.warn('avisosDelBasico: no se pudo leer el Plan Básico publicado; el aviso va sin el Básico', {
       error: error instanceof Error ? error.message : String(error),
     })
-    return null
+    return { retirado: false, basico: null }
   }
+}
+
+/**
+ * El Básico publicado hoy, o `null` (sin publicar, o no se pudo leer: entonces no se ofrece, nunca se inventa un precio).
+ *
+ * Planes editables (B2, Task 9, b2-r2 #10): con una versión del editor el Básico ya no está a la venta, así que es `null` y los
+ * avisos («Tu prueba termina», «Tu Pro terminó», el fin de prueba de Stripe) salen con su texto de hoy sin él. Sin versión del
+ * editor, o si leer la oferta falla, lo de hoy (`leerElBasico`).
+ */
+export async function basicoPublicado(): Promise<BasicoPublico | null> {
+  return (await leerElBasico()).basico
+}
+
+/**
+ * B2 Task 9 (fix round 1): el Básico en la bienvenida de la prueba ENDS_FREE (`sendPlanConfirmationEmail` con `trialEndsFree`, de
+ * `activatePlan` y del alta larga).
+ * - Sin versión del editor, lo de hoy byte por byte: el precio sin IVA, o `undefined` si no se pudo leer (el texto sin precio).
+ * - Con versión del editor, sin precio y con `basicPlanNotOffered`: el correo dice que termina sin cobro y lleva a «Tu plan», sin
+ *   el Básico. Sólo con la versión: un catálogo que no contesta no es «el Básico ya no se vende».
+ */
+export async function basicoDeLaBienvenida(): Promise<{ basicPlanPriceWithoutTaxCents: number | undefined; basicPlanNotOffered?: true }> {
+  const { retirado, basico } = await leerElBasico()
+  if (retirado) return { basicPlanPriceWithoutTaxCents: undefined, basicPlanNotOffered: true }
+  return { basicPlanPriceWithoutTaxCents: basico ? precioSinIvaCents(basico) : undefined }
 }
 
 /** Precio del Básico sin IVA en centavos, SÓLO para escribirlo («$499 + IVA»). */

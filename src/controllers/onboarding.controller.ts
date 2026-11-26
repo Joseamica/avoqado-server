@@ -22,10 +22,11 @@ import {
   createPlanSubscription,
   entregarSuscripcionDePlan,
   getOrCreateStripeCustomer,
-  modalidadDeLaSuscripcion,
   retrievePlanSubscription,
+  suscripcionConTopeCorto,
 } from '../services/stripe.service'
-import { resolverPrecioDelPlan } from '../services/billing/precioDelPlan'
+import { modalidadDePrueba } from '../services/billing/modalidadDePrueba'
+import { LecturaDeLaOfertaFallida, resolverPrecioDelPlan } from '../services/billing/precioDelPlan'
 import { autorizarObligacionNueva } from '../services/access/autorizarObligacionNueva'
 import { resolvePlanNotificationTarget } from '../services/access/planNotification.service'
 import * as resendService from '../services/resend.service'
@@ -44,6 +45,16 @@ import { buildLaunchOfferView } from '../services/launchCampaigns/launchOfferMat
 import { toOfferRow } from '../services/launchCampaigns/launchCampaign.service'
 import { PLAN_ACTIVATION_STATUS } from '../services/launchCampaigns/launchCampaignEnums'
 import { standardPlanQuote } from '../services/access/planPricing.constants'
+import { MENSAJE_PLAN_NO_CONFIGURADO, versionQueCobra, type OfertaVigente } from '../services/billing/planOffer'
+import { ofertaCambio } from '../services/billing/opcionesDeCompra'
+import { basicoDeLaBienvenida } from '../services/billing/avisosDelBasico'
+import {
+  avisoDeLaPruebaSinTarjeta,
+  clienteDeStripeVivo,
+  tarjetaQueCobraria,
+  type TarjetaVisible,
+} from '../services/billing/tarjetaQueCobraria'
+import { cotizarOferta, type OfertaDelAlta } from '../services/billing/cotizacionDeLaOferta'
 import * as planActivationService from '../services/onboarding/planActivation.service'
 import * as launchCampaignService from '../services/launchCampaigns/launchCampaign.service'
 import { claimLaunchCampaign } from '../services/launchCampaigns/launchCampaignClaim.service'
@@ -53,6 +64,7 @@ import logger from '../config/logger'
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '../errors/AppError'
 import prisma from '../utils/prismaClient'
 import { billingPageUrl } from '@/utils/dashboardLinks'
+import { validateRequest } from '../middlewares/validation'
 
 /**
  * POST /api/v1/onboarding/signup
@@ -215,6 +227,63 @@ export async function startOnboarding(req: Request, res: Response, next: NextFun
   }
 }
 
+/** `planQuote` de hoy (sin versión del editor), idéntico al de siempre. */
+function planQuoteDeHoy(quote: ReturnType<typeof standardPlanQuote>) {
+  return {
+    currency: 'MXN' as const,
+    ivaIncluded: true as const,
+    trialDays: TRIAL_DAYS,
+    tiers: {
+      PRO: {
+        monthlyCents: quote.grossCents.PRO.monthly,
+        annualCents: quote.grossCents.PRO.annual,
+        monthlyNetCents: STANDARD_PLAN_NET_CENTS.PRO.monthly,
+        annualNetCents: STANDARD_PLAN_NET_CENTS.PRO.annual,
+        intro: {
+          monthlyCents: LEGACY_INTRO_OFFER.introMonthlyCents,
+          months: LEGACY_INTRO_OFFER.months,
+          interval: LEGACY_INTRO_OFFER.interval,
+          requiresPayNow: true as const,
+        },
+      },
+      PREMIUM: {
+        monthlyCents: quote.grossCents.PREMIUM.monthly,
+        annualCents: quote.grossCents.PREMIUM.annual,
+        monthlyNetCents: STANDARD_PLAN_NET_CENTS.PREMIUM.monthly,
+        annualNetCents: STANDARD_PLAN_NET_CENTS.PREMIUM.annual,
+        intro: null,
+      },
+    },
+  }
+}
+
+/** `planQuote` con la versión del editor: las llaves de siempre salen de la vigente y se suma `oferta`. */
+function planQuoteDeLaVersion(vigente: OfertaVigente, oferta: OfertaDelAlta) {
+  const d = vigente.definition
+  return {
+    currency: 'MXN' as const,
+    ivaIncluded: true as const,
+    trialDays: d.PRO.trialDays,
+    tiers: {
+      PRO: {
+        monthlyCents: d.PRO.monthly.grossCents,
+        annualCents: d.PRO.annual.grossCents,
+        monthlyNetCents: d.PRO.monthly.netCents,
+        annualNetCents: d.PRO.annual.netCents,
+        intro: null,
+      },
+      PREMIUM: {
+        monthlyCents: d.PREMIUM.monthly.grossCents,
+        annualCents: d.PREMIUM.annual.grossCents,
+        monthlyNetCents: d.PREMIUM.monthly.netCents,
+        annualNetCents: d.PREMIUM.annual.netCents,
+        intro: null,
+      },
+    },
+    oferta,
+  }
+}
+
 /**
  * GET /api/v1/onboarding/organizations/:organizationId/progress
  *
@@ -271,6 +340,18 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
     const campaign = progress.launchCampaignId ? await prisma.launchCampaign.findUnique({ where: { id: progress.launchCampaignId } }) : null
     const launchOffer = campaign ? buildLaunchOfferView(toOfferRow(campaign as never), new Date()) : null
     const quote = standardPlanQuote()
+    // Planes editables (B2): con una versión del editor, la cotización sale de ella y trae un comprobante por plan y periodicidad.
+    // 🔴 Leer la oferta nunca tumba una lectura de hoy: si falla (p. ej. una definición que no pasa el esquema), `planQuote` es el de hoy.
+    let planQuote: ReturnType<typeof planQuoteDeHoy> | ReturnType<typeof planQuoteDeLaVersion> = planQuoteDeHoy(quote)
+    try {
+      const versionDelEditor = await versionQueCobra()
+      if (versionDelEditor) planQuote = planQuoteDeLaVersion(versionDelEditor, cotizarOferta(versionDelEditor, organizationId))
+    } catch (error) {
+      logger.warn('onboarding progress: no se pudo leer la oferta de planes; planQuote sale como hoy', {
+        organizationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
 
     res.status(200).json({
       featureFlags: onboardingFeatureFlags(),
@@ -286,32 +367,7 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
           ...(await modalidadDelAlta(organizationId, progress)),
         },
         legal: legalConsentState(progress.termsVersion),
-        planQuote: {
-          currency: 'MXN' as const,
-          ivaIncluded: true as const,
-          trialDays: TRIAL_DAYS,
-          tiers: {
-            PRO: {
-              monthlyCents: quote.grossCents.PRO.monthly,
-              annualCents: quote.grossCents.PRO.annual,
-              monthlyNetCents: STANDARD_PLAN_NET_CENTS.PRO.monthly,
-              annualNetCents: STANDARD_PLAN_NET_CENTS.PRO.annual,
-              intro: {
-                monthlyCents: LEGACY_INTRO_OFFER.introMonthlyCents,
-                months: LEGACY_INTRO_OFFER.months,
-                interval: LEGACY_INTRO_OFFER.interval,
-                requiresPayNow: true as const,
-              },
-            },
-            PREMIUM: {
-              monthlyCents: quote.grossCents.PREMIUM.monthly,
-              annualCents: quote.grossCents.PREMIUM.annual,
-              monthlyNetCents: STANDARD_PLAN_NET_CENTS.PREMIUM.monthly,
-              annualNetCents: STANDARD_PLAN_NET_CENTS.PREMIUM.annual,
-              intro: null,
-            },
-          },
-        },
+        planQuote,
         completedSteps: progress.completedSteps,
         completionPercentage,
         startedAt: progress.startedAt,
@@ -813,6 +869,7 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
         planActivationStatus: progress.planActivationStatus,
         planActivationAttempt: progress.planActivationAttempt,
         planStripeSubscriptionId: progress.planStripeSubscriptionId,
+        planOfferVersionNumber: progress.planOfferVersionNumber,
       }))
     ) {
       throw new ConflictError(
@@ -1196,7 +1253,13 @@ async function marcarPlanCobrado(organizationId: string, subscriptionId: string)
 async function modalidadDelAlta(
   organizationId: string,
   progreso?: { planActivationStatus: string | null; planStripeSubscriptionId: string | null },
-): Promise<{ trialModality?: 'RENEWS_AS_PRO' | 'ENDS_FREE'; trialEndsAt?: string }> {
+): Promise<{
+  trialModality?: 'RENEWS_AS_PRO' | 'ENDS_FREE'
+  trialEndsAt?: string
+  sinTarjeta?: true
+  tarjetaQueCobrara?: TarjetaVisible | null
+  noHabraCobro?: boolean
+}> {
   try {
     const p =
       progreso ??
@@ -1205,7 +1268,14 @@ async function modalidadDelAlta(
         select: { planActivationStatus: true, planStripeSubscriptionId: true },
       }))
     if (p?.planActivationStatus !== PLAN_ACTIVATION_STATUS.ACTIVE || !p.planStripeSubscriptionId) return {}
-    return await modalidadDeLaSuscripcion(p.planStripeSubscriptionId)
+    // UNA lectura, acotada (5 s, sin reintentos): de ella salen la modalidad y, con una prueba sin tarjeta, su aviso.
+    const sub = await suscripcionConTopeCorto(p.planStripeSubscriptionId)
+    const modalidad = modalidadDePrueba(sub)
+    if (!modalidad.sinTarjeta) return modalidad
+    // B2 Task 6 (b2-r8 #9, b2-r9 #7): la prueba sin tarjeta dice, leído de Stripe ahora, qué tarjeta cobraría y si habrá cobro. Es el
+    // mismo ayudante que la respuesta de «Terminar» y de `activate-plan`, y nunca lanza: si la tarjeta no se puede leer (o tarda
+    // más que su tope), `tarjetaQueCobrara` no viaja («no se sabe») y lo ya leído se queda. Sin `sinTarjeta`, la forma de hoy.
+    return { ...modalidad, ...(await avisoDeLaPruebaSinTarjeta(sub)) }
   } catch (error) {
     logger.warn('onboarding: no se pudo leer la modalidad de la prueba; se omite', {
       organizationId,
@@ -1266,7 +1336,9 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       )
       throw new BadRequestError('Falta elegir tu plan. Completa el paso de plan para terminar.')
     }
-    if (planEnabled && planData && planData.tier !== 'FREE' && !planData.paymentMethodId) {
+    // Planes editables (B2): un alta ya cobrada SIN tarjeta (plan raíz `sinTarjeta`, alta ACTIVE) no trae método de pago y no lo necesita.
+    const altaActivaSinTarjeta = planData?.sinTarjeta === true && progress.planActivationStatus === PLAN_ACTIVATION_STATUS.ACTIVE
+    if (planEnabled && planData && planData.tier !== 'FREE' && !planData.paymentMethodId && !altaActivaSinTarjeta) {
       throw new BadRequestError('Falta el método de pago del plan. Completa el paso de plan para terminar.')
     }
     // 🔴 Plan Básico: sólo es la prueba de Pro mensual sin pagar hoy (el paso del plan ya lo valida al guardar).
@@ -1312,6 +1384,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         planActivationStatus: progress.planActivationStatus,
         planActivationAttempt: progress.planActivationAttempt,
         planStripeSubscriptionId: progress.planStripeSubscriptionId,
+        planOfferVersionNumber: progress.planOfferVersionNumber,
       }))
     ) {
       throw new ConflictError(
@@ -1343,6 +1416,59 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       if (cierre.motivo !== 'SIN_NEGOCIO') {
         throw new ConflictError('Tu registro se está terminando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
       }
+    }
+
+    // 🔴 Planes editables (B2): con una versión del editor el alta larga ya no cobra (el cobro es `activate-plan`, con su comprobante).
+    // Va ANTES del candado optimista: no marca `completedAt`, no crea ni activa el negocio y no llama a Stripe. Sólo se lee la oferta
+    // cuando este carril cobraría; si esa lectura falla, falla cerrada (nunca se cobra por el carril viejo con la oferta ilegible).
+    // 🔴 Codex b2-code r3 R3-3 (la regla única): salvo si hay un cobro anterior sin cerrar. Recuperar lo ya cobrado nunca se frena: con
+    // la oferta ilegible y ese cobro, el camino de hoy (B1), que lo ve en la regla común y lo entrega. El 503 «No se cobró nada» sólo
+    // sin cobro anterior.
+    const esteCarrilCobraria =
+      planEnabled && !planYaCobrado && !progress.launchCampaignId && !!planData && planData.tier !== 'FREE' && !!planData.paymentMethodId
+    let versionDelEditor: OfertaVigente | null = null
+    if (esteCarrilCobraria) {
+      try {
+        versionDelEditor = await versionQueCobra()
+      } catch (error) {
+        const cobroSinCerrar =
+          progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS &&
+          (await planActivationService.hayCobroDelAltaSinCerrar({
+            organizationId,
+            planActivationStatus: progress.planActivationStatus,
+            planActivationAttempt: progress.planActivationAttempt,
+            planStripeSubscriptionId: progress.planStripeSubscriptionId,
+            planOfferVersionNumber: progress.planOfferVersionNumber,
+          }))
+        if (!cobroSinCerrar) throw error
+        logger.warn('[ONBOARDING] V2 complete: no se pudo leer la oferta y hay un cobro anterior sin cerrar; se recupera como hoy', {
+          organizationId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    if (versionDelEditor) {
+      // Un intento anterior pudo cobrar (IN_PROGRESS con el lease vencido): decir «no se cobró nada» sería falso. Se responde lo mismo
+      // que el resto de los carriles ante un cobro sin cerrar.
+      if (
+        progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS &&
+        (await planActivationService.hayCobroDelAltaSinCerrar({
+          organizationId,
+          planActivationStatus: progress.planActivationStatus,
+          planActivationAttempt: progress.planActivationAttempt,
+          planStripeSubscriptionId: progress.planStripeSubscriptionId,
+          planOfferVersionNumber: progress.planOfferVersionNumber,
+        }))
+      ) {
+        throw new ConflictError(
+          'Tienes un pago de plan sin confirmar. Confírmalo antes de terminar tu alta: no se te cobrará dos veces.',
+          'PLAN_CHARGE_PENDING',
+        )
+      }
+      throw new ConflictError(
+        'Esta forma de contratar ya no está disponible. Recarga la página para elegir tu plan. No se te cobró nada.',
+        'PLAN_FLOW_RETIRED',
+      )
     }
 
     // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue
@@ -1513,7 +1639,9 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           customerId,
           { tipo: 'PLAN', tier: paidTier },
           async () => {
-            const { priceId } = await resolverPrecioDelPlan(tierCode, planData.interval)
+            // Codex b2-code #1 y r5 A: una versión publicada en medio → 409; la relectura fallida → 503 marcado (ver el `catch`).
+            const opcionesDelPrecio = { soloSinVersionDelEditor: true, marcarLaLecturaFallida: true }
+            const { priceId } = await resolverPrecioDelPlan(tierCode, planData.interval, opcionesDelPrecio)
             return createPlanSubscription({
               // «Pudo cobrarse» empieza justo antes del POST, no al entrar aquí (Codex C15).
               antesDeCobrar: () => {
@@ -1608,7 +1736,8 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
                   nextChargeAmountCents: introPromo ? LEGACY_INTRO_OFFER.introMonthlyCents : grossCents,
                   billingPortalUrl: billingPageUrl(result.venue.slug),
                   ...(terminaSinCobro
-                    ? { trialEndsFree: true, basicPlanPriceWithoutTaxCents: await planActivationService.precioDelBasicoSinIvaCents() }
+                    ? // B2 Task 9: el Básico pasa por `basicoDeLaBienvenida` (con una versión del editor ya no se ofrece).
+                      { trialEndsFree: true, ...(await basicoDeLaBienvenida()) }
                     : {}),
                 })
             } else {
@@ -1622,6 +1751,25 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         // R0 ronda 5 (Codex): el negocio se borró mientras se creaba su cliente de Stripe. Eso NO es un
         // tropiezo de Stripe: no hay negocio que dar por terminado. Se suelta la marca y se propaga.
         if (planErr instanceof AppError && planErr.code === 'VENUE_NOT_FOUND') {
+          await prisma.onboardingProgress.updateMany({
+            where: { organizationId, completedAt: { not: null } },
+            data: { completedAt: null },
+          })
+          throw planErr
+        }
+        // Codex b2-code #1: la relectura del precio vio una versión del editor publicada en medio. Nada se cobró en esta petición ni
+        // quedó un cobro anterior por entregar: se suelta la marca y sale el 409 (sin terminar el alta ni renovar la sesión). La
+        // siguiente petición entra por la compuerta, que ya ve la versión. Con un cobro anterior posible, el camino de hoy (abajo).
+        // 🔴 Codex b2-code r4 #10 / r5 A: igual si esa relectura no pudo leer la oferta, por la razón que sea (marcada en su origen:
+        // `LecturaDeLaOfertaFallida`, la misma clase que T3-3): 503 que se puede reintentar, nunca un 201 en Gratis que suelta en
+        // silencio el plan elegido. El 503 de una llave sin precio en Stripe (B0) y los rechazos de la regla común siguen como hoy
+        // (abajo).
+        if (
+          !intentoCobrar &&
+          !cobroSinEntregar &&
+          planErr instanceof AppError &&
+          (planErr.code === 'OFFER_CHANGED' || planErr instanceof LecturaDeLaOfertaFallida)
+        ) {
           await prisma.onboardingProgress.updateMany({
             where: { organizationId, completedAt: { not: null } },
             data: { completedAt: null },
@@ -1758,6 +1906,56 @@ export async function planSetupIntent(req: Request, res: Response, next: NextFun
 // Lanzamiento con campañas ligeras (spec 2026-09-17)
 // =============================================
 
+/** La oferta de una campaña de lanzamiento. */
+const ofertaDeCampana = z.object({
+  kind: z.literal('LAUNCH'),
+  code: z.string(),
+  offerVersion: z.number().int().min(1),
+  expectedFirstChargeCents: z.number().int().min(0),
+})
+/** La oferta estándar (con tarjeta). */
+const ofertaEstandar = z.object({
+  kind: z.literal('STANDARD'),
+  expectedFirstChargeCents: z.number().int().min(0),
+  // Planes editables (B2): el comprobante de la cotización. 🔴 `unknown` a propósito: con cualquier otro tipo, un cuerpo
+  // de hoy con `null`, un número o un texto largo daría 400. Sólo lo revisa el servicio, y sólo con una versión del editor.
+  quoteToken: z.unknown().optional(),
+})
+/**
+ * B2 Task 6 (§16, §18): la prueba SIN tarjeta. 🔴 Sólo la reconoce `ActivatePlanSchemaConVersion`, y sólo con una versión del
+ * editor (`validarActivatePlan`): sin ella, este cuerpo recibe el 400 de hoy.
+ */
+const ofertaSinTarjeta = z.object({
+  kind: z.literal('STANDARD_SIN_TARJETA'),
+  expectedFirstChargeCents: z.literal(0),
+  quoteToken: z.unknown(),
+})
+const PAYMENT_METHOD_ID = z.string().regex(/^pm_[A-Za-z0-9]+$/)
+
+/** El cuerpo de `activate-plan`, con el método de pago y las ofertas que acepte cada esquema (mismas llaves, mismo orden). */
+const cuerpoDeActivatePlan = <M extends z.ZodTypeAny, O extends z.ZodTypeAny>(paymentMethodId: M, offer: O) =>
+  z.object({
+    tier: z.enum(['PRO', 'PREMIUM']),
+    interval: z.enum(['monthly', 'annual']),
+    payNow: z.boolean(),
+    paymentMethodId,
+    offer,
+    language: z.enum(['es', 'en']).optional(),
+    // Plan Básico: la prueba de Pro que termina sola sin cobrar. Sólo con PRO mensual sin pagar hoy.
+    basicPlan: z.boolean({ invalid_type_error: 'basicPlan debe ser verdadero o falso' }).optional(),
+  })
+
+const refinarPlanBasico = (body: { basicPlan?: unknown; tier?: unknown; interval?: unknown; payNow?: unknown }, ctx: z.RefinementCtx) => {
+  if (!onboardingProgressService.basicPlanValido(body)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['basicPlan'],
+      message: onboardingProgressService.MENSAJE_BASIC_PLAN_INVALIDO,
+      params: { code: 'BASIC_PLAN_INVALID' },
+    })
+  }
+}
+
 /**
  * Esquema de `POST …/v2/activate-plan` (§ 3.6).
  *
@@ -1766,36 +1964,70 @@ export async function planSetupIntent(req: Request, res: Response, next: NextFun
  */
 export const ActivatePlanSchema = z.object({
   params: z.object({ organizationId: z.string().cuid() }),
-  body: z
-    .object({
-      tier: z.enum(['PRO', 'PREMIUM']),
-      interval: z.enum(['monthly', 'annual']),
-      payNow: z.boolean(),
-      paymentMethodId: z.string().regex(/^pm_[A-Za-z0-9]+$/),
-      offer: z.discriminatedUnion('kind', [
-        z.object({
-          kind: z.literal('LAUNCH'),
-          code: z.string(),
-          offerVersion: z.number().int().min(1),
-          expectedFirstChargeCents: z.number().int().min(0),
-        }),
-        z.object({ kind: z.literal('STANDARD'), expectedFirstChargeCents: z.number().int().min(0) }),
-      ]),
-      language: z.enum(['es', 'en']).optional(),
-      // Plan Básico: la prueba de Pro que termina sola sin cobrar. Sólo con PRO mensual sin pagar hoy.
-      basicPlan: z.boolean({ invalid_type_error: 'basicPlan debe ser verdadero o falso' }).optional(),
-    })
-    .superRefine((body, ctx) => {
-      if (!onboardingProgressService.basicPlanValido(body)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['basicPlan'],
-          message: onboardingProgressService.MENSAJE_BASIC_PLAN_INVALIDO,
-          params: { code: 'BASIC_PLAN_INVALID' },
-        })
-      }
-    }),
+  body: cuerpoDeActivatePlan(PAYMENT_METHOD_ID, z.discriminatedUnion('kind', [ofertaDeCampana, ofertaEstandar])).superRefine(
+    refinarPlanBasico,
+  ),
 })
+
+/**
+ * B2 Task 6: el esquema de hoy más la prueba sin tarjeta. Con ella, `paymentMethodId` debe faltar y `payNow` ser `false`;
+ * `STANDARD` y `LAUNCH` siguen con `paymentMethodId` obligatorio. Sólo se usa con una versión del editor (`validarActivatePlan`).
+ */
+export const ActivatePlanSchemaConVersion = z.object({
+  params: z.object({ organizationId: z.string().cuid() }),
+  body: cuerpoDeActivatePlan(
+    PAYMENT_METHOD_ID.optional(),
+    z.discriminatedUnion('kind', [ofertaDeCampana, ofertaEstandar, ofertaSinTarjeta]),
+  ).superRefine((body, ctx) => {
+    refinarPlanBasico(body, ctx)
+    if (body.offer.kind === 'STANDARD_SIN_TARJETA') {
+      if (body.paymentMethodId !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['paymentMethodId'], message: 'La prueba sin tarjeta no lleva método de pago' })
+      }
+      if (body.payNow !== false) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['payNow'], message: 'La prueba sin tarjeta no se paga hoy' })
+      }
+    } else if (body.paymentMethodId === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['paymentMethodId'], message: 'Falta el método de pago' })
+    }
+  }),
+})
+
+const validarConElEsquemaDeHoy = validateRequest(ActivatePlanSchema)
+const validarConVersion = validateRequest(ActivatePlanSchemaConVersion)
+
+/**
+ * La validación de `POST …/v2/activate-plan` (B2 Task 6; b2-r5 ruling 13, b2-r6 y b2-r7 regresión).
+ *
+ * 🔴 Primero el esquema de HOY: si pasa, sigue (un cuerpo válido de hoy ni consulta la versión). Si falla y el cuerpo no es
+ * `STANDARD_SIN_TARJETA`, responde ese 400. Sólo si falla y el cuerpo ES `STANDARD_SIN_TARJETA` se consulta `versionQueCobra()`:
+ * con versión del editor, valida con `ActivatePlanSchemaConVersion`; sin ella **o si la consulta falla**, el MISMO 400 que ya
+ * calculó el esquema de hoy. Así, pase lo que pase, sin versión del editor ese cuerpo recibe el 400 y el cuerpo de error de hoy,
+ * nunca un 5xx.
+ */
+export async function validarActivatePlan(req: Request, res: Response, next: NextFunction): Promise<void> {
+  let errorDeHoy: unknown = undefined
+  let paso = false
+  await validarConElEsquemaDeHoy(req, res, (error?: unknown) => {
+    if (error) errorDeHoy = error
+    else paso = true
+  })
+  if (paso) return next()
+  const oferta = (req.body as { offer?: { kind?: unknown } } | null | undefined)?.offer
+  if (!oferta || typeof oferta !== 'object' || oferta.kind !== 'STANDARD_SIN_TARJETA') return next(errorDeHoy)
+  let version: OfertaVigente | null
+  try {
+    version = await versionQueCobra()
+  } catch (error) {
+    logger.warn('activate-plan: no se pudo leer la oferta para validar la prueba sin tarjeta — se responde el 400 de hoy', {
+      organizationId: req.params.organizationId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return next(errorDeHoy)
+  }
+  if (!version) return next(errorDeHoy)
+  return validarConVersion(req, res, next)
+}
 
 /** POST /api/v1/onboarding/organizations/:organizationId/v2/activate-plan */
 export async function activatePlanController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -1803,6 +2035,9 @@ export async function activatePlanController(req: Request, res: Response, next: 
     const authContext = (req as unknown as { authContext?: { userId?: string } }).authContext
     if (!authContext?.userId) throw new BadRequestError('User authentication required')
 
+    // 🔴 Planes editables (B2, b2-r4): el comprobante viaja APARTE de `offer`. El cierre guarda `offer` en `v2SetupData`, que
+    // `GET progress` devuelve: con el comprobante adentro, ningún camino (con o sin versión) debe poder guardarlo ni devolverlo.
+    const { quoteToken, ...offer } = req.body.offer as planActivationService.ActivatePlanOffer & { quoteToken?: unknown }
     const data = await planActivationService.activatePlan({
       organizationId: req.params.organizationId,
       staffId: authContext.userId,
@@ -1810,10 +2045,89 @@ export async function activatePlanController(req: Request, res: Response, next: 
       interval: req.body.interval,
       payNow: req.body.payNow,
       paymentMethodId: req.body.paymentMethodId,
-      offer: req.body.offer,
+      offer: offer as planActivationService.ActivatePlanOffer,
+      quoteToken,
       language: req.body.language,
       ...(req.body.basicPlan === true ? { basicPlan: true } : {}),
     })
+    res.status(200).json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** Esquema de `GET …/v2/tarjeta-de-la-prueba` (B2 Task 6): sin cuerpo, sólo la organización. */
+export const TarjetaDeLaPruebaSchema = z.object({
+  params: z.object({ organizationId: z.string().cuid() }),
+})
+
+/**
+ * GET /api/v1/onboarding/organizations/:organizationId/v2/tarjeta-de-la-prueba
+ *
+ * 🔴 B2 Task 6 (§18, b2-r8): la ventana del alta, al abrirse, pregunta qué tarjeta cobraría Stripe al terminar la prueba sin
+ * tarjeta: `tarjetaQueCobraria({ customer })` en ESE momento, con el cliente del negocio (`clienteDeStripeVivo`: sin id, `null` sin
+ * llamar a Stripe; borrado, `null`: el alta creará otro). Si Stripe no deja leerlo, 503 `TARJETA_NO_LEIDA` (nunca `null`). Sólo
+ * informa: no escribe nada y nada lo compara al cobrar. Sin versión del editor no hay prueba sin tarjeta: 409 `OFFER_CHANGED`
+ * (`VERSION`, versión 1), sin llamar a Stripe.
+ */
+export async function tarjetaDeLaPruebaController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { organizationId } = req.params
+    // Si leer la oferta falla, el 503 de «plan no configurado» de las compras (nunca un 500): sin oferta no hay prueba que avisar.
+    let version: OfertaVigente | null
+    try {
+      version = await versionQueCobra()
+    } catch (error) {
+      logger.warn('tarjeta-de-la-prueba: no se pudo leer la oferta de planes', {
+        organizationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw new AppError(MENSAJE_PLAN_NO_CONFIGURADO, 503, true, 'PLAN_NOT_CONFIGURED')
+    }
+    if (!version) throw ofertaCambio('VERSION', 1)
+    // El negocio del alta: el mismo que elige `ensureVenueForOnboarding` (el primero de la organización), sin crearlo.
+    const negocio = await prisma.venue.findFirst({
+      where: { organizationId },
+      select: { stripeCustomerId: true },
+      orderBy: { createdAt: 'asc' },
+    })
+    // Sólo informa (§18). `null` («sin tarjeta») sólo sin cliente, con el cliente borrado o sin tarjeta. 🔴 Codex b2-code #5: si Stripe
+    // no deja leer el cliente o su tarjeta (error o tiempo agotado), 503 TARJETA_NO_LEIDA: «no pude ver» nunca es «sin tarjeta» (el
+    // cliente puede tener una guardada que Stripe cobrará). El DASHBOARD lo trata como «no se sabe» y deja el botón apagado.
+    let tarjeta: Awaited<ReturnType<typeof tarjetaQueCobraria>>
+    try {
+      const cliente = await clienteDeStripeVivo(negocio?.stripeCustomerId ?? null)
+      tarjeta = cliente ? await tarjetaQueCobraria({ customer: cliente }) : null
+    } catch (error) {
+      logger.warn('tarjeta-de-la-prueba: no se pudo leer en Stripe qué tarjeta cobraría; se responde 503', {
+        organizationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw new AppError('No pudimos revisar tu cuenta de Stripe. Intenta en unos minutos.', 503, true, 'TARJETA_NO_LEIDA')
+    }
+    res
+      .status(200)
+      .json({ success: true, data: { tarjeta: tarjeta ? { id: tarjeta.id, brand: tarjeta.brand, last4: tarjeta.last4 } : null } })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** Esquema de `POST …/v2/retomar-pago` (B2 Task 5): sin cuerpo, sólo la organización. */
+export const RetomarPagoSchema = z.object({
+  params: z.object({ organizationId: z.string().cuid() }),
+})
+
+/**
+ * POST /api/v1/onboarding/organizations/:organizationId/v2/retomar-pago
+ *
+ * 🔴 B2 Task 5 (b2-r9 #2): «Confirmar mi pago» retoma el reto del banco del intento a medio pago aunque la oferta vigente ya no
+ * tenga opciones. Sólo lee la suscripción del intento: nunca cobra, nunca anula ni crea nada en Stripe. El secreto del reto
+ * sólo va a la dueña autenticada (como el 409 `PLAN_PAYMENT_REQUIRES_ACTION`), nunca a un log.
+ */
+export async function retomarPagoController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const data = await planActivationService.retomarPagoDelAlta(req.params.organizationId)
     res.status(200).json({ success: true, data })
   } catch (error) {
     next(error)

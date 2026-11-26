@@ -24,6 +24,8 @@
 import { NextFunction, Request, Response } from 'express'
 import * as venueDashboardService from '../../services/dashboard/venue.dashboard.service'
 import * as planStateService from '../../services/dashboard/planState.service'
+import { cotizacionDeTuPlanSinRomper, versionDeTuPlanSinRomper } from '../../services/billing/cotizacionDeLaOferta'
+import { LECTURA_ACOTADA } from '../../services/billing/tarjetaQueCobraria'
 import { getVenuePlanInfo } from '../../services/access/basePlan.service'
 import * as seatReconciliationService from '../../services/dashboard/seatReconciliation.service'
 import type { CancellationInput } from '@/services/shared/cancellationReason'
@@ -253,11 +255,22 @@ export async function convertDemoVenue(
       message: 'Demo venue converted to real successfully',
     })
   } catch (error) {
-    logger.error('Error converting demo venue', {
-      error: error instanceof Error ? error.message : 'Unknown error',
-      orgId: req.authContext?.orgId,
-      venueId: req.params?.venueId,
-    })
+    // Planes editables (B2, Task 8): un rechazo a propósito (otra pestaña ya lo convirtió, la oferta cambió, el plan no es válido) es
+    // un warn, no un error en Better Stack (como el checkout, D7).
+    if (error instanceof AppError && error.statusCode < 500)
+      logger.warn('Demo venue conversion refused', {
+        message: error.message,
+        code: error.code,
+        statusCode: error.statusCode,
+        orgId: req.authContext?.orgId,
+        venueId: req.params?.venueId,
+      })
+    else
+      logger.error('Error converting demo venue', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        orgId: req.authContext?.orgId,
+        venueId: req.params?.venueId,
+      })
     next(error)
   }
 }
@@ -411,7 +424,7 @@ export async function updateVenuePaymentMethod(
  * Generates a URL to Stripe's hosted billing portal for subscription management
  */
 export async function createBillingPortalSession(
-  req: Request<{ venueId: string }, any, { returnUrl: string }>,
+  req: Request<{ venueId: string }, any, { returnUrl: string; flujo?: unknown }>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
@@ -426,7 +439,11 @@ export async function createBillingPortalSession(
 
     // Call service to create billing portal session
     const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
-    const portalUrl = await venueDashboardService.createVenueBillingPortalSession(orgId, venueId, returnUrl, { skipOrgCheck })
+    // Planes editables (B2, Task 7): `flujo` sin revisar; sólo con versión del editor y `PONER_TARJETA` se pide el flujo de la tarjeta.
+    const portalUrl = await venueDashboardService.createVenueBillingPortalSession(orgId, venueId, returnUrl, {
+      skipOrgCheck,
+      flujo: req.body.flujo,
+    })
 
     res.status(200).json({
       success: true,
@@ -512,8 +529,25 @@ export async function detachVenuePaymentMethod(
 export async function getVenuePlan(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId } = req.params
-    const planState = await planStateService.getPlanState(venueId)
-    res.status(200).json({ success: true, data: planState })
+    // Planes editables (B2, Task 7): con versión del editor, «Tu plan» trae `cotizacion` (de la MISMA lectura de Stripe). Sin ella,
+    // `data` es exactamente `getPlanState`, con las llamadas a Stripe de hoy (`retrievePlanSubscription(id)`); si leer la oferta
+    // falla, el mismo `data`, sin `cotizacion` (la lectura de Stripe, abajo).
+    // La versión se lee UNA vez, primero: sólo con ella se pide la tarjeta de la prueba sin tarjeta (`conTarjeta`) y se cotiza.
+    // 🔴 Codex b2-code #7: con ella, la suscripción también se lee con el tope corto (5 s, sin reintentos), como las demás lecturas
+    // informativas de la pantalla; si no contesta, «Tu plan» se degrada como hoy. Con el puntero leído en una versión del editor de
+    // definición ilegible (r2 #7), el mismo tope, sin la tarjeta ni la cotización. Sin versión del editor, con la v1 dañada o con el
+    // puntero ilegible (r3 R3-2), la llamada de hoy.
+    const { vigente, delEditor } = await versionDeTuPlanSinRomper(venueId)
+    const { planState, suscripcion } = await planStateService.getPlanStateYSuscripcion(
+      venueId,
+      vigente
+        ? { conTarjeta: true, stripeTimeoutMs: LECTURA_ACOTADA.timeout }
+        : delEditor
+          ? { stripeTimeoutMs: LECTURA_ACOTADA.timeout }
+          : {},
+    )
+    const cotizacion = vigente ? await cotizacionDeTuPlanSinRomper(vigente, venueId, planState, suscripcion) : null
+    res.status(200).json({ success: true, data: cotizacion ? { ...planState, cotizacion } : planState })
   } catch (error) {
     logger.error('Error getting venue plan state', {
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -692,7 +726,17 @@ export async function getVenueSeatStatus(req: Request<{ venueId: string }>, res:
  * POST /api/v1/dashboard/venues/:venueId/plan/checkout
  */
 export async function createVenuePlanCheckoutSession(
-  req: Request<{ venueId: string }, any, { interval?: 'monthly' | 'annual'; tier?: 'PRO' | 'PREMIUM'; primerCobroAnunciado?: string }>,
+  req: Request<
+    { venueId: string },
+    any,
+    {
+      interval?: 'monthly' | 'annual'
+      tier?: 'PRO' | 'PREMIUM'
+      primerCobroAnunciado?: string
+      quoteToken?: unknown
+      acceptanceId?: unknown
+    }
+  >,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
@@ -710,6 +754,8 @@ export async function createVenuePlanCheckoutSession(
     const checkoutUrl = await venueDashboardService.createVenuePlanCheckoutSession(orgId, venueId, interval, tier, {
       skipOrgCheck,
       primerCobroAnunciado: req.body.primerCobroAnunciado,
+      quoteToken: req.body.quoteToken,
+      acceptanceId: req.body.acceptanceId,
     })
 
     res.status(200).json({

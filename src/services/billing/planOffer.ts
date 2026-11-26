@@ -27,6 +27,14 @@ import { STANDARD_PLAN_GROSS_CENTS, STANDARD_PLAN_NET_CENTS, TRIAL_DAYS } from '
 
 export type PlanPagado = 'PRO' | 'PREMIUM'
 export type Periodicidad = 'monthly' | 'annual'
+/** El `Feature.code` del plan pagado (el de las filas de `VenueFeature` y de `PlanTierCode`). */
+export function codigoDelPlan(tier: PlanPagado): 'PLAN_PRO' | 'PLAN_PREMIUM' {
+  return tier === 'PRO' ? 'PLAN_PRO' : 'PLAN_PREMIUM'
+}
+
+export const MENSAJE_PLAN_NO_CONFIGURADO =
+  'No pudimos activar tu plan por un problema nuestro de configuración. No se te cobró nada. Escríbenos y lo resolvemos.'
+
 export type Ranura = `${PlanPagado}:${Periodicidad}`
 
 type Db = Prisma.TransactionClient | PrismaClient
@@ -296,6 +304,9 @@ function leerDefinicion(versionId: string, definition: unknown): PlanOfferDefini
   return r.data
 }
 
+/** El número de una versión publicada: entero, 1 o más (una en preparación no tiene). */
+const esNumeroDeVersion = (number: number | null): number is number => Number.isInteger(number) && (number as number) >= 1
+
 /**
  * La oferta que rige AHORA. Sin puntero o sin vigente → el respaldo con número 1. Una vigente que no pasa el esquema (o que
  * no está publicada con su número) → 503 `PLAN_NOT_CONFIGURED`, nunca el respaldo. Sin caché.
@@ -307,15 +318,32 @@ export async function ofertaVigente(db: Db = prisma): Promise<OfertaVigente> {
   })
   const version = puntero?.currentVersion
   if (!version) return { number: 1, versionId: null, definition: ofertaDeRespaldo(), respaldo: true }
-  if (version.status !== 'PUBLISHED' || !Number.isInteger(version.number) || (version.number as number) < 1) {
+  if (version.status !== 'PUBLISHED' || !esNumeroDeVersion(version.number)) {
     throw ofertaRota(version.id, `la vigente está ${version.status} con número ${version.number ?? 'null'}`)
   }
   return {
-    number: version.number as number,
+    number: version.number,
     versionId: version.id,
     definition: leerDefinicion(version.id, version.definition),
     respaldo: false,
   }
+}
+
+/**
+ * El número de la versión que rige, leído SÓLO del puntero: sin leer ni validar su definición, sin Stripe. Sin vigente, 1 (el
+ * respaldo, como `ofertaVigente`). `null`: la vigente no tiene un número válido (no se sabe cuál rige).
+ *
+ * Para quien tiene que decidir qué hacer cuando `ofertaVigente`/`versionQueCobra` lanzan (B2 Task 8): con la v1, la foto de hoy,
+ * un camino que hoy no lee la oferta sigue igual; con una versión del editor (2 o más) falla cerrado.
+ */
+export async function numeroDeLaVigente(db: Db = prisma): Promise<number | null> {
+  const puntero = await db.planOfferPointer.findUnique({
+    where: { id: PUNTERO_ID },
+    select: { currentVersion: { select: { number: true } } },
+  })
+  const version = puntero?.currentVersion
+  if (!version) return 1
+  return esNumeroDeVersion(version.number) ? version.number : null
 }
 
 /** Una versión por su id (también una en preparación, que no tiene número). */
@@ -329,6 +357,19 @@ export async function ofertaPorId(
   })
   if (!version) throw new NotFoundError('No encontramos esa versión de los planes.', 'PLAN_OFFER_NOT_FOUND', { versionId })
   return { number: version.number, status: version.status, definition: leerDefinicion(version.id, version.definition) }
+}
+
+/**
+ * La versión `PUBLISHED` o `SUPERSEDED` con ese número (la que un comprobante o una compra ya aceptada cita). Otra cosa
+ * (inexistente, en preparación o descartada) → 404 `PLAN_OFFER_NOT_FOUND`; una definición rota → el 503 de `leerDefinicion`.
+ */
+export async function ofertaPorNumero(number: number, db: Db = prisma): Promise<OfertaVigente> {
+  const version = await db.planOfferVersion.findFirst({
+    where: { number, status: { in: ['PUBLISHED', 'SUPERSEDED'] } },
+    select: { id: true, number: true, status: true, definition: true },
+  })
+  if (!version) throw new NotFoundError('No encontramos esa versión de los planes.', 'PLAN_OFFER_NOT_FOUND', { number })
+  return { number, versionId: version.id, definition: leerDefinicion(version.id, version.definition), respaldo: false }
 }
 
 /** La ranura de precio de un plan y una periodicidad. */

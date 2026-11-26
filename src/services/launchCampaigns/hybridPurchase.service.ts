@@ -20,6 +20,8 @@ import { audienceIncludes, hybridOfferBlocker, type HybridOfferBlocker } from '.
 import { lockProducts, productKeyOf, promotionWindow } from './hybridProduct'
 import { assertKeepSelection } from '@/services/dashboard/seatReconciliation.service'
 import { BASIC_PLAN_DEFINITION_WHERE, isBasicPlanDefinition } from './basicPlanAccess'
+import { exigirCompraNuevaPermitida } from '@/services/billing/cotizacionDeLaOferta'
+import { numeroDeLaVigente } from '@/services/billing/planOffer'
 
 const errorMap: z.ZodErrorMap = () => ({ message: 'Valor requerido o formato no válido' })
 const codes = z
@@ -313,6 +315,23 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
   })
   if (redeemed.length)
     throw new ConflictError('Tu organización ya utilizó esta campaña o tiene una aceptación pendiente.', 'HYBRID_OFFER_REDEEMED')
+  // Planes editables (B2, Task 10, §11 F, §11.2): con una versión del editor, un plan fuera de venta (sin una prueba vigente de ese
+  // plan) y el Básico no se compran por aquí: 409 PLAN_NOT_ON_SALE, antes de leer Stripe. Sin ella no se lee más que el puntero, y
+  // sólo para una línea de plan o el Básico.
+  let lineaDePlan = false
+  for (const publication of publications) {
+    const definition = hybridOfferDefinition.parse(publication.definition)
+    if (definition.kind === 'PLAN') lineaDePlan = true
+    await exigirCompraNuevaPermitida(prisma, {
+      venueId,
+      tier: definition.kind === 'PLAN' ? definition.planTier : null,
+      basico: isBasicPlanDefinition(publication.definition),
+    })
+  }
+  // La versión que cita una línea de plan (b2-r1 #11): entra al hash, y la aceptación la compara con la vigente bajo el candado. Sólo
+  // con una versión del editor (2 o más); sin ella, o sin línea de plan, el quote conserva la forma de hoy y su hash.
+  const numeroDeLaVersion = lineaDePlan ? await numeroDeLaVigente(prisma) : null
+  const offerVersion = numeroDeLaVersion !== null && numeroDeLaVersion >= 2 ? numeroDeLaVersion : null
   const inventory = await inventarioDeObligaciones(venueId, { limite: Date.now() + 45000 })
   if (inventory.conCambiosProgramados.length)
     throw new ConflictError('Resuelve los cambios de suscripción pendientes antes de continuar.', 'CAMBIOS_PROGRAMADOS')
@@ -386,6 +405,7 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
     // Hashed with the rest: acceptance re-derives it from the same rows. Omitted when empty, so a quote without a
     // repricing keeps the hash shape it had before this field existed.
     ...(repriced.length ? { repriced } : {}),
+    ...(offerVersion !== null ? { offerVersion } : {}),
     input: body,
     // Codex r5 #2 / r6 #1: frozen here, hashed with the rest, read back by provisioning. Snapshot field, never `input`
     // (acceptance re-parses `input` with the strict public schema). Absent = today's hosted «Pagar».
@@ -492,9 +512,28 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
       // Spec §4.2 rule 5: a cancellation scheduled after the re-observation above only shows up here, under the lock.
       // Reads only: no campaign row is written before lockProducts below.
       const retained = await readRetained(tx, venueId, inventory, saved.replaces, now)
-      if (observed.publications.length === 1 && isBasicPlanDefinition(observed.publications[0].definition))
-        await assertBasicPurchasable(tx, venueId, observed.venue.timezone, inventory, retained.legacy.filter(isPlanRow))
+      const basico = observed.publications.length === 1 && isBasicPlanDefinition(observed.publications[0].definition)
+      if (basico) await assertBasicPurchasable(tx, venueId, observed.venue.timezone, inventory, retained.legacy.filter(isPlanRow))
       assertCartDependencyTerms(retainedCoverage({ inventory, replaceSubscriptionIds: saved.replaces, ...retained }), saved.lines, now)
+      // Invariant: every transaction that writes product-keyed campaign rows takes the sorted precio:<key> locks first, so
+      // mirror carts and catalog operations (list price, promotion group) never wait on each other in opposite orders.
+      await lockProducts(
+        tx,
+        observed.publications.flatMap(p => {
+          if (p.campaign.purpose === 'LIST') return p.campaign.listProductKey ?? []
+          return p.campaign.promotionGroupId ? (productKeyOf(hybridOfferDefinition.parse(p.definition)) ?? []) : []
+        }),
+      )
+      // Planes editables (B2, Task 10): con la tx y bajo los candados de producto, ANTES del claim: la misma revisión de venta y, con
+      // una línea de plan, que la cotización cite la vigente (sin `offerVersion`, la v1; el respaldo y la v1 cuentan como 1). Una
+      // cotización tomada con la v1 se niega desde la primera publicación del editor aunque la v2 haya reusado la misma publicación
+      // híbrida (b2-r2 #9). Lo ya aceptado no pasa por aquí. El publicador mueve el puntero con los candados de las listas de Pro y
+      // Premium (`LIST`): sólo esas líneas quedan en fila con él. El Básico (`PLAN:BASICO`) y una promoción fuera de grupo no toman
+      // ese candado: en el milisegundo de la publicación una compra puede pasar con el precio que la persona vio (residuo aceptado en
+      // Global Constraints; ni monto equivocado ni doble cobro).
+      const lineaDePlan = saved.lines.find(line => line.planTier !== null)
+      await exigirCompraNuevaPermitida(tx, { venueId, tier: lineaDePlan?.planTier ?? null, basico })
+      if (lineaDePlan && (saved.offerVersion ?? 1) !== (await numeroDeLaVigente(tx))) throw offerChanged()
       const claimed = await tx.hybridPurchase.updateMany({
         where: { id: quoteId, venueId, status: 'QUOTED', quoteExpiresAt: { gt: now } },
         data: {
@@ -507,15 +546,6 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
       })
       if (claimed.count !== 1)
         throw new ConflictError('La cotización cambió o ya fue aceptada. Consulta el mismo intento.', 'HYBRID_QUOTE_STALE')
-      // Invariant: every transaction that writes product-keyed campaign rows takes the sorted precio:<key> locks first, so
-      // mirror carts and catalog operations (list price, promotion group) never wait on each other in opposite orders.
-      await lockProducts(
-        tx,
-        observed.publications.flatMap(p => {
-          if (p.campaign.purpose === 'LIST') return p.campaign.listProductKey ?? []
-          return p.campaign.promotionGroupId ? (productKeyOf(hybridOfferDefinition.parse(p.definition)) ?? []) : []
-        }),
-      )
       for (const offer of [...observed.publications].sort((a, b) => a.campaignId.localeCompare(b.campaignId))) {
         const campaign = await tx.hybridCampaign.findUniqueOrThrow({ where: { id: offer.campaignId } })
         const window = promotionWindow(campaign)

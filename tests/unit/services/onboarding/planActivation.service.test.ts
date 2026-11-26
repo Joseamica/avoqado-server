@@ -86,7 +86,7 @@ import {
 import { standardPlanQuote } from '@/services/access/planPricing.constants'
 import { standardFirstChargeCents } from '@/services/launchCampaigns/launchOfferMath'
 import { prismaMock } from '@tests/__helpers__/setup'
-import { definicionDePrueba, idsDeLaVersion, punteroA } from '@tests/__helpers__/planOfferFixtures'
+import { comprobanteDePrueba, definicionDePrueba, idsDeLaVersion, punteroA } from '@tests/__helpers__/planOfferFixtures'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import logger from '@/config/logger'
 import { inspect } from 'util'
@@ -723,6 +723,44 @@ describe('recuperación de un intento desconocido', () => {
     expect(acciones.find(a => a.action === 'LAUNCH_CAMPAIGN_REDEEMED')).toBeUndefined()
   })
 
+  it('🔴 Codex b2-code r2 N2: un reenvío de CAMPAÑA recupera una compra ESTÁNDAR de la v2 pagada y sin entregar → el plan guardado lleva la tarjeta, la versión y el pagar-hoy de ESA suscripción, no los del cuerpo; sin planOfferVersion, B1 literal (la tarjeta del cuerpo)', async () => {
+    const periodo = Math.floor(new Date('2026-10-26T00:00:00Z').getTime() / 1000)
+    const deLaSuscripcion = (metadata: Record<string, string>) => ({
+      id: 'sub_rec',
+      status: 'active',
+      // La tarjeta con que se pagó la compra estándar; el reenvío trae otra del mismo cliente (`pm_1`).
+      default_payment_method: 'pm_suyo',
+      metadata: { planActivationKey: 'plan-activation:org-1:1', featureCode: 'PLAN_PRO', ...metadata },
+      discounts: [],
+      latest_invoice: { amount_paid: 92684 },
+      current_period_end: periodo,
+      items: { data: [{ current_period_end: periodo, price: { unit_amount: 92684, recurring: { interval: 'month' } } }] },
+    })
+    for (const [metadata, esperado] of [
+      [
+        { planOfferVersion: '2', planOfferPrecioDe: '2' },
+        { paymentMethodId: 'pm_suyo', offerVersion: 2, payNow: true },
+      ],
+      [{}, { paymentMethodId: 'pm_1' }],
+    ] as const) {
+      const sub = deLaSuscripcion(metadata)
+      mockSubList.mockReturnValue({
+        autoPagingEach: async (cb: (s: unknown) => boolean) => {
+          cb(sub)
+        },
+      })
+      mockSubRetrieve.mockResolvedValue(sub)
+      prismaMock.$executeRaw.mockClear()
+
+      // El 409 de «la oferta no aplicó» sale DESPUÉS del cierre: lo cobrado ya quedó entregado y guardado.
+      await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({ code: 'PLAN_ACTIVE_WITHOUT_OFFER' })
+
+      expect(mockSubCreate).not.toHaveBeenCalled()
+      expect(planDelCierre()).toMatchObject({ tier: 'PRO', interval: 'monthly', offer: { kind: 'STANDARD' }, ...esperado })
+      if (!('offerVersion' in esperado)) expect(planDelCierre()).not.toHaveProperty('offerVersion')
+    }
+  })
+
   it('🔴 el id se persiste EN CUANTO la suscripción existe, no al cerrar el éxito', async () => {
     // Lo que importa es el ORDEN: el id tiene que quedar guardado ANTES de cerrar el éxito. Si
     // sólo se guardara al cerrar, un fallo entre el cobro y ese cierre deja al reintento sin
@@ -1004,8 +1042,20 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
   })
 
   // Planes editables B1: la relectura compara contra la MISMA fuente que dio el precio verificado. Con la v2, el puntero.
-  const VERSION_DOS = () => definicionDePrueba({ ids: idsDeLaVersion('v2') })
-  const ANUAL_PRO = { ...BASE, interval: 'annual' as const, offer: { kind: 'STANDARD' as const, expectedFirstChargeCents: 1158840 } }
+  // B2 (Task 4): con la v2 el alta manda su comprobante (Pro anual de 0 días: paga hoy el precio de la versión).
+  const VERSION_DOS = () => definicionDePrueba({ ids: idsDeLaVersion('v2'), planes: { PRO: { trialDays: 0 } } })
+  const ANUAL_PRO = {
+    ...BASE,
+    interval: 'annual' as const,
+    offer: { kind: 'STANDARD' as const, expectedFirstChargeCents: 1158840 },
+    quoteToken: comprobanteDePrueba({
+      alcance: 'org:org-1',
+      interval: 'annual',
+      firstChargeCents: 1158840,
+      precioCents: 1158840,
+      trialEndsAt: null,
+    }),
+  }
 
   it('con la v2 vigente, la relectura antes de cobrar no llama a Stripe y cobra con el priceId de la v2', async () => {
     prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv2', 2, VERSION_DOS()) as never)
@@ -1024,14 +1074,18 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
     expect(prismaMock.planOfferPointer.findUnique.mock.invocationCallOrder[1]).toBeLessThan(mockSubCreate.mock.invocationCallOrder[0])
   })
 
-  it('🔴 si otra versión quedó vigente entre el PASO 4 y el cobro → 409 PLAN_PRICE_MISMATCH y no se cobra', async () => {
+  it('🔴 si otra versión quedó vigente entre el PASO 4 y el cobro → 409 OFFER_CHANGED reason VERSION (B2: el comprobante es de la v2) y no se cobra', async () => {
     // PASO 4 con la v2; la segunda lectura del puntero (la relectura, dentro de la regla común) ya ve la v3.
     prismaMock.planOfferPointer.findUnique
       .mockResolvedValueOnce(punteroA('cv2', 2, VERSION_DOS()) as never)
       .mockResolvedValue(punteroA('cv3', 3, definicionDePrueba({ ids: idsDeLaVersion('v3') })) as never)
     mockPriceRetrieve.mockResolvedValue({ id: 'price_v2_pro_a', active: true, unit_amount: 1158840 })
 
-    await expect(activatePlan(ANUAL_PRO)).rejects.toMatchObject({ statusCode: 409, code: 'PLAN_PRICE_MISMATCH' })
+    await expect(activatePlan(ANUAL_PRO)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'OFFER_CHANGED',
+      details: { reason: 'VERSION', offerVersion: 3 },
+    })
 
     expect(mockSubCreate).not.toHaveBeenCalled()
     expect(mockPriceList).not.toHaveBeenCalled()
@@ -1039,8 +1093,8 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
     expect(prismaMock.onboardingProgress.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: { planActivationStatus: 'NONE', planActivationLeaseUntil: null } }),
     )
-    expect(logger.error).toHaveBeenCalledWith(
-      expect.stringContaining('la versión vigente cambió al momento de cobrar'),
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('otra versión de la oferta quedó vigente al momento de cobrar'),
       expect.objectContaining({ origen: 'VERSION', verificado: 'price_v2_pro_a', vigente: 'price_v3_pro_a' }),
     )
   })
@@ -3078,6 +3132,20 @@ describe('🔴 D2: el pedido de después del reto (PASO 6 con una suscripción i
     expect(conEstado('DECLINED')).toEqual([])
     expect(redencionCon('RELEASED')).toEqual([])
     expect(mockEntregar).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex b2-code #2, la guarda de la salida: sin versión del editor la periodicidad no se compara — un reto ANUAL se reanuda aunque el reenvío pida mensual, como hoy', async () => {
+    enStripe({
+      sub_3ds: incompleta({ items: { data: [{ current_period_end: FIN_DEL_PERIODO, price: { recurring: { interval: 'year' } } }] } }),
+    })
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_PAYMENT_REQUIRES_ACTION',
+      details: { clientSecret: 'pi_1_secret_x' },
+    })
+    expect(mockVoid).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
   })
 
   it('3. requires_confirmation (el navegador nunca confirmó) ⇒ igual que el anterior', async () => {

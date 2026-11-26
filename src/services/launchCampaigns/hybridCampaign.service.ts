@@ -10,6 +10,7 @@ import { compileHybridPublication, previewHybridOffer } from './hybridOffer.serv
 import { hybridOfferDefinition, type HybridOfferDefinition } from './hybridOffer.schema'
 import { activePromotionOverlaps, assertPromotionBelowList } from './hybridPriceRule'
 import { BASIC_PLAN_KEY, lockProducts, priceTransaction, productKeyOf } from './hybridProduct'
+import { versionQueCobra } from '@/services/billing/planOffer'
 
 const errorMap: z.ZodErrorMap = () => ({ message: 'Valor requerido o formato no válido' })
 export const hybridCampaignBody = z
@@ -304,7 +305,27 @@ export async function loadCurrentPublication(
   return campaign.currentPublicationId ? tx.hybridOfferPublication.findUnique({ where: { id: campaign.currentPublicationId } }) : null
 }
 
-export async function getPublicHybridOffer(slug: string) {
+/**
+ * Planes editables (B2, Task 10, §11.2): con una versión del editor el Básico ya no se vende, aunque su lista `PLAN:BASICO` siga
+ * ACTIVE (se cierra en el código, no pausándola: `codex-r5.md` #10). Leer la oferta nunca tumba una lectura pública (b2-r8 #10): si
+ * falla (p. ej. una v1 dañada), lo de hoy (`false`) con un aviso.
+ */
+async function basicoRetiradoPorElEditor(): Promise<boolean> {
+  try {
+    return (await versionQueCobra()) !== null
+  } catch (error) {
+    logger.warn('Ofertas públicas: no se pudo leer la oferta de los planes; el Básico sale como hoy', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
+  }
+}
+
+/**
+ * `conocido.basicoRetirado`: quien ya leyó la oferta (la lista de «Ver ofertas») lo pasa y no se vuelve a leer. Con una versión del
+ * editor, el Básico sale con `purchaseAvailable: false` (b2-r8 #8); la forma de la respuesta no cambia.
+ */
+export async function getPublicHybridOffer(slug: string, conocido: { basicoRetirado?: boolean } = {}) {
   const campaign = await prisma.hybridCampaign.findUnique({ where: { slug } })
   // A LIST never has a public page, except the Plan Básico: no window and no seat cap (capacity null = unlimited).
   const basic = campaign?.purpose === 'LIST' && campaign.listProductKey === BASIC_PLAN_KEY
@@ -323,6 +344,7 @@ export async function getPublicHybridOffer(slug: string) {
   if (!publication) throw new NotFoundError('Esta oferta no está disponible.')
   const parentKey = parentKeyOf(campaign, publication)
   const parentOnSale = !campaign.promotionGroupId || (parentKey !== null && (await parentListsOnSale([parentKey])).has(parentKey))
+  const retirado = basic && (conocido.basicoRetirado ?? (await basicoRetiradoPorElEditor()))
   return {
     schemaVersion: 1,
     id: publication.id,
@@ -339,7 +361,7 @@ export async function getPublicHybridOffer(slug: string) {
     audience: campaign.audience,
     // PROMOTION: CHECK guarantees non-null
     placesRemaining: basic ? null : campaign.capacity! - campaign.reservedCount - campaign.redeemedCount,
-    purchaseAvailable: process.env.HYBRID_BILLING_ENABLED === 'true' && parentOnSale,
+    purchaseAvailable: process.env.HYBRID_BILLING_ENABLED === 'true' && parentOnSale && !retirado,
   }
 }
 
@@ -448,14 +470,17 @@ const publicOffersQuery = hybridCampaignListQuery
   .extend({ includeBasic: z.enum(['true', 'false'], { errorMap }).optional() })
   .strict('Filtro no admitido')
 
-/** The Básico on sale as a public offer (pinned first), or null; a search that does not name it leaves it out. */
+/**
+ * The Básico on sale as a public offer (pinned first), or null; a search that does not name it leaves it out. Only called once the
+ * editor's offer is known not to retire it (`listPublicHybridOffers`).
+ */
 async function basicOfferFor(q: string | undefined) {
   const row = await prisma.hybridCampaign.findFirst({
     where: { purpose: 'LIST', listProductKey: BASIC_PLAN_KEY, status: 'ACTIVE' },
     select: { slug: true },
   })
   if (!row) return null
-  const offer = await getPublicHybridOffer(row.slug).catch(error => {
+  const offer = await getPublicHybridOffer(row.slug, { basicoRetirado: false }).catch(error => {
     if (error instanceof NotFoundError) return null
     throw error
   })
@@ -466,7 +491,9 @@ async function basicOfferFor(q: string | undefined) {
 export async function listPublicHybridOffers(input: unknown) {
   const { page, pageSize, q, includeBasic } = parse(publicOffersQuery, input)
   const now = new Date()
-  const basic = includeBasic === 'true' ? await basicOfferFor(q) : null
+  // Planes editables (B2, Task 10, b2-r7 #5): con una versión del editor, «Ver ofertas» ya no enseña el Básico aunque su lista siga
+  // ACTIVE. Sin ella, o si leer la oferta falla (b2-r8 #10), la lista de hoy. Sin `includeBasic` no se lee nada nuevo.
+  const basic = includeBasic === 'true' && !(await basicoRetiradoPorElEditor()) ? await basicOfferFor(q) : null
   // The Básico is item 0 of the whole list: page 1 gives up one slot, later pages shift back by one, the total counts it.
   const pinned = basic ? 1 : 0
   const offset = (page - 1) * pageSize

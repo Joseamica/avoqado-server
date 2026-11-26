@@ -17,7 +17,9 @@ import {
   nombreDelProductoEnStripe,
   ofertaDeRespaldo,
   ofertaPorId,
+  ofertaPorNumero,
   ofertaVigente,
+  numeroDeLaVigente,
   planOfferDefinition,
   planOfferInput,
   precioDeLaOferta,
@@ -150,6 +152,42 @@ describe('ofertaVigente', () => {
   })
 })
 
+describe('numeroDeLaVigente (B2 Task 8): el número del puntero, sin leer la definición', () => {
+  it('sin puntero o sin vigente → 1 (el respaldo, como ofertaVigente)', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce(null)
+    expect(await numeroDeLaVigente()).toBe(1)
+    prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce({ currentVersion: null } as never)
+    expect(await numeroDeLaVigente()).toBe(1)
+  })
+
+  it('🔴 con una definición rota también da su número (la v1 rota → 1, la v2 rota → 2): no la lee ni la valida', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce(punteroA('cv1', 1, { schemaVersion: 1, rota: true }) as never)
+    expect(await numeroDeLaVigente()).toBe(1)
+    prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce(punteroA('cv2', 2, { schemaVersion: 1, rota: true }) as never)
+    expect(await numeroDeLaVigente()).toBe(2)
+    // Sólo pide el número de la vigente: ni su definición ni su id.
+    expect(prismaMock.planOfferPointer.findUnique.mock.calls[0][0]).toEqual({
+      where: { id: 'vigente' },
+      select: { currentVersion: { select: { number: true } } },
+    })
+  })
+
+  it('una vigente sin número válido → null (no se sabe cuál rige); lee con la transacción que le pasen', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce({ currentVersion: { number: null } } as never)
+    expect(await numeroDeLaVigente()).toBeNull()
+    prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce({ currentVersion: { number: 0 } } as never)
+    expect(await numeroDeLaVigente()).toBeNull()
+
+    const tx = { planOfferPointer: { findUnique: jest.fn().mockResolvedValue({ currentVersion: { number: 3 } }) } }
+    expect(await numeroDeLaVigente(tx as never)).toBe(3)
+  })
+
+  it('si el puntero no se puede leer, lanza (quien llama decide)', async () => {
+    prismaMock.planOfferPointer.findUnique.mockRejectedValueOnce(new Error('sin conexión a la base'))
+    await expect(numeroDeLaVigente()).rejects.toThrow('sin conexión a la base')
+  })
+})
+
 describe('versionQueCobra y priceIdVigente', () => {
   it('🔴 versionQueCobra: sin versiones → null; con sólo la v1 → null; con la v2 vigente → la v2', async () => {
     prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce(null)
@@ -206,6 +244,22 @@ describe('ofertaPorId', () => {
     await expect(ofertaPorId('nope')).rejects.toMatchObject({ statusCode: 404 })
     prismaMock.planOfferVersion.findUnique.mockResolvedValueOnce({ id: 'cv3', number: null, status: 'PREPARING', definition: {} } as never)
     await expect(ofertaPorId('cv3')).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED' })
+  })
+})
+
+describe('ofertaPorNumero', () => {
+  it('ofertaPorNumero(2) devuelve la v2 SUPERSEDED con su definición; una versión DISCARDED o inexistente → 404 PLAN_OFFER_NOT_FOUND', async () => {
+    const d = definicionDePrueba({ ids: idsDeLaVersion('v2') })
+    prismaMock.planOfferVersion.findFirst.mockReset()
+    prismaMock.planOfferVersion.findFirst.mockResolvedValueOnce({ id: 'cv2', number: 2, status: 'SUPERSEDED', definition: d } as never)
+    expect(await ofertaPorNumero(2)).toEqual({ number: 2, versionId: 'cv2', definition: d, respaldo: false })
+    const donde = prismaMock.planOfferVersion.findFirst.mock.calls[0][0].where
+    expect(donde).toMatchObject({ number: 2, status: { in: ['PUBLISHED', 'SUPERSEDED'] } })
+
+    prismaMock.planOfferVersion.findFirst.mockResolvedValueOnce(null) // una DISCARDED no pasa el filtro de estado
+    await expect(ofertaPorNumero(3)).rejects.toMatchObject({ statusCode: 404, code: 'PLAN_OFFER_NOT_FOUND' })
+    prismaMock.planOfferVersion.findFirst.mockResolvedValueOnce({ id: 'cv2', number: 2, status: 'SUPERSEDED', definition: {} } as never)
+    await expect(ofertaPorNumero(2)).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED' })
   })
 })
 

@@ -15,6 +15,8 @@ export interface CotizacionFirmable {
   tier: PlanPagado
   interval: Periodicidad
   firstChargeCents: number
+  /** El bruto (con IVA) del `priceId` que se cobrará, también cuando hoy se paga $0. */
+  precioCents: number
   trialEndsAt: Date | null
   alcance: string
 }
@@ -36,6 +38,7 @@ interface Cuerpo {
   t: PlanPagado
   i: Periodicidad
   c: number
+  m: number
   e: number | null
   s: number
   a: string
@@ -56,6 +59,7 @@ export function firmarCotizacion(c: CotizacionFirmable, now: Date = new Date()):
     t: c.tier,
     i: c.interval,
     c: c.firstChargeCents,
+    m: c.precioCents,
     e: c.trialEndsAt ? c.trialEndsAt.getTime() : null,
     s: now.getTime(),
     a: c.alcance,
@@ -63,9 +67,10 @@ export function firmarCotizacion(c: CotizacionFirmable, now: Date = new Date()):
   // Errores de programación (no del usuario): nunca se firma algo que `verificarCotizacion` no podría leer.
   const dinero = (v: number, min: number) => Number.isSafeInteger(v) && v >= min
   if (Number.isNaN(now.getTime())) throw new Error('firmarCotizacion: la hora de emisión no es válida')
-  if (c.trialEndsAt && Number.isNaN(c.trialEndsAt.getTime())) throw new Error('firmarCotizacion: el fin de la prueba no es una fecha válida')
-  if (!dinero(c.versionNumber, 1) || !dinero(c.firstChargeCents, 0)) {
-    throw new Error('firmarCotizacion: la versión y el primer cobro deben ser enteros válidos')
+  if (c.trialEndsAt && Number.isNaN(c.trialEndsAt.getTime()))
+    throw new Error('firmarCotizacion: el fin de la prueba no es una fecha válida')
+  if (!dinero(c.versionNumber, 1) || !dinero(c.firstChargeCents, 0) || !dinero(c.precioCents, 1)) {
+    throw new Error('firmarCotizacion: la versión, el primer cobro y el precio deben ser enteros válidos')
   }
   if (!c.alcance) throw new Error('firmarCotizacion: falta el alcance')
   const b64 = Buffer.from(JSON.stringify(cuerpo)).toString('base64url')
@@ -99,6 +104,7 @@ export function verificarCotizacion(token: unknown, alcance: string, now: Date =
     (p.t !== 'PRO' && p.t !== 'PREMIUM') ||
     (p.i !== 'monthly' && p.i !== 'annual') ||
     !entero(p.c, 0) ||
+    !entero(p.m, 1) ||
     !(p.e === null || entero(p.e, 0)) ||
     !entero(p.s, 0) ||
     typeof p.a !== 'string' ||
@@ -117,6 +123,7 @@ export function verificarCotizacion(token: unknown, alcance: string, now: Date =
     tier: p.t,
     interval: p.i,
     firstChargeCents: p.c,
+    precioCents: p.m,
     trialEndsAt: p.e === null ? null : new Date(p.e),
     alcance: p.a,
     issuedAt: new Date(p.s),

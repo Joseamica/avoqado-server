@@ -42,8 +42,17 @@ function pagoConTarjeta(invoiceId: string, monto: number, devuelto = 0) {
 }
 
 /** Una factura de la suscripción: `tarjeta` = lo cobrado a la tarjeta, `saldo` = el saldo a favor aplicado. */
-function factura(o: { id?: string; total: number; tarjeta: number; saldo?: number; status?: string; billing_reason?: string }) {
-  const { id = 'in_1', total, tarjeta, saldo = 0, status = 'paid', billing_reason = 'subscription_create' } = o
+function factura(o: {
+  id?: string
+  total: number
+  tarjeta: number
+  saldo?: number
+  status?: string
+  billing_reason?: string
+  /** Lo que la factura declara como descuento (`total_discount_amounts[].amount`). */
+  descuentos?: number[]
+}) {
+  const { id = 'in_1', total, tarjeta, saldo = 0, status = 'paid', billing_reason = 'subscription_create', descuentos } = o
   pagos.set(id, tarjeta > 0 ? [pagoConTarjeta(id, tarjeta)] : [])
   return {
     id,
@@ -56,6 +65,7 @@ function factura(o: { id?: string; total: number; tarjeta: number; saldo?: numbe
     starting_balance: saldo ? -saldo : 0,
     ending_balance: 0,
     post_payment_credit_notes_amount: 0,
+    ...(descuentos ? { total_discount_amounts: descuentos.map(amount => ({ amount, discount: 'di_1' })) } : {}),
   }
 }
 
@@ -133,6 +143,57 @@ describe('primerCobroCubierto (lector REAL de cobertura)', () => {
     facturas = [factura({ total: 1000, tarjeta: 1000 })]
     pagos.set('in_1', [pagoConTarjeta('in_1', 1000, devuelto)])
     await expect(primerCobroCubierto('venue-1', 'sub_3ds', 1000)).resolves.toBe(false)
+  })
+
+  // Planes editables B2 (b2-r9 #1): con `discounts` explícitos un descuento del cliente puede aplicarse igual. Sólo baja el
+  // precio: un total MENOR cuenta si la diferencia es exactamente lo que la factura declara como descuento.
+  describe('b2-r9 #1: un descuento que la propia factura declara', () => {
+    const ESPERADO = 92684
+
+    it('🔴 factura paid con total 83416, esperado 92684 y total_discount_amounts [{ amount: 9268 }] (10 % heredado) cubierta por 83416 → true', async () => {
+      facturas = [factura({ total: 83416, tarjeta: 83416, descuentos: [9268] })]
+      await expect(primerCobroCubierto('venue-1', 'sub_3ds', ESPERADO)).resolves.toBe(true)
+    })
+
+    it('🔴 total menor sin descuento declarado (o con uno que no suma la diferencia) → false; total mayor que el esperado → false aunque declare descuentos', async () => {
+      facturas = [factura({ total: 83416, tarjeta: 83416 })]
+      await expect(primerCobroCubierto('venue-1', 'sub_3ds', ESPERADO)).resolves.toBe(false)
+
+      facturas = [factura({ total: 83416, tarjeta: 83416, descuentos: [9000] })]
+      await expect(primerCobroCubierto('venue-1', 'sub_3ds', ESPERADO)).resolves.toBe(false)
+
+      facturas = [factura({ total: 83416, tarjeta: 83416, descuentos: [] })]
+      await expect(primerCobroCubierto('venue-1', 'sub_3ds', ESPERADO)).resolves.toBe(false)
+
+      facturas = [factura({ total: ESPERADO + 9268, tarjeta: ESPERADO + 9268, descuentos: [9268] })]
+      await expect(primerCobroCubierto('venue-1', 'sub_3ds', ESPERADO)).resolves.toBe(false)
+    })
+
+    it('la cobertura se compara contra el total cobrado: con descuento declarado, una tarjeta que no cubre el total → false', async () => {
+      facturas = [factura({ total: 83416, tarjeta: 80000, descuentos: [9268] })]
+      await expect(primerCobroCubierto('venue-1', 'sub_3ds', ESPERADO)).resolves.toBe(false)
+    })
+
+    it('total igual al esperado → el resultado de hoy, con las mismas lecturas', async () => {
+      facturas = [factura({ total: ESPERADO, tarjeta: ESPERADO, descuentos: [9268] })]
+      await expect(primerCobroCubierto('venue-1', 'sub_3ds', ESPERADO)).resolves.toBe(true)
+      expect(mockListaDeFacturas).toHaveBeenCalledTimes(1)
+      expect(mockListaDeFacturas).toHaveBeenCalledWith({ subscription: 'sub_3ds', limit: 100 })
+
+      // Y lo que hoy es «no cubierto» sigue igual con el total exacto: el primer cobro devuelto.
+      facturas = [factura({ total: ESPERADO, tarjeta: ESPERADO })]
+      pagos.set('in_1', [pagoConTarjeta('in_1', ESPERADO, 100)])
+      await expect(primerCobroCubierto('venue-1', 'sub_3ds', ESPERADO)).resolves.toBe(false)
+    })
+
+    it('un descuento declarado no salva una factura abierta ni un cobro devuelto', async () => {
+      facturas = [factura({ total: 83416, tarjeta: 0, status: 'open', descuentos: [9268] })]
+      await expect(primerCobroCubierto('venue-1', 'sub_3ds', ESPERADO)).resolves.toBe(false)
+
+      facturas = [factura({ total: 83416, tarjeta: 83416, descuentos: [9268] })]
+      pagos.set('in_1', [pagoConTarjeta('in_1', 83416, 83416)])
+      await expect(primerCobroCubierto('venue-1', 'sub_3ds', ESPERADO)).resolves.toBe(false)
+    })
   })
 
   it('P8: toma la factura subscription_create aunque la primera de la lista sea una renovación; sin ella, lanza', async () => {

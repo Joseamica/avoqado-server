@@ -2,7 +2,12 @@ const mockPriceList = jest.fn()
 const mockPriceRetrieve = jest.fn()
 jest.mock('stripe', () => jest.fn().mockImplementation(() => ({ prices: { list: mockPriceList, retrieve: mockPriceRetrieve } })))
 
-import { resolverPrecioDelPlan, resolverPrecioPorLlave } from '../../../../src/services/billing/precioDelPlan'
+import {
+  LecturaDeLaOfertaFallida,
+  exigirPrecioDeStripe,
+  resolverPrecioDelPlan,
+  resolverPrecioPorLlave,
+} from '../../../../src/services/billing/precioDelPlan'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { definicionDePrueba, idsDeLaVersion, punteroA, versionUno } from '@tests/__helpers__/planOfferFixtures'
 
@@ -105,10 +110,95 @@ describe('con versiones', () => {
     await expect(resolverPrecioDelPlan('PLAN_PRO', 'monthly')).rejects.toBe(caida)
   })
 
+  it('🔴 Codex b2-code #1: con { soloSinVersionDelEditor } (los carriles que cobran sin versión del editor), una v2 que aparece en la relectura → 409 OFFER_CHANGED reason VERSION con su número, sin leer ningún precio de Stripe', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv2', 2, VERSION_DOS()) as never)
+    mockPriceRetrieve.mockResolvedValue({ id: 'price_v2_pro_m', active: true, unit_amount: 92684 })
+
+    await expect(resolverPrecioDelPlan('PLAN_PRO', 'monthly', { soloSinVersionDelEditor: true })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'OFFER_CHANGED',
+      details: { reason: 'VERSION', offerVersion: 2 },
+    })
+    expect(mockPriceRetrieve).not.toHaveBeenCalled()
+    expect(mockPriceList).not.toHaveBeenCalled()
+  })
+
+  it('🔴 con { soloSinVersionDelEditor }, sin versiones o con sólo la v1, resuelve por la llave exactamente como B0', async () => {
+    for (const puntero of [null, punteroA('cv1', 1, versionUno())]) {
+      mockPriceList.mockReset().mockResolvedValue({ data: [{ id: 'price_llave', unit_amount: 115884 }] })
+      prismaMock.planOfferPointer.findUnique.mockResolvedValue(puntero as never)
+
+      await expect(resolverPrecioDelPlan('PLAN_PRO', 'monthly', { soloSinVersionDelEditor: true })).resolves.toEqual({
+        priceId: 'price_llave',
+        unitAmount: 115884,
+      })
+      expect(mockPriceList.mock.calls).toEqual([
+        [
+          { lookup_keys: ['plan_pro_monthly'], limit: 1 },
+          { timeout: 15_000, maxNetworkRetries: 0 },
+        ],
+      ])
+    }
+    expect(mockPriceRetrieve).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex b2-code r5 A: con { marcarLaLecturaFallida }, CUALQUIER error de la relectura (un error crudo de la base o la definición rota) sale como LecturaDeLaOfertaFallida (503 PLAN_NOT_CONFIGURED, la causa en `cause`); sin la opción, sube tal cual', async () => {
+    const caida = new Error("Can't reach database server")
+    prismaMock.planOfferPointer.findUnique.mockRejectedValue(caida)
+    const marcado = await resolverPrecioDelPlan('PLAN_PRO', 'monthly', {
+      soloSinVersionDelEditor: true,
+      marcarLaLecturaFallida: true,
+    }).catch((e: unknown) => e)
+    expect(marcado).toBeInstanceOf(LecturaDeLaOfertaFallida)
+    expect(marcado).toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED' })
+    expect((marcado as { cause?: unknown }).cause).toBe(caida)
+    // Sin la opción (el checkout), el error de hoy, tal cual.
+    await expect(resolverPrecioDelPlan('PLAN_PRO', 'monthly', { soloSinVersionDelEditor: true })).rejects.toBe(caida)
+
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv1', 1, { schemaVersion: 1, rota: true }) as never)
+    await expect(resolverPrecioDelPlan('PLAN_PRO', 'monthly', { marcarLaLecturaFallida: true })).rejects.toBeInstanceOf(
+      LecturaDeLaOfertaFallida,
+    )
+    expect(mockPriceList).not.toHaveBeenCalled()
+    expect(mockPriceRetrieve).not.toHaveBeenCalled()
+  })
+
+  it('con { marcarLaLecturaFallida }, una llave sin precio de Stripe (B0) sigue siendo el 503 de la llave, sin marcar', async () => {
+    mockPriceList.mockResolvedValue({ data: [] })
+    const error = await resolverPrecioDelPlan('PLAN_PRO', 'monthly', { soloSinVersionDelEditor: true, marcarLaLecturaFallida: true }).catch(
+      (e: unknown) => e,
+    )
+    expect(error).toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED', details: { tierCode: 'PLAN_PRO' } })
+    expect(error).not.toBeInstanceOf(LecturaDeLaOfertaFallida)
+  })
+
   it('una versión guardada rota es 503 PLAN_NOT_CONFIGURED y no cae a la llave', async () => {
     prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv2', 2, { schemaVersion: 1 }) as never)
     await expect(resolverPrecioDelPlan('PLAN_PRO', 'monthly')).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED' })
     expect(mockPriceList).not.toHaveBeenCalled()
     expect(mockPriceRetrieve).not.toHaveBeenCalled()
+  })
+})
+
+describe('exigirPrecioDeStripe', () => {
+  it('exigirPrecioDeStripe: activo y del monto → { priceId, unitAmount }; inactivo, otro monto o 404 → 503 PLAN_NOT_CONFIGURED; un 500 sube tal cual', async () => {
+    mockPriceRetrieve.mockResolvedValue({ id: 'price_x', active: true, unit_amount: 92684 })
+    await expect(exigirPrecioDeStripe('price_x', 92684)).resolves.toEqual({ priceId: 'price_x', unitAmount: 92684 })
+    expect(mockPriceRetrieve).toHaveBeenCalledWith('price_x', { timeout: 15_000, maxNetworkRetries: 0 })
+
+    mockPriceRetrieve.mockResolvedValue({ id: 'price_x', active: false, unit_amount: 92684 })
+    await expect(exigirPrecioDeStripe('price_x', 92684, { tier: 'PRO' })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_NOT_CONFIGURED',
+    })
+    mockPriceRetrieve.mockResolvedValue({ id: 'price_x', active: true, unit_amount: 1 })
+    await expect(exigirPrecioDeStripe('price_x', 92684)).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED' })
+    mockPriceRetrieve.mockRejectedValue(
+      Object.assign(new Error('No such price'), { type: 'StripeInvalidRequestError', statusCode: 404, code: 'resource_missing' }),
+    )
+    await expect(exigirPrecioDeStripe('price_x', 92684)).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED' })
+    const caida = Object.assign(new Error('boom'), { type: 'StripeAPIError', statusCode: 500 })
+    mockPriceRetrieve.mockRejectedValue(caida)
+    await expect(exigirPrecioDeStripe('price_x', 92684)).rejects.toBe(caida)
   })
 })

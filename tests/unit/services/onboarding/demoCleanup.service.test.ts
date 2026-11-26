@@ -9,8 +9,17 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 import { cleanDemoData } from '@/services/onboarding/demoCleanup.service'
 import { Prisma } from '@prisma/client'
+import logger from '@/config/logger'
 
 const VENUE_ID = 'venue-1'
+
+/**
+ * Planes editables B2, Task 8 (b2-r1 #10): la limpieza revisa el estado del negocio en la MISMA fila que toma `FOR UPDATE`. Las
+ * pruebas de abajo leen esa fila con este estado (por default `TRIAL`: un demo que todavía se puede limpiar).
+ */
+let estadoDelNegocio: string | null = 'TRIAL'
+const esLaFilaDelNegocio = (sql: string) => /FROM "Venue" WHERE/.test(sql) && /FOR UPDATE/.test(sql)
+const filaDelNegocio = () => (estadoDelNegocio === null ? [] : [{ status: estadoDelNegocio }])
 
 // Every model cleanDemoData mutates or reads. jest.clearAllMocks() in the
 // global beforeEach wipes return values, so re-prime before each test.
@@ -55,8 +64,12 @@ describe('cleanDemoData (trial→real conversion)', () => {
     }
     // El candado de posiciones (fe2b91) lee la organización del negocio antes de formarse.
     ;(prismaMock.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: 'org-1' })
-    // Los candados en SQL (posiciones, negocio, y los de tarifas/costos y canales de na4b2c82): sin filas por default.
-    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
+    // Los candados en SQL (posiciones, y los de tarifas/costos y canales de na4b2c82): sin filas por default. La fila del negocio
+    // trae su estado (Task 8).
+    estadoDelNegocio = 'TRIAL'
+    ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (strings: TemplateStringsArray) =>
+      esLaFilaDelNegocio(strings.join('?')) ? filaDelNegocio() : [],
+    )
   })
 
   // ==========================================
@@ -191,6 +204,59 @@ describe('cleanDemoData (trial→real conversion)', () => {
     )
     expect(sinAcotar).toEqual([])
   })
+  // Planes editables B2, Task 8 (b2-r1 #10): dos pestañas convierten el mismo demo; la segunda leyó TRIAL antes de que la primera
+  // convirtiera. Si su limpieza corre DESPUÉS, el negocio ya es real y tiene ventas suyas: la revisión del estado va dentro del candado
+  // de la fila del negocio, así que la segunda espera a la primera y luego ve el estado nuevo.
+  describe('b2-r1 #10: la limpieza sólo borra un negocio que sigue siendo demo al tomar su fila', () => {
+    it('🔴 con el negocio ya en PENDING_ACTIVATION al tomar la fila → { skippedReason: "NOT_DEMO" } y cero deleteMany', async () => {
+      estadoDelNegocio = 'PENDING_ACTIVATION'
+
+      const r = await cleanDemoData(VENUE_ID, 'staff-1')
+
+      expect(r.skippedReason).toBe('NOT_DEMO')
+      expect(r.deletedOrders).toBe(0)
+      expect(r.deletedPayments).toBe(0)
+      const escrituras = TOUCHED_MODELS.flatMap(model => {
+        const mock = (prismaMock as any)[model]
+        return ['deleteMany', 'updateMany', 'delete', 'update']
+          .filter(op => (mock[op]?.mock.calls.length ?? 0) > 0)
+          .map(op => `${model}.${op}`)
+      })
+      expect(escrituras).toEqual([])
+      expect(prismaMock.exchange.deleteMany).not.toHaveBeenCalled()
+      expect(prismaMock.exchangeCreditLink.deleteMany).not.toHaveBeenCalled()
+      // Ni siquiera llega a la revisión de tarjetas: el estado se lee en la misma consulta que toma la fila.
+      expect(prismaMock.giftCard.findFirst).not.toHaveBeenCalled()
+      // La fila se tomó (y se leyó su estado) dentro del candado.
+      const consultas = (prismaMock.$queryRaw as jest.Mock).mock.calls.map(([strings]: [TemplateStringsArray]) => strings.join('?'))
+      expect(consultas.filter(esLaFilaDelNegocio)).toEqual([
+        expect.stringMatching(/SELECT .*status.* FROM "Venue" WHERE id = \? FOR UPDATE/),
+      ])
+      expect(jest.mocked(logger.warn)).toHaveBeenCalledWith(
+        expect.stringContaining('ya no es demo'),
+        expect.objectContaining({ venueId: VENUE_ID, skippedReason: 'NOT_DEMO' }),
+      )
+    })
+
+    it.each([['ACTIVE'], ['ONBOARDING'], [null]])('con el negocio en %s (null = ya no existe) tampoco borra nada', async estado => {
+      estadoDelNegocio = estado
+
+      const r = await cleanDemoData(VENUE_ID)
+
+      expect(r.skippedReason).toBe('NOT_DEMO')
+      expect(prismaMock.payment.deleteMany).not.toHaveBeenCalled()
+      expect(prismaMock.order.deleteMany).not.toHaveBeenCalled()
+    })
+
+    it('regresión · en TRIAL limpia como hoy, sin skippedReason', async () => {
+      const r = await cleanDemoData(VENUE_ID)
+
+      expect(r.skippedReason).toBeUndefined()
+      expect(prismaMock.payment.deleteMany).toHaveBeenCalledWith({ where: { venueId: VENUE_ID } })
+      expect(prismaMock.order.deleteMany).toHaveBeenCalledWith({ where: { venueId: VENUE_ID } })
+    })
+  })
+
   // Encargo fe2b91 (hz:87f4b879:D7): una cuenta demo en UNA posición ya no borra la configuración entera ni las tarifas de las
   // posiciones con cuenta real. La prueba contra base real está en tests/integration/demo/limpiezaDemoCuentasReales.
   describe('cuentas de cobro: sólo se limpia la posición con cuenta demo', () => {
@@ -272,7 +338,7 @@ describe('cleanDemoData (trial→real conversion)', () => {
       const orden: string[] = []
       ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (strings: TemplateStringsArray) => {
         if (strings.join('?').includes('posiciones-de-cobro') || strings.join('?').includes('pg_advisory_xact_lock')) orden.push('candado')
-        return []
+        return esLaFilaDelNegocio(strings.join('?')) ? filaDelNegocio() : []
       })
       ;(prismaMock.venuePaymentConfig.findUnique as jest.Mock).mockImplementation(async () => {
         orden.push('leer')
@@ -310,6 +376,7 @@ describe('cleanDemoData (trial→real conversion)', () => {
     const conSql = (responder: (sql: string, valores: unknown[]) => unknown[]) =>
       (prismaMock.$queryRaw as jest.Mock).mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
         const q = Prisma.sql(strings, ...(values as any[]))
+        if (esLaFilaDelNegocio(q.text)) return filaDelNegocio()
         return responder(q.text, q.values) // `text`: con $1, $2 como los ve Postgres
       })
     const filasDeBitacora = () =>

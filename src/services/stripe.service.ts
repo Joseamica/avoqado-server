@@ -15,7 +15,9 @@ import logger from '@/config/logger'
 import { Feature, Prisma } from '@prisma/client'
 import { retry, shouldRetryStripeError } from '@/utils/retry'
 import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
-import { pausaDe } from '@/services/billing/siguienteCobro'
+import { noHabraCobro, pausaDe } from '@/services/billing/siguienteCobro'
+import { tarjetaDeLaPrueba } from '@/services/billing/faltaTarjeta'
+import type { TarjetaVisible } from '@/services/billing/tarjetaQueCobraria'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 import { addDays } from 'date-fns'
 import emailService from './email.service'
@@ -32,7 +34,6 @@ import {
   registrarConflictoDeObligacion,
 } from './access/conflictosDeObligacion.service'
 import { descuentoDelPlan, type DescuentoDelPlan } from './billing/descuentoDelPlan'
-import { modalidadDePrueba, type ModalidadDePrueba } from './billing/modalidadDePrueba'
 import {
   clasificarEstado,
   clasificarSuscripcion,
@@ -718,13 +719,35 @@ export async function createTrialSubscriptions(
 export interface CreatePlanSubscriptionInput {
   venueId: string
   customerId: string
-  paymentMethodId: string
+  /** La tarjeta del cobro. Obligatoria salvo con `sinTarjeta` (la prueba que se abre sin método de pago). */
+  paymentMethodId?: string
+  /**
+   * Planes editables (B2, Task 6, §16, §18): la prueba SIN tarjeta. Exige `trialEnd` (si no, `Error` de programación, antes de
+   * «pudo cobrarse»). No manda `default_payment_method`: al terminar, Stripe cobra la tarjeta que diga su jerarquía (la del
+   * cliente, si la tiene) o, sin ninguna, la CANCELA (`trial_settings.end_behavior.missing_payment_method: 'cancel'`). Lleva la
+   * metadata `sinTarjeta: 'true'`, la única marca que la reconoce (Ruling P6). El resto del cuerpo, el de hoy.
+   */
+  sinTarjeta?: boolean
   tierCode: PlanTierCode
   /** Precio de Stripe ya resuelto (`resolverPrecioDelPlan`): se cobra con éste, sin volver a listar la llave. */
   priceId: string
   interval: 'monthly' | 'annual'
   trialPeriodDays: number // 0 = pay-now (no trial), 30 = trial
+  /**
+   * Planes editables (B2): el fin de la prueba que firmó el comprobante. Con él se manda `trial_end` (en segundos) y **no**
+   * `trial_period_days` (nunca días contados desde ahora), y cuenta como prueba para `paymentBehavior`,
+   * `autenticarEnElNavegador` y `cancelAtTrialEnd`. Sin él, el cuerpo de hoy.
+   */
+  trialEnd?: Date
   coupon?: string // e.g. 'INTRO_PRO_3M' (PRO monthly pay-now only)
+  /**
+   * Planes editables (B2, b2-r9 #1): los `discounts` van SIEMPRE explícitos en los dos `create` — `[{ coupon }]` con el cupón,
+   * o `''` sin él (la forma de `hybridProvision.service.ts`). Sin esta opción, el `discounts` de hoy (sólo con cupón).
+   * 🔴 Ojo: según el SDK instalado (stripe 19, `SubscriptionsResource.d.ts`), un `discounts` vacío SÍ hereda el descuento del
+   * cliente, así que `''` no lo impide. La protección real es el cierre del reto del banco (`primerCobroPagado.ts`): sólo acepta
+   * un total menor por los descuentos que la propia factura declara (un descuento sólo baja el precio).
+   */
+  descuentosExplicitos?: true
   venueName?: string
   venueSlug?: string
   /**
@@ -984,10 +1007,18 @@ export async function suscripcionVendeElPlan(
   return proyecciones.length === 1 && proyecciones[0].tipo === 'PLAN' && CODIGO_DEL_TIER[proyecciones[0].tier] === planCode
 }
 
+/** Lo mínimo que debe faltar para el fin de prueba al mandar el create (Codex b2-mac r4 #1). */
+const MARGEN_DEL_FIN_DE_PRUEBA_AL_ENVIAR_MS = 60_000
+
 export async function createPlanSubscription(input: CreatePlanSubscriptionInput): Promise<CreatePlanSubscriptionResult> {
-  if (input.cancelAtTrialEnd && !(input.trialPeriodDays > 0)) {
+  // Planes editables (B2): un fin de prueba del comprobante también es prueba. Sin él, las comprobaciones de hoy, literales.
+  const conPrueba = !!input.trialEnd || input.trialPeriodDays > 0
+  if (input.cancelAtTrialEnd && !conPrueba) {
     throw new Error('cancelAtTrialEnd sólo aplica a una prueba gratis (trialPeriodDays > 0)')
   }
+  // B2 Task 6: errores de programación, antes de tocar nada (nada pudo cobrarse).
+  if (input.sinTarjeta && !input.trialEnd) throw new Error('una prueba sin tarjeta necesita el fin de su prueba (trialEnd)')
+  if (!input.sinTarjeta && !input.paymentMethodId) throw new Error('createPlanSubscription: falta el método de pago')
   const feature = await prisma.feature.findFirst({ where: { code: input.tierCode, active: true } })
   if (!feature) throw new Error(`Feature ${input.tierCode} not found or inactive`)
 
@@ -1025,26 +1056,39 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
     ...(input.venueSlug ? { venueSlug: input.venueSlug } : {}),
     ...(input.extraMetadata ?? {}),
     ...(input.cancelAtTrialEnd ? { basicPlanChosen: 'true' } : {}),
+    ...(input.sinTarjeta ? { sinTarjeta: 'true' } : {}),
   }
   const params: Stripe.SubscriptionCreateParams = {
     customer: input.customerId,
     items: [{ price: input.priceId }],
-    trial_period_days: input.trialPeriodDays,
-    default_payment_method: input.paymentMethodId,
+    ...(input.trialEnd ? { trial_end: Math.floor(input.trialEnd.getTime() / 1000) } : { trial_period_days: input.trialPeriodDays }),
+    ...(input.sinTarjeta
+      ? { trial_settings: { end_behavior: { missing_payment_method: 'cancel' as const } } }
+      : { default_payment_method: input.paymentMethodId }),
     // No Stripe Tax: IVA is baked into the price (tax_behavior 'inclusive'), so we charge the
     // price as-is and the merchant remits/itemizes the IVA on their own CFDI factura.
-    ...(input.coupon ? { discounts: [{ coupon: input.coupon }] } : {}),
+    ...(input.descuentosExplicitos
+      ? { discounts: input.coupon ? [{ coupon: input.coupon }] : '' }
+      : input.coupon
+        ? { discounts: [{ coupon: input.coupon }] }
+        : {}),
     description: input.venueName
       ? `Plan Avoqado ${planLabel(input.tierCode)} - ${input.venueName}`
       : `Plan Avoqado ${planLabel(input.tierCode)}`,
     metadata,
     // 🔴 Sólo se manda con trial 0: con prueba gratis no hay primer cobro que pueda fallar.
-    ...(input.paymentBehavior && input.trialPeriodDays === 0 ? { payment_behavior: input.paymentBehavior } : {}),
+    ...(input.paymentBehavior && !input.trialEnd && input.trialPeriodDays === 0 ? { payment_behavior: input.paymentBehavior } : {}),
     collection_method: 'charge_automatically',
     payment_settings: { save_default_payment_method: 'on_subscription', payment_method_types: ['card'] },
     ...(input.cancelAtTrialEnd ? { cancel_at_period_end: true } : {}),
   }
 
+  // 🔴 Codex b2-mac r4 #1: el fin de prueba del comprobante se revisó al entrar, pero lo de arriba (y la autorización) puede tardar
+  // minutos con Stripe lento. Justo antes del envío se vuelve a revisar: con menos de un minuto, Stripe lo rechazaría y el alta quedaría
+  // «confirmando con el banco». Antes de `antesDeCobrar`: nada se mandó y quien llama suelta el lease.
+  if (input.trialEnd && input.trialEnd.getTime() - Date.now() < MARGEN_DEL_FIN_DE_PRUEBA_AL_ENVIAR_MS) {
+    throw new ConflictError('La cotización ya venció. Vuelve a cotizar.', 'QUOTE_EXPIRED')
+  }
   input.antesDeCobrar?.()
   let subscription: Stripe.Subscription
   let conAutenticacion = false
@@ -1067,6 +1111,7 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
       !autenticar ||
       !input.idempotencyKey ||
       input.paymentBehavior !== 'error_if_incomplete' ||
+      !!input.trialEnd ||
       input.trialPeriodDays !== 0 ||
       !pideAutenticacion(error)
     ) {
@@ -1116,8 +1161,8 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
   }
 
   // Plan Básico: la tarjeta del alta queda como la del cliente, para que el clic del día 30 compre sin pedirla otra vez.
-  // Es comodidad, no garantía: si falla, se registra y el alta sigue.
-  if (input.cancelAtTrialEnd) {
+  // Es comodidad, no garantía: si falla, se registra y el alta sigue. (Sin tarjeta no hay qué fijar.)
+  if (input.cancelAtTrialEnd && input.paymentMethodId) {
     await stripe.customers
       .update(input.customerId, { invoice_settings: { default_payment_method: input.paymentMethodId } }, STRIPE_DENTRO_DEL_CANDADO)
       .catch(error =>
@@ -1203,6 +1248,11 @@ export interface CreatePlanCheckoutSessionInput {
    * códigos promocionales: un cupón de N meses empezaría a contar hoy y se gastaría antes del primer cobro.
    */
   trialEnd?: Date
+  /**
+   * Planes editables (B2, Task 7): lo que la compra cita de su versión (`planOfferVersion`, `planOfferPrecioDe`). Va en la sesión y
+   * en la suscripción, y nunca pisa lo nuestro (`kind`, `venueId`, `tierCode`, `interval`…). Sin ella, el cuerpo de siempre.
+   */
+  extraMetadata?: Record<string, string>
 }
 
 /**
@@ -1237,6 +1287,7 @@ export async function createPlanCheckoutSession(input: CreatePlanCheckoutSession
             description,
             ...(input.trialEnd ? { trial_end: Math.floor(input.trialEnd.getTime() / 1000) } : {}),
             metadata: {
+              ...(input.extraMetadata ?? {}),
               kind: 'PLAN_CHECKOUT',
               venueId: input.venueId,
               tierCode,
@@ -1249,6 +1300,7 @@ export async function createPlanCheckoutSession(input: CreatePlanCheckoutSession
           },
           // `kind` la marca como NUESTRA para la regla común de compra, que expira las abiertas antes de abrir otra.
           metadata: {
+            ...(input.extraMetadata ?? {}),
             kind: 'PLAN_CHECKOUT',
             venueId: input.venueId,
             tierCode,
@@ -1825,12 +1877,16 @@ export async function createWinbackPromotionCode(
  * only on the item, never on the subscription.
  *
  * @param subscriptionId - Stripe subscription ID
- * @param bound - La B (soporte por WhatsApp, C5): UNA llamada con este tiempo máximo y sin reintentos (ni los de `retry` ni los del
- *   SDK, que por omisión espera 80 s y reintenta 2 veces). Sin él, como siempre: `retry` con 3 reintentos.
+ * @param opciones.timeoutMs - La B (soporte por WhatsApp, C5): UNA llamada con este tiempo máximo y sin reintentos (ni los de `retry`
+ *   ni los del SDK, que por omisión espera 80 s y reintenta 2 veces). Sin él, como siempre: `retry` con 3 reintentos.
+ * @param opciones.conTarjeta - Planes editables (B2, Task 7, fix round 1): con una prueba SIN tarjeta, leer también qué tarjeta
+ *   cobraría Stripe (el cliente, con tope). Sólo lo pide «Tu plan» (`GET /plan`), fuera de toda transacción; sin él no se lee nada
+ *   más y `faltaTarjeta`/`tarjetaQueCobrara` no vienen. 🔴 Codex b2-code #7: se lee también con `timeoutMs` (así la pide «Tu plan»
+ *   con versión del editor); la B (`timeoutMs` sin `conTarjeta`) sigue con UNA llamada.
  */
 export async function retrievePlanSubscription(
   subscriptionId: string,
-  bound?: { timeoutMs: number },
+  opciones: { timeoutMs?: number; conTarjeta?: boolean } = {},
 ): Promise<{
   status: string
   cancelAtPeriodEnd: boolean
@@ -1848,16 +1904,41 @@ export async function retrievePlanSubscription(
   grossAmountCents: number | null
   /** D5: el cupón vigente (uno, entendible) para mostrar lo que de verdad paga; `null` = se muestra el precio de lista. */
   descuento: DescuentoDelPlan | null
+  /** Planes editables (B2, Task 7): es una prueba SIN tarjeta del alta (`metadata.sinTarjeta: 'true'`, ruling P6). */
+  sinTarjeta: boolean
+  /**
+   * Sólo viene si se pidió `conTarjeta`, con una prueba `sinTarjeta` todavía `trialing` y si Stripe dejó leer su
+   * tarjeta: la prueba terminará cancelándose sin método y Stripe no tiene una tarjeta con qué cobrarla. Ausente = no se leyó, no
+   * aplica o no se sabe (no se anuncia lo que no se sabe).
+   */
+  faltaTarjeta?: boolean
+  /** Con `faltaTarjeta` (las mismas condiciones): la tarjeta que cobraría Stripe al terminar la prueba (§18), o `null` (sin tarjeta). */
+  tarjetaQueCobrara?: TarjetaVisible | null
+  /** El fin de la prueba de Stripe (`trial_end`), o `null`. */
+  trialEnd: Date | null
+  /**
+   * Al terminar la prueba (sin prueba, desde ahora) Stripe NO cobrará: cancelación programada o cobranza en pausa. La misma regla de
+   * los recordatorios (`noHabraCobro`).
+   */
+  noHabraCobro: boolean
 }> {
   // D5: el detalle del cupón viene en la MISMA llamada (expand): sin él, `discounts` sólo trae ids.
   const params = { expand: ['discounts.source.coupon.applies_to'] }
-  const sub = bound
-    ? await stripe.subscriptions.retrieve(subscriptionId, params, { timeout: bound.timeoutMs, maxNetworkRetries: 0 })
+  const acotada = opciones.timeoutMs !== undefined
+  const sub = acotada
+    ? await stripe.subscriptions.retrieve(subscriptionId, params, { timeout: opciones.timeoutMs, maxNetworkRetries: 0 })
     : await retry(() => stripe.subscriptions.retrieve(subscriptionId, params), {
         retries: 3,
         shouldRetry: shouldRetryStripeError,
         context: 'stripe.retrievePlanSubscription',
       })
+  // Planes editables (B2, Task 7): una prueba SIN tarjeta se reconoce por su metadata (ruling P6). Qué tarjeta cobraría (el cliente,
+  // con tope y sin lanzar) sólo se lee si quien llama lo pide (`conTarjeta`, «Tu plan»): los demás (la cancelación dentro de su
+  // transacción, el CRM, los recordatorios) hacen las mismas llamadas de siempre. La B (`timeoutMs` sin `conTarjeta`) promete UNA
+  // llamada: ahí no. Codex b2-code #7: un `conTarjeta` explícito se respeta también con `timeoutMs` («Tu plan» con versión del editor).
+  const sinTarjeta = (sub.metadata as Record<string, string> | null | undefined)?.sinTarjeta === 'true'
+  const tarjeta = sinTarjeta && opciones.conTarjeta ? await tarjetaDeLaPrueba(sub) : null
+  const trialEnd = typeof sub.trial_end === 'number' ? new Date(sub.trial_end * 1000) : null
   const createdRaw = (sub as any).created as number | undefined
   const rawInterval = sub.items.data[0]?.price.recurring?.interval
   // SDK v19 may surface a single `discount` object and/or a `discounts` array (see subscriptionHasActiveDiscount).
@@ -1873,16 +1954,24 @@ export async function retrievePlanSubscription(
     interval: rawInterval === 'year' ? 'year' : rawInterval === 'month' ? 'month' : null,
     grossAmountCents: sub.items.data[0]?.price.unit_amount ?? null,
     descuento: descuentoDelPlan(sub as never, productoDe(sub.items.data[0]?.price.product)),
+    sinTarjeta,
+    ...(tarjeta ?? {}),
+    trialEnd,
+    noHabraCobro: noHabraCobro(sub, trialEnd ? trialEnd.getTime() : Date.now()),
   }
 }
 
+/** Lo que `retrievePlanSubscription` lee de la suscripción del plan («Tu plan», B2 Task 7). */
+export type ResumenDeLaSuscripcionDelPlan = Awaited<ReturnType<typeof retrievePlanSubscription>>
+
 /**
- * Plan Básico: la modalidad de la prueba de UNA suscripción, leída de Stripe ahora (`modalidadDePrueba`). Acotada: un
+ * Plan Básico: UNA suscripción leída de Stripe ahora para decir la modalidad de su prueba (`modalidadDePrueba`). Acotada: un
  * intento de 5 s sin reintentos, porque la usan respuestas del alta y `GET /progress`. Si Stripe no contesta, LANZA: quien
- * llama omite el campo, nunca inventa una modalidad.
+ * llama omite el campo, nunca inventa una modalidad. Planes editables (B2, Task 6): de la MISMA lectura salen la modalidad y, con
+ * una prueba sin tarjeta, qué tarjeta cobraría (antes era `modalidadDeLaSuscripcion`, que leía sólo la modalidad).
  */
-export async function modalidadDeLaSuscripcion(subscriptionId: string): Promise<ModalidadDePrueba> {
-  return modalidadDePrueba(await stripe.subscriptions.retrieve(subscriptionId, {}, { timeout: 5_000, maxNetworkRetries: 0 }))
+export async function suscripcionConTopeCorto(subscriptionId: string): Promise<Stripe.Subscription> {
+  return stripe.subscriptions.retrieve(subscriptionId, {}, { timeout: 5_000, maxNetworkRetries: 0 })
 }
 
 /** El id del producto de un precio de Stripe, venga como id o expandido. */
@@ -1946,14 +2035,49 @@ function configuracionDelPortal(): { configuration: string } | Record<string, ne
   return id ? { configuration: id } : {}
 }
 
-export async function createCustomerPortalSession(customerId: string, returnUrl: string): Promise<string> {
-  const session = await stripe.billingPortal.sessions.create({
-    customer: customerId,
-    return_url: returnUrl,
-    ...configuracionDelPortal(),
-  })
+/** Planes editables (B2, Task 7): el 503 del flujo de la tarjeta. Nunca se abre el portal genérico en su lugar. */
+const MENSAJE_PORTAL_NO_CONFIGURADO = 'No pudimos abrir la página para poner tu tarjeta. Intenta en unos minutos.'
 
-  logger.info(`✅ Created customer portal session for customer ${customerId}`)
+export async function createCustomerPortalSession(
+  customerId: string,
+  returnUrl: string,
+  /**
+   * Planes editables (B2, Task 7, §17): `PONER_TARJETA` abre el portal directo en el flujo de la tarjeta (`payment_method_update`) y
+   * regresa a `returnUrl` al terminar. El flujo deja la tarjeta como predeterminada del cliente, que es la que cobra una prueba sin
+   * método propio. El portal no promete enseñar el monto: «Tu plan» lo enseña antes de mandar. Sin opciones, el cuerpo de siempre.
+   */
+  opciones: { flujo?: 'PONER_TARJETA' } = {},
+): Promise<string> {
+  if (opciones.flujo !== 'PONER_TARJETA') {
+    const session = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: returnUrl,
+      ...configuracionDelPortal(),
+    })
+
+    logger.info(`✅ Created customer portal session for customer ${customerId}`)
+    return session.url
+  }
+
+  let session: Stripe.BillingPortal.Session
+  try {
+    session = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: returnUrl,
+      ...configuracionDelPortal(),
+      flow_data: { type: 'payment_method_update', after_completion: { type: 'redirect', redirect: { return_url: returnUrl } } },
+    })
+  } catch (error) {
+    // 🚨 a propósito: la configuración del portal no deja poner la tarjeta (o Stripe no contestó). El portal genérico no lo sustituye.
+    logger.error('🚨 createCustomerPortalSession: Stripe rechazó el flujo de la tarjeta — NO se abre el portal', {
+      customerId,
+      type: (error as { type?: unknown })?.type,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    throw new AppError(MENSAJE_PORTAL_NO_CONFIGURADO, 503, true, 'PORTAL_NOT_CONFIGURED')
+  }
+
+  logger.info(`✅ Created customer portal session (payment_method_update) for customer ${customerId}`)
   return session.url
 }
 

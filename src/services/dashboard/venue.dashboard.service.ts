@@ -30,8 +30,18 @@ import { effectiveExchangesEnabled } from '../exchanges/exchangeRules'
 import { storeCreditAvailable } from '../storeCredit/storeCreditTender'
 import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
-import { Venue, AccountType, EntityType, StaffRole, VerificationStatus, VenueStatus, VenueOperationalRole, VenueType } from '@prisma/client'
-import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import {
+  Prisma,
+  Venue,
+  AccountType,
+  EntityType,
+  StaffRole,
+  VerificationStatus,
+  VenueStatus,
+  VenueOperationalRole,
+  VenueType,
+} from '@prisma/client'
+import AppError, { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { PAID_PLAN_TIER_CODES } from '../access/basePlan.service'
 import { elegirFilaDelPlan } from '../access/filaDelPlan'
 import { MARGEN_CHECKOUT_MS, finDePruebaDiferible } from '../billing/cobroDiferido'
@@ -54,12 +64,34 @@ import {
   createTrialSetupIntent,
 } from '../stripe.service'
 import { autorizarObligacionNueva } from '../access/autorizarObligacionNueva'
-import { resolverPrecioDelPlan } from '../billing/precioDelPlan'
+import { exigirPrecioDeStripe, resolverPrecioDelPlan } from '../billing/precioDelPlan'
 import { exigirNombreDelPlanAlDia } from '../billing/nombreDelPlanEnStripe'
+import {
+  MENSAJE_PLAN_NO_CONFIGURADO,
+  numeroDeLaVigente,
+  ofertaPorNumero,
+  versionQueCobra,
+  type OfertaVigente,
+  type Periodicidad,
+  type PlanPagado,
+} from '../billing/planOffer'
+import {
+  PLAN_ACCEPTANCE_TTL_MS,
+  aceptacionSinUsar,
+  exigirLaMismaCompra,
+  exigirLaMismaOpcion,
+  leerFilaDelPlan,
+  leerPlanDeLaConversion,
+  revisarCompraDeTuPlan,
+  revisarLaOpcion,
+} from '../billing/cotizacionDeLaOferta'
+import { ofertaCambio } from '../billing/opcionesDeCompra'
+import { verificarCotizacion } from '../billing/comprobanteDeCotizacion'
+import { getPlanStateYSuscripcion } from './planState.service'
 import { STANDARD_PLAN_GROSS_CENTS } from '../access/planPricing.constants'
 import { ventaSueltaAbierta } from '../access/ventaSuelta'
 import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.service'
-import { cleanDemoData } from '../onboarding/demoCleanup.service'
+import { TIMEOUT_DE_LA_LIMPIEZA_DEMO_MS, cleanDemoData } from '../onboarding/demoCleanup.service'
 import { deleteOnboardingProgress } from '../onboarding/onboardingProgress.service'
 import { OPERATIONAL_VENUE_STATUSES, canDeleteVenue, isDemoVenue, isTrialVenue } from '@/lib/venueStatus.constants'
 import { logAction } from './activity-log.service'
@@ -1035,9 +1067,14 @@ export async function convertDemoVenue(
     // Stripe integration
     selectedFeatures?: string[]
     paymentMethodId?: string
+    /**
+     * Planes editables (B2, Task 8): el plan que eligió la persona (`{ tier: 'FREE' }` o `{ tier, interval, quoteToken }`). Sin
+     * versión del editor no se lee; con ella es obligatorio (lo revisa `leerPlanDeLaConversion`).
+     */
+    plan?: unknown
   },
   options?: { skipOrgCheck?: boolean },
-): Promise<Venue & { canalesEnLineaSinTarifa: CanalSinTarifaEnLaRespuesta[] }> {
+): Promise<Venue & { canalesEnLineaSinTarifa: CanalSinTarifaEnLaRespuesta[]; planAcceptance?: { id: string; expiresAt: string } }> {
   logger.info('Converting demo venue to real', { orgId, venueId })
 
   // Verify that the venue belongs to the organization (unless SUPERADMIN)
@@ -1062,6 +1099,11 @@ export async function convertDemoVenue(
     throw new BadRequestError('This venue is not in demo mode')
   }
 
+  // Planes editables (B2, Task 8): con una versión del editor, el plan elegido se revisa ANTES de limpiar (codex-r5 #7): un rechazo
+  // no toca nada. Sin ella, `plan` no se lee y todo sigue como hoy.
+  const vigente = await versionDeLaConversion(venueId)
+  const compra = vigente ? await revisarPlanDeLaConversion(vigente, venueId, conversionData.plan) : null
+
   // 🧹 Clean demo data before converting to real venue
   // This removes demo orders, payments, reviews, etc. while keeping menu/products/tables
   // ⭐ Tarjetas de regalo: si el negocio vendió alguna, no borra nada (`skippedReason: 'GIFT_CARDS'`) y la conversión sigue.
@@ -1069,9 +1111,13 @@ export async function convertDemoVenue(
   // la bitácora de su negocio: Codex r1 #10). Límite aceptado (Codex r2 #8, r3 #5 y #6): si la conversión falla DESPUÉS de la
   // limpieza (Stripe), el reintento ya no los trae; la bitácora (escrita en la transacción de la limpieza) sí.
   let canalesEnLineaSinTarifa: CanalSinTarifaEnLaRespuesta[] = []
+  // B2 Task 8 (b2-r1 #10): la limpieza vio, dentro de su candado, que el negocio ya no es demo (otra pestaña lo convirtió).
+  let yaNoEraDemo = false
   try {
     const cleanupResult = await cleanDemoData(venueId, staffId)
-    logger.info(`🧹 Demo data cleaned for venue ${venueId}:`, cleanupResult)
+    yaNoEraDemo = cleanupResult.skippedReason === 'NOT_DEMO'
+    // Con NOT_DEMO no se limpió nada (la limpieza ya avisó).
+    if (!yaNoEraDemo) logger.info(`🧹 Demo data cleaned for venue ${venueId}:`, cleanupResult)
     canalesEnLineaSinTarifa = cleanupResult.canalesEnLineaSinTarifa
       .filter(c => c.venueId === venueId)
       .map(({ id, channelName, perdio }) => ({ id, channelName, perdio }))
@@ -1080,6 +1126,8 @@ export async function convertDemoVenue(
     // Don't block conversion if cleanup fails - venue can still operate
     // The demo data will just remain but venue will be marked as real
   }
+  // Sin versión del editor la conversión sigue como hoy (la limpieza ya no borró nada); con ella, la otra pestaña ganó.
+  if (compra && yaNoEraDemo) throw negocioYaConvertido()
 
   // 🎯 STRIPE INTEGRATION: Create customer and attach payment method
   let stripeCustomerId: string | undefined
@@ -1139,41 +1187,48 @@ export async function convertDemoVenue(
   }
 
   // Update the venue to convert from demo to real
-  const updatedVenue = await prisma.venue.update({
-    where: { id: venueId },
-    data: {
-      // ✅ Update status from TRIAL to PENDING_ACTIVATION (single source of truth)
-      status: VenueStatus.PENDING_ACTIVATION,
-      statusChangedAt: new Date(),
-      statusChangedBy: staffId, // Audit trail: who performed the conversion
-      demoExpiresAt: null,
-      // Entity type (PERSONA_FISICA or PERSONA_MORAL)
-      entityType: conversionData.entityType,
-      // Store tax/business information
-      rfc: conversionData.rfc,
-      legalName: conversionData.legalName,
-      fiscalRegime: conversionData.fiscalRegime,
-      // Store all KYC documents (Blumonpay requirements)
-      idDocumentUrl: conversionData.idDocumentUrl,
-      rfcDocumentUrl: conversionData.rfcDocumentUrl,
-      comprobanteDomicilioUrl: conversionData.comprobanteDomicilioUrl,
-      caratulaBancariaUrl: conversionData.caratulaBancariaUrl,
-      actaDocumentUrl: conversionData.actaDocumentUrl,
-      poderLegalUrl: conversionData.poderLegalUrl,
-      // Legacy field (backwards compatibility - use rfcDocumentUrl if taxDocumentUrl not provided)
-      taxDocumentUrl: conversionData.taxDocumentUrl || conversionData.rfcDocumentUrl,
-      // Set KYC status to PENDING_REVIEW since all documents are uploaded
-      kycStatus: VerificationStatus.PENDING_REVIEW,
-      kycRejectionReason: null,
-      kycRejectedDocuments: [],
-      // Store Stripe IDs if payment method was provided
-      stripeCustomerId,
-      stripePaymentMethodId,
-    },
-    include: {
-      features: true,
-    },
-  })
+  const datosDeLaConversion = {
+    // ✅ Update status from TRIAL to PENDING_ACTIVATION (single source of truth)
+    status: VenueStatus.PENDING_ACTIVATION,
+    statusChangedAt: new Date(),
+    statusChangedBy: staffId, // Audit trail: who performed the conversion
+    demoExpiresAt: null,
+    // Entity type (PERSONA_FISICA or PERSONA_MORAL)
+    entityType: conversionData.entityType,
+    // Store tax/business information
+    rfc: conversionData.rfc,
+    legalName: conversionData.legalName,
+    fiscalRegime: conversionData.fiscalRegime,
+    // Store all KYC documents (Blumonpay requirements)
+    idDocumentUrl: conversionData.idDocumentUrl,
+    rfcDocumentUrl: conversionData.rfcDocumentUrl,
+    comprobanteDomicilioUrl: conversionData.comprobanteDomicilioUrl,
+    caratulaBancariaUrl: conversionData.caratulaBancariaUrl,
+    actaDocumentUrl: conversionData.actaDocumentUrl,
+    poderLegalUrl: conversionData.poderLegalUrl,
+    // Legacy field (backwards compatibility - use rfcDocumentUrl if taxDocumentUrl not provided)
+    taxDocumentUrl: conversionData.taxDocumentUrl || conversionData.rfcDocumentUrl,
+    // Set KYC status to PENDING_REVIEW since all documents are uploaded
+    kycStatus: VerificationStatus.PENDING_REVIEW,
+    kycRejectionReason: null,
+    kycRejectedDocuments: [],
+    // Store Stripe IDs if payment method was provided
+    stripeCustomerId,
+    stripePaymentMethodId,
+  }
+  // Sin versión del editor, el `update` de hoy (sin CAS ni aceptación). Con ella, el CAS y la aceptación en una transacción.
+  const { updatedVenue, aceptacion } = compra
+    ? await convertirConElCas(venueId, staffId, datosDeLaConversion, compra)
+    : {
+        updatedVenue: await prisma.venue.update({
+          where: { id: venueId },
+          data: datosDeLaConversion,
+          include: {
+            features: true,
+          },
+        }),
+        aceptacion: null,
+      }
 
   logger.info('Demo venue successfully converted to real with KYC documents', {
     venueId: updatedVenue.id,
@@ -1237,12 +1292,152 @@ export async function convertDemoVenue(
     }
   }
 
-  // na4b2c82: campo nuevo y opcional para los clientes; el resto de la respuesta no cambia.
-  return { ...updatedVenue, canalesEnLineaSinTarifa }
+  // na4b2c82: campo nuevo y opcional para los clientes; el resto de la respuesta no cambia. B2 Task 8: `planAcceptance`, sólo con una
+  // aceptación (con ella «Tu plan» abre el checkout de lo que se aceptó).
+  return {
+    ...updatedVenue,
+    canalesEnLineaSinTarifa,
+    ...(aceptacion ? { planAcceptance: { id: aceptacion.id, expiresAt: aceptacion.expiresAt.toISOString() } } : {}),
+  }
 }
 
 /** na4b2c82: un canal en línea de este negocio que la limpieza del demo dejó sin su tarifa o su costo. */
 type CanalSinTarifaEnLaRespuesta = { id: string; channelName: string; perdio: Array<'tarifa' | 'costo'> }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Planes editables (B2, Task 8): la conversión de demo guarda su aceptación con el CAS
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** El plan elegido, ya revisado contra la vigente. Uno de pago lleva lo que se guarda en su `PlanAcceptance`. */
+type PlanDeLaConversionRevisado =
+  | { tier: 'FREE' }
+  | { tier: PlanPagado; interval: Periodicidad; quoteToken: string; validadoAt: Date; offerVersionId: string; offerVersion: number }
+
+const negocioYaConvertido = () =>
+  new ConflictError('Este negocio ya se convirtió en otra pestaña. Recarga la página.', 'VENUE_ALREADY_CONVERTED')
+
+/**
+ * El CAS puede esperar la fila del negocio mientras la limpieza de OTRA pestaña la tiene (`FOR UPDATE`, hasta el timeout de esa
+ * limpieza): el `update` de hoy también espera. Con los 5 s de Prisma, esa espera sería un 500 en vez de un 200 y un 409. Se deriva
+ * del timeout de la limpieza, más un margen para el CAS mismo.
+ */
+const TIMEOUT_DEL_CAS_DE_LA_CONVERSION_MS = TIMEOUT_DE_LA_LIMPIEZA_DEMO_MS + 10_000
+
+/**
+ * La versión que decide la conversión. Si no se puede leer, decide el número del puntero (`numeroDeLaVigente`, sin leer la
+ * definición):
+ * - en la v1 (o sin versiones): la conversión de hoy, que nunca leyó la oferta, con un aviso (nada cambia con el editor apagado);
+ * - en una versión del editor, sin número válido o si ni el puntero se puede leer: 503 `PLAN_NOT_CONFIGURED` ANTES de limpiar, sin
+ *   CAS ni aceptación. Convertir «como hoy» ahí soltaría en silencio el plan que eligió la persona (b2-r1 #9), y limpiar no tiene
+ *   vuelta.
+ */
+async function versionDeLaConversion(venueId: string): Promise<OfertaVigente | null> {
+  try {
+    return await versionQueCobra()
+  } catch (error) {
+    const motivo = error instanceof Error ? error.message : String(error)
+    const numero = await numeroDeLaVigente().catch(() => null)
+    if (numero === 1) {
+      logger.warn('La conversión de demo no pudo leer la v1 de la oferta; se convierte como hoy, sin leer el plan elegido', {
+        venueId,
+        error: motivo,
+      })
+      return null
+    }
+    logger.warn('La conversión de demo no pudo leer la oferta del editor; no se limpia ni se convierte', {
+      venueId,
+      numero,
+      error: motivo,
+    })
+    throw new AppError(MENSAJE_PLAN_NO_CONFIGURADO, 503, true, 'PLAN_NOT_CONFIGURED')
+  }
+}
+
+/**
+ * Antes de limpiar (codex-r5 #7): con una versión del editor el plan es obligatorio (sin él, QUOTE_REQUIRED: una demo nunca pasa a
+ * Gratis en silencio, b2-r1 #9). Uno de pago se revisa como el checkout de «Tu plan» (el comprobante de la vigente con alcance
+ * `venue:<id>`, la opción con el margen de 48 h y su precio) con `validadoAt`, la hora que la aceptación guarda: el checkout verifica
+ * su comprobante con ESA hora (b2-r2 #8), así que una limpieza lenta nunca deja una aceptación inservible.
+ */
+async function revisarPlanDeLaConversion(vigente: OfertaVigente, venueId: string, raw: unknown): Promise<PlanDeLaConversionRevisado> {
+  const plan = leerPlanDeLaConversion(raw)
+  if (!plan) throw ofertaCambio('QUOTE_REQUIRED', vigente.number)
+  if (plan.tier === 'FREE') return plan
+  // `versionQueCobra` nunca da el respaldo (sin id); se comprueba por si acaso.
+  if (!vigente.versionId) throw ofertaCambio('VERSION', vigente.number)
+  const validadoAt = new Date()
+  revisarCompraDeTuPlan({
+    vigente,
+    venueId,
+    tier: plan.tier,
+    interval: plan.interval,
+    quoteToken: plan.quoteToken,
+    fila: await leerFilaDelPlan(venueId),
+    ahora: validadoAt,
+  })
+  return {
+    tier: plan.tier,
+    interval: plan.interval,
+    // `verificarCotizacion` (dentro de la revisión) ya exigió un texto.
+    quoteToken: String(plan.quoteToken),
+    validadoAt,
+    offerVersionId: vigente.versionId,
+    offerVersion: vigente.number,
+  }
+}
+
+/**
+ * La conversión con una versión del editor: el CAS (`TRIAL` → `PENDING_ACTIVATION`; si otra pestaña ganó, 409
+ * VENUE_ALREADY_CONVERTED) y, con un plan de pago, su `PlanAcceptance` en la MISMA transacción (§12 #5: la aceptación es de la
+ * conversión que ganó el CAS). Sin llamadas a Stripe dentro. La aceptación vive `PLAN_ACCEPTANCE_TTL_MS` desde `validadoAt`.
+ */
+async function convertirConElCas<D extends Prisma.VenueUpdateManyMutationInput>(
+  venueId: string,
+  staffId: string,
+  datos: D,
+  compra: PlanDeLaConversionRevisado,
+) {
+  const resultado = await prisma.$transaction(
+    async tx => {
+      const cas = await tx.venue.updateMany({ where: { id: venueId, status: VenueStatus.TRIAL }, data: datos })
+      if (cas.count !== 1) throw negocioYaConvertido()
+      const aceptacion =
+        compra.tier === 'FREE'
+          ? null
+          : await tx.planAcceptance.create({
+              data: {
+                venueId,
+                offerVersionId: compra.offerVersionId,
+                tier: compra.tier,
+                interval: compra.interval,
+                quoteToken: compra.quoteToken,
+                validadoAt: compra.validadoAt,
+                createdById: staffId,
+                expiresAt: new Date(compra.validadoAt.getTime() + PLAN_ACCEPTANCE_TTL_MS),
+              },
+            })
+      const updatedVenue = await tx.venue.findUniqueOrThrow({ where: { id: venueId }, include: { features: true } })
+      return { updatedVenue, aceptacion }
+    },
+    { timeout: TIMEOUT_DEL_CAS_DE_LA_CONVERSION_MS },
+  )
+  if (resultado.aceptacion && compra.tier !== 'FREE') {
+    await logAction({
+      staffId,
+      venueId,
+      action: 'PLAN_ACCEPTANCE_CREATED',
+      entity: 'PlanAcceptance',
+      entityId: resultado.aceptacion.id,
+      data: {
+        tier: compra.tier,
+        interval: compra.interval,
+        offerVersion: compra.offerVersion,
+        expiresAt: resultado.aceptacion.expiresAt.toISOString(),
+      },
+    })
+  }
+  return resultado
+}
 
 // ==========================================
 // VENUE STATUS MANAGEMENT (Mexican Regulatory Compliance)
@@ -1603,7 +1798,12 @@ export async function createVenueBillingPortalSession(
   orgId: string,
   venueId: string,
   returnUrl: string,
-  options: { skipOrgCheck?: boolean } = {},
+  /**
+   * `flujo` (planes editables, B2 Task 7, §17): sin revisar. Sólo `PONER_TARJETA` con una versión del editor abre el portal en el
+   * flujo de la tarjeta; cualquier otro valor, o sin versión del editor, el portal de hoy. Con `PONER_TARJETA` y la oferta ilegible,
+   * 503 `PLAN_NOT_CONFIGURED` (fix round 1): el botón de la tarjeta nunca abre el portal genérico.
+   */
+  options: { skipOrgCheck?: boolean; flujo?: unknown } = {},
 ): Promise<string> {
   logger.info('Creating billing portal session', { venueId, returnUrl })
 
@@ -1625,6 +1825,9 @@ export async function createVenueBillingPortalSession(
   if (!venue) {
     throw new NotFoundError(`Venue with ID ${venueId} not found`)
   }
+
+  // Planes editables (B2, Task 7): se decide ANTES de crear nada (con la oferta ilegible, el 503 no deja un cliente nuevo a medias).
+  const conFlujo = await pideElFlujoDeLaTarjeta(venueId, options.flujo)
 
   // If venue doesn't have Stripe customer, create one
   let stripeCustomerId = venue.stripeCustomerId
@@ -1687,7 +1890,9 @@ export async function createVenueBillingPortalSession(
   }
 
   // Create portal session
-  const portalUrl = await createCustomerPortalSession(stripeCustomerId, returnUrl)
+  const portalUrl = conFlujo
+    ? await createCustomerPortalSession(stripeCustomerId, returnUrl, { flujo: 'PONER_TARJETA' })
+    : await createCustomerPortalSession(stripeCustomerId, returnUrl)
 
   logger.info('✅ Billing portal session created', {
     venueId,
@@ -1695,6 +1900,37 @@ export async function createVenueBillingPortalSession(
   })
 
   return portalUrl
+}
+
+/**
+ * Planes editables (B2, Task 7): ¿se abre el portal en el flujo de la tarjeta? Sólo `PONER_TARJETA` con una versión del editor (la
+ * prueba sin tarjeta sólo existe con ella); sin `flujo` no se lee nada. Si la oferta no se puede leer, decide el número del puntero
+ * (`numeroDeLaVigente`, como `versionDeLaConversion`; Codex b2-code #8):
+ * - en la v1 (dañada): el portal genérico de hoy, sin el flujo (B1 descartaba el campo: nada cambia con el editor apagado);
+ * - en una versión del editor, sin número válido o si ni el puntero se puede leer: el 503 de «plan no configurado» de las compras
+ *   (fix round 1, como `tarjeta-de-la-prueba`): el botón de la tarjeta de una prueba sin tarjeta nunca abre el portal genérico.
+ */
+async function pideElFlujoDeLaTarjeta(venueId: string, flujo: unknown): Promise<boolean> {
+  if (flujo !== 'PONER_TARJETA') return false
+  try {
+    return (await versionQueCobra()) !== null
+  } catch (error) {
+    const motivo = error instanceof Error ? error.message : String(error)
+    const numero = await numeroDeLaVigente().catch(() => null)
+    if (numero === 1) {
+      logger.warn('billing-portal: no se pudo leer la v1 de la oferta; se abre el portal de hoy, sin el flujo de la tarjeta', {
+        venueId,
+        error: motivo,
+      })
+      return false
+    }
+    logger.warn('billing-portal: no se pudo leer la oferta; el botón de la tarjeta no abre el portal', {
+      venueId,
+      numero,
+      error: motivo,
+    })
+    throw new AppError(MENSAJE_PLAN_NO_CONFIGURADO, 503, true, 'PLAN_NOT_CONFIGURED')
+  }
 }
 
 /**
@@ -1721,8 +1957,12 @@ export async function createVenuePlanCheckoutSession(
   /**
    * `primerCobroAnunciado` (D3): la fecha que el DASHBOARD mostró con «hoy $0». Si ya no se puede diferir, o la prueba
    * cambió de fecha (el SUPERADMIN la acortó), 409 en vez de abrir un pago distinto de lo anunciado.
+   *
+   * Planes editables (B2, Task 7): `quoteToken` es el comprobante de «Tu plan» (`GET /plan` → `cotizacion`) y `acceptanceId` la
+   * aceptación de la demo (Task 8). Sin revisar: sin versión del editor no se leen; con ella el comprobante es obligatorio y
+   * sustituye a `primerCobroAnunciado` (su `trialEndsAt` es la fecha anunciada).
    */
-  options: { skipOrgCheck?: boolean; primerCobroAnunciado?: string } = {},
+  options: { skipOrgCheck?: boolean; primerCobroAnunciado?: string; quoteToken?: unknown; acceptanceId?: unknown } = {},
 ): Promise<string> {
   const tierCode = tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
   logger.info('Creating plan checkout session', { venueId, interval, tier })
@@ -1814,11 +2054,43 @@ export async function createVenuePlanCheckoutSession(
   // antes, que miraban el ACCESO (un plan suspendido que Stripe sigue cobrando no contaba) y no impedían dos pestañas:
   // ahora se expiran las compras abiertas y se lee lo que el negocio tiene vivo en Stripe.
   const cliente = stripeCustomerId
+
+  // Planes editables (B2, Task 7): con una versión del editor la compra cita el comprobante de «Tu plan». Sin ella, lo de hoy, literal
+  // (el comprobante y la aceptación que lleguen ni se leen).
+  const vigente = await versionQueCobra()
+  if (vigente) {
+    // Task 8: con `acceptanceId`, la compra que se aceptó al convertir la demo (con SU versión). Sin él, ANTES del comprobante (ruling
+    // P8: el reintento de «Tu plan» depende de este orden), el 409 de una aceptación viva que todavía no se usa.
+    if (options.acceptanceId !== undefined && options.acceptanceId !== null) {
+      return checkoutDeLaAceptacion({
+        venue,
+        customerId: cliente,
+        vigente,
+        tier,
+        interval,
+        billingBase,
+        acceptanceId: options.acceptanceId,
+      })
+    }
+    const aceptacionYaRevisada = await exigirSinAceptacionPendiente(venueId, cliente)
+    return checkoutConLaOferta({
+      venue,
+      customerId: cliente,
+      vigente,
+      tier,
+      interval,
+      billingBase,
+      quoteToken: options.quoteToken,
+      aceptacionYaRevisada,
+    })
+  }
   // El precio de Stripe se lee UNA vez; si no es el que el dashboard muestra, NO se abre sesión (nada se cobra).
   // 🔴 Codex B0 #3: ANTES de la regla común. La regla vence las compras abiertas del cliente antes de crear: si este 409
   // saliera dentro, el enlace de pago válido de otra pestaña quedaba vencido y el cliente sin uno nuevo. La sesión se abre
   // con este mismo priceId; dentro no se vuelve a leer.
-  const { priceId, unitAmount } = await resolverPrecioDelPlan(tierCode, interval)
+  // Codex b2-code #1: este carril no cita comprobante. Si la relectura del precio ya ve una versión del editor (se publicó después de
+  // la compuerta de arriba), 409 OFFER_CHANGED sin abrir sesión: nunca se cobra la versión nueva sin su comprobante.
+  const { priceId, unitAmount } = await resolverPrecioDelPlan(tierCode, interval, { soloSinVersionDelEditor: true })
   const esperado = STANDARD_PLAN_GROSS_CENTS[tier][interval]
   if (unitAmount !== esperado) {
     logger.error('🚨 plan-checkout: el precio de Stripe no coincide con las constantes — NO se abre la sesión', {
@@ -1898,6 +2170,208 @@ export async function createVenuePlanCheckoutSession(
   })
 
   return checkoutUrl
+}
+
+/**
+ * El checkout de «Tu plan» con una versión del editor (B2, Task 7). En este orden:
+ *  1-3. el comprobante y la opción de la vigente (`revisarCompraDeTuPlan`; su rechazo se lanza);
+ *  4. el precio de la versión en Stripe (activo y del bruto) y el nombre del plan, ANTES de la regla común: dentro vencería la
+ *     sesión abierta de otra pestaña (Codex B0 #3);
+ *  5. dentro de la regla común, con su `tx` y sólo la base: la aceptación de la demo que se guardó después del paso 0
+ *     (`exigirSinAceptacionNueva`, Codex b2-code #3), la relectura de la vigente y de la fila (`exigirLaMismaCompra`) y la sesión
+ *     con el priceId de la versión, su fin de prueba y la metadata que la cita.
+ * Una prueba sin tarjeta viva del mismo plan la sigue negando la regla común (`PLAN_YA_CONTRATADO`).
+ */
+async function checkoutConLaOferta(args: {
+  venue: { id: string; name: string; slug: string }
+  customerId: string
+  vigente: OfertaVigente
+  tier: 'PRO' | 'PREMIUM'
+  interval: 'monthly' | 'annual'
+  billingBase: string
+  quoteToken: unknown
+  /** La aceptación viva que el paso 0 ya juzgó usada (o `null` si no había ninguna). */
+  aceptacionYaRevisada: string | null
+}): Promise<string> {
+  const { venue, customerId, vigente, tier, interval, billingBase, quoteToken, aceptacionYaRevisada } = args
+  const venueId = venue.id
+  const tierCode = tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
+  const n = vigente.number
+  const { opcion, trialEnd } = revisarCompraDeTuPlan({
+    vigente,
+    venueId,
+    tier,
+    interval,
+    quoteToken,
+    fila: await leerFilaDelPlan(venueId),
+    ahora: new Date(),
+  })
+  await exigirPrecioDeStripe(opcion.priceId, opcion.precioCents, {
+    venueId,
+    tierCode,
+    interval,
+    versionId: vigente.versionId,
+    number: n,
+  })
+  await exigirNombreDelPlanAlDia(tier)
+  const checkoutUrl = await autorizarObligacionNueva(venueId, customerId, { tipo: 'PLAN', tier }, async tx => {
+    // Como en el paso 0 (ruling P8), la aceptación va antes que la versión.
+    await exigirSinAceptacionNueva(tx, venueId, aceptacionYaRevisada)
+    await exigirLaMismaCompra(tx, { venueId, tier, interval, versionNumber: n, trialEnd })
+    return createPlanCheckoutSession({
+      venueId,
+      customerId,
+      priceId: opcion.priceId,
+      interval,
+      tierCode,
+      successUrl: `${billingBase}?checkout=success${trialEnd ? '&sinCobroHoy=1' : ''}`,
+      cancelUrl: `${billingBase}?checkout=cancel`,
+      venueName: venue.name,
+      venueSlug: venue.slug,
+      trialEnd,
+      extraMetadata: { planOfferVersion: String(n), planOfferPrecioDe: String(n) },
+    })
+  })
+
+  logger.info('✅ Plan checkout session created', { venueId, venueName: venue.name, interval, tierCode, offerVersion: n })
+  return checkoutUrl
+}
+
+/**
+ * El checkout de la aceptación de la demo (B2, Task 8, §11 N2), con una versión del editor:
+ *  - la aceptación de ESTE negocio y viva (`expiresAt > ahora`), o 409 `OFFER_CHANGED` reason `VERSION` (con el número de la vigente);
+ *    otro plan o periodicidad → `QUOTE_MISMATCH`;
+ *  - su comprobante se verifica con `validadoAt`, la hora con la que se validó al convertir (b2-r2 #8: nunca nace inservible);
+ *  - la versión es la ACEPTADA (`ofertaPorNumero`), aunque ya no sea la vigente ni venda ningún plan, y con ella corren los pasos 2-5
+ *    de «Tu plan» (sin la relectura del número vigente): sus rechazos citan su número (ruling P3);
+ *  - la sesión (y su suscripción) llevan `planAcceptanceId`: así `aceptacionSinUsar` la reconoce como usada (b2-r9 #5).
+ * Si ya se pagó, la regla común responde `PLAN_YA_CONTRATADO`.
+ */
+async function checkoutDeLaAceptacion(args: {
+  venue: { id: string; name: string; slug: string }
+  customerId: string
+  vigente: OfertaVigente
+  tier: 'PRO' | 'PREMIUM'
+  interval: 'monthly' | 'annual'
+  billingBase: string
+  acceptanceId: unknown
+}): Promise<string> {
+  const { venue, customerId, vigente, tier, interval, billingBase, acceptanceId } = args
+  const venueId = venue.id
+  const tierCode = tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
+  const ahora = new Date()
+  const aceptacion =
+    typeof acceptanceId === 'string'
+      ? await prisma.planAcceptance.findFirst({
+          where: { id: acceptanceId, venueId, expiresAt: { gt: ahora } },
+          include: { offerVersion: { select: { number: true } } },
+        })
+      : null
+  const aceptada = aceptacion?.offerVersion.number ?? null
+  if (!aceptacion || aceptada === null) throw ofertaCambio('VERSION', vigente.number)
+  if (aceptacion.tier !== tier || aceptacion.interval !== interval) throw ofertaCambio('QUOTE_MISMATCH', aceptada)
+  const comprobante = verificarCotizacion(aceptacion.quoteToken, `venue:${venueId}`, aceptacion.validadoAt)
+  // Lo guardó la conversión después de revisarlo: sólo un dato roto llega aquí.
+  if (comprobante.versionNumber !== aceptada || comprobante.tier !== tier || comprobante.interval !== interval) {
+    throw ofertaCambio('VERSION', aceptada)
+  }
+  const version = await ofertaPorNumero(comprobante.versionNumber)
+  const n = version.number
+  const { opcion, trialEnd } = revisarLaOpcion({ version, comprobante, fila: await leerFilaDelPlan(venueId), tier, interval, ahora })
+  await exigirPrecioDeStripe(opcion.priceId, opcion.precioCents, {
+    venueId,
+    tierCode,
+    interval,
+    versionId: version.versionId,
+    number: n,
+    acceptanceId: aceptacion.id,
+  })
+  await exigirNombreDelPlanAlDia(tier)
+  const checkoutUrl = await autorizarObligacionNueva(venueId, customerId, { tipo: 'PLAN', tier }, async tx => {
+    await exigirLaMismaOpcion(tx, { version, venueId, tier, interval, trialEnd })
+    return createPlanCheckoutSession({
+      venueId,
+      customerId,
+      priceId: opcion.priceId,
+      interval,
+      tierCode,
+      successUrl: `${billingBase}?checkout=success${trialEnd ? '&sinCobroHoy=1' : ''}`,
+      cancelUrl: `${billingBase}?checkout=cancel`,
+      venueName: venue.name,
+      venueSlug: venue.slug,
+      trialEnd,
+      extraMetadata: { planOfferVersion: String(n), planOfferPrecioDe: String(n), planAcceptanceId: aceptacion.id },
+    })
+  })
+
+  logger.info('✅ Plan checkout session created', {
+    venueId,
+    venueName: venue.name,
+    interval,
+    tierCode,
+    offerVersion: n,
+    acceptanceId: aceptacion.id,
+  })
+  return checkoutUrl
+}
+
+/**
+ * Sin `acceptanceId` (B2, Task 8, b2-r7 #4): si el negocio tiene una aceptación de la demo viva que todavía no se usó
+ * (`aceptacionSinUsar`), 409 `PLAN_ACCEPTANCE_REQUIRED` con lo necesario para retomarla (la conversión confirmó y su respuesta se
+ * perdió). La lectura de Stripe sólo existe con una aceptación viva, y es de compra (sin el tope de las lecturas informativas). Si no
+ * se puede saber si ya se usó, se trata como sin usar (b2-r9 #5): al retomarla, si ya se pagó, la regla común responde
+ * `PLAN_YA_CONTRATADO`.
+ *
+ * Devuelve el id de la aceptación viva que juzgó ya usada (o `null` si no había ninguna): la relectura dentro del candado
+ * (`exigirSinAceptacionNueva`) no la vuelve a frenar.
+ */
+async function exigirSinAceptacionPendiente(venueId: string, customerId: string): Promise<string | null> {
+  const ahora = new Date()
+  const viva = await prisma.planAcceptance.findFirst({
+    where: { venueId, expiresAt: { gt: ahora } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { id: true, tier: true, interval: true },
+  })
+  if (!viva) return null
+  let pendiente: { id: string; tier: string; interval: string } | null
+  try {
+    const { planState, suscripcion } = await getPlanStateYSuscripcion(venueId, { skipPauseOffer: true })
+    pendiente = await aceptacionSinUsar(venueId, planState, suscripcion, customerId, ahora, {})
+  } catch (error) {
+    logger.warn('plan-checkout: no se pudo saber si la aceptación de la demo ya se usó; se trata como sin usar', {
+      venueId,
+      acceptanceId: viva.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    pendiente = viva
+  }
+  if (!pendiente) return viva.id
+  throw aceptacionRequerida(pendiente)
+}
+
+/** 409 `PLAN_ACCEPTANCE_REQUIRED`, con lo necesario para retomar la aceptación de la demo. */
+function aceptacionRequerida(a: { id: string; tier: string; interval: string }): ConflictError {
+  return new ConflictError(
+    'Termina la contratación que empezaste al convertir tu negocio, o espera 30 minutos.',
+    'PLAN_ACCEPTANCE_REQUIRED',
+    { acceptanceId: a.id, tier: a.tier, interval: a.interval },
+  )
+}
+
+/**
+ * Codex b2-code #3: dentro del candado del checkout de «Tu plan» (paso 5, con su `tx`), la aceptación de la demo viva que se guardó
+ * DESPUÉS del paso 0 (la conversión terminó a media petición). Sólo la base, sin Stripe: si hay una y no es la que el paso 0 ya
+ * juzgó usada, el mismo 409 `PLAN_ACCEPTANCE_REQUIRED`. Residuo aceptado: la conversión no toma este candado, así que lo que guarde
+ * entre esta lectura y la sesión de Stripe pasa; nadie paga otro precio del que vio y la regla común impide un segundo plan.
+ */
+async function exigirSinAceptacionNueva(tx: Prisma.TransactionClient, venueId: string, aceptacionYaRevisada: string | null): Promise<void> {
+  const viva = await tx.planAcceptance.findFirst({
+    where: { venueId, expiresAt: { gt: new Date() } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { id: true, tier: true, interval: true },
+  })
+  if (!viva || viva.id === aceptacionYaRevisada) return
+  throw aceptacionRequerida(viva)
 }
 
 /**

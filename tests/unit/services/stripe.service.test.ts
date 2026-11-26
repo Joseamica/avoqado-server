@@ -1098,6 +1098,12 @@ describe('Stripe Service - Comprehensive Tests', () => {
           pausedUntil: null,
           // D5: un cupón sin su detalle (sólo id) no se adivina: se muestra el precio de lista.
           descuento: null,
+          // Planes editables (B2, Task 7): una suscripción de hoy no es una prueba sin tarjeta y no lee nada más de Stripe (sin
+          // `conTarjeta`, la tarjeta ni se pide: `faltaTarjeta` y `tarjetaQueCobrara` no vienen).
+          sinTarjeta: false,
+          trialEnd: null,
+          // `cancel_at_period_end`: al terminar no se cobrará.
+          noHabraCobro: true,
         })
       })
 
@@ -1267,6 +1273,9 @@ describe('Stripe Service - Comprehensive Tests', () => {
           grossAmountCents: null,
           pausedUntil: null,
           descuento: null,
+          sinTarjeta: false,
+          trialEnd: null,
+          noHabraCobro: false,
         })
       })
 
