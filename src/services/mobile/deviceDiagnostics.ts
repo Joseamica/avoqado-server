@@ -133,7 +133,7 @@ export function readDeviceDiagnostics(req: Request): DeviceDiagnostics | undefin
   }
 }
 
-/** Lo guardado en la columna, validado campo por campo (la marca interna `prevProc` no sale). Nunca lanza. */
+/** Lo guardado en la columna, validado campo por campo (las llaves que no conoce se ignoran). Nunca lanza. */
 export function parseStoredDeviceDiagnostics(raw: unknown): StoredDeviceDiagnostics | undefined {
   try {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
@@ -148,15 +148,18 @@ export function parseStoredDeviceDiagnostics(raw: unknown): StoredDeviceDiagnost
 
 /**
  * Una sentencia condicionada (lo guardado nunca retrocede dentro de una misma apertura). Escribe sólo si la columna está
- * vacía o es basura, si lo guardado es de otra apertura (`proc` distinto, y el que llega no es la apertura que ese
- * reemplazó: `prevProc`), o si es de la misma con una `rev` menor. Lo guardado se lee sin convertir a ciegas: un JSON
- * viejo o raro cuenta como reemplazable y nunca hace fallar la sentencia. Devuelve si escribió.
+ * vacía o es basura, si lo guardado es de otra apertura (`proc` distinto: siempre reemplaza), o si es de la misma con una
+ * `rev` menor. Lo que se guarda es sólo el reporte y su `receivedAt`: reemplaza el valor entero. Lo guardado se lee sin
+ * convertir a ciegas: un JSON viejo o raro cuenta como reemplazable y nunca hace fallar la sentencia. Devuelve si escribió.
+ *
+ * Aceptado a propósito: un sondeo atrasado de la apertura anterior puede pisar el dato un instante; el siguiente sondeo de
+ * la apertura viva (≤ 20 s) lo corrige. Es un dato de sólo vista, así que no vale una marca que podría dejar fuera a la
+ * apertura que sigue abierta.
  */
 export async function guardarDiagnostico(terminalId: string, d: DeviceDiagnostics, now: Date): Promise<boolean> {
   const nuevo = JSON.stringify({ ...d, receivedAt: now.toISOString() })
   const viejo = Prisma.sql`t."deviceDiagnostics"`
   const procViejo = Prisma.sql`(CASE WHEN jsonb_typeof(${viejo} -> 'proc') = 'string' THEN ${viejo} ->> 'proc' END)`
-  const prevViejo = Prisma.sql`(CASE WHEN jsonb_typeof(${viejo} -> 'prevProc') = 'string' THEN ${viejo} ->> 'prevProc' END)`
   const revViejo = Prisma.sql`(CASE WHEN jsonb_typeof(${viejo} -> 'rev') = 'number' AND (${viejo} ->> 'rev') ~ '^[0-9]{1,18}$' THEN (${viejo} ->> 'rev')::bigint END)`
 
   // En lote, no interactiva: la conexión no se queda apartada entre turnos de JS. Si la fila está tomada, se falla rápido: el
@@ -165,14 +168,14 @@ export async function guardarDiagnostico(terminalId: string, d: DeviceDiagnostic
     prisma.$executeRaw`SET LOCAL lock_timeout = '2s'`,
     prisma.$executeRaw(Prisma.sql`
       UPDATE "Terminal" AS t
-      SET "deviceDiagnostics" = ${nuevo}::jsonb || jsonb_strip_nulls(jsonb_build_object(
-        'prevProc', CASE WHEN ${procViejo} = ${d.proc} THEN ${prevViejo} ELSE ${procViejo} END))
+      SET "deviceDiagnostics" = ${nuevo}::jsonb
       WHERE t.id = ${terminalId}
         AND t.type = 'POS_ANDROID'
         AND (
           ${procViejo} IS NULL
-          OR (${procViejo} <> ${d.proc} AND ${prevViejo} IS DISTINCT FROM ${d.proc})
-          OR (${procViejo} = ${d.proc} AND (${revViejo} IS NULL OR ${revViejo} < ${d.rev}))
+          OR ${procViejo} <> ${d.proc}
+          OR ${revViejo} IS NULL
+          OR ${revViejo} < ${d.rev}
         )`),
   ])
   return escritas > 0
@@ -187,7 +190,9 @@ export function esEsperaDeLaBase(error: unknown): boolean {
   return [e?.code, e?.meta?.code].some(c => typeof c === 'string' && ESPERAS.has(c))
 }
 
-// A lo más un guardado en curso por aparato: si ya hay uno, el sondeo no lanza otro (nunca se encolan).
+// A lo más un guardado en curso por aparato, y a lo más MAX_GUARDADOS_EN_CURSO en todo el proceso, para no acaparar las
+// conexiones del pool. Si no hay cupo, el sondeo no lanza ninguno (nunca se encolan ni esperan): el siguiente lo intenta.
+const MAX_GUARDADOS_EN_CURSO = 4
 const enCurso = new Set<string>()
 
 // Cada PC sondea cada 15–20 s: un error que se repite avisa a lo más una vez cada 10 min por aparato. Se borra al guardar bien y
@@ -220,7 +225,7 @@ export function reportarDiagnosticoTrasElSondeo(req: Request, terminalId: string
     // Una sesión de impersonación es de sólo lectura: la misma señal con que la separa impersonationGuard.
     if (req.authContext?.isImpersonating || req.authContext?.impersonation) return
     const d = readDeviceDiagnostics(req)
-    if (!d || enCurso.has(terminalId)) return
+    if (!d || enCurso.has(terminalId) || enCurso.size >= MAX_GUARDADOS_EN_CURSO) return
     enCurso.add(terminalId)
     void guardarDiagnostico(terminalId, d, now)
       .then(

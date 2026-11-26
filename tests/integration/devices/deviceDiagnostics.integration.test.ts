@@ -8,8 +8,9 @@ import { getAllTerminals, getTerminalById } from '@/services/dashboard/terminals
 
 /**
  * El reporte de dibujo del POS de Windows (hz:a5fa2439:D1) se guarda con UNA sentencia condicionada: lo guardado nunca
- * retrocede dentro de una misma apertura del programa (`proc`), un sondeo atrasado de la apertura anterior no pisa a la
- * nueva, y un JSON viejo o raro nunca hace fallar la sentencia. La condición la evalúa Postgres, por eso va contra la base.
+ * retrocede dentro de una misma apertura del programa (`proc`), otra apertura siempre reemplaza (un sondeo atrasado de la
+ * anterior puede pisar un instante; el siguiente de la apertura viva lo corrige), y un JSON viejo o raro nunca hace fallar
+ * la sentencia. La condición la evalúa Postgres, por eso va contra la base.
  */
 const suffix = `dibujo-${Date.now()}`
 const LATIDO = new Date('2026-11-20T12:00:00.000Z')
@@ -78,7 +79,7 @@ afterAll(async () => {
 })
 
 describe('guardarDiagnostico', () => {
-  it('columna vacía ⇒ escribe con receivedAt del servidor y sin prevProc', async () => {
+  it('columna vacía ⇒ escribe con receivedAt del servidor', async () => {
     await expect(guardarDiagnostico(posId, reporte(A, 2), T1)).resolves.toBe(true)
     expect((await leer()).deviceDiagnostics).toEqual({ ...reporte(A, 2), receivedAt: T1.toISOString() })
   })
@@ -96,16 +97,31 @@ describe('guardarDiagnostico', () => {
     expect((await leer()).deviceDiagnostics).toEqual({ ...reporte(A, 3), receivedAt: T2.toISOString() })
   })
 
-  it('otra apertura reemplaza aunque su rev sea menor y anota prevProc; un atrasado de la anterior ya no escribe', async () => {
+  it('otra apertura reemplaza aunque su rev sea menor, y lo guardado es sólo el reporte', async () => {
     await guardarDiagnostico(posId, reporte(A, 7), T1)
     await expect(guardarDiagnostico(posId, reporte(B, 1), T2)).resolves.toBe(true)
-    expect((await leer()).deviceDiagnostics).toEqual({ ...reporte(B, 1), receivedAt: T2.toISOString(), prevProc: A })
+    const guardado = (await leer()).deviceDiagnostics
+    expect(guardado).toEqual({ ...reporte(B, 1), receivedAt: T2.toISOString() })
+    expect(guardado).not.toHaveProperty('prevProc')
+  })
 
-    await expect(guardarDiagnostico(posId, reporte(A, 8), T2)).resolves.toBe(false)
-
-    // Dentro de la misma apertura, la marca se conserva.
+  it('la secuencia de la auditoría: un atrasado de la apertura anterior pisa un instante y la apertura viva lo corrige', async () => {
+    await expect(guardarDiagnostico(posId, reporte(B, 1), T1)).resolves.toBe(true) // la apertura nueva guarda primero
+    await expect(guardarDiagnostico(posId, reporte(A, 1), T2)).resolves.toBe(true) // llega tarde la anterior: se acepta
+    expect((await leer()).deviceDiagnostics).toMatchObject({ proc: A, rev: 1 })
+    await expect(guardarDiagnostico(posId, reporte(B, 1), T2)).resolves.toBe(true) // el siguiente sondeo de la viva lo corrige
+    expect((await leer()).deviceDiagnostics).toMatchObject({ proc: B, rev: 1 })
     await expect(guardarDiagnostico(posId, reporte(B, 2), T2)).resolves.toBe(true)
-    expect((await leer()).deviceDiagnostics).toEqual({ ...reporte(B, 2), receivedAt: T2.toISOString(), prevProc: A })
+    await expect(guardarDiagnostico(posId, reporte(B, 1), T2)).resolves.toBe(false) // atrasado de la misma apertura: no
+    const guardado = (await leer()).deviceDiagnostics
+    expect(guardado).toEqual({ ...reporte(B, 2), receivedAt: T2.toISOString() })
+    expect(guardado).not.toHaveProperty('prevProc')
+  })
+
+  it('un valor viejo con la llave prevProc no estorba y desaparece en la siguiente escritura', async () => {
+    await poner({ ...reporte(A, 7), receivedAt: T1.toISOString(), prevProc: B })
+    await expect(guardarDiagnostico(posId, reporte(B, 1), T2)).resolves.toBe(true)
+    expect((await leer()).deviceDiagnostics).toEqual({ ...reporte(B, 1), receivedAt: T2.toISOString() })
   })
 
   it.each([
@@ -201,11 +217,11 @@ describe('contrato: lo que ya devuelven las pantallas no trae el reporte', () =>
     }
   })
 
-  it('la ficha de UN aparato sí lo trae, tal cual está guardado (con su marca interna)', async () => {
+  it('la ficha de UN aparato sí lo trae, tal cual está guardado', async () => {
     await guardarDiagnostico(posId, reporte(A, 7, { cpu: MARCA }), T1)
     await guardarDiagnostico(posId, reporte(B, 1, { cpu: MARCA }), T2)
     const guardado = (await leer()).deviceDiagnostics
-    expect(guardado).toMatchObject({ proc: B, prevProc: A })
+    expect(guardado).toMatchObject({ proc: B, rev: 1, cpu: MARCA })
 
     const ficha = await getTpvById(venueId, posId)
     expect(ficha.id).toBe(posId)

@@ -134,7 +134,7 @@ describe('parseDeviceDiagnostics (la cabecera)', () => {
 describe('parseStoredDeviceDiagnostics (lo guardado en la columna)', () => {
   const guardado = { ...COMPLETO, receivedAt: '2026-11-25T18:00:00.000Z', prevProc: 'aaaaaaaa' }
 
-  it('lo guardado vuelve campo por campo, sin la marca interna prevProc', () => {
+  it('lo guardado vuelve campo por campo; una llave vieja que ya no se usa (prevProc) se ignora', () => {
     expect(parseStoredDeviceDiagnostics(guardado)).toEqual({ ...COMPLETO, receivedAt: guardado.receivedAt })
   })
 
@@ -217,6 +217,7 @@ describe('reportarDiagnosticoTrasElSondeo', () => {
     expect(sentencia.sql).toMatch(/^\s*UPDATE "Terminal"/)
     expect(sentencia.sql).toContain(`t.type = 'POS_ANDROID'`)
     expect(sentencia.sql).not.toMatch(/lastHeartbeat/)
+    expect(sentencia.sql).not.toMatch(/prevProc/)
     expect(sentencia.values).toContain(TERMINAL)
     expect(sentencia.values).toContain(JSON.stringify({ ...COMPLETO, receivedAt: NOW.toISOString() }))
     expect(prismaMock.terminal.update).not.toHaveBeenCalled()
@@ -363,8 +364,11 @@ describe('reportarDiagnosticoTrasElSondeo', () => {
   it('la memoria de avisos nunca pasa de 1 000 aparatos: si se fuera a pasar, se vacía', async () => {
     const id = (i: number) => `ctope${String(i).padStart(20, '0')}`
     prismaMock.$transaction.mockRejectedValue(new Error('se cayó la base'))
-    for (let i = 0; i < 1_000; i++) reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), id(i), NOW)
-    await vaciar()
+    // Uno a la vez: el cupo global de guardados en curso no deja lanzar mil juntos.
+    for (let i = 0; i < 1_000; i++) {
+      reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), id(i), NOW)
+      await vaciar()
+    }
     expect(logger.warn).toHaveBeenCalledTimes(1_000)
 
     // El aparato 1 000 ya no cabe: la memoria se vacía antes de anotarlo…
@@ -374,5 +378,31 @@ describe('reportarDiagnosticoTrasElSondeo', () => {
     reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), id(0), NOW)
     await vaciar()
     expect(logger.warn).toHaveBeenCalledTimes(1_002)
+  })
+
+  it('a lo más 4 guardados en curso en todo el proceso: un quinto aparato no lanza; al liberarse uno, su siguiente sondeo sí', async () => {
+    const aparato = (i: number) => `ccupo${String(i).padStart(20, '0')}`
+    const retenidos = [0, 1, 2, 3].map(() => pendiente())
+    for (const r of retenidos) prismaMock.$transaction.mockImplementationOnce(() => r.promesa)
+    for (let i = 0; i < 4; i++) reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), aparato(i), NOW)
+    await vaciar()
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(4)
+
+    // Cupo lleno: el quinto no lanza, ni queda en cola ni con un temporizador.
+    reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), aparato(4), NOW)
+    await vaciar()
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(4)
+
+    retenidos[0].soltar([0, 1])
+    await vaciar()
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(4) // nadie lo relanzó solo
+    reportarDiagnosticoTrasElSondeo(reqCon([EJEMPLO]), aparato(4), NOW)
+    await vaciar()
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(5)
+    const [ultima] = prismaMock.$executeRaw.mock.calls.at(-1) as [{ values: unknown[] }]
+    expect(ultima.values).toContain(aparato(4))
+
+    for (const r of retenidos.slice(1)) r.soltar([0, 1])
+    await vaciar()
   })
 })
