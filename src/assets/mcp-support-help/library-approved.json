@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": null,
-  "approvedAt": null,
-  "approvedHash": null,
+  "approvedBy": "Jose Antonio Amieva",
+  "approvedAt": "2026-11-26T02:29:20.376Z",
+  "approvedHash": "876b66e01dc7899fb6ab4e0c58500dc06a62db4013f2a825d18494628090d40b",
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
